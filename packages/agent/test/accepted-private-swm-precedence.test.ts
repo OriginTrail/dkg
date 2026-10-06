@@ -14,9 +14,11 @@ import {
   workspaceAgentEncryptionKeyId,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { TripleStoreAsyncPromoteQueue } from '@origintrail-official/dkg-publisher';
 
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
 import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';
+import { PublishMethods } from '../src/dkg-agent-publish.js';
 import { Rfc64CatalogMethods } from '../src/dkg-agent-rfc64-catalog.js';
 import { SwmSubstrateMethods } from '../src/dkg-agent-swm-substrate.js';
 import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
@@ -660,11 +662,13 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
   const TRANSPORT_CHANGED = {
     reason: 'chain-participant-authority-unavailable',
     detail: 'retry recipient resolution against the current private authority',
+    site: 'transport-changed',
   };
   /** The resolved (agent, key, peer) set differed after a revision moved. */
   const ROUTES_CHANGED = {
     reason: 'chain-participant-authority-unavailable',
     detail: 'recipient routes changed while retrying against current private authority',
+    site: 'recipient-set-changed',
   };
 
   const JOIN_KEY_CACHE_GRAPH = 'urn:dkg:local:join-encryption-key-cache';
@@ -1421,5 +1425,510 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
       options.allowAcceptedRfc64FinalizedAbsence
     ))).toEqual([true, false]);
     expect(privateRoster).toHaveBeenCalledTimes(3);
+  });
+
+  /**
+   * GH#3067. The stability loop re-reads the transport after the keys resolve
+   * and uses the node-wide authority-facts revision only to decide whether to
+   * collect again. On a node whose queues, publishers and catalog lane keep
+   * writing, that revision moves in every window; the last window must then
+   * be decided by what the loop actually proved (the transport's roster, the
+   * exact recipient set of two consecutive collects and the peer gate), not by
+   * the counter alone.
+   */
+  describe('recipient stability loop under sustained authority churn (GH#3067)', () => {
+    type ChurnTransport =
+      | { kind: 'private-roster'; participantAgents: readonly string[] }
+      | { kind: 'legacy-unregistered' }
+      | { kind: 'approved-private-replica'; allowedPeers: string[] }
+      | { kind: 'unavailable'; reason: string };
+
+    interface ChurnContext {
+      readonly store: ReturnType<typeof createChurnStore>['store'];
+      readonly member: ethers.HDNodeWallet;
+      readonly memberUri: string;
+      readonly memberKey: ReturnType<typeof signedKeyFixture>;
+      readonly peerId: string;
+      readonly other: ethers.HDNodeWallet;
+      readonly otherPeerId: string;
+      readonly state: {
+        roster: string[];
+        allowedPeers: string[] | null;
+        transport: ChurnTransport | null;
+      };
+    }
+
+    /** The decorated store and projection exactly as the agent wires them. */
+    function createChurnStore() {
+      const innerStore = new OxigraphStore();
+      stores.push(innerStore);
+      let projection!: ContextGraphMetaProjection;
+      const store = createListContextGraphsCacheInvalidatingStore(
+        innerStore,
+        () => undefined,
+        (quads, targetGraph) => {
+          if (targetGraph !== undefined) {
+            projection.markDirtyForGraph(targetGraph);
+            if (quads) projection.markDirtyFromQuads(quads);
+          } else if (quads) projection.markDirtyFromQuads(quads);
+          else projection.markAllDirty();
+        },
+      );
+      projection = new ContextGraphMetaProjection(store);
+      return { store, projection };
+    }
+
+    /**
+     * A private-roster graph of two members. Read 1 of the transport classifies
+     * the graph and read 2 is the first confirmation (before the first
+     * re-collect), read 3 the second (before the second re-collect) and read 4
+     * the last (after the last collect). `moves` moves the node-wide revision
+     * during every read after the first, as sustained node activity does;
+     * `during(read, context)` applies one real change at a chosen read.
+     */
+    function churningHost(options: {
+      seed: (context: ChurnContext) => Quad[];
+      allowedPeers?: 'both' | null;
+      moves?: boolean;
+      during?: (read: number, context: ChurnContext) => Promise<unknown> | void;
+      transport?: ChurnTransport;
+      withStore?: ReturnType<typeof createChurnStore>;
+    }) {
+      const member = ethers.Wallet.createRandom();
+      const other = ethers.Wallet.createRandom();
+      const peerId = '12D3KooWChurnMemberPeer';
+      const otherPeerId = '12D3KooWChurnOtherPeer';
+      const { store, projection } = options.withStore ?? createChurnStore();
+      const state: ChurnContext['state'] = {
+        roster: [member.address, other.address],
+        allowedPeers: options.allowedPeers === null ? null : [peerId, otherPeerId],
+        transport: options.transport ?? null,
+      };
+      const context: ChurnContext = {
+        store,
+        member,
+        memberUri: `did:dkg:agent:${ethers.getAddress(member.address)}`,
+        memberKey: signedKeyFixture(member, peerId),
+        peerId,
+        other,
+        otherPeerId,
+        state,
+      };
+      let readRevision = 1000;
+      let reads = 0;
+      const host = {
+        store,
+        contextGraphMetaProjection: options.moves === false || options.withStore
+          ? projection
+          : { get readAuthorityFactsRevision() { return readRevision; } },
+        resolveSwmTransportAuthority: vi.fn(async (): Promise<ChurnTransport> => {
+          reads += 1;
+          if (reads > 1 && options.moves !== false && !options.withStore) readRevision += 1;
+          await options.during?.(reads, context);
+          return state.transport ?? { kind: 'private-roster', participantAgents: [...state.roster] };
+        }),
+        getContextGraphAllowedPeers: vi.fn(async () => (
+          state.allowedPeers === null ? null : [...state.allowedPeers]
+        )),
+        ensureAgentsInOnDemandPhonebook: vi.fn(),
+      };
+      const ready = store.insert(options.seed(context));
+      return { host, context, ready, projection };
+    }
+
+    const resolve = (host: unknown) => WorkspaceCryptoMethods.prototype
+      .resolveWorkspaceAgentRecipientsForCurrentAuthority.call(host as never, {
+        contextGraphId: CONTEXT_GRAPH_ID,
+      });
+
+    const profileKeys = (context: ChurnContext): Quad[] => [
+      ...context.memberKey.quads,
+      ...signedKeyQuads(context.other, context.otherPeerId),
+    ];
+
+    const revokeMemberKey = ({ store, member, memberUri, memberKey }: ChurnContext) => {
+      const revokedAt = new Date().toISOString();
+      const proof = member.signingKey.sign(ethers.hashMessage(
+        computeWorkspaceAgentEncryptionKeyRevocationPayload({
+          agentAddress: member.address,
+          encryptionKeyAlgorithm: WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
+          publicKeyBytes: memberKey.publicKeyBytes,
+          revokedAt,
+        }),
+      )).serialized;
+      return store.insert([
+        [DKG_ONTOLOGY.DKG_REVOKED_AT, `"${revokedAt}"`],
+        [DKG_ONTOLOGY.DKG_REVOKED_BY, memberUri],
+        [DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_REVOCATION_PROOF, `"${proof}"`],
+      ].map(([predicate, object]) => ({
+        subject: memberKey.recipientKeyId,
+        predicate,
+        object,
+        graph: PROFILE_GRAPH,
+      })));
+    };
+
+    /** The member's key lives in the join key cache and the peer gate is open. */
+    const joinCacheKeys = ({ memberKey, other, otherPeerId }: ChurnContext): Quad[] => [
+      ...memberKey.quads.map((quad) => ({ ...quad, graph: JOIN_KEY_CACHE_GRAPH })),
+      ...signedKeyQuads(other, otherPeerId),
+    ];
+
+    const replaceMemberRoute = ({ store, memberKey, memberUri }: ChurnContext) => store.replaceSubject!(
+      JOIN_KEY_CACHE_GRAPH,
+      memberUri,
+      memberKey.quads.map((quad) => ({
+        ...quad,
+        graph: JOIN_KEY_CACHE_GRAPH,
+        ...(quad.predicate === DKG_ONTOLOGY.DKG_PEER_ID
+          ? { object: '"12D3KooWChurnReplacedRoute"' }
+          : {}),
+      })),
+    );
+
+    const expectRecipients = (resolution: Awaited<ReturnType<typeof resolve>>, count: number) => {
+      expect(resolution.requiresEncryption).toBe(true);
+      expect(resolution.recipients).toHaveLength(count);
+    };
+
+    it('resolves when the authority revision moves in every window and nothing relevant changed', async () => {
+      const { host, ready } = churningHost({ seed: profileKeys });
+      await ready;
+
+      expectRecipients(await resolve(host), 2);
+      // Classification + three confirmations; the last window is decided by the
+      // two consecutive collects and the roster read after them. Three collects
+      // plus the peer-gate re-read of the last window.
+      expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(4);
+      expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(4);
+    });
+
+    it('keeps the quiet path at two authority reads and one collect', async () => {
+      const { host, ready } = churningHost({ seed: profileKeys, moves: false });
+      await ready;
+
+      expectRecipients(await resolve(host), 2);
+      expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(2);
+      expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(1);
+    });
+
+    it('names the throw site of an authority that is unavailable at the first read', async () => {
+      const { host, ready } = churningHost({
+        seed: profileKeys,
+        transport: { kind: 'unavailable', reason: 'chain-name-binding-unavailable' },
+      });
+      await ready;
+
+      await expect(resolve(host)).rejects.toMatchObject({
+        reason: 'chain-name-binding-unavailable',
+        site: 'transport-unavailable',
+      });
+      expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(1);
+    });
+
+    // A change lands during read N: reads 2 and 3 are followed by a collect that
+    // reads it, so the exact-set comparison refuses; read 4 follows the last
+    // collect, so only the transport's roster and the peer gate are re-read.
+    interface WindowChange {
+      readonly change: string;
+      readonly seed: (context: ChurnContext) => Quad[];
+      readonly allowedPeers?: 'both' | null;
+      readonly apply: (context: ChurnContext) => Promise<unknown> | void;
+      /** What a collect that reads the change refuses with. */
+      readonly early: RegExp | { reason: string; detail: string; site: string };
+      /** The last window: refused, or accepted by design (the residual window). */
+      readonly last: 'refused' | 'accepted';
+    }
+
+    const windowChanges: WindowChange[] = [
+      {
+        change: 'a recipient key is revoked',
+        seed: profileKeys,
+        apply: revokeMemberKey,
+        early: /public encryption keys.*revoked/,
+        last: 'accepted',
+      },
+      {
+        change: 'a peer route is replaced in the join key cache',
+        seed: joinCacheKeys,
+        allowedPeers: null,
+        apply: replaceMemberRoute,
+        early: { ...ROUTES_CHANGED, site: 'recipient-set-changed' },
+        last: 'accepted',
+      },
+      {
+        change: 'a peer leaves the allowlist',
+        seed: profileKeys,
+        apply: ({ state, peerId }) => { state.allowedPeers = [peerId]; },
+        early: /has no recipient key advertised by a peer in the context graph allowlist/,
+        last: 'refused',
+      },
+      {
+        // Same length, different members: only a content comparison sees it.
+        change: 'a peer is swapped in the allowlist',
+        seed: profileKeys,
+        apply: ({ state, peerId }) => { state.allowedPeers = [peerId, '12D3KooWChurnSwappedPeer']; },
+        early: /has no recipient key advertised by a peer in the context graph allowlist/,
+        last: 'refused',
+      },
+      {
+        change: 'the graph gains a peer allowlist',
+        seed: joinCacheKeys,
+        allowedPeers: null,
+        apply: ({ state, peerId }) => { state.allowedPeers = [peerId]; },
+        early: /has no recipient key advertised by a peer in the context graph allowlist/,
+        last: 'refused',
+      },
+    ];
+
+    it.each(windowChanges.flatMap((scenario) => [2, 3].map((read) => ({ ...scenario, read }))))(
+      'still fails closed when $change during authority read $read',
+      async (scenario) => {
+        const { host, ready } = churningHost({
+          seed: scenario.seed,
+          allowedPeers: scenario.allowedPeers,
+          during: (read, context) => (read === scenario.read ? scenario.apply(context) : undefined),
+        });
+        await ready;
+
+        await (scenario.early instanceof RegExp
+          ? expect(resolve(host)).rejects.toThrow(scenario.early)
+          : expect(resolve(host)).rejects.toMatchObject(scenario.early));
+      },
+    );
+
+    it.each(windowChanges)('decides $change after the last collect by what the last window proved', async (scenario) => {
+      const { host, ready } = churningHost({
+        seed: scenario.seed,
+        allowedPeers: scenario.allowedPeers,
+        during: (read, context) => (read === 4 ? scenario.apply(context) : undefined),
+      });
+      await ready;
+
+      if (scenario.last === 'accepted') {
+        // The documented residual window: a removal that lands after the last
+        // collect has read the fact is not visible to the roster read either.
+        expectRecipients(await resolve(host), 2);
+      } else {
+        // The peer gate is re-read after the last roster read and compared with
+        // the one the last collect used.
+        await expect(resolve(host)).rejects.toMatchObject({
+          ...ROUTES_CHANGED,
+          site: 'recipient-set-changed',
+        });
+      }
+    });
+
+    it.each([
+      {
+        change: 'a member leaves the roster',
+        apply: ({ state, member }: ChurnContext) => { state.roster = [member.address]; },
+        rejects: { ...TRANSPORT_CHANGED, site: 'transport-changed' },
+      },
+      {
+        change: 'a member joins the roster',
+        apply: ({ state }: ChurnContext) => { state.roster.push(ethers.Wallet.createRandom().address); },
+        rejects: { ...TRANSPORT_CHANGED, site: 'transport-changed' },
+      },
+      {
+        change: 'the graph stops being a private roster',
+        apply: ({ state }: ChurnContext) => { state.transport = { kind: 'legacy-unregistered' }; },
+        rejects: { ...TRANSPORT_CHANGED, site: 'transport-changed' },
+      },
+      {
+        change: 'the graph becomes an approved private replica',
+        apply: ({ state }: ChurnContext) => {
+          state.transport = { kind: 'approved-private-replica', allowedPeers: [] };
+        },
+        rejects: { ...TRANSPORT_CHANGED, site: 'transport-changed' },
+      },
+      {
+        change: 'its authority becomes unavailable',
+        apply: ({ state }: ChurnContext) => {
+          state.transport = { kind: 'unavailable', reason: 'chain-name-binding-unavailable' };
+        },
+        rejects: { reason: 'chain-name-binding-unavailable', site: 'transport-unavailable' },
+      },
+    ])('fails closed in the last window when $change, whatever the revision did', async (scenario) => {
+      const { host, ready } = churningHost({
+        seed: profileKeys,
+        during: (read, context) => (read === 4 ? scenario.apply(context) : undefined),
+      });
+      await ready;
+
+      await expect(resolve(host)).rejects.toMatchObject(scenario.rejects);
+    });
+
+    it('keeps the last-window accept bounded to two re-collects and three confirmation reads', async () => {
+      const { host, ready } = churningHost({ seed: profileKeys });
+      await ready;
+
+      await resolve(host);
+      // Never a fourth collect: the last window decides without resolving again.
+      expect(host.getContextGraphAllowedPeers.mock.calls.length).toBe(4);
+      expect(host.resolveSwmTransportAuthority.mock.calls.length).toBe(4);
+    });
+
+    it('keeps legacy unregistered authority strict when the revision moves in every window', async () => {
+      const { host, ready } = churningHost({
+        seed: () => [],
+        transport: { kind: 'legacy-unregistered' },
+      });
+      await ready;
+
+      await expect(resolve(host)).rejects.toMatchObject({
+        ...TRANSPORT_CHANGED,
+        site: 'revision-moved',
+      });
+      expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(4);
+    });
+
+    it('keeps an approved private replica strict when the revision moves in every window', async () => {
+      const owner = ethers.Wallet.createRandom();
+      const { host, ready } = churningHost({
+        seed: () => [
+          ...signedKeyQuads(owner),
+          {
+            subject: contextGraphDataUri(CONTEXT_GRAPH_ID),
+            predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+            object: `"${owner.address}"`,
+            graph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
+          },
+        ],
+        transport: { kind: 'approved-private-replica', allowedPeers: [] },
+      });
+      await ready;
+
+      await expect(resolve(host)).rejects.toMatchObject({
+        ...TRANSPORT_CHANGED,
+        site: 'revision-moved',
+      });
+      expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(4);
+    });
+
+    it('resolves through the real store wrapper while bookkeeping writes move the node-wide revision', async () => {
+      const real = createChurnStore();
+      let bookkeepingWrites = 0;
+      const { host, ready, projection } = churningHost({
+        seed: profileKeys,
+        withStore: real,
+        during: async (read) => {
+          if (read < 2) return;
+          bookkeepingWrites += 1;
+          const job = `urn:dkg:promote-queue:job:churn-${bookkeepingWrites}`;
+          // What every job transition of the share queue does to the store.
+          await real.store.replaceSubject!('urn:dkg:promote-queue:control-plane', job, [{
+            subject: job,
+            predicate: 'urn:dkg:promote-queue:state',
+            object: `"running-${bookkeepingWrites}"`,
+            graph: 'urn:dkg:promote-queue:control-plane',
+          }]);
+          await real.store.deleteByPatternWithoutCount!({
+            graph: 'urn:dkg:promote-queue:control-plane',
+            subject: job,
+            predicate: 'urn:dkg:promote-queue:state',
+          });
+        },
+      });
+      await ready;
+      const nodeWide = projection.readAuthorityFactsRevision;
+      const perGraph = projection.readContextGraphAuthorityFactsRevision(CONTEXT_GRAPH_ID);
+
+      expectRecipients(await resolve(host), 2);
+
+      expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(4);
+      expect(projection.readAuthorityFactsRevision).toBeGreaterThan(nodeWide + 2);
+      expect(projection.readContextGraphAuthorityFactsRevision(CONTEXT_GRAPH_ID)).toBe(perGraph);
+    });
+
+    it('lets the VM publish key context resolve its recipients while the revision moves in every window', async () => {
+      // `_resolveCuratedChainKeyContext` runs the same resolver, twice per
+      // publish attempt, with no bounded repeat. The sender is deliberately not
+      // a member, so a successful resolution ends in the recipient-set check
+      // that follows it; before the fix the resolver itself refused.
+      const { host, ready } = churningHost({ seed: profileKeys });
+      await ready;
+      const outsider = ethers.Wallet.createRandom();
+      const agentLike = Object.assign(host, {
+        log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+        defaultAgentAddress: outsider.address,
+        peerId: '12D3KooWChurnPublisherPeer',
+        resolveOnChainAccessPolicyState: vi.fn(async () => 1),
+        isPrivateContextGraph: vi.fn(async () => true),
+        loadSwmSenderKeyState: vi.fn(async () => undefined),
+        getLocalSigningAgentForAddress: vi.fn((address: string) => ({ agentAddress: address })),
+        resolveWorkspaceAgentRecipientsForCurrentAuthority: WorkspaceCryptoMethods.prototype
+          .resolveWorkspaceAgentRecipientsForCurrentAuthority,
+      });
+
+      await expect(PublishMethods.prototype._resolveCuratedChainKeyContext.call(
+        agentLike as never,
+        CONTEXT_GRAPH_ID,
+        undefined,
+        undefined,
+        undefined,
+        'churn',
+      )).rejects.toThrow(/is not in the recipient set/);
+      expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(4);
+    });
+
+    it('does not move the node-wide revision for a plain insert into an unrelated graph', async () => {
+      const real = createChurnStore();
+      const before = real.projection.readAuthorityFactsRevision;
+      await real.store.insert([{
+        subject: 'urn:dkg:churn:unrelated',
+        predicate: 'urn:dkg:churn:predicate',
+        object: '"x"',
+        graph: 'urn:dkg:churn:graph',
+      }]);
+      expect(real.projection.readAuthorityFactsRevision).toBe(before);
+    });
+
+    it('lets four concurrent resolutions succeed while a real promote queue churns the store', async () => {
+      const real = createChurnStore();
+      const queue = new TripleStoreAsyncPromoteQueue(real.store, {});
+      let transition = 0;
+      const jobsAreDriven = async () => {
+        // One real job lifecycle: the control-plane writes of enqueue, claim,
+        // commit markers and success, through the decorated store.
+        transition += 1;
+        await queue.enqueue({
+          contextGraphId: 'graphify',
+          subGraphName: 'code',
+          assertionName: `churn-${transition}`,
+          entities: 'all',
+        });
+        const claimed = await queue.claimNext(`worker-${transition}`);
+        if (claimed?.lease === undefined) return;
+        const token = claimed.lease.claimToken;
+        await queue.recordCommitMarker(claimed.jobId, token, 'swmInserted');
+        await queue.succeed(claimed.jobId, token, { promotedCount: 1, succeededAt: Date.now() });
+      };
+      const hosts = Array.from({ length: 4 }, () => churningHost({
+        seed: () => [],
+        withStore: real,
+        during: (read) => (read >= 2 ? jobsAreDriven() : undefined),
+      }));
+      // All four hosts share one store; give them the same two members' keys.
+      const member = ethers.Wallet.createRandom();
+      const other = ethers.Wallet.createRandom();
+      await real.store.insert([
+        ...signedKeyQuads(member, '12D3KooWChurnSharedMemberPeer'),
+        ...signedKeyQuads(other, '12D3KooWChurnSharedOtherPeer'),
+      ]);
+      for (const { context } of hosts) {
+        context.state.roster = [member.address, other.address];
+        context.state.allowedPeers = ['12D3KooWChurnSharedMemberPeer', '12D3KooWChurnSharedOtherPeer'];
+      }
+      const nodeWide = real.projection.readAuthorityFactsRevision;
+
+      const resolutions = await Promise.all(hosts.map(({ host }) => resolve(host)));
+
+      for (const resolution of resolutions) expectRecipients(resolution, 2);
+      for (const { host } of hosts) {
+        expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(4);
+      }
+      expect(real.projection.readAuthorityFactsRevision).toBeGreaterThan(nodeWide);
+    });
   });
 });

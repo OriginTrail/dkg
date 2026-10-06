@@ -12,7 +12,7 @@
  * comparisons are pure.
  */
 
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
   DEFAULT_PROMOTE_CONTROL_GRAPH_URI,
@@ -1953,5 +1953,115 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     await queue.cancel(replacement);
     expect(await queue.recoverPostCommitFailures()).toMatchObject([{ jobId, action: 'requeued' }]);
     await expect(queue.enqueue(makeRequest())).rejects.toBeInstanceOf(PromoteJobConflictError);
+  });
+
+  // GH#3067 — shares that fail together (a saturated store, a flapping
+  // authority read) used to come back together: every retry delay was exactly
+  // 60/120/240/480 s. The DEFAULT curve now varies by up to 20 %; a backoff the
+  // caller injects is used as given.
+  describe('default retry backoff jitter (GH#3067)', () => {
+    async function failFirstAttempt(queue: AsyncPromoteQueue, assertionName = 'jitter'): Promise<{ jobId: string; delayMs: number }> {
+      const jobId = await queue.enqueue(makeRequest({ assertionName }));
+      const claimed = await queue.claimNext('worker-1');
+      await queue.fail(jobId, claimed!.lease!.claimToken, {
+        message: 'transient blip', retryable: true, classification: 'transient', recordedAt: now,
+      });
+      const nextRetryAt = (await queue.getStatus(jobId))!.attempt.nextRetryAt!;
+      return { jobId, delayMs: nextRetryAt - now };
+    }
+
+    it('J1. the lower end of the band is 80 % of the first delay', async () => {
+      const { delayMs } = await failFirstAttempt(createQueue({ rand: () => 0 }));
+      expect(delayMs).toBe(48_000);
+    });
+
+    it('J2. the upper end of the band is 120 % of the first delay', async () => {
+      const { delayMs } = await failFirstAttempt(createQueue({ rand: () => 0.999999 }));
+      expect(delayMs).toBe(72_000);
+    });
+
+    it('J3. a midpoint random value reproduces the unjittered 60/120/240/480 s schedule and the budget still ends at attempt 5', async () => {
+      const queue = createQueue({ rand: () => 0.5 });
+      const jobId = await queue.enqueue(makeRequest());
+      const delays: number[] = [];
+      for (let attempt = 1; attempt <= 5; attempt += 1) {
+        const claimed = await queue.claimNext('worker-1');
+        expect(claimed).not.toBeNull();
+        await queue.fail(jobId, claimed!.lease!.claimToken, {
+          message: `attempt ${attempt}`, retryable: true, classification: 'transient', recordedAt: now,
+        });
+        const job = (await queue.getStatus(jobId))!;
+        if (job.state === 'failed') break;
+        delays.push(job.attempt.nextRetryAt! - now);
+        advance(job.attempt.nextRetryAt! - now + 1);
+      }
+      expect(delays).toEqual([60_000, 120_000, 240_000, 480_000]);
+      const job = (await queue.getStatus(jobId))!;
+      expect(job.state).toBe('failed');
+      expect(job.attempt.count).toBe(5);
+    });
+
+    it('J4. the persisted retry time is an integer even for a random value that does not divide the delay', async () => {
+      const { delayMs } = await failFirstAttempt(createQueue({ rand: () => 0.333333 }));
+      // 60 000 * (1 + 0.2 * (2 * 0.333333 - 1)) = 55 999.992, persisted as an xsd:integer.
+      expect(Number.isInteger(delayMs)).toBe(true);
+      expect(delayMs).toBe(56_000);
+    });
+
+    it('J5. jobs that fail together are scheduled apart', async () => {
+      const draws = [0.05, 0.31, 0.47, 0.62, 0.74, 0.83, 0.9, 0.97];
+      let next = 0;
+      const queue = createQueue({ rand: () => draws[next++ % draws.length] });
+      const delays = new Set<number>();
+      for (let i = 0; i < draws.length; i += 1) {
+        delays.add((await failFirstAttempt(queue, `spread-${i}`)).delayMs);
+      }
+      expect(delays.size).toBe(draws.length);
+      for (const delay of delays) {
+        expect(delay).toBeGreaterThanOrEqual(48_000);
+        expect(delay).toBeLessThanOrEqual(72_000);
+      }
+    });
+
+    it('J6. an injected backoff is used exactly as given', async () => {
+      const { delayMs } = await failFirstAttempt(createQueue({ backoff: () => 1_234, rand: () => 0 }));
+      expect(delayMs).toBe(1_234);
+    });
+
+    it('J7. the longest delay stays under the 15 minute ceiling however high the random value is', async () => {
+      const queue = createQueue({ maxRetries: 12, rand: () => 0.999999 });
+      const jobId = await queue.enqueue(makeRequest());
+      let longest = 0;
+      for (let attempt = 1; attempt <= 11; attempt += 1) {
+        const claimed = await queue.claimNext('worker-1');
+        await queue.fail(jobId, claimed!.lease!.claimToken, {
+          message: `attempt ${attempt}`, retryable: true, classification: 'transient', recordedAt: now,
+        });
+        const job = (await queue.getStatus(jobId))!;
+        const delay = job.attempt.nextRetryAt! - now;
+        longest = Math.max(longest, delay);
+        advance(delay + 1);
+      }
+      expect(longest).toBe(15 * 60_000);
+    });
+
+    it('J8. the post-commit recovery sweep uses the jittered curve too', async () => {
+      const queue = createQueue({ rand: () => 0 });
+      const jobId = await queue.enqueue(makeRequest());
+      const claimed = await queue.claimNext('worker-1');
+      await failPostCommit(queue, jobId, claimed!.lease!.claimToken);
+
+      expect(await queue.recoverPostCommitFailures()).toMatchObject([{ jobId, action: 'requeued', nextRetryAt: now + 48_000 }]);
+    });
+
+    it('J9. without an injected random source the default curve draws from Math.random', async () => {
+      const spy = vi.spyOn(Math, 'random').mockReturnValue(0);
+      try {
+        const { delayMs } = await failFirstAttempt(createQueue());
+        expect(delayMs).toBe(48_000);
+      } finally {
+        spy.mockRestore();
+      }
+    });
   });
 });
