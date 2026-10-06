@@ -44,6 +44,8 @@ import type {
   ContextGraphSubscriptionRecord,
 } from '../src/index.js';
 import { TEST_SNAPSHOT_CONFIG } from '../../../scripts/testing/snapshot-storage.js';
+import { retainedAuthorityReaderFixture } from '../../chain/test/helpers/retained-authority-reader.js';
+import { RpcEndpointsExhaustedError } from '@origintrail-official/dkg-chain';
 import { isApprovedPrivateReplicaDelegationActive } from '../src/approved-private-replica.js';
 import { resolveRfc64WalletNamespaceOwnerV1 } from '../src/rfc64/unregistered-authority-seed-store-v1.js';
 import { createRfc64RolloutAgentHarness, RFC64_ROLLOUT_DEPLOYMENT } from './_helpers/rfc64-rollout-agent-harness.js';
@@ -578,6 +580,80 @@ describe('approved private bare-name replica authorization', () => {
     );
     expect(bootstrap).toMatchObject({ outcome: 'allowed', source: 'rfc64-private' });
     expect(bootstrap).not.toHaveProperty('registration');
+  });
+
+  it('uses retained finalized name absence for an approved private replica while the circuit is open, with zero RPC', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const retained = retainedAuthorityReaderFixture();
+    // Prime the production projection with a real indexed registration, not a
+    // mocked empty response. The next name is absent in that retained fold.
+    await expect(retained.reader.resolveFinalizedContextGraphIdByNameHash!(retained.presentNameHash))
+      .resolves.toBe(7n);
+    retained.providerRead.mockClear();
+    retained.initialize.mockClear();
+    const projection = vi.spyOn(retained.index, 'peekProjection');
+    Reflect.get(fixture.receiver, 'chain').contextGraphAuthorityIndexRevisionReader = retained.reader;
+    const coordinator = Reflect.get(fixture.receiver, 'rfc64AuthorityReadCoordinatorV1');
+    await expect(coordinator.run(undefined, async () => {
+      throw new RpcEndpointsExhaustedError('unrelated authority pool exhausted', { exhaustionKind: 'mixed', retryAfterMs: 30000 });
+    })).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+    expect(fixture.receiver.readRfc64AuthorityRpcCircuitSnapshotV1().state).toBe('open');
+    try {
+      await expect(fixture.receiver.resolveContextGraphRegistrationBinding(CONTEXT_GRAPH_ID, {
+        allowApprovedPrivateReplicaFinalizedAbsence: true, freshness: 'bounded',
+      })).resolves.toMatchObject({
+        kind: 'unregistered', unregisteredEvidence: 'approved-private-replica-finalized-absence',
+        approvedPrivateReplicaAuthority: { approvedAgentAddress: fixture.approvedAddress, ownerAddress: OWNER },
+      });
+      expect(projection).toHaveBeenCalled();
+      expect(retained.providerRead).not.toHaveBeenCalled();
+      expect(retained.initialize).not.toHaveBeenCalled();
+      // Retained chain absence cannot stand in for the current private proof.
+      await fixture.receiver.writeRequesterJoinRequestState(CONTEXT_GRAPH_ID, fixture.approvedAddress, {
+        status: 'rejected', requestGeneration: `0x${'12'.repeat(32)}`,
+        curatorPeerId: CURATOR_PEER, curatorAgentAddress: OWNER, curatorAuthorityEra: '0',
+      });
+      await expect(fixture.receiver.resolveContextGraphRegistrationBinding(CONTEXT_GRAPH_ID, {
+        allowApprovedPrivateReplicaFinalizedAbsence: true, freshness: 'bounded',
+      })).resolves.toMatchObject({ kind: 'unavailable', reason: 'finalized-name-absence-unaccepted' });
+      expect(retained.providerRead).not.toHaveBeenCalled();
+      expect(retained.initialize).not.toHaveBeenCalled();
+    } finally {
+      await retained.reader.snapshots.close();
+    }
+  });
+
+  it.each(['cold', 'expired', 'invalidated', 'unsupported'] as const)('defers repeated %s retained-projection misses throughout circuit cooldown without RPC', async (condition) => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const retained = retainedAuthorityReaderFixture();
+    if (condition !== 'cold' && condition !== 'unsupported') {
+      await retained.reader.resolveFinalizedContextGraphIdByNameHash!(retained.presentNameHash);
+      if (condition === 'expired') retained.advanceTime(30000);
+      else retained.invalidateAnchor();
+    }
+    retained.providerRead.mockClear();
+    retained.initialize.mockClear();
+    const normalRead = vi.fn(retained.reader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes!.bind(retained.reader));
+    Reflect.get(fixture.receiver, 'chain').contextGraphAuthorityIndexRevisionReader = { ...retained.reader, resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: normalRead,
+      ...(condition === 'unsupported' ? { peekFinalizedContextGraphAuthoritySnapshotsByNameHashes: undefined } : {}) };
+    const coordinator = Reflect.get(fixture.receiver, 'rfc64AuthorityReadCoordinatorV1');
+    await expect(coordinator.run(undefined, async () => {
+      throw new RpcEndpointsExhaustedError('authority pool exhausted', { exhaustionKind: 'mixed', retryAfterMs: 30000 });
+    })).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+    const circuit = fixture.receiver.readRfc64AuthorityRpcCircuitSnapshotV1();
+    try {
+      for (let i = 0; i < 3; i += 1) {
+        await expect(fixture.receiver.resolveContextGraphRegistrationBinding(CONTEXT_GRAPH_ID, {
+          allowApprovedPrivateReplicaFinalizedAbsence: true, freshness: 'bounded',
+        })).resolves.toMatchObject({ kind: 'unavailable', reason: 'authority-circuit-open' });
+      }
+      expect(normalRead).not.toHaveBeenCalled();
+      expect(retained.providerRead).not.toHaveBeenCalled();
+      expect(retained.initialize).not.toHaveBeenCalled();
+      expect(fixture.receiver.readRfc64AuthorityRpcCircuitSnapshotV1()).toEqual(circuit);
+    } finally {
+      await retained.reader.snapshots.close();
+    }
   });
 
   it('does not downgrade registered metadata before a finalized-capable adapter checks its name index', async () => {

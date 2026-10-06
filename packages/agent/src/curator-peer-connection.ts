@@ -54,8 +54,22 @@ async function connectCurator(
     throwIfAborted(signal);
     agent.log.warn(
       ctx,
-      `Failed to dial curator ${curatorPeerId.slice(-8)} for meta refresh: ${error instanceof Error ? error.message : String(error)}`,
+      `Failed to dial curator ${curatorPeerId.slice(-8)}: ${error instanceof Error ? error.message : String(error)}`,
     );
     return false;
+  }
+}
+
+/** Dial recovery cannot prevent Messenger from durably accepting an offline join. */
+export async function recoverCuratorConnectionBeforeQueueing(
+  agent: CuratorPeerConnectionAgent,
+  curatorPeerId: string,
+  signal: AbortSignal,
+  ctx: OperationContext,
+): Promise<void> {
+  try {
+    await ensureCuratorConnected(agent, curatorPeerId, signal, ctx, (abort) => abort?.throwIfAborted());
+  } catch (error) {
+    agent.log.warn(ctx, `Curator connection recovery deferred: ${error instanceof Error ? error.message : String(error)}`);
   }
 }

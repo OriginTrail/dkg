@@ -14,7 +14,10 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { contextGraphAuthorityProjectionAnchorProvenByLogV1 } from
+import {
+  contextGraphAuthorityProjectionAnchorProvenByLogV1,
+  contextGraphFinalizedNameAbsenceAnchorHoldsV1,
+} from
   '../src/evm-context-graph-authority-index-reader.js';
 import type { ContextGraphAuthorityIndexProjection } from
   '../src/context-graph-authority-index-projection.js';
@@ -185,5 +188,85 @@ describe('contextGraphAuthorityProjectionAnchorProvenByLogV1', () => {
 
     expect(seen).toEqual([ANCHOR]);
     expect(seen[0]?.revision).toBe(42);
+  });
+});
+
+describe('contextGraphFinalizedNameAbsenceAnchorHoldsV1', () => {
+  it('defaults to provider-backed validation and compares hashes without case sensitivity', async () => {
+    const cached = projection(LOG_ORIGIN);
+    const readCurrentFinalized = vi.fn(async () => ({ ...cached.finalized, hash: cached.finalized.hash.toUpperCase() }));
+    await expect(contextGraphFinalizedNameAbsenceAnchorHoldsV1(cached, {}, {
+      currentSource: source(async () => true), contractAddress: STORAGE, readCurrentFinalized,
+    })).resolves.toBe(true);
+    expect(readCurrentFinalized).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a pre-aborted read without touching either source', async () => {
+    const anchorHolds = vi.fn(async () => true);
+    const readCurrentFinalized = vi.fn(async () => ANCHOR.finalized);
+    await expect(contextGraphFinalizedNameAbsenceAnchorHoldsV1(projection(LOG_ORIGIN), {
+      freshness: 'bounded', signal: AbortSignal.abort(),
+    }, { currentSource: source(anchorHolds), contractAddress: STORAGE, readCurrentFinalized })).rejects.toThrow();
+    expect(anchorHolds).not.toHaveBeenCalled();
+    expect(readCurrentFinalized).not.toHaveBeenCalled();
+  });
+
+  it('does not serve local proof or start fallback after cancellation during the log check', async () => {
+    const controller = new AbortController();
+    const readCurrentFinalized = vi.fn(async () => ANCHOR.finalized);
+    await expect(contextGraphFinalizedNameAbsenceAnchorHoldsV1(projection(LOG_ORIGIN), {
+      freshness: 'bounded', signal: controller.signal,
+    }, {
+      currentSource: source(async () => { controller.abort(); return true; }),
+      contractAddress: STORAGE, readCurrentFinalized,
+    })).rejects.toThrow();
+    expect(readCurrentFinalized).not.toHaveBeenCalled();
+  });
+
+  it('lets a bounded read reuse a log-fenced absence without touching the provider', async () => {
+    const readCurrentFinalized = vi.fn(async () => ANCHOR.finalized);
+    await expect(contextGraphFinalizedNameAbsenceAnchorHoldsV1(
+      projection(LOG_ORIGIN),
+      { freshness: 'bounded' },
+      {
+        currentSource: source(async () => true),
+        contractAddress: STORAGE,
+        readCurrentFinalized,
+      },
+    )).resolves.toBe(true);
+    expect(readCurrentFinalized).not.toHaveBeenCalled();
+  });
+
+  it('keeps live reads on the provider-backed finalized anchor fence', async () => {
+    const anchorHolds = vi.fn(async () => true);
+    const readCurrentFinalized = vi.fn(async () => ANCHOR.finalized);
+    await expect(contextGraphFinalizedNameAbsenceAnchorHoldsV1(
+      projection(LOG_ORIGIN),
+      { freshness: 'live' },
+      {
+        currentSource: source(anchorHolds),
+        contractAddress: STORAGE,
+        readCurrentFinalized,
+      },
+    )).resolves.toBe(true);
+    expect(anchorHolds).not.toHaveBeenCalled();
+    expect(readCurrentFinalized).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to the provider when the bounded local generation moved', async () => {
+    const readCurrentFinalized = vi.fn(async () => ({
+      number: ANCHOR.finalized.number + 1,
+      hash: `0x${'8'.repeat(64)}`,
+    }));
+    await expect(contextGraphFinalizedNameAbsenceAnchorHoldsV1(
+      projection(LOG_ORIGIN),
+      { freshness: 'bounded' },
+      {
+        currentSource: source(async () => false),
+        contractAddress: STORAGE,
+        readCurrentFinalized,
+      },
+    )).resolves.toBe(false);
+    expect(readCurrentFinalized).toHaveBeenCalledTimes(1);
   });
 });

@@ -464,6 +464,7 @@ import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-gra
 import { ContextGraphSubscriptionPersistShutdownTimeoutError } from './context-graph-subscription-persist-scheduler.js';
 import { drainsWithin } from './keyed-persist-scheduler.js';
 import { reconcileAndAllocateKaNumber } from './allocator.js';
+import { resolveReservedKaIdAllocationV1 } from './reserved-ka-id-allocation.js';
 import { chainAuthorityReadBudgetsOf, resolveChainAuthorityReadBudgets } from './chain-authority-read-budgets.js';
 import { OntologyBindingSlotClassifier } from './ontology-binding-slot-classifier.js';
 import { peekOnDemandAgentsPhonebook } from './sync/on-demand-agents-phonebook.js';
@@ -3859,12 +3860,21 @@ export class DKGAgent extends DKGAgentBase {
     // lands in that agent's per-KA …/_working_memory/{addr}/{number} graph
     // (not the default agent's, and not the legacy name-keyed fallback used
     // when no number is minted).
-    const resolveAuthorAndAllocator = (explicitAuthor: string | undefined): {
+    const resolveAuthorAndAllocator = (
+      explicitAuthor: string | undefined,
+      reservedKaId?: bigint,
+    ): {
       author: string;
+      expectedKaNumber?: bigint;
       allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }>;
     } => {
       const author = explicitAuthor ?? agentAddress;
       const isEvmAuthor = isAllocatableKaAuthorV1(author);
+      if (reservedKaId !== undefined) {
+        return resolveReservedKaIdAllocationV1(
+          author, reservedKaId, agent.chain.chainId, agent.kaNumberAllocator,
+        );
+      }
       // The allocator MUST consume `author`'s lane, never the outer default:
       // the number is minted into the reserved UAL the lifecycle is stamped
       // with, so allocating from a different address strands the draft under
@@ -3882,16 +3892,19 @@ export class DKGAgent extends DKGAgentBase {
         opts?: {
           subGraphName?: string;
           agentAddress?: string;
+          /** Exact author-owned slot carried by a pre-signed attestation. */
+          reservedKaId?: bigint;
           onDisposition?: (disposition: 'created' | 'sealed-noop') => void;
         },
       ): Promise<string> {
-        // D1 (identity-at-create): mint the KA number/UAL at create so the UAL is the
-        // KA's identity from the first write. assertionCreate only allocates when the
-        // draft has no preserved kaId (the re-open guard lives there), so passing the
-        // callback is safe — re-opens reuse the preserved identity.
-        const { author, allocateKaNumber } = resolveAuthorAndAllocator(opts?.agentAddress);
+        // Existing identities are retained; explicit reservations must match
+        // under the publisher's lifecycle lock before any draft is reopened.
+        const { author, allocateKaNumber, expectedKaNumber } = resolveAuthorAndAllocator(
+          opts?.agentAddress,
+          opts?.reservedKaId,
+        );
         return agent.publisher.assertionCreate(contextGraphId, name, author, opts?.subGraphName, {
-          allocateKaNumber,
+          allocateKaNumber, expectedKaNumber,
           onDisposition: opts?.onDisposition,
         });
       },
@@ -4205,7 +4218,7 @@ export class DKGAgent extends DKGAgentBase {
       },
 
       async history(contextGraphId: string, name: string, opts?: { agentAddress?: string; subGraphName?: string }): Promise<AssertionHistoryDescriptor | null> {
-        const addr = opts?.agentAddress ?? agentAddress;
+        let addr = opts?.agentAddress ?? agentAddress;
         const metaGraph = contextGraphMetaUri(contextGraphId);
         const DKG_NS = 'http://dkg.io/ontology/';
         const PROV_NS = 'http://www.w3.org/ns/prov#';
@@ -4257,6 +4270,7 @@ export class DKGAgent extends DKGAgentBase {
             { source: 'agent.history.lifecycleState' },
           );
           if (entityResult.type === 'bindings' && entityResult.bindings.length > 0) {
+            addr = lifecycleAddress;
             lifecycleUri = candidateLifecycleUri;
             row = entityResult.bindings[0];
             break;

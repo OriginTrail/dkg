@@ -52,6 +52,11 @@ async function createAgent(
     dataDir,
   });
   await agent.start();
+  // Most tests in this file isolate join state from discovery. Keep the new
+  // pre-send recovery dial immediate; dedicated connection tests override it.
+  (agent as any).peerResolver.connect = vi.fn().mockRejectedValue(
+    new Error('test curator route unavailable'),
+  );
   // Edge nodes backed by the generic mock adapter have no operational-wallet
   // key to auto-promote into a default agent. Install a real custodial agent
   // explicitly so authenticated bootstrap requests exercise the production
@@ -680,6 +685,78 @@ describe('private CG membership bootstrap recovery', () => {
     );
   });
 
+  it('recovers a disconnected explicit curator before delivering the join request', async () => {
+    ({ agent } = await createAgent('DisconnectedCuratorJoin'));
+    const contextGraphId = 'disconnected-curator-join';
+    const curatorPeerId = '12D3KooWDisconnectedCurator';
+    const delegation = await agent.signJoinRequest(contextGraphId, agent.getDefaultAgentAddress()!);
+    let connected = false;
+    (agent.node.libp2p as any).getConnections = () => connected
+      ? [{ remotePeer: { toString: () => curatorPeerId } }] : [];
+    const recoveryEntered = Promise.withResolvers<void>();
+    const recoveryRelease = Promise.withResolvers<void>();
+    const connect = vi.fn(async (target: string) => {
+      expect(target).toBe(curatorPeerId);
+      recoveryEntered.resolve();
+      await recoveryRelease.promise;
+      connected = true;
+      return { status: 'connected' };
+    });
+    (agent as any).peerResolver.connect = connect;
+    const send = vi.fn(async (target: string) => {
+      expect(target).toBe(curatorPeerId);
+      expect(connected).toBe(true);
+      return { delivered: true, response: encoder.encode(JSON.stringify({ ok: true })) };
+    });
+    (agent as any).messenger.sendReliable = send;
+    const forwarding = agent.forwardJoinRequest(contextGraphId, delegation, 'requester', curatorPeerId);
+    await recoveryEntered.promise;
+    expect(send).not.toHaveBeenCalled();
+    recoveryRelease.resolve();
+    await expect(forwarding).resolves.toMatchObject({ delivered: 1 });
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains durable queue acceptance when curator recovery exhausts its deadline', async () => {
+    ({ agent } = await createAgent('CuratorRecoveryDeadlineJoin'));
+    const contextGraphId = 'curator-recovery-deadline';
+    const curatorPeerId = '12D3KooWDeadlineCurator';
+    const author = agent.getDefaultAgentAddress()!;
+    const delegation = await agent.signJoinRequest(contextGraphId, author);
+    (agent.node.libp2p as any).getConnections = () => [];
+    // Exercise the actual abort boundary without waiting the production 20s.
+    const deadline = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(deadline.signal);
+    const entered = Promise.withResolvers<void>();
+    let receivedSignal: AbortSignal | undefined;
+    const connect = vi.fn(async (_target: string, options: { signal?: AbortSignal }) => {
+      receivedSignal = options.signal;
+      const pending = new Promise<never>((_resolve, reject) => {
+        options.signal?.addEventListener('abort', () => reject(options.signal!.reason), { once: true });
+      });
+      entered.resolve();
+      return pending;
+    });
+    (agent as any).peerResolver.connect = connect;
+    const send = vi.fn(async () => ({ delivered: false }));
+    (agent as any).messenger.sendReliable = send;
+    try {
+      const forwarding = agent.forwardJoinRequest(contextGraphId, delegation, 'requester', curatorPeerId);
+      await entered.promise;
+      expect(receivedSignal).toBe(deadline.signal);
+      expect(send).not.toHaveBeenCalled();
+      deadline.abort(new DOMException('Connection recovery deadline', 'TimeoutError'));
+      await expect(forwarding).resolves.toMatchObject({ delivered: 0, queued: true });
+    } finally {
+      deadline.abort();
+      timeout.mockRestore();
+    }
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith(curatorPeerId, PROTOCOL_JOIN_REQUEST, expect.any(Uint8Array), expect.any(Object));
+    expect(await agent.getJoinRequestStatus(contextGraphId, author)).toBe('pending');
+  });
+
   it('keeps requester decisions local, preserves queued generations, and drops stale decisions', async () => {
     ({ agent } = await createAgent('PrivateBootstrapGenerationBoundDecision'));
     const contextGraphId = 'private-bootstrap-generation-bound-decision';
@@ -732,6 +809,7 @@ describe('private CG membership bootstrap recovery', () => {
       curatorPeerId,
     );
     expect(queued.delivered).toBe(0);
+    expect(queued.queued).toBe(true);
     expect(await agent.getJoinRequestStatus(contextGraphId, agentAddress)).toBe('pending');
 
     const handler = joinRequestHandler(agent);
@@ -1020,12 +1098,13 @@ describe('private CG membership bootstrap recovery', () => {
       .mockResolvedValue({ delivered: false, error: 'queued for retry' });
     (original.node.libp2p as any).getPeers = () => [];
 
-    await original.forwardJoinRequest(
+    const forwarded = await original.forwardJoinRequest(
       contextGraphId,
       delegation,
       'requester',
       curatorPeerId,
     );
+    expect(forwarded).toMatchObject({ delivered: 0, queued: true });
     expect(await original.getJoinRequestStatus(contextGraphId, agentAddress)).toBe('pending');
 
     const restarted = await DKGAgent.create({
