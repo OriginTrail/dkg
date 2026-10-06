@@ -13,8 +13,7 @@ import { ethers } from 'ethers';
 import { MockChainAdapter, buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
 import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import {
-  contextGraphWorkspaceGraphUri,
-  contextGraphWorkspaceMetaGraphUri,
+  createGraphKnowledgeAssetScope,
   createOperationContext,
 } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
@@ -22,6 +21,12 @@ import { DKGAgent } from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { AGENT_REGISTRY_GRAPH, buildAgentProfile } from '../src/profile.js';
 import { FinalizationHandler } from '../src/finalization-handler.js';
+import { buildReconciledKnowledgeAssetUal, packKnowledgeAssetIdFromIdentity } from '../src/ka-identity.js';
+import {
+  graphHoldsTriple,
+  knowledgeAssetVerifiedMemoryGraph,
+  stageKnowledgeAssetInSharedMemory,
+} from './_helpers/staged-knowledge-asset.js';
 import type { OrdinalOutcome, OrdinalRecoveryTarget } from '../src/chain-reconciler.js';
 import {
   VM_HOLDER_TIER_FAILURE_RETRY_MS,
@@ -183,7 +188,15 @@ async function harness(options: {
     h.dialed.push(peerId);
     connected.set(peerId, { toString: () => peerId });
   };
-  stubs.syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+  // The recovery executor counts a fetch only once the transport reports that
+  // work started (`onWorkStarted`, argument four) and the result says it was admitted.
+  stubs.syncExactKnowledgeAssetsFromPeerDetailed = async (
+    peerId: string,
+    _cg: string,
+    _uals: unknown,
+    options?: { onWorkStarted?: () => void },
+  ) => {
+    options?.onWorkStarted?.();
     h.fetched.push(peerId);
     const disposition = await (h.onFetch.get(peerId)?.() ?? 'clean-absent');
     const found = disposition === 'found';
@@ -197,6 +210,7 @@ async function harness(options: {
         deferredBackpressure: 0,
       },
       disposition,
+      admission: 'work-started' as const,
     };
   };
   return h;
@@ -912,33 +926,42 @@ describe('VM exact-recovery holder tier (agent wiring)', () => {
 
   describe('data from a hinted holder is verified against the on-chain root like any other', () => {
     const LOCAL_CG = CG;
-    const ON_CHAIN_CG = 1n;
     const ENTITY = 'urn:fact:holder-tier-octopus';
-    const KA_ID = 701n;
+    const AUTHOR = '0x9277a1a194fcadbb60d8df0c472e7909ead50e33';
+    const KA_NUMBER = 701n;
+    const KA_ID = packKnowledgeAssetIdFromIdentity({ agentAddress: AUTHOR, kaNumber: KA_NUMBER });
+    const NAME = 'http://schema.org/name';
 
     const quadFor = (value: string) => ({
-      subject: ENTITY, predicate: 'http://schema.org/name', object: `"${value}"`, graph: '',
+      subject: ENTITY, predicate: NAME, object: `"${value}"`, graph: '',
     });
 
-    /** What a holder's exact fetch leaves in the local shared-memory snapshot. */
-    async function deliverSnapshot(store: DKGAgent['store'], value: string): Promise<void> {
-      await store.insert([
-        { subject: ENTITY, predicate: 'http://schema.org/name', object: `"${value}"`, graph: contextGraphWorkspaceGraphUri(LOCAL_CG) },
-        {
-          subject: `urn:dkg:share:${ENTITY}`,
-          predicate: 'http://dkg.io/ontology/rootEntity',
-          object: ENTITY,
-          graph: contextGraphWorkspaceMetaGraphUri(LOCAL_CG),
-        },
-      ]);
+    /** What a holder's exact fetch leaves locally: the KA's own shared-memory graph and its workspace head. */
+    async function deliverSnapshot(
+      store: DKGAgent['store'],
+      scope: ReturnType<typeof createGraphKnowledgeAssetScope>,
+      value: string,
+    ): Promise<void> {
+      await stageKnowledgeAssetInSharedMemory({
+        store,
+        contextGraphId: LOCAL_CG,
+        scope,
+        triples: [{ subject: ENTITY, predicate: NAME, object: `"${value}"` }],
+        shareOperationId: 'holder-tier-share',
+        publisherPeerId: HOLDER_A,
+      });
     }
 
-    async function inVm(store: DKGAgent['store'], value: string): Promise<boolean> {
-      const result = await store.query(
-        `ASK { GRAPH <did:dkg:context-graph:${LOCAL_CG}/context/${ON_CHAIN_CG}> `
-        + `{ <${ENTITY}> <http://schema.org/name> "${value}" } }`,
+    function inVm(
+      store: DKGAgent['store'],
+      scope: ReturnType<typeof createGraphKnowledgeAssetScope>,
+      value: string,
+    ): Promise<boolean> {
+      return graphHoldsTriple(
+        store,
+        knowledgeAssetVerifiedMemoryGraph(LOCAL_CG, scope),
+        { subject: ENTITY, predicate: NAME, object: `"${value}"` },
       );
-      return result.type === 'boolean' && result.value;
     }
 
     /**
@@ -952,18 +975,29 @@ describe('VM exact-recovery holder tier (agent wiring)', () => {
         wallets: { [wallet(0xa1)]: 7n },
         profiles: [{ peerId: HOLDER_A, agentAddress: wallet(0xa1) }],
       });
+      // Promotion needs the live authority of a registered public graph and the KA's author.
+      h.chain.getLatestMerkleRootAuthor = async () => AUTHOR;
+      const { contextGraphId: onChainCg } = await h.chain.createOnChainContextGraph({
+        accessPolicy: 0,
+        publishPolicy: 1,
+      });
       const chainRoot = computeFlatKCRootV10([quadFor('Octopuses have three hearts')], []);
       h.chain.__registerKC({
-        kaId: KA_ID, contextGraphId: ON_CHAIN_CG, merkleRootHex: ethers.hexlify(chainRoot), chunks: [],
+        kaId: KA_ID, contextGraphId: onChainCg, merkleRootHex: ethers.hexlify(chainRoot), chunks: [],
       });
       const handler = new FinalizationHandler(h.internals.store, h.chain);
       const storageAddress = await h.chain.getDKGKnowledgeAssetsAddress();
+      const scope = createGraphKnowledgeAssetScope(
+        buildKnowledgeAssetUal(h.chain.chainId, AUTHOR, KA_NUMBER),
+        onChainCg.toString(),
+      );
       const recovery: OrdinalRecoveryTarget = {
         ...target(0, KA_ID.toString()),
-        ual: buildKnowledgeAssetUal(h.chain.chainId, storageAddress, KA_ID),
+        onChainCgId: onChainCg.toString(),
+        ual: buildReconciledKnowledgeAssetUal(h.chain.chainId, storageAddress, KA_ID),
       };
       h.onFetch.set(HOLDER_A, async () => {
-        await deliverSnapshot(h.internals.store, delivered);
+        await deliverSnapshot(h.internals.store, scope, delivered);
         return 'found';
       });
       // The real `reconcileChainOrdinal` reads the chain root and hands the
@@ -971,37 +1005,38 @@ describe('VM exact-recovery holder tier (agent wiring)', () => {
       (h.internals as unknown as Record<string, unknown>).reconcileChainOrdinal = async (): Promise<OrdinalOutcome> => {
         const outcome = await handler.handleChainReconciledKC({
           contextGraphId: LOCAL_CG,
-          onChainCgId: ON_CHAIN_CG.toString(),
+          onChainCgId: onChainCg.toString(),
           ual: recovery.ual,
           merkleRoot: await h.chain.getLatestMerkleRoot(KA_ID),
           publisherAddress: await h.chain.getLatestMerkleRootPublisher(KA_ID),
           kaId: KA_ID,
+          batchId: KA_ID,
           versionBlock: 100,
         }, createOperationContext('system'));
         return outcome === 'promoted' || outcome === 'already-confirmed'
           ? { status: 'reconciled', blockNumber: 100 }
           : { status: 'pending', recovery };
       };
-      return { h, recovery };
+      return { h, recovery, scope, onChainCg };
     }
 
     it('rejects content a hinted holder serves that fails the on-chain root check', async () => {
-      const { h, recovery } = await rootChecked('Octopuses have two hearts');
+      const { h, recovery, scope } = await rootChecked('Octopuses have two hearts');
       const outcome = await pass(h, recovery);
       // The hinted peer really was dialed and asked, and claimed to have it...
       expect(h.dialed).toEqual([HOLDER_A]);
       expect(h.fetched).toEqual([HOLDER_A]);
       // ...but nothing it served reached Verifiable Memory.
       expect(outcome).toMatchObject({ status: 'pending' });
-      expect(await inVm(h.internals.store, 'Octopuses have two hearts')).toBe(false);
-      expect(await inVm(h.internals.store, 'Octopuses have three hearts')).toBe(false);
+      expect(await inVm(h.internals.store, scope, 'Octopuses have two hearts')).toBe(false);
+      expect(await inVm(h.internals.store, scope, 'Octopuses have three hearts')).toBe(false);
     });
 
     it('promotes the same hinted holder\'s content once it matches the on-chain root', async () => {
-      const { h, recovery } = await rootChecked('Octopuses have three hearts');
+      const { h, recovery, scope } = await rootChecked('Octopuses have three hearts');
       expect(await pass(h, recovery)).toEqual({ status: 'reconciled', blockNumber: 100 });
       expect(h.dialed).toEqual([HOLDER_A]);
-      expect(await inVm(h.internals.store, 'Octopuses have three hearts')).toBe(true);
+      expect(await inVm(h.internals.store, scope, 'Octopuses have three hearts')).toBe(true);
     });
   });
 });
