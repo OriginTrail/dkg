@@ -1,17 +1,29 @@
 import path from 'node:path';
+import { phaseInterrupted } from './phases.mjs';
 
-export function verifyDiscovery(records, profile, root) {
-  const matches = records.filter((row) => path.relative(root, row.file).split(path.sep).join('/') === profile.file
+// Report paths were written by the machine that ran the proof, so they are read
+// with its path rules, not the validating machine's: a receipt from Windows
+// validates on Linux and the reverse.
+const pathsFor = (platform) => (platform === 'win32' ? path.win32 : path.posix);
+function repositoryRelative(root, file, platform) {
+  const paths = pathsFor(platform);
+  return paths.relative(root, file).split(paths.sep).join('/');
+}
+
+export function verifyDiscovery(records, profile, root, platform = process.platform) {
+  const matches = records.filter((row) => repositoryRelative(root, row.file, platform) === profile.file
     && row.name === profile.discoveryName);
   if (matches.length !== 1 || records.length !== 1) throw new Error('missing, ambiguous or undiscovered regression assertion');
 }
 
-export function inspectExecution(report, execution, profile, root, side) {
-  if (execution.signal || execution.error || execution.timedOut) throw new Error('crash, prerequisite failure or generic runner timeout');
+// `platform` is the one that produced the report: the proof's own for a live
+// run, the receipt's recorded toolchain platform when validating stored evidence.
+export function inspectExecution(report, execution, profile, root, side, platform = process.platform) {
+  if (phaseInterrupted(execution)) throw new Error('crash, prerequisite failure, cancellation or generic runner timeout');
   const suites = report?.testResults;
   const assertions = suites?.flatMap((suite) => suite.assertionResults ?? []);
   if (!Array.isArray(suites) || suites.length !== 1 || assertions.length !== 1
-      || path.relative(root, suites[0].name).split(path.sep).join('/') !== profile.file
+      || repositoryRelative(root, suites[0].name, platform) !== profile.file
       || assertions[0].fullName !== profile.fullName) throw new Error('zero selected tests, wrong file or wrong failing assertion');
   const assertion = assertions[0];
   if (report.numTotalTests !== 1 || report.numPendingTests !== 0 || report.numTodoTests !== 0

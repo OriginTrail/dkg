@@ -42,8 +42,10 @@ export const UNFOLLOWED_LOADS = new Map([
   ['scripts/devnet.sh: $cli_entry',
     "the CLI entry a devnet node starts from (node_cli_entry): packages/cli/dist/cli.js, built from CLI source whose rule selects both lanes that reach devnet.sh (the CLI lane and the browser suite), or a released version's under .devnet-versions/, outside the repository's files"],
   // Files a child-process or worker call runs that no reading resolves.
-  ['scripts/lib/regressions/proof.mjs: invocation.command',
+  ['scripts/lib/regressions/subprocess.mjs: invocation.command',
     'the installed pnpm CLI or recorded Node executable, not a repository script; repository-owned profiles name the tests replayed in disposable checkouts'],
+  ['scripts/lib/regressions/registry.mjs: invocation.command',
+    'the installed pnpm CLI or recorded Node executable, resolved by subprocess.mjs like every proof launch, running the named-assertion discovery; not a repository script'],
   ["devnet/rfc64-persistence-lifecycle/run.ts: childArguments(AGENT_PROCESS, stage ? ['--stage'] : [])",
     'agent-process.ts beside it, run under tsx (childArguments puts the script after the loader flags); a devnet file with run.ts\'s own route'],
   ['devnet/rfc64-persistence-lifecycle/run.ts: childArguments(LEASE_PROBE)',

@@ -1,9 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { profileFor, REQUIRED_ROUTE } from './profiles.mjs';
+import { profileFor } from './profiles.mjs';
+import { REQUIRED_ROUTE } from './profile-contract.mjs';
 import { inside, sha256, proofIdentity, verifyIdentity } from './identity.mjs';
+import { sidePhases } from './phases.mjs';
 import { inspectExecution } from './results.mjs';
+import { pnpmInvocation } from './subprocess.mjs';
 import { analyzeTestSource } from '../disabled-test-scanner.mjs';
 import { planAgentShards } from '../../ci/plan-agent-shards.mjs';
 
@@ -55,14 +58,18 @@ export function validateEvidence(root, record, profile) {
     if (!/^[a-f0-9]{40}$/.test(source?.commit ?? '') || !/^[a-f0-9]{40}$/.test(source.tree ?? '')
         || !/^[a-f0-9]{64}$/.test(source.lockfileSha256 ?? '') || source.packageManager !== 'pnpm@10.28.1' || source.nodeRequirement !== '22' || receipt[side].pnpmVersion !== '10.28.1') throw new Error('missing exact source/dependency identity');
     if (sha256(fs.readFileSync(inside(root, `${directory}/${side}-config.txt`))) !== receipt[side].config.sha256) throw new Error('stale execution config identity');
-    const phases = receipt.phases.filter((phase) => phase.side === side);
-    if (phases.length !== 5 || phases.map((phase) => phase.name).join(',') !== 'pnpm-version,install,build,discovery,execution'
-        || phases.slice(0, 4).some((phase) => phase.code !== 0 || phase.signal || phase.timedOut)) throw new Error('missing successful prerequisites');
-    const execution = phases.at(-1);
+    const { execution } = sidePhases(receipt.phases, side);
     const stdout = fs.readFileSync(inside(root, `${directory}/${side}-execution.log`), 'utf8');
-    const observed = inspectExecution(json(inside(root, `${directory}/${side}-report.json`)), { ...execution, stdout }, profile, receipt[side].reportRoot, side);
+    const observed = inspectExecution(json(inside(root, `${directory}/${side}-report.json`)), { ...execution, stdout }, profile,
+      receipt[side].reportRoot, side, receipt.toolchain.platform);
     if (observed.runtime !== receipt.toolchain.node) throw new Error('test/proof runtime mismatch');
   }
+}
+// The named-assertion discovery command, launched exactly as the proof runner
+// launches pnpm (see subprocess.mjs), including through Node on Windows.
+export function discoveryInvocation(profiles, options) {
+  return pnpmInvocation(['--dir', 'packages/agent', 'exec', 'vitest', 'list', '--config', REQUIRED_ROUTE.config,
+    ...profiles.map((profile) => profile.file.replace('packages/agent/', '')), '--json'], options);
 }
 export function validateRegressions(root, inventory, { records = loadRecords(root), discover, shards } = {}) {
   if (!records.length) throw new Error('empty regression register');
@@ -77,9 +84,8 @@ export function validateRegressions(root, inventory, { records = loadRecords(roo
   }
   const assigned = shards ?? planAgentShards(root);
   const discovered = discover ? discover(profiles) : (() => {
-    const result = spawnSync(process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', ['--dir', 'packages/agent', 'exec', 'vitest', 'list',
-      '--config', REQUIRED_ROUTE.config, ...profiles.map((profile) => profile.file.replace('packages/agent/', '')), '--json'],
-    { cwd: root, encoding: 'utf8', timeout: 60000, maxBuffer: 8 * 1024 * 1024 });
+    const invocation = discoveryInvocation(profiles);
+    const result = spawnSync(invocation.command, invocation.args, { cwd: root, encoding: 'utf8', timeout: 60000, maxBuffer: 8 * 1024 * 1024 });
     if (result.error || result.status !== 0) throw new Error(`regression discovery failed: ${result.error?.message ?? result.stderr}`);
     return JSON.parse(result.stdout).map((row) => ({ ...row, file: path.relative(root, row.file).split(path.sep).join('/') }));
   })();

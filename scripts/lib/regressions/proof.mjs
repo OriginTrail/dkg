@@ -1,62 +1,18 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn, execFileSync } from 'node:child_process';
-import { profileFor, replayConfig, REQUIRED_ROUTE } from './profiles.mjs';
+import { execFileSync } from 'node:child_process';
+import { profileFor } from './profiles.mjs';
+import { replayConfig, REQUIRED_ROUTE } from './profile-contract.mjs';
 import { inspectExecution, verifyDiscovery } from './results.mjs';
 import { sha256, inside, proofIdentity, verifyIdentity } from './identity.mjs';
+import { EXECUTION_PHASE, PREREQUISITE_PHASES, requirePrerequisite, sidePhases } from './phases.mjs';
+import { pnpmCommand, runCommand } from './subprocess.mjs';
 
-const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
+const pnpm = pnpmCommand();
 const git = (root, args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', timeout: 30000, maxBuffer: 16 * 1024 * 1024 }).trim();
 const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
 
-// A pnpm lifecycle supplies its actual CLI entry. Launch that with Node (or
-// directly for standalone pnpm.exe) so no cmd.exe parsing can alter arguments.
-export function commandInvocation(command, args, { platform = process.platform, env = process.env, node = process.execPath } = {}) {
-  if (platform !== 'win32' || path.win32.basename(command).toLowerCase() !== 'pnpm.cmd') return { command, args };
-  const entry = env.npm_execpath;
-  if (!entry || !path.win32.isAbsolute(entry) || !/^pnpm\.(?:c?js|exe)$/i.test(path.win32.basename(entry))) {
-    throw new Error('Windows proof commands must run through pnpm (pnpm qa:prove-regression or pnpm test:regression-proofs)');
-  }
-  return /\.exe$/i.test(entry) ? { command: entry, args } : { command: node, args: [entry, ...args] };
-}
-
-// Own only the spawned process group. Never kill a service discovered by port.
-export function runCommand(command, args, cwd, log, timeoutMs, signal) {
-  const invocation = commandInvocation(command, args);
-  return new Promise((resolve) => {
-    const output = fs.openSync(log, 'wx');
-    let stdout = '', stderr = '', timedOut = false, error, bytes = 0;
-    const child = spawn(invocation.command, invocation.args, { cwd, env: { ...process.env, CI: '1', FORCE_COLOR: '0' },
-      detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
-    const collect = (kind, data) => {
-      bytes += data.length;
-      if (bytes > 8 * 1024 * 1024) { error = 'phase output exceeds 8 MiB'; stop(); return; }
-      fs.writeSync(output, data);
-      if (kind === 'stdout') stdout += data.toString(); else stderr += data.toString();
-    };
-    child.stdout.on('data', (data) => collect('stdout', data));
-    child.stderr.on('data', (data) => collect('stderr', data));
-    const stop = () => {
-      if (!child.pid) return;
-      try {
-        if (process.platform === 'win32') execFileSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
-        else process.kill(-child.pid, 'SIGKILL');
-      } catch { /* process already exited */ }
-    };
-    const timer = setTimeout(() => { timedOut = true; stop(); }, timeoutMs);
-    signal?.addEventListener('abort', stop, { once: true });
-    if (signal?.aborted) stop();
-    child.on('error', (failure) => { error = failure.message; });
-    child.on('close', (code, terminationSignal) => {
-      clearTimeout(timer); signal?.removeEventListener('abort', stop); fs.closeSync(output);
-      resolve({ command, args, invocation, code, signal: terminationSignal, timedOut, ...(error ? { error } : {}), stdout, stderr });
-    });
-  });
-}
-function requireSetup(result, phase) {
-  if (result.code !== 0 || result.signal || result.error || result.timedOut) throw new Error(`${phase} failed; no behavioral proof (${result.code ?? result.error ?? result.signal})`);
-}
 function sourceIdentity(root) {
   return { commit: git(root, ['rev-parse', 'HEAD']), tree: git(root, ['rev-parse', 'HEAD^{tree}']),
     lockfileSha256: sha256(fs.readFileSync(path.join(root, 'pnpm-lock.yaml'))),
@@ -112,27 +68,28 @@ export async function proveRegression(root, record, badRef, destination, { signa
         onProgress(`${record.id}: ${side} ${name}`);
         const result = await runCommand(command, args, checkout, path.join(destination, `${side}-${name}.log`), timeout, signal);
         receipt.phases.push({ side, name, command, args, invocation: result.invocation, code: result.code, signal: result.signal,
-          timedOut: result.timedOut, ...(result.error ? { error: result.error } : {}) });
+          timedOut: result.timedOut, ...(result.cancelled ? { cancelled: true } : {}), ...(result.error ? { error: result.error } : {}) });
         return result;
       };
-      const version = await phase('pnpm-version', pnpm, ['--version'], 30000);
-      requireSetup(version, 'pnpm');
+      const [versionPhase, installPhase, buildPhase, discoveryPhase] = PREREQUISITE_PHASES;
+      const version = await phase(versionPhase, pnpm, ['--version'], 30000);
+      requirePrerequisite(version, versionPhase);
       receipt[side].pnpmVersion = version.stdout.trim();
       if (receipt[side].pnpmVersion !== '10.28.1') throw new Error('wrong pnpm version');
-      requireSetup(await phase('install', pnpm, ['install', '--frozen-lockfile'], 180000), 'frozen install');
+      requirePrerequisite(await phase(installPhase, pnpm, ['install', '--frozen-lockfile'], 180000), installPhase);
       if (sha256(fs.readFileSync(path.join(checkout, 'pnpm-lock.yaml'))) !== lockHash) throw new Error('historical lockfile was modified');
       // Build only historical workspace dependencies of the source-loaded agent.
-      requireSetup(await phase('build', pnpm, ['-r', '--filter', '@origintrail-official/dkg-agent^...',
-        '--filter', '!@origintrail-official/dkg-evm-module', 'run', 'build'], 180000), 'dependency build');
+      requirePrerequisite(await phase(buildPhase, pnpm, ['-r', '--filter', '@origintrail-official/dkg-agent^...',
+        '--filter', '!@origintrail-official/dkg-evm-module', 'run', 'build'], 180000), buildPhase);
       const testArgs = ['--dir', 'packages/agent', 'exec', 'vitest'];
       const file = profile.file.replace('packages/agent/', '');
-      const discovered = await phase('discovery', pnpm, [...testArgs, 'list', '--config', configRelative, file, '--json'], 60000);
-      requireSetup(discovered, 'assertion discovery');
+      const discovered = await phase(discoveryPhase, pnpm, [...testArgs, 'list', '--config', configRelative, file, '--json'], 60000);
+      requirePrerequisite(discovered, discoveryPhase);
       const discovery = JSON.parse(discovered.stdout);
       verifyDiscovery(discovery, profile, checkout);
       fs.writeFileSync(path.join(destination, `${side}-discovery.json`), JSON.stringify(discovery, null, 2) + '\n');
       const reportPath = path.join(checkout, `${side}-report.json`);
-      const execution = await phase('execution', pnpm, [...testArgs, 'run', '--config', configRelative, file,
+      const execution = await phase(EXECUTION_PHASE, pnpm, [...testArgs, 'run', '--config', configRelative, file,
         '-t', `^${profile.fullName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, '--reporter=json', `--outputFile=${reportPath}`], 45000);
       if (!fs.existsSync(reportPath)) throw new Error('runner produced no report; no behavioral proof');
       const reportBytes = fs.readFileSync(reportPath);
@@ -147,6 +104,10 @@ export async function proveRegression(root, record, badRef, destination, { signa
       receipt[side].dependencyInputs = Object.fromEntries(git(checkout, ['ls-files', '--', '**/package.json', 'package.json', 'pnpm-workspace.yaml', '.npmrc', 'patches'])
         .split('\n').filter(Boolean).map((file) => [file, sha256(fs.readFileSync(path.join(checkout, file)))]));
     }
+    // The recorded phases must satisfy the contract the validator will apply, and
+    // a cancelled proof is never proven, even when every phase had already passed.
+    for (const side of ['bad', 'candidate']) sidePhases(receipt.phases, side);
+    if (signal?.aborted) throw new Error('proof cancelled');
     verifyIdentity(proofIdentity(root, profile), identity);
     receipt.status = 'proven';
   } catch (error) {

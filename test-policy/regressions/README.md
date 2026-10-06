@@ -23,18 +23,22 @@ pnpm test:regression-proofs
 ```
 
 On Windows, invoke these commands through pnpm. Its lifecycle provides the
-installed CLI entry via `npm_execpath`; the bounded runner invokes JavaScript
+installed CLI entry via `npm_execpath`; `subprocess.mjs` invokes JavaScript
 entries with the recorded Node executable, or standalone `pnpm.exe` directly.
 It never passes proof arguments through `cmd.exe`. Missing or non-pnpm entries
 are inconclusive prerequisites, with an instruction to use the pnpm command.
-The required Windows Node 22 job also exercises pnpm-version and owned process
-tree timeout/cancellation through `pnpm qa:check-regression-launcher`.
+That module is the one place a regression subprocess is launched from: proof
+phases, the launcher checks and the registry's named-assertion discovery all
+resolve their command through it, so they cannot disagree about the invocation.
+The required Windows Node 22 job also exercises pnpm-version, owned process
+tree timeout/cancellation and bounded teardown through
+`pnpm qa:check-regression-launcher`.
 
 Commit production/dependency and unit-config changes before proving. The runner
 resolves refs to full commits and uses **two disposable detached worktrees**,
 including for the corrected candidate. It overlays only the case's declared
 minimal test. The historical side also receives a generated test-only config
-from `profiles.mjs`; the corrected side uses its committed normal unit config.
+from `profile-contract.mjs`; the corrected side uses its committed normal unit config.
 No current production code, helper implementation, or replacement lockfile is
 copied into historical source. Both original lockfiles are installed frozen;
 only each checkout's agent workspace dependencies are built. No Hardhat, live
@@ -45,7 +49,20 @@ discovery and 45-second execution bounds; git operations have 30-second bounds.
 Phase output is capped at 8 MiB. Test/hook bounds are 15 seconds in historical
 replay. A broad timeout is always inconclusive. SIGINT/SIGTERM stop the runner's
 own process group and trigger worktree teardown. A failed teardown is retained
-and reported, never silently deleted. Evidence defaults to the ignored
+and reported, never silently deleted.
+
+A phase result records whether it was cancelled, independently of the exit
+status of the process it launched. Prerequisites, the execution classifier and
+the receipt validator all reject a cancelled phase, and a proof whose signal was
+aborted is never marked proven, even when every phase had already passed.
+Output still open ten seconds after the launcher exited, or after the owned tree
+was stopped, belongs to a descendant the runner cannot reach (on Windows,
+`taskkill` follows only a live launcher). The runner stops waiting for it and
+fails the phase with that reason, so the worktree teardown that follows can
+report an inconclusive cleanup instead of hanging. Phase names, their order and
+the one rule for a successful prerequisite live in `phases.mjs`; the runner and
+the validator both use it, so a live result and its recorded form are held to
+the same checks. Evidence defaults to the ignored
 `.regression-proofs/<case>-<timestamp>/`; `--output` names a **new** directory
 and refuses to overwrite existing evidence.
 
@@ -94,10 +111,16 @@ The current weighted planner assigns each to exactly one required unit shard.
 The register validator resolves files through **fresh test inventory**, checks
 actual named Vitest discovery and disabled/focused-test analysis, and confirms
 the planner's assignment. It rechecks the stored raw red/green reports and their
-artifact/test/profile hashes. Each receipt hashes only its selected definition
-in `scripts/lib/regressions/cases/`, together with the shared execution inputs.
-Editing GH-2782's definition leaves GH-2741's identity intact. A selected test,
-case definition or shared proof-execution-tool edit requires fresh proof.
+artifact/test/profile hashes, reading each report's paths with the rules of the
+platform recorded in the receipt, so a receipt produced on Windows validates on
+Linux and the reverse. Each receipt hashes only its selected definition
+in `scripts/lib/regressions/cases/`, together with the shared execution inputs:
+the proof CLI and the `profile-contract`, `phases`, `subprocess`, `results`,
+`identity` and `proof` modules. The register (`profiles.mjs`) and the validator
+(`registry.mjs`) are not fingerprinted, so registering another case leaves the
+existing receipts valid. Editing GH-2782's definition leaves GH-2741's identity
+intact. A selected test, case definition or shared proof-execution-tool edit
+requires fresh proof.
 Registered assertions cannot use general disabled-test waivers, including
 records explicitly marked unproven. The scanner enforces this through its
 explicit `applyWaivers: false` option on the original source; normal scanner
@@ -125,7 +148,14 @@ ambiguous discovery, duplicate case IDs, absent owner/file, optional-only
 routes and excluded/disabled assertions (also with a general waiver). Tests
 modify actual case/shared-runner bytes to demonstrate independent freshness.
 The installed pnpm version and owned descendant termination on timeout and
-cancellation are exercised. These are tool fixtures, not additional incident proofs.
+cancellation are exercised, with an unrelated sentinel process that must survive
+both. A launcher that exits while a descendant keeps its output open must settle
+in bounded time and fail the phase. A cancellation after the launcher exited is
+recorded and rejected, and live results and recorded phases are held to one
+prerequisite contract. Windows- and POSIX-shaped reports validate under their own
+path rules on any host. Registering a case or editing the validator leaves
+identities valid, while every shared execution input invalidates them. These are
+tool fixtures, not additional incident proofs.
 
 Actual case results, commands and limitations are recorded in `RESULTS.md` and
 the per-case evidence directories. Generated full logs are kept with the proof

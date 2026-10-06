@@ -6,11 +6,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { profileFor } from '../regressions/profiles.mjs';
 import { inspectExecution, verifyDiscovery } from '../regressions/results.mjs';
-import { proofIdentity, sha256, verifyIdentity } from '../regressions/identity.mjs';
-import { validateRecord, validateRegressions, validateEvidence } from '../regressions/registry.mjs';
+import { SHARED_EXECUTION_INPUTS, proofIdentity, sha256, verifyIdentity } from '../regressions/identity.mjs';
+import { discoveryInvocation, validateRecord, validateRegressions, validateEvidence } from '../regressions/registry.mjs';
 import { analyzeTestSource } from '../disabled-test-scanner.mjs';
-import { commandInvocation, runCommand } from '../regressions/proof.mjs';
-import { checkInstalledPnpm, checkOwnedProcessTermination } from '../regressions/launcher-checks.mjs';
+import { PHASE_ORDER, PREREQUISITE_PHASES, phaseSucceeded, requirePrerequisite, sidePhases } from '../regressions/phases.mjs';
+import { commandInvocation, pnpmCommand, runCommand } from '../regressions/subprocess.mjs';
+import { checkInstalledPnpm, checkOwnedProcessTermination, checkRetainedOutputIsBounded } from '../regressions/launcher-checks.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const record = JSON.parse(fs.readFileSync(path.join(root, 'test-policy/regressions/GH-2782.json'), 'utf8'));
@@ -88,6 +89,19 @@ test('proof classifier rejects actual empty, skipped, wrong and import-failed ru
     assert.equal(inspectExecution(green.report, green.result, profile, fixture, 'candidate').status, 'passed');
     assert.throws(() => inspectExecution(green.report, green.result, profile, fixture, 'bad'), /intended behavioral/);
     assert.throws(() => inspectExecution(valid.report, { ...valid.result, timedOut: true }, profile, fixture, 'bad'), /timeout/);
+    // A phase whose child exited successfully but was cancelled is never evidence,
+    // even with a passing report.
+    assert.throws(() => inspectExecution(green.report, { ...green.result, cancelled: true }, profile, fixture, 'candidate'), /cancellation/);
+
+    // Report paths are read with the rules of the machine that produced them, so
+    // a Windows receipt validates on any host and a POSIX one does too.
+    const reportNamed = (name) => ({ ...structuredClone(green.report), testResults: [{ ...structuredClone(green.report.testResults[0]), name }] });
+    const windowsReport = reportNamed(`C:/Temp/candidate/${profile.file}`);
+    assert.equal(inspectExecution(windowsReport, green.result, profile, 'C:\\Temp\\candidate', 'candidate', 'win32').status, 'passed');
+    assert.throws(() => inspectExecution(windowsReport, green.result, profile, 'C:\\Temp\\candidate', 'candidate', 'linux'), /wrong file/);
+    assert.throws(() => inspectExecution(windowsReport, green.result, profile, 'C:\\Temp\\elsewhere', 'candidate', 'win32'), /wrong file/);
+    assert.throws(() => inspectExecution(reportNamed('C:/Temp/candidate/packages/agent/test/other.test.ts'), green.result, profile, 'C:\\Temp\\candidate', 'candidate', 'win32'), /wrong file/);
+    assert.equal(inspectExecution(reportNamed(`/Users/dev/candidate/${profile.file}`), green.result, profile, '/Users/dev/candidate', 'candidate', 'darwin').status, 'passed');
   } finally { fs.rmSync(fixture, { recursive: true, force: true }); }
 });
 
@@ -126,9 +140,25 @@ test('proof identities isolate each selected case while retaining shared executi
     fs.appendFileSync(path.join(temp, profile.definitionFile), '\n// selected case change\n');
     assert.throws(() => verifyIdentity(proofIdentity(temp, profile), saved[0]), /stale/);
     assert.doesNotThrow(() => verifyIdentity(proofIdentity(temp, other), saved[1]));
-    fs.appendFileSync(path.join(temp, 'scripts/lib/regressions/proof.mjs'), '\n// shared execution change\n');
-    for (const [index, selected] of [profile, other].entries()) {
-      assert.throws(() => verifyIdentity(proofIdentity(temp, selected), saved[index]), /stale/);
+    fs.copyFileSync(path.join(root, profile.definitionFile), path.join(temp, profile.definitionFile));
+    // Registering another case edits the register, and the validator is no evidence producer:
+    // neither is fingerprinted, so neither invalidates an existing receipt.
+    for (const file of ['scripts/lib/regressions/profiles.mjs', 'scripts/lib/regressions/registry.mjs']) {
+      for (const identity of saved) assert.ok(!(file in identity), `${file} is not part of a receipt identity`);
+      const target = path.join(temp, file); fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.copyFileSync(path.join(root, file), target); fs.appendFileSync(target, '\n// registering another case\n');
+      for (const [index, selected] of [profile, other].entries()) {
+        assert.doesNotThrow(() => verifyIdentity(proofIdentity(temp, selected), saved[index]), file);
+      }
+    }
+    // Every shared execution input invalidates every receipt.
+    for (const file of SHARED_EXECUTION_INPUTS) {
+      const target = path.join(temp, file); const original = fs.readFileSync(target);
+      fs.appendFileSync(target, '\n// shared execution change\n');
+      for (const [index, selected] of [profile, other].entries()) {
+        assert.throws(() => verifyIdentity(proofIdentity(temp, selected), saved[index]), /stale/, `${file} for ${selected.caseId}`);
+      }
+      fs.writeFileSync(target, original);
     }
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });
@@ -150,8 +180,80 @@ test('bounded proof launcher executes the installed pinned pnpm version', { time
   await checkInstalledPnpm(root);
 });
 
-test('bounded subprocess runner stops only its own timed-out or cancelled child', { timeout: 10000 }, async () => {
-  await checkOwnedProcessTermination(root);
+test('bounded subprocess runner stops only its own timed-out or cancelled child', { timeout: 15000 }, async () => {
+  // The check keeps an unrelated sentinel process alive through both cleanups and asserts it survives.
+  assert.deepEqual(await checkOwnedProcessTermination(root),
+    { timedOutTreeStopped: true, cancelledTreeStopped: true, unrelatedProcessSurvived: true });
+});
+
+// A launcher that exits while a descendant outside its tree keeps the output
+// open, the way an unreachable Windows descendant does after taskkill.
+const retainingLauncher = ['-e', `const { spawn } = require('node:child_process');
+  const retainer = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: ['ignore', 'inherit', 'inherit'] });
+  console.log('RETAINING_PID ' + retainer.pid); retainer.unref();`];
+
+test('a descendant that keeps the output open cannot hang the runner', { timeout: 30000 }, async () => {
+  assert.deepEqual(await checkRetainedOutputIsBounded(root), { retainedOutputBounded: true });
+});
+
+test('an abort after the launcher exited is recorded and never reads as a successful phase', { timeout: 30000 }, async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'regression-abort-'));
+  let retainer;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 700);
+    let result;
+    try { result = await runCommand(process.execPath, retainingLauncher, root, path.join(temp, 'retained.log'), 30000, controller.signal, { settleMs: 3000 }); }
+    finally { clearTimeout(timer); }
+    retainer = Number(/RETAINING_PID (\d+)/.exec(result.stdout)?.[1]);
+    assert.equal(result.code, 0, 'the launcher exited successfully before the abort');
+    assert.equal(result.signal, null);
+    assert.equal(result.cancelled, true);
+    assert.equal(phaseSucceeded(result), false);
+    assert.throws(() => requirePrerequisite(result, 'install'), /install failed; no behavioral proof \(cancelled\)/);
+    // An abort that arrives before the command starts is recorded the same way.
+    const aborted = new AbortController(); aborted.abort();
+    const early = await runCommand(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], root, path.join(temp, 'early.log'), 30000, aborted.signal);
+    assert.equal(early.cancelled, true); assert.equal(phaseSucceeded(early), false);
+  } finally {
+    if (retainer) { try { process.kill(retainer); } catch { /* already gone */ } }
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test('live results and serialized phases are held to one prerequisite contract', () => {
+  const completed = { code: 0, signal: null, timedOut: false };
+  const phases = (side = 'bad', overrides = {}) => PHASE_ORDER.map((name) => ({ side, name, ...completed, ...overrides[name] }));
+  assert.deepEqual(sidePhases(phases(), 'bad').prerequisites.map((phase) => phase.name), [...PREREQUISITE_PHASES]);
+  for (const [label, defect] of [['a non-zero exit', { code: 1 }], ['a signal', { signal: 'SIGKILL' }], ['a launch or output error', { error: 'spawn failed' }],
+    ['a deadline', { timedOut: true }], ['a cancellation', { cancelled: true }]]) {
+    for (const name of PREREQUISITE_PHASES) {
+      assert.throws(() => requirePrerequisite({ ...completed, ...defect }, name), /no behavioral proof/, `${label} in the live ${name}`);
+      assert.throws(() => sidePhases(phases('bad', { [name]: defect }), 'bad'), /missing successful prerequisites/, `${label} in the recorded ${name}`);
+    }
+  }
+  // Order and completeness come from the contract, not from array positions.
+  assert.throws(() => sidePhases([...phases()].reverse(), 'bad'), /prerequisites/);
+  assert.throws(() => sidePhases(phases().slice(1), 'bad'), /prerequisites/);
+  assert.throws(() => sidePhases(phases().slice(0, -1), 'bad'), /prerequisites/);
+  assert.throws(() => sidePhases([...phases(), phases()[1]], 'bad'), /prerequisites/);
+  assert.throws(() => requirePrerequisite(completed, 'execution'), /unknown prerequisite/);
+  // The execution is addressed by name and keeps each side's own expectation.
+  const both = [...phases('bad', { execution: { code: 1 } }), ...phases('candidate')];
+  assert.equal(sidePhases(both, 'bad').execution.code, 1);
+  assert.equal(sidePhases(both, 'candidate').execution.side, 'candidate');
+});
+
+test('registry discovery and proof execution resolve the same Windows pnpm invocation', () => {
+  const options = { platform: 'win32', env: { npm_execpath: 'C:\\Program Files\\pnpm\\pnpm.cjs' }, node: 'C:\\Node\\node.exe' };
+  assert.equal(pnpmCommand('win32'), 'pnpm.cmd'); assert.equal(pnpmCommand('linux'), 'pnpm');
+  const pnpmArgs = ['--dir', 'packages/agent', 'exec', 'vitest', 'list', '--config', 'vitest.unit.config.ts',
+    profile.file.replace('packages/agent/', ''), '--json'];
+  const discovery = discoveryInvocation([profile], options);
+  assert.deepEqual(discovery, commandInvocation('pnpm.cmd', pnpmArgs, options));
+  assert.deepEqual(discovery, { command: 'C:\\Node\\node.exe', args: [options.env.npm_execpath, ...pnpmArgs] });
+  assert.deepEqual(discoveryInvocation([profile], { platform: 'linux' }), { command: 'pnpm', args: pnpmArgs });
+  assert.throws(() => discoveryInvocation([profile], { platform: 'win32', env: {} }), /through pnpm/);
 });
 
 test('registry rejects skipped assertions even with a general disabled-test waiver', () => {
