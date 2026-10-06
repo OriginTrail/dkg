@@ -38,23 +38,37 @@ export async function withProvenEmptyPrivateVmReadiness<T>(input: {
   commit: () => SynchronousReadinessCommitResult<T>;
   signal: AbortSignal;
 }): Promise<FencedProof<T>> {
-  // Also bound time spent waiting behind an earlier readiness mutation. The
-  // queued task becomes a no-op when its turn eventually arrives.
+  // The remote finalized proof is intentionally outside the mutation lock.
+  // Its agent-owned completion still performs the final live inspection and
+  // synchronous persistence while holding the lock below.
+  const preparation = await resolveWithinAbort(
+    () => input.agent.prepareContextGraphReadinessWithPrivateEmptyVmV1({
+      contextGraphId: input.contextGraphId,
+      attemptPrivateEmptyVm: true,
+      callerAgentAddress: input.callerAgentAddress,
+      signal: input.signal,
+    }),
+    input.signal,
+  );
+  if (preparation == null || input.signal.aborted) return UNPROVEN;
+
+  // Also bound time spent waiting behind an earlier readiness mutation. A
+  // timed-out queued task becomes a no-op when its turn eventually arrives.
   return await resolveWithinAbort(() => withContextGraphReadinessMutationLock(
     input.agent, input.contextGraphId, async () => {
       if (input.signal.aborted) return UNPROVEN;
-      const proof = await resolveWithinAbort(() => input.agent.proveRegisteredPrivateEmptyVmV1(
-        input.contextGraphId,
-        input.callerAgentAddress,
-        () => {
-          // A backend may ignore its abort signal and invoke this much later.
-          // Never let that abandoned operation persist readiness.
-          if (input.signal.aborted) throw new Error('Private empty-VM readiness proof expired');
-          return input.commit();
-        },
-        input.signal,
-      ), input.signal);
-      return proof ?? UNPROVEN;
+      return preparation.inspectAndCommit({ inspectMetadata: true }, (completion) => {
+        if (!completion.proven) {
+          return {
+            proven: false as const,
+            ...(completion.retryable === undefined ? {} : { retryable: completion.retryable }),
+          };
+        }
+        // A backend may ignore its abort signal and invoke this much later.
+        // Never let that abandoned operation persist readiness.
+        if (input.signal.aborted) throw new Error('Private empty-VM readiness proof expired');
+        return { proven: true as const, value: input.commit() };
+      });
     },
   ), input.signal) ?? UNPROVEN;
 }

@@ -3,6 +3,7 @@ import { acquireFinalizedChainRead, ChainRpcTransportError } from '@origintrail-
 import { StoreOperationTimeoutError } from '@origintrail-official/dkg-storage';
 import type { DKGAgent } from '../src/dkg-agent.js';
 import {
+  isRegisteredPrivateEmptyVmReadinessCandidateV1,
   RegisteredPrivateEmptyVmMethods,
   type InspectedContextGraphReadinessV1,
   type InspectedPrivateEmptyVmReadinessV1,
@@ -46,6 +47,8 @@ function fixture() {
     resolveContextGraphSubscriptionBootstrapAuthority: authority,
     inspectAndCommitContextGraphReadinessV1:
       RegisteredPrivateEmptyVmMethods.prototype.inspectAndCommitContextGraphReadinessV1,
+    prepareContextGraphReadinessWithPrivateEmptyVmV1:
+      RegisteredPrivateEmptyVmMethods.prototype.prepareContextGraphReadinessWithPrivateEmptyVmV1,
     inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1:
       RegisteredPrivateEmptyVmMethods.prototype.inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1,
     readRfc64RegisteredAuthoritySnapshotV1: chainSnapshot,
@@ -229,6 +232,39 @@ describe('registered private empty-VM agent guard', () => {
       contextGraphId: CG, onChainContextGraphId: '3', callerAgentAddress: CALLER,
       chainId: '31337',
     }));
+  });
+
+  it('prepares chain evidence before running the final live inspection', async () => {
+    const state = fixture();
+    const preparation = await state.agent.prepareContextGraphReadinessWithPrivateEmptyVmV1({
+      contextGraphId: CG,
+      attemptPrivateEmptyVm: true,
+      callerAgentAddress: CALLER,
+    });
+    expect(mocks.proof).toHaveBeenCalledOnce();
+    expect(state.authority).toHaveBeenCalledOnce();
+
+    const completion = await preparation.inspectAndCommit(
+      { inspectMetadata: true },
+      (value) => value,
+    );
+    expect(completion).toMatchObject({ proven: true });
+    expect(state.authority).toHaveBeenCalledTimes(2);
+  });
+
+  it('centralizes registered-private empty-VM candidate selection', () => {
+    const base = {
+      outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant',
+      metadataBootstrap: 'eligible',
+    } as const;
+    expect(isRegisteredPrivateEmptyVmReadinessCandidateV1(base, CALLER)).toBe(true);
+    expect(isRegisteredPrivateEmptyVmReadinessCandidateV1(
+      { ...base, registration: 'unregistered' }, CALLER,
+    )).toBe(false);
+    expect(isRegisteredPrivateEmptyVmReadinessCandidateV1(base, undefined)).toBe(false);
+    expect(isRegisteredPrivateEmptyVmReadinessCandidateV1(
+      { ...base, reason: 'chain-public' }, CALLER,
+    )).toBe(false);
   });
 
   it('returns the synchronous persistence callback value only after proof', async () => {

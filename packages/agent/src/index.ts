@@ -387,9 +387,11 @@ export type {
   ContextGraphReadinessMetadataV1,
   InspectedContextGraphReadinessV1,
   InspectedPrivateEmptyVmReadinessV1,
+  PreparedPrivateEmptyVmReadinessV1,
   ProvenRegisteredPrivateEmptyVmInspectionV1,
   SynchronousReadinessCommitResult,
 } from './dkg-agent-registered-private-empty-vm.js';
+export { isRegisteredPrivateEmptyVmReadinessCandidateV1 } from './dkg-agent-registered-private-empty-vm.js';
 export {
   ContextGraphNotFoundError,
   InvalidContentError,

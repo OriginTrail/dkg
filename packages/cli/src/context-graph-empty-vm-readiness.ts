@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import {
+  isRegisteredPrivateEmptyVmReadinessCandidateV1,
+  type ContextGraphReadAuthorityDecision,
+  type DKGAgent,
+} from '@origintrail-official/dkg-agent';
 import { resolveWithinAbort } from '@origintrail-official/dkg-core';
 import type { DashboardDB } from '@origintrail-official/dkg-node-ui';
 import { readContextGraphReadiness } from './context-graph-readiness.js';
 import { classifyEmptyPrivateVmReadiness, withProvenEmptyPrivateVmReadiness } from './context-graph-empty-vm-readiness-owner.js';
 import { commitContextGraphReadinessPatches } from './context-graph-readiness-commit.js';
 
-type RegisteredAuthority = { source: string; reason?: string; registration?: 'unregistered' };
 const trace = (stage: string) => {
   if (process.env.DKG_DEBUG_PRIVATE_EMPTY_VM === '1') console.info(`[private-empty-vm] subscribe-${stage}`);
 };
@@ -22,12 +25,10 @@ export async function settlePrivateEmptyVmAtSubscribe(
   agent: DKGAgent,
   dashboard: DashboardDB,
   contextGraphId: string,
-  authority: RegisteredAuthority,
+  authority: ContextGraphReadAuthorityDecision,
   callerAgentAddress?: string,
 ): Promise<boolean> {
-  if (authority.source !== 'registered-chain' || authority.reason !== 'chain-participant'
-    || authority.registration === 'unregistered'
-    || callerAgentAddress === undefined) return false;
+  if (!isRegisteredPrivateEmptyVmReadinessCandidateV1(authority, callerAgentAddress)) return false;
   trace('candidate');
   const signal = AbortSignal.timeout(8_000);
   const settle = async (): Promise<boolean> => {

@@ -99,6 +99,8 @@ async function proveAtDepth(depthFromAdapter?: number, depthFromConfig?: number,
     },
     inspectAndCommitContextGraphReadinessV1:
       RegisteredPrivateEmptyVmMethods.prototype.inspectAndCommitContextGraphReadinessV1,
+    prepareContextGraphReadinessWithPrivateEmptyVmV1:
+      RegisteredPrivateEmptyVmMethods.prototype.prepareContextGraphReadinessWithPrivateEmptyVmV1,
     inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1:
       RegisteredPrivateEmptyVmMethods.prototype.inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1,
   } as unknown as DKGAgent;

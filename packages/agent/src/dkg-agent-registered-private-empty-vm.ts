@@ -55,6 +55,26 @@ export type InspectedPrivateEmptyVmReadinessV1 =
   | { readonly proven: false; readonly retryable?: boolean; readonly inspection: InspectedContextGraphReadinessV1 }
   | { readonly proven: true; readonly inspection: ProvenRegisteredPrivateEmptyVmInspectionV1 };
 
+export interface PreparedPrivateEmptyVmReadinessV1 {
+  /** Consume the prepared evidence under the caller's readiness mutation lock. */
+  inspectAndCommit<T>(
+    input: { readonly inspectMetadata: boolean },
+    commit: (completion: InspectedPrivateEmptyVmReadinessV1) => SynchronousReadinessCommitResult<T>,
+  ): Promise<T>;
+}
+
+/** One canonical policy owner for deciding whether the zero-VM exception applies. */
+export function isRegisteredPrivateEmptyVmReadinessCandidateV1(
+  authority: ContextGraphReadAuthorityDecision,
+  callerAgentAddress: string | undefined,
+): callerAgentAddress is string {
+  return authority.outcome === 'allowed'
+    && authority.source === 'registered-chain'
+    && authority.reason === 'chain-participant'
+    && authority.registration !== 'unregistered'
+    && callerAgentAddress !== undefined;
+}
+
 function hasValidatedPrivateEmptyVmInspection(
   inspection: Extract<InspectedContextGraphReadinessV1, { kind: 'current' }>,
   onChainId: bigint,
@@ -160,18 +180,16 @@ export class RegisteredPrivateEmptyVmMethods extends DKGAgentBase {
       : { kind: 'invalidated', authority });
   }
 
-  /** One final agent-owned inspection for optional chain evidence and peer classification. */
-  async inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1<T>(
+  /** Collect optional chain evidence without holding the readiness mutation lock. */
+  async prepareContextGraphReadinessWithPrivateEmptyVmV1(
     this: DKGAgent,
     input: {
       contextGraphId: string;
-      inspectMetadata: boolean;
       attemptPrivateEmptyVm: boolean;
       callerAgentAddress?: string;
       signal?: AbortSignal;
     },
-    commit: (completion: InspectedPrivateEmptyVmReadinessV1) => SynchronousReadinessCommitResult<T>,
-  ): Promise<T> {
+  ): Promise<PreparedPrivateEmptyVmReadinessV1> {
     const { contextGraphId, callerAgentAddress, signal } = input;
     const attempt = input.attemptPrivateEmptyVm && callerAgentAddress !== undefined
       ? await attemptRegisteredPrivateEmptyVmV1(this, {
@@ -186,20 +204,46 @@ export class RegisteredPrivateEmptyVmMethods extends DKGAgentBase {
         ),
       }, contextGraphId, callerAgentAddress, signal)
       : UNPROVEN_PRIVATE_EMPTY_VM;
-    // Completion always obtains one last live authority and metadata view. Its
-    // synchronous callback classifies and persists both proof outcomes without
-    // another lock acquisition or a second final inspection.
-    return this.inspectAndCommitContextGraphReadinessV1({
-      contextGraphId,
-      inspectMetadata: input.inspectMetadata || input.attemptPrivateEmptyVm,
-      ...(attempt.proven ? { expectedRevision: attempt.metadataRevision } : {}),
-      callerAgentAddress,
-      signal,
-    }, (inspection) => commit(finalizePrivateEmptyVmEvidence(
-      attempt, inspection,
-      () => this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true,
-      signal,
-    )));
+    let consumed = false;
+    return Object.freeze({
+      inspectAndCommit: async <T>(
+        completionInput: { readonly inspectMetadata: boolean },
+        commit: (completion: InspectedPrivateEmptyVmReadinessV1) => SynchronousReadinessCommitResult<T>,
+      ): Promise<T> => {
+        if (consumed) throw new Error('Private empty-VM readiness preparation already consumed');
+        consumed = true;
+        // Completion always obtains one last live authority and metadata view.
+        // Its synchronous callback classifies and persists both proof outcomes
+        // without another lock acquisition or a second final inspection.
+        return this.inspectAndCommitContextGraphReadinessV1({
+          contextGraphId,
+          inspectMetadata: completionInput.inspectMetadata || input.attemptPrivateEmptyVm,
+          ...(attempt.proven ? { expectedRevision: attempt.metadataRevision } : {}),
+          callerAgentAddress,
+          signal,
+        }, (inspection) => commit(finalizePrivateEmptyVmEvidence(
+          attempt, inspection,
+          () => this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true,
+          signal,
+        )));
+      },
+    });
+  }
+
+  /** Compatibility coordinator for callers that do not own a mutation lock. */
+  async inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1<T>(
+    this: DKGAgent,
+    input: {
+      contextGraphId: string;
+      inspectMetadata: boolean;
+      attemptPrivateEmptyVm: boolean;
+      callerAgentAddress?: string;
+      signal?: AbortSignal;
+    },
+    commit: (completion: InspectedPrivateEmptyVmReadinessV1) => SynchronousReadinessCommitResult<T>,
+  ): Promise<T> {
+    const preparation = await this.prepareContextGraphReadinessWithPrivateEmptyVmV1(input);
+    return preparation.inspectAndCommit({ inspectMetadata: input.inspectMetadata }, commit);
   }
 
   /** A zero-VM proof grants durable readiness only; SWM still needs its own proof. */

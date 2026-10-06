@@ -137,6 +137,8 @@ describe('registered private empty-VM subscribe settlement', () => {
         readContextGraphAuthorityFactsRevision: () => String(metadataRevision),
       },
       inspectAndCommitContextGraphReadinessV1: DKGAgent.prototype.inspectAndCommitContextGraphReadinessV1,
+      prepareContextGraphReadinessWithPrivateEmptyVmV1:
+        DKGAgent.prototype.prepareContextGraphReadinessWithPrivateEmptyVmV1,
       inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1:
         DKGAgent.prototype.inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1,
       proveRegisteredPrivateEmptyVmV1: DKGAgent.prototype.proveRegisteredPrivateEmptyVmV1,
