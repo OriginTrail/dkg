@@ -18,6 +18,9 @@ export const PROTECTED_BRANCHES = TESTNET_CANARY_ROLLOUT_POLICY.controllerBranch
 // How far before the pin's commit date the fetched history reaches, for
 // descendants committed on a clock that ran behind the pin's.
 export const PROTECTED_HISTORY_MARGIN_SECONDS = 24 * 60 * 60;
+// How many generations each cut point of the fetched history is deepened by,
+// one fetch per entry, while the pin is still out of reach.
+export const PROTECTED_HISTORY_DEEPEN_STEPS = Object.freeze([1, 4, 16, 64]);
 
 export function pinnedControllerRef(
   readWorkflow = (name) => fs.readFileSync(new URL(`../../.github/workflows/${name}`, import.meta.url), 'utf8'),
@@ -55,10 +58,25 @@ const refspecs = (branches) => branches.map((branch) => `+refs/heads/${branch}:$
 // margin before the pin's commit date is then deepened back to that point;
 // an older tip cannot contain the pin, and deepening it would fetch the
 // branch's whole history.
+//
+// A date-limited fetch cuts every commit with a parent older than the limit,
+// and git then hides all of that commit's parents, not only the old one. A
+// merge of a pull request branch last pushed before the limit, landing on the
+// branch after the pin, therefore hides the pin whenever the pin is that
+// merge's first parent. While the pin is out of reach, each cut point is
+// deepened by a growing number of generations, to a bounded total. The
+// date-limited fetch also lists cut points whose commits it never sent, and
+// git refuses to deepen while such an entry is in .git/shallow, so the
+// entries for missing commits are pruned before each step, without expiring
+// any object: the pin is reachable from no ref until a step reaches it, and
+// the tests read its files. A pin that is still unreachable after the last
+// step is left for the provenance test to report, as it was before these
+// steps existed.
 export function fetchProtectedHistory({
   run = execFileSync,
   ref = pinnedControllerRef(),
   shallow = isShallowRepository(run),
+  reachable = (commit) => protectedBranchContaining(commit) !== undefined,
 } = {}) {
   const fetch = (options, branches) => run(
     'git',
@@ -72,7 +90,13 @@ export function fetchProtectedHistory({
   const since = commitDate(run, ref) - PROTECTED_HISTORY_MARGIN_SECONDS;
   fetch(['--depth=1'], PROTECTED_BRANCHES);
   const recent = PROTECTED_BRANCHES.filter((branch) => commitDate(run, remoteBranch(branch)) >= since);
-  if (recent.length > 0) fetch([`--shallow-since=${since}`], recent);
+  if (recent.length === 0) return;
+  fetch([`--shallow-since=${since}`], recent);
+  for (const generations of PROTECTED_HISTORY_DEEPEN_STEPS) {
+    if (reachable(ref)) return;
+    run('git', ['prune', '--expire=never'], { stdio: 'inherit' });
+    fetch([`--deepen=${generations}`], recent);
+  }
 }
 
 // The first protected branch whose fetched history contains `commit`. Any git
