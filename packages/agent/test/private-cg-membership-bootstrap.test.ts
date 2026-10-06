@@ -52,6 +52,11 @@ async function createAgent(
     dataDir,
   });
   await agent.start();
+  // Most tests in this file isolate join state from discovery. Keep the new
+  // pre-send recovery dial immediate; dedicated connection tests override it.
+  (agent as any).peerResolver.connect = vi.fn().mockRejectedValue(
+    new Error('test curator route unavailable'),
+  );
   // Edge nodes backed by the generic mock adapter have no operational-wallet
   // key to auto-promote into a default agent. Install a real custodial agent
   // explicitly so authenticated bootstrap requests exercise the production
@@ -732,6 +737,7 @@ describe('private CG membership bootstrap recovery', () => {
       curatorPeerId,
     );
     expect(queued.delivered).toBe(0);
+    expect(queued.queued).toBe(true);
     expect(await agent.getJoinRequestStatus(contextGraphId, agentAddress)).toBe('pending');
 
     const handler = joinRequestHandler(agent);
@@ -1020,12 +1026,13 @@ describe('private CG membership bootstrap recovery', () => {
       .mockResolvedValue({ delivered: false, error: 'queued for retry' });
     (original.node.libp2p as any).getPeers = () => [];
 
-    await original.forwardJoinRequest(
+    const forwarded = await original.forwardJoinRequest(
       contextGraphId,
       delegation,
       'requester',
       curatorPeerId,
     );
+    expect(forwarded).toMatchObject({ delivered: 0, queued: true });
     expect(await original.getJoinRequestStatus(contextGraphId, agentAddress)).toBe('pending');
 
     const restarted = await DKGAgent.create({

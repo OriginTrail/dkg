@@ -1455,6 +1455,19 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
           ? `registration-binding:${contextGraphId}`
           : `registration-binding-repair:${contextGraphId}:${durableBinding?.onChainId ?? ''}:${durableBinding?.onChainHash ?? ''}`;
         const coldResolution = finalizedAuthorityColdResolutionOf(this);
+        // A read-authority caller with an already accepted unregistered proof
+        // may still need the retained finalized projection to re-establish
+        // exact name absence. Let that one foreground read enter during the
+        // circuit cooldown: the chain reader serves an admissible retained
+        // projection without RPC when it can, and the single foreground
+        // permit still bounds any refresh attempt. Ordinary registration and
+        // VM discovery remain deferred while the circuit is open.
+        const mayServeAcceptedUnregisteredProjection =
+          options.allowAcceptedRfc64FinalizedAbsence === true
+          || (
+            options.allowApprovedPrivateReplicaFinalizedAbsence === true
+            && this.localApprovedAgentByCG?.has(contextGraphId) === true
+          );
         const resolution = await coldResolution.read(
           flightKey,
           (flightSignal) => this.rfc64AuthorityReadCoordinatorV1.runForeground(
@@ -1466,6 +1479,9 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
                 ...repairHints,
               },
             ),
+            mayServeAcceptedUnregisteredProjection
+              ? { admitWhileOpen: true }
+              : undefined,
           ),
           {
             label: `resolveFinalizedContextGraphRegistrationBinding(${contextGraphId})`,

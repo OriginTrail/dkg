@@ -258,6 +258,7 @@ import {
   requesterHasDirectLoopbackConnection,
   selectCuratorJoinDialAddress,
 } from './curator-dial-address.js';
+import { ensureCuratorConnectedFromComponents } from './curator-peer-connection.js';
 import { buildCclPolicyQuads, buildPolicyApprovalQuads, buildPolicyRevocationQuads, hashCclPolicy, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
 import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
 import { buildCclEvaluationQuads } from './ccl-evaluation-publish.js';
@@ -3260,7 +3261,7 @@ export class JoinRequestMethods extends DKGAgentBase {
     delegation: SignedAgentDelegation,
     agentName: string | undefined,
     curatorPeerId: string,
-  ): Promise<{ delivered: number; errors: string[]; alreadyMember?: boolean; autoApproved?: boolean }> {
+  ): Promise<{ delivered: number; queued?: boolean; errors: string[]; alreadyMember?: boolean; autoApproved?: boolean }> {
     const key = requesterJoinStateKey(contextGraphId, delegation.agentAddress);
     return withRequesterJoinForwardLock(this, key, () => this.forwardJoinRequestOnce(
       contextGraphId,
@@ -3275,7 +3276,7 @@ export class JoinRequestMethods extends DKGAgentBase {
     delegation: SignedAgentDelegation,
     agentName: string | undefined,
     curatorPeerId: string,
-  ): Promise<{ delivered: number; errors: string[]; alreadyMember?: boolean; autoApproved?: boolean }> {
+  ): Promise<{ delivered: number; queued?: boolean; errors: string[]; alreadyMember?: boolean; autoApproved?: boolean }> {
     if (!curatorPeerId) {
       // Required: V10 invites carry the curator's libp2p peer-id
       // (`<cgId>\n<peerId>`). Without it we can't authenticate the
@@ -3349,9 +3350,14 @@ export class JoinRequestMethods extends DKGAgentBase {
     if (curatorPeerId !== this.peerId) {
       recordAcceptedBy(curatorPeerId);
       try {
-        // rc.9 PR-10: substrate send. queued surfaces as a throw
-        // (matches the legacy sendToPeer ergonomics so the existing
-        // catch path with broadcast fallback still kicks in).
+        await ensureCuratorConnectedFromComponents(
+          this.node,
+          this.peerResolver,
+          curatorPeerId,
+          AbortSignal.timeout(JOIN_REQUEST_SEND_TIMEOUT_MS),
+          ctx,
+          (operationContext, message) => this.log.warn(operationContext, message),
+        );
         const sendResult = await this.messenger.sendReliable(
           curatorPeerId,
           PROTOCOL_JOIN_REQUEST,
@@ -3361,11 +3367,15 @@ export class JoinRequestMethods extends DKGAgentBase {
         if (!sendResult.delivered) {
           // `delivered:false` means Messenger durably queued this exact
           // request; it is still accepted for eventual delivery. Preserve the
-          // generation so the later curator decision can be matched, while
-          // continuing the immediate broadcast fallback for lower latency.
+          // generation and trusted curator. A durable queue acceptance is
+          // pending success rather than a synchronous delivery failure.
           acceptedForDelivery = true;
           recordAcceptedBy(curatorPeerId);
-          throw new Error(`substrate queued (transport): ${sendResult.error}`);
+          this.log.info(
+            ctx,
+            `Queued join request for "${contextGraphId}" from ${agentAddress} to curator ${curatorPeerId.slice(-8)}`,
+          );
+          return { delivered: 0, queued: true, errors };
         }
         const responseBytes = sendResult.response;
         const response = JSON.parse(new TextDecoder().decode(responseBytes));

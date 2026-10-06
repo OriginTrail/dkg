@@ -12,6 +12,23 @@ interface CuratorPeerConnectionAgent {
   readonly log: { warn(ctx: OperationContext, message: string): void };
 }
 
+export function ensureCuratorConnectedFromComponents(
+  node: CuratorPeerConnectionAgent['node'],
+  peerResolver: CuratorPeerConnectionAgent['peerResolver'],
+  curatorPeerId: string,
+  signal: AbortSignal,
+  ctx: OperationContext,
+  warn: CuratorPeerConnectionAgent['log']['warn'],
+): boolean | Promise<boolean> {
+  return ensureCuratorConnected(
+    { node, peerResolver, log: { warn } },
+    curatorPeerId,
+    signal,
+    ctx,
+    (candidate) => candidate?.throwIfAborted(),
+  );
+}
+
 export function ensureCuratorConnected(
   agent: CuratorPeerConnectionAgent,
   curatorPeerId: string,
@@ -54,7 +71,7 @@ async function connectCurator(
     throwIfAborted(signal);
     agent.log.warn(
       ctx,
-      `Failed to dial curator ${curatorPeerId.slice(-8)} for meta refresh: ${error instanceof Error ? error.message : String(error)}`,
+      `Failed to dial curator ${curatorPeerId.slice(-8)}: ${error instanceof Error ? error.message : String(error)}`,
     );
     return false;
   }

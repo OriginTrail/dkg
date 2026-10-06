@@ -1254,7 +1254,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         });
       }
       const result = await agent.forwardJoinRequest(contextGraphId, delegation, agentName, curatorPeerId);
-      if (result.delivered === 0) {
+      if (result.delivered === 0 && result.queued !== true) {
         // Surface per-peer errors so the joiner can see WHY (curator
         // rejected with a specific reason, transport timed out, etc.)
         // instead of a generic "no curator". Silent error swallowing here
@@ -1273,6 +1273,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
             ? 'already-member'
             : 'pending',
         delivered: result.delivered,
+        ...(result.queued === true ? { queued: true } : {}),
         ...(result.alreadyMember || result.autoApproved ? { alreadyMember: true } : {}),
         ...(result.autoApproved ? { autoApproved: true } : {}),
       });

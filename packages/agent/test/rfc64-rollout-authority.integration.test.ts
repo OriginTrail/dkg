@@ -2968,6 +2968,35 @@ describe('RFC-64 rollout authority integration', () => {
     expect(resolveSnapshots).not.toHaveBeenCalled();
   });
 
+  it('lets an approved unregistered replica consume a retained projection while the circuit is open', async () => {
+    const contextGraphId = `${AUTHOR}/approved-registration-binding-open-circuit`;
+    const resolveSnapshots = vi.fn(async () => new Map());
+    const edge = await startAgent({
+      name: 'approved-registration-binding-open-circuit',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          contextGraphAuthorityIndexRevisionReader: {
+            resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+            readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+            whenIdle: vi.fn(async () => undefined),
+          },
+        }),
+      },
+    });
+    (edge as any).localApprovedAgentByCG.set(contextGraphId, AUTHOR);
+    await openSharedAuthorityCircuit(edge);
+
+    const binding = await edge.resolveContextGraphRegistrationBinding(contextGraphId, {
+      allowApprovedPrivateReplicaFinalizedAbsence: true,
+    });
+
+    expect(resolveSnapshots).toHaveBeenCalledTimes(1);
+    expect(binding).toMatchObject({
+      kind: 'unavailable',
+      reason: 'finalized-name-absence-unaccepted',
+    });
+  });
+
   it('resolves a registration binding while a slow authority read holds the serializer', async () => {
     // Registration discovery backs query, crypto and Context Graph operations
     // under a policy-read budget, so it takes the circuit without the queue:
