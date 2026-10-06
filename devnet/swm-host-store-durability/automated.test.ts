@@ -25,14 +25,18 @@
  *          max(the `.meta` cursor, the last complete frame) at the kill: no
  *          seqno is reused (`checkNoSeqnoReuse` in `log-frames.ts`, unit-tested
  *          without a devnet),
- *        - the `.meta` cursor is never below the log's last seqno,
+ *        - the `.meta` cursor covers the log, except for the one append that can be in
+ *          flight while the writer runs (`checkCursorCoversLog` with `appendInFlight`,
+ *          counted in frames),
  *        - the host re-engages host mode from its persisted flag.
  *   3. With ingestion stopped, the `.meta` cursor covers the whole log (no
  *      in-flight allowance), and the curator edge pages the hosting core with
  *      `POST /api/shared-memory/host-catchup`, one round per call and a page
  *      smaller than the log, resuming from the returned cursor until the host
- *      has nothing more, from several starting cursors. Paging from 0 crosses
- *      at least two page boundaries. The envelopes served across the pages
+ *      has nothing more, from several starting cursors. Each call resumes where
+ *      the last stopped, holds at most a page and advances the cursor over the
+ *      frames it served, and paging from 0 crosses at least two page boundaries
+ *      (`checkCatchupWalk`, unit-tested without a devnet). The envelopes served across the pages
  *      are, in order, exactly the frames with seqno > the starting cursor, each
  *      byte-identical to its stored ciphertext (`checkServedFrames`), and the
  *      final cursor is the true last seqno (catch-up "pages to completion").
@@ -77,11 +81,13 @@ import {
 } from '../_bootstrap/harness';
 import * as lifecycle from '../_bootstrap/node-lifecycle';
 import {
+  checkCatchupWalk,
   checkCursorCoversLog,
   checkNoSeqnoReuse,
   checkServedFrames,
   parseLog,
   quietPeriodGate,
+  type ObservedCatchupPage,
   type ParsedLog,
   type ServedEntry,
 } from './log-frames.js';
@@ -204,11 +210,10 @@ const clearDeadNodePidFiles = (num: number): void =>
 /**
  * kill -9 every process that belongs to the node (the real worker is `daemon.pid`). The PID files
  * are read and every live PID is checked to be a daemon of this checkout first, which takes a
- * `ps` per process: a time-critical kill passes the PIDs it verified earlier (`verified`) and
- * signals immediately.
+ * `ps` per process. The time-critical kill in the cycles does not use this: it calls
+ * `lifecycle.verifiedNodePids` before its wait and `lifecycle.sigkillPids` at the kill point.
  */
-const sigkillNode = (num: number, verified?: readonly number[]): number[] =>
-  lifecycle.sigkillNodeProcesses(PATHS, num, verified ? { verified } : {});
+const sigkillNode = (num: number): number[] => lifecycle.sigkillNodeProcesses(PATHS, num);
 
 const nodeReachable = (num: number): Promise<boolean> =>
   lifecycle.nodeReachable(readNodeConfig(num).apiPort, { timeoutMs: 3_000 });
@@ -329,6 +334,13 @@ beforeAll(async () => {
   expect(role, `node${HOST} must be a core`).toBe('core');
   expect((await getJson(nodeFor(CURATOR), '/api/status')).json?.nodeRole).toBe('edge');
 
+  // Check who every live process in the PID files of both nodes is BEFORE anything is edited or
+  // restarted: this throws if a file lists a live process that is not a daemon of this checkout
+  // (a recycled PID). `restartNodeAndWait` stops a node through the same check, and
+  // `devnet.sh restart-node`, whose own stop phase signals PID-file entries without one, runs
+  // only after that stop has left it nothing live to signal.
+  for (const n of [HOST, CURATOR]) lifecycle.verifiedNodePids(PATHS, n);
+
   // See the header for why each switch is needed. Every edited config is backed up and
   // restored (with a restart) on any exit path.
   for (const n of [HOST, CURATOR]) {
@@ -425,7 +437,7 @@ describe('SWM host-mode store survives kill -9 of the hosting core', () => {
       let killed: number[] = [];
       while (Date.now() < killAt) {
         if (logSize(cgId) > baseSize) {
-          killed = sigkillNode(HOST, hostPids);
+          killed = lifecycle.sigkillPids(hostPids);
           break;
         }
         await sleep(3);
@@ -490,9 +502,12 @@ describe('SWM host-mode store survives kill -9 of the hosting core', () => {
         afterRestart: { frames: log.frames },
       });
       expect(recovery.violations, `cycle ${cycle}: recovery lost or recycled frames`).toEqual([]);
-      const meta = readMetaSeqno(cgId);
-      expect(meta, `cycle ${cycle}: meta unreadable after restart`).not.toBeNull();
-      expect(meta!, `cycle ${cycle}: cursor below the log tail`).toBeGreaterThanOrEqual(log.seqnos.at(-1)! - 1);
+      // The writer is still running: the cursor may trail by the one append in flight (counted in
+      // frames, so a burned seqno does not change the allowance) and must be readable.
+      expect(
+        checkCursorCoversLog({ frames: log.frames, metaSeqno: readMetaSeqno(cgId), appendInFlight: true }),
+        `cycle ${cycle}: cursor below the log tail`,
+      ).toEqual([]);
       evidence.push(
         `cycle ${cycle}: ${window}; at the kill log=${afterKill.frames.length} frames last=${afterKill.seqnos.at(-1)} meta=${metaAfterKill}; ` +
           `preserved ${afterKill.frames.length} frames byte for byte, ${recovery.newFrames.length} new above ${recovery.highWater}`,
@@ -528,8 +543,8 @@ describe('SWM host-mode store survives kill -9 of the hosting core', () => {
     for (const start of [0, mid, lastSeqno - 1, lastSeqno]) {
       const expected = log.frames.filter((frame) => frame.seqno > start);
       const served: ServedEntry[] = [];
+      const pages: ObservedCatchupPage[] = [];
       let since = start;
-      let nonEmptyPages = 0;
       let calls = 0;
       for (;;) {
         calls += 1;
@@ -548,23 +563,21 @@ describe('SWM host-mode store survives kill -9 of the hosting core', () => {
         expect(peer.denied, `host denied catch-up: ${JSON.stringify(peer)}`).toBeUndefined();
         expect(peer.error, `host-catchup error: ${JSON.stringify(peer)}`).toBeUndefined();
         expect(peer.entries, `start=${start}: the page lists what the host served`).toHaveLength(peer.fetched);
-        if (peer.fetched === 0) {
-          expect(peer.nextSeqno, `start=${start}: empty page must not move the cursor`).toBe(since);
-          break;
-        }
-        expect(peer.fetched, `start=${start}: a page holds at most ${pageSize} frames`).toBeLessThanOrEqual(pageSize);
-        expect(peer.nextSeqno, `start=${start}: cursor must advance`).toBeGreaterThan(since);
-        nonEmptyPages += 1;
+        pages.push({ since, fetched: peer.fetched, nextSeqno: peer.nextSeqno });
+        if (peer.fetched === 0) break;
         served.push(...peer.entries);
         since = peer.nextSeqno;
       }
+      // Page by page: each call resumed where the last stopped, held at most a page, and advanced
+      // the cursor over exactly the frames it served; the walk ended on an empty response after
+      // ceil(frames / page) nonempty ones, at least three from 0 (it must cross page boundaries).
+      expect(
+        checkCatchupWalk({ start, frames: log.frames, pages, pageSize, ...(start === 0 ? { minNonemptyPages: 3 } : {}) }),
+        `start=${start}: the catch-up walk`,
+      ).toEqual([]);
       // The served envelopes, across the pages and in order, are exactly the frames on disk after
       // the cursor: none missing, repeated or reordered, each byte-identical to its ciphertext.
       expect(checkServedFrames({ expected, served }), `start=${start}: catch-up did not serve the log suffix`).toEqual([]);
-      expect(nonEmptyPages, `start=${start}: non-empty pages`).toBe(Math.ceil(expected.length / pageSize));
-      if (start === 0) expect(nonEmptyPages, 'paging from 0 must cross a page boundary').toBeGreaterThanOrEqual(3);
-      expect(served.length, `start=${start}: frames served across all pages`).toBe(expected.length);
-      expect(since, `start=${start}: final cursor`).toBe(expected.length > 0 ? lastSeqno : start);
     }
   }, 600_000);
 });

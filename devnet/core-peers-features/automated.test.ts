@@ -181,25 +181,9 @@ async function waitFor<T>(
 
 const waitForPidsGone = lifecycle.waitForPidsGone;
 
-async function stopNodeProcesses(num: number): Promise<void> {
-  const pids = lifecycle.verifiedNodePids(PATHS, num); // the live daemons of this checkout; throws on any other live PID
-  if (pids.length === 0) {
-    clearDeadNodePidFiles(num);
-    return;
-  }
-
-  for (const pid of pids) {
-    try { process.kill(pid, 'SIGTERM'); } catch { /* may already be gone */ }
-  }
-  const stopped = await waitForPidsGone(`node${num} processes stopped`, pids, 10_000);
-  if (!stopped) {
-    for (const pid of pids.filter(pidAlive)) {
-      try { process.kill(pid, 'SIGKILL'); } catch { /* may already be gone */ }
-    }
-    await waitForPidsGone(`node${num} processes killed`, pids, 10_000);
-  }
-  clearDeadNodePidFiles(num);
-}
+// Verified stop (every live PID-file entry must be a daemon of this checkout; SIGTERM, then SIGKILL
+// after 10 s, then the dead PID files are removed): shared with `restartNodeAndWait`.
+const stopNodeProcesses = (num: number): Promise<void> => lifecycle.stopNodeProcesses(PATHS, num);
 
 const restartNodeAndWait = (num: number, node: DevnetNode, label: string, timeoutMs: number): Promise<void> =>
   lifecycle.restartNodeAndWait(PATHS, {

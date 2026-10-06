@@ -24,6 +24,7 @@ import {
   rpcUrlFromNode1Config,
   sigkillNodeProcesses,
   sigkillPids,
+  stopNodeProcesses,
   verifiedNodePids,
   waitForPidsGone,
   type DevnetPaths,
@@ -53,11 +54,14 @@ const pidFile = (n: number, name: 'daemon.pid' | 'devnet.pid') => join(paths.dev
 /**
  * A live process that only sleeps. By default it looks like what `devnet.sh` leaves running for a
  * node: its command line ends in `<repoRoot>/packages/cli/dist/cli.js daemon-worker`. Pass `plain`
- * for an unrelated process (what a recycled PID would be).
+ * for an unrelated process (what a recycled PID would be), or `argv` for exactly the arguments that
+ * follow the script (a process that runs from the checkout without being a daemon). `ignoreTerm`
+ * makes it survive SIGTERM.
  */
-function sleeper(options: { plain?: boolean; entry?: string } = {}): ChildProcess {
-  const args = ['-e', 'setInterval(() => {}, 1000)'];
-  if (!options.plain) args.push(options.entry ?? join(root, 'packages/cli/dist/cli.js'), 'daemon-worker');
+function sleeper(options: { plain?: boolean; entry?: string; argv?: string[]; ignoreTerm?: boolean } = {}): ChildProcess {
+  const args = ['-e', `${options.ignoreTerm ? "process.on('SIGTERM', () => {}); " : ''}setInterval(() => {}, 1000)`];
+  if (options.argv) args.push(...options.argv);
+  else if (!options.plain) args.push(options.entry ?? join(root, 'packages/cli/dist/cli.js'), 'daemon-worker');
   const child = spawn(process.execPath, args, { stdio: 'ignore' });
   children.push(child);
   return child;
@@ -252,14 +256,21 @@ describe('only a daemon of this checkout is ever signalled', () => {
     expect(isDaemonOfCheckout(`node ${cli('/work/dkg')} daemon-foreground-worker`, ['/work/dkg'])).toBe(true);
     // The root may be given as a path or as its realpath.
     expect(isDaemonOfCheckout(`node ${cli('/private/work/dkg')} daemon-worker`, ['/work/dkg', '/private/work/dkg'])).toBe(true);
-    // A root with a trailing slash, a flag carrying the path, surrounding whitespace.
-    expect(isDaemonOfCheckout(`node --import=${cli('/work/dkg')} x daemon-worker  \n`, ['/work/dkg/'])).toBe(true);
+    // A root with a trailing slash, surrounding whitespace, node flags before the entry point.
+    expect(isDaemonOfCheckout(`node --max-old-space-size=4096 --no-warnings ${cli('/work/dkg')} daemon-worker  \n`, ['/work/dkg/'])).toBe(true);
+    // `ps` prints argv joined by spaces: a checkout path with spaces in it still matches.
+    expect(isDaemonOfCheckout(`${binary} ${cli('/my work/dkg')} daemon-supervisor`, ['/my work/dkg'])).toBe(true);
   });
 
   it.each([
     ['an unrelated process (a recycled PID)', '/usr/bin/vim /work/notes.txt'],
     ['the same unrelated name without any path', 'sleep 1000'],
     ['a process that runs from the checkout but is not a daemon (the test runner)', `${binary} /work/dkg/node_modules/.bin/vitest run daemon-worker-tests`],
+    ['a test runner of the checkout whose last argument is named like a daemon command', `${binary} /work/dkg/node_modules/vitest/vitest.mjs run daemon-worker`],
+    ['a script of the checkout other than the CLI entry point, followed by a daemon subcommand', `${binary} /work/dkg/packages/cli/dist/daemon-entrypoint.js daemon-supervisor`],
+    ['the CLI entry point of the checkout with the daemon subcommand somewhere else than right after it', `${binary} ${cli('/work/dkg')} run daemon-worker`],
+    ['a flag carrying the entry point path (not the script being run)', `${binary} --import=${cli('/work/dkg')} x daemon-worker`],
+    ['a daemon command run by another program that only mentions the entry point', `/usr/bin/tool ${cli('/work/dkg')}-copy daemon-worker`],
     ['the CLI launcher, which is not a daemon process', `${binary} ${cli('/work/dkg')} start`],
     ['another checkout\'s daemon', `${binary} ${cli('/elsewhere/dkg')} daemon-worker`],
     ['a sibling directory that only shares a prefix with the root', `${binary} ${cli('/work/dkg-other')} daemon-worker`],
@@ -364,17 +375,101 @@ describe('only a daemon of this checkout is ever signalled', () => {
     expect(pidAlive(recycled.pid!)).toBe(true);
   });
 
-  it('a time-critical caller passes the PIDs it verified earlier: no command line is read at kill time and only live ones are signalled', async () => {
+  it('with the real `ps`: a test runner of this checkout with a daemon-named last argument is refused and survives', async () => {
+    // The shape of the review's example: `node <checkout>/node_modules/vitest/vitest.mjs run daemon-worker`.
+    const runner = sleeper({ argv: [join(root, 'node_modules/vitest/vitest.mjs'), 'run', 'daemon-worker'] });
     const worker = sleeper();
+    writeFileSync(pidFile(4, 'daemon.pid'), `${worker.pid}\n`);
+    writeFileSync(pidFile(4, 'devnet.pid'), `${runner.pid}\n`);
+    expect(() => verifiedNodePids(paths, 4)).toThrow(`node4: devnet.pid lists pid ${runner.pid}, which is alive but is not a DKG daemon`);
+    expect(() => sigkillNodeProcesses(paths, 4)).toThrow(/not a DKG daemon/);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(pidAlive(runner.pid!)).toBe(true);
+    expect(pidAlive(worker.pid!)).toBe(true);
+  });
+
+  it('a time-critical caller verifies before its wait and signals the verified PIDs at the kill point: no command line is read then, and only live ones are signalled', async () => {
+    const worker = sleeper();
+    const supervisor = sleeper();
+    const bystander = sleeper(); // not listed anywhere
+    writeFileSync(pidFile(4, 'daemon.pid'), `${worker.pid}\n`);
+    writeFileSync(pidFile(4, 'devnet.pid'), `${supervisor.pid}\n`);
+    const verified = verifiedNodePids(paths, 4);
+    expect(verified).toEqual([worker.pid, supervisor.pid]);
+
+    // One of them exits between the check and the kill: it is not reported as signalled.
+    supervisor.kill('SIGKILL');
+    expect(await exited(supervisor)).toBe(true);
     const gone = deadPid();
-    const reader = () => { throw new Error('must not read command lines at kill time'); };
-    expect(sigkillNodeProcesses(paths, 4, { verified: [worker.pid!, gone], readCommandLine: reader })).toEqual([worker.pid]);
+    expect(sigkillPids([...verified, gone])).toEqual([worker.pid]);
     expect(await exited(worker)).toBe(true);
-    // An empty verified list is honoured (nothing to kill), it does not fall back to the PID files.
-    const bystander = sleeper();
-    writeFileSync(pidFile(4, 'daemon.pid'), `${bystander.pid}\n`);
-    expect(sigkillNodeProcesses(paths, 4, { verified: [] })).toEqual([]);
+    expect(worker.signalCode).toBe('SIGKILL');
     expect(pidAlive(bystander.pid!)).toBe(true);
+    // An empty list signals nothing and does not fall back to the PID files.
+    writeFileSync(pidFile(4, 'daemon.pid'), `${bystander.pid}\n`);
+    expect(sigkillPids([])).toEqual([]);
+    expect(pidAlive(bystander.pid!)).toBe(true);
+  });
+});
+
+describe('stopNodeProcesses', () => {
+  it('stops the worker and the supervisor with SIGTERM, leaves other processes and nodes alone, and removes the PID files of the dead', async () => {
+    const worker = sleeper();
+    const supervisor = sleeper();
+    const bystander = sleeper();
+    const otherNode = sleeper();
+    writeFileSync(pidFile(4, 'daemon.pid'), `${worker.pid}\n`);
+    writeFileSync(pidFile(4, 'devnet.pid'), `${supervisor.pid}\n`);
+    writeFileSync(pidFile(5, 'daemon.pid'), `${otherNode.pid}\n`);
+
+    await stopNodeProcesses(paths, 4, { graceMs: 5_000 });
+
+    expect(await exited(worker)).toBe(true);
+    expect(await exited(supervisor)).toBe(true);
+    expect(worker.signalCode).toBe('SIGTERM');
+    expect(supervisor.signalCode).toBe('SIGTERM');
+    expect(existsSync(pidFile(4, 'daemon.pid'))).toBe(false);
+    expect(existsSync(pidFile(4, 'devnet.pid'))).toBe(false);
+    expect(pidAlive(bystander.pid!)).toBe(true);
+    expect(pidAlive(otherNode.pid!)).toBe(true);
+    expect(existsSync(pidFile(5, 'daemon.pid'))).toBe(true);
+  });
+
+  it('escalates to SIGKILL for a process that ignores SIGTERM once the grace period is over', async () => {
+    const stubborn = sleeper({ ignoreTerm: true });
+    writeFileSync(pidFile(4, 'daemon.pid'), `${stubborn.pid}\n`);
+    // Make sure the SIGTERM handler is installed before the stop signals it.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    await stopNodeProcesses(paths, 4, { graceMs: 700, killWaitMs: 5_000 });
+
+    expect(await exited(stubborn)).toBe(true);
+    expect(stubborn.signalCode).toBe('SIGKILL');
+    expect(existsSync(pidFile(4, 'daemon.pid'))).toBe(false);
+  });
+
+  it('a live PID that is not a daemon of this checkout rejects the stop before anything is signalled, the legitimate worker included', async () => {
+    const worker = sleeper();
+    const unrelated = sleeper({ plain: true });
+    writeFileSync(pidFile(4, 'daemon.pid'), `${worker.pid}\n`);
+    writeFileSync(pidFile(4, 'devnet.pid'), `${unrelated.pid}\n`);
+
+    await expect(stopNodeProcesses(paths, 4, { graceMs: 300 })).rejects.toThrow(
+      `node4: devnet.pid lists pid ${unrelated.pid}, which is alive but is not a DKG daemon`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(pidAlive(worker.pid!)).toBe(true);
+    expect(pidAlive(unrelated.pid!)).toBe(true);
+    // Both files keep their live PIDs.
+    expect(existsSync(pidFile(4, 'daemon.pid'))).toBe(true);
+    expect(existsSync(pidFile(4, 'devnet.pid'))).toBe(true);
+  });
+
+  it('a node whose PID files hold only dead PIDs (or none) just has the dead files removed', async () => {
+    writeFileSync(pidFile(4, 'daemon.pid'), `${deadPid()}\n`);
+    await stopNodeProcesses(paths, 4);
+    await stopNodeProcesses(paths, 5);
+    expect(existsSync(pidFile(4, 'daemon.pid'))).toBe(false);
   });
 });
 
@@ -505,6 +600,53 @@ describe('restartNodeAndWait', () => {
       'LIBP2P_PORT_BASE=10222',
     ]);
     expect(api.seen.at(-1)?.authorization).toBe('Bearer tok');
+  });
+
+  it('stops the node\'s verified daemons first, then runs `devnet.sh restart-node`, which finds no live PID-file entry left', async () => {
+    const worker = sleeper();
+    const supervisor = sleeper();
+    writeFileSync(pidFile(4, 'daemon.pid'), `${worker.pid}\n`);
+    writeFileSync(pidFile(4, 'devnet.pid'), `${supervisor.pid}\n`);
+    // The stand-in script records what the real one would have found to signal.
+    writeFileSync(
+      join(root, 'scripts/devnet.sh'),
+      [
+        '#!/usr/bin/env bash',
+        `for f in ${JSON.stringify(pidFile(4, 'daemon.pid'))} ${JSON.stringify(pidFile(4, 'devnet.pid'))}; do`,
+        '  [ -f "$f" ] && echo "left=$f" >> "$FAKE_DEVNET_OUT"',
+        'done',
+        'echo "args=$*" >> "$FAKE_DEVNET_OUT"',
+      ].join('\n'),
+    );
+    const api = await listen(() => ({ status: 200 }));
+
+    await restartNodeAndWait(paths, {
+      num: 4, apiPort: api.port, rpcUrl: DEFAULT_DEVNET_RPC, label: 'node4 back', timeoutMs: 5_000, pollIntervalMs: 50,
+    });
+
+    expect(await exited(worker)).toBe(true);
+    expect(await exited(supervisor)).toBe(true);
+    expect(readFileSync(out, 'utf8').split('\n').filter(Boolean)).toEqual(['args=restart-node 4']);
+  });
+
+  it('a live unrelated PID in devnet.pid rejects the restart before devnet.sh runs, and leaves it and the legitimate worker alive', async () => {
+    const worker = sleeper();
+    const unrelated = sleeper({ plain: true }); // a recycled number
+    writeFileSync(pidFile(4, 'daemon.pid'), `${worker.pid}\n`);
+    writeFileSync(pidFile(4, 'devnet.pid'), `${unrelated.pid}\n`);
+    const api = await listen(() => ({ status: 200 }));
+
+    await expect(
+      restartNodeAndWait(paths, {
+        num: 4, apiPort: api.port, rpcUrl: DEFAULT_DEVNET_RPC, label: 'node4 back', timeoutMs: 1_000, pollIntervalMs: 50,
+      }),
+    ).rejects.toThrow(`node4: devnet.pid lists pid ${unrelated.pid}, which is alive but is not a DKG daemon`);
+
+    expect(existsSync(out), 'devnet.sh must not run, its stop phase would signal the recycled PID').toBe(false);
+    expect(api.seen).toEqual([]);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(pidAlive(unrelated.pid!)).toBe(true);
+    expect(pidAlive(worker.pid!)).toBe(true);
   });
 
   it('polls until the node answers, and fails with the label and the timeout when it never does', async () => {

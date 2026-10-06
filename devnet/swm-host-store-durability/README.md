@@ -25,8 +25,8 @@ ciphertext at all, so the suite arranges them and undoes them on exit:
 | Step | Assertion |
 |------|-----------|
 | Baseline | The core's `<key>.log` holds the curator's shares as frames, seqnos start at 1 and are strictly increasing, the API stats agree, and the `.meta` cursor equals the last seqno. Without this the rest would be vacuous. |
-| N x kill -9 | The core is SIGKILLed the moment a new frame lands in its log (so the kill falls in the append -> cursor write -> directory fsync window, or right after it) and restarted. No `<key>.<log\|meta>.tmp-*` file that existed at the kill survives the restart; host mode is re-engaged from the persisted flag; after new frames arrive the log has no torn tail, seqnos are strictly increasing with no duplicate, and the `.meta` cursor is never below the log tail. The suite snapshots the complete frames on disk at the kill (seqno plus a digest of each whole frame) once the killed processes are gone, and requires the recovered log to start with exactly that prefix (none dropped, replaced or reordered) and every frame appended after the restart to sit after it with a seqno above the high-water mark, `max(.meta cursor, last complete frame)` at the kill. The suite prints which crash window each kill hit. |
-| Catch-up | With ingestion stopped, the `.meta` cursor covers the whole log (`checkCursorCoversLog`: the one-frame allowance of the kill cycles no longer applies). The curator edge then pages the core with `POST /api/shared-memory/host-catchup`, one round per call and a page smaller than the log, resuming from the returned `nextSeqno` until the core has nothing more, from several starting cursors. Paging from 0 takes at least three non-empty pages. The envelopes served across the pages are, in order, exactly the frames with seqno greater than the starting cursor, each byte-identical to its stored ciphertext (`checkServedFrames`), and the final cursor is the true last seqno. |
+| N x kill -9 | The core is SIGKILLed the moment a new frame lands in its log (so the kill falls in the append -> cursor write -> directory fsync window, or right after it) and restarted. No `<key>.<log\|meta>.tmp-*` file that existed at the kill survives the restart; host mode is re-engaged from the persisted flag; after new frames arrive the log has no torn tail, seqnos are strictly increasing with no duplicate, and the `.meta` cursor covers the log, trailing it at most by the one append that can be in flight while the writer runs (`checkCursorCoversLog` with `appendInFlight`, counted in frames). The suite snapshots the complete frames on disk at the kill (seqno plus a digest of each whole frame) once the killed processes are gone, and requires the recovered log to start with exactly that prefix (none dropped, replaced or reordered) and every frame appended after the restart to sit after it with a seqno above the high-water mark, `max(.meta cursor, last complete frame)` at the kill. The suite prints which crash window each kill hit. |
+| Catch-up | With ingestion stopped, the `.meta` cursor covers the whole log (`checkCursorCoversLog`: the one-frame allowance of the kill cycles no longer applies). The curator edge then pages the core with `POST /api/shared-memory/host-catchup`, one round per call and a page smaller than the log, resuming from the returned `nextSeqno` until the core has nothing more, from several starting cursors. Each call must resume where the last stopped, hold at most a page and advance the cursor over exactly the frames it served, and paging from 0 takes at least three non-empty pages (`checkCatchupWalk`). The envelopes served across the pages are, in order, exactly the frames with seqno greater than the starting cursor, each byte-identical to its stored ciphertext (`checkServedFrames`), and the final cursor is the true last seqno. |
 
 The comparison itself is a pure function (`log-frames.ts`, `checkNoSeqnoReuse`)
 with no-devnet tests (`log-frames.test.ts`, included by this suite's vitest
@@ -40,7 +40,8 @@ place, a dropped or reordered prefix frame, a seqno at or below the high-water
 mark (including a cursor that was ahead of the log), a duplicate or out-of-order
 new seqno, and no new frame at all are each rejected.
 
-The unit tests (`packages/agent/test/swm/host-mode-store-durability.test.ts`)
+The unit tests (`packages/agent/test/swm/host-mode-store-{durable-writes,tail-recovery,cold-init,dirsync-retries}.test.ts`,
+over the durable file operations in `packages/agent/src/swm/host-store-durable-fs.ts`)
 and the real-file SIGKILL e2e
 (`packages/agent/test/swm/host-mode-store-crash.e2e.test.ts`) pin each crash
 window deterministically; this suite shows the same invariants hold inside a
@@ -64,12 +65,21 @@ this devnet's own `node<N>/{daemon,devnet}.pid` files (`daemon.pid` is the
 worker, `devnet.pid` the detached supervisor that would respawn it), and never
 delete the file of a live process. A PID is also signalled only if it is alive
 and its command line (`ps -ww -o command=`: argv, not the environment) is a DKG
-daemon started from this checkout, `<repoRoot>/.../cli.js daemon-supervisor` or
-`daemon-worker`. A live PID that is not one (a stale file whose number an
-unrelated process has taken) makes the helper throw without signalling anything,
-instead of killing it or silently skipping it, which would leave the node running
-and turn the kill -9 into a graceful stop. The check runs before the wait for the
-next frame, so the `SIGKILL` itself stays immediate. The node's home is not used
+daemon started from this checkout: the checkout's CLI entry point
+(`<repoRoot>/packages/cli/dist/cli.js`) directly followed by `daemon-supervisor`,
+`daemon-worker` or `daemon-foreground-worker`, as the last argument (a process that
+only runs from the checkout, such as the test runner, does not qualify). A live PID
+that is not one (a stale file whose number an unrelated process has taken) makes the
+helper throw without signalling anything, instead of killing it or silently skipping
+it, which would leave the node running and turn the kill -9 into a graceful stop. The
+check runs before the wait for the next frame (`verifiedNodePids`), so the `SIGKILL`
+itself (`sigkillPids`) stays immediate. Restarts go through the same check: the
+suite's setup verifies both nodes before it edits a config, and `restartNodeAndWait`
+stops the node itself (verify, SIGTERM, SIGKILL after the grace period, remove the
+dead PID files) before it calls `devnet.sh restart-node`, whose own stop phase signals
+whatever the PID files list without a check and so finds nothing live. (That script
+also sweeps the process table for processes that mention the node's home directory,
+as it always has; the helpers do not change that.) The node's home is not used
 for it: `DKG_HOME` is only in the process environment, while the checkout path is
 in every daemon's argv (`devnet.sh` runs nodes with `DKG_NO_BLUE_GREEN=1`). What it
 cannot tell apart is a recycled PID that became another daemon of this same

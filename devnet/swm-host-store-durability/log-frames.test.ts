@@ -6,12 +6,14 @@
 import { describe, expect, it } from 'vitest';
 import {
   HEADER_BYTES,
+  checkCatchupWalk,
   checkCursorCoversLog,
   checkNoSeqnoReuse,
   checkServedFrames,
   parseLog,
   quietPeriodGate,
   type LogFrame,
+  type ObservedCatchupPage,
   type ServedEntry,
 } from './log-frames.js';
 
@@ -208,6 +210,29 @@ describe('checkCursorCoversLog', () => {
       .toMatch(/cursor is 9 but the last complete frame is seqno 10/);
   });
 
+  it('while a writer is running the cursor may trail by the one append in flight, no more', () => {
+    const frames = framesOf(Array.from({ length: 10 }, (_, i) => i + 1));
+    expect(checkCursorCoversLog({ frames, metaSeqno: 10, appendInFlight: true })).toEqual([]);
+    expect(checkCursorCoversLog({ frames, metaSeqno: 9, appendInFlight: true }), 'the frame in flight').toEqual([]);
+    expect(checkCursorCoversLog({ frames, metaSeqno: 8, appendInFlight: true }).join('\n'))
+      .toMatch(/cursor is 8 .*at most one append can be in flight.*must reach 9/);
+    expect(checkCursorCoversLog({ frames, metaSeqno: 9 }).join('\n'), 'the same cursor, once nothing is in flight').toMatch(/cursor is 9 /);
+  });
+
+  it('one frame is counted in frames, not seqnos: a burned seqno neither widens nor narrows the in-flight allowance', () => {
+    // Seqno 9 was burned by a failed append: the log holds 8 and 10.
+    const frames = framesOf([7, 8, 10]);
+    // The cursor trails by the one frame in flight (seqno 10): it is 8, the frame before it.
+    expect(checkCursorCoversLog({ frames, metaSeqno: 8, appendInFlight: true }), 'a seqno-based tail - 1 would reject it').toEqual([]);
+    // Two frames behind is still too far, however small the seqno distance.
+    expect(checkCursorCoversLog({ frames, metaSeqno: 7, appendInFlight: true }).join('\n')).toMatch(/must reach 8/);
+  });
+
+  it('a log whose only frame may be the one in flight has nothing to cover, but the cursor must still be readable', () => {
+    expect(checkCursorCoversLog({ frames: framesOf([1]), metaSeqno: 0, appendInFlight: true })).toEqual([]);
+    expect(checkCursorCoversLog({ frames: framesOf([1]), metaSeqno: null, appendInFlight: true }).join('\n')).toMatch(/absent or unreadable/);
+  });
+
   it('fails when the cursor cannot be read', () => {
     expect(checkCursorCoversLog({ frames: framesOf([1, 2]), metaSeqno: null }).join('\n'))
       .toMatch(/absent or unreadable while the log holds 2 frames up to seqno 2/);
@@ -260,6 +285,63 @@ describe('checkServedFrames', () => {
     expect(checkServedFrames({ expected: log.slice(0, 2), served: serve(log) }).join('\n'))
       .toMatch(/served 4 envelopes but the log holds 2 frames/);
     expect(checkServedFrames({ expected: log, served: serve([log[1]!, log[0]!, log[2]!, log[3]!]) })).toHaveLength(2);
+  });
+});
+
+describe('checkCatchupWalk', () => {
+  const frames = framesOf([1, 2, 3, 4, 5, 6]);
+  const page = (since: number, fetched: number, nextSeqno: number): ObservedCatchupPage => ({ since, fetched, nextSeqno });
+
+  it('accepts a walk that continues from each truncated page to the end', () => {
+    expect(checkCatchupWalk({
+      start: 0, frames, pageSize: 2, minNonemptyPages: 3,
+      pages: [page(0, 2, 2), page(2, 2, 4), page(4, 2, 6), page(6, 0, 6)],
+    })).toEqual([]);
+    // From the middle, with a short last page; and from the end, where the first call is already empty.
+    expect(checkCatchupWalk({ start: 3, frames, pageSize: 2, pages: [page(3, 2, 5), page(5, 1, 6), page(6, 0, 6)] })).toEqual([]);
+    expect(checkCatchupWalk({ start: 6, frames, pageSize: 2, pages: [page(6, 0, 6)] })).toEqual([]);
+  });
+
+  it('REGRESSION (review of the suite): one full response followed by an empty one never crosses a page boundary and fails', () => {
+    const walk = [page(0, 6, 6), page(6, 0, 6)];
+    // The totals and the final cursor are right, so counters alone pass it.
+    expect(walk.reduce((sum, p) => sum + p.fetched, 0)).toBe(6);
+    expect(walk.at(-1)!.nextSeqno).toBe(6);
+    const violations = checkCatchupWalk({ start: 0, frames, pageSize: 2, minNonemptyPages: 2, pages: walk }).join('\n');
+    expect(violations).toMatch(/served 6 frames, above the page size 2/);
+    expect(violations).toMatch(/1 nonempty responses but pages of 2 over 6 frames make 3/);
+    expect(violations).toMatch(/fewer than the 2 that crossing a page boundary takes/);
+    // Even when the page size is the whole log, two nonempty responses can be demanded.
+    expect(checkCatchupWalk({ start: 0, frames, pageSize: 6, minNonemptyPages: 2, pages: walk }).join('\n'))
+      .toMatch(/1 nonempty responses, fewer than the 2/);
+  });
+
+  it('fails when a call does not resume at the previous cursor', () => {
+    expect(checkCatchupWalk({ start: 0, frames, pageSize: 2, pages: [page(0, 2, 2), page(0, 2, 2), page(2, 2, 4), page(4, 2, 6), page(6, 0, 6)] }).join('\n'))
+      .toMatch(/call #2 \(since 0\) did not resume at the previous cursor 2/);
+  });
+
+  it('fails when a cursor jump does not match the frames served (one skipped or counted twice)', () => {
+    // [1, 1, 3, 4]: the second page says it served 2 frames and jumps to 4, over 3 frames on disk.
+    expect(checkCatchupWalk({ start: 0, frames, pageSize: 3, pages: [page(0, 3, 3), page(3, 2, 6), page(6, 0, 6)] }).join('\n'))
+      .toMatch(/call #2 \(since 3\) served 2 frames but its cursor 6 covers 3 frames on disk/);
+  });
+
+  it('fails when a page does not advance the cursor, or an empty page moves it, or the walk goes on after an empty page', () => {
+    expect(checkCatchupWalk({ start: 0, frames, pageSize: 2, pages: [page(0, 2, 0), page(0, 0, 0)] }).join('\n'))
+      .toMatch(/did not advance the cursor/);
+    expect(checkCatchupWalk({ start: 0, frames, pageSize: 2, pages: [page(0, 0, 2)] }).join('\n'))
+      .toMatch(/served nothing but moved the cursor to 2/);
+    expect(checkCatchupWalk({ start: 0, frames, pageSize: 6, pages: [page(0, 0, 0), page(0, 6, 6), page(6, 0, 6)] }).join('\n'))
+      .toMatch(/call #1 \(since 0\) served nothing and the walk went on/);
+  });
+
+  it('fails when the walk stops short, never ends on an empty response, or ends at the wrong cursor', () => {
+    expect(checkCatchupWalk({ start: 0, frames, pageSize: 2, pages: [page(0, 2, 2), page(2, 2, 4), page(4, 0, 4)] }).join('\n'))
+      .toMatch(/served 4 frames but the log holds 6 above 0[\s\S]*ended at cursor 4 but the log's last seqno above 0 is 6/);
+    expect(checkCatchupWalk({ start: 0, frames, pageSize: 6, pages: [page(0, 6, 6)] }).join('\n'))
+      .toMatch(/did not end on an empty response/);
+    expect(checkCatchupWalk({ start: 0, frames, pageSize: 6, pages: [] }).join('\n')).toMatch(/did not end on an empty response/);
   });
 });
 

@@ -1,14 +1,17 @@
 /**
  * Devnet node lifecycle, shared by the suites that kill or restart a node:
- * PID-file discovery, liveness, dead-PID cleanup, kill helpers, the port
- * environment `scripts/devnet.sh restart-node` needs, and restart + readiness.
+ * PID-file discovery, liveness, dead-PID cleanup, kill and stop helpers, the
+ * port environment `scripts/devnet.sh restart-node` needs, and restart +
+ * readiness.
  *
  * Ownership rule (every helper here follows it): a PID is only ever signalled
  * if it was read from a PID file of THIS devnet's node home
  * (`<devnetDir>/node<N>/{daemon,devnet}.pid`), is alive, and its command line
- * shows a DKG daemon (`<node> <repoRoot>/.../cli.js daemon-supervisor|daemon-worker`)
- * started from THIS checkout. A live PID that fails that check (a stale PID file
- * whose number an unrelated process has taken) is never signalled:
+ * shows a DKG daemon (`<node> [flags] <repoRoot>/packages/cli/dist/cli.js`
+ * directly followed by `daemon-supervisor|daemon-worker|daemon-foreground-worker`
+ * as the last argument) started from THIS checkout. A live PID that fails that
+ * check (a stale PID file whose number an unrelated process has taken, even one
+ * that merely runs from the checkout) is never signalled:
  * `verifiedNodePids` throws instead, so a wrong PID file is a loud failure, not
  * a silent skip that would leave the node running. A PID file is only ever
  * deleted when the PID in it is known to be dead; a live process keeps its
@@ -16,8 +19,18 @@
  * duplicate and could signal a recycled PID. Nothing here scans the process
  * table or signals by name.
  *
+ * Restarting goes through the same rule: `restartNodeAndWait` first runs
+ * `stopNodeProcesses` (verify every live PID-file entry, SIGTERM, escalate to
+ * SIGKILL, clear the dead PID files) and only then calls `devnet.sh
+ * restart-node`. That script's own stop phase signals whatever the PID files
+ * list without any check, so after our stop it finds no live entry to signal.
+ * Not covered by this module: the script's stop phase also sweeps the process
+ * table for processes that mention the node's home directory and their children
+ * (the node's managed store servers and detached children), by design and
+ * unchanged.
+ *
  * Why the command line names the CHECKOUT and not the node's home: a daemon's
- * argv is `<node> <repoRoot>/packages/cli/dist/cli.js daemon-supervisor|daemon-worker`
+ * argv is `<node> [execArgv] <repoRoot>/packages/cli/dist/cli.js daemon-supervisor|daemon-worker`
  * (`devnet.sh` starts nodes with `DKG_NO_BLUE_GREEN=1`, so the entry point is
  * the CLI of the checkout itself; mixed-version nodes live under
  * `<repoRoot>/.devnet-versions` by default, but `devnet.sh` honours a
@@ -135,11 +148,20 @@ export function clearDeadNodePidFiles(
   }
 }
 
-/** kill -9 each PID at once (a PID that is already gone is fine). */
-export function sigkillPids(pids: readonly number[]): void {
+/**
+ * kill -9 each PID at once and return the ones that were signalled (a PID that is
+ * already gone is skipped, not an error). It does not check who a PID is: pass it
+ * PIDs that `verifiedNodePids` returned.
+ */
+export function sigkillPids(pids: readonly number[]): number[] {
+  const signalled: number[] = [];
   for (const pid of pids) {
-    try { process.kill(pid, 'SIGKILL'); } catch { /* may already be gone */ }
+    try {
+      process.kill(pid, 'SIGKILL');
+      signalled.push(pid);
+    } catch { /* may already be gone */ }
   }
+  return signalled;
 }
 
 /** The command line (argv, no environment) of a process, or `null` when it cannot be read. */
@@ -159,29 +181,39 @@ export const readProcessCommandLine: CommandLineReader = (pid) => {
   }
 };
 
+/** The CLI entry point, relative to the checkout: what `resolveDaemonNodeCommand` puts before the subcommand. */
+const CLI_ENTRY_POINT = 'packages/cli/dist/cli.js';
 const DAEMON_SUBCOMMANDS = new Set(['daemon-supervisor', 'daemon-worker', 'daemon-foreground-worker']);
-
-/** True when `text` holds `<root>/` as the start of a path (at the start of the text, or after whitespace or `=`). */
-function mentionsPathUnder(text: string, root: string): boolean {
-  const prefix = root.endsWith('/') ? root : `${root}/`;
-  for (let at = text.indexOf(prefix); at !== -1; at = text.indexOf(prefix, at + 1)) {
-    if (at === 0 || /[\s=]/.test(text[at - 1]!)) return true;
-  }
-  return false;
-}
 
 /**
  * Whether `commandLine` is a DKG daemon process (the supervisor or a worker)
- * started from the checkout at one of `repoRoots`: it names a path under that
- * root and its last argument is the daemon subcommand. A process that merely
- * runs from the checkout (the test runner, `pnpm`), another checkout's daemon,
- * a sibling directory that only shares a prefix with the root, and any
- * unrelated process all fail it.
+ * started from the checkout at one of `repoRoots`: the checkout's CLI entry
+ * point (`<root>/packages/cli/dist/cli.js`, as its own argument) is directly
+ * followed by a daemon subcommand, and that subcommand is the last argument (the
+ * CLI starts a daemon as `<node> [execArgv] <entry> <subcommand>`). Anything else
+ * fails it: a process that merely runs from the checkout (the test runner, `pnpm`,
+ * even when its last argument happens to be named like a daemon command), the
+ * CLI launcher (`... cli.js start`), another checkout's daemon, a sibling
+ * directory that only shares a prefix with the root, and any unrelated process.
+ *
+ * `commandLine` is what `ps` prints, argv joined by single spaces, so the entry
+ * point is searched for as text rather than as a whitespace-split token: a
+ * checkout path that contains spaces still matches (and cannot be told apart
+ * from the same words in another argument, which only a process that already
+ * names this entry point followed by a daemon subcommand could exploit).
  */
 export function isDaemonOfCheckout(commandLine: string, repoRoots: readonly string[]): boolean {
-  const words = commandLine.trim().split(/\s+/);
-  if (!DAEMON_SUBCOMMANDS.has(words[words.length - 1] ?? '')) return false;
-  return repoRoots.some((root) => mentionsPathUnder(commandLine, root));
+  const text = commandLine.trim();
+  return repoRoots.some((root) => {
+    const entry = `${root.replace(/\/+$/, '')}/${CLI_ENTRY_POINT}`;
+    for (let at = text.indexOf(entry); at !== -1; at = text.indexOf(entry, at + 1)) {
+      if (at > 0 && !/\s/.test(text[at - 1]!)) continue; // `/mnt/<root>/...` or `--import=<entry>`: not this argument
+      const rest = text.slice(at + entry.length);
+      const subcommand = /^\s+(\S+)$/.exec(rest)?.[1];
+      if (subcommand !== undefined && DAEMON_SUBCOMMANDS.has(subcommand)) return true;
+    }
+    return false;
+  });
 }
 
 function repoRootSpellings(repoRoot: string): string[] {
@@ -232,19 +264,18 @@ export function verifiedNodePids(
 
 /**
  * kill -9 the node's live daemon processes, immediately, and return the PIDs
- * that were signalled (the real worker is `daemon.pid`). Without `verified` the
- * PID files are read and every live PID is checked first (`verifiedNodePids`,
- * which throws before anything is signalled). A time-critical caller passes the
- * PIDs it verified earlier; only those still alive are signalled.
+ * that were signalled (the real worker is `daemon.pid`). The PID files are read
+ * and every live PID is checked first (`verifiedNodePids`, which throws before
+ * anything is signalled). `ps` takes tens of milliseconds per process, so a
+ * time-critical caller calls `verifiedNodePids` itself before its wait and
+ * `sigkillPids` at the kill point.
  */
 export function sigkillNodeProcesses(
   paths: DevnetPaths,
   num: number,
-  options: { verified?: readonly number[]; readCommandLine?: CommandLineReader } = {},
+  options: { readCommandLine?: CommandLineReader } = {},
 ): number[] {
-  const pids = (options.verified ?? verifiedNodePids(paths, num, options.readCommandLine)).filter(pidAlive);
-  sigkillPids(pids);
-  return pids;
+  return sigkillPids(verifiedNodePids(paths, num, options.readCommandLine));
 }
 
 /** Resolves `true` once every PID is gone, `false` if any is still alive after `timeoutMs`. */
@@ -255,6 +286,36 @@ export async function waitForPidsGone(label: string, pids: readonly number[], ti
   } catch {
     return false;
   }
+}
+
+/**
+ * Stop the node's processes: verify every live PID-file entry (`verifiedNodePids`,
+ * which throws before anything is signalled), SIGTERM them, wait up to `graceMs`
+ * for them to exit, SIGKILL the ones that did not, wait up to `killWaitMs`, then
+ * remove the PID files whose PID is dead. Nothing is signalled that is not a
+ * daemon of this checkout; a live PID of anything else rejects the whole stop.
+ */
+export async function stopNodeProcesses(
+  paths: DevnetPaths,
+  num: number,
+  options: {
+    graceMs?: number;
+    killWaitMs?: number;
+    readCommandLine?: CommandLineReader;
+    removeUnparseable?: boolean;
+  } = {},
+): Promise<void> {
+  const pids = verifiedNodePids(paths, num, options.readCommandLine);
+  if (pids.length > 0) {
+    for (const pid of pids) {
+      try { process.kill(pid, 'SIGTERM'); } catch { /* may already be gone */ }
+    }
+    if (!(await waitForPidsGone(`node${num} processes stopped`, pids, options.graceMs ?? 10_000))) {
+      sigkillPids(pids.filter(pidAlive));
+      await waitForPidsGone(`node${num} processes killed`, pids, options.killWaitMs ?? 10_000);
+    }
+  }
+  clearDeadNodePidFiles(paths, num, { removeUnparseable: options.removeUnparseable });
 }
 
 /**
@@ -332,10 +393,19 @@ export interface RestartNodeOptions {
   timeoutMs: number;
   pollIntervalMs: number;
   probe?: NodeProbe;
+  /** Reads a process's command line for the ownership check (default: `ps`); for tests. */
+  readCommandLine?: CommandLineReader;
 }
 
-/** `scripts/devnet.sh restart-node <num>` with the devnet's port environment, then wait until the node answers. */
+/**
+ * Stop the node through `stopNodeProcesses` (ownership checked, nothing signalled
+ * if a live PID-file entry is not a daemon of this checkout), then
+ * `scripts/devnet.sh restart-node <num>` with the devnet's port environment, then
+ * wait until the node answers. The script's own stop phase signals PID-file
+ * entries unchecked; running ours first leaves it no live entry to signal.
+ */
 export async function restartNodeAndWait(paths: DevnetPaths, options: RestartNodeOptions): Promise<void> {
+  await stopNodeProcesses(paths, options.num, { readCommandLine: options.readCommandLine });
   execFileSync('bash', [join(paths.repoRoot, 'scripts/devnet.sh'), 'restart-node', String(options.num)], {
     cwd: paths.repoRoot,
     stdio: 'inherit',

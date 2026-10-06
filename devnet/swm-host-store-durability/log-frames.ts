@@ -2,9 +2,12 @@
  * Pure helpers for the swm-host-store-durability devnet suite: parse a
  * `SwmHostModeStore` log into frames, decide from a snapshot taken at the
  * kill whether the recovery preserved every complete frame and never reused a
- * seqno, decide whether the `.meta` cursor covers a log that has stopped
- * growing, decide whether host catch-up served exactly the frames on disk, and
- * decide when a log has been quiet for long enough.
+ * seqno, decide whether the `.meta` cursor covers the log (exactly, once it has
+ * stopped growing; allowing the one append in flight, while it still grows),
+ * decide whether host catch-up served exactly the frames on disk, account for a
+ * catch-up walk (page by page, so one full response followed by an empty one
+ * cannot pass for continuation), and decide when a log has been quiet for long
+ * enough.
  * No devnet, no I/O: covered by `log-frames.test.ts`.
  *
  * On-disk frame (see `packages/agent/src/swm/host-mode-store.ts`):
@@ -140,36 +143,48 @@ export function checkNoSeqnoReuse(input: RecoveryCheckInput): RecoveryCheckResul
 }
 
 export interface CursorCoverageInput {
-  /** The complete frames of the log once ingestion has stopped and the log no longer grows. */
+  /** The complete frames of the log (`parseLog(...).frames`), in file order. */
   frames: readonly LogFrame[];
   /** The `.meta` cursor read at the same moment (`null` when the meta is absent or torn). */
   metaSeqno: number | null;
+  /**
+   * `true` while a writer is still feeding the host: an append is fsynced frame
+   * first and cursor second, so the cursor may trail by the ONE append that is in
+   * flight and must still cover every complete frame but the newest. The default
+   * (`false`) is the quiescent check: ingestion has stopped and drained.
+   */
+  appendInFlight?: boolean;
 }
 
 /**
- * Check that the `.meta` cursor covers a quiescent log.
+ * Check that the `.meta` cursor covers the log.
  *
- * While frames are still arriving the cursor may trail the log by the frame
- * being appended (a frame is durable before its cursor), so a check made during
- * ingestion can only allow that one frame, and that allowance also accepts a
- * cursor that is never persisted. With ingestion stopped nothing is in flight:
- * the cursor must be readable and at or above the last complete frame. A cursor
- * above it is fine (a frame lost before its cursor leaves a gap, never a reuse).
+ * With ingestion stopped (the default) nothing is in flight: the cursor must be
+ * readable and at or above the last complete frame, so a cursor that stays one
+ * behind (log ending at seqno 10, cursor 9, every write finished) fails. While
+ * frames are still arriving (`appendInFlight`) the cursor may trail the log by
+ * the frame being appended, no more: "one frame" is counted in frames, not in
+ * seqnos, so a seqno burned by a failed append neither widens nor narrows the
+ * allowance. A cursor above the log is always fine (a frame lost before its
+ * cursor leaves a gap, never a reuse).
  *
  * Returns human-readable failures; empty means the cursor covers the log.
  */
 export function checkCursorCoversLog(input: CursorCoverageInput): string[] {
-  const { frames, metaSeqno } = input;
+  const { frames, metaSeqno, appendInFlight = false } = input;
   if (frames.length === 0) return [];
-  let lastComplete = 0;
-  for (const frame of frames) lastComplete = Math.max(lastComplete, frame.seqno);
+  const highest = (list: readonly LogFrame[]) => list.reduce((high, frame) => Math.max(high, frame.seqno), 0);
+  const lastComplete = highest(frames);
+  const required = appendInFlight ? highest(frames.slice(0, -1)) : lastComplete;
   if (metaSeqno === null) {
     return [`the .meta cursor is absent or unreadable while the log holds ${frames.length} frames up to seqno ${lastComplete}`];
   }
-  if (metaSeqno < lastComplete) {
+  if (metaSeqno < required) {
     return [
-      `the .meta cursor is ${metaSeqno} but the last complete frame is seqno ${lastComplete} and nothing is being appended: ` +
-        'the cursor of a finished append was not persisted',
+      `the .meta cursor is ${metaSeqno} but the last complete frame is seqno ${lastComplete} and ` +
+        (appendInFlight
+          ? `at most one append can be in flight, so the cursor may trail only by that frame (it must reach ${required})`
+          : 'nothing is being appended: the cursor of a finished append was not persisted'),
     ];
   }
   return [];
@@ -213,6 +228,80 @@ export function checkServedFrames(input: {
     } else if (got.envelopeSha256 !== want.envelopeSha256) {
       violations.push(`served envelope seqno ${got.seqno} is not the ciphertext stored for that frame`);
     }
+  }
+  return violations;
+}
+
+/** One observed `host-catchup` call: where it resumed, how many frames it served and the cursor it returned. */
+export interface ObservedCatchupPage {
+  since: number;
+  fetched: number;
+  nextSeqno: number;
+}
+
+export interface CatchupWalkInput {
+  /** The cursor the walk started from. */
+  start: number;
+  /** The complete frames the log holds (`parseLog(...).frames`). */
+  frames: readonly LogFrame[];
+  /** The calls of the walk, in order, including the final empty one that ended it. */
+  pages: readonly ObservedCatchupPage[];
+  /** The page size every call asked for (`maxEntriesPerRound`). */
+  pageSize: number;
+  /** Also require at least this many nonempty responses (the live suite asks for 3 from cursor 0). */
+  minNonemptyPages?: number;
+}
+
+/**
+ * Account for a catch-up walk page by page. Aggregate counters cannot show that
+ * a walk crossed a page boundary: one response that carries everything followed
+ * by an empty one has the right total and the right final cursor. So each call
+ * must resume exactly where the previous one stopped; a nonempty page holds at
+ * most `pageSize` frames, advances the cursor, and its cursor jump covers exactly
+ * as many frames on disk as it served (none skipped, none counted twice); an
+ * empty page leaves the cursor alone and is the last call; the walk served every
+ * frame above `start`, ended on the log's last seqno, and had exactly as many
+ * nonempty pages as `pageSize` demands (`ceil(frames / pageSize)`, and at least
+ * `minNonemptyPages` when given).
+ *
+ * Returns human-readable failures; empty means the walk crossed every page
+ * boundary the log has. Which frames were served is `checkServedFrames`' job.
+ */
+export function checkCatchupWalk(input: CatchupWalkInput): string[] {
+  const { start, frames, pages, pageSize } = input;
+  const violations: string[] = [];
+  const expected = frames.filter((frame) => frame.seqno > start);
+  const lastSeqno = expected.at(-1)?.seqno ?? start;
+  let cursor = start;
+  let nonempty = 0;
+  let fetchedTotal = 0;
+  pages.forEach((page, index) => {
+    const label = `call #${index + 1} (since ${page.since})`;
+    if (page.since !== cursor) violations.push(`${label} did not resume at the previous cursor ${cursor}`);
+    if (page.fetched === 0) {
+      if (page.nextSeqno !== page.since) violations.push(`${label} served nothing but moved the cursor to ${page.nextSeqno}`);
+      if (index !== pages.length - 1) violations.push(`${label} served nothing and the walk went on`);
+    } else {
+      nonempty += 1;
+      fetchedTotal += page.fetched;
+      if (page.fetched > pageSize) violations.push(`${label} served ${page.fetched} frames, above the page size ${pageSize}`);
+      if (page.nextSeqno <= page.since) violations.push(`${label} served ${page.fetched} frames but did not advance the cursor`);
+      const covered = frames.filter((frame) => frame.seqno > page.since && frame.seqno <= page.nextSeqno).length;
+      if (covered !== page.fetched) {
+        violations.push(`${label} served ${page.fetched} frames but its cursor ${page.nextSeqno} covers ${covered} frames on disk`);
+      }
+    }
+    cursor = page.nextSeqno;
+  });
+  if (pages.length === 0 || pages[pages.length - 1]!.fetched !== 0) violations.push('the walk did not end on an empty response');
+  if (fetchedTotal !== expected.length) violations.push(`the walk served ${fetchedTotal} frames but the log holds ${expected.length} above ${start}`);
+  if (cursor !== lastSeqno) violations.push(`the walk ended at cursor ${cursor} but the log's last seqno above ${start} is ${lastSeqno}`);
+  const exact = Math.ceil(expected.length / pageSize);
+  if (nonempty !== exact) {
+    violations.push(`the walk had ${nonempty} nonempty responses but pages of ${pageSize} over ${expected.length} frames make ${exact}`);
+  }
+  if (input.minNonemptyPages !== undefined && nonempty < input.minNonemptyPages) {
+    violations.push(`the walk had ${nonempty} nonempty responses, fewer than the ${input.minNonemptyPages} that crossing a page boundary takes`);
   }
   return violations;
 }
