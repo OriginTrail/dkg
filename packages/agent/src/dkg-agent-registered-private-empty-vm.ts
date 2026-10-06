@@ -16,10 +16,6 @@ import {
   type RegisteredPrivateEmptyVmAttemptV1,
 } from './registered-private-empty-vm-attempt-v1.js';
 
-export type RegisteredPrivateEmptyVmReadinessResult<T> =
-  | { readonly proven: false; readonly retryable?: boolean }
-  | { readonly proven: true; readonly value: T };
-
 /** The same-turn commit cannot return work that persists after its final fence. */
 export type SynchronousReadinessCommitResult<T> = T extends PromiseLike<unknown> ? never : T;
 
@@ -230,38 +226,4 @@ export class RegisteredPrivateEmptyVmMethods extends DKGAgentBase {
     });
   }
 
-  /** Compatibility coordinator for callers that do not own a mutation lock. */
-  async inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1<T>(
-    this: DKGAgent,
-    input: {
-      contextGraphId: string;
-      inspectMetadata: boolean;
-      attemptPrivateEmptyVm: boolean;
-      callerAgentAddress?: string;
-      signal?: AbortSignal;
-    },
-    commit: (completion: InspectedPrivateEmptyVmReadinessV1) => SynchronousReadinessCommitResult<T>,
-  ): Promise<T> {
-    const preparation = await this.prepareContextGraphReadinessWithPrivateEmptyVmV1(input);
-    return preparation.inspectAndCommit({ inspectMetadata: input.inspectMetadata }, commit);
-  }
-
-  /** A zero-VM proof grants durable readiness only; SWM still needs its own proof. */
-  async proveRegisteredPrivateEmptyVmV1<T>(
-    this: DKGAgent,
-    contextGraphId: string,
-    callerAgentAddress: string,
-    commit: (inspection: ProvenRegisteredPrivateEmptyVmInspectionV1) => SynchronousReadinessCommitResult<T>,
-    signal?: AbortSignal,
-  ): Promise<RegisteredPrivateEmptyVmReadinessResult<T>> {
-    return this.inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1({
-      contextGraphId,
-      inspectMetadata: true,
-      attemptPrivateEmptyVm: true,
-      callerAgentAddress,
-      signal,
-    }, (completion) => completion.proven
-      ? { proven: true, value: commit(completion.inspection) }
-      : { proven: false, ...(completion.retryable === undefined ? {} : { retryable: completion.retryable }) });
-  }
 }

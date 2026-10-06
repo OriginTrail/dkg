@@ -101,12 +101,15 @@ async function proveAtDepth(depthFromAdapter?: number, depthFromConfig?: number,
       RegisteredPrivateEmptyVmMethods.prototype.inspectAndCommitContextGraphReadinessV1,
     prepareContextGraphReadinessWithPrivateEmptyVmV1:
       RegisteredPrivateEmptyVmMethods.prototype.prepareContextGraphReadinessWithPrivateEmptyVmV1,
-    inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1:
-      RegisteredPrivateEmptyVmMethods.prototype.inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1,
   } as unknown as DKGAgent;
   const commit = vi.fn();
-  const result = await RegisteredPrivateEmptyVmMethods.prototype.proveRegisteredPrivateEmptyVmV1
-    .call(agent, CG, CALLER, commit);
+  const preparation = await agent.prepareContextGraphReadinessWithPrivateEmptyVmV1({
+    contextGraphId: CG, attemptPrivateEmptyVm: true, callerAgentAddress: CALLER,
+  });
+  const result = await preparation.inspectAndCommit({ inspectMetadata: true }, (completion) => {
+    if (completion.proven) commit(completion.inspection);
+    return completion;
+  });
   return { server, result, commit };
 }
 

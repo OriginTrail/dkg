@@ -139,9 +139,6 @@ describe('registered private empty-VM subscribe settlement', () => {
       inspectAndCommitContextGraphReadinessV1: DKGAgent.prototype.inspectAndCommitContextGraphReadinessV1,
       prepareContextGraphReadinessWithPrivateEmptyVmV1:
         DKGAgent.prototype.prepareContextGraphReadinessWithPrivateEmptyVmV1,
-      inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1:
-        DKGAgent.prototype.inspectAndCommitContextGraphReadinessWithPrivateEmptyVmV1,
-      proveRegisteredPrivateEmptyVmV1: DKGAgent.prototype.proveRegisteredPrivateEmptyVmV1,
       hasConfirmedMetaState: async () => !metadataInvalidated,
       isPrivateContextGraph: async () => true,
       resolveContextGraphSubscriptionBootstrapAuthority: async () => authorityRevoked
