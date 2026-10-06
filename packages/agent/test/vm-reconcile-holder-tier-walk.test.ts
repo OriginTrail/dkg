@@ -851,7 +851,7 @@ describe('rows that all claim one real Core wallet cannot displace another ident
     expect(lastPeers.length).toBe(32);
   });
 
-  it.each([1_100, 3_000])('costs the honest wallets no more chain lookups behind %i junk wallets than without them (the identity cache is bounded; the walk does not depend on it)', async (junk) => {
+  it.each([1_100, 3_000])('costs the honest wallets no more chain lookups behind %i junk wallets than without them (the identity cache is bounded; a flood that pushes honest answers out costs no extra lookups)', async (junk) => {
     // Four hours at the two-minute resolution spacing of the default sweep, honest holders sorting after the junk.
     const lookupsOfHonestWallets = async (flood: number): Promise<number> => {
       const holders = HONEST.map((holder) => ({ ...holder, position: flood + holder.position }));
