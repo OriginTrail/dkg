@@ -7,7 +7,8 @@
  * every safe IRI of the answer. That query is refused on a working-memory view
  * that spans more than one graph (a UNION combined with DISTINCT/LIMIT), which is
  * why it was split; on a single graph it is the reference the split must agree
- * with. Copied from `packages/node-ui/src/chat-memory.ts` at b7b3c8e5d; do NOT
+ * with. Copied from `packages/node-ui/src/chat-memory.ts` as of the merge of testnet-canary into the
+ * persist-turn dedupe branch; do NOT
  * "fix" or modernize it.
  */
 import { isSafeIri } from '@origintrail-official/dkg-core';

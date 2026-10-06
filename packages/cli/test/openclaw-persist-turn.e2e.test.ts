@@ -642,6 +642,9 @@ describe('turns stored under the legacy turn subject, against the real store', (
       { author: 'user', text: 'question a' },
       { author: 'agent', text: 'working on a' },
     ]);
+    // The one-session route resolves it the same way.
+    expect(await single(sessionA)).toEqual(await listed(sessionA));
+    expect(await single(sessionB)).toEqual(await listed(sessionB));
     // The graph delta only selects a subject one session owns, so it carries neither's.
     for (const sessionId of [sessionA, sessionB]) {
       expect(summarizeGraphDelta(await graphDelta(sessionId, turnId))).toMatchObject({ mode: 'full_refresh_required', transitions: [] });

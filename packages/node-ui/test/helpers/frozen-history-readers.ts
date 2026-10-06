@@ -2,15 +2,15 @@
 /**
  * FROZEN COPY of the two chat-history readers of `ChatMemoryManager`
  * (`getSession` and `getRecentChats`, with the private helpers they call) as
- * they were at commit b7b3c8e5d, the merge of testnet-canary into the persist-turn
- * dedupe branch and the last commit before the message-assembly refactor. The
+ * they were right after testnet-canary was merged into the persist-turn dedupe
+ * branch, before the message-assembly refactor. The
  * differential tests run this reader and the current `ChatMemoryManager` over
  * the same rows and require the same output, so that refactor is shown to
  * change nothing. Do NOT "fix" or modernize anything below the marker: its
  * whole value is that it does not follow `src/chat-memory.ts`.
  *
  * Everything between the two markers is copied verbatim from
- * `packages/node-ui/src/chat-memory.ts` at b7b3c8e5d, query texts included (the
+ * `packages/node-ui/src/chat-memory.ts` as of that merge, query texts included (the
  * differential compares them). The methods sit in a small class that supplies
  * what they reach through `this`: `tools`, a no-op `ensureInitialized` (the
  * manager's own initialisation is not a history read) and `wmReadOpts`, the
@@ -39,7 +39,7 @@ const PERSISTENCE_STATUS_RANK: Record<ChatTurnPersistenceDisplayState, number> =
   stored: 5,
 };
 
-// ---- BEGIN verbatim copy from src/chat-memory.ts at b7b3c8e5d ----
+// ---- BEGIN verbatim copy from src/chat-memory.ts (as of the merge of testnet-canary) ----
 
 interface ChatAttachmentRef {
   id?: string;
