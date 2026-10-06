@@ -1,12 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import {
-  isIpLoopbackAddress,
   isLocalOrInternalHostname,
+  isPublicLikeAddress,
+} from '../src/node.js';
+import {
+  isIpLoopbackAddress,
   isLocalhostAddress,
   isLoopbackAddress,
-  isPublicLikeAddress,
   isUnspecifiedAddress,
-} from '../src/node.js';
+} from '../src/network/address-policy.js';
 
 // Twin of `packages/node-ui/test/share-project-modal.test.ts`. The two
 // classifiers (`isPublicLikeAddress` here and `isMultiaddrRemotelyDialable`

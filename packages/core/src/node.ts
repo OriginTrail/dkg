@@ -59,13 +59,8 @@ import { isPublicLikeAddress } from './network/address-policy.js';
 import type { ConfiguredRelayTarget } from './network/relay-target.js';
 
 export {
-  isIpLoopbackAddress,
   isLocalOrInternalHostname,
-  isLocalhostAddress,
-  isLocalhostHostname,
-  isLoopbackAddress,
   isPublicLikeAddress,
-  isUnspecifiedAddress,
 } from './network/address-policy.js';
 
 export interface DKGServices extends Record<string, unknown> {
