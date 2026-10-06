@@ -2,6 +2,8 @@
 
 import {
   assertSignedAuthorCatalogHeadEnvelopeV1,
+  deriveAuthorCatalogScopeFromHeadV1,
+  type AuthorCatalogScopeV1,
   type Digest32V1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
@@ -11,6 +13,7 @@ import { mapWithConcurrency } from '../map-with-concurrency.js';
 import type { Rfc64ControlObjectOperationsV1 } from './control-object-store-v1.js';
 import type {
   AppliedCatalogHeadSnapshotV1,
+  AppliedCatalogHeadsSnapshotV1,
   AppliedCatalogHeadsTokenV1,
   Rfc64InventoryV1OperationsV1,
 } from './inventory-v1/index.js';
@@ -22,6 +25,7 @@ export interface Rfc64OperationalAppliedHeadV1 {
   readonly issuedAt: TimestampMsV1;
   readonly contextGraphId: string;
   readonly scopeKey: string;
+  readonly scope: Readonly<AuthorCatalogScopeV1>;
 }
 
 /** The persistence surface the operational applied-head view reads. */
@@ -91,6 +95,7 @@ async function readRfc64OperationalAppliedHeadProjectionV1(
   return Object.freeze({
     issuedAt: payload.issuedAt,
     contextGraphId: payload.contextGraphId,
+    scope: Object.freeze(deriveAuthorCatalogScopeFromHeadV1(payload)),
     scopeKey: rfc64CatalogTargetScopeKeyV1({
       networkId: payload.networkId,
       contextGraphId: payload.contextGraphId,
@@ -154,9 +159,12 @@ async function readRfc64OperationalAppliedHeadsV1(
  * instead of being re-read and re-verified per call. Only a load in which
  * every head verified is reused as a whole; heads that failed are retried.
  * Concurrent callers that read the same inventory share one load.
+ * A caller may supply a captured, scoped snapshot without replacing the
+ * stable storage identity that owns the verification cache.
  */
 export async function loadRfc64OperationalAppliedHeadsV1(
   storage: Rfc64OperationalAppliedHeadsStorageV1,
+  snapshot: AppliedCatalogHeadsSnapshotV1 = storage.inventory.readAppliedCatalogHeadsSnapshotV1(),
 ): Promise<readonly Readonly<Rfc64OperationalAppliedHeadV1>[]> {
   let cache = rfc64OperationalAppliedHeadsCachesV1.get(storage);
   if (cache === undefined) {
@@ -168,7 +176,7 @@ export async function loadRfc64OperationalAppliedHeadsV1(
     };
     rfc64OperationalAppliedHeadsCachesV1.set(storage, cache);
   }
-  const { token, heads: snapshots } = storage.inventory.readAppliedCatalogHeadsSnapshotV1();
+  const { token, heads: snapshots } = snapshot;
   if (cache.complete?.token === token) return cache.complete.heads;
   if (cache.inFlight?.token === token) return cache.inFlight.heads;
   cache.generation += 1;

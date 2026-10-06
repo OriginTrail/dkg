@@ -7,11 +7,13 @@ import {
 import {
   getSyncBackpressureSnapshot,
   resolveBooleanSwitch,
+  resolveExactBatchStreamEnabled,
   resolveNonNegativeIntegerSwitch,
   resolveSyncGlobalBackpressure,
   resolveSyncReconcilerEnabled,
   resolveVmReconcilerEnabled,
   SyncBackpressureBusyError,
+  syncAdmissionWouldBeRefused,
   withGlobalSyncBackpressure,
 } from '../src/sync/backpressure.js';
 import {
@@ -1007,6 +1009,115 @@ describe('sync global backpressure', () => {
     expect(events).toEqual(['high']);
   });
 
+  it('reads whether an admission would be refused, and leaves the queue as it was', async () => {
+    let running = 0;
+    const queue = new PriorityAdmissionQueue<string>({
+      canRun: () => running < 1,
+      onStart: () => {
+        running += 1;
+        return () => { running -= 1; };
+      },
+    });
+    // Free capacity: it would start, whatever the queue bound.
+    expect(queue.wouldRefuse(queueOptions('probe', 0, { queueLimit: 0 }))).toBe(false);
+    const first = queue.acquire(queueOptions('first', 0, { queueLimit: 1 }));
+    const releaseFirst = await first.release;
+    // Busy with queue room: it would wait, which is not a refusal.
+    expect(queue.wouldRefuse(queueOptions('probe', 0, { queueLimit: 1 }))).toBe(false);
+    // Busy with no queue at all.
+    expect(queue.wouldRefuse(queueOptions('probe', 0, { queueLimit: 0 }))).toBe(true);
+
+    const queued = queue.acquire(queueOptions('queued', 0, { queueLimit: 1 }));
+    const queuedOutcome = queued.release.then(() => 'started', (error: Error) => error.message);
+    // Busy and the queue is full of equal-priority work: the read and the admission agree.
+    expect(queue.wouldRefuse(queueOptions('probe', 0, { queueLimit: 1 }))).toBe(true);
+    expect(() => queue.acquire(queueOptions('refused', 0, { queueLimit: 1 }))).toThrow('global_queue_full');
+    // An owner's own bound refuses while the shared queue still has room.
+    expect(queue.wouldRefuse(queueOptions('probe', 0, {
+      ownerKey: 'queued', queueLimit: 8, ownerQueueLimit: 1,
+    }))).toBe(true);
+    expect(queue.wouldRefuse(queueOptions('probe', 0, {
+      ownerKey: 'another-owner', queueLimit: 8, ownerQueueLimit: 1,
+    }))).toBe(false);
+    // The reads claimed nothing and queued nothing.
+    expect(queue.length).toBe(1);
+    expect(running).toBe(1);
+
+    // A higher priority is not refused: it displaces the queued entry, as the read said.
+    expect(queue.wouldRefuse(queueOptions('probe', 5, { queueLimit: 1 }))).toBe(false);
+    const high = queue.acquire(queueOptions('high', 5, { queueLimit: 1 }));
+    expect(high.status).toBe('queued');
+    await expect(queuedOutcome).resolves.toBe('displaced');
+
+    releaseFirst();
+    const releaseHigh = await high.release;
+    releaseHigh();
+    expect(queue.wouldRefuse(queueOptions('probe', 0, { queueLimit: 0 }))).toBe(false);
+  });
+
+  it('reads a background recovery refusal from the partitioned limiter without taking part in it', async () => {
+    const ctx = createOperationContext('sync');
+    // One background sync at a time and nothing queued.
+    const policy = resolveSyncGlobalBackpressure({
+      syncGlobalQueueLimit: 0,
+      syncAdmission: {
+        mode: 'partitioned',
+        globalMaxInflight: 3,
+        fast: { maxInflight: 1 },
+        slow: { maxInflight: 2, foregroundReserved: 1 },
+      },
+    });
+    const recovery = {
+      contextGraphId: 'graph-a', lane: 'durable', priority: 1_000, source: 'vm-recovery',
+    } as const;
+    expect(syncAdmissionWouldBeRefused(policy, recovery)).toBe(false);
+
+    let releaseOther!: () => void;
+    const other = withGlobalSyncBackpressure({
+      policy, ctx, label: 'durable:graph-b', contextGraphId: 'graph-b',
+      lane: 'durable', priority: 1_000, source: 'vm-recovery',
+    }, async () => { await new Promise<void>((resolve) => { releaseOther = resolve; }); });
+    await tick();
+    try {
+      // Another graph's fetch holds the one background slot. The read says
+      // this graph's would be refused, and with the same terms it is.
+      expect(syncAdmissionWouldBeRefused(policy, recovery)).toBe(true);
+      await expect(withGlobalSyncBackpressure(
+        { policy, ctx, label: 'durable:graph-a', ...recovery },
+        async () => undefined,
+      )).rejects.toThrow(SyncBackpressureBusyError);
+      // Foreground catch-up and the fast lane keep capacity of their own.
+      expect(syncAdmissionWouldBeRefused(policy, { ...recovery, source: 'catchup-foreground' })).toBe(false);
+      expect(syncAdmissionWouldBeRefused(policy, { lane: 'changelog', source: 'reconcile' })).toBe(false);
+      expect(getSyncBackpressureSnapshot(policy)).toMatchObject({ inflight: 1, queued: 0 });
+    } finally {
+      releaseOther();
+      await other;
+    }
+    expect(syncAdmissionWouldBeRefused(policy, recovery)).toBe(false);
+  });
+
+  it('reports no refusal while the shared queue has room, or when admission is disabled', async () => {
+    const ctx = createOperationContext('sync');
+    const policy = resolveSyncGlobalBackpressure({ syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 1 });
+    let releaseFirst!: () => void;
+    const first = withGlobalSyncBackpressure({ policy, ctx, label: 'first' }, async () => {
+      await new Promise<void>((resolve) => { releaseFirst = resolve; });
+    });
+    await tick();
+    // It would queue behind the running work.
+    expect(syncAdmissionWouldBeRefused(policy)).toBe(false);
+    const second = withGlobalSyncBackpressure({ policy, ctx, label: 'second' }, async () => undefined);
+    await tick();
+    expect(syncAdmissionWouldBeRefused(policy)).toBe(true);
+    expect(syncAdmissionWouldBeRefused(
+      resolveSyncGlobalBackpressure({ syncGlobalMaxInflight: 0 }),
+    )).toBe(false);
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(syncAdmissionWouldBeRefused(policy)).toBe(false);
+  });
+
   it('removes aborted queued work without starting it', async () => {
     const ctx = createOperationContext('sync');
     const policy = resolveSyncGlobalBackpressure({ syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 1 });
@@ -1457,6 +1568,42 @@ describe('sync global backpressure', () => {
       else process.env.DKG_VM_RECONCILER_ENABLED = oldVm;
       if (oldSync === undefined) delete process.env.DKG_SYNC_RECONCILER_ENABLED;
       else process.env.DKG_SYNC_RECONCILER_ENABLED = oldSync;
+    }
+  });
+
+  it('resolves the exact-batch stream switch from its current name, then the name it was first deployed under', () => {
+    const oldCurrent = process.env.DKG_EXACT_BATCH_STREAM_ENABLED;
+    const oldFirst = process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM;
+    try {
+      delete process.env.DKG_EXACT_BATCH_STREAM_ENABLED;
+      delete process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM;
+      expect(resolveExactBatchStreamEnabled()).toBe(false);
+
+      process.env.DKG_EXACT_BATCH_STREAM_ENABLED = '1';
+      expect(resolveExactBatchStreamEnabled()).toBe(true);
+
+      // A node configured before the rename keeps its setting.
+      delete process.env.DKG_EXACT_BATCH_STREAM_ENABLED;
+      process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM = '1';
+      expect(resolveExactBatchStreamEnabled()).toBe(true);
+
+      // Once the current name is set it decides, in either direction.
+      process.env.DKG_EXACT_BATCH_STREAM_ENABLED = '0';
+      expect(resolveExactBatchStreamEnabled()).toBe(false);
+      process.env.DKG_EXACT_BATCH_STREAM_ENABLED = 'on';
+      process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM = '0';
+      expect(resolveExactBatchStreamEnabled()).toBe(true);
+
+      // An unrecognised value is not a decision; the earlier name still applies.
+      process.env.DKG_EXACT_BATCH_STREAM_ENABLED = 'maybe';
+      expect(resolveExactBatchStreamEnabled()).toBe(false);
+      process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM = '1';
+      expect(resolveExactBatchStreamEnabled()).toBe(true);
+    } finally {
+      if (oldCurrent === undefined) delete process.env.DKG_EXACT_BATCH_STREAM_ENABLED;
+      else process.env.DKG_EXACT_BATCH_STREAM_ENABLED = oldCurrent;
+      if (oldFirst === undefined) delete process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM;
+      else process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM = oldFirst;
     }
   });
 

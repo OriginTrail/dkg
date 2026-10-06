@@ -29,7 +29,7 @@ function createTools(overrides?: {
   mockListContextGraphs?: TrackingFn;
   mockPublishFromSharedMemory?: TrackingFn;
 }) {
-  const mockQuery = overrides?.mockQuery ?? trackFn(undefined);
+  const mockQuery = overrides?.mockQuery ?? trackFn({ bindings: [] });
   const mockShare = overrides?.mockShare ?? trackFn({ shareOperationId: 'op-1' });
   const mockCreateContextGraph = overrides?.mockCreateContextGraph ?? trackFn(undefined);
   const mockListContextGraphs = overrides?.mockListContextGraphs ?? trackFn([{ id: 'agent-memory', name: 'Agent Memory' }]);
@@ -133,7 +133,7 @@ describe('ChatMemoryManager', () => {
   let mockListContextGraphs: TrackingFn;
 
   beforeEach(() => {
-    mockQuery = trackFn(undefined);
+    mockQuery = trackFn({ bindings: [] });
     mockShare = trackFn({ shareOperationId: 'op-1' });
     mockCreateAssertion = trackFn({ assertionUri: 'urn:test:assertion', alreadyExists: false });
     mockWriteAssertion = trackFn({ written: 0 });
@@ -215,7 +215,7 @@ describe('ChatMemoryManager', () => {
     const quads = mockWriteAssertion.calls[0][2] as any[];
     expect(quads.find((q: any) => q.object === 'http://dkg.io/ontology/ChatTurnPersistenceTransition')).toBeDefined();
     expect(quads.find((q: any) => q.predicate === 'http://dkg.io/ontology/updatesTurn')?.object)
-      .toBe('urn:dkg:chat:turn:turn-1');
+      .toBe('urn:dkg:chat:session-turn:%5B%22session-1%22%2C%22turn-1%22%5D');
     expect(quads.find((q: any) => q.predicate === 'http://dkg.io/ontology/persistenceState')?.object)
       .toBe('"stored"');
     expect(quads.find((q: any) => q.predicate === 'http://dkg.io/ontology/assistantReply')?.object)
@@ -772,6 +772,7 @@ describe('ChatMemoryManager', () => {
       {
         bindings: [
           {
+            turn: 'urn:dkg:chat:turn:t2',
             tid: '"t2"',
             ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
           },
@@ -838,7 +839,7 @@ describe('ChatMemoryManager', () => {
         bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }],
       },
       {
-        bindings: [{ tid: '"t2"', ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
+        bindings: [{ turn: 'urn:dkg:chat:turn:t2', tid: '"t2"', ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
       },
       {
         bindings: [{ latestTurnId: '"t2"', latestTs: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
@@ -865,7 +866,7 @@ describe('ChatMemoryManager', () => {
         bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }],
       },
       {
-        bindings: [{ tid: '"t2"', ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
+        bindings: [{ turn: 'urn:dkg:chat:turn:t2', tid: '"t2"', ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
       },
       {
         bindings: [{ latestTurnId: '"t2"', latestTs: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
@@ -892,7 +893,7 @@ describe('ChatMemoryManager', () => {
         bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }],
       },
       {
-        bindings: [{ tid: '"t2"', ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
+        bindings: [{ turn: 'urn:dkg:chat:turn:t2', tid: '"t2"', ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
       },
       {
         bindings: [{ latestTurnId: '"t2"', latestTs: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
@@ -922,7 +923,7 @@ describe('ChatMemoryManager WM write discipline', () => {
   let mockListContextGraphs: TrackingFn;
 
   beforeEach(() => {
-    mockQuery = trackFn(undefined);
+    mockQuery = trackFn({ bindings: [] });
     mockShare = trackFn({ shareOperationId: 'op-1' });
     mockCreateAssertion = trackFn({ assertionUri: 'urn:test:assertion', alreadyExists: false });
     mockWriteAssertion = trackFn({ written: 0 });

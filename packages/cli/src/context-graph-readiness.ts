@@ -16,11 +16,13 @@ import {
   catchupPlaneProvenBySelectedScope,
   catchupPlaneProvenByUnanimousEmpty,
   catchupPlaneReady,
-  type CatchupJobResult,
   type CatchupPlaneCompletionEvidence,
-} from './catchup-runner.js';
+} from './catchup-proof.js';
+import type { CatchupJobResult } from './catchup-runner.js';
+import { registerContextGraphReadinessEvents } from './context-graph-readiness-events.js';
+export { parseProjectSyncedReadinessPayload, type ProjectSyncedReadinessPayload } from './context-graph-project-synced-payload.js';
 
-export { catchupPlaneCompletedWithoutFailure } from './catchup-runner.js';
+export { catchupPlaneCompletedWithoutFailure } from './catchup-proof.js';
 
 export const CONTEXT_GRAPH_READINESS_VERSION = 1;
 
@@ -212,8 +214,9 @@ export interface ContextGraphSubscriptionReadinessState {
 export interface ContextGraphSubscriptionStatePatch {
   synced: boolean;
   sharedMemorySynced: boolean;
-  metaSynced: boolean;
-  pendingMeta: boolean;
+  /** Omitted when metadata could not be inspected; preserve existing facts. */
+  metaSynced?: boolean;
+  pendingMeta?: boolean;
 }
 
 export interface ContextGraphReadinessPatch {
@@ -245,7 +248,7 @@ export function missingMetadataReadinessPatches(): MissingMetadataReadinessPatch
 interface ContextGraphPlaneReadinessVerdict {
   /** Compatibility/write-readiness: either persisted usable plane opens the graph. */
   readonly writeReady: boolean;
-  /** Catch-up completion: durable VM plus SWM when the caller requested it. */
+  /** Catch-up completion: applicable VM plus SWM when the caller requested it. */
   readonly requestedPlanesVerified: boolean;
   readonly missingRequestedDurable: boolean;
   readonly missingRequestedSharedMemory: boolean;
@@ -255,8 +258,9 @@ function contextGraphPlaneReadinessVerdict(input: {
   durableVerified: boolean;
   sharedMemoryVerified: boolean;
   includeSharedMemory: boolean;
+  registration?: 'unregistered';
 }): ContextGraphPlaneReadinessVerdict {
-  const missingRequestedDurable = !input.durableVerified;
+  const missingRequestedDurable = input.registration !== 'unregistered' && !input.durableVerified;
   const missingRequestedSharedMemory =
     input.includeSharedMemory && !input.sharedMemoryVerified;
   return {
@@ -273,6 +277,7 @@ export function classifyExistingContextGraphReadiness(input: {
   readiness: ContextGraphReadinessProvenance;
   includeSharedMemory: boolean;
   hasConfirmedMeta: boolean;
+  registration?: 'unregistered';
 }): {
   alreadyReady: boolean;
   statePatch?: ContextGraphSubscriptionStatePatch;
@@ -288,6 +293,7 @@ export function classifyExistingContextGraphReadiness(input: {
     durableVerified,
     sharedMemoryVerified,
     includeSharedMemory: input.includeSharedMemory,
+    registration: input.registration,
   });
   const alreadyReady =
     input.hasConfirmedMeta &&
@@ -475,6 +481,7 @@ function catchupPlaneReadinessThisRun(input: {
 }
 
 export interface ContextGraphCatchupReadinessClassification {
+  durablePlane: 'required' | 'not-applicable';
   jobStatus: 'done' | 'failed' | 'denied' | 'partial' | 'unreachable';
   error?: string;
   statePatch?: ContextGraphSubscriptionStatePatch;
@@ -485,6 +492,11 @@ export interface ContextGraphCatchupReadinessClassification {
     verifiedPrivateOnlyResponses: number;
   };
 }
+
+/** Live completion authority takes precedence over peer progress or old proof. */
+export type ContextGraphCatchupCompletionAuthority =
+  | { outcome: 'allowed'; registration?: 'unregistered' }
+  | { outcome: 'denied' | 'unavailable' };
 
 /**
  * A subscription known only by its on-chain name hash cannot sync anything
@@ -503,18 +515,52 @@ export function classifyNameHashOnlyCatchup(
   return { jobStatus: 'unreachable', error: identity.message };
 }
 
+interface ContextGraphCatchupReadinessInput {
+  result: CatchupJobResult;
+  includeSharedMemory: boolean;
+  /** Undefined means unchecked/unavailable, not confirmed absence. */
+  hasConfirmedMeta: boolean | undefined;
+  isPrivate: boolean;
+  readinessBeforeCatchup: ContextGraphReadinessProvenance;
+  /** Current bootstrap authority, never persisted or inferred from metadata. */
+  completionAuthority: ContextGraphCatchupCompletionAuthority;
+}
+
 /**
  * Canonical policy for converting one catch-up result into externally visible
  * subscription readiness. The HTTP route gathers live metadata and applies
  * the returned patches; all readiness decisions remain in this pure function.
  */
-export function classifyContextGraphCatchupReadiness(input: {
-  result: CatchupJobResult;
-  includeSharedMemory: boolean;
-  hasConfirmedMeta: boolean;
-  isPrivate: boolean;
-  readinessBeforeCatchup: ContextGraphReadinessProvenance;
-}): ContextGraphCatchupReadinessClassification {
+export function classifyContextGraphCatchupReadiness(
+  input: ContextGraphCatchupReadinessInput,
+): ContextGraphCatchupReadinessClassification {
+  return {
+    ...classifyCatchupReadiness(input),
+    durablePlane: input.completionAuthority.outcome === 'allowed'
+      && input.completionAuthority.registration === 'unregistered'
+      ? 'not-applicable' : 'required',
+  };
+}
+
+function classifyCatchupReadiness(
+  input: ContextGraphCatchupReadinessInput,
+): Omit<ContextGraphCatchupReadinessClassification, 'durablePlane'> {
+  if (input.completionAuthority.outcome !== 'allowed') {
+    return {
+      jobStatus: input.completionAuthority.outcome === 'denied' ? 'denied' : 'unreachable',
+      error: input.completionAuthority.outcome === 'denied'
+        ? 'Context-graph authority denied access at catch-up completion.'
+        : 'Context-graph authority is unavailable at catch-up completion. Retry after authority recovers.',
+      statePatch: {
+        synced: false, sharedMemorySynced: false,
+        ...(input.hasConfirmedMeta === undefined ? {} : {
+          metaSynced: input.hasConfirmedMeta, pendingMeta: !input.hasConfirmedMeta,
+        }),
+      },
+      readinessPatch: { durableVerified: false, sharedMemoryVerified: false },
+    };
+  }
+  const registration = input.completionAuthority.registration;
   const { result } = input;
   const durableDataProgress = result.dataSynced > 0;
   const sharedMemoryProgress = result.sharedMemorySynced > 0;
@@ -536,6 +582,14 @@ export function classifyContextGraphCatchupReadiness(input: {
   }
 
   if (catchupResultHasCleanResponse(result)) {
+    if (input.hasConfirmedMeta === undefined) {
+      return {
+        jobStatus: 'unreachable',
+        error: 'Authoritative context-graph metadata could not be inspected. Retry after local metadata recovers.',
+        statePatch: { synced: false, sharedMemorySynced: false },
+        readinessPatch: { durableVerified: false, sharedMemoryVerified: false },
+      };
+    }
     if (!input.hasConfirmedMeta) {
       const missingMetadata = missingMetadataReadinessPatches();
       return {
@@ -585,14 +639,15 @@ export function classifyContextGraphCatchupReadiness(input: {
       durableVerified: durableVerifiedPersisted,
       sharedMemoryVerified: sharedMemoryVerifiedPersisted,
       includeSharedMemory: input.includeSharedMemory,
+      registration,
     });
-    // Use the same requested-plane contract as the pre-catch-up fast path so
-    // SWM-only provenance can never synthesize or terminate a `done` job while
-    // finalized VM remains unverified.
+    // Both paths use current authoritative applicability. Exempting an
+    // unregistered graph never manufactures durableVerified provenance.
     const planeReadiness = contextGraphPlaneReadinessVerdict({
       durableVerified,
       sharedMemoryVerified,
       includeSharedMemory: input.includeSharedMemory,
+      registration,
     });
     const {
       missingRequestedDurable,
@@ -622,7 +677,9 @@ export function classifyContextGraphCatchupReadiness(input: {
       } else if (input.isPrivate && missingRequestedDurable) {
         error = 'Shared-memory context-graph data synchronized, but durable VM catch-up did not complete. Retry to finish finalized VM synchronization.';
       } else if (input.isPrivate) {
-        error = 'Durable context-graph data synchronized, but shared-memory catch-up did not complete. Retry to finish shared-memory synchronization.';
+        error = registration === 'unregistered'
+          ? 'Durable VM is not applicable to this unregistered context graph, but shared-memory catch-up did not complete. Retry to finish shared-memory synchronization.'
+          : 'Durable context-graph data synchronized, but shared-memory catch-up did not complete. Retry to finish shared-memory synchronization.';
       } else {
         error = 'Context-graph catch-up did not complete cleanly for every requested data plane. Retry once the network is healthier.';
       }
@@ -790,12 +847,33 @@ export async function reconcileConfiguredContextGraphMetadata(input: {
   });
 }
 
-/**
- * Persist readiness proven by the agent's automatic post-approval catch-up.
- * PROJECT_SYNCED is also used as a UI event, so fail closed unless it carries
- * actual inserted data or a cryptographically verified private-only response,
- * and the graph's authoritative metadata is present.
- */
+/** A wake-up requests verification; only its committed result is a sync event. */
+export async function persistCatalogReadiness(input: {
+  agent: DKGAgent;
+  store: Partial<ContextGraphReadinessStore>;
+  contextGraphId: string;
+}): Promise<boolean> {
+  const contextGraphId = input.contextGraphId.trim();
+  if (!contextGraphId || typeof input.store.setContextGraphReadinessProvenance !== 'function'
+    || typeof input.agent.withVerifiedPrivateCatalogSubscriptionReadinessV1 !== 'function') return false;
+  return withContextGraphReadinessMutationLock(input.agent, contextGraphId, () =>
+    input.agent.withVerifiedPrivateCatalogSubscriptionReadinessV1(contextGraphId, () => {
+      const previous = readContextGraphReadiness(input.store, contextGraphId);
+      writeContextGraphReadiness(input.store, contextGraphId, {
+        durableVerified: previous.version >= CONTEXT_GRAPH_READINESS_VERSION && previous.durableVerified,
+        sharedMemoryVerified: true,
+      });
+      input.agent.markContextGraphSubscriptionState(contextGraphId, {
+        synced: true, sharedMemorySynced: true, metaSynced: true, pendingMeta: false,
+      });
+      input.agent.eventBus.emit(DKGEvent.PROJECT_SYNCED, {
+        contextGraphId, dataSynced: 0, sharedMemorySynced: 0,
+      });
+    }),
+  );
+}
+
+/** Persist ordinary sync completion only with data and confirmed metadata. */
 export async function persistProjectSyncedReadiness(input: {
   agent: DKGAgent;
   store: Partial<ContextGraphReadinessStore>;
@@ -837,59 +915,16 @@ export async function persistProjectSyncedReadiness(input: {
   });
 }
 
-export interface ProjectSyncedReadinessPayload {
-  contextGraphId: string;
-  dataSynced: number;
-  sharedMemorySynced: number;
-  verifiedPrivateOnlyResponses: number;
-}
-
-export function parseProjectSyncedReadinessPayload(
-  data: unknown,
-): ProjectSyncedReadinessPayload | null {
-  if (!data || typeof data !== 'object') return null;
-  const candidate = data as Partial<ProjectSyncedReadinessPayload>;
-  if (
-    typeof candidate.contextGraphId !== 'string' ||
-    typeof candidate.dataSynced !== 'number' ||
-    !Number.isFinite(candidate.dataSynced) ||
-    typeof candidate.sharedMemorySynced !== 'number' ||
-    !Number.isFinite(candidate.sharedMemorySynced) ||
-    (
-      candidate.verifiedPrivateOnlyResponses !== undefined
-      && (
-        typeof candidate.verifiedPrivateOnlyResponses !== 'number'
-        || !Number.isFinite(candidate.verifiedPrivateOnlyResponses)
-      )
-    )
-  ) {
-    return null;
-  }
-  return {
-    contextGraphId: candidate.contextGraphId,
-    dataSynced: candidate.dataSynced,
-    sharedMemorySynced: candidate.sharedMemorySynced,
-    verifiedPrivateOnlyResponses: candidate.verifiedPrivateOnlyResponses ?? 0,
-  };
-}
-
 export function registerProjectSyncedReadinessPersistence(input: {
   agent: DKGAgent;
   store: Partial<ContextGraphReadinessStore>;
   log: (message: string) => void;
 }): void {
-  input.agent.eventBus.on(DKGEvent.PROJECT_SYNCED, (data: unknown) => {
-    const payload = parseProjectSyncedReadinessPayload(data);
-    if (!payload) return;
-    void persistProjectSyncedReadiness({
-      agent: input.agent,
-      store: input.store,
-      ...payload,
-    }).catch((err) => {
-      input.log(
-        `[warn] Failed to persist PROJECT_SYNCED readiness: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    });
+  registerContextGraphReadinessEvents({
+    eventBus: input.agent.eventBus,
+    log: input.log,
+    verifyCatalog: (contextGraphId) => persistCatalogReadiness({ ...input, contextGraphId }),
+    persistProject: (payload) => persistProjectSyncedReadiness({ ...input, ...payload }),
   });
 }
 

@@ -9,6 +9,8 @@
  * cross-calls resolve against the composed class.
  */
 
+
+import { throwIfOperationAborted } from './bounded-operation.js';
 import { readAgentPeerPage } from './agent-peer-discovery.js';
 import { createHash } from 'node:crypto';
 import {
@@ -35,7 +37,7 @@ import {
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
-  Logger, createOperationContext, sparqlString, escapeSparqlLiteral,
+  Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
@@ -210,6 +212,7 @@ import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch
 import { runDurableSync } from './sync/requester/durable-sync.js';
 import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
+import { normalizeExactSyncResponseEncoding } from './sync/wire-compression.js';
 import {
   normalizeExactAssetUals,
   requireExactAssetUals,
@@ -236,7 +239,7 @@ import {
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
-import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
+import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
@@ -327,7 +330,7 @@ import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
 import { finalizedAuthorityColdResolutionOf } from
   './finalized-authority-cold-resolution.js';
 import { isTransientBootChainError } from './dkg-agent-boot.js';
-import { createAbortError, runBoundedOperation } from './bounded-operation.js';
+import { runBoundedOperation } from './bounded-operation.js';
 import type {
   ContextGraphAuthorityReadMode,
   RegisteredContextGraphAuthority,
@@ -448,14 +451,6 @@ import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
   withRpcUsageSite,
 } from '@origintrail-official/dkg-chain';
-
-function syncAuthAbortError(reason: unknown): Error {
-  return createAbortError(reason);
-}
-
-function throwIfSyncAuthAborted(signal: AbortSignal | undefined): void {
-  if (signal?.aborted) throw syncAuthAbortError(signal.reason);
-}
 
 type InternalContextGraphListRow = ListContextGraphsRow & {
   policyKnown?: boolean;
@@ -795,9 +790,9 @@ async function resolveCuratorSyncPeerWithRegistry(
     // share the same wallet address, but better than failing outright)
     if (!resolved) {
       try {
-        throwIfSyncAuthAborted(options.signal);
+        throwIfOperationAborted(options.signal);
         const peerId = await resolveWalletPeer(agent, curatorIdentifier, options.signal);
-        throwIfSyncAuthAborted(options.signal);
+        throwIfOperationAborted(options.signal);
         if (peerId) {
           curatorPeerId = peerId;
           resolved = true;
@@ -808,7 +803,7 @@ async function resolveCuratorSyncPeerWithRegistry(
           provenance = 'registry';
         }
       } catch {
-        throwIfSyncAuthAborted(options.signal);
+        throwIfOperationAborted(options.signal);
         /* registry unavailable */
       }
     }
@@ -975,6 +970,11 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     options: { signal?: AbortSignal } = {},
   ): Promise<boolean> {
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
+    // The id is caller-supplied on several paths (scoped queries, HTTP routes,
+    // gossip). One that cannot be written as an IRI cannot name a stored graph,
+    // and interpolating it below would let the caller append graph patterns to
+    // this query and learn whether triples in other graphs exist.
+    if (!isSafeIri(contextGraphUri)) return false;
     const result = await this.store.query(
       `SELECT ?g WHERE {
         GRAPH ?g { <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> }
@@ -1368,6 +1368,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         authPurpose: typeof parsed.authPurpose === 'string' ? parsed.authPurpose : undefined,
         authSelector: typeof parsed.authSelector === 'string' ? parsed.authSelector : undefined,
         ...normalizeByteBudgetPageHint(parsed.pageMode, parsed.pageRowsHint),
+        responseEncoding: normalizeExactSyncResponseEncoding(parsed.responseEncoding),
         targetPeerId: parsed.targetPeerId,
         requesterPeerId: parsed.requesterPeerId,
         requestId: parsed.requestId,
@@ -1646,9 +1647,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     remotePeerId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<boolean> {
-    throwIfSyncAuthAborted(options.signal);
+    throwIfOperationAborted(options.signal);
     const isPrivate = await this.isPrivateContextGraph(request.contextGraphId, { signal: options.signal });
-    throwIfSyncAuthAborted(options.signal);
+    throwIfOperationAborted(options.signal);
     if (!isPrivate) {
       return true;
     }
@@ -1666,9 +1667,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
             // Chain/RPC verifiers are not actually abortable in ethers. Do not
             // race them against request aborts: that would free responder
             // capacity while the RPC keeps running in the background.
-            throwIfSyncAuthAborted(lookupOptions?.signal);
+            throwIfOperationAborted(lookupOptions?.signal);
             const valid = await verifyIdentity.call(this.chain, recoveredAddress, claimedIdentityId);
-            throwIfSyncAuthAborted(lookupOptions?.signal);
+            throwIfOperationAborted(lookupOptions?.signal);
             return valid;
           }
         : undefined,
@@ -1716,6 +1717,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       durableSubscriptionBinding?: Readonly<DurableContextGraphSubscriptionBinding>;
       /** Query authority proved exact accepted RFC-64 finalized absence. */
       allowAcceptedRfc64FinalizedAbsence?: boolean;
+      /** Read/sync-only proof from this receiver's durable private approval. */
+      allowApprovedPrivateReplicaFinalizedAbsence?: boolean;
       /**
        * Scoped reads and read-only gates may consume the complete finalized
        * authority projection; mutation, admission, and encryption-roster
@@ -1755,8 +1758,12 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           : { durableSubscriptionBinding: options.durableSubscriptionBinding }),
         allowAcceptedRfc64FinalizedAbsence:
           options.allowAcceptedRfc64FinalizedAbsence,
+        allowApprovedPrivateReplicaFinalizedAbsence:
+          options.allowApprovedPrivateReplicaFinalizedAbsence,
       },
     );
+    // Preserve source-qualified non-applicability alongside the legacy read
+    // fallback; kind='unregistered' alone is deliberately not a VM exemption.
     if (registration.kind !== 'registered') return registration;
     const { onChainId } = registration;
 

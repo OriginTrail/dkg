@@ -113,7 +113,7 @@ export {
   type ValidationResult,
   type ValidationOptions,
 } from './validation.js';
-export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMetadata, generateGraphKnowledgeAssetMetadata, normalizeGraphKnowledgeAssetConfirmationKindV1, readGraphKnowledgeAssetConfirmationKindV1, readGraphKnowledgeAssetReceiptProvenanceV1, preserveGraphKnowledgeAssetReceiptProvenanceV1, mergeSameVersionGraphKnowledgeAssetMetadataV1, GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE, replaceLocallyTrustedKnowledgeAssetControls, replaceLocallyTrustedKnowledgeAssetControlEnvelope, readLocallyTrustedKnowledgeAssetControls, overlayLocallyTrustedKnowledgeAssetControls, readLocallyTrustedKnowledgeAssetControlEnvelope, readConfirmedGraphKnowledgeAssetMetadataEnvelope, buildDeterministicTokenRows, compareRootIris, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, generateShareMetadata, generateWorkspaceMetadata, generateKnowledgeAssetShareMetadata, generateSubGraphRegistration, subGraphDeregistrationSparql, subGraphDiscoverySparql, subGraphWritersSparql, toHex, resolveUalByBatchId, updateMetaMerkleRoot, promoteUpdatedKaToPerCgId, restateKaPartition, restateLabelGraphForUpdate, readMaterializedVersion, shouldApplyMaterialization, writeMaterializedVersion, materializedVersionQuad, withMaterializationLock, compareMaterializedVersion, type MaterializedVersion, generateAssertionCreatedMetadata, generateAssertionPromotedMetadata, generateAssertionUpdatedMetadata, generateAssertionDiscardedMetadata, assertionStateQuad, assertionLayerQuad, deriveStatus, assertionLayerPointerQuad, stampLayerPointerSparql, type LifecycleMetadataOptions, WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED, KA_ID_PRED, RESERVED_UAL_PRED, PROV_WAS_REVISION_OF, type KaStatus, type StatusPointers, type KCMetadata, type KAMetadata, type GraphKnowledgeAssetMetadata, type GraphKnowledgeAssetConfirmation, type GraphKnowledgeAssetConfirmationKind, type GraphKnowledgeAssetMetadataState, type GraphKnowledgeAssetReceiptProvenanceV1, type ConfirmedGraphKnowledgeAssetMetadataEnvelope, type ConfirmedGraphKnowledgeAssetMetadataRead, type LocallyTrustedKnowledgeAssetControlAnchor, type LocallyTrustedKnowledgeAssetControlEnvelope, type OnChainProvenance, type ShareMetadata, type WorkspaceMetadata, type KnowledgeAssetShareMetadata, type SubGraphRegistration, type AssertionCreatedMeta, type AssertionPromotedMeta, type AssertionUpdatedMeta, type AssertionDiscardedMeta } from './metadata.js';
+export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMetadata, generateGraphKnowledgeAssetMetadata, normalizeGraphKnowledgeAssetConfirmationKindV1, readGraphKnowledgeAssetConfirmationKindV1, readGraphKnowledgeAssetReceiptProvenanceV1, preserveGraphKnowledgeAssetReceiptProvenanceV1, mergeSameVersionGraphKnowledgeAssetMetadataV1, GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE, replaceLocallyTrustedKnowledgeAssetControls, replaceLocallyTrustedKnowledgeAssetControlEnvelope, readLocallyTrustedKnowledgeAssetControls, overlayLocallyTrustedKnowledgeAssetControls, readLocallyTrustedKnowledgeAssetControlEnvelope, readConfirmedGraphKnowledgeAssetMetadataEnvelope, parseConfirmedGraphKnowledgeAssetMetadataEnvelope, buildDeterministicTokenRows, compareRootIris, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, generateShareMetadata, generateWorkspaceMetadata, generateKnowledgeAssetShareMetadata, generateSubGraphRegistration, subGraphDeregistrationSparql, subGraphDiscoverySparql, subGraphWritersSparql, toHex, resolveUalByBatchId, updateMetaMerkleRoot, promoteUpdatedKaToPerCgId, restateKaPartition, restateLabelGraphForUpdate, readMaterializedVersion, shouldApplyMaterialization, writeMaterializedVersion, materializedVersionQuad, withMaterializationLock, compareMaterializedVersion, type MaterializedVersion, generateAssertionCreatedMetadata, generateAssertionPromotedMetadata, generateAssertionUpdatedMetadata, generateAssertionDiscardedMetadata, assertionStateQuad, assertionLayerQuad, deriveStatus, assertionLayerPointerQuad, stampLayerPointerSparql, type LifecycleMetadataOptions, WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED, KA_ID_PRED, RESERVED_UAL_PRED, PROV_WAS_REVISION_OF, type KaStatus, type StatusPointers, type KCMetadata, type KAMetadata, type GraphKnowledgeAssetMetadata, type GraphKnowledgeAssetConfirmation, type GraphKnowledgeAssetConfirmationKind, type GraphKnowledgeAssetMetadataState, type GraphKnowledgeAssetReceiptProvenanceV1, type ConfirmedGraphKnowledgeAssetMetadataEnvelope, type ConfirmedGraphKnowledgeAssetMetadataRead, type LocallyTrustedKnowledgeAssetControlAnchor, type LocallyTrustedKnowledgeAssetControlEnvelope, type OnChainProvenance, type ShareMetadata, type WorkspaceMetadata, type KnowledgeAssetShareMetadata, type SubGraphRegistration, type AssertionCreatedMeta, type AssertionPromotedMeta, type AssertionUpdatedMeta, type AssertionDiscardedMeta } from './metadata.js';
 export { pruneSupersededAgentRegistryMeta, insertBoundedAgentRegistryMeta } from './agent-registry-meta-retention.js';
 export { PROMOTE_STEP_NAMES, isPromoteStepName, type PromoteStepName } from './promote-step-tag.js';
 export {
@@ -363,6 +363,9 @@ export {
 // consumer reads a job's `retryState` off the publisher and the counts off `retryDetailed`, so
 // nothing outside this package re-derives either.
 export {
+  type HeldRecoveryGap,
+  type LiftJobRetryBlocker,
+  type LiftJobRetryBlockerCode,
   type LiftJobRetryProjection,
   type LiftJobRetryWaitingReason,
 } from './async-lift-retry-disposition.js';
@@ -380,6 +383,7 @@ export {
   type AsyncLiftAdmissionContext,
   type ActiveLiftJobClaim,
   type ActiveLiftJobClaimSession,
+  type ExecutionFailureEvidence,
   type AsyncLiftAdministrativeMutations,
   type AsyncLiftDetailedRetrier,
   type AsyncLiftRetryFilter,
@@ -404,6 +408,9 @@ export {
   type AsyncLiftCreateChainProofLookup,
   type AsyncLiftUpdateChainProofLookup,
   type AsyncLiftChainProofResolution,
+  type AsyncLiftChainProofInconclusiveReason,
+  type AsyncLiftChainCheckOutcome,
+  type AsyncLiftLastChainCheck,
   type VmPublishIntentRecoveryPublisher,
   type VmPublishIntentIndexBackfiller,
   type VmPublishAdmissionJournalReader,
@@ -452,6 +459,7 @@ export {
   getPromoteReplaySafeErrorDiagnostic,
   getPromoteFailureDisposition,
   isPromoteReplaySafeError,
+  runPromoteCommittedFinalization,
   type PromoteFailureDisposition,
   type PromoteReplaySafeErrorDiagnostic,
 } from './promote-replay-safety.js';

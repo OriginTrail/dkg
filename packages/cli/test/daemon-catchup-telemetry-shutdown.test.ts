@@ -1170,6 +1170,7 @@ describe('A24 — a failing step never strands the steps after it', () => {
   it.each([
     'VmReconcileShutdownTimeout',
     'CG_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT',
+    'CG_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT',
   ])('quarantines backing stores when stopAgent fails with %s', async (code) => {
     const { steps } = recordingSteps();
     steps.stopAgent = async () => {
@@ -1206,6 +1207,36 @@ describe('A24 — a failing step never strands the steps after it', () => {
       closeDashboardDb,
       log: () => undefined,
     })).resolves.toBe(true);
+    expect(stopManagedOxigraph).toHaveBeenCalledOnce();
+    expect(closeDashboardDb).toHaveBeenCalledOnce();
+  });
+
+  it('retries agent stop while a subscription persistence drain keeps timing out, then closes the stores', async () => {
+    const outcome = {
+      failures: [{
+        step: 'stopAgent' as const,
+        error: Object.assign(new Error('write still in flight'), { code: 'CG_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT' }),
+      }],
+      dependencyQuarantined: true,
+    };
+    let attempts = 0;
+    const stopManagedOxigraph = vi.fn(async () => undefined);
+    const closeDashboardDb = vi.fn();
+    await closeDaemonBackingStoresAfterTeardown(outcome, {
+      retryAgentStop: async () => {
+        attempts += 1;
+        if (attempts < 3) {
+          // The stores must stay open while the drain is still timing out.
+          expect(stopManagedOxigraph).not.toHaveBeenCalled();
+          expect(closeDashboardDb).not.toHaveBeenCalled();
+          throw Object.assign(new Error('write still in flight'), { code: 'CG_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT' });
+        }
+      },
+      stopManagedOxigraph,
+      closeDashboardDb,
+      log: () => undefined,
+    });
+    expect(attempts).toBe(3);
     expect(stopManagedOxigraph).toHaveBeenCalledOnce();
     expect(closeDashboardDb).toHaveBeenCalledOnce();
   });

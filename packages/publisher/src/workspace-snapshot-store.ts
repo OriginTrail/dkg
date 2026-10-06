@@ -246,17 +246,20 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
       },
     });
     this.lifecycle = {
-      finalizedCleanupEnabled: enabled,
-      acquire: ref => this.lifecycleGate.acquire(snapshotHash(ref)),
-      acquireExisting: async ref => {
-        const hash = snapshotHash(ref);
-        const release = await this.lifecycleGate.acquire(hash);
-        try {
-          if (await withSnapshotSource(this.directory, hash, async source => source !== null)) return release;
-          release();
-          return undefined;
-        } catch (error) { release(); throw error; }
-      },
+      // Operation-long leases keep files out of the collectors for a whole operation. They belong to
+      // finalized cleanup; a store without it keeps its earlier policy (a file is in use only while
+      // an individual read or write runs), so it does not offer the capability.
+      ...(enabled
+        ? {
+          finalizedCleanupEnabled: true as const,
+          operationLease: (ref: string) => this.lifecycleGate.acquire(snapshotHash(ref)),
+        }
+        : { finalizedCleanupEnabled: false as const }),
+      // `false` means the file is absent (ENOENT for every payload format) and nothing else does: any
+      // other failure to open it (EACCES, EIO, a directory or device at the path) rejects, and so does a
+      // failing gate, so reuse cannot mistake a present, unreadable file for a missing one. The lease the
+      // check needs is taken and released inside this call; the caller never owns one.
+      snapshotExists: async ref => this.withActiveSnapshotSource(snapshotHash(ref), async source => source !== null),
       markPublished: refs => this.finalizedCollector.markPublishedSnapshots(refs),
     };
     if (this.gcConfig.enabled) {
@@ -480,7 +483,16 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     let failedDeletions = 0;
     const now = this.now();
     const files = await listSnapshotStoreFiles(this.directory);
-    const finalized = await this.finalizedCollector.collect(files);
+    const targetAvailableBytes = Math.max(
+      watermarks.targetFreeBytes,
+      watermarks.hardReserveBytes + requiredWriteBytes,
+    );
+    // Below the hard reserve, retirement candidates need not wait out their grace
+    // period. They still go through the same reference check (and fail closed).
+    const hardPressure = availableBytesBefore - requiredWriteBytes < watermarks.hardReserveBytes;
+    const finalized = await this.finalizedCollector.collect(files, hardPressure
+      ? { pressure: { bytesNeeded: Math.max(0, targetAvailableBytes - availableBytesBefore) } }
+      : {});
     deletedSnapshots += finalized.deleted;
     deletedSnapshotBytes += finalized.bytes;
     availableBytesAfter += finalized.bytes;
@@ -509,12 +521,9 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     const triggered = availableBytesBefore < watermarks.triggerFreeBytes
       || availableBytesBefore - requiredWriteBytes < watermarks.hardReserveBytes;
     if (triggered) {
-      const targetAvailableBytes = Math.max(
-        watermarks.targetFreeBytes,
-        watermarks.hardReserveBytes + requiredWriteBytes,
-      );
-      // Pressure must not bypass the finalized grace/reference check (including
-      // an unavailable checker or malformed retirement record).
+      // Marked files were just judged by the collector (grace and reference check,
+      // or the reference check alone under hard pressure). Whatever it kept, including
+      // an unavailable checker or malformed record, must not fall to age-based eviction.
       const retiredHashes = new Set(this.gcConfig.finalizedCleanupEnabled
         ? files.filter(file => SNAPSHOT_RETIREMENT_PATTERN.test(file.name)).map(file => file.hash)
         : []);

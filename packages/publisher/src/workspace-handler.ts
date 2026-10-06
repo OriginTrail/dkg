@@ -153,6 +153,8 @@ export interface ContextGraphMetaOracleRecord {
   accessPolicy?: string;
 }
 
+type ContextGraphMetaOracleRead = () => Promise<ContextGraphMetaOracleRecord | null>;
+
 /**
  * Outcome of one `SharedMemoryHandler.handle()` invocation. Added
  * in rc.9 PR-C (codex R3) so the new substrate fan-out receiver
@@ -1098,12 +1100,21 @@ export class SharedMemoryHandler {
         return declineNonAuthoritativeLegacyApply(encodedSubGraphName);
       }
 
+      // One inbound envelope must be judged from one projected metadata read.
+      // Besides keeping the agent/peer/policy gates on a coherent snapshot,
+      // this matters when the injected oracle proves an approved private
+      // replica against finalized/live authority: the three consumers below
+      // must not repeat that authority read independently on the hot path.
+      const readProjectedMeta = this.createContextGraphMetaOracleRead(contextGraphId);
       const agentGateAddresses = await withRpcUsageSite(
         CG_AUTH_RPC_SITES.workspaceApply,
-        () => this.getContextGraphAgentGateAddresses(contextGraphId),
+        () => this.getContextGraphAgentGateAddresses(contextGraphId, readProjectedMeta),
       );
-      const allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId);
-      const hasPrivateAccessPolicy = await this.contextGraphHasPrivateAccessPolicy(contextGraphId);
+      const allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId, readProjectedMeta);
+      const hasPrivateAccessPolicy = await this.contextGraphHasPrivateAccessPolicy(
+        contextGraphId,
+        readProjectedMeta,
+      );
 
       if (hasPrivateAccessPolicy && agentGateAddresses === null && allowedPeers === null) {
         const reason = `private context graph "${contextGraphId}" has no gossip allowlist`;
@@ -2027,11 +2038,15 @@ export class SharedMemoryHandler {
     if (!envelope) {
       return { accepted: false, reasonCode: 'UNSIGNED', reason: 'unsigned envelope (host mode requires agent-signed gossip)' };
     }
+    // Agent and peer gates are two views of the same authority snapshot. Read
+    // the injected projection once so an authority-backed oracle is not
+    // resolved twice for one host-mode envelope.
+    const readProjectedMeta = this.createContextGraphMetaOracleRead(contextGraphId);
     const agentGateAddresses = await withRpcUsageSite(
       CG_AUTH_RPC_SITES.hostEnvelope,
-      () => this.getContextGraphAgentGateAddresses(contextGraphId),
+      () => this.getContextGraphAgentGateAddresses(contextGraphId, readProjectedMeta),
     );
-    const allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId);
+    const allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId, readProjectedMeta);
 
     // GH #1124 — resolve "fully-open (self-publishable) CG" HERE rather than
     // trusting a caller flag: the caller injects the (forced-fresh, fail-closed)
@@ -2255,10 +2270,30 @@ export class SharedMemoryHandler {
   }
 
   /**
+   * Build a lazy request-local read of the projected context-graph metadata.
+   * Laziness preserves the RPC-usage context of the first gate that consumes
+   * it; promise memoization keeps every later gate on the same snapshot.
+   */
+  private createContextGraphMetaOracleRead(
+    contextGraphId: string,
+  ): ContextGraphMetaOracleRead | undefined {
+    const oracle = this.contextGraphMetaOracle;
+    if (oracle === undefined) return undefined;
+    let projected: Promise<ContextGraphMetaOracleRecord | null> | undefined;
+    return () => {
+      projected ??= oracle(contextGraphId);
+      return projected;
+    };
+  }
+
+  /**
    * Returns the peer allowlist for a context graph, or null if no allowlist
    * is set (open CG — all peers allowed).
    */
-  private async getContextGraphAllowedPeers(contextGraphId: string): Promise<string[] | null> {
+  private async getContextGraphAllowedPeers(
+    contextGraphId: string,
+    readProjectedMeta?: ContextGraphMetaOracleRead,
+  ): Promise<string[] | null> {
     // The oracle record is intentionally PARTIAL (OT-RFC-49 public
     // projection): a populated record does NOT imply every gate field
     // was projected. Short-circuit on the projection ONLY for the
@@ -2267,7 +2302,7 @@ export class SharedMemoryHandler {
     // complete snapshot here would let a projection that carried only
     // `accessPolicy`/agent fields skip the peer allowlist entirely
     // (returns null ⇒ "open CG — all peers allowed").
-    const projected = await this.contextGraphMetaOracle?.(contextGraphId);
+    const projected = await (readProjectedMeta?.() ?? this.contextGraphMetaOracle?.(contextGraphId));
     if (projected?.allowedPeers !== undefined) {
       const peers = [...new Set(projected.allowedPeers.filter((v): v is string => typeof v === 'string'))];
       return peers.length > 0 ? peers : null;
@@ -2292,7 +2327,10 @@ export class SharedMemoryHandler {
    * null if the graph is not agent-gated. Includes DKG_ALLOWED_AGENT and
    * DKG_PARTICIPANT_AGENT metadata.
    */
-  private async getContextGraphAgentGateAddresses(contextGraphId: string): Promise<string[] | null> {
+  private async getContextGraphAgentGateAddresses(
+    contextGraphId: string,
+    readProjectedMeta?: ContextGraphMetaOracleRead,
+  ): Promise<string[] | null> {
     // The oracle record is intentionally PARTIAL (OT-RFC-49 public
     // projection): each gate field is resolved INDEPENDENTLY from the
     // projection-if-present-else-store, so a projection that carried
@@ -2302,7 +2340,7 @@ export class SharedMemoryHandler {
     // resolved separately and then subtracted — short-circuiting on a
     // whole truthy record here would let a partial projection fall
     // back to a *stale store allowlist with no revocation applied*.
-    const projected = await this.contextGraphMetaOracle?.(contextGraphId);
+    const projected = await (readProjectedMeta?.() ?? this.contextGraphMetaOracle?.(contextGraphId));
 
     // Revoked tombstones: prefer the projection when it carried the
     // field, otherwise read `_meta`. Applied to whichever source the
@@ -2447,7 +2485,10 @@ export class SharedMemoryHandler {
     }
   }
 
-  private async contextGraphHasPrivateAccessPolicy(contextGraphId: string): Promise<boolean> {
+  private async contextGraphHasPrivateAccessPolicy(
+    contextGraphId: string,
+    readProjectedMeta?: ContextGraphMetaOracleRead,
+  ): Promise<boolean> {
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
       return false;
     }
@@ -2456,7 +2497,7 @@ export class SharedMemoryHandler {
     // projected (`!== undefined`). The oracle record is PARTIAL, so a
     // record carrying only agent/peer fields must NOT be read as
     // "accessPolicy absent ⇒ not private"; fall back to the store.
-    const projected = await this.contextGraphMetaOracle?.(contextGraphId);
+    const projected = await (readProjectedMeta?.() ?? this.contextGraphMetaOracle?.(contextGraphId));
     if (projected?.accessPolicy !== undefined) {
       return projected.accessPolicy.trim().toLowerCase() === 'private';
     }

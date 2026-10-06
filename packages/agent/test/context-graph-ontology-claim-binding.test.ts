@@ -34,6 +34,7 @@ import {
   type ContextGraphSubscriptionStore,
 } from '../src/index.js';
 import { createCursorState } from '../src/reconcile-cursor.js';
+import { subscribeByNameHash } from './_helpers/subscribe-by-name-hash.js';
 
 const keccak = (id: string) => ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerCase();
 
@@ -148,32 +149,6 @@ async function syncOntologyClaims(agent: DKGAgent): Promise<void> {
       { subject, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`, object: `"${onChainId}"`, graph },
     ];
   }));
-}
-
-/**
- * The agent calls `POST /api/context-graph/subscribe` makes for a name hash,
- * in its order (packages/cli/src/daemon/routes/context-graph.ts). `identity`
- * is what `dkg subscribe` prints as its note.
- */
-async function subscribeByNameHash(agent: DKGAgent, requested: string) {
-  let contextGraphId = agent.resolveContextGraphIdAlias(requested) ?? requested;
-  const authority = await agent.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
-    callerAgentAddress: agent.getDefaultAgentAddress(),
-    allowSubscriptionFallback: false,
-  });
-  expect(authority.outcome).toBe('allowed');
-  if (agent.contextGraphNameTargetFor(contextGraphId)) {
-    const resolved = await agent.resolveContextGraphNameHashNow(contextGraphId, {
-      signal: AbortSignal.timeout(2_000),
-    }).catch(() => null);
-    if (resolved) contextGraphId = resolved;
-  }
-  const identity = agent.describeContextGraphIdentity(requested);
-  agent.subscribeToContextGraph(contextGraphId, {
-    syncMode: 'always-on',
-    ...(authority.onChainId === undefined ? {} : { onChainId: authority.onChainId.toString(10) }),
-  });
-  return { contextGraphId, identity };
 }
 
 /** Finalized RFC-64 authority evidence for on-chain #33, as the scheduled batch builds it. */

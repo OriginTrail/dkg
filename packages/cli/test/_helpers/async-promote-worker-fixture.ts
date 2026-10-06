@@ -28,6 +28,30 @@ export interface AsyncPromoteWorkerFixture {
   ) => Promise<PromoteJob>;
 }
 
+export function deferred<T = void>(): {
+  promise: Promise<T>;
+  resolve: (value?: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value?: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+const PROMOTE_FAILURE_LOG_PREFIX = '[async-promote-worker] ';
+
+/** The `async_promote_attempt_failed` diagnostics among the captured log lines. */
+export function promoteFailureDiagnostics(logs: readonly string[]): Record<string, unknown>[] {
+  return logs
+    .filter((line) => line.startsWith(PROMOTE_FAILURE_LOG_PREFIX))
+    .map((line) => JSON.parse(line.slice(PROMOTE_FAILURE_LOG_PREFIX.length)) as Record<string, unknown>)
+    .filter((entry) => entry['event'] === 'async_promote_attempt_failed');
+}
+
 export function retryableBookkeepingFailure(): StoreOperationTimeoutError {
   return new StoreOperationTimeoutError({
     backend: 'managed-oxigraph',
@@ -50,8 +74,10 @@ export function retryableSchedulerBusyFailure(): StoreSchedulerBusyError {
 export function createAsyncPromoteWorkerFixture(options: {
   maxRetries?: number;
   leaseMs?: number;
+  /** Inject a store (e.g. a fault-injecting subclass); defaults to a fresh in-memory one. */
+  store?: OxigraphStore;
 } = {}): AsyncPromoteWorkerFixture {
-  const store = new OxigraphStore();
+  const store = options.store ?? new OxigraphStore();
   const logs: string[] = [];
   let currentNow = 1_700_000_000_000;
   let idCounter = 0;

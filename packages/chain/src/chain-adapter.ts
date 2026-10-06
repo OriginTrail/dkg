@@ -897,8 +897,8 @@ export interface ContextGraphStorageRange {
   /** `getLatestContextGraphId()` at the anchor: the highest id minted so far. */
   readonly latestId: bigint;
   /**
-   * Entries in ascending id order for `[fromId, nextId)`. An id the chain
-   * proves nonexistent (`ERC721NonexistentToken`) is omitted, not an error.
+   * Entries for `[fromId, nextId)`, ascending and with no gap: the range ends
+   * before the first id that is nonexistent on chain or could not be read.
    */
   readonly entries: readonly ContextGraphStorageEntry[];
   /**
@@ -1430,6 +1430,19 @@ export interface ChainReadOptions {
   signal?: AbortSignal;
 }
 
+/** Read options for resolving one publish transaction's receipt. */
+export interface PublishReceiptReadOptions extends ChainReadOptions {
+  /**
+   * The caller never reads `blockTimestamp`. The adapter then skips the extra
+   * block-header lookup that only that field needs, which keeps the lookup at
+   * the single receipt round trip this surface documents, and reports the
+   * field as `0` ("not read"), the value it already reports when the header is
+   * unavailable. Receipt, block number, transaction index and every parsed
+   * publish fact are unchanged.
+   */
+  readonly skipBlockTimestamp?: boolean;
+}
+
 /**
  * One coherent finalized Knowledge Asset version and the immutable physical
  * evidence that produced it. The binding fields are optional only for legacy
@@ -1607,7 +1620,7 @@ export interface ChainAdapter {
    */
   resolvePublishByTxHash?(
     txHash: string,
-    options?: ChainReadOptions,
+    options?: PublishReceiptReadOptions,
   ): Promise<OnChainPublishResult | null>;
 
   /**
@@ -1754,9 +1767,9 @@ export interface ChainAdapter {
     /**
      * Read ContextGraphStorage slots `[fromId, fromId + maxIds)` (capped at
      * `getLatestContextGraphId()`) with view calls pinned to one block: the
-     * node's finality anchor (`chain.finalityConfirmations`). Ids are
-     * sequential, so this enumerates every Context Graph that exists on chain
-     * without event logs or archive state. Stateless: callers own any cursor.
+     * node's finality anchor (`chain.finalityConfirmations`). Ids are sequential,
+     * so this lists every Context Graph without event logs or archive state.
+     * Stateless: callers own any cursor. Rejects only when `fromId` is unreadable.
      */
     readContextGraphStorageRange?(
       options: ContextGraphStorageRangeOptions,

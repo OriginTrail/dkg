@@ -134,8 +134,6 @@ command -v lsof >/dev/null 2>&1 || skip "lsof not available (needed to find the 
 # shellcheck source=devnet-lib.sh
 . "$REPO_ROOT/scripts/devnet-lib.sh" || skip "cannot source scripts/devnet-lib.sh"
 
-node_up() { [ "$(code_of "$(api "$1" GET /api/status)")" = "200" ]; }
-
 # --- live topology (one structured parser — otReviewAgent #1517: no shell-quoted
 # JS expressions). One line per node dir: "<n> <role> <backend> <port>", where
 # <port> is only set for the daemon-managed oxigraph-server backend (default

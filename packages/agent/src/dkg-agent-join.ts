@@ -1,3 +1,5 @@
+
+import { verifiedDelegationKeyIds, verifyJoinEncryptionKeyBundle } from './internal/join-encryption-key-bundle.js';
 import type { PeerSyncConnection } from './p2p/peer-connection.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -234,7 +236,7 @@ import {
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
-import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
+import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
@@ -454,19 +456,12 @@ const JOIN_ENCRYPTION_KEY_CACHE_ISSUED_AT =
 const JOIN_ENCRYPTION_KEY_CACHE_KEY_SET_DIGEST =
   'urn:dkg:local:join-encryption-key-cache:key-set-digest';
 const JOIN_ENCRYPTION_KEY_CACHE_DIGEST_RE = /^0x[0-9a-f]{64}$/i;
-const JOIN_ENCRYPTION_KEY_LIMIT = 8;
 
 const requesterJoinStateCache = new WeakMap<DKGAgent, Map<string, RequesterJoinRequestState>>();
 const requesterJoinStateTails = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
 const requesterJoinForwardTails = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
 const curatorJoinRequestStoreTails = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
 const joinEncryptionKeyCacheTails = new WeakMap<TripleStore, Map<string, Promise<void>>>();
-
-interface VerifiedJoinEncryptionKeyBundle {
-  readonly issuedAtMs: number;
-  readonly keySetDigest: string;
-  readonly keys: NonNullable<SignedAgentDelegation['workspaceEncryptionKeys']>;
-}
 
 interface StorePendingJoinRequestOptions {
   emitNotification?: boolean;
@@ -479,16 +474,6 @@ function sameStringSet(left: ReadonlySet<string>, right: ReadonlySet<string>): b
     if (!right.has(value)) return false;
   }
   return true;
-}
-
-function verifiedDelegationKeyIds(
-  agentAddress: string,
-  keys: VerifiedJoinEncryptionKeyBundle['keys'],
-): Set<string> {
-  return new Set(keys.map((key) => workspaceAgentEncryptionKeyId(
-    agentAddress,
-    decodeWorkspaceEncryptionKey(key.publicEncryptionKey),
-  ).toLowerCase()));
 }
 
 function requesterJoinStateKey(contextGraphId: string, agentAddress: string): string {
@@ -592,81 +577,6 @@ async function withJoinEncryptionKeyCacheLock<T>(
   } finally {
     if (tails.get(agentSubject) === tail) tails.delete(agentSubject);
   }
-}
-
-function verifyJoinEncryptionKeyBundle(
-  delegation: SignedAgentDelegation,
-  carrierPeerId: string,
-): VerifiedJoinEncryptionKeyBundle | null {
-  const keys = delegation.workspaceEncryptionKeys;
-  if (keys === undefined) return null;
-  if (!Array.isArray(keys) || keys.length === 0 || keys.length > JOIN_ENCRYPTION_KEY_LIMIT) {
-    throw new Error(
-      `Join request must carry between 1 and ${JOIN_ENCRYPTION_KEY_LIMIT} workspace encryption keys.`,
-    );
-  }
-  // Preserve the existing admission contract for a signed carrier mismatch:
-  // policy evaluation reports a bounded pending decision. Do not accept the
-  // bundle because the carrier has not proven it is the signed delegatee.
-  if (delegation.delegateePeerId !== carrierPeerId) return null;
-
-  // issuedAtMs becomes the durable cross-CG cache high-water, so authenticate
-  // the base delegation here as well as at the admission boundary.
-  verifyAgentDelegation(delegation);
-  if (!Number.isSafeInteger(delegation.issuedAtMs) || delegation.issuedAtMs < 0) {
-    throw new Error('Join request carries an invalid encryption-key freshness timestamp.');
-  }
-  const verified = keys.map((key) => {
-    if (
-      key === null
-      || typeof key !== 'object'
-      || key.encryptionKeyAlgorithm !== WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519
-      || typeof key.publicEncryptionKey !== 'string'
-      || typeof key.encryptionKeyProof !== 'string'
-    ) {
-      throw new Error('Join request carries a malformed workspace encryption key.');
-    }
-    let valid = false;
-    try {
-      valid = verifyWorkspaceEncryptionKeyBinding(
-        delegation.agentAddress,
-        key.encryptionKeyAlgorithm,
-        key.publicEncryptionKey,
-        key.encryptionKeyProof,
-      );
-    } catch {
-      valid = false;
-    }
-    if (!valid) {
-      throw new Error('Join request carries an invalid workspace encryption key proof.');
-    }
-    return key;
-  });
-  if (typeof delegation.workspaceEncryptionKeysSignature !== 'string') {
-    throw new Error('Join request is missing its workspace encryption-key attestation.');
-  }
-  let attestationSigner = '';
-  try {
-    attestationSigner = ethers.verifyMessage(
-      computeWorkspaceEncryptionKeysAttestationDigest(delegation),
-      delegation.workspaceEncryptionKeysSignature,
-    );
-  } catch {
-    attestationSigner = '';
-  }
-  if (attestationSigner.toLowerCase() !== delegation.agentAddress.toLowerCase()) {
-    throw new Error('Join request carries an invalid workspace encryption-key attestation.');
-  }
-
-  const canonicalKeySet = [...new Set(verified.map((key) => JSON.stringify({
-    encryptionKeyAlgorithm: key.encryptionKeyAlgorithm,
-    publicEncryptionKey: key.publicEncryptionKey,
-  })))].sort();
-  return {
-    issuedAtMs: delegation.issuedAtMs,
-    keySetDigest: `0x${createHash('sha256').update(JSON.stringify(canonicalKeySet)).digest('hex')}`,
-    keys: verified,
-  };
 }
 
 export class JoinRequestMethods extends DKGAgentBase {
@@ -877,10 +787,11 @@ export class JoinRequestMethods extends DKGAgentBase {
     }
     // This is a total private-recipient cap, not merely an allowlist-row cap:
     // participant agents receive ciphertext keys and private read authority too.
-    // Use the fresh authoritative union (allowed + participant - revoked).
+    // Preserve the finalized chain roster for registered private graphs;
+    // unregistered graphs use the effective store-backed metadata union.
     const activeMembers = await withRpcUsageSite(
       CG_AUTH_RPC_SITES.joinPolicyRoster,
-      () => this.getMemberRecoveryGate(contextGraphId),
+      () => this.getMemberRecoveryRosterSource(contextGraphId),
     ) ?? [];
     return {
       ownerDid,
@@ -1177,7 +1088,7 @@ export class JoinRequestMethods extends DKGAgentBase {
       getContextGraphMeta: (contextGraphId) => this.getCgMeta(contextGraphId),
       getActiveMembers: (contextGraphId) => withRpcUsageSite(
         CG_AUTH_RPC_SITES.joinAdmissionRoster,
-        () => this.getMemberRecoveryGate(contextGraphId),
+        () => this.getMemberRecoveryRosterSource(contextGraphId),
       ),
       getContextGraphOwner: (contextGraphId) => this.getContextGraphOwner(contextGraphId),
       resolveLocalOwnerAddress: (ownerDid) => this.resolveLocalJoinPolicyOwnerAddress(ownerDid),
@@ -1450,7 +1361,21 @@ export class JoinRequestMethods extends DKGAgentBase {
     } catch (error) {
       cache.delete(key);
       throw error;
+    } finally {
+      this.fenceRequesterJoinStateChange(contextGraphId);
     }
+  }
+
+  /**
+   * The join proof behind an approved replica's reads, catalog roster and
+   * catalog authority is bound to the requester state. That state lives in
+   * its own graph, so store-level invalidation does not reach the context
+   * graph's facts revision, which is what those paths compare after the reads
+   * that follow the proof. Move it here for every attempted change, including
+   * one that failed part-way, so an in-flight result is discarded.
+   */
+  private fenceRequesterJoinStateChange(this: DKGAgent, contextGraphId: string): void {
+    this.contextGraphMetaProjection.markDirty(contextGraphId);
   }
 
   async clearRequesterJoinRequestState(
@@ -1470,6 +1395,8 @@ export class JoinRequestMethods extends DKGAgentBase {
     } catch (error) {
       cache.delete(key);
       throw error;
+    } finally {
+      this.fenceRequesterJoinStateChange(contextGraphId);
     }
   }
 
@@ -2613,6 +2540,45 @@ export class JoinRequestMethods extends DKGAgentBase {
       'join-approval',
     );
     if (result.delivered) {
+      // The requester can join over an already-open P2P connection. Its
+      // connect-time catalog replay then predates the private roster update,
+      // and the cold requester cannot pull a head until it knows the new
+      // policy digest. Refresh after the durable approval and push only this
+      // graph's current head to the exact peer that received the approval.
+      // Bounded retries cover an overlapping authority composition that was
+      // revision-fenced during admission; transport still checks the current
+      // policy and roster before sending any private head.
+      if (
+        result.peerId
+        && result.peerId !== this.peerId
+        && this.resolveRfc64CatalogServingAuthorityV1(contextGraphId).track2Enabled
+      ) {
+        for (const delayMs of [0, 250, 1_000]) {
+          if (delayMs > 0) {
+            await new Promise<void>((resolve) => { setTimeout(resolve, delayMs); });
+          }
+          try {
+            await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId);
+            if (await this.reannounceRfc64CatalogAfterJoinApprovalV1(
+              contextGraphId,
+              agentAddress,
+              result.peerId,
+            )) return;
+          } catch {
+            // The approval remains durable. The next bounded attempt can
+            // observe the current authority generation.
+          }
+        }
+        this.log.warn(
+          createOperationContext('system'),
+          `RFC-64 catalog replay remains pending after join approval for "${contextGraphId}"`,
+        );
+        this.scheduleRfc64CatalogAfterJoinApprovalRetryV1(
+          contextGraphId,
+          agentAddress,
+          result.peerId,
+        );
+      }
       return;
     }
     // rc.9 PR-10: the substrate outbox already holds the queued send

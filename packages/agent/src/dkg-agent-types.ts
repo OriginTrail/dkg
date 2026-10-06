@@ -143,6 +143,12 @@ export type LocalSwmSenderKeySendState = {
   senderAgentAddress: string;
   epochId: string;
   membershipHash: string;
+  /**
+   * Exact transport-route snapshot seeded for this epoch. Optional only for
+   * sender state persisted before route-aware epoch rotation was introduced;
+   * such legacy state rotates once before it can be reused.
+   */
+  recipientRouteHash?: string;
   chainKey: Uint8Array;
   nextMessageIndex: number;
   senderSigningSecretKey: Uint8Array;
@@ -170,10 +176,10 @@ export type LocalSwmSenderKeyReceiveState = {
  * connection:open or a subsequent publish that re-resolves the
  * recipient set).
  *
- * Keyed in-memory by lowercased `recipientAgentAddress`. The triple
- * `(senderAgentAddress, recipientKeyId, epochId)` dedupes within an
- * agent's queue; newer epochs supersede older ones for the same
- * `(senderAgentAddress, recipientAgentAddress)` pair.
+ * Keyed in-memory by lowercased `recipientAgentAddress`. The tuple
+ * `(senderAgentAddress, recipientKeyId, recipientPeerId, epochId)`
+ * dedupes within an agent's queue; newer epochs supersede older ones for
+ * the same sender, recipient, context-graph, and subgraph scope.
  */
 export type PendingSenderKeyEntry = {
   /** Lower-cased EIP-55 sender agent address. */
@@ -181,6 +187,13 @@ export type PendingSenderKeyEntry = {
   /** Lower-cased EIP-55 recipient agent address (matches the map key). */
   recipientAgentAddress: string;
   recipientKeyId: string;
+  /**
+   * Exact peer route that still owes a positive setup ACK. Absent only for
+   * legacy rows and packages queued before any peer route was advertised;
+   * those drain only after the current verified recipient projection binds
+   * this exact key to a peer.
+   */
+  recipientPeerId?: string;
   epochId: string;
   contextGraphId: string;
   subGraphName?: string;
@@ -202,6 +215,7 @@ export type ACKSignerResolution = {
 };
 
 export interface SyncRequestEnvelope {
+  responseEncoding?: 'gzip-nquads-v1';
   contextGraphId: string;
   offset: number;
   limit: number;
@@ -823,11 +837,13 @@ export interface DurableContextGraphSubscriptionBinding {
   onChainHash?: string;
 }
 
+/** @deprecated Compatibility shape for retired negative-cache store adapters. */
 export interface VmReconcilePeerTopologyPeer {
   peerId: string;
   core: boolean;
 }
 
+/** @deprecated Compatibility shape; VM recovery no longer reads a miss cache. */
 export type VmReconcilePeerTopology =
   | { kind: 'unreadable' }
   | {
@@ -838,7 +854,7 @@ export type VmReconcilePeerTopology =
     peers: VmReconcilePeerTopologyPeer[];
   };
 
-/** Historical proof attached to a cached miss, separate from live topology. */
+/** @deprecated Historical shape for retired negative-cache store adapters. */
 export interface VmReconcilePeerTopologyEvidence {
   topology: VmReconcilePeerTopology;
   cleanMissPeerIds: string[];
@@ -849,10 +865,27 @@ export interface ContextGraphSubscriptionStore {
   load?(contextGraphId: string): Promise<ContextGraphSubscriptionRecord | null>;
   save(record: ContextGraphSubscriptionRecord): Promise<void>;
   delete(contextGraphId: string): Promise<void>;
+  /** @deprecated Compatibility only; VM recovery never calls this hook. */
   loadVmReconcileNegative?(cacheKey: string): Promise<VmReconcileNegativeRecord | null>;
+  /** @deprecated Compatibility only; VM recovery never calls this hook. */
   saveVmReconcileNegative?(record: VmReconcileNegativeRecord): Promise<void>;
+  /** @deprecated Compatibility only; VM recovery never calls this hook. */
   deleteVmReconcileNegative?(cacheKey: string): Promise<void>;
+  /** @deprecated Compatibility only; VM recovery never calls this hook. */
   deleteVmReconcileNegativesForContextGraph?(contextGraphId: string): Promise<void>;
+}
+
+/** @deprecated Retained for custom subscription stores; the runtime no longer consumes these records. */
+export interface VmReconcileNegativeRecord {
+  cacheKey: string;
+  localCgId: string;
+  failures: number;
+  nextRetryAt: number;
+  swmGen: string;
+  candidateNamespaces: Array<{ metaGraph: string; dataGraph: string }>;
+  peerTopologyKey: string;
+  peerTopology?: VmReconcilePeerTopology;
+  cleanMissPeerIds?: string[];
 }
 
 /**
@@ -887,24 +920,13 @@ export interface SelectedVmReconcileCursorRecord {
   watermark: number;
 }
 
-/** Restart-durable, generation-gated record of one authoritative no-match scan. */
-export interface VmReconcileNegativeRecord {
-  cacheKey: string;
-  localCgId: string;
-  failures: number;
-  nextRetryAt: number;
-  swmGen: string;
-  candidateNamespaces: Array<{ metaGraph: string; dataGraph: string }>;
-  /**
-   * Legacy serialized topology contract. Required during the v1-to-v2
-   * migration so existing custom stores can keep reading and persisting the
-   * field they were compiled against.
-   */
-  peerTopologyKey: string;
-  /** Typed topology used by v2-aware stores; absent when loading a legacy row. */
-  peerTopology?: VmReconcilePeerTopology;
-  /** V2 clean-miss evidence; absent legacy records conservatively imply none. */
-  cleanMissPeerIds?: string[];
+/** Fences for experimental transport reuse; never asset or absence authority. */
+export interface VmReconcilePublicCoreHolderCredit {
+  readonly deploymentId: string;
+  readonly lifecycleGeneration: number;
+  readonly bindingGeneration: number;
+  readonly selectedBindingGeneration: number | undefined;
+  readonly candidatePeerIds: readonly string[];
 }
 
 /** Process-local evidence for one chain-ordinal exact-recovery rotation. */
@@ -930,6 +952,12 @@ export interface VmReconcileRotationRecord {
   collectionDeadlineAt: number;
   /** Cursor only; every physical attempt advances it, regardless of outcome. */
   lastAttemptedPeerId?: string;
+  /**
+   * Peers whose last attempt for this target ended without a verdict on their
+   * data and left the target its turn at them (a busy answer, a broken
+   * stream). Ordering only: never read as attempted, present or absent.
+   */
+  streamSetbackPeerIds?: Set<string>;
   failures: number;
   nextRetryAt: number;
 }
@@ -1555,6 +1583,13 @@ export interface DKGAgentConfig {
    * every StorageACK, because it could not promote the ACKed data to VM.
    */
   vmReconcilerEnabled?: boolean;
+  /**
+   * Opt-in switch: prepare the sizing metadata of the next public-graph recovery
+   * batch while the current exact batch transfers, and size candidates with
+   * bounded in-order reads. Advisory planning evidence only. Env
+   * DKG_VM_RECOVERY_PREFETCH_ENABLED wins; default off.
+   */
+  vmRecoveryPrefetchEnabled?: boolean;
   /** Period between automatic sync-reconciler passes. Default: 5 minutes. */
   syncReconcilerIntervalMs?: number;
   /** Age after which a peer is eligible for automatic sync retry. Default: 10 minutes. */
