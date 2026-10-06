@@ -41,8 +41,6 @@ export const UNFOLLOWED_LOADS = new Map([
     "rdf-utils' built dist/rdf-literal-escape.js, which the benchmark passes to its own worker; built from rdf-utils source the rdf-utils rule routes"],
   ['packages/agent/scripts/bench-sync-telemetry.mjs: pathToFileURL(distFile).href',
     "the agent's built dist/sync/attempt-telemetry.js, built from agent source the agent rule routes"],
-  ['scripts/devnet.sh: $cli_entry',
-    "the CLI entry a devnet node starts from (node_cli_entry): packages/cli/dist/cli.js, built from CLI source whose rule selects both lanes that reach devnet.sh (the CLI lane and the browser suite), or a released version's under .devnet-versions/, outside the repository's files"],
   // Files a child-process or worker call runs that no reading resolves.
   ["devnet/rfc64-persistence-lifecycle/run.ts: childArguments(AGENT_PROCESS, stage ? ['--stage'] : [])",
     'agent-process.ts beside it, run under tsx (childArguments puts the script after the loader flags); a devnet file with run.ts\'s own route'],
