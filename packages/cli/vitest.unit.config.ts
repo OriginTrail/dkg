@@ -61,6 +61,7 @@ export default defineConfig({
           // Guarded per-view fan-out on the same route (pure handler).
           'test/memory-search-guarded-query-path.test.ts',
           'test/memory-turn-route.test.ts',
+          'test/chat-turn-persistence-session-recovery.test.ts',
           'test/trust-endpoint-validation.test.ts',
           'test/daemon/plugin-loader.test.ts',
           'test/daemon/routes/plugins.test.ts',
@@ -100,6 +101,7 @@ export default defineConfig({
           'test/context-graph-on-chain-id-helpers.test.ts',
           'test/context-graph-readiness-swm-shortfall.test.ts',
           'test/context-graph-readiness-migration.test.ts',
+          'test/catalog-readiness-replay-integration.test.ts',
           // R9 — PCA advisory wire derivation (pure) + CLI register-agent output
           // rendering (in-process, mocked ApiClient). No hardhat/daemon.
           'test/pca-confirmation-wire.test.ts',
@@ -127,6 +129,7 @@ export default defineConfig({
           'test/nat-status.test.ts',
           'test/core-prereq-check.test.ts',
           'test/random-sampling-status.test.ts',
+          'test/catchup-proof.test.ts',
           'test/catchup-runner.test.ts',
           'test/catchup-runner-worker-impl.test.ts',
           'test/catchup-runner-worker-lifecycle.test.ts',
@@ -156,6 +159,8 @@ export default defineConfig({
           // including preserving a known transaction hash on endpoint exhaustion.
           'test/chain-rpc-transport-status.test.ts',
           'test/async-promote-worker.test.ts',
+          // #2315 — privacy-bounded diagnostics and hostile logger isolation.
+          'test/async-promote-worker-diagnostics.test.ts',
           'test/async-promote-error-classification.test.ts',
           'test/async-promote-publisher-recovery.test.ts',
           'test/async-promote-swm-pointer-recovery.test.ts',

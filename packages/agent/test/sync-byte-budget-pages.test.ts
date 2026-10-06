@@ -1,11 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import {
   contextGraphCatalogUri,
   DEFAULT_MAX_READ_BYTES,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
   SYNC_BYTE_BUDGET_EXACT_MAX_ROWS,
   SYNC_BYTE_BUDGET_PAGE_MODE,
@@ -26,13 +26,18 @@ import {
   serializeResponderRowsWithinByteBudget,
   type SyncRow,
 } from '../src/sync/responder/graph-plan.js';
-import { resolveDurableDataRequestPolicy } from '../src/sync/responder/durable-data-request-policy.js';
+import { resolveSyncResponderRequestProfile } from '../src/sync/responder/page-framing-policy.js';
+import * as wireCompression from '../src/sync/wire-compression.js';
 import {
+  DKG_NS,
   linesFromNquads,
   registerTestSyncHandler,
+  subGraphRegistrationQuads,
+  workspaceOpQuads,
 } from './_helpers/sync-responder.js';
 
 const CG_ID = 'byte-budget-cg';
+const POLICY_UAL = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
 const REMOTE_PEER_ID = '12D3KooWByteBudgetRemote';
 const LOCAL_PEER_ID = '12D3KooWByteBudgetLocal';
 
@@ -85,6 +90,213 @@ function pageFetchParams(overrides: Partial<PageFetchParams> = {}): PageFetchPar
 }
 
 describe('byte-budget sync pagination', () => {
+  it.each(['data', 'meta'] as const)('negotiates shared-memory %s paging above the legacy cap', async (phase) => {
+    const encoded = await buildSyncRequestEnvelope({
+      contextGraphId: CG_ID, offset: 0, limit: SYNC_REQUEST_PAGE_SIZE,
+      includeSharedMemory: true, phase, needsAuth: false,
+      targetPeerId: REMOTE_PEER_ID, requesterPeerId: LOCAL_PEER_ID,
+      computeSyncDigest: () => new Uint8Array(32), getIdentityId: async () => 0n,
+    });
+    expect(new TextDecoder().decode(encoded)).toContain(SYNC_BYTE_BUDGET_PAGE_MODE);
+    expect(resolveSyncResponderRequestProfile({ legacyLimit: 500, includeSharedMemory: true,
+      phase, pageMode: SYNC_BYTE_BUDGET_PAGE_MODE, pageRowsHint: 1200,
+      assetUals: undefined }).framing).toMatchObject({ usesByteBudgetPage: true, limit: 1200 });
+  });
+
+  it('keeps exact compression and export policy behind the durable boundary', () => {
+    const request = { legacyLimit: 128, includeSharedMemory: true, phase: 'data',
+      pageMode: SYNC_BYTE_BUDGET_PAGE_MODE, pageRowsHint: 1200,
+      assetUals: [POLICY_UAL], responseEncoding: 'gzip-nquads-v1' };
+    expect(resolveSyncResponderRequestProfile(request).framing).toMatchObject({
+      usesByteBudgetPage: true, limit: 1200, maxPageBytes: SYNC_BYTE_BUDGET_RESPONSE_BYTES,
+    });
+    expect(resolveSyncResponderRequestProfile(request).durableData).toMatchObject({
+      cacheMode: 'session-snapshot', exactGraphReadMode: 'snapshot-or-page',
+      usesExactAssetExport: false, usesByteBudgetPage: false,
+      maxPageBytes: SYNC_BYTE_BUDGET_RESPONSE_BYTES,
+    });
+    expect(resolveSyncResponderRequestProfile({ ...request, includeSharedMemory: false }).framing).toMatchObject({
+      usesByteBudgetPage: true, limit: 1200, maxPageBytes: 16 * 1024 * 1024,
+    });
+    expect(resolveSyncResponderRequestProfile({ ...request, includeSharedMemory: false }).durableData).toMatchObject({
+      cacheMode: 'page-only', exactGraphReadMode: 'page-only', usesExactAssetExport: true,
+    });
+  });
+
+  it.each([
+    { selection: undefined, rows: 1200, cacheMode: 'session-snapshot' },
+    { selection: [], rows: SYNC_BYTE_BUDGET_EXACT_MAX_ROWS, cacheMode: 'page-only' },
+    { selection: [POLICY_UAL, `${POLICY_UAL.slice(0, -1)}8`], rows: SYNC_BYTE_BUDGET_EXACT_MAX_ROWS, cacheMode: 'page-only' },
+  ])('keeps non-singleton selection $selection on the conservative profile', ({ selection, rows, cacheMode }) => {
+    const profile = resolveSyncResponderRequestProfile({ legacyLimit: 128,
+      includeSharedMemory: false, phase: 'data', pageMode: SYNC_BYTE_BUDGET_PAGE_MODE,
+      pageRowsHint: 1200, assetUals: selection, responseEncoding: 'gzip-nquads-v1' });
+    expect(profile.compression).toBeUndefined();
+    expect(profile.framing).toMatchObject({ usesByteBudgetPage: true, limit: rows,
+      maxPageBytes: SYNC_BYTE_BUDGET_RESPONSE_BYTES });
+    expect(profile.durableData).toMatchObject({ cacheMode, usesExactAssetExport: false });
+  });
+
+  it('uses the actual selection to negotiate once and passes that profile through encoding', async () => {
+    const store = new OxigraphStore();
+    const negotiation = vi.spyOn(wireCompression, 'resolveExactSyncGzipProfile');
+    const encode = vi.spyOn(wireCompression, 'encodeResolvedExactSyncResponse');
+    try {
+      const cap = registerTestSyncHandler(store);
+      await cap.invoke({ contextGraphId: CG_ID, offset: 0, limit: 128,
+        includeSharedMemory: false, phase: 'meta', assetUals: [POLICY_UAL],
+        pageMode: SYNC_BYTE_BUDGET_PAGE_MODE, pageRowsHint: 1200,
+        responseEncoding: 'gzip-nquads-v1' });
+      expect(negotiation).toHaveBeenCalledOnce();
+      expect(negotiation.mock.calls[0]?.[0]).toMatchObject({ assetUals: [POLICY_UAL], phase: 'meta' });
+      expect(encode).toHaveBeenCalledOnce();
+      expect(encode.mock.calls[0]?.[1].profile).toBe(negotiation.mock.results[0]?.value);
+    } finally { negotiation.mockRestore(); encode.mockRestore(); await store.close(); }
+  });
+
+  it.each(['data', 'meta'] as const)('serves shared-memory %s row hints with byte-budget negotiation', async (phase) => {
+    const store = new OxigraphStore();
+    try {
+      const contextGraphId = 'byte-budget-swm';
+      const graph = `did:dkg:context-graph:${contextGraphId}/_shared_memory${phase === 'meta' ? '_meta' : ''}`;
+      await store.insert(Array.from({ length: 1200 }, (_, i) => ({ graph,
+        subject: `urn:swm:${i}`, predicate: 'urn:value', object: `"value-${i}"` })));
+      const cap = registerTestSyncHandler(store, { syncPageSize: 128 });
+      const request = { contextGraphId, offset: 0, limit: 128, includeSharedMemory: true, phase };
+      expect(linesFromNquads(await cap.invoke(request))).toHaveLength(128);
+      const upgraded = await cap.invoke({ ...request, pageMode: SYNC_BYTE_BUDGET_PAGE_MODE, pageRowsHint: 1200 });
+      expect(linesFromNquads(upgraded)).toHaveLength(1200);
+      expect(new TextEncoder().encode(upgraded).byteLength).toBeLessThanOrEqual(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
+    } finally { await store.close(); }
+  });
+
+  it.each(['data', 'meta'] as const)('bounds shared-memory %s bytes and resumes the emitted row prefix', async (phase) => {
+    const store = new OxigraphStore();
+    let clock: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      const contextGraphId = 'byte-fit-swm';
+      const graph = `did:dkg:context-graph:${contextGraphId}/_shared_memory${phase === 'meta' ? '_meta' : ''}`;
+      await store.insert(Array.from({ length: 220 }, (_, i) => ({ graph,
+        subject: `urn:swm:${String(i).padStart(4, '0')}`, predicate: 'urn:value',
+        object: `"${'x'.repeat(22_000)}"` })));
+      const cap = registerTestSyncHandler(store, { syncPageSize: 128, snapshotBudget: {
+        maxRows: 300, maxSnapshotRows: 300,
+        maxBytesEstimate: 64 * 1024 * 1024, maxSnapshotBytesEstimate: 64 * 1024 * 1024,
+      } });
+      const request = { contextGraphId, limit: 128, includeSharedMemory: true, phase,
+        syncSessionId: `swm-byte-fit-${phase}`, pageMode: SYNC_BYTE_BUDGET_PAGE_MODE, pageRowsHint: 1200 };
+      const first = await cap.invoke({ ...request, offset: 0 });
+      const firstRows = linesFromNquads(first);
+      expect(firstRows.length).toBeGreaterThan(128);
+      expect(firstRows.length).toBeLessThan(220);
+      expect(new TextEncoder().encode(first).byteLength).toBeLessThanOrEqual(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
+      const competitor = { ...request, syncSessionId: `competing-${phase}`, offset: 0 };
+      await expect(cap.invoke(competitor, 'competing-peer')).rejects.toThrow(/global rows budget/u);
+      const now = Date.now();
+      clock = vi.spyOn(Date, 'now').mockImplementation(() => now + 31_000);
+      const second = await cap.invoke({ ...request, offset: firstRows.length });
+      const allRows = [...firstRows, ...linesFromNquads(second)];
+      expect(allRows).toHaveLength(220);
+      expect(new Set(allRows).size).toBe(220);
+      expect(new TextEncoder().encode(second).byteLength).toBeLessThanOrEqual(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
+      expect(await cap.invoke({ ...request, offset: allRows.length })).toBe('');
+      // Empty EOF releases the pin, so the competing snapshot can evict it.
+      expect(linesFromNquads(await cap.invoke(competitor, 'competing-peer')).length).toBeGreaterThan(128);
+    } finally { clock?.mockRestore(); await store.close(); }
+  });
+
+  it.each(['meta', 'data'] as const)('continues byte-truncated TTL %s store windows through empty EOF', async (phase) => {
+    const store = new OxigraphStore();
+    try {
+      const contextGraphId = `ttl-byte-fit-${phase}`;
+      const rootGraph = `did:dkg:context-graph:${contextGraphId}/_shared_memory`;
+      const subGraph = `did:dkg:context-graph:${contextGraphId}/subx/_shared_memory`;
+      const now = Math.floor(Date.now() / 1_000) * 1_000 + 230;
+      const fresh = new Date(now - 1_000).toISOString();
+      const stale = new Date(now - 600_000).toISOString();
+      const freshMeta: Quad[] = [];
+      const freshData: Quad[] = [];
+      const staleRows: Quad[] = [];
+      const seedOperation = (index: number, timestamp: string, admitted: boolean) => {
+        const graph = index % 2 === 0 ? rootGraph : subGraph;
+        const id = `${admitted ? 'fresh' : 'stale'}-${String(index).padStart(4, '0')}`;
+        const root = `urn:ttl-root:${id}`;
+        const meta = workspaceOpQuads(contextGraphId, id, root, `${graph}_meta`, timestamp);
+        meta.push({ graph: `${graph}_meta`, subject: meta[0]!.subject,
+          predicate: `${DKG_NS}note`, object: `"${id}:${'x'.repeat(22_000)}"` });
+        const data = { graph, subject: root, predicate: 'urn:value',
+          object: `"${id}:${'y'.repeat(22_000)}"` };
+        if (admitted) { freshMeta.push(...meta); freshData.push(data); }
+        else staleRows.push(...meta, data);
+      };
+      for (let index = 0; index < 220; index += 1) seedOperation(index, fresh, true);
+      for (let index = 0; index < 20; index += 1) seedOperation(index, stale, false);
+      await store.insert([
+        ...subGraphRegistrationQuads(contextGraphId, 'subx'),
+        ...freshMeta, ...freshData, ...staleRows,
+        { graph: rootGraph, subject: 'urn:ttl-root:unshared', predicate: 'urn:value', object: '"unshared"' },
+        { graph: `${rootGraph}_meta`, subject: 'urn:ttl-op:undated', predicate: `${DKG_NS}note`, object: '"undated"' },
+      ]);
+      // Compare against persisted RDF, including the backend's dateTime lexical
+      // normalization, independently of the paginated responder's window reads.
+      const sourceRows = phase === 'meta' ? freshMeta : freshData;
+      const subjects = new Set(sourceRows.map(quad => quad.subject));
+      const persisted: Quad[] = [];
+      for (const graph of new Set(sourceRows.map(quad => quad.graph))) {
+        const result = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graph}> { ?s ?p ?o } }`);
+        expect(result.type).toBe('quads');
+        if (result.type === 'quads') persisted.push(...result.quads.filter(quad => subjects.has(quad.subject)).map(quad => ({ ...quad, graph })));
+      }
+      expect(persisted).toHaveLength(sourceRows.length);
+      const expected = new Set(persisted.map((quad) =>
+        `<${quad.subject}> <${quad.predicate}> ${quad.object.startsWith('"') ? quad.object : `<${quad.object}>`} <${quad.graph}> .`,
+      ));
+      expect(new TextEncoder().encode([...expected].join('\n')).byteLength)
+        .toBeGreaterThan(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
+      let windowReads = 0;
+      const originalQuery = store.query.bind(store);
+      vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+        if (options?.source === (phase === 'meta'
+          ? 'sync.responder.readFreshSwmMetaSubjectRows'
+          : 'sync.responder.readFreshSwmDataRowsPage')) windowReads += 1;
+        return originalQuery(sparql, options);
+      });
+      const cap = registerTestSyncHandler(store, {
+        sharedMemoryTtlMs: 60_000, syncPageSize: 128,
+        snapshotBudget: { maxRows: 1_000_000, maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+          maxSnapshotRows: 1, maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER },
+      });
+      const request = { contextGraphId, limit: 128, includeSharedMemory: true, phase,
+        syncSessionId: `ttl-byte-fit-${phase}`, pageMode: SYNC_BYTE_BUDGET_PAGE_MODE, pageRowsHint: 2_000 };
+      const collected: string[] = [];
+      const requestedOffsets: number[] = [];
+      const pageLengths: number[] = [];
+      let reachedEmptyEof = false;
+      for (let page = 0; page < 10; page += 1) {
+        requestedOffsets.push(collected.length);
+        const previousWindowReads = windowReads;
+        const response = await cap.invoke({ ...request, offset: collected.length });
+        expect(new TextEncoder().encode(response).byteLength).toBeLessThanOrEqual(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
+        const rows = linesFromNquads(response);
+        if (rows.length === 0) { reachedEmptyEof = true; break; }
+        // Every continuation rereads its subject/graph window, proving this is
+        // the forced store fallback rather than the cached unfiltered lane.
+        expect(windowReads).toBeGreaterThan(previousWindowReads);
+        pageLengths.push(rows.length);
+        collected.push(...rows);
+      }
+      expect(reachedEmptyEof).toBe(true);
+      expect(pageLengths.length).toBeGreaterThan(1);
+      expect(pageLengths[0]).toBeLessThan(expected.size);
+      expect(pageLengths[0]).toBeLessThan(request.pageRowsHint);
+      expect(requestedOffsets).toEqual([0, ...pageLengths.map((_, index) =>
+        pageLengths.slice(0, index + 1).reduce((sum, count) => sum + count, 0))]);
+      expect(collected).toHaveLength(expected.size);
+      expect(new Set(collected).size).toBe(collected.length);
+      expect(new Set(collected)).toEqual(expected);
+    } finally { await store.close(); }
+  });
+
   it('advertises byte-budget paging in an unauthenticated public request', async () => {
     const encoded = await buildSyncRequestEnvelope({
       contextGraphId: CG_ID,
@@ -160,14 +372,14 @@ describe('byte-budget sync pagination', () => {
       pageRowsHint: SYNC_REQUEST_SAFE_PAGE_SIZE,
       assetUals: [exactUal],
     });
-    expect(resolveDurableDataRequestPolicy({
+    expect(resolveSyncResponderRequestProfile({
       legacyLimit: request.limit,
       includeSharedMemory: false,
       phase: request.phase,
       pageMode: request.pageMode,
       pageRowsHint: request.pageRowsHint,
-      hasExactAssetFilter: true,
-    })).toEqual({
+      assetUals: [POLICY_UAL],
+    }).durableData).toEqual({
       usesByteBudgetPage: true,
       limit: SYNC_REQUEST_SAFE_PAGE_SIZE,
       cacheMode: 'page-only',
@@ -637,14 +849,14 @@ describe('byte-budget sync pagination', () => {
   });
 
   it('derives exact-fetch resource policy without trusting signature fields', () => {
-    expect(resolveDurableDataRequestPolicy({
+    expect(resolveSyncResponderRequestProfile({
       legacyLimit: SYNC_PAGE_SIZE,
       includeSharedMemory: false,
       phase: 'data',
       pageMode: SYNC_BYTE_BUDGET_PAGE_MODE,
       pageRowsHint: SYNC_REQUEST_PAGE_SIZE,
-      hasExactAssetFilter: true,
-    })).toEqual({
+      assetUals: [POLICY_UAL],
+    }).durableData).toEqual({
       usesByteBudgetPage: true,
       limit: SYNC_BYTE_BUDGET_EXACT_MAX_ROWS,
       cacheMode: 'page-only',
@@ -653,14 +865,14 @@ describe('byte-budget sync pagination', () => {
       usesExactAssetExport: false,
     });
 
-    expect(resolveDurableDataRequestPolicy({
+    expect(resolveSyncResponderRequestProfile({
       legacyLimit: SYNC_PAGE_SIZE,
       includeSharedMemory: false,
       phase: 'data',
       pageMode: SYNC_BYTE_BUDGET_PAGE_MODE,
       pageRowsHint: SYNC_REQUEST_PAGE_SIZE,
-      hasExactAssetFilter: false,
-    })).toEqual({
+      assetUals: undefined,
+    }).durableData).toEqual({
       usesByteBudgetPage: true,
       limit: SYNC_REQUEST_PAGE_SIZE,
       cacheMode: 'session-snapshot',

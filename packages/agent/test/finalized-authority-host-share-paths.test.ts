@@ -289,6 +289,77 @@ describe('finalized authority on the SWM host/sync and share paths', () => {
       .toEqual([member.agentAddress.toLowerCase()]);
   });
 
+  it('resolves private recipients once while the SWM gossip subscription of the graph is reconciled', async () => {
+    const privateGraph = 'finalized-share-private-reconciled';
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'FinalizedShareReconciles', chainAdapter: chain });
+    const internals = agent as unknown as {
+      gossip: unknown;
+      contextGraphMetaProjection: {
+        readonly readAuthorityFactsRevision: number;
+        readContextGraphAuthorityFactsRevision(contextGraphId: string): string;
+      };
+      reconcileSharedMemoryGossipSubscription(contextGraphId: string): Promise<void>;
+    };
+    // A live gossip session, so that a reconcile runs its whole course.
+    internals.gossip = {
+      subscribe: vi.fn(),
+      unsubscribe: vi.fn(),
+      onMessage: vi.fn(),
+      publish: vi.fn(async () => undefined),
+      getSubscribers: () => [],
+    };
+    const member = await agent.registerAgent('Reconciled private member');
+    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
+      .mockResolvedValue(registeredBinding(14n));
+    installFinalizedAuthorityReader(chain, [
+      finalizedAuthoritySnapshot(14n, agent.contextGraphNameCommitment(privateGraph), {
+        accessPolicy: 1,
+        participantAgents: [member.agentAddress],
+      }),
+    ]);
+    vi.spyOn(agent, 'resolveLiveOnChainAccessPolicyState').mockResolvedValue({
+      kind: 'available',
+      accessPolicy: 1,
+      participantAgents: [member.agentAddress],
+    });
+    vi.spyOn(agent, 'hasConfirmedSharedMemoryMetaState').mockResolvedValue(true);
+    const accessChecks = vi.spyOn(agent, 'canUseSharedMemoryForContextGraph');
+    // Only the recipient resolver asks for the live roster. Each of its reads
+    // after the first, one per stability attempt, starts a reconcile.
+    const readTransport = agent.resolveSwmTransportAuthority.bind(agent);
+    const reconciles: Promise<void>[] = [];
+    let recipientReads = 0;
+    vi.spyOn(agent, 'resolveSwmTransportAuthority').mockImplementation((contextGraphId, options) => {
+      if (options?.requireLiveRosterForPrivate === true) {
+        recipientReads += 1;
+        if (recipientReads > 1) {
+          reconciles.push(internals.reconcileSharedMemoryGossipSubscription(privateGraph));
+        }
+      }
+      return readTransport(contextGraphId, options);
+    });
+    const projection = internals.contextGraphMetaProjection;
+    const nodeWide = projection.readAuthorityFactsRevision;
+    const perGraph = projection.readContextGraphAuthorityFactsRevision(privateGraph);
+
+    const resolution = await agent.resolveWorkspaceAgentRecipientsForCurrentAuthority({
+      contextGraphId: privateGraph,
+    });
+    await Promise.all(reconciles);
+
+    expect(resolution.requiresEncryption).toBe(true);
+    expect(resolution.recipients.map((recipient) => recipient.agentAddress.toLowerCase()))
+      .toEqual([member.agentAddress.toLowerCase()]);
+    // One read selects keys and one confirms them: the reconcile wrote no
+    // authority fact, so it cost no further attempt and moved no revision.
+    expect(recipientReads).toBe(2);
+    expect(reconciles).toHaveLength(1);
+    expect(accessChecks).toHaveBeenCalledWith(privateGraph);
+    expect(projection.readAuthorityFactsRevision).toBe(nodeWide);
+    expect(projection.readContextGraphAuthorityFactsRevision(privateGraph)).toBe(perGraph);
+  });
+
   it('admits host-mode gossip from the finalized roster without a live RPC', async () => {
     const contextGraphId = 'finalized-host-gossip';
     const chain = new MockChainAdapter();

@@ -150,6 +150,16 @@ class InFlightAdmissionAttempt {
   }
 }
 
+/**
+ * A retryable identity-probe failure.
+ *
+ * Logging contract: the coordinator logs the failed probe itself, once, with
+ * its reason and the backoff it starts. A backed-off skip throws this error
+ * too, but no new probe ran: it repeats the reason of the probe that opened
+ * the backoff window. Callers handle the error without logging it again
+ * (GH#1578: one warning per failed probe, not one per connection callback).
+ * A new throw site must keep that contract or use another error type.
+ */
 export class NetworkAdmissionProbeError extends Error {
   readonly code = 'NETWORK_ADMISSION_PROBE_FAILED';
 
@@ -376,13 +386,25 @@ export class NetworkAdmissionCoordinator {
     }
   }
 
+  /**
+   * Suffix for the one warning a failed probe gets. The skips inside the
+   * backoff window are not logged, so that warning states the window.
+   */
+  private describeProbeBackoff(remotePeer: CanonicalPeerId): string {
+    const backoff = this.admission.getRetryableProbeBackoff(remotePeer);
+    return backoff ? ` (automatic probes paused for ${backoff.retryAfterMs}ms)` : '';
+  }
+
   private throwTransientProbeFailure(
     remotePeer: CanonicalPeerId,
     ctx: OperationContext,
     message: string,
   ): never {
     this.admission.rememberRetryableProbeFailure(remotePeer, message, 'transient');
-    this.log?.warn(ctx, `Network identity probe for ${remotePeer.slice(-8)} failed retryably: ${message}`);
+    this.log?.warn(
+      ctx,
+      `Network identity probe for ${remotePeer.slice(-8)} failed retryably: ${message}${this.describeProbeBackoff(remotePeer)}`,
+    );
     throw new NetworkAdmissionProbeError(remotePeer, message);
   }
 
@@ -442,7 +464,10 @@ export class NetworkAdmissionCoordinator {
       // bytes, and the backoff reason is re-interpolated into later thrown
       // errors and logs. The raw message is still logged once, below.
       this.admission.rememberRetryableProbeFailure(remotePeer, 'unreadable response', 'unreadable-response');
-      this.log?.warn(ctx, `Network identity probe for ${remotePeer.slice(-8)} returned unreadable response: ${message}`);
+      this.log?.warn(
+        ctx,
+        `Network identity probe for ${remotePeer.slice(-8)} returned unreadable response: ${message}${this.describeProbeBackoff(remotePeer)}`,
+      );
       throw new NetworkAdmissionProbeError(remotePeer, message);
     }
 

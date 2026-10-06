@@ -36,6 +36,11 @@ export function createAbortError(reason: unknown): Error {
   return error;
 }
 
+/** Refuse cancelled work using the canonical normalized AbortError. */
+export function throwIfOperationAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw createAbortError(signal.reason);
+}
+
 /**
  * Run one lazily-started operation with a caller-abort and deadline boundary.
  *

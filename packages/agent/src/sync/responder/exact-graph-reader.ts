@@ -7,7 +7,8 @@ import { SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE, SYNC_RESPONDER_SNAPSH
   type SyncRow } from './snapshot-cache.js';
 import { SyncRowSnapshotBudgetError } from './snapshot-budget.js';
 import { estimateStringRowHeapBytes } from '../memory-telemetry.js';
-import { compareRows, formatTerm } from './row-serialization.js';
+import { compareRows } from './row-serialization.js';
+import { exactGraphCursorFilter, hasUnsupportedExactGraphCursorTerm } from './exact-graph-cursor-filter.js';
 import { raceAgainstAbort, throwIfAborted, type RowListCache } from './responder-row-page.js';
 const DKG = 'http://dkg.io/ontology/';
 const DKG_CONTENT_SCOPE_VERSION = `${DKG}contentScopeVersion`;
@@ -100,7 +101,13 @@ export async function readGraphScopedVmManifest(
   store: TripleStore,
   contextGraphId: string,
   signal?: AbortSignal,
+  assetUals?: readonly string[],
 ): Promise<GraphScopedVmManifest> {
+  if (assetUals?.length === 0) return {
+    confirmedEntries: [], confirmedGraphs: new Set(), knownGraphs: new Set(),
+  };
+  const selection = assetUals === undefined ? ''
+    : `VALUES ?ual { ${[...new Set(assetUals)].map(ual => `<${assertSafeIri(ual)}>`).join(' ')} }`;
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const contextGraph = contextGraphDataGraphUri(contextGraphId);
   const maxRows = SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS;
@@ -145,6 +152,7 @@ export async function readGraphScopedVmManifest(
   // legacy compatibility lane.
   const markerBindings = await readBoundedBindings(`
     SELECT ?ual ?scopeVersion WHERE {
+      ${selection}
       GRAPH <${assertSafeIri(metaGraph)}> {
         ?ual <${DKG_CONTENT_SCOPE_VERSION}> ?scopeVersion .
       }
@@ -188,6 +196,7 @@ export async function readGraphScopedVmManifest(
       SELECT ?ual ?scopeVersion ?kaUal ?assertionVersion ?assertionGraph
              ?contextGraph ?publicTripleCount ?privateTripleCount ?status ?subGraphName
       WHERE {
+        ${selection}
         GRAPH <${assertSafeIri(metaGraph)}> {
           ?ual <${DKG_CONTENT_SCOPE_VERSION}> ?scopeVersion ;
                <${DKG_KA_UAL}> ?kaUal ;
@@ -396,112 +405,6 @@ function exactGraphCursorBytes(cursor: ExactGraphPageCursor | null): number {
   return cursor ? 128 + (cursor.graph.length + cursor.s.length + cursor.p.length + cursor.o.length) * 2 : 32;
 }
 
-/** Datatypes whose SPARQL value comparison is numeric/date-like, not lexical. */
-const SPARQL_VALUE_ORDERED_DATATYPES = [
-  'http://www.w3.org/2001/XMLSchema#boolean',
-  'http://www.w3.org/2001/XMLSchema#date',
-  'http://www.w3.org/2001/XMLSchema#dateTime',
-  'http://www.w3.org/2001/XMLSchema#dateTimeStamp',
-  'http://www.w3.org/2001/XMLSchema#dayTimeDuration',
-  'http://www.w3.org/2001/XMLSchema#decimal',
-  'http://www.w3.org/2001/XMLSchema#double',
-  'http://www.w3.org/2001/XMLSchema#duration',
-  'http://www.w3.org/2001/XMLSchema#float',
-  'http://www.w3.org/2001/XMLSchema#gDay',
-  'http://www.w3.org/2001/XMLSchema#gMonth',
-  'http://www.w3.org/2001/XMLSchema#gMonthDay',
-  'http://www.w3.org/2001/XMLSchema#gYear',
-  'http://www.w3.org/2001/XMLSchema#gYearMonth',
-  'http://www.w3.org/2001/XMLSchema#integer',
-  'http://www.w3.org/2001/XMLSchema#nonNegativeInteger',
-  'http://www.w3.org/2001/XMLSchema#nonPositiveInteger',
-  'http://www.w3.org/2001/XMLSchema#negativeInteger',
-  'http://www.w3.org/2001/XMLSchema#positiveInteger',
-  'http://www.w3.org/2001/XMLSchema#long',
-  'http://www.w3.org/2001/XMLSchema#int',
-  'http://www.w3.org/2001/XMLSchema#short',
-  'http://www.w3.org/2001/XMLSchema#time',
-  'http://www.w3.org/2001/XMLSchema#byte',
-  'http://www.w3.org/2001/XMLSchema#unsignedLong',
-  'http://www.w3.org/2001/XMLSchema#unsignedInt',
-  'http://www.w3.org/2001/XMLSchema#unsignedShort',
-  'http://www.w3.org/2001/XMLSchema#unsignedByte',
-  'http://www.w3.org/2001/XMLSchema#yearMonthDuration',
-] as const;
-
-const SPARQL_VALUE_ORDERED_DATATYPE_VALUES = SPARQL_VALUE_ORDERED_DATATYPES
-  .map((datatype) => `<${datatype}>`)
-  .join(', ');
-
-function hasValueOrderedDatatype(term: string): boolean {
-  return SPARQL_VALUE_ORDERED_DATATYPES
-    .some((datatype) => term.endsWith(`^^<${datatype}>`));
-}
-
-function hasUnsupportedExactGraphCursorTerm(cursor: ExactGraphPageCursor): boolean {
-  // SPARQL exposes no portable ordering relation for blank-node identifiers.
-  // Ordered XSD values also cannot be continued portably with `>`: float and
-  // double admit NaN, duration comparison can be partial, and distinct lexical
-  // forms can denote the same date/time or numeric value. ORDER BY can still
-  // place those terms after the cursor even when `>` is false. Falling back
-  // preserves the pre-existing deterministic path for each unsafe boundary.
-  return [cursor.s, cursor.p, cursor.o].some((term) => (
-    term.startsWith('_:') || hasValueOrderedDatatype(term)
-  ));
-}
-
-/**
- * Build a SPARQL predicate for one term being strictly after a cursor term in
- * the backend's `ORDER BY` order. IRI rank is explicit, while
- * literal values use value comparison for ordered XSD datatypes and lexical
- * comparison otherwise.  The datatype/language tie-break mirrors Oxigraph's
- * RDF-term ordering and is covered by the mixed-term regression fixture.
- */
-function termAfterExactGraphCursor(variable: string, cursorTerm: string): string {
-  const formatted = formatTerm(cursorTerm);
-  if (!cursorTerm.startsWith('"')) {
-    return `(isLiteral(${variable}) || (isIRI(${variable}) && STR(${variable}) > STR(${formatted})))`;
-  }
-  return `(
-    isLiteral(${variable}) && (
-      (
-        STR(${variable}) > STR(${formatted})
-        && !(
-          DATATYPE(${variable}) = DATATYPE(${formatted})
-          && DATATYPE(${variable}) IN (${SPARQL_VALUE_ORDERED_DATATYPE_VALUES})
-        )
-      )
-      || (
-        STR(${variable}) = STR(${formatted}) && (
-          STR(DATATYPE(${variable})) > STR(DATATYPE(${formatted}))
-          || (
-            DATATYPE(${variable}) = DATATYPE(${formatted})
-            && LANG(${variable}) > LANG(${formatted})
-          )
-        )
-      )
-      || (
-        DATATYPE(${variable}) = DATATYPE(${formatted})
-        && DATATYPE(${variable}) IN (${SPARQL_VALUE_ORDERED_DATATYPE_VALUES})
-        && ${variable} > ${formatted}
-      )
-    )
-  )`;
-}
-
-function exactGraphCursorFilter(cursor: ExactGraphPageCursor): string {
-  const s = formatTerm(cursor.s);
-  const p = formatTerm(cursor.p);
-  return `(
-    ${termAfterExactGraphCursor('?s', cursor.s)}
-    || (?s = ${s} && ${termAfterExactGraphCursor('?p', cursor.p)})
-    || (
-      ?s = ${s}
-      && ?p = ${p}
-      && ${termAfterExactGraphCursor('?o', cursor.o)}
-    )
-  )`;
-}
 
 function rememberExactGraphPageCursor(
   plan: ExactGraphPagePlan,

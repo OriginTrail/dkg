@@ -19,6 +19,8 @@ import {
 } from '../src/rfc64/catalog-replay-recovery-runtime-v1.js';
 import { computeRfc64AppliedInventoryDigestV1 } from
   '../src/rfc64/public-catalog-inventory-completeness-v1.js';
+import { composeRfc64UnregisteredCatalogAuthorityV1 } from
+  '../src/rfc64/release-native-catalog-authority-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
   RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
@@ -825,6 +827,153 @@ describe('RFC-64 operational status: provider failure reporting', () => {
       providerHealth: expect.objectContaining({ unresolvedReplayPeers: 1 }),
     });
     expect(status.stableReason).not.toBe('catalog-replay-incomplete');
+  });
+
+  it.each([
+    { authors: 'the owner alone', accessPolicy: 1 as const, memberAddresses: [AUTHOR], soleAuthor: true },
+    {
+      authors: 'the owner and another member',
+      accessPolicy: 1 as const,
+      memberAddresses: [AUTHOR, `0x${'ab'.repeat(20)}` as typeof AUTHOR],
+      soleAuthor: false,
+    },
+    { authors: 'anyone, in a public graph', accessPolicy: 0 as const, memberAddresses: [], soleAuthor: false },
+  ])('keeps curated local owner parity when nonproviders cannot corroborate its head only if the owner is the sole author (authors: $authors)', async ({ accessPolicy, memberAddresses, soleAuthor }) => {
+    const contextGraphId = `${AUTHOR}/curated-owner-replay`;
+    const edge = await startAgent({
+      name: 'curated-owner-replay',
+      activation: activation('catalog'),
+    });
+    const authority = composeRfc64UnregisteredCatalogAuthorityV1({
+      networkId: NETWORK_ID,
+      contextGraphId,
+      ownerAddress: AUTHOR,
+      accessPolicy,
+      publishPolicy: 0,
+      publishAuthorityAccountId: '0',
+      memberAddresses,
+      rosterVersion: '0',
+    });
+    edge.acceptRfc64CatalogAccessSnapshotV1({
+      policy: authority.policy,
+      policyDigest: authority.policyDigest,
+      roster: authority.roster,
+    });
+    const localAgents = vi.spyOn(edge, 'listLocalAgents').mockReturnValue([
+      { agentAddress: AUTHOR },
+    ] as ReturnType<typeof edge.listLocalAgents>);
+    vi.spyOn(edge, 'readRfc64CatalogResponsibilitiesV1').mockReturnValue([{
+      contextGraphId,
+      responsible: true,
+      responsibilityReason: 'private-membership',
+      active: true,
+      mode: 'catalog',
+      selectionSource: 'default',
+    }]);
+    const scope = Object.freeze({
+      networkId: NETWORK_ID,
+      contextGraphId,
+      governanceChainId: null,
+      governanceContractAddress: null,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0',
+      bucketCount: '1',
+    }) as AuthorCatalogScopeV1;
+    const publication = await edge.publishAuthorCatalogGenesisV1({
+      scope,
+      author: Object.freeze({
+        address: AUTHOR,
+        signMessage: (digest: Uint8Array) => AUTHOR_WALLET.signMessage(digest),
+      }),
+      peers: [],
+      issuedAt: GENESIS_ISSUED_AT,
+      catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
+      catalogIssuerDelegationExpiresAt: DELEGATION_EXPIRES_AT,
+    });
+    const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(scope);
+    const persistence = (edge as any).rfc64PersistenceV1;
+    persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
+      catalogScopeDigest,
+      authorAddress: AUTHOR,
+      expectedCurrentCatalogHeadDigest: null,
+      currentCatalogHeadDigest: publication.headObjectDigest,
+      appliedInventoryDigest: computeRfc64AppliedInventoryDigestV1({
+        catalogScopeDigest,
+        rows: [],
+      }),
+      catalogVersion: publication.announcement.catalogVersion,
+      inventoryRowCount: '0',
+    });
+    const nonprovider = '12D3KooWCuratedNonprovider';
+    vi.spyOn(edge.node.libp2p, 'getPeers').mockReturnValue([
+      { toString: () => nonprovider },
+    ] as never);
+    vi.spyOn(replayService(edge), 'requestCatalogHeadReplay').mockRejectedValue(
+      new Rfc64PublicCatalogTransportErrorV1(
+        'catalog-transport-wire',
+        'nonprovider did not answer replay',
+      ),
+    );
+
+    await edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(contextGraphId);
+    const status = (await edge.readRfc64CatalogOperationalStatusV1())
+      .find((row) => row.contextGraphId === contextGraphId);
+    if (!soleAuthor) {
+      // Another member, or any author of a public graph, may hold a catalog
+      // this node never heard of: nothing corroborated the inventory.
+      expect(status).toMatchObject({
+        authorityState: 'accepted',
+        phase: 'unknown-freshness',
+        expectedRowCount: null,
+        missingRowCount: null,
+      });
+      return;
+    }
+    expect(status).toMatchObject({
+      authorityState: 'accepted',
+      appliedRowCount: '0',
+      expectedRowCount: '0',
+      missingRowCount: '0',
+      stableReason: null,
+    });
+    expect(status?.expectedCatalogHeadDigest).toBe(status?.appliedCatalogHeadDigest);
+    expect(status?.expectedInventoryDigest).toBe(status?.appliedInventoryDigest);
+
+    localAgents.mockReturnValue([]);
+    const unowned = (await edge.readRfc64CatalogOperationalStatusV1())
+      .find((row) => row.contextGraphId === contextGraphId);
+    expect(unowned).toMatchObject({
+      phase: 'unknown-freshness',
+      expectedRowCount: null,
+      missingRowCount: null,
+    });
+
+    // The roster rotates to one member who is not the owner. The owner's heads
+    // stay applied, but the only author now allowed is someone else.
+    localAgents.mockReturnValue([
+      { agentAddress: AUTHOR },
+    ] as ReturnType<typeof edge.listLocalAgents>);
+    const rotated = composeRfc64UnregisteredCatalogAuthorityV1({
+      networkId: NETWORK_ID,
+      contextGraphId,
+      ownerAddress: AUTHOR,
+      accessPolicy,
+      publishPolicy: 0,
+      publishAuthorityAccountId: '0',
+      memberAddresses: [`0x${'ab'.repeat(20)}` as typeof AUTHOR],
+      rosterVersion: '1',
+    });
+    (edge as any).rfc64PublicCatalogServiceV1.acceptAuthoritativePolicySnapshot({
+      policy: rotated.policy,
+      policyDigest: rotated.policyDigest,
+      roster: rotated.roster,
+    });
+    const otherSoleMember = (await edge.readRfc64CatalogOperationalStatusV1())
+      .find((row) => row.contextGraphId === contextGraphId);
+    expect(otherSoleMember?.phase).not.toBe('complete');
+    expect(otherSoleMember).toMatchObject({ expectedRowCount: null, missingRowCount: null });
   });
 
   it('reports a verified promised row missing after its head announcement was lost', async () => {
