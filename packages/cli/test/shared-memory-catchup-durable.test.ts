@@ -1440,5 +1440,35 @@ describe('POST /api/shared-memory/host-catchup', () => {
     expect(res.statusCode).toBe(200);
     expect(catchupSwmFromConnectedHosts).toHaveBeenCalledWith('host-cg', { peers: undefined, sinceSeqno: 0, maxRounds: 8 });
   });
+
+  it.each([[''], ['   '], [7], [undefined]])('rejects a contextGraphId of %j with a 400 and does not call the agent', async (contextGraphId) => {
+    const catchupSwmFromConnectedHosts = vi.fn(async () => [peerResult]);
+    const { ctx, res } = buildCatchupCtx({ contextGraphId }, { catchupSwmFromConnectedHosts }, HOST_CATCHUP);
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body)).toEqual({ error: 'Missing or invalid "contextGraphId"' });
+    expect(catchupSwmFromConnectedHosts).not.toHaveBeenCalled();
+  });
+
+  it('answers 501 on an agent build without host catch-up', async () => {
+    const { ctx, res } = buildCatchupCtx({ contextGraphId: 'host-cg' }, {}, HOST_CATCHUP);
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(501);
+    expect(JSON.parse(res.body)).toEqual({ error: 'Host-catchup is not supported on this agent build' });
+  });
+
+  it('answers 500 with the agent\'s message when the catch-up throws', async () => {
+    const catchupSwmFromConnectedHosts = vi.fn(async () => { throw new Error('no connected hosting core'); });
+    const { ctx, res } = buildCatchupCtx({ contextGraphId: 'host-cg' }, { catchupSwmFromConnectedHosts }, HOST_CATCHUP);
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(500);
+    expect(JSON.parse(res.body)).toEqual({ error: 'no connected hosting core' });
+  });
 });
 
