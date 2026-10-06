@@ -787,10 +787,11 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         });
         expect((agent as any).config.syncContextGraphs ?? []).not.toContain(pendingId);
         await expect(agent.canReadContextGraph(pendingId)).resolves.toBe(false);
-        expect(recoverPendingMetadata).toHaveBeenCalledWith(pendingId, '12D3KooWRestartCurator0');
+        expect(recoverPendingMetadata).toHaveBeenCalledWith(pendingId, '12D3KooWRestartCurator0', undefined);
         expect(resumePendingMetadata).toHaveBeenCalledWith(
           pendingId,
           '12D3KooWRestartCurator0',
+          undefined,
         );
         expect(agent.getSubscribedContextGraphs().get(confirmedId)).toMatchObject({
           subscribed: true,
@@ -802,6 +803,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(recoverPendingMetadata).not.toHaveBeenCalledWith(
           confirmedId,
           '12D3KooWRestartCurator1',
+          undefined,
         );
         expect(subscriptionWrites.filter((row) => row.id === confirmedId).at(-1)).toMatchObject({
           id: confirmedId,

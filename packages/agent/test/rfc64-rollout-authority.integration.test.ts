@@ -60,6 +60,7 @@ import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { DKGAgent } from '../src/index.js';
+import { peekFinalizedAuthorityColdResolution } from '../src/finalized-authority-cold-resolution.js';
 import {
   createLoopbackJsonRpcTestHarness,
   sendJsonRpcError,
@@ -2966,6 +2967,81 @@ describe('RFC-64 rollout authority integration', () => {
       reason: 'authority-circuit-open',
     });
     expect(resolveSnapshots).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])('keeps approved replica cooldown lookup retained-only (capability present: %s)', async (supportsRetained) => {
+    const contextGraphId = `${AUTHOR}/approved-registration-binding-open-circuit`;
+    const resolveSnapshots = vi.fn(async () => new Map());
+    const retainedSnapshots = vi.fn(async (_hashes: readonly string[], _options?: ContextGraphAuthorityReadOptions) => new Map());
+    const edge = await startAgent({
+      name: 'approved-registration-binding-open-circuit',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          contextGraphAuthorityIndexRevisionReader: {
+            resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+            peekFinalizedContextGraphAuthoritySnapshotsByNameHashes: supportsRetained ? retainedSnapshots : undefined,
+            readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+            whenIdle: vi.fn(async () => undefined),
+          },
+        }),
+      },
+    });
+    (edge as any).localApprovedAgentByCG.set(contextGraphId, AUTHOR);
+    await openSharedAuthorityCircuit(edge);
+
+    const binding = await edge.resolveContextGraphRegistrationBinding(contextGraphId, {
+      allowApprovedPrivateReplicaFinalizedAbsence: true,
+      freshness: 'bounded',
+    });
+
+    expect(resolveSnapshots).not.toHaveBeenCalled();
+    expect(retainedSnapshots).toHaveBeenCalledTimes(supportsRetained ? 1 : 0);
+    if (supportsRetained) expect(retainedSnapshots.mock.calls[0]?.[1]).toMatchObject({ freshness: 'bounded' });
+    expect(binding).toMatchObject({
+      kind: 'unavailable',
+      reason: supportsRetained ? 'finalized-name-absence-unaccepted' : 'authority-circuit-open',
+    });
+  });
+
+  it('keeps live registration callers separate from a bounded in-flight read', async () => {
+    const contextGraphId = `${AUTHOR}/registration-binding-freshness`;
+    const nameHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
+    const snapshot = finalizedAuthoritySnapshot(contextGraphId, [AUTHOR], '0');
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const resolveSnapshots = vi.fn(async (_hashes: readonly string[], options?: ContextGraphAuthorityReadOptions) => {
+      if (options?.freshness === 'bounded') {
+        entered.resolve();
+        await release.promise;
+      }
+      return new Map([[nameHash, snapshot]]);
+    });
+    const edge = await startAgent({
+      name: 'registration-binding-freshness',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          contextGraphAuthorityIndexRevisionReader: {
+            resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+            readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+            whenIdle: vi.fn(async () => undefined),
+          },
+        }),
+      },
+    });
+    const bounded = edge.resolveContextGraphRegistrationBinding(contextGraphId, {
+      freshness: 'bounded', registrationTimeoutMs: 10_000,
+    });
+    await entered.promise;
+    const live = edge.resolveContextGraphRegistrationBinding(contextGraphId, {
+      freshness: 'live', registrationTimeoutMs: 10_000,
+    });
+    try {
+      await vi.waitFor(() => expect(peekFinalizedAuthorityColdResolution(edge)?.inFlightKeys).toHaveLength(2));
+    } finally {
+      release.resolve();
+      await Promise.allSettled([bounded, live]);
+    }
+    expect(resolveSnapshots.mock.calls.map((call) => call[1]?.freshness)).toEqual(['bounded', 'live']);
   });
 
   it('resolves a registration binding while a slow authority read holds the serializer', async () => {
@@ -7038,7 +7114,7 @@ describe('RFC-64 rollout authority integration', () => {
     });
     expect(stopped.resolveRfc64CatalogReceiverAuthorityV1(CONTEXT_GRAPH_ID)
       .legacySyncAllowed).toBe(false);
-    expect(stopped.canUseLegacySharedMemorySyncForContextGraphV1(CONTEXT_GRAPH_ID)).toBe(true);
+    await expect(stopped.canUseLegacySharedMemorySyncForContextGraphV1(CONTEXT_GRAPH_ID)).resolves.toBe(true);
     await expect(stopped.canUseLegacyDurableSyncForContextGraphV1(CONTEXT_GRAPH_ID)).resolves.toBe(true);
     expect(stopped.getSyncContextGraphIds()).toContain(CONTEXT_GRAPH_ID);
     expect(stopped.rfc64PublicCatalogStatsV1()).toBeNull();

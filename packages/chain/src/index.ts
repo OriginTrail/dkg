@@ -86,6 +86,8 @@ export {
   FINALIZED_CONTEXT_GRAPH_NAME_HASH_MAX_RETURN_BYTES_V1,
   FINALIZED_CONTEXT_GRAPH_TUPLE_MAX_RETURN_BYTES_V1,
   createFinalizedContextGraphRpcResolverV1,
+  readFinalizedContextGraphEmptyVmFactsInSnapshotV1,
+  type FinalizedContextGraphEmptyVmFactsV1,
 } from './finalized-context-graph-rpc-resolver.js';
 export {
   FinalizedVmChainInventoryValidationErrorV1,

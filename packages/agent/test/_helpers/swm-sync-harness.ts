@@ -43,6 +43,8 @@ interface SwmSyncHarnessBaseOptions {
   /** Override verifier output while retaining the raw data-phase transport. */
   readonly verifiedDataOverride?: readonly Quad[];
   /** Runs before real graph replacement; throwing models a write failure. */
+  /** Runs after the real per-KA lock releases, before the final bulk append. */
+  readonly afterKaWriteLock?: () => Promise<void>;
   readonly onReplaceGraph?: (graphUri: string, quads: readonly Quad[]) => void;
 }
 
@@ -74,6 +76,14 @@ export function makeSwmSyncHarness(options: SwmSyncHarnessOptions) {
     materializer.replaceGraph = async (graphUri, quads) => {
       onReplaceGraph(graphUri, quads);
       await replaceGraph(graphUri, quads);
+    };
+  }
+  if (materializer && options.afterKaWriteLock) {
+    const withKaWriteLock = materializer.withKaWriteLock.bind(materializer);
+    materializer.withKaWriteLock = async (cg, subgraph, ual, fn) => {
+      const result = await withKaWriteLock(cg, subgraph, ual, fn);
+      await options.afterKaWriteLock!();
+      return result;
     };
   }
   const servedMeta = options.served !== undefined ? options.served.meta : options.servedMeta;

@@ -4,9 +4,10 @@ import { join } from 'node:path';
 
 import { multiaddr } from '@multiformats/multiaddr';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { NoChainAdapter, type ContextGraphAuthoritySnapshot } from '@origintrail-official/dkg-chain';
+import { NoChainAdapter, verifyControlEnvelopeIssuerSignatureV1, type ContextGraphAuthoritySnapshot } from '@origintrail-official/dkg-chain';
 import {
   DKG_ONTOLOGY as D,
+  DKGEvent,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   GOSSIP_ENVELOPE_VERSION,
   GOSSIP_TYPE_WORKSPACE_PUBLISH,
@@ -33,6 +34,7 @@ import {
   generateSwmSenderChainKey,
   generateSwmSenderEpochId,
   generateWorkspaceRecipientEncryptionKey,
+  type SignedAuthorCatalogHeadEnvelopeV1,
   type SwmSenderKeyPackageMsg,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
@@ -42,9 +44,26 @@ import type {
   ContextGraphSubscriptionRecord,
 } from '../src/index.js';
 import { TEST_SNAPSHOT_CONFIG } from '../../../scripts/testing/snapshot-storage.js';
+import { retainedAuthorityReaderFixture } from '../../chain/test/helpers/retained-authority-reader.js';
+import { RpcEndpointsExhaustedError } from '@origintrail-official/dkg-chain';
 import { isApprovedPrivateReplicaDelegationActive } from '../src/approved-private-replica.js';
 import { resolveRfc64WalletNamespaceOwnerV1 } from '../src/rfc64/unregistered-authority-seed-store-v1.js';
 import { createRfc64RolloutAgentHarness, RFC64_ROLLOUT_DEPLOYMENT } from './_helpers/rfc64-rollout-agent-harness.js';
+import { readinessApplied, readinessHead, readinessTarget } from './_helpers/private-catalog-readiness-fixture.js';
+import type { Rfc64PublicCatalogServiceOptionsV1 } from '../src/rfc64/public-catalog-service-v1.js';
+import type { Rfc64PersistenceV1 } from '../src/rfc64/persistence-v1.js';
+
+// Retain the production service and registry. Capture only its receiver port
+// so tests can deliver a verified admission at an exact awaited boundary.
+const catalogServiceCapture = vi.hoisted(() => ({ options: null as Rfc64PublicCatalogServiceOptionsV1 | null }));
+vi.mock('../src/rfc64/public-catalog-service-v1.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/rfc64/public-catalog-service-v1.js')>();
+  return { ...actual, Rfc64PublicCatalogServiceV1: class extends actual.Rfc64PublicCatalogServiceV1 {
+    constructor(options: Rfc64PublicCatalogServiceOptionsV1) {
+      super(options); catalogServiceCapture.options = options;
+    }
+  } };
+});
 
 // Lets one test act at the await boundary of a successful join proof: after
 // the proof's own final checks, and before its caller resumes.
@@ -561,6 +580,80 @@ describe('approved private bare-name replica authorization', () => {
     );
     expect(bootstrap).toMatchObject({ outcome: 'allowed', source: 'rfc64-private' });
     expect(bootstrap).not.toHaveProperty('registration');
+  });
+
+  it('uses retained finalized name absence for an approved private replica while the circuit is open, with zero RPC', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const retained = retainedAuthorityReaderFixture();
+    // Prime the production projection with a real indexed registration, not a
+    // mocked empty response. The next name is absent in that retained fold.
+    await expect(retained.reader.resolveFinalizedContextGraphIdByNameHash!(retained.presentNameHash))
+      .resolves.toBe(7n);
+    retained.providerRead.mockClear();
+    retained.initialize.mockClear();
+    const projection = vi.spyOn(retained.index, 'peekProjection');
+    Reflect.get(fixture.receiver, 'chain').contextGraphAuthorityIndexRevisionReader = retained.reader;
+    const coordinator = Reflect.get(fixture.receiver, 'rfc64AuthorityReadCoordinatorV1');
+    await expect(coordinator.run(undefined, async () => {
+      throw new RpcEndpointsExhaustedError('unrelated authority pool exhausted', { exhaustionKind: 'mixed', retryAfterMs: 30000 });
+    })).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+    expect(fixture.receiver.readRfc64AuthorityRpcCircuitSnapshotV1().state).toBe('open');
+    try {
+      await expect(fixture.receiver.resolveContextGraphRegistrationBinding(CONTEXT_GRAPH_ID, {
+        allowApprovedPrivateReplicaFinalizedAbsence: true, freshness: 'bounded',
+      })).resolves.toMatchObject({
+        kind: 'unregistered', unregisteredEvidence: 'approved-private-replica-finalized-absence',
+        approvedPrivateReplicaAuthority: { approvedAgentAddress: fixture.approvedAddress, ownerAddress: OWNER },
+      });
+      expect(projection).toHaveBeenCalled();
+      expect(retained.providerRead).not.toHaveBeenCalled();
+      expect(retained.initialize).not.toHaveBeenCalled();
+      // Retained chain absence cannot stand in for the current private proof.
+      await fixture.receiver.writeRequesterJoinRequestState(CONTEXT_GRAPH_ID, fixture.approvedAddress, {
+        status: 'rejected', requestGeneration: `0x${'12'.repeat(32)}`,
+        curatorPeerId: CURATOR_PEER, curatorAgentAddress: OWNER, curatorAuthorityEra: '0',
+      });
+      await expect(fixture.receiver.resolveContextGraphRegistrationBinding(CONTEXT_GRAPH_ID, {
+        allowApprovedPrivateReplicaFinalizedAbsence: true, freshness: 'bounded',
+      })).resolves.toMatchObject({ kind: 'unavailable', reason: 'finalized-name-absence-unaccepted' });
+      expect(retained.providerRead).not.toHaveBeenCalled();
+      expect(retained.initialize).not.toHaveBeenCalled();
+    } finally {
+      await retained.reader.snapshots.close();
+    }
+  });
+
+  it.each(['cold', 'expired', 'invalidated', 'unsupported'] as const)('defers repeated %s retained-projection misses throughout circuit cooldown without RPC', async (condition) => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const retained = retainedAuthorityReaderFixture();
+    if (condition !== 'cold' && condition !== 'unsupported') {
+      await retained.reader.resolveFinalizedContextGraphIdByNameHash!(retained.presentNameHash);
+      if (condition === 'expired') retained.advanceTime(30000);
+      else retained.invalidateAnchor();
+    }
+    retained.providerRead.mockClear();
+    retained.initialize.mockClear();
+    const normalRead = vi.fn(retained.reader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes!.bind(retained.reader));
+    Reflect.get(fixture.receiver, 'chain').contextGraphAuthorityIndexRevisionReader = { ...retained.reader, resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: normalRead,
+      ...(condition === 'unsupported' ? { peekFinalizedContextGraphAuthoritySnapshotsByNameHashes: undefined } : {}) };
+    const coordinator = Reflect.get(fixture.receiver, 'rfc64AuthorityReadCoordinatorV1');
+    await expect(coordinator.run(undefined, async () => {
+      throw new RpcEndpointsExhaustedError('authority pool exhausted', { exhaustionKind: 'mixed', retryAfterMs: 30000 });
+    })).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+    const circuit = fixture.receiver.readRfc64AuthorityRpcCircuitSnapshotV1();
+    try {
+      for (let i = 0; i < 3; i += 1) {
+        await expect(fixture.receiver.resolveContextGraphRegistrationBinding(CONTEXT_GRAPH_ID, {
+          allowApprovedPrivateReplicaFinalizedAbsence: true, freshness: 'bounded',
+        })).resolves.toMatchObject({ kind: 'unavailable', reason: 'authority-circuit-open' });
+      }
+      expect(normalRead).not.toHaveBeenCalled();
+      expect(retained.providerRead).not.toHaveBeenCalled();
+      expect(retained.initialize).not.toHaveBeenCalled();
+      expect(fixture.receiver.readRfc64AuthorityRpcCircuitSnapshotV1()).toEqual(circuit);
+    } finally {
+      await retained.reader.snapshots.close();
+    }
   });
 
   it('does not downgrade registered metadata before a finalized-capable adapter checks its name index', async () => {
@@ -1903,6 +1996,94 @@ describe('approved private bare-name replica authorization', () => {
     Reflect.get(fixture.receiver, 'contextGraphMetaProjection').markDirty(CONTEXT_GRAPH_ID);
     await expect(fixture.receiver.resolveRfc64CatalogLocalAgentAddressV1(CONTEXT_GRAPH_ID))
       .resolves.toBeNull();
+  });
+
+  it('wakes readiness after fresh approved authority even without a receiver completion', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const emit = vi.spyOn(fixture.receiver.eventBus, 'emit');
+    const commit = vi.fn();
+    await expect(fixture.receiver.withVerifiedPrivateCatalogSubscriptionReadinessV1(CONTEXT_GRAPH_ID, commit))
+      .resolves.toBe(false);
+    const refresh = () => fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID, undefined, { kind: 'finalized-absence' },
+    );
+    await refresh();
+    expect(emit).toHaveBeenCalledWith(DKGEvent.CATALOG_READINESS_CHECK_REQUESTED, {
+      contextGraphId: CONTEXT_GRAPH_ID,
+    });
+    await expect(fixture.receiver.withVerifiedPrivateCatalogSubscriptionReadinessV1(CONTEXT_GRAPH_ID, commit))
+      .resolves.toBe(false);
+    expect(commit).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalledWith(DKGEvent.PROJECT_SYNCED, expect.anything());
+    emit.mockClear();
+    // A restored head need not advance. An unchanged fresh policy must wake
+    // the verifier too; no readiness is granted by this hint itself.
+    await refresh();
+    expect(emit).toHaveBeenCalledWith(DKGEvent.CATALOG_READINESS_CHECK_REQUESTED, {
+      contextGraphId: CONTEXT_GRAPH_ID,
+    });
+  });
+
+  async function productionCatalogHandoffFixture() {
+    const f = await approvedBareNameReplicaFixture({ selfSovereignMember: true });
+    const { receiver } = f;
+    receiver.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+    await receiver.whenRfc64CatalogResponsibilitiesIdleV1();
+    await receiver.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID, undefined, { kind: 'finalized-absence' });
+    const service = Reflect.get(receiver, 'rfc64PublicCatalogServiceV1');
+    const accepted = service.acceptedPolicySnapshot(RFC64_ROLLOUT_DEPLOYMENT.networkId, CONTEXT_GRAPH_ID);
+    const second = service.acceptedPolicySnapshot(RFC64_ROLLOUT_DEPLOYMENT.networkId, CONTEXT_GRAPH_ID);
+    expect(accepted).not.toBeNull();
+    expect(second).not.toBe(accepted);
+    expect(second.policy).toBe(accepted.policy);
+    expect(second.roster).toBe(accepted.roster);
+    expect(receiver.isRfc64CatalogTransportAuthorityActiveV1(CONTEXT_GRAPH_ID)).toBe(true);
+    const persistence = Reflect.get(receiver, 'rfc64PersistenceV1') as Rfc64PersistenceV1;
+    const wallet = new ethers.Wallet(`0x${'42'.repeat(32)}`);
+    const signedTarget = async (version: string) => {
+      const unsignedHead = readinessHead({ networkId: RFC64_ROLLOUT_DEPLOYMENT.networkId,
+        contextGraphId: CONTEXT_GRAPH_ID as never, authorAddress: f.memberAddress as never, version });
+      const head = { ...unsignedHead, signature: await wallet.signMessage(ethers.getBytes(unsignedHead.objectDigest)) } as SignedAuthorCatalogHeadEnvelopeV1;
+      const staged = await persistence.controlObjects.stageVerifiedObjects([{
+        envelope: head, issuerSignature: await verifyControlEnvelopeIssuerSignatureV1(head),
+      }]);
+      return { head, target: { ...readinessTarget(head), policyDigest: accepted.policyDigest,
+        signatureVariantDigest: staged.objects[0].signatureVariantDigest } };
+    };
+    const { head, target } = await signedTarget('1');
+    const next = await signedTarget('2');
+    persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
+      ...readinessApplied(head), expectedCurrentCatalogHeadDigest: null,
+    });
+    vi.spyOn(service, 'requestCatalogHeadReplay').mockResolvedValue({ heads: [target] });
+    vi.spyOn(Reflect.get(receiver, 'node').libp2p, 'getPeers').mockReturnValue([CURATOR_PEER]);
+    await receiver.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(CONTEXT_GRAPH_ID);
+    const commit = vi.fn();
+    return { ...f, service, persistence, target, commit,
+      run: () => receiver.withVerifiedPrivateCatalogSubscriptionReadinessV1(CONTEXT_GRAPH_ID, commit),
+      admitTarget: () => catalogServiceCapture.options!.receiver!.onVerifiedCurrentHeadTargetLifecycleEvent!({
+        kind: 'admission-result', result: 'accepted', targetToken: 999,
+        announcement: next.target,
+      }),
+    };
+  }
+
+  it('commits through the production state reader and real policy registry', async () => {
+    const f = await productionCatalogHandoffFixture();
+    await expect(f.run()).resolves.toBe(true);
+    expect(f.commit).toHaveBeenCalledOnce();
+  });
+
+  it('fences an actual receiver target admitted during the production handoff', async () => {
+    const f = await productionCatalogHandoffFixture();
+    await expect(f.run()).resolves.toBe(true);
+    f.commit.mockClear();
+    const original = f.receiver.listSubGraphs.bind(f.receiver);
+    vi.spyOn(f.receiver, 'listSubGraphs').mockImplementationOnce(async (...args) => {
+      const result = await original(...args); f.admitTarget(); return result;
+    });
+    await expect(f.run()).resolves.toBe(false);
+    expect(f.commit).not.toHaveBeenCalled();
   });
 
   it.each(REQUESTER_STATE_CHANGES.flatMap((change) => [

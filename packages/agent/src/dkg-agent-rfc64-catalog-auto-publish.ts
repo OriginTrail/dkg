@@ -118,20 +118,6 @@ function rfc64PromotionInventoryRowIdentityV1(row: SwmAuthorInventoryRowV1): str
   ].join('\n');
 }
 
-// A freshly-created private CG can durably accept its first shares before the
-// membership-derived default responsibility and accepted authority converge.
-// Keep the detached observer alive across that bounded lifecycle gap so an
-// otherwise successful share cannot be omitted from the authoritative head.
-const RFC64_DEFAULT_RESPONSIBILITY_SETTLE_RETRY_DELAYS_MS_V1 = Object.freeze([
-  0,
-  100,
-  250,
-  500,
-  1_000,
-  2_000,
-  4_000,
-  8_000,
-] as const);
 
 class Rfc64SwmInventoryAuthorityTransitionV1 extends Error {
   constructor() {
@@ -139,24 +125,6 @@ class Rfc64SwmInventoryAuthorityTransitionV1 extends Error {
   }
 }
 
-function waitForRfc64DefaultResponsibilitySettlementV1(
-  delayMs: number,
-  signal: AbortSignal,
-): Promise<boolean> {
-  if (signal.aborted) return Promise.resolve(false);
-  if (delayMs === 0) return Promise.resolve(true);
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
-      resolve(true);
-    }, delayMs);
-    const onAbort = (): void => {
-      clearTimeout(timer);
-      resolve(false);
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
-}
 
 // Compatibility exports for consumers of the historically public dist/*
 // subpath. The implementation moved to the projection owner, but the named
@@ -679,7 +647,8 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     this: DKGAgent,
     params: ObserveRfc64DurableSwmPromotionParamsV1,
   ): Promise<void> {
-    const observerSignal = rfc64SwmInventoryShadowRuntimeV1(this).shutdownSignal;
+    const observerRuntime = rfc64SwmInventoryShadowRuntimeV1(this);
+    const observerSignal = observerRuntime.shutdownSignal;
     return withOwnedRpcRequestContext({
       requestClass: 'background',
       signal: observerSignal,
@@ -689,7 +658,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         if (shutdownSignal.aborted) return;
         let result = await this.recordRfc64SwmAuthorInventoryShadowV1(params);
         let lastResponsibilityFailure: unknown = null;
-        for (const delayMs of RFC64_DEFAULT_RESPONSIBILITY_SETTLE_RETRY_DELAYS_MS_V1) {
+        for (const delayMs of observerRuntime.responsibilitySettlementRetryDelaysMs) {
           if (result.status !== 'dormant' || (
             result.dormantReason !== 'inactive-lane'
             && result.dormantReason !== 'authority-transition'
@@ -712,7 +681,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
           } catch (cause) {
             lastResponsibilityFailure = cause;
             if (shutdownSignal.aborted) return;
-            if (!await waitForRfc64DefaultResponsibilitySettlementV1(
+            if (!await observerRuntime.waitForResponsibilitySettlement(
               delayMs,
               shutdownSignal,
             )) return;
@@ -725,7 +694,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
           )) {
             break;
           }
-          if (!await waitForRfc64DefaultResponsibilitySettlementV1(
+          if (!await observerRuntime.waitForResponsibilitySettlement(
             delayMs,
             shutdownSignal,
           )) return;
