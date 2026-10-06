@@ -600,6 +600,29 @@ describe('turns stored under the legacy turn subject, against the real store', (
     expect((await single(sessionA)).map((message) => message.text)).not.toContain('final answer b');
   });
 
+  it('a pending turn recreated beside a shared legacy subject completes on its own scoped subject, and the shared one is left alone', async () => {
+    const [sessionA, sessionB] = [newSessionId(), newSessionId()];
+    const turnId = newTurnId();
+    await writeLegacyTurn(sessionA, turnId, { persistenceState: 'stored', userText: 'question a', assistantText: 'answer a' });
+    await writeLegacyTurn(sessionB, turnId, { persistenceState: 'pending', userText: 'question b', assistantText: 'working on b' });
+    const sharedBefore = await select(`SELECT ?p ?o WHERE { <${legacySubject(turnId)}> ?p ?o }`);
+
+    // The shared subject is no evidence about B, so B's report creates a turn of its own, and B's completion is a transition on that one.
+    const created = await persistTurn(turn(sessionB, turnId, { userMessage: 'question b', assistantReply: 'b is working again', persistenceState: 'pending' }));
+    const finalB = { userMessage: 'question b', assistantReply: 'final answer b', persistenceState: 'stored' };
+    const completed = await persistTurn(turn(sessionB, turnId, finalB));
+    const resend = await persistTurn(turn(sessionB, turnId, finalB));
+
+    expect(created.body).toEqual({ ok: true, turnId });
+    expect(completed.body).toEqual({ ok: true, transitioned: true, turnId });
+    expect(resend.body).toEqual({ ok: true, duplicate: true, turnId });
+    expect(await transitionTargets(turnId)).toEqual([scopedSubject(sessionB, turnId)]);
+    expect(await select(`SELECT ?p ?o WHERE { <${legacySubject(turnId)}> ?p ?o }`)).toHaveLength(sharedBefore.length);
+    expect(await memoryManager.getChatTurnPersistenceState(sessionB, turnId)).toBe('stored');
+    expect(await memoryManager.getChatTurnPersistenceState(sessionA, turnId)).toBeNull();
+    expect((await single(sessionB)).map((message) => message.text)).toContain('final answer b');
+  });
+
   it('a completion on a legacy subject that two sessions share is not listed as either session\'s reply', async () => {
     const [sessionA, sessionB] = [newSessionId(), newSessionId()];
     const turnId = newTurnId();
