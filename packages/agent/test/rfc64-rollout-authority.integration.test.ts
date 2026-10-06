@@ -2969,15 +2969,17 @@ describe('RFC-64 rollout authority integration', () => {
     expect(resolveSnapshots).not.toHaveBeenCalled();
   });
 
-  it('admits approved replica lookup during an open circuit but rejects unaccepted finalized absence', async () => {
+  it.each([true, false])('keeps approved replica cooldown lookup retained-only (capability present: %s)', async (supportsRetained) => {
     const contextGraphId = `${AUTHOR}/approved-registration-binding-open-circuit`;
     const resolveSnapshots = vi.fn(async () => new Map());
+    const retainedSnapshots = vi.fn(async (_hashes: readonly string[], _options?: ContextGraphAuthorityReadOptions) => new Map());
     const edge = await startAgent({
       name: 'approved-registration-binding-open-circuit',
       config: {
         chainAdapter: Object.assign(new NoChainAdapter(), {
           contextGraphAuthorityIndexRevisionReader: {
             resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+            peekFinalizedContextGraphAuthoritySnapshotsByNameHashes: supportsRetained ? retainedSnapshots : undefined,
             readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
             whenIdle: vi.fn(async () => undefined),
           },
@@ -2992,11 +2994,12 @@ describe('RFC-64 rollout authority integration', () => {
       freshness: 'bounded',
     });
 
-    expect(resolveSnapshots).toHaveBeenCalledTimes(1);
-    expect(resolveSnapshots.mock.calls[0]?.[1]).toMatchObject({ freshness: 'bounded' });
+    expect(resolveSnapshots).not.toHaveBeenCalled();
+    expect(retainedSnapshots).toHaveBeenCalledTimes(supportsRetained ? 1 : 0);
+    if (supportsRetained) expect(retainedSnapshots.mock.calls[0]?.[1]).toMatchObject({ freshness: 'bounded' });
     expect(binding).toMatchObject({
       kind: 'unavailable',
-      reason: 'finalized-name-absence-unaccepted',
+      reason: supportsRetained ? 'finalized-name-absence-unaccepted' : 'authority-circuit-open',
     });
   });
 

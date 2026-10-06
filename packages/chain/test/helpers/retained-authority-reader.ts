@@ -15,7 +15,7 @@ export function retainedAuthorityReaderFixture() {
   const storage = `0x${'cd'.repeat(20)}`;
   const deployment = 'evm:31337:0xhub';
   const scope = `${deployment}:${storage}`;
-  const now = Date.now();
+  let now = Date.now();
   const hash = (number: number) => `0x${number.toString(16).padStart(64, '0')}`;
   const abi = new ethers.Interface(loadAbi('ContextGraphStorage'));
   const presentNameHash = ethers.keccak256(ethers.toUtf8Bytes('retained-registered-graph'));
@@ -68,5 +68,9 @@ export function retainedAuthorityReaderFixture() {
     pageSize: () => 2000, finalityConfirmations: () => 1, chainEventLogAuthority: () => source,
   });
   reader.snapshots.open();
-  return { reader, providerRead, presentNameHash, index };
+  return {
+    reader, providerRead, presentNameHash, index,
+    advanceTime: (ms: number) => { now += ms; },
+    invalidateAnchor: () => { source.anchorHolds = async () => false; },
+  };
 }

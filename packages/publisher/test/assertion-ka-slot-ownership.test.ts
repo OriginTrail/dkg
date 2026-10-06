@@ -12,6 +12,15 @@ async function publisher(store = new OxigraphStore()) {
   return new DKGPublisher({ store, chain: new MockChainAdapter(), eventBus: new TypedEventBus(), keypair: await generateEd25519Keypair() });
 }
 
+async function registerSubgraph(store: OxigraphStore, name: string) {
+  const subject = `did:dkg:context-graph:${CG}/${name}`;
+  await store.insert([
+    { subject, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/SubGraph', graph: contextGraphMetaUri(CG) },
+    { subject, predicate: 'http://schema.org/name', object: `"${name}"`, graph: contextGraphMetaUri(CG) },
+    { subject, predicate: 'http://dkg.io/ontology/createdBy', object: 'did:dkg:agent:test-agent', graph: contextGraphMetaUri(CG) },
+  ]);
+}
+
 describe('persistent KA slot ownership', () => {
   it('rejects another name without changing the owning draft and allows an owner retry/reopen', async () => {
     const store = new OxigraphStore();
@@ -47,6 +56,31 @@ describe('persistent KA slot ownership', () => {
     const store = new OxigraphStore();
     await (await publisher(store)).assertionCreate(CG, 'owner', AUTHOR, undefined, allocation);
     await expect((await publisher(store)).assertionCreate(CG, 'other', '0xA32f1cc125401B55911678847426759094055B2d', undefined, allocation))
+      .rejects.toMatchObject({ code: 'KA_SLOT_ALREADY_CLAIMED' });
+  });
+
+  it('keeps root author and address-shaped subgraph coordinates distinct', async () => {
+    const store = new OxigraphStore();
+    const p = await publisher(store);
+    const otherAuthor = `0x${'bb'.repeat(20)}`;
+    await registerSubgraph(store, AUTHOR);
+    const nested = await p.assertionCreate(CG, 'nested', otherAuthor, AUTHOR, allocation);
+    const root = await p.assertionCreate(CG, 'root', AUTHOR, undefined, allocation);
+    expect(root).not.toBe(nested);
+    await expect(p.assertionCreate(CG, 'another-root', AUTHOR, undefined, allocation))
+      .rejects.toMatchObject({ code: 'KA_SLOT_ALREADY_CLAIMED' });
+    await expect(p.assertionCreate(CG, 'another-nested', otherAuthor, AUTHOR, allocation))
+      .rejects.toMatchObject({ code: 'KA_SLOT_ALREADY_CLAIMED' });
+  });
+
+  it('preserves case-sensitive subgraph names for the same author and KA number', async () => {
+    const store = new OxigraphStore();
+    const p = await publisher(store);
+    for (const subgraph of ['Team', 'team']) await registerSubgraph(store, subgraph);
+    const upper = await p.assertionCreate(CG, 'upper', AUTHOR, 'Team', allocation);
+    const lower = await p.assertionCreate(CG, 'lower', AUTHOR, 'team', allocation);
+    expect(upper).not.toBe(lower);
+    await expect(p.assertionCreate(CG, 'other', AUTHOR, 'team', allocation))
       .rejects.toMatchObject({ code: 'KA_SLOT_ALREADY_CLAIMED' });
   });
 

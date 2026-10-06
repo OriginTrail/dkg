@@ -728,17 +728,28 @@ describe('private CG membership bootstrap recovery', () => {
     // Exercise the actual abort boundary without waiting the production 20s.
     const deadline = new AbortController();
     const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(deadline.signal);
-    const connect = vi.fn(async () => {
-      deadline.abort(new DOMException('Connection recovery deadline', 'TimeoutError'));
-      throw deadline.signal.reason;
+    const entered = Promise.withResolvers<void>();
+    let receivedSignal: AbortSignal | undefined;
+    const connect = vi.fn(async (_target: string, options: { signal?: AbortSignal }) => {
+      receivedSignal = options.signal;
+      const pending = new Promise<never>((_resolve, reject) => {
+        options.signal?.addEventListener('abort', () => reject(options.signal!.reason), { once: true });
+      });
+      entered.resolve();
+      return pending;
     });
     (agent as any).peerResolver.connect = connect;
     const send = vi.fn(async () => ({ delivered: false }));
     (agent as any).messenger.sendReliable = send;
     try {
-      await expect(agent.forwardJoinRequest(contextGraphId, delegation, 'requester', curatorPeerId))
-        .resolves.toMatchObject({ delivered: 0, queued: true });
+      const forwarding = agent.forwardJoinRequest(contextGraphId, delegation, 'requester', curatorPeerId);
+      await entered.promise;
+      expect(receivedSignal).toBe(deadline.signal);
+      expect(send).not.toHaveBeenCalled();
+      deadline.abort(new DOMException('Connection recovery deadline', 'TimeoutError'));
+      await expect(forwarding).resolves.toMatchObject({ delivered: 0, queued: true });
     } finally {
+      deadline.abort();
       timeout.mockRestore();
     }
     expect(connect).toHaveBeenCalledTimes(1);

@@ -139,6 +139,7 @@ import {
   validateReadOnlySparql,
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
+import { retainedAuthoritySnapshotReaderV1 } from './internal/context-graph-authority/retained-authority-reader.js';
 import { isRfc64AuthorityRpcCircuitOpenErrorV1 } from
   './rfc64/authority-rpc-circuit-breaker-v1.js';
 import {
@@ -889,6 +890,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     contextGraphIds: readonly string[],
     options: ContextGraphAuthorityReadOptions & Readonly<{
       onRpcRead?: () => void;
+      retainedOnly?: boolean;
       /** Fresh durable identities used only by restart repair before install. */
       durableBindingHints?: ReadonlyMap<
         string,
@@ -896,7 +898,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       >;
     }> = {},
   ): Promise<FinalizedContextGraphAuthorityTargetsResolutionV1> {
-    const { onRpcRead, durableBindingHints, ...chainReadOptions } = options;
+    const { onRpcRead, durableBindingHints, retainedOnly, ...chainReadOptions } = options;
     const uniqueContextGraphIds = [...new Set(contextGraphIds)];
     const bindingTargets = uniqueContextGraphIds.map((contextGraphId) => {
       const hintedBinding = durableBindingHints?.get(contextGraphId);
@@ -938,11 +940,12 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       return { kind: 'finalized-index', targets };
     }
 
-    const resolveSnapshots = indexReader
-      .resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes;
+    const resolveSnapshots = retainedOnly
+      ? retainedAuthoritySnapshotReaderV1(indexReader, this.rfc64AuthorityReadCoordinatorV1.snapshot())
+      : indexReader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes;
     if (resolveSnapshots !== undefined) {
       options.signal?.throwIfAborted();
-      onRpcRead?.();
+      if (!retainedOnly) onRpcRead?.();
       // Registration classification gates private catalog admission and read
       // access. A background reconciliation must not sit behind the ordinary
       // background RPC reserve until the authority read's fail-closed deadline
@@ -1459,13 +1462,8 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
           repairHints === undefined ? null : [durableBinding?.onChainId ?? null, durableBinding?.onChainHash ?? null],
         ]);
         const coldResolution = finalizedAuthorityColdResolutionOf(this);
-        // A read-authority caller with an already accepted unregistered proof
-        // may still need the retained finalized projection to re-establish
-        // exact name absence. Let that one foreground read enter during the
-        // circuit cooldown: the chain reader serves an admissible retained
-        // projection without RPC when it can, and the single foreground
-        // permit still bounds any refresh attempt. Ordinary registration and
-        // VM discovery remain deferred while the circuit is open.
+        // Eligible readers may use retained evidence during cooldown, but a
+        // cache miss must defer; only normal circuit admission may reach RPC.
         const mayServeAcceptedUnregisteredProjection =
           options.allowAcceptedRfc64FinalizedAbsence === true
           || (
@@ -1480,6 +1478,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
               [contextGraphId],
               {
                 ...evidence.agentResolverReadOptions(readSignal),
+                retainedOnly: this.rfc64AuthorityReadCoordinatorV1.snapshot().state === 'open',
                 ...(options.freshness === undefined
                   ? {}
                   : { freshness: options.freshness }),

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { assertSafeIri, assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { assertSafeIri, assertionLifecycleUri, contextGraphMetaUri, escapeSparqlLiteral, toAgentDid } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 
 /** Shared-store creation lock: two lifecycle names cannot claim one graph. */
@@ -17,12 +17,19 @@ export async function assertKaSlotOwnershipAvailable(
   subGraphName?: string,
 ): Promise<void> {
   const lifecycle = assertSafeIri(assertionLifecycleUri(contextGraphId, author, name, subGraphName));
-  const prefix = assertSafeIri(assertionLifecycleUri(contextGraphId, author, '', subGraphName)).toLowerCase();
+  const authorDid = escapeSparqlLiteral(toAgentDid(author).toLowerCase());
+  // Both current and older lifecycle metadata record these coordinates; a
+  // lifecycle URI prefix cannot distinguish a root author from a subgraph.
+  const subgraphScope = subGraphName
+    ? `?owner <http://dkg.io/ontology/subGraphName> "${escapeSparqlLiteral(subGraphName)}" .`
+    : 'FILTER NOT EXISTS { ?owner <http://dkg.io/ontology/subGraphName> ?subgraph }';
   const result = await store.query(`SELECT ?owner WHERE {
     GRAPH <${assertSafeIri(contextGraphMetaUri(contextGraphId))}> {
       VALUES ?number { "${number}"^^<http://www.w3.org/2001/XMLSchema#integer> "${number}" }
-      ?owner <http://dkg.io/ontology/kaId> ?number .
-      FILTER(STRSTARTS(LCASE(STR(?owner)), "${prefix}") && ?owner != <${lifecycle}>)
+      ?owner <http://dkg.io/ontology/kaId> ?number ;
+             <http://www.w3.org/ns/prov#wasAttributedTo> ?author .
+      ${subgraphScope}
+      FILTER(LCASE(STR(?author)) = "${authorDid}" && ?owner != <${lifecycle}>)
     }
   } LIMIT 1`);
   if (result.type !== 'bindings') {

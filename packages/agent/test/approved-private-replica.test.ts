@@ -590,7 +590,7 @@ describe('approved private bare-name replica authorization', () => {
     await expect(retained.reader.resolveFinalizedContextGraphIdByNameHash!(retained.presentNameHash))
       .resolves.toBe(7n);
     retained.providerRead.mockClear();
-    const projection = vi.spyOn(retained.index, 'projection');
+    const projection = vi.spyOn(retained.index, 'peekProjection');
     Reflect.get(fixture.receiver, 'chain').contextGraphAuthorityIndexRevisionReader = retained.reader;
     const coordinator = Reflect.get(fixture.receiver, 'rfc64AuthorityReadCoordinatorV1');
     await expect(coordinator.run(undefined, async () => {
@@ -615,6 +615,36 @@ describe('approved private bare-name replica authorization', () => {
         allowApprovedPrivateReplicaFinalizedAbsence: true, freshness: 'bounded',
       })).resolves.toMatchObject({ kind: 'unavailable', reason: 'finalized-name-absence-unaccepted' });
       expect(retained.providerRead).not.toHaveBeenCalled();
+    } finally {
+      await retained.reader.snapshots.close();
+    }
+  });
+
+  it.each(['cold', 'expired', 'invalidated'] as const)('defers repeated %s retained-projection misses throughout circuit cooldown without RPC', async (condition) => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const retained = retainedAuthorityReaderFixture();
+    if (condition !== 'cold') {
+      await retained.reader.resolveFinalizedContextGraphIdByNameHash!(retained.presentNameHash);
+      if (condition === 'expired') retained.advanceTime(30000);
+      else retained.invalidateAnchor();
+    }
+    retained.providerRead.mockClear();
+    const normalRead = vi.fn(retained.reader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes!.bind(retained.reader));
+    Reflect.get(fixture.receiver, 'chain').contextGraphAuthorityIndexRevisionReader = { ...retained.reader, resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: normalRead };
+    const coordinator = Reflect.get(fixture.receiver, 'rfc64AuthorityReadCoordinatorV1');
+    await expect(coordinator.run(undefined, async () => {
+      throw new RpcEndpointsExhaustedError('authority pool exhausted', { exhaustionKind: 'mixed', retryAfterMs: 30000 });
+    })).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+    const circuit = fixture.receiver.readRfc64AuthorityRpcCircuitSnapshotV1();
+    try {
+      for (let i = 0; i < 3; i += 1) {
+        await expect(fixture.receiver.resolveContextGraphRegistrationBinding(CONTEXT_GRAPH_ID, {
+          allowApprovedPrivateReplicaFinalizedAbsence: true, freshness: 'bounded',
+        })).resolves.toMatchObject({ kind: 'unavailable', reason: 'authority-circuit-open' });
+      }
+      expect(normalRead).not.toHaveBeenCalled();
+      expect(retained.providerRead).not.toHaveBeenCalled();
+      expect(fixture.receiver.readRfc64AuthorityRpcCircuitSnapshotV1()).toEqual(circuit);
     } finally {
       await retained.reader.snapshots.close();
     }
