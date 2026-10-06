@@ -1110,6 +1110,8 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       allowAcceptedRfc64FinalizedAbsence?: boolean;
       /** Read/sync-only proof from this receiver's durable private approval. */
       allowApprovedPrivateReplicaFinalizedAbsence?: boolean;
+      /** Bounded read/sync callers may reuse a locally fenced absence proof. */
+      freshness?: 'live' | 'bounded';
     } = {},
   ): Promise<ContextGraphRegistrationBinding> {
     const route = selectContextGraphRegistrationRoute(this, contextGraphId);
@@ -1476,6 +1478,9 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
               [contextGraphId],
               {
                 ...evidence.agentResolverReadOptions(readSignal),
+                ...(options.freshness === undefined
+                  ? {}
+                  : { freshness: options.freshness }),
                 ...repairHints,
               },
             ),

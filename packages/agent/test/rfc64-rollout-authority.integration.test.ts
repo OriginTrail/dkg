@@ -2988,9 +2988,11 @@ describe('RFC-64 rollout authority integration', () => {
 
     const binding = await edge.resolveContextGraphRegistrationBinding(contextGraphId, {
       allowApprovedPrivateReplicaFinalizedAbsence: true,
+      freshness: 'bounded',
     });
 
     expect(resolveSnapshots).toHaveBeenCalledTimes(1);
+    expect(resolveSnapshots.mock.calls[0]?.[1]).toMatchObject({ freshness: 'bounded' });
     expect(binding).toMatchObject({
       kind: 'unavailable',
       reason: 'finalized-name-absence-unaccepted',

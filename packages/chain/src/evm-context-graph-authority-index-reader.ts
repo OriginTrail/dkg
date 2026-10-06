@@ -186,6 +186,35 @@ export async function contextGraphAuthorityProjectionAnchorProvenByLogV1(
 }
 
 /**
+ * Revalidate a cached proof that a name was absent at its finalized anchor.
+ * Bounded readers may use the local log generation as the first fence; live
+ * readers and any local-proof miss keep the provider-backed comparison.
+ */
+export async function contextGraphFinalizedNameAbsenceAnchorHoldsV1(
+  cached: ContextGraphAuthorityIndexProjection,
+  options: ContextGraphAuthorityReadOptions,
+  input: Readonly<{
+    currentSource?: ChainEventLogAuthoritySource;
+    contractAddress: string;
+    readCurrentFinalized: () => Promise<Readonly<{ number: number; hash: string }>>;
+  }>,
+): Promise<boolean> {
+  if (options.freshness === 'bounded') {
+    const provenByLog = await contextGraphAuthorityProjectionAnchorProvenByLogV1(
+      cached,
+      input.currentSource,
+      input.contractAddress,
+    );
+    options.signal?.throwIfAborted();
+    if (provenByLog === true) return true;
+  }
+  const current = await input.readCurrentFinalized();
+  options.signal?.throwIfAborted();
+  return cached.finalized.number === current.number
+    && cached.finalized.hash.toLowerCase() === current.hash.toLowerCase();
+}
+
+/**
  * How far below the anchor the durable cursor is held back, for one depth.
  *
  * Matches `CG_REGISTRY_REORG_BUFFER_BLOCKS`, the depth the Context Graph
@@ -930,40 +959,47 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
   };
 
   // An absent name binding is reusable only at the SAME finalized block and
-  // hash. A fresh head check is much cheaper than replaying the contract's
-  // event log for every read, while a new registration or reorg still forces
-  // the ordinary live scan before any unregistered authority is accepted.
+  // hash. A live caller proves that against the provider. A bounded caller may
+  // instead use the chain event log's generation fence: its tick/freshness
+  // contract bounds staleness, and a moved local generation declines to the
+  // provider path. This keeps repeatable query/sync authorization available
+  // while a single endpoint is saturated without weakening mutation/key gates.
   const validateFinalizedNameAbsence = (
     operationLabel: string,
     options: ContextGraphAuthorityReadOptions,
   ) => async (cached: ContextGraphAuthorityIndexProjection): Promise<boolean> => {
-    const current = await dependencies.readTipProvider(
-      `${operationLabel} absent-name finality`,
-      (provider) => resolveEvmFinalityAnchorWithHeadV1({
-        finalityConfirmations: dependencies.finalityConfirmations(),
-        readHead: () => withRpcUsageConsumer(
-          'authorityProjection.absentNameHead',
-          () => readEvmContextGraphAuthorityIndexRpcV1(
-            `${operationLabel} absent-name chain head`,
-            () => provider.getBlock('latest'),
-            options.signal,
-          ),
-        ),
-        readBlockAt: (blockNumber) => withRpcUsageConsumer(
-          'authorityProjection.absentNameAnchor',
-          () => readEvmContextGraphAuthorityIndexRpcV1(
-            `${operationLabel} absent-name anchor block ${blockNumber}`,
-            () => provider.getBlock(blockNumber),
-            options.signal,
-          ),
-        ),
-        unavailable: contextGraphAuthorityAnchorUnavailableV1,
-      }),
-      { signal: options.signal },
-    );
-    options.signal?.throwIfAborted();
-    return cached.finalized.number === current.finalized.number
-      && cached.finalized.hash.toLowerCase() === current.finalized.hash.toLowerCase();
+    const contractAddress = await dependencies.requireContextGraphStorage().getAddress();
+    return contextGraphFinalizedNameAbsenceAnchorHoldsV1(cached, options, {
+      currentSource: dependencies.chainEventLogAuthority?.(),
+      contractAddress,
+      readCurrentFinalized: async () => {
+        const current = await dependencies.readTipProvider(
+          `${operationLabel} absent-name finality`,
+          (provider) => resolveEvmFinalityAnchorWithHeadV1({
+            finalityConfirmations: dependencies.finalityConfirmations(),
+            readHead: () => withRpcUsageConsumer(
+              'authorityProjection.absentNameHead',
+              () => readEvmContextGraphAuthorityIndexRpcV1(
+                `${operationLabel} absent-name chain head`,
+                () => provider.getBlock('latest'),
+                options.signal,
+              ),
+            ),
+            readBlockAt: (blockNumber) => withRpcUsageConsumer(
+              'authorityProjection.absentNameAnchor',
+              () => readEvmContextGraphAuthorityIndexRpcV1(
+                `${operationLabel} absent-name anchor block ${blockNumber}`,
+                () => provider.getBlock(blockNumber),
+                options.signal,
+              ),
+            ),
+            unavailable: contextGraphAuthorityAnchorUnavailableV1,
+          }),
+          { signal: options.signal },
+        );
+        return current.finalized;
+      },
+    });
   };
 
   const resolveFinalizedIdsByNameHashes = async (

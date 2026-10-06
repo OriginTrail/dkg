@@ -425,6 +425,64 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(finalizeCalls[0]?.opts?.preSignedAuthorAttestation?.address).toBe(preSignedAuthor);
   });
 
+  it('atomic create uses a node/admin pre-signed author and exact reserved slot as the fresh storage lane', async () => {
+    const preSignedAuthor = `0x${'ab'.repeat(20)}`;
+    const reservedKaId = (BigInt(preSignedAuthor) << 96n) | 27n;
+    const createCalls: any[] = [];
+    const writeCalls: any[] = [];
+    const finalizeCalls: any[] = [];
+
+    await startWith({
+      history: async () => null,
+      create: async (...args: any[]) => {
+        createCalls.push(args);
+        return 'did:dkg:assertion:presigned-atomic';
+      },
+      write: async (...args: any[]) => { writeCalls.push(args); },
+      finalize: async (...args: any[]) => {
+        finalizeCalls.push(args);
+        return {
+          assertionUri: 'did:dkg:assertion:presigned-atomic',
+          merkleRoot: new Uint8Array(32),
+          authorAddress: preSignedAuthor,
+          schemeVersion: 1,
+          chainId: 1n,
+          kav10Address: `0x${'ef'.repeat(20)}`,
+          eip712Digest: `0x${'12'.repeat(32)}`,
+        };
+      },
+    });
+
+    const res = await postRoot({
+      contextGraphId: CG_ID,
+      name: 'presigned-atomic',
+      quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: '' }],
+      finalize: true,
+      preSignedAuthorAttestation: {
+        address: preSignedAuthor,
+        reservedKaId: reservedKaId.toString(),
+        signature: {
+          r: `0x${'01'.repeat(32)}`,
+          vs: `0x${'02'.repeat(32)}`,
+        },
+      },
+    });
+
+    expect(res.status).toBe(201);
+    expect(createCalls[0]?.[2]).toMatchObject({
+      agentAddress: preSignedAuthor,
+      reservedKaId,
+    });
+    expect(writeCalls[0]?.[3]).toMatchObject({ agentAddress: preSignedAuthor });
+    expect(finalizeCalls[0]?.[2]).toMatchObject({
+      agentAddress: preSignedAuthor,
+      preSignedAuthorAttestation: {
+        address: preSignedAuthor,
+        reservedKaId,
+      },
+    });
+  });
+
   it('swm/share: an unrelated promote error still propagates (not silently 409ed)', async () => {
     // Guard: the new 409 branch must only catch UNSEALED_SHARE_BLOCKED. Any
     // other error rethrows to the outer handler (→ 500 here).

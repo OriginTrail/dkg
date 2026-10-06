@@ -377,6 +377,32 @@ function resolveAuthorAgentAddressFromFinalizeOptions(
   return tokenAgentAddress;
 }
 
+/**
+ * A fresh atomic create has no existing storage lane to preserve. When an
+ * administrator supplies a verified pre-signed attestation, create the draft
+ * in that author's lane and reserve the exact slot the signature commits to.
+ * Dedicated finalize keeps its separate lane-resolution rules because it may
+ * be sealing an already-open draft in the daemon's default lane.
+ */
+function resolveAtomicCreateAuthorFromFinalizeOptions(
+  finalizeOptions: Record<string, unknown>,
+  tokenAgentAddress?: string,
+): { agentAddress?: string; reservedKaId?: bigint } {
+  const preSigned = finalizeOptions.preSignedAuthorAttestation;
+  if (preSigned !== null && typeof preSigned === "object") {
+    const address = Reflect.get(preSigned, "address");
+    const reservedKaId = Reflect.get(preSigned, "reservedKaId");
+    if (typeof address === "string" && typeof reservedKaId === "bigint") {
+      return { agentAddress: address, reservedKaId };
+    }
+  }
+  const agentAddress = resolveAuthorAgentAddressFromFinalizeOptions(
+    finalizeOptions,
+    tokenAgentAddress,
+  );
+  return agentAddress ? { agentAddress } : {};
+}
+
 function scopedTokenStorageLane(agentAddress?: string): { agentAddress?: string } {
   return agentAddress ? { agentAddress } : {};
 }
@@ -903,10 +929,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         ? ((finalizeOptions as Record<string, unknown>).authorAgentAddress as string)
         : undefined;
     try {
-      const createAuthorAgentAddress = resolveAuthorAgentAddressFromFinalizeOptions(
+      const atomicCreateAuthor = resolveAtomicCreateAuthorFromFinalizeOptions(
         finalizeOptions,
         writePreflightCallerAgentAddress,
       );
+      const createAuthorAgentAddress = atomicCreateAuthor.agentAddress;
       const atomicAuthorLane = createAuthorAgentAddress
         ? { agentAddress: createAuthorAgentAddress }
         : {};
@@ -930,6 +957,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       const assertionUri = await agent.assertion.create(resolvedContextGraphId, name, {
         subGraphName,
         ...(createAuthorAgentAddress ? { agentAddress: createAuthorAgentAddress } : {}),
+        ...(atomicCreateAuthor.reservedKaId === undefined
+          ? {}
+          : { reservedKaId: atomicCreateAuthor.reservedKaId }),
         onDisposition: (disposition) => { createDisposition = disposition; },
       });
       // The engine reports whether create opened a draft or observed an active
