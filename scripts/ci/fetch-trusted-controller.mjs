@@ -6,7 +6,7 @@
 // It also fetches the protected branches back past the pin, so the provenance
 // test can require the pin to be on their history. A failed fetch fails the
 // script.
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { validateTrustedControllerPins } from './trusted-controller-pins.mjs';
@@ -76,7 +76,7 @@ export function fetchProtectedHistory({
   run = execFileSync,
   ref = pinnedControllerRef(),
   shallow = isShallowRepository(run),
-  reachable = (commit) => protectedBranchContaining(commit) !== undefined,
+  deepenSteps = PROTECTED_HISTORY_DEEPEN_STEPS,
 } = {}) {
   const fetch = (options, branches) => run(
     'git',
@@ -92,8 +92,8 @@ export function fetchProtectedHistory({
   const recent = PROTECTED_BRANCHES.filter((branch) => commitDate(run, remoteBranch(branch)) >= since);
   if (recent.length === 0) return;
   fetch([`--shallow-since=${since}`], recent);
-  for (const generations of PROTECTED_HISTORY_DEEPEN_STEPS) {
-    if (reachable(ref)) return;
+  for (const generations of deepenSteps) {
+    if (protectedBranchContaining(ref, { run })) return;
     run('git', ['prune', '--expire=never'], { stdio: 'inherit' });
     fetch([`--deepen=${generations}`], recent);
   }
@@ -101,12 +101,17 @@ export function fetchProtectedHistory({
 
 // The first protected branch whose fetched history contains `commit`. Any git
 // failure, such as a missing branch or commit, counts as not containing it.
-export function protectedBranchContaining(commit, { cwd } = {}) {
-  return PROTECTED_BRANCHES.find((branch) => spawnSync(
-    'git',
-    ['merge-base', '--is-ancestor', commit, remoteBranch(branch)],
-    { cwd, stdio: 'ignore' },
-  ).status === 0);
+// It runs git through the same injectable runner as the fetches, so one
+// repository configuration serves both.
+export function protectedBranchContaining(commit, { cwd, run = execFileSync } = {}) {
+  return PROTECTED_BRANCHES.find((branch) => {
+    try {
+      run('git', ['merge-base', '--is-ancestor', commit, remoteBranch(branch)], { cwd, stdio: 'ignore' });
+      return true;
+    } catch {
+      return false;
+    }
+  });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

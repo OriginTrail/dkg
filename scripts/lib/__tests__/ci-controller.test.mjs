@@ -253,18 +253,25 @@ test('the build job fetches protected history back past the pin, deepening only 
   assert.deepEqual([...PROTECTED_BRANCHES].sort(), ['main', 'testnet-canary']);
   const pinDate = 1_790_000_000;
   const since = pinDate - PROTECTED_HISTORY_MARGIN_SECONDS;
-  // `reachable` stands in for the check that the fetched history reaches the pin.
-  const plan = (tipDates, shallow = true, reachable = () => true) => {
+  // The pin becomes an ancestor of a protected branch once `deepenings` deepening fetches
+  // have run (Infinity: never); until then git's merge-base exits non-zero, as it does for
+  // a commit that is not an ancestor.
+  const plan = (tipDates, shallow = true, deepenings = 0) => {
     const dates = { [TRUSTED_CI_CONTROLLER_SHA]: pinDate };
     for (const [branch, date] of Object.entries(tipDates)) dates[`refs/remotes/origin/${branch}`] = date;
     const fetches = [];
+    let deepened = 0;
     fetchProtectedHistory({
       ref: TRUSTED_CI_CONTROLLER_SHA,
       shallow,
-      reachable,
       run: (command, args, options) => {
         if (args[0] === 'log') return `${dates[args.at(-1)]}\n`;
+        if (args[0] === 'merge-base') {
+          if (deepened < deepenings) throw new Error('not an ancestor');
+          return null;
+        }
         assert.deepEqual([command, options], ['git', { stdio: 'inherit' }]);
+        if (args.some((arg) => arg.startsWith('--deepen='))) deepened += 1;
         fetches.push(args.join(' '));
       },
     });
@@ -279,39 +286,33 @@ test('the build job fetches protected history back past the pin, deepening only 
     tips,
     `fetch --no-tags --shallow-since=${since} origin ${canary}`,
   ], 'a tip older than the margin stays at depth 1');
-  assert.deepEqual(plan({ main: since - 1, 'testnet-canary': since - 1 }, true, () => false), [tips]);
-  assert.deepEqual(plan({}, false, () => false), [`fetch --no-tags origin ${main} ${canary}`], 'a complete clone stays complete');
+  assert.deepEqual(plan({ main: since - 1, 'testnet-canary': since - 1 }, true, Infinity), [tips]);
+  assert.deepEqual(plan({}, false, Infinity), [`fetch --no-tags origin ${main} ${canary}`], 'a complete clone stays complete');
 
   // A pin the date-limited fetch hides is reached by deepening the cut points,
   // after pruning the shallow entries git cannot deepen past, one growing step
   // at a time and only on the recent tips.
   const deepen = (generations, refs = `${main} ${canary}`) => `fetch --no-tags --deepen=${generations} origin ${refs}`;
-  const reachableAfter = (checks) => {
-    let seen = 0;
-    return () => seen++ >= checks;
-  };
-  assert.deepEqual(plan({ main: since, 'testnet-canary': pinDate }, true, reachableAfter(1)), [tips, dated, 'prune --expire=never', deepen(1)]);
-  assert.deepEqual(plan({ main: since, 'testnet-canary': pinDate }, true, reachableAfter(2)), [
+  assert.deepEqual(plan({ main: since, 'testnet-canary': pinDate }, true, 1), [tips, dated, 'prune --expire=never', deepen(1)]);
+  assert.deepEqual(plan({ main: since, 'testnet-canary': pinDate }, true, 2), [
     tips, dated, 'prune --expire=never', deepen(1), 'prune --expire=never', deepen(PROTECTED_HISTORY_DEEPEN_STEPS[1]),
   ]);
-  assert.deepEqual(plan({ main: since - 1, 'testnet-canary': pinDate }, true, reachableAfter(1)), [
+  assert.deepEqual(plan({ main: since - 1, 'testnet-canary': pinDate }, true, 1), [
     tips, `fetch --no-tags --shallow-since=${since} origin ${canary}`, 'prune --expire=never', deepen(1, canary),
   ], 'only recent tips are deepened');
-  assert.deepEqual(plan({ main: since, 'testnet-canary': pinDate }, true, () => false), [
+  assert.deepEqual(plan({ main: since, 'testnet-canary': pinDate }, true, Infinity), [
     tips, dated, ...PROTECTED_HISTORY_DEEPEN_STEPS.flatMap((generations) => ['prune --expire=never', deepen(generations)]),
   ], 'a pin still out of reach after the last step is left for the provenance test to report');
 
   // A fetch that fails fails the build step instead of leaving the check to
   // run against whatever history is there.
-  for (const [failing, reachable] of [['--shallow-since', () => true], ['--deepen=1', () => false]]) {
+  for (const failing of ['--shallow-since', '--deepen=1']) {
     assert.throws(() => fetchProtectedHistory({
       ref: TRUSTED_CI_CONTROLLER_SHA,
       shallow: true,
-      reachable,
       run: (command, args) => {
-        if (args[0] === 'fetch' && (failing === '--shallow-since' ? args.some((arg) => arg.startsWith(failing)) : args.includes(failing))) {
-          throw new Error(`fetch failed: ${failing}`);
-        }
+        if (args[0] === 'merge-base') throw new Error('not an ancestor');
+        if (args[0] === 'fetch' && args.some((arg) => arg.startsWith(failing))) throw new Error(`fetch failed: ${failing}`);
         return `${pinDate}\n`;
       },
     }), new RegExp(`fetch failed: ${failing}`));
@@ -380,16 +381,13 @@ test('the protected history fetch reaches a pin hidden behind merges of older br
   };
 
   const dateLimited = checkout();
-  fetchProtectedHistory({ run: dateLimited.run, ref: pin, shallow: true, reachable: () => true });
-  assert.equal(protectedBranchContaining(pin, { cwd: dateLimited.directory }), undefined, 'the date limit alone hides the pin');
+  fetchProtectedHistory({ run: dateLimited.run, ref: pin, shallow: true, deepenSteps: [] });
+  assert.equal(protectedBranchContaining(pin, { run: dateLimited.run }), undefined, 'the date limit alone hides the pin');
 
+  // One runner, bound to the checkout, serves the fetches and the ancestry check.
   const deepened = checkout();
-  fetchProtectedHistory({
-    run: deepened.run,
-    ref: pin,
-    shallow: true,
-    reachable: (commitId) => protectedBranchContaining(commitId, { cwd: deepened.directory }) !== undefined,
-  });
+  fetchProtectedHistory({ run: deepened.run, ref: pin, shallow: true });
+  assert.equal(protectedBranchContaining(pin, { run: deepened.run }), 'testnet-canary');
   assert.equal(protectedBranchContaining(pin, { cwd: deepened.directory }), 'testnet-canary');
 });
 
