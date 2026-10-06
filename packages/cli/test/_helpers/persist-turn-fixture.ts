@@ -13,6 +13,7 @@
  * `listed`, `single`, `graphDelta`, `select`, `footprint`) are closures over the
  * running instance, valid between `start()` and `stop()`.
  */
+import { randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import { expect } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
@@ -24,10 +25,12 @@ import {
   type ChatMemoryManager,
 } from '@origintrail-official/dkg-node-ui';
 import { buildChatMemoryStack, resolveMemoryAgentAddress } from '../../src/daemon.js';
+import { primeAgentDkgSessionId } from '../../src/daemon/prime-agent.js';
 import { handleHermesRoutes } from '../../src/daemon/routes/hermes.js';
 import { handleOpenclawRoutes } from '../../src/daemon/routes/openclaw.js';
 import { handlePrimeAgentRoutes } from '../../src/daemon/routes/prime-agent.js';
-import { lexicalTerm, readChatTurnFootprint } from './chat-turn-footprint.js';
+import { lexicalTerm, readChatTurnFootprint, summarizeGraphDelta } from './chat-turn-footprint.js';
+import { scopedSubject } from './legacy-chat-turn.js';
 import { requestAuthentication } from './request-authentication.js';
 
 export const PERSIST_TURN = '/api/openclaw-channel/persist-turn';
@@ -53,6 +56,51 @@ export interface GraphDeltaResponse {
   };
   triples: Array<{ subject: string; predicate: string; object: string }>;
 }
+
+export const USER_TEXT = 'what is a knowledge asset?';
+export const ASSISTANT_TEXT = 'A knowledge asset is a verifiable unit of knowledge.';
+
+/** A persist-turn payload; `turnId: undefined` leaves the field out, `overrides` replace any other. */
+export const turn = (sessionId: string, turnId: string | undefined, overrides: Record<string, unknown> = {}) => ({
+  sessionId,
+  userMessage: USER_TEXT,
+  assistantReply: ASSISTANT_TEXT,
+  ...(turnId === undefined ? {} : { turnId }),
+  ...overrides,
+});
+
+/**
+ * The three local-agent channels persist through one owner, so the same
+ * `(sessionId, turnId)` contract has to hold behind each of their routes.
+ * `storeSessionId` is the session id the chat store sees for a caller's id, and
+ * `echoesSession` says whether the route names it in its response (Prime Agent
+ * does, and prefixes it).
+ */
+export const CHANNELS = [
+  {
+    name: 'OpenClaw',
+    path: PERSIST_TURN,
+    newSession: () => `openclaw:e2e:${randomUUID()}`,
+    storeSessionId: (sessionId: string) => sessionId,
+    echoesSession: false,
+  },
+  {
+    name: 'Hermes',
+    path: '/api/hermes-channel/persist-turn',
+    newSession: () => `hermes:e2e:${randomUUID()}`,
+    storeSessionId: (sessionId: string) => sessionId,
+    echoesSession: false,
+  },
+  {
+    name: 'Prime Agent',
+    path: '/api/prime-agent-channel/persist-turn',
+    newSession: () => `e2e-${randomUUID()}`,
+    storeSessionId: primeAgentDkgSessionId,
+    echoesSession: true,
+  },
+] as const;
+
+export type Channel = (typeof CHANNELS)[number];
 
 export function createPersistTurnFixture() {
   let agent: DKGAgent;
@@ -163,6 +211,16 @@ export function createPersistTurnFixture() {
     return await getJson<GraphDeltaResponse>(`/api/memory/sessions/${encodeURIComponent(sessionId)}/graph-delta?${query}`);
   }
 
+  /** Complete a turn `pending` -> `stored` behind `channel`, then read its graph delta over HTTP. */
+  async function completedTurnDelta(channel: Channel) {
+    const sessionId = channel.storeSessionId(channel.newSession());
+    const turnId = `turn-${randomUUID()}`;
+    const post = (overrides: Record<string, unknown>) => persistTurn(turn(sessionId, turnId, overrides), channel.path);
+    await post({ assistantReply: 'working on it', persistenceState: 'pending' });
+    await post({ assistantReply: 'the final answer', persistenceState: 'stored' });
+    return { subject: scopedSubject(sessionId, turnId), delta: summarizeGraphDelta(await graphDelta(sessionId, turnId)) };
+  }
+
   /** One SELECT against the chat-turns Working Memory assertion. */
   async function select(sparql: string): Promise<Array<Record<string, string>>> {
     const result = await agent.query(sparql, {
@@ -185,6 +243,7 @@ export function createPersistTurnFixture() {
     listed,
     single,
     graphDelta,
+    completedTurnDelta,
     select,
     footprint,
     /** The running instance's parts, for a suite that reads or writes the store itself. */

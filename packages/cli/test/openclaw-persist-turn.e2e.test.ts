@@ -31,8 +31,7 @@ import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import { AGENT_CONTEXT_GRAPH, CHAT_TURNS_ASSERTION, type ChatMemoryManager } from '@origintrail-official/dkg-node-ui';
-import { primeAgentDkgSessionId } from '../src/daemon/prime-agent.js';
-import { ONE_STORED_TURN, completedByTransition, summarizeGraphDelta } from './_helpers/chat-turn-footprint.js';
+import { ONE_STORED_TURN, completedByTransition, completedDelta, summarizeGraphDelta } from './_helpers/chat-turn-footprint.js';
 import {
   CHAT,
   DKG,
@@ -43,8 +42,11 @@ import {
   scopedSubject,
 } from './_helpers/legacy-chat-turn.js';
 import {
-  PERSIST_TURN,
+  ASSISTANT_TEXT,
+  CHANNELS,
+  USER_TEXT,
   createPersistTurnFixture,
+  turn,
   type HistoryMessage,
   type PersistResponse,
 } from './_helpers/persist-turn-fixture.js';
@@ -55,7 +57,7 @@ const fixture = createPersistTurnFixture();
 let agent: DKGAgent;
 let memoryManager: ChatMemoryManager;
 let agentAddress: string;
-const { persistTurn, listed, single, graphDelta, select, footprint } = fixture;
+const { persistTurn, listed, single, graphDelta, completedTurnDelta, select, footprint } = fixture;
 const { writeLegacyTurn, writeStoredTransition } = createLegacyChatTurnWriter(() => fixture);
 
 beforeAll(async () => {
@@ -67,30 +69,6 @@ afterAll(() => fixture.stop());
 
 const newSessionId = () => `openclaw:e2e:${randomUUID()}`;
 const newTurnId = () => `turn-${randomUUID()}`;
-
-/**
- * The graph delta of a turn first reported as `first` that completed by a `stored`
- * transition: its one exchange, `first` still on the turn itself, and the
- * completion (state and final reply) on a transition node that points at the turn.
- */
-const completedDelta = (subject: string, first: 'pending' | 'failed', reply: string) => ({
-  mode: 'delta',
-  turns: [subject],
-  turnStates: [first],
-  messages: 2,
-  transitions: [{ state: 'stored', reply, target: subject }],
-});
-
-const USER_TEXT = 'what is a knowledge asset?';
-const ASSISTANT_TEXT = 'A knowledge asset is a verifiable unit of knowledge.';
-
-const turn = (sessionId: string, turnId: string | undefined, overrides: Record<string, unknown> = {}) => ({
-  sessionId,
-  userMessage: USER_TEXT,
-  assistantReply: ASSISTANT_TEXT,
-  ...(turnId === undefined ? {} : { turnId }),
-  ...overrides,
-});
 
 describe('OpenClaw persist-turn over real HTTP into a real store', () => {
   it('writes a new turn once and reads it back through the chat memory manager', async () => {
@@ -298,47 +276,6 @@ describe('OpenClaw persist-turn over real HTTP into a real store', () => {
     expect(await memoryManager.getSession(sessionId)).toBeNull();
   });
 });
-
-/**
- * The three local-agent channels persist through one owner, so the same
- * `(sessionId, turnId)` contract has to hold behind each of their routes.
- * `storeSessionId` is the session id the chat store sees for a caller's id, and
- * `echoesSession` says whether the route names it in its response (Prime Agent
- * does, and prefixes it).
- */
-const CHANNELS = [
-  {
-    name: 'OpenClaw',
-    path: PERSIST_TURN,
-    newSession: () => `openclaw:e2e:${randomUUID()}`,
-    storeSessionId: (sessionId: string) => sessionId,
-    echoesSession: false,
-  },
-  {
-    name: 'Hermes',
-    path: '/api/hermes-channel/persist-turn',
-    newSession: () => `hermes:e2e:${randomUUID()}`,
-    storeSessionId: (sessionId: string) => sessionId,
-    echoesSession: false,
-  },
-  {
-    name: 'Prime Agent',
-    path: '/api/prime-agent-channel/persist-turn',
-    newSession: () => `e2e-${randomUUID()}`,
-    storeSessionId: primeAgentDkgSessionId,
-    echoesSession: true,
-  },
-] as const;
-
-/** Complete a turn `pending` -> `stored` behind `channel`, then read its graph delta over HTTP. */
-async function completedTurnDelta(channel: (typeof CHANNELS)[number]) {
-  const sessionId = channel.storeSessionId(channel.newSession());
-  const turnId = newTurnId();
-  const post = (overrides: Record<string, unknown>) => persistTurn(turn(sessionId, turnId, overrides), channel.path);
-  await post({ assistantReply: 'working on it', persistenceState: 'pending' });
-  await post({ assistantReply: 'the final answer', persistenceState: 'stored' });
-  return { subject: scopedSubject(sessionId, turnId), delta: summarizeGraphDelta(await graphDelta(sessionId, turnId)) };
-}
 
 /**
  * One turn id reused by two sessions. A turn id is only meaningful inside its

@@ -163,3 +163,17 @@ export function summarizeGraphDelta(
       .sort((a, b) => `${a.state}${a.reply}`.localeCompare(`${b.state}${b.reply}`)),
   };
 }
+
+/**
+ * The graph delta (as `summarizeGraphDelta` reads it) of a turn first reported as
+ * `first` that completed by a `stored` transition: its one exchange, `first`
+ * still on the turn itself, and the completion (state and final reply) on a
+ * transition node that points at the turn.
+ */
+export const completedDelta = (subject: string, first: 'pending' | 'failed', reply: string) => ({
+  mode: 'delta',
+  turns: [subject],
+  turnStates: [first],
+  messages: 2,
+  transitions: [{ state: 'stored', reply, target: subject }],
+});
