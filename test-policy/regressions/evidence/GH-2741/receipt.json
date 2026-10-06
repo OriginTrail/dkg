@@ -9,15 +9,17 @@
     "packages/agent/test/regression-peer-store-repair.test.ts": "dabb9c46e829d9bc4a0fb21ab3bd3a685e88840e9226d953ccee66b4f3852446",
     "scripts/lib/regressions/cases/GH-2741.mjs": "94ba4d195fbacb221d4245bab1c5aff2c92d2b8875a411f450fe0b569469ab8f",
     "scripts/qa-prove-regression.mjs": "fe208ec75be58f2591ee2b5779e228d9b535004b088a4bda7b4519a850bac4af",
-    "scripts/lib/regressions/profiles.mjs": "217df82f9438698bc888e89ce3e8333817882e787475282105817f94158571ed",
-    "scripts/lib/regressions/results.mjs": "314d65918ccfb6fe1589812e3fd8fdbca5bb9aec9751360fd6fe6109fc2e82ea",
-    "scripts/lib/regressions/identity.mjs": "432c6e02754c360f5d23f2bf9da36c70fccf79cc4949a25caf52f28cd5c5788f",
-    "scripts/lib/regressions/proof.mjs": "5567e5896badcf2bf467de183e236010c5aeac1518d3460968d20a29c462f33a"
+    "scripts/lib/regressions/profile-contract.mjs": "80ec108ac673e911f367c5d3fb24c07488c32dba8e5e531b972cb8fc1fe22981",
+    "scripts/lib/regressions/phases.mjs": "67560288acf041b6221fe443baa033ea1269232fb10e5387ce48a9be08e578f6",
+    "scripts/lib/regressions/subprocess.mjs": "d558f259750524f359eeb7e9f4b09ca0175a0ca862c5a5d14c8b9793b21f385c",
+    "scripts/lib/regressions/results.mjs": "54d6abfe2d16fd32723c3a9f92f80dbd0b14a5a18730a6a1dd587ff808445ba9",
+    "scripts/lib/regressions/identity.mjs": "5e84529068e32342dc3400d1a6200b71006ba3daa20e0defd70de8e5d533bb8d",
+    "scripts/lib/regressions/proof.mjs": "473324dfac14b5df7255a085d006944f89c8d454e52e9b03398d650881f95f64"
   },
   "toolchain": {
-    "node": "v22.23.2",
-    "executable": "/Users/aleatoric/.nvm/versions/node/v22.23.2/bin/node",
-    "nodeSha256": "18e387c90ab8a8400183e8bdd396376e1e875b91b4c874b894dcade7b35bf572",
+    "node": "v22.23.1",
+    "executable": "/Users/aleatoric/.nvm/versions/node/v22.23.1/bin/node",
+    "nodeSha256": "2e3f1286a7eb3736346ed1803e458a0ff909e2b2d5bc746144dcb76970e9b99d",
     "platform": "darwin",
     "arch": "arm64"
   },
@@ -142,7 +144,7 @@
         "-t",
         "^Random Sampling proof-time exact repair on the real libp2p peer store fetches the challenged asset from a provider the peer store lists as sync-capable$",
         "--reporter=json",
-        "--outputFile=/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-V7uZRx/bad/bad-report.json"
+        "--outputFile=/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-o1lnhb/bad/bad-report.json"
       ],
       "invocation": {
         "command": "pnpm",
@@ -158,7 +160,7 @@
           "-t",
           "^Random Sampling proof-time exact repair on the real libp2p peer store fetches the challenged asset from a provider the peer store lists as sync-capable$",
           "--reporter=json",
-          "--outputFile=/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-V7uZRx/bad/bad-report.json"
+          "--outputFile=/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-o1lnhb/bad/bad-report.json"
         ]
       },
       "code": 1,
@@ -279,7 +281,7 @@
         "-t",
         "^Random Sampling proof-time exact repair on the real libp2p peer store fetches the challenged asset from a provider the peer store lists as sync-capable$",
         "--reporter=json",
-        "--outputFile=/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-V7uZRx/candidate/candidate-report.json"
+        "--outputFile=/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-o1lnhb/candidate/candidate-report.json"
       ],
       "invocation": {
         "command": "pnpm",
@@ -295,7 +297,7 @@
           "-t",
           "^Random Sampling proof-time exact repair on the real libp2p peer store fetches the challenged asset from a provider the peer store lists as sync-capable$",
           "--reporter=json",
-          "--outputFile=/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-V7uZRx/candidate/candidate-report.json"
+          "--outputFile=/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-o1lnhb/candidate/candidate-report.json"
         ]
       },
       "code": 0,
@@ -325,16 +327,16 @@
       "file": "packages/agent/test/regression-peer-store-repair.test.ts",
       "assertion": "Random Sampling proof-time exact repair on the real libp2p peer store fetches the challenged asset from a provider the peer store lists as sync-capable",
       "status": "failed",
-      "runtime": "v22.23.2",
+      "runtime": "v22.23.1",
       "observation": {
         "fetchedFrom": [],
         "outcome": {
           "error": "Random Sampling exact repair did not recover did:dkg:base:8453/0x0000000000000000000000000000000000001234/7 from zAEZg3q6"
         }
       },
-      "diagnostic": "AssertionError: GH-2741: capable peer repair fetch completes: expected { fetchedFrom: [], outcome: { …(1) } } to deeply equal { …(2) }\n    at /private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-V7uZRx/bad/packages/agent/test/regression-peer-store-repair.test.ts:78:70\n    at file:///private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-V7uZRx/bad/node_modules/.pnpm/@vitest+runner@4.0.18/node_modules/@vitest/runner/dist/index.js:915:20"
+      "diagnostic": "AssertionError: GH-2741: capable peer repair fetch completes: expected { fetchedFrom: [], outcome: { …(1) } } to deeply equal { …(2) }\n    at /private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-o1lnhb/bad/packages/agent/test/regression-peer-store-repair.test.ts:78:70\n    at file:///private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-o1lnhb/bad/node_modules/.pnpm/@vitest+runner@4.0.18/node_modules/@vitest/runner/dist/index.js:915:20"
     },
-    "reportRoot": "/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-V7uZRx/bad",
+    "reportRoot": "/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-o1lnhb/bad",
     "dependencyInputs": {
       ".npmrc": "f5aa3042280204ad7d8b9f0a302273c0ec22748e6c2f9d33d4e68da443315acc",
       "bench/package.json": "3ca9d4afd21425087cf31893b8f9f63c81b0b8408db5e343ca76e5f8aa26ab9a",
@@ -409,8 +411,8 @@
   },
   "candidate": {
     "source": {
-      "commit": "3a34d991deaf118e6e951bbafa86dc2171c2138c",
-      "tree": "9758869680164ca253a9853fd2f3e73cdfcd883b",
+      "commit": "a18e0175e375f29b013e09803769b9d9b9d0e2d1",
+      "tree": "0ea454d1c0a5ed10ff747e0296c12e5be1ef0bc3",
       "lockfileSha256": "11309f3bf44b0484d0d358555fab3a964114259e67d63cbcce4482704fe91c99",
       "packageManager": "pnpm@10.28.1",
       "nodeRequirement": "22"
@@ -425,7 +427,7 @@
       "file": "packages/agent/test/regression-peer-store-repair.test.ts",
       "assertion": "Random Sampling proof-time exact repair on the real libp2p peer store fetches the challenged asset from a provider the peer store lists as sync-capable",
       "status": "passed",
-      "runtime": "v22.23.2",
+      "runtime": "v22.23.1",
       "observation": {
         "fetchedFrom": [
           "12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6"
@@ -480,7 +482,7 @@
       },
       "diagnostic": null
     },
-    "reportRoot": "/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-V7uZRx/candidate",
+    "reportRoot": "/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-o1lnhb/candidate",
     "dependencyInputs": {
       ".npmrc": "f5aa3042280204ad7d8b9f0a302273c0ec22748e6c2f9d33d4e68da443315acc",
       "bench/package.json": "3ca9d4afd21425087cf31893b8f9f63c81b0b8408db5e343ca76e5f8aa26ab9a",
@@ -561,21 +563,21 @@
     }
   },
   "artifacts": {
-    "bad-build.log": "8d1aa94d4c63db3fbebb3b0dd1bf0f58671acca5654c45bedde1ccd9ec0d7459",
+    "bad-build.log": "d73bff9ec50f2e6f691dfc5fdaa76bce9cee48651e0574b399a2bf20ea2b17f3",
     "bad-config.txt": "d810e9e9cf4d95ca4c5af883edb3eb17be15a62f8690e8266c76113355ad9fd6",
-    "bad-discovery.json": "7168378ffcff7f04312d9738c26a83558919bb239b9c9d9767bfddd0b28e123b",
-    "bad-discovery.log": "7168378ffcff7f04312d9738c26a83558919bb239b9c9d9767bfddd0b28e123b",
-    "bad-execution.log": "c436e376776f741a380cc767f7bfd51e4da26abe74a6022628d4000c9181ebd2",
-    "bad-install.log": "2f57f4352462e8a6b49c3f19bd97c23f7dc40353c292ffeb2753e15450162693",
+    "bad-discovery.json": "1cf1fe29e55dfb878cb75f8adbcda23572f797da5869925388fad6895cf41b2c",
+    "bad-discovery.log": "1cf1fe29e55dfb878cb75f8adbcda23572f797da5869925388fad6895cf41b2c",
+    "bad-execution.log": "62a850939957da5cfd2ea1429bed1ee2eb67640c33d43242572ca2471a53b06c",
+    "bad-install.log": "0c7f1cec3ebaf73ce81511ae838115c359243ed26953ce3c5895d336680604cc",
     "bad-pnpm-version.log": "3806dfe55719b45f2b4fb740740c85f0e57c89d2e54030cafa3bcd7600208be7",
-    "bad-report.json": "abde228b66e99029d4531b2d31c882f05ef0d876047b5db1327785469db1d142",
-    "candidate-build.log": "eafeadebd0067326ba77bcbc48b762a3dc042cd601c9941f631e0b2616cea903",
+    "bad-report.json": "20aa20cfd893147530e85b1247de6514acca1e154785cccb560b08ac32d8a313",
+    "candidate-build.log": "af62e04e6d5ee325b880ce09a988b31514f718d2939d60d79de5a43f15adc4f7",
     "candidate-config.txt": "5796c4da50dd54dcb58f4d92ab687aa10581bc6fdf0bb271655d78111f95ace7",
-    "candidate-discovery.json": "a842f70cfde5ef6a643662a51bda7f39030b03cbf20f850865b446bcbb1b8154",
-    "candidate-discovery.log": "a842f70cfde5ef6a643662a51bda7f39030b03cbf20f850865b446bcbb1b8154",
-    "candidate-execution.log": "22c2fb98aada35778cd82628d49e9656e1104fe5a209df53da3bf4272e7d6079",
-    "candidate-install.log": "d21173071b95b07e98de90a4638a8bd2bfc157a8ea71ec855bd18dc5c9e999d8",
+    "candidate-discovery.json": "41f8d93238440f9717273b73e14a265991f6f43e27b5526170f91b185e7cdade",
+    "candidate-discovery.log": "41f8d93238440f9717273b73e14a265991f6f43e27b5526170f91b185e7cdade",
+    "candidate-execution.log": "5803fdffbf7d2370dfe52ebb7e5ce4f28da780b3a51040cabb9cbe35772cdf3f",
+    "candidate-install.log": "ec6dbf5f6f37a9ebfdb24854371c329db8f2a31f5bd49d4c94a6dc111eb2914a",
     "candidate-pnpm-version.log": "3806dfe55719b45f2b4fb740740c85f0e57c89d2e54030cafa3bcd7600208be7",
-    "candidate-report.json": "93a9ab07d5c8d6c8f278db3287841ec8bddf1ead506e91d8152c62b535782fc7"
+    "candidate-report.json": "eafed772bacf0e773933ec1ea23197bacf78ade7b67ee3e3dd2c522ebe2685ef"
   }
 }

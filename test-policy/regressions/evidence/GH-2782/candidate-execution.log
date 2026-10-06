@@ -1,16 +1,16 @@
-2026-10-05 11:28:47 system 79bbb5a8-74da-4a1f-9bfd-9b4a553983d5 [DKGAgent] No dataDir — triple store is in-memory (data will be lost on restart) [WARN]
-2026-10-05 11:28:47 system 51a73709-d9f8-41ec-9069-6e9e4dffc9fd [DKGAgent] reconcile on-demand-pending: watermark 0 -> 3 (head=25, processed=10, reconciled=10, pending=15)
-2026-10-05 11:28:47 system f11aec3b-c6d4-46dd-962a-0353755758d2 [DKGAgent] chain-promote action=cursor-advance cg=on-demand-pending onChainCg=33 cursor=0->3
-2026-10-05 11:28:47 system a2002e12-c5e9-45a4-8d26-e295d43bbab0 [DKGAgent] chain-promote action=sweep cg=on-demand-pending onChainCg=33 head=25 reconciled=10 pending=15
-2026-10-05 11:28:47 system ebbca524-d1f5-40ac-ba1f-a7a57338ea16 [DKGAgent] VM reconcile pass timing for "on-demand-pending": source=periodic gapSincePreviousPassMs=- resolveTargetMs=1 headReadMs=0 blockReadMs=0 scanMs=0 recoverMs=0 engineMs=1 flushMs=0 watermarkMs=0 totalMs=2 processed=10 reconciled=10 pending=15 continue=1
-2026-10-05 11:28:47 system 504eac19-9f76-47b7-aff8-b28a5c2952fe [DKGAgent] reconcile on-demand-pending: watermark 3 -> 6 (head=25, processed=10, reconciled=10, pending=5)
-2026-10-05 11:28:47 system 2555d3a0-9b20-4477-ae7b-d987d2f7ca60 [DKGAgent] chain-promote action=cursor-advance cg=on-demand-pending onChainCg=33 cursor=3->6
-2026-10-05 11:28:47 system f36861ce-e804-4631-943c-dacaebff1342 [DKGAgent] chain-promote action=sweep cg=on-demand-pending onChainCg=33 head=25 reconciled=10 pending=5
-2026-10-05 11:28:47 system 97c59b60-6bf3-4f40-9988-4d1f0777d15e [DKGAgent] VM reconcile pass timing for "on-demand-pending": source=periodic gapSincePreviousPassMs=0 resolveTargetMs=0 headReadMs=0 blockReadMs=0 scanMs=0 recoverMs=0 engineMs=0 flushMs=0 watermarkMs=0 totalMs=0 processed=10 reconciled=10 pending=5 continue=1
-2026-10-05 11:28:47 system 3154dc82-3f8d-4676-8bcc-af3d95ffb967 [DKGAgent] reconcile on-demand-pending: watermark 6 -> 25 (head=25, processed=5, reconciled=5, pending=0)
-2026-10-05 11:28:47 system a409ebbf-3384-43fd-bf87-152d8cc39bce [DKGAgent] chain-promote action=cursor-advance cg=on-demand-pending onChainCg=33 cursor=6->25
-2026-10-05 11:28:47 system 59402e75-43ab-4f19-9692-ada248b5eac3 [DKGAgent] chain-promote action=sweep cg=on-demand-pending onChainCg=33 head=25 reconciled=5 pending=0
-2026-10-05 11:28:47 system 30dbd77b-d2ce-4826-9e26-9d18136c591b [DKGAgent] VM reconcile pass timing for "on-demand-pending": source=periodic gapSincePreviousPassMs=0 resolveTargetMs=0 headReadMs=0 blockReadMs=0 scanMs=0 recoverMs=0 engineMs=0 flushMs=0 watermarkMs=0 totalMs=0 processed=5 reconciled=5 pending=0 continue=0
-REGRESSION_RUNTIME GH-2782 v22.23.2
+2026-10-07 01:53:56 system 931beaed-228d-4042-9fcb-116d6c4a28bc [DKGAgent] No dataDir — triple store is in-memory (data will be lost on restart) [WARN]
+2026-10-07 01:53:56 system a95d3782-82ec-4063-9b3e-13d16e472270 [DKGAgent] reconcile on-demand-pending: watermark 0 -> 3 (head=25, processed=10, reconciled=10, pending=15)
+2026-10-07 01:53:56 system ddfc0213-416c-4926-9569-d2bba8ee4081 [DKGAgent] chain-promote action=cursor-advance cg=on-demand-pending onChainCg=33 cursor=0->3
+2026-10-07 01:53:56 system d76047f1-cb1c-44f0-a01e-7961a101210e [DKGAgent] chain-promote action=sweep cg=on-demand-pending onChainCg=33 head=25 reconciled=10 pending=15
+2026-10-07 01:53:56 system 0c51f7b1-6bfc-4913-b9df-d8554052b310 [DKGAgent] VM reconcile pass timing for "on-demand-pending": source=periodic gapSincePreviousPassMs=- resolveTargetMs=0 headReadMs=0 blockReadMs=0 scanMs=0 recoverMs=0 engineMs=1 flushMs=0 watermarkMs=0 totalMs=2 processed=10 reconciled=10 pending=15 continue=1
+2026-10-07 01:53:56 system a5430ab3-dd74-46ff-af37-f5d599a67cb0 [DKGAgent] reconcile on-demand-pending: watermark 3 -> 6 (head=25, processed=10, reconciled=10, pending=5)
+2026-10-07 01:53:56 system 9e9ba853-e147-4f92-8623-f6f508678871 [DKGAgent] chain-promote action=cursor-advance cg=on-demand-pending onChainCg=33 cursor=3->6
+2026-10-07 01:53:56 system 0e7a86a9-b6c0-4c94-9b65-3a291736edbd [DKGAgent] chain-promote action=sweep cg=on-demand-pending onChainCg=33 head=25 reconciled=10 pending=5
+2026-10-07 01:53:56 system cbd82a7d-0cfa-47a8-a19c-50df4cfa872c [DKGAgent] VM reconcile pass timing for "on-demand-pending": source=periodic gapSincePreviousPassMs=0 resolveTargetMs=0 headReadMs=0 blockReadMs=0 scanMs=0 recoverMs=0 engineMs=0 flushMs=0 watermarkMs=0 totalMs=0 processed=10 reconciled=10 pending=5 continue=1
+2026-10-07 01:53:56 system dd44d2e9-4cc5-46f9-bb04-cc5164aab031 [DKGAgent] reconcile on-demand-pending: watermark 6 -> 25 (head=25, processed=5, reconciled=5, pending=0)
+2026-10-07 01:53:56 system bcc5310f-eebb-43a5-97d7-6a58e8e00c6c [DKGAgent] chain-promote action=cursor-advance cg=on-demand-pending onChainCg=33 cursor=6->25
+2026-10-07 01:53:56 system 8acb89c7-81e3-4d96-b16b-2cd9d8324343 [DKGAgent] chain-promote action=sweep cg=on-demand-pending onChainCg=33 head=25 reconciled=5 pending=0
+2026-10-07 01:53:56 system 10b651bc-ffc1-44db-9c73-b6e19a4fd81f [DKGAgent] VM reconcile pass timing for "on-demand-pending": source=periodic gapSincePreviousPassMs=0 resolveTargetMs=0 headReadMs=0 blockReadMs=0 scanMs=0 recoverMs=0 engineMs=0 flushMs=0 watermarkMs=0 totalMs=0 processed=5 reconciled=5 pending=0 continue=0
+REGRESSION_RUNTIME GH-2782 v22.23.1
 REGRESSION_OBSERVATION GH-2782 {"error":null,"fetched":[6,7,8,9,10,11],"localCount":25,"steps":[[0,3],[3,6],[6,25]],"current":true,"watermark":25,"subscriptionWatermark":25,"saves":0,"rows":0,"sameSubscription":true}
-JSON report written to /private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-KDEbae/candidate/candidate-report.json
+JSON report written to /private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/candidate/candidate-report.json

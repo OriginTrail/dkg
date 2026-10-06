@@ -2,117 +2,141 @@ TAP version 13
 # Subtest: registry resolves exact assertion through discovered required inventory and shard
 ok 1 - registry resolves exact assertion through discovered required inventory and shard
   ---
-  duration_ms: 0.701083
+  duration_ms: 0.605083
   type: 'test'
   ...
 # Subtest: registry rejects missing owner
 ok 2 - registry rejects missing owner
   ---
-  duration_ms: 0.245209
+  duration_ms: 0.202459
   type: 'test'
   ...
 # Subtest: registry rejects missing file
 ok 3 - registry rejects missing file
   ---
-  duration_ms: 0.121292
+  duration_ms: 0.107916
   type: 'test'
   ...
 # Subtest: registry rejects undiscovered assertion
 ok 4 - registry rejects undiscovered assertion
   ---
-  duration_ms: 0.073
+  duration_ms: 0.053958
   type: 'test'
   ...
 # Subtest: registry rejects ambiguous assertion
 ok 5 - registry rejects ambiguous assertion
   ---
-  duration_ms: 0.115958
+  duration_ms: 0.1005
   type: 'test'
   ...
 # Subtest: registry rejects optional-only route
 ok 6 - registry rejects optional-only route
   ---
-  duration_ms: 0.058167
+  duration_ms: 0.044875
   type: 'test'
   ...
 # Subtest: registry rejects optional case claimed as required
 ok 7 - registry rejects optional case claimed as required
   ---
-  duration_ms: 0.1075
+  duration_ms: 0.087708
   type: 'test'
   ...
 # Subtest: registry rejects disabled/discovery-excluded lane
 ok 8 - registry rejects disabled/discovery-excluded lane
   ---
-  duration_ms: 0.053208
+  duration_ms: 0.044041
   type: 'test'
   ...
 # Subtest: registry rejects renamed assertion
 ok 9 - registry rejects renamed assertion
   ---
-  duration_ms: 0.285375
+  duration_ms: 0.212084
   type: 'test'
   ...
 # Subtest: registry rejects duplicate stable IDs before discovery
 ok 10 - registry rejects duplicate stable IDs before discovery
   ---
-  duration_ms: 0.410083
+  duration_ms: 0.329417
   type: 'test'
   ...
 # Subtest: discovery rejects zero and ambiguous matches
 ok 11 - discovery rejects zero and ambiguous matches
   ---
-  duration_ms: 0.220875
+  duration_ms: 0.221375
   type: 'test'
   ...
 # Subtest: proof classifier rejects actual empty, skipped, wrong and import-failed runs
 ok 12 - proof classifier rejects actual empty, skipped, wrong and import-failed runs
   ---
-  duration_ms: 2888.694083
+  duration_ms: 2184.968333
   type: 'test'
   ...
 # Subtest: proof identity rejects stale test and runner bytes, and stale receipt digest
 ok 13 - proof identity rejects stale test and runner bytes, and stale receipt digest
   ---
-  duration_ms: 7.938542
+  duration_ms: 6.478917
   type: 'test'
   ...
 # Subtest: proof identities isolate each selected case while retaining shared execution inputs
 ok 14 - proof identities isolate each selected case while retaining shared execution inputs
   ---
-  duration_ms: 8.340209
+  duration_ms: 17.9355
   type: 'test'
   ...
 # Subtest: Windows pnpm launch preserves arguments without command-interpreter expansion
 ok 15 - Windows pnpm launch preserves arguments without command-interpreter expansion
   ---
-  duration_ms: 0.838458
+  duration_ms: 0.646083
   type: 'test'
   ...
 # Subtest: bounded proof launcher executes the installed pinned pnpm version
 ok 16 - bounded proof launcher executes the installed pinned pnpm version
   ---
-  duration_ms: 165.01225
+  duration_ms: 145.971916
   type: 'test'
   ...
 # Subtest: bounded subprocess runner stops only its own timed-out or cancelled child
 ok 17 - bounded subprocess runner stops only its own timed-out or cancelled child
   ---
-  duration_ms: 3007.20325
+  duration_ms: 3017.23725
+  type: 'test'
+  ...
+# Subtest: a descendant that keeps the output open cannot hang the runner
+ok 18 - a descendant that keeps the output open cannot hang the runner
+  ---
+  duration_ms: 1033.124666
+  type: 'test'
+  ...
+# Subtest: an abort after the launcher exited is recorded and never reads as a successful phase
+ok 19 - an abort after the launcher exited is recorded and never reads as a successful phase
+  ---
+  duration_ms: 3037.447709
+  type: 'test'
+  ...
+# Subtest: live results and serialized phases are held to one prerequisite contract
+ok 20 - live results and serialized phases are held to one prerequisite contract
+  ---
+  duration_ms: 1.448834
+  type: 'test'
+  ...
+# Subtest: registry discovery and proof execution resolve the same Windows pnpm invocation
+ok 21 - registry discovery and proof execution resolve the same Windows pnpm invocation
+  ---
+  duration_ms: 0.276
   type: 'test'
   ...
 # Subtest: registry rejects skipped assertions even with a general disabled-test waiver
-ok 18 - registry rejects skipped assertions even with a general disabled-test waiver
+ok 22 - registry rejects skipped assertions even with a general disabled-test waiver
   ---
-  duration_ms: 6.93425
+  duration_ms: 6.091125
   type: 'test'
   ...
-1..18
-# tests 18
+1..22
+# tests 22
 # suites 0
-# pass 18
+# pass 22
 # fail 0
 # cancelled 0
 # skipped 0
 # todo 0
-# duration_ms 6289.380625
+# duration_ms 9590.271083

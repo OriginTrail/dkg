@@ -9,15 +9,17 @@
     "packages/agent/test/regression-on-demand-cursor.test.ts": "fb9556de0e3e9a760b151bbda35fa123faecf520425ddd960d29dc16a7938058",
     "scripts/lib/regressions/cases/GH-2782.mjs": "00f1beafc5a034bb14dc75125764ba24fc305e8f8c17868284d1bc317bab5b03",
     "scripts/qa-prove-regression.mjs": "fe208ec75be58f2591ee2b5779e228d9b535004b088a4bda7b4519a850bac4af",
-    "scripts/lib/regressions/profiles.mjs": "217df82f9438698bc888e89ce3e8333817882e787475282105817f94158571ed",
-    "scripts/lib/regressions/results.mjs": "314d65918ccfb6fe1589812e3fd8fdbca5bb9aec9751360fd6fe6109fc2e82ea",
-    "scripts/lib/regressions/identity.mjs": "432c6e02754c360f5d23f2bf9da36c70fccf79cc4949a25caf52f28cd5c5788f",
-    "scripts/lib/regressions/proof.mjs": "5567e5896badcf2bf467de183e236010c5aeac1518d3460968d20a29c462f33a"
+    "scripts/lib/regressions/profile-contract.mjs": "80ec108ac673e911f367c5d3fb24c07488c32dba8e5e531b972cb8fc1fe22981",
+    "scripts/lib/regressions/phases.mjs": "67560288acf041b6221fe443baa033ea1269232fb10e5387ce48a9be08e578f6",
+    "scripts/lib/regressions/subprocess.mjs": "d558f259750524f359eeb7e9f4b09ca0175a0ca862c5a5d14c8b9793b21f385c",
+    "scripts/lib/regressions/results.mjs": "54d6abfe2d16fd32723c3a9f92f80dbd0b14a5a18730a6a1dd587ff808445ba9",
+    "scripts/lib/regressions/identity.mjs": "5e84529068e32342dc3400d1a6200b71006ba3daa20e0defd70de8e5d533bb8d",
+    "scripts/lib/regressions/proof.mjs": "473324dfac14b5df7255a085d006944f89c8d454e52e9b03398d650881f95f64"
   },
   "toolchain": {
-    "node": "v22.23.2",
-    "executable": "/Users/aleatoric/.nvm/versions/node/v22.23.2/bin/node",
-    "nodeSha256": "18e387c90ab8a8400183e8bdd396376e1e875b91b4c874b894dcade7b35bf572",
+    "node": "v22.23.1",
+    "executable": "/Users/aleatoric/.nvm/versions/node/v22.23.1/bin/node",
+    "nodeSha256": "2e3f1286a7eb3736346ed1803e458a0ff909e2b2d5bc746144dcb76970e9b99d",
     "platform": "darwin",
     "arch": "arm64"
   },
@@ -142,7 +144,7 @@
         "-t",
         "^VM reconcile cursor follows the subscription lifetime advances an on-demand subscription through its pending ordinals without a durable write$",
         "--reporter=json",
-        "--outputFile=/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-KDEbae/bad/bad-report.json"
+        "--outputFile=/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/bad/bad-report.json"
       ],
       "invocation": {
         "command": "pnpm",
@@ -158,7 +160,7 @@
           "-t",
           "^VM reconcile cursor follows the subscription lifetime advances an on-demand subscription through its pending ordinals without a durable write$",
           "--reporter=json",
-          "--outputFile=/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-KDEbae/bad/bad-report.json"
+          "--outputFile=/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/bad/bad-report.json"
         ]
       },
       "code": 1,
@@ -279,7 +281,7 @@
         "-t",
         "^VM reconcile cursor follows the subscription lifetime advances an on-demand subscription through its pending ordinals without a durable write$",
         "--reporter=json",
-        "--outputFile=/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-KDEbae/candidate/candidate-report.json"
+        "--outputFile=/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/candidate/candidate-report.json"
       ],
       "invocation": {
         "command": "pnpm",
@@ -295,7 +297,7 @@
           "-t",
           "^VM reconcile cursor follows the subscription lifetime advances an on-demand subscription through its pending ordinals without a durable write$",
           "--reporter=json",
-          "--outputFile=/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-KDEbae/candidate/candidate-report.json"
+          "--outputFile=/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/candidate/candidate-report.json"
         ]
       },
       "code": 0,
@@ -325,7 +327,7 @@
       "file": "packages/agent/test/regression-on-demand-cursor.test.ts",
       "assertion": "VM reconcile cursor follows the subscription lifetime advances an on-demand subscription through its pending ordinals without a durable write",
       "status": "failed",
-      "runtime": "v22.23.2",
+      "runtime": "v22.23.1",
       "observation": {
         "error": "Cannot acknowledge join approval for \"on-demand-pending\": durable subscription intent or host state is missing",
         "fetched": [],
@@ -338,9 +340,9 @@
         "rows": 0,
         "sameSubscription": true
       },
-      "diagnostic": "AssertionError: GH-2782: unsaved subscription converges without durable membership: expected { …(10) } to deeply equal { error: null, …(9) }\n    at /private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-KDEbae/bad/packages/agent/test/regression-on-demand-cursor.test.ts:88:92\n    at file:///private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-KDEbae/bad/node_modules/.pnpm/@vitest+runner@4.0.18/node_modules/@vitest/runner/dist/index.js:915:20"
+      "diagnostic": "AssertionError: GH-2782: unsaved subscription converges without durable membership: expected { …(10) } to deeply equal { error: null, …(9) }\n    at /private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/bad/packages/agent/test/regression-on-demand-cursor.test.ts:88:92\n    at file:///private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/bad/node_modules/.pnpm/@vitest+runner@4.0.18/node_modules/@vitest/runner/dist/index.js:915:20"
     },
-    "reportRoot": "/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-KDEbae/bad",
+    "reportRoot": "/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/bad",
     "dependencyInputs": {
       ".npmrc": "f5aa3042280204ad7d8b9f0a302273c0ec22748e6c2f9d33d4e68da443315acc",
       "bench/package.json": "3ca9d4afd21425087cf31893b8f9f63c81b0b8408db5e343ca76e5f8aa26ab9a",
@@ -415,8 +417,8 @@
   },
   "candidate": {
     "source": {
-      "commit": "3a34d991deaf118e6e951bbafa86dc2171c2138c",
-      "tree": "9758869680164ca253a9853fd2f3e73cdfcd883b",
+      "commit": "a18e0175e375f29b013e09803769b9d9b9d0e2d1",
+      "tree": "0ea454d1c0a5ed10ff747e0296c12e5be1ef0bc3",
       "lockfileSha256": "11309f3bf44b0484d0d358555fab3a964114259e67d63cbcce4482704fe91c99",
       "packageManager": "pnpm@10.28.1",
       "nodeRequirement": "22"
@@ -431,7 +433,7 @@
       "file": "packages/agent/test/regression-on-demand-cursor.test.ts",
       "assertion": "VM reconcile cursor follows the subscription lifetime advances an on-demand subscription through its pending ordinals without a durable write",
       "status": "passed",
-      "runtime": "v22.23.2",
+      "runtime": "v22.23.1",
       "observation": {
         "error": null,
         "fetched": [
@@ -466,7 +468,7 @@
       },
       "diagnostic": null
     },
-    "reportRoot": "/private/var/folders/7t/530rq2753055rznnsm0zbmbh0000gn/T/dkg-regression-KDEbae/candidate",
+    "reportRoot": "/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/candidate",
     "dependencyInputs": {
       ".npmrc": "f5aa3042280204ad7d8b9f0a302273c0ec22748e6c2f9d33d4e68da443315acc",
       "bench/package.json": "3ca9d4afd21425087cf31893b8f9f63c81b0b8408db5e343ca76e5f8aa26ab9a",
@@ -547,21 +549,21 @@
     }
   },
   "artifacts": {
-    "bad-build.log": "8c61c5d435012377c5ee1c2f029bc435c4aa93908f9a80d32f7cc8aeedd84452",
+    "bad-build.log": "4b0cc0db6875e8cea91af1b0d2026918e9e98843598b38e2b28434c0781bb84a",
     "bad-config.txt": "c9f5f4d6730810e77f786e168532af2eed36d5e376323b1f07d9bf32dc30b6c3",
-    "bad-discovery.json": "85ac0a18c6b41bbc39db7e33cbdb856d48ce963c7f696ea3c5a3ec10681bd8c7",
-    "bad-discovery.log": "85ac0a18c6b41bbc39db7e33cbdb856d48ce963c7f696ea3c5a3ec10681bd8c7",
-    "bad-execution.log": "f2ecb9cfb76dfb477d7e11053ba2413298d0c9794cd4ec9f0a5b992def9eb72c",
-    "bad-install.log": "68770d75201eb9a93cbc13688128ad9fc570f629dde0b2966ccb08e46beede96",
+    "bad-discovery.json": "acb4bb0fad650a3117e949cd1de23187c0fa1d4dd7328508303eb021622db477",
+    "bad-discovery.log": "acb4bb0fad650a3117e949cd1de23187c0fa1d4dd7328508303eb021622db477",
+    "bad-execution.log": "2189e359fa59bf93e24cc23cb5c8655b0b1ffffe9ac629dc2e1bae32e1300759",
+    "bad-install.log": "ac472cd00cd8fa7eac7ae4ed47184fdba69fd21f60ee4e4aea1c9ee879fc86be",
     "bad-pnpm-version.log": "3806dfe55719b45f2b4fb740740c85f0e57c89d2e54030cafa3bcd7600208be7",
-    "bad-report.json": "3093a400e1d4db481e3bd9aba79fdf2094ae12aed226c679e6c08cdfb871dd49",
-    "candidate-build.log": "e9c38054fa908ab7384e641a7c5ce87ac1cf87f6ebe65443fdd7f6750beb443a",
+    "bad-report.json": "6ae76af443183015af2bc87d4ea71090aad6df79d1478edbaf977bc715bbe5ee",
+    "candidate-build.log": "de8a44863eb0b0f56fa3b493de87aeb975b6959f61a439230a84f3e5f75578fc",
     "candidate-config.txt": "5796c4da50dd54dcb58f4d92ab687aa10581bc6fdf0bb271655d78111f95ace7",
-    "candidate-discovery.json": "e0e45b35eeb2f4dc1f54c8f9924810dcde1acca05cd3734c51f464b56be877da",
-    "candidate-discovery.log": "e0e45b35eeb2f4dc1f54c8f9924810dcde1acca05cd3734c51f464b56be877da",
-    "candidate-execution.log": "428743d4a8caa35bf26e4e77ec8a51c03bcdaaae1c10c0aec398785895ad79cd",
-    "candidate-install.log": "83990d029b8eba17046bf865b3c2b0cf55652b8dc00e29cbf89b1455e291029a",
+    "candidate-discovery.json": "7a879dedd7d227423bbd30c3fc33b403a28969e8b5964431dd44aca929ccd5e4",
+    "candidate-discovery.log": "7a879dedd7d227423bbd30c3fc33b403a28969e8b5964431dd44aca929ccd5e4",
+    "candidate-execution.log": "d3f2531d3936189f31a9c92e2ca7f90fbdd0f2949c101df64d785ed010cfa336",
+    "candidate-install.log": "13c0e954c36efc0741d973ad8545c5ebd220a2a7f5bef22aae06f50289908c7b",
     "candidate-pnpm-version.log": "3806dfe55719b45f2b4fb740740c85f0e57c89d2e54030cafa3bcd7600208be7",
-    "candidate-report.json": "9105a69b7d9689cb595eeb71091f4e3e9e172bba80b23a4c7b2255a78d526e4d"
+    "candidate-report.json": "b97239a06cd3b1197215f5ff20b822482d5dfd41d220ae25d1f79f27c63fac83"
   }
 }
