@@ -16,7 +16,9 @@
  * a silent skip that would leave the node running. A PID file is only ever
  * deleted when the PID in it is known to be dead; a live process keeps its
  * file until it is explicitly stopped, otherwise `restart-node` would launch a
- * duplicate and could signal a recycled PID. Nothing here scans the process
+ * duplicate and could signal a recycled PID. A process that has exited but not
+ * been collected by its parent yet (a zombie, which is what a just-SIGKILLed
+ * daemon is for a moment) counts as dead. Nothing here scans the process
  * table or signals by name.
  *
  * Restarting goes through the same rule: `restartNodeAndWait` first runs
@@ -116,13 +118,38 @@ export function readNodePids(paths: DevnetPaths, num: number): number[] {
   return [...new Set(readNodePidEntries(paths, num).map((entry) => entry.pid))];
 }
 
+/**
+ * `ps -o stat= -p <pid>`: the process state letters (`Z...` is a zombie), `null`
+ * when the process is gone or `ps` cannot show it.
+ */
+export function readProcessState(pid: number): string | null {
+  try {
+    const out = execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 5_000,
+    });
+    return out.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether the process is still running. A process that has exited but whose parent
+ * has not collected it yet (a zombie: what a SIGKILLed daemon is for a moment) still
+ * answers signal 0 and shows a mangled command line (`(node)`), yet nothing is left
+ * to signal and nothing of the daemon runs: it counts as gone, or a restart right
+ * after a kill would refuse it as "not a daemon of this checkout". A state that
+ * cannot be read counts as alive.
+ */
 export function pidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
-    return true;
   } catch {
     return false;
   }
+  return !readProcessState(pid)?.startsWith('Z');
 }
 
 /**
@@ -252,6 +279,7 @@ export function verifiedNodePids(
       );
     }
     if (!isDaemonOfCheckout(commandLine, roots)) {
+      if (!pidAlive(pid)) continue; // exited (and is waiting to be collected) while it was being looked at
       throw new Error(
         `node${num}: ${file} lists pid ${pid}, which is alive but is not a DKG daemon started from `
         + `${paths.repoRoot} (a stale PID file whose number was recycled?); not signalling it`,

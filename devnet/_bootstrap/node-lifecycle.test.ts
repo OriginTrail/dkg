@@ -20,6 +20,7 @@ import {
   readNodePidEntries,
   readNodePids,
   readProcessCommandLine,
+  readProcessState,
   restartNodeAndWait,
   rpcUrlFromNode1Config,
   sigkillNodeProcesses,
@@ -65,6 +66,22 @@ function sleeper(options: { plain?: boolean; entry?: string; argv?: string[]; ig
   const child = spawn(process.execPath, args, { stdio: 'ignore' });
   children.push(child);
   return child;
+}
+
+/**
+ * A zombie: a process that has exited but has not been collected by its parent (a `sleep` that never
+ * waits for it), which is what a just-SIGKILLed daemon is until its parent or init reaps it.
+ */
+async function zombie(): Promise<number> {
+  const holder = spawn('sh', ['-c', 'sleep 0.1 & echo $!; exec sleep 60'], { stdio: ['ignore', 'pipe', 'ignore'] });
+  children.push(holder);
+  const pid = await new Promise<number>((resolve, reject) => {
+    holder.stdout!.once('data', (chunk) => resolve(parseInt(String(chunk).trim(), 10)));
+    holder.once('error', reject);
+  });
+  for (let i = 0; i < 50 && !readProcessState(pid)?.startsWith('Z'); i += 1) await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(readProcessState(pid), 'the helper must leave a zombie').toMatch(/^Z/);
+  return pid;
 }
 
 /** A PID that is certainly dead: a child that has already exited and been reaped. */
@@ -124,6 +141,21 @@ describe('PID files', () => {
   it('pidAlive tells a live process from a reaped one', () => {
     expect(pidAlive(process.pid)).toBe(true);
     expect(pidAlive(deadPid())).toBe(false);
+  });
+
+  it('pidAlive counts a zombie (exited, not yet collected by its parent) as gone, readProcessState shows why', async () => {
+    const pid = await zombie();
+    expect(() => process.kill(pid, 0), 'signal 0 still reaches a zombie').not.toThrow();
+    expect(readProcessState(pid)).toMatch(/^Z/);
+    expect(pidAlive(pid)).toBe(false);
+    expect(readProcessState(process.pid)).not.toMatch(/^Z/);
+    expect(readProcessState(deadPid())).toBeNull();
+  });
+
+  it('clearDeadNodePidFiles removes the file of a zombie, as it does for any dead PID', async () => {
+    writeFileSync(pidFile(4, 'daemon.pid'), `${await zombie()}\n`);
+    clearDeadNodePidFiles(paths, 4);
+    expect(existsSync(pidFile(4, 'daemon.pid'))).toBe(false);
   });
 
   it('clearDeadNodePidFiles removes only files whose PID is dead, and only for that node', () => {
@@ -388,6 +420,20 @@ describe('only a daemon of this checkout is ever signalled', () => {
     expect(pidAlive(worker.pid!)).toBe(true);
   });
 
+  it('a just-killed daemon that is still a zombie is not refused as "not a daemon": it is gone, and nothing is signalled for it', async () => {
+    // The sequence of a cleanup: SIGKILL, then straight away a restart, before the parent has collected the process.
+    const dead = await zombie();
+    const supervisor = sleeper();
+    writeFileSync(pidFile(4, 'daemon.pid'), `${dead}\n`);
+    writeFileSync(pidFile(4, 'devnet.pid'), `${supervisor.pid}\n`);
+    expect(verifiedNodePids(paths, 4)).toEqual([supervisor.pid]);
+    expect(sigkillNodeProcesses(paths, 4)).toEqual([supervisor.pid]);
+    expect(await exited(supervisor)).toBe(true);
+    // Only the zombie is left: nothing to verify, nothing to signal.
+    expect(verifiedNodePids(paths, 4)).toEqual([]);
+    expect(sigkillNodeProcesses(paths, 4)).toEqual([]);
+  });
+
   it('a time-critical caller verifies before its wait and signals the verified PIDs at the kill point: no command line is read then, and only live ones are signalled', async () => {
     const worker = sleeper();
     const supervisor = sleeper();
@@ -463,6 +509,18 @@ describe('stopNodeProcesses', () => {
     // Both files keep their live PIDs.
     expect(existsSync(pidFile(4, 'daemon.pid'))).toBe(true);
     expect(existsSync(pidFile(4, 'devnet.pid'))).toBe(true);
+  });
+
+  it('a zombie in a PID file (the daemon was just SIGKILLed) neither rejects the stop nor keeps its file', async () => {
+    const supervisor = sleeper();
+    writeFileSync(pidFile(4, 'daemon.pid'), `${await zombie()}\n`);
+    writeFileSync(pidFile(4, 'devnet.pid'), `${supervisor.pid}\n`);
+
+    await stopNodeProcesses(paths, 4, { graceMs: 5_000 });
+
+    expect(await exited(supervisor)).toBe(true);
+    expect(existsSync(pidFile(4, 'daemon.pid'))).toBe(false);
+    expect(existsSync(pidFile(4, 'devnet.pid'))).toBe(false);
   });
 
   it('a node whose PID files hold only dead PIDs (or none) just has the dead files removed', async () => {
@@ -627,6 +685,17 @@ describe('restartNodeAndWait', () => {
     expect(await exited(worker)).toBe(true);
     expect(await exited(supervisor)).toBe(true);
     expect(readFileSync(out, 'utf8').split('\n').filter(Boolean)).toEqual(['args=restart-node 4']);
+  });
+
+  it('restarting right after a SIGKILL works: the killed daemon is a zombie for a moment, not an unrelated process', async () => {
+    writeFileSync(pidFile(4, 'daemon.pid'), `${await zombie()}\n`);
+    const api = await listen(() => ({ status: 200 }));
+
+    await restartNodeAndWait(paths, {
+      num: 4, apiPort: api.port, rpcUrl: DEFAULT_DEVNET_RPC, label: 'node4 back', timeoutMs: 5_000, pollIntervalMs: 50,
+    });
+
+    expect(readFileSync(out, 'utf8').split('\n')[0]).toBe('args=restart-node 4');
   });
 
   it('a live unrelated PID in devnet.pid rejects the restart before devnet.sh runs, and leaves it and the legitimate worker alive', async () => {
