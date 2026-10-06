@@ -98,12 +98,15 @@ export class CarriedBindings {
   /** Keys of the bindings this window verified (the others were carried in from earlier windows). */
   readonly #verified = new Set<string>();
   /**
-   * Per identity and peer, the best binding this window verified that lost to a
-   * better row claiming the same peer: if that row is dropped once the window's
-   * examined range is swept (it was not found there), this one, which was found,
-   * takes the peer's place.
+   * Per identity and peer, the best binding this window verified that the bound
+   * turned away: it lost to a better row claiming the same peer, or its identity
+   * already held four better ranked peers. If the carried bindings that turned it
+   * away are dropped once the window's examined range is swept (their rows were
+   * not found there), this one, which was found, takes the place.
    */
   readonly #standby = new Map<string, { readonly key: string; readonly binding: CarriedHolderBinding }>();
+  /** Set while {@link reinstate} admits the standing bindings: what it turns away is not kept again. */
+  #reinstating = false;
 
   entries(): IterableIterator<[string, CarriedHolderBinding]> {
     return this.#bindings.entries();
@@ -126,10 +129,7 @@ export class CarriedBindings {
   /** Take a binding this window verified. */
   verify(key: string, binding: CarriedHolderBinding): void {
     this.#verified.add(key);
-    if (this.#admit(key, binding)) return;
-    const pair = `${binding.identityId}\0${binding.peerId}`;
-    const standing = this.#standby.get(pair);
-    if (standing === undefined || ranksBelow(standing.binding, binding)) this.#standby.set(pair, { key, binding });
+    if (!this.#admit(key, binding)) this.#standBy(key, binding);
   }
 
   /** Whether this window verified the binding under `key`. */
@@ -140,13 +140,21 @@ export class CarriedBindings {
   /**
    * Call once the window has dropped the carried bindings whose rows it examined
    * without finding them: a peer whose better row was dropped is carried under
-   * the row this window found for it.
+   * the row this window found for it, and a peer that the bound turned away takes
+   * the slot of a carried peer that was dropped (or is turned away again, when its
+   * identity still holds four better ranked peers).
    */
   reinstate(): void {
-    for (const { key, binding } of this.#standby.values()) {
-      if (!this.#bindings.has(key) && this.#twinOf(key, binding) === undefined) this.#admit(key, binding);
-    }
+    const standing = [...this.#standby.values()];
     this.#standby.clear();
+    this.#reinstating = true;
+    try {
+      for (const { key, binding } of standing) {
+        if (!this.#bindings.has(key) && this.#twinOf(key, binding) === undefined) this.#admit(key, binding);
+      }
+    } finally {
+      this.#reinstating = false;
+    }
   }
 
   delete(key: string): void {
@@ -179,9 +187,17 @@ export class CarriedBindings {
       for (const candidate of keys) {
         if (ranksBelow(this.#bindings.get(candidate)!, this.#bindings.get(worst)!)) worst = candidate;
       }
+      if (this.#verified.has(worst) && !this.#reinstating) this.#standBy(worst, this.#bindings.get(worst)!);
       this.delete(worst);
     }
     return true;
+  }
+
+  /** Keep the best binding per identity and peer that this window verified and the bound turned away. */
+  #standBy(key: string, binding: CarriedHolderBinding): void {
+    const pair = `${binding.identityId}\0${binding.peerId}`;
+    const standing = this.#standby.get(pair);
+    if (standing === undefined || ranksBelow(standing.binding, binding)) this.#standby.set(pair, { key, binding });
   }
 
   /** The key of another row that claims the same peer for the same identity, if one is carried. */

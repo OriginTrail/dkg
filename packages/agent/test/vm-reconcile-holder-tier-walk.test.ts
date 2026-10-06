@@ -1383,3 +1383,42 @@ describe('a read queued behind a running one after close() or reset()', () => {
     expect(controller.entryFor('cg-b')).toBeUndefined();
   });
 });
+
+describe('a peer the window verified, which the per-identity bound turned away, takes its slot once the peers that crowded it out are swept', () => {
+  // Identity 1 has four fresher claims on its wallet (F1 to F4) and one honest peer that ranks below them. The honest
+  // peer is verified in every window that reads its row, yet the four better peers keep it out of the carry.
+  const FORGED = (index: number): string => `peer-forged-${index}`;
+  const HONEST = holderPeer('h');
+  const worldWithClaims = (): World => {
+    const world = createWorld();
+    for (const index of [1, 2, 3, 4]) world.add({ peerId: FORGED(index), agentAddress: holderWallet(1), lastSeen: FRESH }, 1n);
+    world.add({ peerId: HONEST, agentAddress: holderWallet(1), lastSeen: OLD }, 1n);
+    return world;
+  };
+
+  it('turns the peer away while the four better ranked claims are still there', async () => {
+    const world = worldWithClaims();
+    const cache: VmHolderIdentityCache = new Map();
+    const first = await resolveHolderScanWindow(world.deps, cache, VM_HOLDER_TIER_FRESH_SCAN);
+    expect(carriedPeers(first.next.carried, 1n)).toEqual([1, 2, 3, 4].map(FORGED));
+    const again = await resolveHolderScanWindow(world.deps, cache, { cursor: undefined, carried: first.next.carried });
+    expect(carriedPeers(again.next.carried, 1n)).toEqual([1, 2, 3, 4].map(FORGED));
+    expect(again.resolution).toMatchObject({ kind: 'resolved', peerIds: [FORGED(1), FORGED(2)] });
+  });
+
+  it.each([
+    ['all four claims are gone', [1, 2, 3, 4], [HONEST], [HONEST]],
+    ['two of the four claims are gone', [1, 2], [FORGED(3), FORGED(4), HONEST], [FORGED(3), FORGED(4)]],
+  ])('carries it in the window that finds %s, instead of one pass later', async (_name, gone, carriedAfter, selectedAfter) => {
+    const world = worldWithClaims();
+    const cache: VmHolderIdentityCache = new Map();
+    const first = await resolveHolderScanWindow(world.deps, cache, VM_HOLDER_TIER_FRESH_SCAN);
+    expect(carriedPeers(first.next.carried, 1n)).toEqual([1, 2, 3, 4].map(FORGED));
+
+    // The window that reads the honest row also examines the rows the gone claims were carried from.
+    world.remove((row) => gone.map(FORGED).includes(row.peerId));
+    const again = await resolveHolderScanWindow(world.deps, cache, { cursor: undefined, carried: first.next.carried });
+    expect(carriedPeers(again.next.carried, 1n)).toEqual([...carriedAfter].sort(codeUnits));
+    expect(again.resolution).toMatchObject({ kind: 'resolved', peerIds: selectedAfter });
+  });
+});
