@@ -150,7 +150,6 @@ import {
   type LiveOnChainAccessPolicyState,
 } from './internal/context-graph-authority/context-graph-access-policy.js';
 import {
-  confirmRelaxedRecipientAuthority,
   createContextGraphAuthorityError,
   createRecipientAuthorityChangedError,
   isContextGraphAuthorityUnavailableMarker,
@@ -430,6 +429,12 @@ import {
 
 const KA_LIFECYCLE_ASSET_UAL_RESOLVE_TIMEOUT_MS = 50;
 const SWM_RECIPIENT_AUTHORITY_STABILITY_ATTEMPTS = 3;
+
+/** One completed collect, with the check that nothing it depends on moved since it started. */
+interface RecipientSnapshot {
+  readonly resolution: WorkspaceAgentRecipientResolution;
+  readonly stayedCurrent: () => Promise<boolean>;
+}
 
 type ContextGraphSlotBindingOutcome =
   | { kind: 'match' }
@@ -1784,15 +1789,21 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     if (transport.kind === 'plaintext') {
       return { requiresEncryption: false, recipients: [] };
     }
-    let recipientAuthorityRevision: number | null = null;
-    let resolvedAllowedPeers: readonly string[] | null | undefined;
-    let resolveKeys: () => Promise<WorkspaceAgentRecipientResolution>;
+    const projection = this.contextGraphMetaProjection;
+    // Legacy and approved graphs read more than keys and routes, so the
+    // node-wide revision still fences them. A private roster does not use it.
+    const nodeWideSnapshot = (
+      resolution: WorkspaceAgentRecipientResolution,
+      revision: number,
+    ): RecipientSnapshot => ({
+      resolution,
+      stayedCurrent: async () => revision === projection.readAuthorityFactsRevision,
+    });
+    let resolveKeys: () => Promise<RecipientSnapshot>;
     if (transport.kind === 'legacy-unregistered') {
       resolveKeys = async () => {
-        const attemptRevision = this.contextGraphMetaProjection.readAuthorityFactsRevision;
-        const resolution = await resolveWorkspaceAgentRecipients(this.store, input);
-        recipientAuthorityRevision = attemptRevision;
-        return resolution;
+        const attemptRevision = projection.readAuthorityFactsRevision;
+        return nodeWideSnapshot(await resolveWorkspaceAgentRecipients(this.store, input), attemptRevision);
       };
     } else if (transport.kind === 'approved-private-replica') {
       // Resolve the complete effective metadata roster first. Participant
@@ -1800,17 +1811,14 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       // The peer gate comes from the same source-qualified, revision-fenced
       // proof as the transport classification, never the merged projection.
       resolveKeys = async () => {
-        const attemptRevision = this.contextGraphMetaProjection.readAuthorityFactsRevision;
+        const attemptRevision = projection.readAuthorityFactsRevision;
         const resolution = await resolveWorkspaceAgentRecipients(this.store, input);
         if (!resolution.requiresEncryption) {
           throw new Error(
             `Approved private replica "${input.contextGraphId}" resolved a plaintext SWM roster`,
           );
         }
-        if (transport.allowedPeers.length === 0) {
-          recipientAuthorityRevision = attemptRevision;
-          return resolution;
-        }
+        if (transport.allowedPeers.length === 0) return nodeWideSnapshot(resolution, attemptRevision);
 
         const allowedPeerSet = new Set(transport.allowedPeers);
         const effectiveAgentAddresses = new Set(
@@ -1841,8 +1849,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
           requiresEncryption: true,
           recipients: [firstRecipient, ...remainingRecipients],
         } as const;
-        recipientAuthorityRevision = attemptRevision;
-        return authorizedResolution;
+        return nodeWideSnapshot(authorizedResolution, attemptRevision);
       };
     } else {
       if (transport.kind === 'unavailable') {
@@ -1864,12 +1871,12 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       // write until the local cleanup retry succeeds.
       resolveKeys = async () => {
         // The registered/accepted private roster, local peer gate, and verified
-        // recipient-key routes are conjunctive authorities. Capture their shared
-        // revision before every attempt so a phonebook-hydration retry owns a new
-        // snapshot, while the final transport recheck cannot return a route
-        // removed or revoked meanwhile.
-        const attemptRevision =
-          this.contextGraphMetaProjection.readAuthorityFactsRevision;
+        // recipient-key routes are conjunctive authorities, each fenced by what
+        // it changes with: the roster by the transport re-read, the peer gate by
+        // its content, keys and routes by their own revision. Capture them before
+        // every attempt so a phonebook-hydration retry owns a new snapshot.
+        await projection.recipientKeyRouteFence.ensureReady();
+        const attemptRevision = projection.recipientKeyRouteFence.revision;
         const allowedPeers = await this.getContextGraphAllowedPeers(input.contextGraphId);
         const allowedPeerSet = allowedPeers === null ? null : new Set(allowedPeers);
         const recipients: WorkspaceAgentRecipient[] = [];
@@ -1906,14 +1913,15 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
             `Registered context graph "${input.contextGraphId}" requires encrypted SWM gossip but has no chain-authorized DKG agent recipients`,
           );
         }
-        // Publish only the snapshot owned by the attempt that actually
-        // completed. A failed pre-hydration attempt must not pin its revision
-        // across the phonebook write and the successful retry.
-        recipientAuthorityRevision = attemptRevision;
-        resolvedAllowedPeers = allowedPeers;
         return {
-          requiresEncryption: true,
-          recipients: [firstRecipient, ...remainingRecipients],
+          resolution: { requiresEncryption: true, recipients: [firstRecipient, ...remainingRecipients] },
+          stayedCurrent: async () => {
+            const currentPeers = await this.getContextGraphAllowedPeers(input.contextGraphId);
+            return (allowedPeers === null || currentPeers === null
+              ? allowedPeers === currentPeers
+              : sameStringSet(allowedPeers, currentPeers))
+              && attemptRevision === projection.recipientKeyRouteFence.revision;
+          },
         };
       };
     }
@@ -1922,7 +1930,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     // every member whose key is missing, then the keys are resolved once more.
     // Every member still needs a key, so a share that cannot get one stays
     // closed.
-    const resolveWithPhonebookHydration = async (): Promise<WorkspaceAgentRecipientResolution> => {
+    const resolveWithPhonebookHydration = async (): Promise<RecipientSnapshot> => {
       try {
         return await resolveKeys();
       } catch (error) {
@@ -1941,7 +1949,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         throw isWorkspaceAgentEncryptionKeyMissingError(error) ? withMemberKeyHint(error) : error;
       }
     };
-    let resolution = await resolveWithPhonebookHydration();
+    let snapshot = await resolveWithPhonebookHydration();
 
     if (
       transport.kind === 'private-roster'
@@ -1951,13 +1959,10 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       // Key and phonebook lookup are asynchronous. Re-read the paired
       // transport decision after them so an accepted-private (or registered)
       // roster rotation cannot return keys for a member removed meanwhile.
-      // The store revision is deliberately conservative because recipient
-      // facts can live in any named graph, so it only decides whether to collect
-      // again: a retry is accepted when the exact (agent,key,peer) set and the
-      // transport authority are stable. Unrelated writes on a busy node move it in
-      // every window, so the last window of a private roster does not fail on it
-      // alone (GH#3067): the roster was read after the last collect, that collect
-      // equalled the one before it (ATTEMPTS >= 2) and its peer gate is re-read.
+      // Each snapshot checks what it depends on, so a window whose snapshot
+      // moved collects again and is accepted when the exact (agent,key,peer) set
+      // and the transport authority are stable. The last window never accepts a
+      // snapshot whose check failed (GH#3067).
       for (
         let attempt = 0;
         attempt < SWM_RECIPIENT_AUTHORITY_STABILITY_ATTEMPTS;
@@ -1978,40 +1983,33 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         }
         const transportStayedCurrent = transport.kind === 'private-roster'
           ? currentTransport.kind === 'private-roster'
-            && resolution.requiresEncryption
-            && hasExactRecipientAgentRoster(resolution, currentTransport.participantAgents)
+            && snapshot.resolution.requiresEncryption
+            && hasExactRecipientAgentRoster(snapshot.resolution, currentTransport.participantAgents)
           : transport.kind === 'approved-private-replica'
             ? currentTransport.kind === 'approved-private-replica'
               && sameStringSet(transport.allowedPeers, currentTransport.allowedPeers)
             : currentTransport.kind === 'legacy-unregistered';
-        const revisionStayedCurrent = recipientAuthorityRevision
-          === this.contextGraphMetaProjection.readAuthorityFactsRevision;
-        if (transportStayedCurrent && revisionStayedCurrent) break;
+        if (transportStayedCurrent && await snapshot.stayedCurrent()) break;
 
         if (!transportStayedCurrent) {
           throw createRecipientAuthorityChangedError(input.contextGraphId, 'transport-changed');
         }
         if (attempt + 1 >= SWM_RECIPIENT_AUTHORITY_STABILITY_ATTEMPTS) {
-          if (transport.kind !== 'private-roster') {
-            throw createRecipientAuthorityChangedError(input.contextGraphId, 'revision-moved');
-          }
-          await confirmRelaxedRecipientAuthority(this.log, () => this.getContextGraphAllowedPeers(
-            input.contextGraphId), input.contextGraphId, resolvedAllowedPeers);
-          break;
+          throw createRecipientAuthorityChangedError(input.contextGraphId, 'revision-moved');
         }
 
-        const retriedResolution = await resolveWithPhonebookHydration();
-        const recipientSnapshotStayedCurrent = resolution.requiresEncryption
-          ? retriedResolution.requiresEncryption
-            && hasExactWorkspaceRecipientSet(resolution, retriedResolution)
-          : !retriedResolution.requiresEncryption;
+        const retried = await resolveWithPhonebookHydration();
+        const recipientSnapshotStayedCurrent = snapshot.resolution.requiresEncryption
+          ? retried.resolution.requiresEncryption
+            && hasExactWorkspaceRecipientSet(snapshot.resolution, retried.resolution)
+          : !retried.resolution.requiresEncryption;
         if (!recipientSnapshotStayedCurrent) {
           throw createRecipientAuthorityChangedError(input.contextGraphId, 'recipient-set-changed');
         }
-        resolution = retriedResolution;
+        snapshot = retried;
       }
     }
-    return resolution;
+    return snapshot.resolution;
   }
 
   async encryptWorkspacePayloadWithSenderKey(this: DKGAgent,

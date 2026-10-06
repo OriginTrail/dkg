@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
 import type {
   ContextGraphAuthorityFailureSite,
   RegisteredContextGraphAuthorityUnavailableReason,
@@ -162,49 +161,4 @@ export function createRecipientAuthorityChangedError(
       site,
     },
   );
-}
-
-const RELAXED_ACCEPT_LOG_INTERVAL_MS = 60_000;
-const relaxedAcceptLog = new Map<string, { loggedAt: number; suppressed: number }>();
-
-/**
- * The last window of the recipient stability loop of a private roster (GH#3067).
- * The node-wide authority-facts revision moved in every window, which on a busy
- * node says nothing about this graph. What the loop did prove: the transport's
- * roster read after the last collect is exactly the resolved agents, and the
- * last collect equalled the one before it. The one fact those do not cover is
- * the peer gate the last collect filtered by, so it is read again here and has
- * to be the same. A graph whose gate moved is refused like any recipient change.
- * Every acceptance is counted in a rate-limited line (closed text, no ids of
- * keys, agents or peers) so an operator can see how often the revision alone
- * would have refused a share.
- */
-export async function confirmRelaxedRecipientAuthority(
-  log: { info(ctx: OperationContext, message: string): void },
-  readAllowedPeers: () => Promise<readonly string[] | null>,
-  contextGraphId: string,
-  allowedPeersOfLastCollect: readonly string[] | null | undefined,
-): Promise<void> {
-  const current = await readAllowedPeers();
-  const resolvedWith = allowedPeersOfLastCollect ?? null;
-  const same = current === null || resolvedWith === null
-    ? current === resolvedWith
-    : current.length === resolvedWith.length && current.every((peer) => resolvedWith.includes(peer));
-  if (!same) throw createRecipientAuthorityChangedError(contextGraphId, 'recipient-set-changed');
-  const now = Date.now();
-  const seen = relaxedAcceptLog.get(contextGraphId);
-  if (seen !== undefined && now - seen.loggedAt < RELAXED_ACCEPT_LOG_INTERVAL_MS) {
-    seen.suppressed += 1;
-    return;
-  }
-  relaxedAcceptLog.set(contextGraphId, { loggedAt: now, suppressed: 0 });
-  try {
-    log.info(
-      createOperationContext('share'),
-      `Recipient authority of "${contextGraphId}" kept moving during key resolution; accepted on the exact recipient set `
-        + `and the roster read after the last collect (${seen?.suppressed ?? 0} more since the last line)`,
-    );
-  } catch {
-    // A diagnostic never changes the outcome of a resolution that proved its set.
-  }
 }

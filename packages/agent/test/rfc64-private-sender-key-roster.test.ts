@@ -7,6 +7,7 @@ import {
 import { CHAIN_POLICY_READ_TIMEOUT_MS } from '../src/dkg-agent-constants.js';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
 import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';
+import { stubFence } from './_helpers/recipient-fence-stub.js';
 
 const CG = '0x1111111111111111111111111111111111111111/private-cg';
 const MEMBER_A = '0x8ba1f109551bD432803012645Ac136ddd64DBA72';
@@ -331,7 +332,7 @@ describe('RFC-64 private Sender Key roster authority', () => {
   it('keeps a fully revoked legacy gate authoritative and empty', async () => {
     const receiver = {
       ...noAcceptedPublicUnregisteredPolicy,
-      contextGraphMetaProjection: { readAuthorityFactsRevision: 0 },
+      contextGraphMetaProjection: { readAuthorityFactsRevision: 0, recipientKeyRouteFence: stubFence() },
       resolveContextGraphAgentGateAuthority:
         WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority,
       resolveRegisteredContextGraphAuthority: async () => ({ kind: 'unregistered' as const }),
@@ -353,7 +354,7 @@ describe('RFC-64 private Sender Key roster authority', () => {
   it('preserves legacy meta and subscription resolution for non-RFC-64 graphs', async () => {
     const receiver = {
       ...noAcceptedPublicUnregisteredPolicy,
-      contextGraphMetaProjection: { readAuthorityFactsRevision: 0 },
+      contextGraphMetaProjection: { readAuthorityFactsRevision: 0, recipientKeyRouteFence: stubFence() },
       resolveContextGraphAgentGateAuthority:
         WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority,
       resolveRegisteredContextGraphAuthority: async () => ({ kind: 'unregistered' as const }),

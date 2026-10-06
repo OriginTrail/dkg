@@ -22,6 +22,8 @@ import { PublishMethods } from '../src/dkg-agent-publish.js';
 import { Rfc64CatalogMethods } from '../src/dkg-agent-rfc64-catalog.js';
 import { SwmSubstrateMethods } from '../src/dkg-agent-swm-substrate.js';
 import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
+import { createProjectionWriteHooks } from '../src/internal/projection-write-hooks.js';
+import { stubFence } from './_helpers/recipient-fence-stub.js';
 
 const CONTEXT_GRAPH_ID = '0x1111111111111111111111111111111111111111/accepted-private';
 const PROFILE_GRAPH = 'did:dkg:context-graph:agents';
@@ -177,6 +179,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const host = {
       store,
       contextGraphMetaProjection: {
+        recipientKeyRouteFence: stubFence(),
         readAuthorityFactsRevision: 0,
         readContextGraphAuthorityFactsRevision: () => '0:0',
       },
@@ -222,6 +225,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const host = {
       store,
       contextGraphMetaProjection: {
+        recipientKeyRouteFence: stubFence(),
         readAuthorityFactsRevision: 0,
         readContextGraphAuthorityFactsRevision: () => '0:0',
       },
@@ -266,6 +270,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const host = {
       store,
       contextGraphMetaProjection: {
+        recipientKeyRouteFence: stubFence(),
         get readAuthorityFactsRevision() { return metadataRevision; },
       },
       resolveSwmTransportAuthority: vi.fn(async () => {
@@ -293,47 +298,65 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
       /has no recipient key advertised by a peer in the context graph allowlist/,
     );
     expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(2);
-    expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(2);
+    // Collect, confirm (the gate differs), collect again (which refuses).
+    expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(3);
   });
 
-  it('retries an unchanged recipient snapshot after an unrelated authority revision moves', async () => {
-    const member = ethers.Wallet.createRandom();
-    const peerId = '12D3KooWAcceptedPrivateStableRetryPeer';
-    const store = new OxigraphStore();
-    stores.push(store);
-    await store.insert(signedKeyQuads(member, peerId));
+  describe.each([
+    {
+      moved: 'a recipient key or route fact',
+      expectedReads: 3,
+      expectedPeerGateReads: 4,
+      move: (host: { fence: ReturnType<typeof stubFence>; node: { revision: number } }) => { host.fence.revision += 1; },
+    },
+    {
+      moved: 'only unrelated authority facts',
+      expectedReads: 2,
+      expectedPeerGateReads: 2,
+      move: (host: { fence: ReturnType<typeof stubFence>; node: { revision: number } }) => { host.node.revision += 1; },
+    },
+  ])('a private roster whose snapshot sees $moved move during the first confirmation', (scenario) => {
+    it(`collects ${scenario.expectedReads - 1} time(s) and resolves the same recipients`, async () => {
+      const member = ethers.Wallet.createRandom();
+      const peerId = '12D3KooWAcceptedPrivateStableRetryPeer';
+      const store = new OxigraphStore();
+      stores.push(store);
+      await store.insert(signedKeyQuads(member, peerId));
 
-    let metadataRevision = 19;
-    let transportReads = 0;
-    const host = {
-      store,
-      contextGraphMetaProjection: {
-        get readAuthorityFactsRevision() { return metadataRevision; },
-      },
-      resolveSwmTransportAuthority: vi.fn(async () => {
-        transportReads += 1;
-        if (transportReads === 2) metadataRevision += 1;
-        return {
-          kind: 'private-roster' as const,
-          participantAgents: [member.address],
-        };
-      }),
-      getContextGraphAllowedPeers: vi.fn(async () => [peerId]),
-      ensureAgentsInOnDemandPhonebook: vi.fn(),
-    };
+      const moves = { fence: stubFence(), node: { revision: 19 } };
+      let transportReads = 0;
+      const host = {
+        store,
+        contextGraphMetaProjection: {
+          recipientKeyRouteFence: moves.fence,
+          get readAuthorityFactsRevision() { return moves.node.revision; },
+        },
+        resolveSwmTransportAuthority: vi.fn(async () => {
+          transportReads += 1;
+          if (transportReads === 2) scenario.move(moves);
+          return {
+            kind: 'private-roster' as const,
+            participantAgents: [member.address],
+          };
+        }),
+        getContextGraphAllowedPeers: vi.fn(async () => [peerId]),
+        ensureAgentsInOnDemandPhonebook: vi.fn(),
+      };
 
-    await expect(WorkspaceCryptoMethods.prototype
-      .resolveWorkspaceAgentRecipientsForCurrentAuthority.call(host as never, {
-        contextGraphId: CONTEXT_GRAPH_ID,
-      })).resolves.toMatchObject({
-        requiresEncryption: true,
-        recipients: [expect.objectContaining({
-          agentAddress: ethers.getAddress(member.address),
-          peerId,
-        })],
-      });
-    expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(3);
-    expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(2);
+      await expect(WorkspaceCryptoMethods.prototype
+        .resolveWorkspaceAgentRecipientsForCurrentAuthority.call(host as never, {
+          contextGraphId: CONTEXT_GRAPH_ID,
+        })).resolves.toMatchObject({
+          requiresEncryption: true,
+          recipients: [expect.objectContaining({
+            agentAddress: ethers.getAddress(member.address),
+            peerId,
+          })],
+        });
+      expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(scenario.expectedReads);
+      expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(scenario.expectedPeerGateReads);
+      expect(moves.fence.ensureReady).toHaveBeenCalledTimes(scenario.expectedReads - 1);
+    });
   });
 
   it('retries unchanged legacy plaintext after an unrelated authority revision moves', async () => {
@@ -345,6 +368,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const host = {
       store,
       contextGraphMetaProjection: {
+        recipientKeyRouteFence: stubFence(),
         get readAuthorityFactsRevision() { return metadataRevision; },
       },
       resolveSwmTransportAuthority: vi.fn(async () => {
@@ -372,16 +396,12 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const innerStore = new OxigraphStore();
     stores.push(innerStore);
     let projection!: ContextGraphMetaProjection;
+    const hooks = createProjectionWriteHooks(() => projection);
     const store = createListContextGraphsCacheInvalidatingStore(
       innerStore,
       () => undefined,
-      (quads, targetGraph) => {
-        if (targetGraph !== undefined) {
-          projection.markDirtyForGraph(targetGraph);
-          if (quads) projection.markDirtyFromQuads(quads);
-        } else if (quads) projection.markDirtyFromQuads(quads);
-        else projection.markAllDirty();
-      },
+      hooks.markDirty,
+      hooks.anticipate,
     );
     projection = new ContextGraphMetaProjection(store);
     await store.insert(key.quads);
@@ -464,16 +484,12 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const innerStore = new OxigraphStore();
     stores.push(innerStore);
     let projection!: ContextGraphMetaProjection;
+    const hooks = createProjectionWriteHooks(() => projection);
     const store = createListContextGraphsCacheInvalidatingStore(
       innerStore,
       () => undefined,
-      (quads, targetGraph) => {
-        if (targetGraph !== undefined) {
-          projection.markDirtyForGraph(targetGraph);
-          if (quads) projection.markDirtyFromQuads(quads);
-        } else if (quads) projection.markDirtyFromQuads(quads);
-        else projection.markAllDirty();
-      },
+      hooks.markDirty,
+      hooks.anticipate,
     );
     projection = new ContextGraphMetaProjection(store);
     await store.insert(inJoinCache(oldKey.quads));
@@ -538,16 +554,12 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const innerStore = new OxigraphStore();
     stores.push(innerStore);
     let projection!: ContextGraphMetaProjection;
+    const hooks = createProjectionWriteHooks(() => projection);
     const store = createListContextGraphsCacheInvalidatingStore(
       innerStore,
       () => undefined,
-      (quads, targetGraph) => {
-        if (targetGraph !== undefined) {
-          projection.markDirtyForGraph(targetGraph);
-          if (quads) projection.markDirtyFromQuads(quads);
-        } else if (quads) projection.markDirtyFromQuads(quads);
-        else projection.markAllDirty();
-      },
+      hooks.markDirty,
+      hooks.anticipate,
     );
     projection = new ContextGraphMetaProjection(store);
     // A live session whose member subscription for the graph is installed:
@@ -626,7 +638,8 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     // One authority read to classify the graph and one to confirm it: the
     // reconciles changed no fact, so nothing was resolved a second time.
     expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(2);
-    expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(1);
+    // The peer gate is read to collect and read again to confirm.
+    expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(2);
     expect(reconciles).toHaveLength(2);
     expect(reconcileHost.canUseSharedMemoryForContextGraph).toHaveBeenCalledTimes(2);
     expect(projection.readAuthorityFactsRevision).toBe(nodeWide);
@@ -836,6 +849,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const host = {
       store,
       contextGraphMetaProjection: {
+        recipientKeyRouteFence: stubFence(),
         readAuthorityFactsRevision: 0,
         readContextGraphAuthorityFactsRevision: () => '0:0',
       },
@@ -874,7 +888,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     ]);
     const host = {
       store,
-      contextGraphMetaProjection: { readAuthorityFactsRevision: 3 },
+      contextGraphMetaProjection: { readAuthorityFactsRevision: 3, recipientKeyRouteFence: stubFence() },
       resolveSwmTransportAuthority: vi.fn()
         .mockResolvedValueOnce({ kind: 'legacy-unregistered' as const })
         .mockResolvedValueOnce({
@@ -983,6 +997,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const retainedRoster = vi.fn(() => [retainedRemovedMember.address]);
     const host = {
       contextGraphMetaProjection: {
+        recipientKeyRouteFence: stubFence(),
         readAuthorityFactsRevision: 0,
         readContextGraphAuthorityFactsRevision: () => '0:0',
       },
@@ -1019,6 +1034,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     }));
     const host = {
       contextGraphMetaProjection: {
+        recipientKeyRouteFence: stubFence(),
         get readAuthorityFactsRevision() { return metadataRevision; },
       },
       resolveSwmTransportAuthority,
@@ -1052,6 +1068,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     });
     const host = {
       contextGraphMetaProjection: {
+        recipientKeyRouteFence: stubFence(),
         get readAuthorityFactsRevision() { return metadataRevision; },
       },
       resolveSwmTransportAuthority,
@@ -1080,6 +1097,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     });
     const host = {
       contextGraphMetaProjection: {
+        recipientKeyRouteFence: stubFence(),
         get readAuthorityFactsRevision() { return metadataRevision; },
       },
       resolveSwmTransportAuthority,
@@ -1108,6 +1126,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     let privateAuthorityActive = false;
     const host = {
       contextGraphMetaProjection: {
+        recipientKeyRouteFence: stubFence(),
         readAuthorityFactsRevision: 0,
         readContextGraphAuthorityFactsRevision: () => '0:0',
       },
@@ -1149,6 +1168,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     ));
     const host = {
       contextGraphMetaProjection: {
+        recipientKeyRouteFence: stubFence(),
         readAuthorityFactsRevision: 0,
         readContextGraphAuthorityFactsRevision: () => '0:0',
       },
@@ -1202,6 +1222,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const getLocalMetadataMemberRecoveryGate = vi.fn(async () => [invitedMember.address]);
     const host = {
       contextGraphMetaProjection: {
+        recipientKeyRouteFence: stubFence(),
         readAuthorityFactsRevision: 0,
         readContextGraphAuthorityFactsRevision: () => '0:0',
       },
@@ -1240,6 +1261,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
       : approvedUnregisteredAuthority(staleLocalMember.address));
     const host = {
       contextGraphMetaProjection: {
+        recipientKeyRouteFence: stubFence(),
         readAuthorityFactsRevision: 0,
         readContextGraphAuthorityFactsRevision: () => '0:0',
       },
@@ -1260,6 +1282,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
   it('fails recovery closed when metadata authority facts change during the read', async () => {
     const removed = ethers.Wallet.createRandom();
     const contextGraphMetaProjection = {
+      recipientKeyRouteFence: stubFence(),
       readAuthorityFactsRevision: 4,
       readContextGraphAuthorityFactsRevision() {
         return `0:${this.readAuthorityFactsRevision}`;
@@ -1428,13 +1451,12 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
   });
 
   /**
-   * GH#3067. The stability loop re-reads the transport after the keys resolve
-   * and uses the node-wide authority-facts revision only to decide whether to
-   * collect again. On a node whose queues, publishers and catalog lane keep
-   * writing, that revision moves in every window; the last window must then
-   * be decided by what the loop actually proved (the transport's roster, the
-   * exact recipient set of two consecutive collects and the peer gate), not by
-   * the counter alone.
+   * GH#3067. A private roster's snapshot checks what it depends on: the roster
+   * by the transport re-read, the peer gate by its content, and the members'
+   * keys and routes by a revision that only a write to such a fact moves. On a
+   * node whose queues, publishers and catalog lane keep writing, the node-wide
+   * authority revision moves in every window. That must not fail a share, and a
+   * key or route change in any window, the last one included, must.
    */
   describe('recipient stability loop under sustained authority churn (GH#3067)', () => {
     type ChurnTransport =
@@ -1443,8 +1465,26 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
       | { kind: 'approved-private-replica'; allowedPeers: string[] }
       | { kind: 'unavailable'; reason: string };
 
+    /** The decorated store and projection exactly as the agent wires them. */
+    function createChurnStack() {
+      const innerStore = new OxigraphStore();
+      stores.push(innerStore);
+      let projection!: ContextGraphMetaProjection;
+      const hooks = createProjectionWriteHooks(() => projection);
+      const store = createListContextGraphsCacheInvalidatingStore(
+        innerStore,
+        () => undefined,
+        hooks.markDirty,
+        hooks.anticipate,
+      );
+      projection = new ContextGraphMetaProjection(store);
+      return { store, innerStore, projection };
+    }
+    type ChurnStack = ReturnType<typeof createChurnStack>;
+
     interface ChurnContext {
-      readonly store: ReturnType<typeof createChurnStore>['store'];
+      readonly stack: ChurnStack;
+      readonly store: ChurnStack['store'];
       readonly member: ethers.HDNodeWallet;
       readonly memberUri: string;
       readonly memberKey: ReturnType<typeof signedKeyFixture>;
@@ -1458,54 +1498,83 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
       };
     }
 
-    /** The decorated store and projection exactly as the agent wires them. */
-    function createChurnStore() {
-      const innerStore = new OxigraphStore();
-      stores.push(innerStore);
-      let projection!: ContextGraphMetaProjection;
-      const store = createListContextGraphsCacheInvalidatingStore(
-        innerStore,
-        () => undefined,
-        (quads, targetGraph) => {
-          if (targetGraph !== undefined) {
-            projection.markDirtyForGraph(targetGraph);
-            if (quads) projection.markDirtyFromQuads(quads);
-          } else if (quads) projection.markDirtyFromQuads(quads);
-          else projection.markAllDirty();
-        },
-      );
-      projection = new ContextGraphMetaProjection(store);
-      return { store, projection };
+    /** A key fact of an agent outside the roster: moves the key and route revision, changes nothing resolved. */
+    const bystanderRoute = (): Quad => ({
+      subject: `did:dkg:agent:${ethers.Wallet.createRandom().address}`,
+      predicate: DKG_ONTOLOGY.DKG_PEER_ID,
+      object: '"12D3KooWChurnBystander"',
+      graph: PROFILE_GRAPH,
+    });
+
+    let bookkeeping = 0;
+    /**
+     * What a busy node writes while a share resolves its recipients: queue job
+     * transitions, share and knowledge-asset metadata, and working-memory
+     * cleanup. Each one moves the node-wide revision; none can change a key.
+     */
+    async function unrelatedWrites({ store }: ChurnStack): Promise<void> {
+      bookkeeping += 1;
+      const job = `urn:dkg:promote-queue:job:churn-${bookkeeping}`;
+      const wmGraph = `${contextGraphDataUri(CONTEXT_GRAPH_ID)}/_working_memory/churn-${bookkeeping}`;
+      await store.replaceSubject!('urn:dkg:promote-queue:control-plane', job, [{
+        subject: job,
+        predicate: 'urn:dkg:promote-queue:state',
+        object: `"running-${bookkeeping}"`,
+        graph: 'urn:dkg:promote-queue:control-plane',
+      }]);
+      await store.deleteByPatternWithoutCount!({
+        graph: 'urn:dkg:promote-queue:control-plane',
+        subject: job,
+        predicate: 'urn:dkg:promote-queue:state',
+      });
+      await store.deleteByPatternWithoutCount!({
+        graph: `${contextGraphDataUri(CONTEXT_GRAPH_ID)}/_shared_memory_meta`,
+        subject: `urn:dkg:share:churn-${bookkeeping}`,
+      });
+      await store.deleteByPatternWithoutCount!({
+        graph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
+        subject: `did:dkg:base:84532/0x1234567890123456789012345678901234567890/${bookkeeping}`,
+      });
+      await store.replaceGraph!(wmGraph, [{
+        subject: `urn:dkg:churn:doc-${bookkeeping}`,
+        predicate: 'urn:dkg:churn:predicate',
+        object: '"x"',
+        graph: wmGraph,
+      }]);
+      await store.dropGraph(wmGraph);
     }
 
     /**
      * A private-roster graph of two members. Read 1 of the transport classifies
-     * the graph and read 2 is the first confirmation (before the first
-     * re-collect), read 3 the second (before the second re-collect) and read 4
-     * the last (after the last collect). `moves` moves the node-wide revision
-     * during every read after the first, as sustained node activity does;
+     * the graph, read 2 is the confirmation after the first collect, read 3 after
+     * the second and read 4 after the third, the last. `unrelated` runs the writes
+     * above during every read after the first; `churn` names the reads during
+     * which a key fact of an agent outside the roster is written, which moves the
+     * key and route revision but cannot change the resolved set;
      * `during(read, context)` applies one real change at a chosen read.
      */
     function churningHost(options: {
       seed: (context: ChurnContext) => Quad[];
       allowedPeers?: 'both' | null;
-      moves?: boolean;
+      unrelated?: boolean;
+      churn?: readonly number[];
       during?: (read: number, context: ChurnContext) => Promise<unknown> | void;
       transport?: ChurnTransport;
-      withStore?: ReturnType<typeof createChurnStore>;
+      withStack?: ChurnStack;
     }) {
       const member = ethers.Wallet.createRandom();
       const other = ethers.Wallet.createRandom();
       const peerId = '12D3KooWChurnMemberPeer';
       const otherPeerId = '12D3KooWChurnOtherPeer';
-      const { store, projection } = options.withStore ?? createChurnStore();
+      const stack = options.withStack ?? createChurnStack();
       const state: ChurnContext['state'] = {
         roster: [member.address, other.address],
         allowedPeers: options.allowedPeers === null ? null : [peerId, otherPeerId],
         transport: options.transport ?? null,
       };
       const context: ChurnContext = {
-        store,
+        stack,
+        store: stack.store,
         member,
         memberUri: `did:dkg:agent:${ethers.getAddress(member.address)}`,
         memberKey: signedKeyFixture(member, peerId),
@@ -1514,16 +1583,14 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
         otherPeerId,
         state,
       };
-      let readRevision = 1000;
       let reads = 0;
       const host = {
-        store,
-        contextGraphMetaProjection: options.moves === false || options.withStore
-          ? projection
-          : { get readAuthorityFactsRevision() { return readRevision; } },
+        store: stack.store,
+        contextGraphMetaProjection: stack.projection,
         resolveSwmTransportAuthority: vi.fn(async (): Promise<ChurnTransport> => {
           reads += 1;
-          if (reads > 1 && options.moves !== false && !options.withStore) readRevision += 1;
+          if (reads > 1 && options.unrelated) await unrelatedWrites(stack);
+          if (options.churn?.includes(reads)) await stack.store.insert([bystanderRoute()]);
           await options.during?.(reads, context);
           return state.transport ?? { kind: 'private-roster', participantAgents: [...state.roster] };
         }),
@@ -1533,8 +1600,8 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
         ensureAgentsInOnDemandPhonebook: vi.fn(),
         log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
       };
-      const ready = store.insert(options.seed(context));
-      return { host, context, ready, projection };
+      const ready = stack.store.insert(options.seed(context));
+      return { host, context, ready, projection: stack.projection };
     }
 
     const resolve = (host: unknown) => WorkspaceCryptoMethods.prototype
@@ -1592,25 +1659,31 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
       expect(resolution.recipients).toHaveLength(count);
     };
 
-    it('resolves when the authority revision moves in every window and nothing relevant changed', async () => {
+    const REVISION_MOVED = { ...TRANSPORT_CHANGED, site: 'revision-moved' };
+
+    it('resolves in the first window while unrelated writes move the node-wide revision in every read', async () => {
+      const { host, ready, projection } = churningHost({ seed: profileKeys, unrelated: true });
+      await ready;
+      const nodeWide = projection.readAuthorityFactsRevision;
+      const keyRoute = projection.recipientKeyRouteFence.revision;
+
+      expectRecipients(await resolve(host), 2);
+
+      // The classification read and the confirmation of the one collect; the
+      // peer gate is read to collect and read again to confirm.
+      expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(2);
+      expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(2);
+      expect(projection.readAuthorityFactsRevision).toBeGreaterThan(nodeWide);
+      expect(projection.recipientKeyRouteFence.revision).toBe(keyRoute);
+    });
+
+    it('keeps the quiet path at two authority reads and one collect', async () => {
       const { host, ready } = churningHost({ seed: profileKeys });
       await ready;
 
       expectRecipients(await resolve(host), 2);
-      // Classification + three confirmations; the last window is decided by the
-      // two consecutive collects and the roster read after them. Three collects
-      // plus the peer-gate re-read of the last window.
-      expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(4);
-      expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(4);
-    });
-
-    it('keeps the quiet path at two authority reads and one collect', async () => {
-      const { host, ready } = churningHost({ seed: profileKeys, moves: false });
-      await ready;
-
-      expectRecipients(await resolve(host), 2);
       expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(2);
-      expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(1);
+      expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(2);
     });
 
     it('names the throw site of an authority that is unavailable at the first read', async () => {
@@ -1627,9 +1700,21 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
       expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(1);
     });
 
-    // A change lands during read N: reads 2 and 3 are followed by a collect that
-    // reads it, so the exact-set comparison refuses; read 4 follows the last
-    // collect, so only the transport's roster and the peer gate are re-read.
+    it('collects again, and again learns the key graphs, when a key fact is written during a window', async () => {
+      const { host, ready, projection } = churningHost({ seed: profileKeys, churn: [2] });
+      await ready;
+      const ensureReady = vi.spyOn(projection.recipientKeyRouteFence, 'ensureReady');
+
+      expectRecipients(await resolve(host), 2);
+
+      expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(3);
+      expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(4);
+      expect(ensureReady).toHaveBeenCalledTimes(2);
+    });
+
+    // A change lands during read N. Reads 2 and 3 are followed by a collect that
+    // reads it. Read 4 follows the last collect: only the snapshot's own check
+    // can see it, and it must.
     interface WindowChange {
       readonly change: string;
       readonly seed: (context: ChurnContext) => Quad[];
@@ -1637,8 +1722,6 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
       readonly apply: (context: ChurnContext) => Promise<unknown> | void;
       /** What a collect that reads the change refuses with. */
       readonly early: RegExp | { reason: string; detail: string; site: string };
-      /** The last window: refused, or accepted by design (the residual window). */
-      readonly last: 'refused' | 'accepted';
     }
 
     const windowChanges: WindowChange[] = [
@@ -1647,7 +1730,6 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
         seed: profileKeys,
         apply: revokeMemberKey,
         early: /public encryption keys.*revoked/,
-        last: 'accepted',
       },
       {
         change: 'a peer route is replaced in the join key cache',
@@ -1655,14 +1737,12 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
         allowedPeers: null,
         apply: replaceMemberRoute,
         early: { ...ROUTES_CHANGED, site: 'recipient-set-changed' },
-        last: 'accepted',
       },
       {
         change: 'a peer leaves the allowlist',
         seed: profileKeys,
         apply: ({ state, peerId }) => { state.allowedPeers = [peerId]; },
         early: /has no recipient key advertised by a peer in the context graph allowlist/,
-        last: 'refused',
       },
       {
         // Same length, different members: only a content comparison sees it.
@@ -1670,7 +1750,6 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
         seed: profileKeys,
         apply: ({ state, peerId }) => { state.allowedPeers = [peerId, '12D3KooWChurnSwappedPeer']; },
         early: /has no recipient key advertised by a peer in the context graph allowlist/,
-        last: 'refused',
       },
       {
         change: 'the graph gains a peer allowlist',
@@ -1678,16 +1757,17 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
         allowedPeers: null,
         apply: ({ state, peerId }) => { state.allowedPeers = [peerId]; },
         early: /has no recipient key advertised by a peer in the context graph allowlist/,
-        last: 'refused',
       },
     ];
 
     it.each(windowChanges.flatMap((scenario) => [2, 3].map((read) => ({ ...scenario, read }))))(
-      'still fails closed when $change during authority read $read',
+      'fails closed when $change during authority read $read',
       async (scenario) => {
         const { host, ready } = churningHost({
           seed: scenario.seed,
           allowedPeers: scenario.allowedPeers,
+          // Read 3 only happens when the first window moved.
+          churn: scenario.read === 3 ? [2] : [],
           during: (read, context) => (read === scenario.read ? scenario.apply(context) : undefined),
         });
         await ready;
@@ -1698,26 +1778,33 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
       },
     );
 
-    it.each(windowChanges)('decides $change after the last collect by what the last window proved', async (scenario) => {
+    it.each(windowChanges)('refuses in the last window when $change after the last collect', async (scenario) => {
       const { host, ready } = churningHost({
         seed: scenario.seed,
         allowedPeers: scenario.allowedPeers,
+        // Reads 2 and 3 move the key revision without changing the set, so the
+        // loop reaches its last window; the change lands during read 4.
+        churn: [2, 3],
         during: (read, context) => (read === 4 ? scenario.apply(context) : undefined),
       });
       await ready;
 
-      if (scenario.last === 'accepted') {
-        // The documented residual window: a removal that lands after the last
-        // collect has read the fact is not visible to the roster read either.
-        expectRecipients(await resolve(host), 2);
-      } else {
-        // The peer gate is re-read after the last roster read and compared with
-        // the one the last collect used.
-        await expect(resolve(host)).rejects.toMatchObject({
-          ...ROUTES_CHANGED,
-          site: 'recipient-set-changed',
-        });
-      }
+      await expect(resolve(host)).rejects.toMatchObject(REVISION_MOVED);
+      expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(4);
+    });
+
+    it('never returns the revoked key when it is revoked while the last window is read', async () => {
+      const { host, ready, context } = churningHost({
+        seed: profileKeys,
+        churn: [2, 3],
+        during: (read, ctx) => (read === 4 ? revokeMemberKey(ctx) : undefined),
+      });
+      await ready;
+      const encrypt = vi.fn();
+
+      await expect(resolve(host).then(encrypt)).rejects.toMatchObject(REVISION_MOVED);
+      expect(encrypt).not.toHaveBeenCalled();
+      expect(context.state.roster).toHaveLength(2);
     });
 
     it.each([
@@ -1750,9 +1837,10 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
         },
         rejects: { reason: 'chain-name-binding-unavailable', site: 'transport-unavailable' },
       },
-    ])('fails closed in the last window when $change, whatever the revision did', async (scenario) => {
+    ])('fails closed in the last window when $change', async (scenario) => {
       const { host, ready } = churningHost({
         seed: profileKeys,
+        churn: [2, 3],
         during: (read, context) => (read === 4 ? scenario.apply(context) : undefined),
       });
       await ready;
@@ -1760,31 +1848,29 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
       await expect(resolve(host)).rejects.toMatchObject(scenario.rejects);
     });
 
-    it('keeps the last-window accept bounded to two re-collects and three confirmation reads', async () => {
-      const { host, ready } = churningHost({ seed: profileKeys });
+    it('refuses once the key revision has moved in every window, after exactly three collects', async () => {
+      const { host, ready } = churningHost({ seed: profileKeys, churn: [2, 3, 4] });
       await ready;
 
-      await resolve(host);
-      // Never a fourth collect: the last window decides without resolving again.
-      expect(host.getContextGraphAllowedPeers.mock.calls.length).toBe(4);
-      expect(host.resolveSwmTransportAuthority.mock.calls.length).toBe(4);
+      await expect(resolve(host)).rejects.toMatchObject(REVISION_MOVED);
+      // Never a fourth collect: three collects, each followed by its confirmation.
+      expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(4);
+      expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(6);
     });
 
-    it('keeps legacy unregistered authority strict when the revision moves in every window', async () => {
+    it('keeps legacy unregistered authority strict when the node-wide revision moves in every window', async () => {
       const { host, ready } = churningHost({
         seed: () => [],
         transport: { kind: 'legacy-unregistered' },
+        unrelated: true,
       });
       await ready;
 
-      await expect(resolve(host)).rejects.toMatchObject({
-        ...TRANSPORT_CHANGED,
-        site: 'revision-moved',
-      });
+      await expect(resolve(host)).rejects.toMatchObject(REVISION_MOVED);
       expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(4);
     });
 
-    it('keeps an approved private replica strict when the revision moves in every window', async () => {
+    it('keeps an approved private replica strict when the node-wide revision moves in every window', async () => {
       const owner = ethers.Wallet.createRandom();
       const { host, ready } = churningHost({
         seed: () => [
@@ -1797,57 +1883,42 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
           },
         ],
         transport: { kind: 'approved-private-replica', allowedPeers: [] },
+        unrelated: true,
       });
       await ready;
 
-      await expect(resolve(host)).rejects.toMatchObject({
-        ...TRANSPORT_CHANGED,
-        site: 'revision-moved',
-      });
+      await expect(resolve(host)).rejects.toMatchObject(REVISION_MOVED);
       expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(4);
     });
 
-    it('resolves through the real store wrapper while bookkeeping writes move the node-wide revision', async () => {
-      const real = createChurnStore();
-      let bookkeepingWrites = 0;
-      const { host, ready, projection } = churningHost({
+    it('stays fail-closed when the key graphs cannot be scanned, and converges once the writes stop', async () => {
+      const stack = createChurnStack();
+      const query = stack.innerStore.query.bind(stack.innerStore);
+      vi.spyOn(stack.innerStore, 'query').mockImplementation(async (sparql, options) => {
+        if (options?.source === 'agent.recipientKeyRouteFence.scan') throw new Error('store busy');
+        return query(sparql, options);
+      });
+      let wildcard = 0;
+      const { host, ready } = churningHost({
         seed: profileKeys,
-        withStore: real,
+        withStack: stack,
+        // A drop of a graph nobody knows to be key-free is not harmless while the scan is unavailable.
         during: async (read) => {
-          if (read < 2) return;
-          bookkeepingWrites += 1;
-          const job = `urn:dkg:promote-queue:job:churn-${bookkeepingWrites}`;
-          // What every job transition of the share queue does to the store.
-          await real.store.replaceSubject!('urn:dkg:promote-queue:control-plane', job, [{
-            subject: job,
-            predicate: 'urn:dkg:promote-queue:state',
-            object: `"running-${bookkeepingWrites}"`,
-            graph: 'urn:dkg:promote-queue:control-plane',
-          }]);
-          await real.store.deleteByPatternWithoutCount!({
-            graph: 'urn:dkg:promote-queue:control-plane',
-            subject: job,
-            predicate: 'urn:dkg:promote-queue:state',
-          });
+          if (read === 2) await stack.store.dropGraph(`${contextGraphDataUri(CONTEXT_GRAPH_ID)}/_working_memory/wildcard-${wildcard += 1}`);
         },
       });
       await ready;
-      const nodeWide = projection.readAuthorityFactsRevision;
-      const perGraph = projection.readContextGraphAuthorityFactsRevision(CONTEXT_GRAPH_ID);
 
       expectRecipients(await resolve(host), 2);
-
-      expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(4);
-      expect(projection.readAuthorityFactsRevision).toBeGreaterThan(nodeWide + 2);
-      expect(projection.readContextGraphAuthorityFactsRevision(CONTEXT_GRAPH_ID)).toBe(perGraph);
+      expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(3);
     });
 
-    it('lets the VM publish key context resolve its recipients while the revision moves in every window', async () => {
+    it('lets the VM publish key context resolve its recipients while unrelated writes move the node-wide revision', async () => {
       // `_resolveCuratedChainKeyContext` runs the same resolver, twice per
       // publish attempt, with no bounded repeat. The sender is deliberately not
       // a member, so a successful resolution ends in the recipient-set check
-      // that follows it; before the fix the resolver itself refused.
-      const { host, ready } = churningHost({ seed: profileKeys });
+      // that follows it.
+      const { host, ready } = churningHost({ seed: profileKeys, unrelated: true });
       await ready;
       const outsider = ethers.Wallet.createRandom();
       const agentLike = Object.assign(host, {
@@ -1870,58 +1941,11 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
         undefined,
         'churn',
       )).rejects.toThrow(/is not in the recipient set/);
-      expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(4);
-    });
-
-    it('counts last-window accepts in one rate-limited line that carries no key, agent or peer', async () => {
-      vi.useFakeTimers({ toFake: ['Date'] });
-      try {
-        // Beyond any line an earlier test of this module logged for the graph.
-        vi.setSystemTime(Date.now() + 2 * 3_600_000);
-        const first = churningHost({ seed: profileKeys });
-        await first.ready;
-        await resolve(first.host);
-        expect(first.host.log.info).toHaveBeenCalledTimes(1);
-        const line = String(first.host.log.info.mock.calls[0][1]);
-        expect(line).toContain(`"${CONTEXT_GRAPH_ID}"`);
-        for (const secret of [first.context.member.address, first.context.other.address,
-          first.context.peerId, first.context.otherPeerId, first.context.memberKey.recipientKeyId]) {
-          expect(line).not.toContain(secret);
-        }
-
-        const quiet = churningHost({ seed: profileKeys });
-        await quiet.ready;
-        await resolve(quiet.host);
-        expect(quiet.host.log.info).not.toHaveBeenCalled();
-
-        vi.setSystemTime(Date.now() + 61_000);
-        const later = churningHost({ seed: profileKeys });
-        await later.ready;
-        await resolve(later.host);
-        expect(later.host.log.info).toHaveBeenCalledTimes(1);
-        expect(String(later.host.log.info.mock.calls[0][1])).toContain('(1 more since the last line)');
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
-    it('does not let a failing log line change the outcome of a resolution that proved its set', async () => {
-      vi.useFakeTimers({ toFake: ['Date'] });
-      try {
-        vi.setSystemTime(Date.now() + 4 * 3_600_000);
-        const { host, ready } = churningHost({ seed: profileKeys });
-        await ready;
-        host.log.info.mockImplementation(() => { throw new Error('hostile sink'); });
-
-        expectRecipients(await resolve(host), 2);
-        expect(host.log.info).toHaveBeenCalledTimes(1);
-      } finally {
-        vi.useRealTimers();
-      }
+      expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(2);
     });
 
     it('does not move the node-wide revision for a plain insert into an unrelated graph', async () => {
-      const real = createChurnStore();
+      const real = createChurnStack();
       const before = real.projection.readAuthorityFactsRevision;
       await real.store.insert([{
         subject: 'urn:dkg:churn:unrelated',
@@ -1933,7 +1957,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     });
 
     it('lets four concurrent resolutions succeed while a real promote queue churns the store', async () => {
-      const real = createChurnStore();
+      const real = createChurnStack();
       const queue = new TripleStoreAsyncPromoteQueue(real.store, {});
       let transition = 0;
       const jobsAreDriven = async () => {
@@ -1954,7 +1978,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
       };
       const hosts = Array.from({ length: 4 }, () => churningHost({
         seed: () => [],
-        withStore: real,
+        withStack: real,
         during: (read) => (read >= 2 ? jobsAreDriven() : undefined),
       }));
       // All four hosts share one store; give them the same two members' keys.
@@ -1969,14 +1993,16 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
         context.state.allowedPeers = ['12D3KooWChurnSharedMemberPeer', '12D3KooWChurnSharedOtherPeer'];
       }
       const nodeWide = real.projection.readAuthorityFactsRevision;
+      const keyRoute = real.projection.recipientKeyRouteFence.revision;
 
       const resolutions = await Promise.all(hosts.map(({ host }) => resolve(host)));
 
       for (const resolution of resolutions) expectRecipients(resolution, 2);
       for (const { host } of hosts) {
-        expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(4);
+        expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(2);
       }
       expect(real.projection.readAuthorityFactsRevision).toBeGreaterThan(nodeWide);
+      expect(real.projection.recipientKeyRouteFence.revision).toBe(keyRoute);
     });
   });
 });

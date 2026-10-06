@@ -21,6 +21,7 @@ import {
   WorkspaceAgentEncryptionKeyMissingError,
 } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
+import { stubFence } from './_helpers/recipient-fence-stub.js';
 
 const CONTEXT_GRAPH_ID = '0x00000000000000000000000000000000000000c1/key-fetch';
 const PROFILE_GRAPH = 'did:dkg:context-graph:agents';
@@ -85,7 +86,7 @@ describe('private share recipients with a missing member key (#2849)', () => {
     });
     Object.assign(host, {
       store,
-      contextGraphMetaProjection: { readAuthorityFactsRevision: 0 },
+      contextGraphMetaProjection: { readAuthorityFactsRevision: 0, recipientKeyRouteFence: stubFence() },
       resolveSwmTransportAuthority: vi.fn(async () => (transportKind === 'private-roster'
         ? { kind: 'private-roster' as const, participantAgents: members.map((member) => member.address) }
         : { kind: 'legacy-unregistered' as const })),
@@ -162,8 +163,8 @@ describe('private share recipients with a missing member key (#2849)', () => {
     };
     expect(internals.resolveSwmTransportAuthority).toHaveBeenCalledTimes(2);
     // Each resolution attempt owns its peer-gate snapshot, including the retry
-    // after phonebook hydration.
-    expect(internals.getContextGraphAllowedPeers).toHaveBeenCalledTimes(2);
+    // after phonebook hydration, and the confirmation reads the gate once more.
+    expect(internals.getContextGraphAllowedPeers).toHaveBeenCalledTimes(3);
   });
 
   it('names every member still without a key when the fetch cannot find them', async () => {
