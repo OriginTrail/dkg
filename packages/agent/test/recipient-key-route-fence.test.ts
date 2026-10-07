@@ -336,6 +336,26 @@ describe('RecipientKeyRouteFence (GH#3067)', () => {
       expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH, predicate: MEMORY_LAYER }))).toBe(false);
     });
 
+    it('does not trust a scan that was still running when an opaque write settled with an unknown outcome', async () => {
+      let finishScan!: () => void;
+      const scanning = new Promise<void>((resolve) => { finishScan = resolve; });
+      const query = vi.fn(async () => {
+        await scanning;
+        return { type: 'bindings' as const, bindings: [{ g: PROFILE_GRAPH }] };
+      });
+      const fence = new RecipientKeyRouteFence({ query } as unknown as TripleStore);
+
+      const settle = fence.begin({ everything: true });
+      const ready = fence.ensureReady();
+      settle('indeterminate');
+      finishScan();
+      await ready;
+
+      // The scan began while the write was pending and ended after it settled, so nothing
+      // marks it stale, but the write may still commit into a graph the scan has not seen.
+      expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(true);
+    });
+
     it('keeps trusting the scan after a write that named every graph and whose outcome is unknown', async () => {
       const fence = await readyFence([PROFILE_GRAPH]);
       fence.begin({ quads: [quad(AGENT, DKG_ONTOLOGY.DKG_PEER_ID, DATA_GRAPH)] })('indeterminate');
