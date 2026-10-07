@@ -58,6 +58,10 @@ export { readEvmContextGraphAuthorityIndexRpcV1 } from './evm-context-graph-auth
 import { contextGraphAuthorityAnchorUnavailableV1 } from './context-graph-authority-index-errors.js';
 export { contextGraphAuthorityAnchorUnavailableV1 } from './context-graph-authority-index-errors.js';
 
+/** A local log revision moved; this is not evidence of an RPC outage. */
+class ContextGraphAuthorityIndexLogAnchorMovedError extends
+  ContextGraphAuthorityIndexRetryableError {}
+
 /**
  * Keep authority-index eth_getLogs requests inside the strictest production
  * provider limit currently supported. The configured registry page size can
@@ -260,7 +264,7 @@ async function readEvmContextGraphAuthorityIndexProjectionV1<T>(
         // costs no RPC. Retryable for the same reason: a tick that committed
         // mid-fold is a re-read, not a broken node.
         if (!await logSource.source.anchorHolds(logSource.anchor)) {
-          throw new ContextGraphAuthorityIndexRetryableError(
+          throw new ContextGraphAuthorityIndexLogAnchorMovedError(
             `chain event log moved under ${input.stabilizationOperation}`,
           );
         }
@@ -571,6 +575,13 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
           } catch (error) {
             options.signal?.throwIfAborted();
             projectionSignal.throwIfAborted();
+            // Retry the new local revision once, then scan this provider live.
+            // Ordinary log commits must not consume endpoint failover or open
+            // the authority circuit when the provider remains healthy.
+            if (error instanceof ContextGraphAuthorityIndexLogAnchorMovedError) {
+              if (logAttempt === 0) continue;
+              break;
+            }
             if (!isContextGraphAuthorityIndexRetryableError(error)
               || error.reason !== 'cursor-ahead') throw error;
             if (logAttempt === 0) {

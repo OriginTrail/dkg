@@ -381,12 +381,32 @@ export function postCommitRecoveryExhaustedReason(attempts: number): string {
 }
 
 /**
- * Default exponential backoff: 1m, 2m, 4m, 8m, 15m (cap). Caller passes
- * 1-indexed attempt count.
+ * Default exponential backoff before jitter: 1m, 2m, 4m, 8m, 15m (cap). Caller
+ * passes 1-indexed attempt count.
  */
 export function defaultBackoffMs(attemptCount: number): number {
   const base = 60_000 * 2 ** Math.max(0, attemptCount - 1);
   return Math.min(base, 15 * 60_000);
+}
+
+/** Same ratio as the lift queue (GH#2270) and the worker's claim backoff. */
+const PROMOTE_BACKOFF_JITTER_RATIO = 0.2;
+
+/**
+ * The default curve with symmetric multiplicative jitter (GH#3067), so jobs that
+ * failed together do not come back together. Rounded because `nextRetryAt` is
+ * persisted as an xsd:integer, floored at 1 ms and clamped under the curve's own
+ * ceiling. A backoff the caller injects never goes through here.
+ */
+export function createDefaultPromoteBackoff(
+  rand: () => number = () => Math.random(),
+): (attemptCount: number) => number {
+  return (attemptCount) => Math.min(
+    15 * 60_000,
+    Math.max(1, Math.round(
+      defaultBackoffMs(attemptCount) * (1 + PROMOTE_BACKOFF_JITTER_RATIO * (2 * rand() - 1)),
+    )),
+  );
 }
 
 /**

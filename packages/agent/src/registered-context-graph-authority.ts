@@ -11,6 +11,17 @@ import type { ApprovedPrivateReplicaAuthority } from './approved-private-replica
  */
 export type ContextGraphReadAuthorityDependency = 'store' | 'chain' | 'local-state' | 'unknown';
 
+/**
+ * Which check of the recipient-authority stability loop refused a share or a
+ * publish (GH#3067), for server-side diagnostics only: a closed set, so a log
+ * can carry it without any free text.
+ */
+export type ContextGraphAuthorityFailureSite =
+  | 'transport-unavailable'
+  | 'transport-changed'
+  | 'revision-moved'
+  | 'recipient-set-changed';
+
 export type LiveOnChainAccessPolicyUnavailableReason =
   | 'chain-access-policy-timeout'
   | 'chain-access-policy-unknown';
