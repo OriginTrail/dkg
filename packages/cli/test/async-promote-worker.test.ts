@@ -537,9 +537,11 @@ describe('runPromoteJob', () => {
       expect(seen[1]).toEqual(seen[0]);
     });
 
-    it('ends failed yet still retryable when the fence outlasts every attempt; recover requeues it', async () => {
+    it('keeps retrying past its attempt budget for an hour after enqueue, then ends failed yet retryable; recover requeues it', async () => {
       await queue.enqueue(makeRequest({ assertionName: 'fenced-forever' }));
-      for (let attempt = 0; attempt < 3; attempt += 1) {
+      // One attempt every 10 minutes: the budget of 3 is spent after 20 minutes,
+      // the window of the typed prerequisite failure ends at 60.
+      for (let attempt = 1; attempt <= 7; attempt += 1) {
         const claimed = await queue.claimNext('worker-test');
         expect(claimed).not.toBeNull();
         await runPromoteJob({
@@ -554,13 +556,19 @@ describe('runPromoteJob', () => {
           heartbeatIntervalMs: 0,
           log: (message) => logs.push(message),
         });
+        if (attempt < 7) {
+          expect((await queue.list({}))[0]).toMatchObject({
+            state: 'failed_retrying',
+            attempt: { count: attempt, maxRetries: 3 },
+          });
+        }
         fixture.clock.advance(10 * 60_000);
       }
       const [job] = await queue.list({});
-      expect(job).toMatchObject({ state: 'failed', attempt: { count: 3 } });
+      expect(job).toMatchObject({ state: 'failed', attempt: { count: 7 } });
       expect(promoteJobToView(job)).toMatchObject({
         state: 'failed',
-        attempts: 3,
+        attempts: 7,
         maxAttempts: 3,
         lastError: {
           code: 'transient',

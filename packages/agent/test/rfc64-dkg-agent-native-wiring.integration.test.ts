@@ -5239,6 +5239,63 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(announce).not.toHaveBeenCalled();
   }, 60_000);
 
+  it('hands a cancellation to the successor it has already begun to publish', async () => {
+    const author = await startNativeAgent('r1-3-cancellation-forwarded-author');
+    author.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const originalPublish = author.publishAuthorCatalogExactSetSuccessorV1.bind(author);
+    // The genesis is signed first; only signatures made after the publication
+    // was entered belong to the successor.
+    const signMessage = vi.fn((message: Uint8Array) => AUTHOR_WALLET.signMessage(message));
+    let signaturesBeforeSuccessor = -1;
+    let publicationSettled: Promise<unknown> | undefined;
+    const abortController = new AbortController();
+    vi.spyOn(author, 'publishAuthorCatalogExactSetSuccessorV1')
+      .mockImplementationOnce((params) => {
+        signaturesBeforeSuccessor = signMessage.mock.calls.length;
+        // The caller gives up while the runtime stays open, so nothing but the
+        // cancellation itself can stop the publication that follows.
+        abortController.abort(new Error('test cancellation'));
+        const publication = originalPublish(params);
+        publicationSettled = publication.then(() => 'published', () => 'stopped');
+        return publication;
+      });
+
+    await expect(author.reconcileRfc64PublicRootCatalogExactSetV1({
+      scope: {
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        governanceChainId: null,
+        governanceContractAddress: null,
+        ownershipTransitionDigest: null,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        era: '0',
+        bucketCount: '1',
+      },
+      author: { address: AUTHOR_WALLET.address, signMessage },
+      assets: [{
+        assertionCoordinate: 'r1-3-cancellation-forwarded' as never,
+        projectionBytes: PROJECTION,
+        seal: await authorSeal(75n),
+      }],
+      deployment: NATIVE_DEPLOYMENT,
+      peers: [],
+      catalogIssuerDelegationEffectiveAt: '0' as TimestampMsV1,
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      signal: abortController.signal,
+    })).rejects.toThrow(/test cancellation|aborted/u);
+    // The caller is released at once; the publication itself settles later.
+    await expect(publicationSettled).resolves.toBe('stopped');
+
+    expect(signaturesBeforeSuccessor).toBeGreaterThan(0);
+    // No object of the successor was signed, so none could be staged.
+    expect(signMessage).toHaveBeenCalledTimes(signaturesBeforeSuccessor);
+  }, 60_000);
+
   registerM0RecoveryScenario('cold-restart', rfc64M0RecoveryTitle('cold-restart'), async () => {
     const author = await startNativeAgentWithOptions({
       name: 'bootstrap-author',

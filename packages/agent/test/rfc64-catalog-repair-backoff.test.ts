@@ -5,7 +5,9 @@ import {
   type EvmAddressV1,
 } from '@origintrail-official/dkg-core';
 import { Rfc64SwmCatalogProjectionOwnerV1 } from '../src/dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
-import { activeDefaultStoreWorkPriority } from '@origintrail-official/dkg-storage';
+import { CatalogRepairRetryV1, type CatalogRepairRevisionHintV1 } from '../src/rfc64/catalog-repair-retry-v1.js';
+import { CatalogRepairIntegrityErrorV1 } from '../src/rfc64/catalog-repair-diagnostics-v1.js';
+import { StoreSchedulerBusyError, StoreOperationTimeoutError, activeDefaultStoreWorkPriority } from '@origintrail-official/dkg-storage';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from '../src/rfc64/finalized-private-placement-repair-store-v1.js';
 
 const CG = 'repair-backoff' as ContextGraphIdV1;
@@ -23,7 +25,7 @@ afterEach(async () => {
 });
 
 function fixture(retryIntervalMs = 5_000) {
-  let revision = 'scope-1:head-1';
+  let revision: CatalogRepairRevisionHintV1 = { scopeIdentity: 'scope-1', headRevision: 'head-1' };
   let available = true;
   let privateRepairs: readonly Rfc64FinalizedPrivatePlacementRepairV1[] = [];
   const reconcile = vi.fn(async (): Promise<null> => { throw new Error('unchanged repair failure'); });
@@ -49,7 +51,7 @@ function fixture(retryIntervalMs = 5_000) {
   return {
     owner, reconcile, repairPrivate, readRevision, listPrivateRepairs, warn,
     request: () => owner.request({ contextGraphId: CG, authorAddress: AUTHOR, ctx }),
-    setRevision: (value: string) => { revision = value; },
+    setRevision: (value: string | CatalogRepairRevisionHintV1) => { revision = typeof value === 'string' ? { scopeIdentity: 'scope-1', headRevision: value } : value; },
     setAvailable: (value: boolean) => { available = value; },
     setPrivateRepairs: (value: readonly Rfc64FinalizedPrivatePlacementRepairV1[]) => { privateRepairs = value; },
     advance: async (ms: number) => { await vi.advanceTimersByTimeAsync(ms); await owner.whenIdle(); },
@@ -68,6 +70,14 @@ function privateRepair(): Rfc64FinalizedPrivatePlacementRepairV1 {
     kaUal: `did:dkg:otp:20430/${AUTHOR}/1`, sealDigest: `0x${'22'.repeat(32)}`,
   } as Rfc64FinalizedPrivatePlacementRepairV1;
 }
+
+const retainedFailures = [
+  ['integrity', () => new CatalogRepairIntegrityErrorV1('invalid seal')],
+  ['queue_full', () => new StoreSchedulerBusyError('queue_full', 'background', 'query')],
+  ['queue_wait', () => new StoreSchedulerBusyError('queue_wait_timeout', 'background', 'query')],
+  ['store_timeout_not_started', () => new StoreOperationTimeoutError({ backend: 'test', operation: 'query', outcome: 'not_started' })],
+  ['store_timeout_indeterminate', () => new StoreOperationTimeoutError({ backend: 'test', operation: 'query', outcome: 'indeterminate' })],
+] as const;
 
 describe('RFC-64 unchanged repair backoff', () => {
   it('backs unchanged failures off exponentially with a finite cap', async () => {
@@ -105,6 +115,133 @@ describe('RFC-64 unchanged repair backoff', () => {
     expect(f.reconcile).toHaveBeenCalledTimes(3);
     await f.advance(5_000);
     expect(f.reconcile).toHaveBeenCalledTimes(4);
+  });
+
+  it('does not impose a stale integrity cooldown after a lane transition', () => {
+    const retry = new CatalogRepairRetryV1();
+    retry.observe({ scopeIdentity: 'scope-1', headRevision: 'head-1' });
+    const generation = retry.generation;
+    retry.observe(null);
+    retry.observe({ scopeIdentity: 'scope-1', headRevision: 'head-2' });
+    expect(retry.fail(generation, 0, 5_000, 'integrity')).toBe(false);
+    expect(retry.nextAttemptAtMs).toBeNull();
+  });
+
+  it.each(retainedFailures)('preserves %s cooldown and failure history under continuous inventory churn', async (_kind, failure) => {
+    const f = fixture();
+    f.reconcile.mockImplementation(async () => { throw failure(); });
+    f.request();
+    await f.owner.whenIdle();
+    for (let i = 0; i < 20; i++) {
+      f.setRevision(`scope-1:head-${i + 2}`);
+      f.request();
+      await f.owner.whenIdle();
+    }
+    expect(f.reconcile).toHaveBeenCalledTimes(1);
+    await f.advance(5_000);
+    expect(f.reconcile).toHaveBeenCalledTimes(2);
+    f.setRevision('scope-1:head-100'); f.request();
+    await f.owner.whenIdle();
+    expect(f.owner.status()?.repairs[0]).toMatchObject({ consecutiveFailures: 2, nextAttemptAtMs: 15_000 });
+    f.setAvailable(false); f.request();
+    f.setAvailable(true); f.owner.start(ctx);
+    await f.owner.whenIdle();
+    expect(f.reconcile).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(retainedFailures)('does not immediately replay a %s failure when its head changes while running', async (_kind, failure) => {
+    const f = fixture(0);
+    f.reconcile.mockImplementationOnce(async () => {
+      f.setRevision('scope-1:head-2');
+      throw failure();
+    });
+    f.request();
+    await f.owner.whenIdle();
+    expect(f.reconcile).toHaveBeenCalledTimes(1);
+    expect(f.owner.status()?.repairs[0]).toMatchObject({ consecutiveFailures: 1, nextAttemptAtMs: 5_000 });
+    f.reconcile.mockResolvedValue(null);
+    await f.advance(4_999);
+    expect(f.reconcile).toHaveBeenCalledTimes(1);
+    await f.advance(1);
+    expect(f.reconcile).toHaveBeenCalledTimes(2);
+    await f.advance(60_000);
+    expect(f.reconcile).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('retains a changed head observed only by start until the cooldown deadline', async () => {
+    const f = fixture(0);
+    f.reconcile.mockRejectedValueOnce(new CatalogRepairIntegrityErrorV1('invalid seal'));
+    f.request();
+    await f.owner.whenIdle();
+    f.setRevision({ scopeIdentity: 'scope-1', headRevision: 'head-2' });
+    f.reconcile.mockResolvedValue(null);
+    f.owner.start(ctx);
+    await f.owner.whenIdle();
+    await f.advance(4_999);
+    expect(f.reconcile).toHaveBeenCalledTimes(1);
+    await f.advance(1);
+    expect(f.reconcile).toHaveBeenCalledTimes(2);
+    await f.advance(60_000);
+    expect(f.reconcile).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['cooldown', 'in-flight'])('retains a known changed head through %s with periodic retries disabled', async (phase) => {
+    const f = fixture(0);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    f.reconcile.mockImplementationOnce(async () => {
+      if (phase === 'in-flight') await gate;
+      throw new CatalogRepairIntegrityErrorV1('invalid seal');
+    });
+    f.request();
+    if (phase === 'cooldown') await f.owner.whenIdle();
+    f.setRevision('scope-1:head-2');
+    for (let i = 0; i < 5; i++) f.request();
+    release();
+    await f.owner.whenIdle();
+    expect(f.reconcile).toHaveBeenCalledTimes(1);
+    expect(f.owner.status()?.repairs[0]).toMatchObject({ consecutiveFailures: 1, nextAttemptAtMs: 5_000 });
+    f.reconcile.mockResolvedValue(null);
+    await f.advance(4_999);
+    expect(f.reconcile).toHaveBeenCalledTimes(1);
+    await f.advance(1);
+    expect(f.reconcile).toHaveBeenCalledTimes(2);
+    await f.advance(60_000);
+    expect(f.reconcile).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['cooldown', 'in-flight'])('resets and fences an active authoring-scope change through %s', async (phase) => {
+    const f = fixture(0);
+    const revision = (scope: string): CatalogRepairRevisionHintV1 => ({ scopeIdentity: scope, headRevision: 'head-1' });
+    f.setRevision(revision('era-1'));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    f.reconcile.mockResolvedValue(null).mockImplementationOnce(async () => {
+      if (phase === 'in-flight') await gate;
+      throw new CatalogRepairIntegrityErrorV1('old era seal');
+    });
+    f.request();
+    if (phase === 'cooldown') await f.owner.whenIdle();
+    f.setRevision(revision('era-2'));
+    f.request();
+    release();
+    await f.owner.whenIdle();
+    expect(f.reconcile).toHaveBeenCalledTimes(2);
+    expect(f.owner.status()?.repairs[0]).toMatchObject({ consecutiveFailures: 0, nextAttemptAtMs: null });
+    await f.advance(60_000);
+    expect(f.reconcile).toHaveBeenCalledTimes(2);
+  });
+
+  it('retains cooldown for production head hints within the same authoring scope', () => {
+    const retry = new CatalogRepairRetryV1();
+    retry.observe({ scopeIdentity: 'scope-1', headRevision: 'head-1' });
+    retry.fail(retry.generation, 0, 0, 'integrity');
+    retry.observe({ scopeIdentity: 'scope-1', headRevision: 'head-2' });
+    expect(retry.nextAttemptAtMs).toBe(5_000);
+    expect(retry.consecutiveFailures).toBe(1);
   });
 
   it('preserves a changed revision received while the old failed attempt drains', async () => {
@@ -187,7 +324,7 @@ describe('RFC-64 unchanged repair backoff', () => {
     f.request();
     await f.owner.whenIdle();
     expect(f.reconcile).toHaveBeenCalledTimes(2);
-    f.setRevision('scope-2:head-1'); f.request();
+    f.setRevision({ scopeIdentity: 'scope-2', headRevision: 'head-1' }); f.request();
     await f.owner.whenIdle();
     expect(f.reconcile).toHaveBeenCalledTimes(3);
   });
@@ -222,7 +359,7 @@ describe('RFC-64 unchanged repair backoff', () => {
     expect(f.owner.status()?.repairs[0]).toMatchObject({ consecutiveFailures: 1, nextAttemptAtMs: 5_000 });
     await f.advance(4_999);
     expect(f.reconcile).toHaveBeenCalledTimes(1);
-    f.readRevision.mockImplementation(() => 'scope-1:head-2');
+    f.readRevision.mockImplementation(() => ({ scopeIdentity: 'scope-1', headRevision: 'head-2' }));
     await f.advance(1);
     expect(f.reconcile).toHaveBeenCalledTimes(2);
     await f.advance(60_000);

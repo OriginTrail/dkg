@@ -26,9 +26,22 @@ export interface DurableRootAtomicCompanion {
   readonly settle?: (committed: boolean | undefined) => void;
 }
 
-export type DurableRootAtomicCompanionResolver = (
-  input: Readonly<DurableRootMaterializationIdentity>,
-) => Readonly<DurableRootAtomicCompanion> | undefined;
+export interface DurableRootAtomicCompanionResolver {
+  (input: Readonly<DurableRootMaterializationIdentity>): Readonly<DurableRootAtomicCompanion> | undefined;
+  /** See {@link DurableRootCompanionAdmissionWait}. */
+  readonly awaitAdmission?: DurableRootCompanionAdmissionWait;
+}
+
+/**
+ * Optional companion of a resolver that can refuse a root write for a reason
+ * that passes on its own. It resolves once the resolver would admit this
+ * asset, or when its own short bound ends; it never rejects and reserves
+ * nothing, so the resolver may still refuse afterwards. A seam that can wait
+ * calls it right before the synchronous resolve.
+ */
+export type DurableRootCompanionAdmissionWait = (
+  input: Readonly<Pick<DurableRootMaterializationIdentity, 'contextGraphId' | 'kaUal'>>,
+) => Promise<void>;
 
 /**
  * Replace an exact graph and, when present, its durable companion as one store

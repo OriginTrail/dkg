@@ -16,6 +16,7 @@ import {
 import { ethers } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 
+import { MAIN_THREAD_TIME_SLICE_MS } from '../src/main-thread-time-slice.js';
 import { produceEmptyAuthorCatalogGenesisV1 } from '../src/rfc64/author-catalog-producer.js';
 import { produceDirectAuthorCatalogIssuerDelegationV1 } from '../src/rfc64/public-catalog-issuer-delegation-v1.js';
 import {
@@ -23,7 +24,6 @@ import {
 } from '../src/rfc64/public-catalog-successor-producer-v1.js';
 import {
   snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1,
-  snapshotAndSortRfc64PublicCatalogSuccessorAssetsSlicedV1,
 } from '../src/rfc64/public-catalog-successor-asset-v1.js';
 import { RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1 } from '../src/rfc64/public-catalog-native-transport-v1.js';
 import { verifyAuthorCatalogBucketRowAuthorshipsV1 } from '../src/rfc64/catalog-row-authorship.js';
@@ -35,22 +35,6 @@ vi.mock('../src/rfc64/catalog-row-authorship.js', async (importOriginal) => {
   return {
     ...actual,
     verifyAuthorCatalogBucketRowAuthorshipsV1: vi.fn(actual.verifyAuthorCatalogBucketRowAuthorshipsV1),
-  };
-});
-
-const verificationProgress = vi.hoisted(() => ({ active: false, events: [] as string[] }));
-vi.mock('@origintrail-official/dkg-core', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@origintrail-official/dkg-core')>();
-  return {
-    ...actual,
-    verifyCatalogSealBindingV1: (...args: Parameters<typeof actual.verifyCatalogSealBindingV1>) => {
-      const result = actual.verifyCatalogSealBindingV1(...args);
-      if (verificationProgress.active) {
-        verificationProgress.events.push(`verify:${args[1].kaId}`);
-        setImmediate(() => verificationProgress.events.push('macrotask'));
-      }
-      return result;
-    },
   };
 });
 
@@ -81,90 +65,6 @@ const DEPLOYMENT = Object.freeze({
 }) as CatalogSealDeploymentProfileV1;
 
 describe('RFC-64 public/open one-row successor producer', () => {
-  it('owns all caller bytes and seals before yielding between snapshot verification rows', async () => {
-    const seal = { ...await authorSeal(AUTHOR_WALLET) };
-    const bytes = new Uint8Array(PROJECTION);
-    let clock = 0;
-    const now = vi.spyOn(performance, 'now').mockImplementation(() => clock += 30);
-    try {
-      const pending = snapshotAndSortRfc64PublicCatalogSuccessorAssetsSlicedV1([
-        { assertionCoordinate: 'gate-1-object' as never, projectionBytes: bytes, seal },
-      ]);
-      bytes.fill(0);
-      seal.authorAddress = ATTACKER_WALLET.address.toLowerCase() as EvmAddressV1;
-      const assets = await pending;
-      expect(assets[0].projectionBytes).toEqual(PROJECTION);
-      expect(assets[0].seal.authorAddress).toBe(AUTHOR);
-    } finally { now.mockRestore(); }
-  });
-
-  it('runs macrotasks during verification and aborts before signing or staging', async () => {
-    const { genesis, authorization } = await producerHistory();
-    const seal = await authorSeal(AUTHOR_WALLET);
-    const stageKaBundle = vi.fn(durableBundleReceipt);
-    const stageVerifiedObjects = vi.fn(async () => undefined as never);
-    const signer = { ...catalogSigner(), signDigest: vi.fn(catalogSigner().signDigest) };
-    const controller = new AbortController();
-    const reason = new Error('cancelled during catalog verification');
-    let clock = 0;
-    const now = vi.spyOn(performance, 'now').mockImplementation(() => clock += 30);
-    try {
-      setImmediate(() => controller.abort(reason));
-      const producer = new Rfc64PublicCatalogSuccessorProducerV1({
-        controlObjects: { stageVerifiedObjects } as never, stageKaBundle,
-      });
-      await expect(producer.produceAndStageExactSet({
-        previousHead: genesis.head, previousDirectoryPath: genesis.directoryPath,
-        previousBucket: null,
-        assets: [{ assertionCoordinate: 'gate-1-object' as never, projectionBytes: PROJECTION, seal }],
-        deployment: DEPLOYMENT, issuedAt: '1773900001000' as never,
-        catalogSigner: signer, catalogIssuerAuthorization: authorization, signal: controller.signal,
-      })).rejects.toBe(reason);
-      expect(signer.signDigest).not.toHaveBeenCalled();
-      expect(stageKaBundle).not.toHaveBeenCalled();
-      expect(stageVerifiedObjects).not.toHaveBeenCalled();
-    } finally { now.mockRestore(); }
-  });
-
-  it('yields between real verification rows before signing and retains snapshotted seals', async () => {
-    const { genesis, authorization } = await producerHistory();
-    const assets = snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1([
-      { assertionCoordinate: 'gate-1-object', projectionBytes: PROJECTION, seal: await authorSeal(AUTHOR_WALLET) },
-      { assertionCoordinate: 'gate-2-object', projectionBytes: PROJECTION, seal: await authorSeal(AUTHOR_WALLET, SECOND_KA_NUMBER) },
-    ]);
-    expect(Object.getPrototypeOf(assets[0].seal)).toBeNull();
-    const stageKaBundle = vi.fn(durableBundleReceipt);
-    const stageVerifiedObjects = vi.fn(async () => Object.freeze({
-      durable: true as const, namespaceDurability: 'test-exact-durable' as never, objects: Object.freeze([]),
-    }));
-    const producer = new Rfc64PublicCatalogSuccessorProducerV1({
-      controlObjects: { stageVerifiedObjects } as never, stageKaBundle,
-    });
-    const first = await producer.produceAndStageExactSet({
-      previousHead: genesis.head, previousDirectoryPath: genesis.directoryPath, previousBucket: null,
-      assets: [assets[0]], deployment: DEPLOYMENT, issuedAt: '1773900001000' as never,
-      catalogSigner: catalogSigner(), catalogIssuerAuthorization: authorization,
-    });
-    let clock = 0;
-    const now = vi.spyOn(performance, 'now').mockImplementation(() => clock += 30);
-    verificationProgress.events = [];
-    verificationProgress.active = true;
-    const signer = { ...catalogSigner(), signDigest: vi.fn(async (digest: Digest32V1) => {
-      expect(verificationProgress.events.slice(0, 3)).toEqual([`verify:${KA_ID}`, 'macrotask', `verify:${SECOND_KA_ID}`]);
-      return catalogSigner().signDigest(digest);
-    }) };
-    try {
-      const result = await producer.produceAndStageExactSet({
-        previousHead: first.publication.head, previousDirectoryPath: first.publication.directoryPath,
-        previousBucket: first.publication.bucket, assets, deployment: DEPLOYMENT,
-        issuedAt: '1773900002000' as never, catalogSigner: signer, catalogIssuerAuthorization: authorization,
-      });
-      expect(result.publication.head.payload.totalRows).toBe('2');
-      expect(signer.signDigest).toHaveBeenCalled();
-      expect(stageKaBundle).toHaveBeenCalledTimes(3);
-    } finally { verificationProgress.active = false; now.mockRestore(); }
-  });
-
   it('verifies the exact successor before staging its bundle and signed objects', async () => {
     const { genesis, authorization } = await producerHistory();
     const events: string[] = [];
@@ -337,6 +237,68 @@ describe('RFC-64 public/open one-row successor producer', () => {
     expect(ordered.publication.bucket).toEqual(unordered.publication.bucket);
     expect(stageKaBundle).toHaveBeenCalledTimes(5);
     expect(stageVerifiedObjects).toHaveBeenCalledTimes(3);
+  });
+
+  it('lets a due timer cancel a production through the producer\'s own time slice', async () => {
+    const { genesis, authorization } = await producerHistory();
+    const first = await stageOne(
+      { head: genesis.head, directoryPath: genesis.directoryPath, bucket: null },
+      authorization,
+    );
+    const stageKaBundle = vi.fn(durableBundleReceipt);
+    const stageVerifiedObjects = vi.fn(async () => Object.freeze({
+      durable: true as const,
+      namespaceDurability: 'test-exact-durable' as never,
+      objects: Object.freeze([]),
+    }));
+    const signDigest = vi.fn(async (digest: Uint8Array) => AUTHOR_WALLET.signMessage(digest));
+    const producer = new Rfc64PublicCatalogSuccessorProducerV1({
+      controlObjects: { stageVerifiedObjects } as never,
+      stageKaBundle,
+    });
+    const assets = [{
+      assertionCoordinate: 'gate-1-object' as never,
+      projectionBytes: PROJECTION,
+      seal: await authorSeal(AUTHOR_WALLET),
+    }, {
+      assertionCoordinate: 'gate-2-object' as never,
+      projectionBytes: PROJECTION,
+      seal: await authorSeal(AUTHOR_WALLET, SECOND_KA_NUMBER),
+    }];
+    const controller = new AbortController();
+    const reason = new Error('cancelled by a timer');
+    setTimeout(() => controller.abort(reason), 0);
+    // The timer is due from here on. It can only fire once something gives
+    // up the main thread, and nothing below does except the producer.
+    const due = process.hrtime.bigint() + 3_000_000n;
+    while (process.hrtime.bigint() < due) { /* spin */ }
+    // Each look at the clock is one whole slice later, so these two rows
+    // stand for a set that takes many slices to verify.
+    let clock = 0;
+    const now = vi.spyOn(performance, 'now').mockImplementation(() => {
+      clock += MAIN_THREAD_TIME_SLICE_MS;
+      return clock;
+    });
+
+    try {
+      await expect(producer.produceAndStageExactSet({
+        previousHead: first.publication.head,
+        previousDirectoryPath: first.publication.directoryPath,
+        previousBucket: first.publication.bucket,
+        assets,
+        deployment: DEPLOYMENT,
+        issuedAt: '1773900002000' as never,
+        catalogSigner: { issuer: AUTHOR, signDigest },
+        catalogIssuerAuthorization: authorization,
+        signal: controller.signal,
+      })).rejects.toBe(reason);
+    } finally {
+      now.mockRestore();
+    }
+
+    expect(signDigest).not.toHaveBeenCalled();
+    expect(stageKaBundle).not.toHaveBeenCalled();
+    expect(stageVerifiedObjects).not.toHaveBeenCalled();
   });
 
   it('shares one ordered immutable asset snapshot across producer and reconciler boundaries', async () => {

@@ -21,7 +21,6 @@ import {
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 
-import { createRfc64CpuSliceV1 } from './rfc64/cpu-slice-v1.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
@@ -31,6 +30,7 @@ import {
   type Rfc64CatalogSuccessorAssetInputV1,
   type Rfc64StagedAuthorCatalogHeadRefV1,
 } from './dkg-agent-rfc64-catalog.js';
+import { yieldMainThread } from './main-thread-time-slice.js';
 import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
 import {
   compareRfc64PublicCatalogSuccessorAssetsByKaIdV1,
@@ -329,6 +329,9 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
         });
       }
       state ??= await this.createRfc64CatalogGenesisStateV1(params);
+      // Reading the applied set, planning against it and producing its
+      // successor each walk every row; timers and I/O run in between.
+      await yieldMainThread();
       throwIfAbortedV1(params.signal);
       const targetAssets = planRfc64CatalogProjectionTargetV1(
         state.assets,
@@ -505,6 +508,8 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       commit: () => AppliedCatalogHeadSnapshotV1,
     ) => Promise<Rfc64SourceAwareAppliedHeadCommitResultV1>,
   ) {
+    // The plan before this call and the successor below are whole-set work.
+    await yieldMainThread();
     throwIfAbortedV1(signal);
     const successor = await this.publishAuthorCatalogExactSetSuccessorV1({
       previousHead: state.previousHead,
@@ -700,9 +705,7 @@ async function loadRfc64CatalogSuccessorAssetsV1(
   history: BoundedAuthorCatalogHistoryV1,
 ): Promise<Rfc64CatalogSuccessorAssetInputV1[]> {
   const assets: Rfc64CatalogSuccessorAssetInputV1[] = [];
-  const checkpoint = createRfc64CpuSliceV1();
   for (const row of history.previousBucket?.payload.rows ?? []) {
-    await checkpoint();
     const bundleBytes = await persistence.kaBundles.readKaBundleByDigest(row.transfer.blobDigest);
     if (bundleBytes === null) {
       throw new Error(`RFC-64 applied catalog bundle ${row.transfer.blobDigest} is unavailable`);

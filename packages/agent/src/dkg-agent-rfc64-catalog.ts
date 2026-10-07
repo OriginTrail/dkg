@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+
 /**
  * RFC-64 Gate 1 public author-catalog wiring, extracted as a DKGAgent mixin
  * holder. Methods take `this: DKGAgent` so cross-mixin calls resolve against
@@ -16,6 +17,7 @@
  * Gate-1 boundary: staging a fetched head is the terminal step. Nothing here
  * admits candidate rows or activates KA / SWM / VM state.
  */
+
 import { type Rfc64CatalogTargetLeaseV1, Rfc64CatalogTargetTrackerV1, rfc64CatalogTargetExactIdentityKeyV1 } from './rfc64/catalog-operational-targets-v1.js';
 import { evaluateRfc64CatalogCompletionV1 } from './rfc64/catalog-completion-evidence-v1.js';
 export { RFC64_CATALOG_TARGET_MAX_ENTRIES_V1, RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1, type Rfc64CatalogTargetLeaseV1, Rfc64CatalogTargetTrackerV1, rfc64CatalogTargetExactIdentityKeyV1, projectRfc64OperationalRowCountsV1 } from './rfc64/catalog-operational-targets-v1.js';
@@ -70,6 +72,7 @@ import { ethers } from 'ethers';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { resolveChainFinalityConfirmationsV1 } from './chain-finality-confirmations-v1.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { yieldMainThread } from './main-thread-time-slice.js';
 import {
   isApprovedPrivateReplicaDelegationActive,
   resolveApprovedPrivateReplicaAuthority,
@@ -346,6 +349,7 @@ export interface PublishAuthorCatalogExactSetSuccessorParamsV1 {
   readonly deployment: CatalogSealDeploymentProfileV1;
   readonly issuedAt?: TimestampMsV1;
   readonly peers: readonly string[];
+  /** Stops the production of the successor before anything is staged. */
   readonly signal?: AbortSignal;
 }
 
@@ -4935,6 +4939,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       stageKaBundle: persistence.kaBundles.putKaBundle,
       readKaBundleByDigest: persistence.kaBundles.readKaBundleByDigest,
     });
+    // The history read above and the production below each walk the whole set.
+    await yieldMainThread();
     const produced = await producer.produceAndStageExactSet({
       previousHead: history.previousHead,
       previousDirectoryPath: history.previousDirectoryPath,

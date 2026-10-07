@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { ContextGraphMetaRecord } from '../context-graph-meta-projection.js';
+import type { ContextGraphMetaRecord } from './context-graph-meta-record.js';
 
 export function cloneMetaRecord(record: ContextGraphMetaRecord): ContextGraphMetaRecord {
   return {

@@ -44,7 +44,6 @@
     "./dist/rfc64/catalog-repair-diagnostics-v1.js": null,
     "./dist/rfc64/catalog-repair-retry-v1.js": null,
     "./dist/rfc64/abort-v1.js": null,
-    "./dist/rfc64/cpu-slice-v1.js": null,
     "./dist/rfc64/catalog-mutation-runtime-v1.js": null,
     "./dist/rfc64/catalog-replay-connection-runtime-v1.js": null,
     "./dist/rfc64/catalog-replay-generation-v1.js": null,
@@ -132,6 +131,7 @@
     "./dist/rfc64/public-catalog-issuer-delegation-v1.js": null,
     "./dist/rfc64/public-catalog-successor-producer-v1.js": null,
     "./dist/rfc64/public-catalog-successor-asset-v1.js": null,
+    "./dist/rfc64/public-catalog-successor-row-binding-v1.js": null,
     "./dist/rfc64/public-catalog-transport-v1.js": null,
     "./dist/rfc64/recoverable-author-attestation-v1.js": null,
     "./dist/rfc64/secure-filesystem-policy-v1.js": null,
@@ -140,6 +140,7 @@
     "./dist/rfc64/*": null,
     "./dist/*": "./dist/*",
     "./dist/rfc64/legacy-swm-boundary-codec-v1.js": null,
+    "./dist/rfc64/legacy-swm-boundary-fence-v1.js": null,
     "./dist/rfc64/catalog-operational-targets-v1.js": null,
     "./dist/rfc64/private-read-roster-v1.js": null
   },

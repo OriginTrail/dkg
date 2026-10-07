@@ -1,19 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { AGENT_DID_PREFIX, DKG_ONTOLOGY, isSafeIri, unwrapIri } from '@origintrail-official/dkg-core';
+import { AGENT_DID_PREFIX, isSafeIri, unwrapIri } from '@origintrail-official/dkg-core';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import { WORKSPACE_RECIPIENT_KEY_ROUTE_PREDICATES } from '@origintrail-official/dkg-publisher';
 import type { StoreMutation, StoreMutationOutcome, StoreRemoval } from './store-mutation.js';
 
 /** The predicates a recipient key lookup reads. Each is read only on an agent DID or key IRI subject. */
-export const RECIPIENT_KEY_ROUTE_PREDICATES: ReadonlySet<string> = new Set([
-  DKG_ONTOLOGY.DKG_PUBLIC_ENCRYPTION_KEY,
-  DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_ALGORITHM,
-  DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_PROOF,
-  DKG_ONTOLOGY.DKG_PEER_ID,
-  DKG_ONTOLOGY.DKG_REVOKED_AT,
-  DKG_ONTOLOGY.DKG_REVOKED_BY,
-  DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_REVOCATION_PROOF,
-]);
+export const RECIPIENT_KEY_ROUTE_PREDICATES: ReadonlySet<string> = new Set(
+  WORKSPACE_RECIPIENT_KEY_ROUTE_PREDICATES,
+);
 
 // One branch per predicate, so every pattern is bound by its predicate and the scan
 // reads only the key and route facts, never every triple of every graph.
@@ -83,21 +78,37 @@ export class RecipientKeyRouteFence {
    * been scanned again. Returns what to call when it settles.
    */
   begin(mutation: StoreMutation): (outcome?: StoreMutationOutcome) => void {
-    let opaque = mutation.everything === true;
+    const unscoped = mutation.everything === true
+      || mutation.quads?.some((quad) => !isBareIri(quad.predicate)) === true
+      || mutation.removals?.some(({ graph }) => !isBareIri(graph)) === true;
+    let opaque = unscoped;
     for (const quad of mutation.quads ?? []) {
       if (!isKeyRouteFact(quad)) continue;
       if (isBareIri(quad.graph)) this.keyGraphs.add(quad.graph);
       else opaque = true;
     }
-    if (!opaque) return () => undefined;
-    this.staleGeneration += 1;
-    this.pendingEverything += 1;
+    if (opaque) {
+      this.staleGeneration += 1;
+      this.pendingEverything += 1;
+    }
     let settled = false;
     return (outcome = 'changed') => {
       if (settled) return;
       settled = true;
-      this.pendingEverything -= 1;
-      if (outcome === 'indeterminate') this.graphsUnknown = true;
+      try {
+        if (outcome !== 'unchanged') {
+          if (unscoped) this.noteUnscopedWrite();
+          else {
+            for (const removal of mutation.removals ?? []) this.noteRemoval(removal);
+            if (mutation.quads) this.noteQuads(mutation.quads);
+          }
+        }
+      } finally {
+        if (opaque) {
+          this.pendingEverything -= 1;
+          if (outcome === 'indeterminate') this.graphsUnknown = true;
+        }
+      }
     };
   }
 

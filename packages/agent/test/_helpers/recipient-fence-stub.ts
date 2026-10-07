@@ -9,7 +9,7 @@ import { vi } from 'vitest';
  * `revision` to model a write to a key or route fact.
  */
 export function stubFence(revision = 0) {
-  return { revision, ensureReady: vi.fn(async () => undefined) };
+  return { revision, ensureReady: vi.fn(async () => undefined), begin: vi.fn(() => () => undefined) };
 }
 
 /** The two revisions a recipient resolution of a private roster checks, quiet unless a test moves them. */
