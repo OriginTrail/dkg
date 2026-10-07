@@ -528,3 +528,5 @@ export {
   WORKSPACE_RECIPIENT_KEY_ROUTE_PREDICATES,
   WORKSPACE_RECIPIENT_AUTHORITY_PREDICATES,
 } from './workspace-recipient-dependencies.js';
+
+export { DEFAULT_PROMOTE_RETRY_TUNING, createDefaultPromoteBackoff, resolvePromoteRetryTuning, type PromoteRetryTuning } from './promote-retry-policy.js';
