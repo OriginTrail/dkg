@@ -964,10 +964,7 @@ export async function resolveDaemonPublishEncryption(
     subGraphName?: string;
     publishContextGraphId?: string;
   },
-): Promise<{
-  encryptInlinePayload: Awaited<ReturnType<DKGAgent['_resolveEncryptInlinePayload']>>;
-  encryptInlineChunked: Awaited<ReturnType<DKGAgent['_resolveEncryptInlineChunked']>>;
-}> {
+): ReturnType<DKGAgent['_resolveInlineEncryption']> {
   const requestedTarget = publishOptions.publishContextGraphId?.trim();
   // Async lift resolves this from the source workspace slice before it reaches
   // generic PublishOptions. Treat it as binding-only; future explicit async
@@ -975,24 +972,14 @@ export async function resolveDaemonPublishEncryption(
   const bindingOptions = requestedTarget
     ? { aeadBindingContextGraphId: requestedTarget }
     : undefined;
-  const encryptInlinePayload = await agent._resolveEncryptInlinePayload(
+  // One resolution for both hooks, so they share one recipient authority and one epoch.
+  return agent._resolveInlineEncryption(
     publishOptions.contextGraphId,
     publishOptions.subGraphName,
     undefined,
     undefined,
     bindingOptions,
   );
-  const encryptInlineChunked = await agent._resolveEncryptInlineChunked(
-    publishOptions.contextGraphId,
-    publishOptions.subGraphName,
-    undefined,
-    undefined,
-    bindingOptions,
-  );
-  return {
-    encryptInlinePayload,
-    encryptInlineChunked,
-  };
 }
 
 /** Bound on the chain reads one start may spend resolving configured on-chain ids. */

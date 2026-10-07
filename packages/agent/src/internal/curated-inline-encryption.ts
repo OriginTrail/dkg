@@ -7,25 +7,40 @@ import {
   ciphertextChunkStoreGraph, ciphertextChunkStoreSubject, CIPHERTEXT_CHUNK_PREDICATE,
   contextGraphWorkspaceTopic, createOperationContext, type Logger,
 } from '@origintrail-official/dkg-core';
+import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { sliceIntoCiphertextChunks } from '../dkg-agent-helpers.js';
-import type { DKGAgent } from '../dkg-agent.js';
-import type { ResolveCuratedChainKeyContextOptions } from '../dkg-agent-publish.js';
 
-type CuratedInlineContext = Awaited<ReturnType<DKGAgent['_resolveCuratedChainKeyContext']>>;
-
-export function buildInlinePayload(resolved: CuratedInlineContext) {
-  if (!resolved) return undefined;
-  return (plaintext: Uint8Array) => Promise.resolve(encryptV10PublishPayload({
-    chainKey: resolved.chainKey, contextGraphId: resolved.aeadCgId, plaintext,
-  }));
+/** What both hooks of one publish attempt encrypt with: one sender-key epoch and the id its AEAD binds to. */
+export interface CuratedInlineContext {
+  readonly chainKey: Uint8Array;
+  readonly aeadCgId: string;
 }
 
-export async function buildInlineChunked(agent: DKGAgent, contextGraphId: string, resolved: CuratedInlineContext, log: Pick<Logger, 'warn' | 'info'>) {
+/** What the chunked emitter uses of the agent that owns it. */
+export interface CuratedChunkEmitterHost {
+  readonly store: Pick<TripleStore, 'insert'>;
+  readonly gossip: { publish(topic: string, data: Uint8Array): Promise<unknown> };
+  gossipWireIdFor(contextGraphId: string): string;
+  canonicalChunkStoreCgIdOrNull(contextGraphId: string): string | null;
+  resolveWorkspaceGossipSigningAgent(contextGraphId: string): Promise<{ agentAddress: string; privateKey: string } | null | undefined>;
+}
+
+export function buildInlinePayload(resolved: CuratedInlineContext | undefined) {
   if (!resolved) return undefined;
   const { chainKey, aeadCgId } = resolved;
-  const wireCgId = agent.gossipWireIdFor(contextGraphId);
+  return async (plaintext: Uint8Array): Promise<Uint8Array> => encryptV10PublishPayload({
+    chainKey, contextGraphId: aeadCgId, plaintext,
+  });
+}
+
+export async function buildInlineChunked(
+  host: CuratedChunkEmitterHost, contextGraphId: string, resolved: CuratedInlineContext | undefined, log: Pick<Logger, 'warn' | 'info'>,
+) {
+  if (!resolved) return undefined;
+  const { chainKey, aeadCgId } = resolved;
+  const wireCgId = host.gossipWireIdFor(contextGraphId);
   const topic = contextGraphWorkspaceTopic(wireCgId);
-  const signer = await agent.resolveWorkspaceGossipSigningAgent(contextGraphId);
+  const signer = await host.resolveWorkspaceGossipSigningAgent(contextGraphId);
   if (!signer) {
     throw new Error(
       `LU-11: curated CG ${contextGraphId}: cannot resolve a workspace-gossip signing agent — ` +
@@ -36,7 +51,7 @@ export async function buildInlineChunked(agent: DKGAgent, contextGraphId: string
   const signerWallet = new ethers.Wallet(signer.privateKey);
   const signerAgentAddress = signer.agentAddress;
   const ctx = createOperationContext('publish');
-  const gossip = agent.gossip;
+  const gossip = host.gossip;
 
   return async (input: { plaintextNquads: Uint8Array; batchId: Uint8Array; publishOperationId: string }): Promise<{
     ciphertextChunksRoot: Uint8Array;
@@ -68,12 +83,12 @@ export async function buildInlineChunked(agent: DKGAgent, contextGraphId: string
       const payload = new Uint8Array(input.batchId.length + ct.length);
       payload.set(input.batchId, 0);
       payload.set(ct, input.batchId.length);
-      const persistCanonical = agent.canonicalChunkStoreCgIdOrNull(contextGraphId);
+      const persistCanonical = host.canonicalChunkStoreCgIdOrNull(contextGraphId);
       const chunksGraph = ciphertextChunkStoreGraph(persistCanonical ?? contextGraphId);
       const subject = ciphertextChunkStoreSubject(input.batchId, i);
       const literal = `"${Buffer.from(ct).toString('base64')}"`;
       try {
-        await agent.store.insert([{
+        await host.store.insert([{
           subject,
           predicate: CIPHERTEXT_CHUNK_PREDICATE,
           object: literal,
@@ -133,19 +148,5 @@ export async function buildInlineChunked(agent: DKGAgent, contextGraphId: string
       totalCiphertextBytes,
       ciphertextChunks,
     };
-  };
-}
-
-/** One authority resolution and one epoch for both callbacks in a publish attempt. */
-export async function resolveInlineEncryption(
-  agent: DKGAgent, log: Pick<Logger, 'warn' | 'info'>, contextGraphId: string, subGraphName?: string, authorAgentAddress?: string,
-  explicitPolicyTargetContextGraphId?: string, options?: ResolveCuratedChainKeyContextOptions,
-) {
-  const resolved = await agent._resolveCuratedChainKeyContext(
-    contextGraphId, subGraphName, authorAgentAddress, explicitPolicyTargetContextGraphId, 'LU-5', options,
-  );
-  return {
-    encryptInlinePayload: buildInlinePayload(resolved),
-    encryptInlineChunked: await buildInlineChunked(agent, contextGraphId, resolved, log),
   };
 }

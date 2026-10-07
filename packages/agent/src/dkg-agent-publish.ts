@@ -10,7 +10,8 @@
  */
 
 
-import { buildInlinePayload, buildInlineChunked, resolveInlineEncryption } from './internal/curated-inline-encryption.js';
+import { buildInlinePayload, buildInlineChunked } from './internal/curated-inline-encryption.js';
+import { createContextGraphAuthorityError } from './internal/context-graph-authority/context-graph-authority.js';
 import { planKnowledgeAssetVmPublication, isGraphScopedKnowledgeAssetVmPublishRequest, assertionSealFromQueuedKnowledgeAssetVmPublishRequest, type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
 export { type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
 import { randomUUID } from 'node:crypto';
@@ -4020,13 +4021,23 @@ export class PublishMethods extends DKGAgentBase {
       });
     }
 
-    const current = await this.resolveWorkspaceAgentRecipientsForCurrentAuthority({ contextGraphId });
+    // Distribution and the pending drain wait on peers. A member removed or a route
+    // replaced meanwhile must not be served by this epoch, so the authority is read
+    // once more and any difference refuses the attempt. The refusal is the retryable
+    // authority failure: a queued publish is attempted again and sets up a new epoch.
+    const current = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.curatedKeyContext,
+      () => this.resolveWorkspaceAgentRecipientsForCurrentAuthority({ contextGraphId }),
+    );
     if (!current.requiresEncryption
       || computeSwmSenderKeyMembershipHash({ contextGraphId, subGraphName,
         members: current.recipients.map((recipient) => ({ agentAddress: recipient.agentAddress, recipientKeyId: recipient.recipientKeyId })),
       }) !== membershipHash
       || computeSwmSenderKeyRecipientRouteHash({ contextGraphId, subGraphName, recipients: current.recipients }) !== recipientRouteHash) {
-      throw new Error(`${logPrefix}: curated recipient authority changed during sender-key setup; refusing to encrypt with a stale epoch`);
+      throw createContextGraphAuthorityError(
+        `${logPrefix}: curated CG ${contextGraphId}: recipient authority changed during sender-key setup; refusing to encrypt with a stale epoch`,
+        { reason: 'chain-participant-authority-unavailable', detail: 'retry the publish against the current private authority' },
+      );
     }
 
     return {
@@ -4036,11 +4047,18 @@ export class PublishMethods extends DKGAgentBase {
     };
   }
 
-  _resolveInlineEncryption(this: DKGAgent,
+  /** Both encryption hooks of a publish attempt, from one authority resolution and one sender-key epoch. */
+  async _resolveInlineEncryption(this: DKGAgent,
     contextGraphId: string, subGraphName?: string, authorAgentAddress?: string,
     explicitPolicyTargetContextGraphId?: string, options?: ResolveCuratedChainKeyContextOptions,
-  ): ReturnType<typeof resolveInlineEncryption> {
-    return resolveInlineEncryption(this, this.log, contextGraphId, subGraphName, authorAgentAddress, explicitPolicyTargetContextGraphId, options);
+  ) {
+    const resolved = await this._resolveCuratedChainKeyContext(
+      contextGraphId, subGraphName, authorAgentAddress, explicitPolicyTargetContextGraphId, 'LU-5', options,
+    );
+    return {
+      encryptInlinePayload: buildInlinePayload(resolved),
+      encryptInlineChunked: await buildInlineChunked(this, contextGraphId, resolved, this.log),
+    };
   }
 
   async _resolveEncryptInlinePayload(this: DKGAgent,
