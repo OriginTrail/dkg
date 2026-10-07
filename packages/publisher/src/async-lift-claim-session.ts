@@ -1,4 +1,3 @@
-import { writeLiftJobCandidate } from './async-lift-job-writer.js';
 import type { PublishResult } from './publisher.js';
 import {
   deleteByPatternWithoutCount,
@@ -239,10 +238,10 @@ export interface AsyncLiftClaimCoordinatorDependencies {
   readonly nextAccepted: () => Promise<LiftJobAccepted | undefined>;
   readonly reacceptDueFailedJobs: (now: number) => Promise<unknown>;
   readonly toClaimed: (current: LiftJobAccepted, walletId: string) => LiftJobClaimed;
-  readonly writeJob: (
-    job: LiftJob,
+  readonly writeJob: <T extends LiftJob>(
+    job: T,
     kind: JournalKind,
-  ) => Promise<LiftJob | void>;
+  ) => Promise<T>;
   readonly deleteJob: (jobId: string) => Promise<void>;
   readonly assertJobMatchesStatus: (job: LiftJob) => void;
   readonly resetInterruptedClaim: (job: LiftJob) => LiftJobAccepted;
@@ -320,7 +319,7 @@ export class AsyncLiftClaimCoordinator {
         );
 
         this.dependencies.assertJobMatchesStatus(owned);
-        const committed = await writeLiftJobCandidate(this.dependencies.writeJob, owned, 'claimed');
+        const committed = await this.dependencies.writeJob(owned, 'claimed');
         await this.writeWalletLock({
           walletId,
           jobId: owned.jobId,
@@ -439,7 +438,7 @@ export class AsyncLiftClaimCoordinator {
     }
     const next = this.renewActiveOwnership(candidate);
     this.dependencies.assertJobMatchesStatus(next);
-    const committed = await writeLiftJobCandidate(this.dependencies.writeJob, next, kind);
+    const committed = await this.dependencies.writeJob(next, kind);
     await this.persistOwnershipState(committed);
     return committed;
   }
@@ -697,7 +696,7 @@ export class AsyncLiftClaimCoordinator {
       commitRecoveryReset: async (reset) => await close(async (before) => {
         this.assertLifecycleTransition(before, reset, 'accepted');
         // Reset must be claim-visible before the one-shot wallet-release notification fires.
-        const committed = await writeLiftJobCandidate(this.dependencies.writeJob, reset, 'recover-reset');
+        const committed = await this.dependencies.writeJob(reset, 'recover-reset');
         await this.releaseJobOwnership(before);
         return committed;
       }),
@@ -705,7 +704,7 @@ export class AsyncLiftClaimCoordinator {
         this.assertLifecycleTransition(before, failed, 'failed');
         // Canonical chain proof ends nonce ownership even if the local failure write must retry.
         await this.releaseJobOwnership(before);
-        const committed = await writeLiftJobCandidate(this.dependencies.writeJob, failed, 'failed');
+        const committed = await this.dependencies.writeJob(failed, 'failed');
         return committed;
       }),
       commitProofFinalization: async (finalize) => await close(async (before) => {
@@ -715,13 +714,13 @@ export class AsyncLiftClaimCoordinator {
         const finalized = await finalize();
         if (finalized === null) return null;
         this.assertLifecycleTransition(before, finalized, 'finalized');
-        const committed = await writeLiftJobCandidate(this.dependencies.writeJob, finalized, 'recovered-finalize');
+        const committed = await this.dependencies.writeJob(finalized, 'recovered-finalize');
         return committed;
       }),
       commitReaccept: async (accepted) => await close(async (before) => {
         this.assertLifecycleTransition(before, accepted, 'accepted');
         await this.releaseJobOwnership(before);
-        const committed = await writeLiftJobCandidate(this.dependencies.writeJob, accepted, 'reaccept');
+        const committed = await this.dependencies.writeJob(accepted, 'reaccept');
         return committed;
       }),
       commitRemoval: async () => await close(async (before) => {
@@ -751,7 +750,7 @@ export class AsyncLiftClaimCoordinator {
         // Inclusion becomes visible before release so a woken worker never observes an active
         // transaction as claimable. An already-included retry only repeats the release.
         if (before.status !== 'included') {
-          included = await writeLiftJobCandidate(this.dependencies.writeJob, included, 'included') as typeof included;
+          included = await this.dependencies.writeJob(included, 'included');
         }
         await this.releaseJobOwnership(before);
         return included;

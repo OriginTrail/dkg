@@ -2926,7 +2926,8 @@ export class TripleStoreAsyncLiftPublisher
     this.graphEnsured = true;
   }
 
-  private async writeJob(job: LiftJob, kind: JournalKind): Promise<LiftJob> {
+  private async writeJob<T extends LiftJob>(job: T, kind: JournalKind): Promise<T> {
+    assertCanonicalLiftJobPayload(job);
     if (kind !== 'rollback-noop' && job.broadcast) {
       if (job.status === 'included') this.chainObservations.receipt(job.jobId, job.broadcast.txHash);
       if (job.status === 'finalized') this.chainObservations.finality(job.jobId, job.broadcast.txHash);
@@ -2937,7 +2938,8 @@ export class TripleStoreAsyncLiftPublisher
     const canonical = assertCanonicalLiftJobPayload(job);
     await this.persistJobRecord(canonical);
     await this.appendJournal(canonical, kind);
-    return canonical;
+    // Validation and diagnostic annotation preserve the supplied lifecycle variant and claim.
+    return canonical as T;
   }
 
   /**
