@@ -36,7 +36,7 @@ export const emptyResult = () => finalizeDurableSyncCompletion(createDurableSync
 export function createExactBatchHostFixture(cleanups: Array<() => Promise<void>>, assetCount = 2) {
   const rawStore = new OxigraphStore();
   const projection = new ContextGraphMetaProjection(rawStore);
-  vi.spyOn(projection, 'markDirtyFromQuads');
+  vi.spyOn(projection, 'invalidateStoreMutation');
   const store = createListContextGraphsCacheInvalidatingStore(rawStore, () => {}, createProjectionMutationObserver(() => projection));
   const worker = new SyncVerifyWorker();
   cleanups.push(async () => { await worker.close(); await store.close(); });
