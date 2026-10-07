@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { isSafeIri } from '@origintrail-official/dkg-core';
+import type { Quad } from '@origintrail-official/dkg-storage';
 import type { ContextGraphMetaProjection } from '../context-graph-meta-projection.js';
 import type { StoreMutation, StoreMutationObserver } from './store-mutation.js';
 
@@ -31,7 +32,10 @@ export function createProjectionMutationObserver(
     begin(mutation) {
       const projection = getProjection();
       const release = projection?.recipientKeyRouteFence.begin(mutation);
+      let settled = false;
       return (outcome) => {
+        if (settled) return;
+        settled = true;
         try {
           if (outcome !== 'unchanged' && projection) notifyProjection(projection, mutation);
         } finally {
@@ -40,4 +44,12 @@ export function createProjectionMutationObserver(
       };
     },
   };
+}
+
+/** Report a committed write made through an undecorated storage path. */
+export function reportCommittedProjectionQuads(
+  projection: ContextGraphMetaProjection,
+  quads: readonly Quad[],
+): void {
+  createProjectionMutationObserver(() => projection).begin({ quads })('changed');
 }

@@ -10,6 +10,7 @@
  */
 
 
+import { reportCommittedProjectionQuads } from './internal/projection-mutation-observer.js';
 import { planKnowledgeAssetVmPublication, isGraphScopedKnowledgeAssetVmPublishRequest, assertionSealFromQueuedKnowledgeAssetVmPublishRequest, type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
 export { type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
 import { randomUUID } from 'node:crypto';
@@ -2022,7 +2023,7 @@ export class PublishMethods extends DKGAgentBase {
               await deleteByPatternWithoutCount(this.store, { graph, subject });
             }
             await this.store.insert(quads);
-            this.contextGraphMetaProjection.markDirtyFromQuads(quads);
+            reportCommittedProjectionQuads(this.contextGraphMetaProjection, quads);
           },
           log: (level, message) =>
             level === 'warn' ? this.log.warn(ctx, message) : this.log.info(ctx, message),
@@ -2659,7 +2660,7 @@ export class PublishMethods extends DKGAgentBase {
     ];
 
     await this.store.insert(quads);
-    this.contextGraphMetaProjection.markDirtyFromQuads(quads);
+    reportCommittedProjectionQuads(this.contextGraphMetaProjection, quads);
     await gm.ensureContextGraph(contextGraphId);
     await this.store.flush?.();
     await this.persistLocalContextGraphOrigin(contextGraphId, 'implicit-swm-write');

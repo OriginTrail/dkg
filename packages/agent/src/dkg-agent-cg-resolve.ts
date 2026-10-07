@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-
 /**
  * Context-graph resolution subsystem extracted from dkg-agent.ts as a mixin
  * holder: existence/curation checks, sync-request envelope parse/build/auth,
@@ -10,6 +9,7 @@
  */
 
 
+import { reportCommittedProjectionQuads } from './internal/projection-mutation-observer.js';
 import { throwIfOperationAborted } from './bounded-operation.js';
 import { readAgentPeerPage } from './agent-peer-discovery.js';
 import { createHash } from 'node:crypto';
@@ -1596,7 +1596,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       // persist+invalidate path.
       if (catalogQuads.length > 0) {
         await this.store.insert(catalogQuads);
-        this.contextGraphMetaProjection.markDirtyFromQuads(catalogQuads);
+        reportCommittedProjectionQuads(this.contextGraphMetaProjection, catalogQuads);
       }
       this.syncCheckpoints.delete(result.checkpointKey);
     }

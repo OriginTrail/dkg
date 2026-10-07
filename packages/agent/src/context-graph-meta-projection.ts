@@ -343,9 +343,8 @@ export class ContextGraphMetaProjection {
    * from the inserted quads, so a delete is covered too. Shared AGENTS/ONTOLOGY
    * sources invalidate every record. Other graphs dirty no cache entry but still
    * advance the authority revision, because key lookup scans all named graphs.
-   * The recipient fences are told what the mutation names. */
+   * Mutation observers separately notify recipient fences. */
   markDirtyForGraph(graphUri: string, subject?: string, predicate?: string): void {
-    this.recipientKeyRouteFence.noteRemoval({ graph: graphUri, subject, predicate });
     const graph = stripTerm(graphUri);
     if (
       graph === contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS)
@@ -372,7 +371,6 @@ export class ContextGraphMetaProjection {
 
   markAllDirty(): void {
     this.dirtyAll();
-    this.recipientKeyRouteFence.noteUnscopedWrite();
   }
 
   private dirtyAll(): void {
@@ -399,7 +397,6 @@ export class ContextGraphMetaProjection {
     }
     // Generic update and complete-graph replace paths call markAllDirty(); one
     // conservative bump here closes the recipient-key insertion race.
-    this.recipientKeyRouteFence.noteQuads(quads);
     if (recipientAuthorityTouched) this.authorityFactsRevision += 1;
     return [...touched];
   }

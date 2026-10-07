@@ -458,7 +458,7 @@ import {
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase, createListContextGraphsCacheInvalidatingStore } from './dkg-agent-base.js';
-import { createProjectionMutationObserver } from './internal/projection-mutation-observer.js';
+import { createProjectionMutationObserver, reportCommittedProjectionQuads } from './internal/projection-mutation-observer.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
@@ -927,14 +927,12 @@ export class DKGAgent extends DKGAgentBase {
       },
       recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
       invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
-      markMetaProjectionDirty: (quads) => this.contextGraphMetaProjection
-        .markDirtyFromQuads(quads),
+      markMetaProjectionDirty: (quads) => reportCommittedProjectionQuads(this.contextGraphMetaProjection, quads),
       recoveryMutation: createSwmRecoveryMutationRuntimeV1({
         store: this.store,
         recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
         invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
-        markMetaProjectionDirty: (quads) => this.contextGraphMetaProjection
-          .markDirtyFromQuads(quads),
+        markMetaProjectionDirty: (quads) => reportCommittedProjectionQuads(this.contextGraphMetaProjection, quads),
       }),
       setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
       deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
