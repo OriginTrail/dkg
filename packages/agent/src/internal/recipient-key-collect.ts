@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { ethers } from 'ethers';
-import type { TripleStore } from '@origintrail-official/dkg-storage';
-import { resolveWorkspaceAgentRecipientKeys, type WorkspaceAgentRecipient } from '@origintrail-official/dkg-publisher';
+import type { WorkspaceAgentRecipient } from '@origintrail-official/dkg-publisher';
 import type { RecipientKeyRouteFence } from './recipient-key-route-fence.js';
 
 interface Collect {
@@ -54,21 +53,4 @@ export class RecipientKeyCollect {
       throw error;
     }
   }
-}
-
-const collectors = new WeakMap<RecipientKeyRouteFence, WeakMap<TripleStore, RecipientKeyCollect>>();
-
-export function resolveFencedWorkspaceAgentRecipientKeys(
-  store: TripleStore,
-  fence: RecipientKeyRouteFence,
-  agentAddress: string,
-): Promise<WorkspaceAgentRecipient[]> {
-  let stores = collectors.get(fence);
-  if (!stores) { stores = new WeakMap(); collectors.set(fence, stores); }
-  let collector = stores.get(store);
-  if (!collector) {
-    collector = new RecipientKeyCollect(fence, (agent) => resolveWorkspaceAgentRecipientKeys(store, agent));
-    stores.set(store, collector);
-  }
-  return collector.resolve(agentAddress);
 }

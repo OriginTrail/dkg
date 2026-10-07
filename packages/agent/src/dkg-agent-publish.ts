@@ -10,7 +10,7 @@
  */
 
 
-import { createCuratedKeyContextAttempt, type CuratedKeyContextResolver } from './internal/curated-key-context-attempt.js';
+import { buildInlinePayload, buildInlineChunked, resolveInlineEncryption } from './internal/curated-inline-encryption.js';
 import { planKnowledgeAssetVmPublication, isGraphScopedKnowledgeAssetVmPublishRequest, assertionSealFromQueuedKnowledgeAssetVmPublishRequest, type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
 export { type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
 import { randomUUID } from 'node:crypto';
@@ -32,9 +32,7 @@ import {
   computeACKDigest,
   encodePublishRequest,
   encodeKAUpdateRequest,
-  encodeGossipEnvelope,
   computeGossipSigningPayload,
-  GOSSIP_ENVELOPE_VERSION,
   GOSSIP_TYPE_WORKSPACE_PUBLISH,
   encodeFinalizationMessage, type FinalizationMessageMsg,
   decodeGossipEnvelope, type GossipEnvelopeMsg,
@@ -94,14 +92,6 @@ import {
   type MessageIdempotencyStore,
   type ProtocolOutboxStore,
   type ProtocolOutboxEntry,
-  encryptV10PublishPayload,
-  encryptChunked,
-  buildCiphertextChunksRoot,
-  computeGossipSigningPayloadV2,
-  GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED,
-  ciphertextChunkStoreGraph,
-  ciphertextChunkStoreSubject,
-  CIPHERTEXT_CHUNK_PREDICATE,
   type SubscriptionSource,
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
@@ -460,7 +450,6 @@ import {
   createPublicSnapshotStore,
   applyDefaultLargeLiteralStorage,
   isLocalOxigraphConfig,
-  sliceIntoCiphertextChunks,
 } from './dkg-agent-helpers.js';
 import { reconcileAndAllocateKaNumber, readMaxKaNumberWithRetry, isTransientChainError } from './allocator.js';
 import {
@@ -1874,26 +1863,8 @@ export class PublishMethods extends DKGAgentBase {
     // separate from the AEAD binding id. Agent-derived same-CG ids bind
     // AEAD to the canonical on-chain id without being treated as explicit
     // remaps; caller-supplied mismatches stay explicit policy targets.
-    const resolveInlineContext = createCuratedKeyContextAttempt(this, contextGraphId, opts?.subGraphName, undefined, explicitPublishPolicyTarget, publishBindingOptions);
-    const encryptInlinePayload = await this._resolveEncryptInlinePayload(
-      contextGraphId,
-      opts?.subGraphName,
-      undefined,
-      explicitPublishPolicyTarget,
-      publishBindingOptions,
-      resolveInlineContext,
-    );
-    // OT-RFC-38 LU-11 — also resolve the chunked emitter for curated
-    // CGs. When set, the publisher prefers this path: chunks fan out
-    // via SWM gossip and the V2 ACK carries only the commitment.
-    // Public CGs resolve to `undefined` inside the chain-confirmed resolver.
-    const encryptInlineChunked = await this._resolveEncryptInlineChunked(
-      contextGraphId,
-      opts?.subGraphName,
-      undefined,
-      explicitPublishPolicyTarget,
-      publishBindingOptions,
-      resolveInlineContext,
+    const { encryptInlinePayload, encryptInlineChunked } = await this._resolveInlineEncryption(
+      contextGraphId, opts?.subGraphName, undefined, explicitPublishPolicyTarget, publishBindingOptions,
     );
     // Use the same chain-aware curated decision that selected encryption.
     // Local `_meta` can legitimately lag chain registration; consulting it a
@@ -2272,40 +2243,11 @@ export class PublishMethods extends DKGAgentBase {
       // target on-chain cgId is now binding-only so the AEAD key derives from
       // the canonical id consumers verify against without reclassifying the
       // same-CG update as an explicit remap.
-      const resolveInlineContext = createCuratedKeyContextAttempt(this, contextGraphId, opts?.subGraphName, undefined, undefined, updateOnChainId ? { aeadBindingContextGraphId: updateOnChainId } : undefined);
-      const updateEncryptInlinePayload = await this._resolveEncryptInlinePayload(
-        contextGraphId,
-        opts?.subGraphName,
-        undefined,
-        undefined,
-        updateOnChainId
-          ? { aeadBindingContextGraphId: updateOnChainId }
-          : undefined,
-        resolveInlineContext,
+      const { encryptInlinePayload: updateEncryptInlinePayload, encryptInlineChunked: updateEncryptInlineChunked } = await this._resolveInlineEncryption(
+        contextGraphId, opts?.subGraphName, undefined, undefined,
+        updateOnChainId ? { aeadBindingContextGraphId: updateOnChainId } : undefined,
       );
       const isCuratedUpdate = typeof updateEncryptInlinePayload === 'function';
-
-      // ALSO resolve the chunked SWM emitter — the MEMBER-DISTRIBUTION path. A
-      // curated update must actively fan the updated private payload out to CG
-      // members (OT-RFC-49: cores hold zero ciphertext, members hold it), exactly
-      // as curated publish does — otherwise members silently fall behind a
-      // committed update. The producer prefers this side-effecting chunked emitter
-      // over the pure single-blob hook. Like publish, it THROWS for a curated CG
-      // with no workspace-gossip signer (cores reject unsigned chunked envelopes):
-      // fail-closed — you cannot update a curated CG you cannot distribute to
-      // members. Public CGs → `undefined` (no-op), unchanged.
-      const updateEncryptInlineChunked = isCuratedUpdate
-        ? await this._resolveEncryptInlineChunked(
-            contextGraphId,
-            opts?.subGraphName,
-            undefined,
-            undefined,
-            updateOnChainId
-              ? { aeadBindingContextGraphId: updateOnChainId }
-              : undefined,
-            resolveInlineContext,
-          )
-        : undefined;
 
       // Curated V2 updates re-commit the deterministic catalog floor only as a
       // detached trusted capability. The exact staged KA graph stays untouched.
@@ -4078,11 +4020,27 @@ export class PublishMethods extends DKGAgentBase {
       });
     }
 
+    const current = await this.resolveWorkspaceAgentRecipientsForCurrentAuthority({ contextGraphId });
+    if (!current.requiresEncryption
+      || computeSwmSenderKeyMembershipHash({ contextGraphId, subGraphName,
+        members: current.recipients.map((recipient) => ({ agentAddress: recipient.agentAddress, recipientKeyId: recipient.recipientKeyId })),
+      }) !== membershipHash
+      || computeSwmSenderKeyRecipientRouteHash({ contextGraphId, subGraphName, recipients: current.recipients }) !== recipientRouteHash) {
+      throw new Error(`${logPrefix}: curated recipient authority changed during sender-key setup; refusing to encrypt with a stale epoch`);
+    }
+
     return {
       chainKey: state.chainKey,
       aeadCgId: options?.aeadBindingContextGraphId ?? explicitPolicyTargetContextGraphId ?? contextGraphId,
       senderAddress,
     };
+  }
+
+  _resolveInlineEncryption(this: DKGAgent,
+    contextGraphId: string, subGraphName?: string, authorAgentAddress?: string,
+    explicitPolicyTargetContextGraphId?: string, options?: ResolveCuratedChainKeyContextOptions,
+  ): ReturnType<typeof resolveInlineEncryption> {
+    return resolveInlineEncryption(this, this.log, contextGraphId, subGraphName, authorAgentAddress, explicitPolicyTargetContextGraphId, options);
   }
 
   async _resolveEncryptInlinePayload(this: DKGAgent,
@@ -4091,20 +4049,11 @@ export class PublishMethods extends DKGAgentBase {
     authorAgentAddress?: string,
     explicitPolicyTargetContextGraphId?: string,
     options?: ResolveCuratedChainKeyContextOptions,
-    resolveAttempt?: CuratedKeyContextResolver,
   ): Promise<((plaintext: Uint8Array) => Promise<Uint8Array>) | undefined> {
-    const resolved = resolveAttempt ? await resolveAttempt() : await this._resolveCuratedChainKeyContext(
+    const resolved = await this._resolveCuratedChainKeyContext(
       contextGraphId, subGraphName, authorAgentAddress, explicitPolicyTargetContextGraphId, 'LU-5', options,
     );
-    if (!resolved) return undefined;
-    const { chainKey, aeadCgId } = resolved;
-    return async (plaintextNquads: Uint8Array): Promise<Uint8Array> => {
-      return encryptV10PublishPayload({
-        chainKey,
-        contextGraphId: aeadCgId,
-        plaintext: plaintextNquads,
-      });
-    };
+    return buildInlinePayload(resolved);
   }
 
   /**
@@ -4146,7 +4095,6 @@ export class PublishMethods extends DKGAgentBase {
     authorAgentAddress?: string,
     explicitPolicyTargetContextGraphId?: string,
     options?: ResolveCuratedChainKeyContextOptions,
-    resolveAttempt?: CuratedKeyContextResolver,
   ): Promise<
     | ((input: { plaintextNquads: Uint8Array; batchId: Uint8Array; publishOperationId: string }) => Promise<{
         ciphertextChunksRoot: Uint8Array;
@@ -4156,123 +4104,10 @@ export class PublishMethods extends DKGAgentBase {
       }>)
     | undefined
   > {
-    const resolved = resolveAttempt ? await resolveAttempt() : await this._resolveCuratedChainKeyContext(
+    const resolved = await this._resolveCuratedChainKeyContext(
       contextGraphId, subGraphName, authorAgentAddress, explicitPolicyTargetContextGraphId, 'LU-11', options,
     );
-    if (!resolved) return undefined;
-    const { chainKey, aeadCgId } = resolved;
-    const wireCgId = this.gossipWireIdFor(contextGraphId);
-    const topic = contextGraphWorkspaceTopic(wireCgId);
-    const signer = await this.resolveWorkspaceGossipSigningAgent(contextGraphId);
-    if (!signer) {
-      throw new Error(
-        `LU-11: curated CG ${contextGraphId}: cannot resolve a workspace-gossip signing agent — ` +
-        `cores reject unsigned chunked envelopes. Add a local custodial signing key for an ` +
-        `allowed agent before publishing.`,
-      );
-    }
-    const signerWallet = new ethers.Wallet(signer.privateKey);
-    const signerAgentAddress = signer.agentAddress;
-    const log = this.log;
-    const ctx = createOperationContext('publish');
-    const gossip = this.gossip;
-
-    return async (input: { plaintextNquads: Uint8Array; batchId: Uint8Array; publishOperationId: string }): Promise<{
-      ciphertextChunksRoot: Uint8Array;
-      ciphertextChunkCount: number;
-      totalCiphertextBytes: number;
-      ciphertextChunks: Uint8Array[];
-    }> => {
-      if (input.batchId.length !== 32) {
-        throw new Error(
-          `LU-11: chunked emit requires a 32-byte batchId (V10 KC merkleRoot); got ${input.batchId.length}`,
-        );
-      }
-      if (input.publishOperationId.length === 0) {
-        throw new Error('LU-11: chunked emit requires a non-empty publishOperationId');
-      }
-      const plaintextChunks = sliceIntoCiphertextChunks(input.plaintextNquads);
-      const { ciphertextChunks } = encryptChunked({
-        chainKey,
-        contextGraphId: aeadCgId,
-        plaintextChunks,
-        publishOperationId: input.publishOperationId,
-      });
-      const { root, leafCount } = buildCiphertextChunksRoot(ciphertextChunks);
-      const batchIdHex = ethers.hexlify(input.batchId);
-      let totalCiphertextBytes = 0;
-      for (let i = 0; i < ciphertextChunks.length; i++) {
-        const ct = ciphertextChunks[i];
-        totalCiphertextBytes += ct.length;
-        const payload = new Uint8Array(input.batchId.length + ct.length);
-        payload.set(input.batchId, 0);
-        payload.set(ct, input.batchId.length);
-        const persistCanonical = this.canonicalChunkStoreCgIdOrNull(contextGraphId);
-        const chunksGraph = ciphertextChunkStoreGraph(persistCanonical ?? contextGraphId);
-        const subject = ciphertextChunkStoreSubject(input.batchId, i);
-        const literal = `"${Buffer.from(ct).toString('base64')}"`;
-        try {
-          await this.store.insert([{
-            subject,
-            predicate: CIPHERTEXT_CHUNK_PREDICATE,
-            object: literal,
-            graph: chunksGraph,
-          }]);
-        } catch (err) {
-          log.warn(
-            ctx,
-            `LU-11: failed to persist local ciphertext chunk cgId=${contextGraphId} ` +
-            `batchId=${batchIdHex.slice(0, 18)}... op=${input.publishOperationId} chunkIndex=${i}: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-          throw err;
-        }
-        const timestamp = new Date().toISOString();
-        const signingPayload = computeGossipSigningPayloadV2(
-          GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED,
-          contextGraphId,
-          timestamp,
-          payload,
-          i,
-        );
-        const signature = await signerWallet.signMessage(signingPayload);
-        const envelope = encodeGossipEnvelope({
-          version: GOSSIP_ENVELOPE_VERSION,
-          type: GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED,
-          contextGraphId,
-          agentAddress: signerAgentAddress,
-          timestamp,
-          signature: ethers.getBytes(signature),
-          payload,
-          swmMessageIndex: i,
-        });
-        try {
-          await gossip.publish(topic, envelope);
-        } catch (err) {
-          log.warn(
-            ctx,
-            `LU-11: chunked gossip publish failed for cgId=${contextGraphId} ` +
-            `batchId=${batchIdHex.slice(0, 18)}... op=${input.publishOperationId} chunkIndex=${i}: ${
-              err instanceof Error ? err.message : String(err)
-            } — cores without this chunk will DECLINE the V2 ACK; ` +
-            `late-join sync can backfill once the catchup verb lands.`,
-          );
-        }
-      }
-      log.info(
-        ctx,
-        `LU-11: emitted ${ciphertextChunks.length} ciphertext chunks ` +
-        `(${totalCiphertextBytes} bytes total) for curated CG ${contextGraphId} ` +
-        `batchId=${batchIdHex.slice(0, 18)}... op=${input.publishOperationId} on topic ${topic}`,
-      );
-      return {
-        ciphertextChunksRoot: root,
-        ciphertextChunkCount: leafCount,
-        totalCiphertextBytes,
-        ciphertextChunks,
-      };
-    };
+    return buildInlineChunked(this, contextGraphId, resolved, this.log);
   }
 
   async _loadSelectedSWMQuads(this: DKGAgent,
@@ -5623,22 +5458,8 @@ export class PublishMethods extends DKGAgentBase {
       const publishBindingOptions = queuedOnChainContextGraphId
         ? { aeadBindingContextGraphId: queuedOnChainContextGraphId }
         : undefined;
-      const resolveInlineContext = createCuratedKeyContextAttempt(this, request.contextGraphId, request.subGraphName, undefined, undefined, publishBindingOptions);
-      const resolvedEncryptInlinePayload = await this._resolveEncryptInlinePayload(
-        request.contextGraphId,
-        request.subGraphName,
-        undefined,
-        undefined,
-        publishBindingOptions,
-        resolveInlineContext,
-      );
-      const resolvedEncryptInlineChunked = await this._resolveEncryptInlineChunked(
-        request.contextGraphId,
-        request.subGraphName,
-        undefined,
-        undefined,
-        publishBindingOptions,
-        resolveInlineContext,
+      const { encryptInlinePayload: resolvedEncryptInlinePayload, encryptInlineChunked: resolvedEncryptInlineChunked } = await this._resolveInlineEncryption(
+        request.contextGraphId, request.subGraphName, undefined, undefined, publishBindingOptions,
       );
       // #1670 — finalized V2 private assertions seal only the exact submitted
       // RDF. Queued execution must still supply the deterministic catalog
@@ -6831,36 +6652,13 @@ export class PublishMethods extends DKGAgentBase {
     // (`onChainId`) so consumers using the canonical chain id can
     // decrypt — without this, remap publishes (source SWM cg != target
     // chain cg) produced undecryptable payloads.
-    const resolveInlineContext = createCuratedKeyContextAttempt(this, contextGraphId, options?.subGraphName, options?.authorAgentAddress, ctxGraphIdStr, onChainId ? { aeadBindingContextGraphId: onChainId } : undefined);
-    const encryptInlinePayload = await this._resolveEncryptInlinePayload(
-      contextGraphId,
-      options?.subGraphName,
-      options?.authorAgentAddress,
-      ctxGraphIdStr,
-      onChainId
-        ? { aeadBindingContextGraphId: onChainId }
-        : undefined,
-      resolveInlineContext,
+    const { encryptInlinePayload, encryptInlineChunked } = await this._resolveInlineEncryption(
+      contextGraphId, options?.subGraphName, options?.authorAgentAddress, ctxGraphIdStr,
+      onChainId ? { aeadBindingContextGraphId: onChainId } : undefined,
     );
     if (encryptInlinePayload) {
       this.log.info(ctx, `LU-5: curated CG ${contextGraphId} — wrapping inline ACK payload with chain-key AEAD`);
     }
-    // OT-RFC-38 LU-11 — also resolve the chunked emitter. Publisher
-    // prefers the chunked path when both are set; single-blob remains
-    // the unconditional fallback for any code path that resolves the
-    // chunked callback to `undefined` (currently impossible since
-    // both helpers share the curated probe, but kept defensively to
-    // future-proof CG types whose chunked path might lag rollout).
-    const encryptInlineChunked = await this._resolveEncryptInlineChunked(
-      contextGraphId,
-      options?.subGraphName,
-      options?.authorAgentAddress,
-      ctxGraphIdStr,
-      onChainId
-        ? { aeadBindingContextGraphId: onChainId }
-        : undefined,
-      resolveInlineContext,
-    );
     if (encryptInlineChunked) {
       this.log.info(ctx, `LU-11: curated CG ${contextGraphId} — chunked path active (per-chunk SWM gossip + V2 ACK)`);
     }

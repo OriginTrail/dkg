@@ -9,7 +9,6 @@
  */
 
 
-import { resolveFencedWorkspaceAgentRecipientKeys } from './internal/recipient-key-collect.js';
 import { collectProjectedDelegatees } from './internal/workspace-projected-delegatees.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -1888,7 +1887,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         for (const agentAddress of participantAgents) {
           let agentRecipients: WorkspaceAgentRecipient[];
           try {
-            agentRecipients = await resolveFencedWorkspaceAgentRecipientKeys(this.store, projection.recipientKeyRouteFence, agentAddress);
+            agentRecipients = await projection.recipientKeyCollect.resolve(agentAddress);
           } catch (error) {
             if (!isWorkspaceAgentEncryptionKeyMissingError(error)) throw error;
             missingKeys.push(...error.agentAddresses);

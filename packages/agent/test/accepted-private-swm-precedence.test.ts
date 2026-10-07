@@ -1,3 +1,4 @@
+import { resolveWorkspaceAgentRecipientKeys } from '@origintrail-official/dkg-publisher';
 // SPDX-License-Identifier: Apache-2.0
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -118,7 +119,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const host = {
       store,
       contextGraphMetaProjection: {
-        ...stubRecipientRevisions(),
+        ...stubRecipientRevisions(store),
         readAuthorityFactsRevision: 0,
         readContextGraphAuthorityFactsRevision: () => '0:0',
       },
@@ -164,7 +165,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const host = {
       store,
       contextGraphMetaProjection: {
-        ...stubRecipientRevisions(),
+        ...stubRecipientRevisions(store),
         readAuthorityFactsRevision: 0,
         readContextGraphAuthorityFactsRevision: () => '0:0',
       },
@@ -210,7 +211,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const host = {
       store,
       contextGraphMetaProjection: {
-        ...stubRecipientRevisions(),
+        ...stubRecipientRevisions(store),
         peerGateRevision: { read: () => peerGateRevision },
         readContextGraphAuthorityFactsRevision: () => '0:0',
         get readAuthorityFactsRevision() { return metadataRevision; },
@@ -272,6 +273,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
         store,
         contextGraphMetaProjection: {
           recipientKeyRouteFence: moves.fence,
+          recipientKeyCollect: { resolve: (agent: string) => resolveWorkspaceAgentRecipientKeys(store, agent) },
           peerGateRevision: { read: () => '0:0' },
           readContextGraphAuthorityFactsRevision: () => '0:0',
           get readAuthorityFactsRevision() { return moves.node.revision; },
@@ -313,7 +315,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const host = {
       store,
       contextGraphMetaProjection: {
-        ...stubRecipientRevisions(),
+        ...stubRecipientRevisions(store),
         get readAuthorityFactsRevision() { return metadataRevision; },
       },
       resolveSwmTransportAuthority: vi.fn(async () => {
@@ -773,7 +775,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const host = {
       store,
       contextGraphMetaProjection: {
-        ...stubRecipientRevisions(),
+        ...stubRecipientRevisions(store),
         readAuthorityFactsRevision: 0,
         readContextGraphAuthorityFactsRevision: () => '0:0',
       },
@@ -812,7 +814,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     ]);
     const host = {
       store,
-      contextGraphMetaProjection: { readAuthorityFactsRevision: 3, ...stubRecipientRevisions() },
+      contextGraphMetaProjection: { readAuthorityFactsRevision: 3, ...stubRecipientRevisions(store) },
       resolveSwmTransportAuthority: vi.fn()
         .mockResolvedValueOnce({ kind: 'legacy-unregistered' as const })
         .mockResolvedValueOnce({

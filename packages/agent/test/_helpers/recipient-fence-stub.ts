@@ -1,3 +1,5 @@
+import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { resolveWorkspaceAgentRecipientKeys } from '@origintrail-official/dkg-publisher';
 // SPDX-License-Identifier: Apache-2.0
 
 import { vi } from 'vitest';
@@ -13,6 +15,9 @@ export function stubFence(revision = 0) {
 }
 
 /** The two revisions a recipient resolution of a private roster checks, quiet unless a test moves them. */
-export function stubRecipientRevisions() {
-  return { recipientKeyRouteFence: stubFence(), peerGateRevision: { read: () => '0:0' } };
+export function stubRecipientRevisions(store?: TripleStore) {
+  return { recipientKeyCollect: { resolve: (agent: string) => {
+    if (!store) throw new Error('recipient test host needs an owned store');
+    return resolveWorkspaceAgentRecipientKeys(store, agent);
+  } }, recipientKeyRouteFence: stubFence(), peerGateRevision: { read: () => '0:0' } };
 }

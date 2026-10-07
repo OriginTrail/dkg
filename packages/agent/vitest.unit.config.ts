@@ -324,6 +324,7 @@ export default defineConfig({
       "test/recipient-key-route-dependencies.test.ts",
       "test/recipient-key-route-lifecycle.test.ts",
       "test/recipient-key-collect.test.ts",
+      "test/recipient-authority-stability.test.ts",
       "test/context-graph-cache-invalidating-store-callback.test.ts",
     ],
     testTimeout: 60_000,

@@ -9,11 +9,12 @@ import {
   contextGraphDataUri,
   contextGraphMetaGraphUri,
 } from '@origintrail-official/dkg-core';
-import { WORKSPACE_RECIPIENT_AUTHORITY_PREDICATES as RECIPIENT_AUTHORITY_PREDICATES } from '@origintrail-official/dkg-publisher';
+import { resolveWorkspaceAgentRecipientKeys, WORKSPACE_RECIPIENT_AUTHORITY_PREDICATES as RECIPIENT_AUTHORITY_PREDICATES } from '@origintrail-official/dkg-publisher';
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { strip, stripLiteral } from './dkg-agent-utils.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { cloneMetaRecord } from './internal/context-graph-meta-record-copy.js';
+import { RecipientKeyCollect } from './internal/recipient-key-collect.js';
 import { PeerGateRevision } from './internal/peer-gate-revision.js';
 import { RecipientKeyRouteFence } from './internal/recipient-key-route-fence.js';
 
@@ -185,10 +186,12 @@ export class ContextGraphMetaProjection {
   private allFactsRevision = 0;
   /** What a recipient resolution depends on: key and route facts, and each graph's peer allowlist (GH#3067). */
   readonly recipientKeyRouteFence: RecipientKeyRouteFence;
+  readonly recipientKeyCollect: RecipientKeyCollect;
   readonly peerGateRevision = new PeerGateRevision(PROJECTION_RECORD_PREDICATES);
 
   constructor(private readonly store: TripleStore) {
     this.recipientKeyRouteFence = new RecipientKeyRouteFence(store);
+    this.recipientKeyCollect = new RecipientKeyCollect(this.recipientKeyRouteFence, (agent) => resolveWorkspaceAgentRecipientKeys(store, agent));
   }
 
   /** Invalidate request-local absence proofs when projection sources change. */

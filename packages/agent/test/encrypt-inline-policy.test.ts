@@ -35,7 +35,7 @@ import {
   type KnowledgeAssetVmPublishRequest,
 } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
-import { createCuratedKeyContextAttempt } from '../src/internal/curated-key-context-attempt.js';
+import { computeSwmSenderKeyRecipientRouteHash } from '../src/dkg-agent-swm-state.js';
 
 // Hand-rolled call recorder (replaces vitest spy factories): wraps an
 // implementation, records every argument tuple on `.calls`, captures a
@@ -50,6 +50,41 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
     return impl(...args);
   };
   return Object.assign(fn, { calls, order });
+}
+
+function bindInlineEncryptionFactory(agent: any) {
+  agent._resolveInlineEncryption ??= async (...args: unknown[]) => ({
+    encryptInlinePayload: await agent._resolveEncryptInlinePayload(...args),
+    encryptInlineChunked: await agent._resolveEncryptInlineChunked(...args),
+  });
+  return agent;
+}
+
+async function verifyEntryPointEncryption(agent: any, invoke: () => Promise<unknown>) {
+  const wallet = ethers.Wallet.createRandom();
+  const chainKey = new Uint8Array(32).fill(9);
+  let binding = '';
+  agent._resolveCuratedChainKeyContext = vi.fn(async (cg: string, _sg: unknown, _author: unknown, target: string | undefined, _log: string, options: any) => {
+    binding = options?.aeadBindingContextGraphId ?? target ?? cg;
+    return { chainKey, aeadCgId: binding, senderAddress: wallet.address };
+  });
+  agent._resolveInlineEncryption = DKGAgent.prototype._resolveInlineEncryption;
+  agent.gossipWireIdFor = (id: string) => id;
+  agent.resolveWorkspaceGossipSigningAgent = async () => ({ privateKey: wallet.privateKey, agentAddress: wallet.address });
+  agent.canonicalChunkStoreCgIdOrNull = () => null;
+  agent.gossip = { publish: vi.fn(async () => undefined) };
+  agent.store ??= { insert: vi.fn(async () => undefined) };
+  const plaintext = new TextEncoder().encode('<urn:s> <urn:p> "o" .');
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    await invoke();
+    expect(agent._resolveCuratedChainKeyContext).toHaveBeenCalledTimes(attempt);
+    const hooks = Object.values(agent.publisher).flatMap((fn: any) => fn.calls?.at(-1) ?? [])
+      .find((value: any) => typeof value?.encryptInlinePayload === 'function' && typeof value?.encryptInlineChunked === 'function') as any;
+    expect(hooks).toBeDefined();
+    expect(decryptV10PublishPayload({ chainKey, contextGraphId: binding, encryptedPayload: await hooks.encryptInlinePayload(plaintext) })).toEqual(plaintext);
+    expect(await hooks.encryptInlineChunked({ plaintextNquads: plaintext, batchId: new Uint8Array(32), publishOperationId: `entry-${attempt}` })).toMatchObject({ ciphertextChunkCount: 1 });
+    expect(agent._resolveCuratedChainKeyContext).toHaveBeenCalledTimes(attempt);
+  }
 }
 
 function makeAgentLike(opts: {
@@ -429,7 +464,7 @@ describe('DKGAgent._publish inline encryption routing', () => {
     } as any;
 
     await (DKGAgent.prototype as any)._publish.call(
-      agentLike,
+      bindInlineEncryptionFactory(agentLike),
       'private-cg',
       [{ subject: 'urn:test:s', predicate: 'urn:test:p', object: '"value"', graph: '' }],
     );
@@ -475,8 +510,8 @@ describe('DKGAgent._publish inline encryption routing', () => {
       _resolveEncryptInlineChunked: recorder(async () => encryptInlineChunked),
     } as any;
 
-    await (DKGAgent.prototype as any)._publish.call(
-      agentLike,
+    const invoke = () => (DKGAgent.prototype as any)._publish.call(
+      bindInlineEncryptionFactory(agentLike),
       'local-cg',
       [{ subject: 's', predicate: 'p', object: 'o', graph: 'g' }],
       undefined,
@@ -486,6 +521,7 @@ describe('DKGAgent._publish inline encryption routing', () => {
         publisherNodeIdentityIdOverride: 0n,
       },
     );
+    await invoke();
 
     expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)?.slice(0, 5)).toEqual([
       'local-cg',
@@ -507,6 +543,7 @@ describe('DKGAgent._publish inline encryption routing', () => {
       encryptInlinePayload,
       encryptInlineChunked,
     })]);
+    await verifyEntryPointEncryption(agentLike, invoke);
   });
 
   it('routes direct encrypted private publishes to the publisher without an implicit catalog floor', async () => {
@@ -541,7 +578,7 @@ describe('DKGAgent._publish inline encryption routing', () => {
     } as any;
 
     await expect((DKGAgent.prototype as any)._publish.call(
-      agentLike,
+      bindInlineEncryptionFactory(agentLike),
       'private-cg',
       [{ subject: 's', predicate: 'p', object: '"public"', graph: 'g' }],
       [{ subject: 's', predicate: 'secret', object: '"private"', graph: 'g' }],
@@ -597,7 +634,7 @@ describe('DKGAgent._publish inline encryption routing', () => {
     } as any;
 
     await (DKGAgent.prototype as any)._publish.call(
-      agentLike,
+      bindInlineEncryptionFactory(agentLike),
       'local-cg',
       [{ subject: 's', predicate: 'p', object: 'o', graph: 'g' }],
       undefined,
@@ -702,8 +739,8 @@ describe('DKGAgent.update inline encryption routing', () => {
       _resolveEncryptInlineChunked: recorder(async () => updateEncryptInlineChunked),
     } as any;
 
-    await (DKGAgent.prototype as any).update.call(
-      agentLike,
+    const invoke = () => (DKGAgent.prototype as any).update.call(
+      bindInlineEncryptionFactory(agentLike),
       kaId,
       'private-cg',
       updateQuads,
@@ -717,6 +754,7 @@ describe('DKGAgent.update inline encryption routing', () => {
         },
       },
     );
+    await invoke();
 
     expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)?.slice(0, 5)).toEqual([
       'private-cg',
@@ -740,6 +778,7 @@ describe('DKGAgent.update inline encryption routing', () => {
         encryptInlineChunked: updateEncryptInlineChunked,
       }),
     ]);
+    await verifyEntryPointEncryption(agentLike, invoke);
   });
 });
 
@@ -771,12 +810,13 @@ describe('DKGAgent.publishFromSharedMemory inline encryption routing', () => {
   it('passes derived same-CG on-chain id as binding-only and publisher chain target', async () => {
     const agentLike = makeSwmPublishAgentLike('1');
 
-    await (DKGAgent.prototype as any).publishFromSharedMemory.call(
-      agentLike,
+    const invoke = () => (DKGAgent.prototype as any).publishFromSharedMemory.call(
+      bindInlineEncryptionFactory(agentLike),
       'sports',
       'all',
       { contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION },
     );
+    await invoke();
 
     expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)?.slice(0, 5)).toEqual([
       'sports',
@@ -800,13 +840,14 @@ describe('DKGAgent.publishFromSharedMemory inline encryption routing', () => {
         onChainContextGraphId: '1',
       }),
     ]);
+    await verifyEntryPointEncryption(agentLike, invoke);
   });
 
   it('passes explicit sub-CG remap id as policy target and binding id', async () => {
     const agentLike = makeSwmPublishAgentLike('should-not-be-used');
 
     await (DKGAgent.prototype as any).publishFromSharedMemory.call(
-      agentLike,
+      bindInlineEncryptionFactory(agentLike),
       'sports',
       'all',
       { subContextGraphId: '1', contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION },
@@ -849,7 +890,7 @@ describe('DKGAgent.publishFromSharedMemory inline encryption routing', () => {
     agentLike._resolveEncryptInlineChunked = recorder(async () => encryptInlineChunked);
 
     await (DKGAgent.prototype as any).publishFromSharedMemory.call(
-      agentLike,
+      bindInlineEncryptionFactory(agentLike),
       '0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/TrueSeal',
       'all',
       { contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION },
@@ -876,7 +917,7 @@ describe('DKGAgent.publishFromSharedMemory inline encryption routing', () => {
     const agentLike = makeSwmPublishAgentLike('4');
 
     await expect((DKGAgent.prototype as any).publishFromSharedMemory.call(
-      agentLike,
+      bindInlineEncryptionFactory(agentLike),
       'private-cg',
       'all',
       options,
@@ -895,7 +936,7 @@ describe('DKGAgent.publishFromSharedMemory inline encryption routing', () => {
     const agentLike = makeSwmPublishAgentLike('4');
 
     await expect((DKGAgent.prototype as any).publishFromSharedMemory.call(
-      agentLike,
+      bindInlineEncryptionFactory(agentLike),
       'private-cg',
       'all',
       { contentScopeVersion: 3 },
@@ -1048,7 +1089,7 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
     });
 
     await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(
-      agentLike,
+      bindInlineEncryptionFactory(agentLike),
       request,
       { contextGraphId: request.contextGraphId, quads: snapshotQuads },
     );
@@ -1106,7 +1147,7 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
     });
 
     const result = await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(
-      agentLike,
+      bindInlineEncryptionFactory(agentLike),
       request,
       { contextGraphId: request.contextGraphId, quads: snapshotQuads },
     );
@@ -1141,7 +1182,7 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
     });
 
     await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(
-      agentLike,
+      bindInlineEncryptionFactory(agentLike),
       request,
       { contextGraphId: request.contextGraphId, quads: snapshotQuads },
     );
@@ -1203,12 +1244,13 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
       quads: snapshotQuads,
     });
 
-    await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(agentLike, request, {
+    const invoke = () => (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(bindInlineEncryptionFactory(agentLike), request, {
       contextGraphId: request.contextGraphId,
       quads: snapshotQuads,
       encryptInlinePayload: failClosedInline,
       encryptInlineChunked: failClosedChunked,
     });
+    await invoke();
 
     expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)?.slice(0, 5)).toEqual([
       'private-cg',
@@ -1238,6 +1280,7 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
     )).toHaveLength(1);
     expect(publisherPublish.calls.at(-1)?.[0].encryptInlinePayload).not.toBe(failClosedInline);
     expect(publisherPublish.calls.at(-1)?.[0].encryptInlineChunked).not.toBe(failClosedChunked);
+    await verifyEntryPointEncryption(agentLike, invoke);
   });
 
   it('does not trust or append a catalog floor for a private local-only queued publish', async () => {
@@ -1263,7 +1306,7 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
     });
 
     await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(
-      agentLike,
+      bindInlineEncryptionFactory(agentLike),
       request,
       {
         contextGraphId: request.contextGraphId,
@@ -1310,7 +1353,7 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
     });
 
     await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(
-      agentLike,
+      bindInlineEncryptionFactory(agentLike),
       request,
       {
         contextGraphId: request.contextGraphId,
@@ -1351,7 +1394,7 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
       quads: queuedBindingQuads,
     });
 
-    await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(agentLike, request, {
+    await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(bindInlineEncryptionFactory(agentLike), request, {
       contextGraphId: request.contextGraphId,
       quads: queuedBindingQuads,
       publishContextGraphId: '42',
@@ -1409,7 +1452,7 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
 
     let thrown: any;
     try {
-      await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(agentLike, request, {
+      await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(bindInlineEncryptionFactory(agentLike), request, {
         contextGraphId: request.contextGraphId,
         quads: unregisteredQuads,
       });
@@ -1498,36 +1541,102 @@ describe('curated inline context per publish attempt', () => {
   it('shares one context between real emitters and re-resolves on the next attempt', async () => {
     const agentLike = {
       gossipWireIdFor: (id: string) => id,
-      resolveWorkspaceGossipSigningAgent: async () => ({
-        privateKey: '0x' + '11'.repeat(32),
-        agentAddress: '0x1111111111111111111111111111111111111111',
-      }),
-      _resolveCuratedChainKeyContext: vi.fn(async () => ({
-        chainKey: new Uint8Array(32).fill(9),
-        aeadCgId: '42',
-        senderAddress: '0x1111111111111111111111111111111111111111',
-      })),
+      resolveWorkspaceGossipSigningAgent: async () => ({ privateKey: '0x' + '11'.repeat(32), agentAddress: '0x1111111111111111111111111111111111111111' }),
+      _resolveCuratedChainKeyContext: vi.fn(async () => ({ chainKey: new Uint8Array(32).fill(9), aeadCgId: '42', senderAddress: '0x1111111111111111111111111111111111111111' })),
     };
-    const resolveAttempt = createCuratedKeyContextAttempt(agentLike as never, 'sports');
-    expect(agentLike._resolveCuratedChainKeyContext).not.toHaveBeenCalled();
-    const [payload, chunked] = await Promise.all([
-      DKGAgent.prototype._resolveEncryptInlinePayload.call(agentLike as never, 'sports', undefined, undefined, undefined, undefined, resolveAttempt),
-      DKGAgent.prototype._resolveEncryptInlineChunked.call(agentLike as never, 'sports', undefined, undefined, undefined, undefined, resolveAttempt),
-    ]);
-    expect(payload).toBeTypeOf('function');
-    expect(chunked).toBeTypeOf('function');
+    const first = await DKGAgent.prototype._resolveInlineEncryption.call(agentLike as never, 'sports');
+    expect(first.encryptInlinePayload).toBeTypeOf('function');
+    expect(first.encryptInlineChunked).toBeTypeOf('function');
     expect(agentLike._resolveCuratedChainKeyContext).toHaveBeenCalledTimes(1);
-    expect(await resolveAttempt()).toBe(await resolveAttempt());
-    await createCuratedKeyContextAttempt(agentLike as never, 'sports')();
+    await DKGAgent.prototype._resolveInlineEncryption.call(agentLike as never, 'sports');
     expect(agentLike._resolveCuratedChainKeyContext).toHaveBeenCalledTimes(2);
   });
 
-  it('keeps a failed resolution failed for both emitters in the same attempt', async () => {
+  it('refuses to construct emitters when authority resolution fails', async () => {
     const error = new Error('authority unavailable');
     const agentLike = { _resolveCuratedChainKeyContext: vi.fn(async () => { throw error; }) };
-    const resolveAttempt = createCuratedKeyContextAttempt(agentLike as never, 'sports');
-    await expect(resolveAttempt()).rejects.toBe(error);
-    await expect(resolveAttempt()).rejects.toBe(error);
+    const pending = DKGAgent.prototype._resolveInlineEncryption.call(agentLike as never, 'sports');
+    await expect(pending).rejects.toBe(error);
+    await expect(pending).rejects.toBe(error);
     expect(agentLike._resolveCuratedChainKeyContext).toHaveBeenCalledTimes(1);
+  });
+
+  function emitterHost() {
+    const wallet = ethers.Wallet.createRandom();
+    return {
+      log: { info: vi.fn(), warn: vi.fn() },
+      store: { insert: vi.fn(async () => undefined) }, gossip: { publish: vi.fn(async () => undefined) },
+      canonicalChunkStoreCgIdOrNull: () => 'canonical-cg', gossipWireIdFor: (id: string) => id,
+      resolveWorkspaceGossipSigningAgent: vi.fn(async () => ({ privateKey: wallet.privateKey, agentAddress: wallet.address })),
+      _resolveCuratedChainKeyContext: vi.fn(async () => ({ chainKey: new Uint8Array(32).fill(9), aeadCgId: '42', senderAddress: wallet.address })),
+    };
+  }
+  const chunkInput = () => ({ plaintextNquads: new TextEncoder().encode('<urn:s> <urn:p> "o" .'), batchId: new Uint8Array(32), publishOperationId: 'validated-op' });
+
+  it('leaves both callbacks undefined for a public graph', async () => {
+    const host = { _resolveCuratedChainKeyContext: vi.fn(async () => undefined) };
+    expect(await DKGAgent.prototype._resolveInlineEncryption.call(host as never, 'public')).toEqual({ encryptInlinePayload: undefined, encryptInlineChunked: undefined });
+  });
+  it('refuses curated emitters without a workspace signing agent', async () => {
+    const host = emitterHost();
+    host.resolveWorkspaceGossipSigningAgent.mockResolvedValue(undefined as never);
+    await expect(DKGAgent.prototype._resolveInlineEncryption.call(host as never, 'private')).rejects.toThrow(/cannot resolve a workspace-gossip signing agent/);
+    expect(host.store.insert).not.toHaveBeenCalled();
+  });
+  it.each(['batch', 'operation'])('refuses malformed %s metadata before persistence', async (kind) => {
+    const host = emitterHost();
+    const { encryptInlineChunked } = await DKGAgent.prototype._resolveInlineEncryption.call(host as never, 'private');
+    const input = chunkInput();
+    if (kind === 'batch') input.batchId = new Uint8Array(1);
+    else input.publishOperationId = '';
+    await expect(encryptInlineChunked!(input)).rejects.toThrow(kind === 'batch' ? /32-byte batchId/ : /non-empty publishOperationId/);
+    expect(host.store.insert).not.toHaveBeenCalled();
+    expect(host.gossip.publish).not.toHaveBeenCalled();
+  });
+  it.each([new Error('storage deadline'), 'storage rejected'])('propagates local chunk persistence failure %s', async (error) => {
+    const host = emitterHost();
+    host.store.insert.mockRejectedValue(error);
+    const { encryptInlineChunked } = await DKGAgent.prototype._resolveInlineEncryption.call(host as never, 'private');
+    await expect(encryptInlineChunked!(chunkInput())).rejects.toBe(error);
+    expect(host.gossip.publish).not.toHaveBeenCalled();
+    expect(host.log.warn).toHaveBeenCalledOnce();
+  });
+  it.each([new Error('peer unavailable'), 'gossip rejected'])('retains durable chunks when gossip fails with %s', async (error) => {
+    const host = emitterHost();
+    host.gossip.publish.mockRejectedValue(error);
+    const { encryptInlineChunked } = await DKGAgent.prototype._resolveInlineEncryption.call(host as never, 'private');
+    await expect(encryptInlineChunked!(chunkInput())).resolves.toMatchObject({ ciphertextChunkCount: 1 });
+    expect(host.store.insert).toHaveBeenCalledOnce();
+    expect(host.store.insert.mock.calls[0][0][0].graph).toBe(ciphertextChunkStoreGraph('canonical-cg'));
+    expect(host.log.warn).toHaveBeenCalledOnce();
+  });
+
+  it.each(['distribution', 'pending-drain'])('refuses an epoch when a member is revoked during %s', async (phase) => {
+    const sender = ethers.Wallet.createRandom();
+    const remote = ethers.Wallet.createRandom();
+    const senderRecipient = { agentAddress: sender.address, recipientKeyId: 'sender-key', peerId: 'sender-peer' };
+    const remoteRecipient = { agentAddress: remote.address, recipientKeyId: 'remote-key', peerId: 'remote-peer' };
+    let recipients = [senderRecipient, remoteRecipient];
+    let revoke = phase === 'distribution';
+    const agentLike = {
+      log: { info: vi.fn(), warn: vi.fn() }, defaultAgentAddress: sender.address,
+      resolveOnChainAccessPolicyState: async () => 1,
+      loadSwmSenderKeyState: async () => undefined,
+      getLocalSigningAgentForAddress: () => ({ agentAddress: sender.address, privateKey: sender.privateKey }),
+      resolveWorkspaceAgentRecipientsForCurrentAuthority: vi.fn(async () => ({ requiresEncryption: true, recipients })),
+      swmSenderKeySendStates: new Map(), prunePendingSenderKeysForEpochRotation: () => 0,
+      saveSwmSenderKeyState: async () => undefined,
+      createAndDistributeSwmSenderKeyEpoch: async (input: any) => {
+        const recipientRouteHash = computeSwmSenderKeyRecipientRouteHash(input);
+        if (revoke) recipients = [senderRecipient];
+        return { chainKey: new Uint8Array(32).fill(9), membershipHash: input.membershipHash, recipientRouteHash, senderAgentAddress: sender.address, epochId: 'old-epoch' };
+      },
+      drainPendingSenderKeyForRecipients: async () => { if (revoke) recipients = [senderRecipient]; },
+    };
+    const resolve = () => DKGAgent.prototype._resolveCuratedChainKeyContext.call(agentLike as never, 'private-cg', undefined, sender.address, undefined, 'regression');
+    if (phase === 'pending-drain') { await resolve(); revoke = true; }
+    const encrypt = vi.fn();
+    await expect(resolve().then(encrypt)).rejects.toThrow(/authority changed during sender-key setup/);
+    expect(encrypt).not.toHaveBeenCalled();
   });
 });
