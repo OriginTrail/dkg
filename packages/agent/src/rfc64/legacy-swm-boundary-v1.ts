@@ -545,9 +545,7 @@ export async function markRfc64LegacySwmRepublishedV1(
       canonicalAssets.set(kaUal, assertionVersion);
     }
   }
-  // A pass that does not get its turn within the fence's bound retires nothing:
-  // the next projection pass presents the whole inventory again.
-  await runRfc64LegacySwmRetirementV1(
+  const outcome = await runRfc64LegacySwmRetirementV1(
     state.fence,
     { source: 'republish-retirement', contextGraphId: canonicalContextGraphId },
     () => retireCanonicalRfc64LegacySwmAssetsV1(
@@ -556,6 +554,12 @@ export async function markRfc64LegacySwmRepublishedV1(
       canonicalAssets,
     ),
   );
+  // Nothing was retired within the fence's bound. The projection pass must
+  // fail like it does on a store error here: its supervisor repeats a failed
+  // pass on its timer and never repeats one that reported success.
+  if (!outcome.ran) {
+    throw new Error('RFC-64 legacy SWM republish retirement did not get its turn in time');
+  }
 }
 
 /**

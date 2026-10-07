@@ -105,7 +105,12 @@ describe('graph-scoped publish storage ACKs', () => {
     const settle = vi.fn();
     // The resolver's admission wait runs first, once, for this root asset.
     const order: string[] = [];
-    const awaitAdmission = vi.fn(async () => { order.push('awaitAdmission'); });
+    let admit!: () => void;
+    const admission = new Promise<void>((resolve) => { admit = resolve; });
+    const awaitAdmission = vi.fn(async () => {
+      order.push('awaitAdmission');
+      await admission;
+    });
     const handler = new StorageACKHandler(
       store,
       {
@@ -145,7 +150,13 @@ describe('graph-scoped publish storage ACKs', () => {
       allowedPeers: [],
     });
 
-    const decoded = decodeStorageACK(await handler.handler(intent, PEER));
+    const answered = handler.handler(intent, PEER);
+    // The handler stays behind the pending admission: nothing is resolved.
+    await vi.waitFor(() => expect(awaitAdmission).toHaveBeenCalledOnce());
+    await new Promise<void>((resolve) => { setTimeout(resolve, 25); });
+    expect(order).toEqual(['awaitAdmission']);
+    admit();
+    const decoded = decodeStorageACK(await answered);
 
     expect(isStorageACKDecline(decoded)).toBe(true);
     expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);

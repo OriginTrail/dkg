@@ -348,9 +348,10 @@ describe('RFC-64 legacy SWM boundary behind the fence coordinator', () => {
 
     await expect(retireRfc64LegacySwmAfterFinalizedVmV1(owner, BOUNDARY_CG, BOUNDARY_UAL, '1'))
       .resolves.toBe(false);
+    // A rejection, so the projection pass fails and its supervisor repeats it.
     await expect(markRfc64LegacySwmRepublishedV1(
       owner, BOUNDARY_CG, [{ kaUal: BOUNDARY_UAL, assertionVersion: '1' }],
-    )).resolves.toBeUndefined();
+    )).rejects.toThrow('RFC-64 legacy SWM republish retirement did not get its turn in time');
     await expect(acquireRfc64LegacySwmBoundaryReceiverLeaseV1(owner, BOUNDARY_SCOPE))
       .rejects.toThrow('RFC-64 legacy SWM boundary lease was not acquired in time');
 
@@ -362,8 +363,13 @@ describe('RFC-64 legacy SWM boundary behind the fence coordinator', () => {
     ]);
     expect(events[0]).toMatchObject({ contextGraphId: BOUNDARY_CG, kaUal: BOUNDARY_UAL });
 
-    // No fence is left behind: once the share settles, a new one is admitted.
-    stuck.settle(false);
+    // No fence is left behind, and the repeated pass retires the marker once
+    // the share has settled, with no other change to the inventory.
+    stuck.settle(true);
+    await markRfc64LegacySwmRepublishedV1(
+      owner, BOUNDARY_CG, [{ kaUal: BOUNDARY_UAL, assertionVersion: '1' }],
+    );
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, BOUNDARY_CG)).toBe(0);
     resolver({
       contextGraphId: BOUNDARY_CG, kaUal: BOUNDARY_UAL, shareOperationId: 'next-share', assertionVersion: '1',
     }).settle(false);

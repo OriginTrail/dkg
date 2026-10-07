@@ -1249,8 +1249,10 @@ describe('Working Memory Assertion Lifecycle', () => {
     const companionPredicate = 'urn:test:root-promotion-companion';
     const identities: DurableRootPromotionIdentity[] = [];
     const settle = vi.fn();
-    // The resolver's admission wait runs before the resolve, once.
-    const awaitAdmission = vi.fn(async () => { expect(identities).toHaveLength(0); });
+    // The promote stays behind the resolver's admission wait until it ends.
+    let admit!: () => void;
+    const admission = new Promise<void>((resolve) => { admit = resolve; });
+    const awaitAdmission = vi.fn(() => admission);
     const hookedPublisher = await createPublisher(undefined, store, Object.assign((
       input: Readonly<DurableRootPromotionIdentity>,
     ) => {
@@ -1275,12 +1277,18 @@ describe('Working Memory Assertion Lifecycle', () => {
       return { applied: true };
     });
 
-    const promoted = await hookedPublisher.assertionPromote(
+    const promoting = hookedPublisher.assertionPromote(
       CG_ID,
       ASSERTION_NAME,
       AGENT,
       { publisherPeerId: PEER, confirmBeforeCommit },
     );
+    await vi.waitFor(() => expect(awaitAdmission).toHaveBeenCalledOnce());
+    await new Promise<void>((resolve) => { setTimeout(resolve, 25); });
+    expect(identities).toHaveLength(0);
+    expect(confirmBeforeCommit).not.toHaveBeenCalled();
+    admit();
+    const promoted = await promoting;
     expect(confirmBeforeCommit).toHaveBeenCalledTimes(1);
     expect(settle).toHaveBeenCalledOnce();
     expect(settle).toHaveBeenCalledWith(true);
