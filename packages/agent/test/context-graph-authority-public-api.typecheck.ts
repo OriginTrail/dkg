@@ -190,6 +190,31 @@ type AuthorityFailureSiteMatchesExpected = AssertTrue<
 type ExpectedMatchesAuthorityFailureSite = AssertTrue<
   ExpectedAuthorityFailureSite extends RootAuthorityFailureSite ? true : false
 >;
+// The closed set of detail codes a read-authority log line may carry. As with
+// the failure sites, only the TYPE is public.
+type RootFinalizedAbsenceDetailCode = import(
+  '@origintrail-official/dkg-agent'
+).ContextGraphFinalizedAbsenceDetailCode;
+type ExpectedFinalizedAbsenceDetailCode =
+  | 'no-accepted-authority'
+  | 'replica-proof-timeout'
+  | 'replica-proof-error'
+  | 'replica-proof-absent'
+  | 'replica-metadata-moved'
+  | 'replica-binding-changed'
+  | 'replica-registered-metadata';
+type FinalizedAbsenceDetailCodeMatchesExpected = AssertTrue<
+  RootFinalizedAbsenceDetailCode extends ExpectedFinalizedAbsenceDetailCode ? true : false
+>;
+type ExpectedMatchesFinalizedAbsenceDetailCode = AssertTrue<
+  ExpectedFinalizedAbsenceDetailCode extends RootFinalizedAbsenceDetailCode ? true : false
+>;
+type RegisteredUnavailableDetailCode = NonNullable<
+  Extract<RootRegisteredAuthorityUnavailable, { detailCode?: unknown }>['detailCode']
+>;
+type RegisteredUnavailableCarriesDetailCode = AssertTrue<
+  RootFinalizedAbsenceDetailCode extends RegisteredUnavailableDetailCode ? true : false
+>;
 type DeepAuthorityStaysInternal =
   // @ts-expect-error The export map blocks authority implementation deep imports.
   typeof import('@origintrail-official/dkg-agent/dist/internal/context-graph-authority/context-graph-authority.js');
@@ -232,6 +257,9 @@ export type {
   ExpectedMatchesRegisteredUnavailableReason,
   AuthorityFailureSiteMatchesExpected,
   ExpectedMatchesAuthorityFailureSite,
+  FinalizedAbsenceDetailCodeMatchesExpected,
+  ExpectedMatchesFinalizedAbsenceDetailCode,
+  RegisteredUnavailableCarriesDetailCode,
   GateAuthorityResultStaysInternal,
   AuthorityMarkerStaysInternal,
   DeepAuthorityStaysInternal,

@@ -14,6 +14,8 @@ interface TestAuthorityDecision {
   metadataBootstrap: 'eligible' | 'forbidden';
   onChainId?: bigint;
   registration?: 'unregistered';
+  dependency?: string;
+  detailCode?: string;
 }
 
 function cleanEmptyResult(): CatchupJobResult {
@@ -568,6 +570,31 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
         '[context-graph-subscribe] authority unavailable: reason=other dependency=undefined',
       );
       expect(JSON.stringify(warn.mock.calls)).not.toContain('private diagnostic text');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it.each([
+    ['replica-proof-timeout', 'replica-proof-timeout'],
+    ['graph "private-name" timed out', 'unknown'],
+  ])('ends the unavailable log line with the detail code as a token (%s)', async (detailCode, logged) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const result = await subscribe({
+        hasConfirmedMeta: false,
+        authorityDecision: {
+          outcome: 'unavailable', source: 'registered-chain',
+          reason: 'finalized-name-absence-unaccepted', metadataBootstrap: 'eligible',
+          dependency: 'unknown', detailCode,
+        },
+      });
+      expect(result.responseStatus).toBe(503);
+      expect(warn).toHaveBeenCalledWith(
+        '[context-graph-subscribe] authority unavailable: reason=finalized-name-absence-unaccepted'
+        + ` dependency=unknown detail=${logged}`,
+      );
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('private-name');
     } finally {
       warn.mockRestore();
     }
