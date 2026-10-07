@@ -285,7 +285,7 @@ test('the wait compares against its threshold and stops at the first poll that r
   assert.equal(served, 3);
 });
 
-test('the wait stops the suite on invalid evidence or an unknown late action, and a single observation stays strict', async t => {
+test('the wait stops the suite on invalid evidence or an unknown late action', async t => {
   let served = 0;
   const busy = await serve(t, (req, res) => {
     req.resume(); served += 1;
@@ -298,11 +298,44 @@ test('the wait stops the suite on invalid evidence or an unknown late action, an
   const idle = await answering(t, [D]);
   const unknown = await runShell(expectCount('ignore'), { SHARING: sharing, PORT: idle.port, QUERY: select });
   assert.equal(unknown.status, 1); assert.doesNotMatch(unknown.stdout, /PASS=/); assert.equal(idle.served(), 0);
-  const url = await serve(t, (req, res) => { req.resume(); res.writeHead(503); res.end(settling); });
-  const single = await runShell(`${sharingSetup} AUTH=fixture
-value=$(sharing_api_observe "$PORT" "$QUERY" s rows '{"contextGraphId":"fixture"}') || devnet_observation_abort
-echo "value=$value"`, { SHARING: sharing, PORT: new URL(url).port, QUERY: select });
-  assert.equal(single.status, 1); assert.doesNotMatch(single.stdout, /value=/);
+});
+
+// A single read follows the route's retry contract; the base observation does not.
+const singleRead = (extra = '') => `${sharingSetup} AUTH=fixture; SHARING_RETRY_AFTER=0; SHARING_RETRY_LOG="$LOG"; : > "$LOG"
+value=$(sharing_api_observe "$PORT" "$QUERY" s rows '{"contextGraphId":"fixture"}'${extra}) || { code=$?; echo "status=$code repeats=$(wc -l < "$LOG" | tr -d ' ')"; exit "$code"; }
+echo "value=$value repeats=$(wc -l < "$LOG" | tr -d ' ')"`;
+const retryLog = t => {
+  const dir = mkdtempSync(join(tmpdir(), 'dkg-read-retries-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return join(dir, 'retries.log');
+};
+
+test('a single read asks again after the documented retryable 503 and records each repeat', async t => {
+  const { port, served } = await answering(t, [S, S, D]);
+  const result = await runShell(singleRead(), { SHARING: sharing, PORT: port, QUERY: select, LOG: retryLog(t) });
+  assert.equal(result.status, 0, result.stderr); assert.match(result.stdout, /value=1 repeats=2/); assert.equal(served(), 3);
+});
+
+test('a single read gives up as invalid evidence when read authority stays unavailable', async t => {
+  const { port, served } = await answering(t, [S]);
+  const result = await runShell(singleRead(), { SHARING: sharing, PORT: port, QUERY: select, LOG: retryLog(t) });
+  assert.equal(result.status, 2); assert.match(result.stdout, /status=2 repeats=4/); assert.equal(served(), 5);
+  assert.match(result.stderr, /READ_AUTHORITY_STILL_SETTLING/);
+});
+
+test('a single read does not repeat any other answer', async t => {
+  const busy = await answering(t, [[503, notSettling[0][2]], D]);
+  const refused = await runShell(singleRead(), { SHARING: sharing, PORT: busy.port, QUERY: select, LOG: retryLog(t) });
+  assert.equal(refused.status, 2); assert.match(refused.stdout, /status=2 repeats=0/); assert.equal(busy.served(), 1);
+  const seen = await answering(t, [D]);
+  const violated = await runShell(singleRead(' eq 0'), { SHARING: sharing, PORT: seen.port, QUERY: select, LOG: retryLog(t) });
+  assert.equal(violated.status, 1); assert.match(violated.stdout, /status=1 repeats=0/); assert.equal(seen.served(), 1);
+});
+
+test('the base API observation stays strict: one request, and the retryable 503 is invalid evidence', async t => {
+  const { port, served } = await answering(t, [S, D]);
+  const result = await runShell(`source "$HELPER"; devnet_query_api "http://127.0.0.1:$PORT" fixture "$QUERY" s rows '{"contextGraphId":"fixture"}'`, { HELPER: helper, PORT: port, QUERY: select });
+  assert.equal(result.status, 2); assert.equal(result.stdout, ''); assert.match(result.stderr, /HTTP_ERROR/); assert.equal(served(), 1);
 });
 
 test('real wrapper transport failure has empty stdout and exit 2 even in a pipeline', async () => {

@@ -4,9 +4,30 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/devnet-observation-helpers
 
 # Sharing operations. Caller supplies AUTH, DEVNET_DIR and check/fail functions.
 # Loading this module does not initialize counters or change shell options.
+# One read through the API, made the way a client that follows the route's
+# contract makes it: the documented retryable 503 (read authority unavailable)
+# is asked again after its Retry-After, at most SHARING_READ_ATTEMPTS times in
+# all (default 5). Each repeat appends a line to $SHARING_RETRY_LOG when that
+# is set, so a suite can report how often its reads needed one. A read that is
+# still unavailable after the last attempt is invalid evidence (2), and so is
+# every other invalid answer, at once and without a repeat.
 sharing_api_observe() {
-  local port="$1"; shift
-  devnet_query_api "http://127.0.0.1:$port" "$AUTH" "$@"
+  local port="$1" attempt=1 value status
+  shift
+  while :; do
+    status=0
+    value=$(devnet_query_api_settling "http://127.0.0.1:$port" "$AUTH" "$@") || status=$?
+    [ "$status" -eq 3 ] || break
+    if [ "$attempt" -ge "${SHARING_READ_ATTEMPTS:-5}" ]; then
+      echo '{"outcome":"INCONCLUSIVE","reason":"READ_AUTHORITY_STILL_SETTLING"}' >&2
+      return 2
+    fi
+    [ -z "${SHARING_RETRY_LOG:-}" ] || printf '%s\n' "$port" >> "$SHARING_RETRY_LOG"
+    attempt=$((attempt + 1))
+    sleep "${SHARING_RETRY_AFTER:-3}"
+  done
+  [ "$status" -eq 0 ] || return "$status"
+  printf '%s\n' "$value"
 }
 
 # Bounded wait for a member to read at least <min>: port, attempts, min, then

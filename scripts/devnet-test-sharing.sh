@@ -73,6 +73,10 @@ check() {
 
 # shellcheck source=devnet-sharing-helpers.sh
 source "$SCRIPT_DIR/devnet-sharing-helpers.sh"
+# Reads that had to be asked again after a retryable read-authority 503 are counted here.
+SHARING_RETRY_LOG=$(mktemp "${TMPDIR:-/tmp}/dkg-sharing-retries.XXXXXX")
+export SHARING_RETRY_LOG
+trap 'rm -f "$SHARING_RETRY_LOG"' EXIT
 
 q() { echo "{\"subject\":\"$1\",\"predicate\":\"$2\",\"object\":\"$3\",\"graph\":\"\"}"; }
 ql() { echo "{\"subject\":\"$1\",\"predicate\":\"$2\",\"object\":\"\\\"$3\\\"\",\"graph\":\"\"}"; }
@@ -982,6 +986,11 @@ c -X POST "http://127.0.0.1:${N2_PORT}/api/knowledge-assets/n2-draft/wm/discard"
 
 #------------------------------------------------------------
 echo ""
+READ_RETRIES=$(wc -l < "$SHARING_RETRY_LOG" | tr -d ' ')
+if [ "$READ_RETRIES" -gt 0 ]; then
+  warn "$READ_RETRIES read(s) were asked again after a retryable read-authority 503 (API ports: $(sort "$SHARING_RETRY_LOG" | uniq -c | tr -s ' ' | tr '\n' ';'))"
+fi
+
 echo "============================================================"
 echo "TEST SUMMARY — Private Project Sharing & WM Isolation"
 echo "============================================================"
