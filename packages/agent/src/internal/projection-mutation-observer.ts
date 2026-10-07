@@ -16,7 +16,6 @@ function notifyProjection(projection: ContextGraphMetaProjection, mutation: Stor
     else projection.markDirtyForGraph(graph, subject, predicate);
   }
   if (mutation.quads) projection.markDirtyFromQuads(mutation.quads);
-  if (mutation.unseenPayload) projection.recipientKeyRouteFence.noteUnscopedWrite();
 }
 
 /** How the agent's store wrapper tells the metadata projection what a write is about to change and did change. */

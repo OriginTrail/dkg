@@ -74,6 +74,20 @@ describe('RecipientKeyRouteFence (GH#3067)', () => {
       expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(true);
     });
 
+    it('moves for a key predicate on a blank node, which a store may turn into a variable that matches an agent', async () => {
+      const fence = await readyFence();
+      for (const predicate of RECIPIENT_KEY_ROUTE_PREDICATES) {
+        expect(moved(fence, () => fence.noteQuads([quad('_:b0', predicate)])), predicate).toBe(true);
+      }
+      expect(moved(fence, () => fence.noteQuads([quad('_:b0', 'http://schema.org/name')]))).toBe(false);
+    });
+
+    it('learns the graph of a blank-node key quad before it is dispatched', async () => {
+      const fence = await readyFence([PROFILE_GRAPH]);
+      fence.begin({ quads: [quad('_:b0', DKG_ONTOLOGY.DKG_PEER_ID, DATA_GRAPH)] });
+      expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(true);
+    });
+
     it('does not move for a key predicate on a subject that is not an agent', async () => {
       const fence = await readyFence();
       const quads = [...RECIPIENT_KEY_ROUTE_PREDICATES].flatMap((predicate) => [
@@ -249,10 +263,8 @@ describe('RecipientKeyRouteFence (GH#3067)', () => {
       expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(true);
     });
 
-    it.each([
-      ['an UPDATE', { everything: true }],
-      ['a commit whose payload is not visible', { unseenPayload: true }],
-    ])('does not trust a scan that ran while %s was still in flight, and trusts one after it settled', async (_label, mutation) => {
+    it('does not trust a scan that ran while an UPDATE was still in flight, and trusts one after it settled', async () => {
+      const mutation = { everything: true };
       const { store, query } = scanStore([PROFILE_GRAPH]);
       const fence = new RecipientKeyRouteFence(store);
       await fence.ensureReady();

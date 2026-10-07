@@ -11,3 +11,8 @@ import { vi } from 'vitest';
 export function stubFence(revision = 0) {
   return { revision, ensureReady: vi.fn(async () => undefined) };
 }
+
+/** The two revisions a recipient resolution of a private roster checks, quiet unless a test moves them. */
+export function stubRecipientRevisions() {
+  return { recipientKeyRouteFence: stubFence(), peerGateRevision: { read: () => '0:0' } };
+}

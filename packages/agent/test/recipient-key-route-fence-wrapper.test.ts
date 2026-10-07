@@ -5,6 +5,7 @@ import { DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 
 import { RECIPIENT_KEY_ROUTE_PREDICATES } from '../src/internal/recipient-key-route-fence.js';
+import { commitInput } from './_helpers/rfc64-commit-input.js';
 import {
   AGENT, CG_DID, CONTROL_GRAPH, JOIN_CACHE, KA_GRAPH, KA_UAL, KEY_IRI, MEMORY_LAYER, META_GRAPH, NAME,
   PROFILE_GRAPH, SWM_META_GRAPH, keyFact, quad, stack,
@@ -120,29 +121,55 @@ describe('recipient key/route fence through the production store wrapper (GH#306
     expect(fence.revision).toBe(settled);
   });
 
-  it('moves for a signed CAS commit whose payload the wrapper cannot see, and not for a refused one', async () => {
-    let result: 'committed' | 'conflict' = 'committed';
-    const { wrapper, fence } = await open({
+  describe('an RFC-64 author commit', () => {
+    const committing = (result: () => 'committed' | 'conflict') => open({
       inner: (store) => new Proxy(store, {
         get: (target, property) => property === 'rfc64AuthorCommitCasV1'
-          ? async () => result
+          ? async () => result()
           : (typeof Reflect.get(target, property) === 'function'
             ? (Reflect.get(target, property) as (...args: unknown[]) => unknown).bind(target)
             : Reflect.get(target, property)),
       }),
     });
-    const input = {
-      sharedProjectionGraph: 'urn:g:shared', authorSealGraph: 'urn:g:seal', currentHeadGraph: 'urn:g:head',
-      kaStateDigest: { graphUri: 'urn:g:ka' }, subgraphMutationGeneration: { graphUri: 'urn:g:sub' },
-      contextGraphMutationGeneration: { graphUri: 'urn:g:cg' }, appliedSet: { graphUri: 'urn:g:applied' }, sealInvalidations: [],
-    };
-    result = 'conflict';
-    const refused = fence.revision;
-    await wrapper.rfc64AuthorCommitCasV1!(input as never);
-    expect(fence.revision).toBe(refused);
-    result = 'committed';
-    await wrapper.rfc64AuthorCommitCasV1!(input as never);
-    expect(fence.revision).toBeGreaterThan(refused);
+
+    it('moves when it replaces a graph that holds key facts', async () => {
+      const { wrapper, fence } = await committing(() => 'committed');
+      const before = fence.revision;
+      await wrapper.rfc64AuthorCommitCasV1!(commitInput({ sharedProjectionGraph: PROFILE_GRAPH }));
+      expect(fence.revision).toBeGreaterThan(before);
+    });
+
+    it('moves for a key fact in its payload, and later removals of that graph move too', async () => {
+      const { wrapper, fence } = await committing(() => 'committed');
+      const graph = `${CG_DID}/_shared_memory`;
+      const before = fence.revision;
+      await wrapper.rfc64AuthorCommitCasV1!(commitInput({ sharedProjectionGraph: graph, sharedProjectionQuads: [keyFact(graph)] }));
+      expect(fence.revision).toBeGreaterThan(before);
+      const afterCommit = fence.revision;
+      await wrapper.dropGraph(graph);
+      expect(fence.revision).toBeGreaterThan(afterCommit);
+    });
+
+    it('does not move for ordinary projection and control state', async () => {
+      const { wrapper, fence } = await committing(() => 'committed');
+      const before = fence.revision;
+      await wrapper.rfc64AuthorCommitCasV1!(commitInput({ sharedProjectionGraph: `${CG_DID}/_shared_memory` }));
+      expect(fence.revision).toBe(before);
+    });
+
+    it('does not move for a commit that was refused', async () => {
+      const { wrapper, fence } = await committing(() => 'conflict');
+      const before = fence.revision;
+      await wrapper.rfc64AuthorCommitCasV1!(commitInput({ sharedProjectionGraph: PROFILE_GRAPH }));
+      expect(fence.revision).toBe(before);
+    });
+
+    it('may change anything when the canonical plan cannot describe it', async () => {
+      const { wrapper, fence } = await committing(() => 'committed');
+      const before = fence.revision;
+      await wrapper.rfc64AuthorCommitCasV1!({} as never);
+      expect(fence.revision).toBeGreaterThan(before);
+    });
   });
 
   describe('a removal that overtakes the notification of an insert into the same graph', () => {

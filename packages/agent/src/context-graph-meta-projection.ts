@@ -13,6 +13,7 @@ import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-
 import { strip, stripLiteral } from './dkg-agent-utils.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { cloneMetaRecord } from './internal/context-graph-meta-record-copy.js';
+import { PeerGateRevision } from './internal/peer-gate-revision.js';
 import { RECIPIENT_KEY_ROUTE_PREDICATES, RecipientKeyRouteFence } from './internal/recipient-key-route-fence.js';
 
 export interface ContextGraphSubGraphMeta {
@@ -104,11 +105,8 @@ const DIRECT_META_PREDICATES = new Set([
   `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`,
 ]);
 
-// Recipient resolution scans these facts across every named graph. They do
-// not populate ContextGraphMetaRecord, but a concurrent insert can still
-// change the exact (agent, key, peer) transport set while a private roster is
-// being rechecked. Share the authority revision with the metadata projection
-// so callers can fence both halves of that decision across awaited reads.
+// Recipient resolution scans these facts across every named graph. They do not
+// populate ContextGraphMetaRecord, but they can change a recipient set.
 const WORKSPACE_RECIPIENT_AUTHORITY_PREDICATES: ReadonlySet<string> = new Set([
   DKG_ONTOLOGY.DKG_ACCESS_POLICY,
   DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
@@ -152,6 +150,8 @@ const CATALOG_META_PREDICATES = new Set<string>([
   DKG_ONTOLOGY.RDF_TYPE,
   DKG_ONTOLOGY.DCT_ACCESS_RIGHTS,
 ]);
+const PROJECTION_RECORD_PREDICATES: ReadonlySet<string> = new Set([
+  ...DIRECT_META_PREDICATES, ...SUB_GRAPH_META_PREDICATES, ...DELEGATION_META_PREDICATES, ...CATALOG_META_PREDICATES]);
 
 /**
  * A `ContextGraphMetaRecord` with no facts loaded yet.
@@ -188,8 +188,9 @@ export class ContextGraphMetaProjection {
   private readonly entries = new Map<string, ProjectionEntry>();
   private authorityFactsRevision = 0;
   private allFactsRevision = 0;
-  /** Moves only for writes that can change a recipient key or route (GH#3067). */
+  /** What a recipient resolution depends on: key and route facts, and each graph's peer allowlist (GH#3067). */
   readonly recipientKeyRouteFence: RecipientKeyRouteFence;
+  readonly peerGateRevision = new PeerGateRevision(PROJECTION_RECORD_PREDICATES);
 
   constructor(private readonly store: TripleStore) {
     this.recipientKeyRouteFence = new RecipientKeyRouteFence(store);
@@ -319,7 +320,8 @@ export class ContextGraphMetaProjection {
     return cloneMetaRecord(await raceAgainstAbort(inflight, options.signal));
   }
 
-  markDirty(contextGraphId: string): void {
+  markDirty(contextGraphId: string, changesPeerGate = true): void {
+    if (changesPeerGate) this.peerGateRevision.noteFacts(contextGraphId);
     this.authorityFactsRevision += 1;
     const existing = this.entries.get(contextGraphId);
     if (existing) {
@@ -346,8 +348,7 @@ export class ContextGraphMetaProjection {
    * from the inserted quads, so a delete is covered too. Shared AGENTS/ONTOLOGY
    * sources invalidate every record. Other graphs dirty no cache entry but still
    * advance the authority revision, because key lookup scans all named graphs.
-   * The recipient key/route fence is told what the mutation names.
-   */
+   * The recipient fences are told what the mutation names. */
   markDirtyForGraph(graphUri: string, subject?: string, predicate?: string): void {
     this.recipientKeyRouteFence.noteRemoval({ graph: graphUri, subject, predicate });
     const graph = stripTerm(graphUri);
@@ -364,7 +365,8 @@ export class ContextGraphMetaProjection {
     const contextGraphId =
       contextGraphIdFromMetaGraphUri(graphUri) ?? contextGraphIdFromCatalogGraphUri(graphUri);
     if (contextGraphId) {
-      this.markDirty(contextGraphId);
+      this.markDirty(contextGraphId, false);
+      this.peerGateRevision.noteRemoval(contextGraphId, { subject, predicate });
       return;
     }
     // Key lookup scans every named graph, and an atomic replacement can delete
@@ -379,6 +381,7 @@ export class ContextGraphMetaProjection {
   }
 
   private dirtyAll(): void {
+    this.peerGateRevision.noteEverything();
     this.authorityFactsRevision += 1;
     this.allFactsRevision += 1;
     for (const entry of this.entries.values()) {

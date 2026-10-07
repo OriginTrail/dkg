@@ -1,8 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
-import { deleteByPatternWithoutCount, isStoreOperationNotStarted, type TripleStore, type SortedGraphSetSource, type StoreOperation } from '@origintrail-official/dkg-storage';
+import {
+  deleteByPatternWithoutCount,
+  describeRfc64AuthorCommitCasV1,
+  isStoreOperationNotStarted,
+  type Rfc64AuthorCommitCasInputV1,
+  type SortedGraphSetSource,
+  type StoreOperation,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 import type { StoreMutation, StoreMutationObserver } from './store-mutation.js';
+
+// A commit the canonical plan refuses is refused by the store before dispatch too; until it is,
+// it may change anything.
+function describeCommit(input: Rfc64AuthorCommitCasInputV1): StoreMutation {
+  try {
+    return describeRfc64AuthorCommitCasV1(input);
+  } catch {
+    return { everything: true };
+  }
+}
 
 export function createListContextGraphsCacheInvalidatingStore(
   innerStore: TripleStore,
@@ -156,35 +174,14 @@ export function createListContextGraphsCacheInvalidatingStore(
     // RFC-64 author publication moves a complete public-SWM projection and
     // its bounded semantic control state through one backend CAS. Preserve the
     // capability through this cache-invalidation decorator and invalidate only
-    // after a proven commit; a clean guard conflict changes nothing.
+    // after a proven commit; a clean guard conflict changes nothing. The commit
+    // names every graph and subject it replaces, so only those are fenced, not
+    // every cache of an unrelated private graph.
     rfc64AuthorCommitCasV1: innerStore.rfc64AuthorCommitCasV1
       ? (input, options) => invalidateAfterMutation(
           () => innerStore.rfc64AuthorCommitCasV1!(input, options),
           result => result === 'committed',
-          // The CAS names every graph it replaces. A graph-wide dirty mark
-          // would invalidate an unrelated private CG's own metadata proof
-          // after every authored row, even though the CAS only changed this
-          // exact projection and its control subjects. Fence each named
-          // target, including deleted facts, without losing the conservative
-          // all-graph fallback used by genuinely opaque store mutations.
-          {
-            removals: ('currentHead' in input
-              ? [
-                input.sharedProjectionGraph,
-                input.authorSealGraph,
-                ...[input.currentHead, input.subgraphMutationGeneration, input.contextGraphMutationGeneration, input.appliedSet]
-                  .map((transition) => transition.graphUri),
-              ]
-              : [
-                input.sharedProjectionGraph,
-                input.authorSealGraph,
-                input.currentHeadGraph,
-                ...[input.kaStateDigest, input.subgraphMutationGeneration, input.contextGraphMutationGeneration, input.appliedSet, ...input.sealInvalidations]
-                  .map((transition) => transition.graphUri),
-              ]
-            ).map((graph) => ({ graph })),
-            unseenPayload: true,
-          },
+          describeCommit(input),
           'rfc64AuthorCommitCasV1',
         )
       : undefined,

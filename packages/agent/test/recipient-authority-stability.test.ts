@@ -242,20 +242,34 @@ describe('recipient stability loop under sustained authority churn (GH#3067)', (
 
   const REVISION_MOVED = { ...TRANSPORT_CHANGED, site: 'revision-moved' };
 
+  const allowedPeerQuad = (peerId: string): Quad => ({
+    subject: contextGraphDataUri(CONTEXT_GRAPH_ID),
+    predicate: DKG_ONTOLOGY.DKG_ALLOWED_PEER,
+    object: `"${peerId}"`,
+    graph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
+  });
+
+  /** The peer gate changes: the host's lookup answers differently and the store holds the new fact, as in the agent. */
+  const changeGate = async ({ state, store }: ChurnContext, peers: string[]) => {
+    state.allowedPeers = peers;
+    await store.insert(peers.map(allowedPeerQuad));
+  };
+
   it('resolves in the first window while unrelated writes move the node-wide revision in every read', async () => {
     const { host, ready, projection } = churningHost({ seed: profileKeys, unrelated: true });
     await ready;
     const nodeWide = projection.readAuthorityFactsRevision;
     const keyRoute = projection.recipientKeyRouteFence.revision;
+    const peerGate = projection.peerGateRevision.read(CONTEXT_GRAPH_ID);
 
     expectRecipients(await resolve(host), 2);
 
-    // The classification read and the confirmation of the one collect; the
-    // peer gate is read to collect and read again to confirm.
+    // The classification read and the confirmation of the one collect.
     expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(2);
-    expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(2);
+    expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(1);
     expect(projection.readAuthorityFactsRevision).toBeGreaterThan(nodeWide);
     expect(projection.recipientKeyRouteFence.revision).toBe(keyRoute);
+    expect(projection.peerGateRevision.read(CONTEXT_GRAPH_ID)).toBe(peerGate);
   });
 
   it('keeps the quiet path at two authority reads and one collect', async () => {
@@ -264,7 +278,7 @@ describe('recipient stability loop under sustained authority churn (GH#3067)', (
 
     expectRecipients(await resolve(host), 2);
     expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(2);
-    expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(2);
+    expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(1);
   });
 
   it('names the throw site of an authority that is unavailable at the first read', async () => {
@@ -289,7 +303,7 @@ describe('recipient stability loop under sustained authority churn (GH#3067)', (
     expectRecipients(await resolve(host), 2);
 
     expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(3);
-    expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(4);
+    expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(2);
     expect(ensureReady).toHaveBeenCalledTimes(2);
   });
 
@@ -322,21 +336,21 @@ describe('recipient stability loop under sustained authority churn (GH#3067)', (
     {
       change: 'a peer leaves the allowlist',
       seed: profileKeys,
-      apply: ({ state, peerId }) => { state.allowedPeers = [peerId]; },
+      apply: (context) => changeGate(context, [context.peerId]),
       early: /has no recipient key advertised by a peer in the context graph allowlist/,
     },
     {
-      // Same length, different members: only a content comparison sees it.
+      // Same length, different members.
       change: 'a peer is swapped in the allowlist',
       seed: profileKeys,
-      apply: ({ state, peerId }) => { state.allowedPeers = [peerId, '12D3KooWChurnSwappedPeer']; },
+      apply: (context) => changeGate(context, [context.peerId, '12D3KooWChurnSwappedPeer']),
       early: /has no recipient key advertised by a peer in the context graph allowlist/,
     },
     {
       change: 'the graph gains a peer allowlist',
       seed: joinCacheKeys,
       allowedPeers: null,
-      apply: ({ state, peerId }) => { state.allowedPeers = [peerId]; },
+      apply: (context) => changeGate(context, [context.peerId]),
       early: /has no recipient key advertised by a peer in the context graph allowlist/,
     },
   ];
@@ -436,7 +450,7 @@ describe('recipient stability loop under sustained authority churn (GH#3067)', (
     await expect(resolve(host)).rejects.toMatchObject(REVISION_MOVED);
     // Never a fourth collect: three collects, each followed by its confirmation.
     expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(4);
-    expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(6);
+    expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(3);
   });
 
   it('keeps legacy unregistered authority strict when the node-wide revision moves in every window', async () => {
@@ -585,51 +599,31 @@ describe('recipient stability loop under sustained authority churn (GH#3067)', (
     expect(real.projection.readAuthorityFactsRevision).toBeGreaterThan(nodeWide);
     expect(real.projection.recipientKeyRouteFence.revision).toBe(keyRoute);
   });
-  describe('the peer gate is read while its cache can be invalidated', () => {
-    const allowedPeerQuad = (peerId: string): Quad => ({
-      subject: contextGraphDataUri(CONTEXT_GRAPH_ID),
-      predicate: DKG_ONTOLOGY.DKG_ALLOWED_PEER,
-      object: `"${peerId}"`,
-      graph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
+  it('refuses a member the roster removes while a gate fact is being written, whichever lands last', async () => {
+    const { host, ready } = churningHost({
+      seed: profileKeys,
+      // Reads 2 and 3 move the key revision so that the last window is reached; during
+      // the last roster read a gate fact is written and the roster loses a member.
+      churn: [2, 3],
+      during: async (read, context) => {
+        if (read !== 4) return;
+        await changeGate(context, [context.peerId, context.otherPeerId]);
+        context.state.roster = [context.member.address];
+      },
     });
+    await ready;
 
-    it('refuses the stale gate that a confirmation read returns while the member\'s only allowed peer is removed', async () => {
-      const { host, ready, context } = churningHost({ seed: profileKeys });
-      await ready;
-      let reads = 0;
-      host.getContextGraphAllowedPeers = vi.fn(async () => {
-        reads += 1;
-        const fresh = context.state.allowedPeers === null ? null : [...context.state.allowedPeers];
-        if (reads !== 2) return fresh;
-        // The confirmation read: its rebuild began before the removal, the removal
-        // invalidates the projection while it is pending, and it still returns the
-        // gate it began with.
-        context.state.allowedPeers = [context.otherPeerId];
-        await context.store.delete([allowedPeerQuad(context.peerId)]);
-        return fresh;
-      });
+    await expect(resolve(host)).rejects.toMatchObject({ ...TRANSPORT_CHANGED, site: 'transport-changed' });
+  });
 
-      await expect(resolve(host)).rejects.toThrow(
-        /has no recipient key advertised by a peer in the context graph allowlist/,
-      );
-      // Collect, the raced confirmation, its settled re-read, the collect that refuses.
-      expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(4);
-    });
+  it('checks the peer gate by revision right after the last roster read, with no read of the gate in between', async () => {
+    const { host, ready } = churningHost({ seed: profileKeys });
+    await ready;
 
-    it('refuses once the gate never settles, after exactly three collects', async () => {
-      const { host, ready, context } = churningHost({ seed: profileKeys });
-      await ready;
-      let writes = 0;
-      host.getContextGraphAllowedPeers = vi.fn(async () => {
-        // Every read of the gate overlaps an invalidation of the projection.
-        writes += 1;
-        await context.store.delete([allowedPeerQuad(`12D3KooWChurnNoise${writes}`)]);
-        return [context.peerId, context.otherPeerId];
-      });
-
-      await expect(resolve(host)).rejects.toMatchObject(REVISION_MOVED);
-      expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(4);
-    });
+    expectRecipients(await resolve(host), 2);
+    // The gate is read once, to collect; nothing awaits between the roster read and the verdict.
+    expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(1);
+    expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(2);
   });
 
 });

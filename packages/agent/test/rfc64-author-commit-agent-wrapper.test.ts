@@ -3,44 +3,13 @@ import {
   OxigraphStore,
   UnsupportedTripleStoreCapabilityError,
   type QueryOptions,
-  type Rfc64AuthorCommitCasInputV1,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
 import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
 import { createProjectionMutationObserver } from '../src/internal/projection-mutation-observer.js';
+import { commitInput as input } from './_helpers/rfc64-commit-input.js';
 import { recordingObserver } from './_helpers/store-mutation-recorder.js';
-
-function input(): Rfc64AuthorCommitCasInputV1 {
-  const graph = 'did:dkg:context-graph:rfc64/_shared_memory';
-  const stateGraph = 'urn:test:rfc64:state';
-  const transition = (subject: string, predicate: string, oldValue: string, nextValue: string) => ({
-    graphUri: stateGraph,
-    subject,
-    predicate,
-    expectedObject: oldValue,
-    expectedQuads: [{ subject, predicate, object: oldValue, graph: stateGraph }],
-    quads: [{ subject, predicate, object: nextValue, graph: stateGraph }],
-  });
-  return {
-    sharedProjectionGraph: graph,
-    sharedProjectionQuads: [{ subject: 'urn:ka', predicate: 'urn:p', object: '"v"', graph }],
-    authorSealGraph: 'urn:seals',
-    authorSealSubject: 'urn:seal',
-    authorSealQuads: [{ subject: 'urn:seal', predicate: 'urn:p', object: '"seal"', graph: 'urn:seals' }],
-    currentHead: {
-      graphUri: 'urn:heads',
-      subject: 'urn:author',
-      predicate: 'urn:head',
-      expectedObject: 'urn:old',
-      expectedQuads: [{ subject: 'urn:author', predicate: 'urn:head', object: 'urn:old', graph: 'urn:heads' }],
-      quads: [{ subject: 'urn:author', predicate: 'urn:head', object: 'urn:new', graph: 'urn:heads' }],
-    },
-    subgraphMutationGeneration: transition('urn:subgraph-mutation', 'urn:generation', '"1"', '"2"'),
-    contextGraphMutationGeneration: transition('urn:cg-mutation', 'urn:generation', '"10"', '"11"'),
-    appliedSet: transition('urn:applied-set', 'urn:root', 'urn:old-root', 'urn:new-root'),
-  };
-}
 
 function overrideStore(base: TripleStore, overrides: Partial<TripleStore>): TripleStore {
   return new Proxy(base, {
@@ -77,12 +46,13 @@ describe('RFC-64 CAS through the agent cache wrapper', () => {
     expect(cas).toHaveBeenLastCalledWith(manifest, options);
     expect(invalidate).toHaveBeenCalledTimes(1);
     expect(committed).toHaveLength(1);
-    // Every graph the commit replaces is named, and its payload is not visible
-    // to the decorator.
-    expect(committed[0]).toMatchObject({ unseenPayload: true });
+    // The commit names every graph and subject it replaces and every quad it
+    // inserts, from the canonical plan.
     expect(committed[0].removals).toHaveLength(6);
     expect(committed[0].removals![0]).toEqual({ graph: manifest.sharedProjectionGraph });
     expect(committed[0].removals!.every((removal) => removal.graph !== undefined)).toBe(true);
+    expect(committed[0].quads).toEqual(expect.arrayContaining(manifest.sharedProjectionQuads as never[]));
+    expect(committed[0].quads).toHaveLength(6);
 
     await expect(store.rfc64AuthorCommitCasV1!(manifest, options)).resolves.toBe('conflict');
     expect(invalidate).toHaveBeenCalledTimes(1);

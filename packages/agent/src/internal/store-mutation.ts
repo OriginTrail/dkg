@@ -11,12 +11,10 @@ export interface StoreRemoval {
 
 /** What a store write does, described once and reused before it is dispatched and after it settles. */
 export interface StoreMutation {
-  /** Quads it inserts, or removes by value. */
+  /** Quads it inserts, or removes by value (a blank node among them can stand for any subject). */
   readonly quads?: readonly Quad[];
   /** What it removes by scope. */
   readonly removals?: readonly StoreRemoval[];
-  /** It also inserts quads the decorator cannot see (an RFC-64 commit). */
-  readonly unseenPayload?: boolean;
   /** It may change anything (an UPDATE, a prefix delete). */
   readonly everything?: boolean;
 }

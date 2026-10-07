@@ -11,7 +11,6 @@
 
 
 import { collectProjectedDelegatees } from './internal/workspace-projected-delegatees.js';
-import { peerGateStayedCurrent, sameStringSet } from './internal/recipient-peer-gate.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -434,7 +433,7 @@ const SWM_RECIPIENT_AUTHORITY_STABILITY_ATTEMPTS = 3;
 /** One completed collect, with the check that nothing it depends on moved since it started. */
 interface RecipientSnapshot {
   readonly resolution: WorkspaceAgentRecipientResolution;
-  readonly stayedCurrent: () => Promise<boolean>;
+  readonly stayedCurrent: () => boolean;
 }
 
 type ContextGraphSlotBindingOutcome =
@@ -683,6 +682,12 @@ function hasExactWorkspaceRecipientSet(
   } catch {
     return false;
   }
+}
+
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+  const leftSet = new Set(left);
+  const rightSet = new Set(right);
+  return leftSet.size === rightSet.size && [...leftSet].every((value) => rightSet.has(value));
 }
 
 type PendingSenderKeyDrainAuthority = {
@@ -1792,7 +1797,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       revision: number,
     ): RecipientSnapshot => ({
       resolution,
-      stayedCurrent: async () => revision === projection.readAuthorityFactsRevision,
+      stayedCurrent: () => revision === projection.readAuthorityFactsRevision,
     });
     let resolveKeys: () => Promise<RecipientSnapshot>;
     if (transport.kind === 'legacy-unregistered') {
@@ -1867,11 +1872,13 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       resolveKeys = async () => {
         // The registered/accepted private roster, local peer gate, and verified
         // recipient-key routes are conjunctive authorities, each fenced by what
-        // it changes with: the roster by the transport re-read, the peer gate by
-        // its content, keys and routes by their own revision. Capture them before
-        // every attempt so a phonebook-hydration retry owns a new snapshot.
+        // it changes with: the roster by the transport re-read, the peer gate and
+        // the keys and routes by their own revisions, which are checked
+        // synchronously right after that re-read. Capture them before every
+        // attempt so a phonebook-hydration retry owns a new snapshot.
         await projection.recipientKeyRouteFence.ensureReady();
         const attemptRevision = projection.recipientKeyRouteFence.revision;
+        const attemptGate = projection.peerGateRevision.read(input.contextGraphId);
         const allowedPeers = await this.getContextGraphAllowedPeers(input.contextGraphId);
         const allowedPeerSet = allowedPeers === null ? null : new Set(allowedPeers);
         const recipients: WorkspaceAgentRecipient[] = [];
@@ -1910,14 +1917,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         }
         return {
           resolution: { requiresEncryption: true, recipients: [firstRecipient, ...remainingRecipients] },
-          stayedCurrent: async () => (
-            await peerGateStayedCurrent(
-              allowedPeers,
-              () => this.getContextGraphAllowedPeers(input.contextGraphId),
-              () => projection.readContextGraphAuthorityFactsRevision(input.contextGraphId),
-            )
-            && attemptRevision === projection.recipientKeyRouteFence.revision
-          ),
+          stayedCurrent: () => attemptRevision === projection.recipientKeyRouteFence.revision
+            && attemptGate === projection.peerGateRevision.read(input.contextGraphId),
         };
       };
     }
@@ -1985,7 +1986,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
             ? currentTransport.kind === 'approved-private-replica'
               && sameStringSet(transport.allowedPeers, currentTransport.allowedPeers)
             : currentTransport.kind === 'legacy-unregistered';
-        if (transportStayedCurrent && await snapshot.stayedCurrent()) break;
+        if (transportStayedCurrent && snapshot.stayedCurrent()) break;
 
         if (!transportStayedCurrent) {
           throw createRecipientAuthorityChangedError(input.contextGraphId, 'transport-changed');
