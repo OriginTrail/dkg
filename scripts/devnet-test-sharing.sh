@@ -338,7 +338,6 @@ case $? in
   3) fail "Node 2 read of SWM data: read authority was still unavailable when the wait ended" ;;
   *) fail "Node 2 did not receive SWM data after 15s" ;;
 esac
-N2_SWM_CT=$SHARING_WAIT_VALUE
 
 echo "--- 4d: Verify both entities synced ---"
 if $SWM_SYNCED; then
@@ -391,14 +390,12 @@ echo "--- 5f: Node 4 has NO WM lifecycle/event metadata ---"
 sharing_storage_absence "Node 4 has 0 WM lifecycle entities" "${N1_PORT}" "${N4_PORT}" "SELECT ?s WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/state> \"created\" } }" s
 
 echo "--- 5g: Node 4 DOES have SWM data (promoted before join) ---"
-N4_SWM_SYNCED=false
 sharing_wait_for_count "${N4_PORT}" 10 1 "SELECT ?name WHERE { <urn:sharing:beta1> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}"
 case $? in
-  0) N4_SWM_SYNCED=true; ok "Node 4 (late joiner) received SWM data" ;;
+  0) ok "Node 4 (late joiner) received SWM data" ;;
   3) fail "Node 4 read of SWM data: read authority was still unavailable when the wait ended" ;;
   *) fail "Node 4 did not receive SWM data (late joiner sync broken)" ;;
 esac
-N4_SWM_CT=$SHARING_WAIT_VALUE
 
 echo "--- 5h: Node 4 _meta has only CG-level + non-WM subjects ---"
 N4_META_SUBJ=$(sharing_storage_observe "${N4_PORT}" "SELECT DISTINCT ?s WHERE { GRAPH <$META_GRAPH> { ?s ?p ?o } }" s bindings) || devnet_observation_abort
@@ -456,14 +453,12 @@ echo "--- 6f: Wait for gossip + verify all participants see Node 2's SWM data --
 for port_label in "${N1_PORT}:Node1" "${N4_PORT}:Node4"; do
   port="${port_label%%:*}"
   label="${port_label##*:}"
-  FOUND_N2=false
   sharing_wait_for_count "$port" 20 1 "SELECT ?name WHERE { <urn:sharing:n2secret> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}"
   case $? in
-    0) FOUND_N2=true; ok "$label sees Node 2's promoted SWM data (after ${SHARING_WAIT_POLLS}s)" ;;
+    0) ok "$label sees Node 2's promoted SWM data (after ${SHARING_WAIT_POLLS}s)" ;;
     3) fail "$label read of Node 2's SWM data: read authority was still unavailable when the wait ended" ;;
     *) warn "$label missing Node 2's SWM data after 20s (private CG sync may be slow)" ;;
   esac
-  PEER_CT=$SHARING_WAIT_VALUE
 done
 
 #------------------------------------------------------------
@@ -502,24 +497,20 @@ else
 fi
 
 echo "--- 8b: Verify doc-alpha now visible on Node 2 via SWM ---"
-DOC_SYNCED=false
 sharing_wait_for_count "${N2_PORT}" 15 3 "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}"
 case $? in
-  0) DOC_SYNCED=true; ok "Node 2 now sees promoted doc-alpha in SWM ($SHARING_WAIT_VALUE entities)" ;;
+  0) ok "Node 2 now sees promoted doc-alpha in SWM ($SHARING_WAIT_VALUE entities)" ;;
   3) fail "Node 2 read of doc-alpha in SWM: read authority was still unavailable when the wait ended" ;;
   *) fail "doc-alpha not synced to Node 2 after promotion" ;;
 esac
-N2_DOC_CT=$SHARING_WAIT_VALUE
 
 echo "--- 8c: Verify doc-alpha now visible on Node 4 (late joiner) ---"
-N4_DOC_SYNCED=false
 sharing_wait_for_count "${N4_PORT}" 10 3 "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}"
 case $? in
-  0) N4_DOC_SYNCED=true; ok "Node 4 (late joiner) sees doc-alpha in SWM ($SHARING_WAIT_VALUE entities)" ;;
+  0) ok "Node 4 (late joiner) sees doc-alpha in SWM ($SHARING_WAIT_VALUE entities)" ;;
   3) fail "Node 4 read of doc-alpha in SWM: read authority was still unavailable when the wait ended" ;;
   *) warn "doc-alpha not yet on Node 4 ($SHARING_WAIT_VALUE entities)" ;;
 esac
-N4_DOC_CT=$SHARING_WAIT_VALUE
 
 echo "--- 8d: Node 3 (not invited) still sees nothing ---"
 sharing_excluded_swm "$N3_PORT" "$CG_ID"
@@ -737,14 +728,12 @@ N4_APP_OK=$(json_get "$N4_APPROVE" ok)
 check "Node 4 join request approved" "$N4_APP_OK" "true"
 
 echo "--- 13i: Node 4 auto-subscribes and receives SWM data ---"
-N4_SWM_OK=false
 sharing_wait_for_count "${N4_PORT}" 20 1 "SELECT ?name WHERE { <urn:join-flow:shared1> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG2_ID\",\"view\":\"shared-working-memory\"}"
 case $? in
-  0) N4_SWM_OK=true; ok "Node 4 received SWM data after approval (after ${SHARING_WAIT_POLLS}s)" ;;
+  0) ok "Node 4 received SWM data after approval (after ${SHARING_WAIT_POLLS}s)" ;;
   3) fail "Node 4 read of SWM data after approval: read authority was still unavailable when the wait ended" ;;
   *) fail "Node 4 did not receive SWM data after approval" ;;
 esac
-N4_SWM_CT=$SHARING_WAIT_VALUE
 
 echo "--- 13j: Node 4 has NO WM data (wm-secret stays private) ---"
 N4_SEC_CT=$(sharing_api_observe "${N4_PORT}" "SELECT ?name WHERE { <urn:join-flow:secret1> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG2_ID\",\"includeSharedMemory\":true}") || devnet_observation_abort
@@ -769,14 +758,12 @@ c -X POST "http://127.0.0.1:${N1_PORT}/api/context-graph/$(python3 -c 'import ur
 ok "Node 5 join approved"
 
 echo "--- 13m: Node 5 receives SWM but not WM ---"
-N5_SWM_OK=false
 sharing_wait_for_count "${N5_PORT}" 25 1 "SELECT ?name WHERE { <urn:join-flow:shared1> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG2_ID\",\"view\":\"shared-working-memory\"}"
 case $? in
-  0) N5_SWM_OK=true; ok "Node 5 received SWM data" ;;
+  0) ok "Node 5 received SWM data" ;;
   3) fail "Node 5 read of SWM data: read authority was still unavailable when the wait ended" ;;
   *) warn "Node 5 (edge) did not receive SWM data after 25s — edge sync may be slower" ;;
 esac
-N5_SWM_CT=$SHARING_WAIT_VALUE
 
 N5_SEC_CT=$(sharing_api_observe "${N5_PORT}" "SELECT ?name WHERE { <urn:join-flow:secret1> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG2_ID\",\"includeSharedMemory\":true}") || devnet_observation_abort
 check "Node 5 cannot see WM secret data" "$N5_SEC_CT" "0"
@@ -921,24 +908,20 @@ devnet_count_at_least "$N1_VM_API_CT" 1 && ok "API entity visible in VM" || warn
 echo "--- 15d: VM data syncs to Node 2 ---"
 # Node 2 should pick up VM data via gossip/sync even if not on the allowlist for this project
 # (VM is published on-chain and available to all nodes)
-N2_VM_SYNCED=false
 sharing_wait_for_count "${N2_PORT}" 20 1 "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG3_ID\",\"view\":\"verifiable-memory\"}"
 case $? in
-  0) N2_VM_SYNCED=true; ok "Node 2 received VM data ($SHARING_WAIT_VALUE entities, after ${SHARING_WAIT_POLLS}s)" ;;
+  0) ok "Node 2 received VM data ($SHARING_WAIT_VALUE entities, after ${SHARING_WAIT_POLLS}s)" ;;
   3) fail "Node 2 read of VM data: read authority was still unavailable when the wait ended" ;;
   *) warn "Node 2 missing VM data after 20s — VM sync may need more time" ;;
 esac
-N2_VM_CT=$SHARING_WAIT_VALUE
 
 echo "--- 15e: Node 3 also has VM data (VM is public/on-chain) ---"
-N3_VM_SYNCED=false
 sharing_wait_for_count "${N3_PORT}" 20 1 "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG3_ID\",\"view\":\"verifiable-memory\"}"
 case $? in
-  0) N3_VM_SYNCED=true; ok "Node 3 received VM data ($SHARING_WAIT_VALUE entities, after ${SHARING_WAIT_POLLS}s)" ;;
+  0) ok "Node 3 received VM data ($SHARING_WAIT_VALUE entities, after ${SHARING_WAIT_POLLS}s)" ;;
   3) fail "Node 3 read of VM data: read authority was still unavailable when the wait ended" ;;
   *) warn "Node 3 missing VM data after 20s — VM sync may need more time" ;;
 esac
-N3_VM_CT=$SHARING_WAIT_VALUE
 
 echo "--- 15f: SWM still has data (clearAfter=false) ---"
 SWM_AFTER_CT=$(sharing_api_observe "${N1_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG3_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
@@ -980,34 +963,28 @@ fi
 
 echo "--- 16b: Verify VM data on Node 1 for private CG ---"
 echo "--- 16b: Node 2 (participant) sees VM data ---"
-N2_CG1_VM_OK=false
 sharing_wait_for_count "${N2_PORT}" 20 1 "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG_ID\",\"view\":\"verifiable-memory\"}"
 case $? in
-  0) N2_CG1_VM_OK=true; ok "Node 2 has VM data for CG1 ($SHARING_WAIT_VALUE entities, after ${SHARING_WAIT_POLLS}s)" ;;
+  0) ok "Node 2 has VM data for CG1 ($SHARING_WAIT_VALUE entities, after ${SHARING_WAIT_POLLS}s)" ;;
   3) fail "Node 2 read of VM data for CG1: read authority was still unavailable when the wait ended" ;;
   *) warn "Node 2 missing VM data for CG1 after 20s" ;;
 esac
-N2_CG1_VM_CT=$SHARING_WAIT_VALUE
 
 echo "--- 16c: Node 4 (late joiner) sees VM data ---"
-N4_CG1_VM_OK=false
 sharing_wait_for_count "${N4_PORT}" 20 1 "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG_ID\",\"view\":\"verifiable-memory\"}"
 case $? in
-  0) N4_CG1_VM_OK=true; ok "Node 4 has VM data for CG1 ($SHARING_WAIT_VALUE entities, after ${SHARING_WAIT_POLLS}s)" ;;
+  0) ok "Node 4 has VM data for CG1 ($SHARING_WAIT_VALUE entities, after ${SHARING_WAIT_POLLS}s)" ;;
   3) fail "Node 4 read of VM data for CG1: read authority was still unavailable when the wait ended" ;;
   *) warn "Node 4 missing VM data for CG1 after 20s" ;;
 esac
-N4_CG1_VM_CT=$SHARING_WAIT_VALUE
 
 echo "--- 16d: Node 3 (excluded from private CG) still gets VM (on-chain is public) ---"
-N3_CG1_VM_OK=false
 sharing_wait_for_count "${N3_PORT}" 20 1 "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG_ID\",\"view\":\"verifiable-memory\"}"
 case $? in
-  0) N3_CG1_VM_OK=true; ok "Node 3 sees VM for private CG1 ($SHARING_WAIT_VALUE entities — on-chain is public)" ;;
+  0) ok "Node 3 sees VM for private CG1 ($SHARING_WAIT_VALUE entities — on-chain is public)" ;;
   3) fail "Node 3 read of VM data for CG1: read authority was still unavailable when the wait ended" ;;
   *) warn "Node 3 missing VM for CG1 — VM gossip may be slower for private CGs" ;;
 esac
-N3_CG1_VM_CT=$SHARING_WAIT_VALUE
 
 echo "--- 16e: WM data still private after publish ---"
 for port_label in "${N2_PORT}:Node2" "${N4_PORT}:Node4" "${N3_PORT}:Node3"; do
