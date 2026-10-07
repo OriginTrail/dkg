@@ -28,7 +28,7 @@ import {
   CatalogRepairLaneInactiveErrorV1,
   type CatalogRepairDiagnosticV1,
 } from './rfc64/catalog-repair-diagnostics-v1.js';
-import { CatalogRepairRetryV1 } from './rfc64/catalog-repair-retry-v1.js';
+import { CatalogRepairRetryV1, type CatalogRepairRevisionHintV1 } from './rfc64/catalog-repair-retry-v1.js';
 
 // Match the default background store lane; repair fanout must not flood its queue.
 const MAX_CONCURRENT_REPAIRS_V1 = 1;
@@ -115,7 +115,7 @@ interface ProjectionOwnerDependenciesV1 {
   readonly acceptsFinalizedPrivateLane: (contextGraphId: ContextGraphIdV1) => boolean;
   readonly readRepairRevision: (
     contextGraphId: ContextGraphIdV1, authorAddress: EvmAddressV1,
-  ) => string | null;
+  ) => CatalogRepairRevisionHintV1 | null;
   readonly listFinalizedPrivateRepairs: () => readonly Readonly<
     Rfc64FinalizedPrivatePlacementRepairV1
   >[];
@@ -537,7 +537,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     try {
       // Exact durable identity already partitions private retries. An unrelated
       // mutation of the author's inventory must not reset this repair's backoff.
-      return retry.observe(this.#dependencies.acceptsFinalizedPrivateLane(contextGraphId) ? 'active' : null);
+      return retry.observe(this.#dependencies.acceptsFinalizedPrivateLane(contextGraphId) ? { scopeIdentity: 'finalized-private', headRevision: 'active' } : null);
     } catch {
       return false;
     }

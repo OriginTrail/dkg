@@ -5,7 +5,7 @@ import {
   type EvmAddressV1,
 } from '@origintrail-official/dkg-core';
 import { Rfc64SwmCatalogProjectionOwnerV1 } from '../src/dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
-import { CatalogRepairRetryV1 } from '../src/rfc64/catalog-repair-retry-v1.js';
+import { CatalogRepairRetryV1, type CatalogRepairRevisionHintV1 } from '../src/rfc64/catalog-repair-retry-v1.js';
 import { CatalogRepairIntegrityErrorV1 } from '../src/rfc64/catalog-repair-diagnostics-v1.js';
 import { StoreSchedulerBusyError, StoreOperationTimeoutError, activeDefaultStoreWorkPriority } from '@origintrail-official/dkg-storage';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from '../src/rfc64/finalized-private-placement-repair-store-v1.js';
@@ -25,7 +25,7 @@ afterEach(async () => {
 });
 
 function fixture(retryIntervalMs = 5_000) {
-  let revision = 'scope-1:head-1';
+  let revision: CatalogRepairRevisionHintV1 = { scopeIdentity: 'scope-1', headRevision: 'head-1' };
   let available = true;
   let privateRepairs: readonly Rfc64FinalizedPrivatePlacementRepairV1[] = [];
   const reconcile = vi.fn(async (): Promise<null> => { throw new Error('unchanged repair failure'); });
@@ -51,7 +51,7 @@ function fixture(retryIntervalMs = 5_000) {
   return {
     owner, reconcile, repairPrivate, readRevision, listPrivateRepairs, warn,
     request: () => owner.request({ contextGraphId: CG, authorAddress: AUTHOR, ctx }),
-    setRevision: (value: string) => { revision = value; },
+    setRevision: (value: string | CatalogRepairRevisionHintV1) => { revision = typeof value === 'string' ? { scopeIdentity: 'scope-1', headRevision: value } : value; },
     setAvailable: (value: boolean) => { available = value; },
     setPrivateRepairs: (value: readonly Rfc64FinalizedPrivatePlacementRepairV1[]) => { privateRepairs = value; },
     advance: async (ms: number) => { await vi.advanceTimersByTimeAsync(ms); await owner.whenIdle(); },
@@ -119,10 +119,10 @@ describe('RFC-64 unchanged repair backoff', () => {
 
   it('does not impose a stale integrity cooldown after a lane transition', () => {
     const retry = new CatalogRepairRetryV1();
-    retry.observe('head-1');
+    retry.observe({ scopeIdentity: 'scope-1', headRevision: 'head-1' });
     const generation = retry.generation;
     retry.observe(null);
-    retry.observe('head-2');
+    retry.observe({ scopeIdentity: 'scope-1', headRevision: 'head-2' });
     expect(retry.fail(generation, 0, 5_000, 'integrity')).toBe(false);
     expect(retry.nextAttemptAtMs).toBeNull();
   });
@@ -169,6 +169,24 @@ describe('RFC-64 unchanged repair backoff', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('retains a changed head observed only by start until the cooldown deadline', async () => {
+    const f = fixture(0);
+    f.reconcile.mockRejectedValueOnce(new CatalogRepairIntegrityErrorV1('invalid seal'));
+    f.request();
+    await f.owner.whenIdle();
+    f.setRevision({ scopeIdentity: 'scope-1', headRevision: 'head-2' });
+    f.reconcile.mockResolvedValue(null);
+    f.owner.start(ctx);
+    await f.owner.whenIdle();
+    await f.advance(4_999);
+    expect(f.reconcile).toHaveBeenCalledTimes(1);
+    await f.advance(1);
+    expect(f.reconcile).toHaveBeenCalledTimes(2);
+    await f.advance(60_000);
+    expect(f.reconcile).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it.each(['cooldown', 'in-flight'])('retains a known changed head through %s with periodic retries disabled', async (phase) => {
     const f = fixture(0);
     let release!: () => void;
@@ -197,7 +215,7 @@ describe('RFC-64 unchanged repair backoff', () => {
 
   it.each(['cooldown', 'in-flight'])('resets and fences an active authoring-scope change through %s', async (phase) => {
     const f = fixture(0);
-    const revision = (scope: string) => JSON.stringify(['public', 'legacy-public', scope, 'head-1']);
+    const revision = (scope: string): CatalogRepairRevisionHintV1 => ({ scopeIdentity: scope, headRevision: 'head-1' });
     f.setRevision(revision('era-1'));
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -219,9 +237,9 @@ describe('RFC-64 unchanged repair backoff', () => {
 
   it('retains cooldown for production head hints within the same authoring scope', () => {
     const retry = new CatalogRepairRetryV1();
-    retry.observe(JSON.stringify(['public', 'legacy-public', 'scope-1', 'head-1']));
+    retry.observe({ scopeIdentity: 'scope-1', headRevision: 'head-1' });
     retry.fail(retry.generation, 0, 0, 'integrity');
-    retry.observe(JSON.stringify(['public', 'legacy-public', 'scope-1', 'head-2']));
+    retry.observe({ scopeIdentity: 'scope-1', headRevision: 'head-2' });
     expect(retry.nextAttemptAtMs).toBe(5_000);
     expect(retry.consecutiveFailures).toBe(1);
   });
@@ -306,7 +324,7 @@ describe('RFC-64 unchanged repair backoff', () => {
     f.request();
     await f.owner.whenIdle();
     expect(f.reconcile).toHaveBeenCalledTimes(2);
-    f.setRevision('scope-2:head-1'); f.request();
+    f.setRevision({ scopeIdentity: 'scope-2', headRevision: 'head-1' }); f.request();
     await f.owner.whenIdle();
     expect(f.reconcile).toHaveBeenCalledTimes(3);
   });
@@ -341,7 +359,7 @@ describe('RFC-64 unchanged repair backoff', () => {
     expect(f.owner.status()?.repairs[0]).toMatchObject({ consecutiveFailures: 1, nextAttemptAtMs: 5_000 });
     await f.advance(4_999);
     expect(f.reconcile).toHaveBeenCalledTimes(1);
-    f.readRevision.mockImplementation(() => 'scope-1:head-2');
+    f.readRevision.mockImplementation(() => ({ scopeIdentity: 'scope-1', headRevision: 'head-2' }));
     await f.advance(1);
     expect(f.reconcile).toHaveBeenCalledTimes(2);
     await f.advance(60_000);

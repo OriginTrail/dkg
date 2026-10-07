@@ -7,35 +7,32 @@ const survivesInventoryChange = (kind: CatalogRepairDiagnosticV1['kind']): boole
   || kind === 'store_timeout_not_started' || kind === 'store_timeout_indeterminate'
 );
 
-/** Production hints bind lane kind, target policy, scope digest, then inventory head. */
-function authoringScopeIdentity(revision: string): string | undefined {
-  try {
-    const value: unknown = JSON.parse(revision);
-    return Array.isArray(value) && value.length === 4 && typeof value[2] === 'string'
-      ? JSON.stringify(value.slice(0, 3)) : undefined;
-  } catch { return undefined; }
+/** Producer-owned identity separates inventory churn from an authoring-scope transition. */
+export interface CatalogRepairRevisionHintV1 {
+  readonly scopeIdentity: string;
+  readonly headRevision: string | null;
 }
 
 /** Constant-size scheduling hint; canonical reconciliation remains authoritative. */
 export class CatalogRepairRetryV1 {
-  #revision: string | null | undefined;
-  #scopeIdentity: string | undefined;
+  #revision: CatalogRepairRevisionHintV1 | null | undefined;
   #retainCooldown = false;
   #lastLaneGeneration = 0;
   generation = 0;
   consecutiveFailures = 0;
   nextAttemptAtMs: number | null = null;
 
-  observe(revision: string | null | undefined): boolean {
+  observe(revision: CatalogRepairRevisionHintV1 | null | undefined): boolean {
     // A failed local hint read is neither a mutation nor a lane transition.
     if (revision === undefined) return false;
-    const changed = this.#revision !== undefined && this.#revision !== revision;
-    const scopeIdentity = revision === null ? undefined : authoringScopeIdentity(revision);
-    const scopeChanged = (this.#scopeIdentity !== undefined || scopeIdentity !== undefined)
-      && this.#scopeIdentity !== scopeIdentity;
-    const laneChanged = this.#revision === null || revision === null || scopeChanged;
-    this.#scopeIdentity = scopeIdentity;
-    this.#revision = revision;
+    const previous = this.#revision;
+    const changed = previous !== undefined && (previous === null || revision === null
+      ? previous !== revision
+      : previous.scopeIdentity !== revision.scopeIdentity || previous.headRevision !== revision.headRevision);
+    const scopeChanged = previous != null && revision !== null
+      && previous.scopeIdentity !== revision.scopeIdentity;
+    const laneChanged = previous === null || revision === null || scopeChanged;
+    this.#revision = revision === null ? null : { ...revision };
     if (changed) {
       this.generation += 1;
       if (laneChanged) this.#lastLaneGeneration = this.generation;
