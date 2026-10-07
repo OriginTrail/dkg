@@ -46,7 +46,6 @@ export default defineConfig({
       "test/durable-integrity-seal-assertion-version.test.ts",
       "test/iri-term.test.ts",
       "test/promote-async-default-agent.test.ts",
-      "test/promote-durable-root-companion.test.ts",
       "test/promote-swm-pointer-post-commit.test.ts",
       "test/clear-promote-async-facade.test.ts",
       "test/query-min-trust-alias.test.ts",
@@ -311,7 +310,6 @@ export default defineConfig({
       // public, unregistered context graph.
       "test/public-unregistered-member-swm.test.ts",
       "test/approved-private-replica.test.ts",
-      "test/approved-private-replica-proof-runs.test.ts",
       "test/swm-snapshot-materializer.test.ts",
       "test/swm-head-identity-preservation.test.ts",
       // #2079 — the already-materialized witness: the warm-path win, the count
@@ -319,12 +317,6 @@ export default defineConfig({
       // equal-count version change safe.
       "test/swm-materialization-witness.test.ts",
       "test/replace-subject-agent-wrapper.test.ts",
-      "test/recipient-key-route-fence.test.ts",
-      "test/recipient-key-route-fence-wrapper.test.ts",
-      "test/recipient-key-route-fence.property.test.ts",
-      "test/peer-gate-revision.test.ts",
-      "test/recipient-key-route-dependencies.test.ts",
-      "test/context-graph-cache-invalidating-store-callback.test.ts",
     ],
     testTimeout: 60_000,
     maxWorkers: 1,

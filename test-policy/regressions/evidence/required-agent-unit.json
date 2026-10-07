@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "scope": "Local filtered execution through the shared required agent unit runner; this is not a full CI shard execution receipt.",
+  "command": "node scripts/ci/run-vitest-junit.mjs --lane agent -- --config vitest.unit.config.ts test/regression-on-demand-cursor.test.ts test/regression-peer-store-repair.test.ts",
+  "sourceCommit": "d99ed582380b3146b94d056f4c159109f8818d66",
+  "node": "v22.23.2",
+  "exitCode": 0,
+  "executedAssertions": 2,
+  "failed": 0,
+  "skipped": 0,
+  "requiredLane": "tornado-agent",
+  "config": "vitest.unit.config.ts",
+  "junitSha256": "60985e21e33b27e89c42708926dee35c46357de19b88f18f4cc11f01e97b6bf5",
+  "configSha256": "5796c4da50dd54dcb58f4d92ab687aa10581bc6fdf0bb271655d78111f95ace7",
+  "testSha256": {
+    "packages/agent/test/regression-on-demand-cursor.test.ts": "fb9556de0e3e9a760b151bbda35fa123faecf520425ddd960d29dc16a7938058",
+    "packages/agent/test/regression-peer-store-repair.test.ts": "dabb9c46e829d9bc4a0fb21ab3bd3a685e88840e9226d953ccee66b4f3852446"
+  },
+  "plannedReports": {
+    "GH-2741": "agent-6.xml",
+    "GH-2782": "agent-10.xml"
+  }
+}
