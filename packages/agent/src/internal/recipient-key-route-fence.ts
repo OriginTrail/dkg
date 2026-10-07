@@ -15,9 +15,10 @@ export const RECIPIENT_KEY_ROUTE_PREDICATES: ReadonlySet<string> = new Set([
   DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_REVOCATION_PROOF,
 ]);
 
+// One branch per predicate, so every pattern is bound by its predicate and the scan
+// reads only the key and route facts, never every triple of every graph.
 const KEY_GRAPH_SCAN = `SELECT DISTINCT ?g WHERE {
-  VALUES ?p { ${[...RECIPIENT_KEY_ROUTE_PREDICATES].map((predicate) => `<${predicate}>`).join(' ')} }
-  GRAPH ?g { ?s ?p ?o }
+  ${[...RECIPIENT_KEY_ROUTE_PREDICATES].map((predicate) => `{ GRAPH ?g { ?s <${predicate}> ?o } }`).join('\n  UNION\n  ')}
   FILTER(STRSTARTS(STR(?s), "${AGENT_DID_PREFIX}"))
 }`;
 

@@ -123,6 +123,9 @@ describe('peer gate revision through the production store wrapper (GH#3067)', ()
     ['a removal in the agents graph', (s) => s.deleteByPatternWithoutCount!({
       graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS), subject: CG_DID })],
     ['a prefix delete', (s) => s.deleteBySubjectPrefix(KA_GRAPH, 'urn:x:')],
+    ['a removal naming an empty graph', (s) => s.deleteByPatternWithoutCount!({ graph: '' })],
+    ['a removal naming a bracketed graph, which the store rejects', (s) =>
+      s.deleteByPatternWithoutCount!({ graph: `<${KA_GRAPH}>` }).catch(() => undefined)],
     ['a SPARQL update', (s) => s.update!(`INSERT DATA { GRAPH <${KA_GRAPH}> { <urn:x:a> <${NAME}> "v" } }`)],
   ];
 
@@ -138,6 +141,14 @@ describe('peer gate revision through the production store wrapper (GH#3067)', ()
     await wrapper.insert([quad(CG_DID, ALLOWED_PEER, META_GRAPH)]);
     const before = read();
     await wrapper.deleteByPattern({ graph: META_GRAPH, predicate: ALLOWED_PEER });
+    expect(read()).not.toBe(before);
+  });
+
+  it('moves for a counted removal naming an empty graph, which removes the allowlist from every graph', async () => {
+    const { wrapper, read } = await open();
+    await wrapper.insert([quad(CG_DID, ALLOWED_PEER, META_GRAPH)]);
+    const before = read();
+    expect(await wrapper.deleteByPattern({ graph: '' })).toBeGreaterThan(0);
     expect(read()).not.toBe(before);
   });
 

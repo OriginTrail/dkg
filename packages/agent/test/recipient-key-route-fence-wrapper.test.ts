@@ -59,6 +59,10 @@ describe('recipient key/route fence through the production store wrapper (GH#306
       `an insert of ${predicate.split('/').pop()}`, (s) => s.insert([quad(KEY_IRI, predicate, PROFILE_GRAPH)])]),
     ['a revocation insert', (s) => s.insert([quad(KEY_IRI, DKG_ONTOLOGY.DKG_REVOKED_AT, KA_GRAPH)])],
     ['a delete of a key fact', (s) => s.delete([keyFact(PROFILE_GRAPH, DKG_ONTOLOGY.DKG_PEER_ID)])],
+    // An HTTP store turns a blank-node subject in a delete into a variable that can match an agent.
+    ...[...RECIPIENT_KEY_ROUTE_PREDICATES].map((predicate): [string, (store: Wrapper) => Promise<unknown>] => [
+      `a delete of ${predicate.split('/').pop()} on a blank node`,
+      (s) => s.delete([{ subject: '_:x', predicate, object: '"peer-B"', graph: PROFILE_GRAPH }])]),
     ['a route removal by agent subject', (s) => s.deleteByPattern({ graph: PROFILE_GRAPH, subject: AGENT, predicate: DKG_ONTOLOGY.DKG_PEER_ID })],
     ['a route removal by agent subject, counted or not', (s) => s.deleteByPatternWithoutCount!({ graph: PROFILE_GRAPH, subject: AGENT })],
     ['a route removal by predicate in a key graph', (s) => s.deleteByPattern({ graph: PROFILE_GRAPH, predicate: DKG_ONTOLOGY.DKG_PEER_ID })],

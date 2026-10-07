@@ -30,6 +30,10 @@ interface Universe {
 
 const iri = (values: readonly string[]) => fc.constantFrom(...values);
 
+/** Names an operation by its arguments, so that a counterexample reads as what it did. */
+const named = (label: string, args: unknown, run: Operation): Operation =>
+  Object.assign(run, { toString: () => `${label}(${JSON.stringify(args)})` });
+
 /** Every operation the store wrapper can see, over the terms of one universe, including malformed ones. */
 function operations(u: Universe): fc.Arbitrary<Operation> {
   const quadIn = (graph: fc.Arbitrary<string>, subject: fc.Arbitrary<string> = iri(u.subjects)): fc.Arbitrary<Quad> =>
@@ -40,30 +44,33 @@ function operations(u: Universe): fc.Arbitrary<Operation> {
     predicate: fc.option(iri([...u.predicates, ...u.irregular]), { nil: undefined }),
   });
   return fc.oneof(
-    fc.array(quadIn(iri(u.graphs)), { minLength: 1, maxLength: 3 }).map((q): Operation => (s) => s.insert(q)),
-    fc.array(quadIn(iri(u.graphs)), { minLength: 1, maxLength: 3 }).map((q): Operation => (s) => s.delete(q)),
-    fc.array(quadIn(iri(u.graphs), fc.constant('_:b0')), { minLength: 1, maxLength: 2 }).map((q): Operation => (s) => s.delete(q)),
-    pattern.map((p): Operation => (s) => s.deleteByPattern(p)),
-    pattern.map((p): Operation => (s) => s.deleteByPatternWithoutCount!(p)),
-    iri(u.graphs).map((graph): Operation => (s) => s.dropGraph(graph)),
+    fc.array(quadIn(iri(u.graphs)), { minLength: 1, maxLength: 3 }).map((q): Operation => named('insert', q, (s) => s.insert(q))),
+    fc.array(quadIn(iri(u.graphs)), { minLength: 1, maxLength: 3 }).map((q): Operation => named('delete', q, (s) => s.delete(q))),
+    fc.array(quadIn(iri(u.graphs), fc.constant('_:b0')), { minLength: 1, maxLength: 2 }).map((q): Operation => named('deleteBlank', q, (s) => s.delete(q))),
+    pattern.map((p): Operation => named('deleteByPattern', p, (s) => s.deleteByPattern(p))),
+    pattern.map((p): Operation => named('deleteByPatternWithoutCount', p, (s) => s.deleteByPatternWithoutCount!(p))),
+    iri(u.graphs).map((graph): Operation => named('dropGraph', graph, (s) => s.dropGraph(graph))),
     iri(u.graphs).chain((graph) => fc.array(quadIn(fc.constant(graph)), { maxLength: 3 })
-      .map((q): Operation => (s) => s.replaceGraph!(graph, q))),
+      .map((q): Operation => named('replaceGraph', [graph, q], (s) => s.replaceGraph!(graph, q)))),
     fc.tuple(iri(u.graphs), iri(u.subjects)).chain(([graph, subject]) =>
       fc.array(quadIn(fc.constant(graph), fc.constant(subject)), { maxLength: 3 })
-        .map((q): Operation => (s) => s.replaceSubject!(graph, subject, q))),
+        .map((q): Operation => named('replaceSubject', [graph, subject, q], (s) => s.replaceSubject!(graph, subject, q)))),
     fc.tuple(iri(u.graphs), iri(u.subjects), fc.array(quadIn(iri(u.graphs)), { maxLength: 2 })).map(
-      ([graph, subject, graphQuads]): Operation => (s) => s.replaceGraphAndSubject!(
+      ([graph, subject, graphQuads]): Operation => named('replaceGraphAndSubject', [graph, subject, graphQuads], (s) => s.replaceGraphAndSubject!(
         graph,
         graphQuads.map((q) => ({ ...q, graph })),
         u.metaGraph,
         subject,
         [quad(subject, NAME, u.metaGraph), quad(subject, u.predicates[0]!, u.metaGraph)],
-      ),
+      )),
     ),
-    fc.tuple(iri(u.graphs), iri(u.prefixes)).map(([graph, prefix]): Operation => (s) => s.deleteBySubjectPrefix(graph, prefix)),
+    fc.tuple(iri(u.graphs), iri(u.prefixes)).map(([graph, prefix]): Operation =>
+      named('deleteBySubjectPrefix', [graph, prefix], (s) => s.deleteBySubjectPrefix(graph, prefix))),
     fc.tuple(iri(u.graphs), iri(u.subjects), iri(u.predicates)).map(([graph, subject, predicate]): Operation =>
-      (s) => s.update!(`INSERT DATA { GRAPH <${graph}> { <${subject}> <${predicate}> "u" } }`)),
-    iri(u.graphs).map((graph): Operation => (s) => s.query(`DELETE WHERE { GRAPH <${graph}> { ?s ?p ?o } }`)),
+      named('insertDataUpdate', [graph, subject, predicate], (s) =>
+        s.update!(`INSERT DATA { GRAPH <${graph}> { <${subject}> <${predicate}> "u" } }`))),
+    iri(u.graphs).map((graph): Operation =>
+      named('deleteWhereQuery', graph, (s) => s.query(`DELETE WHERE { GRAPH <${graph}> { ?s ?p ?o } }`))),
   );
 }
 
@@ -125,15 +132,17 @@ describe('recipient key/route fence is sound over random wrapper operations (GH#
     const harmlessPredicate = iri([NAME, MEMORY_LAYER, DKG_ONTOLOGY.DKG_ACCESS_POLICY]);
     const harmlessQuad = fc.record({ subject: harmlessSubject, predicate: harmlessPredicate, object: fc.constant('"a"'), graph: harmlessGraph });
     const harmless: fc.Arbitrary<Operation> = fc.oneof(
-      fc.array(harmlessQuad, { minLength: 1, maxLength: 3 }).map((q): Operation => (s) => s.insert(q)),
-      fc.array(harmlessQuad, { minLength: 1, maxLength: 3 }).map((q): Operation => (s) => s.delete(q)),
-      fc.record({ graph: harmlessGraph, subject: harmlessSubject }).map((p): Operation => (s) => s.deleteByPatternWithoutCount!(p)),
-      fc.record({ graph: harmlessGraph, predicate: harmlessPredicate }).map((p): Operation => (s) => s.deleteByPattern(p)),
-      harmlessGraph.map((g): Operation => (s) => s.dropGraph(g)),
+      fc.array(harmlessQuad, { minLength: 1, maxLength: 3 }).map((q): Operation => named('insert', q, (s) => s.insert(q))),
+      fc.array(harmlessQuad, { minLength: 1, maxLength: 3 }).map((q): Operation => named('delete', q, (s) => s.delete(q))),
+      fc.record({ graph: harmlessGraph, subject: harmlessSubject }).map((p): Operation =>
+        named('deleteByPatternWithoutCount', p, (s) => s.deleteByPatternWithoutCount!(p))),
+      fc.record({ graph: harmlessGraph, predicate: harmlessPredicate }).map((p): Operation =>
+        named('deleteByPattern', p, (s) => s.deleteByPattern(p))),
+      harmlessGraph.map((g): Operation => named('dropGraph', g, (s) => s.dropGraph(g))),
       harmlessGraph.chain((g) => fc.array(fc.record({ subject: harmlessSubject, predicate: harmlessPredicate, object: fc.constant('"a"'), graph: fc.constant(g) }), { maxLength: 3 })
-        .map((q): Operation => (s) => s.replaceGraph!(g, q))),
+        .map((q): Operation => named('replaceGraph', [g, q], (s) => s.replaceGraph!(g, q)))),
       fc.tuple(harmlessGraph, harmlessSubject).map(([g, subject]): Operation =>
-        (s) => s.replaceSubject!(g, subject, [{ subject, predicate: NAME, object: '"a"', graph: g }])),
+        named('replaceSubject', [g, subject], (s) => s.replaceSubject!(g, subject, [{ subject, predicate: NAME, object: '"a"', graph: g }]))),
     );
     await fc.assert(
       fc.asyncProperty(fc.array(harmless, { minLength: 1, maxLength: 10 }), async (ops) => {
