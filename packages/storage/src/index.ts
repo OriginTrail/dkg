@@ -71,6 +71,10 @@ export {
   type Rfc64AuthorCommitSubjectReplacementV1,
 } from './rfc64-author-commit-cas.js';
 export {
+  describeRfc64AuthorCommitCasV1,
+  type Rfc64AuthorCommitMutationV1,
+} from './rfc64-author-commit-mutation.js';
+export {
   Rfc64SemanticAuthorCommitErrorV1,
   compileRfc64SemanticAuthorCommitV1,
   type Rfc64SemanticAuthorCommitErrorCodeV1,

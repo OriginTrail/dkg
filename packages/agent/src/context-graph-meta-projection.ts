@@ -13,6 +13,8 @@ import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-
 import { strip, stripLiteral } from './dkg-agent-utils.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { cloneMetaRecord } from './internal/context-graph-meta-record-copy.js';
+import { PeerGateRevision } from './internal/peer-gate-revision.js';
+import { RECIPIENT_KEY_ROUTE_PREDICATES, RecipientKeyRouteFence } from './internal/recipient-key-route-fence.js';
 
 export interface ContextGraphSubGraphMeta {
   uri: string;
@@ -103,23 +105,14 @@ const DIRECT_META_PREDICATES = new Set([
   `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`,
 ]);
 
-// Recipient resolution scans these facts across every named graph. They do
-// not populate ContextGraphMetaRecord, but a concurrent insert can still
-// change the exact (agent, key, peer) transport set while a private roster is
-// being rechecked. Share the authority revision with the metadata projection
-// so callers can fence both halves of that decision across awaited reads.
+// Recipient resolution scans these facts across every named graph. They do not
+// populate ContextGraphMetaRecord, but they can change a recipient set.
 const WORKSPACE_RECIPIENT_AUTHORITY_PREDICATES: ReadonlySet<string> = new Set([
   DKG_ONTOLOGY.DKG_ACCESS_POLICY,
   DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
   DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT,
   DKG_ONTOLOGY.DKG_REVOKED_AGENT,
-  DKG_ONTOLOGY.DKG_PUBLIC_ENCRYPTION_KEY,
-  DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_ALGORITHM,
-  DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_PROOF,
-  DKG_ONTOLOGY.DKG_PEER_ID,
-  DKG_ONTOLOGY.DKG_REVOKED_AT,
-  DKG_ONTOLOGY.DKG_REVOKED_BY,
-  DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_REVOCATION_PROOF,
+  ...RECIPIENT_KEY_ROUTE_PREDICATES,
 ]);
 
 const SUB_GRAPH_META_PREDICATES = new Set([
@@ -157,6 +150,8 @@ const CATALOG_META_PREDICATES = new Set<string>([
   DKG_ONTOLOGY.RDF_TYPE,
   DKG_ONTOLOGY.DCT_ACCESS_RIGHTS,
 ]);
+const PROJECTION_RECORD_PREDICATES: ReadonlySet<string> = new Set([
+  ...DIRECT_META_PREDICATES, ...SUB_GRAPH_META_PREDICATES, ...DELEGATION_META_PREDICATES, ...CATALOG_META_PREDICATES]);
 
 /**
  * A `ContextGraphMetaRecord` with no facts loaded yet.
@@ -193,8 +188,13 @@ export class ContextGraphMetaProjection {
   private readonly entries = new Map<string, ProjectionEntry>();
   private authorityFactsRevision = 0;
   private allFactsRevision = 0;
+  /** What a recipient resolution depends on: key and route facts, and each graph's peer allowlist (GH#3067). */
+  readonly recipientKeyRouteFence: RecipientKeyRouteFence;
+  readonly peerGateRevision = new PeerGateRevision(PROJECTION_RECORD_PREDICATES);
 
-  constructor(private readonly store: TripleStore) {}
+  constructor(private readonly store: TripleStore) {
+    this.recipientKeyRouteFence = new RecipientKeyRouteFence(store);
+  }
 
   /** Invalidate request-local absence proofs when projection sources change. */
   get readAuthorityFactsRevision(): number {
@@ -320,7 +320,8 @@ export class ContextGraphMetaProjection {
     return cloneMetaRecord(await raceAgainstAbort(inflight, options.signal));
   }
 
-  markDirty(contextGraphId: string): void {
+  markDirty(contextGraphId: string, changesPeerGate = true): void {
+    if (changesPeerGate) this.peerGateRevision.noteFacts(contextGraphId);
     this.authorityFactsRevision += 1;
     const existing = this.entries.get(contextGraphId);
     if (existing) {
@@ -344,16 +345,12 @@ export class ContextGraphMetaProjection {
   /**
    * #1863 — dirty the projection for the context graph a single-graph destructive
    * mutation (e.g. `replaceSubject`) targets, derived from the GRAPH itself, not
-   * from the mutation's inserted quads. A subject replace can DELETE
-   * projection-relevant metadata or replace it with non-relevant/empty rows, so
-   * keying off the inserted quads alone (`markDirtyFromQuads`) misses the delete.
-   * Keying off an own meta/catalog graph covers both insert and delete. Shared
-   * AGENTS/ONTOLOGY sources invalidate every record because the callback does
-   * not supply the affected subject. Other graphs do not dirty projection cache
-   * entries, but still advance the recipient-authority fence because key lookup
-   * scans all named graphs.
-   */
-  markDirtyForGraph(graphUri: string): void {
+   * from the inserted quads, so a delete is covered too. Shared AGENTS/ONTOLOGY
+   * sources invalidate every record. Other graphs dirty no cache entry but still
+   * advance the authority revision, because key lookup scans all named graphs.
+   * The recipient fences are told what the mutation names. */
+  markDirtyForGraph(graphUri: string, subject?: string, predicate?: string): void {
+    this.recipientKeyRouteFence.noteRemoval({ graph: graphUri, subject, predicate });
     const graph = stripTerm(graphUri);
     if (
       graph === contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS)
@@ -362,24 +359,29 @@ export class ContextGraphMetaProjection {
       // Shared metadata sources contain many owners. A subject replacement
       // supplies only its graph here, so every cached/request-local projection
       // must revalidate instead of retaining an absence proof for that owner.
-      this.markAllDirty();
+      this.dirtyAll();
       return;
     }
     const contextGraphId =
       contextGraphIdFromMetaGraphUri(graphUri) ?? contextGraphIdFromCatalogGraphUri(graphUri);
     if (contextGraphId) {
-      this.markDirty(contextGraphId);
+      this.markDirty(contextGraphId, false);
+      this.peerGateRevision.noteRemoval(contextGraphId, { subject, predicate });
       return;
     }
-    // Recipient-key resolution deliberately scans every named graph, including
-    // the durable join-key cache. An atomic subject replacement can delete an
-    // old key/peer route while inserting no authority predicate, so even an
-    // otherwise non-CG target graph must advance the request-local fence. It
-    // does not dirty projection cache entries.
+    // Key lookup scans every named graph, and an atomic replacement can delete
+    // an old key or route while inserting no authority predicate, so even a
+    // non-CG graph advances the request-local fence without dirtying a cache entry.
     this.authorityFactsRevision += 1;
   }
 
   markAllDirty(): void {
+    this.dirtyAll();
+    this.recipientKeyRouteFence.noteUnscopedWrite();
+  }
+
+  private dirtyAll(): void {
+    this.peerGateRevision.noteEverything();
     this.authorityFactsRevision += 1;
     this.allFactsRevision += 1;
     for (const entry of this.entries.values()) {
@@ -400,10 +402,9 @@ export class ContextGraphMetaProjection {
       touched.add(contextGraphId);
       this.markDirty(contextGraphId);
     }
-    // Inserts are the generic store mutation for which the decorator can
-    // classify exact quads. Generic delete/update and complete-graph replace
-    // paths already call markAllDirty(), so one conservative bump here closes
-    // the recipient-key/profile insertion race without dirtying every CG cache.
+    // Generic update and complete-graph replace paths call markAllDirty(); one
+    // conservative bump here closes the recipient-key insertion race.
+    this.recipientKeyRouteFence.noteQuads(quads);
     if (recipientAuthorityTouched) this.authorityFactsRevision += 1;
     return [...touched];
   }

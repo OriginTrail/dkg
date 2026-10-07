@@ -56,7 +56,7 @@ import {
   PROMOTE_UNIQUENESS_KEY,
   classifyJobPayload,
   comparePromoteJobs,
-  defaultBackoffMs,
+  createDefaultPromoteBackoff,
   expectBindings,
   isTerminalPromoteJobState,
   jobSubject,
@@ -117,7 +117,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     this.now = config.now ?? (() => Date.now());
     this.idGenerator = config.idGenerator ?? (() => crypto.randomUUID());
     this.claimTokenGenerator = config.claimTokenGenerator ?? (() => crypto.randomUUID());
-    this.backoff = config.backoff ?? defaultBackoffMs;
+    this.backoff = config.backoff ?? createDefaultPromoteBackoff(config.rand);
   }
 
   // ===========================================================================
