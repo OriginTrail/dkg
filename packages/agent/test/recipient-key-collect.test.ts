@@ -51,18 +51,53 @@ describe('recipient key collect generations', () => {
     expect(load).toHaveBeenCalledTimes(3);
   });
 
-  it('keeps a memo during unrelated queue mutations and does not cache failures', async () => {
+  it('keeps a memo during unrelated queue mutations', async () => {
     const { fence, collect, load } = await setup();
     await collect.resolve(AGENT);
     const settle = fence.begin({ removals: [{ subject: 'urn:job', graph: 'urn:queue' }] });
+    expect(fence.hasPendingWrites).toBe(false);
     await collect.resolve(AGENT);
     settle('changed');
+    await collect.resolve(AGENT);
     expect(load).toHaveBeenCalledOnce();
+  });
+
+  it('drops a failed collect, so the same generation loads again and memoizes the result', async () => {
+    const { fence, collect, load, advance } = await setup();
+    await collect.resolve(AGENT);
+    // The memo expires by age alone: the fence stays cacheable at one revision throughout,
+    // so nothing but the eviction of the failure can let the retry reach the loader.
+    advance(1001);
+    const revision = fence.revision;
     load.mockRejectedValueOnce(new Error('key lookup failed'));
-    fence.noteUnscopedWrite();
-    await expect(collect.resolve(AGENT)).rejects.toThrow('key lookup failed');
+    const failed = await Promise.allSettled([collect.resolve(AGENT), collect.resolve(AGENT)]);
+    expect(failed.map((result) => result.status)).toEqual(['rejected', 'rejected']);
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(fence.cacheable).toBe(true);
+    expect(fence.revision).toBe(revision);
+    expect((await collect.resolve(AGENT))[0].publicKeyBytes![0]).toBe(1);
+    expect(load).toHaveBeenCalledTimes(3);
     await collect.resolve(AGENT);
     expect(load).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not keep a collect that a key write overlapped, even one that changed nothing', async () => {
+    let release!: (value: WorkspaceAgentRecipient[]) => void;
+    const held = new Promise<WorkspaceAgentRecipient[]>((resolve) => { release = resolve; });
+    const load = vi.fn(async () => recipients()).mockImplementationOnce(() => held);
+    const { fence, collect } = await setup(load);
+    const first = collect.resolve(AGENT);
+    await vi.waitFor(() => expect(load).toHaveBeenCalledOnce());
+    const settle = fence.begin({ quads: [{ subject: `did:dkg:agent:${AGENT}`, predicate: DKG_ONTOLOGY.DKG_PEER_ID, object: '"other"', graph: 'urn:profile' }] });
+    release(recipients());
+    await first;
+    const revision = fence.revision;
+    settle('unchanged');
+    // Cacheable again at the same revision: only a dropped collect lets this one load.
+    expect(fence.cacheable).toBe(true);
+    expect(fence.revision).toBe(revision);
+    await collect.resolve(AGENT);
+    expect(load).toHaveBeenCalledTimes(2);
   });
 
   it('never memoizes after an indeterminate key write that can commit later', async () => {

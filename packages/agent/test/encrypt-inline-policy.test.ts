@@ -19,6 +19,7 @@ import {
   contextGraphMetaUri,
   createGraphKnowledgeAssetScope,
   decodeStorageACK,
+  decryptChunked,
   decryptV10PublishPayload,
   encodePublishIntent,
   isStorageACKDecline,
@@ -60,14 +61,26 @@ function bindInlineEncryptionFactory(agent: any) {
   return agent;
 }
 
-async function verifyEntryPointEncryption(agent: any, invoke: () => Promise<unknown>) {
+type ContextResolverArguments = readonly [
+  contextGraphId: string, subGraphName: string | undefined, authorAgentAddress: string | undefined,
+  explicitPolicyTarget: string | undefined, options: { aeadBindingContextGraphId?: string } | undefined,
+];
+
+/**
+ * Runs an entry point through the production `_resolveInlineEncryption`. The context
+ * resolver must receive exactly `expected`, and both hooks must decrypt under
+ * `expectedBinding`: neither value is read back from the call under test, so a
+ * resolver that drops an argument fails here. Each attempt resolves one context.
+ */
+async function verifyEntryPointEncryption(
+  agent: any, invoke: () => Promise<unknown>, expected: ContextResolverArguments, expectedBinding: string,
+) {
   const wallet = ethers.Wallet.createRandom();
   const chainKey = new Uint8Array(32).fill(9);
-  let binding = '';
-  agent._resolveCuratedChainKeyContext = vi.fn(async (cg: string, _sg: unknown, _author: unknown, target: string | undefined, _log: string, options: any) => {
-    binding = options?.aeadBindingContextGraphId ?? target ?? cg;
-    return { chainKey, aeadCgId: binding, senderAddress: wallet.address };
-  });
+  // The binding is derived from the forwarded arguments the way production derives it.
+  agent._resolveCuratedChainKeyContext = vi.fn(async (cg: string, _sg: unknown, _author: unknown, target: string | undefined, _log: string, options: any) => (
+    { chainKey, aeadCgId: options?.aeadBindingContextGraphId ?? target ?? cg, senderAddress: wallet.address }
+  ));
   agent._resolveInlineEncryption = DKGAgent.prototype._resolveInlineEncryption;
   agent.gossipWireIdFor = (id: string) => id;
   agent.resolveWorkspaceGossipSigningAgent = async () => ({ privateKey: wallet.privateKey, agentAddress: wallet.address });
@@ -75,14 +88,20 @@ async function verifyEntryPointEncryption(agent: any, invoke: () => Promise<unkn
   agent.gossip = { publish: vi.fn(async () => undefined) };
   agent.store ??= { insert: vi.fn(async () => undefined) };
   const plaintext = new TextEncoder().encode('<urn:s> <urn:p> "o" .');
+  const [contextGraphId, subGraphName, authorAgentAddress, explicitPolicyTarget, options] = expected;
   for (let attempt = 1; attempt <= 2; attempt++) {
     await invoke();
     expect(agent._resolveCuratedChainKeyContext).toHaveBeenCalledTimes(attempt);
+    expect(agent._resolveCuratedChainKeyContext).toHaveBeenLastCalledWith(
+      contextGraphId, subGraphName, authorAgentAddress, explicitPolicyTarget, 'LU-5', options,
+    );
     const hooks = Object.values(agent.publisher).flatMap((fn: any) => fn.calls?.at(-1) ?? [])
       .find((value: any) => typeof value?.encryptInlinePayload === 'function' && typeof value?.encryptInlineChunked === 'function') as any;
     expect(hooks).toBeDefined();
-    expect(decryptV10PublishPayload({ chainKey, contextGraphId: binding, encryptedPayload: await hooks.encryptInlinePayload(plaintext) })).toEqual(plaintext);
-    expect(await hooks.encryptInlineChunked({ plaintextNquads: plaintext, batchId: new Uint8Array(32), publishOperationId: `entry-${attempt}` })).toMatchObject({ ciphertextChunkCount: 1 });
+    expect(decryptV10PublishPayload({ chainKey, contextGraphId: expectedBinding, encryptedPayload: await hooks.encryptInlinePayload(plaintext) })).toEqual(plaintext);
+    const chunked = await hooks.encryptInlineChunked({ plaintextNquads: plaintext, batchId: new Uint8Array(32), publishOperationId: `entry-${attempt}` });
+    expect(chunked).toMatchObject({ ciphertextChunkCount: 1 });
+    expect(decryptChunked({ chainKey, contextGraphId: expectedBinding, ciphertextChunks: chunked.ciphertextChunks }).plaintextChunks).toEqual([plaintext]);
     expect(agent._resolveCuratedChainKeyContext).toHaveBeenCalledTimes(attempt);
   }
 }
@@ -543,7 +562,7 @@ describe('DKGAgent._publish inline encryption routing', () => {
       encryptInlinePayload,
       encryptInlineChunked,
     })]);
-    await verifyEntryPointEncryption(agentLike, invoke);
+    await verifyEntryPointEncryption(agentLike, invoke, ['local-cg', 'sg-a', undefined, undefined, { aeadBindingContextGraphId: '42' }], '42');
   });
 
   it('routes direct encrypted private publishes to the publisher without an implicit catalog floor', async () => {
@@ -778,7 +797,7 @@ describe('DKGAgent.update inline encryption routing', () => {
         encryptInlineChunked: updateEncryptInlineChunked,
       }),
     ]);
-    await verifyEntryPointEncryption(agentLike, invoke);
+    await verifyEntryPointEncryption(agentLike, invoke, ['private-cg', undefined, undefined, undefined, { aeadBindingContextGraphId: '42' }], '42');
   });
 });
 
@@ -840,7 +859,7 @@ describe('DKGAgent.publishFromSharedMemory inline encryption routing', () => {
         onChainContextGraphId: '1',
       }),
     ]);
-    await verifyEntryPointEncryption(agentLike, invoke);
+    await verifyEntryPointEncryption(agentLike, invoke, ['sports', undefined, undefined, undefined, { aeadBindingContextGraphId: '1' }], '1');
   });
 
   it('passes explicit sub-CG remap id as policy target and binding id', async () => {
@@ -1280,7 +1299,7 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
     )).toHaveLength(1);
     expect(publisherPublish.calls.at(-1)?.[0].encryptInlinePayload).not.toBe(failClosedInline);
     expect(publisherPublish.calls.at(-1)?.[0].encryptInlineChunked).not.toBe(failClosedChunked);
-    await verifyEntryPointEncryption(agentLike, invoke);
+    await verifyEntryPointEncryption(agentLike, invoke, ['private-cg', undefined, undefined, undefined, { aeadBindingContextGraphId: '7' }], '7');
   });
 
   it('does not trust or append a catalog floor for a private local-only queued publish', async () => {
@@ -1538,18 +1557,40 @@ describe('DKGAgent._resolveEncryptInlineChunked nonce domain', () => {
 
 
 describe('curated inline context per publish attempt', () => {
-  it('shares one context between real emitters and re-resolves on the next attempt', async () => {
-    const agentLike = {
-      gossipWireIdFor: (id: string) => id,
-      resolveWorkspaceGossipSigningAgent: async () => ({ privateKey: '0x' + '11'.repeat(32), agentAddress: '0x1111111111111111111111111111111111111111' }),
-      _resolveCuratedChainKeyContext: vi.fn(async () => ({ chainKey: new Uint8Array(32).fill(9), aeadCgId: '42', senderAddress: '0x1111111111111111111111111111111111111111' })),
+  const chainKey = new Uint8Array(32).fill(9);
+  function emitterHost() {
+    const wallet = ethers.Wallet.createRandom();
+    return {
+      log: { info: vi.fn(), warn: vi.fn() },
+      store: { insert: vi.fn(async () => undefined) }, gossip: { publish: vi.fn(async () => undefined) },
+      canonicalChunkStoreCgIdOrNull: () => 'canonical-cg', gossipWireIdFor: (id: string) => id,
+      resolveWorkspaceGossipSigningAgent: vi.fn(async () => ({ privateKey: wallet.privateKey, agentAddress: wallet.address })),
+      _resolveCuratedChainKeyContext: vi.fn(async (..._args: unknown[]) => ({ chainKey, aeadCgId: '42', senderAddress: wallet.address })),
     };
-    const first = await DKGAgent.prototype._resolveInlineEncryption.call(agentLike as never, 'sports');
-    expect(first.encryptInlinePayload).toBeTypeOf('function');
-    expect(first.encryptInlineChunked).toBeTypeOf('function');
-    expect(agentLike._resolveCuratedChainKeyContext).toHaveBeenCalledTimes(1);
-    await DKGAgent.prototype._resolveInlineEncryption.call(agentLike as never, 'sports');
-    expect(agentLike._resolveCuratedChainKeyContext).toHaveBeenCalledTimes(2);
+  }
+  const chunkInput = () => ({ plaintextNquads: new TextEncoder().encode('<urn:s> <urn:p> "o" .'), batchId: new Uint8Array(32), publishOperationId: 'validated-op' });
+
+  it('forwards every argument to one resolution, binds both hooks to its context, and re-resolves on the next attempt', async () => {
+    const host = emitterHost();
+    const author = '0x2222222222222222222222222222222222222222';
+    const options = { aeadBindingContextGraphId: '42' };
+    const first = await DKGAgent.prototype._resolveInlineEncryption.call(host as never, 'sports', 'league', author, '7', options);
+    expect(host._resolveCuratedChainKeyContext.mock.calls).toEqual([['sports', 'league', author, '7', 'LU-5', options]]);
+
+    // Both hooks encrypt under the id of that one context, and under no other id of the call.
+    const { plaintextNquads } = chunkInput();
+    const payload = await first.encryptInlinePayload!(plaintextNquads);
+    expect(decryptV10PublishPayload({ chainKey, contextGraphId: '42', encryptedPayload: payload })).toEqual(plaintextNquads);
+    const { ciphertextChunks } = await first.encryptInlineChunked!(chunkInput());
+    expect(decryptChunked({ chainKey, contextGraphId: '42', ciphertextChunks }).plaintextChunks).toEqual([plaintextNquads]);
+    for (const otherId of ['sports', '7']) {
+      expect(() => decryptV10PublishPayload({ chainKey, contextGraphId: otherId, encryptedPayload: payload })).toThrow();
+      expect(() => decryptChunked({ chainKey, contextGraphId: otherId, ciphertextChunks })).toThrow();
+    }
+    expect(host._resolveCuratedChainKeyContext).toHaveBeenCalledTimes(1);
+
+    await DKGAgent.prototype._resolveInlineEncryption.call(host as never, 'sports');
+    expect(host._resolveCuratedChainKeyContext).toHaveBeenCalledTimes(2);
   });
 
   it('refuses to construct emitters when authority resolution fails', async () => {
@@ -1560,18 +1601,6 @@ describe('curated inline context per publish attempt', () => {
     await expect(pending).rejects.toBe(error);
     expect(agentLike._resolveCuratedChainKeyContext).toHaveBeenCalledTimes(1);
   });
-
-  function emitterHost() {
-    const wallet = ethers.Wallet.createRandom();
-    return {
-      log: { info: vi.fn(), warn: vi.fn() },
-      store: { insert: vi.fn(async () => undefined) }, gossip: { publish: vi.fn(async () => undefined) },
-      canonicalChunkStoreCgIdOrNull: () => 'canonical-cg', gossipWireIdFor: (id: string) => id,
-      resolveWorkspaceGossipSigningAgent: vi.fn(async () => ({ privateKey: wallet.privateKey, agentAddress: wallet.address })),
-      _resolveCuratedChainKeyContext: vi.fn(async () => ({ chainKey: new Uint8Array(32).fill(9), aeadCgId: '42', senderAddress: wallet.address })),
-    };
-  }
-  const chunkInput = () => ({ plaintextNquads: new TextEncoder().encode('<urn:s> <urn:p> "o" .'), batchId: new Uint8Array(32), publishOperationId: 'validated-op' });
 
   it('leaves both callbacks undefined for a public graph', async () => {
     const host = { _resolveCuratedChainKeyContext: vi.fn(async () => undefined) };
@@ -1611,13 +1640,20 @@ describe('curated inline context per publish attempt', () => {
     expect(host.log.warn).toHaveBeenCalledOnce();
   });
 
-  it.each(['distribution', 'pending-drain'])('refuses an epoch when a member is revoked during %s', async (phase) => {
+  it.each([
+    ['distribution', 'a member is removed'], ['pending-drain', 'a member is removed'],
+    ['distribution', 'a route is replaced'], ['pending-drain', 'a route is replaced'],
+  ] as const)('refuses the epoch with a retryable authority failure when, during %s, %s', async (phase, change) => {
     const sender = ethers.Wallet.createRandom();
     const remote = ethers.Wallet.createRandom();
     const senderRecipient = { agentAddress: sender.address, recipientKeyId: 'sender-key', peerId: 'sender-peer' };
     const remoteRecipient = { agentAddress: remote.address, recipientKeyId: 'remote-key', peerId: 'remote-peer' };
+    // A removal changes the membership. A replaced peer keeps every agent and key, so only the route check can see it.
+    const afterChange = change === 'a member is removed'
+      ? [senderRecipient]
+      : [senderRecipient, { ...remoteRecipient, peerId: 'replacement-peer' }];
     let recipients = [senderRecipient, remoteRecipient];
-    let revoke = phase === 'distribution';
+    let changeDuringSetup = phase === 'distribution';
     const agentLike = {
       log: { info: vi.fn(), warn: vi.fn() }, defaultAgentAddress: sender.address,
       resolveOnChainAccessPolicyState: async () => 1,
@@ -1628,15 +1664,22 @@ describe('curated inline context per publish attempt', () => {
       saveSwmSenderKeyState: async () => undefined,
       createAndDistributeSwmSenderKeyEpoch: async (input: any) => {
         const recipientRouteHash = computeSwmSenderKeyRecipientRouteHash(input);
-        if (revoke) recipients = [senderRecipient];
+        if (changeDuringSetup) recipients = afterChange;
         return { chainKey: new Uint8Array(32).fill(9), membershipHash: input.membershipHash, recipientRouteHash, senderAgentAddress: sender.address, epochId: 'old-epoch' };
       },
-      drainPendingSenderKeyForRecipients: async () => { if (revoke) recipients = [senderRecipient]; },
+      drainPendingSenderKeyForRecipients: async () => { if (changeDuringSetup) recipients = afterChange; },
     };
     const resolve = () => DKGAgent.prototype._resolveCuratedChainKeyContext.call(agentLike as never, 'private-cg', undefined, sender.address, undefined, 'regression');
-    if (phase === 'pending-drain') { await resolve(); revoke = true; }
+    if (phase === 'pending-drain') { await resolve(); changeDuringSetup = true; }
     const encrypt = vi.fn();
-    await expect(resolve().then(encrypt)).rejects.toThrow(/authority changed during sender-key setup/);
+    // The typed, retryable authority failure: a queued publish is attempted again instead of ending.
+    await expect(resolve().then(encrypt)).rejects.toMatchObject({
+      code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+      reason: 'chain-participant-authority-unavailable',
+      message: expect.stringMatching(/authority changed during sender-key setup/),
+    });
     expect(encrypt).not.toHaveBeenCalled();
+    // Every read of the authority, the one after setup included, went through the resolver.
+    expect(agentLike.resolveWorkspaceAgentRecipientsForCurrentAuthority).toHaveBeenCalledTimes(phase === 'distribution' ? 2 : 4);
   });
 });

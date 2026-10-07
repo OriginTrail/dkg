@@ -1,7 +1,7 @@
-import { resolveWorkspaceAgentRecipientKeys } from '@origintrail-official/dkg-publisher';
 // SPDX-License-Identifier: Apache-2.0
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { resolveWorkspaceAgentRecipientKeys } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import {
   DKG_ONTOLOGY,

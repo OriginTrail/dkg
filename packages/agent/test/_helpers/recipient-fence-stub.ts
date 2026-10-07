@@ -1,8 +1,8 @@
-import type { TripleStore } from '@origintrail-official/dkg-storage';
-import { resolveWorkspaceAgentRecipientKeys } from '@origintrail-official/dkg-publisher';
 // SPDX-License-Identifier: Apache-2.0
 
 import { vi } from 'vitest';
+import { resolveWorkspaceAgentRecipientKeys } from '@origintrail-official/dkg-publisher';
+import type { TripleStore } from '@origintrail-official/dkg-storage';
 
 /**
  * The recipient key/route fence of a hand-built agent host. Without it the
