@@ -73,6 +73,23 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     detach();
   });
 
+  it('discovers externally persisted work when the reader idle hint expires', async () => {
+    const reader = createQueue();
+    const wake = vi.fn();
+    const detach = reader.workScheduling!.attachScheduler({ onWorkAvailable: wake });
+    try {
+      expect(await reader.claimNext('reader')).toBeNull();
+      const writer = createQueue();
+      const id = await writer.enqueue(makeRequest());
+      expect(wake).not.toHaveBeenCalled();
+      expect(await reader.claimNext('reader')).toBeNull();
+      now += 999;
+      expect(await reader.claimNext('reader')).toBeNull();
+      now += 1;
+      expect((await reader.claimNext('reader'))?.jobId).toBe(id);
+    } finally { detach(); await store.close(); }
+  });
+
   it('never skips past the known retry deadline', async () => {
     const queue = createQueue({ backoff: () => 400 });
     queue.workScheduling!.attachScheduler({ onWorkAvailable() {} });
