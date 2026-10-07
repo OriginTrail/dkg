@@ -289,6 +289,29 @@ describe('RFC-64 exact-set successor producer: turns of the main thread', () => 
       expect(events).not.toContain('stage-bundle');
     });
 
+    it.each([
+      ['the first', 0],
+      ['the second', 1],
+      ['the third', 2],
+    ])('asks the wallet for nothing more when cancelled in the turn before %s signature', async (_which, signed) => {
+      const { input, events, signDigest } = await threeRowProduction();
+      const controller = new AbortController();
+      const reason = new Error('superseded');
+      // Two passes over the rows come first, then one turn per signature.
+      timeSlice.onTurn = (turn) => {
+        if (turn === 2 * ROWS + 1 + signed) controller.abort(reason);
+      };
+
+      // The caller's own reason, not a failure of the supplied history.
+      await expect(harness(events).produceAndStageExactSet({
+        ...input,
+        signal: controller.signal,
+      })).rejects.toBe(reason);
+      expect(signDigest).toHaveBeenCalledTimes(signed);
+      expect(events).not.toContain('stage-bundle');
+      expect(events).not.toContain('stage-objects');
+    });
+
     it('stops after the signatures, before anything is staged', async () => {
       const { input, events, signDigest } = await threeRowProduction();
       const controller = new AbortController();
