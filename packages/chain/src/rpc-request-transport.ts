@@ -31,9 +31,11 @@ import { recordRpcAdmissionWait, recordRpcEndpointLatency } from './rpc-request-
 export type RpcRequestClass = 'foreground' | 'background';
 
 /**
- * Internal admission priority for a foreground read that must complete before
- * its fail-closed security deadline. It changes queue order only: the request
- * still consumes the operator's ordinary foreground rate budget.
+ * Internal admission priority for a read that must complete before its
+ * fail-closed security deadline. It changes queue order inside the request's
+ * own class, and in the background class the request is not held by the
+ * start-up delay. The request still consumes that class's ordinary rate
+ * budget.
  */
 export type RpcRequestAdmissionPriority = 'authority';
 
