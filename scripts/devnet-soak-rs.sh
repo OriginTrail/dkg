@@ -597,7 +597,7 @@ log "Launching chain event listener"
 # not from cwd. We hardlink/copy into the package dir, then run from there.
 EVENT_SCRIPT_RUN="$REPO_ROOT/packages/evm-module/.soak-event-listener-r${ROUND}.js"
 cp "$OUT_DIR/event-listener.js" "$EVENT_SCRIPT_RUN"
-( cd "$REPO_ROOT/packages/evm-module" && node "$EVENT_SCRIPT_RUN" ) \
+( cd "$REPO_ROOT/packages/evm-module" && exec node "$EVENT_SCRIPT_RUN" ) \
   > "$OUT_DIR/event-listener.log" 2>&1 &
 echo $! > "$EVENT_PIDFILE"
 
@@ -643,7 +643,11 @@ while true; do
     log "  stopped node ${RESTART_NODE} via devnet.sh stop-node (see $restart_log)"
     sleep 120
     log "  restarting node ${RESTART_NODE} via devnet.sh restart-node..."
+    # A Core that rejoins a running network takes longer to answer than one
+    # started with the devnet: devnet.sh gives up after 30 s by default and
+    # aborts, before the readiness check below gets to look.
     DEVNET_DIR="$DEVNET_DIR" HARDHAT_PORT="$HARDHAT_PORT" API_PORT_BASE="$API_PORT_BASE" \
+      DEVNET_NODE_READY_TIMEOUT="${DEVNET_NODE_READY_TIMEOUT:-120}" \
       "$REPO_ROOT/scripts/devnet.sh" restart-node "$RESTART_NODE" >> "$restart_log" 2>&1
     log "  restarted node ${RESTART_NODE}; verifying API readiness..."
     api_port=$((API_PORT_BASE + RESTART_NODE - 1))

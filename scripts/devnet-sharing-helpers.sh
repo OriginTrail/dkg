@@ -9,6 +9,12 @@ sharing_api_observe() {
   devnet_query_api "http://127.0.0.1:$port" "$AUTH" "$@"
 }
 
+# For a loop that waits for replication to a member: see devnet_query_api_settling.
+sharing_api_observe_settling() {
+  local port="$1"; shift
+  devnet_query_api_settling "http://127.0.0.1:$port" "$AUTH" "$@"
+}
+
 sharing_storage_observe() {
   devnet_storage_query "$DEVNET_DIR" "$@"
 }

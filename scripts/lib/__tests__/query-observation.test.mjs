@@ -160,6 +160,57 @@ test('direct API metrics preserve scope and large integers in one observation', 
   assert.deepEqual(request, { contextGraphId: 'fixture', view: 'shared-working-memory', sparql: count });
 });
 
+const settling = JSON.stringify({ error: 'temporarily unavailable', code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE', retryable: true });
+const settlingCall = (mode = 'rows', binding = 's') => `source "$HELPER"; devnet_query_api_settling "$URL" fixture "$QUERY" ${binding} ${mode} '{"contextGraphId":"fixture"}'`;
+
+test('a settling poll reads the documented retryable 503 as nothing yet', async t => {
+  let request;
+  const url = await serve(t, (req, res) => {
+    let input = ''; req.on('data', c => input += c);
+    req.on('end', () => { request = JSON.parse(input); res.writeHead(503, { 'Retry-After': '3' }); res.end(settling); });
+  });
+  const result = await runShell(settlingCall(), { HELPER: helper, URL: url, QUERY: select });
+  assert.equal(result.status, 0, result.stderr); assert.equal(result.stdout, '0\n');
+  assert.deepEqual(request, { contextGraphId: 'fixture', sparql: select });
+});
+
+for (const [name, http, response] of [
+  ['a 503 with another code', 503, JSON.stringify({ error: 'busy', code: 'STORE_SCHEDULER_BUSY', retryable: true })],
+  ['the same code without the retryable mark', 503, JSON.stringify({ error: 'x', code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE' })],
+  ['the same body under another status', 500, settling],
+  ['a 503 that is not JSON', 503, 'Service Unavailable'],
+]) test(`a settling poll still rejects ${name}`, async t => {
+  const url = await serve(t, (req, res) => { req.resume(); res.writeHead(http); res.end(response); });
+  const result = await runShell(settlingCall(), { HELPER: helper, URL: url, QUERY: select });
+  assert.equal(result.status, 2); assert.equal(result.stdout, ''); assert.match(result.stderr, /HTTP_ERROR/);
+});
+
+test('a settling poll answers like the plain observation once the read is served', async t => {
+  const url = await serve(t, (req, res) => { req.resume(); res.end(fixture('api-large')); });
+  const result = await runShell(settlingCall('count', 'cnt'), { HELPER: helper, URL: url, QUERY: count });
+  assert.equal(result.status, 0, result.stderr); assert.equal(result.stdout.trim(), '9007199254740993123456789');
+});
+
+test('a settling poll refuses a mode that has no nothing-yet value, before any request', async t => {
+  let requests = 0;
+  const url = await serve(t, (req, res) => { requests += 1; req.resume(); res.end(empty); });
+  const result = await runShell(settlingCall('bindings'), { HELPER: helper, URL: url, QUERY: select });
+  assert.equal(result.status, 2); assert.equal(result.stdout, ''); assert.equal(requests, 0);
+});
+
+test('the sharing wait loops use the settling poll and single observations stay strict', async t => {
+  const url = await serve(t, (req, res) => { req.resume(); res.writeHead(503); res.end(settling); });
+  const port = new URL(url).port;
+  const polled = await runShell(`${sharingSetup} AUTH=fixture
+value=$(sharing_api_observe_settling "$PORT" "$QUERY" s rows '{"contextGraphId":"fixture"}') || devnet_observation_abort
+echo "value=$value"`, { SHARING: sharing, PORT: port, QUERY: select });
+  assert.equal(polled.status, 0, polled.stderr); assert.match(polled.stdout, /value=0/);
+  const single = await runShell(`${sharingSetup} AUTH=fixture
+value=$(sharing_api_observe "$PORT" "$QUERY" s rows '{"contextGraphId":"fixture"}') || devnet_observation_abort
+echo "value=$value"`, { SHARING: sharing, PORT: port, QUERY: select });
+  assert.equal(single.status, 1); assert.doesNotMatch(single.stdout, /value=/);
+});
+
 test('real wrapper transport failure has empty stdout and exit 2 even in a pipeline', async () => {
   const result = await runShell('source "$HELPER"; if value=$(devnet_capture http://127.0.0.1:1 | devnet_observe count cnt api); then echo FALSE_PASS; else exit $?; fi', { HELPER: helper });
   assert.equal(result.status, 2); assert.equal(result.stdout, ''); assert.match(result.stderr, /TRANSPORT_FAILURE/);

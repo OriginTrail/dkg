@@ -28,10 +28,9 @@ devnet_count_at_least() {
   node -e 'const [a,b]=process.argv.slice(1); if (!/^[0-9]+$/.test(a) || !/^[0-9]+$/.test(b)) process.exit(2); process.exit(BigInt(a)>=BigInt(b)?0:1)' "$1" "$2"
 }
 
-# Explicit API observation: base URL, token, SPARQL, binding, mode, scope JSON.
-# Metrics are validated once; bindings mode emits an array for cell inspection.
-devnet_query_api() {
-  local api="$1" token="$2" sparql="$3" binding="$4" mode="$5" scope="${6:-}" body response
+# One API query as a capture frame: base URL, token, SPARQL, scope JSON.
+devnet_query_api_frame() {
+  local api="$1" token="$2" sparql="$3" scope="${4:-}" body
   [ -n "$scope" ] || scope='{}'
   body=$(node -e '
     try {
@@ -42,8 +41,41 @@ devnet_query_api() {
       console.error("INCONCLUSIVE: invalid query scope"); process.exitCode = 2;
     }
   ' "$sparql" "$scope") || return 2
-  response=$(devnet_capture -X POST -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
-    --data "$body" "${api%/}/api/query") || return 2
+  devnet_capture -X POST -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+    --data "$body" "${api%/}/api/query"
+}
+
+# Explicit API observation: base URL, token, SPARQL, binding, mode, scope JSON.
+# Metrics are validated once; bindings mode emits an array for cell inspection.
+devnet_query_api() {
+  local api="$1" token="$2" sparql="$3" binding="$4" mode="$5" scope="${6:-}" response
+  response=$(devnet_query_api_frame "$api" "$token" "$sparql" "$scope") || return 2
+  printf '%s' "$response" | devnet_observe "$mode" "$binding" api "${@:7}"
+}
+
+# Poll form of devnet_query_api, for a step that waits for replication to a
+# member. While the member's read authority is still settling, the query route
+# answers a retryable 503 with code CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE,
+# and the documented client behaviour is to ask again. Inside a poll that one
+# answer is "nothing yet": this prints 0 and succeeds, and the poll's own
+# deadline still fails the step if the data never arrives. Every other answer
+# is devnet_query_api's, so a 503 with another code, or one that is not marked
+# retryable, stays invalid evidence. Only the numeric modes have a "nothing yet".
+devnet_query_api_settling() {
+  local api="$1" token="$2" sparql="$3" binding="$4" mode="$5" scope="${6:-}" response
+  case "$mode" in rows|count) ;; *) echo "INCONCLUSIVE: settling poll needs rows or count mode" >&2; return 2 ;; esac
+  response=$(devnet_query_api_frame "$api" "$token" "$sparql" "$scope") || return 2
+  if printf '%s' "$response" | node -e '
+    let frame = ""; process.stdin.on("data", (c) => { frame += c; }).on("end", () => {
+      const [exit, http, ...rest] = frame.split("\n");
+      let answer; try { answer = JSON.parse(rest.join("\n")); } catch { answer = null; }
+      process.exitCode = exit === "0" && http === "503" && answer !== null && typeof answer === "object"
+        && answer.code === "CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE" && answer.retryable === true ? 0 : 1;
+    });
+  '; then
+    printf '0\n'
+    return 0
+  fi
   printf '%s' "$response" | devnet_observe "$mode" "$binding" api "${@:7}"
 }
 
