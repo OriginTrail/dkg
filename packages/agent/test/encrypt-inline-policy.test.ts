@@ -35,6 +35,7 @@ import {
   type KnowledgeAssetVmPublishRequest,
 } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
+import { createCuratedKeyContextAttempt } from '../src/internal/curated-key-context-attempt.js';
 
 // Hand-rolled call recorder (replaces vitest spy factories): wraps an
 // implementation, records every argument tuple on `.calls`, captures a
@@ -486,14 +487,14 @@ describe('DKGAgent._publish inline encryption routing', () => {
       },
     );
 
-    expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)).toEqual([
+    expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)?.slice(0, 5)).toEqual([
       'local-cg',
       'sg-a',
       undefined,
       undefined,
       { aeadBindingContextGraphId: '42' },
     ]);
-    expect(agentLike._resolveEncryptInlineChunked.calls.at(-1)).toEqual([
+    expect(agentLike._resolveEncryptInlineChunked.calls.at(-1)?.slice(0, 5)).toEqual([
       'local-cg',
       'sg-a',
       undefined,
@@ -550,7 +551,7 @@ describe('DKGAgent._publish inline encryption routing', () => {
       },
     )).rejects.toBe(publisherError);
 
-    expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)).toEqual([
+    expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)?.slice(0, 5)).toEqual([
       'private-cg',
       'sg-private',
       undefined,
@@ -605,14 +606,14 @@ describe('DKGAgent._publish inline encryption routing', () => {
       },
     );
 
-    expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)).toEqual([
+    expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)?.slice(0, 5)).toEqual([
       'local-cg',
       undefined,
       undefined,
       '99',
       { aeadBindingContextGraphId: '99' },
     ]);
-    expect(agentLike._resolveEncryptInlineChunked.calls.at(-1)).toEqual([
+    expect(agentLike._resolveEncryptInlineChunked.calls.at(-1)?.slice(0, 5)).toEqual([
       'local-cg',
       undefined,
       undefined,
@@ -717,14 +718,14 @@ describe('DKGAgent.update inline encryption routing', () => {
       },
     );
 
-    expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)).toEqual([
+    expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)?.slice(0, 5)).toEqual([
       'private-cg',
       undefined,
       undefined,
       undefined,
       { aeadBindingContextGraphId: '42' },
     ]);
-    expect(agentLike._resolveEncryptInlineChunked.calls.at(-1)).toEqual([
+    expect(agentLike._resolveEncryptInlineChunked.calls.at(-1)?.slice(0, 5)).toEqual([
       'private-cg',
       undefined,
       undefined,
@@ -777,14 +778,14 @@ describe('DKGAgent.publishFromSharedMemory inline encryption routing', () => {
       { contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION },
     );
 
-    expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)).toEqual([
+    expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)?.slice(0, 5)).toEqual([
       'sports',
       undefined,
       undefined,
       undefined,
       { aeadBindingContextGraphId: '1' },
     ]);
-    expect(agentLike._resolveEncryptInlineChunked.calls.at(-1)).toEqual([
+    expect(agentLike._resolveEncryptInlineChunked.calls.at(-1)?.slice(0, 5)).toEqual([
       'sports',
       undefined,
       undefined,
@@ -812,14 +813,14 @@ describe('DKGAgent.publishFromSharedMemory inline encryption routing', () => {
     );
 
     expect(agentLike.getContextGraphOnChainId.calls).toEqual([]);
-    expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)).toEqual([
+    expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)?.slice(0, 5)).toEqual([
       'sports',
       undefined,
       undefined,
       '1',
       { aeadBindingContextGraphId: '1' },
     ]);
-    expect(agentLike._resolveEncryptInlineChunked.calls.at(-1)).toEqual([
+    expect(agentLike._resolveEncryptInlineChunked.calls.at(-1)?.slice(0, 5)).toEqual([
       'sports',
       undefined,
       undefined,
@@ -1209,14 +1210,14 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
       encryptInlineChunked: failClosedChunked,
     });
 
-    expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)).toEqual([
+    expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)?.slice(0, 5)).toEqual([
       'private-cg',
       undefined,
       undefined,
       undefined,
       { aeadBindingContextGraphId: '7' },
     ]);
-    expect(agentLike._resolveEncryptInlineChunked.calls.at(-1)).toEqual([
+    expect(agentLike._resolveEncryptInlineChunked.calls.at(-1)?.slice(0, 5)).toEqual([
       'private-cg',
       undefined,
       undefined,
@@ -1359,14 +1360,14 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
     expect(agentLike.getContextGraphOnChainId.calls).toEqual([
       ['memory-layers-e2e'],
     ]);
-    expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)).toEqual([
+    expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)?.slice(0, 5)).toEqual([
       'memory-layers-e2e',
       undefined,
       undefined,
       undefined,
       { aeadBindingContextGraphId: '42' },
     ]);
-    expect(agentLike._resolveEncryptInlineChunked.calls.at(-1)).toEqual([
+    expect(agentLike._resolveEncryptInlineChunked.calls.at(-1)?.slice(0, 5)).toEqual([
       'memory-layers-e2e',
       undefined,
       undefined,
@@ -1490,4 +1491,43 @@ describe('DKGAgent._resolveEncryptInlineChunked nonce domain', () => {
       .not.toBe(Buffer.from(second.ciphertextChunksRoot).toString('hex'));
   });
 
+});
+
+
+describe('curated inline context per publish attempt', () => {
+  it('shares one context between real emitters and re-resolves on the next attempt', async () => {
+    const agentLike = {
+      gossipWireIdFor: (id: string) => id,
+      resolveWorkspaceGossipSigningAgent: async () => ({
+        privateKey: '0x' + '11'.repeat(32),
+        agentAddress: '0x1111111111111111111111111111111111111111',
+      }),
+      _resolveCuratedChainKeyContext: vi.fn(async () => ({
+        chainKey: new Uint8Array(32).fill(9),
+        aeadCgId: '42',
+        senderAddress: '0x1111111111111111111111111111111111111111',
+      })),
+    };
+    const resolveAttempt = createCuratedKeyContextAttempt(agentLike as never, 'sports');
+    expect(agentLike._resolveCuratedChainKeyContext).not.toHaveBeenCalled();
+    const [payload, chunked] = await Promise.all([
+      DKGAgent.prototype._resolveEncryptInlinePayload.call(agentLike as never, 'sports', undefined, undefined, undefined, undefined, resolveAttempt),
+      DKGAgent.prototype._resolveEncryptInlineChunked.call(agentLike as never, 'sports', undefined, undefined, undefined, undefined, resolveAttempt),
+    ]);
+    expect(payload).toBeTypeOf('function');
+    expect(chunked).toBeTypeOf('function');
+    expect(agentLike._resolveCuratedChainKeyContext).toHaveBeenCalledTimes(1);
+    expect(await resolveAttempt()).toBe(await resolveAttempt());
+    await createCuratedKeyContextAttempt(agentLike as never, 'sports')();
+    expect(agentLike._resolveCuratedChainKeyContext).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps a failed resolution failed for both emitters in the same attempt', async () => {
+    const error = new Error('authority unavailable');
+    const agentLike = { _resolveCuratedChainKeyContext: vi.fn(async () => { throw error; }) };
+    const resolveAttempt = createCuratedKeyContextAttempt(agentLike as never, 'sports');
+    await expect(resolveAttempt()).rejects.toBe(error);
+    await expect(resolveAttempt()).rejects.toBe(error);
+    expect(agentLike._resolveCuratedChainKeyContext).toHaveBeenCalledTimes(1);
+  });
 });

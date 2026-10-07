@@ -58,6 +58,8 @@ export class RecipientKeyRouteFence {
   private staleGeneration = 0;
   private scannedGeneration = -1;
   private pendingEverything = 0;
+  private pendingRecipientWrites = 0;
+  private recipientWritesUnknown = false;
   private graphsUnknown = false;
   private scan: Promise<void> | null = null;
 
@@ -66,6 +68,13 @@ export class RecipientKeyRouteFence {
   get revision(): number {
     return this.value;
   }
+
+  /** Memoized collects are usable only with settled, trustworthy dependencies. */
+  get cacheable(): boolean {
+    return this.trusted && !this.recipientWritesUnknown && !this.hasPendingWrites;
+  }
+
+  get hasPendingWrites(): boolean { return this.pendingRecipientWrites > 0; }
 
   private get trusted(): boolean {
     return !this.graphsUnknown && this.scannedGeneration === this.staleGeneration;
@@ -82,6 +91,10 @@ export class RecipientKeyRouteFence {
       || mutation.quads?.some((quad) => !isBareIri(quad.predicate)) === true
       || mutation.removals?.some(({ graph }) => !isBareIri(graph)) === true;
     let opaque = unscoped;
+    const relevant = unscoped
+      || mutation.quads?.some(isKeyRouteFact) === true
+      || mutation.removals?.some((removal) => this.removalMayChange(removal)) === true;
+    if (relevant) this.pendingRecipientWrites += 1;
     for (const quad of mutation.quads ?? []) {
       if (!isKeyRouteFact(quad)) continue;
       if (isBareIri(quad.graph)) this.keyGraphs.add(quad.graph);
@@ -104,6 +117,10 @@ export class RecipientKeyRouteFence {
           }
         }
       } finally {
+        if (relevant) {
+          this.pendingRecipientWrites -= 1;
+          if (outcome === 'indeterminate') this.recipientWritesUnknown = true;
+        }
         if (opaque) {
           this.pendingEverything -= 1;
           if (outcome === 'indeterminate') this.graphsUnknown = true;
@@ -126,11 +143,15 @@ export class RecipientKeyRouteFence {
   }
 
   /** A removal whose scope is known, in whole or in part. */
-  noteRemoval({ graph, subject, predicate }: StoreRemoval): void {
-    if (isNonAgentIri(subject)) return;
-    if (isBareIri(predicate) && !RECIPIENT_KEY_ROUTE_PREDICATES.has(predicate)) return;
-    if (isBareIri(graph) && this.trusted && !this.keyGraphs.has(graph)) return;
-    this.value += 1;
+  private removalMayChange({ graph, subject, predicate }: StoreRemoval): boolean {
+    if (isNonAgentIri(subject)) return false;
+    if (isBareIri(predicate) && !RECIPIENT_KEY_ROUTE_PREDICATES.has(predicate)) return false;
+    if (isBareIri(graph) && this.trusted && !this.keyGraphs.has(graph)) return false;
+    return true;
+  }
+
+  noteRemoval(removal: StoreRemoval): void {
+    if (this.removalMayChange(removal)) this.value += 1;
   }
 
   /** A write that may have changed anything has changed something (an UPDATE, a prefix delete). */

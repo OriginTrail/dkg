@@ -10,6 +10,7 @@
  */
 
 
+import { createCuratedKeyContextAttempt, type CuratedKeyContextResolver } from './internal/curated-key-context-attempt.js';
 import { reportCommittedProjectionQuads } from './internal/projection-mutation-observer.js';
 import { planKnowledgeAssetVmPublication, isGraphScopedKnowledgeAssetVmPublishRequest, assertionSealFromQueuedKnowledgeAssetVmPublishRequest, type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
 export { type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
@@ -1874,12 +1875,14 @@ export class PublishMethods extends DKGAgentBase {
     // separate from the AEAD binding id. Agent-derived same-CG ids bind
     // AEAD to the canonical on-chain id without being treated as explicit
     // remaps; caller-supplied mismatches stay explicit policy targets.
+    const resolveInlineContext = createCuratedKeyContextAttempt(this, contextGraphId, opts?.subGraphName, undefined, explicitPublishPolicyTarget, publishBindingOptions);
     const encryptInlinePayload = await this._resolveEncryptInlinePayload(
       contextGraphId,
       opts?.subGraphName,
       undefined,
       explicitPublishPolicyTarget,
       publishBindingOptions,
+      resolveInlineContext,
     );
     // OT-RFC-38 LU-11 — also resolve the chunked emitter for curated
     // CGs. When set, the publisher prefers this path: chunks fan out
@@ -1891,6 +1894,7 @@ export class PublishMethods extends DKGAgentBase {
       undefined,
       explicitPublishPolicyTarget,
       publishBindingOptions,
+      resolveInlineContext,
     );
     // Use the same chain-aware curated decision that selected encryption.
     // Local `_meta` can legitimately lag chain registration; consulting it a
@@ -2270,6 +2274,7 @@ export class PublishMethods extends DKGAgentBase {
       // target on-chain cgId is now binding-only so the AEAD key derives from
       // the canonical id consumers verify against without reclassifying the
       // same-CG update as an explicit remap.
+      const resolveInlineContext = createCuratedKeyContextAttempt(this, contextGraphId, opts?.subGraphName, undefined, undefined, updateOnChainId ? { aeadBindingContextGraphId: updateOnChainId } : undefined);
       const updateEncryptInlinePayload = await this._resolveEncryptInlinePayload(
         contextGraphId,
         opts?.subGraphName,
@@ -2278,6 +2283,7 @@ export class PublishMethods extends DKGAgentBase {
         updateOnChainId
           ? { aeadBindingContextGraphId: updateOnChainId }
           : undefined,
+        resolveInlineContext,
       );
       const isCuratedUpdate = typeof updateEncryptInlinePayload === 'function';
 
@@ -2299,6 +2305,7 @@ export class PublishMethods extends DKGAgentBase {
             updateOnChainId
               ? { aeadBindingContextGraphId: updateOnChainId }
               : undefined,
+            resolveInlineContext,
           )
         : undefined;
 
@@ -3881,19 +3888,7 @@ export class PublishMethods extends DKGAgentBase {
    * NO_DATA_IN_SWM (same observable as today, the §1.1 bug). The
    * agent surfaces a warn so operators see the configuration miss.
    */
-  /**
-   * Shared resolution between LU-5 (`_resolveEncryptInlinePayload`) and
-   * LU-11 (`_resolveEncryptInlineChunked`). Probes the access policy,
-   * bootstraps / rotates the swm-sender-key epoch, and returns the
-   * effective `chainKey` + AEAD CG-id binding. Returns `undefined` for
-   * public CGs so the caller stays on the plaintext-inline path.
-   *
-   * The original LU-5 method body lived inline here pre-LU-11; pulling
-   * it into a helper avoided drifting two near-identical curated-
-   * probe / epoch-rotation blocks once chunked emission joined the
-   * picture. All semantics (probe order, rotation triggers, fail-
-   * closed branches, error texts) are preserved.
-   */
+  /** Resolve policy, recipient authority and sender-key epoch once per publish attempt. */
   async _resolveCuratedChainKeyContext(this: DKGAgent,
     contextGraphId: string,
     subGraphName: string | undefined,
@@ -4099,8 +4094,9 @@ export class PublishMethods extends DKGAgentBase {
     authorAgentAddress?: string,
     explicitPolicyTargetContextGraphId?: string,
     options?: ResolveCuratedChainKeyContextOptions,
+    resolveAttempt?: CuratedKeyContextResolver,
   ): Promise<((plaintext: Uint8Array) => Promise<Uint8Array>) | undefined> {
-    const resolved = await this._resolveCuratedChainKeyContext(
+    const resolved = resolveAttempt ? await resolveAttempt() : await this._resolveCuratedChainKeyContext(
       contextGraphId, subGraphName, authorAgentAddress, explicitPolicyTargetContextGraphId, 'LU-5', options,
     );
     if (!resolved) return undefined;
@@ -4153,6 +4149,7 @@ export class PublishMethods extends DKGAgentBase {
     authorAgentAddress?: string,
     explicitPolicyTargetContextGraphId?: string,
     options?: ResolveCuratedChainKeyContextOptions,
+    resolveAttempt?: CuratedKeyContextResolver,
   ): Promise<
     | ((input: { plaintextNquads: Uint8Array; batchId: Uint8Array; publishOperationId: string }) => Promise<{
         ciphertextChunksRoot: Uint8Array;
@@ -4162,7 +4159,7 @@ export class PublishMethods extends DKGAgentBase {
       }>)
     | undefined
   > {
-    const resolved = await this._resolveCuratedChainKeyContext(
+    const resolved = resolveAttempt ? await resolveAttempt() : await this._resolveCuratedChainKeyContext(
       contextGraphId, subGraphName, authorAgentAddress, explicitPolicyTargetContextGraphId, 'LU-11', options,
     );
     if (!resolved) return undefined;
@@ -5629,12 +5626,14 @@ export class PublishMethods extends DKGAgentBase {
       const publishBindingOptions = queuedOnChainContextGraphId
         ? { aeadBindingContextGraphId: queuedOnChainContextGraphId }
         : undefined;
+      const resolveInlineContext = createCuratedKeyContextAttempt(this, request.contextGraphId, request.subGraphName, undefined, undefined, publishBindingOptions);
       const resolvedEncryptInlinePayload = await this._resolveEncryptInlinePayload(
         request.contextGraphId,
         request.subGraphName,
         undefined,
         undefined,
         publishBindingOptions,
+        resolveInlineContext,
       );
       const resolvedEncryptInlineChunked = await this._resolveEncryptInlineChunked(
         request.contextGraphId,
@@ -5642,6 +5641,7 @@ export class PublishMethods extends DKGAgentBase {
         undefined,
         undefined,
         publishBindingOptions,
+        resolveInlineContext,
       );
       // #1670 — finalized V2 private assertions seal only the exact submitted
       // RDF. Queued execution must still supply the deterministic catalog
@@ -6834,6 +6834,7 @@ export class PublishMethods extends DKGAgentBase {
     // (`onChainId`) so consumers using the canonical chain id can
     // decrypt — without this, remap publishes (source SWM cg != target
     // chain cg) produced undecryptable payloads.
+    const resolveInlineContext = createCuratedKeyContextAttempt(this, contextGraphId, options?.subGraphName, options?.authorAgentAddress, ctxGraphIdStr, onChainId ? { aeadBindingContextGraphId: onChainId } : undefined);
     const encryptInlinePayload = await this._resolveEncryptInlinePayload(
       contextGraphId,
       options?.subGraphName,
@@ -6842,6 +6843,7 @@ export class PublishMethods extends DKGAgentBase {
       onChainId
         ? { aeadBindingContextGraphId: onChainId }
         : undefined,
+      resolveInlineContext,
     );
     if (encryptInlinePayload) {
       this.log.info(ctx, `LU-5: curated CG ${contextGraphId} — wrapping inline ACK payload with chain-key AEAD`);
@@ -6860,6 +6862,7 @@ export class PublishMethods extends DKGAgentBase {
       onChainId
         ? { aeadBindingContextGraphId: onChainId }
         : undefined,
+      resolveInlineContext,
     );
     if (encryptInlineChunked) {
       this.log.info(ctx, `LU-11: curated CG ${contextGraphId} — chunked path active (per-chunk SWM gossip + V2 ACK)`);
