@@ -13,32 +13,39 @@ export class LiftJobChainObservations {
 
   constructor(private readonly now: () => number) {}
 
-  receipt(jobId: string, txHash: string): void {
-    if (!txHash) return;
+  /**
+   * First receipt or inclusion evidence of a transaction. `at` is the evidence's own time when
+   * the caller has one. The restart schema accepts finite numbers only, so nothing else is kept.
+   */
+  receipt(jobId: string, txHash: string, at: number = this.now()): void {
+    if (!txHash || !Number.isFinite(at)) return;
     const key = txHash.toLowerCase();
     if (this.entries.get(jobId)?.txHash === key) return;
     this.entries.delete(jobId);
     if (this.entries.size >= 512) this.entries.delete(this.entries.keys().next().value!);
-    this.entries.set(jobId, { txHash: key, receiptObservedAt: this.now() });
+    this.entries.set(jobId, { txHash: key, receiptObservedAt: at });
   }
 
+  /** Canonical evidence at the configured confirmation depth, recorded where it is observed. */
   finality(jobId: string, txHash: string): void {
-    this.receipt(jobId, txHash);
+    const at = this.now();
+    this.receipt(jobId, txHash, at);
     const entry = this.entries.get(jobId);
-    if (entry) entry.finalityObservedAt ??= this.now();
+    if (entry?.txHash === txHash.toLowerCase() && Number.isFinite(at)) entry.finalityObservedAt ??= at;
   }
 
-  /** Owned read projection; persisted on the next canonical state transition. */
+  /** Owned copy with the observations of the job's transaction; a write persists it. */
   project<T extends PersistedLiftJob | null>(job: T): T {
     if (!job || job.status === 'accepted' || job.status === 'claimed' || job.status === 'validated') return job;
     const entry = this.entries.get(job.jobId);
     if (!entry || entry.txHash !== getLiftJobTransactionEvidence(job)?.toLowerCase()) return job;
+    const finalityObservedAt = job.timestamps.finalityObservedAt ?? entry.finalityObservedAt;
     return {
       ...job,
       timestamps: {
         ...job.timestamps,
         receiptObservedAt: job.timestamps.receiptObservedAt ?? entry.receiptObservedAt,
-        finalityObservedAt: job.timestamps.finalityObservedAt ?? entry.finalityObservedAt,
+        ...(finalityObservedAt === undefined ? {} : { finalityObservedAt }),
       },
     };
   }

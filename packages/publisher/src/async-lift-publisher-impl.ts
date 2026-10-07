@@ -2928,15 +2928,13 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   private async writeJob<T extends LiftJob>(job: T, kind: JournalKind): Promise<CommittedLiftJob<T>> {
-    assertCanonicalLiftJobPayload(job);
-    if (kind !== 'rollback-noop' && job.broadcast) {
-      if (job.status === 'included') this.chainObservations.receipt(job.jobId, job.broadcast.txHash);
-      if (job.status === 'finalized') this.chainObservations.finality(job.jobId, job.broadcast.txHash);
-    }
     // Validate before the first store mutation. Public Partial<LiftJob> update calls can be forged
     // at runtime; a successful API call must never persist a row the restart decoder will reject.
-    const annotated = assertCanonicalLiftJobPayload(this.chainObservations.project(job));
-    const canonical = committedLiftJob(annotated, job);
+    const validated = assertCanonicalLiftJobPayload(job);
+    // Inclusion is its own first evidence when nothing was observed earlier. Finality is recorded
+    // only where canonical evidence is observed: a finalized write is local completion.
+    if (validated.status === 'included') this.chainObservations.receipt(job.jobId, validated.broadcast.txHash, validated.timestamps.includedAt);
+    const canonical = committedLiftJob(this.chainObservations.project(validated), job);
     await this.persistJobRecord(canonical);
     await this.appendJournal(canonical, kind);
     return canonical;
