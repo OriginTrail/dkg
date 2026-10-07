@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { promises as fsp } from 'node:fs';
 import { mkdtemp, rm, writeFile, readdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -410,6 +411,43 @@ describe('SwmHostModeStore', () => {
         const after = await readdir(dir);
         expect(after).not.toContain(`${corruptKey}.log`);
         expect(after).not.toContain(`${corruptKey}.meta`);
+      });
+
+      it('keeps a .meta it could not read, and the .log paired with it: a transient fs error is not corruption', async () => {
+        // Codex PR #619 follow-up: EACCES / EMFILE / EBUSY on the meta read says nothing about the
+        // file's content. Reaping the pair as corrupt would delete healthy hosted ciphertext on
+        // startup, so the sweep leaves both for a later retry.
+        const cg = 'curator/unreadable-meta';
+        const key = cgKey(cg);
+        const first = new SwmHostModeStore({ dataDir: dir, unregisteredLimits: limits, registeredLimits: limits });
+        await first.append(cg, new Uint8Array([1, 2, 3]));
+        expect(await readdir(dir)).toEqual(expect.arrayContaining([`${key}.log`, `${key}.meta`]));
+
+        const realReadFile = fsp.readFile.bind(fsp) as (...args: unknown[]) => Promise<unknown>;
+        const spy = vi.spyOn(fsp, 'readFile').mockImplementation((async (p: unknown, ...rest: unknown[]) => {
+          if (String(p).endsWith('.meta')) throw Object.assign(new Error('injected EMFILE'), { code: 'EMFILE' });
+          return realReadFile(p, ...rest);
+        }) as never);
+        let reportSeen: SwmHostModeStartupReconcileReport | null = null;
+        try {
+          const store = new SwmHostModeStore({
+            dataDir: dir,
+            unregisteredLimits: limits,
+            registeredLimits: limits,
+            onStartupReconcile: (r) => { reportSeen = r; },
+          });
+          await store.init();
+        } finally {
+          spy.mockRestore();
+        }
+        expect(reportSeen, 'nothing was reaped, so nothing is reported').toBeNull();
+        const after = await readdir(dir);
+        expect(after).toContain(`${key}.log`);
+        expect(after).toContain(`${key}.meta`);
+
+        // Once the meta can be read again the hosted entry is served as before.
+        const second = new SwmHostModeStore({ dataDir: dir, unregisteredLimits: limits, registeredLimits: limits });
+        expect((await second.iterate(cg, 0)).map((e) => e.seqno)).toEqual([1]);
       });
 
       it('reaps .log paired with a .meta missing contextGraphId (parses as JSON but is unusable)', async () => {

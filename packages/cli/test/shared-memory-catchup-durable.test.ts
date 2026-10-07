@@ -29,9 +29,9 @@ function fakeReq(body: unknown) {
   } as any;
 }
 
-function buildCatchupCtx(body: unknown, agent: Record<string, any>) {
+function buildCatchupCtx(body: unknown, agent: Record<string, any>, path = '/api/shared-memory/catchup') {
   const res = fakeRes();
-  const url = new URL('http://127.0.0.1/api/shared-memory/catchup');
+  const url = new URL(`http://127.0.0.1${path}`);
   const ctx = {
     req: fakeReq(body),
     res,
@@ -1380,3 +1380,95 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
       .filter(([selectedPeerId]) => selectedPeerId === peerId)).toHaveLength(failedPhases === 1 ? 2 : 1);
   });
 });
+
+describe('POST /api/shared-memory/host-catchup', () => {
+  const HOST_CATCHUP = '/api/shared-memory/host-catchup';
+  const peerResult = { peerId: 'host-peer', rounds: 1, fetched: 2, applied: 0, appliedTriples: 0, skipped: 2, nextSeqno: 7 };
+
+  it('asks the host with its default page and reports no entries unless the caller asks', async () => {
+    const catchupSwmFromConnectedHosts = vi.fn(async () => [peerResult]);
+    const { ctx, res } = buildCatchupCtx({ contextGraphId: 'host-cg' }, { catchupSwmFromConnectedHosts }, HOST_CATCHUP);
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(catchupSwmFromConnectedHosts).toHaveBeenCalledWith('host-cg', { peers: undefined, sinceSeqno: 0, maxRounds: 8 });
+    expect(JSON.parse(res.body)).toEqual({
+      contextGraphId: 'host-cg',
+      peers: [peerResult],
+      appliedTotal: 0,
+      appliedEnvelopes: 0,
+      fetchedTotal: 2,
+    });
+  });
+
+  it('passes a page size and the request for served entries through to the agent', async () => {
+    const entries = [
+      { seqno: 6, envelopeSha256: 'a'.repeat(64) },
+      { seqno: 7, envelopeSha256: 'b'.repeat(64) },
+    ];
+    const catchupSwmFromConnectedHosts = vi.fn(async () => [{ ...peerResult, entries }]);
+    const { ctx, res } = buildCatchupCtx(
+      { contextGraphId: 'host-cg', peerId: 'host-peer', sinceSeqno: 5, maxRounds: 1, maxEntriesPerRound: 2.9, includeEntries: true },
+      { catchupSwmFromConnectedHosts },
+      HOST_CATCHUP,
+    );
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(catchupSwmFromConnectedHosts).toHaveBeenCalledWith('host-cg', {
+      peers: ['host-peer'],
+      sinceSeqno: 5,
+      maxRounds: 1,
+      maxEntriesPerRound: 2,
+      reportEntries: true,
+    });
+    expect(JSON.parse(res.body).peers).toEqual([{ ...peerResult, entries }]);
+  });
+
+  it.each([0, -3, '4', null, true])('ignores a page size of %j and a non-boolean includeEntries', async (maxEntriesPerRound) => {
+    const catchupSwmFromConnectedHosts = vi.fn(async () => [peerResult]);
+    const { ctx, res } = buildCatchupCtx(
+      { contextGraphId: 'host-cg', maxEntriesPerRound, includeEntries: 'yes' },
+      { catchupSwmFromConnectedHosts },
+      HOST_CATCHUP,
+    );
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(catchupSwmFromConnectedHosts).toHaveBeenCalledWith('host-cg', { peers: undefined, sinceSeqno: 0, maxRounds: 8 });
+  });
+
+  it.each([[''], ['   '], [7], [undefined]])('rejects a contextGraphId of %j with a 400 and does not call the agent', async (contextGraphId) => {
+    const catchupSwmFromConnectedHosts = vi.fn(async () => [peerResult]);
+    const { ctx, res } = buildCatchupCtx({ contextGraphId }, { catchupSwmFromConnectedHosts }, HOST_CATCHUP);
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body)).toEqual({ error: 'Missing or invalid "contextGraphId"' });
+    expect(catchupSwmFromConnectedHosts).not.toHaveBeenCalled();
+  });
+
+  it('answers 501 on an agent build without host catch-up', async () => {
+    const { ctx, res } = buildCatchupCtx({ contextGraphId: 'host-cg' }, {}, HOST_CATCHUP);
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(501);
+    expect(JSON.parse(res.body)).toEqual({ error: 'Host-catchup is not supported on this agent build' });
+  });
+
+  it('answers 500 with the agent\'s message when the catch-up throws', async () => {
+    const catchupSwmFromConnectedHosts = vi.fn(async () => { throw new Error('no connected hosting core'); });
+    const { ctx, res } = buildCatchupCtx({ contextGraphId: 'host-cg' }, { catchupSwmFromConnectedHosts }, HOST_CATCHUP);
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(500);
+    expect(JSON.parse(res.body)).toEqual({ error: 'no connected hosting core' });
+  });
+});
+

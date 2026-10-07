@@ -1201,7 +1201,7 @@ start_node() {
 
 collect_devnet_node_pids() {
   local node_num="${1:-}"
-  local pids="" f pid root_node ps_pids children
+  local pids="" f pid root_node ps_pids children argv0 base
   if [ -n "$node_num" ]; then
     root_node="$DEVNET_DIR/node${node_num}"
     for f in "$root_node/devnet.pid" "$root_node/daemon.pid"; do
@@ -1219,10 +1219,23 @@ collect_devnet_node_pids() {
   fi
 
   if command -v ps >/dev/null 2>&1; then
+    # Only a node process (daemon, supervisor, worker, helpers) or a managed
+    # store binary (oxigraph*) that mentions the home counts as the node's.
+    # Anything else that merely names it (`tail -f <home>/daemon.log` from
+    # `devnet.sh logs`, an editor, a grep) is a bystander and is never signalled.
     ps_pids=$(ps eww -axo pid=,command= 2>/dev/null | awk -v root="$root_node" '
-      index($0, "DKG_HOME=" root) > 0 || index($0, root "/") > 0 { print $1 }
+      index($0, "DKG_HOME=" root) > 0 || index($0, root "/") > 0 { print $1, $2 }
     ' 2>/dev/null || true)
-    for pid in $ps_pids; do pids+=" $pid"; done
+    while read -r pid argv0; do
+      [ -n "$pid" ] || continue
+      base="${argv0##*/}"
+      case "$base" in node|oxigraph*) pids+=" $pid"; continue ;; esac
+      # The first word is not the whole executable path when it contains a space
+      # (a checkout under "My Projects"): fall back to the executable ps reports.
+      base=$(ps -p "$pid" -o comm= 2>/dev/null || true)
+      base="${base##*/}"
+      case "$base" in node|oxigraph*) pids+=" $pid" ;; esac
+    done <<< "$ps_pids"
   fi
 
   if [ -n "$pids" ] && command -v ps >/dev/null 2>&1; then

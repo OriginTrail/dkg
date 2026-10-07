@@ -131,6 +131,7 @@
     "test:devnet:pr1384-preserve-agents-on-transfer": "vitest run --config devnet/pr1384-preserve-agents-on-transfer/vitest.config.ts",
     "test:devnet:pr1370-admin-op-wallet": "vitest run --config devnet/pr1370-admin-op-wallet/vitest.config.ts",
     "test:devnet:public-cg-hash-subscription": "vitest run --config devnet/public-cg-hash-subscription/vitest.config.ts",
+    "test:devnet:swm-host-store-durability": "vitest run --config devnet/swm-host-store-durability/vitest.config.ts",
     "test:devnet:manifest": "vitest run --config devnet/_bootstrap/vitest.manifest.config.ts",
     "lint:tests": "node scripts/ci/check-disabled-tests.mjs",
     "test:properties": "vitest run --config test-policy/vitest.properties.config.ts",
