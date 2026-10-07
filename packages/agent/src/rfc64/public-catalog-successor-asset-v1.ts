@@ -2,6 +2,7 @@
 
 import {
   MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
+  assertCanonicalGraphScopedAuthorSealV1,
   canonicalizeCanonicalGraphScopedAuthorSealV1,
   compareAuthorCatalogKaIdsV1,
   parseCanonicalGraphScopedAuthorSealV1,
@@ -27,20 +28,38 @@ export function snapshotRfc64PublicCatalogSuccessorAssetV1(
   input: unknown,
   label = 'RFC-64 catalog successor asset',
 ): Readonly<Rfc64PublicCatalogSuccessorAssetInputV1> {
+  return canonicalizeOwnedAsset(ownAssetInput(input, label));
+}
+
+interface OwnedAssetInput {
+  readonly assertionCoordinate: AssertionCoordinateV1;
+  readonly projectionBytes: Uint8Array;
+  readonly seal: Readonly<Record<string, unknown>>;
+}
+
+function ownAssetInput(input: unknown, label: string): OwnedAssetInput {
   const record = snapshotPlainDataRecordV1(input, label);
   assertExactFieldSetV1(record, ['assertionCoordinate', 'projectionBytes', 'seal'], label);
   if (!(record.projectionBytes instanceof Uint8Array)) {
     throw new TypeError(`${label}.projectionBytes must be a Uint8Array`);
   }
+  const seal = snapshotPlainDataRecordV1(record.seal, `${label}.seal`, true);
+  if (Object.values(seal).some((value) => value !== null && typeof value === 'object')) {
+    throw new TypeError(`${label}.seal must contain primitive fields`);
+  }
   return Object.freeze({
-    assertionCoordinate:
-      record.assertionCoordinate as Rfc64PublicCatalogSuccessorAssetInputV1['assertionCoordinate'],
+    assertionCoordinate: record.assertionCoordinate as AssertionCoordinateV1,
     projectionBytes: new Uint8Array(record.projectionBytes),
-    seal: parseCanonicalGraphScopedAuthorSealV1(
-      canonicalizeCanonicalGraphScopedAuthorSealV1(
-        record.seal as Rfc64PublicCatalogSuccessorAssetInputV1['seal'],
-      ),
-    ),
+    seal,
+  });
+}
+
+function canonicalizeOwnedAsset(owned: OwnedAssetInput): Readonly<Rfc64PublicCatalogSuccessorAssetInputV1> {
+  assertCanonicalGraphScopedAuthorSealV1(owned.seal);
+  return Object.freeze({
+    assertionCoordinate: owned.assertionCoordinate,
+    projectionBytes: owned.projectionBytes,
+    seal: parseCanonicalGraphScopedAuthorSealV1(canonicalizeCanonicalGraphScopedAuthorSealV1(owned.seal)),
   });
 }
 
@@ -48,8 +67,7 @@ export function snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1(
   input: unknown,
   label = 'RFC-64 catalog successor assets',
 ): readonly Readonly<Rfc64PublicCatalogSuccessorAssetInputV1>[] {
-  const result = snapshotAssetInputs(input, label).map((asset, index) =>
-    snapshotRfc64PublicCatalogSuccessorAssetV1(asset, `${label}[${index}]`));
+  const result = snapshotAssetInputs(input, label).map(canonicalizeOwnedAsset);
   return sortExactAssets(result, label);
 }
 
@@ -60,12 +78,11 @@ export async function snapshotAndSortRfc64PublicCatalogSuccessorAssetsSlicedV1(
   signal?: AbortSignal,
 ): Promise<readonly Readonly<Rfc64PublicCatalogSuccessorAssetInputV1>[]> {
   const owned = snapshotAssetInputs(input, label);
-  const result = await mapRfc64CpuSlicedV1(owned, (asset, index) =>
-    snapshotRfc64PublicCatalogSuccessorAssetV1(asset, `${label}[${index}]`), signal);
+  const result = await mapRfc64CpuSlicedV1(owned, canonicalizeOwnedAsset, signal);
   return sortExactAssets(result, label);
 }
 
-function snapshotAssetInputs(input: unknown, label: string): Readonly<Rfc64PublicCatalogSuccessorAssetInputV1>[] {
+function snapshotAssetInputs(input: unknown, label: string): OwnedAssetInput[] {
   if (!Array.isArray(input) || Object.getPrototypeOf(input) !== Array.prototype) {
     throw new TypeError(`${label} must be an ordinary Array`);
   }
@@ -86,24 +103,13 @@ function snapshotAssetInputs(input: unknown, label: string): Readonly<Rfc64Publi
   ) {
     throw new TypeError(`${label} must be a dense data array`);
   }
-  const owned: Readonly<Rfc64PublicCatalogSuccessorAssetInputV1>[] = [];
+  const owned: OwnedAssetInput[] = [];
   for (let index = 0; index < input.length; index += 1) {
     const descriptor = Object.getOwnPropertyDescriptor(input, String(index));
     if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
       throw new TypeError(`${label} must contain only enumerable data elements`);
     }
-    const record = snapshotPlainDataRecordV1(descriptor.value, `${label}[${index}]`);
-    assertExactFieldSetV1(record, ['assertionCoordinate', 'projectionBytes', 'seal'], label);
-    if (!(record.projectionBytes instanceof Uint8Array)) throw new TypeError(`${label}.projectionBytes must be a Uint8Array`);
-    const seal = snapshotPlainDataRecordV1(record.seal, `${label}[${index}].seal`);
-    if (Object.values(seal).some((value) => value !== null && typeof value === 'object')) {
-      throw new TypeError(`${label}.seal must contain primitive fields`);
-    }
-    owned.push(Object.freeze({
-      assertionCoordinate: record.assertionCoordinate as AssertionCoordinateV1,
-      projectionBytes: new Uint8Array(record.projectionBytes),
-      seal: Object.freeze({ ...seal }) as unknown as CanonicalGraphScopedAuthorSealV1,
-    }));
+    owned.push(ownAssetInput(descriptor.value, `${label}[${index}]`));
   }
   return owned;
 }

@@ -38,6 +38,22 @@ vi.mock('../src/rfc64/catalog-row-authorship.js', async (importOriginal) => {
   };
 });
 
+const verificationProgress = vi.hoisted(() => ({ active: false, events: [] as string[] }));
+vi.mock('@origintrail-official/dkg-core', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@origintrail-official/dkg-core')>();
+  return {
+    ...actual,
+    verifyCatalogSealBindingV1: (...args: Parameters<typeof actual.verifyCatalogSealBindingV1>) => {
+      const result = actual.verifyCatalogSealBindingV1(...args);
+      if (verificationProgress.active) {
+        verificationProgress.events.push(`verify:${args[1].kaId}`);
+        setImmediate(() => verificationProgress.events.push('macrotask'));
+      }
+      return result;
+    },
+  };
+});
+
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'66'.repeat(32)}`);
 const ATTACKER_WALLET = new ethers.Wallet(`0x${'77'.repeat(32)}`);
 const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
@@ -108,6 +124,45 @@ describe('RFC-64 public/open one-row successor producer', () => {
       expect(stageKaBundle).not.toHaveBeenCalled();
       expect(stageVerifiedObjects).not.toHaveBeenCalled();
     } finally { now.mockRestore(); }
+  });
+
+  it('yields between real verification rows before signing and retains snapshotted seals', async () => {
+    const { genesis, authorization } = await producerHistory();
+    const assets = snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1([
+      { assertionCoordinate: 'gate-1-object', projectionBytes: PROJECTION, seal: await authorSeal(AUTHOR_WALLET) },
+      { assertionCoordinate: 'gate-2-object', projectionBytes: PROJECTION, seal: await authorSeal(AUTHOR_WALLET, SECOND_KA_NUMBER) },
+    ]);
+    expect(Object.getPrototypeOf(assets[0].seal)).toBeNull();
+    const stageKaBundle = vi.fn(durableBundleReceipt);
+    const stageVerifiedObjects = vi.fn(async () => Object.freeze({
+      durable: true as const, namespaceDurability: 'test-exact-durable' as never, objects: Object.freeze([]),
+    }));
+    const producer = new Rfc64PublicCatalogSuccessorProducerV1({
+      controlObjects: { stageVerifiedObjects } as never, stageKaBundle,
+    });
+    const first = await producer.produceAndStageExactSet({
+      previousHead: genesis.head, previousDirectoryPath: genesis.directoryPath, previousBucket: null,
+      assets: [assets[0]], deployment: DEPLOYMENT, issuedAt: '1773900001000' as never,
+      catalogSigner: catalogSigner(), catalogIssuerAuthorization: authorization,
+    });
+    let clock = 0;
+    const now = vi.spyOn(performance, 'now').mockImplementation(() => clock += 30);
+    verificationProgress.events = [];
+    verificationProgress.active = true;
+    const signer = { ...catalogSigner(), signDigest: vi.fn(async (digest: Digest32V1) => {
+      expect(verificationProgress.events.slice(0, 3)).toEqual([`verify:${KA_ID}`, 'macrotask', `verify:${SECOND_KA_ID}`]);
+      return catalogSigner().signDigest(digest);
+    }) };
+    try {
+      const result = await producer.produceAndStageExactSet({
+        previousHead: first.publication.head, previousDirectoryPath: first.publication.directoryPath,
+        previousBucket: first.publication.bucket, assets, deployment: DEPLOYMENT,
+        issuedAt: '1773900002000' as never, catalogSigner: signer, catalogIssuerAuthorization: authorization,
+      });
+      expect(result.publication.head.payload.totalRows).toBe('2');
+      expect(signer.signDigest).toHaveBeenCalled();
+      expect(stageKaBundle).toHaveBeenCalledTimes(3);
+    } finally { verificationProgress.active = false; now.mockRestore(); }
   });
 
   it('verifies the exact successor before staging its bundle and signed objects', async () => {

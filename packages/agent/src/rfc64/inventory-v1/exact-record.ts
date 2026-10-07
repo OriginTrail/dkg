@@ -8,11 +8,13 @@
 export function snapshotPlainDataRecordV1(
   value: unknown,
   label: string,
+  allowNullPrototype = false,
 ): Readonly<Record<string, unknown>> {
   if (
     typeof value !== 'object'
     || value === null
-    || Object.getPrototypeOf(value) !== Object.prototype
+    || (Object.getPrototypeOf(value) !== Object.prototype
+      && !(allowNullPrototype && Object.getPrototypeOf(value) === null))
   ) {
     throw new Error(`${label} must be a plain object`);
   }

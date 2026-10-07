@@ -2926,12 +2926,18 @@ export class TripleStoreAsyncLiftPublisher
     this.graphEnsured = true;
   }
 
-  private async writeJob(job: LiftJob, kind: JournalKind): Promise<void> {
+  private async writeJob(job: LiftJob, kind: JournalKind): Promise<LiftJob> {
+    if (kind !== 'rollback-noop' && job.broadcast) {
+      if (job.status === 'included') this.chainObservations.receipt(job.jobId, job.broadcast.txHash);
+      if (job.status === 'finalized') this.chainObservations.finality(job.jobId, job.broadcast.txHash);
+    }
+    job = this.chainObservations.project(job);
     // Validate before the first store mutation. Public Partial<LiftJob> update calls can be forged
     // at runtime; a successful API call must never persist a row the restart decoder will reject.
     const canonical = assertCanonicalLiftJobPayload(job);
     await this.persistJobRecord(canonical);
     await this.appendJournal(canonical, kind);
+    return canonical;
   }
 
   /**
@@ -3371,10 +3377,7 @@ export class TripleStoreAsyncLiftPublisher
     status: LiftJobState,
     data: LiftJobTransitionPatch,
   ): LiftJob {
-    const next = buildCanonicalLiftJobAdministrativeTransition(current, status, data, this.now());
-    if (status === 'included' && next.broadcast) this.chainObservations.receipt(next.jobId, next.broadcast.txHash);
-    if (status === 'finalized' && next.broadcast) this.chainObservations.finality(next.jobId, next.broadcast.txHash);
-    return this.chainObservations.project(next);
+    return buildCanonicalLiftJobAdministrativeTransition(current, status, data, this.now());
   }
 
   /**
@@ -3559,8 +3562,6 @@ export class TripleStoreAsyncLiftPublisher
     inclusion: LiftJobInclusionMetadata,
     finalization: LiftJobFinalizationInput,
   ): LiftJob {
-    this.chainObservations.finality(job.jobId, origin.txHash);
-    job = this.chainObservations.project(job);
     const now = this.now();
     const { failure: _dropped, ...withoutFailure } = job as PersistedLiftJob & { failure?: unknown };
     // PR #2300 r10 (3812960758) — a published-finalized record must CARRY its broadcast metadata,

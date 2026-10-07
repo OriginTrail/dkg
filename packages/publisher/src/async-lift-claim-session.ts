@@ -1,3 +1,4 @@
+import { writeLiftJobCandidate } from './async-lift-job-writer.js';
 import type { PublishResult } from './publisher.js';
 import {
   deleteByPatternWithoutCount,
@@ -241,7 +242,7 @@ export interface AsyncLiftClaimCoordinatorDependencies {
   readonly writeJob: (
     job: LiftJob,
     kind: JournalKind,
-  ) => Promise<void>;
+  ) => Promise<LiftJob | void>;
   readonly deleteJob: (jobId: string) => Promise<void>;
   readonly assertJobMatchesStatus: (job: LiftJob) => void;
   readonly resetInterruptedClaim: (job: LiftJob) => LiftJobAccepted;
@@ -319,7 +320,7 @@ export class AsyncLiftClaimCoordinator {
         );
 
         this.dependencies.assertJobMatchesStatus(owned);
-        await this.dependencies.writeJob(owned, 'claimed');
+        const committed = await writeLiftJobCandidate(this.dependencies.writeJob, owned, 'claimed');
         await this.writeWalletLock({
           walletId,
           jobId: owned.jobId,
@@ -329,7 +330,7 @@ export class AsyncLiftClaimCoordinator {
           claimToken,
           lastHeartbeatAt: now,
         });
-        return owned;
+        return committed;
       });
       if (!claimedJob) return null;
       if (markProcessing) {
@@ -424,9 +425,8 @@ export class AsyncLiftClaimCoordinator {
   }
 
   /**
-   * Commit one lifecycle transition through the coordinator-owned persistence boundary.
-   * Lease renewal, shape validation, the durable job write, and wallet synchronization cannot
-   * be assembled independently by publisher call sites.
+   * Commit transitions, lease renewal, validation, persistence and wallet synchronization
+   * through one coordinator-owned boundary.
    */
   private async commitTransition(
     current: LiftJob,
@@ -439,9 +439,9 @@ export class AsyncLiftClaimCoordinator {
     }
     const next = this.renewActiveOwnership(candidate);
     this.dependencies.assertJobMatchesStatus(next);
-    await this.dependencies.writeJob(next, kind);
-    await this.persistOwnershipState(next);
-    return next;
+    const committed = await writeLiftJobCandidate(this.dependencies.writeJob, next, kind);
+    await this.persistOwnershipState(committed);
+    return committed;
   }
 
   private renewActiveOwnership(job: LiftJob): LiftJob {
@@ -697,16 +697,16 @@ export class AsyncLiftClaimCoordinator {
       commitRecoveryReset: async (reset) => await close(async (before) => {
         this.assertLifecycleTransition(before, reset, 'accepted');
         // Reset must be claim-visible before the one-shot wallet-release notification fires.
-        await this.dependencies.writeJob(reset, 'recover-reset');
+        const committed = await writeLiftJobCandidate(this.dependencies.writeJob, reset, 'recover-reset');
         await this.releaseJobOwnership(before);
-        return reset;
+        return committed;
       }),
       commitProofFailure: async (failed) => await close(async (before) => {
         this.assertLifecycleTransition(before, failed, 'failed');
         // Canonical chain proof ends nonce ownership even if the local failure write must retry.
         await this.releaseJobOwnership(before);
-        await this.dependencies.writeJob(failed, 'failed');
-        return failed;
+        const committed = await writeLiftJobCandidate(this.dependencies.writeJob, failed, 'failed');
+        return committed;
       }),
       commitProofFinalization: async (finalize) => await close(async (before) => {
         // Proof authorizes immediate wallet reuse. Local repair and terminal persistence may then
@@ -715,14 +715,14 @@ export class AsyncLiftClaimCoordinator {
         const finalized = await finalize();
         if (finalized === null) return null;
         this.assertLifecycleTransition(before, finalized, 'finalized');
-        await this.dependencies.writeJob(finalized, 'recovered-finalize');
-        return finalized;
+        const committed = await writeLiftJobCandidate(this.dependencies.writeJob, finalized, 'recovered-finalize');
+        return committed;
       }),
       commitReaccept: async (accepted) => await close(async (before) => {
         this.assertLifecycleTransition(before, accepted, 'accepted');
         await this.releaseJobOwnership(before);
-        await this.dependencies.writeJob(accepted, 'reaccept');
-        return accepted;
+        const committed = await writeLiftJobCandidate(this.dependencies.writeJob, accepted, 'reaccept');
+        return committed;
       }),
       commitRemoval: async () => await close(async (before) => {
         await this.releaseJobOwnership(before);
@@ -751,7 +751,7 @@ export class AsyncLiftClaimCoordinator {
         // Inclusion becomes visible before release so a woken worker never observes an active
         // transaction as claimable. An already-included retry only repeats the release.
         if (before.status !== 'included') {
-          await this.dependencies.writeJob(included, 'included');
+          included = await writeLiftJobCandidate(this.dependencies.writeJob, included, 'included') as typeof included;
         }
         await this.releaseJobOwnership(before);
         return included;
