@@ -1,4 +1,5 @@
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
+import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -217,6 +218,63 @@ test('an abort after the launcher exited is recorded and never reads as a succes
     assert.equal(early.cancelled, true); assert.equal(phaseSucceeded(early), false);
   } finally {
     if (retainer) { try { process.kill(retainer); } catch { /* already gone */ } }
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+// A launcher that exits while an ordinary child, in the launcher's own process
+// group, keeps the output open.
+const groupLauncher = ['-e', `const { spawn } = require('node:child_process');
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: ['ignore', 'inherit', 'inherit'] });
+  console.log('GROUP_CHILD_PID ' + child.pid); child.unref();`];
+
+test('output still open after the launcher exited stops the descendants the runner owns, and nothing else', {
+  timeout: 30000,
+  skip: process.platform === 'win32' && 'Windows has no process group the runner can signal after the launcher exited',
+}, async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'regression-group-'));
+  const sentinel = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
+  sentinel.unref();
+  let descendant;
+  try {
+    const result = await runCommand(process.execPath, groupLauncher, root, path.join(temp, 'group.log'), 60000, undefined, { settleMs: 500 });
+    descendant = Number(/GROUP_CHILD_PID (\d+)/.exec(result.stdout)?.[1]);
+    assert.ok(descendant, 'the descendant started');
+    assert.match(result.error ?? '', /still open/);
+    assert.equal(result.timedOut, false);
+    assert.equal(phaseSucceeded(result), false);
+    let running = true;
+    for (let attempt = 0; attempt < 60 && running; attempt++) {
+      try { process.kill(descendant, 0); await new Promise((resolve) => setTimeout(resolve, 50)); } catch (error) { assert.equal(error.code, 'ESRCH'); running = false; }
+    }
+    assert.equal(running, false, 'the descendant in the owned process group was stopped');
+    assert.doesNotThrow(() => process.kill(sentinel.pid, 0), 'an unrelated process survived');
+  } finally {
+    sentinel.kill();
+    if (descendant) { try { process.kill(descendant, 'SIGKILL'); } catch { /* already stopped */ } }
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test('a log that cannot be written fails the phase and stops the child instead of throwing', { timeout: 30000 }, async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'regression-log-'));
+  const marker = 'LOG-WRITE-FAILS-HERE';
+  const writeSync = fs.writeSync;
+  // Only the command's own output fails, so the test reporter's writes are untouched.
+  const failing = mock.method(fs, 'writeSync', (fd, data, ...rest) => {
+    if (Buffer.isBuffer(data) && data.includes(marker)) throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' });
+    return writeSync(fd, data, ...rest);
+  });
+  try {
+    const result = await runCommand(process.execPath, ['-e', `console.log(${JSON.stringify(marker)}); setInterval(() => {}, 1000)`],
+      root, path.join(temp, 'full.log'), 20000, undefined, { settleMs: 2000 });
+    assert.ok(failing.mock.callCount() > 0, 'the log write was attempted');
+    assert.match(result.error ?? '', /cannot write the phase log: ENOSPC/);
+    assert.equal(result.timedOut, false);
+    assert.equal(phaseSucceeded(result), false);
+    assert.equal(result.signal, 'SIGKILL', 'the owned child was stopped rather than left to its deadline');
+  } finally {
+    failing.mock.restore();
     fs.rmSync(temp, { recursive: true, force: true });
   }
 });

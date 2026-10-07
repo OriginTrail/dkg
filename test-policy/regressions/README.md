@@ -56,10 +56,13 @@ status of the process it launched. Prerequisites, the execution classifier and
 the receipt validator all reject a cancelled phase, and a proof whose signal was
 aborted is never marked proven, even when every phase had already passed.
 Output still open ten seconds after the launcher exited, or after the owned tree
-was stopped, belongs to a descendant the runner cannot reach (on Windows,
-`taskkill` follows only a live launcher). The runner stops waiting for it and
-fails the phase with that reason, so the worktree teardown that follows can
-report an inconclusive cleanup instead of hanging. Phase names, their order and
+was stopped, belongs to a descendant the runner may not be able to reach (on
+Windows, `taskkill` follows only a live launcher). The runner stops the owned
+process group once more, which on POSIX outlives the launcher while any member
+runs, then stops waiting for the output and fails the phase with that reason, so
+the worktree teardown that follows can report an inconclusive cleanup instead of
+hanging. A phase log that cannot be written (a full disk, for instance) fails the
+phase the same way: the owned tree is stopped and the error is recorded. Phase names, their order and
 the one rule for a successful prerequisite live in `phases.mjs`; the runner and
 the validator both use it, so a live result and its recorded form are held to
 the same checks. Evidence defaults to the ignored
@@ -150,7 +153,9 @@ modify actual case/shared-runner bytes to demonstrate independent freshness.
 The installed pnpm version and owned descendant termination on timeout and
 cancellation are exercised, with an unrelated sentinel process that must survive
 both. A launcher that exits while a descendant keeps its output open must settle
-in bounded time and fail the phase. A cancellation after the launcher exited is
+in bounded time and fail the phase, and on POSIX a descendant still in the
+launcher's process group must be stopped by then while the sentinel survives. An
+injected log write failure must fail the phase and stop the child. A cancellation after the launcher exited is
 recorded and rejected, and live results and recorded phases are held to one
 prerequisite contract. Windows- and POSIX-shaped reports validate under their own
 path rules on any host. Registering a case or editing the validator leaves

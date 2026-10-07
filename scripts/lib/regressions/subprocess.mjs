@@ -35,12 +35,15 @@ const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 // `settleMs` after the launcher exited or was stopped. That last case is a
 // descendant outside the owned tree (taskkill follows only a live launcher), so
 // the runner stops waiting for it rather than hang, and the phase fails
-// whatever the launcher's own exit code was.
+// whatever the launcher's own exit code was. Before it stops waiting it stops
+// the owned tree once more: on POSIX the launcher's process group outlives the
+// launcher while any member runs. A log that cannot be written fails the phase
+// the same way, instead of throwing out of a stream callback.
 export function runCommand(command, args, cwd, log, timeoutMs, signal, { settleMs = OUTPUT_SETTLE_MS } = {}) {
   const invocation = commandInvocation(command, args);
   return new Promise((resolve) => {
     const output = fs.openSync(log, 'wx');
-    let stdout = '', stderr = '', timedOut = false, cancelled = false, error, bytes = 0, finished = false, launcherExit, settleTimer;
+    let stdout = '', stderr = '', timedOut = false, cancelled = false, error, bytes = 0, finished = false, logFailed = false, launcherExit, settleTimer;
     const child = spawn(invocation.command, invocation.args, { cwd, env: { ...process.env, CI: '1', FORCE_COLOR: '0' },
       detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
     const finish = (code, terminationSignal) => {
@@ -50,26 +53,40 @@ export function runCommand(command, args, cwd, log, timeoutMs, signal, { settleM
       resolve({ command, args, invocation, code, signal: terminationSignal, timedOut, ...(cancelled ? { cancelled } : {}),
         ...(error ? { error } : {}), stdout, stderr });
     };
+    const killOwnedTree = () => {
+      if (!child.pid) return;
+      try {
+        if (process.platform === 'win32') execFileSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+        else process.kill(-child.pid, 'SIGKILL');
+      } catch { /* nothing of the tree is left to stop */ }
+    };
     const abandonOutput = (reason) => {
       settleTimer ??= setTimeout(() => {
         error ??= `${reason}; the output was still open ${settleMs} ms later`;
+        // Finishing clears the deadline that would otherwise have stopped any
+        // descendant still in the owned process group.
+        killOwnedTree();
         child.stdout?.destroy(); child.stderr?.destroy();
         finish(launcherExit?.code ?? null, launcherExit?.signal ?? null);
       }, settleMs);
     };
     const collect = (kind, data) => {
-      if (finished) return;
+      if (finished || logFailed) return;
       bytes += data.length;
       if (bytes > MAX_OUTPUT_BYTES) { error ??= 'phase output exceeds 8 MiB'; stop(); return; }
-      fs.writeSync(output, data);
+      try {
+        fs.writeSync(output, data);
+      } catch (failure) {
+        logFailed = true;
+        error ??= `cannot write the phase log: ${failure.message}`;
+        stop();
+        return;
+      }
       if (kind === 'stdout') stdout += data.toString(); else stderr += data.toString();
     };
     const stop = () => {
       if (!child.pid) return;
-      try {
-        if (process.platform === 'win32') execFileSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
-        else process.kill(-child.pid, 'SIGKILL');
-      } catch { /* process already exited */ }
+      killOwnedTree();
       abandonOutput('the owned process tree did not release its output after being stopped');
     };
     const cancel = () => { cancelled = true; stop(); };
