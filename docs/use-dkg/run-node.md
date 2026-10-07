@@ -257,6 +257,150 @@ public StorageACK.** `syncReconcilerEnabled` / `DKG_SYNC_RECONCILER_ENABLED`
 only control the periodic peer-sync reconciler and never switch VM
 reconciliation off.
 
+**Holders you are not connected to.** When VM reconciliation recovers a public
+graph's missing Knowledge Assets it asks the graph's curators and your
+connected peers first. Behind them it also dials ShardingTable Cores it is not
+connected to, when the local `agents` phonebook holds a core-role profile whose
+`agentAddress` is an operational wallet registered on chain to an identity in
+the ShardingTable (at most 32 peers, 2 per identity). A profile names its own
+peer id, so it is an unsigned routing hint: it decides only whom to dial, and
+every asset is still verified against its on-chain merkle root. A profile with
+no `agentAddress`, or a wallet that is not a ShardingTable identity's, is
+ignored, and any unreadable chain or phonebook fact leaves the peer set
+unchanged.
+
+Because anyone can publish a profile, no claim a profile makes about itself
+(such as how recently it was seen) moves a row ahead of another; such a claim
+only orders the peers of one identity. The phonebook
+is read in pages of 256 core-role rows in wallet order (then peer id), at most
+four pages per resolution. The order is the rows' own key, so a publisher
+chooses where its junk sorts and can place it ahead of the holders; what bounds
+that is that the walk resumes where it stopped, so position decides when a row
+is read, not whether. The peer cap applies to the peers the chain vouches
+for. A resolution asks the chain about at most 256 wallets it has not asked
+about lately (an answer is remembered for 5 minutes when the wallet has no
+identity and 10 when it has). It starts a page read or a chain lookup only
+when the slowest of its kind so far leaves time to end within 8 of its 10
+seconds, so a slow chain or store shortens a resolution instead of timing it
+out. The walk resumes at the first row the last resolution did not examine and
+wraps at the end of the phonebook. The number of resolutions a walk needs does
+not depend on how far apart they run (the spacing only decides how many answers
+are still remembered), and a remembered answer only saves a lookup, so it can
+carry a resolution further than one that finds none. It keeps walking when the
+peers it already has fill the cap or give every identity its two, so the bindings it carries from behind a flood of junk are
+verified again before they expire.
+
+What is carried is bounded per identity: at most 4 verified peers for each
+ShardingTable identity, however many rows claim a wallet. A peer that several
+rows claim for one identity (for example under different casings of one wallet,
+which are different rows) is carried once, under the row that ranks best (later
+`lastSeen`, then the row that sorts first). A binding goes when a range holding
+its row is examined without it, when its identity leaves the ShardingTable, when
+its identity holds 4 better ranked peers (later `lastSeen`, then smaller peer
+id), or after an hour.
+
+**What the walk guarantees.** Take a phonebook that does not change while the
+walk reaches a holder, with N distinct junk wallets (each needing a chain
+lookup) in R junk rows sorting ahead of it:
+
+- While the tier is not satisfied, the holder is found within about
+  max(N / 256, R / 1,024) + 1 resolutions that complete, at any spacing between
+  them. A resolution reads up to 1,024 rows and costs at most 256 lookups (more
+  resolutions when a slow chain or store makes the time budget the limit), and
+  a wallet is asked about once per pass of the walk. Once the tier is satisfied
+  a resolution stops after the page that satisfied it, so the walk moves 256
+  rows a resolution: about R / 256 + 1.
+- While rows are left, a resolution is due a minute after the previous one ends.
+  With the 60 second sweep that is every second sweep, so 1,000 junk wallets
+  delay a holder by about ten minutes.
+- Once found, the holder stays in the set as long as its row stays in the
+  phonebook and every pass of the walk takes less than the hour a binding is
+  kept. The limit is the number of rows (or distinct wallets) a resolution
+  covers times the resolution period: at the default sweep with one graph, one
+  resolution about every two minutes (30 an hour), so about 7,680 distinct junk
+  wallets, or about 7,680 rows once the tier is satisfied (rows that share
+  wallets are read faster before that: up to about 30,720). A simulation with
+  one graph, a 1 ms chain and distinct junk wallets held the set up to 7,400 of
+  them and lost it at 7,700, the wait at the end of each pass included. A slow chain stretches the period
+  and lowers the limit; more graphs make resolutions more frequent (see the cost
+  below) and raise it.
+- Rows that claim one identity's wallet cannot displace another identity's
+  peers from the carry.
+- Cost: while the phonebook is larger than one page the tier keeps walking even
+  when it is satisfied. Each such resolution costs at most 256 lookups and, once
+  the tier is satisfied, typically one page read (up to four before it is, for
+  example when the carried bindings have expired). A resolution can start a
+  minute after the previous one ended (the cached answer expires then), and the
+  resolver is shared by every graph, so its bound for the node is about 60
+  resolutions, 240 page reads (four per resolution) and 15,360 lookups an hour,
+  plus one resolution for each phonebook arrival that invalidates the hints (the
+  Edge's on-demand `agents` phonebook fetch resolving a graph's curator, which
+  waits at least ten minutes between fetches that reached a peer; a node that
+  syncs the phonebook on every connect has no such arrival).
+  That bound is not what to expect: a node with 3,000 junk wallets ahead of its
+  holders, the default 60 second sweep and a 1 ms chain measured 26
+  resolutions (6,449 to 6,518 lookups, one page each) an hour with one graph,
+  and 32 to 45 resolutions (about 8,000 to 11,300 lookups) an hour with 2 to 12
+  graphs whose sweeps are out of phase. With one graph a resolution is due just
+  after the next sweep tick and runs on the one after, and the resolution that
+  reaches the end of the phonebook waits the full 5 minutes. When the core rows
+  fit one page, nothing changes: one resolution every 5 minutes.
+  The policy reads are not part of that bound: each graph's refresh reads the
+  graph's access policy (a bounded chain-authority read, at most 5 seconds)
+  whenever its entry is due, every 5 minutes, or about every minute while its
+  resolutions are cut short (a phonebook larger than one page keeps them so) or
+  its policy is unknown, so with G graphs a node makes up to about G such reads
+  a minute.
+
+**What it does not guarantee.**
+
+- Junk that arrives ahead of the walk faster than a resolution examines it (256
+  wallets) keeps the walk from reaching a holder. A pass longer than the hour
+  lets a holder's binding expire between passes, so the holder is missing from
+  the set until its row is verified again.
+- A profile that claims a real Core's wallet with peer ids that rank above the
+  Core's own (a later `lastSeen`, or a smaller peer id at an equal one) takes
+  that identity's two peers until peers are bound to wallets by signature. It
+  cannot take another identity's from the carry. With more than 16 identities in
+  the ShardingTable the 32-peer cap is spread over the identities in id order,
+  each one's best peer first, so a claim that gives a low-numbered identity a
+  second peer can take the cap slot of a higher-numbered identity's second peer.
+- The reads of a resolution must finish within its 10 second bound, and a read
+  abandoned at the bound commits nothing. A resolution always makes its first
+  page read and one batch of 8 lookups, so only a chain or store that needs the
+  whole bound for one of those, or one that suddenly runs far slower than it did
+  a moment before, makes no progress (the set of hinted peers is then not
+  updated).
+- Reads never overlap, so a caller that arrives after a phonebook arrival while
+  a read runs waits for that read and then for one of its own: up to two bounds,
+  about 20 seconds. Phonebook arrivals that come faster than a read ends hold
+  the walk still.
+- A Core that registers after its row was examined can go unrecognised for up to
+  the 5 minutes its wallet's "no identity" answer is remembered plus the time
+  the walk needs to come back to its row, up to one pass.
+- A holder profile that arrives, or changes, in rows the walk has already
+  passed is read only when the walk wraps, up to one pass later. A phonebook
+  arrival drops the cached answer and makes the next resolution run, but it does
+  not move the walk back: what it covers again are the rows a read that was
+  still running might have missed, not rows behind the walk. With 3,000 junk
+  wallets (a pass of about 24 minutes at the default sweep) a holder profile
+  that sorts before every junk wallet, published and announced at minute 12,
+  was found at minute 29 (published at minute 6 or 20: also 29).
+
+The tier is on by default; turn it off
+with
+
+```json
+{
+  "vmReconcileHolderTierEnabled": false
+}
+```
+
+or with `DKG_VM_RECONCILE_HOLDER_TIER=0`. The environment variable overrides
+`config.json` in both directions and takes the same values as
+`DKG_VM_RECONCILER_ENABLED`. An embedding program passes the same
+`vmReconcileHolderTierEnabled` option to `DKGAgent`, per instance.
+
 **Updates.** A Core stores a public update as its own ACK copy, replacing the
 Knowledge Asset's SWM copy, only once the version it replaces is in its VM.
 Until then it declines the update transiently and promotes that version at

@@ -17,6 +17,7 @@
 import type { ethers } from 'ethers';
 import type { SharedMemorySyncDiagnostics } from './sync/shared-memory-diagnostics.js';
 import type { ChainAuthorityReadBudgets } from './chain-authority-read-budgets.js';
+import type { VmHolderTierSwitchConfig } from './vm-reconcile-holder-tier-switch.js';
 export type {
   SharedMemorySyncDiagnostics,
   SharedMemorySyncResult,
@@ -1416,7 +1417,7 @@ export type FinalizationRecoveryStoreFactory = (
   dataDir: string,
 ) => Promise<FinalizationRecoveryStore>;
 
-export interface DKGAgentConfig {
+export interface DKGAgentConfig extends VmHolderTierSwitchConfig {
   name: string;
   /**
    * Construction seam for the durable finalization inbox. Embedders and tests

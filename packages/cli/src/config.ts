@@ -635,7 +635,7 @@ export interface LoggingConfig {
   kaPublishLifecycleDebug?: boolean;
 }
 
-export interface DkgConfig {
+export interface DkgConfig extends Pick<DKGAgentConfig, 'vmReconcileHolderTierEnabled'> {
   name: string;
   /**
    * Selects which bundled network/<name>.json overlay this node should use.

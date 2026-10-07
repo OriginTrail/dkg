@@ -21,6 +21,7 @@ packages:
   - "devnet/subscription-persist-restart"
   - "devnet/v10-rs-prune"
   - "devnet/v10-rs-wallet-rotation"
+  - "devnet/vm-holder-tier"
   - "devnet/_bootstrap"
   - "devnet/rfc64-persistence-lifecycle"
   - "devnet/rfc64-gate1-public-open"

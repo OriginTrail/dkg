@@ -1941,6 +1941,7 @@ async function runDaemonInnerWithStartupOwnership(
     syncSharedMemoryOnConnect: config.syncSharedMemoryOnConnect,
     syncReconcilerEnabled: config.syncReconcilerEnabled,
     vmReconcilerEnabled: config.vmReconcilerEnabled,
+    vmReconcileHolderTierEnabled: config.vmReconcileHolderTierEnabled,
     syncReconcilerIntervalMs: config.syncReconcilerIntervalMs,
     syncStalenessThresholdMs: config.syncStalenessThresholdMs,
     syncBackoffBaseMs: config.syncBackoffBaseMs,

@@ -136,6 +136,32 @@ export function groupDiscoveredAgentIdentityRows(
   }));
 }
 
+/** Upper bound of one {@link DiscoveryClient.findCoreAgentPeerHintPage} page. */
+export const MAX_CORE_AGENT_PEER_HINT_PAGE_SIZE = 1024;
+
+/**
+ * One core-role phonebook binding. UNSIGNED: anyone can publish a profile that
+ * names any peer id next to any wallet, so it only ever ranks dial candidates.
+ */
+export interface CoreAgentPeerHint {
+  peerId: string;
+  /** The profile's `dkg:agentAddress`, a well-formed wallet literal; validated again by the consumer. */
+  agentAddress: string;
+  lastSeen?: string;
+}
+
+/** Keyset cursor: the last row of the previous page, by the fixed order of the read. */
+export interface CoreAgentPeerHintCursor {
+  readonly agentAddress: string;
+  readonly peerId: string;
+}
+
+export interface CoreAgentPeerHintPage {
+  readonly hints: CoreAgentPeerHint[];
+  /** Cursor of the next page; null when no further core row exists. */
+  readonly next: CoreAgentPeerHintCursor | null;
+}
+
 export interface DiscoveredOffering {
   agentUri: string;
   agentName: string;
@@ -260,6 +286,9 @@ export class DiscoveryClient implements AgentPeerDiscovery {
   ): Promise<AgentPeerPage> {
     options = Object.freeze({ ...options });
     validateAgentPeerPageRequest(options);
+    // A profile can carry the empty literal as its `dkg:agentAddress`. It binds
+    // no wallet, so no lookup may match it: an empty wallet resolves to nobody.
+    if (agentAddress.trim().length === 0) return { peerIds: [], nextAfterPeerId: null };
     const isEvmAddress = /^0x[0-9a-fA-F]{40}$/.test(agentAddress);
     const addressMatch = isEvmAddress
       ? `?agent <${DKG}agentAddress> ?storedAgentAddress .
@@ -293,6 +322,93 @@ export class DiscoveryClient implements AgentPeerDiscovery {
       peerIds,
       nextAfterPeerId: result.bindings.length > options.limit ? peerIds[peerIds.length - 1] : null,
     }, options);
+  }
+
+  /**
+   * One page of core-role phonebook rows for the VM holder tier: one row per
+   * distinct (agentAddress, peerId) binding, in ascending (agentAddress,
+   * peerId) order, at most `limit`, starting strictly after `after`.
+   *
+   * Every value is an UNSIGNED profile claim. The order is the binding's own
+   * key, not its `lastSeen` (which only travels along, newest per binding), so
+   * a publisher chooses where its rows sort but cannot move one ahead by
+   * freshness; and the walk is keyset-paged so a consumer can continue past
+   * junk at a rate of its own choosing (a page costs time that grows with the phonebook, so how
+   * fast it gets through a flood is the consumer's bound to state). The
+   * `nodeRole`, wallet-shape and peer-id-shape filters are cost bounds (an
+   * Edge with the phonebook holds ~1,900 profiles on Base mainnet, about 60 of
+   * them Core), never trust signals: a row whose `agentAddress` is not a
+   * 20-byte hex wallet cannot bind anything, and a peer id is base58 or base32
+   * text (also what keeps the cursor exact), so neither occupies a slot, and the
+   * consumer must still bind each address to a ShardingTable identity on chain.
+   */
+  async findCoreAgentPeerHintPage(options: {
+    limit: number;
+    after?: CoreAgentPeerHintCursor;
+    signal?: AbortSignal;
+  }): Promise<CoreAgentPeerHintPage> {
+    const { limit, after } = options;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_CORE_AGENT_PEER_HINT_PAGE_SIZE) {
+      throw new RangeError(`Core peer hint page size must be an integer from 1 to ${MAX_CORE_AGENT_PEER_HINT_PAGE_SIZE}`);
+    }
+    if (
+      after !== undefined
+      && (typeof after.agentAddress !== 'string' || after.agentAddress.length === 0
+        || typeof after.peerId !== 'string' || after.peerId.length === 0)
+    ) {
+      throw new TypeError('Core peer hint cursor must name a wallet and a peer id');
+    }
+    options.signal?.throwIfAborted();
+    const afterFilter = after === undefined
+      ? ''
+      : `FILTER(STR(?agentAddress) > "${escapeSparqlLiteral(after.agentAddress)}"
+               || (STR(?agentAddress) = "${escapeSparqlLiteral(after.agentAddress)}"
+                   && STR(?peerId) > "${escapeSparqlLiteral(after.peerId)}"))`;
+    // Grouping keeps a profile with several `lastSeen` rows (a re-published
+    // heartbeat) from multiplying rows ahead of LIMIT and hiding another Core.
+    const result = await this.engine.query(`
+      SELECT ?peerId ?agentAddress (MAX(?seen) AS ?lastSeen) WHERE {
+        ?agent a <${DKG}Agent> ;
+               <${DKG}peerId> ?peerId ;
+               <${DKG}agentAddress> ?agentAddress ;
+               <${DKG}nodeRole> ?nodeRole .
+        FILTER(STR(?nodeRole) = "core")
+        FILTER(REGEX(STR(?agentAddress), "^0x[0-9a-fA-F]{40}$"))
+        FILTER(REGEX(STR(?peerId), "^[A-Za-z0-9]{1,128}$"))
+        ${afterFilter}
+        OPTIONAL { ?agent <${DKG}lastSeen> ?seen }
+      }
+      GROUP BY ?peerId ?agentAddress
+      ORDER BY ASC(STR(?agentAddress)) ASC(STR(?peerId))
+      LIMIT ${limit + 1}
+    `, {
+      contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH,
+      signal: options.signal,
+    });
+    options.signal?.throwIfAborted();
+    if (result.bindings.length > limit + 1) {
+      throw new Error('Core peer hint query exceeded its row limit');
+    }
+    const hints = result.bindings.slice(0, limit).flatMap((row) => {
+      const peerId = stripQuotes(row['peerId'] ?? '');
+      const agentAddress = stripQuotes(row['agentAddress'] ?? '');
+      if (peerId.length === 0 || agentAddress.length === 0) return [];
+      const lastSeen = row['lastSeen'] ? stripQuotes(row['lastSeen']) : undefined;
+      return [{
+        peerId,
+        agentAddress,
+        ...(lastSeen ? { lastSeen } : {}),
+      }];
+    });
+    const last = result.bindings.length > limit
+      ? result.bindings[limit - 1]
+      : undefined;
+    return {
+      hints,
+      next: last === undefined
+        ? null
+        : { agentAddress: stripQuotes(last['agentAddress'] ?? ''), peerId: stripQuotes(last['peerId'] ?? '') },
+    };
   }
 
   async findSkillOfferings(options: SkillSearchOptions = {}): Promise<DiscoveredOffering[]> {

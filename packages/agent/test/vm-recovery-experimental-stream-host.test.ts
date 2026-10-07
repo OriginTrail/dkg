@@ -16,6 +16,11 @@ const agents: Array<{ stop(): Promise<void> }> = [];
 
 /** Planner/host fixture only: exact transport and ordinal chain outcomes are fixture ports. */
 async function harness(options: { public?: boolean; core?: boolean; advertised?: boolean; unknown?: boolean; oversize?: boolean; soleCore?: boolean; failCoreProbe?: boolean; targetCount?: number } = {}) {
+  // These fixtures pin the recovery executor's own authority reads (one per pass, and none on an
+  // ordinary pass). The holder tier reads the graph's access policy through the same resolver, once
+  // per refresh, and would be counted as one of them; it has its own wiring tests
+  // (vm-reconcile-holder-tier-agent.test.ts), so these hosts run without it.
+  vi.stubEnv('DKG_VM_RECONCILE_HOLDER_TIER', '0');
   const h = await createVmRecoveryHostHarness({
     name: 'ExperimentalVmStreamProfile', localCgId: cg, peers: options.soleCore ? [core] : [older, core], targetCount: options.targetCount ?? 13,
     accessPolicy: options.public === false ? 1 : 0,

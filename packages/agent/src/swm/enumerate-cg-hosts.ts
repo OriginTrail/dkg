@@ -23,8 +23,12 @@
  *
  * Future shard-aware enumeration (Phase B) will:
  *   1. Maintain a local (identityId → peerId) map from observed peer
- *      announcements (libp2p identify protocol carries peer addrs, and
- *      `getPeerDiagnostics()` already surfaces a peer's identityId).
+ *      announcements. Note that neither libp2p identify nor
+ *      `getPeerDiagnostics()` carries an identityId today; the only observed
+ *      source is an unsigned phonebook profile bound to a sharding-table
+ *      identity on chain, which `vm-reconcile-holder-tier.ts` already
+ *      consumes as a routing hint for VM exact recovery (routing only: data is
+ *      still verified against on-chain roots).
  *   2. Cross-reference against `ShardingTable.getShardingTable()` to
  *      filter to actual sharding-table members.
  *   3. Apply the per-CG sharding function once shards >1 ship.

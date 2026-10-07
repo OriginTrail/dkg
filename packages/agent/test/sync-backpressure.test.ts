@@ -16,6 +16,7 @@ import {
   syncAdmissionWouldBeRefused,
   withGlobalSyncBackpressure,
 } from '../src/sync/backpressure.js';
+import { resolveVmReconcileHolderTierEnabled } from '../src/vm-reconcile-holder-tier-switch.js';
 import {
   PriorityAdmissionQueue,
   type PriorityAdmissionAcquireOptions,
@@ -1546,6 +1547,58 @@ describe('sync global backpressure', () => {
       else process.env.DKG_VM_RECONCILER_ENABLED = oldVm;
       if (oldSync === undefined) delete process.env.DKG_SYNC_RECONCILER_ENABLED;
       else process.env.DKG_SYNC_RECONCILER_ENABLED = oldSync;
+    }
+  });
+
+  it('resolves the VM holder-tier switch with environment over config over default', () => {
+    const old = process.env.DKG_VM_RECONCILE_HOLDER_TIER;
+    try {
+      delete process.env.DKG_VM_RECONCILE_HOLDER_TIER;
+      expect(resolveVmReconcileHolderTierEnabled()).toBe(true);
+      expect(resolveVmReconcileHolderTierEnabled(undefined)).toBe(true);
+      expect(resolveVmReconcileHolderTierEnabled(false)).toBe(false);
+      expect(resolveVmReconcileHolderTierEnabled(true)).toBe(true);
+
+      // The kill switch beats a configured true, and an explicit on beats a configured false.
+      process.env.DKG_VM_RECONCILE_HOLDER_TIER = '0';
+      expect(resolveVmReconcileHolderTierEnabled(true)).toBe(false);
+      expect(resolveVmReconcileHolderTierEnabled()).toBe(false);
+      process.env.DKG_VM_RECONCILE_HOLDER_TIER = 'enabled';
+      expect(resolveVmReconcileHolderTierEnabled(false)).toBe(true);
+      // An unrecognised value is not a decision; config and default apply.
+      process.env.DKG_VM_RECONCILE_HOLDER_TIER = 'maybe';
+      expect(resolveVmReconcileHolderTierEnabled(false)).toBe(false);
+      expect(resolveVmReconcileHolderTierEnabled()).toBe(true);
+    } finally {
+      if (old === undefined) delete process.env.DKG_VM_RECONCILE_HOLDER_TIER;
+      else process.env.DKG_VM_RECONCILE_HOLDER_TIER = old;
+    }
+  });
+
+  it('keeps the holder-tier switch independent of the VM and peer-sync reconciler switches', () => {
+    const oldTier = process.env.DKG_VM_RECONCILE_HOLDER_TIER;
+    const oldVm = process.env.DKG_VM_RECONCILER_ENABLED;
+    const oldSync = process.env.DKG_SYNC_RECONCILER_ENABLED;
+    try {
+      delete process.env.DKG_VM_RECONCILE_HOLDER_TIER;
+      process.env.DKG_VM_RECONCILER_ENABLED = '0';
+      process.env.DKG_SYNC_RECONCILER_ENABLED = '0';
+      expect(resolveVmReconcileHolderTierEnabled()).toBe(true);
+      process.env.DKG_VM_RECONCILE_HOLDER_TIER = '0';
+      delete process.env.DKG_VM_RECONCILER_ENABLED;
+      delete process.env.DKG_SYNC_RECONCILER_ENABLED;
+      expect(resolveVmReconcileHolderTierEnabled()).toBe(false);
+      expect(resolveVmReconcilerEnabled()).toBe(true);
+      expect(resolveSyncReconcilerEnabled()).toBe(true);
+    } finally {
+      for (const [name, value] of [
+        ['DKG_VM_RECONCILE_HOLDER_TIER', oldTier],
+        ['DKG_VM_RECONCILER_ENABLED', oldVm],
+        ['DKG_SYNC_RECONCILER_ENABLED', oldSync],
+      ] as const) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
     }
   });
 

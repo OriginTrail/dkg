@@ -298,6 +298,10 @@ import {
   type VmRecoveryUalDisposition,
 } from './vm-recovery-provider-policy.js';
 import {
+  VmHolderTierController,
+  appendVmHolderTier,
+} from './vm-reconcile-holder-tier.js';
+import {
   MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
   ExactAssetFetchLifecycleClosedError,
   ExactAssetVersionBehindError,
@@ -533,6 +537,7 @@ import type {
   ContextGraphBindingTarget,
 } from './context-graph-binding-state.js';
 import { resolveExactBatchStreamEnabled, resolveVmReconcilerEnabled } from './sync/backpressure.js';
+import { resolveVmReconcileHolderTierEnabled } from './vm-reconcile-holder-tier-switch.js';
 import { mapWithConcurrencyDrained } from './map-with-concurrency.js';
 import { VM_RECOVERY_SYNC_PRIORITY } from './sync/catchup-policy.js';
 import { finalizedContextGraphSnapshotMismatchV1 } from
@@ -5511,10 +5516,26 @@ export class SwmHostModeMethods extends DKGAgentBase {
     localCgId: string,
   ): string[] {
     const curatorOrder = this.vmReconcileCuratorPeersByCg.get(localCgId) ?? [];
+    // Hinted ShardingTable holders (identity->peer from an unsigned phonebook
+    // profile, bound to a sharding-table identity on chain). They only ever
+    // fill capacity the two tiers below leave free; see `appendVmHolderTier`.
+    const holderPeerIds = this.vmReconcileHolderTier?.peerIdsFor(localCgId) ?? [];
+    // With no hint the roster is returned as composed, touching nothing new
+    // (this node's own peer id is only read when there is a hint to filter).
+    const withHolders = (roster: string[]): string[] => (
+      holderPeerIds.length === 0
+        ? roster
+        : appendVmHolderTier(
+          roster,
+          holderPeerIds,
+          this.peerId,
+          DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX,
+        )
+    );
     const libp2p = (this.node as any)?.libp2p;
     const getConnections = libp2p?.getConnections;
     if (typeof getConnections !== 'function') {
-      return curatorOrder.slice(0, DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX);
+      return withHolders(curatorOrder.slice(0, DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX));
     }
     const peersById = new Map<string, { toString(): string }>();
     for (const connection of getConnections.call(libp2p) as Array<{
@@ -5553,7 +5574,64 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const boundedOrdinary = ordinaryOrder
       .filter((peerId) => !curatorSet.has(peerId))
       .slice(0, ordinaryBudget);
-    return [...boundedCurators, ...boundedOrdinary];
+    return withHolders([...boundedCurators, ...boundedOrdinary]);
+  }
+
+  /**
+   * Whether this agent's holder tier is on: environment
+   * (`DKG_VM_RECONCILE_HOLDER_TIER=0` is the kill switch), then
+   * `config.vmReconcileHolderTierEnabled`, then the default (on).
+   */
+  vmReconcileHolderTierEnabled(this: DKGAgent): boolean {
+    return resolveVmReconcileHolderTierEnabled(this.config.vmReconcileHolderTierEnabled);
+  }
+
+  /**
+   * The node's holder-tier controller, created on first use: the shared resolver
+   * of observed identity->peer hints and every graph's remembered set live
+   * behind it (`vm-reconcile-holder-tier.ts`). Every read is a routing hint: a
+   * missing or failing chain method, phonebook or policy yields no holders.
+   */
+  vmReconcileHolderTierController(this: DKGAgent): VmHolderTierController {
+    this.vmReconcileHolderTier ??= new VmHolderTierController({
+      enabled: () => this.vmReconcileHolderTierEnabled(),
+      readPolicy: (localCgId, signal) => (
+        typeof this.readAgentsPhonebookAccessPolicy === 'function'
+          ? this.readAgentsPhonebookAccessPolicy(localCgId, signal)
+          : Promise.resolve('unknown')
+      ),
+      hints: {
+        listShardingTableIdentityIds: async () => {
+          const list = this.chain.listDesignatableNodes;
+          if (typeof list !== 'function') return undefined;
+          // `ShardingTable.getShardingTable()` itself, not the identity-ring
+          // cache: membership is the chain's answer, reused for 30 s by the adapter.
+          return (await list.call(this.chain)).map((node) => node.identityId);
+        },
+        getIdentityIdForAddress: async (address) => {
+          const read = this.chain.getIdentityIdForAddress;
+          return typeof read === 'function' ? read.call(this.chain, address) : undefined;
+        },
+        listCoreProfileHints: (request) => this.discovery.findCoreAgentPeerHintPage(request),
+        selfPeerId: () => this.peerId,
+        now: () => this.vmReconcileRotationNow(),
+      },
+      log: (message) => this.log.info(createOperationContext('system'), message),
+    });
+    return this.vmReconcileHolderTier;
+  }
+
+  /**
+   * Refresh one public graph's hinted-holder tier ahead of its recovery pass.
+   * Resolves once the tier's own state model has moved (see
+   * `VmHolderTierController.refresh`); rejects only for a defect.
+   */
+  async refreshVmReconcileHolderTier(
+    this: DKGAgent,
+    localCgId: string,
+    options: { signal?: AbortSignal; isCurrent: () => boolean },
+  ): Promise<void> {
+    await this.vmReconcileHolderTierController().refresh(localCgId, options);
   }
 
   vmReconcilePeerMembershipMatches(
@@ -5956,6 +6034,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.vmReconcileRotationAdmissionCursorByCg?.clear();
     this.vmReconcileCuratorPeersByCg?.clear();
     this.vmReconcileCuratorPageCursorByCg?.clear();
+    this.vmReconcileHolderTier?.close();
     this.vmReconcileExactPeerCapabilities?.clear();
     this.vmReconcilePublicCoreTransportPreferencePolicy?.clear();
     this.vmRefreshQueue?.clear();
@@ -6134,6 +6213,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       if (oldestKey === undefined) break;
       this.vmReconcileCuratorPeersByCg.delete(oldestKey);
     }
+    this.vmReconcileHolderTier?.prune(DKGAgentBase.VM_RECONCILE_CG_STATE_MAX_ENTRIES);
     while (
       this.vmReconcileCuratorPageCursorByCg.size
       > DKGAgentBase.VM_RECONCILE_CG_STATE_MAX_ENTRIES
@@ -6178,6 +6258,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.clearVmReconcileRotationStateForContextGraph(localCgId);
     this.vmReconcileCuratorPeersByCg.delete(localCgId);
     this.vmReconcileCuratorPageCursorByCg.delete(localCgId);
+    this.vmReconcileHolderTier?.deleteGraph(localCgId);
     this.clearVmReconcileActiveFetchCooldown(localCgId);
     this.vmReconcileCatchupPeerCursor.delete(localCgId);
     this.vmReconcileCatchupPeerOrder.delete(localCgId);
@@ -6656,10 +6737,37 @@ export class SwmHostModeMethods extends DKGAgentBase {
       index - admissionCursor + currentTargets.length
     ) % currentTargets.length;
 
-    // Suppression consults only the already-observed, capped connection view.
-    // This is intentionally before curator resolution, dialing, protocol waits,
-    // and admission probes. Every target reached this method only after the
-    // production ordinal/finalization check proved it still pending locally.
+    // Hinted ShardingTable holders join the roster behind the curator and
+    // connected-peer tiers. Their tier is refreshed here, before the gate below
+    // reads it, and for this graph only: a set that appeared after a completed
+    // proof cycle is pure roster growth, which breaks that backoff at once, and
+    // one graph's refresh never restarts another graph's cycle. Each time this
+    // graph's entry is due (every minute while its resolutions are cut short or
+    // unavailable or its policy is unknown, otherwise every five minutes) the
+    // work is one bounded policy read plus the shared, cached resolution;
+    // between due times this is a no-op.
+    try {
+      await this.refreshVmReconcileHolderTier(localCgId, {
+        signal,
+        isCurrent: isRecoveryCurrent,
+      });
+    } catch (error) {
+      // Expected outages and aborts never get here (they are outcomes of the
+      // tier's state model). A defect in this advisory tier is reported loudly,
+      // and exact recovery continues with the tiers it already has.
+      this.log.error(
+        ctx,
+        `VM exact fetch holder tier refresh failed unexpectedly for "${localCgId}"; `
+          + `the roster keeps its previous tiers: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
+      );
+    }
+    if (!isRecoveryCurrent()) return staleRecovery();
+
+    // Suppression consults only the already-observed, capped connection view
+    // (plus the remembered curator and holder tiers). This is intentionally
+    // before curator resolution, dialing, protocol waits, and admission probes.
+    // Every target reached this method only after the production
+    // ordinal/finalization check proved it still pending locally.
     const observedCandidatePeerIds = this.vmReconcileObservedCandidatePeerIds(localCgId);
     const now = this.vmReconcileRotationNow();
     const initiallyOwnedSlotKeys = new Set(currentTargets.flatMap((target) => {
@@ -7094,6 +7202,20 @@ export class SwmHostModeMethods extends DKGAgentBase {
       if (candidatePeerId) {
         let connectedPeer = connectedByPeerId.get(candidatePeerId);
         if (!connectedPeer) {
+          if (
+            this.vmReconcileHolderTier?.peerIdsFor(localCgId).includes(candidatePeerId)
+            // `connectedByPeerId` is this pass's opening snapshot: a connection
+            // made since (a priming walk, an inbound dial) must not be claimed.
+            && !this.node.libp2p.getConnections()
+              .some((candidate) => candidate.remotePeer.toString() === candidatePeerId)
+          ) {
+            // Tells an operator (and the live suite) that a hinted holder was
+            // reached by this pass's own dial, not by a connection made earlier.
+            this.log.info(
+              ctx,
+              `VM exact fetch dialing hinted ShardingTable holder ${candidatePeerId.slice(-8)} for "${localCgId}": not connected`,
+            );
+          }
           await phases.measure('peer-ready', () => this.ensurePeerConnected(candidatePeerId, { signal }).catch((error) => {
             this.log.info(
               ctx,

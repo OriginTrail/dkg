@@ -117,6 +117,7 @@ export {
   VmReconcileDispatcher,
 } from './chain-reconciler.js';
 export { resolveSyncReconcilerEnabled, resolveVmReconcilerEnabled } from './sync/backpressure.js';
+export { resolveVmReconcileHolderTierEnabled } from './vm-reconcile-holder-tier-switch.js';
 export {
   FinalizedAuthorityColdResolutionV1,
   finalizedAuthorityColdResolutionOf,

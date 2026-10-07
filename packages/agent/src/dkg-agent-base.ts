@@ -236,6 +236,7 @@ import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
+import type { VmHolderTierController } from './vm-reconcile-holder-tier.js';
 import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler, type ChatAclCheck, type SkillAclCheck } from './messaging.js';
 import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
 import { AGENT_REGISTRY_CONTEXT_GRAPH, canonicalAgentDidSubject, collectPublishableMultiaddrs, type AgentProfileConfig } from './profile.js';
@@ -1241,6 +1242,13 @@ export class DKGAgentBase {
   protected readonly vmReconcileRotationAdmissionCursorByCg = new Map<string, number>();
   /** Last resolved curator peers, used to keep the capped exact-recovery roster authoritative. */
   protected readonly vmReconcileCuratorPeersByCg = new Map<string, string[]>();
+  /**
+   * The VM exact-recovery holder tier: hinted ShardingTable holders per public
+   * graph and the shared resolver behind them, with their whole lifecycle. The
+   * host asks it to refresh a graph and reads a graph's peers; created on first
+   * use (`vmReconcileHolderTierController`).
+   */
+  protected vmReconcileHolderTier: VmHolderTierController | undefined;
   /**
    * Process-local capability evidence for exact VM recovery. Entries are
    * connection-scoped so a reconnect can reevaluate a peer after a rolling

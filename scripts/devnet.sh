@@ -30,6 +30,10 @@
 #   NUM_CORE_NODES
 #                 How many of the first N nodes are core; the rest are edge
 #                 (default: 4). Useful for 3-core/2-edge etc. layouts.
+#   DEVNET_EDGE_BOOTSTRAP_CORES
+#                 Comma-separated core node numbers (e.g. "1"): an edge's
+#                 bootstrap set is narrowed to those cores each time it is
+#                 (re)started. Default: edges dial every earlier core.
 #   DEVNET_ENABLE_PUBLISHER=1
 #                 Enable the async publisher runtime on each node
 #   DEVNET_EPCIS_CONTEXT_GRAPH
@@ -1050,7 +1054,12 @@ start_node() {
   # hub-and-spoke spoke (O(cores) connections per edge, never edge<->edge) — so
   # an edge can still publish and reach quorum; edges never mesh with each other.
   # Node 1 (first core) dials no one and meshes via inbound dials from the rest.
+  # DEVNET_EDGE_BOOTSTRAP_CORES (comma-separated core node numbers, e.g. "1")
+  # narrows an EDGE's bootstrap set to those cores, so a sparse edge is
+  # connected to a subset of the cores and must reach the rest by other means.
+  # Unset (default): edges dial every earlier core, as above.
   DEVNET_DIR="$DEVNET_DIR" NODE_DIR="$node_dir" NODE_NUM="$node_num" \
+  EDGE_BOOTSTRAP_CORES="${DEVNET_EDGE_BOOTSTRAP_CORES:-}" \
   NUM_CORE_NODES="$NUM_CORE_NODES" RELAY_ARG="$relay_arg" node -e "
     const fs = require('fs');
     const dir = process.env.DEVNET_DIR;
@@ -1058,6 +1067,8 @@ start_node() {
     const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
     if (process.env.RELAY_ARG) cfg.relay = process.env.RELAY_ARG;
     const n = Number(process.env.NODE_NUM);
+    const onlyCores = (process.env.EDGE_BOOTSTRAP_CORES || '').split(',').map((s) => s.trim()).filter(Boolean);
+    const narrowed = (cfg.nodeRole || 'edge') === 'edge' && onlyCores.length > 0;
     // Bootstrap targets are the CORE nodes among 1..n-1, read from each node's
     // authoritative nodeRole — NOT the ordinal 'first NUM_CORE_NODES are cores',
     // since cmd_addnode can spawn a core beyond NUM_CORE_NODES (via
@@ -1069,6 +1080,7 @@ start_node() {
       let cRole = 'edge';
       try { cRole = JSON.parse(fs.readFileSync(dir + '/node' + c + '/config.json', 'utf8')).nodeRole || 'edge'; } catch {}
       if (cRole !== 'core') continue;
+      if (narrowed && !onlyCores.includes(String(c))) continue;
       try { const m = fs.readFileSync(dir + '/node' + c + '/multiaddr', 'utf8').trim(); if (m) peers.push(m); } catch {}
     }
     if (peers.length) cfg.bootstrapPeers = peers;

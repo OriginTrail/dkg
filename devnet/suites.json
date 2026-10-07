@@ -41,6 +41,7 @@
     "v10-end-to-end",
     "v10-rs-prune",
     "v10-rs-wallet-rotation",
-    "v10-stress"
+    "v10-stress",
+    "vm-holder-tier"
   ]
 }
