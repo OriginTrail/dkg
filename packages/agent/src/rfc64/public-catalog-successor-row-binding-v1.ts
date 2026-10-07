@@ -1,19 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type {
+  AuthorCatalogScopeV1,
   CatalogSealDeploymentProfileV1,
   SignedAuthorCatalogHeadEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 
+/** What every row of one exact-set successor binds to. */
+export interface Rfc64PublicCatalogSuccessorRowBindingV1 {
+  /** The deployment the rows' seals were asserted on. */
+  readonly deployment: Readonly<CatalogSealDeploymentProfileV1>;
+  /** The lane the predecessor head names. */
+  readonly scope: Readonly<AuthorCatalogScopeV1>;
+}
+
 /**
- * What every row of one exact-set successor binds to: the lane its predecessor
- * head names and the deployment its seals were asserted on. A detached copy,
- * so a production that spans several turns binds all of its rows alike.
+ * A detached copy of the lane and the deployment, so a production that spans
+ * several turns binds all of its rows alike. The fields are copied as they
+ * are: whether the head is a valid one is decided where it always was, by the
+ * checks that run on it afterwards.
  */
 export function snapshotRfc64PublicCatalogSuccessorRowBindingV1(
   previousHead: SignedAuthorCatalogHeadEnvelopeV1,
   deployment: CatalogSealDeploymentProfileV1,
-) {
+): Rfc64PublicCatalogSuccessorRowBindingV1 {
   return Object.freeze({
     deployment: Object.freeze({
       networkId: deployment.networkId,
@@ -32,16 +42,4 @@ export function snapshotRfc64PublicCatalogSuccessorRowBindingV1(
       bucketCount: previousHead.payload.bucketCount,
     }),
   });
-}
-
-export type Rfc64PublicCatalogSuccessorRowBindingV1 =
-  ReturnType<typeof snapshotRfc64PublicCatalogSuccessorRowBindingV1>;
-
-/** True while `head` names the lane the rows of `binding` were bound to. */
-export function rfc64PublicCatalogSuccessorHeadNamesBindingV1(
-  head: SignedAuthorCatalogHeadEnvelopeV1,
-  binding: Rfc64PublicCatalogSuccessorRowBindingV1,
-): boolean {
-  const payload = head.payload as unknown as Readonly<Record<string, unknown>>;
-  return Object.entries(binding.scope).every(([field, value]) => payload[field] === value);
 }

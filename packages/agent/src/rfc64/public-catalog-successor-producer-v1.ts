@@ -17,6 +17,7 @@ import {
   MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   MIN_KA_BUNDLE_BYTES_V1,
   ZERO_DIGEST32_V1,
+  assertAuthorCatalogHeadScopeBindingV1,
   calculateOpaqueKaBundleByteLengthV1,
   canonicalizeAuthorCatalogRowV1,
   canonicalizeCanonicalGraphScopedAuthorSealBytesV1,
@@ -79,7 +80,6 @@ import {
   type Rfc64PublicCatalogSuccessorAssetInputV1,
 } from './public-catalog-successor-asset-v1.js';
 import {
-  rfc64PublicCatalogSuccessorHeadNamesBindingV1,
   snapshotRfc64PublicCatalogSuccessorRowBindingV1,
   type Rfc64PublicCatalogSuccessorRowBindingV1,
 } from './public-catalog-successor-row-binding-v1.js';
@@ -311,15 +311,15 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
       }
     }
 
+    // A set without rows passed no row boundary: nothing is signed for a
+    // production that was cancelled, whatever its size.
+    throwIfRfc64AbortedV1(signal, RFC64_SUCCESSOR_PRODUCTION_ABORT_MESSAGE_V1);
     let publication: ProducedAuthorCatalogPublicationV1;
     try {
       // Same turn as the canonical producer's own snapshot of the head, which
-      // must still name the scope the rows above were bound to.
-      if (
-        exactSet.binding !== null
-        && !rfc64PublicCatalogSuccessorHeadNamesBindingV1(previousHead, exactSet.binding)
-      ) {
-        throw new Error('previous head changed while the exact set was being verified');
+      // must still name the lane the rows above were bound to.
+      if (exactSet.binding !== null) {
+        assertAuthorCatalogHeadScopeBindingV1(previousHead.payload, exactSet.binding.scope);
       }
       publication = await produceSparseAuthorCatalogSuccessorV1({
         previousHead,

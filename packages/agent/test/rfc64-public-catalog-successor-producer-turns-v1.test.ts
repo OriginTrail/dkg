@@ -19,10 +19,8 @@ import {
   Rfc64PublicCatalogSuccessorProducerV1,
   type ProduceAndStagePublicOpenExactSetSuccessorInputV1,
 } from '../src/rfc64/public-catalog-successor-producer-v1.js';
-import {
-  rfc64PublicCatalogSuccessorHeadNamesBindingV1,
-  snapshotRfc64PublicCatalogSuccessorRowBindingV1,
-} from '../src/rfc64/public-catalog-successor-row-binding-v1.js';
+import { snapshotRfc64PublicCatalogSuccessorRowBindingV1 } from
+  '../src/rfc64/public-catalog-successor-row-binding-v1.js';
 
 // Every checkpoint is a real macrotask here, so each place where the producer
 // can give up the main thread is observable and a test can act inside it.
@@ -175,13 +173,29 @@ describe('RFC-64 exact-set successor producer: turns of the main thread', () => 
       catalogIssuerAuthorization: authorization,
     })).rejects.toMatchObject({
       code: 'catalog-successor-producer-history',
-      cause: expect.objectContaining({
-        message: 'previous head changed while the exact set was being verified',
-      }),
+      cause: expect.objectContaining({ code: 'catalog-object-scope-mismatch' }),
     });
     expect(signDigest).not.toHaveBeenCalled();
     expect(events).not.toContain('stage-bundle');
     expect(events).not.toContain('stage-objects');
+  });
+
+  it('signs with a signer method that finds its wallet through the receiver\'s issuer', async () => {
+    const { input, events } = await threeRowProduction();
+    const wallets: Record<string, ethers.Wallet> = { [AUTHOR]: AUTHOR_WALLET };
+
+    const result = await harness(events).produceAndStageExactSet({
+      ...input,
+      catalogSigner: {
+        issuer: AUTHOR,
+        async signDigest(this: { readonly issuer: string }, digest: Uint8Array) {
+          return wallets[this.issuer]!.signMessage(digest);
+        },
+      },
+    });
+
+    expect(result.assets).toHaveLength(ROWS);
+    expect(result.publication.head.issuer).toBe(AUTHOR);
   });
 
   it('classifies a predecessor head it cannot bind rows to as an input failure', async () => {
@@ -214,6 +228,47 @@ describe('RFC-64 exact-set successor producer: turns of the main thread', () => 
       expect(timeSlice.turns).toBe(1);
       expect(signDigest).not.toHaveBeenCalled();
       expect(events).not.toContain('stage-bundle');
+    });
+
+    it('signs nothing for the removal of the last row when the signal is already aborted', async () => {
+      const { genesis, authorization } = await producerHistory();
+      const oneRow = await harness([]).produceAndStageExactSet({
+        previousHead: genesis.head,
+        previousDirectoryPath: genesis.directoryPath,
+        previousBucket: null,
+        assets: [await asset(1)],
+        deployment: DEPLOYMENT,
+        issuedAt: '1773900001000' as never,
+        catalogSigner: signer((digest) => AUTHOR_WALLET.signMessage(digest)),
+        catalogIssuerAuthorization: authorization,
+      });
+      const events: string[] = [];
+      const signDigest = vi.fn(async (digest: Uint8Array) => AUTHOR_WALLET.signMessage(digest));
+      const removal: Input = {
+        previousHead: oneRow.publication.head,
+        previousDirectoryPath: oneRow.publication.directoryPath,
+        previousBucket: oneRow.publication.bucket,
+        // No rows: neither per-row pass before the signature runs at all.
+        assets: [],
+        deployment: DEPLOYMENT,
+        issuedAt: '1773900002000' as never,
+        catalogSigner: signer(signDigest),
+        catalogIssuerAuthorization: authorization,
+      };
+      const reason = new Error('caller gave up');
+
+      await expect(harness(events).produceAndStageExactSet({
+        ...removal,
+        signal: AbortSignal.abort(reason),
+      })).rejects.toBe(reason);
+      expect(signDigest).not.toHaveBeenCalled();
+      expect(events).toEqual([]);
+
+      // The same removal completes when nobody cancelled it.
+      const removed = await harness(events).produceAndStageExactSet(removal);
+      expect(removed.publication.head.payload.totalRows).toBe('0');
+      expect(removed.assets).toEqual([]);
+      expect(events).toEqual(['stage-objects']);
     });
 
     it('stops between two rows of the pre-signature checks without signing', async () => {
@@ -301,6 +356,22 @@ describe('RFC-64 signer taking turns', () => {
     expect(signDigest).toHaveBeenCalledWith(digest);
   });
 
+  it('calls the callback on a snapshot that holds the issuer, as a producer\'s own snapshot does', async () => {
+    const receivers: unknown[] = [];
+    const taking = rfc64SignerTakingTurnsV1({
+      issuer: AUTHOR,
+      async signDigest(this: unknown, _digest: Uint8Array) {
+        receivers.push(this);
+        return `signed-by-${(this as { issuer: string }).issuer}`;
+      },
+    }, async () => undefined);
+
+    await expect(taking.signDigest(new Uint8Array(32))).resolves.toBe(`signed-by-${AUTHOR}`);
+    expect(receivers).toHaveLength(1);
+    expect(Object.isFrozen(receivers[0])).toBe(true);
+    expect(Object.keys(receivers[0] as object).sort()).toEqual(['issuer', 'signDigest']);
+  });
+
   it('reads the callback once, so a later replacement is not the one that signs', async () => {
     const original = vi.fn(async () => '0xoriginal');
     const signerObject = { issuer: AUTHOR, signDigest: original };
@@ -354,18 +425,6 @@ describe('RFC-64 exact-set successor row binding', () => {
     expect(Object.isFrozen(binding)).toBe(true);
     expect(Object.isFrozen(binding.scope)).toBe(true);
     expect(Object.isFrozen(binding.deployment)).toBe(true);
-  });
-
-  it('recognises the head it was taken from and no head of another lane', async () => {
-    const { genesis } = await producerHistory();
-    const other = await producerHistory(OTHER_CONTEXT_GRAPH_ID);
-    const subGraph = await producerHistory(CONTEXT_GRAPH_ID, 'service-lane' as never);
-    const binding = snapshotRfc64PublicCatalogSuccessorRowBindingV1(genesis.head, DEPLOYMENT);
-
-    expect(rfc64PublicCatalogSuccessorHeadNamesBindingV1(genesis.head, binding)).toBe(true);
-    expect(rfc64PublicCatalogSuccessorHeadNamesBindingV1(other.genesis.head, binding)).toBe(false);
-    expect(rfc64PublicCatalogSuccessorHeadNamesBindingV1(subGraph.genesis.head, binding))
-      .toBe(false);
   });
 });
 
