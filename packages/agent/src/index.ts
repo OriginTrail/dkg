@@ -376,6 +376,7 @@ export type {
 export type {
   ContextGraphAuthorityFailureSite,
   ContextGraphAuthorityReadMode,
+  ContextGraphFinalizedAbsenceDetailCode,
   LiveOnChainAccessPolicyUnavailable,
   LiveOnChainAccessPolicyUnavailableReason,
   RegisteredContextGraphAuthority,

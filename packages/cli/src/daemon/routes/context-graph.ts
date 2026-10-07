@@ -194,6 +194,7 @@ import {
 } from '../catchup-telemetry.js';
 import { createStoreQueryRequestLifecycle } from '../store-query-lifecycle.js';
 import { mayFollowOnChainIdToRow } from '../context-graph-on-chain-id-gate.js';
+import { attributionToken } from '../read-authority-diagnostics.js';
 import {
   admitContextGraphFollow,
   readContextGraphSubscriptionAdmission,
@@ -1984,7 +1985,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       const reason = SUBSCRIBE_AUTHORITY_LOG_REASONS.has(readAuthority.reason)
         ? readAuthority.reason : 'other';
       console.warn(`[context-graph-subscribe] authority unavailable: reason=${reason}`
-        + ` dependency=${readAuthority.dependency}`);
+        + ` dependency=${readAuthority.dependency}`
+        + (readAuthority.detailCode === undefined ? '' : ` detail=${attributionToken(readAuthority.detailCode)}`));
       return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
     }
     // A private graph named by its on-chain id: one decision, with one answer

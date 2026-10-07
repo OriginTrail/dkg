@@ -309,6 +309,7 @@ export default defineConfig({
       // public, unregistered context graph.
       "test/public-unregistered-member-swm.test.ts",
       "test/approved-private-replica.test.ts",
+      "test/approved-private-replica-proof-runs.test.ts",
       "test/swm-snapshot-materializer.test.ts",
       "test/swm-head-identity-preservation.test.ts",
       // #2079 — the already-materialized witness: the warm-path win, the count

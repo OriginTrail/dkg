@@ -2644,3 +2644,220 @@ describe('approved private bare-name replica authorization', () => {
       .toBeNull();
   });
 });
+
+describe('approved member read while its own proof is disturbed', () => {
+  type Fixture = Awaited<ReturnType<typeof approvedBareNameReplicaFixture>>;
+  const PROOF_SOURCE = 'agent.contextGraph.approvedPrivateReplica';
+  const REFUSED = { outcome: 'unavailable', source: 'registered-chain', reason: 'finalized-name-absence-unaccepted' };
+  const ALLOWED = { outcome: 'allowed', source: 'rfc64-private', reason: 'rfc64-participant' };
+
+  const memberRead = (fixture: Fixture) => fixture.receiver.resolveContextGraphReadAuthority(
+    CONTEXT_GRAPH_ID,
+    {
+      callerAgentAddress: fixture.memberAddress,
+      allowSubscriptionFallback: false,
+      authorityReadMode: 'finalized-index',
+    },
+  );
+  const binding = (fixture: Fixture) => fixture.receiver.resolveContextGraphRegistrationBinding(
+    CONTEXT_GRAPH_ID,
+    { allowApprovedPrivateReplicaFinalizedAbsence: true, freshness: 'bounded' },
+  );
+  const setProofTimeLimit = (fixture: Fixture, requestTimeoutMs: number) => {
+    Object.defineProperty(fixture.receiver, 'chainAuthorityReadBudgets', {
+      value: { ...fixture.receiver.chainAuthorityReadBudgets, requestTimeoutMs },
+    });
+  };
+  /** Every proof query of the receiver, with what happens while or after each one runs. */
+  const onProofQuery = (
+    fixture: Fixture,
+    hooks: { before?: (run: number) => unknown; after?: (run: number) => unknown },
+  ) => {
+    const originalQuery = fixture.receiver.store.query.bind(fixture.receiver.store);
+    const runs = { count: 0 };
+    vi.spyOn(fixture.receiver.store, 'query').mockImplementation(async (query, options) => {
+      if (options?.source !== PROOF_SOURCE) return originalQuery(query, options);
+      const run = runs.count += 1;
+      await hooks.before?.(run);
+      const result = await originalQuery(query, options);
+      await hooks.after?.(run);
+      return result;
+    });
+    return runs;
+  };
+  const furtherRuns = (fixture: Fixture) => {
+    const info = vi.spyOn(Reflect.get(fixture.receiver, 'log') as { info(ctx: unknown, message: string): void }, 'info');
+    return () => info.mock.calls.map(([, message]) => message).filter((message) => message.includes('runs again'));
+  };
+
+  it('answers the member when an unrelated write to the graph metadata lands while the proof reads', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const receipt = { graph: fixture.graph, subject: 'urn:test:share-receipt' };
+    await fixture.receiver.store.insert([{ ...receipt, predicate: 'urn:test:state', object: JSON.stringify('applied') }]);
+    const logged = furtherRuns(fixture);
+    // Another member's share replaces its own record in the graph's metadata
+    // after the first run has read its proof rows.
+    const runs = onProofQuery(fixture, {
+      after: (run) => run === 1 ? fixture.receiver.store.deleteByPattern(receipt) : undefined,
+    });
+
+    await expect(memberRead(fixture)).resolves.toMatchObject(ALLOWED);
+    expect(runs.count).toBe(2);
+    expect(logged()).toEqual([
+      `Approved member proof for "${CONTEXT_GRAPH_ID}" runs again (metadata-moved, run 2)`,
+    ]);
+  });
+
+  it('answers the member when one run of the proof outlasts its time limit', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    setProofTimeLimit(fixture, 500);
+    const logged = furtherRuns(fixture);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const runs = onProofQuery(fixture, { before: (run) => run === 1 ? held : undefined });
+
+    try {
+      await expect(memberRead(fixture)).resolves.toMatchObject(ALLOWED);
+    } finally {
+      release();
+    }
+    expect(runs.count).toBe(2);
+    expect(logged()).toContain(
+      `Approved member proof for "${CONTEXT_GRAPH_ID}" runs again (timeout, run 2)`,
+    );
+  });
+
+  it('refuses with the time limit once every permitted run has outlasted it', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    setProofTimeLimit(fixture, 150);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const runs = onProofQuery(fixture, { before: () => held });
+
+    try {
+      await expect(binding(fixture)).resolves.toEqual({
+        kind: 'unavailable',
+        reason: 'finalized-name-absence-unaccepted',
+        detail: `resolveApprovedPrivateReplicaAuthority(${CONTEXT_GRAPH_ID}) timed out after 150ms`,
+        dependency: 'unknown',
+        detailCode: 'replica-proof-timeout',
+      });
+      // Every run that got as far as its proof query was held there.
+      expect(runs.count).toBeLessThanOrEqual(3);
+      await expect(memberRead(fixture)).resolves.toMatchObject({
+        ...REFUSED,
+        dependency: 'unknown',
+        detailCode: 'replica-proof-timeout',
+      });
+    } finally {
+      release();
+    }
+  });
+
+  it('refuses once the graph metadata has moved under every permitted run', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const projection = Reflect.get(fixture.receiver, 'contextGraphMetaProjection') as {
+      markDirty(contextGraphId: string): void;
+    };
+    const runs = onProofQuery(fixture, { after: () => projection.markDirty(CONTEXT_GRAPH_ID) });
+
+    await expect(binding(fixture)).resolves.toEqual({
+      kind: 'unavailable',
+      reason: 'finalized-name-absence-unaccepted',
+      detail: 'local private join approval has no current source-qualified replica proof',
+      detailCode: 'replica-metadata-moved',
+    });
+    expect(runs.count).toBe(3);
+    await expect(memberRead(fixture)).resolves.toMatchObject({
+      ...REFUSED,
+      dependency: 'chain',
+      detailCode: 'replica-metadata-moved',
+    });
+  });
+
+  it.each([
+    {
+      refusal: 'the join request is no longer approved',
+      detailCode: 'replica-proof-absent',
+      proofRuns: 0,
+      fixtureOptions: { requesterStatus: 'rejected' },
+    },
+    {
+      refusal: 'the request generation is replaced while the proof reads',
+      detailCode: 'replica-proof-absent',
+      proofRuns: 1,
+      duringProof: (fixture: Fixture) => fixture.receiver.writeRequesterJoinRequestState(
+        CONTEXT_GRAPH_ID,
+        fixture.approvedAddress,
+        {
+          status: 'approved',
+          requestGeneration: `0x${'34'.repeat(32)}`,
+          curatorPeerId: CURATOR_PEER,
+          curatorAgentAddress: OWNER,
+          curatorAuthorityEra: '0',
+        },
+      ),
+    },
+    {
+      refusal: 'a registration starts while the proof reads',
+      detailCode: 'replica-binding-changed',
+      proofRuns: 1,
+      duringProof: (fixture: Fixture) => {
+        (Reflect.get(fixture.receiver, 'contextGraphRegistrationsInFlight') as Set<string>)
+          .add(CONTEXT_GRAPH_ID);
+      },
+    },
+    {
+      refusal: 'the graph metadata claims a registration',
+      detailCode: 'replica-registered-metadata',
+      proofRuns: 1,
+      fixtureOptions: { registrationStatus: 'registered', registeredMetaOnChainIds: ['106'] },
+    },
+    {
+      refusal: 'the node holds no approval',
+      detailCode: 'no-accepted-authority',
+      proofRuns: 0,
+      fixtureOptions: { localApproval: false },
+    },
+  ] as const)('keeps the refusal when $refusal, and names it', async ({
+    detailCode, proofRuns, fixtureOptions, duringProof,
+  }) => {
+    const fixture = await approvedBareNameReplicaFixture(fixtureOptions ?? {});
+    const logged = furtherRuns(fixture);
+    const runs = onProofQuery(fixture, { after: () => duringProof?.(fixture) });
+
+    await expect(memberRead(fixture)).resolves.toMatchObject({ ...REFUSED, dependency: 'chain', detailCode });
+    expect(runs.count).toBe(proofRuns);
+    expect(logged()).toEqual([]);
+    (Reflect.get(fixture.receiver, 'contextGraphRegistrationsInFlight') as Set<string>)
+      .delete(CONTEXT_GRAPH_ID);
+  });
+
+  it('keeps the refusal when a proof read fails, and names it', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const runs = onProofQuery(fixture, { before: () => { throw new Error('store read failed'); } });
+
+    await expect(binding(fixture)).resolves.toEqual({
+      kind: 'unavailable',
+      reason: 'finalized-name-absence-unaccepted',
+      detail: 'store read failed',
+      dependency: 'unknown',
+      detailCode: 'replica-proof-error',
+    });
+    expect(runs.count).toBe(1);
+  });
+
+  it('carries the detail code on the scoped query error and nothing of the graph in it', async () => {
+    const fixture = await approvedBareNameReplicaFixture({ requesterStatus: 'rejected' });
+
+    await expect(fixture.receiver.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId: CONTEXT_GRAPH_ID,
+      callerAgentAddress: fixture.memberAddress,
+    })).rejects.toMatchObject({
+      code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE',
+      reason: 'finalized-name-absence-unaccepted',
+      dependency: 'chain',
+      detailCode: 'replica-proof-absent',
+    });
+  });
+});

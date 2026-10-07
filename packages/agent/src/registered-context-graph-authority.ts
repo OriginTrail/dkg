@@ -22,6 +22,23 @@ export type ContextGraphAuthorityFailureSite =
   | 'revision-moved'
   | 'recipient-set-changed';
 
+/**
+ * Why a name that is absent on chain has no accepted unregistered authority,
+ * for server-side diagnostics only: a closed set, so a log can carry it where
+ * the free-text `detail` may not go. The `replica-` codes belong to an approved
+ * member's local proof: it ran out of its time limit, failed, found no current
+ * proof, was discarded on every run because the graph's metadata moved, or was
+ * followed by a binding change or a registration its own metadata claims.
+ */
+export type ContextGraphFinalizedAbsenceDetailCode =
+  | 'no-accepted-authority'
+  | 'replica-proof-timeout'
+  | 'replica-proof-error'
+  | 'replica-proof-absent'
+  | 'replica-metadata-moved'
+  | 'replica-binding-changed'
+  | 'replica-registered-metadata';
+
 export type LiveOnChainAccessPolicyUnavailableReason =
   | 'chain-access-policy-timeout'
   | 'chain-access-policy-unknown';
@@ -63,6 +80,8 @@ export type RegisteredContextGraphAuthorityUnavailable =
       detail?: string;
       /** Set where the failed read's own error says which dependency could not answer. */
       dependency?: ContextGraphReadAuthorityDependency;
+      /** Set by the producers of `finalized-name-absence-unaccepted` that classify their `detail`. */
+      detailCode?: ContextGraphFinalizedAbsenceDetailCode;
     };
 
 /** Explicit non-applicability proof, separate from legacy read fallbacks. */
