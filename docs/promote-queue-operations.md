@@ -1,6 +1,6 @@
 # Promote queue operations
 
-The daemon configures the promote queue before its first access. Five attempts remain the default. Existing jobs retain the budget persisted when they were enqueued; changing configuration affects new jobs.
+The daemon configures the promote queue before its first access. Five attempts remain the default. Existing jobs retain the budget persisted when they were enqueued; changing configuration affects new jobs. The existing one-hour retry window for typed prerequisite failures can keep those jobs retrying beyond the attempt budget; these settings do not change that window.
 
 ```json
 {

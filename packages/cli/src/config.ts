@@ -1035,7 +1035,7 @@ export interface DkgConfig {
   };
   /** WM → SWM worker, enabled by default; see docs/promote-queue-operations.md. */
   promoteQueue?: {
-    /** Default 5. Maximum attempts for newly enqueued shares. */
+    /** Default 5. Attempt budget; typed prerequisites also retain their retry window. */
     maxRetries?: number;
     /** Default 60_000ms; exponential retry curve base. */
     retryBaseMs?: number;
