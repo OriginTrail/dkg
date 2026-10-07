@@ -1,19 +1,19 @@
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import {
   WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
-  WORKSPACE_RECIPIENT_ENCRYPTION_KEY_PURPOSE,
-  decodeWorkspaceEncryptionKey, encodeWorkspaceEncryptionKey,
-  AGENT_DID_PREFIX, toAgentDid, workspaceAgentEncryptionKeyId, sparqlIri, sparqlString,
+  AGENT_DID_PREFIX, toAgentDid, sparqlIri, sparqlString,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { WORKSPACE_RECIPIENT_DEPENDENCIES } from './workspace-recipient-dependencies.js';
-import { WorkspaceAgentEncryptionKeyMissingError, type WorkspaceAgentRecipient } from './workspace-agent-recipients.js';
-import { loadVerifiedRevokedKeyIds, verifyAgentEncryptionKeyProof, stringBinding, stripRdfLiteral } from './workspace-recipient-key-verification.js';
+import type { WorkspaceAgentRecipient } from './workspace-agent-recipients.js';
+import { WorkspaceAgentEncryptionKeyMissingError } from './workspace-recipient-key-errors.js';
+import { loadVerifiedRevokedKeyIds, stringBinding, stripRdfLiteral } from './workspace-recipient-key-verification.js';
 import { collectCompleteWorkspaceAgentKeys } from './workspace-recipient-key-collect.js';
 
 const { keyRoute: KEY_ROUTE } = WORKSPACE_RECIPIENT_DEPENDENCIES;
-const STRICT_RECIPIENT_KEY_CANDIDATE_LIMIT = 64;
-const RECIPIENT_KEY_HISTORY_PAGE_SIZE = 64;
+import { decodePublicKeyCandidate, candidateRecipient, candidateHasProof, projectPublicKeyRoutes,
+  RECIPIENT_KEY_CANDIDATE_LIMIT as STRICT_RECIPIENT_KEY_CANDIDATE_LIMIT, RECIPIENT_KEY_HISTORY_PAGE_SIZE,
+  type PublicKeyCandidate, type PublicKeyRoute } from './workspace-recipient-key-candidates.js';
 
 /**
  * Resolve every valid (non-revoked) workspace encryption key registered for a DKG
@@ -60,11 +60,7 @@ export async function resolveWorkspaceAgentRecipientKeys(
   // tear under concurrent appends). Only a wallet-verified revocation earns a
   // history exemption; a bare `revokedAt` marker remains an active/untrusted
   // candidate and therefore consumes the strict 64-key budget.
-  const activeKeyCandidates = new Map<string, {
-    encodedPublicKey: string;
-    publicKeyBytes: Uint8Array;
-    recipientKeyId: string;
-  }>();
+  const activeKeyCandidates = new Map<string, PublicKeyCandidate>();
   let sawAnyKeyCandidate = false;
   let sawMalformedKey = false;
   let unretiredKeyCandidateCount = 0;
@@ -102,25 +98,10 @@ export async function resolveWorkspaceAgentRecipientKeys(
       const encodedPublicKey = publicKey ? stripRdfLiteral(publicKey) : '';
       let publicKeyBytes: Uint8Array | undefined;
       let recipientKeyId: string | undefined;
-      if (encodedPublicKey) {
-        try {
-          publicKeyBytes = decodeWorkspaceEncryptionKey(encodedPublicKey);
-          if (encodeWorkspaceEncryptionKey(publicKeyBytes) !== encodedPublicKey) {
-            throw new Error('Non-canonical workspace encryption key');
-          }
-          recipientKeyId = workspaceAgentEncryptionKeyId(checksum, publicKeyBytes);
-          revocationCandidates.set(recipientKeyId, {
-            purpose: WORKSPACE_RECIPIENT_ENCRYPTION_KEY_PURPOSE,
-            recipientId: agentUri,
-            recipientKeyId,
-            encryptionKeyAlgorithm: WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
-            publicKeyBytes,
-            agentAddress: checksum,
-          });
-        } catch {
-          // Malformed candidates cannot earn a retirement exemption because a
-          // valid revocation proof commits to canonical 32-byte key material.
-        }
+      const candidate = decodePublicKeyCandidate(checksum, encodedPublicKey);
+      if (candidate) {
+        ({ publicKeyBytes, recipientKeyId } = candidate);
+        revocationCandidates.set(recipientKeyId, candidateRecipient(candidate, checksum, agentUri));
       }
       decodedPage.push({ encodedPublicKey, publicKeyBytes, recipientKeyId });
     }
@@ -218,7 +199,7 @@ export async function resolveWorkspaceAgentRecipientKeys(
       const cleanProof = stripRdfLiteral(proof);
       for (const candidate of activeKeyCandidates.values()) {
         if (verifiedProofKeyIds.has(candidate.recipientKeyId)) continue;
-        if (verifyAgentEncryptionKeyProof(checksum, candidate.publicKeyBytes, cleanProof)) {
+        if (candidateHasProof(candidate, checksum, cleanProof)) {
           verifiedProofKeyIds.add(candidate.recipientKeyId);
           break;
         }
@@ -277,68 +258,14 @@ export async function resolveWorkspaceAgentRecipientKeys(
     LIMIT ${routeRowLimit}`,
   );
 
-  // One wallet-verified key can be replicated in several profile graphs. Keep
-  // distinct peer bindings for that key so a later Context Graph allowlist can
-  // select the reachable variant. A peer-bound copy supersedes a peerless copy:
-  // retaining both would incorrectly make the transport projection incomplete.
-  const verifiedKeys = new Map<
-    string,
-    Map<string | undefined, WorkspaceAgentRecipient>
-  >();
-  const activeKeyByEncodedValue = new Map(
-    proofVerifiedKeys.map((candidate) => [candidate.encodedPublicKey, candidate]),
-  );
-
-  if (result.type === 'bindings') for (const row of result.bindings) {
-    const publicKey = stringBinding(row['key']);
+  const routes: PublicKeyRoute[] = result.type === 'bindings' ? result.bindings.flatMap((row) => {
+    const key = stringBinding(row['key']);
     const peerId = stringBinding(row['peerId']);
-    if (!publicKey) continue;
-    const candidate = activeKeyByEncodedValue.get(stripRdfLiteral(publicKey));
-    if (!candidate) continue;
-
-    const cleanPeerId = peerId ? stripRdfLiteral(peerId) : undefined;
-    if (
-      options.requiredPeerId !== undefined
-      && cleanPeerId !== options.requiredPeerId
-    ) {
-      throw new Error(
-        `Public encryption key for DKG agent ${checksum} is not bound to the required peer`,
-      );
-    }
-
-    const { recipientKeyId, publicKeyBytes } = candidate;
-    let variants = verifiedKeys.get(recipientKeyId);
-    if (variants === undefined) {
-      variants = new Map();
-      verifiedKeys.set(recipientKeyId, variants);
-    }
-    const recipient = {
-      purpose: WORKSPACE_RECIPIENT_ENCRYPTION_KEY_PURPOSE,
-      recipientId: agentUri,
-      recipientKeyId,
-      encryptionKeyAlgorithm: WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
-      publicKeyBytes,
-      agentAddress: checksum,
-      peerId: cleanPeerId,
-    } satisfies WorkspaceAgentRecipient;
-    if (cleanPeerId === undefined) {
-      // Do not let query ordering replace a usable peer-bound copy with the
-      // same key discovered in a graph that omitted peer provenance.
-      if (variants.size === 0) variants.set(undefined, recipient);
-      continue;
-    }
-    variants.delete(undefined);
-    variants.set(cleanPeerId, recipient);
-  }
-
-  const routeCount = [...verifiedKeys.values()].reduce((count, variants) => count + variants.size, 0);
-  if (
-    routeCount > STRICT_RECIPIENT_KEY_CANDIDATE_LIMIT
-    || (result.type === 'bindings' && result.bindings.length >= routeRowLimit)
-  ) {
-    throw new Error(
-      `Too many public encryption-key candidates for DKG agent ${checksum}`,
-    );
+    return key ? [{ key: stripRdfLiteral(key), peerId: peerId ? stripRdfLiteral(peerId) : undefined }] : [];
+  }) : [];
+  const verifiedKeys = projectPublicKeyRoutes(checksum, agentUri, proofVerifiedKeys, routes, options.requiredPeerId);
+  if (result.type === 'bindings' && result.bindings.length >= routeRowLimit) {
+    throw new Error(`Too many public encryption-key candidates for DKG agent ${checksum}`);
   }
 
   if (verifiedKeys.size === 0) {

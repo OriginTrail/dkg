@@ -294,6 +294,7 @@ export default defineConfig({
       "test/messenger-substrate.test.ts",
       "test/messenger-outbox-budget.test.ts",
       "test/context-graph-join-policy.test.ts",
+      "test/join-encryption-key-cache.test.ts",
       "test/bounded-operation.test.ts",
       "test/private-read-chain-authority.test.ts",
       "test/context-graph-authority-retry.test.ts",

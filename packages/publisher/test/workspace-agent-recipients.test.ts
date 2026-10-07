@@ -826,6 +826,24 @@ describe('complete bounded recipient key collect', () => {
     await store.close();
   });
 
+  it.each(['bounded', 'paged'])('preserves peer variants and required-peer rejection through %s collection', async (strategy) => {
+    const store = new OxigraphStore();
+    try {
+      const wallet = ethers.Wallet.createRandom();
+      for (const [peerId, graph] of [[undefined, 'urn:peerless'], [PEER_A, 'urn:peer-a'], [PEER_B, 'urn:peer-b']] as const) {
+        await insertAgentEncryptionKey(store, wallet, { peerId, graph, keyFill: 7 });
+      }
+      if (strategy === 'paged') {
+        const query = store.query.bind(store);
+        vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => sparql.includes('SELECT ?kind ?key ?proof ?peerId')
+          ? { type: 'bindings', bindings: [] } : query(sparql, options));
+      }
+      const recipients = await resolveWorkspaceAgentRecipientKeys(store, wallet.address);
+      expect(recipients.map((recipient) => recipient.peerId).sort()).toEqual([PEER_A, PEER_B].sort());
+      await expect(resolveWorkspaceAgentRecipientKeys(store, wallet.address, { requiredPeerId: PEER_A })).rejects.toThrow(/not bound to the required peer/);
+    } finally { await store.close(); }
+  });
+
   it('falls back when a bounded branch cannot prove completeness', async () => {
     const store = new OxigraphStore();
     const wallet = ethers.Wallet.createRandom();
