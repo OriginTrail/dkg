@@ -150,13 +150,6 @@ baseline_for() {
   echo 0
 }
 
-# Mine N blocks. Args: blocks (decimal). See devnet_mine_blocks for why this
-# is a batch of evm_mine calls and not hardhat_mine.
-hardhat_mine_blocks() {
-  devnet_mine_blocks "$1" "$HARDHAT_PORT" && return 0
-  warn "mining $1 blocks failed"
-  return 1
-}
 
 # Read on-chain (ciphertextChunksRoot, ciphertextChunkCount) for kaId.
 read_ct_commitment() {
@@ -396,7 +389,7 @@ EOF
   fi
 
   log "Mining $MINE_BLOCKS_AFTER_PUBLISH hardhat blocks to advance into a fresh sampling period..."
-  hardhat_mine_blocks "$MINE_BLOCKS_AFTER_PUBLISH" || warn "block-mine RPC call failed"
+  devnet_mine_blocks "$MINE_BLOCKS_AFTER_PUBLISH" "$HARDHAT_PORT" || warn "mining $MINE_BLOCKS_AFTER_PUBLISH blocks failed"
 
   log "Polling cores for fresh submitChallengeProof tx (timeout=${RS_TIMEOUT}s)..."
   local proof_line proof_node proof_count proof_tx
@@ -502,7 +495,7 @@ wait_for_backfill_and_proof_on() {
   while [ "$(date +%s)" -lt "$end_ts" ]; do
     local now_ts; now_ts=$(date +%s)
     if [ $(( now_ts - last_mine )) -ge "$mine_every" ]; then
-      hardhat_mine_blocks 250 >/dev/null 2>&1 || true
+      devnet_mine_blocks 250 "$HARDHAT_PORT" || true
       last_mine=$now_ts
     fi
     local cur; cur=$(get_submitted_count "$n")
@@ -633,7 +626,7 @@ EOF
 
   # Mine to advance into a fresh sampling period (RS picker re-samples
   # only on a new period). Then poll for the backfill marker + count bump.
-  hardhat_mine_blocks 250 >/dev/null 2>&1 || true
+  devnet_mine_blocks 250 "$HARDHAT_PORT" || true
 
   log "Polling node $late_node for LU-11 backfill + proof submission (timeout=${RS_BACKFILL_TIMEOUT}s)..."
   local result
