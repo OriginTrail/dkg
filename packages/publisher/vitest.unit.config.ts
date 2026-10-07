@@ -59,6 +59,7 @@ export default defineConfig({
       'test/async-lift-chain-check-2945.test.ts',
       'test/lift-job-failure.test.ts',
       'test/async-promote-queue.test.ts',
+      'test/promote-retry-policy.test.ts',
       'test/async-promote-writejob-atomicity.test.ts',
       'test/query-source-coverage.test.ts',
       'test/subject-atomic-write.test.ts',
