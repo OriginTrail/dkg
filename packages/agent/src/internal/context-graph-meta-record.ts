@@ -41,4 +41,3 @@ export interface ContextGraphMetaRecord {
   hasPeerGate: boolean;
   hasLegacyParticipantGate: boolean;
 }
-
