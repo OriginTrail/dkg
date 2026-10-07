@@ -235,7 +235,7 @@ describe('RFC-64 local SWM catalog projection repair', () => {
     })).toBe(false);
   }, 30_000);
 
-  it('bounds distinct repair scopes to four concurrent reconciliations', async () => {
+  it('bounds distinct repair scopes to one background reconciliation', async () => {
     const agent = await startRepairAgentV1({
       name: 'bounded-distinct-repairs',
       autoPublish: {
@@ -252,11 +252,11 @@ describe('RFC-64 local SWM catalog projection repair', () => {
     let call = 0;
     let markFirstEntered!: () => void;
     let releaseFirst!: () => void;
-    let markFourEntered!: () => void;
+    let markNextEntered!: () => void;
     let releaseRepairs!: () => void;
     const firstEntered = new Promise<void>((resolve) => { markFirstEntered = resolve; });
     const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
-    const fourEntered = new Promise<void>((resolve) => { markFourEntered = resolve; });
+    const nextEntered = new Promise<void>((resolve) => { markNextEntered = resolve; });
     const repairGate = new Promise<void>((resolve) => { releaseRepairs = resolve; });
     const reconcile = vi.spyOn(agent, 'reconcileRfc64PublicCatalogFromSwmInventoryV1')
       .mockImplementation(async () => {
@@ -268,7 +268,7 @@ describe('RFC-64 local SWM catalog projection repair', () => {
         }
         active += 1;
         maxActive = Math.max(maxActive, active);
-        if (active === 4) markFourEntered();
+        if (active === 1) markNextEntered();
         await repairGate;
         active -= 1;
         return null;
@@ -284,13 +284,13 @@ describe('RFC-64 local SWM catalog projection repair', () => {
     }
     await firstEntered;
     releaseFirst();
-    await fourEntered;
-    expect(reconcile).toHaveBeenCalledTimes(5);
-    expect(maxActive).toBe(4);
+    await nextEntered;
+    expect(reconcile).toHaveBeenCalledTimes(2);
+    expect(maxActive).toBe(1);
     releaseRepairs();
     await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     expect(reconcile).toHaveBeenCalledTimes(6);
-    expect(maxActive).toBe(4);
+    expect(maxActive).toBe(1);
   }, 30_000);
 
   it('settles a finalized-private repair without waiting for an unrelated projection', async () => {

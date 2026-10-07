@@ -30,7 +30,8 @@ import {
 } from './rfc64/catalog-repair-diagnostics-v1.js';
 import { CatalogRepairRetryV1 } from './rfc64/catalog-repair-retry-v1.js';
 
-const MAX_CONCURRENT_REPAIRS_V1 = 4;
+// Match the default background store lane; repair fanout must not flood its queue.
+const MAX_CONCURRENT_REPAIRS_V1 = 1;
 const DEFAULT_PROJECTION_RETRY_INTERVAL_MS_V1 = 5_000;
 
 export type Rfc64PublicCatalogAuthorRepairOutcomeV1 =
@@ -468,7 +469,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       } catch (error) {
         if (!signal.aborted) {
           const changed = this.#observePrivateLane(entry.retry, repair.contextGraphId);
-          entry.retry.fail(attemptGeneration, Date.now(), state.retryIntervalMs);
+          entry.retry.fail(attemptGeneration, Date.now(), state.retryIntervalMs, catalogRepairDiagnosticV1(error).kind);
           if (changed) state.finalizedPrivateRunner.request();
           this.#warnFailure('catalog_private_repair_failed', error, entry.attempts, entry.retry);
         }
@@ -608,7 +609,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     } catch (error) {
       if (signal.aborted) return;
       const changed = this.#observeRevision(repair.retry, repair.contextGraphId, repair.authorAddress);
-      if (repair.retry.fail(attemptGeneration, Date.now(), retryIntervalMs)) {
+      if (repair.retry.fail(attemptGeneration, Date.now(), retryIntervalMs, catalogRepairDiagnosticV1(error).kind)) {
         // Duplicate same-head wakes received while this attempt was active do
         // not get to bypass the newly established failure deadline.
         repair.dirty = repair.pendingUnknownRequest;

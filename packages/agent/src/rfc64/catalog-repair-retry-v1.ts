@@ -1,8 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import type { CatalogRepairDiagnosticV1 } from './catalog-repair-diagnostics-v1.js';
+
+const survivesInventoryChange = (kind: CatalogRepairDiagnosticV1['kind']): boolean => (
+  kind === 'integrity' || kind === 'queue_wait' || kind === 'queue_full'
+  || kind === 'store_timeout_not_started' || kind === 'store_timeout_indeterminate'
+);
+
 /** Constant-size scheduling hint; canonical reconciliation remains authoritative. */
 export class CatalogRepairRetryV1 {
   #revision: string | null | undefined;
+  #retainCooldown = false;
+  #lastLaneGeneration = 0;
   generation = 0;
   consecutiveFailures = 0;
   nextAttemptAtMs: number | null = null;
@@ -11,10 +20,12 @@ export class CatalogRepairRetryV1 {
     // A failed local hint read is neither a mutation nor a lane transition.
     if (revision === undefined) return false;
     const changed = this.#revision !== undefined && this.#revision !== revision;
+    const laneChanged = this.#revision === null || revision === null;
     this.#revision = revision;
     if (changed) {
       this.generation += 1;
-      this.reset();
+      if (laneChanged) this.#lastLaneGeneration = this.generation;
+      if (laneChanged || !this.#retainCooldown) this.reset();
     }
     return changed;
   }
@@ -24,13 +35,16 @@ export class CatalogRepairRetryV1 {
   }
 
   reset(): void {
+    this.#retainCooldown = false;
     this.consecutiveFailures = 0;
     this.nextAttemptAtMs = null;
   }
 
-  /** A stale attempt cannot impose its cooldown on a newer observed revision. */
-  fail(attemptGeneration: number, nowMs: number, configuredIntervalMs?: number): boolean {
-    if (attemptGeneration !== this.generation) return false;
+  /** Integrity and store pressure survive head churn; lane changes and success reset them. */
+  fail(attemptGeneration: number, nowMs: number, configuredIntervalMs?: number, kind: CatalogRepairDiagnosticV1['kind'] = 'unknown'): boolean {
+    const retain = survivesInventoryChange(kind);
+    if (attemptGeneration !== this.generation && (!retain || this.#revision === null || attemptGeneration < this.#lastLaneGeneration)) return false;
+    this.#retainCooldown = retain;
     this.consecutiveFailures = Math.min(Number.MAX_SAFE_INTEGER, this.consecutiveFailures + 1);
     const base = configuredIntervalMs !== undefined && configuredIntervalMs > 0
       ? configuredIntervalMs : 5_000;

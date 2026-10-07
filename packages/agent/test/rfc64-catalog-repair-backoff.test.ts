@@ -5,6 +5,8 @@ import {
   type EvmAddressV1,
 } from '@origintrail-official/dkg-core';
 import { Rfc64SwmCatalogProjectionOwnerV1 } from '../src/dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
+import { CatalogRepairRetryV1 } from '../src/rfc64/catalog-repair-retry-v1.js';
+import { CatalogRepairIntegrityErrorV1 } from '../src/rfc64/catalog-repair-diagnostics-v1.js';
 import { activeDefaultStoreWorkPriority } from '@origintrail-official/dkg-storage';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from '../src/rfc64/finalized-private-placement-repair-store-v1.js';
 
@@ -105,6 +107,50 @@ describe('RFC-64 unchanged repair backoff', () => {
     expect(f.reconcile).toHaveBeenCalledTimes(3);
     await f.advance(5_000);
     expect(f.reconcile).toHaveBeenCalledTimes(4);
+  });
+
+  it('does not impose a stale integrity cooldown after a lane transition', () => {
+    const retry = new CatalogRepairRetryV1();
+    retry.observe('head-1');
+    const generation = retry.generation;
+    retry.observe(null);
+    retry.observe('head-2');
+    expect(retry.fail(generation, 0, 5_000, 'integrity')).toBe(false);
+    expect(retry.nextAttemptAtMs).toBeNull();
+  });
+
+  it('preserves integrity cooldown and failure history under continuous inventory churn', async () => {
+    const f = fixture();
+    f.reconcile.mockImplementation(async () => { throw new CatalogRepairIntegrityErrorV1('invalid seal'); });
+    f.request();
+    await f.owner.whenIdle();
+    for (let i = 0; i < 20; i++) {
+      f.setRevision(`scope-1:head-${i + 2}`);
+      f.request();
+      await f.owner.whenIdle();
+    }
+    expect(f.reconcile).toHaveBeenCalledTimes(1);
+    await f.advance(5_000);
+    expect(f.reconcile).toHaveBeenCalledTimes(2);
+    f.setRevision('scope-1:head-100'); f.request();
+    await f.owner.whenIdle();
+    expect(f.owner.status()?.repairs[0]).toMatchObject({ consecutiveFailures: 2, nextAttemptAtMs: 15_000 });
+    f.setAvailable(false); f.request();
+    f.setAvailable(true); f.owner.start(ctx);
+    await f.owner.whenIdle();
+    expect(f.reconcile).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not immediately replay an integrity failure when its head changes while running', async () => {
+    const f = fixture();
+    f.reconcile.mockImplementationOnce(async () => {
+      f.setRevision('scope-1:head-2');
+      throw new CatalogRepairIntegrityErrorV1('invalid seal');
+    });
+    f.request();
+    await f.owner.whenIdle();
+    expect(f.reconcile).toHaveBeenCalledTimes(1);
+    expect(f.owner.status()?.repairs[0]).toMatchObject({ consecutiveFailures: 1, nextAttemptAtMs: 5_000 });
   });
 
   it('preserves a changed revision received while the old failed attempt drains', async () => {
