@@ -1097,7 +1097,10 @@ export class DKGAgent extends DKGAgentBase {
           });
           const headDigest = this.rfc64PersistenceV1?.swmAuthorInventory
             .readSwmAuthorInventoryHeadDigestV1(scopeDigest, authorAddress) ?? null;
-          return JSON.stringify([lane.kind, lane.projectionTargetPolicy, scopeDigest, headDigest]);
+          return {
+            scopeIdentity: JSON.stringify([lane.kind, lane.projectionTargetPolicy, scopeDigest]),
+            headRevision: headDigest,
+          };
         },
         listFinalizedPrivateRepairs: () => (
           this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.list() ?? []
