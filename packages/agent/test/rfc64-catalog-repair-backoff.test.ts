@@ -150,7 +150,7 @@ describe('RFC-64 unchanged repair backoff', () => {
   });
 
   it.each(retainedFailures)('does not immediately replay a %s failure when its head changes while running', async (_kind, failure) => {
-    const f = fixture();
+    const f = fixture(0);
     f.reconcile.mockImplementationOnce(async () => {
       f.setRevision('scope-1:head-2');
       throw failure();
@@ -159,6 +159,14 @@ describe('RFC-64 unchanged repair backoff', () => {
     await f.owner.whenIdle();
     expect(f.reconcile).toHaveBeenCalledTimes(1);
     expect(f.owner.status()?.repairs[0]).toMatchObject({ consecutiveFailures: 1, nextAttemptAtMs: 5_000 });
+    f.reconcile.mockResolvedValue(null);
+    await f.advance(4_999);
+    expect(f.reconcile).toHaveBeenCalledTimes(1);
+    await f.advance(1);
+    expect(f.reconcile).toHaveBeenCalledTimes(2);
+    await f.advance(60_000);
+    expect(f.reconcile).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it.each(['cooldown', 'in-flight'])('retains a known changed head through %s with periodic retries disabled', async (phase) => {
@@ -185,6 +193,37 @@ describe('RFC-64 unchanged repair backoff', () => {
     await f.advance(60_000);
     expect(f.reconcile).toHaveBeenCalledTimes(2);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['cooldown', 'in-flight'])('resets and fences an active authoring-scope change through %s', async (phase) => {
+    const f = fixture(0);
+    const revision = (scope: string) => JSON.stringify(['public', 'legacy-public', scope, 'head-1']);
+    f.setRevision(revision('era-1'));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    f.reconcile.mockResolvedValue(null).mockImplementationOnce(async () => {
+      if (phase === 'in-flight') await gate;
+      throw new CatalogRepairIntegrityErrorV1('old era seal');
+    });
+    f.request();
+    if (phase === 'cooldown') await f.owner.whenIdle();
+    f.setRevision(revision('era-2'));
+    f.request();
+    release();
+    await f.owner.whenIdle();
+    expect(f.reconcile).toHaveBeenCalledTimes(2);
+    expect(f.owner.status()?.repairs[0]).toMatchObject({ consecutiveFailures: 0, nextAttemptAtMs: null });
+    await f.advance(60_000);
+    expect(f.reconcile).toHaveBeenCalledTimes(2);
+  });
+
+  it('retains cooldown for production head hints within the same authoring scope', () => {
+    const retry = new CatalogRepairRetryV1();
+    retry.observe(JSON.stringify(['public', 'legacy-public', 'scope-1', 'head-1']));
+    retry.fail(retry.generation, 0, 0, 'integrity');
+    retry.observe(JSON.stringify(['public', 'legacy-public', 'scope-1', 'head-2']));
+    expect(retry.nextAttemptAtMs).toBe(5_000);
+    expect(retry.consecutiveFailures).toBe(1);
   });
 
   it('preserves a changed revision received while the old failed attempt drains', async () => {
