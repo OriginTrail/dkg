@@ -172,7 +172,7 @@ export interface ProduceAndStagePublicOpenExactSetSuccessorInputV1 {
   readonly issuedAt: TimestampMsV1;
   readonly catalogSigner: Rfc64AuthorCatalogEip191SignerV1;
   readonly catalogIssuerAuthorization: Rfc64PublicCatalogIssuerAuthorizationV1;
-  /** Stops the production between rows, before anything is staged. */
+  /** Stops the production between rows and before each signature; nothing is staged. */
   readonly signal?: AbortSignal;
 }
 
@@ -328,10 +328,14 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
         selectedBucketId: '0' as DecimalU64V1,
         nextRows: preparedAssets.map(({ row }) => row),
         issuedAt,
-        // The canonical producer reads the whole bucket before and after it signs.
-        signer: rfc64SignerTakingTurnsV1(catalogSigner, timeSlice),
+        // The canonical producer reads the whole bucket before and after it
+        // signs. A production cancelled in one of those turns asks the wallet
+        // for nothing more.
+        signer: rfc64SignerTakingTurnsV1(catalogSigner, rowBoundary),
       });
     } catch (cause) {
+      // Cancelled inside the canonical producer: that is not a history failure.
+      throwIfRfc64AbortedV1(signal, RFC64_SUCCESSOR_PRODUCTION_ABORT_MESSAGE_V1);
       fail(
         'catalog-successor-producer-history',
         'bounded exact-set successor could not be built from the supplied history',
