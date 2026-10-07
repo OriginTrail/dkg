@@ -1,11 +1,15 @@
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519, computeWorkspaceAgentEncryptionKeyProofPayload, computeWorkspaceAgentEncryptionKeyRevocationPayload } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
-import type { WorkspaceAgentRecipient } from './workspace-agent-recipients.js';
 import { WORKSPACE_RECIPIENT_DEPENDENCIES } from './workspace-recipient-dependencies.js';
 
 const { keyRoute: KEY_ROUTE } = WORKSPACE_RECIPIENT_DEPENDENCIES;
 const STRICT_RECIPIENT_KEY_CANDIDATE_LIMIT = 64;
+
+export interface EncryptionKeyMaterial {
+  readonly recipientKeyId: string;
+  readonly publicKeyBytes: Uint8Array;
+}
 
 /**
  * Fetch revocation triples for the candidate keys and return the subset whose
@@ -16,12 +20,12 @@ const STRICT_RECIPIENT_KEY_CANDIDATE_LIMIT = 64;
 export async function loadVerifiedRevokedKeyIds(
   store: TripleStore,
   agentAddress: string,
-  candidates: readonly WorkspaceAgentRecipient[],
+  candidates: readonly EncryptionKeyMaterial[],
   graphFilter = '',
 ): Promise<Set<string>> {
   const revoked = new Set<string>();
   if (candidates.length === 0) return revoked;
-  const candidatesByKey = new Map<string, WorkspaceAgentRecipient>();
+  const candidatesByKey = new Map<string, EncryptionKeyMaterial>();
   for (const candidate of candidates) candidatesByKey.set(candidate.recipientKeyId, candidate);
   const valuesList = [...candidatesByKey.keys()].map((keyId) => `<${keyId}>`).join(' ');
   const revocationRowLimit = candidatesByKey.size + STRICT_RECIPIENT_KEY_CANDIDATE_LIMIT + 1;
@@ -50,7 +54,7 @@ export async function loadVerifiedRevokedKeyIds(
     if (!candidate) continue;
     const verified = verifyAgentEncryptionKeyRevocation(
       agentAddress,
-      candidate.publicKeyBytes!,
+      candidate.publicKeyBytes,
       stripRdfLiteral(revokedAt),
       stripRdfLiteral(revocationProof),
     );

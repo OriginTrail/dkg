@@ -8,10 +8,10 @@ import { WORKSPACE_RECIPIENT_DEPENDENCIES } from './workspace-recipient-dependen
 import type { WorkspaceAgentRecipient } from './workspace-agent-recipients.js';
 import { WorkspaceAgentEncryptionKeyMissingError } from './workspace-recipient-key-errors.js';
 import { loadVerifiedRevokedKeyIds, stringBinding, stripRdfLiteral } from './workspace-recipient-key-verification.js';
-import { collectCompleteWorkspaceAgentKeys } from './workspace-recipient-key-collect.js';
+import { collectWorkspaceAgentKeyEvidence } from './workspace-recipient-key-collect.js';
 
 const { keyRoute: KEY_ROUTE } = WORKSPACE_RECIPIENT_DEPENDENCIES;
-import { decodePublicKeyCandidate, candidateRecipient, candidateHasProof, projectPublicKeyRoutes,
+import { decodePublicKeyCandidate, candidateHasProof, projectPublicKeyRoutes,
   RECIPIENT_KEY_CANDIDATE_LIMIT as STRICT_RECIPIENT_KEY_CANDIDATE_LIMIT, RECIPIENT_KEY_HISTORY_PAGE_SIZE,
   type PublicKeyCandidate, type PublicKeyRoute } from './workspace-recipient-key-candidates.js';
 
@@ -51,8 +51,11 @@ export async function resolveWorkspaceAgentRecipientKeys(
   const graphFilter = excludedGraphs.length === 0
     ? ''
     : `FILTER (?g NOT IN (${excludedGraphs.join(', ')}))`;
-  const complete = await collectCompleteWorkspaceAgentKeys(store, checksum, agentUri, agentUriValues, graphFilter, options.requiredPeerId);
-  if (complete !== null) return complete;
+  const evidence = await collectWorkspaceAgentKeyEvidence(store, agentUriValues, graphFilter);
+  const complete = evidence.completeness === 'complete';
+  // Both retrieval strategies use the same budgets, authentication and outcome classification.
+  // Complete evidence needs no further positive reads; its revocation read remains the last read.
+  let completeRevokedKeyIds: Set<string> | undefined;
   // The legacy flat RDF shape keeps every rotated key and proof on the agent
   // subject forever. Scan distinct keys before joining route metadata so an
   // authenticated retired history does not consume the live fanout cap. Each
@@ -71,7 +74,9 @@ export async function resolveWorkspaceAgentRecipientKeys(
     const cursorFilter = keyCursor === undefined
       ? ''
       : `FILTER (?key > ${sparqlString(keyCursor)})`;
-    const page = await store.query(
+    const page = complete
+      ? { type: 'bindings' as const, bindings: evidence.keys.map((key) => ({ key })) }
+      : await store.query(
       `SELECT DISTINCT ?key WHERE {
         VALUES ?agentSubject { ${agentUriValues} }
         GRAPH ?g {
@@ -92,7 +97,7 @@ export async function resolveWorkspaceAgentRecipientKeys(
       publicKeyBytes?: Uint8Array;
       recipientKeyId?: string;
     }> = [];
-    const revocationCandidates = new Map<string, WorkspaceAgentRecipient>();
+    const revocationCandidates = new Map<string, PublicKeyCandidate>();
     for (const row of page.bindings) {
       const publicKey = stringBinding(row['key']);
       const encodedPublicKey = publicKey ? stripRdfLiteral(publicKey) : '';
@@ -101,7 +106,7 @@ export async function resolveWorkspaceAgentRecipientKeys(
       const candidate = decodePublicKeyCandidate(checksum, encodedPublicKey);
       if (candidate) {
         ({ publicKeyBytes, recipientKeyId } = candidate);
-        revocationCandidates.set(recipientKeyId, candidateRecipient(candidate, checksum, agentUri));
+        revocationCandidates.set(recipientKeyId, candidate);
       }
       decodedPage.push({ encodedPublicKey, publicKeyBytes, recipientKeyId });
     }
@@ -112,6 +117,7 @@ export async function resolveWorkspaceAgentRecipientKeys(
       [...revocationCandidates.values()],
       graphFilter,
     );
+    if (complete) completeRevokedKeyIds = revokedKeyIds;
     for (const candidate of decodedPage) {
       if (candidate.recipientKeyId && revokedKeyIds.has(candidate.recipientKeyId)) {
         // Count unique cryptographic key ids rather than lexical RDF aliases:
@@ -143,7 +149,7 @@ export async function resolveWorkspaceAgentRecipientKeys(
       throw new Error(`Non-monotonic public encryption-key history for DKG agent ${checksum}`);
     }
     keyCursor = nextCursor;
-    if (page.bindings.length < RECIPIENT_KEY_HISTORY_PAGE_SIZE) break;
+    if (complete || page.bindings.length < RECIPIENT_KEY_HISTORY_PAGE_SIZE) break;
   }
 
   if (!sawAnyKeyCandidate) {
@@ -172,7 +178,9 @@ export async function resolveWorkspaceAgentRecipientKeys(
     const cursorFilter = proofCursor === undefined
       ? ''
       : `FILTER (?proof > ${sparqlString(proofCursor)})`;
-    const page = await store.query(
+    const page = complete
+      ? { type: 'bindings' as const, bindings: evidence.proofs.map((proof) => ({ proof })) }
+      : await store.query(
       `SELECT DISTINCT ?proof WHERE {
         VALUES ?agentSubject { ${agentUriValues} }
         GRAPH ?g {
@@ -212,7 +220,7 @@ export async function resolveWorkspaceAgentRecipientKeys(
       throw new Error(`Non-monotonic public encryption-key proof history for DKG agent ${checksum}`);
     }
     proofCursor = nextCursor;
-    if (page.bindings.length < RECIPIENT_KEY_HISTORY_PAGE_SIZE) break;
+    if (complete || page.bindings.length < RECIPIENT_KEY_HISTORY_PAGE_SIZE) break;
   }
 
   let sawUntrustedOnly = false;
@@ -243,7 +251,9 @@ export async function resolveWorkspaceAgentRecipientKeys(
     .map((candidate) => sparqlString(candidate.encodedPublicKey))
     .join(' ');
   const routeRowLimit = STRICT_RECIPIENT_KEY_CANDIDATE_LIMIT + proofVerifiedKeys.length + 1;
-  const result = await store.query(
+  const result = complete
+    ? { type: 'bindings' as const, bindings: evidence.routes.filter((route) => proofVerifiedKeys.some((candidate) => candidate.encodedPublicKey === route.key)) }
+    : await store.query(
     `SELECT DISTINCT ?key ?peerId WHERE {
       VALUES ?agentSubject { ${agentUriValues} }
       VALUES ?key { ${activeKeyValues} }
@@ -290,14 +300,8 @@ export async function resolveWorkspaceAgentRecipientKeys(
     throw new Error(`Untrusted RDF-only public encryption key for DKG agent ${checksum}`);
   }
 
-  const verifiedRecipients = [...verifiedKeys.values()].flatMap((variants) => (
-    [...variants.values()]
-  ));
-  const revokedKeyIds = await loadVerifiedRevokedKeyIds(
-    store,
-    checksum,
-    verifiedRecipients,
-    graphFilter,
+  const revokedKeyIds = completeRevokedKeyIds ?? await loadVerifiedRevokedKeyIds(
+    store, checksum, proofVerifiedKeys, graphFilter,
   );
   for (const id of revokedKeyIds) {
     // Revocation is keyed by recipientKeyId, not by transport provenance, so

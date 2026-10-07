@@ -836,11 +836,72 @@ describe('complete bounded recipient key collect', () => {
       if (strategy === 'paged') {
         const query = store.query.bind(store);
         vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => sparql.includes('SELECT ?kind ?key ?proof ?peerId')
-          ? { type: 'bindings', bindings: [] } : query(sparql, options));
+          ? { type: 'bindings', bindings: [{ kind: 'unsupported' }] } : query(sparql, options));
       }
       const recipients = await resolveWorkspaceAgentRecipientKeys(store, wallet.address);
       expect(recipients.map((recipient) => recipient.peerId).sort()).toEqual([PEER_A, PEER_B].sort());
       await expect(resolveWorkspaceAgentRecipientKeys(store, wallet.address, { requiredPeerId: PEER_A })).rejects.toThrow(/not bound to the required peer/);
+    } finally { await store.close(); }
+  });
+
+  it.each(['key', 'proof', 'route'])('excludes cached authority from the real %s UNION branch', async (branch) => {
+    const store = new OxigraphStore();
+    try {
+      const wallet = ethers.Wallet.createRandom();
+      const excludedGraph = 'urn:local-recipient-cache';
+      await insertAgentEncryptionKey(store, wallet, { graph: excludedGraph, keyFill: 9, peerId: PEER_A });
+      if (branch !== 'key') {
+        await insertAgentEncryptionKey(store, wallet, {
+          graph: 'urn:visible-profile', keyFill: 9, omitProof: branch === 'proof', omitAlgorithm: branch === 'route',
+        });
+      }
+      const expected = branch === 'key' ? /Missing public encryption key/
+        : /Untrusted RDF-only public encryption key/;
+      await expect(resolveWorkspaceAgentRecipientKeys(store, wallet.address, { excludeGraphUris: [excludedGraph] }))
+        .rejects.toThrow(expected);
+    } finally { await store.close(); }
+  });
+
+  it('does not attach an excluded peer route to a visible peerless profile key', async () => {
+    const store = new OxigraphStore();
+    try {
+      const wallet = ethers.Wallet.createRandom();
+      await insertAgentEncryptionKey(store, wallet, { graph: 'urn:visible-profile', keyFill: 9 });
+      await insertAgentEncryptionKey(store, wallet, { graph: 'urn:local-recipient-cache', keyFill: 9, peerId: PEER_A });
+      const recipients = await resolveWorkspaceAgentRecipientKeys(store, wallet.address, { excludeGraphUris: ['urn:local-recipient-cache'] });
+      expect(recipients).toHaveLength(1);
+      expect(recipients[0].peerId).toBeUndefined();
+      await expect(resolveWorkspaceAgentRecipientKeys(store, wallet.address, {
+        excludeGraphUris: ['urn:local-recipient-cache'], requiredPeerId: PEER_A,
+      })).rejects.toThrow(/not bound to the required peer/);
+    } finally { await store.close(); }
+  });
+
+  it.each([
+    ['missing', /Missing public encryption key/, 1],
+    ['malformed', /Unverifiable public encryption key/, 1],
+    ['untrusted', /Untrusted RDF-only public encryption key/, 2],
+    ['spoofed', /Spoofed or unverifiable public encryption key/, 2],
+    ['revoked', /have been revoked/, 2],
+    ['algorithm', /Unsupported public encryption key algorithm/, 3],
+  ] as const)('retains complete %s diagnostics without restarting collection', async (kind, expected, reads) => {
+    const store = new OxigraphStore();
+    try {
+      const wallet = ethers.Wallet.createRandom();
+      if (kind === 'malformed') {
+        await store.insert([{ subject: agentUri(wallet.address), predicate: DKG_PUBLIC_ENCRYPTION_KEY,
+          object: '"invalid-key"', graph: AGENTS_GRAPH }]);
+      } else if (kind !== 'missing') {
+        const key = await insertAgentEncryptionKey(store, wallet, {
+          omitProof: kind === 'untrusted', proofWallet: kind === 'spoofed' ? ethers.Wallet.createRandom() : undefined,
+          algorithm: kind === 'algorithm' ? 'P-256' : undefined,
+        });
+        if (kind === 'revoked') await insertAgentEncryptionKeyRevocation(store, wallet, key.publicKeyBytes);
+      }
+      const query = vi.spyOn(store, 'query');
+      await expect(resolveWorkspaceAgentRecipientKeys(store, wallet.address)).rejects.toThrow(expected);
+      expect(query).toHaveBeenCalledTimes(reads);
+      expect(query.mock.calls.some(([sparql]) => sparql.includes('ORDER BY ?key') || sparql.includes('ORDER BY ?proof'))).toBe(false);
     } finally { await store.close(); }
   });
 
