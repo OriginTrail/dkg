@@ -139,6 +139,7 @@
     "./dist/rfc64/*": null,
     "./dist/*": "./dist/*",
     "./dist/rfc64/legacy-swm-boundary-codec-v1.js": null,
+    "./dist/rfc64/legacy-swm-boundary-fence-v1.js": null,
     "./dist/rfc64/catalog-operational-targets-v1.js": null,
     "./dist/rfc64/private-read-roster-v1.js": null
   },

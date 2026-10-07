@@ -25,7 +25,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   DKGPublisher,
-  type DurableRootPromotionAtomicCompanion,
+  type DurableRootPromotionAtomicCompanionResolver,
   type DurableRootPromotionIdentity,
   getPromoteFailureDisposition,
   createPromoteRetryableFailure,
@@ -125,9 +125,7 @@ describe('Working Memory Assertion Lifecycle', () => {
   const createPublisher = async (
     writeLocks?: Map<string, Promise<void>>,
     publisherStore: OxigraphStore = store,
-    resolveDurableRootPromotionAtomicCompanion?: (
-      input: Readonly<DurableRootPromotionIdentity>,
-    ) => Readonly<DurableRootPromotionAtomicCompanion> | undefined,
+    resolveDurableRootPromotionAtomicCompanion?: DurableRootPromotionAtomicCompanionResolver,
   ): Promise<DKGPublisher> => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
@@ -1251,7 +1249,11 @@ describe('Working Memory Assertion Lifecycle', () => {
     const companionPredicate = 'urn:test:root-promotion-companion';
     const identities: DurableRootPromotionIdentity[] = [];
     const settle = vi.fn();
-    const hookedPublisher = await createPublisher(undefined, store, (input) => {
+    // The resolver's admission wait runs before the resolve, once.
+    const awaitAdmission = vi.fn(async () => { expect(identities).toHaveLength(0); });
+    const hookedPublisher = await createPublisher(undefined, store, Object.assign((
+      input: Readonly<DurableRootPromotionIdentity>,
+    ) => {
       identities.push(input);
       const subject = `urn:test:root-promotion:${input.shareOperationId}`;
       return {
@@ -1265,7 +1267,7 @@ describe('Working Memory Assertion Lifecycle', () => {
         }],
         settle,
       };
-    });
+    }, { awaitAdmission }));
     const confirmBeforeCommit = vi.fn(async () => {
       expect(identities).toHaveLength(1);
       expect(await store.hasGraph(companionGraph)).toBe(false);
@@ -1282,6 +1284,8 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(confirmBeforeCommit).toHaveBeenCalledTimes(1);
     expect(settle).toHaveBeenCalledOnce();
     expect(settle).toHaveBeenCalledWith(true);
+    expect(awaitAdmission).toHaveBeenCalledOnce();
+    expect(awaitAdmission).toHaveBeenCalledWith({ contextGraphId: CG_ID, kaUal: finalized.kaUal });
     expect(identities).toEqual([expect.objectContaining({
       contextGraphId: CG_ID,
       assertionCoordinate: ASSERTION_NAME,

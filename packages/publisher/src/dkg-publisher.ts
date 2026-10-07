@@ -102,7 +102,7 @@ import {
   type StagedKnowledgeAssetSharedWorkingMemoryV1,
 } from './knowledge-asset-swm-staging.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
-import type { DurableRootAtomicCompanionResolver } from
+import type { DurableRootAtomicCompanionResolver, DurableRootCompanionAdmissionWait } from
   './durable-root-atomic-companion.js';
 import { ethers } from 'ethers';
 import {
@@ -488,6 +488,11 @@ export interface DurableRootPromotionAtomicCompanion {
   readonly settle?: (committed: boolean | undefined) => void;
 }
 
+export interface DurableRootPromotionAtomicCompanionResolver {
+  (input: Readonly<DurableRootPromotionIdentity>): Readonly<DurableRootPromotionAtomicCompanion> | undefined;
+  readonly awaitAdmission?: DurableRootCompanionAdmissionWait;
+}
+
 export interface DKGPublisherConfig {
   store: TripleStore;
   chain: ChainAdapter;
@@ -532,9 +537,7 @@ export interface DKGPublisherConfig {
    * persistence, but before curator confirmation or any SWM content mutation.
    * A rejection aborts the promotion fail closed.
    */
-  resolveDurableRootPromotionAtomicCompanion?: (
-    input: Readonly<DurableRootPromotionIdentity>,
-  ) => Readonly<DurableRootPromotionAtomicCompanion> | undefined;
+  resolveDurableRootPromotionAtomicCompanion?: DurableRootPromotionAtomicCompanionResolver;
   /** Atomic late-boundary companion for root SWM staging/update writes. */
   resolveDurableRootMaterializationAtomicCompanion?: DurableRootAtomicCompanionResolver;
   /**
@@ -1180,9 +1183,7 @@ export class DKGPublisher implements Publisher {
   private readonly publishedSnapshotRetirement: PublishedSnapshotRetirement;
   /** OT-RFC-43 Option 1 — deterministic KA-id allocator (optional; see DKGPublisherConfig). */
   private readonly kaAllocator?: KaIdAllocator;
-  private readonly resolveDurableRootPromotionAtomicCompanion?: (
-    input: Readonly<DurableRootPromotionIdentity>,
-  ) => Readonly<DurableRootPromotionAtomicCompanion> | undefined;
+  private readonly resolveDurableRootPromotionAtomicCompanion?: DurableRootPromotionAtomicCompanionResolver;
   private readonly resolveDurableRootMaterializationAtomicCompanion?:
     DurableRootAtomicCompanionResolver;
   /** Authors whose allocator floor has been reconciled against the chain this process. */
@@ -9109,7 +9110,13 @@ export class DKGPublisher implements Publisher {
     // exact SWM graph and companion subject share one atomic commit below, so a
     // failed promotion cannot strand a durable false-incomplete witness. The
     // resolver itself may conservatively hydrate process-local state and must be
-    // idempotent because retries reuse operationId.
+    // idempotent because retries reuse operationId. A resolver that can refuse
+    // for a passing reason is first given its short wait.
+    if (opts?.subGraphName === undefined) {
+      await this.resolveDurableRootPromotionAtomicCompanion?.awaitAdmission?.({
+        contextGraphId, kaUal: contentScope.ual,
+      });
+    }
     const resolvedRootCompanion = opts?.subGraphName === undefined
       ? this.resolveDurableRootPromotionAtomicCompanion?.(Object.freeze({
           contextGraphId,

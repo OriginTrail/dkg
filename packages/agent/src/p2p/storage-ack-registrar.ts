@@ -182,10 +182,13 @@ export function createStorageACKRegistrationPlan(ports: StorageACKRegistrarPorts
         chainId: chainIdForHandler,
         kav10Address: kav10AddressForHandler,
         workspaceWriteLocks: ports.writeLocks,
-        resolveDurableRootAtomicCompanion: (input) => {
-          if (ports.config.dataDir === undefined) return;
-          return ports.prepareDurableRootAtomicCompanion(input);
-        },
+        resolveDurableRootAtomicCompanion: Object.assign(
+          (input: Parameters<StorageACKRegistrarPorts['prepareDurableRootAtomicCompanion']>[0]) => {
+            if (ports.config.dataDir === undefined) return;
+            return ports.prepareDurableRootAtomicCompanion(input);
+          },
+          { awaitAdmission: ports.prepareDurableRootAtomicCompanion.awaitAdmission },
+        ),
         ackHandlerDeadlineMs: ports.config.storageAckTiming.handlerDeadlineMs,
         // Codex review (round 2) on PR #727: must NOT collapse to a
         // plain `gossipWireIdFor` because `PublishIntent.swmGraphId`
