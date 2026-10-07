@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { isSafeIri } from '@origintrail-official/dkg-core';
-import type { Quad } from '@origintrail-official/dkg-storage';
 import type { ContextGraphMetaProjection } from '../context-graph-meta-projection.js';
 import type { StoreMutation, StoreMutationObserver } from './store-mutation.js';
 
@@ -10,7 +9,7 @@ function notifyProjection(projection: ContextGraphMetaProjection, mutation: Stor
   // A quad whose predicate is not a bare IRI may be stored under another one, so no classification
   // of its predicate holds.
   if (mutation.everything || mutation.quads?.some((quad) => !isSafeIri(quad.predicate))) {
-    projection.markAllDirty();
+    projection.markAllDirty(false);
     return;
   }
   for (const { graph, subject, predicate } of mutation.removals ?? []) {
@@ -18,10 +17,10 @@ function notifyProjection(projection: ContextGraphMetaProjection, mutation: Stor
     // deleted facts are fenced, while replacement quads cover inserted ones. A graph
     // that is not a bare IRI names nothing provable (some adapters read an empty
     // one as a wildcard), so it is a write that may have changed anything.
-    if (graph === undefined || !isSafeIri(graph)) projection.markAllDirty();
-    else projection.markDirtyForGraph(graph, subject, predicate);
+    if (graph === undefined || !isSafeIri(graph)) projection.markAllDirty(false);
+    else projection.markDirtyForGraph(graph, subject, predicate, false);
   }
-  if (mutation.quads) projection.markDirtyFromQuads(mutation.quads);
+  if (mutation.quads) projection.markDirtyFromQuads(mutation.quads, false);
 }
 
 /** How the agent's store wrapper tells the metadata projection what a write is about to change and did change. */
@@ -46,10 +45,3 @@ export function createProjectionMutationObserver(
   };
 }
 
-/** Report a committed write made through an undecorated storage path. */
-export function reportCommittedProjectionQuads(
-  projection: ContextGraphMetaProjection,
-  quads: readonly Quad[],
-): void {
-  createProjectionMutationObserver(() => projection).begin({ quads })('changed');
-}

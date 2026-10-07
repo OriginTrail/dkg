@@ -343,8 +343,9 @@ export class ContextGraphMetaProjection {
    * from the inserted quads, so a delete is covered too. Shared AGENTS/ONTOLOGY
    * sources invalidate every record. Other graphs dirty no cache entry but still
    * advance the authority revision, because key lookup scans all named graphs.
-   * Mutation observers separately notify recipient fences. */
-  markDirtyForGraph(graphUri: string, subject?: string, predicate?: string): void {
+   * Legacy callbacks also notify recipient fences; the observed store opts out of that notification. */
+  markDirtyForGraph(graphUri: string, subject?: string, predicate?: string, notifyRecipientFence = true): void {
+    if (notifyRecipientFence) this.recipientKeyRouteFence.noteRemoval({ graph: graphUri, subject, predicate });
     const graph = stripTerm(graphUri);
     if (
       graph === contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS)
@@ -369,8 +370,9 @@ export class ContextGraphMetaProjection {
     this.authorityFactsRevision += 1;
   }
 
-  markAllDirty(): void {
+  markAllDirty(notifyRecipientFence = true): void {
     this.dirtyAll();
+    if (notifyRecipientFence) this.recipientKeyRouteFence.noteUnscopedWrite();
   }
 
   private dirtyAll(): void {
@@ -383,7 +385,8 @@ export class ContextGraphMetaProjection {
     }
   }
 
-  markDirtyFromQuads(quads: readonly Quad[]): string[] {
+  markDirtyFromQuads(quads: readonly Quad[], notifyRecipientFence = true): string[] {
+    if (notifyRecipientFence) this.recipientKeyRouteFence.noteQuads(quads);
     const touched = new Set<string>();
     let recipientAuthorityTouched = false;
     for (const quad of quads) {

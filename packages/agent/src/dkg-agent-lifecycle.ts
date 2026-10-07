@@ -1,4 +1,3 @@
-import { reportCommittedProjectionQuads } from './internal/projection-mutation-observer.js';
 import { syncReconcilerEnabled, syncOnConnectEnabled, durableSyncEnabled } from './internal/lifecycle-sync-policy.js';
 import { emptySwmRecoveryResult } from './sync/shared-memory-completion.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
@@ -6451,7 +6450,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           });
           if (outcome === 'applied') {
             this.invalidateListContextGraphsCache();
-            reportCommittedProjectionQuads(this.contextGraphMetaProjection, authentication.asset.metadataQuads);
             try {
               let retiredTwin: FinalizedSwmTwinRetirement | undefined;
               const retirement = await reconcileFinalizedSwmTwin({

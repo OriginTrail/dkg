@@ -89,7 +89,7 @@ export function createSwmRecoveryMutationRuntimeV1(params: Readonly<{
   store: TripleStore;
   recordDrops: OversizeGuardHooks['recordDrops'];
   invalidateListContextGraphsCache: () => void;
-  markMetaProjectionDirty: (quads: Quad[]) => void;
+  markMetaProjectionDirty?: (quads: Quad[]) => void;
 }>): SwmRecoveryMutationRuntimeV1 {
   const graphManager = new GraphManager(params.store);
   const store: SwmRecoveryStore = {
@@ -105,7 +105,7 @@ export function createSwmRecoveryMutationRuntimeV1(params: Readonly<{
       );
       if (inserted.length > 0) {
         params.invalidateListContextGraphsCache();
-        params.markMetaProjectionDirty(inserted);
+        params.markMetaProjectionDirty?.(inserted);
       }
     },
     replaceGraph: async (graph, quads) => {

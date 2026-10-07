@@ -1,6 +1,5 @@
 
 export { createListContextGraphsCacheInvalidatingStore } from './internal/context-graph-cache-invalidating-store.js';
-import { reportCommittedProjectionQuads } from './internal/projection-mutation-observer.js';
 import type { VmRecoveryCoreTransportPreferencePolicy } from './vm-recovery-core-transport-preference.js';
 import { VmRecoveryTransportBudgetPolicy } from './vm-recovery-transport-budget-policy.js';
 import { VmRecoveryStreamSetbackPolicy } from './vm-recovery-stream-setback-policy.js';
@@ -1467,7 +1466,6 @@ export class DKGAgentBase {
     );
     if (inserted.length > 0) {
       this.invalidateListContextGraphsCache();
-      reportCommittedProjectionQuads(this.contextGraphMetaProjection, inserted);
     }
   }
   protected get gossipRegistered() { return this.gossipSession.gossipRegistered; }

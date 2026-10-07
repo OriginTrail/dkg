@@ -6,7 +6,6 @@
  * class; the holder extends DKGAgentBase for shared field state. Behaviour is
  * unchanged — bodies are a 1:1 move. Assembled onto DKGAgent via applyMixins.
  */
-import { reportCommittedProjectionQuads } from './internal/projection-mutation-observer.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -797,7 +796,6 @@ export class ContextGraphMethods extends DKGAgentBase {
 
     await this.store.insert(quads);
     this.invalidateListContextGraphsCache();
-    reportCommittedProjectionQuads(this.contextGraphMetaProjection, quads);
     await gm.ensureNewContextGraph(opts.id);
 
     // Force the triple-store flush BEFORE the SQLite caches are written.
@@ -1898,7 +1896,6 @@ export class ContextGraphMethods extends DKGAgentBase {
 
     await this.store.insert(quadsToInsert);
     this.invalidateListContextGraphsCache();
-    reportCommittedProjectionQuads(this.contextGraphMetaProjection, quadsToInsert);
 
     // Issue #865 — log a clear warning AFTER the allowlist quad has
     // landed on a CG with an explicit `accessPolicy="public"` triple.
@@ -2200,7 +2197,6 @@ export class ContextGraphMethods extends DKGAgentBase {
     }
     this.invalidateListContextGraphsCache();
 
-    reportCommittedProjectionQuads(this.contextGraphMetaProjection, quadsToInsert);
 
     // Private admission changes the release-native RFC-64 roster even when
     // the graph was registered before this member joined. Advance the
