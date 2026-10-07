@@ -321,6 +321,7 @@ export default defineConfig({
       "test/recipient-key-route-fence.property.test.ts",
       "test/peer-gate-revision.test.ts",
       "test/recipient-key-route-dependencies.test.ts",
+      "test/context-graph-cache-invalidating-store-callback.test.ts",
     ],
     testTimeout: 60_000,
     maxWorkers: 1,

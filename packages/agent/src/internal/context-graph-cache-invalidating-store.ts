@@ -7,6 +7,7 @@ import {
   isStoreOperationNotStarted,
   type Rfc64AuthorCommitCasInputV1,
   type SortedGraphSetSource,
+  type Quad,
   type StoreOperation,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
@@ -22,14 +23,39 @@ function describeCommit(input: Rfc64AuthorCommitCasInputV1): StoreMutation {
   }
 }
 
+/**
+ * The third argument this factory took before it took an observer, still accepted because the
+ * factory is reachable through the historical `dkg-agent-base` export: called after a write that
+ * changed something, with its quads, or with the graph and subject it removed, or with nothing
+ * when it may have changed anything.
+ */
+export type ProjectionDirtyCallback = (quads?: readonly Quad[], targetGraph?: string, targetSubject?: string) => void;
+
+function observerFromCallback(markProjectionDirty: ProjectionDirtyCallback): StoreMutationObserver {
+  return {
+    begin: (mutation) => (outcome) => {
+      if (outcome === 'unchanged') return;
+      if (mutation.everything) {
+        markProjectionDirty();
+        return;
+      }
+      for (const { graph, subject } of mutation.removals ?? []) markProjectionDirty(undefined, graph, subject);
+      if (mutation.quads) markProjectionDirty(mutation.quads);
+    },
+  };
+}
+
 export function createListContextGraphsCacheInvalidatingStore(
   innerStore: TripleStore,
   invalidate: () => void,
   // Every write is described once (#1863: a single-graph destructive mutation
   // names its target graph so deleted facts are fenced, not only inserted
   // ones) and the observer sees it before dispatch and again when it settles.
-  observer?: StoreMutationObserver,
+  observerOrCallback?: StoreMutationObserver | ProjectionDirtyCallback,
 ): TripleStore & Partial<SortedGraphSetSource> {
+  const observer = typeof observerOrCallback === 'function'
+    ? observerFromCallback(observerOrCallback)
+    : observerOrCallback;
   const invalidateAfterMutation = async <T>(
     work: () => Promise<T>,
     changed: (result: T) => boolean,
