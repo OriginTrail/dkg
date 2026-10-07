@@ -736,9 +736,9 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     await this.store.flush?.();
   }
 
-  /** Persist a transition through the storage-owned atomic subject writer.
-   * The fallback and flush preserve the same durability boundary on older stores.
-   * Literal externalization, changelog and reserved-plane bookkeeping stay in storage.
+  /** Capable stores replace atomically; older stores use a subject-scoped delete/insert
+   * fallback protected from same-process observation by the mutation lock.
+   * Flush completes durability separately; storage owns the record bookkeeping.
    */
   private async persistJobRecord(job: PromoteJob): Promise<void> {
     // The serializer owns record shaping AND the fail-loud single-subject guard (it throws if
