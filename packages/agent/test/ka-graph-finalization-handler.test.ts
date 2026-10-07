@@ -10,6 +10,8 @@ import {
   encodeFinalizationMessage,
   knowledgeAssetLayerGraphUri,
   type FinalizationMessageMsg,
+  Logger,
+  type LogRecord,
 } from '@origintrail-official/dkg-core';
 import {
   GraphManager,
@@ -420,7 +422,6 @@ describe('graph-scoped finalization handler', () => {
 
   function makeReconcileHandler(
     chainOverrides: Partial<ChainAdapter>,
-    options: { forbidLegacyRootScan?: boolean } = {},
   ): FinalizationHandler {
     const reconcileHandler = new FinalizationHandler(
       store,
@@ -428,14 +429,8 @@ describe('graph-scoped finalization handler', () => {
     );
     const internals = reconcileHandler as unknown as {
       verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
-      findSwmSnapshotForMerkleRoot?: () => Promise<never>;
     };
     internals.verifyChainCgBinding = async () => true;
-    if (options.forbidLegacyRootScan) {
-      internals.findSwmSnapshotForMerkleRoot = async () => {
-        throw new Error('legacy root scan must not run for graph-scoped SWM');
-      };
-    }
     return reconcileHandler;
   }
 
@@ -449,7 +444,7 @@ describe('graph-scoped finalization handler', () => {
       getMerkleRootCount: async () => 1n,
       getLatestMerkleRoot: async () => message.kcMerkleRoot,
       ...chainOverrides,
-    }, { forbidLegacyRootScan: true });
+    });
   }
 
   function reconcileGraphScoped(
@@ -2322,7 +2317,7 @@ describe('graph-scoped finalization handler', () => {
     }
   });
 
-  it('never persists structurally invalid or legacy envelopes under store pressure', async () => {
+  it('never persists structurally invalid or non-graph-scoped envelopes, and never reads the store for the latter', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-'));
     let inbox: SqliteFinalizationRecoveryStore | undefined;
     try {
@@ -2340,15 +2335,18 @@ describe('graph-scoped finalization handler', () => {
       expect(await inbox.list()).toEqual([]);
 
       const query = store.query.bind(store);
+      let queries = 0;
       store.query = async () => {
+        queries += 1;
         throw new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'sparql-http.query');
       };
       await expect(pressured.handleFinalizationMessage(encodeFinalizationMessage({
         ...message,
         contentScopeVersion: 0,
         rootEntities: ['urn:legacy:root'],
-      }), CG)).rejects.toBeInstanceOf(StoreSchedulerBusyError);
+      }), CG)).resolves.toBeUndefined();
       store.query = query;
+      expect(queries).toBe(0);
       expect(await inbox.list()).toEqual([]);
     } finally {
       await closeInbox(inbox);
@@ -2369,6 +2367,32 @@ describe('graph-scoped finalization handler', () => {
       CG,
     )).rejects.toBeInstanceOf(StoreSchedulerBusyError);
     store.query = query;
+  });
+
+  it('reports a failed unjournaled apply and materializes nothing', async () => {
+    const { message, vmGraph } = await stageGraph();
+    const quadsBefore = await store.countQuads(vmGraph);
+    const unjournaled = new FinalizationHandler(store, legacyFinalizationChain(4));
+    (unjournaled as unknown as {
+      recovery: { processUnjournaled: () => Promise<never> };
+    }).recovery.processUnjournaled = async () => {
+      throw new Error('materializer unavailable');
+    };
+    const entries: LogRecord[] = [];
+    Logger.setSink((entry) => entries.push(entry));
+    try {
+      await expect(unjournaled.handleFinalizationMessage(
+        encodeFinalizationMessage(message),
+        CG,
+      )).resolves.toBeUndefined();
+    } finally {
+      Logger.setSink(null);
+    }
+
+    expect(await store.countQuads(vmGraph)).toBe(quadsBefore);
+    const warnings = entries.filter((entry) => entry.level === 'warn').map((entry) => entry.message);
+    expect(warnings).toContain('Finalization: failed to process message: materializer unavailable');
+    expect(warnings.some((message_) => message_.includes('event=finalization_failed'))).toBe(true);
   });
 
   it('does not delete a newer SWM assertion staged after source verification', async () => {
@@ -2535,12 +2559,8 @@ describe('graph-scoped finalization handler', () => {
     );
     const internals = publicHandler as unknown as {
       verifyChainCgBinding: () => Promise<boolean>;
-      findSwmSnapshotForMerkleRoot?: () => Promise<never>;
     };
     internals.verifyChainCgBinding = async () => true;
-    internals.findSwmSnapshotForMerkleRoot = async () => {
-      throw new Error('legacy root scan must not run for graph-scoped SWM');
-    };
 
     await expect(reconcileGraphScoped(publicHandler, message)).resolves.toBe('promoted');
 
@@ -2589,12 +2609,8 @@ describe('graph-scoped finalization handler', () => {
     );
     const internals = restarted as unknown as {
       verifyChainCgBinding: () => Promise<boolean>;
-      findSwmSnapshotForMerkleRoot?: () => Promise<never>;
     };
     internals.verifyChainCgBinding = async () => true;
-    internals.findSwmSnapshotForMerkleRoot = async () => {
-      throw new Error('legacy root scan must not run for matching graph-scoped VM metadata');
-    };
 
     await expect(reconcileGraphScoped(restarted, message)).resolves.toBe('already-confirmed');
 
@@ -2795,7 +2811,7 @@ describe('graph-scoped finalization handler', () => {
       getContextGraphAccessPolicy: async () => 1,
       getMerkleRootCount: async () => 1n,
       getLatestMerkleRoot: async () => message.kcMerkleRoot,
-    }, { forbidLegacyRootScan: true });
+    });
 
     await expect(reconcileGraphScoped(privateHandler, message))
       .resolves.toBe('verified-vm-metadata-pending');
@@ -4013,12 +4029,8 @@ describe('graph-scoped finalization handler', () => {
       );
       const internals = reconciler as unknown as {
         verifyChainCgBinding: () => Promise<boolean>;
-        findSwmSnapshotForMerkleRoot?: () => Promise<never>;
       };
       internals.verifyChainCgBinding = async () => true;
-      internals.findSwmSnapshotForMerkleRoot = async () => {
-        throw new Error('legacy root scan must not run for graph-scoped SWM');
-      };
       const inputs = [
         graphReconcileInput(message),
         graphReconcileInput(message, {
@@ -4283,15 +4295,11 @@ describe('graph-scoped finalization handler', () => {
     let bindingVerified = false;
     const internals = handler as unknown as {
       verifyChainCgBinding: () => Promise<boolean>;
-      findSwmSnapshotForMerkleRoot: () => Promise<never>;
       graphScopedMetadataState: (...args: unknown[]) => Promise<'matching' | 'different' | 'absent'>;
     };
     internals.verifyChainCgBinding = async () => {
       bindingVerified = true;
       return true;
-    };
-    internals.findSwmSnapshotForMerkleRoot = async () => {
-      throw new Error('legacy root scan must not run for exact VM metadata repair');
     };
     const graphScopedMetadataState = internals.graphScopedMetadataState.bind(handler);
     internals.graphScopedMetadataState = async (...args) => {
@@ -4389,12 +4397,8 @@ describe('graph-scoped finalization handler', () => {
 
     const internals = handler as unknown as {
       verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
-      findSwmSnapshotForMerkleRoot: () => Promise<never>;
     };
     internals.verifyChainCgBinding = async () => true;
-    internals.findSwmSnapshotForMerkleRoot = async () => {
-      throw new Error('legacy root scan must not run for VM metadata recovery');
-    };
 
     const outcome = await handler.handleChainReconciledKC({
       contextGraphId: CG,
@@ -4441,12 +4445,8 @@ describe('graph-scoped finalization handler', () => {
 
     const internals = handler as unknown as {
       verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
-      findSwmSnapshotForMerkleRoot: () => Promise<never>;
     };
     internals.verifyChainCgBinding = async () => true;
-    internals.findSwmSnapshotForMerkleRoot = async () => {
-      throw new Error('legacy root scan must not run for VM metadata-tail recovery');
-    };
 
     await expect(handler.handleChainReconciledKC({
       contextGraphId: CG,
@@ -4487,12 +4487,8 @@ describe('graph-scoped finalization handler', () => {
 
     const internals = handler as unknown as {
       verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
-      findSwmSnapshotForMerkleRoot: () => Promise<never>;
     };
     internals.verifyChainCgBinding = async () => true;
-    internals.findSwmSnapshotForMerkleRoot = async () => {
-      throw new Error('legacy root scan must not run for corrupt V2 content');
-    };
 
     await expect(handler.handleChainReconciledKC({
       contextGraphId: CG,
@@ -4619,12 +4615,8 @@ describe('graph-scoped finalization handler', () => {
 
     const internals = handler as unknown as {
       verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
-      findSwmSnapshotForMerkleRoot: () => Promise<never>;
     };
     internals.verifyChainCgBinding = async () => true;
-    internals.findSwmSnapshotForMerkleRoot = async () => {
-      throw new Error('legacy root scan must not run for VM metadata recovery');
-    };
 
     const outcome = await handler.handleChainReconciledKC({
       contextGraphId: CG,
@@ -4773,12 +4765,8 @@ describe('graph-scoped finalization handler', () => {
     );
     const internals = handler as unknown as {
       verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
-      findSwmSnapshotForMerkleRoot: () => Promise<never>;
     };
     internals.verifyChainCgBinding = async () => true;
-    internals.findSwmSnapshotForMerkleRoot = async () => {
-      throw new Error('legacy root scan must not run for a V2 update');
-    };
 
     const outcome = await handler.handleChainReconciledKC({
       contextGraphId: CG,
@@ -4957,7 +4945,47 @@ describe('graph-scoped finalization handler', () => {
       await expect(reconcileAt(handler, UNRELATED_ROOT)).resolves.toBe('already-confirmed');
     });
 
-    it('keeps legacy workspace operations on the chain path only in the namespaces the scan reads', async () => {
+    it('answers no-swm, without the marker shortcut, when the lifecycle metadata of the KA is ambiguous', async () => {
+      trustBinding(handler);
+      const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
+      await store.insert([
+        { subject: 'urn:dkg:lifecycle:first', predicate: 'http://dkg.io/ontology/reservedUal', object: `"${UAL}"`, graph: metaGraph },
+        { subject: 'urn:dkg:lifecycle:second', predicate: 'http://dkg.io/ontology/reservedUal', object: `"${UAL}"`, graph: metaGraph },
+        { subject: UAL, predicate: 'http://dkg.io/ontology/status', object: '"confirmed"', graph: metaGraph },
+      ]);
+      const entries: LogRecord[] = [];
+      Logger.setSink((entry) => entries.push(entry));
+      try {
+        await expect(classify(handler)).resolves.toEqual({ kind: 'present' });
+        await expect(reconcileAt(handler, UNRELATED_ROOT)).resolves.toBe('no-swm');
+      } finally {
+        Logger.setSink(null);
+      }
+      expect(entries.map((entry) => entry.message))
+        .toContain(`Chain-reconcile: lifecycle metadata for ${UAL} is ambiguous`);
+    });
+
+    it('answers no-swm for a named KA whose graph-scoped metadata has neither a workspace head nor a confirmed copy', async () => {
+      trustBinding(handler);
+      const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
+      await store.insert([
+        { subject: 'urn:dkg:lifecycle:only', predicate: 'http://dkg.io/ontology/reservedUal', object: `"${UAL}"`, graph: metaGraph },
+        { subject: UAL, predicate: 'http://dkg.io/ontology/kaUal', object: `"${UAL}"`, graph: metaGraph },
+      ]);
+      const entries: LogRecord[] = [];
+      Logger.setSink((entry) => entries.push(entry));
+      try {
+        await expect(classify(handler)).resolves.toEqual({ kind: 'present' });
+        await expect(reconcileAt(handler, UNRELATED_ROOT)).resolves.toBe('no-swm');
+      } finally {
+        Logger.setSink(null);
+      }
+      expect(entries.map((entry) => entry.message)).toContain(
+        `Chain-reconcile: graph-scoped metadata exists for ${UAL} but its durable workspace head is missing`,
+      );
+    });
+
+    it('does not count historical workspace operations as a local candidate', async () => {
       await store.insert([{
         subject: 'urn:dkg:share:unrelated-legacy-share',
         predicate: 'http://dkg.io/ontology/rootEntity',
@@ -4965,8 +4993,8 @@ describe('graph-scoped finalization handler', () => {
         graph: graphManager.sharedMemoryMetaUri(CG),
       }]);
 
-      await expect(classify(handler)).resolves.toEqual({ kind: 'present' });
-      // A named namespace confines the root-matched scan to that namespace.
+      // Chain reconcile never searches them, in any namespace.
+      await expect(classify(handler)).resolves.toEqual({ kind: 'none' });
       await expect(classify(handler, { subGraphName: 'elsewhere' }))
         .resolves.toEqual({ kind: 'none' });
     });

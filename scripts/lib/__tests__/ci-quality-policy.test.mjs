@@ -135,6 +135,10 @@ test('every shared JUnit runner job uploads convention-derived reports', () => {
     path: `${JUNIT_UPLOAD_PATTERN}\npackages/*/test-results/*.coverage.json\npackages/adapter-hermes/coverage-python/\n`,
     'retention-days': 14,
     'if-no-files-found': 'ignore',
+    // A re-run shard replaces its earlier artifact: two artifacts under one
+    // name let the coverage job read the failed attempt's, which has no
+    // coverage file ("missing coverage shards").
+    overwrite: true,
   });
   for (const report of [
     'packages/example/test-results/example.xml',

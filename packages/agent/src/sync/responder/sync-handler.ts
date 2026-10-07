@@ -1,17 +1,13 @@
 import {
   createOperationContext,
   DEFAULT_MAX_READ_BYTES,
+  ExactBatchResponderRefusal,
   QuietRetryableHandlerError,
   withSpan,
   getMetrics,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import { supportsBoundedExactGraphExport, type TripleStore } from '@origintrail-official/dkg-storage';
-import {
-  SYNC_BYTE_BUDGET_MAX_ROWS,
-  SYNC_BYTE_BUDGET_PAGE_MODE,
-  SYNC_BYTE_BUDGET_RESPONSE_BYTES,
-} from '../../dkg-agent-constants.js';
 import {
   serializeWorkspacePublicSnapshotQuads,
   type WorkspacePublicSnapshotStore,
@@ -35,10 +31,10 @@ import {
   readSwmDataPage,
   readSwmMetaPage,
   serializeResponderRows,
-  serializeResponderRowsWithinByteBudget,
   SyncRowSnapshotLimitError,
 } from './graph-plan.js';
 import { exactAssetFilterKey } from '../exact-assets.js';
+import { observeExactBatch } from '../exact-batch-observation.js';
 import {
   createSyncResponderSnapshotBudget,
   SyncRowSnapshotBudgetError,
@@ -57,9 +53,9 @@ import {
   PriorityAdmissionQueue,
   type PriorityAdmission,
 } from '../priority-admission-queue.js';
-import { resolveDurableDataRequestPolicy } from './durable-data-request-policy.js';
+import { resolveSyncResponderRequestProfile } from './page-framing-policy.js';
 import { createBoundedExactAssetExportCache, type ExactAssetExportLease, type ExactAssetExportCache } from './exact-asset-export-cache.js';
-import { encodeNegotiatedExactSyncResponse } from '../wire-compression.js';
+import { encodeResolvedExactSyncResponse } from '../wire-compression.js';
 
 const MAX_SYNC_SESSION_TOKENS = 256;
 
@@ -81,6 +77,12 @@ type PreparedResponderStage =
 export interface ExperimentalExactBatchResponderResources {
   readonly exportCache: ExactAssetExportCache;
   readonly snapshotBudget: import('./snapshot-budget.js').SyncResponderSnapshotBudget;
+  /**
+   * Both admissions share the limiter of every other sync response. When it
+   * does not admit the stage (queue wait exceeded, queue full, displaced) they
+   * reject with Core's `ExactBatchResponderRefusal('BUSY')`, which Core answers
+   * with a refusal frame.
+   */
   withPreAuthorizationAdmission<T>(peerId: string, signal: AbortSignal, work: () => Promise<T>): Promise<T>;
   withAuthorizedResponseAdmission<T>(peerId: string, contextGraphId: string, signal: AbortSignal, work: () => Promise<T>): Promise<T>;
 }
@@ -134,6 +136,8 @@ interface RegisterSyncHandlerParams {
    */
   servingWithheld?: (contextGraphId: string) => boolean;
   logWarn: (ctx: OperationContext, message: string) => void;
+  /** One line per exact-batch stream request refused as busy. Omitted ⇒ `logDebug`. */
+  logInfo?: (ctx: OperationContext, message: string) => void;
   logDebug: (ctx: OperationContext, message: string) => void;
   /** Primarily injectable for deterministic tests; production uses the bounded defaults below. */
   snapshotBudget?: SyncResponderSnapshotBudgetOptions;
@@ -142,7 +146,6 @@ interface RegisterSyncHandlerParams {
 }
 
 const SYNC_RESPONDER_GLOBAL_CONCURRENCY = 3;
-const SYNC_RESPONDER_PER_PEER_CONCURRENCY = 1;
 const SYNC_RESPONDER_QUEUE_LIMIT = 64;
 export const SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT = 4;
 const SYNC_RESPONDER_MAX_QUEUE_WAIT_MS = 10_000;
@@ -265,12 +268,16 @@ class SyncResponderBusyError extends Error {
   }
 }
 
+type SyncResponderPlane = 'shared-memory' | 'durable';
+
 interface SyncResponderQueuePayload {
   peerId: string;
+  plane: SyncResponderPlane;
   contextGraphId?: string;
 }
 
 type SyncResponderScheduling = {
+  plane: SyncResponderPlane;
   contextGraphId?: string;
   lane: Extract<SyncSchedulerLane, 'pre_authorization' | 'responder'>;
   priority: number;
@@ -278,23 +285,18 @@ type SyncResponderScheduling = {
 };
 
 function createSyncResponderLimiter() {
-  let running = 0;
-  const runningByPeer = new Map<string, number>();
+  const activePeerPlanes = new Set<string>();
+  const peerPlaneKey = (peerId: string, plane: SyncResponderPlane) => `${peerId}\0${plane}`;
   const queue = new PriorityAdmissionQueue<SyncResponderQueuePayload>({
     canRun: (entry) => (
-      running < SYNC_RESPONDER_GLOBAL_CONCURRENCY
-      && (runningByPeer.get(entry.payload.peerId) ?? 0) < SYNC_RESPONDER_PER_PEER_CONCURRENCY
+      activePeerPlanes.size < SYNC_RESPONDER_GLOBAL_CONCURRENCY
+      && !activePeerPlanes.has(peerPlaneKey(entry.payload.peerId, entry.payload.plane))
     ),
     onStart: (entry) => {
-      const { peerId } = entry.payload;
-      running += 1;
-      runningByPeer.set(peerId, (runningByPeer.get(peerId) ?? 0) + 1);
-      return () => {
-        running = Math.max(0, running - 1);
-        const peerRunning = (runningByPeer.get(peerId) ?? 1) - 1;
-        if (peerRunning <= 0) runningByPeer.delete(peerId);
-        else runningByPeer.set(peerId, peerRunning);
-      };
+      const { peerId, plane } = entry.payload;
+      const planeKey = peerPlaneKey(peerId, plane);
+      activePeerPlanes.add(planeKey);
+      return () => { activePeerPlanes.delete(planeKey); };
     },
   });
 
@@ -303,7 +305,7 @@ function createSyncResponderLimiter() {
     scheduling: SyncResponderScheduling,
     signal?: AbortSignal,
   ) => ({
-    payload: { peerId, contextGraphId: scheduling.contextGraphId },
+    payload: { peerId, plane: scheduling.plane, contextGraphId: scheduling.contextGraphId },
     lane: scheduling.lane,
     priority: scheduling.priority,
     priorityClass: scheduling.priorityClass,
@@ -337,6 +339,9 @@ function createSyncResponderLimiter() {
   });
 
   return {
+    /** Responses running and requests waiting right now, for diagnostics only. */
+    pressure: (): { running: number; queued: number } => ({ running: activePeerPlanes.size, queued: queue.length }),
+
     async run<T>(
       peerId: string,
       signal: AbortSignal | undefined,
@@ -503,20 +508,49 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
   // compatibility no-op for responder scheduling.
   const prioritySchedulingEnabled = Object.values(contextGraphPriorities ?? {})
     .some((priority) => priority !== 0);
+  // A page request the limiter does not admit fails with a retryable reply its
+  // requester can read. The stream has no reply to put that in, and an abort
+  // reads as a broken connection, so the same condition becomes a BUSY refusal.
+  // It is counted and logged here, once, with nothing taken from the request.
+  const admitExactBatchStage = async <T>(
+    stage: 'pre-authorization' | 'response',
+    remotePeerId: string,
+    signal: AbortSignal,
+    scheduling: SyncResponderScheduling,
+    work: () => Promise<T>,
+  ): Promise<T> => {
+    try {
+      return await limiter.run(remotePeerId, signal, scheduling, work);
+    } catch (err) {
+      if (!(err instanceof SyncResponderBusyError)) throw err;
+      getMetrics().syncResponseTotal.add(1, { outcome: 'busy' });
+      observeExactBatch(() => {
+        const { running, queued } = limiter.pressure();
+        (params.logInfo ?? logDebug)(
+          createOperationContext('sync'),
+          `Exact batch responder busy stage=${stage} peer=${remotePeerId.slice(-8)} `
+            + `reason=${JSON.stringify(err.message)} running=${running} queued=${queued}`,
+        );
+      });
+      throw new ExactBatchResponderRefusal('BUSY', { cause: err });
+    }
+  };
   // The opt-in batch profile uses two separately bounded stages. Unlike the
   // legacy runTwoStage path, it does not claim a reserved FIFO handoff between
   // authorization and response. No admission remains held across that gap.
+  // Exact-batch exports are VM data, so both stages occupy the durable plane.
   // Advertising the export-only transport requires a pre-parse bounded reader.
   // Unsupported stores retain their existing ordinary bounded page handler.
   if (params.onExperimentalExactBatchResources && supportsBoundedExactGraphExport(store)) params.onExperimentalExactBatchResources({
     exportCache: exactAssetExportCache,
     snapshotBudget: responderSnapshotBudget,
-    withPreAuthorizationAdmission: (remotePeerId, signal, work) => limiter.run(remotePeerId, signal,
-      { lane: 'pre_authorization', priority: 0, priorityClass: 'default' }, work),
+    withPreAuthorizationAdmission: (remotePeerId, signal, work) => admitExactBatchStage(
+      'pre-authorization', remotePeerId, signal,
+      { plane: 'durable', lane: 'pre_authorization', priority: 0, priorityClass: 'default' }, work),
     withAuthorizedResponseAdmission: (remotePeerId, contextGraphId, signal, work) => {
       const priority = prioritySchedulingEnabled ? contextGraphPriority(contextGraphPriorities, contextGraphId) : 0;
-      return limiter.run(remotePeerId, signal,
-        { contextGraphId, lane: 'responder', priority, priorityClass: syncPriorityClass(priority) }, work);
+      return admitExactBatchStage('response', remotePeerId, signal,
+        { plane: 'durable', contextGraphId, lane: 'responder', priority, priorityClass: syncPriorityClass(priority) }, work);
     },
   });
   let warnedPreDispatchCancellation = false;
@@ -601,34 +635,19 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     const assetSelectionKey = assetUals === undefined
       ? 'full'
       : exactAssetFilterKey(assetUals);
-    const durableDataPolicy = resolveDurableDataRequestPolicy({
+    const requestProfile = resolveSyncResponderRequestProfile({
       legacyLimit: limit,
       includeSharedMemory: isWorkspace,
       phase,
       pageMode: request.pageMode,
       pageRowsHint: request.pageRowsHint,
-      hasExactAssetFilter: assetUals !== undefined,
+      assetUals,
       responseEncoding: request.responseEncoding,
-      exactAssetCount: assetUals?.length,
     });
-    const usesByteBudgetPage = durableDataPolicy.usesByteBudgetPage;
-    // Durable meta negotiated its byte-budget page mode on the wire (#1916 /
-    // #1923). The subject-atomic byte-fit in readDurableMetaPage already bounds
-    // the page ≤ budget for BOTH modes, so this only selects the belt-and-
-    // suspenders response serializer and records the explicit contract.
-    const usesMetaByteBudget = !isWorkspace &&
-      phase === 'meta' &&
-      request.pageMode === SYNC_BYTE_BUDGET_PAGE_MODE;
-    // The authenticated `limit` deliberately remains capped at the legacy
-    // responder size for rolling-upgrade signature compatibility. Upgraded
-    // META requesters carry the larger row target in the additive hint, just
-    // like DATA. Honour it here: readDurableMetaPage and the serializer below
-    // still enforce the response byte budget and whole-subject boundaries.
-    const durableMetaLimit = usesMetaByteBudget &&
-      typeof request.pageRowsHint === 'number' &&
-      Number.isSafeInteger(request.pageRowsHint)
-      ? Math.max(1, Math.min(request.pageRowsHint, SYNC_BYTE_BUDGET_MAX_ROWS))
-      : limit;
+    const pageFraming = requestProfile.framing;
+    const usesByteBudgetPage = pageFraming.usesByteBudgetPage;
+    const usesMetaByteBudget = phase === 'meta' && usesByteBudgetPage;
+    const durableMetaLimit = pageFraming.limit;
     if (!contextGraphId || typeof contextGraphId !== 'string') {
       // Count this early return too — it short-circuits before limiter.run, so
       // without this it would never reach the syncResponseTotal{ok}/{error}
@@ -748,17 +767,18 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             contextGraphId,
             cutoffIso: cutoff,
             offset,
-            limit,
+            limit: durableMetaLimit,
             signal,
             rowListMemo: session ? swmRowsMemo : undefined,
             rowListCacheKey: session?.rowListCacheKey,
             refreshRowList: session?.refreshRowList,
             refreshGeneration: session?.refreshGeneration,
             freshMetaPlanMemo: freshSwmMetaPlanMemo,
+            releaseCacheOnShortPage: !usesByteBudgetPage,
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();
-          const serialized = serializeResponderRows(rows);
+          const serialized = pageFraming.serialize(rows);
           if (serialized) nquads.push(serialized);
           const serializeDurationMs = Date.now() - serializeStartedAt;
           logFirstPageDetail(() => `Sync responder SWM meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
@@ -788,7 +808,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             contextGraphId,
             cutoffIso: cutoff,
             offset,
-            limit,
+            limit: pageFraming.limit,
             signal,
             rowListMemo: session ? swmRowsMemo : undefined,
             rowListCacheKey: session?.rowListCacheKey,
@@ -796,10 +816,11 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             refreshGeneration: session?.refreshGeneration,
             freshGraphPlanMemo: freshSwmDataGraphPlanMemo,
             exactGraphPlanMemo: swmDataExactGraphPlanMemo,
+            releaseCacheOnShortPage: !usesByteBudgetPage,
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();
-          const serialized = serializeResponderRows(rows);
+          const serialized = pageFraming.serialize(rows);
           if (serialized) nquads.push(serialized);
           const serializeDurationMs = Date.now() - serializeStartedAt;
           logFirstPageDetail(() => `Sync responder SWM data for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
@@ -851,7 +872,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             refreshRowList: session?.refreshRowList,
             refreshGeneration: session?.refreshGeneration,
             assetUals,
-            maxResponseBytes: SYNC_BYTE_BUDGET_RESPONSE_BYTES,
+            maxResponseBytes: pageFraming.maxPageBytes,
             // NON-NEGOTIATED legacy requesters (no wire `pageMode`) must fail
             // loud on an oversized `_meta` subject rather than receive a byte-fit
             // SHORT page they would read as EOF — silent metadata loss + a #1788
@@ -877,14 +898,13 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           // (byte-budget serializer) and the non-negotiated (plain serializer)
           // branches are frame-safe and never split a subject; the gate here just
           // honours the explicit contract.
-          const serialized = usesMetaByteBudget
-            ? serializeResponderRowsWithinByteBudget(rows, SYNC_BYTE_BUDGET_RESPONSE_BYTES)
-            : serializeResponderRows(rows);
+          const serialized = pageFraming.serialize(rows);
           if (serialized) nquads.push(serialized);
           const serializeDurationMs = Date.now() - serializeStartedAt;
           logFirstPageDetail(() => `Sync responder durable meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
         }
       } else {
+        const durableDataPolicy = requestProfile.durableData;
         const queryStartedAt = Date.now();
         const session = prepareResponderSession(
           'Durable data',
@@ -935,9 +955,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         if (page.responseLease) exactExportLeases.push(page.responseLease);
         const queryDurationMs = Date.now() - queryStartedAt;
         const serializeStartedAt = Date.now();
-        const serialized = usesByteBudgetPage
-          ? serializeResponderRowsWithinByteBudget(rows, durableDataPolicy.maxPageBytes)
-          : serializeResponderRows(rows);
+        const serialized = pageFraming.serialize(rows);
         if (serialized) nquads.push(serialized);
         const serializeDurationMs = Date.now() - serializeStartedAt;
         logFirstPageDetail(() => `Sync responder durable data for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
@@ -947,13 +965,15 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       if (totalDurationMs > 100) {
         logDebug(createOperationContext('sync'), `Sync responder total for "${contextGraphId}" (phase=${phase}, workspace=${isWorkspace}): ${totalDurationMs}ms`);
       }
-      const bytes = await encodeNegotiatedExactSyncResponse(new TextEncoder().encode(nquads.join('\n')), { request, signal });
+      const bytes = await encodeResolvedExactSyncResponse(new TextEncoder().encode(nquads.join('\n')), { profile: requestProfile.compression, signal });
       for (const lease of exactExportLeases) await lease.assertCurrent();
       throwIfAborted(signal);
       return bytes;
     };
 
+    const plane: SyncResponderPlane = isWorkspace ? 'shared-memory' : 'durable';
     const preAuthorizationScheduling: SyncResponderScheduling = {
+      plane,
       lane: 'pre_authorization',
       priority: 0,
       priorityClass: 'default',
@@ -969,6 +989,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             const priority = contextGraphPriority(contextGraphPriorities, contextGraphId);
             return {
               scheduling: {
+                plane,
                 contextGraphId,
                 lane: 'responder' as const,
                 priority,
@@ -985,7 +1006,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       : limiter.run(
           peerId,
           signal,
-          { contextGraphId, lane: 'responder', priority: 0, priorityClass: 'default' },
+          { plane, contextGraphId, lane: 'responder', priority: 0, priorityClass: 'default' },
           async () => {
             const prepared = await prepareResponderStage();
             return prepared.kind === 'respond'

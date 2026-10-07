@@ -175,6 +175,13 @@ export {
   isPublicLikeAddress,
   isLocalOrInternalHostname,
 } from './node.js';
+export {
+  isIpLoopbackAddress,
+  isLocalhostAddress,
+  isLocalhostHostname,
+  isLoopbackAddress,
+  isUnspecifiedAddress,
+} from './network/address-policy.js';
 // Transport-level network isolation. `peerIdFromRelayAddress` is shared with
 // the CLI, which derives other-network relay ids from bundled network configs.
 export { peerIdFromRelayAddress } from './network-peer-dial-policy.js';
@@ -243,6 +250,7 @@ export {
   exchangeExperimentalExactBatch,
   registerExperimentalExactBatchResponder,
   ExperimentalExactBatchUnsupportedError,
+  ExactBatchResponderRefusal,
   type ExactBatchTransportSession,
   type ExactBatchTransportOptions,
   type ExactBatchTransportEvent,
@@ -431,6 +439,10 @@ export {
   AMBIGUOUS_ASSERTION_AUTHOR_CODE,
   ASSERTION_AUTHOR_NOT_RESIDENT_CODE,
   PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE,
+  RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE,
+  isRfc64LegacySwmBoundaryRetirementInProgressError,
+  UNSCOPED_QUERY_INVALIDATED_CODE,
+  UNSCOPED_QUERY_INVALIDATED_MESSAGE,
   messageIndicatesNoFundedPublisherWallet,
   messageIndicatesPublishAuthorNotCustodial,
   formatPublishAuthorNotCustodialMessage,

@@ -1,3 +1,5 @@
+import type { ContextGraphAuthorityIndexRevisionReader } from './context-graph-authority-index-reader.js';
+export type { ContextGraphAuthorityIndexRevisionReader } from './context-graph-authority-index-reader.js';
 import type {
   RandomSamplingAvailability,
 } from './random-sampling-availability.js';
@@ -8,8 +10,6 @@ import type { RpcUsageWindow } from './rpc-usage.js';
 import type { ContextGraphAuthorityIndexSnapshots } from './context-graph-authority-index-snapshot.js';
 import type { ContextGraphAuthorityProjectionServedEvidence } from
   './context-graph-authority-index-projection.js';
-import type { ContextGraphAuthorityIndexId } from
-  './context-graph-authority-index-id.js';
 export type { ContextGraphAuthorityIndexId } from
   './context-graph-authority-index-id.js';
 
@@ -646,65 +646,6 @@ export interface ContextGraphFinalizedCreation {
   readonly accessPolicy: 0 | 1;
 }
 
-/**
- * Logical finalized-authority capability. Callers provide the complete target
- * set for one operation; the chain implementation owns validation, projection,
- * and the single finalized anchor.
- */
-export interface ContextGraphAuthorityIndexRevisionReader {
-  /**
-   * Resolve one RFC-64 authority binding at the index's finalized anchor.
-   * This intentionally differs from the public current-state name resolver.
-   */
-  resolveFinalizedContextGraphIdByNameHash?(
-    nameHash: string,
-    options?: ContextGraphAuthorityReadOptions,
-  ): Promise<bigint | null>;
-  /**
-   * Resolve many unique name commitments from one finalized index projection.
-   * Missing and zero-hash commitments are omitted; ambiguity fails closed.
-   */
-  resolveFinalizedContextGraphIdsByNameHashes?(
-    nameHashes: readonly string[],
-    options?: ContextGraphAuthorityReadOptions,
-  ): Promise<ReadonlyMap<string, bigint>>;
-  /**
-   * Resolve a name commitment and its complete authority state atomically at
-   * one finalized anchor. RFC-64 consumers should prefer this over composing
-   * the single-name ID resolver with a later snapshot read.
-   */
-  resolveFinalizedContextGraphAuthoritySnapshotByNameHash?(
-    nameHash: string,
-    options?: ContextGraphAuthorityReadOptions,
-  ): Promise<ContextGraphAuthoritySnapshot | null>;
-  /**
-   * Resolve many name commitments and their complete authority state from one
-   * finalized index projection. Missing and zero-hash commitments are omitted;
-   * ambiguity fails the whole projection closed.
-   */
-  resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes?(
-    nameHashes: readonly string[],
-    options?: ContextGraphAuthorityReadOptions,
-  ): Promise<ReadonlyMap<string, ContextGraphAuthoritySnapshot>>;
-  readContextGraphAuthorityIndexRevisions(
-    contextGraphIds: readonly ContextGraphAuthorityIndexId[],
-    options?: ContextGraphAuthorityReadOptions,
-  ): Promise<ReadonlyMap<ContextGraphAuthorityIndexId, string>>;
-  /**
-   * Read complete authority snapshots for many graphs at one finalized anchor.
-   * Responsibility selection and immediate authority acceptance share this
-   * projection. Optional so older/custom adapters retain their point-read path.
-   */
-  readContextGraphAuthorityIndexSnapshots?(
-    contextGraphIds: readonly ContextGraphAuthorityIndexId[],
-    options?: ContextGraphAuthorityReadOptions,
-  ): Promise<ReadonlyMap<
-    ContextGraphAuthorityIndexId,
-    ContextGraphAuthoritySnapshot
-  >>;
-  /** Await the physical shared-index scans underlying detached/cancelled waiters. */
-  whenIdle(): Promise<void>;
-}
 
 export class ContextGraphChainScanPartialError extends Error {
   readonly partialResults: ContextGraphOnChain[];
@@ -897,8 +838,8 @@ export interface ContextGraphStorageRange {
   /** `getLatestContextGraphId()` at the anchor: the highest id minted so far. */
   readonly latestId: bigint;
   /**
-   * Entries in ascending id order for `[fromId, nextId)`. An id the chain
-   * proves nonexistent (`ERC721NonexistentToken`) is omitted, not an error.
+   * Entries for `[fromId, nextId)`, ascending and with no gap: the range ends
+   * before the first id that is nonexistent on chain or could not be read.
    */
   readonly entries: readonly ContextGraphStorageEntry[];
   /**
@@ -1493,8 +1434,8 @@ export interface ContextGraphLiveAuthorityReadOptions extends ChainReadOptions {
   freshness?: 'live' | 'bounded';
 }
 
-/** Options honored only by finalized Context Graph authority projections. */
-export interface ContextGraphAuthorityReadOptions extends ChainReadOptions {
+/** Finalized authority projection reads; freshness defaults to live. */
+export interface ContextGraphAuthorityReadOptions extends ChainReadOptions, Pick<ContextGraphLiveAuthorityReadOptions, 'freshness'> {
   /**
    * Finalized Context Graph authority reads only: told how the read was
    * answered. FOUR ways, and a consumer that assumes three will read the
@@ -1767,9 +1708,9 @@ export interface ChainAdapter {
     /**
      * Read ContextGraphStorage slots `[fromId, fromId + maxIds)` (capped at
      * `getLatestContextGraphId()`) with view calls pinned to one block: the
-     * node's finality anchor (`chain.finalityConfirmations`). Ids are
-     * sequential, so this enumerates every Context Graph that exists on chain
-     * without event logs or archive state. Stateless: callers own any cursor.
+     * node's finality anchor (`chain.finalityConfirmations`). Ids are sequential,
+     * so this lists every Context Graph without event logs or archive state.
+     * Stateless: callers own any cursor. Rejects only when `fromId` is unreadable.
      */
     readContextGraphStorageRange?(
       options: ContextGraphStorageRangeOptions,

@@ -86,6 +86,8 @@ export {
   FINALIZED_CONTEXT_GRAPH_NAME_HASH_MAX_RETURN_BYTES_V1,
   FINALIZED_CONTEXT_GRAPH_TUPLE_MAX_RETURN_BYTES_V1,
   createFinalizedContextGraphRpcResolverV1,
+  readFinalizedContextGraphEmptyVmFactsInSnapshotV1,
+  type FinalizedContextGraphEmptyVmFactsV1,
 } from './finalized-context-graph-rpc-resolver.js';
 export {
   FinalizedVmChainInventoryValidationErrorV1,
@@ -238,6 +240,10 @@ export {
   type RpcRequestGovernorClock,
   type RpcRequestGovernorWindow,
 } from './rpc-request-governor.js';
+export {
+  drainRpcReadBatchingWindow,
+  type RpcReadBatchingWindow,
+} from './evm-background-read-batching.js';
 export { MockChainAdapter, MOCK_DEFAULT_SIGNER } from './mock-adapter.js';
 export type { MockChainAdapterOptions } from './mock-adapter.js';
 export {

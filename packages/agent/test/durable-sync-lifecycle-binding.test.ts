@@ -87,6 +87,7 @@ vi.mock('../src/sync/requester/finalized-swm-twin-reconciliation.js', async (imp
 import { PROTOCOL_SYNC_CHANGELOG, createOperationContext } from '@origintrail-official/dkg-core';
 import { resolveSyncGlobalBackpressure, withGlobalSyncBackpressure } from '../src/sync/backpressure.js';
 import { createDurableSyncAccumulator } from '../src/sync/durable-progress.js';
+import { createUalOnlyExactAssetSelection } from '../src/sync/exact-assets.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import {
   durableSyncRequestPageSize,
@@ -590,6 +591,81 @@ describe('durable sync lifecycle chain binding', () => {
     });
     expect(runLegacyDurableSyncDetailed.mock.calls[0]?.[6]).not.toHaveProperty('totalTimeoutMs');
     expect(detailed).toEqual({ result: physicalResult, disposition: 'clean-absent' });
+  });
+
+  it('forwards a caller deadline through the real exact-sync lifecycle boundary', async () => {
+    const runLegacyDurableSyncDetailed = vi.fn(async () => ({
+      result: {} as Awaited<ReturnType<typeof runDurableSync>>,
+      exactFetchDisposition: 'incomplete' as const,
+    }));
+    await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeerDetailed.call(
+      { runLegacyDurableSyncDetailed } as any,
+      '12D3KooWExactRecoveryPeer',
+      '0x1111111111111111111111111111111111111111/public-recovery',
+      { kind: 'ual-only', assetUals: ['did:dkg:base:84532/0x1111111111111111111111111111111111111111/1'] },
+      { totalTimeoutMs: 120_000 },
+    );
+    expect(runLegacyDurableSyncDetailed.mock.calls[0]?.[6]).toMatchObject({
+      totalTimeoutMs: 120_000,
+      stopOnBackoffWorthyFailure: true,
+      source: 'vm-recovery',
+    });
+  });
+
+  it.each(['complete', 'responder-busy', 'stream-interrupted', undefined] as const)(
+    'carries the stream outcome %s from the per-graph run to the exact-sync result', async (outcome) => {
+      const perGraph = vi.spyOn(LifecycleSyncMethods.prototype, 'runLegacyDurableSyncForContextGraphDetailed')
+        .mockResolvedValue({
+          result: {} as Awaited<ReturnType<typeof runDurableSync>>,
+          exactFetchDisposition: outcome === 'complete' ? 'found' : 'incomplete',
+          ...(outcome === undefined ? {} : { exactStreamOutcome: outcome }),
+        });
+      const agentLike: any = {
+        config: {},
+        runContextGraphSyncWithBackpressure: async (
+          _ctx: unknown, _contextGraphId: string, _lane: string, _operationId: string,
+          work: () => Promise<unknown>,
+        ) => work(),
+        log: { info: () => {}, warn: () => {}, debug: () => {} },
+      };
+      agentLike.runLegacyDurableSyncDetailed = LifecycleSyncMethods.prototype.runLegacyDurableSyncDetailed;
+
+      const settled = await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeerDetailed.call(
+        agentLike,
+        '12D3KooWExactStreamOutcomePeer',
+        contextGraphId,
+        [ual],
+        { exactRecoveryTransportMode: 'stream-required' },
+      );
+
+      expect(perGraph).toHaveBeenCalledOnce();
+      expect(settled.disposition).toBe(outcome === 'complete' ? 'found' : 'incomplete');
+      if (outcome === undefined) expect(settled).not.toHaveProperty('streamOutcome');
+      else expect(settled.streamOutcome).toBe(outcome);
+    });
+
+  it('reports no stream outcome for a run over several graphs', async () => {
+    vi.spyOn(LifecycleSyncMethods.prototype, 'runLegacyDurableSyncForContextGraphDetailed')
+      .mockResolvedValue({
+        result: {} as Awaited<ReturnType<typeof runDurableSync>>,
+        exactFetchDisposition: 'incomplete',
+        exactStreamOutcome: 'responder-busy',
+      });
+    const agentLike: any = {
+      config: {},
+      runContextGraphSyncWithBackpressure: async (
+        _ctx: unknown, _contextGraphId: string, _lane: string, _operationId: string,
+        work: () => Promise<unknown>,
+      ) => work(),
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+    const detailed = await LifecycleSyncMethods.prototype.runLegacyDurableSyncDetailed.call(
+      agentLike, ctx, 'peer-multi-stream', ['stream-cg-one', 'stream-cg-two'],
+      undefined, undefined, undefined,
+      { exactAssetSelection: createUalOnlyExactAssetSelection([ual]) },
+    );
+    expect(detailed.exactFetchDisposition).toBe('incomplete');
+    expect(detailed).not.toHaveProperty('exactStreamOutcome');
   });
 
   it('projects the public exact-sync result from the detailed implementation', async () => {
@@ -1400,6 +1476,65 @@ describe('durable sync lifecycle chain binding', () => {
     expect(mockedMaterialize).toHaveBeenCalledOnce();
     expect(agentLike.invalidateListContextGraphsCache).toHaveBeenCalled();
   });
+
+  it.each([
+    ['the root graph', undefined],
+    ['a named subgraph', 'code'],
+  ] as const)(
+    'retires the legacy marker in the namespace of a twin retired from %s',
+    async (_label, subGraphName) => {
+      const root = new Uint8Array(32);
+      root[31] = 2;
+      const chain = {
+        chainId: 'otp:2043',
+        getLatestMerkleRoot: async () => root,
+        getMerkleRootCount: async () => 2n,
+        getKAContextGraphId: async () => 14n,
+        getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+        getLatestMerkleRootPublisher: async () => '0x2222222222222222222222222222222222222222',
+        verifyKAUpdate: async () => ({
+          verified: true,
+          onChainMerkleRoot: root,
+          blockNumber: 123,
+          txIndex: 4,
+          merkleRootCount: 2n,
+        }),
+      } as ChainAdapter;
+      // The reconciler derives the twin's namespace from the authenticated
+      // asset and hands it to the retirement callback.
+      mockedReconcileFinalizedSwmTwin.mockImplementationOnce(async ({ retire }) => {
+        await retire({
+          contextGraphId,
+          kaUal: ual,
+          agentAddress: '0x1111111111111111111111111111111111111111',
+          kaNumber: 1n,
+          swmGraph: 'urn:swm',
+          ...(subGraphName === undefined ? {} : { subGraphName }),
+        } satisfies FinalizedSwmTwinRetirement);
+        return 'retired';
+      });
+      const retireLegacySwmAfterVerifiedVmTwin = vi.fn(async () => {});
+      const warnings = vi.fn();
+      const storeGraphScopedAsset = await captureGraphScopedStore(chain, warnings, {
+        onAgentLike: (value) => {
+          value.retireLegacySwmAfterVerifiedVmTwin = retireLegacySwmAfterVerifiedVmTwin;
+        },
+      });
+
+      await expect(storeGraphScopedAsset(
+        graphScopedStoreRequest(graphScopedAsset(root), Date.now() + 60_000),
+      )).resolves.toBe('applied');
+
+      // A root marker must never be retired on the evidence of a subgraph twin.
+      expect(retireLegacySwmAfterVerifiedVmTwin).toHaveBeenCalledExactlyOnceWith({
+        contextGraphId,
+        kaUal: ual,
+        assertionVersion: 2n,
+        subGraphName,
+      });
+      expect(warnings).not.toHaveBeenCalled();
+    },
+  );
 
   it('maps already-retired SWM recovery evidence to metadata suppression at the lifecycle boundary', async () => {
     let disposition: unknown;

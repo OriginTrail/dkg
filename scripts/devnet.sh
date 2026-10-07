@@ -40,6 +40,20 @@
 #                 Local snapshot-store watermarks (defaults: 256 MiB, 512 MiB,
 #                 and 1 GiB) so devnet keeps capacity admission without
 #                 requiring production-scale free disk.
+#   DEVNET_SNAPSHOT_GC_FINALIZED_CLEANUP=1
+#                 Opt every node into the finalized-snapshot collector
+#                 (sharedMemoryPublicSnapshotStorage.gc.finalizedCleanupEnabled).
+#   DEVNET_SNAPSHOT_GC_FINALIZED_RETENTION_MS
+#                 Grace period after a confirmed publish before a snapshot may
+#                 be reclaimed (only written with FINALIZED_CLEANUP=1; the node
+#                 default is 24 hours).
+#   DEVNET_SNAPSHOT_GC_INTERVAL_MS
+#                 How often the snapshot collector runs (only written when set;
+#                 the node default is 5 minutes).
+#   DEVNET_RPC_BUDGET=shipped
+#                 Keep each node's shipped chain RPC request budget. By default
+#                 (`local`) nodes get a budget sized for the one local chain
+#                 they share: see devnet_chain_config_block.
 #
 set -euo pipefail
 
@@ -80,6 +94,7 @@ DEVNET_DOCKER_NAME_PREFIX="${DEVNET_DOCKER_NAME_PREFIX:-devnet}"
 DEVNET_SNAPSHOT_GC_HARD_RESERVE_BYTES="${DEVNET_SNAPSHOT_GC_HARD_RESERVE_BYTES:-268435456}"
 DEVNET_SNAPSHOT_GC_TRIGGER_FREE_BYTES="${DEVNET_SNAPSHOT_GC_TRIGGER_FREE_BYTES:-536870912}"
 DEVNET_SNAPSHOT_GC_TARGET_FREE_BYTES="${DEVNET_SNAPSHOT_GC_TARGET_FREE_BYTES:-1073741824}"
+DEVNET_RPC_BUDGET="${DEVNET_RPC_BUDGET:-local}"
 BLAZEGRAPH_PORT="${DEVNET_BLAZEGRAPH_PORT:-9999}"
 BLAZEGRAPH_CONTAINER="${DEVNET_DOCKER_NAME_PREFIX}-blazegraph"
 BLAZEGRAPH_LOG_MAX_SIZE="200m"
@@ -566,6 +581,43 @@ stop_blazegraph() {
   fi
 }
 
+# The "chain" member of one node's config.json.
+#
+# A node's shipped RPC request budget is sized for a public provider it shares
+# with other users: 10 requests/second, with background work held back for a
+# random part of the first 30 seconds so that nodes restarting together do not
+# all ask at once. Every devnet node talks to one local chain, where neither
+# limit protects anything, so a node gets a budget sized for that chain.
+#
+# DEVNET_RPC_BUDGET=shipped leaves the block out, for a run that is meant to
+# exercise the shipped budget. A node on another version (DEVNET_VERSION_LAYOUT)
+# keeps its shipped budget as well: only the code under test is known to read
+# this block.
+devnet_chain_config_block() {
+  local hub_addr="$1" version_ref="$2" rpc_budget=""
+  case "$DEVNET_RPC_BUDGET" in
+    local)
+      if [ "$version_ref" = "current" ]; then
+        rpc_budget=',
+    "rpcRequestBudget": { "maxRequestsPerSecond": 1000, "burstRequests": 1000, "startupJitterMs": 0 }'
+      fi
+      ;;
+    shipped) ;;
+    *)
+      echo "[devnet] DEVNET_RPC_BUDGET must be 'local' or 'shipped' (got '$DEVNET_RPC_BUDGET')" >&2
+      return 1
+      ;;
+  esac
+  cat <<EOCHAIN
+"chain": {
+    "type": "evm",
+    "rpcUrl": "http://127.0.0.1:${HARDHAT_PORT}",
+    "hubAddress": "${hub_addr}",
+    "chainId": "evm:31337"${rpc_budget}
+  }
+EOCHAIN
+}
+
 create_node_config() {
   local node_num="$1"
   local node_dir="$DEVNET_DIR/node${node_num}"
@@ -687,6 +739,24 @@ create_node_config() {
     rs_block="\"randomSampling\": { \"walPath\": \"${node_dir}/random-sampling.wal\", \"tickIntervalMs\": 5000 },"
   fi
 
+  # Optional snapshot collector tuning; nothing is written unless requested.
+  local snapshot_gc_extra=""
+  if [ "${DEVNET_SNAPSHOT_GC_FINALIZED_CLEANUP:-}" = "1" ]; then
+    snapshot_gc_extra="${snapshot_gc_extra},
+      \"finalizedCleanupEnabled\": true"
+    if [ -n "${DEVNET_SNAPSHOT_GC_FINALIZED_RETENTION_MS:-}" ]; then
+      snapshot_gc_extra="${snapshot_gc_extra},
+      \"finalizedRetentionMs\": ${DEVNET_SNAPSHOT_GC_FINALIZED_RETENTION_MS}"
+    fi
+  fi
+  if [ -n "${DEVNET_SNAPSHOT_GC_INTERVAL_MS:-}" ]; then
+    snapshot_gc_extra="${snapshot_gc_extra},
+      \"intervalMs\": ${DEVNET_SNAPSHOT_GC_INTERVAL_MS}"
+  fi
+
+  local chain_block
+  chain_block="$(devnet_chain_config_block "$hub_addr" "$(node_version_ref "$node_num" "$node_role")")"
+
   cat > "$node_dir/config.json" <<EOCONF
 {
   "name": "devnet-node-${node_num}",
@@ -704,7 +774,7 @@ create_node_config() {
     "gc": {
       "hardReserveBytes": ${DEVNET_SNAPSHOT_GC_HARD_RESERVE_BYTES},
       "triggerFreeBytes": ${DEVNET_SNAPSHOT_GC_TRIGGER_FREE_BYTES},
-      "targetFreeBytes": ${DEVNET_SNAPSHOT_GC_TARGET_FREE_BYTES}
+      "targetFreeBytes": ${DEVNET_SNAPSHOT_GC_TARGET_FREE_BYTES}${snapshot_gc_extra}
     }
   },
   "publisher": {
@@ -716,12 +786,7 @@ create_node_config() {
   ${rs_block}
   ${publisher_block}
   ${epcis_block}
-  "chain": {
-    "type": "evm",
-    "rpcUrl": "http://127.0.0.1:${HARDHAT_PORT}",
-    "hubAddress": "${hub_addr}",
-    "chainId": "evm:31337"
-  }
+  ${chain_block}
 }
 EOCONF
 
@@ -1007,6 +1072,21 @@ start_node() {
       try { const m = fs.readFileSync(dir + '/node' + c + '/multiaddr', 'utf8').trim(); if (m) peers.push(m); } catch {}
     }
     if (peers.length) cfg.bootstrapPeers = peers;
+    // The isolated Hardhat chain has no authority history on the public
+    // network relays. Pin an edge's snapshot trust to the local Core mesh so
+    // unregistered-CG subscription can prove finalized name absence without
+    // repeatedly cold-scanning the same chain on every receiver. Preserve an
+    // explicit operator override when adding a node to an existing devnet.
+    // The daemon rejects a trust list longer than eight Cores
+    // (CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MAX_TRUSTED_PEERS), so a larger
+    // Core mesh trusts its first eight; bootstrapPeers above stays complete.
+    if (cfg.nodeRole === 'edge' && peers.length && !cfg.authorityIndex) {
+      cfg.authorityIndex = {
+        mode: 'core-snapshot',
+        trustedCorePeers: peers.slice(0, 8),
+        maxTailBlocks: 2000,
+      };
+    }
     fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
   "
 

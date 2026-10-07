@@ -3,6 +3,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: [
+      'test/wm-lifecycle-integrity.test.ts',
       'test/sealed-create-retry.test.ts',
       'test/workspace-snapshot-source.test.ts',
       'test/workspace-snapshot-page-index.test.ts',
@@ -91,6 +92,7 @@ export default defineConfig({
       'test/storage-ack-handler-local-self-ack.test.ts',
       'test/storage-ack-priority-lane.test.ts',
       'test/storage-ack-ledger-graph-index.test.ts',
+      'test/storage-ack-copy-cleanup.test.ts',
       'test/swm-slice-ack-unbounded.test.ts',
       'test/workspace-snapshot-store.test.ts',
       'test/workspace-snapshot-retirement.test.ts',

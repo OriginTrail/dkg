@@ -2,8 +2,24 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parse } from 'yaml';
 import { CI_LANES, PRIMARY_LANE_JOBS, planCi } from '../ci-delta.mjs';
+import { repositoryFiles, workflowExecution } from './ci-execution-graph.mjs';
+
+// Independent test obligations: deriving these from the production validator
+// would let deleting a requirement silently remove its regression coverage.
+export const EXPECTED_NODE26_ASSERTIONS = Object.freeze([
+  'chain RPC fetches against a server that offers HTTP/2 (#2828) stay on HTTP/1.1 where a plain fetch negotiates HTTP/2',
+  'chain RPC fetches against a server that offers HTTP/2 (#2828) go through a dispatcher the application installed, with its own TLS trust',
+  'chain RPC fetches against a server that offers HTTP/2 (#2828) go through the proxy of NODE_USE_ENV_PROXY',
+  'chain RPC fetches against a server that offers HTTP/2 (#2828) stay on HTTP/1.1 when a chain RPC call is the first request of a fresh process',
+]);
+
+export function node26Evidence() {
+  return {
+    version: 1, node: '26.7.0', undici: '8.9.0', requireUndici8Fetch: true, success: true,
+    assertions: EXPECTED_NODE26_ASSERTIONS.map((name) => ({ name, status: 'passed' })),
+  };
+}
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 // The trusted CI controller commit that the workflows' four trusted checkouts
@@ -49,6 +65,9 @@ export function gateNeeds(results = {}) {
   ].map((job) => [job, { result: 'skipped' }]));
   needs.changes = { result: 'success' };
   for (const [job, result] of Object.entries(results)) needs[job] = { result };
+  if (needs['chain-rpc-node26'].result === 'success') {
+    needs['chain-rpc-node26'].outputs = { evidence: JSON.stringify(node26Evidence()) };
+  }
   return needs;
 }
 
@@ -56,67 +75,26 @@ export function succeeded(...jobs) {
   return Object.fromEntries(jobs.flat().map((job) => [job, 'success']));
 }
 
-// Source files (repo-relative) under `directory`, skipping installs and builds.
+// Source files (repo-relative) under `directory`, skipping installs, builds
+// and anything else the repository does not hold (repositoryFiles).
 export function sourceFiles(directory) {
   return fs.readdirSync(path.join(REPO_ROOT, directory), { withFileTypes: true }).flatMap((entry) => {
     if (['node_modules', 'dist', 'dist-ui', 'coverage'].includes(entry.name)) return [];
     const relative = path.posix.join(directory, entry.name);
     if (entry.isDirectory()) return sourceFiles(relative);
-    return /\.[cm]?[jt]sx?$/.test(entry.name) ? [relative] : [];
+    const held = !repositoryFiles() || repositoryFiles().has(relative);
+    return held && /\.[cm]?[jt]sx?$/.test(entry.name) ? [relative] : [];
   });
-}
-
-function readRepoText(file) {
-  try {
-    return fs.readFileSync(path.join(REPO_ROOT, file), 'utf8');
-  } catch {
-    return undefined;
-  }
 }
 
 // What each job of a workflow runs, as the text of its commands: its steps'
-// `run` scripts, the root package.json scripts they call (pnpm, npm or yarn,
-// recursively), the repository shell scripts they name, and the steps of the
-// local composite actions and reusable workflows it uses (a reusable
-// workflow's jobs run for the job that calls it). One { job, condition,
-// commands } entry per job; a local action or workflow that cannot be read
-// throws.
-export function workflowJobCommands(workflowSource, { readRepoFile = readRepoText } = {}) {
-  const { scripts = {} } = JSON.parse(readRepoFile('package.json') ?? '{}');
-  return Object.entries(parse(workflowSource).jobs ?? {}).map(([job, definition]) => {
-    const followed = new Set();
-    const unseen = (key) => !followed.has(key) && Boolean(followed.add(key));
-    const commands = [];
-    const followRun = (text) => {
-      commands.push(text);
-      for (const [, name] of text.matchAll(/\b(?:pnpm|npm|yarn)\s+(?:run\s+)?([\w:.-]+)/g)) {
-        if (Object.hasOwn(scripts, name) && unseen(`script ${name}`)) followRun(scripts[name]);
-      }
-      for (const [script] of text.matchAll(/[\w./-]+\.sh\b/g)) {
-        const file = path.posix.normalize(script);
-        const source = readRepoFile(file);
-        if (source !== undefined && unseen(file)) followRun(source);
-      }
-    };
-    const followJob = ({ steps = [], uses } = {}) => {
-      for (const step of steps) {
-        if (step.run) followRun(step.run);
-        followUses(step.uses);
-      }
-      followUses(uses);
-    };
-    const followUses = (uses) => {
-      const target = uses?.match(/^\.\/(.+?)\/?$/)?.[1];
-      if (!target || !unseen(target)) return;
-      const definition = /\.ya?ml$/.test(target)
-        ? readRepoFile(target)
-        : ['action.yml', 'action.yaml'].map((name) => readRepoFile(`${target}/${name}`)).find((text) => text !== undefined);
-      if (definition === undefined) throw new Error(`${uses} names no local workflow or action`);
-      const { jobs, runs } = parse(definition);
-      if (jobs) for (const nested of Object.values(jobs)) followJob(nested);
-      else followJob({ steps: runs?.steps });
-    };
-    followJob(definition);
-    return { job, condition: definition.if ?? '', commands };
-  });
+// `run` scripts, the root package.json scripts, workspace scripts and
+// repository shell scripts they reach, and the steps of the local composite
+// actions and reusable workflows it uses (a reusable workflow's jobs run for
+// the job that calls it), as the CI execution graph reads them
+// (ci-execution-graph.mjs). One { job, condition, commands } entry per job; a
+// local action or workflow that cannot be read throws.
+export function workflowJobCommands(workflowSource, { readRepoFile } = {}) {
+  return workflowExecution(workflowSource, readRepoFile ? { readRepoFile } : undefined)
+    .map(({ job, condition, commands }) => ({ job, condition, commands }));
 }

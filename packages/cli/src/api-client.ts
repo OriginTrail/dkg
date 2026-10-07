@@ -20,6 +20,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { DkgHomeFiles, isProcessRunning } from './config.js';
 import type { ContextGraphListOnChainView } from './context-graph-list-format.js';
+import type { ContextGraphJoinResult } from './context-graph-join-result.js';
 import {
   serializeAgentListOptions,
   type AgentListPageOptions,
@@ -2139,13 +2140,7 @@ export class ApiClient {
     delegation: unknown,
     curatorPeerId: string,
     agentName?: string,
-  ): Promise<{
-    ok: boolean;
-    status: string;
-    delivered: number | 'local';
-    alreadyMember?: boolean;
-    autoApproved?: boolean;
-  }> {
+  ): Promise<ContextGraphJoinResult> {
     return this.post(
       `/api/context-graph/${encodeURIComponent(contextGraphId)}/request-join`,
       { delegation, curatorPeerId, ...(agentName ? { agentName } : {}) },

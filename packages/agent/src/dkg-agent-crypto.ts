@@ -9,6 +9,8 @@
  * composed class.
  */
 
+
+import { collectProjectedDelegatees } from './internal/workspace-projected-delegatees.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -261,7 +263,7 @@ import {
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
-import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
+import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
@@ -414,7 +416,7 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
-import type { ContextGraphMetaRecord } from './context-graph-meta-projection.js';
+
 import {
   isCanonicalPositiveContextGraphId,
   localContextGraphIdMatchesCommittedNameHash,
@@ -426,42 +428,6 @@ import {
 
 const KA_LIFECYCLE_ASSET_UAL_RESOLVE_TIMEOUT_MS = 50;
 const SWM_RECIPIENT_AUTHORITY_STABILITY_ATTEMPTS = 3;
-
-function delegationIsCurrentlyActive(expiresAtValues: readonly string[], nowMs: number): boolean {
-  if (expiresAtValues.length === 0) return true;
-  return expiresAtValues.some((value) => {
-    const expiresAt = Number(value);
-    return !Number.isFinite(expiresAt) || expiresAt <= 0 || expiresAt >= nowMs;
-  });
-}
-
-function collectProjectedDelegatees(
-  meta: ContextGraphMetaRecord,
-  field: 'allowedPeers' | 'allowedKeys',
-  normalizeValue: (value: string) => string,
-): Map<string, string[]> {
-  const members = new Set(
-    [...meta.allowedAgents, ...meta.participantAgents].map((agent) => agent.toLowerCase()),
-  );
-  const revoked = new Set(meta.revokedAgents.map((agent) => agent.toLowerCase()));
-  const out = new Map<string, string[]>();
-  const nowMs = Date.now();
-
-  for (const delegation of meta.delegations) {
-    if (!delegationIsCurrentlyActive(delegation.expiresAtValues, nowMs)) continue;
-    for (const rawAgent of delegation.agents) {
-      const agent = rawAgent.toLowerCase();
-      if (!agent || !members.has(agent) || revoked.has(agent)) continue;
-      const values = out.get(agent) ?? [];
-      for (const rawValue of delegation[field]) {
-        const value = normalizeValue(rawValue);
-        if (value && !values.includes(value)) values.push(value);
-      }
-      if (values.length > 0) out.set(agent, values);
-    }
-  }
-  return out;
-}
 
 type ContextGraphSlotBindingOutcome =
   | { kind: 'match' }
@@ -869,7 +835,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     }
     if (recoveryAuthority.kind !== 'legacy-unregistered') return null;
 
-    const metadataRevision = this.contextGraphMetaProjection.readAuthorityFactsRevision;
+    const metadataRevision = this.contextGraphMetaProjection
+      .readContextGraphAuthorityFactsRevision(contextGraphId);
     const metadataGate = await this.getLocalMetadataMemberRecoveryGate(contextGraphId, options);
 
     // Metadata is another async boundary. Re-resolve the authoritative state
@@ -891,7 +858,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     // A revocation or other authority-fact mutation during the metadata read
     // invalidates the captured roster even if registration remained absent.
     // Recovery is retryable, so fail closed instead of serving that snapshot.
-    return this.contextGraphMetaProjection.readAuthorityFactsRevision === metadataRevision
+    return this.contextGraphMetaProjection
+      .readContextGraphAuthorityFactsRevision(contextGraphId) === metadataRevision
       ? metadataGate
       : null;
   }
@@ -914,7 +882,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     );
     if (registered.kind === 'private') return [...registered.participantAgents];
     if (registered.kind !== 'unregistered') return null;
-    const metadataRevision = this.contextGraphMetaProjection.readAuthorityFactsRevision;
+    const metadataRevision = this.contextGraphMetaProjection
+      .readContextGraphAuthorityFactsRevision(contextGraphId);
     const metadataGate = await this.getLocalMetadataMemberRecoveryGate(contextGraphId, options);
     const currentRegistered = await this.resolveSwmRegisteredAuthority(
       contextGraphId,
@@ -924,7 +893,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       return [...currentRegistered.participantAgents];
     }
     if (currentRegistered.kind !== 'unregistered') return null;
-    return this.contextGraphMetaProjection.readAuthorityFactsRevision === metadataRevision
+    return this.contextGraphMetaProjection
+      .readContextGraphAuthorityFactsRevision(contextGraphId) === metadataRevision
       ? metadataGate
       : null;
   }
@@ -2915,6 +2885,34 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       // A connection can teach us routes for another peer. Persist that legacy
       // migration even when this peer had no exact authorized row to drain.
       await this.saveSwmSenderKeyState();
+    }
+    return drained;
+  }
+
+  /**
+   * A delivered Sender Key setup can receive a retryable authority denial.
+   * That leaves a durable pending row but does not create a Messenger outbox
+   * retry, and an already-connected recipient may never produce another
+   * connection:open event. Retry only peer-bound rows on the ordinary outbox
+   * cadence. The drain below re-resolves current graph authority and the exact
+   * recipient key/peer route before sending any package.
+   */
+  public async drainPendingSenderKeysForConnectedPeers(this: DKGAgent): Promise<number> {
+    await this.loadSwmSenderKeyState();
+    if (this.pendingSenderKeyByAgent.size === 0 || !this.node.isStarted) return 0;
+
+    const pendingPeers = new Set(
+      [...this.pendingSenderKeyByAgent.values()]
+        .flatMap((queue) => queue.flatMap((entry) =>
+          entry.recipientPeerId === undefined ? [] : [entry.recipientPeerId])),
+    );
+    if (pendingPeers.size === 0) return 0;
+
+    let drained = 0;
+    for (const peer of this.node.libp2p.getPeers()) {
+      const peerId = peer.toString();
+      if (!pendingPeers.has(peerId)) continue;
+      drained += await this.drainPendingSenderKeyForPeer(peerId);
     }
     return drained;
   }

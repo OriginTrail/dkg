@@ -27,10 +27,8 @@
 import type { RequestContext } from "./context.js";
 import { reportBatchRejectionWithLifecycle } from "@origintrail-official/dkg-agent";
 import {
-  isPayloadTooLargeError,
   jsonResponse,
   oversizedRdfLiteralResponseBody,
-  payloadTooLargeResponseBody,
   readBody,
   safeParseJson,
   validateEntities,
@@ -78,16 +76,12 @@ import {
   AsyncLiftJobConflictError,
   LiftJobPendingChainProofError,
   PromoteJobConflictError,
-  PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE,
   isKnowledgeAssetWorkspaceHeadCorruptError,
 } from "@origintrail-official/dkg-publisher";
 import { deriveStatus } from "@origintrail-official/dkg-publisher";
 import {
   validateAssertionName,
   contextGraphAssertionUri,
-  AMBIGUOUS_ASSERTION_AUTHOR_CODE,
-  ASSERTION_AUTHOR_NOT_RESIDENT_CODE,
-  PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
 } from "@origintrail-official/dkg-core";
 import {
   formatFinalizedPublishOptionError,
@@ -96,6 +90,15 @@ import {
 } from "../../finalized-publish-options.js";
 import { storageAckPeerIdsFromPublishResult } from "./storage-ack-peers.js";
 import { authenticatedAgentAddress } from '../../auth.js';
+
+import {
+  respondAssertionError,
+  respondAssertionCodeError,
+  respondPromoteRecoveryError,
+  respondAmbiguousAssertionAuthor,
+  respondAuthorSelectionError,
+  respondPublicationPricingPolicyError,
+} from './knowledge-assets-error-mapping.js';
 
 const PREFIX = "/api/knowledge-assets";
 
@@ -173,178 +176,7 @@ const FINALIZE_ONLY_CREATE_FIELDS = [
   "schemeVersion",
 ] as const;
 
-/**
- * GH#1778 — shared 409 mapping for the ambiguous-author VM-publish error, used
- * by both `vm/publish` and `vm/publish-async` so the `{ code, error, candidates }`
- * response shape cannot drift between the two routes. Returns `true` (and writes
- * the response) when it handled the error, `false` otherwise.
- */
-function respondAmbiguousAssertionAuthor(res: RequestContext["res"], e: any): boolean {
-  if (e?.code !== AMBIGUOUS_ASSERTION_AUTHOR_CODE) return false;
-  jsonResponse(res, 409, {
-    code: AMBIGUOUS_ASSERTION_AUTHOR_CODE,
-    error: e.message ?? String(e),
-    candidates: e.candidates ?? [],
-  });
-  return true;
-}
 
-/**
- * GH#1786 — author-selection outcomes that are permanent, caller-actionable
- * state rather than server faults. Unmapped they would fall through to a generic
- * 500 on both publish lanes; they are answered here, and are matched BEFORE the
- * precondition / message-keyed branches so a future reword of either message
- * cannot be captured by those looser predicates.
- *
- *  - `ASSERTION_AUTHOR_NOT_RESIDENT`: the selected author has no finalized
- *    assertion at this coordinate. Echoes the resident `candidates` so the client
- *    can retry without a second round-trip.
- *  - `PUBLISH_AUTHOR_NOT_CUSTODIAL`: the selected author's KA needs an UPDATE,
- *    which the node cannot re-sign without that author's custodial key.
- */
-function respondAuthorSelectionError(res: RequestContext["res"], e: any): boolean {
-  if (
-    e?.code !== ASSERTION_AUTHOR_NOT_RESIDENT_CODE
-    && e?.code !== PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE
-  ) {
-    return false;
-  }
-  jsonResponse(res, 409, {
-    code: e.code,
-    error: e.message ?? String(e),
-    ...(e.candidates ? { candidates: e.candidates } : {}),
-  });
-  return true;
-}
-
-function respondPublicationPricingPolicyError(res: RequestContext["res"], e: any): boolean {
-  if (e?.code !== PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE) return false;
-  jsonResponse(res, 409, {
-    code: e.code,
-    error: e.message ?? String(e),
-  });
-  return true;
-}
-
-interface PromoteRecoveryContext {
-  contextGraphId: string;
-  name: string;
-  phase: string;
-  subGraphName?: string;
-}
-
-function respondPromoteRecoveryError(
-  res: RequestContext["res"],
-  e: any,
-  context?: PromoteRecoveryContext,
-): boolean {
-  if (e?.code !== 'KA_PROMOTE_RECOVERY_REQUIRED') return false;
-  process.stderr.write(`[DKG-Daemon] ${JSON.stringify({
-    event: 'knowledge_asset_recovery_required',
-    code: e.code,
-    ...context,
-  })}\n`);
-  jsonResponse(res, 409, {
-    code: e.code,
-    error: sanitizeRpcMessage(e.message ?? String(e)),
-    retryAction: 'resume_existing_knowledge_asset',
-    retryPhase: 'swm-share',
-    ...(context ? {
-      contextGraphId: context.contextGraphId,
-      retryKnowledgeAssetName: context.name,
-      ...(context.subGraphName ? { subGraphName: context.subGraphName } : {}),
-    } : {}),
-  });
-  return true;
-}
-
-/**
- * Map caller preconditions on WM/SWM operations to actionable 4xx responses.
- * VM publishing keeps its own mapping so chain failures remain server errors.
- */
-function respondAssertionError(res: RequestContext["res"], e: any, context?: PromoteRecoveryContext): void {
-  if (respondPromoteRecoveryError(res, e, context)) return;
-  if (e?.code === 'KA_ASSERTION_ALREADY_FINALIZED') {
-    jsonResponse(res, 409, { code: e.code, error: e.message });
-    return;
-  }
-  if (e?.code === "OVERSIZED_RDF_LITERAL") {
-    jsonResponse(res, 400, oversizedRdfLiteralResponseBody(e));
-    return;
-  }
-  if (isPayloadTooLargeError(e)) {
-    jsonResponse(res, 413, payloadTooLargeResponseBody(e));
-    return;
-  }
-  if (respondIfStoreUnavailable(res, e)) return;
-  if (e?.name === "AssertionNotPersistedError" || e?.code === "ASSERTION_NOT_PERSISTED") {
-    jsonResponse(res, 409, {
-      error: e.message,
-      code: "ASSERTION_NOT_PERSISTED",
-      contextGraphId: e.contextGraphId,
-      assertionGraph: e.assertionGraph,
-      expectedTripleCount: e.expectedTripleCount,
-    });
-    return;
-  }
-  // Strict curator-ack gate (OT-RFC-49 curator-leader) on the WM→SWM promote
-  // (swm/share). The curator (authoritative replica) did not confirm, so the
-  // promote was aborted with WM left intact — surface a distinct, actionable
-  // status instead of a 500. The client is TOLD, never silently led to success.
-  if (e?.code === "CURATOR_UNCONFIRMED") {
-    jsonResponse(res, 503, {
-      error: e.message,
-      code: "CURATOR_UNCONFIRMED",
-      curatorDelivery: "unconfirmed",
-      contextGraphId: e.contextGraphId,
-    });
-    return;
-  }
-  if (e?.code === "CURATOR_REJECTED") {
-    jsonResponse(res, 409, {
-      error: e.message,
-      code: "CURATOR_REJECTED",
-      curatorDelivery: "rejected",
-      contextGraphId: e.contextGraphId,
-    });
-    return;
-  }
-  // GH#1759 — the draft has no sealable content (no quads at all, or only
-  // reserved-namespace subjects that are filtered out before SWM). That is a
-  // client precondition the caller can fix by writing a quad, not a server
-  // fault, so it gets the same actionable 409 the rest of this route family
-  // uses rather than an opaque 500. Code-keyed, so the mapping does not drift
-  // when the engine's wording changes.
-  if (e?.code === "ASSERTION_EMPTY") {
-    jsonResponse(res, 409, {
-      error: e.message,
-      code: "ASSERTION_EMPTY",
-    });
-    return;
-  }
-  // KA-number-floor reconcile couldn't reach the chain (e.g. a rate-limited RPC
-  // 429'd the one-time-per-author read) -> retryable 503, not 500.
-  if (respondIfReconcileUnavailable(res, e)) return;
-  // Transient chain-RPC transport failure (all endpoints exhausted / receipt
-  // lookup failed / timeout) -> retryable 503/504, keyed on err.code so a
-  // genuine on-chain revert (no transport code) still falls through to the
-  // 4xx/500 mapping below. Code-keyed check precedes the message-keyed 400
-  // branch so an exhaustion message that happens to contain "not found"
-  // (e.g. "header not found") is not mis-mapped to a 400.
-  if (respondIfChainRpcTransportError(res, e)) return;
-  const msg = e?.message ?? String(e);
-  if (
-    e?.name === "ReservedNamespaceError" ||
-    msg.includes("not found") ||
-    msg.includes("Invalid") ||
-    msg.includes("Unsafe") ||
-    msg.includes("reserved namespace")
-  ) {
-    jsonResponse(res, 400, { error: msg });
-    return;
-  }
-  jsonResponse(res, 500, { error: msg });
-}
 
 function hex(bytes: Uint8Array): string {
   return "0x" + Buffer.from(bytes).toString("hex");
@@ -441,11 +273,18 @@ function layerStatus(hist: Record<string, unknown>, layer: "wm" | "swm" | "vm"):
   );
 }
 
+type ResolvedFinalizeOptions = {
+  subGraphName?: string;
+  authorAgentAddress?: string;
+  preSignedAuthorAttestation?: NonNullable<ReturnType<typeof validatePreSignedAuthorAttestation>>;
+  schemeVersion?: number;
+};
+
 export function resolveFinalizeOptions(
   raw: Record<string, any>,
   res: RequestContext["res"],
   tokenAgentAddress?: string,
-): Record<string, unknown> | null {
+): ResolvedFinalizeOptions | null {
   const {
     subGraphName,
     authorAgentAddress,
@@ -522,7 +361,7 @@ export function resolveFinalizeOptions(
       : explicitAuthorAgentAddress) ??
     (resolvedPreSignedAttestation == null ? tokenAgentAddress : undefined);
   return {
-    ...(subGraphName ? { subGraphName } : {}),
+    ...(typeof subGraphName === "string" && subGraphName ? { subGraphName } : {}),
     ...(typeof effectiveAuthorAgentAddress === "string" ? { authorAgentAddress: effectiveAuthorAgentAddress } : {}),
     ...(resolvedPreSignedAttestation ? { preSignedAuthorAttestation: resolvedPreSignedAttestation } : {}),
     ...(schemeVersion != null ? { schemeVersion } : {}),
@@ -534,7 +373,7 @@ function hasFinalizeOnlyCreateFields(raw: Record<string, unknown>): boolean {
 }
 
 function resolveAuthorAgentAddressFromFinalizeOptions(
-  finalizeOptions: Record<string, unknown>,
+  finalizeOptions: ResolvedFinalizeOptions,
   tokenAgentAddress?: string,
 ): string | undefined {
   const finalizedAuthor = finalizeOptions.authorAgentAddress;
@@ -544,6 +383,28 @@ function resolveAuthorAgentAddressFromFinalizeOptions(
       : finalizedAuthor;
   }
   return tokenAgentAddress;
+}
+
+/**
+ * A fresh atomic create has no existing storage lane to preserve. When an
+ * administrator supplies a verified pre-signed attestation, create the draft
+ * in that author's lane and reserve the exact slot the signature commits to.
+ * Dedicated finalize keeps its separate lane-resolution rules because it may
+ * be sealing an already-open draft in the daemon's default lane.
+ */
+function resolveAtomicCreateAuthorFromFinalizeOptions(
+  finalizeOptions: ResolvedFinalizeOptions,
+  tokenAgentAddress?: string,
+): { agentAddress?: string; reservedKaId?: bigint } {
+  const preSigned = finalizeOptions.preSignedAuthorAttestation;
+  if (preSigned !== undefined) {
+    return { agentAddress: tokenAgentAddress ?? preSigned.address, reservedKaId: preSigned.reservedKaId };
+  }
+  const agentAddress = resolveAuthorAgentAddressFromFinalizeOptions(
+    finalizeOptions,
+    tokenAgentAddress,
+  );
+  return agentAddress ? { agentAddress } : {};
 }
 
 function scopedTokenStorageLane(agentAddress?: string): { agentAddress?: string } {
@@ -591,7 +452,7 @@ async function resolveFinalizeStorageLane(
   agent: RequestContext["agent"],
   contextGraphId: string,
   name: string,
-  finalizeOptions: Record<string, unknown>,
+  finalizeOptions: ResolvedFinalizeOptions,
   tokenAgentAddress?: string,
 ): Promise<{ agentAddress?: string }> {
   const tokenLane = scopedTokenStorageLane(tokenAgentAddress);
@@ -758,6 +619,23 @@ function resolveSelectedAuthorAgentAddress(
     return { ok: false };
   }
   return { ok: true, value: raw };
+}
+
+async function resolvePromoteStorageLane(
+  ctx: RequestContext,
+  source: Record<string, unknown>,
+  contextGraphId: string, name: string, subGraphName?: string, callerAgentAddress?: string,
+): Promise<{ agentAddress?: string; authorAgentAddress?: string } | null> {
+  const selected = resolveSelectedAuthorAgentAddress(ctx, source);
+  if (!selected.ok) return null;
+  if (!authorizeAgentScopedAuthorClaim(
+    ctx.res, callerAgentAddress, selected.value, SELECTED_AUTHOR_FIELD,
+  )) return null;
+  if (callerAgentAddress || selected.value === undefined) return scopedTokenPromoteLane(callerAgentAddress);
+  const history = await ctx.agent.assertion.history(contextGraphId, name, { subGraphName, agentAddress: selected.value });
+  const storedAuthor = history?.agentAddress ?? selected.value;
+  if (!isSameAgentAddress(storedAuthor, selected.value)) throw new Error("Selected lifecycle author does not match its stored identity");
+  return { agentAddress: storedAuthor, authorAgentAddress: storedAuthor };
 }
 
 /**
@@ -1072,10 +950,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         ? ((finalizeOptions as Record<string, unknown>).authorAgentAddress as string)
         : undefined;
     try {
-      const createAuthorAgentAddress = resolveAuthorAgentAddressFromFinalizeOptions(
+      const atomicCreateAuthor = resolveAtomicCreateAuthorFromFinalizeOptions(
         finalizeOptions,
         writePreflightCallerAgentAddress,
       );
+      const createAuthorAgentAddress = atomicCreateAuthor.agentAddress;
       const atomicAuthorLane = createAuthorAgentAddress
         ? { agentAddress: createAuthorAgentAddress }
         : {};
@@ -1099,6 +978,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       const assertionUri = await agent.assertion.create(resolvedContextGraphId, name, {
         subGraphName,
         ...(createAuthorAgentAddress ? { agentAddress: createAuthorAgentAddress } : {}),
+        ...(atomicCreateAuthor.reservedKaId === undefined
+          ? {}
+          : { reservedKaId: atomicCreateAuthor.reservedKaId }),
         onDisposition: (disposition) => { createDisposition = disposition; },
       });
       // The engine reports whether create opened a draft or observed an active
@@ -1263,6 +1145,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           retryKnowledgeAssetName: name,
         });
       }
+      if (respondAssertionCodeError(res, e)) return;
       if (e?.code === "OVERSIZED_RDF_LITERAL") {
         return jsonResponse(res, 400, oversizedRdfLiteralResponseBody(e));
       }
@@ -1533,6 +1416,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
 
     // ── SWM verb: share (WM → SWM; OT-RFC-43 §10.6 renames promote → share) ──
     if (layer === "swm" && verb === "share") {
+      const promoteStorageLane = await resolvePromoteStorageLane(
+        ctx, parsed, contextGraphId, name, subGraphName, writePreflightCallerAgentAddress,
+      );
+      if (promoteStorageLane === null) return;
       // Per-request opt-in to the strict curator-ack gate (OT-RFC-49). Omitted →
       // agent config default (`swmAwaitCuratorAck`). The promote aborts with 503
       // (mapped in respondAssertionError) if the curator doesn't confirm.
@@ -1566,7 +1453,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           subGraphName,
           awaitCuratorAck,
           skipSeal,
-          ...scopedTokenPromoteLane(writePreflightCallerAgentAddress),
+          ...promoteStorageLane,
         });
         if (share.promotedCount !== 0) {
           emitMemoryGraphChanged?.({ contextGraphId, layers: ["wm", "swm"], subGraphName, operation: "assertion_promoted", source: "api", counts: { triples: share.promotedCount } });
@@ -1615,6 +1502,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     // `respondAssertionError` catch.
     if (layer === "swm" && verb === "share-async") {
       if (asyncPromoteUnavailable(res)) return;
+      const promoteStorageLane = await resolvePromoteStorageLane(
+        ctx, parsed, contextGraphId, name, subGraphName, writePreflightCallerAgentAddress,
+      );
+      if (promoteStorageLane === null) return;
       const entities = parsed.entities;
       if (!validateEntities(entities, res)) return;
       if (Array.isArray(entities)) {
@@ -1641,7 +1532,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         const result = await agent.assertion.promoteAsync(contextGraphId, name, {
           entities: entities ?? "all",
           subGraphName,
-          ...scopedTokenPromoteLane(writePreflightCallerAgentAddress),
+          ...promoteStorageLane,
         });
         return jsonResponse(res, 200, { jobId: result.jobId, state: "queued" });
       } catch (err: any) {

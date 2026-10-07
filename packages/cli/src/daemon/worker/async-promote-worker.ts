@@ -34,7 +34,9 @@
  * decide what to do with any leases the old worker held.
  */
 
-import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import type {
+  DKGAgent,
+} from '@origintrail-official/dkg-agent';
 import {
   isStoreOperationTimeoutError,
   StoreSchedulerBusyError,
@@ -47,9 +49,9 @@ import {
   type PromoteRequest,
 } from '@origintrail-official/dkg-publisher';
 import { createClaimFailureBackoff } from './claim-failure-backoff.js';
+import { logPromoteAttemptFailure } from './async-promote-attempt-diagnostics.js';
 import {
   classifyPromoteError,
-  diagnosticPromoteStage,
   safePromoteErrorIdentity,
   type ClassifiedPromoteError,
 } from './async-promote-error-classification.js';
@@ -77,6 +79,36 @@ export interface PromoteMemoryGraphChangedEvent {
  * but worker progress never waits for them and sink failures are discarded.
  */
 export type PromoteWorkerLogger = (message: string) => void | Promise<void>;
+
+/**
+ * Internal logger shape: normalization makes every worker call fire-and-forget.
+ * Worker code holds only this type and calls it directly. A public
+ * `PromoteWorkerLogger` is assignable to it, so the rule that keeps a raw sink
+ * out is structural: normalize at the entry point, pass nothing else down.
+ */
+export type PromoteWorkerSyncLogger = (message: string) => void;
+
+const defaultPromoteWorkerLogger: PromoteWorkerLogger = (message) => {
+  console.warn(`[promote-worker] ${message}`);
+};
+
+/**
+ * Normalize a public logger once at the worker boundary. The worker's internal
+ * paths can then emit diagnostics without each call having to know whether the
+ * configured sink is synchronous, asynchronous, or hostile.
+ */
+export function normalizePromoteWorkerLogger(
+  configured: PromoteWorkerLogger | undefined,
+): PromoteWorkerSyncLogger {
+  const sink = configured ?? defaultPromoteWorkerLogger;
+  return (message: string): void => {
+    try {
+      void Promise.resolve(sink(message)).catch(() => {});
+    } catch {
+      // Logging must never delay or alter queue state transitions.
+    }
+  };
+}
 
 export interface PromoteWorkerConfig {
   /** The host DKG agent — provides the queue + the sync `promote` call. */
@@ -199,14 +231,6 @@ export interface PromoteWorkerCounters {
   postCommitExhausted: number;
 }
 
-function bestEffortLog(log: PromoteWorkerLogger, message: string): void {
-  try {
-    void Promise.resolve(log(message)).catch(() => {});
-  } catch {
-    // Logging must never delay or alter queue state transitions.
-  }
-}
-
 /**
  * Queue bookkeeping has its own retry domain. Only typed storage failures
  * whose write definitely did not start are replayable; an indeterminate
@@ -216,47 +240,6 @@ function bestEffortLog(log: PromoteWorkerLogger, message: string): void {
 function isRetryableQueueBookkeepingError(error: unknown): boolean {
   return error instanceof StoreSchedulerBusyError
     || (isStoreOperationTimeoutError(error) && error.outcome === 'not_started');
-}
-
-/**
- * Emit privacy-bounded evidence before queue.fail() makes a terminal row
- * externally clearable. Diagnostics are best-effort and can never change the
- * promote state transition, even when the injected logger fails synchronously
- * or asynchronously.
- */
-function logPromoteAttemptFailure(input: {
-  job: PromoteJob;
-  err: unknown;
-  message: string;
-  classified: ClassifiedPromoteError;
-  promoteStarted: boolean;
-  log: PromoteWorkerLogger;
-}): void {
-  try {
-    bestEffortLog(
-      input.log,
-      `[async-promote-worker] ${JSON.stringify({
-        event: 'async_promote_attempt_failed',
-        schemaVersion: 1,
-        jobId: input.job.jobId,
-        attempt: input.job.attempt.count,
-        maxAttempts: input.job.attempt.maxRetries,
-        promoteStartedMarkerPersisted: input.promoteStarted,
-        swmCommitObserved: false,
-        stage: diagnosticPromoteStage(input.message),
-        classification: input.classified.classification,
-        retryable: input.classified.retryable,
-        errorName: input.classified.diagnostic?.name
-          ?? safePromoteErrorIdentity(input.err, 'name')
-          ?? 'unknown',
-        errorCode: input.classified.diagnostic?.code
-          ?? safePromoteErrorIdentity(input.err, 'code')
-          ?? 'unknown',
-      })}`,
-    );
-  } catch {
-    // Diagnostics must never prevent fail-closed queue bookkeeping.
-  }
 }
 
 /**
@@ -305,9 +288,10 @@ export async function runPromoteJob(
     bookkeepingRetryBudgetMs = 10 * 60 * 1000,
     sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
     shutdownSignal,
-    log,
+    log: configuredLog,
     emitMemoryGraphChanged,
   } = args;
+  const log = normalizePromoteWorkerLogger(configuredLog);
   if (!job.lease) {
     throw new Error(`runPromoteJob requires a job with an active lease (jobId=${job.jobId})`);
   }
@@ -353,8 +337,7 @@ export async function runPromoteJob(
           // Expected when the job has already succeeded/failed and the lease was cleared.
           return;
         }
-        bestEffortLog(
-          log,
+        log(
           `Heartbeat error for ${job.jobId}: ${err instanceof Error ? err.message : String(err)}`,
         );
       });
@@ -380,8 +363,7 @@ export async function runPromoteJob(
         const retryable = isRetryableQueueBookkeepingError(err);
         if (err instanceof PromoteJobLeaseError || !retryable || now() >= deadlineAt) throw err;
         if (failures === 1) {
-          bestEffortLog(
-            log,
+          log(
             `Queue bookkeeping recovery started for ${job.jobId} (${label}) after a transient error`,
           );
         }
@@ -496,8 +478,7 @@ export async function runPromoteJob(
         bookkeepingErr instanceof Error
           ? bookkeepingErr.message
           : String(bookkeepingErr);
-      bestEffortLog(
-        log,
+      log(
         `PARTIAL-PROMOTE-AMBIGUITY: jobId=${job.jobId} ` +
           `assertion.promote() returned successfully (promotedCount=${result.promotedCount}) ` +
           `but post-promote bookkeeping failed: ${message}. ` +
@@ -526,8 +507,7 @@ export async function runPromoteJob(
           counts: { triples: result.promotedCount },
         });
       } catch (emitErr: unknown) {
-        bestEffortLog(
-          log,
+        log(
           `memoryGraphChanged emit failed for ${job.jobId}: ${emitErr instanceof Error ? emitErr.message : String(emitErr)}`,
         );
       }
@@ -566,8 +546,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
   const shutdownTimeoutMs = config.shutdownTimeoutMs ?? 30_000;
   const postCommitRecoveryIntervalMs = Math.max(0, config.postCommitRecoveryIntervalMs ?? 30_000);
   const now = config.now ?? (() => Date.now());
-  const log: PromoteWorkerLogger =
-    config.log ?? ((msg: string) => console.warn(`[promote-worker] ${msg}`));
+  const log = normalizePromoteWorkerLogger(config.log);
   const workerIdPrefix = config.workerIdPrefix ?? `daemon-${process.pid}`;
   const slots: WorkerSlot[] = Array.from({ length: concurrency }, (_, i) => ({
     workerId: `${workerIdPrefix}-slot-${i}`,
@@ -625,8 +604,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
         for (const event of events) {
           if (event.action === 'requeued') counters.postCommitRequeued += 1;
           else counters.postCommitExhausted += 1;
-          bestEffortLog(
-            log,
+          log(
             `[async-promote-worker] ${JSON.stringify({
               event: 'async_promote_post_commit_recovery',
               schemaVersion: 1,
@@ -640,8 +618,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
           );
         }
       } catch (err: unknown) {
-        bestEffortLog(
-          log,
+        log(
           `post-commit recovery sweep failed (${trigger}): ${err instanceof Error ? err.message : String(err)}`,
         );
       }
@@ -679,8 +656,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
     } catch (err: unknown) {
       const delayMs = claimFailureBackoff.recordFailure();
       scheduleClaimRetry(delayMs);
-      bestEffortLog(
-        log,
+      log(
         `claimNext error on ${slot.workerId}; retrying in ${delayMs}ms: `
           + `${err instanceof Error ? err.message : String(err)}`,
       );
@@ -737,14 +713,13 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
         if (err instanceof PromoteWorkerShutdownError || shutdownSignal?.aborted) {
-          bestEffortLog(
-            log,
+          log(
             `Worker ${slot.workerId} stopped bookkeeping for ${claimed.jobId} after shutdown timeout`,
           );
           return;
         }
         if (err instanceof PromoteFailureBookkeepingUncertainError) {
-          bestEffortLog(log, `[async-promote-worker] ${JSON.stringify({
+          log(`[async-promote-worker] ${JSON.stringify({
             event: 'async_promote_failure_bookkeeping_uncertain',
             schemaVersion: 1,
             jobId: claimed.jobId,
@@ -758,7 +733,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
           // existing lease reconciliation hold an ambiguous started promote.
           return;
         }
-        bestEffortLog(log, `Worker ${slot.workerId} crashed processing ${claimed.jobId}: ${message}`);
+        log(`Worker ${slot.workerId} crashed processing ${claimed.jobId}: ${message}`);
         if (claimed.lease) {
           try {
             await config.agent.promoteQueue.fail(claimed.jobId, claimed.lease.claimToken, {
@@ -770,13 +745,11 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
           } catch (failErr: unknown) {
             const failMessage = failErr instanceof Error ? failErr.message : String(failErr);
             if (failErr instanceof PromoteJobLeaseError) {
-              bestEffortLog(
-                log,
+              log(
                 `Lease lost while parking crashed job ${claimed.jobId}: ${failMessage}`,
               );
             } else {
-              bestEffortLog(
-                log,
+              log(
                 `Failed to park crashed job ${claimed.jobId}; next startup recovery must reconcile it: ` +
                   `${failMessage}`,
               );
@@ -825,8 +798,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
       } while (wakeRequested && !shuttingDown);
     })()
       .catch((err: unknown) => {
-        bestEffortLog(
-          log,
+        log(
           `Promote worker wake failed: ${err instanceof Error ? err.message : String(err)}`,
         );
       })
@@ -866,8 +838,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
         const summary = await config.agent.promoteQueue.recoverOnStartup();
         recovering = false;
         if (summary.reclaimed > 0 || summary.abandoned > 0) {
-          bestEffortLog(
-            log,
+          log(
             `recoverOnStartup: reclaimed=${summary.reclaimed} abandoned=${summary.abandoned}`,
           );
         }
@@ -938,8 +909,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
       if (result === 'timeout') {
         const active = activeShutdownSlotCount() || activeAtStop;
         counters.interruptedAtShutdown += active;
-        bestEffortLog(
-          log,
+        log(
           `Shutdown timeout (${shutdownTimeoutMs}ms) reached; ${active} in-flight promote(s) abandoned to next-boot recovery`,
         );
         lifecycleAbortController?.abort();

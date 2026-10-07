@@ -9,6 +9,7 @@ import {
   CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
   MEMBER_ROSTER_OBJECT_TYPE_V1,
   MemoryLayer,
+  DKGEvent,
   assertCanonicalGraphScopedAuthorSealV1,
   buildAssertionSealQuads,
   buildAuthorAttestationTypedData,
@@ -98,8 +99,10 @@ import {
 import { createAppliedCatalogHeadsSnapshotV1 } from '../src/rfc64/inventory-v1/index.js';
 import { Rfc64BoundedPublicRootCatalogNativeReconcilerV1 } from
   '../src/rfc64/public-catalog-native-reconciler-v1.js';
-import { readRfc64LegacySwmBoundaryCountV1 } from
-  '../src/rfc64/legacy-swm-boundary-v1.js';
+import {
+  prepareRfc64LateLegacySwmBoundaryV1,
+  readRfc64LegacySwmBoundaryCountV1,
+} from '../src/rfc64/legacy-swm-boundary-v1.js';
 import {
   Rfc64PublicCatalogReceiverV1,
   type Rfc64VerifiedCurrentHeadTargetLifecycleEventV1,
@@ -5784,6 +5787,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       startNativeAgent('author'),
       startNativeAgent('receiver'),
     ]);
+    const readinessRequests = vi.fn();
+    const syncCompletions = vi.fn();
+    receiver.eventBus.on(DKGEvent.CATALOG_READINESS_CHECK_REQUESTED, readinessRequests);
+    receiver.eventBus.on(DKGEvent.PROJECT_SYNCED, syncCompletions);
     const receiverPolicy = receiver.acceptOpenContextGraphPolicyV1({
       networkId: NETWORK_ID,
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -5809,6 +5816,9 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(delivery.announcedPeers).toEqual([receiver.peerId]);
     expect(delivery.failedPeers).toEqual([]);
     await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+
+    expect(readinessRequests).toHaveBeenCalledWith({ contextGraphId: CONTEXT_GRAPH_ID });
+    expect(syncCompletions).not.toHaveBeenCalled();
 
     const scopeDigest = catalogScopeDigest();
     expect(receiver.readRfc64AppliedCatalogHeadV1({
@@ -7334,6 +7344,111 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         `SELECT ?s WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } } LIMIT 1`,
       )).resolves.toMatchObject({ type: 'bindings', bindings: [] });
     }
+  }, 60_000);
+
+  it('replays an exact applied head through the production receiver to retire a late legacy boundary', async () => {
+    const [author, receiver] = await Promise.all([
+      startNativeAgent('late-boundary-replay-author'),
+      startNativeAgent('late-boundary-replay-receiver'),
+    ]);
+    receiver.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    await connectBothWays(author, receiver);
+
+    const genesis = await author.publishOpenAuthorCatalogGenesisV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      author: AUTHOR_WALLET,
+      peers: [receiver.peerId],
+      issuedAt: FIXED_HEAD_ISSUED_AT,
+      catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
+      catalogIssuerDelegationExpiresAt: MULTI_DELEGATION_EXPIRES_AT,
+    });
+    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    const seal = await authorSeal(91n);
+    const applied = await author.publishAuthorCatalogExactSetSuccessorV1({
+      previousHead: {
+        objectDigest: genesis.headObjectDigest,
+        signatureVariantDigest: genesis.signatureVariantDigest,
+      },
+      author: AUTHOR_WALLET,
+      catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+      assets: [{
+        assertionCoordinate: 'late-boundary-replay' as never,
+        projectionBytes: PROJECTION,
+        seal,
+      }],
+      deployment: NATIVE_DEPLOYMENT,
+      issuedAt: SUCCESSOR_ISSUED_AT,
+      peers: [receiver.peerId],
+    });
+    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    const reannounce = async () => {
+      await expect(author.announceRfc64PublicCatalogHeadV1({
+        announcement: applied.announcement,
+        peers: [receiver.peerId],
+      })).resolves.toMatchObject({ announcedPeers: [receiver.peerId] });
+      await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    };
+
+    // With no boundary outstanding, the exact applied head is only deduplicated,
+    // and from then on it is answered without a receiver task at all.
+    await reannounce();
+    await reannounce();
+    const settled = receiver.rfc64PublicCatalogStatsV1()!;
+    expect(settled.receiver).toMatchObject({ applied: 2, dedupedAlreadyApplied: 1 });
+    expect(readRfc64LegacySwmBoundaryCountV1(receiver, CONTEXT_GRAPH_ID)).toBe(0);
+
+    // A legacy root share of the already-applied row commits its marker late.
+    const marker = prepareRfc64LateLegacySwmBoundaryV1(
+      receiver,
+      CONTEXT_GRAPH_ID,
+      seal.kaUal,
+      'late-boundary-replay-share',
+      seal.assertionVersion,
+    );
+    await receiver.store.insert([...marker.quads]);
+    marker.settle(true);
+    const storedMarkerRows = async () => {
+      const result = await receiver.store.query(
+        `SELECT ?p WHERE { GRAPH <${marker.graphUri}> { <${marker.subject}> ?p ?o } }`,
+      );
+      return result.type === 'bindings' ? result.bindings.length : -1;
+    };
+    expect(readRfc64LegacySwmBoundaryCountV1(receiver, CONTEXT_GRAPH_ID)).toBe(1);
+    expect(await storedMarkerRows()).toBe(1);
+
+    // The same head must now be replayed, not deduplicated: only the replay
+    // retires the marker under the receiver's boundary lease.
+    await reannounce();
+    const replayed = receiver.rfc64PublicCatalogStatsV1()!;
+    expect(replayed.receiver).toMatchObject({
+      applied: settled.receiver.applied + 1,
+      dedupedAlreadyApplied: settled.receiver.dedupedAlreadyApplied,
+    });
+    expect(replayed.announcedHeadsAlreadySatisfied)
+      .toBe(settled.announcedHeadsAlreadySatisfied);
+    expect(receiver.readRfc64PublicCatalogReconciliationFailureV1(
+      applied.headObjectDigest,
+    )).toBeNull();
+    expect(readRfc64LegacySwmBoundaryCountV1(receiver, CONTEXT_GRAPH_ID)).toBe(0);
+    expect(await storedMarkerRows()).toBe(0);
+    expect(receiver.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      currentCatalogHeadDigest: applied.headObjectDigest,
+      inventoryRowCount: '1',
+    });
+
+    // With the boundary retired, the head is satisfied again.
+    await reannounce();
+    expect(receiver.rfc64PublicCatalogStatsV1()!.receiver).toMatchObject({
+      applied: replayed.receiver.applied,
+    });
   }, 60_000);
 
   it('preserves a single-provider discovery error without aggregation', async () => {

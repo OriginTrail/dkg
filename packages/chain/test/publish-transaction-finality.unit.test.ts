@@ -35,7 +35,7 @@ function adapter(overrides: Record<string, unknown> = {}) {
     getTransactionReceiptWithFailover: vi.fn(async () => null),
     getTransactionWithFailover: vi.fn(async () => null),
     getBlockTimestamp: vi.fn(async () => 1_234_567),
-    parseV10PublishReceipt: vi.fn(async () => null),
+    decodeV10PublishReceipt: vi.fn(() => null),
     ...overrides,
   }) as PublishMethods & {
     finalityConfirmations: number;
@@ -89,7 +89,7 @@ describe('resolvePublishTransaction gates every mined verdict on finality [PR#23
     });
     const confirmed = adapter({
       getTransactionReceiptWithFailover: vi.fn(async () => receipt(1)),
-      parseV10PublishReceipt: vi.fn(async () => ({ batchId: 7n, txHash: TX_HASH })),
+      decodeV10PublishReceipt: vi.fn(() => ({ batchId: 7n, txHash: TX_HASH })),
       ...gateClosed,
     });
 

@@ -412,6 +412,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     });
     expect(readAuthority).toHaveBeenCalledWith(contextGraphId, {
       allowSubscriptionFallback: false,
+      onReadAuthorityDecision: expect.any(Function),
     });
     expect(index.whenIdle).toHaveBeenCalledOnce();
     expect(legacyLookup).not.toHaveBeenCalled();

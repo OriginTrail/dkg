@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@origintrail-official/dkg-core', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@origintrail-official/dkg-core')>();
@@ -12,109 +12,23 @@ vi.mock('../src/sync/requester/durable-sync.js', async (importOriginal) => {
 });
 
 import {
-  MemoryLayer, ExperimentalExactBatchUnsupportedError, createGraphKnowledgeAssetScope, exchangeExperimentalExactBatch,
-  knowledgeAssetLayerGraphUri, type OperationContext,
+  ExperimentalExactBatchUnsupportedError,
+  exchangeExperimentalExactBatch
 } from '@origintrail-official/dkg-core';
-import { OxigraphStore, quadToNQuad, type Quad } from '@origintrail-official/dkg-storage';
-import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
-import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
-import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
-import { SyncVerifyWorker } from '../src/sync-verify-worker.js';
-import { createDurableSyncAccumulator, finalizeDurableSyncCompletion } from '../src/sync/durable-progress.js';
 import { createChallengePinnedExactAssetSelection, createUalOnlyExactAssetSelection } from '../src/sync/exact-assets.js';
-import { EXACT_BATCH_FRAME_KIND as K, EXACT_BATCH_STREAM_PROTOCOL, type ExactBatchFrame } from '../src/sync/exact-batch-stream-contract.js';
 import { EXACT_BATCH_RESOURCE_REFUSAL_TTL_MS, exactBatchStreamUnsupported } from '../src/sync/exact-batch-stream-capability.js';
-import type { ExactBatchAgentSession } from '../src/sync/requester/exact-batch-stream.js';
-import * as exactBatchRequester from '../src/sync/requester/exact-batch-stream.js';
-import type { ExactRecoveryTransportMode } from '../src/sync/requester/exact-recovery-transport.js';
+import { EXACT_BATCH_FRAME_KIND as K, type ExactBatchFrame } from '../src/sync/exact-batch-stream-contract.js';
 import { runChallengeExactAssetFetch, runDurableSyncDetailed } from '../src/sync/requester/durable-sync.js';
+import * as exactBatchRequester from '../src/sync/requester/exact-batch-stream.js';
 import {
   VM_RECOVERY_REGISTERED_PUBLIC_MAX_AGE_MS,
-  VmRecoveryPassAuthority,
-  type VmRecoveryRegisteredPublicEvidence,
+  VmRecoveryPassAuthority
 } from '../src/vm-recovery-pass-authority.js';
 
-const CG = 'exact-batch-host-verdict';
-const ctx = { operationId: 'exact-batch-host-verdict', operationName: 'sync' } as OperationContext;
-const emptyResult = () => finalizeDurableSyncCompletion(createDurableSyncAccumulator());
+import { CG, createExactBatchHostFixture, emptyResult, resourceLimitRefusal, storedRows } from './_helpers/exact-batch-host.js';
 const cleanups: Array<() => Promise<void>> = [];
-
-/**
- * Host-verdict integration fixture: transport and chain authority are mocked.
- * The actual receive window, canonical worker, lifecycle physical-operation
- * fence, chain authenticator, Oxigraph atomic materializer and SWM reconciliation
- * run here. This is not encrypted-network or live-chain certification.
- */
-function fixture(assetCount = 2) {
-  const store = new OxigraphStore();
-  const worker = new SyncVerifyWorker();
-  cleanups.push(async () => { await worker.close(); await store.close(); });
-  const items = Array.from({ length: assetCount }, (_, index) => index + 1).map(number => {
-    const ual = `did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/${number}`;
-    const graph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.VerifiableMemory, createGraphKnowledgeAssetScope(ual, 1));
-    const data: Quad[] = [{ graph, subject: `urn:host:asset:${number}`, predicate: 'urn:host:value', object: `"asset ${number}"` }];
-    const root = computeFlatKCRootV10(data, []);
-    const kaId = (0xabn << 96n) | BigInt(number);
-    const meta = generateGraphKnowledgeAssetMetadata({ ual, contextGraphId: CG, assertionGraph: graph,
-      assertionVersion: '1', merkleRoot: root, publisherPeerId: 'fixture-source', accessPolicy: 'public',
-      timestamp: new Date(0), publicTripleCount: data.length, privateTripleCount: 0 },
-    { status: 'confirmed', confirmation: { kind: 'finalized-materialization', provenance: {
-      batchId: kaId, materializedVersion: { blockNumber: 123, txIndex: 0 },
-    } } });
-    return { ual, graph, data, meta, root, kaId };
-  });
-  const byId = new Map(items.map(item => [item.kaId, item]));
-  const wallet = ethers.Wallet.createRandom();
-  // The fake host follows the established prototype-call pattern: only host
-  // dependencies used by this lifecycle seam are supplied, with an owned store.
-  const host: any = {
-    config: { nodeRole: 'edge' }, peerId: 'fixture-requester', router: {}, store,
-    chain: { chainId: 'hardhat:31337', deploymentId: 'fixture-deployment', getIdentityId: vi.fn(async () => 1n),
-      signMessage: vi.fn(async (digest: Uint8Array) => {
-        const signature = ethers.Signature.from(await wallet.signMessage(digest));
-        return { r: ethers.getBytes(signature.r), vs: ethers.getBytes(signature.yParityAndS) };
-      }),
-      getLatestMerkleRoot: vi.fn(async (id: bigint) => byId.get(id)!.root),
-      getMerkleRootCount: vi.fn(async () => 1n), getKAContextGraphId: vi.fn(async () => 14n) },
-    getPeerProtocols: vi.fn(async () => [EXACT_BATCH_STREAM_PROTOCOL]),
-    getSyncReconcilerConnectionKey: vi.fn(() => 'fixture-connection'),
-    resolveRegisteredContextGraphAuthority: vi.fn(async () => ({ kind: 'public', onChainId: '14' })),
-    findLocalAgentForContextGraph: vi.fn(async () => undefined), localAgents: new Map(),
-    computeSyncDigest: ContextGraphResolveMethods.prototype.computeSyncDigest,
-    parsePipeDelimitedSyncRequest: ContextGraphResolveMethods.prototype.parsePipeDelimitedSyncRequest,
-    getOrCreateSyncVerifyWorker: () => worker,
-    processDurableBatchInWorker: (data: Quad[], meta: Quad[], _ctx: unknown, accept: boolean, mode: Parameters<SyncVerifyWorker['processDurableBatch']>[3]) => worker.processDurableBatch(data, meta, accept, mode),
-    fetchSyncPages: vi.fn(), insertSyncedQuadsAndInvalidateListCache: vi.fn(),
-    subscribedContextGraphs: new Map([[CG, { onChainId: '14' }]]),
-    contextGraphBindingState: new ContextGraphBindingState(), graphScopedStoreClosed: false,
-    captureExperimentalExactBatchRefusalScope: LifecycleSyncMethods.prototype.captureExperimentalExactBatchRefusalScope,
-    graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
-    requireLocalCgMatchesOnChainSlot: vi.fn(async (cg: string, id: string) => cg === CG && id === '14'),
-    syncCheckpoints: { delete: vi.fn(), set: vi.fn(), setManifestBoundOffset: vi.fn() },
-    oversizeTombstoneLog: { record: vi.fn() }, invalidateListContextGraphsCache: vi.fn(),
-    contextGraphMetaProjection: { markDirtyFromQuads: vi.fn() }, writeLocks: new Map(),
-    retireFinalizedSwmTwinCandidate: vi.fn(), log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
-  };
-  const selection = createUalOnlyExactAssetSelection(items.map(item => item.ual));
-  const atomicStarted = vi.fn();
-  const run = (exactAssetSelection = selection as typeof selection | ReturnType<typeof createChallengePinnedExactAssetSelection>, exactRecoveryTransportMode: ExactRecoveryTransportMode = 'stream-preferred',
-    handedOver: { registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence } = {}) => (
-    LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraphDetailed.call(host, ctx, 'fixture-source', CG, 1,
-      { exactAssetSelection, exactRecoveryTransportMode, fetchTimeoutMs: 120_000, authenticationTimeoutMs: 30_000, onAtomicCommitStarted: atomicStarted, ...handedOver })
-  );
-  const frames: ExactBatchFrame[] = items.flatMap((item, assetIndex) => [
-    { kind: K.META, assetIndex, sequence: 0, payload: new TextEncoder().encode(item.meta.map(quadToNQuad).join('\n') + '\n') },
-    { kind: K.DATA, assetIndex, sequence: 0, payload: new TextEncoder().encode(item.data.map(quadToNQuad).join('\n') + '\n') },
-    { kind: K.ASSET_END, assetIndex, sequence: 1, payload: new Uint8Array() },
-  ]);
-  frames.push({ kind: K.BATCH_END, assetIndex: 255, sequence: items.length, payload: new Uint8Array() });
-  const controller = new AbortController();
-  const session: ExactBatchAgentSession = { signal: controller.signal, assetUals: selection.assetUals, windowSize: 2,
-    next: vi.fn(async () => frames.shift()), send: vi.fn(async () => {}) };
-  vi.mocked(exchangeExperimentalExactBatch).mockImplementation(async (_router, _peer, _start, _options, consume) => consume(session as never));
-  return { host, store, items, run, session, atomicStarted, selection, frames, controller };
-}
+const fixture = (assetCount = 2) => createExactBatchHostFixture(cleanups, assetCount);
 
 /** A responder stops between assets only after the first two real commit ACKs. */
 function refuseAfterVerifiedPrefix(f: ReturnType<typeof fixture>, code: string, midAsset = false,
@@ -145,12 +59,6 @@ function refusalLogs(f: ReturnType<typeof fixture>) {
     .filter((message: string) => message.startsWith('Exact batch requester refusal '));
 }
 
-async function storedRows(store: OxigraphStore, graph: string) {
-  const result = await store.query(`SELECT ?s ?p ?o WHERE { GRAPH <${graph}> { ?s ?p ?o } }`);
-  if (result.type !== 'bindings') throw new Error('Fixture SELECT shape mismatch');
-  return result.bindings.length;
-}
-
 beforeEach(() => {
   vi.clearAllMocks();
   vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
@@ -160,7 +68,11 @@ beforeEach(() => {
 
 afterEach(async () => {
   for (const close of cleanups.splice(0)) await close();
+  vi.restoreAllMocks();
+  vi.useRealTimers();
   vi.unstubAllEnvs();
+  // A scripted exchange a test did not consume must not serve the next test.
+  vi.mocked(exchangeExperimentalExactBatch).mockReset();
 });
 
 describe('experimental exact batch actual host completion verdict', () => {
@@ -438,13 +350,14 @@ describe('experimental exact batch actual host completion verdict', () => {
     'does not carry a resource refusal to a changed %s scope', async boundary => {
       const f = fixture();
       f.host.selectedVmReconcileCursors = new Map([[CG, { bindingGeneration: 1 }]]);
-      f.frames.splice(0, f.frames.length,
-        { kind: K.REFUSE, assetIndex: 255, sequence: 0, payload: new TextEncoder().encode('RESOURCE_LIMIT') });
+      f.frames.splice(0, f.frames.length, resourceLimitRefusal());
       await f.run();
       if (boundary === 'connection') f.host.getSyncReconcilerConnectionKey.mockReturnValue('replacement-connection');
       else if (boundary === 'deployment') f.host.chain.deploymentId = 'replacement-deployment';
       else if (boundary === 'binding') f.host.contextGraphBindingState.bump(CG);
       else f.host.selectedVmReconcileCursors.set(CG, { bindingGeneration: 2 });
+      // The stream is tried again; it answers with a refusal, not with a break.
+      f.frames.push(resourceLimitRefusal());
       await f.run();
       expect(exchangeExperimentalExactBatch).toHaveBeenCalledTimes(2);
       expect(runDurableSyncDetailed).not.toHaveBeenCalled();
@@ -454,14 +367,14 @@ describe('experimental exact batch actual host completion verdict', () => {
     const f = fixture();
     const clock = vi.spyOn(Date, 'now').mockReturnValue(100_000);
     try {
-      f.frames.splice(0, f.frames.length,
-        { kind: K.REFUSE, assetIndex: 255, sequence: 0, payload: new TextEncoder().encode('RESOURCE_LIMIT') });
+      f.frames.splice(0, f.frames.length, resourceLimitRefusal());
       await f.run();
       clock.mockReturnValue(100_000 + EXACT_BATCH_RESOURCE_REFUSAL_TTL_MS - 1);
       await f.run();
       expect(exchangeExperimentalExactBatch).toHaveBeenCalledOnce();
       expect(runDurableSyncDetailed).toHaveBeenCalledOnce();
       clock.mockReturnValue(100_000 + EXACT_BATCH_RESOURCE_REFUSAL_TTL_MS);
+      f.frames.push(resourceLimitRefusal());
       await f.run();
       expect(exchangeExperimentalExactBatch).toHaveBeenCalledTimes(2);
     } finally { clock.mockRestore(); }
@@ -505,14 +418,15 @@ describe('experimental exact batch actual host completion verdict', () => {
   it('publishes refusal observations only after transport physical cleanup has settled', async () => {
     const f = fixture(5);
     refuseAfterVerifiedPrefix(f, 'RESOURCE_LIMIT');
-    let enteredClose = false, settled = false, finishClose!: () => void;
+    let enteredClose!: () => void, settled = false, finishClose!: () => void;
+    const closing = new Promise<void>(resolve => { enteredClose = resolve; });
     const close = new Promise<void>(resolve => { finishClose = resolve; });
     vi.mocked(exchangeExperimentalExactBatch).mockImplementation(async (_router, _peer, _start, _options, consume) => {
       try { return await consume(f.session as never); }
-      catch (error) { enteredClose = true; await close; throw error; }
+      catch (error) { enteredClose(); await close; throw error; }
     });
     const running = f.run().then(outcome => { settled = true; return outcome; });
-    await vi.waitFor(() => expect(enteredClose).toBe(true));
+    await closing;
     expect(settled).toBe(false);
     expect(refusalLogs(f)).toEqual([]);
     expect(await storedRows(f.store, f.items[1]!.graph)).toBe(1);

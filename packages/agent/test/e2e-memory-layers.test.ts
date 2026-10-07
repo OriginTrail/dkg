@@ -2,8 +2,8 @@
  * E2E tests for the DKG V10 memory layer progression:
  *
  * 1. Working Memory → SWM: assertion promote moves data to shared memory
- * 2. SWM → Verifiable Memory: publishFromSharedMemory anchors on-chain
- * 3. Full pipeline: WM → promote → SWM gossip → publishFromSharedMemory → VM
+ * 2. SWM → Verifiable Memory: publishFromFinalizedAssertion anchors on-chain
+ * 3. Full pipeline: WM → promote → SWM gossip → publishFromFinalizedAssertion → VM
  * 4. Memory layer isolation: data in one layer doesn't leak to another
  * 5. Two-node flow: A promotes to SWM → gossip to B → A publishes → B finalizes
  * 6. SWM query view vs default view
@@ -731,7 +731,7 @@ describe('WM → SWM → VM pipeline (single agent)', () => {
     expect(swmResult.bindings[0]?.['name']).toBe('"Pipeline Entity"');
 
     // Step 3: Publish from SWM to verifiable memory
-    const pubResult = await agent.publishFromSharedMemory(CG_ID, 'all');
+    const pubResult = await agent.publishFromFinalizedAssertion(CG_ID, 'pipeline');
     expect(pubResult.status).toBe('confirmed');
     expect(pubResult.ual).toBeDefined();
 
@@ -927,7 +927,7 @@ describe('WM → SWM → VM pipeline (single agent)', () => {
     expect((await agent.assertion.promote(CG_ID, 'stale')).sealed).toBe(true);
   }, 20_000);
 
-  it('WM is empty after promote; SWM clear after publishFromSWM with flag', async () => {
+  it('WM is empty after promote; SWM clear after publish with flag', async () => {
     const agent = await createAgent('CleanupBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Cleanup E2E' });
     await agent.registerContextGraph(CG_ID);
@@ -942,7 +942,7 @@ describe('WM → SWM → VM pipeline (single agent)', () => {
     const wmAfterPromote = await agent.assertion.query(CG_ID, 'cleanup');
     expect(wmAfterPromote.length).toBe(0);
 
-    await agent.publishFromSharedMemory(CG_ID, 'all', { clearSharedMemoryAfter: true });
+    await agent.publishFromFinalizedAssertion(CG_ID, 'cleanup', { clearSharedMemoryAfter: true });
 
     // SWM should be empty after publish with clear flag
     const swmAfterPublish = await agent.query(

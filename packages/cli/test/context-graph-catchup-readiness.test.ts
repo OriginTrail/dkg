@@ -2,7 +2,11 @@
 // the end of this file, before `catchup-runner.ts` is loaded below.
 import { runCatchupThroughBridge } from './helpers/catchup-runner-worker-test-harness.js';
 import { describe, expect, it } from 'vitest';
-import { emptySharedMemorySyncResult, type DKGAgent } from '@origintrail-official/dkg-agent';
+import {
+  emptySharedMemorySyncResult,
+  type ContextGraphReadinessMetadataV1,
+  type DKGAgent,
+} from '@origintrail-official/dkg-agent';
 import { createIncompleteDurableSyncResult } from '@origintrail-official/dkg-agent/dist/sync/durable-progress.js';
 import { Rfc64SwmRecoveryTargetRevokedErrorV1 } from '@origintrail-official/dkg-agent/dist/dkg-agent-rfc64-swm-recovery-runtime.js';
 import { catchupReadinessResult, durableDiagnostics, sharedMemoryDiagnostics } from './_helpers/catchup-readiness-fixtures.js';
@@ -64,12 +68,107 @@ describe('context graph catch-up readiness classification', () => {
     updatedAt: 1,
   };
 
+  const swmOnlyResult = () => catchupReadinessResult({
+    connectedPeers: 1, peersResponded: 1, peersSucceeded: 1, sharedMemorySynced: 29,
+    cleanPlaneCompletions: {
+      durable: { verifiedDataPeers: 0, verifiedPrivateOnlyPeers: 0, emptyPeers: 0 },
+      sharedMemory: { verifiedDataPeers: 1, emptyPeers: 0 },
+    },
+  });
+
+  it.each(['denied', 'unavailable'] as const)(
+    'invalidates all readiness when completion authority is %s despite peer data and prior proof',
+    (outcome) => {
+      const classification = classifyContextGraphCatchupReadiness({
+        result: swmOnlyResult(), includeSharedMemory: true,
+        inspection: { kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'private' }, authority: { outcome } },
+        readinessBeforeCatchup: { ...swmVerifiedReadinessBeforeCatchup, durableVerified: true },
+      });
+      expect(classification).toMatchObject({
+        jobStatus: outcome === 'denied' ? 'denied' : 'unreachable', durablePlane: 'required',
+        readinessPatch: { durableVerified: false, sharedMemoryVerified: false },
+        statePatch: { synced: false, sharedMemorySynced: false, metaSynced: true, pendingMeta: false },
+      });
+      expect(classification.eventPayload).toBeUndefined();
+    },
+  );
+
+  it.each([
+    ['registered', { outcome: 'allowed' as const }, 'required', 'unreachable'],
+    ['unregistered', { outcome: 'allowed' as const, registration: 'unregistered' as const }, 'not-applicable', 'unreachable'],
+    ['revoked', { outcome: 'denied' as const }, 'required', 'denied'],
+  ] as const)('fails closed on an invalidated %s inspection without changing applicability', (
+    _label, authority, durablePlane, jobStatus,
+  ) => {
+    const classification = classifyContextGraphCatchupReadiness({
+      result: swmOnlyResult(), includeSharedMemory: true,
+      inspection: { kind: 'invalidated', authority },
+      readinessBeforeCatchup: { ...swmVerifiedReadinessBeforeCatchup, durableVerified: true },
+    });
+    expect(classification).toMatchObject({
+      jobStatus, durablePlane,
+      statePatch: { synced: false, sharedMemorySynced: false },
+      readinessPatch: { durableVerified: false, sharedMemoryVerified: false },
+    });
+    expect(classification.statePatch).not.toHaveProperty('metaSynced');
+    expect(classification.eventPayload).toBeUndefined();
+  });
+
+  it('withholds clean peer readiness when current metadata policy is unavailable', () => {
+    const classification = classifyContextGraphCatchupReadiness({
+      result: swmOnlyResult(), includeSharedMemory: true,
+      inspection: {
+        kind: 'current', metadata: { kind: 'unavailable' }, authority: { outcome: 'allowed' },
+      },
+      readinessBeforeCatchup: swmVerifiedReadinessBeforeCatchup,
+    });
+    expect(classification).toMatchObject({
+      jobStatus: 'unreachable',
+      statePatch: { synced: false, sharedMemorySynced: false },
+      readinessPatch: { durableVerified: false, sharedMemoryVerified: false },
+    });
+    expect(classification.statePatch).not.toHaveProperty('metaSynced');
+  });
+
+  it('classifies current qualified absence and a subsequent registration without manufacturing VM proof', () => {
+    const input = {
+      result: swmOnlyResult(), includeSharedMemory: true,
+      readinessBeforeCatchup,
+    };
+    const unregistered = classifyContextGraphCatchupReadiness({
+      ...input, inspection: {
+        kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'private' },
+        authority: { outcome: 'allowed', registration: 'unregistered' },
+      },
+    });
+    expect(unregistered).toMatchObject({ jobStatus: 'done', durablePlane: 'not-applicable' });
+    expect(unregistered.readinessPatch).toEqual({ durableVerified: false, sharedMemoryVerified: true });
+    const registered = classifyContextGraphCatchupReadiness({
+      ...input, inspection: {
+        kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'private' },
+        authority: { outcome: 'allowed' },
+      },
+    });
+    expect(registered).toMatchObject({ jobStatus: 'unreachable', durablePlane: 'required' });
+    expect(registered.readinessPatch).toEqual(unregistered.readinessPatch);
+  });
+
+  it.each(['denied', 'unavailable'] as const)('preserves unchecked metadata when completion authority is %s', (outcome) => {
+    const classification = classifyContextGraphCatchupReadiness({
+      result: catchupReadinessResult(), includeSharedMemory: true,
+      inspection: { kind: 'current', metadata: { kind: 'unchecked' }, authority: { outcome } },
+      readinessBeforeCatchup: swmVerifiedReadinessBeforeCatchup,
+    });
+    expect(classification.statePatch).toEqual({ synced: false, sharedMemorySynced: false });
+    expect(classification.readinessPatch).toEqual({ durableVerified: false, sharedMemoryVerified: false });
+    expect(classification.eventPayload).toBeUndefined();
+  });
+
   it('uses a clean per-peer completion even when aggregate diagnostics contain denial and timeout', () => {
     const classification = classifyContextGraphCatchupReadiness({
+      inspection: { kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'private' }, authority: { outcome: 'allowed' } },
       result: mixedPeerResult(1),
       includeSharedMemory: false,
-      hasConfirmedMeta: true,
-      isPrivate: true,
       readinessBeforeCatchup,
     });
 
@@ -99,10 +198,9 @@ describe('context graph catch-up readiness classification', () => {
     result.diagnostics.durable.verifiedPrivateOnlyResponses = 1;
 
     const classification = classifyContextGraphCatchupReadiness({
+      inspection: { kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'private' }, authority: { outcome: 'allowed' } },
       result,
       includeSharedMemory: false,
-      hasConfirmedMeta: true,
-      isPrivate: true,
       readinessBeforeCatchup,
     });
 
@@ -141,10 +239,9 @@ describe('context graph catch-up readiness classification', () => {
     result.diagnostics.durable.deniedPhases = 0;
 
     const classification = classifyContextGraphCatchupReadiness({
+      inspection: { kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'private' }, authority: { outcome: 'allowed' } },
       result,
       includeSharedMemory: false,
-      hasConfirmedMeta: true,
-      isPrivate: true,
       readinessBeforeCatchup,
     });
 
@@ -166,10 +263,9 @@ describe('context graph catch-up readiness classification', () => {
     // liveness success. That counter is deliberately not readiness evidence.
     result.peersSucceeded = 1;
     const classification = classifyContextGraphCatchupReadiness({
+      inspection: { kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'private' }, authority: { outcome: 'allowed' } },
       result,
       includeSharedMemory: false,
-      hasConfirmedMeta: true,
-      isPrivate: true,
       readinessBeforeCatchup,
     });
 
@@ -195,10 +291,9 @@ describe('context graph catch-up readiness classification', () => {
     result.diagnostics!.sharedMemory.completedPhases = 1;
 
     const classification = classifyContextGraphCatchupReadiness({
+      inspection: { kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'public' }, authority: { outcome: 'allowed' } },
       result,
       includeSharedMemory: true,
-      hasConfirmedMeta: true,
-      isPrivate: false,
       readinessBeforeCatchup,
     });
 
@@ -236,10 +331,9 @@ describe('context graph catch-up readiness classification', () => {
     result.diagnostics!.sharedMemory.emptyResponses = 1;
 
     const classification = classifyContextGraphCatchupReadiness({
+      inspection: { kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'public' }, authority: { outcome: 'allowed' } },
       result,
       includeSharedMemory: true,
-      hasConfirmedMeta: true,
-      isPrivate: false,
       readinessBeforeCatchup,
     });
 
@@ -263,10 +357,9 @@ describe('context graph catch-up readiness classification', () => {
     const result = durableMetaOnlyResult();
 
     const classification = classifyContextGraphCatchupReadiness({
+      inspection: { kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'public' }, authority: { outcome: 'allowed' } },
       result,
       includeSharedMemory: false,
-      hasConfirmedMeta: true,
-      isPrivate: false,
       readinessBeforeCatchup: swmVerifiedReadinessBeforeCatchup,
     });
 
@@ -281,10 +374,9 @@ describe('context graph catch-up readiness classification', () => {
     const result = durableMetaOnlyResult();
 
     const classification = classifyContextGraphCatchupReadiness({
+      inspection: { kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'private' }, authority: { outcome: 'allowed' } },
       result,
       includeSharedMemory: true,
-      hasConfirmedMeta: true,
-      isPrivate: true,
       readinessBeforeCatchup: swmVerifiedReadinessBeforeCatchup,
     });
 
@@ -321,10 +413,9 @@ describe('context graph catch-up readiness classification', () => {
 
   it('persists a unanimously clean-empty round only because it was FULLY accounted', () => {
     const classification = classifyContextGraphCatchupReadiness({
+      inspection: { kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'public' }, authority: { outcome: 'allowed' } },
       result: publicEmptyRoundResult(),
       includeSharedMemory: false,
-      hasConfirmedMeta: true,
-      isPrivate: false,
       readinessBeforeCatchup,
     });
 
@@ -364,10 +455,9 @@ describe('context graph catch-up readiness classification', () => {
     mixed.diagnostics!.durable.failedPeers = 0;
 
     const classification = classifyContextGraphCatchupReadiness({
+      inspection: { kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'public' }, authority: { outcome: 'allowed' } },
       result: mixed,
       includeSharedMemory: false,
-      hasConfirmedMeta: true,
-      isPrivate: false,
       readinessBeforeCatchup,
     });
 
@@ -390,10 +480,9 @@ describe('context graph catch-up readiness classification', () => {
     firstRun.diagnostics!.durable.failedPeers = 1;
 
     const first = classifyContextGraphCatchupReadiness({
+      inspection: { kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'public' }, authority: { outcome: 'allowed' } },
       result: firstRun,
       includeSharedMemory: false,
-      hasConfirmedMeta: true,
-      isPrivate: false,
       readinessBeforeCatchup,
     });
     expect(first.jobStatus).toBe('done');
@@ -412,10 +501,9 @@ describe('context graph catch-up readiness classification', () => {
     secondRun.diagnostics!.durable.metaOnlyResponses = 1;
 
     const second = classifyContextGraphCatchupReadiness({
+      inspection: { kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'public' }, authority: { outcome: 'allowed' } },
       result: secondRun,
       includeSharedMemory: false,
-      hasConfirmedMeta: true,
-      isPrivate: false,
       readinessBeforeCatchup: {
         ...readinessBeforeCatchup,
         version: CONTEXT_GRAPH_READINESS_VERSION,
@@ -430,10 +518,9 @@ describe('context graph catch-up readiness classification', () => {
     proven.dataSynced = 12;
     proven.cleanPlaneCompletions!.durable.verifiedDataPeers = 1;
     expect(classifyContextGraphCatchupReadiness({
+      inspection: { kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'public' }, authority: { outcome: 'allowed' } },
       result: proven,
       includeSharedMemory: false,
-      hasConfirmedMeta: true,
-      isPrivate: false,
       readinessBeforeCatchup,
     }).readinessPatch).toMatchObject({ durableVerified: true });
   });
@@ -449,10 +536,9 @@ describe('context graph catch-up readiness classification', () => {
     result.diagnostics!.durable.deniedPhases = 1;
 
     const classification = classifyContextGraphCatchupReadiness({
+      inspection: { kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'public' }, authority: { outcome: 'allowed' } },
       result,
       includeSharedMemory: false,
-      hasConfirmedMeta: true,
-      isPrivate: false,
       readinessBeforeCatchup,
     });
 
@@ -473,10 +559,9 @@ describe('context graph catch-up readiness classification', () => {
     result.diagnostics!.durable.failedPhases = 5;
 
     const classification = classifyContextGraphCatchupReadiness({
+      inspection: { kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'public' }, authority: { outcome: 'allowed' } },
       result,
       includeSharedMemory: false,
-      hasConfirmedMeta: true,
-      isPrivate: false,
       readinessBeforeCatchup,
     });
 
@@ -494,10 +579,9 @@ describe('context graph catch-up readiness classification', () => {
     masked.diagnostics!.durable.failedPhases = 5;
 
     expect(classifyContextGraphCatchupReadiness({
+      inspection: { kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'public' }, authority: { outcome: 'allowed' } },
       result: masked,
       includeSharedMemory: false,
-      hasConfirmedMeta: true,
-      isPrivate: false,
       readinessBeforeCatchup,
     }).jobStatus).not.toBe('done');
 
@@ -505,10 +589,9 @@ describe('context graph catch-up readiness classification', () => {
     const clean = publicEmptyRoundResult();
     delete clean.cleanPlaneCompletions;
     expect(classifyContextGraphCatchupReadiness({
+      inspection: { kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'public' }, authority: { outcome: 'allowed' } },
       result: clean,
       includeSharedMemory: false,
-      hasConfirmedMeta: true,
-      isPrivate: false,
       readinessBeforeCatchup,
     })).toMatchObject({
       jobStatus: 'done',
@@ -522,10 +605,9 @@ describe('context graph catch-up readiness classification', () => {
     delete lossy.cleanPlaneCompletions;
     lossy.diagnostics!.durable.failedPeers = 1;
     expect(classifyContextGraphCatchupReadiness({
+      inspection: { kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'public' }, authority: { outcome: 'allowed' } },
       result: lossy,
       includeSharedMemory: false,
-      hasConfirmedMeta: true,
-      isPrivate: false,
       readinessBeforeCatchup,
     })).toMatchObject({
       jobStatus: 'done',
@@ -536,15 +618,96 @@ describe('context graph catch-up readiness classification', () => {
 
   it('never proves a private plane from an empty round', () => {
     const classification = classifyContextGraphCatchupReadiness({
+      inspection: { kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'private' }, authority: { outcome: 'allowed' } },
       result: publicEmptyRoundResult(),
       includeSharedMemory: false,
-      hasConfirmedMeta: true,
-      isPrivate: true,
       readinessBeforeCatchup,
     });
 
     expect(classification.jobStatus).toBe('unreachable');
     expect(classification.readinessPatch).toMatchObject({ durableVerified: false });
+  });
+
+  it('settles only durable VM for a registered private graph with pinned zero-chain proof', () => {
+    const classification = classifyContextGraphCatchupReadiness({
+      inspection: { kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'private' }, authority: { outcome: 'allowed' } },
+      result: catchupReadinessResult(),
+      includeSharedMemory: true,
+
+      independentPlaneEvidence: { durable: { ready: true, persistable: true } },
+      readinessBeforeCatchup,
+    });
+    expect(classification).toMatchObject({
+      jobStatus: 'unreachable', durablePlane: 'required',
+      statePatch: { synced: true, sharedMemorySynced: false },
+      readinessPatch: { durableVerified: true, sharedMemoryVerified: false },
+    });
+  });
+
+  it('keeps peer denial while persisting an independent finalized empty-VM proof', () => {
+    const deniedRound = catchupReadinessResult({
+      connectedPeers: 1, totalPeers: 1, selectedPeers: 1, syncCapablePeers: 1,
+      peersTried: 1, peersResponded: 1, denied: true, deniedPeers: 1,
+    });
+    const unproven = classifyContextGraphCatchupReadiness({
+      inspection: { kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'private' }, authority: { outcome: 'allowed' } }, result: deniedRound,
+      includeSharedMemory: true,
+      readinessBeforeCatchup,
+    });
+    expect(unproven).toMatchObject({ jobStatus: 'denied' });
+    expect(unproven.readinessPatch?.durableVerified).not.toBe(true);
+
+    const proven = classifyContextGraphCatchupReadiness({
+      inspection: { kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'private' }, authority: { outcome: 'allowed' } }, result: deniedRound,
+      includeSharedMemory: true,
+      independentPlaneEvidence: { durable: { ready: true, persistable: true } }, readinessBeforeCatchup,
+    });
+    expect(proven).toMatchObject({
+      jobStatus: 'denied',
+      statePatch: { synced: true, sharedMemorySynced: false },
+      readinessPatch: { durableVerified: true, sharedMemoryVerified: false },
+    });
+  });
+
+  it('keeps peer denial ahead of metadata from a clean unrequested plane', () => {
+    const deniedRound = catchupReadinessResult({
+      connectedPeers: 1, totalPeers: 1, selectedPeers: 1, syncCapablePeers: 1,
+      peersTried: 1, peersResponded: 1, denied: true, deniedPeers: 1,
+      cleanPlaneCompletions: {
+        durable: { verifiedDataPeers: 0, emptyPeers: 0 },
+        sharedMemory: { verifiedDataPeers: 0, emptyPeers: 1 },
+      },
+    });
+    expect(classifyContextGraphCatchupReadiness({
+      inspection: { kind: 'current', metadata: { kind: 'unchecked' }, authority: { outcome: 'allowed' } }, result: deniedRound,
+      includeSharedMemory: false,
+      readinessBeforeCatchup,
+    })).toMatchObject({ jobStatus: 'denied' });
+  });
+
+  it.each([
+    ['unregistered', { outcome: 'allowed', registration: 'unregistered' }, true, true],
+    ['metadata absent', { outcome: 'allowed' }, true, false],
+    ['authority unavailable', { outcome: 'unavailable' }, true, true],
+  ] as const)('does not persist an independent durable proof without %s authority', (
+    _label, completionAuthority, isPrivate, hasConfirmedMeta,
+  ) => {
+    const classification = classifyContextGraphCatchupReadiness({
+      inspection: {
+        kind: 'current',
+        metadata: hasConfirmedMeta
+          ? { kind: 'confirmed', accessPolicy: isPrivate ? 'private' : 'public' }
+          : { kind: 'absent' },
+        authority: completionAuthority,
+      },
+      result: catchupReadinessResult(),
+      includeSharedMemory: true,
+
+      independentPlaneEvidence: { durable: { ready: true, persistable: true } },
+      readinessBeforeCatchup,
+    });
+    expect(classification.readinessPatch?.durableVerified).not.toBe(true);
+    expect(classification.statePatch?.synced).not.toBe(true);
   });
 
   // A registered public graph with no Knowledge Assets yet. Its host serves the
@@ -568,10 +731,9 @@ describe('context graph catch-up readiness classification', () => {
 
   it('settles a registered-but-empty public graph on the curator hosted-empty round', () => {
     expect(classifyContextGraphCatchupReadiness({
+      inspection: { kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'public' }, authority: { outcome: 'allowed' } },
       result: curatorHostedEmptyResult(),
       includeSharedMemory: false,
-      hasConfirmedMeta: true,
-      isPrivate: false,
       readinessBeforeCatchup,
     })).toMatchObject({
       jobStatus: 'done',
@@ -592,10 +754,9 @@ describe('context graph catch-up readiness classification', () => {
     mutate(result);
 
     expect(classifyContextGraphCatchupReadiness({
+      inspection: { kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'public' }, authority: { outcome: 'allowed' } },
       result,
       includeSharedMemory: false,
-      hasConfirmedMeta: true,
-      isPrivate: false,
       readinessBeforeCatchup,
     })).toMatchObject({
       jobStatus: 'unreachable',
@@ -615,10 +776,9 @@ describe('context graph catch-up readiness classification', () => {
     result.diagnostics!.sharedMemory.deniedPhases = 1;
 
     expect(classifyContextGraphCatchupReadiness({
+      inspection: { kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'public' }, authority: { outcome: 'allowed' } },
       result,
       includeSharedMemory: false,
-      hasConfirmedMeta: true,
-      isPrivate: false,
       readinessBeforeCatchup,
     })).toMatchObject({
       jobStatus: 'done',
@@ -630,10 +790,9 @@ describe('context graph catch-up readiness classification', () => {
     // Private planes stay proof-by-content only: an authorized-but-filtered
     // response is indistinguishable from an empty one on this side of the wire.
     expect(classifyContextGraphCatchupReadiness({
+      inspection: { kind: 'current', metadata: { kind: 'confirmed', accessPolicy: 'private' }, authority: { outcome: 'allowed' } },
       result: curatorHostedEmptyResult(),
       includeSharedMemory: false,
-      hasConfirmedMeta: true,
-      isPrivate: true,
       readinessBeforeCatchup,
     }).jobStatus).toBe('unreachable');
   });
@@ -694,14 +853,15 @@ describe('T16 — terminal readiness strings are byte-identical', () => {
 
   const classify = (
     result: CatchupJobResult,
-    over: Partial<{ includeSharedMemory: boolean; hasConfirmedMeta: boolean; isPrivate: boolean }> = {},
+    over: Partial<{ includeSharedMemory: boolean; metadata: ContextGraphReadinessMetadataV1 }> = {},
   ) => classifyContextGraphCatchupReadiness({
-    result, includeSharedMemory: false, hasConfirmedMeta: true, isPrivate: false,
-    readinessBeforeCatchup: before, ...over,
+    inspection: { kind: 'current', metadata: over.metadata ?? { kind: 'confirmed', accessPolicy: 'public' }, authority: { outcome: 'allowed' } },
+    result, includeSharedMemory: over.includeSharedMemory ?? false,
+    readinessBeforeCatchup: before,
   });
 
   it('pins the missing-authoritative-metadata string', () => {
-    const c = classify(metadataOnly(), { hasConfirmedMeta: false });
+    const c = classify(metadataOnly(), { metadata: { kind: 'absent' } });
     expect(c.jobStatus).toBe('unreachable');
     expect(c.error).toBe('No peer delivered authoritative context-graph metadata — the curator may be offline, or responding peers do not host this project.');
   });
@@ -717,13 +877,15 @@ describe('T16 — terminal readiness strings are byte-identical', () => {
   });
 
   it('pins the private missing-graph-proof string', () => {
-    const c = classify(metadataOnly(), { isPrivate: true });
+    const c = classify(metadataOnly(), { metadata: { kind: 'confirmed', accessPolicy: 'private' } });
     expect(c.jobStatus).toBe('unreachable');
     expect(c.error).toBe('No authorized context-graph peer delivered verified durable or shared-memory data — empty or metadata-only responses cannot prove a private graph is fully synchronized, and the curator may be offline.');
   });
 
   it('pins the private durable-ok-shared-memory-incomplete string', () => {
-    const c = classify(durableProven(), { isPrivate: true, includeSharedMemory: true });
+    const c = classify(durableProven(), {
+      metadata: { kind: 'confirmed', accessPolicy: 'private' }, includeSharedMemory: true,
+    });
     expect(c.jobStatus).toBe('unreachable');
     expect(c.error).toBe('Durable context-graph data synchronized, but shared-memory catch-up did not complete. Retry to finish shared-memory synchronization.');
   });
@@ -897,10 +1059,14 @@ describe('catch-up terminal status through the bridge and worker', () => {
    */
   const classify = (result: CatchupJobResult, agentConfirmsMeta = false) => (
     classifyContextGraphCatchupReadiness({
+      inspection: {
+        kind: 'current',
+        metadata: catchupResultHasCleanResponse(result) && agentConfirmsMeta
+          ? { kind: 'confirmed', accessPolicy: 'public' } : { kind: 'absent' },
+        authority: { outcome: 'allowed' },
+      },
       result,
       includeSharedMemory: true,
-      hasConfirmedMeta: catchupResultHasCleanResponse(result) && agentConfirmsMeta,
-      isPrivate: false,
       readinessBeforeCatchup: before,
     })
   );

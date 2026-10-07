@@ -12,7 +12,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import type { DKGAgent, InspectedPrivateEmptyVmReadinessV1 } from '@origintrail-official/dkg-agent';
 import type { CatchupJobResult } from '../src/catchup-runner.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 
@@ -273,6 +273,25 @@ async function createHarness(opts: HarnessOptions = {}) {
     reconcileRfc64CatalogResponsibilityV1: async () => undefined,
     hasConfirmedMetaState: async () => opts.hasConfirmedMeta ?? true,
     isPrivateContextGraph: async () => opts.isPrivate ?? false,
+    prepareContextGraphReadinessWithPrivateEmptyVmV1: async (
+      input: { contextGraphId: string; callerAgentAddress?: string },
+    ) => ({
+      inspectAndCommit: async (
+        _completionInput: { inspectMetadata: boolean },
+        commit: (completion: InspectedPrivateEmptyVmReadinessV1) => unknown,
+      ) => commit({ proven: false, inspection: subscriptions.get(input.contextGraphId)?.subscribed === true
+        ? {
+            kind: 'current',
+            metadata: opts.hasConfirmedMeta === false
+              ? { kind: 'absent' }
+              : { kind: 'confirmed', accessPolicy: opts.isPrivate ? 'private' : 'public' },
+            authority: await agent.resolveContextGraphSubscriptionBootstrapAuthority(),
+          }
+        : {
+            kind: 'invalidated',
+            authority: await agent.resolveContextGraphSubscriptionBootstrapAuthority(),
+          } }),
+    }),
     resolveAgentByToken: () => undefined,
     getDefaultAgentAddress: () =>
       opts.callerAddress ?? '0x0000000000000000000000000000000000000001',
@@ -1170,6 +1189,7 @@ describe('A24 — a failing step never strands the steps after it', () => {
   it.each([
     'VmReconcileShutdownTimeout',
     'CG_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT',
+    'CG_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT',
   ])('quarantines backing stores when stopAgent fails with %s', async (code) => {
     const { steps } = recordingSteps();
     steps.stopAgent = async () => {
@@ -1206,6 +1226,36 @@ describe('A24 — a failing step never strands the steps after it', () => {
       closeDashboardDb,
       log: () => undefined,
     })).resolves.toBe(true);
+    expect(stopManagedOxigraph).toHaveBeenCalledOnce();
+    expect(closeDashboardDb).toHaveBeenCalledOnce();
+  });
+
+  it('retries agent stop while a subscription persistence drain keeps timing out, then closes the stores', async () => {
+    const outcome = {
+      failures: [{
+        step: 'stopAgent' as const,
+        error: Object.assign(new Error('write still in flight'), { code: 'CG_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT' }),
+      }],
+      dependencyQuarantined: true,
+    };
+    let attempts = 0;
+    const stopManagedOxigraph = vi.fn(async () => undefined);
+    const closeDashboardDb = vi.fn();
+    await closeDaemonBackingStoresAfterTeardown(outcome, {
+      retryAgentStop: async () => {
+        attempts += 1;
+        if (attempts < 3) {
+          // The stores must stay open while the drain is still timing out.
+          expect(stopManagedOxigraph).not.toHaveBeenCalled();
+          expect(closeDashboardDb).not.toHaveBeenCalled();
+          throw Object.assign(new Error('write still in flight'), { code: 'CG_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT' });
+        }
+      },
+      stopManagedOxigraph,
+      closeDashboardDb,
+      log: () => undefined,
+    });
+    expect(attempts).toBe(3);
     expect(stopManagedOxigraph).toHaveBeenCalledOnce();
     expect(closeDashboardDb).toHaveBeenCalledOnce();
   });

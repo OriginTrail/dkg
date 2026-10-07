@@ -12,6 +12,7 @@
 // See `packages/cli/scripts/split-handle-request.mjs` for the
 // extraction driver.
 
+import { catchupShuttingDownResponse, catchupAuthorityUnavailableResponse, authorityUnavailableResponse } from './context-graph-catchup-responses.js';
 import {
   createServer,
   type IncomingMessage,
@@ -127,13 +128,13 @@ import {
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
 import {
-  catchupResultHasCleanResponse,
-  classifyContextGraphCatchupReadiness,
   classifyExistingContextGraphReadiness,
   classifyNameHashOnlyCatchup,
   readContextGraphReadiness,
   writeContextGraphReadiness,
 } from '../../context-graph-readiness.js';
+import { classifyAndCommitContextGraphCatchup } from '../../context-graph-catchup-readiness-owner.js';
+import { settlePrivateEmptyVmAtSubscribe } from '../../context-graph-empty-vm-readiness.js';
 import { canAdministerNode, loadTokens, httpAuthGuard } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
@@ -468,54 +469,23 @@ function respondReconcileError(res: ServerResponse, err: unknown): void {
   return jsonResponse(res, 500, { error: message });
 }
 
-/**
- * Refuse to mint a new catch-up job because the daemon is shutting down.
- *
- * Shaped after `respondIfStoreUnavailable` — retryable 503 plus `Retry-After`
- * — because that is what this is: the request is fine, the node just cannot
- * take on new work it will never drain. Returned from BOTH mint sites, which
- * is why I7's `result` vocabulary needed a distinct value; a 503 that clamped
- * to `unspecified` would hide the one route outcome shutdown introduces.
- */
-function catchupShuttingDownResponse(res: ServerResponse, includeSharedMemory: boolean): void {
-  recordCatchupRequest('shutting_down', includeSharedMemory);
-  return jsonResponse(
-    res,
-    503,
-    {
-      error:
-        'Node is shutting down and is no longer accepting catch-up jobs; retry once it is back up.',
-      code: 'CATCHUP_SHUTTING_DOWN',
-      retryable: true,
-    },
-    undefined,
-    { 'Retry-After': '5' },
-  );
-}
-
-/** Fail closed without misreporting a transient authority outage as a denial. */
-function catchupAuthorityUnavailableResponse(
-  res: ServerResponse,
-  includeSharedMemory: boolean,
-): void {
-  recordCatchupRequest('authority_unavailable', includeSharedMemory);
-  return authorityUnavailableResponse(res);
-}
-
-/** The retryable 503 for an admission read that could not be completed. */
-function authorityUnavailableResponse(res: ServerResponse): void {
-  return jsonResponse(
-    res,
-    503,
-    {
-      error: 'Context Graph read authority is temporarily unavailable; retry once chain and metadata access recover.',
-      code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
-      retryable: true,
-    },
-    undefined,
-    { 'Retry-After': '3' },
-  );
-}
+const SUBSCRIBE_AUTHORITY_LOG_REASONS = new Set([
+  'finalized-name-absence-unaccepted',
+  'chain-name-binding-unavailable',
+  'registered-authority-error',
+  'authority-circuit-open',
+  'local-chain-binding-unavailable',
+  'local-existence-unavailable',
+  'chain-access-policy-unavailable',
+  'chain-access-policy-timeout',
+  'chain-access-policy-unknown',
+  'chain-participant-authority-unavailable',
+  'chain-participant-authority-unsupported',
+  'chain-participant-authority-invalid',
+  'remote-local-authority-unaccepted',
+  'rfc64-private-read-roster-unavailable',
+  'no-read-authority',
+]);
 
 /** How the subscribe route answers an on-chain id that names nothing subscribable. */
 const UNRESOLVED_ON_CHAIN_ID_RESPONSES = {
@@ -1284,7 +1254,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         });
       }
       const result = await agent.forwardJoinRequest(contextGraphId, delegation, agentName, curatorPeerId);
-      if (result.delivered === 0) {
+      if (result.delivered === 0 && result.queued !== true) {
         // Surface per-peer errors so the joiner can see WHY (curator
         // rejected with a specific reason, transport timed out, etc.)
         // instead of a generic "no curator". Silent error swallowing here
@@ -1303,6 +1273,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
             ? 'already-member'
             : 'pending',
         delivered: result.delivered,
+        ...(result.queued === true ? { queued: true } : {}),
         ...(result.alreadyMember || result.autoApproved ? { alreadyMember: true } : {}),
         ...(result.autoApproved ? { autoApproved: true } : {}),
       });
@@ -2007,6 +1978,13 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
     }
     if (readAuthority.outcome === 'unavailable') {
+      // The public response remains generic, but the operator needs the typed
+      // authority dependency to distinguish a missing seed from a chain read
+      // outage. Never log the graph name or caller identity here.
+      const reason = SUBSCRIBE_AUTHORITY_LOG_REASONS.has(readAuthority.reason)
+        ? readAuthority.reason : 'other';
+      console.warn(`[context-graph-subscribe] authority unavailable: reason=${reason}`
+        + ` dependency=${readAuthority.dependency}`);
       return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
     }
     // A private graph named by its on-chain id: one decision, with one answer
@@ -2066,7 +2044,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     let effectiveSyncMode = lifetimePlan.effectiveSyncMode;
     const existingJobId = catchupTracker.latestByContextGraph.get(contextGraphId);
     const existingJob = existingJobId ? catchupTracker.jobs.get(existingJobId) : undefined;
-    let readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
+    const readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
 
     if (existingSub?.subscribed) {
       if (existingJob && (existingJob.status === "queued" || existingJob.status === "running")) {
@@ -2108,6 +2086,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         readiness: readinessBeforeCatchup,
         includeSharedMemory: shouldSyncSharedMemory,
         hasConfirmedMeta: hasConfirmedExistingMeta,
+        registration: readAuthority.registration,
       });
       if (existingReadiness.alreadyReady && !forceCatchup) {
         const reusableDoneJob = existingJob?.status === 'done' ? existingJob : undefined;
@@ -2141,6 +2120,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
             contextGraphId,
             includeWorkspace: shouldSyncSharedMemory,
             status: "done",
+            durablePlane: readAuthority.registration === 'unregistered' ? 'not-applicable' : 'required',
             queuedAt: Date.now(),
             startedAt: Date.now(),
             finishedAt: Date.now(),
@@ -2179,11 +2159,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           existingReadiness.readinessPatch,
         );
       }
-      // The existing-state classifier may have just invalidated stale v1
-      // provenance because authoritative metadata was missing. Carry the
-      // corrected value into the queued catch-up so a later metadata-only or
-      // incomplete response cannot resurrect the pre-reset true bits.
-      readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
+      // Any invalidation is persisted before queueing; completion reads the
+      // then-current provenance so it cannot resurrect these stale bits.
     }
 
     // First mint site. The guard belongs HERE, above
@@ -2311,38 +2288,16 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           job.error = "Sync deferred by local scheduler backpressure; retry when capacity is available.";
           if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${targetContextGraphId} deferred by local scheduler: ${result.deferredBackpressure}`);
         } else {
-          const inspectReadiness = catchupResultHasCleanResponse(result);
-          const hasConfirmedMeta = inspectReadiness
-            ? await agent.hasConfirmedMetaState(targetContextGraphId).catch(() => false)
-            : false;
-          const isPrivate = hasConfirmedMeta
-            ? await agent.isPrivateContextGraph(targetContextGraphId).catch(() => true)
-            : false;
-          const classification = classifyContextGraphCatchupReadiness({
-            result,
-            includeSharedMemory: shouldSyncSharedMemory,
-            hasConfirmedMeta,
-            isPrivate,
-            readinessBeforeCatchup: targetContextGraphId === jobContextGraphId
-              ? readinessBeforeCatchup
-              : readContextGraphReadiness(dashDb, targetContextGraphId),
+          const classification = await classifyAndCommitContextGraphCatchup({
+            agent, store: dashDb, contextGraphId: targetContextGraphId,
+            callerAgentAddress: callerAddr,
+            result, includeSharedMemory: shouldSyncSharedMemory,
+            admissionAuthority: readAuthority,
           });
 
+          job.durablePlane = classification.durablePlane;
           job.status = classification.jobStatus;
           job.error = classification.error;
-          if (classification.readinessPatch) {
-            writeContextGraphReadiness(
-              dashDb,
-              targetContextGraphId,
-              classification.readinessPatch,
-            );
-          }
-          if (classification.statePatch) {
-            agent.markContextGraphSubscriptionState(
-              targetContextGraphId,
-              classification.statePatch,
-            );
-          }
           // The first subscribe can legitimately race ahead of metadata and
           // the on-chain binding. Its eager RFC-64 responsibility pass then
           // fails closed because accessPolicy is still unknown. Re-run the
@@ -2398,6 +2353,13 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       );
     });
 
+    try {
+      await settlePrivateEmptyVmAtSubscribe(agent, dashDb, contextGraphId, readAuthority, callerAddr);
+    } catch (error) {
+      // The subscription and catch-up job already exist. A best-effort early
+      // readiness write must not hide the job from its caller.
+      console.warn(`[catchup] early empty-VM settlement deferred: ${error instanceof Error ? error.name : 'unknown'}`);
+    }
     recordCatchupRequest('queued', shouldSyncSharedMemory);
     return jsonResponse(res, 200, withResolutionNotes({
       subscribed: contextGraphId,

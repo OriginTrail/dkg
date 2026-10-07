@@ -1,3 +1,5 @@
+
+import { createACKSendP2P } from './internal/storage-ack-owned-request.js';
 import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
 import type { ACKCanonicalCandidatePeerSelectionResult } from '@origintrail-official/dkg-publisher';
 import { randomUUID } from 'node:crypto';
@@ -164,7 +166,10 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
-import { prepareAssertionPromote } from './internal/promote/assertion-promote-precommit.js';
+import {
+  prepareAssertionPromote,
+  translateLegacySwmRetirementFence,
+} from './internal/promote/assertion-promote-precommit.js';
 import { isCanonicalAuthoritativeContextGraphId } from './context-graph-binding-state.js';
 
 import { ProfileManager } from './profile-manager.js';
@@ -278,7 +283,7 @@ import {
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
-import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
+import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 import { resolveDiscoveredContextGraphBinding } from './context-graph-chain-discovery-binding.js';
@@ -456,7 +461,10 @@ import { DKGAgentBase, createListContextGraphsCacheInvalidatingStore } from './d
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
+import { ContextGraphSubscriptionPersistShutdownTimeoutError } from './context-graph-subscription-persist-scheduler.js';
+import { drainsWithin } from './keyed-persist-scheduler.js';
 import { reconcileAndAllocateKaNumber } from './allocator.js';
+import { resolveReservedKaIdAllocationV1 } from './reserved-ka-id-allocation.js';
 import { chainAuthorityReadBudgetsOf, resolveChainAuthorityReadBudgets } from './chain-authority-read-budgets.js';
 import { OntologyBindingSlotClassifier } from './ontology-binding-slot-classifier.js';
 import { peekOnDemandAgentsPhonebook } from './sync/on-demand-agents-phonebook.js';
@@ -493,6 +501,7 @@ import {
   Rfc64SwmRecoveryRuntimeMethods,
 } from './dkg-agent-rfc64-swm-recovery-runtime.js';
 import { Rfc64CatalogUpsertMethods } from './dkg-agent-rfc64-catalog-upsert.js';
+import { RegisteredPrivateEmptyVmMethods } from './dkg-agent-registered-private-empty-vm.js';
 import { Rfc64SeedStoreMethods } from './dkg-agent-rfc64-seed-store.js';
 import { Rfc64CatalogRuntimeV1 } from './rfc64/catalog-runtime-v1.js';
 import { createRfc64CatalogAuthorityRefreshOwnerV1 } from
@@ -761,33 +770,6 @@ function constructConfiguredChainAdapter(
   return { chain: new NoChainAdapter(), operationalKeys };
 }
 
-interface ACKReliableMessenger {
-  sendRequestOwned(
-    peerId: string,
-    protocol: string,
-    data: Uint8Array,
-    opts: { timeoutMs: number },
-  ): Promise<{ delivered: boolean; error?: unknown; response?: Uint8Array }>;
-}
-
-function createACKSendP2P(input: {
-  messenger: ACKReliableMessenger;
-  timeoutMs: number;
-}): ACKCollectorDeps['sendP2P'] {
-  return async (peerId: string, protocol: string, data: Uint8Array) => {
-    const sendResult = await input.messenger.sendRequestOwned(peerId, protocol, data, {
-      timeoutMs: input.timeoutMs,
-    });
-    if (!sendResult.delivered) {
-      throw new Error(`substrate send already in flight (transport): ${sendResult.error}`);
-    }
-    if (!sendResult.response) {
-      throw new Error('substrate delivered (transport) without response');
-    }
-    return sendResult.response;
-  };
-}
-
 /**
  * High-level facade that ties together all DKG agent capabilities:
  * identity, networking, publishing, querying, discovery, and messaging.
@@ -966,6 +948,9 @@ export class DKGAgent extends DKGAgentBase {
       },
       retireFinalizedSwmTwin: (candidate, ctx) => (
         this.retireFinalizedSwmTwinCandidate(candidate, ctx)
+      ),
+      retireLegacySwmAfterVerifiedVmTwin: (input) => (
+        this.retireLegacySwmAfterVerifiedVmTwin(input)
       ),
       logInfo: (ctx, message) => this.log.info(ctx, message),
       logWarn: (ctx, message) => this.log.warn(ctx, message),
@@ -1632,16 +1617,19 @@ export class DKGAgent extends DKGAgentBase {
         // witness in the same transaction; exact catalog reconciliation alone
         // retires it later.
         if (resolvedConfig.dataDir === undefined) return;
-        if (agentRef === undefined) {
+        const owner = agentRef;
+        if (owner === undefined) {
           throw new Error('RFC-64 legacy SWM write-ahead owner is unavailable');
         }
-        return prepareRfc64LateLegacySwmBoundaryV1(
-          agentRef,
+        // A promote that meets a retirement's fence (its asset's, or the graph's) is
+        // retried by the queue; every other refusal here stays a hard failure.
+        return translateLegacySwmRetirementFence(() => prepareRfc64LateLegacySwmBoundaryV1(
+          owner,
           input.contextGraphId,
           input.kaUal,
           input.shareOperationId,
           input.assertionVersion,
-        );
+        ));
       },
       resolveDurableRootMaterializationAtomicCompanion: (input) => {
         if (resolvedConfig.dataDir === undefined) return;
@@ -2894,7 +2882,12 @@ export class DKGAgent extends DKGAgentBase {
     if (dispatcherDrain) drains.push(dispatcherDrain);
 
     let retirement!: Promise<void>;
-    retirement = Promise.allSettled(drains).then(() => {
+    retirement = Promise.allSettled(drains).then(async () => {
+      // All agent-owned producers are fenced and physically drained before
+      // sampling the reader's GLOBAL activity. Its idle boundary also owns
+      // detached adapter work, including readers without snapshots.close().
+      // Never attach this unrelated global drain to individual read results.
+      await this.chain.contextGraphAuthorityIndexRevisionReader?.whenIdle();
       if (this.vmReconcileScheduling === vmReconcileScheduling) {
         this.vmReconcileScheduling = undefined;
       }
@@ -2951,6 +2944,13 @@ export class DKGAgent extends DKGAgentBase {
       );
     }
     this.contextGraphMembershipPersistenceShutdownBlocked = false;
+    // A core-host recording persists its host row through the strict
+    // subscription queue, so it has to retire while that queue still admits
+    // writes. Fence new recordings first, then drain the tracked ones: a
+    // StorageACK gate or promotion-audit recording paused before its persist
+    // finishes here instead of being refused by a closed queue. The audit and
+    // promotion flights, which reach subscription state only through
+    // recordings, drain right behind them.
     this.coreHostRecordingsClosed = true;
     await this.drainCoreHostRecordings();
     // An in-flight ACK promotion audit stops at its next checkpoint once the
@@ -2970,6 +2970,29 @@ export class DKGAgent extends DKGAgentBase {
         }),
       ]).finally(() => { if (auditDrainTimer) clearTimeout(auditDrainTimer); });
     }
+    // Subscription writes come from graph-scoped sync and reconciliation (cursor
+    // and binding snapshots), from inside a join approval's membership write,
+    // and from core-host recordings. All three have finished by here, so
+    // admission closes now: a run that stop() just waited for still had its
+    // write admitted, and only a late network callback finds the queue closed.
+    // The drain has the same bounded budget as membership's, and a timeout
+    // blocks store teardown until stop() is retried.
+    if (!await drainsWithin(
+      this.contextGraphSubscriptionPersistence.closeAndDrain(),
+      DKGAgentBase.CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT_MS,
+    )) {
+      this.contextGraphSubscriptionPersistenceShutdownBlocked = true;
+      this.log.warn(
+        createOperationContext('system'),
+        `DKGAgent.stop: context-graph subscription persistence did not drain within `
+        + `${DKGAgentBase.CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT_MS}ms; `
+        + `store teardown is blocked until stop() is retried`,
+      );
+      throw new ContextGraphSubscriptionPersistShutdownTimeoutError(
+        DKGAgentBase.CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT_MS,
+      );
+    }
+    this.contextGraphSubscriptionPersistenceShutdownBlocked = false;
     if (this.messengerOutboxTimer) {
       clearInterval(this.messengerOutboxTimer);
       this.messengerOutboxTimer = null;
@@ -3065,6 +3088,10 @@ export class DKGAgent extends DKGAgentBase {
     try {
       await this.node.stop();
     } finally {
+      // The libp2p node, and every pubsub subscription with it, is gone; what
+      // the agent recorded about the session's gossip wiring is now stale
+      // (restart contract on DKGAgentBase). Subscription intent is untouched.
+      this.retireGossipSession();
       this.finalizationRuntime.markStopped();
       // Node stop aborts active transport first; now drain the peer-serial
       // owners and release every retained selected-SWM prefix/checkpoint before
@@ -3833,12 +3860,21 @@ export class DKGAgent extends DKGAgentBase {
     // lands in that agent's per-KA …/_working_memory/{addr}/{number} graph
     // (not the default agent's, and not the legacy name-keyed fallback used
     // when no number is minted).
-    const resolveAuthorAndAllocator = (explicitAuthor: string | undefined): {
+    const resolveAuthorAndAllocator = (
+      explicitAuthor: string | undefined,
+      reservedKaId?: bigint,
+    ): {
       author: string;
+      expectedKaNumber?: bigint;
       allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }>;
     } => {
       const author = explicitAuthor ?? agentAddress;
       const isEvmAuthor = isAllocatableKaAuthorV1(author);
+      if (reservedKaId !== undefined) {
+        return resolveReservedKaIdAllocationV1(
+          author, reservedKaId, agent.chain.chainId, agent.kaNumberAllocator,
+        );
+      }
       // The allocator MUST consume `author`'s lane, never the outer default:
       // the number is minted into the reserved UAL the lifecycle is stamped
       // with, so allocating from a different address strands the draft under
@@ -3856,16 +3892,19 @@ export class DKGAgent extends DKGAgentBase {
         opts?: {
           subGraphName?: string;
           agentAddress?: string;
+          /** Exact author-owned slot carried by a pre-signed attestation. */
+          reservedKaId?: bigint;
           onDisposition?: (disposition: 'created' | 'sealed-noop') => void;
         },
       ): Promise<string> {
-        // D1 (identity-at-create): mint the KA number/UAL at create so the UAL is the
-        // KA's identity from the first write. assertionCreate only allocates when the
-        // draft has no preserved kaId (the re-open guard lives there), so passing the
-        // callback is safe — re-opens reuse the preserved identity.
-        const { author, allocateKaNumber } = resolveAuthorAndAllocator(opts?.agentAddress);
+        // Existing identities are retained; explicit reservations must match
+        // under the publisher's lifecycle lock before any draft is reopened.
+        const { author, allocateKaNumber, expectedKaNumber } = resolveAuthorAndAllocator(
+          opts?.agentAddress,
+          opts?.reservedKaId,
+        );
         return agent.publisher.assertionCreate(contextGraphId, name, author, opts?.subGraphName, {
-          allocateKaNumber,
+          allocateKaNumber, expectedKaNumber,
           onDisposition: opts?.onDisposition,
         });
       },
@@ -4179,7 +4218,7 @@ export class DKGAgent extends DKGAgentBase {
       },
 
       async history(contextGraphId: string, name: string, opts?: { agentAddress?: string; subGraphName?: string }): Promise<AssertionHistoryDescriptor | null> {
-        const addr = opts?.agentAddress ?? agentAddress;
+        let addr = opts?.agentAddress ?? agentAddress;
         const metaGraph = contextGraphMetaUri(contextGraphId);
         const DKG_NS = 'http://dkg.io/ontology/';
         const PROV_NS = 'http://www.w3.org/ns/prov#';
@@ -4231,6 +4270,7 @@ export class DKGAgent extends DKGAgentBase {
             { source: 'agent.history.lifecycleState' },
           );
           if (entityResult.type === 'bindings' && entityResult.bindings.length > 0) {
+            addr = lifecycleAddress;
             lifecycleUri = candidateLifecycleUri;
             row = entityResult.bindings[0];
             break;
@@ -4553,5 +4593,5 @@ export class DKGAgent extends DKGAgentBase {
 }
 
 
-export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods {}
-applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods]);
+export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, RegisteredPrivateEmptyVmMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods {}
+applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, RegisteredPrivateEmptyVmMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods]);

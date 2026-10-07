@@ -188,7 +188,7 @@ function logSource(
 }
 
 /** One provider that counts every chain round trip this read could make. */
-function makeProvider() {
+function makeProvider(latestBlockNumber: () => number = () => LIVE_HEAD) {
   const calls = { getBlock: 0, getLogs: 0, getNetwork: 0 };
   const usage = new RpcUsageTracker(() => 'evm:31337');
   const authorityLogs: ethers.Log[] = [];
@@ -196,7 +196,7 @@ function makeProvider() {
     async getBlock(tag: ethers.BlockTag) {
       calls.getBlock += 1;
       usage.record('eth_getBlockByNumber');
-      const number = tag === 'latest' ? LIVE_HEAD : Number(tag);
+      const number = tag === 'latest' ? latestBlockNumber() : Number(tag);
       return { number, hash: hash(number), timestamp: HEAD_TIMESTAMP_SECONDS };
     },
     async getLogs() {
@@ -217,6 +217,7 @@ function makeReader(options: {
   sourceProvider?: () => ChainEventLogAuthoritySource | undefined;
   contractAddress?: string;
   finalityConfirmations?: number;
+  latestBlockNumber?: () => number;
   /** The projection cache's clock, where a test has to age a projection. */
   now?: () => number;
   /**
@@ -227,7 +228,7 @@ function makeReader(options: {
    */
   exhaustsOnFailover?: boolean;
 } = {}) {
-  const { provider, calls, authorityLogs, usage } = makeProvider();
+  const { provider, calls, authorityLogs, usage } = makeProvider(options.latestBlockNumber);
   const index = new ContextGraphAuthorityIndex(
     new MemoryAuthorityIndexStore(),
     undefined,
@@ -280,7 +281,7 @@ function makeReader(options: {
         }),
   });
   reader.snapshots.open();
-  return { reader, index, calls, authorityLogs, attempts, usage };
+  return { reader, index, provider, calls, authorityLogs, attempts, usage };
 }
 
 /** The same `ContextGraphCreated`, as the LIVE scan would deliver it. */
@@ -618,6 +619,62 @@ describe('Context Graph authority index over the one log', () => {
       .map((entry) => entry.consumer);
     expect(headerConsumers).toContain('authorityIndex.head');
     expect(headerConsumers).toContain('authorityIndex.stabilize');
+  });
+
+  it('rechecks a cached tip before exhausting an endpoint whose cursor just advanced', async () => {
+    let phase: 'prime' | 'race' = 'prime';
+    let racedHeadReads = 0;
+    const { reader, attempts } = makeReader({
+      latestBlockNumber: () => phase === 'prime'
+        ? LIVE_HEAD
+        : racedHeadReads++ === 0 ? LIVE_HEAD - 1 : LIVE_HEAD + 1,
+    });
+    await reader.snapshots.refresh();
+    phase = 'race';
+
+    await expect(reader.snapshots.refresh()).resolves.toBeUndefined();
+    expect(racedHeadReads).toBe(2);
+    expect(attempts).toEqual([]);
+  });
+
+  it('falls through to a live scan when the event-log anchor trails the durable cursor', async () => {
+    const store = seededStore({ head: LIVE_HEAD - 1, rows: [] });
+    const source = logSource(store);
+    let enableLog = false;
+    const { reader, calls, attempts } = makeReader({
+      sourceProvider: () => enableLog ? source : undefined,
+    });
+    // A live reader advances the durable index while the independent event
+    // log still describes the preceding block.
+    await reader.snapshots.refresh();
+    const initialHeadReads = calls.getBlock;
+    enableLog = true;
+
+    await expect(reader.snapshots.refresh()).resolves.toBeUndefined();
+    expect(calls.getBlock).toBeGreaterThan(initialHeadReads);
+    expect(attempts).toEqual([]);
+  });
+
+  it('reacquires a newer event-log anchor before falling back to a live scan', async () => {
+    const stale = logSource(seededStore({ head: LIVE_HEAD - 1 }));
+    const fresh = logSource(seededStore({ head: LIVE_HEAD + 1 }), {
+      readBlockHash: async (blockNumber) => hash(blockNumber),
+    });
+    let phase: 'prime' | 'race' = 'prime';
+    let sourceReads = 0;
+    const { reader, calls, attempts } = makeReader({
+      sourceProvider: () => phase === 'prime'
+        ? undefined
+        : sourceReads++ === 0 ? stale : fresh,
+    });
+    await reader.snapshots.refresh();
+    const initialHeadReads = calls.getBlock;
+    phase = 'race';
+
+    await expect(reader.snapshots.refresh()).resolves.toBeUndefined();
+    expect(sourceReads).toBeGreaterThanOrEqual(2);
+    expect(calls.getBlock).toBe(initialHeadReads);
+    expect(attempts).toEqual([]);
   });
 
   it('keeps its live scan while the backfill has not reached the deploy block', async () => {
@@ -1078,19 +1135,70 @@ describe('Context Graph authority index over the one log', () => {
       });
   });
 
-  it('refuses the fold when the tick committed underneath it', async () => {
+  it('retries a moved log revision then falls back within the same provider', async () => {
     const store = seededStore();
     // The fence, and only the fence: the anchor resolves, the pages read, and
     // then the log moves before the answer is handed over.
     const moved = vi.fn(async () => false);
     const source = { ...logSource(store), anchorHolds: moved };
-    const { reader, attempts } = makeReader({ store, source });
+    const { reader, attempts, calls } = makeReader({ store, source });
 
-    await expect(reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
-      /chain event log moved under/,
-    );
-    // Retryable, not fatal: the transport asked for a second attempt.
-    expect(attempts).toHaveLength(2);
-    expect(moved).toHaveBeenCalled();
+    await expect(reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).resolves.toBe(7n);
+    // The first moved revision reacquires the log; the second drops to the live
+    // scan against this provider instead of being misclassified as its outage.
+    expect(moved).toHaveBeenCalledTimes(2);
+    expect(calls.getLogs).toBe(1);
+    expect(attempts).toHaveLength(0);
+  });
+
+  it.each([
+    ['registered', NAME_HASH, true],
+    ['unregistered', ABSENT_NAME_HASH, false],
+  ] as const)('keeps the %s batch name-binding read available across local log movement',
+    async (_kind, nameHash, present) => {
+      const store = seededStore();
+      const moved = vi.fn(async () => false);
+      const source = { ...logSource(store), anchorHolds: moved };
+      const { reader, attempts, calls } = makeReader({
+        store, source, exhaustsOnFailover: true,
+      });
+
+      const snapshots = await reader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes(
+        [nameHash], { freshness: 'live' },
+      );
+
+      expect(snapshots.has(nameHash)).toBe(present);
+      expect(moved).toHaveBeenCalledTimes(2);
+      expect(calls.getLogs).toBe(1);
+      expect(attempts).toHaveLength(0);
+    });
+
+  it('propagates a failed live scan after local log movement', async () => {
+    const store = seededStore();
+    const source = { ...logSource(store), anchorHolds: vi.fn(async () => false) };
+    const { reader, provider } = makeReader({ store, source, exhaustsOnFailover: true });
+    vi.spyOn(provider, 'getLogs').mockRejectedValue(new Error('live scan unavailable'));
+
+    await expect(reader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes(
+      [ABSENT_NAME_HASH], { freshness: 'live' },
+    )).rejects.toThrow('live scan unavailable');
+  });
+
+  it('does not retry or fall back after abort during the local revision fence', async () => {
+    const store = seededStore();
+    const controller = new AbortController();
+    const moved = vi.fn(async () => {
+      controller.abort(new DOMException('test abort', 'AbortError'));
+      return false;
+    });
+    const source = { ...logSource(store), anchorHolds: moved };
+    const { reader, calls, attempts } = makeReader({ store, source });
+
+    await expect(reader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes(
+      [ABSENT_NAME_HASH], { freshness: 'live', signal: controller.signal },
+    )).rejects.toMatchObject({ name: 'AbortError' });
+    expect(moved).toHaveBeenCalledTimes(1);
+    expect(calls.getLogs).toBe(0);
+    expect(attempts).toHaveLength(1);
   });
 });

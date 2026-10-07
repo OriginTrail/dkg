@@ -1,6 +1,7 @@
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import { describe, expect, it, vi } from 'vitest';
 import { DKGAgent } from '../src/index.js';
+import { NetworkAdmissionProbeError } from '../src/p2p/network-admission-coordinator.js';
 import { resolveRfc64CatalogExecutionPlanV1 } from '../src/rfc64/catalog-rollout-authority-v1.js';
 import { syncOpenedPeerConnection } from '../src/sync/peer-connection.js';
 import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
@@ -17,6 +18,34 @@ function replayReservation() {
   const admit = vi.fn();
   const reject = vi.fn();
   return { value: { admit, reject }, admit, reject };
+}
+
+function connectionOpenWithAdmissionFailure(failure: (remotePeer: string) => Error) {
+  const session = activeSessionWithoutJobs();
+  const replay = replayReservation();
+  const remotePeer = '12D3KooWProbeWarningDedupPeer';
+  const log = { info: vi.fn(), warn: vi.fn() };
+  const ports = {
+    localPeerId: '12D3KooWlocal',
+    prepareCatalogReplay: vi.fn(() => replay.value),
+    ensureAdmitted: vi.fn(async (): Promise<boolean> => { throw failure(remotePeer); }),
+    enrichPeerStore: vi.fn(async () => undefined),
+    drainPendingSenderKey: vi.fn(async () => 0),
+    queueSync: vi.fn(() => true),
+  };
+  const run = async (): Promise<void> => {
+    try {
+      await syncOpenedPeerConnection({
+        ports,
+        session,
+        ctx: createOperationContext('sync'),
+        log,
+      }, { direction: 'inbound', remotePeer: { toString: () => remotePeer } });
+    } finally {
+      session.close();
+    }
+  };
+  return { log, replay, remotePeer, run };
 }
 
 describe('peer connection lifecycle', () => {
@@ -335,5 +364,36 @@ describe('peer connection lifecycle', () => {
       senderKeyGate.resolve();
       await f.close();
     }
+  });
+
+  // The coordinator logs a failed probe once (pinned in
+  // network-admission-coordinator.test.ts); the connection-open caller must
+  // not repeat it, for the failed probe or for a skip inside its backoff.
+  it.each([
+    { admissionFailure: 'a failed probe', reason: 'timeout' },
+    { admissionFailure: 'a backed-off skip', reason: 'retryable probe backed off for 15000ms after timeout' },
+  ])('does not repeat the coordinator warning for $admissionFailure on connection open', async ({ reason }) => {
+    const { log, replay, run } = connectionOpenWithAdmissionFailure(
+      (remotePeer) => new NetworkAdmissionProbeError(remotePeer, reason),
+    );
+
+    await run();
+
+    expect(replay.reject).toHaveBeenCalledOnce();
+    expect(log.warn).not.toHaveBeenCalled();
+  });
+
+  it('still warns for an admission failure the coordinator does not report', async () => {
+    const { log, replay, remotePeer, run } = connectionOpenWithAdmissionFailure(
+      () => new Error('admission transport unavailable'),
+    );
+
+    await run();
+
+    expect(replay.reject).toHaveBeenCalledOnce();
+    expect(log.warn).toHaveBeenCalledTimes(1);
+    expect(log.warn.mock.calls[0][1]).toBe(
+      `Network admission probe failed for ${remotePeer.slice(-8)} on connect: admission transport unavailable`,
+    );
   });
 });

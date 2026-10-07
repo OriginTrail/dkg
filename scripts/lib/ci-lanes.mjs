@@ -6,6 +6,7 @@ const SYSTEM_PREREQUISITES = ['built runtime packages', 'isolated local devnet']
 
 /** Explicit inventory semantics for every canonical and registered test lane. */
 export const TEST_LANE_METADATA = Object.freeze({
+  'chain-rpc-node26': { layer: 'transport regression', prerequisites: ['Node 26 (bundled undici 8)', 'pnpm frozen install', 'local TLS loopback'] },
   'tornado-core': { layer: 'unit/component', prerequisites: UNIT_PREREQUISITES },
   'tornado-publisher': { layer: 'unit/component', prerequisites: UNIT_PREREQUISITES },
   'tornado-agent': { layer: 'unit/component', prerequisites: UNIT_PREREQUISITES },

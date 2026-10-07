@@ -1,4 +1,6 @@
-import type { ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
+import { syncReconcilerEnabled, syncOnConnectEnabled, durableSyncEnabled } from './internal/lifecycle-sync-policy.js';
+import { emptySwmRecoveryResult } from './sync/shared-memory-completion.js';
+import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import { DurableSyncAdmissionBoundary, type DurableSyncAdmissionOutcome } from './sync/requester/admission-boundary.js';
 import { createRandomSamplingEligibilityResolver } from './random-sampling-eligibility.js';
 import { RandomSamplingRuntime } from './random-sampling-runtime.js';
@@ -371,10 +373,10 @@ import {
 import {
   sharedMemoryOwnershipKeyFromGraph,
 } from './sync/requester/shared-memory-sync.js';
-import {
-  emptySharedMemorySyncResult as createEmptySharedMemorySyncResult,
-  mergeFleetSharedMemoryDiagnostics,
+import  {
+  emptySharedMemorySyncResult,
   mergeSamePeerSharedMemoryDiagnostics,
+  mergeFleetSharedMemoryDiagnostics,
   recordSharedMemoryPhaseFailure,
 } from './sync/shared-memory-diagnostics.js';
 import {
@@ -426,6 +428,7 @@ import { mapWithConcurrency } from './map-with-concurrency.js';
 import { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js';
 import {
   FOREGROUND_CATCHUP_SYNC_PRIORITY,
+  VM_RECOVERY_SYNC_PRIORITY,
   catchupAdmissionSource,
   runCatchupPlaneWithPolicy,
   runCatchupPlanesWithPolicy,
@@ -464,14 +467,13 @@ import {
   recordDurableSyncDiagnostics,
   type DurableSyncAccumulator,
 } from './sync/durable-progress.js';
-import {
+import  {
   getSyncBackpressureSnapshot,
   getSyncBackpressureBusyError,
   resolveNonNegativeIntegerSwitch,
-  resolveBooleanSwitch,
   resolveExactBatchStreamEnabled,
-  resolveSyncReconcilerEnabled,
   resolveSyncGlobalBackpressure,
+  syncAdmissionWouldBeRefused,
   withGlobalSyncBackpressure,
 } from './sync/backpressure.js';
 import {
@@ -520,7 +522,7 @@ import {
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
-import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
+import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
@@ -712,7 +714,7 @@ import {
 } from './sync/on-demand-agents-phonebook.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
-import {
+import  {
   ContextGraphNotFoundError,
   InvalidContentError,
   StaleSenderKeyTargetError,
@@ -750,7 +752,6 @@ import {
   type DurableSyncResult,
   type SharedMemorySyncResult,
   type SwmSnapshotCoverage,
-  type DKGAgentConfig,
   type ResolvedDKGAgentConfig,
   type ReplicationEvent,
   type SyncReconcilerProbe,
@@ -806,6 +807,7 @@ import type { Rfc64SwmRecoveryTargetLeaseV1 } from
   './dkg-agent-rfc64-swm-recovery-runtime.js';
 import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
+import { ContextGraphSubscriptionPersistShutdownTimeoutError } from './context-graph-subscription-persist-scheduler.js';
 import {
   createLocalContextGraphOriginMembershipRecord,
 } from
@@ -851,53 +853,17 @@ import { reconcileRfc64CatalogAuthorityPlanV1 } from
 import {
   initializeRfc64LegacySwmBoundaryV1,
   prepareRfc64LateLegacySwmBoundaryV1,
+  retireRfc64LegacySwmAfterFinalizedVmV1,
 } from
   './rfc64/legacy-swm-boundary-v1.js';
+import {
+  projectPersistedJoinApprovals,
+  type ContextGraphMembershipSnapshot,
+} from './join-approval-restart-projection.js';
+import { verifiedCuratorDialAddress } from './curator-dial-address.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
-
-type ContextGraphMembershipSnapshot = ReadonlyArray<
-  ContextGraphMembershipRecord & { firstSeenAt?: number; updatedAt: number }
->;
-
-interface PersistedJoinApprovalProjection {
-  readonly principalId: string;
-  readonly updatedAt: number;
-  readonly curatorPeerId?: string;
-}
-
-function projectPersistedJoinApprovals(
-  persistedMembershipRows: ContextGraphMembershipSnapshot,
-  persistedContextGraphIds: ReadonlySet<string>,
-  localAgentAddresses: ReadonlySet<string>,
-): ReadonlyMap<string, PersistedJoinApprovalProjection> {
-  const newestApprovalByContextGraph = new Map<string, PersistedJoinApprovalProjection>();
-  for (const membership of persistedMembershipRows) {
-    const principalId = membership.principalId.toLowerCase();
-    if (
-      membership.principalType !== 'agent' ||
-      membership.status !== 'active' ||
-      membership.source !== 'join-approved' ||
-      !persistedContextGraphIds.has(membership.contextGraphId) ||
-      !localAgentAddresses.has(principalId)
-    ) {
-      continue;
-    }
-    const existing = newestApprovalByContextGraph.get(membership.contextGraphId);
-    if (!existing || membership.updatedAt > existing.updatedAt) {
-      newestApprovalByContextGraph.set(membership.contextGraphId, {
-        principalId,
-        updatedAt: membership.updatedAt,
-        curatorPeerId: typeof membership.metadata?.['curatorPeerId'] === 'string' &&
-          membership.metadata['curatorPeerId'].trim()
-          ? membership.metadata['curatorPeerId'].trim()
-          : undefined,
-      });
-    }
-  }
-  return newestApprovalByContextGraph;
-}
 
 function resolveAgentSyncGlobalBackpressure(config: ResolvedDKGAgentConfig) {
   // `trackSyncContextGraph()` mutates this list when an Edge explicitly
@@ -1731,6 +1697,8 @@ export interface ExactKnowledgeAssetSyncResult {
   readonly authenticatedAssets?: readonly ChallengePinnedGraphScopedAsset[];
   /** Physically applied by the experimental stream, even if final transport close failed. */
   readonly committedExactAssetUals?: readonly string[];
+  /** Present only when the exact-batch stream settled this fetch with one of these outcomes. */
+  readonly streamOutcome?: ExactBatchStreamOutcome;
 }
 
 type PhysicalDurableSyncResult = {
@@ -1739,6 +1707,7 @@ type PhysicalDurableSyncResult = {
   readonly exactResponderCapability?: ExactAssetResponderCapability;
   readonly authenticatedExactAssets?: readonly ChallengePinnedGraphScopedAsset[];
   readonly committedExactAssetUals?: readonly string[];
+  readonly exactStreamOutcome?: ExactBatchStreamOutcome;
 };
 
 type AdmittedDurableSyncResult = PhysicalDurableSyncResult & {
@@ -1944,51 +1913,9 @@ async function authenticateDurableGraphScopedAsset(params: {
   }
 }
 
-function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
-  return a.length === b.length && a.every((value, index) => value === b[index]);
-}
-
-function syncReconcilerEnabled(config: DKGAgentConfig): boolean {
-  return resolveSyncReconcilerEnabled(config.syncReconcilerEnabled);
-}
-
-function syncOnConnectEnabled(config: DKGAgentConfig): boolean {
-  return resolveBooleanSwitch(config.syncOnConnectEnabled, 'DKG_SYNC_ON_CONNECT_ENABLED', true);
-}
-
-function durableSyncEnabled(config: DKGAgentConfig): boolean {
-  return resolveBooleanSwitch(config.durableSyncEnabled, 'DKG_DURABLE_SYNC_ENABLED', true);
-}
-
 /** OT-RFC-59 responder cap on the peer-controlled raw-scan limit (DoS bound). Honest
  *  requesters send SYNC_PAGE_SIZE (500); the headroom tolerates larger legitimate pages. */
 const CHANGELOG_MAX_SCAN_LIMIT = 2000;
-
-function emptySharedMemorySyncResult(): SharedMemorySyncResult {
-  return createEmptySharedMemorySyncResult();
-}
-
-function mergeSharedMemorySyncResults(
-  a: SharedMemorySyncResult,
-  b: SharedMemorySyncResult,
-): SharedMemorySyncResult {
-  return {
-    ...mergeSamePeerSharedMemoryDiagnostics(a, b),
-  };
-}
-
-function emptySwmRecoveryResult(): RecoverContextGraphSwmResult {
-  return {
-    replacedRoots: 0,
-    replacedGraphs: 0,
-    insertedDataQuads: 0,
-    insertedMetaQuads: 0,
-    droppedDataTriples: 0,
-    readySnapshots: 0,
-    totalSnapshots: 0,
-    completed: true,
-  };
-}
 
 type NonBoundedCuratorPeerIdsResolution =
   | {
@@ -2053,7 +1980,29 @@ type StructuralCuratorPeerLookup =
       readonly nextPageAfterPeerId?: never;
     };
 
+function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
 export class LifecycleSyncMethods extends DKGAgentBase {
+  async retireLegacySwmAfterVerifiedVmTwin(
+    this: DKGAgent,
+    input: Readonly<{
+      contextGraphId: string;
+      kaUal: string;
+      assertionVersion: string | bigint;
+      subGraphName?: string;
+    }>,
+  ): Promise<void> {
+    await retireRfc64LegacySwmAfterFinalizedVmV1(
+      this,
+      input.contextGraphId,
+      input.kaUal,
+      String(input.assertionVersion),
+      input.subGraphName,
+    );
+  }
+
   async retireFinalizedSwmTwinCandidate(
     candidate: FinalizedSwmTwinRetirement,
     ctx: OperationContext,
@@ -2241,6 +2190,21 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
   }
 
+  /**
+   * Whether this node's sync admission would take an exact VM recovery fetch
+   * for the graph right now. A read of the limiter: nothing is claimed or
+   * queued, and the fetch must still handle a refusal.
+   */
+  vmRecoverySyncAdmissionAvailable(this: DKGAgent, contextGraphId: string): boolean {
+    return !syncAdmissionWouldBeRefused(resolveAgentSyncGlobalBackpressure(this.config), {
+      contextGraphId,
+      lane: 'durable',
+      priority: VM_RECOVERY_SYNC_PRIORITY,
+      priorityClass: syncPriorityClass(VM_RECOVERY_SYNC_PRIORITY),
+      source: 'vm-recovery',
+    });
+  }
+
   async start(this: DKGAgent): Promise<void> {
     if (this.vmReconcileShutdownBlocked) {
       throw new VmReconcileShutdownTimeoutError(DKGAgentBase.VM_RECONCILE_SHUTDOWN_TIMEOUT_MS);
@@ -2248,6 +2212,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (this.contextGraphMembershipPersistenceShutdownBlocked) {
       throw new ContextGraphMembershipPersistShutdownTimeoutError(
         DKGAgentBase.CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_MS,
+      );
+    }
+    if (this.contextGraphSubscriptionPersistenceShutdownBlocked) {
+      throw new ContextGraphSubscriptionPersistShutdownTimeoutError(
+        DKGAgentBase.CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT_MS,
       );
     }
     if (this.started) return;
@@ -2269,6 +2238,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     await this.contextGraphSubscriptionRehydrationPromotionRuntime?.close();
     this.rfc64BackgroundWorkDispatcherV1.reopen();
     this.contextGraphMembershipPersistence.reopen();
+    // stop() drained and closed subscription writes; a restarted agent admits
+    // them again. Writes issued before the first start() left it open.
+    this.contextGraphSubscriptionPersistence.reopenIfClosed();
     // stop() aborts detached cold authority flights; a restarted agent admits
     // new ones (the runtime is created lazily on first use otherwise).
     peekFinalizedAuthorityColdResolution(this)?.reopen();
@@ -2604,11 +2576,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.messenger.setOutboxResponseHandler(PROTOCOL_JOIN_REQUEST, async (result) => {
       await this.handleJoinRequestOutboxResponse(result);
     });
+    // Snapshot live intent before any durable read or detached persistence
+    // completion. Durable rows claim their part of this startup plan below.
+    const liveIntents = [...this.subscribedContextGraphs].filter(
+      ([, subscription]) => subscription.subscribed && !subscription.pendingMeta,
+    );
     this.gossip = new GossipSubManager(this.node, this.eventBus, {
       networkId: this.config.networkIdentity?.networkId,
       chainId: this.config.networkIdentity?.chainId,
       isPeerAccepted: (peerId) => this.networkAdmissionCoordinator.isAcceptedPeer(peerId),
     });
+    for (const [id, subscription] of liveIntents) {
+      this.gossipSession.startupLiveIntents.set(id, { syncMode: subscription.syncMode });
+    }
     await this.loadSwmSenderKeyState();
     await this.initializeSwmHostModeStore();
     await this.rehydrateContextGraphsFromDurableState();
@@ -3313,6 +3293,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         shouldWithholdAgentsDurableMeta(contextGraphId, process.env.DKG_SERVE_AGENTS_META),
       servingWithheld: (contextGraphId) => this.contextGraphServingWithheld(contextGraphId),
       logWarn: (ctx, message) => this.log.warn(ctx, message),
+      logInfo: (ctx, message) => this.log.info(ctx, message),
       logDebug: (ctx, message) => this.log.debug(ctx, message),
       snapshotBudget: snapshotPolicy.budget,
       contextGraphPriorities: this.config.syncContextGraphPriorities,
@@ -3454,7 +3435,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               role: 'participant',
               status: 'active',
               source: 'join-approved',
-              metadata: { curatorPeerId: peerId.toString() },
+              metadata: {
+                curatorPeerId: peerId.toString(),
+                // The approved sender's own listener address is a durable
+                // transport hint. An inbound remoteAddr can be an ephemeral
+                // source port, so it is never persisted for restart dialing.
+                ...(() => {
+                  const address = verifiedCuratorDialAddress(
+                    payload.curatorDialAddress,
+                    peerId.toString(),
+                  );
+                  return address ? { curatorDialAddress: address } : {};
+                })(),
+              },
             };
             // Commit the restart contract before changing live subscription
             // state. The two stores do not expose a shared transaction, so the
@@ -3797,6 +3790,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     for (const systemContextGraph of [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY]) {
       this.subscribeToContextGraph(systemContextGraph, { syncMode: 'always-on' });
     }
+    this.applyStartupContextGraphGossipPlan();
 
     // Connect to bootstrap peers
     if (this.config.bootstrapPeers) {
@@ -4021,6 +4015,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // this is now the only outbox tick — chat (PR-3) and every
     // future migrated protocol drain on the same cadence so
     // operators see a single "outbox tick" beat.
+    let senderKeyRetryInFlight = false;
     this.messengerOutboxTimer = setInterval(() => {
       const now = Date.now();
       this.messenger.processOutboxTick(now)
@@ -4039,6 +4034,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             );
           }
         });
+      // A retryable ACK is a delivered Messenger response, so it has no
+      // outbox obligation. The sender-key queue owns that retry and must
+      // progress even if both peers stay connected and no further share is
+      // published. Keep one pass in flight and reuse its current-authority
+      // recipient check before every resend.
+      if (!senderKeyRetryInFlight && this.pendingSenderKeyByAgent.size > 0) {
+        senderKeyRetryInFlight = true;
+        void this.drainPendingSenderKeysForConnectedPeers()
+          .then((drained) => {
+            if (drained > 0) {
+              this.log.info(ctx, `Sender-key retry delivered ${drained} pending package(s)`);
+            }
+          })
+          .catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : String(err);
+            this.log.warn(ctx, `Sender-key retry tick failed: ${message}`);
+          })
+          .finally(() => { senderKeyRetryInFlight = false; });
+      }
     }, MESSAGE_OUTBOX_TICK_MS);
     if (this.messengerOutboxTimer.unref) this.messengerOutboxTimer.unref();
 
@@ -5623,11 +5637,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   /** One agent-owned admission decision for the legacy shared-memory lane. */
-  canUseLegacySharedMemorySyncForContextGraphV1(
-    this: DKGAgent,
-    contextGraphId: string,
-  ): boolean {
-    return this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId);
+  async canUseLegacySharedMemorySyncForContextGraphV1(this: DKGAgent, contextGraphId: string): Promise<boolean> {
+    // The private predicate verifies local membership and current lane authority.
+    return this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)
+      || await this.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId) === true;
   }
 
   /** One agent-owned admission decision for the legacy durable VM lane. */
@@ -5795,6 +5808,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     let exactResponderCapability: ExactAssetResponderCapability | undefined;
     const authenticatedExactAssets: ChallengePinnedGraphScopedAsset[] = [];
     const committedExactAssetUals: string[] = [];
+    // What the stream established about this peer for one graph. A run over
+    // several graphs has no single answer, so it reports none.
+    let exactStreamOutcome: ExactBatchStreamOutcome | undefined;
     const markExactFetchIncomplete = () => {
       if (exactAssetUals === undefined) return;
       exactFetchDisposition = mergeExactDurableFetchDisposition(
@@ -5851,6 +5867,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             if (detailed.committedExactAssetUals !== undefined) {
               committedExactAssetUals.push(...detailed.committedExactAssetUals);
             }
+            if (orderedContextGraphIds.length === 1) exactStreamOutcome = detailed.exactStreamOutcome;
             return durableSyncAccumulatorFromResult(detailed.result);
           },
         })),
@@ -5923,6 +5940,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         ...(committedExactAssetUals.length === 0
           ? {}
           : { committedExactAssetUals: Object.freeze([...committedExactAssetUals]) }),
+        ...(exactStreamOutcome === undefined ? {} : { exactStreamOutcome }),
       };
     };
 
@@ -6020,6 +6038,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       forceFreshExactSession?: boolean;
       exactRecoveryTransportMode?: ExactRecoveryTransportMode;
       registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
+      totalTimeoutMs?: number;
     },
   ): Promise<ExactKnowledgeAssetSyncResult>;
   syncExactKnowledgeAssetsFromPeerDetailed(this: DKGAgent,
@@ -6033,6 +6052,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       forceFreshExactSession?: boolean;
       exactRecoveryTransportMode?: ExactRecoveryTransportMode;
       registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
+      totalTimeoutMs?: number;
     },
   ): Promise<ExactKnowledgeAssetSyncResult>;
   async syncExactKnowledgeAssetsFromPeerDetailed(this: DKGAgent,
@@ -6046,6 +6066,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       forceFreshExactSession?: boolean;
       exactRecoveryTransportMode?: ExactRecoveryTransportMode;
       registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
+      totalTimeoutMs?: number;
     } = {},
   ): Promise<ExactKnowledgeAssetSyncResult> {
     const selection: ExactAssetSelection = Array.isArray(selectionInput)
@@ -6064,8 +6085,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         forceFreshExactSession: options.forceFreshExactSession,
         exactRecoveryTransportMode: options.exactRecoveryTransportMode,
         registeredPublicEvidence: options.registeredPublicEvidence,
+        ...(options.totalTimeoutMs === undefined ? {} : { totalTimeoutMs: options.totalTimeoutMs }),
         stopOnBackoffWorthyFailure: true,
-        priority: 1_000,
+        priority: VM_RECOVERY_SYNC_PRIORITY,
         source: 'vm-recovery',
         onWorkStarted: options.onWorkStarted,
         signal: options.signal,
@@ -6085,6 +6107,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ...(detailed.committedExactAssetUals === undefined
         ? {}
         : { committedExactAssetUals: detailed.committedExactAssetUals }),
+      ...(detailed.exactStreamOutcome === undefined
+        ? {}
+        : { streamOutcome: detailed.exactStreamOutcome }),
     };
   }
 
@@ -6427,13 +6452,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             this.invalidateListContextGraphsCache();
             this.contextGraphMetaProjection.markDirtyFromQuads(authentication.asset.metadataQuads);
             try {
+              let retiredTwin: FinalizedSwmTwinRetirement | undefined;
               const retirement = await reconcileFinalizedSwmTwin({
                 store: this.store,
                 writeLocks: this.writeLocks,
                 asset: authentication.asset,
-                retire: (candidate) => this.retireFinalizedSwmTwinCandidate(candidate, ctx),
+                retire: async (candidate) => {
+                  await this.retireFinalizedSwmTwinCandidate(candidate, ctx);
+                  retiredTwin = candidate;
+                },
               });
               if (retirement === 'retired') {
+                await this.retireLegacySwmAfterVerifiedVmTwin({
+                  contextGraphId: asset.contextGraphId,
+                  kaUal: asset.ual,
+                  assertionVersion: asset.assertionVersion,
+                  // The marker of the namespace whose twin was verified and
+                  // retired. Without it a twin in a named subgraph would
+                  // retire the root marker of the same asset.
+                  subGraphName: retiredTwin?.subGraphName,
+                });
                 this.invalidateListContextGraphsCache();
                 this.log.info(
                   ctx,
@@ -6534,6 +6572,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           processDurableBatchInWorker: durableContext.processDurableBatchInWorker,
           authenticationDeadline: contextGraphBudget.createGraphScopedAuthenticationDeadline,
           storeGraphScopedAsset: durableContext.storeGraphScopedAsset!,
+        },
+        reconnect: async (reconnectSignal) => {
+          try {
+            await this.ensurePeerConnected(remotePeerId, { signal: reconnectSignal });
+          } catch {
+            // Unreachable for now, or connected but no longer admitted.
+            return false;
+          }
+          return this.node.libp2p.getConnections()
+            .some((connection) => connection.remotePeer.toString() === remotePeerId);
         },
         logInfo: message => this.log.info(ctx, message),
       });
@@ -7669,7 +7717,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             },
           );
         },
-        merge: mergeSharedMemorySyncResults,
+        merge: mergeSamePeerSharedMemoryDiagnostics,
         onResult: (item, result) => {
           if (
             selectedSwmEnabled
@@ -7748,7 +7796,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             selectedSwmPriority: true,
           },
         ),
-        merge: mergeSharedMemorySyncResults,
+        merge: mergeSamePeerSharedMemoryDiagnostics,
         markDeferred: (summary) => ({
           ...summary,
           deferredBackpressure: (summary.deferredBackpressure ?? 0) + 1,
@@ -7788,7 +7836,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         },
       });
       const { summary: continuationSummary } = continuationExecution;
-      const finalSummary = mergeSharedMemorySyncResults(
+      const finalSummary = mergeSamePeerSharedMemoryDiagnostics(
         initialSummary,
         continuationSummary,
       );
@@ -8053,21 +8101,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   /** Focused VM-recovery operation that returns clean per-peer miss evidence. */
-  async syncVmRecoveryFromConnectedPeers(
-    this: DKGAgent,
-    contextGraphId: string,
-    options?: ContextGraphCatchupOptions,
-  ): Promise<{ catchup: ContextGraphCatchupResult; cleanMissPeerIds: string[] }> {
-    const catchup = await this.syncContextGraphFromConnectedPeers(contextGraphId, options);
-    return {
-      catchup,
-      // Embedders may still override the catch-up method with the pre-evidence
-      // result shape. Treat that legacy shape as no proof; production results
-      // always carry the immutable field below.
-      cleanMissPeerIds: [...(catchup.cleanSharedMemoryPeerIds ?? [])],
-    };
-  }
-
   selectCatchupPeerWindow(this: DKGAgent,
     peers: Array<{ toString(): string }>,
     options?: { maxPeers?: number; peerRotationKey?: string; peerPriorityRanks?: ReadonlyMap<string, number> },
@@ -8278,7 +8311,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // catchup-status endpoint and UI keep working — see
     // `cli/src/daemon.ts` subscribe job and `catchup-runner.ts`.
     const emptyShared = (): SharedMemorySyncResult =>
-      createEmptySharedMemorySyncResult(1);
+      emptySharedMemorySyncResult(1);
     // Bounded fan-out: at most CATCHUP_MAX_CONCURRENT_PEER_SYNCS peer syncs run
     // at once. The pre-cap unbounded `Promise.all` over every sync-capable peer
     // was the top amplifier of the 2026-07-07 mainnet sync storm — one
@@ -8849,6 +8882,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async resumePendingJoinApprovalMetadata(this: DKGAgent,
     contextGraphId: string,
     curatorPeerId: string,
+    curatorDialAddress?: string,
   ): Promise<JoinApprovalMetadataRecoveryOutcome> {
     const ctx = createOperationContext('sync');
     const acceptance = await this.resolveApprovedMemberAcceptance(contextGraphId);
@@ -8856,6 +8890,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     const refreshed = await this.refreshMetaFromCurator(contextGraphId, {
       trustedCuratorPeerId: curatorPeerId,
+      curatorDialAddressHint: curatorDialAddress,
       force: true,
       approvedMember: acceptance,
     }).catch((error) => {
@@ -8921,12 +8956,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async recoverPendingJoinApprovalMetadata(this: DKGAgent,
     contextGraphId: string,
     curatorPeerId: string,
+    curatorDialAddress?: string,
   ): Promise<void> {
     const stopSignal = this.node.stopSignal;
     for (let attempt = 0; ; attempt += 1) {
       let outcome: JoinApprovalMetadataRecoveryOutcome;
       try {
-        outcome = await this.resumePendingJoinApprovalMetadata(contextGraphId, curatorPeerId);
+        outcome = await this.resumePendingJoinApprovalMetadata(
+          contextGraphId,
+          curatorPeerId,
+          curatorDialAddress,
+        );
       } catch (error) {
         // A store or network fault that escapes an attempt is as transient as
         // a `retry`. Ending the loop on it would leave the row closed until
@@ -8946,7 +8986,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (
         !this.localApprovedAgentByCG.has(contextGraphId)
         || current?.subscribed !== true
-        || current.pendingMeta !== true
+        // A concurrent data catch-up can set `synced` while authoritative
+        // join metadata is still pending or unknown. Only its explicit
+        // confirmation ends this join-specific retry.
+        || (current.synced === true && current.metaSynced === true && current.pendingMeta !== true)
       ) return;
     }
   }
@@ -9412,13 +9455,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphId: string,
     write: () => Promise<void>,
   ): Promise<void> {
-    const previous = this.contextGraphSubscriptionPersistChains.get(contextGraphId) ?? Promise.resolve();
-    const run = previous.then(write);
-    const chain = run.catch(() => undefined);
-    this.contextGraphSubscriptionPersistChains.set(contextGraphId, chain);
-    void chain.finally(() => {
-      if (this.contextGraphSubscriptionPersistChains.get(contextGraphId) !== chain) return;
-      this.contextGraphSubscriptionPersistChains.delete(contextGraphId);
+    // The scheduler owns per-context-graph ordering, strict non-coalescing,
+    // write-start timing (a microtask after admission), shutdown drain and
+    // bounds; the revision maps below stay the cancel/supersede layer on top of
+    // it. The returned promise rejects when the write (or admission) fails, so
+    // an awaiting caller sees the failure. The lane keeps draining, so a failed
+    // write does not stall the next one for this context graph.
+    const run = this.contextGraphSubscriptionPersistence.enqueue(contextGraphId, write);
+    // Idle cleanup runs after the caller's own handlers and marks a failure as
+    // handled for a caller that drops the promise, as the chain tail did.
+    void run.catch(() => undefined).finally(() => {
       this.clearContextGraphSubscriptionPersistRevisionStateIfIdle(contextGraphId);
     });
     return run;
@@ -9444,7 +9490,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
   clearContextGraphSubscriptionPersistRevisionStateIfIdle(this: DKGAgent, contextGraphId: string): void {
     if ((this.contextGraphSubscriptionPersistPendingRevisions.get(contextGraphId)?.size ?? 0) > 0) return;
-    if (this.contextGraphSubscriptionPersistChains.has(contextGraphId)) return;
+    if (this.contextGraphSubscriptionPersistence.hasLane(contextGraphId)) return;
     const sub = this.subscribedContextGraphs.get(contextGraphId);
     if (sub?.subscribed === true || sub?.coreHosted === true) return;
     if (this.contextGraphSubscriptionRehydrationAccountedIds.has(contextGraphId)) return;
@@ -10662,6 +10708,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!store) return;
     const ctx = createOperationContext('init');
     let authorityBudget: RehydrationAuthorityBudget | undefined;
+    const startupPlan = this.gossipSession.beginDurableStartupPlan(
+      this.contextGraphSubscriptionRehydrationAccountedIds,
+    );
     try {
       // System context graphs (AGENTS/ONTOLOGY) are auto-subscribed separately
       // by start(); their persisted rows must NOT be rehydrated here too. Re-
@@ -10670,6 +10719,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // dormant. Exclude them from the rehydration set entirely.
       const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
       const persistedRows = await store.loadAll();
+      startupPlan.claimDurableRows(persistedRows);
       // A name-hash placeholder whose verified cleartext row is also durable
       // was adopted earlier; the crash window between the two writes can
       // leave both. Never reactivate the placeholder. Record the adoption as
@@ -10754,16 +10804,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // snapshot already read by the provenance phase. Load every persisted
       // row (not just rows under the activation cap) so a dormant subscription
       // still has the right signer when an operator activates it explicitly.
-      if (persistedMembershipRows !== null) {
-        const persistedContextGraphIds = new Set(rows.map((row) => row.id));
-        const localAgentAddresses = new Set(
-          [...this.localAgents.keys()].map((address) => address.toLowerCase()),
-        );
-        const newestApprovalByContextGraph = projectPersistedJoinApprovals(
+      const newestApprovalByContextGraph = persistedMembershipRows === null
+        ? null
+        : projectPersistedJoinApprovals(
           persistedMembershipRows,
-          persistedContextGraphIds,
-          localAgentAddresses,
+          new Set(rows.map((row) => row.id)),
+          new Set([...this.localAgents.keys()].map((address) => address.toLowerCase())),
         );
+      if (newestApprovalByContextGraph) {
         for (const [contextGraphId, approval] of newestApprovalByContextGraph) {
           this.localApprovedAgentByCG.set(contextGraphId, approval.principalId);
           if (approval.curatorPeerId) {
@@ -10992,7 +11040,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             `Restored persisted context-graph subscription "${row.id}" in restricted pending-metadata mode; VM, payload recovery, and SWM remain closed`,
           );
           if (curatorPeerId) {
-            void this.recoverPendingJoinApprovalMetadata(row.id, curatorPeerId).catch((error) => {
+            void this.recoverPendingJoinApprovalMetadata(
+              row.id,
+              curatorPeerId,
+              newestApprovalByContextGraph?.get(row.id)?.curatorDialAddress,
+            ).catch((error) => {
               this.log.warn(
                 ctx,
                 `Pending join-approval recovery for "${row.id}" stopped safely: ${error instanceof Error ? error.message : String(error)}`,
@@ -11083,6 +11135,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.log.warn(ctx, `Failed to rehydrate persisted context-graph subscriptions: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       authorityBudget?.dispose();
+      startupPlan.finish();
     }
   }
 
@@ -11145,7 +11198,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
     }
     const activeUserIdsWithPendingStoreWrite = store
-      ? activeUserIds.filter((id) => this.contextGraphSubscriptionPersistChains.has(id))
+      ? activeUserIds.filter((id) => this.contextGraphSubscriptionPersistence.hasLane(id))
       : [];
     const storeDeleteIds = [...new Set([...persistedUserIds, ...activeUserIdsWithPendingStoreWrite])];
     const total = storeDeleteIds.length;

@@ -8,8 +8,84 @@ import {
   NAME_HASH,
   selectedFixture,
 } from './context-graph-registration-binding.fixture.js';
+import { finalizedAuthorityColdResolutionOf } from '../src/finalized-authority-cold-resolution.js';
 
 describe('Context Graph registration resolution deadlines', () => {
+  it.each(['ordinary', 'repair'] as const)('separates %s flights whose graph IDs or repair hints contain delimiters', async (mode) => {
+    const fixture = selectedFixture();
+    fixture.agent.subscribedContextGraphs.clear();
+    fixture.agent.wireIdToLocalCgId.clear();
+    const firstId = 'registration-flight';
+    const secondId = `${firstId}:${mode === 'ordinary' ? 'bounded' : 'bad'}`;
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const resolveFinalized = vi.fn(async (): Promise<bigint> => {
+      const result = resolveFinalized.mock.calls.length === 1 ? 42n : 43n;
+      if (result === 42n) { entered.resolve(); await release.promise; }
+      return result;
+    });
+    Object.assign(fixture.agent.chain, {
+      contextGraphAuthorityIndexRevisionReader: { resolveFinalizedContextGraphIdByNameHash: resolveFinalized },
+    });
+    const first = fixture.agent.resolveContextGraphRegistrationBinding(firstId, {
+      freshness: mode === 'ordinary' ? 'bounded' : 'live',
+      registrationTimeoutMs: 10_000,
+      ...(mode === 'repair' ? { durableSubscriptionBinding: {
+        contextGraphId: firstId, onChainId: 'bad:part', onChainHash: NAME_HASH,
+      } } : {}),
+    });
+    await entered.promise;
+    const second = fixture.agent.resolveContextGraphRegistrationBinding(secondId, {
+      freshness: 'live', registrationTimeoutMs: 10_000,
+      allowAcceptedRfc64FinalizedAbsence: true,
+      ...(mode === 'repair' ? { durableSubscriptionBinding: {
+        contextGraphId: secondId, onChainId: 'part', onChainHash: NAME_HASH,
+      } } : {}),
+    });
+    try {
+      await vi.waitFor(() => expect(finalizedAuthorityColdResolutionOf(fixture.agent).inFlightKeys).toHaveLength(2));
+    } finally {
+      release.resolve();
+      await Promise.allSettled([first, second]);
+    }
+    await expect(first).resolves.toMatchObject({ kind: 'registered', onChainId: 42n });
+    await expect(second).resolves.toMatchObject({ kind: 'registered', onChainId: 43n });
+    expect(resolveFinalized).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns fresh finalized bindings without registering unrelated global index drains', async () => {
+    vi.useFakeTimers();
+    let releaseDrain!: () => void;
+    const globalDrain = new Promise<void>((resolve) => { releaseDrain = resolve; });
+    const fixture = selectedFixture();
+    const resolveFinalized = vi.fn(async () => 42n);
+    const whenIdle = vi.fn(() => globalDrain);
+    Object.assign(fixture.agent.chain, {
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphIdByNameHash: resolveFinalized,
+        whenIdle,
+      },
+    });
+    try {
+      const binding = fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID, {
+        registrationTimeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+      });
+      await vi.advanceTimersByTimeAsync(CHAIN_POLICY_READ_TIMEOUT_MS);
+      await expect(binding).resolves.toMatchObject({ kind: 'registered', onChainId: 42n });
+      await finalizedAuthorityColdResolutionOf(fixture.agent).whenIdle();
+      expect(whenIdle).not.toHaveBeenCalled();
+      resolveFinalized.mockResolvedValueOnce(43n);
+      await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID))
+        .resolves.toMatchObject({ kind: 'registered', onChainId: 43n });
+      expect(resolveFinalized).toHaveBeenCalledTimes(2);
+      expect(whenIdle).not.toHaveBeenCalled();
+    } finally {
+      releaseDrain();
+      await finalizedAuthorityColdResolutionOf(fixture.agent).whenIdle();
+      vi.useRealTimers();
+    }
+  });
+
   it('marks only a positive cold reverse-name-hash RPC result as pool evidence', async () => {
     const positive = selectedFixture();
     const markPositive = vi.fn();
@@ -56,7 +132,7 @@ describe('Context Graph registration resolution deadlines', () => {
     );
 
     await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID))
-      .resolves.toEqual({ kind: 'unregistered' });
+      .resolves.toEqual({ kind: 'unregistered', unregisteredEvidence: 'local-create' });
     expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
   });
 
@@ -307,7 +383,7 @@ describe('Context Graph registration resolution deadlines', () => {
       provenance: 'name-hash',
     });
     expect(resolveFinalized).toHaveBeenCalledWith(persistedNameHash, expect.any(Object));
-    expect(whenIdle).toHaveBeenCalledOnce();
+    expect(whenIdle).not.toHaveBeenCalled();
     expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
   });
 
@@ -341,7 +417,7 @@ describe('Context Graph registration resolution deadlines', () => {
       reason: 'chain-name-binding-unavailable',
       detail: expect.stringContaining('requires the finalized Context Graph authority index'),
     });
-    expect(whenIdle).toHaveBeenCalledOnce();
+    expect(whenIdle).not.toHaveBeenCalled();
     expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
   });
 
@@ -358,7 +434,7 @@ describe('Context Graph registration resolution deadlines', () => {
         onChainId: 42n,
         provenance: 'reverse-name-hash',
       });
-    expect(whenIdle).toHaveBeenCalledOnce();
+    expect(whenIdle).not.toHaveBeenCalled();
     expect(fixture.resolveContextGraphIdByNameHash).toHaveBeenCalledOnce();
   });
 
