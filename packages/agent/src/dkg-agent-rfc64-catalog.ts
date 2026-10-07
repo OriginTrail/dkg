@@ -1508,6 +1508,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     }));
   }
 
+  /** Reason the last authority refresh of one graph recorded, or null. */
+  rfc64CatalogAuthorityRefreshFailureReasonV1(this: DKGAgent, contextGraphId: string): string | null {
+    return rfc64CatalogAuthorityProgressV1.get(this)?.get(contextGraphId)?.reason ?? null;
+  }
+
   /** Re-prove catalog completion before the daemon's synchronous readiness commit. */
   async withVerifiedPrivateCatalogSubscriptionReadinessV1(
     this: DKGAgent, contextGraphId: string, commit: () => void,
