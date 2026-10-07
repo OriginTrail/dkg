@@ -33,8 +33,13 @@ import type {
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
-import { decodeSparqlJsonQueryResult } from '../sparql-json-query-result.js';
-import { decodeSparqlTsvSelectResult } from '../sparql-tsv-query-result.js';
+import {
+  decodeSparqlQueryResponse,
+  resolveSelectResultFormat,
+  sparqlResultsAccept,
+  type SparqlSelectResultFormat,
+} from '../sparql-select-response.js';
+import { hashQuery, normalizeQuerySource, sanitizeEndpointForTelemetry } from '../sparql-http-telemetry.js';
 import {
   externalStorePriorityScheduler,
   type StorePriorityScheduler,
@@ -65,7 +70,6 @@ import {
   JAVA_WRITE_UTF_MAX_BYTES,
   type Rfc64SemanticReadOperationV1,
 } from '@origintrail-official/dkg-core';
-import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import {
   AbortableStoreWorkLifecycle,
@@ -339,7 +343,7 @@ export interface SparqlHttpStoreOptions {
    * SELECT result transport. Managed Oxigraph defaults to compact TSV; generic
    * endpoints retain JSON unless the operator explicitly opts in.
    */
-  selectResultFormat?: 'json' | 'tsv';
+  selectResultFormat?: SparqlSelectResultFormat;
   /**
    * Marker used by higher-level daemon flows to distinguish daemon-owned
    * endpoints from operator-provided URLs.
@@ -416,7 +420,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
   private readonly managedRecovery?: SparqlHttpManagedRecoveryV1;
   private readonly consistencyProfile: SparqlHttpConsistencyProfile;
   private readonly scheduler: StorePriorityScheduler;
-  private readonly selectResultFormat: 'json' | 'tsv';
+  private readonly selectResultFormat: SparqlSelectResultFormat;
 
   private readonly now: () => number;
   private readonly slowQueryThresholdMs: number;
@@ -457,10 +461,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       ? 'atomic-readback'
       : resolveConsistencyProfile(options);
     this.scheduler = options.scheduler ?? externalStorePriorityScheduler;
-    this.selectResultFormat = normalizeSelectResultFormat(
-      options.selectResultFormat,
-      this.managedOxigraph ? 'tsv' : 'json',
-    );
+    this.selectResultFormat = resolveSelectResultFormat(options.selectResultFormat, this.managedOxigraph);
     this.now = options.now ?? monotonicNow;
     this.slowQueryThresholdMs = normalizeNonNegativeNumber(
       options.slowQueryThresholdMs,
@@ -1249,10 +1250,9 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
           );
         }
 
-        const useTsv = !isAsk && this.selectResultFormat === 'tsv';
         return await this.postQuery(
           trimmed,
-          useTsv ? 'text/tab-separated-values' : 'application/sparql-results+json',
+          sparqlResultsAccept(isAsk, this.selectResultFormat),
           'query',
           canonicalOperation,
           effectiveOptions,
@@ -1272,14 +1272,10 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
               managedOxigraph: this.managedOxigraph,
               operation: canonicalOperation,
             });
-            // Some generic endpoints ignore Accept and still return JSON. An
-            // explicit JSON content type is safe to fall back to; managed
-            // Oxigraph honors TSV and takes the compact decoder below.
-            const contentType = res.headers.get('content-type')?.toLowerCase() ?? '';
-            if (useTsv && !contentType.includes('sparql-results+json')) {
-              return decodeSparqlTsvSelectResult(text);
-            }
-            return decodeSparqlJsonQueryResult(text, isAsk ? 'ask' : 'select');
+            return decodeSparqlQueryResponse(text, res.headers.get('content-type'), {
+              isAsk,
+              format: this.selectResultFormat,
+            });
           },
           readPolicy,
         );
@@ -1487,15 +1483,6 @@ function normalizeConsistencyProfile(value: unknown): SparqlHttpConsistencyProfi
   );
 }
 
-function normalizeSelectResultFormat(
-  value: unknown,
-  fallback: 'json' | 'tsv',
-): 'json' | 'tsv' {
-  if (value === undefined) return fallback;
-  if (value === 'json' || value === 'tsv') return value;
-  throw new Error('sparql-http selectResultFormat must be json or tsv');
-}
-
 function resolveConsistencyProfile(
   options: Pick<SparqlHttpStoreOptions, 'consistencyProfile' | 'atomicUpdates'>,
 ): SparqlHttpConsistencyProfile {
@@ -1529,12 +1516,6 @@ function normalizeSampleRate(value: number | undefined, fallback: number): numbe
   return Math.min(1, Math.max(0, value));
 }
 
-function normalizeQuerySource(source: string | undefined): string {
-  const trimmed = source?.trim();
-  if (!trimmed) return 'unknown';
-  return trimmed.replace(/[^\w:./-]/g, '_').slice(0, 120) || 'unknown';
-}
-
 function inferQueryOperation(sparql: string): SparqlHttpSlowQueryEvent['operation'] {
   const operation = classifySparqlOperation(sparql);
   if (operation.kind !== 'read') return 'unknown';
@@ -1543,23 +1524,6 @@ function inferQueryOperation(sparql: string): SparqlHttpSlowQueryEvent['operatio
     case 'ASK': return 'ask';
     case 'CONSTRUCT': return 'construct';
     case 'DESCRIBE': return 'describe';
-  }
-}
-
-function hashQuery(sparql: string): string {
-  return createHash('sha256').update(sparql).digest('hex').slice(0, 16);
-}
-
-function sanitizeEndpointForTelemetry(endpoint: string): string {
-  try {
-    const url = new URL(endpoint);
-    url.username = '';
-    url.password = '';
-    url.search = '';
-    url.hash = '';
-    return url.toString();
-  } catch {
-    return endpoint.split(/[?#]/, 1)[0];
   }
 }
 
