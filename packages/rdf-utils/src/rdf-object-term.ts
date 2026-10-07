@@ -1,7 +1,7 @@
 import { isAbsoluteRfc3987IriV1 } from './absolute-rfc3987-iri.js';
+import { isRdfBlankNodeLabel } from './blank-node-label.js';
 import { escapeRdfLiteral } from './rdf-literal-escape.js';
 import {
-  isRdfBlankNodeTerm,
   isRdfLanguageTag,
   parseRdfLiteralLexicalTerm,
 } from './rdf-term-lexical.js';
@@ -95,7 +95,8 @@ export function parseWritableRdfTerm(term: string): WritableRdfTerm | null {
     return { kind: 'literal', value: literal };
   }
   if (term.startsWith('_:')) {
-    return isRdfBlankNodeTerm(term) ? { kind: 'blank-node', value: term.slice(2) } : null;
+    const label = term.slice(2);
+    return isRdfBlankNodeLabel(label) ? { kind: 'blank-node', value: label } : null;
   }
   const iri = term.startsWith('<') && term.endsWith('>') ? term.slice(1, -1) : term;
   return isAbsoluteRfc3987IriV1(iri) ? { kind: 'iri', value: iri } : null;

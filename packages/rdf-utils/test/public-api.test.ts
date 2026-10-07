@@ -5,7 +5,10 @@ describe('rdf-utils package façade', () => {
   it('keeps lexical implementation helpers out of the root export', () => {
     expect(rdfUtils).not.toHaveProperty('parseRdfLiteralLexicalTermWith');
     expect(rdfUtils).not.toHaveProperty('isRdfLanguageTag');
-    expect(rdfUtils).not.toHaveProperty('isRdfBlankNodeTerm');
+  });
+
+  it('exposes one blank-node label validator', () => {
+    expect(Object.keys(rdfUtils).filter((name) => /blank.?node/i.test(name))).toEqual(['isRdfBlankNodeLabel']);
   });
 
   it('retains the semantic RDF and TSV parser APIs', () => {

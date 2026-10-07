@@ -1,5 +1,3 @@
-import { readRawSparqlBlankNodeLabelEnd } from './sparql-lexical-primitives.js';
-
 export type RdfLiteralLexicalTerm =
   | { body: string; suffix: { kind: 'plain' } }
   | { body: string; suffix: { kind: 'language'; language: string } }
@@ -85,9 +83,4 @@ export function parseRdfLiteralLexicalTermWith(
     if (isLineTerminator(datatype.charCodeAt(index))) return null;
   }
   return { body, suffix: { kind: 'datatype', datatype, syntax: 'bare' } };
-}
-
-export function isRdfBlankNodeTerm(term: string): boolean {
-  if (!term.startsWith('_:')) return false;
-  return readRawSparqlBlankNodeLabelEnd(term, 2) === term.length;
 }

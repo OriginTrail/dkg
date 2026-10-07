@@ -150,28 +150,6 @@ export function readRawSparqlVariableNameEnd(
   return end;
 }
 
-/** End of one raw BLANK_NODE_LABEL body, without its `_:` prefix. */
-export function readRawSparqlBlankNodeLabelEnd(
-  source: string,
-  start: number,
-): number | null {
-  let width = rawWidthWhen(source, start, isSparqlVariableInitialCodePoint);
-  if (!width) return null;
-  let cursor = start + width;
-  let validEnd = cursor;
-  while (cursor < source.length) {
-    width = rawWidthWhen(source, cursor, isSparqlPnCharsCodePoint);
-    if (width) {
-      cursor += width;
-      validEnd = cursor;
-      continue;
-    }
-    if (source.charCodeAt(cursor) !== 0x2e) break;
-    cursor += 1;
-  }
-  return validEnd;
-}
-
 export function sparqlVariableInitialWidth(source: string, index: number): number {
   return logicalWidthWhen(source, index, isSparqlVariableInitialCodePoint);
 }

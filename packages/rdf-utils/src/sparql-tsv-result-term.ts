@@ -1,4 +1,5 @@
 import { isAbsoluteRfc3987IriV1 } from './absolute-rfc3987-iri.js';
+import { isRdfBlankNodeLabel } from './blank-node-label.js';
 import {
   decodeNTriplesIriEscapesStrict,
   decodeRdfLiteralBody,
@@ -6,7 +7,6 @@ import {
   type RdfTerm,
 } from './rdf-term.js';
 import {
-  isRdfBlankNodeTerm,
   isRdfLanguageTag,
   parseRdfLiteralLexicalTermWith,
 } from './rdf-term-lexical.js';
@@ -68,9 +68,8 @@ export function parseSparqlTsvResultTerm(
       : null;
   }
   if (term.startsWith('_:')) {
-    return isRdfBlankNodeTerm(term)
-      ? { kind: 'blank-node', value: term.slice(2) }
-      : null;
+    const label = term.slice(2);
+    return isRdfBlankNodeLabel(label) ? { kind: 'blank-node', value: label } : null;
   }
   const literal = parseSparqlTsvShortLiteral(term, validateIri);
   return literal === null ? null : { kind: 'literal', value: literal };
