@@ -289,6 +289,7 @@ const blockedRfc64Modules = [
   'release-native-catalog-authority-v1.js',
   'legacy-swm-boundary-v1.js',
   'legacy-swm-boundary-codec-v1.js',
+  'legacy-swm-boundary-fence-v1.js',
   'catalog-operational-targets-v1.js',
   'private-read-roster-v1.js',
   'catalog-rollout-authority-v1.js',
