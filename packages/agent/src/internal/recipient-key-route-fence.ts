@@ -1,19 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { AGENT_DID_PREFIX, DKG_ONTOLOGY, isSafeIri, unwrapIri } from '@origintrail-official/dkg-core';
+import { AGENT_DID_PREFIX, isSafeIri, unwrapIri } from '@origintrail-official/dkg-core';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import { WORKSPACE_RECIPIENT_KEY_ROUTE_PREDICATES } from '@origintrail-official/dkg-publisher';
 import type { StoreMutation, StoreMutationOutcome, StoreRemoval } from './store-mutation.js';
 
 /** The predicates a recipient key lookup reads. Each is read only on an agent DID or key IRI subject. */
-export const RECIPIENT_KEY_ROUTE_PREDICATES: ReadonlySet<string> = new Set([
-  DKG_ONTOLOGY.DKG_PUBLIC_ENCRYPTION_KEY,
-  DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_ALGORITHM,
-  DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_PROOF,
-  DKG_ONTOLOGY.DKG_PEER_ID,
-  DKG_ONTOLOGY.DKG_REVOKED_AT,
-  DKG_ONTOLOGY.DKG_REVOKED_BY,
-  DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_REVOCATION_PROOF,
-]);
+export const RECIPIENT_KEY_ROUTE_PREDICATES: ReadonlySet<string> = new Set(
+  WORKSPACE_RECIPIENT_KEY_ROUTE_PREDICATES,
+);
 
 // One branch per predicate, so every pattern is bound by its predicate and the scan
 // reads only the key and route facts, never every triple of every graph.

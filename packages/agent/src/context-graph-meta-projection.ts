@@ -9,12 +9,13 @@ import {
   contextGraphDataUri,
   contextGraphMetaGraphUri,
 } from '@origintrail-official/dkg-core';
+import { WORKSPACE_RECIPIENT_AUTHORITY_PREDICATES as RECIPIENT_AUTHORITY_PREDICATES } from '@origintrail-official/dkg-publisher';
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { strip, stripLiteral } from './dkg-agent-utils.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { cloneMetaRecord } from './internal/context-graph-meta-record-copy.js';
 import { PeerGateRevision } from './internal/peer-gate-revision.js';
-import { RECIPIENT_KEY_ROUTE_PREDICATES, RecipientKeyRouteFence } from './internal/recipient-key-route-fence.js';
+import { RecipientKeyRouteFence } from './internal/recipient-key-route-fence.js';
 
 export interface ContextGraphSubGraphMeta {
   uri: string;
@@ -107,13 +108,7 @@ const DIRECT_META_PREDICATES = new Set([
 
 // Recipient resolution scans these facts across every named graph. They do not
 // populate ContextGraphMetaRecord, but they can change a recipient set.
-const WORKSPACE_RECIPIENT_AUTHORITY_PREDICATES: ReadonlySet<string> = new Set([
-  DKG_ONTOLOGY.DKG_ACCESS_POLICY,
-  DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
-  DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT,
-  DKG_ONTOLOGY.DKG_REVOKED_AGENT,
-  ...RECIPIENT_KEY_ROUTE_PREDICATES,
-]);
+const WORKSPACE_RECIPIENT_AUTHORITY_PREDICATES: ReadonlySet<string> = new Set(RECIPIENT_AUTHORITY_PREDICATES);
 
 const SUB_GRAPH_META_PREDICATES = new Set([
   DKG_ONTOLOGY.RDF_TYPE,

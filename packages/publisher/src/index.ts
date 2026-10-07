@@ -520,3 +520,9 @@ export * from './share-batching.js';
 export { withKeyedLocks, swmKaWriteLockKey } from './keyed-lock.js';
 
 export { withSnapshotScope, snapshotOperation, WorkspaceSnapshotScope, snapshotReferenceCheck, type WorkspaceSnapshotLifecycle } from './workspace-snapshot-lifecycle.js';
+
+export {
+  WORKSPACE_RECIPIENT_DEPENDENCIES,
+  WORKSPACE_RECIPIENT_KEY_ROUTE_PREDICATES,
+  WORKSPACE_RECIPIENT_AUTHORITY_PREDICATES,
+} from './workspace-recipient-dependencies.js';
