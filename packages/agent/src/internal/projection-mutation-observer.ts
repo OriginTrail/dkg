@@ -6,7 +6,9 @@ import type { StoreMutation, StoreMutationObserver } from './store-mutation.js';
 
 /** What the metadata projection must learn from a write that changed something. */
 function notifyProjection(projection: ContextGraphMetaProjection, mutation: StoreMutation): void {
-  if (mutation.everything) {
+  // A quad whose predicate is not a bare IRI may be stored under another one, so no classification
+  // of its predicate holds.
+  if (mutation.everything || mutation.quads?.some((quad) => !isSafeIri(quad.predicate))) {
     projection.markAllDirty();
     return;
   }

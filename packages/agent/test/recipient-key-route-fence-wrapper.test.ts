@@ -185,6 +185,25 @@ describe('recipient key/route fence through the production store wrapper (GH#306
     expect(fence.revision).toBe(before);
   });
 
+  it('does not take a key fact stored under an unsafe predicate for an irrelevant one', async () => {
+    // An HTTP adapter renders an unsafe predicate as a cleaned one.
+    const { wrapper, fence } = await open({
+      inner: (inner) => new Proxy(inner, {
+        get: (target, property) => property === 'insert'
+          ? (quads: Quad[], options?: unknown) => target.insert(quads.map((q) => ({ ...q, predicate: q.predicate.replace(/[{}]/g, '') })), options as never)
+          : (typeof Reflect.get(target, property) === 'function'
+            ? (Reflect.get(target, property) as (...args: unknown[]) => unknown).bind(target)
+            : Reflect.get(target, property)),
+      }),
+    });
+    await wrapper.insert([{ ...keyFact('urn:dkg:graph:keys'), predicate: `${DKG_ONTOLOGY.DKG_PEER_ID}{}` }]);
+    await fence.ensureReady();
+
+    const before = fence.revision;
+    await wrapper.dropGraph('urn:dkg:graph:keys');
+    expect(fence.revision).toBeGreaterThan(before);
+  });
+
   it('does not take a key fact stored under an unsafe graph name for one stored under that name', async () => {
     // An HTTP adapter renders an unsafe graph name as a cleaned one.
     const { wrapper, fence } = await open({

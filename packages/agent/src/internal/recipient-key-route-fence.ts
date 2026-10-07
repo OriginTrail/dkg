@@ -32,8 +32,11 @@ const isNonAgentIri = (term: string | undefined): boolean => (
 );
 const isBareIri = (term: string | undefined): term is string => term !== undefined && isSafeIri(term);
 
+// A predicate that is not a bare IRI may be stored under another name (an adapter cleans unsafe
+// characters), so it cannot be shown to be something other than a key or route predicate.
 const isKeyRouteFact = (quad: Quad): boolean => (
-  RECIPIENT_KEY_ROUTE_PREDICATES.has(unwrapIri(quad.predicate)) && !isNonAgentIri(quad.subject)
+  (RECIPIENT_KEY_ROUTE_PREDICATES.has(unwrapIri(quad.predicate)) || !isBareIri(quad.predicate))
+  && !isNonAgentIri(quad.subject)
 );
 
 /**

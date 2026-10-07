@@ -110,6 +110,20 @@ describe('RecipientKeyRouteFence (GH#3067)', () => {
       }
     });
 
+    it.each([`${DKG_ONTOLOGY.DKG_PEER_ID}{}`, `<${MEMORY_LAYER}>`, 'urn:p q', 'relative-predicate', ''])(
+      'treats the predicate %j, which an adapter may store under another name, as a possible key fact',
+      async (predicate) => {
+        const fence = await readyFence([PROFILE_GRAPH]);
+        // On an agent it is a fact, and the graph it lands in is learned.
+        const unsafe = { subject: AGENT, predicate, object: '"p"', graph: DATA_GRAPH };
+        expect(moved(fence, () => fence.noteQuads([unsafe]))).toBe(true);
+        expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(true);
+        // On a bare subject that is not an agent, nothing can make it a key fact.
+        const elsewhere = { subject: 'urn:dkg:share:s1', predicate, object: '"p"', graph: 'urn:dkg:other' };
+        expect(moved(fence, () => fence.noteQuads([elsewhere]))).toBe(false);
+      },
+    );
+
     it('moves for a key predicate on a blank node, which a store may turn into a variable that matches an agent', async () => {
       const fence = await readyFence();
       for (const predicate of RECIPIENT_KEY_ROUTE_PREDICATES) {

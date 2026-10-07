@@ -7,7 +7,7 @@ import {
   contextGraphCatalogUri,
   contextGraphDataGraphUri,
 } from '@origintrail-official/dkg-core';
-import { type OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
+import { type OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 
 import { PeerGateRevision } from '../src/internal/peer-gate-revision.js';
 import {
@@ -152,6 +152,22 @@ describe('peer gate revision through the production store wrapper (GH#3067)', ()
     const before = read();
     expect(await wrapper.deleteByPattern({ graph: '' })).toBeGreaterThan(0);
     expect(read()).not.toBe(before);
+  });
+
+  it('moves for an allowlist fact written under an unsafe predicate that an adapter stores under the real one', async () => {
+    const built = await stack({
+      inner: (inner) => new Proxy(inner, {
+        get: (target, property) => property === 'insert'
+          ? (quads: Quad[], options?: unknown) => target.insert(quads.map((q) => ({ ...q, predicate: q.predicate.replace(/[{}]/g, '') })), options as never)
+          : (typeof Reflect.get(target, property) === 'function'
+            ? (Reflect.get(target, property) as (...args: unknown[]) => unknown).bind(target)
+            : Reflect.get(target, property)),
+      }),
+    });
+    stores.push(built.store);
+    const before = built.projection.peerGateRevision.read(CG);
+    await built.wrapper.insert([quad(CG_DID, `${ALLOWED_PEER}{}`, META_GRAPH)]);
+    expect(built.projection.peerGateRevision.read(CG)).not.toBe(before);
   });
 
   it('moves for an explicit invalidation of the graph, and not for a fresh-read request', async () => {
