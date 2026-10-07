@@ -105,6 +105,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   private readonly backoff: (attemptCount: number) => number;
   private workScheduler?: { onWorkAvailable(): void };
   private paused = false;
+  private nextIdleClaimAt = 0;
   private graphEnsured = false;
 
   constructor(
@@ -259,6 +260,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       if (this.paused) return null;
 
       const now = this.now();
+      if (this.workScheduler && now < this.nextIdleClaimAt) return null;
       await this.reconcileExpiredRunning(now);
       const jobs = await this.listUnlocked(
         { state: [...ACTIVE_PROMOTE_STATES] },
@@ -282,7 +284,17 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       const eligible = claimableCandidates.filter((candidate) =>
         !running.some((active) => active.jobId !== candidate.jobId && this.jobsShareClaimLane(active, candidate)),
       );
-      if (eligible.length === 0) return null;
+      if (eligible.length === 0) {
+        // A hint only: bounded polling discovers out-of-process writes, while
+        // local writes clear it. Never sleep past a known retry or lease expiry.
+        this.nextIdleClaimAt = jobs.reduce((deadline, job) => {
+          for (const at of [job.attempt.nextRetryAt, job.lease?.expiresAt]) {
+            if (at !== undefined && at > now) deadline = Math.min(deadline, at);
+          }
+          return deadline;
+        }, now + 1_000);
+        return null;
+      }
 
       // listUnlocked sorted once; filtering preserves the claim order.
       const next = eligible[0]!;
@@ -593,6 +605,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
 
   readonly workScheduling = {
     attachScheduler: (scheduler: { onWorkAvailable(): void }): (() => void) => {
+      this.nextIdleClaimAt = 0;
       this.workScheduler = scheduler;
       return () => {
         if (this.workScheduler === scheduler) this.workScheduler = undefined;
@@ -619,6 +632,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   // ===========================================================================
 
   private notifyWorkAvailable(): void {
+    this.nextIdleClaimAt = 0;
     try {
       this.workScheduler?.onWorkAvailable();
     } catch {
@@ -717,29 +731,14 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   }
 
   private async writeJob(job: PromoteJob): Promise<void> {
+    this.nextIdleClaimAt = 0;
     await this.persistJobRecord(job);
     await this.store.flush?.();
   }
 
-  /**
-   * #1933 — persist a job transition as a single-subject atomic replace so a crash between
-   * the delete and the insert can never lose the job row (delete-then-insert is two separate
-   * commits; a crash after the delete commits but before the insert commits permanently
-   * strands the subject empty). Routed through the shared writer
-   * `replaceSubjectAtomicallyOrFallback` (#1938), which uses the storage capability
-   * `tryReplaceSubjectAtomically` (one commit boundary — the storage layer owns literal
-   * externalization, graph-set-index, changelog, and reserved-plane bookkeeping structurally,
-   * rather than a raw `update()` string that ChangelogStore would scan and false-reject).
-   * Mirrors the async-lift publisher's `persistJobRecord` (#1863/#1919), adapted to the promote
-   * job's SINGLE subject: there is no immutable request subject, so the request-first ordering
-   * the lift sibling needs is N/A.
-   *
-   * A store that cannot guarantee one commit boundary (no `replaceSubject`, or a
-   * non-transactional endpoint that refuses it) takes the shared writer's BOUNDED pre-#1933
-   * delete-then-insert fallback — still safe here because every same-process transition and
-   * read serializes under `withMutationLock`, so the transient window is masked in-process.
-   * `cancel` routes through this path (it retains the row as a `failed`/`cancelled` replace,
-   * never a delete), so the atomic replace preserves its retain semantics by construction.
+  /** Persist a transition through the storage-owned atomic subject writer.
+   * The fallback and flush preserve the same durability boundary on older stores.
+   * Literal externalization, changelog and reserved-plane bookkeeping stay in storage.
    */
   private async persistJobRecord(job: PromoteJob): Promise<void> {
     // The serializer owns record shaping AND the fail-loud single-subject guard (it throws if

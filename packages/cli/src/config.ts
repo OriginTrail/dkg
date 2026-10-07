@@ -1033,23 +1033,23 @@ export interface DkgConfig {
     /** GH#2270 — hard ceiling on the (jittered) retry delay. Default 60000. */
     retryBackoffMaxMs?: number;
   };
-  /**
-   * Async promote queue worker (WM → SWM). Unlike `publisher` which is
-   * opt-in, the promote worker is **on by default** — without it, jobs
-   * enqueued via `POST /api/knowledge-assets/{name}/swm/share-async` sit in
-   * `queued` forever. Set `enabled: false` to disable when running a
-   * read-only / forensic node where you don't want the worker mutating
-   * SWM. See `docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md` and the
-   * `dkg-node` skill (§8 "Async promote queue") for the full contract.
-   */
+  /** WM → SWM worker, enabled by default; see docs/promote-queue-operations.md. */
   promoteQueue?: {
+    /** Default 5. Maximum attempts for newly enqueued shares. */
+    maxRetries?: number;
+    /** Default 60_000ms; exponential retry curve base. */
+    retryBaseMs?: number;
+    /** Default 900_000ms; maximum retry delay including jitter. */
+    retryMaxMs?: number;
+    /** Default 0.2; symmetric jitter ratio in [0, 1]. */
+    retryJitterRatio?: number;
     /** Default `true`. Set `false` to disable the in-daemon worker. */
     enabled?: boolean;
     /** Default 4. Number of concurrent worker slots polling the queue. */
     workerConcurrency?: number;
-    /** Default 100ms. Polling interval per slot. */
+    /** Default 100ms. Idle full scans are bounded to once per second. */
     pollIntervalMs?: number;
-    /** Default 60_000ms (1 min). Must be >0 and shorter than the queue's 5-min lease when enabled. */
+    /** Default 60_000ms. Must be shorter than the queue's 15-minute lease when enabled. */
     heartbeatIntervalMs?: number;
     /** Default 30_000ms. Max time `stop()` waits for in-flight promotes to drain on shutdown. */
     shutdownTimeoutMs?: number;

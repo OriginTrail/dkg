@@ -58,6 +58,34 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     });
   }
 
+  it('skips repeated idle scans, wakes immediately for enqueue, and expires external-write hints', async () => {
+    const queue = createQueue();
+    const detach = queue.workScheduling!.attachScheduler({ onWorkAvailable() {} });
+    await queue.claimNext('idle');
+    const query = vi.spyOn(store, 'query');
+    for (let i = 0; i < 10; i++) await queue.claimNext('idle');
+    expect(query).not.toHaveBeenCalled();
+    now += 1_000;
+    await queue.claimNext('idle');
+    expect(query).toHaveBeenCalled();
+    const id = await queue.enqueue(makeRequest());
+    expect((await queue.claimNext('awake'))?.jobId).toBe(id);
+    detach();
+  });
+
+  it('never skips past the known retry deadline', async () => {
+    const queue = createQueue({ backoff: () => 400 });
+    queue.workScheduling!.attachScheduler({ onWorkAvailable() {} });
+    const id = await queue.enqueue(makeRequest());
+    const job = await queue.claimNext('worker');
+    await queue.fail(id, job!.lease!.claimToken, { message: 'retry', retryable: true, classification: 'transient', recordedAt: now });
+    expect(await queue.claimNext('worker')).toBeNull();
+    now += 399;
+    expect(await queue.claimNext('worker')).toBeNull();
+    now += 1;
+    expect((await queue.claimNext('worker'))?.jobId).toBe(id);
+  });
+
   function makeRequest(overrides: Partial<PromoteRequest> = {}): PromoteRequest {
     return {
       contextGraphId: 'graphify',
