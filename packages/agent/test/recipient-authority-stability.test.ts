@@ -616,6 +616,27 @@ describe('recipient stability loop under sustained authority churn (GH#3067)', (
     await expect(resolve(host)).rejects.toMatchObject({ ...TRANSPORT_CHANGED, site: 'transport-changed' });
   });
 
+  it('sees a peer gate change that lands while the allowlist itself is being read', async () => {
+    const { host, ready, context } = churningHost({ seed: profileKeys });
+    await ready;
+    let reads = 0;
+    host.getContextGraphAllowedPeers = vi.fn(async () => {
+      reads += 1;
+      const stale = [context.peerId, context.otherPeerId];
+      if (reads === 1) {
+        // The change lands during the first read, which still returns the gate it began with.
+        await changeGate(context, [context.otherPeerId]);
+        return stale;
+      }
+      return [...context.state.allowedPeers!];
+    });
+
+    await expect(resolve(host)).rejects.toThrow(
+      /has no recipient key advertised by a peer in the context graph allowlist/,
+    );
+    expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(2);
+  });
+
   it('checks the peer gate by revision right after the last roster read, with no read of the gate in between', async () => {
     const { host, ready } = churningHost({ seed: profileKeys });
     await ready;
