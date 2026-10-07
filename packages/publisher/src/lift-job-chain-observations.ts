@@ -40,6 +40,6 @@ export class LiftJobChainObservations {
         receiptObservedAt: job.timestamps.receiptObservedAt ?? entry.receiptObservedAt,
         finalityObservedAt: job.timestamps.finalityObservedAt ?? entry.finalityObservedAt,
       },
-    } as T;
+    };
   }
 }

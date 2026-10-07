@@ -22,6 +22,7 @@ import { isHeldForChainProof } from './async-lift-retry-disposition.js';
 import { assertLiftJobTransition } from './lift-job-states.js';
 import { replaceSubjectAtomicallyOrFallback } from './subject-atomic-write.js';
 import { withKeyedLocks } from './keyed-lock.js';
+import { requireActiveLiftJobClaim, type CommittedLiftJob } from './lift-job-committed.js';
 import {
   CONTROL_CLAIM_TOKEN,
   CONTROL_LOCKED_JOB,
@@ -241,7 +242,7 @@ export interface AsyncLiftClaimCoordinatorDependencies {
   readonly writeJob: <T extends LiftJob>(
     job: T,
     kind: JournalKind,
-  ) => Promise<T>;
+  ) => Promise<CommittedLiftJob<T>>;
   readonly deleteJob: (jobId: string) => Promise<void>;
   readonly assertJobMatchesStatus: (job: LiftJob) => void;
   readonly resetInterruptedClaim: (job: LiftJob) => LiftJobAccepted;
@@ -319,7 +320,7 @@ export class AsyncLiftClaimCoordinator {
         );
 
         this.dependencies.assertJobMatchesStatus(owned);
-        const committed = await this.dependencies.writeJob(owned, 'claimed');
+        const committed = requireActiveLiftJobClaim(await this.dependencies.writeJob(owned, 'claimed'));
         await this.writeWalletLock({
           walletId,
           jobId: owned.jobId,
@@ -704,8 +705,7 @@ export class AsyncLiftClaimCoordinator {
         this.assertLifecycleTransition(before, failed, 'failed');
         // Canonical chain proof ends nonce ownership even if the local failure write must retry.
         await this.releaseJobOwnership(before);
-        const committed = await this.dependencies.writeJob(failed, 'failed');
-        return committed;
+        return await this.dependencies.writeJob(failed, 'failed');
       }),
       commitProofFinalization: async (finalize) => await close(async (before) => {
         // Proof authorizes immediate wallet reuse. Local repair and terminal persistence may then
@@ -714,14 +714,12 @@ export class AsyncLiftClaimCoordinator {
         const finalized = await finalize();
         if (finalized === null) return null;
         this.assertLifecycleTransition(before, finalized, 'finalized');
-        const committed = await this.dependencies.writeJob(finalized, 'recovered-finalize');
-        return committed;
+        return await this.dependencies.writeJob(finalized, 'recovered-finalize');
       }),
       commitReaccept: async (accepted) => await close(async (before) => {
         this.assertLifecycleTransition(before, accepted, 'accepted');
         await this.releaseJobOwnership(before);
-        const committed = await this.dependencies.writeJob(accepted, 'reaccept');
-        return committed;
+        return await this.dependencies.writeJob(accepted, 'reaccept');
       }),
       commitRemoval: async () => await close(async (before) => {
         await this.releaseJobOwnership(before);

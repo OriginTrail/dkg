@@ -1,4 +1,5 @@
 import { LiftJobChainObservations } from './lift-job-chain-observations.js';
+import { committedLiftJob, type CommittedLiftJob } from './lift-job-committed.js';
 import type { PreBroadcastRecord } from './publisher.js';
 import { bestEffortNotify } from './best-effort-notify.js';
 import { resolveWithinAbort } from '@origintrail-official/dkg-core';
@@ -2926,20 +2927,19 @@ export class TripleStoreAsyncLiftPublisher
     this.graphEnsured = true;
   }
 
-  private async writeJob<T extends LiftJob>(job: T, kind: JournalKind): Promise<T> {
+  private async writeJob<T extends LiftJob>(job: T, kind: JournalKind): Promise<CommittedLiftJob<T>> {
     assertCanonicalLiftJobPayload(job);
     if (kind !== 'rollback-noop' && job.broadcast) {
       if (job.status === 'included') this.chainObservations.receipt(job.jobId, job.broadcast.txHash);
       if (job.status === 'finalized') this.chainObservations.finality(job.jobId, job.broadcast.txHash);
     }
-    job = this.chainObservations.project(job);
     // Validate before the first store mutation. Public Partial<LiftJob> update calls can be forged
     // at runtime; a successful API call must never persist a row the restart decoder will reject.
-    const canonical = assertCanonicalLiftJobPayload(job);
+    const annotated = assertCanonicalLiftJobPayload(this.chainObservations.project(job));
+    const canonical = committedLiftJob(annotated, job);
     await this.persistJobRecord(canonical);
     await this.appendJournal(canonical, kind);
-    // Validation and diagnostic annotation preserve the supplied lifecycle variant and claim.
-    return canonical as T;
+    return canonical;
   }
 
   /**
