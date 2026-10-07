@@ -211,41 +211,77 @@ test('a settling poll answers like the plain observation once the read is served
   assert.equal(result.status, 0, result.stderr); assert.equal(result.stdout.trim(), '9007199254740993123456789');
 });
 
-// The shape of the sharing test's waits that only warn when their data is late.
-const warnOnlyWait = `${sharingSetup} AUTH=fixture; WARN=0
-warn(){ WARN=$((WARN+1)); echo "  [WARN] $1"; }
-SEEN=false
-for i in 1 2 3 4; do
-  VALUE=$(sharing_api_poll "$PORT" "$QUERY" s rows '{"contextGraphId":"fixture"}') || devnet_observation_abort
-  if devnet_count_at_least "$VALUE" 1; then SEEN=true; ok "member sees the data (poll $i)"; break; fi
-done
-$SEEN || warn "member is missing the data"
-sharing_fail_if_settling "member read" "$VALUE"
-echo "PASS=$PASS FAIL=$FAIL WARN=$WARN"; exit "$FAIL"`;
+test('the settling policy rejects near misses of the documented body', () => {
+  for (const response of ['null', '[]', '"CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE"',
+    JSON.stringify({ code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE', retryable: 'true' }),
+    JSON.stringify({ code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE', retryable: 1 }),
+    JSON.stringify([{ code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE', retryable: true }])]) {
+    assert.equal(observe(response, { httpStatus: 503, mode: 'rows', binding: 's', settling: true }).reason, 'HTTP_ERROR', response);
+  }
+});
+
+test('a settling poll keeps a transport failure invalid', async () => {
+  const result = await runShell(settlingCall(), { HELPER: helper, URL: 'http://127.0.0.1:1', QUERY: select });
+  assert.equal(result.status, 2); assert.equal(result.stdout, ''); assert.match(result.stderr, /TRANSPORT_FAILURE/);
+});
+
+for (const mode of ['bindings', 'json']) test(`a settling poll serves ${mode} mode like the plain observation`, async t => {
+  const url = await serve(t, (req, res) => { req.resume(); res.end(oneRow); });
+  const polled = await runShell(settlingCall(mode), { HELPER: helper, URL: url, QUERY: select });
+  const plain = await runShell(`source "$HELPER"; devnet_query_api "$URL" fixture "$QUERY" s ${mode} '{"contextGraphId":"fixture"}'`, { HELPER: helper, URL: url, QUERY: select });
+  assert.equal(polled.status, 0, polled.stderr); assert.equal(polled.stdout, plain.stdout); assert.notEqual(polled.stdout, '');
+});
+
+// The bounded wait the sharing test uses, with a caller that only warns when its data is late.
 const oneRow = JSON.stringify({ result: { type: 'bindings', bindings: [{ s: 'urn:seen' }] } });
+const boundedWait = (attempts = 5, min = 1) => `${sharingSetup} AUTH=fixture; WARN=0; SHARING_WAIT_INTERVAL=0
+warn(){ WARN=$((WARN+1)); echo "  [WARN] $1"; }
+sharing_wait_for_count "$PORT" ${attempts} ${min} "$QUERY" s rows '{"contextGraphId":"fixture"}'
+case $? in
+  0) ok "member sees the data" ;;
+  3) fail "member read: read authority was still unavailable when the wait ended" ;;
+  *) warn "member is missing the data" ;;
+esac
+echo "PASS=$PASS FAIL=$FAIL WARN=$WARN value=[$SHARING_WAIT_VALUE] polls=$SHARING_WAIT_POLLS"; exit "$FAIL"`;
+const S = [503, settling], E = [200, empty], D = [200, oneRow];
 
 for (const [name, answers, status, summary] of [
-  ['fails when read authority never settles', [[503, settling]], 1, /PASS=0 FAIL=1 WARN=1/],
-  ['passes when the read is served after two settling answers', [[503, settling], [503, settling], [200, oneRow]], 0, /PASS=1 FAIL=0 WARN=0/],
-  ['only warns when valid reads stay empty', [[200, empty]], 0, /PASS=0 FAIL=0 WARN=1/],
-  ['fails when it ends settling after valid empty reads', [[200, empty], [200, empty], [200, empty], [503, settling]], 1, /PASS=0 FAIL=1 WARN=1/],
-]) test(`a warn-only wait ${name}`, async t => {
+  ['fails when read authority never settles', [S], 1, /PASS=0 FAIL=1 WARN=0 value=\[\] polls=5/],
+  ['passes when the read is served after two settling answers', [S, S, D], 0, /PASS=1 FAIL=0 WARN=0 value=\[1\] polls=3/],
+  ['only warns when valid reads stay empty', [E], 0, /PASS=0 FAIL=0 WARN=1 value=\[0\] polls=5/],
+  ['only warns when one settling answer ends a wait of valid empty reads', [E, E, E, E, S], 0, /PASS=0 FAIL=0 WARN=1 value=\[0\] polls=5/],
+  ['only warns when settling answers are scattered between valid reads', [S, E, S, E, S], 0, /PASS=0 FAIL=0 WARN=1 value=\[0\] polls=5/],
+  ['fails when its last three polls are all settling', [E, E, S, S, S], 1, /PASS=0 FAIL=1 WARN=0 value=\[0\] polls=5/],
+]) test(`the bounded wait ${name}`, async t => {
   let served = 0;
   const url = await serve(t, (req, res) => {
     req.resume();
     const [http, response] = answers[Math.min(served, answers.length - 1)]; served += 1;
     res.writeHead(http); res.end(response);
   });
-  const result = await runShell(warnOnlyWait, { SHARING: sharing, PORT: new URL(url).port, QUERY: select });
+  const result = await runShell(boundedWait(), { SHARING: sharing, PORT: new URL(url).port, QUERY: select });
   assert.equal(result.status, status, result.stdout + result.stderr); assert.match(result.stdout, summary);
-  if (status === 1) assert.match(result.stdout, /member read: read authority was still unavailable when the wait ended/);
 });
 
-test('a wait stops on invalid evidence, and a single observation stays strict', async t => {
-  const busy = await serve(t, (req, res) => { req.resume(); res.writeHead(503); res.end(notSettling[0][2]); });
-  const invalidPoll = await runShell(warnOnlyWait, { SHARING: sharing, PORT: new URL(busy).port, QUERY: select });
-  assert.equal(invalidPoll.status, 1); assert.doesNotMatch(invalidPoll.stdout, /PASS=/);
-  assert.match(invalidPoll.stderr, /Invalid query observation/);
+test('the bounded wait compares against its threshold and stops at the first poll that reaches it', async t => {
+  let served = 0;
+  const rows = n => JSON.stringify({ result: { type: 'bindings', bindings: Array.from({ length: n }, (_, i) => ({ s: `urn:${i}` })) } });
+  const url = await serve(t, (req, res) => { req.resume(); served += 1; res.end(rows(served)); });
+  const result = await runShell(boundedWait(6, 3), { SHARING: sharing, PORT: new URL(url).port, QUERY: select });
+  assert.equal(result.status, 0, result.stderr); assert.match(result.stdout, /PASS=1 FAIL=0 WARN=0 value=\[3\] polls=3/);
+  assert.equal(served, 3);
+});
+
+test('the bounded wait stops the suite on invalid evidence, and a single observation stays strict', async t => {
+  let served = 0;
+  const busy = await serve(t, (req, res) => {
+    req.resume(); served += 1;
+    if (served === 1) { res.end(empty); return; }
+    res.writeHead(503); res.end(notSettling[0][2]);
+  });
+  const stopped = await runShell(boundedWait(), { SHARING: sharing, PORT: new URL(busy).port, QUERY: select });
+  assert.equal(stopped.status, 1); assert.doesNotMatch(stopped.stdout, /PASS=/);
+  assert.match(stopped.stderr, /Invalid query observation/); assert.equal(served, 2);
   const url = await serve(t, (req, res) => { req.resume(); res.writeHead(503); res.end(settling); });
   const single = await runShell(`${sharingSetup} AUTH=fixture
 value=$(sharing_api_observe "$PORT" "$QUERY" s rows '{"contextGraphId":"fixture"}') || devnet_observation_abort

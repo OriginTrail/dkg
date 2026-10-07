@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Bash 3.2. New helper results: PASS/0, FAIL/1, INCONCLUSIVE/2.
+# Bash 3.2. New helper results: PASS/0, FAIL/1, INCONCLUSIVE/2, and SETTLING/3
+# for the poll form only (devnet_query_api_settling).
 # The capture always writes a frame; it never substitutes a transport failure
 # with a successful body. Consumers MUST check the parser's status explicitly.
 devnet_capture() {
