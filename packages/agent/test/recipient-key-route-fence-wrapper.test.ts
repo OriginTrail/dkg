@@ -2,7 +2,7 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, STORE_OPERATION_OUTCOME_TAG, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 
 import { RECIPIENT_KEY_ROUTE_PREDICATES } from '../src/internal/recipient-key-route-fence.js';
 import { commitInput } from './_helpers/rfc64-commit-input.js';
@@ -148,6 +148,33 @@ describe('recipient key/route fence through the production store wrapper (GH#306
     const before = fence.revision;
     await wrapper.dropGraph('urn:dkg:graph:late');
     expect(fence.revision).toBeGreaterThan(before);
+  });
+
+  it('trusts the graphs again after an UPDATE that was refused before dispatch, which cannot have committed', async () => {
+    const refused = Object.assign(new Error('rejected'), {
+      storeOperationOutcomeTag: STORE_OPERATION_OUTCOME_TAG,
+      storeOperation: 'query',
+      outcome: 'not_started',
+    });
+    const { wrapper, fence } = await open({
+      inner: (inner) => new Proxy(inner, {
+        get: (target, property) => property === 'query'
+          ? async (sparql: string) => {
+            if (/^\s*INSERT/i.test(sparql)) throw refused;
+            return target.query(sparql);
+          }
+          : (typeof Reflect.get(target, property) === 'function'
+            ? (Reflect.get(target, property) as (...args: unknown[]) => unknown).bind(target)
+            : Reflect.get(target, property)),
+      }),
+    });
+    await expect(wrapper.query(`INSERT DATA { GRAPH <urn:dkg:graph:late> { <${AGENT}> <${DKG_ONTOLOGY.DKG_PEER_ID}> "p" } }`))
+      .rejects.toThrow('rejected');
+    await fence.ensureReady();
+
+    const before = fence.revision;
+    await wrapper.dropGraph(`${CG_DID}/never-held-keys`);
+    expect(fence.revision).toBe(before);
   });
 
   it('does not take a key fact stored under an unsafe graph name for one stored under that name', async () => {
