@@ -2496,7 +2496,6 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     }
 
     await this.store.insert(quads);
-    this.contextGraphMetaProjection.markDirtyFromQuads(quads);
     await gm.ensureNewContextGraph(opts.id);
 
     this.subscribeToContextGraph(opts.id, { syncMode: 'always-on' });
