@@ -68,7 +68,7 @@ export interface SwmTargetExecutorPortsV1 {
     SharedMemorySyncContext['resolveRootSnapshotAtomicCompanion'];
   readonly recordDrops: OversizeGuardHooks['recordDrops'];
   readonly invalidateListContextGraphsCache: () => void;
-  readonly markMetaProjectionDirty: (quads: Quad[]) => void;
+  readonly markMetaProjectionDirty?: (quads: Quad[]) => void;
   readonly recoveryMutation: SwmRecoveryMutationRuntimeV1;
   readonly setCheckpoint: RecoverContextGraphSwmOptions['setCheckpoint'];
   readonly deleteCheckpoint: RecoverContextGraphSwmOptions['deleteCheckpoint'];
@@ -261,7 +261,7 @@ export class SwmTargetExecutorV1 {
         { recordDrops: this.#ports.recordDrops },
         'swm-sync',
       );
-      this.#ports.markMetaProjectionDirty(inserted);
+      this.#ports.markMetaProjectionDirty?.(inserted);
     };
     return runSharedMemorySync({
       mode,
