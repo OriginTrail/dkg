@@ -9,6 +9,8 @@ import {
   type CanonicalGraphScopedAuthorSealV1,
 } from '@origintrail-official/dkg-core';
 
+import { mapRfc64CpuSlicedV1 } from './cpu-slice-v1.js';
+
 import {
   assertExactFieldSetV1,
   snapshotPlainDataRecordV1,
@@ -46,6 +48,24 @@ export function snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1(
   input: unknown,
   label = 'RFC-64 catalog successor assets',
 ): readonly Readonly<Rfc64PublicCatalogSuccessorAssetInputV1>[] {
+  const result = snapshotAssetInputs(input, label).map((asset, index) =>
+    snapshotRfc64PublicCatalogSuccessorAssetV1(asset, `${label}[${index}]`));
+  return sortExactAssets(result, label);
+}
+
+/** Own every caller byte and primitive seal field before the first yield. */
+export async function snapshotAndSortRfc64PublicCatalogSuccessorAssetsSlicedV1(
+  input: unknown,
+  label = 'RFC-64 catalog successor assets',
+  signal?: AbortSignal,
+): Promise<readonly Readonly<Rfc64PublicCatalogSuccessorAssetInputV1>[]> {
+  const owned = snapshotAssetInputs(input, label);
+  const result = await mapRfc64CpuSlicedV1(owned, (asset, index) =>
+    snapshotRfc64PublicCatalogSuccessorAssetV1(asset, `${label}[${index}]`), signal);
+  return sortExactAssets(result, label);
+}
+
+function snapshotAssetInputs(input: unknown, label: string): Readonly<Rfc64PublicCatalogSuccessorAssetInputV1>[] {
   if (!Array.isArray(input) || Object.getPrototypeOf(input) !== Array.prototype) {
     throw new TypeError(`${label} must be an ordinary Array`);
   }
@@ -66,17 +86,32 @@ export function snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1(
   ) {
     throw new TypeError(`${label} must be a dense data array`);
   }
-  const result: Readonly<Rfc64PublicCatalogSuccessorAssetInputV1>[] = [];
+  const owned: Readonly<Rfc64PublicCatalogSuccessorAssetInputV1>[] = [];
   for (let index = 0; index < input.length; index += 1) {
     const descriptor = Object.getOwnPropertyDescriptor(input, String(index));
     if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
       throw new TypeError(`${label} must contain only enumerable data elements`);
     }
-    result.push(snapshotRfc64PublicCatalogSuccessorAssetV1(
-      descriptor.value,
-      `${label}[${index}]`,
-    ));
+    const record = snapshotPlainDataRecordV1(descriptor.value, `${label}[${index}]`);
+    assertExactFieldSetV1(record, ['assertionCoordinate', 'projectionBytes', 'seal'], label);
+    if (!(record.projectionBytes instanceof Uint8Array)) throw new TypeError(`${label}.projectionBytes must be a Uint8Array`);
+    const seal = snapshotPlainDataRecordV1(record.seal, `${label}[${index}].seal`);
+    if (Object.values(seal).some((value) => value !== null && typeof value === 'object')) {
+      throw new TypeError(`${label}.seal must contain primitive fields`);
+    }
+    owned.push(Object.freeze({
+      assertionCoordinate: record.assertionCoordinate as AssertionCoordinateV1,
+      projectionBytes: new Uint8Array(record.projectionBytes),
+      seal: Object.freeze({ ...seal }) as unknown as CanonicalGraphScopedAuthorSealV1,
+    }));
   }
+  return owned;
+}
+
+function sortExactAssets(
+  result: Readonly<Rfc64PublicCatalogSuccessorAssetInputV1>[],
+  label: string,
+): readonly Readonly<Rfc64PublicCatalogSuccessorAssetInputV1>[] {
   result.sort((left, right) => compareAuthorCatalogKaIdsV1(
     left.seal.reservedKaId,
     right.seal.reservedKaId,

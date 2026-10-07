@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-
 /**
  * RFC-64 Gate 1 public author-catalog wiring, extracted as a DKGAgent mixin
  * holder. Methods take `this: DKGAgent` so cross-mixin calls resolve against
@@ -17,7 +16,6 @@
  * Gate-1 boundary: staging a fetched head is the terminal step. Nothing here
  * admits candidate rows or activates KA / SWM / VM state.
  */
-
 import { type Rfc64CatalogTargetLeaseV1, Rfc64CatalogTargetTrackerV1, rfc64CatalogTargetExactIdentityKeyV1 } from './rfc64/catalog-operational-targets-v1.js';
 import { evaluateRfc64CatalogCompletionV1 } from './rfc64/catalog-completion-evidence-v1.js';
 export { RFC64_CATALOG_TARGET_MAX_ENTRIES_V1, RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1, type Rfc64CatalogTargetLeaseV1, Rfc64CatalogTargetTrackerV1, rfc64CatalogTargetExactIdentityKeyV1, projectRfc64OperationalRowCountsV1 } from './rfc64/catalog-operational-targets-v1.js';
@@ -348,6 +346,7 @@ export interface PublishAuthorCatalogExactSetSuccessorParamsV1 {
   readonly deployment: CatalogSealDeploymentProfileV1;
   readonly issuedAt?: TimestampMsV1;
   readonly peers: readonly string[];
+  readonly signal?: AbortSignal;
 }
 
 export type Rfc64OpenCatalogSuccessorAssetInputV1 =
@@ -4948,6 +4947,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         signDigest: (objectDigest) => params.author.signMessage(objectDigest),
       },
       catalogIssuerAuthorization: params.catalogIssuerAuthorization,
+      signal: params.signal,
     });
     const head = produced.publication.head;
     const headKeys = produced.stagedControlObjects.objects.find(

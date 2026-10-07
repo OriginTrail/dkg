@@ -44,6 +44,7 @@
     "./dist/rfc64/catalog-repair-diagnostics-v1.js": null,
     "./dist/rfc64/catalog-repair-retry-v1.js": null,
     "./dist/rfc64/abort-v1.js": null,
+    "./dist/rfc64/cpu-slice-v1.js": null,
     "./dist/rfc64/catalog-mutation-runtime-v1.js": null,
     "./dist/rfc64/catalog-replay-connection-runtime-v1.js": null,
     "./dist/rfc64/catalog-replay-generation-v1.js": null,

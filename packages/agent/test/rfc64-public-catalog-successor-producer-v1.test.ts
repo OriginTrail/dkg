@@ -23,6 +23,7 @@ import {
 } from '../src/rfc64/public-catalog-successor-producer-v1.js';
 import {
   snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1,
+  snapshotAndSortRfc64PublicCatalogSuccessorAssetsSlicedV1,
 } from '../src/rfc64/public-catalog-successor-asset-v1.js';
 import { RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1 } from '../src/rfc64/public-catalog-native-transport-v1.js';
 import { verifyAuthorCatalogBucketRowAuthorshipsV1 } from '../src/rfc64/catalog-row-authorship.js';
@@ -64,6 +65,51 @@ const DEPLOYMENT = Object.freeze({
 }) as CatalogSealDeploymentProfileV1;
 
 describe('RFC-64 public/open one-row successor producer', () => {
+  it('owns all caller bytes and seals before yielding between snapshot verification rows', async () => {
+    const seal = { ...await authorSeal(AUTHOR_WALLET) };
+    const bytes = new Uint8Array(PROJECTION);
+    let clock = 0;
+    const now = vi.spyOn(performance, 'now').mockImplementation(() => clock += 30);
+    try {
+      const pending = snapshotAndSortRfc64PublicCatalogSuccessorAssetsSlicedV1([
+        { assertionCoordinate: 'gate-1-object' as never, projectionBytes: bytes, seal },
+      ]);
+      bytes.fill(0);
+      seal.authorAddress = ATTACKER_WALLET.address.toLowerCase() as EvmAddressV1;
+      const assets = await pending;
+      expect(assets[0].projectionBytes).toEqual(PROJECTION);
+      expect(assets[0].seal.authorAddress).toBe(AUTHOR);
+    } finally { now.mockRestore(); }
+  });
+
+  it('runs macrotasks during verification and aborts before signing or staging', async () => {
+    const { genesis, authorization } = await producerHistory();
+    const seal = await authorSeal(AUTHOR_WALLET);
+    const stageKaBundle = vi.fn(durableBundleReceipt);
+    const stageVerifiedObjects = vi.fn(async () => undefined as never);
+    const signer = { ...catalogSigner(), signDigest: vi.fn(catalogSigner().signDigest) };
+    const controller = new AbortController();
+    const reason = new Error('cancelled during catalog verification');
+    let clock = 0;
+    const now = vi.spyOn(performance, 'now').mockImplementation(() => clock += 30);
+    try {
+      setImmediate(() => controller.abort(reason));
+      const producer = new Rfc64PublicCatalogSuccessorProducerV1({
+        controlObjects: { stageVerifiedObjects } as never, stageKaBundle,
+      });
+      await expect(producer.produceAndStageExactSet({
+        previousHead: genesis.head, previousDirectoryPath: genesis.directoryPath,
+        previousBucket: null,
+        assets: [{ assertionCoordinate: 'gate-1-object' as never, projectionBytes: PROJECTION, seal }],
+        deployment: DEPLOYMENT, issuedAt: '1773900001000' as never,
+        catalogSigner: signer, catalogIssuerAuthorization: authorization, signal: controller.signal,
+      })).rejects.toBe(reason);
+      expect(signer.signDigest).not.toHaveBeenCalled();
+      expect(stageKaBundle).not.toHaveBeenCalled();
+      expect(stageVerifiedObjects).not.toHaveBeenCalled();
+    } finally { now.mockRestore(); }
+  });
+
   it('verifies the exact successor before staging its bundle and signed objects', async () => {
     const { genesis, authorization } = await producerHistory();
     const events: string[] = [];

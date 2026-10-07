@@ -17,6 +17,16 @@ dkg publisher enable
 dkg publisher publish-async <context-graph-id> <name>
 ```
 
+## Receipt, finality, and local completion
+
+A job enters `broadcast` when its signed transaction is durably recorded before send. Receipt confirmation can trigger reconciliation while the executor finishes local work. The reconciler independently checks the transaction at the configured confirmation depth and binds canonical publish evidence to that job before writing `included` and releasing its wallet. `finalized` also requires the executor to settle, local lifecycle repair/private staging to complete, and the final job record to be persisted. An `included` job can therefore have already reached chain finality while local work remains.
+
+`GET /api/publisher/job?id=<id>` and `GET /api/publisher/jobs` expose `timestamps.receiptObservedAt` and `timestamps.finalityObservedAt` (Unix milliseconds). The first records the receipt-confirmation callback or inclusion evidence; the second records canonical recovery evidence at the configured confirmation depth. They are distinct from `includedAt` and `finalizedAt`, which describe job transitions. Receipt observations are diagnostics and never release a wallet or authorize a publish. Observations are matched to the job's transaction hash, exposed immediately in the running process, and persisted at the next state transition; a restart before that transition can lose the observation. Older jobs and local-only finalizations can omit these fields.
+
+RFC-64 exact-set verification yields between rows after roughly 25 ms of work, allowing receipt polling and store timers to progress. Every row still passes verification before signing and bundle/control-object staging. One large row or whole-object codec operation can take longer than a slice.
+
+The default scheduler has four total slots (capped by available logical CPUs), with one slot each reserved for ACK and health work. This leaves two shared normal/background slots on a four-CPU host. Background work protects one normal slot and uses at most one slot by default. These are intentional backend admission limits, rather than a count of publisher wallets; six wallets do not imply six concurrent store operations. `DKG_STORE_MAX_CONCURRENT` and the lane reservation settings control these limits. Job-state reads/writes and post-confirmation store work use this scheduler, and the daemon's main event loop also gates their completion.
+
 ## Admission retries
 
 Before `POST /api/knowledge-assets/{name}/vm/publish-async` enqueues a job, it verifies the immutable SWM snapshot. Temporary store pressure or recovery returns `503` with `code: "STORE_SCHEDULER_BUSY"` or `"STORE_OPERATION_TIMEOUT"`, `retryable: true`, and `Retry-After: 1`. Retry the same request after the store recovers without re-sharing valid content. A genuine snapshot mismatch still returns `409 PUBLISH_INTENT_STALE`; so does a finalized update that is not numbered one above the KA's latest confirmed version, which could never be published (see [Stale update intents](#stale-update-intents) below and [Editing a published Knowledge Asset](knowledge-asset-lifecycle.md#editing-a-published-knowledge-asset)).

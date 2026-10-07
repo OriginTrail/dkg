@@ -21,6 +21,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 
+import { createRfc64CpuSliceV1 } from './rfc64/cpu-slice-v1.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
@@ -513,6 +514,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       deployment: params.deployment,
       issuedAt: Date.now().toString() as TimestampMsV1,
       peers: [],
+      signal,
     });
     throwIfAbortedV1(signal);
     const appliedInventoryDigest = computeRfc64AppliedInventoryDigestV1({
@@ -698,7 +700,9 @@ async function loadRfc64CatalogSuccessorAssetsV1(
   history: BoundedAuthorCatalogHistoryV1,
 ): Promise<Rfc64CatalogSuccessorAssetInputV1[]> {
   const assets: Rfc64CatalogSuccessorAssetInputV1[] = [];
+  const checkpoint = createRfc64CpuSliceV1();
   for (const row of history.previousBucket?.payload.rows ?? []) {
+    await checkpoint();
     const bundleBytes = await persistence.kaBundles.readKaBundleByDigest(row.transfer.blobDigest);
     if (bundleBytes === null) {
       throw new Error(`RFC-64 applied catalog bundle ${row.transfer.blobDigest} is unavailable`);

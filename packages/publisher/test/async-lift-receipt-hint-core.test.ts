@@ -18,6 +18,37 @@ describe('receipt-hint lane: core and evidence', () => {
     h = createReceiptHintHarness();
   });
 
+  it('exposes observations before the executor tail, and persists them with inclusion', async () => {
+    const { publisher, jobId, releaseTail } = await h.parkedHintScenario();
+    try {
+      const broadcast = await publisher.getStatus(jobId);
+      expect(broadcast?.status).toBe('broadcast');
+      const receiptAt = broadcast?.timestamps.receiptObservedAt;
+      expect(receiptAt).toBeGreaterThan(0);
+      expect(broadcast?.timestamps.finalityObservedAt).toBeUndefined();
+      expect((await publisher.list()).find((job) => job.jobId === jobId)?.timestamps.receiptObservedAt).toBe(receiptAt);
+      await publisher.recover();
+      const included = await publisher.getStatus(jobId);
+      expect(included?.status).toBe('included');
+      expect(included?.timestamps.receiptObservedAt).toBe(receiptAt);
+      expect(included?.timestamps.finalityObservedAt).toBeGreaterThanOrEqual(receiptAt!);
+      expect(included?.timestamps.finalityObservedAt).toBeLessThanOrEqual(included!.timestamps.includedAt!);
+      const restarted = h.createPublisher();
+      expect((await restarted.getStatus(jobId))?.timestamps).toEqual(included?.timestamps);
+      releaseTail();
+      await publisher.drainDetachedExecutions?.();
+      await publisher.recover();
+      const finalized = await publisher.getStatus(jobId);
+      expect(finalized?.status).toBe('finalized');
+      expect(finalized?.timestamps.receiptObservedAt).toBe(receiptAt);
+      expect(finalized?.timestamps.finalityObservedAt).toBe(included?.timestamps.finalityObservedAt);
+      expect(finalized?.timestamps.finalizedAt).toBeGreaterThanOrEqual(finalized!.timestamps.finalityObservedAt!);
+    } finally {
+      releaseTail();
+      await publisher.drainDetachedExecutions?.();
+    }
+  });
+
   it('frees the wallet through the receipt hint while the executor tail is still running', async () => {
     // GH#2359 item 2 - the headline discriminator. The executor confirms its receipt (fires
     // onPublishConfirmed) and then PARKS in its local post-receipt tail. Without the hint lane,
@@ -101,6 +132,7 @@ describe('receipt-hint lane: core and evidence', () => {
     await publisher.reconcileTransactions();
     await publisher.reconcileTransactions();
     expect((await publisher.getStatus(jobId))?.status).toBe('broadcast');
+    expect((await publisher.getStatus(jobId))?.timestamps.receiptObservedAt).toBeUndefined();
     await h.expectWalletLock('wallet-1', 'held');
 
     // The normal settle path is untouched: tail settles, the demanded pass proves and finalizes.

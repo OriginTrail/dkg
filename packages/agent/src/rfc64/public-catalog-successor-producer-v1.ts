@@ -50,6 +50,8 @@ import {
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 
+import { createRfc64CpuSliceV1, mapRfc64CpuSlicedV1 } from './cpu-slice-v1.js';
+import { throwIfRfc64AbortedV1 } from './abort-v1.js';
 import { mapWithConcurrencySettled } from '../map-with-concurrency.js';
 import {
   readVerifiedAuthorCatalogRowAuthorshipV1,
@@ -72,7 +74,7 @@ import {
   addRfc64PublicCatalogExactSetBundleBytesV1,
 } from './public-catalog-native-transport-v1.js';
 import {
-  snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1,
+  snapshotAndSortRfc64PublicCatalogSuccessorAssetsSlicedV1,
   type Rfc64PublicCatalogSuccessorAssetInputV1,
 } from './public-catalog-successor-asset-v1.js';
 
@@ -144,6 +146,7 @@ export interface ProduceAndStagePublicOpenOneRowSuccessorInputV1 {
   readonly catalogSigner: Rfc64AuthorCatalogEip191SignerV1;
   /** Exact author/delegation closure authorizing the catalog signer for this lane. */
   readonly catalogIssuerAuthorization: Rfc64PublicCatalogIssuerAuthorizationV1;
+  readonly signal?: AbortSignal;
 }
 
 /**
@@ -162,6 +165,7 @@ export interface ProduceAndStagePublicOpenExactSetSuccessorInputV1 {
   readonly issuedAt: TimestampMsV1;
   readonly catalogSigner: Rfc64AuthorCatalogEip191SignerV1;
   readonly catalogIssuerAuthorization: Rfc64PublicCatalogIssuerAuthorizationV1;
+  readonly signal?: AbortSignal;
 }
 
 export interface ProducedAndStagedPublicOpenOneRowSuccessorV1 {
@@ -236,6 +240,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
       issuedAt: input.issuedAt,
       catalogSigner: input.catalogSigner,
       catalogIssuerAuthorization: input.catalogIssuerAuthorization,
+      signal: input.signal,
     });
     const asset = result.assets[0];
     if (asset === undefined) {
@@ -261,13 +266,15 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
   async produceAndStageExactSet(
     input: ProduceAndStagePublicOpenExactSetSuccessorInputV1,
   ): Promise<ProducedAndStagedPublicOpenExactSetSuccessorV1> {
-    const preparedAssets = prepareExactSet(input);
+    const preparedAssets = await prepareExactSet(input);
+    const checkpoint = createRfc64CpuSliceV1(input.signal);
     assertSupportedPreviousSlice(input.previousHead, input.previousBucket);
 
     // Strict typed-row reconstruction, exact deployment binding, and the
     // recoverable EOA author proof all run for the complete set before signing
     // a catalog object or performing I/O.
     for (const prepared of preparedAssets) {
+      await checkpoint();
       try {
         const initialSealBinding = verifyCatalogSealBindingV1(
           prepared.scope,
@@ -289,6 +296,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
 
     let publication: ProducedAuthorCatalogPublicationV1;
     try {
+      throwIfRfc64AbortedV1(input.signal);
       publication = await produceSparseAuthorCatalogSuccessorV1({
         previousHead: input.previousHead,
         previousDirectoryPath: input.previousDirectoryPath,
@@ -324,7 +332,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
       );
     }
 
-    const verifiedAssets = producedRows.map((producedRow, index) => {
+    const verifiedAssets = await mapRfc64CpuSlicedV1(producedRows, (producedRow, index) => {
       const prepared = preparedAssets[index];
       if (prepared === undefined || producedRow.kaId !== prepared.row.kaId) {
         fail(
@@ -368,7 +376,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
           cause,
         );
       }
-    });
+    }, input.signal);
 
     let verifiedObjects;
     let authorship: readonly VerifiedAuthorCatalogRowAuthorshipSnapshotV1[];
@@ -442,10 +450,12 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
         row.transfer.blobDigest,
       ] as const),
     );
+    throwIfRfc64AbortedV1(input.signal);
     const bundleStageResults = await mapWithConcurrencySettled(
       verifiedAssets,
       RFC64_SUCCESSOR_BUNDLE_IO_CONCURRENCY_V1,
       async ({ prepared, row }): Promise<void> => {
+        throwIfRfc64AbortedV1(input.signal);
         try {
           if (
             previousBundleByKaId.get(row.kaId) === prepared.encoded.blobDigest
@@ -479,6 +489,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
 
     let stagedControlObjects: StageVerifiedControlObjectsResultV1;
     try {
+      throwIfRfc64AbortedV1(input.signal);
       stagedControlObjects = await this.#stageVerifiedObjects(verifiedObjects);
     } catch (cause) {
       fail(
@@ -488,7 +499,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
       );
     }
 
-    const assets = verifiedAssets.map((verified, index) => {
+    const assets = await mapRfc64CpuSlicedV1(verifiedAssets, (verified, index) => {
       const rowAuthorship = authorship[index];
       if (rowAuthorship === undefined) {
         fail(
@@ -505,7 +516,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
         projection: verified.projection,
         authorship: rowAuthorship,
       });
-    });
+    }, input.signal);
     return Object.freeze({
       publication,
       assets: Object.freeze(assets),
@@ -522,19 +533,23 @@ function bytesEqualV1(left: Uint8Array, right: Uint8Array): boolean {
   return true;
 }
 
-function prepareExactSet(input: ProduceAndStagePublicOpenExactSetSuccessorInputV1) {
+async function prepareExactSet(input: ProduceAndStagePublicOpenExactSetSuccessorInputV1) {
   let assets: readonly Readonly<Rfc64PublicCatalogSuccessorAssetInputV1>[];
   try {
-    assets = snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1(
+    assets = await snapshotAndSortRfc64PublicCatalogSuccessorAssetsSlicedV1(
       input?.assets,
       'RFC-64 successor assets',
+      input.signal,
     );
   } catch (cause) {
+    throwIfRfc64AbortedV1(input?.signal);
     fail('catalog-successor-producer-input', 'assets are not one canonical exact set', cause);
   }
   const snapshots: PreparedRfc64PublicCatalogSuccessorAssetSnapshotV1[] = [];
   let aggregateBundleBytes = 0n;
+  const checkpoint = createRfc64CpuSliceV1(input.signal);
   for (const asset of assets) {
+    await checkpoint();
     try {
       // Reject a projection that cannot possibly fit the Gate-1 transport
       // before allocating its detached snapshot.
@@ -573,11 +588,11 @@ function prepareExactSet(input: ProduceAndStagePublicOpenExactSetSuccessorInputV
       );
     }
   }
-  const prepared = snapshots.map((snapshot) => prepareRowAndBundle(
+  const prepared = await mapRfc64CpuSlicedV1(snapshots, (snapshot) => prepareRowAndBundle(
     snapshot,
     input.previousHead,
     input.deployment,
-  ));
+  ), input.signal);
   return Object.freeze(prepared);
 }
 

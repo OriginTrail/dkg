@@ -1,3 +1,4 @@
+import { LiftJobChainObservations } from './lift-job-chain-observations.js';
 import type { PreBroadcastRecord } from './publisher.js';
 import { bestEffortNotify } from './best-effort-notify.js';
 import { resolveWithinAbort } from '@origintrail-official/dkg-core';
@@ -577,6 +578,7 @@ export class TripleStoreAsyncLiftPublisher
    * consumes it instead of re-paying the chain reads. Bounded FIFO; entries are dropped on
    * consumption, invalidation (hash mismatch / terminal disposition), or eviction.
    */
+  private readonly chainObservations = new LiftJobChainObservations(() => this.now());
   private readonly executorProofHints = new Map<string, {
     readonly txHash: string;
     proof?: {
@@ -853,7 +855,7 @@ export class TripleStoreAsyncLiftPublisher
 
   async getStatus(jobId: string): Promise<PersistedLiftJob | null> {
     await this.ensureGraph();
-    return decodedLiftJobOrThrow(await this.readJobPayload(jobId));
+    return this.chainObservations.project(decodedLiftJobOrThrow(await this.readJobPayload(jobId)));
   }
 
   private async readJobPayload(jobId: string): Promise<LiftJobPayloadDecodeResult> {
@@ -952,6 +954,7 @@ export class TripleStoreAsyncLiftPublisher
     return expectBindings(result)
       .map((row) => this.parseJobPayloadForScan(row['payload']))
       .filter((job): job is PersistedLiftJob => job !== null)
+      .map((job) => this.chainObservations.project(job))
       .sort(compareAcceptedJobs);
   }
 
@@ -1261,6 +1264,7 @@ export class TripleStoreAsyncLiftPublisher
           // reads while the executor finishes its local post-receipt tail. Never trusted as
           // evidence.
           onPublishConfirmed: (confirmation: { txHash: string }) => {
+            this.chainObservations.receipt(claimed.jobId, confirmation.txHash);
             if (canReleaseOnReceiptHint) {
               this.recordExecutorProofHint(claimed.jobId, confirmation);
             }
@@ -1567,6 +1571,7 @@ export class TripleStoreAsyncLiftPublisher
             unresolved += 1;
             return;
           }
+          this.chainObservations.finality(current.jobId, persistedTxHash);
           // The node has observed inclusion through its OWN canonical proof: stamp it
           // truthfully, then free the wallet (write-before-release — the poke must find
           // claim-visible state). A retry that already persisted 'included' skips the write.
@@ -1902,32 +1907,16 @@ export class TripleStoreAsyncLiftPublisher
     preResolved?: AsyncKnowledgeAssetVmPublishRecoveryEvidence,
   ): Promise<'finalized' | 'unresolved' | 'repair-deferred' | 'unsupported'> {
     if (!this.knowledgeAssetVmPublishRecoveryResolver) return 'unresolved';
-    // r26 (🔴 3821028709) — the race bounds the WAIT, it does not cancel the loser, and r25 put
-    // the MUTATING repair inside it. My reasoning there was wrong in a specific way: I argued the
-    // tolerance was the same as a crash in this window. It is not. A crash is fail-STOP; an
-    // abandoned promise is fail-CONTINUE, and it keeps writing lifecycle state after the pass has
-    // returned and released its serialization — overlapping a later pass or live queue work.
-    //
-    // So the split is by MUTABILITY, not by convenience:
-    //   - evidence resolution is READ-ONLY, so abandoning it costs nothing but a wasted RPC. Raced.
-    //   - `finalizeRecovered` MUTATES, so it is never abandoned. It is given the deadline signal
-    //     and then AWAITED to termination, and an in-flight guard keeps a second pass from
-    //     entering it concurrently even if something else goes wrong.
-    //
-    // The honest consequence, stated rather than hidden: a handler that ignores the signal and
-    // never returns holds the pass open. That is deliberate. Blocking is strictly safer than a
-    // repair racing the queue it was supposed to reconcile, and it is a handler defect we would
-    // rather surface than paper over.
-    // --- read-only phase: raced through the ONE lazy abort boundary, safe to abandon
-    // (skipped when the early release already resolved the canonical evidence). A deadline
-    // win and a resolver that answered null both mean the same thing here: unresolved, no
-    // transition (r4 3877695872 — the former symbol sentinel distinguished two paths that
-    // returned identically).
+    // Evidence resolution is read-only and may be abandoned at its deadline.
+    // Local repair mutates lifecycle state: await it to termination and retain
+    // its in-flight guard so it cannot race a later pass or a live executor.
+    // An early release may already have established the canonical evidence.
     const resolved = preResolved ?? await resolveWithinAbort(
       () => this.knowledgeAssetVmPublishRecoveryResolver!(job, origin.lookup, verdictRecovery, options),
       options?.signal,
     );
     if (!resolved) return 'unresolved';
+    if (resolved.inclusion.txHash.toLowerCase() === origin.txHash.toLowerCase()) this.chainObservations.finality(job.jobId, origin.txHash);
     if (
       !this.knowledgeAssetVmPublishHandler?.finalizeRecovered
       || !isKnowledgeAssetVmPublishJobRequest(job.request)
@@ -3382,7 +3371,10 @@ export class TripleStoreAsyncLiftPublisher
     status: LiftJobState,
     data: LiftJobTransitionPatch,
   ): LiftJob {
-    return buildCanonicalLiftJobAdministrativeTransition(current, status, data, this.now());
+    const next = buildCanonicalLiftJobAdministrativeTransition(current, status, data, this.now());
+    if (status === 'included' && next.broadcast) this.chainObservations.receipt(next.jobId, next.broadcast.txHash);
+    if (status === 'finalized' && next.broadcast) this.chainObservations.finality(next.jobId, next.broadcast.txHash);
+    return this.chainObservations.project(next);
   }
 
   /**
@@ -3567,6 +3559,8 @@ export class TripleStoreAsyncLiftPublisher
     inclusion: LiftJobInclusionMetadata,
     finalization: LiftJobFinalizationInput,
   ): LiftJob {
+    this.chainObservations.finality(job.jobId, origin.txHash);
+    job = this.chainObservations.project(job);
     const now = this.now();
     const { failure: _dropped, ...withoutFailure } = job as PersistedLiftJob & { failure?: unknown };
     // PR #2300 r10 (3812960758) — a published-finalized record must CARRY its broadcast metadata,
