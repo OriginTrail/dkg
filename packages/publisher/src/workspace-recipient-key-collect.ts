@@ -4,9 +4,9 @@ import {
   sparqlString,
 } from '@origintrail-official/dkg-core';
 import { WORKSPACE_RECIPIENT_DEPENDENCIES } from './workspace-recipient-dependencies.js';
-import { stripRdfLiteral } from './workspace-recipient-key-verification.js';
+import { loadVerifiedRevokedKeyIds, stringBinding, stripRdfLiteral, type EncryptionKeyMaterial } from './workspace-recipient-key-verification.js';
 
-import { COMPLETE_KEY_ROW_LIMIT, COMPLETE_ROUTE_ROW_LIMIT, type PublicKeyRoute } from './workspace-recipient-key-candidates.js';
+import { COMPLETE_KEY_ROW_LIMIT, COMPLETE_ROUTE_ROW_LIMIT, type PublicKeyRoute, type PublicKeyCandidate, RECIPIENT_KEY_HISTORY_PAGE_SIZE, RECIPIENT_KEY_CANDIDATE_LIMIT } from './workspace-recipient-key-candidates.js';
 
 const { keyRoute: KEY_ROUTE } = WORKSPACE_RECIPIENT_DEPENDENCIES;
 
@@ -68,4 +68,114 @@ export async function collectWorkspaceAgentKeyEvidence(
   const keySet = new Set(keys);
   if (routes.some((route) => !keySet.has(route.key))) return incomplete();
   return { completeness: 'complete', keys, proofs, routes };
+}
+
+/** Normalized retrieval source; validation never sees query bindings or paging cursors. */
+export interface WorkspaceAgentKeySource {
+  keyPages(): AsyncIterable<readonly string[]>;
+  proofPages(): AsyncIterable<readonly string[]>;
+  readRetirements(candidates: readonly EncryptionKeyMaterial[]): Promise<Set<string>>;
+  routes(candidates: readonly PublicKeyCandidate[]): Promise<readonly PublicKeyRoute[]>;
+  hasUnsupportedAlgorithm(candidates: readonly PublicKeyCandidate[]): Promise<boolean>;
+  finalRevocations(candidates: readonly EncryptionKeyMaterial[]): Promise<Set<string>>;
+}
+
+async function* onePage(values: readonly string[]): AsyncIterable<readonly string[]> {
+  if (values.length > 0) yield values;
+}
+
+async function* keysetPages(
+  store: TripleStore, checksum: string, agentUriValues: string, graphFilter: string,
+  column: 'key' | 'proof', predicate: string,
+): AsyncIterable<readonly string[]> {
+  let cursor: string | undefined;
+  while (true) {
+    const cursorFilter = cursor === undefined ? '' : `FILTER (?${column} > ${sparqlString(cursor)})`;
+    const page = await store.query(`SELECT DISTINCT ?${column} WHERE {
+      VALUES ?agentSubject { ${agentUriValues} }
+      GRAPH ?g { ?agentSubject <${predicate}> ?rawValue }
+      BIND (STR(?rawValue) AS ?${column})
+      ${graphFilter} ${cursorFilter}
+    } ORDER BY ?${column} LIMIT ${RECIPIENT_KEY_HISTORY_PAGE_SIZE}`);
+    if (page.type !== 'bindings' || page.bindings.length === 0) return;
+    const values = page.bindings.flatMap((row) => {
+      const value = stringBinding(row[column]);
+      if (value === undefined && column === 'proof') return [];
+      return [value === undefined ? '' : stripRdfLiteral(value)];
+    });
+    yield values;
+    const lastValue = stringBinding(page.bindings.at(-1)?.[column]);
+    const nextCursor = lastValue === undefined ? undefined : stripRdfLiteral(lastValue);
+    if (!nextCursor || (cursor !== undefined && nextCursor <= cursor)) {
+      throw new Error(`Non-monotonic public encryption-key ${column === 'proof' ? 'proof ' : ''}history for DKG agent ${checksum}`);
+    }
+    cursor = nextCursor;
+    if (page.bindings.length < RECIPIENT_KEY_HISTORY_PAGE_SIZE) return;
+  }
+}
+
+/** Select bounded or paged retrieval once, retaining the final fresh-read policy of each. */
+export async function createWorkspaceAgentKeySource(
+  store: TripleStore, checksum: string, agentUriValues: string, graphFilter: string,
+): Promise<WorkspaceAgentKeySource> {
+  const evidence = await collectWorkspaceAgentKeyEvidence(store, agentUriValues, graphFilter);
+  const readRevocations = (candidates: readonly EncryptionKeyMaterial[]) =>
+    loadVerifiedRevokedKeyIds(store, checksum, candidates, graphFilter);
+  const hasUnsupportedAlgorithm = async (candidates: readonly PublicKeyCandidate[]): Promise<boolean> => {
+    const result = await store.query(`ASK {
+      VALUES ?agentSubject { ${agentUriValues} }
+      VALUES ?key { ${candidates.map((candidate) => sparqlString(candidate.encodedPublicKey)).join(' ')} }
+      GRAPH ?g { ?agentSubject <${KEY_ROUTE.publicKey}> ?rawKey ; <${KEY_ROUTE.algorithm}> ?algorithm }
+      ${graphFilter}
+      FILTER (STR(?rawKey) = ?key && STR(?algorithm) != ${sparqlString(WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519)})
+    }`);
+    return result.type === 'boolean' && result.value;
+  };
+  if (evidence.completeness === 'complete') {
+    let freshRevocations = new Set<string>();
+    return {
+      keyPages: () => onePage(evidence.keys),
+      proofPages: () => onePage(evidence.proofs),
+      readRetirements: async (candidates) => {
+        // All positive evidence was read together; this is the last store read on success.
+        freshRevocations = await readRevocations(candidates);
+        return freshRevocations;
+      },
+      routes: async (candidates) => {
+        const keys = new Set(candidates.map((candidate) => candidate.encodedPublicKey));
+        return evidence.routes.filter((route) => keys.has(route.key));
+      },
+      hasUnsupportedAlgorithm,
+      finalRevocations: async () => freshRevocations,
+    };
+  }
+  return {
+    keyPages: () => keysetPages(store, checksum, agentUriValues, graphFilter, 'key', KEY_ROUTE.publicKey),
+    proofPages: () => keysetPages(store, checksum, agentUriValues, graphFilter, 'proof', KEY_ROUTE.proof),
+    readRetirements: readRevocations,
+    hasUnsupportedAlgorithm,
+    finalRevocations: readRevocations,
+    routes: async (candidates) => {
+      const rowLimit = RECIPIENT_KEY_CANDIDATE_LIMIT + candidates.length + 1;
+      const result = await store.query(`SELECT DISTINCT ?key ?peerId WHERE {
+        VALUES ?agentSubject { ${agentUriValues} }
+        VALUES ?key { ${candidates.map((candidate) => sparqlString(candidate.encodedPublicKey)).join(' ')} }
+        GRAPH ?g {
+          ?agentSubject <${KEY_ROUTE.publicKey}> ?rawKey ;
+            <${KEY_ROUTE.algorithm}> ${sparqlString(WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519)} .
+          OPTIONAL { ?agentSubject <${KEY_ROUTE.peerId}> ?peerId }
+        }
+        ${graphFilter} FILTER (STR(?rawKey) = ?key)
+      } LIMIT ${rowLimit}`);
+      if (result.type !== 'bindings') return [];
+      if (result.bindings.length >= rowLimit) {
+        throw new Error(`Too many public encryption-key candidates for DKG agent ${checksum}`);
+      }
+      return result.bindings.flatMap((row) => {
+        const key = stringBinding(row['key']);
+        const peer = stringBinding(row['peerId']);
+        return key ? [{ key: stripRdfLiteral(key), peerId: peer ? stripRdfLiteral(peer) : undefined }] : [];
+      });
+    },
+  };
 }

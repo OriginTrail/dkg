@@ -905,6 +905,50 @@ describe('complete bounded recipient key collect', () => {
     } finally { await store.close(); }
   });
 
+  it.each(['key', 'proof'])('accepts an authenticated recipient with an empty %s binding last in complete evidence', async (column) => {
+    const store = new OxigraphStore();
+    try {
+      const wallet = ethers.Wallet.createRandom();
+      const key = await insertAgentEncryptionKey(store, wallet, { peerId: PEER_A });
+      await store.insert([{ subject: agentUri(wallet.address),
+        predicate: column === 'key' ? DKG_PUBLIC_ENCRYPTION_KEY : DKG_ENCRYPTION_KEY_PROOF,
+        object: '""', graph: AGENTS_GRAPH }]);
+      const query = store.query.bind(store);
+      vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+        const result = await query(sparql, options);
+        if (!sparql.includes('SELECT ?kind ?key ?proof ?peerId') || result.type !== 'bindings') return result;
+        const empty = (row: Record<string, string>) => row[column]?.replace(/^"|"$/g, '') === '';
+        return { ...result, bindings: [...result.bindings.filter((row) => !empty(row)), ...result.bindings.filter(empty)] };
+      });
+      const recipients = await resolveWorkspaceAgentRecipientKeys(store, wallet.address);
+      expect(recipients).toHaveLength(1);
+      expect(recipients[0]).toMatchObject({ recipientKeyId: key.keyId, peerId: PEER_A });
+    } finally { await store.close(); }
+  });
+
+  it('pages when only unsigned route noise saturates the bounded branch and retains the signed recipient', async () => {
+    const store = new OxigraphStore();
+    try {
+      const wallet = ethers.Wallet.createRandom();
+      const signed = await insertAgentEncryptionKey(store, wallet, { keyFill: 1, peerId: PEER_A });
+      for (let i = 0; i < 129; i++) {
+        await insertAgentEncryptionKey(store, wallet, { keyFill: 2, omitProof: true, peerId: `unsigned-peer-${i}`, graph: `urn:noise-${i}` });
+      }
+      const query = store.query.bind(store);
+      const calls = vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+        if (!sparql.includes('SELECT ?kind ?key ?proof ?peerId')) return query(sparql, options);
+        // UNION results have no ordering guarantee: select the 129 unsigned routes first.
+        const result = await query(sparql.replace('LIMIT 129', 'LIMIT 130'), options);
+        if (result.type !== 'bindings') throw new Error('expected real UNION bindings');
+        return { ...result, bindings: result.bindings.filter((row) => row.peerId?.replace(/^"|"$/g, '') !== PEER_A) };
+      });
+      const recipients = await resolveWorkspaceAgentRecipientKeys(store, wallet.address);
+      expect(recipients).toHaveLength(1);
+      expect(recipients[0]).toMatchObject({ recipientKeyId: signed.keyId, peerId: PEER_A });
+      expect(calls.mock.calls.some(([sparql]) => sparql.includes('ORDER BY ?key'))).toBe(true);
+    } finally { await store.close(); }
+  });
+
   it('falls back when a bounded branch cannot prove completeness', async () => {
     const store = new OxigraphStore();
     const wallet = ethers.Wallet.createRandom();
