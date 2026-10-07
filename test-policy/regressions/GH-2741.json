@@ -34,7 +34,7 @@
     "status": "proven",
     "method": "historical-replay",
     "receipt": "test-policy/regressions/evidence/GH-2741/receipt.json",
-    "receiptSha256": "0d350b49526df8614eb68f117dc5a72e2985348d2b1e8935fc106ea0d85c6a42"
+    "receiptSha256": "83207f4ee96687f1fc2f6e674400c2196afab9370d157d75391d45c759bb0a24"
   },
   "scope": "Production repair orchestration and readiness against a started DKGNode real peer store; the authenticated fetch result is a deterministic transport fixture."
 }

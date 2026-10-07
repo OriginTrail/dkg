@@ -3,16 +3,18 @@ Lockfile is up to date, resolution step is skipped
 Progress: resolved 1, reused 0, downloaded 0, added 0
 Packages: +1373
 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-Progress: resolved 1373, reused 1369, downloaded 0, added 118
-Progress: resolved 1373, reused 1369, downloaded 0, added 361
-Progress: resolved 1373, reused 1369, downloaded 0, added 667
-Progress: resolved 1373, reused 1369, downloaded 0, added 1038
-Progress: resolved 1373, reused 1369, downloaded 0, added 1337
+Progress: resolved 1373, reused 1369, downloaded 0, added 75
+Progress: resolved 1373, reused 1369, downloaded 0, added 224
+Progress: resolved 1373, reused 1369, downloaded 0, added 455
+Progress: resolved 1373, reused 1369, downloaded 0, added 804
+Progress: resolved 1373, reused 1369, downloaded 0, added 1040
+Progress: resolved 1373, reused 1369, downloaded 0, added 1196
+Progress: resolved 1373, reused 1369, downloaded 0, added 1369
 Progress: resolved 1373, reused 1369, downloaded 0, added 1372
 Progress: resolved 1373, reused 1369, downloaded 0, added 1373, done
- WARN  Failed to create bin at /private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/candidate/packages/cli/node_modules/.bin/dkg-mcp. ENOENT: no such file or directory, open '/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/candidate/packages/mcp-dkg/dist/index.js'
- WARN  Failed to create bin at /private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/candidate/packages/kafka-plugin/node_modules/.bin/dkg. ENOENT: no such file or directory, open '/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/candidate/packages/cli/dist/cli.js'
- WARN  Failed to create bin at /private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/candidate/node_modules/.bin/dkg. ENOENT: no such file or directory, open '/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/candidate/packages/cli/dist/cli.js'
+ WARN  Failed to create bin at /private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-HP5sbn/candidate/packages/cli/node_modules/.bin/dkg-mcp. ENOENT: no such file or directory, open '/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-HP5sbn/candidate/packages/mcp-dkg/dist/index.js'
+ WARN  Failed to create bin at /private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-HP5sbn/candidate/packages/kafka-plugin/node_modules/.bin/dkg. ENOENT: no such file or directory, open '/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-HP5sbn/candidate/packages/cli/dist/cli.js'
+ WARN  Failed to create bin at /private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-HP5sbn/candidate/node_modules/.bin/dkg. ENOENT: no such file or directory, open '/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-HP5sbn/candidate/packages/cli/dist/cli.js'
 
 devDependencies:
 + @origintrail-official/dkg 10.0.20 <- packages/cli
@@ -35,17 +37,17 @@ devDependencies:
 + vitest 4.0.18
 + yaml 2.9.0
 
- WARN  Failed to create bin at /private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/candidate/packages/cli/node_modules/.bin/dkg-mcp. ENOENT: no such file or directory, open '/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/candidate/packages/cli/node_modules/@origintrail-official/dkg-mcp/dist/index.js'
+ WARN  Failed to create bin at /private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-HP5sbn/candidate/packages/cli/node_modules/.bin/dkg-mcp. ENOENT: no such file or directory, open '/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-HP5sbn/candidate/packages/cli/node_modules/@origintrail-official/dkg-mcp/dist/index.js'
 packages/cli preinstall$ node ./scripts/verify-node-sqlite-runtime.mjs
-packages/cli preinstall: (node:82930) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+packages/cli preinstall: (node:3811) ExperimentalWarning: SQLite is an experimental feature and might change at any time
 packages/cli preinstall: (Use `node --trace-warnings ...` to show where the warning was created)
 packages/cli preinstall: Done
 packages/cli postinstall$ node ./scripts/bundle-markitdown-binaries.mjs --quiet --current-platform --best-effort
 packages/cli postinstall: Done
- WARN  Failed to create bin at /private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/candidate/packages/kafka-plugin/node_modules/.bin/dkg. ENOENT: no such file or directory, open '/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/candidate/packages/kafka-plugin/node_modules/@origintrail-official/dkg/dist/cli.js'
- WARN  Failed to create bin at /private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/candidate/node_modules/.bin/dkg. ENOENT: no such file or directory, open '/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/candidate/node_modules/@origintrail-official/dkg/dist/cli.js'
+ WARN  Failed to create bin at /private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-HP5sbn/candidate/packages/kafka-plugin/node_modules/.bin/dkg. ENOENT: no such file or directory, open '/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-HP5sbn/candidate/packages/kafka-plugin/node_modules/@origintrail-official/dkg/dist/cli.js'
+ WARN  Failed to create bin at /private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-HP5sbn/candidate/node_modules/.bin/dkg. ENOENT: no such file or directory, open '/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-HP5sbn/candidate/node_modules/@origintrail-official/dkg/dist/cli.js'
 . preinstall$ node packages/cli/scripts/verify-node-sqlite-runtime.mjs
-. preinstall: (node:82956) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+. preinstall: (node:3837) ExperimentalWarning: SQLite is an experimental feature and might change at any time
 . preinstall: (Use `node --trace-warnings ...` to show where the warning was created)
 . preinstall: Done
 ╭ Warning ─────────────────────────────────────────────────────────────────────╮
@@ -56,4 +58,4 @@ packages/cli postinstall: Done
 │   to run scripts.                                                            │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-Done in 8.2s using pnpm v10.28.1
+Done in 10.8s using pnpm v10.28.1

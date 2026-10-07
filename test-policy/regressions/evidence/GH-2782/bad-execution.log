@@ -1,5 +1,5 @@
-2026-10-07 01:53:21 system 44f414e5-328d-4400-8fe6-5df82b4e332b [DKGAgent] No dataDir — triple store is in-memory (data will be lost on restart) [WARN]
-2026-10-07 01:53:21 system 12dc547c-c149-434a-8f25-73bcd366f36e [DKGAgent] reconcile on-demand-pending: watermark 0 -> 3 (head=25, processed=10, reconciled=10, pending=15)
+2026-10-07 02:25:45 system 512cbdd5-859a-4873-ab5c-093902137e6b [DKGAgent] No dataDir — triple store is in-memory (data will be lost on restart) [WARN]
+2026-10-07 02:25:45 system 30078d12-44bc-4f7a-82b9-9509926228c2 [DKGAgent] reconcile on-demand-pending: watermark 0 -> 3 (head=25, processed=10, reconciled=10, pending=15)
 REGRESSION_RUNTIME GH-2782 v22.23.1
 REGRESSION_OBSERVATION GH-2782 {"error":"Cannot acknowledge join approval for \"on-demand-pending\": durable subscription intent or host state is missing","fetched":[],"localCount":19,"steps":[],"current":false,"watermark":0,"subscriptionWatermark":0,"saves":0,"rows":0,"sameSubscription":true}
-JSON report written to /private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/bad/bad-report.json
+JSON report written to /private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-HP5sbn/bad/bad-report.json

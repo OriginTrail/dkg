@@ -4,21 +4,21 @@ packages/rdf-utils build$ tsc
 packages/http-utils build: Done
 packages/rdf-utils build: Done
 packages/core build$ tsc && pnpm run test:types
-packages/core build: > @origintrail-official/dkg-core@10.0.19 test:types /private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/bad/packages/core
+packages/core build: > @origintrail-official/dkg-core@10.0.19 test:types /private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-HP5sbn/bad/packages/core
 packages/core build: > tsc --project tsconfig.type-tests.json
 packages/core build: Done
 packages/storage build$ tsc
 packages/chain build$ tsc && pnpm run test:types
 packages/storage build: Done
-packages/chain build: > @origintrail-official/dkg-chain@10.0.19 test:types /private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/bad/packages/chain
+packages/chain build: > @origintrail-official/dkg-chain@10.0.19 test:types /private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-HP5sbn/bad/packages/chain
 packages/chain build: > tsc --project tsconfig.type-tests.json
 packages/chain build: Done
 packages/query build$ tsc
 packages/query build: Done
 packages/publisher build$ tsc && pnpm run test:helper-types && pnpm run test:package-exports
-packages/publisher build: > @origintrail-official/dkg-publisher@10.0.19 test:helper-types /private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/bad/packages/publisher
+packages/publisher build: > @origintrail-official/dkg-publisher@10.0.19 test:helper-types /private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-HP5sbn/bad/packages/publisher
 packages/publisher build: > tsc --project tsconfig.test-helpers.json
-packages/publisher build: > @origintrail-official/dkg-publisher@10.0.19 test:package-exports /private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/bad/packages/publisher
+packages/publisher build: > @origintrail-official/dkg-publisher@10.0.19 test:package-exports /private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-HP5sbn/bad/packages/publisher
 packages/publisher build: > node scripts/test-package-exports.mjs
 packages/publisher build: Done
 packages/random-sampling build$ tsc

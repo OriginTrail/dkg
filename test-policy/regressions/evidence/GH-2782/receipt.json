@@ -11,7 +11,7 @@
     "scripts/qa-prove-regression.mjs": "fe208ec75be58f2591ee2b5779e228d9b535004b088a4bda7b4519a850bac4af",
     "scripts/lib/regressions/profile-contract.mjs": "80ec108ac673e911f367c5d3fb24c07488c32dba8e5e531b972cb8fc1fe22981",
     "scripts/lib/regressions/phases.mjs": "67560288acf041b6221fe443baa033ea1269232fb10e5387ce48a9be08e578f6",
-    "scripts/lib/regressions/subprocess.mjs": "d558f259750524f359eeb7e9f4b09ca0175a0ca862c5a5d14c8b9793b21f385c",
+    "scripts/lib/regressions/subprocess.mjs": "4cf313f41214c34a59f6b6fc417babefa5a55c20795046f66951dc242b91c652",
     "scripts/lib/regressions/results.mjs": "54d6abfe2d16fd32723c3a9f92f80dbd0b14a5a18730a6a1dd587ff808445ba9",
     "scripts/lib/regressions/identity.mjs": "5e84529068e32342dc3400d1a6200b71006ba3daa20e0defd70de8e5d533bb8d",
     "scripts/lib/regressions/proof.mjs": "473324dfac14b5df7255a085d006944f89c8d454e52e9b03398d650881f95f64"
@@ -144,7 +144,7 @@
         "-t",
         "^VM reconcile cursor follows the subscription lifetime advances an on-demand subscription through its pending ordinals without a durable write$",
         "--reporter=json",
-        "--outputFile=/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/bad/bad-report.json"
+        "--outputFile=/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-HP5sbn/bad/bad-report.json"
       ],
       "invocation": {
         "command": "pnpm",
@@ -160,7 +160,7 @@
           "-t",
           "^VM reconcile cursor follows the subscription lifetime advances an on-demand subscription through its pending ordinals without a durable write$",
           "--reporter=json",
-          "--outputFile=/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/bad/bad-report.json"
+          "--outputFile=/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-HP5sbn/bad/bad-report.json"
         ]
       },
       "code": 1,
@@ -281,7 +281,7 @@
         "-t",
         "^VM reconcile cursor follows the subscription lifetime advances an on-demand subscription through its pending ordinals without a durable write$",
         "--reporter=json",
-        "--outputFile=/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/candidate/candidate-report.json"
+        "--outputFile=/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-HP5sbn/candidate/candidate-report.json"
       ],
       "invocation": {
         "command": "pnpm",
@@ -297,7 +297,7 @@
           "-t",
           "^VM reconcile cursor follows the subscription lifetime advances an on-demand subscription through its pending ordinals without a durable write$",
           "--reporter=json",
-          "--outputFile=/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/candidate/candidate-report.json"
+          "--outputFile=/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-HP5sbn/candidate/candidate-report.json"
         ]
       },
       "code": 0,
@@ -340,9 +340,9 @@
         "rows": 0,
         "sameSubscription": true
       },
-      "diagnostic": "AssertionError: GH-2782: unsaved subscription converges without durable membership: expected { …(10) } to deeply equal { error: null, …(9) }\n    at /private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/bad/packages/agent/test/regression-on-demand-cursor.test.ts:88:92\n    at file:///private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/bad/node_modules/.pnpm/@vitest+runner@4.0.18/node_modules/@vitest/runner/dist/index.js:915:20"
+      "diagnostic": "AssertionError: GH-2782: unsaved subscription converges without durable membership: expected { …(10) } to deeply equal { error: null, …(9) }\n    at /private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-HP5sbn/bad/packages/agent/test/regression-on-demand-cursor.test.ts:88:92\n    at file:///private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-HP5sbn/bad/node_modules/.pnpm/@vitest+runner@4.0.18/node_modules/@vitest/runner/dist/index.js:915:20"
     },
-    "reportRoot": "/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/bad",
+    "reportRoot": "/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-HP5sbn/bad",
     "dependencyInputs": {
       ".npmrc": "f5aa3042280204ad7d8b9f0a302273c0ec22748e6c2f9d33d4e68da443315acc",
       "bench/package.json": "3ca9d4afd21425087cf31893b8f9f63c81b0b8408db5e343ca76e5f8aa26ab9a",
@@ -417,8 +417,8 @@
   },
   "candidate": {
     "source": {
-      "commit": "a18e0175e375f29b013e09803769b9d9b9d0e2d1",
-      "tree": "0ea454d1c0a5ed10ff747e0296c12e5be1ef0bc3",
+      "commit": "cf4fe4dd1e377a5e1412cd75fca48fc8ae9adea2",
+      "tree": "27f585998ab9589884f25a7d0860c51838117281",
       "lockfileSha256": "11309f3bf44b0484d0d358555fab3a964114259e67d63cbcce4482704fe91c99",
       "packageManager": "pnpm@10.28.1",
       "nodeRequirement": "22"
@@ -468,7 +468,7 @@
       },
       "diagnostic": null
     },
-    "reportRoot": "/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-loP1Xz/candidate",
+    "reportRoot": "/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-HP5sbn/candidate",
     "dependencyInputs": {
       ".npmrc": "f5aa3042280204ad7d8b9f0a302273c0ec22748e6c2f9d33d4e68da443315acc",
       "bench/package.json": "3ca9d4afd21425087cf31893b8f9f63c81b0b8408db5e343ca76e5f8aa26ab9a",
@@ -549,21 +549,21 @@
     }
   },
   "artifacts": {
-    "bad-build.log": "4b0cc0db6875e8cea91af1b0d2026918e9e98843598b38e2b28434c0781bb84a",
+    "bad-build.log": "54e6efabeaabf33451ad20b8905241035666c495db41f2e63dad9574554b78c0",
     "bad-config.txt": "c9f5f4d6730810e77f786e168532af2eed36d5e376323b1f07d9bf32dc30b6c3",
-    "bad-discovery.json": "acb4bb0fad650a3117e949cd1de23187c0fa1d4dd7328508303eb021622db477",
-    "bad-discovery.log": "acb4bb0fad650a3117e949cd1de23187c0fa1d4dd7328508303eb021622db477",
-    "bad-execution.log": "2189e359fa59bf93e24cc23cb5c8655b0b1ffffe9ac629dc2e1bae32e1300759",
-    "bad-install.log": "ac472cd00cd8fa7eac7ae4ed47184fdba69fd21f60ee4e4aea1c9ee879fc86be",
+    "bad-discovery.json": "685ebd86065491f4c49d9cc2e08a00343e1ae2168a28208981c17af37d74e518",
+    "bad-discovery.log": "685ebd86065491f4c49d9cc2e08a00343e1ae2168a28208981c17af37d74e518",
+    "bad-execution.log": "79b387c6aee2e1b99b555e4639fd2b67bcc0f2b3edf42c1ecbd154a4359778f9",
+    "bad-install.log": "25f6aa1b5422680a219b50bfb8453344f473c9f221280f675911de276aafc711",
     "bad-pnpm-version.log": "3806dfe55719b45f2b4fb740740c85f0e57c89d2e54030cafa3bcd7600208be7",
-    "bad-report.json": "6ae76af443183015af2bc87d4ea71090aad6df79d1478edbaf977bc715bbe5ee",
-    "candidate-build.log": "de8a44863eb0b0f56fa3b493de87aeb975b6959f61a439230a84f3e5f75578fc",
+    "bad-report.json": "393653338bd5e924740fbe8ea4f04079da4dd49ed7b045405507daf24cf1610d",
+    "candidate-build.log": "439abf361b69973cd4b75e09c8dfe88d8a02c37a1fb33be72df6ec66f57ba1df",
     "candidate-config.txt": "5796c4da50dd54dcb58f4d92ab687aa10581bc6fdf0bb271655d78111f95ace7",
-    "candidate-discovery.json": "7a879dedd7d227423bbd30c3fc33b403a28969e8b5964431dd44aca929ccd5e4",
-    "candidate-discovery.log": "7a879dedd7d227423bbd30c3fc33b403a28969e8b5964431dd44aca929ccd5e4",
-    "candidate-execution.log": "d3f2531d3936189f31a9c92e2ca7f90fbdd0f2949c101df64d785ed010cfa336",
-    "candidate-install.log": "13c0e954c36efc0741d973ad8545c5ebd220a2a7f5bef22aae06f50289908c7b",
+    "candidate-discovery.json": "9979563f3f63d4882c0ea8c4285a3059aad5eda69facfc75e31b6ffebfd38a44",
+    "candidate-discovery.log": "9979563f3f63d4882c0ea8c4285a3059aad5eda69facfc75e31b6ffebfd38a44",
+    "candidate-execution.log": "5c13748984a5a56a8ad3b0f17a9e3ae4a5ba548d96566e431763d1e36ea1b2e3",
+    "candidate-install.log": "8c62fc764820d9b08621ad0322632562a31a541196064325273a3f196fbc56b7",
     "candidate-pnpm-version.log": "3806dfe55719b45f2b4fb740740c85f0e57c89d2e54030cafa3bcd7600208be7",
-    "candidate-report.json": "b97239a06cd3b1197215f5ff20b822482d5dfd41d220ae25d1f79f27c63fac83"
+    "candidate-report.json": "5b37fc7fe0988291338b01d6fbd1796e86c44d36764a446fec1ea767cf42ff70"
   }
 }
