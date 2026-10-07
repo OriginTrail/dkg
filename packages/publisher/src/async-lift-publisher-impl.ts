@@ -579,7 +579,7 @@ export class TripleStoreAsyncLiftPublisher
    * consumes it instead of re-paying the chain reads. Bounded FIFO; entries are dropped on
    * consumption, invalidation (hash mismatch / terminal disposition), or eviction.
    */
-  private readonly chainObservations = new LiftJobChainObservations(() => this.now());
+  private readonly chainObservations: LiftJobChainObservations;
   private readonly executorProofHints = new Map<string, {
     readonly txHash: string;
     proof?: {
@@ -676,6 +676,7 @@ export class TripleStoreAsyncLiftPublisher
     config: AsyncLiftPublisherConfig = {},
   ) {
     this.graphUri = config.graphUri ?? DEFAULT_GRAPH_URI;
+    this.chainObservations = LiftJobChainObservations.shared(store, this.graphUri);
     this.journalGraphUri = DEFAULT_JOURNAL_GRAPH_URI;
     this.journalWrites = config.journalWrites ?? false;
     this.maxRetries = config.maxRetries ?? TripleStoreAsyncLiftPublisher.DEFAULT_MAX_RETRIES;
@@ -1265,7 +1266,7 @@ export class TripleStoreAsyncLiftPublisher
           // reads while the executor finishes its local post-receipt tail. Never trusted as
           // evidence.
           onPublishConfirmed: (confirmation: { txHash: string }) => {
-            this.chainObservations.receipt(claimed.jobId, confirmation.txHash);
+            this.chainObservations.receipt(claimed.jobId, confirmation.txHash, this.now());
             if (canReleaseOnReceiptHint) {
               this.recordExecutorProofHint(claimed.jobId, confirmation);
             }
@@ -1572,7 +1573,7 @@ export class TripleStoreAsyncLiftPublisher
             unresolved += 1;
             return;
           }
-          this.chainObservations.finality(current.jobId, persistedTxHash);
+          this.chainObservations.finality(current.jobId, persistedTxHash, this.now());
           // The node has observed inclusion through its OWN canonical proof: stamp it
           // truthfully, then free the wallet (write-before-release — the poke must find
           // claim-visible state). A retry that already persisted 'included' skips the write.
@@ -1917,7 +1918,7 @@ export class TripleStoreAsyncLiftPublisher
       options?.signal,
     );
     if (!resolved) return 'unresolved';
-    if (resolved.inclusion.txHash.toLowerCase() === origin.txHash.toLowerCase()) this.chainObservations.finality(job.jobId, origin.txHash);
+    if (resolved.inclusion.txHash.toLowerCase() === origin.txHash.toLowerCase()) this.chainObservations.finality(job.jobId, origin.txHash, this.now());
     if (
       !this.knowledgeAssetVmPublishHandler?.finalizeRecovered
       || !isKnowledgeAssetVmPublishJobRequest(job.request)
@@ -2933,7 +2934,7 @@ export class TripleStoreAsyncLiftPublisher
     const validated = assertCanonicalLiftJobPayload(job);
     // Inclusion is its own first evidence when nothing was observed earlier. Finality is recorded
     // only where canonical evidence is observed: a finalized write is local completion.
-    if (validated.status === 'included') this.chainObservations.receipt(job.jobId, validated.broadcast.txHash, validated.timestamps.includedAt);
+    if (validated.status === 'included') this.chainObservations.receipt(job.jobId, validated.broadcast.txHash, validated.timestamps.includedAt ?? this.now());
     const canonical = committedLiftJob(this.chainObservations.project(validated), job);
     await this.persistJobRecord(canonical);
     await this.appendJournal(canonical, kind);

@@ -9,6 +9,7 @@ import {
   kaVmRecoveryEvidence,
   recoveredResolution,
 } from '../../../scripts/testing/ka-vm-publish.js';
+import { readPersistedLiftJob } from './_helpers/persisted-lift-job.js';
 import { createReceiptHintHarness } from './_helpers/receipt-hint-scenario.js';
 
 describe('receipt-hint lane: core and evidence', () => {
@@ -33,8 +34,7 @@ describe('receipt-hint lane: core and evidence', () => {
       expect(included?.timestamps.receiptObservedAt).toBe(receiptAt);
       expect(included?.timestamps.finalityObservedAt).toBeGreaterThanOrEqual(receiptAt!);
       expect(included?.timestamps.finalityObservedAt).toBeLessThanOrEqual(included!.timestamps.includedAt!);
-      const restarted = h.createPublisher();
-      expect((await restarted.getStatus(jobId))?.timestamps).toEqual(included?.timestamps);
+      expect((await readPersistedLiftJob(h.store, jobId))?.timestamps).toEqual(included?.timestamps);
       releaseTail();
       await publisher.drainDetachedExecutions?.();
       await publisher.recover();
@@ -43,6 +43,24 @@ describe('receipt-hint lane: core and evidence', () => {
       expect(finalized?.timestamps.receiptObservedAt).toBe(receiptAt);
       expect(finalized?.timestamps.finalityObservedAt).toBe(included?.timestamps.finalityObservedAt);
       expect(finalized?.timestamps.finalizedAt).toBeGreaterThanOrEqual(finalized!.timestamps.finalityObservedAt!);
+    } finally {
+      releaseTail();
+      await publisher.drainDetachedExecutions?.();
+    }
+  });
+
+  it('shows a receipt to another publisher instance over the same store before it is persisted', async () => {
+    // The daemon serves job views from a control instance, not from the one executing the job.
+    const { publisher, jobId, releaseTail } = await h.parkedHintScenario();
+    try {
+      const control = h.createPublisher();
+
+      const viewed = await control.getStatus(jobId);
+      expect(viewed?.status).toBe('broadcast');
+      expect(viewed?.timestamps.receiptObservedAt).toBeGreaterThan(viewed!.timestamps.broadcastAt!);
+      expect(viewed).toEqual(await publisher.getStatus(jobId));
+      expect((await control.list()).find((job) => job.jobId === jobId)).toEqual(viewed);
+      expect((await readPersistedLiftJob(h.store, jobId))?.timestamps).not.toHaveProperty('receiptObservedAt');
     } finally {
       releaseTail();
       await publisher.drainDetachedExecutions?.();

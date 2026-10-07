@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { PersistedLiftJob } from './lift-job.js';
 import { getLiftJobTransactionEvidence } from './async-lift-publisher-utils.js';
+
+const sharedByStore = new WeakMap<TripleStore, Map<string, LiftJobChainObservations>>();
 
 /** Diagnostics only. An observation cannot authorize a job transition or wallet release. */
 export class LiftJobChainObservations {
@@ -11,13 +14,30 @@ export class LiftJobChainObservations {
     finalityObservedAt?: number;
   }>();
 
-  constructor(private readonly now: () => number) {}
+  /**
+   * The observations of one store and control graph in this process. A daemon serves job views
+   * from another publisher instance than the one that executes and reconciles jobs. Both are
+   * built over the same store, so each reads what the other observed before it is persisted.
+   */
+  static shared(store: TripleStore, graphUri: string): LiftJobChainObservations {
+    let byGraph = sharedByStore.get(store);
+    if (!byGraph) {
+      byGraph = new Map();
+      sharedByStore.set(store, byGraph);
+    }
+    let observations = byGraph.get(graphUri);
+    if (!observations) {
+      observations = new LiftJobChainObservations();
+      byGraph.set(graphUri, observations);
+    }
+    return observations;
+  }
 
   /**
-   * First receipt or inclusion evidence of a transaction. `at` is the evidence's own time when
-   * the caller has one. The restart schema accepts finite numbers only, so nothing else is kept.
+   * First receipt or inclusion evidence of a transaction, at the time the caller observed it.
+   * The restart schema accepts finite numbers only, so nothing else is kept.
    */
-  receipt(jobId: string, txHash: string, at: number = this.now()): void {
+  receipt(jobId: string, txHash: string, at: number): void {
     if (!txHash || !Number.isFinite(at)) return;
     const key = txHash.toLowerCase();
     if (this.entries.get(jobId)?.txHash === key) return;
@@ -27,8 +47,7 @@ export class LiftJobChainObservations {
   }
 
   /** Canonical evidence at the configured confirmation depth, recorded where it is observed. */
-  finality(jobId: string, txHash: string): void {
-    const at = this.now();
+  finality(jobId: string, txHash: string, at: number): void {
     this.receipt(jobId, txHash, at);
     const entry = this.entries.get(jobId);
     if (entry?.txHash === txHash.toLowerCase() && Number.isFinite(at)) entry.finalityObservedAt ??= at;
