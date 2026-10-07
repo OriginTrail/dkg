@@ -232,56 +232,72 @@ for (const mode of ['bindings', 'json']) test(`a settling poll serves ${mode} mo
   assert.equal(polled.status, 0, polled.stderr); assert.equal(polled.stdout, plain.stdout); assert.notEqual(polled.stdout, '');
 });
 
-// The bounded wait the sharing test uses, with a caller that only warns when its data is late.
+// The bounded wait and its report, as the sharing test calls them.
 const oneRow = JSON.stringify({ result: { type: 'bindings', bindings: [{ s: 'urn:seen' }] } });
-const boundedWait = (attempts = 5, min = 1) => `${sharingSetup} AUTH=fixture; WARN=0; SHARING_WAIT_INTERVAL=0
+const expectCount = (late = 'warn', attempts = 5, min = 1) => `${sharingSetup} AUTH=fixture; WARN=0; SEEN=false; SHARING_WAIT_INTERVAL=0
 warn(){ WARN=$((WARN+1)); echo "  [WARN] $1"; }
-sharing_wait_for_count "$PORT" ${attempts} ${min} "$QUERY" s rows '{"contextGraphId":"fixture"}'
-case $? in
-  0) ok "member sees the data" ;;
-  3) fail "member read: read authority was still unavailable when the wait ended" ;;
-  *) warn "member is missing the data" ;;
-esac
-echo "PASS=$PASS FAIL=$FAIL WARN=$WARN value=[$SHARING_WAIT_VALUE] polls=$SHARING_WAIT_POLLS"; exit "$FAIL"`;
+sharing_expect_count ${late} "member read" "member sees {value} rows after {polls} polls" "member is missing the data ({value} rows)" \\
+  "$PORT" ${attempts} ${min} "$QUERY" s rows '{"contextGraphId":"fixture"}' && SEEN=true
+echo "PASS=$PASS FAIL=$FAIL WARN=$WARN seen=$SEEN value=[$SHARING_WAIT_VALUE] polls=$SHARING_WAIT_POLLS"; exit "$FAIL"`;
 const S = [503, settling], E = [200, empty], D = [200, oneRow];
-
-for (const [name, answers, status, summary] of [
-  ['fails when read authority never settles', [S], 1, /PASS=0 FAIL=1 WARN=0 value=\[\] polls=5/],
-  ['passes when the read is served after two settling answers', [S, S, D], 0, /PASS=1 FAIL=0 WARN=0 value=\[1\] polls=3/],
-  ['only warns when valid reads stay empty', [E], 0, /PASS=0 FAIL=0 WARN=1 value=\[0\] polls=5/],
-  ['only warns when one settling answer ends a wait of valid empty reads', [E, E, E, E, S], 0, /PASS=0 FAIL=0 WARN=1 value=\[0\] polls=5/],
-  ['only warns when settling answers are scattered between valid reads', [S, E, S, E, S], 0, /PASS=0 FAIL=0 WARN=1 value=\[0\] polls=5/],
-  ['fails when its last three polls are all settling', [E, E, S, S, S], 1, /PASS=0 FAIL=1 WARN=0 value=\[0\] polls=5/],
-]) test(`the bounded wait ${name}`, async t => {
+const answering = async (t, answers) => {
   let served = 0;
   const url = await serve(t, (req, res) => {
     req.resume();
     const [http, response] = answers[Math.min(served, answers.length - 1)]; served += 1;
     res.writeHead(http); res.end(response);
   });
-  const result = await runShell(boundedWait(), { SHARING: sharing, PORT: new URL(url).port, QUERY: select });
-  assert.equal(result.status, status, result.stdout + result.stderr); assert.match(result.stdout, summary);
+  return { port: new URL(url).port, served: () => served };
+};
+
+for (const [name, answers, status, summary, line] of [
+  ['fails when read authority never settles', [S], 1, /PASS=0 FAIL=1 WARN=0 seen=false value=\[\] polls=5/, /\[FAIL\] member read: read authority was still unavailable when the wait ended/],
+  ['passes when the read is served after two settling answers', [S, S, D], 0, /PASS=1 FAIL=0 WARN=0 seen=true value=\[1\] polls=3/, /\[PASS\] member sees 1 rows after 3 polls/],
+  ['only warns when valid reads stay empty', [E], 0, /PASS=0 FAIL=0 WARN=1 seen=false value=\[0\] polls=5/, /\[WARN\] member is missing the data \(0 rows\)/],
+  ['only warns when one settling answer ends a wait of valid empty reads', [E, E, E, E, S], 0, /PASS=0 FAIL=0 WARN=1 seen=false value=\[0\] polls=5/, /\[WARN\] member is missing the data \(0 rows\)/],
+  ['only warns when settling answers are scattered between valid reads', [S, E, S, E, S], 0, /PASS=0 FAIL=0 WARN=1 seen=false value=\[0\] polls=5/, /\[WARN\]/],
+  ['fails when its last three polls are all settling', [E, E, S, S, S], 1, /PASS=0 FAIL=1 WARN=0 seen=false value=\[0\] polls=5/, /\[FAIL\] member read: read authority was still unavailable/],
+]) test(`a wait that warns on late data ${name}`, async t => {
+  const { port } = await answering(t, answers);
+  const result = await runShell(expectCount(), { SHARING: sharing, PORT: port, QUERY: select });
+  assert.equal(result.status, status, result.stdout + result.stderr);
+  assert.match(result.stdout, summary); assert.match(result.stdout, line);
 });
 
-test('the bounded wait compares against its threshold and stops at the first poll that reaches it', async t => {
+test('a wait that fails on late data fails for late data and for unavailable authority alike', async t => {
+  const late = await answering(t, [E]);
+  const lateRun = await runShell(expectCount('fail'), { SHARING: sharing, PORT: late.port, QUERY: select });
+  assert.equal(lateRun.status, 1); assert.match(lateRun.stdout, /\[FAIL\] member is missing the data \(0 rows\)/);
+  assert.match(lateRun.stdout, /PASS=0 FAIL=1 WARN=0 seen=false/);
+  const unavailable = await answering(t, [S]);
+  const unavailableRun = await runShell(expectCount('fail'), { SHARING: sharing, PORT: unavailable.port, QUERY: select });
+  assert.equal(unavailableRun.status, 1); assert.match(unavailableRun.stdout, /\[FAIL\] member read: read authority was still unavailable/);
+  assert.match(unavailableRun.stdout, /PASS=0 FAIL=1 WARN=0 seen=false/);
+});
+
+test('the wait compares against its threshold and stops at the first poll that reaches it', async t => {
   let served = 0;
   const rows = n => JSON.stringify({ result: { type: 'bindings', bindings: Array.from({ length: n }, (_, i) => ({ s: `urn:${i}` })) } });
   const url = await serve(t, (req, res) => { req.resume(); served += 1; res.end(rows(served)); });
-  const result = await runShell(boundedWait(6, 3), { SHARING: sharing, PORT: new URL(url).port, QUERY: select });
-  assert.equal(result.status, 0, result.stderr); assert.match(result.stdout, /PASS=1 FAIL=0 WARN=0 value=\[3\] polls=3/);
+  const result = await runShell(expectCount('warn', 6, 3), { SHARING: sharing, PORT: new URL(url).port, QUERY: select });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /\[PASS\] member sees 3 rows after 3 polls/); assert.match(result.stdout, /seen=true value=\[3\] polls=3/);
   assert.equal(served, 3);
 });
 
-test('the bounded wait stops the suite on invalid evidence, and a single observation stays strict', async t => {
+test('the wait stops the suite on invalid evidence or an unknown late action, and a single observation stays strict', async t => {
   let served = 0;
   const busy = await serve(t, (req, res) => {
     req.resume(); served += 1;
     if (served === 1) { res.end(empty); return; }
     res.writeHead(503); res.end(notSettling[0][2]);
   });
-  const stopped = await runShell(boundedWait(), { SHARING: sharing, PORT: new URL(busy).port, QUERY: select });
+  const stopped = await runShell(expectCount(), { SHARING: sharing, PORT: new URL(busy).port, QUERY: select });
   assert.equal(stopped.status, 1); assert.doesNotMatch(stopped.stdout, /PASS=/);
   assert.match(stopped.stderr, /Invalid query observation/); assert.equal(served, 2);
+  const idle = await answering(t, [D]);
+  const unknown = await runShell(expectCount('ignore'), { SHARING: sharing, PORT: idle.port, QUERY: select });
+  assert.equal(unknown.status, 1); assert.doesNotMatch(unknown.stdout, /PASS=/); assert.equal(idle.served(), 0);
   const url = await serve(t, (req, res) => { req.resume(); res.writeHead(503); res.end(settling); });
   const single = await runShell(`${sharingSetup} AUTH=fixture
 value=$(sharing_api_observe "$PORT" "$QUERY" s rows '{"contextGraphId":"fixture"}') || devnet_observation_abort

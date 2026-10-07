@@ -40,6 +40,30 @@ sharing_wait_for_count() {
   return 1
 }
 
+# Run one bounded wait and report it: <warn|fail> for late data, what was read,
+# the message when the threshold was reached, the message when the data was
+# late, then the sharing_wait_for_count arguments. In both messages {value} and
+# {polls} stand for the last valid number and the polls made. A wait that ended
+# while read authority was still unavailable is a failed step for every caller,
+# whatever it does about late data. Returns 0 only when the threshold was
+# reached, so a caller can keep a flag: sharing_expect_count ... && SEEN=true.
+sharing_expect_count() {
+  local late_action="$1" what="$2" reached="$3" late="$4" status message
+  shift 4
+  case "$late_action" in warn|fail) ;; *) echo "INCONCLUSIVE: late action must be warn or fail" >&2; devnet_observation_abort ;; esac
+  sharing_wait_for_count "$@"; status=$?
+  case "$status" in
+    0) message=$reached ;;
+    3) fail "$what: read authority was still unavailable when the wait ended"; return 1 ;;
+    *) message=$late ;;
+  esac
+  message=${message//\{value\}/$SHARING_WAIT_VALUE}
+  message=${message//\{polls\}/$SHARING_WAIT_POLLS}
+  if [ "$status" -eq 0 ]; then ok "$message"; return 0; fi
+  "$late_action" "$message"
+  return 1
+}
+
 sharing_storage_observe() {
   devnet_storage_query "$DEVNET_DIR" "$@"
 }

@@ -37,6 +37,15 @@ test('devnet_mine_blocks mines one block per call in a single batch', async t =>
   assert.deepEqual(requests, [[1, 2, 3].map(id => ({ jsonrpc: '2.0', id, method: 'evm_mine', params: [] }))]);
 });
 
+test('devnet_mine_blocks sends its largest accepted batch and reads the answer back', async t => {
+  const { port, requests } = await chain(t, mined);
+  const result = await mine(5000, port);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(requests.length, 1); assert.equal(requests[0].length, 5000);
+  assert.deepEqual(requests[0][4999], { jsonrpc: '2.0', id: 5000, method: 'evm_mine', params: [] });
+  assert.ok(JSON.stringify(requests[0]).length > 131072, 'larger than one command-line argument may be on Linux');
+});
+
 test('devnet_mine_blocks takes the port from HARDHAT_PORT when none is given', async t => {
   const { port, requests } = await chain(t, mined);
   const result = await runShell('source "$HELPER"; devnet_mine_blocks 2', { HELPER: helper, HARDHAT_PORT: port });
