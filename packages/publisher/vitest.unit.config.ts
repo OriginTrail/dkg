@@ -60,6 +60,7 @@ export default defineConfig({
       'test/lift-job-failure.test.ts',
       'test/async-promote-queue.test.ts',
       'test/promote-retry-policy.test.ts',
+      'test/workspace-agent-recipients.test.ts',
       'test/async-promote-writejob-atomicity.test.ts',
       'test/query-source-coverage.test.ts',
       'test/subject-atomic-write.test.ts',

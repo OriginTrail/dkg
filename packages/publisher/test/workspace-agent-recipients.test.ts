@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
@@ -18,6 +18,7 @@ import {
   isWorkspaceAgentEncryptionKeyMissingError,
   projectWorkspaceAgentRecipientFanout,
   resolveWorkspaceAgentRecipients,
+  resolveWorkspaceAgentRecipientKeys,
   WorkspaceAgentEncryptionKeyMissingError,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
@@ -788,5 +789,50 @@ describe('resolveWorkspaceAgentRecipients', () => {
 
     await expect(resolveWorkspaceAgentRecipients(store, { contextGraphId: CONTEXT_GRAPH_ID }))
       .rejects.toThrow(/have been revoked/);
+  });
+});
+
+
+describe('complete bounded recipient key collect', () => {
+  it('uses two queries for quiet keys, proof and peer routes', async () => {
+    const store = new OxigraphStore();
+    const wallet = ethers.Wallet.createRandom();
+    await insertAgentEncryptionKey(store, wallet, { peerId: PEER_A });
+    const query = vi.spyOn(store, 'query');
+    const result = await resolveWorkspaceAgentRecipientKeys(store, wallet.address);
+    expect(result).toHaveLength(1);
+    expect(result[0].peerId).toBe(PEER_A);
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(query.mock.calls[0][0]).toContain('LIMIT 65');
+    expect(query.mock.calls[1][0]).toContain('?revocationProof');
+    await store.close();
+  });
+
+  it('observes a wallet-signed revocation arriving after the positive collect', async () => {
+    const store = new OxigraphStore();
+    const wallet = ethers.Wallet.createRandom();
+    const key = await insertAgentEncryptionKey(store, wallet, { peerId: PEER_A });
+    const query = store.query.bind(store);
+    let injected = false;
+    vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+      if (!injected && sparql.includes('SELECT DISTINCT ?keyId ?revokedAt')) {
+        injected = true;
+        await insertAgentEncryptionKeyRevocation(store, wallet, key.publicKeyBytes);
+      }
+      return query(sparql, options);
+    });
+    await expect(resolveWorkspaceAgentRecipientKeys(store, wallet.address)).rejects.toThrow(/revoked/);
+    expect(injected).toBe(true);
+    await store.close();
+  });
+
+  it('falls back when a bounded branch cannot prove completeness', async () => {
+    const store = new OxigraphStore();
+    const wallet = ethers.Wallet.createRandom();
+    for (let i = 1; i <= 65; i++) await insertAgentEncryptionKey(store, wallet, { keyFill: i });
+    const query = vi.spyOn(store, 'query');
+    await expect(resolveWorkspaceAgentRecipientKeys(store, wallet.address)).rejects.toThrow(/Too many public encryption-key candidates/);
+    expect(query.mock.calls.some(([sparql]) => sparql.includes('ORDER BY ?key'))).toBe(true);
+    await store.close();
   });
 });
