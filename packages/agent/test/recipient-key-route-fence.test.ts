@@ -67,11 +67,40 @@ describe('RecipientKeyRouteFence (GH#3067)', () => {
       }
     });
 
-    it('sees a bracketed predicate and remembers a bracketed graph under its bare name', async () => {
+    it('sees a bracketed predicate', async () => {
       const fence = await readyFence([]);
-      const bracketed = { subject: AGENT, predicate: `<${DKG_ONTOLOGY.DKG_PEER_ID}>`, object: '"p"', graph: `<${DATA_GRAPH}>` };
+      const bracketed = { subject: AGENT, predicate: `<${DKG_ONTOLOGY.DKG_PEER_ID}>`, object: '"p"', graph: DATA_GRAPH };
       expect(moved(fence, () => fence.noteQuads([bracketed]))).toBe(true);
-      expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(true);
+    });
+
+    it.each(['urn:dkg:keys{}', `<${DATA_GRAPH}>`, 'urn:g h', '', 'relative-graph'])(
+      'does not remember a key fact stored under the graph name %j, which an adapter may store under another one, and lets the next scan name it',
+      async (name) => {
+        const scan = scanStore([PROFILE_GRAPH]);
+        const fence = new RecipientKeyRouteFence(scan.store);
+        await fence.ensureReady();
+        const unsafe = { subject: AGENT, predicate: DKG_ONTOLOGY.DKG_PEER_ID, object: '"p"', graph: name };
+
+        expect(moved(fence, () => fence.noteQuads([unsafe]))).toBe(true);
+        // The graph it landed in is not known, so removing it is not proven harmless.
+        expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(true);
+
+        // The store reports the name it actually used, and the graph list is trusted again.
+        scan.query.mockResolvedValue({ type: 'bindings', bindings: [{ g: PROFILE_GRAPH }, { g: DATA_GRAPH }] });
+        await fence.ensureReady();
+        expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(true);
+        expect(moved(fence, () => fence.noteRemoval({ graph: 'urn:dkg:never-held-keys' }))).toBe(false);
+      },
+    );
+
+    it('treats a write that stores a key fact under such a name as in flight until it settles', async () => {
+      const fence = await readyFence([PROFILE_GRAPH]);
+      const settle = fence.begin({ quads: [quad(AGENT, DKG_ONTOLOGY.DKG_PEER_ID, 'urn:dkg:keys{}')] });
+      await fence.ensureReady();
+      expect(moved(fence, () => fence.noteRemoval({ graph: 'urn:dkg:keys' }))).toBe(true);
+      settle('changed');
+      await fence.ensureReady();
+      expect(moved(fence, () => fence.noteRemoval({ graph: 'urn:dkg:keys' }))).toBe(false);
     });
 
     it('moves for a key predicate on a blank node, which a store may turn into a variable that matches an agent', async () => {
@@ -149,7 +178,6 @@ describe('RecipientKeyRouteFence (GH#3067)', () => {
     it('a graph that never held a key fact proves it once the graphs are known', async () => {
       const fence = await readyFence([PROFILE_GRAPH]);
       expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(false);
-      expect(moved(fence, () => fence.noteRemoval({ graph: `<${DATA_GRAPH}>` }))).toBe(false);
       expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH, predicate: DKG_ONTOLOGY.DKG_PEER_ID }))).toBe(false);
     });
 
@@ -198,6 +226,7 @@ describe('RecipientKeyRouteFence (GH#3067)', () => {
       expect(moved(fence, () => fence.noteRemoval({ graph: 'urn:g h' }))).toBe(true);
       expect(moved(fence, () => fence.noteRemoval({ graph: '<urn:g' }))).toBe(true);
       expect(moved(fence, () => fence.noteRemoval({ graph: 'relative-graph' }))).toBe(true);
+      expect(moved(fence, () => fence.noteRemoval({ graph: `<${DATA_GRAPH}>` }))).toBe(true);
     });
   });
 
@@ -283,6 +312,35 @@ describe('RecipientKeyRouteFence (GH#3067)', () => {
       await fence.ensureReady();
       expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(false);
       expect(query.mock.calls.length).toBeGreaterThanOrEqual(3);
+    });
+
+    it.each(['unchanged', 'changed'] as const)('trusts the scan again after an opaque write that settled as %s', async (outcome) => {
+      const fence = await readyFence([PROFILE_GRAPH]);
+      fence.begin({ everything: true })(outcome);
+      await fence.ensureReady();
+      expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(false);
+    });
+
+    it('never trusts a scan again after an opaque write whose outcome is unknown, because it may still commit', async () => {
+      const { store, query } = scanStore([PROFILE_GRAPH]);
+      const fence = new RecipientKeyRouteFence(store);
+      await fence.ensureReady();
+      fence.begin({ everything: true })('indeterminate');
+      const scans = query.mock.calls.length;
+      await fence.ensureReady();
+      await fence.ensureReady();
+      expect(query.mock.calls.length).toBe(scans);
+      expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(true);
+      // What a subject or a predicate proves does not depend on the graph list.
+      expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH, subject: 'urn:dkg:share:s1' }))).toBe(false);
+      expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH, predicate: MEMORY_LAYER }))).toBe(false);
+    });
+
+    it('keeps trusting the scan after a write that named every graph and whose outcome is unknown', async () => {
+      const fence = await readyFence([PROFILE_GRAPH]);
+      fence.begin({ quads: [quad(AGENT, DKG_ONTOLOGY.DKG_PEER_ID, DATA_GRAPH)] })('indeterminate');
+      expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(true);
+      expect(moved(fence, () => fence.noteRemoval({ graph: 'urn:dkg:never-held-keys' }))).toBe(false);
     });
 
     it('trusts the scan again after a write that changed nothing has settled', async () => {

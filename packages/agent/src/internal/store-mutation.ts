@@ -19,11 +19,15 @@ export interface StoreMutation {
   readonly everything?: boolean;
 }
 
+/**
+ * How a write ended. `unchanged`: it provably changed nothing (it succeeded without
+ * effect, or was refused before dispatch). `indeterminate`: it failed in a way that
+ * does not prove it did not commit (a timeout, a lost response), so a remote backend
+ * may still apply it later.
+ */
+export type StoreMutationOutcome = 'changed' | 'unchanged' | 'indeterminate';
+
 export interface StoreMutationObserver {
-  /**
-   * Called before a write is dispatched. The returned function is called exactly
-   * once, when the write settles: `changed` is false only when it provably
-   * changed nothing (it succeeded without effect, or was refused before dispatch).
-   */
-  begin(mutation: StoreMutation): (changed: boolean) => void;
+  /** Called before a write is dispatched. The returned function is called exactly once, when the write settles. */
+  begin(mutation: StoreMutation): (outcome: StoreMutationOutcome) => void;
 }

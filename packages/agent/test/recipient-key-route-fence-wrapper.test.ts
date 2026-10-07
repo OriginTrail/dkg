@@ -125,6 +125,50 @@ describe('recipient key/route fence through the production store wrapper (GH#306
     expect(fence.revision).toBe(settled);
   });
 
+  it('is never trusted again after an UPDATE whose outcome is unknown, because the backend may still apply it', async () => {
+    const { wrapper, store, fence } = await open({
+      inner: (inner) => new Proxy(inner, {
+        get: (target, property) => property === 'query'
+          ? async (sparql: string) => {
+            if (/^\s*INSERT/i.test(sparql)) throw new Error('request timed out');
+            return target.query(sparql);
+          }
+          : (typeof Reflect.get(target, property) === 'function'
+            ? (Reflect.get(target, property) as (...args: unknown[]) => unknown).bind(target)
+            : Reflect.get(target, property)),
+      }),
+    });
+    await expect(wrapper.query(`INSERT DATA { GRAPH <urn:dkg:graph:late> { <${AGENT}> <${DKG_ONTOLOGY.DKG_PEER_ID}> "p" } }`))
+      .rejects.toThrow('timed out');
+    // A scan that finishes before the remote write lands does not see its graph...
+    await fence.ensureReady();
+    // ...which then commits, and a resolution reads its keys.
+    await store.insert([keyFact('urn:dkg:graph:late')]);
+
+    const before = fence.revision;
+    await wrapper.dropGraph('urn:dkg:graph:late');
+    expect(fence.revision).toBeGreaterThan(before);
+  });
+
+  it('does not take a key fact stored under an unsafe graph name for one stored under that name', async () => {
+    // An HTTP adapter renders an unsafe graph name as a cleaned one.
+    const { wrapper, fence } = await open({
+      inner: (inner) => new Proxy(inner, {
+        get: (target, property) => property === 'insert'
+          ? (quads: Quad[], options?: unknown) => target.insert(quads.map((q) => ({ ...q, graph: q.graph.replace(/[{}]/g, '') })), options as never)
+          : (typeof Reflect.get(target, property) === 'function'
+            ? (Reflect.get(target, property) as (...args: unknown[]) => unknown).bind(target)
+            : Reflect.get(target, property)),
+      }),
+    });
+    await wrapper.insert([{ ...keyFact('urn:dkg:graph:keys'), graph: 'urn:dkg:graph:keys{}' }]);
+    await fence.ensureReady();
+
+    const before = fence.revision;
+    await wrapper.dropGraph('urn:dkg:graph:keys');
+    expect(fence.revision).toBeGreaterThan(before);
+  });
+
   describe('an RFC-64 author commit', () => {
     const committing = (result: () => 'committed' | 'conflict') => open({
       inner: (store) => new Proxy(store, {

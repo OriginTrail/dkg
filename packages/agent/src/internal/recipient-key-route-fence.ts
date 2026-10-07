@@ -2,7 +2,7 @@
 
 import { AGENT_DID_PREFIX, DKG_ONTOLOGY, isSafeIri, unwrapIri } from '@origintrail-official/dkg-core';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
-import type { StoreMutation, StoreRemoval } from './store-mutation.js';
+import type { StoreMutation, StoreMutationOutcome, StoreRemoval } from './store-mutation.js';
 
 /** The predicates a recipient key lookup reads. Each is read only on an agent DID or key IRI subject. */
 export const RECIPIENT_KEY_ROUTE_PREDICATES: ReadonlySet<string> = new Set([
@@ -45,9 +45,14 @@ const isKeyRouteFact = (quad: Quad): boolean => (
  * A removal is harmless when its subject is not an agent DID, its predicate is
  * not a key or route predicate, or its graph has never held such a fact. The
  * lookup reads every named graph, so the graphs that hold key facts are found
- * by one scan and kept current from every write that names its quads. While a
- * write that may change anything is in flight, or after one has changed
- * something, that list is not trusted until a scan has run again.
+ * by one scan and kept current from every write that names its quads. A write
+ * is opaque when it may change anything, or stores a key fact under a graph
+ * name that is not a bare IRI (an adapter may store it under another name): the
+ * list is not trusted while it is in flight, nor after it has changed something,
+ * until a scan has run again. An opaque write whose outcome is unknown may still
+ * commit later, into a graph no scan has seen, so after one the list is never
+ * trusted again and a removal moves the revision unless its subject or predicate
+ * proves it harmless.
  */
 export class RecipientKeyRouteFence {
   private value = 0;
@@ -55,6 +60,7 @@ export class RecipientKeyRouteFence {
   private staleGeneration = 0;
   private scannedGeneration = -1;
   private pendingEverything = 0;
+  private graphsUnknown = false;
   private scan: Promise<void> | null = null;
 
   constructor(private readonly store: TripleStore) {}
@@ -64,25 +70,31 @@ export class RecipientKeyRouteFence {
   }
 
   private get trusted(): boolean {
-    return this.scannedGeneration === this.staleGeneration && this.pendingEverything === 0;
+    return !this.graphsUnknown && this.scannedGeneration === this.staleGeneration && this.pendingEverything === 0;
   }
 
   /**
    * A write is about to be dispatched. The graphs of its quads are learned before
-   * it can commit, so no removal of one of them completes while it is unknown. A
-   * write that may change anything makes the list untrusted until it has settled
-   * and the graphs have been scanned again. Returns what to call when it settles.
+   * it can commit, so no removal of one of them completes while it is unknown. An
+   * opaque write makes the list untrusted until it has settled and the graphs have
+   * been scanned again. Returns what to call when it settles.
    */
-  begin(mutation: StoreMutation): () => void {
-    for (const quad of mutation.quads ?? []) if (isKeyRouteFact(quad)) this.keyGraphs.add(unwrapIri(quad.graph));
-    if (!mutation.everything) return () => undefined;
+  begin(mutation: StoreMutation): (outcome?: StoreMutationOutcome) => void {
+    let opaque = mutation.everything === true;
+    for (const quad of mutation.quads ?? []) {
+      if (!isKeyRouteFact(quad)) continue;
+      if (isBareIri(quad.graph)) this.keyGraphs.add(quad.graph);
+      else opaque = true;
+    }
+    if (!opaque) return () => undefined;
     this.staleGeneration += 1;
     this.pendingEverything += 1;
     let settled = false;
-    return () => {
+    return (outcome = 'changed') => {
       if (settled) return;
       settled = true;
       this.pendingEverything -= 1;
+      if (outcome === 'indeterminate') this.graphsUnknown = true;
     };
   }
 
@@ -91,7 +103,9 @@ export class RecipientKeyRouteFence {
     let changed = false;
     for (const quad of quads) {
       if (!isKeyRouteFact(quad)) continue;
-      this.keyGraphs.add(unwrapIri(quad.graph));
+      // A name that is not a bare IRI may be stored under another one: the next scan learns it.
+      if (isBareIri(quad.graph)) this.keyGraphs.add(quad.graph);
+      else this.staleGeneration += 1;
       changed = true;
     }
     if (changed) this.value += 1;
@@ -101,8 +115,7 @@ export class RecipientKeyRouteFence {
   noteRemoval({ graph, subject, predicate }: StoreRemoval): void {
     if (isNonAgentIri(subject)) return;
     if (isBareIri(predicate) && !RECIPIENT_KEY_ROUTE_PREDICATES.has(predicate)) return;
-    const named = graph === undefined ? undefined : unwrapIri(graph);
-    if (isBareIri(named) && this.trusted && !this.keyGraphs.has(named)) return;
+    if (isBareIri(graph) && this.trusted && !this.keyGraphs.has(graph)) return;
     this.value += 1;
   }
 
@@ -119,7 +132,7 @@ export class RecipientKeyRouteFence {
    * later scan.
    */
   async ensureReady(): Promise<void> {
-    if (this.trusted) return;
+    if (this.trusted || this.graphsUnknown) return;
     this.scan ??= this.scanKeyGraphs().finally(() => { this.scan = null; });
     await this.scan;
   }

@@ -46,12 +46,12 @@ export function createListContextGraphsCacheInvalidatingStore(
       // not change; every indeterminate outcome must invalidate fail-closed.
       const indeterminate = operation !== undefined && !isStoreOperationNotStarted(error, operation);
       if (indeterminate) invalidate();
-      settle?.(indeterminate);
+      settle?.(indeterminate ? 'indeterminate' : 'unchanged');
       throw error;
     }
     const didChange = changed(result);
     if (didChange) invalidate();
-    settle?.(didChange);
+    settle?.(didChange ? 'changed' : 'unchanged');
     return result;
   };
   const sortedSource = typeof (innerStore as Partial<SortedGraphSetSource>).listGraphsSorted

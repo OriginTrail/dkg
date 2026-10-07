@@ -29,11 +29,11 @@ export function createProjectionMutationObserver(
     begin(mutation) {
       const projection = getProjection();
       const release = projection?.recipientKeyRouteFence.begin(mutation);
-      return (changed) => {
+      return (outcome) => {
         try {
-          if (changed && projection) notifyProjection(projection, mutation);
+          if (outcome !== 'unchanged' && projection) notifyProjection(projection, mutation);
         } finally {
-          release?.();
+          release?.(outcome);
         }
       };
     },
