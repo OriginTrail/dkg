@@ -705,6 +705,9 @@ export type ResolveCuratedChainKeyContextOptions = {
   aeadBindingContextGraphId?: string;
 };
 
+/** How many sender-key setups one resolution may run before it gives the publish attempt back. */
+const CURATED_KEY_CONTEXT_SETUP_ROUNDS = 3;
+
 function normalizeOptionalContextGraphId(value: string | null | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
@@ -3836,6 +3839,7 @@ export class PublishMethods extends DKGAgentBase {
     explicitPolicyTargetContextGraphId: string | undefined,
     logPrefix: string,
     options?: ResolveCuratedChainKeyContextOptions,
+    setupRound = 1,
   ): Promise<{ chainKey: Uint8Array; aeadCgId: string; senderAddress: string } | undefined> {
     const ctx = createOperationContext('publish');
     const targetCgId = explicitPolicyTargetContextGraphId ?? contextGraphId;
@@ -4023,8 +4027,9 @@ export class PublishMethods extends DKGAgentBase {
 
     // Distribution and the pending drain wait on peers. A member removed or a route
     // replaced meanwhile must not be served by this epoch, so the authority is read
-    // once more and any difference refuses the attempt. The refusal is the retryable
-    // authority failure: a queued publish is attempted again and sets up a new epoch.
+    // once more. On a difference the resolution starts over, as a new attempt would,
+    // and sets up an epoch for the authority as it is now. An authority that keeps
+    // moving gives the attempt back as the typed authority failure.
     const current = await withRpcUsageSite(
       CG_AUTH_RPC_SITES.curatedKeyContext,
       () => this.resolveWorkspaceAgentRecipientsForCurrentAuthority({ contextGraphId }),
@@ -4034,6 +4039,16 @@ export class PublishMethods extends DKGAgentBase {
         members: current.recipients.map((recipient) => ({ agentAddress: recipient.agentAddress, recipientKeyId: recipient.recipientKeyId })),
       }) !== membershipHash
       || computeSwmSenderKeyRecipientRouteHash({ contextGraphId, subGraphName, recipients: current.recipients }) !== recipientRouteHash) {
+      if (setupRound < CURATED_KEY_CONTEXT_SETUP_ROUNDS) {
+        this.log.info(
+          ctx,
+          `${logPrefix}: curated CG ${contextGraphId}: recipient authority changed during sender-key setup; ` +
+          `resolving again (round ${setupRound + 1} of ${CURATED_KEY_CONTEXT_SETUP_ROUNDS})`,
+        );
+        return this._resolveCuratedChainKeyContext(
+          contextGraphId, subGraphName, authorAgentAddress, explicitPolicyTargetContextGraphId, logPrefix, options, setupRound + 1,
+        );
+      }
       throw createContextGraphAuthorityError(
         `${logPrefix}: curated CG ${contextGraphId}: recipient authority changed during sender-key setup; refusing to encrypt with a stale epoch`,
         { reason: 'chain-participant-authority-unavailable', detail: 'retry the publish against the current private authority' },

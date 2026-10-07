@@ -1640,46 +1640,94 @@ describe('curated inline context per publish attempt', () => {
     expect(host.log.warn).toHaveBeenCalledOnce();
   });
 
-  it.each([
-    ['distribution', 'a member is removed'], ['pending-drain', 'a member is removed'],
-    ['distribution', 'a route is replaced'], ['pending-drain', 'a route is replaced'],
-  ] as const)('refuses the epoch with a retryable authority failure when, during %s, %s', async (phase, change) => {
+  /** A curated host whose authority a test can move while a sender-key setup waits on peers. */
+  function setupHost() {
     const sender = ethers.Wallet.createRandom();
     const remote = ethers.Wallet.createRandom();
     const senderRecipient = { agentAddress: sender.address, recipientKeyId: 'sender-key', peerId: 'sender-peer' };
     const remoteRecipient = { agentAddress: remote.address, recipientKeyId: 'remote-key', peerId: 'remote-peer' };
+    const host = {
+      recipients: [senderRecipient, remoteRecipient],
+      /** What happens to the authority while the next distribution or drain is in flight. */
+      duringSetup: undefined as (() => void) | undefined,
+      epochs: 0,
+      log: { info: vi.fn(), warn: vi.fn() },
+      // The resolution starts over through the agent's own method.
+      _resolveCuratedChainKeyContext: DKGAgent.prototype._resolveCuratedChainKeyContext,
+      // Not the author: a round that lost the author would have no signing key.
+      defaultAgentAddress: ethers.Wallet.createRandom().address,
+      resolveOnChainAccessPolicyState: async () => 1,
+      loadSwmSenderKeyState: async () => undefined,
+      getLocalSigningAgentForAddress: (address: string) => (
+        address === sender.address ? { agentAddress: sender.address, privateKey: sender.privateKey } : undefined
+      ),
+      resolveWorkspaceAgentRecipientsForCurrentAuthority: vi.fn(async () => ({ requiresEncryption: true, recipients: host.recipients })),
+      swmSenderKeySendStates: new Map(), prunePendingSenderKeysForEpochRotation: () => 0,
+      saveSwmSenderKeyState: async () => undefined,
+      // Each epoch has its own key bytes, so a test can tell which one a resolution returned.
+      createAndDistributeSwmSenderKeyEpoch: vi.fn(async (input: any) => {
+        host.epochs += 1;
+        const state = {
+          chainKey: new Uint8Array(32).fill(host.epochs), membershipHash: input.membershipHash,
+          recipientRouteHash: computeSwmSenderKeyRecipientRouteHash(input), senderAgentAddress: sender.address, epochId: `epoch-${host.epochs}`,
+        };
+        host.duringSetup?.();
+        return state;
+      }),
+      drainPendingSenderKeyForRecipients: vi.fn(async () => { host.duringSetup?.(); }),
+    };
+    const resolve = (subGraphName?: string, policyTarget?: string, options?: { aeadBindingContextGraphId?: string }) => (
+      DKGAgent.prototype._resolveCuratedChainKeyContext.call(host as never, 'private-cg', subGraphName, sender.address, policyTarget, 'regression', options)
+    );
+    return { host, resolve, sender, senderRecipient, remoteRecipient };
+  }
+
+  it.each([
+    ['distribution', 'a member is removed'], ['pending-drain', 'a member is removed'],
+    ['distribution', 'a route is replaced'], ['pending-drain', 'a route is replaced'],
+  ] as const)('sets up again when, during %s, %s, and returns the epoch of the authority as it is', async (phase, change) => {
+    const { host, resolve, sender, senderRecipient, remoteRecipient } = setupHost();
     // A removal changes the membership. A replaced peer keeps every agent and key, so only the route check can see it.
     const afterChange = change === 'a member is removed'
       ? [senderRecipient]
       : [senderRecipient, { ...remoteRecipient, peerId: 'replacement-peer' }];
-    let recipients = [senderRecipient, remoteRecipient];
-    let changeDuringSetup = phase === 'distribution';
-    const agentLike = {
-      log: { info: vi.fn(), warn: vi.fn() }, defaultAgentAddress: sender.address,
-      resolveOnChainAccessPolicyState: async () => 1,
-      loadSwmSenderKeyState: async () => undefined,
-      getLocalSigningAgentForAddress: () => ({ agentAddress: sender.address, privateKey: sender.privateKey }),
-      resolveWorkspaceAgentRecipientsForCurrentAuthority: vi.fn(async () => ({ requiresEncryption: true, recipients })),
-      swmSenderKeySendStates: new Map(), prunePendingSenderKeysForEpochRotation: () => 0,
-      saveSwmSenderKeyState: async () => undefined,
-      createAndDistributeSwmSenderKeyEpoch: async (input: any) => {
-        const recipientRouteHash = computeSwmSenderKeyRecipientRouteHash(input);
-        if (changeDuringSetup) recipients = afterChange;
-        return { chainKey: new Uint8Array(32).fill(9), membershipHash: input.membershipHash, recipientRouteHash, senderAgentAddress: sender.address, epochId: 'old-epoch' };
-      },
-      drainPendingSenderKeyForRecipients: async () => { if (changeDuringSetup) recipients = afterChange; },
-    };
-    const resolve = () => DKGAgent.prototype._resolveCuratedChainKeyContext.call(agentLike as never, 'private-cg', undefined, sender.address, undefined, 'regression');
-    if (phase === 'pending-drain') { await resolve(); changeDuringSetup = true; }
+    const options = { aeadBindingContextGraphId: '42' };
+    // Epoch 1 already exists in the drain case, so the attempt under test drains it instead of distributing.
+    if (phase === 'pending-drain') await resolve('sub', undefined, options);
+    host.duringSetup = () => { host.recipients = afterChange; host.duringSetup = undefined; };
+
+    const context = await resolve('sub', undefined, options);
+
+    // Epoch 1 went to the authority as it was. The resolution started over and distributed epoch 2 to the current one.
+    expect(host.createAndDistributeSwmSenderKeyEpoch).toHaveBeenCalledTimes(2);
+    expect(host.createAndDistributeSwmSenderKeyEpoch.mock.calls[1][0]).toMatchObject({
+      contextGraphId: 'private-cg', subGraphName: 'sub', recipients: afterChange,
+    });
+    expect(context).toEqual({ chainKey: new Uint8Array(32).fill(2), aeadCgId: '42', senderAddress: sender.address });
+    // Every setup was followed by its own read of the authority; the last one found it unchanged.
+    expect(host.resolveWorkspaceAgentRecipientsForCurrentAuthority).toHaveBeenCalledTimes(phase === 'distribution' ? 4 : 6);
+    expect(host.log.info.mock.calls.some(([, message]) => /^regression: .*resolving again \(round 2 of 3\)$/.test(message))).toBe(true);
+  });
+
+  it('starts over with the same policy target', async () => {
+    const { host, resolve, senderRecipient } = setupHost();
+    host.duringSetup = () => { host.recipients = [senderRecipient]; host.duringSetup = undefined; };
+    expect(await resolve(undefined, 'target-cg')).toMatchObject({ chainKey: new Uint8Array(32).fill(2), aeadCgId: 'target-cg' });
+  });
+
+  it('gives the attempt back with the typed authority failure when the authority moves during every setup', async () => {
+    const { host, resolve, senderRecipient, remoteRecipient } = setupHost();
+    let moves = 0;
+    host.duringSetup = () => { moves += 1; host.recipients = moves % 2 ? [senderRecipient] : [senderRecipient, remoteRecipient]; };
     const encrypt = vi.fn();
-    // The typed, retryable authority failure: a queued publish is attempted again instead of ending.
+    // Typed, and raised before anything is signed: the queued KA publish path records it before the send stage and retries on its own.
     await expect(resolve().then(encrypt)).rejects.toMatchObject({
       code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
       reason: 'chain-participant-authority-unavailable',
-      message: expect.stringMatching(/authority changed during sender-key setup/),
+      message: expect.stringMatching(/^regression: .*authority changed during sender-key setup; refusing to encrypt with a stale epoch$/),
     });
     expect(encrypt).not.toHaveBeenCalled();
-    // Every read of the authority, the one after setup included, went through the resolver.
-    expect(agentLike.resolveWorkspaceAgentRecipientsForCurrentAuthority).toHaveBeenCalledTimes(phase === 'distribution' ? 2 : 4);
+    expect(host.createAndDistributeSwmSenderKeyEpoch).toHaveBeenCalledTimes(3);
+    expect(host.resolveWorkspaceAgentRecipientsForCurrentAuthority).toHaveBeenCalledTimes(6);
   });
 });
