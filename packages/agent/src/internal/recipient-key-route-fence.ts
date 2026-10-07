@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
+import { AGENT_DID_PREFIX, DKG_ONTOLOGY, isSafeIri, unwrapIri } from '@origintrail-official/dkg-core';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
-
-const AGENT_DID_PREFIX = 'did:dkg:agent:';
-const UNSAFE_IRI_CHARACTER = /[\s<>"{}|\\^`]/;
+import type { StoreMutation, StoreRemoval } from './store-mutation.js';
 
 /** The predicates a recipient key lookup reads. Each is read only on an agent DID or key IRI subject. */
 export const RECIPIENT_KEY_ROUTE_PREDICATES: ReadonlySet<string> = new Set([
@@ -23,38 +21,33 @@ const KEY_GRAPH_SCAN = `SELECT DISTINCT ?g WHERE {
   FILTER(STRSTARTS(STR(?s), "${AGENT_DID_PREFIX}"))
 }`;
 
-const bare = (term: string): string => (term.startsWith('<') && term.endsWith('>') ? term.slice(1, -1) : term);
+const isKeyRouteFact = (quad: Quad): boolean => unwrapIri(quad.subject).startsWith(AGENT_DID_PREFIX)
+  && RECIPIENT_KEY_ROUTE_PREDICATES.has(unwrapIri(quad.predicate));
 
-// A removal is proven harmless only by a bare IRI. Some adapters read an empty
-// term as a wildcard and rewrite unsafe characters, so those never prove anything.
-const isBareIri = (term: string | undefined): term is string => term !== undefined && term !== '' && !UNSAFE_IRI_CHARACTER.test(term);
-
-const isKeyRouteFact = (quad: Quad): boolean => bare(quad.subject).startsWith(AGENT_DID_PREFIX)
-  && RECIPIENT_KEY_ROUTE_PREDICATES.has(bare(quad.predicate));
-
-/** What a store removal names; every field is optional because an absent one means "any". */
-export interface RecipientRemovalScope {
-  graph?: string;
-  subject?: string;
-  predicate?: string;
-}
+// A removal is proven harmless only by a bare IRI (the shared definition of a
+// safe one, which also refuses brackets and an empty term): some adapters read
+// an empty term as a wildcard and rewrite unsafe characters.
+const isBareIri = (term: string | undefined): term is string => term !== undefined && isSafeIri(term);
 
 /**
  * A revision that moves only when a write can change which recipient keys or
  * routes a private-roster resolution finds. It ignores the job, share, metadata
  * and content writes that move the node-wide authority revision on a busy node.
  *
- * Fail closed: anything this class cannot prove irrelevant moves the revision.
- * A removal is irrelevant when its subject is not an agent DID, its predicate is
+ * Fail closed: anything this class cannot prove harmless moves the revision.
+ * A removal is harmless when its subject is not an agent DID, its predicate is
  * not a key or route predicate, or its graph has never held such a fact. The
- * lookup reads every named graph, so the graphs that hold key facts are
- * found by one scan and kept current from every write that names its quads.
+ * lookup reads every named graph, so the graphs that hold key facts are found
+ * by one scan and kept current from every write that names its quads. While a
+ * write that names none is in flight, or after one has changed something, that
+ * list is not trusted until a scan has run again.
  */
 export class RecipientKeyRouteFence {
   private value = 0;
   private readonly keyGraphs = new Set<string>();
   private staleGeneration = 0;
   private scannedGeneration = -1;
+  private pendingUnseen = 0;
   private scan: Promise<void> | null = null;
 
   constructor(private readonly store: TripleStore) {}
@@ -63,17 +56,27 @@ export class RecipientKeyRouteFence {
     return this.value;
   }
 
+  private get trusted(): boolean {
+    return this.scannedGeneration === this.staleGeneration && this.pendingUnseen === 0;
+  }
+
   /**
-   * A write is about to be dispatched. Its graphs are learned before the write
-   * can commit, so no removal of one of them completes while it is unknown. A
-   * write that names no quads makes every learned graph untrusted.
+   * A write is about to be dispatched. The graphs of its quads are learned before
+   * it can commit, so no removal of one of them completes while it is unknown. A
+   * write that names no quads makes the list untrusted until it has settled and
+   * the graphs have been scanned again. Returns what to call when the write settles.
    */
-  anticipate(quads?: readonly Quad[]): void {
-    if (quads === undefined) {
-      this.staleGeneration += 1;
-      return;
-    }
-    for (const quad of quads) if (isKeyRouteFact(quad)) this.keyGraphs.add(bare(quad.graph));
+  begin(mutation: StoreMutation): () => void {
+    for (const quad of mutation.quads ?? []) if (isKeyRouteFact(quad)) this.keyGraphs.add(unwrapIri(quad.graph));
+    if (!mutation.unseenPayload && !mutation.everything) return () => undefined;
+    this.staleGeneration += 1;
+    this.pendingUnseen += 1;
+    let settled = false;
+    return () => {
+      if (settled) return;
+      settled = true;
+      this.pendingUnseen -= 1;
+    };
   }
 
   /** Quads that were inserted, removed or replaced into a graph. */
@@ -81,23 +84,22 @@ export class RecipientKeyRouteFence {
     let changed = false;
     for (const quad of quads) {
       if (!isKeyRouteFact(quad)) continue;
-      this.keyGraphs.add(bare(quad.graph));
+      this.keyGraphs.add(unwrapIri(quad.graph));
       changed = true;
     }
     if (changed) this.value += 1;
   }
 
   /** A removal whose scope is known, in whole or in part. */
-  noteRemoval(scope: RecipientRemovalScope): void {
-    const { graph, subject, predicate } = scope;
+  noteRemoval({ graph, subject, predicate }: StoreRemoval): void {
     if (isBareIri(subject) && !subject.startsWith(AGENT_DID_PREFIX)) return;
     if (isBareIri(predicate) && !RECIPIENT_KEY_ROUTE_PREDICATES.has(predicate)) return;
-    const named = graph === undefined ? undefined : bare(graph);
-    if (isBareIri(named) && this.scannedGeneration === this.staleGeneration && !this.keyGraphs.has(named)) return;
+    const named = graph === undefined ? undefined : unwrapIri(graph);
+    if (isBareIri(named) && this.trusted && !this.keyGraphs.has(named)) return;
     this.value += 1;
   }
 
-  /** A write whose facts are not named (an UPDATE, a prefix delete, a replaced payload that was not seen). */
+  /** A write whose facts are not named has changed something (an UPDATE, a prefix delete, a replaced payload that was not seen). */
   noteUnscopedWrite(): void {
     this.value += 1;
     this.staleGeneration += 1;
@@ -105,11 +107,11 @@ export class RecipientKeyRouteFence {
 
   /**
    * Make the set of key-holding graphs trustworthy before a resolution reads the
-   * revision. A failed scan leaves it untrusted, so removals keep moving the
-   * revision until a later scan succeeds.
+   * revision. A failed scan, or one that overlapped a write that names no quads,
+   * leaves it untrusted, so removals keep moving the revision until a later scan.
    */
   async ensureReady(): Promise<void> {
-    if (this.scannedGeneration === this.staleGeneration) return;
+    if (this.trusted) return;
     this.scan ??= this.scanKeyGraphs().finally(() => { this.scan = null; });
     await this.scan;
   }
@@ -120,9 +122,9 @@ export class RecipientKeyRouteFence {
       const result = await this.store.query(KEY_GRAPH_SCAN, { source: 'agent.recipientKeyRouteFence.scan' });
       if (result.type !== 'bindings') return;
       for (const row of result.bindings) {
-        if (typeof row['g'] === 'string') this.keyGraphs.add(bare(row['g']));
+        if (typeof row['g'] === 'string') this.keyGraphs.add(unwrapIri(row['g']));
       }
-      if (generation === this.staleGeneration) this.scannedGeneration = generation;
+      if (generation === this.staleGeneration && this.pendingUnseen === 0) this.scannedGeneration = generation;
     } catch {
       // Not ready: every removal that cannot be proven harmless by subject or predicate still moves the revision.
     }

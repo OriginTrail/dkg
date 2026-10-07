@@ -13,7 +13,6 @@ import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-
 import { strip, stripLiteral } from './dkg-agent-utils.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { cloneMetaRecord } from './internal/context-graph-meta-record-copy.js';
-import type { StoreMutationScope } from './internal/context-graph-cache-invalidating-store.js';
 import { RECIPIENT_KEY_ROUTE_PREDICATES, RecipientKeyRouteFence } from './internal/recipient-key-route-fence.js';
 
 export interface ContextGraphSubGraphMeta {
@@ -349,9 +348,8 @@ export class ContextGraphMetaProjection {
    * advance the authority revision, because key lookup scans all named graphs.
    * The recipient key/route fence is told what the mutation names.
    */
-  markDirtyForGraph(graphUri: string, subject?: string, scope?: StoreMutationScope): void {
-    this.recipientKeyRouteFence.noteRemoval({ graph: graphUri, subject, predicate: scope?.predicate });
-    if (scope?.unscopedPayload) this.recipientKeyRouteFence.noteUnscopedWrite();
+  markDirtyForGraph(graphUri: string, subject?: string, predicate?: string): void {
+    this.recipientKeyRouteFence.noteRemoval({ graph: graphUri, subject, predicate });
     const graph = stripTerm(graphUri);
     if (
       graph === contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS)

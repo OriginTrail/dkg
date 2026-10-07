@@ -170,15 +170,45 @@ describe('recipient key/route fence through the production store wrapper (GH#306
       (store as unknown as { release: () => void }).release();
       await insert;
     });
+  });
 
-    it('would be missed without that hook (control for the test above)', async () => {
-      const { wrapper, fence, store } = await open({ inner: racing, anticipate: false });
-      const insert = wrapper.replaceGraph!(`${CG_DID}/racing`, [keyFact(`${CG_DID}/racing`)]);
+  describe('a scan that runs while an UPDATE is still pending', () => {
+    it('cannot make a later removal of the graph that UPDATE fills harmless', async () => {
+      let commit!: () => void;
+      let respond!: () => void;
+      const committing = new Promise<void>((resolve) => { commit = resolve; });
+      const responding = new Promise<void>((resolve) => { respond = resolve; });
+      const { wrapper, fence } = await open({
+        inner: (store) => new Proxy(store, {
+          get: (target, property) => {
+            if (property === 'update') {
+              return async (sparql: string) => {
+                await committing;
+                await target.update!(sparql);
+                await responding;
+              };
+            }
+            const value = Reflect.get(target, property);
+            return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+          },
+        }),
+      });
+      const filled = `${CG_DID}/filled`;
+      const update = wrapper.update!(
+        `INSERT DATA { GRAPH <${filled}> { <${AGENT}> <${DKG_ONTOLOGY.DKG_PEER_ID}> "p" } }`,
+      );
+      // The scan runs before the UPDATE has committed, so it cannot list the graph.
+      await fence.ensureReady();
+      commit();
+      await new Promise((resolve) => setImmediate(resolve));
+      // The UPDATE has committed but its response is still on its way: the
+      // removal completes first and must not be taken for harmless.
       const before = fence.revision;
-      await wrapper.dropGraph(`${CG_DID}/racing`);
-      expect(fence.revision).toBe(before);
-      (store as unknown as { release: () => void }).release();
-      await insert;
+      await wrapper.dropGraph(filled);
+      expect(fence.revision).toBeGreaterThan(before);
+      respond();
+      await update;
     });
+
   });
 });

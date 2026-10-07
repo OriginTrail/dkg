@@ -8,6 +8,8 @@ import {
 } from '@origintrail-official/dkg-storage';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
 import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
+import { createProjectionMutationObserver } from '../src/internal/projection-mutation-observer.js';
+import { recordingObserver } from './_helpers/store-mutation-recorder.js';
 
 function input(): Rfc64AuthorCommitCasInputV1 {
   const graph = 'did:dkg:context-graph:rfc64/_shared_memory';
@@ -63,40 +65,41 @@ describe('RFC-64 CAS through the agent cache wrapper', () => {
       ));
     const inner = overrideStore(new OxigraphStore(), { rfc64AuthorCommitCasV1: cas });
     const invalidate = vi.fn();
-    const markProjectionDirty = vi.fn();
+    const { observer, began, committed, unchanged } = recordingObserver();
     const store = createListContextGraphsCacheInvalidatingStore(
       inner,
       invalidate,
-      markProjectionDirty,
+      observer,
     );
     const manifest = input();
 
     await expect(store.rfc64AuthorCommitCasV1!(manifest, options)).resolves.toBe('committed');
     expect(cas).toHaveBeenLastCalledWith(manifest, options);
     expect(invalidate).toHaveBeenCalledTimes(1);
-    expect(markProjectionDirty).toHaveBeenCalledTimes(6);
-    expect(markProjectionDirty).toHaveBeenNthCalledWith(
-      1,
-      undefined,
-      manifest.sharedProjectionGraph,
-      undefined,
-      { unscopedPayload: true },
-    );
-    expect(markProjectionDirty.mock.calls.every((call) => call[1] !== undefined)).toBe(true);
+    expect(committed).toHaveLength(1);
+    // Every graph the commit replaces is named, and its payload is not visible
+    // to the decorator.
+    expect(committed[0]).toMatchObject({ unseenPayload: true });
+    expect(committed[0].removals).toHaveLength(6);
+    expect(committed[0].removals![0]).toEqual({ graph: manifest.sharedProjectionGraph });
+    expect(committed[0].removals!.every((removal) => removal.graph !== undefined)).toBe(true);
 
     await expect(store.rfc64AuthorCommitCasV1!(manifest, options)).resolves.toBe('conflict');
     expect(invalidate).toHaveBeenCalledTimes(1);
-    expect(markProjectionDirty).toHaveBeenCalledTimes(6);
+    expect(committed).toHaveLength(1);
+    expect(unchanged).toHaveLength(1);
 
     await expect(store.rfc64AuthorCommitCasV1!(manifest, options))
       .rejects.toThrow('response lost after commit');
     expect(invalidate).toHaveBeenCalledTimes(2);
-    expect(markProjectionDirty).toHaveBeenCalledTimes(12);
+    expect(committed).toHaveLength(2);
 
     await expect(store.rfc64AuthorCommitCasV1!(manifest, options))
       .rejects.toBeInstanceOf(UnsupportedTripleStoreCapabilityError);
     expect(invalidate).toHaveBeenCalledTimes(2);
-    expect(markProjectionDirty).toHaveBeenCalledTimes(12);
+    expect(committed).toHaveLength(2);
+    expect(unchanged).toHaveLength(2);
+    expect(began).toHaveLength(4);
   });
 
   it('keeps an unrelated private proof current after an exact author commit', async () => {
@@ -107,11 +110,7 @@ describe('RFC-64 CAS through the agent cache wrapper', () => {
     const store = createListContextGraphsCacheInvalidatingStore(
       inner,
       vi.fn(),
-      (quads, targetGraph) => {
-        if (targetGraph !== undefined) projection.markDirtyForGraph(targetGraph);
-        if (quads !== undefined) projection.markDirtyFromQuads(quads);
-        else if (targetGraph === undefined) projection.markAllDirty();
-      },
+      createProjectionMutationObserver(() => projection),
     );
     const before = projection.readContextGraphAuthorityFactsRevision('unrelated-private-cg');
 
@@ -123,7 +122,7 @@ describe('RFC-64 CAS through the agent cache wrapper', () => {
 
   it('does not advertise a capability absent from the inner store', () => {
     const inner = overrideStore(new OxigraphStore(), { rfc64AuthorCommitCasV1: undefined });
-    const store = createListContextGraphsCacheInvalidatingStore(inner, vi.fn(), vi.fn());
+    const store = createListContextGraphsCacheInvalidatingStore(inner, vi.fn(), recordingObserver().observer);
     expect(store.rfc64AuthorCommitCasV1).toBeUndefined();
   });
 });

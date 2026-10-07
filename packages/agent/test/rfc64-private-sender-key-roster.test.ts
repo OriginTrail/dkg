@@ -332,7 +332,11 @@ describe('RFC-64 private Sender Key roster authority', () => {
   it('keeps a fully revoked legacy gate authoritative and empty', async () => {
     const receiver = {
       ...noAcceptedPublicUnregisteredPolicy,
-      contextGraphMetaProjection: { readAuthorityFactsRevision: 0, recipientKeyRouteFence: stubFence() },
+      contextGraphMetaProjection: {
+        readAuthorityFactsRevision: 0,
+        readContextGraphAuthorityFactsRevision: () => '0:0',
+        recipientKeyRouteFence: stubFence(),
+      },
       resolveContextGraphAgentGateAuthority:
         WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority,
       resolveRegisteredContextGraphAuthority: async () => ({ kind: 'unregistered' as const }),
@@ -354,7 +358,11 @@ describe('RFC-64 private Sender Key roster authority', () => {
   it('preserves legacy meta and subscription resolution for non-RFC-64 graphs', async () => {
     const receiver = {
       ...noAcceptedPublicUnregisteredPolicy,
-      contextGraphMetaProjection: { readAuthorityFactsRevision: 0, recipientKeyRouteFence: stubFence() },
+      contextGraphMetaProjection: {
+        readAuthorityFactsRevision: 0,
+        readContextGraphAuthorityFactsRevision: () => '0:0',
+        recipientKeyRouteFence: stubFence(),
+      },
       resolveContextGraphAgentGateAuthority:
         WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority,
       resolveRegisteredContextGraphAuthority: async () => ({ kind: 'unregistered' as const }),

@@ -458,7 +458,7 @@ import {
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase, createListContextGraphsCacheInvalidatingStore } from './dkg-agent-base.js';
-import { createProjectionWriteHooks } from './internal/projection-write-hooks.js';
+import { createProjectionMutationObserver } from './internal/projection-mutation-observer.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
@@ -1571,14 +1571,12 @@ export class DKGAgent extends DKGAgentBase {
       !adapterCanPublishFromAdvertisedSigner &&
       (!configuredPublisherAddress || publisherAddressMatchesLegacyKey),
     );
-    const projectionWriteHooks = createProjectionWriteHooks(() => agentRef?.contextGraphMetaProjection);
     const agentStore = createListContextGraphsCacheInvalidatingStore(
       store,
       () => {
         agentRef?.invalidateListContextGraphsCache();
       },
-      projectionWriteHooks.markDirty,
-      projectionWriteHooks.anticipate,
+      createProjectionMutationObserver(() => agentRef?.contextGraphMetaProjection),
     );
 
     const publicSnapshotStore = config.publicSnapshotStore ?? (config.publicSnapshotStoreFactory

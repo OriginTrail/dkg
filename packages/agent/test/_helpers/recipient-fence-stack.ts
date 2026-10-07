@@ -6,7 +6,7 @@ import { OxigraphStore, type Quad, type TripleStore } from '@origintrail-officia
 
 import { ContextGraphMetaProjection } from '../../src/context-graph-meta-projection.js';
 import { createListContextGraphsCacheInvalidatingStore } from '../../src/dkg-agent-base.js';
-import { createProjectionWriteHooks } from '../../src/internal/projection-write-hooks.js';
+import { createProjectionMutationObserver } from '../../src/internal/projection-mutation-observer.js';
 
 export const AGENT = 'did:dkg:agent:0xAbCdEf0123456789aBcDeF0123456789AbCdEf01';
 export const KEY_IRI = `${AGENT.toLowerCase()}#x25519-0123456789abcdef0123456789abcdef`;
@@ -24,15 +24,13 @@ export const MEMORY_LAYER = 'http://dkg.io/ontology/memoryLayer';
 export const quad = (subject: string, predicate: string, graph: string): Quad => ({ subject, predicate, object: '"v"', graph });
 export const keyFact = (graph = PROFILE_GRAPH, predicate = DKG_ONTOLOGY.DKG_PEER_ID): Quad => quad(AGENT, predicate, graph);
 
-export async function stack(options: { anticipate?: boolean; inner?: (store: OxigraphStore) => TripleStore } = {}) {
+export async function stack(options: { inner?: (store: OxigraphStore) => TripleStore } = {}) {
   const store = new OxigraphStore();
   const projection = new ContextGraphMetaProjection(store);
-  const hooks = createProjectionWriteHooks(() => projection);
   const wrapper = createListContextGraphsCacheInvalidatingStore(
     options.inner ? options.inner(store) : store,
     () => {},
-    hooks.markDirty,
-    options.anticipate === false ? undefined : hooks.anticipate,
+    createProjectionMutationObserver(() => projection),
   );
   await store.insert([
     keyFact(PROFILE_GRAPH, DKG_ONTOLOGY.DKG_PUBLIC_ENCRYPTION_KEY),

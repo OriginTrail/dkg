@@ -170,6 +170,7 @@ describe('RecipientKeyRouteFence (GH#3067)', () => {
       ['a subject with a backslash', { subject: 'urn:x\\y', graph: PROFILE_GRAPH }],
       ['a subject with a caret', { subject: 'urn:x^y', graph: PROFILE_GRAPH }],
       ['a subject with a backtick', { subject: 'urn:x`y', graph: PROFILE_GRAPH }],
+      ['a name without a scheme', { subject: 'relative-name', graph: PROFILE_GRAPH }],
       ['an unsafe predicate', { predicate: 'urn:p q', graph: PROFILE_GRAPH }],
       ['an empty predicate', { predicate: '', graph: PROFILE_GRAPH }],
     ])('does not trust %s as proof', async (_label, scope) => {
@@ -182,12 +183,20 @@ describe('RecipientKeyRouteFence (GH#3067)', () => {
       expect(moved(fence, () => fence.noteRemoval({ graph: '' }))).toBe(true);
       expect(moved(fence, () => fence.noteRemoval({ graph: 'urn:g h' }))).toBe(true);
       expect(moved(fence, () => fence.noteRemoval({ graph: '<urn:g' }))).toBe(true);
+      expect(moved(fence, () => fence.noteRemoval({ graph: 'relative-graph' }))).toBe(true);
     });
   });
 
   describe('which graphs hold key facts', () => {
     it('is untrusted until the scan has run, so a bare graph proves nothing', () => {
       const fence = new RecipientKeyRouteFence(scanStore([]).store);
+      expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(true);
+    });
+
+    it('does not trust a scan whose answer is not a list of bindings', async () => {
+      const query = vi.fn(async () => ({ type: 'boolean' as const, boolean: true }));
+      const fence = new RecipientKeyRouteFence({ query } as unknown as TripleStore);
+      await fence.ensureReady();
       expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(true);
     });
 
@@ -225,7 +234,7 @@ describe('RecipientKeyRouteFence (GH#3067)', () => {
       expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(false);
     });
 
-    it('does not trust a scan that an unscoped write overtook while it was running', async () => {
+    it('does not trust a scan that a write naming no quads overtook while it was running', async () => {
       let release!: () => void;
       const gate = new Promise<void>((resolve) => { release = resolve; });
       const query = vi.fn(async () => {
@@ -234,24 +243,76 @@ describe('RecipientKeyRouteFence (GH#3067)', () => {
       });
       const fence = new RecipientKeyRouteFence({ query } as unknown as TripleStore);
       const scanning = fence.ensureReady();
-      fence.anticipate();
+      fence.begin({ everything: true });
       release();
       await scanning;
       expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(true);
+    });
+
+    it.each([
+      ['an UPDATE', { everything: true }],
+      ['a commit whose payload is not visible', { unseenPayload: true }],
+    ])('does not trust a scan that ran while %s was still in flight, and trusts one after it settled', async (_label, mutation) => {
+      const { store, query } = scanStore([PROFILE_GRAPH]);
+      const fence = new RecipientKeyRouteFence(store);
+      await fence.ensureReady();
+      expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(false);
+
+      const settle = fence.begin(mutation);
+      await fence.ensureReady();
+      // The scan could not have seen what the write is about to add.
+      expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(true);
+      await fence.ensureReady();
+      expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(true);
+
+      fence.noteUnscopedWrite();
+      settle();
+      expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(true);
+      await fence.ensureReady();
+      expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(false);
+      expect(query.mock.calls.length).toBeGreaterThanOrEqual(3);
+    });
+
+    it('trusts the scan again after a write that changed nothing has settled', async () => {
+      const fence = await readyFence([PROFILE_GRAPH]);
+      const settle = fence.begin({ everything: true });
+      settle();
+      expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(true);
+      await fence.ensureReady();
+      expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(false);
+    });
+
+    it('releases a write once however often it is settled, and not before every write has settled', async () => {
+      const fence = await readyFence([PROFILE_GRAPH]);
+      const first = fence.begin({ everything: true });
+      const second = fence.begin({ everything: true });
+      first();
+      first();
+      await fence.ensureReady();
+      expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(true);
+      second();
+      await fence.ensureReady();
+      expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(false);
     });
 
     it('learns the graph of an inserting write before it commits, so no removal of that graph is missed in between', async () => {
       const fence = await readyFence([PROFILE_GRAPH]);
       expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(false);
       const before = fence.revision;
-      fence.anticipate([quad(AGENT, DKG_ONTOLOGY.DKG_PEER_ID, DATA_GRAPH)]);
+      fence.begin({ quads: [quad(AGENT, DKG_ONTOLOGY.DKG_PEER_ID, DATA_GRAPH)] });
       expect(fence.revision).toBe(before);
       expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(true);
     });
 
+    it('would miss that removal if the insert were only noted once it had settled (control)', async () => {
+      const fence = await readyFence([PROFILE_GRAPH]);
+      expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(false);
+      expect(moved(fence, () => fence.noteQuads([quad(AGENT, DKG_ONTOLOGY.DKG_PEER_ID, DATA_GRAPH)]))).toBe(true);
+    });
+
     it('does not learn a graph from a write that adds no key fact', async () => {
       const fence = await readyFence([PROFILE_GRAPH]);
-      fence.anticipate([quad('urn:x:y', 'http://schema.org/name', DATA_GRAPH), quad(AGENT, 'http://schema.org/name', DATA_GRAPH)]);
+      fence.begin({ quads: [quad('urn:x:y', 'http://schema.org/name', DATA_GRAPH), quad(AGENT, 'http://schema.org/name', DATA_GRAPH)] });
       expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(false);
     });
   });

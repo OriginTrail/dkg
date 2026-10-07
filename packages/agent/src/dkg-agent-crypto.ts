@@ -11,6 +11,7 @@
 
 
 import { collectProjectedDelegatees } from './internal/workspace-projected-delegatees.js';
+import { peerGateStayedCurrent, sameStringSet } from './internal/recipient-peer-gate.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -682,12 +683,6 @@ function hasExactWorkspaceRecipientSet(
   } catch {
     return false;
   }
-}
-
-function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
-  const leftSet = new Set(left);
-  const rightSet = new Set(right);
-  return leftSet.size === rightSet.size && [...leftSet].every((value) => rightSet.has(value));
 }
 
 type PendingSenderKeyDrainAuthority = {
@@ -1915,13 +1910,14 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         }
         return {
           resolution: { requiresEncryption: true, recipients: [firstRecipient, ...remainingRecipients] },
-          stayedCurrent: async () => {
-            const currentPeers = await this.getContextGraphAllowedPeers(input.contextGraphId);
-            return (allowedPeers === null || currentPeers === null
-              ? allowedPeers === currentPeers
-              : sameStringSet(allowedPeers, currentPeers))
-              && attemptRevision === projection.recipientKeyRouteFence.revision;
-          },
+          stayedCurrent: async () => (
+            await peerGateStayedCurrent(
+              allowedPeers,
+              () => this.getContextGraphAllowedPeers(input.contextGraphId),
+              () => projection.readContextGraphAuthorityFactsRevision(input.contextGraphId),
+            )
+            && attemptRevision === projection.recipientKeyRouteFence.revision
+          ),
         };
       };
     }
