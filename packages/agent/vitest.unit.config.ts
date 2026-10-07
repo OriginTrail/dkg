@@ -190,6 +190,7 @@ export default defineConfig({
       "test/outbox-drainer.test.ts",
       "test/sync-checkpoint-key.test.ts",
       "test/map-with-concurrency.test.ts",
+      "test/main-thread-time-slice.test.ts",
       "test/peer-selection.test.ts",
       "test/sync-requester-priority.test.ts",
       "test/sync-requester-progress.test.ts",
