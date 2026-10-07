@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
 import { DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
-import { resolveWorkspaceAgentRecipientKeys } from '@origintrail-official/dkg-publisher';
+import { WORKSPACE_RECIPIENT_DEPENDENCIES, WORKSPACE_RECIPIENT_KEY_ROUTE_PREDICATES, resolveWorkspaceAgentRecipientKeys } from '@origintrail-official/dkg-publisher';
 
 import { RECIPIENT_KEY_ROUTE_PREDICATES } from '../src/internal/recipient-key-route-fence.js';
 import { PROFILE_GRAPH, signedKeyFixture } from './_helpers/signed-private-keys.js';
@@ -71,9 +71,10 @@ describe('recipient key/route fence dependencies (GH#3067)', () => {
     expect(missingFrom(named, RECIPIENT_KEY_ROUTE_PREDICATES)).toEqual([]);
   });
 
-  it('would report a predicate the list lacks', () => {
-    const named = new Set([DKG_ONTOLOGY.DKG_PEER_ID, DKG_ONTOLOGY.DKG_REVOKED_AT]);
-    const withoutPeerId = new Set([...RECIPIENT_KEY_ROUTE_PREDICATES].filter((p) => p !== DKG_ONTOLOGY.DKG_PEER_ID));
-    expect(missingFrom(named, withoutPeerId)).toEqual([DKG_ONTOLOGY.DKG_PEER_ID]);
+  it('derives the fence and scan predicates from the immutable publisher contract', () => {
+    expect([...RECIPIENT_KEY_ROUTE_PREDICATES]).toEqual(WORKSPACE_RECIPIENT_KEY_ROUTE_PREDICATES);
+    expect(WORKSPACE_RECIPIENT_KEY_ROUTE_PREDICATES).toEqual(Object.values(WORKSPACE_RECIPIENT_DEPENDENCIES.keyRoute));
+    expect(Object.isFrozen(WORKSPACE_RECIPIENT_DEPENDENCIES.keyRoute)).toBe(true);
+    expect(Object.isFrozen(WORKSPACE_RECIPIENT_KEY_ROUTE_PREDICATES)).toBe(true);
   });
 });

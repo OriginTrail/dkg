@@ -1,6 +1,5 @@
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import {
-  DKG_ONTOLOGY,
   SYSTEM_CONTEXT_GRAPHS,
   WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
   WORKSPACE_RECIPIENT_ENCRYPTION_KEY_PURPOSE,
@@ -21,11 +20,9 @@ import {
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 
-const DKG = 'https://dkg.network/ontology#';
-const DKG_PUBLIC_ENCRYPTION_KEY = `${DKG}publicEncryptionKey`;
-const DKG_ENCRYPTION_KEY_ALGORITHM = `${DKG}encryptionKeyAlgorithm`;
-const DKG_ENCRYPTION_KEY_PROOF = `${DKG}encryptionKeyProof`;
-const DKG_PEER_ID = `${DKG}peerId`;
+import { WORKSPACE_RECIPIENT_DEPENDENCIES } from './workspace-recipient-dependencies.js';
+
+const { keyRoute: KEY_ROUTE, access: ACCESS } = WORKSPACE_RECIPIENT_DEPENDENCIES;
 const STRICT_RECIPIENT_KEY_CANDIDATE_LIMIT = 64;
 const RECIPIENT_KEY_HISTORY_PAGE_SIZE = 64;
 
@@ -247,25 +244,25 @@ async function getWorkspaceAccessMetadata(
   const result = await store.query(
     `SELECT ?agent ?policy ?revoked WHERE {
       {
-        GRAPH <${cgMeta}> { <${cgData}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?agent }
+        GRAPH <${cgMeta}> { <${cgData}> <${ACCESS.allowedAgent}> ?agent }
       } UNION {
-        GRAPH <${cgMeta}> { <${cgData}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}> ?agent }
+        GRAPH <${cgMeta}> { <${cgData}> <${ACCESS.participantAgent}> ?agent }
       } UNION {
-        GRAPH <${cgMeta}> { <${cgData}> <${DKG_ONTOLOGY.DKG_REVOKED_AGENT}> ?revoked }
+        GRAPH <${cgMeta}> { <${cgData}> <${ACCESS.revokedAgent}> ?revoked }
       } UNION {
-        GRAPH <${cgMeta}> { <${cgData}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?policy }
+        GRAPH <${cgMeta}> { <${cgData}> <${ACCESS.policy}> ?policy }
       } UNION {
-        GRAPH <${ontologyGraph}> { <${cgData}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?policy }
+        GRAPH <${ontologyGraph}> { <${cgData}> <${ACCESS.policy}> ?policy }
       } UNION {
-        GRAPH <${agentsGraph}> { <${cgData}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?agent }
+        GRAPH <${agentsGraph}> { <${cgData}> <${ACCESS.allowedAgent}> ?agent }
       } UNION {
-        GRAPH <${agentsGraph}> { <${cgData}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}> ?agent }
+        GRAPH <${agentsGraph}> { <${cgData}> <${ACCESS.participantAgent}> ?agent }
       } UNION {
-        GRAPH <${agentsGraph}> { <${cgData}> <${DKG_ONTOLOGY.DKG_REVOKED_AGENT}> ?revoked }
+        GRAPH <${agentsGraph}> { <${cgData}> <${ACCESS.revokedAgent}> ?revoked }
       } UNION {
-        GRAPH <${agentsGraph}> { <${cgData}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?policy }
+        GRAPH <${agentsGraph}> { <${cgData}> <${ACCESS.policy}> ?policy }
       } UNION {
-        GRAPH <${swmGraph}> { <${cgData}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?policy }
+        GRAPH <${swmGraph}> { <${cgData}> <${ACCESS.policy}> ?policy }
       }
     }`,
   );
@@ -427,7 +424,7 @@ export async function resolveWorkspaceAgentRecipientKeys(
       `SELECT DISTINCT ?key WHERE {
         VALUES ?agentSubject { ${agentUriValues} }
         GRAPH ?g {
-          ?agentSubject <${DKG_PUBLIC_ENCRYPTION_KEY}> ?rawKey .
+          ?agentSubject <${KEY_ROUTE.publicKey}> ?rawKey .
         }
         BIND (STR(?rawKey) AS ?key)
         ${graphFilter}
@@ -543,7 +540,7 @@ export async function resolveWorkspaceAgentRecipientKeys(
       `SELECT DISTINCT ?proof WHERE {
         VALUES ?agentSubject { ${agentUriValues} }
         GRAPH ?g {
-          ?agentSubject <${DKG_ENCRYPTION_KEY_PROOF}> ?rawProof .
+          ?agentSubject <${KEY_ROUTE.proof}> ?rawProof .
         }
         BIND (STR(?rawProof) AS ?proof)
         ${graphFilter}
@@ -615,9 +612,9 @@ export async function resolveWorkspaceAgentRecipientKeys(
       VALUES ?agentSubject { ${agentUriValues} }
       VALUES ?key { ${activeKeyValues} }
       GRAPH ?g {
-        ?agentSubject <${DKG_PUBLIC_ENCRYPTION_KEY}> ?rawKey ;
-          <${DKG_ENCRYPTION_KEY_ALGORITHM}> ${sparqlString(WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519)} .
-        OPTIONAL { ?agentSubject <${DKG_PEER_ID}> ?peerId }
+        ?agentSubject <${KEY_ROUTE.publicKey}> ?rawKey ;
+          <${KEY_ROUTE.algorithm}> ${sparqlString(WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519)} .
+        OPTIONAL { ?agentSubject <${KEY_ROUTE.peerId}> ?peerId }
       }
       ${graphFilter}
       FILTER (STR(?rawKey) = ?key)
@@ -695,8 +692,8 @@ export async function resolveWorkspaceAgentRecipientKeys(
         VALUES ?agentSubject { ${agentUriValues} }
         VALUES ?key { ${activeKeyValues} }
         GRAPH ?g {
-          ?agentSubject <${DKG_PUBLIC_ENCRYPTION_KEY}> ?rawKey ;
-            <${DKG_ENCRYPTION_KEY_ALGORITHM}> ?algorithm .
+          ?agentSubject <${KEY_ROUTE.publicKey}> ?rawKey ;
+            <${KEY_ROUTE.algorithm}> ?algorithm .
         }
         ${graphFilter}
         FILTER (
@@ -755,8 +752,8 @@ async function loadVerifiedRevokedKeyIds(
     `SELECT DISTINCT ?keyId ?revokedAt ?revocationProof WHERE {
       VALUES ?keyId { ${valuesList} }
       GRAPH ?g {
-        ?keyId <${DKG_ONTOLOGY.DKG_REVOKED_AT}> ?revokedAt .
-        OPTIONAL { ?keyId <${DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_REVOCATION_PROOF}> ?revocationProof }
+        ?keyId <${KEY_ROUTE.revokedAt}> ?revokedAt .
+        OPTIONAL { ?keyId <${KEY_ROUTE.revocationProof}> ?revocationProof }
       }
       ${graphFilter}
     }

@@ -6450,7 +6450,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           });
           if (outcome === 'applied') {
             this.invalidateListContextGraphsCache();
-            this.contextGraphMetaProjection.markDirtyFromQuads(authentication.asset.metadataQuads);
             try {
               let retiredTwin: FinalizedSwmTwinRetirement | undefined;
               const retirement = await reconcileFinalizedSwmTwin({

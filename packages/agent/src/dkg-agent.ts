@@ -927,15 +927,11 @@ export class DKGAgent extends DKGAgentBase {
       },
       recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
       invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
-      markMetaProjectionDirty: (quads) => this.contextGraphMetaProjection
-        .markDirtyFromQuads(quads),
       recoveryMutation: createSwmRecoveryMutationRuntimeV1({
         store: this.store,
         recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
         invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
-        markMetaProjectionDirty: (quads) => this.contextGraphMetaProjection
-          .markDirtyFromQuads(quads),
-      }),
+        }),
       setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
       deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
       deletePublicCheckpoint: (key) => deleteSyncPageCheckpoint(this.syncCheckpoints, key),
