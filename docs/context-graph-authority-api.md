@@ -3,13 +3,16 @@
 `GET /api/context-graph/{encodedContextGraphId}/authority` returns the node's
 current local access policy, curator, on-chain binding and effective allowed
 agents for one existing graph. Encode the complete graph ID as one URL segment.
-This operator endpoint uses the same native metadata, curator, registration and
+This owner/operator endpoint uses the same native metadata, curator, registration and
 revocation getters used by the graph-management APIs. It does not enumerate
 other graphs, register a graph, change access or return graph data.
 
-With authentication enabled, only a node operator principal can call this endpoint.
-Agent principals without operator privileges and anonymous principals receive
-403 before an existence check. Auth-disabled mode follows the existing node
+With authentication enabled, a node operator can inspect any graph; an
+authenticated agent can inspect only a graph whose native curator DID matches
+its authenticated wallet. Foreign agents and anonymous principals receive 403
+before an existence check or disclosure of policy, registration or membership.
+An allowlist entry or a matching namespace alone does not grant access.
+Auth-disabled mode follows the existing node
 administration gate and permits local diagnostics. The daemon's normal
 authentication guard still rejects invalid/missing credentials when enabled.
 

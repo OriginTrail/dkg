@@ -48,10 +48,19 @@ describe('targeted Context Graph authority diagnostics', () => {
     expect(agent.getContextGraphAllowedAgents).toHaveBeenCalledWith(graphId);
     expect(agent.listContextGraphs).not.toHaveBeenCalled();
   });
-  it('rejects agent and anonymous callers before disclosing existence', async () => {
+  it('rejects foreign agent and anonymous callers before disclosing existence', async () => {
+    agent.getContextGraphCurator.mockResolvedValue('did:dkg:agent:other');
     expect((await request('agent')).status).toBe(403);
     expect((await request()).status).toBe(403);
     expect(agent.contextGraphExists).not.toHaveBeenCalled();
+  });
+  it('allows an authenticated curator and rechecks ownership for the next request', async () => {
+    expect((await request('agent')).status).toBe(200);
+    agent.getContextGraphCurator.mockResolvedValue('did:dkg:agent:other');
+    expect((await request('agent')).status).toBe(403);
+    expect(agent.contextGraphExists).toHaveBeenCalledTimes(1);
+    expect(agent.getExplicitAccessPolicy).toHaveBeenCalledTimes(1);
+    expect(agent.listContextGraphs).not.toHaveBeenCalled();
   });
   it('reports missing graphs and malformed IDs', async () => {
     agent.contextGraphExists.mockResolvedValue(false);
