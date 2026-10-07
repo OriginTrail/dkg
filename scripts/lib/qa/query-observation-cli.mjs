@@ -8,7 +8,9 @@ const transport = input.slice(0, first), http = input.slice(first + 1, second);
 let result = parseObservation({
   transportExit: first >= 0 && /^[0-9]+$/.test(transport) ? Number(transport) : null,
   httpStatus: second >= 0 && /^[0-9]{3}$/.test(http) ? Number(http) : null,
-  body: input.slice(second + 1), mode, binding, format,
+  body: input.slice(second + 1), mode, binding,
+  // "api-settling" is the API format under the poll policy (exit 3 while read authority settles).
+  format: format === 'api-settling' ? 'api' : format, settling: format === 'api-settling',
 });
 if (operator !== undefined) result = assertObservation(result, operator, expected ?? '');
 if (result.outcome === 'PASS') {

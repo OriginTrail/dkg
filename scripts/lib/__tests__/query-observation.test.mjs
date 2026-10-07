@@ -160,6 +160,184 @@ test('direct API metrics preserve scope and large integers in one observation', 
   assert.deepEqual(request, { contextGraphId: 'fixture', view: 'shared-working-memory', sparql: count });
 });
 
+const settling = JSON.stringify({ error: 'temporarily unavailable', code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE', retryable: true });
+const notSettling = [
+  ['a 503 with another code', 503, JSON.stringify({ error: 'busy', code: 'STORE_SCHEDULER_BUSY', retryable: true })],
+  ['the same code without the retryable mark', 503, JSON.stringify({ error: 'x', code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE' })],
+  ['the same body under another status', 500, settling],
+  ['a 503 that is not JSON', 503, 'Service Unavailable'],
+];
+
+test('the settling policy names the documented retryable 503 and nothing else', () => {
+  const polled = observe(settling, { httpStatus: 503, mode: 'rows', binding: 's', settling: true });
+  assert.deepEqual(polled, { outcome: 'SETTLING', reason: 'READ_AUTHORITY_SETTLING' });
+  assert.equal(resultExit(polled), 3);
+  assert.equal(resultExit(assertObservation(polled, 'ge', '1')), 3);
+  // Strict by default: a single observation still treats the same answer as invalid evidence.
+  const strict = observe(settling, { httpStatus: 503, mode: 'rows', binding: 's' });
+  assert.deepEqual(strict, { outcome: 'INCONCLUSIVE', reason: 'HTTP_ERROR' });
+  // The raw-store format has no such answer, whatever the policy says.
+  assert.equal(observe(settling, { httpStatus: 503, format: 'sparql', settling: true }).reason, 'HTTP_ERROR');
+  for (const [name, httpStatus, response] of notSettling) {
+    assert.equal(observe(response, { httpStatus, mode: 'rows', binding: 's', settling: true }).reason, 'HTTP_ERROR', name);
+  }
+  // A served read is the same observation under either policy.
+  assert.deepEqual(observe(fixture('api-large'), { settling: true }), observe(fixture('api-large')));
+});
+
+const settlingCall = (mode = 'rows', binding = 's') => `source "$HELPER"; devnet_query_api_settling "$URL" fixture "$QUERY" ${binding} ${mode} '{"contextGraphId":"fixture"}'`;
+
+test('a settling poll reports the documented retryable 503 as its own status, with no value', async t => {
+  let request;
+  const url = await serve(t, (req, res) => {
+    let input = ''; req.on('data', c => input += c);
+    req.on('end', () => { request = JSON.parse(input); res.writeHead(503, { 'Retry-After': '3' }); res.end(settling); });
+  });
+  const result = await runShell(settlingCall(), { HELPER: helper, URL: url, QUERY: select });
+  assert.equal(result.status, 3, result.stderr); assert.equal(result.stdout, '');
+  assert.match(result.stderr, /READ_AUTHORITY_SETTLING/);
+  assert.deepEqual(request, { contextGraphId: 'fixture', sparql: select });
+});
+
+for (const [name, http, response] of notSettling) test(`a settling poll still rejects ${name}`, async t => {
+  const url = await serve(t, (req, res) => { req.resume(); res.writeHead(http); res.end(response); });
+  const result = await runShell(settlingCall(), { HELPER: helper, URL: url, QUERY: select });
+  assert.equal(result.status, 2); assert.equal(result.stdout, ''); assert.match(result.stderr, /HTTP_ERROR/);
+});
+
+test('a settling poll answers like the plain observation once the read is served', async t => {
+  const url = await serve(t, (req, res) => { req.resume(); res.end(fixture('api-large')); });
+  const result = await runShell(settlingCall('count', 'cnt'), { HELPER: helper, URL: url, QUERY: count });
+  assert.equal(result.status, 0, result.stderr); assert.equal(result.stdout.trim(), '9007199254740993123456789');
+});
+
+test('the settling policy rejects near misses of the documented body', () => {
+  for (const response of ['null', '[]', '"CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE"',
+    JSON.stringify({ code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE', retryable: 'true' }),
+    JSON.stringify({ code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE', retryable: 1 }),
+    JSON.stringify([{ code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE', retryable: true }])]) {
+    assert.equal(observe(response, { httpStatus: 503, mode: 'rows', binding: 's', settling: true }).reason, 'HTTP_ERROR', response);
+  }
+});
+
+test('a settling poll keeps a transport failure invalid', async () => {
+  const result = await runShell(settlingCall(), { HELPER: helper, URL: 'http://127.0.0.1:1', QUERY: select });
+  assert.equal(result.status, 2); assert.equal(result.stdout, ''); assert.match(result.stderr, /TRANSPORT_FAILURE/);
+});
+
+for (const mode of ['bindings', 'json']) test(`a settling poll serves ${mode} mode like the plain observation`, async t => {
+  const url = await serve(t, (req, res) => { req.resume(); res.end(oneRow); });
+  const polled = await runShell(settlingCall(mode), { HELPER: helper, URL: url, QUERY: select });
+  const plain = await runShell(`source "$HELPER"; devnet_query_api "$URL" fixture "$QUERY" s ${mode} '{"contextGraphId":"fixture"}'`, { HELPER: helper, URL: url, QUERY: select });
+  assert.equal(polled.status, 0, polled.stderr); assert.equal(polled.stdout, plain.stdout); assert.notEqual(polled.stdout, '');
+});
+
+// The bounded wait and its report, as the sharing test calls them.
+const oneRow = JSON.stringify({ result: { type: 'bindings', bindings: [{ s: 'urn:seen' }] } });
+const expectCount = (late = 'warn', attempts = 5, min = 1) => `${sharingSetup} AUTH=fixture; WARN=0; SEEN=false; SHARING_WAIT_INTERVAL=0
+warn(){ WARN=$((WARN+1)); echo "  [WARN] $1"; }
+sharing_expect_count ${late} "member read" "member sees {value} rows after {polls} polls" "member is missing the data ({value} rows)" \\
+  "$PORT" ${attempts} ${min} "$QUERY" s rows '{"contextGraphId":"fixture"}' && SEEN=true
+echo "PASS=$PASS FAIL=$FAIL WARN=$WARN seen=$SEEN value=[$SHARING_WAIT_VALUE] polls=$SHARING_WAIT_POLLS"; exit "$FAIL"`;
+const S = [503, settling], E = [200, empty], D = [200, oneRow];
+const answering = async (t, answers) => {
+  let served = 0;
+  const url = await serve(t, (req, res) => {
+    req.resume();
+    const [http, response] = answers[Math.min(served, answers.length - 1)]; served += 1;
+    res.writeHead(http); res.end(response);
+  });
+  return { port: new URL(url).port, served: () => served };
+};
+
+for (const [name, answers, status, summary, line] of [
+  ['fails when read authority never settles', [S], 1, /PASS=0 FAIL=1 WARN=0 seen=false value=\[\] polls=5/, /\[FAIL\] member read: read authority was still unavailable when the wait ended/],
+  ['passes when the read is served after two settling answers', [S, S, D], 0, /PASS=1 FAIL=0 WARN=0 seen=true value=\[1\] polls=3/, /\[PASS\] member sees 1 rows after 3 polls/],
+  ['only warns when valid reads stay empty', [E], 0, /PASS=0 FAIL=0 WARN=1 seen=false value=\[0\] polls=5/, /\[WARN\] member is missing the data \(0 rows\)/],
+  ['only warns when one settling answer ends a wait of valid empty reads', [E, E, E, E, S], 0, /PASS=0 FAIL=0 WARN=1 seen=false value=\[0\] polls=5/, /\[WARN\] member is missing the data \(0 rows\)/],
+  ['only warns when settling answers are scattered between valid reads', [S, E, S, E, S], 0, /PASS=0 FAIL=0 WARN=1 seen=false value=\[0\] polls=5/, /\[WARN\]/],
+  ['fails when its last three polls are all settling', [E, E, S, S, S], 1, /PASS=0 FAIL=1 WARN=0 seen=false value=\[0\] polls=5/, /\[FAIL\] member read: read authority was still unavailable/],
+]) test(`a wait that warns on late data ${name}`, async t => {
+  const { port } = await answering(t, answers);
+  const result = await runShell(expectCount(), { SHARING: sharing, PORT: port, QUERY: select });
+  assert.equal(result.status, status, result.stdout + result.stderr);
+  assert.match(result.stdout, summary); assert.match(result.stdout, line);
+});
+
+test('a wait that fails on late data fails for late data and for unavailable authority alike', async t => {
+  const late = await answering(t, [E]);
+  const lateRun = await runShell(expectCount('fail'), { SHARING: sharing, PORT: late.port, QUERY: select });
+  assert.equal(lateRun.status, 1); assert.match(lateRun.stdout, /\[FAIL\] member is missing the data \(0 rows\)/);
+  assert.match(lateRun.stdout, /PASS=0 FAIL=1 WARN=0 seen=false/);
+  const unavailable = await answering(t, [S]);
+  const unavailableRun = await runShell(expectCount('fail'), { SHARING: sharing, PORT: unavailable.port, QUERY: select });
+  assert.equal(unavailableRun.status, 1); assert.match(unavailableRun.stdout, /\[FAIL\] member read: read authority was still unavailable/);
+  assert.match(unavailableRun.stdout, /PASS=0 FAIL=1 WARN=0 seen=false/);
+});
+
+test('the wait compares against its threshold and stops at the first poll that reaches it', async t => {
+  let served = 0;
+  const rows = n => JSON.stringify({ result: { type: 'bindings', bindings: Array.from({ length: n }, (_, i) => ({ s: `urn:${i}` })) } });
+  const url = await serve(t, (req, res) => { req.resume(); served += 1; res.end(rows(served)); });
+  const result = await runShell(expectCount('warn', 6, 3), { SHARING: sharing, PORT: new URL(url).port, QUERY: select });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /\[PASS\] member sees 3 rows after 3 polls/); assert.match(result.stdout, /seen=true value=\[3\] polls=3/);
+  assert.equal(served, 3);
+});
+
+test('the wait stops the suite on invalid evidence or an unknown late action', async t => {
+  let served = 0;
+  const busy = await serve(t, (req, res) => {
+    req.resume(); served += 1;
+    if (served === 1) { res.end(empty); return; }
+    res.writeHead(503); res.end(notSettling[0][2]);
+  });
+  const stopped = await runShell(expectCount(), { SHARING: sharing, PORT: new URL(busy).port, QUERY: select });
+  assert.equal(stopped.status, 1); assert.doesNotMatch(stopped.stdout, /PASS=/);
+  assert.match(stopped.stderr, /Invalid query observation/); assert.equal(served, 2);
+  const idle = await answering(t, [D]);
+  const unknown = await runShell(expectCount('ignore'), { SHARING: sharing, PORT: idle.port, QUERY: select });
+  assert.equal(unknown.status, 1); assert.doesNotMatch(unknown.stdout, /PASS=/); assert.equal(idle.served(), 0);
+});
+
+// A single read follows the route's retry contract; the base observation does not.
+const singleRead = (extra = '') => `${sharingSetup} AUTH=fixture; SHARING_RETRY_AFTER=0; SHARING_RETRY_LOG="$LOG"; : > "$LOG"
+value=$(sharing_api_observe "$PORT" "$QUERY" s rows '{"contextGraphId":"fixture"}'${extra}) || { code=$?; echo "status=$code repeats=$(wc -l < "$LOG" | tr -d ' ')"; exit "$code"; }
+echo "value=$value repeats=$(wc -l < "$LOG" | tr -d ' ')"`;
+const retryLog = t => {
+  const dir = mkdtempSync(join(tmpdir(), 'dkg-read-retries-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return join(dir, 'retries.log');
+};
+
+test('a single read asks again after the documented retryable 503 and records each repeat', async t => {
+  const { port, served } = await answering(t, [S, S, D]);
+  const result = await runShell(singleRead(), { SHARING: sharing, PORT: port, QUERY: select, LOG: retryLog(t) });
+  assert.equal(result.status, 0, result.stderr); assert.match(result.stdout, /value=1 repeats=2/); assert.equal(served(), 3);
+});
+
+test('a single read gives up as invalid evidence when read authority stays unavailable', async t => {
+  const { port, served } = await answering(t, [S]);
+  const result = await runShell(singleRead(), { SHARING: sharing, PORT: port, QUERY: select, LOG: retryLog(t) });
+  assert.equal(result.status, 2); assert.match(result.stdout, /status=2 repeats=4/); assert.equal(served(), 5);
+  assert.match(result.stderr, /READ_AUTHORITY_STILL_SETTLING/);
+});
+
+test('a single read does not repeat any other answer', async t => {
+  const busy = await answering(t, [[503, notSettling[0][2]], D]);
+  const refused = await runShell(singleRead(), { SHARING: sharing, PORT: busy.port, QUERY: select, LOG: retryLog(t) });
+  assert.equal(refused.status, 2); assert.match(refused.stdout, /status=2 repeats=0/); assert.equal(busy.served(), 1);
+  const seen = await answering(t, [D]);
+  const violated = await runShell(singleRead(' eq 0'), { SHARING: sharing, PORT: seen.port, QUERY: select, LOG: retryLog(t) });
+  assert.equal(violated.status, 1); assert.match(violated.stdout, /status=1 repeats=0/); assert.equal(seen.served(), 1);
+});
+
+test('the base API observation stays strict: one request, and the retryable 503 is invalid evidence', async t => {
+  const { port, served } = await answering(t, [S, D]);
+  const result = await runShell(`source "$HELPER"; devnet_query_api "http://127.0.0.1:$PORT" fixture "$QUERY" s rows '{"contextGraphId":"fixture"}'`, { HELPER: helper, PORT: port, QUERY: select });
+  assert.equal(result.status, 2); assert.equal(result.stdout, ''); assert.match(result.stderr, /HTTP_ERROR/); assert.equal(served(), 1);
+});
+
 test('real wrapper transport failure has empty stdout and exit 2 even in a pipeline', async () => {
   const result = await runShell('source "$HELPER"; if value=$(devnet_capture http://127.0.0.1:1 | devnet_observe count cnt api); then echo FALSE_PASS; else exit $?; fi', { HELPER: helper });
   assert.equal(result.status, 2); assert.equal(result.stdout, ''); assert.match(result.stderr, /TRANSPORT_FAILURE/);

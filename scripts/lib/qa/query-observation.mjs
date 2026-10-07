@@ -18,7 +18,16 @@ const own = (x, k) => Object.hasOwn(x, k);
 const invalid = reason => ({ outcome: 'INCONCLUSIVE', reason });
 const apiError = x => own(x, 'error') || own(x, 'errors') || x.ok === false
   || x.success === false || (own(x, 'status') && !['ok', 'success'].includes(x.status));
-export const resultExit = result => result.outcome === 'PASS' ? 0 : result.outcome === 'FAIL' ? 1 : 2;
+// 3 is SETTLING: not evidence and not invalid evidence; only a caller that asked for the settling policy sees it.
+export const resultExit = result => result.outcome === 'PASS' ? 0 : result.outcome === 'FAIL' ? 1
+  : result.outcome === 'SETTLING' ? 3 : 2;
+// The query route's documented answer while a member's read authority is unavailable: ask again.
+function readAuthoritySettling(httpStatus, body) {
+  if (httpStatus !== 503) return false;
+  let answer;
+  try { answer = JSON.parse(body); } catch { return false; }
+  return object(answer) && answer.code === 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE' && answer.retryable === true;
+}
 
 export function countValue(cell) {
   let lexical, datatype;
@@ -61,8 +70,12 @@ function validCell(cell) {
     && (!own(cell, 'xml:lang') || (typeof cell['xml:lang'] === 'string' && /^[A-Za-z]+(?:-[A-Za-z0-9]+)*$/.test(cell['xml:lang'])));
 }
 
-export function parseObservation({ transportExit, httpStatus, body, format = 'api', mode = 'count', binding = 'cnt' }) {
+// `settling` is the poll policy: strict by default, so a single observation still rejects every HTTP error.
+export function parseObservation({ transportExit, httpStatus, body, format = 'api', mode = 'count', binding = 'cnt', settling = false }) {
   if (transportExit !== 0) return invalid('TRANSPORT_FAILURE');
+  if (settling && format === 'api' && readAuthoritySettling(httpStatus, body)) {
+    return { outcome: 'SETTLING', reason: 'READ_AUTHORITY_SETTLING' };
+  }
   if (!Number.isInteger(httpStatus) || httpStatus < 200 || httpStatus >= 300) return invalid('HTTP_ERROR');
   let envelope;
   try { envelope = JSON.parse(body); } catch { return invalid('MALFORMED_JSON'); }

@@ -1135,7 +1135,10 @@ start_node() {
       auth_args=(-H "Authorization: Bearer $auth_token")
     fi
   fi
-  local max_wait=${DEVNET_NODE_READY_TIMEOUT:-30}
+  # 120 s, not 30: a Core that restarts into a running network has taken 70 s
+  # to answer on a busy machine, and a restart that gives up early aborts the
+  # suite that asked for it. The loop ends as soon as the node answers.
+  local max_wait=${DEVNET_NODE_READY_TIMEOUT:-120}
   [ "$node_num" -eq 1 ] && max_wait=$(( max_wait > 120 ? max_wait : 120 ))
   local ready=false
   # CRITICAL: declare loop variable `local` so we don't clobber the OUTER

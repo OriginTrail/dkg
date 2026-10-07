@@ -11,7 +11,7 @@ PR #1571 changes nightly sweep tooling, which this delivery does not edit.
 
 ## Observation interface
 
-`parseObservation({transportExit, httpStatus, body, format, mode, binding})`
+`parseObservation({transportExit, httpStatus, body, format, mode, binding, settling})`
 is pure. `format` is `api` (default) or `sparql`; `mode` is `count`, `rows`, or
 `json` or `bindings`. COUNT defaults to binding `cnt`; callers select the actual alias, never
 fall back to a different column. Successful values are normalized decimal
@@ -22,13 +22,20 @@ Valid parsed observations carry `outcome`, a stable `reason`, and a `value`;
 invalid observations carry no value. Row observations also carry `rows`. `assertObservation(observation, 'eq'|'ge',
 expectedDecimalString)` separates valid observation from assertion evaluation
 and preserves the validated value and row payload when adding its outcome.
-`resultExit` maps PASS/FAIL/INCONCLUSIVE to 0/1/2. Diagnostics contain no response
+`resultExit` maps PASS/FAIL/INCONCLUSIVE to 0/1/2, and SETTLING to 3. Diagnostics contain no response
 body, token, URL, config, or subject values.
+
+`settling` is the poll policy and is off by default. With it, and only for the `api` format, the query route's
+documented answer while a member's read authority is unavailable (HTTP 503 whose JSON body carries code
+`CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE` and `retryable: true`) is the outcome SETTLING: not evidence, and not
+invalid evidence either. It is for a bounded wait that asks again; a wait that ends on it has observed nothing and
+must fail its step. Without the policy the same answer is HTTP_ERROR, as for every single observation.
 
 | Stage | Representative reason | Outcome |
 | --- | --- | --- |
 | curl failed | TRANSPORT_FAILURE | INCONCLUSIVE |
 | HTTP not 2xx | HTTP_ERROR | INCONCLUSIVE |
+| the documented retryable read-authority 503, under the poll policy only | READ_AUTHORITY_SETTLING | SETTLING |
 | API error envelope, including HTTP 200 | API_ERROR | INCONCLUSIVE |
 | malformed JSON/result/bindings | MALFORMED_JSON / INVALID_RESULT / INVALID_BINDINGS | INCONCLUSIVE |
 | missing COUNT alias | MISSING_BINDING | INCONCLUSIVE |
@@ -39,8 +46,10 @@ body, token, URL, config, or subject values.
 
 `devnet_capture <curl arguments>` emits `curlExit LF httpStatus LF body`. Capture
 always carries the real curl exit; it does not turn an HTTP failure into a JSON
-success. `devnet_observe count|rows|json|bindings <binding> api|sparql [eq|ge expected]`
-consumes that frame. It emits a value only on PASS and uses 0/1/2. The `json`
+success. `devnet_observe count|rows|json|bindings <binding> api|api-settling|sparql [eq|ge expected]`
+consumes that frame. It emits a value only on PASS and uses 0/1/2; `api-settling` is the `api` format under the
+poll policy and adds 3. `devnet_query_api_settling` is the poll form of `devnet_query_api`, and
+`sharing_wait_for_count` (in `devnet-sharing-helpers.sh`) is the bounded wait built on it. The `json`
 mode remains a compatibility adapter to the DKG
 `{result:{type:'bindings',bindings}}` shape, including after a successful optional
 assertion. `bindings` emits the validated row array for cell inspection.
