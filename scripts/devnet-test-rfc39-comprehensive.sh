@@ -40,7 +40,7 @@
 #     node 4's `submittedCount` strictly increased after restart.
 #
 # Each scenario snapshots `submittedCount` per core BEFORE publishing,
-# `hardhat_mine`s 250 blocks AFTER publish to guarantee a fresh
+# mines 250 blocks AFTER publish to guarantee a fresh
 # sampling period, and asserts at least one core's count strictly
 # increases. The cores' `lastSubmittedTxHash` after the bump is the
 # concrete proof tx — printed at the end for operator follow-up.
@@ -150,19 +150,11 @@ baseline_for() {
   echo 0
 }
 
-# Mine N blocks via hardhat_mine RPC. Args: blocks (decimal).
+# Mine N blocks. Args: blocks (decimal). See devnet_mine_blocks for why this
+# is a batch of evm_mine calls and not hardhat_mine.
 hardhat_mine_blocks() {
-  local blocks="$1"
-  local hexcount
-  hexcount=$(printf '0x%x' "$blocks")
-  local resp
-  resp=$(curl -sS -X POST -H 'Content-Type: application/json' \
-    --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"hardhat_mine\",\"params\":[\"${hexcount}\"]}" \
-    "http://127.0.0.1:${HARDHAT_PORT}" 2>/dev/null || true)
-  if grep -q '"result":true' <<<"$resp"; then
-    return 0
-  fi
-  warn "hardhat_mine response was unexpected: $resp"
+  devnet_mine_blocks "$1" "$HARDHAT_PORT" && return 0
+  warn "mining $1 blocks failed"
   return 1
 }
 

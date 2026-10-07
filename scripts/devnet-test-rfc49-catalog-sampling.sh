@@ -98,11 +98,9 @@ api_call_agent() {
 
 jq_field() { node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{const j=JSON.parse(d);const p=process.argv[1].split(".").filter(Boolean);let v=j;for(const k of p)v=v?.[k];console.log(typeof v==="object"?JSON.stringify(v):(v??""))}catch(e){console.log("")}})' "$1"; }
 
+# Named for what it used to call; see devnet_mine_blocks for why it no longer does.
 hardhat_mine() {
-  local hex; hex=$(printf '0x%x' "$1")
-  curl -sS -X POST -H 'Content-Type: application/json' \
-    --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"hardhat_mine\",\"params\":[\"${hex}\"]}" \
-    "http://127.0.0.1:${HARDHAT_PORT}" > /dev/null
+  devnet_mine_blocks "$1" "$HARDHAT_PORT"
 }
 
 # Parse the COUNT(*) row of a SPARQL JSON answer (a store's `.results`, or the
