@@ -349,6 +349,7 @@ const blockedRfc64Modules = [
   'public-catalog-issuer-delegation-v1.js',
   'public-catalog-successor-asset-v1.js',
   'public-catalog-successor-producer-v1.js',
+  'public-catalog-successor-row-binding-v1.js',
   'public-catalog-transport-v1.js',
   'recoverable-author-attestation-v1.js',
   'secure-filesystem-policy-v1.js',

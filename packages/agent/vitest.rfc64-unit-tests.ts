@@ -59,6 +59,7 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-persistent-catalog-provider-v1.test.ts",
   "test/rfc64-public-catalog-successor-bundle-durability-v1.test.ts",
   "test/rfc64-public-catalog-successor-producer-v1.test.ts",
+  "test/rfc64-public-catalog-successor-producer-turns-v1.test.ts",
   "test/rfc64-dkg-agent-successor-publication.integration.test.ts",
   "test/rfc64-catalog-access-policy-v1.test.ts",
   "test/rfc64-catalog-authority-refresh-loop-v1.test.ts",
