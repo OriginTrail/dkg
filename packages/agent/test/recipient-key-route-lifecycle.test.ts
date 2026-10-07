@@ -44,7 +44,7 @@ describe('recipient fence lifecycle owner', () => {
     const store = new OxigraphStore();
     try {
       const projection = new ContextGraphMetaProjection(store);
-      const invalidate = vi.spyOn(projection, 'markDirtyFromQuads').mockImplementation(() => { throw new Error('projection failed'); });
+      const invalidate = vi.spyOn(projection, 'invalidateStoreMutation').mockImplementation(() => { throw new Error('projection failed'); });
       const before = projection.recipientKeyRouteFence.revision;
       const settle = createProjectionMutationObserver(() => projection).begin({ quads: [key] });
       expect(() => settle('changed')).toThrow('projection failed');

@@ -15,6 +15,7 @@ import { strip, stripLiteral } from './dkg-agent-utils.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { cloneMetaRecord } from './internal/context-graph-meta-record-copy.js';
 import { RecipientKeyCollect } from './internal/recipient-key-collect.js';
+import { ProjectionMutationInvalidation } from './internal/projection-mutation-invalidation.js';
 import { PeerGateRevision } from './internal/peer-gate-revision.js';
 import { RecipientKeyRouteFence } from './internal/recipient-key-route-fence.js';
 
@@ -189,6 +190,16 @@ export class ContextGraphMetaProjection {
   readonly recipientKeyCollect: RecipientKeyCollect;
   readonly peerGateRevision = new PeerGateRevision(PROJECTION_RECORD_PREDICATES);
 
+  private readonly mutationInvalidation = new ProjectionMutationInvalidation({
+    fence: () => this.recipientKeyRouteFence, everything: () => this.dirtyAll(),
+    graph: (graph, subject, predicate) => this.invalidateGraph(graph, subject, predicate),
+    quads: (quads) => this.invalidateQuads(quads),
+  });
+  readonly markDirtyForGraph = this.mutationInvalidation.markDirtyForGraph;
+  readonly markAllDirty = this.mutationInvalidation.markAllDirty;
+  readonly markDirtyFromQuads = this.mutationInvalidation.markDirtyFromQuads;
+  readonly invalidateStoreMutation = this.mutationInvalidation.invalidateStoreMutation;
+
   constructor(private readonly store: TripleStore) {
     this.recipientKeyRouteFence = new RecipientKeyRouteFence(store);
     this.recipientKeyCollect = new RecipientKeyCollect(this.recipientKeyRouteFence, (agent) => resolveWorkspaceAgentRecipientKeys(store, agent));
@@ -340,15 +351,8 @@ export class ContextGraphMetaProjection {
     if (existing) existing.dirty = true;
   }
 
-  /**
-   * #1863 — dirty the projection for the context graph a single-graph destructive
-   * mutation (e.g. `replaceSubject`) targets, derived from the GRAPH itself, not
-   * from the inserted quads, so a delete is covered too. Shared AGENTS/ONTOLOGY
-   * sources invalidate every record. Other graphs dirty no cache entry but still
-   * advance the authority revision, because key lookup scans all named graphs.
-   * Legacy callbacks also notify recipient fences; the observed store opts out of that notification. */
-  markDirtyForGraph(graphUri: string, subject?: string, predicate?: string, notifyRecipientFence = true): void {
-    if (notifyRecipientFence) this.recipientKeyRouteFence.noteRemoval({ graph: graphUri, subject, predicate });
+  /** Destructive graph mutations invalidate their target cache and request-local revisions. */
+  private invalidateGraph(graphUri: string, subject?: string, predicate?: string): void {
     const graph = stripTerm(graphUri);
     if (
       graph === contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS)
@@ -373,11 +377,6 @@ export class ContextGraphMetaProjection {
     this.authorityFactsRevision += 1;
   }
 
-  markAllDirty(notifyRecipientFence = true): void {
-    this.dirtyAll();
-    if (notifyRecipientFence) this.recipientKeyRouteFence.noteUnscopedWrite();
-  }
-
   private dirtyAll(): void {
     this.peerGateRevision.noteEverything();
     this.authorityFactsRevision += 1;
@@ -388,8 +387,7 @@ export class ContextGraphMetaProjection {
     }
   }
 
-  markDirtyFromQuads(quads: readonly Quad[], notifyRecipientFence = true): string[] {
-    if (notifyRecipientFence) this.recipientKeyRouteFence.noteQuads(quads);
+  private invalidateQuads(quads: readonly Quad[]): string[] {
     const touched = new Set<string>();
     let recipientAuthorityTouched = false;
     for (const quad of quads) {
