@@ -1,3 +1,4 @@
+import { DEFAULT_PROMOTE_RETRY_TUNING } from './promote-retry-policy.js';
 import { isAutomaticallyRecoverablePostCommitFailure, missingStorageLaneForAuthorOnlyJob, promoteRetryAttempt, requiresManualInspection } from './async-promote-recovery-policy.js';
 /**
  * `TripleStoreAsyncPromoteQueue` — RDF-backed persistent queue for
@@ -88,7 +89,6 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
    * control-graph URI instead of walletId.
    */
   private static readonly mutationQueues = new Map<string, Promise<void>>();
-  private static readonly DEFAULT_MAX_RETRIES = 5;
   // A managed-store recovery can legitimately reject every heartbeat and
   // bookkeeping write for several minutes. Keep the lease longer than the
   // worker's bounded bookkeeping-retry window so an in-process worker is not
@@ -113,7 +113,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     config: AsyncPromoteQueueConfig = {},
   ) {
     this.graphUri = config.graphUri ?? DEFAULT_PROMOTE_CONTROL_GRAPH_URI;
-    this.maxRetries = config.maxRetries ?? TripleStoreAsyncPromoteQueue.DEFAULT_MAX_RETRIES;
+    this.maxRetries = config.maxRetries ?? DEFAULT_PROMOTE_RETRY_TUNING.maxRetries;
     this.effectiveLeaseMs = config.leaseMs ?? TripleStoreAsyncPromoteQueue.DEFAULT_LEASE_MS;
     this.now = config.now ?? (() => Date.now());
     this.idGenerator = config.idGenerator ?? (() => crypto.randomUUID());

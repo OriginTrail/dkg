@@ -137,7 +137,8 @@ describe('runDaemonInner VM-publish intent backfill wiring (#1828)', () => {
 
   it('invokes backfillVmPublishIntentIndexOnBoot with the admission publisher control on boot', async () => {
     const fakeAgent = {
-      peerId: 'self-peer',
+      configurePromoteQueue: vi.fn(),
+    peerId: 'self-peer',
       multiaddrs: [],
       wallet: { keypair: { publicKey: new Uint8Array([1]), secretKey: new Uint8Array([2]) } },
       store: {},
