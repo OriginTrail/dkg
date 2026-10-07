@@ -1,3 +1,4 @@
+import { randomUUID } from './lib/randomUUID.js';
 import {
   BASE,
   authHeaders,
@@ -2089,7 +2090,7 @@ function buildLocalAgentChatBody(
 ): Record<string, unknown> {
   return {
     text,
-    correlationId: opts?.correlationId ?? crypto.randomUUID(),
+    correlationId: opts?.correlationId ?? randomUUID(),
     ...(opts?.identity ? { identity: opts.identity } : {}),
     ...(opts?.sessionId ? { sessionId: opts.sessionId } : {}),
     ...(opts?.profile ? { profile: opts.profile } : {}),
@@ -2397,7 +2398,7 @@ export async function sendLocalLlmChat(
   text: string,
   opts?: LocalAgentChatRequestOptions,
 ): Promise<LocalAgentChatResponse> {
-  const correlationId = opts?.correlationId ?? crypto.randomUUID();
+  const correlationId = opts?.correlationId ?? randomUUID();
   const res = await fetch('/api/local-llm/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
