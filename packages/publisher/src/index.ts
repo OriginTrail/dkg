@@ -511,6 +511,11 @@ export {
   type WorkspacePublicSnapshotStore,
   type WorkspaceSnapshotIO,
 } from './workspace-snapshot-store.js';
+// Producer gate and ordering helpers stay internal: the producer is `workspacePublicQuadsDigest`.
+export {
+  describeWorkspaceDigestConfiguration,
+  workspacePublicQuadsDigestMatches,
+} from './workspace-public-quads-digest.js';
 export { acceptIncomingPublicQuads } from './incoming-public-copy.js';
 export { UpdateHandler } from './update-handler.js';
 export { ChainEventPoller, type ChainEventPollerConfig, type CursorPersistence, type OnContextGraphCreated } from './chain-event-poller.js';

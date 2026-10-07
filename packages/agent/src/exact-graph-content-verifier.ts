@@ -1,6 +1,6 @@
 import {
   computeFlatKCRootV10,
-  workspacePublicQuadsDigest,
+  workspacePublicQuadsDigestMatches,
 } from '@origintrail-official/dkg-publisher';
 import {
   ExactGraphReadError,
@@ -78,7 +78,7 @@ export async function verifyExactGraphContent(
   }
   if (
     input.expectedPublicQuadsDigest !== undefined
-    && workspacePublicQuadsDigest(quads) !== input.expectedPublicQuadsDigest
+    && !workspacePublicQuadsDigestMatches(quads, input.expectedPublicQuadsDigest)
   ) {
     return { status: 'head-mismatch', graphUri: input.graphUri };
   }

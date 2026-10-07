@@ -27,6 +27,7 @@ import {
 } from '../src/index.js';
 import { workspaceOperationSubject } from '../src/workspace-metadata-subjects.js';
 import { SharedMemoryHandler } from '../src/workspace-handler.js';
+import { useAmbientCollation } from '../../../scripts/testing/digest-locale.js';
 
 const CONTEXT_GRAPH = 'rootless-receiver';
 const PEER_ID = '12D3KooWGraphScopedPeer';
@@ -774,5 +775,47 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
     // Replaying the same escaped share matches the recorded head.
     const replay = await handler.handle(request, PEER_ID);
     expect(replay.applied).toBe(true);
+  });
+  it('replays the same assertion without churn when the recorded head carries another accepted digest form', async () => {
+    const store = new OxigraphStore();
+    const graphManager = new GraphManager(store);
+    const subjects = ['aa', 'b', 'B', '_', '1', 'A', 'z', 'é'].map((name) => `urn:x:${name}`);
+    const request = v2Request({
+      nquads: new TextEncoder().encode(subjects.map((subject) => nquad(subject, 'one')).join('\n')),
+      publicTripleCount: subjects.length,
+    });
+    // Recorded on a host whose collation is en-US ...
+    expect((await new SharedMemoryHandler(store, new TypedEventBus()).handle(request, PEER_ID)).applied).toBe(true);
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.SharedWorkingMemory,
+      createGraphKnowledgeAssetScope(UAL, 1),
+    );
+    const metaGraph = graphManager.sharedMemoryMetaUri(CONTEXT_GRAPH);
+    const rows = async (graph: string): Promise<string[]> => {
+      const result = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graph}> { ?s ?p ?o } }`);
+      if (result.type !== 'quads') throw new Error(`expected quads for ${graph}`);
+      return result.quads.map(({ subject, predicate, object }) => `${subject}\u0000${predicate}\u0000${object}`).sort();
+    };
+    const swmBefore = await rows(swmGraph);
+    const metaBefore = await rows(metaGraph);
+    const recorded = (await resolveKnowledgeAssetWorkspaceHead({
+      store, graphManager, contextGraphId: CONTEXT_GRAPH, kaUal: UAL,
+    }))?.publicQuadsDigest;
+
+    // ... and replayed on a node whose default collator is da-DK: the digest it
+    // computes for the very same bytes is a different string.
+    const restore = useAmbientCollation('da-DK');
+    try {
+      expect(workspacePublicQuadsDigest(subjects.map((subject) => ({
+        subject, predicate: 'urn:predicate:value', object: '"one"', graph: '',
+      })))).not.toBe(recorded);
+      const replay = await new SharedMemoryHandler(store, new TypedEventBus()).handle(request, PEER_ID);
+      expect(replay.applied).toBe(true);
+    } finally {
+      restore();
+    }
+    expect(await rows(swmGraph)).toEqual(swmBefore);
+    expect(await rows(metaGraph)).toEqual(metaBefore);
   });
 });

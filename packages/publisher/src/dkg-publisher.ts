@@ -102,6 +102,7 @@ import {
   type StagedKnowledgeAssetSharedWorkingMemoryV1,
 } from './knowledge-asset-swm-staging.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
+import { workspacePublicQuadsDigestMatches } from './workspace-public-quads-digest.js';
 import type { DurableRootAtomicCompanionResolver } from
   './durable-root-atomic-companion.js';
 import { ethers } from 'ethers';
@@ -4649,7 +4650,12 @@ export class DKGPublisher implements Publisher {
         : { publicSnapshotStore: this.publicSnapshotStore }),
     });
     const quads = snapshot.quads.filter((quad) => !isSwmMerkleExcludedQuad(quad));
-    if (snapshot.publicQuadsDigest !== stagedOperation.publicQuadsDigest) {
+    if (
+      snapshot.publicQuadsDigest !== stagedOperation.publicQuadsDigest
+      // A reference recorded before an upgrade or a digest-ordering change may
+      // carry another accepted form of the same content.
+      && !workspacePublicQuadsDigestMatches(snapshot.quads, stagedOperation.publicQuadsDigest)
+    ) {
       throw new Error('Staged SWM operation snapshot differs from its immutable reference');
     }
     if (quads.length !== stagedOperation.tripleCount) {

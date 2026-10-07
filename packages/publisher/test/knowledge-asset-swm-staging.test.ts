@@ -16,6 +16,7 @@ import {
   storeKnowledgeAssetOperationPublicQuads,
 } from '../src/workspace-resolution.js';
 import type { WorkspacePublicSnapshotStore } from '../src/workspace-snapshot-store.js';
+import { divergentObjectQuads, referenceDigest, useAmbientCollation } from '../../../scripts/testing/digest-locale.js';
 
 const CONTEXT_GRAPH_ID = 'staging-lock-cg';
 const UAL = 'did:dkg:otp:20430/0x1111111111111111111111111111111111111111/7';
@@ -292,6 +293,75 @@ describe('knowledge-asset SWM staging', () => {
     assertNoWrites();
     expect(fixture.snapshotStore.putSnapshot).not.toHaveBeenCalled();
     if (externalSnapshots) expect(fixture.snapshotStore.getSnapshot).toHaveBeenCalledOnce();
+  });
+
+  describe('an operation recorded under another accepted digest form', () => {
+    // Recorded on a host whose default collator is en-US; the node that now
+    // reuses it computes another digest string for the same bytes (a different
+    // host locale, or a digest-ordering change after the operation was queued).
+    const divergent = divergentObjectQuads('urn:asset');
+
+    it.each([false, true])('is reused without writes, keeping its recorded reference (external snapshots: %s)', async (externalSnapshots) => {
+      const fixture = await createReusableOperation({ quads: divergent }, externalSnapshots);
+      const assertNoWrites = trackStoreWrites(fixture.store);
+      const restore = useAmbientCollation('da-DK');
+      try {
+        const reused = await fixture.publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
+          ...fixture.input,
+          reuseExistingOperation: true,
+        });
+
+        // The reference is the operation's own recorded digest, so it keeps
+        // agreeing byte for byte with the persisted snapshot.
+        expect(reused).toEqual(fixture.staged);
+      } finally {
+        restore();
+      }
+      assertNoWrites();
+    });
+
+    it('still rejects a reused operation whose content differs', async () => {
+      const fixture = await createReusableOperation({ quads: divergent });
+      const restore = useAmbientCollation('da-DK');
+      try {
+        await expect(fixture.publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
+          ...fixture.input,
+          quads: divergent.slice(1),
+          reuseExistingOperation: true,
+        })).rejects.toMatchObject({ code: 'PUBLISH_INTENT_STALE' });
+      } finally {
+        restore();
+      }
+    });
+
+    it('is updated from a staged reference carrying the code-unit form of the same content', async () => {
+      const fixture = await createReusableOperation({ quads: divergent });
+      const update = vi.spyOn(
+        fixture.publisher as unknown as { updateKnowledgeAssetFromResolvedSharedWorkingMemory: () => Promise<unknown> },
+        'updateKnowledgeAssetFromResolvedSharedWorkingMemory',
+      ).mockResolvedValue({ status: 'confirmed' });
+      const options = {
+        contextGraphId: CONTEXT_GRAPH_ID,
+        privateQuads: [],
+        contentScopeVersion: 2,
+        kaUal: UAL,
+        assertionVersion: VERSION,
+        publicTripleCount: divergent.length,
+        privateTripleCount: 0,
+      };
+
+      await expect(fixture.publisher.updateKnowledgeAssetFromStagedSharedWorkingMemoryV1(7n, {
+        ...options,
+        stagedOperation: { ...fixture.staged, publicQuadsDigest: referenceDigest(divergent, 'code-unit') },
+      })).resolves.toEqual({ status: 'confirmed' });
+      expect(update).toHaveBeenCalledOnce();
+
+      await expect(fixture.publisher.updateKnowledgeAssetFromStagedSharedWorkingMemoryV1(7n, {
+        ...options,
+        stagedOperation: { ...fixture.staged, publicQuadsDigest: `sha256:${'0'.repeat(64)}` },
+      })).rejects.toThrow(/immutable reference/u);
+      expect(update).toHaveBeenCalledOnce();
+    });
   });
 
   it('atomically backfills a root boundary when reusing an unmarked queued intent', async () => {

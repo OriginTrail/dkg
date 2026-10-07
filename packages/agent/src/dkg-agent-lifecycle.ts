@@ -180,6 +180,7 @@ import {
   type WorkspaceSenderKeyEncryptInput,
   type SharedMemoryPublicSnapshotStorageConfig,
   STORAGE_ACK_LEDGER_GRAPH,
+  describeWorkspaceDigestConfiguration,
   swmKaWriteLockKey,
   withKeyedLocks,
 } from '@origintrail-official/dkg-publisher';
@@ -2251,6 +2252,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.coreHostRecordingsClosed = false;
     const ctx = createOperationContext('connect');
     this.log.info(ctx, `Starting DKG node`);
+    this.log.info(ctx, describeWorkspaceDigestConfiguration());
 
     // OT-RFC-64: persistent inventory ownership and the complete bounded
     // startup purge precede node.start(), protocol registration, and every

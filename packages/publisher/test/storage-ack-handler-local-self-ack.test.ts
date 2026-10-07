@@ -19,6 +19,7 @@ import type { LocalStorageAckHeadExpectation } from '../src/storage-ack-handler.
 import { computeFlatKCMerkleLeafCountV10, computeFlatKCRootV10 } from '../src/merkle.js';
 import { resolveKnowledgeAssetWorkspaceHead } from '../src/workspace-resolution.js';
 import { workspaceKnowledgeAssetHeadSubject, workspaceOperationSubject } from '../src/workspace-metadata-subjects.js';
+import { divergentObjectQuads, useAmbientCollation } from '../../../scripts/testing/digest-locale.js';
 import {
   STORAGE_ACK_LEDGER_GRAPH,
   STORAGE_ACK_LEDGER_PREDICATES as LEDGER,
@@ -412,6 +413,71 @@ describe('StorageACK local self-ACK keeps the publisher SWM head (#2796)', () =>
     expect(isStorageACKDecline(ack)).toBe(false);
     expect(await readHead(h)).toMatchObject({
       shareOperationIds: [ackCopyOperationId(1, content('direct'))],
+    });
+  });
+
+  describe('a head recorded under another accepted digest form is the same content', () => {
+    // The head was staged on a host whose collation put these rows in one
+    // order; this core now runs with a different locale (or after a digest
+    // ordering change), so the ACK copy's digest is a different string for
+    // byte-identical content. That is not a stale or conflicting head.
+    const divergent = divergentObjectQuads('urn:asset:self-ack');
+
+    it('keeps a queued publish share as the head for a local self-ACK', async () => {
+      const h = await harness();
+      await h.publisher.stageKnowledgeAssetSharedWorkingMemoryV1(shareInput(1, 'queued-publish-share', divergent));
+      const before = await readHead(h);
+      const restore = useAmbientCollation('da-DK');
+      try {
+        const ack = decodeStorageACK(await h.handler.localHandler(
+          publishIntent(divergent),
+          { toString: () => PUBLISHER_PEER },
+          undefined,
+          expectedHead(1, 'queued-publish-share'),
+        ));
+
+        expect(isStorageACKDecline(ack)).toBe(false);
+        expect(h.signMessage).toHaveBeenCalledOnce();
+        expect(await readHead(h)).toEqual(before);
+        expect(await swmValues(h, 1)).toHaveLength(divergent.length);
+      } finally {
+        restore();
+      }
+    });
+
+    it('takes a remote ACK of the same content as a replay, not a conflicting assertion', async () => {
+      const h = await harness();
+      // An ACK signed under one locale leaves an outstanding signed copy of this content. A request
+      // the head cannot be matched to is refused against it, so the replay below is accepted only if
+      // the other locale's digest of the same bytes is recognized as the same content.
+      const restoreFirst = useAmbientCollation('en-US');
+      try {
+        const first = decodeStorageACK(await h.handler.handler(
+          publishIntent(divergent),
+          { toString: () => REMOTE_PEER },
+        ));
+        expect(isStorageACKDecline(first)).toBe(false);
+      } finally {
+        restoreFirst();
+      }
+      const copy = ackCopyOperationId(1, divergent);
+      expect(h.signMessage).toHaveBeenCalledOnce();
+      expect(await ledgerOperations(h)).toEqual([workspaceOperationSubject(SWM_GRAPH_ID, copy)]);
+      expect(await readHead(h)).toMatchObject({ shareOperationIds: [copy] });
+
+      const restore = useAmbientCollation('da-DK');
+      try {
+        const replay = decodeStorageACK(await h.handler.handler(
+          publishIntent(divergent),
+          { toString: () => REMOTE_PEER },
+        ));
+
+        expect(isStorageACKDecline(replay)).toBe(false);
+        expect(await readHead(h)).toMatchObject({ shareOperationIds: [copy] });
+        expect(await ledgerOperations(h)).toEqual([workspaceOperationSubject(SWM_GRAPH_ID, copy)]);
+      } finally {
+        restore();
+      }
     });
   });
 

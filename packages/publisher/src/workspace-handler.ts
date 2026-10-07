@@ -48,6 +48,7 @@ import {
 } from './workspace-resolution.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
+import { workspacePublicQuadsDigestMatches } from './workspace-public-quads-digest.js';
 import { resolveWorkspaceEncryptionRequirement } from './workspace-encryption-policy.js';
 import { computeFlatKCRootV10 } from './merkle.js';
 import { workspaceHeadIncludesShareOperationId } from './workspace-operation-equivalence.js';
@@ -1543,9 +1544,8 @@ export class SharedMemoryHandler {
         // Validated as received; record and persist it in the form the store
         // returns it in.
         const normalized = acceptIncomingPublicQuads(quads).map((q) => ({ ...q, graph: swmGraph }));
-        const publicDigest = workspacePublicQuadsDigest(
-          normalized.map((quad) => ({ ...quad, graph: '' })),
-        );
+        const publicDigestQuads = normalized.map((quad) => ({ ...quad, graph: '' }));
+        const publicDigest = workspacePublicQuadsDigest(publicDigestQuads);
         const operationTimestamp = new Date(Number(timestampMs));
         if (Number.isNaN(operationTimestamp.getTime())) {
           const reason = `invalid timestampMs ${String(timestampMs)}`;
@@ -1617,13 +1617,13 @@ export class SharedMemoryHandler {
             const sameAssertion =
               workspaceHeadIncludesShareOperationId(currentHead, shareOperationId) &&
               currentHead.publisherPeerId === publisherPeerId &&
-              currentHead.publicQuadsDigest === publicDigest &&
               currentHead.publicTripleCount === (publicTripleCount ?? 0) &&
               currentHead.privateTripleCount === (privateTripleCount ?? 0) &&
               currentHead.privateMerkleRoot?.toLowerCase() === incomingPrivateRootHex &&
               currentHead.assertionGraph === swmGraph &&
               currentHead.access.accessPolicy === graphAccessPolicy &&
-              currentHead.access.allowedPeers.slice().sort().join('\u0000') === graphAllowedPeers.join('\u0000');
+              currentHead.access.allowedPeers.slice().sort().join('\u0000') === graphAllowedPeers.join('\u0000') &&
+              (currentHead.publicQuadsDigest === publicDigest || workspacePublicQuadsDigestMatches(publicDigestQuads, currentHead.publicQuadsDigest)); // an older head may carry another accepted form
             if (sameAssertion) {
               if (
                 this.legacyApplyAllowedOracle !== undefined

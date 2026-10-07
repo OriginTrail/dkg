@@ -29,6 +29,7 @@ import {
   computePrivateRootV10 as computePrivateRoot,
 } from './merkle.js';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
+import { workspacePublicQuadsDigestMatches } from './workspace-public-quads-digest.js';
 import {
   publisherWorkspaceOperationSemanticsKey,
   selectEquivalentWorkspaceOperation,
@@ -1130,7 +1131,7 @@ export async function resolveKnowledgeAssetOperationPublicQuads(params: {
   }
   if (
     quads.length !== expectedCount ||
-    workspacePublicQuadsDigest(quads) !== expectedDigest
+    !workspacePublicQuadsDigestMatches(quads, expectedDigest)
   ) {
     throw new Error(
       `Immutable graph-scoped public snapshot is missing or corrupt for ` +
@@ -1519,8 +1520,7 @@ async function resolveCompactWorkspaceOperationPublicQuads(params: {
       missingRoots.push(root);
       continue;
     }
-    const snapshotDigest = workspacePublicQuadsDigest(snapshotQuads);
-    if (snapshotDigest !== expectedDigest || snapshotQuads.length !== expectedCount) {
+    if (snapshotQuads.length !== expectedCount || !workspacePublicQuadsDigestMatches(snapshotQuads, expectedDigest)) {
       staleRoots.push(root);
       continue;
     }

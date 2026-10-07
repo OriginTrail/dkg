@@ -9,6 +9,7 @@ import { generateKnowledgeAssetShareMetadata } from './metadata.js';
 import { storageAckOperationId, storageAckOwedCopiesByScopeQuery, STORAGE_ACK_LEDGER_PREDICATES, STORAGE_ACK_LEDGER_GRAPH, xsdDateTimeLiteral, storageAckLedgerRecordUpdate, storageAckLedgerEntryQuads, type StorageAckLedgerEntry } from './storage-ack-ledger.js';
 import { planStorageAckHeadPersistence, type StorageAckRequestContext } from './storage-ack-head-policy.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
+import { workspacePublicQuadsDigestMatches } from './workspace-public-quads-digest.js';
 import { storeKnowledgeAssetWorkspaceHead, tryResolveKnowledgeAssetWorkspaceHead, type KnowledgeAssetWorkspaceHead } from './workspace-resolution.js';
 
 /** The verified graph envelope stored by a core before it signs. */
@@ -216,6 +217,10 @@ export class GraphScopedACKPersistence {
         scope: request.graphPublish.scope,
         subGraphName: request.graphPublish.subGraphName,
         publicDigest: copy.publicDigest,
+        headDigestMatches: (headDigest) => workspacePublicQuadsDigestMatches(
+          copy.normalized.map((quad) => ({ ...quad, graph: '' })),
+          headDigest,
+        ),
         publicTripleCount: copy.normalized.length,
         privateTripleCount: request.graphPublish.privateTripleCount,
         privateMerkleRoot: copy.incomingPrivateRoot,
@@ -433,6 +438,7 @@ export class GraphScopedACKPersistence {
     scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
     subGraphName?: string;
     publicDigest: string;
+    headDigestMatches: (headDigest: string) => boolean;
     publicTripleCount: number;
     privateTripleCount: number;
     privateMerkleRoot?: string;
@@ -469,6 +475,7 @@ export class GraphScopedACKPersistence {
       assertionVersion: input.scope.assertionVersion,
       publisherPeerId: input.publisherPeerId,
       publicDigest: input.publicDigest,
+      headDigestMatches: input.headDigestMatches,
       publicTripleCount: input.publicTripleCount,
       privateTripleCount: input.privateTripleCount,
       privateMerkleRoot: input.privateMerkleRoot,

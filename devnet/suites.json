@@ -36,6 +36,7 @@
     "rpc-quiet-window",
     "snapshot-finalized-cleanup",
     "storage-ack-store-outage",
+    "swm-digest-locale",
     "subscription-persist-restart",
     "v10-core-flows",
     "v10-end-to-end",
