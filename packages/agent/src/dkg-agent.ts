@@ -118,7 +118,7 @@ import {
   type NormalizedContextGraphDiscoveryScan,
 } from './context-graph-discovery-options.js';
 export type { DiscoverContextGraphsFromChainOptions } from './context-graph-discovery-options.js';
-import { prepareRfc64LateLegacySwmBoundaryV1 } from
+import { awaitRfc64LateLegacySwmBoundaryAdmissionV1, prepareRfc64LateLegacySwmBoundaryV1 } from
   './rfc64/legacy-swm-boundary-v1.js';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, withRpcRequestContext, type EVMAdapterConfig, type ChainAdapter, type ChainEventLogBinding, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
@@ -153,7 +153,7 @@ import {
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolverInput,
-  type WorkspaceSenderKeyEncryptInput,
+  type WorkspaceSenderKeyEncryptInput, type DurableRootPromotionIdentity,
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
   DEFAULT_REQUIRED_ACKS,
 } from '@origintrail-official/dkg-publisher';
@@ -1093,7 +1093,10 @@ export class DKGAgent extends DKGAgentBase {
           });
           const headDigest = this.rfc64PersistenceV1?.swmAuthorInventory
             .readSwmAuthorInventoryHeadDigestV1(scopeDigest, authorAddress) ?? null;
-          return JSON.stringify([lane.kind, lane.projectionTargetPolicy, scopeDigest, headDigest]);
+          return {
+            scopeIdentity: JSON.stringify([lane.kind, lane.projectionTargetPolicy, scopeDigest]),
+            headRevision: headDigest,
+          };
         },
         listFinalizedPrivateRepairs: () => (
           this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.list() ?? []
@@ -1596,7 +1599,9 @@ export class DKGAgent extends DKGAgentBase {
       kaAllocator: config.kaNumberAllocator,
       // RFC ka-metadata-trim P3.3 — `metadata.provenanceEvents` (default true).
       provenanceEvents: config.metadataProvenanceEvents,
-      resolveDurableRootPromotionAtomicCompanion: (input) => {
+      resolveDurableRootPromotionAtomicCompanion: Object.assign((
+        input: Readonly<DurableRootPromotionIdentity>,
+      ) => {
         // Every root graph may exist before its exact catalog head is durable,
         // including the normal catalog lane. Persist its negative-completeness
         // witness in the same transaction; exact catalog reconciliation alone
@@ -1615,7 +1620,13 @@ export class DKGAgent extends DKGAgentBase {
           input.shareOperationId,
           input.assertionVersion,
         ));
-      },
+      }, {
+        // The promote gives a fence a short time to drop before it prepares.
+        awaitAdmission: async (input: Readonly<{ contextGraphId: string; kaUal: string }>) => {
+          if (resolvedConfig.dataDir === undefined || agentRef === undefined) return;
+          await awaitRfc64LateLegacySwmBoundaryAdmissionV1(agentRef, input.contextGraphId, input.kaUal);
+        },
+      }),
       resolveDurableRootMaterializationAtomicCompanion: (input) => {
         if (resolvedConfig.dataDir === undefined) return;
         if (agentRef === undefined) {

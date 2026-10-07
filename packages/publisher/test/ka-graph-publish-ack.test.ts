@@ -103,21 +103,32 @@ describe('graph-scoped publish storage ACKs', () => {
     const markerGraph = 'urn:test:rfc64-late-boundary';
     const markerSubject = 'urn:test:rfc64-late-boundary:storage-ack';
     const settle = vi.fn();
+    // The resolver's admission wait runs first, once, for this root asset.
+    const order: string[] = [];
+    let admit!: () => void;
+    const admission = new Promise<void>((resolve) => { admit = resolve; });
+    const awaitAdmission = vi.fn(async () => {
+      order.push('awaitAdmission');
+      await admission;
+    });
     const handler = new StorageACKHandler(
       store,
       {
         ...handlerConfig(ethers.Wallet.createRandom(), false),
-        resolveDurableRootAtomicCompanion: () => ({
-          graphUri: markerGraph,
-          subject: markerSubject,
-          quads: [{
+        resolveDurableRootAtomicCompanion: Object.assign(() => {
+          order.push('resolve');
+          return {
+            graphUri: markerGraph,
             subject: markerSubject,
-            predicate: 'urn:test:entry',
-            object: '"storage-ack"',
-            graph: markerGraph,
-          }],
-          settle,
-        }),
+            quads: [{
+              subject: markerSubject,
+              predicate: 'urn:test:entry',
+              object: '"storage-ack"',
+              graph: markerGraph,
+            }],
+            settle,
+          };
+        }, { awaitAdmission }),
       },
       new TypedEventBus(),
     );
@@ -139,11 +150,19 @@ describe('graph-scoped publish storage ACKs', () => {
       allowedPeers: [],
     });
 
-    const decoded = decodeStorageACK(await handler.handler(intent, PEER));
+    const answered = handler.handler(intent, PEER);
+    // The handler stays behind the pending admission: nothing is resolved.
+    await vi.waitFor(() => expect(awaitAdmission).toHaveBeenCalledOnce());
+    await new Promise<void>((resolve) => { setTimeout(resolve, 25); });
+    expect(order).toEqual(['awaitAdmission']);
+    admit();
+    const decoded = decodeStorageACK(await answered);
 
     expect(isStorageACKDecline(decoded)).toBe(true);
     expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
     expect(settle).toHaveBeenCalledWith(expectedSettle);
+    expect(order).toEqual(['awaitAdmission', 'resolve']);
+    expect(awaitAdmission).toHaveBeenCalledWith({ contextGraphId: expect.any(String), kaUal: UAL });
     await expect(base.query(
       `ASK { GRAPH <${markerGraph}> { <${markerSubject}> ?p ?o } }`,
     )).resolves.toMatchObject({

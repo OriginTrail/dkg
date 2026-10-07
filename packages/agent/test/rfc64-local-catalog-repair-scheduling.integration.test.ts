@@ -6,17 +6,25 @@ import {
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
 import {
+  OxigraphStore,
+  StorePriorityScheduler,
+  withDefaultStoreWorkPriority,
+} from '@origintrail-official/dkg-storage';
+import {
   buildOpenOwnerContextGraphPolicyV1,
   unsignedOpenContextGraphPolicyEnvelopeV1,
 } from '../src/rfc64/open-catalog-policy-v1.js';
 import {
   AUTHOR,
+  AUTHOR_WALLET,
   CONTEXT_GRAPH_ID,
   LEGACY_CONTEXT_GRAPH_ID,
   NATIVE_DEPLOYMENT,
   NETWORK_ID,
   REMOTE_AUTHOR,
   catalogScopeDigestV1,
+  scheduledRepairStoreV1,
+  seedInventoryAssetV1,
   startRepairAgentV1,
 } from './support/rfc64-local-catalog-repair-fixture.js';
 
@@ -235,7 +243,7 @@ describe('RFC-64 local SWM catalog projection repair', () => {
     })).toBe(false);
   }, 30_000);
 
-  it('bounds distinct repair scopes to four concurrent reconciliations', async () => {
+  it('bounds distinct repair scopes to one background reconciliation', async () => {
     const agent = await startRepairAgentV1({
       name: 'bounded-distinct-repairs',
       autoPublish: {
@@ -252,11 +260,11 @@ describe('RFC-64 local SWM catalog projection repair', () => {
     let call = 0;
     let markFirstEntered!: () => void;
     let releaseFirst!: () => void;
-    let markFourEntered!: () => void;
+    let markNextEntered!: () => void;
     let releaseRepairs!: () => void;
     const firstEntered = new Promise<void>((resolve) => { markFirstEntered = resolve; });
     const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
-    const fourEntered = new Promise<void>((resolve) => { markFourEntered = resolve; });
+    const nextEntered = new Promise<void>((resolve) => { markNextEntered = resolve; });
     const repairGate = new Promise<void>((resolve) => { releaseRepairs = resolve; });
     const reconcile = vi.spyOn(agent, 'reconcileRfc64PublicCatalogFromSwmInventoryV1')
       .mockImplementation(async () => {
@@ -268,7 +276,7 @@ describe('RFC-64 local SWM catalog projection repair', () => {
         }
         active += 1;
         maxActive = Math.max(maxActive, active);
-        if (active === 4) markFourEntered();
+        if (active === 1) markNextEntered();
         await repairGate;
         active -= 1;
         return null;
@@ -284,14 +292,55 @@ describe('RFC-64 local SWM catalog projection repair', () => {
     }
     await firstEntered;
     releaseFirst();
-    await fourEntered;
-    expect(reconcile).toHaveBeenCalledTimes(5);
-    expect(maxActive).toBe(4);
+    await nextEntered;
+    expect(reconcile).toHaveBeenCalledTimes(2);
+    expect(maxActive).toBe(1);
     releaseRepairs();
     await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     expect(reconcile).toHaveBeenCalledTimes(6);
-    expect(maxActive).toBe(4);
+    expect(maxActive).toBe(1);
   }, 30_000);
+
+  it('reads a ten-row inventory no wider than the background store lane admits', async () => {
+    // The shipped store capacity: the background lane admits one read at a time.
+    const scheduler = new StorePriorityScheduler({
+      maxConcurrent: 4, ackReservedSlots: 1, healthReservedSlots: 1,
+      normalReservedSlots: 1, backgroundReservedSlots: 1, queueWaitTimeoutMs: 60_000,
+    });
+    const scheduled = scheduledRepairStoreV1(new OxigraphStore(), scheduler);
+    const agent = await startRepairAgentV1({
+      name: 'lane-wide-resolve',
+      store: scheduled.store,
+      autoPublish: {
+        peers: [],
+        catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      },
+    });
+    vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+    agent.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    for (let row = 1; row <= 10; row += 1) {
+      await seedInventoryAssetV1(agent, `lane-${row}`, BigInt(60 + row));
+    }
+    await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+
+    // The supervisor's own call: background priority, no width given here.
+    const observed = await scheduled.observe(() => withDefaultStoreWorkPriority('background', () => (
+      agent.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        authorAddress: AUTHOR,
+      })
+    )));
+
+    expect(observed.result).toMatchObject({ targetAssetCount: 10 });
+    expect(observed.queries).toBeGreaterThanOrEqual(10);
+    expect(scheduler.snapshot.backgroundInflightLimit).toBe(1);
+    // No read of the reconcile waits behind another one of its own.
+    expect(observed.mostHeld).toBe(1);
+  }, 60_000);
 
   it('settles a finalized-private repair without waiting for an unrelated projection', async () => {
     const agent = await startRepairAgentV1({

@@ -851,8 +851,9 @@ import {
 import { reconcileRfc64CatalogAuthorityPlanV1 } from
   './rfc64/catalog-rollout-authority-reconciliation-v1.js';
 import {
+  describeRfc64LegacySwmFenceEventV1,
   initializeRfc64LegacySwmBoundaryV1,
-  prepareRfc64LateLegacySwmBoundaryV1,
+  rfc64LateLegacySwmCompanionResolverV1,
   retireRfc64LegacySwmAfterFinalizedVmV1,
 } from
   './rfc64/legacy-swm-boundary-v1.js';
@@ -2265,6 +2266,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           this,
           this.rfc64PersistenceV1.rootPath,
           this.store,
+          { onFenceEvent: (event) => this.log.warn(ctx, describeRfc64LegacySwmFenceEventV1(event)) },
         );
         await reconcileRfc64CatalogAuthorityPlanV1(
           this.rfc64PersistenceV1,
@@ -2908,9 +2910,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           recordStorageAckDecline: (code) => this.recordStorageAckDecline(code),
           gossipWireIdFor: (id) => this.gossipWireIdFor(id),
           getSwmSubscriptionSource: (...ids) => this.getSwmSubscriptionSource(...ids),
-          prepareDurableRootAtomicCompanion: (input) => prepareRfc64LateLegacySwmBoundaryV1(
-            this, input.contextGraphId, input.kaUal, input.shareOperationId, input.assertionVersion,
-          ),
+          prepareDurableRootAtomicCompanion: rfc64LateLegacySwmCompanionResolverV1(this),
           chain: this.chain,
           config: this.config,
           log: this.log,

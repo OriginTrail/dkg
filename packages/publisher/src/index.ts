@@ -127,6 +127,7 @@ export {
   type DKGPublisherConfig,
   type DurableRootPromotionIdentity,
   type DurableRootPromotionAtomicCompanion,
+  type DurableRootPromotionAtomicCompanionResolver,
   type WorkspaceSenderKeyEncryptInput,
   type WorkspaceSenderKeyEncryptor,
   type ShareOptions,
@@ -140,6 +141,7 @@ export {
   type DurableRootMaterializationIdentity,
   type DurableRootAtomicCompanion,
   type DurableRootAtomicCompanionResolver,
+  type DurableRootCompanionAdmissionWait,
 } from './durable-root-atomic-companion.js';
 export {
   createCapturedWorkspaceGossipPayload,

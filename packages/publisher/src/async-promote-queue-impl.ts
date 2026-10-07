@@ -1,4 +1,4 @@
-import { isAutomaticallyRecoverablePostCommitFailure, missingStorageLaneForAuthorOnlyJob, requiresManualInspection } from './async-promote-recovery-policy.js';
+import { isAutomaticallyRecoverablePostCommitFailure, missingStorageLaneForAuthorOnlyJob, promoteRetryAttempt, requiresManualInspection } from './async-promote-recovery-policy.js';
 /**
  * `TripleStoreAsyncPromoteQueue` — RDF-backed persistent queue for
  * WM→SWM promotes. Mirrors the structure of
@@ -382,20 +382,17 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       const now = this.now();
       const attemptCount = Math.max(1, job.attempt.count);
       const swmInserted = job.commitMarker?.swmInserted === true;
-      const canRetry = error.retryable && !swmInserted && attemptCount < job.attempt.maxRetries;
+      const retryAttempt = error.retryable && !swmInserted
+        ? promoteRetryAttempt(job, error, attemptCount, now, this.backoff)
+        : undefined;
 
-      if (canRetry) {
+      if (retryAttempt) {
         const failedRetrying: PromoteJob = {
           ...job,
           state: 'failed_retrying',
           updatedAt: now,
           lease: undefined,
-          attempt: {
-            count: attemptCount,
-            maxRetries: job.attempt.maxRetries,
-            nextRetryAt: now + this.backoff(attemptCount),
-            lastError: error,
-          },
+          attempt: retryAttempt,
         };
         await this.writeJob(failedRetrying);
         return;

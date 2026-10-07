@@ -102,6 +102,7 @@
     "test:devnet:rfc51-publishing-allocation": "vitest run --config devnet/rfc51-publishing-allocation/vitest.config.ts",
     "test:devnet:core-peers-features": "vitest run --config devnet/core-peers-features/vitest.config.ts",
     "test:devnet:ack-candidate-isolation": "vitest run --config devnet/ack-candidate-isolation/vitest.config.ts",
+    "test:devnet:openclaw-persist-turn": "vitest run --config devnet/openclaw-persist-turn/vitest.config.ts",
     "test:devnet:agent-restart-gossip": "vitest run --config devnet/agent-restart-gossip/vitest.config.ts",
     "test:devnet:edge-update-flow": "vitest run --config devnet/edge-update-flow/vitest.config.ts",
     "test:devnet:greenfield-10min": "vitest run --config devnet/greenfield-10min/vitest.config.ts",
@@ -136,7 +137,11 @@
     "test:properties": "vitest run --config test-policy/vitest.properties.config.ts",
     "test:mutation": "stryker run test-policy/stryker.config.mjs",
     "test:inventory": "node scripts/ci/test-inventory.mjs",
-    "test:conformance": "tsx --tsconfig test-systems/tsconfig.json --test test-systems/storage-conformance.test.ts"
+    "test:conformance": "tsx --tsconfig test-systems/tsconfig.json --test test-systems/storage-conformance.test.ts",
+    "test:regression-proofs": "node --test scripts/lib/__tests__/regression-proofs.test.mjs",
+    "qa:check-regression-launcher": "node scripts/qa-check-regression-launcher.mjs",
+    "qa:check-regressions": "node scripts/qa-check-regressions.mjs",
+    "qa:prove-regression": "node scripts/qa-prove-regression.mjs"
   },
   "devDependencies": {
     "@origintrail-official/dkg": "workspace:*",

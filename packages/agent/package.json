@@ -131,6 +131,7 @@
     "./dist/rfc64/public-catalog-issuer-delegation-v1.js": null,
     "./dist/rfc64/public-catalog-successor-producer-v1.js": null,
     "./dist/rfc64/public-catalog-successor-asset-v1.js": null,
+    "./dist/rfc64/public-catalog-successor-row-binding-v1.js": null,
     "./dist/rfc64/public-catalog-transport-v1.js": null,
     "./dist/rfc64/recoverable-author-attestation-v1.js": null,
     "./dist/rfc64/secure-filesystem-policy-v1.js": null,
@@ -139,6 +140,7 @@
     "./dist/rfc64/*": null,
     "./dist/*": "./dist/*",
     "./dist/rfc64/legacy-swm-boundary-codec-v1.js": null,
+    "./dist/rfc64/legacy-swm-boundary-fence-v1.js": null,
     "./dist/rfc64/catalog-operational-targets-v1.js": null,
     "./dist/rfc64/private-read-roster-v1.js": null
   },
