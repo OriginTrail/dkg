@@ -103,6 +103,13 @@ describe('RecipientKeyRouteFence (GH#3067)', () => {
       expect(moved(fence, () => fence.noteRemoval({ graph: 'urn:dkg:keys' }))).toBe(false);
     });
 
+    it('does not take a bracketed subject for a bare IRI, so it never proves a fact harmless', async () => {
+      const fence = await readyFence();
+      for (const subject of ['<urn:dkg:share:s1>', `<${AGENT}>`]) {
+        expect(moved(fence, () => fence.noteQuads([quad(subject, DKG_ONTOLOGY.DKG_PEER_ID)])), subject).toBe(true);
+      }
+    });
+
     it('moves for a key predicate on a blank node, which a store may turn into a variable that matches an agent', async () => {
       const fence = await readyFence();
       for (const predicate of RECIPIENT_KEY_ROUTE_PREDICATES) {
@@ -234,6 +241,12 @@ describe('RecipientKeyRouteFence (GH#3067)', () => {
     it('is untrusted until the scan has run, so a bare graph proves nothing', () => {
       const fence = new RecipientKeyRouteFence(scanStore([]).store);
       expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(true);
+    });
+
+    it('reads a graph the store reports in angle brackets under its bare name', async () => {
+      const fence = await readyFence([`<${PROFILE_GRAPH}>`, `<${DATA_GRAPH}>`]);
+      expect(moved(fence, () => fence.noteRemoval({ graph: DATA_GRAPH }))).toBe(true);
+      expect(moved(fence, () => fence.noteRemoval({ graph: 'urn:dkg:never-held-keys' }))).toBe(false);
     });
 
     it('does not trust a scan whose answer is not a list of bindings', async () => {

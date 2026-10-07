@@ -120,6 +120,8 @@ describe('peer gate revision through the production store wrapper (GH#3067)', ()
     ['a replace of the graph\'s own subject', (s) => s.replaceSubject!(META_GRAPH, CG_DID, [quad(CG_DID, ALLOWED_PEER, META_GRAPH)])],
     ['a replace of the catalog subject', (s) => s.replaceSubject!(contextGraphCatalogUri(CG), CG_DID, [
       quad(CG_DID, DKG_ONTOLOGY.DCT_ACCESS_RIGHTS, contextGraphCatalogUri(CG))])],
+    ['a removal of a catalog fact by predicate', (s) => s.deleteByPatternWithoutCount!({
+      graph: contextGraphCatalogUri(CG), subject: CG_DID, predicate: DKG_ONTOLOGY.DCT_ACCESS_RIGHTS })],
     ['a removal in the agents graph', (s) => s.deleteByPatternWithoutCount!({
       graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS), subject: CG_DID })],
     ['a prefix delete', (s) => s.deleteBySubjectPrefix(KA_GRAPH, 'urn:x:')],

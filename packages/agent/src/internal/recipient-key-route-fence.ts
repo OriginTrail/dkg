@@ -33,7 +33,7 @@ const isNonAgentIri = (term: string | undefined): boolean => (
 const isBareIri = (term: string | undefined): term is string => term !== undefined && isSafeIri(term);
 
 const isKeyRouteFact = (quad: Quad): boolean => (
-  RECIPIENT_KEY_ROUTE_PREDICATES.has(unwrapIri(quad.predicate)) && !isNonAgentIri(unwrapIri(quad.subject))
+  RECIPIENT_KEY_ROUTE_PREDICATES.has(unwrapIri(quad.predicate)) && !isNonAgentIri(quad.subject)
 );
 
 /**
@@ -70,7 +70,7 @@ export class RecipientKeyRouteFence {
   }
 
   private get trusted(): boolean {
-    return !this.graphsUnknown && this.scannedGeneration === this.staleGeneration && this.pendingEverything === 0;
+    return !this.graphsUnknown && this.scannedGeneration === this.staleGeneration;
   }
 
   /**

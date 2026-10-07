@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { afterEach, describe, expect, it } from 'vitest';
-import { DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
+import { DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, contextGraphDataGraphUri } from '@origintrail-official/dkg-core';
 import { OxigraphStore, STORE_OPERATION_OUTCOME_TAG, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 
 import { RECIPIENT_KEY_ROUTE_PREDICATES } from '../src/internal/recipient-key-route-fence.js';
@@ -29,6 +29,14 @@ describe('recipient key/route fence through the production store wrapper (GH#306
     ['a lift-queue job replace', (s) => s.replaceSubject!('urn:dkg:publisher:control-plane', 'urn:dkg:publisher:lift-job:l1', [
       quad('urn:dkg:publisher:lift-job:l1', 'urn:dkg:publisher:state', 'urn:dkg:publisher:control-plane')])],
     ['a share metadata delete', (s) => s.deleteByPatternWithoutCount!({ graph: SWM_META_GRAPH, subject: 'urn:dkg:share:s1' })],
+    // The shared agents graph reaches every cached record, but a context graph's own facts are not key facts.
+    ['a delete of a context graph\'s facts from the shared agents graph', (s) => s.deleteByPatternWithoutCount!({
+      graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS), subject: CG_DID })],
+    // The subject is an agent and the graph holds key facts, so only the predicate can prove this harmless.
+    ['a delete of a non-key predicate on an agent in a graph that holds key facts', (s) => s.deleteByPatternWithoutCount!({ graph: PROFILE_GRAPH, subject: AGENT, predicate: NAME })],
+    // The graph holds key facts, so only the subject can prove these harmless.
+    ['a delete of a non-agent subject in a graph that holds key facts', (s) => s.deleteByPatternWithoutCount!({ graph: PROFILE_GRAPH, subject: 'urn:dkg:share:s1' })],
+    ['a replace of a non-agent subject in a graph that holds key facts', (s) => s.replaceSubject!(PROFILE_GRAPH, 'urn:dkg:share:s1', [quad('urn:dkg:share:s1', NAME, PROFILE_GRAPH)])],
     ['a knowledge-asset metadata delete in the graph\'s own _meta', (s) => s.deleteByPatternWithoutCount!({ graph: META_GRAPH, subject: KA_UAL })],
     ['an assertion layer delete in _meta', (s) => s.deleteByPatternWithoutCount!({
       graph: META_GRAPH, subject: KA_GRAPH, predicate: MEMORY_LAYER })],
