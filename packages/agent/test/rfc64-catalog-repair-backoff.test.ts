@@ -7,7 +7,7 @@ import {
 import { Rfc64SwmCatalogProjectionOwnerV1 } from '../src/dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
 import { CatalogRepairRetryV1 } from '../src/rfc64/catalog-repair-retry-v1.js';
 import { CatalogRepairIntegrityErrorV1 } from '../src/rfc64/catalog-repair-diagnostics-v1.js';
-import { activeDefaultStoreWorkPriority } from '@origintrail-official/dkg-storage';
+import { StoreSchedulerBusyError, StoreOperationTimeoutError, activeDefaultStoreWorkPriority } from '@origintrail-official/dkg-storage';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from '../src/rfc64/finalized-private-placement-repair-store-v1.js';
 
 const CG = 'repair-backoff' as ContextGraphIdV1;
@@ -71,6 +71,14 @@ function privateRepair(): Rfc64FinalizedPrivatePlacementRepairV1 {
   } as Rfc64FinalizedPrivatePlacementRepairV1;
 }
 
+const retainedFailures = [
+  ['integrity', () => new CatalogRepairIntegrityErrorV1('invalid seal')],
+  ['queue_full', () => new StoreSchedulerBusyError('queue_full', 'background', 'query')],
+  ['queue_wait', () => new StoreSchedulerBusyError('queue_wait_timeout', 'background', 'query')],
+  ['store_timeout_not_started', () => new StoreOperationTimeoutError({ backend: 'test', operation: 'query', outcome: 'not_started' })],
+  ['store_timeout_indeterminate', () => new StoreOperationTimeoutError({ backend: 'test', operation: 'query', outcome: 'indeterminate' })],
+] as const;
+
 describe('RFC-64 unchanged repair backoff', () => {
   it('backs unchanged failures off exponentially with a finite cap', async () => {
     const f = fixture();
@@ -119,9 +127,9 @@ describe('RFC-64 unchanged repair backoff', () => {
     expect(retry.nextAttemptAtMs).toBeNull();
   });
 
-  it('preserves integrity cooldown and failure history under continuous inventory churn', async () => {
+  it.each(retainedFailures)('preserves %s cooldown and failure history under continuous inventory churn', async (_kind, failure) => {
     const f = fixture();
-    f.reconcile.mockImplementation(async () => { throw new CatalogRepairIntegrityErrorV1('invalid seal'); });
+    f.reconcile.mockImplementation(async () => { throw failure(); });
     f.request();
     await f.owner.whenIdle();
     for (let i = 0; i < 20; i++) {
@@ -141,16 +149,42 @@ describe('RFC-64 unchanged repair backoff', () => {
     expect(f.reconcile).toHaveBeenCalledTimes(3);
   });
 
-  it('does not immediately replay an integrity failure when its head changes while running', async () => {
+  it.each(retainedFailures)('does not immediately replay a %s failure when its head changes while running', async (_kind, failure) => {
     const f = fixture();
     f.reconcile.mockImplementationOnce(async () => {
       f.setRevision('scope-1:head-2');
-      throw new CatalogRepairIntegrityErrorV1('invalid seal');
+      throw failure();
     });
     f.request();
     await f.owner.whenIdle();
     expect(f.reconcile).toHaveBeenCalledTimes(1);
     expect(f.owner.status()?.repairs[0]).toMatchObject({ consecutiveFailures: 1, nextAttemptAtMs: 5_000 });
+  });
+
+  it.each(['cooldown', 'in-flight'])('retains a known changed head through %s with periodic retries disabled', async (phase) => {
+    const f = fixture(0);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    f.reconcile.mockImplementationOnce(async () => {
+      if (phase === 'in-flight') await gate;
+      throw new CatalogRepairIntegrityErrorV1('invalid seal');
+    });
+    f.request();
+    if (phase === 'cooldown') await f.owner.whenIdle();
+    f.setRevision('scope-1:head-2');
+    for (let i = 0; i < 5; i++) f.request();
+    release();
+    await f.owner.whenIdle();
+    expect(f.reconcile).toHaveBeenCalledTimes(1);
+    expect(f.owner.status()?.repairs[0]).toMatchObject({ consecutiveFailures: 1, nextAttemptAtMs: 5_000 });
+    f.reconcile.mockResolvedValue(null);
+    await f.advance(4_999);
+    expect(f.reconcile).toHaveBeenCalledTimes(1);
+    await f.advance(1);
+    expect(f.reconcile).toHaveBeenCalledTimes(2);
+    await f.advance(60_000);
+    expect(f.reconcile).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('preserves a changed revision received while the old failed attempt drains', async () => {
