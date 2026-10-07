@@ -4,6 +4,7 @@ import {
   DKG_ONTOLOGY,
   SYSTEM_CONTEXT_GRAPHS,
   assertSafeIri,
+  isSafeIri,
   contextGraphCatalogUri,
   contextGraphDataGraphUri,
   contextGraphDataUri,
@@ -14,51 +15,12 @@ import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-
 import { strip, stripLiteral } from './dkg-agent-utils.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { cloneMetaRecord } from './internal/context-graph-meta-record-copy.js';
-import { ProjectionMutationInvalidation } from './internal/projection-mutation-invalidation.js';
+import type { StoreMutation } from './internal/store-mutation.js';
 import { PeerGateRevision } from './internal/peer-gate-revision.js';
 import { RecipientKeyRouteFence } from './internal/recipient-key-route-fence.js';
 
-export interface ContextGraphSubGraphMeta {
-  uri: string;
-  name: string;
-  createdBy: string;
-  createdAt?: string;
-  description?: string;
-}
-
-export interface ContextGraphDelegationMeta {
-  uri: string;
-  agents: string[];
-  allowedPeers: string[];
-  allowedKeys: string[];
-  expiresAtValues: string[];
-}
-
-export interface ContextGraphMetaRecord {
-  id: string;
-  uri: string;
-  declared: boolean;
-  isSystem: boolean;
-  name?: string;
-  description?: string;
-  creator?: string;
-  creators: string[];
-  curator?: string;
-  curators: string[];
-  accessPolicy?: string;
-  createdAt?: string;
-  allowedPeers: string[];
-  allowedAgents: string[];
-  participantAgents: string[];
-  participantIdentityIds: string[];
-  revokedAgents: string[];
-  delegations: ContextGraphDelegationMeta[];
-  onChainId?: string;
-  subGraphs: ContextGraphSubGraphMeta[];
-  hasAgentGate: boolean;
-  hasPeerGate: boolean;
-  hasLegacyParticipantGate: boolean;
-}
+import type { ContextGraphMetaRecord, ContextGraphSubGraphMeta, ContextGraphDelegationMeta } from './internal/context-graph-meta-record.js';
+export type { ContextGraphMetaRecord, ContextGraphSubGraphMeta, ContextGraphDelegationMeta } from './internal/context-graph-meta-record.js';
 
 interface ProjectionEntry {
   value?: ContextGraphMetaRecord;
@@ -188,15 +150,32 @@ export class ContextGraphMetaProjection {
   readonly recipientKeyRouteFence: RecipientKeyRouteFence;
   readonly peerGateRevision = new PeerGateRevision(PROJECTION_RECORD_PREDICATES);
 
-  private readonly mutationInvalidation = new ProjectionMutationInvalidation({
-    fence: () => this.recipientKeyRouteFence, everything: () => this.dirtyAll(),
-    graph: (graph, subject, predicate) => this.invalidateGraph(graph, subject, predicate),
-    quads: (quads) => this.invalidateQuads(quads),
-  });
-  readonly markDirtyForGraph = this.mutationInvalidation.markDirtyForGraph;
-  readonly markAllDirty = this.mutationInvalidation.markAllDirty;
-  readonly markDirtyFromQuads = this.mutationInvalidation.markDirtyFromQuads;
-  readonly invalidateStoreMutation = this.mutationInvalidation.invalidateStoreMutation;
+  /** Historical callbacks remain bound and also notify the recipient fence. */
+  readonly markDirtyForGraph = (graph: string, subject?: string, predicate?: string): void => {
+    try { this.invalidateGraph(graph, subject, predicate); }
+    finally { this.recipientKeyRouteFence.noteRemoval({ graph, subject, predicate }); }
+  };
+  readonly markAllDirty = (): void => {
+    try { this.dirtyAll(); }
+    finally { this.recipientKeyRouteFence.noteUnscopedWrite(); }
+  };
+  readonly markDirtyFromQuads = (quads: readonly Quad[]): string[] => {
+    try { return this.invalidateQuads(quads); }
+    finally { this.recipientKeyRouteFence.noteQuads(quads); }
+  };
+
+  /** Projection-only dispatch: the observed store owns recipient-fence settlement. */
+  readonly invalidateStoreMutation = (mutation: StoreMutation): void => {
+    if (mutation.everything || mutation.quads?.some((quad) => !isSafeIri(quad.predicate))) {
+      this.dirtyAll();
+      return;
+    }
+    for (const { graph, subject, predicate } of mutation.removals ?? []) {
+      if (graph === undefined || !isSafeIri(graph)) this.dirtyAll();
+      else this.invalidateGraph(graph, subject, predicate);
+    }
+    if (mutation.quads) this.invalidateQuads(mutation.quads);
+  };
 
   constructor(private readonly store: TripleStore) {
     this.recipientKeyRouteFence = new RecipientKeyRouteFence(store);

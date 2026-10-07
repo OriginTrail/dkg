@@ -5,6 +5,8 @@ import { DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/internal/context-graph-cache-invalidating-store.js';
 import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
+import { DKGAgentBase } from '../src/dkg-agent-base.js';
+import { createSwmRecoveryMutationRuntimeV1 } from '../src/sync/requester/swm-recovery-apply.js';
 import { createProjectionMutationObserver } from '../src/internal/projection-mutation-observer.js';
 
 const key = {
@@ -33,10 +35,29 @@ describe('recipient fence lifecycle owner', () => {
       const begin = vi.spyOn(projection.recipientKeyRouteFence, 'begin');
       const before = projection.recipientKeyRouteFence.revision;
       const store = createListContextGraphsCacheInvalidatingStore(raw, () => {}, createProjectionMutationObserver(() => projection));
-      await store.insert([key]);
+      const invalidate = vi.fn();
+      const host = { store, contextGraphMetaProjection: projection, invalidateListContextGraphsCache: invalidate,
+        oversizeTombstoneLog: { record: vi.fn() } };
+      await (DKGAgentBase.prototype as any).insertSyncedQuadsAndInvalidateListCache.call(host, [key]);
+      expect(invalidate).toHaveBeenCalledOnce();
       expect(begin).toHaveBeenCalledOnce();
       expect(projection.recipientKeyRouteFence.revision).toBe(before + 1);
 
+    } finally { await raw.close(); }
+  });
+
+  it.each(['callback', 'observed'])('gives recovery inserts one invalidation owner through %s composition', async (composition) => {
+    const raw = new OxigraphStore();
+    try {
+      const projection = new ContextGraphMetaProjection(raw);
+      await projection.recipientKeyRouteFence.ensureReady();
+      const before = projection.recipientKeyRouteFence.revision;
+      const store = createListContextGraphsCacheInvalidatingStore(raw, () => {}, composition === 'observed'
+        ? createProjectionMutationObserver(() => projection)
+        : (quads) => projection.markDirtyFromQuads(quads!));
+      const runtime = createSwmRecoveryMutationRuntimeV1({ store, recordDrops: () => {}, invalidateListContextGraphsCache: () => {} });
+      await runtime.store.insert([key]);
+      expect(projection.recipientKeyRouteFence.revision).toBe(before + 1);
     } finally { await raw.close(); }
   });
 
