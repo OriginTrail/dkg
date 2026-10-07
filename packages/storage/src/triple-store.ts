@@ -88,6 +88,10 @@ export interface StorePressureSnapshot {
   normalReservedSlots?: number;
   healthReservedSlots?: number;
   backgroundReservedSlots?: number;
+  /** Operations of the normal lane admitted at once. */
+  normalInflightLimit?: number;
+  /** Operations of the background lane admitted at once. */
+  backgroundInflightLimit?: number;
 }
 
 export interface QueryOptions {
