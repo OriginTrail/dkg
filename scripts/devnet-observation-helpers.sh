@@ -54,29 +54,16 @@ devnet_query_api() {
 }
 
 # Poll form of devnet_query_api, for a step that waits for replication to a
-# member. While the member's read authority is still settling, the query route
+# member. While the member's read authority is unavailable, the query route
 # answers a retryable 503 with code CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE,
-# and the documented client behaviour is to ask again. Inside a poll that one
-# answer is "nothing yet": this prints 0 and succeeds, and the poll's own
-# deadline still fails the step if the data never arrives. Every other answer
-# is devnet_query_api's, so a 503 with another code, or one that is not marked
-# retryable, stays invalid evidence. Only the numeric modes have a "nothing yet".
+# and the documented client behaviour is to ask again. Under this policy that
+# one answer is SETTLING: nothing is printed and the exit status is 3, so the
+# caller can tell it from a valid observation and from invalid evidence (2).
+# A wait that ends on 3 never observed anything and must fail its step.
 devnet_query_api_settling() {
   local api="$1" token="$2" sparql="$3" binding="$4" mode="$5" scope="${6:-}" response
-  case "$mode" in rows|count) ;; *) echo "INCONCLUSIVE: settling poll needs rows or count mode" >&2; return 2 ;; esac
   response=$(devnet_query_api_frame "$api" "$token" "$sparql" "$scope") || return 2
-  if printf '%s' "$response" | node -e '
-    let frame = ""; process.stdin.on("data", (c) => { frame += c; }).on("end", () => {
-      const [exit, http, ...rest] = frame.split("\n");
-      let answer; try { answer = JSON.parse(rest.join("\n")); } catch { answer = null; }
-      process.exitCode = exit === "0" && http === "503" && answer !== null && typeof answer === "object"
-        && answer.code === "CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE" && answer.retryable === true ? 0 : 1;
-    });
-  '; then
-    printf '0\n'
-    return 0
-  fi
-  printf '%s' "$response" | devnet_observe "$mode" "$binding" api "${@:7}"
+  printf '%s' "$response" | devnet_observe "$mode" "$binding" api-settling "${@:7}"
 }
 
 # Authorized raw-store observation: devnet directory, API port, SPARQL,

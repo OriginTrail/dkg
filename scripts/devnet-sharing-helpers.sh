@@ -9,10 +9,24 @@ sharing_api_observe() {
   devnet_query_api "http://127.0.0.1:$port" "$AUTH" "$@"
 }
 
-# For a loop that waits for replication to a member: see devnet_query_api_settling.
-sharing_api_observe_settling() {
-  local port="$1"; shift
-  devnet_query_api_settling "http://127.0.0.1:$port" "$AUTH" "$@"
+# One poll of a wait loop: the observed number, or the word "settling" while
+# the member's read authority is unavailable (devnet_query_api_settling).
+# Invalid evidence returns 2, as for sharing_api_observe.
+sharing_api_poll() {
+  local port="$1" value status=0; shift
+  value=$(devnet_query_api_settling "http://127.0.0.1:$port" "$AUTH" "$@") || status=$?
+  case "$status" in
+    0) printf '%s\n' "$value" ;;
+    3) printf 'settling\n' ;;
+    *) return 2 ;;
+  esac
+}
+
+# After a wait loop that only warns when its data did not arrive: a wait that
+# ended while the member was still settling never observed anything, and that
+# is a failed step, not a slow sync.
+sharing_fail_if_settling() {
+  [ "$2" != settling ] || fail "$1: read authority was still unavailable when the wait ended"
 }
 
 sharing_storage_observe() {

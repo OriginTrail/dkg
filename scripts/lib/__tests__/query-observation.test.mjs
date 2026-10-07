@@ -161,25 +161,45 @@ test('direct API metrics preserve scope and large integers in one observation', 
 });
 
 const settling = JSON.stringify({ error: 'temporarily unavailable', code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE', retryable: true });
+const notSettling = [
+  ['a 503 with another code', 503, JSON.stringify({ error: 'busy', code: 'STORE_SCHEDULER_BUSY', retryable: true })],
+  ['the same code without the retryable mark', 503, JSON.stringify({ error: 'x', code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE' })],
+  ['the same body under another status', 500, settling],
+  ['a 503 that is not JSON', 503, 'Service Unavailable'],
+];
+
+test('the settling policy names the documented retryable 503 and nothing else', () => {
+  const polled = observe(settling, { httpStatus: 503, mode: 'rows', binding: 's', settling: true });
+  assert.deepEqual(polled, { outcome: 'SETTLING', reason: 'READ_AUTHORITY_SETTLING' });
+  assert.equal(resultExit(polled), 3);
+  assert.equal(resultExit(assertObservation(polled, 'ge', '1')), 3);
+  // Strict by default: a single observation still treats the same answer as invalid evidence.
+  const strict = observe(settling, { httpStatus: 503, mode: 'rows', binding: 's' });
+  assert.deepEqual(strict, { outcome: 'INCONCLUSIVE', reason: 'HTTP_ERROR' });
+  // The raw-store format has no such answer, whatever the policy says.
+  assert.equal(observe(settling, { httpStatus: 503, format: 'sparql', settling: true }).reason, 'HTTP_ERROR');
+  for (const [name, httpStatus, response] of notSettling) {
+    assert.equal(observe(response, { httpStatus, mode: 'rows', binding: 's', settling: true }).reason, 'HTTP_ERROR', name);
+  }
+  // A served read is the same observation under either policy.
+  assert.deepEqual(observe(fixture('api-large'), { settling: true }), observe(fixture('api-large')));
+});
+
 const settlingCall = (mode = 'rows', binding = 's') => `source "$HELPER"; devnet_query_api_settling "$URL" fixture "$QUERY" ${binding} ${mode} '{"contextGraphId":"fixture"}'`;
 
-test('a settling poll reads the documented retryable 503 as nothing yet', async t => {
+test('a settling poll reports the documented retryable 503 as its own status, with no value', async t => {
   let request;
   const url = await serve(t, (req, res) => {
     let input = ''; req.on('data', c => input += c);
     req.on('end', () => { request = JSON.parse(input); res.writeHead(503, { 'Retry-After': '3' }); res.end(settling); });
   });
   const result = await runShell(settlingCall(), { HELPER: helper, URL: url, QUERY: select });
-  assert.equal(result.status, 0, result.stderr); assert.equal(result.stdout, '0\n');
+  assert.equal(result.status, 3, result.stderr); assert.equal(result.stdout, '');
+  assert.match(result.stderr, /READ_AUTHORITY_SETTLING/);
   assert.deepEqual(request, { contextGraphId: 'fixture', sparql: select });
 });
 
-for (const [name, http, response] of [
-  ['a 503 with another code', 503, JSON.stringify({ error: 'busy', code: 'STORE_SCHEDULER_BUSY', retryable: true })],
-  ['the same code without the retryable mark', 503, JSON.stringify({ error: 'x', code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE' })],
-  ['the same body under another status', 500, settling],
-  ['a 503 that is not JSON', 503, 'Service Unavailable'],
-]) test(`a settling poll still rejects ${name}`, async t => {
+for (const [name, http, response] of notSettling) test(`a settling poll still rejects ${name}`, async t => {
   const url = await serve(t, (req, res) => { req.resume(); res.writeHead(http); res.end(response); });
   const result = await runShell(settlingCall(), { HELPER: helper, URL: url, QUERY: select });
   assert.equal(result.status, 2); assert.equal(result.stdout, ''); assert.match(result.stderr, /HTTP_ERROR/);
@@ -191,23 +211,45 @@ test('a settling poll answers like the plain observation once the read is served
   assert.equal(result.status, 0, result.stderr); assert.equal(result.stdout.trim(), '9007199254740993123456789');
 });
 
-test('a settling poll refuses a mode that has no nothing-yet value, before any request', async t => {
-  let requests = 0;
-  const url = await serve(t, (req, res) => { requests += 1; req.resume(); res.end(empty); });
-  const result = await runShell(settlingCall('bindings'), { HELPER: helper, URL: url, QUERY: select });
-  assert.equal(result.status, 2); assert.equal(result.stdout, ''); assert.equal(requests, 0);
+// The shape of the sharing test's waits that only warn when their data is late.
+const warnOnlyWait = `${sharingSetup} AUTH=fixture; WARN=0
+warn(){ WARN=$((WARN+1)); echo "  [WARN] $1"; }
+SEEN=false
+for i in 1 2 3 4; do
+  VALUE=$(sharing_api_poll "$PORT" "$QUERY" s rows '{"contextGraphId":"fixture"}') || devnet_observation_abort
+  if devnet_count_at_least "$VALUE" 1; then SEEN=true; ok "member sees the data (poll $i)"; break; fi
+done
+$SEEN || warn "member is missing the data"
+sharing_fail_if_settling "member read" "$VALUE"
+echo "PASS=$PASS FAIL=$FAIL WARN=$WARN"; exit "$FAIL"`;
+const oneRow = JSON.stringify({ result: { type: 'bindings', bindings: [{ s: 'urn:seen' }] } });
+
+for (const [name, answers, status, summary] of [
+  ['fails when read authority never settles', [[503, settling]], 1, /PASS=0 FAIL=1 WARN=1/],
+  ['passes when the read is served after two settling answers', [[503, settling], [503, settling], [200, oneRow]], 0, /PASS=1 FAIL=0 WARN=0/],
+  ['only warns when valid reads stay empty', [[200, empty]], 0, /PASS=0 FAIL=0 WARN=1/],
+  ['fails when it ends settling after valid empty reads', [[200, empty], [200, empty], [200, empty], [503, settling]], 1, /PASS=0 FAIL=1 WARN=1/],
+]) test(`a warn-only wait ${name}`, async t => {
+  let served = 0;
+  const url = await serve(t, (req, res) => {
+    req.resume();
+    const [http, response] = answers[Math.min(served, answers.length - 1)]; served += 1;
+    res.writeHead(http); res.end(response);
+  });
+  const result = await runShell(warnOnlyWait, { SHARING: sharing, PORT: new URL(url).port, QUERY: select });
+  assert.equal(result.status, status, result.stdout + result.stderr); assert.match(result.stdout, summary);
+  if (status === 1) assert.match(result.stdout, /member read: read authority was still unavailable when the wait ended/);
 });
 
-test('the sharing wait loops use the settling poll and single observations stay strict', async t => {
+test('a wait stops on invalid evidence, and a single observation stays strict', async t => {
+  const busy = await serve(t, (req, res) => { req.resume(); res.writeHead(503); res.end(notSettling[0][2]); });
+  const invalidPoll = await runShell(warnOnlyWait, { SHARING: sharing, PORT: new URL(busy).port, QUERY: select });
+  assert.equal(invalidPoll.status, 1); assert.doesNotMatch(invalidPoll.stdout, /PASS=/);
+  assert.match(invalidPoll.stderr, /Invalid query observation/);
   const url = await serve(t, (req, res) => { req.resume(); res.writeHead(503); res.end(settling); });
-  const port = new URL(url).port;
-  const polled = await runShell(`${sharingSetup} AUTH=fixture
-value=$(sharing_api_observe_settling "$PORT" "$QUERY" s rows '{"contextGraphId":"fixture"}') || devnet_observation_abort
-echo "value=$value"`, { SHARING: sharing, PORT: port, QUERY: select });
-  assert.equal(polled.status, 0, polled.stderr); assert.match(polled.stdout, /value=0/);
   const single = await runShell(`${sharingSetup} AUTH=fixture
 value=$(sharing_api_observe "$PORT" "$QUERY" s rows '{"contextGraphId":"fixture"}') || devnet_observation_abort
-echo "value=$value"`, { SHARING: sharing, PORT: port, QUERY: select });
+echo "value=$value"`, { SHARING: sharing, PORT: new URL(url).port, QUERY: select });
   assert.equal(single.status, 1); assert.doesNotMatch(single.stdout, /value=/);
 });
 

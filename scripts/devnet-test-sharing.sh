@@ -333,7 +333,7 @@ devnet_count_at_least "$N1_SWM_CT" 1 && ok "Node 1 has promoted data in SWM" || 
 echo "--- 4c: Wait for gossip + verify SWM data on Node 2 ---"
 SWM_SYNCED=false
 for i in $(seq 1 15); do
-  N2_SWM_CT=$(sharing_api_observe_settling "${N2_PORT}" "SELECT ?name WHERE { <urn:sharing:beta1> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
+  N2_SWM_CT=$(sharing_api_poll "${N2_PORT}" "SELECT ?name WHERE { <urn:sharing:beta1> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
   if devnet_count_at_least "$N2_SWM_CT" 1; then
     SWM_SYNCED=true
     ok "Node 2 received promoted SWM data (after ${i}s)"
@@ -396,7 +396,7 @@ sharing_storage_absence "Node 4 has 0 WM lifecycle entities" "${N1_PORT}" "${N4_
 echo "--- 5g: Node 4 DOES have SWM data (promoted before join) ---"
 N4_SWM_SYNCED=false
 for i in $(seq 1 10); do
-  N4_SWM_CT=$(sharing_api_observe_settling "${N4_PORT}" "SELECT ?name WHERE { <urn:sharing:beta1> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
+  N4_SWM_CT=$(sharing_api_poll "${N4_PORT}" "SELECT ?name WHERE { <urn:sharing:beta1> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
   if devnet_count_at_least "$N4_SWM_CT" 1; then
     N4_SWM_SYNCED=true
     ok "Node 4 (late joiner) received SWM data"
@@ -464,7 +464,7 @@ for port_label in "${N1_PORT}:Node1" "${N4_PORT}:Node4"; do
   label="${port_label##*:}"
   FOUND_N2=false
   for i in $(seq 1 20); do
-    PEER_CT=$(sharing_api_observe_settling "$port" "SELECT ?name WHERE { <urn:sharing:n2secret> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
+    PEER_CT=$(sharing_api_poll "$port" "SELECT ?name WHERE { <urn:sharing:n2secret> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
     if devnet_count_at_least "$PEER_CT" 1; then
       FOUND_N2=true
       ok "$label sees Node 2's promoted SWM data (after ${i}s)"
@@ -473,6 +473,7 @@ for port_label in "${N1_PORT}:Node1" "${N4_PORT}:Node4"; do
     sleep 1
   done
   $FOUND_N2 || warn "$label missing Node 2's SWM data after 20s (private CG sync may be slow)"
+  sharing_fail_if_settling "$label read of Node 2's SWM data" "$PEER_CT"
 done
 
 #------------------------------------------------------------
@@ -513,7 +514,7 @@ fi
 echo "--- 8b: Verify doc-alpha now visible on Node 2 via SWM ---"
 DOC_SYNCED=false
 for i in $(seq 1 15); do
-  N2_DOC_CT=$(sharing_api_observe_settling "${N2_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
+  N2_DOC_CT=$(sharing_api_poll "${N2_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
   if devnet_count_at_least "$N2_DOC_CT" 3; then
     DOC_SYNCED=true
     ok "Node 2 now sees promoted doc-alpha in SWM ($N2_DOC_CT entities)"
@@ -526,7 +527,7 @@ $DOC_SYNCED || fail "doc-alpha not synced to Node 2 after promotion"
 echo "--- 8c: Verify doc-alpha now visible on Node 4 (late joiner) ---"
 N4_DOC_SYNCED=false
 for i in $(seq 1 10); do
-  N4_DOC_CT=$(sharing_api_observe_settling "${N4_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
+  N4_DOC_CT=$(sharing_api_poll "${N4_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
   if devnet_count_at_least "$N4_DOC_CT" 3; then
     N4_DOC_SYNCED=true
     ok "Node 4 (late joiner) sees doc-alpha in SWM ($N4_DOC_CT entities)"
@@ -535,6 +536,7 @@ for i in $(seq 1 10); do
   sleep 1
 done
 $N4_DOC_SYNCED || warn "doc-alpha not yet on Node 4 ($N4_DOC_CT entities)"
+sharing_fail_if_settling "Node 4 read of doc-alpha in SWM" "$N4_DOC_CT"
 
 echo "--- 8d: Node 3 (not invited) still sees nothing ---"
 sharing_excluded_swm "$N3_PORT" "$CG_ID"
@@ -754,7 +756,7 @@ check "Node 4 join request approved" "$N4_APP_OK" "true"
 echo "--- 13i: Node 4 auto-subscribes and receives SWM data ---"
 N4_SWM_OK=false
 for i in $(seq 1 20); do
-  N4_SWM_CT=$(sharing_api_observe_settling "${N4_PORT}" "SELECT ?name WHERE { <urn:join-flow:shared1> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG2_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
+  N4_SWM_CT=$(sharing_api_poll "${N4_PORT}" "SELECT ?name WHERE { <urn:join-flow:shared1> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG2_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
   if devnet_count_at_least "$N4_SWM_CT" 1; then
     N4_SWM_OK=true
     ok "Node 4 received SWM data after approval (after ${i}s)"
@@ -789,7 +791,7 @@ ok "Node 5 join approved"
 echo "--- 13m: Node 5 receives SWM but not WM ---"
 N5_SWM_OK=false
 for i in $(seq 1 25); do
-  N5_SWM_CT=$(sharing_api_observe_settling "${N5_PORT}" "SELECT ?name WHERE { <urn:join-flow:shared1> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG2_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
+  N5_SWM_CT=$(sharing_api_poll "${N5_PORT}" "SELECT ?name WHERE { <urn:join-flow:shared1> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG2_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
   if devnet_count_at_least "$N5_SWM_CT" 1; then
     N5_SWM_OK=true
     ok "Node 5 received SWM data"
@@ -798,6 +800,7 @@ for i in $(seq 1 25); do
   sleep 1
 done
 $N5_SWM_OK || warn "Node 5 (edge) did not receive SWM data after 25s — edge sync may be slower"
+sharing_fail_if_settling "Node 5 read of SWM data" "$N5_SWM_CT"
 
 N5_SEC_CT=$(sharing_api_observe "${N5_PORT}" "SELECT ?name WHERE { <urn:join-flow:secret1> <http://schema.org/name> ?name }" name rows "{\"contextGraphId\":\"$CG2_ID\",\"includeSharedMemory\":true}") || devnet_observation_abort
 check "Node 5 cannot see WM secret data" "$N5_SEC_CT" "0"
@@ -944,7 +947,7 @@ echo "--- 15d: VM data syncs to Node 2 ---"
 # (VM is published on-chain and available to all nodes)
 N2_VM_SYNCED=false
 for i in $(seq 1 20); do
-  N2_VM_CT=$(sharing_api_observe_settling "${N2_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG3_ID\",\"view\":\"verifiable-memory\"}") || devnet_observation_abort
+  N2_VM_CT=$(sharing_api_poll "${N2_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG3_ID\",\"view\":\"verifiable-memory\"}") || devnet_observation_abort
   if devnet_count_at_least "$N2_VM_CT" 1; then
     N2_VM_SYNCED=true
     ok "Node 2 received VM data ($N2_VM_CT entities, after ${i}s)"
@@ -953,11 +956,12 @@ for i in $(seq 1 20); do
   sleep 1
 done
 $N2_VM_SYNCED || warn "Node 2 missing VM data after 20s — VM sync may need more time"
+sharing_fail_if_settling "Node 2 read of VM data" "$N2_VM_CT"
 
 echo "--- 15e: Node 3 also has VM data (VM is public/on-chain) ---"
 N3_VM_SYNCED=false
 for i in $(seq 1 20); do
-  N3_VM_CT=$(sharing_api_observe_settling "${N3_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG3_ID\",\"view\":\"verifiable-memory\"}") || devnet_observation_abort
+  N3_VM_CT=$(sharing_api_poll "${N3_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG3_ID\",\"view\":\"verifiable-memory\"}") || devnet_observation_abort
   if devnet_count_at_least "$N3_VM_CT" 1; then
     N3_VM_SYNCED=true
     ok "Node 3 received VM data ($N3_VM_CT entities, after ${i}s)"
@@ -966,6 +970,7 @@ for i in $(seq 1 20); do
   sleep 1
 done
 $N3_VM_SYNCED || warn "Node 3 missing VM data after 20s — VM sync may need more time"
+sharing_fail_if_settling "Node 3 read of VM data" "$N3_VM_CT"
 
 echo "--- 15f: SWM still has data (clearAfter=false) ---"
 SWM_AFTER_CT=$(sharing_api_observe "${N1_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG3_ID\",\"view\":\"shared-working-memory\"}") || devnet_observation_abort
@@ -1009,7 +1014,7 @@ echo "--- 16b: Verify VM data on Node 1 for private CG ---"
 echo "--- 16b: Node 2 (participant) sees VM data ---"
 N2_CG1_VM_OK=false
 for i in $(seq 1 20); do
-  N2_CG1_VM_CT=$(sharing_api_observe_settling "${N2_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG_ID\",\"view\":\"verifiable-memory\"}") || devnet_observation_abort
+  N2_CG1_VM_CT=$(sharing_api_poll "${N2_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG_ID\",\"view\":\"verifiable-memory\"}") || devnet_observation_abort
   if devnet_count_at_least "$N2_CG1_VM_CT" 1; then
     N2_CG1_VM_OK=true
     ok "Node 2 has VM data for CG1 ($N2_CG1_VM_CT entities, after ${i}s)"
@@ -1018,11 +1023,12 @@ for i in $(seq 1 20); do
   sleep 1
 done
 $N2_CG1_VM_OK || warn "Node 2 missing VM data for CG1 after 20s"
+sharing_fail_if_settling "Node 2 read of VM data for CG1" "$N2_CG1_VM_CT"
 
 echo "--- 16c: Node 4 (late joiner) sees VM data ---"
 N4_CG1_VM_OK=false
 for i in $(seq 1 20); do
-  N4_CG1_VM_CT=$(sharing_api_observe_settling "${N4_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG_ID\",\"view\":\"verifiable-memory\"}") || devnet_observation_abort
+  N4_CG1_VM_CT=$(sharing_api_poll "${N4_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG_ID\",\"view\":\"verifiable-memory\"}") || devnet_observation_abort
   if devnet_count_at_least "$N4_CG1_VM_CT" 1; then
     N4_CG1_VM_OK=true
     ok "Node 4 has VM data for CG1 ($N4_CG1_VM_CT entities, after ${i}s)"
@@ -1031,11 +1037,12 @@ for i in $(seq 1 20); do
   sleep 1
 done
 $N4_CG1_VM_OK || warn "Node 4 missing VM data for CG1 after 20s"
+sharing_fail_if_settling "Node 4 read of VM data for CG1" "$N4_CG1_VM_CT"
 
 echo "--- 16d: Node 3 (excluded from private CG) still gets VM (on-chain is public) ---"
 N3_CG1_VM_OK=false
 for i in $(seq 1 20); do
-  N3_CG1_VM_CT=$(sharing_api_observe_settling "${N3_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG_ID\",\"view\":\"verifiable-memory\"}") || devnet_observation_abort
+  N3_CG1_VM_CT=$(sharing_api_poll "${N3_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG_ID\",\"view\":\"verifiable-memory\"}") || devnet_observation_abort
   if devnet_count_at_least "$N3_CG1_VM_CT" 1; then
     N3_CG1_VM_OK=true
     ok "Node 3 sees VM for private CG1 ($N3_CG1_VM_CT entities — on-chain is public)"
@@ -1044,6 +1051,7 @@ for i in $(seq 1 20); do
   sleep 1
 done
 $N3_CG1_VM_OK || warn "Node 3 missing VM for CG1 — VM gossip may be slower for private CGs"
+sharing_fail_if_settling "Node 3 read of VM data for CG1" "$N3_CG1_VM_CT"
 
 echo "--- 16e: WM data still private after publish ---"
 for port_label in "${N2_PORT}:Node2" "${N4_PORT}:Node4" "${N3_PORT}:Node3"; do
