@@ -391,6 +391,7 @@ import {
   contextGraphReadAuthorityDependencyOf,
   resolveContextGraphReadAuthorityDecision,
   resolveContextGraphReadAuthorityResolution,
+  resolveScopedContextGraphQueryReadAuthority,
   unavailableContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityInput,
@@ -553,17 +554,16 @@ export class QueryMethods extends DKGAgentBase {
     let scopedReadAuthority: ContextGraphReadAuthorityDecision | undefined;
     if (opts.contextGraphId) {
       const scopedContextGraphId = opts.contextGraphId;
-      // Keep the public read-authority seam: tests and embedders stub it, and
-      // the outer `query` RPC site already owns attribution for the nested call.
-      scopedReadAuthority = await withRpcUsageSite(
-        CG_AUTH_RPC_SITES.query,
-        () => this.resolveContextGraphReadAuthority(scopedContextGraphId, {
-          callerAgentAddress: callerAgentAddressStr,
-          allowSubscriptionFallback: targetsSharedMemory ? false : undefined,
-          signal: opts.signal,
-          authorityReadMode: 'finalized-index',
-        }),
-      );
+      scopedReadAuthority = await resolveScopedContextGraphQueryReadAuthority({
+        contextGraphId: scopedContextGraphId,
+        view: opts.view,
+        callerAgentAddress: callerAgentAddressStr,
+        targetsSharedMemory,
+        signal: opts.signal,
+        resolveAuthority: (id, options) => this.resolveContextGraphReadAuthority(id, options),
+        isLocalFirstUnregistered: (id) => this.isLocalFirstUnregisteredContextGraph(id),
+        readCurrentBinding: (id) => this.subscribedContextGraphs.get(id),
+      });
       if (scopedReadAuthority.outcome === 'unavailable') {
         // An exact finalized name absence or a transient authority-circuit
         // failure cannot expose data when this node has no local declaration,

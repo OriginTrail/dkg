@@ -29,6 +29,7 @@ import {
 } from '@origintrail-official/dkg-core';
 
 import { rememberBounded } from './bounded-map.js';
+import { conflictsWithOwnedContextGraphBinding } from './context-graph-chain-discovery-binding.js';
 import { runBoundedOperation } from './bounded-operation.js';
 import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
 import { isUnrecordedNameHashRow } from './context-graph-claim-proof.js';
@@ -673,6 +674,7 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
     const nameHash = this.contextGraphNameCommitment(contextGraphId);
     const placeholder = this.contextGraphNamePlaceholder(nameHash);
     if (placeholder === null || placeholder.subscription.subscribed !== true) return;
+    if (conflictsWithOwnedContextGraphBinding(placeholder.subscription.onChainId, this.subscribedContextGraphs.get(contextGraphId)?.onChainId)) return;
     this.unsubscribeFromContextGraph(nameHash, { persist: true, supersededBy: contextGraphId });
   }
 

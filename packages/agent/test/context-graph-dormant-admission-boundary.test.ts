@@ -6,6 +6,9 @@ import type { ContextGraphSub, ContextGraphSubInput } from '../src/dkg-agent-typ
 import type { Quad } from '@origintrail-official/dkg-storage';
 
 const CG = 'dormant-admission-boundary';
+const DRAFT = 'local-owner-draft';
+const DRAFT_SUBJECT = 'urn:dormant-admission:local-draft';
+const FOREIGN = '0x00000000000000000000000000000000000000B2';
 const SELECT = 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 1';
 const UNAVAILABLE = [
   'finalized-name-absence-unaccepted', 'authority-circuit-open',
@@ -150,5 +153,138 @@ describe('dormant identity is distinct from native admission', () => {
     await expect(state._publish(CG, [])).rejects.toThrow('ACK_BOUNDARY_REACHED');
     expect(exists).toHaveBeenCalledWith(CG);
     expect(ack).toHaveBeenCalledOnce();
+  });
+});
+
+async function localWorkingMemoryFixture(allowedAgents?: string[]) {
+  const agent = await DKGAgent.create({
+    name: 'LocalWorkingMemoryOwner',
+    listenHost: '127.0.0.1',
+    listenPort: 0,
+    chainAdapter: new MockChainAdapter(),
+    nodeRole: 'edge',
+    rfc64CatalogActivation: { enabled: false },
+    contextGraphSubscriptionRehydrationEnabled: false,
+  });
+  agents.push(agent);
+  await agent.start();
+  expect(agent.getDefaultAgentAddress()).toBeUndefined();
+  await agent.createContextGraph({ id: CG, name: CG, private: true, allowedAgents });
+  await agent.assertion.create(CG, DRAFT);
+  await agent.assertion.write(CG, DRAFT, [{
+    subject: DRAFT_SUBJECT, predicate: 'urn:dormant-admission:predicate', object: '"local draft"', graph: '',
+  }]);
+  const state = agent as unknown as NativeState;
+  const wm = { contextGraphId: CG, view: 'working-memory' as const, agentAddress: agent.peerId, assertionName: DRAFT };
+  return { agent, state, wm };
+}
+
+describe('local private working-memory ownership does not grant graph admission', () => {
+  it('reads a real locally created peer-ID draft without an EVM identity or subscription', async () => {
+    const { agent, state, wm } = await localWorkingMemoryFixture();
+    expect(state.subscribedContextGraphs.get(CG)?.subscribed).toBe(false);
+    expect(state.subscribedContextGraphs.get(CG)?.coreHosted).not.toBe(true);
+    await expect(agent.resolveContextGraphReadAuthority(CG)).resolves.toMatchObject({
+      outcome: 'denied', source: 'legacy-local', reason: 'no-read-authority',
+    });
+    await expect(agent.query(SELECT, wm)).resolves.toMatchObject({ bindings: [{ s: DRAFT_SUBJECT }] });
+    await expect(agent.canReadContextGraph(CG)).resolves.toBe(false);
+  });
+
+  it('keeps authenticated foreign-agent working-memory isolation', async () => {
+    const { agent, wm } = await localWorkingMemoryFixture();
+    const query = vi.spyOn(agent.queryEngine, 'query');
+    await expect(agent.query(SELECT, { ...wm, callerAgentAddress: FOREIGN })).resolves.toEqual({ bindings: [] });
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('does not authorize default, shared, or verifiable-memory graph reads', async () => {
+    const { agent } = await localWorkingMemoryFixture();
+    const query = vi.spyOn(agent.queryEngine, 'query');
+    for (const view of [undefined, 'shared-working-memory', 'verifiable-memory'] as const) {
+      await expect(agent.query(SELECT, { contextGraphId: CG, view })).resolves.toEqual({ bindings: [] });
+    }
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('does not bypass chain authority for a numerically bound local-origin graph', async () => {
+    const { agent, state, wm } = await localWorkingMemoryFixture();
+    state.setContextGraphSubscription(CG, {
+      ...state.subscribedContextGraphs.get(CG), onChainId: '582',
+    }, { persist: false });
+    await expect(agent.isLocalFirstUnregisteredContextGraph(CG)).resolves.toBe(false);
+    const query = vi.spyOn(agent.queryEngine, 'query');
+    await expect(agent.query(SELECT, wm)).rejects.toMatchObject({ code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE' });
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('does not treat replicated declaration and draft RDF as local-create origin', async () => {
+    const { agent: owner, wm } = await localWorkingMemoryFixture();
+    const replica = await DKGAgent.create({
+      name: 'WorkingMemoryReplica', chainAdapter: new MockChainAdapter(), nodeRole: 'edge',
+      rfc64CatalogActivation: { enabled: false }, contextGraphSubscriptionRehydrationEnabled: false,
+    });
+    agents.push(replica);
+    const snapshot = await owner.store.query('SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } }');
+    if (snapshot.type !== 'bindings') throw new Error('Expected native SELECT snapshot');
+    await replica.store.insert(snapshot.bindings.map(({ s, p, o, g }) => ({ subject: s, predicate: p, object: o, graph: g })));
+    await expect(replica.isLocalFirstUnregisteredContextGraph(CG)).resolves.toBe(false);
+    const query = vi.spyOn(replica.queryEngine, 'query');
+    await expect(replica.resolveContextGraphReadAuthority(CG)).resolves.toMatchObject({
+      outcome: 'denied', source: 'legacy-local', reason: 'no-read-authority',
+    });
+    await expect(replica.query(SELECT, wm)).resolves.toEqual({ bindings: [] });
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it.each(['numeric', 'pending'] as const)('refuses a %s binding arriving during the local-owner proof', async (change) => {
+    const { agent, state, wm } = await localWorkingMemoryFixture();
+    const readStatus = agent.readLocalContextGraphRegistrationStatus.bind(agent);
+    let entered!: () => void;
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => { entered = resolve; });
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let decisionComplete = false;
+    const resolveAuthority = agent.resolveContextGraphReadAuthority.bind(agent);
+    vi.spyOn(agent, 'resolveContextGraphReadAuthority').mockImplementation(async (...args) => {
+      const authority = await resolveAuthority(...args);
+      decisionComplete = true;
+      return authority;
+    });
+    vi.spyOn(agent, 'readLocalContextGraphRegistrationStatus').mockImplementation(async (id) => {
+      if (decisionComplete) {
+        entered();
+        await held;
+      }
+      return readStatus(id);
+    });
+    const query = vi.spyOn(agent.queryEngine, 'query');
+    const result = agent.query(SELECT, wm);
+    try {
+      await waiting;
+      state.setContextGraphSubscription(CG, {
+        ...state.subscribedContextGraphs.get(CG),
+        ...(change === 'numeric' ? { onChainId: '582' } : { pendingMeta: true }),
+      }, { persist: false });
+    } finally {
+      release();
+    }
+    await expect(result).resolves.toEqual({ bindings: [] });
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('keeps pending metadata and an explicit private roster closed', async () => {
+    const pending = await localWorkingMemoryFixture();
+    pending.state.setContextGraphSubscription(CG, {
+      ...pending.state.subscribedContextGraphs.get(CG), pendingMeta: true,
+    }, { persist: false });
+    await expect(pending.agent.query(SELECT, pending.wm)).rejects.toMatchObject({
+      code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE', reason: 'pending-authoritative-metadata',
+    });
+    const gated = await localWorkingMemoryFixture([FOREIGN]);
+    await expect(gated.agent.resolveContextGraphReadAuthority(CG)).resolves.toMatchObject({
+      outcome: 'denied', source: 'legacy-local', reason: 'local-agent-not-allowed',
+    });
+    await expect(gated.agent.query(SELECT, gated.wm)).resolves.toEqual({ bindings: [] });
   });
 });

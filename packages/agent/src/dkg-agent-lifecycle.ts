@@ -10306,7 +10306,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       persistMembership: (id) => this.persistLocalNodeMembership(id, 'rehydrated-subscription'),
       commit: (id) => {
         this.retireLiveContextGraphNamePlaceholderFor(id);
-        return this.setContextGraphSubscription(id, this.subscribedContextGraphs.get(id)!, { persist: false });
+        return this.setContextGraphSubscription(id, this.subscribedContextGraphs.get(id)!, { persist: false, preserveAdmittedWireBinding: true });
       },
     }, options);
   }
