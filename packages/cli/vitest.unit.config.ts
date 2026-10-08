@@ -42,6 +42,8 @@ export default defineConfig({
           'test/sealed-create-retry-route.test.ts',
           'test/config.test.ts',
           'test/status-route-rpc.test.ts',
+          // Pure: in-process status route and a chain adapter over scripted endpoints.
+          'test/status-chain-rpc.test.ts',
           'test/backpressure-route.test.ts',
       'test/status-route-store-quads.test.ts',
       'test/store-reachability.test.ts',
