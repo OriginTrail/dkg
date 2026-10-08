@@ -21,10 +21,11 @@ import {
 } from './evm-knowledge-asset-update-context.js';
 import { confirmedStateBlockAtHead } from './evm-adapter-constants.js';
 import { isContractViewRetryable } from './rpc-failover-client.js';
-import { readAllProvidersWithTransientRetry } from './rpc-provider-poll.js';
+import { readFirstProviderWithTransientRetry } from './rpc-provider-fallback.js';
+import { activeRpcRequestAbortSignal } from './rpc-request-transport.js';
 import { withRpcUsageConsumer } from './rpc-usage.js';
 
-/** One in-place retry per endpoint for transient transport blips in the unanimity poll. */
+/** One in-place retry per endpoint for transient transport blips before fallback. */
 const VERSION_SNAPSHOT_TRANSIENT_RETRY_DELAY_MS = 250;
 
 /**
@@ -34,7 +35,7 @@ const VERSION_SNAPSHOT_TRANSIENT_RETRY_DELAY_MS = 250;
 /**
  * r17 (3814893080) / r19 (3816490449) — EXPORTED so every pinned-snapshot reader can perform the
  * same check. `ensureConfiguredStaticChainIdValidated` is a no-op under `staticNetwork: false`,
- * which is the mode these fan-outs run in, so each reader must compare the endpoint's chain id
+ * which these readers support, so each reader must compare the endpoint's chain id
  * itself. Sharing the parse is what keeps the two readers from drifting apart again.
  */
 export function numericChainIdOf(chainId: string | undefined): bigint | undefined {
@@ -101,35 +102,31 @@ export class StorageReadMethods extends EVMChainAdapterBase {
   }
 
   /**
-   * GH#2270 PR #2300 r8 — see {@link ChainAdapter.readKnowledgeAssetVersionSnapshot}. Both reads
-   * happen inside ONE `readProvider` callback and carry the SAME pinned block number, so the root
-   * and the count can never come from endpoints at different heights; an endpoint that cannot
-   * produce the pair yields nothing and the whole snapshot moves to the next one.
-   */
-  /**
-   * GH#2270 PR #2300 — see {@link ChainAdapter.readKnowledgeAssetVersionSnapshot}.
-   *
-   * Every read for ONE endpoint happens at the SAME pinned block, so a view can never mix a root
-   * with a count, an author or a publisher from a different height — that mixture is what let an
-   * old transaction in an A -> B -> A history read as current. And because a healthy endpoint can
-   * still be BEHIND, every configured endpoint is asked and the MOST ADVANCED complete view wins
-   * (r11): first-success ordering would have re-introduced the same staleness through a different
-   * door. An endpoint that cannot produce a complete view simply does not compete.
+   * Read root, count and attribution from one endpoint at one pinned block.
+   * Configured RPCs are ordered fallbacks (GH#3098): a complete primary view
+   * returns immediately, without requiring unused backups to answer. Currency
+   * is relative to that selected endpoint; caller receipt/version floors remain
+   * necessary when an endpoint is behind known evidence.
    */
   async readKnowledgeAssetVersionSnapshot(
     kaId: bigint,
     options: ChainReadOptions = {},
   ): Promise<KnowledgeAssetVersionSnapshot | null> {
+    if (options.signal?.aborted || activeRpcRequestAbortSignal()?.aborted) return null;
     await this.init();
+    if (options.signal?.aborted || activeRpcRequestAbortSignal()?.aborted) return null;
     const kas = this.contracts.knowledgeAssetStorage;
     if (!kas) return null;
     const knowledgeAssetStorageAddress = this.knowledgeAssetStorageBindingAddress(kas);
     const knowledgeAssetStorageGeneration = this.knowledgeAssetStorageBindingGeneration;
     if (knowledgeAssetStorageAddress === undefined) return null;
-    const readOne = async (provider: JsonRpcProvider) => {
+    const readOne = async (provider: JsonRpcProvider, signal?: AbortSignal) => {
+      signal?.throwIfAborted();
+      if (!this.knowledgeAssetStorageBindingIsCurrent(
+        kas, knowledgeAssetStorageAddress, knowledgeAssetStorageGeneration,
+      )) return null;
       // r15 (3814317260) / r17 (3814893080) — every endpoint must prove it is THIS chain before its
-      // view is eligible, because the poll trusts the most advanced answer and an accidentally
-      // configured wrong-chain RPC would otherwise supply the durable version decision.
+      // view is eligible; a configured wrong-chain RPC must not supply a durable version decision.
       //
       // The shared `ensureConfiguredStaticChainIdValidated` is NOT sufficient here: it returns
       // immediately when no static chain id is configured, which is exactly the supported
@@ -137,26 +134,25 @@ export class StorageReadMethods extends EVMChainAdapterBase {
       // most deployments use. The identity is therefore compared explicitly, against the chain id
       // this adapter was configured with, on every endpoint.
       await this.ensureConfiguredStaticChainIdValidated(provider);
+      signal?.throwIfAborted();
       const expectedChainId = numericChainIdOf(this.chainId);
       if (expectedChainId !== undefined) {
         const network = await provider.getNetwork();
         if (BigInt(network.chainId) !== expectedChainId) return null;
       }
-      if (options.signal?.aborted) return null;
+      signal?.throwIfAborted();
       // Use the same operator-selected confirmation depth as the receipt proof. The receipt block
       // itself is confirmation 1, so finalityConfirmations=1 pins this coherent version view to
       // the current head. Larger values pin head-depth+1. Using the RPC-specific `finalized` tag
       // here made one-block receipt finality ineffective because named-KA recovery still waited
       // many minutes for the endpoint's consensus finality marker to advance.
-      // Deliberately NOT routed through `resolveEvmFinalityAnchorBlockV1`: this
-      // read pins by NUMBER only and never needs the anchor block's hash, so the
-      // shared resolver would add a `getBlock` round-trip for a field nothing
-      // here consumes. The arithmetic — the part that must stay singular — is
-      // still `confirmedStateBlockAtHead`, the same function the resolver uses.
+      // Share confirmation arithmetic with the finality resolver while keeping
+      // this endpoint's exact numbered block/hash as the snapshot anchor.
       const head = await withRpcUsageConsumer(
         'getBlock',
         () => provider.getBlock('latest'),
       );
+      signal?.throwIfAborted();
       if (head === null || !Number.isSafeInteger(head.number) || head.number < 0) return null;
       const blockNumber = confirmedStateBlockAtHead(
         head.number,
@@ -169,20 +165,32 @@ export class StorageReadMethods extends EVMChainAdapterBase {
             'getBlock',
             () => provider.getBlock(blockNumber),
           );
+      signal?.throwIfAborted();
       if (block === null
         || block.number !== blockNumber
         || typeof block.hash !== 'string'
         || !ethers.isHexString(block.hash, 32)) return null;
       const bound = this.rebindContract(kas as Contract, provider);
       const at = { blockTag: blockNumber };
-      const [latestRoot, context, latestAuthor, latestPublisher] = await Promise.all([
+      // Keep the endpoint deadline active until every tuple read settles. An
+      // early failure must not abandon hanging sibling requests beside a new
+      // fallback attempt; the existing timeout cancels those physical reads.
+      const [rootRead, contextRead, authorRead, publisherRead] = await Promise.allSettled([
         bound.getLatestMerkleRoot(kaId, at) as Promise<string>,
         bound.getKnowledgeAssetUpdateContext(kaId, at),
         bound.getLatestMerkleRootAuthor(kaId, at) as Promise<string>,
         bound.getLatestMerkleRootPublisher(kaId, at) as Promise<string>,
       ]);
+      signal?.throwIfAborted();
+      if (rootRead.status === 'rejected') throw rootRead.reason;
+      if (contextRead.status === 'rejected') throw contextRead.reason;
+      if (authorRead.status === 'rejected') throw authorRead.reason;
+      if (publisherRead.status === 'rejected') throw publisherRead.reason;
+      const latestRoot = rootRead.value;
+      const context = contextRead.value;
+      const latestAuthor = authorRead.value;
+      const latestPublisher = publisherRead.value;
       if (!latestRoot || !latestAuthor || !latestPublisher) return null;
-      options.signal?.throwIfAborted();
       if (!this.knowledgeAssetStorageBindingIsCurrent(
         kas,
         knowledgeAssetStorageAddress,
@@ -200,39 +208,17 @@ export class StorageReadMethods extends EVMChainAdapterBase {
         knowledgeAssetStorageGeneration,
       };
     };
-    // r14 (3814017390) / r3 (3880005809) — endpoint retry, cancellation, and settlement are the
-    // TRANSPORT layer's job: `readAllProvidersWithTransientRetry` polls every endpoint in
-    // parallel, gives each ONE in-place retry for transient failures (deterministic
-    // classifications like CALL_EXCEPTION disqualify with no second ask — re-asking cannot
-    // change their answer), and completes on abort rather than waiting out a stalled endpoint.
-    // This method keeps only what is domain: the per-endpoint pinned read above, and the
-    // unanimity decision below — r12's rule keeps its exact meaning ("every configured endpoint
-    // reports a complete view"), judged over the retried answers.
-    const settled = await readAllProvidersWithTransientRetry(this.providers, readOne, {
+    const view = await readFirstProviderWithTransientRetry(this.providers, readOne, {
       retryDelayMs: VERSION_SNAPSHOT_TRANSIENT_RETRY_DELAY_MS,
       isRetryable: isContractViewRetryable,
       signal: options.signal,
     });
-    if (!settled) return null;
-    const views = settled.flatMap((view) => (view ? [view] : []));
-    // r12 (3813506086) — the poll must be UNANIMOUS. Taking the highest block among the endpoints
-    // that happened to answer does not establish currency: the endpoint whose read failed is
-    // exactly the one that might have been ahead, so a stale-but-complete view would win and an
-    // old transaction would materialize as current. Anything less than every configured endpoint
-    // reporting a complete view is "cannot establish", and the caller must defer rather than
-    // decide — recovery retries on the next tick, and the operator's by-id clear remains.
-    if (views.length !== this.providers.length) return null;
-    const best = views.reduce((current, view) => (
-      view.blockNumber > current.blockNumber ? view : current
-    ));
-    if (views.some((view) => view.blockNumber === best.blockNumber
-      && view.blockHash !== best.blockHash)) return null;
-    options.signal?.throwIfAborted();
+    if (!view || options.signal?.aborted || activeRpcRequestAbortSignal()?.aborted) return null;
     return this.knowledgeAssetStorageBindingIsCurrent(
       kas,
       knowledgeAssetStorageAddress,
       knowledgeAssetStorageGeneration,
-    ) ? best : null;
+    ) ? view : null;
   }
 
   async knowledgeAssetVersionSnapshotIsCurrent(
@@ -241,6 +227,7 @@ export class StorageReadMethods extends EVMChainAdapterBase {
     options: ChainReadOptions = {},
   ): Promise<boolean> {
     options.signal?.throwIfAborted();
+    activeRpcRequestAbortSignal()?.throwIfAborted();
     const snapshotBlockHash = snapshot.blockHash;
     const snapshotStorageAddress = snapshot.knowledgeAssetStorageAddress;
     const snapshotStorageGeneration = snapshot.knowledgeAssetStorageGeneration;
@@ -256,6 +243,7 @@ export class StorageReadMethods extends EVMChainAdapterBase {
 
     await this.init();
     options.signal?.throwIfAborted();
+    activeRpcRequestAbortSignal()?.throwIfAborted();
     const kas = this.contracts.knowledgeAssetStorage;
     if (!kas) return false;
     const address = this.knowledgeAssetStorageBindingAddress(kas);
@@ -267,18 +255,22 @@ export class StorageReadMethods extends EVMChainAdapterBase {
       || generation !== snapshotStorageGeneration
       || !this.knowledgeAssetStorageBindingIsCurrent(kas, address, generation)) return false;
 
-    const readOne = async (provider: JsonRpcProvider) => {
+    const readOne = async (provider: JsonRpcProvider, signal?: AbortSignal) => {
+      signal?.throwIfAborted();
+      if (!this.knowledgeAssetStorageBindingIsCurrent(kas, address, generation)) return null;
       await this.ensureConfiguredStaticChainIdValidated(provider);
+      signal?.throwIfAborted();
       const expectedChainId = numericChainIdOf(this.chainId);
       if (expectedChainId !== undefined) {
         const network = await provider.getNetwork();
         if (BigInt(network.chainId) !== expectedChainId) return null;
       }
-      options.signal?.throwIfAborted();
+      signal?.throwIfAborted();
       const head = await withRpcUsageConsumer(
         'getBlock',
         () => provider.getBlock('latest'),
       );
+      signal?.throwIfAborted();
       if (head === null || !Number.isSafeInteger(head.number) || head.number < 0) return null;
       const blockNumber = confirmedStateBlockAtHead(
         head.number,
@@ -291,28 +283,25 @@ export class StorageReadMethods extends EVMChainAdapterBase {
             'getBlock',
             () => provider.getBlock(blockNumber),
           );
+      signal?.throwIfAborted();
       if (block === null
         || block.number !== blockNumber
         || typeof block.hash !== 'string'
         || !ethers.isHexString(block.hash, 32)) return null;
       return { blockNumber, blockHash: block.hash.toLowerCase() };
     };
-    const settled = await readAllProvidersWithTransientRetry(this.providers, readOne, {
+    const view = await readFirstProviderWithTransientRetry(this.providers, readOne, {
       retryDelayMs: VERSION_SNAPSHOT_TRANSIENT_RETRY_DELAY_MS,
       isRetryable: isContractViewRetryable,
       signal: options.signal,
     });
     options.signal?.throwIfAborted();
-    if (!settled) return false;
-    const views = settled.flatMap((view) => (view ? [view] : []));
-    if (views.length !== this.providers.length) return false;
-    const best = views.reduce((current, view) => (
-      view.blockNumber > current.blockNumber ? view : current
-    ));
-    if (views.some((view) => view.blockNumber === best.blockNumber
-      && view.blockHash !== best.blockHash)) return false;
-    return best.blockNumber === snapshot.blockNumber
-      && best.blockHash === snapshotBlockHash.toLowerCase()
+    activeRpcRequestAbortSignal()?.throwIfAborted();
+    if (!view) return false;
+    // A usable primary header that differs is a negative verdict, not a reason
+    // to search the fallbacks for an endpoint matching an older snapshot.
+    return view.blockNumber === snapshot.blockNumber
+      && view.blockHash === snapshotBlockHash.toLowerCase()
       && this.knowledgeAssetStorageBindingIsCurrent(kas, address, generation)
       && generation === snapshotStorageGeneration;
   }

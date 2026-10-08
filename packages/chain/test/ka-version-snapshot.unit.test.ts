@@ -6,13 +6,16 @@
  *
  * Recovery asks this one question: is a recovered transaction still the current version? Getting
  * that wrong in the permissive direction stamps an old transaction's provenance over newer state,
- * so the view it answers with must be both COHERENT (every fact from one endpoint at one pinned
- * block) and CURRENT (the most advanced endpoint, not merely the first that replies). Consumers
- * that inject an already-good view cannot see either guarantee break; these drive the adapter.
+ * so every fact must come from one endpoint at one pinned block. Configured RPCs are ordered
+ * authorities: use the primary's complete view, then fall back in order only when it cannot
+ * answer. Consumers that inject an already-good view cannot see either guarantee break; these
+ * drive the adapter and record every endpoint read, including reads that yield no tuple.
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
+import { RPC_READ_STALL_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
+import { withRpcRequestContext } from '../src/rpc-request-transport.js';
 
 const KA_ID = 7n;
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
@@ -37,6 +40,8 @@ type Script = {
   stall?: boolean;
   /** Fail the first N head reads with `code` before serving `blockNumber` (transient-blip cases). */
   headFailures?: { count: number; code: string };
+  /** Fail a numeric block-pinned contract call without making chain/head reads fail. */
+  pinnedFailures?: { call: string; count: number; code: string };
   /** Override the canonical hash at the scripted head; null models a missing hash. */
   blockHash?: string | null;
   latestRoot: string | null;
@@ -58,13 +63,16 @@ function adapterOver(
   opts: { storageDeployed?: boolean; finalityConfirmations?: number } = {},
 ) {
   const reads: Array<{ provider: number; call: string; blockTag: unknown }> = [];
+  const attempts: Array<{ provider: number; call: string; blockTag?: unknown }> = [];
   const providers = scripts.map((script, index) => ({
     __index: index,
     __script: script,
     async getNetwork() {
+      attempts.push({ provider: index, call: 'getNetwork' });
       return { chainId: script.wrongChain ? 999n : 31337n };
     },
     async getBlock(tag: 'latest' | number) {
+      attempts.push({ provider: index, call: 'getBlock', blockTag: tag });
       if (script.stall) return new Promise(() => {}) as never;
       if (tag === 'latest' && script.headFailures && script.headFailures.count > 0) {
         script.headFailures.count -= 1;
@@ -98,8 +106,18 @@ function adapterOver(
   a.contracts = { knowledgeAssetStorage: opts.storageDeployed === false ? undefined : storage };
   a.providers = providers;
   a.rebindContract = (_c: unknown, provider: (typeof providers)[number]) => {
-    const record = (call: string, overrides: { blockTag?: unknown }) =>
-      reads.push({ provider: provider.__index, call, blockTag: overrides?.blockTag });
+    const record = (call: string, overrides: { blockTag?: unknown }) => {
+      const read = { provider: provider.__index, call, blockTag: overrides?.blockTag };
+      reads.push(read);
+      attempts.push(read);
+      const failure = provider.__script.pinnedFailures;
+      if (failure?.call === call && failure.count > 0) {
+        failure.count -= 1;
+        throw Object.assign(new Error('RPC27 Unknown state for numeric block-pinned eth_call'), {
+          code: failure.code,
+        });
+      }
+    };
     return {
       async getLatestMerkleRoot(_kaId: bigint, o: { blockTag?: unknown }) {
         record('getLatestMerkleRoot', o);
@@ -119,7 +137,21 @@ function adapterOver(
       },
     };
   };
-  return { adapter: a, reads, validated, providers, storage };
+  return { adapter: a, reads, attempts, validated, providers, storage };
+}
+
+function snapshotAt(blockNumber = 500) {
+  return {
+    knowledgeAssetId: KA_ID,
+    latestRoot: `0x${'aa'.repeat(32)}`,
+    rootCount: 3n,
+    latestAuthor: AUTHOR,
+    latestPublisher: PUBLISHER,
+    blockNumber,
+    blockHash: hashForBlock(blockNumber),
+    knowledgeAssetStorageAddress: KAS_ADDRESS,
+    knowledgeAssetStorageGeneration: 0,
+  };
 }
 
 describe('EVMChainAdapter.readKnowledgeAssetVersionSnapshot [GH#2270 PR#2300]', () => {
@@ -171,142 +203,268 @@ describe('EVMChainAdapter.readKnowledgeAssetVersionSnapshot [GH#2270 PR#2300]', 
     expect(reads).toEqual([]);
   });
 
-  it('takes the MOST ADVANCED endpoint, not the first that answers [r11]', async () => {
-    // A healthy endpoint can still be behind. First-success ordering would hand recovery a
-    // perfectly coherent but stale view — {root A, count 1} while the chain is at A -> B -> A —
-    // and an old transaction would read as current.
-    const { adapter } = adapterOver([
+  it('uses the primary complete snapshot without reading higher or disagreeing fallbacks', async () => {
+    const { adapter, attempts, validated } = adapterOver([
       { blockNumber: 100, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 1n },
-      { blockNumber: 103, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
+      { blockNumber: 103, latestRoot: `0x${'bb'.repeat(32)}`, rootCount: 3n },
+      { blockNumber: 100, blockHash: `0x${'99'.repeat(32)}`, latestRoot: null, rootCount: 9n },
     ]);
 
     const view = await adapter.readKnowledgeAssetVersionSnapshot(KA_ID);
 
-    expect(view?.blockNumber).toBe(103);
-    expect(view?.rootCount).toBe(3n);
+    expect(view).toMatchObject({ blockNumber: 100, rootCount: 1n, latestRoot: `0x${'aa'.repeat(32)}` });
+    expect(validated).toEqual([0]);
+    expect(attempts).toHaveLength(6);
+    expect(attempts.every((attempt) => attempt.provider === 0)).toBe(true);
   });
 
-  it('an endpoint that cannot answer makes the whole poll inconclusive [r12]', async () => {
-    // 3813506086 — taking the best of whoever answered does not establish currency: the endpoint
-    // that failed is exactly the one that might have been ahead, so a stale-but-complete view
-    // would win. Anything short of unanimity is "cannot establish", and the caller defers.
-    const { adapter } = adapterOver([
-      { blockNumber: null, latestRoot: null, rootCount: 0n },
-      { blockNumber: 900, latestRoot: `0x${'bb'.repeat(32)}`, rootCount: 5n },
+  it('a healthy primary completes with a configured fallback that rejects pinned eth_call', async () => {
+    const { adapter, attempts, providers } = adapterOver([
+      { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
+      {
+        blockNumber: 900,
+        latestRoot: `0x${'bb'.repeat(32)}`,
+        rootCount: 5n,
+        pinnedFailures: { call: 'getLatestMerkleRoot', count: 1, code: 'CALL_EXCEPTION' },
+      },
     ]);
 
-    await expect(adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toBeNull();
+    await expect(adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toMatchObject(snapshotAt());
+    expect(attempts.every((attempt) => attempt.provider === 0)).toBe(true);
+    expect(providers[1]!.__script.pinnedFailures!.count).toBe(1);
   });
 
-  it('rejects same-height provider disagreement and missing canonical hashes', async () => {
-    const root = `0x${'aa'.repeat(32)}`;
-    const disagreeing = adapterOver([
-      { blockNumber: 500, blockHash: `0x${'01'.repeat(32)}`, latestRoot: root, rootCount: 3n },
-      { blockNumber: 500, blockHash: `0x${'02'.repeat(32)}`, latestRoot: root, rootCount: 3n },
-    ]).adapter;
-    await expect(disagreeing.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toBeNull();
+  it('uses fallback1 after the primary fails and never asks fallback2', async () => {
+    const { adapter, attempts, validated } = adapterOver([
+      { blockNumber: null, latestRoot: null, rootCount: 0n },
+      { blockNumber: 900, latestRoot: `0x${'bb'.repeat(32)}`, rootCount: 5n },
+      { blockNumber: 999, latestRoot: `0x${'cc'.repeat(32)}`, rootCount: 6n },
+    ]);
 
+    await expect(adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toMatchObject({
+      blockNumber: 900, latestRoot: `0x${'bb'.repeat(32)}`, rootCount: 5n,
+    });
+    expect(validated).toEqual([0, 0, 1]);
+    expect(attempts.map((attempt) => attempt.provider)).toEqual([0, 0, 0, 0, 1, 1, 1, 1, 1, 1]);
+  });
+
+  it('uses fallback2 only after primary and fallback1 each fail', async () => {
+    const { adapter, attempts, validated, reads } = adapterOver([
+      { blockNumber: 1_000, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 9n, wrongChain: true },
+      { blockNumber: 999, latestRoot: `0x${'bb'.repeat(32)}`, rootCount: 8n, author: null },
+      { blockNumber: 900, latestRoot: `0x${'cc'.repeat(32)}`, rootCount: 5n },
+    ]);
+
+    await expect(adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toMatchObject({
+      blockNumber: 900, latestRoot: `0x${'cc'.repeat(32)}`, rootCount: 5n,
+    });
+    expect(validated).toEqual([0, 1, 2]);
+    expect(attempts.map((attempt) => attempt.provider)).toEqual([0, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2]);
+    expect(reads.filter((read) => read.provider === 0)).toEqual([]);
+    expect(reads.filter((read) => read.provider === 2)).toHaveLength(4);
+    expect(reads.filter((read) => read.provider === 2).every((read) => read.blockTag === 900)).toBe(true);
+  });
+
+  it('a missing canonical hash disqualifies its endpoint', async () => {
+    const root = `0x${'aa'.repeat(32)}`;
     const missing = adapterOver([
       { blockNumber: 500, blockHash: null, latestRoot: root, rootCount: 3n },
     ]).adapter;
     await expect(missing.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toBeNull();
+
+    const { adapter, reads } = adapterOver([
+      { blockNumber: 999, blockHash: null, latestRoot: root, rootCount: 9n },
+      { blockNumber: 500, latestRoot: root, rootCount: 3n },
+    ]);
+    await expect(adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toMatchObject(snapshotAt());
+    expect(reads.every((read) => read.provider === 1 && read.blockTag === 500)).toBe(true);
+    expect(reads).toHaveLength(4);
   });
 
-  it('a single transient blip on one endpoint does not void the unanimity poll', async () => {
-    // The blip endpoint fails its first head read with a transient transport code and answers
-    // normally on the in-place retry. Unanimity ("every configured endpoint reports a complete
-    // view") is judged over the retried answer, so one flaky tick no longer costs the caller a
-    // whole backoff cycle.
-    const { adapter } = adapterOver([
-      { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
+  it('retries a transient primary blip once before asking any fallback', async () => {
+    const { adapter, attempts, providers } = adapterOver([
       {
-        blockNumber: 502,
-        latestRoot: `0x${'bb'.repeat(32)}`,
-        rootCount: 4n,
+        blockNumber: 500,
+        latestRoot: `0x${'aa'.repeat(32)}`,
+        rootCount: 3n,
         headFailures: { count: 1, code: 'SERVER_ERROR' },
       },
+      { blockNumber: 502, latestRoot: `0x${'bb'.repeat(32)}`, rootCount: 4n },
     ]);
 
-    const view = await adapter.readKnowledgeAssetVersionSnapshot(KA_ID);
-
-    expect(view).toMatchObject({ latestRoot: `0x${'bb'.repeat(32)}`, blockNumber: 502 });
+    await expect(adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toMatchObject(snapshotAt());
+    expect(attempts.filter((attempt) => attempt.call === 'getBlock')).toEqual([
+      { provider: 0, call: 'getBlock', blockTag: 'latest' },
+      { provider: 0, call: 'getBlock', blockTag: 'latest' },
+    ]);
+    expect(attempts.every((attempt) => attempt.provider === 0)).toBe(true);
+    expect(providers[0]!.__script.headFailures!.count).toBe(0);
   });
 
-  it('a deterministic failure disqualifies its endpoint with NO retry — the poll stays inconclusive', async () => {
-    // CALL_EXCEPTION is an ANSWER, not an outage: re-asking cannot change it, so the retry must
-    // not apply. The endpoint would have answered on a second ask (the script only fails once) —
-    // if this row ever sees a snapshot, the retry has started second-guessing deterministic
-    // classifications.
-    const { adapter } = adapterOver([
-      { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
+  it('a deterministic pinned eth_call failure falls back without retrying or mixing the tuple', async () => {
+    const fallbackAuthor = `0x${'44'.repeat(20)}`;
+    const fallbackPublisher = `0x${'55'.repeat(20)}`;
+    const { adapter, attempts, reads, providers } = adapterOver([
       {
-        blockNumber: 502,
+        blockNumber: 999,
+        latestRoot: `0x${'aa'.repeat(32)}`,
+        rootCount: 9n,
+        pinnedFailures: { call: 'getKnowledgeAssetUpdateContext', count: 1, code: 'CALL_EXCEPTION' },
+      },
+      {
+        blockNumber: 900,
         latestRoot: `0x${'bb'.repeat(32)}`,
-        rootCount: 4n,
-        headFailures: { count: 1, code: 'CALL_EXCEPTION' },
+        rootCount: 5n,
+        author: fallbackAuthor,
+        publisher: fallbackPublisher,
       },
     ]);
 
-    expect(await adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).toBeNull();
+    await expect(adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toMatchObject({
+      latestRoot: `0x${'bb'.repeat(32)}`,
+      rootCount: 5n,
+      latestAuthor: fallbackAuthor,
+      latestPublisher: fallbackPublisher,
+      blockNumber: 900,
+      blockHash: hashForBlock(900),
+    });
+    expect(providers[0]!.__script.pinnedFailures!.count).toBe(0);
+    expect(attempts.filter((attempt) => attempt.call === 'getBlock')).toEqual([
+      { provider: 0, call: 'getBlock', blockTag: 'latest' },
+      { provider: 1, call: 'getBlock', blockTag: 'latest' },
+    ]);
+    expect(reads.filter((read) => read.provider === 0)).toHaveLength(4);
+    expect(reads.filter((read) => read.provider === 1)).toHaveLength(4);
+    expect(reads.every((read) => read.blockTag === (read.provider === 0 ? 999 : 900))).toBe(true);
   });
 
-  it('a second consecutive transient failure still voids the poll — the retry budget is one', async () => {
-    const { adapter } = adapterOver([
-      { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
+  it('two transient primary failures exhaust its one retry before fallback1', async () => {
+    const { adapter, attempts } = adapterOver([
       {
-        blockNumber: 502,
-        latestRoot: `0x${'bb'.repeat(32)}`,
-        rootCount: 4n,
+        blockNumber: 999,
+        latestRoot: `0x${'aa'.repeat(32)}`,
+        rootCount: 9n,
         headFailures: { count: 2, code: 'SERVER_ERROR' },
       },
+      { blockNumber: 900, latestRoot: `0x${'bb'.repeat(32)}`, rootCount: 5n },
     ]);
 
-    expect(await adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).toBeNull();
+    await expect(adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toMatchObject({
+      blockNumber: 900, latestRoot: `0x${'bb'.repeat(32)}`, rootCount: 5n,
+    });
+    expect(attempts.map((attempt) => attempt.provider)).toEqual([0, 0, 0, 0, 1, 1, 1, 1, 1, 1]);
   });
 
-  it('a partial view is never returned — a missing attribution disqualifies its endpoint', async () => {
-    const { adapter } = adapterOver([
+  it('a missing attribution disqualifies its endpoint without returning a partial view', async () => {
+    const { adapter, reads } = adapterOver([
       { blockNumber: 999, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 9n, author: null },
       { blockNumber: 900, latestRoot: `0x${'bb'.repeat(32)}`, rootCount: 5n },
     ]);
 
-    // The incomplete endpoint is the MOST ADVANCED one — precisely the answer that would have
-    // mattered — so the poll is inconclusive rather than settling for the endpoint behind it.
-    await expect(adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toBeNull();
+    await expect(adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toMatchObject({
+      blockNumber: 900, latestRoot: `0x${'bb'.repeat(32)}`, rootCount: 5n,
+      latestAuthor: AUTHOR, latestPublisher: PUBLISHER,
+    });
+    expect(reads.filter((read) => read.provider === 1)).toHaveLength(4);
+    expect(reads.filter((read) => read.provider === 1).every((read) => read.blockTag === 900)).toBe(true);
   });
 
-  it('a WRONG-CHAIN endpoint cannot contribute a view, however far ahead it is [r15]', async () => {
-    // 3814317260 / 3814893080 — the fan-out skipped the identity check every normal adapter read
-    // performs, and the shared static-mode validator is a NO-OP under `staticNetwork: false`, so
-    // the endpoint's chain id is now compared explicitly against the configured one.
-    // so an accidentally configured RPC for another chain could answer with an ABI-compatible view
-    // and WIN the poll by reporting a higher confirmation-depth block. Recovery would then materialize that
-    // chain's root and attribution. It is now validated per endpoint before its view is eligible —
-    // and because the poll must be unanimous, a wrong-chain endpoint makes the answer inconclusive
-    // rather than silently handing the decision to the remaining one.
-    const { adapter, validated } = adapterOver([
+  it('a wrong-chain primary cannot contribute a view and falls back before reading its head', async () => {
+    const { adapter, attempts, validated } = adapterOver([
       { blockNumber: 5_000, latestRoot: `0x${'ff'.repeat(32)}`, rootCount: 99n, wrongChain: true },
       { blockNumber: 900, latestRoot: `0x${'bb'.repeat(32)}`, rootCount: 5n },
     ]);
 
-    await expect(adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toBeNull();
-    expect(validated).toContain(0);
+    await expect(adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toMatchObject({
+      blockNumber: 900, rootCount: 5n,
+    });
+    expect(validated).toEqual([0, 1]);
+    expect(attempts.filter((attempt) => attempt.provider === 0)).toEqual([
+      { provider: 0, call: 'getNetwork' },
+    ]);
   });
 
-  it('an abort completes the snapshot read rather than waiting out a stalled endpoint [r16]', async () => {
-    // 3814610248 — this poll gates durable recovery and fans out over every provider, so without a
-    // cancellation row a regression could leave recovery waiting on one stalled RPC indefinitely
-    // while every other snapshot row stayed green.
-    const { adapter } = adapterOver([
+  it('a healthy primary completes without waiting for a stalled unused fallback', async () => {
+    const { adapter, attempts } = adapterOver([
+      { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
+      { blockNumber: 500, latestRoot: `0x${'bb'.repeat(32)}`, rootCount: 5n, stall: true },
+    ]);
+    const controller = new AbortController();
+    let result: unknown;
+    vi.useFakeTimers();
+    const pending = adapter.readKnowledgeAssetVersionSnapshot(KA_ID, { signal: controller.signal })
+      .then((view: unknown) => { result = view; });
+    try {
+      await vi.advanceTimersByTimeAsync(1);
+      expect(result).toMatchObject(snapshotAt());
+      expect(attempts.every((attempt) => attempt.provider === 0)).toBe(true);
+    } finally {
+      controller.abort();
+      await pending;
+      vi.useRealTimers();
+    }
+  });
+
+  it('a stalled primary reaches fallback1 within the endpoint cap and is not retried later', async () => {
+    const { adapter, attempts } = adapterOver([
+      { blockNumber: 999, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 9n, stall: true },
+      { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
+      { blockNumber: 900, latestRoot: `0x${'bb'.repeat(32)}`, rootCount: 5n },
+    ]);
+    const controller = new AbortController();
+    let result: unknown;
+    vi.useFakeTimers();
+    const pending = adapter.readKnowledgeAssetVersionSnapshot(KA_ID, { signal: controller.signal })
+      .then((view: unknown) => { result = view; });
+    try {
+      await vi.advanceTimersByTimeAsync(RPC_READ_STALL_TIMEOUT_MS + 1);
+      expect(result).toMatchObject(snapshotAt());
+      expect(attempts.map((attempt) => attempt.provider)).toEqual([0, 0, 1, 1, 1, 1, 1, 1]);
+      await vi.advanceTimersByTimeAsync(RPC_READ_STALL_TIMEOUT_MS + 250);
+      expect(attempts.filter((attempt) => attempt.provider === 0)).toEqual([
+        { provider: 0, call: 'getNetwork' },
+        { provider: 0, call: 'getBlock', blockTag: 'latest' },
+      ]);
+    } finally {
+      controller.abort();
+      await pending;
+      vi.useRealTimers();
+    }
+  });
+
+  it('an abort after the primary starts completes the snapshot without asking fallback1', async () => {
+    const { adapter, attempts, providers } = adapterOver([
       { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n, stall: true },
       { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
     ]);
+    let started!: () => void;
+    const entered = new Promise<void>((resolve) => { started = resolve; });
+    const getBlock = providers[0]!.getBlock.bind(providers[0]);
+    providers[0]!.getBlock = async (tag: 'latest' | number) => {
+      started();
+      return getBlock(tag);
+    };
     const controller = new AbortController();
 
     const pending = adapter.readKnowledgeAssetVersionSnapshot(KA_ID, { signal: controller.signal });
+    await entered;
     controller.abort();
 
     await expect(pending).resolves.toBeNull();
+    expect(attempts.every((attempt) => attempt.provider === 0)).toBe(true);
+  });
+
+  it('an inherited already-aborted request starts no snapshot endpoint reads', async () => {
+    const { adapter, attempts, validated } = adapterOver([
+      { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
+    ]);
+
+    await expect(withRpcRequestContext(
+      { signal: AbortSignal.abort() },
+      () => adapter.readKnowledgeAssetVersionSnapshot(KA_ID),
+    )).resolves.toBeNull();
+    expect(attempts).toEqual([]);
+    expect(validated).toEqual([]);
   });
 
   it('answers null when no endpoint can produce a view', async () => {
@@ -325,6 +483,124 @@ describe('EVMChainAdapter.readKnowledgeAssetVersionSnapshot [GH#2270 PR#2300]', 
     );
 
     await expect(adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toBeNull();
+  });
+
+  it('currentness accepts a primary header despite a broken unused fallback', async () => {
+    const { adapter, attempts, reads } = adapterOver([
+      { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
+      { blockNumber: null, latestRoot: null, rootCount: 0n },
+    ]);
+
+    await expect(adapter.knowledgeAssetVersionSnapshotIsCurrent(KA_ID, snapshotAt())).resolves.toBe(true);
+    expect(attempts).toEqual([
+      { provider: 0, call: 'getNetwork' },
+      { provider: 0, call: 'getBlock', blockTag: 'latest' },
+    ]);
+    expect(reads).toEqual([]);
+  });
+
+  it.each([
+    { label: 'a newer primary height', blockNumber: 501, blockHash: hashForBlock(501) },
+    { label: 'a different primary hash', blockNumber: 500, blockHash: `0x${'99'.repeat(32)}` },
+  ])('currentness stops at $label instead of looking for a matching fallback', async (primary) => {
+    const { adapter, attempts } = adapterOver([
+      { ...primary, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
+      { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
+    ]);
+
+    await expect(adapter.knowledgeAssetVersionSnapshotIsCurrent(KA_ID, snapshotAt())).resolves.toBe(false);
+    expect(attempts).toEqual([
+      { provider: 0, call: 'getNetwork' },
+      { provider: 0, call: 'getBlock', blockTag: 'latest' },
+    ]);
+  });
+
+  it('currentness uses fallback1 only after the primary cannot supply a header', async () => {
+    const { adapter, attempts, reads } = adapterOver([
+      { blockNumber: null, latestRoot: null, rootCount: 0n },
+      { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
+      { blockNumber: 900, latestRoot: `0x${'bb'.repeat(32)}`, rootCount: 5n },
+    ]);
+
+    await expect(adapter.knowledgeAssetVersionSnapshotIsCurrent(KA_ID, snapshotAt())).resolves.toBe(true);
+    expect(attempts.map((attempt) => attempt.provider)).toEqual([0, 0, 0, 0, 1, 1]);
+    expect(reads).toEqual([]);
+  });
+
+  it('currentness uses fallback2 after wrong-chain and missing-hash headers', async () => {
+    const { adapter, attempts } = adapterOver([
+      { blockNumber: 500, latestRoot: null, rootCount: 0n, wrongChain: true },
+      { blockNumber: 500, blockHash: null, latestRoot: null, rootCount: 0n },
+      { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
+    ]);
+
+    await expect(adapter.knowledgeAssetVersionSnapshotIsCurrent(KA_ID, snapshotAt())).resolves.toBe(true);
+    expect(attempts).toEqual([
+      { provider: 0, call: 'getNetwork' },
+      { provider: 1, call: 'getNetwork' },
+      { provider: 1, call: 'getBlock', blockTag: 'latest' },
+      { provider: 2, call: 'getNetwork' },
+      { provider: 2, call: 'getBlock', blockTag: 'latest' },
+    ]);
+  });
+
+  it('currentness validates the header at the configured confirmation depth', async () => {
+    const { adapter, attempts, reads } = adapterOver([
+      { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
+    ], { finalityConfirmations: 3 });
+
+    await expect(adapter.knowledgeAssetVersionSnapshotIsCurrent(KA_ID, snapshotAt(498))).resolves.toBe(true);
+    expect(attempts).toEqual([
+      { provider: 0, call: 'getNetwork' },
+      { provider: 0, call: 'getBlock', blockTag: 'latest' },
+      { provider: 0, call: 'getBlock', blockTag: 498 },
+    ]);
+    expect(reads).toEqual([]);
+  });
+
+  it('currentness is false when no endpoint can provide a usable header', async () => {
+    const { adapter } = adapterOver([
+      { blockNumber: 500, latestRoot: null, rootCount: 0n, wrongChain: true },
+      { blockNumber: 500, blockHash: null, latestRoot: null, rootCount: 0n },
+    ]);
+
+    await expect(adapter.knowledgeAssetVersionSnapshotIsCurrent(KA_ID, snapshotAt())).resolves.toBe(false);
+  });
+
+  it('currentness does not wait for a stalled unused fallback', async () => {
+    const { adapter, attempts } = adapterOver([
+      { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
+      { blockNumber: 500, latestRoot: null, rootCount: 0n, stall: true },
+    ]);
+    const controller = new AbortController();
+    let result: unknown;
+    let failure: unknown;
+    vi.useFakeTimers();
+    const pending = adapter.knowledgeAssetVersionSnapshotIsCurrent(
+      KA_ID, snapshotAt(), { signal: controller.signal },
+    ).then((value: unknown) => { result = value; }, (error: unknown) => { failure = error; });
+    try {
+      await vi.advanceTimersByTimeAsync(1);
+      expect(failure).toBeUndefined();
+      expect(result).toBe(true);
+      expect(attempts.every((attempt) => attempt.provider === 0)).toBe(true);
+    } finally {
+      controller.abort();
+      await pending;
+      vi.useRealTimers();
+    }
+  });
+
+  it('an inherited already-aborted request propagates from currentness without endpoint reads', async () => {
+    const { adapter, attempts } = adapterOver([
+      { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
+    ]);
+
+    await expect(withRpcRequestContext(
+      { signal: AbortSignal.abort() },
+      () => adapter.knowledgeAssetVersionSnapshotIsCurrent(KA_ID, snapshotAt()),
+    )).rejects.toMatchObject({ name: 'AbortError' });
+    expect(attempts).toEqual([]);
   });
 
   it('validates a snapshot only while its finalized hash and exact KAS generation remain current', async () => {
@@ -362,12 +638,21 @@ describe('EVMChainAdapter.readKnowledgeAssetVersionSnapshot [GH#2270 PR#2300]', 
     const snapshot = await adapter.readKnowledgeAssetVersionSnapshot(KA_ID);
     expect(snapshot).not.toBeNull();
     script.stall = true;
+    let started!: () => void;
+    const entered = new Promise<void>((resolve) => { started = resolve; });
+    const provider = (adapter as any).providers[0];
+    const getBlock = provider.getBlock.bind(provider);
+    provider.getBlock = async (tag: 'latest' | number) => {
+      started();
+      return getBlock(tag);
+    };
     const controller = new AbortController();
     const pending = adapter.knowledgeAssetVersionSnapshotIsCurrent(
       KA_ID,
       snapshot!,
       { signal: controller.signal },
     );
+    await entered;
     controller.abort();
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
   });
@@ -406,12 +691,15 @@ describe('EVMChainAdapter.readKnowledgeAssetVersionSnapshot [GH#2270 PR#2300]', 
       { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
     ]);
     let release!: () => void;
+    let started!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
+    const entered = new Promise<void>((resolve) => { started = resolve; });
     const originalRebind = (adapter as any).rebindContract;
     (adapter as any).rebindContract = (...args: unknown[]) => {
       const bound = originalRebind(...args);
       const original = bound.getLatestMerkleRoot;
       bound.getLatestMerkleRoot = async (...callArgs: unknown[]) => {
+        started();
         await gate;
         return original(...callArgs);
       };
@@ -419,7 +707,7 @@ describe('EVMChainAdapter.readKnowledgeAssetVersionSnapshot [GH#2270 PR#2300]', 
     };
 
     const pending = adapter.readKnowledgeAssetVersionSnapshot(KA_ID);
-    await Promise.resolve();
+    await entered;
     (adapter as any).contracts.knowledgeAssetStorage = { target: KAS_ADDRESS };
     (adapter as any).knowledgeAssetStorageBindingGeneration += 1;
     release();
