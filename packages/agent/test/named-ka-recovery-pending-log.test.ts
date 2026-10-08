@@ -52,6 +52,36 @@ const OPERATOR_LINE = (pending: number, minutes: number, endpoints = NO_ENDPOINT
   + 'without being sent again.'
 );
 
+const operatorLines = (lines: string[]) => lines.filter((line) => line.startsWith('Operator action needed: '));
+
+/** One endpoint, failing one way and then another as one outage goes on. */
+const UNREACHABLE: KnowledgeAssetVersionSnapshotUnavailable = {
+  reason: 'endpoints-failed',
+  endpointCount: 1,
+  endpoints: [{ position: 1, host: 'only.example', stage: 'head-block', failure: 'network' }],
+};
+const UNREACHABLE_WORDS = 'endpoint 1 of 1 (only.example) could not be reached for the head block read';
+const SERVER_ERROR: KnowledgeAssetVersionSnapshotUnavailable = {
+  reason: 'endpoints-failed',
+  endpointCount: 1,
+  endpoints: [{ position: 1, host: 'only.example', stage: 'pinned-read', failure: 'http-server-error', httpStatus: 503 }],
+};
+
+const DEADLINE = 'named-KA recovery deadline reached before the chain reads completed';
+
+/** A deadline that cut the version read short, as the recovery throws it: one reason, and no endpoint to blame. */
+function deadlineDeferral(): Error {
+  const cutShort: KnowledgeAssetVersionSnapshotUnavailable = {
+    reason: 'aborted',
+    endpointCount: 2,
+    endpoints: [{ position: 1, host: 'rpc.example', stage: 'pinned-read', failure: 'timeout' }],
+  };
+  return Object.assign(new Error(`${DEADLINE}${versionViewCause(cutShort)}`), {
+    pendingReason: DEADLINE,
+    versionViewUnavailable: cutShort,
+  });
+}
+
 function harness(options: ConstructorParameters<typeof NamedKaRecoveryPendingLog>[0] = {}) {
   const clock = { now: 1_000_000 };
   const lines: string[] = [];
@@ -200,6 +230,74 @@ describe('NamedKaRecoveryPendingLog', () => {
 
     expect(later).toHaveLength(4);
     expect(later.every((line) => line.startsWith('Named KA recovery remains pending for 1 asset(s) after '))).toBe(true);
+  });
+
+  it('one endpoint failing one way and then another is one run: the operator is told once', () => {
+    // Each failure gives the deferral a reason of its own. The endpoint is the cause of every one.
+    const { defer, run } = harness();
+    let deferrals = 0;
+    const error = (name: string) => noViewDeferral(name, deferrals++ % 2 === 0 ? UNREACHABLE : SERVER_ERROR);
+
+    defer('ka-1', error('ka-1'));
+    const later = run(['ka-1'], 10 * MINUTE, error);
+
+    expect(operatorLines(later)).toEqual([OPERATOR_LINE(1, 5, UNREACHABLE_WORDS)]);
+  });
+
+  it('assets the endpoints fail in different ways are one run: one operator line that counts them all', () => {
+    const { defer, run } = harness();
+    const reports: Record<string, KnowledgeAssetVersionSnapshotUnavailable> = {
+      'ka-1': UNREACHABLE,
+      'ka-2': SERVER_ERROR,
+    };
+    const error = (name: string) => noViewDeferral(name, reports[name]);
+
+    for (const name of Object.keys(reports)) defer(name, error(name));
+    const later = run(Object.keys(reports), 10 * MINUTE, error);
+
+    expect(operatorLines(later)).toEqual([OPERATOR_LINE(2, 5, UNREACHABLE_WORDS)]);
+  });
+
+  it.each<[string, (name: string) => Error]>([
+    ['a deadline', () => deadlineDeferral()],
+    ["the node's own request budget", (name) => noViewDeferral(name, {
+      reason: 'local-pressure',
+      endpointCount: 2,
+      endpoints: [{ position: 1, host: 'rpc.example', stage: 'pinned-read', failure: 'http-client-error', httpStatus: 400 }],
+    })],
+  ])('%s between endpoint failures interrupts their run: the next one counts from its own start', (_name, other) => {
+    const { clock, defer, run } = harness();
+    const start = clock.now;
+    const endpoints = (name: string) => noViewDeferral(name, NO_ENDPOINT_SERVES);
+    // The endpoints fail for 100 s, then the other cause holds but for single endpoint failures
+    // at 240 s and 300 s: five minutes from the first failure to the last, never uninterrupted.
+    const error = (name: string) => {
+      const elapsed = clock.now - start;
+      return elapsed <= 100_000 || elapsed === 240_000 || elapsed === 300_000 ? endpoints(name) : other(name);
+    };
+
+    defer('ka-1', error('ka-1'));
+    expect(operatorLines(run(['ka-1'], 5 * MINUTE, error))).toEqual([]);
+
+    // From 300 s the endpoints fail every time: five minutes on, and not before, the operator is told.
+    expect(operatorLines(run(['ka-1'], 5 * MINUTE - TICK, endpoints))).toEqual([]);
+    expect(run(['ka-1'], TICK, endpoints)).toEqual([OPERATOR_LINE(1, 5)]);
+  });
+
+  it("another asset deferring for an unrelated cause does not interrupt the endpoints' run", () => {
+    // Only an asset the endpoints were named for, now deferring for something else, says they
+    // are not the cause. A store that is unavailable for another asset says nothing about them.
+    const { defer, run } = harness();
+    const error = (name: string) => (
+      name === 'ka-1' ? noViewDeferral(name, NO_ENDPOINT_SERVES) : new Error('store unavailable'));
+
+    defer('ka-1', error('ka-1'));
+    defer('ka-2', error('ka-2'));
+    expect(run(['ka-1', 'ka-2'], NAMED_KA_RECOVERY_ENDPOINT_ESCALATION_AFTER_MS - TICK, error)).toEqual([]);
+    expect(run(['ka-1', 'ka-2'], TICK, error)).toEqual([
+      OPERATOR_LINE(1, 5),
+      'Named KA recovery remains pending for 1 asset(s) after 5 min (31 deferrals): store unavailable',
+    ]);
   });
 
   it('a version view that is read ends the run: an endpoint answered, so the count starts over', () => {
