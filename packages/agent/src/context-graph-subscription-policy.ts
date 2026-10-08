@@ -15,6 +15,24 @@ export function normalizeContextGraphSubscriptionTransition(
   };
 }
 
+/**
+ * Inactive readiness retains numeric identity and may enrich a missing hash.
+ * Deliberate rebind/unbind or a changed known hash retains ordinary cleanup.
+ */
+export function retainsInactiveContextGraphBinding(
+  previous: ContextGraphSub | undefined,
+  next: ContextGraphSub,
+): boolean {
+  return previous?.subscribed !== true
+    && previous?.coreHosted !== true
+    && next.subscribed !== true
+    && next.coreHosted !== true
+    && (previous === undefined || (
+      previous.onChainId === next.onChainId
+      && (previous.onChainHash === undefined || previous.onChainHash === next.onChainHash)
+    ));
+}
+
 export function resolveContextGraphSyncMode(input: {
   existing?: Pick<ContextGraphSub, 'subscribed' | 'syncMode'>;
   requested?: ContextGraphSyncMode;
@@ -49,13 +67,17 @@ export function projectContextGraphSubscriptionPersistence(input: {
   contextGraphId: string;
   subscription: ContextGraphSub | undefined;
   syncScoped: boolean;
+  /** Readiness/enrichment owns no removal of saved inactive member intent. */
+  preserveInactiveIntent?: boolean;
 }): ContextGraphSubscriptionPersistenceProjection {
   const sub = input.subscription;
   if (sub?.syncMode === 'on-demand' && sub.coreHosted !== true) {
     return { action: 'skip', persistMemberIntent: false };
   }
   if (!sub?.subscribed && !sub?.coreHosted) {
-    return { action: 'delete', persistMemberIntent: true };
+    return input.preserveInactiveIntent === true
+      ? { action: 'skip', persistMemberIntent: false }
+      : { action: 'delete', persistMemberIntent: true };
   }
 
   const persistMemberIntent = sub.syncMode !== 'on-demand';

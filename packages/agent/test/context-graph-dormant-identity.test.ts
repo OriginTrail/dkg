@@ -4,7 +4,10 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
 import { FinalizationHandler } from '../src/finalization-handler.js';
+import { buildAuthoritativePublicMetaQuads } from '../src/context-graph-public-meta-proof.js';
+import { projectContextGraphSubscriptionPersistence } from '../src/context-graph-subscription-policy.js';
 import type {
+  ContextGraphMembershipRecord,
   ContextGraphSub,
   ContextGraphSubInput,
   ContextGraphSubscriptionRecord,
@@ -26,6 +29,7 @@ interface Internals {
   gossipRegistered: Set<string>;
   setContextGraphSubscription(id: string, next: ContextGraphSubInput, options?: { persist?: boolean }): ContextGraphSub;
   enqueueContextGraphSubscriptionPersistWrite(id: string, write: () => Promise<void>): Promise<void>;
+  enqueueContextGraphMembershipPersistWrite(key: string, write: () => Promise<void>): Promise<void>;
 }
 
 function durable(overrides: Partial<ContextGraphSubscriptionRecord> = {}): ContextGraphSubscriptionRecord {
@@ -42,7 +46,7 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-async function cold(rows: ContextGraphSubscriptionRecord[] = [durable()], seedDormant = true, options: { enabled?: boolean; cap?: number } = {}) {
+async function cold(rows: ContextGraphSubscriptionRecord[] = [durable()], seedDormant = true, options: { enabled?: boolean; cap?: number; syncScoped?: boolean } = {}) {
   // Genuine native lifecycle methods and typed persistence contract. No daemon,
   // provider, external RPC or custom numeric resolver is started.
   let retained = rows.map((row) => ({ ...row }));
@@ -50,6 +54,14 @@ async function cold(rows: ContextGraphSubscriptionRecord[] = [durable()], seedDo
     retained = [...retained.filter((old) => old.id !== row.id), { ...row }];
   });
   const remove = vi.fn(async (id: string) => { retained = retained.filter((row) => row.id !== id); });
+  const membership = new Map<string, ContextGraphMembershipRecord & { updatedAt: number }>();
+  const memberKey = (cg: string, kind: string, principal: string) => [cg, kind, principal].join('\0');
+  const memberSave = vi.fn(async (row: ContextGraphMembershipRecord & { updatedAt: number }) => {
+    membership.set(memberKey(row.contextGraphId, row.principalType, row.principalId), { ...row });
+  });
+  const memberRemove = vi.fn(async (cg: string, kind: string, principal: string) => {
+    membership.delete(memberKey(cg, kind, principal));
+  });
   const chain = new MockChainAdapter('mock:31337', undefined, { initialContextGraphId: 585n });
   await chain.createOnChainContextGraph({ accessPolicy: 0, publishPolicy: 1, nameHash: HASH });
   await chain.createOnChainContextGraph({ accessPolicy: 0, publishPolicy: 1, nameHash: HASH });
@@ -59,6 +71,11 @@ async function cold(rows: ContextGraphSubscriptionRecord[] = [durable()], seedDo
     rfc64CatalogActivation: { enabled: false },
     contextGraphSubscriptionRehydrationEnabled: options.enabled ?? false,
     maxRehydratedContextGraphSubscriptions: options.cap,
+    syncContextGraphs: options.syncScoped ? [LOCAL] : undefined,
+    contextGraphMembershipStore: {
+      loadAll: async () => [...membership.values()].map((row) => ({ ...row })),
+      upsert: memberSave, delete: memberRemove,
+    },
     contextGraphSubscriptionStore: { loadAll: async () => retained.map((row) => ({ ...row })), save, delete: remove },
   });
   agents.push(agent);
@@ -71,8 +88,39 @@ async function cold(rows: ContextGraphSubscriptionRecord[] = [durable()], seedDo
   const policy = vi.spyOn(chain, 'getContextGraphAccessPolicy');
   const drain = async () => {
     for (const id of [LOCAL, HASH]) await state.enqueueContextGraphSubscriptionPersistWrite(id, async () => undefined);
+    await state.enqueueContextGraphMembershipPersistWrite(
+      memberKey(LOCAL, 'node', agent.peerId), async () => undefined,
+    );
   };
-  return { agent, state, chain, save, remove, reverse, policy, drain, rows: () => retained };
+  const seedMember = async () => {
+    await agent.upsertContextGraphMember({
+      contextGraphId: LOCAL, principalType: 'node', principalId: agent.peerId,
+      role: 'subscriber', status: 'active', source: 'subscription',
+      metadata: { subscribed: true, onChainId: ORIGINAL },
+    }, { strict: true });
+    await drain();
+    memberSave.mockClear();
+    memberRemove.mockClear();
+  };
+  return {
+    agent, state, chain, save, remove, reverse, policy, drain, seedMember,
+    memberSave, memberRemove, members: () => [...membership.values()], rows: () => retained,
+  };
+}
+
+async function competingWireOwner() {
+  const f = await cold([durable({ onChainId: '582' })], false);
+  f.state.setContextGraphSubscription(HASH, {
+    subscribed: false, coreHosted: true, synced: true,
+    onChainId: '323', onChainHash: HASH,
+  }, { persist: false });
+  f.agent.applyOnChainContextGraphObservation(observed('323'), { source: 'checkpoint' });
+  await f.agent.rehydrateContextGraphSubscriptions(null);
+  await f.drain();
+  f.save.mockClear();
+  f.remove.mockClear();
+  f.memberRemove.mockClear();
+  return f;
 }
 
 function observed(id: string) {
@@ -83,6 +131,143 @@ function observed(id: string) {
 }
 
 describe('dormant durable Context Graph identity', () => {
+
+  it.each(['readiness', 'explicit-unsubscribe'] as const)(
+    'keeps admitted slot323 routing through dormant %s', async (operation) => {
+      const f = await competingWireOwner();
+      if (operation === 'readiness') {
+        await f.agent.store.insert(buildAuthoritativePublicMetaQuads(LOCAL));
+        await f.agent.refreshMetaSyncedFlags([LOCAL]);
+      } else {
+        f.agent.unsubscribeFromContextGraph(LOCAL);
+      }
+      await f.drain();
+      expect(f.state.wireIdToLocalCgId.get(HASH)).toBe(HASH);
+      await expect(f.agent.resolveContextGraphOnChainIdReference('#323')).resolves.toMatchObject({
+        kind: 'resolved', contextGraphId: HASH, onChainId: '323',
+      });
+      expect(f.state.subscribedContextGraphs.get(HASH)).toMatchObject({
+        coreHosted: true, onChainId: '323',
+      });
+      if (operation === 'explicit-unsubscribe') expect(f.remove).toHaveBeenCalledWith(LOCAL);
+      else expect(f.remove).not.toHaveBeenCalledWith(LOCAL);
+    },
+  );
+
+  it('retains an explicit native numeric rebind beside the admitted wire owner', async () => {
+    const f = await competingWireOwner();
+    const next = { ...f.state.subscribedContextGraphs.get(LOCAL)! };
+    f.agent.bindSubscriptionOnChainId(LOCAL, next, '777');
+    f.state.setContextGraphSubscription(LOCAL, next);
+    await f.drain();
+    expect(f.state.wireIdToLocalCgId.get(HASH)).toBe(LOCAL);
+    expect(f.state.subscribedContextGraphs.get(LOCAL)?.onChainId).toBe('777');
+    expect(f.remove).toHaveBeenCalledWith(LOCAL);
+  });
+
+  it('retains deliberate native dormant unbinding cleanup', async () => {
+    const f = await cold([durable()], false);
+    await f.agent.rehydrateContextGraphSubscriptions(null);
+    await f.seedMember();
+    f.agent.unbindSubscriptionOnChainId(LOCAL);
+    await f.drain();
+    expect(f.state.subscribedContextGraphs.get(LOCAL)?.onChainId).toBeUndefined();
+    expect(f.rows()).toEqual([]);
+    expect(f.members()).toEqual([]);
+    expect(f.remove).toHaveBeenCalledWith(LOCAL);
+  });
+
+  it.each([
+    { subscribed: false, coreHosted: false, preserve: true, action: 'skip' },
+    { subscribed: false, coreHosted: false, preserve: undefined, action: 'delete' },
+    { subscribed: true, coreHosted: false, preserve: true, action: 'save' },
+    { subscribed: false, coreHosted: true, preserve: true, action: 'save' },
+  ] as const)(
+    'projects admitted:$subscribed hosted:$coreHosted preserve:$preserve as $action',
+    ({ subscribed, coreHosted, preserve, action }) => {
+      expect(projectContextGraphSubscriptionPersistence({
+        contextGraphId: LOCAL,
+        subscription: { subscribed, coreHosted, synced: false, syncMode: 'always-on' },
+        syncScoped: false, preserveInactiveIntent: preserve,
+      }).action).toBe(action);
+    },
+  );
+
+
+  it('preserves dormant durable intent during genuine confirmed-meta readiness refresh', async () => {
+    const saved = durable({ syncScoped: true });
+    const f = await cold([saved], false, { syncScoped: true });
+    await f.agent.rehydrateContextGraphSubscriptions(null);
+    await f.seedMember();
+    const membersBefore = f.members();
+    await f.agent.store.insert(buildAuthoritativePublicMetaQuads(LOCAL));
+    await expect(f.agent.hasConfirmedMetaState(LOCAL)).resolves.toBe(true);
+    await f.agent.refreshMetaSyncedFlags([LOCAL]);
+    await f.drain();
+    expect(f.state.subscribedContextGraphs.get(LOCAL)).toMatchObject({
+      subscribed: false, coreHosted: false, metaSynced: true,
+      onChainId: ORIGINAL, onChainHash: HASH,
+    });
+    expect(f.rows()).toEqual([saved]);
+    expect(f.members()).toEqual(membersBefore);
+    expect(f.save).not.toHaveBeenCalled();
+    expect(f.remove).not.toHaveBeenCalled();
+    expect(f.memberRemove).not.toHaveBeenCalled();
+  });
+
+  it('keeps dormant intent through sync readiness and direct watermark persistence', async () => {
+    const saved = durable();
+    const f = await cold([saved], false);
+    await f.agent.rehydrateContextGraphSubscriptions(null);
+    await f.seedMember();
+    const membersBefore = f.members();
+    f.agent.markContextGraphSubscriptionState(LOCAL, {
+      synced: true, sharedMemorySynced: true, lastReconciledOrdinal: 9,
+    });
+    await f.agent.persistContextGraphSubscriptionState(LOCAL);
+    await f.drain();
+    expect(f.state.subscribedContextGraphs.get(LOCAL)).toMatchObject({
+      subscribed: false, coreHosted: false, synced: true,
+      sharedMemorySynced: true, lastReconciledOrdinal: 9,
+    });
+    expect(f.rows()).toEqual([saved]);
+    expect(f.members()).toEqual(membersBefore);
+    expect(f.remove).not.toHaveBeenCalled();
+    expect(f.memberRemove).not.toHaveBeenCalled();
+  });
+
+  it('persists confirmed-meta readiness for an admitted member', async () => {
+    const f = await cold([], false);
+    f.state.setContextGraphSubscription(LOCAL, {
+      subscribed: true, synced: false, sharedMemorySynced: false, metaSynced: false,
+      onChainId: ORIGINAL, onChainHash: HASH,
+    }, { persist: false });
+    await f.agent.store.insert(buildAuthoritativePublicMetaQuads(LOCAL));
+    await f.agent.refreshMetaSyncedFlags([LOCAL]);
+    await f.drain();
+    expect(f.rows()).toEqual([expect.objectContaining({
+      id: LOCAL, subscribed: true, metaSynced: true, onChainId: ORIGINAL,
+    })]);
+    expect(f.members()).toEqual([expect.objectContaining({
+      contextGraphId: LOCAL, principalType: 'node', principalId: f.agent.peerId,
+      status: 'active', metadata: expect.objectContaining({ subscribed: true, metaSynced: true }),
+    })]);
+    expect(f.remove).not.toHaveBeenCalled();
+  });
+
+  it('deletes dormant saved member intent on explicit native unsubscribe', async () => {
+    const f = await cold([durable({ syncScoped: true })], false, { syncScoped: true });
+    await f.agent.rehydrateContextGraphSubscriptions(null);
+    await f.seedMember();
+    f.agent.unsubscribeFromContextGraph(LOCAL);
+    await f.drain();
+    expect(f.rows()).toEqual([]);
+    expect(f.members()).toEqual([]);
+    expect(f.remove).toHaveBeenCalledWith(LOCAL);
+    expect(f.memberRemove).toHaveBeenCalledWith(LOCAL, 'node', f.agent.peerId);
+    expect(f.state.config.syncContextGraphs ?? []).not.toContain(LOCAL);
+  });
+
 
   it('repairs a legacy hash row after disabled restart and a matching native observation', async () => {
     const legacy = durable({ id: HASH, onChainId: '323', onChainHash: undefined });

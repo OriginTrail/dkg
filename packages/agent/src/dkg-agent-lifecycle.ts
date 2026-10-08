@@ -760,6 +760,7 @@ import  {
 import {
   normalizeContextGraphSubscriptionTransition,
   projectContextGraphSubscriptionPersistence,
+  retainsInactiveContextGraphBinding,
 } from './context-graph-subscription-policy.js';
 import { partitionSupersededContextGraphNamePlaceholders } from './dkg-agent-cg-name-resolution.js';
 import {
@@ -9271,6 +9272,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ...normalizedNext,
       ...(normalizedNext.onChainHash === nextOnChainHash ? {} : { onChainHash: nextOnChainHash }),
     };
+    const retainsInactiveBinding = retainsInactiveContextGraphBinding(previous, canonicalNext);
     const bindingFacts = this.contextGraphBindingState.applySubscriptionTransition(
       contextGraphId,
       previous,
@@ -9286,9 +9288,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.subscribedContextGraphs.set(contextGraphId, canonicalNext);
     const wireOwnerId = this.wireIdToLocalCgId.get(nextWireId);
     const wireOwner = wireOwnerId === undefined ? undefined : this.subscribedContextGraphs.get(wireOwnerId);
-    // Identity-only restoration retains the direct local binding, but cannot
-    // take wire routing from an admitted row for a different registry slot.
-    const preserveWireOwner = options?.preserveAdmittedWireBinding === true
+    const preserveWireOwner = (options?.preserveAdmittedWireBinding === true || retainsInactiveBinding)
       && wireOwnerId !== contextGraphId
       && (wireOwner?.subscribed === true || wireOwner?.coreHosted === true)
       && wireOwner.onChainId !== canonicalNext.onChainId;
@@ -9364,14 +9364,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     } else if (!bindingFacts.admitted) {
       this.clearVmReconcileStateForContextGraph(contextGraphId);
     }
-    // On-demand member subscriptions deliberately keep their live state and
-    // readiness process-local. A Core's independent hosting obligation is
-    // still durable, though: persistContextGraphSubscription writes a
-    // host-only snapshot without converting the member intent to always-on.
     const persistence = projectContextGraphSubscriptionPersistence({
       contextGraphId,
       subscription: canonicalNext,
       syncScoped: (this.config.syncContextGraphs ?? []).includes(contextGraphId),
+      preserveInactiveIntent: options?.persist !== true && retainsInactiveBinding,
     });
     if (options?.persist !== false && persistence.action !== 'skip') {
       if (this.config.contextGraphSubscriptionStore) {
@@ -9776,6 +9773,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return this.persistContextGraphSubscription(contextGraphId, {
       revision: this.nextContextGraphSubscriptionPersistRevision(contextGraphId),
       updateRehydrationStatus: false,
+      preserveInactiveIntent: true,
     });
   }
 
@@ -9784,6 +9782,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     options?: {
       revision?: number;
       updateRehydrationStatus?: boolean;
+      preserveInactiveIntent?: boolean;
     },
   ): Promise<void> {
     this.invalidateListContextGraphsCache();
@@ -9797,6 +9796,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       contextGraphId,
       subscription: sub,
       syncScoped: (this.config.syncContextGraphs ?? []).includes(contextGraphId),
+      preserveInactiveIntent: options?.preserveInactiveIntent,
     });
     if (persistence.action === 'skip') {
       // Some lifecycle paths persist reconciliation watermarks directly
