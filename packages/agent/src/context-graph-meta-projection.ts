@@ -110,6 +110,8 @@ const CATALOG_META_PREDICATES = new Set<string>([
 ]);
 const PROJECTION_RECORD_PREDICATES: ReadonlySet<string> = new Set([
   ...DIRECT_META_PREDICATES, ...SUB_GRAPH_META_PREDICATES, ...DELEGATION_META_PREDICATES, ...CATALOG_META_PREDICATES]);
+const AGENT_ROSTER_PREDICATES: ReadonlySet<string> = new Set([
+  DKG_ONTOLOGY.DKG_ALLOWED_AGENT, DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT, DKG_ONTOLOGY.DKG_REVOKED_AGENT]);
 
 /**
  * A `ContextGraphMetaRecord` with no facts loaded yet.
@@ -378,6 +380,8 @@ export class ContextGraphMetaProjection {
     // Generic update and complete-graph replace paths call markAllDirty(); one
     // conservative bump here closes the recipient-key insertion race.
     if (recipientAuthorityTouched) this.authorityFactsRevision += 1;
+    // The loop marks only the context graph a quad names; such a fact may be any graph's.
+    if (quads.some(mayChangeUnnamedRoster)) this.dirtyAll();
     return [...touched];
   }
 
@@ -836,6 +840,22 @@ function applyAccessPolicy(record: ContextGraphMetaRecord, value: string): void 
     return;
   }
   record.accessPolicy ??= value;
+}
+
+/**
+ * A roster fact, written or removed by value, whose context graph its terms do
+ * not prove. Only a plain IRI is stored as written: an adapter matches a blank
+ * node in a delete against any subject, and drops unsafe characters from a
+ * graph name. A plainly named graph that is not a metadata source is harmless,
+ * because no record reads a roster from it.
+ */
+function mayChangeUnnamedRoster(quad: Quad): boolean {
+  if (!AGENT_ROSTER_PREDICATES.has(strip(quad.predicate))) return false;
+  if (!isSafeIri(quad.graph)) return true;
+  if (isSafeIri(quad.subject)) return false;
+  return contextGraphIdFromMetaGraphUri(quad.graph) !== null
+    || quad.graph === contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS)
+    || quad.graph === contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
 }
 
 function contextGraphIdFromContextGraphUri(uri: string): string | null {
