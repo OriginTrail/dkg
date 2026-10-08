@@ -109,6 +109,43 @@ describe('Context Graph authority index horizon coordinator', () => {
     )).toThrow('behind durable refresh horizon');
   });
 
+  it('replaces a same-height horizon only with a stabilized tail, never for lag', () => {
+    const horizons = horizonCoordinator();
+    const blockHash = (seed: number): string => `0x${seed.toString(16).padStart(64, '0')}`;
+    const refreshed = horizons.begin(SCOPE, { number: 1_000, hash: blockHash(1_000) });
+    refreshed.activate();
+    refreshed.commit();
+
+    // An inactive view without a stabilized tail has not proved a tail reorg.
+    const unproven = horizons.begin(SCOPE, { number: 1_000, hash: blockHash(1_001_000) });
+    unproven.commit();
+    expect(() => horizons.assertAtOrAbove(
+      SCOPE,
+      { number: 1_000, hash: blockHash(1_001_000) },
+    )).toThrow('behind durable refresh horizon');
+
+    // A lagging provider's stabilized tail never lowers the floor.
+    const lagging = horizons.begin(SCOPE, { number: 999, hash: blockHash(1_000_999) });
+    lagging.markTailStabilized();
+    lagging.commit();
+    expect(() => horizons.assertAtOrAbove(
+      SCOPE,
+      { number: 999, hash: blockHash(1_000_999) },
+    )).toThrow('behind durable refresh horizon');
+
+    const replacement = horizons.begin(SCOPE, { number: 1_000, hash: blockHash(1_001_000) });
+    replacement.markTailStabilized();
+    replacement.commit();
+    expect(() => horizons.assertAtOrAbove(
+      SCOPE,
+      { number: 1_000, hash: blockHash(1_001_000) },
+    )).not.toThrow();
+    expect(() => horizons.assertAtOrAbove(
+      SCOPE,
+      { number: 1_000, hash: blockHash(1_000) },
+    )).toThrow('behind durable refresh horizon');
+  });
+
   it('does not let a pre-rejection root on another repository clear the fence', () => {
     const horizons = horizonCoordinator();
     const oldHash = `0x${(29).toString(16).padStart(64, '0')}`;

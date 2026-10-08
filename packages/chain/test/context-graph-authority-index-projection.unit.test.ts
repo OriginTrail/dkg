@@ -76,6 +76,8 @@ function makeHarness(options: Readonly<{
   tickMs?: number;
   scope?: string;
   store?: MemoryAuthorityIndexStore;
+  /** Fence each refresh's anchor after its scan, as production inputs do. */
+  stabilize?: boolean;
 }> = {}) {
   const clock = { nowMs: START_MS };
   const chain = {
@@ -108,6 +110,7 @@ function makeHarness(options: Readonly<{
     if (refreshGate !== undefined) await refreshGate;
     if (refreshFailure !== undefined) throw refreshFailure;
     const head = chain.head;
+    const anchorHash = blockHash(head);
     const view = await index.view({
       scope,
       readScope: chain,
@@ -125,6 +128,15 @@ function makeHarness(options: Readonly<{
           .filter((e) => e.blockNumber >= from && e.blockNumber <= to)
           .map((e) => ({ ...e, blockHash: blockHash(e.blockNumber) }));
       },
+      ...(options.stabilize === true
+        ? {
+            stabilize: async () => {
+              if (blockHash(head) !== anchorHash) {
+                throw new ContextGraphAuthorityIndexRetryableError('test anchor moved');
+              }
+            },
+          }
+        : {}),
     });
     return Object.freeze({
       scope,
@@ -2015,6 +2027,44 @@ describe('finalized Context Graph authority projection cache', () => {
     expect(h.reads.refreshes).toBe(2);
     expect(h.served.at(-1)?.source).toBe('scan');
     expect(h.store.invalidations).toHaveLength(0);
+  });
+
+  it('lets a stabilized tail-only reorg replace the refreshed horizon hash', async () => {
+    const h = makeHarness({ holdback: 8, stabilize: true });
+    h.chain.events.push(transfer(9n, 20));
+    const blockHash = (block: number): string => (
+      `0x${((block >= h.chain.forkFrom ? h.chain.fork : 0) * 1_000_000 + block)
+        .toString(16).padStart(64, '0')}`
+    );
+    // The background refresh commits horizon H25 but persists only H17.
+    await h.index.refresh({
+      scope: h.scope,
+      readScope: h.chain,
+      deploymentBlockNumber: 10,
+      finalized: { number: 25, hash: blockHash(25) },
+      pageSize: 100,
+      durableReorgHoldbackBlocks: 8,
+      readBlockHash: async (block) => blockHash(block),
+      readPage: async (from, to) => h.chain.events
+        .filter((event) => event.blockNumber >= from && event.blockNumber <= to)
+        .map((event) => ({ ...event, blockHash: blockHash(event.blockNumber) })),
+    });
+
+    // Replace only the unpersisted tail at 18..25, keeping the same height.
+    h.chain.fork = 1;
+    h.chain.forkFrom = 18;
+    h.chain.events = h.chain.events.filter((event) => event.blockNumber < 18);
+
+    const after = await h.read();
+    expect(after.finalized).toEqual({ number: 25, hash: blockHash(25) });
+    expect(after.view.resolve(id(9n)).owner).toBe(OWNER);
+    expect(h.store.invalidations).toHaveLength(0);
+    expect(await h.read()).toBe(after);
+    expect(h.reads.refreshes).toBe(1);
+
+    // A provider that merely lags the replacement horizon is still fenced.
+    h.chain.head = 24;
+    await expect(h.read(13n)).rejects.toMatchObject({ reason: 'refresh-horizon-ahead' });
   });
 
   it('never serves a pre-reorg tail as stale-cache when rebuilding fails', async () => {

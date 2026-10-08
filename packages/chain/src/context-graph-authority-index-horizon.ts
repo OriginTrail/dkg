@@ -248,6 +248,8 @@ export interface ContextGraphAuthorityIndexRefreshHorizonLease {
     repositoryKey: string,
     committed: ContextGraphAuthorityIndexCommittedRepositoryRecord,
   ): void;
+  /** The scan stabilized its own unpersisted tail above its durable prefix. */
+  markTailStabilized(): void;
   /** Settle from the lifecycle-owned physical promise, never a caller wait. */
   commit(): void;
   rollback(): void;
@@ -296,6 +298,7 @@ implements ContextGraphAuthorityIndexHorizonReader {
     const rejectionRevisionAtStart = state.rejectionRevision;
     let activated = false;
     let checkpointRejected = false;
+    let tailStabilized = false;
     let lineage: ContextGraphAuthorityLeaseLineage = UNOBSERVED_LEASE_LINEAGE;
     let settled = false;
 
@@ -403,6 +406,10 @@ implements ContextGraphAuthorityIndexHorizonReader {
           publishRecoveryBoundary,
         );
       },
+      markTailStabilized: (): void => {
+        if (settled) return;
+        tailStabilized = true;
+      },
       commit: (): void => {
         if (settled) return;
         settled = true;
@@ -426,6 +433,17 @@ implements ContextGraphAuthorityIndexHorizonReader {
           if (committed === undefined
             || horizon.number > committed.number
             || (horizon.number === committed.number && horizon.hash !== committed.hash)) {
+            state.committed = horizon;
+          }
+        } else if (tailStabilized && !checkpointRejected && state.rejectedThrough === undefined) {
+          // A reorg confined to the unpersisted tail leaves the durable
+          // checkpoint valid, so no rejection can discharge the old hash. A
+          // view that stabilized its replacement tail at that same height may
+          // replace it; a lower view is still lag and never moves the floor.
+          const committed = state.committed;
+          if (committed !== undefined
+            && horizon.number === committed.number
+            && horizon.hash !== committed.hash) {
             state.committed = horizon;
           }
         }

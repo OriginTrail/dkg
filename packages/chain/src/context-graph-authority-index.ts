@@ -611,6 +611,10 @@ export class ContextGraphAuthorityIndex {
         if (checkpoint !== undefined && checkpoint.cursor.throughBlockNumber === finalizedNumber) {
           await input.stabilize?.(lifecycleSignal);
           lifecycleSignal.throwIfAborted();
+          // Only a fenced in-memory tail proves a reorg above the durable cursor.
+          if (tail !== undefined && input.stabilize !== undefined) {
+            horizonLease.markTailStabilized();
+          }
           if (durable.kind === 'checkpoint'
             && servableEpoch === (this.#servableEpochs.get(scope) ?? 0)) {
             // `durable.checkpoint`, never the local `checkpoint`: that may be
