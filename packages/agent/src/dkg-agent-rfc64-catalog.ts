@@ -5203,7 +5203,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // reads honoured the operator. One anchor, one source.
           finalityConfirmations: resolveChainFinalityConfirmationsV1(this.chain, this.config.chainConfig),
           getOnChainContextGraphId: (contextGraphId, signal) =>
-            this.getContextGraphOnChainId(contextGraphId, { signal }),
+            this.resolveContextGraphNumericIdForPolicy(contextGraphId, { signal })
+              .then((id) => id?.toString() ?? null),
           getEvmChainId: () => this.chain.getEvmChainId(),
         });
         const finalizedVmPrecommit = createRfc64FinalizedVmAgentPrecommitV1({
@@ -5218,7 +5219,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // reads honoured the operator. One anchor, one source.
           finalityConfirmations: resolveChainFinalityConfirmationsV1(this.chain, this.config.chainConfig),
           getOnChainContextGraphId: (contextGraphId, signal) =>
-            this.getContextGraphOnChainId(contextGraphId, { signal }),
+            this.resolveContextGraphNumericIdForPolicy(contextGraphId, { signal })
+              .then((id) => id?.toString() ?? null),
           getEvmChainId: () => this.chain.getEvmChainId(),
           getKnowledgeAssetStorageAddress: async () => {
             if (typeof this.chain.getDKGKnowledgeAssetsAddress !== 'function') {

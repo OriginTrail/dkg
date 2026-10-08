@@ -1611,8 +1611,9 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   async resolveContextGraphNumericIdForPolicy(
     this: DKGAgent,
     contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
   ): Promise<bigint | null> {
-    const binding = await this.resolveContextGraphRegistrationBinding(contextGraphId);
+    const binding = await this.resolveContextGraphRegistrationBinding(contextGraphId, options);
     return binding.kind === 'registered' ? binding.onChainId : null;
   }
 
