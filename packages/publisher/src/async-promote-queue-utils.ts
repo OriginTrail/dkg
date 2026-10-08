@@ -380,14 +380,7 @@ export function postCommitRecoveryExhaustedReason(attempts: number): string {
   return `automatic post-commit recovery exhausted after ${attempts} attempts; needs operator inspection`;
 }
 
-/**
- * Default exponential backoff: 1m, 2m, 4m, 8m, 15m (cap). Caller passes
- * 1-indexed attempt count.
- */
-export function defaultBackoffMs(attemptCount: number): number {
-  const base = 60_000 * 2 ** Math.max(0, attemptCount - 1);
-  return Math.min(base, 15 * 60_000);
-}
+export { defaultBackoffMs, createDefaultPromoteBackoff } from './promote-retry-policy.js';
 
 /**
  * Stable sort key for queued/failed_retrying jobs: oldest `nextRetryAt`

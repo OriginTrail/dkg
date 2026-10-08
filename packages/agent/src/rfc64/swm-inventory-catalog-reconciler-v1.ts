@@ -42,6 +42,13 @@ export const RFC64_SWM_INVENTORY_CATALOG_TARGET_MAX_ROWS_V1 =
 /** Bound read-only projection resolution so a large author lane does not serialize N store reads. */
 const RFC64_SWM_INVENTORY_CATALOG_RESOLVE_CONCURRENCY_V1 = 8;
 
+/** A usable caller width, never wider than the bound above. */
+function resolveConcurrencyV1(requested: number | undefined): number {
+  return Number.isSafeInteger(requested) && (requested as number) >= 1
+    ? Math.min(requested as number, RFC64_SWM_INVENTORY_CATALOG_RESOLVE_CONCURRENCY_V1)
+    : RFC64_SWM_INVENTORY_CATALOG_RESOLVE_CONCURRENCY_V1;
+}
+
 export type Rfc64SwmInventoryCatalogReconcilerErrorCodeV1 =
   | 'swm-catalog-reconcile-input'
   | 'swm-catalog-reconcile-signature'
@@ -63,6 +70,12 @@ export class Rfc64SwmInventoryCatalogReconcilerErrorV1 extends Error {
 export interface PrepareRfc64SwmInventoryCatalogTargetInputV1 {
   readonly snapshot: SwmAuthorInventorySnapshotV1;
   readonly signal?: AbortSignal;
+  /**
+   * Most rows resolved at once, at most 8 (the default). A caller whose
+   * resolver reads through an admission lane passes what that lane admits at
+   * once: a wider fan-out queues its surplus reads behind their own siblings.
+   */
+  readonly resolveConcurrency?: number;
   /** Resolve the exact durable shared projection and seal named by one signed row. */
   readonly resolveAsset: (
     row: Readonly<SwmAuthorInventoryRowV1>,
@@ -132,6 +145,7 @@ export async function prepareRfc64SwmInventoryCatalogTargetV1(
       assertAssetBindsInventoryRow(asset, row);
       return asset;
     },
+    resolveConcurrencyV1(input.resolveConcurrency),
     input.signal,
   );
 
@@ -147,6 +161,7 @@ export async function prepareRfc64SwmInventoryCatalogTargetV1(
 async function resolveCatalogAssetsWithDrainV1<T>(
   rows: readonly SwmAuthorInventoryRowV1[],
   resolve: (row: Readonly<SwmAuthorInventoryRowV1>, signal: AbortSignal) => Promise<T>,
+  concurrency: number,
   externalSignal?: AbortSignal,
 ): Promise<T[]> {
   externalSignal?.throwIfAborted();
@@ -165,7 +180,7 @@ async function resolveCatalogAssetsWithDrainV1<T>(
   externalSignal?.addEventListener('abort', onAbort, { once: true });
   try {
     await Promise.all(Array.from({
-      length: Math.min(rows.length, RFC64_SWM_INVENTORY_CATALOG_RESOLVE_CONCURRENCY_V1),
+      length: Math.min(rows.length, concurrency),
     }, async () => {
       while (!failed && next < rows.length) {
         const index = next++;

@@ -546,9 +546,13 @@ describe('createAndDistributeSwmSenderKeyEpoch: missing-peerId soft success', ()
   it('serializes full-state saves so a delayed older write cannot overwrite a newer snapshot', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-swm-sender-save-queue-'));
     tempDirs.push(dataDir);
-    const boot = await bootAgent({ dataDir });
+    // This exercises sender-key writes, not boot persistence. Attaching the
+    // directory after create avoids unrelated constructor writes racing its
+    // teardown (the agent is intentionally never started in this suite).
+    const boot = await bootAgent();
     agent = boot.agent;
     const internals = boot.internals;
+    internals.config.dataDir = dataDir;
     const path = join(dataDir, 'swm-sender-keys.json');
 
     let markFirstWrite!: () => void;

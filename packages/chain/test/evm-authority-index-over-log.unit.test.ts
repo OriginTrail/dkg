@@ -281,7 +281,7 @@ function makeReader(options: {
         }),
   });
   reader.snapshots.open();
-  return { reader, index, calls, authorityLogs, attempts, usage };
+  return { reader, index, provider, calls, authorityLogs, attempts, usage };
 }
 
 /** The same `ContextGraphCreated`, as the LIVE scan would deliver it. */
@@ -1135,19 +1135,70 @@ describe('Context Graph authority index over the one log', () => {
       });
   });
 
-  it('refuses the fold when the tick committed underneath it', async () => {
+  it('retries a moved log revision then falls back within the same provider', async () => {
     const store = seededStore();
     // The fence, and only the fence: the anchor resolves, the pages read, and
     // then the log moves before the answer is handed over.
     const moved = vi.fn(async () => false);
     const source = { ...logSource(store), anchorHolds: moved };
-    const { reader, attempts } = makeReader({ store, source });
+    const { reader, attempts, calls } = makeReader({ store, source });
 
-    await expect(reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
-      /chain event log moved under/,
-    );
-    // Retryable, not fatal: the transport asked for a second attempt.
-    expect(attempts).toHaveLength(2);
-    expect(moved).toHaveBeenCalled();
+    await expect(reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).resolves.toBe(7n);
+    // The first moved revision reacquires the log; the second drops to the live
+    // scan against this provider instead of being misclassified as its outage.
+    expect(moved).toHaveBeenCalledTimes(2);
+    expect(calls.getLogs).toBe(1);
+    expect(attempts).toHaveLength(0);
+  });
+
+  it.each([
+    ['registered', NAME_HASH, true],
+    ['unregistered', ABSENT_NAME_HASH, false],
+  ] as const)('keeps the %s batch name-binding read available across local log movement',
+    async (_kind, nameHash, present) => {
+      const store = seededStore();
+      const moved = vi.fn(async () => false);
+      const source = { ...logSource(store), anchorHolds: moved };
+      const { reader, attempts, calls } = makeReader({
+        store, source, exhaustsOnFailover: true,
+      });
+
+      const snapshots = await reader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes(
+        [nameHash], { freshness: 'live' },
+      );
+
+      expect(snapshots.has(nameHash)).toBe(present);
+      expect(moved).toHaveBeenCalledTimes(2);
+      expect(calls.getLogs).toBe(1);
+      expect(attempts).toHaveLength(0);
+    });
+
+  it('propagates a failed live scan after local log movement', async () => {
+    const store = seededStore();
+    const source = { ...logSource(store), anchorHolds: vi.fn(async () => false) };
+    const { reader, provider } = makeReader({ store, source, exhaustsOnFailover: true });
+    vi.spyOn(provider, 'getLogs').mockRejectedValue(new Error('live scan unavailable'));
+
+    await expect(reader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes(
+      [ABSENT_NAME_HASH], { freshness: 'live' },
+    )).rejects.toThrow('live scan unavailable');
+  });
+
+  it('does not retry or fall back after abort during the local revision fence', async () => {
+    const store = seededStore();
+    const controller = new AbortController();
+    const moved = vi.fn(async () => {
+      controller.abort(new DOMException('test abort', 'AbortError'));
+      return false;
+    });
+    const source = { ...logSource(store), anchorHolds: moved };
+    const { reader, calls, attempts } = makeReader({ store, source });
+
+    await expect(reader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes(
+      [ABSENT_NAME_HASH], { freshness: 'live', signal: controller.signal },
+    )).rejects.toMatchObject({ name: 'AbortError' });
+    expect(moved).toHaveBeenCalledTimes(1);
+    expect(calls.getLogs).toBe(0);
+    expect(attempts).toHaveLength(1);
   });
 });

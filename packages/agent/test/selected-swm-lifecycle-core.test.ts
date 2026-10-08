@@ -42,22 +42,40 @@ function activeSessionWithoutJobs(): PeerSyncSession {
 }
 
 describe('selected RFC-64 SWM lifecycle wiring', () => {
-  it('uses the canonical legacy SWM decision for shared-memory admission', () => {
+  it('uses the canonical legacy SWM decision for shared-memory admission', async () => {
     const rfc64LegacySwmGossipAllowedForContextGraph = vi.fn(
       (contextGraphId: string) => contextGraphId === 'cg-legacy',
     );
-    const agent = { rfc64LegacySwmGossipAllowedForContextGraph };
+    const privateMember = vi.fn().mockResolvedValue(false);
+    const agent = {
+      rfc64LegacySwmGossipAllowedForContextGraph,
+      rfc64PrivateRootSwmOnLegacyLaneV1: privateMember,
+    };
     const allowed = LifecycleSyncMethods.prototype.canUseLegacySharedMemorySyncForContextGraphV1;
 
-    expect(allowed.call(agent as never, 'cg-legacy')).toBe(true);
-    expect(allowed.call(agent as never, 'cg-catalog-only')).toBe(false);
+    await expect(allowed.call(agent as never, 'cg-legacy')).resolves.toBe(true);
+    await expect(allowed.call(agent as never, 'cg-catalog-only')).resolves.toBe(false);
     expect(rfc64LegacySwmGossipAllowedForContextGraph.mock.calls).toEqual([
       ['cg-legacy'],
       ['cg-catalog-only'],
     ]);
+    expect(privateMember).toHaveBeenCalledExactlyOnceWith('cg-catalog-only');
   });
 
-  it('restores legacy SWM for a configured catalog graph under the global kill switch', () => {
+  it('admits only a locally proven private member after legacy policy declines', async () => {
+    const privateMember = vi.fn(async (contextGraphId: string) => contextGraphId === 'cg-member');
+    const agent = {
+      rfc64LegacySwmGossipAllowedForContextGraph: () => false,
+      rfc64PrivateRootSwmOnLegacyLaneV1: privateMember,
+    };
+    const allowed = LifecycleSyncMethods.prototype.canUseLegacySharedMemorySyncForContextGraphV1;
+
+    await expect(allowed.call(agent as never, 'cg-member')).resolves.toBe(true);
+    await expect(allowed.call(agent as never, 'cg-outsider')).resolves.toBe(false);
+    expect(privateMember.mock.calls).toEqual([['cg-member'], ['cg-outsider']]);
+  });
+
+  it('restores legacy SWM for a configured catalog graph under the global kill switch', async () => {
     const contextGraphId = 'cg-configured-catalog';
     const executionPlan = resolveRfc64CatalogExecutionPlanV1({
       configuredContextGraphs: [contextGraphId],
@@ -76,8 +94,8 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
 
     expect(executionPlan.selectedAuthority[contextGraphId]?.legacySyncAllowed).toBe(false);
     expect(executionPlan.legacyContextGraphs).toContain(contextGraphId);
-    expect(LifecycleSyncMethods.prototype.canUseLegacySharedMemorySyncForContextGraphV1
-      .call(agent as never, contextGraphId)).toBe(true);
+    await expect(LifecycleSyncMethods.prototype.canUseLegacySharedMemorySyncForContextGraphV1
+      .call(agent as never, contextGraphId)).resolves.toBe(true);
   });
 
   it('restores durable VM admission under the global kill switch', async () => {

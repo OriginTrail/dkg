@@ -17,7 +17,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
-import { isClientQueryFailure } from "./query-error.js";
+import { respondToQueryFailure } from "./query-error.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   appendFile,
@@ -742,12 +742,10 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         return;
       }
       tracker.fail(ctx, err);
-      const msg = err?.message ?? "";
-      // #1758 — one classifier: a typed upstream status decides, otherwise
-      // legacy message families apply. See ./query-error.ts.
-      if (isClientQueryFailure(err)) {
-        return jsonResponse(res, 400, { error: msg });
-      }
+      // #1758 — one policy module answers a failed query: a rejection of the
+      // caller's own SPARQL is a 400, a withheld unscoped result a retryable
+      // 503. See ./query-error.ts.
+      if (respondToQueryFailure(res, err)) return;
       throw err;
     }
   }

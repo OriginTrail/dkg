@@ -46,6 +46,7 @@ import {
 import {
   NoChainAdapter,
   activeRpcRequestAbortSignal,
+  activeRpcRequestContext,
   createRpcRequestProvider,
   RpcRequestGovernor,
   RpcEndpointsExhaustedError,
@@ -59,6 +60,7 @@ import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { DKGAgent } from '../src/index.js';
+import { peekFinalizedAuthorityColdResolution } from '../src/finalized-authority-cold-resolution.js';
 import {
   createLoopbackJsonRpcTestHarness,
   sendJsonRpcError,
@@ -2481,7 +2483,10 @@ describe('RFC-64 rollout authority integration', () => {
       contextGraphId: '10',
       accessPolicy: 0,
     });
+    const readLanes: Array<Readonly<{ requestClass: string; admissionPriority?: string }>> = [];
     const resolveSnapshots = vi.fn(async (nameHashes: readonly string[]) => {
+      const { requestClass, admissionPriority } = activeRpcRequestContext();
+      readLanes.push({ requestClass, admissionPriority });
       if (nameHashes.includes(firstSnapshot.nameHash)) {
         throw new Error('durably bound duplicate name hash is ambiguous');
       }
@@ -2524,12 +2529,15 @@ describe('RFC-64 rollout authority integration', () => {
         contextGraphId === localFirstContextGraphId
       ));
 
-    const requests = await edge.createRfc64CatalogAuthorityRefreshRequestsV1(
-      [firstContextGraphId, localFirstContextGraphId, secondContextGraphId],
-      new AbortController().signal,
-    );
+    const requests = await withRpcRequestContext({ requestClass: 'background' }, () => (
+      edge.createRfc64CatalogAuthorityRefreshRequestsV1(
+        [firstContextGraphId, localFirstContextGraphId, secondContextGraphId],
+        new AbortController().signal,
+      )
+    ));
 
     expect(resolveSnapshots).toHaveBeenCalledOnce();
+    expect(readLanes).toEqual([{ requestClass: 'foreground', admissionPriority: 'authority' }]);
     expect(resolveSnapshots).toHaveBeenCalledWith([
       secondSnapshot.nameHash,
     ], {
@@ -2959,6 +2967,81 @@ describe('RFC-64 rollout authority integration', () => {
       reason: 'authority-circuit-open',
     });
     expect(resolveSnapshots).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])('keeps approved replica cooldown lookup retained-only (capability present: %s)', async (supportsRetained) => {
+    const contextGraphId = `${AUTHOR}/approved-registration-binding-open-circuit`;
+    const resolveSnapshots = vi.fn(async () => new Map());
+    const retainedSnapshots = vi.fn(async (_hashes: readonly string[], _options?: ContextGraphAuthorityReadOptions) => new Map());
+    const edge = await startAgent({
+      name: 'approved-registration-binding-open-circuit',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          contextGraphAuthorityIndexRevisionReader: {
+            resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+            peekFinalizedContextGraphAuthoritySnapshotsByNameHashes: supportsRetained ? retainedSnapshots : undefined,
+            readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+            whenIdle: vi.fn(async () => undefined),
+          },
+        }),
+      },
+    });
+    (edge as any).localApprovedAgentByCG.set(contextGraphId, AUTHOR);
+    await openSharedAuthorityCircuit(edge);
+
+    const binding = await edge.resolveContextGraphRegistrationBinding(contextGraphId, {
+      allowApprovedPrivateReplicaFinalizedAbsence: true,
+      freshness: 'bounded',
+    });
+
+    expect(resolveSnapshots).not.toHaveBeenCalled();
+    expect(retainedSnapshots).toHaveBeenCalledTimes(supportsRetained ? 1 : 0);
+    if (supportsRetained) expect(retainedSnapshots.mock.calls[0]?.[1]).toMatchObject({ freshness: 'bounded' });
+    expect(binding).toMatchObject({
+      kind: 'unavailable',
+      reason: supportsRetained ? 'finalized-name-absence-unaccepted' : 'authority-circuit-open',
+    });
+  });
+
+  it('keeps live registration callers separate from a bounded in-flight read', async () => {
+    const contextGraphId = `${AUTHOR}/registration-binding-freshness`;
+    const nameHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
+    const snapshot = finalizedAuthoritySnapshot(contextGraphId, [AUTHOR], '0');
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const resolveSnapshots = vi.fn(async (_hashes: readonly string[], options?: ContextGraphAuthorityReadOptions) => {
+      if (options?.freshness === 'bounded') {
+        entered.resolve();
+        await release.promise;
+      }
+      return new Map([[nameHash, snapshot]]);
+    });
+    const edge = await startAgent({
+      name: 'registration-binding-freshness',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          contextGraphAuthorityIndexRevisionReader: {
+            resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+            readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+            whenIdle: vi.fn(async () => undefined),
+          },
+        }),
+      },
+    });
+    const bounded = edge.resolveContextGraphRegistrationBinding(contextGraphId, {
+      freshness: 'bounded', registrationTimeoutMs: 10_000,
+    });
+    await entered.promise;
+    const live = edge.resolveContextGraphRegistrationBinding(contextGraphId, {
+      freshness: 'live', registrationTimeoutMs: 10_000,
+    });
+    try {
+      await vi.waitFor(() => expect(peekFinalizedAuthorityColdResolution(edge)?.inFlightKeys).toHaveLength(2));
+    } finally {
+      release.resolve();
+      await Promise.allSettled([bounded, live]);
+    }
+    expect(resolveSnapshots.mock.calls.map((call) => call[1]?.freshness)).toEqual(['bounded', 'live']);
   });
 
   it('resolves a registration binding while a slow authority read holds the serializer', async () => {
@@ -5368,6 +5451,7 @@ describe('RFC-64 rollout authority integration', () => {
     const accepted = (author as any).rfc64PublicCatalogServiceV1
       .acceptedPolicySnapshot(NETWORK_ID, contextGraphId);
     expect(accepted).not.toBeNull();
+    expect(author.rfc64CatalogAuthorityRefreshFailureReasonV1(contextGraphId)).toBeNull();
 
     // The finalized index no longer carries the bound id (finality lag).
     readSnapshots.mockResolvedValue(new Map());
@@ -5383,6 +5467,9 @@ describe('RFC-64 rollout authority integration', () => {
       code: 'registered-authority-unfinalized',
       message: expect.stringContaining('no finalized indexed authority'),
     });
+    // The recorded reason is what ends a share observer's settlement retries early.
+    expect(author.rfc64CatalogAuthorityRefreshFailureReasonV1(contextGraphId))
+      .toBe('registered-authority-unfinalized');
 
     // Retryable, not a denial: authority retained, fence open, not parked.
     expect((author as any).rfc64PublicCatalogServiceV1
@@ -5908,7 +5995,7 @@ describe('RFC-64 rollout authority integration', () => {
     const curatorPeerId = '12D3KooWVerifiedPrivateCurator';
     const memberPeerId = '12D3KooWVerifiedPrivateMember';
     const edge = await startAgent({ name: 'private-peer-binding' });
-    vi.spyOn(edge, 'findAgentByPeerId').mockResolvedValue(null);
+    const profile = vi.spyOn(edge, 'findAgentByPeerId').mockResolvedValue(null);
     vi.spyOn(edge, 'hasConfirmedMetaState').mockResolvedValue(true);
     const delegateePeers = vi.spyOn(edge, 'getContextGraphAllowedDelegateePeers')
       .mockResolvedValue(new Map([[MEMBER, [memberPeerId]]]));
@@ -5917,6 +6004,15 @@ describe('RFC-64 rollout authority integration', () => {
       memberPeerId,
       contextGraphId,
     )).resolves.toBe(MEMBER);
+
+    // A generic profile can arrive after the private delegatee binding and
+    // name another local agent. It must not replace the graph-scoped identity.
+    profile.mockResolvedValue({ agentAddress: AUTHOR } as never);
+    await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
+      memberPeerId,
+      contextGraphId,
+    )).resolves.toBe(MEMBER);
+    profile.mockResolvedValue(null);
 
     delegateePeers.mockResolvedValue(new Map());
     (edge as any).localApprovedAgentByCG.set(contextGraphId, MEMBER);
@@ -5936,6 +6032,12 @@ describe('RFC-64 rollout authority integration', () => {
       curatorPeerId,
       contextGraphId,
     )).resolves.toBe(AUTHOR);
+    profile.mockResolvedValue({ agentAddress: MEMBER } as never);
+    await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
+      curatorPeerId,
+      contextGraphId,
+    )).resolves.toBe(AUTHOR);
+    profile.mockResolvedValue(null);
 
     currentCuratorBinding.mockResolvedValue({ agentAddress: MEMBER, authorityEra: '1' });
     await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
@@ -5967,8 +6069,38 @@ describe('RFC-64 rollout authority integration', () => {
       [MEMBER, [memberPeerId]],
       [AUTHOR, [memberPeerId]],
     ]));
+    profile.mockResolvedValue({ agentAddress: MEMBER } as never);
     await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
       memberPeerId,
+      contextGraphId,
+    )).resolves.toBeNull();
+
+    // Transient failures in graph-scoped binding reads must not manufacture
+    // an identity when no verified profile can supply one.
+    profile.mockResolvedValue(null);
+    delegateePeers.mockRejectedValueOnce(new Error('delegatee roster unavailable'));
+    await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
+      curatorPeerId,
+      contextGraphId,
+    )).resolves.toBeNull();
+
+    delegateePeers.mockResolvedValue(new Map());
+    requesterState.mockRejectedValueOnce(new Error('join state unavailable'));
+    await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
+      curatorPeerId,
+      contextGraphId,
+    )).resolves.toBeNull();
+
+    requesterState.mockResolvedValue({
+      status: 'approved',
+      requestGeneration: `0x${'11'.repeat(32)}`,
+      curatorPeerId,
+      curatorAgentAddress: AUTHOR,
+      curatorAuthorityEra: '0',
+    });
+    currentCuratorBinding.mockRejectedValueOnce(new Error('curator binding unavailable'));
+    await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
+      curatorPeerId,
       contextGraphId,
     )).resolves.toBeNull();
   });
@@ -6986,7 +7118,7 @@ describe('RFC-64 rollout authority integration', () => {
     });
     expect(stopped.resolveRfc64CatalogReceiverAuthorityV1(CONTEXT_GRAPH_ID)
       .legacySyncAllowed).toBe(false);
-    expect(stopped.canUseLegacySharedMemorySyncForContextGraphV1(CONTEXT_GRAPH_ID)).toBe(true);
+    await expect(stopped.canUseLegacySharedMemorySyncForContextGraphV1(CONTEXT_GRAPH_ID)).resolves.toBe(true);
     await expect(stopped.canUseLegacyDurableSyncForContextGraphV1(CONTEXT_GRAPH_ID)).resolves.toBe(true);
     expect(stopped.getSyncContextGraphIds()).toContain(CONTEXT_GRAPH_ID);
     expect(stopped.rfc64PublicCatalogStatsV1()).toBeNull();

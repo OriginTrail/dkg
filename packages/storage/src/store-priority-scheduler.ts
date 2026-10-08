@@ -13,6 +13,7 @@ import {
   STORE_WORK_PRIORITIES,
   type StorePressureSnapshot,
   type StoreWorkPriority,
+  type TripleStore,
 } from './triple-store.js';
 import {
   STORE_OPERATION_OUTCOME_TAG,
@@ -40,6 +41,24 @@ export function withDefaultStoreWorkPriority<T>(priority: StoreWorkPriority, fn:
 /** The ambient default lane in effect here, if a caller set one. */
 export function activeDefaultStoreWorkPriority(): StoreWorkPriority | undefined {
   return defaultStoreWorkPriority.getStore();
+}
+
+/**
+ * How many operations of one shared lane `store` admits at once, or undefined
+ * when the store does not say. Without `priority` it answers for the lane that
+ * unprioritised work started here runs in. A caller that fans out reads uses
+ * it as its width: a wider fan-out only queues the surplus behind its own
+ * siblings, where each read waits against the queue deadline.
+ */
+export function storeLaneInflightLimit(
+  store: Pick<TripleStore, 'getPressureSnapshot'>,
+  priority: StoreWorkPriority = activeDefaultStoreWorkPriority() ?? 'normal',
+): number | undefined {
+  const snapshot = store.getPressureSnapshot?.();
+  const limit = priority === 'background'
+    ? snapshot?.backgroundInflightLimit
+    : priority === 'normal' ? snapshot?.normalInflightLimit : undefined;
+  return Number.isSafeInteger(limit) && (limit as number) > 0 ? limit : undefined;
 }
 
 export interface StorePrioritySchedulerSnapshot extends StorePressureSnapshot {
@@ -452,6 +471,8 @@ export class StorePriorityScheduler extends ObservableScheduler {
       healthReservedSlots: this.healthReservedSlots,
       normalReservedSlots: this.nonAckLanePolicy.normalFloor,
       backgroundReservedSlots: this.nonAckLanePolicy.backgroundFloor,
+      normalInflightLimit: this.nonAckLanePolicy.totalLimit,
+      backgroundInflightLimit: this.nonAckLanePolicy.backgroundLimit,
       ackQueueLimit: this.queueLimits.ack,
       healthQueueLimit: this.queueLimits.health,
       normalQueueLimit: this.queueLimits.normal,

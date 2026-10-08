@@ -59,6 +59,7 @@ import {
   createRpcRequestProvider,
   activeRpcRequestAbortSignal,
   activeRpcRequestContext,
+  withDetachedRpcRequestContext,
   withOwnedRpcRequestContext,
   withRpcRequestTimeout,
 } from './rpc-request-transport.js';
@@ -1386,6 +1387,7 @@ export class EVMChainAdapterBase {
     this.providers = this.rpcUrls.map(
       (url, endpointSlot) => createRpcRequestProvider(url, {
         maxRetries: perEndpointRetries,
+        discoveryStallTimeoutMs: this.rpcUrls.length > 1 ? RPC_READ_STALL_TIMEOUT_MS : undefined,
         providerOptions: {
           cacheTimeout: -1,
           polling: true,
@@ -3289,8 +3291,12 @@ export class EVMChainAdapterBase {
     // delay a chain write. Only the adapter the composition root gave a store
     // does anything at all here.
     // Both starts spawn detached work. Its context must belong to the adapter,
-    // not to whichever transient caller happened to initialize it first.
-    await withOwnedRpcRequestContext({}, async () => {
+    // not to whichever transient caller happened to initialize it first: the
+    // work keeps that caller's request class, as it always has, and nothing
+    // else of it. An authority read that finds the adapter uninitialized must
+    // not lend its admission priority to scans that run for the process's
+    // lifetime.
+    await withDetachedRpcRequestContext(activeRpcRequestContext().requestClass, async () => {
       this.startChainIndexRuntime();
       await this.startHubRotationListener();
     });

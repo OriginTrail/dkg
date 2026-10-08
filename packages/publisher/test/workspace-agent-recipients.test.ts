@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
@@ -18,6 +18,7 @@ import {
   isWorkspaceAgentEncryptionKeyMissingError,
   projectWorkspaceAgentRecipientFanout,
   resolveWorkspaceAgentRecipients,
+  resolveWorkspaceAgentRecipientKeys,
   WorkspaceAgentEncryptionKeyMissingError,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
@@ -788,5 +789,201 @@ describe('resolveWorkspaceAgentRecipients', () => {
 
     await expect(resolveWorkspaceAgentRecipients(store, { contextGraphId: CONTEXT_GRAPH_ID }))
       .rejects.toThrow(/have been revoked/);
+  });
+});
+
+
+describe('complete bounded recipient key collect', () => {
+  it('uses two queries for quiet keys, proof and peer routes', async () => {
+    const store = new OxigraphStore();
+    const wallet = ethers.Wallet.createRandom();
+    await insertAgentEncryptionKey(store, wallet, { peerId: PEER_A });
+    const query = vi.spyOn(store, 'query');
+    const result = await resolveWorkspaceAgentRecipientKeys(store, wallet.address);
+    expect(result).toHaveLength(1);
+    expect(result[0].peerId).toBe(PEER_A);
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(query.mock.calls[0][0]).toContain('LIMIT 65');
+    expect(query.mock.calls[1][0]).toContain('?revocationProof');
+    await store.close();
+  });
+
+  it('observes a wallet-signed revocation arriving after the positive collect', async () => {
+    const store = new OxigraphStore();
+    const wallet = ethers.Wallet.createRandom();
+    const key = await insertAgentEncryptionKey(store, wallet, { peerId: PEER_A });
+    const query = store.query.bind(store);
+    let injected = false;
+    vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+      if (!injected && sparql.includes('SELECT DISTINCT ?keyId ?revokedAt')) {
+        injected = true;
+        await insertAgentEncryptionKeyRevocation(store, wallet, key.publicKeyBytes);
+      }
+      return query(sparql, options);
+    });
+    await expect(resolveWorkspaceAgentRecipientKeys(store, wallet.address)).rejects.toThrow(/revoked/);
+    expect(injected).toBe(true);
+    await store.close();
+  });
+
+  it('refreshes revocations written after paged route retrieval', async () => {
+    const store = new OxigraphStore();
+    try {
+      const wallet = ethers.Wallet.createRandom();
+      const key = await insertAgentEncryptionKey(store, wallet, { peerId: PEER_A });
+      const query = store.query.bind(store);
+      let injected = false;
+      const calls = vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+        const result = await query(sparql, options);
+        if (sparql.includes('SELECT ?kind ?key ?proof ?peerId')) {
+          return { type: 'bindings', bindings: [{ kind: 'unsupported' }] };
+        }
+        if (sparql.includes('SELECT DISTINCT ?key ?peerId')) {
+          expect(result.type).toBe('bindings');
+          if (result.type === 'bindings') expect(result.bindings).toHaveLength(1);
+          injected = true;
+          await insertAgentEncryptionKeyRevocation(store, wallet, key.publicKeyBytes);
+        }
+        return result;
+      });
+      await expect(resolveWorkspaceAgentRecipientKeys(store, wallet.address)).rejects.toThrow(/have been revoked/);
+      expect(injected).toBe(true);
+      expect(calls.mock.calls.some(([sparql]) => sparql.includes('ORDER BY ?key'))).toBe(true);
+      expect(calls.mock.calls.filter(([sparql]) => sparql.includes('SELECT DISTINCT ?keyId ?revokedAt'))).toHaveLength(2);
+      expect(calls.mock.calls.at(-1)?.[0]).toContain('SELECT DISTINCT ?keyId ?revokedAt');
+    } finally { await store.close(); }
+  });
+
+  it.each(['bounded', 'paged'])('preserves peer variants and required-peer rejection through %s collection', async (strategy) => {
+    const store = new OxigraphStore();
+    try {
+      const wallet = ethers.Wallet.createRandom();
+      for (const [peerId, graph] of [[undefined, 'urn:peerless'], [PEER_A, 'urn:peer-a'], [PEER_B, 'urn:peer-b']] as const) {
+        await insertAgentEncryptionKey(store, wallet, { peerId, graph, keyFill: 7 });
+      }
+      if (strategy === 'paged') {
+        const query = store.query.bind(store);
+        vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => sparql.includes('SELECT ?kind ?key ?proof ?peerId')
+          ? { type: 'bindings', bindings: [{ kind: 'unsupported' }] } : query(sparql, options));
+      }
+      const recipients = await resolveWorkspaceAgentRecipientKeys(store, wallet.address);
+      expect(recipients.map((recipient) => recipient.peerId).sort()).toEqual([PEER_A, PEER_B].sort());
+      await expect(resolveWorkspaceAgentRecipientKeys(store, wallet.address, { requiredPeerId: PEER_A })).rejects.toThrow(/not bound to the required peer/);
+    } finally { await store.close(); }
+  });
+
+  it.each(['key', 'proof', 'route'])('excludes cached authority from the real %s UNION branch', async (branch) => {
+    const store = new OxigraphStore();
+    try {
+      const wallet = ethers.Wallet.createRandom();
+      const excludedGraph = 'urn:local-recipient-cache';
+      await insertAgentEncryptionKey(store, wallet, { graph: excludedGraph, keyFill: 9, peerId: PEER_A });
+      if (branch !== 'key') {
+        await insertAgentEncryptionKey(store, wallet, {
+          graph: 'urn:visible-profile', keyFill: 9, omitProof: branch === 'proof', omitAlgorithm: branch === 'route',
+        });
+      }
+      const expected = branch === 'key' ? /Missing public encryption key/
+        : /Untrusted RDF-only public encryption key/;
+      await expect(resolveWorkspaceAgentRecipientKeys(store, wallet.address, { excludeGraphUris: [excludedGraph] }))
+        .rejects.toThrow(expected);
+    } finally { await store.close(); }
+  });
+
+  it('does not attach an excluded peer route to a visible peerless profile key', async () => {
+    const store = new OxigraphStore();
+    try {
+      const wallet = ethers.Wallet.createRandom();
+      await insertAgentEncryptionKey(store, wallet, { graph: 'urn:visible-profile', keyFill: 9 });
+      await insertAgentEncryptionKey(store, wallet, { graph: 'urn:local-recipient-cache', keyFill: 9, peerId: PEER_A });
+      const recipients = await resolveWorkspaceAgentRecipientKeys(store, wallet.address, { excludeGraphUris: ['urn:local-recipient-cache'] });
+      expect(recipients).toHaveLength(1);
+      expect(recipients[0].peerId).toBeUndefined();
+      await expect(resolveWorkspaceAgentRecipientKeys(store, wallet.address, {
+        excludeGraphUris: ['urn:local-recipient-cache'], requiredPeerId: PEER_A,
+      })).rejects.toThrow(/not bound to the required peer/);
+    } finally { await store.close(); }
+  });
+
+  it.each([
+    ['missing', /Missing public encryption key/, 1],
+    ['malformed', /Unverifiable public encryption key/, 1],
+    ['untrusted', /Untrusted RDF-only public encryption key/, 2],
+    ['spoofed', /Spoofed or unverifiable public encryption key/, 2],
+    ['revoked', /have been revoked/, 2],
+    ['algorithm', /Unsupported public encryption key algorithm/, 3],
+  ] as const)('retains complete %s diagnostics without restarting collection', async (kind, expected, reads) => {
+    const store = new OxigraphStore();
+    try {
+      const wallet = ethers.Wallet.createRandom();
+      if (kind === 'malformed') {
+        await store.insert([{ subject: agentUri(wallet.address), predicate: DKG_PUBLIC_ENCRYPTION_KEY,
+          object: '"invalid-key"', graph: AGENTS_GRAPH }]);
+      } else if (kind !== 'missing') {
+        const key = await insertAgentEncryptionKey(store, wallet, {
+          omitProof: kind === 'untrusted', proofWallet: kind === 'spoofed' ? ethers.Wallet.createRandom() : undefined,
+          algorithm: kind === 'algorithm' ? 'P-256' : undefined,
+        });
+        if (kind === 'revoked') await insertAgentEncryptionKeyRevocation(store, wallet, key.publicKeyBytes);
+      }
+      const query = vi.spyOn(store, 'query');
+      await expect(resolveWorkspaceAgentRecipientKeys(store, wallet.address)).rejects.toThrow(expected);
+      expect(query).toHaveBeenCalledTimes(reads);
+      expect(query.mock.calls.some(([sparql]) => sparql.includes('ORDER BY ?key') || sparql.includes('ORDER BY ?proof'))).toBe(false);
+    } finally { await store.close(); }
+  });
+
+  it.each(['key', 'proof'])('accepts an authenticated recipient with an empty %s binding last in complete evidence', async (column) => {
+    const store = new OxigraphStore();
+    try {
+      const wallet = ethers.Wallet.createRandom();
+      const key = await insertAgentEncryptionKey(store, wallet, { peerId: PEER_A });
+      await store.insert([{ subject: agentUri(wallet.address),
+        predicate: column === 'key' ? DKG_PUBLIC_ENCRYPTION_KEY : DKG_ENCRYPTION_KEY_PROOF,
+        object: '""', graph: AGENTS_GRAPH }]);
+      const query = store.query.bind(store);
+      vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+        const result = await query(sparql, options);
+        if (!sparql.includes('SELECT ?kind ?key ?proof ?peerId') || result.type !== 'bindings') return result;
+        const empty = (row: Record<string, string>) => row[column]?.replace(/^"|"$/g, '') === '';
+        return { ...result, bindings: [...result.bindings.filter((row) => !empty(row)), ...result.bindings.filter(empty)] };
+      });
+      const recipients = await resolveWorkspaceAgentRecipientKeys(store, wallet.address);
+      expect(recipients).toHaveLength(1);
+      expect(recipients[0]).toMatchObject({ recipientKeyId: key.keyId, peerId: PEER_A });
+    } finally { await store.close(); }
+  });
+
+  it('pages when only unsigned route noise saturates the bounded branch and retains the signed recipient', async () => {
+    const store = new OxigraphStore();
+    try {
+      const wallet = ethers.Wallet.createRandom();
+      const signed = await insertAgentEncryptionKey(store, wallet, { keyFill: 1, peerId: PEER_A });
+      for (let i = 0; i < 129; i++) {
+        await insertAgentEncryptionKey(store, wallet, { keyFill: 2, omitProof: true, peerId: `unsigned-peer-${i}`, graph: `urn:noise-${i}` });
+      }
+      const query = store.query.bind(store);
+      const calls = vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+        if (!sparql.includes('SELECT ?kind ?key ?proof ?peerId')) return query(sparql, options);
+        // UNION results have no ordering guarantee: select the 129 unsigned routes first.
+        const result = await query(sparql.replace('LIMIT 129', 'LIMIT 130'), options);
+        if (result.type !== 'bindings') throw new Error('expected real UNION bindings');
+        return { ...result, bindings: result.bindings.filter((row) => row.peerId?.replace(/^"|"$/g, '') !== PEER_A) };
+      });
+      const recipients = await resolveWorkspaceAgentRecipientKeys(store, wallet.address);
+      expect(recipients).toHaveLength(1);
+      expect(recipients[0]).toMatchObject({ recipientKeyId: signed.keyId, peerId: PEER_A });
+      expect(calls.mock.calls.some(([sparql]) => sparql.includes('ORDER BY ?key'))).toBe(true);
+    } finally { await store.close(); }
+  });
+
+  it('falls back when a bounded branch cannot prove completeness', async () => {
+    const store = new OxigraphStore();
+    const wallet = ethers.Wallet.createRandom();
+    for (let i = 1; i <= 65; i++) await insertAgentEncryptionKey(store, wallet, { keyFill: i });
+    const query = vi.spyOn(store, 'query');
+    await expect(resolveWorkspaceAgentRecipientKeys(store, wallet.address)).rejects.toThrow(/Too many public encryption-key candidates/);
+    expect(query.mock.calls.some(([sparql]) => sparql.includes('ORDER BY ?key'))).toBe(true);
+    await store.close();
   });
 });

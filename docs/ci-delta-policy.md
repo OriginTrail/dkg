@@ -140,7 +140,13 @@ on planted workflows, runs and install hooks, sharing `load-closure.mjs`),
   PR CI now checks this as well. The build job's
   `fetch-trusted-controller.mjs` step fetches `testnet-canary` and `main`
   from `origin` back to a day before the pin's commit date, and a failed
-  fetch fails the step. A test in `ci-controller.test.mjs` then fails unless
+  fetch fails the step. A merge of a pull request branch last pushed before
+  that date, landing right after the pin, cuts that history and hides the
+  pin, because git hides every parent of a commit with one old parent; while
+  the pin is out of reach the step prunes the stale shallow entries and
+  deepens the cut points by 1, 4, 16 and then 64 generations, and leaves a
+  pin that is still out of reach to the test. A test in
+  `ci-controller.test.mjs` then fails unless
   the pinned SHA is an ancestor of one of those branches, and logs which
   one, so a rotation to a commit that only a pull request branch contains
   fails that PR's CI. The check runs under the controller it checks, which

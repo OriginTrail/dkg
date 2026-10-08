@@ -29,6 +29,7 @@ export const EVM_SCOPES = Object.freeze(['chain', 'publisher', 'agent']);
 export const WORKSPACE_RULES = Object.freeze({
   'packages/core': {
     lanes: [
+      'chain_rpc_node26',
       'tornado_core',
       'tornado_blazegraph',
       'tornado_publisher',
@@ -44,6 +45,7 @@ export const WORKSPACE_RULES = Object.freeze({
   },
   'packages/rdf-utils': {
     lanes: [
+      'chain_rpc_node26',
       'tornado_core',
       'tornado_blazegraph',
       'tornado_publisher',
@@ -59,6 +61,7 @@ export const WORKSPACE_RULES = Object.freeze({
   },
   'packages/http-utils': {
     lanes: [
+      'chain_rpc_node26',
       'tornado_core',
       'tornado_blazegraph',
       'tornado_publisher',
@@ -89,6 +92,7 @@ export const WORKSPACE_RULES = Object.freeze({
   },
   'packages/chain': {
     lanes: [
+      'chain_rpc_node26',
       'tornado_core',
       'tornado_publisher',
       'tornado_agent',
@@ -383,6 +387,12 @@ export const INSTALL_HOOK_INPUTS = installHookInputs(INSTALL_HOOK_DEPENDENCIES);
 
 export const PATH_TRIGGERS = Object.freeze([
   {
+    patterns: [/^test-policy\/(?:README\.md|test-routes\.json)$/],
+    lanes: ['chain_rpc_node26'],
+    evmScopes: [],
+    reason: 'supported-runtime regression policy changed',
+  },
+  {
     patterns: BLAZEGRAPH_ARM64_PATTERNS,
     lanes: ['bura_cli', 'bura_blazegraph_arm64'],
     evmScopes: [],
@@ -599,7 +609,7 @@ export const SUPPORT_PATH_ROUTES = Object.freeze([
   {
     // Workflows whose jobs, conditions and gates define what "CI gate" means.
     // Other top-level workflows run (or are linted) on their own.
-    pattern: /^\.github\/workflows\/(?:ci|evm-integration|rfc64-inventory-windows)\.yml$/,
+    pattern: /^\.github\/workflows\/(?:ci|evm-integration|rfc64-inventory-windows|chain-rpc-node26)\.yml$/,
     full: 'CI control-plane workflow changed',
   },
   {

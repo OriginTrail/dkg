@@ -56,6 +56,19 @@ describe('LibP2PNetwork', () => {
     expect(net.isStarted).toBe(false);
   });
 
+  it('connects through the recovery transport capability using a peer-bound private hint', async () => {
+    const a = spawn();
+    const b = spawn();
+    const network = new LibP2PNetwork(a);
+    await network.start();
+    await b.start();
+
+    await expect(network.tryConnectRecoveryStage(b.peerId, {
+      kind: 'hint', address: b.multiaddrs[0]!, timeoutMs: 5_000,
+    })).resolves.toBe(true);
+    expect(network.getConnections(b.peerId)).toHaveLength(1);
+  });
+
   it('handle + dialProtocol round-trips a stream', async () => {
     const a = spawn();
     const b = spawn();

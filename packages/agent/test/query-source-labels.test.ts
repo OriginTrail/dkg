@@ -18,6 +18,7 @@ import { QueryMethods } from '../src/dkg-agent-query.js';
 import { ContextGraphPartitionQueryMethods } from '../src/internal/context-graph-partition-query.js';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { canReadUnscopedQuery } from '../src/unscoped-query-admission.js';
+import { resolveRfc64PrivateReadRoster } from '../src/rfc64/private-read-roster-v1.js';
 import {
   createRfc64CatalogAccessPolicyRegistryFixture,
 } from './support/rfc64-catalog-access-policy-fixture.js';
@@ -220,6 +221,74 @@ function runtimePrivateQueryAgent(options: {
     store,
   };
 }
+
+describe('minimal RFC-64 private roster authority', () => {
+  function fixture() {
+    const { acceptedPolicySnapshot } = runtimePrivateQueryAgent();
+    const current = acceptedPolicySnapshot(RUNTIME_NETWORK_ID, RUNTIME_PRIVATE_CG)!;
+    acceptedPolicySnapshot.mockClear();
+    const input = {
+      activeNetworkId: RUNTIME_NETWORK_ID as string | undefined,
+      acceptedPolicies: undefined,
+      service: { acceptedPolicySnapshot },
+      isJoinDerived: () => false,
+    } satisfies Parameters<typeof resolveRfc64PrivateReadRoster>[0];
+    const policies = [{ policyEnvelope: { payload: {
+      networkId: RUNTIME_NETWORK_ID, contextGraphId: RUNTIME_PRIVATE_CG, accessPolicy: 1 as const,
+    } } }];
+    return { input, policies, current, acceptedPolicySnapshot };
+  }
+
+  it('returns a frozen accepted roster through only the typed lookup capability', () => {
+    const { input, acceptedPolicySnapshot } = fixture();
+    const result = resolveRfc64PrivateReadRoster(input, RUNTIME_PRIVATE_CG);
+    expect(result).toEqual([LOCAL_MEMBER, REMOTE_MEMBER]);
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(acceptedPolicySnapshot).toHaveBeenCalledExactlyOnceWith(RUNTIME_NETWORK_ID, RUNTIME_PRIVATE_CG);
+  });
+
+  it('keeps unselected authority undefined and configured unavailable authority null', () => {
+    const { input, policies } = fixture();
+    expect(resolveRfc64PrivateReadRoster({ ...input, service: undefined }, RUNTIME_PRIVATE_CG)).toBeUndefined();
+    expect(resolveRfc64PrivateReadRoster({ ...input, service: undefined, acceptedPolicies: policies }, RUNTIME_PRIVATE_CG)).toBeNull();
+    expect(resolveRfc64PrivateReadRoster({ ...input, service: undefined, acceptedPolicies: policies }, 'unselected')).toBeUndefined();
+  });
+
+  it('distinguishes missing, empty and public rosters', () => {
+    const { input, current, acceptedPolicySnapshot } = fixture();
+    acceptedPolicySnapshot.mockReturnValue({ ...current, roster: null });
+    expect(resolveRfc64PrivateReadRoster(input, RUNTIME_PRIVATE_CG)).toBeNull();
+    acceptedPolicySnapshot.mockReturnValue({ ...current, roster: { ...current.roster!, members: [] } });
+    expect(resolveRfc64PrivateReadRoster(input, RUNTIME_PRIVATE_CG)).toEqual([]);
+    acceptedPolicySnapshot.mockReturnValue({ ...current, policy: { ...current.policy, accessPolicy: 0 } });
+    expect(resolveRfc64PrivateReadRoster(input, RUNTIME_PRIVATE_CG)).toBeUndefined();
+  });
+
+  it('excludes live join-derived acceptance from the read authority result', () => {
+    const { input } = fixture();
+    expect(resolveRfc64PrivateReadRoster({ ...input, isJoinDerived: () => true }, RUNTIME_PRIVATE_CG)).toBeUndefined();
+  });
+
+  it.each([
+    { networkId: ' invalid network ', contextGraphId: RUNTIME_PRIVATE_CG },
+    { networkId: RUNTIME_NETWORK_ID, contextGraphId: ' invalid graph ' },
+  ])('skips the live lookup for invalid identifiers: $networkId / $contextGraphId', ({ networkId, contextGraphId }) => {
+    const { input, acceptedPolicySnapshot } = fixture();
+    expect(resolveRfc64PrivateReadRoster({ ...input, activeNetworkId: networkId }, contextGraphId)).toBeUndefined();
+    expect(acceptedPolicySnapshot).not.toHaveBeenCalled();
+  });
+
+  it('uses configured policy authority after the active-network lookup misses', () => {
+    const { input, policies, acceptedPolicySnapshot } = fixture();
+    expect(resolveRfc64PrivateReadRoster({ ...input, activeNetworkId: 'otp:1', acceptedPolicies: policies }, RUNTIME_PRIVATE_CG))
+      .toEqual([LOCAL_MEMBER, REMOTE_MEMBER]);
+    expect(acceptedPolicySnapshot.mock.calls).toEqual([
+      ['otp:1', RUNTIME_PRIVATE_CG], [RUNTIME_NETWORK_ID, RUNTIME_PRIVATE_CG],
+    ]);
+    acceptedPolicySnapshot.mockReturnValue(null);
+    expect(resolveRfc64PrivateReadRoster({ ...input, acceptedPolicies: policies }, RUNTIME_PRIVATE_CG)).toBeNull();
+  });
+});
 
 describe('runtime-accepted RFC-64 private query authorization', () => {
   it('does not execute SPARQL when unscoped read authority throws', async () => {

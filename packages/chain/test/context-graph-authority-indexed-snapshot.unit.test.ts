@@ -832,6 +832,30 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
     ]);
   });
 
+  it('reuses absent name reads only while a fresh finality anchor matches', async () => {
+    const { adapter, evidence, advanceAuthorityHead } = makeIndexedAuthorityAdapter({
+      lateContextGraphNameHash: LATE_NAME_HASH,
+    });
+    const reader = adapter.contextGraphAuthorityIndexRevisionReader!;
+
+    await expect(reader.resolveFinalizedContextGraphIdByNameHash!(LATE_NAME_HASH))
+      .resolves.toBeNull();
+    const scannedRanges = [...evidence.indexRanges];
+    const initialHeadReads = evidence.headReads.length;
+
+    await expect(reader.resolveFinalizedContextGraphIdByNameHash!(LATE_NAME_HASH))
+      .resolves.toBeNull();
+    await expect(reader.resolveFinalizedContextGraphAuthoritySnapshotByNameHash!(LATE_NAME_HASH))
+      .resolves.toBeNull();
+    expect(evidence.indexRanges).toEqual(scannedRanges);
+    expect(evidence.headReads.length).toBe(initialHeadReads + 2);
+
+    advanceAuthorityHead();
+    await expect(reader.resolveFinalizedContextGraphAuthoritySnapshotByNameHash!(LATE_NAME_HASH))
+      .resolves.toMatchObject({ contextGraphId: '11', nameHash: LATE_NAME_HASH });
+    expect(evidence.indexRanges.at(-1)).toEqual([31, 35]);
+  });
+
   it('resolves name identity and authority state at one finalized horizon', async () => {
     const { adapter, evidence, advanceAuthorityHead } = makeIndexedAuthorityAdapter({
       lateContextGraphNameHash: NAME_HASH,
@@ -1602,6 +1626,35 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
     gate.release();
   });
 
+  it('fails over when a provider cannot supply the selected finalized head', async () => {
+    const { adapter, provider } = makeIndexedAuthorityAdapter();
+    const attempts: string[] = [];
+    const unavailable: IndexedAuthorityProvider = {
+      ...provider,
+      getBlock: async (tag) => tag === 'latest' ? null : provider.getBlock(tag),
+    };
+    (adapter as any).readTipProvider = async (
+      _label: string,
+      read: (selected: IndexedAuthorityProvider) => Promise<unknown>,
+      options: Readonly<{ isRetryable?: (error: unknown) => boolean }>,
+    ) => {
+      try {
+        attempts.push('unavailable');
+        return await read(unavailable);
+      } catch (error) {
+        expect(error).toBeInstanceOf(ContextGraphAuthorityIndexRetryableError);
+        expect(options.isRetryable?.(error)).toBe(true);
+        attempts.push('healthy');
+        return read(provider);
+      }
+    };
+
+    await expect(adapter.getContextGraphAuthoritySnapshot(9n)).resolves.toMatchObject({
+      contextGraphId: '9',
+    });
+    expect(attempts).toEqual(['unavailable', 'healthy']);
+  });
+
   it('fails over when a provider cannot revalidate the durable authority anchor', async () => {
     const { adapter, provider, advanceAuthorityHead } = makeIndexedAuthorityAdapter();
     await adapter.getContextGraphAuthoritySnapshot(9n);
@@ -1972,6 +2025,28 @@ describe('RFC-64 indexed authority reads inside chain.indexTickMs', () => {
     await expect(reader.resolveFinalizedContextGraphAuthoritySnapshotByNameHash!(LATE_NAME_HASH))
       .resolves.toBeNull();
     expect(harness.evidence.headReads).toEqual([30, 30, 30]);
+  });
+
+  it('does not reuse cached name absence after configured finality advances', async () => {
+    const { adapter, evidence, provider, advanceAuthorityHead } = makeTimedAdapter({
+      lateContextGraphNameHash: LATE_NAME_HASH,
+      finalityConfirmations: 4,
+    });
+    const reader = adapter.contextGraphAuthorityIndexRevisionReader!;
+
+    await expect(reader.resolveFinalizedContextGraphIdByNameHash!(LATE_NAME_HASH))
+      .resolves.toBeNull();
+    advanceAuthorityHead();
+    provider.getLogs = async () => {
+      throw new RpcEndpointsExhaustedError('new finalized page unavailable');
+    };
+
+    await expect(reader.resolveFinalizedContextGraphIdByNameHash!(LATE_NAME_HASH))
+      .rejects.toThrow('new finalized page unavailable');
+    // An outage cannot reuse absence proven at block 27 once the configured
+    // finality horizon has advanced to block 32.
+    expect(evidence.blockReads).toContain(32);
+    expect(evidence.blockReads).not.toContain('finalized');
   });
 
   it('rejects an invalid chain.indexTickMs at construction', () => {

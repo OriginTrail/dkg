@@ -1833,7 +1833,7 @@ describe('private read authorization uses the on-chain participant roster', () =
       await recovery;
 
       expect(resume).toHaveBeenCalledTimes(3);
-      expect(resume).toHaveBeenLastCalledWith(contextGraphId, curatorPeerId);
+      expect(resume).toHaveBeenLastCalledWith(contextGraphId, curatorPeerId, undefined);
     });
 
     it('tries again after an attempt that throws', async () => {
@@ -1885,7 +1885,70 @@ describe('private read authorization uses the on-chain participant roster', () =
       expect(resume).toHaveBeenCalledTimes(1);
     });
 
-    it('stops once the row is no longer a pending join approval', async () => {
+    it('keeps trying after metadata clears the pending marker but SWM is not ready', async () => {
+      const { agent: member, internals } = await restrictedMember();
+      const resume = vi.spyOn(member, 'resumePendingJoinApprovalMetadata')
+        .mockResolvedValueOnce('retry')
+        .mockResolvedValueOnce('completed');
+      vi.useFakeTimers();
+
+      const recovery = member.recoverPendingJoinApprovalMetadata(contextGraphId, curatorPeerId);
+      await vi.advanceTimersByTimeAsync(0);
+      internals.subscribedContextGraphs.set(contextGraphId, {
+        ...internals.subscribedContextGraphs.get(contextGraphId),
+        pendingMeta: false,
+        metaSynced: true,
+        synced: false,
+      });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await recovery;
+
+      expect(resume).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps trying when data sync completes before authoritative metadata', async () => {
+      const { agent: member, internals } = await restrictedMember();
+      const resume = vi.spyOn(member, 'resumePendingJoinApprovalMetadata')
+        .mockResolvedValueOnce('retry')
+        .mockResolvedValueOnce('completed');
+      vi.useFakeTimers();
+
+      const recovery = member.recoverPendingJoinApprovalMetadata(contextGraphId, curatorPeerId);
+      await vi.advanceTimersByTimeAsync(0);
+      internals.subscribedContextGraphs.set(contextGraphId, {
+        ...internals.subscribedContextGraphs.get(contextGraphId),
+        synced: true,
+        metaSynced: false,
+        pendingMeta: true,
+      });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await recovery;
+
+      expect(resume).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps trying when data sync completes but join metadata remains unknown', async () => {
+      const { agent: member, internals } = await restrictedMember();
+      const resume = vi.spyOn(member, 'resumePendingJoinApprovalMetadata')
+        .mockResolvedValueOnce('retry')
+        .mockResolvedValueOnce('completed');
+      vi.useFakeTimers();
+
+      const recovery = member.recoverPendingJoinApprovalMetadata(contextGraphId, curatorPeerId);
+      await vi.advanceTimersByTimeAsync(0);
+      internals.subscribedContextGraphs.set(contextGraphId, {
+        ...internals.subscribedContextGraphs.get(contextGraphId),
+        synced: true,
+        metaSynced: undefined,
+        pendingMeta: undefined,
+      });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await recovery;
+
+      expect(resume).toHaveBeenCalledTimes(2);
+    });
+
+    it('stops once the subscription is ready', async () => {
       const { agent: member, internals } = await restrictedMember();
       const resume = vi.spyOn(member, 'resumePendingJoinApprovalMetadata').mockResolvedValue('retry');
       vi.useFakeTimers();
@@ -1897,6 +1960,8 @@ describe('private read authorization uses the on-chain participant roster', () =
         ...internals.subscribedContextGraphs.get(contextGraphId),
         pendingMeta: false,
         metaSynced: true,
+        sharedMemorySynced: true,
+        synced: true,
       });
       await vi.advanceTimersByTimeAsync(15_000);
       await recovery;
@@ -1922,7 +1987,8 @@ describe('private read authorization uses the on-chain participant roster', () =
 
   it('keeps restarted join approvals metadata-only until ordinary read authority is proven', async () => {
     const contextGraphId = 'restart-pending-join-approval';
-    const curatorPeerId = '12D3KooWRestartPendingCurator';
+    const curatorPeerId = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+    const restoredDialAddress = `/ip4/127.0.0.1/tcp/9090/p2p/${curatorPeerId}`;
     agent = await DKGAgent.create({
       name: 'PendingJoinApprovalRecovery',
       chainAdapter: new MockChainAdapter(),
@@ -1972,7 +2038,7 @@ describe('private read authorization uses the on-chain participant roster', () =
     const catchUp = vi.spyOn(agent, 'runImmediatePostApprovalSync').mockResolvedValue(undefined);
 
     // A failed fetch can succeed later (#2832).
-    await expect(agent.resumePendingJoinApprovalMetadata(contextGraphId, curatorPeerId))
+    await expect(agent.resumePendingJoinApprovalMetadata(contextGraphId, curatorPeerId, restoredDialAddress))
       .resolves.toBe('retry');
     expect(readAuthority).not.toHaveBeenCalled();
     expect(refreshFlags).not.toHaveBeenCalled();
@@ -1980,10 +2046,11 @@ describe('private read authorization uses the on-chain participant roster', () =
     expect(persistMembership).not.toHaveBeenCalled();
     expect(catchUp).not.toHaveBeenCalled();
 
-    await expect(agent.resumePendingJoinApprovalMetadata(contextGraphId, curatorPeerId))
+    await expect(agent.resumePendingJoinApprovalMetadata(contextGraphId, curatorPeerId, restoredDialAddress))
       .resolves.toBe('completed');
     expect(refreshMeta).toHaveBeenLastCalledWith(contextGraphId, expect.objectContaining({
       trustedCuratorPeerId: curatorPeerId,
+      curatorDialAddressHint: restoredDialAddress,
       force: true,
       approvedMember: acceptance,
     }));
@@ -2185,9 +2252,20 @@ describe('private read authorization uses the on-chain participant roster', () =
     });
   });
 
-  it('keeps a restarted approval with no local metadata out of every data lane', async () => {
+  it.each([
+    ['valid listener', 'valid', true],
+    ['legacy approval without a hint', undefined, false],
+    ['malformed hint', 'not-a-multiaddr', false],
+    ['different peer hint', 'wrong-peer', false],
+  ] as const)('keeps a restarted approval with no local metadata out of every data lane (%s)',
+    async (_case, hint, acceptedHint) => {
     const contextGraphId = 'restart-approval-no-metadata';
-    const curatorPeerId = '12D3KooWRestartNoMetadataCurator';
+    const curatorPeerId = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+    const curatorDialAddress = `/ip4/127.0.0.1/tcp/9090/p2p/${curatorPeerId}`;
+    const storedHint = hint === 'valid' ? curatorDialAddress
+      : hint === 'wrong-peer'
+        ? '/ip4/127.0.0.1/tcp/9090/p2p/12D3KooWNmCF7BxTYPjtTkTi3xHY4qHdRogqY2PxHrLpm8MFTWxq'
+        : hint;
     let localAgentAddress = MEMBER;
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({
@@ -2213,7 +2291,7 @@ describe('private read authorization uses the on-chain participant roster', () =
           role: 'participant',
           status: 'active' as const,
           source: 'join-approved',
-          metadata: { curatorPeerId },
+          metadata: { curatorPeerId, ...(storedHint === undefined ? {} : { curatorDialAddress: storedHint }) },
           updatedAt: 1,
         }],
         upsert: async () => undefined,
@@ -2231,7 +2309,11 @@ describe('private read authorization uses the on-chain participant roster', () =
     await agent.rehydrateContextGraphsFromDurableState();
 
     expect(subscribe).not.toHaveBeenCalled();
-    expect(resume).toHaveBeenCalledWith(contextGraphId, curatorPeerId);
+    expect(resume).toHaveBeenCalledWith(
+      contextGraphId,
+      curatorPeerId,
+      acceptedHint ? curatorDialAddress : undefined,
+    );
     expect(agent.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
       subscribed: true,
       synced: false,

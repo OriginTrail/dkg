@@ -17,6 +17,7 @@ import {
   MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   MIN_KA_BUNDLE_BYTES_V1,
   ZERO_DIGEST32_V1,
+  assertAuthorCatalogHeadScopeBindingV1,
   calculateOpaqueKaBundleByteLengthV1,
   canonicalizeAuthorCatalogRowV1,
   canonicalizeCanonicalGraphScopedAuthorSealBytesV1,
@@ -50,7 +51,9 @@ import {
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 
+import { createMainThreadTimeSlice } from '../main-thread-time-slice.js';
 import { mapWithConcurrencySettled } from '../map-with-concurrency.js';
+import { throwIfRfc64AbortedV1 } from './abort-v1.js';
 import {
   readVerifiedAuthorCatalogRowAuthorshipV1,
   verifyAuthorCatalogBucketRowAuthorshipsV1,
@@ -62,6 +65,7 @@ import {
   type ProducedAuthorCatalogPublicationV1,
   type Rfc64AuthorCatalogEip191SignerV1,
 } from './author-catalog-producer.js';
+import { rfc64SignerTakingTurnsV1 } from './control-envelope-signer-v1.js';
 import type {
   Rfc64ControlObjectOperationsV1,
   StageVerifiedControlObjectsResultV1,
@@ -75,6 +79,10 @@ import {
   snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1,
   type Rfc64PublicCatalogSuccessorAssetInputV1,
 } from './public-catalog-successor-asset-v1.js';
+import {
+  snapshotRfc64PublicCatalogSuccessorRowBindingV1,
+  type Rfc64PublicCatalogSuccessorRowBindingV1,
+} from './public-catalog-successor-row-binding-v1.js';
 
 export type { Rfc64PublicCatalogSuccessorAssetInputV1 } from
   './public-catalog-successor-asset-v1.js';
@@ -132,6 +140,8 @@ export interface Rfc64PublicCatalogSuccessorProducerOptionsV1 {
 /** Bound independent immutable-bundle reads/writes without serializing an entire successor. */
 const RFC64_SUCCESSOR_BUNDLE_IO_CONCURRENCY_V1 = 8;
 
+const RFC64_SUCCESSOR_PRODUCTION_ABORT_MESSAGE_V1 = 'RFC-64 catalog successor production aborted';
+
 export interface ProduceAndStagePublicOpenOneRowSuccessorInputV1 {
   readonly previousHead: SignedAuthorCatalogHeadEnvelopeV1;
   readonly previousDirectoryPath: readonly SignedAuthorCatalogDirectoryNodeEnvelopeV1[];
@@ -162,6 +172,8 @@ export interface ProduceAndStagePublicOpenExactSetSuccessorInputV1 {
   readonly issuedAt: TimestampMsV1;
   readonly catalogSigner: Rfc64AuthorCatalogEip191SignerV1;
   readonly catalogIssuerAuthorization: Rfc64PublicCatalogIssuerAuthorizationV1;
+  /** Stops the production between rows and before each signature; nothing is staged. */
+  readonly signal?: AbortSignal;
 }
 
 export interface ProducedAndStagedPublicOpenOneRowSuccessorV1 {
@@ -261,13 +273,25 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
   async produceAndStageExactSet(
     input: ProduceAndStagePublicOpenExactSetSuccessorInputV1,
   ): Promise<ProducedAndStagedPublicOpenExactSetSuccessorV1> {
-    const preparedAssets = prepareExactSet(input);
-    assertSupportedPreviousSlice(input.previousHead, input.previousBucket);
+    // The caller's input is read once, here, before the first row boundary.
+    const exactSet = snapshotExactSet(input);
+    const { previousHead, previousDirectoryPath, previousBucket, issuedAt } = input;
+    const { catalogSigner, catalogIssuerAuthorization, signal } = input;
+    // The whole set is verified on the main thread: its per-row loops give
+    // timers and I/O a turn between rows, and a cancelled production stops there.
+    const timeSlice = createMainThreadTimeSlice();
+    const rowBoundary = async (): Promise<void> => {
+      await timeSlice();
+      throwIfRfc64AbortedV1(signal, RFC64_SUCCESSOR_PRODUCTION_ABORT_MESSAGE_V1);
+    };
+    const preparedAssets = await prepareExactSet(exactSet, rowBoundary);
+    assertSupportedPreviousSlice(previousHead, previousBucket);
 
     // Strict typed-row reconstruction, exact deployment binding, and the
     // recoverable EOA author proof all run for the complete set before signing
     // a catalog object or performing I/O.
     for (const prepared of preparedAssets) {
+      await rowBoundary();
       try {
         const initialSealBinding = verifyCatalogSealBindingV1(
           prepared.scope,
@@ -287,18 +311,31 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
       }
     }
 
+    // A set without rows passed no row boundary: nothing is signed for a
+    // production that was cancelled, whatever its size.
+    throwIfRfc64AbortedV1(signal, RFC64_SUCCESSOR_PRODUCTION_ABORT_MESSAGE_V1);
     let publication: ProducedAuthorCatalogPublicationV1;
     try {
+      // Same turn as the canonical producer's own snapshot of the head, which
+      // must still name the lane the rows above were bound to.
+      if (exactSet.binding !== null) {
+        assertAuthorCatalogHeadScopeBindingV1(previousHead.payload, exactSet.binding.scope);
+      }
       publication = await produceSparseAuthorCatalogSuccessorV1({
-        previousHead: input.previousHead,
-        previousDirectoryPath: input.previousDirectoryPath,
-        previousBucket: input.previousBucket,
+        previousHead,
+        previousDirectoryPath,
+        previousBucket,
         selectedBucketId: '0' as DecimalU64V1,
         nextRows: preparedAssets.map(({ row }) => row),
-        issuedAt: input.issuedAt,
-        signer: input.catalogSigner,
+        issuedAt,
+        // The canonical producer reads the whole bucket before and after it
+        // signs. A production cancelled in one of those turns asks the wallet
+        // for nothing more.
+        signer: rfc64SignerTakingTurnsV1(catalogSigner, rowBoundary),
       });
     } catch (cause) {
+      // Cancelled inside the canonical producer: that is not a history failure.
+      throwIfRfc64AbortedV1(signal, RFC64_SUCCESSOR_PRODUCTION_ABORT_MESSAGE_V1);
       fail(
         'catalog-successor-producer-history',
         'bounded exact-set successor could not be built from the supplied history',
@@ -324,7 +361,7 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
       );
     }
 
-    const verifiedAssets = producedRows.map((producedRow, index) => {
+    const verifyProducedRow = (producedRow: Readonly<AuthorCatalogRowV1>, index: number) => {
       const prepared = preparedAssets[index];
       if (prepared === undefined || producedRow.kaId !== prepared.row.kaId) {
         fail(
@@ -368,12 +405,17 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
           cause,
         );
       }
-    });
+    };
+    const verifiedAssets: ReturnType<typeof verifyProducedRow>[] = [];
+    for (let index = 0; index < producedRows.length; index += 1) {
+      await rowBoundary();
+      verifiedAssets.push(verifyProducedRow(producedRows[index]!, index));
+    }
 
     let verifiedObjects;
     let authorship: readonly VerifiedAuthorCatalogRowAuthorshipSnapshotV1[];
     try {
-      const authorization = input.catalogIssuerAuthorization;
+      const authorization = catalogIssuerAuthorization;
       const catalogIssuerDelegationSignature = await verifyControlEnvelopeIssuerSignatureV1(
         authorization.catalogIssuerDelegation,
       );
@@ -389,6 +431,8 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
           issuerSignature,
         ] as const),
       );
+      // The signature checks and the bucket closure each read the whole bucket.
+      await timeSlice();
       const directoryPathProof = verifyAuthorCatalogDirectoryPathV1(
         publication.head,
         publication.directoryPath,
@@ -436,8 +480,9 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
       );
     }
 
+    await rowBoundary();
     const previousBundleByKaId = new Map(
-      (input.previousBucket?.payload.rows ?? []).map((row) => [
+      (previousBucket?.payload.rows ?? []).map((row) => [
         row.kaId,
         row.transfer.blobDigest,
       ] as const),
@@ -522,7 +567,12 @@ function bytesEqualV1(left: Uint8Array, right: Uint8Array): boolean {
   return true;
 }
 
-function prepareExactSet(input: ProduceAndStagePublicOpenExactSetSuccessorInputV1) {
+/**
+ * Detached copy of everything the rows are built from: the canonical asset
+ * set and the scope and deployment every row binds to. Synchronous, so the
+ * caller's objects are read once and never across a row boundary.
+ */
+function snapshotExactSet(input: ProduceAndStagePublicOpenExactSetSuccessorInputV1) {
   let assets: readonly Readonly<Rfc64PublicCatalogSuccessorAssetInputV1>[];
   try {
     assets = snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1(
@@ -573,11 +623,34 @@ function prepareExactSet(input: ProduceAndStagePublicOpenExactSetSuccessorInputV
       );
     }
   }
-  const prepared = snapshots.map((snapshot) => prepareRowAndBundle(
-    snapshot,
-    input.previousHead,
-    input.deployment,
-  ));
+  let binding: Rfc64PublicCatalogSuccessorRowBindingV1 | null = null;
+  if (snapshots.length > 0) {
+    try {
+      binding = snapshotRfc64PublicCatalogSuccessorRowBindingV1(
+        input.previousHead,
+        input.deployment,
+      );
+    } catch (cause) {
+      fail(
+        'catalog-successor-producer-input',
+        'projection, seal, or catalog-row input is not canonical',
+        cause,
+      );
+    }
+  }
+  return Object.freeze({ snapshots: Object.freeze(snapshots), binding });
+}
+
+async function prepareExactSet(
+  exactSet: ReturnType<typeof snapshotExactSet>,
+  rowBoundary: () => Promise<void>,
+) {
+  const prepared: ReturnType<typeof prepareRowAndBundle>[] = [];
+  for (const snapshot of exactSet.snapshots) {
+    await rowBoundary();
+    // A non-empty set always carries its binding.
+    prepared.push(prepareRowAndBundle(snapshot, exactSet.binding!));
+  }
   return Object.freeze(prepared);
 }
 
@@ -591,8 +664,7 @@ interface PreparedRfc64PublicCatalogSuccessorAssetSnapshotV1 {
 
 function prepareRowAndBundle(
   asset: PreparedRfc64PublicCatalogSuccessorAssetSnapshotV1,
-  previousHead: SignedAuthorCatalogHeadEnvelopeV1,
-  deploymentInput: CatalogSealDeploymentProfileV1,
+  binding: Rfc64PublicCatalogSuccessorRowBindingV1,
 ) {
   let encoded: ReturnType<typeof encodeOpaqueKaBundleV1>;
   let row: AuthorCatalogRowV1;
@@ -621,25 +693,9 @@ function prepareRowAndBundle(
         chunkTreeRoot: computeKaChunkTreeRootV1(encoded.bundleBytes),
       },
     }));
-    const deployment = Object.freeze({
-      networkId: deploymentInput.networkId,
-      assertedAtChainId: deploymentInput.assertedAtChainId,
-      assertedAtKav10Address: deploymentInput.assertedAtKav10Address,
-    });
-    const scope = Object.freeze({
-      networkId: previousHead.payload.networkId,
-      contextGraphId: previousHead.payload.contextGraphId,
-      governanceChainId: previousHead.payload.governanceChainId,
-      governanceContractAddress: previousHead.payload.governanceContractAddress,
-      ownershipTransitionDigest: previousHead.payload.ownershipTransitionDigest,
-      subGraphName: previousHead.payload.subGraphName,
-      authorAddress: previousHead.payload.authorAddress,
-      era: previousHead.payload.era,
-      bucketCount: previousHead.payload.bucketCount,
-    });
     return Object.freeze({
-      deployment,
-      scope,
+      deployment: binding.deployment,
+      scope: binding.scope,
       row: Object.freeze(row),
       sealBytes: asset.sealBytes,
       encoded,

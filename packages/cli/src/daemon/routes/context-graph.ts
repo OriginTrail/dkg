@@ -128,13 +128,13 @@ import {
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
 import {
-  catchupResultHasCleanResponse,
-  classifyContextGraphCatchupReadiness,
   classifyExistingContextGraphReadiness,
   classifyNameHashOnlyCatchup,
   readContextGraphReadiness,
   writeContextGraphReadiness,
 } from '../../context-graph-readiness.js';
+import { classifyAndCommitContextGraphCatchup } from '../../context-graph-catchup-readiness-owner.js';
+import { settlePrivateEmptyVmAtSubscribe } from '../../context-graph-empty-vm-readiness.js';
 import { canAdministerNode, loadTokens, httpAuthGuard } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
@@ -194,6 +194,7 @@ import {
 } from '../catchup-telemetry.js';
 import { createStoreQueryRequestLifecycle } from '../store-query-lifecycle.js';
 import { mayFollowOnChainIdToRow } from '../context-graph-on-chain-id-gate.js';
+import { attributionToken } from '../read-authority-diagnostics.js';
 import {
   admitContextGraphFollow,
   readContextGraphSubscriptionAdmission,
@@ -1249,7 +1250,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         });
       }
       const result = await agent.forwardJoinRequest(contextGraphId, delegation, agentName, curatorPeerId);
-      if (result.delivered === 0) {
+      if (result.delivered === 0 && result.queued !== true) {
         // Surface per-peer errors so the joiner can see WHY (curator
         // rejected with a specific reason, transport timed out, etc.)
         // instead of a generic "no curator". Silent error swallowing here
@@ -1268,6 +1269,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
             ? 'already-member'
             : 'pending',
         delivered: result.delivered,
+        ...(result.queued === true ? { queued: true } : {}),
         ...(result.alreadyMember || result.autoApproved ? { alreadyMember: true } : {}),
         ...(result.autoApproved ? { autoApproved: true } : {}),
       });
@@ -1978,7 +1980,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       const reason = SUBSCRIBE_AUTHORITY_LOG_REASONS.has(readAuthority.reason)
         ? readAuthority.reason : 'other';
       console.warn(`[context-graph-subscribe] authority unavailable: reason=${reason}`
-        + ` dependency=${readAuthority.dependency}`);
+        + ` dependency=${readAuthority.dependency}`
+        + (readAuthority.detailCode === undefined ? '' : ` detail=${attributionToken(readAuthority.detailCode)}`));
       return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
     }
     // A private graph named by its on-chain id: one decision, with one answer
@@ -2038,7 +2041,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     let effectiveSyncMode = lifetimePlan.effectiveSyncMode;
     const existingJobId = catchupTracker.latestByContextGraph.get(contextGraphId);
     const existingJob = existingJobId ? catchupTracker.jobs.get(existingJobId) : undefined;
-    let readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
+    const readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
 
     if (existingSub?.subscribed) {
       if (existingJob && (existingJob.status === "queued" || existingJob.status === "running")) {
@@ -2153,11 +2156,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           existingReadiness.readinessPatch,
         );
       }
-      // The existing-state classifier may have just invalidated stale v1
-      // provenance because authoritative metadata was missing. Carry the
-      // corrected value into the queued catch-up so a later metadata-only or
-      // incomplete response cannot resurrect the pre-reset true bits.
-      readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
+      // Any invalidation is persisted before queueing; completion reads the
+      // then-current provenance so it cannot resurrect these stale bits.
     }
 
     // First mint site. The guard belongs HERE, above
@@ -2285,49 +2285,16 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           job.error = "Sync deferred by local scheduler backpressure; retry when capacity is available.";
           if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${targetContextGraphId} deferred by local scheduler: ${result.deferredBackpressure}`);
         } else {
-          const inspectReadiness = catchupResultHasCleanResponse(result);
-          const hasConfirmedMeta = inspectReadiness
-            ? await agent.hasConfirmedMetaState(targetContextGraphId).catch(() => undefined)
-            : undefined;
-          const isPrivate = hasConfirmedMeta
-            ? await agent.isPrivateContextGraph(targetContextGraphId).catch(() => true)
-            : false;
-          // A catch-up can outlive its admission's absence proof or member
-          // delegation. Re-derive unregistered applicability at completion;
-          // registration, revocation, and outages must not reuse an old N/A.
-          const completionAuthority = readAuthority.registration === 'unregistered'
-            ? await agent.resolveContextGraphSubscriptionBootstrapAuthority(targetContextGraphId, {
-              callerAgentAddress: callerAddr,
-              allowSubscriptionFallback: false,
-            }).catch(() => ({ outcome: 'unavailable' as const, registration: undefined }))
-            : readAuthority;
-          const classification = classifyContextGraphCatchupReadiness({
-            result,
-            includeSharedMemory: shouldSyncSharedMemory,
-            hasConfirmedMeta,
-            isPrivate,
-            completionAuthority,
-            readinessBeforeCatchup: targetContextGraphId === jobContextGraphId
-              ? readinessBeforeCatchup
-              : readContextGraphReadiness(dashDb, targetContextGraphId),
+          const classification = await classifyAndCommitContextGraphCatchup({
+            agent, store: dashDb, contextGraphId: targetContextGraphId,
+            callerAgentAddress: callerAddr,
+            result, includeSharedMemory: shouldSyncSharedMemory,
+            admissionAuthority: readAuthority,
           });
 
           job.durablePlane = classification.durablePlane;
           job.status = classification.jobStatus;
           job.error = classification.error;
-          if (classification.readinessPatch) {
-            writeContextGraphReadiness(
-              dashDb,
-              targetContextGraphId,
-              classification.readinessPatch,
-            );
-          }
-          if (classification.statePatch) {
-            agent.markContextGraphSubscriptionState(
-              targetContextGraphId,
-              classification.statePatch,
-            );
-          }
           // The first subscribe can legitimately race ahead of metadata and
           // the on-chain binding. Its eager RFC-64 responsibility pass then
           // fails closed because accessPolicy is still unknown. Re-run the
@@ -2383,6 +2350,13 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       );
     });
 
+    try {
+      await settlePrivateEmptyVmAtSubscribe(agent, dashDb, contextGraphId, readAuthority, callerAddr);
+    } catch (error) {
+      // The subscription and catch-up job already exist. A best-effort early
+      // readiness write must not hide the job from its caller.
+      console.warn(`[catchup] early empty-VM settlement deferred: ${error instanceof Error ? error.name : 'unknown'}`);
+    }
     recordCatchupRequest('queued', shouldSyncSharedMemory);
     return jsonResponse(res, 200, withResolutionNotes({
       subscribed: contextGraphId,

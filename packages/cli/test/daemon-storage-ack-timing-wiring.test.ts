@@ -867,7 +867,8 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     const currentChainEventLogBinding = { scope: 'evm:100:hub=test:test' };
     const getChainEventLogBinding = vi.fn(() => currentChainEventLogBinding);
     const fakeAgent = {
-      peerId: 'self-peer',
+      configurePromoteQueue: vi.fn(),
+    peerId: 'self-peer',
       multiaddrs: [],
       wallet: {
         keypair: {

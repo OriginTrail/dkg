@@ -14,7 +14,10 @@ import {
   registeredContextGraphAuthorityUnavailableDependency,
   type ContextGraphReadAuthorityDependency,
 } from './context-graph-authority-dependency.js';
-import type { RegisteredContextGraphAuthority } from './registered-context-graph-authority.js';
+import type {
+  ContextGraphFinalizedAbsenceDetailCode,
+  RegisteredContextGraphAuthority,
+} from './registered-context-graph-authority.js';
 
 export {
   contextGraphReadAuthorityDependencyOf,
@@ -52,6 +55,8 @@ export interface SettledContextGraphReadAuthorityDecision extends ContextGraphRe
 export interface UnavailableContextGraphReadAuthorityDecision extends ContextGraphReadAuthorityDecisionFields {
   outcome: 'unavailable';
   dependency: ContextGraphReadAuthorityDependency;
+  /** The registered authority's classified detail, where it names one; for diagnostics only. */
+  detailCode?: ContextGraphFinalizedAbsenceDetailCode;
 }
 
 export type ContextGraphReadAuthorityDecision =
@@ -74,10 +79,11 @@ export class ContextGraphReadAuthorityUnavailableError extends Error {
   readonly source: ContextGraphReadAuthoritySource;
   readonly reason: string;
   readonly dependency: ContextGraphReadAuthorityDependency;
+  readonly detailCode?: ContextGraphFinalizedAbsenceDetailCode;
 
   constructor(
     contextGraphId: string,
-    decision: Pick<UnavailableContextGraphReadAuthorityDecision, 'source' | 'reason' | 'dependency'>,
+    decision: Pick<UnavailableContextGraphReadAuthorityDecision, 'source' | 'reason' | 'dependency' | 'detailCode'>,
   ) {
     super(
       `Context Graph read authority is unavailable for "${contextGraphId}" `
@@ -88,6 +94,7 @@ export class ContextGraphReadAuthorityUnavailableError extends Error {
     this.source = decision.source;
     this.reason = decision.reason;
     this.dependency = decision.dependency;
+    if (decision.detailCode !== undefined) this.detailCode = decision.detailCode;
   }
 }
 
@@ -133,6 +140,7 @@ export function unavailableContextGraphReadAuthorityDecision(
   reason: string,
   dependency: ContextGraphReadAuthorityDependency,
   onChainId?: bigint,
+  detailCode?: ContextGraphFinalizedAbsenceDetailCode,
 ): UnavailableContextGraphReadAuthorityDecision {
   return {
     outcome: 'unavailable',
@@ -141,6 +149,7 @@ export function unavailableContextGraphReadAuthorityDecision(
     metadataBootstrap: 'eligible',
     ...(onChainId === undefined ? {} : { onChainId }),
     dependency,
+    ...(detailCode === undefined ? {} : { detailCode }),
   };
 }
 
@@ -199,6 +208,7 @@ async function resolveReadAuthorityFromRegistration(
       registeredAuthority.reason,
       registeredContextGraphAuthorityUnavailableDependency(registeredAuthority),
       registeredAuthority.onChainId,
+      'detailCode' in registeredAuthority ? registeredAuthority.detailCode : undefined,
     );
   }
   if (registeredAuthority.kind === 'public') {

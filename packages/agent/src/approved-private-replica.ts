@@ -70,6 +70,24 @@ export type ApprovedPrivateReplicaAuthorityResolution =
     }>;
 
 /**
+ * Hooks for a caller that may run the proof again for the same decision. Both
+ * can only take a result away from a run; neither can add one.
+ */
+export interface ApprovedPrivateReplicaProofRun {
+  /**
+   * Called with the generation of the approved request the run starts from.
+   * `false` ends the run without a proof, which is how every run of one
+   * decision is held to the generation the first one read.
+   */
+  acceptsRequestGeneration(requestGeneration: string): boolean;
+  /**
+   * Called when a run is discarded for a moved metadata revision and nothing
+   * else: every check before that one held.
+   */
+  metadataMoved(): void;
+}
+
+/**
  * Classify the exact own-meta on-chain binding returned by the same proof.
  * `null` means absent; `undefined` means malformed, ambiguous, or a mixed
  * bound/unbound result and therefore fails closed.
@@ -109,6 +127,7 @@ export async function resolveApprovedPrivateReplicaAuthority(
   approvalStillHolds: () => boolean,
   metadataStillCurrent: () => boolean,
   signal?: AbortSignal,
+  run?: ApprovedPrivateReplicaProofRun,
 ): Promise<ApprovedPrivateReplicaAuthorityResolution | null> {
   const approved = approvedAgentAddress?.toLowerCase();
   const hasLocalAgent = () => agent.listLocalAgents().some(
@@ -127,6 +146,7 @@ export async function resolveApprovedPrivateReplicaAuthority(
     || !EVM_ADDRESS.test(state.curatorAgentAddress)
     || state.curatorAgentAddress === ZERO_ADDRESS
   ) return null;
+  if (run?.acceptsRequestGeneration(state.requestGeneration) === false) return null;
 
   const ownerAddress = state.curatorAgentAddress;
   const meta = await agent.getOwnCgMetaFacts(contextGraphId, { signal });
@@ -184,8 +204,12 @@ export async function resolveApprovedPrivateReplicaAuthority(
     || current.curatorPeerId !== state.curatorPeerId
     || current.curatorAgentAddress !== ownerAddress
     || current.curatorAuthorityEra !== '0'
-    || !metadataStillCurrent()
   ) return null;
+  // Checked last, so a run discarded here had every earlier check hold.
+  if (!metadataStillCurrent()) {
+    run?.metadataMoved();
+    return null;
+  }
 
   // The proof query embeds its start time. Recheck the deadline it proved
   // after every await so a delegation cannot expire while the read is in

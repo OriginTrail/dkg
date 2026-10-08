@@ -31,15 +31,34 @@ export function planKnowledgeAssetVmPublication(input: {
   return { kind: 'initial', pricingPolicy: input.pricingPolicy };
 }
 
+/** Required immutable envelope consumed by graph-scoped queued publication. */
+export type GraphScopedKnowledgeAssetVmPublishRequest = KnowledgeAssetVmPublishRequest & {
+  readonly contentScopeVersion: typeof GRAPH_KA_CONTENT_SCOPE_VERSION;
+  readonly kaUal: string;
+  readonly assertionVersion: string;
+  readonly publicTripleCount: number;
+  readonly privateTripleCount: number;
+};
+
+/** Narrow the existing persisted-envelope checks before any graph mutation. */
+export function isGraphScopedKnowledgeAssetVmPublishRequest(
+  request: KnowledgeAssetVmPublishRequest,
+): request is GraphScopedKnowledgeAssetVmPublishRequest {
+  return request.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION
+    && request.kaUal !== undefined
+    && request.assertionVersion !== undefined
+    && request.publicTripleCount !== undefined
+    && request.privateTripleCount !== undefined
+    && request.roots.length === 0;
+}
+
 /** Rebuild the immutable graph-scoped seal carried by one queued VM request. */
 export function assertionSealFromQueuedKnowledgeAssetVmPublishRequest(
-  request: KnowledgeAssetVmPublishRequest,
+  request: GraphScopedKnowledgeAssetVmPublishRequest,
 ): AssertionSeal {
-  // Both execution boundaries validate the immutable graph-scoped envelope
-  // before calling this shared reconstruction helper.
   const graphScope = createGraphKnowledgeAssetScope(
-    request.kaUal!,
-    request.assertionVersion!,
+    request.kaUal,
+    request.assertionVersion,
   );
   return {
     merkleRoot: ethers.getBytes(request.seal.merkleRoot),
@@ -53,11 +72,11 @@ export function assertionSealFromQueuedKnowledgeAssetVmPublishRequest(
     contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
     kaUal: graphScope.ual,
     assertionVersion: graphScope.assertionVersion,
-    publicTripleCount: request.publicTripleCount!,
+    publicTripleCount: request.publicTripleCount,
     ...(request.privateMerkleRoot
       ? { privateMerkleRoot: ethers.getBytes(request.privateMerkleRoot) }
       : {}),
-    privateTripleCount: request.privateTripleCount!,
+    privateTripleCount: request.privateTripleCount,
     rootEntities: [],
     ...(request.seal.reservedKaId !== undefined
       ? { reservedKaId: BigInt(request.seal.reservedKaId) }
