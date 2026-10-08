@@ -56,7 +56,6 @@ import {
 import {
   NoChainAdapter,
   type ContextGraphAuthorityIndexRevisionReader,
-  type ContextGraphAuthoritySnapshot,
 } from '@origintrail-official/dkg-chain';
 import {
   computeFlatKCRootV10,
@@ -206,7 +205,6 @@ const rpcHarness = createLoopbackJsonRpcTestHarness();
 
 /** Logical finalized name-reader capability; numeric agent resolvers stay native. */
 class ColdFinalizedCatalogChainV1 extends FinalizedVmLoopbackMockChainAdapterV1 {
-  readonly #fixture: FinalizedVmLoopbackFixtureConfigV1;
   authorityAvailable = true;
   readonly finalizedNameReads: {
     readonly nameHashes: readonly string[];
@@ -217,7 +215,6 @@ class ColdFinalizedCatalogChainV1 extends FinalizedVmLoopbackMockChainAdapterV1 
 
   constructor(fixture: FinalizedVmLoopbackFixtureConfigV1) {
     super(fixture);
-    this.#fixture = fixture;
     this.contextGraphAuthorityIndexRevisionReader = {
       resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: async (nameHashes, options) => {
         options?.signal?.throwIfAborted();
@@ -239,15 +236,6 @@ class ColdFinalizedCatalogChainV1 extends FinalizedVmLoopbackMockChainAdapterV1 
     };
   }
 
-  override async getContextGraphAuthoritySnapshot(id: bigint): Promise<ContextGraphAuthoritySnapshot> {
-    const snapshot = await super.getContextGraphAuthoritySnapshot(id);
-    return Object.freeze({
-      ...snapshot,
-      participantAgents: this.#fixture.accessPolicy === 1
-        ? Object.freeze([this.#fixture.ownerAddress])
-        : Object.freeze([]),
-    });
-  }
 }
 
 const RFC64_M0_RECOVERY_SCENARIOS = Object.freeze(
@@ -9068,24 +9056,14 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       networkId: NETWORK_ID,
       onChainContextGraphId: '582',
       ownerAddress: AUTHOR,
+      participantAgents: Object.freeze(accessPolicy === 1 ? [AUTHOR] : []),
       publishPolicy: accessPolicy === 0 ? 1 : 0,
     } satisfies FinalizedVmLoopbackFixtureConfigV1);
     const emptyFixture = fixture(false);
-    const graphInterface = new ethers.Interface([
-      'function getContextGraph(uint256) view returns (address, address[], uint256, bool, uint256, uint8, uint8, address, uint256)',
-    ]);
     let finalizedRpc = createFinalizedVmLoopbackRpcV1(emptyFixture);
     const rpc = await rpcHarness.start((call, response) => {
       try {
-        let result = finalizedRpc.respond(call.method, call.params);
-        const data = (call.params[0] as { data?: string } | undefined)?.data;
-        if (accessPolicy === 1 && call.method === 'eth_call'
-          && data?.startsWith(graphInterface.getFunction('getContextGraph')!.selector)) {
-          const fields = [...graphInterface.decodeFunctionResult('getContextGraph', result as string)];
-          fields[1] = [AUTHOR];
-          result = graphInterface.encodeFunctionResult('getContextGraph', fields);
-        }
-        sendJsonRpcResult(response, call, result);
+        sendJsonRpcResult(response, call, finalizedRpc.respond(call.method, call.params));
       } catch (cause) {
         sendJsonRpcError(response, call, -32602, cause instanceof Error ? cause.message : String(cause));
       }
