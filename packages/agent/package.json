@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-agent",
-  "version": "10.0.20",
+  "version": "10.0.22",
   "type": "module",
   "engines": {
     "node": ">=22.13.0 <23.0.0 || >=23.4.0"
@@ -50,6 +50,10 @@
     "./dist/rfc64/catalog-replay-recovery-runtime-v1.js": null,
     "./dist/rfc64/catalog-replay-snapshot-runtime-v1.js": null,
     "./dist/rfc64/catalog-operational-applied-heads-v1.js": null,
+    "./dist/rfc64/catalog-operational-reads-v1.js": null,
+    "./dist/rfc64/catalog-completion-evidence-v1.js": null,
+    "./dist/rfc64/private-catalog-subscription-readiness-v1.js": null,
+    "./dist/rfc64/registered-private-empty-vm-proof-v1.js": null,
     "./dist/rfc64/catalog-runtime-v1.js": null,
     "./dist/rfc64/background-work-dispatcher-v1.js": null,
     "./dist/rfc64/supervisor-status-v1.js": null,
@@ -60,6 +64,7 @@
     "./dist/rfc64/unregistered-authority-seed-store-v1.js": null,
     "./dist/rfc64/unregistered-authority-transport-v1.js": null,
     "./dist/rfc64/swm-inventory-shadow-runtime-v1.js": null,
+    "./dist/rfc64/swm-inventory-settlement-outlook-v1.js": null,
     "./dist/rfc64/control-object-store-v1-internal.js": null,
     "./dist/rfc64/control-object-store-v1.js": null,
     "./dist/rfc64/catalog-access-policy-v1.js": null,
@@ -126,6 +131,7 @@
     "./dist/rfc64/public-catalog-issuer-delegation-v1.js": null,
     "./dist/rfc64/public-catalog-successor-producer-v1.js": null,
     "./dist/rfc64/public-catalog-successor-asset-v1.js": null,
+    "./dist/rfc64/public-catalog-successor-row-binding-v1.js": null,
     "./dist/rfc64/public-catalog-transport-v1.js": null,
     "./dist/rfc64/recoverable-author-attestation-v1.js": null,
     "./dist/rfc64/secure-filesystem-policy-v1.js": null,
@@ -134,6 +140,7 @@
     "./dist/rfc64/*": null,
     "./dist/*": "./dist/*",
     "./dist/rfc64/legacy-swm-boundary-codec-v1.js": null,
+    "./dist/rfc64/legacy-swm-boundary-fence-v1.js": null,
     "./dist/rfc64/catalog-operational-targets-v1.js": null,
     "./dist/rfc64/private-read-roster-v1.js": null
   },

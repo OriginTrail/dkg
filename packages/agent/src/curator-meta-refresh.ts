@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { randomUUID } from 'node:crypto';
-import { multiaddr } from '@multiformats/multiaddr';
 import {
   assertSafeIri,
   contextGraphDataGraphUri,
@@ -9,6 +8,8 @@ import {
   createOperationContext,
   DKG_ONTOLOGY,
   type OperationContext,
+  type Libp2pConnectHost,
+  type PeerResolver,
 } from '@origintrail-official/dkg-core';
 import {
   tryReplaceSubjectAtomically,
@@ -43,6 +44,7 @@ import type { SyncPhase } from './sync/auth/request-build.js';
 import { stripLiteral } from './dkg-agent-utils.js';
 import { isCanonicalAuthoritativeContextGraphId } from
   './context-graph-binding-state.js';
+import { ensureCuratorConnected } from './curator-peer-connection.js';
 
 export interface CuratorMetaRefreshOptions {
   signal?: AbortSignal;
@@ -52,6 +54,8 @@ export interface CuratorMetaRefreshOptions {
    * metadata recovery does not depend on metadata that has not arrived yet.
    */
   trustedCuratorPeerId?: string;
+  /** Last observed address for that peer, used only as a dial hint after restart. */
+  curatorDialAddressHint?: string;
   /** Bypass the normal auth-probe cooldown for an explicit recovery event. */
   force?: boolean;
   /**
@@ -97,10 +101,6 @@ export interface CuratorMetaRefreshOptions {
   expectedCuratorAddress?: string;
 }
 
-interface CuratorConnection {
-  remotePeer: { toString(): string };
-}
-
 interface CuratorBoundSubscription {
   onChainId?: string;
   onChainHash?: string;
@@ -109,18 +109,8 @@ interface CuratorBoundSubscription {
 interface CuratorMetaRefreshAgent {
   readonly peerId: string;
   readonly metaRefreshTimestamps: Map<string, number>;
-  readonly node: {
-    libp2p: {
-      getConnections(): CuratorConnection[];
-      dial(target: unknown, options?: { signal?: AbortSignal }): Promise<unknown>;
-      peerStore: {
-        merge(target: unknown, data: { multiaddrs: unknown[] }): Promise<unknown>;
-      };
-    };
-  };
-  readonly discovery: {
-    findAgentByPeerId(peerId: string): Promise<{ relayAddress?: string } | undefined>;
-  };
+  readonly node: { libp2p: Libp2pConnectHost };
+  readonly peerResolver: Pick<PeerResolver, 'connect'>;
   readonly store: TripleStore;
   readonly syncCheckpoints: Pick<SyncCheckpointStore, 'delete'>;
   readonly oversizeTombstoneLog: {
@@ -362,71 +352,6 @@ function waitForSharedRefresh(
       },
     );
   });
-}
-
-function ensureCuratorConnected(
-  agent: CuratorMetaRefreshAgent,
-  curatorPeerId: string,
-  signal: AbortSignal | undefined,
-  ctx: OperationContext,
-): boolean | Promise<boolean> {
-  const connections = agent.node.libp2p.getConnections();
-  const isConnected = connections.some((connection) => (
-    connection.remotePeer.toString() === curatorPeerId
-  ));
-  if (isConnected) return true;
-
-  return dialCurator(agent, curatorPeerId, signal, ctx);
-}
-
-async function dialCurator(
-  agent: CuratorMetaRefreshAgent,
-  curatorPeerId: string,
-  signal: AbortSignal | undefined,
-  ctx: OperationContext,
-): Promise<boolean> {
-  let connections: CuratorConnection[] = [];
-  let isConnected = false;
-
-  try {
-    const { peerIdFromString } = await import('@libp2p/peer-id');
-    const peerId = peerIdFromString(curatorPeerId);
-    try {
-      await agent.node.libp2p.dial(peerId, { signal });
-      throwIfCuratorMetaRefreshAborted(signal);
-      connections = agent.node.libp2p.getConnections();
-      isConnected = connections.some((connection) => (
-        connection.remotePeer.toString() === curatorPeerId
-      ));
-    } catch {
-      // A regular dial may not have a usable direct address; relay is next.
-    }
-
-    if (!isConnected) {
-      throwIfCuratorMetaRefreshAborted(signal);
-      const discoveredAgent = await agent.discovery.findAgentByPeerId(curatorPeerId);
-      throwIfCuratorMetaRefreshAborted(signal);
-      if (discoveredAgent?.relayAddress) {
-        const circuitAddress = multiaddr(
-          `${discoveredAgent.relayAddress}/p2p-circuit/p2p/${curatorPeerId}`,
-        );
-        await agent.node.libp2p.peerStore.merge(peerId, { multiaddrs: [circuitAddress] });
-        await agent.node.libp2p.dial(peerId, { signal });
-        throwIfCuratorMetaRefreshAborted(signal);
-        connections = agent.node.libp2p.getConnections();
-        isConnected = connections.some((connection) => (
-          connection.remotePeer.toString() === curatorPeerId
-        ));
-      }
-    }
-  } catch (error) {
-    throwIfCuratorMetaRefreshAborted(signal);
-    agent.log.warn(
-      ctx,
-      `Failed to dial curator ${curatorPeerId.slice(-8)} for meta refresh: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-  return isConnected;
 }
 
 async function fetchAuthoritativeMetaSnapshot(
@@ -822,6 +747,8 @@ async function executeCuratorMetaRefresh(
     curatorPeerId,
     options.signal,
     ctx,
+    throwIfCuratorMetaRefreshAborted,
+    options.curatorDialAddressHint,
   );
   const connected = typeof connectionResult === 'boolean'
     ? connectionResult

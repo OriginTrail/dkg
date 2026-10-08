@@ -9,12 +9,12 @@
  * `this: DKGAgent` so cross-calls resolve against the composed class.
  */
 
-import { randomUUID } from 'node:crypto';
 import { isConfirmedNamedKaVmLifecycleCurrent } from './named-ka-vm-lifecycle-current.js';
 import { confirmedNamedKaVmLifecycleInput, type ConfirmedNamedKaVmCoordinates } from './named-ka-vm-lifecycle-evidence.js';
 
-import { planKnowledgeAssetVmPublication, assertionSealFromQueuedKnowledgeAssetVmPublishRequest, type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
+import { planKnowledgeAssetVmPublication, isGraphScopedKnowledgeAssetVmPublishRequest, assertionSealFromQueuedKnowledgeAssetVmPublishRequest, type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
 export { type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
+import { randomUUID } from 'node:crypto';
 import { preflightKnowledgeAssetVmPublishSnapshot } from './vm-publish-snapshot-preflight.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -2027,7 +2027,6 @@ export class PublishMethods extends DKGAgentBase {
               await deleteByPatternWithoutCount(this.store, { graph, subject });
             }
             await this.store.insert(quads);
-            this.contextGraphMetaProjection.markDirtyFromQuads(quads);
           },
           log: (level, message) =>
             level === 'warn' ? this.log.warn(ctx, message) : this.log.info(ctx, message),
@@ -2664,7 +2663,6 @@ export class PublishMethods extends DKGAgentBase {
     ];
 
     await this.store.insert(quads);
-    this.contextGraphMetaProjection.markDirtyFromQuads(quads);
     await gm.ensureContextGraph(contextGraphId);
     await this.store.flush?.();
     await this.persistLocalContextGraphOrigin(contextGraphId, 'implicit-swm-write');
@@ -4791,14 +4789,7 @@ export class PublishMethods extends DKGAgentBase {
     request: KnowledgeAssetVmPublishRequest,
     opts?: { publisherOverride?: DKGPublisher },
   ): Promise<AsyncKnowledgeAssetVmPublishPreflightResult> {
-    if (
-      request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION
-      || request.kaUal === undefined
-      || request.assertionVersion === undefined
-      || request.publicTripleCount === undefined
-      || request.privateTripleCount === undefined
-      || request.roots.length !== 0
-    ) {
+    if (!isGraphScopedKnowledgeAssetVmPublishRequest(request)) {
       throw new LegacyKnowledgeAssetReadOnlyError();
     }
     createGraphKnowledgeAssetScope(request.kaUal, request.assertionVersion);
@@ -5093,14 +5084,7 @@ export class PublishMethods extends DKGAgentBase {
     ctx: OperationContext,
   ): Promise<void> {
     const { request, job, lookup, recovery, signal } = input;
-    if (
-      request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION
-      || request.kaUal === undefined
-      || request.assertionVersion === undefined
-      || request.publicTripleCount === undefined
-      || request.privateTripleCount === undefined
-      || request.roots.length !== 0
-    ) {
+    if (!isGraphScopedKnowledgeAssetVmPublishRequest(request)) {
       throw new LegacyKnowledgeAssetReadOnlyError();
     }
     const recovered = await normalizeRecoveredNamedKaPublish({
@@ -5387,13 +5371,7 @@ export class PublishMethods extends DKGAgentBase {
     if (request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
       throw new LegacyKnowledgeAssetReadOnlyError();
     }
-    if (
-      request.roots.length !== 0
-      || request.kaUal === undefined
-      || request.assertionVersion === undefined
-      || request.publicTripleCount === undefined
-      || request.privateTripleCount === undefined
-    ) {
+    if (!isGraphScopedKnowledgeAssetVmPublishRequest(request)) {
       throw new Error('Queued graph-scoped VM publish has an incomplete KA content envelope');
     }
     const graphScope = createGraphKnowledgeAssetScope(

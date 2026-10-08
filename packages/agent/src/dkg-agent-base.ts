@@ -1468,7 +1468,6 @@ export class DKGAgentBase {
     );
     if (inserted.length > 0) {
       this.invalidateListContextGraphsCache();
-      this.contextGraphMetaProjection.markDirtyFromQuads(inserted);
     }
   }
   protected get gossipRegistered() { return this.gossipSession.gossipRegistered; }

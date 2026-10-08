@@ -80,6 +80,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Check regression proof launcher and process cleanup
+        run: pnpm qa:check-regression-launcher
+
       - name: Build agent dependency closure
         # The canonical Gate 0 closure excludes unnecessary Solidity compilation.
         run: pnpm test:gate0:rfc64-persistence-lifecycle:build

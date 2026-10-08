@@ -16,6 +16,7 @@ import {
 import { ethers } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 
+import { MAIN_THREAD_TIME_SLICE_MS } from '../src/main-thread-time-slice.js';
 import { produceEmptyAuthorCatalogGenesisV1 } from '../src/rfc64/author-catalog-producer.js';
 import { produceDirectAuthorCatalogIssuerDelegationV1 } from '../src/rfc64/public-catalog-issuer-delegation-v1.js';
 import {
@@ -236,6 +237,68 @@ describe('RFC-64 public/open one-row successor producer', () => {
     expect(ordered.publication.bucket).toEqual(unordered.publication.bucket);
     expect(stageKaBundle).toHaveBeenCalledTimes(5);
     expect(stageVerifiedObjects).toHaveBeenCalledTimes(3);
+  });
+
+  it('lets a due timer cancel a production through the producer\'s own time slice', async () => {
+    const { genesis, authorization } = await producerHistory();
+    const first = await stageOne(
+      { head: genesis.head, directoryPath: genesis.directoryPath, bucket: null },
+      authorization,
+    );
+    const stageKaBundle = vi.fn(durableBundleReceipt);
+    const stageVerifiedObjects = vi.fn(async () => Object.freeze({
+      durable: true as const,
+      namespaceDurability: 'test-exact-durable' as never,
+      objects: Object.freeze([]),
+    }));
+    const signDigest = vi.fn(async (digest: Uint8Array) => AUTHOR_WALLET.signMessage(digest));
+    const producer = new Rfc64PublicCatalogSuccessorProducerV1({
+      controlObjects: { stageVerifiedObjects } as never,
+      stageKaBundle,
+    });
+    const assets = [{
+      assertionCoordinate: 'gate-1-object' as never,
+      projectionBytes: PROJECTION,
+      seal: await authorSeal(AUTHOR_WALLET),
+    }, {
+      assertionCoordinate: 'gate-2-object' as never,
+      projectionBytes: PROJECTION,
+      seal: await authorSeal(AUTHOR_WALLET, SECOND_KA_NUMBER),
+    }];
+    const controller = new AbortController();
+    const reason = new Error('cancelled by a timer');
+    setTimeout(() => controller.abort(reason), 0);
+    // The timer is due from here on. It can only fire once something gives
+    // up the main thread, and nothing below does except the producer.
+    const due = process.hrtime.bigint() + 3_000_000n;
+    while (process.hrtime.bigint() < due) { /* spin */ }
+    // Each look at the clock is one whole slice later, so these two rows
+    // stand for a set that takes many slices to verify.
+    let clock = 0;
+    const now = vi.spyOn(performance, 'now').mockImplementation(() => {
+      clock += MAIN_THREAD_TIME_SLICE_MS;
+      return clock;
+    });
+
+    try {
+      await expect(producer.produceAndStageExactSet({
+        previousHead: first.publication.head,
+        previousDirectoryPath: first.publication.directoryPath,
+        previousBucket: first.publication.bucket,
+        assets,
+        deployment: DEPLOYMENT,
+        issuedAt: '1773900002000' as never,
+        catalogSigner: { issuer: AUTHOR, signDigest },
+        catalogIssuerAuthorization: authorization,
+        signal: controller.signal,
+      })).rejects.toBe(reason);
+    } finally {
+      now.mockRestore();
+    }
+
+    expect(signDigest).not.toHaveBeenCalled();
+    expect(stageKaBundle).not.toHaveBeenCalled();
+    expect(stageVerifiedObjects).not.toHaveBeenCalled();
   });
 
   it('shares one ordered immutable asset snapshot across producer and reconciler boundaries', async () => {

@@ -94,6 +94,7 @@ import { authenticatedAgentAddress } from '../../auth.js';
 
 import {
   respondAssertionError,
+  respondAssertionCodeError,
   respondPromoteRecoveryError,
   respondAmbiguousAssertionAuthor,
   respondAuthorSelectionError,
@@ -219,11 +220,18 @@ function layerStatus(hist: Record<string, unknown>, layer: "wm" | "swm" | "vm"):
   );
 }
 
+type ResolvedFinalizeOptions = {
+  subGraphName?: string;
+  authorAgentAddress?: string;
+  preSignedAuthorAttestation?: NonNullable<ReturnType<typeof validatePreSignedAuthorAttestation>>;
+  schemeVersion?: number;
+};
+
 export function resolveFinalizeOptions(
   raw: Record<string, any>,
   res: RequestContext["res"],
   tokenAgentAddress?: string,
-): Record<string, unknown> | null {
+): ResolvedFinalizeOptions | null {
   const {
     subGraphName,
     authorAgentAddress,
@@ -300,7 +308,7 @@ export function resolveFinalizeOptions(
       : explicitAuthorAgentAddress) ??
     (resolvedPreSignedAttestation == null ? tokenAgentAddress : undefined);
   return {
-    ...(subGraphName ? { subGraphName } : {}),
+    ...(typeof subGraphName === "string" && subGraphName ? { subGraphName } : {}),
     ...(typeof effectiveAuthorAgentAddress === "string" ? { authorAgentAddress: effectiveAuthorAgentAddress } : {}),
     ...(resolvedPreSignedAttestation ? { preSignedAuthorAttestation: resolvedPreSignedAttestation } : {}),
     ...(schemeVersion != null ? { schemeVersion } : {}),
@@ -312,7 +320,7 @@ function hasFinalizeOnlyCreateFields(raw: Record<string, unknown>): boolean {
 }
 
 function resolveAuthorAgentAddressFromFinalizeOptions(
-  finalizeOptions: Record<string, unknown>,
+  finalizeOptions: ResolvedFinalizeOptions,
   tokenAgentAddress?: string,
 ): string | undefined {
   const finalizedAuthor = finalizeOptions.authorAgentAddress;
@@ -322,6 +330,28 @@ function resolveAuthorAgentAddressFromFinalizeOptions(
       : finalizedAuthor;
   }
   return tokenAgentAddress;
+}
+
+/**
+ * A fresh atomic create has no existing storage lane to preserve. When an
+ * administrator supplies a verified pre-signed attestation, create the draft
+ * in that author's lane and reserve the exact slot the signature commits to.
+ * Dedicated finalize keeps its separate lane-resolution rules because it may
+ * be sealing an already-open draft in the daemon's default lane.
+ */
+function resolveAtomicCreateAuthorFromFinalizeOptions(
+  finalizeOptions: ResolvedFinalizeOptions,
+  tokenAgentAddress?: string,
+): { agentAddress?: string; reservedKaId?: bigint } {
+  const preSigned = finalizeOptions.preSignedAuthorAttestation;
+  if (preSigned !== undefined) {
+    return { agentAddress: tokenAgentAddress ?? preSigned.address, reservedKaId: preSigned.reservedKaId };
+  }
+  const agentAddress = resolveAuthorAgentAddressFromFinalizeOptions(
+    finalizeOptions,
+    tokenAgentAddress,
+  );
+  return agentAddress ? { agentAddress } : {};
 }
 
 function scopedTokenStorageLane(agentAddress?: string): { agentAddress?: string } {
@@ -369,7 +399,7 @@ async function resolveFinalizeStorageLane(
   agent: RequestContext["agent"],
   contextGraphId: string,
   name: string,
-  finalizeOptions: Record<string, unknown>,
+  finalizeOptions: ResolvedFinalizeOptions,
   tokenAgentAddress?: string,
 ): Promise<{ agentAddress?: string }> {
   const tokenLane = scopedTokenStorageLane(tokenAgentAddress);
@@ -536,6 +566,23 @@ function resolveSelectedAuthorAgentAddress(
     return { ok: false };
   }
   return { ok: true, value: raw };
+}
+
+async function resolvePromoteStorageLane(
+  ctx: RequestContext,
+  source: Record<string, unknown>,
+  contextGraphId: string, name: string, subGraphName?: string, callerAgentAddress?: string,
+): Promise<{ agentAddress?: string; authorAgentAddress?: string } | null> {
+  const selected = resolveSelectedAuthorAgentAddress(ctx, source);
+  if (!selected.ok) return null;
+  if (!authorizeAgentScopedAuthorClaim(
+    ctx.res, callerAgentAddress, selected.value, SELECTED_AUTHOR_FIELD,
+  )) return null;
+  if (callerAgentAddress || selected.value === undefined) return scopedTokenPromoteLane(callerAgentAddress);
+  const history = await ctx.agent.assertion.history(contextGraphId, name, { subGraphName, agentAddress: selected.value });
+  const storedAuthor = history?.agentAddress ?? selected.value;
+  if (!isSameAgentAddress(storedAuthor, selected.value)) throw new Error("Selected lifecycle author does not match its stored identity");
+  return { agentAddress: storedAuthor, authorAgentAddress: storedAuthor };
 }
 
 /**
@@ -850,10 +897,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         ? ((finalizeOptions as Record<string, unknown>).authorAgentAddress as string)
         : undefined;
     try {
-      const createAuthorAgentAddress = resolveAuthorAgentAddressFromFinalizeOptions(
+      const atomicCreateAuthor = resolveAtomicCreateAuthorFromFinalizeOptions(
         finalizeOptions,
         writePreflightCallerAgentAddress,
       );
+      const createAuthorAgentAddress = atomicCreateAuthor.agentAddress;
       const atomicAuthorLane = createAuthorAgentAddress
         ? { agentAddress: createAuthorAgentAddress }
         : {};
@@ -877,6 +925,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       const assertionUri = await agent.assertion.create(resolvedContextGraphId, name, {
         subGraphName,
         ...(createAuthorAgentAddress ? { agentAddress: createAuthorAgentAddress } : {}),
+        ...(atomicCreateAuthor.reservedKaId === undefined
+          ? {}
+          : { reservedKaId: atomicCreateAuthor.reservedKaId }),
         onDisposition: (disposition) => { createDisposition = disposition; },
       });
       // The engine reports whether create opened a draft or observed an active
@@ -1045,6 +1096,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           retryKnowledgeAssetName: name,
         });
       }
+      if (respondAssertionCodeError(res, e)) return;
       if (e?.code === "OVERSIZED_RDF_LITERAL") {
         return jsonResponse(res, 400, oversizedRdfLiteralResponseBody(e));
       }
@@ -1315,6 +1367,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
 
     // ── SWM verb: share (WM → SWM; OT-RFC-43 §10.6 renames promote → share) ──
     if (layer === "swm" && verb === "share") {
+      const promoteStorageLane = await resolvePromoteStorageLane(
+        ctx, parsed, contextGraphId, name, subGraphName, writePreflightCallerAgentAddress,
+      );
+      if (promoteStorageLane === null) return;
       // Per-request opt-in to the strict curator-ack gate (OT-RFC-49). Omitted →
       // agent config default (`swmAwaitCuratorAck`). The promote aborts with 503
       // (mapped in respondAssertionError) if the curator doesn't confirm.
@@ -1348,7 +1404,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           subGraphName,
           awaitCuratorAck,
           skipSeal,
-          ...scopedTokenPromoteLane(writePreflightCallerAgentAddress),
+          ...promoteStorageLane,
         });
         if (share.promotedCount !== 0) {
           emitMemoryGraphChanged?.({ contextGraphId, layers: ["wm", "swm"], subGraphName, operation: "assertion_promoted", source: "api", counts: { triples: share.promotedCount } });
@@ -1397,6 +1453,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     // `respondAssertionError` catch.
     if (layer === "swm" && verb === "share-async") {
       if (asyncPromoteUnavailable(res)) return;
+      const promoteStorageLane = await resolvePromoteStorageLane(
+        ctx, parsed, contextGraphId, name, subGraphName, writePreflightCallerAgentAddress,
+      );
+      if (promoteStorageLane === null) return;
       const entities = parsed.entities;
       if (!validateEntities(entities, res)) return;
       if (Array.isArray(entities)) {
@@ -1423,7 +1483,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         const result = await agent.assertion.promoteAsync(contextGraphId, name, {
           entities: entities ?? "all",
           subGraphName,
-          ...scopedTokenPromoteLane(writePreflightCallerAgentAddress),
+          ...promoteStorageLane,
         });
         return jsonResponse(res, 200, { jobId: result.jobId, state: "queued" });
       } catch (err: any) {

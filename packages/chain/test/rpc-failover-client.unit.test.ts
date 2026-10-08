@@ -134,6 +134,26 @@ describe('resolveCapMs — the named timeout-policy matrix (PLAN §3.2)', () => 
 });
 
 describe('RpcReadDescriptor — explicit read attribution ownership', () => {
+  it('rejects malformed human labels before dispatching a provider read', () => {
+    const read = vi.fn(async () => 'OK');
+    const client = makeClient([{ read }], ['https://health.example']);
+    for (const label of ['', '   ', 42]) {
+      expect(() => client.read({ label, consumer: 'stable.consumer' } as never, (p: any) => p.read()))
+        .toThrow('RPC read label must be a non-empty string');
+    }
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('rejects malformed attribution owners before dispatching a provider read', () => {
+    const read = vi.fn(async () => 'OK');
+    const client = makeClient([{ read }], ['https://health.example']);
+    for (const consumer of ['', '   ', 42]) {
+      expect(() => client.read({ label: 'health probe', consumer } as never, (p: any) => p.read()))
+        .toThrow('RPC read consumer must be a non-empty string or null');
+    }
+    expect(read).not.toHaveBeenCalled();
+  });
+
   it('freezes the human label and consumer owner together', () => {
     const descriptor = createRpcReadDescriptor('human read label', 'stable.consumer');
 

@@ -93,6 +93,7 @@ export function createFakeDaemonAgent<Libp2pExtras extends object = object>(
   const store = { close: vi.fn(async () => undefined) };
   const libp2p = { getMultiaddrs: vi.fn(() => []), ...libp2pExtras };
   return {
+    configurePromoteQueue: vi.fn(),
     peerId: 'self-peer',
     multiaddrs: [],
     wallet: { keypair: { publicKey: new Uint8Array([1]), secretKey: new Uint8Array([2]) } },

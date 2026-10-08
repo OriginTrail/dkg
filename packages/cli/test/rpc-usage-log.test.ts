@@ -18,7 +18,6 @@ describe('formatRpcUsageLines — the Grafana-facing rpc_usage contract', () => 
         clearTimeout: (timer) => clearTimeout(timer),
       },
     });
-    await governor.acquire('foreground');
     const source = createDaemonRpcTelemetrySource([
       () => ({ byMethod: { eth_call: publisherCount }, lifetimeTotal: publisherCount }),
       () => undefined,
@@ -27,7 +26,7 @@ describe('formatRpcUsageLines — the Grafana-facing rpc_usage contract', () => 
     expect(source.drainRpcUsage?.().byMethod).toEqual({ eth_call: 7 });
     publisherCount = 9;
     expect(source.drainRpcUsage?.().byMethod).toEqual({ eth_call: 11 });
-    // Real activity distinguishes a destructive drain from a read-only snapshot.
+    await governor.acquire('foreground');
     expect(source.drainRpcRequestGovernor?.().foregroundAdmitted).toBe(1);
     expect(source.drainRpcRequestGovernor?.().foregroundAdmitted).toBe(0);
     expect(source.drainRpcReadBatching?.()).toMatchObject({ batches: 0, readsByLabel: {} });

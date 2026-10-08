@@ -1,20 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { assertNetworkIdV1, assertContextGraphIdV1, type NetworkIdV1, type ContextGraphIdV1 } from '@origintrail-official/dkg-core';
-import type { ResolvedDKGAgentConfig } from '../dkg-agent-types.js';
+import { assertNetworkIdV1, assertContextGraphIdV1, type NetworkIdV1, type ContextGraphIdV1, type ContextGraphPolicyV1 } from '@origintrail-official/dkg-core';
 import type { Rfc64PublicCatalogServiceV1 } from './public-catalog-service-v1.js';
 
 /** Accepted private roster resolution preserves fail-closed configured selections and live join proof. */
 export function resolveRfc64PrivateReadRoster(input: {
-  readonly config: ResolvedDKGAgentConfig;
-  readonly service: Rfc64PublicCatalogServiceV1 | undefined;
+  readonly activeNetworkId: string | undefined;
+  readonly acceptedPolicies: readonly {
+    readonly policyEnvelope: {
+      readonly payload: Pick<ContextGraphPolicyV1, 'networkId' | 'contextGraphId' | 'accessPolicy'>;
+    };
+  }[] | undefined;
+  readonly service: Pick<Rfc64PublicCatalogServiceV1, 'acceptedPolicySnapshot'> | undefined;
   readonly isJoinDerived: (contextGraphId: string) => boolean;
 }, contextGraphId: string): readonly string[] | null | undefined {
     const service = input.service;
     // RFC-64 policies are keyed by the effective namespaced chain network
     // (for example `otp:20430`). `networkIdentity.networkId` is the DKG
     // genesis hash and must never be used as catalog-policy authority.
-    const activeNetworkId = input.config.networkIdentity?.chainId;
+    const activeNetworkId = input.activeNetworkId;
     if (service !== undefined && activeNetworkId !== undefined) {
       let canonicalNetworkId: NetworkIdV1 | null = null;
       let canonicalContextGraphId: ContextGraphIdV1 | null = null;
@@ -48,7 +52,7 @@ export function resolveRfc64PrivateReadRoster(input: {
     // A configured private selection remains fail-closed until its authority
     // is accepted into the live registry. Bootstrap is a liveness/source hint,
     // not the ownership boundary for query authorization.
-    const configured = input.config.rfc64CatalogBootstrap?.acceptedPolicies.filter(
+    const configured = input.acceptedPolicies?.filter(
       ({ policyEnvelope }) => (
         policyEnvelope.payload.contextGraphId === contextGraphId
         && policyEnvelope.payload.accessPolicy === 1

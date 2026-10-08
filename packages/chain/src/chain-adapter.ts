@@ -1,3 +1,5 @@
+import type { ContextGraphAuthorityIndexRevisionReader } from './context-graph-authority-index-reader.js';
+export type { ContextGraphAuthorityIndexRevisionReader } from './context-graph-authority-index-reader.js';
 import type {
   RandomSamplingAvailability,
 } from './random-sampling-availability.js';
@@ -8,8 +10,6 @@ import type { RpcUsageWindow } from './rpc-usage.js';
 import type { ContextGraphAuthorityIndexSnapshots } from './context-graph-authority-index-snapshot.js';
 import type { ContextGraphAuthorityProjectionServedEvidence } from
   './context-graph-authority-index-projection.js';
-import type { ContextGraphAuthorityIndexId } from
-  './context-graph-authority-index-id.js';
 export type { ContextGraphAuthorityIndexId } from
   './context-graph-authority-index-id.js';
 
@@ -646,65 +646,6 @@ export interface ContextGraphFinalizedCreation {
   readonly accessPolicy: 0 | 1;
 }
 
-/**
- * Logical finalized-authority capability. Callers provide the complete target
- * set for one operation; the chain implementation owns validation, projection,
- * and the single finalized anchor.
- */
-export interface ContextGraphAuthorityIndexRevisionReader {
-  /**
-   * Resolve one RFC-64 authority binding at the index's finalized anchor.
-   * This intentionally differs from the public current-state name resolver.
-   */
-  resolveFinalizedContextGraphIdByNameHash?(
-    nameHash: string,
-    options?: ContextGraphAuthorityReadOptions,
-  ): Promise<bigint | null>;
-  /**
-   * Resolve many unique name commitments from one finalized index projection.
-   * Missing and zero-hash commitments are omitted; ambiguity fails closed.
-   */
-  resolveFinalizedContextGraphIdsByNameHashes?(
-    nameHashes: readonly string[],
-    options?: ContextGraphAuthorityReadOptions,
-  ): Promise<ReadonlyMap<string, bigint>>;
-  /**
-   * Resolve a name commitment and its complete authority state atomically at
-   * one finalized anchor. RFC-64 consumers should prefer this over composing
-   * the single-name ID resolver with a later snapshot read.
-   */
-  resolveFinalizedContextGraphAuthoritySnapshotByNameHash?(
-    nameHash: string,
-    options?: ContextGraphAuthorityReadOptions,
-  ): Promise<ContextGraphAuthoritySnapshot | null>;
-  /**
-   * Resolve many name commitments and their complete authority state from one
-   * finalized index projection. Missing and zero-hash commitments are omitted;
-   * ambiguity fails the whole projection closed.
-   */
-  resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes?(
-    nameHashes: readonly string[],
-    options?: ContextGraphAuthorityReadOptions,
-  ): Promise<ReadonlyMap<string, ContextGraphAuthoritySnapshot>>;
-  readContextGraphAuthorityIndexRevisions(
-    contextGraphIds: readonly ContextGraphAuthorityIndexId[],
-    options?: ContextGraphAuthorityReadOptions,
-  ): Promise<ReadonlyMap<ContextGraphAuthorityIndexId, string>>;
-  /**
-   * Read complete authority snapshots for many graphs at one finalized anchor.
-   * Responsibility selection and immediate authority acceptance share this
-   * projection. Optional so older/custom adapters retain their point-read path.
-   */
-  readContextGraphAuthorityIndexSnapshots?(
-    contextGraphIds: readonly ContextGraphAuthorityIndexId[],
-    options?: ContextGraphAuthorityReadOptions,
-  ): Promise<ReadonlyMap<
-    ContextGraphAuthorityIndexId,
-    ContextGraphAuthoritySnapshot
-  >>;
-  /** Await the physical shared-index scans underlying detached/cancelled waiters. */
-  whenIdle(): Promise<void>;
-}
 
 export class ContextGraphChainScanPartialError extends Error {
   readonly partialResults: ContextGraphOnChain[];
@@ -1493,8 +1434,8 @@ export interface ContextGraphLiveAuthorityReadOptions extends ChainReadOptions {
   freshness?: 'live' | 'bounded';
 }
 
-/** Options honored only by finalized Context Graph authority projections. */
-export interface ContextGraphAuthorityReadOptions extends ChainReadOptions {
+/** Finalized authority projection reads; freshness defaults to live. */
+export interface ContextGraphAuthorityReadOptions extends ChainReadOptions, Pick<ContextGraphLiveAuthorityReadOptions, 'freshness'> {
   /**
    * Finalized Context Graph authority reads only: told how the read was
    * answered. FOUR ways, and a consumer that assumes three will read the
@@ -2396,11 +2337,12 @@ export interface ChainAdapter {
    * or not at all. `null` means no endpoint could produce the view, and the caller must not
    * conclude anything from that.
    *
-   * PR #2300 r11 — it also carries the version's ATTRIBUTION, and it is taken from the MOST
-   * ADVANCED endpoint rather than the first that answers. Both follow from the same requirement:
-   * a caller deciding "is this recovered transaction still current" must not mix a root from one
-   * view with an author, a publisher or a block height from another, and a healthy-but-lagging
-   * endpoint answering first would make an old transaction look current.
+   * Attribution and block evidence belong to that same observation. Configured
+   * RPCs are primary-first fallbacks: the first endpoint supplying a complete
+   * view is authoritative, and unused fallbacks are not queried (GH#3098).
+   * This establishes currency at the selected endpoint's confirmation-depth
+   * block, not freshness against every configured RPC. Consumers still enforce
+   * their known receipt/event/version floors and defer when the view is behind.
    *
    * The pinned height uses `chain.finalityConfirmations`: confirmation 1 is the current head,
    * and larger values pin `head - confirmations + 1`.
@@ -2412,8 +2354,10 @@ export interface ChainAdapter {
 
   /**
    * Cheap lease validation for a previously-read coherent snapshot. A true
-   * result proves that the same finalized block hash and exact physical KAS
-   * binding generation are still current. Missing evidence is always false.
+   * result proves that the first usable configured endpoint still reports the
+   * same confirmation-depth block hash and exact physical KAS binding generation.
+   * A usable differing header returns false immediately; only unavailable or
+   * unusable endpoint evidence advances to a fallback. Missing evidence is false.
    */
   knowledgeAssetVersionSnapshotIsCurrent?(
     kaId: bigint,
