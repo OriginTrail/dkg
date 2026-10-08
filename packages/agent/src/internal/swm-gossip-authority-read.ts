@@ -67,8 +67,12 @@ export class SharedMemoryGossipAuthorityRead {
     const subscribed = this.#subscribedAtCheck;
     const unansweredChecks = recheck.defer(this.contextGraphId, () => {
       // The repeat stands in for this pass. A member subscription that was
-      // withdrawn since the check began has nothing left to decide.
-      if (subscribed && !this.memberSubscribed()) return;
+      // withdrawn since the check began has nothing left to decide, so the
+      // graph is settled: a later subscription starts counting from one.
+      if (subscribed && !this.memberSubscribed()) {
+        recheck.settle(this.contextGraphId);
+        return;
+      }
       pass.askAgain();
     });
     pass.log[unansweredChecks <= 1 ? 'info' : 'debug'](pass.ctx, describeUnansweredAuthorityCheck({

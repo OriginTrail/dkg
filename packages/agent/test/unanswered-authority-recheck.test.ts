@@ -88,6 +88,24 @@ describe('UnansweredAuthorityRecheck', () => {
     expect(asked).toEqual(['b']);
   });
 
+  it('lets an ask settle its own graph and still asks the graphs behind it', () => {
+    const recheck = new UnansweredAuthorityRecheck();
+    const asked: string[] = [];
+    // An owner whose repeat finds nothing left to decide settles in its turn.
+    expect(recheck.defer('a', () => { asked.push('a'); recheck.settle('a'); })).toBe(1);
+    recheck.defer('b', () => { asked.push('b'); });
+
+    vi.advanceTimersByTime(DELAY_MS);
+    expect(asked).toEqual(['a']);
+    expect(vi.getTimerCount()).toBe(1);
+    // Its count went with it.
+    expect(recheck.defer('a', () => { asked.push('a again'); })).toBe(1);
+
+    vi.advanceTimersByTime(2 * DELAY_MS);
+    expect(asked).toEqual(['a', 'b', 'a again']);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('still asks the graphs behind one whose ask throws', () => {
     const recheck = new UnansweredAuthorityRecheck();
     const asked: string[] = [];

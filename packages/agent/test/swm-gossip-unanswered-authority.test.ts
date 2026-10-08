@@ -358,6 +358,40 @@ describe('shared-memory gossip reconcile whose authority check gets no answer', 
     }
   });
 
+  it('starts counting at one again for a graph subscribed anew after its withdrawn subscription was dropped', async () => {
+    const host = await subscribedHost([publicGraph, notAdmitted]);
+    const { authorityReads, h, internals, logged } = host;
+    useFakeClock();
+    try {
+      await host.reconcile();
+      await host.reconcile();
+      expect(host.waiting()).toBe(1);
+
+      h.agent.unsubscribeFromContextGraph(localCgId, { persist: false });
+      await vi.advanceTimersByTimeAsync(RECHECK_MS);
+      await host.settled();
+      expect(authorityReads).toHaveBeenCalledTimes(2);
+      expect(host.waiting()).toBe(0);
+
+      // Subscribed anew, and its first check gets no answer: a first one,
+      // said where an operator sees it.
+      internals.subscribedContextGraphs.set(localCgId, {
+        ...internals.subscribedContextGraphs.get(localCgId),
+        subscribed: true,
+      });
+      await host.reconcile();
+      expect(authorityReads).toHaveBeenCalledTimes(3);
+      expect(logged('info')).toEqual([
+        waitingLine('chain-access-policy-unavailable', 'the subscription is kept'),
+        waitingLine('chain-access-policy-unavailable', 'not subscribed yet'),
+      ]);
+      expect(logged('debug')).toEqual([]);
+      expect(host.waiting()).toBe(1);
+    } finally {
+      await host.close();
+    }
+  });
+
   it('asks again a graph it was reconciling without a member subscription', async () => {
     const host = await subscribedHost([notAdmitted, publicGraph]);
     const { authorityReads, internals } = host;
