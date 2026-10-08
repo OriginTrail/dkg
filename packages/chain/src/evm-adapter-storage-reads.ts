@@ -21,8 +21,8 @@ import {
 } from './evm-knowledge-asset-update-context.js';
 import { confirmedStateBlockAtHead } from './evm-adapter-constants.js';
 import { isContractViewRetryable } from './rpc-failover-client.js';
-import { classifyRpcRetryDisposition } from './evm-adapter-rpc.js';
 import { readFirstProviderWithTransientRetry } from './rpc-provider-fallback.js';
+import { readRpcTuple } from './rpc-read-lifecycle.js';
 import { activeRpcRequestAbortSignal } from './rpc-request-transport.js';
 import { withRpcUsageConsumer } from './rpc-usage.js';
 
@@ -121,16 +121,6 @@ export class StorageReadMethods extends EVMChainAdapterBase {
     const knowledgeAssetStorageAddress = this.knowledgeAssetStorageBindingAddress(kas);
     const knowledgeAssetStorageGeneration = this.knowledgeAssetStorageBindingGeneration;
     if (knowledgeAssetStorageAddress === undefined) return null;
-    const resolutionAbort = new AbortController();
-    const resolutionSignal = options.signal
-      ? AbortSignal.any([resolutionAbort.signal, options.signal])
-      : resolutionAbort.signal;
-    const observeLocalPressure = <T>(read: Promise<T>): Promise<T> => read.catch((error) => {
-      // End resolution as soon as shared capacity fails. Waiting for a hung
-      // sibling would let its endpoint timeout mask this operation verdict.
-      if (classifyRpcRetryDisposition(error) === 'retry-later') resolutionAbort.abort(error);
-      throw error;
-    });
     const readOne = async (provider: JsonRpcProvider, signal?: AbortSignal) => {
       signal?.throwIfAborted();
       if (!this.knowledgeAssetStorageBindingIsCurrent(
@@ -183,24 +173,13 @@ export class StorageReadMethods extends EVMChainAdapterBase {
         || !ethers.isHexString(block.hash, 32)) return null;
       const bound = this.rebindContract(kas as Contract, provider);
       const at = { blockTag: blockNumber };
-      // Keep the endpoint deadline active until every tuple read settles. An
-      // early failure must not abandon hanging sibling requests beside a new
-      // fallback attempt; the existing timeout cancels those physical reads.
-      const [rootRead, contextRead, authorRead, publisherRead] = await Promise.allSettled([
-        observeLocalPressure(bound.getLatestMerkleRoot(kaId, at) as Promise<string>),
-        observeLocalPressure(bound.getKnowledgeAssetUpdateContext(kaId, at)),
-        observeLocalPressure(bound.getLatestMerkleRootAuthor(kaId, at) as Promise<string>),
-        observeLocalPressure(bound.getLatestMerkleRootPublisher(kaId, at) as Promise<string>),
+      const [latestRoot, context, latestAuthor, latestPublisher] = await readRpcTuple([
+        () => bound.getLatestMerkleRoot(kaId, at) as Promise<string>,
+        () => bound.getKnowledgeAssetUpdateContext(kaId, at),
+        () => bound.getLatestMerkleRootAuthor(kaId, at) as Promise<string>,
+        () => bound.getLatestMerkleRootPublisher(kaId, at) as Promise<string>,
       ]);
       signal?.throwIfAborted();
-      if (rootRead.status === 'rejected') throw rootRead.reason;
-      if (contextRead.status === 'rejected') throw contextRead.reason;
-      if (authorRead.status === 'rejected') throw authorRead.reason;
-      if (publisherRead.status === 'rejected') throw publisherRead.reason;
-      const latestRoot = rootRead.value;
-      const context = contextRead.value;
-      const latestAuthor = authorRead.value;
-      const latestPublisher = publisherRead.value;
       if (!latestRoot || !latestAuthor || !latestPublisher) return null;
       if (!this.knowledgeAssetStorageBindingIsCurrent(
         kas,
@@ -222,7 +201,7 @@ export class StorageReadMethods extends EVMChainAdapterBase {
     const view = await readFirstProviderWithTransientRetry(this.providers, readOne, {
       retryDelayMs: VERSION_SNAPSHOT_TRANSIENT_RETRY_DELAY_MS,
       isRetryable: isContractViewRetryable,
-      signal: resolutionSignal,
+      signal: options.signal,
     });
     if (!view || options.signal?.aborted || activeRpcRequestAbortSignal()?.aborted) return null;
     return this.knowledgeAssetStorageBindingIsCurrent(

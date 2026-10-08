@@ -10,7 +10,7 @@ import { describe, expect, it } from 'vitest';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import { loadAbi } from '../src/evm-adapter-abi.js';
 import { RPC_READ_STALL_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
-import { RpcRequestGovernorQueueFullError } from '../src/rpc-request-governor.js';
+import { RpcRequestGovernor, RpcRequestGovernorQueueFullError } from '../src/rpc-request-governor.js';
 import {
   CHAIN_ID_HEX,
   createLoopbackJsonRpcTestHarness,
@@ -289,5 +289,91 @@ describe('coherent snapshot tuple settlement over real HTTP', () => {
       await result?.catch(() => {});
     }
   }, 4_000);
+
+
+  it('healthy primary completes a coherent tuple under real one-per-second governor pacing without fallback', async () => {
+    const harness = createLoopbackJsonRpcTestHarness();
+    const cleanup = new AbortController();
+    const deadline = setTimeout(() => cleanup.abort(new Error('paced snapshot test deadline')), 15_000);
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 1, burstRequests: 1,
+      foregroundReservePercent: 0, startupJitterMs: 0,
+    });
+    let adapter: EVMChainAdapter | undefined;
+    const primaryDispatchTimes: number[] = [];
+    const anchorNumber = BLOCK_NUMBER - 3 + 1;
+    const anchorHash = `0x${'77'.repeat(32)}`;
+    const healthy = (times: number[]) => harness.start((request, response) => {
+      times.push(performance.now());
+      if (request.method === 'eth_chainId') {
+        sendJsonRpcResult(response, request, CHAIN_ID_HEX);
+        return;
+      }
+      if (request.method === 'eth_getBlockByNumber') {
+        const latest = request.params[0] === 'latest';
+        sendJsonRpcResult(response, request, { ...blockResult(),
+          number: `0x${(latest ? BLOCK_NUMBER : anchorNumber).toString(16)}`,
+          hash: latest ? BLOCK_HASH : anchorHash });
+        return;
+      }
+      if (request.method !== 'eth_call') throw new Error(`Unexpected RPC ${request.method}`);
+      const call = request.params[0] as { data: string };
+      const method = iface.parseTransaction({ data: call.data })!.name;
+      sendJsonRpcResult(response, request, resultFor(method));
+    });
+    try {
+      const primary = await healthy(primaryDispatchTimes);
+      const fallback = await healthy([]);
+      adapter = new EVMChainAdapter({
+        rpcUrl: primary.url, rpcUrls: [primary.url, fallback.url],
+        // Public local development key; the real loopback servers implement reads only.
+        privateKey: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
+        hubAddress: `0x${'11'.repeat(20)}`, chainId: 'evm:31337',
+        staticNetwork: true, finalityConfirmations: 3, rpcRequestAdmission: governor,
+      });
+      const mutable = adapter as unknown as {
+        initialized: boolean;
+        providers: JsonRpcProvider[];
+        contracts: { knowledgeAssetStorage: Contract };
+        ensureConfiguredStaticChainIdValidated: (provider: JsonRpcProvider) => Promise<bigint>;
+      };
+      mutable.initialized = true;
+      mutable.contracts.knowledgeAssetStorage = new Contract(KAS_ADDRESS, ABI, mutable.providers[0]);
+      // Populate the actual configured-chain cache via real RPC, outside the
+      // measured resolution. No fake providers, clocks, governor or validation.
+      await mutable.ensureConfiguredStaticChainIdValidated(mutable.providers[0]);
+      await mutable.ensureConfiguredStaticChainIdValidated(mutable.providers[1]);
+      expect(primary.calls.map((call) => call.method)).toEqual(['eth_chainId']);
+      expect(fallback.calls.map((call) => call.method)).toEqual(['eth_chainId']);
+      primary.calls.length = 0; fallback.calls.length = 0; primaryDispatchTimes.length = 0;
+      const before = governor.snapshot();
+      const startedAt = performance.now();
+      const snapshot = await adapter.readKnowledgeAssetVersionSnapshot(KA_ID, { signal: cleanup.signal });
+      // Six immediate responses need at least five seconds of legitimate
+      // admission spacing. A 4s aggregate endpoint timer cannot finish this
+      // healthy tuple and must not blame the endpoint or consult its backup.
+      expect(snapshot).toMatchObject({
+        knowledgeAssetId: KA_ID, latestRoot: FALLBACK_ROOT, rootCount: 5n,
+        latestAuthor: AUTHOR, latestPublisher: PUBLISHER,
+        blockNumber: anchorNumber, blockHash: anchorHash,
+        knowledgeAssetStorageAddress: KAS_ADDRESS, knowledgeAssetStorageGeneration: 0,
+      });
+      expect(fallback.calls).toEqual([]);
+      expect(primary.calls.filter((call) => call.method === 'eth_getBlockByNumber')
+        .map((call) => call.params[0])).toEqual(['latest', `0x${anchorNumber.toString(16)}`]);
+      const tupleCalls = primary.calls.filter((call) => call.method === 'eth_call');
+      expect(tupleCalls).toHaveLength(4);
+      expect(tupleCalls.map((call) => iface.parseTransaction({ data: (call.params[0] as { data: string }).data })!.name).sort())
+        .toEqual(['getLatestMerkleRoot', 'getKnowledgeAssetUpdateContext', 'getLatestMerkleRootAuthor', 'getLatestMerkleRootPublisher'].sort());
+      expect(tupleCalls.every((call) => call.params[1] === `0x${anchorNumber.toString(16)}`)).toBe(true);
+      expect(primary.calls).toHaveLength(6);
+      const after = governor.snapshot();
+      expect(after.foregroundAdmitted + after.backgroundAdmitted - before.foregroundAdmitted - before.backgroundAdmitted).toBe(6);
+      expect(primaryDispatchTimes.at(-1)! - primaryDispatchTimes[0]).toBeGreaterThanOrEqual(4_800);
+      expect(performance.now() - startedAt).toBeLessThan(13_000);
+    } finally {
+      clearTimeout(deadline); cleanup.abort(); adapter?.destroy(); await harness.stopAll();
+    }
+  }, 17_000);
 
 });

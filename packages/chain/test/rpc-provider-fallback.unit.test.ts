@@ -9,9 +9,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readFirstProviderWithTransientRetry } from '../src/rpc-provider-fallback.js';
 import { isContractViewRetryable } from '../src/rpc-failover-client.js';
 import { RpcRequestGovernorQueueFullError } from '../src/rpc-request-governor.js';
+import { createRpcTimeoutError } from '../src/chain-rpc-transport-error.js';
 import {
   activeRpcRequestContext,
   withRpcRequestContext,
+  waitForActiveRpcRequest,
+  type RpcRequestContext,
+  type RpcResponseStallPolicy,
 } from '../src/rpc-request-transport.js';
 
 const options = { retryDelayMs: 1, isRetryable: isContractViewRetryable };
@@ -246,9 +250,9 @@ describe('readFirstProviderWithTransientRetry', () => {
     const result = readFirstProviderWithTransientRetry(
       ['primary', 'fallback'],
       async (provider) => { attempts.push(provider); throw transient(); },
-      { ...options, retryDelayMs: 5_000, signal: controller.signal },
+      { ...options, retryDelayMs: 250, signal: controller.signal },
     );
-    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(100);
     expect(attempts).toEqual(['primary']);
     controller.abort();
     await expect(result).resolves.toBeNull();
@@ -256,73 +260,159 @@ describe('readFirstProviderWithTransientRetry', () => {
     expect(attempts).toEqual(['primary']);
   });
 
-  it('caps the whole hung multi-RPC endpoint at four seconds and aborts it before fallback', async () => {
+  it('configures a four-second physical response policy without capping a paced whole callback', async () => {
     vi.useFakeTimers();
+    const gate = deferred<string>();
+    const started = deferred<void>();
     const attempts: string[] = [];
+    let policy: RpcResponseStallPolicy | undefined;
     let primarySignal: AbortSignal | undefined;
+    let settled = false;
     const result = readFirstProviderWithTransientRetry(
       ['primary', 'fallback'],
-      (provider, signal) => {
+      async (provider, signal) => {
         attempts.push(provider);
-        if (provider === 'primary') {
-          primarySignal = signal;
-          return new Promise<never>(() => {});
-        }
-        expect(primarySignal?.aborted).toBe(true);
-        return Promise.resolve('fallback view');
+        primarySignal = signal;
+        policy = activeRpcRequestContext().responseStallPolicy;
+        expect(activeRpcRequestContext().signal).toBe(signal);
+        started.resolve();
+        // No raw response has been admitted here. Admission/staged work may
+        // legitimately take longer than the per-physical-response stall cap.
+        return waitForActiveRpcRequest(gate.promise);
       },
       options,
-    );
-    await vi.advanceTimersByTimeAsync(3_999);
+    ).then((value) => { settled = true; return value; });
+    await started.promise;
+    expect(policy?.timeoutMs).toBe(4_000);
+    expect(policy?.onTimeout).toBeTypeOf('function');
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(settled).toBe(false);
+    expect(primarySignal?.aborted).toBe(false);
     expect(attempts).toEqual(['primary']);
-    await vi.advanceTimersByTimeAsync(1);
-    await expect(result).resolves.toBe('fallback view');
-    expect(attempts).toEqual(['primary', 'fallback']);
-    await vi.advanceTimersByTimeAsync(10_000);
-    expect(attempts).toEqual(['primary', 'fallback']);
+    gate.resolve('paced primary view');
+    await expect(result).resolves.toBe('paced primary view');
+    expect(attempts).toEqual(['primary']);
+    expect(primarySignal?.aborted).toBe(true); // Successful endpoint scope is retired too.
+    expect(activeRpcRequestContext().responseStallPolicy).toBeUndefined();
   });
 
-  it('times out retry backoff as part of the endpoint budget, with no detached late retry', async () => {
+  it('does not retry a full TIMEOUT and retires its endpoint signal before the next provider', async () => {
     vi.useFakeTimers();
+    const caller = new AbortController();
     const attempts: string[] = [];
-    const result = readFirstProviderWithTransientRetry(
-      ['primary', 'fallback'],
-      async (provider) => {
-        attempts.push(provider);
-        if (provider === 'primary') throw transient();
-        return 'fallback view';
-      },
-      { ...options, retryDelayMs: 5_000 },
-    );
-    await vi.advanceTimersByTimeAsync(4_000);
-    await expect(result).resolves.toBe('fallback view');
-    await vi.advanceTimersByTimeAsync(10_000);
-    expect(attempts).toEqual(['primary', 'fallback']);
-  });
-
-  it('gives delayed endpoint stages the expired signal so they cannot issue late reads', async () => {
-    vi.useFakeTimers();
-    const gate = deferred<void>();
-    const lateReads: string[] = [];
     let primarySignal: AbortSignal | undefined;
     const result = readFirstProviderWithTransientRetry(
       ['primary', 'fallback'],
       async (provider, signal) => {
-        if (provider === 'fallback') return 'fallback view';
+        attempts.push(provider);
+        expect(activeRpcRequestContext().responseStallPolicy?.timeoutMs).toBe(4_000);
+        if (provider === 'primary') {
+          primarySignal = signal;
+          throw Object.assign(new Error('admitted physical response stalled'), { code: 'TIMEOUT' });
+        }
+        expect(primarySignal?.aborted).toBe(true);
+        expect(signal).not.toBe(primarySignal);
+        expect(signal?.aborted).toBe(false);
+        expect(caller.signal.aborted).toBe(false);
+        return 'fallback view';
+      },
+      // Even an overly permissive caller classifier must not retry a full stall.
+      { retryDelayMs: 250, isRetryable: () => true, signal: caller.signal },
+    );
+    await vi.advanceTimersByTimeAsync(250);
+    await expect(result).resolves.toBe('fallback view');
+    expect(attempts).toEqual(['primary', 'fallback']);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(attempts).toEqual(['primary', 'fallback']);
+    expect(caller.signal.aborted).toBe(false);
+  });
+
+  it('owned response onTimeout cancels an abort-aware thunk without a detached late stage', async () => {
+    vi.useFakeTimers();
+    const gate = deferred<void>();
+    const started = deferred<void>();
+    const caller = new AbortController();
+    const attempts: string[] = [];
+    const lateReads: string[] = [];
+    let policy: RpcResponseStallPolicy | undefined;
+    let primarySignal: AbortSignal | undefined;
+    let observedError: unknown;
+    const result = readFirstProviderWithTransientRetry(
+      ['primary', 'fallback'],
+      async (provider, signal) => {
+        attempts.push(provider);
+        if (provider === 'fallback') {
+          expect(primarySignal?.aborted).toBe(true);
+          expect(signal?.aborted).toBe(false);
+          return 'fallback view';
+        }
         primarySignal = signal;
-        await gate.promise;
+        policy = activeRpcRequestContext().responseStallPolicy;
+        started.resolve();
+        try {
+          // Physical timeout dispatch is proved by the transport/settlement
+          // cases. This unit test drives the actual scope callback and waiter.
+          await waitForActiveRpcRequest(gate.promise);
+        } catch (error) {
+          observedError = error;
+          throw error;
+        }
         signal?.throwIfAborted();
         lateReads.push(provider);
         return 'late primary view';
       },
-      options,
+      { ...options, retryDelayMs: 250, signal: caller.signal },
     );
-    await vi.advanceTimersByTimeAsync(4_000);
+    await started.promise;
+    const timeout = createRpcTimeoutError('admitted RPC response exceeded its stall policy');
+    expect(policy?.timeoutMs).toBe(4_000);
+    expect(policy?.onTimeout).toBeTypeOf('function');
+    policy!.onTimeout!(timeout);
     await expect(result).resolves.toBe('fallback view');
-    expect(primarySignal?.aborted).toBe(true);
+    expect(observedError).toBe(timeout);
+    expect(primarySignal?.reason).toBe(timeout);
+    expect(caller.signal.aborted).toBe(false);
+    expect(attempts).toEqual(['primary', 'fallback']);
     gate.resolve();
     await vi.advanceTimersByTimeAsync(10_000);
     expect(lateReads).toEqual([]);
+    expect(attempts).toEqual(['primary', 'fallback']);
+  });
+
+  it('bounds transient backoff at 250ms while retaining response policy and inherited context', async () => {
+    vi.useFakeTimers();
+    const caller = new AbortController();
+    const onProgress = vi.fn();
+    const attempts: string[] = [];
+    const contexts: RpcRequestContext[] = [];
+    const result = withRpcRequestContext({
+      signal: caller.signal, requestClass: 'background', admissionPriority: 'authority', onProgress,
+    }, () => readFirstProviderWithTransientRetry(
+      ['primary', 'fallback'],
+      async (provider, signal) => {
+        attempts.push(provider);
+        const context = activeRpcRequestContext();
+        contexts.push(context);
+        expect(context).toMatchObject({ signal, requestClass: 'background', admissionPriority: 'authority', onProgress });
+        expect(context.responseStallPolicy?.timeoutMs).toBe(4_000);
+        expect(context.responseStallPolicy?.onTimeout).toBeTypeOf('function');
+        expect(signal?.aborted).toBe(false);
+        if (attempts.length === 1) throw transient();
+        return 'recovered primary view';
+      },
+      { ...options, retryDelayMs: 250 },
+    ));
+    await vi.advanceTimersByTimeAsync(249);
+    expect(attempts).toEqual(['primary']);
+    expect(contexts[0].signal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(result).resolves.toBe('recovered primary view');
+    expect(attempts).toEqual(['primary', 'primary']);
+    expect(contexts[1].signal).toBe(contexts[0].signal);
+    expect(contexts[1].responseStallPolicy).toBe(contexts[0].responseStallPolicy);
+    expect(contexts[0].signal?.aborted).toBe(true);
+    expect(caller.signal.aborted).toBe(false);
+    expect(activeRpcRequestContext().responseStallPolicy).toBeUndefined();
   });
 
   it('retains uncapped single-endpoint policy beyond the multi-RPC timeout', async () => {

@@ -15,7 +15,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import { RPC_READ_STALL_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
-import { withRpcRequestContext } from '../src/rpc-request-transport.js';
+import { withRpcRequestContext, withRpcRequestTimeout } from '../src/rpc-request-transport.js';
 import { RpcRequestGovernorQueueFullError } from '../src/rpc-request-governor.js';
 
 const KA_ID = 7n;
@@ -451,12 +451,19 @@ describe('EVMChainAdapter.readKnowledgeAssetVersionSnapshot [GH#2270 PR#2300]', 
     }
   });
 
-  it('a stalled primary reaches fallback1 within the endpoint cap and is not retried later', async () => {
-    const { adapter, attempts } = adapterOver([
+  it('a primary head response timeout reaches fallback1 and is not retried later', async () => {
+    const { adapter, attempts, providers } = adapterOver([
       { blockNumber: 999, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 9n, stall: true },
       { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
       { blockNumber: 900, latestRoot: `0x${'bb'.repeat(32)}`, rootCount: 5n },
     ]);
+    // This scripted provider has no physical transport. Model its response
+    // deadline explicitly; the complete coherent operation has no aggregate
+    // timer because supported governor pacing can legitimately exceed 4s.
+    const readHead = providers[0].getBlock.bind(providers[0]);
+    providers[0].getBlock = (tag) => withRpcRequestTimeout(
+      RPC_READ_STALL_TIMEOUT_MS, 'scripted head response', () => readHead(tag),
+    );
     const controller = new AbortController();
     let result: unknown;
     vi.useFakeTimers();
