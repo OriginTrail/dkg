@@ -443,6 +443,8 @@ const timestampsParser = objectParser<LiftJobTimestamps>({
   validatedAt: optional(numberParser),
   broadcastAt: optional(numberParser),
   rpcAcceptedAt: optional(numberParser),
+  receiptObservedAt: optional(numberParser),
+  finalityObservedAt: optional(numberParser),
   includedAt: optional(numberParser),
   finalizedAt: optional(numberParser),
   failedAt: optional(numberParser),
