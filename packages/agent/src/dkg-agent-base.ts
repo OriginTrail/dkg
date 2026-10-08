@@ -282,6 +282,7 @@ import {
   verifyCgDiscoveryBeacon,
 } from './swm/cg-discovery-beacon.js';
 import { DiscoveryRateLimit } from './swm/discovery-rate-limit.js';
+import { NamedKaRecoveryPendingLog } from './named-ka-recovery-pending-log.js';
 import {
   decodeSwmHostCatchupRequest,
   encodeSwmHostCatchupRequest,
@@ -717,6 +718,8 @@ export class DKGAgentBase {
    */
   protected readonly reconciledKaAuthors = new Set<string>();
   protected readonly log = new Logger('DKGAgent');
+  /** Rate limit for the "Named KA recovery ... remains pending" warning. */
+  protected readonly namedKaRecoveryPendingLog = new NamedKaRecoveryPendingLog();
 
   /**
    * Per-cgId count of SWM gossip publish failures. Populated by

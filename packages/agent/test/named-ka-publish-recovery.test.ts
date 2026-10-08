@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
 import {
+  EVMChainAdapter,
   MockChainAdapter,
   buildKnowledgeAssetUal,
+  type KnowledgeAssetVersionSnapshotReadOptions,
+  type KnowledgeAssetVersionSnapshotUnavailable,
 } from '@origintrail-official/dkg-chain';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -12,7 +15,10 @@ import type {
   AsyncKnowledgeAssetVmPublishRecoveryEvidence,
   KnowledgeAssetVmPublishRequest,
 } from '@origintrail-official/dkg-publisher';
+import type { DKGAgent } from '../src/dkg-agent.js';
+import { PublishMethods } from '../src/dkg-agent-publish.js';
 import { normalizeRecoveredNamedKaPublish } from '../src/named-ka-publish-recovery.js';
+import { NamedKaRecoveryPendingLog } from '../src/named-ka-recovery-pending-log.js';
 
 // Regression suite for GH#1966: a confirmed named-KA publish must recover even
 // when the recovery resolver returns the GRAPH-LOCAL UAL (author + low-96 KA
@@ -759,3 +765,296 @@ describe('normalizeRecoveredNamedKaPublish — fail-closed boundary (GH#1966)', 
 // getBlockNumber, which MockChainAdapter does not implement — it is covered by
 // the real-Hardhat e2e (e2e-memory-layers.test.ts). This suite intentionally
 // keeps every KA non-superseded via seededChain().
+
+// ---------------------------------------------------------------------------
+// The deferral says why: which chain endpoint gave no view
+// ---------------------------------------------------------------------------
+//
+// A confirmed publish used to stay "pending" behind one endpoint that refused block-pinned reads,
+// with a line per tick and nothing naming the endpoint. The rule that defers is unchanged (the
+// rows above still hold as written); these rows are about what the deferral now carries.
+
+const NO_VIEW_DEFERRAL = 'Named KA recovery rejected for "campaign-v2-3p95mib-ka-018": '
+  + 'the current KA version could not be established from a single coherent chain view; '
+  + 'recovery is deferred rather than deciding supersession from a weaker signal';
+
+const REFUSING: KnowledgeAssetVersionSnapshotUnavailable = {
+  reason: 'endpoints-failed',
+  endpointCount: 5,
+  endpoints: [{
+    position: 3,
+    host: 'rpc.example',
+    stage: 'pinned-read',
+    failure: 'http-client-error',
+    httpStatus: 400,
+  }],
+};
+const REFUSING_WORDS = 'endpoint 3 of 5 (rpc.example) refused a block-pinned read (http 400)';
+
+type SnapshotRead = (
+  kaId: bigint,
+  options?: KnowledgeAssetVersionSnapshotReadOptions,
+) => Promise<unknown>;
+
+function chainWithSnapshotRead(read: SnapshotRead): MockChainAdapter {
+  const chain = seededChain();
+  (chain as unknown as { readKnowledgeAssetVersionSnapshot: SnapshotRead })
+    .readKnowledgeAssetVersionSnapshot = read;
+  return chain;
+}
+
+/** Evidence that carries a history position, so a missing view defers. */
+function positionedEvidence(): AsyncKnowledgeAssetVmPublishRecoveryEvidence {
+  return recoveryEvidence(GRAPH_LOCAL_UAL, {
+    publishProof: { merkleRoot: SEAL_MERKLE_ROOT, authorAddress: AUTHOR, txIndex: 4, merkleRootCount: '1' },
+  });
+}
+
+describe('normalizeRecoveredNamedKaPublish — the deferral names the endpoint', () => {
+  it('appends what the adapter reported and carries the report, still as a deferral', async () => {
+    const chain = chainWithSnapshotRead(async (_kaId, options) => {
+      options?.onUnavailable?.(REFUSING);
+      return null;
+    });
+
+    await expect(normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: positionedEvidence(),
+    })).rejects.toMatchObject({
+      ...REJECTS,
+      message: `${NO_VIEW_DEFERRAL}: ${REFUSING_WORDS}`,
+      versionViewUnavailable: REFUSING,
+    });
+  });
+
+  it('says exactly what it said before when the adapter reports nothing', async () => {
+    const chain = chainWithSnapshotRead(async () => null);
+
+    await expect(normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: positionedEvidence(),
+    })).rejects.toMatchObject({ ...REJECTS, message: NO_VIEW_DEFERRAL, versionViewUnavailable: undefined });
+  });
+
+  it('never decides from the report: a view is used whatever was reported beside it', async () => {
+    const chain = chainWithSnapshotRead(async (_kaId, options) => {
+      options?.onUnavailable?.(REFUSING);
+      return { latestRoot: SEAL_MERKLE_ROOT, rootCount: 1n, latestAuthor: AUTHOR, latestPublisher: PUBLISHER, blockNumber: 300 };
+    });
+
+    const result = await normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: positionedEvidence(),
+    });
+
+    expect(result.materialization.superseded).toBe(false);
+  });
+
+  it('never decides from the report: legacy evidence still settles by the latest root', async () => {
+    const chain = chainWithSnapshotRead(async (_kaId, options) => {
+      options?.onUnavailable?.(REFUSING);
+      return null;
+    });
+
+    const result = await normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: recoveryEvidence(GRAPH_LOCAL_UAL),
+    });
+
+    expect(result.materialization).toMatchObject({ superseded: false, merkleRoot: SEAL_MERKLE_ROOT });
+  });
+
+  it.each([
+    [
+      'names the endpoint the deadline was waiting on while the others had answered',
+      {
+        reason: 'aborted',
+        endpointCount: 5,
+        endpoints: [{ position: 3, host: 'rpc.example', stage: 'pinned-read', failure: 'no-answer' }],
+      } satisfies KnowledgeAssetVersionSnapshotUnavailable,
+      'named-KA recovery deadline reached before the chain reads completed: '
+      + 'endpoint 3 of 5 (rpc.example) had not answered a block-pinned read when the read was cancelled',
+    ],
+    [
+      'names no endpoint when the deadline found every one of them still in flight',
+      {
+        reason: 'aborted',
+        endpointCount: 2,
+        endpoints: [
+          { position: 1, host: 'a.example', stage: 'head-block', failure: 'no-answer' },
+          { position: 2, host: 'b.example', stage: 'head-block', failure: 'no-answer' },
+        ],
+      } satisfies KnowledgeAssetVersionSnapshotUnavailable,
+      'named-KA recovery deadline reached before the chain reads completed',
+    ],
+  ])('a deadline during the version read %s', async (_name, report, message) => {
+    const controller = new AbortController();
+    const chain = chainWithSnapshotRead(async (_kaId, options) => {
+      controller.abort();
+      options?.onUnavailable?.(report);
+      return null;
+    });
+
+    await expect(normalizeRecoveredNamedKaPublish({
+      chain,
+      request: baseRequest(),
+      queued: queuedTx(),
+      recovery: positionedEvidence(),
+      signal: controller.signal,
+    })).rejects.toMatchObject({ name: 'RecoveryDeadlineReachedError', message, versionViewUnavailable: report });
+  });
+});
+
+type RecoveryInput = Parameters<DKGAgent['finalizeRecoveredQueuedKnowledgeAssetVmPublish']>[0];
+
+/** The agent's recovery finalizer over `chain`, with its log captured and its clock in hand. */
+function recoveryFinalizer(chain: unknown) {
+  const clock = { now: 1_000_000 };
+  const warned: string[] = [];
+  const host = {
+    chain,
+    log: { warn: (_ctx: unknown, line: string) => { warned.push(line); }, info: () => {} },
+    namedKaRecoveryPendingLog: new NamedKaRecoveryPendingLog({ now: () => clock.now }),
+    _finalizeRecoveredQueuedKnowledgeAssetVmPublish:
+      PublishMethods.prototype._finalizeRecoveredQueuedKnowledgeAssetVmPublish,
+  };
+  const input = {
+    walletId: 'wallet-1',
+    request: baseRequest(),
+    job: { jobId: 'job-1', status: 'included', broadcast: { merkleRoot: SEAL_MERKLE_ROOT } },
+    lookup: { txHash: TX_HASH, walletId: 'wallet-1' },
+    recovery: positionedEvidence(),
+  } as unknown as RecoveryInput;
+  /** One recovery tick, ten seconds after the last. Resolves to what the tick rejected with. */
+  const tick = async (): Promise<unknown> => {
+    clock.now += 10_000;
+    return PublishMethods.prototype.finalizeRecoveredQueuedKnowledgeAssetVmPublish
+      .call(host as unknown as DKGAgent, input)
+      .then(() => undefined, (error: unknown) => error);
+  };
+  return { host, warned, tick, clock };
+}
+
+describe('finalizeRecoveredQueuedKnowledgeAssetVmPublish — the pending warning', () => {
+  it('names the endpoint once, then stays quiet while every tick still defers', async () => {
+    const { warned, tick } = recoveryFinalizer(chainWithSnapshotRead(async (_kaId, options) => {
+      options?.onUnavailable?.(REFUSING);
+      return null;
+    }));
+
+    const errors = [];
+    for (let ticks = 0; ticks < 12; ticks += 1) errors.push(await tick());
+
+    // Twelve ticks used to be twelve lines.
+    expect(warned).toEqual([
+      `Named KA recovery for "campaign-v2-3p95mib-ka-018" remains pending: ${NO_VIEW_DEFERRAL}: ${REFUSING_WORDS}`,
+    ]);
+    // Every one of them is still the same deferral to the publisher.
+    expect(errors).toHaveLength(12);
+    for (const error of errors) expect(error).toMatchObject(REJECTS);
+  });
+
+  it('tells the operator what to do once the endpoint has held recovery for five minutes', async () => {
+    const { warned, tick } = recoveryFinalizer(chainWithSnapshotRead(async (_kaId, options) => {
+      options?.onUnavailable?.(REFUSING);
+      return null;
+    }));
+
+    for (let ticks = 0; ticks < 31; ticks += 1) await tick();
+
+    expect(warned).toHaveLength(2);
+    expect(warned[1]).toBe(
+      'Operator action needed: publishes confirmed on chain are not finalizing on this node '
+      + `(1 pending, 5 min) because ${REFUSING_WORDS}. `
+      + 'The current-version read needs a complete answer from every configured chain endpoint at one '
+      + 'pinned block. Fix the named endpoint, or replace or remove it in the chain RPC configuration '
+      + '(rpcUrl / rpcUrls) and restart the node; the pending publishes then finalize without being sent again.',
+    );
+  });
+
+  it('a finalized recovery clears the asset, so a later deferral is reported again', async () => {
+    const finalizer = recoveryFinalizer(chainWithSnapshotRead(async (_kaId, options) => {
+      options?.onUnavailable?.(REFUSING);
+      return null;
+    }));
+    const { host, warned, tick } = finalizer;
+    const deferring = host._finalizeRecoveredQueuedKnowledgeAssetVmPublish;
+
+    await tick();
+    await tick();
+    expect(warned).toHaveLength(1);
+
+    host._finalizeRecoveredQueuedKnowledgeAssetVmPublish = async () => {};
+    expect(await tick()).toBeUndefined();
+    host._finalizeRecoveredQueuedKnowledgeAssetVmPublish = deferring;
+    await tick();
+
+    expect(warned).toHaveLength(2);
+    expect(warned[1]).toBe(warned[0]);
+  });
+
+  it('from the chain adapter to the log line: a refused pinned read is named, and its URL is not', async () => {
+    // The real adapter over scripted endpoints. The third refuses the read pinned to a block
+    // number, the way an endpoint without historical state does; the others serve it.
+    const urls = ['one', 'two', 'three'].map(
+      (name) => `https://${name}.example/v3/SECRET-PATH-KEY?apikey=SECRET-QUERY-KEY`,
+    );
+    const adapter = new EVMChainAdapter({
+      rpcUrl: urls[0],
+      rpcUrls: urls.slice(1),
+      privateKey: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
+      hubAddress: '0x0000000000000000000000000000000000000001',
+      chainId: CHAIN_ID,
+      staticNetwork: false,
+      finalityConfirmations: 1,
+    } as never) as unknown as Record<string, unknown>;
+    const providers = urls.map((url) => ({
+      url,
+      async getNetwork() { return { chainId: 31337n }; },
+      async getBlock() { return { number: 500, hash: `0x${'50'.repeat(32)}` }; },
+    }));
+    adapter.initialized = true;
+    adapter.init = async () => {};
+    adapter.ensureConfiguredStaticChainIdValidated = async () => 31337n;
+    adapter.contracts = { knowledgeAssetStorage: { target: `0x${'33'.repeat(20)}` } };
+    adapter.providers = providers;
+    adapter.rebindContract = (_contract: unknown, provider: (typeof providers)[number]) => ({
+      async getLatestMerkleRoot() {
+        if (provider.url === urls[2]) {
+          // The shape ethers gives an HTTP 400: the request URL, key and all, is in the message.
+          throw Object.assign(new Error(`server response 400 Bad Request (request={ url: "${provider.url}" })`), {
+            code: 'SERVER_ERROR',
+            response: { statusCode: 400 },
+            info: { requestUrl: provider.url, responseStatus: '400 Bad Request' },
+          });
+        }
+        return SEAL_MERKLE_ROOT;
+      },
+      async getKnowledgeAssetUpdateContext() { return { 0: 1n, length: 7 }; },
+      async getLatestMerkleRootAuthor() { return AUTHOR; },
+      async getLatestMerkleRootPublisher() { return PUBLISHER; },
+    });
+    const { warned, tick } = recoveryFinalizer(adapter);
+
+    // Each tick spends the adapter's one in-place retry on the refusing endpoint, so few of them.
+    const errors = [await tick(), await tick(), await tick()];
+
+    expect(warned).toEqual([
+      `Named KA recovery for "campaign-v2-3p95mib-ka-018" remains pending: ${NO_VIEW_DEFERRAL}: `
+      + 'endpoint 3 of 3 (three.example) refused a block-pinned read (http 400)',
+    ]);
+    for (const error of errors) expect(error).toMatchObject(REJECTS);
+    const produced = [...warned, ...errors.map((error) => (error as Error).message)].join('\n');
+    expect(produced).not.toContain('SECRET');
+    expect(produced).not.toContain('apikey');
+    expect(produced).not.toContain('://');
+  });
+});

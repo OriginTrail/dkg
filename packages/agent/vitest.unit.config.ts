@@ -268,6 +268,7 @@ export default defineConfig({
       "test/finalization-recovery-sqlite-migration.test.ts",
       "test/finalization-recovery-sqlite-store.test.ts",
       "test/named-ka-publish-recovery.test.ts",
+      "test/named-ka-recovery-pending-log.test.ts",
       "test/ka-graph-finalization-handler.test.ts",
       "test/ka-lifecycle-asset-ual-timeout.test.ts",
       "test/storage-ack-lifecycle-identity.test.ts",
