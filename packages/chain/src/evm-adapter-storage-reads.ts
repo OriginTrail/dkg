@@ -121,8 +121,8 @@ export class StorageReadMethods extends EVMChainAdapterBase {
     const knowledgeAssetStorageAddress = this.knowledgeAssetStorageBindingAddress(kas);
     const knowledgeAssetStorageGeneration = this.knowledgeAssetStorageBindingGeneration;
     if (knowledgeAssetStorageAddress === undefined) return null;
-    const readOne = async (provider: JsonRpcProvider, signal?: AbortSignal) => {
-      signal?.throwIfAborted();
+    const readOne = async (provider: JsonRpcProvider, signal: AbortSignal) => {
+      signal.throwIfAborted();
       if (!this.knowledgeAssetStorageBindingIsCurrent(
         kas, knowledgeAssetStorageAddress, knowledgeAssetStorageGeneration,
       )) return null;
@@ -135,13 +135,13 @@ export class StorageReadMethods extends EVMChainAdapterBase {
       // most deployments use. The identity is therefore compared explicitly, against the chain id
       // this adapter was configured with, on every endpoint.
       await this.ensureConfiguredStaticChainIdValidated(provider);
-      signal?.throwIfAborted();
+      signal.throwIfAborted();
       const expectedChainId = numericChainIdOf(this.chainId);
       if (expectedChainId !== undefined) {
         const network = await provider.getNetwork();
         if (BigInt(network.chainId) !== expectedChainId) return null;
       }
-      signal?.throwIfAborted();
+      signal.throwIfAborted();
       // Use the same operator-selected confirmation depth as the receipt proof. The receipt block
       // itself is confirmation 1, so finalityConfirmations=1 pins this coherent version view to
       // the current head. Larger values pin head-depth+1. Using the RPC-specific `finalized` tag
@@ -153,7 +153,7 @@ export class StorageReadMethods extends EVMChainAdapterBase {
         'getBlock',
         () => provider.getBlock('latest'),
       );
-      signal?.throwIfAborted();
+      signal.throwIfAborted();
       if (head === null || !Number.isSafeInteger(head.number) || head.number < 0) return null;
       const blockNumber = confirmedStateBlockAtHead(
         head.number,
@@ -166,7 +166,7 @@ export class StorageReadMethods extends EVMChainAdapterBase {
             'getBlock',
             () => provider.getBlock(blockNumber),
           );
-      signal?.throwIfAborted();
+      signal.throwIfAborted();
       if (block === null
         || block.number !== blockNumber
         || typeof block.hash !== 'string'
@@ -179,7 +179,7 @@ export class StorageReadMethods extends EVMChainAdapterBase {
         () => bound.getLatestMerkleRootAuthor(kaId, at) as Promise<string>,
         () => bound.getLatestMerkleRootPublisher(kaId, at) as Promise<string>,
       ]);
-      signal?.throwIfAborted();
+      signal.throwIfAborted();
       if (!latestRoot || !latestAuthor || !latestPublisher) return null;
       if (!this.knowledgeAssetStorageBindingIsCurrent(
         kas,
@@ -245,22 +245,22 @@ export class StorageReadMethods extends EVMChainAdapterBase {
       || generation !== snapshotStorageGeneration
       || !this.knowledgeAssetStorageBindingIsCurrent(kas, address, generation)) return false;
 
-    const readOne = async (provider: JsonRpcProvider, signal?: AbortSignal) => {
-      signal?.throwIfAborted();
+    const readOne = async (provider: JsonRpcProvider, signal: AbortSignal) => {
+      signal.throwIfAborted();
       if (!this.knowledgeAssetStorageBindingIsCurrent(kas, address, generation)) return null;
       await this.ensureConfiguredStaticChainIdValidated(provider);
-      signal?.throwIfAborted();
+      signal.throwIfAborted();
       const expectedChainId = numericChainIdOf(this.chainId);
       if (expectedChainId !== undefined) {
         const network = await provider.getNetwork();
         if (BigInt(network.chainId) !== expectedChainId) return null;
       }
-      signal?.throwIfAborted();
+      signal.throwIfAborted();
       const head = await withRpcUsageConsumer(
         'getBlock',
         () => provider.getBlock('latest'),
       );
-      signal?.throwIfAborted();
+      signal.throwIfAborted();
       if (head === null || !Number.isSafeInteger(head.number) || head.number < 0) return null;
       const blockNumber = confirmedStateBlockAtHead(
         head.number,
@@ -273,7 +273,7 @@ export class StorageReadMethods extends EVMChainAdapterBase {
             'getBlock',
             () => provider.getBlock(blockNumber),
           );
-      signal?.throwIfAborted();
+      signal.throwIfAborted();
       if (block === null
         || block.number !== blockNumber
         || typeof block.hash !== 'string'

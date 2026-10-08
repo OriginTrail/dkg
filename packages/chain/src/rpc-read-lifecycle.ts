@@ -9,7 +9,7 @@ import {
 /** Own one endpoint's physical response stalls, independently of admission wait. */
 export async function withRpcResponseStallScope<T>(
   timeoutMs: number | undefined,
-  read: (signal?: AbortSignal) => Promise<T>,
+  read: (signal: AbortSignal) => Promise<T>,
 ): Promise<T> {
   const owner = new AbortController();
   try {
@@ -19,8 +19,8 @@ export async function withRpcResponseStallScope<T>(
         responseStallPolicy: { timeoutMs, onTimeout: (error: Error) => owner.abort(error) },
       }),
     }, () => {
-      const signal = activeRpcRequestAbortSignal();
-      signal?.throwIfAborted();
+      const signal = activeRpcRequestAbortSignal() ?? owner.signal;
+      signal.throwIfAborted();
       return read(signal);
     });
   } finally {

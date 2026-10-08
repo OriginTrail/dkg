@@ -7,6 +7,7 @@
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { Network, type JsonRpcProvider } from 'ethers';
+import { performance } from 'node:perf_hooks';
 import { readFirstProviderWithTransientRetry } from '../src/rpc-provider-fallback.js';
 import { isContractViewRetryable } from '../src/rpc-failover-client.js';
 import {
@@ -100,6 +101,61 @@ describe('ordered snapshot fallback over real loopback RPC transport', () => {
     }
     for (const endpoint of endpoints.slice(winningIndex + 1)) expect(endpoint.calls).toEqual([]);
   });
+
+  it('a single provider completes one healthy physical response body delayed beyond the multi-RPC cap', async () => {
+    const responseDelayMs = 6_000;
+    const physicalRequests: string[] = [];
+    let receivedAt: number | undefined;
+    let respondedAt: number | undefined;
+    let incompleteResponses = 0;
+    const endpoint = await harness.start((request, response) => {
+      receivedAt = performance.now();
+      const body = JSON.stringify({ jsonrpc: '2.0', id: request.id, result: '0xcafe' });
+      // Admit real HTTP and its headers immediately, keeping the actual JSON
+      // response body outstanding for six seconds in the canonical transport.
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.write(body.slice(0, -1));
+      return new Promise<void>((resolve) => {
+        const close = () => {
+          clearTimeout(timer);
+          if (!response.writableEnded) incompleteResponses++;
+          resolve();
+        };
+        const timer = setTimeout(() => {
+          respondedAt = performance.now();
+          response.end(body.slice(-1));
+          resolve();
+        }, responseDelayMs);
+        response.once('close', close);
+      });
+    });
+    const rpc = createRpcRequestProvider(endpoint.url, {
+      maxRetries: 0,
+      network: Network.from(31_337),
+      providerOptions: { batchMaxCount: 1 },
+      onRequest: (method) => { physicalRequests.push(method); },
+    });
+    providers.push(rpc);
+    const startedAt = performance.now();
+
+    const value = await readFirstProviderWithTransientRetry(
+      [rpc],
+      (current) => current.send('eth_call', CALL) as Promise<string>,
+      options,
+    );
+
+    expect(value).toBe('0xcafe');
+    expect(physicalRequests).toEqual(['eth_call']);
+    expect(endpoint.calls.map(({ method, params }) => ({ method, params })))
+      .toEqual([{ method: 'eth_call', params: CALL }]);
+    expect(incompleteResponses).toBe(0);
+    expect(receivedAt).toBeDefined();
+    expect(respondedAt).toBeDefined();
+    const physicalResponseMs = respondedAt! - receivedAt!;
+    expect(physicalResponseMs).toBeGreaterThanOrEqual(responseDelayMs - 100);
+    expect(physicalResponseMs).toBeGreaterThan(4_000);
+    expect(performance.now() - startedAt).toBeLessThan(10_000);
+  }, 12_000);
 
   it('an inherited caller abort physically cancels the primary request and never reaches the backup', async () => {
     const primary = await startLoopbackRpc({ hang: ['eth_call'] });

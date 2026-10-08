@@ -21,7 +21,7 @@ import {
  */
 export async function readFirstProviderWithTransientRetry<TProvider, TResult>(
   providers: readonly TProvider[],
-  readOne: (provider: TProvider, signal?: AbortSignal) => Promise<TResult | null>,
+  readOne: (provider: TProvider, signal: AbortSignal) => Promise<TResult | null>,
   opts: {
     retryDelayMs: number;
     isRetryable: (err: unknown) => boolean;
@@ -40,7 +40,7 @@ export async function readFirstProviderWithTransientRetry<TProvider, TResult>(
               baseDelayMs: opts.retryDelayMs,
               maxDelayMs: opts.retryDelayMs,
               jitter: 0,
-              isRetryable: (error) => !attemptSignal?.aborted
+              isRetryable: (error) => !attemptSignal.aborted
                 && classifyRpcRetryDisposition(error) !== 'retry-later'
                 && !isRpcRequestTimeout(error) && opts.isRetryable(error),
               signal: attemptSignal,

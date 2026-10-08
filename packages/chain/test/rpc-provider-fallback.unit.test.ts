@@ -415,7 +415,9 @@ describe('readFirstProviderWithTransientRetry', () => {
     expect(activeRpcRequestContext().responseStallPolicy).toBeUndefined();
   });
 
-  it('retains uncapped single-endpoint policy beyond the multi-RPC timeout', async () => {
+  // No HTTP request is admitted by this deferred callback; physical single-RPC
+  // response behavior is proved by rpc-provider-fallback-transport.unit.test.ts.
+  it('does not apply an aggregate callback deadline before single-provider physical work', async () => {
     vi.useFakeTimers();
     const gate = deferred<string>();
     let settled = false;
