@@ -18,6 +18,7 @@ vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src
 import {
   OxigraphStore,
   StoreOperationTimeoutError,
+  StoreSchedulerBusyError,
 } from '@origintrail-official/dkg-storage';
 import {
   TripleStoreAsyncPromoteQueue,
@@ -323,6 +324,137 @@ describe('runPromoteJob', () => {
     });
     expect(JSON.stringify(diagnostic)).not.toContain('private detail');
     expect(diagnostic).not.toHaveProperty('causeCode');
+    // An authority error that carries no throw site logs none.
+    expect(diagnostic).not.toHaveProperty('authoritySite');
+  });
+
+  // GH#3067 — the log said which authority reason ended an attempt but not
+  // which check raised it, so a loop failure and a failed chain read looked alike.
+  describe('throw site and store failure of an attempt (GH#3067)', () => {
+    async function logOf(thrown: unknown) {
+      const job = await enqueueAndClaim();
+      const result = await runPromoteJob({
+        job,
+        queue,
+        workerId: 'worker-test',
+        runPromote: async (_request, markPromoteStarted) => {
+          await markPromoteStarted();
+          throw thrown;
+        },
+        now: fixture.clock.now,
+        heartbeatIntervalMs: 0,
+        log: (message) => logs.push(message),
+      });
+      return { result, diagnostic: promoteFailureDiagnostics(logs)[0], job };
+    }
+
+    const authorityCause = (extra: Record<string, unknown>) => Object.assign(new Error('private detail'), {
+      code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+      reason: 'chain-participant-authority-unavailable',
+      detail: 'private detail',
+      ...extra,
+    });
+
+    it.each([
+      'transport-unavailable',
+      'transport-changed',
+      'revision-moved',
+      'recipient-set-changed',
+    ])('logs the closed throw site %s behind a retryable authority failure', async (site) => {
+      const { diagnostic } = await logOf(createPromoteRetryableFailure(authorityCause({ site })));
+
+      expect(diagnostic).toMatchObject({
+        errorCode: PROMOTE_RETRYABLE_FAILURE_CODE,
+        authorityReason: 'chain-participant-authority-unavailable',
+        authoritySite: site,
+      });
+      expect(JSON.stringify(diagnostic)).not.toContain('private detail');
+    });
+
+    it.each([
+      'AKIAIOSFODNN7EXAMPLE',
+      'https://rpc.example/key',
+      'toString',
+      '__proto__',
+      'constructor',
+      'x'.repeat(1_000),
+      42,
+      null,
+      { site: 'revision-moved' },
+    ])('drops a throw site that is not in the closed set (%j) without leaking it', async (site) => {
+      const { result, diagnostic } = await logOf(createPromoteRetryableFailure(authorityCause({ site })));
+
+      expect(result.outcome).toBe('failed_retrying');
+      expect(diagnostic).not.toHaveProperty('authoritySite');
+      expect(diagnostic).toMatchObject({ authorityReason: 'chain-participant-authority-unavailable' });
+      if (typeof site === 'string') expect(JSON.stringify(diagnostic)).not.toContain(site);
+    });
+
+    it('survives a throw site whose getter throws and still does the queue bookkeeping', async () => {
+      const hostile = authorityCause({});
+      Object.defineProperty(hostile, 'site', { get() { throw new Error('hostile getter'); } });
+
+      const { result, diagnostic, job } = await logOf(createPromoteRetryableFailure(hostile));
+
+      expect(result.outcome).toBe('failed_retrying');
+      expect(await queue.getStatus(job.jobId)).toMatchObject({ state: 'failed_retrying' });
+      expect(diagnostic).not.toHaveProperty('authoritySite');
+    });
+
+    it('does not read a throw site from an error that is not an authority error', async () => {
+      const { diagnostic } = await logOf(createPromoteRetryableFailure(
+        Object.assign(new Error('x'), { code: 'SOMETHING_ELSE', reason: 'chain-participant-authority-unavailable', site: 'revision-moved' }),
+      ));
+
+      expect(diagnostic).not.toHaveProperty('authoritySite');
+    });
+
+    it.each([
+      {
+        name: 'a queue wait timeout',
+        thrown: () => new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'publisher.asyncPromote.claimNext.candidates'),
+        storeFailure: 'queue_wait',
+      },
+      {
+        name: 'a full queue',
+        thrown: () => new StoreSchedulerBusyError('queue_full', 'normal', 'publisher.asyncPromote.write'),
+        storeFailure: 'queue_full',
+      },
+      {
+        name: 'a store deadline before the operation started',
+        thrown: () => new StoreOperationTimeoutError({ backend: 'blazegraph', operation: 'query', outcome: 'not_started' }),
+        storeFailure: 'store_timeout_not_started',
+      },
+      {
+        name: 'a store deadline of a read that was already running',
+        thrown: () => new StoreOperationTimeoutError({ backend: 'blazegraph', operation: 'query', outcome: 'indeterminate' }),
+        storeFailure: 'store_timeout_indeterminate',
+      },
+    ])('names $name from a closed set instead of an unknown error', async ({ thrown, storeFailure }) => {
+      const { diagnostic } = await logOf(thrown());
+
+      expect(diagnostic).toMatchObject({ storeFailure });
+      expect(diagnostic).not.toHaveProperty('authorityReason');
+      expect(diagnostic).not.toHaveProperty('authoritySite');
+    });
+
+    it('names a store failure that a retryable promote failure wraps as its cause', async () => {
+      const { diagnostic } = await logOf(createPromoteRetryableFailure(
+        new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'agent.query'),
+      ));
+
+      expect(diagnostic).toMatchObject({ storeFailure: 'queue_wait' });
+    });
+
+    it('does not invent a store failure for an error that only looks like one', async () => {
+      const { diagnostic } = await logOf(Object.assign(new Error('queue wait timeout'), {
+        code: 'NOT_A_STORE_ERROR',
+        reason: 'queue_wait_timeout',
+        outcome: 'not_started',
+      }));
+
+      expect(diagnostic).not.toHaveProperty('storeFailure');
+    });
   });
 
   it('names the legacy SWM retirement fence behind a retryable promote, from a closed set', async () => {
@@ -405,9 +537,11 @@ describe('runPromoteJob', () => {
       expect(seen[1]).toEqual(seen[0]);
     });
 
-    it('ends failed yet still retryable when the fence outlasts every attempt; recover requeues it', async () => {
+    it('keeps retrying past its attempt budget for an hour after enqueue, then ends failed yet retryable; recover requeues it', async () => {
       await queue.enqueue(makeRequest({ assertionName: 'fenced-forever' }));
-      for (let attempt = 0; attempt < 3; attempt += 1) {
+      // One attempt every 10 minutes: the budget of 3 is spent after 20 minutes,
+      // the window of the typed prerequisite failure ends at 60.
+      for (let attempt = 1; attempt <= 7; attempt += 1) {
         const claimed = await queue.claimNext('worker-test');
         expect(claimed).not.toBeNull();
         await runPromoteJob({
@@ -422,13 +556,19 @@ describe('runPromoteJob', () => {
           heartbeatIntervalMs: 0,
           log: (message) => logs.push(message),
         });
+        if (attempt < 7) {
+          expect((await queue.list({}))[0]).toMatchObject({
+            state: 'failed_retrying',
+            attempt: { count: attempt, maxRetries: 3 },
+          });
+        }
         fixture.clock.advance(10 * 60_000);
       }
       const [job] = await queue.list({});
-      expect(job).toMatchObject({ state: 'failed', attempt: { count: 3 } });
+      expect(job).toMatchObject({ state: 'failed', attempt: { count: 7 } });
       expect(promoteJobToView(job)).toMatchObject({
         state: 'failed',
-        attempts: 3,
+        attempts: 7,
         maxAttempts: 3,
         lastError: {
           code: 'transient',

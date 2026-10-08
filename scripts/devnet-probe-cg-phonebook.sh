@@ -25,6 +25,7 @@ set -u
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 API_PORT_BASE="${API_PORT_BASE:-9201}"
+source "$REPO_ROOT/scripts/devnet-observation-helpers.sh"
 AUTH_TOKEN=$(grep -v '^#' "$DEVNET_DIR/node1/auth.token" 2>/dev/null | head -1 || echo "")
 AUTH_HEADER="Authorization: Bearer $AUTH_TOKEN"
 
@@ -74,32 +75,12 @@ echo "--- 2. agents-CG has any triples ---"
 # don't pin a specific predicate name (those have churned across
 # rc.11/rc.12); we just confirm SOMETHING was written. The PR #700
 # code path includes `dkg:multiaddr` + agent-uri + lastSeen triples.
-MA_QUERY=$(curl -sS -H "$AUTH_HEADER" -X POST -H "Content-Type: application/json" \
-  -d '{
-    "sparql": "SELECT (COUNT(*) as ?n) WHERE { ?s ?p ?o }",
-    "contextGraphId": "agents"
-  }' \
-  "http://127.0.0.1:$API_PORT_BASE/api/query" 2>/dev/null || echo '{}')
-MA_COUNT=$(echo "$MA_QUERY" | python3 -c "
-import sys, json, re
-try:
-  d = json.load(sys.stdin)
-  b = d.get('result',{}).get('bindings',[])
-  if b:
-    raw = str(b[0].get('n') or b[0].get('?n') or b[0].get('count') or '')
-    m = re.search(r'(\d+)', raw)
-    print(int(m.group(1)) if m else 0)
-  else:
-    print(0)
-except Exception:
-  print(0)
-" 2>/dev/null)
-# Guard against blank/non-numeric output (bash 3.2 -gt on '' is a syntax error).
-case "$MA_COUNT" in ''|*[!0-9]*) MA_COUNT=0 ;; esac
-if [ "$MA_COUNT" -gt 0 ]; then
+MA_COUNT=$(devnet_query_api "http://127.0.0.1:$API_PORT_BASE" "$AUTH_TOKEN" \
+  'SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }' n count '{"contextGraphId":"agents"}') || devnet_observation_abort
+if devnet_count_at_least "$MA_COUNT" 1; then
   ok "agents-CG contains $MA_COUNT triple(s) — phonebook is publishing"
 else
-  fail "agents-CG has 0 triples — phonebook publish may have failed (got: $MA_QUERY)"
+  fail "agents-CG has 0 triples — phonebook publish may have failed"
 fi
 
 # --- 3. agentProfileHeartbeatTimer wired (look for the log) ---
@@ -124,28 +105,9 @@ if [ -n "$NODE2_PEER" ]; then
   # heartbeat may take up to 5 min for the first repeat; the one-shot
   # startup publish should have fired by now (setTimeout 0 in
   # lifecycle.ts).
-  cross_query=$(curl -sS -H "$AUTH_HEADER" -X POST -H "Content-Type: application/json" \
-    -d "{
-      \"sparql\": \"SELECT (COUNT(*) as ?n) WHERE { ?s ?p ?o FILTER (CONTAINS(STR(?o), \\\"$NODE2_PEER\\\")) }\",
-      \"contextGraphId\": \"agents\"
-    }" \
-    "http://127.0.0.1:$API_PORT_BASE/api/query" 2>/dev/null || echo '{}')
-  X_COUNT=$(echo "$cross_query" | python3 -c "
-import sys, json, re
-try:
-  d = json.load(sys.stdin)
-  b = d.get('result',{}).get('bindings',[])
-  if b:
-    raw = str(b[0].get('n') or b[0].get('?n') or b[0].get('count') or '')
-    m = re.search(r'(\d+)', raw)
-    print(int(m.group(1)) if m else 0)
-  else:
-    print(0)
-except Exception:
-  print(0)
-" 2>/dev/null)
-  case "$X_COUNT" in ''|*[!0-9]*) X_COUNT=0 ;; esac
-  if [ "$X_COUNT" -gt 0 ]; then
+  X_COUNT=$(devnet_query_api "http://127.0.0.1:$API_PORT_BASE" "$AUTH_TOKEN" \
+    "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o FILTER (CONTAINS(STR(?o), \"$NODE2_PEER\")) }" n count '{"contextGraphId":"agents"}') || devnet_observation_abort
+  if devnet_count_at_least "$X_COUNT" 1; then
     ok "node 1 sees $X_COUNT triple(s) referencing node 2's peerId in agents-CG"
   else
     # Phonebook entries propagate via ONTOLOGY gossip — first heartbeat

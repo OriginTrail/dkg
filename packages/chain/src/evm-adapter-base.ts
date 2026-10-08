@@ -1393,6 +1393,7 @@ export class EVMChainAdapterBase {
     this.providers = this.rpcUrls.map(
       (url, endpointSlot) => createRpcRequestProvider(url, {
         maxRetries: perEndpointRetries,
+        discoveryStallTimeoutMs: this.rpcUrls.length > 1 ? RPC_READ_STALL_TIMEOUT_MS : undefined,
         providerOptions: {
           cacheTimeout: -1,
           polling: true,
@@ -3289,7 +3290,10 @@ export class EVMChainAdapterBase {
     activeRpcRequestAbortSignal()?.throwIfAborted();
     // Both starts spawn detached work. Its context must belong to the adapter,
     // not to whichever transient caller happened to initialize it first: the
-    // work keeps that caller's request class and nothing else of it.
+    // work keeps the request class of the caller that started the run, as it
+    // always has, and nothing else of it. An authority read that finds the
+    // adapter uninitialized must not lend its admission priority to scans that
+    // run for the process's lifetime.
     await withDetachedRpcRequestContext(startsRequestClass, async () => {
       this.startChainIndexRuntime();
       await this.startHubRotationListener();

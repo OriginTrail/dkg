@@ -73,3 +73,6 @@ test-systems/.runtime/
 
 **/coverage-python/
 **/.coverage
+
+# Disposable regression proof artifacts
+.regression-proofs/

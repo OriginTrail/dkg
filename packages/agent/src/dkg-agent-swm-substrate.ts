@@ -1258,7 +1258,6 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           getCgMeta: (id) => this.getCgMeta(id),
           getContextGraphOnChainId: (id) => this.getContextGraphOnChainId(id),
           classifyOnChainSlot: (onChainId) => this.classifyOntologyBindingSlot(onChainId),
-          markCgMetaDirtyFromQuads: (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
           persistContextGraphSubscription: (id) => this.persistContextGraphSubscriptionState(id),
         },
         { requireContextGraphSubscriptionSetter: true },
@@ -1327,7 +1326,6 @@ export class SwmSubstrateMethods extends DKGAgentBase {
             input.assertionVersion,
           );
         },
-        markContextGraphMetaDirtyFromQuads: (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
         // OT-RFC-38 / LU-6 Phase B: chain-backed agent-allowlist
         // fallback. Cores hosting curated CGs they are NOT members
         // of have no local meta for the allowlist — without this,
@@ -2082,9 +2080,6 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           // Defensive: resolve a missing pre-cd68fa689 wire CG id locally.
           resolveContextGraphOnChainId: (cgName: string) =>
             this.getContextGraphOnChainId(cgName),
-          markContextGraphMetaDirtyFromQuads: (quads) => {
-            this.contextGraphMetaProjection.markDirtyFromQuads(quads);
-          },
           workspaceWriteLocks: this.writeLocks,
           retireConfirmedGraphScopedSwmTwinIfOrphaned: (() => {
             const retireOrphaned = createRetireConfirmedGraphScopedSwmTwinIfOrphaned({

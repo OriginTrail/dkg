@@ -33,6 +33,7 @@ import {
   buildOpenClawAttachmentImportContextEntries,
 } from '../openclaw.js';
 import { persistDurableChatTurn } from '../chat-turn-persistence.js';
+import { durableChatTurnResponseBody } from './durable-chat-turn-response.js';
 import {
   isUndiciResponseTimeoutError,
   localAgentChannelFetchInit,
@@ -860,15 +861,7 @@ async function persistHermesTurnWithDuplicateLock(
         payload.assistantReply,
       ),
     });
-    return {
-      statusCode: 200,
-      body: {
-        ok: true,
-        ...(outcome.kind === 'duplicate' ? { duplicate: true } : {}),
-        ...(outcome.kind === 'transitioned' ? { transitioned: true } : {}),
-        turnId: payload.turnId,
-      },
-    };
+    return { statusCode: 200, body: durableChatTurnResponseBody(outcome) };
   } catch (err: any) {
     return { statusCode: 500, body: { error: err.message } };
   }

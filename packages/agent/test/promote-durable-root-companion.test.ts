@@ -131,7 +131,9 @@ describe('promote companion under the legacy SWM retirement fence (real agent wi
     expect(refusal.message).not.toContain('retry promotion');
     expect(refusal.code).toBe('PROMOTE_RETRYABLE_FAILURE');
     expect(refusal.cause.code).toBe(FENCE_CODE);
-    expect(refusal.cause.message).toBe(FENCE_MESSAGE);
+    expect(refusal.cause.message).toMatch(new RegExp(
+      `^${FENCE_MESSAGE} \\(fence raised by finalized-vm-retirement on the asset, up \\d+ ms\\)$`,
+    ));
     expect(getPromoteFailureDisposition(refusal)).toMatchObject({
       classification: 'transient',
       retryable: true,

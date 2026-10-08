@@ -148,4 +148,39 @@ describe('read-authority dependency attribution (#2834)', () => {
       }),
     }))).resolves.toMatchObject({ reason: 'local-chain-binding-unavailable', dependency: 'store' });
   });
+
+  it('carries a classified detail from the registered authority to the decision and the scoped-query error', async () => {
+    const decision = await resolveContextGraphReadAuthorityDecision(input({
+      getRegisteredAuthority: async () => ({
+        kind: 'unavailable',
+        reason: 'finalized-name-absence-unaccepted',
+        detail: 'free text that stays behind',
+        dependency: 'unknown',
+        detailCode: 'replica-proof-timeout',
+      }),
+    }));
+
+    expect(decision).toEqual({
+      outcome: 'unavailable',
+      source: 'registered-chain',
+      reason: 'finalized-name-absence-unaccepted',
+      metadataBootstrap: 'eligible',
+      dependency: 'unknown',
+      detailCode: 'replica-proof-timeout',
+    });
+    if (decision.outcome !== 'unavailable') throw new Error('expected an unavailable decision');
+    const error = new ContextGraphReadAuthorityUnavailableError('cg-2834', decision);
+    expect(error.detailCode).toBe('replica-proof-timeout');
+    expect(error.message).toContain('(registered-chain/finalized-name-absence-unaccepted/unknown)');
+  });
+
+  it('adds no detail code where the registered authority classifies none', async () => {
+    const decision = await resolveContextGraphReadAuthorityDecision(input({
+      getRegisteredAuthority: async () => ({ kind: 'unavailable', reason: 'chain-access-policy-timeout', onChainId: 7n }),
+    }));
+
+    expect(decision).not.toHaveProperty('detailCode');
+    if (decision.outcome !== 'unavailable') throw new Error('expected an unavailable decision');
+    expect(new ContextGraphReadAuthorityUnavailableError('cg-2834', decision).detailCode).toBeUndefined();
+  });
 });
