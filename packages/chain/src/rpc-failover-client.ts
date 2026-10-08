@@ -772,40 +772,39 @@ export class RpcFailoverClient {
     const configuredAttemptTimeoutMs = options.attemptTimeoutMs(canonical.length);
     let allEndpointsThrottled = true;
     let retryAfterMs: number | undefined;
-    let attemptDeadlineMs: number | undefined;
-    const result = await runRpcProviderPass(attempts, async (attempt, index) => {
-      const endpoint = attempt.endpoint;
-      if (this.validateEndpoint) {
-        await this.runProviderAttemptStage(
-          () => this.validateEndpoint!(endpoint),
+    const result = await runRpcProviderPass(attempts, (attempt, index) => {
+      // Prepare an immutable budget before observers, then attach it to this
+      // attempt's runner so validation and request share the same deadline.
+      const attemptStartedAt = Date.now();
+      const deadlineRemainingMs = options.deadlineMs === undefined
+        ? undefined
+        : options.deadlineMs - attemptStartedAt;
+      if (deadlineRemainingMs !== undefined && deadlineRemainingMs <= 0) return null;
+      const attemptBudgetMs = deadlineRemainingMs === undefined
+        ? configuredAttemptTimeoutMs
+        : configuredAttemptTimeoutMs === undefined
+          ? deadlineRemainingMs
+          : Math.min(configuredAttemptTimeoutMs, deadlineRemainingMs);
+      const attemptDeadlineMs = attemptBudgetMs === undefined
+        ? undefined
+        : attemptStartedAt + attemptBudgetMs;
+      return async () => {
+        const endpoint = attempt.endpoint;
+        if (this.validateEndpoint) {
+          await this.runProviderAttemptStage(
+            () => this.validateEndpoint!(endpoint),
+            attemptDeadlineMs,
+            `${label} chainId validation via RPC #${index + 1}`,
+          );
+        }
+        return this.runProviderAttemptStage(
+          () => fn(endpoint.provider),
           attemptDeadlineMs,
-          `${label} chainId validation via RPC #${index + 1}`,
+          `${label} via RPC #${index + 1}`,
         );
-      }
-      return this.runProviderAttemptStage(
-        () => fn(endpoint.provider),
-        attemptDeadlineMs,
-        `${label} via RPC #${index + 1}`,
-      );
+      };
     }, {
       isRetryable: error => options.isRetryable(error),
-      canStartAttempt: () => {
-        // Preserve the original budget boundary before onAttempt observers.
-        const attemptStartedAt = Date.now();
-        const deadlineRemainingMs = options.deadlineMs === undefined
-          ? undefined
-          : options.deadlineMs - attemptStartedAt;
-        if (deadlineRemainingMs !== undefined && deadlineRemainingMs <= 0) return false;
-        const attemptBudgetMs = deadlineRemainingMs === undefined
-          ? configuredAttemptTimeoutMs
-          : configuredAttemptTimeoutMs === undefined
-            ? deadlineRemainingMs
-            : Math.min(configuredAttemptTimeoutMs, deadlineRemainingMs);
-        attemptDeadlineMs = attemptBudgetMs === undefined
-          ? undefined
-          : attemptStartedAt + attemptBudgetMs;
-        return true;
-      },
       onAttempt: (_attempt, index) => options.onAttempt?.(index + 1),
       isEmptyResult: (value) => {
         const empty = options.isEmptyResult?.(value) ?? false;

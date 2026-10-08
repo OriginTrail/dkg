@@ -33,7 +33,7 @@ export async function readFirstProviderWithTransientRetry<TProvider, TResult>(
     const responseTimeoutMs = resolveCapMs('pointRead', providers.length);
     const result = await resolveWithinAbort(async () => {
       try {
-        const pass = await runRpcProviderPass(providers, (provider) => (
+        const pass = await runRpcProviderPass(providers, (provider) => (signal?.aborted ? null : () => (
           withRpcResponseStallScope(responseTimeoutMs, (attemptSignal) => (
             withRetry(() => readOne(provider, attemptSignal), {
               maxAttempts: 2,
@@ -46,8 +46,7 @@ export async function readFirstProviderWithTransientRetry<TProvider, TResult>(
               signal: attemptSignal,
             })
           ))
-        ), {
-          canStartAttempt: () => !signal?.aborted,
+        )), {
           isRetryable: () => !signal?.aborted,
           isEmptyResult: (value) => value === null,
         });

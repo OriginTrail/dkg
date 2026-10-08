@@ -173,7 +173,9 @@ describe('native shared discovery lifetime', () => {
       await pause(30); // Longer than the first waiter's foreign policy, shorter than the owner's cap.
       expect(socketClosed).toBe(0);
       expect(discoveryContext).toEqual({
-        requestClass: 'foreground', signal: expect.any(AbortSignal), responseStallPolicy: { timeoutMs: 1_000 },
+        // The provider cap is selected at physical transport; discovery keeps
+        // only its independent owner and must not inherit a caller policy.
+        requestClass: 'foreground', signal: expect.any(AbortSignal),
       });
       expect(discoveryContext!.signal!.aborted).toBe(false);
       expect(foreignTimeouts).toBe(0);

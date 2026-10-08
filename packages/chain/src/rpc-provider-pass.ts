@@ -5,8 +5,6 @@ import { classifyRpcRetryDisposition } from './evm-adapter-rpc.js';
 export interface RpcProviderPassOptions<P, T> {
   readonly isRetryable: (error: unknown) => boolean;
   readonly isEmptyResult?: (value: T) => boolean;
-  /** Checked before observers or physical work; indexes are zero-based. */
-  readonly canStartAttempt?: (attempt: P, index: number) => boolean;
   readonly onAttempt?: (attempt: P, index: number) => void;
   readonly onServed?: (attempt: P, value: T, index: number) => void;
   readonly onFailure?: (attempt: P, error: unknown, index: number) => void;
@@ -23,13 +21,14 @@ export type RpcProviderPassResult<T> =
 
 /**
  * Run one ordered provider pass. Callers own endpoint ordering, attempt budgets,
- * retry policy, telemetry and exhaustion translation. A benign empty response
+ * retry policy, telemetry and exhaustion translation. Preparation returns an
+ * attempt-local runner or null before observers; indexes are zero-based. A benign empty response
  * advances without recording success or failure. Local retry-later failures
  * always stop the pass, even when a caller's classifier permits all errors.
  */
 export async function runRpcProviderPass<P, T>(
   attempts: readonly P[],
-  readOne: (attempt: P, index: number) => Promise<T>,
+  prepareAttempt: (attempt: P, index: number) => (() => Promise<T>) | null,
   options: RpcProviderPassOptions<P, T>,
 ): Promise<RpcProviderPassResult<T>> {
   let lastError: unknown;
@@ -37,13 +36,14 @@ export async function runRpcProviderPass<P, T>(
   let stopped = false;
   for (let index = 0; index < attempts.length; index += 1) {
     const attempt = attempts[index];
-    if (options.canStartAttempt?.(attempt, index) === false) {
+    const runAttempt = prepareAttempt(attempt, index);
+    if (runAttempt === null) {
       stopped = true;
       break;
     }
     try {
       options.onAttempt?.(attempt, index);
-      const value = await readOne(attempt, index);
+      const value = await runAttempt();
       if (options.isEmptyResult?.(value)) {
         empty = { value };
         continue;

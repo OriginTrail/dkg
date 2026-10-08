@@ -534,15 +534,6 @@ class RequestContextJsonRpcProvider extends JsonRpcProvider {
     readonly usage: RpcUsageIssuerContext;
   }> = [];
 
-  constructor(
-    request: FetchRequest,
-    network: Networkish | undefined,
-    options: JsonRpcApiProviderOptions | undefined,
-    private readonly discoveryStallTimeoutMs?: number,
-  ) {
-    super(request, network, options);
-  }
-
   override destroy(): void {
     try {
       // Mark ethers destroyed before cancellation resumes its discovery loop.
@@ -560,12 +551,7 @@ class RequestContextJsonRpcProvider extends JsonRpcProvider {
     // `eth_chainId` probe to that caller). Its own signal retires admission,
     // HTTP, and retry backoff when the provider is destroyed.
     return rpcRequestContext.run(
-      {
-        requestClass: 'foreground', signal: this.#discoveryAbortController.signal,
-        ...(this.discoveryStallTimeoutMs === undefined ? {} : {
-          responseStallPolicy: { timeoutMs: this.discoveryStallTimeoutMs },
-        }),
-      },
+      { requestClass: 'foreground', signal: this.#discoveryAbortController.signal },
       () => withRpcUsageIssuerContext({}, () => super._detectNetwork()),
     );
   }
@@ -644,7 +630,6 @@ export function createRpcRequestProvider(
     createRpcProviderRequest(url, config),
     config.network,
     configuredProviderOptions(config, normalizedProviderOptions),
-    config.discoveryStallTimeoutMs,
   );
 }
 
