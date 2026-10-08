@@ -20,6 +20,10 @@ import {
   decodeKnowledgeAssetMerkleRootCount,
 } from './evm-knowledge-asset-update-context.js';
 import { confirmedStateBlockAtHead } from './evm-adapter-constants.js';
+import {
+  KnowledgeAssetVersionSnapshotTrace,
+  type KnowledgeAssetVersionSnapshotReadOptions,
+} from './ka-version-snapshot-report.js';
 import { isContractViewRetryable } from './rpc-failover-client.js';
 import { readAllProvidersWithTransientRetry } from './rpc-provider-poll.js';
 import { withRpcUsageConsumer } from './rpc-usage.js';
@@ -118,15 +122,18 @@ export class StorageReadMethods extends EVMChainAdapterBase {
    */
   async readKnowledgeAssetVersionSnapshot(
     kaId: bigint,
-    options: ChainReadOptions = {},
+    options: KnowledgeAssetVersionSnapshotReadOptions = {},
   ): Promise<KnowledgeAssetVersionSnapshot | null> {
     await this.init();
+    // Observation only (see ka-version-snapshot-report.ts): `unavailable` returns the same
+    // `null` and `established` the same view; the trace keeps which endpoint gave no view.
+    const trace = new KnowledgeAssetVersionSnapshotTrace(this.providers, this.rpcUrls, options);
     const kas = this.contracts.knowledgeAssetStorage;
-    if (!kas) return null;
+    if (!kas) return trace.unavailable('no-storage-contract');
     const knowledgeAssetStorageAddress = this.knowledgeAssetStorageBindingAddress(kas);
     const knowledgeAssetStorageGeneration = this.knowledgeAssetStorageBindingGeneration;
-    if (knowledgeAssetStorageAddress === undefined) return null;
-    const readOne = async (provider: JsonRpcProvider) => {
+    if (knowledgeAssetStorageAddress === undefined) return trace.unavailable('no-storage-contract');
+    const readOne = trace.observe(async (provider: JsonRpcProvider, step) => {
       // r15 (3814317260) / r17 (3814893080) — every endpoint must prove it is THIS chain before its
       // view is eligible, because the poll trusts the most advanced answer and an accidentally
       // configured wrong-chain RPC would otherwise supply the durable version decision.
@@ -142,6 +149,7 @@ export class StorageReadMethods extends EVMChainAdapterBase {
         const network = await provider.getNetwork();
         if (BigInt(network.chainId) !== expectedChainId) return null;
       }
+      step('head-block');
       if (options.signal?.aborted) return null;
       // Use the same operator-selected confirmation depth as the receipt proof. The receipt block
       // itself is confirmation 1, so finalityConfirmations=1 pins this coherent version view to
@@ -158,6 +166,7 @@ export class StorageReadMethods extends EVMChainAdapterBase {
         () => provider.getBlock('latest'),
       );
       if (head === null || !Number.isSafeInteger(head.number) || head.number < 0) return null;
+      step('pinned-block');
       const blockNumber = confirmedStateBlockAtHead(
         head.number,
         this.finalityConfirmations,
@@ -173,6 +182,7 @@ export class StorageReadMethods extends EVMChainAdapterBase {
         || block.number !== blockNumber
         || typeof block.hash !== 'string'
         || !ethers.isHexString(block.hash, 32)) return null;
+      step('pinned-read');
       const bound = this.rebindContract(kas as Contract, provider);
       const at = { blockTag: blockNumber };
       const [latestRoot, context, latestAuthor, latestPublisher] = await Promise.all([
@@ -182,6 +192,7 @@ export class StorageReadMethods extends EVMChainAdapterBase {
         bound.getLatestMerkleRootPublisher(kaId, at) as Promise<string>,
       ]);
       if (!latestRoot || !latestAuthor || !latestPublisher) return null;
+      step('storage-binding');
       options.signal?.throwIfAborted();
       if (!this.knowledgeAssetStorageBindingIsCurrent(
         kas,
@@ -199,7 +210,7 @@ export class StorageReadMethods extends EVMChainAdapterBase {
         knowledgeAssetStorageAddress,
         knowledgeAssetStorageGeneration,
       };
-    };
+    });
     // r14 (3814017390) / r3 (3880005809) — endpoint retry, cancellation, and settlement are the
     // TRANSPORT layer's job: `readAllProvidersWithTransientRetry` polls every endpoint in
     // parallel, gives each ONE in-place retry for transient failures (deterministic
@@ -213,7 +224,7 @@ export class StorageReadMethods extends EVMChainAdapterBase {
       isRetryable: isContractViewRetryable,
       signal: options.signal,
     });
-    if (!settled) return null;
+    if (!settled) return trace.unavailable('aborted');
     const views = settled.flatMap((view) => (view ? [view] : []));
     // r12 (3813506086) — the poll must be UNANIMOUS. Taking the highest block among the endpoints
     // that happened to answer does not establish currency: the endpoint whose read failed is
@@ -221,18 +232,18 @@ export class StorageReadMethods extends EVMChainAdapterBase {
     // old transaction would materialize as current. Anything less than every configured endpoint
     // reporting a complete view is "cannot establish", and the caller must defer rather than
     // decide — recovery retries on the next tick, and the operator's by-id clear remains.
-    if (views.length !== this.providers.length) return null;
+    if (views.length !== this.providers.length) return trace.unavailable('endpoints-failed');
     const best = views.reduce((current, view) => (
       view.blockNumber > current.blockNumber ? view : current
     ));
     if (views.some((view) => view.blockNumber === best.blockNumber
-      && view.blockHash !== best.blockHash)) return null;
+      && view.blockHash !== best.blockHash)) return trace.unavailable('endpoints-disagree');
     options.signal?.throwIfAborted();
     return this.knowledgeAssetStorageBindingIsCurrent(
       kas,
       knowledgeAssetStorageAddress,
       knowledgeAssetStorageGeneration,
-    ) ? best : null;
+    ) ? trace.established(best) : trace.unavailable('storage-binding-changed');
   }
 
   async knowledgeAssetVersionSnapshotIsCurrent(
