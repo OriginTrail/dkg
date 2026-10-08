@@ -312,6 +312,7 @@ import type {
   VmRefreshQueue,
   VmRefreshTarget,
 } from './vm-refresh.js';
+import { readVmRefreshVersionView } from './vm-refresh-version-view.js';
 import { isBoundedOperationTimeoutError, runBoundedOperation } from './bounded-operation.js';
 
 /** Graph-scoped KA metadata marker; its presence names the metadata graph. */
@@ -3871,14 +3872,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
       attempt: { outcome: 'current', detail: 'the copy holds the chain root and version' },
     } as const;
     if (typeof this.chain.readKnowledgeAssetVersionSnapshot !== 'function') return current;
-    const view = await this.chain.readKnowledgeAssetVersionSnapshot(target.kaId, { signal });
+    // Without a view the attempt retries, and says why the adapter had none when it reports that.
+    const versionRead = await readVmRefreshVersionView(
+      this.chain.readKnowledgeAssetVersionSnapshot.bind(this.chain), target.kaId, signal,
+    );
     if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
-    if (view === null) {
-      return {
-        kind: 'settled',
-        attempt: { outcome: 'retry', detail: 'no coherent chain view confirms the copy' },
-      };
-    }
+    if (versionRead.view === null) return { kind: 'settled', attempt: versionRead.retry };
+    const { view } = versionRead;
     const proofBlock = target.proofBlockNumber ?? target.blockNumber;
     if (proofBlock !== undefined && view.blockNumber < proofBlock) {
       return {
@@ -4060,8 +4060,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
       isCurrent,
       getKAContextGraphId: (kaId, readSignal) =>
         getKAContextGraphId(kaId, { signal: readSignal }),
-      readKnowledgeAssetVersionSnapshot: (kaId, readSignal) =>
-        readKnowledgeAssetVersionSnapshot(kaId, { signal: readSignal }),
+      readKnowledgeAssetVersionSnapshot: (kaId, readSignal, onUnavailable) =>
+        readKnowledgeAssetVersionSnapshot(kaId, { signal: readSignal, onUnavailable }),
       verifyLocalContextGraph: (onChainCgId) =>
         this.requireLocalCgMatchesOnChainSlot(
           localCgId,

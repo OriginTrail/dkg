@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import type { KnowledgeAssetVersionSnapshotUnavailable } from '@origintrail-official/dkg-chain';
 import { parseDeterministicKnowledgeAssetUal } from '@origintrail-official/dkg-core';
 
 import { packKnowledgeAssetIdFromIdentity } from '../ka-identity.js';
+import { versionViewCause } from '../named-ka-recovery-diagnostics.js';
 import { MAX_EXACT_SYNC_ASSETS } from './exact-assets.js';
 import { runBoundedPreparedPeerTraversal } from './prepared-peer-traversal.js';
 
@@ -46,7 +48,15 @@ export class ContextGraphAssetFetchValidationError extends Error {
 export class ContextGraphAssetFetchConflictError extends Error {
   readonly code = 'ContextGraphAssetFetchConflict';
 
-  constructor(message: string) {
+  /**
+   * `versionViewUnavailable` is the chain adapter's report of why it had no
+   * version snapshot, when that is the conflict and the adapter said. The
+   * message has its words.
+   */
+  constructor(
+    message: string,
+    readonly versionViewUnavailable?: KnowledgeAssetVersionSnapshotUnavailable,
+  ) {
     super(message);
     this.name = 'ContextGraphAssetFetchConflictError';
   }
@@ -116,6 +126,8 @@ export interface ExactAssetFetchDependencies {
   readKnowledgeAssetVersionSnapshot(
     kaId: bigint,
     signal?: AbortSignal,
+    /** Told why there is no snapshot, when the chain adapter says. Never decided from. */
+    onUnavailable?: (report: KnowledgeAssetVersionSnapshotUnavailable) => void,
   ): Promise<ExactAssetChainSnapshot | null>;
   verifyLocalContextGraph(onChainCgId: string): Promise<boolean>;
   inspectLocal(evidence: ExactAssetFetchEvidence): Promise<ExactAssetLocalState>;
@@ -228,9 +240,15 @@ async function resolveEvidence(
   const { ual, kaId } = request;
   // These two reads are independent. Run them together for every requested KA.
   // The version fields themselves must come from the one coherent snapshot.
+  // Why the adapter had no snapshot, when it says, goes on the conflict below.
+  const versionRead: { unavailable?: KnowledgeAssetVersionSnapshotUnavailable } = {};
   const [rawOnChainCgId, snapshot] = await Promise.all([
     deps.getKAContextGraphId(kaId, deps.signal),
-    deps.readKnowledgeAssetVersionSnapshot(kaId, deps.signal),
+    deps.readKnowledgeAssetVersionSnapshot(
+      kaId,
+      deps.signal,
+      (report) => { versionRead.unavailable = report; },
+    ),
   ]);
   requireCurrent(deps);
   const onChainCgId = rawOnChainCgId.toString();
@@ -241,7 +259,9 @@ async function resolveEvidence(
   }
   if (!snapshot) {
     throw new ContextGraphAssetFetchConflictError(
-      `Knowledge Asset ${ual} has no coherent on-chain version snapshot`,
+      `Knowledge Asset ${ual} has no coherent on-chain version snapshot`
+        + versionViewCause(versionRead.unavailable),
+      versionRead.unavailable,
     );
   }
   if (snapshot.rootCount <= 0n) {
