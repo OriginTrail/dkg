@@ -9162,9 +9162,13 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       expect(read.returnedId).toBe(authority === 'available' ? '582' : null);
     }
     const vmGraph = contextGraphLayerUri(CONTEXT_GRAPH_ID, MemoryLayer.VerifiableMemory, AUTHOR, 41);
+    const contentGraph = accessPolicy === 1
+      ? vmGraph
+      : contextGraphLayerUri(CONTEXT_GRAPH_ID, MemoryLayer.SharedWorkingMemory, AUTHOR, 41);
     if (authority === 'unavailable') {
       expect(receiver.readRfc64AppliedCatalogHeadV1(appliedScope)).toEqual(previousAppliedHead);
       expect(receiver.readRfc64PublicCatalogReconciliationFailureV1(successor.headObjectDigest)).not.toBeNull();
+      await expect(receiver.store.countQuads(contentGraph)).resolves.toBe(0);
       await expect(receiver.store.countQuads(vmGraph)).resolves.toBe(0);
       return;
     }
@@ -9172,9 +9176,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(receiver.readRfc64AppliedCatalogHeadV1(appliedScope)).toMatchObject({
       currentCatalogHeadDigest: successor.headObjectDigest, inventoryRowCount: '1',
     });
-    const contentGraph = accessPolicy === 1
-      ? vmGraph
-      : contextGraphLayerUri(CONTEXT_GRAPH_ID, MemoryLayer.SharedWorkingMemory, AUTHOR, 41);
     await expect(readExactGraphPaged(receiver.store, contentGraph, {
       expectedQuadCount: PROJECTION_QUADS.length, outputGraph: '',
     })).resolves.toEqual(PROJECTION_QUADS);
