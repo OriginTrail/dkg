@@ -30,6 +30,8 @@ describe('private share authority churn (real agent, signed chain seal and store
       await agent.start();
       await agent.createContextGraph({ id: cg, name: cg, accessPolicy: 1 });
       await agent.registerContextGraph(cg);
+      // Another agent hosted on this node. It is not on the graph's chain roster.
+      const coHosted = await agent.registerAgent('co-hosted-agent');
       await agent.assertion.create(cg, name);
       await agent.assertion.write(cg, name, [{
         subject: 'urn:share:entity', predicate: 'urn:share:public', object: '"original public"',
@@ -52,7 +54,7 @@ describe('private share authority churn (real agent, signed chain seal and store
       }`);
       const readSwm = () => agent.store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } }`);
       const projection = (agent as unknown as {
-        contextGraphMetaProjection: { readAuthorityFactsRevision: number };
+        contextGraphMetaProjection: { recipientKeyRouteFence: { revision: number } };
       }).contextGraphMetaProjection;
       const query = agent.store.query.bind(agent.store);
       let interleaving = false;
@@ -63,13 +65,16 @@ describe('private share authority churn (real agent, signed chain seal and store
           && result.type === 'bindings' && result.bindings.length > 0) {
           interleaving = true;
           try {
-            const before = projection.readAuthorityFactsRevision;
-            // Interleave an actual authority metadata write after the real key
-            // read. Neither the resolver, chain roster nor its error is stubbed.
-            const other = `${cg}-concurrent-${++mutations}`;
-            await agent.createContextGraph({ id: other, name: other, accessPolicy: 1 });
-            expect(projection.readAuthorityFactsRevision).toBeGreaterThan(before);
-            observedRevisions.push(projection.readAuthorityFactsRevision);
+            const before = projection.recipientKeyRouteFence.revision;
+            // Interleave an actual recipient-key write after the real key read:
+            // the co-hosted agent rotates its encryption key. A private roster is
+            // fenced by the key/route facts of every agent on the node and by its
+            // own peer gate, not by other graphs (GH#3067). Neither the resolver,
+            // chain roster nor its error is stubbed.
+            await agent.rotateWorkspaceEncryptionKey(coHosted.agentAddress);
+            mutations += 1;
+            expect(projection.recipientKeyRouteFence.revision).toBeGreaterThan(before);
+            observedRevisions.push(projection.recipientKeyRouteFence.revision);
           } finally { interleaving = false; }
         }
         return result;
@@ -87,6 +92,9 @@ describe('private share authority churn (real agent, signed chain seal and store
           code: 'PROMOTE_RETRYABLE_FAILURE', message: PRIVATE_SHARE_AUTHORITY_RETRY_ERROR,
           cause: { message: expect.stringContaining('private authority changed while recipient keys were resolving') },
         });
+        // A recipient read refuses after collecting keys in each of its three
+        // windows, each collect followed by a rotation. The promote may repeat
+        // the read within its time bound, so there can be more.
         expect(mutations).toBeGreaterThanOrEqual(3);
         expect(new Set(observedRevisions).size).toBe(mutations);
         expect(await readIntent()).toMatchObject({ type: 'bindings', bindings: [] });
