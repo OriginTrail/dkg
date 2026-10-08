@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
-import { SingleFlightInvalidatedError } from '../src/keyed-ttl-single-flight-cache.js';
+import {
+  AbortableKeyedSingleFlight,
+  SingleFlightInvalidatedError,
+} from '../src/keyed-ttl-single-flight-cache.js';
 import {
   activeRpcRequestContext,
   withRpcRequestContext,
@@ -161,6 +164,29 @@ describe('adapter initialization is shared by the callers that need it', () => {
 
   /** Let what a released or ended run still has to do happen. */
   const settled = () => new Promise<void>((done) => setTimeout(done, 20));
+
+  /**
+   * How often a caller asked to share a run, by the signal it waits under. A
+   * caller that keeps asking lets nothing else run, a test's timeout
+   * included, so one that asks a sixth time fails instead.
+   */
+  function attemptsByCaller() {
+    const run = AbortableKeyedSingleFlight.prototype.run;
+    const attempts = new Map<AbortSignal | undefined, number>();
+    vi.spyOn(AbortableKeyedSingleFlight.prototype, 'run').mockImplementation(function (
+      this: AbortableKeyedSingleFlight<unknown, unknown>,
+      ...args: Parameters<typeof run>
+    ) {
+      const [key, , signal] = args;
+      if (key === 'init') {
+        const asked = (attempts.get(signal) ?? 0) + 1;
+        attempts.set(signal, asked);
+        if (asked > 5) throw new Error(`a caller asked ${asked} times to share initialization`);
+      }
+      return run.apply(this, args);
+    });
+    return (signal: AbortSignal) => attempts.get(signal) ?? 0;
+  }
 
   it('runs once for callers that arrive together', async () => {
     const { adapter, runs, holdNext } = fixture();
@@ -384,6 +410,39 @@ describe('adapter initialization is shared by the callers that need it', () => {
       .rejects.toBe(reason);
     await settled();
     expect(runs()).toBe(0);
+  });
+
+  it.each([
+    ['while it waits', false],
+    ['before it asks', true],
+  ])('ends a caller cancelled %s by a retryable invalidation of its own, instead of asking again', async (_when, early) => {
+    const { adapter, runs, holdNext } = fixture();
+    const attempts = attemptsByCaller();
+    const held = holdNext('ContextGraphs');
+    // What a shared read cancels its wait for initialization with when the
+    // read is invalidated, as a name-hash lookup is when the publish-preflight
+    // cache is reset: retryable, for the read to start again, not this wait.
+    const reason = new SingleFlightInvalidatedError('the caller\'s own read was invalidated', { retryable: true });
+    const leaving = new AbortController();
+    const staying = new AbortController();
+    if (early) leaving.abort(reason);
+    const cancelled = withRpcRequestContext({ signal: leaving.signal }, () => adapter.init())
+      .catch((error: unknown) => error);
+    const live = withRpcRequestContext({ signal: staying.signal }, () => adapter.init());
+    await held.reached;
+
+    if (!early) leaving.abort(reason);
+    const outcome = await cancelled;
+    expect(attempts(leaving.signal)).toBe(1);
+    expect(outcome).toBe(reason);
+
+    // A caller that waits on, under a signal of its own, still follows a
+    // reset to the run that starts after it.
+    adapter.invalidateAllBoundContracts();
+    await expect(live).resolves.toBeUndefined();
+    expect(attempts(staying.signal)).toBe(2);
+    expect(runs()).toBe(2);
+    expect(adapter.initialized).toBe(true);
   });
 
   it('gives every waiter the failure of the run they shared, and the next caller a new run', async () => {

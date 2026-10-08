@@ -98,8 +98,13 @@ export class SharedAdapterInitialization {
         );
       } catch (error) {
         // A reset ended the run this caller was waiting for. The next run
-        // resolves the bindings as the Hub has them now.
-        if (error instanceof SingleFlightInvalidatedError && error.retryable) continue;
+        // resolves the bindings as the Hub has them now. A cancelled caller
+        // leaves with its own reason, even a retryable invalidation: that is
+        // its canceller's to retry, and asking again would fail the same way.
+        if (error instanceof SingleFlightInvalidatedError && error.retryable) {
+          starter.signal?.throwIfAborted();
+          continue;
+        }
         throw error;
       } finally {
         if (observer !== undefined) this.#observers.delete(observer);
