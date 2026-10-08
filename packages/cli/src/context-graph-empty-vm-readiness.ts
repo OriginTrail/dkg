@@ -72,6 +72,9 @@ export function registerJoinMetadataEmptyVmSettlement(input: {
  * The agent's proof owns every prerequisite, this node's membership included,
  * so a graph it does not apply to settles nothing here. A proven graph is
  * announced the way a catch-up job that proved the same thing announces it.
+ *
+ * No request owns this work, so the node does: it ends when the node begins
+ * to stop, and the proof's own fence then refuses to commit.
  */
 export async function settlePrivateEmptyVmAfterJoinMetadata(
   agent: DKGAgent,
@@ -84,9 +87,34 @@ export async function settlePrivateEmptyVmAfterJoinMetadata(
   trace('join-metadata', 'candidate');
   if (!await settlePrivateEmptyVm(
     'join-metadata', agent, dashboard, contextGraphId, callerAgentAddress, JOIN_METADATA_SETTLEMENT_TIMEOUT_MS,
+    agent.node?.stopSignal,
   )) return false;
   agent.eventBus.emit(DKGEvent.PROJECT_SYNCED, { contextGraphId, dataSynced: 0, sharedMemorySynced: 0 });
   return true;
+}
+
+/**
+ * One signal for the deadline and the node's stop. The stop signal lives as
+ * long as the node, so nothing derived from it stays registered on it once
+ * the settlement is over.
+ */
+function endingWithEither(
+  deadline: AbortSignal,
+  stop: AbortSignal | undefined,
+): { signal: AbortSignal; release: () => void } {
+  if (stop === undefined) return { signal: deadline, release: () => {} };
+  const controller = new AbortController();
+  const end = () => controller.abort();
+  if (deadline.aborted || stop.aborted) end();
+  deadline.addEventListener('abort', end, { once: true });
+  stop.addEventListener('abort', end, { once: true });
+  return {
+    signal: controller.signal,
+    release: () => {
+      deadline.removeEventListener('abort', end);
+      stop.removeEventListener('abort', end);
+    },
+  };
 }
 
 async function settlePrivateEmptyVm(
@@ -96,8 +124,9 @@ async function settlePrivateEmptyVm(
   contextGraphId: string,
   callerAgentAddress: string,
   timeoutMs: number,
+  stopSignal?: AbortSignal,
 ): Promise<boolean> {
-  const signal = AbortSignal.timeout(timeoutMs);
+  const { signal, release } = endingWithEither(AbortSignal.timeout(timeoutMs), stopSignal);
   // One second within the subscribe deadline; a longer deadline retries less often.
   const maxRetryDelayMs = Math.max(1_000, Math.floor(timeoutMs / 8));
   const settle = async (): Promise<boolean> => {
@@ -133,8 +162,12 @@ async function settlePrivateEmptyVm(
   };
   // The agent also sees the same signal and rejects a late proof before its
   // synchronous commit. Bound the wait if a backend ignores cancellation.
-  const completed = await resolveWithinAbort(() => settle(), signal);
-  if (completed) return true;
-  trace(origin, signal.aborted ? 'meta-timeout' : 'settlement-incomplete');
-  return false;
+  try {
+    const completed = await resolveWithinAbort(() => settle(), signal);
+    if (completed) return true;
+    trace(origin, stopSignal?.aborted ? 'node-stopping' : signal.aborted ? 'meta-timeout' : 'settlement-incomplete');
+    return false;
+  } finally {
+    release();
+  }
 }

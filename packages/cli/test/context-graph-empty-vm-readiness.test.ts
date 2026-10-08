@@ -371,6 +371,7 @@ describe('private empty-VM settlement after join metadata', () => {
   function memberNode(options: {
     subscription?: Record<string, unknown> | null;
     proof?: LegacyProof;
+    stopSignal?: AbortSignal;
   } = {}) {
     const eventBus = new TypedEventBus();
     const subscriptions = new Map<string, Record<string, unknown>>();
@@ -381,6 +382,7 @@ describe('private empty-VM settlement after join metadata', () => {
     const proof = vi.fn(options.proof ?? provenProof);
     const agent = {
       eventBus,
+      node: { stopSignal: options.stopSignal },
       getSubscribedContextGraphs: () => subscriptions,
       markContextGraphSubscriptionState: (id: string, patch: Record<string, unknown>) => {
         subscriptions.set(id, { ...subscriptions.get(id), ...patch });
@@ -498,6 +500,70 @@ describe('private empty-VM settlement after join metadata', () => {
     expect(node.proof).not.toHaveBeenCalled();
     expect(node.subscription()).toMatchObject({ synced: false });
     expect(node.log).not.toHaveBeenCalled();
+  });
+
+  it('ends when the node begins to stop, and a proof that answers afterwards commits nothing', async () => {
+    const stop = new AbortController();
+    // A proof still waiting on its chain read when the node stops. It answers
+    // later all the same, as a backend that ignores cancellation would.
+    let answerLate = () => {};
+    const proof = vi.fn<LegacyProof>(async (_id, _caller, commit) => {
+      await new Promise<void>((resolve) => { answerLate = resolve; });
+      commit();
+      return { proven: true as const, value: undefined };
+    });
+    const node = memberNode({ proof, stopSignal: stop.signal });
+
+    const settlement = settlePrivateEmptyVmAfterJoinMetadata(node.agent, node.dashboard, 'graph', CALLER);
+    await vi.waitFor(() => expect(proof).toHaveBeenCalledOnce());
+    stop.abort();
+
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    const outcome = await Promise.race([
+      settlement,
+      new Promise((resolve) => { watchdog = setTimeout(() => resolve('still running'), 1_000); }),
+    ]);
+    clearTimeout(watchdog);
+    expect(outcome).toBe(false);
+    expect(proof.mock.calls[0]?.[3]?.aborted).toBe(true);
+    answerLate();
+    await settled();
+
+    expect(proof).toHaveBeenCalledOnce();
+    expect(node.subscription()).toMatchObject({ subscribed: true, synced: false });
+    expect(node.readiness()).toBeNull();
+    expect(node.announcedReady).not.toHaveBeenCalled();
+  });
+
+  it('starts no proof once the node is stopping', async () => {
+    const stop = new AbortController();
+    stop.abort();
+    const node = memberNode({ stopSignal: stop.signal });
+
+    node.confirmJoinMetadata();
+    await settled();
+
+    expect(node.proof).not.toHaveBeenCalled();
+    expect(node.subscription()).toMatchObject({ synced: false });
+    expect(node.announcedReady).not.toHaveBeenCalled();
+    expect(node.log).not.toHaveBeenCalled();
+  });
+
+  it('leaves nothing registered on the node stop signal when it is done', async () => {
+    const stop = new AbortController();
+    const added = vi.spyOn(stop.signal, 'addEventListener');
+    const removed = vi.spyOn(stop.signal, 'removeEventListener');
+    const node = memberNode({ stopSignal: stop.signal });
+
+    await expect(settlePrivateEmptyVmAfterJoinMetadata(node.agent, node.dashboard, 'graph', CALLER))
+      .resolves.toBe(true);
+
+    expect(added).toHaveBeenCalledOnce();
+    expect(removed.mock.calls.map(([type, listener]) => [type, listener]))
+      .toEqual(added.mock.calls.map(([type, listener]) => [type, listener]));
+    // The node stopping later reaches nothing that is left of this settlement.
+    stop.abort();
+    expect(node.subscription()).toMatchObject({ synced: true });
   });
 
   it.each([new Error('store unavailable'), 'store unavailable'])(
