@@ -2329,14 +2329,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     // registry slot. It may enrich this binding, but only an explicit verified
     // transition may replace a previously recorded numeric id.
     if (current.onChainId !== undefined && current.onChainId !== onChainContextGraphId) return null;
-    const next = { ...current };
-    this.bindSubscriptionOnChainId(localId, next, onChainContextGraphId);
-    next.onChainHash = wireId;
-    // Discovery enriches identity, not durable subscription intent. An
-    // inactive row may own a saved dormant binding; projecting it through the
-    // ordinary intent writer would delete that original durable subscription.
-    this.setContextGraphSubscription(localId, next,
-      current.subscribed || current.coreHosted ? options : { ...options, persist: false });
+    this.recordDiscoveredContextGraph(localId, {
+      onChainId: onChainContextGraphId, onChainHash: wireId,
+    }, options);
     return localId;
   }
 

@@ -83,6 +83,108 @@ function observed(id: string) {
 }
 
 describe('dormant durable Context Graph identity', () => {
+
+  it('repairs a legacy hash row after disabled restart and a matching native observation', async () => {
+    const legacy = durable({ id: HASH, onChainId: '323', onChainHash: undefined });
+    const f = await cold([legacy], false);
+    await f.agent.rehydrateContextGraphSubscriptions(null);
+    f.agent.applyOnChainContextGraphObservation(observed('323'), { source: 'checkpoint' });
+    await f.drain();
+    expect(f.state.subscribedContextGraphs.get(HASH)).toMatchObject({
+      onChainId: '323', onChainHash: HASH, subscribed: false,
+    });
+    expect(f.state.subscribedContextGraphs.get(HASH)?.coreHosted).not.toBe(true);
+    expect(f.state.wireIdToLocalCgId.get(HASH)).toBe(HASH);
+    await expect(f.agent.resolveContextGraphOnChainIdReference('#323')).resolves.toMatchObject({
+      kind: 'resolved', contextGraphId: HASH, onChainId: '323', nameHash: HASH,
+    });
+    expect(f.rows()).toEqual([legacy]);
+    expect(f.save).not.toHaveBeenCalled();
+    expect(f.remove).not.toHaveBeenCalled();
+  });
+
+  it('retains an explicit literal commitment for a hash-shaped cleartext identity', async () => {
+    const literalCommitment = ethers.keccak256(ethers.toUtf8Bytes(HASH)).toLowerCase();
+    const literal = durable({ id: HASH, onChainId: '323', onChainHash: literalCommitment });
+    const f = await cold([literal], false);
+    await f.agent.rehydrateContextGraphSubscriptions(null);
+    f.agent.applyOnChainContextGraphObservation({
+      ...observed('323'), nameHash: literalCommitment,
+    }, { source: 'checkpoint' });
+    await f.drain();
+    expect(f.state.subscribedContextGraphs.get(HASH)).toMatchObject({
+      onChainId: '323', onChainHash: literalCommitment, subscribed: false,
+    });
+    expect(f.state.wireIdToLocalCgId.get(literalCommitment)).toBe(HASH);
+    expect(f.state.wireIdToLocalCgId.has(HASH)).toBe(false);
+    expect(f.rows()).toEqual([literal]);
+  });
+
+  it('preserves admitted hash-slot323 routing beside dormant cleartext slot582', async () => {
+    const saved = durable({ onChainId: '582' });
+    const f = await cold([saved], false);
+    f.state.setContextGraphSubscription(HASH, {
+      coreHosted: true, subscribed: false, synced: true,
+      sharedMemorySynced: true, metaSynced: true,
+      onChainId: '323', onChainHash: HASH,
+    }, { persist: false });
+    // Typed chain facts enter through the real checkpoint observation owner.
+    // The native numeric resolver and subscription setter are never stubbed.
+    f.agent.applyOnChainContextGraphObservation(observed('323'), { source: 'checkpoint' });
+    await expect(f.agent.resolveContextGraphOnChainIdReference('#323')).resolves.toMatchObject({
+      kind: 'resolved', contextGraphId: HASH, onChainId: '323',
+    });
+    await f.drain();
+    const admitted = f.state.subscribedContextGraphs.get(HASH)!;
+    const persistedBefore = f.rows();
+    f.save.mockClear();
+    f.remove.mockClear();
+    await f.agent.rehydrateContextGraphSubscriptions(null);
+    await f.drain();
+    await expect(f.agent.getContextGraphOnChainId(LOCAL)).resolves.toBe('582');
+    expect(f.state.subscribedContextGraphs.get(HASH)).toBe(admitted);
+    expect(admitted).toMatchObject({
+      coreHosted: true, synced: true, sharedMemorySynced: true, metaSynced: true,
+      onChainId: '323', onChainHash: HASH,
+    });
+    expect(f.state.wireIdToLocalCgId.get(HASH)).toBe(HASH);
+    await expect(f.agent.resolveContextGraphOnChainIdReference('#323')).resolves.toMatchObject({
+      kind: 'resolved', contextGraphId: HASH, onChainId: '323', nameHash: HASH,
+    });
+    expect(f.state.subscribedContextGraphs.get(LOCAL)).toMatchObject({
+      subscribed: false, coreHosted: false, onChainId: '582', onChainHash: HASH,
+    });
+    expect(f.rows()).toEqual(persistedBefore);
+    expect(f.save).not.toHaveBeenCalled();
+    expect(f.remove).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, false] as const)(
+    'keeps active readiness and discovery persistence with persist:%s', async (persist) => {
+      const f = await cold([], false);
+      f.state.setContextGraphSubscription(LOCAL, {
+        subscribed: true, synced: true, sharedMemorySynced: true,
+        metaSynced: true, onChainHash: HASH,
+      }, { persist: false });
+      expect(f.agent.bindOnChainContextGraphIdFromNameHash(HASH, ORIGINAL, { persist })).toBe(LOCAL);
+      await f.drain();
+      expect(f.state.subscribedContextGraphs.get(LOCAL)).toMatchObject({
+        subscribed: true, synced: true, sharedMemorySynced: true,
+        metaSynced: true, onChainId: ORIGINAL, onChainHash: HASH,
+      });
+      if (persist === false) expect(f.save).not.toHaveBeenCalled();
+      else expect(f.rows()).toEqual([expect.objectContaining({
+        id: LOCAL, subscribed: true, synced: true, sharedMemorySynced: true,
+        metaSynced: true, onChainId: ORIGINAL, onChainHash: HASH,
+      })]);
+      f.save.mockClear();
+      expect(f.agent.bindOnChainContextGraphIdFromNameHash(HASH, COLLISION)).toBeNull();
+      await f.drain();
+      expect(f.state.subscribedContextGraphs.get(LOCAL)?.onChainId).toBe(ORIGINAL);
+      expect(f.save).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(['event', 'storage', 'checkpoint'] as const)(
     'retains exact585 and durable intent across foreign-first %s observations', async (source) => {
       const f = await cold();

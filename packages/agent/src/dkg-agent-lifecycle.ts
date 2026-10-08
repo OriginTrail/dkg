@@ -9196,7 +9196,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   setContextGraphSubscription(this: DKGAgent,
     contextGraphId: string,
     next: ContextGraphSubInput,
-    options?: { persist?: boolean; updateRehydrationStatus?: boolean },
+    options?: { persist?: boolean; updateRehydrationStatus?: boolean; preserveAdmittedWireBinding?: boolean },
   ): ContextGraphSub {
     this.invalidateListContextGraphsCache();
     const previous = this.subscribedContextGraphs.get(contextGraphId);
@@ -9284,7 +9284,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.wireIdToLocalCgId.delete(previousWireId);
     }
     this.subscribedContextGraphs.set(contextGraphId, canonicalNext);
-    this.wireIdToLocalCgId.set(nextWireId, contextGraphId);
+    const wireOwnerId = this.wireIdToLocalCgId.get(nextWireId);
+    const wireOwner = wireOwnerId === undefined ? undefined : this.subscribedContextGraphs.get(wireOwnerId);
+    // Identity-only restoration retains the direct local binding, but cannot
+    // take wire routing from an admitted row for a different registry slot.
+    const preserveWireOwner = options?.preserveAdmittedWireBinding === true
+      && wireOwnerId !== contextGraphId
+      && (wireOwner?.subscribed === true || wireOwner?.coreHosted === true)
+      && wireOwner.onChainId !== canonicalNext.onChainId;
+    if (!preserveWireOwner) this.wireIdToLocalCgId.set(nextWireId, contextGraphId);
     if (
       (canonicalNext.subscribed === true || canonicalNext.coreHosted === true)
       && previous?.subscribed !== true
@@ -10482,7 +10490,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         this.updateContextGraphSubscriptionRehydrationStatusAfterClear([], [contextGraphId]);
         continue;
       }
-      if (this.subscribedContextGraphs.has(contextGraphId)) {
+      const currentSubscription = this.subscribedContextGraphs.get(contextGraphId);
+      if (currentSubscription?.subscribed || currentSubscription?.coreHosted) {
         this.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
         this.contextGraphSubscriptionDormancyById.delete(contextGraphId);
         continue;
@@ -10549,7 +10558,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ) {
         continue;
       }
-      if (this.subscribedContextGraphs.has(contextGraphId)) {
+      const freshSubscription = this.subscribedContextGraphs.get(contextGraphId);
+      if (freshSubscription?.subscribed || freshSubscription?.coreHosted) {
         this.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
         this.contextGraphSubscriptionDormancyById.delete(contextGraphId);
         continue;
@@ -10771,7 +10781,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       for (const [id, identity] of projectDormantContextGraphIdentities(rows)) {
         const current = this.subscribedContextGraphs.get(id);
         if (current?.subscribed || current?.coreHosted) continue;
-        this.setContextGraphSubscription(id, identity, { persist: false });
+        this.setContextGraphSubscription(id, identity, {
+          persist: false, preserveAdmittedWireBinding: true,
+        });
       }
       if (!this.config.contextGraphSubscriptionRehydrationEnabled) {
         const dormancyById = this.contextGraphSubscriptionDormancyById;

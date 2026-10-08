@@ -842,7 +842,11 @@ describe('Context Graph subscription authority retry', () => {
       });
 
     await agent.start();
-    expect(agent.getSubscribedContextGraphs().has(cappedContextGraphId)).toBe(false);
+    expect(agent.getSubscribedContextGraphs().get(cappedContextGraphId)).toMatchObject({
+      onChainId: '8', onChainHash: targetNameHash,
+      subscribed: false, coreHosted: false, synced: false,
+      sharedMemorySynced: false, metaSynced: false,
+    });
     expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
       dormantReasons: { activationCap: [cappedContextGraphId] },
     });
@@ -1440,7 +1444,11 @@ describe('Context Graph subscription authority retry', () => {
           dormantReasons: { authorityUnavailable: [contextGraphId], deactivated: [] },
         });
       }
-      expect(agent.getSubscribedContextGraphs().has(contextGraphId)).toBe(false);
+      expect(agent.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
+        onChainId: '95', onChainHash: agent.contextGraphNameCommitment(contextGraphId),
+        subscribed: false, coreHosted: false, synced: false,
+        sharedMemorySynced: false, metaSynced: false,
+      });
     });
   }
 
@@ -1510,7 +1518,11 @@ describe('Context Graph subscription authority retry', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(first.decisions()).toHaveLength(2);
     expect(first.subscribed()).toBe(false);
-    expect(first.node.getSubscribedContextGraphs().has(contextGraphId)).toBe(false);
+    expect(first.node.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
+      onChainId: '95', onChainHash: first.node.contextGraphNameCommitment(contextGraphId),
+      subscribed: false, coreHosted: false, synced: false,
+      sharedMemorySynced: false, metaSynced: false,
+    });
     expect(first.node.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
       activated: 0,
       dormantIds: [contextGraphId],
@@ -1961,8 +1973,13 @@ describe('Context Graph subscription rehydration startup authority budget (#2815
     // The row after the spent budget is never read during startup.
     expect(startupReads).toEqual(['a-quick', 'b-unanswered']);
     expect(agent.getSubscribedContextGraphs().get('a-quick')).toMatchObject({ subscribed: true });
-    expect(agent.getSubscribedContextGraphs().has('b-unanswered')).toBe(false);
-    expect(agent.getSubscribedContextGraphs().has('c-unread')).toBe(false);
+    for (const [id, onChainId] of [['b-unanswered', '12'], ['c-unread', '13']]) {
+      expect(agent.getSubscribedContextGraphs().get(id)).toMatchObject({
+        onChainId, onChainHash: agent.contextGraphNameCommitment(id),
+        subscribed: false, coreHosted: false, synced: false,
+        sharedMemorySynced: false, metaSynced: false,
+      });
+    }
     expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
       activated: 1,
       dormantReasons: { authorityUnavailable: ['b-unanswered', 'c-unread'] },

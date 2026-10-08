@@ -18,9 +18,12 @@ export function projectDormantContextGraphIdentities(
       try {
         const commitment = ethers.keccak256(ethers.toUtf8Bytes(row.id)).toLowerCase();
         const explicitHash = row.onChainHash?.toLowerCase();
-        const wirePlaceholder = /^0x[0-9a-f]{64}$/i.test(row.id)
-          && explicitHash === row.id.toLowerCase();
-        if (explicitHash === undefined || explicitHash === commitment || wirePlaceholder) {
+        const hashShaped = /^0x[0-9a-f]{64}$/i.test(row.id);
+        const wirePlaceholder = hashShaped && explicitHash === row.id.toLowerCase();
+        // A legacy hash-keyed row without its hash is ambiguous. Leave it for
+        // matching native chain observation to stage/repair rather than invent
+        // the commitment of a possible placeholder's literal spelling.
+        if ((explicitHash === undefined && !hashShaped) || explicitHash === commitment || wirePlaceholder) {
           identity = {
             name: row.name,
             onChainId: row.onChainId,

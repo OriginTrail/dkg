@@ -270,10 +270,12 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
       ports.clearStatus(contextGraphId);
       continue;
     }
+    const currentSubscription = ports.subscriptions.get(contextGraphId);
     if (
       ports.dormancyById.get(contextGraphId) !== 'authorityUnavailable'
       || (ports.persistRevisions.get(contextGraphId) ?? 0) !== revision
-      || ports.subscriptions.has(contextGraphId)
+      || currentSubscription?.subscribed === true
+      || currentSubscription?.coreHosted === true
       || currentRow.id !== candidate.id
       || currentRow.onChainId !== candidate.onChainId
       || currentRow.onChainHash !== candidate.onChainHash
