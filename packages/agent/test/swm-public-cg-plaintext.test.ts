@@ -1,4 +1,3 @@
-import { createContextGraphProjectionFenceFixture } from './_helpers/context-graph-projection-fence.js';
 /**
  * Regression coverage for the WM→SWM promote / publish gating bug on a
  * PUBLIC-on-chain context graph that carries a `DKG_ALLOWED_AGENT` list.
@@ -24,6 +23,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { RpcUsageTracker, withRpcUsageConsumer } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/dkg-agent.js';
+import { stubRecipientRevisions } from './_helpers/recipient-fence-stub.js';
 
 // Hand-rolled call recorder: records every invocation's args and delegates to
 // the real impl, replacing the DI-seam spies on this file's agent-like stub.
@@ -121,7 +121,7 @@ function makeAgentLike(opts: {
     log,
     chain,
     store: { query: storeQuery },
-    contextGraphMetaProjection: createContextGraphProjectionFenceFixture(),
+    contextGraphMetaProjection: { readAuthorityFactsRevision: 0, ...stubRecipientRevisions() },
     swmSenderKeyStateLoaded: true,
     loadSwmSenderKeyState: vi.fn(async () => {}),
     subscribedContextGraphs,

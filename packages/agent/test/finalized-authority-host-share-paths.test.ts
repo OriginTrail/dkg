@@ -13,7 +13,6 @@ import {
   encodeWorkspacePublishRequest,
 } from '@origintrail-official/dkg-core';
 import { DKGAgent, agentFromPrivateKey, type AgentKeyRecord } from '../src/index.js';
-import type { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
 import { initializeRfc64LegacySwmBoundaryV1 } from '../src/rfc64/legacy-swm-boundary-v1.js';
 import { resolveRfc64PersistenceRootV1 } from '../src/rfc64/persistence-layout-v1.js';
 import { SwmHostModeStore } from '../src/swm/host-mode-store.js';
@@ -296,8 +295,10 @@ describe('finalized authority on the SWM host/sync and share paths', () => {
     agent = await DKGAgent.create({ name: 'FinalizedShareReconciles', chainAdapter: chain });
     const internals = agent as unknown as {
       gossip: unknown;
-      contextGraphMetaProjection: Pick<ContextGraphMetaProjection,
-        'readAuthorityFactsRevision' | 'captureContextGraphAuthorityFactsFence'>;
+      contextGraphMetaProjection: {
+        readonly readAuthorityFactsRevision: number;
+        readContextGraphAuthorityFactsRevision(contextGraphId: string): string;
+      };
       reconcileSharedMemoryGossipSubscription(contextGraphId: string): Promise<void>;
     };
     // A live gossip session, so that a reconcile runs its whole course.
@@ -340,7 +341,7 @@ describe('finalized authority on the SWM host/sync and share paths', () => {
     });
     const projection = internals.contextGraphMetaProjection;
     const nodeWide = projection.readAuthorityFactsRevision;
-    const perGraph = projection.captureContextGraphAuthorityFactsFence(privateGraph);
+    const perGraph = projection.readContextGraphAuthorityFactsRevision(privateGraph);
 
     const resolution = await agent.resolveWorkspaceAgentRecipientsForCurrentAuthority({
       contextGraphId: privateGraph,
@@ -356,7 +357,7 @@ describe('finalized authority on the SWM host/sync and share paths', () => {
     expect(reconciles).toHaveLength(1);
     expect(accessChecks).toHaveBeenCalledWith(privateGraph);
     expect(projection.readAuthorityFactsRevision).toBe(nodeWide);
-    expect(perGraph.assertCurrent()).toBe(true);
+    expect(projection.readContextGraphAuthorityFactsRevision(privateGraph)).toBe(perGraph);
   });
 
   it('admits host-mode gossip from the finalized roster without a live RPC', async () => {

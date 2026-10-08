@@ -1258,7 +1258,6 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           getCgMeta: (id) => this.getCgMeta(id),
           getContextGraphOnChainId: (id) => this.getContextGraphOnChainId(id),
           classifyOnChainSlot: (onChainId) => this.classifyOntologyBindingSlot(onChainId),
-          markCgMetaDirtyFromQuads: (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
           persistContextGraphSubscription: (id) => this.persistContextGraphSubscriptionState(id),
         },
         { requireContextGraphSubscriptionSetter: true },
@@ -1280,11 +1279,14 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           // one changed snapshot so the ordinary revoke race does not drop an
           // otherwise valid envelope, then fail closed under continued churn.
           for (let attempt = 0; attempt < 2; attempt += 1) {
-            const metadataFence = this.contextGraphMetaProjection.captureContextGraphAuthorityFactsFence(cgId);
+            const metadataRevision = this.contextGraphMetaProjection.readAuthorityFactsRevision;
             const meta = await this.getCgMeta(cgId);
             const allowedPeers =
               await this.resolveApprovedPrivateReplicaSwmAllowedPeersOverride(cgId);
-            if (metadataFence.assertCurrent()) {
+            if (
+              this.contextGraphMetaProjection.readAuthorityFactsRevision
+                === metadataRevision
+            ) {
               return allowedPeers === undefined ? meta : { ...meta, allowedPeers };
             }
           }
@@ -1324,7 +1326,6 @@ export class SwmSubstrateMethods extends DKGAgentBase {
             input.assertionVersion,
           );
         },
-        markContextGraphMetaDirtyFromQuads: (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
         // OT-RFC-38 / LU-6 Phase B: chain-backed agent-allowlist
         // fallback. Cores hosting curated CGs they are NOT members
         // of have no local meta for the allowlist — without this,
@@ -2079,9 +2080,6 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           // Defensive: resolve a missing pre-cd68fa689 wire CG id locally.
           resolveContextGraphOnChainId: (cgName: string) =>
             this.getContextGraphOnChainId(cgName),
-          markContextGraphMetaDirtyFromQuads: (quads) => {
-            this.contextGraphMetaProjection.markDirtyFromQuads(quads);
-          },
           workspaceWriteLocks: this.writeLocks,
           retireConfirmedGraphScopedSwmTwinIfOrphaned: (() => {
             const retireOrphaned = createRetireConfirmedGraphScopedSwmTwinIfOrphaned({

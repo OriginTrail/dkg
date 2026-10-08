@@ -142,13 +142,17 @@ describe('bounded-freshness authority reads', () => {
         'dkg-agent-crypto.ts',
         'dkg-agent-publish.ts',
       ];
-      const flipped = files.filter((file) => source(file).includes("freshness: 'bounded'"));
+      const flipped = files.filter((file) => source(file).includes("freshness: 'bounded'")
+        || source(file).includes("freshness: opts.freshness ?? 'bounded'"));
 
       // `dkg-agent-query.ts` carries the read-authority funnel behind
       // `cgAuth.query`, `cgAuth.canRead` and `cgAuth.readAuth`, and
       // `cgAuth.vmReconcile` reaches it through `canReadContextGraph`.
       // `dkg-agent-swm-host.ts` carries `cgAuth.vmSizing`.
       expect(flipped.sort()).toEqual(['dkg-agent-query.ts', 'dkg-agent-swm-host.ts']);
+      // The read funnel keeps bounded as its default, while durable readiness
+      // explicitly selects live current-chain authority at its final fence.
+      expect(source('dkg-agent-query.ts')).toContain("freshness: opts.freshness ?? 'bounded'");
     });
 
     it('never flips the key-issuance or plaintext-downgrade paths', () => {

@@ -300,9 +300,13 @@ export interface AsyncPromoteQueueConfig {
   /**
    * Backoff curve for `failed_retrying` jobs. Receives the next attempt
    * count (1-indexed — first retry is attempt 1) and returns ms-from-now.
-   * Default: `min(60_000 * 2^(attempt-1), 15 * 60_000)`.
+   * Default: `min(60_000 * 2^(attempt-1), 15 * 60_000)`, varied by up to +-20 %
+   * so jobs that failed together do not return together (GH#3067). A curve the
+   * caller supplies is used as given.
    */
   backoff?: (attemptCount: number) => number;
+  /** Random source of the default backoff's jitter, in [0, 1). Defaults to `Math.random`. */
+  rand?: () => number;
 }
 
 /**

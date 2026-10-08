@@ -68,6 +68,7 @@ import {
 import { EndpointStickiness, type StickinessIntent } from './endpoint-stickiness.js';
 import { EndpointReadRefusals } from './endpoint-read-refusals.js';
 import { resolveCapMs, type ReadPolicy } from './rpc-read-timeout-policy.js';
+import { runRpcProviderPass } from './rpc-provider-pass.js';
 export { resolveCapMs, type ReadPolicy } from './rpc-read-timeout-policy.js';
 import {
   ChainRpcTransportError,
@@ -741,13 +742,11 @@ export class RpcFailoverClient {
   }
 
   /**
-   * The single per-endpoint state machine backing `read`, `readContract`, and
-   * `getReceipt`. It owns endpoint ordering, validation+request attempt budgets,
-   * retry classification, benign-empty semantics, stickiness transitions, and
-   * failover selection. Receipt lookups add an absolute deadline and accept any
-   * real null response; ordinary nullable reads retain their stricter all-empty
-   * contract. Keeping both policies here prevents CLI and adapter receipt paths
-   * from growing a second transport loop beside the canonical failover core.
+   * Canonical policy for `read`, `readContract`, and `getReceipt`, using the
+   * shared ordered provider pass. This wrapper owns endpoint ordering,
+   * validation+request attempt budgets, stickiness transitions and exhaustion.
+   * Receipt lookups add an absolute deadline and accept any real null response;
+   * ordinary nullable reads retain their stricter all-empty contract.
    */
   private async runAcrossProviders<T>(
     label: string,
@@ -771,24 +770,16 @@ export class RpcFailoverClient {
       options.intent !== 'transparentRead' && this.endpointOrderingEnabled(),
     );
     const configuredAttemptTimeoutMs = options.attemptTimeoutMs(canonical.length);
-    let lastRetryable: unknown;
     let allEndpointsThrottled = true;
     let retryAfterMs: number | undefined;
-    let sawEmpty = false;
-    let lastEmpty: T | undefined;
-    let deadlineExpiredBeforeAttempt = false;
-    for (let i = 0; i < attempts.length; i += 1) {
-      const attempt = attempts[i];
-      const endpoint = attempt.endpoint;
-      const isLast = i === attempts.length - 1;
+    const result = await runRpcProviderPass(attempts, (attempt, index) => {
+      // Prepare an immutable budget before observers, then attach it to this
+      // attempt's runner so validation and request share the same deadline.
       const attemptStartedAt = Date.now();
       const deadlineRemainingMs = options.deadlineMs === undefined
         ? undefined
         : options.deadlineMs - attemptStartedAt;
-      if (deadlineRemainingMs !== undefined && deadlineRemainingMs <= 0) {
-        deadlineExpiredBeforeAttempt = true;
-        break;
-      }
+      if (deadlineRemainingMs !== undefined && deadlineRemainingMs <= 0) return null;
       const attemptBudgetMs = deadlineRemainingMs === undefined
         ? configuredAttemptTimeoutMs
         : configuredAttemptTimeoutMs === undefined
@@ -797,51 +788,51 @@ export class RpcFailoverClient {
       const attemptDeadlineMs = attemptBudgetMs === undefined
         ? undefined
         : attemptStartedAt + attemptBudgetMs;
-      try {
-        options.onAttempt?.(i + 1);
+      return async () => {
+        const endpoint = attempt.endpoint;
         if (this.validateEndpoint) {
           await this.runProviderAttemptStage(
             () => this.validateEndpoint!(endpoint),
             attemptDeadlineMs,
-            `${label} chainId validation via RPC #${i + 1}`,
+            `${label} chainId validation via RPC #${index + 1}`,
           );
         }
-        const out = await this.runProviderAttemptStage(
+        return this.runProviderAttemptStage(
           () => fn(endpoint.provider),
           attemptDeadlineMs,
-          `${label} via RPC #${i + 1}`,
+          `${label} via RPC #${index + 1}`,
         );
-        if (options.isEmptyResult?.(out)) {
-          // A BENIGN "no result on this endpoint (yet)" — a nullable read whose
-          // endpoint hasn't imported the tx/block. This is NOT a transport failure:
-          // it must NOT de-prefer the endpoint (recordFailure) or emit failover
-          // telemetry. Try the next endpoint; if EVERY endpoint is empty (and none
-          // errored) the empty value itself is the honest answer.
-          sawEmpty = true;
-          allEndpointsThrottled = false;
-          lastEmpty = out;
-          continue;
-        }
+      };
+    }, {
+      isRetryable: error => options.isRetryable(error),
+      onAttempt: (_attempt, index) => options.onAttempt?.(index + 1),
+      isEmptyResult: (value) => {
+        const empty = options.isEmptyResult?.(value) ?? false;
+        // Benign emptiness neither de-prefers a backend nor emits failover.
+        if (empty) allEndpointsThrottled = false;
+        return empty;
+      },
+      onServed: (attempt, value) => {
         attempt.recordSuccess();
-        options.onServed(endpoint, out);
-        return out;
-      } catch (err) {
-        if (classifyRpcRetryDisposition(err) === 'retry-later') throw err;
-        if (!options.isRetryable(err)) throw err;
-        lastRetryable = err;
-        if (!isThrottleRpcError(err)) {
+        options.onServed(attempt.endpoint, value);
+      },
+      onFailure: (attempt, error, index) => {
+        if (!isThrottleRpcError(error)) {
           allEndpointsThrottled = false;
         } else {
-          const hint = errorRetryAfterMs(err);
+          const hint = errorRetryAfterMs(error);
           if (hint !== undefined) retryAfterMs = Math.max(retryAfterMs ?? 0, hint);
         }
-        attempt.recordFailure(err); // de-prefer a failed backend; remember a refusal
+        attempt.recordFailure(error); // de-prefer a failed backend; remember a refusal
         const canTryNext = options.deadlineMs === undefined || Date.now() < options.deadlineMs;
-        if (!isLast && canTryNext) {
-          noteRpcFailover(label, endpoint.rpcUrl, err, attempts[i + 1].endpoint.rpcUrl);
+        if (index < attempts.length - 1 && canTryNext) {
+          noteRpcFailover(label, attempt.endpoint.rpcUrl, error, attempts[index + 1].endpoint.rpcUrl);
         }
-      }
-    }
+      },
+    });
+    if (result.status === 'served') return result.value;
+    const lastRetryable = result.lastError;
+    const sawEmpty = result.empty !== null;
     // Ordinary nullable reads require an all-empty pass, so any real transport
     // error still exhausts. Receipt polls opt into `any-empty`: one endpoint's
     // real null response is enough to report "not mined yet" despite a transient
@@ -871,8 +862,8 @@ export class RpcFailoverClient {
     }
     // Either every endpoint returned empty with no errors, or the caller's
     // `any-empty` policy accepted at least one empty response.
-    if (sawEmpty) return lastEmpty as T;
-    if (deadlineExpiredBeforeAttempt) {
+    if (result.empty !== null) return result.empty.value;
+    if (result.stopped) {
       throw createRpcTimeoutError(`${label} exceeded its operation deadline`);
     }
     // Unreachable when >=1 endpoint is configured (each iteration returns,

@@ -232,10 +232,10 @@ function selectedSharedMemoryLaneActive(agent: any, contextGraphId: string): boo
   return authority?.active === true && authority.lane === 'selected-public';
 }
 
-/** The kill switch can revoke the selected lane while explicitly restoring legacy transfer. */
-function legacySharedMemoryLaneAllowed(agent: any, contextGraphId: string): boolean {
+/** Delegate ordinary SWM admission to the agent's complete lane decision. */
+async function legacySharedMemoryLaneAllowed(agent: any, contextGraphId: string): Promise<boolean> {
   return typeof agent.canUseLegacySharedMemorySyncForContextGraphV1 === 'function'
-    && agent.canUseLegacySharedMemorySyncForContextGraphV1(contextGraphId) === true;
+    && await agent.canUseLegacySharedMemorySyncForContextGraphV1(contextGraphId) === true;
 }
 
 /** `Rfc64SwmRecoveryTargetRevokedErrorV1`, thrown by a selected lane whose lease is not current. */
@@ -964,7 +964,7 @@ class WorkerCatchupRunner implements CatchupRunner {
           // commits the graph's RFC-64 authority in the background while the
           // job is still preparing, and a later peer's call must then run.
           if (!selectedSharedMemoryLaneActive(agent, contextGraphId)) {
-            if (legacySharedMemoryLaneAllowed(agent, contextGraphId)) {
+            if (await legacySharedMemoryLaneAllowed(agent, contextGraphId)) {
               return runLegacyFallback();
             }
             return this.selectedLaneNotAttempted(
@@ -993,7 +993,7 @@ class WorkerCatchupRunner implements CatchupRunner {
             // its failure semantics.
             if (!isRfc64SwmRecoveryLeaseRefusal(error)) throw error;
             if (!selectedSharedMemoryLaneActive(agent, contextGraphId)
-              && legacySharedMemoryLaneAllowed(agent, contextGraphId)) {
+              && await legacySharedMemoryLaneAllowed(agent, contextGraphId)) {
               return runLegacyFallback();
             }
             return this.selectedLaneNotAttempted(

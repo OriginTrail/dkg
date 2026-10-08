@@ -261,24 +261,3 @@ export function countSyncPriorityClasses(
   }
   return counts;
 }
-
-/** Validate the scheduler admission shape before resolving its values. */
-export function validateSyncAdmissionConfig(config: SyncAdmissionConfig | undefined): void {
-  if (config === undefined) return;
-  if (config === null || typeof config !== 'object' || Array.isArray(config)) {
-    throw new TypeError('Invalid syncAdmission: expected an object');
-  }
-  if (config.mode !== undefined && config.mode !== 'shared' && config.mode !== 'partitioned') {
-    throw new TypeError('Invalid syncAdmission.mode: expected shared or partitioned');
-  }
-  for (const key of ['fast', 'slow'] as const) {
-    const value = config[key];
-    if (value !== undefined && (
-      value === null
-      || typeof value !== 'object'
-      || Array.isArray(value)
-    )) {
-      throw new TypeError(`Invalid syncAdmission.${key}: expected an object`);
-    }
-  }
-}

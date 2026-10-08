@@ -241,17 +241,14 @@ done
 # `[rs.tick.already-solved]` warnings after the first submission. The
 # configured proofingPeriodDurationInBlocks on devnet is 100, so
 # mining a generous 250 blocks reliably ticks us into the next period
-# without burning seconds on real-time advance. `hardhat_mine` accepts
-# a hex count and mines instantly. Safe to call against the
-# Hardhat-node JSON-RPC the devnet starts on $HARDHAT_PORT.
+# without burning seconds on real-time advance. devnet_mine_blocks mines
+# them one each in a single batch against the Hardhat-node JSON-RPC the
+# devnet starts on $HARDHAT_PORT (and says why it is not hardhat_mine).
 log "Mining 250 hardhat blocks to advance into a fresh random-sampling period..."
-mine_resp=$(curl -sS -X POST -H 'Content-Type: application/json' \
-  --data '{"jsonrpc":"2.0","id":1,"method":"hardhat_mine","params":["0xfa"]}' \
-  "http://127.0.0.1:${HARDHAT_PORT}" 2>/dev/null || true)
-if grep -q '"result":true' <<<"$mine_resp"; then
+if devnet_mine_blocks 250 "$HARDHAT_PORT"; then
   log "  ✓ mined 250 blocks (proofingPeriodDurationInBlocks=100 → guaranteed new period)"
 else
-  warn "hardhat_mine response was unexpected: $mine_resp"
+  warn "mining 250 blocks failed"
 fi
 
 log "Polling cores for random-sampling submitProof tx against kaId=$PUBLISH_KC (timeout=${RS_TIMEOUT}s)..."

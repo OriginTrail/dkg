@@ -11,9 +11,21 @@ import type { RpcRequestAdmissionPriority } from './rpc-request-transport.js';
 /**
  * Internal authority reads may enter a saturated ordinary queue, but remain
  * bounded independently so a bug cannot create an unbounded priority lane.
- * Four slots match the default async-promote worker concurrency.
+ * Four slots match the default async-promote worker concurrency. An authority
+ * read enters the reserve when the ordinary slots of its class are taken: the
+ * whole queue for foreground work, the background share of it for background
+ * work. Reserve slots are counted apart from ordinary ones, so a read waiting
+ * in the reserve never takes a slot the capacity split keeps for other work.
  */
 const AUTHORITY_PRIORITY_QUEUE_RESERVE = 4;
+
+/**
+ * How many authority admissions in a row may pass ordinary background work
+ * that has already waited the fairness grace period. Authority reads then get
+ * four of every five background permits for as long as they need them, and a
+ * stream of them cannot starve bulk work.
+ */
+const BACKGROUND_AUTHORITY_MAX_PASSES = 4;
 
 export interface RpcRequestGovernorPolicyInput {
   /** Total node-process RPC request rate. Defaults to 10 requests/second. */
@@ -202,6 +214,8 @@ interface RpcRequestWaiter {
   readonly requestClass: RpcRequestClass;
   readonly admissionPriority?: RpcRequestAdmissionPriority;
   readonly enqueuedAtMs: number;
+  /** Waits in the authority reserve rather than in an ordinary queue slot. */
+  readonly authorityReserveSlot: boolean;
   readonly resolve: () => void;
   readonly reject: (error: unknown) => void;
   readonly signal?: AbortSignal;
@@ -234,6 +248,15 @@ function zeroGovernorCounters(): MutableGovernorCounters {
  * background work; background work additionally consumes a smaller bucket,
  * so catalog warming cannot consume the reserved publishing/control-plane
  * capacity. The same instance is injected into every adapter in one daemon.
+ *
+ * An authority read keeps its caller's class and that class's budget, and goes
+ * first inside it. It answers a fail-closed check under a deadline of a few
+ * seconds, so a place behind bulk work would be a refusal the chain never
+ * gave. In the background class it is for the same reason not held by the
+ * start-up delay, which exists to spread bulk work. It still spends the
+ * background bucket, yields to foreground work as any background request
+ * does, and leaves bulk work that has waited a bounded share of the
+ * background permits.
  */
 export class RpcRequestGovernor {
   /**
@@ -255,6 +278,10 @@ export class RpcRequestGovernor {
   #availableTokens: number;
   #backgroundAvailableTokens: number;
   #lastRefillMs: number;
+  /** See {@link RpcRequestGovernor.#nextBackgroundWaiter}. */
+  #backgroundAuthorityPasses = 0;
+  /** Queued waiters that hold a slot of the authority reserve. */
+  #authorityReserveSlotsInUse = 0;
   #timer: ReturnType<typeof setTimeout> | null = null;
   #window = zeroGovernorCounters();
 
@@ -341,17 +368,26 @@ export class RpcRequestGovernor {
   ): Promise<void> {
     if (signal?.aborted) throwRpcRequestAbortReason(signal);
     this.#refill();
-    if (this.#canAdmitImmediately(requestClass)) {
-      this.#admit(requestClass);
+    const authorityPriority = admissionPriority === 'authority';
+    if (
+      requestClass === 'background' && authorityPriority
+        ? this.#canAdmitBackgroundAuthorityImmediately()
+        : this.#canAdmitImmediately(requestClass)
+    ) {
+      this.#admit(requestClass, authorityPriority);
       return;
     }
-    const queueSize = this.#foregroundQueue.length + this.#backgroundQueue.length;
-    const authorityPriority = requestClass === 'foreground'
-      && admissionPriority === 'authority';
+    const ordinarySlotsInUse = this.#foregroundQueue.length + this.#backgroundQueue.length
+      - this.#authorityReserveSlotsInUse;
+    const authorityReserveSlot = ordinarySlotsInUse >= (
+      requestClass === 'background' ? this.#backgroundQueueLimit : this.#policy.maxQueueSize
+    );
     if (
-      queueSize >= this.#policy.maxQueueSize
-        + (authorityPriority ? AUTHORITY_PRIORITY_QUEUE_RESERVE : 0)
-      || (requestClass === 'background' && queueSize >= this.#backgroundQueueLimit)
+      authorityReserveSlot
+      && (
+        !authorityPriority
+        || this.#authorityReserveSlotsInUse >= AUTHORITY_PRIORITY_QUEUE_RESERVE
+      )
     ) {
       this.#window.rejected += 1;
       throw new RpcRequestGovernorQueueFullError(this.#policy.maxQueueSize);
@@ -362,6 +398,7 @@ export class RpcRequestGovernor {
         requestClass,
         ...(authorityPriority ? { admissionPriority } : {}),
         enqueuedAtMs: this.#clock.now(),
+        authorityReserveSlot,
         resolve,
         reject,
         signal,
@@ -378,6 +415,7 @@ export class RpcRequestGovernor {
         },
       };
       if (waiter.onAbort) signal!.addEventListener('abort', waiter.onAbort, { once: true });
+      if (authorityReserveSlot) this.#authorityReserveSlotsInUse += 1;
       const queue = requestClass === 'foreground' ? this.#foregroundQueue : this.#backgroundQueue;
       if (authorityPriority) {
         const firstOrdinary = queue.findIndex(
@@ -388,7 +426,9 @@ export class RpcRequestGovernor {
       } else {
         queue.push(waiter);
       }
-      if (requestClass === 'foreground') this.#cancelScheduledWakeup();
+      // A wake-up set for ordinary background work can be as far away as the
+      // start-up delay; an authority waiter is not bound by that.
+      if (requestClass === 'foreground' || authorityPriority) this.#cancelScheduledWakeup();
       this.#schedule();
     });
   }
@@ -446,38 +486,113 @@ export class RpcRequestGovernor {
       && this.#backgroundAvailableTokens >= 1;
   }
 
-  #admit(requestClass: RpcRequestClass): void {
+  /**
+   * A background authority read is admitted at once when no queued waiter is
+   * due the permit: the queues are empty, or the background queue holds only
+   * ordinary work waiting out the start-up delay. Otherwise it queues at the
+   * front and {@link RpcRequestGovernor.#nextBackgroundWaiter} decides.
+   */
+  #canAdmitBackgroundAuthorityImmediately(): boolean {
+    return this.#availableTokens >= 1
+      && this.#backgroundAvailableTokens >= 1
+      && this.#foregroundQueue.length === 0
+      && this.#nextBackgroundWaiter() < 0;
+  }
+
+  /**
+   * Index of the background waiter the next background permit goes to, or -1
+   * when none may take one yet.
+   *
+   * Authority waiters sit at the front and go first, also during the start-up
+   * delay. Ordinary background work must still make progress under a stream of
+   * them: an ordinary waiter that has waited the fairness grace period is
+   * passed by at most {@link BACKGROUND_AUTHORITY_MAX_PASSES} authority
+   * admissions in a row, then takes a permit itself.
+   */
+  #nextBackgroundWaiter(): number {
+    const head = this.#backgroundQueue[0];
+    if (head === undefined) return -1;
+    if (head.admissionPriority !== 'authority') {
+      return this.#clock.now() >= this.#backgroundNotBeforeMs ? 0 : -1;
+    }
+    if (this.#backgroundAuthorityPasses < BACKGROUND_AUTHORITY_MAX_PASSES) return 0;
+    const passed = this.#passedBackgroundWaiter();
+    return passed < 0 ? 0 : passed;
+  }
+
+  /**
+   * Index of the first ordinary background waiter that could take a permit
+   * now and has waited the fairness grace period, or -1.
+   */
+  #passedBackgroundWaiter(): number {
+    const now = this.#clock.now();
+    if (now < this.#backgroundNotBeforeMs) return -1;
+    const firstOrdinary = this.#backgroundQueue.findIndex(
+      (queued) => queued.admissionPriority !== 'authority',
+    );
+    return firstOrdinary >= 0
+      && now - this.#backgroundQueue[firstOrdinary]!.enqueuedAtMs
+        >= RpcRequestGovernor.BACKGROUND_FAIRNESS_GRACE_MS
+      ? firstOrdinary
+      : -1;
+  }
+
+  /**
+   * Whether the background class is owed its turn past foreground work: one of
+   * its waiters has waited the fairness grace period for a permit it could
+   * take now. Which waiter the turn goes to is a separate question
+   * ({@link RpcRequestGovernor.#nextBackgroundWaiter}), so an authority read
+   * that queued a moment ago does not undo what ordinary work behind it has
+   * already waited.
+   */
+  #backgroundWorkHasWaited(): boolean {
+    const head = this.#backgroundQueue[0];
+    const authorityHasWaited = head?.admissionPriority === 'authority'
+      && this.#clock.now() - head.enqueuedAtMs >= RpcRequestGovernor.BACKGROUND_FAIRNESS_GRACE_MS;
+    return authorityHasWaited || this.#passedBackgroundWaiter() >= 0;
+  }
+
+  #admit(requestClass: RpcRequestClass, authorityPriority = false): void {
     this.#availableTokens -= 1;
-    if (requestClass === 'background') this.#backgroundAvailableTokens -= 1;
+    if (requestClass === 'background') {
+      this.#backgroundAvailableTokens -= 1;
+      this.#backgroundAuthorityPasses = authorityPriority && this.#passedBackgroundWaiter() >= 0
+        ? this.#backgroundAuthorityPasses + 1
+        : 0;
+    }
     this.#window[requestClass === 'foreground' ? 'foregroundAdmitted' : 'backgroundAdmitted'] += 1;
+  }
+
+  /** Take a waiter out of its queue and give back the slot it held there. */
+  #dequeue(queue: RpcRequestWaiter[], index: number): RpcRequestWaiter {
+    const [waiter] = queue.splice(index, 1) as [RpcRequestWaiter];
+    waiter.signal?.removeEventListener('abort', waiter.onAbort!);
+    if (waiter.authorityReserveSlot) this.#authorityReserveSlotsInUse -= 1;
+    return waiter;
   }
 
   #removeWaiter(waiter: RpcRequestWaiter): boolean {
     const queue = waiter.requestClass === 'foreground' ? this.#foregroundQueue : this.#backgroundQueue;
     const index = queue.indexOf(waiter);
     if (index < 0) return false;
-    queue.splice(index, 1);
-    waiter.signal?.removeEventListener('abort', waiter.onAbort!);
+    this.#dequeue(queue, index);
     return true;
   }
 
-  #resolveHead(queue: RpcRequestWaiter[]): void {
-    const waiter = queue.shift()!;
-    waiter.signal?.removeEventListener('abort', waiter.onAbort!);
-    this.#admit(waiter.requestClass);
+  #resolveWaiter(queue: RpcRequestWaiter[], index = 0): void {
+    const waiter = this.#dequeue(queue, index);
+    this.#admit(waiter.requestClass, waiter.admissionPriority === 'authority');
     waiter.resolve();
   }
 
   #processQueues = (): void => {
     this.#timer = null;
     this.#refill();
-    const backgroundHead = this.#backgroundQueue[0];
-    const agedBackgroundHasCapacity = backgroundHead !== undefined
+    const backgroundNext = this.#nextBackgroundWaiter();
+    const agedBackgroundHasCapacity = backgroundNext >= 0
       && this.#availableTokens >= 1
       && this.#backgroundAvailableTokens >= 1
-      && this.#clock.now() >= this.#backgroundNotBeforeMs
-      && this.#clock.now() - backgroundHead.enqueuedAtMs
-        >= RpcRequestGovernor.BACKGROUND_FAIRNESS_GRACE_MS;
+      && this.#backgroundWorkHasWaited();
     // At most one aged background request jumps the foreground queue per
     // scheduling turn. Its own bucket keeps this within the background share;
     // the single admission keeps foreground latency bounded.
@@ -486,19 +601,19 @@ export class RpcRequestGovernor {
       && this.#foregroundQueue[0]?.admissionPriority !== 'authority'
       && agedBackgroundHasCapacity
     ) {
-      this.#resolveHead(this.#backgroundQueue);
+      this.#resolveWaiter(this.#backgroundQueue, backgroundNext);
     }
     while (this.#foregroundQueue.length > 0 && this.#availableTokens >= 1) {
-      this.#resolveHead(this.#foregroundQueue);
+      this.#resolveWaiter(this.#foregroundQueue);
     }
     while (
       this.#foregroundQueue.length === 0
-      && this.#backgroundQueue.length > 0
       && this.#availableTokens >= 1
       && this.#backgroundAvailableTokens >= 1
-      && this.#clock.now() >= this.#backgroundNotBeforeMs
     ) {
-      this.#resolveHead(this.#backgroundQueue);
+      const next = this.#nextBackgroundWaiter();
+      if (next < 0) break;
+      this.#resolveWaiter(this.#backgroundQueue, next);
     }
     this.#schedule();
   };
@@ -519,7 +634,9 @@ export class RpcRequestGovernor {
     } else {
       const totalDelay = ((1 - this.#availableTokens) / this.#policy.maxRequestsPerSecond) * 1000;
       const backgroundDelay = ((1 - this.#backgroundAvailableTokens) / this.#backgroundRate) * 1000;
-      const startupDelay = this.#backgroundNotBeforeMs - this.#clock.now();
+      const startupDelay = this.#backgroundQueue[0]?.admissionPriority === 'authority'
+        ? 0
+        : this.#backgroundNotBeforeMs - this.#clock.now();
       delayMs = Math.max(1, totalDelay, backgroundDelay, startupDelay);
     }
     this.#timer = this.#clock.setTimeout(this.#processQueues, Math.ceil(delayMs));

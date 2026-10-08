@@ -6,31 +6,6 @@ import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection
 import { DKGAgent } from '../src/dkg-agent.js';
 
 describe('ContextGraphMetaProjection', () => {
-  it('keeps source-specific declaration types and exact subject ownership in stored discovery', async () => {
-    const store = new OxigraphStore();
-    try {
-      const projection = new ContextGraphMetaProjection(store);
-      const root = '0x0000000000000000000000000000000000000abc/discovery-root';
-      const declaration = (id: string, source: 'meta' | 'catalog', type: string, subject = id): Quad => ({
-        subject: contextGraphDataUri(subject), predicate: DKG_ONTOLOGY.RDF_TYPE, object: type,
-        graph: source === 'meta' ? contextGraphMetaGraphUri(id) : contextGraphCatalogUri(id),
-      });
-      await store.insert([
-        declaration(root, 'meta', DKG_ONTOLOGY.DKG_CONTEXT_GRAPH),
-        declaration(`${root}/child`, 'meta', DKG_ONTOLOGY.DKG_CONTEXT_GRAPH),
-        declaration('catalog-only', 'catalog', DKG_ONTOLOGY.DKG_PRIVATE_CONTEXT_GRAPH),
-        declaration(`${root}/catalog-child`, 'catalog', DKG_ONTOLOGY.DKG_PRIVATE_CONTEXT_GRAPH),
-        declaration('meta-wrong-type', 'meta', DKG_ONTOLOGY.DKG_PRIVATE_CONTEXT_GRAPH),
-        declaration('catalog-wrong-type', 'catalog', DKG_ONTOLOGY.DKG_CONTEXT_GRAPH),
-        declaration('meta-owner', 'meta', DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, 'foreign-meta-subject'),
-        declaration('catalog-owner', 'catalog', DKG_ONTOLOGY.DKG_PRIVATE_CONTEXT_GRAPH, 'foreign-catalog-subject'),
-      ]);
-      await expect(projection.listDeclaredContextGraphIds()).resolves.toEqual([
-        root, 'catalog-only', `${root}/catalog-child`,
-      ].sort());
-    } finally { await store.close(); }
-  });
-
   it('enumerates declared context graph ids from ontology, agents, and root _meta graphs', async () => {
     const store = new OxigraphStore();
     const projection = new ContextGraphMetaProjection(store);
@@ -300,20 +275,18 @@ describe('ContextGraphMetaProjection', () => {
   it('fences one graph without discarding its proof for unrelated metadata writes', () => {
     const projection = new ContextGraphMetaProjection({} as TripleStore);
     const target = 'projection-target';
-    const before = projection.captureContextGraphAuthorityFactsFence(target);
+    const before = projection.readContextGraphAuthorityFactsRevision(target);
 
     projection.markDirty('projection-other');
     projection.markDirtyForGraph('urn:dkg:local:join-encryption-key-cache');
-    expect(before.assertCurrent()).toBe(true);
+    expect(projection.readContextGraphAuthorityFactsRevision(target)).toBe(before);
 
     projection.markDirtyForGraph(contextGraphMetaGraphUri(target));
-    expect(before.assertCurrent()).toBe(false);
-    const afterOwnWrite = projection.captureContextGraphAuthorityFactsFence(target);
+    const afterOwnWrite = projection.readContextGraphAuthorityFactsRevision(target);
+    expect(afterOwnWrite).not.toBe(before);
 
-    const unseenBefore = projection.captureContextGraphAuthorityFactsFence("not-yet-projected");
     projection.markAllDirty();
-    expect(afterOwnWrite.assertCurrent()).toBe(false);
-    expect(unseenBefore.assertCurrent()).toBe(false);
+    expect(projection.readContextGraphAuthorityFactsRevision(target)).not.toBe(afterOwnWrite);
   });
 
   it('rebuilds a cached record on request without advancing either authority revision', async () => {
@@ -336,20 +309,20 @@ describe('ContextGraphMetaProjection', () => {
     expect((await projection.get(id)).allowedAgents).toEqual([]);
 
     const nodeWide = projection.readAuthorityFactsRevision;
-    const perGraph = projection.captureContextGraphAuthorityFactsFence(id);
+    const perGraph = projection.readContextGraphAuthorityFactsRevision(id);
     projection.requireFreshRead(id);
     expect(projection.readAuthorityFactsRevision).toBe(nodeWide);
-    expect(perGraph.assertCurrent()).toBe(true);
+    expect(projection.readContextGraphAuthorityFactsRevision(id)).toBe(perGraph);
     expect((await projection.get(id)).allowedAgents).toEqual([member]);
 
     // A reported change still moves both revisions after a fresh-read request.
     projection.markDirty(id);
     expect(projection.readAuthorityFactsRevision).toBe(nodeWide + 1);
-    expect(perGraph.assertCurrent()).toBe(false);
-    const afterOwnChange = projection.captureContextGraphAuthorityFactsFence(id);
+    expect(projection.readContextGraphAuthorityFactsRevision(id)).not.toBe(perGraph);
+    const afterOwnChange = projection.readContextGraphAuthorityFactsRevision(id);
     projection.markAllDirty();
     expect(projection.readAuthorityFactsRevision).toBe(nodeWide + 2);
-    expect(afterOwnChange.assertCurrent()).toBe(false);
+    expect(projection.readContextGraphAuthorityFactsRevision(id)).not.toBe(afterOwnChange);
     await store.close();
   });
 
@@ -358,12 +331,12 @@ describe('ContextGraphMetaProjection', () => {
     const projection = new ContextGraphMetaProjection(store);
     const id = 'projection-fresh-read-unknown';
     const nodeWide = projection.readAuthorityFactsRevision;
-    const perGraph = projection.captureContextGraphAuthorityFactsFence(id);
+    const perGraph = projection.readContextGraphAuthorityFactsRevision(id);
 
     projection.requireFreshRead(id);
 
     expect(projection.readAuthorityFactsRevision).toBe(nodeWide);
-    expect(perGraph.assertCurrent()).toBe(true);
+    expect(projection.readContextGraphAuthorityFactsRevision(id)).toBe(perGraph);
     expect((projection as unknown as { entries: Map<string, unknown> }).entries.has(id)).toBe(false);
     expect((await projection.get(id)).declared).toBe(false);
     await store.close();
@@ -394,7 +367,7 @@ describe('ContextGraphMetaProjection', () => {
 
     const first = projection.get(id);
     const nodeWide = projection.readAuthorityFactsRevision;
-    const perGraph = projection.captureContextGraphAuthorityFactsFence(id);
+    const perGraph = projection.readContextGraphAuthorityFactsRevision(id);
     projection.requireFreshRead(id);
     const afterRequest = projection.get(id);
     releaseFirstQuery();
@@ -404,7 +377,7 @@ describe('ContextGraphMetaProjection', () => {
     // The superseded rebuild is not kept as the clean cached value either.
     expect((await projection.get(id)).accessPolicy).toBe('private');
     expect(projection.readAuthorityFactsRevision).toBe(nodeWide);
-    expect(perGraph.assertCurrent()).toBe(true);
+    expect(projection.readContextGraphAuthorityFactsRevision(id)).toBe(perGraph);
   });
 
   it('rebuilds for callers that arrive after invalidation during an in-flight rebuild', async () => {

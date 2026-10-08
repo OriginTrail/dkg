@@ -1,4 +1,3 @@
-import { createContextGraphProjectionFenceFixture } from './_helpers/context-graph-projection-fence.js';
 /**
  * #2849: a sender that lacks roster members' encryption keys fetches the
  * `agents` phonebook for all of them at once, then resolves their keys again.
@@ -22,6 +21,7 @@ import {
   WorkspaceAgentEncryptionKeyMissingError,
 } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
+import { stubRecipientRevisions } from './_helpers/recipient-fence-stub.js';
 
 const CONTEXT_GRAPH_ID = '0x00000000000000000000000000000000000000c1/key-fetch';
 const PROFILE_GRAPH = 'did:dkg:context-graph:agents';
@@ -86,7 +86,11 @@ describe('private share recipients with a missing member key (#2849)', () => {
     });
     Object.assign(host, {
       store,
-      contextGraphMetaProjection: createContextGraphProjectionFenceFixture(),
+      contextGraphMetaProjection: {
+        readAuthorityFactsRevision: 0,
+        readContextGraphAuthorityFactsRevision: () => '0:0',
+        ...stubRecipientRevisions(),
+      },
       resolveSwmTransportAuthority: vi.fn(async () => (transportKind === 'private-roster'
         ? { kind: 'private-roster' as const, participantAgents: members.map((member) => member.address) }
         : { kind: 'legacy-unregistered' as const })),

@@ -6,13 +6,17 @@ import type {
   ContextGraphAgentGateAuthority,
   ContextGraphAgentGateUnavailableReason,
 } from './context-graph-authority.js';
-import type { ContextGraphAuthorityFactsFence } from '../../context-graph-meta-projection.js';
 import type { SwmTransportAuthority } from './swm-transport-authority.js';
 
 export interface ContextGraphAgentGateAuthorityInput {
   contextGraphId: string;
   getTransportAuthority(): Promise<SwmTransportAuthority>;
-  captureMetadataFence(): ContextGraphAuthorityFactsFence;
+  /**
+   * Must move whenever a fact that `getLegacyMeta` reports for this context
+   * graph may have changed. A revision that also moves for other writes
+   * refuses the gate on a busy node (GH#3069).
+   */
+  readRosterRevision(): number | string;
   getLegacyMeta(): Promise<{
     allowedAgents: readonly string[];
     participantAgents: readonly string[];
@@ -61,29 +65,20 @@ function conclusiveTransportGate(
 export async function resolveContextGraphAgentGateAuthorityDecision(
   input: ContextGraphAgentGateAuthorityInput,
 ): Promise<ContextGraphAgentGateAuthority> {
-  // A concurrent metadata write can invalidate a legacy roster while its
-  // store read is in flight. Re-read the entire decision a bounded number of
-  // times so an ordinary create/write burst does not strand SWM publishing.
+  // A concurrent write to this graph's roster can invalidate a legacy roster
+  // while its store read is in flight. Re-read the entire decision a bounded
+  // number of times so a burst of roster changes does not strand SWM publishing.
   // Never return a roster captured before the final revision check.
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const transportAuthority = await input.getTransportAuthority();
-    const conclusiveGate = conclusiveTransportGate(transportAuthority);
+    const conclusiveGate = conclusiveTransportGate(await input.getTransportAuthority());
     if (conclusiveGate !== null) return conclusiveGate;
 
-    const metadataFence = input.captureMetadataFence();
+    const rosterRevision = input.readRosterRevision();
     const meta = await input.getLegacyMeta();
-    // Metadata is an async boundary. A private RFC-64 policy can activate or a
-    // private registration can commit while it awaits the store; in either case
-    // that exact roster must supersede the captured legacy/approved projection.
-    const currentConclusiveGate = conclusiveTransportGate(
-      await input.getTransportAuthority(),
-    );
+    // A private policy or registration can activate during the store read.
+    const currentConclusiveGate = conclusiveTransportGate(await input.getTransportAuthority());
     if (currentConclusiveGate !== null) return currentConclusiveGate;
-    // Approved-private authority proves this receiver's membership, not every
-    // member in the legacy roster. A different member can be revoked while the
-    // transport recheck awaits and leave that proof valid. Do not combine the
-    // fresh receiver proof with a stale metadata gate from before the revoke.
-    if (!metadataFence.assertCurrent()) continue;
+    if (input.readRosterRevision() !== rosterRevision) continue;
 
     const seen = new Set<string>();
     const agents: string[] = [];

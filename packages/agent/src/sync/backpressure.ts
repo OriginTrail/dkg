@@ -6,7 +6,6 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   normalizeSyncAdmissionSource,
-  validateSyncAdmissionConfig,
   type SyncAdmissionConfig,
   type SyncAdmissionSource,
   type SyncPriorityClass,
@@ -564,16 +563,6 @@ export function resolveSyncReconcilerEnabled(configValue?: boolean): boolean {
   );
 }
 
-/** Effective automatic peer-connect sync, evaluated at each admission. */
-export function resolveSyncOnConnectEnabled(configValue?: boolean): boolean {
-  return resolveBooleanSwitch(configValue, 'DKG_SYNC_ON_CONNECT_ENABLED', true);
-}
-
-/** Effective durable recovery, shared by lifecycle and phonebook admission. */
-export function resolveDurableSyncEnabled(configValue?: boolean): boolean {
-  return resolveBooleanSwitch(configValue, 'DKG_DURABLE_SYNC_ENABLED', true);
-}
-
 /** Effective activation of chain-driven VM reconciliation: core-hosted
  * recording, the KA-registered nudge, and the VM reconcile sweep. A core's
  * StorageACK finality gate keys off this switch, so a core with it off
@@ -675,6 +664,26 @@ export function resolveSyncGlobalBackpressure(
   automaticBackgroundLimits.set(policy, selectedRecoveryIds.size > 0 && limit > 1 ? limit - 1 : limit);
   selectedRecoveryScopeIds.set(policy, selectedRecoveryIds);
   return configureResolvedSyncGlobalPolicy(policy);
+}
+
+function validateSyncAdmissionConfig(config: SyncAdmissionConfig | undefined): void {
+  if (config === undefined) return;
+  if (config === null || typeof config !== 'object' || Array.isArray(config)) {
+    throw new TypeError('Invalid syncAdmission: expected an object');
+  }
+  if (config.mode !== undefined && config.mode !== 'shared' && config.mode !== 'partitioned') {
+    throw new TypeError('Invalid syncAdmission.mode: expected shared or partitioned');
+  }
+  for (const key of ['fast', 'slow'] as const) {
+    const value = config[key];
+    if (value !== undefined && (
+      value === null
+      || typeof value !== 'object'
+      || Array.isArray(value)
+    )) {
+      throw new TypeError(`Invalid syncAdmission.${key}: expected an object`);
+    }
+  }
 }
 
 function resolvedPartitionValue(

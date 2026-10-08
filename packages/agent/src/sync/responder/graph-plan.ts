@@ -1955,10 +1955,17 @@ async function countFreshSwmMetaSubjectRows(
   for (const chunk of chunkValues(subjects, FRESH_SWM_META_PLAN_SUBJECT_CHUNK)) {
     let res;
     try {
+      // Blazegraph drops the groups when aggregate subjects are introduced by
+      // VALUES. Constant-subject branches keep indexed, bounded lookups on
+      // both backends; a FILTER IN would scan the whole metadata graph.
       res = await store.query(`
         SELECT ?s (COUNT(*) AS ?count) WHERE {
-          VALUES ?s { ${subjectValues(chunk)} }
-          GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o }
+          GRAPH <${assertSafeIri(graph)}> {
+            ${chunk.map((subject) => {
+              const iri = `<${assertSafeIri(subject)}>`;
+              return `{ ${iri} ?p ?o BIND(${iri} AS ?s) }`;
+            }).join(' UNION ')}
+          }
         }
         GROUP BY ?s
       `, {
