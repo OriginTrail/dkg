@@ -5058,6 +5058,7 @@ export class PublishMethods extends DKGAgentBase {
       // normalizer performs. They all precede any mutation, so bounding them is safe and is what
       // keeps a stalled endpoint from holding the global claim lock past the budget.
       signal,
+      onVersionView: () => this.namedKaRecoveryPendingLog.versionViewRead(),
     });
 
     const onChainCgId = normalizeOptionalContextGraphId(

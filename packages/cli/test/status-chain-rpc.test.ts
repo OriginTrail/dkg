@@ -4,8 +4,9 @@
  * `/api/status.chain` endpoint observability.
  *
  * The failover counters moved here from the route body unchanged; these rows pin that, and the
- * fact added beside them: which chain endpoint gave no view on the pinned version read. One
- * such endpoint holds every confirmed publish on the node, so status has to be able to say so.
+ * fact added beside them: which chain endpoints failed the pinned version read. A failing
+ * primary is passed over on every read without a word, and when no endpoint serves the read
+ * confirmed publishes wait, so status has to be able to say which.
  * Pure: an in-process route call and a chain adapter over scripted endpoints, no daemon.
  */
 
@@ -34,12 +35,14 @@ import { requestAuthentication } from './_helpers/request-authentication.js';
 
 const SECRET = 'v3/SECRET-PATH-KEY?apikey=SECRET-QUERY-KEY';
 
+const ENDPOINTS = ['one', 'two', 'three'] as const;
+
 /**
- * One version read through the real adapter over three scripted endpoints, the third of which
- * refuses the read pinned to a block number unless `serving`.
+ * One version read through the real adapter over three scripted endpoints. Those named in
+ * `refusing` serve `latest` reads and refuse the read pinned to a block number.
  */
-async function readVersionSnapshot(serving = false): Promise<unknown> {
-  const urls = ['one', 'two', 'three'].map((name) => `https://${name}.example/${SECRET}`);
+async function readVersionSnapshot(refusing: ReadonlyArray<(typeof ENDPOINTS)[number]>): Promise<unknown> {
+  const urls = ENDPOINTS.map((name) => `https://${name}.example/${SECRET}`);
   const adapter = new EVMChainAdapter({
     rpcUrl: urls[0],
     rpcUrls: urls.slice(1),
@@ -49,8 +52,9 @@ async function readVersionSnapshot(serving = false): Promise<unknown> {
     staticNetwork: false,
     finalityConfirmations: 1,
   } as never) as unknown as Record<string, unknown>;
-  const providers = urls.map((url) => ({
+  const providers = urls.map((url, index) => ({
     url,
+    refuses: refusing.includes(ENDPOINTS[index]!),
     async getNetwork() { return { chainId: 31337n }; },
     async getBlock() { return { number: 500, hash: `0x${'50'.repeat(32)}` }; },
   }));
@@ -61,7 +65,7 @@ async function readVersionSnapshot(serving = false): Promise<unknown> {
   adapter.providers = providers;
   adapter.rebindContract = (_contract: unknown, provider: (typeof providers)[number]) => ({
     async getLatestMerkleRoot() {
-      if (provider.url === urls[2] && !serving) {
+      if (provider.refuses) {
         // The shape ethers gives an HTTP 400: the request URL, key and all, is in the message.
         throw Object.assign(new Error(`server response 400 Bad Request (url="${provider.url}")`), {
           code: 'SERVER_ERROR',
@@ -177,17 +181,22 @@ describe('/api/status chain endpoint observability', () => {
     expect(chainRpcStatusFields().rpcFailoversByClass).toEqual(stats.byErrorClass);
   });
 
-  it('names the endpoint that refuses the pinned version read, by position and host only', async () => {
-    await expect(readVersionSnapshot()).resolves.toBeNull();
-    await expect(readVersionSnapshot()).resolves.toBeNull();
+  async function statusChain(): Promise<Record<string, any>> {
     const started = await startStatusServer();
     server = started.server;
-
     const response = await fetch(`${started.baseUrl}/api/status`);
     expect(response.status).toBe(200);
-    const body = await response.json() as { chain: Record<string, any> };
+    return (await response.json() as { chain: Record<string, any> }).chain;
+  }
 
-    expect(body.chain).toMatchObject({
+  it('names a primary that every version read passes over, by position and host only', async () => {
+    // The reads succeed through the next endpoint; nothing but this says the primary fails.
+    await expect(readVersionSnapshot(['one'])).resolves.toMatchObject({ blockNumber: 500 });
+    await expect(readVersionSnapshot(['one'])).resolves.toMatchObject({ blockNumber: 500 });
+
+    const chain = await statusChain();
+
+    expect(chain).toMatchObject({
       chainId: 'evm:31337',
       configured: true,
       rpcEndpointCount: 3,
@@ -195,14 +204,15 @@ describe('/api/status chain endpoint observability', () => {
       rpcFailovers: 0,
       rpcExhaustions: 0,
       versionSnapshot: {
-        established: 0,
-        unavailable: 2,
-        consecutiveUnavailable: 2,
-        lastUnavailableReason: 'endpoints-failed',
+        established: 2,
+        unavailable: 0,
+        consecutiveUnavailable: 0,
+        unavailableSince: null,
+        lastUnavailableReason: null,
         failingEndpoints: [{
-          position: 3,
+          position: 1,
           endpointCount: 3,
-          host: 'three.example',
+          host: 'one.example',
           stage: 'pinned-read',
           failure: 'http-client-error',
           httpStatus: 400,
@@ -210,22 +220,38 @@ describe('/api/status chain endpoint observability', () => {
         }],
       },
     });
-    expect(body.chain.versionSnapshot.unavailableSince).toEqual(expect.any(Number));
     // The status route is public. Neither the configured URLs nor the provider's error text
     // (which quotes the URL) may reach it.
-    const chain = JSON.stringify(body.chain);
-    expect(chain).not.toContain('SECRET');
-    expect(chain).not.toContain('apikey');
-    expect(chain).not.toContain('://');
+    const text = JSON.stringify(chain);
+    expect(text).not.toContain('SECRET');
+    expect(text).not.toContain('apikey');
+    expect(text).not.toContain('://');
   });
 
-  it('shows nothing failing once the endpoint serves the pinned read again', async () => {
-    await readVersionSnapshot();
-    await expect(readVersionSnapshot(true)).resolves.toMatchObject({ blockNumber: 500 });
+  it('says so when no endpoint serves the version read, and names each one', async () => {
+    await expect(readVersionSnapshot(['one', 'two', 'three'])).resolves.toBeNull();
+
+    const chain = await statusChain();
+
+    expect(chain.versionSnapshot).toMatchObject({
+      established: 0,
+      unavailable: 1,
+      consecutiveUnavailable: 1,
+      lastUnavailableReason: 'endpoints-failed',
+    });
+    expect(chain.versionSnapshot.unavailableSince).toEqual(expect.any(Number));
+    expect(chain.versionSnapshot.failingEndpoints.map((entry: { host: string }) => entry.host))
+      .toEqual(['one.example', 'two.example', 'three.example']);
+    expect(JSON.stringify(chain)).not.toContain('SECRET');
+  });
+
+  it('shows nothing failing once the primary serves the pinned read again', async () => {
+    await readVersionSnapshot(['one']);
+    await expect(readVersionSnapshot([])).resolves.toMatchObject({ blockNumber: 500 });
 
     expect(chainRpcStatusFields().versionSnapshot).toEqual({
-      established: 1,
-      unavailable: 1,
+      established: 2,
+      unavailable: 0,
       consecutiveUnavailable: 0,
       unavailableSince: null,
       lastUnavailableReason: null,

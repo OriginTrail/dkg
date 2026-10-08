@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * What `readKnowledgeAssetVersionSnapshot` says about a `null`.
+ * What `readKnowledgeAssetVersionSnapshot` says beside its answer.
  *
- * The rule is unchanged and stays tested in ka-version-snapshot.unit.test.ts: every configured
- * endpoint must produce a complete view at one pinned block. These rows are about the answer's
- * other half: which endpoint contributed no view, at which step, and why, by position and host
- * only. One endpoint that answers `latest` reads and refuses every read pinned to a block
- * number used to hold every confirmed publish with nothing in the log naming it.
+ * The rule is tested in ka-version-snapshot.unit.test.ts and is not what these rows are about:
+ * the primary endpoint is asked for a complete view at one pinned block, then the configured
+ * fallbacks in order (GH#3098). These rows are about what that read otherwise drops. An endpoint
+ * that fails is passed over without a word, and a `null` does not say which endpoint failed, at
+ * which step, or why. A node whose only endpoint serves `latest` reads and refuses every read
+ * pinned to a block number never finalizes a confirmed publish, and nothing named the endpoint.
  */
 
 import { createServer, type Server } from 'node:http';
@@ -26,6 +27,7 @@ import {
   type KnowledgeAssetVersionSnapshotEndpointFailure,
   type KnowledgeAssetVersionSnapshotUnavailable,
 } from '../src/ka-version-snapshot-report.js';
+import { RpcRequestGovernorQueueFullError } from '../src/rpc-request-governor.js';
 
 const KA_ID = 7n;
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
@@ -33,6 +35,17 @@ const ROOT = `0x${'aa'.repeat(32)}`;
 const AUTHOR = `0x${'11'.repeat(20)}`;
 const PUBLISHER = `0x${'22'.repeat(20)}`;
 const KAS_ADDRESS = `0x${'33'.repeat(20)}`;
+const SECRET_PATH = 'v3/SECRET-PATH-KEY';
+const SECRET_QUERY = 'apikey=SECRET-QUERY-KEY';
+
+const NOTHING_RECORDED = {
+  established: 0,
+  unavailable: 0,
+  consecutiveUnavailable: 0,
+  unavailableSince: null,
+  lastUnavailableReason: null,
+  failingEndpoints: [],
+};
 
 function hashForBlock(blockNumber: number): string {
   return `0x${blockNumber.toString(16).padStart(64, '0')}`;
@@ -69,12 +82,10 @@ afterEach(() => {
 });
 
 // ---------------------------------------------------------------------------
-// The real transport: an endpoint that serves `latest` and refuses pinned reads
+// The real transport: endpoints that serve `latest` and refuse pinned reads
 // ---------------------------------------------------------------------------
 
 const KAS_INTERFACE = new Interface(loadAbi('DKGKnowledgeAssets') as never[]);
-const SECRET_PATH = 'v3/SECRET-PATH-KEY';
-const SECRET_QUERY = 'apikey=SECRET-QUERY-KEY';
 
 interface RpcEndpoint {
   server: Server;
@@ -82,11 +93,13 @@ interface RpcEndpoint {
   host: string;
   /** How this endpoint answers an `eth_call` pinned to a block number. */
   pinned: { kind: 'serve' } | { kind: 'http'; status: number } | { kind: 'rpc-error' };
+  /** Requests received, of any kind, and pinned calls among them. */
+  requests: number;
   pinnedCalls: number;
 }
 
 async function startRpcEndpoint(pinned: RpcEndpoint['pinned'], head = 500): Promise<RpcEndpoint> {
-  const endpoint = { pinned, pinnedCalls: 0 } as RpcEndpoint;
+  const endpoint = { pinned, requests: 0, pinnedCalls: 0 } as RpcEndpoint;
   const answer = (call: { id: unknown; method: string; params: any[] }) => {
     const ok = (result: unknown) => ({ jsonrpc: '2.0', id: call.id, result });
     if (call.method === 'eth_chainId') return ok('0x7a69');
@@ -129,6 +142,7 @@ async function startRpcEndpoint(pinned: RpcEndpoint['pinned'], head = 500): Prom
     let body = '';
     req.on('data', (chunk) => { body += chunk; });
     req.on('end', () => {
+      endpoint.requests += 1;
       const answered = answer(JSON.parse(body));
       if (typeof answered === 'number') {
         res.writeHead(answered, { 'content-type': 'text/plain' });
@@ -157,7 +171,7 @@ function adapterOverEndpoints(endpoints: RpcEndpoint[]) {
   return adapter;
 }
 
-describe('an endpoint that serves latest reads and refuses block-pinned ones', () => {
+describe('endpoints that serve latest reads and refuse block-pinned ones', () => {
   let endpoints: RpcEndpoint[] = [];
   let adapter: any;
 
@@ -171,101 +185,108 @@ describe('an endpoint that serves latest reads and refuses block-pinned ones', (
     adapter = undefined;
   });
 
-  it('is named by position and host, with the HTTP status, and the answer is still null', async () => {
+  it('a refusing primary is passed over, the read succeeds, and the primary is on record', async () => {
     endpoints = [
-      await startRpcEndpoint({ kind: 'serve' }),
       await startRpcEndpoint({ kind: 'http', status: 400 }),
+      await startRpcEndpoint({ kind: 'serve' }),
       await startRpcEndpoint({ kind: 'serve' }),
     ];
     adapter = adapterOverEndpoints(endpoints);
-    const refusing = endpoints[1]!;
+    const [primary, fallback, unused] = endpoints as [RpcEndpoint, RpcEndpoint, RpcEndpoint];
 
-    const { view, reports } = await readWithReport(adapter);
+    const first = await readWithReport(adapter);
+    const second = await readWithReport(adapter);
 
-    // The decision is the one it always was: one endpoint without a view, no snapshot.
-    expect(view).toBeNull();
-    expect(reports).toEqual([{
-      reason: 'endpoints-failed',
-      endpointCount: 3,
-      endpoints: [{
-        position: 2,
-        host: refusing.host,
+    // The decision is the fallback's own: the first endpoint with a complete view answers.
+    expect(first.view).toMatchObject({ latestRoot: ROOT, rootCount: 3n, blockNumber: 500 });
+    expect(second.view).toMatchObject({ latestRoot: ROOT, rootCount: 3n, blockNumber: 500 });
+    expect(first.reports).toEqual([]);
+    expect(fallback.pinnedCalls).toBeGreaterThan(0);
+    expect(unused.requests).toBe(0);
+    // What the read used to drop: every read pays for the primary's refusal first.
+    expect(primary.pinnedCalls).toBeGreaterThan(0);
+    const health = getKnowledgeAssetVersionSnapshotHealth();
+    expect(health).toMatchObject({
+      established: 2,
+      unavailable: 0,
+      consecutiveUnavailable: 0,
+      unavailableSince: null,
+      failingEndpoints: [{
+        position: 1,
+        endpointCount: 3,
+        host: primary.host,
         stage: 'pinned-read',
         failure: 'http-client-error',
         httpStatus: 400,
+        consecutive: 2,
       }],
-    }]);
-    expect(describeKnowledgeAssetVersionSnapshotUnavailable(reports[0]!)).toBe(
-      `endpoint 2 of 3 (${refusing.host}) refused a block-pinned read (http 400)`,
-    );
-    // It answered everything that was not pinned: this is not an endpoint that is down.
-    expect(refusing.pinnedCalls).toBeGreaterThan(0);
+    });
+    // ethers puts the request URL, key included, in this error's message. Nothing produced
+    // here may carry it: not the path, not the query, not a URL at all.
+    const produced = JSON.stringify(health);
+    expect(produced).not.toContain('SECRET');
+    expect(produced).not.toContain('apikey');
+    expect(produced).not.toContain('://');
+  });
 
+  it('when no endpoint serves the pinned read the answer is null and each one is named', async () => {
+    endpoints = [
+      await startRpcEndpoint({ kind: 'http', status: 400 }),
+      await startRpcEndpoint({ kind: 'http', status: 403 }),
+    ];
+    adapter = adapterOverEndpoints(endpoints);
+    const [primary, fallback] = endpoints as [RpcEndpoint, RpcEndpoint];
+
+    const { view, reports } = await readWithReport(adapter);
+
+    expect(view).toBeNull();
+    expect(reports).toEqual([{
+      reason: 'endpoints-failed',
+      endpointCount: 2,
+      endpoints: [
+        { position: 1, host: primary.host, stage: 'pinned-read', failure: 'http-client-error', httpStatus: 400 },
+        { position: 2, host: fallback.host, stage: 'pinned-read', failure: 'http-client-error', httpStatus: 403 },
+      ],
+    }]);
+    const words = describeKnowledgeAssetVersionSnapshotUnavailable(reports[0]!);
+    expect(words).toBe(
+      `endpoint 1 of 2 (${primary.host}) refused a block-pinned read (http 400); `
+      + `endpoint 2 of 2 (${fallback.host}) refused a block-pinned read (http 403)`,
+    );
     const health = getKnowledgeAssetVersionSnapshotHealth();
     expect(health).toMatchObject({
       established: 0,
       unavailable: 1,
       consecutiveUnavailable: 1,
       lastUnavailableReason: 'endpoints-failed',
-      failingEndpoints: [{
-        position: 2,
-        endpointCount: 3,
-        host: refusing.host,
-        stage: 'pinned-read',
-        failure: 'http-client-error',
-        httpStatus: 400,
-        consecutive: 1,
-      }],
     });
-
-    // ethers puts the request URL, key included, in this error's message. Nothing produced
-    // here may carry it: not the path, not the query, not a URL at all.
-    const produced = [
-      JSON.stringify(reports),
-      describeKnowledgeAssetVersionSnapshotUnavailable(reports[0]!),
-      JSON.stringify(health),
-    ].join('\n');
+    expect(health.unavailableSince).toEqual(expect.any(Number));
+    expect(health.failingEndpoints.map((entry) => entry.position)).toEqual([1, 2]);
+    const produced = [JSON.stringify(reports), words, JSON.stringify(health)].join('\n');
     expect(produced).not.toContain('SECRET');
     expect(produced).not.toContain(SECRET_PATH);
     expect(produced).not.toContain('apikey');
     expect(produced).not.toContain('://');
-  });
 
-  it('counts consecutive refusals, and forgets the endpoint once it serves a pinned read', async () => {
-    endpoints = [
-      await startRpcEndpoint({ kind: 'serve' }),
-      await startRpcEndpoint({ kind: 'http', status: 403 }),
-    ];
-    adapter = adapterOverEndpoints(endpoints);
+    // The fallback starts serving pinned reads: the read succeeds, the fallback is forgotten,
+    // and the primary stays on record as the endpoint every read passes over.
+    fallback.pinned = { kind: 'serve' };
+    const recovered = await readWithReport(adapter);
 
-    expect((await readWithReport(adapter)).view).toBeNull();
-    expect((await readWithReport(adapter)).view).toBeNull();
+    expect(recovered.view).toMatchObject({ latestRoot: ROOT, blockNumber: 500 });
+    expect(recovered.reports).toEqual([]);
     expect(getKnowledgeAssetVersionSnapshotHealth()).toMatchObject({
-      unavailable: 2,
-      consecutiveUnavailable: 2,
-      failingEndpoints: [{ position: 2, failure: 'http-client-error', httpStatus: 403, consecutive: 2 }],
-    });
-
-    endpoints[1]!.pinned = { kind: 'serve' };
-    const { view, reports } = await readWithReport(adapter);
-
-    expect(view).toMatchObject({ latestRoot: ROOT, rootCount: 3n, blockNumber: 500 });
-    expect(reports).toEqual([]);
-    expect(getKnowledgeAssetVersionSnapshotHealth()).toEqual({
       established: 1,
-      unavailable: 2,
+      unavailable: 1,
       consecutiveUnavailable: 0,
       unavailableSince: null,
       lastUnavailableReason: null,
-      failingEndpoints: [],
+      failingEndpoints: [{ position: 1, host: primary.host, httpStatus: 400, consecutive: 2 }],
     });
   });
 
   it('a JSON-RPC error answer to the pinned read is a call exception, not an outage', async () => {
-    endpoints = [
-      await startRpcEndpoint({ kind: 'rpc-error' }),
-      await startRpcEndpoint({ kind: 'serve' }),
-    ];
+    endpoints = [await startRpcEndpoint({ kind: 'rpc-error' })];
     adapter = adapterOverEndpoints(endpoints);
 
     const { view, reports } = await readWithReport(adapter);
@@ -278,7 +299,7 @@ describe('an endpoint that serves latest reads and refuses block-pinned ones', (
       failure: 'call-exception',
     }]);
     expect(describeKnowledgeAssetVersionSnapshotUnavailable(reports[0]!)).toBe(
-      `endpoint 1 of 2 (${endpoints[0]!.host}) rejected a block-pinned read (call exception)`,
+      `endpoint 1 of 1 (${endpoints[0]!.host}) rejected a block-pinned read (call exception)`,
     );
   });
 });
@@ -304,9 +325,11 @@ interface Script {
 }
 
 function adapterOverScripts(scripts: Script[], opts: { finalityConfirmations?: number } = {}) {
+  const asked: string[] = [];
   const providers = scripts.map((script) => ({
     script,
     async getNetwork() {
+      asked.push(script.host);
       return { chainId: script.chainId ?? 31337n };
     },
     async getBlock(tag: 'latest' | number) {
@@ -344,129 +367,164 @@ function adapterOverScripts(scripts: Script[], opts: { finalityConfirmations?: n
       return PUBLISHER;
     },
   });
-  return { adapter, storage };
+  /** Hosts in the order the read first asked them. */
+  const order = () => [...new Set(asked)];
+  return { adapter, storage, order };
 }
 
 const HEALTHY: Script = { host: 'healthy.example' };
+type Expected = Omit<KnowledgeAssetVersionSnapshotEndpointFailure, 'position' | 'host'>;
 
 describe('which step an endpoint stopped at, and why', () => {
-  it.each<[string, Script, Omit<KnowledgeAssetVersionSnapshotEndpointFailure, 'position' | 'host'>, string]>([
+  // A script that fails the same way on its transient retry carries the error twice.
+  const cases: Array<[string, () => Script, Expected, string]> = [
     [
       'another chain',
-      { host: 'odd.example', chainId: 999n },
+      () => ({ host: 'odd.example', chainId: 999n }),
       { stage: 'chain-id', failure: 'wrong-chain' },
-      'endpoint 2 of 2 (odd.example) answered for a different chain',
+      'answered for a different chain',
     ],
     [
       'no head block',
-      { host: 'odd.example', head: null },
+      () => ({ host: 'odd.example', head: null }),
       { stage: 'head-block', failure: 'incomplete-view' },
-      'endpoint 2 of 2 (odd.example) returned an incomplete answer to the head block read',
+      'returned an incomplete answer to the head block read',
     ],
     [
       'a head read that cannot connect',
-      { host: 'odd.example', headErrors: [{ code: 'ECONNREFUSED' }, { code: 'ECONNREFUSED' }] },
+      () => ({ host: 'odd.example', headErrors: [{ code: 'ECONNREFUSED' }, { code: 'ECONNREFUSED' }] }),
       { stage: 'head-block', failure: 'network' },
-      'endpoint 2 of 2 (odd.example) could not be reached for the head block read',
+      'could not be reached for the head block read',
     ],
     [
       'a head read that times out',
-      { host: 'odd.example', headErrors: [{ code: 'TIMEOUT' }, { code: 'TIMEOUT' }] },
+      () => ({ host: 'odd.example', headErrors: [{ code: 'TIMEOUT' }] }),
       { stage: 'head-block', failure: 'timeout' },
-      'endpoint 2 of 2 (odd.example) timed out on the head block read',
+      'timed out on the head block read',
     ],
     [
       'a block without a hash',
-      { host: 'odd.example', hash: null },
+      () => ({ host: 'odd.example', hash: null }),
       { stage: 'pinned-block', failure: 'incomplete-view' },
-      'endpoint 2 of 2 (odd.example) returned an incomplete answer to the pinned block header read',
+      'returned an incomplete answer to the pinned block header read',
     ],
     [
       'a refused pinned read',
-      { host: 'odd.example', readErrors: [{ code: 'SERVER_ERROR', status: 400 }, { code: 'SERVER_ERROR', status: 400 }] },
+      () => ({
+        host: 'odd.example',
+        readErrors: [{ code: 'SERVER_ERROR', status: 400 }, { code: 'SERVER_ERROR', status: 400 }],
+      }),
       { stage: 'pinned-read', failure: 'http-client-error', httpStatus: 400 },
-      'endpoint 2 of 2 (odd.example) refused a block-pinned read (http 400)',
+      'refused a block-pinned read (http 400)',
     ],
     [
       'a throttled pinned read',
-      { host: 'odd.example', readErrors: [{ status: 429 }, { status: 429 }] },
+      () => ({ host: 'odd.example', readErrors: [{ status: 429 }, { status: 429 }] }),
       { stage: 'pinned-read', failure: 'http-throttled', httpStatus: 429 },
-      'endpoint 2 of 2 (odd.example) throttled a block-pinned read (http 429)',
+      'throttled a block-pinned read (http 429)',
     ],
     [
       'a pinned read behind a failing gateway',
-      { host: 'odd.example', readErrors: [{ status: 503 }, { status: 503 }] },
+      () => ({ host: 'odd.example', readErrors: [{ status: 503 }, { status: 503 }] }),
       { stage: 'pinned-read', failure: 'http-server-error', httpStatus: 503 },
-      'endpoint 2 of 2 (odd.example) failed a block-pinned read (http 503)',
+      'failed a block-pinned read (http 503)',
     ],
     [
       'a pinned read the node rejects',
-      { host: 'odd.example', readErrors: [{ code: 'CALL_EXCEPTION' }] },
+      () => ({ host: 'odd.example', readErrors: [{ code: 'CALL_EXCEPTION' }] }),
       { stage: 'pinned-read', failure: 'call-exception' },
-      'endpoint 2 of 2 (odd.example) rejected a block-pinned read (call exception)',
+      'rejected a block-pinned read (call exception)',
     ],
     [
       'a view without its author',
-      { host: 'odd.example', author: null },
+      () => ({ host: 'odd.example', author: null }),
       { stage: 'pinned-read', failure: 'incomplete-view' },
-      'endpoint 2 of 2 (odd.example) returned an incomplete answer to a block-pinned read',
+      'returned an incomplete answer to a block-pinned read',
     ],
-  ])('%s', async (_name, odd, expected, words) => {
-    const { adapter } = adapterOverScripts([HEALTHY, odd]);
+  ];
+
+  it.each(cases)('%s, as the only endpoint: null, and named', async (_name, odd, expected, words) => {
+    const { adapter } = adapterOverScripts([odd()]);
 
     const { view, reports } = await readWithReport(adapter);
 
     expect(view).toBeNull();
     expect(reports).toEqual([{
       reason: 'endpoints-failed',
-      endpointCount: 2,
-      endpoints: [{ position: 2, host: 'odd.example', ...expected }],
+      endpointCount: 1,
+      endpoints: [{ position: 1, host: 'odd.example', ...expected }],
     }]);
-    expect(describeKnowledgeAssetVersionSnapshotUnavailable(reports[0]!)).toBe(words);
+    expect(describeKnowledgeAssetVersionSnapshotUnavailable(reports[0]!)).toBe(
+      `endpoint 1 of 1 (odd.example) ${words}`,
+    );
     expect(JSON.stringify(reports)).not.toContain('SECRET');
   });
 
-  it('names every endpoint that gave no view, in configured order', async () => {
+  it.each(cases)('%s, as the primary: passed over, and on record', async (_name, odd, expected) => {
+    const { adapter, order } = adapterOverScripts([odd(), HEALTHY]);
+
+    const { view, reports } = await readWithReport(adapter);
+
+    expect(view).toMatchObject({ latestRoot: ROOT, blockNumber: 500 });
+    expect(reports).toEqual([]);
+    expect(order()).toEqual(['odd.example', 'healthy.example']);
+    expect(getKnowledgeAssetVersionSnapshotHealth()).toMatchObject({
+      established: 1,
+      unavailable: 0,
+      failingEndpoints: [{ position: 1, endpointCount: 2, host: 'odd.example', ...expected, consecutive: 1 }],
+    });
+  });
+
+  it('a healthy primary answers alone: nothing is asked of the others and nothing is recorded', async () => {
+    const { adapter, order } = adapterOverScripts([HEALTHY, { host: 'odd.example', chainId: 999n }]);
+
+    const { view, reports } = await readWithReport(adapter);
+
+    expect(view).toMatchObject({ latestRoot: ROOT, blockNumber: 500 });
+    expect(reports).toEqual([]);
+    expect(order()).toEqual(['healthy.example']);
+    expect(getKnowledgeAssetVersionSnapshotHealth()).toEqual({ ...NOTHING_RECORDED, established: 1 });
+  });
+
+  it('names every endpoint that was asked, in configured order', async () => {
     const { adapter } = adapterOverScripts([
       { host: 'a.example', readErrors: [{ status: 401 }, { status: 401 }] },
-      HEALTHY,
-      { host: 'c.example', chainId: 1n },
+      { host: 'b.example', chainId: 1n },
+      { host: 'c.example', head: null },
     ]);
 
-    const { reports } = await readWithReport(adapter);
+    const { view, reports } = await readWithReport(adapter);
 
+    expect(view).toBeNull();
     expect(describeKnowledgeAssetVersionSnapshotUnavailable(reports[0]!)).toBe(
       'endpoint 1 of 3 (a.example) refused a block-pinned read (http 401); '
-      + 'endpoint 3 of 3 (c.example) answered for a different chain',
+      + 'endpoint 2 of 3 (b.example) answered for a different chain; '
+      + 'endpoint 3 of 3 (c.example) returned an incomplete answer to the head block read',
     );
   });
 
   it('reports the last attempt when the in-place retry fails differently', async () => {
     // The first failure is transient and retried; the endpoint's second answer is the one
-    // the poll is judged over, so it is the one reported.
+    // the read moved on from, so it is the one reported.
     const { adapter } = adapterOverScripts([
-      HEALTHY,
       { host: 'odd.example', readErrors: [{ status: 503 }, { code: 'SERVER_ERROR', status: 404 }] },
     ]);
 
     const { reports } = await readWithReport(adapter);
 
     expect(reports[0]!.endpoints).toEqual([
-      { position: 2, host: 'odd.example', stage: 'pinned-read', failure: 'http-client-error', httpStatus: 404 },
+      { position: 1, host: 'odd.example', stage: 'pinned-read', failure: 'http-client-error', httpStatus: 404 },
     ]);
   });
 
-  it('says nothing when a transient failure is followed by a view', async () => {
-    const { adapter } = adapterOverScripts([
-      HEALTHY,
-      { host: 'blip.example', headErrors: [{ code: 'SERVER_ERROR' }] },
-    ]);
+  it('says nothing when a transient failure is followed by a view from the same endpoint', async () => {
+    const { adapter } = adapterOverScripts([{ host: 'blip.example', headErrors: [{ code: 'SERVER_ERROR' }] }]);
 
     const { view, reports } = await readWithReport(adapter);
 
     expect(view).toMatchObject({ latestRoot: ROOT, blockNumber: 500 });
     expect(reports).toEqual([]);
-    expect(getKnowledgeAssetVersionSnapshotHealth()).toMatchObject({ established: 1, unavailable: 0 });
+    expect(getKnowledgeAssetVersionSnapshotHealth()).toEqual({ ...NOTHING_RECORDED, established: 1 });
   });
 
   it('a chain younger than the confirmation depth is an incomplete pinned block', async () => {
@@ -481,39 +539,26 @@ describe('which step an endpoint stopped at, and why', () => {
   });
 });
 
-describe('a null that no single endpoint explains', () => {
-  it('different hashes at the same height', async () => {
-    const { adapter } = adapterOverScripts([
-      { host: 'a.example', hash: `0x${'01'.repeat(32)}` },
-      { host: 'b.example', hash: `0x${'02'.repeat(32)}` },
-    ]);
-
-    const { view, reports } = await readWithReport(adapter);
-
-    expect(view).toBeNull();
-    expect(reports).toEqual([{ reason: 'endpoints-disagree', endpointCount: 2, endpoints: [] }]);
-    expect(describeKnowledgeAssetVersionSnapshotUnavailable(reports[0]!)).toBe(
-      'the 2 endpoints returned different block hashes at the same height',
-    );
-    expect(getKnowledgeAssetVersionSnapshotHealth()).toMatchObject({
-      unavailable: 1,
-      lastUnavailableReason: 'endpoints-disagree',
-      failingEndpoints: [],
-    });
-  });
-
+describe('a null that no endpoint explains', () => {
   it('no storage contract, or one without an address', async () => {
     for (const storage of [undefined, {}]) {
-      const { adapter } = adapterOverScripts([HEALTHY]);
+      _resetKnowledgeAssetVersionSnapshotHealthForTest();
+      const { adapter, order } = adapterOverScripts([HEALTHY]);
       adapter.contracts = { knowledgeAssetStorage: storage };
 
       const { view, reports } = await readWithReport(adapter);
 
       expect(view).toBeNull();
+      expect(order()).toEqual([]);
       expect(reports).toEqual([{ reason: 'no-storage-contract', endpointCount: 1, endpoints: [] }]);
       expect(describeKnowledgeAssetVersionSnapshotUnavailable(reports[0]!)).toBe(
         'the knowledge asset storage contract is not resolved',
       );
+      expect(getKnowledgeAssetVersionSnapshotHealth()).toMatchObject({
+        unavailable: 1,
+        lastUnavailableReason: 'no-storage-contract',
+        failingEndpoints: [],
+      });
     }
   });
 
@@ -530,7 +575,7 @@ describe('a null that no single endpoint explains', () => {
     };
 
     const pending = readWithReport(adapter);
-    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 20));
     adapter.knowledgeAssetStorageBindingGeneration += 1;
     release();
     const { view, reports } = await pending;
@@ -544,18 +589,63 @@ describe('a null that no single endpoint explains', () => {
     );
   });
 
-  it('a storage binding that changes after every endpoint answered', async () => {
+  it('a storage binding that changes after the endpoint answered', async () => {
     const { adapter } = adapterOverScripts([{ host: 'a.example' }, { host: 'b.example' }]);
-    // Each endpoint checks the binding once, then the read checks it a last time.
+    // The endpoint's read checks the binding as it starts and as it ends; the read checks it
+    // once more before it answers.
     let checks = 0;
     adapter.knowledgeAssetStorageBindingIsCurrent = () => { checks += 1; return checks <= 2; };
 
     const { view, reports } = await readWithReport(adapter);
 
     expect(view).toBeNull();
+    expect(checks).toBe(3);
     expect(reports).toEqual([{ reason: 'storage-binding-changed', endpointCount: 2, endpoints: [] }]);
     expect(describeKnowledgeAssetVersionSnapshotUnavailable(reports[0]!)).toBe(
       'the storage contract binding changed during the read',
+    );
+  });
+
+  it("the node's own request budget stops the read: no endpoint is blamed for it", async () => {
+    const { adapter, order } = adapterOverScripts([
+      { host: 'a.example', headErrors: [new RpcRequestGovernorQueueFullError(8)] },
+      HEALTHY,
+    ]);
+
+    const { view, reports } = await readWithReport(adapter);
+
+    // The read ends there instead of asking the fallback, as it did before this report existed.
+    expect(view).toBeNull();
+    expect(order()).toEqual(['a.example']);
+    expect(reports).toEqual([{ reason: 'local-pressure', endpointCount: 2, endpoints: [] }]);
+    expect(describeKnowledgeAssetVersionSnapshotUnavailable(reports[0]!)).toBe(
+      "the node's own RPC request budget was full before another endpoint could be asked",
+    );
+    expect(getKnowledgeAssetVersionSnapshotHealth()).toMatchObject({
+      unavailable: 1,
+      lastUnavailableReason: 'local-pressure',
+      failingEndpoints: [],
+    });
+  });
+
+  it('an endpoint that failed before the budget ran out is still named beside it', async () => {
+    const { adapter } = adapterOverScripts([
+      { host: 'odd.example', chainId: 999n },
+      { host: 'b.example', headErrors: [new RpcRequestGovernorQueueFullError(8)] },
+      HEALTHY,
+    ]);
+
+    const { view, reports } = await readWithReport(adapter);
+
+    expect(view).toBeNull();
+    expect(reports).toEqual([{
+      reason: 'local-pressure',
+      endpointCount: 3,
+      endpoints: [{ position: 1, host: 'odd.example', stage: 'chain-id', failure: 'wrong-chain' }],
+    }]);
+    expect(describeKnowledgeAssetVersionSnapshotUnavailable(reports[0]!)).toBe(
+      'endpoint 1 of 3 (odd.example) answered for a different chain; '
+      + "the node's own RPC request budget was full before another endpoint could be asked",
     );
   });
 });
@@ -564,12 +654,11 @@ describe('a read the caller cancels', () => {
   it.each([
     ['head', 'head-block', 'the head block read'],
     ['read', 'pinned-read', 'a block-pinned read'],
-  ] as const)('names the endpoint still waiting on its %s', async (stall, stage, read) => {
-    const { adapter } = adapterOverScripts([HEALTHY, { host: 'slow.example', stall }]);
+  ] as const)('names the endpoint still waiting on its %s, and does not record it', async (stall, stage, read) => {
+    const { adapter } = adapterOverScripts([{ host: 'slow.example', stall }]);
     const controller = new AbortController();
 
     const pending = readWithReport(adapter, controller.signal);
-    // Long enough for the healthy endpoint to have answered.
     await new Promise((resolve) => setTimeout(resolve, 20));
     controller.abort();
     const { view, reports } = await pending;
@@ -577,94 +666,63 @@ describe('a read the caller cancels', () => {
     expect(view).toBeNull();
     expect(reports).toEqual([{
       reason: 'aborted',
-      endpointCount: 2,
-      endpoints: [{ position: 2, host: 'slow.example', stage, failure: 'no-answer' }],
+      endpointCount: 1,
+      endpoints: [{ position: 1, host: 'slow.example', stage, failure: 'no-answer' }],
     }]);
     expect(describeKnowledgeAssetVersionSnapshotUnavailable(reports[0]!)).toBe(
-      `endpoint 2 of 2 (slow.example) had not answered ${read} when the read was cancelled`,
+      `endpoint 1 of 1 (slow.example) had not answered ${read} when the read was cancelled`,
     );
-    // The other endpoint had answered, so this one is singled out and recorded.
-    expect(getKnowledgeAssetVersionSnapshotHealth()).toMatchObject({
-      unavailable: 1,
-      lastUnavailableReason: 'aborted',
-      failingEndpoints: [{ position: 2, host: 'slow.example', stage, failure: 'no-answer', consecutive: 1 }],
-    });
+    // A cancelled read says nothing about whether a view can be established, and an
+    // endpoint that was still in flight had not failed.
+    expect(getKnowledgeAssetVersionSnapshotHealth()).toEqual(NOTHING_RECORDED);
   });
 
-  it('names no endpoint when the signal was aborted before the read began', async () => {
-    const { adapter } = adapterOverScripts([HEALTHY, HEALTHY]);
-    const controller = new AbortController();
-    controller.abort();
-
-    const { view, reports } = await readWithReport(adapter, controller.signal);
-
-    expect(view).toBeNull();
-    expect(reports).toEqual([{ reason: 'aborted', endpointCount: 2, endpoints: [] }]);
-    expect(describeKnowledgeAssetVersionSnapshotUnavailable(reports[0]!)).toBe(
-      'the read was cancelled before it completed',
-    );
-    expect(getKnowledgeAssetVersionSnapshotHealth()).toMatchObject({ unavailable: 0, failingEndpoints: [] });
-  });
-
-  it('a cancellation that finds every endpoint in flight says nothing about any of them', async () => {
-    // The caller is told what was pending. The process-wide record is not touched: it would
-    // list healthy endpoints as failing until the next read came along.
+  it('keeps what an endpoint had already failed with before the cancellation', async () => {
     const { adapter } = adapterOverScripts([
-      { host: 'a.example', stall: 'head' },
-      { host: 'b.example', stall: 'read' },
+      { host: 'odd.example', chainId: 999n },
+      { host: 'slow.example', stall: 'read' },
     ]);
     const controller = new AbortController();
 
     const pending = readWithReport(adapter, controller.signal);
     await new Promise((resolve) => setTimeout(resolve, 20));
     controller.abort();
-    const { view, reports } = await pending;
+    const { reports } = await pending;
 
-    expect(view).toBeNull();
     expect(reports).toEqual([{
       reason: 'aborted',
       endpointCount: 2,
       endpoints: [
-        { position: 1, host: 'a.example', stage: 'head-block', failure: 'no-answer' },
-        { position: 2, host: 'b.example', stage: 'pinned-read', failure: 'no-answer' },
+        { position: 1, host: 'odd.example', stage: 'chain-id', failure: 'wrong-chain' },
+        { position: 2, host: 'slow.example', stage: 'pinned-read', failure: 'no-answer' },
       ],
     }]);
-    expect(getKnowledgeAssetVersionSnapshotHealth()).toEqual({
+    expect(getKnowledgeAssetVersionSnapshotHealth()).toMatchObject({
       established: 0,
       unavailable: 0,
-      consecutiveUnavailable: 0,
-      unavailableSince: null,
-      lastUnavailableReason: null,
-      failingEndpoints: [],
+      failingEndpoints: [{ position: 1, host: 'odd.example', failure: 'wrong-chain', consecutive: 1 }],
     });
   });
 
-  it('an endpoint whose read stops at the cancellation is one that had not answered', async () => {
-    // Its chain id arrives as the signal aborts, so its read returns at the next check without
-    // having asked for a block. That is not an endpoint that returned an incomplete head.
-    const { adapter } = adapterOverScripts([HEALTHY, { host: 'late.example' }]);
+  it('reports nothing when the signal was aborted before the read began', async () => {
+    const { adapter, order } = adapterOverScripts([HEALTHY]);
     const controller = new AbortController();
-    let answer!: (network: { chainId: bigint }) => void;
-    adapter.providers[1].getNetwork = () => new Promise((resolve) => { answer = resolve; });
-    // Registered before the read attaches its own listener, so this one runs first.
-    controller.signal.addEventListener('abort', () => answer({ chainId: 31337n }));
-
-    const pending = readWithReport(adapter, controller.signal);
-    await new Promise((resolve) => setTimeout(resolve, 20));
     controller.abort();
-    const { reports } = await pending;
 
-    expect(reports[0]).toMatchObject({ reason: 'aborted', endpointCount: 2 });
-    expect(reports[0]!.endpoints).toHaveLength(1);
-    expect(reports[0]!.endpoints[0]).toMatchObject({ position: 2, host: 'late.example', failure: 'no-answer' });
+    const { view, reports } = await readWithReport(adapter, controller.signal);
+
+    expect(view).toBeNull();
+    expect(order()).toEqual([]);
+    expect(reports).toEqual([]);
+    expect(getKnowledgeAssetVersionSnapshotHealth()).toEqual(NOTHING_RECORDED);
   });
 
   it('an endpoint that fails after the cancellation is one that had not answered', async () => {
     // Its error arrives once the signal is aborted: that is the cancellation, not a refusal.
-    const { adapter } = adapterOverScripts([HEALTHY, { host: 'late.example' }]);
+    const { adapter } = adapterOverScripts([{ host: 'late.example' }]);
     const controller = new AbortController();
     let fail!: (error: unknown) => void;
-    adapter.providers[1].getBlock = () => new Promise((_resolve, reject) => { fail = reject; });
+    adapter.providers[0].getBlock = () => new Promise((_resolve, reject) => { fail = reject; });
 
     const pending = readWithReport(adapter, controller.signal);
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -673,7 +731,7 @@ describe('a read the caller cancels', () => {
     const { reports } = await pending;
 
     expect(reports[0]!.endpoints).toEqual([
-      { position: 2, host: 'late.example', stage: 'head-block', failure: 'no-answer' },
+      { position: 1, host: 'late.example', stage: 'head-block', failure: 'no-answer' },
     ]);
   });
 });
@@ -691,26 +749,68 @@ describe('the report never changes the answer', () => {
   });
 
   it('a caller that passes no callback gets the same null and the same view', async () => {
-    const failing = adapterOverScripts([HEALTHY, { host: 'odd.example', head: null }]).adapter;
+    const failing = adapterOverScripts([{ host: 'odd.example', head: null }]).adapter;
     await expect(failing.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toBeNull();
 
-    const healthy = adapterOverScripts([HEALTHY, HEALTHY]).adapter;
-    await expect(healthy.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toMatchObject({
+    const healthy = adapterOverScripts([HEALTHY, { host: 'second.example' }]).adapter;
+    await expect(healthy.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toEqual({
       knowledgeAssetId: KA_ID,
       latestRoot: ROOT,
       rootCount: 3n,
+      latestAuthor: AUTHOR,
+      latestPublisher: PUBLISHER,
       blockNumber: 500,
       blockHash: hashForBlock(500),
+      knowledgeAssetStorageAddress: KAS_ADDRESS,
+      knowledgeAssetStorageGeneration: 0,
     });
   });
 
-  it('passes the per-endpoint error through unchanged', async () => {
-    const trace = new KnowledgeAssetVersionSnapshotTrace(['p'], ['https://a.example/key'], {});
+  it('passes the per-endpoint answer and error through unchanged', async () => {
+    const trace = new KnowledgeAssetVersionSnapshotTrace(['p'], ['https://a.example/key'], {
+      cancelled: () => false,
+    });
     const failure = Object.assign(new Error('boom'), { code: 'CALL_EXCEPTION' });
+    const view = { latestRoot: ROOT };
 
-    await expect(trace.observe(async () => { throw failure; })('p')).rejects.toBe(failure);
-    await expect(trace.observe(async () => 'view')('p')).resolves.toBe('view');
-    expect(trace.established('same')).toBe('same');
+    await expect(trace.observe(async () => { throw failure; })('p', undefined)).rejects.toBe(failure);
+    await expect(trace.observe(async () => view)('p', undefined)).resolves.toBe(view);
+    await expect(trace.observe(async (_provider, signal: string) => signal)('p', 'the signal')).resolves.toBe('the signal');
+    expect(trace.established(view)).toBe(view);
+  });
+
+  it('an endpoint error that cannot be inspected is passed through and recorded as unclassified', async () => {
+    const reports: KnowledgeAssetVersionSnapshotUnavailable[] = [];
+    const trace = new KnowledgeAssetVersionSnapshotTrace(['p'], ['https://a.example/key'], {
+      cancelled: () => false,
+      onUnavailable: (report) => { reports.push(report); },
+    });
+    const hostile = Object.defineProperty({}, 'code', { get() { throw new Error('no'); } });
+
+    await expect(trace.observe(async () => { throw hostile; })('p', undefined)).rejects.toBe(hostile);
+
+    expect(trace.noView()).toBeNull();
+    expect(reports).toEqual([{
+      reason: 'endpoints-failed',
+      endpointCount: 1,
+      endpoints: [{ position: 1, host: 'a.example', stage: 'storage-binding', failure: 'other' }],
+    }]);
+  });
+
+  it('a cancellation check that throws counts as not cancelled', async () => {
+    const reports: KnowledgeAssetVersionSnapshotUnavailable[] = [];
+    const trace = new KnowledgeAssetVersionSnapshotTrace(['p'], ['https://a.example/key'], {
+      cancelled: () => { throw new Error('caller bug'); },
+      onUnavailable: (report) => { reports.push(report); },
+    });
+    await trace.observe(async (_provider, _signal, step) => { step('chain-id'); return null; })('p', undefined);
+
+    expect(trace.noView()).toBeNull();
+    expect(reports).toEqual([{
+      reason: 'endpoints-failed',
+      endpointCount: 1,
+      endpoints: [{ position: 1, host: 'a.example', stage: 'chain-id', failure: 'wrong-chain' }],
+    }]);
   });
 });
 
@@ -764,79 +864,127 @@ describe('describeKnowledgeAssetVersionSnapshotEndpointFailure', () => {
     expect(describeKnowledgeAssetVersionSnapshotEndpointFailure(endpoint, 5)).toBe(words);
   });
 
-  it('has words for a failed read that names no endpoint', () => {
+  it('has words for a read that names no endpoint', () => {
     expect(describeKnowledgeAssetVersionSnapshotUnavailable({
       reason: 'endpoints-failed',
       endpointCount: 2,
       endpoints: [],
-    })).toBe('not every endpoint returned a complete view');
+    })).toBe('no endpoint returned a complete view');
+    expect(describeKnowledgeAssetVersionSnapshotUnavailable({
+      reason: 'aborted',
+      endpointCount: 2,
+      endpoints: [],
+    })).toBe('the read was cancelled before it completed');
   });
 });
 
 describe('the process-wide record', () => {
-  const trace = (hosts: string[]) => new KnowledgeAssetVersionSnapshotTrace(
-    hosts,
-    hosts.map((host) => `https://${host}/${SECRET_PATH}`),
-    {},
-  );
-  /** One read over `hosts` in which each endpoint in `failing` throws `error`. */
-  async function read(hosts: string[], failing: Record<string, unknown>) {
-    const poll = trace(hosts);
-    const readOne = poll.observe(async (host: string, step) => {
+  /**
+   * One read over endpoints asked in order until one supplies a view, as the adapter's read
+   * does. `failing` maps a URL to the error that endpoint throws.
+   */
+  async function read(urls: string[], failing: Record<string, unknown>) {
+    const trace = new KnowledgeAssetVersionSnapshotTrace(urls, urls, { cancelled: () => false });
+    const readOne = trace.observe(async (url: string, _signal: undefined, step) => {
       step('pinned-read');
-      if (host in failing) throw failing[host];
+      if (url in failing) throw failing[url];
       return 'view';
     });
-    const settled = await Promise.allSettled(hosts.map(readOne));
-    return settled.every((result) => result.status === 'fulfilled')
-      ? poll.established('view')
-      : poll.unavailable('endpoints-failed');
+    for (const url of urls) {
+      const view = await readOne(url, undefined).catch(() => null);
+      if (view !== null) return trace.established(view);
+    }
+    return trace.noView();
   }
+  const url = (host: string, key = SECRET_PATH) => `https://${host}/${key}`;
 
-  it('starts a new count when an endpoint fails in a different way', async () => {
+  it('counts reads no endpoint served, from the first of the run', async () => {
     const now = vi.spyOn(Date, 'now');
     now.mockReturnValue(1_000);
-    await read(['a.example', 'b.example'], { 'b.example': { status: 400 } });
+    await read([url('a.example')], { [url('a.example')]: { status: 400 } });
     now.mockReturnValue(2_000);
-    await read(['a.example', 'b.example'], { 'b.example': { status: 400 } });
+    await read([url('a.example')], { [url('a.example')]: { status: 400 } });
+
+    expect(getKnowledgeAssetVersionSnapshotHealth()).toEqual({
+      established: 0,
+      unavailable: 2,
+      consecutiveUnavailable: 2,
+      unavailableSince: 1_000,
+      lastUnavailableReason: 'endpoints-failed',
+      failingEndpoints: [{
+        position: 1,
+        endpointCount: 1,
+        host: 'a.example',
+        stage: 'pinned-read',
+        failure: 'http-client-error',
+        httpStatus: 400,
+        consecutive: 2,
+        since: 1_000,
+        last: 2_000,
+      }],
+    });
+  });
+
+  it('starts a new count when an endpoint fails in a different way', async () => {
+    const urls = [url('a.example'), url('b.example')];
+    const now = vi.spyOn(Date, 'now');
+    now.mockReturnValue(1_000);
+    await read(urls, { [urls[0]!]: { status: 400 } });
+    now.mockReturnValue(2_000);
+    await read(urls, { [urls[0]!]: { status: 400 } });
 
     expect(getKnowledgeAssetVersionSnapshotHealth()).toMatchObject({
-      unavailableSince: 1_000,
-      failingEndpoints: [{ host: 'b.example', httpStatus: 400, consecutive: 2, since: 1_000, last: 2_000 }],
+      established: 2,
+      unavailableSince: null,
+      failingEndpoints: [{ host: 'a.example', httpStatus: 400, consecutive: 2, since: 1_000, last: 2_000 }],
     });
 
     now.mockReturnValue(3_000);
-    await read(['a.example', 'b.example'], { 'b.example': { code: 'TIMEOUT' } });
+    await read(urls, { [urls[0]!]: { code: 'TIMEOUT' } });
 
     expect(getKnowledgeAssetVersionSnapshotHealth()).toMatchObject({
-      consecutiveUnavailable: 3,
-      unavailableSince: 1_000,
-      failingEndpoints: [{ host: 'b.example', failure: 'timeout', consecutive: 1, since: 3_000, last: 3_000 }],
+      established: 3,
+      failingEndpoints: [{ host: 'a.example', failure: 'timeout', consecutive: 1, since: 3_000, last: 3_000 }],
     });
   });
 
-  it('drops an endpoint that answers while another still fails', async () => {
-    await read(['a.example', 'b.example'], { 'a.example': { status: 400 }, 'b.example': { status: 400 } });
-    await read(['a.example', 'b.example'], { 'b.example': { status: 400 } });
+  it('drops an endpoint once it serves, and leaves one that was not asked as it was', async () => {
+    const urls = [url('a.example'), url('b.example'), url('c.example')];
+    // a and b fail, c serves. Then a serves: b is not asked, so what is known of b stands.
+    await read(urls, { [urls[0]!]: { status: 400 }, [urls[1]!]: { status: 403 } });
+    await read(urls, {});
 
-    expect(getKnowledgeAssetVersionSnapshotHealth().failingEndpoints.map((entry) => entry.host))
-      .toEqual(['b.example']);
+    expect(getKnowledgeAssetVersionSnapshotHealth().failingEndpoints).toMatchObject([
+      { position: 2, host: 'b.example', httpStatus: 403, consecutive: 1 },
+    ]);
   });
 
-  it('a view from one configuration does not clear another configuration\'s endpoint', async () => {
-    await read(['a.example', 'b.example'], { 'b.example': { status: 400 } });
-    await read(['c.example'], {});
+  it('keeps two endpoints on one host apart, and shows only the host', async () => {
+    // Same host, same position, different keys: the working one must not clear the other.
+    await read([url('rpc.example', 'bad-key')], { [url('rpc.example', 'bad-key')]: { status: 403 } });
+    await read([url('rpc.example', 'good-key')], {});
+
+    const health = getKnowledgeAssetVersionSnapshotHealth();
+    expect(health.failingEndpoints).toMatchObject([
+      { position: 1, endpointCount: 1, host: 'rpc.example', httpStatus: 403, consecutive: 1 },
+    ]);
+    expect(JSON.stringify(health)).not.toContain('key');
+  });
+
+  it("a view from one configuration does not clear another configuration's endpoint", async () => {
+    await read([url('a.example'), url('b.example')], { [url('a.example')]: { status: 400 } });
+    await read([url('c.example')], {});
 
     expect(getKnowledgeAssetVersionSnapshotHealth()).toMatchObject({
-      established: 1,
-      consecutiveUnavailable: 0,
-      failingEndpoints: [{ host: 'b.example', position: 2, endpointCount: 2 }],
+      established: 2,
+      failingEndpoints: [{ host: 'a.example', position: 1, endpointCount: 2 }],
     });
   });
 
   it('keeps a bounded number of endpoints, most recently failing last', async () => {
     for (let index = 0; index < 70; index += 1) {
-      await read([`host-${index}.example`, 'ok.example'], { [`host-${index}.example`]: { status: 400 } });
+      const failingUrl = url(`host-${index}.example`);
+      await read([failingUrl, url('ok.example')], { [failingUrl]: { status: 400 } });
     }
 
     const hosts = getKnowledgeAssetVersionSnapshotHealth().failingEndpoints.map((entry) => entry.host);

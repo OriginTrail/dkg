@@ -26,9 +26,10 @@ export function chainRpcStatusFields() {
     // failover (a rising count = a configured primary is degraded).
     rpcPreferredEstablishments: rpcFailoverStats.preferredEstablishments,
     // The read that decides whether a confirmed publish is still the current
-    // version needs a complete answer from every endpoint at one pinned block.
-    // `failingEndpoints` names each endpoint whose latest such read gave none
-    // (position, host, step, closed class): while it is not empty, confirmed
+    // version asks the primary endpoint for one pinned block, then the others
+    // in order. `failingEndpoints` names each endpoint whose latest such read
+    // failed (position, host, step, closed class): one that every read passes
+    // over first, or, when `consecutiveUnavailable` grows, the reason confirmed
     // publishes on this node wait.
     versionSnapshot: getKnowledgeAssetVersionSnapshotHealth(),
   };

@@ -68,6 +68,8 @@ export default defineConfig({
       'test/entity-grouping.test.ts',
       'test/async-promote-terminal-clear.test.ts',
       'test/lift-job-types.test.ts',
+      'test/lift-job-committed.test.ts',
+      'test/lift-job-chain-observations.test.ts',
       'test/multi-root-token-rows.test.ts',
       'test/access-verification.test.ts',
       'test/promote-step-tag.test.ts',

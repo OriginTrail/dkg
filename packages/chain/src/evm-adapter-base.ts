@@ -1387,6 +1387,7 @@ export class EVMChainAdapterBase {
     this.providers = this.rpcUrls.map(
       (url, endpointSlot) => createRpcRequestProvider(url, {
         maxRetries: perEndpointRetries,
+        discoveryStallTimeoutMs: this.rpcUrls.length > 1 ? RPC_READ_STALL_TIMEOUT_MS : undefined,
         providerOptions: {
           cacheTimeout: -1,
           polling: true,

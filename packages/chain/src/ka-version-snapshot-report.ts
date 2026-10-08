@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Why a Knowledge Asset version snapshot could not be established.
+ * Why a Knowledge Asset version snapshot could not be established, and which
+ * endpoint a read that did succeed had to pass over.
  *
- * `readKnowledgeAssetVersionSnapshot` answers `null` unless EVERY configured
- * endpoint produces a complete view at one pinned block: the endpoint that did
- * not answer may be the one that is ahead, so a partial poll must not decide
- * which version is current. This module does not touch that rule. It keeps
- * what the `null` used to drop: which endpoint contributed no view, at which
- * step of its read, and a closed class for why.
+ * `readKnowledgeAssetVersionSnapshot` asks the primary endpoint for a complete
+ * view at one pinned block and falls back through the configured endpoints in
+ * order (GH#3098); it answers `null` when none supplies one. This module does
+ * not touch that rule. It keeps what the read otherwise drops: an endpoint
+ * that fails is passed over silently, and a `null` says nothing about which
+ * endpoint failed, at which step of its read, or why.
  *
  * The same three invariants as the failover log (rpc-failover-log.ts):
  *
@@ -25,6 +26,7 @@
 
 import type { ChainReadOptions } from './chain-adapter.js';
 import { errorCode, errorStatus } from './evm-adapter-errors.js';
+import { classifyRpcRetryDisposition } from './evm-adapter-rpc.js';
 import { classifyRpcFailoverError, rpcHost } from './rpc-failover-log.js';
 
 /** The step of one endpoint's read that produced no answer. */
@@ -35,7 +37,7 @@ export type KnowledgeAssetVersionSnapshotReadStage =
   | 'pinned-read'
   | 'storage-binding';
 
-/** Why one endpoint contributed no view. Closed: never the provider's own words. */
+/** Why one endpoint supplied no view. Closed: never the provider's own words. */
 export type KnowledgeAssetVersionSnapshotEndpointFailureClass =
   | 'http-client-error'
   | 'http-throttled'
@@ -61,20 +63,20 @@ export interface KnowledgeAssetVersionSnapshotEndpointFailure {
 }
 
 export type KnowledgeAssetVersionSnapshotUnavailableReason =
-  /** At least one endpoint contributed no complete view; `endpoints` names each. */
+  /** No endpoint supplied a complete view; `endpoints` names each one that was asked. */
   | 'endpoints-failed'
   /** The caller's signal ended the read; `endpoints` names those without a view by then. */
   | 'aborted'
-  /** Every endpoint answered, with different block hashes at the same height. */
-  | 'endpoints-disagree'
-  /** The storage contract binding changed while the views were read. */
+  /** The node's own RPC request budget stopped the read before another endpoint was asked. */
+  | 'local-pressure'
+  /** The storage contract binding changed while the view was read. */
   | 'storage-binding-changed'
   /** No endpoint was asked: the storage contract is not resolved. */
   | 'no-storage-contract';
 
 export interface KnowledgeAssetVersionSnapshotUnavailable {
   readonly reason: KnowledgeAssetVersionSnapshotUnavailableReason;
-  /** Configured endpoints. The rule needs a complete view from every one. */
+  /** Configured endpoints. They are asked in order until one supplies a view. */
   readonly endpointCount: number;
   readonly endpoints: readonly KnowledgeAssetVersionSnapshotEndpointFailure[];
 }
@@ -117,28 +119,44 @@ export function classifyKnowledgeAssetVersionSnapshotEndpointError(err: unknown)
   }
 }
 
+/** True when the node's own request budget refused the request: nothing reached the endpoint. */
+function isLocalPressure(err: unknown): boolean {
+  try {
+    return classifyRpcRetryDisposition(err) === 'retry-later';
+  } catch {
+    return false;
+  }
+}
+
 interface EndpointSlot {
   stage: KnowledgeAssetVersionSnapshotReadStage;
   /** How the endpoint's latest attempt ended. Unset while one is in flight. */
   outcome?: 'view' | EndpointCause;
 }
 
+export interface KnowledgeAssetVersionSnapshotTraceOptions {
+  onUnavailable?: KnowledgeAssetVersionSnapshotReadOptions['onUnavailable'];
+  /** True once the caller has cancelled the read: what ends after that is no endpoint's failure. */
+  cancelled: () => boolean;
+}
+
 /**
  * One read's record of what each endpoint did. The adapter wraps its
- * per-endpoint read in {@link observe} and returns through {@link established}
- * or {@link unavailable}; both hand back exactly the value the read would have
- * returned without the trace.
+ * per-endpoint read in {@link observe} and returns through {@link established},
+ * {@link noView} or {@link unavailable}; each hands back exactly the value the
+ * read would have returned without the trace.
  */
 export class KnowledgeAssetVersionSnapshotTrace<TProvider> {
   readonly #providers: readonly TProvider[];
   readonly #rpcUrls: readonly string[];
-  readonly #options: KnowledgeAssetVersionSnapshotReadOptions;
+  readonly #options: KnowledgeAssetVersionSnapshotTraceOptions;
   readonly #slots = new Map<TProvider, EndpointSlot>();
+  #localPressure = false;
 
   constructor(
     providers: readonly TProvider[],
     rpcUrls: readonly string[],
-    options: KnowledgeAssetVersionSnapshotReadOptions,
+    options: KnowledgeAssetVersionSnapshotTraceOptions,
   ) {
     this.#providers = providers;
     this.#rpcUrls = rpcUrls;
@@ -146,27 +164,35 @@ export class KnowledgeAssetVersionSnapshotTrace<TProvider> {
   }
 
   /**
-   * The per-endpoint read, observed. `readOne` names each step it enters through
-   * `step`. A transient failure is retried in place, so each attempt starts a
-   * new record and the last one stands.
+   * The per-endpoint read, observed. `readOne` starts at its storage binding
+   * check and names each later step it enters through `step`. A transient
+   * failure is retried in place, so each attempt starts a new record and the
+   * last one stands.
    */
-  observe<TView>(
+  observe<TView, TSignal>(
     readOne: (
       provider: TProvider,
+      signal: TSignal,
       step: (stage: KnowledgeAssetVersionSnapshotReadStage) => void,
     ) => Promise<TView | null>,
-  ): (provider: TProvider) => Promise<TView | null> {
-    return async (provider) => {
-      const slot: EndpointSlot = { stage: 'chain-id' };
+  ): (provider: TProvider, signal: TSignal) => Promise<TView | null> {
+    return async (provider, signal) => {
+      const slot: EndpointSlot = { stage: 'storage-binding' };
       this.#slots.set(provider, slot);
       try {
-        const view = await readOne(provider, (stage) => { slot.stage = stage; });
+        const view = await readOne(provider, signal, (stage) => { slot.stage = stage; });
         slot.outcome = view === null ? this.#withoutView(slot.stage) : 'view';
         return view;
       } catch (error) {
-        slot.outcome = this.#options.signal?.aborted
-          ? { failure: 'no-answer' }
-          : classifyKnowledgeAssetVersionSnapshotEndpointError(error);
+        if (this.#cancelled()) {
+          slot.outcome = { failure: 'no-answer' };
+        } else if (isLocalPressure(error)) {
+          // Nothing reached the endpoint, so this is not something it did.
+          this.#localPressure = true;
+          this.#slots.delete(provider);
+        } else {
+          slot.outcome = classifyKnowledgeAssetVersionSnapshotEndpointError(error);
+        }
         throw error;
       }
     };
@@ -174,35 +200,30 @@ export class KnowledgeAssetVersionSnapshotTrace<TProvider> {
 
   /** The read established `view`. Returns it. */
   established<TView>(view: TView): TView {
-    noteEstablished(() => this.#endpointKeys());
+    try {
+      noteEstablished(this.#outcomes());
+    } catch {
+      // Observability must never change what the read answers.
+    }
     return view;
+  }
+
+  /** No endpoint supplied a view. Returns the read's `null`. */
+  noView(): null {
+    if (this.#cancelled()) return this.unavailable('aborted');
+    return this.unavailable(this.#localPressure ? 'local-pressure' : 'endpoints-failed');
   }
 
   /** The read could not establish a view, for `reason`. Returns the read's `null`. */
   unavailable(reason: KnowledgeAssetVersionSnapshotUnavailableReason): null {
     try {
-      const endpointCount = this.#providers.length;
-      const endpoints: KnowledgeAssetVersionSnapshotEndpointFailure[] = [];
-      const answered: string[] = [];
-      this.#providers.forEach((provider, index) => {
-        const slot = this.#slots.get(provider);
-        const position = index + 1;
-        const host = rpcHost(this.#rpcUrls[index]!);
-        if (slot === undefined) return;
-        if (slot.outcome === 'view') {
-          answered.push(endpointKey(position, endpointCount, host));
-          return;
-        }
-        // No outcome: the read ended while this endpoint's attempt was in flight.
-        endpoints.push({ position, host, stage: slot.stage, ...(slot.outcome ?? { failure: 'no-answer' }) });
-      });
-      const report: KnowledgeAssetVersionSnapshotUnavailable = { reason, endpointCount, endpoints };
-      // A cancelled read enters the process-wide record only when it singles endpoints out.
-      // One that ends with every endpoint still in flight says nothing about any of them,
-      // and would leave healthy endpoints listed until the next read.
-      if (reason !== 'aborted' || (endpoints.length > 0 && answered.length > 0)) {
-        noteUnavailable(report, answered);
-      }
+      const outcomes = this.#outcomes();
+      const report: KnowledgeAssetVersionSnapshotUnavailable = {
+        reason,
+        endpointCount: outcomes.endpointCount,
+        endpoints: outcomes.failed.map(({ endpoint }) => endpoint),
+      };
+      noteUnavailable(reason, outcomes);
       this.#options.onUnavailable?.(report);
     } catch {
       // Observability must never change what the read answers.
@@ -210,18 +231,47 @@ export class KnowledgeAssetVersionSnapshotTrace<TProvider> {
     return null;
   }
 
+  #cancelled(): boolean {
+    try {
+      return this.#options.cancelled();
+    } catch {
+      return false;
+    }
+  }
+
   /** Why an endpoint that returned no view did so, from the step it was in. */
   #withoutView(stage: KnowledgeAssetVersionSnapshotReadStage): EndpointCause {
-    if (this.#options.signal?.aborted) return { failure: 'no-answer' };
     if (stage === 'chain-id') return { failure: 'wrong-chain' };
     if (stage === 'storage-binding') return { failure: 'binding-changed' };
     return { failure: 'incomplete-view' };
   }
 
-  #endpointKeys(): string[] {
-    return this.#providers.map(
-      (_, index) => endpointKey(index + 1, this.#providers.length, rpcHost(this.#rpcUrls[index]!)),
-    );
+  /** What each endpoint that was asked did, in configured order. */
+  #outcomes(): EndpointOutcomes {
+    const failed: TrackedFailure[] = [];
+    const answered: string[] = [];
+    const endpointCount = this.#providers.length;
+    this.#providers.forEach((provider, index) => {
+      const slot = this.#slots.get(provider);
+      if (slot === undefined) return;
+      const url = this.#rpcUrls[index]!;
+      const key = endpointKey(index + 1, endpointCount, url);
+      if (slot.outcome === 'view') {
+        answered.push(key);
+        return;
+      }
+      failed.push({
+        key,
+        endpoint: {
+          position: index + 1,
+          host: rpcHost(url),
+          stage: slot.stage,
+          // No outcome: the read ended while this endpoint's attempt was in flight.
+          ...(slot.outcome ?? { failure: 'no-answer' }),
+        },
+      });
+    });
+    return { endpointCount, failed, answered };
   }
 }
 
@@ -235,7 +285,7 @@ const READ_NAME: Record<KnowledgeAssetVersionSnapshotReadStage, string> = {
   'storage-binding': 'a block-pinned read',
 };
 
-/** One endpoint's failure in words, e.g. `endpoint 3 of 5 (host) refused a block-pinned read (http 400)`. */
+/** One endpoint's failure in words, e.g. `endpoint 1 of 3 (host) refused a block-pinned read (http 400)`. */
 export function describeKnowledgeAssetVersionSnapshotEndpointFailure(
   endpoint: KnowledgeAssetVersionSnapshotEndpointFailure,
   endpointCount: number,
@@ -258,28 +308,27 @@ export function describeKnowledgeAssetVersionSnapshotEndpointFailure(
   }
 }
 
-/** Why no view could be established, in words. Names every endpoint that contributed none. */
+/** Why no view could be established, in words. Names every endpoint that was asked and supplied none. */
 export function describeKnowledgeAssetVersionSnapshotUnavailable(
   report: KnowledgeAssetVersionSnapshotUnavailable,
 ): string {
-  if (report.endpoints.length > 0) {
-    return report.endpoints
-      .map((endpoint) => describeKnowledgeAssetVersionSnapshotEndpointFailure(endpoint, report.endpointCount))
-      .join('; ');
+  const parts = report.endpoints
+    .map((endpoint) => describeKnowledgeAssetVersionSnapshotEndpointFailure(endpoint, report.endpointCount));
+  if (report.reason === 'local-pressure') {
+    parts.push("the node's own RPC request budget was full before another endpoint could be asked");
   }
+  if (parts.length > 0) return parts.join('; ');
   switch (report.reason) {
     case 'aborted': return 'the read was cancelled before it completed';
-    case 'endpoints-disagree':
-      return `the ${report.endpointCount} endpoints returned different block hashes at the same height`;
     case 'storage-binding-changed': return 'the storage contract binding changed during the read';
     case 'no-storage-contract': return 'the knowledge asset storage contract is not resolved';
-    default: return 'not every endpoint returned a complete view';
+    default: return 'no endpoint returned a complete view';
   }
 }
 
 // --- Process-wide record (host only) -----------------------------------------
 
-/** One endpoint whose latest pinned read contributed no view. */
+/** One endpoint whose latest pinned read supplied no view. */
 export interface KnowledgeAssetVersionSnapshotFailingEndpoint
   extends KnowledgeAssetVersionSnapshotEndpointFailure {
   readonly endpointCount: number;
@@ -293,9 +342,8 @@ export interface KnowledgeAssetVersionSnapshotFailingEndpoint
 /** Snapshot for `/api/status`: host only, plain JSON. */
 export interface KnowledgeAssetVersionSnapshotHealth {
   /**
-   * Reads that established a view, and reads that could not, since start. A read its caller
-   * cancelled counts as one that could not only when it left some endpoint waiting while
-   * another had answered.
+   * Reads that established a view, and reads that could not, since start. A
+   * read its caller cancelled is neither.
    */
   established: number;
   unavailable: number;
@@ -303,11 +351,29 @@ export interface KnowledgeAssetVersionSnapshotHealth {
   consecutiveUnavailable: number;
   unavailableSince: number | null;
   lastUnavailableReason: KnowledgeAssetVersionSnapshotUnavailableReason | null;
+  /**
+   * Endpoints whose latest pinned read failed. When reads still succeed, an
+   * entry here is an endpoint that every read passes over first.
+   */
   failingEndpoints: KnowledgeAssetVersionSnapshotFailingEndpoint[];
 }
 
 /** Real configurations have a handful of endpoints per chain; this is a ceiling. */
 const MAX_FAILING_ENDPOINTS = 64;
+
+interface TrackedFailure {
+  /** Private identity of the configured endpoint. Never part of any output. */
+  readonly key: string;
+  readonly endpoint: KnowledgeAssetVersionSnapshotEndpointFailure;
+}
+
+interface EndpointOutcomes {
+  readonly endpointCount: number;
+  /** Endpoints that were asked and supplied no view, in configured order. */
+  readonly failed: readonly TrackedFailure[];
+  /** Private identities of the endpoints that supplied a view. */
+  readonly answered: readonly string[];
+}
 
 interface MutableHealth extends Omit<KnowledgeAssetVersionSnapshotHealth, 'failingEndpoints'> {
   failing: Map<string, KnowledgeAssetVersionSnapshotFailingEndpoint>;
@@ -328,32 +394,45 @@ function freshHealth(): MutableHealth {
 // agent and per publisher wallet, and `/api/status` reads the aggregate.
 let health = freshHealth();
 
-function endpointKey(position: number, endpointCount: number, host: string): string {
-  return `${position}/${endpointCount}|${host}`;
+/**
+ * Bookkeeping identity of one configured endpoint: the whole URL, so that two
+ * endpoints on one host stay apart. It is a map key only and is never output.
+ */
+function endpointKey(position: number, endpointCount: number, rpcUrl: string): string {
+  return `${position}/${endpointCount}|${rpcUrl}`;
 }
 
-function noteEstablished(endpointKeys: () => readonly string[]): void {
+function noteEstablished(outcomes: EndpointOutcomes): void {
   health.established += 1;
   health.consecutiveUnavailable = 0;
   health.unavailableSince = null;
   health.lastUnavailableReason = null;
-  // The common read has nothing to clear and must not pay for the keys.
-  if (health.failing.size === 0) return;
-  for (const key of endpointKeys()) health.failing.delete(key);
+  // The common read passed over nothing and has nothing to clear.
+  if (outcomes.failed.length === 0 && health.failing.size === 0) return;
+  noteEndpoints(outcomes.failed, outcomes);
 }
 
 function noteUnavailable(
-  report: KnowledgeAssetVersionSnapshotUnavailable,
-  answered: readonly string[],
+  reason: KnowledgeAssetVersionSnapshotUnavailableReason,
+  outcomes: EndpointOutcomes,
 ): void {
-  const now = Date.now();
+  // A cancelled read says nothing about whether a view can be established. What an
+  // endpoint had already failed with is still recorded; one still in flight is not.
+  if (reason === 'aborted') {
+    noteEndpoints(outcomes.failed.filter(({ endpoint }) => endpoint.failure !== 'no-answer'), outcomes);
+    return;
+  }
   health.unavailable += 1;
   health.consecutiveUnavailable += 1;
-  health.unavailableSince ??= now;
-  health.lastUnavailableReason = report.reason;
-  for (const key of answered) health.failing.delete(key);
-  for (const endpoint of report.endpoints) {
-    const key = endpointKey(endpoint.position, report.endpointCount, endpoint.host);
+  health.unavailableSince ??= Date.now();
+  health.lastUnavailableReason = reason;
+  noteEndpoints(outcomes.failed, outcomes);
+}
+
+function noteEndpoints(failed: readonly TrackedFailure[], outcomes: EndpointOutcomes): void {
+  const now = Date.now();
+  for (const key of outcomes.answered) health.failing.delete(key);
+  for (const { key, endpoint } of failed) {
     const prior = health.failing.get(key);
     const same = prior !== undefined
       && prior.stage === endpoint.stage
@@ -363,7 +442,7 @@ function noteUnavailable(
     health.failing.delete(key);
     health.failing.set(key, {
       ...endpoint,
-      endpointCount: report.endpointCount,
+      endpointCount: outcomes.endpointCount,
       consecutive: same ? prior.consecutive + 1 : 1,
       since: same ? prior.since : now,
       last: now,
