@@ -11,7 +11,12 @@ import type { SwmTransportAuthority } from './swm-transport-authority.js';
 export interface ContextGraphAgentGateAuthorityInput {
   contextGraphId: string;
   getTransportAuthority(): Promise<SwmTransportAuthority>;
-  readMetadataRevision(): number;
+  /**
+   * Must move whenever a fact that `getLegacyMeta` reports for this context
+   * graph may have changed. A revision that also moves for other writes
+   * refuses the gate on a busy node (GH#3069).
+   */
+  readRosterRevision(): number | string;
   getLegacyMeta(): Promise<{
     allowedAgents: readonly string[];
     participantAgents: readonly string[];
@@ -60,20 +65,20 @@ function conclusiveTransportGate(
 export async function resolveContextGraphAgentGateAuthorityDecision(
   input: ContextGraphAgentGateAuthorityInput,
 ): Promise<ContextGraphAgentGateAuthority> {
-  // A concurrent metadata write can invalidate a legacy roster while its
-  // store read is in flight. Re-read the entire decision a bounded number of
-  // times so an ordinary create/write burst does not strand SWM publishing.
+  // A concurrent write to this graph's roster can invalidate a legacy roster
+  // while its store read is in flight. Re-read the entire decision a bounded
+  // number of times so a burst of roster changes does not strand SWM publishing.
   // Never return a roster captured before the final revision check.
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const conclusiveGate = conclusiveTransportGate(await input.getTransportAuthority());
     if (conclusiveGate !== null) return conclusiveGate;
 
-    const metadataRevision = input.readMetadataRevision();
+    const rosterRevision = input.readRosterRevision();
     const meta = await input.getLegacyMeta();
     // A private policy or registration can activate during the store read.
     const currentConclusiveGate = conclusiveTransportGate(await input.getTransportAuthority());
     if (currentConclusiveGate !== null) return currentConclusiveGate;
-    if (input.readMetadataRevision() !== metadataRevision) continue;
+    if (input.readRosterRevision() !== rosterRevision) continue;
 
     const seen = new Set<string>();
     const agents: string[] = [];
