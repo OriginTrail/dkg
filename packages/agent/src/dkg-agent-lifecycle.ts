@@ -771,6 +771,7 @@ import {
 import { runCuratorMetaRefreshFromPeer } from './curator-meta-refresh.js';
 import { isCanonicalAuthoritativeContextGraphId } from
   './context-graph-binding-state.js';
+import { projectDormantContextGraphIdentities } from './context-graph-dormant-identity.js';
 import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
@@ -9245,14 +9246,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (this.wireIdToLocalCgId.get(localWireId) === wireOnlySubscription.localId) {
         this.wireIdToLocalCgId.delete(localWireId);
       }
-      // A placeholder can be durable (a `dkg subscribe <hash> --save` row, or
-      // a Core's hosted row). Delete that record too, whatever this caller's
-      // persist flag: otherwise the next rehydration resurrects the hash row
-      // and re-points the reverse index away from the cleartext id.
-      this.retirePersistedContextGraphNamePlaceholder(
-        wireOnlySubscription.localId,
-        wireOnlySubscription.subscription,
-      );
+      // Admitted adoption also retires a durable hash-keyed intent, even when
+      // the live subscription itself is process-local. Identity-only startup
+      // must leave every durable row intact while activation is disabled.
+      if (options?.persist !== false || normalizedNext.subscribed || normalizedNext.coreHosted) {
+        this.retirePersistedContextGraphNamePlaceholder(
+          wireOnlySubscription.localId,
+          wireOnlySubscription.subscription,
+        );
+      }
       this.log.info(
         createOperationContext('system'),
         `Promoted wire-only Context Graph ${localWireId.slice(0, 18)}… to local identity "${contextGraphId}"`,
@@ -10761,12 +10763,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         }
       }
 
-      // Operator kill-switch: inventory the durable rows for diagnostics but
-      // deliberately do not copy any of them into runtime subscription state.
-      // In particular, do not install gossip handlers, add automatic sync
-      // scope, persist node-membership side effects, or touch the RDF store.
-      // A later explicit subscribe remains a normal live activation and updates
-      // the status through updateContextGraphSubscriptionRehydrationStatusAfterPersist.
+      // Restore exact saved identity before discovery, independently of every
+      // activation gate (disabled, capped or authority-denied). Inactive rows
+      // cannot admit gossip, sync or RFC-64 authority; installation owns no
+      // subscription, membership or RDF writes. Unbound/invalid rows stay
+      // absent, and the fresh authority gates below still own activation.
+      for (const [id, identity] of projectDormantContextGraphIdentities(rows)) {
+        const current = this.subscribedContextGraphs.get(id);
+        if (current?.subscribed || current?.coreHosted) continue;
+        this.setContextGraphSubscription(id, identity, { persist: false });
+      }
       if (!this.config.contextGraphSubscriptionRehydrationEnabled) {
         const dormancyById = this.contextGraphSubscriptionDormancyById;
         dormancyById.clear();
@@ -10828,10 +10834,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // the cap stay PERSISTED but dormant and are promoted when an earlier
       // rehydrated subscription reaches a safe synced state. Prioritise
       // core-hosted, then subscribed, so the first set is most relevant.
-      // A dormant (capped-out) row has no in-memory entry, so individual
-      // `POST /api/context-graph/unsubscribe` cannot target it. The row remains
-      // eligible for rolling activation or bulk pruning through the existing
-      // DELETE endpoint.
+      // Canonically bound dormant rows retain inactive identity only; no data
+      // lane is active. Every dormant row remains eligible for rolling
+      // activation or explicit pruning through the existing DELETE endpoint.
       // coreHosted graphs MUST always be restored — their chain-driven
       // reconcile / host-mode path depends on it — so EXEMPT them from the cap.
       // The cap (a #997 anti-wedge measure) applies only to the non-hosted

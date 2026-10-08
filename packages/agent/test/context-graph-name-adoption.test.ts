@@ -529,10 +529,13 @@ describe('restart with a saved name-hash subscription', () => {
     const internals = await boot({ store, syncContextGraphs: [NAME_HASH], rehydrationEnabled: false });
     await internals.rehydrateContextGraphSubscriptions(null);
 
-    expect(internals.subscribedContextGraphs.has(CLEARTEXT)).toBe(false);
+    expect(internals.subscribedContextGraphs.get(CLEARTEXT)).toMatchObject({
+      onChainId: ON_CHAIN_ID, onChainHash: NAME_HASH,
+      subscribed: false, coreHosted: false, synced: false, metaSynced: false,
+    });
     expect(internals.resolveContextGraphIdAlias(NAME_HASH)).toBe(CLEARTEXT);
     expect(internals.config.syncContextGraphs).toEqual([CLEARTEXT]);
-    // The kill-switch leaves every persisted row exactly as it was.
+    // The kill-switch restores identity without admitting or writing intent.
     expect(store.deleted).toEqual([]);
     expect(store.saved).toEqual([]);
   });

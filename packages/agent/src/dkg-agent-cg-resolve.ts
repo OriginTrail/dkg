@@ -2332,7 +2332,11 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     const next = { ...current };
     this.bindSubscriptionOnChainId(localId, next, onChainContextGraphId);
     next.onChainHash = wireId;
-    this.setContextGraphSubscription(localId, next, options);
+    // Discovery enriches identity, not durable subscription intent. An
+    // inactive row may own a saved dormant binding; projecting it through the
+    // ordinary intent writer would delete that original durable subscription.
+    this.setContextGraphSubscription(localId, next,
+      current.subscribed || current.coreHosted ? options : { ...options, persist: false });
     return localId;
   }
 

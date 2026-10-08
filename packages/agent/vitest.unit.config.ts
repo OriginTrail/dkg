@@ -129,6 +129,7 @@ export default defineConfig({
       "test/context-graph-storage-discovery.test.ts",
       "test/context-graph-storage-discovery-agent.test.ts",
       "test/context-graph-duplicate-name-binding.test.ts",
+      "test/context-graph-dormant-identity.test.ts",
       "test/context-graph-persisted-alias-binding.test.ts",
       "test/context-graph-binding-claims.integration.test.ts",
       "test/context-graph-on-chain-reference.test.ts",
