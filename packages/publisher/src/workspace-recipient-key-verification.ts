@@ -2,9 +2,10 @@ import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519, computeWorkspaceAgentEncryptionKeyProofPayload, computeWorkspaceAgentEncryptionKeyRevocationPayload } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { WORKSPACE_RECIPIENT_DEPENDENCIES } from './workspace-recipient-dependencies.js';
+import { RECIPIENT_KEY_CANDIDATE_LIMIT as STRICT_RECIPIENT_KEY_CANDIDATE_LIMIT } from './workspace-recipient-key-policy.js';
 
 const { keyRoute: KEY_ROUTE } = WORKSPACE_RECIPIENT_DEPENDENCIES;
-const STRICT_RECIPIENT_KEY_CANDIDATE_LIMIT = 64;
+
 
 export interface EncryptionKeyMaterial {
   readonly recipientKeyId: string;

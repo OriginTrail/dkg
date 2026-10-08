@@ -6,7 +6,8 @@ import {
 import { WORKSPACE_RECIPIENT_DEPENDENCIES } from './workspace-recipient-dependencies.js';
 import { loadVerifiedRevokedKeyIds, stringBinding, stripRdfLiteral, type EncryptionKeyMaterial } from './workspace-recipient-key-verification.js';
 
-import { COMPLETE_KEY_ROW_LIMIT, COMPLETE_ROUTE_ROW_LIMIT, type PublicKeyRoute, type PublicKeyCandidate, RECIPIENT_KEY_HISTORY_PAGE_SIZE, RECIPIENT_KEY_CANDIDATE_LIMIT } from './workspace-recipient-key-candidates.js';
+import type { PublicKeyRoute, PublicKeyCandidate } from './workspace-recipient-key-candidates.js';
+import { COMPLETE_KEY_ROW_LIMIT, COMPLETE_ROUTE_ROW_LIMIT, RECIPIENT_KEY_HISTORY_PAGE_SIZE, RECIPIENT_KEY_CANDIDATE_LIMIT } from './workspace-recipient-key-policy.js';
 
 const { keyRoute: KEY_ROUTE } = WORKSPACE_RECIPIENT_DEPENDENCIES;
 
@@ -71,14 +72,22 @@ export async function collectWorkspaceAgentKeyEvidence(
 }
 
 /** Normalized retrieval source; validation never sees query bindings or paging cursors. */
-export interface WorkspaceAgentKeySource {
+interface WorkspaceAgentKeyReaders {
   keyPages(): AsyncIterable<readonly string[]>;
   proofPages(): AsyncIterable<readonly string[]>;
   readRetirements(candidates: readonly EncryptionKeyMaterial[]): Promise<Set<string>>;
   routes(candidates: readonly PublicKeyCandidate[]): Promise<readonly PublicKeyRoute[]>;
   hasUnsupportedAlgorithm(candidates: readonly PublicKeyCandidate[]): Promise<boolean>;
-  finalRevocations(candidates: readonly EncryptionKeyMaterial[]): Promise<Set<string>>;
 }
+
+/** Complete retirement reads serve as the final read; paged evidence must refresh. */
+export type WorkspaceAgentKeySource = WorkspaceAgentKeyReaders & (
+  | { readonly finalRevocationPolicy: 'already-applied' }
+  | {
+    readonly finalRevocationPolicy: 'refresh';
+    refreshFinalRevocations(candidates: readonly EncryptionKeyMaterial[]): Promise<Set<string>>;
+  }
+);
 
 async function* onePage(values: readonly string[]): AsyncIterable<readonly string[]> {
   if (values.length > 0) yield values;
@@ -132,29 +141,26 @@ export async function createWorkspaceAgentKeySource(
     return result.type === 'boolean' && result.value;
   };
   if (evidence.completeness === 'complete') {
-    let freshRevocations = new Set<string>();
     return {
+      finalRevocationPolicy: 'already-applied',
       keyPages: () => onePage(evidence.keys),
       proofPages: () => onePage(evidence.proofs),
-      readRetirements: async (candidates) => {
-        // All positive evidence was read together; this is the last store read on success.
-        freshRevocations = await readRevocations(candidates);
-        return freshRevocations;
-      },
+      // All positive evidence was read together; this is the last store read on success.
+      readRetirements: readRevocations,
       routes: async (candidates) => {
         const keys = new Set(candidates.map((candidate) => candidate.encodedPublicKey));
         return evidence.routes.filter((route) => keys.has(route.key));
       },
       hasUnsupportedAlgorithm,
-      finalRevocations: async () => freshRevocations,
     };
   }
   return {
+    finalRevocationPolicy: 'refresh',
     keyPages: () => keysetPages(store, checksum, agentUriValues, graphFilter, 'key', KEY_ROUTE.publicKey),
     proofPages: () => keysetPages(store, checksum, agentUriValues, graphFilter, 'proof', KEY_ROUTE.proof),
     readRetirements: readRevocations,
     hasUnsupportedAlgorithm,
-    finalRevocations: readRevocations,
+    refreshFinalRevocations: readRevocations,
     routes: async (candidates) => {
       const rowLimit = RECIPIENT_KEY_CANDIDATE_LIMIT + candidates.length + 1;
       const result = await store.query(`SELECT DISTINCT ?key ?peerId WHERE {

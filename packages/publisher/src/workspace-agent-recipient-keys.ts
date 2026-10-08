@@ -6,9 +6,9 @@ import { ethers } from 'ethers';
 import type { WorkspaceAgentRecipient } from './workspace-agent-recipients.js';
 import { WorkspaceAgentEncryptionKeyMissingError } from './workspace-recipient-key-errors.js';
 import { createWorkspaceAgentKeySource } from './workspace-recipient-key-collect.js';
+import { RECIPIENT_KEY_CANDIDATE_LIMIT as STRICT_RECIPIENT_KEY_CANDIDATE_LIMIT } from './workspace-recipient-key-policy.js';
 
 import { decodePublicKeyCandidate, candidateHasProof, projectPublicKeyRoutes,
-  RECIPIENT_KEY_CANDIDATE_LIMIT as STRICT_RECIPIENT_KEY_CANDIDATE_LIMIT,
   type PublicKeyCandidate } from './workspace-recipient-key-candidates.js';
 
 /**
@@ -182,11 +182,13 @@ export async function resolveWorkspaceAgentRecipientKeys(
     throw new Error(`Untrusted RDF-only public encryption key for DKG agent ${checksum}`);
   }
 
-  const revokedKeyIds = await source.finalRevocations(proofVerifiedKeys);
-  for (const id of revokedKeyIds) {
-    // Revocation is keyed by recipientKeyId, not by transport provenance, so
-    // retiring a key removes every peer-bound variant at once.
-    verifiedKeys.delete(id);
+  if (source.finalRevocationPolicy === 'refresh') {
+    const revokedKeyIds = await source.refreshFinalRevocations(proofVerifiedKeys);
+    for (const id of revokedKeyIds) {
+      // Revocation is keyed by recipientKeyId, not by transport provenance, so
+      // retiring a key removes every peer-bound variant at once.
+      verifiedKeys.delete(id);
+    }
   }
 
   if (verifiedKeys.size === 0) {

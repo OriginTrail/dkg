@@ -5,10 +5,11 @@ import {
 import type { WorkspaceAgentRecipient } from './workspace-agent-recipients.js';
 import { verifyAgentEncryptionKeyProof } from './workspace-recipient-key-verification.js';
 
-export const RECIPIENT_KEY_CANDIDATE_LIMIT = 64;
-export const RECIPIENT_KEY_HISTORY_PAGE_SIZE = 64;
-export const COMPLETE_KEY_ROW_LIMIT = RECIPIENT_KEY_CANDIDATE_LIMIT + 1;
-export const COMPLETE_ROUTE_ROW_LIMIT = RECIPIENT_KEY_CANDIDATE_LIMIT * 2 + 1;
+import { RECIPIENT_KEY_CANDIDATE_LIMIT } from './workspace-recipient-key-policy.js';
+export {
+  RECIPIENT_KEY_CANDIDATE_LIMIT, RECIPIENT_KEY_HISTORY_PAGE_SIZE,
+  COMPLETE_KEY_ROW_LIMIT, COMPLETE_ROUTE_ROW_LIMIT,
+} from './workspace-recipient-key-policy.js';
 
 export interface PublicKeyCandidate {
   readonly encodedPublicKey: string;

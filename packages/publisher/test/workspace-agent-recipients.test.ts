@@ -826,6 +826,34 @@ describe('complete bounded recipient key collect', () => {
     await store.close();
   });
 
+  it('refreshes revocations written after paged route retrieval', async () => {
+    const store = new OxigraphStore();
+    try {
+      const wallet = ethers.Wallet.createRandom();
+      const key = await insertAgentEncryptionKey(store, wallet, { peerId: PEER_A });
+      const query = store.query.bind(store);
+      let injected = false;
+      const calls = vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+        const result = await query(sparql, options);
+        if (sparql.includes('SELECT ?kind ?key ?proof ?peerId')) {
+          return { type: 'bindings', bindings: [{ kind: 'unsupported' }] };
+        }
+        if (sparql.includes('SELECT DISTINCT ?key ?peerId')) {
+          expect(result.type).toBe('bindings');
+          if (result.type === 'bindings') expect(result.bindings).toHaveLength(1);
+          injected = true;
+          await insertAgentEncryptionKeyRevocation(store, wallet, key.publicKeyBytes);
+        }
+        return result;
+      });
+      await expect(resolveWorkspaceAgentRecipientKeys(store, wallet.address)).rejects.toThrow(/have been revoked/);
+      expect(injected).toBe(true);
+      expect(calls.mock.calls.some(([sparql]) => sparql.includes('ORDER BY ?key'))).toBe(true);
+      expect(calls.mock.calls.filter(([sparql]) => sparql.includes('SELECT DISTINCT ?keyId ?revokedAt'))).toHaveLength(2);
+      expect(calls.mock.calls.at(-1)?.[0]).toContain('SELECT DISTINCT ?keyId ?revokedAt');
+    } finally { await store.close(); }
+  });
+
   it.each(['bounded', 'paged'])('preserves peer variants and required-peer rejection through %s collection', async (strategy) => {
     const store = new OxigraphStore();
     try {
