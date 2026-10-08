@@ -758,6 +758,7 @@ import  {
   type SyncReconcilerBackoff,
 } from './dkg-agent-types.js';
 import {
+  mayAdoptContextGraphWireSubscription,
   normalizeContextGraphSubscriptionTransition,
   projectContextGraphSubscriptionPersistence,
   retainsInactiveContextGraphBinding,
@@ -9212,6 +9213,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       : this.contextGraphWireId(next.onChainHash);
     const adoptsWireOnlySubscription =
       wireOnlySubscription !== null
+      && mayAdoptContextGraphWireSubscription(next, wireOnlySubscription.subscription)
       && (explicitNextWireId === undefined || explicitNextWireId === localWireId)
       && (
         next.onChainId === undefined
@@ -9241,15 +9243,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // an identity placeholder rather than a second graph. Retire it before
       // publishing the canonical row so its RFC-64 responsibility, binding
       // fence, and receiver lifecycle cannot remain active under the wire id.
-      // Host-mode bookkeeping is already wire-keyed and therefore survives
-      // this local-identity promotion without rewiring its ciphertext topic.
       this.deleteContextGraphSubscription(wireOnlySubscription.localId);
       if (this.wireIdToLocalCgId.get(localWireId) === wireOnlySubscription.localId) {
         this.wireIdToLocalCgId.delete(localWireId);
       }
-      // Admitted adoption also retires a durable hash-keyed intent, even when
-      // the live subscription itself is process-local. Identity-only startup
-      // must leave every durable row intact while activation is disabled.
+      // Admitted adoption retires durable placeholder intent; inactive
+      // startup keeps its saved rows intact.
       if (options?.persist !== false || normalizedNext.subscribed || normalizedNext.coreHosted) {
         this.retirePersistedContextGraphNamePlaceholder(
           wireOnlySubscription.localId,
@@ -9291,7 +9290,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const preserveWireOwner = (options?.preserveAdmittedWireBinding === true || retainsInactiveBinding)
       && wireOwnerId !== contextGraphId
       && (wireOwner?.subscribed === true || wireOwner?.coreHosted === true)
-      && wireOwner.onChainId !== canonicalNext.onChainId;
+      && (retainsInactiveBinding || wireOwner.onChainId !== canonicalNext.onChainId);
     if (!preserveWireOwner) this.wireIdToLocalCgId.set(nextWireId, contextGraphId);
     if (
       (canonicalNext.subscribed === true || canonicalNext.coreHosted === true)
@@ -9368,7 +9367,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       contextGraphId,
       subscription: canonicalNext,
       syncScoped: (this.config.syncContextGraphs ?? []).includes(contextGraphId),
-      preserveInactiveIntent: options?.persist !== true && retainsInactiveBinding,
+      preserveInactiveIntent: options?.persist !== true && retainsInactiveBinding
+        && previous?.subscribed !== true && previous?.coreHosted !== true,
     });
     if (options?.persist !== false && persistence.action !== 'skip') {
       if (this.config.contextGraphSubscriptionStore) {

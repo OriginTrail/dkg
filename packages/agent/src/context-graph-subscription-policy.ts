@@ -16,21 +16,28 @@ export function normalizeContextGraphSubscriptionTransition(
 }
 
 /**
- * Inactive readiness retains numeric identity and may enrich a missing hash.
- * Deliberate rebind/unbind or a changed known hash retains ordinary cleanup.
+ * An inactive next state retains identity, including explicit unsubscribe.
+ * A missing hash may be enriched; numeric/known-hash changes do not retain it.
  */
 export function retainsInactiveContextGraphBinding(
   previous: ContextGraphSub | undefined,
   next: ContextGraphSub,
 ): boolean {
-  return previous?.subscribed !== true
-    && previous?.coreHosted !== true
-    && next.subscribed !== true
+  return next.subscribed !== true
     && next.coreHosted !== true
     && (previous === undefined || (
       previous.onChainId === next.onChainId
       && (previous.onChainHash === undefined || previous.onChainHash === next.onChainHash)
     ));
+}
+
+/** Identity-only writes cannot retire already admitted wire custody. */
+export function mayAdoptContextGraphWireSubscription(
+  next: ContextGraphSubInput,
+  wire: ContextGraphSub,
+): boolean {
+  return next.subscribed === true || next.coreHosted === true
+    || (wire.subscribed !== true && wire.coreHosted !== true);
 }
 
 export function resolveContextGraphSyncMode(input: {
