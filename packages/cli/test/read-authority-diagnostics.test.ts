@@ -1,6 +1,9 @@
 import { createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
 import { describe, expect, it } from 'vitest';
-import { createReadAuthorityDiagnostics } from '../src/daemon/read-authority-diagnostics.js';
+import {
+  createReadAuthorityDiagnostics,
+  decodeReadAuthorityAttribution,
+} from '../src/daemon/read-authority-diagnostics.js';
 
 interface Line {
   readonly level: 'info' | 'warn';
@@ -91,5 +94,74 @@ describe('read-authority 503 diagnostics (#2834)', () => {
 
     expect(lines[0]!.message).toContain('source=registered-chain reason=unknown dependency=unknown');
     expect(lines[0]!.message).not.toContain('secret');
+  });
+
+  it('ends the line with the detail code the agent names, and leaves it out otherwise', () => {
+    const { lines, diagnostics } = harness();
+
+    diagnostics.record(createOperationContext('query'), STORE);
+    diagnostics.record(createOperationContext('query'), { ...STORE, detailCode: 'replica-proof-timeout' });
+
+    expect(lines[0]!.message).toMatch(/dependency=store$/);
+    expect(lines[1]!.message).toMatch(/dependency=store detail=replica-proof-timeout$/);
+  });
+
+  it('warns separately for each detail code of one reason', () => {
+    const { lines, diagnostics } = harness();
+
+    diagnostics.record(createOperationContext('query'), { ...STORE, detailCode: 'replica-proof-timeout' });
+    diagnostics.record(createOperationContext('query'), { ...STORE, detailCode: 'replica-metadata-moved' });
+    diagnostics.record(createOperationContext('query'), { ...STORE, detailCode: 'replica-proof-timeout' });
+
+    expect(lines.map((line) => line.level)).toEqual(['warn', 'warn', 'info']);
+  });
+
+  it('logs a detail code that is not a token as unknown', () => {
+    const { lines, diagnostics } = harness();
+
+    diagnostics.record(createOperationContext('query'), {
+      ...STORE,
+      detailCode: 'resolve(private-graph-name) timed out after 2500ms',
+    });
+
+    expect(lines[0]!.message).toMatch(/dependency=store detail=unknown$/);
+    expect(lines[0]!.message).not.toContain('private-graph-name');
+  });
+});
+
+describe('read-authority attribution of a thrown marker', () => {
+  it('reads the three fields and the detail code', () => {
+    expect(decodeReadAuthorityAttribution({
+      source: 'registered-chain',
+      reason: 'finalized-name-absence-unaccepted',
+      dependency: 'unknown',
+      detailCode: 'replica-proof-timeout',
+      message: 'not part of the attribution',
+    })).toEqual({
+      source: 'registered-chain',
+      reason: 'finalized-name-absence-unaccepted',
+      dependency: 'unknown',
+      detailCode: 'replica-proof-timeout',
+    });
+  });
+
+  it('reads a missing or non-string field as unknown and leaves out a detail code that is not a string', () => {
+    expect(decodeReadAuthorityAttribution({ source: 'registered-chain', reason: 7, detailCode: { raw: true } }))
+      .toEqual({ source: 'registered-chain', reason: 'unknown', dependency: 'unknown' });
+    expect(decodeReadAuthorityAttribution(new Error('no attribution')))
+      .toEqual({ source: 'unknown', reason: 'unknown', dependency: 'unknown' });
+  });
+
+  it('survives fields whose getters throw', () => {
+    const hostile = { source: 'registered-chain', reason: 'registered-authority-error' };
+    for (const key of ['dependency', 'detailCode']) {
+      Object.defineProperty(hostile, key, { get() { throw new Error('hostile getter'); } });
+    }
+
+    expect(decodeReadAuthorityAttribution(hostile)).toEqual({
+      source: 'registered-chain',
+      reason: 'registered-authority-error',
+      dependency: 'unknown',
+    });
   });
 });

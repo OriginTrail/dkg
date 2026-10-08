@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-
 /**
  * Context-graph lifecycle methods (create / register / invite / remove /
  * rename / allowed-agents) extracted from dkg-agent.ts as a mixin holder.
@@ -797,7 +796,6 @@ export class ContextGraphMethods extends DKGAgentBase {
 
     await this.store.insert(quads);
     this.invalidateListContextGraphsCache();
-    this.contextGraphMetaProjection.markDirtyFromQuads(quads);
     await gm.ensureNewContextGraph(opts.id);
 
     // Force the triple-store flush BEFORE the SQLite caches are written.
@@ -1898,7 +1896,6 @@ export class ContextGraphMethods extends DKGAgentBase {
 
     await this.store.insert(quadsToInsert);
     this.invalidateListContextGraphsCache();
-    this.contextGraphMetaProjection.markDirtyFromQuads(quadsToInsert);
 
     // Issue #865 — log a clear warning AFTER the allowlist quad has
     // landed on a CG with an explicit `accessPolicy="public"` triple.
@@ -2200,7 +2197,6 @@ export class ContextGraphMethods extends DKGAgentBase {
     }
     this.invalidateListContextGraphsCache();
 
-    this.contextGraphMetaProjection.markDirtyFromQuads(quadsToInsert);
 
     // Private admission changes the release-native RFC-64 roster even when
     // the graph was registered before this member joined. Advance the

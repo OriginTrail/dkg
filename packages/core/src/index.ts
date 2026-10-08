@@ -175,6 +175,13 @@ export {
   isPublicLikeAddress,
   isLocalOrInternalHostname,
 } from './node.js';
+export {
+  isIpLoopbackAddress,
+  isLocalhostAddress,
+  isLocalhostHostname,
+  isLoopbackAddress,
+  isUnspecifiedAddress,
+} from './network/address-policy.js';
 // Transport-level network isolation. `peerIdFromRelayAddress` is shared with
 // the CLI, which derives other-network relay ids from bundled network configs.
 export { peerIdFromRelayAddress } from './network-peer-dial-policy.js';

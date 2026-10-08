@@ -70,7 +70,9 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import { DKGAgentBase } from './dkg-agent-base.js';
+import { resolveChainFinalityConfirmationsV1 } from './chain-finality-confirmations-v1.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { yieldMainThread } from './main-thread-time-slice.js';
 import {
   isApprovedPrivateReplicaDelegationActive,
   resolveApprovedPrivateReplicaAuthority,
@@ -347,6 +349,8 @@ export interface PublishAuthorCatalogExactSetSuccessorParamsV1 {
   readonly deployment: CatalogSealDeploymentProfileV1;
   readonly issuedAt?: TimestampMsV1;
   readonly peers: readonly string[];
+  /** Stops the production of the successor before anything is staged. */
+  readonly signal?: AbortSignal;
 }
 
 export type Rfc64OpenCatalogSuccessorAssetInputV1 =
@@ -1030,23 +1034,6 @@ export function isRfc64UnregisteredOwnerUnresolvedErrorV1(error: unknown): boole
 
 export class Rfc64CatalogMethods extends DKGAgentBase {
   /** Stable recovery capabilities are captured once per agent-owned runtime. */
-  /**
-   * The node's SINGLE finality depth, taken from the adapter that actually
-   * resolves the anchors whenever it can report one.
-   *
-   * `dkg-agent-types.ts` documents `chainAdapter` as "If provided, chainConfig
-   * is ignored", so in the SDK-embedding shape `chainConfig.finalityConfirmations`
-   * is absent or stale while the adapter holds the operator's real value. An
-   * adapter that does not implement the accessor (mocks, out-of-tree adapters)
-   * has no opinion, and the configured value stands.
-   */
-  private resolveChainFinalityConfirmationsV1(this: DKGAgent): number | undefined {
-    const fromAdapter = typeof this.chain.getFinalityConfirmations === 'function'
-      ? this.chain.getFinalityConfirmations()
-      : undefined;
-    return fromAdapter ?? this.config.chainConfig?.finalityConfirmations;
-  }
-
   private rfc64CatalogReplayRecoveryRuntimeV1(
     this: DKGAgent,
   ): Rfc64CatalogReplayRecoveryRuntimeV1<Rfc64PublicCatalogHeadAnnouncementV1> {
@@ -1524,6 +1511,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     }));
   }
 
+  /** Reason the last authority refresh of one graph recorded, or null. */
+  rfc64CatalogAuthorityRefreshFailureReasonV1(this: DKGAgent, contextGraphId: string): string | null {
+    return rfc64CatalogAuthorityProgressV1.get(this)?.get(contextGraphId)?.reason ?? null;
+  }
+
   /** Re-prove catalog completion before the daemon's synchronous readiness commit. */
   async withVerifiedPrivateCatalogSubscriptionReadinessV1(
     this: DKGAgent, contextGraphId: string, commit: () => void,
@@ -1746,7 +1738,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   }
 
   /** Canonical coordinated boundary for one registered authority snapshot. */
-  private async readRfc64RegisteredAuthoritySnapshotV1(
+  async readRfc64RegisteredAuthoritySnapshotV1(
     this: DKGAgent,
     contextGraphId: string,
     signal?: AbortSignal,
@@ -4946,6 +4938,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       stageKaBundle: persistence.kaBundles.putKaBundle,
       readKaBundleByDigest: persistence.kaBundles.readKaBundleByDigest,
     });
+    // The history read above and the production below each walk the whole set.
+    await yieldMainThread();
     const produced = await producer.produceAndStageExactSet({
       previousHead: history.previousHead,
       previousDirectoryPath: history.previousDirectoryPath,
@@ -4958,6 +4952,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         signDigest: (objectDigest) => params.author.signMessage(objectDigest),
       },
       catalogIssuerAuthorization: params.catalogIssuerAuthorization,
+      signal: params.signal,
     });
     const head = produced.publication.head;
     const headKeys = produced.stagedControlObjects.objects.find(
@@ -5205,7 +5200,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // `chainConfig` is ignored, so reading it here would pin the
           // precommits to the default while the adapter's own authority
           // reads honoured the operator. One anchor, one source.
-          finalityConfirmations: this.resolveChainFinalityConfirmationsV1(),
+          finalityConfirmations: resolveChainFinalityConfirmationsV1(this.chain, this.config.chainConfig),
           getOnChainContextGraphId: (contextGraphId, signal) =>
             this.getContextGraphOnChainId(contextGraphId, { signal }),
           getEvmChainId: () => this.chain.getEvmChainId(),
@@ -5220,7 +5215,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // `chainConfig` is ignored, so reading it here would pin the
           // precommits to the default while the adapter's own authority
           // reads honoured the operator. One anchor, one source.
-          finalityConfirmations: this.resolveChainFinalityConfirmationsV1(),
+          finalityConfirmations: resolveChainFinalityConfirmationsV1(this.chain, this.config.chainConfig),
           getOnChainContextGraphId: (contextGraphId, signal) =>
             this.getContextGraphOnChainId(contextGraphId, { signal }),
           getEvmChainId: () => this.chain.getEvmChainId(),

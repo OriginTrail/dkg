@@ -93,4 +93,33 @@ describe('optional contract initialization preserves local refusal', () => {
       expect(context.onProgress).toBeUndefined();
     }
   });
+
+  it('keeps the admission priority of an initializing authority read out of the adapter-owned starts', async () => {
+    const { adapter, allow } = fixture('Staking', new Error('unused'));
+    allow();
+    vi.mocked(adapter.startChainIndexRuntime).mockRestore();
+    vi.mocked(adapter.startHubRotationListener).mockRestore();
+    const contexts: RpcRequestContext[] = [];
+    const continuations: Promise<void>[] = [];
+    const capture = () => {
+      contexts.push(activeRpcRequestContext());
+      continuations.push(Promise.resolve().then(() => { contexts.push(activeRpcRequestContext()); }));
+    };
+    vi.spyOn(adapter.chainIndexOwner, 'start').mockImplementation(capture);
+    vi.spyOn(adapter.hubRotationPoller, 'start').mockImplementation(capture);
+
+    await expect(withRpcRequestContext(
+      { requestClass: 'background', admissionPriority: 'authority' },
+      () => adapter.getIdentityId(),
+    )).resolves.toBe(7n);
+    await Promise.all(continuations);
+
+    // What the adapter starts for itself runs for the life of the process. The
+    // priority belonged to the one read that found the adapter uninitialized.
+    expect(contexts).toHaveLength(4);
+    for (const context of contexts) {
+      expect(context.admissionPriority).toBeUndefined();
+      expect(context.signal).toBeUndefined();
+    }
+  });
 });

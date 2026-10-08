@@ -2022,7 +2022,6 @@ export class PublishMethods extends DKGAgentBase {
               await deleteByPatternWithoutCount(this.store, { graph, subject });
             }
             await this.store.insert(quads);
-            this.contextGraphMetaProjection.markDirtyFromQuads(quads);
           },
           log: (level, message) =>
             level === 'warn' ? this.log.warn(ctx, message) : this.log.info(ctx, message),
@@ -2659,7 +2658,6 @@ export class PublishMethods extends DKGAgentBase {
     ];
 
     await this.store.insert(quads);
-    this.contextGraphMetaProjection.markDirtyFromQuads(quads);
     await gm.ensureContextGraph(contextGraphId);
     await this.store.flush?.();
     await this.persistLocalContextGraphOrigin(contextGraphId, 'implicit-swm-write');

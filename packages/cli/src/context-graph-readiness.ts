@@ -2,6 +2,7 @@ import type {
   CatchupPassDecisionReason,
   ConfiguredContextGraphMetadataReconciliationResult,
   DKGAgent,
+  InspectedContextGraphReadinessV1,
   SwmSnapshotCoverage,
 } from '@origintrail-official/dkg-agent';
 import { DKGEvent, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
@@ -9,22 +10,25 @@ import type {
   ContextGraphReadinessProvenance,
   DashboardDB,
 } from '@origintrail-official/dkg-node-ui';
-import {
-  catchupPlaneCompletedWithoutFailure,
-  catchupPlaneProvenByAuthorityHostedEmpty,
-  catchupPlaneProvenByData,
-  catchupPlaneProvenBySelectedScope,
-  catchupPlaneProvenByUnanimousEmpty,
-  catchupPlaneReady,
-  type CatchupPlaneCompletionEvidence,
-} from './catchup-proof.js';
+import type { CatchupPlaneCompletionEvidence } from './catchup-proof.js';
 import type { CatchupJobResult } from './catchup-runner.js';
+import {
+  contextGraphPlaneReadinessVerdict,
+  deriveCatchupReadiness,
+  type DerivedCatchupReadiness,
+} from './context-graph-catchup-readiness-classification.js';
 import { registerContextGraphReadinessEvents } from './context-graph-readiness-events.js';
+import {
+  CONTEXT_GRAPH_READINESS_VERSION,
+  NO_CONTEXT_GRAPH_PLANE_EVIDENCE,
+  type ContextGraphIndependentPlaneEvidence,
+  type ContextGraphReadinessPatch,
+} from './context-graph-readiness-policy.js';
 export { parseProjectSyncedReadinessPayload, type ProjectSyncedReadinessPayload } from './context-graph-project-synced-payload.js';
 
 export { catchupPlaneCompletedWithoutFailure } from './catchup-proof.js';
 
-export const CONTEXT_GRAPH_READINESS_VERSION = 1;
+export { CONTEXT_GRAPH_READINESS_VERSION, type ContextGraphReadinessPatch } from './context-graph-readiness-policy.js';
 
 /**
  * Identifiers named in the terminal shortfall clause. The producer already caps
@@ -219,11 +223,6 @@ export interface ContextGraphSubscriptionStatePatch {
   pendingMeta?: boolean;
 }
 
-export interface ContextGraphReadinessPatch {
-  durableVerified: boolean;
-  sharedMemoryVerified: boolean;
-}
-
 export interface MissingMetadataReadinessPatches {
   statePatch: ContextGraphSubscriptionStatePatch;
   readinessPatch: ContextGraphReadinessPatch;
@@ -242,33 +241,6 @@ export function missingMetadataReadinessPatches(): MissingMetadataReadinessPatch
       durableVerified: false,
       sharedMemoryVerified: false,
     },
-  };
-}
-
-interface ContextGraphPlaneReadinessVerdict {
-  /** Compatibility/write-readiness: either persisted usable plane opens the graph. */
-  readonly writeReady: boolean;
-  /** Catch-up completion: applicable VM plus SWM when the caller requested it. */
-  readonly requestedPlanesVerified: boolean;
-  readonly missingRequestedDurable: boolean;
-  readonly missingRequestedSharedMemory: boolean;
-}
-
-function contextGraphPlaneReadinessVerdict(input: {
-  durableVerified: boolean;
-  sharedMemoryVerified: boolean;
-  includeSharedMemory: boolean;
-  registration?: 'unregistered';
-}): ContextGraphPlaneReadinessVerdict {
-  const missingRequestedDurable = input.registration !== 'unregistered' && !input.durableVerified;
-  const missingRequestedSharedMemory =
-    input.includeSharedMemory && !input.sharedMemoryVerified;
-  return {
-    writeReady: input.durableVerified || input.sharedMemoryVerified,
-    requestedPlanesVerified:
-      !missingRequestedDurable && !missingRequestedSharedMemory,
-    missingRequestedDurable,
-    missingRequestedSharedMemory,
   };
 }
 
@@ -397,89 +369,6 @@ export function catchupResultHasCleanResponse(result: CatchupJobResult): boolean
     (!result.denied && peerReturnedMetadata);
 }
 
-interface CatchupPlaneReadinessThisRun {
-  /** Whether this plane counts as ready for THIS run's reported job status. */
-  ready: boolean;
-  /**
-   * Whether the evidence is strong enough to PERSIST as sticky readiness
-   * provenance.
-   *
-   * Readiness provenance is carried forward by an OR against
-   * `readinessBeforeCatchup`, so anything recorded here is permanent for the
-   * subscription. Verified content earns it outright, as does the curator's own
-   * word that it hosts an empty graph.
-   *
-   * A unanimous-empty round earns it only when the round was FULLY ACCOUNTED:
-   * every peer the walk attempted actually answered (`failedPeers === 0`).
-   * Emptiness is a verdict derived from ABSENCE of evidence, so it is only as
-   * good as the denominator it was taken over — with peers unaccounted for and
-   * no authoritative curator to anchor it, a single unrelated empty response
-   * produces the same verdict as a genuinely empty graph.
-   *
-   * Splitting it this way keeps both properties that pulled against each other:
-   *
-   * - LIVENESS. The per-run verdict is unchanged, so a graph on a lossy network
-   *   still reports `done` instead of retrying forever. Failing the verdict
-   *   itself closed on unaccounted peers was rejected for exactly that reason.
-   * - NO FROZEN GUESS. Nothing derived from a partial round is written down, so
-   *   a wrong empty verdict cannot outlive the run that produced it.
-   *
-   * This bit is what `statePatch.synced` is built from, and `synced` gates
-   * write preflight (`contextGraphRowIsWritable`), so anything admitted here
-   * grants durable readiness to consumers that never see the job result.
-   */
-  persistable: boolean;
-}
-
-function catchupPlaneReadinessThisRun(input: {
-  result: CatchupJobResult;
-  plane: 'durable' | 'sharedMemory';
-  isPrivate: boolean;
-}): CatchupPlaneReadinessThisRun {
-  const diagnostics = input.result.diagnostics?.[input.plane];
-  const completion = input.result.cleanPlaneCompletions?.[input.plane];
-  const options = { isPrivate: input.isPrivate };
-  // Every attempted peer answered, so the empty verdict was taken over the
-  // whole peer set rather than over whoever happened to reply.
-  const fullyAccounted = (diagnostics?.failedPeers ?? 0) === 0;
-  if (completion) {
-    const provenPositively = catchupPlaneProvenByData(completion)
-      || catchupPlaneProvenBySelectedScope(completion)
-      || catchupPlaneProvenByAuthorityHostedEmpty(completion, diagnostics, options);
-    const unanimousEmpty = catchupPlaneProvenByUnanimousEmpty(completion, diagnostics, options);
-    return {
-      ready: provenPositively || unanimousEmpty,
-      persistable: provenPositively || (unanimousEmpty && fullyAccounted),
-    };
-  }
-
-  // Backward compatibility for callers that construct a legacy result (for
-  // example, an older in-process runner during a rolling upgrade). New worker
-  // results always carry cleanPlaneCompletions, so aggregate failures are not
-  // used as readiness evidence on the production path. The same fail-closed
-  // rule applies: aggregate counters can show that SOMEBODY answered empty, but
-  // only a content-free, failure-free round proves the plane really is empty.
-  const dataProgress = input.plane === 'durable'
-    ? input.result.dataSynced > 0 ||
-      (input.result.diagnostics?.durable.verifiedPrivateOnlyResponses ?? 0) > 0
-    : input.result.sharedMemorySynced > 0;
-  if (catchupPlaneCompletedWithoutFailure(diagnostics) && dataProgress) {
-    return { ready: true, persistable: true };
-  }
-  // Pass NO completion evidence rather than an all-zero stand-in: the empty
-  // proof consults the raw aggregate counters only when completion evidence is
-  // genuinely absent, and a synthetic `emptyPeers: 0` would read as "the
-  // per-peer view saw no clean empty response" and suppress the legacy path.
-  const ready = catchupPlaneReady(undefined, diagnostics, options);
-  return {
-    ready,
-    // No completion evidence means neither positive proof mode can fire, so
-    // anything true here came from the aggregate empty counter and is subject
-    // to the same fully-accounted requirement.
-    persistable: ready && fullyAccounted,
-  };
-}
-
 export interface ContextGraphCatchupReadinessClassification {
   durablePlane: 'required' | 'not-applicable';
   jobStatus: 'done' | 'failed' | 'denied' | 'partial' | 'unreachable';
@@ -492,11 +381,6 @@ export interface ContextGraphCatchupReadinessClassification {
     verifiedPrivateOnlyResponses: number;
   };
 }
-
-/** Live completion authority takes precedence over peer progress or old proof. */
-export type ContextGraphCatchupCompletionAuthority =
-  | { outcome: 'allowed'; registration?: 'unregistered' }
-  | { outcome: 'denied' | 'unavailable' };
 
 /**
  * A subscription known only by its on-chain name hash cannot sync anything
@@ -515,15 +399,12 @@ export function classifyNameHashOnlyCatchup(
   return { jobStatus: 'unreachable', error: identity.message };
 }
 
-interface ContextGraphCatchupReadinessInput {
+interface ContextGraphCatchupReadinessBaseInput {
   result: CatchupJobResult;
   includeSharedMemory: boolean;
-  /** Undefined means unchecked/unavailable, not confirmed absence. */
-  hasConfirmedMeta: boolean | undefined;
-  isPrivate: boolean;
+  inspection: InspectedContextGraphReadinessV1;
   readinessBeforeCatchup: ContextGraphReadinessProvenance;
-  /** Current bootstrap authority, never persisted or inferred from metadata. */
-  completionAuthority: ContextGraphCatchupCompletionAuthority;
+  independentPlaneEvidence?: ContextGraphIndependentPlaneEvidence;
 }
 
 /**
@@ -532,47 +413,41 @@ interface ContextGraphCatchupReadinessInput {
  * the returned patches; all readiness decisions remain in this pure function.
  */
 export function classifyContextGraphCatchupReadiness(
-  input: ContextGraphCatchupReadinessInput,
+  input: ContextGraphCatchupReadinessBaseInput,
 ): ContextGraphCatchupReadinessClassification {
-  return {
-    ...classifyCatchupReadiness(input),
-    durablePlane: input.completionAuthority.outcome === 'allowed'
-      && input.completionAuthority.registration === 'unregistered'
-      ? 'not-applicable' : 'required',
-  };
-}
-
-function classifyCatchupReadiness(
-  input: ContextGraphCatchupReadinessInput,
-): Omit<ContextGraphCatchupReadinessClassification, 'durablePlane'> {
-  if (input.completionAuthority.outcome !== 'allowed') {
+  const authority = input.inspection.authority;
+  const durablePlane = authority.outcome === 'allowed' && authority.registration === 'unregistered'
+    ? 'not-applicable' : 'required';
+  if (input.inspection.kind === 'invalidated') {
+    const denied = authority.outcome === 'denied';
     return {
-      jobStatus: input.completionAuthority.outcome === 'denied' ? 'denied' : 'unreachable',
-      error: input.completionAuthority.outcome === 'denied'
-        ? 'Context-graph authority denied access at catch-up completion.'
-        : 'Context-graph authority is unavailable at catch-up completion. Retry after authority recovers.',
-      statePatch: {
-        synced: false, sharedMemorySynced: false,
-        ...(input.hasConfirmedMeta === undefined ? {} : {
-          metaSynced: input.hasConfirmedMeta, pendingMeta: !input.hasConfirmedMeta,
-        }),
-      },
+      durablePlane, jobStatus: denied ? 'denied' : 'unreachable',
+      error: denied ? 'Context-graph authority denied access at catch-up completion.'
+        : 'Context-graph readiness inspection was invalidated before completion. Retry after metadata stabilizes.',
+      statePatch: { synced: false, sharedMemorySynced: false },
       readinessPatch: { durableVerified: false, sharedMemoryVerified: false },
     };
   }
-  const registration = input.completionAuthority.registration;
-  const { result } = input;
-  const durableDataProgress = result.dataSynced > 0;
-  const sharedMemoryProgress = result.sharedMemorySynced > 0;
-  const servedUsableData = durableDataProgress || sharedMemoryProgress;
-  const totalConnectedPeers = result.totalPeers ?? result.connectedPeers;
-  const selectedConnectedPeers = result.selectedPeers ?? result.connectedPeers;
-  const hasRequestedCleanPeerResponse = catchupHasRequestedCleanPeerResponse(
-    result,
-    input.includeSharedMemory,
-  );
+  return {
+    ...classifyCatchupReadiness(input, input.inspection), durablePlane,
+  };
+}
 
-  if (result.denied && !servedUsableData && !hasRequestedCleanPeerResponse) {
+type CatchupTerminalStatus = Pick<
+  ContextGraphCatchupReadinessClassification,
+  'jobStatus' | 'error'
+>;
+
+/** Select one terminal job outcome after readiness derivation has completed. */
+function selectCatchupTerminalStatus(input: {
+  result: CatchupJobResult;
+  isPrivate: boolean;
+  registration?: 'unregistered';
+  peerDenied: boolean;
+  readiness?: DerivedCatchupReadiness;
+}): CatchupTerminalStatus {
+  const { result, readiness } = input;
+  if (input.peerDenied) {
     return {
       jobStatus: 'denied',
       error: result.deniedPeers > 1
@@ -581,87 +456,13 @@ function classifyCatchupReadiness(
     };
   }
 
-  if (catchupResultHasCleanResponse(result)) {
-    if (input.hasConfirmedMeta === undefined) {
-      return {
-        jobStatus: 'unreachable',
-        error: 'Authoritative context-graph metadata could not be inspected. Retry after local metadata recovers.',
-        statePatch: { synced: false, sharedMemorySynced: false },
-        readinessPatch: { durableVerified: false, sharedMemoryVerified: false },
-      };
-    }
-    if (!input.hasConfirmedMeta) {
-      const missingMetadata = missingMetadataReadinessPatches();
-      return {
-        jobStatus: 'unreachable',
-        error: 'No peer delivered authoritative context-graph metadata — the curator may be offline, or responding peers do not host this project.',
-        ...missingMetadata,
-      };
-    }
-
-    const durableThisRun = catchupPlaneReadinessThisRun({
-      result,
-      plane: 'durable',
-      isPrivate: input.isPrivate,
-    });
-    const sharedMemoryThisRun = input.includeSharedMemory
-      ? catchupPlaneReadinessThisRun({
-        result,
-        plane: 'sharedMemory',
-        isPrivate: input.isPrivate,
-      })
-      : { ready: false, persistable: false };
-    const durableReadyThisRun = durableThisRun.ready;
-    const sharedMemoryReadyThisRun = sharedMemoryThisRun.ready;
-    const currentReadinessProvenance =
-      input.readinessBeforeCatchup.version >= CONTEXT_GRAPH_READINESS_VERSION;
-    const durableVerifiedBefore =
-      currentReadinessProvenance && input.readinessBeforeCatchup.durableVerified;
-    const sharedMemoryVerifiedBefore =
-      currentReadinessProvenance && input.readinessBeforeCatchup.sharedMemoryVerified;
-    const durableVerified = durableVerifiedBefore || durableReadyThisRun;
-    const sharedMemoryVerified = sharedMemoryVerifiedBefore || sharedMemoryReadyThisRun;
-    // What this run is allowed to FREEZE, as opposed to what it reports. These
-    // diverge only for a unanimous-empty verdict, which stays re-derived per run
-    // so that a wrong empty verdict cannot become permanent.
-    const durableVerifiedPersisted = durableVerifiedBefore || durableThisRun.persistable;
-    const sharedMemoryVerifiedPersisted =
-      sharedMemoryVerifiedBefore || sharedMemoryThisRun.persistable;
-    // `subscription.synced` is a SECOND persisted readiness bit, living outside
-    // the provenance store and consumed by callers that never see this job's
-    // result — `contextGraphRowIsWritable` treats `subscribed && synced` as
-    // writable. It must therefore carry the same verdict as `readinessPatch`,
-    // not the transient one. The pre-catch-up path already assumes they agree:
-    // it derives `synced` from the persisted provenance and patches the row
-    // back into line, so letting them diverge here would be corrected away on
-    // the next pass anyway — after a window in which the graph looked writable.
-    const persistedPlaneReadiness = contextGraphPlaneReadinessVerdict({
-      durableVerified: durableVerifiedPersisted,
-      sharedMemoryVerified: sharedMemoryVerifiedPersisted,
-      includeSharedMemory: input.includeSharedMemory,
-      registration,
-    });
-    // Both paths use current authoritative applicability. Exempting an
-    // unregistered graph never manufactures durableVerified provenance.
-    const planeReadiness = contextGraphPlaneReadinessVerdict({
-      durableVerified,
-      sharedMemoryVerified,
-      includeSharedMemory: input.includeSharedMemory,
-      registration,
-    });
-    const {
-      missingRequestedDurable,
-      missingRequestedSharedMemory,
-    } = planeReadiness;
-    const madeIncompleteProgress =
-      (durableDataProgress && !durableReadyThisRun) ||
-      (sharedMemoryProgress && !sharedMemoryReadyThisRun);
-
-    let jobStatus: ContextGraphCatchupReadinessClassification['jobStatus'] = 'done';
+  if (readiness) {
+    const { missingRequestedDurable, missingRequestedSharedMemory } = readiness.planeReadiness;
+    let jobStatus: CatchupTerminalStatus['jobStatus'] = 'done';
     let error: string | undefined;
     if (missingRequestedDurable || missingRequestedSharedMemory) {
       jobStatus = 'unreachable';
-      if (madeIncompleteProgress) {
+      if (readiness.madeIncompleteProgress) {
         jobStatus = 'partial';
         // This terminal describes only the bounded foreground job. Selected
         // RFC-64 continuation has its own graph-level lifecycle and can keep
@@ -672,46 +473,19 @@ function classifyCatchupReadiness(
             result.diagnostics?.sharedMemory?.continuationPasses,
             result.diagnostics?.sharedMemory?.continuationStopReason,
           );
-      } else if (input.isPrivate && missingRequestedDurable && !sharedMemoryVerified) {
+      } else if (input.isPrivate && missingRequestedDurable && !readiness.sharedMemoryVerified) {
         error = 'No authorized context-graph peer delivered verified durable or shared-memory data — empty or metadata-only responses cannot prove a private graph is fully synchronized, and the curator may be offline.';
       } else if (input.isPrivate && missingRequestedDurable) {
         error = 'Shared-memory context-graph data synchronized, but durable VM catch-up did not complete. Retry to finish finalized VM synchronization.';
       } else if (input.isPrivate) {
-        error = registration === 'unregistered'
+        error = input.registration === 'unregistered'
           ? 'Durable VM is not applicable to this unregistered context graph, but shared-memory catch-up did not complete. Retry to finish shared-memory synchronization.'
           : 'Durable context-graph data synchronized, but shared-memory catch-up did not complete. Retry to finish shared-memory synchronization.';
       } else {
         error = 'Context-graph catch-up did not complete cleanly for every requested data plane. Retry once the network is healthier.';
       }
     }
-
-    return {
-      jobStatus,
-      error,
-      statePatch: {
-        synced: persistedPlaneReadiness.writeReady,
-        sharedMemorySynced: sharedMemoryVerifiedPersisted,
-        metaSynced: true,
-        pendingMeta: false,
-      },
-      readinessPatch: {
-        durableVerified: durableVerifiedPersisted,
-        sharedMemoryVerified: sharedMemoryVerifiedPersisted,
-      },
-      eventPayload: durableReadyThisRun || sharedMemoryReadyThisRun
-        ? {
-            dataSynced: durableReadyThisRun ? result.dataSynced : 0,
-            sharedMemorySynced: sharedMemoryReadyThisRun
-              ? result.sharedMemorySynced
-              : 0,
-            verifiedPrivateOnlyResponses: durableReadyThisRun
-              ? result.cleanPlaneCompletions?.durable.verifiedPrivateOnlyPeers
-                ?? result.diagnostics?.durable.verifiedPrivateOnlyResponses
-                ?? 0
-              : 0,
-          }
-        : undefined,
-    };
+    return { jobStatus, error };
   }
 
   if (result.peersTried > 0 && (result.peersResponded ?? result.peersSucceeded) === 0) {
@@ -726,10 +500,12 @@ function classifyCatchupReadiness(
       error: 'Sync did not complete — all reachable peers failed (timeouts or transport errors). Retry once the network is healthier.',
     };
   }
+  const totalConnectedPeers = result.totalPeers ?? result.connectedPeers;
+  const selectedConnectedPeers = result.selectedPeers ?? result.connectedPeers;
   if (
-    totalConnectedPeers > 0 &&
-    selectedConnectedPeers >= totalConnectedPeers &&
-    result.syncCapablePeers === 0
+    totalConnectedPeers > 0
+    && selectedConnectedPeers >= totalConnectedPeers
+    && result.syncCapablePeers === 0
   ) {
     return {
       jobStatus: 'unreachable',
@@ -742,8 +518,93 @@ function classifyCatchupReadiness(
       error: "No peers connected — couldn't reach the curator. They may be offline, or your node hasn't bootstrapped to the network yet.",
     };
   }
-
   return { jobStatus: 'done' };
+}
+
+function classifyCatchupReadiness(
+  input: ContextGraphCatchupReadinessBaseInput,
+  inspection: Extract<InspectedContextGraphReadinessV1, { kind: 'current' }>,
+): Omit<ContextGraphCatchupReadinessClassification, 'durablePlane'> {
+  const { metadata, authority } = inspection;
+  const isPrivate = metadata.kind === 'confirmed' && metadata.accessPolicy === 'private';
+  if (authority.outcome !== 'allowed') {
+    return {
+      jobStatus: authority.outcome === 'denied' ? 'denied' : 'unreachable',
+      error: authority.outcome === 'denied'
+        ? 'Context-graph authority denied access at catch-up completion.'
+        : 'Context-graph authority is unavailable at catch-up completion. Retry after authority recovers.',
+      statePatch: {
+        synced: false, sharedMemorySynced: false,
+        ...(metadata.kind === 'confirmed' ? { metaSynced: true, pendingMeta: false }
+          : metadata.kind === 'absent' ? { metaSynced: false, pendingMeta: true } : {}),
+      },
+      readinessPatch: { durableVerified: false, sharedMemoryVerified: false },
+    };
+  }
+  const registration = authority.registration;
+  const { result } = input;
+  const durableDataProgress = result.dataSynced > 0;
+  const sharedMemoryProgress = result.sharedMemorySynced > 0;
+  const servedUsableData = durableDataProgress || sharedMemoryProgress;
+  const hasRequestedCleanPeerResponse = catchupHasRequestedCleanPeerResponse(
+    result,
+    input.includeSharedMemory,
+  );
+
+  const peerDenied = result.denied && !servedUsableData && !hasRequestedCleanPeerResponse;
+  const noEvidence = NO_CONTEXT_GRAPH_PLANE_EVIDENCE;
+  const independentDurable = registration === 'unregistered'
+    ? noEvidence : input.independentPlaneEvidence?.durable ?? noEvidence;
+  const independentSharedMemory = input.independentPlaneEvidence?.sharedMemory ?? noEvidence;
+  const hasIndependentEvidence = independentDurable.ready || independentDurable.persistable
+    || independentSharedMemory.ready || independentSharedMemory.persistable;
+  const cleanPeerEvidence = !peerDenied && catchupResultHasCleanResponse(result);
+  let readiness: DerivedCatchupReadiness | undefined;
+  if (cleanPeerEvidence || hasIndependentEvidence) {
+    if (metadata.kind === 'unchecked' || metadata.kind === 'unavailable') {
+      return {
+        jobStatus: 'unreachable',
+        error: 'Authoritative context-graph metadata could not be inspected. Retry after local metadata recovers.',
+        statePatch: { synced: false, sharedMemorySynced: false },
+        readinessPatch: { durableVerified: false, sharedMemoryVerified: false },
+      };
+    }
+    if (metadata.kind === 'absent') {
+      const missingMetadata = missingMetadataReadinessPatches();
+      return {
+        jobStatus: 'unreachable',
+        error: 'No peer delivered authoritative context-graph metadata — the curator may be offline, or responding peers do not host this project.',
+        ...missingMetadata,
+      };
+    }
+
+    readiness = deriveCatchupReadiness({
+      result,
+      includeSharedMemory: input.includeSharedMemory,
+      isPrivate,
+      registration,
+      readinessBeforeCatchup: input.readinessBeforeCatchup,
+      cleanPeerEvidence,
+      independentDurable,
+      independentSharedMemory,
+    });
+  }
+
+  const terminal = selectCatchupTerminalStatus({
+    result,
+    isPrivate,
+    registration,
+    peerDenied,
+    readiness,
+  });
+  return readiness
+    ? {
+        ...terminal,
+        statePatch: readiness.statePatch,
+        readinessPatch: readiness.readinessPatch,
+        eventPayload: readiness.eventPayload,
+      }
+    : terminal;
 }
 
 export function readContextGraphReadiness(
@@ -779,7 +640,7 @@ const contextGraphReadinessMutationTails = new WeakMap<
   Map<string, Promise<void>>
 >();
 
-async function withContextGraphReadinessMutationLock<T>(
+export async function withContextGraphReadinessMutationLock<T>(
   agent: DKGAgent,
   contextGraphId: string,
   task: () => Promise<T>,

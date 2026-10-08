@@ -49,6 +49,7 @@ import {
   localAgentChannelFetchInit,
 } from '../local-agent-channel-fetch.js';
 import { persistDurableChatTurn } from '../chat-turn-persistence.js';
+import { durableChatTurnResponseBody } from './durable-chat-turn-response.js';
 
 type PrimeAgentPersistRouteResult = {
   statusCode: number;
@@ -219,16 +220,7 @@ async function persistPrimeAgentTurn(
         toolCalls: payload.toolCalls,
       },
     });
-    return {
-      statusCode: 200,
-      body: {
-        ok: true,
-        ...(outcome.kind === 'duplicate' ? { duplicate: true } : {}),
-        ...(outcome.kind === 'transitioned' ? { transitioned: true } : {}),
-        turnId,
-        sessionId,
-      },
-    };
+    return { statusCode: 200, body: { ...durableChatTurnResponseBody(outcome), sessionId } };
   } catch (err: any) {
     return { statusCode: 500, body: { error: err.message } };
   }

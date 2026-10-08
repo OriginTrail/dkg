@@ -597,7 +597,7 @@ log "Launching chain event listener"
 # not from cwd. We hardlink/copy into the package dir, then run from there.
 EVENT_SCRIPT_RUN="$REPO_ROOT/packages/evm-module/.soak-event-listener-r${ROUND}.js"
 cp "$OUT_DIR/event-listener.js" "$EVENT_SCRIPT_RUN"
-( cd "$REPO_ROOT/packages/evm-module" && node "$EVENT_SCRIPT_RUN" ) \
+( cd "$REPO_ROOT/packages/evm-module" && exec node "$EVENT_SCRIPT_RUN" ) \
   > "$OUT_DIR/event-listener.log" 2>&1 &
 echo $! > "$EVENT_PIDFILE"
 

@@ -851,56 +851,20 @@ import {
 import { reconcileRfc64CatalogAuthorityPlanV1 } from
   './rfc64/catalog-rollout-authority-reconciliation-v1.js';
 import {
+  describeRfc64LegacySwmFenceEventV1,
   initializeRfc64LegacySwmBoundaryV1,
-  prepareRfc64LateLegacySwmBoundaryV1,
+  rfc64LateLegacySwmCompanionResolverV1,
   retireRfc64LegacySwmAfterFinalizedVmV1,
 } from
   './rfc64/legacy-swm-boundary-v1.js';
+import {
+  projectPersistedJoinApprovals,
+  type ContextGraphMembershipSnapshot,
+} from './join-approval-restart-projection.js';
+import { verifiedCuratorDialAddress } from './curator-dial-address.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
-
-type ContextGraphMembershipSnapshot = ReadonlyArray<
-  ContextGraphMembershipRecord & { firstSeenAt?: number; updatedAt: number }
->;
-
-interface PersistedJoinApprovalProjection {
-  readonly principalId: string;
-  readonly updatedAt: number;
-  readonly curatorPeerId?: string;
-}
-
-function projectPersistedJoinApprovals(
-  persistedMembershipRows: ContextGraphMembershipSnapshot,
-  persistedContextGraphIds: ReadonlySet<string>,
-  localAgentAddresses: ReadonlySet<string>,
-): ReadonlyMap<string, PersistedJoinApprovalProjection> {
-  const newestApprovalByContextGraph = new Map<string, PersistedJoinApprovalProjection>();
-  for (const membership of persistedMembershipRows) {
-    const principalId = membership.principalId.toLowerCase();
-    if (
-      membership.principalType !== 'agent' ||
-      membership.status !== 'active' ||
-      membership.source !== 'join-approved' ||
-      !persistedContextGraphIds.has(membership.contextGraphId) ||
-      !localAgentAddresses.has(principalId)
-    ) {
-      continue;
-    }
-    const existing = newestApprovalByContextGraph.get(membership.contextGraphId);
-    if (!existing || membership.updatedAt > existing.updatedAt) {
-      newestApprovalByContextGraph.set(membership.contextGraphId, {
-        principalId,
-        updatedAt: membership.updatedAt,
-        curatorPeerId: typeof membership.metadata?.['curatorPeerId'] === 'string' &&
-          membership.metadata['curatorPeerId'].trim()
-          ? membership.metadata['curatorPeerId'].trim()
-          : undefined,
-      });
-    }
-  }
-  return newestApprovalByContextGraph;
-}
 
 function resolveAgentSyncGlobalBackpressure(config: ResolvedDKGAgentConfig) {
   // `trackSyncContextGraph()` mutates this list when an Edge explicitly
@@ -2302,6 +2266,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           this,
           this.rfc64PersistenceV1.rootPath,
           this.store,
+          { onFenceEvent: (event) => this.log.warn(ctx, describeRfc64LegacySwmFenceEventV1(event)) },
         );
         await reconcileRfc64CatalogAuthorityPlanV1(
           this.rfc64PersistenceV1,
@@ -2945,9 +2910,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           recordStorageAckDecline: (code) => this.recordStorageAckDecline(code),
           gossipWireIdFor: (id) => this.gossipWireIdFor(id),
           getSwmSubscriptionSource: (...ids) => this.getSwmSubscriptionSource(...ids),
-          prepareDurableRootAtomicCompanion: (input) => prepareRfc64LateLegacySwmBoundaryV1(
-            this, input.contextGraphId, input.kaUal, input.shareOperationId, input.assertionVersion,
-          ),
+          prepareDurableRootAtomicCompanion: rfc64LateLegacySwmCompanionResolverV1(this),
           chain: this.chain,
           config: this.config,
           log: this.log,
@@ -3472,7 +3435,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               role: 'participant',
               status: 'active',
               source: 'join-approved',
-              metadata: { curatorPeerId: peerId.toString() },
+              metadata: {
+                curatorPeerId: peerId.toString(),
+                // The approved sender's own listener address is a durable
+                // transport hint. An inbound remoteAddr can be an ephemeral
+                // source port, so it is never persisted for restart dialing.
+                ...(() => {
+                  const address = verifiedCuratorDialAddress(
+                    payload.curatorDialAddress,
+                    peerId.toString(),
+                  );
+                  return address ? { curatorDialAddress: address } : {};
+                })(),
+              },
             };
             // Commit the restart contract before changing live subscription
             // state. The two stores do not expose a shared transaction, so the
@@ -6475,7 +6450,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           });
           if (outcome === 'applied') {
             this.invalidateListContextGraphsCache();
-            this.contextGraphMetaProjection.markDirtyFromQuads(authentication.asset.metadataQuads);
             try {
               let retiredTwin: FinalizedSwmTwinRetirement | undefined;
               const retirement = await reconcileFinalizedSwmTwin({
@@ -8907,6 +8881,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async resumePendingJoinApprovalMetadata(this: DKGAgent,
     contextGraphId: string,
     curatorPeerId: string,
+    curatorDialAddress?: string,
   ): Promise<JoinApprovalMetadataRecoveryOutcome> {
     const ctx = createOperationContext('sync');
     const acceptance = await this.resolveApprovedMemberAcceptance(contextGraphId);
@@ -8914,6 +8889,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     const refreshed = await this.refreshMetaFromCurator(contextGraphId, {
       trustedCuratorPeerId: curatorPeerId,
+      curatorDialAddressHint: curatorDialAddress,
       force: true,
       approvedMember: acceptance,
     }).catch((error) => {
@@ -8979,12 +8955,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async recoverPendingJoinApprovalMetadata(this: DKGAgent,
     contextGraphId: string,
     curatorPeerId: string,
+    curatorDialAddress?: string,
   ): Promise<void> {
     const stopSignal = this.node.stopSignal;
     for (let attempt = 0; ; attempt += 1) {
       let outcome: JoinApprovalMetadataRecoveryOutcome;
       try {
-        outcome = await this.resumePendingJoinApprovalMetadata(contextGraphId, curatorPeerId);
+        outcome = await this.resumePendingJoinApprovalMetadata(
+          contextGraphId,
+          curatorPeerId,
+          curatorDialAddress,
+        );
       } catch (error) {
         // A store or network fault that escapes an attempt is as transient as
         // a `retry`. Ending the loop on it would leave the row closed until
@@ -9004,7 +8985,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (
         !this.localApprovedAgentByCG.has(contextGraphId)
         || current?.subscribed !== true
-        || current.pendingMeta !== true
+        // A concurrent data catch-up can set `synced` while authoritative
+        // join metadata is still pending or unknown. Only its explicit
+        // confirmation ends this join-specific retry.
+        || (current.synced === true && current.metaSynced === true && current.pendingMeta !== true)
       ) return;
     }
   }
@@ -10819,16 +10803,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // snapshot already read by the provenance phase. Load every persisted
       // row (not just rows under the activation cap) so a dormant subscription
       // still has the right signer when an operator activates it explicitly.
-      if (persistedMembershipRows !== null) {
-        const persistedContextGraphIds = new Set(rows.map((row) => row.id));
-        const localAgentAddresses = new Set(
-          [...this.localAgents.keys()].map((address) => address.toLowerCase()),
-        );
-        const newestApprovalByContextGraph = projectPersistedJoinApprovals(
+      const newestApprovalByContextGraph = persistedMembershipRows === null
+        ? null
+        : projectPersistedJoinApprovals(
           persistedMembershipRows,
-          persistedContextGraphIds,
-          localAgentAddresses,
+          new Set(rows.map((row) => row.id)),
+          new Set([...this.localAgents.keys()].map((address) => address.toLowerCase())),
         );
+      if (newestApprovalByContextGraph) {
         for (const [contextGraphId, approval] of newestApprovalByContextGraph) {
           this.localApprovedAgentByCG.set(contextGraphId, approval.principalId);
           if (approval.curatorPeerId) {
@@ -11057,7 +11039,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             `Restored persisted context-graph subscription "${row.id}" in restricted pending-metadata mode; VM, payload recovery, and SWM remain closed`,
           );
           if (curatorPeerId) {
-            void this.recoverPendingJoinApprovalMetadata(row.id, curatorPeerId).catch((error) => {
+            void this.recoverPendingJoinApprovalMetadata(
+              row.id,
+              curatorPeerId,
+              newestApprovalByContextGraph?.get(row.id)?.curatorDialAddress,
+            ).catch((error) => {
               this.log.warn(
                 ctx,
                 `Pending join-approval recovery for "${row.id}" stopped safely: ${error instanceof Error ? error.message : String(error)}`,

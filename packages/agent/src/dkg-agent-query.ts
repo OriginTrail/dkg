@@ -867,6 +867,8 @@ export class QueryMethods extends DKGAgentBase {
       callerAgentAddress?: string;
       allowSubscriptionFallback?: boolean;
       signal?: AbortSignal;
+      /** Durable readiness fences require a live roster, not a bounded read. */
+      freshness?: 'live' | 'bounded';
       /**
        * Freshly loaded durable row for this exact bootstrap candidate. Its
        * canonical numeric id may skip name discovery, but never the fresh
@@ -1072,6 +1074,7 @@ export class QueryMethods extends DKGAgentBase {
       callerAgentAddress?: string;
       allowSubscriptionFallback?: boolean;
       signal?: AbortSignal;
+      freshness?: 'live' | 'bounded';
       durableSubscriptionBinding?: Readonly<DurableContextGraphSubscriptionBinding>;
     },
     plan: ContextGraphReadAuthorityPlan,
@@ -1106,15 +1109,10 @@ export class QueryMethods extends DKGAgentBase {
               && this.isRfc64JoinDerivedAcceptedAuthorityV1?.(contextGraphId) !== true,
             allowApprovedPrivateReplicaFinalizedAbsence: true,
             authorityReadMode,
-            // READ authorization, and therefore correctable by the next read.
-            // A roster this node has not caught up on denies a member who was
-            // just added — they retry and are let in — and admits one who was
-            // just removed for at most the index's freshness bound. Neither
-            // outcome hands out anything that outlives the bound, which is what
-            // separates this from key issuance and from the roster mutation
-            // itself. Inert unless the operator enables
-            // `chain.boundedAuthorityReads`.
-            freshness: 'bounded',
+            // Ordinary reads are correctable by their next read and may use a
+            // bounded roster. A durable readiness commit is not self-correcting
+            // and explicitly asks for live current-chain authority instead.
+            freshness: opts.freshness ?? 'bounded',
           },
         ),
       ),

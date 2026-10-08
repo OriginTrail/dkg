@@ -95,6 +95,24 @@ const resolveBootstrap = (agent: DKGAgent) => (
 );
 
 describe('subscription bootstrap finalized-generation refresh', () => {
+  it('uses a live roster only when the durable-readiness caller requires it', async () => {
+    const { agent, registeredAuthority } = createBootstrapAgent({ refresh: async () => new Map() });
+    registeredAuthority.mockResolvedValue({ kind: 'public', onChainId: ON_CHAIN_ID });
+    await agent.resolveContextGraphSubscriptionBootstrapAuthority(CG_ID, {
+      allowSubscriptionFallback: false, freshness: 'live',
+    });
+    expect(registeredAuthority).toHaveBeenCalledWith(CG_ID, expect.objectContaining({
+      authorityReadMode: 'live-current', freshness: 'live',
+    }));
+    registeredAuthority.mockClear();
+    await agent.resolveContextGraphSubscriptionBootstrapAuthority(CG_ID, {
+      allowSubscriptionFallback: false,
+    });
+    expect(registeredAuthority).toHaveBeenCalledWith(CG_ID, expect.objectContaining({
+      authorityReadMode: 'live-current', freshness: 'bounded',
+    }));
+  });
+
   it('carries explicit unregistered applicability only from the canonical allowed authority read', async () => {
     const { agent, registeredAuthority } = createBootstrapAgent({ refresh: async () => new Map() });
     registeredAuthority.mockResolvedValue({

@@ -374,7 +374,9 @@ export type {
   UnavailableContextGraphReadAuthorityDecision,
 } from './context-graph-read-authority.js';
 export type {
+  ContextGraphAuthorityFailureSite,
   ContextGraphAuthorityReadMode,
+  ContextGraphFinalizedAbsenceDetailCode,
   LiveOnChainAccessPolicyUnavailable,
   LiveOnChainAccessPolicyUnavailableReason,
   RegisteredContextGraphAuthority,
@@ -383,6 +385,15 @@ export type {
 } from './registered-context-graph-authority.js';
 export type { ContextGraphRegistrationBinding } from './dkg-agent-cg-registry.js';
 export type { FinalizedContextGraphAuthoritySnapshotReadV1 } from './dkg-agent-cg-resolve.js';
+export type {
+  ContextGraphReadinessMetadataV1,
+  InspectedContextGraphReadinessV1,
+  InspectedPrivateEmptyVmReadinessV1,
+  PreparedPrivateEmptyVmReadinessV1,
+  ProvenRegisteredPrivateEmptyVmInspectionV1,
+  SynchronousReadinessCommitResult,
+} from './dkg-agent-registered-private-empty-vm.js';
+export { isRegisteredPrivateEmptyVmReadinessCandidateV1 } from './dkg-agent-registered-private-empty-vm.js';
 export {
   ContextGraphNotFoundError,
   InvalidContentError,

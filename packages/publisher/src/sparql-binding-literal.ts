@@ -33,3 +33,15 @@ export function stripOptionalLiteral(value: string | undefined): string | undefi
   }
   return value;
 }
+
+/** Retain only string-valued SPARQL bindings for recipient evidence readers. */
+export function stringBinding(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
+}
+
+/** Preserve recipient evidence's historical quote/suffix stripping semantics. */
+export function stripRdfLiteral(value: string): string {
+  return value
+    .replace(/^"/, '')
+    .replace(/"(@[a-zA-Z-]+|\^\^<[^>]+>)?$/, '');
+}
