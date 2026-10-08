@@ -1639,20 +1639,28 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     // the list is empty and matches nothing, but the store is still read, so
     // a failing store fails closed instead of reading as an unregistered graph.
     const result = await this.store.query(
-      contextGraphOnChainIdBindingQuery(contextGraphId, { onChainIds: this.provenOnChainIdsFor(contextGraphId) }),
+      contextGraphOnChainIdBindingQuery(contextGraphId, {
+        onChainIds: this.provenOnChainIdsFor(contextGraphId),
+        includeConflicts: true,
+      }),
       {
         signal: options.signal,
         source: options.source ?? 'agent.contextGraph.onChainId',
       },
     );
     if (result.type !== 'bindings') return null;
+    let resolvedId: string | null = null;
     for (const binding of result.bindings) {
       const value = binding['id'];
       if (typeof value !== 'string') continue;
       const proven = this.provenOnChainContextGraphClaim(contextGraphId, value.replace(/^"|"$/g, ''));
-      if (proven !== null) return { onChainId: proven.onChainId, provenance: 'ontology' };
+      if (proven === null) continue;
+      if (resolvedId !== null && resolvedId !== proven.onChainId) {
+        throw new Error(`Context Graph "${contextGraphId}" has conflicting proven on-chain ids ${resolvedId} and ${proven.onChainId}`);
+      }
+      resolvedId = proven.onChainId;
     }
-    return null;
+    return resolvedId === null ? null : { onChainId: resolvedId, provenance: 'ontology' };
   }
 
   /**

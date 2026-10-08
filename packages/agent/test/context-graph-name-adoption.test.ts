@@ -541,7 +541,9 @@ describe('restart with a saved name-hash subscription', () => {
     const hashShapedCleartext = `0x${'ab'.repeat(32)}`;
     const rows = [
       { id: hashShapedCleartext, onChainHash: ethers.keccak256(ethers.toUtf8Bytes(hashShapedCleartext)) },
-      { id: NAME_HASH, onChainHash: NAME_HASH },
+      // The saved placeholder must own the same slot as the durable cleartext
+      // row before cleanup can establish that they are the same graph.
+      { id: NAME_HASH, onChainHash: NAME_HASH, onChainId: ON_CHAIN_ID },
     ];
     // No row is the preimage of NAME_HASH, so the placeholder stays active.
     expect(partitionSupersededContextGraphNamePlaceholders(rows).superseded).toEqual([]);

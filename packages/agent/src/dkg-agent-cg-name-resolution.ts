@@ -32,6 +32,8 @@ import { rememberBounded } from './bounded-map.js';
 import { runBoundedOperation } from './bounded-operation.js';
 import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
 import { isUnrecordedNameHashRow } from './context-graph-claim-proof.js';
+import { persistedContextGraphIdAliases } from './context-graph-persisted-name-aliases.js';
+export { partitionSupersededContextGraphNamePlaceholders } from './context-graph-persisted-name-aliases.js';
 import {
   CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
   CONTEXT_GRAPH_SUBJECT_PREFIX,
@@ -152,41 +154,6 @@ function stateOf(agent: object): ContextGraphNameState {
     contextGraphNameStates.set(agent, state);
   }
   return state;
-}
-
-/**
- * Split persisted subscription rows into those to activate and hash-keyed
- * placeholders already superseded by a durable cleartext row for the same
- * commitment. A superseded placeholder must not be rehydrated: activating it
- * would re-point the reverse name-hash index at the hash and undo adoption.
- */
-export function partitionSupersededContextGraphNamePlaceholders<
-  T extends Pick<ContextGraphSubscriptionRecord, 'id' | 'onChainHash'>,
->(rows: readonly T[]): { readonly active: T[]; readonly superseded: T[] } {
-  const cleartextByHash = persistedContextGraphIdAliases(rows);
-  const active: T[] = [];
-  const superseded: T[] = [];
-  for (const row of rows) {
-    const nameHash = normalizeContextGraphNameHash(row.id);
-    const placeholder = nameHash !== null
-      && normalizeContextGraphNameHash(row.onChainHash) === nameHash;
-    if (placeholder && cleartextByHash.has(nameHash!)) superseded.push(row);
-    else active.push(row);
-  }
-  return { active, superseded };
-}
-
-/** name hash -> cleartext id for durable rows whose id is the hash's preimage. */
-function persistedContextGraphIdAliases(
-  rows: readonly Pick<ContextGraphSubscriptionRecord, 'id' | 'onChainHash'>[],
-): Map<string, string> {
-  const aliases = new Map<string, string>();
-  for (const row of rows) {
-    const nameHash = normalizeContextGraphNameHash(row.onChainHash);
-    if (nameHash === null || row.id.toLowerCase() === nameHash) continue;
-    if (verifyContextGraphNameCandidate(row.id, nameHash) === row.id) aliases.set(nameHash, row.id);
-  }
-  return aliases;
 }
 
 export class ContextGraphNameResolutionMethods extends DKGAgentBase {
@@ -489,12 +456,13 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
     }
   }
 
-  /** Remember durable aliases (called by rehydration with every persisted row). */
+  /** Replace snapshot-owned aliases from the complete durable row snapshot. */
   recordPersistedContextGraphIdAliases(
     this: DKGAgent,
-    rows: readonly Pick<ContextGraphSubscriptionRecord, 'id' | 'onChainHash'>[],
+    rows: readonly Pick<ContextGraphSubscriptionRecord, 'id' | 'onChainHash' | 'onChainId'>[],
   ): void {
     const aliases = stateOf(this).persistedAliases;
+    aliases.clear();
     for (const [nameHash, contextGraphId] of persistedContextGraphIdAliases(rows)) {
       aliases.set(nameHash, contextGraphId);
     }

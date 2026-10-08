@@ -10,6 +10,7 @@
 
 
 import { throwIfOperationAborted } from './bounded-operation.js';
+import { resolveContextGraphNameBindingTarget, type ContextGraphNameHashBindingTarget } from './context-graph-name-binding-target.js';
 import { readAgentPeerPage } from './agent-peer-discovery.js';
 import { createHash } from 'node:crypto';
 import {
@@ -260,11 +261,6 @@ type ListContextGraphsUncachedResult = {
   cacheable: boolean;
 };
 type ListContextGraphsPrivacy = 'public' | 'private' | 'unknown';
-type ContextGraphNameHashBindingTarget = {
-  localId: string;
-  subscription: ContextGraphSub;
-  nameHash?: string;
-};
 class ListContextGraphsBudgetExceeded extends Error {
   constructor(label: string) {
     super(`${label} exceeded listContextGraphs budget`);
@@ -384,7 +380,6 @@ import {
   type PeerConnectionSnapshot,
   type PeerDiagnostics,
   type ChatSendResult,
-  type ContextGraphSub,
   type ContextGraphSubscriptionRecord,
   type DurableContextGraphSubscriptionBinding,
   type ContextGraphSubscriptionStore,
@@ -2211,22 +2206,13 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     this: DKGAgent,
     requestedId: string,
   ): ContextGraphNameHashBindingTarget | null {
-    const direct = this.subscribedContextGraphs.get(requestedId);
-    const mappedLocalId = this.localCgIdForWireId(
-      this.contextGraphWireId(requestedId),
-    );
-    const localId = direct === undefined ? mappedLocalId : requestedId;
-    const subscription = direct ?? this.subscribedContextGraphs.get(mappedLocalId);
-    if (subscription === undefined) return null;
-
-    const locallyAdmitted = subscription.subscribed === true
-      || subscription.coreHosted === true;
-    const nameHash = locallyAdmitted
-      ? subscription.onChainHash
-        ? this.contextGraphWireId(subscription.onChainHash)
-        : this.contextGraphNameCommitment(localId)
-      : undefined;
-    return { localId, subscription, nameHash };
+    return resolveContextGraphNameBindingTarget({
+      subscriptions: this.subscribedContextGraphs,
+      localIdForWireId: (id) => this.localCgIdForWireId(id),
+      wireId: (id) => this.contextGraphWireId(id),
+      nameCommitment: (id) => this.contextGraphNameCommitment(id),
+      isWireIdKeyedSubscription: (id) => this.isWireIdKeyedSubscription(id),
+    }, requestedId);
   }
 
   /**
@@ -2339,6 +2325,10 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     if (localId === undefined) return null;
     const current = this.subscribedContextGraphs.get(localId);
     if (current === undefined) return null;
+    // Discovery proves a name commitment, which need not identify a unique
+    // registry slot. It may enrich this binding, but only an explicit verified
+    // transition may replace a previously recorded numeric id.
+    if (current.onChainId !== undefined && current.onChainId !== onChainContextGraphId) return null;
     const next = { ...current };
     this.bindSubscriptionOnChainId(localId, next, onChainContextGraphId);
     next.onChainHash = wireId;
