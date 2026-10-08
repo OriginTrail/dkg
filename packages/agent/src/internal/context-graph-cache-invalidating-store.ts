@@ -255,7 +255,7 @@ export function createListContextGraphsCacheInvalidatingStore(
       ? (sparql, options) => invalidateAfterMutation(
         () => innerStore.atomicUpdate!(sparql, options),
         () => true,
-        () => markProjectionDirty?.(),
+        { everything: true },
         'update',
       )
       : undefined,
