@@ -16,6 +16,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import { RPC_READ_STALL_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
 import { withRpcRequestContext } from '../src/rpc-request-transport.js';
+import { RpcRequestGovernorQueueFullError } from '../src/rpc-request-governor.js';
 
 const KA_ID = 7n;
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
@@ -299,6 +300,51 @@ describe('EVMChainAdapter.readKnowledgeAssetVersionSnapshot [GH#2270 PR#2300]', 
     ]);
     expect(attempts.every((attempt) => attempt.provider === 0)).toBe(true);
     expect(providers[0]!.__script.headFailures!.count).toBe(0);
+  });
+
+  it.each([
+    'getKnowledgeAssetUpdateContext',
+    'getLatestMerkleRootAuthor',
+    'getLatestMerkleRootPublisher',
+  ] as const)('local capacity from %s wins over an earlier rejected tuple slot', async (capacityGetter) => {
+    const { adapter, attempts, reads } = adapterOver([
+      { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
+      { blockNumber: 502, latestRoot: `0x${'bb'.repeat(32)}`, rootCount: 4n },
+    ]);
+    const originalRebind = (adapter as any).rebindContract;
+    (adapter as any).rebindContract = (...args: unknown[]) => {
+      const bound = originalRebind(...args);
+      if ((args[1] as { __index: number }).__index !== 0) return bound;
+      const readRoot = bound.getLatestMerkleRoot;
+      bound.getLatestMerkleRoot = async (...readArgs: unknown[]) => {
+        await readRoot(...readArgs);
+        throw Object.assign(new Error('unusable pinned root'), { code: 'CALL_EXCEPTION' });
+      };
+      const readCapacityGetter = bound[capacityGetter];
+      bound[capacityGetter] = async (...readArgs: unknown[]) => {
+        await readCapacityGetter(...readArgs);
+        throw new RpcRequestGovernorQueueFullError(1);
+      };
+      return bound;
+    };
+
+    // The complete settled tuple contains local admission pressure even though
+    // slot zero fails deterministically. Falling back cannot create capacity;
+    // preserve that original local verdict instead of the first array slot.
+    await expect(adapter.readKnowledgeAssetVersionSnapshot(KA_ID)).resolves.toBeNull();
+    expect(attempts.every((attempt) => attempt.provider === 0)).toBe(true);
+    expect(attempts.filter((attempt) => attempt.call === 'getNetwork')).toEqual([
+      { provider: 0, call: 'getNetwork' },
+    ]);
+    expect(attempts.filter((attempt) => attempt.call === 'getBlock')).toEqual([
+      { provider: 0, call: 'getBlock', blockTag: 'latest' },
+    ]);
+    expect(reads).toHaveLength(4);
+    expect(reads.every((read) => read.provider === 0 && read.blockTag === 500)).toBe(true);
+    expect(reads.map((read) => read.call).sort()).toEqual([
+      'getLatestMerkleRoot', 'getKnowledgeAssetUpdateContext',
+      'getLatestMerkleRootAuthor', 'getLatestMerkleRootPublisher',
+    ].sort());
   });
 
   it('a deterministic pinned eth_call failure falls back without retrying or mixing the tuple', async () => {

@@ -21,6 +21,7 @@ import {
 } from './evm-knowledge-asset-update-context.js';
 import { confirmedStateBlockAtHead } from './evm-adapter-constants.js';
 import { isContractViewRetryable } from './rpc-failover-client.js';
+import { classifyRpcRetryDisposition } from './evm-adapter-rpc.js';
 import { readFirstProviderWithTransientRetry } from './rpc-provider-fallback.js';
 import { activeRpcRequestAbortSignal } from './rpc-request-transport.js';
 import { withRpcUsageConsumer } from './rpc-usage.js';
@@ -182,6 +183,12 @@ export class StorageReadMethods extends EVMChainAdapterBase {
         bound.getLatestMerkleRootPublisher(kaId, at) as Promise<string>,
       ]);
       signal?.throwIfAborted();
+      // Local admission pressure cannot be repaired by another endpoint. Keep
+      // that verdict even when an earlier tuple slot failed at the endpoint.
+      for (const read of [rootRead, contextRead, authorRead, publisherRead]) {
+        if (read.status === 'rejected'
+          && classifyRpcRetryDisposition(read.reason) === 'retry-later') throw read.reason;
+      }
       if (rootRead.status === 'rejected') throw rootRead.reason;
       if (contextRead.status === 'rejected') throw contextRead.reason;
       if (authorRead.status === 'rejected') throw authorRead.reason;
