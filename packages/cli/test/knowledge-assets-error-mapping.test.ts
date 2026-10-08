@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createPromoteRetryableFailure } from '@origintrail-official/dkg-publisher';
 import { tagPromoteError } from '../../publisher/src/promote-step-tag.js';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
-import { respondAssertionError } from '../src/daemon/routes/knowledge-assets-error-mapping.js';
+import { respondAssertionCodeError, respondAssertionError } from '../src/daemon/routes/knowledge-assets-error-mapping.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 
@@ -49,11 +49,21 @@ describe('knowledge-assets mutation error mapping', () => {
     vi.restoreAllMocks();
   });
 
-  it.each(['KA_ASSERTION_ALREADY_FINALIZED', 'ASSERTION_EMPTY'])('keeps the %s conflict mapping', (code) => {
+  it.each(['KA_ASSERTION_ALREADY_FINALIZED', 'ASSERTION_EMPTY', 'KA_SLOT_ALREADY_CLAIMED', 'KA_RESERVED_ID_MISMATCH'])('keeps the %s conflict mapping', (code) => {
     const { record, res } = fakeResponse();
     respondAssertionError(res, { code, message: 'caller precondition' });
     expect(record.status).toBe(409);
     expect(JSON.parse(record.body)).toEqual({ code, error: 'caller precondition' });
+    const direct = fakeResponse();
+    expect(respondAssertionCodeError(direct.res, { code, message: 'caller precondition' })).toBe(true);
+    expect(direct.record.status).toBe(409);
+    expect(JSON.parse(direct.record.body)).toEqual(JSON.parse(record.body));
+  });
+
+  it('leaves unknown codes to the route-specific fallback without writing a response', () => {
+    const { record, res } = fakeResponse();
+    expect(respondAssertionCodeError(res, { code: 'toString', message: 'unknown' })).toBe(false);
+    expect(record).toMatchObject({ status: 0, body: '', ended: false });
   });
 
   it.each([

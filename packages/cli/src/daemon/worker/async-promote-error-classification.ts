@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE } from '@origintrail-official/dkg-core';
 import {
   isReadOnlyStoreOperation,
   isStoreOperationTimeoutError,
@@ -64,6 +65,24 @@ export function safePromoteErrorIdentity(
     const value = Reflect.get(err, field);
     const allowed = field === 'name' ? SAFE_ERROR_NAMES : SAFE_ERROR_CODES;
     return typeof value === 'string' && allowed.has(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// The causes whose code may be named beside a retryable promote: an explicit
+// allowlist of shared contract codes (dkg-core), never a shape test.
+const SAFE_PROMOTE_RETRY_CAUSE_CODES = Object.freeze({
+  [RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE]: true,
+} as const);
+
+export function safePromoteRetryCauseCode(cause: unknown): string | undefined {
+  if ((typeof cause !== 'object' && typeof cause !== 'function') || cause === null) return undefined;
+  try {
+    const value = Reflect.get(cause, 'code');
+    return typeof value === 'string' && Object.hasOwn(SAFE_PROMOTE_RETRY_CAUSE_CODES, value)
+      ? value
+      : undefined;
   } catch {
     return undefined;
   }

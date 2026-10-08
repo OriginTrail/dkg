@@ -31,6 +31,7 @@ import {
 import type { DkgConfig } from '../config.js';
 import {
   createReadAuthorityDiagnostics,
+  decodeReadAuthorityAttribution,
   type ContextGraphReadAuthorityAttribution,
 } from './read-authority-diagnostics.js';
 import { enforceSignedRequestPostBody } from '../auth.js';
@@ -137,23 +138,6 @@ export function isContextGraphReadAuthorityUnavailable(err: unknown): boolean {
 }
 
 const readAuthorityDiagnostics = createReadAuthorityDiagnostics();
-
-/**
- * The attribution a thrown read-authority marker carries. The agent's error is
- * recognised structurally, so each field is read defensively; a missing,
- * non-string or throwing field becomes `unknown` here and nowhere else.
- */
-function decodeReadAuthorityAttribution(err: unknown): ContextGraphReadAuthorityAttribution {
-  const field = (key: keyof ContextGraphReadAuthorityAttribution): string => {
-    try {
-      const value: unknown = Reflect.get(err as object, key);
-      return typeof value === 'string' ? value : 'unknown';
-    } catch {
-      return 'unknown';
-    }
-  };
-  return { source: field('source'), reason: field('reason'), dependency: field('dependency') };
-}
 
 /**
  * Uniform retryable response for an unresolvable Context Graph read authority,

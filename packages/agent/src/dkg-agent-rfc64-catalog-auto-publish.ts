@@ -76,6 +76,7 @@ import {
 import { resolveDurableGraphScopedAuthorSealCandidateV1 } from
   './durable-author-seal-resolver-v1.js';
 import { throwIfRfc64AbortedV1 as throwIfAbortedV1 } from './rfc64/abort-v1.js';
+import { rfc64SwmInventorySettlementCanConvergeV1 } from './rfc64/swm-inventory-settlement-outlook-v1.js';
 import {
   snapshotRfc64FinalizedPrivatePlacementRepairV1,
   type Rfc64FinalizedPrivatePlacementRepairV1,
@@ -664,6 +665,10 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
             && result.dormantReason !== 'authority-transition'
           )) break;
           if (shutdownSignal.aborted) return;
+          // Registered-chain conditions outlast this window; the refresh owner retries them.
+          if (!rfc64SwmInventorySettlementCanConvergeV1(
+            this.rfc64CatalogAuthorityRefreshFailureReasonV1(params.contextGraphId),
+          )) break;
           // A durable promotion can race the asynchronous default-responsibility
           // and authority transition for a newly created CG. Refresh and retry
           // that normal lifecycle boundary for a bounded settlement window before

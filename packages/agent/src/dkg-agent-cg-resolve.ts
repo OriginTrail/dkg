@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-
 /**
  * Context-graph resolution subsystem extracted from dkg-agent.ts as a mixin
  * holder: existence/curation checks, sync-request envelope parse/build/auth,
@@ -1596,7 +1595,6 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       // persist+invalidate path.
       if (catalogQuads.length > 0) {
         await this.store.insert(catalogQuads);
-        this.contextGraphMetaProjection.markDirtyFromQuads(catalogQuads);
       }
       this.syncCheckpoints.delete(result.checkpointKey);
     }
@@ -1736,10 +1734,10 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       /**
        * How fresh this authority has to be. Defaults to `'live'`.
        *
-       * Governs only the current-state read: the one `live-current` takes,
-       * and the one a finalized `authorityReadMode` falls back to when its
-       * lane leaves the answer undecided. The finalized lanes are unaffected.
-       *
+       * Governs the registration binding and current-state read: the one
+       * `live-current` takes and the fallback when a finalized read mode
+       * leaves its own lane undecided. A bounded
+       * binding read may reuse a locally fenced finalized name-absence proof.
        * `'bounded'` lets the node's own event index answer, and is only for a
        * caller whose decision the NEXT read can correct. It must never be used
        * where the answer issues a key, permits a plaintext downgrade, or
@@ -1760,6 +1758,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           options.allowAcceptedRfc64FinalizedAbsence,
         allowApprovedPrivateReplicaFinalizedAbsence:
           options.allowApprovedPrivateReplicaFinalizedAbsence,
+        ...(options.freshness === undefined ? {} : { freshness: options.freshness }),
       },
     );
     // Preserve source-qualified non-applicability alongside the legacy read
