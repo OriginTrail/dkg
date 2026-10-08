@@ -3,6 +3,7 @@ import { WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519, computeWorkspaceAgentE
 import { ethers } from 'ethers';
 import { WORKSPACE_RECIPIENT_DEPENDENCIES } from './workspace-recipient-dependencies.js';
 import { RECIPIENT_KEY_CANDIDATE_LIMIT as STRICT_RECIPIENT_KEY_CANDIDATE_LIMIT } from './workspace-recipient-key-policy.js';
+import { stringBinding, stripRdfLiteral } from './sparql-binding-literal.js';
 
 const { keyRoute: KEY_ROUTE } = WORKSPACE_RECIPIENT_DEPENDENCIES;
 
@@ -100,14 +101,4 @@ function verifyAgentEncryptionKeyRevocation(
   } catch {
     return false;
   }
-}
-
-export function stringBinding(value: unknown): string | undefined {
-  return typeof value === 'string' ? value : undefined;
-}
-
-export function stripRdfLiteral(value: string): string {
-  return value
-    .replace(/^"/, '')
-    .replace(/"(@[a-zA-Z-]+|\^\^<[^>]+>)?$/, '');
 }

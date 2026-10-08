@@ -64,26 +64,17 @@ export async function resolveWorkspaceAgentRecipientKeys(
   for await (const keys of source.keyPages()) {
     sawAnyKeyCandidate = true;
 
-    const decodedPage: Array<{
-      encodedPublicKey: string;
-      publicKeyBytes?: Uint8Array;
-      recipientKeyId?: string;
-    }> = [];
+    const decodedPage: Array<PublicKeyCandidate | undefined> = [];
     const revocationCandidates = new Map<string, PublicKeyCandidate>();
     for (const encodedPublicKey of keys) {
-      let publicKeyBytes: Uint8Array | undefined;
-      let recipientKeyId: string | undefined;
       const candidate = decodePublicKeyCandidate(checksum, encodedPublicKey);
-      if (candidate) {
-        ({ publicKeyBytes, recipientKeyId } = candidate);
-        revocationCandidates.set(recipientKeyId, candidate);
-      }
-      decodedPage.push({ encodedPublicKey, publicKeyBytes, recipientKeyId });
+      if (candidate) revocationCandidates.set(candidate.recipientKeyId, candidate);
+      decodedPage.push(candidate);
     }
 
     const revokedKeyIds = await source.readRetirements([...revocationCandidates.values()]);
     for (const candidate of decodedPage) {
-      if (candidate.recipientKeyId && revokedKeyIds.has(candidate.recipientKeyId)) {
+      if (candidate && revokedKeyIds.has(candidate.recipientKeyId)) {
         // Count unique cryptographic key ids rather than lexical RDF aliases:
         // one authenticated retirement grants exactly one proof-history credit.
         verifiedRetiredKeyIds.add(candidate.recipientKeyId);
@@ -96,15 +87,11 @@ export async function resolveWorkspaceAgentRecipientKeys(
           `Too many public encryption-key candidates for DKG agent ${checksum}`,
         );
       }
-      if (!candidate.publicKeyBytes || !candidate.recipientKeyId) {
+      if (!candidate) {
         sawMalformedKey = true;
         continue;
       }
-      activeKeyCandidates.set(candidate.recipientKeyId, {
-        encodedPublicKey: candidate.encodedPublicKey,
-        publicKeyBytes: candidate.publicKeyBytes,
-        recipientKeyId: candidate.recipientKeyId,
-      });
+      activeKeyCandidates.set(candidate.recipientKeyId, candidate);
     }
 
   }

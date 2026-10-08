@@ -4,7 +4,8 @@ import {
   sparqlString,
 } from '@origintrail-official/dkg-core';
 import { WORKSPACE_RECIPIENT_DEPENDENCIES } from './workspace-recipient-dependencies.js';
-import { loadVerifiedRevokedKeyIds, stringBinding, stripRdfLiteral, type EncryptionKeyMaterial } from './workspace-recipient-key-verification.js';
+import { loadVerifiedRevokedKeyIds, type EncryptionKeyMaterial } from './workspace-recipient-key-verification.js';
+import { stringBinding, stripRdfLiteral } from './sparql-binding-literal.js';
 
 import type { PublicKeyRoute, PublicKeyCandidate } from './workspace-recipient-key-candidates.js';
 import { COMPLETE_KEY_ROW_LIMIT, COMPLETE_ROUTE_ROW_LIMIT, RECIPIENT_KEY_HISTORY_PAGE_SIZE, RECIPIENT_KEY_CANDIDATE_LIMIT } from './workspace-recipient-key-policy.js';

@@ -18,6 +18,7 @@ import { WorkspaceAgentEncryptionKeyMissingError, isWorkspaceAgentEncryptionKeyM
 export { WorkspaceAgentEncryptionKeyMissingError, isWorkspaceAgentEncryptionKeyMissingError } from './workspace-recipient-key-errors.js';
 
 import { WORKSPACE_RECIPIENT_DEPENDENCIES } from './workspace-recipient-dependencies.js';
+import { stringBinding, stripRdfLiteral } from './sparql-binding-literal.js';
 
 const { access: ACCESS } = WORKSPACE_RECIPIENT_DEPENDENCIES;
 
@@ -311,14 +312,4 @@ async function getWorkspaceAccessMetadata(
   }
 
   return { hasPrivateAccessPolicy, agentAddresses };
-}
-
-function stringBinding(value: unknown): string | undefined {
-  return typeof value === 'string' ? value : undefined;
-}
-
-function stripRdfLiteral(value: string): string {
-  return value
-    .replace(/^"/, '')
-    .replace(/"(@[a-zA-Z-]+|\^\^<[^>]+>)?$/, '');
 }
