@@ -1,4 +1,3 @@
-import { rpcReadDescriptor } from './rpc-read-descriptor.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -71,6 +70,7 @@ import {
 import  {
   RpcFailoverClient,
   createRpcReadDescriptor,
+  rpcReadDescriptor,
   type ReadOpts,
   type ReceiptLookupOptions,
 } from './rpc-failover-client.js';
