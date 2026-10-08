@@ -31,6 +31,7 @@ export function projectDormantContextGraphIdentities(
             syncMode: 'always-on',
             subscribed: false, coreHosted: false, synced: false,
             sharedMemorySynced: false, metaSynced: false,
+            lastReconciledOrdinal: row.lastReconciledOrdinal,
           };
         }
       } catch {

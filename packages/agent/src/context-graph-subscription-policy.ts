@@ -5,6 +5,13 @@ import type {
   ContextGraphSyncMode,
 } from './dkg-agent-types.js';
 
+/** Retained identity alone grants neither member admission nor Core custody. */
+export function isAdmittedContextGraphSubscription(
+  subscription: Pick<ContextGraphSub, 'subscribed' | 'coreHosted'> | undefined,
+): boolean {
+  return subscription?.subscribed === true || subscription?.coreHosted === true;
+}
+
 export function normalizeContextGraphSubscriptionTransition(
   previous: ContextGraphSub | undefined,
   next: ContextGraphSubInput,

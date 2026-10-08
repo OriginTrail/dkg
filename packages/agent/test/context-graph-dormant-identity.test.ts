@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { createOperationContext } from '@origintrail-official/dkg-core';
+import { createOperationContext, contextGraphDataGraphUri, contextGraphMetaGraphUri, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
 import { FinalizationHandler } from '../src/finalization-handler.js';
 import { buildAuthoritativePublicMetaQuads } from '../src/context-graph-public-meta-proof.js';
@@ -194,7 +194,7 @@ describe('dormant durable Context Graph identity', () => {
   );
 
 
-  it('preserves dormant durable intent during genuine confirmed-meta readiness refresh', async () => {
+  it('preserves dormant intent without readiness, responsibility or gossip activation', async () => {
     const saved = durable({ syncScoped: true });
     const f = await cold([saved], false, { syncScoped: true });
     await f.agent.rehydrateContextGraphSubscriptions(null);
@@ -202,10 +202,14 @@ describe('dormant durable Context Graph identity', () => {
     const membersBefore = f.members();
     await f.agent.store.insert(buildAuthoritativePublicMetaQuads(LOCAL));
     await expect(f.agent.hasConfirmedMetaState(LOCAL)).resolves.toBe(true);
+    const gossip = vi.spyOn(f.agent, 'queueSharedMemoryGossipSubscription');
+    const responsibility = vi.spyOn(f.agent, 'reconcileRfc64CatalogResponsibilityV1');
     await f.agent.refreshMetaSyncedFlags([LOCAL]);
     await f.drain();
+    expect(gossip).not.toHaveBeenCalled();
+    expect(responsibility).not.toHaveBeenCalled();
     expect(f.state.subscribedContextGraphs.get(LOCAL)).toMatchObject({
-      subscribed: false, coreHosted: false, metaSynced: true,
+      subscribed: false, coreHosted: false, metaSynced: false,
       onChainId: ORIGINAL, onChainHash: HASH,
     });
     expect(f.rows()).toEqual([saved]);
@@ -581,5 +585,144 @@ describe('dormant durable Context Graph identity', () => {
     expect(f.state.subscribedContextGraphs.get(LOCAL)?.onChainId).toBeUndefined();
     expect(f.reverse).not.toHaveBeenCalled();
     expect(f.rows()).toEqual([]);
+  });
+
+  it.each([
+    ['identity-only', false, false, false, 'denied'],
+    ['host-only', false, true, false, 'denied'],
+    ['member', true, false, false, 'allowed'],
+    ['configured scope', false, false, true, 'allowed'],
+  ] as const)('uses admitted membership or configured scope for legacy private authority: %s',
+    async (_label, subscribed, coreHosted, scope, outcome) => {
+      const f = await cold([durable()], false, { syncScoped: scope });
+      await f.agent.rehydrateContextGraphSubscriptions(null);
+      if (subscribed || coreHosted) f.state.setContextGraphSubscription(LOCAL, {
+        ...f.state.subscribedContextGraphs.get(LOCAL)!, subscribed, coreHosted,
+      }, { persist: false });
+      vi.spyOn(f.agent, 'resolveRegisteredContextGraphAuthority').mockResolvedValue({ kind: 'unregistered' });
+      vi.spyOn(f.agent, 'getContextGraphAllowedPeers').mockResolvedValue(null);
+      vi.spyOn(f.agent, 'isPrivateContextGraph').mockResolvedValue(true);
+      vi.spyOn(f.agent, 'getContextGraphAgentGateAddresses').mockResolvedValue(null);
+      vi.spyOn(f.agent, 'getPrivateContextGraphParticipants').mockResolvedValue([]);
+      await expect(f.agent.resolveContextGraphReadAuthority(LOCAL)).resolves.toMatchObject({ outcome });
+    },
+  );
+
+  it('restores the prior dormant binding after native activation preparation fails', async () => {
+    const saved = durable({ lastReconciledOrdinal: 77 });
+    const f = await cold([saved], false);
+    await f.agent.rehydrateContextGraphSubscriptions(null);
+    const prior = { ...f.state.subscribedContextGraphs.get(LOCAL)! };
+    await expect(f.agent.activatePersistedContextGraphSubscriptionRecord(saved, {
+      prepare: async () => { throw new Error('owned activation preparation failed'); },
+    })).rejects.toThrow('owned activation preparation failed');
+    expect(f.state.subscribedContextGraphs.get(LOCAL)).toEqual(prior);
+    f.agent.applyOnChainContextGraphObservation(observed(COLLISION), { source: 'event' });
+    await f.drain();
+    await expect(f.agent.getContextGraphOnChainId(LOCAL)).resolves.toBe(ORIGINAL);
+    expect(f.rows()).toEqual([saved]);
+    expect(f.save).not.toHaveBeenCalled();
+    expect(f.remove).not.toHaveBeenCalled();
+  });
+
+  it('preserves a concurrent replacement when activation preparation fails', async () => {
+    const saved = durable();
+    const f = await cold([saved], false);
+    await f.agent.rehydrateContextGraphSubscriptions(null);
+    await expect(f.agent.activatePersistedContextGraphSubscriptionRecord(saved, {
+      prepare: async () => {
+        f.state.setContextGraphSubscription(LOCAL, {
+          subscribed: false, synced: false, onChainId: '777', onChainHash: HASH,
+        }, { persist: false });
+        throw new Error('owned activation became stale');
+      },
+    })).rejects.toThrow('owned activation became stale');
+    expect(f.state.subscribedContextGraphs.get(LOCAL)?.onChainId).toBe('777');
+  });
+
+  it('retains the saved watermark through native explicit subscription of a dormant row', async () => {
+    const saved = durable({ lastReconciledOrdinal: 77 });
+    const f = await cold([saved], false);
+    await f.agent.rehydrateContextGraphSubscriptions(null);
+    expect(f.state.subscribedContextGraphs.get(LOCAL)?.lastReconciledOrdinal).toBe(77);
+    // Only the network primitive is inert; install/persistence stay native.
+    (f.agent as unknown as { gossip: unknown }).gossip = {
+      subscribe: vi.fn(), unsubscribe: vi.fn(), onMessage: vi.fn(),
+      publish: async () => undefined, getSubscribers: () => [],
+    };
+    f.agent.subscribeToContextGraph(LOCAL, { trackSyncScope: false });
+    await f.drain();
+    expect(f.rows()).toEqual([expect.objectContaining({ id: LOCAL, subscribed: true, lastReconciledOrdinal: 77 })]);
+  });
+
+  it.each([
+    ['confirmed proof', 'unsubscribe'], ['confirmed proof', 'delete'],
+    ['registration query', 'unsubscribe'], ['registration query', 'delete'],
+  ] as const)('fences readiness generation after deferred %s and native %s', async (phase, mutation) => {
+    const f = await cold([durable()], false);
+    await f.agent.rehydrateContextGraphSubscriptions(null);
+    f.state.setContextGraphSubscription(LOCAL, {
+      ...f.state.subscribedContextGraphs.get(LOCAL)!, subscribed: true,
+    }, { persist: false });
+    await f.agent.store.insert(buildAuthoritativePublicMetaQuads(LOCAL));
+    await expect(f.agent.hasConfirmedMetaState(LOCAL)).resolves.toBe(true);
+    let release!: () => void;
+    let entered!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const waiting = new Promise<void>((resolve) => { entered = resolve; });
+    const actualProof = f.agent.hasConfirmedMetaState.bind(f.agent);
+    const actualQuery = f.agent.store.query.bind(f.agent.store);
+    if (phase === 'confirmed proof') vi.spyOn(f.agent, 'hasConfirmedMetaState').mockImplementation(async (id) => {
+      const result = await actualProof(id);
+      entered(); await held; return result;
+    });
+    else vi.spyOn(f.agent.store, 'query').mockImplementation(async (...args) => {
+      if (args[1]?.source === 'agent.durableSync.registrationBinding') { entered(); await held; }
+      return actualQuery(...args);
+    });
+    const setter = vi.spyOn(f.agent, 'setContextGraphSubscription');
+    const gossip = vi.spyOn(f.agent, 'queueSharedMemoryGossipSubscription');
+    const responsibility = vi.spyOn(f.agent, 'reconcileRfc64CatalogResponsibilityV1');
+    const refresh = f.agent.refreshMetaSyncedFlags([LOCAL]);
+    await waiting;
+    if (mutation === 'unsubscribe') f.agent.unsubscribeFromContextGraph(LOCAL);
+    else f.agent.deleteContextGraphSubscription(LOCAL);
+    await f.drain();
+    const stateAfterMutation = f.state.subscribedContextGraphs.get(LOCAL);
+    const rowsAfterMutation = structuredClone(f.rows());
+    setter.mockClear(); gossip.mockClear(); responsibility.mockClear();
+    f.save.mockClear(); f.remove.mockClear();
+    release(); await refresh; await f.drain();
+    expect(f.state.subscribedContextGraphs.get(LOCAL)).toEqual(stateAfterMutation);
+    expect(f.rows()).toEqual(rowsAfterMutation);
+    expect(setter).not.toHaveBeenCalled();
+    expect(gossip).not.toHaveBeenCalled();
+    expect(responsibility).not.toHaveBeenCalled();
+    expect(f.save).not.toHaveBeenCalled();
+    expect(f.remove).not.toHaveBeenCalled();
+  });
+
+  it('refuses a conflicting numeric binding before confirmed-meta readiness mutation', async () => {
+    const saved = durable({ lastReconciledOrdinal: 77 });
+    const f = await cold([saved], false);
+    await f.agent.rehydrateContextGraphSubscriptions(null);
+    f.state.setContextGraphSubscription(LOCAL, {
+      ...f.state.subscribedContextGraphs.get(LOCAL)!, subscribed: true,
+    }, { persist: false });
+    await f.agent.store.insert([
+      ...buildAuthoritativePublicMetaQuads(LOCAL),
+      { subject: contextGraphDataGraphUri(LOCAL), predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`, object: `"${COLLISION}"`, graph: contextGraphMetaGraphUri(LOCAL) },
+      { subject: contextGraphDataGraphUri(LOCAL), predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`, object: `"${HASH}"`, graph: contextGraphMetaGraphUri(LOCAL) },
+    ]);
+    await expect(f.agent.hasConfirmedMetaState(LOCAL)).resolves.toBe(true);
+    const before = { ...f.state.subscribedContextGraphs.get(LOCAL)! };
+    const gossip = vi.spyOn(f.agent, 'queueSharedMemoryGossipSubscription');
+    const responsibility = vi.spyOn(f.agent, 'reconcileRfc64CatalogResponsibilityV1');
+    await f.agent.refreshMetaSyncedFlags([LOCAL]); await f.drain();
+    expect(f.state.subscribedContextGraphs.get(LOCAL)).toEqual(before);
+    expect(f.rows()).toEqual([saved]);
+    expect(gossip).not.toHaveBeenCalled();
+    expect(responsibility).not.toHaveBeenCalled();
+    expect(f.save).not.toHaveBeenCalled();
   });
 });

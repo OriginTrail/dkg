@@ -7,6 +7,7 @@
  * so cross-calls resolve against the composed class.
  */
 
+import { isAdmittedContextGraphSubscription } from './context-graph-subscription-policy.js';
 import { resolveRfc64PrivateReadRoster } from './rfc64/private-read-roster-v1.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { canReadUnscopedQuery } from './unscoped-query-admission.js';
@@ -577,7 +578,7 @@ export class QueryMethods extends DKGAgentBase {
             || scopedReadAuthority.reason === 'authority-circuit-open'
           )
           && validateContextGraphId(scopedContextGraphId).valid
-          && !this.subscribedContextGraphs.has(scopedContextGraphId)
+          && !isAdmittedContextGraphSubscription(this.subscribedContextGraphs.get(scopedContextGraphId))
           && !this.localContextGraphProvenance.hasLocalCreate(scopedContextGraphId)
           && !await this.contextGraphExists(scopedContextGraphId, { signal: opts.signal })
         ) {
@@ -1141,7 +1142,7 @@ export class QueryMethods extends DKGAgentBase {
       hasLegacySubscription:
         this.subscribedContextGraphs.get(contextGraphId)?.pendingMeta !== true
         && (
-          this.subscribedContextGraphs.has(contextGraphId)
+          this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true
           || (this.config.syncContextGraphs ?? []).includes(contextGraphId)
         ),
       getLocalIdentityId: () => this.chain.getIdentityId(),
