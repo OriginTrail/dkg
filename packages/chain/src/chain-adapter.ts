@@ -2337,11 +2337,12 @@ export interface ChainAdapter {
    * or not at all. `null` means no endpoint could produce the view, and the caller must not
    * conclude anything from that.
    *
-   * PR #2300 r11 — it also carries the version's ATTRIBUTION, and it is taken from the MOST
-   * ADVANCED endpoint rather than the first that answers. Both follow from the same requirement:
-   * a caller deciding "is this recovered transaction still current" must not mix a root from one
-   * view with an author, a publisher or a block height from another, and a healthy-but-lagging
-   * endpoint answering first would make an old transaction look current.
+   * Attribution and block evidence belong to that same observation. Configured
+   * RPCs are primary-first fallbacks: the first endpoint supplying a complete
+   * view is authoritative, and unused fallbacks are not queried (GH#3098).
+   * This establishes currency at the selected endpoint's confirmation-depth
+   * block, not freshness against every configured RPC. Consumers still enforce
+   * their known receipt/event/version floors and defer when the view is behind.
    *
    * The pinned height uses `chain.finalityConfirmations`: confirmation 1 is the current head,
    * and larger values pin `head - confirmations + 1`.
@@ -2353,8 +2354,10 @@ export interface ChainAdapter {
 
   /**
    * Cheap lease validation for a previously-read coherent snapshot. A true
-   * result proves that the same finalized block hash and exact physical KAS
-   * binding generation are still current. Missing evidence is always false.
+   * result proves that the first usable configured endpoint still reports the
+   * same confirmation-depth block hash and exact physical KAS binding generation.
+   * A usable differing header returns false immediately; only unavailable or
+   * unusable endpoint evidence advances to a fallback. Missing evidence is false.
    */
   knowledgeAssetVersionSnapshotIsCurrent?(
     kaId: bigint,

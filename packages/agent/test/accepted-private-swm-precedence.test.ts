@@ -961,7 +961,8 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const host = {
       contextGraphMetaProjection: {
         ...stubRecipientRevisions(),
-        get readAuthorityFactsRevision() { return metadataRevision; },
+        // The gate compares the graph's own roster revision, not the node-wide one.
+        peerGateRevision: { read: () => `0:${metadataRevision}` },
       },
       resolveSwmTransportAuthority,
       getCgMeta: vi.fn(async () => ({
@@ -995,7 +996,8 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const host = {
       contextGraphMetaProjection: {
         ...stubRecipientRevisions(),
-        get readAuthorityFactsRevision() { return metadataRevision; },
+        // The gate compares the graph's own roster revision, not the node-wide one.
+        peerGateRevision: { read: () => `0:${metadataRevision}` },
       },
       resolveSwmTransportAuthority,
       getCgMeta: vi.fn(async () => ({
@@ -1024,7 +1026,8 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const host = {
       contextGraphMetaProjection: {
         ...stubRecipientRevisions(),
-        get readAuthorityFactsRevision() { return metadataRevision; },
+        // The gate compares the graph's own roster revision, not the node-wide one.
+        peerGateRevision: { read: () => `0:${metadataRevision}` },
       },
       resolveSwmTransportAuthority,
       getCgMeta: vi.fn(async () => ({

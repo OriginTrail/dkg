@@ -783,7 +783,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         contextGraphId,
         { signal: options.signal },
       ),
-      readMetadataRevision: () => this.contextGraphMetaProjection.readAuthorityFactsRevision,
+      readRosterRevision: () => this.contextGraphMetaProjection.peerGateRevision.read(contextGraphId),
       getLegacyMeta: () => this.getCgMeta(contextGraphId, { signal: options.signal }),
       getSubscriptionAgents: () => (
         this.subscribedContextGraphs.get(contextGraphId)?.participantAgents ?? []

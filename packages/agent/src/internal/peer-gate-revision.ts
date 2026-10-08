@@ -8,11 +8,11 @@ const DELEGATION_PREFIX = 'did:dkg:agent-delegation:';
 
 /**
  * A revision per context graph that moves only when a write can change the
- * metadata facts its peer allowlist is built from. The graph's own cache is
- * invalidated by every write to its meta graph, among them the knowledge-asset
- * metadata that every publish writes, so that revision says nothing about the
- * allowlist; this one lets a resolution check, synchronously and right after
- * its last asynchronous read, that the allowlist it collected with still holds.
+ * metadata facts its peer allowlist and its agent roster are built from. The
+ * graph's own cache is invalidated by every write to its meta graph, among them
+ * the knowledge-asset metadata that every publish writes, so that revision says
+ * nothing about either; this one lets a resolution check, synchronously and
+ * right after its last asynchronous read, that what it collected still holds.
  */
 export class PeerGateRevision {
   private everything = 0;
