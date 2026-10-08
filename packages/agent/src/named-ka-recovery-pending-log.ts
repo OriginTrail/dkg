@@ -44,8 +44,9 @@ export const NAMED_KA_RECOVERY_PENDING_SUMMARY_INTERVAL_MS = 5 * 60_000;
 export const NAMED_KA_RECOVERY_ENDPOINT_ESCALATION_AFTER_MS = 5 * 60_000;
 
 /**
- * And at least this many deferrals in the run, so that two samples either side
- * of a suspended process cannot stand in for a sustained one.
+ * And at least this many deferrals in the run, counted once per recovery tick
+ * however many assets the tick defers, so that two samples either side of a
+ * suspended process cannot stand in for a sustained one.
  */
 export const NAMED_KA_RECOVERY_ENDPOINT_ESCALATION_MIN_DEFERRALS = 12;
 
@@ -92,10 +93,12 @@ interface ReasonEntry {
  * A version view read ends it, and so does an asset it held deferring for something else.
  */
 interface EndpointRun {
-  /** First and latest deferral of the run, and how many it holds. */
+  /** First and latest deferral of the run. */
   since: number;
   lastAt: number;
-  deferrals: number;
+  /** Recovery ticks with a deferral in the run, and the assets the latest of them deferred. */
+  ticks: number;
+  tickAssets: Set<string>;
   escalated: boolean;
 }
 
@@ -193,7 +196,7 @@ export class NamedKaRecoveryPendingLog {
 
     let run: EndpointRun | undefined;
     if (endpointsNamed) {
-      run = this.#continueEndpointRun(now);
+      run = this.#continueEndpointRun(key, now);
     } else if (seen?.endpointsNamed === true) {
       // An asset the endpoints were named for now defers for something else (a deadline, the
       // node's own request budget): they are not the cause of every deferral, and their run is
@@ -205,7 +208,7 @@ export class NamedKaRecoveryPendingLog {
       run !== undefined
       && !run.escalated
       && now - run.since >= this.#escalateAfterMs
-      && run.deferrals >= this.#escalateMinDeferrals
+      && run.ticks >= this.#escalateMinDeferrals
     ) {
       run.escalated = true;
       const pending = this.#pending(now, (tracked) => tracked.endpointsNamed);
@@ -233,14 +236,23 @@ export class NamedKaRecoveryPendingLog {
    * The endpoints' run, one deferral longer. One not extended for a summary interval is over,
    * as a reason's is.
    */
-  #continueEndpointRun(now: number): EndpointRun {
+  #continueEndpointRun(key: string, now: number): EndpointRun {
     let run = this.#endpointRun;
     if (run === undefined || now - run.lastAt > this.#summaryIntervalMs) {
-      run = { since: now, lastAt: now, deferrals: 0, escalated: false };
+      run = { since: now, lastAt: now, ticks: 1, tickAssets: new Set(), escalated: false };
       this.#endpointRun = run;
     }
+    // The minimum counts recovery ticks, not deferrals: one tick defers every pending asset, so
+    // a burst across many of them is one sample. A tick asks each asset once, so an asset the
+    // current tick has deferred, deferring again, opens the next one. That holds at any cadence,
+    // where spacing the samples in time would have to assume one.
+    if (run.tickAssets.has(key)) {
+      run.ticks += 1;
+      run.tickAssets.clear();
+    }
+    // Past the ceiling an asset is not remembered; those that are still open the next tick.
+    if (run.tickAssets.size < MAX_TRACKED_ASSETS) run.tickAssets.add(key);
     run.lastAt = now;
-    run.deferrals += 1;
     return run;
   }
 

@@ -208,6 +208,53 @@ describe('NamedKaRecoveryPendingLog', () => {
     ]);
   });
 
+  it('a burst across many assets is one sample: two either side of a pause do not escalate', () => {
+    // Thirteen assets defer in one recovery tick, the process is suspended until five minutes
+    // after the first of them, and the next tick defers them again: fourteen deferrals by the
+    // first asset to defer, but two ticks. The summary still counts the deferrals.
+    const { clock, defer } = harness();
+    const names = Array.from({ length: 13 }, (_, index) => `ka-${index + 1}`);
+    const error = (name: string) => noViewDeferral(name, NO_ENDPOINT_SERVES);
+
+    for (const name of names) defer(name, error(name));
+    clock.now += NAMED_KA_RECOVERY_ENDPOINT_ESCALATION_AFTER_MS;
+
+    expect(names.flatMap((name) => defer(name, error(name)))).toEqual([
+      `Named KA recovery remains pending for 13 asset(s) after 5 min (14 deferrals): ${NO_VIEW_REASON}: ${NO_ENDPOINT_SERVES_WORDS}`,
+    ]);
+  });
+
+  it('after a burst and a shorter pause, the operator is told only once the run holds twelve ticks', () => {
+    // The same burst, four minutes of suspension, then a tick every 10 s: the run is five
+    // minutes old after eight ticks, and twelve come at 340 s.
+    const { clock, defer, run } = harness();
+    const names = Array.from({ length: 13 }, (_, index) => `ka-${index + 1}`);
+    const error = (name: string) => noViewDeferral(name, NO_ENDPOINT_SERVES);
+
+    for (const name of names) defer(name, error(name));
+    clock.now += 4 * MINUTE - TICK;
+    expect(operatorLines(run(names, MINUTE + 4 * TICK, error))).toEqual([]);
+    expect(operatorLines(run(names, TICK, error))).toEqual([OPERATOR_LINE(13, 6)]);
+  });
+
+  it.each([1, 13])('failures every 5 s still escalate on the tick that completes five minutes (%i asset(s))', (count) => {
+    const { clock, defer, lines } = harness();
+    const names = Array.from({ length: count }, (_, index) => `ka-${index + 1}`);
+    const error = (name: string) => noViewDeferral(name, NO_ENDPOINT_SERVES);
+    const tick = () => { for (const name of names) defer(name, error(name)); };
+
+    tick();
+    for (let elapsed = 5_000; elapsed < NAMED_KA_RECOVERY_ENDPOINT_ESCALATION_AFTER_MS; elapsed += 5_000) {
+      clock.now += 5_000;
+      tick();
+    }
+    expect(operatorLines(lines)).toEqual([]);
+
+    clock.now += 5_000;
+    tick();
+    expect(operatorLines(lines)).toEqual([OPERATOR_LINE(count, 5)]);
+  });
+
   it.each<[string, KnowledgeAssetVersionSnapshotUnavailable | undefined]>([
     ['a deadline cut the read short', {
       reason: 'aborted',
