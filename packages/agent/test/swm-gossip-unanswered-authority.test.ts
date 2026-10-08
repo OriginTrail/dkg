@@ -324,6 +324,40 @@ describe('shared-memory gossip reconcile whose authority check gets no answer', 
     }
   });
 
+  it('does not ask again, or subscribe, a graph whose subscription was withdrawn while its check was out', async () => {
+    const host = await subscribedHost([publicGraph, neverAnswers, publicGraph]);
+    const { authorityReads, manager, h, logged } = host;
+    useFakeClock();
+    try {
+      await host.reconcile();
+      expect(host.subscribed()).toBe(true);
+
+      const reconciled = host.reconcile();
+      await host.settled();
+      // The check is waiting for its chain read when the subscription is withdrawn.
+      expect(authorityReads).toHaveBeenCalledTimes(2);
+      h.agent.unsubscribeFromContextGraph(localCgId, { persist: false });
+      expect(host.subscribed()).toBe(false);
+      manager.subscribe.mockClear();
+
+      await vi.advanceTimersByTimeAsync(AUTHORITY_READ_TIMEOUT_MS);
+      await reconciled;
+      expect(logged('info')).toEqual([
+        expect.stringContaining('(registered-chain/chain-access-policy-timeout/chain)'),
+      ]);
+
+      // The chain would now answer that the graph is public. Nobody asks.
+      await vi.advanceTimersByTimeAsync(10 * RECHECK_MS);
+      await host.settled();
+      expect(manager.subscribe).not.toHaveBeenCalled();
+      expect(host.subscribed()).toBe(false);
+      expect(authorityReads).toHaveBeenCalledTimes(2);
+      expect(host.waiting()).toBe(0);
+    } finally {
+      await host.close();
+    }
+  });
+
   it('asks again a graph it was reconciling without a member subscription', async () => {
     const host = await subscribedHost([notAdmitted, publicGraph]);
     const { authorityReads, internals } = host;

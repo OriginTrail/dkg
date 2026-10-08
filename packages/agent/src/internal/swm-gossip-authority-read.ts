@@ -18,8 +18,14 @@ import { describeUnansweredAuthorityCheck } from './unanswered-authority-recheck
 
 export class SharedMemoryGossipAuthorityRead {
   readonly #read: UnansweredAuthorityObservation;
+  /** Whether the graph's member subscription was wanted when the check began. */
+  #subscribedAtCheck = false;
 
-  constructor(private readonly contextGraphId: string) {
+  constructor(
+    private readonly contextGraphId: string,
+    /** Whether the graph's member subscription is wanted at the time of the call. */
+    private readonly memberSubscribed: () => boolean,
+  ) {
     this.#read = new UnansweredAuthorityObservation(contextGraphId);
   }
 
@@ -29,6 +35,9 @@ export class SharedMemoryGossipAuthorityRead {
    * takes no more turns than awaiting it directly.
    */
   run<T>(check: () => T): T {
+    // Taken before the chain read: a member subscription withdrawn while the
+    // read is out must not make this pass look like one that held none.
+    this.#subscribedAtCheck = this.memberSubscribed();
     return this.#read.run(check);
   }
 
@@ -46,8 +55,6 @@ export class SharedMemoryGossipAuthorityRead {
     readonly isRegistered: boolean;
     readonly log: Pick<Logger, 'info' | 'debug'>;
     readonly ctx: OperationContext;
-    /** Whether the graph's member subscription is wanted at the time of the call. */
-    memberSubscribed(): boolean;
     /** Reconcile the graph's subscription again. */
     askAgain(): void;
   }): boolean {
@@ -57,11 +64,11 @@ export class SharedMemoryGossipAuthorityRead {
       recheck.settle(this.contextGraphId);
       return false;
     }
-    const subscribed = pass.memberSubscribed();
+    const subscribed = this.#subscribedAtCheck;
     const unansweredChecks = recheck.defer(this.contextGraphId, () => {
       // The repeat stands in for this pass. A member subscription that was
-      // withdrawn in the meantime has nothing left to decide.
-      if (subscribed && !pass.memberSubscribed()) return;
+      // withdrawn since the check began has nothing left to decide.
+      if (subscribed && !this.memberSubscribed()) return;
       pass.askAgain();
     });
     pass.log[unansweredChecks <= 1 ? 'info' : 'debug'](pass.ctx, describeUnansweredAuthorityCheck({

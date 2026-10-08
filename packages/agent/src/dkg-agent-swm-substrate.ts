@@ -905,12 +905,14 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       }
       return;
     }
-    const authorityRead = new SharedMemoryGossipAuthorityRead(contextGraphId);
+    const authorityRead = new SharedMemoryGossipAuthorityRead(
+      contextGraphId,
+      () => this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true,
+    );
     const canUseSharedMemory = await authorityRead.run(() => this.canUseSharedMemoryForContextGraph(contextGraphId));
     if (!session.active || this.gossipSession !== session) return;
     if (authorityRead.deferIfUnanswered({
       session, canUseSharedMemory, isRegistered, log: this.log, ctx,
-      memberSubscribed: () => this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true,
       askAgain: () => this.queueSharedMemoryGossipSubscription(contextGraphId),
     })) {
       // A core that holds no member subscription may still host the curated
