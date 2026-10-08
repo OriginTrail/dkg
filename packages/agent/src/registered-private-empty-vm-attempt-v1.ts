@@ -4,6 +4,7 @@ import { ethers } from 'ethers';
 import {
   createStrictCurrentFinalizedEvmSnapshotScopeV1,
   isFinalizedChainAdmissionContention,
+  numericChainIdOf,
   resolveRpcUrls,
 } from '@origintrail-official/dkg-chain';
 import {
@@ -81,15 +82,19 @@ export async function attemptRegisteredPrivateEmptyVmV1(
     }
     const endpoints = resolveRpcUrls(chainConfig.rpcUrl ?? '', chainConfig.rpcUrls);
     if (endpoints.length === 0) { tracePrivateEmptyVm('rpc-endpoints-absent'); return UNPROVEN_PRIVATE_EMPTY_VM; }
-    const configuredChainId = chainConfig.chainId?.match(/^evm:(0|[1-9][0-9]*)$/u)?.[1];
+    // The adapter's own reading of a configured chain: a decimal id behind any
+    // namespace. The network files name theirs `base:8453`, `gnosis:100`, and
+    // so on; only a local chain is `evm:31337`.
+    const configuredChainId = numericChainIdOf(chainConfig.chainId);
     if ((chainConfig.chainId !== undefined && configuredChainId === undefined)
       || !ethers.isAddress(chainConfig.hubAddress)) {
       tracePrivateEmptyVm('chain-binding-absent'); return UNPROVEN_PRIVATE_EMPTY_VM;
     }
-    const chainId = (await bindings.readAdapterEvmChainId()).toString();
-    if (configuredChainId !== undefined && configuredChainId !== chainId) {
+    const adapterChainId = await bindings.readAdapterEvmChainId();
+    if (configuredChainId !== undefined && configuredChainId !== adapterChainId) {
       tracePrivateEmptyVm('chain-binding-mismatch'); return UNPROVEN_PRIVATE_EMPTY_VM;
     }
+    const chainId = adapterChainId.toString();
     // Normalize external bindings once. The registry supplies the graph name;
     // it is not restricted to the RFC-64 author-lane grammar.
     const hubAddress = chainConfig.hubAddress.toLowerCase();
