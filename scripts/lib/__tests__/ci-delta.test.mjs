@@ -236,6 +236,7 @@ test('leaf and shared package snapshots include conservative downstream consumer
 
   const core = pullRequestPlan([change('packages/core/src/index.ts')]);
   assert.deepEqual(selectedLanes(core), [
+    'chain_rpc_node26',
     'tornado_core',
     'tornado_blazegraph',
     'tornado_publisher',

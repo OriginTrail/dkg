@@ -32,6 +32,18 @@ Thank you for your interest in contributing to the OriginTrail Decentralized Kno
   - `test:` for adding or updating tests
   - `chore:` for tooling, CI, or dependency changes
 
+## Source file size
+
+Run `pnpm check:file-size` before opening a source change. New handwritten
+`packages/*/src` TypeScript files are limited to 800 lines. Existing oversized
+files have exact budgets in `scripts/file-size-baseline.json`; extract code
+before adding a responsibility that would exceed a budget. Tests, generated
+bindings, declarations, and build output are excluded.
+
+After an extraction, run `pnpm check:file-size --write` to lower the recorded
+budgets. This command refuses growth and new oversized files once the baseline
+exists. The same check runs with the other audits in CI.
+
 ## Pull Request Process
 
 1. Create a feature branch from `testnet-canary`:

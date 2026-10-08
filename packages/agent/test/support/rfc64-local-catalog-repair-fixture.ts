@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -19,7 +20,13 @@ import {
   type EvmAddressV1,
   type NetworkIdV1,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  GraphManager,
+  OxigraphStore,
+  type Quad,
+  type StorePriorityScheduler,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 import {
   computeFlatKCRootV10,
   storeKnowledgeAssetOperationPublicQuads,
@@ -88,6 +95,8 @@ interface StartRepairAgentOptionsV1 {
   readonly name: string;
   readonly dataDir?: string;
   readonly storePath?: string;
+  /** Replaces the in-memory store, for example with {@link scheduledRepairStoreV1}. */
+  readonly store?: TripleStore;
   readonly syncContextGraphs?: readonly string[];
   readonly autoPublish?: Rfc64PublicCatalogAutoPublishConfigV1;
   readonly bootstrap?: Rfc64PublicCatalogBootstrapConfigV1;
@@ -108,7 +117,7 @@ export async function startRepairAgentV1(
     listenPort: 0,
     bootstrapPeers: [],
     nodeRole: 'edge',
-    store: new OxigraphStore(options.storePath),
+    store: options.store ?? new OxigraphStore(options.storePath),
     syncSharedMemoryOnConnect: false,
     syncReconcilerEnabled: false,
     vmReconcilerEnabled: false,
@@ -139,6 +148,49 @@ export async function startRepairAgentV1(
   await options.beforeStart?.(agent);
   await agent.start();
   return agent;
+}
+
+/**
+ * A store whose queries are admitted by `scheduler`, as the daemon's store
+ * adapters admit theirs, and which reports that scheduler's pressure. `observe`
+ * runs work and reports how many queries that work held at once, admitted or
+ * still waiting.
+ */
+export function scheduledRepairStoreV1(inner: TripleStore, scheduler: StorePriorityScheduler) {
+  const windows = new AsyncLocalStorage<{ held: number; mostHeld: number; queries: number }>();
+  const store = new Proxy(inner, {
+    get(target, property) {
+      if (property === 'getPressureSnapshot') return () => scheduler.snapshot;
+      const value: unknown = Reflect.get(target, property, target);
+      if (typeof value !== 'function') return value;
+      if (property !== 'query') return value.bind(target);
+      const query: TripleStore['query'] = (sparql, options) => {
+        const window = windows.getStore();
+        if (window !== undefined) {
+          window.queries += 1;
+          window.held += 1;
+          window.mostHeld = Math.max(window.mostHeld, window.held);
+        }
+        return scheduler.run(
+          options?.priority,
+          options?.source ?? 'repair-fixture.query',
+          () => target.query(sparql, options),
+          options?.signal,
+        ).finally(() => {
+          if (window !== undefined) window.held -= 1;
+        });
+      };
+      return query;
+    },
+  });
+  return {
+    store,
+    async observe<T>(work: () => Promise<T>) {
+      const window = { held: 0, mostHeld: 0, queries: 0 };
+      const result = await windows.run(window, work);
+      return { result, mostHeld: window.mostHeld, queries: window.queries };
+    },
+  };
 }
 
 export function catalogScopeDigestV1(): Digest32V1 {

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { RegisteredContextGraphAuthorityUnavailableReason } from
-  '../../registered-context-graph-authority.js';
+import type {
+  ContextGraphAuthorityFailureSite,
+  RegisteredContextGraphAuthorityUnavailableReason,
+} from '../../registered-context-graph-authority.js';
 
 const REGISTERED_CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASON_REGISTRY = Object.freeze({
   'finalized-name-absence-unaccepted': true,
@@ -89,15 +91,22 @@ export class ContextGraphAuthorityUnavailableError extends Error {
   readonly code = CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_CODE;
   readonly reason: ContextGraphAgentGateUnavailableReason;
   readonly detail?: string;
+  /** Which check of the recipient stability loop raised it, when one did. */
+  readonly site?: ContextGraphAuthorityFailureSite;
 
   constructor(
     message: string,
-    options: { reason: ContextGraphAgentGateUnavailableReason; detail?: string },
+    options: {
+      reason: ContextGraphAgentGateUnavailableReason;
+      detail?: string;
+      site?: ContextGraphAuthorityFailureSite;
+    },
   ) {
     super(message);
     this.name = CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_ERROR_NAME;
     this.reason = options.reason;
     if (options.detail !== undefined) this.detail = options.detail;
+    if (options.site !== undefined) this.site = options.site;
   }
 }
 
@@ -119,10 +128,37 @@ export function isContextGraphAuthorityUnavailableMarker(
 
 export function createContextGraphAuthorityError(
   message: string,
-  failure: { reason: ContextGraphAgentGateUnavailableReason; detail?: string },
+  failure: {
+    reason: ContextGraphAgentGateUnavailableReason;
+    detail?: string;
+    site?: ContextGraphAuthorityFailureSite;
+  },
 ): ContextGraphAuthorityUnavailableError {
   return new ContextGraphAuthorityUnavailableError(message, {
     reason: failure.reason,
     ...(failure.detail === undefined ? {} : { detail: failure.detail }),
+    ...(failure.site === undefined ? {} : { site: failure.site }),
   });
+}
+
+/** The details of the recipient stability loop's refusals; kept as the callers match them. */
+const RECIPIENT_AUTHORITY_CHANGED_DETAIL = Object.freeze({
+  'transport-changed': 'retry recipient resolution against the current private authority',
+  'revision-moved': 'retry recipient resolution against the current private authority',
+  'recipient-set-changed': 'recipient routes changed while retrying against current private authority',
+} as const satisfies Record<Exclude<ContextGraphAuthorityFailureSite, 'transport-unavailable'>, string>);
+
+/** The refusal of the recipient stability loop: the private authority moved while keys resolved. */
+export function createRecipientAuthorityChangedError(
+  contextGraphId: string,
+  site: keyof typeof RECIPIENT_AUTHORITY_CHANGED_DETAIL,
+): ContextGraphAuthorityUnavailableError {
+  return createContextGraphAuthorityError(
+    `Context graph "${contextGraphId}" private authority changed while recipient keys were resolving`,
+    {
+      reason: 'chain-participant-authority-unavailable',
+      detail: RECIPIENT_AUTHORITY_CHANGED_DETAIL[site],
+      site,
+    },
+  );
 }

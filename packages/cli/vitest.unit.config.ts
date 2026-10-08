@@ -37,6 +37,7 @@ export default defineConfig({
           'test/async-vm-publish-registration.test.ts',
           // #2892 — real in-memory queue and supervisor; no chain or daemon process.
           'test/async-promote-supervisor-bookkeeping.test.ts',
+          'test/promote-queue-config.test.ts',
           // #1828 — durable-admission recovery lookup route (pure handler, no hardhat).
           'test/publisher-job-by-intent-route.test.ts',
           'test/publisher-journal-route.test.ts',
@@ -116,6 +117,7 @@ export default defineConfig({
           'test/context-graph-on-chain-id-helpers.test.ts',
           'test/context-graph-readiness-swm-shortfall.test.ts',
           'test/context-graph-readiness-migration.test.ts',
+          'test/catalog-readiness-replay-integration.test.ts',
           // R9 — PCA advisory wire derivation (pure) + CLI register-agent output
           // rendering (in-process, mocked ApiClient). No hardhat/daemon.
           'test/pca-confirmation-wire.test.ts',
@@ -301,6 +303,15 @@ export default defineConfig({
           // Local-agent bridge routes are mocked HTTP/runtime tests; include
           // timeout attribution regressions in the fast unit lane too.
           'test/daemon-openclaw.part-*.test.ts',
+          // Canonical spec of the shared durable-turn owner (created / duplicate /
+          // transition ranking, per-turn lock, failure paths) behind the three
+          // local-agent persist-turn routes below; a fake store, no hardhat.
+          'test/chat-turn-persistence.test.ts',
+          'test/daemon-openclaw-persistence.test.ts',
+          // The persist-turn answer of all three channels, per outcome, as raw text.
+          'test/durable-chat-turn-response.test.ts',
+          // Real DKGAgent + real chat-memory stack behind a real HTTP server; no hardhat.
+          'test/openclaw-persist-turn.e2e.test.ts',
           'test/daemon-hermes.test.ts',
           'test/daemon-prime-agent.test.ts',
           'test/daemon-prime-agent-persistence.test.ts',

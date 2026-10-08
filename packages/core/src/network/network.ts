@@ -51,7 +51,22 @@ export interface PeerConnectOpts {
   candidateTimeoutMs?: number;
   /** Optional diagnostic sink for the transport's candidate walk. */
   log?: (message: string) => void;
+  /** Recovery already tried the cached peer-ID route before resolution. */
+  skipIdentityFallback?: boolean;
+  /** Explicitly try resolved, terminal target-bound private direct routes. */
+  allowResolvedPrivateDirect?: boolean;
 }
+
+interface PeerRecoveryStageBase {
+  signal?: AbortSignal;
+  timeoutMs: number;
+  log?: (message: string) => void;
+}
+
+export type PeerRecoveryStageOpts = PeerRecoveryStageBase & (
+  | { kind: 'hint'; /** Caller-validated and peer-bound. */ address: Address }
+  | { kind: 'cached'; address?: never }
+);
 
 /**
  * Handler invoked for every inbound stream on a registered protocol.
@@ -159,6 +174,11 @@ export interface PeerConnectionNetwork extends Network {
     resolvedAddresses: readonly Address[],
     opts?: PeerConnectOpts,
   ): Promise<void>;
+  /** Optional fast path for a verified hint or cached peer before resolution. */
+  tryConnectRecoveryStage?(
+    peerId: NodeIdentity,
+    stage: PeerRecoveryStageOpts,
+  ): Promise<boolean>;
 }
 
 /**

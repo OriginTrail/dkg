@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "testedPrHeadCommit": "adb8aa2b1746daeea55dca421d8ffa7f297e4949",
+  "runUrl": "https://github.com/OriginTrail/dkg/actions/runs/37549501908",
+  "nodeMajorConfigured": 22,
+  "pnpmVersionAsserted": "10.28.1",
+  "checksExecuted": [
+    "actual pinned pnpm launch",
+    "owned descendant stopped on timeout",
+    "owned descendant stopped on cancellation",
+    "unrelated sentinel process survives both terminations",
+    "output held by a descendant outside the owned tree settles in bounded time and fails the phase"
+  ],
+  "checkInputs": {
+    "scripts/qa-check-regression-launcher.mjs": "41fd7dbd31f6b4c2d81dfa6e29aa86ba4994d34445f147a47b77fc66055ce525",
+    "scripts/lib/regressions/launcher-checks.mjs": "b135e1acfbb271f22bb1400d6fb425e1659ec67bd36b896c59ce75e7c8932236",
+    "scripts/lib/regressions/subprocess.mjs": "d558f259750524f359eeb7e9f4b09ca0175a0ca862c5a5d14c8b9793b21f385c",
+    "scripts/lib/regressions/phases.mjs": "67560288acf041b6221fe443baa033ea1269232fb10e5387ce48a9be08e578f6"
+  },
+  "verification": "Both required Windows steps completed successfully; full workflow completion is separate.",
+  "jobs": [
+    {
+      "name": "inventory-windows / SQLite lifecycle (Windows, object-stores)",
+      "jobUrl": "https://github.com/OriginTrail/dkg/actions/runs/37549501908/job/112561428639",
+      "jobStatusAtObservation": "completed",
+      "step": {
+        "name": "Check regression proof launcher and process cleanup",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 6,
+        "started_at": "2026-10-07T00:00:37Z",
+        "completed_at": "2026-10-07T00:00:43Z"
+      }
+    },
+    {
+      "name": "inventory-windows / SQLite lifecycle (Windows, inventory)",
+      "jobUrl": "https://github.com/OriginTrail/dkg/actions/runs/37549501908/job/112561428711",
+      "jobStatusAtObservation": "completed",
+      "step": {
+        "name": "Check regression proof launcher and process cleanup",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 6,
+        "started_at": "2026-10-07T00:00:50Z",
+        "completed_at": "2026-10-07T00:00:55Z"
+      }
+    }
+  ]
+}

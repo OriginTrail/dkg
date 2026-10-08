@@ -61,6 +61,7 @@ jobs:
       full_ci: ${{ steps.plan.outputs.full_ci }}
       run_node: ${{ steps.plan.outputs.run_node }}
       node_test_artifacts: ${{ steps.plan.outputs.node_test_artifacts }}
+      chain_rpc_node26: ${{ steps.plan.outputs.chain_rpc_node26 }}
       tornado_core: ${{ steps.plan.outputs.tornado_core }}
       tornado_blazegraph: ${{ steps.plan.outputs.tornado_blazegraph }}
       tornado_publisher: ${{ steps.plan.outputs.tornado_publisher }}
@@ -94,7 +95,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: OriginTrail/dkg
-          ref: dfb3460719c13d592e2bb4d7d3c29fe55567fbe3
+          ref: 8af04a376332c17527ce0f7dffaac8432ba1a9b3
           persist-credentials: false
           path: trusted-ci
           sparse-checkout: |
@@ -155,6 +156,12 @@ jobs:
       # has finalized its outputs, so it cannot influence test selection.
       - name: Validate npm metadata points to v10
         run: node candidate/scripts/check-npm-metadata.mjs
+
+  # Source-only transport regressions use the supported runtime independently.
+  chain-rpc-node26:
+    needs: changes
+    if: needs.changes.outputs.chain_rpc_node26 == 'true'
+    uses: ./.github/workflows/chain-rpc-node26.yml
 
   # ------------------------------------------------------------------
   # One canonical build. Every test job downloads this artifact instead
@@ -233,6 +240,12 @@ jobs:
 
       - name: Test audit-dial-protocol lexer
         run: node --test scripts/audit-dial-protocol.test.mjs
+
+      - name: Audit source file size
+        run: node scripts/audit-file-size.mjs
+
+      - name: Test source file-size guard
+        run: node --test scripts/audit-file-size.test.mjs
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -1556,6 +1569,7 @@ jobs:
     if: always()
     needs:
       - changes
+      - chain-rpc-node26
       - build
       - evm-node-test-artifacts
       - evm-devnet-test-artifacts
@@ -1585,7 +1599,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: OriginTrail/dkg
-          ref: dfb3460719c13d592e2bb4d7d3c29fe55567fbe3
+          ref: 8af04a376332c17527ce0f7dffaac8432ba1a9b3
           persist-credentials: false
           path: trusted-ci
           sparse-checkout: |
