@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { setTimeout as sleep } from 'node:timers/promises';
+import { contextGraphAuthorityProjectionAnchorProvenByLogV1, contextGraphFinalizedNameAbsenceAnchorHoldsV1, peekRetainedAuthoritySnapshotsV1 } from './evm-context-graph-authority-retained.js';
+export { contextGraphAuthorityProjectionAnchorProvenByLogV1, contextGraphFinalizedNameAbsenceAnchorHoldsV1 } from './evm-context-graph-authority-retained.js';
+import { snapshotAuthorityRevisionTargetsV1, snapshotAuthorityNameHashTargetsV1, authoritySnapshotV1, projectAuthoritySnapshotsByNameHashesV1 } from './evm-context-graph-authority-snapshot.js';
 import { ethers, type Contract, type JsonRpcProvider } from 'ethers';
 import type {
   ContextGraphAuthorityReadOptions,
@@ -15,8 +18,6 @@ import {
   isContextGraphAuthorityIndexRetryableError,
   type ContextGraphAuthorityIndexScanInput,
 } from './context-graph-authority-index.js';
-import type { ContextGraphAuthorityIndexState } from
-  './context-graph-authority-index-checkpoint.js';
 import type { RawContextGraphAuthorityIndexEvent } from
   './context-graph-authority-index-reducer.js';
 import {
@@ -36,7 +37,6 @@ import type {
 import type { ChainEventLogAuthoritySource } from './chain-event-log-binding.js';
 import type { ChainIndexAuthorityAnchor } from './chain-index/index.js';
 import {
-  assertContextGraphAuthorityIndexId,
   contextGraphAuthorityIndexIdFromBigInt,
   type ContextGraphAuthorityIndexId,
 } from './context-graph-authority-index-id.js';
@@ -47,15 +47,17 @@ import {
   decodeContextGraphAuthorityIndexLog,
 } from './evm-context-graph-authority-source.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
-import { RPC_LOG_SCAN_TIMEOUT_MS } from './evm-adapter-constants.js';
 import { resolveEvmFinalityAnchorWithHeadV1 } from './evm-finality-anchor.js';
 import type { ReadOpts } from './rpc-failover-client.js';
 import {
-  withOwnedRpcRequestContext,
   withRpcRequestContext,
-  withRpcRequestTimeout,
 } from './rpc-request-transport.js';
 import { withRpcUsageConsumer } from './rpc-usage.js';
+
+import { readEvmContextGraphAuthorityIndexRpcV1, readOwnedAuthorityIndexRpcV1, retryCachedAuthorityIndexHeadV1 } from './evm-context-graph-authority-index-rpc.js';
+export { readEvmContextGraphAuthorityIndexRpcV1 } from './evm-context-graph-authority-index-rpc.js';
+import { contextGraphAuthorityAnchorUnavailableV1 } from './context-graph-authority-index-errors.js';
+export { contextGraphAuthorityAnchorUnavailableV1 } from './context-graph-authority-index-errors.js';
 
 function isContextGraphAuthorityIndexProviderRetryableV1(
   error: unknown,
@@ -67,7 +69,7 @@ function isContextGraphAuthorityIndexProviderRetryableV1(
   );
 }
 
-/** A local one-log CAS fence moved; retry locally before spending failover. */
+/** A local log revision moved; this is not evidence of an RPC outage. */
 class ContextGraphAuthorityIndexLogAnchorMovedError extends
   ContextGraphAuthorityIndexRetryableError {}
 
@@ -79,66 +81,6 @@ class ContextGraphAuthorityIndexLogAnchorMovedError extends
  */
 const CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_LOG_RANGE_BLOCKS_V1 = 10_000;
 
-/** Refresh an ethers-cached tip once before classifying cursor skew as endpoint failure. */
-async function retryCachedAuthorityIndexHeadV1<T>(
-  read: () => Promise<T>,
-  lifecycleSignal: AbortSignal,
-  callerSignal?: AbortSignal,
-): Promise<T> {
-  try {
-    return await read();
-  } catch (error) {
-    if (!isContextGraphAuthorityIndexRetryableError(error)
-      || error.reason !== 'cursor-ahead') throw error;
-    // Rapid writes can advance the durable cursor while `getBlock('latest')`
-    // still returns a recently cached block from this very endpoint. A
-    // persistent lag remains retryable and takes the usual endpoint failover.
-    await sleep(300, undefined, { signal: lifecycleSignal });
-    callerSignal?.throwIfAborted();
-    return read();
-  }
-}
-
-/** Bound one physical authority-index RPC without capping the durable scan. */
-export function readEvmContextGraphAuthorityIndexRpcV1<T>(
-  operation: string,
-  read: () => Promise<T>,
-  signal?: AbortSignal,
-): Promise<T> {
-  const bounded = () => withRpcRequestTimeout(
-    RPC_LOG_SCAN_TIMEOUT_MS,
-    operation,
-    read,
-  );
-  return signal === undefined
-    ? bounded()
-    : withRpcRequestContext({ signal }, bounded);
-}
-
-/**
- * The single fail-closed error both authority-anchor resolvers raise.
- *
- * The message is preserved verbatim as a prefix: it is the contract callers
- * (and operators reading logs) already recognize. The detail only says which
- * step of the anchor resolution failed.
- *
- * RETRYABLE by type, not by message. Every condition it reports — a head an
- * endpoint could not answer, an anchor below the configured depth, a block that
- * came back at the wrong height — is one that a different endpoint or a later
- * attempt can satisfy, so it must fail over rather than abort the authority
- * read that gates catalog admission. Typing it also keeps it away from
- * `classifyRpcRetryDisposition`'s message regex, which alternates bare
- * `429|503|502|500` with no word boundaries: the details here interpolate block
- * numbers, so a head of 31500123 would classify as `failover` and 31499123 as
- * `fail` purely on its digits.
- */
-export function contextGraphAuthorityAnchorUnavailableV1(
-  detail: string,
-): ContextGraphAuthorityIndexRetryableError {
-  return new ContextGraphAuthorityIndexRetryableError(
-    `finalized Context Graph authority block is unavailable: ${detail}`,
-  );
-}
 
 type ContextGraphAuthorityLogFoldAdmission =
   | Readonly<{ kind: 'served' }>
@@ -156,21 +98,6 @@ function admitContextGraphAuthorityLogFold<T>(
   } catch (fault) {
     return Object.freeze({ kind: 'fault' as const, fault });
   }
-}
-
-/**
- * Shared page/hash work belongs to the authority-index lifecycle, not to the
- * first caller whose AsyncLocalStorage context starts the single flight.
- */
-function readOwnedAuthorityIndexRpcV1<T>(
-  lifecycleSignal: AbortSignal,
-  operation: string,
-  read: () => Promise<T>,
-): Promise<T> {
-  return withOwnedRpcRequestContext(
-    { signal: lifecycleSignal },
-    () => readEvmContextGraphAuthorityIndexRpcV1(operation, read),
-  );
 }
 
 function boundedAuthorityIndexPageSizeV1(pageSize: number): number {
@@ -216,66 +143,6 @@ type EvmContextGraphAuthorityIndexReadInputV1 = Readonly<{
     source: ChainEventLogAuthoritySource;
   }>;
 }>;
-
-/**
- * Can the LOG alone prove a retained fold's anchor is still current?
- *
- * The projection cache re-validates the anchor of any retained projection that
- * carries an unsettled tail, and until now that was always a block read — on a
- * measured six-node run, `authorityProjection.validateAnchor` was 982 requests,
- * 8.7% of a private cell, and the single largest consumer of
- * `eth_getBlockByNumber`. But a fold that came from the event log already
- * carries the anchor it was admitted under, and when the tick has not committed
- * since, the log's own CAS token proves that the LOCAL indexed generation has
- * not moved. That costs no RPC.
- *
- * This is deliberately the same bounded-consistency contract as every direct
- * answer from the one-log fast path: it does NOT independently ask the chain
- * whether the anchor is still canonical between ticks. The tick's fetch-time
- * and chain-time freshness limits bound that window. A caller that requires a
- * fresh external-canonicality proof must continue to use the provider path.
- *
- * IT MAY ONLY EVER ANSWER YES. Its return type makes that invariant explicit:
- * `true` is local proof and `undefined` means the local log cannot prove the
- * anchor, so the caller must continue to the provider. Two reasons matter:
- *
- *  - A moved revision does not prove a reorg. It proves the tick committed,
- *    which is the ordinary case once per `chain.indexTickMs`. The log stores a
- *    hash for exactly two blocks — its observed head and its settled boundary
- *    (`ChainEventLogCursor`) — so it cannot speak for the mid-window block a
- *    retained fold is usually anchored at, and silence is not a mismatch.
- *  - `false` is not "unproven" to the cache: it reads it as proof of a
- *    fork and DROPS the whole scope's projection. Answering `false` on a
- *    commit would turn a routine tick into a full rescan.
- *
- * So every case this cannot prove, including a local-store read error, falls
- * through to the block read unchanged. A scan-origin projection has no anchor
- * and always does.
- */
-export async function contextGraphAuthorityProjectionAnchorProvenByLogV1(
-  cached: ContextGraphAuthorityIndexProjection,
-  currentSource: ChainEventLogAuthoritySource | undefined,
-  currentContractAddress: string,
-): Promise<true | undefined> {
-  const anchor = cached.origin.kind === 'log' ? cached.origin.anchor : undefined;
-  if (anchor === undefined || currentSource === undefined) return undefined;
-  // The LATE-BOUND owner, not the one that produced the fold. A Hub rotation or
-  // runtime rebuild may have replaced the source since, and a retired
-  // generation's token must not vouch for rows it no longer owns — even when it
-  // happens to have kept the same physical address.
-  const cachedContractAddress = cached.contractAddress.toLowerCase();
-  const sourceContractAddress = currentSource.contractAddress.toLowerCase();
-  const boundContractAddress = currentContractAddress.toLowerCase();
-  if (cachedContractAddress !== boundContractAddress
-    || sourceContractAddress !== boundContractAddress) return undefined;
-  try {
-    return await currentSource.anchorHolds(anchor) ? true : undefined;
-  } catch {
-    // This is an optional local proof. A store failure must not replace the
-    // provider-backed validation that existed before the optimization.
-    return undefined;
-  }
-}
 
 /**
  * How far below the anchor the durable cursor is held back, for one depth.
@@ -497,57 +364,6 @@ interface EvmContextGraphAuthorityIndexRevisionReaderDependenciesV1 {
    * coverage recorded for a retired `ContextGraphStorage`.
    */
   readonly chainEventLogAuthority?: () => ChainEventLogAuthoritySource | undefined;
-}
-
-function snapshotAuthorityRevisionTargetsV1(
-  contextGraphIds: unknown,
-): readonly ContextGraphAuthorityIndexId[] {
-  if (!Array.isArray(contextGraphIds)) {
-    throw new Error('Context Graph authority revision target set is invalid');
-  }
-  const targets = new Set<ContextGraphAuthorityIndexId>();
-  for (const contextGraphId of contextGraphIds as readonly unknown[]) {
-    assertContextGraphAuthorityIndexId(
-      contextGraphId,
-      'Context Graph authority revision target id',
-    );
-    targets.add(contextGraphId);
-  }
-  return Object.freeze([...targets]);
-}
-
-function snapshotAuthorityNameHashTargetsV1(
-  nameHashes: unknown,
-): readonly string[] {
-  if (!Array.isArray(nameHashes)) {
-    throw new Error('Context Graph authority name-hash target set is invalid');
-  }
-  const targets = new Set<string>();
-  for (const nameHash of nameHashes as readonly unknown[]) {
-    if (typeof nameHash !== 'string' || !ethers.isHexString(nameHash, 32)) {
-      throw new TypeError('Context Graph authority name-hash target must be bytes32');
-    }
-    const normalized = nameHash.toLowerCase();
-    if (normalized !== ethers.ZeroHash) targets.add(normalized);
-  }
-  return Object.freeze([...targets]);
-}
-
-function authoritySnapshotV1(
-  state: ContextGraphAuthorityIndexState,
-  chainId: string,
-  contractAddress: string,
-): ContextGraphAuthoritySnapshot {
-  return Object.freeze({
-    chainId,
-    governanceContract: contractAddress,
-    ...state,
-    contextGraphId: state.contextGraphId,
-    ownershipEra: state.ownershipEra.toString(10),
-    policyVersion: state.policyVersion.toString(10),
-    rosterVersion: state.rosterVersion.toString(10),
-    sourceBlockNumber: state.sourceBlockNumber.toString(10),
-  });
 }
 
 /** Physical provider attempts outlive a cancelled caller and must be drained. */
@@ -790,15 +606,14 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
           } catch (error) {
             options.signal?.throwIfAborted();
             projectionSignal.throwIfAborted();
-            if (!isContextGraphAuthorityIndexRetryableError(error)) throw error;
-            // A tick commit moves the local revision without implicating this
-            // RPC endpoint. Reacquire the new generation once; if it moves
-            // again, use this same provider's live scan rather than consuming
-            // an endpoint failover or falsely exhausting a single-provider set.
+            // Retry the new local revision once, then scan this provider live.
+            // Ordinary log commits must not consume endpoint failover or open
+            // the authority circuit when the provider remains healthy.
             if (error instanceof ContextGraphAuthorityIndexLogAnchorMovedError) {
               if (logAttempt === 0) continue;
               break;
             }
+            if (!isContextGraphAuthorityIndexRetryableError(error)) throw error;
             // Retrying the same local rows cannot lift a fold above the
             // durable horizon. Fall through to this provider's live view; if
             // the endpoint also trails, the outer pool can try a sibling.
@@ -1106,48 +921,58 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
   };
 
   // An absent name binding is reusable only at the SAME finalized block and
-  // hash. A fresh head check is much cheaper than replaying the contract's
-  // event log for every read, while a new registration or reorg still forces
-  // the ordinary live scan before any unregistered authority is accepted.
+  // hash. A live caller proves that against the provider. A bounded caller may
+  // instead use the chain event log's generation fence: its tick/freshness
+  // contract bounds staleness, and a moved local generation declines to the
+  // provider path. This keeps repeatable query/sync authorization available
+  // while a single endpoint is saturated without weakening mutation/key gates.
   const validateFinalizedNameAbsence = (
     operationLabel: string,
     options: ContextGraphAuthorityReadOptions,
   ) => async (
     cached: ContextGraphAuthorityIndexProjection,
   ): Promise<ContextGraphAuthorityIndexIncompleteProjectionAdmission> => {
-    const current = await dependencies.readTipProvider(
-      `${operationLabel} absent-name finality`,
-      (provider) => resolveEvmFinalityAnchorWithHeadV1({
-        finalityConfirmations: dependencies.finalityConfirmations(),
-        readHead: () => withRpcUsageConsumer(
-          'authorityProjection.absentNameHead',
-          () => readEvmContextGraphAuthorityIndexRpcV1(
-            `${operationLabel} absent-name chain head`,
-            () => provider.getBlock('latest'),
-            options.signal,
-          ),
-        ),
-        readBlockAt: (blockNumber) => withRpcUsageConsumer(
-          'authorityProjection.absentNameAnchor',
-          () => readEvmContextGraphAuthorityIndexRpcV1(
-            `${operationLabel} absent-name anchor block ${blockNumber}`,
-            () => provider.getBlock(blockNumber),
-            options.signal,
-          ),
-        ),
-        unavailable: contextGraphAuthorityAnchorUnavailableV1,
-      }),
-      {
-        signal: options.signal,
-        isRetryable: (error: unknown) => (
-          isContextGraphAuthorityIndexProviderRetryableV1(error, options.signal)
-        ),
+    const contractAddress = await dependencies.requireContextGraphStorage().getAddress();
+    const anchorHolds = await contextGraphFinalizedNameAbsenceAnchorHoldsV1(cached, options, {
+      currentSource: dependencies.chainEventLogAuthority?.(),
+      contractAddress,
+      readCurrentFinalized: async () => {
+        const current = await dependencies.readTipProvider(
+          `${operationLabel} absent-name finality`,
+          (provider) => resolveEvmFinalityAnchorWithHeadV1({
+            finalityConfirmations: dependencies.finalityConfirmations(),
+            readHead: () => withRpcUsageConsumer(
+              'authorityProjection.absentNameHead',
+              () => readEvmContextGraphAuthorityIndexRpcV1(
+                `${operationLabel} absent-name chain head`,
+                () => provider.getBlock('latest'),
+                options.signal,
+              ),
+            ),
+            readBlockAt: (blockNumber) => withRpcUsageConsumer(
+              'authorityProjection.absentNameAnchor',
+              () => readEvmContextGraphAuthorityIndexRpcV1(
+                `${operationLabel} absent-name anchor block ${blockNumber}`,
+                () => provider.getBlock(blockNumber),
+                options.signal,
+              ),
+            ),
+            unavailable: contextGraphAuthorityAnchorUnavailableV1,
+          }),
+          {
+            signal: options.signal,
+            isRetryable: (error: unknown) => (
+              isContextGraphAuthorityIndexProviderRetryableV1(error, options.signal)
+            ),
+          },
+        );
+        return current.finalized;
       },
-    );
-    options.signal?.throwIfAborted();
-    const anchorMatches = cached.finalized.number === current.finalized.number
-      && cached.finalized.hash.toLowerCase() === current.finalized.hash.toLowerCase();
-    return anchorMatches
+    });
+    // Either proof (the bounded local generation fence, or the provider's
+    // current finalized block and hash) is the same proof the tail-anchor
+    // validator would accept, so admission also carries the validated anchor.
+    return anchorHolds
       ? Object.freeze({ admitted: true as const, anchorValidated: true })
       : Object.freeze({ admitted: false as const });
   };
@@ -1185,13 +1010,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
     return readFinalizedProjection(
       operationLabel,
       options,
-      ({ view, chainId, contractAddress }) => {
-        const snapshots = new Map<string, ContextGraphAuthoritySnapshot>();
-        for (const [nameHash, state] of view.statesByNameHashes(nameHashes)) {
-          snapshots.set(nameHash, authoritySnapshotV1(state, chainId, contractAddress));
-        }
-        return { complete: snapshots.size === nameHashes.length, value: snapshots };
-      },
+      (projection) => projectAuthoritySnapshotsByNameHashesV1(nameHashes, projection),
       validateFinalizedNameAbsence(operationLabel, options),
     );
   };
@@ -1449,6 +1268,25 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       options: ContextGraphAuthorityReadOptions = {},
     ): Promise<ReadonlyMap<string, ContextGraphAuthoritySnapshot>> {
       return resolveFinalizedSnapshotsByNameHashes(nameHashes, options);
+    },
+    async peekFinalizedContextGraphAuthoritySnapshotsByNameHashes(
+      nameHashes: readonly string[],
+      options: ContextGraphAuthorityReadOptions = {},
+    ): Promise<ReadonlyMap<string, ContextGraphAuthoritySnapshot> | undefined> {
+      assertOpen();
+      options.signal?.throwIfAborted();
+      // No initialize/getAddress: either could resolve a dependency using RPC.
+      if (ownScope === undefined) return undefined;
+      const contractAddress = dependencies.requireContextGraphStorage().target;
+      if (typeof contractAddress !== 'string' || !ethers.isAddress(contractAddress)) return undefined;
+      const result = await peekRetainedAuthoritySnapshotsV1({
+        index: dependencies.index, deploymentId: dependencies.deploymentId,
+        contractAddress, currentSource: dependencies.chainEventLogAuthority,
+      }, nameHashes, options);
+      assertOpen();
+      options.signal?.throwIfAborted();
+      if (dependencies.requireContextGraphStorage().target !== contractAddress) return undefined;
+      return result;
     },
     async readContextGraphAuthorityIndexRevisions(
       contextGraphIds: readonly ContextGraphAuthorityIndexId[],

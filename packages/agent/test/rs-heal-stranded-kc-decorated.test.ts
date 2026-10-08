@@ -30,6 +30,7 @@ import { extractV10KCFromStore } from '@origintrail-official/dkg-random-sampling
 import { writeMaterializedVersion } from '@origintrail-official/dkg-publisher';
 import { SwmHostModeMethods } from '../src/dkg-agent-swm-host.js';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
+import { recordingObserver } from './_helpers/store-mutation-recorder.js';
 import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
 
 const DKG = 'http://dkg.io/ontology/';
@@ -113,7 +114,6 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     store = createListContextGraphsCacheInvalidatingStore(
       inner,
       () => { invalidateCount += 1; },
-      () => undefined,
     );
 
     const seedOntology = (cg: string, onChainId: string): Promise<void> => store.insert([{
@@ -162,11 +162,11 @@ describe('healStrandedScopedKCs — through the production store decorator stack
       },
     }) as TripleStore;
     let invalidations = 0;
-    const dirtyMarks: Array<{ quads: Quad[]; targetGraph: string | undefined }> = [];
+    const { observer, committed } = recordingObserver();
     const wrapped = createListContextGraphsCacheInvalidatingStore(
       adapter,
       () => { invalidations += 1; },
-      (quads, targetGraph) => { dirtyMarks.push({ quads: [...(quads ?? [])], targetGraph }); },
+      observer,
     );
     const graphQuads: Quad[] = [{
       subject: 'urn:data:s', predicate: 'urn:data:p', object: '"data"', graph: 'urn:data',
@@ -194,12 +194,12 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     );
     expect(invalidations).toBe(1);
     // Complete graph-and-subject replacement can delete authority facts that
-    // are absent from the replacement payload, so projection invalidation is
-    // keyed by the two replaced targets rather than by the inserted quads.
-    expect(dirtyMarks).toEqual([
-      { quads: [], targetGraph: 'urn:data' },
-      { quads: [], targetGraph: 'urn:meta' },
-    ]);
+    // are absent from the replacement payload, so the mutation names the two
+    // replaced targets (the metadata one with its subject) besides the quads.
+    expect(committed).toEqual([{
+      removals: [{ graph: 'urn:data' }, { graph: 'urn:meta', subject: 'urn:ual' }],
+      quads: [...graphQuads, ...metadataQuads],
+    }]);
 
     await wrapped.close();
   });
@@ -269,11 +269,11 @@ describe('healStrandedScopedKCs — through the production store decorator stack
       },
     }) as TripleStore;
     let invalidations = 0;
-    let projectionInvalidations = 0;
+    const { observer, committed } = recordingObserver();
     const wrapped = createListContextGraphsCacheInvalidatingStore(
       adapter,
       () => { invalidations += 1; },
-      () => { projectionInvalidations += 1; },
+      observer,
     );
     const pattern = { graph: 'urn:test:no-count', subject: 'urn:test:subject' };
     const options: QueryOptions = { source: 'test.no-count', priority: 'background' };
@@ -282,14 +282,14 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     expect(noCountDelete).toHaveBeenCalledWith(pattern, options);
     expect(countedDelete).not.toHaveBeenCalled();
     expect(invalidations).toBe(1);
-    expect(projectionInvalidations).toBe(1);
+    expect(committed).toHaveLength(1);
 
     rejectDelete = true;
     await expect(wrapped.deleteByPatternWithoutCount?.(pattern, options)).rejects.toBe(failure);
     // The adapter may have committed before losing its response. Untagged
     // failures are indeterminate and must invalidate conservatively.
     expect(invalidations).toBe(2);
-    expect(projectionInvalidations).toBe(2);
+    expect(committed).toHaveLength(2);
     await wrapped.close();
   });
 
@@ -305,11 +305,11 @@ describe('healStrandedScopedKCs — through the production store decorator stack
       },
     }) as TripleStore;
     let invalidations = 0;
-    let projectionInvalidations = 0;
+    const { observer, committed } = recordingObserver();
     const wrapped = createListContextGraphsCacheInvalidatingStore(
       queryStore,
       () => { invalidations += 1; },
-      () => { projectionInvalidations += 1; },
+      observer,
     );
 
     await wrapped.query(
@@ -318,7 +318,7 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     );
 
     expect(invalidations).toBe(1);
-    expect(projectionInvalidations).toBe(1);
+    expect(committed).toEqual([{ everything: true }]);
     await wrapped.close();
   });
 

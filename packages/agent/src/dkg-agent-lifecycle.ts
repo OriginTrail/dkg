@@ -1,3 +1,5 @@
+import { syncReconcilerEnabled, syncOnConnectEnabled, durableSyncEnabled } from './internal/lifecycle-sync-policy.js';
+import { emptySwmRecoveryResult } from './sync/shared-memory-completion.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import { DurableSyncAdmissionBoundary, type DurableSyncAdmissionOutcome } from './sync/requester/admission-boundary.js';
 import { createRandomSamplingEligibilityResolver } from './random-sampling-eligibility.js';
@@ -371,10 +373,10 @@ import {
 import {
   sharedMemoryOwnershipKeyFromGraph,
 } from './sync/requester/shared-memory-sync.js';
-import {
-  emptySharedMemorySyncResult as createEmptySharedMemorySyncResult,
-  mergeFleetSharedMemoryDiagnostics,
+import  {
+  emptySharedMemorySyncResult,
   mergeSamePeerSharedMemoryDiagnostics,
+  mergeFleetSharedMemoryDiagnostics,
   recordSharedMemoryPhaseFailure,
 } from './sync/shared-memory-diagnostics.js';
 import {
@@ -465,13 +467,11 @@ import {
   recordDurableSyncDiagnostics,
   type DurableSyncAccumulator,
 } from './sync/durable-progress.js';
-import {
+import  {
   getSyncBackpressureSnapshot,
   getSyncBackpressureBusyError,
   resolveNonNegativeIntegerSwitch,
-  resolveBooleanSwitch,
   resolveExactBatchStreamEnabled,
-  resolveSyncReconcilerEnabled,
   resolveSyncGlobalBackpressure,
   syncAdmissionWouldBeRefused,
   withGlobalSyncBackpressure,
@@ -714,7 +714,7 @@ import {
 } from './sync/on-demand-agents-phonebook.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
-import {
+import  {
   ContextGraphNotFoundError,
   InvalidContentError,
   StaleSenderKeyTargetError,
@@ -752,7 +752,6 @@ import {
   type DurableSyncResult,
   type SharedMemorySyncResult,
   type SwmSnapshotCoverage,
-  type DKGAgentConfig,
   type ResolvedDKGAgentConfig,
   type ReplicationEvent,
   type SyncReconcilerProbe,
@@ -852,56 +851,20 @@ import {
 import { reconcileRfc64CatalogAuthorityPlanV1 } from
   './rfc64/catalog-rollout-authority-reconciliation-v1.js';
 import {
+  describeRfc64LegacySwmFenceEventV1,
   initializeRfc64LegacySwmBoundaryV1,
-  prepareRfc64LateLegacySwmBoundaryV1,
+  rfc64LateLegacySwmCompanionResolverV1,
   retireRfc64LegacySwmAfterFinalizedVmV1,
 } from
   './rfc64/legacy-swm-boundary-v1.js';
+import {
+  projectPersistedJoinApprovals,
+  type ContextGraphMembershipSnapshot,
+} from './join-approval-restart-projection.js';
+import { verifiedCuratorDialAddress } from './curator-dial-address.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
-
-type ContextGraphMembershipSnapshot = ReadonlyArray<
-  ContextGraphMembershipRecord & { firstSeenAt?: number; updatedAt: number }
->;
-
-interface PersistedJoinApprovalProjection {
-  readonly principalId: string;
-  readonly updatedAt: number;
-  readonly curatorPeerId?: string;
-}
-
-function projectPersistedJoinApprovals(
-  persistedMembershipRows: ContextGraphMembershipSnapshot,
-  persistedContextGraphIds: ReadonlySet<string>,
-  localAgentAddresses: ReadonlySet<string>,
-): ReadonlyMap<string, PersistedJoinApprovalProjection> {
-  const newestApprovalByContextGraph = new Map<string, PersistedJoinApprovalProjection>();
-  for (const membership of persistedMembershipRows) {
-    const principalId = membership.principalId.toLowerCase();
-    if (
-      membership.principalType !== 'agent' ||
-      membership.status !== 'active' ||
-      membership.source !== 'join-approved' ||
-      !persistedContextGraphIds.has(membership.contextGraphId) ||
-      !localAgentAddresses.has(principalId)
-    ) {
-      continue;
-    }
-    const existing = newestApprovalByContextGraph.get(membership.contextGraphId);
-    if (!existing || membership.updatedAt > existing.updatedAt) {
-      newestApprovalByContextGraph.set(membership.contextGraphId, {
-        principalId,
-        updatedAt: membership.updatedAt,
-        curatorPeerId: typeof membership.metadata?.['curatorPeerId'] === 'string' &&
-          membership.metadata['curatorPeerId'].trim()
-          ? membership.metadata['curatorPeerId'].trim()
-          : undefined,
-      });
-    }
-  }
-  return newestApprovalByContextGraph;
-}
 
 function resolveAgentSyncGlobalBackpressure(config: ResolvedDKGAgentConfig) {
   // `trackSyncContextGraph()` mutates this list when an Edge explicitly
@@ -1951,51 +1914,9 @@ async function authenticateDurableGraphScopedAsset(params: {
   }
 }
 
-function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
-  return a.length === b.length && a.every((value, index) => value === b[index]);
-}
-
-function syncReconcilerEnabled(config: DKGAgentConfig): boolean {
-  return resolveSyncReconcilerEnabled(config.syncReconcilerEnabled);
-}
-
-function syncOnConnectEnabled(config: DKGAgentConfig): boolean {
-  return resolveBooleanSwitch(config.syncOnConnectEnabled, 'DKG_SYNC_ON_CONNECT_ENABLED', true);
-}
-
-function durableSyncEnabled(config: DKGAgentConfig): boolean {
-  return resolveBooleanSwitch(config.durableSyncEnabled, 'DKG_DURABLE_SYNC_ENABLED', true);
-}
-
 /** OT-RFC-59 responder cap on the peer-controlled raw-scan limit (DoS bound). Honest
  *  requesters send SYNC_PAGE_SIZE (500); the headroom tolerates larger legitimate pages. */
 const CHANGELOG_MAX_SCAN_LIMIT = 2000;
-
-function emptySharedMemorySyncResult(): SharedMemorySyncResult {
-  return createEmptySharedMemorySyncResult();
-}
-
-function mergeSharedMemorySyncResults(
-  a: SharedMemorySyncResult,
-  b: SharedMemorySyncResult,
-): SharedMemorySyncResult {
-  return {
-    ...mergeSamePeerSharedMemoryDiagnostics(a, b),
-  };
-}
-
-function emptySwmRecoveryResult(): RecoverContextGraphSwmResult {
-  return {
-    replacedRoots: 0,
-    replacedGraphs: 0,
-    insertedDataQuads: 0,
-    insertedMetaQuads: 0,
-    droppedDataTriples: 0,
-    readySnapshots: 0,
-    totalSnapshots: 0,
-    completed: true,
-  };
-}
 
 type NonBoundedCuratorPeerIdsResolution =
   | {
@@ -2059,6 +1980,10 @@ type StructuralCuratorPeerLookup =
       readonly overflowed?: never;
       readonly nextPageAfterPeerId?: never;
     };
+
+function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
 
 export class LifecycleSyncMethods extends DKGAgentBase {
   async retireLegacySwmAfterVerifiedVmTwin(
@@ -2341,6 +2266,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           this,
           this.rfc64PersistenceV1.rootPath,
           this.store,
+          { onFenceEvent: (event) => this.log.warn(ctx, describeRfc64LegacySwmFenceEventV1(event)) },
         );
         await reconcileRfc64CatalogAuthorityPlanV1(
           this.rfc64PersistenceV1,
@@ -2984,9 +2910,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           recordStorageAckDecline: (code) => this.recordStorageAckDecline(code),
           gossipWireIdFor: (id) => this.gossipWireIdFor(id),
           getSwmSubscriptionSource: (...ids) => this.getSwmSubscriptionSource(...ids),
-          prepareDurableRootAtomicCompanion: (input) => prepareRfc64LateLegacySwmBoundaryV1(
-            this, input.contextGraphId, input.kaUal, input.shareOperationId, input.assertionVersion,
-          ),
+          prepareDurableRootAtomicCompanion: rfc64LateLegacySwmCompanionResolverV1(this),
           chain: this.chain,
           config: this.config,
           log: this.log,
@@ -3511,7 +3435,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               role: 'participant',
               status: 'active',
               source: 'join-approved',
-              metadata: { curatorPeerId: peerId.toString() },
+              metadata: {
+                curatorPeerId: peerId.toString(),
+                // The approved sender's own listener address is a durable
+                // transport hint. An inbound remoteAddr can be an ephemeral
+                // source port, so it is never persisted for restart dialing.
+                ...(() => {
+                  const address = verifiedCuratorDialAddress(
+                    payload.curatorDialAddress,
+                    peerId.toString(),
+                  );
+                  return address ? { curatorDialAddress: address } : {};
+                })(),
+              },
             };
             // Commit the restart contract before changing live subscription
             // state. The two stores do not expose a shared transaction, so the
@@ -5701,11 +5637,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   /** One agent-owned admission decision for the legacy shared-memory lane. */
-  canUseLegacySharedMemorySyncForContextGraphV1(
-    this: DKGAgent,
-    contextGraphId: string,
-  ): boolean {
-    return this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId);
+  async canUseLegacySharedMemorySyncForContextGraphV1(this: DKGAgent, contextGraphId: string): Promise<boolean> {
+    // The private predicate verifies local membership and current lane authority.
+    return this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)
+      || await this.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId) === true;
   }
 
   /** One agent-owned admission decision for the legacy durable VM lane. */
@@ -6515,7 +6450,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           });
           if (outcome === 'applied') {
             this.invalidateListContextGraphsCache();
-            this.contextGraphMetaProjection.markDirtyFromQuads(authentication.asset.metadataQuads);
             try {
               let retiredTwin: FinalizedSwmTwinRetirement | undefined;
               const retirement = await reconcileFinalizedSwmTwin({
@@ -7782,7 +7716,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             },
           );
         },
-        merge: mergeSharedMemorySyncResults,
+        merge: mergeSamePeerSharedMemoryDiagnostics,
         onResult: (item, result) => {
           if (
             selectedSwmEnabled
@@ -7861,7 +7795,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             selectedSwmPriority: true,
           },
         ),
-        merge: mergeSharedMemorySyncResults,
+        merge: mergeSamePeerSharedMemoryDiagnostics,
         markDeferred: (summary) => ({
           ...summary,
           deferredBackpressure: (summary.deferredBackpressure ?? 0) + 1,
@@ -7901,7 +7835,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         },
       });
       const { summary: continuationSummary } = continuationExecution;
-      const finalSummary = mergeSharedMemorySyncResults(
+      const finalSummary = mergeSamePeerSharedMemoryDiagnostics(
         initialSummary,
         continuationSummary,
       );
@@ -8376,7 +8310,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // catchup-status endpoint and UI keep working — see
     // `cli/src/daemon.ts` subscribe job and `catchup-runner.ts`.
     const emptyShared = (): SharedMemorySyncResult =>
-      createEmptySharedMemorySyncResult(1);
+      emptySharedMemorySyncResult(1);
     // Bounded fan-out: at most CATCHUP_MAX_CONCURRENT_PEER_SYNCS peer syncs run
     // at once. The pre-cap unbounded `Promise.all` over every sync-capable peer
     // was the top amplifier of the 2026-07-07 mainnet sync storm — one
@@ -8947,6 +8881,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async resumePendingJoinApprovalMetadata(this: DKGAgent,
     contextGraphId: string,
     curatorPeerId: string,
+    curatorDialAddress?: string,
   ): Promise<JoinApprovalMetadataRecoveryOutcome> {
     const ctx = createOperationContext('sync');
     const acceptance = await this.resolveApprovedMemberAcceptance(contextGraphId);
@@ -8954,6 +8889,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     const refreshed = await this.refreshMetaFromCurator(contextGraphId, {
       trustedCuratorPeerId: curatorPeerId,
+      curatorDialAddressHint: curatorDialAddress,
       force: true,
       approvedMember: acceptance,
     }).catch((error) => {
@@ -9019,12 +8955,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async recoverPendingJoinApprovalMetadata(this: DKGAgent,
     contextGraphId: string,
     curatorPeerId: string,
+    curatorDialAddress?: string,
   ): Promise<void> {
     const stopSignal = this.node.stopSignal;
     for (let attempt = 0; ; attempt += 1) {
       let outcome: JoinApprovalMetadataRecoveryOutcome;
       try {
-        outcome = await this.resumePendingJoinApprovalMetadata(contextGraphId, curatorPeerId);
+        outcome = await this.resumePendingJoinApprovalMetadata(
+          contextGraphId,
+          curatorPeerId,
+          curatorDialAddress,
+        );
       } catch (error) {
         // A store or network fault that escapes an attempt is as transient as
         // a `retry`. Ending the loop on it would leave the row closed until
@@ -9044,7 +8985,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (
         !this.localApprovedAgentByCG.has(contextGraphId)
         || current?.subscribed !== true
-        || current.pendingMeta !== true
+        // A concurrent data catch-up can set `synced` while authoritative
+        // join metadata is still pending or unknown. Only its explicit
+        // confirmation ends this join-specific retry.
+        || (current.synced === true && current.metaSynced === true && current.pendingMeta !== true)
       ) return;
     }
   }
@@ -10859,16 +10803,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // snapshot already read by the provenance phase. Load every persisted
       // row (not just rows under the activation cap) so a dormant subscription
       // still has the right signer when an operator activates it explicitly.
-      if (persistedMembershipRows !== null) {
-        const persistedContextGraphIds = new Set(rows.map((row) => row.id));
-        const localAgentAddresses = new Set(
-          [...this.localAgents.keys()].map((address) => address.toLowerCase()),
-        );
-        const newestApprovalByContextGraph = projectPersistedJoinApprovals(
+      const newestApprovalByContextGraph = persistedMembershipRows === null
+        ? null
+        : projectPersistedJoinApprovals(
           persistedMembershipRows,
-          persistedContextGraphIds,
-          localAgentAddresses,
+          new Set(rows.map((row) => row.id)),
+          new Set([...this.localAgents.keys()].map((address) => address.toLowerCase())),
         );
+      if (newestApprovalByContextGraph) {
         for (const [contextGraphId, approval] of newestApprovalByContextGraph) {
           this.localApprovedAgentByCG.set(contextGraphId, approval.principalId);
           if (approval.curatorPeerId) {
@@ -11097,7 +11039,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             `Restored persisted context-graph subscription "${row.id}" in restricted pending-metadata mode; VM, payload recovery, and SWM remain closed`,
           );
           if (curatorPeerId) {
-            void this.recoverPendingJoinApprovalMetadata(row.id, curatorPeerId).catch((error) => {
+            void this.recoverPendingJoinApprovalMetadata(
+              row.id,
+              curatorPeerId,
+              newestApprovalByContextGraph?.get(row.id)?.curatorDialAddress,
+            ).catch((error) => {
               this.log.warn(
                 ctx,
                 `Pending join-approval recovery for "${row.id}" stopped safely: ${error instanceof Error ? error.message : String(error)}`,

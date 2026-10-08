@@ -36,6 +36,8 @@ export const CONTROL_ACCEPTED_AT = 'urn:dkg:publisher:acceptedAt';
 export const CONTROL_CLAIMED_AT = 'urn:dkg:publisher:claimedAt';
 export const CONTROL_VALIDATED_AT = 'urn:dkg:publisher:validatedAt';
 export const CONTROL_BROADCAST_AT = 'urn:dkg:publisher:broadcastAt';
+export const CONTROL_RECEIPT_OBSERVED_AT = 'urn:dkg:publisher:receiptObservedAt';
+export const CONTROL_FINALITY_OBSERVED_AT = 'urn:dkg:publisher:finalityObservedAt';
 export const CONTROL_INCLUDED_AT = 'urn:dkg:publisher:includedAt';
 export const CONTROL_FINALIZED_AT = 'urn:dkg:publisher:finalizedAt';
 export const CONTROL_FAILED_AT = 'urn:dkg:publisher:failedAt';
@@ -183,6 +185,8 @@ export function serializeJob(
   pushOptional(quads, jobRef, CONTROL_CLAIMED_AT, job.timestamps.claimedAt, graphUri, integer);
   pushOptional(quads, jobRef, CONTROL_VALIDATED_AT, job.timestamps.validatedAt, graphUri, integer);
   pushOptional(quads, jobRef, CONTROL_BROADCAST_AT, job.timestamps.broadcastAt, graphUri, integer);
+  pushOptional(quads, jobRef, CONTROL_RECEIPT_OBSERVED_AT, job.timestamps.receiptObservedAt, graphUri, integer);
+  pushOptional(quads, jobRef, CONTROL_FINALITY_OBSERVED_AT, job.timestamps.finalityObservedAt, graphUri, integer);
   pushOptional(quads, jobRef, CONTROL_INCLUDED_AT, job.timestamps.includedAt, graphUri, integer);
   pushOptional(quads, jobRef, CONTROL_FINALIZED_AT, job.timestamps.finalizedAt, graphUri, integer);
   pushOptional(quads, jobRef, CONTROL_FAILED_AT, job.timestamps.failedAt, graphUri, integer);

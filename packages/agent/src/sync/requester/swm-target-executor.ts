@@ -53,6 +53,7 @@ type RecoverContextGraphSwmOptions = Parameters<typeof recoverContextGraphSwm>[0
 export interface SwmTargetExecutorPortsV1 {
   /** Defaults to ten minutes for callers composed before this port existed. */
   readonly privateRecoveryBudgetMs?: number;
+  /** Mutations own their projection invalidation at the supplied store boundary. */
   readonly store: TripleStore;
   readonly writeLocks: Map<string, Promise<void>>;
   readonly listSubGraphs: (
@@ -68,7 +69,6 @@ export interface SwmTargetExecutorPortsV1 {
     SharedMemorySyncContext['resolveRootSnapshotAtomicCompanion'];
   readonly recordDrops: OversizeGuardHooks['recordDrops'];
   readonly invalidateListContextGraphsCache: () => void;
-  readonly markMetaProjectionDirty: (quads: Quad[]) => void;
   readonly recoveryMutation: SwmRecoveryMutationRuntimeV1;
   readonly setCheckpoint: RecoverContextGraphSwmOptions['setCheckpoint'];
   readonly deleteCheckpoint: RecoverContextGraphSwmOptions['deleteCheckpoint'];
@@ -252,7 +252,7 @@ export class SwmTargetExecutorV1 {
       }
       : { kind: 'ordinary' as const };
     const storeInsert = async (quads: Quad[]) => {
-      const inserted = await insertWithOversizeGuard(
+      await insertWithOversizeGuard(
         (kept) => this.#ports.store.insert(kept, {
           priority: 'background',
           source: 'agent.sharedMemorySync.storeInsert',
@@ -261,7 +261,6 @@ export class SwmTargetExecutorV1 {
         { recordDrops: this.#ports.recordDrops },
         'swm-sync',
       );
-      this.#ports.markMetaProjectionDirty(inserted);
     };
     return runSharedMemorySync({
       mode,

@@ -19,3 +19,7 @@ runs:
           packages/adapter-hermes/coverage-python/
         retention-days: 14
         if-no-files-found: ignore
+        # A re-run of a failed shard uploads under the same name. Without this
+        # the run keeps both artifacts, and the coverage job can pick the one
+        # from the failed attempt, which has no coverage file.
+        overwrite: true

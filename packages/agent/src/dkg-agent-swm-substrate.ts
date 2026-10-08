@@ -9,6 +9,8 @@
  * composed class.
  */
 
+
+import { isLocalPrivateMember } from './internal/local-private-member.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -408,40 +410,6 @@ export interface ContextGraphSubscribeOptions {
   syncMode?: 'on-demand' | 'always-on';
   /** Authoritative numeric slot established by the admission owner. */
   onChainId?: string;
-}
-
-/** A context graph member identity: a bare agent address or its `did:dkg:agent:` DID. */
-function memberAgentAddress(value: string): string | undefined {
-  const match = /^(?:did:dkg:agent:)?(0x[0-9a-fA-F]{40})$/.exec(value.trim());
-  return match?.[1]?.toLowerCase();
-}
-
-/**
- * Whether `meta` declares an explicit private policy (#865) and lists one of
- * `localAgents` among its allowed agents, participants, curators or creators,
- * and not among its revoked agents.
- */
-function isLocalPrivateMember(
-  meta: {
-    readonly accessPolicy?: string;
-    readonly allowedAgents: readonly string[];
-    readonly participantAgents: readonly string[];
-    readonly curators: readonly string[];
-    readonly creators: readonly string[];
-    readonly revokedAgents: readonly string[];
-  },
-  localAgents: readonly (string | undefined)[],
-): boolean {
-  if (meta.accessPolicy?.trim().toLowerCase() !== 'private') return false;
-  const revoked = new Set(meta.revokedAgents.map(memberAgentAddress));
-  const members = new Set(
-    [...meta.allowedAgents, ...meta.participantAgents, ...meta.curators, ...meta.creators]
-      .map(memberAgentAddress)
-      .filter((member) => member !== undefined && !revoked.has(member)),
-  );
-  return localAgents.some((local) => (
-    local !== undefined && members.has(memberAgentAddress(local))
-  ));
 }
 
 export class SwmSubstrateMethods extends DKGAgentBase {
@@ -1290,7 +1258,6 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           getCgMeta: (id) => this.getCgMeta(id),
           getContextGraphOnChainId: (id) => this.getContextGraphOnChainId(id),
           classifyOnChainSlot: (onChainId) => this.classifyOntologyBindingSlot(onChainId),
-          markCgMetaDirtyFromQuads: (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
           persistContextGraphSubscription: (id) => this.persistContextGraphSubscriptionState(id),
         },
         { requireContextGraphSubscriptionSetter: true },
@@ -1359,7 +1326,6 @@ export class SwmSubstrateMethods extends DKGAgentBase {
             input.assertionVersion,
           );
         },
-        markContextGraphMetaDirtyFromQuads: (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
         // OT-RFC-38 / LU-6 Phase B: chain-backed agent-allowlist
         // fallback. Cores hosting curated CGs they are NOT members
         // of have no local meta for the allowlist — without this,
@@ -2114,9 +2080,6 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           // Defensive: resolve a missing pre-cd68fa689 wire CG id locally.
           resolveContextGraphOnChainId: (cgName: string) =>
             this.getContextGraphOnChainId(cgName),
-          markContextGraphMetaDirtyFromQuads: (quads) => {
-            this.contextGraphMetaProjection.markDirtyFromQuads(quads);
-          },
           workspaceWriteLocks: this.writeLocks,
           retireConfirmedGraphScopedSwmTwinIfOrphaned: (() => {
             const retireOrphaned = createRetireConfirmedGraphScopedSwmTwinIfOrphaned({

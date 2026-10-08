@@ -30,6 +30,7 @@ export const DKGEvent = {
   JOIN_APPROVED: 'join:approved',
   JOIN_REJECTED: 'join:rejected',
   PROJECT_SYNCED: 'project:synced',
+  CATALOG_READINESS_CHECK_REQUESTED: 'catalog:readiness-check-requested',
   MEMORY_GRAPH_CHANGED: 'memory-graph:changed',
 } as const;
 

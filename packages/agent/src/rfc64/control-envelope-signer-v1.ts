@@ -27,6 +27,29 @@ export class Rfc64ControlEnvelopeSigningErrorV1 extends Error {
   }
 }
 
+/**
+ * The same signer, awaiting `turn` before each signature. A producer that
+ * works on the main thread passes its time-slice checkpoint, so the work
+ * around each signature does not run back to back with the work before it.
+ * The callback is read once and called on a snapshot that holds the issuer,
+ * which is the receiver a producer's own signer snapshot gives it.
+ */
+export function rfc64SignerTakingTurnsV1(
+  signer: Rfc64ControlEnvelopeEip191SignerV1,
+  turn: () => Promise<void>,
+): Rfc64ControlEnvelopeEip191SignerV1 {
+  const { issuer, signDigest } = signer;
+  if (typeof signDigest !== 'function') return signer;
+  const snapshot = Object.freeze({ issuer, signDigest });
+  return Object.freeze({
+    issuer,
+    signDigest: async (objectDigest: Uint8Array): Promise<string> => {
+      await turn();
+      return snapshot.signDigest(objectDigest);
+    },
+  });
+}
+
 export interface SignedAndVerifiedRfc64ControlEnvelopeV1 {
   readonly envelope: SignedControlEnvelopeV1;
   readonly issuerSignature: VerifiedControlEnvelopeIssuerSignatureV1;

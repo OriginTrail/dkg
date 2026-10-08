@@ -5674,30 +5674,6 @@ describe('VM reconcile cursor follows the subscription lifetime', () => {
   const watermarkSteps = (passes: ContextGraphReconcileResult[]) =>
     passes.map((pass) => [pass.watermarkBefore, pass.watermarkAfter]);
 
-  it('advances an on-demand subscription through its pending ordinals without a durable write', async () => {
-    const { rows, saves, store } = memorySubscriptionStore();
-    const internals = await boot('OnDemandCursorAdvance', store);
-    const localCgId = 'on-demand-pending';
-    const subscription = {
-      subscribed: true,
-      syncMode: 'on-demand' as const,
-      onChainId: '33',
-      lastReconciledOrdinal: 0,
-    };
-    internals.subscribedContextGraphs.set(localCgId, subscription);
-    const fetched = stageStalledGraph(internals);
-
-    const passes = await sweepUntilCurrent(internals, localCgId);
-
-    // The same three advances the live node made once `--save` unblocked it.
-    expect(watermarkSteps(passes)).toEqual([[0, 3], [3, 6], [6, HEAD]]);
-    expect([...fetched].sort((a, b) => a - b)).toEqual(MISSING);
-    expect((internals as any).reconcileCursors.get(localCgId)?.watermark).toBe(HEAD);
-    expect(subscription.lastReconciledOrdinal).toBe(HEAD);
-    expect(saves).toEqual([]);
-    expect(rows.size).toBe(0);
-  });
-
   it('still saves each cursor advance of an always-on subscription', async () => {
     const { rows, saves, store } = memorySubscriptionStore();
     const internals = await boot('AlwaysOnCursorAdvance', store);

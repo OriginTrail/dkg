@@ -12,6 +12,8 @@ import { traceLaneLoads } from './load-graph.mjs';
 // load-closure guard cannot follow, each with the reason it needs no route of
 // its own.
 export const UNFOLLOWED_LOADS = new Map([
+  ['scripts/ci/run-chain-rpc-node26.mjs: vitest',
+    'the Vitest CLI resolved from packages/chain node_modules, run with the verified process.execPath; not a repository file'],
   ['packages/agent/test/sync-native-export-hostile.test.ts: pathToFileURL(`${oldDist}/dkg-agent-cg-resolve.js`).href',
     'an optional user-supplied external frozen 10.0.20 build; compatibility cases always execute the repository historical source fixture, and no repository lane can route the external build'],
   ['packages/agent/src/generic-sql-source.ts: moduleName', 'the optional mssql driver and node:sqlite, neither a repository file'],
@@ -29,8 +31,8 @@ export const UNFOLLOWED_LOADS = new Map([
   ['packages/cli/test/blazegraph-image-metadata.test.ts: parserPath', "the CLI's own blazegraph-image-metadata.cjs"],
   ['packages/mcp-dkg/src/adapters.ts: pkg', 'a third-party adapter package named at run time; ADAPTER_MAP names no workspace'],
   ['packages/adapter-openclaw/test/openclaw-entry.test.ts: href', 'a module the test writes to a temporary directory'],
-  ['packages/agent/scripts/test-package-root.mjs: representativeInternalSpecifier',
-    "the agent package's own built dist/, imported by package name to check its export map; agent source changes run the agent's lanes"],
+  ['packages/agent/scripts/test-package-root.mjs: specifier',
+    "the agent package's own emitted internal namespace files, imported by package name to verify export denial; agent source changes run the agent's lanes"],
   ['packages/agent/scripts/test-package-root.mjs: `@origintrail-official/dkg-agent/dist/rfc64/${path}`',
     "the agent package's own built dist/rfc64/ entries, checked through its export map"],
   ['packages/agent/scripts/test-package-root.mjs: `@origintrail-official/dkg-agent/dist/${path}`',
@@ -42,6 +44,10 @@ export const UNFOLLOWED_LOADS = new Map([
   ['scripts/devnet.sh: $cli_entry',
     "the CLI entry a devnet node starts from (node_cli_entry): packages/cli/dist/cli.js, built from CLI source whose rule selects both lanes that reach devnet.sh (the CLI lane and the browser suite), or a released version's under .devnet-versions/, outside the repository's files"],
   // Files a child-process or worker call runs that no reading resolves.
+  ['scripts/lib/regressions/subprocess.mjs: invocation.command',
+    'the installed pnpm CLI or recorded Node executable, not a repository script; repository-owned profiles name the tests replayed in disposable checkouts'],
+  ['scripts/lib/regressions/registry.mjs: invocation.command',
+    'the installed pnpm CLI or recorded Node executable, resolved by subprocess.mjs like every proof launch, running the named-assertion discovery; not a repository script'],
   ["devnet/rfc64-persistence-lifecycle/run.ts: childArguments(AGENT_PROCESS, stage ? ['--stage'] : [])",
     'agent-process.ts beside it, run under tsx (childArguments puts the script after the loader flags); a devnet file with run.ts\'s own route'],
   ['devnet/rfc64-persistence-lifecycle/run.ts: childArguments(LEASE_PROBE)',

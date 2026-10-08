@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphMetaGraphUri, type OperationContext } from '@origintrail-official/dkg-core';
+import {
+  DKG_ONTOLOGY,
+  PeerResolver,
+  StubNetworkStateRegistry,
+  contextGraphDataGraphUri,
+  contextGraphMetaGraphUri,
+  type OperationContext,
+} from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
   resolveApprovedMemberAcceptanceDecision,
@@ -22,7 +29,6 @@ import {
 import { getSyncCheckpointKey, MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 
 const CURATOR_PEER_ID = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
-const RELAY_ADDR = '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 
 function noop(): void {}
 
@@ -314,9 +320,93 @@ describe('authoritative private metadata proof', () => {
 });
 
 describe('refreshMetaFromCurator', () => {
-  it('passes caller abort signal to direct and relay curator dials', async () => {
+  it('resolves a restarted curator by peer ID without trusting resolver status alone', async () => {
+    const directHint = `/ip4/127.0.0.1/tcp/9090/p2p/${CURATOR_PEER_ID}`;
+    const recoveryStages: Array<{ peerId: string; kind: string; address?: string }> = [];
+    const connectPeerIds: string[] = [];
+    const warnings: string[] = [];
+    let fetched = false;
+    const network = {
+      localId: 'local-peer',
+      localAddresses: [],
+      isStarted: true,
+      start: async () => undefined,
+      stop: async () => undefined,
+      dialProtocol: async () => { throw new Error('not used by curator refresh'); },
+      handle: async () => undefined,
+      unhandle: async () => undefined,
+      getConnections: () => [],
+      addKnownAddresses: async () => undefined,
+      tryConnectRecoveryStage: async (
+        peerId: string,
+        stage: { kind: string; address?: string },
+      ) => {
+        recoveryStages.push({
+          peerId,
+          kind: stage.kind,
+          ...(stage.address === undefined ? {} : { address: stage.address }),
+        });
+        // A transport attempt is not proof of a usable connection. Leave the
+        // connection set empty so PeerResolver must reject this false success.
+        return true;
+      },
+      connectPeer: async (peerId: string) => {
+        connectPeerIds.push(peerId);
+      },
+    };
+    const peerResolver = new PeerResolver({
+      network: network as never,
+      registry: new StubNetworkStateRegistry(),
+      agentDirectory: { findRelayForPeer: async () => null },
+    });
+    const agent = {
+      metaRefreshTimestamps: new Map<string, number>(),
+      runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
+      peerId: 'local-peer',
+      node: {
+        libp2p: {
+          getConnections: network.getConnections,
+        },
+      },
+      peerResolver,
+      fetchSyncPages: async () => { fetched = true; throw new Error('unexpected fetch'); },
+      syncCheckpoints: new Map<string, number>(),
+      log: {
+        warn: (_ctx: OperationContext, message: string) => { warnings.push(message); },
+        info: noop,
+      },
+    };
+
+    const refreshed = await ContextGraphResolveMethods.prototype.refreshMetaFromCurator.call(
+      agent as never,
+      'unit-test-cg',
+      {
+        trustedCuratorPeerId: CURATOR_PEER_ID,
+        curatorDialAddressHint: directHint,
+        force: true,
+      },
+    );
+
+    expect(recoveryStages).toEqual([{
+      peerId: CURATOR_PEER_ID,
+      kind: 'hint',
+      address: directHint,
+    }, {
+      peerId: CURATOR_PEER_ID,
+      kind: 'cached',
+    }]);
+    expect(connectPeerIds).toEqual([CURATOR_PEER_ID]);
+    expect(refreshed).toBe(false);
+    expect(fetched).toBe(false);
+    expect(warnings).toEqual([]);
+  });
+
+  it('cancels a pending resolver connection before metadata fetch', async () => {
     const controller = new AbortController();
-    const dialSignals: Array<AbortSignal | undefined> = [];
+    let releaseResolverStart: () => void = noop;
+    const resolverStarted = new Promise<void>((resolve) => { releaseResolverStart = resolve; });
+    let resolverCalls = 0;
+    let fetchCalls = 0;
 
     const agent = {
       metaRefreshTimestamps: new Map<string, number>(),
@@ -326,22 +416,22 @@ describe('refreshMetaFromCurator', () => {
       node: {
         libp2p: {
           getConnections: () => [],
-          dial: async (_target: unknown, opts?: { signal?: AbortSignal }) => {
-            dialSignals.push(opts?.signal);
-            if (dialSignals.length === 1) {
-              throw new Error('direct dial unavailable');
-            }
-          },
-          peerStore: {
-            merge: async () => undefined,
-          },
         },
       },
-      discovery: {
-        findAgentByPeerId: async () => ({ relayAddress: RELAY_ADDR }),
+      peerResolver: {
+        connect: async (_peerId: string, options: { signal?: AbortSignal }) => {
+          resolverCalls += 1;
+          releaseResolverStart();
+          return new Promise<never>((_resolve, reject) => {
+            const abort = () => reject(new DOMException('Aborted', 'AbortError'));
+            if (options.signal?.aborted) abort();
+            else options.signal?.addEventListener('abort', abort, { once: true });
+          });
+        },
       },
       fetchSyncPages: async () => {
-        throw new Error('should not fetch without a connected curator');
+        fetchCalls += 1;
+        throw new Error('should not fetch after cancellation');
       },
       log: {
         warn: () => undefined,
@@ -349,69 +439,100 @@ describe('refreshMetaFromCurator', () => {
       },
     };
 
-    const refreshed = await ContextGraphResolveMethods.prototype.refreshMetaFromCurator.call(
+    const refreshed = ContextGraphResolveMethods.prototype.refreshMetaFromCurator.call(
       agent as never,
       'unit-test-cg',
       { signal: controller.signal },
     );
 
-    expect(refreshed).toBe(false);
-    expect(dialSignals).toEqual([controller.signal, controller.signal]);
+    await resolverStarted;
+    controller.abort();
+    await expect(refreshed).rejects.toMatchObject({ name: 'AbortError' });
+    expect(resolverCalls).toBe(1);
+    expect(fetchCalls).toBe(0);
   });
 
-  it('accepts an authoritative public snapshot without a private member proof', async () => {
-    const contextGraphId = 'public/authoritative-curator-snapshot';
-    const metaGraph = contextGraphMetaGraphUri(contextGraphId);
-    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
-    const snapshot: Quad[] = [{
-      subject: contextGraphUri,
-      predicate: DKG_ONTOLOGY.RDF_TYPE,
-      object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
-      graph: metaGraph,
-    }, {
-      subject: contextGraphUri,
-      predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
-      object: '"public"',
-      graph: metaGraph,
-    }];
-    let staged: Quad[] = [];
-    const agent = {
-      metaRefreshTimestamps: new Map<string, number>(),
-      runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
-      peerId: 'local-peer',
-      node: {
-        libp2p: {
-          getConnections: () => [{ remotePeer: { toString: () => CURATOR_PEER_ID } }],
+  it.each(['direct hint', 'circuit hint', 'no hint', 'malformed hint'])(
+    'accepts an authoritative public snapshot after the resolver connects with %s',
+    async (connectionPath) => {
+      const contextGraphId = 'public/authoritative-curator-snapshot';
+      const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+      const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+      const directHint = `/ip4/127.0.0.1/tcp/9090/p2p/${CURATOR_PEER_ID}`;
+      const relayAddress = '/ip4/127.0.0.1/tcp/9091/p2p/12D3KooWNmCF7BxTYPjtTkTi3xHY4qHdRogqY2PxHrLpm8MFTWxq';
+      const circuitHint = `${relayAddress}/p2p-circuit/p2p/${CURATOR_PEER_ID}`;
+      const addressHint = connectionPath === 'direct hint' ? directHint
+        : connectionPath === 'circuit hint' ? circuitHint
+          : connectionPath === 'malformed hint' ? 'invalid address' : undefined;
+      const snapshot: Quad[] = [{
+        subject: contextGraphUri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: metaGraph,
+      }, {
+        subject: contextGraphUri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"public"',
+        graph: metaGraph,
+      }];
+      let staged: Quad[] = [];
+      let connected = false;
+      let resolverCalls = 0;
+      let passedHint: string | undefined;
+      const agent = {
+        metaRefreshTimestamps: new Map<string, number>(),
+        runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
+        peerId: 'local-peer',
+        node: {
+          libp2p: {
+            getConnections: () => connected
+              ? [{ remotePeer: { toString: () => CURATOR_PEER_ID } }]
+              : [],
+          },
         },
-      },
-      discovery: {},
-      fetchSyncPages: async () => ({
-        quads: snapshot,
-        checkpointKey: 'public-authoritative-snapshot',
-        resumedFromOffset: 0,
-        completed: true,
-      }),
-      store: {
-        insert: async (quads: Quad[]) => { staged = quads; },
-        update: async () => undefined,
-        dropGraph: async () => undefined,
-      },
-      oversizeTombstoneLog: { record: noop },
-      invalidateListContextGraphsCache: noop,
-      contextGraphMetaProjection: { markDirty: noop },
-      syncCheckpoints: new Map<string, number>(),
-      log: { warn: noop, info: noop },
-    };
+        peerResolver: {
+          connect: async (_peerId: string, options: { recovery?: { verifiedInitialAddress?: string } }) => {
+            resolverCalls += 1;
+            passedHint = options.recovery?.verifiedInitialAddress;
+            connected = true;
+            return { status: 'connected' as const, resolvedAddresses: [] };
+          },
+        },
+        fetchSyncPages: async () => ({
+          quads: snapshot,
+          checkpointKey: 'public-authoritative-snapshot',
+          resumedFromOffset: 0,
+          completed: true,
+        }),
+        store: {
+          insert: async (quads: Quad[]) => { staged = quads; },
+          update: async () => undefined,
+          dropGraph: async () => undefined,
+        },
+        oversizeTombstoneLog: { record: noop },
+        invalidateListContextGraphsCache: noop,
+        contextGraphMetaProjection: { markDirty: noop },
+        syncCheckpoints: new Map<string, number>(),
+        log: { warn: noop, info: noop },
+      };
 
-    const refreshed = await ContextGraphResolveMethods.prototype.refreshMetaFromCurator.call(
-      agent as never,
-      contextGraphId,
-      { trustedCuratorPeerId: CURATOR_PEER_ID, force: true },
-    );
+      const refreshed = await ContextGraphResolveMethods.prototype.refreshMetaFromCurator.call(
+        agent as never,
+        contextGraphId,
+        {
+          trustedCuratorPeerId: CURATOR_PEER_ID,
+          force: true,
+          ...(addressHint === undefined ? {} : { curatorDialAddressHint: addressHint }),
+        },
+      );
 
-    expect(refreshed).toBe(true);
-    expect(staged).toHaveLength(2);
-  });
+      expect(refreshed).toBe(true);
+      expect(staged).toHaveLength(2);
+      expect(passedHint).toBe(connectionPath === 'direct hint' ? directHint
+        : connectionPath === 'circuit hint' ? circuitHint : undefined);
+      expect(resolverCalls).toBe(1);
+    },
+  );
 
   it('rejects a public-only snapshot when private member proof was required', async () => {
     const contextGraphId = 'private/member-proof-cannot-use-public-snapshot';

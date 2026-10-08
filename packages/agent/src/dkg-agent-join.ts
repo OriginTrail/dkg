@@ -1,3 +1,5 @@
+
+import { verifiedDelegationKeyIds, verifyJoinEncryptionKeyBundle } from './internal/join-encryption-key-bundle.js';
 import type { PeerSyncConnection } from './p2p/peer-connection.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -139,7 +141,7 @@ import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
 import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler, type ChatAclCheck } from './messaging.js';
 import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
-import { AGENT_REGISTRY_CONTEXT_GRAPH, canonicalAgentDidSubject, collectPublishableMultiaddrs, type AgentProfileConfig } from './profile.js';
+import { AGENT_REGISTRY_CONTEXT_GRAPH, canonicalAgentDidSubject, type AgentProfileConfig } from './profile.js';
 import {
   computeDelegationDigest,
   computeWorkspaceEncryptionKeysAttestationDigest,
@@ -252,6 +254,11 @@ type JoinApprovalRetryEntry = {
   lastError: string;
 };
 import { multiaddr } from '@multiformats/multiaddr';
+import {
+  requesterHasDirectLoopbackConnection,
+  selectCuratorJoinDialAddress,
+} from './curator-dial-address.js';
+import { recoverCuratorConnectionBeforeQueueing } from './curator-peer-connection.js';
 import { buildCclPolicyQuads, buildPolicyApprovalQuads, buildPolicyRevocationQuads, hashCclPolicy, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
 import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
 import { buildCclEvaluationQuads } from './ccl-evaluation-publish.js';
@@ -454,19 +461,12 @@ const JOIN_ENCRYPTION_KEY_CACHE_ISSUED_AT =
 const JOIN_ENCRYPTION_KEY_CACHE_KEY_SET_DIGEST =
   'urn:dkg:local:join-encryption-key-cache:key-set-digest';
 const JOIN_ENCRYPTION_KEY_CACHE_DIGEST_RE = /^0x[0-9a-f]{64}$/i;
-const JOIN_ENCRYPTION_KEY_LIMIT = 8;
 
 const requesterJoinStateCache = new WeakMap<DKGAgent, Map<string, RequesterJoinRequestState>>();
 const requesterJoinStateTails = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
 const requesterJoinForwardTails = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
 const curatorJoinRequestStoreTails = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
 const joinEncryptionKeyCacheTails = new WeakMap<TripleStore, Map<string, Promise<void>>>();
-
-interface VerifiedJoinEncryptionKeyBundle {
-  readonly issuedAtMs: number;
-  readonly keySetDigest: string;
-  readonly keys: NonNullable<SignedAgentDelegation['workspaceEncryptionKeys']>;
-}
 
 interface StorePendingJoinRequestOptions {
   emitNotification?: boolean;
@@ -479,16 +479,6 @@ function sameStringSet(left: ReadonlySet<string>, right: ReadonlySet<string>): b
     if (!right.has(value)) return false;
   }
   return true;
-}
-
-function verifiedDelegationKeyIds(
-  agentAddress: string,
-  keys: VerifiedJoinEncryptionKeyBundle['keys'],
-): Set<string> {
-  return new Set(keys.map((key) => workspaceAgentEncryptionKeyId(
-    agentAddress,
-    decodeWorkspaceEncryptionKey(key.publicEncryptionKey),
-  ).toLowerCase()));
 }
 
 function requesterJoinStateKey(contextGraphId: string, agentAddress: string): string {
@@ -594,78 +584,34 @@ async function withJoinEncryptionKeyCacheLock<T>(
   }
 }
 
-function verifyJoinEncryptionKeyBundle(
-  delegation: SignedAgentDelegation,
-  carrierPeerId: string,
-): VerifiedJoinEncryptionKeyBundle | null {
-  const keys = delegation.workspaceEncryptionKeys;
-  if (keys === undefined) return null;
-  if (!Array.isArray(keys) || keys.length === 0 || keys.length > JOIN_ENCRYPTION_KEY_LIMIT) {
-    throw new Error(
-      `Join request must carry between 1 and ${JOIN_ENCRYPTION_KEY_LIMIT} workspace encryption keys.`,
-    );
-  }
-  // Preserve the existing admission contract for a signed carrier mismatch:
-  // policy evaluation reports a bounded pending decision. Do not accept the
-  // bundle because the carrier has not proven it is the signed delegatee.
-  if (delegation.delegateePeerId !== carrierPeerId) return null;
-
-  // issuedAtMs becomes the durable cross-CG cache high-water, so authenticate
-  // the base delegation here as well as at the admission boundary.
-  verifyAgentDelegation(delegation);
-  if (!Number.isSafeInteger(delegation.issuedAtMs) || delegation.issuedAtMs < 0) {
-    throw new Error('Join request carries an invalid encryption-key freshness timestamp.');
-  }
-  const verified = keys.map((key) => {
-    if (
-      key === null
-      || typeof key !== 'object'
-      || key.encryptionKeyAlgorithm !== WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519
-      || typeof key.publicEncryptionKey !== 'string'
-      || typeof key.encryptionKeyProof !== 'string'
-    ) {
-      throw new Error('Join request carries a malformed workspace encryption key.');
-    }
-    let valid = false;
-    try {
-      valid = verifyWorkspaceEncryptionKeyBinding(
-        delegation.agentAddress,
-        key.encryptionKeyAlgorithm,
-        key.publicEncryptionKey,
-        key.encryptionKeyProof,
-      );
-    } catch {
-      valid = false;
-    }
-    if (!valid) {
-      throw new Error('Join request carries an invalid workspace encryption key proof.');
-    }
-    return key;
+function curatorJoinDialAddress(agent: DKGAgent, requesterPeerId: string): string | undefined {
+  return selectCuratorJoinDialAddress(agent.node.multiaddrs, agent.peerId, {
+    preferLoopback: requesterHasDirectLoopbackConnection(
+      agent.node.libp2p.getConnections(), requesterPeerId,
+    ),
   });
-  if (typeof delegation.workspaceEncryptionKeysSignature !== 'string') {
-    throw new Error('Join request is missing its workspace encryption-key attestation.');
-  }
-  let attestationSigner = '';
-  try {
-    attestationSigner = ethers.verifyMessage(
-      computeWorkspaceEncryptionKeysAttestationDigest(delegation),
-      delegation.workspaceEncryptionKeysSignature,
-    );
-  } catch {
-    attestationSigner = '';
-  }
-  if (attestationSigner.toLowerCase() !== delegation.agentAddress.toLowerCase()) {
-    throw new Error('Join request carries an invalid workspace encryption-key attestation.');
-  }
+}
 
-  const canonicalKeySet = [...new Set(verified.map((key) => JSON.stringify({
-    encryptionKeyAlgorithm: key.encryptionKeyAlgorithm,
-    publicEncryptionKey: key.publicEncryptionKey,
-  })))].sort();
-  return {
-    issuedAtMs: delegation.issuedAtMs,
-    keySetDigest: `0x${createHash('sha256').update(JSON.stringify(canonicalKeySet)).digest('hex')}`,
-    keys: verified,
+function joinApprovalPayload(
+  agent: DKGAgent,
+  contextGraphId: string,
+  agentAddress: string,
+  requestGeneration: string,
+  curatorBinding: Awaited<ReturnType<DKGAgent['readRfc64CurrentCuratorAuthorityBindingV1']>>,
+): (targetPeerId: string) => string {
+  return (targetPeerId) => {
+    const curatorDialAddress = curatorJoinDialAddress(agent, targetPeerId);
+    return JSON.stringify({
+      type: 'join-approved',
+      contextGraphId,
+      agentAddress,
+      requestGeneration,
+      ...(curatorDialAddress === undefined ? {} : { curatorDialAddress }),
+      ...(curatorBinding === null ? {} : {
+        curatorAgentAddress: curatorBinding.agentAddress,
+        curatorAuthorityEra: curatorBinding.authorityEra,
+      }),
+    });
   };
 }
 
@@ -2612,16 +2558,9 @@ export class JoinRequestMethods extends DKGAgentBase {
       contextGraphId,
       { admitWhileOpen: true },
     ).catch(() => null);
-    const payload = JSON.stringify({
-      type: 'join-approved',
-      contextGraphId,
-      agentAddress,
-      requestGeneration: resolvedGeneration,
-      ...(curatorBinding === null ? {} : {
-        curatorAgentAddress: curatorBinding.agentAddress,
-        curatorAuthorityEra: curatorBinding.authorityEra,
-      }),
-    });
+    const payload = joinApprovalPayload(
+      this, contextGraphId, agentAddress, resolvedGeneration, curatorBinding,
+    );
     const result = await this.deliverPrivateJoinNotification(
       contextGraphId,
       agentAddress,
@@ -2744,16 +2683,9 @@ export class JoinRequestMethods extends DKGAgentBase {
       contextGraphId,
       { admitWhileOpen: true },
     ).catch(() => null);
-    const payload = JSON.stringify({
-      type: 'join-approved',
-      contextGraphId,
-      agentAddress,
-      requestGeneration,
-      ...(curatorBinding === null ? {} : {
-        curatorAgentAddress: curatorBinding.agentAddress,
-        curatorAuthorityEra: curatorBinding.authorityEra,
-      }),
-    });
+    const payload = joinApprovalPayload(
+      this, contextGraphId, agentAddress, requestGeneration, curatorBinding,
+    );
     const result = await this.deliverPrivateJoinNotification(
       contextGraphId,
       agentAddress,
@@ -3190,10 +3122,9 @@ export class JoinRequestMethods extends DKGAgentBase {
     contextGraphId: string,
     agentAddress: string,
     requestGeneration: string,
-    payload: string,
+    payload: string | ((targetPeerId: string) => string),
     label: 'join-approval' | 'join-rejection',
   ): Promise<{ delivered: boolean; peerId: string | null; error: string | null }> {
-    const payloadBytes = new TextEncoder().encode(payload);
     const ctx = createOperationContext('system');
     const addrLower = agentAddress.toLowerCase();
 
@@ -3268,6 +3199,11 @@ export class JoinRequestMethods extends DKGAgentBase {
     }
 
     try {
+      // Resolve the exact recipient before encoding the approval. The outbox
+      // then persists these final bytes unchanged across later retries.
+      const payloadBytes = new TextEncoder().encode(
+        typeof payload === 'function' ? payload(targetPeerId) : payload,
+      );
       // rc.9 PR-10: send via the Universal Messenger substrate. If
       // the substrate can't deliver synchronously it enqueues into
       // the SQLite outbox and retries in the background — this
@@ -3325,7 +3261,7 @@ export class JoinRequestMethods extends DKGAgentBase {
     delegation: SignedAgentDelegation,
     agentName: string | undefined,
     curatorPeerId: string,
-  ): Promise<{ delivered: number; errors: string[]; alreadyMember?: boolean; autoApproved?: boolean }> {
+  ): Promise<{ delivered: number; queued?: boolean; errors: string[]; alreadyMember?: boolean; autoApproved?: boolean }> {
     const key = requesterJoinStateKey(contextGraphId, delegation.agentAddress);
     return withRequesterJoinForwardLock(this, key, () => this.forwardJoinRequestOnce(
       contextGraphId,
@@ -3340,7 +3276,7 @@ export class JoinRequestMethods extends DKGAgentBase {
     delegation: SignedAgentDelegation,
     agentName: string | undefined,
     curatorPeerId: string,
-  ): Promise<{ delivered: number; errors: string[]; alreadyMember?: boolean; autoApproved?: boolean }> {
+  ): Promise<{ delivered: number; queued?: boolean; errors: string[]; alreadyMember?: boolean; autoApproved?: boolean }> {
     if (!curatorPeerId) {
       // Required: V10 invites carry the curator's libp2p peer-id
       // (`<cgId>\n<peerId>`). Without it we can't authenticate the
@@ -3414,9 +3350,10 @@ export class JoinRequestMethods extends DKGAgentBase {
     if (curatorPeerId !== this.peerId) {
       recordAcceptedBy(curatorPeerId);
       try {
-        // rc.9 PR-10: substrate send. queued surfaces as a throw
-        // (matches the legacy sendToPeer ergonomics so the existing
-        // catch path with broadcast fallback still kicks in).
+        await recoverCuratorConnectionBeforeQueueing(
+          { node: this.node, peerResolver: this.peerResolver, log: this.log },
+          curatorPeerId, AbortSignal.timeout(JOIN_REQUEST_SEND_TIMEOUT_MS), ctx,
+        );
         const sendResult = await this.messenger.sendReliable(
           curatorPeerId,
           PROTOCOL_JOIN_REQUEST,
@@ -3426,11 +3363,15 @@ export class JoinRequestMethods extends DKGAgentBase {
         if (!sendResult.delivered) {
           // `delivered:false` means Messenger durably queued this exact
           // request; it is still accepted for eventual delivery. Preserve the
-          // generation so the later curator decision can be matched, while
-          // continuing the immediate broadcast fallback for lower latency.
+          // generation and trusted curator. A durable queue acceptance is
+          // pending success rather than a synchronous delivery failure.
           acceptedForDelivery = true;
           recordAcceptedBy(curatorPeerId);
-          throw new Error(`substrate queued (transport): ${sendResult.error}`);
+          this.log.info(
+            ctx,
+            `Queued join request for "${contextGraphId}" from ${agentAddress} to curator ${curatorPeerId.slice(-8)}`,
+          );
+          return { delivered: 0, queued: true, errors };
         }
         const responseBytes = sendResult.response;
         const response = JSON.parse(new TextDecoder().decode(responseBytes));

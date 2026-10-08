@@ -42,6 +42,9 @@
  * telemetry have one owner.
  */
 
+
+import { type RpcReadDescriptor, createRpcReadDescriptor, type RpcReadDescriptorInput, type ReadOpts } from './rpc-read-descriptor.js';
+export { type RpcReadDescriptor, createRpcReadDescriptor, rpcReadDescriptor, type RpcReadDescriptorInput, type ReadOpts } from './rpc-read-descriptor.js';
 import type { SignedTransactionEnvelope } from './chain-adapter.js';
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
 import { withSpan, getMetrics } from '@origintrail-official/dkg-core';
@@ -65,6 +68,7 @@ import {
 import { EndpointStickiness, type StickinessIntent } from './endpoint-stickiness.js';
 import { EndpointReadRefusals } from './endpoint-read-refusals.js';
 import { resolveCapMs, type ReadPolicy } from './rpc-read-timeout-policy.js';
+import { runRpcProviderPass } from './rpc-provider-pass.js';
 export { resolveCapMs, type ReadPolicy } from './rpc-read-timeout-policy.js';
 import {
   ChainRpcTransportError,
@@ -95,85 +99,6 @@ import {
 export interface RpcEndpoint {
   provider: JsonRpcProvider;
   rpcUrl: string;
-}
-
-/**
- * The human-facing label and the low-cardinality telemetry owner for one RPC
- * read. Keeping them together prevents a read from accidentally changing its
- * diagnostic label while silently retaining (or losing) its usage bucket.
- * `consumer: null` is an explicit opt-out for reads that must remain
- * unattributed.
- */
-export interface RpcReadDescriptor {
-  readonly label: string;
-  readonly consumer: string | null;
-}
-
-/** Construct an immutable, validated RPC read descriptor. */
-export function createRpcReadDescriptor(
-  label: string,
-  consumer: string | null = label,
-): RpcReadDescriptor {
-  if (typeof label !== 'string' || label.trim().length === 0) {
-    throw new TypeError('RPC read label must be a non-empty string');
-  }
-  if (consumer !== null && (typeof consumer !== 'string' || consumer.trim().length === 0)) {
-    throw new TypeError('RPC read consumer must be a non-empty string or null');
-  }
-  return Object.freeze({ label, consumer });
-}
-
-/**
- * Bind an adapter read's human label and telemetry owner together.
- *
- * Kept as a module helper so it does not become part of the concrete adapter's
- * prototype API (the mock-adapter parity test intentionally enumerates that
- * surface).
- */
-export function rpcReadDescriptor(label: string, opts?: ReadOpts): RpcReadDescriptor {
-  const consumer = opts?.rpcUsageConsumer === undefined ? label : opts.rpcUsageConsumer;
-  return createRpcReadDescriptor(label, consumer);
-}
-
-export type RpcReadDescriptorInput = string | RpcReadDescriptor;
-
-/** Per-read options: timeout/failover behavior plus a compatibility escape
- *  hatch for callers that have not migrated to {@link RpcReadDescriptor} yet.
- *  New code should put the consumer owner beside the human label in a
- *  descriptor. `null` deliberately suppresses raw-read attribution. */
-export interface ReadOpts {
-  policy?: ReadPolicy;
-  isRetryable?: (err: unknown) => boolean;
-  /** @deprecated Use `RpcReadDescriptor.consumer`; retained for compatibility. */
-  rpcUsageConsumer?: string | null;
-  /**
-   * Opt this read OUT of endpoint stickiness — it always uses the canonical
-   * (configured) endpoint order AND never mutates the preferred pointer
-   * (fully preference-transparent). Set on TIP-SENSITIVE reads (current head /
-   * latest block) where a lagging preferred backend could return a stale/lower
-   * head and make the tip non-monotonic across calls. A `skipPreferred` read on
-   * a selectively-healthy primary must NOT clear the preference the heavy
-   * read/write paths rely on — hence transparent, not merely canonical-ordered.
-   */
-  skipPreferred?: boolean;
-  /**
-   * Marks a read whose result may be a benign "not on this endpoint (yet)" EMPTY
-   * value (e.g. `eth_getTransactionReceipt` / `getBlock` returning `null`) rather
-   * than a definitive answer. When set, an empty result is NOT a transport
-   * failure: the loop tries the next endpoint WITHOUT de-preferring it or emitting
-   * failover/exhaustion telemetry, and if EVERY endpoint returns empty (and none
-   * errored) the empty value itself is returned. A real transport error still
-   * fails over / exhausts / propagates as usual. This keeps nullable reads
-   * (receipt/tx/block lookups) failing over on a lagging endpoint without a thrown
-   * sentinel polluting stickiness or telemetry.
-   */
-  isEmptyResult?: (value: unknown) => boolean;
-  /** Retry a complete endpoint pass only when every failure was a throttle. */
-  endpointSetRetry?: 'all-throttled';
-  /** Cancels the active raw ethers FetchRequest for this read. */
-  signal?: AbortSignal;
-  /** Absolute operation deadline shared by every endpoint attempt. */
-  deadlineMs?: number;
 }
 
 /** Optional absolute deadline and low-cardinality label for one receipt pass. */
@@ -817,13 +742,11 @@ export class RpcFailoverClient {
   }
 
   /**
-   * The single per-endpoint state machine backing `read`, `readContract`, and
-   * `getReceipt`. It owns endpoint ordering, validation+request attempt budgets,
-   * retry classification, benign-empty semantics, stickiness transitions, and
-   * failover selection. Receipt lookups add an absolute deadline and accept any
-   * real null response; ordinary nullable reads retain their stricter all-empty
-   * contract. Keeping both policies here prevents CLI and adapter receipt paths
-   * from growing a second transport loop beside the canonical failover core.
+   * Canonical policy for `read`, `readContract`, and `getReceipt`, using the
+   * shared ordered provider pass. This wrapper owns endpoint ordering,
+   * validation+request attempt budgets, stickiness transitions and exhaustion.
+   * Receipt lookups add an absolute deadline and accept any real null response;
+   * ordinary nullable reads retain their stricter all-empty contract.
    */
   private async runAcrossProviders<T>(
     label: string,
@@ -847,24 +770,16 @@ export class RpcFailoverClient {
       options.intent !== 'transparentRead' && this.endpointOrderingEnabled(),
     );
     const configuredAttemptTimeoutMs = options.attemptTimeoutMs(canonical.length);
-    let lastRetryable: unknown;
     let allEndpointsThrottled = true;
     let retryAfterMs: number | undefined;
-    let sawEmpty = false;
-    let lastEmpty: T | undefined;
-    let deadlineExpiredBeforeAttempt = false;
-    for (let i = 0; i < attempts.length; i += 1) {
-      const attempt = attempts[i];
-      const endpoint = attempt.endpoint;
-      const isLast = i === attempts.length - 1;
+    const result = await runRpcProviderPass(attempts, (attempt, index) => {
+      // Prepare an immutable budget before observers, then attach it to this
+      // attempt's runner so validation and request share the same deadline.
       const attemptStartedAt = Date.now();
       const deadlineRemainingMs = options.deadlineMs === undefined
         ? undefined
         : options.deadlineMs - attemptStartedAt;
-      if (deadlineRemainingMs !== undefined && deadlineRemainingMs <= 0) {
-        deadlineExpiredBeforeAttempt = true;
-        break;
-      }
+      if (deadlineRemainingMs !== undefined && deadlineRemainingMs <= 0) return null;
       const attemptBudgetMs = deadlineRemainingMs === undefined
         ? configuredAttemptTimeoutMs
         : configuredAttemptTimeoutMs === undefined
@@ -873,51 +788,51 @@ export class RpcFailoverClient {
       const attemptDeadlineMs = attemptBudgetMs === undefined
         ? undefined
         : attemptStartedAt + attemptBudgetMs;
-      try {
-        options.onAttempt?.(i + 1);
+      return async () => {
+        const endpoint = attempt.endpoint;
         if (this.validateEndpoint) {
           await this.runProviderAttemptStage(
             () => this.validateEndpoint!(endpoint),
             attemptDeadlineMs,
-            `${label} chainId validation via RPC #${i + 1}`,
+            `${label} chainId validation via RPC #${index + 1}`,
           );
         }
-        const out = await this.runProviderAttemptStage(
+        return this.runProviderAttemptStage(
           () => fn(endpoint.provider),
           attemptDeadlineMs,
-          `${label} via RPC #${i + 1}`,
+          `${label} via RPC #${index + 1}`,
         );
-        if (options.isEmptyResult?.(out)) {
-          // A BENIGN "no result on this endpoint (yet)" — a nullable read whose
-          // endpoint hasn't imported the tx/block. This is NOT a transport failure:
-          // it must NOT de-prefer the endpoint (recordFailure) or emit failover
-          // telemetry. Try the next endpoint; if EVERY endpoint is empty (and none
-          // errored) the empty value itself is the honest answer.
-          sawEmpty = true;
-          allEndpointsThrottled = false;
-          lastEmpty = out;
-          continue;
-        }
+      };
+    }, {
+      isRetryable: error => options.isRetryable(error),
+      onAttempt: (_attempt, index) => options.onAttempt?.(index + 1),
+      isEmptyResult: (value) => {
+        const empty = options.isEmptyResult?.(value) ?? false;
+        // Benign emptiness neither de-prefers a backend nor emits failover.
+        if (empty) allEndpointsThrottled = false;
+        return empty;
+      },
+      onServed: (attempt, value) => {
         attempt.recordSuccess();
-        options.onServed(endpoint, out);
-        return out;
-      } catch (err) {
-        if (classifyRpcRetryDisposition(err) === 'retry-later') throw err;
-        if (!options.isRetryable(err)) throw err;
-        lastRetryable = err;
-        if (!isThrottleRpcError(err)) {
+        options.onServed(attempt.endpoint, value);
+      },
+      onFailure: (attempt, error, index) => {
+        if (!isThrottleRpcError(error)) {
           allEndpointsThrottled = false;
         } else {
-          const hint = errorRetryAfterMs(err);
+          const hint = errorRetryAfterMs(error);
           if (hint !== undefined) retryAfterMs = Math.max(retryAfterMs ?? 0, hint);
         }
-        attempt.recordFailure(err); // de-prefer a failed backend; remember a refusal
+        attempt.recordFailure(error); // de-prefer a failed backend; remember a refusal
         const canTryNext = options.deadlineMs === undefined || Date.now() < options.deadlineMs;
-        if (!isLast && canTryNext) {
-          noteRpcFailover(label, endpoint.rpcUrl, err, attempts[i + 1].endpoint.rpcUrl);
+        if (index < attempts.length - 1 && canTryNext) {
+          noteRpcFailover(label, attempt.endpoint.rpcUrl, error, attempts[index + 1].endpoint.rpcUrl);
         }
-      }
-    }
+      },
+    });
+    if (result.status === 'served') return result.value;
+    const lastRetryable = result.lastError;
+    const sawEmpty = result.empty !== null;
     // Ordinary nullable reads require an all-empty pass, so any real transport
     // error still exhausts. Receipt polls opt into `any-empty`: one endpoint's
     // real null response is enough to report "not mined yet" despite a transient
@@ -947,8 +862,8 @@ export class RpcFailoverClient {
     }
     // Either every endpoint returned empty with no errors, or the caller's
     // `any-empty` policy accepted at least one empty response.
-    if (sawEmpty) return lastEmpty as T;
-    if (deadlineExpiredBeforeAttempt) {
+    if (result.empty !== null) return result.empty.value;
+    if (result.stopped) {
       throw createRpcTimeoutError(`${label} exceeded its operation deadline`);
     }
     // Unreachable when >=1 endpoint is configured (each iteration returns,

@@ -7,6 +7,7 @@
  * so cross-calls resolve against the composed class.
  */
 
+import { resolveRfc64PrivateReadRoster } from './rfc64/private-read-roster-v1.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { canReadUnscopedQuery } from './unscoped-query-admission.js';
 import {
@@ -38,8 +39,8 @@ import {
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS,
-  assertContextGraphIdV1, assertNetworkIdV1,
-  type ContextGraphIdV1, type NetworkIdV1,
+
+
   Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
   validateContextGraphId,
   TrustLevel,
@@ -865,6 +866,8 @@ export class QueryMethods extends DKGAgentBase {
       callerAgentAddress?: string;
       allowSubscriptionFallback?: boolean;
       signal?: AbortSignal;
+      /** Durable readiness fences require a live roster, not a bounded read. */
+      freshness?: 'live' | 'bounded';
       /**
        * Freshly loaded durable row for this exact bootstrap candidate. Its
        * canonical numeric id may skip name discovery, but never the fresh
@@ -1070,6 +1073,7 @@ export class QueryMethods extends DKGAgentBase {
       callerAgentAddress?: string;
       allowSubscriptionFallback?: boolean;
       signal?: AbortSignal;
+      freshness?: 'live' | 'bounded';
       durableSubscriptionBinding?: Readonly<DurableContextGraphSubscriptionBinding>;
     },
     plan: ContextGraphReadAuthorityPlan,
@@ -1104,15 +1108,10 @@ export class QueryMethods extends DKGAgentBase {
               && this.isRfc64JoinDerivedAcceptedAuthorityV1?.(contextGraphId) !== true,
             allowApprovedPrivateReplicaFinalizedAbsence: true,
             authorityReadMode,
-            // READ authorization, and therefore correctable by the next read.
-            // A roster this node has not caught up on denies a member who was
-            // just added — they retry and are let in — and admits one who was
-            // just removed for at most the index's freshness bound. Neither
-            // outcome hands out anything that outlives the bound, which is what
-            // separates this from key issuance and from the roster mutation
-            // itself. Inert unless the operator enables
-            // `chain.boundedAuthorityReads`.
-            freshness: 'bounded',
+            // Ordinary reads are correctable by their next read and may use a
+            // bounded roster. A durable readiness commit is not self-correcting
+            // and explicitly asks for live current-chain authority instead.
+            freshness: opts.freshness ?? 'bounded',
           },
         ),
       ),
@@ -1154,72 +1153,13 @@ export class QueryMethods extends DKGAgentBase {
    * `undefined` means the CG is not owned by RFC-64 activation. `null` means
    * it is selected but current authority is unavailable, so reads must deny.
    */
-  resolveRfc64PrivateReadRosterV1(
-    this: DKGAgent,
-    contextGraphId: string,
-  ): readonly string[] | null | undefined {
-    const service = this.rfc64PublicCatalogServiceV1;
-    // RFC-64 policies are keyed by the effective namespaced chain network
-    // (for example `otp:20430`). `networkIdentity.networkId` is the DKG
-    // genesis hash and must never be used as catalog-policy authority.
-    const activeNetworkId = this.config.networkIdentity?.chainId;
-    if (service !== undefined && activeNetworkId !== undefined) {
-      let canonicalNetworkId: NetworkIdV1 | null = null;
-      let canonicalContextGraphId: ContextGraphIdV1 | null = null;
-      try {
-        assertNetworkIdV1(activeNetworkId);
-        assertContextGraphIdV1(contextGraphId);
-        canonicalNetworkId = activeNetworkId;
-        canonicalContextGraphId = contextGraphId;
-      } catch {
-        // Non-RFC-64 identifiers continue through the legacy authorization path.
-      }
-      if (canonicalNetworkId !== null && canonicalContextGraphId !== null) {
-        const current = service.acceptedPolicySnapshot(
-          canonicalNetworkId,
-          canonicalContextGraphId,
-        );
-        if (current !== null) {
-          if (current.policy.accessPolicy !== 1) return undefined;
-          // A join-derived roster never authorizes a read on its own.
-          if (this.isRfc64JoinDerivedAcceptedAuthorityV1?.(contextGraphId) === true) {
-            return undefined;
-          }
-          if (current.roster === null) return null;
-          return Object.freeze(
-            current.roster.members.map(({ agentAddress }) => agentAddress),
-          );
-        }
-      }
-    }
-
-    // A configured private selection remains fail-closed until its authority
-    // is accepted into the live registry. Bootstrap is a liveness/source hint,
-    // not the ownership boundary for query authorization.
-    const configured = this.config.rfc64CatalogBootstrap?.acceptedPolicies.filter(
-      ({ policyEnvelope }) => (
-        policyEnvelope.payload.contextGraphId === contextGraphId
-        && policyEnvelope.payload.accessPolicy === 1
-      ),
-    ) ?? [];
-    if (configured.length === 0) return undefined;
-    if (service === undefined) return null;
-
-    for (const { policyEnvelope } of configured) {
-      const policy = policyEnvelope.payload;
-      const current = service.acceptedPolicySnapshot(
-        policy.networkId,
-        policy.contextGraphId,
-      );
-      if (
-        current !== null
-        && current.policy.accessPolicy === 1
-        && current.roster !== null
-      ) {
-        return Object.freeze(current.roster.members.map(({ agentAddress }) => agentAddress));
-      }
-    }
-    return null;
+  resolveRfc64PrivateReadRosterV1(this: DKGAgent, contextGraphId: string): readonly string[] | null | undefined {
+    return resolveRfc64PrivateReadRoster({
+      activeNetworkId: this.config.networkIdentity?.chainId,
+      acceptedPolicies: this.config.rfc64CatalogBootstrap?.acceptedPolicies,
+      service: this.rfc64PublicCatalogServiceV1,
+      isJoinDerived: id => this.isRfc64JoinDerivedAcceptedAuthorityV1?.(id) === true,
+    }, contextGraphId);
   }
 
   /**

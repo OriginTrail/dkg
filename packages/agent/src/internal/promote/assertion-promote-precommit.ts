@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { createOperationContext } from '@origintrail-official/dkg-core';
+import {
+  createOperationContext,
+  isRfc64LegacySwmBoundaryRetirementInProgressError,
+} from '@origintrail-official/dkg-core';
 import {
   createPromoteRetryableFailure,
   type PublisherAssertionPromoteOptions,
@@ -68,6 +71,23 @@ async function resolvePromoteAuthority<T>(resolve: () => Promise<T>): Promise<T>
   }
 }
 
+/**
+ * The same translation for the root promote's boundary companion, which the
+ * publisher prepares synchronously. Only the retirement fence is transient:
+ * every other refusal from the prepare (unavailable persistence, the head
+ * limit, invalid input) is a hard failure and passes through unchanged.
+ */
+export function translateLegacySwmRetirementFence<T>(prepare: () => T): T {
+  try {
+    return prepare();
+  } catch (error) {
+    if (isRfc64LegacySwmBoundaryRetirementInProgressError(error)) {
+      throw createPromoteRetryableFailure(error);
+    }
+    throw error;
+  }
+}
+
 /** Waits before each repeat of a promote's recipient read. */
 export const PROMOTE_RECIPIENT_RETRY_DELAYS_MS: readonly number[] = Object.freeze([100, 300, 700]);
 
@@ -93,14 +113,16 @@ const REAL_PROMOTE_RECIPIENT_RETRY_TIMING: PromoteRecipientRetryTiming = Object.
  * Repeat a promote's recipient read while it fails with a retryable authority
  * outage and the bound allows.
  *
- * The recipient read accepts its roster only while the node-wide authority
- * facts revision stands still, and it gives up after a few attempts. Work that
+ * The recipient read accepts its roster only while the facts it depends on
+ * stand still, and it gives up after a few attempts. For a private roster those
+ * are the roster, the peer allowlist and the members' keys and routes (GH#3067);
+ * the other kinds also watch the node-wide authority facts revision. Work that
  * has nothing to do with this promote moves that revision: after a Context
  * Graph is registered the node reconciles the new graph's gossip subscription
- * several times within a few hundred milliseconds. A share sent straight after
- * a registration can therefore use up those attempts and report the roster as
- * temporarily unavailable, although no fact changed and the same read succeeds
- * moments later.
+ * several times within a few hundred milliseconds. A share of one of the other
+ * kinds sent straight after a registration can therefore use up those attempts
+ * and report the roster as temporarily unavailable, although no fact changed
+ * and the same read succeeds moments later.
  *
  * Repeating it is safe. It only reads authority and recipient keys, it fails
  * closed every time, and the publisher asks for it before the attempt claims
