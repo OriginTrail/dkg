@@ -30,8 +30,9 @@ import {
 export const NAMED_KA_RECOVERY_PENDING_SUMMARY_INTERVAL_MS = 5 * 60_000;
 
 /**
- * How long the chain endpoints must be the named cause of every deferral, with
- * no version view read in between, before the operator is told to act.
+ * How long the chain endpoints must be the named cause of every deferral of the
+ * assets they hold, whatever each failed with, and with no version view read in
+ * between, before the operator is told to act.
  *
  * Recovery is asked again at the active reconciliation cadence (5 s by
  * default), so five minutes is dozens of failed reads in a row: longer than a
@@ -69,6 +70,8 @@ export interface NamedKaRecoveryPendingLogOptions {
 interface AssetEntry {
   reason: string;
   lastAt: number;
+  /** Whether the endpoints were named as the cause of its latest deferral. */
+  endpointsNamed: boolean;
 }
 
 interface ReasonEntry {
@@ -80,6 +83,19 @@ interface ReasonEntry {
   reportedAt: number;
   /** The endpoints named as the cause, when the reason names any. */
   blockedBy?: string;
+}
+
+/**
+ * The run of deferrals the chain endpoints are named for, across assets and whatever each
+ * endpoint failed with: each failure is a reason of its own, with its own summaries, but an
+ * outage whose failure changes from one tick to the next is one run and one operator line.
+ * A version view read ends it, and so does an asset it held deferring for something else.
+ */
+interface EndpointRun {
+  /** First and latest deferral of the run, and how many it holds. */
+  since: number;
+  lastAt: number;
+  deferrals: number;
   escalated: boolean;
 }
 
@@ -90,6 +106,7 @@ export class NamedKaRecoveryPendingLog {
   readonly #escalateMinDeferrals: number;
   readonly #assets = new Map<string, AssetEntry>();
   readonly #reasons = new Map<string, ReasonEntry>();
+  #endpointRun: EndpointRun | undefined;
 
   constructor(options: NamedKaRecoveryPendingLogOptions = {}) {
     this.#now = options.now ?? Date.now;
@@ -130,6 +147,7 @@ export class NamedKaRecoveryPendingLog {
    * the position check settles without a view), so it is reported separately.
    */
   versionViewRead(): void {
+    this.#endpointRun = undefined;
     if (this.#reasons.size === 0) return;
     for (const [reason, entry] of this.#reasons) {
       if (entry.blockedBy !== undefined) this.#reasons.delete(reason);
@@ -147,6 +165,7 @@ export class NamedKaRecoveryPendingLog {
     // The recovery's own reason is the same for every asset one cause holds, so they share
     // a summary. An error from elsewhere has only its message.
     const reason = diagnostics.pendingReason ?? message;
+    const blockedBy = versionViewBlockingEndpoints(diagnostics.versionViewUnavailable);
     const due: string[] = [];
 
     const key = assetKey(asset);
@@ -154,7 +173,8 @@ export class NamedKaRecoveryPendingLog {
     if (seen === undefined || seen.reason !== reason || now - seen.lastAt > this.#summaryIntervalMs) {
       due.push(line);
     }
-    rememberBounded(this.#assets, key, { reason, lastAt: now }, MAX_TRACKED_ASSETS);
+    const endpointsNamed = blockedBy !== undefined;
+    rememberBounded(this.#assets, key, { reason, lastAt: now, endpointsNamed }, MAX_TRACKED_ASSETS);
 
     let entry = this.#reasons.get(reason);
     // A reason not seen for a summary interval is a new run, not a continuation.
@@ -164,33 +184,43 @@ export class NamedKaRecoveryPendingLog {
         lastAt: now,
         deferrals: 0,
         reportedAt: now,
-        blockedBy: versionViewBlockingEndpoints(diagnostics.versionViewUnavailable),
-        escalated: false,
+        blockedBy,
       };
     }
     entry.lastAt = now;
     entry.deferrals += 1;
     rememberBounded(this.#reasons, reason, entry, MAX_TRACKED_REASONS);
 
-    const minutes = Math.round((now - entry.since) / 60_000);
+    let run: EndpointRun | undefined;
+    if (endpointsNamed) {
+      run = this.#continueEndpointRun(now);
+    } else if (seen?.endpointsNamed === true) {
+      // An asset the endpoints were named for now defers for something else (a deadline, the
+      // node's own request budget): they are not the cause of every deferral, and their run is
+      // over. An asset they were never named for says nothing about them either way.
+      this.#endpointRun = undefined;
+    }
+
     if (
-      entry.blockedBy !== undefined
-      && !entry.escalated
-      && now - entry.since >= this.#escalateAfterMs
-      && entry.deferrals >= this.#escalateMinDeferrals
+      run !== undefined
+      && !run.escalated
+      && now - run.since >= this.#escalateAfterMs
+      && run.deferrals >= this.#escalateMinDeferrals
     ) {
-      entry.escalated = true;
+      run.escalated = true;
+      const pending = this.#pending(now, (tracked) => tracked.endpointsNamed);
       due.push(
         'Operator action needed: publishes confirmed on chain are not finalizing on this node '
-        + `(${this.#pending(reason, now)} pending, ${minutes} min). No configured chain endpoint `
-        + `supplies the current version at one pinned block: ${entry.blockedBy}. Fix an endpoint `
+        + `(${pending} pending, ${minutesSince(run.since, now)} min). No configured chain endpoint `
+        + `supplies the current version at one pinned block: ${blockedBy}. Fix an endpoint `
         + 'named here, or replace it in the chain RPC configuration (rpcUrl / rpcUrls) and '
         + 'restart the node; the pending publishes then finalize without being sent again.',
       );
     } else if (now - entry.reportedAt >= this.#summaryIntervalMs) {
+      const pending = this.#pending(now, (tracked) => tracked.reason === reason);
       due.push(
-        `Named KA recovery remains pending for ${this.#pending(reason, now)} asset(s) after `
-        + `${minutes} min (${entry.deferrals} deferrals): ${reason}`,
+        `Named KA recovery remains pending for ${pending} asset(s) after `
+        + `${minutesSince(entry.since, now)} min (${entry.deferrals} deferrals): ${reason}`,
       );
     } else {
       return due;
@@ -199,11 +229,26 @@ export class NamedKaRecoveryPendingLog {
     return due;
   }
 
-  /** Assets deferred for `reason` within the last summary interval. */
-  #pending(reason: string, now: number): number {
+  /**
+   * The endpoints' run, one deferral longer. One not extended for a summary interval is over,
+   * as a reason's is.
+   */
+  #continueEndpointRun(now: number): EndpointRun {
+    let run = this.#endpointRun;
+    if (run === undefined || now - run.lastAt > this.#summaryIntervalMs) {
+      run = { since: now, lastAt: now, deferrals: 0, escalated: false };
+      this.#endpointRun = run;
+    }
+    run.lastAt = now;
+    run.deferrals += 1;
+    return run;
+  }
+
+  /** Assets deferred within the last summary interval whose latest deferral `held` accepts. */
+  #pending(now: number, held: (asset: AssetEntry) => boolean): number {
     let count = 0;
     for (const entry of this.#assets.values()) {
-      if (entry.reason === reason && now - entry.lastAt <= this.#summaryIntervalMs) count += 1;
+      if (held(entry) && now - entry.lastAt <= this.#summaryIntervalMs) count += 1;
     }
     return count;
   }
@@ -211,4 +256,8 @@ export class NamedKaRecoveryPendingLog {
 
 function assetKey(asset: NamedKaRecoveryPendingAsset): string {
   return JSON.stringify([asset.contextGraphId, asset.subGraphName ?? '', asset.name]);
+}
+
+function minutesSince(since: number, now: number): number {
+  return Math.round((now - since) / 60_000);
 }
