@@ -9164,6 +9164,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           current = this.subscribedContextGraphs.get(contextGraphId) ?? current;
         }
 
+        const metadataWasPending = current.metaSynced !== true || current.pendingMeta === true;
         if (current.metaSynced !== true) {
           this.setContextGraphSubscription(contextGraphId, { ...current, metaSynced: true });
         }
@@ -9173,12 +9174,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           // (set by the join-approved handler) no longer applies — the
           // CG will now surface via the normal `_meta` branch in
           // `listContextGraphs`.
-          this.setContextGraphSubscription(contextGraphId, {
-            ...current,
-            metaSynced: true,
-            pendingMeta: false,
-          });
+          this.setContextGraphSubscription(contextGraphId, { ...current, metaSynced: true, pendingMeta: false });
         }
+        if (metadataWasPending) this.announceJoinMetadataConfirmedV1(contextGraphId);
         // Private responsibility depends on the live ACL projection, not only
         // on subscription fields. A curator refresh can add/remove the local
         // agent while `metaSynced`, `subscribed`, and the chain binding all stay

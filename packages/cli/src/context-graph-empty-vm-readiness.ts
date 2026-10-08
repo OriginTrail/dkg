@@ -5,15 +5,23 @@ import {
   type ContextGraphReadAuthorityDecision,
   type DKGAgent,
 } from '@origintrail-official/dkg-agent';
-import { resolveWithinAbort } from '@origintrail-official/dkg-core';
+import { DKGEvent, resolveWithinAbort } from '@origintrail-official/dkg-core';
 import type { DashboardDB } from '@origintrail-official/dkg-node-ui';
 import { readContextGraphReadiness } from './context-graph-readiness.js';
 import { classifyEmptyPrivateVmReadiness, withProvenEmptyPrivateVmReadiness } from './context-graph-empty-vm-readiness-owner.js';
 import { commitContextGraphReadinessPatches } from './context-graph-readiness-commit.js';
 
-const trace = (stage: string) => {
-  if (process.env.DKG_DEBUG_PRIVATE_EMPTY_VM === '1') console.info(`[private-empty-vm] subscribe-${stage}`);
+/** What asked for the proof; it only labels the debug trace. */
+type SettlementOrigin = 'subscribe' | 'join-metadata';
+
+const trace = (origin: SettlementOrigin, stage: string) => {
+  if (process.env.DKG_DEBUG_PRIVATE_EMPTY_VM === '1') console.info(`[private-empty-vm] ${origin}-${stage}`);
 };
+
+/** How long a subscribe request waits for the proof before it answers. */
+const SUBSCRIBE_SETTLEMENT_TIMEOUT_MS = 8_000;
+/** No request waits on a join's metadata, so slow chain reads get more room. */
+const JOIN_METADATA_SETTLEMENT_TIMEOUT_MS = 30_000;
 
 /**
  * The first write follows subscribe, while a foreground catch-up can still be
@@ -29,8 +37,69 @@ export async function settlePrivateEmptyVmAtSubscribe(
   callerAgentAddress?: string,
 ): Promise<boolean> {
   if (!isRegisteredPrivateEmptyVmReadinessCandidateV1(authority, callerAgentAddress)) return false;
-  trace('candidate');
-  const signal = AbortSignal.timeout(8_000);
+  trace('subscribe', 'candidate');
+  return settlePrivateEmptyVm(
+    'subscribe', agent, dashboard, contextGraphId, callerAgentAddress, SUBSCRIBE_SETTLEMENT_TIMEOUT_MS,
+  );
+}
+
+/**
+ * A join approval, and the curator metadata fetched after it, can reach a
+ * member after its subscribe call and the catch-up job that call started.
+ * Both of those attempts then end before the proof can succeed, and an empty
+ * graph gives nothing else a reason to try again, so the member could not
+ * write until it subscribed a second time. Run the same proof when the agent
+ * reports that metadata as confirmed.
+ */
+export function registerJoinMetadataEmptyVmSettlement(input: {
+  agent: DKGAgent;
+  dashboard: DashboardDB;
+  log: (message: string) => void;
+}): void {
+  input.agent.eventBus.on(DKGEvent.JOIN_METADATA_CONFIRMED, (data: unknown) => {
+    if (data === null || typeof data !== 'object') return;
+    const { contextGraphId, agentAddress } = data as { contextGraphId?: unknown; agentAddress?: unknown };
+    if (typeof contextGraphId !== 'string' || typeof agentAddress !== 'string') return;
+    void settlePrivateEmptyVmAfterJoinMetadata(
+      input.agent, input.dashboard, contextGraphId, agentAddress,
+    ).catch((err) => {
+      input.log(`[warn] Failed to settle empty-graph readiness after join metadata: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  });
+}
+
+/**
+ * The agent's proof owns every prerequisite, this node's membership included,
+ * so a graph it does not apply to settles nothing here. A proven graph is
+ * announced the way a catch-up job that proved the same thing announces it.
+ */
+export async function settlePrivateEmptyVmAfterJoinMetadata(
+  agent: DKGAgent,
+  dashboard: DashboardDB,
+  contextGraphId: string,
+  callerAgentAddress: string,
+): Promise<boolean> {
+  const subscription = agent.getSubscribedContextGraphs().get(contextGraphId);
+  if (subscription?.subscribed !== true || subscription.synced === true) return false;
+  trace('join-metadata', 'candidate');
+  if (!await settlePrivateEmptyVm(
+    'join-metadata', agent, dashboard, contextGraphId, callerAgentAddress, JOIN_METADATA_SETTLEMENT_TIMEOUT_MS,
+  )) return false;
+  agent.eventBus.emit(DKGEvent.PROJECT_SYNCED, { contextGraphId, dataSynced: 0, sharedMemorySynced: 0 });
+  return true;
+}
+
+async function settlePrivateEmptyVm(
+  origin: SettlementOrigin,
+  agent: DKGAgent,
+  dashboard: DashboardDB,
+  contextGraphId: string,
+  callerAgentAddress: string,
+  timeoutMs: number,
+): Promise<boolean> {
+  const signal = AbortSignal.timeout(timeoutMs);
+  // One second within the subscribe deadline; a longer deadline retries less often.
+  const maxRetryDelayMs = Math.max(1_000, Math.floor(timeoutMs / 8));
   const settle = async (): Promise<boolean> => {
     let retryDelayMs = 250;
     while (!signal.aborted) {
@@ -47,25 +116,25 @@ export async function settlePrivateEmptyVmAtSubscribe(
       });
       if (!proof.proven) {
         if (!proof.retryable || signal.aborted) {
-          trace('proof-false'); return false;
+          trace(origin, 'proof-false'); return false;
         }
         // A curator metadata refresh or temporary authority outage can
         // invalidate an otherwise valid proof while a fresh join settles.
-        // Re-run the agent-owned proof within this subscribe deadline.
-        trace('proof-retry');
+        // Re-run the agent-owned proof within this deadline.
+        trace(origin, 'proof-retry');
         await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
-        retryDelayMs = Math.min(retryDelayMs * 2, 1_000);
+        retryDelayMs = Math.min(retryDelayMs * 2, maxRetryDelayMs);
         continue;
       }
-      trace('vm-ready');
+      trace(origin, 'vm-ready');
       return true;
     }
     return false;
   };
   // The agent also sees the same signal and rejects a late proof before its
-  // synchronous commit. Bound this HTTP request if a backend ignores cancellation.
+  // synchronous commit. Bound the wait if a backend ignores cancellation.
   const completed = await resolveWithinAbort(() => settle(), signal);
   if (completed) return true;
-  trace(signal.aborted ? 'meta-timeout' : 'settlement-incomplete');
+  trace(origin, signal.aborted ? 'meta-timeout' : 'settlement-incomplete');
   return false;
 }
