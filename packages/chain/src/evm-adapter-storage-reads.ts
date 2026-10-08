@@ -121,6 +121,16 @@ export class StorageReadMethods extends EVMChainAdapterBase {
     const knowledgeAssetStorageAddress = this.knowledgeAssetStorageBindingAddress(kas);
     const knowledgeAssetStorageGeneration = this.knowledgeAssetStorageBindingGeneration;
     if (knowledgeAssetStorageAddress === undefined) return null;
+    const resolutionAbort = new AbortController();
+    const resolutionSignal = options.signal
+      ? AbortSignal.any([resolutionAbort.signal, options.signal])
+      : resolutionAbort.signal;
+    const observeLocalPressure = <T>(read: Promise<T>): Promise<T> => read.catch((error) => {
+      // End resolution as soon as shared capacity fails. Waiting for a hung
+      // sibling would let its endpoint timeout mask this operation verdict.
+      if (classifyRpcRetryDisposition(error) === 'retry-later') resolutionAbort.abort(error);
+      throw error;
+    });
     const readOne = async (provider: JsonRpcProvider, signal?: AbortSignal) => {
       signal?.throwIfAborted();
       if (!this.knowledgeAssetStorageBindingIsCurrent(
@@ -177,18 +187,12 @@ export class StorageReadMethods extends EVMChainAdapterBase {
       // early failure must not abandon hanging sibling requests beside a new
       // fallback attempt; the existing timeout cancels those physical reads.
       const [rootRead, contextRead, authorRead, publisherRead] = await Promise.allSettled([
-        bound.getLatestMerkleRoot(kaId, at) as Promise<string>,
-        bound.getKnowledgeAssetUpdateContext(kaId, at),
-        bound.getLatestMerkleRootAuthor(kaId, at) as Promise<string>,
-        bound.getLatestMerkleRootPublisher(kaId, at) as Promise<string>,
+        observeLocalPressure(bound.getLatestMerkleRoot(kaId, at) as Promise<string>),
+        observeLocalPressure(bound.getKnowledgeAssetUpdateContext(kaId, at)),
+        observeLocalPressure(bound.getLatestMerkleRootAuthor(kaId, at) as Promise<string>),
+        observeLocalPressure(bound.getLatestMerkleRootPublisher(kaId, at) as Promise<string>),
       ]);
       signal?.throwIfAborted();
-      // Local admission pressure cannot be repaired by another endpoint. Keep
-      // that verdict even when an earlier tuple slot failed at the endpoint.
-      for (const read of [rootRead, contextRead, authorRead, publisherRead]) {
-        if (read.status === 'rejected'
-          && classifyRpcRetryDisposition(read.reason) === 'retry-later') throw read.reason;
-      }
       if (rootRead.status === 'rejected') throw rootRead.reason;
       if (contextRead.status === 'rejected') throw contextRead.reason;
       if (authorRead.status === 'rejected') throw authorRead.reason;
@@ -218,7 +222,7 @@ export class StorageReadMethods extends EVMChainAdapterBase {
     const view = await readFirstProviderWithTransientRetry(this.providers, readOne, {
       retryDelayMs: VERSION_SNAPSHOT_TRANSIENT_RETRY_DELAY_MS,
       isRetryable: isContractViewRetryable,
-      signal: options.signal,
+      signal: resolutionSignal,
     });
     if (!view || options.signal?.aborted || activeRpcRequestAbortSignal()?.aborted) return null;
     return this.knowledgeAssetStorageBindingIsCurrent(
