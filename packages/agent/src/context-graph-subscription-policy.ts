@@ -2,8 +2,10 @@ import type {
   ContextGraphSub,
   ContextGraphSubInput,
   ContextGraphSubscriptionRecord,
+  ContextGraphSubscriptionStore,
   ContextGraphSyncMode,
 } from './dkg-agent-types.js';
+import { projectDormantContextGraphIdentities } from './context-graph-dormant-identity.js';
 
 /** Retained identity alone grants neither member admission nor Core custody. */
 export function isAdmittedContextGraphSubscription(
@@ -112,4 +114,89 @@ export function projectContextGraphSubscriptionPersistence(input: {
       syncScoped: persistMemberIntent && input.syncScoped,
     },
   };
+}
+
+/** Join approval owns this exact durable snapshot, including sync scope. */
+export function projectContextGraphJoinSubscriptionRecord(
+  contextGraphId: string,
+  subscription: ContextGraphSub,
+): ContextGraphSubscriptionRecord {
+  return {
+    id: contextGraphId,
+    name: subscription.name,
+    subscribed: subscription.subscribed,
+    synced: subscription.synced,
+    sharedMemorySynced: subscription.sharedMemorySynced,
+    metaSynced: subscription.metaSynced,
+    onChainId: subscription.onChainId,
+    onChainHash: subscription.onChainHash,
+    lastReconciledOrdinal: subscription.lastReconciledOrdinal,
+    coreHosted: subscription.coreHosted,
+    syncScoped: true,
+  };
+}
+
+/** Only the independent hosting bit crosses a matching durable identity. */
+export function preserveSavedContextGraphCoreHosting(
+  record: ContextGraphSubscriptionRecord,
+  previous: ContextGraphSubscriptionRecord | null,
+): ContextGraphSubscriptionRecord {
+  if (record.coreHosted === true || previous?.coreHosted !== true) return record;
+  const current = projectDormantContextGraphIdentities([record]).get(record.id);
+  const saved = projectDormantContextGraphIdentities([previous]).get(previous.id);
+  if (
+    current === undefined || saved === undefined
+    || current.onChainId !== saved.onChainId || current.onChainHash !== saved.onChainHash
+    || (previous.id !== record.id && previous.id.toLowerCase() !== current.onChainHash)
+  ) return record;
+  return { ...record, coreHosted: true };
+}
+
+/** Must run inside the caller's existing serialized store-write lane. */
+export async function readPreservedContextGraphCoreHosting(
+  store: ContextGraphSubscriptionStore,
+  record: ContextGraphSubscriptionRecord,
+  previous?: ContextGraphSubscriptionRecord | null,
+): Promise<ContextGraphSubscriptionRecord> {
+  if (record.coreHosted === true) return record;
+  const identity = projectDormantContextGraphIdentities([record]).get(record.id);
+  if (identity?.onChainHash === undefined) return record;
+  const nameHash = identity.onChainHash;
+  let rows: ContextGraphSubscriptionRecord[] | undefined;
+  if (previous === undefined) {
+    if (store.load) previous = await store.load(record.id);
+    else {
+      rows = await store.loadAll();
+      const matches = rows.filter((row) => row.id === record.id);
+      previous = matches.length === 1 ? matches[0] : null;
+    }
+  }
+  const saved = preserveSavedContextGraphCoreHosting(record, previous);
+  if (saved.coreHosted === true || nameHash === record.id.toLowerCase()) return saved;
+  rows ??= await store.loadAll();
+  const wireRows = rows.filter((row) => typeof row?.id === 'string' && row.id.toLowerCase() === nameHash);
+  // Alias cleanup groups every case variant. None may assert a foreign slot
+  // or a malformed/literal-hash commitment before hosting is transferred.
+  if (wireRows.some((row) => {
+    const wire = projectDormantContextGraphIdentities([row]).get(row.id);
+    return wire === undefined || wire.onChainId !== identity.onChainId || wire.onChainHash !== nameHash;
+  })) return saved;
+  return wireRows.reduce(preserveSavedContextGraphCoreHosting, saved);
+}
+
+export async function projectContextGraphSubscriptionPersistenceWithSavedHosting(
+  input: Parameters<typeof projectContextGraphSubscriptionPersistence>[0],
+  store: ContextGraphSubscriptionStore,
+  preserveDormantHosting = true,
+): Promise<ContextGraphSubscriptionPersistenceProjection> {
+  const projection = projectContextGraphSubscriptionPersistence(input);
+  if (!preserveDormantHosting || !input.subscription || projection.action === 'skip') return projection;
+  const hosted = projectContextGraphSubscriptionPersistence({
+    ...input, subscription: { ...input.subscription, coreHosted: true },
+  });
+  if (hosted.action !== 'save') return projection;
+  const record = await readPreservedContextGraphCoreHosting(store, {
+    ...hosted.record, coreHosted: input.subscription.coreHosted,
+  });
+  return record.coreHosted === true ? { ...hosted, record } : projection;
 }

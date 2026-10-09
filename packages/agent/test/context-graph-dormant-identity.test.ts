@@ -11,6 +11,7 @@ import type {
   ContextGraphSub,
   ContextGraphSubInput,
   ContextGraphSubscriptionRecord,
+  ContextGraphSubscriptionStore,
 } from '../src/dkg-agent-types.js';
 
 const LOCAL = 'cold-dormant-exact-identity';
@@ -46,7 +47,7 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-async function cold(rows: ContextGraphSubscriptionRecord[] = [durable()], seedDormant = true, options: { enabled?: boolean; cap?: number; syncScoped?: boolean } = {}) {
+async function cold(rows: ContextGraphSubscriptionRecord[] = [durable()], seedDormant = true, options: { enabled?: boolean; cap?: number; syncScoped?: boolean; live?: boolean; pointRead?: boolean } = {}) {
   // Genuine native lifecycle methods and typed persistence contract. No daemon,
   // provider, external RPC or custom numeric resolver is started.
   let retained = rows.map((row) => ({ ...row }));
@@ -62,12 +63,20 @@ async function cold(rows: ContextGraphSubscriptionRecord[] = [durable()], seedDo
   const memberRemove = vi.fn(async (cg: string, kind: string, principal: string) => {
     membership.delete(memberKey(cg, kind, principal));
   });
+  const subscriptionStore: ContextGraphSubscriptionStore = {
+    loadAll: async () => retained.map((row) => ({ ...row })), save, delete: remove,
+    ...(options.pointRead ? { load: async (id: string) => {
+      const row = retained.find((candidate) => candidate.id === id);
+      return row ? { ...row } : null;
+    } } : {}),
+  };
   const chain = new MockChainAdapter('mock:31337', undefined, { initialContextGraphId: 585n });
   await chain.createOnChainContextGraph({ accessPolicy: 0, publishPolicy: 1, nameHash: HASH });
   await chain.createOnChainContextGraph({ accessPolicy: 0, publishPolicy: 1, nameHash: HASH });
   chain.__registerKC({ kaId: PACKED_KA, contextGraphId: 585n, merkleRootHex: ROOT, chunks: [] });
   const agent = await DKGAgent.create({
     name: 'DormantIdentity', chainAdapter: chain, nodeRole: 'edge',
+    ...(options.live ? { listenHost: '127.0.0.1', listenPort: 0 } : {}),
     rfc64CatalogActivation: { enabled: false },
     contextGraphSubscriptionRehydrationEnabled: options.enabled ?? false,
     maxRehydratedContextGraphSubscriptions: options.cap,
@@ -76,11 +85,12 @@ async function cold(rows: ContextGraphSubscriptionRecord[] = [durable()], seedDo
       loadAll: async () => [...membership.values()].map((row) => ({ ...row })),
       upsert: memberSave, delete: memberRemove,
     },
-    contextGraphSubscriptionStore: { loadAll: async () => retained.map((row) => ({ ...row })), save, delete: remove },
+    contextGraphSubscriptionStore: subscriptionStore,
   });
   agents.push(agent);
   const state = agent as unknown as Internals;
-  (agent as unknown as { node: unknown }).node = {
+  if (options.live) await agent.start();
+  else (agent as unknown as { node: unknown }).node = {
     peerId: '12D3KooWDormantIdentityFixture', libp2p: { getPeers: () => [] },
   };
   if (seedDormant) state.setContextGraphSubscription(LOCAL, { subscribed: false, synced: false }, { persist: false });
@@ -103,7 +113,7 @@ async function cold(rows: ContextGraphSubscriptionRecord[] = [durable()], seedDo
     memberRemove.mockClear();
   };
   return {
-    agent, state, chain, save, remove, reverse, policy, drain, seedMember,
+    agent, state, chain, save, remove, reverse, policy, drain, seedMember, subscriptionStore,
     memberSave, memberRemove, members: () => [...membership.values()], rows: () => retained,
   };
 }
@@ -131,6 +141,290 @@ function observed(id: string) {
 }
 
 describe('dormant durable Context Graph identity', () => {
+
+  it.each(['unsubscribe', 'subscribe-then-unsubscribe'] as const)(
+    'preserves independent saved Core hosting through disabled member %s', async (operation) => {
+      const f = await cold([durable({ coreHosted: true, lastReconciledOrdinal: 7 })], false, { live: true });
+      await f.agent.rehydrateContextGraphSubscriptions(null);
+      expect(f.state.subscribedContextGraphs.get(LOCAL)).toMatchObject({
+        subscribed: false, coreHosted: false, synced: false, metaSynced: false,
+        onChainId: ORIGINAL, onChainHash: HASH,
+      });
+      if (operation === 'subscribe-then-unsubscribe') {
+        f.agent.subscribeToContextGraph(LOCAL);
+        await f.drain();
+        expect(f.state.subscribedContextGraphs.get(LOCAL)).toMatchObject({
+          subscribed: true, coreHosted: false, synced: false, metaSynced: false,
+        });
+        expect(f.agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+          activated: 1, hostedActivated: 0, hostedActivatedIds: [],
+        });
+        expect(f.rows().filter((row) => row.id === LOCAL)).toEqual([expect.objectContaining({
+          subscribed: true, coreHosted: true, onChainId: ORIGINAL, onChainHash: HASH,
+        })]);
+      }
+      f.agent.unsubscribeFromContextGraph(LOCAL);
+      await f.drain();
+      expect(f.state.subscribedContextGraphs.get(LOCAL)).toMatchObject({
+        subscribed: false, coreHosted: false, synced: false, metaSynced: false,
+      });
+      expect(f.rows().filter((row) => row.id === LOCAL)).toEqual([expect.objectContaining({
+        subscribed: false, coreHosted: true, synced: false, metaSynced: false,
+        syncScoped: false, onChainId: ORIGINAL, onChainHash: HASH, lastReconciledOrdinal: 7,
+      })]);
+      expect(f.remove).not.toHaveBeenCalledWith(LOCAL);
+      expect(f.agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+        activated: 0, hostedActivated: 0, hostedActivatedIds: [],
+        dormantReasons: { rehydrationDisabled: [LOCAL] },
+      });
+    },
+  );
+
+  it.each(['strict-subscription', 'strict-join'] as const)(
+    'preserves dormant Core hosting through the native %s point-read store', async (operation) => {
+      const f = await cold([durable({ coreHosted: true })], false, { pointRead: true });
+      await f.agent.rehydrateContextGraphSubscriptions(null);
+      const subscription = f.state.setContextGraphSubscription(LOCAL, {
+        ...f.state.subscribedContextGraphs.get(LOCAL)!, subscribed: true,
+      }, { persist: false });
+      if (operation === 'strict-subscription') {
+        await f.agent.persistContextGraphSubscriptionStrict(LOCAL, subscription);
+      } else {
+        await f.agent.persistJoinApprovalStateStrict(LOCAL, {
+          contextGraphId: LOCAL, principalType: 'node', principalId: f.agent.peerId,
+          role: 'subscriber', status: 'active', source: 'join',
+        }, subscription);
+      }
+      expect(f.rows()).toEqual([expect.objectContaining({
+        subscribed: true, coreHosted: true, synced: false, metaSynced: false,
+        onChainId: ORIGINAL, onChainHash: HASH,
+      })]);
+      expect(f.state.subscribedContextGraphs.get(LOCAL)?.coreHosted).toBe(false);
+    },
+  );
+
+  it.each([ORIGINAL, COLLISION])('carries wire-keyed saved hosting only into the same canonical slot %s', async (slot) => {
+    const f = await cold([durable({ id: HASH, coreHosted: true })], false, { live: true });
+    await f.agent.rehydrateContextGraphSubscriptions(null);
+    f.agent.subscribeToContextGraph(LOCAL, { onChainId: slot });
+    await f.drain();
+    const saved = f.rows().find((row) => row.id === LOCAL);
+    if (slot === ORIGINAL) expect(saved?.coreHosted).toBe(true);
+    else expect(saved?.coreHosted).not.toBe(true);
+    expect(f.state.subscribedContextGraphs.get(LOCAL)?.coreHosted).not.toBe(true);
+    f.agent.unsubscribeFromContextGraph(LOCAL);
+    await f.drain();
+    if (slot === ORIGINAL) expect(f.rows().find((row) => row.id === LOCAL)?.coreHosted).toBe(true);
+    else expect(f.rows().some((row) => row.id === LOCAL)).toBe(false);
+  });
+
+  it.each([
+    ['member', `0x${HASH.slice(2).toUpperCase()}`], ['join', HASH],
+    ['join', `0x${HASH.slice(2).toUpperCase()}`],
+  ] as const)('preserves case-folded wire hosting through native %s migration from %s', async (operation, wireId) => {
+    const f = await cold([durable({ id: wireId, coreHosted: true })], false, { live: true, pointRead: true });
+    await f.agent.rehydrateContextGraphSubscriptions(null);
+    if (operation === 'member') {
+      f.state.setContextGraphSubscription(LOCAL, {
+        subscribed: false, coreHosted: false, synced: false,
+        onChainId: ORIGINAL, onChainHash: HASH,
+      }, { persist: false });
+      f.agent.subscribeToContextGraph(LOCAL, { onChainId: ORIGINAL });
+    }
+    else {
+      const subscription = f.state.setContextGraphSubscription(LOCAL, {
+        subscribed: true, coreHosted: false, synced: false,
+        onChainId: ORIGINAL, onChainHash: HASH,
+      }, { persist: false });
+      await f.agent.persistJoinApprovalStateStrict(LOCAL, {
+        contextGraphId: LOCAL, principalType: 'node', principalId: f.agent.peerId,
+        role: 'subscriber', status: 'active', source: 'join',
+      }, subscription);
+    }
+    await f.drain();
+    expect(f.rows().find((row) => row.id === LOCAL)).toMatchObject({
+      subscribed: true, coreHosted: true, onChainId: ORIGINAL, onChainHash: HASH,
+    });
+    expect(f.state.subscribedContextGraphs.get(LOCAL)?.coreHosted).toBe(false);
+    f.agent.unsubscribeFromContextGraph(LOCAL);
+    await f.drain();
+    expect(f.rows().find((row) => row.id === LOCAL)).toMatchObject({ subscribed: false, coreHosted: true });
+    expect(f.agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({ activated: 0, hostedActivated: 0 });
+  });
+
+  it('refuses alias hosting transfer across conflicting case-folded wire slots', async () => {
+    const f = await cold([
+      durable({ id: HASH, coreHosted: true }),
+      durable({ id: `0x${HASH.slice(2).toUpperCase()}`, onChainId: COLLISION, coreHosted: true }),
+    ], false, { live: true, pointRead: true });
+    f.agent.subscribeToContextGraph(LOCAL, { onChainId: ORIGINAL });
+    await f.drain();
+    expect(f.rows().find((row) => row.id === LOCAL)?.coreHosted).not.toBe(true);
+    expect(f.rows().find((row) => row.id === `0x${HASH.slice(2).toUpperCase()}`)?.coreHosted).toBe(true);
+  });
+
+  it('ignores an unrelated malformed durable key during native hosting preservation', async () => {
+    const f = await cold([durable({ id: HASH, coreHosted: true })], false, { pointRead: true });
+    const loadAll = f.subscriptionStore.loadAll.bind(f.subscriptionStore);
+    vi.spyOn(f.subscriptionStore, 'loadAll').mockImplementation(async () => [
+      ...await loadAll(), JSON.parse('{"id":17,"coreHosted":true}'),
+    ]);
+    const subscription = f.state.setContextGraphSubscription(LOCAL, {
+      subscribed: true, coreHosted: false, synced: false, onChainId: ORIGINAL, onChainHash: HASH,
+    }, { persist: false });
+    await f.agent.persistContextGraphSubscriptionStrict(LOCAL, subscription);
+    expect(f.rows().find((row) => row.id === LOCAL)?.coreHosted).toBe(true);
+    expect(subscription.coreHosted).toBe(false);
+  });
+
+  it('keeps exact-local hosting despite a foreign-slot wire predecessor', async () => {
+    const f = await cold([
+      durable({ coreHosted: true }), durable({ id: HASH, onChainId: COLLISION, coreHosted: true }),
+    ], false, { pointRead: true });
+    await f.agent.rehydrateContextGraphSubscriptions(null);
+    const subscription = f.state.setContextGraphSubscription(LOCAL, {
+      ...f.state.subscribedContextGraphs.get(LOCAL)!, subscribed: true,
+    }, { persist: false });
+    await f.agent.persistContextGraphSubscriptionStrict(LOCAL, subscription);
+    expect(f.rows().find((row) => row.id === LOCAL)).toMatchObject({ coreHosted: true, onChainId: ORIGINAL });
+    expect(subscription.coreHosted).toBe(false);
+  });
+
+  it('fences same-object native rebinding while a saved-hosting read is pending', async () => {
+    const original = durable({ coreHosted: true });
+    const f = await cold([original], false, { pointRead: true });
+    await f.agent.rehydrateContextGraphSubscriptions(null);
+    const load = f.subscriptionStore.load!.bind(f.subscriptionStore);
+    let reached!: () => void;
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => { reached = resolve; });
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(f.subscriptionStore, 'load').mockImplementation(async (id) => {
+      const row = await load(id);
+      reached(); await held; return row;
+    });
+    const subscription = f.state.setContextGraphSubscription(LOCAL, {
+      ...f.state.subscribedContextGraphs.get(LOCAL)!, subscribed: true,
+    });
+    try {
+      await waiting;
+      f.agent.bindSubscriptionOnChainId(LOCAL, subscription, COLLISION);
+      expect(f.state.subscribedContextGraphs.get(LOCAL)).toBe(subscription);
+    } finally { release(); }
+    await f.drain();
+    expect(f.rows()).toEqual([original]);
+    expect(f.save).not.toHaveBeenCalled();
+    expect(subscription.onChainId).toBe(COLLISION);
+  });
+
+  it('refuses aliased join persistence after a native bind during its added durable read', async () => {
+    const original = durable({ id: HASH, coreHosted: true });
+    const f = await cold([original], false, { pointRead: true });
+    const live = f.state.setContextGraphSubscription(LOCAL, {
+      subscribed: false, coreHosted: false, synced: false,
+      onChainId: ORIGINAL, onChainHash: HASH,
+    }, { persist: false });
+    const loadAll = f.subscriptionStore.loadAll.bind(f.subscriptionStore);
+    let reached!: () => void;
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => { reached = resolve; });
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(f.subscriptionStore, 'loadAll').mockImplementation(async () => {
+      const rows = await loadAll(); reached(); await held; return rows;
+    });
+    const joining = f.agent.persistJoinApprovalStateStrict(LOCAL, {
+      contextGraphId: LOCAL, principalType: 'node', principalId: f.agent.peerId,
+      role: 'subscriber', status: 'active', source: 'join',
+    }, { ...live, subscribed: true });
+    const rejected = expect(joining).rejects.toThrow('changed before join persistence');
+    try { await waiting; f.agent.bindSubscriptionOnChainId(LOCAL, live, COLLISION); }
+    finally { release(); }
+    await rejected; await f.drain();
+    expect(f.rows()).toEqual([original]);
+    expect(f.memberSave).not.toHaveBeenCalled();
+    expect(f.save).not.toHaveBeenCalled();
+    expect(f.state.subscribedContextGraphs.get(LOCAL)).toBe(live);
+  });
+
+  it('retains explicit teardown of an admitted native Core hosting obligation', async () => {
+    const f = await cold([durable({ coreHosted: true })], false);
+    await f.agent.rehydrateContextGraphSubscriptions(null);
+    f.state.setContextGraphSubscription(LOCAL, {
+      ...f.state.subscribedContextGraphs.get(LOCAL)!, subscribed: false, coreHosted: true,
+    }, { persist: false });
+    f.state.setContextGraphSubscription(LOCAL, {
+      ...f.state.subscribedContextGraphs.get(LOCAL)!, subscribed: false, coreHosted: false,
+    });
+    await f.drain();
+    expect(f.rows()).toEqual([]);
+    expect(f.remove).toHaveBeenCalledWith(LOCAL);
+  });
+
+  it('does not resurrect saved hosting after a native unbind during the serialized durable read', async () => {
+    const f = await cold([durable({ coreHosted: true })], false, { pointRead: true });
+    await f.agent.rehydrateContextGraphSubscriptions(null);
+    const load = f.subscriptionStore.load!.bind(f.subscriptionStore);
+    let reached!: () => void;
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => { reached = resolve; });
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(f.subscriptionStore, 'load').mockImplementation(async (id) => {
+      const row = await load(id);
+      reached();
+      await held;
+      return row;
+    });
+    f.state.setContextGraphSubscription(LOCAL, {
+      ...f.state.subscribedContextGraphs.get(LOCAL)!, subscribed: true,
+    });
+    try {
+      await waiting;
+      f.agent.unbindSubscriptionOnChainId(LOCAL);
+    } finally {
+      release();
+    }
+    await f.drain();
+    expect(f.rows()).toEqual([expect.objectContaining({ subscribed: true, coreHosted: false, onChainId: undefined })]);
+    expect(f.state.subscribedContextGraphs.get(LOCAL)?.onChainId).toBeUndefined();
+  });
+
+  it.each(['best-effort', 'strict'] as const)('keeps saved hosting intact when the %s durable read fails', async (mode) => {
+    const original = durable({ coreHosted: true });
+    const f = await cold([original], false, { pointRead: true });
+    await f.agent.rehydrateContextGraphSubscriptions(null);
+    vi.spyOn(f.subscriptionStore, 'load').mockRejectedValue(new Error('hosting intent read failed'));
+    if (mode === 'best-effort') {
+      f.agent.unsubscribeFromContextGraph(LOCAL);
+      await f.drain();
+    } else {
+      const subscription = f.state.setContextGraphSubscription(LOCAL, {
+        ...f.state.subscribedContextGraphs.get(LOCAL)!, subscribed: true,
+      }, { persist: false });
+      await expect(f.agent.persistContextGraphSubscriptionStrict(LOCAL, subscription)).rejects.toThrow('hosting intent read failed');
+    }
+    expect(f.rows()).toEqual([original]);
+    expect(f.remove).not.toHaveBeenCalledWith(LOCAL);
+  });
+
+  it('still deletes an ordinary saved member-only row after disabled restoration', async () => {
+    const f = await cold([durable({ coreHosted: false })], false);
+    await f.agent.rehydrateContextGraphSubscriptions(null);
+    f.agent.unsubscribeFromContextGraph(LOCAL);
+    await f.drain();
+    expect(f.rows()).toEqual([]);
+    expect(f.remove).toHaveBeenCalledWith(LOCAL);
+  });
+
+  it('does not carry dormant Core hosting across explicit numeric unbinding', async () => {
+    const f = await cold([durable({ coreHosted: true })], false);
+    await f.agent.rehydrateContextGraphSubscriptions(null);
+    f.agent.unbindSubscriptionOnChainId(LOCAL);
+    await f.drain();
+    expect(f.state.subscribedContextGraphs.get(LOCAL)?.onChainId).toBeUndefined();
+    expect(f.rows()).toEqual([]);
+    expect(f.remove).toHaveBeenCalledWith(LOCAL);
+  });
+
 
   it.each(['readiness', 'explicit-unsubscribe'] as const)(
     'keeps admitted slot323 routing through dormant %s', async (operation) => {

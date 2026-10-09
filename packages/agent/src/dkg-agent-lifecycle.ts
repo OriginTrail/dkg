@@ -761,6 +761,9 @@ import {
   mayAdoptContextGraphWireSubscription,
   normalizeContextGraphSubscriptionTransition,
   projectContextGraphSubscriptionPersistence,
+  projectContextGraphSubscriptionPersistenceWithSavedHosting,
+  readPreservedContextGraphCoreHosting,
+  projectContextGraphJoinSubscriptionRecord,
   retainsInactiveContextGraphBinding,
 } from './context-graph-subscription-policy.js';
 import { partitionSupersededContextGraphNamePlaceholders } from './dkg-agent-cg-name-resolution.js';
@@ -9375,6 +9378,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           contextGraphId,
           {
             revision,
+            preserveDormantHosting: previous?.coreHosted !== true || canonicalNext.coreHosted === true,
             updateRehydrationStatus: options?.updateRehydrationStatus !== false,
           },
         );
@@ -9517,22 +9521,28 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const hostedActivatedIds = status.hostedActivatedIds ?? [];
     const wasAccounted = this.contextGraphSubscriptionRehydrationAccountedIds.has(contextGraphId);
     const isPersisted = next?.subscribed === true || next?.coreHosted === true;
+    const live = this.subscribedContextGraphs.get(contextGraphId);
+    const isActive = live?.subscribed === true || live?.coreHosted === true;
 
     let persistedTotal = status.persistedTotal;
     let activated = status.activated;
     const dormancyById = this.contextGraphSubscriptionDormancyById;
-    dormancyById.delete(contextGraphId);
+    if (!isPersisted || isActive) dormancyById.delete(contextGraphId);
+    else dormancyById.set(contextGraphId, dormancyById.get(contextGraphId)
+      ?? (status.rehydrationEnabled ? 'authorityUnavailable' : 'rehydrationDisabled'));
     let nextHostedActivatedIds = hostedActivatedIds.filter((id) => id !== contextGraphId);
-    if (next?.coreHosted === true) {
+    if (live?.coreHosted === true) {
       nextHostedActivatedIds = sortIds([...nextHostedActivatedIds, contextGraphId]);
     }
 
     if (isPersisted) {
-      if (wasDormant) {
+      if (wasDormant && isActive) {
         activated += 1;
       } else if (!wasAccounted) {
         persistedTotal += 1;
-        activated += 1;
+        if (isActive) activated += 1;
+      } else if (!wasDormant && !isActive) {
+        activated = Math.max(0, activated - 1);
       }
       this.contextGraphSubscriptionRehydrationAccountedIds.add(contextGraphId);
     } else if (wasAccounted) {
@@ -9781,6 +9791,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       revision?: number;
       updateRehydrationStatus?: boolean;
       preserveInactiveIntent?: boolean;
+      preserveDormantHosting?: boolean;
     },
   ): Promise<void> {
     this.invalidateListContextGraphsCache();
@@ -9790,61 +9801,44 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return Promise.resolve();
     }
     const sub = this.subscribedContextGraphs.get(contextGraphId);
-    const persistence = projectContextGraphSubscriptionPersistence({
-      contextGraphId,
-      subscription: sub,
+    const generation = this.contextGraphBindingState.capture(contextGraphId);
+    const input = {
+      contextGraphId, subscription: sub,
       syncScoped: (this.config.syncContextGraphs ?? []).includes(contextGraphId),
       preserveInactiveIntent: options?.preserveInactiveIntent,
-    });
-    if (persistence.action === 'skip') {
-      // Some lifecycle paths persist reconciliation watermarks directly
-      // instead of going through setContextGraphSubscription. Preserve the
-      // process-local lifetime at this lowest shared write boundary too.
+    };
+    if (projectContextGraphSubscriptionPersistence(input).action === 'skip') {
       this.clearContextGraphSubscriptionPersistRevisionStateIfIdle(contextGraphId);
       return Promise.resolve();
     }
-    // Persist member subscriptions AND (Phase D) public CGs this Core hosts —
-    // the host-only record MUST survive restart so a Core that was offline
-    // during a publish remembers it hosts the CG and fills its gap. Drop the
-    // row only when the node neither subscribes to nor hosts the CG.
     this.beginContextGraphSubscriptionPersistRevision(contextGraphId, options?.revision);
-    if (persistence.action === 'delete') {
-      return this.enqueueContextGraphSubscriptionPersistWrite(contextGraphId, () => store.delete(contextGraphId))
-        .then(() => {
-          if (
-            options?.updateRehydrationStatus === true &&
-            this.claimContextGraphSubscriptionPersistRevision(contextGraphId, options.revision)
-          ) {
-            this.updateContextGraphSubscriptionRehydrationStatusAfterPersist(contextGraphId, undefined);
-          }
-        })
-        .catch((err) => {
-          this.log.warn(
-            createOperationContext('system'),
-            `Failed to delete persisted context-graph subscription for "${contextGraphId}": ${err instanceof Error ? err.message : String(err)}`,
-          );
-        })
-        .finally(() => {
-          this.finishContextGraphSubscriptionPersistRevision(contextGraphId, options?.revision);
-        });
-    }
-    const record = persistence.record;
-    return this.enqueueContextGraphSubscriptionPersistWrite(contextGraphId, () => store.save(record))
-      .then(() => {
-        if (
-          options?.updateRehydrationStatus === true &&
-          this.claimContextGraphSubscriptionPersistRevision(contextGraphId, options.revision)
-        ) {
-          this.updateContextGraphSubscriptionRehydrationStatusAfterPersist(contextGraphId, record);
-        }
-      }).catch((err) => {
-        this.log.warn(
-          createOperationContext('system'),
-          `Failed to persist context-graph subscription for "${contextGraphId}": ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }).finally(() => {
-        this.finishContextGraphSubscriptionPersistRevision(contextGraphId, options?.revision);
-      });
+    let written = false;
+    let persisted: ContextGraphSubscriptionRecord | undefined;
+    return this.enqueueContextGraphSubscriptionPersistWrite(contextGraphId, async () => {
+      const persistence = sub?.coreHosted === true
+        ? projectContextGraphSubscriptionPersistence(input)
+        : await projectContextGraphSubscriptionPersistenceWithSavedHosting(input, store, options?.preserveDormantHosting);
+      const current = this.subscribedContextGraphs.get(contextGraphId);
+      const retired = persistence.action === 'delete' && current === undefined;
+      if (persistence.action === 'skip' || (!retired && (current !== sub
+        || !this.contextGraphBindingState.isGenerationCurrent(contextGraphId, generation)))) return;
+      if (persistence.action === 'delete') await store.delete(contextGraphId);
+      else {
+        persisted = persistence.record;
+        await store.save(persisted);
+      }
+      written = true;
+    }).then(() => {
+      if (written && options?.updateRehydrationStatus === true
+        && this.claimContextGraphSubscriptionPersistRevision(contextGraphId, options.revision)) {
+        this.updateContextGraphSubscriptionRehydrationStatusAfterPersist(contextGraphId, persisted);
+      }
+    }).catch((err) => {
+      this.log.warn(createOperationContext('system'),
+        `Failed to persist context-graph subscription for "${contextGraphId}": ${err instanceof Error ? err.message : String(err)}`);
+    }).finally(() => {
+      this.finishContextGraphSubscriptionPersistRevision(contextGraphId, options?.revision);
+    });
   }
 
   /**
@@ -9923,6 +9917,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Queue behind any fire-and-forget writes scheduled by subscribe/mark so
     // this final authoritative snapshot is the last write before the ACK.
     await this.enqueueContextGraphSubscriptionPersistWrite(input.contextGraphId, async () => {
+      const hostedRecord = await readPreservedContextGraphCoreHosting(store, record);
       const current = this.subscribedContextGraphs.get(input.contextGraphId);
       if (
         !(input.isCurrent?.() ?? true)
@@ -9937,7 +9932,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           `Context graph "${input.contextGraphId}" changed before its strict subscription snapshot (${input.operation}) was persisted`,
         ));
       }
-      await store.save(record);
+      await store.save(hostedRecord);
     });
   }
 
@@ -10032,22 +10027,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             : (await subscriptionStore.loadAll()).find((row) => row.id === contextGraphId) ?? null;
         }
 
-        const subscriptionRecord: ContextGraphSubscriptionRecord = {
-          id: contextGraphId,
-          name: subscription.name,
-          subscribed: subscription.subscribed,
-          synced: subscription.synced,
-          sharedMemorySynced: subscription.sharedMemorySynced,
-          metaSynced: subscription.metaSynced,
-          onChainId: subscription.onChainId,
-          onChainHash: subscription.onChainHash,
-          lastReconciledOrdinal: subscription.lastReconciledOrdinal,
-          coreHosted: subscription.coreHosted,
-          syncScoped: true,
-        };
+        const subscriptionRecord = projectContextGraphJoinSubscriptionRecord(contextGraphId, subscription);
         let membershipAttempted = false;
         let subscriptionAttempted = false;
         try {
+          const expectedLiveSub = this.subscribedContextGraphs.get(contextGraphId);
+          const generation = this.contextGraphBindingState.capture(contextGraphId);
+          const hostedRecord = subscriptionStore
+            ? await readPreservedContextGraphCoreHosting(subscriptionStore, subscriptionRecord, previousSubscription)
+            : subscriptionRecord;
+          if (subscriptionStore && (this.subscribedContextGraphs.get(contextGraphId) !== expectedLiveSub
+            || !this.contextGraphBindingState.isGenerationCurrent(contextGraphId, generation))) {
+            throw asSyncFetchAbortError(new Error(`Context graph "${contextGraphId}" changed before join persistence`));
+          }
           if (membershipStore) {
             membershipAttempted = true;
             await membershipStore.upsert({
@@ -10058,7 +10050,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           }
           if (subscriptionStore) {
             subscriptionAttempted = true;
-            await subscriptionStore.save(subscriptionRecord);
+            await subscriptionStore.save(hostedRecord);
           }
         } catch (error) {
           const rollbackFailures: unknown[] = [];

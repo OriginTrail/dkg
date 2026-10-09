@@ -716,10 +716,10 @@ describe('Context Graph subscription authority retry', () => {
     );
 
     expect(retry).toHaveBeenCalledOnce();
-    expect(loadAll).toHaveBeenCalledOnce();
-    expect(load).toHaveBeenCalledTimes(2);
-    expect(load).toHaveBeenNthCalledWith(1, contextGraphId);
-    expect(load).toHaveBeenNthCalledWith(2, contextGraphId);
+    // Startup scans once; the serialized save also validates wire aliases.
+    // Its exact-local hosting read follows the two recovery-owned point reads.
+    expect(loadAll).toHaveBeenCalledTimes(2);
+    expect(load.mock.calls).toEqual([[contextGraphId], [contextGraphId], [contextGraphId]]);
     expect(resolveByNameHash.mock.calls.find(([, options]) => options?.signal)?.[1]?.signal?.aborted)
       .toBe(false);
     expect(agent.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
