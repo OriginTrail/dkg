@@ -544,6 +544,37 @@ describe('metadata of a join approved while the node runs (#3109)', () => {
       expect(recover).toHaveBeenCalledTimes(1);
     });
 
+    it('runs the recovery a restart asked for once the previous lifetime\'s attempt ends', async () => {
+      const { member, recover } = await approvedMember(false);
+      // One stop signal per node lifetime.
+      let lifetime = new AbortController();
+      Object.defineProperty(member.node, 'stopSignal', { get: () => lifetime.signal, configurable: true });
+      const finish: Array<() => void> = [];
+      const ranIn: AbortSignal[] = [];
+      recover.mockImplementation(() => new Promise<void>((resolve) => {
+        ranIn.push(member.node.stopSignal!);
+        finish.push(resolve);
+      }));
+
+      const first = runJoinApprovalMetadataRecovery(member, contextGraphId, CURATOR_PEER);
+      const previous = lifetime.signal;
+      // The node stops while that attempt still runs and starts again; the
+      // restart restores the row and asks for its recovery.
+      lifetime.abort();
+      lifetime = new AbortController();
+      await runJoinApprovalMetadataRecovery(member, contextGraphId, CURATOR_PEER, dialAddress);
+      // It does not run beside the attempt of the previous lifetime.
+      expect(recover).toHaveBeenCalledTimes(1);
+
+      finish[0]!();
+      await vi.waitFor(() => expect(recover).toHaveBeenCalledTimes(2));
+      expect(recover).toHaveBeenLastCalledWith(contextGraphId, CURATOR_PEER, dialAddress);
+      expect(ranIn[0]).toBe(previous);
+      expect(ranIn[1]).toBe(lifetime.signal);
+      finish[1]!();
+      await first;
+    });
+
     it('starts no recovery once the approval is withdrawn', async () => {
       const { member, resolveAcceptance, recover } = await approvedMember(false);
 

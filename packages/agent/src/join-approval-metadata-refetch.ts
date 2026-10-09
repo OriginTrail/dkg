@@ -41,6 +41,8 @@ interface JoinApprovalMetadataAgent {
 interface RunningRecovery {
   /** Asked for again while it ran: it runs once more when it ends. */
   again: boolean;
+  /** Stop signal of the node lifetime its next run belongs to. */
+  stopSignal?: AbortSignal;
   curatorDialAddress?: string;
 }
 
@@ -56,7 +58,9 @@ const describeError = (error: unknown): string => (
  * graph and curator peer, whether a restart or a live approval asks for it.
  * A request that arrives while one runs is not dropped: it can belong to a
  * newer approval than the one the running recovery was started for, so that
- * recovery runs once more when it ends. Never rejects.
+ * recovery runs once more when it ends. A request from a restarted node moves
+ * that run to the new lifetime, so the stop of the previous one, whose attempt
+ * can still be ending, does not skip it. Never rejects.
  */
 export async function runJoinApprovalMetadataRecovery(
   agentObject: object,
@@ -68,18 +72,20 @@ export async function runJoinApprovalMetadataRecovery(
   let recoveries = recoveriesByAgent.get(agent);
   if (!recoveries) recoveriesByAgent.set(agent, recoveries = new Map());
   const key = `${contextGraphId}\u0000${curatorPeerId}`;
+  // Read once: the getter answers `undefined` again after a completed stop.
+  const stopSignal = agent.node.stopSignal;
   const running = recoveries.get(key);
   if (running) {
     running.again = true;
     running.curatorDialAddress = curatorDialAddress ?? running.curatorDialAddress;
+    // A running node's request: after a restart, the next run is the new lifetime's.
+    if (stopSignal && !stopSignal.aborted) running.stopSignal = stopSignal;
     return;
   }
-  // Read once: the getter answers `undefined` again after a completed stop.
-  const stopSignal = agent.node.stopSignal;
-  const recovery: RunningRecovery = { again: true, curatorDialAddress };
+  const recovery: RunningRecovery = { again: true, stopSignal, curatorDialAddress };
   recoveries.set(key, recovery);
   try {
-    while (recovery.again && stopSignal?.aborted !== true) {
+    while (recovery.again && recovery.stopSignal?.aborted !== true) {
       recovery.again = false;
       await agent.recoverPendingJoinApprovalMetadata(
         contextGraphId,
