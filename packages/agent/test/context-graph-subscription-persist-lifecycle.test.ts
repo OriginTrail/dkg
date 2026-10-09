@@ -8,6 +8,7 @@ import { StorageACKRegistrationRuntime } from '../src/p2p/storage-ack-registrati
 import { FinalizationRuntime } from '../src/finalization-runtime.js';
 import { SelectedSwmBootstrapAdmission } from '../src/sync/selected-swm-bootstrap-admission.js';
 import { Rfc64BackgroundWorkDispatcherV1 } from '../src/rfc64/background-work-dispatcher-v1.js';
+import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
 import { ContextGraphMembershipPersistScheduler } from '../src/context-graph-membership-persist-scheduler.js';
 import {
   ContextGraphSubscriptionPersistQueueClosedError,
@@ -64,6 +65,7 @@ function persistenceAgent(config: Record<string, unknown> = {}): any {
   const agent = Object.create(DKGAgent.prototype) as any;
   Object.assign(agent, {
     config,
+    contextGraphBindingState: new ContextGraphBindingState(),
     contextGraphSubscriptionPersistence: new ContextGraphSubscriptionPersistScheduler(),
     contextGraphMembershipPersistence: new ContextGraphMembershipPersistScheduler(),
     contextGraphSubscriptionPersistRevisions: new Map<string, number>(),
