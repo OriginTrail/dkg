@@ -28,6 +28,7 @@ import {
   type ApprovalPolicy,
 } from '../src/chain-adapter.js';
 import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
+import { explainOutOfGasRevert } from '../src/evm-adapter-rpc.js';
 import { isChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
 import {
   DEFAULT_FINALITY_CONFIRMATIONS,
@@ -866,6 +867,49 @@ describe('EVMChainAdapter random sampling identity lookup', () => {
     expect(a.nextRandomSamplingSigner.calls).toHaveLength(1);
     expect(sendSpy.calls[0][1]).toBe('submitProof');
     expect(sendSpy.calls[0][3]).toBe(w1); // the SELECTED signer
+    expect(sendSpy.calls[0][5]).toEqual({ gasLimitBufferBps: 5_000 }); // gas headroom
+  });
+
+  it('submitProof signs a gas limit above the estimate, so a proof that costs more one block later still fits', async () => {
+    // The contract settles the node's stake to `block.timestamp` and skips the
+    // settle when the node is already settled at that timestamp, which is the
+    // case on the block that holds the node's own createChallenge. An estimate
+    // taken on that block comes out below what the proof needs one block
+    // later. Numbers from one observed case: estimate 294,443, needed 306,807;
+    // sent with the raw estimate, the proof ran out of gas.
+    const estimatedOnChallengeBlock = 294_443n;
+    const neededOneBlockLater = 306_807n;
+    const a: any = new EVMChainAdapter(minimalConfig({ rpcUrl: 'https://only.example' }));
+    const provider = { name: 'only' } as any;
+    const signer = new ethers.Wallet(DEPLOYER_PK, provider);
+    const receipt = { hash: '0x' + '33'.repeat(32), blockNumber: 6, index: 0, status: 1, logs: [] };
+    // No gasLimit from populate: without headroom ethers would fill in the raw
+    // estimate while signing.
+    const populateTransaction = recorder(async () => (
+      { to: '0x0000000000000000000000000000000000000001', data: '0x1234' } as any
+    ));
+    const estimateGas = recorder(async () => estimatedOnChallengeBlock);
+    const rs = {
+      connect: recorder(() => ({ submitProof: { populateTransaction, estimateGas } })),
+    };
+    a.init = async () => undefined;
+    a.getRandomSampling = async () => ({ rs });
+    a.nextRandomSamplingSigner = async () => signer;
+    a.providers = [provider];
+    const signSpy = recorder(async (..._a: any[]) => ({ signedTx: '0xdead', txHash: receipt.hash }));
+    a.signPopulatedTransaction = signSpy;
+    a.sendSignedTransactionAndWait = recorder(async () => receipt);
+
+    await expect(a.submitProof(new Uint8Array([1, 2, 3]), [])).resolves.toMatchObject({
+      hash: receipt.hash,
+      success: true,
+    });
+
+    expect(estimateGas.calls).toHaveLength(1);
+    const signedGasLimit = signSpy.calls[0][1].gasLimit;
+    // 294_443 * (10_000 + 5_000) / 10_000, rounded down
+    expect(signedGasLimit).toBe(441_664n);
+    expect(signedGasLimit >= neededOneBlockLater).toBe(true);
   });
 
   // ── self-heal for STALE eligibility: an out-of-band removed wallet that
@@ -2007,6 +2051,85 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       receipt,
     });
     expect(backup.getTransactionReceipt.calls).toEqual([]);
+  });
+
+  describe('a mined write that reverted: out-of-gas hint', () => {
+    const GAS_LIMIT = 294_443n;
+    const blockHash = '0x' + '48'.repeat(32);
+
+    async function signWithGasLimit(gasLimit: bigint) {
+      const signedTx = await new ethers.Wallet(DEPLOYER_PK).signTransaction({
+        to: '0x0000000000000000000000000000000000000001',
+        data: '0x1234',
+        gasLimit,
+        nonce: 0,
+        chainId: 31337n,
+        type: 2,
+        maxFeePerGas: 1n,
+        maxPriorityFeePerGas: 1n,
+      });
+      return { signedTx, txHash: ethers.Transaction.from(signedTx).hash! };
+    }
+
+    async function sendAndRevert(signedTx: string, txHash: string, gasUsed: bigint): Promise<any> {
+      const a = new EVMChainAdapter(minimalConfig({ rpcUrl: 'https://only.example' }));
+      const receipt = { hash: txHash, blockNumber: 48, blockHash, status: 0, gasUsed, logs: [] };
+      (a as any).providers = [{
+        broadcastTransaction: recorder(async () => ({ hash: txHash })),
+        getTransactionReceipt: recorder(async () => receipt),
+        getBlockNumber: recorder(async () => 48),
+        getBlock: recorder(async () => ({ number: 48, hash: blockHash })),
+      }];
+      const error = await (a as any).sendSignedTransactionAndWait(signedTx, txHash, 'unit write')
+        .then(() => undefined, (err: unknown) => err);
+      expect(error).toMatchObject({ code: 'CALL_EXCEPTION', receipt });
+      return error;
+    }
+
+    it('says so when the transaction used nearly its whole gas limit', async () => {
+      const { signedTx, txHash } = await signWithGasLimit(GAS_LIMIT);
+
+      // The observed case: 416 gas short of the limit, no logs, no revert data.
+      const error = await sendAndRevert(signedTx, txHash, 294_027n);
+
+      expect(error.message).toBe(
+        `unit write tx ${txHash} was mined but reverted (status=0); ` +
+        'it used 294027 of its 294443 gas limit, so it probably ran out of gas',
+      );
+    });
+
+    it('applies from 99% of the limit and not below', async () => {
+      const { signedTx, txHash } = await signWithGasLimit(1_000_000n);
+      const plain = `unit write tx ${txHash} was mined but reverted (status=0)`;
+
+      expect((await sendAndRevert(signedTx, txHash, 990_000n)).message).toBe(
+        `${plain}; it used 990000 of its 1000000 gas limit, so it probably ran out of gas`,
+      );
+      // An ordinary revert leaves gas unused: the message stays as it was.
+      expect((await sendAndRevert(signedTx, txHash, 989_999n)).message).toBe(plain);
+    });
+
+    it('leaves the message alone when the signed bytes cannot be decoded', async () => {
+      const txHash = '0x' + '34'.repeat(32);
+
+      const error = await sendAndRevert('0xdeadbeef', txHash, GAS_LIMIT);
+
+      expect(error.message).toBe(`unit write tx ${txHash} was mined but reverted (status=0)`);
+    });
+
+    it('rethrows any other rejection untouched', async () => {
+      const { signedTx } = await signWithGasLimit(GAS_LIMIT);
+      const handler = explainOutOfGasRevert(signedTx);
+      const timeout = Object.assign(new Error('no receipt yet'), { code: 'RPC_TIMEOUT' });
+      const notAnError = { receipt: { status: 0, gasUsed: GAS_LIMIT } };
+
+      expect(() => handler(timeout)).toThrow(timeout);
+      expect(timeout.message).toBe('no receipt yet');
+      let thrown: unknown;
+      try { handler(notAnError); } catch (err) { thrown = err; }
+      expect(thrown).toBe(notAnError);
+      expect(notAnError).toEqual({ receipt: { status: 0, gasUsed: GAS_LIMIT } });
+    });
   });
 
   it('signMessage returns 32-byte r and vs (no contract init)', async () => {

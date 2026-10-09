@@ -153,8 +153,7 @@ async function makeAgentLike(
     publisher,
     getContextGraphOnChainId: async () => null,
     createV10UpdateACKProvider: () => undefined,
-    _resolveEncryptInlinePayload: async () => undefined,
-    _resolveEncryptInlineChunked: async () => undefined,
+    _resolveInlineEncryption: async () => ({ encryptInlinePayload: undefined, encryptInlineChunked: undefined }),
     gossip: { publish: async () => undefined },
   } as any;
 }
@@ -714,8 +713,7 @@ describe('DKGAgent rootless update boundary', () => {
         blockNumber: 42,
       },
     }));
-    agent._resolveEncryptInlinePayload = async () => encrypt;
-    agent._resolveEncryptInlineChunked = async () => encrypt;
+    agent._resolveInlineEncryption = async () => ({ encryptInlinePayload: encrypt, encryptInlineChunked: encrypt });
     const published: string[] = [];
     agent.gossip = {
       publish: async (topic: string) => { published.push(topic); },

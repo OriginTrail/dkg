@@ -397,6 +397,7 @@ import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
   withRpcUsageSite,
 } from '@origintrail-official/dkg-chain';
+import { SharedMemoryGossipAuthorityRead } from './internal/swm-gossip-authority-read.js';
 import { rfc64ExecutionPlanAllowsLegacySyncV1 } from
   './rfc64/public-catalog-activation-config-v1.js';
 import { projectRfc64CatalogTransportStateV1 } from
@@ -407,6 +408,8 @@ export interface ContextGraphSubscribeOptions {
   trackSyncScope?: boolean;
   persist?: boolean;
   deferSharedMemoryGossipSubscribe?: boolean;
+  /** Internal activation transaction: wire retirement belongs to its commit. */
+  deferWireAdoption?: boolean;
   syncMode?: 'on-demand' | 'always-on';
   /** Authoritative numeric slot established by the admission owner. */
   onChainId?: string;
@@ -424,7 +427,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     if (adoptedCleartextId !== null) return this.subscribeToContextGraph(adoptedCleartextId, options);
     // Subscribing the cleartext of a graph held only by its name hash moves
     // the subscription: nothing may keep running under the hash id.
-    this.retireLiveContextGraphNamePlaceholderFor(contextGraphId);
+    if (options?.deferWireAdoption !== true) this.retireLiveContextGraphNamePlaceholderFor(contextGraphId);
     const subscription = this.installContextGraphSubscription(contextGraphId, options);
     // The row is installed, so the phonebook check sees the subscription it
     // qualifies against. An Edge keeps no durable `agents` phonebook, so the
@@ -504,7 +507,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       const subscription = this.setContextGraphSubscription(
         contextGraphId,
         nextSubscription(),
-        { persist },
+        { persist, deferWireAdoption: options?.deferWireAdoption },
       );
       if (options?.deferSharedMemoryGossipSubscribe !== true) {
         this.queueSharedMemoryGossipSubscription(contextGraphId);
@@ -541,7 +544,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         return this.setContextGraphSubscription(
           contextGraphId,
           nextSubscription(),
-          { persist },
+          { persist, deferWireAdoption: options?.deferWireAdoption },
         );
       }
       return existing;
@@ -557,7 +560,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     const subscription = this.setContextGraphSubscription(
       contextGraphId,
       nextSubscription(),
-      { persist },
+      { persist, deferWireAdoption: options?.deferWireAdoption },
     );
 
     this.gossip.onMessage(publishTopic, async (_topic, data, from) => {
@@ -904,8 +907,21 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       }
       return;
     }
-    const canUseSharedMemory = await this.canUseSharedMemoryForContextGraph(contextGraphId);
+    const authorityRead = new SharedMemoryGossipAuthorityRead(
+      contextGraphId,
+      () => this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true,
+    );
+    const canUseSharedMemory = await authorityRead.run(() => this.canUseSharedMemoryForContextGraph(contextGraphId));
     if (!session.active || this.gossipSession !== session) return;
+    if (authorityRead.deferIfUnanswered({
+      session, canUseSharedMemory, isRegistered, log: this.log, ctx,
+      askAgain: () => this.queueSharedMemoryGossipSubscription(contextGraphId),
+    })) {
+      // A core that holds no member subscription may still host the curated
+      // substrate, as after a refusal (see below).
+      if (!isRegistered) await this.reconcileSwmHostModeSubscription(contextGraphId);
+      return;
+    }
     if (!canUseSharedMemory) {
       if (isRegistered) {
         // `gossip.unsubscribe()` drops EVERY handler on the topic,
@@ -1278,13 +1294,15 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           // proof finishes without invalidating the receiver's proof. Retry
           // one changed snapshot so the ordinary revoke race does not drop an
           // otherwise valid envelope, then fail closed under continued churn.
+          // This graph's own authority facts: a write to another graph cannot
+          // change its gate and must not drop the envelope (#2968).
           for (let attempt = 0; attempt < 2; attempt += 1) {
-            const metadataRevision = this.contextGraphMetaProjection.readAuthorityFactsRevision;
+            const metadataRevision = this.contextGraphMetaProjection.readContextGraphAuthorityFactsRevision(cgId);
             const meta = await this.getCgMeta(cgId);
             const allowedPeers =
               await this.resolveApprovedPrivateReplicaSwmAllowedPeersOverride(cgId);
             if (
-              this.contextGraphMetaProjection.readAuthorityFactsRevision
+              this.contextGraphMetaProjection.readContextGraphAuthorityFactsRevision(cgId)
                 === metadataRevision
             ) {
               return allowedPeers === undefined ? meta : { ...meta, allowedPeers };

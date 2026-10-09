@@ -9,6 +9,7 @@
  * the distinction between an authoritative denial and unavailable authority.
  */
 
+import { CONTEXT_GRAPH_AUTHORITY_RPC_SITES, withRpcUsageSite } from '@origintrail-official/dkg-chain';
 import {
   contextGraphReadAuthorityDependencyOf,
   registeredContextGraphAuthorityUnavailableDependency,
@@ -62,6 +63,48 @@ export interface UnavailableContextGraphReadAuthorityDecision extends ContextGra
 export type ContextGraphReadAuthorityDecision =
   | SettledContextGraphReadAuthorityDecision
   | UnavailableContextGraphReadAuthorityDecision;
+
+interface ScopedContextGraphQueryReadAuthorityInput {
+  contextGraphId: string;
+  view?: string;
+  callerAgentAddress?: string;
+  targetsSharedMemory: boolean;
+  signal?: AbortSignal;
+  resolveAuthority(contextGraphId: string, options: {
+    callerAgentAddress?: string;
+    allowSubscriptionFallback?: boolean;
+    signal?: AbortSignal;
+    authorityReadMode: 'finalized-index';
+  }): Promise<ContextGraphReadAuthorityDecision>;
+  isLocalFirstUnregistered(contextGraphId: string): Promise<boolean>;
+  readCurrentBinding(contextGraphId: string): { onChainId?: string; pendingMeta?: boolean } | undefined;
+}
+
+/** A local draft read does not grant general graph or shared-memory admission. */
+export async function resolveScopedContextGraphQueryReadAuthority(
+  input: ScopedContextGraphQueryReadAuthorityInput,
+): Promise<ContextGraphReadAuthorityDecision> {
+  const authority = await withRpcUsageSite(CONTEXT_GRAPH_AUTHORITY_RPC_SITES.query, () => (
+    input.resolveAuthority(input.contextGraphId, {
+      callerAgentAddress: input.callerAgentAddress,
+      allowSubscriptionFallback: input.targetsSharedMemory ? false : undefined,
+      signal: input.signal,
+      authorityReadMode: 'finalized-index',
+    })
+  ));
+  if (
+    input.view === 'working-memory'
+    && authority.outcome === 'denied'
+    && authority.source === 'legacy-local'
+    && authority.reason === 'no-read-authority'
+    && await input.isLocalFirstUnregistered(input.contextGraphId)
+    && input.readCurrentBinding(input.contextGraphId)?.onChainId === undefined
+    && input.readCurrentBinding(input.contextGraphId)?.pendingMeta !== true
+  ) {
+    return { ...authority, outcome: 'allowed', reason: 'local-first-working-memory-owner' };
+  }
+  return authority;
+}
 
 export const CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE =
   'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE' as const;

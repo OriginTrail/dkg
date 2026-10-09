@@ -5,8 +5,13 @@ import type {
   PreparedPrivateEmptyVmReadinessV1,
   SynchronousReadinessCommitResult,
 } from '@origintrail-official/dkg-agent';
+import { DKGEvent, TypedEventBus } from '@origintrail-official/dkg-core';
 import type { DashboardDB } from '@origintrail-official/dkg-node-ui';
-import { settlePrivateEmptyVmAtSubscribe } from '../src/context-graph-empty-vm-readiness.js';
+import {
+  registerJoinMetadataEmptyVmSettlement,
+  settlePrivateEmptyVmAfterJoinMetadata,
+  settlePrivateEmptyVmAtSubscribe,
+} from '../src/context-graph-empty-vm-readiness.js';
 import { withProvenEmptyPrivateVmReadiness } from '../src/context-graph-empty-vm-readiness-owner.js';
 import { withContextGraphReadinessMutationLock } from '../src/context-graph-readiness.js';
 
@@ -354,4 +359,225 @@ describe('private empty-VM subscribe settlement', () => {
     })).toEqual({ proven: false });
     expect(commit).not.toHaveBeenCalled();
   });
+});
+
+describe('private empty-VM settlement after join metadata', () => {
+  const provenProof: LegacyProof = async (_id, _caller, commit) => {
+    commit();
+    return { proven: true as const, value: undefined };
+  };
+
+  /** A subscribed member row that no subscribe-time attempt could make ready. */
+  function memberNode(options: {
+    subscription?: Record<string, unknown> | null;
+    proof?: LegacyProof;
+    stopSignal?: AbortSignal;
+  } = {}) {
+    const eventBus = new TypedEventBus();
+    const subscriptions = new Map<string, Record<string, unknown>>();
+    if (options.subscription !== null) {
+      subscriptions.set('graph', { subscribed: true, synced: false, pendingMeta: false, ...options.subscription });
+    }
+    let readiness: Record<string, unknown> | null = null;
+    const proof = vi.fn(options.proof ?? provenProof);
+    const agent = {
+      eventBus,
+      node: { stopSignal: options.stopSignal },
+      getSubscribedContextGraphs: () => subscriptions,
+      markContextGraphSubscriptionState: (id: string, patch: Record<string, unknown>) => {
+        subscriptions.set(id, { ...subscriptions.get(id), ...patch });
+      },
+      ...preparedProofAgent(proof),
+    } as unknown as DKGAgent;
+    const dashboard = {
+      getContextGraphReadinessProvenance: () => readiness,
+      setContextGraphReadinessProvenance: (_id: string, next: Record<string, unknown>) => { readiness = next; },
+    } as unknown as DashboardDB;
+    const announcedReady = vi.fn();
+    eventBus.on(DKGEvent.PROJECT_SYNCED, announcedReady);
+    const log = vi.fn();
+    registerJoinMetadataEmptyVmSettlement({ agent, dashboard, log });
+    const confirmJoinMetadata = (payload: unknown = { contextGraphId: 'graph', agentAddress: CALLER }) => {
+      eventBus.emit(DKGEvent.JOIN_METADATA_CONFIRMED, payload);
+    };
+    return {
+      agent, dashboard, proof, log, announcedReady, confirmJoinMetadata,
+      subscription: () => subscriptions.get('graph'),
+      readiness: () => readiness,
+    };
+  }
+
+  /** Let a handler that was started by an event reach its first await and beyond. */
+  const settled = () => new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+  it('opens first-write readiness when the agent confirms the join metadata', async () => {
+    const node = memberNode();
+    // Whoever hears that the graph is ready must find it already committed. The
+    // event bus contains a listener's failure, so record here and assert below.
+    const committedWhenAnnounced: unknown[] = [];
+    node.announcedReady.mockImplementation(() => {
+      committedWhenAnnounced.push({ synced: node.subscription()?.synced, readiness: node.readiness() });
+    });
+
+    node.confirmJoinMetadata();
+
+    await vi.waitFor(() => expect(node.announcedReady).toHaveBeenCalledTimes(1));
+    expect(committedWhenAnnounced).toEqual([
+      { synced: true, readiness: expect.objectContaining({ durableVerified: true }) },
+    ]);
+    expect(node.proof).toHaveBeenCalledOnce();
+    expect(node.proof.mock.calls[0]?.slice(0, 2)).toEqual(['graph', CALLER]);
+    expect(node.subscription()).toMatchObject({
+      subscribed: true, synced: true, sharedMemorySynced: false, metaSynced: true, pendingMeta: false,
+    });
+    expect(node.readiness()).toMatchObject({ durableVerified: true, sharedMemoryVerified: false });
+    expect(node.announcedReady).toHaveBeenCalledWith({
+      contextGraphId: 'graph', dataSynced: 0, sharedMemorySynced: 0,
+    });
+    expect(node.log).not.toHaveBeenCalled();
+  });
+
+  it('retries a transient refusal inside its own deadline, longer than a subscribe request has', async () => {
+    const deadlines = vi.spyOn(AbortSignal, 'timeout');
+    const proof = vi.fn<LegacyProof>(async (id, caller, commit, signal) => (
+      proof.mock.calls.length === 1
+        ? { proven: false as const, retryable: true as const }
+        : provenProof(id, caller, commit, signal)
+    ));
+    const node = memberNode({ proof });
+
+    await expect(settlePrivateEmptyVmAfterJoinMetadata(node.agent, node.dashboard, 'graph', CALLER))
+      .resolves.toBe(true);
+
+    expect(proof).toHaveBeenCalledTimes(2);
+    expect(node.subscription()).toMatchObject({ synced: true });
+    expect(deadlines).toHaveBeenCalledWith(30_000);
+
+    deadlines.mockClear();
+    await settlePrivateEmptyVmAtSubscribe(node.agent, node.dashboard, 'graph', PRIVATE_AUTHORITY, CALLER);
+    expect(deadlines).toHaveBeenCalledWith(8_000);
+  });
+
+  it.each([
+    ['is already ready', { synced: true }],
+    ['is no longer subscribed', { subscribed: false }],
+    ['is not held by this node', null],
+  ])('starts no proof for a graph that %s', async (_case, subscription) => {
+    const node = memberNode({ subscription });
+    const before = node.subscription() === undefined ? undefined : { ...node.subscription() };
+
+    node.confirmJoinMetadata();
+    await settled();
+
+    expect(node.proof).not.toHaveBeenCalled();
+    expect(node.subscription()).toEqual(before);
+    expect(node.readiness()).toBeNull();
+    expect(node.announcedReady).not.toHaveBeenCalled();
+  });
+
+  it('leaves the graph unready, and says nothing, when the proof does not hold', async () => {
+    const node = memberNode({ proof: async () => ({ proven: false as const }) });
+
+    await expect(settlePrivateEmptyVmAfterJoinMetadata(node.agent, node.dashboard, 'graph', CALLER))
+      .resolves.toBe(false);
+
+    expect(node.proof).toHaveBeenCalledOnce();
+    expect(node.subscription()).toMatchObject({ subscribed: true, synced: false });
+    expect(node.readiness()).toBeNull();
+    expect(node.announcedReady).not.toHaveBeenCalled();
+  });
+
+  it('ignores an announcement that names no graph or no member', async () => {
+    const node = memberNode();
+    for (const payload of [
+      null, 'graph', {}, { contextGraphId: 'graph' }, { agentAddress: CALLER },
+      { contextGraphId: 7, agentAddress: CALLER }, { contextGraphId: 'graph', agentAddress: 7 },
+    ]) {
+      node.confirmJoinMetadata(payload);
+    }
+    await settled();
+
+    expect(node.proof).not.toHaveBeenCalled();
+    expect(node.subscription()).toMatchObject({ synced: false });
+    expect(node.log).not.toHaveBeenCalled();
+  });
+
+  it('ends when the node begins to stop, and a proof that answers afterwards commits nothing', async () => {
+    const stop = new AbortController();
+    // A proof still waiting on its chain read when the node stops. It answers
+    // later all the same, as a backend that ignores cancellation would.
+    let answerLate = () => {};
+    const proof = vi.fn<LegacyProof>(async (_id, _caller, commit) => {
+      await new Promise<void>((resolve) => { answerLate = resolve; });
+      commit();
+      return { proven: true as const, value: undefined };
+    });
+    const node = memberNode({ proof, stopSignal: stop.signal });
+
+    const settlement = settlePrivateEmptyVmAfterJoinMetadata(node.agent, node.dashboard, 'graph', CALLER);
+    await vi.waitFor(() => expect(proof).toHaveBeenCalledOnce());
+    stop.abort();
+
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    const outcome = await Promise.race([
+      settlement,
+      new Promise((resolve) => { watchdog = setTimeout(() => resolve('still running'), 1_000); }),
+    ]);
+    clearTimeout(watchdog);
+    expect(outcome).toBe(false);
+    expect(proof.mock.calls[0]?.[3]?.aborted).toBe(true);
+    answerLate();
+    await settled();
+
+    expect(proof).toHaveBeenCalledOnce();
+    expect(node.subscription()).toMatchObject({ subscribed: true, synced: false });
+    expect(node.readiness()).toBeNull();
+    expect(node.announcedReady).not.toHaveBeenCalled();
+  });
+
+  it('starts no proof once the node is stopping', async () => {
+    const stop = new AbortController();
+    stop.abort();
+    const node = memberNode({ stopSignal: stop.signal });
+
+    node.confirmJoinMetadata();
+    await settled();
+
+    expect(node.proof).not.toHaveBeenCalled();
+    expect(node.subscription()).toMatchObject({ synced: false });
+    expect(node.announcedReady).not.toHaveBeenCalled();
+    expect(node.log).not.toHaveBeenCalled();
+  });
+
+  it('leaves nothing registered on the node stop signal when it is done', async () => {
+    const stop = new AbortController();
+    const added = vi.spyOn(stop.signal, 'addEventListener');
+    const removed = vi.spyOn(stop.signal, 'removeEventListener');
+    const node = memberNode({ stopSignal: stop.signal });
+
+    await expect(settlePrivateEmptyVmAfterJoinMetadata(node.agent, node.dashboard, 'graph', CALLER))
+      .resolves.toBe(true);
+
+    expect(added).toHaveBeenCalledOnce();
+    expect(removed.mock.calls.map(([type, listener]) => [type, listener]))
+      .toEqual(added.mock.calls.map(([type, listener]) => [type, listener]));
+    // The node stopping later reaches nothing that is left of this settlement.
+    stop.abort();
+    expect(node.subscription()).toMatchObject({ synced: true });
+  });
+
+  it.each([new Error('store unavailable'), 'store unavailable'])(
+    'reports a settlement that fails with %s instead of throwing into the agent',
+    async (failure) => {
+      const node = memberNode({ proof: async () => { throw failure; } });
+
+      expect(() => node.confirmJoinMetadata()).not.toThrow();
+
+      await vi.waitFor(() => expect(node.log).toHaveBeenCalledWith(
+        '[warn] Failed to settle empty-graph readiness after join metadata: store unavailable',
+      ));
+      expect(node.subscription()).toMatchObject({ synced: false });
+      expect(node.announcedReady).not.toHaveBeenCalled();
+    },
+  );
 });
