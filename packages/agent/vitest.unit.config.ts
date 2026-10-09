@@ -81,6 +81,7 @@ export default defineConfig({
       "test/exact-graph-content-export.test.ts",
       "test/vm-recovery-local-admission.test.ts",
       "test/vm-reconcile-read-authority-wait.test.ts",
+      "test/vm-reconcile-local-rpc-refusal.test.ts",
       "test/unanswered-authority-read.test.ts",
       "test/unanswered-authority-recheck.test.ts",
       "test/swm-gossip-unanswered-authority.test.ts",

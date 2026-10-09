@@ -4,6 +4,7 @@ import {
   VmReconcileLocalAdmissionWait,
   type LocalAdmissionWaitOptions,
 } from './internal/vm-reconcile-local-admission-wait.js';
+import { VmReconcileLocalRpcRefusalWindow } from './internal/vm-reconcile-local-rpc-refusal.js';
 import type { VmReconcileSweepAdmission } from './internal/vm-reconcile-sweep-admission.js';
 import { VmReconcileSweepPlanner } from './internal/vm-reconcile-sweep.js';
 import {
@@ -541,6 +542,7 @@ export class VmReconcileSchedulingRuntime<T> {
   private readonly planner: VmReconcileSweepPlanner;
   private readonly sweepAdmission: VmReconcileSweepAdmission<T>;
   private readonly localAdmissionWait: VmReconcileLocalAdmissionWait;
+  private readonly localRpcRefusals: VmReconcileLocalRpcRefusalWindow;
 
   constructor(
     run: (key: string, source: VmReconcileSource) => Promise<T>,
@@ -551,9 +553,13 @@ export class VmReconcileSchedulingRuntime<T> {
     this.dispatcher = new VmReconcileRuntimeDispatcher(
       async (key, source) => {
         const pass = this.localAdmissionWait.passStarted(key);
+        let succeeded = false;
         try {
-          return await run(key, source);
+          const result = await run(key, source);
+          succeeded = true;
+          return result;
         } finally {
+          this.localRpcRefusals.passEnded(key, succeeded);
           this.localAdmissionWait.passEnded(pass);
         }
       },
@@ -563,14 +569,22 @@ export class VmReconcileSchedulingRuntime<T> {
     );
     this.localAdmissionWait = new VmReconcileLocalAdmissionWait({
       nudge: (key, deferred) => {
-        // A deferred graph's last pass ended as a failed one and left the
-        // live hold. This nudge is that pass's retry, so it lifts the hold it
-        // is about to use; nudges from elsewhere stayed held meanwhile.
-        if (deferred) this.dispatcher.releaseLiveHold(key);
+        if (deferred) {
+          // A pass of the graph that is queued or running, the sweep's for
+          // one, already asks what this nudge would, and parks the graph
+          // again if it must. A second pass queued behind it would run with
+          // no delay between the two and without the hold a failure leaves.
+          if (this.dispatcher.isInFlight(key)) return undefined;
+          // A deferred graph's failed pass left the live hold. This nudge is
+          // that pass's retry, so it lifts the hold it is about to use;
+          // nudges from elsewhere stayed held meanwhile.
+          this.dispatcher.releaseLiveHold(key);
+        }
         return this.dispatcher.nudgeLive(key);
       },
       maxWaiters: options.maxPending ?? 256,
     });
+    this.localRpcRefusals = new VmReconcileLocalRpcRefusalWindow(options.maxPending ?? 256);
     this.planner = new VmReconcileSweepPlanner({
       discoveryBatchSize: options.discoveryBatchSize ?? 8,
       periodicBoundBatchSize: options.periodicBoundBatchSize ?? 8,
@@ -613,6 +627,32 @@ export class VmReconcileSchedulingRuntime<T> {
     options: LocalAdmissionWaitOptions,
   ): 'parked' | 'again' | undefined {
     return this.localAdmissionWait.defer(key, options);
+  }
+
+  /**
+   * The graph's running pass met a chain read whose attempt the node's own
+   * RPC admission refused, so that attempt was never sent. The graph waits
+   * like one whose read-authority check got no answer, and is asked again
+   * from there, while it is inside its window (see
+   * `internal/vm-reconcile-local-rpc-refusal.ts`). Undefined when the window
+   * has run out or the wait did not take the graph: the periodic sweep then
+   * retries it, as after any pass that ended this way before.
+   */
+  deferForLocalRpcRefusal(
+    key: string,
+    options: LocalAdmissionWaitOptions,
+  ): 'parked' | 'again' | undefined {
+    if (!this.localRpcRefusals.refused(key)) return undefined;
+    return this.localAdmissionWait.defer(key, options);
+  }
+
+  /**
+   * The graph's running pass met such a read and is not asked again for it.
+   * Its window stays as it is all the same: only a pass that succeeds
+   * without meeting one shows the node's RPC admission open again.
+   */
+  noteLocalRpcRefusal(key: string): void {
+    this.localRpcRefusals.refused(key);
   }
   releaseLiveHold(key: string): void { this.dispatcher.releaseLiveHold(key); }
   triggerPeriodic(key: string): void { this.dispatcher.triggerPeriodic(key); }
