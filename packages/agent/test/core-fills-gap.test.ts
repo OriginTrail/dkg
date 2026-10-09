@@ -307,13 +307,14 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
 
   async function boot(): Promise<AgentInternals> {
     const chain = new MockChainAdapter();
+    const retained = new Map<string, ContextGraphSubscriptionRecord>();
     agent = await DKGAgent.create({
       name: 'CoreFillTest',
       chainAdapter: chain,
       contextGraphSubscriptionStore: {
-        loadAll: async () => [],
-        save: async (record) => { saved.push(record); },
-        delete: async (id) => { deleted.push(id); },
+        loadAll: async () => [...retained.values()].map((row) => ({ ...row })),
+        save: async (record) => { saved.push(record); retained.set(record.id, { ...record }); },
+        delete: async (id) => { deleted.push(id); retained.delete(id); },
       },
     });
     stubNode(agent);

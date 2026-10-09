@@ -1183,7 +1183,7 @@ describe('Context Graph discovery/subscription boundary', () => {
     }
   }, 60_000);
 
-  it('resets and persists reconciliation state when discovery changes an active graph binding', async () => {
+  it('refuses a foreign discovery binding and preserves active reconciliation state', async () => {
     const persisted = new Map<string, ContextGraphSubscriptionRecord>();
     const localId = 'discovery-rebind-active';
     const oldOnChainId = '601';
@@ -1220,19 +1220,18 @@ describe('Context Graph discovery/subscription boundary', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
 
       expect(agent.getSubscribedContextGraphs().get(localId)).toMatchObject({
-        name: 'Rebound Active Graph',
         subscribed: true,
-        onChainId: newOnChainId,
-        lastReconciledOrdinal: 0,
+        onChainId: oldOnChainId,
+        onChainHash: oldOnChainHash,
+        lastReconciledOrdinal: 7,
       });
-      expect(agent.getSubscribedContextGraphs().get(localId)?.onChainHash).toBeUndefined();
-      // The live reconciler may immediately self-prime a fresh cursor after
-      // the reset; the stale object must never survive the rebind.
-      expect((agent as any).reconcileCursors.get(localId)).not.toBe(staleCursor);
+      expect(agent.getSubscribedContextGraphs().get(localId)?.name).not.toBe('Rebound Active Graph');
+      expect((agent as any).reconcileCursors.get(localId)).toBe(staleCursor);
       expect(persisted.get(localId)).toMatchObject({
         subscribed: true,
-        onChainId: newOnChainId,
-        lastReconciledOrdinal: 0,
+        onChainId: oldOnChainId,
+        onChainHash: oldOnChainHash,
+        lastReconciledOrdinal: 7,
       });
 
       (agent as any).setContextGraphSubscription(localId, {
@@ -1241,7 +1240,7 @@ describe('Context Graph discovery/subscription boundary', () => {
       });
       const currentCursor = { watermark: 4, ahead: new Set<number>() };
       (agent as any).reconcileCursors.set(localId, currentCursor);
-      agent.recordDiscoveredContextGraph(localId, { onChainId: newOnChainId });
+      agent.recordDiscoveredContextGraph(localId, { onChainId: oldOnChainId });
 
       expect(agent.getSubscribedContextGraphs().get(localId)?.lastReconciledOrdinal).toBe(4);
       expect((agent as any).reconcileCursors.get(localId)).toBe(currentCursor);
