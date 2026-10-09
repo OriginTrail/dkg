@@ -72,6 +72,7 @@ import { ethers } from 'ethers';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { resolveChainFinalityConfirmationsV1 } from './chain-finality-confirmations-v1.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { yieldMainThread } from './main-thread-time-slice.js';
 import {
   isApprovedPrivateReplicaDelegationActive,
   resolveApprovedPrivateReplicaAuthority,
@@ -348,6 +349,8 @@ export interface PublishAuthorCatalogExactSetSuccessorParamsV1 {
   readonly deployment: CatalogSealDeploymentProfileV1;
   readonly issuedAt?: TimestampMsV1;
   readonly peers: readonly string[];
+  /** Stops the production of the successor before anything is staged. */
+  readonly signal?: AbortSignal;
 }
 
 export type Rfc64OpenCatalogSuccessorAssetInputV1 =
@@ -1506,6 +1509,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         stableReason,
       });
     }));
+  }
+
+  /** Reason the last authority refresh of one graph recorded, or null. */
+  rfc64CatalogAuthorityRefreshFailureReasonV1(this: DKGAgent, contextGraphId: string): string | null {
+    return rfc64CatalogAuthorityProgressV1.get(this)?.get(contextGraphId)?.reason ?? null;
   }
 
   /** Re-prove catalog completion before the daemon's synchronous readiness commit. */
@@ -4931,6 +4939,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       stageKaBundle: persistence.kaBundles.putKaBundle,
       readKaBundleByDigest: persistence.kaBundles.readKaBundleByDigest,
     });
+    // The history read above and the production below each walk the whole set.
+    await yieldMainThread();
     const produced = await producer.produceAndStageExactSet({
       previousHead: history.previousHead,
       previousDirectoryPath: history.previousDirectoryPath,
@@ -4943,6 +4953,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         signDigest: (objectDigest) => params.author.signMessage(objectDigest),
       },
       catalogIssuerAuthorization: params.catalogIssuerAuthorization,
+      signal: params.signal,
     });
     const head = produced.publication.head;
     const headKeys = produced.stagedControlObjects.objects.find(
@@ -5192,7 +5203,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // reads honoured the operator. One anchor, one source.
           finalityConfirmations: resolveChainFinalityConfirmationsV1(this.chain, this.config.chainConfig),
           getOnChainContextGraphId: (contextGraphId, signal) =>
-            this.getContextGraphOnChainId(contextGraphId, { signal }),
+            this.resolveContextGraphNumericIdForPolicy(contextGraphId, { signal })
+              .then((id) => id?.toString() ?? null),
           getEvmChainId: () => this.chain.getEvmChainId(),
         });
         const finalizedVmPrecommit = createRfc64FinalizedVmAgentPrecommitV1({
@@ -5207,7 +5219,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // reads honoured the operator. One anchor, one source.
           finalityConfirmations: resolveChainFinalityConfirmationsV1(this.chain, this.config.chainConfig),
           getOnChainContextGraphId: (contextGraphId, signal) =>
-            this.getContextGraphOnChainId(contextGraphId, { signal }),
+            this.resolveContextGraphNumericIdForPolicy(contextGraphId, { signal })
+              .then((id) => id?.toString() ?? null),
           getEvmChainId: () => this.chain.getEvmChainId(),
           getKnowledgeAssetStorageAddress: async () => {
             if (typeof this.chain.getDKGKnowledgeAssetsAddress !== 'function') {

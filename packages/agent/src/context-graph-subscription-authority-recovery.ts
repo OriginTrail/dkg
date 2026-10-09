@@ -52,11 +52,15 @@ export interface PersistedContextGraphSubscriptionActivationPorts {
   ): ContextGraphSub;
   current(contextGraphId: string): ContextGraphSub | undefined;
   remove(contextGraphId: string): void;
+  /** Restore the captured identity-only state after compensating activation. */
+  restoreInactive?(contextGraphId: string, subscription: ContextGraphSub): void;
   /** Compensate sync scope and every partially installed network handler. */
   rollbackNetworkEffects(contextGraphId: string): void;
   trackSync(contextGraphId: string): void;
   subscribe(contextGraphId: string): void;
   persistMembership(contextGraphId: string): void;
+  /** Retire/adopt wire custody only after all speculative effects succeed. */
+  commit?(contextGraphId: string): ContextGraphSub;
 }
 
 export interface PersistedContextGraphSubscriptionActivationOptions {
@@ -73,6 +77,7 @@ export async function activatePersistedContextGraphSubscription(
   ports: PersistedContextGraphSubscriptionActivationPorts,
   options: PersistedContextGraphSubscriptionActivationOptions = {},
 ): Promise<ContextGraphSub> {
+  const previous = ports.current(row.id);
   const restorePendingMeta = options.restorePendingMeta === true;
   const subscription = ports.install(row, {
     onChainId: options.onChainId,
@@ -89,6 +94,9 @@ export async function activatePersistedContextGraphSubscription(
       ports.rollbackNetworkEffects(row.id);
     } finally {
       ports.remove(row.id);
+      if (previous && !previous.subscribed && previous.coreHosted !== true) {
+        ports.restoreInactive?.(row.id, previous);
+      }
     }
   };
 
@@ -105,11 +113,11 @@ export async function activatePersistedContextGraphSubscription(
         ports.persistMembership(row.id);
       }
     }
+    return ports.commit?.(row.id) ?? subscription;
   } catch (error) {
     rollback();
     throw error;
   }
-  return subscription;
 }
 
 export interface DeferredContextGraphSubscriptionAuthorityRecoveryPorts {
@@ -270,10 +278,12 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
       ports.clearStatus(contextGraphId);
       continue;
     }
+    const currentSubscription = ports.subscriptions.get(contextGraphId);
     if (
       ports.dormancyById.get(contextGraphId) !== 'authorityUnavailable'
       || (ports.persistRevisions.get(contextGraphId) ?? 0) !== revision
-      || ports.subscriptions.has(contextGraphId)
+      || currentSubscription?.subscribed === true
+      || currentSubscription?.coreHosted === true
       || currentRow.id !== candidate.id
       || currentRow.onChainId !== candidate.onChainId
       || currentRow.onChainHash !== candidate.onChainHash

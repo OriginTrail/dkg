@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests" tests="2" failures="0" errors="0" time="0.172031001">
+    <testsuite name="test/regression-on-demand-cursor.test.ts" timestamp="2026-10-04T19:39:15.575Z" hostname="BMP14.local" tests="1" failures="0" errors="0" skipped="0" time="0.114754334">
+        <testcase classname="test/regression-on-demand-cursor.test.ts" name="VM reconcile cursor follows the subscription lifetime &gt; advances an on-demand subscription through its pending ordinals without a durable write" time="0.113934917">
+        </testcase>
+    </testsuite>
+    <testsuite name="test/regression-peer-store-repair.test.ts" timestamp="2026-10-04T19:39:15.576Z" hostname="BMP14.local" tests="1" failures="0" errors="0" skipped="0" time="0.057276667">
+        <testcase classname="test/regression-peer-store-repair.test.ts" name="Random Sampling proof-time exact repair on the real libp2p peer store &gt; fetches the challenged asset from a provider the peer store lists as sync-capable" time="0.010838125">
+        </testcase>
+    </testsuite>
+</testsuites>

@@ -381,6 +381,23 @@ describe('registered private empty-VM agent guard', () => {
     expect(mocks.proof).not.toHaveBeenCalled();
   });
 
+  it('reads the configured chain as the adapter does, whatever its namespace', async () => {
+    const state = fixture();
+    const config = state.agent.config.chainConfig as { chainId: string };
+    // The network files name their chains after the network (`base:8453`,
+    // `gnosis:100`), not `evm:`; a bare number is the adapter's other form.
+    for (const chainId of ['base:31337', 'gnosis:31337', 'neuroweb:31337', '31337']) {
+      config.chainId = chainId;
+      expect(await prove(state.agent)).toBe(true);
+    }
+    expect(mocks.proof).toHaveBeenCalledTimes(4);
+    expect(mocks.proof).toHaveBeenLastCalledWith(expect.objectContaining({ chainId: '31337' }));
+    // The namespace is free; the number still has to be the adapter's chain.
+    config.chainId = 'base:8453';
+    expect(await prove(state.agent)).toBe(false);
+    expect(mocks.proof).toHaveBeenCalledTimes(4);
+  });
+
   it('uses the adapter chain ID when configuration omits it, but rejects a mismatch', async () => {
     const state = fixture();
     const config = state.agent.config.chainConfig as { chainId?: string };

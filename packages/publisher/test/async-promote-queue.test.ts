@@ -25,6 +25,7 @@ import {
   serializeJob,
   uniquenessKey,
 } from '../src/async-promote-queue-utils.js';
+import { PROMOTE_PREREQUISITE_RETRY_WINDOW_MS } from '../src/async-promote-recovery-policy.js';
 import {
   ASYNC_PROMOTE_QUEUE_FORMAT_VERSION,
   PROMOTE_JOB_STATES,
@@ -56,6 +57,51 @@ describe('TripleStoreAsyncPromoteQueue', () => {
       ...overrides,
     });
   }
+
+  it('skips repeated idle scans, wakes immediately for enqueue, and expires external-write hints', async () => {
+    const queue = createQueue();
+    const detach = queue.workScheduling!.attachScheduler({ onWorkAvailable() {} });
+    await queue.claimNext('idle');
+    const query = vi.spyOn(store, 'query');
+    for (let i = 0; i < 10; i++) await queue.claimNext('idle');
+    expect(query).not.toHaveBeenCalled();
+    now += 1_000;
+    await queue.claimNext('idle');
+    expect(query).toHaveBeenCalled();
+    const id = await queue.enqueue(makeRequest());
+    expect((await queue.claimNext('awake'))?.jobId).toBe(id);
+    detach();
+  });
+
+  it('discovers externally persisted work when the reader idle hint expires', async () => {
+    const reader = createQueue();
+    const wake = vi.fn();
+    const detach = reader.workScheduling!.attachScheduler({ onWorkAvailable: wake });
+    try {
+      expect(await reader.claimNext('reader')).toBeNull();
+      const writer = createQueue();
+      const id = await writer.enqueue(makeRequest());
+      expect(wake).not.toHaveBeenCalled();
+      expect(await reader.claimNext('reader')).toBeNull();
+      now += 999;
+      expect(await reader.claimNext('reader')).toBeNull();
+      now += 1;
+      expect((await reader.claimNext('reader'))?.jobId).toBe(id);
+    } finally { detach(); await store.close(); }
+  });
+
+  it('never skips past the known retry deadline', async () => {
+    const queue = createQueue({ backoff: () => 400 });
+    queue.workScheduling!.attachScheduler({ onWorkAvailable() {} });
+    const id = await queue.enqueue(makeRequest());
+    const job = await queue.claimNext('worker');
+    await queue.fail(id, job!.lease!.claimToken, { message: 'retry', retryable: true, classification: 'transient', recordedAt: now });
+    expect(await queue.claimNext('worker')).toBeNull();
+    now += 399;
+    expect(await queue.claimNext('worker')).toBeNull();
+    now += 1;
+    expect((await queue.claimNext('worker'))?.jobId).toBe(id);
+  });
 
   function makeRequest(overrides: Partial<PromoteRequest> = {}): PromoteRequest {
     return {
@@ -1079,6 +1125,44 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     const job = await queue.getStatus(jobId);
     expect(job?.state).toBe('failed');
     expect(job?.attempt.count).toBe(2); // maxRetries exhausted
+  });
+
+  it('20a. a typed prerequisite failure keeps retrying past maxRetries until the window after enqueue ends (GH#3052)', async () => {
+    const queue = createQueue({ maxRetries: 2, backoff: () => 1 });
+    const jobId = await queue.enqueue(makeRequest());
+    const failOnce = async (diagnosticCode?: string) => {
+      const claimed = await queue.claimNext('worker-1');
+      await queue.fail(jobId, claimed!.lease!.claimToken, {
+        message: 'A promote prerequisite is temporarily unavailable',
+        retryable: true,
+        classification: 'transient',
+        recordedAt: now,
+        ...(diagnosticCode === undefined ? {} : { diagnosticCode }),
+      });
+      advance(10);
+      return queue.getStatus(jobId);
+    };
+
+    await failOnce('PROMOTE_RETRYABLE_FAILURE');
+    // Attempts 2 and 3 are at and past the budget of 2: still retried, and the
+    // row's budget stays what it was.
+    for (const attempt of [2, 3]) {
+      const job = await failOnce('PROMOTE_RETRYABLE_FAILURE');
+      expect(job?.state).toBe('failed_retrying');
+      expect(job?.attempt).toMatchObject({ count: attempt, maxRetries: 2 });
+    }
+    // Any other retryable failure past the base budget ends the job as before.
+    const other = await failOnce();
+    expect(other?.state).toBe('failed');
+    expect(other?.attempt.lastError?.retryable).toBe(true);
+
+    // And so does a prerequisite failure once the window has passed.
+    await queue.recover(jobId);
+    advance(PROMOTE_PREREQUISITE_RETRY_WINDOW_MS);
+    expect((await failOnce('PROMOTE_RETRYABLE_FAILURE'))?.state).toBe('failed_retrying');
+    const late = await failOnce('PROMOTE_RETRYABLE_FAILURE');
+    expect(late?.state).toBe('failed');
+    expect(late?.attempt).toMatchObject({ count: 2, maxRetries: 2 });
   });
 
   it('21. claimNext() picks up a failed_retrying job once nextRetryAt has passed', async () => {

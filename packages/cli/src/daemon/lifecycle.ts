@@ -1,13 +1,11 @@
 // daemon/lifecycle.ts
 //
-// `runDaemon` + `runDaemonInner` extracted verbatim from the legacy
-// monolithic `daemon.ts`. Owns the daemon boot sequence: PID file,
-// config load, agent construction, http server, signal handling,
-// shutdown.
+// Owns daemon boot, agent configuration, HTTP serving and shutdown.
 //
 // The router (`handleRequest`) is in `./handle-request.ts` and
 // imported here purely so `createServer` can wire it up.
 
+import { resolveDaemonPromoteQueueConfig } from './promote-queue-config.js';
 import {
   createServer,
   type IncomingMessage,
@@ -208,6 +206,7 @@ import {
   writeContextGraphReadiness,
   type ContextGraphReadinessStore,
 } from '../context-graph-readiness.js';
+import { registerJoinMetadataEmptyVmSettlement } from '../context-graph-empty-vm-readiness.js';
 import { authenticateHttpRequest, canAdministerNode, loadTokens } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
@@ -2190,7 +2189,9 @@ async function runDaemonInnerWithStartupOwnership(
     );
   }
   log(formatAuthorityIndexStartupLine(authorityIndexPlan));
+  const promoteQueuePolicy = resolveDaemonPromoteQueueConfig(config.promoteQueue);
   const agent = await DKGAgent.create(agentConfig);
+  agent.configurePromoteQueue(promoteQueuePolicy);
   const publicSnapshotStore = agent.publicSnapshotStore;
 
   let publisherState: PublisherState = createInitialPublisherState(config);
@@ -2332,6 +2333,9 @@ async function runDaemonInnerWithStartupOwnership(
     store: dashDb,
     log,
   });
+  // The same holds for the metadata a join approval fetches: it can arrive
+  // after the member's own subscribe call has finished its readiness attempts.
+  registerJoinMetadataEmptyVmSettlement({ agent, dashboard: dashDb, log });
 
   await agent.start();
 

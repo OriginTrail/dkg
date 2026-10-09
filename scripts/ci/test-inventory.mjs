@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import { validateRegressions } from '../lib/regressions/registry.mjs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -64,6 +65,8 @@ try {
   const report = tracked.sort().map((file) => ({ file, execution: owners.get(file) ?? [] }));
   fs.writeFileSync(path.join(root, 'test-inventory.json'), JSON.stringify(report, null, 2) + '\n');
   if (missing.length) throw new Error(`tests without an execution route:\n${missing.join('\n')}`);
+  const regressions = validateRegressions(root, report);
+  console.log(`Regression register: ${JSON.stringify(regressions)}`);
   console.log(`Verified ${report.length} test files across ${packages.length} Vitest packages and explicit secondary systems.`);
 } catch (error) {
   console.error(`test inventory: ${error.message}`); process.exitCode = 1;

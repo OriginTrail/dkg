@@ -19,6 +19,7 @@ import {
   type SwmAuthorInventoryScopeV1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
+import { storeLaneInflightLimit } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 
 import { DKGAgentBase } from './dkg-agent-base.js';
@@ -330,6 +331,8 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       const prepared = await prepareRfc64SwmInventoryCatalogTargetV1({
         snapshot,
         signal: params.signal,
+        // As wide as the store lane these reads run in, and no wider.
+        resolveConcurrency: storeLaneInflightLimit(this.store),
         resolveAsset: (row, signal) => resolveRfc64InventoryWorkspaceCatalogAssetV1({
           store: this.store,
           publicSnapshotStore: this.publicSnapshotStore,

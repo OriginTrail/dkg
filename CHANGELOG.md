@@ -2,6 +2,253 @@
 
 All notable changes to the DKG V10 node are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.0.23] - 2026-10-09
+
+A patch for shares and publishes on busy nodes, for private Context Graphs
+and for restart recovery. A share on a node that is also publishing is no
+longer refused, and retried a minute later, because an unrelated write moved
+a node-wide counter or because a short retirement fence was up. A confirmed
+publish finalizes when one of the configured chain endpoints cannot answer
+block-pinned reads, and its answer no longer waits for retries that cannot
+succeed. A member approved into a new, empty private graph can write into
+it. After a restart a node keeps the on-chain identity of the Context Graphs
+it had saved, also when another account has registered the same name.
+
+**No smart-contract, ABI, deployment registry or wire-format changes.**
+
+### Upgrading from 10.0.22
+
+| Change | Impact | Action |
+| --- | --- | --- |
+| A share that is refused before it writes anything is retried for up to an hour (#3085) | Past its attempt budget such a job (the retirement fence, an unanswered authority read) gets one more attempt at a time, on the same backoff, until one hour after it was queued. Then it ends `failed` with `retryable: true` as before. Other retryable failures keep the attempt budget alone | None. Tooling that expects a share job to end after five attempts should allow the hour |
+| The retry policy of the share queue can be configured (#3088) | `promoteQueue.maxRetries`, `retryBaseMs`, `retryMaxMs` and `retryJitterRatio` are validated and applied at start. The defaults are unchanged: five attempts, a 60 s base, a 15 min cap and 20 % jitter. Jobs already in the queue keep the budget they were created with | None, unless you want other values; see `docs/promote-queue-operations.md` |
+| A fence refusal names its cause (#3085) | The message of `RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS` now ends with who raised the fence (`finalized-vm-retirement`, `republish-retirement` or `receiver-lease`), on which scope and for how long. The code and the start of the message are unchanged. A fence that was up for more than 5 s is logged when it drops | None. Tooling that matches the whole message should match its start |
+| The chain read that finalizes a publish asks the first endpoint first (#3101) | The version of a published asset is read from the first configured endpoint, and from the others only when an endpoint cannot supply usable evidence. Before, every configured endpoint had to answer | None. An endpoint that cannot serve block-pinned `eth_call` no longer has to be taken out of the configured list |
+| Publisher job views show when the chain was done (#3083) | `GET /api/publisher/job` and `GET /api/publisher/jobs` gain `timestamps.receiptObservedAt` and `timestamps.finalityObservedAt` (Unix milliseconds): when the node first saw the transaction's receipt, and when it first saw it at the configured confirmation depth | None. The fields are additive |
+| A resent OpenClaw chat turn is stored once (#2932) | `POST /api/openclaw-channel/persist-turn` goes through the same per-turn owner as the Hermes and Prime Agent channels, so a turn that is sent again no longer writes a second pair of messages | None |
+
+### Known issues
+
+- **RFC-64 catalog replay loop**: replays that come back incomplete repeat on
+  every reconnect. Keep `rfc64Catalog.rollout.killSwitch` on wherever it is
+  set.
+- **A subscriber of a public Context Graph can receive a new asset minutes
+  late** (#3052): while a node applies a catalog update for a graph it
+  refuses Shared Working Memory writes for that graph. A sync round that
+  overlaps the update writes none of the snapshots it fetched, and the node
+  does not pull that graph again at once: the assets arrive with a later
+  round or through the catalog, in our tests 6 to 7 minutes after they were
+  shared. An asset that was finalized in the meantime is then fetched on its
+  own, and those fetches can fail and be retried minutes apart: on a graph
+  of a few hundred assets that was being published to, single assets took up
+  to 15 minutes. Nothing is lost, and this is not new in this release.
+- **A member whose metadata fetch fails right after a live approval stays not
+  ready until its node restarts** (#3109): when a join is approved, the
+  member fetches the curator's metadata in two attempts and then asks for a
+  broadcast catch-up, which does not carry private metadata. If both
+  attempts fail, nothing fetches the metadata again while the node keeps
+  running; the retry for this state starts only at start-up. Restart the
+  member's node.
+- **A member that restarted before its empty private graph was proven ready
+  stays not ready** (#3109): the readiness proof of an empty registered
+  private graph now runs again when the member's copy of the metadata
+  becomes authoritative (#3108). A node that restarted after that moment and
+  before the proof succeeded keeps the graph subscribed and not writable
+  until the member subscribes again or content arrives. Members that reached
+  this state on an earlier version are in the same position after the
+  upgrade. Subscribe again.
+- **A read by a newly approved member of an unregistered private graph can
+  answer a retryable 503** (#3064): before it reads such a graph, the
+  member's node has to accept a proof that the graph's name is not
+  registered on chain. One slow or discarded run of that proof no longer
+  fails a read (#3074), but in the seconds after an approval a read can
+  still answer 503 with `CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE`. Send the
+  read again.
+- **A member of private graphs that are not registered on chain reads the
+  chain much more often than other nodes** (#3064): the node rebuilds the
+  proof that a graph's name is not registered very often, and those reads
+  are held back only by its chain request budget. Other chain work on that
+  node, a publish included, can wait behind them.
+- **Recovery through the batch stream depends on the Cores that serve it**:
+  only Cores with the switch set serve the stream. A Core that is busy
+  answers `BUSY` and is asked again after a short pause, and a stream that
+  breaks is opened once more with the same Core (#2979, #2987); a stream that
+  stalls without closing is not detected. After a busy attempt, and after a
+  broken one on a Core that has already served the graph, the Core keeps its
+  turn, but between two stream attempts the node can probe peers without the
+  stream. Each such probe is bounded to two minutes while a stream-capable
+  Core is connected, three times out of four (#2978), and large assets still
+  take minutes each there. Serve the stream from more than one Core that
+  holds the graph.
+- **The catalog of an unregistered private graph can stay unverified on a
+  member** (#2993): after the approval, data and reads reach a member Core
+  within seconds and a member Edge after about a minute, but the member's
+  catalog status reaches `complete` only after about eight minutes on a
+  Core and may not reach it on an Edge, because the curator gives up its
+  replay to the approved peer before the member is ready. Delivery and reads
+  do not depend on it. These timings were measured before #3036, which
+  retries an incomplete private catalog within a short budget; they were not
+  measured again.
+- **Two peers that connect while both are still starting do not sync with each
+  other until they reconnect** (#2854): a node learns a peer's protocols when
+  the connection opens. Two nodes that both connected before either
+  registered its handlers recover on reconnect.
+- **A member added to a private Context Graph only by wallet address does not
+  receive its Shared Working Memory until it joins** (#2862): the member needs
+  the graph's metadata, which the curator sends on an approved join request.
+  Have the member send a signed join request; a pre-authorized member is
+  approved automatically.
+- **A restarted member Edge may not reconnect to its private graph's curator
+  Edge if the curator is unreachable** (#2865): approval now carries a
+  validated listener hint and recovery retries the curator connection
+  (#3058). This does not make an unavailable curator reachable. If automatic
+  discovery cannot establish the connection, connect to a reachable curator
+  multiaddr with `POST /api/connect`.
+- **Copies already stale before the upgrade may wait for another update**
+  (#2866): the update lane initially replays about 500 blocks. Older stale
+  copies, and refresh targets given up after 24 hours, need the next update
+  or an explicit asset fetch. The rate-limited backfill is not in this
+  release.
+- **The successor of an abandoned shared update draft is shared under the same
+  number** (#2964): peers' share gate, the RFC-64 catalog and curator
+  confirmation (`swmAwaitCuratorAck`) do not replace a draft with another of
+  the same number, so peers may keep showing the earlier draft until the
+  update is published, and the replacement replaces the private payload
+  sealed under that number.
+- **A catalog authority refresh can wait for the next five-minute pass on a
+  node with constant store writes** (#2968): a refresh that is composed while
+  the node's authority facts change is composed again, up to six more times
+  within about four seconds. On a node whose unrelated writes never pause,
+  every attempt can be discarded, and a newly approved member then receives
+  the catalog only after the next periodic pass.
+- **Some lifecycle pointer stamps are still only logged when they fail**
+  (#2962): the Verifiable Memory stamps after a confirmed publish, and the
+  shared pointer stamp of `publishAsync` between its share and its publish.
+
+### Fixed
+
+- **A share on a busy node is no longer refused because of unrelated writes**
+  (#3069, #3096): an asynchronous share resolves its signer through a check
+  of the Context Graph's local roster. The check read the roster again
+  whenever a node-wide revision moved during the read, and refused after
+  three reads. Every write on the node moves that revision, so on a node
+  that was publishing, shares were refused although nothing about their
+  graph had changed, and each refusal cost one step of the queue's retry
+  policy: about a minute after the first, twice that after the next. The
+  check now compares the graph's own revision, which moves only when a fact
+  of that graph's metadata record can change. In a test on a public testnet,
+  on a node that was publishing, 17 of 40 shares were refused at least once
+  before the change and none after it.
+- **A short retirement fence no longer costs a share attempt or a declined
+  acknowledgement** (#3052, #3085): while a node retires the shared copy of
+  a finalized asset it fences new shares of that asset, normally for 10 to
+  16 ms. A share, or a Core's StorageACK, that met the fence was refused at
+  once and retried about a minute later, together with every other share
+  refused in the same window. Both now wait up to 2 s for the fence to drop;
+  a fence that lasts longer is refused as before. A retirement or a catalog
+  lease that never got its turn used to hold every later retirement on the
+  node. It now gives up after 30 s of waiting, logs what it waited for, and
+  is tried again on the next pass.
+- **A confirmed publish finalizes when one chain endpoint cannot serve
+  block-pinned reads** (#3098, #3101): after its transaction is confirmed, a
+  node reads the asset's version from the chain at a pinned block. That read
+  needed an answer from every configured endpoint, so one endpoint that
+  refuses block-pinned `eth_call` left every confirmed publish in
+  `broadcast` or `included` although the chain was done. The read now asks
+  the first endpoint and falls back to the others only when an endpoint
+  cannot supply usable evidence. The root, the count, the author and the
+  publisher are still read from one endpoint at one block.
+- **A publish answers without waiting for share retries that cannot
+  succeed** (#3076): after a share, a background step records the asset in
+  the author's catalog inventory and retries for a bounded window when the
+  graph has no catalog lane yet. The confirmed-publish step of the same
+  asset runs behind it, so on a node whose catalog authority for the graph
+  was unavailable a publish answered tens of seconds after its transaction
+  had been confirmed: 44 s at the median in the devnet soak, where the
+  on-chain part took 4 s. The retries now end as soon as the graph's last
+  authority refresh recorded a condition the window cannot outlast. This was
+  the slow publish answer seen on 10.0.22.
+- **Chain-authority reads issued by background work are admitted within
+  their deadline** (#3038): in the background request class such a read
+  goes ahead of ordinary background work and is not held by the class's
+  start-up delay. It keeps the background budget and yields to foreground
+  work, and ordinary background work is passed by at most four of these
+  reads in a row.
+- **One slow or discarded run of the local proof no longer fails an approved
+  member's read** (#3064, #3074): every read of a private graph that is not
+  registered on chain runs a local proof of the membership. A run that
+  outlasted its time limit on a busy store, or whose result was discarded
+  because the graph's metadata was written while it ran, ended the read with
+  a retryable 503, although nothing about the membership had changed. The
+  proof now runs again, at most two more times, for exactly those two
+  outcomes. This also happened to a member that had read the graph before;
+  the 10.0.22 notes named only first reads.
+- **A member approved into a new, empty registered private graph can write
+  into it** (#3108): the member's first write was refused with
+  `CONTEXT_GRAPH_NOT_WRITABLE`, and its node kept the graph subscribed and
+  not synced, on 10.0.21 and 10.0.22. An empty registered private graph
+  becomes ready through a proof that it has no published assets yet. Outside
+  a local devnet that proof never succeeded: it accepted the configured
+  chain id only when written `evm:<number>`, while the network files use
+  forms such as `base:8453` and `gnosis:100`, and it ran only around the
+  subscribe request, before the member's copy of the curator's metadata
+  could arrive. The proof now reads the chain id with the chain adapter's
+  own parser and runs again when that metadata becomes authoritative. Two
+  remaining cases are listed under Known issues (#3109).
+- **A node keeps the on-chain identity of its saved Context Graphs across a
+  restart** (#3104, #3105): a Context Graph name can be registered under
+  more than one numeric id, by different accounts. After a restart, seeing
+  another account's registration of the same name could replace the numeric
+  id a node had saved for its own graph, and recovery then rejected that
+  graph's pending publication. The saved numeric identity is now kept apart
+  from whether the node is admitted as a member or a host, and automatic
+  discovery adds to a binding only when the numeric id agrees. Conflicting
+  and ambiguous claims are refused. A saved graph that is not activated at
+  start-up keeps its identity and stays closed: it grants no subscription,
+  private read, publish or hosting.
+- **Catalog work blocks and loads the node less** (#3072, #3087, #3090,
+  #3091, #3093): producing a catalog successor verified its whole live set
+  in one stretch on the main thread, seconds per publish on a large catalog.
+  The work now gives the event loop a turn after every 25 ms and honours a
+  cancellation before each signature; it does not use less CPU. A catalog
+  reconcile reads its rows no wider than the store lane it runs in admits,
+  instead of queueing most of them behind their own siblings. Catalog repair
+  admits one repair at a time and keeps its cooldown when the inventory
+  changes, so a failure that repeats is not retried continuously.
+- **A resent OpenClaw chat turn is stored once** (#2932):
+  `POST /api/openclaw-channel/persist-turn` wrote on every request, so a
+  turn that an adapter sent again after a timeout or a reconnect appeared
+  twice in the chat history. The route now goes through the per-turn owner
+  that the Hermes and Prime Agent channels already use.
+
+### Changed
+
+- **The recipient keys of a private graph are collected in two store reads**
+  (#3069, #3082, #3089): a complete resolution took five. A collection that
+  is saturated or inconsistent falls back to the paged strategy used before.
+  The recipient lookup and the fences that guard it now derive their queries
+  from one description of the facts a recipient depends on.
+- **The share worker skips queue scans while nothing is queued** (#3069,
+  #3088): an idle scan is skipped for up to a second. Local writes and work
+  notifications end the pause, and polling still finds writes made by
+  another process.
+- **Test and CI plumbing** (#3037, #3050, #3077): two historical defects have
+  replayable regression proofs and a register of the assertions they
+  require, the Node 26 chain-RPC job runs under the reviewed controller, and
+  the devnet suite's wait loops, soak restart and block mining no longer
+  fail a healthy candidate. One dated test exception that expired on the day
+  of this release is extended.
+
+### Added
+
+- **Chain observation times on publisher job views** (#3081, #3083):
+  `timestamps.receiptObservedAt` and `timestamps.finalityObservedAt` tell a
+  job whose transaction is done on chain from one whose node is still
+  finishing local work.
+- **`promoteQueue` retry settings** (#3088): `maxRetries`, `retryBaseMs`,
+  `retryMaxMs` and `retryJitterRatio`, described in
+  `docs/promote-queue-operations.md`.
+
 ## [10.0.22] - 2026-10-07
 
 A patch for private Context Graphs, for two problems seen on 10.0.21.

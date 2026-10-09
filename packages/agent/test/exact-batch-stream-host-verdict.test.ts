@@ -215,7 +215,7 @@ describe('experimental exact batch actual host completion verdict', () => {
     expect(f.host.chain.getKAContextGraphId).toHaveBeenCalledTimes(2);
     expect(f.host.requireLocalCgMatchesOnChainSlot).toHaveBeenCalledOnce();
     expect(f.host.invalidateListContextGraphsCache).toHaveBeenCalledTimes(2);
-    expect(f.host.contextGraphMetaProjection.markDirtyFromQuads).toHaveBeenCalledTimes(2);
+    expect(f.host.contextGraphMetaProjection.invalidateStoreMutation).toHaveBeenCalledTimes(2);
     expect(f.host.graphScopedStorePhysicalRuns.size).toBe(0);
     expect(vi.mocked(f.session.send).mock.calls.map(([frame]) => frame.assetIndex)).toEqual([0, 1]);
     expect(runDurableSyncDetailed).not.toHaveBeenCalled();

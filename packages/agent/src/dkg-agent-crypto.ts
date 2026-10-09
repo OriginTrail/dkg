@@ -785,7 +785,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         contextGraphId,
         { signal: options.signal },
       ),
-      readMetadataRevision: () => this.contextGraphMetaProjection.readAuthorityFactsRevision,
+      readRosterRevision: () => this.contextGraphMetaProjection.peerGateRevision.read(contextGraphId),
       getLegacyMeta: () => this.getCgMeta(contextGraphId, { signal: options.signal }),
       getSubscriptionAgents: () => (
         this.subscribedContextGraphs.get(contextGraphId)?.participantAgents ?? []
@@ -1060,10 +1060,11 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     signal?: AbortSignal,
   ): Promise<T | typeof TIMEOUT_SENTINEL> {
     try {
-      // This remains inside the ordinary foreground RATE budget, but it must
+      // This remains inside the caller's ordinary RATE budget, but it must
       // not wait behind a harness-sized queue longer than its 2.5s fail-closed
-      // deadline. Background callers retain their background class; the
-      // governor honors this priority only for foreground authority gates.
+      // deadline. Background callers retain their background class and its
+      // budget; there the governor admits the read ahead of ordinary
+      // background work and does not hold it for the start-up delay.
       return await withRpcRequestContext({ admissionPriority: 'authority' }, () => (
         runBoundedOperation(start, {
           label,

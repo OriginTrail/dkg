@@ -4,59 +4,23 @@ import {
   DKG_ONTOLOGY,
   SYSTEM_CONTEXT_GRAPHS,
   assertSafeIri,
+  isSafeIri,
   contextGraphCatalogUri,
   contextGraphDataGraphUri,
   contextGraphDataUri,
   contextGraphMetaGraphUri,
 } from '@origintrail-official/dkg-core';
+import { WORKSPACE_RECIPIENT_AUTHORITY_PREDICATES as RECIPIENT_AUTHORITY_PREDICATES } from '@origintrail-official/dkg-publisher';
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { strip, stripLiteral } from './dkg-agent-utils.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { cloneMetaRecord } from './internal/context-graph-meta-record-copy.js';
+import type { StoreMutation } from './internal/store-mutation.js';
 import { PeerGateRevision } from './internal/peer-gate-revision.js';
-import { RECIPIENT_KEY_ROUTE_PREDICATES, RecipientKeyRouteFence } from './internal/recipient-key-route-fence.js';
+import { RecipientKeyRouteFence } from './internal/recipient-key-route-fence.js';
 
-export interface ContextGraphSubGraphMeta {
-  uri: string;
-  name: string;
-  createdBy: string;
-  createdAt?: string;
-  description?: string;
-}
-
-export interface ContextGraphDelegationMeta {
-  uri: string;
-  agents: string[];
-  allowedPeers: string[];
-  allowedKeys: string[];
-  expiresAtValues: string[];
-}
-
-export interface ContextGraphMetaRecord {
-  id: string;
-  uri: string;
-  declared: boolean;
-  isSystem: boolean;
-  name?: string;
-  description?: string;
-  creator?: string;
-  creators: string[];
-  curator?: string;
-  curators: string[];
-  accessPolicy?: string;
-  createdAt?: string;
-  allowedPeers: string[];
-  allowedAgents: string[];
-  participantAgents: string[];
-  participantIdentityIds: string[];
-  revokedAgents: string[];
-  delegations: ContextGraphDelegationMeta[];
-  onChainId?: string;
-  subGraphs: ContextGraphSubGraphMeta[];
-  hasAgentGate: boolean;
-  hasPeerGate: boolean;
-  hasLegacyParticipantGate: boolean;
-}
+import type { ContextGraphMetaRecord, ContextGraphSubGraphMeta, ContextGraphDelegationMeta } from './internal/context-graph-meta-record.js';
+export type { ContextGraphMetaRecord, ContextGraphSubGraphMeta, ContextGraphDelegationMeta } from './internal/context-graph-meta-record.js';
 
 interface ProjectionEntry {
   value?: ContextGraphMetaRecord;
@@ -107,13 +71,7 @@ const DIRECT_META_PREDICATES = new Set([
 
 // Recipient resolution scans these facts across every named graph. They do not
 // populate ContextGraphMetaRecord, but they can change a recipient set.
-const WORKSPACE_RECIPIENT_AUTHORITY_PREDICATES: ReadonlySet<string> = new Set([
-  DKG_ONTOLOGY.DKG_ACCESS_POLICY,
-  DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
-  DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT,
-  DKG_ONTOLOGY.DKG_REVOKED_AGENT,
-  ...RECIPIENT_KEY_ROUTE_PREDICATES,
-]);
+const WORKSPACE_RECIPIENT_AUTHORITY_PREDICATES: ReadonlySet<string> = new Set(RECIPIENT_AUTHORITY_PREDICATES);
 
 const SUB_GRAPH_META_PREDICATES = new Set([
   DKG_ONTOLOGY.RDF_TYPE,
@@ -152,6 +110,8 @@ const CATALOG_META_PREDICATES = new Set<string>([
 ]);
 const PROJECTION_RECORD_PREDICATES: ReadonlySet<string> = new Set([
   ...DIRECT_META_PREDICATES, ...SUB_GRAPH_META_PREDICATES, ...DELEGATION_META_PREDICATES, ...CATALOG_META_PREDICATES]);
+const AGENT_ROSTER_PREDICATES: ReadonlySet<string> = new Set([
+  DKG_ONTOLOGY.DKG_ALLOWED_AGENT, DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT, DKG_ONTOLOGY.DKG_REVOKED_AGENT]);
 
 /**
  * A `ContextGraphMetaRecord` with no facts loaded yet.
@@ -191,6 +151,33 @@ export class ContextGraphMetaProjection {
   /** What a recipient resolution depends on: key and route facts, and each graph's peer allowlist (GH#3067). */
   readonly recipientKeyRouteFence: RecipientKeyRouteFence;
   readonly peerGateRevision = new PeerGateRevision(PROJECTION_RECORD_PREDICATES);
+
+  /** Historical callbacks remain bound and also notify the recipient fence. */
+  readonly markDirtyForGraph = (graph: string, subject?: string, predicate?: string): void => {
+    try { this.invalidateGraph(graph, subject, predicate); }
+    finally { this.recipientKeyRouteFence.noteRemoval({ graph, subject, predicate }); }
+  };
+  readonly markAllDirty = (): void => {
+    try { this.dirtyAll(); }
+    finally { this.recipientKeyRouteFence.noteUnscopedWrite(); }
+  };
+  readonly markDirtyFromQuads = (quads: readonly Quad[]): string[] => {
+    try { return this.invalidateQuads(quads); }
+    finally { this.recipientKeyRouteFence.noteQuads(quads); }
+  };
+
+  /** Projection-only dispatch: the observed store owns recipient-fence settlement. */
+  readonly invalidateStoreMutation = (mutation: StoreMutation): void => {
+    if (mutation.everything || mutation.quads?.some((quad) => !isSafeIri(quad.predicate))) {
+      this.dirtyAll();
+      return;
+    }
+    for (const { graph, subject, predicate } of mutation.removals ?? []) {
+      if (graph === undefined || !isSafeIri(graph)) this.dirtyAll();
+      else this.invalidateGraph(graph, subject, predicate);
+    }
+    if (mutation.quads) this.invalidateQuads(mutation.quads);
+  };
 
   constructor(private readonly store: TripleStore) {
     this.recipientKeyRouteFence = new RecipientKeyRouteFence(store);
@@ -342,15 +329,8 @@ export class ContextGraphMetaProjection {
     if (existing) existing.dirty = true;
   }
 
-  /**
-   * #1863 — dirty the projection for the context graph a single-graph destructive
-   * mutation (e.g. `replaceSubject`) targets, derived from the GRAPH itself, not
-   * from the inserted quads, so a delete is covered too. Shared AGENTS/ONTOLOGY
-   * sources invalidate every record. Other graphs dirty no cache entry but still
-   * advance the authority revision, because key lookup scans all named graphs.
-   * The recipient fences are told what the mutation names. */
-  markDirtyForGraph(graphUri: string, subject?: string, predicate?: string): void {
-    this.recipientKeyRouteFence.noteRemoval({ graph: graphUri, subject, predicate });
+  /** Destructive graph mutations invalidate their target cache and request-local revisions. */
+  private invalidateGraph(graphUri: string, subject?: string, predicate?: string): void {
     const graph = stripTerm(graphUri);
     if (
       graph === contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS)
@@ -375,11 +355,6 @@ export class ContextGraphMetaProjection {
     this.authorityFactsRevision += 1;
   }
 
-  markAllDirty(): void {
-    this.dirtyAll();
-    this.recipientKeyRouteFence.noteUnscopedWrite();
-  }
-
   private dirtyAll(): void {
     this.peerGateRevision.noteEverything();
     this.authorityFactsRevision += 1;
@@ -390,7 +365,7 @@ export class ContextGraphMetaProjection {
     }
   }
 
-  markDirtyFromQuads(quads: readonly Quad[]): string[] {
+  private invalidateQuads(quads: readonly Quad[]): string[] {
     const touched = new Set<string>();
     let recipientAuthorityTouched = false;
     for (const quad of quads) {
@@ -404,8 +379,9 @@ export class ContextGraphMetaProjection {
     }
     // Generic update and complete-graph replace paths call markAllDirty(); one
     // conservative bump here closes the recipient-key insertion race.
-    this.recipientKeyRouteFence.noteQuads(quads);
     if (recipientAuthorityTouched) this.authorityFactsRevision += 1;
+    // The loop marks only the context graph a quad names; such a fact may be any graph's.
+    if (quads.some(mayChangeUnnamedRoster)) this.dirtyAll();
     return [...touched];
   }
 
@@ -864,6 +840,22 @@ function applyAccessPolicy(record: ContextGraphMetaRecord, value: string): void 
     return;
   }
   record.accessPolicy ??= value;
+}
+
+/**
+ * A roster fact, written or removed by value, whose context graph its terms do
+ * not prove. Only a plain IRI is stored as written: an adapter matches a blank
+ * node in a delete against any subject, and drops unsafe characters from a
+ * graph name. A plainly named graph that is not a metadata source is harmless,
+ * because no record reads a roster from it.
+ */
+function mayChangeUnnamedRoster(quad: Quad): boolean {
+  if (!AGENT_ROSTER_PREDICATES.has(strip(quad.predicate))) return false;
+  if (!isSafeIri(quad.graph)) return true;
+  if (isSafeIri(quad.subject)) return false;
+  return contextGraphIdFromMetaGraphUri(quad.graph) !== null
+    || quad.graph === contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS)
+    || quad.graph === contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
 }
 
 function contextGraphIdFromContextGraphUri(uri: string): string | null {

@@ -118,7 +118,7 @@ import {
   type NormalizedContextGraphDiscoveryScan,
 } from './context-graph-discovery-options.js';
 export type { DiscoverContextGraphsFromChainOptions } from './context-graph-discovery-options.js';
-import { prepareRfc64LateLegacySwmBoundaryV1 } from
+import { awaitRfc64LateLegacySwmBoundaryAdmissionV1, prepareRfc64LateLegacySwmBoundaryV1 } from
   './rfc64/legacy-swm-boundary-v1.js';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, withRpcRequestContext, type EVMAdapterConfig, type ChainAdapter, type ChainEventLogBinding, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
@@ -153,7 +153,7 @@ import {
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolverInput,
-  type WorkspaceSenderKeyEncryptInput,
+  type WorkspaceSenderKeyEncryptInput, type DurableRootPromotionIdentity,
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
   DEFAULT_REQUIRED_ACKS,
 } from '@origintrail-official/dkg-publisher';
@@ -286,7 +286,9 @@ import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
-import { resolveDiscoveredContextGraphBinding } from './context-graph-chain-discovery-binding.js';
+import {
+  conflictsWithOwnedContextGraphBinding, resolveDiscoveredContextGraphBinding,
+} from './context-graph-chain-discovery-binding.js';
 import {
   relocatePrivateContextGraphMetadata,
   type ContextGraphMetadataRelocationResult,
@@ -927,15 +929,11 @@ export class DKGAgent extends DKGAgentBase {
       },
       recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
       invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
-      markMetaProjectionDirty: (quads) => this.contextGraphMetaProjection
-        .markDirtyFromQuads(quads),
       recoveryMutation: createSwmRecoveryMutationRuntimeV1({
         store: this.store,
         recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
         invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
-        markMetaProjectionDirty: (quads) => this.contextGraphMetaProjection
-          .markDirtyFromQuads(quads),
-      }),
+        }),
       setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
       deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
       deletePublicCheckpoint: (key) => deleteSyncPageCheckpoint(this.syncCheckpoints, key),
@@ -1097,7 +1095,10 @@ export class DKGAgent extends DKGAgentBase {
           });
           const headDigest = this.rfc64PersistenceV1?.swmAuthorInventory
             .readSwmAuthorInventoryHeadDigestV1(scopeDigest, authorAddress) ?? null;
-          return JSON.stringify([lane.kind, lane.projectionTargetPolicy, scopeDigest, headDigest]);
+          return {
+            scopeIdentity: JSON.stringify([lane.kind, lane.projectionTargetPolicy, scopeDigest]),
+            headRevision: headDigest,
+          };
         },
         listFinalizedPrivateRepairs: () => (
           this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.list() ?? []
@@ -1600,7 +1601,9 @@ export class DKGAgent extends DKGAgentBase {
       kaAllocator: config.kaNumberAllocator,
       // RFC ka-metadata-trim P3.3 — `metadata.provenanceEvents` (default true).
       provenanceEvents: config.metadataProvenanceEvents,
-      resolveDurableRootPromotionAtomicCompanion: (input) => {
+      resolveDurableRootPromotionAtomicCompanion: Object.assign((
+        input: Readonly<DurableRootPromotionIdentity>,
+      ) => {
         // Every root graph may exist before its exact catalog head is durable,
         // including the normal catalog lane. Persist its negative-completeness
         // witness in the same transaction; exact catalog reconciliation alone
@@ -1619,7 +1622,13 @@ export class DKGAgent extends DKGAgentBase {
           input.shareOperationId,
           input.assertionVersion,
         ));
-      },
+      }, {
+        // The promote gives a fence a short time to drop before it prepares.
+        awaitAdmission: async (input: Readonly<{ contextGraphId: string; kaUal: string }>) => {
+          if (resolvedConfig.dataDir === undefined || agentRef === undefined) return;
+          await awaitRfc64LateLegacySwmBoundaryAdmissionV1(agentRef, input.contextGraphId, input.kaUal);
+        },
+      }),
       resolveDurableRootMaterializationAtomicCompanion: (input) => {
         if (resolvedConfig.dataDir === undefined) return;
         if (agentRef === undefined) {
@@ -1935,17 +1944,11 @@ export class DKGAgent extends DKGAgentBase {
   }
 
   /**
-   * Record metadata learned through a discovery channel, then apply the
-   * temporary role policy required until core host-mode custody is independent
-   * from member subscriptions (#1611):
+   * Enrich catalogue metadata while preserving an owned numeric slot.
+   * Until core custody is independent (#1611), new core discoveries activate
+   * ACK/finalization hosting; edge discoveries stay passive.
    *
-   * - edge: catalogue only; explicit subscribe/create/join owns activation
-   * - core: newly discovered graphs auto-subscribe so ACK-capable nodes keep
-   *   the publish/finalization handlers needed to host network data
-   *
-   * Existing unsubscribed rows are never reactivated here. That preserves an
-   * operator's explicit unsubscribe while still allowing authoritative
-   * metadata (including an on-chain binding) to enrich the catalogue.
+   * Existing unsubscribed rows retain their explicit inactive intent.
    */
   recordDiscoveredContextGraph(
     contextGraphId: string,
@@ -1961,6 +1964,22 @@ export class DKGAgent extends DKGAgentBase {
     } = {},
   ): ContextGraphSub {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
+    const authoritativeOnChainId = isCanonicalAuthoritativeContextGraphId(metadata.onChainId)
+      ? metadata.onChainId
+      : undefined;
+    if (
+      existing
+      && conflictsWithOwnedContextGraphBinding(existing.onChainId, authoritativeOnChainId)
+    ) {
+      // Discovery enriches an identity; it cannot replace an owned slot.
+      // Explicit verified rebinds use their own authority boundary.
+      this.log.warn(
+        createOperationContext('system'),
+        `Ignoring discovered Context Graph "${contextGraphId}" slot ${authoritativeOnChainId}: `
+        + `the local identity already owns slot ${existing.onChainId}`,
+      );
+      return existing;
+    }
     const next: ContextGraphSub = {
       ...existing,
       syncMode: existing?.syncMode ?? 'always-on',
@@ -1972,9 +1991,6 @@ export class DKGAgent extends DKGAgentBase {
       participantAgents: metadata.participantAgents ?? existing?.participantAgents,
     };
 
-    const authoritativeOnChainId = isCanonicalAuthoritativeContextGraphId(metadata.onChainId)
-      ? metadata.onChainId
-      : undefined;
     const invalidExplicitOnChainId = metadata.onChainId !== undefined
       && authoritativeOnChainId === undefined;
     if (authoritativeOnChainId !== undefined) {
@@ -1989,9 +2005,7 @@ export class DKGAgent extends DKGAgentBase {
       next.onChainHash = metadata.onChainHash;
     }
 
-    // Discovery-only rows stay in-memory. Metadata learned for an already
-    // active member/host row is part of that durable state and must survive a
-    // restart (notably a later-discovered onChainId).
+    // Only an admitted member/host's enrichment belongs in durable state.
     const persistEnrichment = options.persist !== false
       && (existing?.subscribed === true || existing?.coreHosted === true);
     this.setContextGraphSubscription(contextGraphId, next, { persist: persistEnrichment });
@@ -2555,10 +2569,7 @@ export class DKGAgent extends DKGAgentBase {
       return err.partialResults;
     };
 
-    // NameRegistry enumeration is keyed by bytes32 name hashes, while all
-    // authoritative agent bindings are positive decimal ContextGraphStorage
-    // ids. Keep those namespaces separate: the legacy
-    // ContextGraphOnChain.contextGraphId field is the former, not the latter.
+    // Enumeration name hashes and authoritative numeric slots are distinct.
     const knownNameHashes = new Set<string>();
     for (const [localId, sub] of this.subscribedContextGraphs) {
       if (sub.onChainHash && ethers.isHexString(sub.onChainHash, 32)) {
@@ -2614,6 +2625,13 @@ export class DKGAgent extends DKGAgentBase {
         }
 
         const durableOnChainId = await readDurableContextGraphOnChainId(binding.name);
+        const currentOnChainId = this.subscribedContextGraphs.get(binding.name)?.onChainId;
+        if (conflictsWithOwnedContextGraphBinding(currentOnChainId, binding.onChainId)) {
+          this.log.warn(ctx, `Ignoring chain discovery for "${binding.name}" slot ${binding.onChainId}: `
+            + `the local identity already owns slot ${currentOnChainId}`);
+          continue;
+        }
+
         if (durableOnChainId === binding.onChainId) {
           // A previous attempt may have committed the reconstructible RDF
           // binding but failed the active/core subscription write before page
@@ -2628,18 +2646,9 @@ export class DKGAgent extends DKGAgentBase {
           continue;
         }
 
-        // Persist the on-chain ID durably so the publisher's VM registration
-        // guard can find it via RDF (it has no access to the in-memory
-        // subscribedContextGraphs map). Only the metadata home gets it:
-        // ontology for a public graph, its own `_meta` for a curated one (only
-        // its curator gets here). A graph found on chain isn't held here, and
-        // any `_meta` row would make the relocation treat it as held.
-        // Single-valued binding guard (RS heal): on-chain id is immutable; clear
-        // any prior value so the cgId resolver / heal never read a multi-valued
-        // (LIMIT-1-nondeterministic) binding.
-        // Keep this durable write before in-memory catalogue mutation: cursor
-        // pages are acked after this function returns, and an in-memory onChainId
-        // alone must not make a retry skip the RDF binding.
+        // The publisher resolves this reconstructible binding from RDF.
+        // Write its public/private metadata home before catalogue persistence
+        // and page acknowledgement, so a failed durable row can be replayed.
         await replaceContextGraphMetadataFact(this.store, binding.name, {
           predicate: CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
           object: `"${binding.onChainId}"`,

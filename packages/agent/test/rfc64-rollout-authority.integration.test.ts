@@ -5451,6 +5451,7 @@ describe('RFC-64 rollout authority integration', () => {
     const accepted = (author as any).rfc64PublicCatalogServiceV1
       .acceptedPolicySnapshot(NETWORK_ID, contextGraphId);
     expect(accepted).not.toBeNull();
+    expect(author.rfc64CatalogAuthorityRefreshFailureReasonV1(contextGraphId)).toBeNull();
 
     // The finalized index no longer carries the bound id (finality lag).
     readSnapshots.mockResolvedValue(new Map());
@@ -5466,6 +5467,9 @@ describe('RFC-64 rollout authority integration', () => {
       code: 'registered-authority-unfinalized',
       message: expect.stringContaining('no finalized indexed authority'),
     });
+    // The recorded reason is what ends a share observer's settlement retries early.
+    expect(author.rfc64CatalogAuthorityRefreshFailureReasonV1(contextGraphId))
+      .toBe('registered-authority-unfinalized');
 
     // Retryable, not a denial: authority retained, fence open, not parked.
     expect((author as any).rfc64PublicCatalogServiceV1

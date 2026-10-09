@@ -8,6 +8,9 @@ import {
 } from '@origintrail-official/dkg-core';
 import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore, quadToNQuad, type Quad } from '@origintrail-official/dkg-storage';
+import { ContextGraphMetaProjection } from '../../src/context-graph-meta-projection.js';
+import { createProjectionMutationObserver } from '../../src/internal/projection-mutation-observer.js';
+import { createListContextGraphsCacheInvalidatingStore } from '../../src/internal/context-graph-cache-invalidating-store.js';
 import { ContextGraphBindingState } from '../../src/context-graph-binding-state.js';
 import { ContextGraphResolveMethods } from '../../src/dkg-agent-cg-resolve.js';
 import { LifecycleSyncMethods } from '../../src/dkg-agent-lifecycle.js';
@@ -31,7 +34,10 @@ export const emptyResult = () => finalizeDurableSyncCompletion(createDurableSync
  * run here. This is not encrypted-network or live-chain certification.
  */
 export function createExactBatchHostFixture(cleanups: Array<() => Promise<void>>, assetCount = 2) {
-  const store = new OxigraphStore();
+  const rawStore = new OxigraphStore();
+  const projection = new ContextGraphMetaProjection(rawStore);
+  vi.spyOn(projection, 'invalidateStoreMutation');
+  const store = createListContextGraphsCacheInvalidatingStore(rawStore, () => {}, createProjectionMutationObserver(() => projection));
   const worker = new SyncVerifyWorker();
   cleanups.push(async () => { await worker.close(); await store.close(); });
   const items = Array.from({ length: assetCount }, (_, index) => index + 1).map(number => {
@@ -80,7 +86,7 @@ export function createExactBatchHostFixture(cleanups: Array<() => Promise<void>>
     requireLocalCgMatchesOnChainSlot: vi.fn(async (cg: string, id: string) => cg === CG && id === '14'),
     syncCheckpoints: { delete: vi.fn(), set: vi.fn(), setManifestBoundOffset: vi.fn() },
     oversizeTombstoneLog: { record: vi.fn() }, invalidateListContextGraphsCache: vi.fn(),
-    contextGraphMetaProjection: { markDirtyFromQuads: vi.fn() }, writeLocks: new Map(),
+    contextGraphMetaProjection: projection, writeLocks: new Map(),
     retireFinalizedSwmTwinCandidate: vi.fn(), log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
   };
   const selection = createUalOnlyExactAssetSelection(items.map(item => item.ual));

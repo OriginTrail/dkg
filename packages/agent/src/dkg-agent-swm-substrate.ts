@@ -407,6 +407,8 @@ export interface ContextGraphSubscribeOptions {
   trackSyncScope?: boolean;
   persist?: boolean;
   deferSharedMemoryGossipSubscribe?: boolean;
+  /** Internal activation transaction: wire retirement belongs to its commit. */
+  deferWireAdoption?: boolean;
   syncMode?: 'on-demand' | 'always-on';
   /** Authoritative numeric slot established by the admission owner. */
   onChainId?: string;
@@ -424,7 +426,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     if (adoptedCleartextId !== null) return this.subscribeToContextGraph(adoptedCleartextId, options);
     // Subscribing the cleartext of a graph held only by its name hash moves
     // the subscription: nothing may keep running under the hash id.
-    this.retireLiveContextGraphNamePlaceholderFor(contextGraphId);
+    if (options?.deferWireAdoption !== true) this.retireLiveContextGraphNamePlaceholderFor(contextGraphId);
     const subscription = this.installContextGraphSubscription(contextGraphId, options);
     // The row is installed, so the phonebook check sees the subscription it
     // qualifies against. An Edge keeps no durable `agents` phonebook, so the
@@ -504,7 +506,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       const subscription = this.setContextGraphSubscription(
         contextGraphId,
         nextSubscription(),
-        { persist },
+        { persist, deferWireAdoption: options?.deferWireAdoption },
       );
       if (options?.deferSharedMemoryGossipSubscribe !== true) {
         this.queueSharedMemoryGossipSubscription(contextGraphId);
@@ -541,7 +543,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         return this.setContextGraphSubscription(
           contextGraphId,
           nextSubscription(),
-          { persist },
+          { persist, deferWireAdoption: options?.deferWireAdoption },
         );
       }
       return existing;
@@ -557,7 +559,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     const subscription = this.setContextGraphSubscription(
       contextGraphId,
       nextSubscription(),
-      { persist },
+      { persist, deferWireAdoption: options?.deferWireAdoption },
     );
 
     this.gossip.onMessage(publishTopic, async (_topic, data, from) => {
@@ -1258,7 +1260,6 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           getCgMeta: (id) => this.getCgMeta(id),
           getContextGraphOnChainId: (id) => this.getContextGraphOnChainId(id),
           classifyOnChainSlot: (onChainId) => this.classifyOntologyBindingSlot(onChainId),
-          markCgMetaDirtyFromQuads: (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
           persistContextGraphSubscription: (id) => this.persistContextGraphSubscriptionState(id),
         },
         { requireContextGraphSubscriptionSetter: true },
@@ -1327,7 +1328,6 @@ export class SwmSubstrateMethods extends DKGAgentBase {
             input.assertionVersion,
           );
         },
-        markContextGraphMetaDirtyFromQuads: (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
         // OT-RFC-38 / LU-6 Phase B: chain-backed agent-allowlist
         // fallback. Cores hosting curated CGs they are NOT members
         // of have no local meta for the allowlist — without this,
@@ -2082,9 +2082,6 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           // Defensive: resolve a missing pre-cd68fa689 wire CG id locally.
           resolveContextGraphOnChainId: (cgName: string) =>
             this.getContextGraphOnChainId(cgName),
-          markContextGraphMetaDirtyFromQuads: (quads) => {
-            this.contextGraphMetaProjection.markDirtyFromQuads(quads);
-          },
           workspaceWriteLocks: this.writeLocks,
           retireConfirmedGraphScopedSwmTwinIfOrphaned: (() => {
             const retireOrphaned = createRetireConfirmedGraphScopedSwmTwinIfOrphaned({

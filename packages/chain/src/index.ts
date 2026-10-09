@@ -316,6 +316,7 @@ export {
   type HubResolutionCacheOptions,
 } from './hub-resolution-cache.js';
 export { PcaUnavailableError, isPcaUnavailableError } from './pca-errors.js';
+export { numericChainIdOf } from './evm-adapter-storage-reads.js';
 export {
   DEFAULT_FINALITY_CONFIRMATIONS,
   MIN_RPC_RECEIPT_TIMEOUT_MS,

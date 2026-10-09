@@ -10,6 +10,7 @@
  */
 
 
+import { isAdmittedContextGraphSubscription } from './context-graph-subscription-policy.js';
 import { planKnowledgeAssetVmPublication, isGraphScopedKnowledgeAssetVmPublishRequest, assertionSealFromQueuedKnowledgeAssetVmPublishRequest, type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
 export { type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
 import { randomUUID } from 'node:crypto';
@@ -1734,7 +1735,7 @@ export class PublishMethods extends DKGAgentBase {
     rejectOversizedRdfLiterals(privateQuads, 'agent.publish.privateQuads');
 
     const isSystem = contextGraphId === SYSTEM_CONTEXT_GRAPHS.AGENTS || contextGraphId === SYSTEM_CONTEXT_GRAPHS.ONTOLOGY;
-    if (!isSystem && !this.subscribedContextGraphs.has(contextGraphId)) {
+    if (!isSystem && !isAdmittedContextGraphSubscription(this.subscribedContextGraphs.get(contextGraphId))) {
       const exists = await this.contextGraphExists(contextGraphId);
       if (!exists) {
         throw new Error(
@@ -2022,7 +2023,6 @@ export class PublishMethods extends DKGAgentBase {
               await deleteByPatternWithoutCount(this.store, { graph, subject });
             }
             await this.store.insert(quads);
-            this.contextGraphMetaProjection.markDirtyFromQuads(quads);
           },
           log: (level, message) =>
             level === 'warn' ? this.log.warn(ctx, message) : this.log.info(ctx, message),
@@ -2659,7 +2659,6 @@ export class PublishMethods extends DKGAgentBase {
     ];
 
     await this.store.insert(quads);
-    this.contextGraphMetaProjection.markDirtyFromQuads(quads);
     await gm.ensureContextGraph(contextGraphId);
     await this.store.flush?.();
     await this.persistLocalContextGraphOrigin(contextGraphId, 'implicit-swm-write');
