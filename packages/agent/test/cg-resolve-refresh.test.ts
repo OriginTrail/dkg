@@ -1310,9 +1310,7 @@ describe('refreshMetaFromCurator', () => {
       let invalidations = 0;
       let projectionInvalidations = 0;
       let persistedBindings = 0;
-      const subscription: { onChainId?: string; onChainHash?: string } = {
-        onChainId: '104',
-      };
+      const subscription: { onChainId?: string; onChainHash?: string } = {};
       const agent = {
         metaRefreshTimestamps: new Map<string, number>(),
         runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,

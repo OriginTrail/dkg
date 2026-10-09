@@ -1523,7 +1523,11 @@ describe('private read authorization uses the on-chain participant roster', () =
       if (watchdog) clearTimeout(watchdog);
     });
 
-    expect(agent.getSubscribedContextGraphs().has(contextGraphId)).toBe(false);
+    expect(agent.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
+      onChainId: '7', subscribed: false, coreHosted: false,
+      synced: false, sharedMemorySynced: false, metaSynced: false,
+    });
+    expect(agent.getSubscribedContextGraphs().get(contextGraphId)?.pendingMeta).not.toBe(true);
     expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
       activated: 0,
       dormant: 1,
@@ -1682,7 +1686,11 @@ describe('private read authorization uses the on-chain participant roster', () =
       },
     });
     expect(subscribe).not.toHaveBeenCalled();
-    expect(agent.getSubscribedContextGraphs().has(contextGraphId)).toBe(false);
+    expect(agent.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
+      onChainId: '7', subscribed: false, coreHosted: false,
+      synced: false, sharedMemorySynced: false, metaSynced: false,
+    });
+    expect(agent.getSubscribedContextGraphs().get(contextGraphId)?.pendingMeta).not.toBe(true);
     expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
       persistedTotal: 1,
       activated: 0,
