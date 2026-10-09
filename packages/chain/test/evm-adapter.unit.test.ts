@@ -2155,15 +2155,39 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       );
     });
 
-    it('applies from 99% of the limit and not below', async () => {
-      const { signedTx, txHash } = await signWithGasLimit(1_000_000n);
+    it('applies when at most 1/32 of the limit is left, and not below', async () => {
+      // A call hands its callee at most 63/64 of its gas. When a callee two
+      // calls deep runs out, both callers above it keep 1/64: at most 1/32 of
+      // the limit is left when the transaction reverts.
+      const { signedTx, txHash } = await signWithGasLimit(1_280_000n);
       const plain = `unit write tx ${txHash} was mined but reverted (status=0)`;
 
-      expect((await sendAndRevert(signedTx, txHash, 990_000n)).message).toBe(
-        `${plain}; it used 990000 of its 1000000 gas limit, so it probably ran out of gas`,
+      expect((await sendAndRevert(signedTx, txHash, 1_240_000n)).message).toBe(
+        `${plain}; it used 1240000 of its 1280000 gas limit, so it probably ran out of gas`,
       );
-      // An ordinary revert leaves gas unused: the message stays as it was.
-      expect((await sendAndRevert(signedTx, txHash, 989_999n)).message).toBe(plain);
+      // An ordinary revert leaves more gas unused: the message stays as it was.
+      expect((await sendAndRevert(signedTx, txHash, 1_239_999n)).message).toBe(plain);
+    });
+
+    it.each([
+      // Challenge creations that ran out of gas on a test network: status 0, no logs.
+      [476_714, 482_200], // 98.86%
+      [460_505, 466_182], // 98.78%
+      [484_904, 492_139], // 98.53%
+      [497_260, 503_787], // 98.70%
+      // The lowest share among 557 such failures in 24 days: below 63/64 (98.44%).
+      [765_413, 781_749], // 97.91%
+      // Reproduced on a local fork: the loop two calls below the transaction ran out.
+      [494_198, 501_151], // 98.61%
+    ])('recognises a callee that ran out of gas: %i used of %i', async (gasUsed, gasLimit) => {
+      const { signedTx, txHash } = await signWithGasLimit(BigInt(gasLimit));
+
+      const error = await sendAndRevert(signedTx, txHash, BigInt(gasUsed));
+
+      expect(error.message).toBe(
+        `unit write tx ${txHash} was mined but reverted (status=0); ` +
+        `it used ${gasUsed} of its ${gasLimit} gas limit, so it probably ran out of gas`,
+      );
     });
 
     it('leaves the message alone when the signed bytes cannot be decoded', async () => {

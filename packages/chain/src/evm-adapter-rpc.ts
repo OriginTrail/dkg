@@ -212,10 +212,25 @@ export function assertSuccessfulReceipt(receipt: ethers.TransactionReceipt, labe
  * Rejection handler for the receipt wait of a transaction this process signed.
  * A receipt carries neither the gas limit nor revert data, so a transaction
  * that ran out of gas reads like any other mined revert. When the failed
- * transaction used at least 99% of the limit it was signed with, append both
- * numbers to the message. An out-of-gas failure inside a nested call hands a
- * sliver of gas back to its caller, so the test is not exact equality. Every
- * error, changed or not, is rethrown as the same object.
+ * transaction left at most 1/32 of the limit it was signed with unused, append
+ * both numbers to the message.
+ *
+ * A call hands the contract it calls at most 63/64 of its remaining gas. A
+ * callee that runs out therefore leaves its caller 1/64 of what the caller
+ * had, and the caller reverts with that much unused. The writes seen running
+ * out did so two calls below the transaction's own frame, so two callers each
+ * kept 1/64: at most 1/32 of the limit together. A transaction that runs out
+ * in its own frame uses the whole limit.
+ *
+ * All 557 challenge creations that failed in 24 days of one test network's
+ * history used 97.91% to 100% of their limit. A 99% test saw 158 of them and
+ * 63/64 would see 547. An ordinary revert stops where its check fails and
+ * hands back the rest, which is most of a limit that carries headroom. Only a
+ * write sent on its bare estimate that reverts in its last steps comes this
+ * close. Not recognised: a callee three or more calls deep that runs out
+ * early in the transaction, which leaves up to 1/64 per level.
+ *
+ * Every error, changed or not, is rethrown as the same object.
  */
 export function explainOutOfGasRevert(signedTx: string): (err: unknown) => never {
   return (err) => {
@@ -227,7 +242,7 @@ export function explainOutOfGasRevert(signedTx: string): (err: unknown) => never
       } catch {
         // Not a decodable signed transaction: leave the error as it is.
       }
-      if (gasLimit > 0n && receipt.gasUsed * 100n >= gasLimit * 99n) {
+      if (gasLimit > 0n && receipt.gasUsed * 32n >= gasLimit * 31n) {
         err.message += `; it used ${receipt.gasUsed} of its ${gasLimit} gas limit, so it probably ran out of gas`;
       }
     }
