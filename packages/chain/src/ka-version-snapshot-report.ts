@@ -47,7 +47,6 @@ export type KnowledgeAssetVersionSnapshotEndpointFailureClass =
   | 'call-exception'
   | 'wrong-chain'
   | 'incomplete-view'
-  | 'binding-changed'
   | 'no-answer'
   | 'other';
 
@@ -152,6 +151,7 @@ export class KnowledgeAssetVersionSnapshotTrace<TProvider> {
   readonly #options: KnowledgeAssetVersionSnapshotTraceOptions;
   readonly #slots = new Map<TProvider, EndpointSlot>();
   #localPressure = false;
+  #bindingChanged = false;
 
   constructor(
     providers: readonly TProvider[],
@@ -165,9 +165,9 @@ export class KnowledgeAssetVersionSnapshotTrace<TProvider> {
 
   /**
    * The per-endpoint read, observed. `readOne` starts at its storage binding
-   * check and names each later step it enters through `step`. A transient
-   * failure is retried in place, so each attempt starts a new record and the
-   * last one stands.
+   * check and names each later step it enters through `step`, the binding check
+   * after its reads among them. A transient failure is retried in place, so each
+   * attempt starts a new record and the last one stands.
    */
   observe<TView, TSignal>(
     readOne: (
@@ -181,7 +181,14 @@ export class KnowledgeAssetVersionSnapshotTrace<TProvider> {
       this.#slots.set(provider, slot);
       try {
         const view = await readOne(provider, signal, (stage) => { slot.stage = stage; });
-        slot.outcome = view === null ? this.#withoutView(slot.stage) : 'view';
+        if (view === null && slot.stage === 'storage-binding') {
+          // The node's own binding fence: the binding moved on before this endpoint was asked,
+          // or while its answer was in flight. Not something the endpoint did.
+          this.#bindingChanged = true;
+          this.#slots.delete(provider);
+        } else {
+          slot.outcome = view === null ? this.#withoutView(slot.stage) : 'view';
+        }
         return view;
       } catch (error) {
         if (this.#cancelled()) {
@@ -211,6 +218,7 @@ export class KnowledgeAssetVersionSnapshotTrace<TProvider> {
   /** No endpoint supplied a view. Returns the read's `null`. */
   noView(): null {
     if (this.#cancelled()) return this.unavailable('aborted');
+    if (this.#bindingChanged) return this.unavailable('storage-binding-changed');
     return this.unavailable(this.#localPressure ? 'local-pressure' : 'endpoints-failed');
   }
 
@@ -242,7 +250,6 @@ export class KnowledgeAssetVersionSnapshotTrace<TProvider> {
   /** Why an endpoint that returned no view did so, from the step it was in. */
   #withoutView(stage: KnowledgeAssetVersionSnapshotReadStage): EndpointCause {
     if (stage === 'chain-id') return { failure: 'wrong-chain' };
-    if (stage === 'storage-binding') return { failure: 'binding-changed' };
     return { failure: 'incomplete-view' };
   }
 
@@ -302,7 +309,6 @@ export function describeKnowledgeAssetVersionSnapshotEndpointFailure(
     case 'call-exception': return `${who} rejected ${read} (call exception)`;
     case 'wrong-chain': return `${who} answered for a different chain`;
     case 'incomplete-view': return `${who} returned an incomplete answer to ${read}`;
-    case 'binding-changed': return `${who} was read while the storage contract binding changed`;
     case 'no-answer': return `${who} had not answered ${read} when the read was cancelled`;
     default: return `${who} failed ${read} (${http ?? 'unclassified error'})`;
   }
@@ -317,10 +323,12 @@ export function describeKnowledgeAssetVersionSnapshotUnavailable(
   if (report.reason === 'local-pressure') {
     parts.push("the node's own RPC request budget was full before another endpoint could be asked");
   }
+  if (report.reason === 'storage-binding-changed') {
+    parts.push('the storage contract binding changed during the read');
+  }
   if (parts.length > 0) return parts.join('; ');
   switch (report.reason) {
     case 'aborted': return 'the read was cancelled before it completed';
-    case 'storage-binding-changed': return 'the storage contract binding changed during the read';
     case 'no-storage-contract': return 'the knowledge asset storage contract is not resolved';
     default: return 'no endpoint returned a complete view';
   }

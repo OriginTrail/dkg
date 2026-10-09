@@ -562,31 +562,71 @@ describe('a null that no endpoint explains', () => {
     }
   });
 
-  it('a storage binding that changes while an endpoint is read', async () => {
-    const { adapter } = adapterOverScripts([{ host: 'a.example' }]);
+  /** Reads with `host`'s pinned read held until the storage binding has moved on, as a Hub rotation does. */
+  async function readAcrossBindingChange(adapter: any, host: string) {
+    let started!: () => void;
     let release!: () => void;
+    const inFlight = new Promise<void>((resolve) => { started = resolve; });
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const rebind = adapter.rebindContract;
-    adapter.rebindContract = (...args: unknown[]) => {
-      const bound = rebind(...args);
+    adapter.rebindContract = (contract: unknown, provider: { script: Script }) => {
+      const bound = rebind(contract, provider);
+      if (provider.script.host !== host) return bound;
       const read = bound.getLatestMerkleRoot;
-      bound.getLatestMerkleRoot = async () => { await gate; return read(); };
+      bound.getLatestMerkleRoot = async () => { started(); await gate; return read(); };
       return bound;
     };
 
     const pending = readWithReport(adapter);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await inFlight;
     adapter.knowledgeAssetStorageBindingGeneration += 1;
     release();
-    const { view, reports } = await pending;
+    return pending;
+  }
+
+  it('a storage binding that changes while the primary is read: no endpoint is blamed for it', async () => {
+    // The primary's answer is for the binding the read began with, and the backup is never
+    // asked: the node's own fence ends the read, and neither endpoint failed.
+    const { adapter, order } = adapterOverScripts([{ host: 'a.example' }, { host: 'b.example' }]);
+
+    const { view, reports } = await readAcrossBindingChange(adapter, 'a.example');
 
     expect(view).toBeNull();
-    expect(reports[0]!.endpoints).toEqual([
-      { position: 1, host: 'a.example', stage: 'storage-binding', failure: 'binding-changed' },
-    ]);
+    expect(order()).toEqual(['a.example']);
+    expect(reports).toEqual([{ reason: 'storage-binding-changed', endpointCount: 2, endpoints: [] }]);
     expect(describeKnowledgeAssetVersionSnapshotUnavailable(reports[0]!)).toBe(
-      'endpoint 1 of 1 (a.example) was read while the storage contract binding changed',
+      'the storage contract binding changed during the read',
     );
+    expect(getKnowledgeAssetVersionSnapshotHealth()).toMatchObject({
+      unavailable: 1,
+      lastUnavailableReason: 'storage-binding-changed',
+      failingEndpoints: [],
+    });
+  });
+
+  it('an endpoint that failed before the binding changed is still named beside it', async () => {
+    const { adapter, order } = adapterOverScripts([
+      { host: 'odd.example', chainId: 999n },
+      { host: 'a.example' },
+      { host: 'b.example' },
+    ]);
+
+    const { view, reports } = await readAcrossBindingChange(adapter, 'a.example');
+
+    expect(view).toBeNull();
+    expect(order()).toEqual(['odd.example', 'a.example']);
+    expect(reports).toEqual([{
+      reason: 'storage-binding-changed',
+      endpointCount: 3,
+      endpoints: [{ position: 1, host: 'odd.example', stage: 'chain-id', failure: 'wrong-chain' }],
+    }]);
+    expect(describeKnowledgeAssetVersionSnapshotUnavailable(reports[0]!)).toBe(
+      'endpoint 1 of 3 (odd.example) answered for a different chain; '
+      + 'the storage contract binding changed during the read',
+    );
+    expect(getKnowledgeAssetVersionSnapshotHealth().failingEndpoints).toMatchObject([
+      { position: 1, host: 'odd.example', failure: 'wrong-chain' },
+    ]);
   });
 
   it('a storage binding that changes after the endpoint answered', async () => {
