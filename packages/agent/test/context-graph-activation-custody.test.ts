@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { contextGraphWorkspaceTopic } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
 import type { CursorState } from '../src/reconcile-cursor.js';
 import type { ContextGraphMembershipRecord, ContextGraphSub, ContextGraphSubInput, ContextGraphSubscriptionRecord } from '../src/dkg-agent-types.js';
@@ -13,23 +17,35 @@ interface Internals {
   wireIdToLocalCgId: Map<string, string>;
   reconcileCursors: Map<string, CursorState>;
   config: { syncContextGraphs?: string[] };
+  swmHostModeHandlers: Map<string, GossipHandler>;
+  swmHostModeSubscribed: Map<string, unknown>;
   setContextGraphSubscription(id: string, next: ContextGraphSubInput, options: { persist: false }): ContextGraphSub;
   enqueueContextGraphSubscriptionPersistWrite(id: string, write: () => Promise<void>): Promise<void>;
   enqueueContextGraphMembershipPersistWrite(key: string, write: () => Promise<void>): Promise<void>;
 }
+type GossipHandler = (topic: string, data: Uint8Array, from: string) => void | Promise<void>;
 class Gossip {
   readonly subscribed = new Set<string>();
-  readonly handlers = new Map<string, unknown[]>();
+  readonly handlers = new Map<string, GossipHandler[]>();
   subscribe(topic: string) { this.subscribed.add(topic); }
   unsubscribe(topic: string) { this.subscribed.delete(topic); this.handlers.delete(topic); }
-  onMessage(topic: string, handler: unknown) { this.handlers.set(topic, [...(this.handlers.get(topic) ?? []), handler]); }
-  offMessage(topic: string, handler: unknown) { this.handlers.set(topic, (this.handlers.get(topic) ?? []).filter(value => value !== handler)); }
+  onMessage(topic: string, handler: GossipHandler) { this.handlers.set(topic, [...(this.handlers.get(topic) ?? []), handler]); }
+  offMessage(topic: string, handler: GossipHandler) { this.handlers.set(topic, (this.handlers.get(topic) ?? []).filter(value => value !== handler)); }
+  async deliver(topic: string, data: Uint8Array, from: string) {
+    if (!this.subscribed.has(topic)) return;
+    for (const handler of this.handlers.get(topic) ?? []) await handler(topic, data, from);
+  }
   async publish() {}
   getSubscribers() { return []; }
 }
 const agents: DKGAgent[] = [];
+const tempDirs: string[] = [];
 afterEach(async () => {
-  for (const agent of agents.splice(0)) await agent.stop();
+  for (const agent of agents.splice(0)) {
+    await agent.stop();
+    await agent.store.close();
+  }
+  for (const directory of tempDirs.splice(0)) await rm(directory, { recursive: true, force: true });
   vi.restoreAllMocks();
 });
 
@@ -53,8 +69,12 @@ async function fixture(role: 'member' | 'host', options: { target?: 'member' | '
     await chain.createOnChainContextGraph({ accessPolicy: 0, publishPolicy: 1, nameHash: id === 323n || id === 582n ? HASH : ethers.ZeroHash });
   }
   if (options.foreign) await chain.__transferContextGraphOwnership(582n, '0x2222222222222222222222222222222222222222');
+  const core = role === 'host' || options.target === 'host';
+  const dataDir = core ? await mkdtemp(join(tmpdir(), 'dkg-activation-custody-')) : undefined;
+  if (dataDir) tempDirs.push(dataDir);
   const agent = await DKGAgent.create({
-    name: 'ActivationCustody', chainAdapter: chain, nodeRole: 'edge',
+    name: 'ActivationCustody', chainAdapter: chain, nodeRole: core ? 'core' : 'edge', dataDir,
+    swmHostMode: { enabled: true, stripCiphertext: false },
     rfc64CatalogActivation: { enabled: false }, contextGraphSubscriptionRehydrationEnabled: false,
     contextGraphSubscriptionStore: { loadAll: async () => retained.map(row => ({ ...row })), save, delete: remove },
     contextGraphMembershipStore: { loadAll: async () => [...members.values()], upsert: memberSave, delete: memberRemove },
@@ -64,14 +84,19 @@ async function fixture(role: 'member' | 'host', options: { target?: 'member' | '
   const gossip = new Gossip();
   (agent as unknown as { gossip: Gossip }).gossip = gossip;
   const state = agent as unknown as Internals;
+  if (core) await agent.initializeSwmHostModeStore();
   if (options.reverse) await agent.rehydrateContextGraphSubscriptions(null);
   state.setContextGraphSubscription(HASH, { ...wire, syncMode: 'always-on' }, { persist: false });
   if (role === 'member') agent.subscribeToContextGraph(HASH, { persist: false, trackSyncScope: options.foreign === true });
   if (!options.reverse) await agent.rehydrateContextGraphSubscriptions(null);
+  if (role === 'host') {
+    await expect(agent.enableSwmHostModeFor(HASH)).resolves.toMatchObject({ subscribed: true, hostingEnabled: true });
+  }
   const drain = async () => {
     for (const id of [LOCAL, HASH]) {
       await state.enqueueContextGraphSubscriptionPersistWrite(id, async () => undefined);
       await state.enqueueContextGraphMembershipPersistWrite(key(id, 'node', agent.peerId), async () => undefined);
+      if (core) await agent.awaitHostModePersistence(id);
     }
   };
   for (const id of [LOCAL, HASH]) await agent.upsertContextGraphMember({
@@ -83,6 +108,21 @@ async function fixture(role: 'member' | 'host', options: { target?: 'member' | '
   const originalWireSnapshot = { ...originalWire };
   const originalLocal = { ...state.subscribedContextGraphs.get(LOCAL)! };
   const originalMembers = [...members.values()].map(row => ({ ...row }));
+  const hostTopic = contextGraphWorkspaceTopic(HASH);
+  const probe = new Uint8Array([1]);
+  const ingest = vi.spyOn(agent, 'ingestSwmHostModeEnvelope'); // Native defensive ingest runs unchanged.
+  const assertHostLive = async () => {
+    if (role !== 'host') return;
+    expect(state.swmHostModeHandlers.size).toBe(1);
+    expect(state.swmHostModeSubscribed.has(HASH)).toBe(true);
+    expect(gossip.subscribed.has(hostTopic)).toBe(true);
+    expect(gossip.handlers.get(hostTopic)).toEqual([state.swmHostModeHandlers.get(HASH)]);
+    ingest.mockClear();
+    await gossip.deliver(hostTopic, probe, 'owned-custody-probe');
+    expect(ingest).toHaveBeenCalledExactlyOnceWith(HASH, probe, 'owned-custody-probe');
+    await ingest.mock.results[0].value;
+  };
+  await assertHostLive();
   const originalTopics = new Set(gossip.subscribed);
   const originalHandlers = new Map([...gossip.handlers].map(([topic, handlers]) => [topic, [...handlers]]));
   save.mockClear(); remove.mockClear(); memberSave.mockClear(); memberRemove.mockClear();
@@ -99,23 +139,35 @@ async function fixture(role: 'member' | 'host', options: { target?: 'member' | '
   };
   const retainedRows = () => retained.map(row => ({ ...row }));
   const retainedMembers = () => [...members.values()].map(row => ({ ...row }));
-  return { agent, state, saved, originalWire, originalWireSnapshot, originalRetained, originalMembers, originalTopics, originalHandlers, gossip, retainedRows, retainedMembers, drain, unchanged, remove, memberRemove, chain };
+  return { agent, state, saved, originalWire, originalWireSnapshot, originalRetained, originalMembers, originalTopics, originalHandlers, gossip, assertHostLive, ingest, hostTopic, probe, retainedRows, retainedMembers, drain, unchanged, remove, memberRemove, chain };
 }
 
 describe('persisted activation commits admitted wire adoption after successful effects', () => {
+  it('stops dispatch when the native host listener is unwired', async () => {
+    const f = await fixture('host');
+    f.agent.unwireSwmHostModeHandler(HASH);
+    expect(f.state.swmHostModeHandlers.has(HASH)).toBe(false);
+    expect(f.state.swmHostModeSubscribed.has(HASH)).toBe(false);
+    f.ingest.mockClear();
+    await f.gossip.deliver(f.hostTopic, f.probe, 'owned-retired-probe');
+    expect(f.ingest).not.toHaveBeenCalled();
+    await f.drain();
+  });
+
+
   it.each(['member', 'host'] as const)('keeps admitted %s runtime and durable custody when prepare fails', async role => {
     const f = await fixture(role);
     await expect(f.agent.activatePersistedContextGraphSubscriptionRecord(f.saved, {
       prepare: async () => { throw new Error('owned prepare failure'); },
     })).rejects.toThrow('owned prepare failure');
-    await f.drain(); f.unchanged();
+    await f.drain(); f.unchanged(); await f.assertHostLive();
   });
 
   it.each(['member', 'host'] as const)('keeps admitted %s custody after a post-subscribe failure', async role => {
     const f = await fixture(role);
     vi.spyOn(f.agent, 'persistLocalNodeMembership').mockImplementation(() => { throw new Error('owned membership boundary failure'); });
     await expect(f.agent.activatePersistedContextGraphSubscriptionRecord(f.saved)).rejects.toThrow('owned membership boundary failure');
-    await f.drain(); f.unchanged();
+    await f.drain(); f.unchanged(); await f.assertHostLive();
   });
 
   it.each(['member', 'host'] as const)('still commits verified %s adoption after successful preparation', async role => {
@@ -185,5 +237,6 @@ describe('activation commit preserves a different numeric slot with the same com
     expect(f.state.subscribedContextGraphs.get(LOCAL)?.coreHosted === true).toBe(target === 'host');
     await expect(f.agent.resolveContextGraphOnChainIdReference('#323')).resolves.toMatchObject({ kind: 'resolved', contextGraphId: HASH, onChainId: '323' });
     await expect(f.agent.resolveContextGraphOnChainIdReference('#582')).resolves.toMatchObject({ kind: 'resolved', contextGraphId: LOCAL, onChainId: SLOT });
+    await f.assertHostLive();
   });
 });
