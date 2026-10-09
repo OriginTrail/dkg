@@ -232,6 +232,24 @@ export function snapshotCuratorMatches(
   ));
 }
 
+/** An authenticated metadata refresh still cannot replace an owned numeric slot. */
+function preservesCuratorRegistrationBinding(
+  agent: CuratorMetaRefreshAgent,
+  contextGraphId: string,
+  snapshot: readonly Quad[],
+): boolean {
+  const currentId = agent.subscribedContextGraphs?.get(contextGraphId)?.onChainId;
+  if (!isCanonicalAuthoritativeContextGraphId(currentId)) return true;
+  const subject = contextGraphDataGraphUri(contextGraphId);
+  const graph = contextGraphMetaGraphUri(contextGraphId);
+  const predicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`;
+  return snapshot.every((quad) => {
+    if (quad.graph !== graph || quad.subject !== subject || quad.predicate !== predicate) return true;
+    const incomingId = stripLiteral(quad.object);
+    return !isCanonicalAuthoritativeContextGraphId(incomingId) || incomingId === currentId;
+  });
+}
+
 /**
  * Apply the chain slot and wire-id carried by an authenticated curator
  * snapshot to the late member's durable subscription row.
@@ -247,7 +265,7 @@ function applyCuratorRegistrationBinding(
   snapshot: readonly Quad[],
 ): void {
   const sub = agent.subscribedContextGraphs?.get(contextGraphId);
-  if (!sub) return;
+  if (!sub || !preservesCuratorRegistrationBinding(agent, contextGraphId, snapshot)) return;
 
   const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
@@ -556,11 +574,10 @@ function replaceCuratorMetaProjectionSparql(
 }
 
 /**
- * Install `authoritative` as the graph's curator projection. Returns false,
- * leaving the projection exactly as it was, when the approved member's
- * acceptance no longer holds right before the projection's first write
- * (#2831 review): registration or catalog authority can change during the
- * store work that precedes it.
+ * Install `authoritative` as the graph's curator projection. A refusal before
+ * its first write leaves the projection unchanged. Subject-based stores also
+ * recheck root activation after awaited delegation commits: a late refusal
+ * preserves the root definition, while earlier admitted delegation writes remain.
  */
 async function atomicallyReplaceCuratorMetaSnapshot(
   agent: CuratorMetaRefreshAgent,
@@ -570,8 +587,8 @@ async function atomicallyReplaceCuratorMetaSnapshot(
 ): Promise<boolean> {
   const snapshot = authoritative.quads;
   const activationHolds = async (): Promise<boolean> => (
-    authoritative.approvedMember === undefined
-    || await authoritative.approvedMember.stillHolds()
+    (authoritative.approvedMember === undefined || await authoritative.approvedMember.stillHolds())
+    && preservesCuratorRegistrationBinding(agent, contextGraphId, snapshot)
   );
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
@@ -674,6 +691,7 @@ async function atomicallyReplaceCuratorMetaSnapshot(
         await replaceSubject(subject, quads);
         existingDelegations.delete(subject);
       }
+      if (!(await activationHolds())) return false;
       await replaceSubject(contextGraphUri, rootReplacement);
       for (const staleSubject of [...existingDelegations].sort()) {
         await replaceSubject(staleSubject, []);
@@ -766,11 +784,17 @@ async function executeCuratorMetaRefresh(
       ctx,
     );
     if (!snapshot) return false;
+    if (!preservesCuratorRegistrationBinding(agent, contextGraphId, snapshot.quads)) {
+      agent.syncCheckpoints.delete(snapshot.checkpointKey);
+      agent.log.warn(ctx, `Rejected curator metadata for "${contextGraphId}": `
+        + `its registration conflicts with owned slot ${agent.subscribedContextGraphs?.get(contextGraphId)?.onChainId}`);
+      return false;
+    }
     if (!(await atomicallyReplaceCuratorMetaSnapshot(agent, contextGraphId, snapshot, ctx))) {
       agent.syncCheckpoints.delete(snapshot.checkpointKey);
       agent.log.warn(
         ctx,
-        `Rejected curator metadata snapshot for "${contextGraphId}": the approved member's authority changed before it was installed`,
+        `Rejected curator metadata snapshot for "${contextGraphId}": the approved member's authority or owned registration changed before root activation`,
       );
       return false;
     }

@@ -52,6 +52,7 @@ import {
   isRetryableRpcError,
   resolveRpcUrls,
   assertSuccessfulReceipt,
+  explainOutOfGasRevert,
   sleep,
 } from './evm-adapter-rpc.js';
 import {
@@ -1446,14 +1447,7 @@ export class EVMChainAdapterBase {
       // Resolved here at the config boundary, live per read, like the stickiness switch.
       isEnabled: () => process.env.DKG_DISABLE_RPC_READ_BATCHING !== '1',
     });
-    this.chainIndexOwner = new EvmChainIndexRuntimeOwner(
-      config.chainEventLogStore,
-      (error) => {
-        console.warn(
-          `[chain] one-log chain index disabled: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      },
-    );
+    this.chainIndexOwner = new EvmChainIndexRuntimeOwner(config.chainEventLogStore);
     this.receiptFinality = new EvmReceiptFinalityReader(
       this.finalityConfirmations,
       (label, read, options) => this.readProviderRetryingNull(label, read, options),
@@ -2051,7 +2045,7 @@ export class EVMChainAdapterBase {
     // poll + deadline), so lock-hold (held across the retries for the V10 path)
     // stays bounded.
     await this.broadcastSignedTransactionWithRetries(signedTx, txHash, label);
-    return this.waitForReceiptWithFailover(txHash, label);
+    return this.waitForReceiptWithFailover(txHash, label).catch(explainOutOfGasRevert(signedTx));
   }
 
   /** Broadcast one immutable signed transaction with bounded endpoint-set retries. */
@@ -2254,16 +2248,15 @@ export class EVMChainAdapterBase {
     signer: Wallet,
     label: string,
     // Optional gas headroom for methods whose on-chain gas cost depends on
-    // per-block randomness. ethers fills `gasLimit` from a single
+    // the block they are mined in. ethers fills `gasLimit` from a single
     // `eth_estimateGas` with NO margin, but that estimate runs against the
     // CURRENT block while the tx is mined in a LATER block with different
-    // `prevrandao`/`blockhash`/`timestamp`. If the mined block's entropy
-    // drives a more expensive code path than the estimate's, the tx runs
-    // out of gas and reverts with empty (`0x`) data. `RandomSampling.createChallenge`
-    // is exactly this case (weighted CG draw + historical blockhash access):
-    // observed estimate-vs-execution spread is small here but unbounded in
-    // production with many CGs/KCs. When set, we estimate once and inflate
-    // the limit by `gasLimitBufferBps` basis points so the drift can't OOG.
+    // `prevrandao`/`blockhash`/`timestamp`. If the mined block drives a more
+    // expensive code path than the estimate's, the tx runs out of gas and
+    // reverts with empty (`0x`) data. `RandomSampling.createChallenge`
+    // (weighted CG draw + historical blockhash access) and `submitProof`
+    // (stake settle at `block.timestamp`) are such cases. When set, we estimate
+    // once and inflate the limit by `gasLimitBufferBps` basis points.
     opts?: { gasLimitBufferBps?: number },
   ): Promise<ethers.TransactionReceipt> {
     // Parent span for the whole send. Broadcast + receipt-wait open their own
@@ -4896,7 +4889,10 @@ export class EVMChainAdapterBase {
    * refuses and each one does exactly what it did before the log existed.
    *
    * A failure here is a degraded index, not a degraded node: it is reported
-   * and the adapter keeps every pre-log path.
+   * and the adapter keeps every pre-log path. A start that could not complete
+   * for now (a read not admitted to the local RPC queue in time, an endpoint
+   * that timed out, throttled or was unreachable) is not a failure: the owner
+   * retries it, with this same snapshot, until the log attaches.
    *
    * Re-entrant after a Hub rotation, and only after one:
    * `rebuildChainIndexRuntimeOnRotation` clears the single-flight so the next

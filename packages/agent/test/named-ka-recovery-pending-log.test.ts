@@ -267,6 +267,11 @@ describe('NamedKaRecoveryPendingLog', () => {
       endpoints: [{ position: 1, host: 'rpc.example', stage: 'pinned-read', failure: 'http-client-error', httpStatus: 400 }],
     }],
     ['the storage binding changed', { reason: 'storage-binding-changed', endpointCount: 2, endpoints: [] }],
+    ['the storage binding changed after an endpoint had failed', {
+      reason: 'storage-binding-changed',
+      endpointCount: 2,
+      endpoints: [{ position: 1, host: 'rpc.example', stage: 'chain-id', failure: 'wrong-chain' }],
+    }],
     ['the adapter gave no report', undefined],
   ])('summarizes but never asks the operator to act on an endpoint when %s', (_name, report) => {
     const { defer, run } = harness();
@@ -311,6 +316,11 @@ describe('NamedKaRecoveryPendingLog', () => {
       reason: 'local-pressure',
       endpointCount: 2,
       endpoints: [{ position: 1, host: 'rpc.example', stage: 'pinned-read', failure: 'http-client-error', httpStatus: 400 }],
+    })],
+    ['a storage binding change', (name) => noViewDeferral(name, {
+      reason: 'storage-binding-changed',
+      endpointCount: 2,
+      endpoints: [],
     })],
   ])('%s between endpoint failures interrupts their run: the next one counts from its own start', (_name, other) => {
     const { clock, defer, run } = harness();

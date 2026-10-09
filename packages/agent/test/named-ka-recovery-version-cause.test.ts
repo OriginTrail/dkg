@@ -219,6 +219,8 @@ describe('recovery diagnostics', () => {
     // The node's own budget stopped the read: the endpoint that had failed first is not the cause.
     expect(versionViewBlockingEndpoints({ ...NO_ENDPOINT_SERVES, reason: 'local-pressure' })).toBeUndefined();
     expect(versionViewBlockingEndpoints({ ...NO_ENDPOINT_SERVES, reason: 'aborted' })).toBeUndefined();
+    // The storage binding moved on under the read: the node's own fence, not an endpoint.
+    expect(versionViewBlockingEndpoints({ ...NO_ENDPOINT_SERVES, reason: 'storage-binding-changed' })).toBeUndefined();
   });
 
   it('adds a cause to a message only when there is a report', () => {
