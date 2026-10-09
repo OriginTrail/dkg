@@ -9236,7 +9236,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // was first recorded under.
       ...(adoptsWireOnlySubscription
         && wireOnlySubscription.subscription.coreHosted === true
-        && next.coreHosted === undefined
         ? { coreHosted: true }
         : {}),
     });

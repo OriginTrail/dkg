@@ -6,6 +6,8 @@ import type {
   ContextGraphSyncMode,
 } from './dkg-agent-types.js';
 import { projectDormantContextGraphIdentities } from './context-graph-dormant-identity.js';
+import { isCanonicalAuthoritativeContextGraphId } from './context-graph-binding-state.js';
+import { normalizeContextGraphNameHash, verifyContextGraphNameCandidate } from './context-graph-name-candidate.js';
 
 /** Retained identity alone grants neither member admission nor Core custody. */
 export function isAdmittedContextGraphSubscription(
@@ -75,7 +77,7 @@ export type ContextGraphSubscriptionPersistenceProjection =
 /** Preserve non-coalescing queued intent without lending it a different binding. */
 export function isContextGraphSubscriptionPersistenceTargetCurrent(
   captured: ContextGraphSub | undefined,
-  input: { subscription: ContextGraphSub | undefined; syncScoped: boolean },
+  input: { contextGraphId: string; subscription: ContextGraphSub | undefined; syncScoped: boolean },
   current: ContextGraphSub | undefined,
   state: {
     revision: number | undefined;
@@ -84,8 +86,19 @@ export function isContextGraphSubscriptionPersistenceTargetCurrent(
   },
 ): boolean {
   const snapshot = input.subscription;
-  if (snapshot?.onChainId !== current?.onChainId
-    || snapshot?.onChainHash !== current?.onChainHash) return false;
+  if (snapshot?.onChainId !== current?.onChainId) return false;
+  if (snapshot?.onChainHash !== current?.onChainHash) {
+    const previousHash = normalizeContextGraphNameHash(snapshot?.onChainHash);
+    const currentHash = normalizeContextGraphNameHash(current?.onChainHash);
+    const sameCommitment = previousHash !== null && previousHash === currentHash;
+    // Only an already owned numeric slot may learn its missing commitment.
+    // Verify the literal local name, including a user-chosen wire-shaped name.
+    const verifiedEnrichment = snapshot?.onChainHash === undefined
+      && isCanonicalAuthoritativeContextGraphId(snapshot?.onChainId)
+      && currentHash !== null
+      && verifyContextGraphNameCandidate(input.contextGraphId, currentHash) === input.contextGraphId;
+    if (!sameCommitment && !verifiedEnrichment) return false;
+  }
   // A genuine queued successor owns the later durable intent. Both snapshots
   // execute in order; a failed successor must not erase the older success.
   const revision = state.revision;

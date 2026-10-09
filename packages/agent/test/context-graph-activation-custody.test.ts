@@ -3,10 +3,13 @@ import { ethers } from 'ethers';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { contextGraphWorkspaceTopic } from '@origintrail-official/dkg-core';
+import { MockChainAdapter, buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
+import { contextGraphWorkspaceTopic, createGraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
+import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/index.js';
 import type { CursorState } from '../src/reconcile-cursor.js';
+import { packKnowledgeAssetIdFromIdentity } from '../src/ka-identity.js';
+import { graphHoldsTriple, knowledgeAssetVerifiedMemoryGraph, stageKnowledgeAssetInSharedMemory } from './_helpers/staged-knowledge-asset.js';
 import type { ContextGraphMembershipRecord, ContextGraphSub, ContextGraphSubInput, ContextGraphSubscriptionRecord } from '../src/dkg-agent-types.js';
 
 const LOCAL = 'activation-custody';
@@ -49,13 +52,13 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-async function fixture(role: 'member' | 'host', options: { target?: 'member' | 'host'; foreign?: boolean; reverse?: boolean } = {}) {
+async function fixture(role: 'member' | 'host', options: { target?: 'member' | 'host'; foreign?: boolean; reverse?: boolean; ordinal?: number } = {}) {
   const saved: ContextGraphSubscriptionRecord = {
     id: LOCAL, subscribed: options.target !== 'host', coreHosted: options.target === 'host' ? true : undefined, synced: true, sharedMemorySynced: true,
     metaSynced: true, syncScoped: true, onChainId: SLOT, onChainHash: HASH,
-    lastReconciledOrdinal: 77,
+    lastReconciledOrdinal: options.ordinal ?? 77,
   };
-  const wire = { ...saved, id: HASH, subscribed: role === 'member', coreHosted: role === 'host', onChainId: options.foreign ? '323' : SLOT, lastReconciledOrdinal: 17 };
+  const wire = { ...saved, id: HASH, subscribed: role === 'member', coreHosted: role === 'host', onChainId: options.foreign ? '323' : SLOT, lastReconciledOrdinal: options.ordinal ?? 17 };
   let retained: ContextGraphSubscriptionRecord[] = options.reverse ? [saved, wire] : [wire, saved];
   const originalRetained = retained.map(row => ({ ...row }));
   const save = vi.fn(async (row: ContextGraphSubscriptionRecord) => { retained = [...retained.filter(old => old.id !== row.id), { ...row }]; });
@@ -143,6 +146,42 @@ async function fixture(role: 'member' | 'host', options: { target?: 'member' | '
 }
 
 describe('persisted activation commits admitted wire adoption after successful effects', () => {
+  const ordinaryCases = [false, true].flatMap(reverse => (['always-on', 'on-demand'] as const).map(syncMode => ({ reverse, syncMode })));
+  it.each(ordinaryCases)('preserves admitted Core custody through ordinary dormant subscribe/unsubscribe reverse=$reverse mode=$syncMode', async ({ reverse, syncMode }) => {
+    const f = await fixture('host', { reverse, ordinal: 0 });
+    expect(f.state.subscribedContextGraphs.get(LOCAL)).toMatchObject({ subscribed: false, coreHosted: false, onChainId: SLOT });
+    expect(f.originalWire).toMatchObject({ subscribed: false, coreHosted: true, onChainId: SLOT });
+    await f.assertHostLive();
+
+    f.agent.subscribeToContextGraph(LOCAL, { syncMode, deferSharedMemoryGossipSubscribe: true });
+    await f.drain();
+    expect(f.state.subscribedContextGraphs.has(HASH)).toBe(false);
+    expect(f.state.subscribedContextGraphs.get(LOCAL)).toMatchObject({ subscribed: true, coreHosted: true, onChainId: SLOT, onChainHash: HASH, syncMode: 'always-on' });
+    await f.assertHostLive();
+
+    f.agent.unsubscribeFromContextGraph(LOCAL);
+    await f.agent.reconcileSwmHostModeSubscription(LOCAL);
+    await f.drain();
+    expect(f.state.subscribedContextGraphs.get(LOCAL)).toMatchObject({ subscribed: false, coreHosted: true, onChainId: SLOT });
+    expect(f.retainedRows()).toEqual([expect.objectContaining({ id: LOCAL, subscribed: false, coreHosted: true, onChainId: SLOT })]);
+    await f.assertHostLive();
+
+    const author = '0x9277a1a194fcadbb60d8df0c472e7909ead50e33';
+    const scope = createGraphKnowledgeAssetScope(buildKnowledgeAssetUal(f.chain.chainId, author, 1n), '1');
+    const triple = { subject: 'urn:custody:missed-ka', predicate: 'http://schema.org/name', object: '"retained Core custody"' };
+    f.chain.getLatestMerkleRootAuthor = async () => author;
+    f.chain.__registerKC({
+      kaId: packKnowledgeAssetIdFromIdentity({ agentAddress: author, kaNumber: 1n }),
+      contextGraphId: BigInt(SLOT), merkleRootHex: ethers.hexlify(computeFlatKCRootV10([{ ...triple, graph: '' }], [])), chunks: [],
+    });
+    await stageKnowledgeAssetInSharedMemory({ store: f.agent.store, contextGraphId: LOCAL, scope, triples: [triple], shareOperationId: 'custody-missed-share' });
+    const verifiedGraph = knowledgeAssetVerifiedMemoryGraph(LOCAL, scope);
+    await expect(graphHoldsTriple(f.agent.store, verifiedGraph, triple)).resolves.toBe(false);
+    await f.agent.runVmReconcileForCg(LOCAL);
+    await expect(graphHoldsTriple(f.agent.store, verifiedGraph, triple)).resolves.toBe(true);
+    expect(f.state.subscribedContextGraphs.get(LOCAL)).toMatchObject({ subscribed: false, coreHosted: true, lastReconciledOrdinal: 1 });
+    await f.drain();
+  });
   it('stops dispatch when the native host listener is unwired', async () => {
     const f = await fixture('host');
     f.agent.unwireSwmHostModeHandler(HASH);

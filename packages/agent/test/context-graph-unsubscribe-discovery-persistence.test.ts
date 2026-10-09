@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/index.js';
+import { isContextGraphSubscriptionPersistenceTargetCurrent } from '../src/context-graph-subscription-policy.js';
 import type { ContextGraphSub, ContextGraphSubInput, ContextGraphSubscriptionRecord, ContextGraphSubscriptionStore } from '../src/dkg-agent-types.js';
 
 const LOCAL = 'queued-unsubscribe-discovery';
@@ -30,11 +31,11 @@ afterEach(async () => {
   for (const agent of agents.splice(0)) await agent.stop();
   vi.restoreAllMocks();
 });
-async function fixture(hosted = false) {
+async function fixture(hosted = false, missingHash = false) {
   const original: ContextGraphSubscriptionRecord = {
     id: LOCAL, subscribed: true, coreHosted: hosted, synced: true,
     sharedMemorySynced: true, metaSynced: true, syncScoped: false,
-    onChainId: ID, onChainHash: HASH, lastReconciledOrdinal: 7,
+    onChainId: ID, onChainHash: missingHash ? undefined : HASH, lastReconciledOrdinal: 7,
   };
   let rows = [{ ...original }];
   const save = vi.fn(async (record: ContextGraphSubscriptionRecord) => {
@@ -61,7 +62,13 @@ async function fixture(hosted = false) {
   state.gossip = { subscribe: vi.fn(), unsubscribe: vi.fn(), onMessage: vi.fn() };
   vi.spyOn(agent, 'queueSharedMemoryGossipSubscription').mockImplementation(() => undefined);
   vi.spyOn(agent, 'reconcileSwmHostModeSubscription').mockResolvedValue(undefined);
-  await agent.rehydrateContextGraphSubscriptions(null);
+  if (missingHash) {
+    // A native passive numeric observation has not learned the commitment yet.
+    // Dormant rehydration would already derive it and conceal this transition.
+    agent.recordDiscoveredContextGraph(LOCAL, { onChainId: ID });
+    expect(state.subscribedContextGraphs.get(LOCAL)).toMatchObject({ onChainId: ID, subscribed: false });
+    expect(state.subscribedContextGraphs.get(LOCAL)?.onChainHash).toBeUndefined();
+  } else await agent.rehydrateContextGraphSubscriptions(null);
   save.mockClear(); remove.mockClear();
   const drain = () => state.enqueueContextGraphSubscriptionPersistWrite(LOCAL, async () => undefined);
   const discover = () => agent.recordDiscoveredContextGraph(LOCAL, {
@@ -88,6 +95,75 @@ async function hold(f: Awaited<ReturnType<typeof fixture>>, window: Window) {
 
 const windows: Window[] = ['before-lane', 'hosting-read'];
 describe('passive discovery while explicit unsubscribe is queued', () => {
+
+  const enrichmentCases = windows.flatMap((window) => [false, true].map((hosted) => ({ window, hosted })));
+  it.each(enrichmentCases)('finishes unsubscribe through verified missing-hash enrichment $window savedHosting=$hosted', async ({ window, hosted }) => {
+    const f = await fixture(hosted, true); const gate = await hold(f, window);
+    f.agent.unsubscribeFromContextGraph(LOCAL);
+    const captured = { ...f.state.subscribedContextGraphs.get(LOCAL)! };
+    expect(captured.onChainHash).toBeUndefined();
+    try {
+      if (window === 'hosting-read') await gate.entered.promise;
+      const pointer = f.state.subscribedContextGraphs.get(LOCAL)!;
+      const pending = [...f.state.contextGraphSubscriptionPersistPendingRevisions.get(LOCAL)!];
+      expect(pending).toHaveLength(1);
+      f.discover();
+      expect(f.state.subscribedContextGraphs.get(LOCAL)).not.toBe(pointer);
+      expect(f.state.subscribedContextGraphs.get(LOCAL)).toMatchObject({ onChainId: ID, onChainHash: HASH, subscribed: false });
+      expect([...f.state.contextGraphSubscriptionPersistPendingRevisions.get(LOCAL)!]).toEqual(pending);
+    } finally { gate.release.resolve(); }
+    await f.drain();
+    if (hosted) {
+      expect(f.rows()).toEqual([expect.objectContaining({
+        subscribed: false, coreHosted: true, onChainId: ID, onChainHash: undefined,
+        synced: captured.synced, sharedMemorySynced: captured.sharedMemorySynced,
+        metaSynced: captured.metaSynced, lastReconciledOrdinal: captured.lastReconciledOrdinal,
+      })]);
+      expect(f.save).toHaveBeenCalledTimes(1); expect(f.remove).not.toHaveBeenCalled();
+    } else {
+      expect(f.rows()).toEqual([]);
+      expect(f.remove).toHaveBeenCalledTimes(1); expect(f.save).not.toHaveBeenCalled();
+    }
+  });
+  const conflictCases = windows.flatMap((window) => [false, true].map((missingHash) => ({ window, missingHash })));
+  it.each(conflictCases)('fences a different commitment $window previouslyMissing=$missingHash', async ({ window, missingHash }) => {
+    const f = await fixture(true, missingHash); const gate = await hold(f, window);
+    f.agent.unsubscribeFromContextGraph(LOCAL);
+    const otherHash = ethers.keccak256(ethers.toUtf8Bytes('another-context-graph'));
+    try {
+      if (window === 'hosting-read') await gate.entered.promise;
+      f.agent.recordDiscoveredContextGraph(LOCAL, { onChainId: ID, onChainHash: otherHash });
+      expect(f.state.subscribedContextGraphs.get(LOCAL)).toMatchObject({ onChainId: ID, onChainHash: otherHash });
+    } finally { gate.release.resolve(); }
+    await f.drain();
+    expect(f.rows()).toEqual([f.original]);
+    expect(f.save).not.toHaveBeenCalled(); expect(f.remove).not.toHaveBeenCalled();
+  });
+  it.each(windows)('fences a newer native resubscription after verified hash enrichment %s', async (window) => {
+    const f = await fixture(true, true); const gate = await hold(f, window);
+    f.agent.unsubscribeFromContextGraph(LOCAL);
+    try {
+      if (window === 'hosting-read') await gate.entered.promise;
+      f.discover();
+      f.agent.subscribeToContextGraph(LOCAL, { persist: false, deferSharedMemoryGossipSubscribe: true });
+      expect(f.state.subscribedContextGraphs.get(LOCAL)).toMatchObject({ subscribed: true, onChainHash: HASH });
+    } finally { gate.release.resolve(); }
+    await f.drain();
+    expect(f.rows()).toEqual([f.original]);
+    expect(f.save).not.toHaveBeenCalled(); expect(f.remove).not.toHaveBeenCalled();
+  });
+  it.each(windows)('fences numeric rebinding after verified hash enrichment %s', async (window) => {
+    const f = await fixture(true, true); const gate = await hold(f, window);
+    f.agent.unsubscribeFromContextGraph(LOCAL);
+    try {
+      if (window === 'hosting-read') await gate.entered.promise;
+      f.discover();
+      f.agent.bindSubscriptionOnChainId(LOCAL, f.state.subscribedContextGraphs.get(LOCAL)!, '586');
+    } finally { gate.release.resolve(); }
+    await f.drain();
+    expect(f.rows()).toEqual([f.original]);
+    expect(f.save).not.toHaveBeenCalled(); expect(f.remove).not.toHaveBeenCalled();
+  });
 
   const readinessChanges: { field: string; patch: Partial<ContextGraphSub> }[] = [
     { field: 'synced', patch: { synced: true } },
@@ -269,5 +345,39 @@ describe('passive discovery while explicit unsubscribe is queued', () => {
     expect(f.save.mock.calls.map(([row]) => row.synced)).toEqual([false, true]);
     expect(f.rows()).toEqual([expect.objectContaining({ subscribed: true, synced: true })]);
     expect(status).not.toHaveBeenCalled();
+  });
+});
+
+describe('canonical commitment ownership for queued subscription intent', () => {
+  function target(local: string, id: string | undefined, oldHash: string | undefined, newHash: string | undefined) {
+    const captured: ContextGraphSub = {
+      subscribed: false, coreHosted: false, synced: false, syncMode: 'always-on',
+      onChainId: id, onChainHash: oldHash,
+    };
+    return isContextGraphSubscriptionPersistenceTargetCurrent(captured, {
+      contextGraphId: local, subscription: { ...captured }, syncScoped: false,
+    }, { ...captured, onChainHash: newHash }, {
+      revision: 1, pendingRevisions: new Set([1]), syncScoped: false,
+    });
+  }
+  it('retains a known same-byte commitment through case normalization', () => {
+    expect(target(LOCAL, ID, HASH.toUpperCase().replace('0X', '0x'), HASH)).toBe(true);
+    expect(target(LOCAL, ID, HASH, HASH.toUpperCase().replace('0X', '0x'))).toBe(true);
+  });
+  it.each([undefined, '0', '0585', (ethers.MaxUint256 + 1n).toString()])('refuses missing-hash enrichment without canonical numeric ownership %s', (id) => {
+    expect(target(LOCAL, id, undefined, HASH)).toBe(false);
+  });
+  it.each(['not-a-hash', '0x1234'])('refuses malformed commitment enrichment %s', (hash) => {
+    expect(target(LOCAL, ID, undefined, hash)).toBe(false);
+  });
+  it('hashes a wire-shaped literal local name instead of borrowing its spelling', () => {
+    const literal = HASH;
+    const literalCommitment = ethers.keccak256(ethers.toUtf8Bytes(literal));
+    expect(target(literal, ID, undefined, literalCommitment)).toBe(true);
+    expect(target(literal, ID, undefined, literal)).toBe(false);
+  });
+  it.each(['../bad', 'x'.repeat(257)])('refuses an invalid or unbounded local name before commitment verification %s', (local) => {
+    const hash = ethers.keccak256(ethers.toUtf8Bytes(local));
+    expect(target(local, ID, undefined, hash)).toBe(false);
   });
 });
