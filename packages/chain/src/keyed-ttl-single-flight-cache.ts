@@ -87,7 +87,9 @@ export class TtlValueCache<K, V> {
  * but its `onSuccess` hook is suppressed so it cannot repopulate stale state.
  * A lookup that runs under its caller's cancellation (`owner`) is shared only
  * until that is aborted: then it ends with a cancellation that is no later
- * caller's, so the next caller starts a lookup of its own in its place.
+ * caller's, so the next caller starts a lookup of its own in its place. Only
+ * the lookup still in flight for its key publishes through `onSuccess`, so the
+ * one it replaced cannot overwrite it by answering last.
  */
 export class KeyedSingleFlight<K, I = K> {
   private readonly inflightByKey = new Map<K, Map<I, Promise<unknown>>>();
@@ -111,9 +113,14 @@ export class KeyedSingleFlight<K, I = K> {
     if (existing && this.owners.get(existing)?.aborted !== true) return existing;
 
     const epoch = this.epoch(key);
-    const lookup = (async () => {
+    let lookup: Promise<V> | undefined;
+    lookup = (async () => {
       const value = await load();
-      if (onSuccess && this.epochUnchanged(key, epoch)) onSuccess(value);
+      if (
+        onSuccess
+        && this.epochUnchanged(key, epoch)
+        && this.inflightByKey.get(key)?.get(inflightKey) === lookup
+      ) onSuccess(value);
       return value;
     })();
     if (owner !== undefined) this.owners.set(lookup, owner);

@@ -64,7 +64,8 @@ export class HubResolutionCache<T> {
    * as no `invalidate()` has fired in the interim — see `generation`.
    * A resolve that runs under its caller's cancellation (`owner`) is
    * shared only until that is aborted: then it ends with a cancellation
-   * that is no later caller's, so the next caller resolves in its place.
+   * that is no later caller's, so the next caller resolves in its place,
+   * and only that one writes the cache.
    */
   async get(owner?: AbortSignal): Promise<T> {
     const now = this.opts.now?.() ?? Date.now();
@@ -84,8 +85,10 @@ export class HubResolutionCache<T> {
         // already be coalescing a fresh resolve). Returning `value`
         // to our awaiters is fine — they asked under our generation
         // — but we must not write it back to `cached` or future
-        // synchronous reads would observe the stale address.
-        if (this.generation === startGeneration) {
+        // synchronous reads would observe the stale address. The same
+        // holds for a resolve that another took the place of, after its
+        // owner was cancelled: only the one still in flight writes.
+        if (this.generation === startGeneration && this.inflight === resolving) {
           this.cached = value;
           this.resolvedAt = this.opts.now?.() ?? Date.now();
         }

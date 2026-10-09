@@ -4720,9 +4720,11 @@ export class EVMChainAdapterBase {
   protected async resolveAndAssignRandomSamplingPair(): Promise<{ rs: Contract; rss: Contract }> {
     const generationBefore = this.randomSamplingPairCache.currentGeneration();
     // Under the caller's cancellation, as the address reads: nobody joins a
-    // resolve whose caller was cancelled.
-    const pair = await this.randomSamplingPairCache.get(activeRpcRequestAbortSignal());
-    if (this.randomSamplingPairCache.currentGeneration() === generationBefore) {
+    // resolve whose caller was cancelled, and a caller cancelled meanwhile (an
+    // initialization that was ended) assigns nothing from its late result.
+    const owner = activeRpcRequestAbortSignal();
+    const pair = await this.randomSamplingPairCache.get(owner);
+    if (this.randomSamplingPairCache.currentGeneration() === generationBefore && owner?.aborted !== true) {
       this.contracts.randomSampling = pair.rs;
       this.contracts.randomSamplingStorage = pair.rss;
     }

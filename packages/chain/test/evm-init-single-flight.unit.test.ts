@@ -636,6 +636,34 @@ describe('adapter initialization is shared by the callers that need it', () => {
     expect(adapter.initialized).toBe(true);
   });
 
+  it.each([
+    ['ContextGraphs', 'contextGraphs', (adapter: any) => adapter.resolveContract('ContextGraphs')],
+    ['RandomSampling', 'randomSampling', async (adapter: any) => (await adapter.getRandomSampling()).rs],
+  ])('keeps what the run after an abandoned one bound for %s when the abandoned run\'s read answers last', async (name, binding, resolveNow) => {
+    const { adapter, initRuns, reads, register, answerLate } = hubFixture();
+    // The Hub moves on and no rotation is observed: the abandoned run's read
+    // still answers with the address it had.
+    const retired = answerLate(name, RETIRED);
+    const controller = new AbortController();
+    const abandoned = withRpcRequestContext({ signal: controller.signal }, () => adapter.init());
+    await retired.reached;
+
+    controller.abort(new Error('caller cancelled'));
+    await expect(abandoned).rejects.toThrow('caller cancelled');
+    register(name, CURRENT);
+    await adapter.init();
+    await expect(adapter.contracts[binding].getAddress()).resolves.toBe(CURRENT);
+
+    retired.release();
+    await expect(initRuns()[0]).rejects.toThrow('no active waiters');
+    await settled();
+
+    // Neither the binding nor the cache behind it took the late answer.
+    await expect(adapter.contracts[binding].getAddress()).resolves.toBe(CURRENT);
+    await expect((await resolveNow(adapter)).getAddress()).resolves.toBe(CURRENT);
+    expect(reads(name)).toBe(2);
+  });
+
   it('ends the run and starts nothing when the adapter is destroyed while a binding is read', async () => {
     const { adapter, runs, starts, holdNext } = fixture();
     // The last binding read before the adapter-owned work is started.
