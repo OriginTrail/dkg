@@ -94,7 +94,7 @@ function joinedMember(options: {
   const warn = vi.fn();
   const agent = {
     contextGraphMetaProjection: {
-      ...stubRecipientRevisions(),
+      ...stubRecipientRevisions(store),
       readAuthorityFactsRevision: 0,
       readContextGraphAuthorityFactsRevision: () => '0:0',
     },

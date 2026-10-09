@@ -1929,8 +1929,9 @@ export interface DKGAgentConfig {
   /**
    * Whether durable context-graph subscription rows become live subscriptions
    * during startup. Defaults to `true`. When `false`, startup still opens the
-   * same durable stores and leaves every row and RDF graph intact, but it does
-   * not restore those rows into gossip handlers or automatic sync scope.
+   * same durable stores and leaves every row and RDF graph intact. Canonical
+   * saved numeric identity is restored into inactive rows before discovery;
+   * subscription, hosting, readiness, gossip and automatic sync stay disabled.
    * Explicit subscriptions made after boot continue to work normally.
    */
   contextGraphSubscriptionRehydrationEnabled?: boolean;
