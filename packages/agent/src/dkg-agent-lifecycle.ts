@@ -2602,6 +2602,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     await this.loadSwmSenderKeyState();
     await this.initializeSwmHostModeStore();
     await this.rehydrateContextGraphsFromDurableState();
+    await this.restoreSwmHostModeSubscriptions();
 
     this.networkAdmissionCoordinator.registerIdentityProtocol(this.router);
 

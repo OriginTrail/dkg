@@ -10,6 +10,7 @@
 
 import { orderVmRecoveryCandidates } from './vm-recovery-candidate-order.js';
 import { isAdmittedContextGraphSubscription } from './context-graph-subscription-policy.js';
+import { normalizeContextGraphNameHash } from './context-graph-name-candidate.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { createSwmHostModeHandler } from './internal/gossip/host-mode-handler.js';
 import { Buffer } from 'node:buffer';
@@ -806,6 +807,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
       `SWM host-mode store initialized at ${join(this.config.dataDir, 'swm-host')} (role=${role})`,
     );
 
+  }
+
+  /** Restore disk intent after the durable subscription admission plan exists. */
+  async restoreSwmHostModeSubscriptions(this: DKGAgent): Promise<void> {
+    if (!this.swmHostModeStore) return;
+    const session = this.gossipSession;
+    if (session.live() === null) return;
     // OT-RFC-38 LU-6 B3 — restore persisted host-mode subscriptions
     // BEFORE the chain-event poller starts. Chain events older than
     // the poller's lookback window would otherwise be silently lost
@@ -815,6 +823,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // shortcut that keeps the per-restart re-derivation cheap.
     try {
       const previouslySubscribed = await this.swmHostModeStore.listHostModeSubscribedCgs();
+      if (!session.active || this.gossipSession !== session) return;
       if (previouslySubscribed.length > 0) {
         // OT-RFC-49 WS-A — persisted host-mode subscriptions are curated by
         // construction (the curated check ran when each was first wired). With
@@ -843,6 +852,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
           // authority check on every envelope ingest still catches
           // revocations even if curator state has changed since.
           try {
+            if (!session.active || this.gossipSession !== session) return;
+            if (!this.automaticSwmHostModeAdmissionAllowed(cgId)) continue;
             this.wireSwmHostModeHandler(cgId, SUBSCRIPTION_SOURCES.RECONCILER, true);
             // Codex PR #620 R2: also re-probe registration state.
             // Without this, a host-only CG that was registered while
@@ -852,6 +863,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
             // sees local store graphs, so the periodic reconciler
             // can't heal it later either.
             await this.maybeMarkRegisteredForHostMode(cgId);
+            if (!session.active || this.gossipSession !== session) return;
+            this.automaticSwmHostModeAdmissionAllowed(cgId);
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             this.log.warn(
@@ -884,6 +897,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const live = session.live();
     if (live === null) return;
     if (!this.swmHostModeStore) return;
+    if (!this.automaticSwmHostModeAdmissionAllowed(contextGraphId)) return;
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) return;
     if (!this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)) {
       // Host reconciliation is a second, independent path into the same
@@ -918,44 +932,28 @@ export class SwmHostModeMethods extends DKGAgentBase {
       ) {
         // A manually hosted CG can become curated later. Upgrade the cached
         // classification so the existing handler starts stripping immediately.
-        if (!session.active || this.gossipSession !== session) return;
+        if (!session.active || this.gossipSession !== session
+          || !this.automaticSwmHostModeAdmissionAllowed(contextGraphId)
+          || this.swmHostModeAccessPolicy(contextGraphId) === 0) return;
         session.swmHostModeCurated.set(hostKey, true);
       }
+      if (!session.active || this.gossipSession !== session
+        || !this.automaticSwmHostModeAdmissionAllowed(contextGraphId)) return;
       await this.maybeMarkRegisteredForHostMode(contextGraphId);
+      if (!session.active || this.gossipSession !== session) return;
+      this.automaticSwmHostModeAdmissionAllowed(contextGraphId);
       return;
     }
 
     // Only host curated CGs. Public CGs already have plaintext SWM
     // distribution and don't need an opaque ciphertext custodian.
     //
-    // OT-RFC-38 / LU-6 Phase B — three-source curation probe in
-    // cheapest-first order. The local SPARQL probe (the original
-    // gate) only finds the access-policy triple for CGs the local
-    // node CREATED or JOINED with metadata; for a chain-event-
-    // driven host-only core OR a beacon-driven pre-reg auto-host,
-    // no local meta exists and `isPrivateContextGraph` returns
-    // false, stranding the subscription. We supplement it with:
-    //
-    //   (a) `subscribedContextGraphs[contextGraphId].onChainHash` —
-    //       set ONLY by code paths that already proved curation
-    //       (chain-event handler with accessPolicy==1, beacon
-    //       handler with accessPolicy==BEACON_ACCESS_POLICY_CURATED,
-    //       successful curator-side `registerContextGraph` on a
-    //       curated CG). Cheapest of the three.
-    //   (b) `onChainAccessPolicyCache` — populated by the chain-
-    //       event poller; keyed by on-chain numeric id. Falls
-    //       through to the existing per-CG cache for CGs whose
-    //       cleartext is unknown locally.
-    //
-    // Any of the three returning "curated" is sufficient. If all
-    // three return "not curated", we bail (same as before). The
-    // probe is shared with `enableSwmHostModeFor` via
-    // {@link isCuratedForHostMode} so the operator-hatch close
-    // (OT-RFC-49 WS-A) sees the SAME curation answer as auto-host —
-    // critically, the host-only-core case where there's no local
-    // `_meta` and `isPrivateContextGraph` alone returns false.
+    // A numeric policy, verified curated beacon or native private metadata
+    // proves curation. A name commitment alone does not prove access policy.
     const curated = await this.isCuratedForHostMode(contextGraphId);
-    if (!curated || !session.active || this.gossipSession !== session) return;
+    if (!curated || !session.active || this.gossipSession !== session
+      || !this.automaticSwmHostModeAdmissionAllowed(contextGraphId)
+      || this.swmHostModeAccessPolicy(contextGraphId) === 0) return;
 
     // OT-RFC-49 WS-A — the private-ciphertext strip. With `stripCiphertext`
     // ON (default), a core declines ALL host-mode custody for a curated CG:
@@ -980,8 +978,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
     this.wireSwmHostModeHandler(contextGraphId, source, true);
     await this.awaitHostModePersistence(contextGraphId);
-
+    if (!session.active || this.gossipSession !== session
+      || !this.automaticSwmHostModeAdmissionAllowed(contextGraphId)) return;
     await this.maybeMarkRegisteredForHostMode(contextGraphId);
+    if (!session.active || this.gossipSession !== session
+      || !this.automaticSwmHostModeAdmissionAllowed(contextGraphId)) return;
 
     this.log.info(
       createOperationContext('system'),
@@ -1000,34 +1001,48 @@ export class SwmHostModeMethods extends DKGAgentBase {
     return this.config.swmHostMode?.stripCiphertext ?? true;
   }
 
-  /**
-   * OT-RFC-38 / LU-6 Phase B — the three-source curation probe used to decide
-   * whether a CG warrants host-mode custody, in cheapest-first order:
-   *
-   *   (a) `subscribedContextGraphs[id].onChainHash` — set ONLY by paths that
-   *       already proved curation (chain-event handler with accessPolicy==1,
-   *       beacon handler with BEACON_ACCESS_POLICY_CURATED, curator-side
-   *       register of a curated CG);
-   *   (b) `onChainId` + `onChainAccessPolicyCache===1` — populated by the
-   *       chain-event poller, keyed by numeric on-chain id;
-   *   (c) `isPrivateContextGraph` — the local `_meta` accessPolicy/allowlist
-   *       read (the original gate; the only one a host-only core CANNOT
-   *       satisfy, since it never holds the cleartext `_meta`).
-   *
-   * Any positive ⇒ curated. A probe throw is treated as NOT curated (the same
-   * bail-out `reconcileSwmHostModeSubscription` had inline). Extracted so the
-   * OT-RFC-49 WS-A operator-hatch close in {@link enableSwmHostModeFor} sees
-   * the EXACT same curation answer as the auto-host path — without this, a
-   * host-only core (no local `_meta`) would fail an `isPrivateContextGraph`-only
-   * check, leaving the operator override open for precisely the case WS-A
-   * exists to close.
-   */
+  /** Exact local identity wins; absent raw wire requests use native routing. */
+  swmHostModeLocalId(this: DKGAgent, contextGraphId: string): string {
+    if (this.subscribedContextGraphs.has(contextGraphId)
+      || this.contextGraphSubscriptionDormancyById.has(contextGraphId)) return contextGraphId;
+    const wireId = normalizeContextGraphNameHash(contextGraphId);
+    if (wireId === null) return contextGraphId;
+    if (this.subscribedContextGraphs.has(wireId)
+      || this.contextGraphSubscriptionDormancyById.has(wireId)) return wireId;
+    return this.resolveContextGraphIdAlias(wireId) ?? wireId;
+  }
+
+  /** Automatic hosting cannot activate saved intent that admission left dormant. */
+  automaticSwmHostModeAdmissionAllowed(this: DKGAgent, contextGraphId: string): boolean {
+    const localId = this.swmHostModeLocalId(contextGraphId);
+    if (!this.contextGraphSubscriptionDormancyById.has(localId)
+      || isAdmittedContextGraphSubscription(this.subscribedContextGraphs.get(localId))) return true;
+    const hostKey = this.canonicalSwmHostModeKey(contextGraphId);
+    // Refusal of A cannot retire an operator handler or another slot's owner B.
+    if (this.swmHostModeSubscribed.get(hostKey) !== SUBSCRIPTION_SOURCES.MANUAL
+      && this.wireIdToLocalCgId.get(hostKey) === localId) this.unwireSwmHostModeHandler(contextGraphId);
+    return false;
+  }
+
+  /** Numeric policy is authoritative over metadata and same-hash beacon hints. */
+  swmHostModeAccessPolicy(this: DKGAgent, contextGraphId: string): number | undefined {
+    let sub = this.subscribedContextGraphs.get(this.swmHostModeLocalId(contextGraphId));
+    if (!sub?.onChainId && normalizeContextGraphNameHash(contextGraphId) !== null) {
+      const owner = this.wireIdToLocalCgId.get(this.canonicalSwmHostModeKey(contextGraphId));
+      sub = owner === undefined ? undefined : this.subscribedContextGraphs.get(owner);
+    }
+    return sub?.onChainId ? this.onChainAccessPolicyCache.get(sub.onChainId) : undefined;
+  }
+
+  /** Curation requires actual policy, signed beacon verification or private metadata. */
   async isCuratedForHostMode(this: DKGAgent, contextGraphId: string): Promise<boolean> {
-    const sub = this.subscribedContextGraphs.get(contextGraphId);
-    if (sub?.onChainHash) return true;
-    if (sub?.onChainId && this.onChainAccessPolicyCache.get(sub.onChainId) === 1) return true;
+    const policy = this.swmHostModeAccessPolicy(contextGraphId);
+    if (policy !== undefined) return policy === 1;
+    if (this.beaconCuratorByWireId.has(this.canonicalSwmHostModeKey(contextGraphId))) return true;
     try {
-      return await this.isPrivateContextGraph(contextGraphId);
+      const privateMetadata = await this.isPrivateContextGraph(this.swmHostModeLocalId(contextGraphId));
+      const currentPolicy = this.swmHostModeAccessPolicy(contextGraphId);
+      return currentPolicy === undefined ? privateMetadata : currentPolicy === 1;
     } catch {
       return false;
     }
@@ -1093,6 +1108,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const session = this.gossipSession;
     const live = session.live();
     if (live === null) return;
+    if (source !== SUBSCRIPTION_SOURCES.MANUAL
+      && !this.automaticSwmHostModeAdmissionAllowed(contextGraphId)) return;
     if (!this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)) {
       const hostKey = this.canonicalSwmHostModeKey(contextGraphId);
       const hadRuntimeHostState = session.swmHostModeHandlers.has(hostKey)

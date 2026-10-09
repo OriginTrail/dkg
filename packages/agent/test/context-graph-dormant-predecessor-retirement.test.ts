@@ -218,6 +218,32 @@ describe('durable dormant name predecessor retirement', () => {
     expect((restarted as unknown as Internals).subscribedContextGraphs.get(HASH)?.subscribed ?? false).toBe(false);
   });
 
+  it('preserves a newly durable Core predecessor with unchanged runtime ownership', async () => {
+    const saved = predecessor(); const f = await fixture([saved]);
+    await f.agent.upsertContextGraphMember({ contextGraphId: HASH, principalType: 'node', principalId: f.agent.peerId,
+      status: 'active', role: 'subscriber', metadata: { onChainId: SLOT } }, { strict: true });
+    let entered!: () => void; let release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const original = f.membershipStore.loadAll;
+    vi.spyOn(f.membershipStore, 'loadAll').mockImplementationOnce(async () => { entered(); await held; return original(); });
+    f.agent.subscribeToContextGraph(LOCAL, { deferSharedMemoryGossipSubscribe: true });
+    await started;
+    const bindings = (f.agent as unknown as { contextGraphBindingState: { capture(id: string): number } }).contextGraphBindingState;
+    const pointer = f.state.subscribedContextGraphs.get(LOCAL);
+    const sourcePointer = f.state.subscribedContextGraphs.get(HASH);
+    const generation = bindings.capture(LOCAL); const sourceGeneration = bindings.capture(HASH);
+    const newlyHosted = { ...saved, coreHosted: true };
+    await f.store.save(newlyHosted);
+    expect(f.state.subscribedContextGraphs.get(LOCAL)).toBe(pointer);
+    expect(f.state.subscribedContextGraphs.get(HASH)).toBe(sourcePointer);
+    expect(bindings.capture(LOCAL)).toBe(generation); expect(bindings.capture(HASH)).toBe(sourceGeneration);
+    release(); await f.drain();
+    expect(f.rows()).toContainEqual(newlyHosted);
+    expect(f.remove).not.toHaveBeenCalled(); expect(f.membershipStore.delete).not.toHaveBeenCalled();
+    expect([...f.members.values()]).toContainEqual(expect.objectContaining({ contextGraphId: HASH }));
+  });
+
   it('does not retire a source whose exact node membership now proves a foreign slot', async () => {
     const saved = predecessor(); const f = await fixture([saved]);
     await f.agent.upsertContextGraphMember({ contextGraphId: HASH, principalType: 'node', principalId: f.agent.peerId,
