@@ -45,6 +45,7 @@ import { stripLiteral } from './dkg-agent-utils.js';
 import { isCanonicalAuthoritativeContextGraphId } from
   './context-graph-binding-state.js';
 import { ensureCuratorConnected } from './curator-peer-connection.js';
+import { noteCuratorRegistrationRefusal } from './curator-registration-refusal.js';
 
 export interface CuratorMetaRefreshOptions {
   signal?: AbortSignal;
@@ -785,12 +786,17 @@ async function executeCuratorMetaRefresh(
     );
     if (!snapshot) return false;
     if (!preservesCuratorRegistrationBinding(agent, contextGraphId, snapshot.quads)) {
+      // Counted, so a caller that retries failed refreshes does not fetch it again.
+      noteCuratorRegistrationRefusal(agent, contextGraphId, curatorPeerId);
       agent.syncCheckpoints.delete(snapshot.checkpointKey);
       agent.log.warn(ctx, `Rejected curator metadata for "${contextGraphId}": `
         + `its registration conflicts with owned slot ${agent.subscribedContextGraphs?.get(contextGraphId)?.onChainId}`);
       return false;
     }
     if (!(await atomicallyReplaceCuratorMetaSnapshot(agent, contextGraphId, snapshot, ctx))) {
+      if (!preservesCuratorRegistrationBinding(agent, contextGraphId, snapshot.quads)) {
+        noteCuratorRegistrationRefusal(agent, contextGraphId, curatorPeerId);
+      }
       agent.syncCheckpoints.delete(snapshot.checkpointKey);
       agent.log.warn(
         ctx,
