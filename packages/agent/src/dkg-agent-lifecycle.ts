@@ -763,6 +763,7 @@ import {
   projectContextGraphSubscriptionPersistence,
   projectContextGraphSubscriptionPersistenceWithSavedHosting,
   readPreservedContextGraphCoreHosting,
+  isContextGraphSubscriptionPersistenceTargetCurrent,
   projectContextGraphJoinSubscriptionRecord,
   retainsInactiveContextGraphBinding,
 } from './context-graph-subscription-policy.js';
@@ -9802,8 +9803,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     const sub = this.subscribedContextGraphs.get(contextGraphId);
     const generation = this.contextGraphBindingState.capture(contextGraphId);
+    const revision = options?.revision ?? this.contextGraphSubscriptionPersistRevisions.get(contextGraphId);
     const input = {
-      contextGraphId, subscription: sub,
+      contextGraphId, subscription: sub && { ...sub },
       syncScoped: (this.config.syncContextGraphs ?? []).includes(contextGraphId),
       preserveInactiveIntent: options?.preserveInactiveIntent,
     };
@@ -9815,13 +9817,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     let written = false;
     let persisted: ContextGraphSubscriptionRecord | undefined;
     return this.enqueueContextGraphSubscriptionPersistWrite(contextGraphId, async () => {
-      const persistence = sub?.coreHosted === true
+      const persistence = input.subscription?.coreHosted === true
         ? projectContextGraphSubscriptionPersistence(input)
         : await projectContextGraphSubscriptionPersistenceWithSavedHosting(input, store, options?.preserveDormantHosting);
       const current = this.subscribedContextGraphs.get(contextGraphId);
       const retired = persistence.action === 'delete' && current === undefined;
-      if (persistence.action === 'skip' || (!retired && (current !== sub
-        || !this.contextGraphBindingState.isGenerationCurrent(contextGraphId, generation)))) return;
+      if (persistence.action === 'skip' || (!retired && (
+        !this.contextGraphBindingState.isGenerationCurrent(contextGraphId, generation)
+        || !isContextGraphSubscriptionPersistenceTargetCurrent(sub, input, current, {
+          revision,
+          pendingRevisions: this.contextGraphSubscriptionPersistPendingRevisions.get(contextGraphId),
+          syncScoped: (this.config.syncContextGraphs ?? []).includes(contextGraphId),
+        })))) return;
       if (persistence.action === 'delete') await store.delete(contextGraphId);
       else {
         persisted = persistence.record;

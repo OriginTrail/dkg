@@ -72,6 +72,38 @@ export type ContextGraphSubscriptionPersistenceProjection =
     record: ContextGraphSubscriptionRecord;
   };
 
+/** Preserve non-coalescing queued intent without lending it a different binding. */
+export function isContextGraphSubscriptionPersistenceTargetCurrent(
+  captured: ContextGraphSub | undefined,
+  input: { subscription: ContextGraphSub | undefined; syncScoped: boolean },
+  current: ContextGraphSub | undefined,
+  state: {
+    revision: number | undefined;
+    pendingRevisions: ReadonlySet<number> | undefined;
+    syncScoped: boolean;
+  },
+): boolean {
+  const snapshot = input.subscription;
+  if (snapshot?.onChainId !== current?.onChainId
+    || snapshot?.onChainHash !== current?.onChainHash) return false;
+  // A genuine queued successor owns the later durable intent. Both snapshots
+  // execute in order; a failed successor must not erase the older success.
+  const revision = state.revision;
+  if (current !== undefined && revision !== undefined
+    && [...(state.pendingRevisions ?? [])].some((pending) => pending > revision)) return true;
+  if (current === captured) return true;
+  if (!snapshot || !current || state.syncScoped !== input.syncScoped
+    || isAdmittedContextGraphSubscription(snapshot)
+    || isAdmittedContextGraphSubscription(current)) return false;
+  // Inactive discovery owns name/participant enrichment, not a replacement
+  // durable write. Every other persisted field must retain its captured value.
+  return snapshot.syncMode === current.syncMode
+    && snapshot.subscribed === current.subscribed && snapshot.coreHosted === current.coreHosted
+    && snapshot.synced === current.synced && snapshot.sharedMemorySynced === current.sharedMemorySynced
+    && snapshot.metaSynced === current.metaSynced
+    && snapshot.lastReconciledOrdinal === current.lastReconciledOrdinal;
+}
+
 /**
  * Canonical durable projection for live Context Graph subscription state.
  *
