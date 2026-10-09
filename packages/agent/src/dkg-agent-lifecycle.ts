@@ -765,6 +765,7 @@ import {
   readPreservedContextGraphCoreHosting,
   isContextGraphSubscriptionPersistenceTargetCurrent,
   projectContextGraphJoinSubscriptionRecord,
+  contextGraphSubscriptionClearTargets,
   retainsInactiveContextGraphBinding,
 } from './context-graph-subscription-policy.js';
 import { partitionSupersededContextGraphNamePlaceholders } from './dkg-agent-cg-name-resolution.js';
@@ -11174,32 +11175,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // USER context-graph subscriptions, live and persisted alike. (The store's
     // system-unaware bulk delete is deliberately NOT used here.)
     const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
-    // Clearable = a NON-system, NON-coreHosted user subscription. System CGs are
-    // the control plane (above). coreHosted graphs are legitimate hosted graphs
-    // that `unsubscribeFromContextGraph` deliberately keeps wired for host-mode /
-    // chain reconcile (so a teardown can't fully remove them anyway) and that the
-    // rehydration cap already exempts — clearing/counting them here would report a
-    // removal that didn't happen. The clear targets only the stale non-hosted
-    // backlog, the actual #997 wedge.
-    const isClearable = (id: string, coreHosted: boolean | undefined): boolean =>
-      !systemContextGraphs.has(id) && coreHosted !== true;
-
-    const activeUserIds = [...this.subscribedContextGraphs.entries()]
-      .filter(([id, s]) => isClearable(id, s?.coreHosted))
-      .map(([id]) => id);
-
-    // The full persisted clearable backlog (active + dormant rows left behind by
-    // the rehydration cap). Counted up front: `unsubscribeFromContextGraph`
-    // deletes each active row as a side effect, so a post-teardown count would
-    // miss them. Starts empty so a node with NO store reports 0 persisted rows
-    // removed (the active teardown is logged separately) rather than a phantom
-    // count of the in-memory subs.
-    let persistedUserIds: string[] = [];
+    // Snapshot saved hosting before teardown: dormant Core intent is not
+    // reflected by the inactive runtime projection. Pending writes are checked
+    // again inside their serial lane before a selective durable deletion.
+    let persistedRows: ContextGraphSubscriptionRecord[] = [];
     if (store) {
       try {
-        persistedUserIds = (await store.loadAll())
-          .filter((r) => isClearable(r.id, r.coreHosted))
-          .map((r) => r.id);
+        persistedRows = await store.loadAll();
       } catch (err) {
         // Can't enumerate the persisted backlog → the dormant (capped-out) rows
         // would survive and rehydrate after the next restart. Do NOT silently
@@ -11213,6 +11195,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         );
       }
     }
+    const { activeUserIds, persistedUserIds } = contextGraphSubscriptionClearTargets(
+      this.subscribedContextGraphs, persistedRows, systemContextGraphs,
+    );
     const activeUserIdsWithPendingStoreWrite = store
       ? activeUserIds.filter((id) => this.contextGraphSubscriptionPersistence.hasLane(id))
       : [];
@@ -11255,7 +11240,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       cleared = 0;
       for (const id of storeDeleteIds) {
         try {
-          await this.enqueueContextGraphSubscriptionPersistWrite(id, () => store.delete(id));
+          let deleted = false;
+          await this.enqueueContextGraphSubscriptionPersistWrite(id, async () => {
+            const hosted = store.load ? (await store.load(id))?.coreHosted === true
+              : (await store.loadAll()).some(row => row.id === id && row.coreHosted === true);
+            if (hosted || this.subscribedContextGraphs.get(id)?.coreHosted === true) return;
+            await store.delete(id);
+            deleted = true;
+          });
+          if (!deleted) continue;
           cleared++;
           clearedIds.push(id);
         } catch (err) {

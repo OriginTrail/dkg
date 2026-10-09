@@ -73,13 +73,21 @@ export function matchingContextGraphNamePredecessors<T extends ContextGraphNameR
   rows: readonly T[],
   destination: ContextGraphNameRetirementIdentity,
   hostingPreserved: boolean,
+  retired?: ContextGraphNameRetirementIdentity,
 ): T[] | null {
   const identity = nameRetirementIdentity(destination);
   const hash = identity?.onChainHash;
   if (!identity || !hash || hash === destination.id.toLowerCase()) return null;
   const predecessors = rows.filter((row) => typeof row?.id === 'string' && row.id.toLowerCase() === hash);
+  const captured = retired && nameRetirementIdentity(retired);
+  const capturedHash = captured?.onChainHash;
   return predecessors.some((row) => {
-    const source = nameRetirementIdentity(row);
+    // Only the exact genuinely retired raw-wire row can supply a legacy missing
+    // commitment. A saved hash-shaped key alone has no such authority.
+    const repaired = capturedHash !== undefined && row.onChainHash === undefined && row.id === retired?.id
+      && capturedHash === normalizeContextGraphNameHash(row.id)
+      && captured?.onChainId === row.onChainId;
+    const source = nameRetirementIdentity(repaired ? { ...row, onChainHash: capturedHash } : row);
     return !source || source.onChainId !== identity.onChainId || source.onChainHash !== hash
       || (row.coreHosted === true && !hostingPreserved);
   }) ? null : predecessors;
@@ -119,7 +127,7 @@ export async function retireCommittedContextGraphNamePredecessors(
   if (!ports.destinationCurrent()) return;
   const loaded = await ports.store.loadAll();
   if (!ports.destinationCurrent()) return;
-  const predecessors = matchingContextGraphNamePredecessors(loaded, destination, hostingPreserved);
+  const predecessors = matchingContextGraphNamePredecessors(loaded, destination, hostingPreserved, retired);
   if (predecessors === null) return;
   const remaining = predecessors.map(row => ({ ...row }));
   const candidates: ContextGraphNameRetirementIdentity[] = [...remaining];

@@ -16,6 +16,21 @@ export function isAdmittedContextGraphSubscription(
   return subscription?.subscribed === true || subscription?.coreHosted === true;
 }
 
+/** Bulk recovery removes member backlog, never independent saved Core intent. */
+export function contextGraphSubscriptionClearTargets(
+  subscriptions: ReadonlyMap<string, Pick<ContextGraphSub, 'coreHosted'>>,
+  persisted: readonly ContextGraphSubscriptionRecord[],
+  systemIds: ReadonlySet<string>,
+): { activeUserIds: string[]; persistedUserIds: string[] } {
+  const savedHosting = new Set(persisted.filter(row => row.coreHosted === true).map(row => row.id));
+  const clearable = (id: string, hosted: boolean | undefined) =>
+    !systemIds.has(id) && !savedHosting.has(id) && hosted !== true;
+  return {
+    activeUserIds: [...subscriptions].filter(([id, row]) => clearable(id, row.coreHosted)).map(([id]) => id),
+    persistedUserIds: persisted.filter(row => clearable(row.id, row.coreHosted)).map(row => row.id),
+  };
+}
+
 export function normalizeContextGraphSubscriptionTransition(
   previous: ContextGraphSub | undefined,
   next: ContextGraphSubInput,

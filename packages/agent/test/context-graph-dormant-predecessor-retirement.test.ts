@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/index.js';
+import { matchingContextGraphNamePredecessors } from '../src/context-graph-persisted-name-aliases.js';
 import type { ContextGraphMembershipRecord, ContextGraphSub, ContextGraphSubInput, ContextGraphSubscriptionRecord, ContextGraphSubscriptionStore } from '../src/dkg-agent-types.js';
 
 const LOCAL = 'dormant-predecessor-retirement';
@@ -226,4 +227,30 @@ describe('durable dormant name predecessor retirement', () => {
     expect([...f.members.values()]).toContainEqual(expect.objectContaining({ contextGraphId: HASH, metadata: { onChainId: '323' } }));
   });
 
+});
+
+
+describe('legacy missing-hash retirement requires captured native wire identity', () => {
+  const destination = { id: LOCAL, onChainId: SLOT, onChainHash: HASH, coreHosted: false };
+  const saved = predecessor({ onChainHash: undefined });
+  it('accepts exact captured raw-wire identity after the canonical commit', () => {
+    expect(matchingContextGraphNamePredecessors([saved], destination, false, predecessor())).toEqual([saved]);
+  });
+  it('does not infer raw-wire meaning from an unproved saved hash-shaped key', () => {
+    expect(matchingContextGraphNamePredecessors([saved], destination, false)).toBeNull();
+  });
+  it.each([
+    { id: HASH.toUpperCase() }, { onChainId: undefined }, { onChainId: '323' },
+    { onChainHash: undefined }, { onChainHash: ethers.keccak256(ethers.toUtf8Bytes(HASH)) },
+  ])('refuses a different or unproved captured predecessor %j', overrides => {
+    expect(matchingContextGraphNamePredecessors([saved], destination, false, predecessor(overrides))).toBeNull();
+  });
+  it.each([null, '', 'malformed', ethers.keccak256(ethers.toUtf8Bytes(HASH))])('does not repair a known invalid saved commitment %s', onChainHash => {
+    const invalid = { ...saved, onChainHash } as unknown as ContextGraphSubscriptionRecord;
+    expect(matchingContextGraphNamePredecessors([invalid], destination, false, predecessor())).toBeNull();
+  });
+  it('refuses a foreign competing case variant or unpreserved saved Core intent', () => {
+    expect(matchingContextGraphNamePredecessors([saved, predecessor({ id: HASH.toUpperCase(), onChainId: '323' })], destination, false, predecessor())).toBeNull();
+    expect(matchingContextGraphNamePredecessors([{ ...saved, coreHosted: true }], destination, false, predecessor())).toBeNull();
+  });
 });
