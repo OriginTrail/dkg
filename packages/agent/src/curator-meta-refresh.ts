@@ -45,7 +45,10 @@ import { stripLiteral } from './dkg-agent-utils.js';
 import { isCanonicalAuthoritativeContextGraphId } from
   './context-graph-binding-state.js';
 import { ensureCuratorConnected } from './curator-peer-connection.js';
-import { noteCuratorRegistrationRefusal } from './curator-registration-refusal.js';
+import {
+  noteCuratorMetaRefreshStarted,
+  noteCuratorRegistrationRefusal,
+} from './curator-registration-refusal.js';
 
 export interface CuratorMetaRefreshOptions {
   signal?: AbortSignal;
@@ -761,6 +764,8 @@ async function executeCuratorMetaRefresh(
   options: CuratorMetaRefreshOptions,
   ctx: OperationContext,
 ): Promise<boolean> {
+  // Numbered as it starts, so a watch tells its refusal from an earlier refresh's.
+  const refresh = noteCuratorMetaRefreshStarted(agent, contextGraphId, curatorPeerId);
   const connectionResult = ensureCuratorConnected(
     agent,
     curatorPeerId,
@@ -787,7 +792,7 @@ async function executeCuratorMetaRefresh(
     if (!snapshot) return false;
     if (!preservesCuratorRegistrationBinding(agent, contextGraphId, snapshot.quads)) {
       // Counted, so a caller that retries failed refreshes does not fetch it again.
-      noteCuratorRegistrationRefusal(agent, contextGraphId, curatorPeerId);
+      noteCuratorRegistrationRefusal(agent, contextGraphId, curatorPeerId, refresh);
       agent.syncCheckpoints.delete(snapshot.checkpointKey);
       agent.log.warn(ctx, `Rejected curator metadata for "${contextGraphId}": `
         + `its registration conflicts with owned slot ${agent.subscribedContextGraphs?.get(contextGraphId)?.onChainId}`);
@@ -795,7 +800,7 @@ async function executeCuratorMetaRefresh(
     }
     if (!(await atomicallyReplaceCuratorMetaSnapshot(agent, contextGraphId, snapshot, ctx))) {
       if (!preservesCuratorRegistrationBinding(agent, contextGraphId, snapshot.quads)) {
-        noteCuratorRegistrationRefusal(agent, contextGraphId, curatorPeerId);
+        noteCuratorRegistrationRefusal(agent, contextGraphId, curatorPeerId, refresh);
       }
       agent.syncCheckpoints.delete(snapshot.checkpointKey);
       agent.log.warn(

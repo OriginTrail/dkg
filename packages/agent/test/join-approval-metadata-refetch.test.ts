@@ -27,6 +27,7 @@ const CURATOR_AGENT = '0x00000000000000000000000000000000000000c1';
 const TRANSPORT_FAILURE = 'Remote closed connection during opening';
 
 type JoinRequestHandler = (data: Uint8Array, peerId: string) => Promise<Uint8Array>;
+type MetadataFetchOutcome = SyncPageResult['quads'] | Error;
 
 /** The parts of the agent these tests reach past its public surface for. */
 interface MemberInternals {
@@ -103,13 +104,13 @@ describe('metadata of a join approved while the node runs (#3109)', () => {
 
   /**
    * The curator is connected and answers a catch-up; what its metadata fetch
-   * returns is decided per call by `metadataFetch`. Everything between the
-   * approval and that fetch runs for real.
+   * returns, and when, is decided per call by `metadataFetch`. Everything
+   * between the approval and that fetch runs for real.
    */
   function reachCurator(
     member: DKGAgent,
     contextGraphId: string,
-    metadataFetch: (attempt: number) => SyncPageResult['quads'] | Error,
+    metadataFetch: (attempt: number) => MetadataFetchOutcome | Promise<MetadataFetchOutcome>,
   ) {
     const calls = { metadataFetches: 0, catchUps: 0, broadcasts: 0 };
     vi.spyOn(member.node.libp2p, 'getConnections').mockReturnValue([
@@ -137,12 +138,12 @@ describe('metadata of a join approved while the node runs (#3109)', () => {
         if (remotePeerId !== CURATOR_PEER || id !== contextGraphId || phase !== 'meta') {
           throw new Error(`unexpected fetch of ${id}/${phase} from ${remotePeerId}`);
         }
-        calls.metadataFetches += 1;
-        const outcome = metadataFetch(calls.metadataFetches);
+        const attempt = calls.metadataFetches += 1;
+        const outcome = await metadataFetch(attempt);
         if (outcome instanceof Error) throw outcome;
         return {
           quads: outcome,
-          checkpointKey: `join-metadata-refetch-${calls.metadataFetches}`,
+          checkpointKey: `join-metadata-refetch-${attempt}`,
           resumedFromOffset: 0,
           completed: true,
         } as SyncPageResult;
@@ -317,6 +318,43 @@ describe('metadata of a join approved while the node runs (#3109)', () => {
     await expect(agent.resumePendingJoinApprovalMetadata(contextGraphId, CURATOR_PEER))
       .resolves.toBe('completed');
     expect(sync).toHaveBeenCalledWith(contextGraphId, CURATOR_PEER);
+  }, 30_000);
+
+  it.each([
+    { earlier: 'refused', own: 'failed in transport', outcome: 'retry' },
+    { earlier: 'failed in transport', own: 'refused', outcome: 'stop' },
+  ] as const)('judges a recovery attempt by its own fetch when a refresh still running before it is $earlier', async ({ earlier, outcome }) => {
+    agent = await startMember('JoinMetadataEarlierRefresh');
+    const contextGraphId = 'join-metadata-earlier-refresh';
+    const member = approve(agent, contextGraphId, { onChainId: '582' });
+    const foreign = curatorSnapshot(contextGraphId, member, agent.peerId, '323');
+    const answers = earlier === 'refused'
+      ? [foreign, new Error(TRANSPORT_FAILURE)]
+      : [new Error(TRANSPORT_FAILURE), foreign];
+    let releaseEarlier!: () => void;
+    const earlierHeld = new Promise<void>((resolve) => { releaseEarlier = resolve; });
+    const calls = reachCurator(agent, contextGraphId, async (attempt) => {
+      if (attempt === 1) await earlierHeld;
+      return answers[attempt - 1]!;
+    });
+    vi.spyOn(agent, 'runImmediatePostApprovalSync').mockResolvedValue(undefined);
+    const refresh = vi.spyOn(agent, 'refreshMetaFromCurator');
+
+    // A refresh of the same graph and curator is still fetching when the
+    // attempt starts; the attempt's own refresh waits behind it.
+    const running = agent.refreshMetaFromCurator(contextGraphId, {
+      trustedCuratorPeerId: CURATOR_PEER,
+      force: true,
+      approvedMember: await agent.resolveApprovedMemberAcceptance(contextGraphId),
+    });
+    await vi.waitFor(() => expect(calls.metadataFetches).toBe(1));
+    const attempt = agent.resumePendingJoinApprovalMetadata(contextGraphId, CURATOR_PEER);
+    await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(2));
+    releaseEarlier();
+
+    await expect(running).resolves.toBe(false);
+    await expect(attempt).resolves.toBe(outcome);
+    expect(calls.metadataFetches).toBe(2);
   }, 30_000);
 
   it.each([
