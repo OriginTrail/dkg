@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-
 /**
  * Workspace-encryption / sender-key subsystem extracted from dkg-agent.ts as
  * a mixin holder: recipient/gate resolution, on-chain access-policy reads,
@@ -106,7 +105,6 @@ import {
   ACKCollector, StorageACKHandler,
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
   resolveWorkspaceAgentRecipients,
-  resolveWorkspaceAgentRecipientKeys,
   isWorkspaceAgentEncryptionKeyMissingError,
   WorkspaceAgentEncryptionKeyMissingError,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, isReservedSubject, computePrivateRootV10 as computePrivateRoot,
@@ -1889,7 +1887,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         for (const agentAddress of participantAgents) {
           let agentRecipients: WorkspaceAgentRecipient[];
           try {
-            agentRecipients = await resolveWorkspaceAgentRecipientKeys(this.store, agentAddress);
+            agentRecipients = await projection.recipientKeyCollect.resolve(agentAddress);
           } catch (error) {
             if (!isWorkspaceAgentEncryptionKeyMissingError(error)) throw error;
             missingKeys.push(...error.agentAddresses);
@@ -1918,7 +1916,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         }
         return {
           resolution: { requiresEncryption: true, recipients: [firstRecipient, ...remainingRecipients] },
-          stayedCurrent: () => attemptRevision === projection.recipientKeyRouteFence.revision
+          stayedCurrent: () => projection.recipientKeyRouteFence.hasPendingWrites !== true
+            && attemptRevision === projection.recipientKeyRouteFence.revision
             && attemptGate === projection.peerGateRevision.read(input.contextGraphId),
         };
       };
