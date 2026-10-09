@@ -20,7 +20,6 @@ import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
 import {
   contextGraphNameCommitmentOf,
   normalizeContextGraphNameHash,
-  verifyContextGraphNameCandidate,
 } from './context-graph-name-candidate.js';
 import {
   parseContextGraphOnChainIdReference,
@@ -32,6 +31,7 @@ import {
   type RetiredNumericContextGraphSubscription,
 } from './context-graph-on-chain-reference.js';
 import { contextGraphStorageObservation } from './context-graph-storage-discovery.js';
+import { resolveRetainedContextGraphNumericBinding } from './context-graph-name-binding-target.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type { ContextGraphSub } from './dkg-agent-types.js';
@@ -85,9 +85,9 @@ export class ContextGraphOnChainIdMethods extends DKGAgentBase {
 
   /**
    * The row this node keeps for on-chain Context Graph `onChainId`: the row
-   * the reverse name-hash index holds for the slot's committed name hash,
-   * when that row is bound to the id and is either the hash-keyed row or its
-   * verified cleartext. Chain facts name the hash. Without them (a restart
+   * admitted wire owner or unique retained row bound to both the slot and its
+   * committed name hash, either an explicit hash-keyed row or verified
+   * cleartext. Chain facts name the hash. Without them (a restart
    * before discovery reached the id; an on-demand read is never
    * checkpointed), each row bound to the id vouches with its own durable
    * commitment instead.
@@ -97,14 +97,9 @@ export class ContextGraphOnChainIdMethods extends DKGAgentBase {
     onChainId: string,
   ): { contextGraphId: string; nameHash: string } | null {
     const committed = normalizeContextGraphNameHash(this.onChainContextGraphFacts.get(onChainId)?.nameHash);
-    if (committed !== null) return this.heldContextGraphForNameHash(onChainId, committed);
-    for (const [contextGraphId, row] of this.subscribedContextGraphs) {
-      if (row.onChainId !== onChainId) continue;
-      const nameHash = normalizeContextGraphNameHash(row.onChainHash) ?? contextGraphNameCommitmentOf(contextGraphId);
-      const held = this.heldContextGraphForNameHash(onChainId, nameHash);
-      if (held?.contextGraphId === contextGraphId) return held;
-    }
-    return null;
+    return resolveRetainedContextGraphNumericBinding(
+      this.subscribedContextGraphs, this.wireIdToLocalCgId, onChainId, committed ?? undefined,
+    );
   }
 
   heldContextGraphForNameHash(
@@ -112,12 +107,9 @@ export class ContextGraphOnChainIdMethods extends DKGAgentBase {
     onChainId: string,
     nameHash: string,
   ): { contextGraphId: string; nameHash: string } | null {
-    const contextGraphId = this.wireIdToLocalCgId.get(nameHash);
-    if (contextGraphId === undefined) return null;
-    if (this.subscribedContextGraphs.get(contextGraphId)?.onChainId !== onChainId) return null;
-    const verified = contextGraphId === nameHash
-      || verifyContextGraphNameCandidate(contextGraphId, nameHash) === contextGraphId;
-    return verified ? { contextGraphId, nameHash } : null;
+    return resolveRetainedContextGraphNumericBinding(
+      this.subscribedContextGraphs, this.wireIdToLocalCgId, onChainId, nameHash,
+    );
   }
 
   /**
