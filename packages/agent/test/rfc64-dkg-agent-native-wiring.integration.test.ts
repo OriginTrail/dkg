@@ -24,6 +24,7 @@ import {
   assertionLifecycleUri,
   contextGraphAssertionUri,
   contextGraphMetaUri,
+  contextGraphOnChainIdBindingQuery,
   contextGraphLayerUri,
   contextGraphWorkspaceGraphUri,
   createGraphKnowledgeAssetScope,
@@ -52,7 +53,10 @@ import {
   writeSwmMaterializationWitness,
   type Quad,
 } from '@origintrail-official/dkg-storage';
-import { NoChainAdapter } from '@origintrail-official/dkg-chain';
+import {
+  NoChainAdapter,
+  type ContextGraphAuthorityIndexRevisionReader,
+} from '@origintrail-official/dkg-chain';
 import {
   computeFlatKCRootV10,
   generateGraphKnowledgeAssetMetadata,
@@ -198,6 +202,42 @@ const NATIVE_DEPLOYMENT = Object.freeze({
 const agents: DKGAgent[] = [];
 const tempDirs: string[] = [];
 const rpcHarness = createLoopbackJsonRpcTestHarness();
+
+/** Logical finalized name-reader capability; numeric agent resolvers stay native. */
+class ColdFinalizedCatalogChainV1 extends FinalizedVmLoopbackMockChainAdapterV1 {
+  authorityAvailable = true;
+  readonly finalizedNameReads: {
+    readonly nameHashes: readonly string[];
+    readonly signal: AbortSignal | undefined;
+    returnedId: string | null;
+  }[] = [];
+  readonly contextGraphAuthorityIndexRevisionReader: ContextGraphAuthorityIndexRevisionReader;
+
+  constructor(fixture: FinalizedVmLoopbackFixtureConfigV1) {
+    super(fixture);
+    this.contextGraphAuthorityIndexRevisionReader = {
+      resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: async (nameHashes, options) => {
+        options?.signal?.throwIfAborted();
+        const read = { nameHashes: [...nameHashes], signal: options?.signal, returnedId: null as string | null };
+        this.finalizedNameReads.push(read);
+        if (!this.authorityAvailable) throw new Error('cold finalized registration reader unavailable');
+        if (nameHashes.length !== 1 || nameHashes[0] !== fixture.nameHash) {
+          throw new Error('cold finalized fixture received a different name commitment');
+        }
+        const snapshot = await this.getContextGraphAuthoritySnapshot(BigInt(fixture.onChainContextGraphId));
+        read.returnedId = snapshot.contextGraphId;
+        return new Map([[fixture.nameHash, snapshot]]);
+      },
+      readContextGraphAuthorityIndexRevisions: async (ids, options) => {
+        options?.signal?.throwIfAborted();
+        return new Map(ids.map((id) => [id, '0'] as const));
+      },
+      whenIdle: async () => {},
+    };
+  }
+
+}
+
 const RFC64_M0_RECOVERY_SCENARIOS = Object.freeze(
   RFC64_M0_RECOVERY_SCENARIO_MANIFEST.map(({ id }) => id),
 );
@@ -8984,6 +9024,162 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
       authorAddress: AUTHOR,
     })).toBeNull();
+  }, 60_000);
+
+  it.each([
+    { lane: 'policy', accessPolicy: 0, authority: 'available' },
+    { lane: 'policy', accessPolicy: 0, authority: 'unavailable' },
+    { lane: 'VM', accessPolicy: 1, authority: 'available' },
+    { lane: 'VM', accessPolicy: 1, authority: 'unavailable' },
+  ] as const)('cold finalized registration $lane successor with $authority authority', async ({
+    lane, accessPolicy, authority,
+  }) => {
+    const nameHash = ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH_ID)).toLowerCase() as Digest32V1;
+    const asset = Object.freeze({
+      assertionRoot: ASSERTION_ROOT,
+      assertionVersion: '1',
+      authorAddress: AUTHOR,
+      kaId: ((BigInt(AUTHOR) << 96n) | 41n).toString(),
+      publisherAddress: AUTHOR,
+    });
+    const fixture = (withAsset: boolean) => Object.freeze({
+      accessPolicy,
+      active: true,
+      assertedAtChainId: NATIVE_DEPLOYMENT.assertedAtChainId,
+      assertedAtKav10Address: KAV10,
+      knowledgeAssetStorageAddress: KA_STORAGE,
+      assets: Object.freeze(withAsset ? [asset] : []),
+      blockHash: FINALIZED_BLOCK_HASH,
+      blockNumberQuantity: '0x7c',
+      contextGraphStorageAddress: CONTEXT_GRAPH_STORAGE,
+      nameHash,
+      networkId: NETWORK_ID,
+      onChainContextGraphId: '582',
+      ownerAddress: AUTHOR,
+      participantAgents: Object.freeze(accessPolicy === 1 ? [AUTHOR] : []),
+      publishPolicy: accessPolicy === 0 ? 1 : 0,
+    } satisfies FinalizedVmLoopbackFixtureConfigV1);
+    const emptyFixture = fixture(false);
+    let finalizedRpc = createFinalizedVmLoopbackRpcV1(emptyFixture);
+    const rpc = await rpcHarness.start((call, response) => {
+      try {
+        sendJsonRpcResult(response, call, finalizedRpc.respond(call.method, call.params));
+      } catch (cause) {
+        sendJsonRpcError(response, call, -32602, cause instanceof Error ? cause.message : String(cause));
+      }
+    });
+    const receiverChain = new ColdFinalizedCatalogChainV1(emptyFixture);
+    const receiver = await startNativeAgentWithOptions({
+      name: `cold-finalized-${lane}-${authority}-receiver`,
+      networkIdentityChainId: NETWORK_ID,
+      syncContextGraphs: [],
+      accessPolicyAuthority: {
+        localAgentAddress: AUTHOR,
+        resolveRemoteAgentAddress: async () => AUTHOR,
+      },
+      finalizedRuntime: { rpcUrl: rpc.url, chainAdapter: receiverChain },
+    });
+    const author = await startNativeAgentWithOptions({
+      name: `cold-finalized-${lane}-${authority}-author`,
+      networkIdentityChainId: NETWORK_ID,
+      accessPolicyAuthority: {
+        localAgentAddress: AUTHOR,
+        resolveRemoteAgentAddress: async () => AUTHOR,
+      },
+    });
+    const accepted = composeRfc64FinalizedCatalogAuthorityV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      snapshot: parseRfc64AuthoritySnapshotV1(
+        await receiverChain.getContextGraphAuthoritySnapshot(582n), 582n,
+      ),
+    });
+    for (const agent of [author, receiver]) {
+      agent.acceptRfc64CatalogAccessSnapshotV1({
+        policy: accepted.policy, policyDigest: accepted.policyDigest, roster: accepted.roster,
+      });
+    }
+    await connectBothWays(author, receiver);
+    const scope = {
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: accepted.policy.governanceChainId,
+      governanceContractAddress: accepted.policy.governanceContractAddress,
+      ownershipTransitionDigest: accepted.policy.ownershipTransitionDigest,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: accepted.policy.era,
+      bucketCount: '1',
+    } as const;
+    const appliedScope = {
+      catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope), authorAddress: AUTHOR,
+    };
+    const genesis = await author.publishAuthorCatalogGenesisV1({
+      scope,
+      author: AUTHOR_WALLET,
+      peers: [receiver.peerId],
+      issuedAt: FIXED_HEAD_ISSUED_AT,
+      catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
+      catalogIssuerDelegationExpiresAt: MULTI_DELEGATION_EXPIRES_AT,
+    });
+    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    const previousAppliedHead = receiver.readRfc64AppliedCatalogHeadV1(appliedScope);
+    expect(previousAppliedHead).toMatchObject({
+      currentCatalogHeadDigest: genesis.headObjectDigest, inventoryRowCount: '0',
+    });
+    // Registration discovery must not silently admit or persist a current binding.
+    expect(receiver.getSubscribedContextGraphs().has(CONTEXT_GRAPH_ID)).toBe(false);
+    expect(receiver.getSubscribedContextGraphs().has(nameHash)).toBe(false);
+    await expect(receiver.store.query(contextGraphOnChainIdBindingQuery(
+      CONTEXT_GRAPH_ID, { includeConflicts: true },
+    ))).resolves.toMatchObject({ type: 'bindings', bindings: [] });
+    await expect(receiver.getContextGraphOnChainId(CONTEXT_GRAPH_ID)).resolves.toBeNull();
+
+    const readerCallsBeforeSuccessor = receiverChain.finalizedNameReads.length;
+    receiverChain.authorityAvailable = authority === 'available';
+    finalizedRpc = createFinalizedVmLoopbackRpcV1(fixture(true));
+    const successor = await author.publishAuthorCatalogExactSetSuccessorV1({
+      previousHead: {
+        objectDigest: genesis.headObjectDigest, signatureVariantDigest: genesis.signatureVariantDigest,
+      },
+      author: AUTHOR_WALLET,
+      catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+      assets: [{
+        assertionCoordinate: `cold-finalized-${lane}-41` as never,
+        projectionBytes: PROJECTION,
+        seal: await authorSeal(41n),
+      }],
+      deployment: NATIVE_DEPLOYMENT,
+      issuedAt: SUCCESSOR_ISSUED_AT,
+      peers: [receiver.peerId],
+    });
+    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    const successorReads = receiverChain.finalizedNameReads.slice(readerCallsBeforeSuccessor);
+    expect(successorReads.length).toBeGreaterThan(0);
+    for (const read of successorReads) {
+      expect(read.nameHashes).toEqual([nameHash]);
+      expect(read.signal).toBeInstanceOf(AbortSignal);
+      expect(read.returnedId).toBe(authority === 'available' ? '582' : null);
+    }
+    const vmGraph = contextGraphLayerUri(CONTEXT_GRAPH_ID, MemoryLayer.VerifiableMemory, AUTHOR, 41);
+    const contentGraph = accessPolicy === 1
+      ? vmGraph
+      : contextGraphLayerUri(CONTEXT_GRAPH_ID, MemoryLayer.SharedWorkingMemory, AUTHOR, 41);
+    if (authority === 'unavailable') {
+      expect(receiver.readRfc64AppliedCatalogHeadV1(appliedScope)).toEqual(previousAppliedHead);
+      expect(receiver.readRfc64PublicCatalogReconciliationFailureV1(successor.headObjectDigest)).not.toBeNull();
+      await expect(receiver.store.countQuads(contentGraph)).resolves.toBe(0);
+      await expect(receiver.store.countQuads(vmGraph)).resolves.toBe(0);
+      return;
+    }
+    expect(receiver.readRfc64PublicCatalogReconciliationFailureV1(successor.headObjectDigest)).toBeNull();
+    expect(receiver.readRfc64AppliedCatalogHeadV1(appliedScope)).toMatchObject({
+      currentCatalogHeadDigest: successor.headObjectDigest, inventoryRowCount: '1',
+    });
+    await expect(readExactGraphPaged(receiver.store, contentGraph, {
+      expectedQuadCount: PROJECTION_QUADS.length, outputGraph: '',
+    })).resolves.toEqual(PROJECTION_QUADS);
+    if (accessPolicy === 0) await expect(receiver.store.countQuads(vmGraph)).resolves.toBe(0);
   }, 60_000);
 
   it('applies a finalized-policy SWM successor through production wiring without VM writes', async () => {

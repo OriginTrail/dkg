@@ -277,6 +277,20 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
           'submitProof',
           [contentHex, proofHex],
           'submit random-sampling proof',
+          // submitProof's gas depends on `block.timestamp`. The contract settles
+          // the node's stake to it and skips that settle when the node is
+          // already settled at that timestamp, which createChallenge leaves
+          // true for its own block. An estimate that runs on the block holding
+          // this node's challenge therefore misses the settle, and the proof,
+          // mined a block later, pays for it: observed 294,443 estimated and
+          // 306,807 needed (+4.2%); with the raw estimate as its limit the
+          // proof ran out of gas and reverted with empty `0x` data. Rarer and
+          // larger: a proof mined after an epoch change or a stake-boost expiry
+          // writes storage its estimate did not see (measured on a local chain:
+          // +33%, +16%, and +46% for both at once). +50%, the headroom
+          // createChallenge already has, covers all of these; +25% does not
+          // cover the epoch change. Unused gas is refunded.
+          { gasLimitBufferBps: 5_000 },
         );
       } catch (err) {
         this.translateRandomSamplingError(err);
