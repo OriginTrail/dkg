@@ -1,18 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * A node whose one-log start is refused gets its log later, without a restart.
+ * A node whose one-log start cannot complete for now gets its log later,
+ * without a restart.
  *
- * The start resolves each indexed contract's deploy block with a search of
- * `eth_getCode` reads. Each read has a four-second deadline, and that deadline
- * also covers the time the read waits in the node's own request queue. A read
- * that is still queued when it expires was never sent: the search stops, the
- * build rejects, and before this change the node ran without its log for the
- * rest of the process.
+ * The start resolves each indexed contract's deploy block: a head probe of
+ * every endpoint, then a search of `eth_getCode` reads. Each read has a
+ * four-second deadline, and that deadline also covers the time the read waits
+ * in the node's own request queue. A read that is still queued when it expires
+ * was never sent, a read that was admitted late is not answered in time, and
+ * an endpoint can throttle the probe. In each case the build rejects, and
+ * before this change the node ran without its log for the rest of the process.
  *
- * The first test plays that through the real search, transport and request
- * governor; only the HTTP exchange is answered in-process. The others pin the
- * adapter's side of the three ways a deferred start ends.
+ * The first three tests play those through the real deploy-block resolution,
+ * transport and request governor; only the HTTP exchange is answered
+ * in-process. The others pin the adapter's side of the three ways a deferred
+ * start ends, and the failure that still ends it at once.
  */
 
 import { ethers } from 'ethers';
@@ -20,17 +23,26 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const rpc = vi.hoisted(() => ({
   answer: undefined as undefined | ((method: string, params: readonly unknown[]) => unknown),
-  sent: [] as Array<{ method: string; params: readonly unknown[] }>,
+  /** An HTTP status to answer with instead of a result. */
+  refusal: undefined as undefined | ((method: string) => number | undefined),
+  /** How long the endpoint takes to answer. */
+  roundTripMs: 0,
+  sent: [] as Array<{ url: string; method: string; params: readonly unknown[] }>,
 }));
 
 vi.mock('../src/rpc-http1-dispatcher.js', () => ({
-  chainRpcFetch: async (_input: string | URL, init: RequestInit) => {
+  chainRpcFetch: async (input: string | URL, init: RequestInit) => {
     const call = JSON.parse(new TextDecoder().decode(init.body as ArrayBuffer)) as {
       id: number;
       method: string;
       params: readonly unknown[];
     };
-    rpc.sent.push({ method: call.method, params: call.params });
+    rpc.sent.push({ url: String(input), method: call.method, params: call.params });
+    if (rpc.roundTripMs > 0) {
+      await new Promise<void>((resolve) => { setTimeout(resolve, rpc.roundTripMs); });
+    }
+    const status = rpc.refusal?.(call.method);
+    if (status !== undefined) return new Response('refused', { status });
     return new Response(
       JSON.stringify({ jsonrpc: '2.0', id: call.id, result: rpc.answer!(call.method, call.params) }),
       { status: 200, headers: { 'content-type': 'application/json' } },
@@ -59,6 +71,8 @@ const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf
 const HUB = '0x0000000000000000000000000000000000000001';
 const CG_STORAGE = '0x00000000000000000000000000000000000000aa';
 const ROTATED_CG_STORAGE = '0x00000000000000000000000000000000000000bb';
+const RPC_URL = 'http://rpc-a.invalid:8545';
+const SECOND_RPC_URL = 'http://rpc-b.invalid:8545';
 const HEAD = 64;
 const HUB_DEPLOY_BLOCK = 21;
 const CG_STORAGE_DEPLOY_BLOCK = 30;
@@ -77,15 +91,16 @@ interface Internals {
 
 const internalsOf = (adapter: Adapter): Internals => adapter as unknown as Internals;
 
-function createAdapter(governor?: Governor): Adapter {
+function createAdapter(options: { governor?: Governor; secondEndpoint?: boolean } = {}): Adapter {
   const adapter = new EVMChainAdapter({
-    rpcUrl: 'http://rpc.invalid:8545',
+    rpcUrl: RPC_URL,
+    ...(options.secondEndpoint ? { rpcUrls: [SECOND_RPC_URL] } : {}),
     privateKey: DEPLOYER_PK,
     hubAddress: HUB,
     chainId: 'evm:31337',
     allowNoAdminSigner: true,
     chainEventLogStore: new MemoryChainEventLogStore(),
-    ...(governor === undefined ? {} : { rpcRequestAdmission: governor }),
+    ...(options.governor === undefined ? {} : { rpcRequestAdmission: options.governor }),
   });
   const internals = internalsOf(adapter);
   internals.contracts.hub = {
@@ -107,6 +122,19 @@ function createAdapter(governor?: Governor): Adapter {
     getLogs: async () => [],
   });
   return adapter;
+}
+
+/**
+ * Every endpoint's chain id is validated already, as it is by the time
+ * `initContracts` reaches the start on a node.
+ */
+async function validateChainIds(adapter: Adapter): Promise<void> {
+  const internals = internalsOf(adapter);
+  const validated = Promise.all(internals.providers.map(
+    (provider) => internals.ensureConfiguredStaticChainIdValidated(provider),
+  ));
+  await vi.advanceTimersByTimeAsync(50);
+  await expect(validated).resolves.toEqual(internals.providers.map(() => 31337n));
 }
 
 /** `ContextGraphStorage` as `initContracts` would have resolved it. */
@@ -168,13 +196,15 @@ function startAuthorityReads(governor: Governor, readers: number, roundTripMs: n
   };
 }
 
-describe('one-log start that is refused by the local request queue', () => {
+describe('one-log start that cannot complete for now', () => {
   const adapters: Adapter[] = [];
 
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(1_700_000_000_000);
     rpc.sent.length = 0;
+    rpc.refusal = undefined;
+    rpc.roundTripMs = 0;
     rpc.answer = (method, params) => {
       if (method === 'eth_chainId') return '0x7a69';
       if (method === 'eth_blockNumber') return ethers.toQuantity(HEAD);
@@ -202,15 +232,10 @@ describe('one-log start that is refused by the local request queue', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
     const governor = new RpcRequestGovernor({ startupJitterMs: 0 });
-    const adapter = createAdapter(governor);
+    const adapter = createAdapter({ governor });
     adapters.push(adapter);
     const internals = internalsOf(adapter);
-
-    // The endpoint's chain id is validated already, as it is by the time
-    // `initContracts` reaches the start on a node.
-    const validated = internals.ensureConfiguredStaticChainIdValidated(internals.providers[0]!);
-    await vi.advanceTimersByTimeAsync(50);
-    await expect(validated).resolves.toBe(31337n);
+    await validateChainIds(adapter);
 
     // The start runs as ordinary foreground work. Part-way through the second
     // contract's search, authority reads start to arrive faster than the node's
@@ -279,6 +304,97 @@ describe('one-log start that is refused by the local request queue', () => {
     // 5 s to the second attempt, 4 s until it was refused, 10 s to the third.
     expect(indexLines(log)).toEqual([
       '[chain] one-log chain index started on attempt 3, 19s after its start was deferred',
+    ]);
+  });
+
+  it('retries a start whose head probe was admitted too late to be answered', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const governor = new RpcRequestGovernor({ startupJitterMs: 0 });
+    const adapter = createAdapter({ governor });
+    adapters.push(adapter);
+    const internals = internalsOf(adapter);
+    await validateChainIds(adapter);
+    rpc.roundTripMs = 300;
+
+    // Authority reads hold the queue until 150 ms before the probe's deadline.
+    // The probe is then admitted and sent, and its answer comes 150 ms too late.
+    const authorityReads = withDetachedRpcRequestContext(
+      'foreground',
+      () => startAuthorityReads(governor, 20, 100),
+    );
+    await vi.advanceTimersByTimeAsync(3_000);
+    internals.startChainIndexRuntime();
+    const starting = internals.chainIndexOwner.starting;
+    await vi.advanceTimersByTimeAsync(3_850);
+    expect(rpc.sent.filter(({ method }) => method === 'eth_blockNumber')).toEqual([]);
+    await authorityReads.stop();
+    await advanceUntil(() => indexLines(warn).length > 0, 200);
+
+    // A timeout this time, not a refusal: the request did leave the node.
+    expect(rpc.sent.filter(({ method }) => method === 'eth_blockNumber')).toHaveLength(1);
+    expect(indexLines(warn)).toEqual([
+      '[chain] one-log chain index start deferred (retrying, next attempt in 5s): '
+        + 'chainIndex deploy block backend head probe timed out after 4000ms',
+    ]);
+    expect(adapter.chainEventLog).toBeUndefined();
+    expect(internals.chainIndexOwner.starting).toBe(starting);
+
+    rpc.roundTripMs = 0;
+    await vi.advanceTimersByTimeAsync(CHAIN_INDEX_START_RETRY_INITIAL_DELAY_MS + 100);
+    await starting;
+
+    expect(adapter.chainEventLog!.contextGraphStorageAddress).toBe(CG_STORAGE);
+    expect(indexLines(warn)).toHaveLength(1);
+    expect(indexLines(log)).toEqual([
+      '[chain] one-log chain index started on attempt 2, 5s after its start was deferred',
+    ]);
+  });
+
+  it('retries a start whose head probe every endpoint throttled, and attaches the log when they answer', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const adapter = createAdapter({ secondEndpoint: true });
+    adapters.push(adapter);
+    const internals = internalsOf(adapter);
+    await validateChainIds(adapter);
+    const headProbes = (): string[] => rpc.sent
+      .filter(({ method }) => method === 'eth_blockNumber')
+      .map(({ url }) => url);
+
+    let throttled = true;
+    rpc.refusal = (method) => (throttled && method === 'eth_blockNumber' ? 429 : undefined);
+    internals.startChainIndexRuntime();
+    const starting = internals.chainIndexOwner.starting;
+    await advanceUntil(() => indexLines(warn).length > 0, 500);
+
+    // Each endpoint was asked once and said 429. No endpoint is left to anchor
+    // the search, and that is all this attempt learned.
+    expect(headProbes()).toEqual([RPC_URL, SECOND_RPC_URL]);
+    expect(indexLines(warn)).toHaveLength(1);
+    expect(indexLines(warn)[0]).toMatch(
+      /^\[chain\] one-log chain index start deferred \(retrying, next attempt in 5s\): .*\b429\b/,
+    );
+    // The line names the endpoint by host only.
+    expect(indexLines(warn)[0]).toContain('rpc-b.invalid:8545');
+    expect(indexLines(warn)[0]).not.toContain('://');
+    expect(rpc.sent.filter(({ method }) => method === 'eth_getCode')).toEqual([]);
+    expect(adapter.chainEventLog).toBeUndefined();
+    expect(internals.chainIndexOwner.starting).toBe(starting);
+
+    throttled = false;
+    await vi.advanceTimersByTimeAsync(CHAIN_INDEX_START_RETRY_INITIAL_DELAY_MS - 100);
+    expect(headProbes()).toHaveLength(2);
+    await advanceUntil(() => adapter.chainEventLog !== undefined, 500);
+    await starting;
+
+    expect(adapter.chainEventLog!.contextGraphStorageAddress).toBe(CG_STORAGE);
+    await expect(internals.resolveContractDeployBlockNumber(HUB)).resolves.toBe(HUB_DEPLOY_BLOCK);
+    await expect(internals.resolveContractDeployBlockNumber(CG_STORAGE))
+      .resolves.toBe(CG_STORAGE_DEPLOY_BLOCK);
+    expect(indexLines(warn)).toHaveLength(1);
+    expect(indexLines(log)).toEqual([
+      '[chain] one-log chain index started on attempt 2, 5s after its start was deferred',
     ]);
   });
 
@@ -385,7 +501,7 @@ describe('one-log start that is refused by the local request queue', () => {
       expect(indexLines(log)).toEqual([]);
     });
 
-    it('still ends the start on a failure that is not a refusal, with the line it always printed', async () => {
+    it('still ends the start on a failure another attempt cannot change, with the line it always printed', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const adapter = createAdapter();
       adapters.push(adapter);

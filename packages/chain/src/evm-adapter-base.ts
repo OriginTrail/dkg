@@ -4889,10 +4889,10 @@ export class EVMChainAdapterBase {
    * refuses and each one does exactly what it did before the log existed.
    *
    * A failure here is a degraded index, not a degraded node: it is reported
-   * and the adapter keeps every pre-log path. A start that was only refused
-   * for now (a read that was not admitted to the local RPC queue in time, or
-   * every endpoint exhausted) is not a failure: the owner retries it, with
-   * this same snapshot, until the log attaches.
+   * and the adapter keeps every pre-log path. A start that could not complete
+   * for now (a read not admitted to the local RPC queue in time, an endpoint
+   * that timed out, throttled or was unreachable) is not a failure: the owner
+   * retries it, with this same snapshot, until the log attaches.
    *
    * Re-entrant after a Hub rotation, and only after one:
    * `rebuildChainIndexRuntimeOnRotation` clears the single-flight so the next

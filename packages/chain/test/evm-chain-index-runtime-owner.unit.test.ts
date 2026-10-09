@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * The owner of the one-log runtime, and what it does when a start is refused.
+ * The owner of the one-log runtime, and what it does when a start cannot
+ * complete for now.
  *
- * A start whose reads were not admitted in time (or found every endpoint
- * exhausted) has learned nothing about the chain. It used to end there, and
- * nothing started it again: the node ran without its log until a restart.
- * These pin the retry that replaced that, and the three ways it ends.
+ * A start whose reads were not admitted in time, timed out, or found its
+ * endpoints throttled or unreachable has learned nothing about the chain. It
+ * used to end there, and nothing started it again: the node ran without its
+ * log until a restart. These pin the retry that replaced that, the three ways
+ * it ends, and the failures that still end the start at once.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -14,11 +16,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChainEventLogBinding } from '../src/chain-event-log-binding.js';
 import {
   createRpcAdmissionTimeoutError,
+  createRpcTimeoutError,
   RpcEndpointsExhaustedError,
 } from '../src/chain-rpc-transport-error.js';
 import {
   CHAIN_INDEX_START_RETRY_INITIAL_DELAY_MS,
   CHAIN_INDEX_START_RETRY_MAX_DELAY_MS,
+  CHAIN_INDEX_START_STILL_DEFERRED_REPORT_MS,
   EvmChainIndexRuntimeOwner,
   type EvmChainIndexRuntimeOwnerOptions,
 } from '../src/evm-chain-index-runtime-owner.js';
@@ -49,7 +53,12 @@ function fakeRuntime(name: string) {
 }
 
 function fixture(options: Omit<EvmChainIndexRuntimeOwnerOptions, 'report'> = {}) {
-  const report = { disabled: vi.fn(), deferred: vi.fn(), started: vi.fn() };
+  const report = {
+    disabled: vi.fn(),
+    deferred: vi.fn(),
+    stillDeferred: vi.fn(),
+    started: vi.fn(),
+  };
   const store = new MemoryChainEventLogStore();
   const owner = new EvmChainIndexRuntimeOwner(store, { report, ...options });
   return { owner, report, store };
@@ -84,7 +93,7 @@ const settle = (): Promise<void> => vi.advanceTimersByTimeAsync(0).then(() => un
 describe('EvmChainIndexRuntimeOwner', () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    vi.setSystemTime(0);
+    vi.setSystemTime(1_700_000_000_000);
   });
 
   afterEach(() => {
@@ -158,9 +167,28 @@ describe('EvmChainIndexRuntimeOwner', () => {
   });
 
   it.each([
+    // The node's own capacity.
     ['a read that was not admitted to the local queue in time', refused()],
     ['a full local queue', new RpcRequestGovernorQueueFullError(256)],
     ['every endpoint exhausted', new RpcEndpointsExhaustedError('all endpoints throttled')],
+    // An endpoint, at the moment of the start.
+    ['a head probe that timed out at its endpoint', createRpcTimeoutError(
+      'chainIndex deploy block backend head probe timed out after 4000ms',
+    )],
+    ['a throttled endpoint', Object.assign(new Error('server response 429'), {
+      code: 'SERVER_ERROR',
+      response: { statusCode: 429 },
+    })],
+    ['an endpoint that answers 503', Object.assign(new Error('server response 503'), {
+      code: 'SERVER_ERROR',
+      response: { statusCode: 503 },
+    })],
+    ['a connection that was reset', Object.assign(new Error('read ECONNRESET'), {
+      code: 'ECONNRESET',
+    })],
+    ['a host that does not resolve', Object.assign(new Error('getaddrinfo ENOTFOUND rpc.invalid'), {
+      code: 'ENOTFOUND',
+    })],
   ])('retries on %s', async (_name, error) => {
     const { owner, report } = fixture();
     const runtime = fakeRuntime('log');
@@ -201,6 +229,31 @@ describe('EvmChainIndexRuntimeOwner', () => {
     await owner.starting;
     expect(owner.binding).toBe(runtime.binding);
     expect(report.started).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a revert', Object.assign(new Error('execution reverted: ContractDoesNotExist'), {
+      code: 'CALL_EXCEPTION',
+    })],
+    ['an invalid setting', new RangeError('chain.indexTickMs must be a positive integer')],
+    // Raised when every endpoint answered the head probe and none of them with
+    // a block number: nothing a later attempt against the same endpoints changes.
+    ['no endpoint that can anchor the search', new Error(
+      'chainIndex deploy block: no RPC backend returned a block number to anchor the log scan.',
+    )],
+  ])('ends the start on %s, which another attempt cannot change', async (_name, error) => {
+    const { owner, report } = fixture();
+    const build = vi.fn<Build>().mockRejectedValue(error);
+
+    owner.start(build);
+    await owner.starting;
+    await vi.advanceTimersByTimeAsync(10 * CHAIN_INDEX_START_RETRY_MAX_DELAY_MS);
+
+    expect(report.disabled).toHaveBeenCalledTimes(1);
+    expect(report.disabled).toHaveBeenCalledWith(error);
+    expect(report.deferred).not.toHaveBeenCalled();
+    expect(build).toHaveBeenCalledTimes(1);
+    expect(owner.starting).toBeUndefined();
   });
 
   it('stops retrying when a later attempt fails for another reason', async () => {
@@ -461,6 +514,68 @@ describe('EvmChainIndexRuntimeOwner', () => {
     expect(owner.binding).toBe(runtime.binding);
   });
 
+  it('says again that the start is deferred once per long interval, with the latest failure', async () => {
+    const { owner, report } = fixture();
+    const failures: Error[] = [];
+    const runtime = fakeRuntime('log');
+    let attaches = false;
+    const build = vi.fn<Build>(async () => {
+      if (attaches) return runtime;
+      failures.push(createRpcTimeoutError(`head probe timed out, attempt ${failures.length + 1}`));
+      throw failures.at(-1);
+    });
+
+    owner.start(build);
+    await settle();
+    // Attempts fail at 0, 5, 15, 35 and 75 s, then every 60 s. The first one
+    // half an hour or more after the deferral is the 34th, at 1,815 s.
+    expect(CHAIN_INDEX_START_STILL_DEFERRED_REPORT_MS).toBe(30 * 60_000);
+    await vi.advanceTimersByTimeAsync(1_814_999);
+    expect(build).toHaveBeenCalledTimes(33);
+    expect(report.stillDeferred).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(report.stillDeferred).toHaveBeenCalledTimes(1);
+    expect(report.stillDeferred).toHaveBeenLastCalledWith(failures[33], 34, 1_815_000);
+
+    // The next one is due half an hour after that line, not after the deferral.
+    await vi.advanceTimersByTimeAsync(1_799_999);
+    expect(report.stillDeferred).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(report.stillDeferred).toHaveBeenCalledTimes(2);
+    expect(report.stillDeferred).toHaveBeenLastCalledWith(failures[63], 64, 3_615_000);
+
+    attaches = true;
+    await vi.advanceTimersByTimeAsync(CHAIN_INDEX_START_RETRY_MAX_DELAY_MS);
+    await owner.starting;
+
+    expect(report.deferred).toHaveBeenCalledTimes(1);
+    expect(report.deferred).toHaveBeenCalledWith(failures[0], CHAIN_INDEX_START_RETRY_INITIAL_DELAY_MS);
+    expect(report.started).toHaveBeenCalledWith(65, 3_675_000);
+    expect(report.disabled).not.toHaveBeenCalled();
+  });
+
+  it('honours the interval it is given for saying so again', async () => {
+    const { owner, report } = fixture({
+      retryInitialDelayMs: 100,
+      retryMaxDelayMs: 100,
+      stillDeferredReportMs: 300,
+    });
+
+    // Attempts fail at 0, 100, 200, ... ms: the interval is met exactly.
+    owner.start(async () => { throw refused(); });
+    await settle();
+    await vi.advanceTimersByTimeAsync(299);
+    expect(report.stillDeferred).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(report.stillDeferred).toHaveBeenCalledTimes(1);
+    expect(report.stillDeferred.mock.calls[0]!.slice(1)).toEqual([4, 300]);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(report.stillDeferred).toHaveBeenCalledTimes(2);
+    expect(report.stillDeferred.mock.calls[1]!.slice(1)).toEqual([7, 600]);
+
+    owner.stop();
+  });
+
   it('honours the retry bounds it is given', async () => {
     const { owner, report } = fixture({ retryInitialDelayMs: 100, retryMaxDelayMs: 150 });
     const runtime = fakeRuntime('log');
@@ -480,7 +595,7 @@ describe('EvmChainIndexRuntimeOwner', () => {
   });
 
   it('asks its caller what is worth retrying when told to', async () => {
-    const { owner, report } = fixture({ isRetryLater: () => false });
+    const { owner, report } = fixture({ isRetryable: () => false });
 
     owner.start(async () => { throw refused(); });
     await owner.starting;
@@ -490,7 +605,12 @@ describe('EvmChainIndexRuntimeOwner', () => {
   });
 
   it('does nothing at all without a store', async () => {
-    const report = { disabled: vi.fn(), deferred: vi.fn(), started: vi.fn() };
+    const report = {
+      disabled: vi.fn(),
+      deferred: vi.fn(),
+      stillDeferred: vi.fn(),
+      started: vi.fn(),
+    };
     const owner = new EvmChainIndexRuntimeOwner(undefined, { report });
     const build = vi.fn<Build>(async () => fakeRuntime('log'));
 
@@ -531,6 +651,27 @@ describe('EvmChainIndexRuntimeOwner', () => {
       expect(log.mock.calls).toEqual([[
         '[chain] one-log chain index started on attempt 3, 15s after its start was deferred',
       ]]);
+    });
+
+    it('says once per long interval that the start is still deferred', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const owner = new EvmChainIndexRuntimeOwner(new MemoryChainEventLogStore());
+      const throttled = Object.assign(
+        new Error('server response 429 (requestUrl="https://rpc.example/v2/key")'),
+        { code: 'SERVER_ERROR', response: { statusCode: 429 } },
+      );
+
+      owner.start(async () => { throw throttled; });
+      await settle();
+      await vi.advanceTimersByTimeAsync(CHAIN_INDEX_START_STILL_DEFERRED_REPORT_MS + 15_000);
+
+      expect(warn.mock.calls).toEqual([
+        ['[chain] one-log chain index start deferred (retrying, next attempt in 5s): '
+          + 'server response 429 (requestUrl="rpc.example")'],
+        ['[chain] one-log chain index start still deferred after 34 attempts in 30 min (retrying): '
+          + 'server response 429 (requestUrl="rpc.example")'],
+      ]);
+      owner.stop();
     });
 
     it('keeps the line a failed start has always printed', async () => {
