@@ -28,6 +28,7 @@ import {
   type ApprovalPolicy,
 } from '../src/chain-adapter.js';
 import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
+import { explainOutOfGasRevert } from '../src/evm-adapter-rpc.js';
 import { isChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
 import {
   DEFAULT_FINALITY_CONFIRMATIONS,
@@ -2050,6 +2051,85 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       receipt,
     });
     expect(backup.getTransactionReceipt.calls).toEqual([]);
+  });
+
+  describe('a mined write that reverted: out-of-gas hint', () => {
+    const GAS_LIMIT = 294_443n;
+    const blockHash = '0x' + '48'.repeat(32);
+
+    async function signWithGasLimit(gasLimit: bigint) {
+      const signedTx = await new ethers.Wallet(DEPLOYER_PK).signTransaction({
+        to: '0x0000000000000000000000000000000000000001',
+        data: '0x1234',
+        gasLimit,
+        nonce: 0,
+        chainId: 31337n,
+        type: 2,
+        maxFeePerGas: 1n,
+        maxPriorityFeePerGas: 1n,
+      });
+      return { signedTx, txHash: ethers.Transaction.from(signedTx).hash! };
+    }
+
+    async function sendAndRevert(signedTx: string, txHash: string, gasUsed: bigint): Promise<any> {
+      const a = new EVMChainAdapter(minimalConfig({ rpcUrl: 'https://only.example' }));
+      const receipt = { hash: txHash, blockNumber: 48, blockHash, status: 0, gasUsed, logs: [] };
+      (a as any).providers = [{
+        broadcastTransaction: recorder(async () => ({ hash: txHash })),
+        getTransactionReceipt: recorder(async () => receipt),
+        getBlockNumber: recorder(async () => 48),
+        getBlock: recorder(async () => ({ number: 48, hash: blockHash })),
+      }];
+      const error = await (a as any).sendSignedTransactionAndWait(signedTx, txHash, 'unit write')
+        .then(() => undefined, (err: unknown) => err);
+      expect(error).toMatchObject({ code: 'CALL_EXCEPTION', receipt });
+      return error;
+    }
+
+    it('says so when the transaction used nearly its whole gas limit', async () => {
+      const { signedTx, txHash } = await signWithGasLimit(GAS_LIMIT);
+
+      // The observed case: 416 gas short of the limit, no logs, no revert data.
+      const error = await sendAndRevert(signedTx, txHash, 294_027n);
+
+      expect(error.message).toBe(
+        `unit write tx ${txHash} was mined but reverted (status=0); ` +
+        'it used 294027 of its 294443 gas limit, so it probably ran out of gas',
+      );
+    });
+
+    it('applies from 99% of the limit and not below', async () => {
+      const { signedTx, txHash } = await signWithGasLimit(1_000_000n);
+      const plain = `unit write tx ${txHash} was mined but reverted (status=0)`;
+
+      expect((await sendAndRevert(signedTx, txHash, 990_000n)).message).toBe(
+        `${plain}; it used 990000 of its 1000000 gas limit, so it probably ran out of gas`,
+      );
+      // An ordinary revert leaves gas unused: the message stays as it was.
+      expect((await sendAndRevert(signedTx, txHash, 989_999n)).message).toBe(plain);
+    });
+
+    it('leaves the message alone when the signed bytes cannot be decoded', async () => {
+      const txHash = '0x' + '34'.repeat(32);
+
+      const error = await sendAndRevert('0xdeadbeef', txHash, GAS_LIMIT);
+
+      expect(error.message).toBe(`unit write tx ${txHash} was mined but reverted (status=0)`);
+    });
+
+    it('rethrows any other rejection untouched', async () => {
+      const { signedTx } = await signWithGasLimit(GAS_LIMIT);
+      const handler = explainOutOfGasRevert(signedTx);
+      const timeout = Object.assign(new Error('no receipt yet'), { code: 'RPC_TIMEOUT' });
+      const notAnError = { receipt: { status: 0, gasUsed: GAS_LIMIT } };
+
+      expect(() => handler(timeout)).toThrow(timeout);
+      expect(timeout.message).toBe('no receipt yet');
+      let thrown: unknown;
+      try { handler(notAnError); } catch (err) { thrown = err; }
+      expect(thrown).toBe(notAnError);
+      expect(notAnError).toEqual({ receipt: { status: 0, gasUsed: GAS_LIMIT } });
+    });
   });
 
   it('signMessage returns 32-byte r and vs (no contract init)', async () => {
