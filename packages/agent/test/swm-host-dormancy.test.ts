@@ -254,6 +254,10 @@ describe('automatic SWM host admission honors durable dormancy', () => {
     await started;
     const replacement = new Gossip();
     (f.agent as unknown as { gossip: Gossip }).gossip = replacement;
+    f.state.setContextGraphSubscription(LOCAL, {
+      subscribed: false, synced: false, onChainId: SLOT, onChainHash: HASH,
+    }, { persist: false });
+    f.state.onChainAccessPolicyCache.set(SLOT, await f.chain.getContextGraphAccessPolicy(582n));
     f.agent.wireSwmHostModeHandler(LOCAL, SUBSCRIPTION_SOURCES.MANUAL, false);
     const handler = f.state.swmHostModeHandlers.get(HASH);
     expect(handler).toBeDefined();

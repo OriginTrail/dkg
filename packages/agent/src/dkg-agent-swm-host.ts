@@ -9,6 +9,9 @@
  */
 
 import { orderVmRecoveryCandidates } from './vm-recovery-candidate-order.js';
+import {
+  isCanonicalAuthoritativeContextGraphId, localContextGraphIdMatchesCommittedNameHash,
+} from './context-graph-binding-state.js';
 import { isAdmittedContextGraphSubscription } from './context-graph-subscription-policy.js';
 import { normalizeContextGraphNameHash } from './context-graph-name-candidate.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -1034,6 +1037,29 @@ export class SwmHostModeMethods extends DKGAgentBase {
     return sub?.onChainId ? this.onChainAccessPolicyCache.get(sub.onChainId) : undefined;
   }
 
+  /** Manual authority uses current identity, not a retired predecessor's status. */
+  manualSwmHostModeLocalId(this: DKGAgent, contextGraphId: string): string {
+    if (this.subscribedContextGraphs.has(contextGraphId)) return contextGraphId;
+    const wireId = normalizeContextGraphNameHash(contextGraphId);
+    if (wireId === null) return contextGraphId;
+    if (this.subscribedContextGraphs.has(wireId)) return wireId;
+    return this.resolveContextGraphIdAlias(wireId) ?? wireId;
+  }
+
+  /** Manual strip-on custody requires this exact routed slot's public proof. */
+  isExactPublicManualSwmHostMode(this: DKGAgent, contextGraphId: string, hostKey: string): boolean {
+    const localId = this.manualSwmHostModeLocalId(contextGraphId);
+    const subscription = this.subscribedContextGraphs.get(localId);
+    const onChainId = subscription?.onChainId;
+    const wireOwner = this.wireIdToLocalCgId.get(hostKey);
+    return isCanonicalAuthoritativeContextGraphId(onChainId)
+      && normalizeContextGraphNameHash(subscription?.onChainHash) === hostKey
+      && localContextGraphIdMatchesCommittedNameHash(localId, hostKey, id => this.isWireIdKeyedSubscription(id))
+      && this.canonicalSwmHostModeKey(contextGraphId) === hostKey
+      && (wireOwner === undefined || wireOwner === localId)
+      && this.onChainAccessPolicyCache.get(onChainId) === 0;
+  }
+
   /** Curation requires actual policy, signed beacon verification or private metadata. */
   async isCuratedForHostMode(this: DKGAgent, contextGraphId: string): Promise<boolean> {
     const policy = this.swmHostModeAccessPolicy(contextGraphId);
@@ -1156,7 +1182,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
     session.swmHostModeSubscribed.set(wireCgId, source);
     session.swmHostModeCurated.set(wireCgId, curated);
     live.manager.subscribe(swmTopic);
-    const handler = createSwmHostModeHandler(this, this.log, session, contextGraphId, wireCgId);
+    const delegate = createSwmHostModeHandler(this, this.log, session, contextGraphId, wireCgId);
+    // Manual public custody must remain proven after enable returns or yields.
+    // Automatic callbacks retain their existing positive-private admission.
+    const handler = source === SUBSCRIPTION_SOURCES.MANUAL
+      ? (topic: string, data: Uint8Array, from: string): void => {
+        if (this.swmHostModeStripCiphertext()
+          && !this.isExactPublicManualSwmHostMode(contextGraphId, wireCgId)) return;
+        delegate(topic, data, from);
+      }
+      : delegate;
     session.swmHostModeHandlers.set(wireCgId, handler);
     live.manager.onMessage(swmTopic, handler);
     // B3: persist the host-mode designation so a restart re-engages
@@ -8452,8 +8487,40 @@ export class SwmHostModeMethods extends DKGAgentBase {
       return { subscribed: false, alreadySubscribed: false, hostingEnabled: true, memberMode: true };
     }
     const hostKey = this.canonicalSwmHostModeKey(contextGraphId);
+    const localId = this.manualSwmHostModeLocalId(contextGraphId);
+    const subscription = this.subscribedContextGraphs.get(localId);
+    const onChainId = subscription?.onChainId;
+    const onChainHash = subscription?.onChainHash;
+    const generation = this.contextGraphBindingState.capture(localId);
+    const handler = session.swmHostModeHandlers.get(hostKey);
+    const source = session.swmHostModeSubscribed.get(hostKey);
+    const wireOwner = this.wireIdToLocalCgId.get(hostKey);
+    const requestIsCurrent = (): boolean => session.active && this.gossipSession === session
+      && this.manualSwmHostModeLocalId(contextGraphId) === localId
+      && this.subscribedContextGraphs.get(localId) === subscription
+      && subscription?.onChainId === onChainId && subscription?.onChainHash === onChainHash
+      && this.contextGraphBindingState.isGenerationCurrent(localId, generation)
+      && this.canonicalSwmHostModeKey(contextGraphId) === hostKey
+      && this.wireIdToLocalCgId.get(hostKey) === wireOwner;
     const curated = await this.isCuratedForHostMode(contextGraphId);
-    if (!session.active || this.gossipSession !== session) {
+    if (!requestIsCurrent()
+      || session.swmHostModeHandlers.get(hostKey) !== handler
+      || session.swmHostModeSubscribed.get(hostKey) !== source) {
+      return { subscribed: false, alreadySubscribed: false, hostingEnabled: true };
+    }
+    const strip = this.swmHostModeStripCiphertext();
+    const publicPolicy = this.isExactPublicManualSwmHostMode(contextGraphId, hostKey);
+    const ownsHandler = handler !== undefined && wireOwner === localId;
+    // Absence of private evidence is not public proof. Close only this owner's
+    // existing dispatch; retain its operator provenance and durable marker.
+    if (strip && !publicPolicy) {
+      if (ownsHandler) session.swmHostModeCurated.set(hostKey, true);
+      this.log.info(createOperationContext('system'),
+        `SWM host-mode subscribe REFUSED for "${contextGraphId}": private-ciphertext strip requires exact public access policy`,
+      );
+      return { subscribed: false, alreadySubscribed: false, hostingEnabled: true };
+    }
+    if (strip && (handler !== undefined || source !== undefined) && !ownsHandler) {
       return { subscribed: false, alreadySubscribed: false, hostingEnabled: true };
     }
     if (this.swmHostModeSubscribed.has(hostKey)) {
@@ -8470,37 +8537,29 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // this canonicalisation the second subscribe would wire a
       // duplicate gossip handler on the same topic and double every
       // host-mode ingest/persistence.
-      // Never downgrade a positive classification on a transient policy-read
-      // failure. A false -> true transition closes both dispatch branches.
+      // Exact public policy can reopen this owner after an unknown-policy
+      // refusal. Strip-off re-entry retains positive private classification.
       this.swmHostModeCurated.set(
         hostKey,
-        this.swmHostModeCurated.get(hostKey) === true || curated,
+        strip && ownsHandler && source === SUBSCRIPTION_SOURCES.MANUAL
+          ? false : this.swmHostModeCurated.get(hostKey) === true || curated,
       );
       await this.maybeMarkRegisteredForHostMode(contextGraphId);
+      if (!requestIsCurrent() || session.swmHostModeHandlers.get(hostKey) !== handler
+        || session.swmHostModeSubscribed.get(hostKey) !== source
+        || (strip && !this.isExactPublicManualSwmHostMode(contextGraphId, hostKey))) {
+        return { subscribed: false, alreadySubscribed: false, hostingEnabled: true };
+      }
       return { subscribed: false, alreadySubscribed: true, hostingEnabled: true };
     }
-    // OT-RFC-49 WS-A — CLOSE the operator hatch. With the private-ciphertext
-    // strip ON (default), the operator override must NOT re-introduce private
-    // custody for a CURATED CG: WS-A diverges from rung-1 (which deliberately
-    // left this manual path open) precisely here — there is no supported way
-    // back into private host-mode for a curated CG while the strip is on.
-    // Scoped to curated CGs via the SAME three-source probe the auto-host
-    // path uses ({@link isCuratedForHostMode}), NOT `isPrivateContextGraph`
-    // alone — a host-only core has no local `_meta`, so an
-    // `isPrivateContextGraph`-only check would return false and leave the
-    // hatch open for exactly the case WS-A closes. PUBLIC / bare-uncurated CGs
-    // are never affected (all three sources return not-curated → hatch stays
-    // open).
-    if (this.swmHostModeStripCiphertext() && curated) {
-      this.log.info(
-        createOperationContext('system'),
-        `SWM host-mode subscribe REFUSED for "${contextGraphId}": private-ciphertext strip is ON ` +
-        `(OT-RFC-49 WS-A — the operator override is closed for curated CGs; cores custody zero private SWM ciphertext)`,
-      );
-      return { subscribed: false, alreadySubscribed: false, hostingEnabled: true };
-    }
-    this.wireSwmHostModeHandler(contextGraphId, SUBSCRIPTION_SOURCES.MANUAL, curated);
+    this.wireSwmHostModeHandler(contextGraphId, SUBSCRIPTION_SOURCES.MANUAL, strip ? false : curated);
+    const createdHandler = session.swmHostModeHandlers.get(hostKey);
+    const createdIsCurrent = (): boolean => requestIsCurrent() && createdHandler !== undefined
+      && session.swmHostModeHandlers.get(hostKey) === createdHandler
+      && session.swmHostModeSubscribed.get(hostKey) === SUBSCRIPTION_SOURCES.MANUAL
+      && (!strip || this.isExactPublicManualSwmHostMode(contextGraphId, hostKey));
     await this.awaitHostModePersistence(contextGraphId);
+    if (!createdIsCurrent()) return { subscribed: false, alreadySubscribed: false, hostingEnabled: true };
     // Codex PR #610 R1 comment 5: a core that only knows the CG by
     // topic id (the explicit /host-mode/subscribe entrypoint) must
     // still transition the store to the registered-CG limits as
@@ -8509,6 +8568,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // forever and prune ciphertext from registered CGs much
     // earlier than intended.
     await this.maybeMarkRegisteredForHostMode(contextGraphId);
+    if (!createdIsCurrent()) return { subscribed: false, alreadySubscribed: false, hostingEnabled: true };
     this.log.info(
       createOperationContext('system'),
       `SWM host-mode subscription explicitly enabled for "${contextGraphId}" via API (role=${this.config.nodeRole ?? 'edge'})`,
