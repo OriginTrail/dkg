@@ -9,6 +9,7 @@
  */
 
 import { orderVmRecoveryCandidates } from './vm-recovery-candidate-order.js';
+import { isAdmittedContextGraphSubscription } from './context-graph-subscription-policy.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { createSwmHostModeHandler } from './internal/gossip/host-mode-handler.js';
 import { Buffer } from 'node:buffer';
@@ -2827,9 +2828,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
         }
       }
       const existing = this.subscribedContextGraphs.get(localCgId);
-      if (existing === undefined) {
-        return this.contextGraphSubscriptionDormancyById.has(localCgId) ? 'dormant' : undefined;
-      }
+      if (this.contextGraphSubscriptionDormancyById.has(localCgId)
+        && !isAdmittedContextGraphSubscription(existing)) return 'dormant';
+      if (existing === undefined) return undefined;
       if (!existing.subscribed) return undefined;
       if (existing.onChainId === undefined) {
         return options.namespaceVerified === true || localCgId === numericStr ? undefined : 'binding-pending';

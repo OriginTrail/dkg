@@ -130,6 +130,7 @@ export default defineConfig({
       "test/context-graph-storage-discovery-agent.test.ts",
       "test/context-graph-duplicate-name-binding.test.ts",
       "test/context-graph-dormant-identity.test.ts",
+      "test/context-graph-dormant-core-host-admission.test.ts",
       "test/context-graph-dormant-placeholder-order.test.ts",
       "test/context-graph-dormant-admission-boundary.test.ts",
       "test/context-graph-automatic-discovery-binding.test.ts",
