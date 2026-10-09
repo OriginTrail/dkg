@@ -3503,6 +3503,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             // once the allowlist is locally visible — clean self-heal,
             // no spurious denial. Other gossip topics (publish/app/
             // update/finalization) wire up immediately as before.
+            const wirePredecessor = this.resolveWireOnlyContextGraphSubscription(contextGraphId);
             this.subscribeToContextGraph(contextGraphId, {
               deferSharedMemoryGossipSubscribe: true,
               syncMode: 'always-on',
@@ -3533,6 +3534,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               approvedSubscription,
               { persist: false },
             );
+            if (wirePredecessor && !this.subscribedContextGraphs.has(wirePredecessor.localId)) {
+              void this.persistContextGraphSubscription(contextGraphId, { retiredNamePredecessor: { ...wirePredecessor.subscription, id: wirePredecessor.localId } });
+            }
             this.joinRequestAcceptedBy.delete(this.joinRequestTrackingKey(
               contextGraphId,
               approvedAddr,
@@ -9246,14 +9250,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (this.wireIdToLocalCgId.get(localWireId) === wireOnlySubscription.localId) {
         this.wireIdToLocalCgId.delete(localWireId);
       }
-      // Admitted adoption retires durable placeholder intent; inactive
-      // startup keeps its saved rows intact.
-      if (options?.persist !== false || normalizedNext.subscribed || normalizedNext.coreHosted) {
-        this.retirePersistedContextGraphNamePlaceholder(
-          wireOnlySubscription.localId,
-          wireOnlySubscription.subscription,
-        );
-      }
       this.log.info(
         createOperationContext('system'),
         `Promoted wire-only Context Graph ${localWireId.slice(0, 18)}… to local identity "${contextGraphId}"`,
@@ -9379,6 +9375,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           {
             revision,
             preserveDormantHosting: previous?.coreHosted !== true || canonicalNext.coreHosted === true,
+            retiredNamePredecessor: adoptsWireOnlySubscription ? { ...wireOnlySubscription!.subscription, id: wireOnlySubscription!.localId } : undefined,
             updateRehydrationStatus: options?.updateRehydrationStatus !== false,
           },
         );
@@ -9792,6 +9789,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       updateRehydrationStatus?: boolean;
       preserveInactiveIntent?: boolean;
       preserveDormantHosting?: boolean;
+      retiredNamePredecessor?: Pick<ContextGraphSubscriptionRecord, 'id' | 'onChainId' | 'onChainHash' | 'coreHosted'>;
     },
   ): Promise<void> {
     this.invalidateListContextGraphsCache();
@@ -9833,6 +9831,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         persisted = persistence.record;
         await store.save(persisted);
       }
+      await this.retirePersistedContextGraphNamePredecessors(input, sub, generation, revision, persistence, options?.retiredNamePredecessor);
       written = true;
     }).then(() => {
       if (written && options?.updateRehydrationStatus === true
@@ -10303,8 +10302,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }),
       persistMembership: (id) => this.persistLocalNodeMembership(id, 'rehydrated-subscription'),
       commit: (id) => {
+        const wire = this.resolveWireOnlyContextGraphSubscription(id);
         this.retireLiveContextGraphNamePlaceholderFor(id);
-        return this.setContextGraphSubscription(id, this.subscribedContextGraphs.get(id)!, { persist: false, preserveAdmittedWireBinding: true });
+        const committed = this.setContextGraphSubscription(id, this.subscribedContextGraphs.get(id)!, { persist: false, preserveAdmittedWireBinding: true });
+        if (wire && !this.subscribedContextGraphs.has(wire.localId)) void this.persistContextGraphSubscription(id, { retiredNamePredecessor: { ...wire.subscription, id: wire.localId } });
+        return committed;
       },
     }, options);
   }

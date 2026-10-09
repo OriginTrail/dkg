@@ -39,12 +39,19 @@ interface RecordingStore extends ContextGraphSubscriptionStore {
 function recordingStore(rows: ContextGraphSubscriptionRecord[] = []): RecordingStore {
   const saved: ContextGraphSubscriptionRecord[] = [];
   const deleted: string[] = [];
+  let retained = rows.map((row) => ({ ...row }));
   return {
     saved,
     deleted,
-    loadAll: async () => rows,
-    save: async (record) => { saved.push(record); },
-    delete: async (id) => { deleted.push(id); },
+    loadAll: async () => retained.map((row) => ({ ...row })),
+    save: async (record) => {
+      saved.push(record);
+      retained = [...retained.filter((row) => row.id !== record.id), { ...record }];
+    },
+    delete: async (id) => {
+      deleted.push(id);
+      retained = retained.filter((row) => row.id !== id);
+    },
   };
 }
 
@@ -278,8 +285,8 @@ describe('adopting a verified cleartext id', () => {
     internals.setContextGraphSubscription(CLEARTEXT, { subscribed: true, synced: false, syncMode: 'always-on' });
     expect(internals.subscribedContextGraphs.has(NAME_HASH)).toBe(false);
     expect(internals.subscribedContextGraphs.get(CLEARTEXT)).toMatchObject({ onChainId: ON_CHAIN_ID, onChainHash: NAME_HASH });
-    expect(deleteMember).toHaveBeenCalledWith(NAME_HASH, 'node', internals.peerId);
     await waitFor(() => store.deleted.includes(NAME_HASH));
+    expect(deleteMember).toHaveBeenCalledWith(NAME_HASH, 'node', internals.peerId);
   });
 
   it('never mints a second identity when the adopted hash is subscribed again', async () => {
@@ -302,6 +309,7 @@ describe('adopting a verified cleartext id', () => {
     const store = recordingStore();
     const internals = await boot({ store });
     subscribeByNameHash(internals);
+    await waitFor(() => store.saved.some((row) => row.id === NAME_HASH));
     internals.subscribeToContextGraph(CLEARTEXT, { syncMode: 'always-on' });
     await waitFor(() => store.deleted.includes(NAME_HASH));
     expect(internals.subscribedContextGraphs.has(NAME_HASH)).toBe(false);

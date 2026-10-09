@@ -136,6 +136,7 @@ export default defineConfig({
       "test/context-graph-dormant-admission-boundary.test.ts",
       "test/context-graph-automatic-discovery-binding.test.ts",
       "test/context-graph-activation-custody.test.ts",
+      "test/context-graph-dormant-predecessor-retirement.test.ts",
       "test/context-graph-numeric-dormant-binding.test.ts",
       "test/context-graph-same-slot-restoration.test.ts",
       "test/context-graph-persisted-alias-binding.test.ts",
