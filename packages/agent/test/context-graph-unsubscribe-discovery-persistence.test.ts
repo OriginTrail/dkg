@@ -11,6 +11,8 @@ type Window = 'before-lane' | 'hosting-read';
 interface State {
   node: unknown;
   gossip: unknown;
+  config: { syncContextGraphs?: string[] };
+  contextGraphSubscriptionPersistPendingRevisions: Map<string, Set<number>>;
   subscribedContextGraphs: Map<string, ContextGraphSub>;
   setContextGraphSubscription(id: string, sub: ContextGraphSubInput, opts?: { persist?: boolean }): ContextGraphSub;
   enqueueContextGraphSubscriptionPersistWrite(id: string, write: () => Promise<void>): Promise<void>;
@@ -86,6 +88,63 @@ async function hold(f: Awaited<ReturnType<typeof fixture>>, window: Window) {
 
 const windows: Window[] = ['before-lane', 'hosting-read'];
 describe('passive discovery while explicit unsubscribe is queued', () => {
+
+  const readinessChanges: { field: string; patch: Partial<ContextGraphSub> }[] = [
+    { field: 'synced', patch: { synced: true } },
+    { field: 'sharedMemorySynced', patch: { sharedMemorySynced: true } },
+    { field: 'metaSynced', patch: { metaSynced: true } },
+    { field: 'lastReconciledOrdinal', patch: { lastReconciledOrdinal: 19 } },
+  ];
+  const readinessCases = windows.flatMap((window) => [false, true].flatMap((hosted) => (
+    readinessChanges.map((change) => ({ window, hosted, ...change }))
+  )));
+  it.each(readinessCases)('finishes unsubscribe through late inactive $field $window savedHosting=$hosted', async ({ window, hosted, patch }) => {
+    const f = await fixture(hosted); const gate = await hold(f, window);
+    f.agent.unsubscribeFromContextGraph(LOCAL);
+    const captured = { ...f.state.subscribedContextGraphs.get(LOCAL)! };
+    try {
+      if (window === 'hosting-read') await gate.entered.promise;
+      const pointer = f.state.subscribedContextGraphs.get(LOCAL)!;
+      expect(pointer).toEqual(captured);
+      const pending = [...f.state.contextGraphSubscriptionPersistPendingRevisions.get(LOCAL)!];
+      expect(pending).toHaveLength(1);
+      f.agent.markContextGraphSubscriptionState(LOCAL, patch);
+      expect(f.state.subscribedContextGraphs.get(LOCAL)).not.toBe(pointer);
+      expect(f.state.subscribedContextGraphs.get(LOCAL)).toMatchObject(patch);
+      expect([...f.state.contextGraphSubscriptionPersistPendingRevisions.get(LOCAL)!]).toEqual(pending);
+    } finally { gate.release.resolve(); }
+    await f.drain();
+    if (hosted) {
+      expect(f.rows()).toEqual([expect.objectContaining({
+        subscribed: false, coreHosted: true, onChainId: ID, onChainHash: HASH,
+        synced: captured.synced, sharedMemorySynced: captured.sharedMemorySynced,
+        metaSynced: captured.metaSynced, lastReconciledOrdinal: captured.lastReconciledOrdinal,
+      })]);
+      expect(f.save).toHaveBeenCalledTimes(1); expect(f.remove).not.toHaveBeenCalled();
+    } else {
+      expect(f.rows()).toEqual([]);
+      expect(f.remove).toHaveBeenCalledTimes(1); expect(f.save).not.toHaveBeenCalled();
+    }
+    expect(f.state.subscribedContextGraphs.get(LOCAL)).toMatchObject({
+      subscribed: false, coreHosted: false, onChainId: ID, onChainHash: HASH, ...patch,
+    });
+  });
+  const intentCases = windows.flatMap((window) => (['sync-mode', 'sync-scope'] as const).map((intent) => ({ window, intent })));
+  it.each(intentCases)('fences unqueued changed $intent intent during unsubscribe $window', async ({ window, intent }) => {
+    const f = await fixture(); const gate = await hold(f, window);
+    f.agent.unsubscribeFromContextGraph(LOCAL);
+    try {
+      if (window === 'hosting-read') await gate.entered.promise;
+      if (intent === 'sync-mode') f.agent.markContextGraphSubscriptionState(LOCAL, { syncMode: 'on-demand' });
+      else {
+        f.state.config.syncContextGraphs = [LOCAL];
+        f.agent.markContextGraphSubscriptionState(LOCAL, { synced: true });
+      }
+    } finally { gate.release.resolve(); }
+    await f.drain();
+    expect(f.rows()).toEqual([f.original]);
+    expect(f.save).not.toHaveBeenCalled(); expect(f.remove).not.toHaveBeenCalled();
+  });
   it.each(windows)('finishes a member-only unsubscribe through same-slot discovery %s', async (window) => {
     const f = await fixture(); const gate = await hold(f, window);
     f.agent.unsubscribeFromContextGraph(LOCAL);
@@ -118,11 +177,11 @@ describe('passive discovery while explicit unsubscribe is queued', () => {
     expect(f.remove).not.toHaveBeenCalled();
     expect(f.state.subscribedContextGraphs.get(LOCAL)).toMatchObject({ subscribed: false, coreHosted: false });
   });
-  it('fences an in-place genuine numeric rebind during the hosting read', async () => {
-    const f = await fixture(true); const gate = await hold(f, 'hosting-read');
+  it.each(windows)('fences an in-place genuine numeric rebind %s', async (window) => {
+    const f = await fixture(true); const gate = await hold(f, window);
     f.agent.unsubscribeFromContextGraph(LOCAL);
     try {
-      await gate.entered.promise;
+      if (window === 'hosting-read') await gate.entered.promise;
       const current = f.state.subscribedContextGraphs.get(LOCAL)!;
       f.agent.bindSubscriptionOnChainId(LOCAL, current, '586');
     } finally { gate.release.resolve(); }
@@ -130,11 +189,11 @@ describe('passive discovery while explicit unsubscribe is queued', () => {
     expect(f.rows()).toEqual([f.original]);
     expect(f.save).not.toHaveBeenCalled(); expect(f.remove).not.toHaveBeenCalled();
   });
-  it('retains a newer native resubscription during the hosting read', async () => {
-    const f = await fixture(); const gate = await hold(f, 'hosting-read');
+  it.each(windows)('retains a newer native resubscription %s', async (window) => {
+    const f = await fixture(); const gate = await hold(f, window);
     f.agent.unsubscribeFromContextGraph(LOCAL);
     try {
-      await gate.entered.promise;
+      if (window === 'hosting-read') await gate.entered.promise;
       f.agent.subscribeToContextGraph(LOCAL, { persist: false, deferSharedMemoryGossipSubscribe: true });
     } finally { gate.release.resolve(); }
     await f.drain();

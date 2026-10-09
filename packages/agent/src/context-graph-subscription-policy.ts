@@ -95,13 +95,10 @@ export function isContextGraphSubscriptionPersistenceTargetCurrent(
   if (!snapshot || !current || state.syncScoped !== input.syncScoped
     || isAdmittedContextGraphSubscription(snapshot)
     || isAdmittedContextGraphSubscription(current)) return false;
-  // Inactive discovery owns name/participant enrichment, not a replacement
-  // durable write. Every other persisted field must retain its captured value.
+  // Inactive metadata/readiness owns no replacement durable intent. Keep
+  // membership, custody, mode and scope ownership; retain the queued snapshot.
   return snapshot.syncMode === current.syncMode
-    && snapshot.subscribed === current.subscribed && snapshot.coreHosted === current.coreHosted
-    && snapshot.synced === current.synced && snapshot.sharedMemorySynced === current.sharedMemorySynced
-    && snapshot.metaSynced === current.metaSynced
-    && snapshot.lastReconciledOrdinal === current.lastReconciledOrdinal;
+    && snapshot.subscribed === current.subscribed && snapshot.coreHosted === current.coreHosted;
 }
 
 /**
