@@ -302,6 +302,10 @@ describe('runtime-accepted RFC-64 private query authorization', () => {
       },
     );
     expect(outsider.bindings).toEqual([]);
+    await expect(QueryMethods.prototype.query.call(fixture.agent as never,
+      'SELECT ?s WHERE { ?s ?p ?o }', { contextGraphId: RUNTIME_PRIVATE_CG,
+        view: 'verifiable-memory', callerAgentAddress: OUTSIDER, accessDenied: 'error', redactQuery: true,
+      })).rejects.toMatchObject({ code: 'QUERY_ACCESS_DENIED' });
     expect(fixture.queryEngine.query).toHaveBeenCalledTimes(1);
     expect(fixture.isPrivateContextGraph).not.toHaveBeenCalled();
     expect(fixture.acceptedPolicySnapshot).toHaveBeenCalledWith(
