@@ -716,14 +716,14 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
           principalId: this.normalizeMembershipPrincipal('node', this.peerId),
           destinationCurrent,
           queueSubscription: (sourceId, write) => this.enqueueContextGraphSubscriptionPersistWrite(sourceId, write),
-          queueMembership: (key, write) => this.enqueueContextGraphMembershipPersistWrite(key, write),
+          queueMembership: (key, write) => this.enqueueContextGraphMembershipPersistWrite(key, write, { strict: true }),
           captureSource: (row) => captureInactiveContextGraphNamePredecessor(row, destination, {
             current: (sourceId) => this.subscribedContextGraphs.get(sourceId),
             binding: this.contextGraphBindingState,
             nextRevision: this.nextContextGraphSubscriptionPersistRevision.bind(this),
             claimRevision: this.claimContextGraphSubscriptionPersistRevision.bind(this),
             retireRuntime: this.deleteContextGraphSubscription.bind(this),
-            retireMembership: (sourceId) => this.deleteContextGraphMember(sourceId, 'node', this.peerId),
+            refreshMembership: (sourceId) => this.scheduleRfc64CatalogResponsibilityReconciliationV1(sourceId),
             clearStatus: (sourceId) => this.updateContextGraphSubscriptionRehydrationStatusAfterClear([sourceId]),
           }),
         });

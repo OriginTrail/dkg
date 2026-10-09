@@ -45,7 +45,7 @@ afterEach(async () => {
   for (const directory of directories.splice(0)) await rm(directory, { recursive: true, force: true });
   vi.restoreAllMocks();
 });
-async function fixture(options: { capped?: boolean; host?: boolean; marker?: boolean; nativeStart?: boolean; skipPlan?: boolean; private?: boolean; sameHashSecond?: boolean; secondPublic?: boolean; wire?: boolean } = {}) {
+async function fixture(options: { capped?: boolean; host?: boolean; marker?: boolean; nativeStart?: boolean; skipPlan?: boolean; private?: boolean; sameHashSecond?: boolean; secondPublic?: boolean; wire?: boolean; markerOnly?: boolean } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'dkg-swm-host-dormancy-')); directories.push(directory);
   const chain = new MockChainAdapter('mock:31337', undefined, { initialContextGraphId: 582n });
   await chain.createOnChainContextGraph({ accessPolicy: options.private ? 1 : 0, publishPolicy: 1, nameHash: HASH });
@@ -55,6 +55,7 @@ async function fixture(options: { capped?: boolean; host?: boolean; marker?: boo
   const target: ContextGraphSubscriptionRecord = { id: options.wire ? HASH : LOCAL, subscribed: !options.host, coreHosted: options.host ?? false,
     synced: false, sharedMemorySynced: false, metaSynced: false, syncScoped: true, onChainId: SLOT, onChainHash: HASH };
   let rows = options.capped ? [{ ...target, id: blocker, onChainId: '583', onChainHash: blockerHash }, target] : [target];
+  if (options.markerOnly) rows = [];
   if (options.marker) {
     const store = new SwmHostModeStore({ dataDir: join(directory, 'swm-host'), ...SwmHostModeStore.defaultLimits() });
     await store.init(); await store.markHostModeSubscribed(LOCAL);
@@ -124,12 +125,42 @@ describe('automatic SWM host admission honors durable dormancy', () => {
     const order: string[] = [];
     const init = f.agent.initializeSwmHostModeStore.bind(f.agent);
     const rehydrate = f.agent.rehydrateContextGraphsFromDurableState.bind(f.agent);
+    const restore = f.agent.restoreSwmHostModeSubscriptions.bind(f.agent);
     vi.spyOn(f.agent, 'initializeSwmHostModeStore').mockImplementation(async () => { await init(); order.push('store'); expect(f.state.swmHostModeHandlers.size).toBe(0); });
     vi.spyOn(f.agent, 'rehydrateContextGraphsFromDurableState').mockImplementation(async () => { await rehydrate(); order.push('durable'); });
+    vi.spyOn(f.agent, 'restoreSwmHostModeSubscriptions').mockImplementation(async () => { await restore(); order.push('restore'); });
     await f.agent.start();
-    expect(order).toEqual(['store', 'durable']);
+    expect(order).toEqual(['store', 'durable', 'restore']);
     expect(f.state.contextGraphSubscriptionDormancyById.has(LOCAL)).toBe(true);
     expect(f.state.swmHostModeHandlers.has(HASH)).toBe(false);
+    expect(await f.state.swmHostModeStore.listHostModeSubscribedCgs()).toContain(LOCAL);
+  }, 15000);
+  it('actual startup restores an eligible marker-only listener after durable rehydration', async () => {
+    const f = await fixture({ private: true, marker: true, markerOnly: true, nativeStart: true });
+    await privateMetadata(f.agent);
+    expect(await f.agent.isCuratedForHostMode(LOCAL)).toBe(true);
+    const order: string[] = [];
+    const init = f.agent.initializeSwmHostModeStore.bind(f.agent);
+    const rehydrate = f.agent.rehydrateContextGraphsFromDurableState.bind(f.agent);
+    const restore = f.agent.restoreSwmHostModeSubscriptions.bind(f.agent);
+    vi.spyOn(f.agent, 'initializeSwmHostModeStore').mockImplementation(async () => { await init(); order.push('store'); expect(f.state.swmHostModeHandlers.size).toBe(0); });
+    vi.spyOn(f.agent, 'rehydrateContextGraphsFromDurableState').mockImplementation(async () => { await rehydrate(); order.push('durable'); expect(f.state.swmHostModeHandlers.size).toBe(0); });
+    vi.spyOn(f.agent, 'restoreSwmHostModeSubscriptions').mockImplementation(async () => {
+      expect(f.state.swmHostModeHandlers.size).toBe(0);
+      await restore(); order.push('restore');
+      expect(f.state.swmHostModeHandlers.has(HASH)).toBe(true);
+    });
+    vi.spyOn(f.agent, 'reconcileSwmHostModeSubscription').mockResolvedValue(undefined);
+    vi.spyOn(f.agent, 'reconcileHostModeSubscriptions').mockResolvedValue(undefined);
+    await f.agent.start();
+    expect(order).toEqual(['store', 'durable', 'restore']);
+    const topic = contextGraphWorkspaceTopic(HASH);
+    const gossip = (f.agent as unknown as { gossip: { subscribedTopics: string[]; topicHandlers: Map<string, Set<Handler>> } }).gossip;
+    const handler = f.state.swmHostModeHandlers.get(HASH);
+    expect(handler).toBeDefined();
+    expect(gossip.subscribedTopics).toContain(topic);
+    expect(gossip.topicHandlers.get(topic)).toContain(handler);
+    expect(f.state.swmHostModeSubscribed.get(HASH)).toBe(SUBSCRIPTION_SOURCES.RECONCILER);
     expect(await f.state.swmHostModeStore.listHostModeSubscribedCgs()).toContain(LOCAL);
   }, 15000);
   it('does not recreate a dormant listener through the direct automatic wire choke point', async () => {

@@ -12,7 +12,7 @@ interface Internals {
   subscribedContextGraphs: Map<string, ContextGraphSub>;
   setContextGraphSubscription(id: string, row: ContextGraphSubInput, options?: { persist?: boolean; deferWireAdoption?: boolean }): ContextGraphSub;
   enqueueContextGraphSubscriptionPersistWrite(id: string, write: () => Promise<void>): Promise<void>;
-  enqueueContextGraphMembershipPersistWrite(key: string, write: () => Promise<void>): Promise<void>;
+  enqueueContextGraphMembershipPersistWrite(key: string, write: () => Promise<void>, options?: { strict?: boolean }): Promise<void>;
 }
 class Gossip {
   subscribe() {} unsubscribe() {} onMessage() {} offMessage() {}
@@ -27,7 +27,7 @@ function predecessor(overrides: Partial<ContextGraphSubscriptionRecord> = {}): C
   return { id: HASH, subscribed: true, coreHosted: false, synced: true, sharedMemorySynced: true,
     metaSynced: true, syncScoped: true, onChainId: SLOT, onChainHash: HASH, ...overrides };
 }
-async function fixture(initial: ContextGraphSubscriptionRecord[] = [predecessor()]) {
+async function fixture(initial: ContextGraphSubscriptionRecord[] = [predecessor()], legacyMembers = false) {
   let rows = initial.map(row => ({ ...row }));
   let failDestination = false;
   const events: string[] = [];
@@ -51,7 +51,7 @@ async function fixture(initial: ContextGraphSubscriptionRecord[] = [predecessor(
   const create = async (enabled: boolean) => {
     const agent = await DKGAgent.create({ name: 'DormantPredecessor', nodeRole: 'edge', chainAdapter: chain,
       rfc64CatalogActivation: { enabled: false }, contextGraphSubscriptionRehydrationEnabled: enabled,
-      contextGraphSubscriptionStore: store, contextGraphMembershipStore: membershipStore });
+      contextGraphSubscriptionStore: store, contextGraphMembershipStore: legacyMembers ? { upsert: membershipStore.upsert, delete: membershipStore.delete } : membershipStore });
     agents.push(agent);
     (agent as unknown as { node: unknown }).node = { peerId: '12D3KooWDormantPredecessor', libp2p: { getPeers: () => [] } };
     (agent as unknown as { gossip: Gossip }).gossip = new Gossip();
@@ -63,7 +63,7 @@ async function fixture(initial: ContextGraphSubscriptionRecord[] = [predecessor(
   const drain = async () => {
     for (const id of [LOCAL, HASH, ...initial.map(row => row.id)]) {
       await state.enqueueContextGraphSubscriptionPersistWrite(id, async () => undefined);
-      await state.enqueueContextGraphMembershipPersistWrite(memberKey(id, agent.peerId), async () => undefined);
+      await state.enqueueContextGraphMembershipPersistWrite(memberKey(id, agent.peerId), async () => undefined, { strict: true });
     }
   };
   return { agent, state, store, chain, save, remove, loadAll, events, create, drain, members, membershipStore, rows: () => rows.map(row => ({ ...row })), fail: () => { failDestination = true; } };
@@ -216,6 +216,67 @@ describe('durable dormant name predecessor retirement', () => {
     expect([...f.members.values()].some(row => row.contextGraphId === LOCAL)).toBe(false);
     const restarted = await f.create(true);
     expect((restarted as unknown as Internals).subscribedContextGraphs.get(HASH)?.subscribed ?? false).toBe(false);
+  });
+
+  it('preserves a later strict membership upsert behind the checked retirement lane', async () => {
+    const f = await fixture();
+    await f.agent.upsertContextGraphMember({ contextGraphId: HASH, principalType: 'node', principalId: f.agent.peerId,
+      status: 'active', role: 'subscriber', metadata: { onChainId: SLOT } }, { strict: true });
+    let entered!: () => void; let release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; }); const held = new Promise<void>(resolve => { release = resolve; });
+    const original = f.membershipStore.loadAll;
+    vi.spyOn(f.membershipStore, 'loadAll').mockImplementationOnce(async () => { const snapshot = await original(); entered(); await held; return snapshot; });
+    f.agent.subscribeToContextGraph(LOCAL, { deferSharedMemoryGossipSubscribe: true });
+    await started;
+    const bindings = (f.agent as unknown as { contextGraphBindingState: { capture(id: string): number } }).contextGraphBindingState;
+    const pointers = [f.state.subscribedContextGraphs.get(LOCAL), f.state.subscribedContextGraphs.get(HASH)];
+    const generations = [bindings.capture(LOCAL), bindings.capture(HASH)];
+    let completed = false;
+    const update = f.agent.upsertContextGraphMember({ contextGraphId: HASH, principalType: 'node', principalId: f.agent.peerId,
+      status: 'active', role: 'subscriber', metadata: { onChainId: '323' } }, { strict: true }).then(() => { completed = true; });
+    expect(completed).toBe(false);
+    expect([f.state.subscribedContextGraphs.get(LOCAL), f.state.subscribedContextGraphs.get(HASH)]).toEqual(pointers);
+    expect([bindings.capture(LOCAL), bindings.capture(HASH)]).toEqual(generations);
+    release(); await update; await f.drain();
+    expect(f.rows().some(row => row.id === HASH)).toBe(false);
+    expect([...f.members.values()]).toContainEqual(expect.objectContaining({ contextGraphId: HASH, metadata: { onChainId: '323' } }));
+  });
+
+  it('does not coalesce a prior pending background membership upsert with retirement', async () => {
+    const saved = predecessor(); const f = await fixture([saved]);
+    const key = HASH + '\0node\0' + f.agent.peerId;
+    let entered!: () => void; let release!: () => void; let queued!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; }); const held = new Promise<void>(resolve => { release = resolve; });
+    const retirementQueued = new Promise<void>(resolve => { queued = resolve; });
+    const blocker = f.state.enqueueContextGraphMembershipPersistWrite(key, async () => { entered(); await held; }, { strict: true });
+    await started;
+    const update = f.agent.upsertContextGraphMember({ contextGraphId: HASH, principalType: 'node', principalId: f.agent.peerId,
+      status: 'active', role: 'subscriber', metadata: { onChainId: '323' } });
+    const enqueue = f.state.enqueueContextGraphMembershipPersistWrite.bind(f.state);
+    vi.spyOn(f.state, 'enqueueContextGraphMembershipPersistWrite').mockImplementation((id, write, options) => {
+      const result = enqueue(id, write, options); if (id === key) queued(); return result;
+    });
+    f.agent.subscribeToContextGraph(LOCAL, { deferSharedMemoryGossipSubscribe: true });
+    await retirementQueued; release(); await blocker; await update; await f.drain();
+    expect(f.rows()).toContainEqual(saved);
+    expect([...f.members.values()]).toContainEqual(expect.objectContaining({ contextGraphId: HASH, metadata: { onChainId: '323' } }));
+    expect(f.remove).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('legacy unreadable membership keeps opaque rows but cannot resurrect subscribed intent, saved host=%s', async host => {
+    const f = await fixture([predecessor({ coreHosted: host })], true);
+    await f.agent.upsertContextGraphMember({ contextGraphId: HASH, principalType: 'node', principalId: f.agent.peerId,
+      status: 'active', role: 'subscriber', metadata: { onChainId: '323' } }, { strict: true });
+    f.agent.subscribeToContextGraph(LOCAL, { deferSharedMemoryGossipSubscribe: true }); await f.drain();
+    f.agent.unsubscribeFromContextGraph(LOCAL); await f.drain();
+    expect(f.rows().some(row => row.id === HASH)).toBe(false);
+    if (host) expect(f.rows()).toEqual([expect.objectContaining({ id: LOCAL, subscribed: false, coreHosted: true, onChainId: SLOT, onChainHash: HASH })]);
+    else expect(f.rows()).toEqual([]);
+    expect(f.membershipStore.delete).not.toHaveBeenCalledWith(HASH, 'node', f.agent.peerId);
+    expect([...f.members.values()]).toContainEqual(expect.objectContaining({ contextGraphId: HASH, metadata: { onChainId: '323' } }));
+    const restarted = await f.create(true);
+    expect((restarted as unknown as Internals).subscribedContextGraphs.get(HASH)?.subscribed ?? false).toBe(false);
+    expect((restarted as unknown as Internals).subscribedContextGraphs.get(LOCAL)?.subscribed ?? false).toBe(false);
   });
 
   it('preserves a newly durable Core predecessor with unchanged runtime ownership', async () => {

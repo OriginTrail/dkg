@@ -144,8 +144,8 @@ export async function retireCommittedContextGraphNamePredecessors(
     const key = `${predecessor.id}\0node\0${ports.principalId}`;
     await ports.queueMembership(key, () => ports.queueSubscription(predecessor.id, async () => {
       if (!current()) return;
-      if (ports.membershipStore) {
-        if (!ports.membershipStore.loadAll) return;
+      // Legacy stores cannot prove membership ownership; retire only the saved row.
+      if (ports.membershipStore?.loadAll) {
         const members = await ports.membershipStore.loadAll();
         if (!current() || members.some(row => row.contextGraphId === predecessor.id
           && row.principalType === 'node' && row.principalId === ports.principalId
@@ -161,6 +161,10 @@ export async function retireCommittedContextGraphNamePredecessors(
         await ports.store.delete(predecessor.id);
         if (!current()) return;
         remaining.splice(index, 1);
+      }
+      if (ports.membershipStore?.loadAll) {
+        await ports.membershipStore.delete(predecessor.id, 'node', ports.principalId);
+        if (!current()) return;
       }
       source.complete();
     }));
@@ -191,7 +195,7 @@ export function captureInactiveContextGraphNamePredecessor(
     nextRevision(id: string): number;
     claimRevision(id: string, revision: number): boolean;
     retireRuntime(id: string): unknown;
-    retireMembership(id: string): void;
+    refreshMembership(id: string): void;
     clearStatus(id: string): void;
   },
 ): { current(): boolean; complete(): void } | null {
@@ -203,7 +207,7 @@ export function captureInactiveContextGraphNamePredecessor(
     current: () => owner.current(row.id) === source && owner.binding.isGenerationCurrent(row.id, generation),
     complete: () => {
       if (source) owner.retireRuntime(row.id);
-      owner.retireMembership(row.id);
+      owner.refreshMembership(row.id);
       if (owner.claimRevision(row.id, revision)) owner.clearStatus(row.id);
     },
   };
