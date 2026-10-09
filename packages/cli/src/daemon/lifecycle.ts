@@ -206,6 +206,7 @@ import {
   writeContextGraphReadiness,
   type ContextGraphReadinessStore,
 } from '../context-graph-readiness.js';
+import { registerJoinMetadataEmptyVmSettlement } from '../context-graph-empty-vm-readiness.js';
 import { authenticateHttpRequest, canAdministerNode, loadTokens } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
@@ -2319,6 +2320,9 @@ async function runDaemonInnerWithStartupOwnership(
     store: dashDb,
     log,
   });
+  // The same holds for the metadata a join approval fetches: it can arrive
+  // after the member's own subscribe call has finished its readiness attempts.
+  registerJoinMetadataEmptyVmSettlement({ agent, dashboard: dashDb, log });
 
   await agent.start();
 
