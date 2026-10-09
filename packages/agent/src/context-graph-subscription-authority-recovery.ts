@@ -7,7 +7,10 @@ import type {
   ContextGraphSubscriptionRehydrationInternalStatus,
   ContextGraphSubscriptionStore,
 } from './dkg-agent-types.js';
-import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
+import {
+  contextGraphDormancyAfterAuthority,
+  type ContextGraphDormancyReason,
+} from './context-graph-subscription-dormancy.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { isCanonicalAuthoritativeContextGraphId } from './context-graph-binding-state.js';
 
@@ -248,15 +251,11 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
       || (ports.persistRevisions.get(contextGraphId) ?? 0) !== revision
     ) continue;
     if (authority.outcome !== 'allowed') {
-      if (authority.outcome === 'denied') {
-        ports.dormancyById.set(contextGraphId, 'authorityDenied');
-        ports.touchStatus();
-      } else if (authority.reason === 'chain-access-policy-unknown') {
-        // The chain answered: the id does not exist or is not active (a
-        // timeout or a failed read has its own reason and stays retryable).
-        // Retrying every pass only repeats that answer, so retire the row for
-        // this process like a deny. It stays durable; a restart checks it again.
-        ports.dormancyById.set(contextGraphId, 'deactivated');
+      // A denial and a chain-unknown id retire the row for this process;
+      // anything else stays unavailable and is asked again on a later pass.
+      const dormancy = contextGraphDormancyAfterAuthority(authority);
+      if (dormancy !== 'authorityUnavailable') {
+        ports.dormancyById.set(contextGraphId, dormancy);
         ports.touchStatus();
       }
       continue;

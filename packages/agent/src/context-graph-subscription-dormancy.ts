@@ -15,6 +15,21 @@ export type ContextGraphDormancyProjection = {
   dormantReasons: Record<ContextGraphDormancyReason, string[]>;
 };
 
+/**
+ * Dormancy of a saved row whose read authority did not come back allowed.
+ *
+ * A denial is final for the process. So is the chain's answer that the id
+ * does not exist or is not active: asking again only repeats it, while a
+ * timeout or a failed read has its own reason and stays retryable. The row
+ * stays saved either way, and the next start checks it again.
+ */
+export function contextGraphDormancyAfterAuthority(
+  authority: Readonly<{ outcome: string; reason: string }>,
+): 'authorityDenied' | 'authorityUnavailable' | 'deactivated' {
+  if (authority.outcome === 'denied') return 'authorityDenied';
+  return authority.reason === 'chain-access-policy-unknown' ? 'deactivated' : 'authorityUnavailable';
+}
+
 export function projectContextGraphDormancy(
   dormancyById: ReadonlyMap<string, ContextGraphDormancyReason>,
 ): ContextGraphDormancyProjection {

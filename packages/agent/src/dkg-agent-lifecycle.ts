@@ -10418,7 +10418,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       },
       capped: (contextGraphId) => {
         this.contextGraphSubscriptionRehydrationPendingIds.add(contextGraphId);
-        this.contextGraphSubscriptionRehydrationPromotionRuntime?.request();
+        this.requestContextGraphSubscriptionPromotion(contextGraphId);
       },
     });
   }
@@ -10460,19 +10460,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         };
       }
     };
-    const pending = [...this.contextGraphSubscriptionRehydrationPendingIds]
-      .filter((id) => this.contextGraphSubscriptionDormancyById.get(id) === 'activationCap')
-      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    // Rows the chain does not confirm are checked at a bounded pace: back to
+    // back, their authority reads take the node's whole chain request budget.
+    const pass = this.contextGraphSubscriptionRollingChecks.beginPass({
+      pendingIds: this.contextGraphSubscriptionRehydrationPendingIds,
+      dormancyById: this.contextGraphSubscriptionDormancyById,
+      subscriptions: this.subscribedContextGraphs,
+      warn: (message) => this.log.warn(ctx, message),
+      debug: (message) => this.log.debug(ctx, message),
+    });
 
-    for (let i = 0; i < pending.length; i++) {
+    for (let i = 0; ; i++) {
       signal.throwIfAborted();
       if (!runtime.owns(signal)) return 'idle';
       if (this.contextGraphSubscriptionRehydrationSlotIds.size >= status.activationCap) break;
-      const contextGraphId = pending[i];
-      if (
-        !this.contextGraphSubscriptionRehydrationPendingIds.has(contextGraphId)
-        || this.contextGraphSubscriptionDormancyById.get(contextGraphId) !== 'activationCap'
-      ) continue;
+      const contextGraphId = await pass.next(signal);
+      if (contextGraphId === undefined) break;
 
       let row = await loadRow(contextGraphId);
       signal.throwIfAborted();
@@ -10505,33 +10508,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         onChainHash: row.onChainHash,
       };
 
-      const authority = await this.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
+      const authority = await pass.read(() => this.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
         allowSubscriptionFallback: false,
         signal,
         durableSubscriptionBinding: {
-          contextGraphId: row.id,
-          onChainId: row.onChainId,
-          onChainHash: row.onChainHash,
+          contextGraphId: candidateBinding.id,
+          onChainId: candidateBinding.onChainId,
+          onChainHash: candidateBinding.onChainHash,
         },
       }).catch((error: unknown) => unavailableContextGraphReadAuthorityDecision(
         'legacy-local',
         'unexpected-authority-error',
         contextGraphReadAuthorityDependencyOf(error),
-      ));
+      )));
       signal.throwIfAborted();
       if (!runtime.owns(signal)) return 'idle';
       if (authority.outcome !== 'allowed') {
         this.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
-        this.contextGraphSubscriptionDormancyById.set(
-          contextGraphId,
-          authority.outcome === 'denied' ? 'authorityDenied' : 'authorityUnavailable',
-        );
+        this.contextGraphSubscriptionDormancyById.set(contextGraphId, pass.leftDormant(contextGraphId, authority));
         touchStatus();
-        this.log.warn(
-          ctx,
-          `Left pending persisted context-graph subscription "${contextGraphId}" dormant: ` +
-            `${authority.outcome} by ${authority.source} (${authority.reason})`,
-        );
         continue;
       }
 
@@ -10627,6 +10622,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
       if (!runtime.owns(signal)) return 'idle';
 
+      pass.activated();
       this.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
       this.updateContextGraphSubscriptionRehydrationStatusAfterPersist(contextGraphId, {
         subscribed: row.subscribed,

@@ -1884,6 +1884,7 @@ describe('Context Graph subscription authority retry', () => {
       });
 
     const rollingPromotion = vi.spyOn(agent, 'promoteDormantContextGraphSubscriptions');
+    const askedFor = vi.spyOn((agent as any).contextGraphSubscriptionRollingChecks, 'prefer');
 
     await agent.start();
     await retryStarted;
@@ -1903,6 +1904,8 @@ describe('Context Graph subscription authority retry', () => {
       },
     }));
     expect(rollingPromotion).toHaveBeenCalled();
+    // The row recovery found allowed goes ahead of rows still waiting unread.
+    expect(askedFor).toHaveBeenCalledWith(coldContextGraphId);
     expect(agent.getSubscribedContextGraphs().has(liveContextGraphId)).toBe(true);
     expect(agent.getSubscribedContextGraphs().has(coldContextGraphId)).toBe(true);
   }, 15_000);
@@ -2121,6 +2124,73 @@ describe('Context Graph subscription rehydration startup authority budget (#2815
     expect(activate).not.toHaveBeenCalled();
     expect(dormancyById.get(row.id)).toBe('activationCap');
     expect(capped).toHaveBeenCalledWith(row.id);
+  });
+
+  it('retires a denied row and a chain-unknown row for the process, and keeps asking for the rest', async () => {
+    const rows = ['denied', 'timed-out', 'unknown'].map((id, i) => persistedRow(id, String(61 + i)));
+    const dormancyById = new Map<string, any>(rows.map((row) => [row.id, 'authorityUnavailable']));
+    const unavailable = (reason: string) => ({
+      outcome: 'unavailable',
+      source: 'registered-chain',
+      reason,
+      metadataBootstrap: 'forbidden',
+      dependency: 'chain',
+    } as const);
+    const answers: Record<string, any> = {
+      denied: {
+        outcome: 'denied',
+        source: 'registered-chain',
+        reason: 'agent-not-in-chain-roster',
+        metadataBootstrap: 'forbidden',
+      },
+      'timed-out': unavailable('chain-access-policy-timeout'),
+      unknown: unavailable('chain-access-policy-unknown'),
+    };
+    let reading = '';
+    const touchedAfter: string[] = [];
+
+    await recoverDeferredContextGraphSubscriptionAuthorities(new AbortController().signal, {
+      store: {
+        loadAll: async () => rows,
+        load: async (id) => rows.find((row) => row.id === id) ?? null,
+        save: async () => undefined,
+        delete: async () => undefined,
+      },
+      dormancyById,
+      persistRevisions: new Map(),
+      subscriptions: new Map(),
+      getStatus: () => ({
+        rehydrationEnabled: true,
+        persistedTotal: 3,
+        systemExcluded: 0,
+        hostedActivated: 0,
+        hostedActivatedIds: [],
+        activated: 0,
+        activationCap: 64,
+        capDisabled: false,
+        completedAt: 1,
+        updatedAt: 1,
+      }),
+      isCurrent: () => true,
+      touchStatus: () => { touchedAfter.push(reading); },
+      clearStatus: vi.fn(),
+      resolveAuthority: async (row) => {
+        reading = row.id;
+        return answers[row.id];
+      },
+      activate: vi.fn(),
+      warn: vi.fn(),
+      activated: vi.fn(),
+      capped: vi.fn(),
+    });
+
+    expect(Object.fromEntries(dormancyById)).toEqual({
+      denied: 'authorityDenied',
+      'timed-out': 'authorityUnavailable',
+      unknown: 'deactivated',
+    });
+    // Only a row whose dormancy changed moves the status timestamp.
+    expect(touchedAfter).toEqual(['denied', 'unknown']);
   });
 
   it('still waits for a join-approved row past the budget and defers the rows after it unread', async () => {

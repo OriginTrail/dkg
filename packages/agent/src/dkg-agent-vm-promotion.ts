@@ -224,7 +224,7 @@ export class VmPromotionMethods extends DKGAgentBase {
         this.storageAckDormantSince.set(localCgId, since);
         const selfClearing = reason === 'authorityUnavailable' || reason === 'activationCap';
         if (selfClearing && now - since < STORAGE_ACK_DORMANT_TRANSIENT_MS) {
-          if (reason === 'activationCap') this.contextGraphSubscriptionRehydrationPromotionRuntime?.request();
+          if (reason === 'activationCap') this.requestContextGraphSubscriptionPromotion(localCgId);
           return unavailable(`the graph subscription on this core is not active yet (${reason})`);
         }
         return disabled(

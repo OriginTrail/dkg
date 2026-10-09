@@ -138,6 +138,8 @@ export default defineConfig({
       "test/context-graph-activation-custody.test.ts",
       "test/context-graph-dormant-predecessor-retirement.test.ts",
       "test/swm-host-dormancy.test.ts",
+      "test/context-graph-subscription-rolling-checks.test.ts",
+      "test/rolling-activation-request-lane.test.ts",
       "test/context-graph-bulk-clear-hosting-intent.test.ts",
       "test/context-graph-numeric-dormant-binding.test.ts",
       "test/context-graph-same-slot-restoration.test.ts",

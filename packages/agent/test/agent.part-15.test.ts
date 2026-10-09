@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, vi, DKGAgentWallet, buildAgentProfile, collectPublishableMultiaddrs, CclEvaluator, DiscoveryClient, ProfileManager, encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret, DKGAgent as RealDKGAgent, AGENT_REGISTRY_CONTEXT_GRAPH, parseCclPolicy, OxigraphStore, getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, PROTOCOL_STORAGE_ACK, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphWorkspaceGraphUri, contextGraphMetaUri, sparqlString, DKGQueryEngine, sha256, EVMChainAdapter, MockChainAdapter, createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS, mintTokens, ethers, tmpdir, mkdtemp, readFile, readdir, rm, join, fileURLToPath, _wrapAgentPublisherForSeal, CapturingContextGraphChainAdapter, AsyncSignerAddressContextGraphChainAdapter, SignerListContextGraphChainAdapter, PcaCuratedRegistrationChainAdapter, NonRegisteringACKChainAdapter, FlakyRegistrationACKChainAdapter, TransientIdentityFailureChainAdapter, BrandNewCoreTransientChainAdapter, PermanentProfileFailureChainAdapter, RetryPathPermanentFailureChainAdapter, ContextAuthorizedPublisherChainAdapter, buildSnapshotFactQuads, ReferenceEvaluator, loadYaml, CCL_FACT_NS, OperationalKeyOnlyPublishChainAdapter, ExternalOperationalKeyPublishChainAdapter, AddressOnlyExternalOperationalKeyPublishChainAdapter, AsyncAddressSignMessageAsPublishChainAdapter, GenericSignMessageExternalOperationalKeyPublishChainAdapter, MultiSignerGenericSignMessagePublishChainAdapter, SingleAddressMismatchedGenericSignMessagePublishChainAdapter, SingleSignerAdapterPublishChainAdapter, ReservingAuthorityContextGraphChainAdapter, type Quad, type ChainAdapter, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type OnChainPublishResult, type V10PublishDirectParams } from './agent.shared';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
+import { RollingSubscriptionChecks } from '../src/context-graph-subscription-rolling-checks.js';
 
 type DKGAgent = RealDKGAgent;
 const DKGAgent = {
@@ -82,13 +83,15 @@ function createPromotionHarness(
       updatedAt: 0,
     },
     contextGraphSubscriptionRehydrationPromotionRuntime: { owns: () => true },
+    // These cases are about the pass's fences, not its pace.
+    contextGraphSubscriptionRollingChecks: new RollingSubscriptionChecks({ minPauseMs: 0, pausePerCheckTime: 0 }),
     contextGraphSubscriptionRehydrationPendingIds: new Set<string>(),
     contextGraphSubscriptionRehydrationSlotIds: new Set<string>(),
     contextGraphSubscriptionDormancyById: new Map<string, string>(),
     contextGraphSubscriptionPersistRevisions: new Map<string, number>(),
     subscribedContextGraphs: new Map<string, any>(),
     started: true,
-    log: { warn: vi.fn(), info: vi.fn() },
+    log: { warn: vi.fn(), info: vi.fn(), debug: vi.fn() },
     updateContextGraphSubscriptionRehydrationStatusAfterClear: vi.fn(),
     updateContextGraphSubscriptionRehydrationStatusAfterPersist: vi.fn(),
     persistContextGraphSubscriptionStrict: vi.fn(async () => undefined),
