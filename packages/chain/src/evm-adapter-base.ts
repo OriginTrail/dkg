@@ -1446,14 +1446,7 @@ export class EVMChainAdapterBase {
       // Resolved here at the config boundary, live per read, like the stickiness switch.
       isEnabled: () => process.env.DKG_DISABLE_RPC_READ_BATCHING !== '1',
     });
-    this.chainIndexOwner = new EvmChainIndexRuntimeOwner(
-      config.chainEventLogStore,
-      (error) => {
-        console.warn(
-          `[chain] one-log chain index disabled: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      },
-    );
+    this.chainIndexOwner = new EvmChainIndexRuntimeOwner(config.chainEventLogStore);
     this.receiptFinality = new EvmReceiptFinalityReader(
       this.finalityConfirmations,
       (label, read, options) => this.readProviderRetryingNull(label, read, options),
@@ -4896,7 +4889,10 @@ export class EVMChainAdapterBase {
    * refuses and each one does exactly what it did before the log existed.
    *
    * A failure here is a degraded index, not a degraded node: it is reported
-   * and the adapter keeps every pre-log path.
+   * and the adapter keeps every pre-log path. A start that was only refused
+   * for now (a read that was not admitted to the local RPC queue in time, or
+   * every endpoint exhausted) is not a failure: the owner retries it, with
+   * this same snapshot, until the log attaches.
    *
    * Re-entrant after a Hub rotation, and only after one:
    * `rebuildChainIndexRuntimeOnRotation` clears the single-flight so the next
