@@ -511,6 +511,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
         live: () => ({ manager: {} }),
         sharedMemoryGossipRegistered: new Set([CONTEXT_GRAPH_ID]),
       },
+      subscribedContextGraphs: new Map([[CONTEXT_GRAPH_ID, { subscribed: true }]]),
       contextGraphMetaProjection: projection,
       gossipWireIdFor: (contextGraphId: string) => contextGraphId,
       rfc64LegacySwmMemberTransportAllowedForContextGraph: () => true,

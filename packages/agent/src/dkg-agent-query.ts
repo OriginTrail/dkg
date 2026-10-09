@@ -396,6 +396,7 @@ import {
   type ContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityInput,
 } from './context-graph-read-authority.js';
+import { observedReadAuthorityDecision } from './internal/context-graph-authority/unanswered-authority-read.js';
 import { runBoundedOperation } from './bounded-operation.js';
 import { isRfc64UnregisteredOwnerUnresolvedErrorV1 } from './dkg-agent-rfc64-catalog.js';
 import type { Rfc64UnregisteredAuthoritySeedFetchOutcomeV1 } from './dkg-agent-rfc64-seed-fetch.js';
@@ -783,7 +784,7 @@ export class QueryMethods extends DKGAgentBase {
       () => this.resolveContextGraphReadAuthority(contextGraphId, readOpts),
     );
     onReadAuthorityDecision?.(decision);
-    return decision.outcome === 'allowed';
+    return observedReadAuthorityDecision(contextGraphId, decision).outcome === 'allowed';
   }
 
   /** Candidate owners that must enter the same canonical authority resolver as scoped reads. */

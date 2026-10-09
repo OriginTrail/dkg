@@ -162,6 +162,7 @@ import {
   type SwmRegisteredAuthorityReadOptions,
   type SwmTransportAuthority,
 } from './internal/context-graph-authority/swm-transport-authority.js';
+import { noRosterFrom } from './internal/context-graph-authority/unanswered-authority-read.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -886,7 +887,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       { signal: options.signal },
     );
     if (registered.kind === 'private') return [...registered.participantAgents];
-    if (registered.kind !== 'unregistered') return null;
+    if (registered.kind !== 'unregistered') return noRosterFrom(contextGraphId, registered);
     const metadataRevision = this.contextGraphMetaProjection
       .readContextGraphAuthorityFactsRevision(contextGraphId);
     const metadataGate = await this.getLocalMetadataMemberRecoveryGate(contextGraphId, options);
@@ -897,7 +898,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     if (currentRegistered.kind === 'private') {
       return [...currentRegistered.participantAgents];
     }
-    if (currentRegistered.kind !== 'unregistered') return null;
+    if (currentRegistered.kind !== 'unregistered') return noRosterFrom(contextGraphId, currentRegistered);
     return this.contextGraphMetaProjection
       .readContextGraphAuthorityFactsRevision(contextGraphId) === metadataRevision
       ? metadataGate

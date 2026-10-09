@@ -176,9 +176,9 @@ import {
 } from './rfc64/public-catalog-activation-config-v1.js';
 import {
   Rfc64CatalogResponsibilityRegistryV1,
-  resolveRfc64CatalogResponsibilityReasonV1,
   type Rfc64CatalogResponsibilitySelectionV1,
 } from './rfc64/catalog-responsibility-registry-v1.js';
+import { Rfc64CatalogResponsibilityRosterV1 } from './internal/rfc64-catalog-responsibility-roster-v1.js';
 import {
   projectRfc64CatalogTransportStateV1,
   rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1,
@@ -2360,19 +2360,18 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         // chain evidence keeps precedence whenever a numeric binding exists.
         accessPolicy = this.readAcceptedRfc64CatalogAccessPolicyV1(contextGraphId);
       }
-      const privateMembershipVerified = accessPolicy === 'private'
-        && await this.hasRfc64VerifiedPrivateMembershipV1(contextGraphId);
-      const reason = resolveRfc64CatalogResponsibilityReasonV1({
+      const roster = new Rfc64CatalogResponsibilityRosterV1({
+        contextGraphId, accessPolicy, registry, owner: this, log: this.log,
+        lifecycleSignal: this.rfc64BackgroundWorkDispatcherV1.shutdownSignal,
         nodeRole: (this.config.nodeRole ?? 'edge') === 'core' ? 'core' : 'edge',
-        subscribed: subscription.subscribed === true,
-        coreHosted: subscription.coreHosted === true,
-        accessPolicy,
-        privateMembershipVerified,
+        subscribed: subscription.subscribed === true, coreHosted: subscription.coreHosted === true,
+        isCurrent: () => isCurrentRfc64CatalogResponsibilityRevisionV1(this, contextGraphId, revision),
+        askAgain: () => this.scheduleRfc64CatalogResponsibilityReconciliationV1(contextGraphId),
       });
-      if (!isCurrentRfc64CatalogResponsibilityRevisionV1(this, contextGraphId, revision)) {
-        return registry.read(contextGraphId);
-      }
-      const next = commit(reason);
+      const decision = roster.decide(accessPolicy === 'private'
+        && await roster.read(() => this.hasRfc64VerifiedPrivateMembershipV1(contextGraphId)));
+      if (decision.keep !== undefined) return decision.keep;
+      const next = commit(decision.reason);
       if (
         finalizedAuthorityEvidence?.snapshot !== null
         && finalizedAuthorityEvidence?.snapshot !== undefined
