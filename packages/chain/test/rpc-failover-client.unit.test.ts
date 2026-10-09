@@ -618,6 +618,53 @@ describe('RpcFailoverClient.populateAndSign — #870 signer propagation + estima
     expect(populated.gasLimit).toBe(23_100n); // 21000 * (10000+1000) / 10000 — buffer applied
   });
 
+  it('a least headroom alone asks for the buffered estimate and is added to it', async () => {
+    const populateTransaction = recorder(async () => ({ to: '0xTO', data: '0x' })); // no gasLimit → estimate runs
+    const estimateGas = recorder(async () => 319_732n);
+    const contract = { connect: () => ({ doWrite: { populateTransaction, estimateGas } }) } as any;
+    const signPopulated = recorder(async (_s: unknown, _pop: unknown) => ({ signedTx: '0xS', txHash: '0xH' }));
+    const client = makeClient([{}], ['https://only.example'], signPopulated as SignPopulatedFn);
+
+    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'unit write', { gasLimitMinBuffer: 2_500_000n });
+
+    expect(estimateGas.calls).toHaveLength(1);
+    const [, populated] = signPopulated.calls[0] as [unknown, any];
+    expect(populated.gasLimit).toBe(2_819_732n);
+  });
+
+  it('signs with the larger of the proportional and the least headroom', async () => {
+    const sign = async (estimate: bigint) => {
+      const populateTransaction = recorder(async () => ({ to: '0xTO', data: '0x' }));
+      const contract = { connect: () => ({ doWrite: { populateTransaction, estimateGas: async () => estimate } }) } as any;
+      const signPopulated = recorder(async (_s: unknown, _pop: unknown) => ({ signedTx: '0xS', txHash: '0xH' }));
+      const client = makeClient([{}], ['https://only.example'], signPopulated as SignPopulatedFn);
+      await client.populateAndSign(
+        contract, 'doWrite', [], makeSigner(), 'unit write',
+        { gasLimitBufferBps: 5_000, gasLimitMinBuffer: 2_500_000n },
+      );
+      return (signPopulated.calls[0] as [unknown, any])[1].gasLimit;
+    };
+
+    expect(await sign(1_000_000n)).toBe(3_500_000n); // +2.5M: half the estimate is less
+    expect(await sign(6_000_000n)).toBe(9_000_000n); // +50%: more than 2.5M
+  });
+
+  it('leaves a gas limit the populated transaction already carries, and skips the estimate', async () => {
+    const populateTransaction = recorder(async () => ({ to: '0xTO', data: '0x', gasLimit: 777_000n }));
+    const estimateGas = recorder(async () => 319_732n);
+    const contract = { connect: () => ({ doWrite: { populateTransaction, estimateGas } }) } as any;
+    const signPopulated = recorder(async (_s: unknown, _pop: unknown) => ({ signedTx: '0xS', txHash: '0xH' }));
+    const client = makeClient([{}], ['https://only.example'], signPopulated as SignPopulatedFn);
+
+    await client.populateAndSign(
+      contract, 'doWrite', [], makeSigner(), 'unit write',
+      { gasLimitBufferBps: 5_000, gasLimitMinBuffer: 2_500_000n },
+    );
+
+    expect(estimateGas.calls).toEqual([]);
+    expect((signPopulated.calls[0] as [unknown, any])[1].gasLimit).toBe(777_000n);
+  });
+
   it('on the LAST provider a retryable estimate error does NOT rethrow — falls back to an unbuffered sign (rethrow only if more providers)', async () => {
     const populateTransaction = recorder(async () => ({ to: '0xTO', data: '0x' }));
     const estimateGas = recorder(async () => { throw retryable429(); });

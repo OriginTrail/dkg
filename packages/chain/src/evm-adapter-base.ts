@@ -75,6 +75,7 @@ import  {
   type ReadOpts,
   type ReceiptLookupOptions,
 } from './rpc-failover-client.js';
+import type { GasLimitBufferOptions } from './gas-limit-buffer.js';
 import { waitForReceiptWithDeadline } from './receipt-wait.js';
 import {
   RpcUsageTracker,
@@ -146,7 +147,7 @@ type ContractWriteSender = (
   args: readonly unknown[],
   signer: Wallet,
   label: string,
-  opts?: { gasLimitBufferBps?: number },
+  opts?: GasLimitBufferOptions,
 ) => Promise<ethers.TransactionReceipt>;
 
 type SerializedSignerWriteContext = {
@@ -2175,7 +2176,7 @@ export class EVMChainAdapterBase {
     args: readonly unknown[],
     signer: Wallet,
     label: string,
-    opts?: { gasLimitBufferBps?: number },
+    opts?: GasLimitBufferOptions,
   ): Promise<SignedTransactionEnvelope> {
     return this.rpcFailover.populateAndSign(contract, method, args, signer, label, opts);
   }
@@ -2192,7 +2193,7 @@ export class EVMChainAdapterBase {
     args: readonly unknown[],
     signer: Wallet,
     label: string,
-    opts?: { gasLimitBufferBps?: number },
+    opts?: GasLimitBufferOptions,
   ): Promise<ethers.TransactionReceipt> {
     return this.withSerializedSignerWrite(
       signer,
@@ -2254,10 +2255,10 @@ export class EVMChainAdapterBase {
     // `prevrandao`/`blockhash`/`timestamp`. If the mined block drives a more
     // expensive code path than the estimate's, the tx runs out of gas and
     // reverts with empty (`0x`) data. `RandomSampling.createChallenge`
-    // (weighted CG draw + historical blockhash access) and `submitProof`
+    // (weighted CG draw that settles every graph it misses) and `submitProof`
     // (stake settle at `block.timestamp`) are such cases. When set, we estimate
-    // once and inflate the limit by `gasLimitBufferBps` basis points.
-    opts?: { gasLimitBufferBps?: number },
+    // once and add the headroom `bufferedGasLimit` computes from these options.
+    opts?: GasLimitBufferOptions,
   ): Promise<ethers.TransactionReceipt> {
     // Parent span for the whole send. Broadcast + receipt-wait open their own
     // nested spans/metrics (chain.tx_submit / chain.tx_wait) inside

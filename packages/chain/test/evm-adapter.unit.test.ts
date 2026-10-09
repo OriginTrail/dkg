@@ -849,7 +849,64 @@ describe('EVMChainAdapter random sampling identity lookup', () => {
     expect(a.nextRandomSamplingSigner.calls).toHaveLength(1);
     expect(sendSpy.calls[0][1]).toBe('createChallenge');
     expect(sendSpy.calls[0][3]).toBe(w1); // the SELECTED signer
-    expect(sendSpy.calls[0][5]).toEqual({ gasLimitBufferBps: 5_000 }); // gas headroom preserved
+    // gas headroom: +50%, and never less than 2.5M
+    expect(sendSpy.calls[0][5]).toEqual({ gasLimitBufferBps: 5_000, gasLimitMinBuffer: 2_500_000n });
+  });
+
+  it('createChallenge signs a gas limit that fits a draw costlier than the one its estimate saw', async () => {
+    // The contract settles every graph its weighted draw lands on without
+    // finding a live asset, then draws again. Which graphs a creation lands on
+    // follows from the block it runs in, so the estimate and the mined
+    // transaction take independent draws, and a settle is a fixed amount of
+    // extra work. Numbers from one test network: a creation without a settle
+    // and one with the cheapest settle (local fork of its state), and the
+    // costliest of 5,336 creations estimated there in 24 days.
+    const estimatedWithoutSettle = 319_732n;
+    const neededWithCheapestSettle = 499_275n;
+    const costliestEstimateSeen = 2_580_738n;
+    const a: any = new EVMChainAdapter(minimalConfig({ rpcUrl: 'https://only.example' }));
+    const provider = { name: 'only' } as any;
+    const signer = new ethers.Wallet(DEPLOYER_PK, provider);
+    const rsInterface = new Interface([
+      'event ChallengeGenerated(uint72 indexed identityId,uint256 indexed contextGraphId,uint256 knowledgeAssetId,uint256 chunkId,uint256 epoch,uint256 activeProofPeriodStartBlock)',
+    ]);
+    const encoded = rsInterface.encodeEventLog(rsInterface.getEvent('ChallengeGenerated')!, [7n, 3n, 11n, 2n, 3n, 4n]);
+    const receipt = {
+      hash: '0x' + '44'.repeat(32), blockNumber: 8, index: 0, status: 1,
+      logs: [{ topics: encoded.topics, data: encoded.data }],
+    };
+    const challengeRaw = {
+      knowledgeAssetId: 11n, knowledgeAssetStorageContract: ethers.ZeroAddress, chunkId: 2n, epoch: 3n,
+      activeProofPeriodStartBlock: 4n, proofingPeriodDurationInBlocks: 5n, solved: false, isCurated: false,
+      challengeLeafCount: 1n, challengeRoot: ethers.ZeroHash,
+    };
+    // No gasLimit from populate: the buffered estimate decides it.
+    const populateTransaction = recorder(async () => (
+      { to: '0x0000000000000000000000000000000000000001', data: '0x1234' } as any
+    ));
+    const estimateGas = recorder(async () => estimatedWithoutSettle);
+    const rs = {
+      interface: rsInterface,
+      connect: recorder(() => ({ createChallenge: { populateTransaction, estimateGas } })),
+    };
+    a.init = async () => undefined;
+    a.getRandomSampling = async () => ({ rs, rss: {} });
+    a.readContract = recorder(async () => challengeRaw);
+    a.nextRandomSamplingSigner = async () => signer;
+    a.providers = [provider];
+    const signSpy = recorder(async (..._a: any[]) => ({ signedTx: '0xdead', txHash: receipt.hash }));
+    a.signPopulatedTransaction = signSpy;
+    a.sendSignedTransactionAndWait = recorder(async () => receipt);
+
+    await expect(a.createChallenge()).resolves.toMatchObject({ hash: receipt.hash, success: true });
+
+    expect(estimateGas.calls).toHaveLength(1);
+    const signedGasLimit = signSpy.calls[0][1].gasLimit;
+    // 319,732 + 2,500,000: +50% of the estimate would add 159,866
+    expect(signedGasLimit).toBe(2_819_732n);
+    expect(signedGasLimit >= costliestEstimateSeen).toBe(true);
+    // +50% alone, the previous limit, was below even the cheapest settle.
+    expect((estimatedWithoutSettle * 3n) / 2n < neededWithCheapestSettle).toBe(true);
   });
 
   it('submitProof signs with the wallet selected by nextRandomSamplingSigner', async () => {
