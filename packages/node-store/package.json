@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-node-store",
-  "version": "10.0.22",
+  "version": "10.0.23",
   "description": "Durable daemon protocol state for DKG V10 nodes: outbox, sync checkpoints, changelog cursors, KA numbering, message idempotency, chain-event log and chain cursors",
   "type": "module",
   "main": "dist/index.js",
