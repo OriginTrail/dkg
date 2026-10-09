@@ -62,6 +62,7 @@ interface DKGAgentInternals {
     onChainHash?: string;
   }>;
   refreshMetaSyncedFlags(contextGraphIds: Iterable<string>): Promise<void>;
+  announceJoinMetadataConfirmedV1(contextGraphId: string): void;
 }
 
 class FakeGossip {
@@ -381,7 +382,6 @@ describe('join metadata confirmation', () => {
   it.each([
     ['a row that holds no join approval', { approved: false }],
     ['a graph that is already ready', { synced: true }],
-    ['a row that is no longer subscribed', { subscribed: false }],
   ])('stays silent for %s', async (_case, state) => {
     const contextGraphId = 'cg-join-metadata-silent';
     const { internals, announced, landMetadata } = await approvedMember(contextGraphId, state);
@@ -391,6 +391,20 @@ describe('join metadata confirmation', () => {
 
     // The metadata was confirmed all the same; only the announcement is withheld.
     expect(internals.subscribedContextGraphs.get(contextGraphId)).toMatchObject({ metaSynced: true });
+    expect(announced).toEqual([]);
+  });
+
+  it('stays silent for a row that is no longer subscribed', async () => {
+    const contextGraphId = 'cg-join-metadata-unsubscribed';
+    const { internals, announced, landMetadata } = await approvedMember(contextGraphId, { subscribed: false });
+
+    await landMetadata();
+    await internals.refreshMetaSyncedFlags([contextGraphId]);
+    expect(announced).toEqual([]);
+
+    // The refresh need not look at an inactive row at all. The announcement
+    // must not act on one either, whichever path asks for it.
+    internals.announceJoinMetadataConfirmedV1(contextGraphId);
     expect(announced).toEqual([]);
   });
 });
