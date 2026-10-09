@@ -645,9 +645,14 @@ export class ContextGraphAuthorityIndexProjectionCache {
     if (state === undefined) return PROJECTION_CACHE_MISS;
     const projection = state.projection;
     if (projection === undefined) return PROJECTION_CACHE_MISS;
+    // A same-height replacement horizon can exclude this projection without a
+    // refresh observing it, including while the validation below is pending.
     const candidateIsCurrent = (): boolean => (
       this.#scopes.get(input.scope) === state && state.projection === projection
+      && (this.#horizons === undefined
+        || this.#horizons.admits(input.scope, projection.finalized))
     );
+    if (!candidateIsCurrent()) return PROJECTION_CACHE_MISS;
     const now = this.#now();
     const ageMs = now - projection.fetchedAtMs;
     if (!this.#isWithinServiceWindow(projection, now)) return PROJECTION_CACHE_MISS;

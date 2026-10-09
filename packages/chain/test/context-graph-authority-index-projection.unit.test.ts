@@ -192,6 +192,39 @@ const turns = async (count = 20): Promise<void> => {
   for (let turn = 0; turn < count; turn += 1) await Promise.resolve();
 };
 
+/** A fenced H25 scan of the harness chain's current fork, durable through H17. */
+function holdbackScan(h: ReturnType<typeof makeHarness>) {
+  const blockHash = (block: number): string => (
+    `0x${((block >= h.chain.forkFrom ? h.chain.fork : 0) * 1_000_000 + block)
+      .toString(16).padStart(64, '0')}`
+  );
+  return {
+    scope: h.scope,
+    readScope: h.chain,
+    deploymentBlockNumber: 10,
+    finalized: { number: 25, hash: blockHash(25) },
+    pageSize: 100,
+    durableReorgHoldbackBlocks: 8,
+    readBlockHash: async (block: number) => blockHash(block),
+    readPage: async (from: number, to: number) => h.chain.events
+      .filter((event) => event.blockNumber >= from && event.blockNumber <= to)
+      .map((event) => ({ ...event, blockHash: blockHash(event.blockNumber) })),
+    stabilize: async () => undefined,
+  };
+}
+
+/** Retain an H25 projection over the tail, then fork only that tail. */
+async function retainTailThenFork(h: ReturnType<typeof makeHarness>) {
+  h.chain.events.push(transfer(9n, 20));
+  await h.index.refresh(holdbackScan(h));
+  const before = await h.read();
+  expect(before.view.resolve(id(9n)).owner).toBe(NEXT_OWNER);
+  h.chain.fork = 1;
+  h.chain.forkFrom = 18;
+  h.chain.events = h.chain.events.filter((event) => event.blockNumber < 18);
+  return before;
+}
+
 describe('authority projection scope', () => {
   it('normalizes the contract address for every index/cache caller', () => {
     expect(contextGraphAuthorityIndexScope('evm:31337:0xhub', '0xAbCd'))
@@ -2065,6 +2098,46 @@ describe('finalized Context Graph authority projection cache', () => {
     // A provider that merely lags the replacement horizon is still fenced.
     h.chain.head = 24;
     await expect(h.read(13n)).rejects.toMatchObject({ reason: 'refresh-horizon-ahead' });
+  });
+
+  it('does not serve a retained projection excluded by a tail replacement horizon', async () => {
+    const h = makeHarness({ holdback: 8, stabilize: true });
+    const before = await retainTailThenFork(h);
+    // A read outside the cache, such as a finalized creation, rebuilds the tail.
+    await h.index.view(holdbackScan(h));
+
+    // A sibling endpoint still on the old fork confirms the retained anchor.
+    const served = await h.index.projection({
+      scope: h.scope,
+      project: (candidate) => ({ complete: candidate.view.has(id(9n)), value: candidate }),
+      validateAnchor: async () => true,
+      refresh: h.refresh,
+    });
+    expect(served.view.resolve(id(9n)).owner).toBe(OWNER);
+    expect(served).not.toBe(before);
+  });
+
+  it('re-checks a replacement horizon after retained anchor validation', async () => {
+    const h = makeHarness({ holdback: 8, stabilize: true });
+    const before = await retainTailThenFork(h);
+    const validating = Promise.withResolvers<void>();
+    const validated = Promise.withResolvers<boolean>();
+    const reading = h.index.projection({
+      scope: h.scope,
+      project: (candidate) => ({ complete: candidate.view.has(id(9n)), value: candidate }),
+      validateAnchor: async () => {
+        validating.resolve();
+        return validated.promise;
+      },
+      refresh: h.refresh,
+    });
+    await validating.promise;
+    await h.index.view(holdbackScan(h));
+    validated.resolve(true);
+
+    const served = await reading;
+    expect(served.view.resolve(id(9n)).owner).toBe(OWNER);
+    expect(served).not.toBe(before);
   });
 
   it('never serves a pre-reorg tail as stale-cache when rebuilding fails', async () => {
