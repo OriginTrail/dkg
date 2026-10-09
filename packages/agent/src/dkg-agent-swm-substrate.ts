@@ -1280,13 +1280,15 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           // proof finishes without invalidating the receiver's proof. Retry
           // one changed snapshot so the ordinary revoke race does not drop an
           // otherwise valid envelope, then fail closed under continued churn.
+          // This graph's own authority facts: a write to another graph cannot
+          // change its gate and must not drop the envelope (#2968).
           for (let attempt = 0; attempt < 2; attempt += 1) {
-            const metadataRevision = this.contextGraphMetaProjection.readAuthorityFactsRevision;
+            const metadataRevision = this.contextGraphMetaProjection.readContextGraphAuthorityFactsRevision(cgId);
             const meta = await this.getCgMeta(cgId);
             const allowedPeers =
               await this.resolveApprovedPrivateReplicaSwmAllowedPeersOverride(cgId);
             if (
-              this.contextGraphMetaProjection.readAuthorityFactsRevision
+              this.contextGraphMetaProjection.readContextGraphAuthorityFactsRevision(cgId)
                 === metadataRevision
             ) {
               return allowedPeers === undefined ? meta : { ...meta, allowedPeers };
