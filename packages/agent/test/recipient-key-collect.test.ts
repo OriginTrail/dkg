@@ -111,6 +111,80 @@ describe('recipient key collect generations', () => {
     expect(fence.cacheable).toBe(false);
   });
 
+  describe('a removal that only its graph proves harmless', () => {
+    const GRAPH = 'urn:profile:fresh';
+    const keyIn = (graph: string) => ({
+      quads: [{ subject: `did:dkg:agent:${AGENT}`, predicate: DKG_ONTOLOGY.DKG_PUBLIC_ENCRYPTION_KEY, object: '"key"', graph }],
+    });
+
+    it('does not reuse a key that a timed-out removal of its graph can still delete', async () => {
+      let stored = recipients();
+      const { fence, collect } = await setup(vi.fn(async () => stored));
+      // The graph holds no key fact when its removal starts, so the removal says nothing about keys yet.
+      const settleRemoval = fence.begin({ removals: [{ graph: GRAPH }] });
+      expect(fence.hasPendingWrites).toBe(false);
+      // A key lands in that graph while the removal is in flight: the removal can now delete a key.
+      fence.begin(keyIn(GRAPH))('changed');
+      expect(fence.hasPendingWrites).toBe(true);
+      // The removal times out. The backend may still run it, and nothing will say when.
+      settleRemoval('indeterminate');
+      expect(fence.hasPendingWrites).toBe(false);
+      expect(await collect.resolve(AGENT)).toHaveLength(1);
+      stored = [];
+      // Inside what would be the memo's lifetime: a memoized answer would still carry the deleted key.
+      expect(await collect.resolve(AGENT)).toEqual([]);
+      expect(fence.cacheable).toBe(false);
+    });
+
+    it('counts as a pending key write from the moment its graph gains a key, until it settles', async () => {
+      const { fence, collect, load } = await setup();
+      const settleRemoval = fence.begin({ removals: [{ graph: GRAPH }] });
+      fence.begin(keyIn(GRAPH))('changed');
+      expect(fence.hasPendingWrites).toBe(true);
+      await collect.resolve(AGENT);
+      await collect.resolve(AGENT);
+      expect(load).toHaveBeenCalledTimes(2);
+      const revision = fence.revision;
+      settleRemoval('changed');
+      expect(fence.hasPendingWrites).toBe(false);
+      expect(fence.revision).toBeGreaterThan(revision);
+      // It settled with a known outcome, so the memo works again.
+      await collect.resolve(AGENT);
+      await collect.resolve(AGENT);
+      expect(load).toHaveBeenCalledTimes(3);
+    });
+
+    it('stops memoizing when a key lands in a graph that a timed-out removal may still empty', async () => {
+      const { fence, collect, load } = await setup();
+      fence.begin({ removals: [{ graph: GRAPH }] })('indeterminate');
+      // No key fact is at stake yet: the memo is unaffected.
+      await collect.resolve(AGENT);
+      await collect.resolve(AGENT);
+      expect(load).toHaveBeenCalledOnce();
+      fence.begin(keyIn(GRAPH))('changed');
+      expect(fence.cacheable).toBe(false);
+      await collect.resolve(AGENT);
+      await collect.resolve(AGENT);
+      expect(load).toHaveBeenCalledTimes(3);
+    });
+
+    it('stays out of the way while its graph never holds a key, whatever its outcome', async () => {
+      const { fence, collect, load } = await setup();
+      await collect.resolve(AGENT);
+      for (const outcome of ['changed', 'unchanged', 'indeterminate'] as const) {
+        const settleRemoval = fence.begin({ removals: [{ graph: 'urn:staging:1' }, { graph: 'urn:staging:2' }] });
+        // A key written elsewhere meanwhile does not make this removal a key write.
+        fence.begin(keyIn('urn:profile:other'))('unchanged');
+        expect(fence.hasPendingWrites).toBe(false);
+        await collect.resolve(AGENT);
+        settleRemoval(outcome);
+        expect(fence.cacheable).toBe(true);
+      }
+      await collect.resolve(AGENT);
+      expect(load).toHaveBeenCalledOnce();
+    });
+  });
+
   it('never lets an old in-flight generation overwrite a newer collect', async () => {
     let release!: (value: WorkspaceAgentRecipient[]) => void;
     const old = new Promise<WorkspaceAgentRecipient[]>((resolve) => { release = resolve; });
