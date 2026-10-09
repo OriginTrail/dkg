@@ -149,6 +149,42 @@ describe('exact context-graph partition reads', () => {
     } finally { await store.close(); }
   });
 
+  it('judges staging below the CG root, so a subgraph or CG ID segment named staging stays readable', async () => {
+    const store = new OxigraphStore();
+    const read = (engine: DKGQueryEngine, graph: string, opts: object) => engine.query(`SELECT ?s WHERE { GRAPH <${graph}> { ?s ?p ?o } }`, { ...options, ...opts });
+    const sub = `${ROOT}/staging`;
+    const walletId = '0x1111111111111111111111111111111111111111/staging';
+    const wallet = `did:dkg:context-graph:${walletId}`;
+    const layers = (base: string) => ['_working_memory', '_shared_memory', '_verifiable_memory'].map(layer => `${base}/${layer}/0xagent/1`);
+    const staged = (base: string) => [`${base}/_shared_memory/staging/0123456789abcdef`, `${base}/_verifiable_memory/staging/1`];
+    const cases = [
+      { id: 'large', opts: {}, readable: [sub, ...layers(sub)], forbidden: [...staged(ROOT), ...staged(sub)] },
+      { id: 'large', opts: { subGraphName: 'staging' }, readable: [sub, ...layers(sub)], forbidden: staged(sub) },
+      { id: walletId, opts: { includeSharedMemory: true }, readable: [`${wallet}/_shared_memory`, ...layers(wallet)], forbidden: staged(wallet) },
+    ];
+    try {
+      await store.insert([
+        { subject: sub, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/SubGraph', graph: `${ROOT}/_meta` },
+        { subject: sub, predicate: 'http://schema.org/name', object: '"staging"', graph: `${ROOT}/_meta` },
+        { subject: 'urn:assertion', predicate: 'http://dkg.io/ontology/assertionGraph', object: layers(sub)[0], graph: `${ROOT}/_meta` },
+        { subject: 'urn:assertion', predicate: 'http://dkg.io/ontology/assertionGraph', object: layers(wallet)[0], graph: `${wallet}/_meta` },
+        ...[sub, `${wallet}/_shared_memory`, ...layers(sub), ...layers(wallet), ...staged(ROOT), ...staged(sub), ...staged(wallet)]
+          .map(graph => ({ subject: 'urn:s', predicate: 'urn:p', object: '"v"', graph })),
+      ]);
+      const engine = new DKGQueryEngine(store);
+      for (const { id, opts, readable, forbidden } of cases) {
+        // Exact admission must accept every inventory graph the dashboard then reads.
+        const inventory = await engine.listContextGraphQueryPartitions(id, opts);
+        expect(inventory).toEqual(expect.arrayContaining(readable));
+        for (const graph of readable) expect((await read(engine, graph, { ...opts, contextGraphId: id })).bindings).toHaveLength(1);
+        for (const graph of forbidden) {
+          expect(inventory).not.toContain(graph);
+          await expect(read(engine, graph, { ...opts, contextGraphId: id })).rejects.toThrow(/Scoped query violation/);
+        }
+      }
+    } finally { await store.close(); }
+  });
+
   it('withholds a materialized result when candidate admission metadata changes during the store read', async () => {
     const store = new OxigraphStore();
     try {

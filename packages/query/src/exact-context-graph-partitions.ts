@@ -33,8 +33,8 @@ export async function authorizeExactContextGraphPartitions(
   const metadata = new Set(policy.metadataGraphs);
   const relevant = [...new Set(candidates)].filter(graph => {
     if (metadata.has(graph) || graph === root) return true;
-    return graph.startsWith(`${root}/`) && !graph.includes('/staging/')
-      && !isExcludedContentGraphTail(graph.slice(root.length + 1));
+    // Judge exclusions below the root, as inventory does, so a CG ID or subgraph named `staging` stays readable.
+    return graph.startsWith(`${root}/`) && !isExcludedContentGraphTail(graph.slice(root.length + 1));
   });
   const names = new Set<string>();
   const assertionParents = new Set<string>();
