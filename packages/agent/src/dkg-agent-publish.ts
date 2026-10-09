@@ -12,6 +12,7 @@
 
 import { buildInlinePayload, buildInlineChunked } from './internal/curated-inline-encryption.js';
 import { createContextGraphAuthorityError } from './internal/context-graph-authority/context-graph-authority.js';
+import { isAdmittedContextGraphSubscription } from './context-graph-subscription-policy.js';
 import { planKnowledgeAssetVmPublication, isGraphScopedKnowledgeAssetVmPublishRequest, assertionSealFromQueuedKnowledgeAssetVmPublishRequest, type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
 export { type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
 import { randomUUID } from 'node:crypto';
@@ -1728,7 +1729,7 @@ export class PublishMethods extends DKGAgentBase {
     rejectOversizedRdfLiterals(privateQuads, 'agent.publish.privateQuads');
 
     const isSystem = contextGraphId === SYSTEM_CONTEXT_GRAPHS.AGENTS || contextGraphId === SYSTEM_CONTEXT_GRAPHS.ONTOLOGY;
-    if (!isSystem && !this.subscribedContextGraphs.has(contextGraphId)) {
+    if (!isSystem && !isAdmittedContextGraphSubscription(this.subscribedContextGraphs.get(contextGraphId))) {
       const exists = await this.contextGraphExists(contextGraphId);
       if (!exists) {
         throw new Error(
