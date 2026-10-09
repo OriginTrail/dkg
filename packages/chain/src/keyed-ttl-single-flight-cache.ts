@@ -85,9 +85,15 @@ export class TtlValueCache<K, V> {
  * Invalidation clears known in-flight variants for the value key and bumps an
  * epoch. A pre-invalidation promise can still resolve to its original caller,
  * but its `onSuccess` hook is suppressed so it cannot repopulate stale state.
+ * A lookup that runs under its caller's cancellation (`owner`) is shared only
+ * until that is aborted: then it ends with a cancellation that is no later
+ * caller's, so the next caller starts a lookup of its own in its place.
  */
 export class KeyedSingleFlight<K, I = K> {
   private readonly inflightByKey = new Map<K, Map<I, Promise<unknown>>>();
+
+  /** The cancellation each in-flight lookup runs under, where it has one. */
+  private readonly owners = new WeakMap<Promise<unknown>, AbortSignal>();
 
   private readonly keyEpochs = new Map<K, number>();
 
@@ -98,10 +104,11 @@ export class KeyedSingleFlight<K, I = K> {
     inflightKey: I,
     load: () => Promise<V>,
     onSuccess?: (value: V) => void,
+    owner?: AbortSignal,
   ): Promise<V> {
     const keys = this.inflightKeysFor(key);
     const existing = keys.get(inflightKey) as Promise<V> | undefined;
-    if (existing) return existing;
+    if (existing && this.owners.get(existing)?.aborted !== true) return existing;
 
     const epoch = this.epoch(key);
     const lookup = (async () => {
@@ -109,6 +116,7 @@ export class KeyedSingleFlight<K, I = K> {
       if (onSuccess && this.epochUnchanged(key, epoch)) onSuccess(value);
       return value;
     })();
+    if (owner !== undefined) this.owners.set(lookup, owner);
 
     keys.set(inflightKey, lookup);
     try {
@@ -423,16 +431,18 @@ export class ReadThroughTtlCache<K, V, I = K> {
     this.values = new TtlValueCache<K, V>(options);
   }
 
+  /** `owner`: the cancellation `load` runs under; no caller joins it once aborted. */
   async getOrLoad(
     key: K,
     inflightKey: I,
     load: () => Promise<CacheValue<V>>,
+    owner?: AbortSignal,
   ): Promise<CacheValue<V>> {
     const cached = this.values.get(key);
     if (cached !== undefined) return cached;
     return this.singleFlight.run(key, inflightKey, load, (value) => {
       this.values.set(key, value);
-    });
+    }, owner);
   }
 
   seed(key: K, value: CacheValue<V>): void {

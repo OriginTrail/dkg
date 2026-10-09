@@ -3106,10 +3106,13 @@ export class EVMChainAdapterBase {
       return this.readHubContractAddress(name);
     }
     const key = `${this.hubAddress}:${this.chainId}:${name}`;
+    // The read runs under its caller's cancellation. Once that is aborted, as
+    // an initialization's is when the run is ended, nobody joins the read.
     return this.resolvedContractAddressCache.getOrLoad(
       key,
       key,
       () => this.readHubContractAddress(name),
+      activeRpcRequestAbortSignal(),
     );
   }
 
@@ -4716,7 +4719,9 @@ export class EVMChainAdapterBase {
    */
   protected async resolveAndAssignRandomSamplingPair(): Promise<{ rs: Contract; rss: Contract }> {
     const generationBefore = this.randomSamplingPairCache.currentGeneration();
-    const pair = await this.randomSamplingPairCache.get();
+    // Under the caller's cancellation, as the address reads: nobody joins a
+    // resolve whose caller was cancelled.
+    const pair = await this.randomSamplingPairCache.get(activeRpcRequestAbortSignal());
     if (this.randomSamplingPairCache.currentGeneration() === generationBefore) {
       this.contracts.randomSampling = pair.rs;
       this.contracts.randomSamplingStorage = pair.rss;

@@ -125,6 +125,7 @@ describe('adapter initialization is shared by the callers that need it', () => {
     const lateAnswers = new Map<string, {
       entered: () => void; released: Promise<void>; address: string;
     }>();
+    const slowReads = new Map<string, { entered: () => void; released: Promise<void> }>();
     vi.spyOn(adapter, 'readContract').mockImplementation(async (...args: unknown[]) => {
       const name = args[3] as string;
       reads.set(name, (reads.get(name) ?? 0) + 1);
@@ -135,6 +136,14 @@ describe('adapter initialization is shared by the callers that need it', () => {
         // An answer that arrives whether or not its request was cancelled.
         await late.released;
         return late.address;
+      }
+      const slow = slowReads.get(name);
+      if (slow) {
+        slowReads.delete(name);
+        slow.entered();
+        // A read that takes until its release to settle, a cancelled one
+        // included: it ends as its request has it by then.
+        await slow.released;
       }
       activeRpcRequestContext().signal?.throwIfAborted();
       return registered.get(name) ?? ADDRESS;
@@ -157,6 +166,15 @@ describe('adapter initialization is shared by the callers that need it', () => {
         const reached = new Promise<void>((done) => { entered = done; });
         const released = new Promise<void>((done) => { release = done; });
         lateAnswers.set(name, { entered, released, address });
+        return { reached, release };
+      },
+      /** The next read of `name` settles only when released: cancelled, if its request was by then. */
+      settleLate(name: string) {
+        let entered!: () => void;
+        let release!: () => void;
+        const reached = new Promise<void>((done) => { entered = done; });
+        const released = new Promise<void>((done) => { release = done; });
+        slowReads.set(name, { entered, released });
         return { reached, release };
       },
     };
@@ -587,6 +605,34 @@ describe('adapter initialization is shared by the callers that need it', () => {
     const resolvedNow = await adapter.resolveContract('ContextGraphs');
     await expect(resolvedNow.getAddress()).resolves.toBe(CURRENT);
     expect(reads('ContextGraphs')).toBe(2);
+    expect(adapter.initialized).toBe(true);
+  });
+
+  it.each([
+    ['Identity', 'identity'],
+    ['Chronos', 'chronos'],
+    ['RandomSampling', 'randomSampling'],
+  ])('reads %s afresh for the run after an abandoned one, while that run\'s read of it is still settling', async (name, binding) => {
+    const { adapter, reads, settleLate } = hubFixture();
+    const settling = settleLate(name);
+    const controller = new AbortController();
+    const reason = new Error('caller cancelled');
+    const abandoned = withRpcRequestContext({ signal: controller.signal }, () => adapter.init());
+    await settling.reached;
+
+    // The run's last waiter leaves, and the next caller arrives before the
+    // read the ended run had out has finished cancelling.
+    controller.abort(reason);
+    await expect(abandoned).rejects.toBe(reason);
+    const arriving = adapter.init();
+    await settled();
+    settling.release();
+
+    // The new run read it for itself: the ended run's read ends with that
+    // run's cancellation, which is not the new run's.
+    await expect(arriving).resolves.toBeUndefined();
+    expect(adapter.contracts[binding]).toBeDefined();
+    expect(reads(name)).toBe(2);
     expect(adapter.initialized).toBe(true);
   });
 
