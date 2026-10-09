@@ -6,6 +6,7 @@ import { requestAuthentication } from './_helpers/request-authentication.js';
 import { handleQueryRoutes } from '../src/daemon/routes/query.js';
 import { daemonState } from '../src/daemon/state.js';
 import { catchupReadinessResult, durableDiagnostics, sharedMemoryDiagnostics } from './_helpers/catchup-readiness-fixtures.js';
+import { registerJoinMetadataEmptyVmSettlement } from '../src/context-graph-empty-vm-readiness.js';
 
 // The real agent mixins own metadata/authority fencing, proof composition,
 // cancellation, and the synchronous commit. Only their finalized-proof leaf
@@ -16,6 +17,7 @@ vi.mock('../../agent/dist/registered-private-empty-vm-attempt-v1.js', async (imp
   attemptRegisteredPrivateEmptyVmV1: proofLeaf.attempt,
 }));
 import { DKGAgent } from '@origintrail-official/dkg-agent';
+import { DKGEvent, TypedEventBus } from '@origintrail-official/dkg-core';
 
 const CALLER = `0x${'11'.repeat(20)}`;
 const ALLOWED = {
@@ -81,6 +83,13 @@ describe('registered private empty-VM subscribe settlement', () => {
     invalidateMetaDuringProof?: boolean;
     throwEarlyReadinessCommitOnce?: boolean;
     revokeOnTerminalProof?: boolean;
+    /**
+     * The join approval, and the curator metadata fetched after it, reach this
+     * node only after its subscribe call and catch-up job are over. Until
+     * `landJoinMetadata()` the proof answers as the agent does without
+     * confirmed metadata: not proven, worth retrying.
+     */
+    joinMetadataArrivesLater?: boolean;
   }) {
     const contextGraphId = `empty-vm-${Math.random().toString(36).slice(2, 8)}`;
     const subscriptions = new Map<string, Record<string, any>>([
@@ -95,11 +104,16 @@ describe('registered private empty-VM subscribe settlement', () => {
     let metadataRevision = 0;
     let earlyReadinessCommitFailureInjected = false;
     let retryableProofReturned = false;
+    let joinMetadataLanded = opts.joinMetadataArrivesLater !== true;
     const proofAttempts: Array<{ phase: 'early' | 'terminal'; proven: boolean }> = [];
 
     proofLeaf.attempt.mockImplementation(async () => {
       const phase = catchupCompleted ? 'terminal' as const : 'early' as const;
       if (phase === 'early') opts.onEarlyProofAttempt?.();
+      if (!joinMetadataLanded) {
+        proofAttempts.push({ phase, proven: false });
+        return { proven: false as const, retryable: true };
+      }
       if (opts.retryableProofOnce && !retryableProofReturned) {
         retryableProofReturned = true;
         proofAttempts.push({ phase, proven: false });
@@ -131,7 +145,9 @@ describe('registered private empty-VM subscribe settlement', () => {
       close: async () => {},
     };
 
+    const eventBus = new TypedEventBus();
     const agent = {
+      eventBus,
       subscribedContextGraphs: subscriptions,
       contextGraphMetaProjection: {
         readContextGraphAuthorityFactsRevision: () => String(metadataRevision),
@@ -139,7 +155,7 @@ describe('registered private empty-VM subscribe settlement', () => {
       inspectAndCommitContextGraphReadinessV1: DKGAgent.prototype.inspectAndCommitContextGraphReadinessV1,
       prepareContextGraphReadinessWithPrivateEmptyVmV1:
         DKGAgent.prototype.prepareContextGraphReadinessWithPrivateEmptyVmV1,
-      hasConfirmedMetaState: async () => !metadataInvalidated,
+      hasConfirmedMetaState: async () => joinMetadataLanded && !metadataInvalidated,
       isPrivateContextGraph: async () => true,
       resolveContextGraphSubscriptionBootstrapAuthority: async () => authorityRevoked
         ? { outcome: 'denied', source: 'registered-chain', reason: 'agent-not-in-chain-roster', metadataBootstrap: 'forbidden' }
@@ -170,17 +186,21 @@ describe('registered private empty-VM subscribe settlement', () => {
       }),
     };
 
+    const dashDb = {
+      getContextGraphReadinessProvenance: () => readiness ?? null,
+      setContextGraphReadinessProvenance: (_id: string, next: Record<string, unknown>) => {
+        readiness = { ...next, updatedAt: Date.now() };
+      },
+    };
+    // As the daemon wires it at start-up, before any join can be approved.
+    registerJoinMetadataEmptyVmSettlement({ agent: agent as any, dashboard: dashDb as any, log: () => {} });
+
     server = createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
       const routeContext = {
         req, res, agent, publisherControl: {}, publisherRuntime: null,
         config: { auth: { enabled: false } }, startedAt: Date.now(),
-        dashDb: {
-          getContextGraphReadinessProvenance: () => readiness ?? null,
-          setContextGraphReadinessProvenance: (_id: string, next: Record<string, unknown>) => {
-            readiness = { ...next, updatedAt: Date.now() };
-          },
-        },
+        dashDb,
         opWallets: {}, network: {}, tracker: {}, memoryManager: {}, bridgeAuthToken: undefined,
         nodeVersion: 'test', nodeCommit: 'test', catchupTracker, extractionRegistry: {}, fileStore: {},
         extractionStatus: new Map(), assertionImportLocks: new Map(), vectorStore: {},
@@ -209,6 +229,16 @@ describe('registered private empty-VM subscribe settlement', () => {
       response, responseStatus: httpResponse.status, job: jobId ? jobs.get(jobId) : undefined,
       state: subscriptions.get(contextGraphId) ?? {}, readiness,
       proofAttempts, earlyReadinessCommitFailureInjected,
+      currentState: () => subscriptions.get(contextGraphId) ?? {},
+      currentReadiness: () => readiness,
+      /** What the agent does once the post-approval sync has stored the curator metadata. */
+      landJoinMetadata: () => {
+        joinMetadataLanded = true;
+        subscriptions.set(contextGraphId, {
+          ...subscriptions.get(contextGraphId), metaSynced: true, pendingMeta: false,
+        });
+        eventBus.emit(DKGEvent.JOIN_METADATA_CONFIRMED, { contextGraphId, agentAddress: CALLER });
+      },
     };
   }
 
@@ -297,6 +327,38 @@ describe('registered private empty-VM subscribe settlement', () => {
     expect(result.job.status).toBe('denied');
     expect(result.state).toMatchObject({ synced: true, sharedMemorySynced: false });
     expect(result.readiness).toMatchObject({ durableVerified: true, sharedMemoryVerified: false });
+  });
+
+  it('opens first-write readiness when join metadata arrives after subscribe and its catch-up are over', async () => {
+    // The order seen on a public network: the member subscribes as soon as its
+    // join request is answered, the approval notice and the curator metadata
+    // follow seconds later. Shorten only the subscribe request's own deadline.
+    const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+    const deadlines = vi.spyOn(AbortSignal, 'timeout')
+      .mockImplementation((ms: number) => realTimeout(ms === 8_000 ? 120 : ms));
+    try {
+      const result = await subscribe({ finalizedEmptyPrivateVm: true, joinMetadataArrivesLater: true });
+
+      // Neither attempt of the subscribe call could prove anything.
+      expect(result.responseStatus).toBe(200);
+      expect(result.job.finishedAt).toBeDefined();
+      expect(result.job.status).not.toBe('done');
+      expect(result.proofAttempts.length).toBeGreaterThanOrEqual(2);
+      expect(result.proofAttempts.every((attempt) => !attempt.proven)).toBe(true);
+      expect(result.state).toMatchObject({ subscribed: true, synced: false });
+      expect(result.readiness?.durableVerified ?? false).toBe(false);
+
+      // No second subscribe: the metadata arriving is enough.
+      result.landJoinMetadata();
+
+      await vi.waitFor(() => expect(result.currentState()).toMatchObject({
+        subscribed: true, synced: true, metaSynced: true, pendingMeta: false, sharedMemorySynced: false,
+      }));
+      expect(result.currentReadiness()).toMatchObject({ durableVerified: true, sharedMemoryVerified: false });
+      expect(result.proofAttempts.at(-1)).toMatchObject({ proven: true });
+    } finally {
+      deadlines.mockRestore();
+    }
   });
 
   it('does not restore readiness after metadata invalidates during the proof', async () => {

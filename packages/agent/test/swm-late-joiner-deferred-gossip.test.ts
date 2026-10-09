@@ -10,6 +10,7 @@ import {
   contextGraphUpdateTopic,
   contextGraphWorkspaceTopic,
   DKG_ONTOLOGY,
+  DKGEvent,
 } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, agentFromPrivateKey, type AgentKeyRecord } from '../src/index.js';
@@ -55,11 +56,13 @@ const LOCAL_PEER_ID = '12D3KooWLateJoinerDeferGossip';
 interface DKGAgentInternals {
   localAgents: Map<string, AgentKeyRecord>;
   defaultAgentAddress?: string;
+  localApprovedAgentByCG: Map<string, string>;
   subscribedContextGraphs: Map<string, {
     onChainId?: string;
     onChainHash?: string;
   }>;
   refreshMetaSyncedFlags(contextGraphIds: Iterable<string>): Promise<void>;
+  announceJoinMetadataConfirmedV1(contextGraphId: string): void;
 }
 
 class FakeGossip {
@@ -304,5 +307,104 @@ describe('SWM late-joiner deferred gossip subscribe (#885 Codex)', () => {
     await flushAsync();
 
     expect(gossip.subscribed.has(workspaceTopic(contextGraphId))).toBe(true);
+  });
+});
+
+/**
+ * The same `refreshMetaSyncedFlags` boundary also tells the readiness owner
+ * that an approved member's metadata has arrived. On a slow path that happens
+ * after the member's subscribe call and its catch-up job have finished, and an
+ * empty private graph gives nothing else a reason to prove readiness again.
+ */
+describe('join metadata confirmation', () => {
+  /** The delegation a curator stores with an approved join, bound to this node. */
+  async function insertApprovedMemberDelegation(
+    agent: DKGAgent,
+    contextGraphId: string,
+    agentAddress: string,
+  ): Promise<void> {
+    const delegation = `did:dkg:agent-delegation:${contextGraphId}:${agentAddress.toLowerCase()}`;
+    const metaGraph = contextGraphMetaUri(contextGraphId);
+    await agent.store.insert([
+      { subject: delegation, predicate: DKG_ONTOLOGY.DKG_DELEGATION_AGENT, object: `"${agentAddress.toLowerCase()}"`, graph: metaGraph },
+      { subject: delegation, predicate: DKG_ONTOLOGY.DKG_DELEGATION_ISSUED_AT, object: `"${Date.now() - 1_000}"`, graph: metaGraph },
+      { subject: delegation, predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER, object: `"${LOCAL_PEER_ID}"`, graph: metaGraph },
+    ]);
+  }
+
+  /** A member row as the join-approved handler leaves it, before any metadata. */
+  async function approvedMember(contextGraphId: string, state: { synced?: boolean; subscribed?: boolean; approved?: boolean } = {}) {
+    const { agent, internals, chain } = await createAgent();
+    const record = agentFromPrivateKey(ethers.Wallet.createRandom().privateKey, 'local');
+    internals.localAgents.set(record.agentAddress, record);
+    internals.defaultAgentAddress = record.agentAddress;
+    const onChainId = await registerPrivateContextGraph(chain, contextGraphId, record.agentAddress);
+    agent.subscribeToContextGraph(contextGraphId, { deferSharedMemoryGossipSubscribe: true });
+    agent.markContextGraphSubscriptionState(contextGraphId, {
+      pendingMeta: true,
+      metaSynced: false,
+      synced: state.synced ?? false,
+      ...(state.subscribed === false ? { subscribed: false } : {}),
+    });
+    if (state.approved !== false) {
+      internals.localApprovedAgentByCG.set(contextGraphId, record.agentAddress.toLowerCase());
+    }
+    const announced: unknown[] = [];
+    agent.eventBus.on(DKGEvent.JOIN_METADATA_CONFIRMED, (data) => announced.push(data));
+    const landMetadata = async () => {
+      await insertCgMetaWithAllowlist(agent, contextGraphId, record.agentAddress, onChainId);
+      await insertApprovedMemberDelegation(agent, contextGraphId, record.agentAddress);
+    };
+    return { internals, announced, landMetadata, agentAddress: record.agentAddress.toLowerCase() };
+  }
+
+  it('announces the approved member once, when its metadata becomes authoritative', async () => {
+    const contextGraphId = 'cg-join-metadata-confirmed';
+    const { internals, announced, landMetadata, agentAddress } = await approvedMember(contextGraphId);
+
+    // The approval is known, the curator metadata is not here yet.
+    await internals.refreshMetaSyncedFlags([contextGraphId]);
+    expect(announced).toEqual([]);
+
+    await landMetadata();
+    await internals.refreshMetaSyncedFlags([contextGraphId]);
+    expect(announced).toEqual([{ contextGraphId, agentAddress }]);
+    expect(internals.subscribedContextGraphs.get(contextGraphId)).toMatchObject({
+      metaSynced: true,
+      pendingMeta: false,
+    });
+
+    // Reading the same confirmed metadata again is not a new confirmation.
+    await internals.refreshMetaSyncedFlags([contextGraphId]);
+    expect(announced).toHaveLength(1);
+  });
+
+  it.each([
+    ['a row that holds no join approval', { approved: false }],
+    ['a graph that is already ready', { synced: true }],
+  ])('stays silent for %s', async (_case, state) => {
+    const contextGraphId = 'cg-join-metadata-silent';
+    const { internals, announced, landMetadata } = await approvedMember(contextGraphId, state);
+
+    await landMetadata();
+    await internals.refreshMetaSyncedFlags([contextGraphId]);
+
+    // The metadata was confirmed all the same; only the announcement is withheld.
+    expect(internals.subscribedContextGraphs.get(contextGraphId)).toMatchObject({ metaSynced: true });
+    expect(announced).toEqual([]);
+  });
+
+  it('stays silent for a row that is no longer subscribed', async () => {
+    const contextGraphId = 'cg-join-metadata-unsubscribed';
+    const { internals, announced, landMetadata } = await approvedMember(contextGraphId, { subscribed: false });
+
+    await landMetadata();
+    await internals.refreshMetaSyncedFlags([contextGraphId]);
+    expect(announced).toEqual([]);
+
+    // The refresh need not look at an inactive row at all. The announcement
+    // must not act on one either, whichever path asks for it.
+    internals.announceJoinMetadataConfirmedV1(contextGraphId);
+    expect(announced).toEqual([]);
   });
 });
