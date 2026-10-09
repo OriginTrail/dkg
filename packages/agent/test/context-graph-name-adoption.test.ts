@@ -17,6 +17,8 @@ import {
 } from '@origintrail-official/dkg-core';
 import { SyncTargetSupersededError } from '../src/sync/error-tags.js';
 import type {
+  ContextGraphMembershipRecord,
+  ContextGraphMembershipStore,
   ContextGraphSubscriptionRecord,
   ContextGraphSubscriptionStore,
 } from '../src/dkg-agent-types.js';
@@ -79,6 +81,7 @@ async function chainWithContextGraph33(
 /** A created (not started) agent with inert networking, like core-fills-gap's fixture. */
 async function boot(options: {
   store?: RecordingStore;
+  membershipStore?: ContextGraphMembershipStore;
   accessPolicy?: 0 | 1;
   committedNameHash?: string | null;
   syncContextGraphs?: string[];
@@ -91,6 +94,7 @@ async function boot(options: {
       options.committedNameHash === undefined ? NAME_HASH : options.committedNameHash,
     ),
     contextGraphSubscriptionStore: options.store ?? recordingStore(),
+    contextGraphMembershipStore: options.membershipStore,
     syncContextGraphs: options.syncContextGraphs,
     ...(options.rehydrationEnabled === undefined
       ? {}
@@ -277,16 +281,27 @@ describe('adopting a verified cleartext id', () => {
 
   it('retires the durable rows of a subscribed placeholder that any cleartext writer promotes', async () => {
     const store = recordingStore();
-    const internals = await boot({ store });
+    const members = new Map<string, ContextGraphMembershipRecord & { updatedAt: number }>();
+    const key = (id: string, principal: string) => id + '\0node\0' + principal;
+    const membershipStore: ContextGraphMembershipStore = {
+      loadAll: async () => [...members.values()].map((row) => ({ ...row, metadata: row.metadata && { ...row.metadata } })),
+      upsert: async (row) => { members.set(key(row.contextGraphId, row.principalId), { ...row }); },
+      delete: vi.fn(async (id, _kind, principal) => { members.delete(key(id, principal)); }),
+    };
+    const internals = await boot({ store, membershipStore });
     subscribeByNameHash(internals);
     await waitFor(() => store.saved.some((row) => row.id === NAME_HASH));
-    const deleteMember = vi.spyOn(internals, 'deleteContextGraphMember');
+    const sourceKey = key(NAME_HASH, internals.peerId);
+    await internals.enqueueContextGraphMembershipPersistWrite(sourceKey, async () => undefined, { strict: true });
+    expect(members.get(sourceKey)).toMatchObject({ contextGraphId: NAME_HASH, metadata: { onChainId: ON_CHAIN_ID } });
     // A writer that names the cleartext id directly (a join, a hosting record).
     internals.setContextGraphSubscription(CLEARTEXT, { subscribed: true, synced: false, syncMode: 'always-on' });
     expect(internals.subscribedContextGraphs.has(NAME_HASH)).toBe(false);
     expect(internals.subscribedContextGraphs.get(CLEARTEXT)).toMatchObject({ onChainId: ON_CHAIN_ID, onChainHash: NAME_HASH });
     await waitFor(() => store.deleted.includes(NAME_HASH));
-    expect(deleteMember).toHaveBeenCalledWith(NAME_HASH, 'node', internals.peerId);
+    await internals.enqueueContextGraphMembershipPersistWrite(sourceKey, async () => undefined, { strict: true });
+    expect(membershipStore.delete).toHaveBeenCalledWith(NAME_HASH, 'node', internals.peerId);
+    expect(members.has(sourceKey)).toBe(false);
   });
 
   it('never mints a second identity when the adopted hash is subscribed again', async () => {
