@@ -2,7 +2,7 @@ import { LiftJobChainObservations } from './lift-job-chain-observations.js';
 import { committedLiftJob, type CommittedLiftJob } from './lift-job-committed.js';
 import type { PreBroadcastRecord } from './publisher.js';
 import { bestEffortNotify } from './best-effort-notify.js';
-import { resolveWithinAbort } from '@origintrail-official/dkg-core';
+import { createOperationContext, resolveWithinAbort } from '@origintrail-official/dkg-core';
 import { isPendingPublishTransactionStatus } from '@origintrail-official/dkg-chain';
 import {
   ChainProofRetrySchedule,
@@ -1248,6 +1248,7 @@ export class TripleStoreAsyncLiftPublisher
         resolved: validated.resolved,
         publishOptions: {
           ...prepared.publishOptions,
+          operationCtx: prepared.publishOptions.operationCtx ?? createOperationContext('publishFromSWM', claimed.jobId),
           onBeforeBroadcast: broadcastRecorder.onBeforeBroadcast,
           // The endpoint has accepted the exact signed transaction recorded
           // above. Persist that fact before receipt polling is detached. The

@@ -53,6 +53,7 @@ import { markRfc64LegacySwmRepublishedV1 } from
   './rfc64/legacy-swm-boundary-v1.js';
 import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 } from
   './rfc64/catalog-peers-v1.js';
+import { catalogPlacementTimingV1 } from './internal/catalog-placement-timing.js';
 
 const RFC64_DEFAULT_CATALOG_DELEGATION_EXPIRES_AT_V1 =
   '253402300799000' as TimestampMsV1;
@@ -172,10 +173,15 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       ...inventoryScope,
       bucketCount: '1',
     }) as AuthorCatalogScopeV1;
-    if (await this.rfc64CatalogCoversConfirmedSwmRowV1({
+    const placement = catalogPlacementTimingV1(this).attemptFor(params);
+    const coverageStartedAt = placement.now();
+    const covered = await this.rfc64CatalogCoversConfirmedSwmRowV1({
       scope,
       expectedRow: params,
-    })) return null;
+    });
+    placement.covered(covered, coverageStartedAt);
+    if (covered) return null;
+    const assetStartedAt = placement.now();
     let asset: Rfc64CatalogSuccessorAssetInputV1;
     if (row === undefined) {
       asset = await resolveRfc64ConfirmedVmRepairCatalogAssetV1({
@@ -195,6 +201,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         row,
       });
     }
+    placement.phase('asset', assetStartedAt);
     lane.service.acceptedPolicySnapshotForCatalogScope(scope);
     return this.upsertConfirmedRfc64PublicRootCatalogAssetV1({
       scope,
@@ -204,6 +211,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       peers: this.resolveRfc64CatalogAnnouncementPeersV1(lane.announcementPeers),
       catalogIssuerDelegationEffectiveAt: lane.catalogIssuerDelegationEffectiveAt,
       catalogIssuerDelegationExpiresAt: lane.catalogIssuerDelegationExpiresAt,
+      placement,
     });
   }
 

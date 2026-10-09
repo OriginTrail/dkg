@@ -263,6 +263,9 @@ export default defineConfig({
       "test/vm-promotion-gate.test.ts",
       "test/vm-recovery-microbatch-planner.test.ts",
       "test/vm-recovery-phase-timing.test.ts",
+      // #3081 — where a confirmed publication waits for its catalog placement (observation only).
+      "test/catalog-placement-timing.test.ts",
+      "test/catalog-placement-wait-attribution.test.ts",
       "test/vm-recovery-transport-plan.test.ts",
       "test/vm-recovery-batch-timing-host.test.ts",
       "test/vm-recovery-pass-authority.test.ts",

@@ -4892,7 +4892,8 @@ export class PublishMethods extends DKGAgentBase {
     this: DKGAgent,
     input: AsyncKnowledgeAssetVmPublishRecoveryInput,
   ): Promise<void> {
-    const ctx = createOperationContext('publishFromSWM');
+    // The queue job is the operation this recovery serves: every line it logs carries [from:<jobId>].
+    const ctx = createOperationContext('publishFromSWM', input.job.jobId);
     try {
       await this._finalizeRecoveredQueuedKnowledgeAssetVmPublish(input, ctx);
     } catch (error) {

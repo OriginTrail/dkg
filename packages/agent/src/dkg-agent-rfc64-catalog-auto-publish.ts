@@ -83,6 +83,7 @@ import {
 } from './rfc64/finalized-private-placement-repair-store-v1.js';
 import { loadExactAppliedCatalogRowsV1 } from
   './rfc64/applied-catalog-authority-transition-v1.js';
+import { catalogPlacementTimingV1 } from './internal/catalog-placement-timing.js';
 
 export type {
   Rfc64SwmAuthorInventoryShadowMutationResultV1,
@@ -816,6 +817,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       );
       return;
     }
+    const placementWait = catalogPlacementTimingV1(this).beginWait(confirmedSeal, params.ctx);
     const shadowRuntime = rfc64SwmInventoryShadowRuntimeV1(this);
     const assetKey = rfc64SwmInventoryAssetKeyV1({
       contextGraphId,
@@ -875,6 +877,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
               repair,
               ctx: params.ctx,
             }).whenAttempted;
+            placementWait.requested();
             return;
           }
           const result = await this.removeRfc64SwmAuthorInventoryShadowV1({
@@ -898,6 +901,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         `Confirmed ${params.publicationLabel} but RFC-64 SWM inventory shadow removal escaped its failure boundary: ${cause instanceof Error ? cause.message : String(cause)}`,
       );
     }
+    placementWait.end(this.log);
   }
 
   /** Idempotent durable repair body owned by the catalog supervisor. */

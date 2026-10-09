@@ -46,6 +46,10 @@ import {
 } from './rfc64/abort-v1.js';
 import type { Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1 } from
   './rfc64/swm-author-inventory-producer-v1.js';
+import {
+  INERT_CATALOG_PLACEMENT_ATTEMPT_V1,
+  type CatalogPlacementAttemptV1,
+} from './internal/catalog-placement-timing.js';
 
 export interface UpsertConfirmedRfc64PublicRootCatalogAssetParamsV1 {
   readonly scope: AuthorCatalogScopeV1;
@@ -55,6 +59,8 @@ export interface UpsertConfirmedRfc64PublicRootCatalogAssetParamsV1 {
   readonly peers: readonly string[];
   readonly catalogIssuerDelegationEffectiveAt: TimestampMsV1;
   readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
+  /** GH#3081 — the finalized-private attempt this mutation's phases are charged to (observation only). */
+  readonly placement?: CatalogPlacementAttemptV1;
 }
 
 export interface ReconcileRfc64PublicRootCatalogExactSetParamsV1 {
@@ -185,6 +191,8 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     }
     service.acceptedPolicySnapshotForCatalogScope(params.scope);
     const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(params.scope);
+    const placement = params.placement ?? INERT_CATALOG_PLACEMENT_ATTEMPT_V1;
+    const stateStartedAt = placement.now();
 
     return this.rfc64CatalogMutationCoordinatorV1.run(params.scope, async () => {
       let state = await this.readRfc64CatalogMutationStateV1(
@@ -193,6 +201,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
         params.scope.authorAddress,
       );
       state ??= await this.createRfc64CatalogGenesisStateV1(params);
+      placement.phase('state', stateStartedAt);
       const assets = state.assets;
       const existingIndex = assets.findIndex(
         (asset) => asset.seal.reservedKaId === params.asset.seal.reservedKaId,
@@ -499,6 +508,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       scope: AuthorCatalogScopeV1;
       author: Rfc64CatalogAuthorSignerV1;
       deployment: CatalogSealDeploymentProfileV1;
+      placement?: CatalogPlacementAttemptV1;
     }>,
     assets: readonly Rfc64CatalogSuccessorAssetInputV1[],
     peers: readonly string[],
@@ -508,6 +518,8 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       commit: () => AppliedCatalogHeadSnapshotV1,
     ) => Promise<Rfc64SourceAwareAppliedHeadCommitResultV1>,
   ) {
+    const placement = params.placement ?? INERT_CATALOG_PLACEMENT_ATTEMPT_V1;
+    const successorStartedAt = placement.now();
     // The plan before this call and the successor below are whole-set work.
     await yieldMainThread();
     throwIfAbortedV1(signal);
@@ -526,6 +538,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       catalogScopeDigest: successor.catalogScopeDigest,
       rows: successor.assets,
     });
+    placement.phase('successor', successorStartedAt);
     const commit = (): AppliedCatalogHeadSnapshotV1 => (
       persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
         catalogScopeDigest: successor.catalogScopeDigest,
@@ -538,15 +551,20 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
         stageOnly,
       }).snapshot
     );
+    const casStartedAt = placement.now();
     const committed = commitAppliedHead === undefined
       ? Object.freeze({ appliedHead: commit(), sourceCurrent: true })
       : await commitAppliedHead(commit);
+    placement.phase('cas', casStartedAt);
     if (!signal?.aborted) {
-      this.warnRfc64CatalogAnnounceFailuresV1(await this.announceRfc64PublicCatalogHeadV1({
+      const announceStartedAt = placement.now();
+      const delivery = await this.announceRfc64PublicCatalogHeadV1({
         announcement: successor.announcement,
         peers,
         signal,
-      }));
+      });
+      placement.announced(delivery, announceStartedAt);
+      this.warnRfc64CatalogAnnounceFailuresV1(delivery);
     }
     return Object.freeze({
       applied: committed.appliedHead,

@@ -144,6 +144,25 @@ describe('async publish post-finality timing', () => {
     );
   });
 
+  it('hands the executor an operation context that names the queue job as its source', async () => {
+    // Correlation only: every line the executor and the agent tail log carries [from:<jobId>].
+    const h = createReceiptHintHarness();
+    let seen: OperationContext | undefined;
+    const publisher = h.createPublisher({
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          seen = input.publishOptions.operationCtx;
+          throw new Error('stop before the write-ahead');
+        },
+      },
+    });
+    await h.stageShareSnapshot();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.processNext('wallet-1');
+    expect(seen).toMatchObject({ operationName: 'publishFromSWM', sourceOperationId: jobId });
+    expect(seen?.operationId).not.toBe(jobId);
+  });
+
   it('labels a held failed record finalized by the chain-proof dispatcher', async () => {
     const h = createAsyncLift2270Harness();
     h.reset();

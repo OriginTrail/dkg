@@ -29,6 +29,11 @@ import {
   type CatalogRepairDiagnosticV1,
 } from './rfc64/catalog-repair-diagnostics-v1.js';
 import { CatalogRepairRetryV1, type CatalogRepairRevisionHintV1 } from './rfc64/catalog-repair-retry-v1.js';
+import {
+  catalogPlacementTimingV1,
+  shareCatalogPlacementTimingV1,
+  type FinalizedPrivatePlacementQueueStatusV1,
+} from './internal/catalog-placement-timing.js';
 
 // Match the default background store lane; repair fanout must not flood its queue.
 const MAX_CONCURRENT_REPAIRS_V1 = 1;
@@ -62,6 +67,8 @@ export interface Rfc64SwmCatalogProjectionSupervisorStatusV1 {
   readonly lastPassStartedAtMs: number | null;
   readonly lastPassCompletedAtMs: number | null;
   readonly repairs: readonly Rfc64PublicCatalogAuthorRepairStatusV1[];
+  /** GH#3081 — aggregate finalized-private queue evidence; observation only. */
+  readonly finalizedPrivatePlacement: Readonly<FinalizedPrivatePlacementQueueStatusV1>;
 }
 
 interface MutableAuthorRepairStatusV1 {
@@ -304,6 +311,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       settleAttempt();
       return rejected();
     }
+    catalogPlacementTimingV1(this).waiterAdded(key, waiters.size === 1);
     return Object.freeze({ accepted: true, whenAttempted });
   }
 
@@ -322,6 +330,10 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
         Object.freeze({ ...repair, consecutiveFailures: retry.consecutiveFailures,
           nextAttemptAtMs: retry.nextAttemptAtMs })
       ))),
+      finalizedPrivatePlacement: catalogPlacementTimingV1(this).queueStatus(
+        state.finalizedPrivateAttemptWaiters,
+        state.finalizedPrivateRunner.running,
+      ),
     });
   }
 
@@ -392,6 +404,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
           failed = true;
           throw error;
         } finally {
+          catalogPlacementTimingV1(this).passEnded();
           // A failed durable queue read must not spin on an already-due waiter.
           this.#schedulePrivateWaiterWake(state, failed
             ? (finalizedPrivateRetryIntervalMs > 0
@@ -444,6 +457,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     signal: AbortSignal,
   ): Promise<void> {
     const repairs = this.#dependencies.listFinalizedPrivateRepairs();
+    catalogPlacementTimingV1(this).passStarted(repairs.length);
     const currentKeys = new Set(repairs.map(finalizedPrivateRepairKeyV1));
     for (const key of state.finalizedPrivateRetries.keys()) {
       if (!currentKeys.has(key)) state.finalizedPrivateRetries.delete(key);
@@ -460,9 +474,13 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
         state.finalizedPrivateRetries.set(key, entry);
       }
       this.#observePrivateLane(entry.retry, repair.contextGraphId);
-      if (!entry.retry.eligible(Date.now())) return;
+      if (!entry.retry.eligible(Date.now())) {
+        catalogPlacementTimingV1(this).cooldownSkipped(repair);
+        return;
+      }
       const attemptGeneration = entry.retry.generation;
       entry.attempts += 1;
+      const placement = catalogPlacementTimingV1(this).admit(repair);
       try {
         if (!this.#dependencies.acceptsFinalizedPrivateLane(repair.contextGraphId)) {
           throw new CatalogRepairLaneInactiveErrorV1();
@@ -470,8 +488,10 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
         await withDefaultStoreWorkPriority('background', () => (
           this.#dependencies.repairFinalizedPrivatePlacement(repair)
         ));
+        placement.end('completed');
         state.finalizedPrivateRetries.delete(key);
       } catch (error) {
+        placement.end('failed');
         if (!signal.aborted) {
           const changed = this.#observePrivateLane(entry.retry, repair.contextGraphId);
           entry.retry.fail(attemptGeneration, Date.now(), state.retryIntervalMs, catalogRepairDiagnosticV1(error).kind);
@@ -487,6 +507,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
   #settlePrivateWaiters(state: ProjectionSupervisorStateV1, key: string): void {
     const waiters = state.finalizedPrivateAttemptWaiters.get(key);
     state.finalizedPrivateAttemptWaiters.delete(key);
+    catalogPlacementTimingV1(this).waitersSettled(key);
     if (waiters !== undefined) for (const settle of waiters) settle();
   }
 
@@ -648,6 +669,7 @@ export function bindRfc64SwmCatalogProjectionOwnerV1(
     throw new Error('RFC-64 SWM catalog projection owner is already bound');
   }
   projectionOwnersV1.set(agent, owner);
+  shareCatalogPlacementTimingV1(owner, agent);
   return owner;
 }
 
