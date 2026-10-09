@@ -1432,6 +1432,7 @@ export class TripleStoreAsyncLiftPublisher
       () => undefined,
       () => undefined,
     ).finally(() => {
+      this.chainObservations.completion.executorSettled(jobId);
       if (this.detachedExecutions.get(jobId) === tracked) {
         this.detachedExecutions.delete(jobId);
       }
@@ -1782,6 +1783,7 @@ export class TripleStoreAsyncLiftPublisher
     // The normal executor still owns this job. Recovery will retry after it
     // settles. This prevents two writers from finalizing the same lifecycle.
     if (this.detachedExecutions.has(job.jobId)) return false;
+    this.chainObservations.completion.recoveryTurn(job.jobId);
 
     const recoverable = job as LiftJobBroadcast | LiftJobIncluded;
     const origin = liveChainRecoveryOrigin(recoverable);
@@ -1925,7 +1927,7 @@ export class TripleStoreAsyncLiftPublisher
     ) {
       return 'unsupported';
     }
-    const finalizeRecovered = this.knowledgeAssetVmPublishHandler.finalizeRecovered;
+    const finalizeRecovered = this.chainObservations.completion.timeRecovery(this.knowledgeAssetVmPublishHandler.finalizeRecovered);
     const request = job.request.knowledgeAssetVmPublish;
 
     let incompleteOutcome: 'unresolved' | 'repair-deferred' = 'unresolved';
@@ -2938,6 +2940,7 @@ export class TripleStoreAsyncLiftPublisher
     const canonical = committedLiftJob(this.chainObservations.project(validated), job);
     await this.persistJobRecord(canonical);
     await this.appendJournal(canonical, kind);
+    if (canonical.status === 'finalized') this.chainObservations.completion.terminal(job.jobId);
     return canonical;
   }
 
