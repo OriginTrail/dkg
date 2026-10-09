@@ -34,6 +34,7 @@ import {
   generatedPrivateCatalogTripleKeys,
   skolemizeKnowledgeAssetParts,
   type KnowledgeAssetVmPublishRequest,
+  type PublishOptions,
 } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { computeSwmSenderKeyRecipientRouteHash } from '../src/dkg-agent-swm-state.js';
@@ -66,14 +67,18 @@ type ContextResolverArguments = readonly [
   explicitPolicyTarget: string | undefined, options: { aeadBindingContextGraphId?: string } | undefined,
 ];
 
+type PublishedHooks = Pick<PublishOptions, 'encryptInlinePayload' | 'encryptInlineChunked'>;
+
 /**
  * Runs an entry point through the production `_resolveInlineEncryption`. The context
  * resolver must receive exactly `expected`, and both hooks must decrypt under
  * `expectedBinding`: neither value is read back from the call under test, so a
  * resolver that drops an argument fails here. Each attempt resolves one context.
+ * `publishedOptions` returns what the entry point last handed to its publisher method.
  */
 async function verifyEntryPointEncryption(
   agent: any, invoke: () => Promise<unknown>, expected: ContextResolverArguments, expectedBinding: string,
+  publishedOptions: () => PublishedHooks | undefined,
 ) {
   const wallet = ethers.Wallet.createRandom();
   const chainKey = new Uint8Array(32).fill(9);
@@ -95,11 +100,11 @@ async function verifyEntryPointEncryption(
     expect(agent._resolveCuratedChainKeyContext).toHaveBeenLastCalledWith(
       contextGraphId, subGraphName, authorAgentAddress, explicitPolicyTarget, 'LU-5', options,
     );
-    const hooks = Object.values(agent.publisher).flatMap((fn: any) => fn.calls?.at(-1) ?? [])
-      .find((value: any) => typeof value?.encryptInlinePayload === 'function' && typeof value?.encryptInlineChunked === 'function') as any;
-    expect(hooks).toBeDefined();
-    expect(decryptV10PublishPayload({ chainKey, contextGraphId: expectedBinding, encryptedPayload: await hooks.encryptInlinePayload(plaintext) })).toEqual(plaintext);
-    const chunked = await hooks.encryptInlineChunked({ plaintextNquads: plaintext, batchId: new Uint8Array(32), publishOperationId: `entry-${attempt}` });
+    const hooks = publishedOptions();
+    expect(hooks?.encryptInlinePayload).toBeTypeOf('function');
+    expect(hooks?.encryptInlineChunked).toBeTypeOf('function');
+    expect(decryptV10PublishPayload({ chainKey, contextGraphId: expectedBinding, encryptedPayload: await hooks!.encryptInlinePayload!(plaintext) })).toEqual(plaintext);
+    const chunked = await hooks!.encryptInlineChunked!({ plaintextNquads: plaintext, batchId: new Uint8Array(32), publishOperationId: `entry-${attempt}` });
     expect(chunked).toMatchObject({ ciphertextChunkCount: 1 });
     expect(decryptChunked({ chainKey, contextGraphId: expectedBinding, ciphertextChunks: chunked.ciphertextChunks }).plaintextChunks).toEqual([plaintext]);
     expect(agent._resolveCuratedChainKeyContext).toHaveBeenCalledTimes(attempt);
@@ -593,7 +598,7 @@ describe('DKGAgent._publish inline encryption routing', () => {
       encryptInlinePayload,
       encryptInlineChunked,
     })]);
-    await verifyEntryPointEncryption(agentLike, invoke, ['local-cg', 'sg-a', undefined, undefined, { aeadBindingContextGraphId: '42' }], '42');
+    await verifyEntryPointEncryption(agentLike, invoke, ['local-cg', 'sg-a', undefined, undefined, { aeadBindingContextGraphId: '42' }], '42', () => publisherPublish.calls.at(-1)?.[0]);
   });
 
   it('routes direct encrypted private publishes to the publisher without an implicit catalog floor', async () => {
@@ -830,7 +835,7 @@ describe('DKGAgent.update inline encryption routing', () => {
         encryptInlineChunked: updateEncryptInlineChunked,
       }),
     ]);
-    await verifyEntryPointEncryption(agentLike, invoke, ['private-cg', undefined, undefined, undefined, { aeadBindingContextGraphId: '42' }], '42');
+    await verifyEntryPointEncryption(agentLike, invoke, ['private-cg', undefined, undefined, undefined, { aeadBindingContextGraphId: '42' }], '42', () => publisherUpdate.calls.at(-1)?.[1]);
   });
 });
 
@@ -892,7 +897,7 @@ describe('DKGAgent.publishFromSharedMemory inline encryption routing', () => {
         onChainContextGraphId: '1',
       }),
     ]);
-    await verifyEntryPointEncryption(agentLike, invoke, ['sports', undefined, undefined, undefined, { aeadBindingContextGraphId: '1' }], '1');
+    await verifyEntryPointEncryption(agentLike, invoke, ['sports', undefined, undefined, undefined, { aeadBindingContextGraphId: '1' }], '1', () => agentLike.publisher.publishFromSharedMemory.calls.at(-1)?.[2]);
   });
 
   it('passes explicit sub-CG remap id as policy target and binding id', async () => {
@@ -1332,7 +1337,7 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
     )).toHaveLength(1);
     expect(publisherPublish.calls.at(-1)?.[0].encryptInlinePayload).not.toBe(failClosedInline);
     expect(publisherPublish.calls.at(-1)?.[0].encryptInlineChunked).not.toBe(failClosedChunked);
-    await verifyEntryPointEncryption(agentLike, invoke, ['private-cg', undefined, undefined, undefined, { aeadBindingContextGraphId: '7' }], '7');
+    await verifyEntryPointEncryption(agentLike, invoke, ['private-cg', undefined, undefined, undefined, { aeadBindingContextGraphId: '7' }], '7', () => publisherPublish.calls.at(-1)?.[0]);
   });
 
   it('does not trust or append a catalog floor for a private local-only queued publish', async () => {
