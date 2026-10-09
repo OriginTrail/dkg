@@ -114,6 +114,29 @@ describe('KeyedSingleFlight', () => {
     expect(values.get('account')).toBe(3);
   });
 
+  it('lets only the lookup that replaced a cancelled one publish, whichever settles last', async () => {
+    const cancelled = deferred<string>();
+    const replacement = deferred<string>();
+    const values = new TtlValueCache<string, string>({ ttlMs: 1000 });
+    const singleFlight = new KeyedSingleFlight<string>();
+    const publish = (value: string) => { values.set('hub', value); };
+    const owner = new AbortController();
+
+    const staleLookup = singleFlight.run('hub', 'hub', async () => cancelled.promise, publish, owner.signal);
+    // While its owner is live, the lookup is shared.
+    const joined = singleFlight.run('hub', 'hub', async () => 'unread', publish);
+    // Its owner is cancelled, with no invalidation: the next caller reads afresh.
+    owner.abort();
+    const freshLookup = singleFlight.run('hub', 'hub', async () => replacement.promise, publish);
+
+    replacement.resolve('CURRENT');
+    await expect(freshLookup).resolves.toBe('CURRENT');
+    cancelled.resolve('RETIRED');
+    await expect(staleLookup).resolves.toBe('RETIRED');
+    await expect(joined).resolves.toBe('RETIRED');
+    expect(values.get('hub')).toBe('CURRENT');
+  });
+
   it('scopes identical in-flight keys by value key', async () => {
     let calls = 0;
     const singleFlight = new KeyedSingleFlight<string, string>();
@@ -336,5 +359,23 @@ describe('ReadThroughTtlCache', () => {
     await expect(staleLookup).resolves.toBe(1);
     await expect(freshLookup).resolves.toBe(2);
     await expect(cache.getOrLoad('account', 'account', async () => 3)).resolves.toBe(2);
+  });
+
+  it('keeps the replacement of a cancelled lookup cached when the cancelled one answers last', async () => {
+    const cancelled = deferred<string>();
+    const replacement = deferred<string>();
+    const cache = new ReadThroughTtlCache<string, string>({ ttlMs: 1000 });
+    const owner = new AbortController();
+
+    const staleLookup = cache.getOrLoad('hub', 'hub', async () => cancelled.promise, owner.signal);
+    // Its owner is cancelled, with no invalidation: the next caller reads afresh.
+    owner.abort();
+    const freshLookup = cache.getOrLoad('hub', 'hub', async () => replacement.promise);
+
+    replacement.resolve('CURRENT');
+    await expect(freshLookup).resolves.toBe('CURRENT');
+    cancelled.resolve('RETIRED');
+    await expect(staleLookup).resolves.toBe('RETIRED');
+    await expect(cache.getOrLoad('hub', 'hub', async () => 'unread')).resolves.toBe('CURRENT');
   });
 });
