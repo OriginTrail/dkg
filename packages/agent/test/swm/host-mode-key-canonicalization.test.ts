@@ -29,6 +29,8 @@ import { join } from 'node:path';
 import { DKGAgent } from '../../src/index.js';
 import { SwmHostModeStore } from '../../src/swm/host-mode-store.js';
 import { GraphManager } from '@origintrail-official/dkg-storage';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import type { ContextGraphSubInput } from '../../src/dkg-agent-types.js';
 
 /**
  * Minimal in-memory gossip transport — mirrors the surface the agent
@@ -83,6 +85,8 @@ function totalHandlers(bus: InMemoryGossipBus): number {
 }
 
 interface AgentInternals {
+  chain: MockChainAdapter;
+  onChainAccessPolicyCache: Map<string, number>;
   gossip: InMemoryGossipBus;
   swmHostModeStore?: SwmHostModeStore;
   swmHostModeSubscribed: Map<string, string>;
@@ -103,9 +107,24 @@ interface AgentInternals {
   ): string | null;
   setContextGraphSubscription(
     contextGraphId: string,
-    next: { subscribed: boolean; synced: boolean },
+    next: ContextGraphSubInput,
     options?: { persist?: boolean },
   ): void;
+}
+
+async function installPublicGraph(core: DKGAgent, cleartext: string): Promise<void> {
+  const internals = core as unknown as AgentInternals;
+  const nameHash = ethers.keccak256(ethers.toUtf8Bytes(cleartext)).toLowerCase();
+  const registration = await internals.chain.createOnChainContextGraph({
+    accessPolicy: 0, publishPolicy: 1, nameHash,
+  });
+  const onChainId = String(registration.contextGraphId);
+  internals.setContextGraphSubscription(cleartext, {
+    subscribed: false, synced: false, onChainId, onChainHash: nameHash,
+  }, { persist: false });
+  internals.onChainAccessPolicyCache.set(
+    onChainId, await internals.chain.getContextGraphAccessPolicy(registration.contextGraphId),
+  );
 }
 
 async function installHostModeStore(core: DKGAgent, dataDir: string): Promise<SwmHostModeStore> {
@@ -134,6 +153,7 @@ describe('host-mode bookkeeping key canonicalisation', () => {
     tempDirs.push(dataDir);
     const core = await DKGAgent.create({
       name: 'CanonKeyCore',
+      chainAdapter: new MockChainAdapter(),
       listenHost: '127.0.0.1',
       dataDir,
       nodeRole: 'core',
@@ -210,6 +230,7 @@ describe('host-mode bookkeeping key canonicalisation', () => {
     const { core } = await makeCore();
     const cleartext = 'canon-cg-cleartext-first';
     const wireHash = ethers.keccak256(ethers.toUtf8Bytes(cleartext)).toLowerCase();
+    await installPublicGraph(core, cleartext);
 
     const first = await core.enableSwmHostModeFor(cleartext);
     expect(first).toEqual({ subscribed: true, alreadySubscribed: false, hostingEnabled: true });
@@ -229,6 +250,7 @@ describe('host-mode bookkeeping key canonicalisation', () => {
     const { core } = await makeCore();
     const cleartext = 'canon-cg-hash-first';
     const wireHash = ethers.keccak256(ethers.toUtf8Bytes(cleartext)).toLowerCase();
+    await installPublicGraph(core, cleartext);
 
     const first = await core.enableSwmHostModeFor(wireHash);
     expect(first).toEqual({ subscribed: true, alreadySubscribed: false, hostingEnabled: true });
@@ -325,6 +347,7 @@ describe('host-mode bookkeeping key canonicalisation', () => {
     // discovery-beacon path on a host-only core (no cleartext meta).
     const cleartext = 'canon-cg-handler-count';
     const wireHash = ethers.keccak256(ethers.toUtf8Bytes(cleartext)).toLowerCase();
+    await installPublicGraph(core, cleartext);
 
     await core.enableSwmHostModeFor(wireHash);
     // The bookkeeping handler count is per-topic-equivalent — both
@@ -348,6 +371,7 @@ describe('host-mode bookkeeping key canonicalisation', () => {
     const { core } = await makeCore();
     const cleartext = 'canon-cg-unwire-mixed';
     const wireHash = ethers.keccak256(ethers.toUtf8Bytes(cleartext)).toLowerCase();
+    await installPublicGraph(core, cleartext);
 
     await core.enableSwmHostModeFor(cleartext);
     const internals = core as unknown as AgentInternals;

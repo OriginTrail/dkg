@@ -28,6 +28,7 @@ export const DKGEvent = {
   CONTEXT_GRAPH_REGISTRATION_FAILED: 'context-graph:registration:failed',
   JOIN_REQUEST_RECEIVED: 'join-request:received',
   JOIN_APPROVED: 'join:approved',
+  JOIN_METADATA_CONFIRMED: 'join:metadata-confirmed',
   JOIN_REJECTED: 'join:rejected',
   PROJECT_SYNCED: 'project:synced',
   CATALOG_READINESS_CHECK_REQUESTED: 'catalog:readiness-check-requested',

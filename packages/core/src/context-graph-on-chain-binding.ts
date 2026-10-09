@@ -28,10 +28,14 @@ export type OntologyBindingSlotClass = 'curated' | 'public' | 'inactive' | 'unkn
  * ontology copy is preferred, so other values in either graph can never hide
  * an allowed one. An empty list matches nothing, but the query still reads
  * the store.
+ *
+ * `includeConflicts` returns up to two distinct lexical ids from either
+ * graph, so strict binding consumers can reject conflicting claims instead
+ * of hiding one behind ontology precedence. Two ids suffice to prove conflict.
  */
 export function contextGraphOnChainIdBindingQuery(
   contextGraphId: string,
-  options: { readonly onChainIds?: readonly string[] } = {},
+  options: { readonly onChainIds?: readonly string[]; readonly includeConflicts?: boolean } = {},
 ): string {
   const subject = contextGraphDataUri(contextGraphId);
   const ontologyGraph = contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
@@ -43,6 +47,13 @@ export function contextGraphOnChainIdBindingQuery(
     if (allowed.length === 0) return ' FILTER(false)';
     return ` FILTER(STR(?${variable}) IN (${allowed.map((onChainId) => sparqlString(onChainId)).join(', ')}))`;
   };
+  if (options.includeConflicts) {
+    return `SELECT DISTINCT (STR(?claimId) AS ?id) WHERE {
+      { GRAPH <${ontologyGraph}> { <${subject}> <${CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE}> ?claimId }${only('claimId')} }
+      UNION
+      { GRAPH <${metaGraph}> { <${subject}> <${CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE}> ?claimId }${only('claimId')} }
+    } LIMIT 2`;
+  }
   return `SELECT ?id WHERE {
     OPTIONAL { GRAPH <${ontologyGraph}> { <${subject}> <${CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE}> ?ontologyId }${only('ontologyId')} }
     OPTIONAL { GRAPH <${metaGraph}> { <${subject}> <${CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE}> ?metaId }${only('metaId')} }

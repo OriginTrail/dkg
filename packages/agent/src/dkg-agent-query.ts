@@ -7,6 +7,7 @@
  * so cross-calls resolve against the composed class.
  */
 
+import { isAdmittedContextGraphSubscription } from './context-graph-subscription-policy.js';
 import { resolveRfc64PrivateReadRoster } from './rfc64/private-read-roster-v1.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { canReadUnscopedQuery } from './unscoped-query-admission.js';
@@ -390,6 +391,7 @@ import {
   contextGraphReadAuthorityDependencyOf,
   resolveContextGraphReadAuthorityDecision,
   resolveContextGraphReadAuthorityResolution,
+  resolveScopedContextGraphQueryReadAuthority,
   unavailableContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityInput,
@@ -552,17 +554,16 @@ export class QueryMethods extends DKGAgentBase {
     let scopedReadAuthority: ContextGraphReadAuthorityDecision | undefined;
     if (opts.contextGraphId) {
       const scopedContextGraphId = opts.contextGraphId;
-      // Keep the public read-authority seam: tests and embedders stub it, and
-      // the outer `query` RPC site already owns attribution for the nested call.
-      scopedReadAuthority = await withRpcUsageSite(
-        CG_AUTH_RPC_SITES.query,
-        () => this.resolveContextGraphReadAuthority(scopedContextGraphId, {
-          callerAgentAddress: callerAgentAddressStr,
-          allowSubscriptionFallback: targetsSharedMemory ? false : undefined,
-          signal: opts.signal,
-          authorityReadMode: 'finalized-index',
-        }),
-      );
+      scopedReadAuthority = await resolveScopedContextGraphQueryReadAuthority({
+        contextGraphId: scopedContextGraphId,
+        view: opts.view,
+        callerAgentAddress: callerAgentAddressStr,
+        targetsSharedMemory,
+        signal: opts.signal,
+        resolveAuthority: (id, options) => this.resolveContextGraphReadAuthority(id, options),
+        isLocalFirstUnregistered: (id) => this.isLocalFirstUnregisteredContextGraph(id),
+        readCurrentBinding: (id) => this.subscribedContextGraphs.get(id),
+      });
       if (scopedReadAuthority.outcome === 'unavailable') {
         // An exact finalized name absence or a transient authority-circuit
         // failure cannot expose data when this node has no local declaration,
@@ -577,7 +578,7 @@ export class QueryMethods extends DKGAgentBase {
             || scopedReadAuthority.reason === 'authority-circuit-open'
           )
           && validateContextGraphId(scopedContextGraphId).valid
-          && !this.subscribedContextGraphs.has(scopedContextGraphId)
+          && !isAdmittedContextGraphSubscription(this.subscribedContextGraphs.get(scopedContextGraphId))
           && !this.localContextGraphProvenance.hasLocalCreate(scopedContextGraphId)
           && !await this.contextGraphExists(scopedContextGraphId, { signal: opts.signal })
         ) {
@@ -1141,7 +1142,7 @@ export class QueryMethods extends DKGAgentBase {
       hasLegacySubscription:
         this.subscribedContextGraphs.get(contextGraphId)?.pendingMeta !== true
         && (
-          this.subscribedContextGraphs.has(contextGraphId)
+          this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true
           || (this.config.syncContextGraphs ?? []).includes(contextGraphId)
         ),
       getLocalIdentityId: () => this.chain.getIdentityId(),

@@ -32,6 +32,7 @@ export interface FinalizedVmLoopbackFixtureConfigV1 {
   readonly networkId: NetworkIdV1;
   readonly onChainContextGraphId: string;
   readonly ownerAddress: EvmAddressV1;
+  readonly participantAgents?: readonly EvmAddressV1[];
   readonly publishPolicy: 0 | 1;
 }
 
@@ -100,7 +101,7 @@ export class FinalizedVmLoopbackMockChainAdapterV1 extends MockChainAdapter {
         ? null
         : this.#fixture.ownerAddress.toLowerCase(),
       publishAuthorityAccountId: '0',
-      participantAgents: Object.freeze([]),
+      participantAgents: Object.freeze([...(this.#fixture.participantAgents ?? [])]),
       nameHash: this.#fixture.nameHash.toLowerCase(),
       ownershipEra: '0',
       policyVersion: '0',
@@ -158,7 +159,7 @@ function finalizedVmEthCallResult(
       assertContextGraphCall('getContextGraph', data, fixture.onChainContextGraphId);
       return CONTEXT_GRAPH_INTERFACE.encodeFunctionResult('getContextGraph', [
         fixture.ownerAddress,
-        [],
+        fixture.participantAgents ?? [],
         0n,
         fixture.active,
         1n,

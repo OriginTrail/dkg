@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { DKGEvent } from '@origintrail-official/dkg-core';
 import type { DKGAgent } from './dkg-agent.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { resolveChainFinalityConfirmationsV1 } from './chain-finality-confirmations-v1.js';
@@ -115,6 +116,20 @@ function finalizePrivateEmptyVmEvidence(
 }
 
 export class RegisteredPrivateEmptyVmMethods extends DKGAgentBase {
+  /**
+   * The curator metadata of a graph this node's agent was approved to join has
+   * just become authoritative here. A readiness proof that needs it cannot
+   * succeed earlier, and on a slow path it arrives after the subscribe call and
+   * its catch-up job have made their attempts. Tell the readiness owner, unless
+   * the graph is already ready or no longer subscribed.
+   */
+  announceJoinMetadataConfirmedV1(this: DKGAgent, contextGraphId: string): void {
+    const agentAddress = this.localApprovedAgentByCG.get(contextGraphId);
+    const subscription = this.subscribedContextGraphs.get(contextGraphId);
+    if (agentAddress === undefined || subscription?.subscribed !== true || subscription.synced === true) return;
+    this.eventBus.emit(DKGEvent.JOIN_METADATA_CONFIRMED, { contextGraphId, agentAddress });
+  }
+
   /** Inspect and commit graph readiness under one agent-owned, same-turn fence. */
   async inspectAndCommitContextGraphReadinessV1<T>(
     this: DKGAgent,

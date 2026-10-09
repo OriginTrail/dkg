@@ -380,6 +380,35 @@ describe('DKGAgent._resolveEncryptInlinePayload policy lookup', () => {
 });
 
 describe('DKGAgent._publish inline encryption routing', () => {
+
+  it('does not treat a retained inactive identity as an admitted publish row', async () => {
+    const publisherPublish = recorder(async () => ({ status: 'confirmed', kaId: '1' }));
+    const agentLike = {
+      log: {
+        info: recorder(() => undefined),
+        warn: recorder(() => undefined),
+        error: recorder(() => undefined),
+        debug: recorder(() => undefined),
+      },
+      chain: {},
+      subscribedContextGraphs: new Map([
+        ['identity-only-cg', { name: 'identity-only-cg', subscribed: false, synced: true }],
+      ]),
+      contextGraphExists: recorder(async () => false),
+      createV10ACKProvider: recorder(() => undefined),
+      publisher: { publish: publisherPublish },
+    } as any;
+
+    await expect((DKGAgent.prototype as any)._publish.call(
+      agentLike,
+      'identity-only-cg',
+      [{ subject: 'urn:test:s', predicate: 'urn:test:p', object: '"value"', graph: '' }],
+    )).rejects.toThrow('Context graph "identity-only-cg" does not exist.');
+    expect(agentLike.contextGraphExists.calls).toEqual([['identity-only-cg']]);
+    expect(agentLike.createV10ACKProvider.calls).toEqual([]);
+    expect(publisherPublish.calls).toEqual([]);
+  });
+
   it('uses chain-confirmed V2 encryption to attach the catalog when local meta is stale', async () => {
     const authorAddress = '0x1111111111111111111111111111111111111111';
     const reservedKaId = (BigInt(authorAddress) << 96n) | 1n;
@@ -400,7 +429,7 @@ describe('DKGAgent._publish inline encryption routing', () => {
         error: recorder(() => undefined),
         debug: recorder(() => undefined),
       },
-      subscribedContextGraphs: new Set(['private-cg']),
+      subscribedContextGraphs: new Map([['private-cg', { name: 'private-cg', subscribed: true, synced: true }]]),
       contextGraphExists: recorder(async () => true),
       createV10ACKProvider: recorder(() => undefined),
       getContextGraphOnChainId: recorder(async () => '4'),
@@ -433,6 +462,7 @@ describe('DKGAgent._publish inline encryption routing', () => {
       [{ subject: 'urn:test:s', predicate: 'urn:test:p', object: '"value"', graph: '' }],
     );
 
+    expect(agentLike.contextGraphExists.calls).toEqual([]);
     expect(agentLike.isPrivateContextGraph.calls).toEqual([]);
     expect(publisherPublish.calls.at(-1)?.[0]).toEqual(expect.objectContaining({
       contextGraphId: 'private-cg',
@@ -457,7 +487,7 @@ describe('DKGAgent._publish inline encryption routing', () => {
         error: recorder(() => undefined),
         debug: recorder(() => undefined),
       },
-      subscribedContextGraphs: new Set(['local-cg']),
+      subscribedContextGraphs: new Map([['local-cg', { name: 'local-cg', subscribed: true, synced: true }]]),
       contextGraphExists: recorder(async () => true),
       createV10ACKProvider: recorder(() => undefined),
       getContextGraphOnChainId: recorder(async () => '42'),
@@ -486,6 +516,7 @@ describe('DKGAgent._publish inline encryption routing', () => {
       },
     );
 
+    expect(agentLike.contextGraphExists.calls).toEqual([]);
     expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)).toEqual([
       'local-cg',
       'sg-a',
@@ -524,7 +555,7 @@ describe('DKGAgent._publish inline encryption routing', () => {
         error: recorder(() => undefined),
         debug: recorder(() => undefined),
       },
-      subscribedContextGraphs: new Set(['private-cg']),
+      subscribedContextGraphs: new Map([['private-cg', { name: 'private-cg', subscribed: true, synced: true }]]),
       contextGraphExists: recorder(async () => true),
       createV10ACKProvider: recorder(() => undefined),
       getContextGraphOnChainId: recorder(async () => '42'),
@@ -550,6 +581,7 @@ describe('DKGAgent._publish inline encryption routing', () => {
       },
     )).rejects.toBe(publisherError);
 
+    expect(agentLike.contextGraphExists.calls).toEqual([]);
     expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)).toEqual([
       'private-cg',
       'sg-private',
@@ -580,7 +612,7 @@ describe('DKGAgent._publish inline encryption routing', () => {
         error: recorder(() => undefined),
         debug: recorder(() => undefined),
       },
-      subscribedContextGraphs: new Set(['local-cg']),
+      subscribedContextGraphs: new Map([['local-cg', { name: 'local-cg', subscribed: true, synced: true }]]),
       contextGraphExists: recorder(async () => true),
       createV10ACKProvider: recorder(() => undefined),
       getContextGraphOnChainId: recorder(async () => '42'),
@@ -605,6 +637,7 @@ describe('DKGAgent._publish inline encryption routing', () => {
       },
     );
 
+    expect(agentLike.contextGraphExists.calls).toEqual([]);
     expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)).toEqual([
       'local-cg',
       undefined,
