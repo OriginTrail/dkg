@@ -866,6 +866,49 @@ describe('EVMChainAdapter random sampling identity lookup', () => {
     expect(a.nextRandomSamplingSigner.calls).toHaveLength(1);
     expect(sendSpy.calls[0][1]).toBe('submitProof');
     expect(sendSpy.calls[0][3]).toBe(w1); // the SELECTED signer
+    expect(sendSpy.calls[0][5]).toEqual({ gasLimitBufferBps: 5_000 }); // gas headroom
+  });
+
+  it('submitProof signs a gas limit above the estimate, so a proof that costs more one block later still fits', async () => {
+    // The contract settles the node's stake to `block.timestamp` and skips the
+    // settle when the node is already settled at that timestamp, which is the
+    // case on the block that holds the node's own createChallenge. An estimate
+    // taken on that block comes out below what the proof needs one block
+    // later. Numbers from one observed case: estimate 294,443, needed 306,807;
+    // sent with the raw estimate, the proof ran out of gas.
+    const estimatedOnChallengeBlock = 294_443n;
+    const neededOneBlockLater = 306_807n;
+    const a: any = new EVMChainAdapter(minimalConfig({ rpcUrl: 'https://only.example' }));
+    const provider = { name: 'only' } as any;
+    const signer = new ethers.Wallet(DEPLOYER_PK, provider);
+    const receipt = { hash: '0x' + '33'.repeat(32), blockNumber: 6, index: 0, status: 1, logs: [] };
+    // No gasLimit from populate: without headroom ethers would fill in the raw
+    // estimate while signing.
+    const populateTransaction = recorder(async () => (
+      { to: '0x0000000000000000000000000000000000000001', data: '0x1234' } as any
+    ));
+    const estimateGas = recorder(async () => estimatedOnChallengeBlock);
+    const rs = {
+      connect: recorder(() => ({ submitProof: { populateTransaction, estimateGas } })),
+    };
+    a.init = async () => undefined;
+    a.getRandomSampling = async () => ({ rs });
+    a.nextRandomSamplingSigner = async () => signer;
+    a.providers = [provider];
+    const signSpy = recorder(async (..._a: any[]) => ({ signedTx: '0xdead', txHash: receipt.hash }));
+    a.signPopulatedTransaction = signSpy;
+    a.sendSignedTransactionAndWait = recorder(async () => receipt);
+
+    await expect(a.submitProof(new Uint8Array([1, 2, 3]), [])).resolves.toMatchObject({
+      hash: receipt.hash,
+      success: true,
+    });
+
+    expect(estimateGas.calls).toHaveLength(1);
+    const signedGasLimit = signSpy.calls[0][1].gasLimit;
+    // 294_443 * (10_000 + 5_000) / 10_000, rounded down
+    expect(signedGasLimit).toBe(441_664n);
+    expect(signedGasLimit >= neededOneBlockLater).toBe(true);
   });
 
   // ── self-heal for STALE eligibility: an out-of-band removed wallet that
