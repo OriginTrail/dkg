@@ -99,7 +99,7 @@ describe('EndpointStickiness complete refusal-aware plan', () => {
 
     expect(pass).toEqual({ tried: [REFUSER, PRIMARY], servedBy: PRIMARY });
     expect(order.owner.hasPreference()).toBe(true);
-    expect(urlsOf(order.owner.attempts(order.endpoints, 'receiptRead'))).toEqual([PRIMARY, REFUSER, THIRD]);
+    expect(urlsOf(order.owner.readAttempts(order.endpoints, 'receiptRead', { label: 'preference inspection', memory: refusals }))).toEqual([PRIMARY, REFUSER, THIRD]);
     // A throttle is not remembered: the next pass starts at the same endpoint.
     expect(urlsOf(readAttempts(refusals, LABEL, stickyOrder(REFUSER, PRIMARY, THIRD))))
       .toEqual([REFUSER, PRIMARY, THIRD]);
@@ -112,7 +112,7 @@ describe('EndpointStickiness complete refusal-aware plan', () => {
     runPass(refusals, LABEL, order, { [REFUSER]: refused403() });
 
     expect(order.owner.hasPreference()).toBe(true);
-    expect(urlsOf(order.owner.attempts(order.endpoints, 'receiptRead'))).toEqual([PRIMARY, REFUSER, THIRD]);
+    expect(urlsOf(order.owner.readAttempts(order.endpoints, 'receiptRead', { label: 'preference inspection', memory: refusals }))).toEqual([PRIMARY, REFUSER, THIRD]);
     expect(urlsOf(readAttempts(refusals, LABEL, stickyOrder(REFUSER, PRIMARY, THIRD))))
       .toEqual([PRIMARY, THIRD, REFUSER]);
     expect(urlsOf(readAttempts(refusals, 'kas.getLatestMerkleRoot', stickyOrder(REFUSER, PRIMARY, THIRD))))
@@ -210,7 +210,7 @@ describe('EndpointStickiness complete refusal-aware plan', () => {
     // The endpoint stickiness starts at was tried first, so what follows means what it meant.
     expect(pass).toEqual({ tried: [PRIMARY, THIRD], servedBy: THIRD });
     expect(order.owner.hasPreference()).toBe(true);
-    expect(urlsOf(order.owner.attempts(order.endpoints, 'receiptRead'))).toEqual([THIRD, PRIMARY, REFUSER]);
+    expect(urlsOf(order.owner.readAttempts(order.endpoints, 'receiptRead', { label: 'preference inspection', memory: refusals }))).toEqual([THIRD, PRIMARY, REFUSER]);
   });
 
   it('changes nothing when every endpoint has refused the read', () => {

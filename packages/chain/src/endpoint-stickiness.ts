@@ -46,7 +46,9 @@ export interface StickyEndpoint {
   rpcUrl: string;
 }
 
-export type StickinessIntent = 'stickyRead' | 'transparentRead' | 'receiptRead' | 'nonceWrite' | 'write';
+export type ReadStickinessIntent = 'stickyRead' | 'transparentRead' | 'receiptRead';
+export type WriteStickinessIntent = 'nonceWrite' | 'write';
+export type StickinessIntent = ReadStickinessIntent | WriteStickinessIntent;
 
 type StickyState =
   | { kind: 'none' }
@@ -66,7 +68,7 @@ export interface StickinessConfig {
 }
 
 /**
- * ONE bound attempt in a failover pass: the endpoint to try, plus its outcome
+ * ONE bound write attempt in a failover pass: the endpoint to try, plus its outcome
  * recorders with the endpoint, its position (triedFirst = index 0), and the
  * (canonical, intent) pair ALL captured at creation. A loop iterates the entries
  * {@link EndpointStickiness.attempts} returns and, on the entry it actually ran,
@@ -106,7 +108,7 @@ export class EndpointStickiness {
    * but unavailable. (`hasPreference` stays public as a read-only introspection
    * helper; it can't cause drift.)
    */
-  attempts<T extends StickyEndpoint>(canonical: T[], intent: StickinessIntent): StickyAttempt<T>[] {
+  attempts<T extends StickyEndpoint>(canonical: T[], intent: WriteStickinessIntent): StickyAttempt<T>[] {
     return this.order(canonical, intent).map((endpoint, i) => ({
       endpoint,
       recordSuccess: () => this.recordSuccess(endpoint, canonical, intent, i === 0),
@@ -122,7 +124,7 @@ export class EndpointStickiness {
    * Refusers stay in the pass, last; if all refused, the ordinary order remains.
    */
   readAttempts<T extends StickyEndpoint>(
-    canonical: T[], intent: StickinessIntent,
+    canonical: T[], intent: ReadStickinessIntent,
     read: { label: string; memory: EndpointReadRefusals },
   ): ReadAttempt<T>[] {
     const remember = intent !== 'transparentRead' && this.cfg.isEnabled();
@@ -155,7 +157,7 @@ export class EndpointStickiness {
   }
 
   /** Consume a due re-probe only at the actual primary transport boundary. */
-  private recordReadStart<T extends StickyEndpoint>(endpoint: T, canonical: T[], intent: StickinessIntent): void {
+  private recordReadStart<T extends StickyEndpoint>(endpoint: T, canonical: T[], intent: ReadStickinessIntent): void {
     if (intent !== 'stickyRead' || !this.cfg.isEnabled() || this.state.kind !== 'preferred') return;
     if (endpoint.rpcUrl !== canonical[0]?.rpcUrl || this.state.url === endpoint.rpcUrl) return;
     if (this.cfg.now() >= this.state.primaryProbeDueAt) {

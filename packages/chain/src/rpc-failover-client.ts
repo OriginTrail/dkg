@@ -66,7 +66,7 @@ import {
   noteRpcServed,
   rpcHost,
 } from './rpc-failover-log.js';
-import { EndpointStickiness, type StickinessIntent } from './endpoint-stickiness.js';
+import { EndpointStickiness, type ReadStickinessIntent } from './endpoint-stickiness.js';
 import { EndpointReadRefusals } from './endpoint-read-refusals.js';
 import { resolveCapMs, type ReadPolicy } from './rpc-read-timeout-policy.js';
 import { runRpcProviderPass } from './rpc-provider-pass.js';
@@ -119,7 +119,7 @@ export interface ReceiptLookupOptions {
  */
 interface ProviderPassOptions<T> {
   isRetryable: (err: unknown) => boolean;
-  intent: StickinessIntent;
+  intent: ReadStickinessIntent;
   attemptTimeoutMs: (providerCount: number) => number | undefined;
   deadlineMs?: number;
   isEmptyResult?: (value: T) => boolean;
