@@ -15,7 +15,8 @@ import {
   decodePublicGraphSnapshot,
   type PublicGraphSnapshot,
 } from "./public-graph-snapshot.js";
-import { withRpcRequestContext } from "./rpc-request-transport.js";
+import { readFirstProviderWithTransientRetry } from "./rpc-provider-fallback.js";
+import { isContractViewRetryable } from "./rpc-failover-client.js";
 import type { ChainReadOptions } from "./chain-adapter.js";
 
 export class PublicGraphSnapshotMethods extends EVMChainAdapterBase {
@@ -29,9 +30,8 @@ export class PublicGraphSnapshotMethods extends EVMChainAdapterBase {
       throw new Error("Invalid snapshot scope");
     const signal = options.signal ?? AbortSignal.timeout(110_000);
     signal.throwIfAborted();
-    return withRpcRequestContext({ signal }, async () => {
-      await this.init();
-      const provider = this.provider;
+    await this.init();
+    const readOne = async (provider: JsonRpcProvider, signal: AbortSignal) => {
       const expected = BigInt(this.chainId.split(":").pop()!);
       if (BigInt(await provider.send("eth_chainId", [])) !== expected)
         throw new Error("Snapshot RPC chain mismatch");
@@ -147,7 +147,12 @@ export class PublicGraphSnapshotMethods extends EVMChainAdapterBase {
         contextGraphId,
         onChainId,
       });
+    };
+    const result = await readFirstProviderWithTransientRetry(this.providers, readOne, {
+      signal, retryDelayMs: 250, isRetryable: isContractViewRetryable,
     });
+    if (!result) throw new Error("Public snapshot unavailable");
+    return result;
   }
 }
 

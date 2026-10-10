@@ -89,7 +89,8 @@ describe("public snapshot recovery over live local nodes and chain", () => {
           graph: assertionGraph,
         },
       ];
-      const root = computeFlatKCRootV10(data, []);
+      const privateRoot = n === 12 ? new Uint8Array(32).fill(7) : undefined;
+      const root = computeFlatKCRootV10(data, privateRoot ? [privateRoot] : []);
       await (
         await kas.createKnowledgeAsset(
           signer.address,
@@ -124,7 +125,8 @@ describe("public snapshot recovery over live local nodes and chain", () => {
             assertionVersion: 1,
             authorAddress: signer.address,
             publicTripleCount: 1,
-            privateTripleCount: 0,
+            privateTripleCount: privateRoot ? 1 : 0,
+            privateMerkleRoot: privateRoot,
           },
           {
             status: "confirmed",
@@ -139,6 +141,7 @@ describe("public snapshot recovery over live local nodes and chain", () => {
         ),
       ]);
     }
+    await source.insert([{subject:'urn:private-fixture',predicate:'urn:secret',object:'"synthetic-private-data"',graph:`did:dkg:context-graph:${graph}/_private`}]);
     const snapshotRead = vi.spyOn(adapter, "readPublicGraphSnapshot");
     const make = async (
       name: string,
@@ -221,6 +224,10 @@ describe("public snapshot recovery over live local nodes and chain", () => {
       `SELECT ?name WHERE {GRAPH ?g {?s <http://schema.org/name> ?name}}`,
     );
     expect(found.type === "bindings" && found.bindings.length).toBe(12);
+    const privateRows = await target.query('SELECT ?value WHERE {GRAPH ?g {?s <urn:secret> ?value}}');
+    expect(privateRows.type === 'bindings' && privateRows.bindings.length).toBe(0);
+    const commitments = await target.query('SELECT ?root WHERE {GRAPH ?g {?s <http://dkg.io/ontology/privateMerkleRoot> ?root}}');
+    expect(commitments.type === 'bindings' && commitments.bindings.length).toBe(1);
     await expect(assertPublicSnapshotQueryTrust(target, graph)).rejects.toThrow(
       "core-trusted",
     );

@@ -26,6 +26,10 @@ const make = () =>
     accessPolicy: 0,
     assets: [{ id: "1", root: `0x${"b".repeat(64)}`, version: "1" }],
   });
+const reseal = (patch: object) => {
+  const { inventoryDigest: _i, snapshotDigest: _s, ...base } = make();
+  return sealPublicGraphSnapshot({ ...base, ...patch } as any);
+};
 const bytes = (s: unknown) => Buffer.from(JSON.stringify(s));
 describe("public graph snapshot contract", () => {
   it("accepts a scoped coherent inventory and detaches/freezes it", () => {
@@ -52,7 +56,7 @@ describe("public graph snapshot contract", () => {
   );
   it.each([
     { expiresAt: 2000 },
-    { observedAt: 3000 },
+    { observedAt: 18000 },
     { accessPolicy: 1 },
     { nameHash: `0x${"c".repeat(64)}` },
     { blockNumber: "01" },
@@ -62,11 +66,15 @@ describe("public graph snapshot contract", () => {
     { unexpected: true },
   ])("rejects malformed or stale facts %j", (patch) => {
     expect(() =>
-      decodePublicGraphSnapshot(bytes({ ...make(), ...patch }), {
+      decodePublicGraphSnapshot(bytes(reseal(patch)), {
         ...scope,
-        now: 2000,
+        now: 8000,
       }),
-    ).toThrow();
+    ).toThrow("assets" in patch ? "Invalid or duplicate snapshot asset" : "unexpected" in patch ? "Invalid snapshot fields" : "Invalid, stale or mis-scoped snapshot");
+  });
+  it("accepts bounded clock skew in both directions without accepting old snapshots", () => {
+    for (const now of [-3000, 124000]) expect(decodePublicGraphSnapshot(bytes(make()), { ...scope, now }).assets).toHaveLength(1);
+    for (const now of [-5000, 126000]) expect(() => decodePublicGraphSnapshot(bytes(make()), { ...scope, now })).toThrow("stale");
   });
   it("rejects truncation and changed roots even with an intact inventory count", () => {
     const s = make();
@@ -106,7 +114,7 @@ describe("public graph snapshot contract", () => {
     const cache = new PublicGraphSnapshotCache(read, () => now);
     await cache.get("g", "1");
     now = 1100;
-    expect((await cache.get("g", "1", now)).observedAt).toBe(1100);
+    expect((await cache.get("g", "1", true)).observedAt).toBe(1100);
     expect(read).toHaveBeenCalledTimes(2);
   });
 });

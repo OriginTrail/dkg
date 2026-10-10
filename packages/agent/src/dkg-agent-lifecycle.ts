@@ -1,4 +1,3 @@
-import type { PublicSnapshotEvidence } from './public-snapshot-evidence.js';
 import { syncReconcilerEnabled, syncOnConnectEnabled, durableSyncEnabled } from './internal/lifecycle-sync-policy.js';
 import { emptySwmRecoveryResult } from './sync/shared-memory-completion.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
@@ -130,6 +129,7 @@ import {
   type ChallengePinnedGraphScopedAsset,
   type GraphScopedMaterializationOutcome,
   type VerifiedGraphScopedAsset,
+  type AuthenticatedGraphScopedAsset,
   type VerifyContextGraphBinding,
 } from './sync/requester/graph-scoped-materialization.js';
 import {
@@ -1645,7 +1645,7 @@ interface ExactKnowledgeAssetSyncOptions {
   forceFreshExactSession?: boolean;
   exactRecoveryTransportMode?: ExactRecoveryTransportMode;
   registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
-  publicSnapshotEvidence?: PublicSnapshotEvidence;
+  authenticateGraphScopedAsset?: (asset: VerifiedGraphScopedAsset) => AuthenticatedGraphScopedAsset | Promise<AuthenticatedGraphScopedAsset>;
   totalTimeoutMs?: number;
 }
 
@@ -1691,7 +1691,7 @@ export type DurableSyncOptions = {
    * stream pre-flight to rely on. Handed only to that pass's own exchange; absent otherwise.
    */
   registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
-  publicSnapshotEvidence?: PublicSnapshotEvidence;
+  authenticateGraphScopedAsset?: (asset: VerifiedGraphScopedAsset) => AuthenticatedGraphScopedAsset | Promise<AuthenticatedGraphScopedAsset>;
   /** Owner-private retained META prefix for bounded durable recovery. */
   durableMetaContinuation?: DurableMetaContinuation;
   /** Admission override for foreground VM recovery. */
@@ -1755,7 +1755,7 @@ type LegacyDurableContextGraphOptions = {
   durableMetaContinuation?: DurableMetaContinuation;
   exactRecoveryTransportMode?: ExactRecoveryTransportMode;
   registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
-  publicSnapshotEvidence?: PublicSnapshotEvidence;
+  authenticateGraphScopedAsset?: (asset: VerifiedGraphScopedAsset) => AuthenticatedGraphScopedAsset | Promise<AuthenticatedGraphScopedAsset>;
 };
 
 const DURABLE_AUTHENTICATION_MAX_ATTEMPTS = 5;
@@ -5870,7 +5870,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 forceFreshExactSession: options?.forceFreshExactSession,
                 exactRecoveryTransportMode: options?.exactRecoveryTransportMode,
                 registeredPublicEvidence: options?.registeredPublicEvidence,
-                publicSnapshotEvidence: options?.publicSnapshotEvidence,
+                authenticateGraphScopedAsset: options?.authenticateGraphScopedAsset,
                 authenticationTimeoutMs,
                 operationFetchDeadline: operationBoundary.fetchDeadline,
                 operationDeadline: operationBoundary.deadline,
@@ -6090,7 +6090,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         forceFreshExactSession: options.forceFreshExactSession,
         exactRecoveryTransportMode: options.exactRecoveryTransportMode,
         registeredPublicEvidence: options.registeredPublicEvidence,
-        publicSnapshotEvidence: options.publicSnapshotEvidence,
+        authenticateGraphScopedAsset: options.authenticateGraphScopedAsset,
         ...(options.totalTimeoutMs === undefined ? {} : { totalTimeoutMs: options.totalTimeoutMs }),
         stopOnBackoffWorthyFailure: true,
         priority: VM_RECOVERY_SYNC_PRIORITY,
@@ -6167,7 +6167,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       forceFreshExactSession,
       exactRecoveryTransportMode = 'stream-preferred',
       registeredPublicEvidence,
-      publicSnapshotEvidence,
+      authenticateGraphScopedAsset,
       authenticationTimeoutMs = fetchTimeoutMs,
       operationFetchDeadline,
       operationDeadline,
@@ -6383,7 +6383,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           recaptureBindingGeneration,
           assertCurrent,
         }): Promise<GraphScopedMaterializationOutcome> => {
-          const authentication = publicSnapshotEvidence ? publicSnapshotEvidence.authenticate(asset) : await authenticateDurableGraphScopedAsset({
+          const authentication = authenticateGraphScopedAsset ? await authenticateGraphScopedAsset(asset) : await authenticateDurableGraphScopedAsset({
             chain: this.chain,
             asset,
             verifyContextGraphBinding,

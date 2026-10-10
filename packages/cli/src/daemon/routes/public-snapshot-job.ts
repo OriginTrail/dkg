@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { readBody, jsonResponse, isPayloadTooLargeError } from "../http-utils.js";
 import { randomUUID } from "node:crypto";
 import type {
   DKGAgent,
@@ -28,8 +29,7 @@ export async function handlePublicSnapshotJob({
   agent,
 }: RequestContext): Promise<void> {
   const reply = (status: number, body: unknown) => {
-    res.writeHead(status, { "content-type": "application/json" });
-    res.end(JSON.stringify(body));
+    jsonResponse(res, status, body);
   };
   if (req.method === "GET") {
     reply(200, jobs.get(agent) ?? { state: "idle" });
@@ -43,20 +43,9 @@ export async function handlePublicSnapshotJob({
     reply(409, { error: "Snapshot recovery already running" });
     return;
   }
-  let size = 0;
-  const chunks: Buffer[] = [];
-  for await (const raw of req) {
-    const chunk = Buffer.from(raw);
-    size += chunk.length;
-    if (size > 4096) {
-      reply(413, { error: "Request too large" });
-      return;
-    }
-    chunks.push(chunk);
-  }
   let input: PublicSnapshotSyncOptions;
   try {
-    input = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    input = JSON.parse(await readBody(req, 4096));
     if (
       !input ||
       typeof input !== "object" ||
@@ -81,7 +70,8 @@ export async function handlePublicSnapshotJob({
       !/^[1-9][0-9]{0,77}$/.test(input.onChainId)
     )
       throw new Error("Invalid request");
-  } catch {
+  } catch (error) {
+    if (isPayloadTooLargeError(error)) { reply(413, { error: "Request too large" }); return; }
     reply(400, { error: "Invalid snapshot recovery request" });
     return;
   }

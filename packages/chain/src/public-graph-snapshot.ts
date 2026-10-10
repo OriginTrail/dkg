@@ -30,6 +30,7 @@ export interface PublicGraphSnapshotAsset {
 export const PUBLIC_GRAPH_SNAPSHOT_MAX_ASSETS = 10_000;
 export const PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024;
 export const PUBLIC_GRAPH_SNAPSHOT_MAX_AGE_MS = 120_000;
+export const PUBLIC_GRAPH_SNAPSHOT_CLOCK_SKEW_MS = 5_000;
 const hash = (value: unknown) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const decimal = (value: unknown, positive = false): value is string =>
@@ -109,8 +110,8 @@ export function decodePublicGraphSnapshot(
     s.finalityConfirmations < 1 ||
     !Number.isSafeInteger(s.observedAt) ||
     !Number.isSafeInteger(s.expiresAt) ||
-    s.observedAt > now ||
-    now >= s.expiresAt ||
+    s.observedAt > now + PUBLIC_GRAPH_SNAPSHOT_CLOCK_SKEW_MS ||
+    now >= s.expiresAt + PUBLIC_GRAPH_SNAPSHOT_CLOCK_SKEW_MS ||
     s.expiresAt <= s.observedAt ||
     s.expiresAt - s.observedAt > PUBLIC_GRAPH_SNAPSHOT_MAX_AGE_MS ||
     !Array.isArray(s.assets) ||
@@ -175,36 +176,37 @@ export class PublicGraphSnapshotCache {
     ) => Promise<PublicGraphSnapshot>,
     private readonly clock: () => number = Date.now,
   ) {}
-  async get(
-    id: string,
-    onChainId: string,
-    minObservedAt = 0,
-  ): Promise<PublicGraphSnapshot> {
+  private sequence = 0;
+  private readonly completed = new Map<string, number>();
+  private readonly building = new Map<string, number>();
+  async get(id: string, onChainId: string, refresh = false): Promise<PublicGraphSnapshot> {
     const key = JSON.stringify([id, onChainId]);
-    const cached = this.entries.get(key);
-    if (
-      cached &&
-      cached.observedAt >= minObservedAt &&
-      this.clock() - cached.observedAt < 30_000 &&
-      this.clock() < cached.expiresAt
-    )
-      return cached;
-    const current = this.pending.get(key);
-    if (current) {
-      const result = await current;
-      if (result.observedAt >= minObservedAt) return result;
-      return this.get(id, onChainId, minObservedAt);
-    }
-    if (this.pending.size >= 2) throw new Error("Snapshot builder busy");
-    const operation = this.read(id, onChainId, AbortSignal.timeout(110_000))
-      .then((snapshot) => {
-        if (this.entries.size >= 8)
-          this.entries.delete(this.entries.keys().next().value!);
-        this.entries.set(key, snapshot);
+    // A forced observation must begin after THIS request, in the supplier's
+    // own ordering domain. Never compare clocks belonging to different nodes.
+    const minimum = refresh ? this.sequence + 1 : 0;
+    for (;;) {
+      const cached = this.entries.get(key);
+      if (cached && (this.completed.get(key) ?? 0) >= minimum
+        && this.clock() - cached.observedAt < 30_000 && this.clock() < cached.expiresAt) return cached;
+      const current = this.pending.get(key);
+      if (current) {
+        const sequence = this.building.get(key)!;
+        const result = await current;
+        if (sequence >= minimum) return result;
+        continue;
+      }
+      if (this.pending.size >= 2) throw new Error("Snapshot builder busy");
+      const sequence = ++this.sequence;
+      const operation = this.read(id, onChainId, AbortSignal.timeout(110_000)).then(snapshot => {
+        if (this.entries.size >= 8) {
+          const oldest = this.entries.keys().next().value!;
+          this.entries.delete(oldest); this.completed.delete(oldest);
+        }
+        this.entries.set(key, snapshot); this.completed.set(key, sequence);
         return snapshot;
-      })
-      .finally(() => this.pending.delete(key));
-    this.pending.set(key, operation);
-    return operation;
+      }).finally(() => { this.pending.delete(key); this.building.delete(key); });
+      this.pending.set(key, operation); this.building.set(key, sequence);
+      return operation;
+    }
   }
 }
