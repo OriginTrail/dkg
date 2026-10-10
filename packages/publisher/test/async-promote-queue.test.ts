@@ -117,6 +117,44 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     now += ms;
   }
 
+  it.each([true, false])('returns the committed failure transition after flush (retryable=%s)', async (retryable) => {
+    const queue = createQueue({ backoff: () => 400 });
+    const id = await queue.enqueue(makeRequest());
+    const job = (await queue.claimNext('worker'))!;
+    let release!: () => void;
+    let entered!: () => void;
+    const flushing = new Promise<void>((resolve) => { entered = resolve; });
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const flush = vi.spyOn(store, 'flush').mockImplementation(async () => { entered(); await held; });
+    let settled = false;
+    const failure = queue.fail(id, job.lease!.claimToken, {
+      message: 'attempt failed', retryable, classification: retryable ? 'transient' : 'fatal', recordedAt: now,
+    }).then((transition) => { settled = true; return transition; });
+    try {
+      await flushing;
+      expect(settled).toBe(false);
+      release();
+      expect(await failure).toEqual(retryable
+        ? { state: 'failed_retrying', jobId: id, attemptCount: 1, nextRetryAt: now + 400 }
+        : { state: 'failed', jobId: id, attemptCount: 1 });
+      expect((await queue.getStatus(id))?.state).toBe(retryable ? 'failed_retrying' : 'failed');
+    } finally { release(); flush.mockRestore(); await store.close(); }
+  });
+
+  it('does not acknowledge a failure transition when flush loses its acknowledgement', async () => {
+    const queue = createQueue();
+    const id = await queue.enqueue(makeRequest());
+    const job = (await queue.claimNext('worker'))!;
+    const failure = new Error('flush acknowledgement lost');
+    vi.spyOn(store, 'flush').mockRejectedValueOnce(failure);
+    await expect(queue.fail(id, job.lease!.claimToken, {
+      message: 'fatal', retryable: false, classification: 'fatal', recordedAt: now,
+    })).rejects.toBe(failure);
+    expect((await queue.getStatus(id))?.state).toBe('failed');
+    vi.restoreAllMocks();
+    await store.close();
+  });
+
   it('claims from active rows after restart without transferring terminal history', async () => {
     const queue = createQueue();
     const cancelledId = await queue.enqueue(makeRequest());

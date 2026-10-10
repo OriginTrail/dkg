@@ -1,5 +1,5 @@
 import { DEFAULT_PROMOTE_RETRY_TUNING } from './promote-retry-policy.js';
-import { isAutomaticallyRecoverablePostCommitFailure, missingStorageLaneForAuthorOnlyJob, promoteRetryAttempt, requiresManualInspection } from './async-promote-recovery-policy.js';
+import { isAutomaticallyRecoverablePostCommitFailure, missingStorageLaneForAuthorOnlyJob, promoteFailureTransition, requiresManualInspection } from './async-promote-recovery-policy.js';
 /**
  * `TripleStoreAsyncPromoteQueue` — RDF-backed persistent queue for
  * WM→SWM promotes. Mirrors the structure of
@@ -36,6 +36,7 @@ import {
   type AsyncPromoteQueueConfig,
   type PromoteTerminalJobClearer,
   type PromoteAttemptError,
+  type PromoteFailureTransition,
   type PromoteCommitMarker,
   type PromoteCommitMarkerStep,
   type PromoteJob,
@@ -385,46 +386,14 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     });
   }
 
-  async fail(jobId: string, claimToken: string, error: PromoteAttemptError): Promise<void> {
-    await this.withMutationLock(async () => {
+  async fail(jobId: string, claimToken: string, error: PromoteAttemptError): Promise<PromoteFailureTransition> {
+    return this.withMutationLock(async () => {
       await this.ensureGraph();
       const job = await this.requireJob(jobId);
       this.assertLeaseHeld(job, claimToken);
-
-      const now = this.now();
-      const attemptCount = Math.max(1, job.attempt.count);
-      const swmInserted = job.commitMarker?.swmInserted === true;
-      const retryAttempt = error.retryable && !swmInserted
-        ? promoteRetryAttempt(job, error, attemptCount, now, this.backoff)
-        : undefined;
-
-      if (retryAttempt) {
-        const failedRetrying: PromoteJob = {
-          ...job,
-          state: 'failed_retrying',
-          updatedAt: now,
-          lease: undefined,
-          attempt: retryAttempt,
-        };
-        await this.writeJob(failedRetrying);
-        return;
-      }
-
-      const failed: PromoteJob = {
-        ...job,
-        state: 'failed',
-        updatedAt: now,
-        lease: undefined,
-        attempt: {
-          count: attemptCount,
-          maxRetries: job.attempt.maxRetries,
-          lastError: error,
-        },
-        reason: swmInserted
-          ? 'partial promote ambiguity: failed after SWM insert; needs operator inspection'
-          : job.reason,
-      };
-      await this.writeJob(failed);
+      const failure = promoteFailureTransition(job, error, this.now(), this.backoff);
+      await this.writeJob(failure.job);
+      return failure.transition;
     });
   }
 

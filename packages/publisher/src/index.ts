@@ -444,6 +444,7 @@ export {
   type PromoteCommitMarker,
   type PromoteCommitMarkerStep,
   type PromoteFailureClassification,
+  type PromoteFailureTransition,
   type PromoteJob,
   type PromoteJobState,
   type PromoteLease,
