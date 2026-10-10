@@ -2,7 +2,7 @@ import { LiftJobChainObservations } from './lift-job-chain-observations.js';
 import { committedLiftJob, type CommittedLiftJob } from './lift-job-committed.js';
 import type { PreBroadcastRecord } from './publisher.js';
 import { bestEffortNotify } from './best-effort-notify.js';
-import { resolveWithinAbort } from '@origintrail-official/dkg-core';
+import { createOperationContext, resolveWithinAbort } from '@origintrail-official/dkg-core';
 import { isPendingPublishTransactionStatus } from '@origintrail-official/dkg-chain';
 import {
   ChainProofRetrySchedule,
@@ -1248,6 +1248,7 @@ export class TripleStoreAsyncLiftPublisher
         resolved: validated.resolved,
         publishOptions: {
           ...prepared.publishOptions,
+          operationCtx: prepared.publishOptions.operationCtx ?? createOperationContext('publishFromSWM', claimed.jobId),
           onBeforeBroadcast: broadcastRecorder.onBeforeBroadcast,
           // The endpoint has accepted the exact signed transaction recorded
           // above. Persist that fact before receipt polling is detached. The
@@ -1432,6 +1433,7 @@ export class TripleStoreAsyncLiftPublisher
       () => undefined,
       () => undefined,
     ).finally(() => {
+      this.chainObservations.completion.executorSettled(jobId);
       if (this.detachedExecutions.get(jobId) === tracked) {
         this.detachedExecutions.delete(jobId);
       }
@@ -1782,6 +1784,7 @@ export class TripleStoreAsyncLiftPublisher
     // The normal executor still owns this job. Recovery will retry after it
     // settles. This prevents two writers from finalizing the same lifecycle.
     if (this.detachedExecutions.has(job.jobId)) return false;
+    this.chainObservations.completion.recoveryTurn(job.jobId);
 
     const recoverable = job as LiftJobBroadcast | LiftJobIncluded;
     const origin = liveChainRecoveryOrigin(recoverable);
@@ -1925,7 +1928,7 @@ export class TripleStoreAsyncLiftPublisher
     ) {
       return 'unsupported';
     }
-    const finalizeRecovered = this.knowledgeAssetVmPublishHandler.finalizeRecovered;
+    const finalizeRecovered = this.chainObservations.completion.timeRecovery(this.knowledgeAssetVmPublishHandler.finalizeRecovered);
     const request = job.request.knowledgeAssetVmPublish;
 
     let incompleteOutcome: 'unresolved' | 'repair-deferred' = 'unresolved';
@@ -2938,6 +2941,7 @@ export class TripleStoreAsyncLiftPublisher
     const canonical = committedLiftJob(this.chainObservations.project(validated), job);
     await this.persistJobRecord(canonical);
     await this.appendJournal(canonical, kind);
+    if (canonical.status === 'finalized') this.chainObservations.completion.terminal(job.jobId);
     return canonical;
   }
 

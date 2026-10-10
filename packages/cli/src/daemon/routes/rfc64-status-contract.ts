@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type {
+  FinalizedPrivatePlacementQueueStatusV1,
   Rfc64CatalogShadowExecutionStatusV1,
 } from '@origintrail-official/dkg-agent';
 
@@ -110,6 +111,31 @@ export function sanitizeRfc64CatalogShadowExecutionStatusV1(
   });
 }
 
+/**
+ * GH#3081 — allow-list for the finalized-private placement queue aggregate. Counts, two durations
+ * and one flag are rebuilt field by field, so no repair key, UAL, author or graph id a provider
+ * might attach can cross the HTTP boundary; any other shape reads as null.
+ */
+export function sanitizeRfc64FinalizedPrivatePlacementQueueV1(
+  input: unknown,
+): Readonly<FinalizedPrivatePlacementQueueStatusV1> | null {
+  if (
+    !isRecordV1(input)
+    || !hasNonNegativeSafeIntegersV1(input, ['depth', 'waiters', 'cooldownSkips'])
+    || typeof input.passRunning !== 'boolean'
+    || !isNullableNonNegativeSafeIntegerV1(input.oldestWaiterAgeMs)
+    || !isNullableNonNegativeSafeIntegerV1(input.lastPassDurationMs)
+  ) return null;
+  return Object.freeze({
+    depth: input.depth as number,
+    waiters: input.waiters as number,
+    oldestWaiterAgeMs: input.oldestWaiterAgeMs,
+    passRunning: input.passRunning,
+    lastPassDurationMs: input.lastPassDurationMs,
+    cooldownSkips: input.cooldownSkips as number,
+  });
+}
+
 function isRecordV1(value: unknown): value is Readonly<Record<string, unknown>> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
@@ -128,6 +154,10 @@ function hasNonNegativeSafeIntegersV1(
 }
 
 function isNullableTimestampMsV1(value: unknown): value is number | null {
+  return value === null || isNonNegativeSafeIntegerV1(value);
+}
+
+function isNullableNonNegativeSafeIntegerV1(value: unknown): value is number | null {
   return value === null || isNonNegativeSafeIntegerV1(value);
 }
 

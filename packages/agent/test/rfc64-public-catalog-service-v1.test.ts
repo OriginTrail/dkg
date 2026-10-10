@@ -844,6 +844,44 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     await scoped.service.close();
   });
 
+  it('classifies a locally refused private announce by its typed code', async () => {
+    // GH#3081 — the denials measured in the issue were this local outbound refusal, raised before
+    // any send, not a remote peer's denied reply; both must carry the same typed code.
+    const policy = catalogPolicy(`${CONTEXT_GRAPH_ID}-private-refused`, 1, 1);
+    const policyDigest = `0x${'2d'.repeat(32)}` as Digest32V1;
+    const router = new RecordingRouter();
+    router.sendResponse = async () => Uint8Array.of(1);
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: {
+        localAgentAddress: AUTHOR,
+        resolveRemoteAgentAddress: async (peerId: string) => (
+          peerId === 'private-member' ? OTHER_WALLET.address.toLowerCase() as EvmAddressV1 : null
+        ),
+      },
+      native: {
+        ...nativeOptions(() => inertReconciler()),
+        resolveScopedReadCapability: async () => null,
+      },
+    });
+    service.acceptPolicySnapshot({ policy, policyDigest, roster: memberRoster(policy, policyDigest) });
+    service.start();
+
+    const result = await service.announceCatalogHead({
+      announcement: { ...announcement(policyDigest), contextGraphId: policy.contextGraphId },
+      peers: ['private-outsider', 'private-member'],
+    });
+    expect(result.announcedPeers).toEqual(['private-member']);
+    expect(result.failedPeers).toEqual([{
+      peerId: 'private-outsider',
+      error: '[catalog-transport-policy-denied] catalog operation is not access-policy authorized',
+      code: 'catalog-transport-policy-denied',
+    }]);
+    expect(router.sends.map(({ peerId }) => peerId)).toEqual(['private-member']);
+    await service.close();
+  });
+
   it('denies a private-cell author that is absent from the current member roster', async () => {
     const service = new Rfc64PublicCatalogServiceV1({
       router: new RecordingRouter().asProtocolRouter(),
@@ -1131,6 +1169,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     expect(result.failedPeers).toEqual([{
       peerId: 'peer-fail',
       error: expect.stringContaining('invalid acknowledgement'),
+      code: 'catalog-transport-wire',
     }]);
     expect(Object.isFrozen(result)).toBe(true);
     expect(Object.isFrozen(result.announcedPeers)).toBe(true);
@@ -1161,6 +1200,40 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       router,
       `send:${RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1}`,
     )).toBe(sendsBefore);
+    await service.close();
+  });
+
+  it('classifies a failed announce by its typed transport code and keeps the message as display text', async () => {
+    // GH#3081 — denial counts must not depend on error wording: the code is taken where the
+    // typed transport error is caught, before it becomes a message.
+    const router = new RecordingRouter();
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+    });
+    const policy = acceptPolicy(service);
+    router.sendResponse = async (_protocolId, _options, peerId) => {
+      if (peerId === 'peer-unreachable') throw new Error('[catalog-transport-policy-denied] lookalike text');
+      return Uint8Array.of(peerId === 'peer-denied' ? 0 : 1);
+    };
+    service.start();
+
+    const result = await service.announceCatalogHead({
+      announcement: announcement(policy.policyDigest),
+      peers: ['peer-denied', 'peer-unreachable', 'peer-ack'],
+    });
+    expect(result.announcedPeers).toEqual(['peer-ack']);
+    expect(result.failedPeers).toEqual([
+      {
+        peerId: 'peer-denied',
+        error: '[catalog-transport-policy-denied] remote peer denied the catalog-head announcement',
+        code: 'catalog-transport-policy-denied',
+      },
+      // Only a typed transport error is classified, whatever its text says.
+      { peerId: 'peer-unreachable', error: '[catalog-transport-policy-denied] lookalike text' },
+    ]);
+    expect(Object.isFrozen(result.failedPeers[0])).toBe(true);
     await service.close();
   });
 
