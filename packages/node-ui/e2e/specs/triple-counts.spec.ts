@@ -41,13 +41,17 @@ test.describe('Triple counts — project overview', () => {
 });
 
 test.describe('Triple counts — memory layers', () => {
-  test('VM layer hero shows verifiable triple stat', async ({ shell, leftPanel, projectLayer, page }) => {
+  test('VM layer hero shows stored data and provenance triple count', async ({ shell, leftPanel, projectLayer, page }) => {
     await shell.goto();
     await leftPanel.expandProject(PRIMARY_CG);
     await projectLayer.switchLayer('Verifiable Memory');
-    await expect(page.getByText(/Verifiable Triples/i)).toBeVisible({ timeout: 15_000 });
-    const statCells = page.locator('.v10-vm-hero-stats .v10-stat-strip-value, .v10-stat-strip-value');
-    await expect(statCells.first()).toBeVisible();
+    const triples = page.locator('.v10-vm-hero-stats [data-stat-id="triples"]');
+    await expect(triples.locator('.v10-stat-strip-label')).toHaveText('Stored triples (data + provenance)', { timeout: 15_000 });
+    await expect(triples).toHaveAttribute('title', 'Publication adds provenance to the data. Raw triple counts can change between memory layers without losing entities.');
+    await expect.poll(async () => Number((await triples.locator('.v10-stat-strip-value').innerText()).replace(/[^0-9]/g, '')), {
+      message: 'the VM triples cell should display the seeded stored triple count',
+      timeout: 30_000,
+    }).toBeGreaterThanOrEqual(1);
   });
 
   test('VM layer entity cards show triple badges', async ({ shell, leftPanel, projectLayer, page }) => {

@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import { listAssertions, promoteAssertion, describePromoteError, publishAssertionsToVm, partialPublishWarning, outcomeUnknownPublishNote, type ConvictionCostCovered } from '../../../api.js';
 import type { MemoryEntity } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
-import { LAYER_CONFIG, entityMeta, layerNoun } from '../helpers.js';
+import { LAYER_CONFIG, entityMeta, layerNoun, VM_TRIPLE_STAT } from '../helpers.js';
 import { EmptyState, StatStrip, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
 import { useVmPublishGate } from '../../../pages/conviction/useVmPublishGate.js';
 import { PublishEligibilityChipView } from '../../../pages/conviction/PublishEligibilityChip.js';
@@ -92,10 +92,10 @@ export function LayerStatsWidget({ entities, entityCount, triples, layer }: {
         layer={layer}
         items={[
           { id: 'entities', label: layerNoun(layer, entityCount), value: entityCount },
-          { id: 'triples', label: layer === 'vm' ? 'Stored triples (data + provenance)' : 'Stored triples', value: triples,
-            tooltip: layer === 'vm'
-              ? 'Publication adds provenance to the data. Raw triple counts can change between memory layers without losing entities.'
-              : 'Promotion normalizes draft blank nodes and can leave draft residue; publication adds provenance. Raw triple counts are not expected to match across memory layers.' },
+          { id: 'triples', value: triples, ...(layer === 'vm' ? VM_TRIPLE_STAT : {
+            label: 'Stored triples',
+            tooltip: 'Promotion normalizes draft blank nodes and can leave draft residue; publication adds provenance. Raw triple counts are not expected to match across memory layers.',
+          }) },
           { id: 'connections', label: 'Connections', value: totalConns },
           { id: 'avg', label: 'Avg. connections / entity', value: avgConns },
           ...(docCount > 0 ? [{ id: 'documents', label: 'Documents', value: docCount }] : []),

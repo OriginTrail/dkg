@@ -10,7 +10,7 @@ import { useAgentsContext } from '../../../hooks/useAgents.js';
 import { AgentChip } from '../../../components/AgentChip.js';
 import { useTabsStore } from '../../../stores/tabs.js';
 import type { SwmAttributionsResult } from '../../../hooks/useSwmAttributions.js';
-import { LAYER_CONFIG, SOURCE_CONTENT_TYPE, MARKDOWN_FORM, SOURCE_FILE, DKG_SIZE, entityAuthorUri, entityMeta, layerNoun, useLayerTriples, entityTimestamp, formatRelativeTime, type LayerContentTab } from '../helpers.js';
+import { LAYER_CONFIG, VM_TRIPLE_STAT, SOURCE_CONTENT_TYPE, MARKDOWN_FORM, SOURCE_FILE, DKG_SIZE, entityAuthorUri, entityMeta, layerNoun, useLayerTriples, entityTimestamp, formatRelativeTime, type LayerContentTab } from '../helpers.js';
 import { EmptyState, StatStrip, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
 import { LayerGraphPanel } from './graph.js';
 import { LayerWidgetStrip } from './layer-widgets.js';
@@ -400,7 +400,7 @@ export function VerifiableMemoryHeroBanner({ entities, tripleCount, contextGraph
         layer="vm"
         items={[
           { id: 'assets', value: totalAssets, label: 'Knowledge Assets' },
-          { id: 'triples', value: tripleCount.toLocaleString(), label: 'Stored triples (data + provenance)', tooltip: 'Publication adds provenance to the data. Raw triple counts can change between memory layers without losing entities.' },
+          { id: 'triples', value: tripleCount.toLocaleString(), ...VM_TRIPLE_STAT },
           { id: 'types', value: typeCount, label: 'Entity Types' },
         ]}
       />

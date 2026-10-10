@@ -48,7 +48,7 @@ test.describe('Graph presentation — memory layer views', () => {
   test('VM layer shows verifiable memory hero and entity list', async ({ projectLayer, page }) => {
     await projectLayer.switchLayer('Verifiable Memory');
     await expect(page.locator('.v10-me-error')).toBeHidden();
-    await expect(page.getByText(/Verifiable Triples|Knowledge Assets/i).first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('.v10-vm-hero-stats [data-stat-id="triples"] .v10-stat-strip-label')).toHaveText('Stored triples (data + provenance)', { timeout: 15_000 });
   });
 });
 
