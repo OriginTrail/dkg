@@ -38,9 +38,18 @@ export interface Rfc64CatalogReplaySnapshotStorageV1 {
   ): Promise<SignedControlEnvelopeV1 | null>;
 }
 
-interface WithRfc64CatalogReplaySnapshotInputV1<T> {
+interface WithRfc64CatalogReplaySnapshotInputV1<Prepared, T> {
   readonly selection: Rfc64CatalogReplaySelectionV1;
-  operation(entries: readonly Rfc64CatalogReplayHeadV1[]): Promise<T>;
+  /**
+   * Runs while the catalog mutation locks of the snapshot's scopes are held, so `entries` is one
+   * consistent set. Every change of those catalogs waits for it: it must not wait for a peer.
+   */
+  prepare(entries: readonly Rfc64CatalogReplayHeadV1[]): Prepared | Promise<Prepared>;
+  /**
+   * Runs once the locks are released (GH#3081), so a catalog change never waits for a replay's
+   * sends. A change that lands meanwhile makes the replay reject after delivery has ended.
+   */
+  deliver(prepared: Prepared): Promise<T>;
 }
 
 function rfc64CatalogReplayScopeKeyV1(
@@ -72,7 +81,16 @@ function rfc64CatalogReplayMutationScopesV1(
   })).values()];
 }
 
-/** Own index construction, cache invalidation, and the complete locked snapshot protocol. */
+/**
+ * Own index construction, cache invalidation, and the complete snapshot protocol.
+ *
+ * A replay has two phases. `prepare` runs under the catalog mutation locks of every scope in the
+ * snapshot and decides what to replay; `deliver` runs after they are released and sends it. The
+ * replay completes only if the inventory it was prepared from is still current when delivery
+ * ends: it rejects when the inventory moved before the locks settled, or while it delivered. The
+ * second check is all that guards delivery now that the locks do not, so a replay that overlaps a
+ * catalog change is rejected and its requester asks again.
+ */
 export class Rfc64CatalogReplaySnapshotRuntimeV1 {
   readonly #storage: Rfc64CatalogReplaySnapshotStorageV1;
   readonly #mutationCoordinator: Rfc64CatalogMutationCoordinatorV1;
@@ -87,27 +105,28 @@ export class Rfc64CatalogReplaySnapshotRuntimeV1 {
     this.#mutationCoordinator = mutationCoordinator;
   }
 
-  async withSnapshot<T>(
-    input: Readonly<WithRfc64CatalogReplaySnapshotInputV1<T>>,
+  async withSnapshot<Prepared, T>(
+    input: Readonly<WithRfc64CatalogReplaySnapshotInputV1<Prepared, T>>,
   ): Promise<T> {
     if (input.selection.kind === 'all') {
       const inventoryToken = this.#readInventoryToken();
       const entries = Object.freeze([
         ...(await this.#readIndex()).values(),
       ].flat());
-      return this.#mutationCoordinator.runMany(
+      const prepared = await this.#mutationCoordinator.runMany(
         rfc64CatalogReplayMutationScopesV1(entries),
         async () => {
           if (this.#readInventoryToken() !== inventoryToken) {
             throw new Error('RFC-64 durable catalog inventory changed before replay snapshot');
           }
-          const result = await input.operation(entries);
-          if (this.#readInventoryToken() !== inventoryToken) {
-            throw new Error('RFC-64 durable catalog inventory changed during replay');
-          }
-          return result;
+          return input.prepare(entries);
         },
       );
+      const result = await input.deliver(prepared);
+      if (this.#readInventoryToken() !== inventoryToken) {
+        throw new Error('RFC-64 durable catalog inventory changed during replay');
+      }
+      return result;
     }
 
     const replayScopeKey = rfc64CatalogReplayScopeKeyV1(
@@ -119,7 +138,7 @@ export class Rfc64CatalogReplaySnapshotRuntimeV1 {
     const lockedScopeKeys = new Set(mutationScopes.map(
       (scope) => rfc64CatalogMutationScopeKeyV1(scope),
     ));
-    return this.#mutationCoordinator.runMany(mutationScopes, async () => {
+    const snapshot = await this.#mutationCoordinator.runMany(mutationScopes, async () => {
       // Refresh only after all discovered author scopes are locked so a
       // same-author head advance that raced acquisition joins this snapshot.
       const entries = (await this.#readIndex()).get(replayScopeKey) ?? [];
@@ -130,14 +149,17 @@ export class Rfc64CatalogReplaySnapshotRuntimeV1 {
       ))) {
         throw new Error('RFC-64 scoped catalog inventory changed before replay snapshot');
       }
-      const entriesFingerprint = rfc64CatalogReplayEntriesFingerprintV1(entries);
-      const result = await input.operation(entries);
-      const currentEntries = (await this.#readIndex()).get(replayScopeKey) ?? [];
-      if (rfc64CatalogReplayEntriesFingerprintV1(currentEntries) !== entriesFingerprint) {
-        throw new Error('RFC-64 scoped catalog inventory changed during replay');
-      }
-      return result;
+      return {
+        entriesFingerprint: rfc64CatalogReplayEntriesFingerprintV1(entries),
+        prepared: await input.prepare(entries),
+      };
     });
+    const result = await input.deliver(snapshot.prepared);
+    const currentEntries = (await this.#readIndex()).get(replayScopeKey) ?? [];
+    if (rfc64CatalogReplayEntriesFingerprintV1(currentEntries) !== snapshot.entriesFingerprint) {
+      throw new Error('RFC-64 scoped catalog inventory changed during replay');
+    }
+    return result;
   }
 
   #readInventoryToken(): AppliedCatalogHeadsTokenV1 {
