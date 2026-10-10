@@ -10,9 +10,13 @@ import { DKGAgent } from '../src/index.js';
 import { CHAIN_POLICY_READ_TIMEOUT_MS } from '../src/dkg-agent-constants.js';
 import {
   activatePersistedContextGraphSubscription,
+  DEFERRED_AUTHORITY_RECOVERY_RETRY_MS,
   recoverDeferredContextGraphSubscriptionAuthorities,
+  wakeDeferredContextGraphSubscriptionAuthorityRecovery,
 } from
   '../src/context-graph-subscription-authority-recovery.js';
+import { CoalescingRecurringTask } from '../src/coalescing-recurring-task.js';
+import { RollingSubscriptionChecks } from '../src/context-graph-subscription-rolling-checks.js';
 
 const mockLivePolicy = (agent: DKGAgent, accessPolicy: 0 | 1) =>
   vi.spyOn(agent, 'resolveLiveOnChainAccessPolicyState').mockResolvedValue({
@@ -39,6 +43,83 @@ class ActivationTestGossip {
     return [];
   }
 }
+
+describe('waking authority recovery for a row that became unavailable', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // Recovery as its scheduler sees it: a pass that finds nothing to ask ends
+  // idle, and nothing runs after that until someone starts it again.
+  const recoveryThatFindsNothing = (pass: () => Promise<void> = async () => undefined) => {
+    let passes = 0;
+    const recovery = new CoalescingRecurringTask({
+      retryIntervalMs: DEFERRED_AUTHORITY_RECOVERY_RETRY_MS,
+      requestWhileRunning: 'drop',
+      runPass: async () => {
+        passes += 1;
+        await pass();
+        return 'idle';
+      },
+      onError: (error) => { throw error; },
+      closingMessage: 'test recovery closing',
+    });
+    return { recovery, passes: () => passes };
+  };
+
+  it('starts a recovery that had stopped, one retry interval later', async () => {
+    vi.useFakeTimers();
+    const { recovery, passes } = recoveryThatFindsNothing();
+
+    wakeDeferredContextGraphSubscriptionAuthorityRecovery(recovery);
+    await vi.advanceTimersByTimeAsync(DEFERRED_AUTHORITY_RECOVERY_RETRY_MS - 1);
+    expect(passes()).toBe(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(passes()).toBe(1);
+
+    // That pass found nothing and stopped again.
+    await vi.advanceTimersByTimeAsync(10 * DEFERRED_AUTHORITY_RECOVERY_RETRY_MS);
+    expect(passes()).toBe(1);
+    await recovery.close();
+  });
+
+  it('leaves a recovery alone that is due sooner', async () => {
+    vi.useFakeTimers();
+    const { recovery, passes } = recoveryThatFindsNothing();
+    recovery.schedule(1_000);
+
+    wakeDeferredContextGraphSubscriptionAuthorityRecovery(recovery);
+    wakeDeferredContextGraphSubscriptionAuthorityRecovery(recovery);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(passes()).toBe(1);
+    await vi.advanceTimersByTimeAsync(10 * DEFERRED_AUTHORITY_RECOVERY_RETRY_MS);
+    expect(passes()).toBe(1);
+    await recovery.close();
+  });
+
+  it('starts recovery again after a pass that was already ending when the row was handed over', async () => {
+    vi.useFakeTimers();
+    let endPass!: () => void;
+    const ending = new Promise<void>((resolve) => { endPass = resolve; });
+    const { recovery, passes } = recoveryThatFindsNothing(() => ending);
+    recovery.request();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(recovery.running).toBe(true);
+
+    // The pass has counted its rows; it cannot see this one any more.
+    wakeDeferredContextGraphSubscriptionAuthorityRecovery(recovery);
+    endPass();
+    await vi.advanceTimersByTimeAsync(DEFERRED_AUTHORITY_RECOVERY_RETRY_MS - 1);
+    expect(passes()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(passes()).toBe(2);
+    await recovery.close();
+  });
+
+  it('has nothing to start before the agent has made its recovery runtime', () => {
+    expect(() => wakeDeferredContextGraphSubscriptionAuthorityRecovery(undefined)).not.toThrow();
+  });
+});
 
 describe('Context Graph subscription authority retry', () => {
   let agent: DKGAgent | null = null;
@@ -1366,6 +1447,177 @@ describe('Context Graph subscription authority retry', () => {
     expect(resolveAuthority.mock.calls.filter(([id]) => id === contextGraphId)).toHaveLength(2);
   });
 
+  it('asks a row again that rolling activation left unavailable after recovery had gone idle', async () => {
+    // One activation slot. The start-up pass reads the first two rows; the
+    // other two are left to rolling activation by the cap.
+    const recovered = 'a-unavailable-at-start';
+    const live = 'b-live';
+    const refused = 'c-capped-denied';
+    const timedOut = 'd-capped-timed-out';
+    const rows = new Map<string, any>([recovered, live, refused, timedOut].map((id) => [id, {
+      id,
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      syncScoped: true,
+    }]));
+    agent = await DKGAgent.create({
+      name: 'RollingActivationWakesAuthorityRecovery',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...rows.values()],
+        load: async (id) => rows.get(id) ?? null,
+        save: async (row) => { rows.set(row.id, row); },
+        delete: async (id) => { rows.delete(id); },
+      },
+      contextGraphSubscriptionRehydrationEnabled: true,
+      maxRehydratedContextGraphSubscriptions: 1,
+      syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
+    });
+    const allowed = {
+      outcome: 'allowed',
+      source: 'registered-chain',
+      reason: 'open-context-graph',
+      metadataBootstrap: 'not-needed',
+    } as const;
+    const denied = {
+      outcome: 'denied',
+      source: 'registered-chain',
+      reason: 'caller-not-participant',
+      metadataBootstrap: 'forbidden',
+    } as const;
+    const unavailable = (reason: string) => ({
+      outcome: 'unavailable',
+      source: 'registered-chain',
+      reason,
+      metadataBootstrap: 'eligible',
+    } as const);
+    const reads: string[] = [];
+    vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority')
+      .mockImplementation(async (contextGraphId) => {
+        reads.push(contextGraphId);
+        const earlier = reads.filter((id) => id === contextGraphId).length - 1;
+        if (contextGraphId === live) return allowed;
+        if (contextGraphId === recovered) {
+          return earlier === 0 ? unavailable('temporary-authority-outage') : denied;
+        }
+        if (contextGraphId === refused) return denied;
+        if (contextGraphId === timedOut) {
+          // The chain answers again after the one read that timed out.
+          return earlier === 0 ? unavailable('chain-access-policy-timeout') : allowed;
+        }
+        return unavailable('unrelated-startup-probe');
+      });
+    vi.useFakeTimers();
+
+    await agent.start();
+    expect(reads.filter((id) => rows.has(id))).toEqual([recovered, live]);
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()?.dormantReasons).toMatchObject({
+      authorityUnavailable: [recovered],
+      activationCap: [refused, timedOut],
+    });
+
+    // Recovery reads its one row, gets a denial, and has nothing left to ask.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()?.dormantReasons).toMatchObject({
+      authorityUnavailable: [],
+      authorityDenied: [recovered],
+    });
+
+    // Rolling activation starts half a minute after start: a denial, a pause,
+    // then the read that times out.
+    await vi.advanceTimersByTimeAsync(30_000 + 10_000);
+    expect(reads.filter((id) => id === refused || id === timedOut)).toEqual([refused, timedOut]);
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()?.dormantReasons).toMatchObject({
+      activationCap: [],
+      authorityDenied: [recovered, refused],
+      authorityUnavailable: [timedOut],
+    });
+
+    // Nothing but recovery asks an unavailable row again, and recovery had
+    // stopped. The row starts it: one retry interval after the read that timed
+    // out, not at once, and not for the denial five seconds earlier.
+    await vi.advanceTimersByTimeAsync(24_000);
+    expect(reads.filter((id) => id === timedOut)).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(reads.filter((id) => id === timedOut).length).toBeGreaterThan(1);
+    expect(agent.getSubscribedContextGraphs().get(timedOut)?.subscribed).toBe(true);
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()?.dormantReasons).toMatchObject({
+      activationCap: [],
+      authorityUnavailable: [],
+      authorityDenied: [recovered, refused],
+    });
+  });
+
+  it('begins the report of rolling activation afresh when the same agent is started again', async () => {
+    // One activation slot: the first row takes it, the cap leaves the other two.
+    const live = 'b-live';
+    const capped = ['c-capped-denied', 'd-capped-denied'];
+    const rows = new Map<string, any>([live, ...capped].map((id) => [id, {
+      id,
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      syncScoped: true,
+    }]));
+    agent = await DKGAgent.create({
+      name: 'RollingActivationReportAcrossRestart',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...rows.values()],
+        load: async (id) => rows.get(id) ?? null,
+        save: async (row) => { rows.set(row.id, row); },
+        delete: async (id) => { rows.delete(id); },
+      },
+      contextGraphSubscriptionRehydrationEnabled: true,
+      maxRehydratedContextGraphSubscriptions: 1,
+      syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
+    });
+    const reads: string[] = [];
+    vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority')
+      .mockImplementation(async (contextGraphId) => {
+        reads.push(contextGraphId);
+        return contextGraphId === live
+          ? { outcome: 'allowed', source: 'registered-chain', reason: 'open-context-graph', metadataBootstrap: 'not-needed' } as const
+          : { outcome: 'denied', source: 'registered-chain', reason: 'caller-not-participant', metadataBootstrap: 'forbidden' } as const;
+      });
+    const warn = vi.spyOn((agent as any).log, 'warn');
+    const reports = (): string[] => warn.mock.calls
+      .map(([, message]) => String(message))
+      .filter((message) => message.startsWith('Left ') && message.includes(' pending persisted '));
+    const readsOfCappedRows = (): string[] => reads.filter((id) => capped.includes(id));
+
+    vi.useFakeTimers();
+    await agent.start();
+    // Rolling activation starts half a minute after start. The stop comes
+    // during the pause after its first check, before the pass could report.
+    await vi.advanceTimersByTimeAsync(30_000 + 1_000);
+    expect(readsOfCappedRows()).toEqual([capped[0]]);
+    vi.useRealTimers();
+    await agent.stop();
+    expect(reports()).toEqual([]);
+
+    reads.length = 0;
+    vi.useFakeTimers();
+    await agent.start();
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()?.dormantReasons).toMatchObject({
+      activationCap: capped,
+      authorityDenied: [],
+    });
+    await vi.advanceTimersByTimeAsync(30_000 + 10_000);
+    expect(readsOfCappedRows()).toEqual(capped);
+    // The row the first run left dormant is counted once, by this run's check.
+    expect(reports()).toEqual([
+      'Left 2 pending persisted context-graph subscription(s) dormant: ' +
+        '2 denied by registered-chain (caller-not-participant). 0 more wait for their check. ' +
+        "Inspect 'GET /api/context-graph/subscriptions' for dormant ids.",
+    ]);
+  });
+
   for (const scenario of [
     {
       name: 'retires recurring recovery when the chain reports the graph unknown',
@@ -1884,6 +2136,7 @@ describe('Context Graph subscription authority retry', () => {
       });
 
     const rollingPromotion = vi.spyOn(agent, 'promoteDormantContextGraphSubscriptions');
+    const askedFor = vi.spyOn(RollingSubscriptionChecks.prototype, 'prefer');
 
     await agent.start();
     await retryStarted;
@@ -1903,6 +2156,9 @@ describe('Context Graph subscription authority retry', () => {
       },
     }));
     expect(rollingPromotion).toHaveBeenCalled();
+    // The row recovery found allowed goes ahead of rows still waiting unread.
+    expect(askedFor).toHaveBeenCalledWith(coldContextGraphId);
+    askedFor.mockRestore();
     expect(agent.getSubscribedContextGraphs().has(liveContextGraphId)).toBe(true);
     expect(agent.getSubscribedContextGraphs().has(coldContextGraphId)).toBe(true);
   }, 15_000);
@@ -2121,6 +2377,73 @@ describe('Context Graph subscription rehydration startup authority budget (#2815
     expect(activate).not.toHaveBeenCalled();
     expect(dormancyById.get(row.id)).toBe('activationCap');
     expect(capped).toHaveBeenCalledWith(row.id);
+  });
+
+  it('retires a denied row and a chain-unknown row for the process, and keeps asking for the rest', async () => {
+    const rows = ['denied', 'timed-out', 'unknown'].map((id, i) => persistedRow(id, String(61 + i)));
+    const dormancyById = new Map<string, any>(rows.map((row) => [row.id, 'authorityUnavailable']));
+    const unavailable = (reason: string) => ({
+      outcome: 'unavailable',
+      source: 'registered-chain',
+      reason,
+      metadataBootstrap: 'forbidden',
+      dependency: 'chain',
+    } as const);
+    const answers: Record<string, any> = {
+      denied: {
+        outcome: 'denied',
+        source: 'registered-chain',
+        reason: 'agent-not-in-chain-roster',
+        metadataBootstrap: 'forbidden',
+      },
+      'timed-out': unavailable('chain-access-policy-timeout'),
+      unknown: unavailable('chain-access-policy-unknown'),
+    };
+    let reading = '';
+    const touchedAfter: string[] = [];
+
+    await recoverDeferredContextGraphSubscriptionAuthorities(new AbortController().signal, {
+      store: {
+        loadAll: async () => rows,
+        load: async (id) => rows.find((row) => row.id === id) ?? null,
+        save: async () => undefined,
+        delete: async () => undefined,
+      },
+      dormancyById,
+      persistRevisions: new Map(),
+      subscriptions: new Map(),
+      getStatus: () => ({
+        rehydrationEnabled: true,
+        persistedTotal: 3,
+        systemExcluded: 0,
+        hostedActivated: 0,
+        hostedActivatedIds: [],
+        activated: 0,
+        activationCap: 64,
+        capDisabled: false,
+        completedAt: 1,
+        updatedAt: 1,
+      }),
+      isCurrent: () => true,
+      touchStatus: () => { touchedAfter.push(reading); },
+      clearStatus: vi.fn(),
+      resolveAuthority: async (row) => {
+        reading = row.id;
+        return answers[row.id];
+      },
+      activate: vi.fn(),
+      warn: vi.fn(),
+      activated: vi.fn(),
+      capped: vi.fn(),
+    });
+
+    expect(Object.fromEntries(dormancyById)).toEqual({
+      denied: 'authorityDenied',
+      'timed-out': 'authorityUnavailable',
+      unknown: 'deactivated',
+    });
+    // Only a row whose dormancy changed moves the status timestamp.
+    expect(touchedAfter).toEqual(['denied', 'unknown']);
   });
 
   it('still waits for a join-approved row past the budget and defers the rows after it unread', async () => {
