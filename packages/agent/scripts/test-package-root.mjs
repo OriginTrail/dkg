@@ -347,6 +347,7 @@ const blockedRfc64Modules = [
   'public-catalog-receiver-task-lifecycle-v1.js',
   'public-catalog-receiver-v1.js',
   'public-catalog-service-v1.js',
+  'public-catalog-head-delivery-v1.js',
   'public-catalog-issuer-delegation-v1.js',
   'public-catalog-successor-asset-v1.js',
   'public-catalog-successor-producer-v1.js',

@@ -23,6 +23,8 @@ import {
 } from '../src/internal/catalog-placement-timing.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
   '../src/rfc64/finalized-private-placement-repair-store-v1.js';
+import { RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1 } from
+  '../src/rfc64/public-catalog-transport-v1.js';
 import {
   AUTHOR,
   AUTHOR_WALLET,
@@ -34,12 +36,15 @@ import {
 } from './support/rfc64-local-catalog-repair-fixture.js';
 
 
+/** A configured announcement peer; the tests that name it never let it answer. */
+const PARKED_PEER = '12D3KooWAUCFb3hwTLUu3bhMqAsqtF1YH1sTUaMuTXiyvC1z7k65';
+
 /** An author whose confirmed private placements go through the real repair path. */
-async function startPlacementAgent(name: string) {
+async function startPlacementAgent(name: string, peers: readonly string[] = []) {
   const agent = await startRepairAgentV1({
     name,
     autoPublish: {
-      peers: [],
+      peers,
       catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
     },
   });
@@ -95,52 +100,70 @@ function fields(line: string): Record<string, string> {
 }
 
 describe('catalog placement wait attribution', () => {
-  it('attributes a parked announcement to announce, and a second observation to the coverage check', async () => {
-    const { agent, clock, placementLines, repairs } = await startPlacementAgent('placement-wait-announce');
+  it('finishes a placement while its announcement is parked, and charges a second observation to the coverage check', async () => {
+    // GH#3081 — the committed head is handed off for delivery. A peer that never answers holds
+    // neither the placement that produced the head nor the next change of the same scope.
+    const { agent, clock, placementLines, repairs } = await startPlacementAgent(
+      'placement-wait-announce',
+      [PARKED_PEER],
+    );
     const { seal } = await seedInventoryAssetV1(agent, 'announce', 81n);
+    const next = await seedInventoryAssetV1(agent, 'next', 84n);
     await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
-    expect(agent.readRfc64AppliedCatalogHeadV1({
+    const appliedHead = () => agent.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigestV1(),
       authorAddress: AUTHOR,
-    })).toBeNull();
+    });
+    expect(appliedHead()).toBeNull();
 
-    let enterAnnounce!: () => void;
-    const announceEntered = new Promise<void>((resolve) => { enterAnnounce = resolve; });
-    let releaseAnnounce!: () => void;
-    const announceGate = new Promise<void>((resolve) => { releaseAnnounce = resolve; });
-    const announce = vi.spyOn(agent, 'announceRfc64PublicCatalogHeadV1').mockImplementation(async (input) => {
-      enterAnnounce();
-      await announceGate;
-      return Object.freeze({
-        announcement: input.announcement,
-        announcedPeers: Object.freeze(['peer-a', 'peer-b']),
-        // Classified by the transport's typed code; the wording is display text only.
-        failedPeers: Object.freeze([Object.freeze({
-          peerId: 'peer-c',
-          error: 'the peer refused this announcement',
-          code: 'catalog-transport-policy-denied' as const,
-        })]),
+    // The announcement stream to the configured peer stays open until its signal aborts.
+    const parked: string[] = [];
+    const router = (agent as any).router;
+    const send = router.send.bind(router);
+    vi.spyOn(router, 'send').mockImplementation((...args: any[]) => {
+      const [peerId, protocolId, , options] = args;
+      if (protocolId !== RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1) return send(...args);
+      parked.push(peerId);
+      return new Promise((_resolve, reject) => {
+        options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
       });
     });
+    const handoff = vi.spyOn(agent, 'deliverRfc64CatalogHeadV1');
+    const warn = vi.spyOn((agent as any).log, 'warn');
+    const debug = vi.spyOn((agent as any).log, 'debug');
 
-    const first = observe(agent, 'announce', seal, 'job-announce');
-    await announceEntered;
-    clock.now = 45_000;
-    releaseAnnounce();
-    await first;
+    await observe(agent, 'announce', seal, 'job-announce');
+    await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
 
-    expect(announce).toHaveBeenCalledTimes(1);
-    expect(agent.readRfc64AppliedCatalogHeadV1({
-      catalogScopeDigest: catalogScopeDigestV1(),
-      authorAddress: AUTHOR,
-    })).toMatchObject({ inventoryRowCount: '1' });
+    expect(handoff).toHaveBeenCalledTimes(1);
+    expect(handoff.mock.calls[0]?.[0].peers).toEqual([PARKED_PEER]);
+    expect(handoff.mock.results[0]?.value).toMatchObject({
+      status: 'queued',
+      announcedPeers: [],
+      failedPeers: [],
+    });
+    expect(appliedHead()).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
     expect(repairs().list()).toEqual([]);
+    // The attempt's announce phase is the hand-off: no time, and no peer delivered inside it.
     expect(placementLines()).toEqual([
       `rfc64_catalog_placement_wait ual=${seal.kaUal} version=1 lane=finalized-private source=job-announce `
-      + 'observerCall=1 outcome=completed totalMs=45000 requestMs=0 queueMs=0 attemptMs=45000 coverageMs=0 '
-      + 'assetMs=0 stateMs=0 successorMs=0 casMs=0 announceMs=45000 otherMs=0 peers=3 failedPeers=1 '
-      + 'deniedPeers=1 covered=false cooldownSkips=0',
+      + 'observerCall=1 outcome=completed totalMs=0 requestMs=0 queueMs=0 attemptMs=0 coverageMs=0 '
+      + 'assetMs=0 stateMs=0 successorMs=0 casMs=0 announceMs=0 otherMs=0 peers=0 failedPeers=0 '
+      + 'deniedPeers=0 covered=false cooldownSkips=0',
     ]);
+
+    // The next change of the same catalog scope is placed while the first head is still being sent.
+    await vi.waitFor(() => expect(parked).toEqual([PARKED_PEER]), { timeout: 10_000, interval: 10 });
+    await observe(agent, 'next', next.seal, 'job-next');
+    await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    expect(appliedHead()).toMatchObject({ catalogVersion: '2', inventoryRowCount: '2' });
+    expect(handoff).toHaveBeenCalledTimes(2);
+    // One owner per scope: the second head waits for the first fan-out instead of joining it.
+    expect(parked).toEqual([PARKED_PEER]);
+    let deliveryIdle = false;
+    const whenDeliveryIdle = agent.whenRfc64CatalogHeadDeliveryIdleV1().then(() => { deliveryIdle = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(deliveryIdle).toBe(false);
 
     // The detached path observes the same confirmation again from recovery: the marker returns,
     // the supervisor runs the repair once more, and only the coverage check stands between them.
@@ -150,9 +173,10 @@ describe('catalog placement wait attribution', () => {
       return coverage(params);
     });
     await observe(agent, 'announce', seal, 'job-announce');
-    expect(announce).toHaveBeenCalledTimes(1);
+    await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    expect(handoff).toHaveBeenCalledTimes(2);
     expect(repairs().list()).toEqual([]);
-    expect(fields(placementLines()[1]!)).toMatchObject({
+    expect(fields(placementLines()[2]!)).toMatchObject({
       observerCall: '2',
       outcome: 'completed',
       covered: 'true',
@@ -162,6 +186,19 @@ describe('catalog placement wait attribution', () => {
       peers: '0',
       source: 'job-announce',
     });
+
+    // Stopping the node ends the parked send; a send cut short by shutdown is not a failed delivery.
+    await agent.stop();
+    await whenDeliveryIdle;
+    expect(parked).toEqual([PARKED_PEER]);
+    expect(warn.mock.calls.map(([, message]) => String(message))
+      .filter((message) => message.includes('catalog head announce failed'))).toEqual([]);
+    // The one fan-out that ran reports through the agent; the waiting head was dropped unsent.
+    const deliveryLines = debug.mock.calls.map(([, message]) => String(message))
+      .filter((message) => message.startsWith('rfc64_catalog_head_delivery '));
+    expect(deliveryLines).toHaveLength(1);
+    expect(deliveryLines[0]).toContain(' version=1 delivered=0 failed=0 refused=0 superseded=0 ');
+    expect(deliveryLines[0]).toContain('notDeliverable="RFC-64 catalog head delivery closed"');
   }, 60_000);
 
   it('charges a coverage check that fails after six seconds to coverage, not to other time', async () => {

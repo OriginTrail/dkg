@@ -6,6 +6,7 @@ import {
   assertCanonicalEvmAddress,
   assertContextGraphIdV1,
   computeSwmAuthorInventoryScopeDigestV1,
+  createOperationContext,
   type AssertionCoordinateV1,
   type AuthorCatalogScopeV1,
   type AuthorLaneScopeV1,
@@ -19,7 +20,11 @@ import {
   type SwmAuthorInventoryScopeV1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
-import { storeLaneInflightLimit } from '@origintrail-official/dkg-storage';
+import { withOwnedRpcRequestContext } from '@origintrail-official/dkg-chain';
+import {
+  storeLaneInflightLimit,
+  withDefaultStoreWorkPriority,
+} from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 
 import { DKGAgentBase } from './dkg-agent-base.js';
@@ -43,6 +48,13 @@ import { snapshotRfc64CatalogDeploymentProfileV1 } from
   './rfc64/catalog-authority-config-v1.js';
 import type { Rfc64PublicCatalogServiceV1 } from
   './rfc64/public-catalog-service-v1.js';
+import {
+  rfc64CatalogHeadHandoffV1,
+  type DeliverRfc64PublicCatalogHeadInputV1,
+  type Rfc64CatalogHeadDeliveryOptionsV1,
+  type Rfc64CatalogHeadDeliveryOutcomeV1,
+  type Rfc64CatalogHeadHandoffV1,
+} from './rfc64/public-catalog-head-delivery-v1.js';
 import { prepareRfc64SwmInventoryCatalogTargetV1 } from
   './rfc64/swm-inventory-catalog-reconciler-v1.js';
 import {
@@ -543,6 +555,68 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       status: 'active',
       lane,
     });
+  }
+
+  /**
+   * Hand a head that a catalog mutation just committed to the catalog service's delivery owner
+   * and return at once: the fan-out to peers runs outside the serialized mutation (GH#3081).
+   * Never throws. Without a running service the head stays durable and reaches peers through
+   * replay.
+   */
+  deliverRfc64CatalogHeadV1(
+    this: DKGAgent,
+    input: DeliverRfc64PublicCatalogHeadInputV1,
+  ): Rfc64CatalogHeadHandoffV1 {
+    return this.rfc64PublicCatalogServiceV1?.deliverCatalogHead(input)
+      ?? rfc64CatalogHeadHandoffV1('not-queued', input.announcement);
+  }
+
+  /** Await the fan-outs of handed-off heads (tests / graceful shutdown coordination). */
+  whenRfc64CatalogHeadDeliveryIdleV1(this: DKGAgent): Promise<void> {
+    return this.rfc64PublicCatalogServiceV1?.whenCatalogHeadDeliveryIdle() ?? Promise.resolve();
+  }
+
+  /**
+   * The agent's side of head delivery. A fan-out is best-effort work that outlives the mutation
+   * that produced its head, so the store and chain reads of its policy decisions take the
+   * background lanes; its outcome goes to the log.
+   */
+  rfc64CatalogHeadDeliveryPortsV1(
+    this: DKGAgent,
+  ): Pick<Rfc64CatalogHeadDeliveryOptionsV1, 'onDelivered' | 'runFanout'> {
+    return Object.freeze({
+      runFanout: (fanout: () => Promise<void>) => withDefaultStoreWorkPriority(
+        'background',
+        () => withOwnedRpcRequestContext({ requestClass: 'background' }, fanout),
+      ),
+      onDelivered: (outcome: Rfc64CatalogHeadDeliveryOutcomeV1) =>
+        this.reportRfc64CatalogHeadDeliveryV1(outcome),
+    });
+  }
+
+  /**
+   * One finished fan-out of a handed-off head. Peers this node's own policy refused received
+   * nothing and are not failures: they appear only in the debug line, so a head with no eligible
+   * peer writes nothing at warn level.
+   */
+  reportRfc64CatalogHeadDeliveryV1(
+    this: DKGAgent,
+    outcome: Rfc64CatalogHeadDeliveryOutcomeV1,
+  ): void {
+    this.log.debug(
+      createOperationContext('system'),
+      'rfc64_catalog_head_delivery'
+        + ` head=${outcome.announcement.catalogHeadObjectDigest}`
+        + ` cg=${outcome.announcement.contextGraphId}`
+        + ` version=${outcome.announcement.catalogVersion}`
+        + ` delivered=${outcome.announcedPeers.length}`
+        + ` failed=${outcome.failedPeers.length}`
+        + ` refused=${outcome.refusedPeers.length}`
+        + ` superseded=${outcome.supersededHeads}`
+        + ` durationMs=${Math.round(outcome.durationMs)}`
+        + ` notDeliverable=${JSON.stringify(outcome.notDeliverable?.slice(0, 160) ?? null)}`,
+    );
+    this.warnRfc64CatalogAnnounceFailuresV1(outcome);
   }
 
 }

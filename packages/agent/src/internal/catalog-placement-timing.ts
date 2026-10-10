@@ -17,14 +17,16 @@ import type { Rfc64PublicCatalogTransportErrorCodeV1 } from '../rfc64/public-cat
  * that releases it. An admitted attempt returns a recorder that the supervisor passes to the repair
  * body beside the data-only marker, and the body charges its phases to it (the coverage check and
  * asset resolution in the projection; the locked state read, successor production, applied-head
- * CAS and announcement in the upsert). Nothing is matched by object identity or relies on how many
+ * CAS and hand-off in the upsert). Nothing is matched by object identity or relies on how many
  * repairs run at once; a repair run outside the supervisor reports to the inert recorder, so a line
  * describes exactly the attempt that released its call. It splits the call's wait into the time to
  * request the repair (the asset lock
  * and the durable marker write), the time queued in the supervisor (earlier markers, cooldown,
  * the next pass) and the attempt, broken down by phase; `otherMs` is the attempt time no phase
- * claims (lock waits, lane and inventory reads, marker deletion). Per-send announcement timing is
- * not measured: the announce phase is the whole sequential fan-out, with peer and failure counts.
+ * claims (lock waits, lane and inventory reads, marker deletion). The fan-out of a committed head
+ * is not part of an attempt: the upsert hands the head to the catalog service's delivery owner and
+ * returns, so a line's announce phase and peer counts stay at zero and the fan-out writes its own
+ * `rfc64_catalog_head_delivery` line.
  */
 
 /** An observer wait at or above this writes its line; shorter waits write nothing. */
@@ -43,7 +45,7 @@ export const CATALOG_PLACEMENT_PHASES = [
   'successor',
   /** The applied-head compare-and-swap. */
   'cas',
-  /** Best-effort announcement of the committed head to every selected peer, in sequence. */
+  /** Zero: the committed head is handed off for delivery; its fan-out runs outside the attempt. */
   'announce',
 ] as const;
 

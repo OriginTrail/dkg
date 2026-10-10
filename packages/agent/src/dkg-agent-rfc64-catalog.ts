@@ -4256,6 +4256,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           );
         },
       },
+      catalogHeadDelivery: this.rfc64CatalogHeadDeliveryPortsV1(),
       onCatalogHeadReplayRequested: (request, remotePeerId) => {
         const admission = this.tryQueueRfc64CatalogHeadReplayV1(remotePeerId, request);
         if (admission.status === 'busy') return admission;

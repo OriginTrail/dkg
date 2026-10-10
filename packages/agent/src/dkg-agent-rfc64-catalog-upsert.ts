@@ -58,7 +58,8 @@ export interface UpsertConfirmedRfc64PublicRootCatalogAssetParamsV1 {
 
 /**
  * GH#3081 — what one catalog mutation reports while it runs: how long each phase took, whether it
- * resolved or rejected, and what its announcement delivered. Observation only; an observer never
+ * resolved or rejected, and the receipt of handing its head off for delivery (the fan-out itself
+ * runs outside the mutation and delivers nothing inside it). Observation only; an observer never
  * changes the mutation, and `measure` passes the work's result or rejection through unchanged.
  */
 export interface Rfc64CatalogMutationObserverV1 {
@@ -581,13 +582,13 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       ? Object.freeze({ appliedHead: commit(), sourceCurrent: true })
       : commitAppliedHead(commit)));
     if (!signal?.aborted) {
-      const delivery = await observer.measure('announce', () => this.announceRfc64PublicCatalogHeadV1({
+      // The head is durable. Hand it to the catalog service's delivery owner and return: the
+      // fan-out runs outside this serialized mutation, so the next change never waits for a peer
+      // (GH#3081). The hand-off delivers nothing itself, so the announce phase takes no time.
+      observer.announced(this.deliverRfc64CatalogHeadV1({
         announcement: successor.announcement,
         peers,
-        signal,
       }));
-      observer.announced(delivery);
-      this.warnRfc64CatalogAnnounceFailuresV1(delivery);
     }
     return Object.freeze({
       applied: committed.appliedHead,
