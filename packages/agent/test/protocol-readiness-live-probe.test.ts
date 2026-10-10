@@ -42,10 +42,20 @@ describe('live sync protocol readiness after a stale Identify record', () => {
   it('honors cancellation during a live probe', async () => {
     const input = options();
     const controller = new AbortController();
-    input.probe.mockImplementationOnce(async () => {
-      controller.abort();
+    let probeStarted!: () => void;
+    const started = new Promise<void>((resolve) => { probeStarted = resolve; });
+    input.probe.mockImplementationOnce(async (_peer, _protocol, signal) => {
+      probeStarted();
+      if (!signal) return 'unavailable';
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
       return 'unavailable';
     });
-    await expect(waitForAdvertisedOrLiveProtocol({ ...input, signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' });
+    const pending = waitForAdvertisedOrLiveProtocol({ ...input, signal: controller.signal });
+    await started;
+    const receivedSignal = input.probe.mock.calls[0]?.[2];
+    controller.abort();
+    expect(receivedSignal).toBe(controller.signal);
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect(input.probe).toHaveBeenCalledTimes(1);
   });
 });

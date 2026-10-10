@@ -425,6 +425,7 @@ import {
   planPrivateRecoverySource,
 } from './sync/private-recovery-source-planner.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
+import { selectSyncCapablePeers } from './p2p/catchup-protocol-readiness.js';
 import { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js';
 import {
   FOREGROUND_CATCHUP_SYNC_PRIORITY,
@@ -8289,26 +8290,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
 
-    // Phase 1: probe all peers for PROTOCOL_SYNC support serially. This is
-    // cheap (peerStore lookup / waitForPeerProtocol), but we keep it a
-    // separate pass so Phase 2's Promise.all only kicks off peers we know
-    // can serve us — parallel-probing would multiply connection churn for
-    // no gain. See the "Run per-peer syncs in parallel" comment below.
-    const syncCapable: string[] = [];
-    for (const pid of peers) {
+    // Phase 1: check protocol readiness with bounded concurrency. Stale
+    // Identify records now require live negotiation, so a serial pass would
+    // add up to six seconds per peer before any catch-up work can start.
+    const readiness = await selectSyncCapablePeers(peers, MAX_IDENTITY_PROBE_CONCURRENCY, async (pid) => {
       if (DEBUG_SYNC_PROGRESS) {
         this.log.info(ctx, `Checking sync protocol for peer ${pid.toString()} in catch-up for "${contextGraphId}"`);
       }
       const hasSync = await this.waitForSyncProtocol(pid);
       if (!hasSync) {
-        noProtocolPeers++;
         if (DEBUG_SYNC_PROGRESS) {
           this.log.warn(ctx, `Peer ${pid.toString()} is connected but not sync-capable for "${contextGraphId}"`);
         }
-        continue;
       }
-      syncCapable.push(pid.toString());
-    }
+      return hasSync;
+    });
+    noProtocolPeers = readiness.noProtocolPeers;
+    const syncCapable = readiness.syncCapable;
     syncCapablePeers = syncCapable.length;
     const coordinatedRecovery = (this.config.syncContextGraphs ?? []).includes(contextGraphId);
     let catchupPeers = syncCapable;
