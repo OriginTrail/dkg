@@ -176,17 +176,6 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     const inventoryScope = params.inventoryScope;
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
-    const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1(inventoryScope);
-    const snapshot = persistence.swmAuthorInventory.readSwmAuthorInventorySnapshotV1(
-      inventoryScopeDigest,
-      params.authorAddress,
-    );
-    const row = snapshot?.rows.find((candidate) => (
-      candidate.assertionCoordinate === params.assertionCoordinate
-      && candidate.assertionVersion === params.assertionVersion
-      && candidate.kaUal === params.kaUal
-      && candidate.sealDigest === params.sealDigest
-    ));
     const scope = Object.freeze({
       ...inventoryScope,
       bucketCount: '1',
@@ -197,6 +186,17 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     }));
     placement.covered(covered);
     if (covered) return null;
+    // Only a placement that has work to do reads the author's whole inventory.
+    const snapshot = persistence.swmAuthorInventory.readSwmAuthorInventorySnapshotV1(
+      computeSwmAuthorInventoryScopeDigestV1(inventoryScope),
+      params.authorAddress,
+    );
+    const row = snapshot?.rows.find((candidate) => (
+      candidate.assertionCoordinate === params.assertionCoordinate
+      && candidate.assertionVersion === params.assertionVersion
+      && candidate.kaUal === params.kaUal
+      && candidate.sealDigest === params.sealDigest
+    ));
     const asset: Rfc64CatalogSuccessorAssetInputV1 = await placement.measure('asset', () => (row === undefined
       ? resolveRfc64ConfirmedVmRepairCatalogAssetV1({
         store: this.store,

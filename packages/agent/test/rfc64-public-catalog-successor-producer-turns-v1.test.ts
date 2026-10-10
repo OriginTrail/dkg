@@ -82,10 +82,11 @@ describe('RFC-64 exact-set successor producer: turns of the main thread', () => 
     expect(result.assets).toHaveLength(ROWS);
     const firstSignature = events.indexOf('sign');
     const firstStage = events.indexOf('stage-bundle');
-    // Row preparation and the pre-signature checks are two full passes, and
-    // the signature takes a turn of its own.
+    // Row preparation and the pre-signature checks are two full passes; the
+    // canonical producer's first block and the signature each take a turn of
+    // their own.
     expect(events.slice(0, firstSignature).filter((event) => event === 'turn'))
-      .toHaveLength(2 * ROWS + 1);
+      .toHaveLength(2 * ROWS + 2);
     expect(events.slice(0, firstSignature)).not.toContain('stage-bundle');
     // Bucket, directory node and head, then one more pass over the rows.
     expect(signDigest).toHaveBeenCalledTimes(3);
@@ -297,9 +298,10 @@ describe('RFC-64 exact-set successor producer: turns of the main thread', () => 
       const { input, events, signDigest } = await threeRowProduction();
       const controller = new AbortController();
       const reason = new Error('superseded');
-      // Two passes over the rows come first, then one turn per signature.
+      // Two passes over the rows come first, then the canonical producer's
+      // own turn, then one turn per signature.
       timeSlice.onTurn = (turn) => {
-        if (turn === 2 * ROWS + 1 + signed) controller.abort(reason);
+        if (turn === 2 * ROWS + 2 + signed) controller.abort(reason);
       };
 
       // The caller's own reason, not a failure of the supplied history.
@@ -310,6 +312,24 @@ describe('RFC-64 exact-set successor producer: turns of the main thread', () => 
       expect(signDigest).toHaveBeenCalledTimes(signed);
       expect(events).not.toContain('stage-bundle');
       expect(events).not.toContain('stage-objects');
+    });
+
+    it('signs nothing when cancelled in the turn the canonical producer starts on', async () => {
+      const { input, events, signDigest } = await threeRowProduction();
+      const controller = new AbortController();
+      const reason = new Error('superseded');
+      // Every row has passed its checks; the predecessor has not been read yet.
+      timeSlice.onTurn = (turn) => {
+        if (turn === 2 * ROWS + 1) controller.abort(reason);
+      };
+
+      await expect(harness(events).produceAndStageExactSet({
+        ...input,
+        signal: controller.signal,
+      })).rejects.toBe(reason);
+      expect(timeSlice.turns).toBe(2 * ROWS + 1);
+      expect(signDigest).not.toHaveBeenCalled();
+      expect(events).not.toContain('stage-bundle');
     });
 
     it('stops after the signatures, before anything is staged', async () => {
