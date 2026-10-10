@@ -771,6 +771,50 @@ describe('full catalog parking', () => {
     expect(p.status([])).toEqual({ parkedPlacements: 0, scopesAtCap: 0 });
   });
 
+  it('keeps the safety-net marker parked whatever its attempt failed on, with nothing else to park it', () => {
+    // No applied-head reader: a marker that is not parked gets an attempt of its own.
+    const { parking: p, clock } = parking();
+    p.placementRefused('a', NEW_A, refusal());
+    clock.now = HOUR;
+    p.passStarted(new Set(['a']));
+    expect(p.park('a', NEW_A)).toBe(false);
+    // That attempt failed before the catalog was asked, so no refusal came back. The marker is
+    // not left to the failure timer.
+    p.passStarted(new Set(['a']));
+    expect(p.park('a', NEW_A)).toBe(true);
+    expect(p.status([])).toEqual({ parkedPlacements: 1, scopesAtCap: 1 });
+  });
+
+  it('takes a marker out of what is parked once a refusal finds its asset in the catalog', () => {
+    const { parking: p } = parking(atCap);
+    p.placementRefused('a', NEW_A, refusal());
+    expect(p.park('b', NEW_B)).toBe(true);
+    expect(p.status([])).toEqual({ parkedPlacements: 2, scopesAtCap: 1 });
+    // A later refusal of the scope finds the second marker's asset among the rows.
+    const rows = [...fullRows().slice(1), { seal: { kaUal: NEW_B.kaUal } }];
+    p.placementRefused('a', NEW_A, new AuthorCatalogFullErrorV1(rows, 1));
+    expect(p.park('b', NEW_B)).toBe(false);
+    expect(p.status([])).toEqual({ parkedPlacements: 1, scopesAtCap: 1 });
+  });
+
+  it('keeps the list of a scope that stays full while other scopes fill up and get a free row', () => {
+    const freed = new Set<string>();
+    const read = (digest: string) => ({ inventoryRowCount: String(freed.has(digest) ? CAP - 1 : CAP) });
+    const { parking: p } = parking(read as never);
+    p.placementRefused('old', NEW_A, refusal());
+    // More scopes than lists are kept come and go, one at a time.
+    for (let index = 0; index <= MAX_FULL_CATALOG_DETAILED_SCOPES_V1; index++) {
+      const other = marker(`passing-${index}` as ContextGraphIdV1, CAP + 1);
+      p.placementRefused(`o${index}`, other, refusal());
+      freed.add(scopeDigest(other));
+      p.passStarted(new Set(['old', `o${index}`]));
+      expect(p.park(`o${index}`, other)).toBe(false);
+    }
+    // The list of the scope that stayed full was never the one to go: its new marker is parked on it.
+    p.passStarted(new Set(['old']));
+    expect(p.park('new', NEW_B)).toBe(true);
+  });
+
   it('survives a log sink that throws', () => {
     const { parking: p, warn } = parking(atCap);
     warn.mockImplementation(() => { throw new Error('log sink closed'); });
