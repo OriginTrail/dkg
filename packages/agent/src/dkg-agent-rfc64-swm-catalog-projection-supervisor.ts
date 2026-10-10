@@ -485,7 +485,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       if (signal.aborted) return;
       const key = finalizedPrivateRepairKeyV1(repair);
       // GH#3134 — a placement its full catalog has no row for is parked: no attempt, nothing waits on it.
-      if (this.#fullCatalogs.parked(key, repair)) return state.finalizedPrivateWaiters.release(key);
+      if (this.#fullCatalogs.park(key, repair)) return state.finalizedPrivateWaiters.release(key);
       let entry = state.finalizedPrivateRetries.get(key);
       if (entry === undefined) {
         entry = { contextGraphId: repair.contextGraphId, retry: new CatalogRepairRetryV1(), attempts: 0 };

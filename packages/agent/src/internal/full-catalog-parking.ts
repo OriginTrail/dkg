@@ -33,15 +33,19 @@ import { findAuthorCatalogFullErrorV1 } from './author-catalog-capacity.js';
  *   catalog, at the applied head the refusal read, is parked without an attempt of its own, so a
  *   restart costs one attempt a full catalog and not one a marker;
  * - parked markers are attempted again when the scope's applied head shows a free row. As a
- *   safety net one of them is attempted an interval per scope, each interval the next one in
- *   turn, and its refusal reads afresh what the catalog holds;
+ *   safety net one of them is attempted an interval per scope: the one parked longest, which
+ *   goes to the back when it is parked again. Its refusal reads afresh what the catalog holds;
  * - the log names the graph and author when a scope first refuses and at most once an interval
  *   after that; status carries two counts and no identity.
  *
- * Nothing here is durable and nothing decides what a full catalog should do instead. The
- * share-time projection of a full scope is not parked here: its retry class gives a full catalog
- * the same interval, and a change of the author's inventory (which may be a removal) still gets
- * its one attempt. This object rate-limits that path's log line and counts its scope.
+ * A scope is identified by its canonical catalog scope digest. Nothing here is durable, and
+ * nothing decides what a full catalog should do instead. What is kept is bounded by the durable
+ * marker queue: a scope is known only while it has parked markers or for an interval after its
+ * refusal, and the list of what a catalog holds is kept for a bounded number of scopes.
+ *
+ * The share-time projection of a full scope is not parked here: its retry class gives a full
+ * catalog the same interval, and a change of the author's inventory (which may be a removal)
+ * still gets its one attempt. This object rate-limits that path's log line and counts its scope.
  */
 
 /**
@@ -49,7 +53,8 @@ import { findAuthorCatalogFullErrorV1 } from './author-catalog-capacity.js';
  * interval the retry class gives the share-time projection of a full catalog.
  */
 export const FULL_CATALOG_RECHECK_INTERVAL_MS_V1 = CATALOG_FULL_RETRY_INTERVAL_MS_V1;
-const MAX_FULL_SCOPES_V1 = 64;
+/** Scopes whose list of held assets is kept; a list is at most a catalog's rows of UALs. */
+export const MAX_FULL_CATALOG_DETAILED_SCOPES_V1 = 64;
 const MAX_NAMED_SCOPES_V1 = 256;
 
 /** The applied-head row of one author catalog scope, as far as capacity reads it. */
@@ -92,28 +97,31 @@ type ProjectionRepairV1 = Readonly<{
   diagnostic: Readonly<CatalogRepairDiagnosticV1> | null;
 }>;
 
+/** The applied head of a scope, as far as parking reads it. */
+type AppliedHeadV1 = Readonly<{ digest: string; rows: number }>;
+
 /** What the last real refusal of one exact catalog scope found. */
 interface FullScopeV1 {
   readonly catalogScopeDigest: Digest32V1;
   readonly contextGraphId: string;
   readonly authorAddress: EvmAddressV1;
   readonly headDigest: string | null;
-  readonly heldKaUals: ReadonlySet<string>;
+  /** The assets the catalog held, or null once that list was dropped to bound what is kept. */
+  heldKaUals: ReadonlySet<string> | null;
   readonly rows: number;
   readonly rowCap: number;
+  /** When the scope's next safety-net attempt is due. */
   recheckAtMs: number;
-  /** Parked markers the next safety-net attempt lets pass first, so the turn moves on. */
-  turn: number;
-  /** Parked markers that asked for a due safety-net attempt in the current pass. */
-  asked: number;
+  /** The parked marker the current pass attempts as that safety net, when one is due. */
+  dueMarker: string | undefined;
 }
 
 export class FullCatalogParkingV1 {
   readonly #dependencies: FullCatalogParkingDependenciesV1;
   readonly #now: () => number;
-  /** Full scopes, by exact catalog scope. */
+  /** Full scopes by canonical catalog scope digest, the latest refusal last. */
   readonly #scopes = new Map<string, FullScopeV1>();
-  /** Parked markers: the supervisor's marker key and the scope that has no row for it. */
+  /** Parked markers and their scope, by the supervisor's marker key, the longest parked first. */
   readonly #parked = new Map<string, string>();
   /** When each graph and author was last named in the log. */
   readonly #namedAtMs = new Map<string, number>();
@@ -125,31 +133,41 @@ export class FullCatalogParkingV1 {
     this.#now = now;
   }
 
-  /** A pass listed the durable markers with these keys: forget what left the queue. */
+  /**
+   * A pass listed the durable markers with these keys. Forget what left the queue, and choose
+   * for each scope whose safety-net attempt is due the marker that gets it in this pass.
+   */
   passStarted(listed: ReadonlySet<string>): void {
     this.#passHeads.clear();
-    for (const key of this.#parked.keys()) {
-      if (!listed.has(key)) this.#parked.delete(key);
-    }
-    const parkedScopes = new Set(this.#parked.values());
     const now = this.#now();
+    for (const scope of this.#scopes.values()) scope.dueMarker = undefined;
+    for (const [key, scopeKey] of this.#parked) {
+      if (!listed.has(key)) {
+        this.#parked.delete(key);
+        continue;
+      }
+      // The marker parked longest. A marker goes to the back each time it is parked again, so
+      // one that keeps failing for another reason cannot hold the safety net.
+      const scope = this.#scopes.get(scopeKey);
+      if (scope !== undefined && scope.dueMarker === undefined && now >= scope.recheckAtMs) scope.dueMarker = key;
+    }
     for (const [scopeKey, scope] of this.#scopes) {
       // What a refusal found is not kept past its interval for a scope with nothing parked.
-      if (!parkedScopes.has(scopeKey) && now >= scope.recheckAtMs) this.#scopes.delete(scopeKey);
-      // No marker took the due safety-net attempt in the last pass: the turn starts over.
-      if (scope.asked > 0 && now >= scope.recheckAtMs) scope.turn = 0;
-      scope.asked = 0;
+      if (scope.dueMarker === undefined && now >= scope.recheckAtMs) this.#scopes.delete(scopeKey);
     }
   }
 
   /**
-   * Whether this pass leaves the marker alone. False means "attempt it as usual", and a refusal of
-   * that attempt comes back through {@link placementRefused}.
+   * Decide one listed marker for this pass, and record the decision. True: it is parked, and the
+   * pass leaves it alone. False: attempt it as usual; a refusal of that attempt comes back
+   * through {@link placementRefused}. Asked once a marker a pass.
    */
-  parked(key: string, repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>): boolean {
-    const scopeKey = this.#parked.get(key) ?? scopeKeyV1(repair);
-    const scope = this.#scopes.get(scopeKey);
-    if (scope !== undefined && this.#keepsParked(scopeKey, scope, key, repair)) {
+  park(key: string, repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>): boolean {
+    // No full scope is known: nothing is parked, and no marker needs its scope named.
+    if (this.#scopes.size === 0) return false;
+    const scopeKey = this.#parked.get(key) ?? catalogScopeDigestV1(repair);
+    const scope = scopeKey === undefined ? undefined : this.#scopes.get(scopeKey);
+    if (scopeKey !== undefined && scope !== undefined && this.#keepsParked(scopeKey, scope, key, repair)) {
       this.#parked.set(key, scopeKey);
       return true;
     }
@@ -168,20 +186,13 @@ export class FullCatalogParkingV1 {
   ): boolean {
     const full = findAuthorCatalogFullErrorV1(error);
     if (full === undefined) return false;
-    let catalogScopeDigest: Digest32V1;
-    try {
-      catalogScopeDigest = computeAuthorCatalogScopeDigestV1({
-        ...repair.inventoryScope,
-        bucketCount: '1',
-      } as AuthorCatalogScopeV1) as Digest32V1;
-    } catch {
-      // A marker whose scope cannot be named keeps the ordinary failure handling.
-      return false;
-    }
-    const scopeKey = scopeKeyV1(repair);
-    const known = this.#scopes.get(scopeKey);
-    rememberBounded(this.#scopes, scopeKey, {
-      catalogScopeDigest,
+    const scopeKey = catalogScopeDigestV1(repair);
+    // A marker whose scope cannot be named keeps the ordinary failure handling.
+    if (scopeKey === undefined) return false;
+    // The latest refusal last: the list of held assets is dropped from the earliest ones first.
+    this.#scopes.delete(scopeKey);
+    this.#scopes.set(scopeKey, {
+      catalogScopeDigest: scopeKey,
       contextGraphId: repair.contextGraphId,
       authorAddress: repair.authorAddress,
       headDigest: full.appliedHeadDigest,
@@ -189,9 +200,9 @@ export class FullCatalogParkingV1 {
       rows: full.rowCount,
       rowCap: full.rowCap,
       recheckAtMs: this.#now() + FULL_CATALOG_RECHECK_INTERVAL_MS_V1,
-      turn: known?.turn ?? 0,
-      asked: known?.asked ?? 0,
-    }, MAX_FULL_SCOPES_V1);
+      dueMarker: undefined,
+    });
+    this.#boundDetail();
     this.#parked.set(key, scopeKey);
     // The pass may have read this scope's head before the attempt, when it still showed a free row.
     this.#passHeads.delete(scopeKey);
@@ -266,22 +277,34 @@ export class FullCatalogParkingV1 {
       return false;
     }
     // The catalog holds a row of this asset: a newer version replaces it, an equal one is placed.
-    if (scope.heldKaUals.has(repair.kaUal)) return false;
-    const now = this.#now();
-    if (now >= scope.recheckAtMs) {
-      // The safety net: one real attempt a scope an interval, by a marker that would otherwise
-      // stay parked. Its refusal reads afresh what the catalog holds. The turn moves on by one
-      // marker each interval, so a marker that keeps failing for another reason cannot hold it.
-      scope.asked += 1;
-      if (scope.asked > scope.turn) {
-        scope.turn = scope.asked;
-        scope.recheckAtMs = now + FULL_CATALOG_RECHECK_INTERVAL_MS_V1;
-        return false;
-      }
+    if (scope.heldKaUals?.has(repair.kaUal) === true) return false;
+    if (scope.dueMarker === key) {
+      // The safety net: one real attempt a scope an interval, by the marker this pass chose.
+      // Its refusal reads afresh what the catalog holds.
+      scope.dueMarker = undefined;
+      scope.recheckAtMs = this.#now() + FULL_CATALOG_RECHECK_INTERVAL_MS_V1;
+      return false;
     }
-    // A marker that was not parked before is taken on the catalog's word only at the applied
-    // head that word was read under, read now; at any other head it gets an attempt of its own.
-    return this.#parked.has(key) || this.#appliedHead(scope)?.digest === scope.headDigest;
+    if (this.#parked.has(key)) return true;
+    // A marker that was not parked before is taken on the catalog's word only while that word is
+    // kept, and only at the applied head it was read under, read now. Otherwise it gets an
+    // attempt of its own.
+    return scope.heldKaUals !== null && this.#appliedHead(scope)?.digest === scope.headDigest;
+  }
+
+  /** Keep the list of held assets for a bounded number of scopes; a scope without it stays known. */
+  #boundDetail(): void {
+    let detailed = 0;
+    for (const scope of this.#scopes.values()) {
+      if (scope.heldKaUals !== null) detailed += 1;
+    }
+    for (const scope of this.#scopes.values()) {
+      if (detailed <= MAX_FULL_CATALOG_DETAILED_SCOPES_V1) return;
+      if (scope.heldKaUals === null) continue;
+      // What stays keeps the scope's markers parked; a new marker of it gets its own attempt.
+      scope.heldKaUals = null;
+      detailed -= 1;
+    }
   }
 
   /** The scope's applied head, null when it has none, undefined when it cannot be read. */
@@ -322,27 +345,23 @@ export class FullCatalogParkingV1 {
   }
 }
 
-/** The applied head of a scope, as far as parking reads it. */
-type AppliedHeadV1 = Readonly<{ digest: string; rows: number }>;
-
 /** True or false when the applied head was read; undefined when it could not be. */
 function hasFreeRowV1(head: AppliedHeadV1 | null | undefined, scope: FullScopeV1): boolean | undefined {
   return head === undefined ? undefined : head === null || head.rows < scope.rowCap;
 }
 
-/** One exact author catalog scope, as a marker names it. */
-function scopeKeyV1(repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>): string {
-  const scope = repair.inventoryScope;
-  return JSON.stringify([
-    repair.authorAddress,
-    scope.networkId,
-    scope.contextGraphId,
-    scope.governanceChainId,
-    scope.governanceContractAddress,
-    scope.ownershipTransitionDigest,
-    scope.subGraphName,
-    scope.era,
-  ]);
+/** The canonical digest of the author catalog scope a marker names, or undefined when it names none. */
+function catalogScopeDigestV1(
+  repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
+): Digest32V1 | undefined {
+  try {
+    return computeAuthorCatalogScopeDigestV1({
+      ...repair.inventoryScope,
+      bucketCount: '1',
+    } as AuthorCatalogScopeV1) as Digest32V1;
+  } catch {
+    return undefined;
+  }
 }
 
 /** One graph and author, as the log and the status count name a scope. */
