@@ -761,15 +761,14 @@ export class RpcFailoverClient {
     // so the cap/exhaustion contract stays canonical while only the try-order changes.
     const canonical = this.getEndpoints();
     // A read that an endpoint has refused by policy starts at the others; the
-    // refusing endpoint stays in the pass, last. `readRefusals` builds the pass
-    // from the stickiness order and owns what each outcome is recorded as. A
+    // refusing endpoint stays in the pass, last. Stickiness owns the full plan
+    // using refusal memory before binding each outcome recorder. A
     // tip-sensitive read keeps the configured order, as it does under
     // stickiness, and so does every read when ordering is switched off.
-    const attempts = this.readRefusals.attempts(
-      label,
-      this.stickiness.attempts(canonical, options.intent),
-      options.intent !== 'transparentRead' && this.endpointOrderingEnabled(),
-    );
+    const attempts = this.stickiness.readAttempts(canonical, options.intent, {
+      label, memory: this.readRefusals,
+      remember: options.intent !== 'transparentRead' && this.endpointOrderingEnabled(),
+    });
     const configuredAttemptTimeoutMs = options.attemptTimeoutMs(canonical.length);
     let allEndpointsThrottled = true;
     let retryAfterMs: number | undefined;
@@ -791,6 +790,7 @@ export class RpcFailoverClient {
         : attemptStartedAt + attemptBudgetMs;
       return async () => {
         const endpoint = attempt.endpoint;
+        attempt.recordStart();
         if (this.validateEndpoint) {
           await this.runProviderAttemptStage(
             () => this.validateEndpoint!(endpoint),

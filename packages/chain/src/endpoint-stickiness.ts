@@ -38,6 +38,8 @@
  * a slightly stale order, never torn state.
  */
 
+import type { EndpointReadRefusals, ReadAttempt } from './endpoint-read-refusals.js';
+
 /** Minimal endpoint shape the ordering needs — keyed on `rpcUrl` (survives a live
  *  provider-pool rebind, unlike a positional index). */
 export interface StickyEndpoint {
@@ -93,13 +95,12 @@ export class EndpointStickiness {
 
   /**
    * Build the preferred-first list of BOUND {@link StickyAttempt}s for `intent`
-   * over `canonical`. `order()` runs EXACTLY once here (it may re-arm the TTL
-   * re-probe — it must not run twice per loop entry); each entry captures its own
+   * over `canonical`. `order()` runs EXACTLY once here; each entry captures its own
    * endpoint + position (triedFirst = index 0) + the SAME (canonical, intent), so
    * a loop records via the nullary `recordSuccess()`/`recordFailure()` on the entry
    * it ran and cannot drift the endpoint, index, canonical, or intent apart.
    *
-   * This is the SOLE public API for DRIVING a failover pass — `order`,
+   * Together with readAttempts this is the public API for DRIVING a failover pass — `order`,
    * `recordSuccess`, and `recordFailure` are `private` below precisely so the
    * mismatched hand-threaded path these entries prevent is not merely discouraged
    * but unavailable. (`hasPreference` stays public as a read-only introspection
@@ -114,6 +115,54 @@ export class EndpointStickiness {
   }
 
   /**
+   * Own the complete read plan before binding any outcome recorders. Ordinary
+   * attempts retain their position in the stickiness order. When that order's
+   * first endpoint refused this read, other endpoints explicitly substitute for
+   * it and update refusal memory alone: a skipped preference was not disproven.
+   * Refusers stay in the pass, last; if all refused, the ordinary order remains.
+   */
+  readAttempts<T extends StickyEndpoint>(
+    canonical: T[], intent: StickinessIntent,
+    read: { label: string; memory: EndpointReadRefusals; remember: boolean },
+  ): ReadAttempt<T>[] {
+    const ordered = this.order(canonical, intent);
+    let plan = ordered.map((endpoint, index) => ({ endpoint, index, kind: 'ordinary' as 'ordinary' | 'substitute' }));
+    if (read.remember) {
+      const { refusing, servedInstead } = read.memory.constraints(read.label, ordered.map(e => e.rpcUrl));
+      if (refusing.size > 0 && refusing.size < ordered.length) {
+        const refused = plan.filter(attempt => refusing.has(attempt.endpoint.rpcUrl));
+        const others = plan.filter(attempt => !refusing.has(attempt.endpoint.rpcUrl));
+        if (refusing.has(ordered[0].rpcUrl)) {
+          const first = others.find(attempt => attempt.endpoint.rpcUrl === servedInstead);
+          const substitutes = first ? [first, ...others.filter(attempt => attempt !== first)] : others;
+          plan = [...substitutes.map(attempt => ({ ...attempt, kind: 'substitute' as const })), ...refused];
+        } else plan = [...others, ...refused];
+      }
+    }
+    return plan.map(({ endpoint, index, kind }) => ({
+      endpoint, kind,
+      recordStart: () => this.recordReadStart(endpoint, canonical, intent),
+      recordSuccess: () => {
+        if (read.remember) read.memory.recordSuccess(read.label, endpoint.rpcUrl, kind);
+        if (kind === 'ordinary') this.recordSuccess(endpoint, canonical, intent, index === 0);
+      },
+      recordFailure: error => {
+        if (read.remember) read.memory.recordFailure(read.label, endpoint.rpcUrl, error, kind);
+        if (kind === 'ordinary') this.recordFailure(endpoint, intent);
+      },
+    }));
+  }
+
+  /** Consume a due re-probe only at the actual primary transport boundary. */
+  private recordReadStart<T extends StickyEndpoint>(endpoint: T, canonical: T[], intent: StickinessIntent): void {
+    if (intent !== 'stickyRead' || !this.cfg.isEnabled() || this.state.kind !== 'preferred') return;
+    if (endpoint.rpcUrl !== canonical[0]?.rpcUrl || this.state.url === endpoint.rpcUrl) return;
+    if (this.cfg.now() >= this.state.primaryProbeDueAt) {
+      this.state = { ...this.state, primaryProbeDueAt: this.cfg.now() + this.cfg.ttlMs };
+    }
+  }
+
+  /**
    * Decide the per-op iteration order over `canonical` (the live configured order,
    * index 0 = primary). Returns canonical unless a compatible preference is active
    * and inside the current re-probe window, in which case the preferred endpoint is
@@ -121,7 +170,7 @@ export class EndpointStickiness {
    * still visits every endpoint exactly once). A `transparentRead` always uses
    * canonical; a `nonceWrite` uses canonical unless the preference is WRITE-proven.
    * When the re-probe deadline has passed this op probes the primary first AND
-   * re-arms the deadline `+ttlMs` (at most one primary re-stall per TTL).
+   * leaves re-arming to the actual primary transport boundary.
    */
   private order<T extends StickyEndpoint>(canonical: T[], intent: StickinessIntent): T[] {
     if (intent === 'transparentRead' || !this.cfg.isEnabled() || this.state.kind !== 'preferred') {
@@ -148,9 +197,7 @@ export class EndpointStickiness {
     // re-probe CLEARS the preference on primary recovery (or the backend fails, see
     // recordFailure).
     if (intent === 'stickyRead' && this.cfg.now() >= pref.primaryProbeDueAt) {
-      // Re-probe the configured primary this op; schedule the next re-probe one TTL
-      // out so we don't re-stall on it again until then.
-      this.state = { ...pref, primaryProbeDueAt: this.cfg.now() + this.cfg.ttlMs };
+      // A due re-probe is only a plan until the primary is actually attempted.
       return canonical;
     }
     const reordered = canonical.slice();
