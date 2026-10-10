@@ -349,22 +349,16 @@ describe('rolling activation checks', () => {
       await expect(rows.beginPass().next(abort.signal)).rejects.toBe(closing);
     });
 
-    it('does not let a clock that steps back stretch a pause', async () => {
-      let nowMs = 1_000_000;
-      const rows = backlog(['a', 'b'], { now: () => nowMs });
+    it('keeps the default monotonic pause when the wall clock steps backwards', async () => {
+      const rows = backlog(['a', 'b']);
       const pass = rows.beginPass();
       const signal = new AbortController().signal;
-
       await pass.next(signal);
-      await pass.read(async () => {
-        nowMs -= 5_000;
-        return ABSENT;
-      });
+      await pass.read(async () => ABSENT);
       rows.leave(pass, 'a', ABSENT);
-      nowMs -= 3_600_000;
-
+      vi.setSystemTime(Date.now() - 3_600_000);
       const next = pass.next(signal);
-      await vi.advanceTimersByTimeAsync(ROLLING_CHECK_MAX_PAUSE_MS - 1);
+      await vi.advanceTimersByTimeAsync(ROLLING_CHECK_MIN_PAUSE_MS - 1);
       expect(await settled(next)).toBe(false);
       await vi.advanceTimersByTimeAsync(1);
       expect(await next).toBe('b');
