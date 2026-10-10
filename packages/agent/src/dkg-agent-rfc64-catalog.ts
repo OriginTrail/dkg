@@ -4937,6 +4937,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       controlObjects: persistence.controlObjects,
       stageKaBundle: persistence.kaBundles.putKaBundle,
       readKaBundleByDigest: persistence.kaBundles.readKaBundleByDigest,
+      verifiedRows: this.rfc64VerifiedCatalogRowsV1(scope),
     });
     // The history read above and the production below each walk the whole set.
     await yieldMainThread();

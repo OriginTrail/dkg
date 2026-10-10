@@ -63,6 +63,8 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-public-catalog-successor-producer-turns-v1.test.ts",
   // #3081 / #3072 — one placement no longer reads and verifies the whole catalog three times.
   "test/rfc64-verified-catalog-rows.test.ts",
+  "test/rfc64-catalog-mutation-memory.test.ts",
+  "test/rfc64-catalog-placement-reuse.test.ts",
   "test/rfc64-dkg-agent-successor-publication.integration.test.ts",
   "test/rfc64-catalog-access-policy-v1.test.ts",
   "test/rfc64-catalog-authority-refresh-loop-v1.test.ts",
