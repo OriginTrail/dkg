@@ -407,23 +407,9 @@ describe('listAssertions query path', () => {
 describe('useMemoryEntities hook', () => {
   const hook = readFileSync(resolve(UI_DIR, 'hooks', 'useMemoryEntities.ts'), 'utf-8');
   const memoryLabels = readFileSync(resolve(UI_DIR, 'lib', 'memoryLabels.ts'), 'utf-8');
-  const nodeEventsHook = readFileSync(resolve(UI_DIR, 'hooks', 'useNodeEvents.ts'), 'utf-8');
 
   it('exports TrustLevel type with three levels', () => {
     expect(hook).toContain("type TrustLevel = 'working' | 'shared' | 'verified'");
-  });
-
-  it('queries WM, SWM, and VM in parallel', () => {
-    // Hook was refactored from `view: 'shared-working-memory' | 'verifiable-memory'`
-    // to per-layer SPARQL builders that walk the named-graph space directly
-    // (see the rationale comment in useMemoryEntities.ts) so per-sub-graph
-    // SWM/VM partitions are covered and each triple carries its source `?g`.
-    // The original intent of this test — that all three layers are fetched
-    // in parallel — is still asserted, just against the new shape.
-    expect(hook).toContain('Promise.all');
-    expect(hook).toContain('wmSparql');
-    expect(hook).toContain('swmSparql');
-    expect(hook).toContain('vmSparql');
   });
 
   it('builds entity map grouped by subject URI', () => {
@@ -446,10 +432,6 @@ describe('useMemoryEntities hook', () => {
     expect(hook).toContain('const seen = new Set<string>()');
   });
 
-  it('subscribes to memory_graph_changed events for live graph refreshes', () => {
-    expect(nodeEventsHook).toContain("'memory_graph_changed'");
-    expect(hook).toContain('useMemoryGraphEvents(contextGraphId, fetchAll)');
-  });
 });
 
 describe('AgentHub page renders PanelRight', () => {

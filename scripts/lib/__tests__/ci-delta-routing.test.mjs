@@ -533,6 +533,7 @@ test('identity-wallet browser actions select the real-EVM chain scope', () => {
     'packages/node-ui/src/ui/pages/identity-wallets/useIdentityWalletManagement.ts',
     'packages/node-ui/src/ui/web3/session.ts',
     'packages/node-ui/src/ui/stores/wallet.ts',
+    'packages/node-ui/src/ui/memory-layers-api.ts',
     'packages/node-ui/integration/identity-wallet-actions-v10.test.ts',
     'packages/cli/src/daemon/routes/identity-wallets.ts',
   ]) {

@@ -361,9 +361,13 @@ import {
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
+import {
+  readContextGraphNamedGraphStats,
+} from '../context-graph-read-model.js';
 
 import type { RequestContext } from './context.js';
 import { actorFromRequestContext } from './context.js';
+import { contextGraphReader, handleContextGraphMemoryLayerRoute } from './context-graph-memory.js';
 
 /**
  * Map a `registerContextGraph` failure to an HTTP status +
@@ -1058,6 +1062,10 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     }
   }
 
+  if (req.method === 'POST' && path === '/api/context-graph/memory-layers') {
+    return handleContextGraphMemoryLayerRoute(ctx);
+  }
+
   // GET /api/sub-graph/list?contextGraphId=...
   // Returns per-sub-graph metadata + entity/triple counts so UIs can render a
   // SubGraphBar without a second round-trip per sub-graph.
@@ -1065,52 +1073,39 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     const qs = new URL(req.url ?? "", "http://localhost").searchParams;
     const contextGraphId = qs.get("contextGraphId");
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    const lifecycle = createStoreQueryRequestLifecycle(req, res, 'node-ui.sub-graph-stats');
     try {
       const registered = await agent.listSubGraphs(contextGraphId!);
-      // One pass enumerates *all* named graphs in the project + their
-      // distinct-subject and triple counts. Sub-graph ownership is inferred
-      // from the named-graph path segment after the context-graph id:
+      // Enumerate named graphs through the graph-set index, then aggregate
+      // exact-IRI query batches. Sub-graph ownership is inferred from the
+      // named-graph path segment after the context-graph id:
       //   did:dkg:context-graph:<cg>/<subGraph>/assertion/<author>/<name>
       //   did:dkg:context-graph:<cg>/<subGraph>   (committed sub-graph view)
-      // This is one SPARQL round-trip regardless of how many sub-graphs exist.
+      // Unlike the old GRAPH ?g aggregate, this never creates a giant VALUES
+      // allow-list or an unbounded CartesianProductJoinIterator in Oxigraph.
       const counts = new Map<string, { entityCount: number; tripleCount: number }>();
       try {
         const prefix = `did:dkg:context-graph:${contextGraphId}/`;
-        const sparql = `
-          SELECT ?g (COUNT(DISTINCT ?s) AS ?entities) (COUNT(*) AS ?triples)
-          WHERE {
-            GRAPH ?g { ?s ?p ?o }
-            FILTER(STRSTARTS(STR(?g), ${JSON.stringify(prefix)}))
-          }
-          GROUP BY ?g
-        `;
-        const result = await agent.query(sparql, {
-          contextGraphId: contextGraphId!,
-          includeContextGraphPartitions: true,
+        const graphStats = await readContextGraphNamedGraphStats(contextGraphReader(agent, contextGraphId!, actor.authenticatedAgentAddress), contextGraphId!, {
+          signal: lifecycle.signal, priority: lifecycle.priority,
         });
-        const parseCount = (v: any) => {
-          if (v === undefined || v === null) return 0;
-          const s = typeof v === 'string' ? v : (v && typeof v === 'object' && 'value' in v ? (v as any).value : '');
-          const m = String(s).match(/^"?(\d+)/);
-          return m ? Number(m[1]) : 0;
-        };
-        for (const row of (result?.bindings ?? []) as Array<Record<string, any>>) {
-          const g = typeof row.g === 'string' ? row.g : (row.g && typeof row.g === 'object' && 'value' in row.g ? row.g.value : undefined);
-          if (!g || !g.startsWith(prefix)) continue;
-          const tail = g.slice(prefix.length);
+        for (const row of graphStats) {
+          if (!row.graph.startsWith(prefix)) continue;
+          const tail = row.graph.slice(prefix.length);
           // tail starts with either "<subGraphName>/..." or "_meta" or "_shared_memory".
           // Only care about the first segment, but skip daemon-internal graphs.
           const firstSlash = tail.indexOf('/');
           const seg = firstSlash >= 0 ? tail.slice(0, firstSlash) : tail;
           if (!seg || seg.startsWith('_')) continue;
           const entry = counts.get(seg) ?? { entityCount: 0, tripleCount: 0 };
-          entry.entityCount += parseCount(row.entities);
-          entry.tripleCount += parseCount(row.triples);
+          entry.entityCount += row.entityCount;
+          entry.tripleCount += row.tripleCount;
           counts.set(seg, entry);
         }
       } catch {
         // Counts are best-effort — UI degrades to zeros on query failure.
       }
+      if (lifecycle.signal.aborted || res.destroyed) return;
       const items = registered.map((sg) => ({
         name: sg.name,
         uri: sg.uri,
@@ -1126,7 +1121,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         return jsonResponse(res, 400, { error: err.message });
       }
       throw err;
-    }
+    } finally { lifecycle.dispose(); }
   }
 
   // POST /api/context-graph/{id}/add-participant

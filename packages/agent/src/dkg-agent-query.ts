@@ -426,11 +426,10 @@ export class QueryMethods extends DKGAgentBase {
       includeSharedMemory?: boolean;
       /** @deprecated Use includeSharedMemory */
       includeWorkspace?: boolean;
-      /**
-       * Opt-in for dashboard/count queries that intentionally enumerate all
-       * registered public content partitions in a scoped `GRAPH ?g` scan.
-       */
+      /** Admit registered public partitions for scoped count scans. */
       includeContextGraphPartitions?: boolean;
+      /** Bounded exact-graph reads over the registered public count dataset. */
+      exactContextGraphPartitions?: boolean;
       /**
        * Opt-in: allow the scoped query to reference the context graph's own
        * `_private` partition (excluded from the scope guard's allow-set by
@@ -712,6 +711,7 @@ export class QueryMethods extends DKGAgentBase {
       graphSuffix: opts.graphSuffix,
       includeSharedMemory: opts.includeSharedMemory,
       includeContextGraphPartitions: opts.includeContextGraphPartitions,
+      exactContextGraphPartitions: opts.exactContextGraphPartitions,
       includePrivate: opts.includePrivate,
       signal: opts.signal,
       priority: opts.priority,
