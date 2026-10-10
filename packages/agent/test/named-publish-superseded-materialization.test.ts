@@ -182,6 +182,7 @@ async function lostMintFixture() {
   agent.requestRfc64SwmCatalogProjectionV1 = () => {};
   vi.spyOn(publisher, 'hasSwmShareComplete').mockResolvedValue(true);
   const clearShareComplete = vi.spyOn(publisher, 'clearSwmShareComplete').mockResolvedValue(undefined);
+  const clearRemainingShares = vi.spyOn(publisher, 'clearRemainingSharedMemory').mockResolvedValue(undefined);
   // The production wrapper reads the same share and calls this publish.
   agent.publishFromSharedMemory = async (contextGraphId: string, _selection: unknown, opts: any) =>
     publisher.publish({
@@ -205,7 +206,7 @@ async function lostMintFixture() {
     seal: { merkleRoot: ethers.hexlify(R1_ROOT), authorAddress: AUTHOR, schemeVersion: AUTHOR_SCHEME_VERSION_V1,
       reservedKaId: KA_ID.toString(), signature },
     sealChainId: '31337', sealKav10Address: KAV10, sealFinalizedAtIso: '2026-10-10T00:00:00.000Z',
-    intentKey: `sha256:${'ab'.repeat(32)}`,
+    intentKey: `sha256:${'ab'.repeat(32)}`, clearSharedMemoryAfter: true,
   };
   const queuedPublishOptions = { contextGraphId: CG, quads: [R1], publisherPeerId: 'race-publisher',
     v10ACKProvider: ackProvider };
@@ -234,8 +235,8 @@ async function lostMintFixture() {
     });
     return version;
   };
-  return { store, chain, agent, minted, releaseAdoption, clearShareComplete, completeNewerAssertion,
-    queuedRequest, queuedPublishOptions };
+  return { store, chain, agent, minted, releaseAdoption, clearShareComplete, clearRemainingShares,
+    completeNewerAssertion, queuedRequest, queuedPublishOptions };
 }
 
 describe('named publish whose adopted materialization is superseded', () => {
@@ -244,7 +245,7 @@ describe('named publish whose adopted materialization is superseded', () => {
     try {
       expect(await readPointer(f.store)).toBeUndefined();
       const publishing = entrypoint === 'sync vm/publish'
-        ? f.agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AUTHOR })
+        ? f.agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AUTHOR, clearSharedMemoryAfter: true })
         : f.agent.publishQueuedKnowledgeAssetVmPublish(f.queuedRequest, f.queuedPublishOptions);
       const settled = publishing.then((result: any) => ({ result }), (error: unknown) => ({ error }));
       await f.chain.adoptionStarted.promise;
@@ -259,6 +260,7 @@ describe('named publish whose adopted materialization is superseded', () => {
       expect(await readPointer(f.store)).toBe(bare(R2_ROOT));
       expect(await readMaterializedVersion(f.store, META, KA_UAL)).toEqual(newer);
       expect(f.clearShareComplete).not.toHaveBeenCalled();
+      expect(f.clearRemainingShares).not.toHaveBeenCalled();
       // ...while the adopted transaction stays R1's confirmed, recorded receipt.
       expect(outcome.result).toMatchObject({ status: 'confirmed', materializationSuperseded: true,
         onChainResult: { txHash: f.minted.onChainResult?.txHash } });
