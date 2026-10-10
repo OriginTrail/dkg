@@ -290,6 +290,8 @@ export default defineConfig({
       "test/named-ka-recovery-pending-log.test.ts",
       "test/named-ka-recovery-pending-warning.test.ts",
       "test/named-ka-recovery-version-cause.test.ts",
+      "test/exact-asset-fetch-version-cause.test.ts",
+      "test/vm-refresh-version-cause.test.ts",
       "test/ka-graph-finalization-handler.test.ts",
       "test/ka-lifecycle-asset-ual-timeout.test.ts",
       "test/storage-ack-lifecycle-identity.test.ts",
