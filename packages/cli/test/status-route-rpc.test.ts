@@ -699,6 +699,8 @@ describe('/api/status RFC-64 private recovery privacy', () => {
     } as never;
     const queue = {
       depth: 2,
+      pending: 4,
+      oldestPendingAgeMs: 61_000,
       waiters: 1,
       oldestWaiterAgeMs: 1_520,
       passRunning: true,
@@ -739,8 +741,10 @@ describe('/api/status RFC-64 private recovery privacy', () => {
         'cooldownSkips',
         'depth',
         'lastPassDurationMs',
+        'oldestPendingAgeMs',
         'oldestWaiterAgeMs',
         'passRunning',
+        'pending',
         'waiters',
       ]);
       const serialized = JSON.stringify(response.body.rfc64Catalog);
@@ -750,8 +754,27 @@ describe('/api/status RFC-64 private recovery privacy', () => {
         .not.toContain(privateContextGraph);
     });
 
+    it('keeps a backlog that nothing waits on: placements owed with no request held', async () => {
+      // A failed first attempt, or a restart, leaves markers owed and no waiter behind them.
+      const owed = { ...queue, waiters: 0, oldestWaiterAgeMs: null, passRunning: false };
+      const response = await requestStatusWithAgent(
+        { readRfc64SwmCatalogProjectionSupervisorStatusV1: () => supervisorStatus(owed) },
+        {},
+        '/api/status',
+        null,
+        catalogActivation,
+      );
+      expect(response.status).toBe(200);
+      expect(response.body.rfc64Catalog.finalizedPrivatePlacementQueue).toMatchObject({
+        pending: 4, oldestPendingAgeMs: 61_000, waiters: 0, oldestWaiterAgeMs: null,
+      });
+    });
+
     it('keeps an idle queue with nothing waiting', async () => {
-      const idle = { ...queue, waiters: 0, oldestWaiterAgeMs: null, passRunning: false, lastPassDurationMs: null };
+      const idle = {
+        ...queue, pending: 0, oldestPendingAgeMs: null, waiters: 0, oldestWaiterAgeMs: null,
+        passRunning: false, lastPassDurationMs: null,
+      };
       const response = await requestStatusWithAgent(
         { readRfc64SwmCatalogProjectionSupervisorStatusV1: () => supervisorStatus(idle) },
         {},
@@ -767,6 +790,9 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       ['missing block', undefined],
       ['negative depth', { ...queue, depth: -1 }],
       ['fractional age', { ...queue, oldestWaiterAgeMs: 1.5 }],
+      ['no pending count', { ...queue, pending: undefined }],
+      ['fractional pending age', { ...queue, oldestPendingAgeMs: 0.5 }],
+      ['missing pending age', (({ oldestPendingAgeMs: _dropped, ...rest }) => rest)(queue)],
       ['string flag', { ...queue, passRunning: 'yes' }],
       ['array', [queue]],
     ])('degrades a version-skewed queue to null: %s', async (_label, finalizedPrivatePlacement) => {

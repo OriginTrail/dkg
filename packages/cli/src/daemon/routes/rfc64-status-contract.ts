@@ -112,22 +112,26 @@ export function sanitizeRfc64CatalogShadowExecutionStatusV1(
 }
 
 /**
- * GH#3081 — allow-list for the finalized-private placement queue aggregate. Counts, two durations
- * and one flag are rebuilt field by field, so no repair key, UAL, author or graph id a provider
- * might attach can cross the HTTP boundary; any other shape reads as null.
+ * GH#3081 — allow-list for the finalized-private placement queue aggregate. Counts, three
+ * durations and one flag are rebuilt field by field, so no repair key, UAL, author or graph id a
+ * provider might attach can cross the HTTP boundary; any other shape reads as null. `pending` and
+ * `oldestPendingAgeMs` are the backlog: placements owed, whether or not anything still asks for them.
  */
 export function sanitizeRfc64FinalizedPrivatePlacementQueueV1(
   input: unknown,
 ): Readonly<FinalizedPrivatePlacementQueueStatusV1> | null {
   if (
     !isRecordV1(input)
-    || !hasNonNegativeSafeIntegersV1(input, ['depth', 'waiters', 'cooldownSkips'])
+    || !hasNonNegativeSafeIntegersV1(input, ['depth', 'pending', 'waiters', 'cooldownSkips'])
     || typeof input.passRunning !== 'boolean'
+    || !isNullableNonNegativeSafeIntegerV1(input.oldestPendingAgeMs)
     || !isNullableNonNegativeSafeIntegerV1(input.oldestWaiterAgeMs)
     || !isNullableNonNegativeSafeIntegerV1(input.lastPassDurationMs)
   ) return null;
   return Object.freeze({
     depth: input.depth as number,
+    pending: input.pending as number,
+    oldestPendingAgeMs: input.oldestPendingAgeMs,
     waiters: input.waiters as number,
     oldestWaiterAgeMs: input.oldestWaiterAgeMs,
     passRunning: input.passRunning,
