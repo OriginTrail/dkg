@@ -204,8 +204,6 @@ export class RpcFailoverClient {
   private readonly stickiness: EndpointStickiness;
   /** Which endpoint refused which read (see endpoint-read-refusals.ts). */
   private readonly readRefusals: EndpointReadRefusals;
-  /** The stickiness kill switch: off means every pass uses the configured order. */
-  private readonly endpointOrderingEnabled: () => boolean;
   /** Optional per-endpoint transport preflight (from `options.validateEndpoint`). */
   private readonly validateEndpoint?: ValidateEndpointFn;
   private readonly readThrottleRetries: number;
@@ -236,7 +234,6 @@ export class RpcFailoverClient {
       onEstablished: (url) => notePreferredEndpoint('rpc failover', url),
     });
     this.readRefusals = new EndpointReadRefusals({ now: stickiness?.now ?? Date.now });
-    this.endpointOrderingEnabled = isEnabled;
   }
 
   /**
@@ -767,7 +764,6 @@ export class RpcFailoverClient {
     // stickiness, and so does every read when ordering is switched off.
     const attempts = this.stickiness.readAttempts(canonical, options.intent, {
       label, memory: this.readRefusals,
-      remember: options.intent !== 'transparentRead' && this.endpointOrderingEnabled(),
     });
     const configuredAttemptTimeoutMs = options.attemptTimeoutMs(canonical.length);
     let allEndpointsThrottled = true;

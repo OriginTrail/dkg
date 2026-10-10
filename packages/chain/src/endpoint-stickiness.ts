@@ -123,11 +123,12 @@ export class EndpointStickiness {
    */
   readAttempts<T extends StickyEndpoint>(
     canonical: T[], intent: StickinessIntent,
-    read: { label: string; memory: EndpointReadRefusals; remember: boolean },
+    read: { label: string; memory: EndpointReadRefusals },
   ): ReadAttempt<T>[] {
+    const remember = intent !== 'transparentRead' && this.cfg.isEnabled();
     const ordered = this.order(canonical, intent);
     let plan = ordered.map((endpoint, index) => ({ endpoint, index, kind: 'ordinary' as 'ordinary' | 'substitute' }));
-    if (read.remember) {
+    if (remember) {
       const { refusing, servedInstead } = read.memory.constraints(read.label, ordered.map(e => e.rpcUrl));
       if (refusing.size > 0 && refusing.size < ordered.length) {
         const refused = plan.filter(attempt => refusing.has(attempt.endpoint.rpcUrl));
@@ -143,11 +144,11 @@ export class EndpointStickiness {
       endpoint, kind,
       recordStart: () => this.recordReadStart(endpoint, canonical, intent),
       recordSuccess: () => {
-        if (read.remember) read.memory.recordSuccess(read.label, endpoint.rpcUrl, kind);
+        if (remember) read.memory.recordSuccess(read.label, endpoint.rpcUrl, kind);
         if (kind === 'ordinary') this.recordSuccess(endpoint, canonical, intent, index === 0);
       },
       recordFailure: error => {
-        if (read.remember) read.memory.recordFailure(read.label, endpoint.rpcUrl, error, kind);
+        if (remember) read.memory.recordFailure(read.label, endpoint.rpcUrl, error, kind);
         if (kind === 'ordinary') this.recordFailure(endpoint, intent);
       },
     }));
