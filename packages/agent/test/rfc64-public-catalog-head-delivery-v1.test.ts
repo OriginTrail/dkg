@@ -8,11 +8,22 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { noteRfc64CatalogPolicyUndecidedV1 } from '../src/rfc64/catalog-policy-decision-probe-v1.js';
+import { RFC64_CATALOG_HEAD_DELIVERY_MAX_ACTIVE_FANOUTS_V1 } from '../src/rfc64/public-catalog-head-delivery-v1.js';
 import {
   RFC64_CATALOG_HEAD_FANOUT_WAVE_INTERVAL_MS_V1,
   RFC64_CATALOG_HEAD_FANOUT_WAVE_PEERS_V1,
-} from '../src/rfc64/public-catalog-head-delivery-v1.js';
-import { BUDGET_MS, harness, head, peers, settle } from './support/rfc64-catalog-head-delivery-harness.js';
+  RFC64_CATALOG_HEAD_MAX_DECISIONS_IN_FLIGHT_V1,
+  RFC64_CATALOG_HEAD_SELECTION_CONCURRENCY_V1,
+} from '../src/rfc64/public-catalog-head-fanout-v1.js';
+import {
+  BUDGET_MS,
+  author,
+  harness,
+  head,
+  peers,
+  settle,
+} from './support/rfc64-catalog-head-delivery-harness.js';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -41,6 +52,8 @@ describe('RFC-64 catalog head delivery: hand-off', () => {
       announcedPeers: ['peer-a', 'peer-b'],
       failedPeers: [],
       refusedPeers: [],
+      uncheckedPeers: [],
+      unconfirmedPeers: [],
       supersededHeads: 0,
       checkpointCapacityExceeded: false,
       notDeliverable: null,
@@ -69,10 +82,11 @@ describe('RFC-64 catalog head delivery: hand-off', () => {
     const { delivery, sends } = harness();
     const malformed = { ...head('1'), catalogVersion: 'not-a-version' } as never;
 
-    expect(delivery.deliver({ announcement: malformed, peers: ['peer-a'] }).status).toBe('not-queued');
-    expect(delivery.deliver({ announcement: head('1'), peers: ['peer-a', 'peer-a'] }).status)
-      .toBe('not-queued');
-    expect(delivery.deliver(undefined as never).status).toBe('not-queued');
+    const invalid = { status: 'not-queued', reason: 'invalid' };
+    expect(delivery.deliver({ announcement: malformed, peers: ['peer-a'] })).toEqual(invalid);
+    expect(delivery.deliver({ announcement: head('1'), peers: ['peer-a', 'peer-a'] })).toEqual(invalid);
+    expect(delivery.deliver({ announcement: head('1'), peers: peers(65) })).toEqual(invalid);
+    expect(delivery.deliver(undefined as never)).toEqual(invalid);
     await delivery.whenIdle();
     expect(sends).toEqual([]);
   });
@@ -101,9 +115,10 @@ describe('RFC-64 catalog head delivery: hand-off', () => {
     expect(seen).toEqual([undefined, undefined, undefined]);
   });
 
-  it('lets the host run each fan-out, and survives a host that fails to', async () => {
+  it('lets the host run each fan-out, and reports a head the host could not run a fan-out for', async () => {
     const hosted: string[] = [];
     let failNext = true;
+    let failAfterwards = false;
     const { delivery, sends, outcomes } = harness({
       runFanout: async (fanout) => {
         if (failNext) {
@@ -113,18 +128,35 @@ describe('RFC-64 catalog head delivery: hand-off', () => {
         hosted.push('start');
         await fanout();
         hosted.push('end');
+        if (failAfterwards) throw new Error('host lane closed late');
       },
     });
 
     delivery.deliver({ announcement: head('1'), peers: ['peer-a'] });
     await delivery.whenIdle();
     expect(sends).toEqual([]);
-    expect(outcomes).toEqual([]);
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]).toMatchObject({
+      announcement: { catalogVersion: '1' },
+      announcedPeers: [],
+      failedPeers: [],
+      notDeliverable: 'the fan-out could not be run: host lane unavailable',
+    });
 
+    // The owner carries on with the next head, and a fan-out that ran is reported once.
     delivery.deliver({ announcement: head('2'), peers: ['peer-a'] });
     await delivery.whenIdle();
     expect(hosted).toEqual(['start', 'end']);
     expect(sends.map(({ version }) => version)).toEqual(['2']);
+    expect(outcomes).toHaveLength(2);
+    expect(outcomes[1]!.notDeliverable).toBeNull();
+
+    // A host that fails after the fan-out has run does not add a second report for it.
+    failAfterwards = true;
+    delivery.deliver({ announcement: head('3'), peers: ['peer-a'] });
+    await delivery.whenIdle();
+    expect(outcomes).toHaveLength(3);
+    expect(outcomes[2]).toMatchObject({ announcedPeers: ['peer-a'], notDeliverable: null });
   });
 
   it('keeps delivering when the outcome observer throws', async () => {
@@ -262,37 +294,101 @@ describe('RFC-64 catalog head delivery: peers the local policy refuses', () => {
     expect(outcomes[0]!.failedPeers[1]).not.toHaveProperty('code');
   });
 
-  it('asks about the peers whose send was denied four at a time, and keeps their order', async () => {
-    vi.useFakeTimers();
-    const asked = new Map<string, number>();
-    const { delivery, outcomes, behaviour } = harness({
-      // Selection is answered at once; the question after a denied send takes 100 ms.
-      isPeerAuthorized: (peerId) => {
-        const times = (asked.get(peerId) ?? 0) + 1;
-        asked.set(peerId, times);
-        return times === 1
-          ? Promise.resolve(true)
-          : new Promise((resolve) => { setTimeout(() => resolve(true), 100); });
-      },
-    });
+  it('tells a denied send apart without asking the policy again', async () => {
+    const { delivery, outcomes, behaviour, decisions } = harness();
     const denying = peers(8, 'denying');
     for (const peerId of denying) behaviour.set(peerId, 'remote-denial');
 
     delivery.deliver({ announcement: head('1'), peers: ['member', ...denying] });
-    await vi.advanceTimersByTimeAsync(199);
-    expect(outcomes).toEqual([]);
-    await vi.advanceTimersByTimeAsync(1);
+    await delivery.whenIdle();
 
-    // Eight questions of 100 ms each, four at a time.
-    expect(outcomes[0]!.durationMs).toBe(200);
+    // One question per peer, at selection. Where a send was denied says the rest: the transport
+    // let these out, so the denial is the remote peer's.
+    expect(decisions).toEqual(['member', ...denying]);
     expect(outcomes[0]!.announcedPeers).toEqual(['member']);
     expect(outcomes[0]!.failedPeers.map(({ peerId }) => peerId)).toEqual(denying);
     expect(outcomes[0]!.refusedPeers).toEqual([]);
   });
 
-  it('fails closed when the policy decision throws or is anything but a plain yes', async () => {
+  it('reports a peer it sent the head to whose authorization ended while the send was under way', async () => {
+    const { delivery, sends, outcomes, behaviour } = harness();
+    behaviour.set('leaving-member', 'lapse');
+
+    delivery.deliver({ announcement: head('4'), peers: ['member', 'leaving-member'] });
+    await delivery.whenIdle();
+
+    // The head went out to both. For one of them this node's check after the send said no:
+    // that is neither a refusal (something was sent) nor a delivery it can vouch for.
+    expect(sends.map(({ peerId }) => peerId)).toEqual(['member', 'leaving-member']);
+    expect(outcomes[0]).toMatchObject({
+      announcedPeers: ['member'],
+      failedPeers: [],
+      refusedPeers: [],
+      uncheckedPeers: [],
+      unconfirmedPeers: ['leaving-member'],
+    });
+  });
+});
+
+describe('RFC-64 catalog head delivery: peers the local policy could not be asked about', () => {
+  it('keeps a peer it could not check apart from a refused one, and looks a second time', async () => {
+    const { delivery, sends, transportCalls, outcomes, refused, undecidable, decisions } = harness();
+    refused.add('outsider');
+    undecidable.add('unknown-1');
+    undecidable.add('unknown-2');
+
+    delivery.deliver({
+      announcement: head('3'),
+      peers: ['unknown-1', 'outsider', 'member', 'unknown-2'],
+    });
+    await delivery.whenIdle();
+
+    // Nothing is sent without a yes. A refusal is final for this fan-out; a decision that could
+    // not be made is asked for once more before the fan-out gives up on the peer.
+    expect(sends.map(({ peerId }) => peerId)).toEqual(['member']);
+    expect(transportCalls).toEqual(['member']);
+    expect(decisions).toEqual([
+      'unknown-1', 'outsider', 'member', 'unknown-2',
+      'unknown-1', 'unknown-2',
+    ]);
+    expect(outcomes[0]).toMatchObject({
+      announcedPeers: ['member'],
+      failedPeers: [],
+      refusedPeers: ['outsider'],
+      uncheckedPeers: ['unknown-1', 'unknown-2'],
+      notDeliverable: null,
+    });
+  });
+
+  it('sends to a peer whose decision could be made at the second look', async () => {
+    const { delivery, sends, outcomes } = harness({
+      isPeerAuthorized: (() => {
+        let looks = 0;
+        return async (peerId) => {
+          if (peerId !== 'slow-to-resolve') return true;
+          looks += 1;
+          if (looks > 1) return true;
+          // The first look fails the way a lookup that times out does.
+          noteRfc64CatalogPolicyUndecidedV1();
+          return false;
+        };
+      })(),
+    });
+
+    delivery.deliver({ announcement: head('3'), peers: ['member', 'slow-to-resolve'] });
+    await delivery.whenIdle();
+
+    expect(sends.map(({ peerId }) => peerId)).toEqual(['member', 'slow-to-resolve']);
+    expect(outcomes[0]).toMatchObject({
+      announcedPeers: ['member', 'slow-to-resolve'],
+      refusedPeers: [],
+      uncheckedPeers: [],
+    });
+  });
+
+  it('treats a decision that fails as no answer, and anything but a plain yes as a no', async () => {
     // What a yes takes (the policy cell, its generation) is the transport's to decide and is
-    // covered there and in the service suite. Here: no answer, or an unclear one, is a refusal.
+    // covered there and in the service suite.
     const { delivery, sends, outcomes } = harness({
       isPeerAuthorized: async (peerId) => {
         if (peerId === 'throws') throw new Error('store unavailable');
@@ -300,7 +396,7 @@ describe('RFC-64 catalog head delivery: peers the local policy refuses', () => {
         return true;
       },
       send: async (peerId, announcement, options) => {
-        sends.push({ peerId, version: announcement.catalogVersion, author: '', options });
+        sends.push({ peerId, version: announcement.catalogVersion, author: '', options, at: 0 });
       },
     });
 
@@ -311,10 +407,99 @@ describe('RFC-64 catalog head delivery: peers the local policy refuses', () => {
     expect(outcomes[0]).toMatchObject({
       announcedPeers: ['member'],
       failedPeers: [],
-      refusedPeers: ['throws', 'unclear'],
+      refusedPeers: ['unclear'],
+      uncheckedPeers: ['throws'],
     });
   });
 
+  it('counts a peer as unchecked when the check before its send could not be made', async () => {
+    // The peer passes selection; before its send the lookup fails, so the transport's own check
+    // has no answer and nothing is sent.
+    const { delivery, sends, transportCalls, outcomes, undecidable } = harness({
+      isPeerAuthorized: async (peerId) => {
+        if (peerId === 'flaky-lookup') undecidable.add(peerId);
+        return true;
+      },
+    });
+
+    delivery.deliver({ announcement: head('4'), peers: ['member', 'flaky-lookup'] });
+    await delivery.whenIdle();
+
+    expect(transportCalls).toEqual(['member', 'flaky-lookup']);
+    expect(sends.map(({ peerId }) => peerId)).toEqual(['member']);
+    expect(outcomes[0]).toMatchObject({
+      announcedPeers: ['member'],
+      failedPeers: [],
+      refusedPeers: [],
+      uncheckedPeers: ['flaky-lookup'],
+    });
+  });
+
+  it('stops selecting at its deadline: unanswered peers are unchecked and the rest are sent to', async () => {
+    vi.useFakeTimers();
+    const { delivery, sends, outcomes } = harness({
+      selectionBudgetMs: 2_000,
+      // One lookup never answers; the others take half a second.
+      isPeerAuthorized: (peerId) => (peerId === 'hung-lookup'
+        ? new Promise(() => undefined)
+        : new Promise((resolve) => { setTimeout(() => resolve(true), 500); })),
+    });
+    const others = peers(6);
+
+    delivery.deliver({ announcement: head('1'), peers: ['hung-lookup', ...others] });
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(sends).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+
+    // Three lanes answered six peers in a second; the deadline then ended the wait for the
+    // fourth, and the fan-out went ahead without it.
+    expect(sends.map(({ peerId }) => peerId)).toEqual(others);
+    expect(outcomes[0]).toMatchObject({
+      announcedPeers: others,
+      refusedPeers: [],
+      uncheckedPeers: ['hung-lookup'],
+      durationMs: 2_000,
+    });
+    expect(delivery.pendingScopes).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('gives its turn back at the selection deadline: lookups that never answer hold no other scope for longer', async () => {
+    vi.useFakeTimers();
+    const asked: string[] = [];
+    const { delivery, outcomes } = harness({
+      selectionBudgetMs: 1_000,
+      isPeerAuthorized: (peerId) => {
+        asked.push(peerId);
+        return new Promise(() => undefined);
+      },
+    });
+    const turns = RFC64_CATALOG_HEAD_DELIVERY_MAX_ACTIVE_FANOUTS_V1;
+    const lanes = RFC64_CATALOG_HEAD_SELECTION_CONCURRENCY_V1;
+    const scopes = turns + 2;
+    for (let index = 0; index < scopes; index += 1) {
+      delivery.deliver({ announcement: head('1', author(index)), peers: peers(lanes, `s${index}`) });
+    }
+    await settle();
+    expect(asked).toHaveLength(turns * lanes);
+    expect(asked).toHaveLength(RFC64_CATALOG_HEAD_MAX_DECISIONS_IN_FLIGHT_V1);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await settle();
+    // The first four fan-outs gave up on their lookups and reported them; the two scopes behind
+    // them got their turns. Their peers are not asked about while the hung lookups fill every
+    // place for a decision in flight, so they are unchecked at once.
+    expect(asked).toHaveLength(RFC64_CATALOG_HEAD_MAX_DECISIONS_IN_FLIGHT_V1);
+    expect(outcomes).toHaveLength(scopes);
+    expect(outcomes.every(({ uncheckedPeers, announcedPeers, refusedPeers }) => (
+      uncheckedPeers.length === lanes && announcedPeers.length === 0 && refusedPeers.length === 0
+    ))).toBe(true);
+    expect(delivery.pendingScopes).toBe(0);
+    await expect(delivery.close()).resolves.toBeUndefined();
+  });
+});
+
+describe('RFC-64 catalog head delivery: what cannot be fanned out', () => {
   it('sends nothing when the head may no longer be fanned out', async () => {
     const { delivery, sends, outcomes, decisions } = harness({
       assertDeliverable: () => {
@@ -437,18 +622,58 @@ describe('RFC-64 catalog head delivery: one budget, bounded waves', () => {
     ]));
   });
 
+  it('takes the times stated for 4, 11 and 64 peers that acknowledge, are refused, stall, or a third each', async () => {
+    vi.useFakeTimers();
+    // An acknowledging peer answers after 25 ms; a stalled peer never answers.
+    const fanout = async (count: number, kindOf: (index: number) => 'ack' | 'refused' | 'stall') => {
+      const { delivery, sends, outcomes, behaviour, refused } = harness({ ackDelayMs: 25 });
+      const everyone = peers(count);
+      everyone.forEach((peerId, index) => {
+        if (kindOf(index) === 'refused') refused.add(peerId);
+        if (kindOf(index) === 'stall') behaviour.set(peerId, 'stall');
+      });
+      const startedAt = Date.now();
+      delivery.deliver({ announcement: head('1'), peers: everyone });
+      await vi.advanceTimersByTimeAsync(BUDGET_MS);
+      await settle();
+      const acknowledged = sends.filter(({ peerId }) => !behaviour.has(peerId));
+      return {
+        fanoutMs: outcomes[0]!.durationMs,
+        // When the last acknowledging peer had the head.
+        servedMs: acknowledged.length === 0
+          ? null
+          : Math.max(...acknowledged.map(({ at }) => at)) - startedAt + 25,
+        sent: sends.length,
+        failed: outcomes[0]!.failedPeers.length,
+      };
+    };
+    const mixed = (index: number) => (['ack', 'refused', 'stall'] as const)[index % 3]!;
+
+    for (const [count, acknowledging, aThirdEach] of [
+      [4, { fanoutMs: 25, servedMs: 25 }, { fanoutMs: BUDGET_MS, servedMs: 25 }],
+      [11, { fanoutMs: 25, servedMs: 25 }, { fanoutMs: BUDGET_MS, servedMs: 25 }],
+      // Four waves of acknowledging peers; with a stalled peer in every wave, three waves a second apart.
+      [64, { fanoutMs: 100, servedMs: 100 }, { fanoutMs: BUDGET_MS, servedMs: 2_025 }],
+    ] as const) {
+      expect(await fanout(count, () => 'ack')).toMatchObject({ ...acknowledging, failed: 0 });
+      expect(await fanout(count, () => 'refused')).toEqual({ fanoutMs: 0, servedMs: null, sent: 0, failed: 0 });
+      expect(await fanout(count, () => 'stall')).toMatchObject({ fanoutMs: BUDGET_MS, failed: count });
+      expect(await fanout(count, mixed)).toMatchObject(aThirdEach);
+    }
+  });
+
   it('starts the budget with the first send: a slow selection does not use it up', async () => {
     vi.useFakeTimers();
     const { delivery, sends, outcomes, behaviour } = harness({
-      // This node's own policy reads take longer than a whole fan-out budget.
+      // This node's own policy reads take most of the time selection has.
       isPeerAuthorized: () => new Promise((resolve) => {
-        setTimeout(() => resolve(true), BUDGET_MS + 1_000);
+        setTimeout(() => resolve(true), BUDGET_MS - 1_000);
       }),
     });
     behaviour.set('slow-peer', 'stall');
 
     delivery.deliver({ announcement: head('1'), peers: ['peer-a', 'slow-peer'] });
-    await vi.advanceTimersByTimeAsync(BUDGET_MS + 1_000);
+    await vi.advanceTimersByTimeAsync(BUDGET_MS - 1_000);
     await settle();
 
     // Both peers were still attempted, each with the whole budget ahead of it.
@@ -462,7 +687,7 @@ describe('RFC-64 catalog head delivery: one budget, bounded waves', () => {
       announcedPeers: ['peer-a'],
       failedPeers: [{ peerId: 'slow-peer' }],
       refusedPeers: [],
-      durationMs: 2 * BUDGET_MS + 1_000,
+      durationMs: 2 * BUDGET_MS - 1_000,
     });
   });
 });

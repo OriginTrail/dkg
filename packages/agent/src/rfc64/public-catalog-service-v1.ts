@@ -117,6 +117,10 @@ import type {
   Rfc64CatalogAuthorityPolicyV1,
 } from './public-catalog-activation-config-v1.js';
 import {
+  notingRfc64CatalogPolicyFailureV1,
+  observedRfc64CatalogAccessAuthorityV1,
+} from './catalog-policy-decision-probe-v1.js';
+import {
   Rfc64CatalogHeadDeliveryV1,
   type AnnounceRfc64PublicCatalogHeadResultV1,
   type DeliverRfc64PublicCatalogHeadInputV1,
@@ -517,7 +521,9 @@ export class Rfc64PublicCatalogServiceV1 {
 
   constructor(options: Rfc64PublicCatalogServiceOptionsV1) {
     this.#controlObjects = options.controlObjects;
-    this.#policies = new Rfc64CatalogAccessPolicyRegistryV1(options.accessPolicyAuthority);
+    this.#policies = new Rfc64CatalogAccessPolicyRegistryV1(
+      observedRfc64CatalogAccessAuthorityV1(options.accessPolicyAuthority),
+    );
     this.#verifyIssuerSignature =
       options.verifyIssuerSignature ?? verifyControlEnvelopeIssuerSignatureV1;
     this.#transportTimeoutMs = options.transportTimeoutMs ?? DEFAULT_TRANSPORT_TIMEOUT_MS;
@@ -538,11 +544,11 @@ export class Rfc64PublicCatalogServiceV1 {
       }));
 
     const authorizeCatalogOperation: Rfc64CatalogAccessPolicyRegistryV1['authorize'] =
-      async (input) => (
+      (input) => notingRfc64CatalogPolicyFailureV1(() => (
         this.#authorityForOperation(input.contextGraphId, input.operation).track2Enabled
           ? this.#policies.authorize(input)
           : null
-      );
+      ));
     this.#transport = new Rfc64PublicCatalogTransportV1(options.router, {
       controlObjects: this.#controlObjects,
       authorizeCatalogOperation,
@@ -574,7 +580,9 @@ export class Rfc64PublicCatalogServiceV1 {
       },
       localPeerId: options.localPeerId,
       fanoutBudgetMs: this.#transportTimeoutMs,
-      ...options.catalogHeadDelivery,
+      // The host chooses these two and nothing else: the ports above stay the service's own.
+      onDelivered: options.catalogHeadDelivery?.onDelivered,
+      runFanout: options.catalogHeadDelivery?.runFanout,
     });
 
     this.#currentHeadDiscoveryTransport = options.currentHeadDiscovery === undefined

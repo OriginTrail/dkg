@@ -584,6 +584,10 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       // fan-out runs outside this serialized mutation, so the next change never waits for a peer
       // (GH#3081). The fan-out reports itself; the mutation has nothing to observe about it.
       this.deliverRfc64CatalogHeadV1({ announcement: successor.announcement, peers });
+    } else {
+      // The caller gave up after the commit, so nothing is handed off. The head is durable all
+      // the same and reaches peers with the catalog's next head or through replay: say so.
+      this.reportRfc64CatalogHeadNotHandedOffV1(successor.announcement);
     }
     return Object.freeze({
       applied: committed.appliedHead,

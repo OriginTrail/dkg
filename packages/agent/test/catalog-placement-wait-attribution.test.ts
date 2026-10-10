@@ -193,7 +193,8 @@ describe('catalog placement wait attribution', () => {
     const deliveryLines = debug.mock.calls.map(([, message]) => String(message))
       .filter((message) => message.startsWith('rfc64_catalog_head_delivery '));
     expect(deliveryLines).toHaveLength(1);
-    expect(deliveryLines[0]).toContain(' version=1 delivered=0 failed=0 refused=0 superseded=0 ');
+    expect(deliveryLines[0])
+      .toContain(' version=1 delivered=0 failed=0 refused=0 unchecked=0 unconfirmed=0 superseded=0 ');
     expect(deliveryLines[0]).toContain('notDeliverable="RFC-64 catalog head delivery closed"');
   }, 60_000);
 

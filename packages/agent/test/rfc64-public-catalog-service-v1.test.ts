@@ -28,10 +28,8 @@ import {
   Rfc64PublicCatalogServiceV1,
   type Rfc64PublicCatalogReconcilerClientsV1,
 } from '../src/rfc64/public-catalog-service-v1.js';
-import {
-  RFC64_CATALOG_HEAD_FANOUT_WAVE_PEERS_V1,
-  type Rfc64CatalogHeadDeliveryOutcomeV1,
-} from '../src/rfc64/public-catalog-head-delivery-v1.js';
+import type { Rfc64CatalogHeadDeliveryOutcomeV1 } from '../src/rfc64/public-catalog-head-delivery-v1.js';
+import { RFC64_CATALOG_HEAD_FANOUT_WAVE_PEERS_V1 } from '../src/rfc64/public-catalog-head-fanout-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_KIND_V1,
   RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1,
@@ -2776,9 +2774,12 @@ describe('RFC-64 public catalog service v1 head hand-off (GH#3081)', () => {
   /** A started service holding one private policy whose roster is the author and one member. */
   function privateDeliveryService(options: {
     readonly resolveRemoteAgentAddress: (peerId: string) => Promise<EvmAddressV1 | null>;
+    /** This node's own principal, looked up per decision instead of configured. */
+    readonly resolveLocalAgentAddress?: () => Promise<EvmAddressV1 | null>;
     readonly sendResponse: RecordingRouter['sendResponse'];
     readonly scopeBoundReads?: boolean;
     readonly start?: boolean;
+    readonly hostPorts?: Record<string, unknown>;
   }) {
     const policy = catalogPolicy(`${CONTEXT_GRAPH_ID}-private-delivery`, 1, 1);
     const policyDigest = `0x${'3d'.repeat(32)}` as Digest32V1;
@@ -2788,15 +2789,20 @@ describe('RFC-64 public catalog service v1 head hand-off (GH#3081)', () => {
     const service = new Rfc64PublicCatalogServiceV1({
       router: router.asProtocolRouter(),
       controlObjects: controlObjects(),
-      accessPolicyAuthority: {
-        localAgentAddress: AUTHOR,
-        resolveRemoteAgentAddress: options.resolveRemoteAgentAddress,
-      },
+      accessPolicyAuthority: options.resolveLocalAgentAddress === undefined
+        ? { localAgentAddress: AUTHOR, resolveRemoteAgentAddress: options.resolveRemoteAgentAddress }
+        : {
+          resolveLocalAgentAddress: options.resolveLocalAgentAddress,
+          resolveRemoteAgentAddress: options.resolveRemoteAgentAddress,
+        },
       native: {
         ...nativeOptions(() => inertReconciler()),
         ...(options.scopeBoundReads === false ? {} : { resolveScopedReadCapability: async () => null }),
       },
-      catalogHeadDelivery: { onDelivered: (outcome) => { outcomes.push(outcome); } },
+      catalogHeadDelivery: {
+        onDelivered: (outcome) => { outcomes.push(outcome); },
+        ...options.hostPorts,
+      },
       transportTimeoutMs: 40,
     });
     service.acceptPolicySnapshot({ policy, policyDigest, roster: memberRoster(policy, policyDigest) });
@@ -2866,8 +2872,79 @@ describe('RFC-64 public catalog service v1 head hand-off (GH#3081)', () => {
       failedPeers: [],
       refusedPeers: ['leaving-member'],
     });
-    // Selection, the transport's check before the send, and the decision that classified it.
-    expect(lookups).toBe(3);
+    // Selection, then the transport's check before the send. Where that check denied the send
+    // says that nothing went out: no further question is asked.
+    expect(lookups).toBe(2);
+    await service.close();
+  });
+
+  it('reports every peer as unchecked, not refused, when this node cannot establish its own principal', async () => {
+    let localLookups = 0;
+    const { service, router, outcomes, head } = privateDeliveryService({
+      // The read behind this node's own identity for the graph fails: the lookup has no answer.
+      resolveLocalAgentAddress: async () => {
+        localLookups += 1;
+        return null;
+      },
+      resolveRemoteAgentAddress: async () => MEMBER,
+      sendResponse: async () => Uint8Array.of(1),
+    });
+
+    service.deliverCatalogHead({ announcement: head, peers: ['member-a', 'member-b'] });
+    await service.whenCatalogHeadDeliveryIdle();
+
+    // Nothing is sent without a decision, and the two members are not written off as outsiders.
+    expect(router.sends).toEqual([]);
+    expect(outcomes[0]).toMatchObject({
+      announcedPeers: [],
+      failedPeers: [],
+      refusedPeers: [],
+      uncheckedPeers: ['member-a', 'member-b'],
+      notDeliverable: null,
+    });
+    // Each peer was asked about twice before the fan-out gave up on it.
+    expect(localLookups).toBe(4);
+    await service.close();
+  });
+
+  it('tells a peer whose identity lookup fails from a peer the roster does not hold', async () => {
+    const { service, router, outcomes, head } = privateDeliveryService({
+      resolveRemoteAgentAddress: async (peerId) => {
+        if (peerId === 'member-flaky') throw new Error('store query timed out');
+        return peerId === 'outsider' ? null : MEMBER;
+      },
+      sendResponse: async () => Uint8Array.of(1),
+    });
+
+    service.deliverCatalogHead({ announcement: head, peers: ['member-flaky', 'outsider', 'member-ok'] });
+    await service.whenCatalogHeadDeliveryIdle();
+
+    expect(router.sends.map(({ peerId }) => peerId)).toEqual(['member-ok']);
+    expect(outcomes[0]).toMatchObject({
+      announcedPeers: ['member-ok'],
+      failedPeers: [],
+      refusedPeers: ['outsider'],
+      uncheckedPeers: ['member-flaky'],
+    });
+    await service.close();
+  });
+
+  it('does not let its host replace the ports that decide who is sent what', async () => {
+    const hostSend = vi.fn(async () => undefined);
+    const hostDecision = vi.fn(async () => true);
+    const { service, router, outcomes, head } = privateDeliveryService({
+      resolveRemoteAgentAddress: async (peerId) => (peerId.startsWith('member') ? MEMBER : null),
+      sendResponse: async () => Uint8Array.of(1),
+      hostPorts: { send: hostSend, isPeerAuthorized: hostDecision, assertDeliverable: () => undefined },
+    });
+
+    service.deliverCatalogHead({ announcement: head, peers: ['outsider', 'member-ok'] });
+    await service.whenCatalogHeadDeliveryIdle();
+
+    expect(hostSend).not.toHaveBeenCalled();
+    expect(hostDecision).not.toHaveBeenCalled();
+    expect(router.sends.map(({ peerId }) => peerId)).toEqual(['member-ok']);
+    expect(outcomes[0]).toMatchObject({ announcedPeers: ['member-ok'], refusedPeers: ['outsider'] });
     await service.close();
   });
 

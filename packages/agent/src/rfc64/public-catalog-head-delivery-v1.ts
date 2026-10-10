@@ -2,6 +2,8 @@
 
 /**
  * Outbound delivery of author-catalog head announcements, owned by the public catalog service.
+ * This module decides which head is sent when; `public-catalog-head-fanout-v1.ts` is how one head
+ * is sent (peer selection, waves, the budget of the sends).
  *
  * Two callers share one bounded fan-out:
  *
@@ -23,7 +25,7 @@
  * - The peers of a replaced head are carried over to the head that replaces it, as far as the
  *   peers of one fan-out go. A waiting head whose peers do not all fit is not replaced for them:
  *   it stays, for those peers only, and is sent first. So every peer a hand-off named is sent
- *   that head or a newer one.
+ *   that head or a newer one, unless this node's policy refuses the peer or cannot be asked.
  * - Two heads sent one after the other are at most half the lineage window apart. When a newer
  *   head would be further than that from the head sent before it, the waiting head is kept as a
  *   checkpoint and sent first.
@@ -39,8 +41,12 @@
  * On the wire both carry the same graph, author and era, but their versions are numbered
  * independently, so they are never compared with each other.
  *
- * A peer that missed an announcement converges through connect-time replay, which sends the
- * current head of each scope.
+ * A committed head does not reach a peer in these cases, and each is reported: it was not handed
+ * off or not queued (the receipt says why); the head could not be fanned out when its turn came (its
+ * policy is no longer the accepted one, the service is not started, the host could not run the
+ * fan-out); the owner closed first; the peer was refused, could not be checked or did not take
+ * the head; the scope ran out of places. Such a peer converges with the scope's next head or
+ * through connect-time replay, which sends the current head of each scope.
  *
  * Nothing is persisted here and no refusal is remembered: every fan-out asks the current policy
  * again, and the transport asks once more immediately before and after each send.
@@ -53,19 +59,14 @@
  * waiting heads per scope (the newest, and heads kept before it only when a backlog is that deep
  * or names that many peers), at most
  * {@link RFC64_CATALOG_HEAD_DELIVERY_MAX_CHECKPOINTS_V1} kept heads in all scopes together, at
- * most {@link RFC64_CATALOG_HEAD_DELIVERY_MAX_SCOPES_V1} scopes,
+ * most {@link RFC64_CATALOG_HEAD_DELIVERY_MAX_SCOPES_V1} scopes, and
  * {@link RFC64_CATALOG_HEAD_DELIVERY_MAX_ACTIVE_FANOUTS_V1} hand-off fan-outs selecting peers and
- * starting sends at a time, sends started in waves of
- * {@link RFC64_CATALOG_HEAD_FANOUT_WAVE_PEERS_V1}, and one time budget for all the sends of a
- * fan-out, counted from its first send. A fan-out owns one abort controller and one budget timer
- * that every send of it shares; no signal is composed per send. Selecting the peers is this node's
- * own reads, each bounded by its store or chain deadline, and is not counted against the budget.
- * `close` aborts every fan-out and resolves when the last one has settled.
+ * starting sends at a time. A fan-out has a deadline for selecting its peers and one time budget
+ * for all its sends. `close` aborts every fan-out and resolves when the last send has settled; it
+ * does not wait for a policy read that is still in flight.
  */
 
 import { AsyncResource } from 'node:async_hooks';
-
-import type { SendOptions } from '@origintrail-official/dkg-core';
 
 import { RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1 } from './catalog-head-lineage-v1.js';
 import {
@@ -74,21 +75,20 @@ import {
   snapshotRfc64RemoteCatalogAnnouncementPeersV1,
 } from './catalog-peers-v1.js';
 import {
-  Rfc64PublicCatalogTransportErrorV1,
+  Rfc64CatalogHeadFanoutV1,
+  describeRfc64CatalogHeadSendsV1,
+  type AnnounceRfc64PublicCatalogHeadResultV1,
+  type Rfc64CatalogHeadFanoutPortsV1,
+  type Rfc64CatalogHeadSendV1,
+} from './public-catalog-head-fanout-v1.js';
+import {
   encodeRfc64PublicCatalogHeadAnnouncementV1,
   parseRfc64PublicCatalogHeadAnnouncementV1,
   type Rfc64PublicCatalogHeadAnnouncementV1,
 } from './public-catalog-transport-v1.js';
-import { mapWithConcurrency } from '../map-with-concurrency.js';
 
-/** Sends a fan-out starts together. */
-export const RFC64_CATALOG_HEAD_FANOUT_WAVE_PEERS_V1 = 16;
-/**
- * The next wave starts when the previous one has settled, or after this long when it has not, so
- * a peer that never answers holds back the peers of later waves by at most this much per wave and
- * never the peers of its own wave. All sends still end with the fan-out's one budget.
- */
-export const RFC64_CATALOG_HEAD_FANOUT_WAVE_INTERVAL_MS_V1 = 1_000;
+export type { AnnounceRfc64PublicCatalogHeadResultV1 };
+
 /** Catalog scopes that may hold a head waiting for its fan-out. */
 export const RFC64_CATALOG_HEAD_DELIVERY_MAX_SCOPES_V1 = 1_024;
 /**
@@ -118,30 +118,7 @@ export const RFC64_CATALOG_HEAD_DELIVERY_MAX_CHECKPOINTS_V1 = 4_096;
  * waiting for a peer that does not answer never holds another scope's delivery.
  */
 export const RFC64_CATALOG_HEAD_DELIVERY_MAX_ACTIVE_FANOUTS_V1 = 4;
-/**
- * Local policy decisions in flight at once while a hand-off fan-out selects its peers. For a
- * private graph one decision reads this node's store several times and, when the graph is
- * registered on chain, the chain once. A few at a time let identical chain reads that are in
- * flight together be shared, without queueing a burst of store reads.
- */
-const ELIGIBILITY_CONCURRENCY_V1 = 4;
 const CLOSED_MESSAGE_V1 = 'RFC-64 catalog head delivery closed';
-
-export interface AnnounceRfc64PublicCatalogHeadResultV1 {
-  /** Validated immutable snapshot used for every delivery attempt. */
-  readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
-  /** Input-order peers that returned the exact transport ACK. */
-  readonly announcedPeers: readonly string[];
-  /**
-   * Input-order peers whose attempt threw, returned a non-ACK, or was not reached before the
-   * budget ended; `code` classifies typed failures.
-   */
-  readonly failedPeers: ReadonlyArray<{
-    readonly peerId: string;
-    readonly error: string;
-    readonly code?: Rfc64PublicCatalogTransportErrorV1['code'];
-  }>;
-}
 
 export interface DeliverRfc64PublicCatalogHeadInputV1 {
   readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
@@ -158,22 +135,45 @@ export interface Rfc64CatalogHeadHandoffV1 {
    * - `queued`: the scope's owner sends this head to these peers, or a newer one handed off before
    *   its turn.
    * - `nobody`: the peer list is empty once this node is removed from it.
-   * - `not-queued`: the owner is closed, every scope slot is taken, or the input is malformed. The
-   *   head stays durable and reaches peers through replay.
+   * - `not-queued`: nobody took the head; `reason` says why. The head stays durable and reaches
+   *   peers with the scope's next head or through replay.
    */
   readonly status: 'queued' | 'nobody' | 'not-queued';
+  /**
+   * Why a head was not queued: the owner is `closed`, every scope slot is taken (`full`), the
+   * input is malformed (`invalid`), there is no service to take it (`unavailable`), or its
+   * mutation's caller had given up by the time the head was durable (`cancelled`).
+   */
+  readonly reason?: 'closed' | 'full' | 'invalid' | 'unavailable' | 'cancelled';
 }
 
 const HANDOFF_QUEUED_V1: Rfc64CatalogHeadHandoffV1 = Object.freeze({ status: 'queued' });
 const HANDOFF_NOBODY_V1: Rfc64CatalogHeadHandoffV1 = Object.freeze({ status: 'nobody' });
-/** The receipt of a hand-off that no owner took, also used when there is no service to take it. */
-export const RFC64_CATALOG_HEAD_HANDOFF_NOT_QUEUED_V1: Rfc64CatalogHeadHandoffV1 =
-  Object.freeze({ status: 'not-queued' });
+const notQueuedV1 = (
+  reason: NonNullable<Rfc64CatalogHeadHandoffV1['reason']>,
+): Rfc64CatalogHeadHandoffV1 => Object.freeze({ status: 'not-queued', reason });
+const HANDOFF_CLOSED_V1 = notQueuedV1('closed');
+const HANDOFF_FULL_V1 = notQueuedV1('full');
+const HANDOFF_INVALID_V1 = notQueuedV1('invalid');
+/** The receipt of a hand-off made while there is no service to take it. */
+export const RFC64_CATALOG_HEAD_HANDOFF_UNAVAILABLE_V1 = notQueuedV1('unavailable');
+/** What a mutation reports instead of a hand-off when its caller gave up after the commit. */
+export const RFC64_CATALOG_HEAD_HANDOFF_CANCELLED_V1 = notQueuedV1('cancelled');
 
 /** One finished fan-out of a handed-off head. */
 export interface Rfc64CatalogHeadDeliveryOutcomeV1 extends AnnounceRfc64PublicCatalogHeadResultV1 {
   /** Peers this node's own policy refused when the fan-out ran. Nothing was sent to them. */
   readonly refusedPeers: readonly string[];
+  /**
+   * Peers this node could not check: its policy decision did not answer, because a lookup failed
+   * or came back empty-handed, or not in time. Nothing was sent to them. This is not a refusal.
+   */
+  readonly uncheckedPeers: readonly string[];
+  /**
+   * Peers the head was sent to while they were authorized, whose authorization this node could
+   * not confirm once the send had finished: it had ended, or could not be checked.
+   */
+  readonly unconfirmedPeers: readonly string[];
   /** Earlier heads of the scope replaced before they were sent, since its last fan-out. */
   readonly supersededHeads: number;
   /**
@@ -183,25 +183,15 @@ export interface Rfc64CatalogHeadDeliveryOutcomeV1 extends AnnounceRfc64PublicCa
    */
   readonly checkpointCapacityExceeded: boolean;
   readonly durationMs: number;
-  /** Why the head was not fanned out at all, for example its policy is no longer accepted. */
+  /**
+   * Why the head was not fanned out at all: its policy is no longer accepted, the service is not
+   * started, the owner closed, or the host could not run the fan-out.
+   */
   readonly notDeliverable: string | null;
 }
 
-export interface Rfc64CatalogHeadDeliveryOptionsV1 {
-  /** One announcement to one peer through the head transport, which rechecks the policy there. */
-  readonly send: (
-    remotePeerId: string,
-    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
-    sendOptions: SendOptions,
-  ) => Promise<void>;
-  /**
-   * Whether this node's own policy lets it announce `announcement` to the peer now: the head
-   * transport's own decision, asked without sending anything.
-   */
-  readonly isPeerAuthorized: (
-    remotePeerId: string,
-    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
-  ) => Promise<boolean>;
+export interface Rfc64CatalogHeadDeliveryOptionsV1
+  extends Omit<Rfc64CatalogHeadFanoutPortsV1, 'now'> {
   /** Throws when a handed-off head may not be fanned out now. Runs when its fan-out starts. */
   readonly assertDeliverable: (
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
@@ -209,8 +199,6 @@ export interface Rfc64CatalogHeadDeliveryOptionsV1 {
   ) => void;
   /** Local libp2p identity, removed from every peer list. */
   readonly localPeerId?: string;
-  /** Time budget of the sends of one whole fan-out, from the first send (ms). */
-  readonly fanoutBudgetMs: number;
   /** Diagnostic-only observer of every finished hand-off fan-out. */
   readonly onDelivered?: (outcome: Rfc64CatalogHeadDeliveryOutcomeV1) => void;
   /**
@@ -232,7 +220,7 @@ interface WaitingHeadV1 {
 }
 
 interface ScopeDeliveryV1 {
-  /** Oldest first. The last one is the newest head; the ones before it are checkpoints. */
+  /** Oldest first. The last one is the newest head; the ones before it are kept heads. */
   readonly waiting: WaitingHeadV1[];
   /** Version of the head sent last, or of the one before the first head this owner was given. */
   sentVersion: bigint;
@@ -241,19 +229,11 @@ interface ScopeDeliveryV1 {
   run: Promise<void> | null;
 }
 
-type PeerAttemptV1 = Readonly<
-  | { peerId: string; sent: true }
-  | { peerId: string; sent: false; failure: unknown }
+/** What a fan-out's report takes from the scope: counted since the scope's last fan-out. */
+type ScopeCountsV1 = Pick<
+  Rfc64CatalogHeadDeliveryOutcomeV1,
+  'supersededHeads' | 'checkpointCapacityExceeded'
 >;
-
-interface FanoutSessionV1 {
-  /** Aborts when the budget ends, the owner closes, or the awaiting caller's signal aborts. */
-  readonly signal: AbortSignal;
-  remainingMs(): number;
-  /** True when the budget, not the close path or a caller, ended the fan-out. */
-  budgetEnded(): boolean;
-  end(): void;
-}
 
 export class Rfc64CatalogHeadDeliveryV1 {
   readonly #options: Rfc64CatalogHeadDeliveryOptionsV1;
@@ -262,6 +242,7 @@ export class Rfc64CatalogHeadDeliveryV1 {
   /** The construction-time async context every scope owner starts in. */
   readonly #ownerContext = new AsyncResource('Rfc64CatalogHeadDeliveryV1');
   readonly #lifecycle = new AbortController();
+  readonly #fanout: Rfc64CatalogHeadFanoutV1;
   readonly #scopes = new Map<string, ScopeDeliveryV1>();
   readonly #announces = new Set<Promise<unknown>>();
   readonly #turnWaiters: Array<() => void> = [];
@@ -275,6 +256,13 @@ export class Rfc64CatalogHeadDeliveryV1 {
     this.#options = options;
     this.#now = options.now ?? (() => performance.now());
     this.#runFanout = options.runFanout ?? ((fanout) => fanout());
+    this.#fanout = new Rfc64CatalogHeadFanoutV1({
+      send: options.send,
+      isPeerAuthorized: options.isPeerAuthorized,
+      fanoutBudgetMs: options.fanoutBudgetMs,
+      selectionBudgetMs: options.selectionBudgetMs,
+      now: this.#now,
+    }, this.#lifecycle.signal);
     this.#maxWaitingHeadsPerScope = options.maxWaitingHeadsPerScope
       ?? RFC64_CATALOG_HEAD_DELIVERY_MAX_WAITING_HEADS_PER_SCOPE_V1;
     this.#maxCheckpoints = options.maxCheckpoints ?? RFC64_CATALOG_HEAD_DELIVERY_MAX_CHECKPOINTS_V1;
@@ -295,11 +283,11 @@ export class Rfc64CatalogHeadDeliveryV1 {
     signal?: AbortSignal,
   ): Promise<AnnounceRfc64PublicCatalogHeadResultV1> {
     const remotePeers = this.#remotePeers(peers);
-    const session = this.#beginFanout(signal);
-    const sending = this.#sendAll(session, announcement, remotePeers).finally(session.end);
+    const session = this.#fanout.begin(signal);
+    const sending = this.#fanout.sendAll(session, announcement, remotePeers).finally(session.end);
     this.#announces.add(sending);
     try {
-      return describeAttemptsV1(announcement, await sending);
+      return describeRfc64CatalogHeadSendsV1(announcement, await sending);
     } finally {
       this.#announces.delete(sending);
     }
@@ -316,17 +304,15 @@ export class Rfc64CatalogHeadDeliveryV1 {
         peers: this.#remotePeers(input.peers),
       });
     } catch {
-      return RFC64_CATALOG_HEAD_HANDOFF_NOT_QUEUED_V1;
+      return HANDOFF_INVALID_V1;
     }
     if (head.peers.length === 0) return HANDOFF_NOBODY_V1;
-    if (this.#lifecycle.signal.aborted) return RFC64_CATALOG_HEAD_HANDOFF_NOT_QUEUED_V1;
+    if (this.#lifecycle.signal.aborted) return HANDOFF_CLOSED_V1;
     const key = scopeKeyV1(head.announcement);
     const version = BigInt(head.announcement.catalogVersion);
     const scope = this.#scopes.get(key);
     if (scope === undefined) {
-      if (this.#scopes.size >= RFC64_CATALOG_HEAD_DELIVERY_MAX_SCOPES_V1) {
-        return RFC64_CATALOG_HEAD_HANDOFF_NOT_QUEUED_V1;
-      }
+      if (this.#scopes.size >= RFC64_CATALOG_HEAD_DELIVERY_MAX_SCOPES_V1) return HANDOFF_FULL_V1;
       const created: ScopeDeliveryV1 = {
         waiting: [head],
         sentVersion: version - 1n,
@@ -417,11 +403,13 @@ export class Rfc64CatalogHeadDeliveryV1 {
         // Read after the wait: a newer head may have replaced the one that asked for the turn,
         // and close may have dropped it.
         const head = scope.waiting.shift();
-        // A head that leaves others waiting behind it was a checkpoint.
+        // A head that leaves others waiting behind it was a kept head.
         if (scope.waiting.length > 0) this.#checkpoints -= 1;
-        const superseded = scope.superseded;
+        const counts: ScopeCountsV1 = {
+          supersededHeads: scope.superseded,
+          checkpointCapacityExceeded: scope.checkpointCapacityExceeded,
+        };
         scope.superseded = 0;
-        const capacityExceeded = scope.checkpointCapacityExceeded;
         scope.checkpointCapacityExceeded = false;
         if (head !== undefined) scope.sentVersion = BigInt(head.announcement.catalogVersion);
         let holdsTurn = true;
@@ -430,14 +418,26 @@ export class Rfc64CatalogHeadDeliveryV1 {
           holdsTurn = false;
           this.#releaseTurn();
         };
+        let reported = false;
+        const report = (outcome: Rfc64CatalogHeadDeliveryOutcomeV1): void => {
+          reported = true;
+          try {
+            this.#options.onDelivered?.(outcome);
+          } catch {
+            // Observer failures never own delivery work.
+          }
+        };
         try {
           if (head !== undefined) {
-            await this.#runFanout(
-              () => this.#deliverHead(head, superseded, capacityExceeded, releaseTurn),
-            );
+            await this.#runFanout(() => this.#deliverHead(head, counts, releaseTurn, report));
           }
-        } catch {
+        } catch (cause) {
           // A host that fails to run the fan-out drops this head only; the owner carries on.
+          if (head !== undefined && !reported) {
+            report(undeliveredOutcomeV1(head, counts, `the fan-out could not be run: ${
+              cause instanceof Error ? cause.message : String(cause)
+            }`));
+          }
         } finally {
           releaseTurn();
         }
@@ -449,167 +449,61 @@ export class Rfc64CatalogHeadDeliveryV1 {
   }
 
   /**
-   * One fan-out of one head. `onSendsStarted` is called once every send has been started, which
-   * is when the fan-out stops needing its turn.
+   * One fan-out of one head, reported exactly once. `onSendsStarted` is called once every send
+   * has been started, which is when the fan-out stops needing its turn.
    */
   async #deliverHead(
     head: WaitingHeadV1,
-    supersededHeads: number,
-    checkpointCapacityExceeded: boolean,
+    counts: ScopeCountsV1,
     onSendsStarted: () => void,
+    report: (outcome: Rfc64CatalogHeadDeliveryOutcomeV1) => void,
   ): Promise<void> {
     const startedAt = this.#now();
     const refusedPeers: string[] = [];
-    const delivered: PeerAttemptV1[] = [];
+    const uncheckedPeers: string[] = [];
+    const unconfirmedPeers: string[] = [];
+    const reportedSends: Rfc64CatalogHeadSendV1[] = [];
     let notDeliverable: string | null = null;
-    let session: FanoutSessionV1 | undefined;
+    const session = { end: (): void => undefined };
     try {
       this.#options.assertDeliverable(head.announcement, head.peers);
-      const decisions = await mapWithConcurrency(
-        head.peers,
-        ELIGIBILITY_CONCURRENCY_V1,
-        // Once the owner is closing, no further decision is worth a read.
-        async (peerId) => (
-          this.#lifecycle.signal.aborted
-            ? null
-            : this.#isPeerAuthorized(peerId, head.announcement)
-        ),
-      );
-      const eligible = head.peers.filter((peerId, index) => {
-        if (decisions[index] === false) refusedPeers.push(peerId);
-        return decisions[index] === true;
-      });
+      const selection = await this.#fanout.select(head.announcement, head.peers);
+      refusedPeers.push(...selection.refused);
+      uncheckedPeers.push(...selection.unchecked);
       // The budget is for the peers: it starts with the first send, so a slow local read during
       // selection cannot use up the time an eligible peer has to answer.
-      session = this.#beginFanout();
-      const attempts = await this.#sendAll(session, head.announcement, eligible, onSendsStarted);
-      // A policy denial at send time is either the transport's own recheck (the peer stopped
-      // being authorized after selection, and nothing was sent) or the remote peer's answer.
-      // The current local decision tells them apart; it is asked as selection asks.
-      const refusedAtSend = await mapWithConcurrency(
-        attempts,
-        ELIGIBILITY_CONCURRENCY_V1,
-        async (attempt) => (
-          !attempt.sent
-          && !this.#lifecycle.signal.aborted
-          && attempt.failure instanceof Rfc64PublicCatalogTransportErrorV1
-          && attempt.failure.code === 'catalog-transport-policy-denied'
-          && !(await this.#isPeerAuthorized(attempt.peerId, head.announcement))
-        ),
+      const sending = this.#fanout.begin();
+      session.end = sending.end;
+      const sends = await this.#fanout.sendAll(
+        sending,
+        head.announcement,
+        selection.eligible,
+        onSendsStarted,
       );
-      for (const [index, attempt] of attempts.entries()) {
-        if (attempt.sent) delivered.push(attempt);
+      for (const send of sends) {
+        if (send.outcome === 'sent') reportedSends.push(send);
         // A send the close path cut short is neither a refusal nor a failed delivery.
         else if (this.#lifecycle.signal.aborted) continue;
-        else if (refusedAtSend[index]) refusedPeers.push(attempt.peerId);
-        else delivered.push(attempt);
+        else if (send.outcome === 'refused') refusedPeers.push(send.peerId);
+        else if (send.outcome === 'unchecked') uncheckedPeers.push(send.peerId);
+        else if (send.outcome === 'unconfirmed') unconfirmedPeers.push(send.peerId);
+        else reportedSends.push(send);
       }
       if (this.#lifecycle.signal.aborted) notDeliverable = CLOSED_MESSAGE_V1;
     } catch (error) {
       notDeliverable = error instanceof Error ? error.message : String(error);
     } finally {
-      session?.end();
+      session.end();
     }
-    try {
-      this.#options.onDelivered?.(Object.freeze({
-        ...describeAttemptsV1(head.announcement, delivered),
-        refusedPeers: Object.freeze(refusedPeers),
-        supersededHeads,
-        checkpointCapacityExceeded,
-        durationMs: Math.max(0, this.#now() - startedAt),
-        notDeliverable,
-      }));
-    } catch {
-      // Observer failures never own delivery work.
-    }
-  }
-
-  /** Sends in bounded waves under the session's one budget. Never rejects. */
-  async #sendAll(
-    session: FanoutSessionV1,
-    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
-    peers: readonly string[],
-    onSendsStarted?: () => void,
-  ): Promise<PeerAttemptV1[]> {
-    // Filled by index as each send settles; every index below `next` is filled once all have.
-    const attempts: PeerAttemptV1[] = [];
-    const attempt = async (index: number): Promise<void> => {
-      const peerId = peers[index]!;
-      try {
-        await this.#options.send(peerId, announcement, {
-          timeoutMs: session.remainingMs(),
-          signal: session.signal,
-        });
-        attempts[index] = { peerId, sent: true };
-      } catch (failure) {
-        attempts[index] = { peerId, sent: false, failure };
-      }
-    };
-    const started: Promise<void>[] = [];
-    let next = 0;
-    while (next < peers.length && !session.signal.aborted) {
-      const wave: Promise<void>[] = [];
-      const waveEnd = Math.min(peers.length, next + RFC64_CATALOG_HEAD_FANOUT_WAVE_PEERS_V1);
-      for (; next < waveEnd; next += 1) wave.push(attempt(next));
-      started.push(...wave);
-      if (next < peers.length) {
-        await settledOrElapsedV1(wave, RFC64_CATALOG_HEAD_FANOUT_WAVE_INTERVAL_MS_V1);
-      }
-    }
-    onSendsStarted?.();
-    await Promise.all(started);
-    if (session.budgetEnded()) {
-      // Peers the budget ended before were asked for and did not get the head: report them.
-      for (; next < peers.length; next += 1) {
-        attempts[next] = { peerId: peers[next]!, sent: false, failure: session.signal.reason };
-      }
-    }
-    return attempts.slice(0, next);
-  }
-
-  /** One abort controller and one timer for a whole fan-out; sources are followed, not composed. */
-  #beginFanout(caller?: AbortSignal): FanoutSessionV1 {
-    const budgetMs = this.#options.fanoutBudgetMs;
-    const controller = new AbortController();
-    const budgetEnded = new DOMException(
-      `RFC-64 catalog head fan-out exceeded its ${budgetMs} ms budget`,
-      'TimeoutError',
-    );
-    const deadlineAt = this.#now() + budgetMs;
-    const timer = setTimeout(() => controller.abort(budgetEnded), budgetMs);
-    timer.unref?.();
-    const detachers: Array<() => void> = [];
-    for (const source of [this.#lifecycle.signal, caller]) {
-      if (source === undefined) continue;
-      if (source.aborted) {
-        controller.abort(source.reason);
-        continue;
-      }
-      const onAbort = (): void => controller.abort(source.reason);
-      source.addEventListener('abort', onAbort, { once: true });
-      detachers.push(() => source.removeEventListener('abort', onAbort));
-    }
-    return {
-      signal: controller.signal,
-      remainingMs: () => Math.max(1, Math.ceil(deadlineAt - this.#now())),
-      budgetEnded: () => controller.signal.reason === budgetEnded,
-      end: () => {
-        clearTimeout(timer);
-        for (const detach of detachers.splice(0)) detach();
-      },
-    };
-  }
-
-  /** The head transport's decision, asked now and never cached. A decision that fails refuses. */
-  async #isPeerAuthorized(
-    remotePeerId: string,
-    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
-  ): Promise<boolean> {
-    try {
-      return (await this.#options.isPeerAuthorized(remotePeerId, announcement)) === true;
-    } catch {
-      return false;
-    }
+    report(Object.freeze({
+      ...describeRfc64CatalogHeadSendsV1(head.announcement, reportedSends),
+      refusedPeers: Object.freeze(refusedPeers),
+      uncheckedPeers: Object.freeze(uncheckedPeers),
+      unconfirmedPeers: Object.freeze(unconfirmedPeers),
+      ...counts,
+      durationMs: Math.max(0, this.#now() - startedAt),
+      notDeliverable,
+    }));
   }
 
   #remotePeers(peers: readonly string[]): readonly string[] {
@@ -634,46 +528,20 @@ export class Rfc64CatalogHeadDeliveryV1 {
   }
 }
 
-/** Resolves when every promise of `wave` has settled or `intervalMs` has passed, whichever first. */
-async function settledOrElapsedV1(
-  wave: readonly Promise<void>[],
-  intervalMs: number,
-): Promise<void> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const elapsed = new Promise<void>((resolve) => {
-    timer = setTimeout(resolve, intervalMs);
-    timer.unref?.();
-  });
-  try {
-    await Promise.race([Promise.all(wave), elapsed]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function describeAttemptsV1(
-  announcement: Rfc64PublicCatalogHeadAnnouncementV1,
-  attempts: readonly PeerAttemptV1[],
-): AnnounceRfc64PublicCatalogHeadResultV1 {
-  const announcedPeers: string[] = [];
-  const failedPeers: Array<AnnounceRfc64PublicCatalogHeadResultV1['failedPeers'][number]> = [];
-  for (const attempt of attempts) {
-    if (attempt.sent) {
-      announcedPeers.push(attempt.peerId);
-      continue;
-    }
-    const { failure } = attempt;
-    // Classify where the typed error still exists: the message is display text only.
-    failedPeers.push(Object.freeze({
-      peerId: attempt.peerId,
-      error: failure instanceof Error ? failure.message : String(failure),
-      ...(failure instanceof Rfc64PublicCatalogTransportErrorV1 ? { code: failure.code } : {}),
-    }));
-  }
+/** The report of a head that was not fanned out at all. */
+function undeliveredOutcomeV1(
+  head: WaitingHeadV1,
+  counts: ScopeCountsV1,
+  notDeliverable: string,
+): Rfc64CatalogHeadDeliveryOutcomeV1 {
   return Object.freeze({
-    announcement,
-    announcedPeers: Object.freeze(announcedPeers),
-    failedPeers: Object.freeze(failedPeers),
+    ...describeRfc64CatalogHeadSendsV1(head.announcement, []),
+    refusedPeers: Object.freeze([]),
+    uncheckedPeers: Object.freeze([]),
+    unconfirmedPeers: Object.freeze([]),
+    ...counts,
+    durationMs: 0,
+    notDeliverable,
   });
 }
 

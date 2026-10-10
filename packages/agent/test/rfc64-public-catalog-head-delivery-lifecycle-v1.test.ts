@@ -4,10 +4,8 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import {
-  RFC64_CATALOG_HEAD_DELIVERY_MAX_ACTIVE_FANOUTS_V1,
-  RFC64_CATALOG_HEAD_FANOUT_WAVE_PEERS_V1,
-} from '../src/rfc64/public-catalog-head-delivery-v1.js';
+import { RFC64_CATALOG_HEAD_DELIVERY_MAX_ACTIVE_FANOUTS_V1 } from '../src/rfc64/public-catalog-head-delivery-v1.js';
+import { RFC64_CATALOG_HEAD_FANOUT_WAVE_PEERS_V1 } from '../src/rfc64/public-catalog-head-fanout-v1.js';
 import {
   BUDGET_MS,
   author,
@@ -54,8 +52,8 @@ describe('RFC-64 catalog head delivery: close', () => {
     await settle();
     expect(unwinding).toBe(1);
     expect(closed).toBe(false);
-    expect(delivery.deliver({ announcement: head('3'), peers: ['quick-peer'] }).status)
-      .toBe('not-queued');
+    expect(delivery.deliver({ announcement: head('3'), peers: ['quick-peer'] }))
+      .toEqual({ status: 'not-queued', reason: 'closed' });
 
     await vi.advanceTimersByTimeAsync(50);
     await closing;
@@ -76,7 +74,7 @@ describe('RFC-64 catalog head delivery: close', () => {
     await expect(delivery.close()).resolves.toBeUndefined();
   });
 
-  it('releases scopes that were waiting for their turn, and sends nothing for a selection that ends after close', async () => {
+  it('releases scopes that were waiting for their turn, and does not wait for policy reads in flight', async () => {
     vi.useFakeTimers();
     const finishSelection: Array<() => void> = [];
     const { delivery, sends, outcomes } = harness({
@@ -92,22 +90,22 @@ describe('RFC-64 catalog head delivery: close', () => {
     // Four fan-outs are selecting their peers; three scopes wait for a turn.
     expect(finishSelection).toHaveLength(RFC64_CATALOG_HEAD_DELIVERY_MAX_ACTIVE_FANOUTS_V1 * 2);
 
-    let closed = false;
-    const closing = delivery.close().then(() => { closed = true; });
-    await settle();
-    // A policy decision that is being read cannot be cut short: close waits for it.
-    expect(closed).toBe(false);
-    for (const finish of finishSelection.splice(0)) finish();
-    await closing;
+    // A policy decision that is being read cannot be cut short, and close does not wait for it:
+    // the fan-outs end where they are.
+    await delivery.close();
 
     expect(sends).toEqual([]);
-    expect(finishSelection).toEqual([]);
     expect(delivery.pendingScopes).toBe(0);
+    // A decision that arrives afterwards changes nothing.
+    for (const finish of finishSelection.splice(0)) finish();
+    await settle();
+    expect(sends).toEqual([]);
     expect(outcomes).toHaveLength(RFC64_CATALOG_HEAD_DELIVERY_MAX_ACTIVE_FANOUTS_V1);
     expect(new Set(outcomes.map(({ notDeliverable }) => notDeliverable)))
       .toEqual(new Set(['RFC-64 catalog head delivery closed']));
-    expect(outcomes.every(({ failedPeers, refusedPeers }) => (
-      failedPeers.length === 0 && refusedPeers.length === 0
+    // Giving up on a read because the owner closes is not the same as being unable to check.
+    expect(outcomes.every(({ failedPeers, refusedPeers, uncheckedPeers }) => (
+      failedPeers.length === 0 && refusedPeers.length === 0 && uncheckedPeers.length === 0
     ))).toBe(true);
   });
 
@@ -128,9 +126,9 @@ describe('RFC-64 catalog head delivery: close', () => {
     // Four decisions are being read; three peers have not been asked about yet.
     expect(asked).toEqual(everyone.slice(0, 4));
 
-    const closing = delivery.close();
+    await delivery.close();
     for (const finish of finishSelection.splice(0)) finish();
-    await closing;
+    await settle();
 
     expect(asked).toEqual(everyone.slice(0, 4));
     expect(sends).toEqual([]);

@@ -5,6 +5,8 @@
 import type { SendOptions } from '@origintrail-official/dkg-core';
 import { vi } from 'vitest';
 
+import { noteRfc64CatalogPolicyUndecidedV1 } from '../../src/rfc64/catalog-policy-decision-probe-v1.js';
+import { withCurrentRfc64CatalogPolicyV1 } from '../../src/rfc64/catalog-transport-authorization-v1.js';
 import {
   Rfc64CatalogHeadDeliveryV1,
   type Rfc64CatalogHeadDeliveryOptionsV1,
@@ -46,48 +48,67 @@ export function peers(count: number, prefix = 'peer'): string[] {
   return Array.from({ length: count }, (_, index) => `${prefix}-${String(index).padStart(2, '0')}`);
 }
 
-export type PeerBehaviour = 'ack' | 'stall' | 'remote-denial' | 'unreachable';
+/**
+ * What a peer does with an announcement. `lapse` acknowledges it, and this node's policy stops
+ * authorizing the peer while the send is under way.
+ */
+export type PeerBehaviour = 'ack' | 'stall' | 'remote-denial' | 'unreachable' | 'lapse';
 
 export interface RecordedSend {
   readonly peerId: string;
   readonly version: string;
   readonly author: string;
   readonly options: SendOptions;
+  /** `Date.now()` when the send started. */
+  readonly at: number;
+}
+
+function policyDenied(message: string): Rfc64PublicCatalogTransportErrorV1 {
+  return new Rfc64PublicCatalogTransportErrorV1('catalog-transport-policy-denied', message);
 }
 
 /**
- * A delivery over a simulated transport. `send` behaves as the head transport does: it asks the
- * policy immediately before the send and refuses with the typed denial, sending nothing. The
- * policy decision is the transport's own, so one `refused` set answers both.
+ * A delivery over a simulated transport. `send` behaves as the head transport does: it runs the
+ * send inside the real policy wrapper, which asks this node's policy immediately before and
+ * after it, and it reads the peer's own denial from the reply afterwards.
+ *
+ * The policy is the two sets: a peer in `refused` gets a plain no, and for a peer in
+ * `undecidable` the decision cannot be made, as when an identity lookup fails.
  */
-export function harness(overrides: Partial<Rfc64CatalogHeadDeliveryOptionsV1> = {}) {
+export function harness(
+  overrides: Partial<Rfc64CatalogHeadDeliveryOptionsV1> & { readonly ackDelayMs?: number } = {},
+) {
+  const { ackDelayMs = 0, ...options } = overrides;
   const sends: RecordedSend[] = [];
   /** Every peer the transport was asked to send to, including those its own check then refused. */
   const transportCalls: string[] = [];
   const outcomes: Rfc64CatalogHeadDeliveryOutcomeV1[] = [];
   const behaviour = new Map<string, PeerBehaviour>();
   const refused = new Set<string>();
+  const undecidable = new Set<string>();
   /** Every peer the policy was asked about without a send, in order. */
   const decisions: string[] = [];
   const inFlightByAuthor = new Map<string, number>();
   const mostInFlightByAuthor = new Map<string, number>();
+  const authorizes = (peerId: string): boolean => {
+    if (undecidable.has(peerId)) noteRfc64CatalogPolicyUndecidedV1();
+    return !undecidable.has(peerId) && !refused.has(peerId);
+  };
   const isPeerAuthorized: Rfc64CatalogHeadDeliveryOptionsV1['isPeerAuthorized'] = async (peerId) => {
     decisions.push(peerId);
-    return !refused.has(peerId);
+    return authorizes(peerId);
   };
-  const send: Rfc64CatalogHeadDeliveryOptionsV1['send'] = async (peerId, announcement, options) => {
-    transportCalls.push(peerId);
-    if (refused.has(peerId)) {
-      throw new Rfc64PublicCatalogTransportErrorV1(
-        'catalog-transport-policy-denied',
-        'catalog operation is not access-policy authorized',
-      );
-    }
+  const exchange = async (
+    peerId: string,
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    sendOptions: SendOptions,
+  ): Promise<'ack' | 'denied'> => {
     sends.push({
       peerId,
       version: announcement.catalogVersion,
       author: announcement.authorAddress,
-      options,
+      options: sendOptions,
+      at: Date.now(),
     });
     const key = announcement.authorAddress;
     const inFlight = (inFlightByAuthor.get(key) ?? 0) + 1;
@@ -95,26 +116,37 @@ export function harness(overrides: Partial<Rfc64CatalogHeadDeliveryOptionsV1> = 
     mostInFlightByAuthor.set(key, Math.max(mostInFlightByAuthor.get(key) ?? 0, inFlight));
     try {
       switch (behaviour.get(peerId) ?? 'ack') {
-        case 'ack':
-          return;
         case 'remote-denial':
-          throw new Rfc64PublicCatalogTransportErrorV1(
-            'catalog-transport-policy-denied',
-            'remote peer denied the catalog-head announcement',
-          );
+          return 'denied';
         case 'unreachable':
           throw new Error('all multiaddr dials failed');
         case 'stall':
-          await new Promise<void>((_resolve, reject) => {
-            const signal = options.signal!;
+          return await new Promise<never>((_resolve, reject) => {
+            const signal = sendOptions.signal!;
             const onAbort = (): void => reject(signal.reason);
             signal.addEventListener('abort', onAbort, { once: true });
             if (signal.aborted) onAbort();
           });
+        case 'lapse':
+          refused.add(peerId);
+          return 'ack';
+        default:
+          if (ackDelayMs > 0) await new Promise((resolve) => { setTimeout(resolve, ackDelayMs); });
+          return 'ack';
       }
     } finally {
       inFlightByAuthor.set(key, (inFlightByAuthor.get(key) ?? 1) - 1);
     }
+  };
+  const send: Rfc64CatalogHeadDeliveryOptionsV1['send'] = async (peerId, announcement, sendOptions) => {
+    transportCalls.push(peerId);
+    const reply = await withCurrentRfc64CatalogPolicyV1(
+      async () => {
+        if (!authorizes(peerId)) throw policyDenied('catalog operation is not access-policy authorized');
+      },
+      () => exchange(peerId, announcement, sendOptions),
+    );
+    if (reply === 'denied') throw policyDenied('remote peer denied the catalog-head announcement');
   };
   const delivery = new Rfc64CatalogHeadDeliveryV1({
     send,
@@ -123,10 +155,18 @@ export function harness(overrides: Partial<Rfc64CatalogHeadDeliveryOptionsV1> = 
     fanoutBudgetMs: BUDGET_MS,
     onDelivered: (outcome) => { outcomes.push(outcome); },
     now: () => Date.now(),
-    ...overrides,
+    ...options,
   });
   return {
-    delivery, sends, transportCalls, outcomes, behaviour, refused, decisions, mostInFlightByAuthor,
+    delivery,
+    sends,
+    transportCalls,
+    outcomes,
+    behaviour,
+    refused,
+    undecidable,
+    decisions,
+    mostInFlightByAuthor,
   };
 }
 

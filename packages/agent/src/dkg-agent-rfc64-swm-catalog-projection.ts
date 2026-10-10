@@ -6,7 +6,6 @@ import {
   assertCanonicalEvmAddress,
   assertContextGraphIdV1,
   computeSwmAuthorInventoryScopeDigestV1,
-  createOperationContext,
   type AssertionCoordinateV1,
   type AuthorCatalogScopeV1,
   type AuthorLaneScopeV1,
@@ -46,15 +45,19 @@ import { rfc64SwmInventoryShadowRuntimeV1 } from
   './rfc64/swm-inventory-shadow-runtime-v1.js';
 import { snapshotRfc64CatalogDeploymentProfileV1 } from
   './rfc64/catalog-authority-config-v1.js';
+import { catalogHeadDeliveryReportV1 } from './internal/catalog-head-delivery-report.js';
 import type { Rfc64PublicCatalogServiceV1 } from
   './rfc64/public-catalog-service-v1.js';
 import {
-  RFC64_CATALOG_HEAD_HANDOFF_NOT_QUEUED_V1,
+  RFC64_CATALOG_HEAD_HANDOFF_CANCELLED_V1,
+  RFC64_CATALOG_HEAD_HANDOFF_UNAVAILABLE_V1,
   type DeliverRfc64PublicCatalogHeadInputV1,
   type Rfc64CatalogHeadDeliveryOptionsV1,
   type Rfc64CatalogHeadDeliveryOutcomeV1,
   type Rfc64CatalogHeadHandoffV1,
 } from './rfc64/public-catalog-head-delivery-v1.js';
+import type { Rfc64PublicCatalogHeadAnnouncementV1 } from
+  './rfc64/public-catalog-transport-v1.js';
 import { prepareRfc64SwmInventoryCatalogTargetV1 } from
   './rfc64/swm-inventory-catalog-reconciler-v1.js';
 import {
@@ -560,15 +563,26 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
   /**
    * Hand a head that a catalog mutation just committed to the catalog service's delivery owner
    * and return at once: the fan-out to peers runs outside the serialized mutation (GH#3081).
-   * Never throws. Without a running service the head stays durable and reaches peers through
-   * replay.
+   * Never throws. A hand-off that nobody takes is logged; its head stays durable and reaches
+   * peers with the next head of its catalog or through replay.
    */
   deliverRfc64CatalogHeadV1(
     this: DKGAgent,
     input: DeliverRfc64PublicCatalogHeadInputV1,
   ): Rfc64CatalogHeadHandoffV1 {
-    return this.rfc64PublicCatalogServiceV1?.deliverCatalogHead(input)
-      ?? RFC64_CATALOG_HEAD_HANDOFF_NOT_QUEUED_V1;
+    const receipt = this.rfc64PublicCatalogServiceV1?.deliverCatalogHead(input)
+      ?? RFC64_CATALOG_HEAD_HANDOFF_UNAVAILABLE_V1;
+    catalogHeadDeliveryReportV1(this).handoff(this.log, input?.announcement, receipt);
+    return receipt;
+  }
+
+  /** A committed head that its mutation did not hand off, because the caller had given up. */
+  reportRfc64CatalogHeadNotHandedOffV1(
+    this: DKGAgent,
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+  ): void {
+    catalogHeadDeliveryReportV1(this)
+      .handoff(this.log, announcement, RFC64_CATALOG_HEAD_HANDOFF_CANCELLED_V1);
   }
 
   /** Await the fan-outs of handed-off heads (tests / graceful shutdown coordination). */
@@ -595,39 +609,16 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
   }
 
   /**
-   * One finished fan-out of a handed-off head. Peers this node's own policy refused received
-   * nothing and are not failures: they appear only in the debug line, so a head with no eligible
-   * peer writes nothing at warn level. A delivery that had to give up a waiting head it should
-   * have kept is worth a warning: the peers named for that head may have missed it, and a peer
-   * left more than a lineage window behind stays behind.
+   * One finished fan-out of a handed-off head: the delivery report's lines (see
+   * `internal/catalog-head-delivery-report.ts`), then the warning for deliveries that failed.
+   * Peers this node's own policy refused received nothing and are not failures, so a head with
+   * no eligible peer writes nothing at warn level.
    */
   reportRfc64CatalogHeadDeliveryV1(
     this: DKGAgent,
     outcome: Rfc64CatalogHeadDeliveryOutcomeV1,
   ): void {
-    const ctx = createOperationContext('system');
-    const head = ` head=${outcome.announcement.catalogHeadObjectDigest}`
-      + ` cg=${outcome.announcement.contextGraphId}`
-      + ` version=${outcome.announcement.catalogVersion}`;
-    this.log.debug(
-      ctx,
-      `rfc64_catalog_head_delivery${head}`
-        + ` delivered=${outcome.announcedPeers.length}`
-        + ` failed=${outcome.failedPeers.length}`
-        + ` refused=${outcome.refusedPeers.length}`
-        + ` superseded=${outcome.supersededHeads}`
-        + ` checkpointCapacityExceeded=${outcome.checkpointCapacityExceeded}`
-        + ` durationMs=${Math.round(outcome.durationMs)}`
-        + ` notDeliverable=${JSON.stringify(outcome.notDeliverable?.slice(0, 160) ?? null)}`,
-    );
-    if (outcome.checkpointCapacityExceeded) {
-      this.log.warn(
-        ctx,
-        `RFC-64 catalog head delivery could not keep a waiting head${head}:`
-          + ' peers named for it may have been left out, and a peer more than a lineage window'
-          + ' behind the newest head cannot apply it',
-      );
-    }
+    catalogHeadDeliveryReportV1(this).delivered(this.log, outcome);
     this.warnRfc64CatalogAnnounceFailuresV1(outcome);
   }
 

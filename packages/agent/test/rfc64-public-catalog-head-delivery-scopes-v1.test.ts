@@ -185,6 +185,38 @@ describe('RFC-64 catalog head delivery: one owner per scope, newest head', () =>
     ]);
   });
 
+  it('keeps members that a newer head\'s peers push past the limit of one fan-out', async () => {
+    vi.useFakeTimers();
+    const { delivery, sends, outcomes, behaviour, refused } = harness();
+    behaviour.set('slow-peer', 'stall');
+    const limit = RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1;
+    // A private graph on a busy node: most of the peers a hand-off names are not members.
+    const outsiders = peers(limit - 2, 'outsider');
+    const members = ['member-y', 'member-z'];
+    const newcomers = peers(limit, 'newcomer');
+    for (const peerId of [...outsiders, ...newcomers]) refused.add(peerId);
+
+    delivery.deliver({ announcement: head('1'), peers: ['slow-peer'] });
+    await settle();
+    // The two members come last in the list handed off with version 2. The list handed off with
+    // version 3 names 64 other peers, none of them a member.
+    delivery.deliver({ announcement: head('2'), peers: [...outsiders, ...members] });
+    delivery.deliver({ announcement: head('3'), peers: newcomers });
+    await vi.advanceTimersByTimeAsync(BUDGET_MS);
+    await settle();
+
+    // Every named peer is asked about. The limit of 64 never decides who is a member.
+    expect(sends.slice(1).map(({ peerId, version }) => [peerId, version])).toEqual([
+      ['member-y', '2'],
+      ['member-z', '2'],
+    ]);
+    expect(outcomes.slice(1).map(({ announcement, announcedPeers, refusedPeers }) => [
+      announcement.catalogVersion,
+      announcedPeers.length,
+      refusedPeers.length,
+    ])).toEqual([['2', 2, limit - 2], ['3', 0, limit]]);
+  });
+
   it('keeps an older head handed off late for the peers the newest head has no room for', async () => {
     vi.useFakeTimers();
     const { delivery, sends, outcomes, behaviour } = harness();
@@ -234,11 +266,10 @@ describe('RFC-64 catalog head delivery: one owner per scope, newest head', () =>
         .map(({ peerId, version }) => [peerId, version]))
         .toEqual(second.map((peerId) => [peerId, '3']));
     }
-    expect(outcomes.slice(2).map((outcome) => [
-      outcome.announcement.catalogVersion,
-      outcome.supersededHeads,
-      outcome.checkpointCapacityExceeded,
-    ])).toEqual([['3', 1, true], ['3', 1, true]]);
+    expect(outcomes
+      .filter(({ announcement }) => announcement.catalogVersion === '3')
+      .map((outcome) => [outcome.supersededHeads, outcome.checkpointCapacityExceeded]))
+      .toEqual([[1, true], [1, true]]);
   });
 
   it('keeps the heads of two policy generations of one catalog scope apart', async () => {
@@ -515,8 +546,8 @@ describe('RFC-64 catalog head delivery: one owner per scope, newest head', () =>
     expect(delivery.pendingScopes).toBe(RFC64_CATALOG_HEAD_DELIVERY_MAX_SCOPES_V1);
 
     const overflow = author(RFC64_CATALOG_HEAD_DELIVERY_MAX_SCOPES_V1);
-    expect(delivery.deliver({ announcement: head('1', overflow), peers: ['slow-peer'] }).status)
-      .toBe('not-queued');
+    expect(delivery.deliver({ announcement: head('1', overflow), peers: ['slow-peer'] }))
+      .toEqual({ status: 'not-queued', reason: 'full' });
     // A scope that already has its slot still takes a newer head.
     expect(delivery.deliver({ announcement: head('2', author(0)), peers: ['slow-peer'] }).status)
       .toBe('queued');
