@@ -382,6 +382,10 @@ describe('RFC-64 durable catalog asset resolver after the assertion was re-opene
     await expect(resolveConfirmedRepair(other)).rejects.toThrow(
       `durable RFC-64 catalog asset ${other.kaUal} has no strict author seal`,
     );
+    // Nor is the archived seal the one of an identity that names version 1 under another digest.
+    await expect(resolveConfirmedRepair(sealedAtAnotherInstant(seal))).rejects.toThrow(
+      `durable RFC-64 catalog asset ${seal.kaUal} has no strict author seal`,
+    );
     // With version 2 sealed as the active seal, a third identity differs from both.
     await seedDurableSeal(store, other);
     const third = await createSeal({
@@ -390,6 +394,10 @@ describe('RFC-64 durable catalog asset resolver after the assertion was re-opene
     });
     await expect(resolveConfirmedRepair(third)).rejects.toThrow(
       `durable RFC-64 catalog asset ${third.kaUal} has a different author seal`,
+    );
+    // So does an identity that names version 2 under another digest than the active seal's.
+    await expect(resolveConfirmedRepair(sealedAtAnotherInstant(other))).rejects.toThrow(
+      `durable RFC-64 catalog asset ${other.kaUal} has a different author seal`,
     );
   });
 
@@ -424,11 +432,7 @@ describe('RFC-64 durable catalog asset resolver after the assertion was re-opene
     await seedVmProjection(store, seal, PROJECTION_QUADS);
     // Two edit cycles: the next version was sealed and re-opened in turn, so the one archive
     // holds its seal and the active subject is empty.
-    await store.deleteByPattern({
-      graph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
-      subject: contextGraphAssertionUri(CONTEXT_GRAPH_ID, AUTHOR, ASSERTION_COORDINATE),
-    });
-    await seedDurableSeal(store, nextVersion);
+    await replaceActiveSeal(store, nextVersion);
     await reopenForEditing(store);
 
     // The stored seals alone cannot place the first version any more.
@@ -448,8 +452,12 @@ describe('RFC-64 durable catalog asset resolver after the assertion was re-opene
       row,
       retainedSeal: seal,
     })).resolves.toMatchObject({ seal });
-    // A handed seal is taken on the same exact match: another version's changes nothing.
+    // A handed seal is taken on the same exact match: another version's changes nothing, and
+    // neither does this version's under another digest.
     await expect(resolveConfirmedRepair(seal, nextVersion)).rejects.toThrow(
+      `durable RFC-64 catalog asset ${seal.kaUal} has no strict author seal`,
+    );
+    await expect(resolveConfirmedRepair(seal, sealedAtAnotherInstant(seal))).rejects.toThrow(
       `durable RFC-64 catalog asset ${seal.kaUal} has no strict author seal`,
     );
   });
@@ -480,7 +488,110 @@ describe('RFC-64 durable catalog asset resolver after the assertion was re-opene
     await expect(resolveConfirmedRepair(seal)).resolves.toMatchObject({ seal });
     expect(query.mock.calls.filter(([sparql]) => String(sparql).includes('_recovery_seal'))).toEqual([]);
   });
+
+  describe('and the seal on offer differs from the identity in its digest alone', () => {
+    // The author's attestation covers the content, not the instant it was sealed at. A seal of
+    // the same content at another instant is valid for the same coordinate, version, asset and
+    // stored projection, so the digest comparison is the one check that can tell it apart. Each
+    // row first shows that the seal on offer places the repair that names it.
+    let twin: CanonicalGraphScopedAuthorSealV1;
+
+    beforeEach(async () => {
+      twin = sealedAtAnotherInstant(seal);
+      await seedVmProjection(store, seal, PROJECTION_QUADS);
+    });
+
+    it('offers the same version of the same asset and content under another digest', () => {
+      const { assertionFinalizedAt: sealedAt, ...content } = seal;
+      expect(twin).toMatchObject(content);
+      expect(twin.assertionFinalizedAt).not.toBe(sealedAt);
+      expect(computeCanonicalGraphScopedAuthorSealDigestV1(twin))
+        .not.toBe(computeCanonicalGraphScopedAuthorSealDigestV1(seal));
+    });
+
+    it('refuses it as the active seal', async () => {
+      await replaceActiveSeal(store, twin);
+
+      await expect(resolveConfirmedRepair(twin)).resolves.toMatchObject({
+        projectionBytes: PROJECTION_BYTES,
+        seal: twin,
+      });
+      await expect(resolveConfirmedRepair(seal)).rejects.toThrow(
+        `durable RFC-64 catalog asset ${seal.kaUal} has a different author seal`,
+      );
+      await expect(resolve('private')).rejects.toThrow(
+        `durable RFC-64 catalog asset ${seal.kaUal} has a different author seal`,
+      );
+    });
+
+    it('refuses it as the archived seal', async () => {
+      await replaceActiveSeal(store, twin);
+      await reopenForEditing(store);
+
+      await expect(resolveConfirmedRepair(twin)).resolves.toMatchObject({
+        projectionBytes: PROJECTION_BYTES,
+        seal: twin,
+      });
+      await expect(resolveConfirmedRepair(seal)).rejects.toThrow(
+        `durable RFC-64 catalog asset ${seal.kaUal} has no strict author seal`,
+      );
+      await expect(resolve('private')).rejects.toThrow(
+        `durable RFC-64 catalog asset ${seal.kaUal} has no strict author seal`,
+      );
+    });
+
+    it('refuses it as the seal the caller was handed', async () => {
+      // Nothing is stored for the assertion: the handed seal is the only one on offer.
+      await store.deleteByPattern({
+        graph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
+        subject: contextGraphAssertionUri(CONTEXT_GRAPH_ID, AUTHOR, ASSERTION_COORDINATE),
+      });
+
+      await expect(resolveConfirmedRepair(twin, twin)).resolves.toMatchObject({
+        projectionBytes: PROJECTION_BYTES,
+        seal: twin,
+      });
+      await expect(resolveConfirmedRepair(seal, twin)).rejects.toThrow(
+        `durable RFC-64 catalog asset ${seal.kaUal} has no strict author seal`,
+      );
+      await expect(resolveRfc64InventoryWorkspaceCatalogAssetV1({
+        store,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        authorAddress: AUTHOR,
+        laneKind: 'private',
+        row,
+        retainedSeal: twin,
+      })).rejects.toThrow(`durable RFC-64 catalog asset ${seal.kaUal} has no strict author seal`);
+      // The handed seal the identity does name is taken from the same empty store.
+      await expect(resolveConfirmedRepair(seal, seal)).resolves.toMatchObject({ seal });
+    });
+  });
 });
+
+/**
+ * The same content sealed at another instant: every field of `canonicalSeal` but the instant, so
+ * the two differ in their digest and in nothing an identity names besides it.
+ */
+function sealedAtAnotherInstant(
+  canonicalSeal: CanonicalGraphScopedAuthorSealV1,
+): CanonicalGraphScopedAuthorSealV1 {
+  return Object.freeze({
+    ...canonicalSeal,
+    assertionFinalizedAt: '2026-09-01T00:00:01.000Z',
+  }) as CanonicalGraphScopedAuthorSealV1;
+}
+
+/** What a later finalization of the same coordinate leaves: its seal alone on the active subject. */
+async function replaceActiveSeal(
+  target: OxigraphStore,
+  canonicalSeal: CanonicalGraphScopedAuthorSealV1,
+): Promise<void> {
+  await target.deleteByPattern({
+    graph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
+    subject: contextGraphAssertionUri(CONTEXT_GRAPH_ID, AUTHOR, ASSERTION_COORDINATE),
+  });
+  await seedDurableSeal(target, canonicalSeal);
+}
 
 /**
  * What a pull-from leaves of the seal: the active seal's predicates copied to the archive subject
