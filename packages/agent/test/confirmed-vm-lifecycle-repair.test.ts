@@ -15,6 +15,7 @@ import { DKGAgent } from '../src/dkg-agent.js';
 import { GossipSession } from '../src/gossip-session.js';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
 import { createKnowledgeAssetVmPublishIntentKey } from '../src/dkg-agent-publish.js';
+import { DurableReplaceableFile } from '../src/durable-file-replace.js';
 import { NamedKaVmLifecycleRepair, type ConfirmedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle-repair.js';
 import { decodeLifecycleRepairJournal, encodeLifecycleRepairJournal, lifecycleRepairKey, normalizeLifecycleRepairInput } from '../src/named-ka-vm-lifecycle-repair-journal.js';
 import { applyPublishedNamedKaVmLifecycle, applyTentativeNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
@@ -205,6 +206,75 @@ for (const mode of ['sync-mint', 'sync-update', 'queued-mint', 'queued-update'] 
     }
   });
 }
+
+describe('confirmed publication tail after a lifecycle journal retirement failure', () => {
+  it.each(['sync', 'queued'] as const)('%s publish still clears the SWM marker and admits RFC-64 placement without another publication', async mode => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-retirement-tail-')); dirs.push(dir);
+    const store = new OxigraphStore(join(dir, 'store.nq')), scope = createGraphKnowledgeAssetScope(UAL, 1), finalizedAt = new Date().toISOString();
+    await store.insert([
+      ...buildAssertionSealQuads({ assertionUri: ASSERTION, metaGraph: META, merkleRoot: ROOT, authorAddress: AUTHOR,
+        authorAttestationR: new Uint8Array(32).fill(1), authorAttestationVS: new Uint8Array(32).fill(2), authorSchemeVersion: 1,
+        chainId: 31337n, kav10Address: AUTHOR, reservedKaId: PACKED, finalizedAtIso: finalizedAt, contentScopeVersion: 2,
+        kaUal: UAL, assertionVersion: 1, publicTripleCount: 1, privateTripleCount: 0 }),
+      ...QUADS.map(q => ({ ...q, graph: knowledgeAssetLayerGraphUri(CG, MemoryLayer.SharedWorkingMemory, scope) })),
+      { subject: LIFECYCLE, predicate: `${DKG}kaId`, object: '"1"', graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}wmCurrentAssertion`, object: JSON.stringify(HEX.slice(2)), graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}swmCurrentAssertion`, object: JSON.stringify(HEX.slice(2)), graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}state`, object: '"shared"', graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}memoryLayer`, object: '"SWM"', graph: META },
+    ]);
+    const agent = agentFor(store, dir, 1);
+    // The real confirmation hook runs; only the RFC-64 observer it delegates to is replaced.
+    agent.afterConfirmedGraphScopedVmPublishV1 = (DKGAgent.prototype as any).afterConfirmedGraphScopedVmPublishV1;
+    const observed = vi.spyOn(agent, 'observeRfc64ConfirmedVmV1').mockResolvedValue(undefined), broadcast = vi.spyOn(agent.gossip, 'publish');
+    const txHash = `0x${'cd'.repeat(32)}`, clearMarker = vi.fn(async () => undefined);
+    const publish = vi.fn(async (...args: any[]) => {
+      await args.at(-1)?.onBeforeBroadcast?.({ txHash, nonce: 1, operationKind: 'create' });
+      return { status: 'confirmed', ual: PUBLISHED, kaId: PACKED, merkleRoot: ROOT, kaManifest: [], onChainResult: { txHash, blockNumber: 2,
+        txIndex: 0, kaId: PACKED, batchId: PACKED, startKAId: PACKED, endKAId: PACKED, publisherAddress: AUTHOR } };
+    });
+    agent.publisher = { publish, hasSwmShareComplete: async () => true, clearSwmShareComplete: clearMarker, clearPublishedKnowledgeAssetSwm: async () => undefined };
+    agent.publishFromSharedMemory = publish;
+    // Write-ahead admission and the durable metadata commit succeed; the retirement replacement fails.
+    const journal = join(dir, 'named-ka-vm-lifecycle-repairs.json'), replace = DurableReplaceableFile.prototype.replace;
+    let journalWrites = 0, failure: unknown, queue: TripleStoreAsyncLiftPublisher | undefined;
+    vi.spyOn(DurableReplaceableFile.prototype, 'replace').mockImplementation(async function (this: DurableReplaceableFile, contents: string) {
+      if (Reflect.get(this, 'path') === journal && ++journalWrites === 2) throw Object.assign(new Error('journal retirement failed'), { code: 'EIO' });
+      return replace.call(this, contents);
+    });
+    if (mode === 'queued') {
+      const staging = new DKGPublisher({ store, chain: new MockChainAdapter(), eventBus: new TypedEventBus(), keypair: await generateEd25519Keypair() });
+      await staging.stageKnowledgeAssetSharedWorkingMemoryV1({ contextGraphId: CG, kaUal: UAL, assertionVersion: 1,
+        shareOperationId: 'retirement-share', quads: QUADS, privateTripleCount: 0, publisherPeerId: agent.peerId });
+      const fields = { contextGraphId: CG, name: NAME, agentAddress: AUTHOR, shareOperationId: 'retirement-share', roots: [],
+        seal: { merkleRoot: HEX, authorAddress: AUTHOR, signature: { r: `0x${'01'.repeat(32)}`, vs: `0x${'02'.repeat(32)}` }, schemeVersion: 1, reservedKaId: PACKED.toString() },
+        sealChainId: '31337', sealKav10Address: AUTHOR, sealFinalizedAtIso: finalizedAt, sealMerkleRoot: HEX,
+        contentScopeVersion: 2, kaUal: UAL, assertionVersion: '1', publicTripleCount: 1, privateTripleCount: 0 };
+      queue = new TripleStoreAsyncLiftPublisher(store, { knowledgeAssetVmPublishHandler: { execute: async ({ request, publishOptions }) => {
+        try { return await agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions); } catch (error) { failure = error; throw error; }
+      } } });
+      const jobId = await queue.enqueueKnowledgeAssetVmPublish({ ...fields, intentKey: createKnowledgeAssetVmPublishIntentKey(fields as any) } as KnowledgeAssetVmPublishRequest);
+      // The write-ahead broadcast record keeps the job for chain proof; the queue never resends it.
+      expect(await queue.processNext('wallet-1')).toMatchObject({ jobId, status: 'broadcast', broadcast: { txHash } });
+    } else failure = await agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AUTHOR }).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code: 'KA_VM_LIFECYCLE_REPAIR_REQUIRED', publishedUal: PUBLISHED, assertionVersion: '1' });
+    expect(journalWrites).toBe(2);
+    expect(await store.query(`ASK { GRAPH <${META}> { <${LIFECYCLE}> <${DKG}state> "published" } }`)).toMatchObject({ value: true });
+    expect(decodeLifecycleRepairJournal(JSON.parse(await readFile(journal, 'utf8'))).size).toBe(1);
+    // The lifecycle journal error did not skip the confirmation work that is independent of it.
+    expect(clearMarker).toHaveBeenCalledOnce(); expect(clearMarker).toHaveBeenCalledWith(CG, NAME, AUTHOR, undefined);
+    expect(observed).toHaveBeenCalledOnce();
+    expect(observed).toHaveBeenCalledWith(expect.objectContaining({ status: 'confirmed', contextGraphId: CG, assertionCoordinate: NAME,
+      assertionUri: ASSERTION, seal: expect.objectContaining({ kaUal: UAL, assertionVersion: '1', authorAddress: AUTHOR }) }));
+    if (queue) expect(broadcast).toHaveBeenCalledOnce(); // The queued finalization broadcast also still runs.
+    // Storage recovered: the worker completes the retained entry, and nothing publishes or observes again.
+    await agent.namedKaVmLifecycleRepair.runDue();
+    expect(decodeLifecycleRepairJournal(JSON.parse(await readFile(journal, 'utf8'))).size).toBe(0);
+    expect(journalWrites).toBe(3); expect(publish).toHaveBeenCalledOnce(); expect(observed).toHaveBeenCalledOnce();
+    if (queue) expect(await queue.processNext('wallet-1')).toBeNull();
+    await agent.namedKaVmLifecycleRepair.stop();
+  });
+});
 
 describe('confirmed lifecycle repair scheduling and fences', () => {
   const input = { contextGraphId: CG, name: NAME, agentAddress: AUTHOR, publishedUal: PUBLISHED,

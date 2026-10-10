@@ -5602,12 +5602,19 @@ export class PublishMethods extends DKGAgentBase {
       }
     }
 
-    const lifecycleRepairPending = result.status === 'confirmed'
-      ? await this._repairConfirmedNamedKaVmLifecycle({
+    // A lifecycle journal error must not skip the confirmed tail below: the finalization
+    // broadcast, SWM marker clear and RFC-64 placement never read the stamp. Its typed
+    // error is rethrown after them.
+    let lifecycleRepairPending = false, lifecycleRepairFailure: { error: unknown } | undefined;
+    if (result.status === 'confirmed') {
+      try {
+        lifecycleRepairPending = await this._repairConfirmedNamedKaVmLifecycle({
           contextGraphId: request.contextGraphId, name: request.name, agentAddress,
           subGraphName: request.subGraphName, packedKaId: packedKaId ?? seal.reservedKaId,
           ...(operationPlan.kind === 'update' ? { priorMerkleRoot: operationPlan.vmCurrentAssertion } : {}),
-        }, { ...result, status: 'confirmed', assertionUri, seal }) : false;
+        }, { ...result, status: 'confirmed', assertionUri, seal });
+      } catch (error) { lifecycleRepairFailure = { error }; }
+    }
 
     if (result.status === 'confirmed' && result.onChainResult) {
       const rootEntities: string[] = [];
@@ -5673,6 +5680,7 @@ export class PublishMethods extends DKGAgentBase {
       publicationLabel: 'queued publish',
     });
 
+    if (lifecycleRepairFailure) throw lifecycleRepairFailure.error;
     return { ...result, ...(lifecycleRepairPending ? { lifecycleRepairPending: true } : {}), assertionUri, seal };
   }
 
@@ -6091,12 +6099,19 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
-    const lifecycleRepairPending = result.status === 'confirmed'
-      ? await this._repairConfirmedNamedKaVmLifecycle({
+    // A lifecycle journal error must not skip the confirmed tail below: the SWM
+    // marker clear and RFC-64 placement never read the stamp. Its typed error is
+    // rethrown after them.
+    let lifecycleRepairPending = false, lifecycleRepairFailure: { error: unknown } | undefined;
+    if (result.status === 'confirmed') {
+      try {
+        lifecycleRepairPending = await this._repairConfirmedNamedKaVmLifecycle({
           contextGraphId, name, agentAddress, subGraphName: opts?.subGraphName,
           packedKaId,
           ...(operationPlan.kind === 'update' ? { priorMerkleRoot: operationPlan.vmCurrentAssertion } : {}),
-        }, { ...result, status: 'confirmed', assertionUri, seal }) : false;
+        }, { ...result, status: 'confirmed', assertionUri, seal });
+      } catch (error) { lifecycleRepairFailure = { error }; }
+    }
 
     // Preserve the standalone tentative publication projection. Confirmed work
     // above uses the durable repair owner; no VM data graph is claimed here.
@@ -6145,6 +6160,7 @@ export class PublishMethods extends DKGAgentBase {
       publicationLabel: 'publish',
     });
 
+    if (lifecycleRepairFailure) throw lifecycleRepairFailure.error;
     return { ...result, ...(lifecycleRepairPending ? { lifecycleRepairPending: true } : {}), assertionUri, seal };
   }
 
