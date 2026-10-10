@@ -39,6 +39,13 @@ export async function materializeConfirmedGraphKnowledgeAsset(input: GraphMateri
     const rows = await input.prepare();
     const publicMetadata = await prepareKnowledgeAssetMaterializationMetadata(
       input.store, input.metaGraph, input.scope.ual, rows.metadataQuads);
+    // GH #1078 — persist the private slice only now that the chain has confirmed,
+    // and before the metadata that advertises it, so no read sees this assertion
+    // confirmed without its private data. The slice graph is keyed by assertion
+    // version: until that metadata commits, readers keep the previous assertion
+    // and its own slice, and a retry rewrites this one.
+    await input.privateStore.replaceKnowledgeAssetPrivateTriples(input.contextGraphId,
+      input.scope, rows.privateQuads, input.subGraphName);
     await replaceLocallyTrustedKnowledgeAssetControls(input.store, input.scope.ual, rows.metadataQuads);
     if (!await tryReplaceGraphAndSubjectAtomically(input.store, input.vmGraph,
       rows.vmQuads.map(quad => ({ ...quad, graph: input.vmGraph })),
@@ -46,11 +53,6 @@ export async function materializeConfirmedGraphKnowledgeAsset(input: GraphMateri
       await replacePublicSliceWithoutCompoundCapability(input.store, input.vmGraph,
         rows.vmQuads, input.metaGraph, input.scope.ual, publicMetadata);
     }
-    // GH #1078 — supersede/persist private slices only now that the chain
-    // has confirmed (before returning 'confirmed', so no read sees the KA
-    // confirmed without its private data).
-    await input.privateStore.replaceKnowledgeAssetPrivateTriples(input.contextGraphId,
-      input.scope, rows.privateQuads, input.subGraphName);
     await input.persistCatalogEntry();
     await writeMaterializedVersion(input.store, input.metaGraph, input.scope.ual, input.version);
     return true;

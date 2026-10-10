@@ -96,7 +96,52 @@ describe('confirmed graph publish materialization', () => {
     } finally { await input.store.close(); }
   });
 
-  it.each(['private', 'catalog'] as const)('retains the previous fence in the compound payload after a later %s failure', async failingSlice => {
+  it.each(['first materialization', 'update'] as const)('advertises a %s only after its own private slice is durable', async kind => {
+    const input = fixture();
+    const assertion = (assertionVersion: number, value: string) => {
+      const scope = createGraphKnowledgeAssetScope(input.scope.ual, assertionVersion);
+      const privateQuads = [{ subject: 'urn:data', predicate: 'urn:secret', object: `"${value} private"`, graph: '' }];
+      return { ...input, scope, privateQuads, version: { blockNumber: 10 + assertionVersion, txIndex: 0 },
+        vmQuads: input.vmQuads.map(q => ({ ...q, object: `"${value} public"` })),
+        confirmedQuads: generateGraphKnowledgeAssetMetadata({ ual: scope.ual, contextGraphId: input.contextGraphId,
+          assertionVersion, assertionGraph: input.vmGraph, publisherPeerId: 'owner', accessPolicy: 'ownerOnly',
+          merkleRoot: new Uint8Array(32).fill(assertionVersion), timestamp: new Date(0), publicTripleCount: 1,
+          privateTripleCount: 1, privateMerkleRoot: computePrivateRootV10(privateQuads)!,
+        }, { status: 'confirmed', confirmation: { kind: 'transaction', provenance: { batchId: 7n, txHash: `0x${'11'.repeat(32)}` } } }) };
+    };
+    const rows = async (query: string) => {
+      const result = await input.store.query(query);
+      return result.type === 'quads' ? result.quads.map(q => JSON.stringify(q)).sort() : result;
+    };
+    // Everything a reader resolves before it reaches the private store.
+    const readable = async () => ({
+      metadata: await rows(`CONSTRUCT { <${input.scope.ual}> ?p ?o } WHERE { GRAPH <${input.metaGraph}> { <${input.scope.ual}> ?p ?o } }`),
+      data: await rows(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${input.vmGraph}> { ?s ?p ?o } }`),
+      fence: await readMaterializedVersion(input.store, input.metaGraph, input.scope.ual),
+    });
+    const readPrivate = (scope: typeof input.scope) => new PrivateContentStore(input.store, new GraphManager(input.store))
+      .getKnowledgeAssetPrivateTriples(input.contextGraphId, scope);
+    const previous = assertion(1, 'one');
+    const incoming = kind === 'update' ? assertion(2, 'two') : previous;
+    try {
+      if (kind === 'update') expect(await materialize(previous)).toBe(true);
+      const before = await readable();
+      vi.spyOn(input.privateStore, 'replaceKnowledgeAssetPrivateTriples').mockRejectedValueOnce(new Error('private slice unavailable'));
+      await expect(materialize(incoming)).rejects.toThrow('private slice unavailable');
+      expect(await readable()).toEqual(before);
+      if (kind === 'update') expect(await readPrivate(previous.scope)).toEqual(previous.privateQuads);
+      expect(input.persistCatalogEntry).toHaveBeenCalledTimes(kind === 'update' ? 1 : 0);
+      expect(await materialize(incoming)).toBe(true);
+      expect(await readPrivate(incoming.scope)).toEqual(incoming.privateQuads);
+      expect(await input.store.query(`SELECT ?v WHERE { GRAPH <${input.metaGraph}> {
+        <${input.scope.ual}> <http://dkg.io/ontology/assertionVersion> ?v } }`))
+        .toMatchObject({ bindings: [{ v: expect.stringMatching(new RegExp(`^"${incoming.scope.assertionVersion}"`)) }] });
+      expect(await readMaterializedVersion(input.store, input.metaGraph, input.scope.ual)).toEqual(incoming.version);
+    } finally { await input.store.close(); }
+  });
+
+  // A private failure precedes the compound commit; the test above covers it.
+  it('retains the previous fence in the compound payload after a later catalog failure', async () => {
     const input = fixture();
     try {
       await materialize(input);
@@ -106,11 +151,7 @@ describe('confirmed graph publish materialization', () => {
         vmQuads: input.vmQuads.map(q => ({ ...q, object: '"replacement"' })),
         confirmedQuads: [...input.confirmedQuads, materializedVersionQuad(input.metaGraph, input.scope.ual, nextVersion)],
       };
-      if (failingSlice === 'private') {
-        vi.spyOn(input.privateStore, 'replaceKnowledgeAssetPrivateTriples').mockRejectedValueOnce(new Error('later slice failed'));
-      } else {
-        input.persistCatalogEntry.mockRejectedValueOnce(new Error('later slice failed'));
-      }
+      input.persistCatalogEntry.mockRejectedValueOnce(new Error('later slice failed'));
       await expect(materialize(next)).rejects.toThrow('later slice failed');
       expect(compound).toHaveBeenCalledOnce();
       expect(compound.mock.calls[0]?.[4].filter(q => q.predicate.endsWith('materializedVersion')))
@@ -160,7 +201,8 @@ describe('confirmed graph publish materialization', () => {
       const graphOnly = vi.spyOn(input.store, 'replaceGraph');
       vi.spyOn(input.store, 'replaceGraphAndSubject').mockRejectedValue(new Error('compound response lost'));
       await expect(materialize(input)).rejects.toThrow('compound response lost');
-      expect(graphOnly).not.toHaveBeenCalled();
+      // The private slice's own atomic replace shares this store and precedes the compound.
+      expect(graphOnly.mock.calls.filter(([graph]) => graph === input.vmGraph)).toHaveLength(0);
       expect(input.persistCatalogEntry).not.toHaveBeenCalled();
       expect(await readMaterializedVersion(input.store, input.metaGraph, input.scope.ual)).toBeNull();
     } finally { await input.store.close(); }
@@ -208,18 +250,19 @@ describe('confirmed graph publish materialization', () => {
     const input = fixture();
     try {
       expect(await materialize(input)).toBe(true);
-      vi.spyOn(input.privateStore, 'replaceKnowledgeAssetPrivateTriples').mockRejectedValueOnce(new Error('private retry failed'));
+      // The catalog is the first slice after the compound metadata commit.
+      input.persistCatalogEntry.mockRejectedValueOnce(new Error('catalog retry failed'));
       await expect(materialize({ ...input,
         confirmedQuads: input.confirmedQuads.map(q => q.predicate.endsWith('accessPolicy')
           ? { ...q, object: '"ownerOnly"' } : q),
-      })).rejects.toThrow('private retry failed');
+      })).rejects.toThrow('catalog retry failed');
       expect(await readMaterializedVersion(input.store, input.metaGraph, input.scope.ual)).toEqual(input.version);
       expect(await materialize({ ...input, version: { blockNumber: 9, txIndex: 9 },
         vmQuads: input.vmQuads.map(q => ({ ...q, object: '"stale after interrupted retry"' })),
       })).toBe(false);
       expect(await input.store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${input.vmGraph}> { ?s ?p ?o } }`))
         .toMatchObject({ quads: [expect.objectContaining({ object: '"old"' })] });
-      expect(input.persistCatalogEntry).toHaveBeenCalledOnce();
+      expect(input.persistCatalogEntry).toHaveBeenCalledTimes(2);
     } finally { await input.store.close(); }
   });
 
@@ -267,15 +310,17 @@ describe('confirmed graph publish materialization', () => {
 
   it('refuses a store without atomic complete-graph replacement', async () => {
     const input = fixture();
+    // A separate private store keeps its atomic replace, so this refusal is the public slice's own.
+    const privateBacking = new OxigraphStore();
     try {
       await input.store.insert(input.vmQuads);
       Reflect.set(input.store, 'replaceGraphAndSubject', undefined);
       Reflect.set(input.store, 'replaceGraph', undefined);
-      await expect(materialize(input))
+      await expect(materialize({ ...input, privateStore: new PrivateContentStore(privateBacking, new GraphManager(privateBacking)) }))
         .rejects.toMatchObject({ code: 'ATOMIC_GRAPH_REPLACE_UNSUPPORTED', graphUri: input.vmGraph });
       expect(await input.store.countQuads(input.vmGraph)).toBe(1);
       expect(input.persistCatalogEntry).not.toHaveBeenCalled();
-    } finally { await input.store.close(); }
+    } finally { await input.store.close(); await privateBacking.close(); }
   });
 
   it('does not stamp the materialized version or catalog after a failed public graph swap', async () => {

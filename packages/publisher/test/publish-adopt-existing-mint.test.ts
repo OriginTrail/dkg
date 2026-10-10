@@ -179,8 +179,8 @@ async function setupSealedGraphPublish(privateQuads: Quad[] = []) {
 }
 
 /** A confirmed retry uses the same chain evidence while the local write is repaired. */
-async function sealedUpdateFixture() {
-  const s = await setupSealedGraphPublish();
+async function sealedUpdateFixture(initialPrivateQuads: Quad[] = []) {
+  const s = await setupSealedGraphPublish(initialPrivateQuads);
   const initial = await s.publisher.publish(s.publishOptions);
   expect(initial.status).toBe('confirmed');
   const meta = `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_meta`;
@@ -311,6 +311,46 @@ describe('publish adopt-existing-mint interception (KaIdAlreadyMinted)', () => {
         }
       } finally { await s.store.close(); }
     });
+
+  it('keeps the previous private assertion readable until a confirmed update persists its own private slice', async () => {
+    const s = await sealedUpdateFixture([{ subject: 'urn:test:adopt-existing-mint', predicate: 'urn:test:secret',
+      object: '"old private"', graph: '' }]);
+    try {
+      // Real access reads require the registration owned by joined context graphs.
+      await s.store.insert([{ subject: `did:dkg:context-graph:${CONTEXT_GRAPH_ID}`,
+        predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+        object: 'https://dkg.network/ontology#ContextGraph', graph: s.meta }]);
+      const handler = new AccessHandler(s.store, new TypedEventBus());
+      const key = await generateEd25519Keypair();
+      const request = encodeAccessRequest({ kaUal: s.ual, requesterPeerId: 'adoption-publisher', paymentProof: new Uint8Array(0),
+        requesterSignature: await ed25519Sign(new TextEncoder().encode(s.ual), key.secretKey), requesterPublicKey: key.publicKey });
+      const ownerRead = async () => {
+        const response = decodeAccessResponse(await handler.handler(request, 'adoption-publisher' as never));
+        return { rejectionReason: response.rejectionReason, nquads: new TextDecoder().decode(response.nquads) };
+      };
+      const advertised = () => s.store.query(`SELECT ?version WHERE { GRAPH <${s.meta}> {
+        <${s.ual}> <http://dkg.io/ontology/assertionVersion> ?version } }`);
+      expect(await ownerRead()).toMatchObject({ rejectionReason: '', nquads: expect.stringContaining('old private') });
+      const privateStore = Reflect.get(s.publisher, 'privateStore');
+      const replace = privateStore.replaceKnowledgeAssetPrivateTriples.bind(privateStore);
+      let failIncoming = true;
+      vi.spyOn(privateStore, 'replaceKnowledgeAssetPrivateTriples').mockImplementation(async (cg, scope, quads, subGraph) => {
+        if (failIncoming && scope.assertionVersion === '2') {
+          failIncoming = false;
+          throw new Error('assertion 2 private slice unavailable');
+        }
+        return replace(cg, scope, quads, subGraph);
+      });
+      await expect(s.publisher.update(s.reservedKaId, s.options)).rejects.toThrow('assertion 2 private slice unavailable');
+      expect(await advertised()).toMatchObject({ bindings: [{ version: expect.stringMatching(/^"1"/) }] });
+      expect(await ownerRead()).toMatchObject({ rejectionReason: '', nquads: expect.stringContaining('old private') });
+      expect(await readMaterializedVersion(s.store, s.meta, s.ual)).toEqual(s.prior);
+      expect((await s.publisher.update(s.reservedKaId, s.options)).status).toBe('confirmed');
+      expect(await advertised()).toMatchObject({ bindings: [{ version: expect.stringMatching(/^"2"/) }] });
+      expect(await ownerRead()).toMatchObject({ rejectionReason: '', nquads: expect.stringContaining('new private') });
+      expect(await readMaterializedVersion(s.store, s.meta, s.ual)).toEqual(s.version);
+    } finally { await s.store.close(); }
+  });
 
   it('holds the KA lock and previous fence through a catalog commit before admitting an older mint retry', async () => {
     const s = await sealedUpdateFixture();
