@@ -14,7 +14,7 @@ Both modes use the existing exact-batch transport, content-root verification, gr
 
 Wire snapshots are versioned, size-bounded and scoped to the chain, Hub deployment, graph name commitment and registered graph id. Integer strings are canonical; duplicate assets and digest mismatches fail. New evidence must be observed within 120 seconds; a recovery job pins its accepted snapshot while transferring. A final comparison requires a newly observed snapshot after transfer, not reuse of the initial cached answer. `completeAsOfSnapshot` and `current` are separate facts: a changed inventory does not become a full-current PASS.
 
-Imported asset metadata records the mode, supplier, snapshot digest, observation time and chain anchor. A durable graph trust marker is written before core-trusted content. Query APIs require `chainEvidenceMode: "core-cache"` with an explicit context graph to read such a graph. Normal authorization still applies. Queries recheck evidence policy before releasing results so concurrent imports cannot race the guard. Unscoped queries fail conservatively if the dataset contains any marked graph.
+Imported asset metadata records the mode, supplier, snapshot digest, observation time and chain anchor. A durable graph trust marker is written before core-trusted content. Query APIs require `chainEvidenceMode: "core-cache"` with an explicit context graph to read such a graph. Parent scopes are conservatively guarded when any descendant graph is marked, including child partitions selected through `subGraphName`. Normal authorization still applies. Queries recheck evidence policy before releasing results so concurrent imports cannot race the guard. Unscoped queries fail conservatively if the dataset contains any marked graph.
 
 A marked graph stays marked across partial imports, process restarts and subsequent RPC replays. To retain an independent-only query policy, use a separate profile/store; automatic evidence promotion is not implemented. Querying the raw database as its operator is outside the query API policy boundary.
 
@@ -61,4 +61,4 @@ acceptance field. They refuse reads from a marked graph (and conservatively
 refuse unscoped UAL lookups when any graph is marked) before execution and before
 releasing results. Local scoped queries may explicitly accept core-cache evidence.
 Imported `publishedAt` values are locally assigned RDF `xsd:dateTime` values;
-same-version replay preserves the original local receive time.
+same-version replay preserves the original local receive time. The pinned snapshot block is the local materialization ordering stamp. Every finalization write also checks the stored assertion version under the same asset lock, so a delayed older receipt cannot replace a newer snapshot import, including imports carrying a legacy zero ordering stamp.

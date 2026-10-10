@@ -1,3 +1,4 @@
+import { activeRpcRequestAbortSignal } from "../src/rpc-request-transport.js";
 import { describe, expect, it, vi } from 'vitest';
 import { Interface, ethers } from 'ethers';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
@@ -47,7 +48,7 @@ function fixture(aggregate: boolean, reorg: boolean, depth: number) {
   };
   const a: any = new EVMChainAdapter({rpcUrl:'http://127.0.0.1:59998',chainId:'evm:31337',hubAddress:hub,privateKey:ethers.Wallet.createRandom().privateKey,finalityConfirmations:depth});
   a.init=vi.fn(async()=>{}); a.providers=[provider];
-  return {a, reads, blockReads, anchor};
+  return {a, reads, blockReads, anchor, provider, interfaces};
 }
 describe('public snapshot coherent provider reads', () => {
   const cases = [true,false].flatMap(aggregate => [1,3].map(depth => ({aggregate,depth})));
@@ -63,4 +64,31 @@ describe('public snapshot coherent provider reads', () => {
     const {a} = fixture(aggregate,true,depth);
     await expect(a.readPublicGraphSnapshot('coherent-snapshot','1')).rejects.toThrow();
   });
+});
+
+it.each(['hub','inventory','assets'] as const)('cancels sibling %s calls on pressure and settles before returning', async stage => {
+  const {a,provider,interfaces} = fixture(false,false,1);
+  const original = provider.call;
+  const pressure = Object.assign(new Error('local queue is full'),{code:'RPC_REQUEST_GOVERNOR_QUEUE_FULL'});
+  const started: string[] = [], cancelled: string[] = [];
+  let released = false, active = 0;
+  provider.call = async (tx:any) => {
+    const name = interfaces[tx.to]!.parseTransaction({data:tx.data})!.name;
+    const names = stage==='hub' ? ['getAssetStorageAddress'] : stage==='inventory' ? ['getContextGraph','getNameHash','getContextGraphKaCount'] : ['getLatestMerkleRoot','getKnowledgeAssetUpdateContext','kaToContextGraph'];
+    if(!names.includes(name)) return original(tx);
+    started.push(name); active++;
+    try {
+      if(!released) {released=true;await Promise.resolve();throw pressure;}
+      const signal=activeRpcRequestAbortSignal()!;
+      await new Promise((_resolve,reject)=>{
+        const abort=()=>{cancelled.push(name);reject(signal.reason);};
+        signal.addEventListener('abort',abort,{once:true});if(signal.aborted)abort();
+      });
+    } finally {active--;}
+  };
+  const fallback = {...provider,send:vi.fn(provider.send)}; a.providers.push(fallback);
+  await expect(a.readPublicGraphSnapshot('coherent-snapshot','1')).rejects.toThrow('unavailable');
+  expect(started).toHaveLength(stage==='hub'?2:stage==='inventory'?3:6);
+  expect(cancelled).toHaveLength(started.length-1);
+  expect(active).toBe(0);expect(fallback.send).not.toHaveBeenCalled();
 });

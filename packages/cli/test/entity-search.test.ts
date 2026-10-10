@@ -1,3 +1,4 @@
+import { markCoreTrustedGraph, withPublicSnapshotQueryTrust } from "../../agent/src/public-snapshot-evidence.js";
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -26,7 +27,7 @@ async function fixture(count = 3) {
   let permitted = true;
   const agent = { query: vi.fn(async (sparql, options) => {
     if (!permitted) throw Object.assign(new Error('denied'), { code: 'QUERY_ACCESS_DENIED' });
-    return engine.query(sparql, options);
+    return withPublicSnapshotQueryTrust(graph, options.contextGraphId, options.chainEvidenceMode, () => engine.query(sparql, options));
   }) };
   for (let i = 0; i < count; i++) await graph.insert([
     { graph: partition, subject: `urn:entity:${i}`, predicate: 'urn:description', object: JSON.stringify(i === 0 ? 'ocean science' : 'mountain climbing') },
@@ -221,4 +222,23 @@ it('reports disabled, wrong-scope, method and timeout outcomes separately', asyn
   f.embedder.embed.mockImplementationOnce(async () => { const end = performance.now() + 10; while (performance.now() < end) {} return [1, 0]; });
   const late = request(f, { ...body, timeoutMs: 1 }); await handleEntityRoutes(late.ctx);
   expect(JSON.parse(late.res.body).code).toBe('QUERY_DEADLINE_EXCEEDED');
+});
+
+it('enforces persisted core trust on entity indexing, cached search and readiness', async () => {
+  const f = await fixture();
+  const indexed = await f.index(); // Cache predates the import marker.
+  await markCoreTrustedGraph(f.graph,'catalog');
+  for (const route of ['index','search','readiness']) {
+    const body = route === 'index' ? spec : {contextGraphId:'catalog',indexId:indexed.indexId,query:'ocean'};
+    for (const mode of [undefined,'rpc-only','core-cache','unknown']) {
+      const r = request(f,{...body,...(mode === undefined ? {} : {chainEvidenceMode:mode})},'nodeOperator',`/api/entities/${route}`);
+      await handleEntityRoutes(r.ctx);
+      expect(r.res.statusCode).toBe(mode === 'core-cache' ? 200 : mode === 'unknown' ? 400 : 409);
+      if(mode === 'core-cache') expect(JSON.parse(r.res.body).chainEvidenceMode).toBe('core-cache');
+      else if(mode !== 'unknown') expect(JSON.parse(r.res.body).code).toBe('CORE_CACHE_QUERY_TRUST_REQUIRED');
+    }
+  }
+  f.deny();
+  const denied = request(f,{...spec,chainEvidenceMode:'core-cache'},'nodeOperator','/api/entities/index');
+  await handleEntityRoutes(denied.ctx); expect(denied.res.statusCode).toBe(403);
 });
