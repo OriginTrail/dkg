@@ -27,7 +27,7 @@ export interface ExactBatchResponderBindingOptions {
   readonly isPublicContextGraph: (contextGraphId: string, signal: AbortSignal) => Promise<boolean>;
   readonly servingWithheld?: (contextGraphId: string) => boolean;
   /** Closed, request-free reason for a pre-export refusal. */
-  readonly onRefusal?: (stage: 'authorization' | 'public-authority' | 'serving', code: 'BUSY' | 'DENIED') => void;
+  readonly onRefusal?: (stage: 'authorization' | 'public-authority' | 'serving' | 'export', code: 'BUSY' | 'DENIED') => void;
   readonly onStage?: (stage: 'metadata' | 'export' | 'encode' | 'send' | 'source-fence' | 'ack-wait' | ExactAssetExportStage, assetIndex: number, durationMs: number, context: OperationContext) => void;
   /** Successful cache lease export count, never a peer/body authority claim. */
   readonly onExport?: (assetIndex: number, wholePayloadExports: 0 | 1, context: OperationContext) => void;
@@ -56,7 +56,7 @@ class ProfileRefusal extends Error {}
 /** Bind directly to Core's explicit registerExperimentalExactBatchResponder. */
 export function createExactBatchResponderBinding(options: ExactBatchResponderBindingOptions) {
   const authorizationOwner = {};
-  const refuse = (stage: 'authorization' | 'public-authority' | 'serving', code: 'BUSY' | 'DENIED'): never => {
+  const refuse = (stage: 'authorization' | 'public-authority' | 'serving' | 'export', code: 'BUSY' | 'DENIED'): never => {
     try { options.onRefusal?.(stage, code); } catch { /* observation cannot change a refusal */ }
     throw new ExactBatchResponderRefusal(code);
   };
@@ -170,6 +170,9 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
       if (error instanceof ProfileRefusal && !session.signal.aborted) {
         await send({ kind: K.REFUSE, assetIndex: EXACT_BATCH_BATCH_INDEX, sequence: 0, payload: ENCODER.encode('RESOURCE_LIMIT') });
         return;
+      }
+      if (!session.signal.aborted && (isStoreSchedulerBusyError(error) || isStoreOperationTimeoutError(error))) {
+        refuse('export', 'BUSY');
       }
       throw error;
     } finally { window.close(); }

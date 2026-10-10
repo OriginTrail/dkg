@@ -191,6 +191,31 @@ describe('exact batch normal verifier/materializer binding', () => {
     } finally { await f.close(); }
   });
 
+  it('answers typed export pressure with BUSY before sending an asset frame', async () => {
+    const f = await fixture(1, 2), signal = new AbortController().signal;
+    const session = { signal, windowSize: 2 as const, assetUals: f.receiver.assetUals,
+      send: vi.fn(async (_frame: ExactBatchFrame) => {}), next: vi.fn(async () => undefined) };
+    try {
+      const acquire = vi.spyOn(f.exportCache, 'acquireEncoded');
+      const pressure = [
+        new StoreSchedulerBusyError('queue_full', 'normal', 'blazegraph.query', { storeOperation: 'query' }),
+        new StoreOperationTimeoutError({ backend: 'blazegraph', operation: 'query' }),
+      ];
+      for (const error of pressure) {
+        const authorized = await f.binding.authorizeRequest(f.signed, 'requester', signal);
+        acquire.mockRejectedValueOnce(error);
+        await expect(f.binding.respond(authorized.context, session, 'requester'))
+          .rejects.toMatchObject({ refusal: 'BUSY' } satisfies Partial<ExactBatchResponderRefusal>);
+        expect(session.send).not.toHaveBeenCalled();
+      }
+      const unexpected = new Error('Unexpected exporter failure');
+      const authorized = await f.binding.authorizeRequest(f.signed, 'requester', signal);
+      acquire.mockRejectedValueOnce(unexpected);
+      await expect(f.binding.respond(authorized.context, session, 'requester')).rejects.toBe(unexpected);
+      expect(session.send).not.toHaveBeenCalled();
+    } finally { await f.close(); }
+  });
+
   it('keeps explicit authorization after the START buffers are copied and discarded', async () => {
     const f = await fixture(1, 20), wire = duplex(f.receiver.assetUals);
     try {
