@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { chainRpcFetch } from './rpc-http1-dispatcher.js';
 import {
   FetchRequest,
   JsonRpcProvider,
@@ -185,7 +186,7 @@ export const cancellableRpcGetUrl: FetchGetUrlFunc = async (
       requestBody = new ArrayBuffer(request.body.length);
       new Uint8Array(requestBody).set(request.body);
     }
-    const response = await fetch(request.url, {
+    const response = await chainRpcFetch(request.url, {
       method: request.method,
       headers: request.headers,
       body: requestBody,
