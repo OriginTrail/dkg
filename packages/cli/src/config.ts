@@ -765,16 +765,13 @@ export interface DkgConfig {
   queryAccess?: QueryAccessConfig;
   autoUpdate?: AutoUpdateConfig;
   /**
-   * Chain config. Field-merged on top of `network/<env>.json#chain` via
-   * `resolveChainConfig()`, so an operator can override individual fields
-   * (e.g. just `rpcUrl` to point at a private RPC) without having to
-   * restate `hubAddress` and `chainId`. Fields omitted here inherit the
-   * network defaults — including future hub rotations propagated by the
-   * auto-updater pulling a fresh network/<env>.json.
+   * Field-merged over network/<env>.json#chain by resolveChainConfig().
+   * Operators can override one field; omitted fields follow updated defaults.
    */
   chain?: Partial<ChainConfig>;
   /** Optional LLM for the Node UI chatbot (natural language → SPARQL, answers). */
   llm?: LlmConfig;
+  entitySearch?: { embedding: import('./entity-search/types.js').EntityEmbeddingConfig };
   /** Block explorer URL for TX links (default: derived from chainId). */
   blockExplorerUrl?: string;
   /** Triple store backend override (default: oxigraph-worker with file persistence). */
