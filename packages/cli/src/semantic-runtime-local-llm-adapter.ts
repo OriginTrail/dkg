@@ -12,26 +12,22 @@ export interface LocalLlmProgramCapability {
 }
 
 export interface LocalLlmProgramProvider {
-  capability: LocalLlmProgramCapability;
+  readonly capability: LocalLlmProgramCapability;
+  isEnabled(): boolean;
   run(prompt: string): Promise<unknown>;
 }
 
-// The daemon installs its existing read-only, graph-scoped model runtime.
-// Program input cannot install a provider or choose an endpoint or credential.
-let provider: LocalLlmProgramProvider | undefined;
-
-export function registerLocalLlmProgramProvider(value: LocalLlmProgramProvider): () => void {
-  provider = value;
-  return () => { if (provider === value) provider = undefined; };
+export function localLlmAdapterHashes(paths: readonly string[] = []) {
+  return paths.map(path => ({
+    path, sha256: createHash('sha256').update(readFileSync(path)).digest('hex'),
+  }));
 }
 
 export function localLlmConfigurationSha256(settings: {
   llamaUrl: string; model: string; defaultProjectId?: string;
   domainProfile?: unknown; adapterPaths?: string[];
 }, ownerAgentAddress: string): string {
-  const adapters = (settings.adapterPaths ?? []).map(path => ({
-    path, sha256: createHash('sha256').update(readFileSync(path)).digest('hex'),
-  }));
+  const adapters = localLlmAdapterHashes(settings.adapterPaths);
   return createHash('sha256').update(JSON.stringify({
     endpoint: settings.llamaUrl, model: settings.model,
     contextGraphId: settings.defaultProjectId, ownerAgentAddress: ownerAgentAddress.toLowerCase(),
@@ -46,9 +42,10 @@ export function createLocalLlmProgramAdapter(
   executorAddress: string,
   grant: { toolIri: string; configurationSha256: string },
   assertAuthorized: () => Promise<void>,
+  provider: LocalLlmProgramProvider | undefined,
 ): RuntimeAdapterOperation<{ prompt: string }, string> {
   const installed = provider;
-  const matches = () => Boolean(installed && provider === installed
+  const matches = () => Boolean(installed && installed.isEnabled()
     && grant.toolIri === LOCAL_LLM_PROGRAM_TOOL
     && installed.capability.configurationSha256 === grant.configurationSha256
     && installed.capability.contextGraphId === contextGraphId
@@ -71,10 +68,10 @@ export function createLocalLlmProgramAdapter(
     },
     async dispatch(_authorization, input) {
       await assertAuthorized();
-      if (!matches()) throw new Error('LOCAL_LLM_PROGRAM_CONFIGURATION_CHANGED');
+      if (!matches()) throw new Error('LOCAL_LLM_PROGRAM_CONFIGURATION_CHANGED_BEFORE_DISPATCH');
       const result = await installed!.run(input.prompt);
       await assertAuthorized();
-      if (!matches()) throw new Error('LOCAL_LLM_PROGRAM_CONFIGURATION_CHANGED');
+      if (!matches()) throw new Error('LOCAL_LLM_PROGRAM_CONFIGURATION_CHANGED_AFTER_DISPATCH');
       const output = JSON.stringify(result);
       return {
         status: 'succeeded', output: JSON.stringify({ output, childExecutions: [] }),
@@ -83,6 +80,6 @@ export function createLocalLlmProgramAdapter(
     },
     reconcile: async () => ({ status: 'unknown', evidenceRef: 'urn:sr:reconciliation:manual-review-required' }),
     couldHaveReachedTarget: error => !(error instanceof Error
-      && ['INVALID_SAFE_LLM_ARGUMENT', 'LOCAL_LLM_PROGRAM_CONFIGURATION_CHANGED'].includes(error.message)),
+      && ['INVALID_SAFE_LLM_ARGUMENT', 'LOCAL_LLM_PROGRAM_CONFIGURATION_CHANGED_BEFORE_DISPATCH'].includes(error.message)),
   };
 }

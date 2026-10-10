@@ -1,5 +1,5 @@
 import { programToolDefinition } from './semantic-runtime-tool-catalog.js';
-import { createLocalLlmProgramAdapter } from './semantic-runtime-local-llm-adapter.js';
+import { createLocalLlmProgramAdapter, type LocalLlmProgramProvider } from './semantic-runtime-local-llm-adapter.js';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -144,6 +144,7 @@ export class SemanticProgramError extends Error {
 }
 
 export interface ConfiguredSemanticRuntimeService {
+  readonly localLlmProvider?: LocalLlmProgramProvider;
   host: SemanticRuntimeHost;
   store: SemanticRuntimeStore;
   configuration: SemanticProgramConfiguration;
@@ -156,6 +157,7 @@ export interface ConfiguredSemanticRuntimeService {
 }
 
 export interface ConfiguredSemanticRuntimeDeps {
+  localLlmProvider?: LocalLlmProgramProvider;
   log: (message: string) => void;
   dataDirectory?: string;
   start?: (options: SemanticRuntimeHostOptions) => Promise<SemanticRuntimeHost>;
@@ -200,6 +202,7 @@ export async function startConfiguredSemanticRuntime(
   const typescript = new TypeScriptProgramHost();
   const inFlight: ConfiguredSemanticRuntimeService['inFlight'] = new Map();
   return {
+    localLlmProvider: deps.localLlmProvider,
     host,
     store,
     configuration,
@@ -698,7 +701,7 @@ async function resolveTypeScriptTools(agent: DKGAgent, runtime: ConfiguredSemant
   const digest = programBindingDigest(binding);
   const resolved = await resolveProgramTools(agent, binding.contextGraphId, program, config, undefined,
     binding.executorAgentAddress, binding.executorAgentAddress, binding.executionLayer ?? 'wm', undefined, check,
-    { binding, digest, assertAuthorized: check }, runtime.store);
+    { binding, digest, assertAuthorized: check }, runtime.store, runtime.localLlmProvider);
   if (resolved.tools.some(tool => !tool.effective)) throw new SemanticProgramError('REQUIRED_TOOL_UNAVAILABLE', 'A requested adapter is unavailable', 409);
   return { registry: resolved.registry, policyHashHex: resolved.policyHashHex,
     public: { contextGraphId: binding.contextGraphId, programIri: program.programIri, programLayer: program.layer,
@@ -951,6 +954,7 @@ async function resolveProgramTools(
   executionLayer: SemanticMemoryLayer, childInvoker: SemanticProgramChildInvoker | undefined,
   assertAuthorized: (() => Promise<void>) | undefined, bound: BoundProgramInvocation | undefined,
   assetStore: SemanticRuntimeStore | undefined,
+  localLlmProvider?: LocalLlmProgramProvider,
 ) {
   const programIri = program.programIri, programLayer = program.layer;
   const readPrincipal = bound?.binding.executorAgentAddress ?? callerAgentAddress;
@@ -1098,7 +1102,7 @@ async function resolveProgramTools(
   }
   if (bound?.binding.localLlm) {
     registry.register(createLocalLlmProgramAdapter(contextGraphId, operatorAddress,
-      bound.binding.localLlm, bound.assertAuthorized));
+      bound.binding.localLlm, bound.assertAuthorized, localLlmProvider));
   }
   if (!bound && (!config?.programPolicy || config.programPolicy.disclosure)) {
     registry.register(createSafeLlmAdapter(
@@ -1214,8 +1218,7 @@ async function resolveInternal(
   if (bound && (compilation.plan.adapterVersions.size !== program.requiredTools.length
     || [...compilation.plan.adapterVersions].some(([operation, version]) => version !== 1
       || !(operation === 'dkg/query' && bound.binding.query || operation === 'dkg/asset-create' && bound.binding.assetCreation
-        || operation === 'dkg/sparql-read' && bound.binding.sparqlRead
-        || operation === 'llm/safe' && bound.binding.localLlm))
+        || operation === 'dkg/sparql-read' && bound.binding.sparqlRead))
     || compilation.plan.effectUpperBound.some((effect) => !['read', 'asset-creation'].includes(effect)))) {
     throw new SemanticProgramError('PROGRAM_BINDING_TOOL_FORBIDDEN', 'Program uses tools outside the tenant binding', 403);
   }
@@ -1305,6 +1308,9 @@ function createProgramToolDispatcher(
       return descriptor ? [descriptor.verb] : [];
     }))];
     const readOnly = [...authority.allowedEffectClasses].every(effectClass => effectClass === 'read');
+    // Bound TypeScript Programs spend their shared maxCalls budget per tool.
+    // Non-repeatable effects retain separate durable call IDs; consuming the
+    // execution-wide capability on their first call would also disable reads.
     runtime.store.putCapability({
       capabilityId,
       executionId: executionIri,
@@ -1315,14 +1321,14 @@ function createProgramToolDispatcher(
         verbs: capabilityVerbs,
         resources: resolved.public.requiredTools.map(tool => tool.toolIri),
         delegationDepth: 0,
-        oneShot: !readOnly && !authority.adapterVersions.has('dkg/asset-create'),
+        oneShot: !bound?.binding.typescript && !readOnly && !authority.adapterVersions.has('dkg/asset-create'),
         budgetMicros: 0n,
       }),
       hostBindingKey: resolved.public.requiredTools[0]?.adapterHash ?? 'no-adapter',
       policyEpoch: 1n,
       notBefore: now - 1_000,
       expiresAt: now + 30 * 24 * 60 * 60 * 1_000,
-      oneShot: !readOnly && !authority.adapterVersions.has('dkg/asset-create'),
+      oneShot: !bound?.binding.typescript && !readOnly && !authority.adapterVersions.has('dkg/asset-create'),
       consumedAt: null,
       revokedAt: null,
     });
@@ -1603,8 +1609,7 @@ async function invokeResolved(
     executionIri, invocationId, assertAuthorized, bound);
   const childExecutions: string[] = [];
   const toolDispatcher: ComponentToolDispatcher = async (call) => {
-    if (bound && !(call.kind === 'safe-llm' && bound.binding.localLlm)
-      && !(call.kind === 'asset-create' && bound.binding.assetCreation)
+    if (bound && !(call.kind === 'asset-create' && bound.binding.assetCreation)
       && !(call.kind === 'sparql-read' && bound.binding.sparqlRead)
       && (call.kind !== 'query-catalog' || call.queryId !== bound.binding.query?.selector || call.parameters.length !== 0)) {
       throw new SemanticProgramError('PROGRAM_BINDING_QUERY_FORBIDDEN', 'Only the tenant-approved tools and fixed query arguments can be invoked', 403);

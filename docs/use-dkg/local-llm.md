@@ -633,6 +633,26 @@ the current turn. Replaying the same invocation does not repeat inference.
 An interrupted model effect retains the existing non-repeatable reconciliation
 rules. The unbound Rig safe-LLM adapter keeps its existing behavior.
 
+The daemon supplies its owned provider explicitly to the configured semantic
+runtime. Separate runtime instances do not share a global provider slot. Every
+model turn, including a standalone Program API invocation, has a session-owned
+cancellation controller; shutdown aborts and drains it before closing MCP.
+
+The operator configuration is rechecked before session initialization and on
+each approved turn. For Program sessions, MCP imports a private sibling copy of
+each adapter entry point containing exactly its verified bytes, then removes
+that copy after registration. The adapter directory must permit this temporary
+file creation. Relative imports retain their original directory resolution.
+These hashes pin entry points, not their transitive dependencies; deploy those
+dependencies in immutable, operator-controlled releases. A changed entry point
+or a failed required registration stops session initialization.
+
+An approved TypeScript Program may call the model, perform an approved read,
+and call the model again within its shared `maxCalls` budget. Each model call
+still has its own non-repeatable effect receipt. A configuration change after
+model dispatch withholds the answer and leaves an unknown effect requiring
+reconciliation; it is not recorded as a definitive pre-dispatch rejection.
+
 To route the native UI chat through such a Program, set
 `DKG_LLM_PROGRAM_EXECUTOR` to an absolute operator-owned module exporting
 `createProgramChatExecutor({ dkgHome, capability })`. Its `chat` method must

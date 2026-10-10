@@ -2257,6 +2257,11 @@ async function runDaemonInnerWithStartupOwnership(
 
   await agent.start();
 
+  const localLlm = createDaemonLocalLlmService({
+    dkgHome: dkgDir(), cwd: process.cwd(),
+    stderr: (line) => log(`[dkg-mcp] ${line}`),
+  });
+
   // Persisted API permissions restore the service on boot. With no records,
   // only an authenticated management request may lazily activate it; an
   // explicit enabled:false remains the operator's service kill switch.
@@ -2268,7 +2273,9 @@ async function runDaemonInnerWithStartupOwnership(
     if (semanticRuntimeHost) return semanticRuntimeHost;
     if (semanticRuntimeStarting) return semanticRuntimeStarting;
     semanticRuntimeStarting = (async () => {
-      const started = await startConfiguredSemanticRuntime(config.semanticRuntime, { log, dataDirectory: dkgDir(), activate });
+      const started = await startConfiguredSemanticRuntime(config.semanticRuntime, {
+        log, dataDirectory: dkgDir(), activate, localLlmProvider: localLlm.programProvider,
+      });
       if (started) {
         try { registerSemanticRuntimeInboxSkill(agent, started, config.semanticRuntime, config.llm); }
         catch (error) { await started.stop(); throw error; }
@@ -2282,6 +2289,7 @@ async function runDaemonInnerWithStartupOwnership(
   try {
     semanticRuntimeHost = await ensureSemanticRuntime(false);
   } catch (err) {
+    await localLlm.close();
     await semanticRuntimeHost?.stop().catch((stopErr: any) =>
       log(`Semantic runtime startup rollback could not stop runtime: ${stopErr?.message ?? String(stopErr)}`),
     );
@@ -3475,12 +3483,6 @@ async function runDaemonInnerWithStartupOwnership(
   // (version counters or ETag-like compare-and-swap) to close the race
   // across processes — out of scope for Round 6.
   const assertionImportLocks = new Map<string, Promise<void>>();
-  const localLlm = createDaemonLocalLlmService({
-    dkgHome: dkgDir(),
-    cwd: process.cwd(),
-    stderr: (line) => log(`[dkg-mcp] ${line}`),
-  });
-
   // --- HTTP API ---
 
   const rateLimiter = new HttpRateLimiter(
