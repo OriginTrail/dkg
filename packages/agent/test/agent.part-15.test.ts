@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, vi, DKGAgentWallet, buildAgentProfile, collectPublishableMultiaddrs, CclEvaluator, DiscoveryClient, ProfileManager, encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret, DKGAgent as RealDKGAgent, AGENT_REGISTRY_CONTEXT_GRAPH, parseCclPolicy, OxigraphStore, getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, PROTOCOL_STORAGE_ACK, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphWorkspaceGraphUri, contextGraphMetaUri, sparqlString, DKGQueryEngine, sha256, EVMChainAdapter, MockChainAdapter, createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS, mintTokens, ethers, tmpdir, mkdtemp, readFile, readdir, rm, join, fileURLToPath, _wrapAgentPublisherForSeal, CapturingContextGraphChainAdapter, AsyncSignerAddressContextGraphChainAdapter, SignerListContextGraphChainAdapter, PcaCuratedRegistrationChainAdapter, NonRegisteringACKChainAdapter, FlakyRegistrationACKChainAdapter, TransientIdentityFailureChainAdapter, BrandNewCoreTransientChainAdapter, PermanentProfileFailureChainAdapter, RetryPathPermanentFailureChainAdapter, ContextAuthorizedPublisherChainAdapter, buildSnapshotFactQuads, ReferenceEvaluator, loadYaml, CCL_FACT_NS, OperationalKeyOnlyPublishChainAdapter, ExternalOperationalKeyPublishChainAdapter, AddressOnlyExternalOperationalKeyPublishChainAdapter, AsyncAddressSignMessageAsPublishChainAdapter, GenericSignMessageExternalOperationalKeyPublishChainAdapter, MultiSignerGenericSignMessagePublishChainAdapter, SingleAddressMismatchedGenericSignMessagePublishChainAdapter, SingleSignerAdapterPublishChainAdapter, ReservingAuthorityContextGraphChainAdapter, type Quad, type ChainAdapter, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type OnChainPublishResult, type V10PublishDirectParams } from './agent.shared';
-import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
-import { RollingSubscriptionChecks } from '../src/context-graph-subscription-rolling-checks.js';
+import { createRollingSubscriptionPromotionRuntime, promoteDormantContextGraphSubscriptions } from '../src/context-graph-subscription-authority-recovery.js';
+import type { ContextGraphSubscriptionRecord } from '../src/dkg-agent-types.js';
+import { createRollingPromotionFixture as createPromotionHarness, promotionSubscription } from './_helpers/rolling-subscription-promotion.js';
 
 type DKGAgent = RealDKGAgent;
 const DKGAgent = {
@@ -62,63 +63,6 @@ async function createAgentWithContextGraphPersistence(
     contextGraphSubscriptionStore: fixture.subscriptionStore,
     contextGraphMembershipStore: fixture.membershipStore,
   });
-}
-
-function createPromotionHarness(
-  rows: Array<Record<string, unknown>>,
-  options: {
-    cap?: number;
-    authority?: 'allowed' | 'denied' | 'unavailable';
-    load?: (id: string) => Promise<Record<string, unknown> | null>;
-    activate?: (row: Record<string, unknown>, activationOptions?: unknown) => Promise<void>;
-  } = {},
-) {
-  const byId = new Map(rows.map((row) => [String(row.id), row]));
-  const load = options.load ?? (async (id: string) => byId.get(id) ?? null);
-  const agent: any = {
-    config: { contextGraphSubscriptionStore: { load } },
-    contextGraphSubscriptionRehydrationStatus: {
-      rehydrationEnabled: true,
-      activationCap: options.cap ?? 64,
-      updatedAt: 0,
-    },
-    contextGraphSubscriptionRehydrationPromotionRuntime: { owns: () => true },
-    // These cases are about the pass's fences, not its pace.
-    contextGraphSubscriptionRollingChecks: new RollingSubscriptionChecks({ minPauseMs: 0, pausePerCheckTime: 0 }),
-    contextGraphSubscriptionRehydrationPendingIds: new Set<string>(),
-    contextGraphSubscriptionRehydrationSlotIds: new Set<string>(),
-    contextGraphSubscriptionDormancyById: new Map<string, string>(),
-    contextGraphSubscriptionPersistRevisions: new Map<string, number>(),
-    subscribedContextGraphs: new Map<string, any>(),
-    started: true,
-    log: { warn: vi.fn(), info: vi.fn(), debug: vi.fn() },
-    updateContextGraphSubscriptionRehydrationStatusAfterClear: vi.fn(),
-    updateContextGraphSubscriptionRehydrationStatusAfterPersist: vi.fn(),
-    persistContextGraphSubscriptionStrict: vi.fn(async () => undefined),
-    reconcileRfc64CatalogResponsibilityV1: vi.fn(async () => undefined),
-    resolveContextGraphSubscriptionBootstrapAuthority: vi.fn(async () => ({
-      outcome: options.authority ?? 'allowed',
-      source: 'test',
-      reason: 'test',
-      metadataBootstrap: 'eligible',
-    })),
-  };
-  agent.activatePersistedContextGraphSubscriptionRecord = options.activate
-    ? vi.fn(options.activate)
-    : vi.fn(async (row: Record<string, unknown>) => {
-      agent.subscribedContextGraphs.set(row.id, {
-        subscribed: row.subscribed === true,
-        coreHosted: row.coreHosted === true,
-        synced: false,
-        metaSynced: false,
-        pendingMeta: false,
-      });
-    });
-  for (const row of rows) {
-    agent.contextGraphSubscriptionRehydrationPendingIds.add(String(row.id));
-    agent.contextGraphSubscriptionDormancyById.set(String(row.id), 'activationCap');
-  }
-  return { agent, load: vi.mocked(load) };
 }
 
 beforeAll(async () => {
@@ -1025,15 +969,125 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       }
     });
 
+    it.each(['save', 'prepare'] as const)('retries provisional activation %s failures after thirty seconds', async (failureStage) => {
+      const row: ContextGraphSubscriptionRecord = { id: `rollback-${failureStage}`, subscribed: true, synced: false, syncScoped: true, onChainId: '7' };
+      let persisted = row;
+      const save = vi.fn(async (record: ContextGraphSubscriptionRecord) => {
+        if (failureStage === 'save') throw new Error('store save failed');
+        persisted = { ...record };
+      });
+      const agent = await DKGAgent.create({ name: 'RollingRollbackBackoff', chainAdapter: new MockChainAdapter(), contextGraphSubscriptionStore: {
+        load: async () => persisted, loadAll: async () => [persisted], save, delete: async () => {},
+      } });
+      const host = agent as any;
+      const reconcile = vi.spyOn(agent, 'reconcileRfc64CatalogResponsibilityV1').mockImplementation(async () => {
+        if (failureStage === 'prepare') throw new Error('preparation failed');
+      });
+      vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority').mockResolvedValue({
+        outcome: 'allowed', source: 'registered-chain', reason: 'open-context-graph', metadataBootstrap: 'eligible', onChainId: 8n,
+      });
+      await host.node.start();
+      host.started = true;
+      host.contextGraphSubscriptionRehydrationStatus = { rehydrationEnabled: true, activationCap: 1 };
+      host.contextGraphSubscriptionRehydrationAccountedIds.add(row.id);
+      host.contextGraphSubscriptionRehydrationPendingIds.add(row.id);
+      host.contextGraphSubscriptionDormancyById.set(row.id, 'activationCap');
+      const runtime = createRollingSubscriptionPromotionRuntime({ runPass: signal => agent.promoteDormantContextGraphSubscriptions(signal), onError: error => { throw error; } });
+      host.contextGraphSubscriptionRehydrationPromotionRuntime = runtime;
+      const attempts = failureStage === 'save' ? save : reconcile;
+      vi.useFakeTimers();
+      try {
+        runtime.request();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(attempts).toHaveBeenCalledTimes(1);
+        expect(host.contextGraphSubscriptionRehydrationSlotIds.size).toBe(0);
+        expect(agent.getSubscribedContextGraphs().has(row.id)).toBe(false);
+        expect(host.contextGraphSubscriptionRehydrationPendingIds.has(row.id)).toBe(true);
+        await vi.advanceTimersByTimeAsync(29_999);
+        expect(attempts).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(attempts).toHaveBeenCalledTimes(2);
+        await vi.advanceTimersByTimeAsync(29_999);
+        expect(attempts).toHaveBeenCalledTimes(2);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(attempts).toHaveBeenCalledTimes(3);
+        expect(save).toHaveBeenCalledTimes(failureStage === 'prepare' ? 1 : 3);
+        expect(persisted.onChainId).toBe(failureStage === 'prepare' ? '8' : '7');
+        expect(reconcile).toHaveBeenCalledTimes(failureStage === 'prepare' ? 3 : 0);
+      } finally {
+        await runtime.close();
+        vi.useRealTimers();
+        await agent.stop();
+        vi.restoreAllMocks();
+      }
+    });
+
+    it.each(['external-wake', 'replacement'] as const)('preserves %s through a failed provisional binding save', async (scenario) => {
+      const row = { id: 'held-rollback', subscribed: true, synced: false, syncScoped: true, onChainId: '7' };
+      let rejectSave!: (error: Error) => void;
+      const firstSave = new Promise<void>((_resolve, reject) => { rejectSave = reject; });
+      const save = vi.fn(async () => { if (save.mock.calls.length === 1) await firstSave; throw new Error('store save failed'); });
+      const agent = await DKGAgent.create({ name: 'RollingRollbackExternalWake', chainAdapter: new MockChainAdapter(), contextGraphSubscriptionStore: {
+        load: async () => row, loadAll: async () => [row], save, delete: async () => {},
+      } });
+      const host = agent as any;
+      const reconcile = vi.spyOn(agent, 'reconcileRfc64CatalogResponsibilityV1');
+      vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority').mockResolvedValue({
+        outcome: 'allowed', source: 'registered-chain', reason: 'open-context-graph', metadataBootstrap: 'eligible', onChainId: 8n,
+      });
+      await host.node.start();
+      host.started = true;
+      host.contextGraphSubscriptionRehydrationStatus = { rehydrationEnabled: true, activationCap: 1 };
+      host.contextGraphSubscriptionRehydrationAccountedIds.add(row.id);
+      host.contextGraphSubscriptionRehydrationPendingIds.add(row.id);
+      host.contextGraphSubscriptionDormancyById.set(row.id, 'activationCap');
+      const runtime = createRollingSubscriptionPromotionRuntime({ runPass: signal => agent.promoteDormantContextGraphSubscriptions(signal), onError: error => { throw error; } });
+      host.contextGraphSubscriptionRehydrationPromotionRuntime = runtime;
+      vi.useFakeTimers();
+      try {
+        runtime.request();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(save).toHaveBeenCalledTimes(1);
+        expect(host.contextGraphSubscriptionRehydrationSlotIds.has(row.id)).toBe(true);
+        if (scenario === 'external-wake') {
+          host.requestContextGraphSubscriptionPromotion(row.id);
+          rejectSave(new Error('held save failed'));
+          await vi.advanceTimersByTimeAsync(5_000);
+          expect(save).toHaveBeenCalledTimes(2);
+          await vi.advanceTimersByTimeAsync(29_999);
+          expect(save).toHaveBeenCalledTimes(2);
+          await vi.advanceTimersByTimeAsync(1);
+          expect(save).toHaveBeenCalledTimes(3);
+        } else {
+          const replacement = agent.setContextGraphSubscription(row.id, promotionSubscription({ subscribed: true, onChainId: '9' }), { persist: false });
+          rejectSave(new Error('held save failed'));
+          await vi.advanceTimersByTimeAsync(0);
+          await runtime.whenIdle();
+          expect(host.subscribedContextGraphs.get(row.id)).toBe(replacement);
+          expect(host.contextGraphSubscriptionRehydrationSlotIds.has(row.id)).toBe(true);
+          expect(save).toHaveBeenCalledTimes(1);
+        }
+        expect(reconcile).not.toHaveBeenCalled();
+      } finally {
+        rejectSave(new Error('cleanup'));
+        await runtime.close();
+        vi.useRealTimers();
+        await agent.stop();
+        vi.restoreAllMocks();
+      }
+    });
+
     it('reconciles rolling promotion races and retry outcomes', async () => {
-      const inactive: any = {
+      const inactive = {
+        ...createPromotionHarness([]).agent,
+        store: undefined, getStatus: () => null, isCurrent: () => false,
         config: { contextGraphSubscriptionStore: undefined },
         contextGraphSubscriptionRehydrationStatus: null,
         contextGraphSubscriptionRehydrationPromotionRuntime: undefined,
         started: false,
       };
       await expect(
-        LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(
+        promoteDormantContextGraphSubscriptions(
           inactive,
           new AbortController().signal,
         ),
@@ -1043,7 +1097,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         load: async () => null,
       });
       await expect(
-        LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(
+        promoteDormantContextGraphSubscriptions(
           missing.agent,
           new AbortController().signal,
         ),
@@ -1053,7 +1107,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         .toHaveBeenCalledWith(['missing']);
 
       const revoked = createPromotionHarness([{ id: 'revoked', subscribed: false, coreHosted: false }]);
-      await LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(
+      await promoteDormantContextGraphSubscriptions(
         revoked.agent,
         new AbortController().signal,
       );
@@ -1061,8 +1115,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         .toHaveBeenCalledWith([], ['revoked']);
 
       const alreadyActive = createPromotionHarness([{ id: 'already-active', subscribed: true }]);
-      alreadyActive.agent.subscribedContextGraphs.set('already-active', { subscribed: true });
-      await LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(
+      alreadyActive.agent.subscribedContextGraphs.set('already-active', promotionSubscription({ subscribed: true }));
+      await promoteDormantContextGraphSubscriptions(
         alreadyActive.agent,
         new AbortController().signal,
       );
@@ -1071,7 +1125,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
       for (const authority of ['denied', 'unavailable'] as const) {
         const blocked = createPromotionHarness([{ id: `blocked-${authority}`, subscribed: true }], { authority });
-        await LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(
+        await promoteDormantContextGraphSubscriptions(
           blocked.agent,
           new AbortController().signal,
         );
@@ -1084,7 +1138,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       const stale = createPromotionHarness([{ id: 'stale' }], {
         load: async () => (++reread === 1 ? { id: 'stale', subscribed: true } : null),
       });
-      await LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(
+      await promoteDormantContextGraphSubscriptions(
         stale.agent,
         new AbortController().signal,
       );
@@ -1119,12 +1173,11 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
             outcome: 'allowed',
             source: 'registered-chain',
             reason: 'open-context-graph',
-            metadataBootstrap: 'not-needed',
+            metadataBootstrap: 'eligible',
             onChainId: 7n,
           } as const;
         });
-      const racedPromotion = LifecycleSyncMethods.prototype
-        .promoteDormantContextGraphSubscriptions.call(
+      const racedPromotion = promoteDormantContextGraphSubscriptions(
           bindingRace.agent,
           new AbortController().signal,
         );
@@ -1138,7 +1191,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       expect(bindingRace.agent.activatePersistedContextGraphSubscriptionRecord)
         .toHaveBeenCalledOnce();
       expect(bindingRace.agent.activatePersistedContextGraphSubscriptionRecord)
-        .toHaveBeenCalledWith(laterEligible, expect.any(Object));
+        .toHaveBeenCalledWith(expect.objectContaining(laterEligible), expect.any(Object));
       expect(bindingRace.agent.contextGraphSubscriptionRehydrationPendingIds)
         .toContain('binding-race');
 
@@ -1146,7 +1199,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         activate: async () => { throw new Error('activation failed'); },
       });
       await expect(
-        LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(
+        promoteDormantContextGraphSubscriptions(
           activationFailure.agent,
           new AbortController().signal,
         ),
@@ -1158,7 +1211,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         { cap: 9 },
       );
       await expect(
-        LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(
+        promoteDormantContextGraphSubscriptions(
           batch.agent,
           new AbortController().signal,
         ),
@@ -1179,12 +1232,12 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
             outcome: 'allowed',
             source: 'registered-chain',
             reason: 'open-context-graph',
-            metadataBootstrap: 'not-needed',
+            metadataBootstrap: 'eligible',
             onChainId: 7n,
           };
         });
       await expect(
-        LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(
+        promoteDormantContextGraphSubscriptions(
           reclassified.agent,
           new AbortController().signal,
         ),
@@ -1197,19 +1250,17 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       ]);
       concurrentlyActive.agent.resolveContextGraphSubscriptionBootstrapAuthority
         .mockImplementation(async (contextGraphId: string) => {
-          concurrentlyActive.agent.subscribedContextGraphs.set(contextGraphId, {
-            subscribed: true,
-          });
+          concurrentlyActive.agent.subscribedContextGraphs.set(contextGraphId, promotionSubscription({ subscribed: true }));
           return {
             outcome: 'allowed',
             source: 'registered-chain',
             reason: 'open-context-graph',
-            metadataBootstrap: 'not-needed',
+            metadataBootstrap: 'eligible',
             onChainId: 7n,
           };
         });
       await expect(
-        LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(
+        promoteDormantContextGraphSubscriptions(
           concurrentlyActive.agent,
           new AbortController().signal,
         ),
@@ -1225,7 +1276,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       ]);
       staleBeforePrepare.agent.activatePersistedContextGraphSubscriptionRecord
         .mockImplementation(async (row: any, options: any) => {
-          const subscription = { subscribed: true, onChainId: row.onChainId };
+          const subscription = promotionSubscription({ subscribed: true, onChainId: row.onChainId });
           staleBeforePrepare.agent.subscribedContextGraphs.set(row.id, subscription);
           staleBeforePrepare.agent.contextGraphSubscriptionDormancyById
             .set(row.id, 'authorityUnavailable');
@@ -1233,7 +1284,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           return subscription;
         });
       await expect(
-        LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(
+        promoteDormantContextGraphSubscriptions(
           staleBeforePrepare.agent,
           new AbortController().signal,
         ),
@@ -1251,7 +1302,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           outcome: 'allowed',
           source: 'registered-chain',
           reason: 'open-context-graph',
-          metadataBootstrap: 'not-needed',
+          metadataBootstrap: 'eligible',
           onChainId: 8n,
         });
       const staleDuringRepairNetworkEffects = vi.fn();
@@ -1263,7 +1314,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         });
       staleDuringRepair.agent.activatePersistedContextGraphSubscriptionRecord
         .mockImplementation(async (row: any, options: any) => {
-          const subscription = { subscribed: true, onChainId: options.onChainId };
+          const subscription = promotionSubscription({ subscribed: true, onChainId: options.onChainId });
           staleDuringRepair.agent.subscribedContextGraphs.set(row.id, subscription);
           await options.prepare(subscription);
           if (!options.isCurrent(subscription)) throw new Error('stale activation');
@@ -1271,7 +1322,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           return subscription;
         });
       await expect(
-        LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(
+        promoteDormantContextGraphSubscriptions(
           staleDuringRepair.agent,
           new AbortController().signal,
         ),

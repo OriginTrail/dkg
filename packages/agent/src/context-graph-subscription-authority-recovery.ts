@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { ContextGraphReadAuthorityDecision } from './context-graph-read-authority.js';
+import { createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
+import { unavailableContextGraphReadAuthorityDecision, contextGraphReadAuthorityDependencyOf, type ContextGraphReadAuthorityDecision } from './context-graph-read-authority.js';
 import type {
   ContextGraphSub,
+  DurableContextGraphSubscriptionBinding,
   ContextGraphSubscriptionRecord,
   ContextGraphSubscriptionRehydrationInternalStatus,
   ContextGraphSubscriptionStore,
@@ -13,11 +15,13 @@ import {
 } from './context-graph-subscription-dormancy.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { isCanonicalAuthoritativeContextGraphId } from './context-graph-binding-state.js';
-import type { CoalescingRecurringTask } from './coalescing-recurring-task.js';
+import { CoalescingRecurringTask } from './coalescing-recurring-task.js';
+import type { RollingSubscriptionChecks } from './context-graph-subscription-rolling-checks.js';
 
 const MAX_CONCURRENT_DEFERRED_ROW_LOADS = 4;
 /** How often recovery asks again while a row is unavailable. */
 export const DEFERRED_AUTHORITY_RECOVERY_RETRY_MS = 30_000;
+export const REHYDRATION_ROLLING_RETRY_MS = 30_000;
 
 /**
  * Have recovery ask its rows one retry interval from now, unless it is due
@@ -338,4 +342,260 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
     if (!ports.isCurrent()) return;
     ports.activated(contextGraphId);
   }
+}
+
+export function rehydratedSubscriptionReachedSafeState(
+  subscription: Pick<ContextGraphSub, 'synced' | 'metaSynced' | 'pendingMeta'>,
+): boolean {
+  return subscription.synced === true
+    && subscription.metaSynced !== false
+    && subscription.pendingMeta !== true;
+}
+
+/** One coalescing owner retains explicit wake-ups delivered as a pass ends. */
+export function createRollingSubscriptionPromotionRuntime(callbacks: {
+  runPass(signal: AbortSignal): Promise<'rearm' | 'idle'>;
+  onError(error: unknown): void;
+}): CoalescingRecurringTask {
+  return new CoalescingRecurringTask({
+    retryIntervalMs: REHYDRATION_ROLLING_RETRY_MS,
+    requestWhileRunning: 'coalesce',
+    runPass: callbacks.runPass,
+    onError: callbacks.onError,
+    closingMessage: 'Rolling context-graph subscription activation closing',
+  });
+}
+
+/** Binding repair and responsibility preparation for one subscription generation. */
+export interface RollingSubscriptionActivationPorts {
+  activate(row: ContextGraphSubscriptionRecord, options: PersistedContextGraphSubscriptionActivationOptions): Promise<unknown>;
+  persistBinding(id: string, subscription: ContextGraphSub, syncScoped: boolean, isCurrent: () => boolean): Promise<void>;
+  reconcile(id: string): Promise<unknown>;
+}
+
+export async function activateRollingSubscriptionPromotion(
+  ports: RollingSubscriptionActivationPorts,
+  row: ContextGraphSubscriptionRecord,
+  onChainId: string | undefined,
+  isCurrent: (subscription: ContextGraphSub) => boolean,
+): Promise<void> {
+  await ports.activate(row, {
+    onChainId, updateRehydrationStatus: false,
+    prepare: async (subscription) => {
+      if (!isCurrent(subscription)) throw new Error('Persisted subscription promotion became stale');
+      if (onChainId !== undefined && onChainId !== row.onChainId) {
+        // A repaired binding must be durable before responsibility or network effects.
+        await ports.persistBinding(row.id, subscription, row.syncScoped, () => isCurrent(subscription));
+      }
+      if (!isCurrent(subscription)) throw new Error('Persisted subscription promotion became stale');
+      await ports.reconcile(row.id);
+    },
+    isCurrent,
+  });
+}
+
+/** Rolling promotion owns candidate ordering and generation fences. */
+export interface RollingSubscriptionPromotionPorts {
+  readonly store?: Pick<ContextGraphSubscriptionStore, 'load' | 'loadAll'>;
+  getStatus(): Pick<ContextGraphSubscriptionRehydrationInternalStatus, 'rehydrationEnabled' | 'activationCap'> | null;
+  isCurrent(signal: AbortSignal): boolean;
+  readonly contextGraphSubscriptionRollingChecks: RollingSubscriptionChecks;
+  readonly contextGraphSubscriptionRehydrationPendingIds: Set<string>;
+  readonly contextGraphSubscriptionRehydrationSlotIds: Set<string>;
+  readonly contextGraphSubscriptionDormancyById: Map<string, ContextGraphDormancyReason>;
+  readonly contextGraphSubscriptionPersistRevisions: ReadonlyMap<string, number>;
+  readonly subscribedContextGraphs: ReadonlyMap<string, ContextGraphSub>;
+  readonly log: { warn(ctx: OperationContext, message: string): void; info(ctx: OperationContext, message: string): void; debug(ctx: OperationContext, message: string): void };
+  touchStatus(): void;
+  updateContextGraphSubscriptionRehydrationStatusAfterClear(removed: readonly string[], revoked?: readonly string[]): void;
+  updateContextGraphSubscriptionRehydrationStatusAfterPersist(id: string, intent: Pick<ContextGraphSubscriptionRecord, 'subscribed' | 'coreHosted'>): void;
+  resolveAuthority(binding: Readonly<DurableContextGraphSubscriptionBinding>, signal: AbortSignal): Promise<ContextGraphReadAuthorityDecision>;
+  activate(row: ContextGraphSubscriptionRecord, onChainId: string | undefined, isCurrent: (subscription: ContextGraphSub) => boolean): Promise<void>;
+  wakeAuthorityRecovery(): void;
+}
+
+export async function promoteDormantContextGraphSubscriptions(
+  ports: RollingSubscriptionPromotionPorts,
+  signal: AbortSignal,
+): Promise<'rearm' | 'idle'> {
+    const store = ports.store;
+    const status = ports.getStatus();
+    if (
+      !store
+      || !status?.rehydrationEnabled
+      || status.activationCap <= 0
+      || !ports.isCurrent(signal)
+    ) return 'idle';
+
+    const ctx = createOperationContext('init');
+    const loadRow = async (contextGraphId: string): Promise<ContextGraphSubscriptionRecord | null> => (
+      store.load
+        ? store.load(contextGraphId)
+        : store.loadAll().then((rows) => rows.find((row) => row.id === contextGraphId) ?? null)
+    );
+    // Rows the chain does not confirm are checked at a bounded pace: back to
+    // back, their authority reads take the node's whole chain request budget.
+    const pass = ports.contextGraphSubscriptionRollingChecks.beginPass({
+      pendingIds: ports.contextGraphSubscriptionRehydrationPendingIds,
+      dormancyById: ports.contextGraphSubscriptionDormancyById,
+      subscriptions: ports.subscribedContextGraphs,
+      warn: (message) => ports.log.warn(ctx, message),
+      debug: (message) => ports.log.debug(ctx, message),
+    });
+
+    for (let i = 0; ; i++) {
+      signal.throwIfAborted();
+      if (!ports.isCurrent(signal)) return 'idle';
+      if (ports.contextGraphSubscriptionRehydrationSlotIds.size >= status.activationCap) break;
+      const contextGraphId = await pass.next(signal);
+      if (contextGraphId === undefined) break;
+      // A subscription that lost its readiness can take the slot during the pause.
+      if (ports.contextGraphSubscriptionRehydrationSlotIds.size >= status.activationCap) break;
+
+      let row = await loadRow(contextGraphId);
+      signal.throwIfAborted();
+      if (!ports.isCurrent(signal)) return 'idle';
+      if (row === null) {
+        ports.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
+        ports.updateContextGraphSubscriptionRehydrationStatusAfterClear([contextGraphId]);
+        continue;
+      }
+      // Rows without durable subscription or hosting intent are not eligible
+      // for activation.  A concurrent write may have removed that intent
+      // after startup even when the row still exists in a custom store.
+      if (!row.subscribed && !row.coreHosted) {
+        ports.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
+        ports.updateContextGraphSubscriptionRehydrationStatusAfterClear([], [contextGraphId]);
+        continue;
+      }
+      const currentSubscription = ports.subscribedContextGraphs.get(contextGraphId);
+      if (currentSubscription?.subscribed || currentSubscription?.coreHosted) {
+        ports.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
+        ports.contextGraphSubscriptionDormancyById.delete(contextGraphId);
+        continue;
+      }
+
+      const candidateRevision = ports.contextGraphSubscriptionPersistRevisions
+        .get(contextGraphId) ?? 0;
+      const candidateBinding: Readonly<DurableContextGraphSubscriptionBinding> = {
+        contextGraphId: row.id,
+        onChainId: row.onChainId,
+        onChainHash: row.onChainHash,
+      };
+
+      const authority = await pass.read(() => ports.resolveAuthority(candidateBinding, signal).catch((error: unknown) => unavailableContextGraphReadAuthorityDecision(
+        'legacy-local',
+        'unexpected-authority-error',
+        contextGraphReadAuthorityDependencyOf(error),
+      )));
+      signal.throwIfAborted();
+      if (!ports.isCurrent(signal)) return 'idle';
+
+      // Authority resolution may yield while an operator unsubscribes or a
+      // store writer replaces the durable row. Reconcile that boundary before
+      // recording a refusal or installing any network effects, so a stale
+      // answer can neither retire the new record nor resurrect the old one.
+      const freshRow = await loadRow(contextGraphId);
+      signal.throwIfAborted();
+      if (!ports.isCurrent(signal)) return 'idle';
+      if (freshRow === null) {
+        ports.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
+        ports.updateContextGraphSubscriptionRehydrationStatusAfterClear([contextGraphId]);
+        continue;
+      }
+      if (!freshRow.subscribed && !freshRow.coreHosted) {
+        ports.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
+        ports.updateContextGraphSubscriptionRehydrationStatusAfterClear([], [contextGraphId]);
+        continue;
+      }
+      if (
+        !ports.contextGraphSubscriptionRehydrationPendingIds.has(contextGraphId)
+        || ports.contextGraphSubscriptionDormancyById.get(contextGraphId) !== 'activationCap'
+      ) {
+        continue;
+      }
+      const freshSubscription = ports.subscribedContextGraphs.get(contextGraphId);
+      if (freshSubscription?.subscribed || freshSubscription?.coreHosted) {
+        ports.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
+        ports.contextGraphSubscriptionDormancyById.delete(contextGraphId);
+        continue;
+      }
+      if (
+        (ports.contextGraphSubscriptionPersistRevisions.get(contextGraphId) ?? 0)
+          !== candidateRevision
+        || freshRow.id !== candidateBinding.contextGraphId
+        || freshRow.onChainId !== candidateBinding.onChainId
+        || freshRow.onChainHash !== candidateBinding.onChainHash
+      ) {
+        // Authority belongs to the exact row snapshot that preceded the chain
+        // read. Keep the candidate pending and retry its new generation rather
+        // than activating or retiring a replacement under stale authority.
+        ports.touchStatus();
+        continue;
+      }
+      if (authority.outcome !== 'allowed') {
+        ports.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
+        const { outcome, source, reason } = authority;
+        const dormancy = pass.leftDormant(contextGraphId, { outcome, source, reason });
+        ports.contextGraphSubscriptionDormancyById.set(contextGraphId, dormancy);
+        if (dormancy === 'authorityUnavailable') ports.wakeAuthorityRecovery();
+        ports.touchStatus();
+        continue;
+      }
+      // A concurrent readiness reset can occupy a slot while authority is read.
+      if (ports.contextGraphSubscriptionRehydrationSlotIds.size >= status.activationCap) break;
+      row = freshRow;
+      const healedOnChainId = authority.onChainId?.toString();
+      const isCurrentPromotion = (subscription: ContextGraphSub): boolean => (
+        ports.isCurrent(signal)
+        && ports.contextGraphSubscriptionRehydrationPendingIds.has(contextGraphId)
+        && ports.contextGraphSubscriptionDormancyById.get(contextGraphId) === 'activationCap'
+        && (ports.contextGraphSubscriptionPersistRevisions.get(contextGraphId) ?? 0)
+          === candidateRevision
+        && ports.subscribedContextGraphs.get(contextGraphId) === subscription
+      );
+
+      try {
+        await ports.activate(row, healedOnChainId, isCurrentPromotion);
+      } catch (error) {
+        // Keep the durable row pending and retain its activation-cap dormancy;
+        // the recurring owner will retry after its bounded delay.
+        ports.log.warn(
+          ctx,
+          `Could not promote pending context-graph subscription "${contextGraphId}": ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+        );
+        return 'rearm';
+      }
+      if (!ports.isCurrent(signal)) return 'idle';
+
+      pass.activated();
+      ports.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
+      ports.updateContextGraphSubscriptionRehydrationStatusAfterPersist(contextGraphId, {
+        subscribed: row.subscribed,
+        coreHosted: row.coreHosted,
+      });
+      const activated = ports.subscribedContextGraphs.get(contextGraphId);
+      if (
+        !row.coreHosted
+        && activated
+        && !rehydratedSubscriptionReachedSafeState(activated)
+      ) {
+        ports.contextGraphSubscriptionRehydrationSlotIds.add(contextGraphId);
+      }
+      ports.log.info(
+        ctx,
+        `Promoted pending persisted context-graph subscription "${contextGraphId}"; ` +
+          `pending=${ports.contextGraphSubscriptionRehydrationPendingIds.size}, ` +
+          `slots=${ports.contextGraphSubscriptionRehydrationSlotIds.size}/${status.activationCap}`,
+      );
+      if ((i + 1) % 8 === 0) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
+    }
+
+    return ports.contextGraphSubscriptionRehydrationPendingIds.size > 0
+      && ports.contextGraphSubscriptionRehydrationSlotIds.size < status.activationCap
+      ? 'rearm'
+      : 'idle';
 }
