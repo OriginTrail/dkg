@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { PROTOCOL_SYNC, exchangeExperimentalExactBatch } from '@origintrail-official/dkg-core';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { buildSyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 import { EXACT_BATCH_FRAME_KIND as K, EXACT_BATCH_STREAM_PROTOCOL, type ExactBatchFrame } from '../src/sync/exact-batch-stream-contract.js';
@@ -113,5 +113,45 @@ describe('a core whose sync responder has no room for a stream request', () => {
       release();
       await Promise.all(opened);
     }
+  }, 30_000);
+});
+
+describe('a core whose exact-stream public authority cannot be read', () => {
+  it.each(['authority-unavailable', 'store-busy'] as const)('answers %s with a BUSY frame before export', async failure => {
+    vi.stubEnv(CURRENT, '1'); vi.stubEnv(FIRST_DEPLOYED, undefined);
+    const create = (name: string, nodeRole: 'core' | 'edge') => DKGAgent.create({
+      name, nodeRole, listenHost: '127.0.0.1', listenPort: 0,
+      chainAdapter: new MockChainAdapter('mock:31337'),
+      store: Object.assign(new OxigraphStore(), { queryResponseLimitMode: 'pre-materialization' as const }),
+      randomSamplingUseWorkerThread: false,
+    });
+    const core = await create(`ExactBatchRefusalCore-${failure}`, 'core'); agents.push(core);
+    const authorized = vi.spyOn(core, 'authorizeSyncRequest');
+    const authority = vi.spyOn(core, 'resolveRegisteredContextGraphAuthority');
+    if (failure === 'store-busy') {
+      authorized.mockRejectedValue(new StoreSchedulerBusyError('queue_full', 'normal', 'blazegraph.query', { storeOperation: 'query' }));
+    } else {
+      authorized.mockResolvedValue(true);
+      authority.mockResolvedValue({ kind: 'unavailable', reason: 'chain-access-policy-unavailable' });
+    }
+    await core.start();
+    const edge = await create(`ExactBatchRefusalEdge-${failure}`, 'edge'); agents.push(edge);
+    await edge.start();
+    await edge.connectTo(core.multiaddrs.find(address => address.includes('/tcp/') && !address.includes('/p2p-circuit'))!);
+
+    const assetUals = ['did:dkg:mock:31337/0x0000000000000000000000000000000000000001/1'];
+    const unused = async () => { throw new Error('A public START needs no identity or signature'); };
+    const request = await buildSyncRequestEnvelope({ contextGraphId: 'public-authority-unavailable', offset: 0, limit: 500,
+      includeSharedMemory: false, targetPeerId: core.peerId, requesterPeerId: edge.peerId, phase: 'data',
+      assetUals, needsAuth: false, getIdentityId: unused, computeSyncDigest: () => { throw new Error('unused'); }, signMessage: unused });
+    const frames = await exchangeExperimentalExactBatch(edge.router, core.peerId, exactBatchStartFrame(request),
+      { ...exactBatchTransportOptions(30_000), assetUals }, async session => {
+        const received: ExactBatchFrame[] = [];
+        for (let item = await session.next(); item; item = await session.next()) received.push(item);
+        return received;
+      });
+    expect(frames).toEqual([{ kind: K.REFUSE, assetIndex: 255, sequence: 0, payload: new TextEncoder().encode('BUSY') }]);
+    expect(authorized).toHaveBeenCalledOnce();
+    expect(authority).toHaveBeenCalledTimes(failure === 'store-busy' ? 0 : 1);
   }, 30_000);
 });
