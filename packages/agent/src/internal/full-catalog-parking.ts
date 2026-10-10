@@ -41,7 +41,8 @@ import { findAuthorCatalogFullErrorV1 } from './author-catalog-capacity.js';
  *   marker, the catalog held a row the refusal did not name, so the next parked marker follows
  *   in the next pass, and so on until one is refused. No other refusal moves that interval;
  * - the log names the graph and author when a scope first refuses and at most once an interval
- *   after that; status carries two counts and no identity.
+ *   after that, for a refused placement and for a refused projection each on its own; status
+ *   carries two counts and no identity.
  *
  * A scope is identified by its canonical catalog scope digest. Nothing here is durable, and
  * nothing decides what a full catalog should do instead. What is kept is bounded by the durable
@@ -130,7 +131,7 @@ export class FullCatalogParkingV1 {
   readonly #held = new Map<string, ReadonlySet<string>>();
   /** Parked markers and their scope, by the supervisor's marker key, the longest parked first. */
   readonly #parked = new Map<string, string>();
-  /** When each graph and author was last named in the log. */
+  /** When each graph and author was last named in the log, for each of the two refused paths. */
   readonly #namedAtMs = new Map<string, number>();
   /** The applied head of each full scope as the current pass read it: one read a scope a pass. */
   readonly #passHeads = new Map<string, AppliedHeadV1 | null | undefined>();
@@ -349,13 +350,16 @@ export class FullCatalogParkingV1 {
     rows: number | null,
     parkedPlacements: number,
   ): void {
-    const named = namedScopeV1(scope);
+    // Each path has its line and its hour. A share is refused before its publication is
+    // confirmed, so the projection's line comes first and says nothing is parked yet: it must
+    // not swallow the line for the first parked placement.
+    const named = `${namedScopeV1(scope)}\n${refused}`;
     const now = this.#now();
     const last = this.#namedAtMs.get(named);
     if (last !== undefined && now - last < FULL_CATALOG_RECHECK_INTERVAL_MS_V1) return;
     if (this.#namedAtMs.size >= FULL_CATALOG_NAMED_SCOPES_SWEEP_V1) {
       // A time older than the interval suppresses nothing. Every newer one stays, however many
-      // there are: a scope named within the interval is not named again in it.
+      // there are: a path of a scope named within the interval is not named again in it.
       for (const [other, namedAt] of this.#namedAtMs) {
         if (now - namedAt >= FULL_CATALOG_RECHECK_INTERVAL_MS_V1) this.#namedAtMs.delete(other);
       }

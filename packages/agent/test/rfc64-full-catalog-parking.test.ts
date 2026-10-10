@@ -305,6 +305,35 @@ describe('finalized-private placements of a full author catalog', () => {
     expect(model.state.markers).not.toContain(parked[0]);
   });
 
+  it('attempts what was parked first when a row frees, whatever was refused after it', async () => {
+    const model = node();
+    const scopes = MAX_FULL_CATALOG_DETAILED_SCOPES_V1 + 1;
+    const graph = (index: number) => `full-catalog-${index}` as ContextGraphIdV1;
+    const parked = Array.from({ length: scopes }, (_value, index) => marker(graph(index), CAP + 1));
+    for (const refused of parked) model.fill(refused);
+    model.state.markers = [...parked];
+    const s = supervisor(model);
+    await s.pass();
+    // Later arrivals in every scope, each refused on an attempt of its own where the list was
+    // dropped, the first scope's among them.
+    await s.advance(30 * 60_000);
+    const later = parked.map((_marker, index) => marker(graph(index), CAP + 2));
+    model.state.markers = [...model.state.markers, ...later];
+    await s.pass();
+    expect(s.capacity()).toEqual({ parkedPlacements: 2 * scopes, scopesAtCap: scopes });
+
+    // A row frees in the first scope. The next pass attempts that scope's placements in the
+    // order the queue lists them: the one parked first takes the row, the later one is refused
+    // again and parked, and no other scope is touched.
+    model.free(parked[0]!, 9);
+    model.state.attempts.length = 0;
+    await s.advance(5_000);
+    expect(model.state.attempts).toEqual([parked[0]!.kaUal, later[0]!.kaUal]);
+    expect(model.state.markers).not.toContain(parked[0]);
+    expect(model.state.markers).toContain(later[0]);
+    expect(s.capacity()).toEqual({ parkedPlacements: 2 * scopes - 1, scopesAtCap: scopes });
+  });
+
   it('does not let a placement that keeps failing for another reason hold the safety net', async () => {
     const model = node();
     model.fill(NEW_A);
@@ -631,6 +660,41 @@ describe('share-time projection of a full author catalog', () => {
     expect(s.lines('catalog_full')).toHaveLength(2);
   });
 
+  it('writes the line for the first parked placement although the projection was named before it', async () => {
+    const model = node();
+    model.fill(NEW_A);
+    const s = supervisor(model);
+    // The order a node sees: the share is refused first, by the projection target's own bound,
+    // which is raised before the catalog is read and so reports no row count.
+    s.reconcile.mockImplementation(async () => {
+      throw new Rfc64SwmInventoryCatalogReconcilerErrorV1(
+        'swm-catalog-reconcile-capacity', 'bounded catalog target exceeds its rows',
+      );
+    });
+    s.shareTimeRequest();
+    await s.owner.whenIdle();
+    expect(s.lines('catalog_full')).toEqual([{
+      event: 'catalog_full', contextGraphId: FULL_GRAPH, authorAddress: AUTHOR,
+      refused: 'projection', rows: null, rowCap: CAP, parkedPlacements: 0,
+    }]);
+
+    // Minutes later the publications are confirmed and their placements parked. That is a line
+    // of its own, with the rows the refusal read and what is parked when the pass ends.
+    await s.advance(5 * 60_000);
+    model.state.markers = [NEW_A, NEW_B, NEW_C];
+    await s.pass();
+    expect(s.lines('catalog_full')).toHaveLength(2);
+    expect(s.lines('catalog_full')[1]).toEqual({
+      event: 'catalog_full', contextGraphId: FULL_GRAPH, authorAddress: AUTHOR,
+      refused: 'placement', rows: CAP, rowCap: CAP, parkedPlacements: 3,
+    });
+    expect(s.capacity()).toEqual({ parkedPlacements: 3, scopesAtCap: 1 });
+
+    // Neither path is named again within its hour.
+    await s.advance(50 * 60_000);
+    expect(s.lines('catalog_full')).toHaveLength(2);
+  });
+
   it('counts a scope once when both of its paths are refused, and drops it when the projection succeeds', async () => {
     const model = node();
     model.fill(NEW_A);
@@ -642,8 +706,11 @@ describe('share-time projection of a full author catalog', () => {
     await s.owner.whenIdle();
 
     expect(s.capacity()).toEqual({ parkedPlacements: 1, scopesAtCap: 1 });
-    // The scope was named for its placement a moment ago: the projection adds no second line.
-    expect(s.lines('catalog_full')).toEqual([expect.objectContaining({ refused: 'placement' })]);
+    // One scope in the count, and one line for each of its two refused paths.
+    expect(s.lines('catalog_full')).toEqual([
+      expect.objectContaining({ refused: 'placement', rows: CAP, parkedPlacements: 1 }),
+      expect.objectContaining({ refused: 'projection', rows: CAP, parkedPlacements: 1 }),
+    ]);
 
     model.state.markers = [];
     model.free(NEW_A, 9);
