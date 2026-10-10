@@ -33,10 +33,12 @@ const selected = manifest.assets.slice(0, limit);
 const store = new SparqlHttpStore({ queryEndpoint: endpoint.href, consistencyProfile: 'atomic-readback', timeout: 120000 });
 const numeric = term => Number(/^"([0-9]+)"/.exec(term)?.[1] ?? term);
 const count = async () => {
+  // sparql-scan-allow: R2 -- Post-ingest integrity check of a fresh owned loopback store containing only the fixed manifest corpus; outside the timed ingestion path.
   const result = await store.query('SELECT (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } }');
   return numeric(result.bindings[0].n);
 };
-if (await count() !== 0) throw new Error('Refusing a nonempty store; supply a fresh owned namespace');
+const existing = await store.query('SELECT ?g WHERE { GRAPH ?g { FILTER EXISTS { ?s ?p ?o } } } LIMIT 1');
+if (existing.bindings.length !== 0) throw new Error('Refusing a nonempty store; supply a fresh owned namespace');
 const elapsed = start => performance.now() - start;
 const sha = value => createHash('sha256').update(value).digest('hex');
 const result = {
@@ -99,6 +101,7 @@ try {
   result.ingestWallMs = elapsed(start);
   const check = performance.now();
   result.actualQuads = await count();
+  // sparql-scan-allow: R2 -- Fixed-corpus integrity check in the benchmark-only fresh store; enumeration deliberately detects unexpected graphs as well as missing data.
   const grouped = await store.query('SELECT ?g (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?g');
   const counts = new Map(grouped.bindings.map(row => [row.g, numeric(row.n)]));
   result.graphCountsMatch = selected.every(asset => counts.get(asset.graph) === asset.quads)
