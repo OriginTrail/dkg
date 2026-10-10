@@ -253,7 +253,8 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
     if (authority.outcome !== 'allowed') {
       // A denial and a chain-unknown id retire the row for this process;
       // anything else stays unavailable and is asked again on a later pass.
-      const dormancy = contextGraphDormancyAfterAuthority(authority);
+      const { outcome, reason } = authority;
+      const dormancy = contextGraphDormancyAfterAuthority({ outcome, reason });
       if (dormancy !== 'authorityUnavailable') {
         ports.dormancyById.set(contextGraphId, dormancy);
         ports.touchStatus();

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import type { ContextGraphReadAuthorityDecision } from './context-graph-read-authority.js';
+
 export const CONTEXT_GRAPH_DORMANCY_REASONS = [
   'activationCap',
   'authorityDenied',
@@ -16,6 +18,16 @@ export type ContextGraphDormancyProjection = {
 };
 
 /**
+ * What a read-authority decision said when it did not come back allowed: a
+ * denial, or no answer.
+ */
+export type ContextGraphReadAuthorityNotAllowed = Readonly<{
+  outcome: Exclude<ContextGraphReadAuthorityDecision['outcome'], 'allowed'>;
+  source: ContextGraphReadAuthorityDecision['source'];
+  reason: ContextGraphReadAuthorityDecision['reason'];
+}>;
+
+/**
  * Dormancy of a saved row whose read authority did not come back allowed.
  *
  * A denial is final for the process. So is the chain's answer that the id
@@ -24,7 +36,7 @@ export type ContextGraphDormancyProjection = {
  * stays saved either way, and the next start checks it again.
  */
 export function contextGraphDormancyAfterAuthority(
-  authority: Readonly<{ outcome: string; reason: string }>,
+  authority: Pick<ContextGraphReadAuthorityNotAllowed, 'outcome' | 'reason'>,
 ): 'authorityDenied' | 'authorityUnavailable' | 'deactivated' {
   if (authority.outcome === 'denied') return 'authorityDenied';
   return authority.reason === 'chain-access-policy-unknown' ? 'deactivated' : 'authorityUnavailable';

@@ -3,8 +3,8 @@
 import {
   contextGraphDormancyAfterAuthority,
   type ContextGraphDormancyReason,
+  type ContextGraphReadAuthorityNotAllowed,
 } from './context-graph-subscription-dormancy.js';
-import type { ContextGraphReadAuthorityDecision } from './context-graph-read-authority.js';
 
 /**
  * Shortest pause after a check that activated nothing. A check that has to
@@ -57,7 +57,7 @@ export interface RollingSubscriptionCheckPass {
   /** The row just read stays dormant. Returns the dormancy to record for it. */
   leftDormant(
     contextGraphId: string,
-    authority: Pick<ContextGraphReadAuthorityDecision, 'outcome' | 'source' | 'reason'>,
+    authority: ContextGraphReadAuthorityNotAllowed,
   ): ContextGraphDormancyReason;
 }
 

@@ -49,8 +49,24 @@ const ALLOWED = Object.freeze({
 
 type Answer = typeof ABSENT | typeof UNKNOWN | typeof DENIED | typeof ALLOWED;
 
+interface SavedRow {
+  id: string;
+  subscribed: boolean;
+  synced: boolean;
+  coreHosted?: boolean;
+  onChainId?: string;
+  onChainHash?: string;
+}
+
+/** What the pass hands the authority read for one row. */
+interface AuthorityRead {
+  signal: AbortSignal;
+  durableSubscriptionBinding: { contextGraphId: string; onChainId?: string; onChainHash?: string };
+}
+
 interface Host {
   [key: string]: any;
+  savedRows: Map<string, SavedRow>;
   contextGraphSubscriptionRehydrationPendingIds: Set<string>;
   contextGraphSubscriptionRehydrationSlotIds: Set<string>;
   contextGraphSubscriptionDormancyById: Map<string, string>;
@@ -98,19 +114,30 @@ describe('rolling activation and the chain request lane', () => {
     }
   }
 
-  /** A stand-in for the agent with `ids` saved, all left dormant by the activation cap. */
+  /**
+   * A stand-in for the agent with `ids` saved, all left dormant by the
+   * activation cap. `savedRows` is its subscription store.
+   */
   function hostWith(
     ids: readonly string[],
     options: {
       checks?: RollingSubscriptionChecks;
-      answer?: (id: string) => Answer;
+      answer?: (id: string, read: AuthorityRead) => Answer | Promise<Answer>;
       cap?: number;
     } = {},
   ): Host {
-    const rows = new Map(ids.map((id) => [id, { id, subscribed: true, synced: false }]));
+    const rows = new Map<string, SavedRow>(ids.map((id) => [id, { id, subscribed: true, synced: false }]));
     const answer = options.answer ?? (() => ABSENT);
     const host: Host = {
-      config: { contextGraphSubscriptionStore: { load: async (id: string) => rows.get(id) ?? null } },
+      savedRows: rows,
+      config: {
+        contextGraphSubscriptionStore: {
+          load: async (id: string) => {
+            const row = rows.get(id);
+            return row ? { ...row } : null;
+          },
+        },
+      },
       contextGraphSubscriptionRehydrationStatus: {
         rehydrationEnabled: true,
         activationCap: options.cap ?? 64,
@@ -129,12 +156,12 @@ describe('rolling activation and the chain request lane', () => {
       updateContextGraphSubscriptionRehydrationStatusAfterPersist: vi.fn(),
       persistContextGraphSubscriptionStrict: vi.fn(async () => undefined),
       reconcileRfc64CatalogResponsibilityV1: vi.fn(async () => undefined),
-      resolveContextGraphSubscriptionBootstrapAuthority: vi.fn((id: string, read: { signal: AbortSignal }) => (
+      resolveContextGraphSubscriptionBootstrapAuthority: vi.fn((id: string, read: AuthorityRead) => (
         withRpcRequestContext(
           { requestClass: 'foreground', admissionPriority: 'authority', signal: read.signal },
           async () => {
             for (let i = 0; i < READS_PER_CHECK; i++) await chainRead();
-            return answer(id);
+            return answer(id, read);
           },
         )
       )),
@@ -298,6 +325,163 @@ describe('rolling activation and the chain request lane', () => {
         + '0 more wait for their check. '
         + "Inspect 'GET /api/context-graph/subscriptions' for dormant ids.",
     );
+  });
+
+  describe('a row that changes while its check is out', () => {
+    const ID = 'changed-under-the-read';
+
+    /** One row saved with chain id 7; `whileReadIsOut` runs before the first read answers. */
+    function hostWithRowReadAs(
+      firstAnswer: Answer,
+      whileReadIsOut: (host: Host) => void,
+    ): Host {
+      const host: Host = hostWith([ID], {
+        answer: (_id, read) => {
+          if (read.durableSubscriptionBinding.onChainId !== '7') return ALLOWED;
+          whileReadIsOut(host);
+          return firstAnswer;
+        },
+      });
+      host.savedRows.set(ID, { ...host.savedRows.get(ID)!, onChainId: '7' });
+      return host;
+    }
+
+    async function runPass(host: Host): Promise<'rearm' | 'idle'> {
+      const pass = promote(host, new AbortController().signal);
+      await vi.advanceTimersByTimeAsync(ROLLING_CHECK_MIN_PAUSE_MS + 2_000);
+      return pass;
+    }
+
+    const repairBinding = (host: Host, raiseRevision: boolean): void => {
+      host.savedRows.set(ID, { ...host.savedRows.get(ID)!, onChainId: '8' });
+      if (raiseRevision) host.contextGraphSubscriptionPersistRevisions.set(ID, 1);
+    };
+
+    it.each([
+      ['a chain-unknown answer, binding repaired by this node', UNKNOWN, true],
+      ['a chain-unknown answer, binding replaced in the store alone', UNKNOWN, false],
+      ['a denial, binding repaired by this node', DENIED, true],
+      ['a name not confirmed for now, binding repaired by this node', ABSENT, true],
+    ] as const)('keeps the row waiting after %s, and reads its new binding on the next pass', async (_name, stale, raiseRevision) => {
+      const host = hostWithRowReadAs(stale, (h) => repairBinding(h, raiseRevision));
+
+      await expect(runPass(host)).resolves.toBe('rearm');
+
+      // The answer was about chain id 7. The row now names chain id 8: it is
+      // neither retired nor handed to recovery under the old answer.
+      expect(host.contextGraphSubscriptionRehydrationPendingIds.has(ID)).toBe(true);
+      expect(host.contextGraphSubscriptionDormancyById.get(ID)).toBe('activationCap');
+      expect(host.log.warn).not.toHaveBeenCalled();
+      expect(host.log.debug).not.toHaveBeenCalled();
+      expect(host.activatePersistedContextGraphSubscriptionRecord).not.toHaveBeenCalled();
+
+      await expect(runPass(host)).resolves.toBe('idle');
+
+      expect(host.resolveContextGraphSubscriptionBootstrapAuthority.mock.calls.map(
+        ([, read]: [string, AuthorityRead]) => read.durableSubscriptionBinding.onChainId,
+      )).toEqual(['7', '8']);
+      expect(host.activatePersistedContextGraphSubscriptionRecord).toHaveBeenCalledOnce();
+      expect(host.activatePersistedContextGraphSubscriptionRecord.mock.calls[0]![0]).toMatchObject({ id: ID, onChainId: '8' });
+      expect(host.contextGraphSubscriptionRehydrationPendingIds.has(ID)).toBe(false);
+    });
+
+    it('asks again when the row was saved anew under the read, although its binding is the same', async () => {
+      let answers = 0;
+      const host: Host = hostWith([ID], {
+        answer: () => {
+          // The first answer arrives after this node wrote the row again.
+          if (++answers === 1) host.contextGraphSubscriptionPersistRevisions.set(ID, 1);
+          return UNKNOWN;
+        },
+      });
+      host.savedRows.set(ID, { ...host.savedRows.get(ID)!, onChainId: '7' });
+
+      await expect(runPass(host)).resolves.toBe('rearm');
+      expect(host.contextGraphSubscriptionDormancyById.get(ID)).toBe('activationCap');
+
+      // Nothing changes under the second read: its answer is recorded.
+      await expect(runPass(host)).resolves.toBe('idle');
+      expect(answers).toBe(2);
+      expect(host.contextGraphSubscriptionDormancyById.get(ID)).toBe('deactivated');
+    });
+
+    it('still retires a row whose binding did not change and whose chain id the chain does not know', async () => {
+      const host = hostWithRowReadAs(UNKNOWN, () => undefined);
+
+      await expect(runPass(host)).resolves.toBe('idle');
+
+      expect(host.contextGraphSubscriptionRehydrationPendingIds.has(ID)).toBe(false);
+      expect(host.contextGraphSubscriptionDormancyById.get(ID)).toBe('deactivated');
+      expect(host.log.warn).toHaveBeenCalledOnce();
+    });
+
+    it('does not mark a row dormant that was activated while a refusal was on its way', async () => {
+      const host = hostWithRowReadAs(DENIED, (h) => {
+        // An explicit subscribe: the row is active and no longer waits.
+        h.subscribedContextGraphs.set(ID, { subscribed: true, onChainId: '7' });
+      });
+
+      await expect(runPass(host)).resolves.toBe('idle');
+
+      expect(host.contextGraphSubscriptionRehydrationPendingIds.has(ID)).toBe(false);
+      expect(host.contextGraphSubscriptionDormancyById.has(ID)).toBe(false);
+      expect(host.log.warn).not.toHaveBeenCalled();
+    });
+
+    it('leaves a row alone that another path reclassified while a refusal was on its way', async () => {
+      const host = hostWithRowReadAs(UNKNOWN, (h) => {
+        h.contextGraphSubscriptionDormancyById.set(ID, 'rehydrationDisabled');
+      });
+
+      await runPass(host);
+
+      expect(host.contextGraphSubscriptionDormancyById.get(ID)).toBe('rehydrationDisabled');
+      expect(host.log.warn).not.toHaveBeenCalled();
+    });
+
+    it('clears a row that was removed while a refusal was on its way', async () => {
+      const host = hostWithRowReadAs(UNKNOWN, (h) => { h.savedRows.delete(ID); });
+
+      await expect(runPass(host)).resolves.toBe('idle');
+
+      expect(host.contextGraphSubscriptionRehydrationPendingIds.has(ID)).toBe(false);
+      expect(host.updateContextGraphSubscriptionRehydrationStatusAfterClear).toHaveBeenCalledWith([ID]);
+      expect(host.contextGraphSubscriptionDormancyById.get(ID)).toBe('activationCap');
+      expect(host.log.warn).not.toHaveBeenCalled();
+    });
+  });
+
+  it('keeps the activation cap when a slot is taken during a pause', async () => {
+    const host = hostWith(['a-not-confirmed', 'b-confirmed'], {
+      cap: 1,
+      answer: (id) => (id === 'b-confirmed' ? ALLOWED : ABSENT),
+    });
+    let result: 'rearm' | 'idle' | undefined;
+    void promote(host, new AbortController().signal).then((value) => { result = value; });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(host.resolveContextGraphSubscriptionBootstrapAuthority).toHaveBeenCalledTimes(1);
+    expect(result).toBeUndefined();
+
+    // During the pause a subscription that was already active loses its
+    // readiness and takes the one rolling slot.
+    host.contextGraphSubscriptionRehydrationSlotIds.add('active-row-syncing-again');
+    await vi.advanceTimersByTimeAsync(ROLLING_CHECK_MIN_PAUSE_MS + 2_000);
+
+    // The pass ends without reading the next row, which stays waiting.
+    expect(result).toBe('idle');
+    expect(host.resolveContextGraphSubscriptionBootstrapAuthority).toHaveBeenCalledTimes(1);
+    expect(host.activatePersistedContextGraphSubscriptionRecord).not.toHaveBeenCalled();
+    expect(host.contextGraphSubscriptionRehydrationPendingIds.has('b-confirmed')).toBe(true);
+    expect(host.contextGraphSubscriptionDormancyById.get('b-confirmed')).toBe('activationCap');
+
+    // The slot is released: the next pass activates it.
+    host.contextGraphSubscriptionRehydrationSlotIds.delete('active-row-syncing-again');
+    const next = promote(host, new AbortController().signal);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await next;
+    expect(host.activatePersistedContextGraphSubscriptionRecord.mock.calls.map(([row]: [{ id: string }]) => row.id))
+      .toEqual(['b-confirmed']);
+    expect(host.contextGraphSubscriptionRehydrationPendingIds.size).toBe(0);
   });
 
   it('stops at once, without a failure report, when the node closes during a pause', async () => {

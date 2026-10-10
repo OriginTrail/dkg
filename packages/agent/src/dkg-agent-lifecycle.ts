@@ -10482,6 +10482,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (this.contextGraphSubscriptionRehydrationSlotIds.size >= status.activationCap) break;
       const contextGraphId = await pass.next(signal);
       if (contextGraphId === undefined) break;
+      // A subscription that lost its readiness can take the slot during the pause.
+      if (this.contextGraphSubscriptionRehydrationSlotIds.size >= status.activationCap) break;
 
       let row = await loadRow(contextGraphId);
       signal.throwIfAborted();
@@ -10529,17 +10531,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       )));
       signal.throwIfAborted();
       if (!runtime.owns(signal)) return 'idle';
-      if (authority.outcome !== 'allowed') {
-        this.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
-        this.contextGraphSubscriptionDormancyById.set(contextGraphId, pass.leftDormant(contextGraphId, authority));
-        touchStatus();
-        continue;
-      }
 
       // Authority resolution may yield while an operator unsubscribes or a
       // store writer replaces the durable row. Reconcile that boundary before
-      // installing any network effects so a stale timer cannot resurrect the
-      // old record.
+      // recording a refusal or installing any network effects, so a stale
+      // answer can neither retire the new record nor resurrect the old one.
       const freshRow = await loadRow(contextGraphId);
       signal.throwIfAborted();
       if (!runtime.owns(signal)) return 'idle';
@@ -10574,7 +10570,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ) {
         // Authority belongs to the exact row snapshot that preceded the chain
         // read. Keep the candidate pending and retry its new generation rather
-        // than activating a replacement under stale authority.
+        // than activating or retiring a replacement under stale authority.
+        touchStatus();
+        continue;
+      }
+      if (authority.outcome !== 'allowed') {
+        this.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
+        const { outcome, source, reason } = authority;
+        this.contextGraphSubscriptionDormancyById.set(contextGraphId, pass.leftDormant(contextGraphId, { outcome, source, reason }));
         touchStatus();
         continue;
       }
