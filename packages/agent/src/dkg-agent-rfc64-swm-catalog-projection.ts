@@ -198,19 +198,26 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     }));
     placement.covered(covered);
     if (covered) return null;
-    // The seal this process was handed at the confirmation, for an assertion that was re-opened
-    // more than once since and whose stored seals have moved on.
-    const retainedSeal = readOwedPlacementSealV1(this, params.sealDigest);
-    const source = {
-      store: this.store,
-      publicSnapshotStore: this.publicSnapshotStore,
-      contextGraphId: params.contextGraphId,
-      authorAddress: params.authorAddress,
-      ...(retainedSeal === undefined ? {} : { retainedSeal }),
-    };
     const asset: Rfc64CatalogSuccessorAssetInputV1 = await placement.measure('asset', () => (row === undefined
-      ? resolveRfc64ConfirmedVmRepairCatalogAssetV1({ ...source, identity: params })
-      : resolveRfc64InventoryWorkspaceCatalogAssetV1({ ...source, laneKind: lane.kind, row })));
+      ? resolveRfc64ConfirmedVmRepairCatalogAssetV1({
+        store: this.store,
+        publicSnapshotStore: this.publicSnapshotStore,
+        contextGraphId: params.contextGraphId,
+        authorAddress: params.authorAddress,
+        identity: params,
+        // The seal this process was handed at the confirmation, for an assertion that was
+        // re-opened more than once since and whose stored seals have moved on.
+        retainedSeal: readOwedPlacementSealV1(this, params.sealDigest),
+      })
+      : resolveRfc64InventoryWorkspaceCatalogAssetV1({
+        store: this.store,
+        publicSnapshotStore: this.publicSnapshotStore,
+        contextGraphId: params.contextGraphId,
+        authorAddress: params.authorAddress,
+        laneKind: lane.kind,
+        row,
+        retainedSeal: readOwedPlacementSealV1(this, params.sealDigest),
+      })));
     lane.service.acceptedPolicySnapshotForCatalogScope(scope);
     return this.upsertObservedRfc64PublicRootCatalogAssetV1({
       scope,
