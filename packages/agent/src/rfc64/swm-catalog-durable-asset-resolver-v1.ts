@@ -14,6 +14,7 @@ import {
   type CanonicalGraphScopedAuthorSealV1,
   type ContextGraphIdV1,
   type EvmAddressV1,
+  type GraphScopedAssertionSealCandidate,
   type SwmAuthorInventoryRowV1,
 } from '@origintrail-official/dkg-core';
 import {
@@ -36,8 +37,10 @@ import { ethers } from 'ethers';
 
 import type { Rfc64PublicCatalogSuccessorAssetInputV1 } from
   './public-catalog-successor-asset-v1.js';
-import { resolveDurableGraphScopedAuthorSealCandidateV1 } from
-  '../durable-author-seal-resolver-v1.js';
+import {
+  resolveArchivedGraphScopedAuthorSealCandidateV1,
+  resolveDurableGraphScopedAuthorSealCandidateV1,
+} from '../durable-author-seal-resolver-v1.js';
 import { throwIfRfc64AbortedV1 as throwIfAbortedV1 } from './abort-v1.js';
 import {
   CatalogRepairIntegrityErrorV1,
@@ -281,14 +284,22 @@ async function resolveStrictSealV1(
   identity: Readonly<Rfc64DurableCatalogAssetIdentityV1>,
 ): Promise<ResolvedStrictSealV1> {
   throwIfAbortedV1(params.signal);
-  const candidate = await resolveDurableGraphScopedAuthorSealCandidateV1({
+  const sealQuery = {
     store: params.store,
     contextGraphId: params.contextGraphId,
     agentAddress: params.authorAddress,
     assertionCoordinate: identity.assertionCoordinate,
     source: 'agent.rfc64.swmInventory.catalogReconcile.seal',
     signal: params.signal,
-  });
+  };
+  let candidate = await resolveDurableGraphScopedAuthorSealCandidateV1(sealQuery);
+  if (!isSealOfIdentityV1(candidate, params, identity)) {
+    // The assertion was re-opened for editing after this exact version was sealed: its seal is
+    // archived and the active subject is empty or carries the next version. The identity names
+    // the seal by digest, so the archived copy is accepted only when it is that seal.
+    const archived = await resolveArchivedGraphScopedAuthorSealCandidateV1(sealQuery);
+    if (isSealOfIdentityV1(archived, params, identity)) candidate = archived;
+  }
   if (candidate === undefined) {
     throw new CatalogRepairIntegrityErrorV1(`durable RFC-64 catalog asset ${identity.kaUal} has no strict author seal`);
   }
@@ -310,6 +321,29 @@ async function resolveStrictSealV1(
     throw new CatalogRepairIntegrityErrorV1(`durable RFC-64 catalog asset ${identity.kaUal} has a different author seal`);
   }
   return Object.freeze({ graphManager: new GraphManager(params.store), seal });
+}
+
+/** True when `candidate` is exactly the seal `identity` names: its coordinate, version, asset and digest. */
+function isSealOfIdentityV1(
+  candidate: GraphScopedAssertionSealCandidate | undefined,
+  params: Readonly<DurableCatalogAssetResolverBaseV1>,
+  identity: Readonly<Rfc64DurableCatalogAssetIdentityV1>,
+): candidate is GraphScopedAssertionSealCandidate {
+  if (
+    candidate === undefined
+    || candidate.coordinate.scope !== params.contextGraphId
+    || candidate.coordinate.agentAddress.toLowerCase() !== params.authorAddress
+    || candidate.coordinate.name !== identity.assertionCoordinate
+  ) return false;
+  try {
+    const seal = canonicalGraphScopedAuthorSealFromAssertionSealV1(candidate.seal);
+    return seal.assertionVersion === identity.assertionVersion
+      && seal.kaUal === identity.kaUal
+      && computeCanonicalGraphScopedAuthorSealDigestV1(seal) === identity.sealDigest;
+  } catch {
+    // A seal that cannot be canonicalized is not this identity's; the strict checks report it.
+    return false;
+  }
 }
 
 function laneAcceptsWorkspaceHeadV1(
