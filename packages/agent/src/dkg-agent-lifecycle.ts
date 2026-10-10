@@ -1,3 +1,4 @@
+import type { PublicSnapshotEvidence } from './public-snapshot-evidence.js';
 import { syncReconcilerEnabled, syncOnConnectEnabled, durableSyncEnabled } from './internal/lifecycle-sync-policy.js';
 import { emptySwmRecoveryResult } from './sync/shared-memory-completion.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
@@ -1637,6 +1638,17 @@ export interface ContextGraphCatchupOptions {
   sourceOverride?: SyncAdmissionSource;
 }
 
+interface ExactKnowledgeAssetSyncOptions {
+  onWorkStarted?: () => void;
+  signal?: AbortSignal;
+  isCurrent?: () => boolean;
+  forceFreshExactSession?: boolean;
+  exactRecoveryTransportMode?: ExactRecoveryTransportMode;
+  registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
+  publicSnapshotEvidence?: PublicSnapshotEvidence;
+  totalTimeoutMs?: number;
+}
+
 export type DurableSyncOptions = {
   stopOnBackoffWorthyFailure?: boolean;
   /**
@@ -1679,6 +1691,7 @@ export type DurableSyncOptions = {
    * stream pre-flight to rely on. Handed only to that pass's own exchange; absent otherwise.
    */
   registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
+  publicSnapshotEvidence?: PublicSnapshotEvidence;
   /** Owner-private retained META prefix for bounded durable recovery. */
   durableMetaContinuation?: DurableMetaContinuation;
   /** Admission override for foreground VM recovery. */
@@ -1742,6 +1755,7 @@ type LegacyDurableContextGraphOptions = {
   durableMetaContinuation?: DurableMetaContinuation;
   exactRecoveryTransportMode?: ExactRecoveryTransportMode;
   registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
+  publicSnapshotEvidence?: PublicSnapshotEvidence;
 };
 
 const DURABLE_AUTHENTICATION_MAX_ATTEMPTS = 5;
@@ -3895,6 +3909,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Subscriptions known only by an on-chain name hash sync nothing until the
     // cleartext id is found; serve and resolve names for this node's lifetime.
     this.startContextGraphNameResolution(signal);
+    this.startPublicGraphSnapshots();
 
     // Reconnect-on-gossip: when a gossip message arrives from a peer we're
     // not currently connected to, best-effort dial them. This catches the
@@ -5855,6 +5870,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 forceFreshExactSession: options?.forceFreshExactSession,
                 exactRecoveryTransportMode: options?.exactRecoveryTransportMode,
                 registeredPublicEvidence: options?.registeredPublicEvidence,
+                publicSnapshotEvidence: options?.publicSnapshotEvidence,
                 authenticationTimeoutMs,
                 operationFetchDeadline: operationBoundary.fetchDeadline,
                 operationDeadline: operationBoundary.deadline,
@@ -6044,43 +6060,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeerId: string,
     contextGraphId: string,
     assetUals: readonly string[],
-    options?: {
-      onWorkStarted?: () => void;
-      signal?: AbortSignal;
-      isCurrent?: () => boolean;
-      forceFreshExactSession?: boolean;
-      exactRecoveryTransportMode?: ExactRecoveryTransportMode;
-      registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
-      totalTimeoutMs?: number;
-    },
+    options?: ExactKnowledgeAssetSyncOptions,
   ): Promise<ExactKnowledgeAssetSyncResult>;
   syncExactKnowledgeAssetsFromPeerDetailed(this: DKGAgent,
     remotePeerId: string,
     contextGraphId: string,
     selection: ExactAssetSelection,
-    options?: {
-      onWorkStarted?: () => void;
-      signal?: AbortSignal;
-      isCurrent?: () => boolean;
-      forceFreshExactSession?: boolean;
-      exactRecoveryTransportMode?: ExactRecoveryTransportMode;
-      registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
-      totalTimeoutMs?: number;
-    },
+    options?: ExactKnowledgeAssetSyncOptions,
   ): Promise<ExactKnowledgeAssetSyncResult>;
   async syncExactKnowledgeAssetsFromPeerDetailed(this: DKGAgent,
     remotePeerId: string,
     contextGraphId: string,
     selectionInput: ExactAssetSelection | readonly string[],
-    options: {
-      onWorkStarted?: () => void;
-      signal?: AbortSignal;
-      isCurrent?: () => boolean;
-      forceFreshExactSession?: boolean;
-      exactRecoveryTransportMode?: ExactRecoveryTransportMode;
-      registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
-      totalTimeoutMs?: number;
-    } = {},
+    options: ExactKnowledgeAssetSyncOptions = {},
   ): Promise<ExactKnowledgeAssetSyncResult> {
     const selection: ExactAssetSelection = Array.isArray(selectionInput)
       ? createUalOnlyExactAssetSelection(selectionInput)
@@ -6098,6 +6090,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         forceFreshExactSession: options.forceFreshExactSession,
         exactRecoveryTransportMode: options.exactRecoveryTransportMode,
         registeredPublicEvidence: options.registeredPublicEvidence,
+        publicSnapshotEvidence: options.publicSnapshotEvidence,
         ...(options.totalTimeoutMs === undefined ? {} : { totalTimeoutMs: options.totalTimeoutMs }),
         stopOnBackoffWorthyFailure: true,
         priority: VM_RECOVERY_SYNC_PRIORITY,
@@ -6174,6 +6167,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       forceFreshExactSession,
       exactRecoveryTransportMode = 'stream-preferred',
       registeredPublicEvidence,
+      publicSnapshotEvidence,
       authenticationTimeoutMs = fetchTimeoutMs,
       operationFetchDeadline,
       operationDeadline,
@@ -6389,7 +6383,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           recaptureBindingGeneration,
           assertCurrent,
         }): Promise<GraphScopedMaterializationOutcome> => {
-          const authentication = await authenticateDurableGraphScopedAsset({
+          const authentication = publicSnapshotEvidence ? publicSnapshotEvidence.authenticate(asset) : await authenticateDurableGraphScopedAsset({
             chain: this.chain,
             asset,
             verifyContextGraphBinding,

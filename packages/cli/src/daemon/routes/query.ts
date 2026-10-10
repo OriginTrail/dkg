@@ -669,6 +669,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       try {
         result = await agent.query(sparql, {
           contextGraphId,
+          chainEvidenceMode: parsed.chainEvidenceMode,
           graphSuffix,
           includeSharedMemory,
           includeContextGraphPartitions,

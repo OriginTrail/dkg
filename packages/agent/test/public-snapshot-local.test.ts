@@ -1,0 +1,314 @@
+import { MULTICALL3_RUNTIME_CODE } from "../../chain/test/fixtures/multicall3-runtime-code.js";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { Contract, Wallet, ethers } from "ethers";
+import { readFileSync } from "node:fs";
+import { performance } from "node:perf_hooks";
+import { EVMChainAdapter } from "@origintrail-official/dkg-chain";
+import { OxigraphStore, type Quad } from "@origintrail-official/dkg-storage";
+import {
+  computeFlatKCRootV10,
+  generateGraphKnowledgeAssetMetadata,
+} from "@origintrail-official/dkg-publisher";
+import { DKGAgent } from "../src/dkg-agent.js";
+import { assertPublicSnapshotQueryTrust } from "../src/public-snapshot-evidence.js";
+import {
+  getSharedContext,
+  createProvider,
+  makeAdapterConfig,
+  HARDHAT_KEYS,
+  takeSnapshot,
+  revertSnapshot,
+} from "../../chain/test/evm-test-context.js";
+
+const agents: DKGAgent[] = [];
+const graph = "public-snapshot-local";
+const abi = (name: string) =>
+  JSON.parse(
+    readFileSync(
+      new URL(`../../chain/abi/${name}.json`, import.meta.url),
+      "utf8",
+    ),
+  );
+let before: string;
+beforeAll(async () => {
+  before = await takeSnapshot();
+  vi.stubEnv("DKG_EXACT_BATCH_STREAM_ENABLED", "1");
+});
+afterAll(async () => {
+  for (const agent of agents.reverse()) await agent.stop();
+  vi.unstubAllEnvs();
+  await revertSnapshot(before);
+});
+
+describe("public snapshot recovery over live local nodes and chain", () => {
+  it("reuses coherent core evidence and verifies content without receiver asset RPCs", async () => {
+    const { rpcUrl, hubAddress } = getSharedContext();
+    const provider = createProvider();
+    const signer = new Wallet(HARDHAT_KEYS.DEPLOYER, provider);
+    const adapter = new EVMChainAdapter(
+      makeAdapterConfig(rpcUrl, hubAddress, HARDHAT_KEYS.DEPLOYER),
+    );
+    const created = await adapter.createOnChainContextGraph({
+      participantAgents: [],
+      metadataBatchId: 0n,
+      accessPolicy: 0,
+      publishPolicy: 0,
+      publishAuthority: ethers.ZeroAddress,
+      publishAuthorityAccountId: 0n,
+      nameHash: ethers.id(graph),
+    });
+    const onChainId = created.contextGraphId.toString();
+    const hub = new Contract(hubAddress, abi("Hub"), signer);
+    await (
+      await hub.setContractAddress("SnapshotTestFixture", signer.address)
+    ).wait();
+    const kas = new Contract(
+      await hub.getAssetStorageAddress("DKGKnowledgeAssets"),
+      abi("DKGKnowledgeAssets"),
+      signer,
+    );
+    const cg = new Contract(
+      await hub.getAssetStorageAddress("ContextGraphStorage"),
+      abi("ContextGraphStorage"),
+      signer,
+    );
+    await provider.send("hardhat_setCode", [
+      "0xcA11bde05977b3631167028862bE2a173976CA11",
+      MULTICALL3_RUNTIME_CODE,
+    ]);
+    const source = new OxigraphStore();
+    for (let n = 1; n <= 12; n++) {
+      const id = (BigInt(signer.address) << 96n) | BigInt(n);
+      const ual = `did:dkg:evm:31337/${signer.address.toLowerCase()}/${n}`;
+      const assertionGraph = `did:dkg:context-graph:${graph}/_verifiable_memory/${signer.address.toLowerCase()}/${n}`;
+      const data: Quad[] = [
+        {
+          subject: `urn:entity:${n}`,
+          predicate: "http://schema.org/name",
+          object: `"Entity ${n}"`,
+          graph: assertionGraph,
+        },
+      ];
+      const root = computeFlatKCRootV10(data, []);
+      await (
+        await kas.createKnowledgeAsset(
+          signer.address,
+          signer.address,
+          id,
+          `snapshot-${n}`,
+          ethers.hexlify(root),
+          1,
+          100,
+          1,
+          2,
+          0,
+          false,
+          1,
+        )
+      ).wait();
+      await (
+        await cg.registerKnowledgeAssetToContextGraph(BigInt(onChainId), id)
+      ).wait();
+      await source.insert([
+        ...data,
+        ...generateGraphKnowledgeAssetMetadata(
+          {
+            contextGraphId: graph,
+            ual,
+            assertionGraph,
+            merkleRoot: root,
+            publisherPeerId: "fixture",
+            accessPolicy: "public",
+            allowedPeers: [],
+            timestamp: new Date(),
+            assertionVersion: 1,
+            authorAddress: signer.address,
+            publicTripleCount: 1,
+            privateTripleCount: 0,
+          },
+          {
+            status: "confirmed",
+            confirmation: {
+              kind: "finalized-materialization",
+              provenance: {
+                batchId: id,
+                materializedVersion: { blockNumber: 0, txIndex: 0 },
+              },
+            },
+          },
+        ),
+      ]);
+    }
+    const snapshotRead = vi.spyOn(adapter, "readPublicGraphSnapshot");
+    const make = async (
+      name: string,
+      nodeRole: "core" | "edge",
+      chainAdapter: EVMChainAdapter,
+      store: OxigraphStore,
+    ) => {
+      const a = await DKGAgent.create({
+        name,
+        nodeRole,
+        listenHost: "127.0.0.1",
+        listenPort: 0,
+        chainAdapter,
+        store: Object.assign(store, {
+          queryResponseLimitMode: "pre-materialization" as const,
+        }),
+        randomSamplingUseWorkerThread: false,
+        syncReconcilerEnabled: false,
+        vmReconcilerEnabled: false,
+      });
+      agents.push(a);
+      await a.start();
+      a.subscribeToContextGraph(graph, { onChainId, syncMode: "on-demand" });
+      return a;
+    };
+    const core = await make("SnapshotCore", "core", adapter, source);
+    const receiverChain = new EVMChainAdapter(
+      makeAdapterConfig(rpcUrl, hubAddress, HARDHAT_KEYS.REC1_OP),
+    );
+    const target = new OxigraphStore();
+    const receiver = await make(
+      "SnapshotReceiver",
+      "edge",
+      receiverChain,
+      target,
+    );
+    await receiver.connectTo(
+      core.multiaddrs.find(
+        (a) => a.includes("/tcp/") && !a.includes("/p2p-circuit"),
+      )!,
+    );
+    const assetCalls = [
+      "getLatestMerkleRoot",
+      "getMerkleRootCount",
+      "getKAContextGraphId",
+      "resolvePublishByTxHash",
+      "verifyKAUpdate",
+      "readPublicGraphSnapshot",
+    ] as const;
+    const calls = assetCalls.map((name) =>
+      vi
+        .spyOn(receiverChain, name)
+        .mockRejectedValue(
+          new Error("Receiver asset RPC forbidden in core-cache mode"),
+        ),
+    );
+    const t = performance.now();
+    const result = await receiver.syncPublicGraphSnapshot({
+      contextGraphId: graph,
+      onChainId,
+      trustedCorePeerIds: [core.peerId],
+    });
+    expect(result).toMatchObject({
+      mode: "core-cache",
+      assets: 12,
+      committed: 12,
+      completeAsOfSnapshot: true,
+      current: true,
+    });
+    expect(snapshotRead).toHaveBeenCalledTimes(2);
+    for (const call of calls) {
+      expect(call).not.toHaveBeenCalled();
+      call.mockRestore();
+    }
+    const found = await target.query(
+      `SELECT ?name WHERE {GRAPH ?g {?s <http://schema.org/name> ?name}}`,
+    );
+    expect(found.type === "bindings" && found.bindings.length).toBe(12);
+    await expect(assertPublicSnapshotQueryTrust(target, graph)).rejects.toThrow(
+      "core-trusted",
+    );
+    await expect(
+      assertPublicSnapshotQueryTrust(target, graph, "core-cache"),
+    ).resolves.toBeUndefined();
+    console.log(
+      JSON.stringify({
+        measurement: "local-public-snapshot-recovery",
+        assets: 12,
+        elapsedMs: performance.now() - t,
+        receiverAssetRpcCalls: 0,
+        coreSnapshotBuilds: snapshotRead.mock.calls.length,
+      }),
+    );
+    await expect(
+      receiver.query(
+        "SELECT ?name WHERE {GRAPH ?g {?s <http://schema.org/name> ?name}}",
+        {
+          contextGraphId: graph,
+          includeContextGraphPartitions: true,
+        },
+      ),
+    ).rejects.toMatchObject({ code: "CORE_CACHE_QUERY_TRUST_REQUIRED" });
+    const accepted = await receiver.query(
+      "SELECT ?name WHERE {GRAPH ?g {?s <http://schema.org/name> ?name}}",
+      {
+        contextGraphId: graph,
+        includeContextGraphPartitions: true,
+        chainEvidenceMode: "core-cache",
+      },
+    );
+    expect(accepted.bindings?.length).toBe(12);
+    const rpcChain = new EVMChainAdapter(
+      makeAdapterConfig(rpcUrl, hubAddress, HARDHAT_KEYS.REC2_OP),
+    );
+    const rpcReads = vi.spyOn(rpcChain, "readPublicGraphSnapshot");
+    const rpcReceiver = await make(
+      "IndependentReceiver",
+      "edge",
+      rpcChain,
+      new OxigraphStore(),
+    );
+    await rpcReceiver.connectTo(
+      core.multiaddrs.find(
+        (a) => a.includes("/tcp/") && !a.includes("/p2p-circuit"),
+      )!,
+    );
+    const rpcStart = performance.now();
+    const rpcResult = await rpcReceiver.syncPublicGraphSnapshot({
+      contextGraphId: graph,
+      onChainId,
+      trustedCorePeerIds: [core.peerId],
+      mode: "rpc-only",
+    });
+    expect(rpcResult).toMatchObject({
+      mode: "rpc-only",
+      sourceCore: null,
+      assets: 12,
+      committed: 12,
+      current: true,
+    });
+    expect(rpcReads).toHaveBeenCalledTimes(2);
+    console.log(
+      JSON.stringify({
+        measurement: "local-independent-snapshot-recovery",
+        assets: 12,
+        elapsedMs: performance.now() - rpcStart,
+        independentSnapshots: 2,
+      }),
+    );
+    const independent = await receiverChain.readPublicGraphSnapshot(
+      graph,
+      onChainId,
+    );
+    expect(independent.inventoryDigest).toBe(
+      (await adapter.readPublicGraphSnapshot(graph, onChainId)).inventoryDigest,
+    );
+    const privateCreated = await adapter.createOnChainContextGraph({
+      participantAgents: [],
+      metadataBatchId: 0n,
+      accessPolicy: 1,
+      publishPolicy: 0,
+      publishAuthority: ethers.ZeroAddress,
+      publishAuthorityAccountId: 0n,
+      nameHash: ethers.id("snapshot-private"),
+    });
+    await expect(
+      adapter.readPublicGraphSnapshot(
+        "snapshot-private",
+        privateCreated.contextGraphId.toString(),
+      ),
+    ).rejects.toThrow("unavailable");
+  }, 180_000);
+});

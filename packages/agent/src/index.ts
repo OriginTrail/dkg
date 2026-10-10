@@ -1,3 +1,5 @@
+export type { PublicSnapshotSyncOptions } from './dkg-agent-public-snapshot.js';
+export type { PublicSnapshotMode } from './public-snapshot-evidence.js';
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 export {
   authorityIndexTrustDomain,

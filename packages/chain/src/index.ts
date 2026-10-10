@@ -1,3 +1,4 @@
+export * from './public-graph-snapshot.js';
 export * from './chain-adapter.js';
 export {
   CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MAX_BYTES,
