@@ -191,7 +191,7 @@ describe('exact batch normal verifier/materializer binding', () => {
     } finally { await f.close(); }
   });
 
-  it('answers typed export pressure with BUSY before sending an asset frame', async () => {
+  it('answers typed export pressure with a BUSY frame before sending asset bytes', async () => {
     const f = await fixture(1, 2), signal = new AbortController().signal;
     const session = { signal, windowSize: 2 as const, assetUals: f.receiver.assetUals,
       send: vi.fn(async (_frame: ExactBatchFrame) => {}), next: vi.fn(async () => undefined) };
@@ -204,15 +204,75 @@ describe('exact batch normal verifier/materializer binding', () => {
       for (const error of pressure) {
         const authorized = await f.binding.authorizeRequest(f.signed, 'requester', signal);
         acquire.mockRejectedValueOnce(error);
-        await expect(f.binding.respond(authorized.context, session, 'requester'))
-          .rejects.toMatchObject({ refusal: 'BUSY' } satisfies Partial<ExactBatchResponderRefusal>);
-        expect(session.send).not.toHaveBeenCalled();
+        await f.binding.respond(authorized.context, session, 'requester');
+        expect(session.send).toHaveBeenCalledExactlyOnceWith({ kind: K.REFUSE, assetIndex: 255,
+          sequence: 0, payload: new TextEncoder().encode('BUSY') });
+        session.send.mockClear();
       }
       const unexpected = new Error('Unexpected exporter failure');
       const authorized = await f.binding.authorizeRequest(f.signed, 'requester', signal);
       acquire.mockRejectedValueOnce(unexpected);
       await expect(f.binding.respond(authorized.context, session, 'requester')).rejects.toBe(unexpected);
       expect(session.send).not.toHaveBeenCalled();
+    } finally { await f.close(); }
+  });
+
+  it('answers an absent exact envelope with ASSET_MISSING instead of resetting the stream', async () => {
+    const f = await fixture(1, 2), wire = duplex(f.receiver.assetUals);
+    try {
+      await f.backing.delete(f.items[0]!.meta);
+      await expect(run(f, wire)).rejects.toMatchObject({ code: 'EXACT_BATCH_PARTIAL',
+        streamInterrupted: false, refusalObservation: { code: 'ASSET_MISSING' }, committedAssetUals: [] });
+      expect(wire.sent[1]).toEqual([{ kind: K.REFUSE, assetIndex: 255, sequence: 0,
+        payload: new TextEncoder().encode('ASSET_MISSING') }]);
+      expect(f.applied).toEqual([]);
+    } finally { await f.close(); }
+  });
+
+  it('isolates throwing and rejecting refusal observers from the wire refusal', async () => {
+    const f = await fixture(1, 2);
+    try {
+      f.isPublic.mockResolvedValue(false);
+      for (const onRefusal of [
+        () => { throw new Error('observer failed'); },
+        async () => { throw new Error('async observer failed'); },
+      ]) {
+        const binding = createExactBatchResponderBinding({ localPeerId: 'source', store: f.store,
+          exportCache: f.exportCache, parseSyncRequest: f.parse, authorizeSyncRequest: f.authorize,
+          isPublicContextGraph: f.isPublic, admission: f.resources, onRefusal });
+        await expect(binding.authorizeRequest(f.signed, 'requester', new AbortController().signal))
+          .rejects.toMatchObject({ refusal: 'DENIED' } satisfies Partial<ExactBatchResponderRefusal>);
+      }
+    } finally { await f.close(); }
+  });
+
+  it('sends BUSY after second-asset bytes when its final metadata fence times out', async () => {
+    const f = await fixture(2, 2);
+    const timeout = new StoreOperationTimeoutError({ backend: 'blazegraph', operation: 'query' });
+    const actualAcquire = f.exportCache.acquireEncoded.bind(f.exportCache);
+    const acquire = vi.spyOn(f.exportCache, 'acquireEncoded');
+    acquire.mockImplementation(async request => {
+      if (request.assetUal === f.items[1]!.ual) {
+        await vi.waitFor(() => expect(f.applied).toEqual([f.items[0]!.ual]));
+      }
+      return actualAcquire(request);
+    });
+    const wire = duplex(f.receiver.assetUals, frame => {
+      if (frame.kind === K.DATA && frame.assetIndex === 1) {
+        vi.mocked(f.store.query).mockRejectedValueOnce(timeout);
+      }
+      return frame;
+    });
+    try {
+      await expect(run(f, wire)).rejects.toMatchObject({ code: 'EXACT_BATCH_PARTIAL',
+        streamInterrupted: false, refusalObservation: { code: 'BUSY' },
+        committedAssetUals: [f.items[0]!.ual] });
+      expect(f.applied).toEqual([f.items[0]!.ual]);
+      expect(wire.sent[1]).toContainEqual({ kind: K.REFUSE, assetIndex: 255,
+        sequence: 0, payload: new TextEncoder().encode('BUSY') });
+      expect(wire.sent[1]).not.toContainEqual(expect.objectContaining({ kind: K.ASSET_END, assetIndex: 1 }));
+      expect(wire.sent[0]).not.toContainEqual(expect.objectContaining({ kind: K.ACK, assetIndex: 1 }));
+      expect(f.resources.snapshotBudget.stats().bytesEstimate).toBe(f.exportCache.stats().encodedCacheBytes);
     } finally { await f.close(); }
   });
 

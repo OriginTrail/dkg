@@ -165,6 +165,12 @@ function invalid(): Error {
   });
 }
 
+/** An absent confirmed envelope cannot be served by the exact profile. */
+export class ExactBatchAssetMissingError extends Error {
+  readonly code = 'SYNC_EXACT_ASSET_MISSING';
+  constructor() { super('Exact asset has no confirmed export envelope'); }
+}
+
 function compareRows(a: SyncRow, b: SyncRow): number {
   return compareCodePoint(a.s, b.s) || compareCodePoint(a.p, b.p) || compareCodePoint(a.o, b.o);
 }
@@ -273,6 +279,7 @@ export function createBoundedExactAssetExportCache(params: {
   const readMetadata = async (
     request: ExactAssetEncodedExportRequest,
     expected?: Pick<ExactAssetExportRequest, 'graph' | 'expectedRows' | 'expectedIdentity'>,
+    missingIsRefusal = false,
   ): Promise<VerifiedMetadata | null> => {
     throwIfAborted(request.signal);
     const metaGraph = `did:dkg:context-graph:${request.contextGraphId}/_meta`;
@@ -307,7 +314,12 @@ export function createBoundedExactAssetExportCache(params: {
     const { identity, confirmed: parsed } = metadata;
     throwIfAborted(request.signal);
     if (expected?.expectedIdentity !== undefined && identity !== expected.expectedIdentity) throw changed();
-    if (parsed.state !== 'confirmed') throw invalid();
+    if (parsed.state !== 'confirmed') {
+      if (missingIsRefusal && parsed.state === 'absent' && expected?.expectedIdentity === undefined) {
+        throw new ExactBatchAssetMissingError();
+      }
+      throw invalid();
+    }
     if (metadata.accessPolicy !== 'public') {
       if (metadata.accessPolicy !== 'absent' || parsed.envelope.privateTripleCount !== 0
         || !request.authorizeMissingAccessPolicy || (await request.authorizeMissingAccessPolicy()) !== true) {
@@ -531,7 +543,7 @@ export function createBoundedExactAssetExportCache(params: {
       throwIfAborted(scope.signal);
       if (!canReadWholeAsset) return refuse('store-capability', scope);
       const started = performance.now();
-      const metadata = await readMetadata(scope);
+      const metadata = await readMetadata(scope, undefined, true);
       observeExactBatch(() => scope.onStage?.('export-metadata-before', performance.now() - started));
       if (!metadata) return null;
       const request: ExactAssetExportRequest = { ...scope, graph: metadata.envelope.assertionGraph,

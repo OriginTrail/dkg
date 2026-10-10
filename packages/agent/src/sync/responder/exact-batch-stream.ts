@@ -9,7 +9,8 @@ import {
   EXACT_BATCH_STREAM_WINDOW_SIZE, ExactBatchSendWindow, type ExactBatchFrame,
 } from '../exact-batch-stream-contract.js';
 import type { ExactBatchAgentSession } from '../requester/exact-batch-stream.js';
-import type { ExactAssetExportCache, ExactAssetExportFallbackReason, ExactAssetExportStage } from './exact-asset-export-cache.js';
+import { ExactBatchAssetMissingError, type ExactAssetExportCache, type ExactAssetExportFallbackReason,
+  type ExactAssetExportStage } from './exact-asset-export-cache.js';
 import type { SyncRowSnapshotBudgetError } from './snapshot-budget.js';
 import type { ExperimentalExactBatchResponderResources } from './sync-handler.js';
 
@@ -27,7 +28,7 @@ export interface ExactBatchResponderBindingOptions {
   readonly isPublicContextGraph: (contextGraphId: string, signal: AbortSignal) => Promise<boolean>;
   readonly servingWithheld?: (contextGraphId: string) => boolean;
   /** Closed, request-free reason for a pre-export refusal. */
-  readonly onRefusal?: (stage: 'authorization' | 'public-authority' | 'serving' | 'export', code: 'BUSY' | 'DENIED') => void;
+  readonly onRefusal?: (stage: 'authorization' | 'public-authority' | 'serving' | 'export', code: 'BUSY' | 'DENIED' | 'ASSET_MISSING') => void;
   readonly onStage?: (stage: 'metadata' | 'export' | 'encode' | 'send' | 'source-fence' | 'ack-wait' | ExactAssetExportStage, assetIndex: number, durationMs: number, context: OperationContext) => void;
   /** Successful cache lease export count, never a peer/body authority claim. */
   readonly onExport?: (assetIndex: number, wholePayloadExports: 0 | 1, context: OperationContext) => void;
@@ -56,8 +57,11 @@ class ProfileRefusal extends Error {}
 /** Bind directly to Core's explicit registerExperimentalExactBatchResponder. */
 export function createExactBatchResponderBinding(options: ExactBatchResponderBindingOptions) {
   const authorizationOwner = {};
+  const noteRefusal = (stage: 'authorization' | 'public-authority' | 'serving' | 'export', code: 'BUSY' | 'DENIED' | 'ASSET_MISSING'): void => {
+    observeExactBatch(() => options.onRefusal?.(stage, code));
+  };
   const refuse = (stage: 'authorization' | 'public-authority' | 'serving' | 'export', code: 'BUSY' | 'DENIED'): never => {
-    try { options.onRefusal?.(stage, code); } catch { /* observation cannot change a refusal */ }
+    noteRefusal(stage, code);
     throw new ExactBatchResponderRefusal(code);
   };
   const requirePublicAuthority = async (contextGraphId: string, signal: AbortSignal): Promise<void> => {
@@ -171,8 +175,15 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
         await send({ kind: K.REFUSE, assetIndex: EXACT_BATCH_BATCH_INDEX, sequence: 0, payload: ENCODER.encode('RESOURCE_LIMIT') });
         return;
       }
+      if (!session.signal.aborted && error instanceof ExactBatchAssetMissingError) {
+        noteRefusal('export', 'ASSET_MISSING');
+        await send({ kind: K.REFUSE, assetIndex: EXACT_BATCH_BATCH_INDEX, sequence: 0, payload: ENCODER.encode('ASSET_MISSING') });
+        return;
+      }
       if (!session.signal.aborted && (isStoreSchedulerBusyError(error) || isStoreOperationTimeoutError(error))) {
-        refuse('export', 'BUSY');
+        noteRefusal('export', 'BUSY');
+        await send({ kind: K.REFUSE, assetIndex: EXACT_BATCH_BATCH_INDEX, sequence: 0, payload: ENCODER.encode('BUSY') });
+        return;
       }
       throw error;
     } finally { window.close(); }
