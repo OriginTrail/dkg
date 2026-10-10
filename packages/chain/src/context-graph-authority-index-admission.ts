@@ -3,6 +3,7 @@
 import { normalizeContextGraphAuthorityHash as normalizeHash } from
   './context-graph-authority-generation.js';
 import {
+  type ContextGraphAuthorityIndexAdmittedRepositoryRecord,
   type ContextGraphAuthorityIndexScopedRepository,
   type ContextGraphAuthorityIndexRepositoryRecord,
 } from './context-graph-authority-index-repository.js';
@@ -36,7 +37,7 @@ export interface ContextGraphAuthorityIndexAdmissionInput {
   readonly finalized: Readonly<{ number: number; hash: string }>;
   readonly lifecycleSignal: AbortSignal;
   /** Evict remotely servable observations as soon as a durable row is rejected. */
-  readonly onRejectedCheckpoint?: () => void;
+  readonly onRejectedCheckpoint?: (rejectedToken: number) => void;
   readonly readBlockHash: (
     blockNumber: number,
     lifecycleSignal: AbortSignal,
@@ -53,15 +54,19 @@ export interface ContextGraphAuthorityIndexAdmissionInput {
  */
 export async function admitContextGraphAuthorityIndexCheckpoint(
   input: Readonly<ContextGraphAuthorityIndexAdmissionInput>,
-): Promise<ContextGraphAuthorityIndexRepositoryRecord> {
+): Promise<ContextGraphAuthorityIndexAdmittedRepositoryRecord> {
   let record = input.initial;
   let lostInvalidations = 0;
+  // A checkpoint that wins the CAS against an invalidator may have been
+  // reduced from the rejected row by work already in flight. Its cursor hash
+  // alone cannot prove that its materialized prefix belongs to the new fork.
+  let forceCheckpointInvalidation = false;
 
   for (;;) {
     input.lifecycleSignal.throwIfAborted();
     if (record.kind === 'missing' || record.kind === 'tombstone') return record;
 
-    if (record.kind === 'checkpoint') {
+    if (record.kind === 'checkpoint' && !forceCheckpointInvalidation) {
       const checkpoint = record.checkpoint;
       if (checkpoint.cursor.deploymentBlockNumber === input.deploymentBlockNumber) {
         const cursorSkew = checkpoint.cursor.throughBlockNumber - input.finalized.number;
@@ -95,7 +100,7 @@ export async function admitContextGraphAuthorityIndexCheckpoint(
       }
     }
 
-    input.onRejectedCheckpoint?.();
+    input.onRejectedCheckpoint?.(record.token);
     if (lostInvalidations >= MAX_CONTEXT_GRAPH_AUTHORITY_INDEX_LOST_INVALIDATIONS) {
       throw new ContextGraphAuthorityIndexRetryableError(
         'Context Graph authority index changed repeatedly during checkpoint recovery',
@@ -105,5 +110,6 @@ export async function admitContextGraphAuthorityIndexCheckpoint(
     if (recovery.kind === 'invalidated') return recovery.record;
     lostInvalidations += 1;
     record = recovery.record;
+    forceCheckpointInvalidation = record.kind === 'checkpoint';
   }
 }

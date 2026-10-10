@@ -2325,8 +2325,22 @@ describe('RFC-64 rollout authority integration', () => {
       callerAgentAddress: AUTHOR,
     });
     await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    const scheduleRecovery = vi.spyOn(
+      edge as unknown as Record<string, (...args: unknown[]) => void>,
+      'scheduleRfc64AuthorityAcceptedCatalogRecoveryV1',
+    ).mockImplementation(() => undefined);
     await edge.reconcileRfc64CatalogAccessAuthorityV1(publicContextGraphId);
     await edge.reconcileRfc64CatalogAccessAuthorityV1(privateContextGraphId);
+    expect(scheduleRecovery).toHaveBeenCalledWith(
+      publicContextGraphId,
+      expect.stringMatching(/^0x[0-9a-f]{64}$/u),
+      'public',
+    );
+    expect(scheduleRecovery).toHaveBeenCalledWith(
+      privateContextGraphId,
+      expect.stringMatching(/^0x[0-9a-f]{64}$/u),
+      'private',
+    );
     Reflect.set((edge as any).config, 'networkIdentity', undefined);
 
     await expect(edge.canUseSharedMemoryForContextGraph(publicContextGraphId))

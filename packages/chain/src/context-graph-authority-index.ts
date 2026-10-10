@@ -19,15 +19,19 @@ import { ContextGraphAuthorityIndexRetryableError } from
   './context-graph-authority-index-errors.js';
 import {
   ContextGraphAuthorityIndexRepository,
+  type ContextGraphAuthorityIndexAdmittedRepositoryRecord,
   type ContextGraphAuthorityIndexRepositoryRecord,
 } from './context-graph-authority-index-repository.js';
-import { KeyedSingleFlight } from './keyed-ttl-single-flight-cache.js';
 import {
   ContextGraphAuthorityIndexProjectionCache,
   ContextGraphAuthorityIndexView,
   type ContextGraphAuthorityIndexProjectionOptions,
   type ContextGraphAuthorityIndexProjectionReadInput,
 } from './context-graph-authority-index-projection.js';
+import {
+  ContextGraphAuthorityIndexHorizonCoordinator,
+  type ContextGraphAuthorityIndexRefreshHorizonLease,
+} from './context-graph-authority-index-horizon.js';
 import { ContextGraphAuthorityIndexBootstrapCoordinator } from
   './context-graph-authority-index-bootstrap.js';
 import { ContextGraphAuthorityIndexActivity } from
@@ -69,6 +73,12 @@ type ServableCheckpoint = Readonly<{
   snapshot?: ContextGraphAuthorityIndexSnapshot;
 }>;
 
+type ContextGraphAuthorityIndexScanFlight = Readonly<{
+  promise: Promise<ContextGraphAuthorityIndexCheckpoint>;
+  /** Active joiners promote the physical owner's lease synchronously. */
+  activate(): void;
+}>;
+
 export {
   ContextGraphAuthorityIndexRetryableError,
   isContextGraphAuthorityIndexRetryableError,
@@ -79,6 +89,15 @@ export interface ContextGraphAuthorityIndexScanInput {
   readonly scope: string;
   /** Physical RPC reader identity; isolates a timed-out provider attempt. */
   readonly readScope: object;
+  /**
+   * Optional immutable generation of the rows exposed by `readScope`.
+   *
+   * A long-lived local reader can replace its rows while retaining the same
+   * object identity and finalized block. Such generations must not join one
+   * physical flight because its stabilization fence belongs to the generation
+   * that started it. Provider readers omit this and retain the previous key.
+   */
+  readonly readGeneration?: string;
   readonly deploymentBlockNumber: number;
   readonly finalized: Readonly<{ number: number; hash: string }>;
   readonly pageSize: number;
@@ -115,6 +134,8 @@ export interface ContextGraphAuthorityIndexScanInput {
     throughBlockNumber: number,
     lifecycleSignal: AbortSignal,
   ) => Promise<readonly RawContextGraphAuthorityIndexEvent[]>;
+  /** Final provider/log-generation fence owned by the physical scan. */
+  readonly stabilize?: (lifecycleSignal: AbortSignal) => Promise<void>;
 }
 
 /**
@@ -126,8 +147,9 @@ export interface ContextGraphAuthorityIndexScanInput {
  */
 export class ContextGraphAuthorityIndex {
   readonly #repository: ContextGraphAuthorityIndexRepository;
-  readonly #singleFlight = new KeyedSingleFlight<string, object>();
+  readonly #flights = new Map<string, Map<object, ContextGraphAuthorityIndexScanFlight>>();
   readonly #activity = new ContextGraphAuthorityIndexActivity();
+  readonly #horizons: ContextGraphAuthorityIndexHorizonCoordinator;
   readonly #bootstrapCoordinator: ContextGraphAuthorityIndexBootstrapCoordinator | undefined;
   readonly #servable = new Map<string, readonly ServableCheckpoint[]>();
   readonly #servableEpochs = new Map<string, number>();
@@ -139,13 +161,21 @@ export class ContextGraphAuthorityIndex {
   readonly #projections: ContextGraphAuthorityIndexProjectionCache;
   #closed = false;
   #lifecycleAbort = new AbortController();
+  /** New generations cannot read durable state until pre-clear physical work drains. */
+  #lifecycleDrain: Promise<void> | undefined;
 
   constructor(
     readonly localStore: ContextGraphAuthorityIndexStore,
     private readonly bootstrap?: ContextGraphAuthorityIndexBootstrap,
     projection: ContextGraphAuthorityIndexProjectionOptions = {},
   ) {
-    this.#projections = new ContextGraphAuthorityIndexProjectionCache(projection);
+    let projections!: ContextGraphAuthorityIndexProjectionCache;
+    this.#horizons = new ContextGraphAuthorityIndexHorizonCoordinator({
+      onConstraintChanged: (scope) => { projections.refreshHorizonChanged(scope); },
+      onProjectionInvalidated: (scope) => { projections.dropProjection(scope); },
+    });
+    projections = new ContextGraphAuthorityIndexProjectionCache(projection, this.#horizons);
+    this.#projections = projections;
     this.#bootstrapCoordinator = bootstrap === undefined ? undefined
       : new ContextGraphAuthorityIndexBootstrapCoordinator(bootstrap, this.#activity);
     this.#repository = new ContextGraphAuthorityIndexRepository(localStore);
@@ -169,7 +199,15 @@ export class ContextGraphAuthorityIndex {
     deploymentBlockNumber: number,
   ): Promise<number | undefined> {
     if (this.#closed) return undefined;
+    const lifecycleSignal = this.#lifecycleAbort.signal;
+    const lifecycleDrain = this.#lifecycleDrain;
+    if (lifecycleDrain !== undefined) {
+      await this.#waitForLifecycleDrain(lifecycleDrain, lifecycleSignal);
+    }
+    if (this.#closed) return undefined;
     const record = await this.#repository.forScope(scope).load();
+    lifecycleSignal.throwIfAborted();
+    if (this.#closed) return undefined;
     if (record.kind !== 'checkpoint'
       || record.checkpoint.cursor.deploymentBlockNumber !== deploymentBlockNumber) {
       return undefined;
@@ -184,7 +222,7 @@ export class ContextGraphAuthorityIndex {
    * is one ordinary incremental refresh.
    */
   dropProjections(): void {
-    this.#projections.clear();
+    this.#projections.dropAll();
   }
 
   /** The caller must bind requests to this adapter's own initialized scope. */
@@ -240,7 +278,8 @@ export class ContextGraphAuthorityIndex {
   }
 
   async refresh(input: ContextGraphAuthorityIndexScanInput): Promise<void> {
-    await this.#snapshot(input);
+    input.signal?.throwIfAborted();
+    await this.#snapshot(input, 'active');
   }
 
   open(): void {
@@ -259,12 +298,23 @@ export class ContextGraphAuthorityIndex {
       'AbortError',
     ));
     this.#lifecycleAbort = new AbortController();
+    // Stores may finish an already-dispatched CAS after observing cancellation.
+    // Fence the replacement lifecycle before clearing caches: no new scan may
+    // admit the CAS's old token while that physical mutation is still pending.
+    const lifecycleDrain = this.#activity.drainPending();
+    this.#lifecycleDrain = lifecycleDrain;
+    if (lifecycleDrain !== undefined) {
+      void lifecycleDrain.then(() => {
+        if (this.#lifecycleDrain === lifecycleDrain) this.#lifecycleDrain = undefined;
+      });
+    }
     this.#repository.clear();
     this.#servable.clear();
     this.#servableEpochs.clear();
+    this.#horizons.clear();
     this.#projections.clear();
     this.#bootstrapCoordinator?.clear();
-    this.#singleFlight.invalidateAll();
+    this.#flights.clear();
   }
 
   /** Wait until every lifecycle-owned physical scan has settled. */
@@ -298,16 +348,37 @@ export class ContextGraphAuthorityIndex {
     return this.#projections.read(input);
   }
 
+  /** Fail a provider attempt that trails the durable refresh already observed. */
+  assertProjectionAtRefreshHorizon(
+    scope: string,
+    finalized: Readonly<{ number: number; hash: string }>,
+  ): void {
+    if (this.#closed) {
+      throw new DOMException('Context Graph authority index is closed', 'AbortError');
+    }
+    this.#horizons.assertAtOrAbove(scope.trim(), finalized);
+  }
+
   /** One fresh scan to the anchor, behind the checkpoint-private projections. */
   async view(input: ContextGraphAuthorityIndexScanInput): Promise<ContextGraphAuthorityIndexView> {
-    return new ContextGraphAuthorityIndexView(await this.#snapshot(input));
+    const scope = input.scope.trim();
+    const view = new ContextGraphAuthorityIndexView(await this.#snapshot(input, 'on-rejection'));
+    this.assertProjectionAtRefreshHorizon(scope, input.finalized);
+    return view;
   }
 
   /** Resolve the complete materialized index at one finalized chain anchor. */
   async #snapshot(
     input: ContextGraphAuthorityIndexScanInput,
+    horizonMode: 'active' | 'on-rejection',
   ): Promise<ContextGraphAuthorityIndexCheckpoint> {
     input.signal?.throwIfAborted();
+    if (this.#closed) throw new DOMException('Context Graph authority index is closed', 'AbortError');
+    const lifecycleSignal = this.#lifecycleAbort.signal;
+    const lifecycleDrain = this.#lifecycleDrain;
+    if (lifecycleDrain !== undefined) {
+      await this.#waitForLifecycleDrain(lifecycleDrain, lifecycleSignal, input.signal);
+    }
     if (this.#closed) throw new DOMException('Context Graph authority index is closed', 'AbortError');
     const scope = input.scope.trim();
     if (scope.length === 0) throw new Error('Context Graph authority index scope is empty');
@@ -318,21 +389,98 @@ export class ContextGraphAuthorityIndex {
     if (finalizedHash === undefined) {
       throw new Error('Context Graph authority index finalized hash is invalid');
     }
-    const scanKey = [scope, input.finalized.number, finalizedHash].join('\u0000');
-    const pending = this.#singleFlight.run(scanKey, input.readScope, () => {
-      const lifecycleSignal = this.#lifecycleAbort.signal;
-      const scan = this.#scan({ ...input, scope, finalized: {
-        number: input.finalized.number,
-        hash: finalizedHash,
-      } }, lifecycleSignal);
-      return this.#activity.track(scan);
+    const scanKey = [
+      scope,
+      input.finalized.number,
+      finalizedHash,
+      input.readGeneration ?? '',
+    ].join('\u0000');
+    const flight = this.#scanFlight(scanKey, input.readScope, {
+      ...input,
+      scope,
+      finalized: { number: input.finalized.number, hash: finalizedHash },
+    }, lifecycleSignal);
+    if (horizonMode === 'active') flight.activate();
+    return waitForSignal(flight.promise, input.signal);
+  }
+
+  /** Open or join one physical scan and its sole durable horizon lease. */
+  #scanFlight(
+    scanKey: string,
+    readScope: object,
+    input: ContextGraphAuthorityIndexScanInput,
+    lifecycleSignal: AbortSignal,
+  ): ContextGraphAuthorityIndexScanFlight {
+    let variants = this.#flights.get(scanKey);
+    const existing = variants?.get(readScope);
+    if (existing !== undefined) return existing;
+    if (variants === undefined) {
+      variants = new Map();
+      this.#flights.set(scanKey, variants);
+    }
+
+    const horizonLease = this.#horizons.begin(input.scope, input.finalized);
+    let flight!: ContextGraphAuthorityIndexScanFlight;
+    const physical = this.#scan(input, lifecycleSignal, horizonLease);
+    // The exposed promise settles only after its lease and registry entry do.
+    // A resolved inactive flight therefore cannot be joined and promoted too late.
+    const settled = physical.then(
+      (checkpoint) => {
+        try {
+          horizonLease.commit();
+          return checkpoint;
+        } finally {
+          this.#removeScanFlight(scanKey, readScope, flight);
+        }
+      },
+      (error: unknown) => {
+        try {
+          horizonLease.rollback();
+        } finally {
+          this.#removeScanFlight(scanKey, readScope, flight);
+        }
+        throw error;
+      },
+    );
+    flight = Object.freeze({
+      promise: this.#activity.track(settled),
+      activate: () => { horizonLease.activate(); },
     });
-    return waitForSignal(pending, input.signal);
+    variants.set(readScope, flight);
+    return flight;
+  }
+
+  /** Bind one pre-scan drain wait to the lifecycle generation that requested it. */
+  async #waitForLifecycleDrain(
+    lifecycleDrain: Promise<void>,
+    lifecycleSignal: AbortSignal,
+    callerSignal?: AbortSignal,
+  ): Promise<void> {
+    callerSignal?.throwIfAborted();
+    lifecycleSignal.throwIfAborted();
+    const waitSignal = callerSignal === undefined
+      ? lifecycleSignal
+      : AbortSignal.any([callerSignal, lifecycleSignal]);
+    await waitForSignal(lifecycleDrain, waitSignal);
+    callerSignal?.throwIfAborted();
+    lifecycleSignal.throwIfAborted();
+  }
+
+  #removeScanFlight(
+    scanKey: string,
+    readScope: object,
+    flight: ContextGraphAuthorityIndexScanFlight,
+  ): void {
+    const variants = this.#flights.get(scanKey);
+    if (variants?.get(readScope) !== flight) return;
+    variants.delete(readScope);
+    if (variants.size === 0) this.#flights.delete(scanKey);
   }
 
   async #scan(
     input: ContextGraphAuthorityIndexScanInput,
     lifecycleSignal: AbortSignal,
+    horizonLease: ContextGraphAuthorityIndexRefreshHorizonLease,
   ): Promise<ContextGraphAuthorityIndexCheckpoint> {
     const scope = input.scope;
     // Imported authority is never promoted into an independently scanned index
@@ -357,10 +505,14 @@ export class ContextGraphAuthorityIndex {
     }
 
     let servableEpoch = this.#servableEpochs.get(scope) ?? 0;
-    const onRejectedCheckpoint = (): void => {
+    const onRejectedCheckpoint = (
+      repositoryKey: string,
+      rejectedToken: number,
+    ): void => {
       // The tombstone voids everything reduced on top of that checkpoint,
-      // including the projection readers are still being answered from.
-      this.#projections.drop(scope);
+      // including the projection readers are still being answered from. Keep
+      // this scan's horizon: its physical work outlives a cancelled waiter.
+      horizonLease.markCheckpointRejected(repositoryKey, rejectedToken);
       this.#servable.delete(scope);
       servableEpoch = (this.#servableEpochs.get(scope) ?? 0) + 1;
       this.#servableEpochs.set(scope, servableEpoch);
@@ -368,19 +520,24 @@ export class ContextGraphAuthorityIndex {
     // The one admission path for every durable record this scan adopts: the
     // one it starts from, a CAS winner, and the plain-scope checkpoint the
     // fallback resumes from. Reads `repository` at call time on purpose.
-    const admit = (
+    const admit = async (
       initial: ContextGraphAuthorityIndexRepositoryRecord,
-    ): Promise<ContextGraphAuthorityIndexRepositoryRecord> => (
-      admitContextGraphAuthorityIndexCheckpoint({
-        repository,
+    ): Promise<ContextGraphAuthorityIndexAdmittedRepositoryRecord> => {
+      const admissionRepository = repository;
+      const admitted = await admitContextGraphAuthorityIndexCheckpoint({
+        repository: admissionRepository,
         initial,
         deploymentBlockNumber,
         finalized: { number: finalizedNumber, hash: finalizedHash },
         readBlockHash: input.readBlockHash,
         lifecycleSignal,
-        onRejectedCheckpoint,
-      })
-    );
+        onRejectedCheckpoint: (rejectedToken) => {
+          onRejectedCheckpoint(admissionRepository.key, rejectedToken);
+        },
+      });
+      horizonLease.admitDurableGeneration(admissionRepository.key, admitted);
+      return admitted;
+    };
     let durable = await admit(await repository.load());
 
     // Highest block this scan may WRITE DOWN. Never below the deployment block:
@@ -425,6 +582,7 @@ export class ContextGraphAuthorityIndex {
         if (seedSession !== undefined && tail === undefined && seedSession.needsSeed(durable)) {
           try {
             durable = await seedSession.seed(durable);
+            horizonLease.admitDurableGeneration(repository.key, durable);
           } catch (error) {
             if (bootstrap === undefined || bootstrap.localHistoryFallback !== true
               || !isBootstrapUnavailable(error)) {
@@ -451,6 +609,12 @@ export class ContextGraphAuthorityIndex {
           ? durable.checkpoint
           : undefined);
         if (checkpoint !== undefined && checkpoint.cursor.throughBlockNumber === finalizedNumber) {
+          await input.stabilize?.(lifecycleSignal);
+          lifecycleSignal.throwIfAborted();
+          // Only a fenced in-memory tail proves a reorg above the durable cursor.
+          if (tail !== undefined && input.stabilize !== undefined) {
+            horizonLease.markTailStabilized();
+          }
           if (durable.kind === 'checkpoint'
             && servableEpoch === (this.#servableEpochs.get(scope) ?? 0)) {
             // `durable.checkpoint`, never the local `checkpoint`: that may be
@@ -529,6 +693,7 @@ export class ContextGraphAuthorityIndex {
         // if another token wins the next CAS, that value is reloaded through
         // admission before it can influence this attempt.
         durable = commit.record;
+        horizonLease.commitDurableGeneration(repository.key, durable);
       }
     } finally {
       seedSession?.close();

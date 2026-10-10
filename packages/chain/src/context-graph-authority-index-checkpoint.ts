@@ -45,9 +45,10 @@ export interface ContextGraphAuthorityIndexCheckpoint {
 /**
  * Durable backing for the contract-wide authority index.
  *
- * The store owns a monotonic, non-repeating CAS token. Invalidating a payload
- * advances that token and leaves a tombstone, so a scanner holding an older
- * token can never overwrite a newly rebuilt checkpoint (the ABA case).
+ * The store owns a monotonic, non-repeating CAS token per scope. Invalidating
+ * a payload advances that scope's token and leaves a tombstone, so a scanner
+ * holding an older token can never overwrite a newly rebuilt checkpoint (the
+ * ABA case). Tokens from different scopes are not comparable.
  * Authority-bearing contents remain opaque outside the chain package.
  */
 export interface ContextGraphAuthorityIndexStore {

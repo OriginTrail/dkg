@@ -396,6 +396,142 @@ describe('Context Graph authority index over the one log', () => {
     expect(calls.getLogs).toBe(0);
   });
 
+  it('does not single-flight two log source generations through one provider', async () => {
+    const storeA = seededStore({
+      rows: [creationRow(20, 7n, NAME_HASH, 1)],
+    });
+    const storeB = seededStore({
+      rows: [creationRow(20, 7n, ABSENT_NAME_HASH, 0)],
+    });
+    const originalA = logSource(storeA);
+    const originalB = logSource(storeB);
+    const enteredA = Promise.withResolvers<void>();
+    const releaseA = Promise.withResolvers<void>();
+    const sourceA: ChainEventLogAuthoritySource = {
+      ...originalA,
+      pageSource: {
+        ...originalA.pageSource,
+        async readPage(...args) {
+          enteredA.resolve();
+          await releaseA.promise;
+          return originalA.pageSource.readPage(...args);
+        },
+      },
+    };
+    const readPageB = vi.fn(originalB.pageSource.readPage.bind(originalB.pageSource));
+    const sourceB: ChainEventLogAuthoritySource = {
+      ...originalB,
+      pageSource: { ...originalB.pageSource, readPage: readPageB },
+    };
+    let current: ChainEventLogAuthoritySource | undefined = sourceA;
+    const { reader } = makeReader({
+      sourceProvider: () => current,
+    });
+    const readingA = reader.readContextGraphFinalizedCreation(7n);
+    await enteredA.promise;
+    current = sourceB;
+    const readingB = reader.readContextGraphFinalizedCreation(7n);
+
+    try {
+      await vi.waitFor(() => expect(readPageB).toHaveBeenCalled(), { timeout: 250 });
+      await expect(readingB).resolves.toEqual({
+        nameHash: ABSENT_NAME_HASH,
+        accessPolicy: 0,
+      });
+    } finally {
+      releaseA.resolve();
+      await Promise.allSettled([readingA, readingB]);
+    }
+    await expect(readingA).resolves.toBeUndefined();
+  });
+
+  it('does not single-flight successive revisions of one source at the same head', async () => {
+    const store = seededStore({
+      rows: [creationRow(20, 7n, NAME_HASH, 1)],
+    });
+    const original = logSource(store);
+    const enteredA = Promise.withResolvers<void>();
+    const releaseA = Promise.withResolvers<void>();
+    const readPage = vi.fn(async (...args: Parameters<typeof original.pageSource.readPage>) => {
+      if (readPage.mock.calls.length === 1) {
+        enteredA.resolve();
+        await releaseA.promise;
+      }
+      return original.pageSource.readPage(...args);
+    });
+    const source: ChainEventLogAuthoritySource = {
+      ...original,
+      pageSource: { ...original.pageSource, readPage },
+    };
+    const { reader, calls, attempts } = makeReader({ store, source });
+    const readingA = reader.readContextGraphFinalizedCreation(7n);
+    await enteredA.promise;
+
+    const before = (await store.load(SCOPE))!;
+    const { revision, ...cursor } = before.cursor;
+    await expect(store.commit(SCOPE, revision, {
+      cursor,
+      rows: [],
+      coverage: [],
+    })).resolves.toBe(revision + 1);
+    const after = (await store.load(SCOPE))!;
+    expect(after.cursor.head).toEqual(before.cursor.head);
+
+    const readingB = reader.readContextGraphFinalizedCreation(7n);
+    try {
+      await vi.waitFor(() => expect(readPage).toHaveBeenCalledTimes(2), { timeout: 250 });
+      await expect(readingB).resolves.toEqual({
+        nameHash: NAME_HASH,
+        accessPolicy: 1,
+      });
+    } finally {
+      releaseA.resolve();
+      await Promise.allSettled([readingA, readingB]);
+    }
+
+    await expect(readingA).resolves.toBeUndefined();
+    expect(calls.getLogs).toBe(0);
+    expect(attempts).toHaveLength(0);
+  });
+
+  it('rejects and does not cache a same-source revision moved while network metadata is pending',
+    async () => {
+      const store = seededStore({
+        rows: [creationRow(20, 7n, NAME_HASH, 1)],
+      });
+      const source = logSource(store);
+      const { reader, provider, calls, attempts } = makeReader({ store, source });
+      const networkEntered = Promise.withResolvers<void>();
+      const networkReleased = Promise.withResolvers<void>();
+      const getNetwork = provider.getNetwork.bind(provider);
+      vi.spyOn(provider, 'getNetwork').mockImplementationOnce(async () => {
+        networkEntered.resolve();
+        await networkReleased.promise;
+        return getNetwork();
+      });
+
+      const reading = reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH);
+      await networkEntered.promise;
+      const before = await store.load(SCOPE);
+      expect(before).toBeDefined();
+      store.seed(SCOPE, {
+        cursor: {
+          ...before!.cursor,
+          revision: before!.cursor.revision + 1,
+        },
+        coverage: before!.coverage,
+      }, [creationRow(20, 8n, NAME_HASH, 1)]);
+      networkReleased.resolve();
+
+      await expect(reading).resolves.toBe(8n);
+      const networkReadsAfterRefresh = calls.getNetwork;
+      expect(networkReadsAfterRefresh).toBe(2);
+      expect(attempts).toHaveLength(0);
+
+      await expect(reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).resolves.toBe(8n);
+      expect(calls.getNetwork).toBe(networkReadsAfterRefresh);
+    });
+
   it('returns a proof miss when the source rotates during the point-row lookup', async () => {
     const store = seededStore();
     const original = logSource(store);

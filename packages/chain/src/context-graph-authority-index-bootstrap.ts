@@ -11,8 +11,8 @@ import type { ContextGraphAuthorityIndexCheckpoint } from
 import { ContextGraphAuthorityIndexRetryableError } from
   './context-graph-authority-index-errors.js';
 import type {
-  ContextGraphAuthorityIndexRepositoryRecord,
-  ContextGraphAuthorityIndexScopedRepository,
+  ContextGraphAuthorityIndexAdmittedRepositoryRecord,
+  ContextGraphAuthorityIndexKeyedScopedRepository,
 } from './context-graph-authority-index-repository.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_INDEX_BOOTSTRAP_TIMEOUT_MS,
@@ -27,15 +27,17 @@ import {
 interface BootstrapSessionInput {
   readonly request: ContextGraphAuthorityIndexSnapshotRequest;
   readonly finalized: Readonly<{ number: number; hash: string }>;
-  readonly repository: ContextGraphAuthorityIndexScopedRepository;
+  readonly repository: ContextGraphAuthorityIndexKeyedScopedRepository;
   readonly lifecycleSignal: AbortSignal;
   readonly readBlockHash: (blockNumber: number, signal: AbortSignal) => Promise<string | null>;
-  readonly onRejectedCheckpoint: () => void;
+  readonly onRejectedCheckpoint: (repositoryKey: string, rejectedToken: number) => void;
 }
 
 export interface ContextGraphAuthorityIndexBootstrapSession {
-  needsSeed(durable: ContextGraphAuthorityIndexRepositoryRecord): boolean;
-  seed(durable: ContextGraphAuthorityIndexRepositoryRecord): Promise<ContextGraphAuthorityIndexRepositoryRecord>;
+  needsSeed(durable: ContextGraphAuthorityIndexAdmittedRepositoryRecord): boolean;
+  seed(
+    durable: ContextGraphAuthorityIndexAdmittedRepositoryRecord,
+  ): Promise<ContextGraphAuthorityIndexAdmittedRepositoryRecord>;
   close(): void;
 }
 
@@ -117,9 +119,9 @@ export class ContextGraphAuthorityIndexBootstrapCoordinator {
 
   async #importSeed(
     input: BootstrapSessionInput,
-    durable: ContextGraphAuthorityIndexRepositoryRecord,
+    durable: ContextGraphAuthorityIndexAdmittedRepositoryRecord,
     budgetSignal: AbortSignal,
-  ): Promise<ContextGraphAuthorityIndexRepositoryRecord> {
+  ): Promise<ContextGraphAuthorityIndexAdmittedRepositoryRecord> {
     const anchors = new Map<number, string | undefined>();
     const validate = async (value: unknown, attemptSignal = budgetSignal): Promise<ContextGraphAuthorityIndexCheckpoint> => {
       const validationSignal = attemptSignal === budgetSignal ? budgetSignal
@@ -169,7 +171,9 @@ export class ContextGraphAuthorityIndexBootstrapCoordinator {
           finalized: input.finalized,
           readBlockHash: input.readBlockHash,
           lifecycleSignal: budgetSignal,
-          onRejectedCheckpoint: input.onRejectedCheckpoint,
+          onRejectedCheckpoint: (rejectedToken) => {
+            input.onRejectedCheckpoint(input.repository.key, rejectedToken);
+          },
         }));
   }
 }

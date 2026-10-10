@@ -300,7 +300,7 @@ describe('durable contract-wide Context Graph authority scanner', () => {
     expect(store.invalidations).toEqual([]);
   });
 
-  it('reloads a newer winner when conditional reorg invalidation loses its race', async () => {
+  it('tombstones a checkpoint winner when conditional reorg invalidation loses its race', async () => {
     const store = new MemoryAuthorityIndexStore();
     const readPage = async (from: number, to: number) => allEvents.filter((entry) => (
       entry.blockNumber >= from && entry.blockNumber <= to
@@ -323,14 +323,14 @@ describe('durable contract-wide Context Graph authority scanner', () => {
     };
 
     const state = await new ContextGraphAuthorityIndex(store).resolve({
-      ...makeInput(10n, {}, async () => [], 30),
+      ...makeInput(10n, {}, readPage, 30),
       readBlockHash: async (blockNumber: number) => (
         blockNumber === 25 ? blockHash(24) : blockHash(blockNumber)
       ),
     });
     expect(state).toMatchObject({ contextGraphId: '10', policyVersion: 1 });
-    expect(store.record?.token).toBe(rejectedToken + 1);
-    expect(store.invalidations).toEqual([]);
+    expect(store.record?.token).toBeGreaterThan(rejectedToken + 2);
+    expect(store.invalidations).toEqual([rejectedToken + 2]);
   });
 
   it('bounds repeated invalidation losses without recursive recovery', async () => {
@@ -358,7 +358,7 @@ describe('durable contract-wide Context Graph authority scanner', () => {
     expect(pageReads).toBe(0);
   });
 
-  it('accepts a valid checkpoint installed by the third invalidation winner', async () => {
+  it('does not trust even a valid-looking third checkpoint invalidation winner', async () => {
     const store = new MemoryAuthorityIndexStore();
     const winner = reduceContextGraphAuthorityIndexPage({
       deploymentBlockNumber: 10,
@@ -395,7 +395,9 @@ describe('durable contract-wide Context Graph authority scanner', () => {
         blockReads += 1;
         return blockHash(25);
       },
-    })).resolves.toMatchObject({ contextGraphId: '9' });
+    })).rejects.toThrow(
+      'Context Graph authority index changed repeatedly during checkpoint recovery',
+    );
     expect(invalidationAttempts).toBe(3);
     expect(store.record).toEqual({ token: 4, value: winner });
     expect(blockReads).toBe(0);
@@ -490,7 +492,7 @@ describe('durable contract-wide Context Graph authority scanner', () => {
     await expect(providerB).resolves.toMatchObject({ nameHash: NAME_10 });
 
     releaseFinalCommit.resolve();
-    await expect(providerA).resolves.toMatchObject({ nameHash: NAME_9 });
+    await expect(providerA).rejects.toMatchObject({ reason: 'refresh-horizon-ahead' });
     expect(store.invalidations).toEqual([5]);
     expect((store.record!.value as { states: Array<{ nameHash: string }> }).states[0])
       .toMatchObject({ nameHash: NAME_10 });
@@ -613,6 +615,149 @@ describe('durable contract-wide Context Graph authority scanner', () => {
       message: 'Context Graph authority index lifecycle cleared',
     });
     expect(store.commits).toEqual([]);
+  });
+
+  it('drains a pre-clear invalidation before the replacement lifecycle reads its token', async () => {
+    const scope = makeInput(9n, {}, async () => []).scope;
+    const oldHash = blockHash;
+    const forkHash = (block: number): string => (
+      `0x${(1_000_000 + block).toString(16).padStart(64, '0')}`
+    );
+    const checkpoint = reduceContextGraphAuthorityIndexPage({
+      deploymentBlockNumber: 10,
+      throughBlockNumber: 25,
+      throughBlockHash: oldHash(25),
+      events: [],
+    }).checkpoint;
+    let record: { token: number; value: unknown | null } | undefined = {
+      token: 1,
+      value: checkpoint,
+    };
+    let loads = 0;
+    const invalidationEntered = Promise.withResolvers<void>();
+    const releaseInvalidation = Promise.withResolvers<void>();
+    const store: ContextGraphAuthorityIndexStore = {
+      load: async () => {
+        loads += 1;
+        return record;
+      },
+      compareAndSwap: async (_key, expectedToken, next) => {
+        if (record?.token !== expectedToken) return undefined;
+        record = { token: record.token + 1, value: next };
+        return record.token;
+      },
+      invalidate: async (_key, expectedToken) => {
+        invalidationEntered.resolve();
+        await releaseInvalidation.promise;
+        if (record?.token !== expectedToken) return undefined;
+        record = { token: record.token + 1, value: null };
+        return record.token;
+      },
+    };
+    const index = new ContextGraphAuthorityIndex(store);
+    const readScope = {};
+    const rejecting = index.refresh({
+      scope,
+      readScope,
+      deploymentBlockNumber: 10,
+      finalized: { number: 29, hash: forkHash(29) },
+      pageSize: 100,
+      durableReorgHoldbackBlocks: 4,
+      readBlockHash: async (block) => forkHash(block),
+      readPage: async () => [],
+    });
+    await invalidationEntered.promise;
+
+    index.clear();
+    let replacementSettled = false;
+    let replacementPages = 0;
+    const replacement = index.refresh({
+      scope,
+      readScope,
+      deploymentBlockNumber: 10,
+      finalized: { number: 29, hash: oldHash(29) },
+      pageSize: 100,
+      durableReorgHoldbackBlocks: 4,
+      readBlockHash: async (block) => oldHash(block),
+      readPage: async () => {
+        replacementPages += 1;
+        return [];
+      },
+    });
+    void replacement.then(
+      () => { replacementSettled = true; },
+      () => { replacementSettled = true; },
+    );
+
+    for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+
+    // The replacement generation cannot cache token 1 while its invalidation
+    // is physically pending, even though clear() already detached the flight.
+    expect(loads).toBe(1);
+    expect(replacementPages).toBe(0);
+    expect(replacementSettled).toBe(false);
+
+    releaseInvalidation.resolve();
+    await expect(rejecting).rejects.toMatchObject({
+      name: 'AbortError',
+      message: 'Context Graph authority index lifecycle cleared',
+    });
+    await expect(replacement).resolves.toBeUndefined();
+    await index.whenIdle();
+
+    expect(loads).toBe(2);
+    expect(replacementPages).toBe(2);
+    expect(record).toMatchObject({
+      token: 3,
+      value: { cursor: { throughBlockNumber: 25, throughBlockHash: oldHash(25) } },
+    });
+    await expect(index.durableCursorBlockNumber(scope, 10)).resolves.toBe(25);
+    expect(index.exportSnapshot({
+      scope,
+      deploymentBlockNumber: 10,
+      minThroughBlockNumber: 25,
+      maxThroughBlockNumber: 25,
+    })?.checkpoint.cursor.throughBlockHash).toBe(oldHash(25));
+    expect(() => index.assertProjectionAtRefreshHorizon(scope, {
+      number: 29,
+      hash: oldHash(29),
+    })).not.toThrow();
+    expect(() => index.assertProjectionAtRefreshHorizon(scope, {
+      number: 29,
+      hash: forkHash(29),
+    })).toThrow('behind durable refresh horizon');
+  });
+
+  it('does not return a durable cursor loaded across a lifecycle clear', async () => {
+    const scope = makeInput(9n, {}, async () => []).scope;
+    const checkpoint = reduceContextGraphAuthorityIndexPage({
+      deploymentBlockNumber: 10,
+      throughBlockNumber: 25,
+      throughBlockHash: blockHash(25),
+      events: [],
+    }).checkpoint;
+    const loadEntered = Promise.withResolvers<void>();
+    const releaseLoad = Promise.withResolvers<void>();
+    const store: ContextGraphAuthorityIndexStore = {
+      load: async () => {
+        loadEntered.resolve();
+        await releaseLoad.promise;
+        return { token: 1, value: checkpoint };
+      },
+      compareAndSwap: async () => undefined,
+      invalidate: async () => undefined,
+    };
+    const index = new ContextGraphAuthorityIndex(store);
+    const pending = index.durableCursorBlockNumber(scope, 10);
+    await loadEntered.promise;
+
+    index.clear();
+    releaseLoad.resolve();
+
+    await expect(pending).rejects.toMatchObject({
+      name: 'AbortError',
+      message: 'Context Graph authority index lifecycle cleared',
+    });
   });
 
   describe('trusted core bootstrap local-history fallback', () => {

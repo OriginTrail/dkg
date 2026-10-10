@@ -120,14 +120,6 @@ function rfc64PromotionInventoryRowIdentityV1(row: SwmAuthorInventoryRowV1): str
   ].join('\n');
 }
 
-
-class Rfc64SwmInventoryAuthorityTransitionV1 extends Error {
-  constructor() {
-    super('RFC-64 SWM inventory authority changed before commit');
-  }
-}
-
-
 // Compatibility exports for consumers of the historically public dist/*
 // subpath. The implementation moved to the projection owner, but the named
 // types remain available from their original module path.
@@ -1121,7 +1113,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
       const signer = this.createRfc64CatalogAuthorSignerV1(prepared.scope.authorAddress);
       const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1(prepared.scope);
-      const maintained = await rfc64SwmInventoryShadowRuntimeV1(this).runScopeExclusive(
+      const result = await rfc64SwmInventoryShadowRuntimeV1(this).runScopeExclusive(
         `${inventoryScopeDigest}\n${prepared.scope.authorAddress}`,
         async () => {
           // Authority may advance while workspace/seal evidence is loading.
@@ -1134,7 +1126,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
           if (
             currentLane === null
             || currentLane.kind !== prepared.laneKind
-          ) throw new Rfc64SwmInventoryAuthorityTransitionV1();
+          ) return shadowResult('dormant', 'upsert', 0, null, null, 'authority-transition');
           const currentScope = Object.freeze({
             ...currentLane.scopeBase,
             authorAddress: prepared.scope.authorAddress,
@@ -1142,8 +1134,8 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
           if (
             computeSwmAuthorInventoryScopeDigestV1(currentScope)
             !== inventoryScopeDigest
-          ) throw new Rfc64SwmInventoryAuthorityTransitionV1();
-          return maintainRfc64SwmAuthorInventoryV1(
+          ) return shadowResult('dormant', 'upsert', 0, null, null, 'authority-transition');
+          const maintained = await maintainRfc64SwmAuthorInventoryV1(
             persistence.swmAuthorInventory,
             {
               scope: currentScope,
@@ -1155,23 +1147,21 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
               }),
             },
           );
+          return shadowResult(
+            maintained.status,
+            'upsert',
+            maintained.attempts,
+            maintained.snapshot.head.objectDigest,
+            null,
+          );
         },
       );
       return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
-        shadowResult(
-          maintained.status,
-          'upsert',
-          maintained.attempts,
-          maintained.snapshot.head.objectDigest,
-          null,
-        ),
+        result,
         params.contextGraphId,
         kaUal,
       );
     } catch (cause) {
-      if (cause instanceof Rfc64SwmInventoryAuthorityTransitionV1) {
-        return shadowResult('dormant', 'upsert', 0, null, null, 'authority-transition');
-      }
       return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
         this.failRfc64SwmAuthorInventoryShadowV1('upsert', cause),
         params.contextGraphId,

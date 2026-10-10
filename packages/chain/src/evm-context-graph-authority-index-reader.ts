@@ -26,6 +26,7 @@ import {
   resolveProjectionFetchedAtMs,
   contextGraphAuthorityIndexScope,
   type ContextGraphAuthorityIndexCompletedProjection,
+  type ContextGraphAuthorityIndexIncompleteProjectionAdmission,
   type ContextGraphAuthorityIndexProjection,
   type ContextGraphAuthorityIndexProjectionFault,
   type ContextGraphAuthorityIndexView,
@@ -57,6 +58,16 @@ import { readEvmContextGraphAuthorityIndexRpcV1, readOwnedAuthorityIndexRpcV1, r
 export { readEvmContextGraphAuthorityIndexRpcV1 } from './evm-context-graph-authority-index-rpc.js';
 import { contextGraphAuthorityAnchorUnavailableV1 } from './context-graph-authority-index-errors.js';
 export { contextGraphAuthorityAnchorUnavailableV1 } from './context-graph-authority-index-errors.js';
+
+function isContextGraphAuthorityIndexProviderRetryableV1(
+  error: unknown,
+  signal?: AbortSignal,
+): boolean {
+  return signal?.aborted !== true && (
+    isContextGraphAuthorityIndexRetryableError(error)
+    || isRpcEndpointFailoverEligible(error)
+  );
+}
 
 /** A local log revision moved; this is not evidence of an RPC outage. */
 class ContextGraphAuthorityIndexLogAnchorMovedError extends
@@ -115,6 +126,8 @@ type EvmContextGraphAuthorityIndexReadInputV1 = Readonly<{
   finalityConfirmations: number;
   stabilizationOperation: string;
   signal?: AbortSignal;
+  /** The projection reads additional log rows after `index.view()` returns. */
+  postProjectLogStabilization?: boolean;
   /**
    * The one log, when it has PROVEN it can answer this read.
    *
@@ -173,7 +186,7 @@ export function contextGraphAuthorityIndexDurableHoldbackV1(
  */
 function authorityIndexScanBoundsV1(
   input: EvmContextGraphAuthorityIndexReadInputV1,
-): Omit<ContextGraphAuthorityIndexScanInput, 'readBlockHash' | 'readPage'> {
+): Omit<ContextGraphAuthorityIndexScanInput, 'readBlockHash' | 'readPage' | 'stabilize'> {
   return {
     scope: contextGraphAuthorityIndexScope(input.deploymentId, input.contractAddress),
     readScope: input.provider,
@@ -193,10 +206,19 @@ function authorityIndexScanBoundsV1(
 function authorityIndexScanInputV1(
   input: EvmContextGraphAuthorityIndexReadInputV1,
 ): ContextGraphAuthorityIndexScanInput {
-  const logged = input.logSource?.source.pageSource;
-  if (logged !== undefined) {
+  const logSource = input.logSource;
+  const logged = logSource?.source.pageSource;
+  if (logSource !== undefined && logged !== undefined) {
     return {
       ...authorityIndexScanBoundsV1(input),
+      // A late-bound log generation owns both these rows and their CAS fence.
+      // Two generations can share the same fallback provider, but may never
+      // join one physical single-flight scan across that ownership boundary.
+      readScope: logSource.source,
+      // The source object is stable for its whole runtime generation, while an
+      // ordinary tick commit advances this revision even at the same head.
+      // Bind the physical flight to the exact rows its stabilizer fences.
+      readGeneration: `${logSource.anchor.lineage}:${logSource.anchor.revision}`,
       readBlockHash: (blockNumber, lifecycleSignal) => (
         logged.readBlockHash(blockNumber, lifecycleSignal)
       ),
@@ -206,6 +228,15 @@ function authorityIndexScanInputV1(
       readPage: (fromBlock, toBlock, lifecycleSignal) => (
         logged.readPage(fromBlock, toBlock, lifecycleSignal)
       ),
+      stabilize: async (lifecycleSignal) => {
+        lifecycleSignal.throwIfAborted();
+        if (!await logSource.source.anchorHolds(logSource.anchor)) {
+          throw new ContextGraphAuthorityIndexLogAnchorMovedError(
+            `chain event log moved under ${input.stabilizationOperation}`,
+          );
+        }
+        lifecycleSignal.throwIfAborted();
+      },
     };
   }
   const authorityTopics = contextGraphAuthorityEventTopics(input.contract.interface);
@@ -243,6 +274,22 @@ function authorityIndexScanInputV1(
         log,
       ));
     },
+    stabilize: async (lifecycleSignal) => {
+      const stable = await withRpcUsageConsumer(
+        'authorityIndex.stabilize',
+        () => readOwnedAuthorityIndexRpcV1(
+          lifecycleSignal,
+          `${input.stabilizationOperation} stabilization block`,
+          () => input.provider.getBlock(input.finalized.number),
+        ),
+      );
+      lifecycleSignal.throwIfAborted();
+      if (stable?.hash?.toLowerCase() !== input.finalized.hash.toLowerCase()) {
+        throw new ContextGraphAuthorityIndexRetryableError(
+          `finalized Context Graph authority anchor changed during ${input.stabilizationOperation}`,
+        );
+      }
+    },
   };
 }
 
@@ -250,44 +297,28 @@ async function readEvmContextGraphAuthorityIndexProjectionV1<T>(
   input: EvmContextGraphAuthorityIndexReadInputV1,
   project: (scan: ContextGraphAuthorityIndexScanInput) => Promise<T>,
 ): Promise<EvmContextGraphAuthorityIndexReadV1<T>> {
-  const value = await project(authorityIndexScanInputV1(input));
+  const logSource = input.logSource;
+  const scan = authorityIndexScanInputV1(input);
+  const value = await project(scan);
   input.signal?.throwIfAborted();
   return Object.freeze({
     value,
     stabilize: async () => {
       input.signal?.throwIfAborted();
-      const logSource = input.logSource;
-      if (logSource !== undefined) {
-        // The SAME fence, evaluated against the side that owns the rows. See
-        // `chainIndexAuthorityAnchorHolds` for why the log's CAS token is a
-        // stronger statement than the anchor hash re-read below, and why it
-        // costs no RPC. Retryable for the same reason: a tick that committed
-        // mid-fold is a re-read, not a broken node.
-        if (!await logSource.source.anchorHolds(logSource.anchor)) {
-          throw new ContextGraphAuthorityIndexLogAnchorMovedError(
-            `chain event log moved under ${input.stabilizationOperation}`,
-          );
-        }
-        return;
-      }
-      const stable = await withRpcUsageConsumer(
-        'authorityIndex.stabilize',
-        () => readEvmContextGraphAuthorityIndexRpcV1(
-          `${input.stabilizationOperation} stabilization block`,
-          () => input.provider.getBlock(input.finalized.number),
-          input.signal,
-        ),
-      );
-      if (stable?.hash?.toLowerCase() !== input.finalized.hash.toLowerCase()) {
-        // Anchored at the operator's depth the anchor can be the head, so a
-        // routine single-block tip reorg reaches here during the 1-3s a page
-        // scan plus `readCurrentState` takes. That is a re-read, not a broken
-        // node: retryable, so the caller re-resolves against the new tip
-        // instead of failing the authority read that gates catalog admission.
-        throw new ContextGraphAuthorityIndexRetryableError(
-          `finalized Context Graph authority anchor changed during ${input.stabilizationOperation}`,
+      // The lease-owned fence above settles the physical index scan. A log
+      // caller can consume additional rows after `index.view()` returns (the
+      // finalized-creation path does), so retain its original end-to-end CAS
+      // fence as well. Provider projections finish their asynchronous metadata
+      // work before the view so the physical fence remains their final check.
+      if (input.postProjectLogStabilization === true
+        && logSource !== undefined
+        && !await logSource.source.anchorHolds(logSource.anchor)) {
+        throw new ContextGraphAuthorityIndexLogAnchorMovedError(
+          `chain event log moved under ${input.stabilizationOperation}`,
         );
       }
+      input.signal?.throwIfAborted();
+      input.index.assertProjectionAtRefreshHorizon(scan.scope, scan.finalized);
     },
   });
 }
@@ -582,8 +613,12 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
               if (logAttempt === 0) continue;
               break;
             }
-            if (!isContextGraphAuthorityIndexRetryableError(error)
-              || error.reason !== 'cursor-ahead') throw error;
+            if (!isContextGraphAuthorityIndexRetryableError(error)) throw error;
+            // Retrying the same local rows cannot lift a fold above the
+            // durable horizon. Fall through to this provider's live view; if
+            // the endpoint also trails, the outer pool can try a sibling.
+            if (error.reason === 'refresh-horizon-ahead') break;
+            if (error.reason !== 'cursor-ahead') throw error;
             if (logAttempt === 0) {
               await sleep(300, undefined, { signal: projectionSignal });
               continue;
@@ -648,10 +683,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       {
         signal: options.signal,
         isRetryable: (error: unknown) => (
-          !options.signal?.aborted && (
-            isContextGraphAuthorityIndexRetryableError(error)
-            || isRpcEndpointFailoverEligible(error)
-          )
+          isContextGraphAuthorityIndexProviderRetryableV1(error, options.signal)
         ),
         policy: 'durablePagedLogScan',
       },
@@ -751,7 +783,9 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       complete: boolean;
       value: T;
     }>,
-    validateIncomplete?: (projection: ContextGraphAuthorityIndexProjection) => Promise<boolean>,
+    validateIncomplete?: (
+      projection: ContextGraphAuthorityIndexProjection,
+    ) => Promise<ContextGraphAuthorityIndexIncompleteProjectionAdmission>,
   ): Promise<T> => {
     assertOpen();
     options.signal?.throwIfAborted();
@@ -806,12 +840,16 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         operationLabel,
         options,
         async (scan, { provider, contractAddress, finalized, head, origin }) => {
-          const view = await dependencies.index.view(scan);
           const chainId = (await readEvmContextGraphAuthorityIndexRpcV1(
             `${operationLabel} network`,
             () => provider.getNetwork(),
             options.signal,
           )).chainId.toString(10);
+          // Keep the lifecycle-owned physical stabilization inside `view()` as
+          // the final source operation. A reorg or log revision while the
+          // asynchronous network metadata read is pending is therefore fenced
+          // before this projection can be returned or cached.
+          const view = await dependencies.index.view(scan);
           return Object.freeze({
             scope: scan.scope,
             chainId,
@@ -891,9 +929,11 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
   const validateFinalizedNameAbsence = (
     operationLabel: string,
     options: ContextGraphAuthorityReadOptions,
-  ) => async (cached: ContextGraphAuthorityIndexProjection): Promise<boolean> => {
+  ) => async (
+    cached: ContextGraphAuthorityIndexProjection,
+  ): Promise<ContextGraphAuthorityIndexIncompleteProjectionAdmission> => {
     const contractAddress = await dependencies.requireContextGraphStorage().getAddress();
-    return contextGraphFinalizedNameAbsenceAnchorHoldsV1(cached, options, {
+    const anchorHolds = await contextGraphFinalizedNameAbsenceAnchorHoldsV1(cached, options, {
       currentSource: dependencies.chainEventLogAuthority?.(),
       contractAddress,
       readCurrentFinalized: async () => {
@@ -919,11 +959,22 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
             ),
             unavailable: contextGraphAuthorityAnchorUnavailableV1,
           }),
-          { signal: options.signal },
+          {
+            signal: options.signal,
+            isRetryable: (error: unknown) => (
+              isContextGraphAuthorityIndexProviderRetryableV1(error, options.signal)
+            ),
+          },
         );
         return current.finalized;
       },
     });
+    // Either proof (the bounded local generation fence, or the provider's
+    // current finalized block and hash) is the same proof the tail-anchor
+    // validator would accept, so admission also carries the validated anchor.
+    return anchorHolds
+      ? Object.freeze({ admitted: true as const, anchorValidated: true })
+      : Object.freeze({ admitted: false as const });
   };
 
   const resolveFinalizedIdsByNameHashes = async (
@@ -1107,6 +1158,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
                   finalized: anchor.finalized,
                   stabilizationOperation: 'getContextGraphFinalizedCreation',
                   signal: projectionSignal,
+                  postProjectLogStabilization: true,
                   logSource: { anchor, source },
                 },
                 async (scan) => {

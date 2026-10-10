@@ -86,6 +86,10 @@ import {
   type Rfc64CatalogReplayPeerDemandV1,
   type Rfc64CatalogReplayPeerFenceLeaseV1,
 } from './rfc64/catalog-replay-recovery-runtime-v1.js';
+import {
+  RFC64_AUTHORITY_ACCEPTED_CATALOG_RECOVERY_PLANS_V1,
+  type Rfc64AuthorityAcceptedCatalogRecoveryPolicyV1,
+} from './rfc64/catalog-authority-recovery-plan-v1.js';
 export { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from
   './rfc64/catalog-limits-v1.js';
 import { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from
@@ -531,23 +535,6 @@ const RFC64_SCHEDULED_RESPONSIBILITY_QUIET_MS_V1 = 25;
 const RFC64_SCHEDULED_RESPONSIBILITY_MAX_COALESCE_MS_V1 = 1_000;
 const RFC64_SCHEDULED_RESPONSIBILITY_RETRY_MS_V1 = 30_000;
 const RFC64_SCHEDULED_FINALIZED_ABSENCE_RETRY_DELAYS_MS_V1 = Object.freeze([
-  30_000,
-  60_000,
-  120_000,
-  240_000,
-]);
-const RFC64_AUTHORITY_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1 = Object.freeze([
-  250,
-  1_000,
-  4_000,
-]);
-/**
- * A join-approved replica can accept its policy before its providers have the
- * roster that names it. Only that replica keeps asking for this long.
- */
-const RFC64_JOIN_DERIVED_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1 = Object.freeze([
-  ...RFC64_AUTHORITY_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1,
-  15_000,
   30_000,
   60_000,
   120_000,
@@ -3456,13 +3443,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         this.queueSharedMemoryGossipSubscription(contextGraphId);
         this.scheduleRfc64AuthorityAcceptedPeerCatchupV1();
       }
+      const catalogRecoveryPolicy: Rfc64AuthorityAcceptedCatalogRecoveryPolicyV1 =
+        approvedPrivateReplicaAuthority !== null
+          ? 'private-join'
+          : acceptedAuthority.policy.accessPolicy === 1
+            ? 'private'
+            : 'public';
       this.scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
         contextGraphId,
         acceptedAuthority.policyDigest,
-        {
-          awaitsProviderAuthorization: approvedPrivateReplicaAuthority !== null,
-          retryIncompletePrivate: acceptedAuthority.policy.accessPolicy === 1,
-        },
+        catalogRecoveryPolicy,
       );
       return authority;
     } catch (error) {
@@ -3527,15 +3517,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
     policyDigest: Digest32V1,
-    options: Readonly<{
-      awaitsProviderAuthorization?: boolean;
-      retryIncompletePrivate?: boolean;
-    }> = {},
+    recoveryPolicy: Rfc64AuthorityAcceptedCatalogRecoveryPolicyV1,
   ): void {
-    const awaitsProviderAuthorization = options.awaitsProviderAuthorization === true;
-    const retryDelays = awaitsProviderAuthorization
-      ? RFC64_JOIN_DERIVED_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1
-      : RFC64_AUTHORITY_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1;
+    const { retryDelays, isComplete } =
+      RFC64_AUTHORITY_ACCEPTED_CATALOG_RECOVERY_PLANS_V1[recoveryPolicy];
     const workKey = `authority-catalog-recovery\0${contextGraphId}\0${policyDigest}`;
     this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(workKey, async (signal) => {
       for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
@@ -3546,30 +3531,18 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             contextGraphId,
             signal,
           );
-          // A private join may accept its owner-signed policy before both
-          // peers have the current member roster. A peer may answer replay
-          // while the subsequent native fetch is still denied. The replay
-          // runtime's settled parity, not an answered request alone, is the
-          // evidence that the promised catalog rows were applied, so that
-          // replica keeps this bounded demand alive until the parity is clean.
-          if (!awaitsProviderAuthorization && !options.retryIncompletePrivate) return;
-          const progress = this.rfc64CatalogReplayRecoveryRuntimeV1().status(
-            contextGraphId,
-            policyDigest,
-          );
-          const incomplete = progress?.failed === true || progress?.unverified === true;
-          // A private graph can finish receiving every row while its replay
-          // drain times out or an authorized peer is temporarily unavailable.
-          // Its first accepted-authority pass must not leave that unverified
-          // witness standing until another authority revision happens. Retry
-          // only this observed incomplete state, under the existing short
-          // budget. Ordinary public and already-clean graphs still do one
-          // pass; the longer join-derived budget remains join-only.
-          if (!awaitsProviderAuthorization) {
-            if (!options.retryIncompletePrivate || !incomplete) return;
-          } else if (replay.requested > 0 && !incomplete) {
-            return;
-          }
+          // Public recovery is complete after an answered replay. Private
+          // recovery also requires clean settled parity, while a join-derived
+          // private recovery additionally waits for at least one authorized
+          // provider. The selected closed policy keeps those completion rules
+          // coupled to their short or extended retry budget.
+          if (isComplete(
+            replay,
+            () => this.rfc64CatalogReplayRecoveryRuntimeV1().status(
+              contextGraphId,
+              policyDigest,
+            ),
+          )) return;
         } catch (error) {
           if (signal.aborted) throw signal.reason ?? error;
           const retryDelayMs = retryDelays[attempt];
