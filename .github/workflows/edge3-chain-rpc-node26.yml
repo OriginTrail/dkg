@@ -32,6 +32,7 @@ jobs:
         run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Build source dependencies for transport wiring test
         run: |
+          pnpm --filter @origintrail-official/dkg-http-utils build
           pnpm --filter @origintrail-official/dkg-rdf-utils build
           pnpm --filter @origintrail-official/dkg-core build
       - name: Verify Node 26 transport assertions executed
