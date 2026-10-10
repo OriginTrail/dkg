@@ -304,6 +304,10 @@ describe('a confirmed private placement the observer handed to the supervisor', 
       'Confirmed queued publish but RFC-64 finalized-private placement could not be requested; its durable '
       + 'marker stays for the next pass or start: the catalog policy is not accepted yet',
     );
+    // No waiter exists to release this call later, so its line is written as the observer returns.
+    expect(fixture.placementLines().map(fields)).toEqual([
+      expect.objectContaining({ observerCall: '1', outcome: 'no-attempt', lane: 'finalized-private' }),
+    ]);
 
     agent.startRfc64SwmCatalogProjectionSupervisorV1(ctx);
     await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();

@@ -895,6 +895,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         });
       }
     } catch (cause) {
+      placementWait.observer.released(); // A request that threw has no waiter to release it later.
       const failed = finalizedPrivateInventoryScope === null ? 'SWM inventory shadow removal escaped its failure boundary'
         : markerStored ? 'finalized-private placement could not be requested; its durable marker stays for the next pass or start'
           : 'finalized-private placement was not recorded, so nothing owes it';
