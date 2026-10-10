@@ -13,8 +13,26 @@ import {
 } from './context-graph-subscription-dormancy.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { isCanonicalAuthoritativeContextGraphId } from './context-graph-binding-state.js';
+import type { CoalescingRecurringTask } from './coalescing-recurring-task.js';
 
 const MAX_CONCURRENT_DEFERRED_ROW_LOADS = 4;
+/** How often recovery asks again while a row is unavailable. */
+export const DEFERRED_AUTHORITY_RECOVERY_RETRY_MS = 30_000;
+
+/**
+ * Have recovery ask its rows one retry interval from now, unless it is due
+ * sooner. Recovery stops when it finds no unavailable row, so whoever leaves a
+ * row unavailable after that has to start it again.
+ */
+export function wakeDeferredContextGraphSubscriptionAuthorityRecovery(
+  recovery: Pick<CoalescingRecurringTask, 'schedule' | 'whenIdle'> | undefined,
+): void {
+  if (recovery === undefined) return;
+  const arm = (): boolean => recovery.schedule(DEFERRED_AUTHORITY_RECOVERY_RETRY_MS);
+  // A pass that is running declines this. If it is ending, it may have counted
+  // its rows before this one and stop: ask again once it has retired.
+  if (!arm()) void recovery.whenIdle().then(arm, arm);
+}
 
 function hasCanonicalDurableBinding(
   row: ContextGraphSubscriptionRecord | null,

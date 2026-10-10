@@ -833,7 +833,9 @@ import {
 } from './context-graph-subscription-dormancy.js';
 import {
   activatePersistedContextGraphSubscription as activatePersistedContextGraphSubscriptionTransaction,
+  DEFERRED_AUTHORITY_RECOVERY_RETRY_MS,
   recoverDeferredContextGraphSubscriptionAuthorities,
+  wakeDeferredContextGraphSubscriptionAuthorityRecovery,
   type DeferredContextGraphSubscriptionAuthorityRecoveryCursor,
   type PersistedContextGraphSubscriptionActivationOptions,
 } from './context-graph-subscription-authority-recovery.js';
@@ -2246,7 +2248,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       new InMemoryProtocolOutboxStore();
     assertBoundedProtocolOutboxStore(outboxStore);
     await this.contextGraphSubscriptionAuthorityRecoveryRuntime?.close();
-    await this.contextGraphSubscriptionRehydrationPromotionRuntime?.close();
+    await this.retireContextGraphSubscriptionPromotionRuntime();
     this.rfc64BackgroundWorkDispatcherV1.reopen();
     this.contextGraphMembershipPersistence.reopen();
     // stop() drained and closed subscription writes; a restarted agent admits
@@ -4143,7 +4145,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // state or across lifecycle generations.
     const authorityRecoveryColdCursor: DeferredContextGraphSubscriptionAuthorityRecoveryCursor = {};
     const authorityRecovery = new CoalescingRecurringTask({
-        retryIntervalMs: 30_000,
+        retryIntervalMs: DEFERRED_AUTHORITY_RECOVERY_RETRY_MS,
         requestWhileRunning: 'drop',
         runPass: async (signal) => {
           await withOwnedRpcRequestContext({
@@ -10577,7 +10579,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (authority.outcome !== 'allowed') {
         this.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
         const { outcome, source, reason } = authority;
-        this.contextGraphSubscriptionDormancyById.set(contextGraphId, pass.leftDormant(contextGraphId, { outcome, source, reason }));
+        const dormancy = pass.leftDormant(contextGraphId, { outcome, source, reason });
+        this.contextGraphSubscriptionDormancyById.set(contextGraphId, dormancy);
+        if (dormancy === 'authorityUnavailable') wakeDeferredContextGraphSubscriptionAuthorityRecovery(this.contextGraphSubscriptionAuthorityRecoveryRuntime);
         touchStatus();
         continue;
       }

@@ -1406,8 +1406,8 @@ export class DKGAgentBase {
   protected readonly contextGraphSubscriptionRehydrationSlotIds = new Set<string>();
   /** Non-hosted rows waiting behind the rolling rehydration cap. */
   protected readonly contextGraphSubscriptionRehydrationPendingIds = new Set<string>();
-  /** Which waiting row rolling activation checks next, and how soon. */
-  protected readonly contextGraphSubscriptionRollingChecks = new RollingSubscriptionChecks();
+  /** Which waiting row rolling activation checks next, and how soon; made anew when a start retires the runtime before. */
+  protected contextGraphSubscriptionRollingChecks = new RollingSubscriptionChecks();
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistAppliedRevisions = new Map<string, number>();
@@ -1427,6 +1427,17 @@ export class DKGAgentBase {
   protected requestContextGraphSubscriptionPromotion(contextGraphId: string): void {
     this.contextGraphSubscriptionRollingChecks.prefer(contextGraphId);
     this.contextGraphSubscriptionRehydrationPromotionRuntime?.request();
+  }
+
+  /**
+   * Close the runtime of rolling activation that a run before this start left.
+   * The order, the pace and the report totals of its checks end with it: an
+   * agent that is started again inherits none of them, while a row asked for
+   * during this start is remembered for the runtime that follows.
+   */
+  protected async retireContextGraphSubscriptionPromotionRuntime(): Promise<void> {
+    this.contextGraphSubscriptionRollingChecks = new RollingSubscriptionChecks();
+    await this.contextGraphSubscriptionRehydrationPromotionRuntime?.close();
   }
 
   protected listContextGraphsCacheNow(): number {
