@@ -1,3 +1,4 @@
+import { DKGQueryEngine } from "../../query/src/dkg-query-engine.js";
 import { describe, it, expect } from "vitest";
 import { ethers } from "ethers";
 import { OxigraphStore } from "@origintrail-official/dkg-storage";
@@ -167,4 +168,28 @@ describe("job-scoped public snapshot evidence", () => {
     } finally { await store.close(); }
   });
 
+});
+
+it("guards parent queries that resolve imported child VM partitions", async () => {
+  const store = new OxigraphStore();
+  try {
+    const child = `${graph}/v1`;
+    const a = asset(); a.contextGraphId = child;
+    a.metaGraph = `did:dkg:context-graph:${child}/_meta`;
+    a.assertionGraph = `did:dkg:context-graph:${child}/_verifiable_memory/${address}/1`;
+    a.dataQuads = a.dataQuads.map(q => ({...q,graph:a.assertionGraph}));
+    a.metadataQuads = a.metadataQuads.map(q => ({...q,graph:a.metaGraph}));
+    const childSnapshot = sealPublicGraphSnapshot({...snapshot,contextGraphId:child,nameHash:ethers.id(child)});
+    await markCoreTrustedGraph(store,child);
+    const imported = new PublicSnapshotEvidence({snapshot:childSnapshot,mode:"core-cache",sourceCore:"core"},()=>true).authenticate(a);
+    expect(await materializeVerifiedGraphScopedAsset({store,asset:imported.asset})).toBe("applied");
+    const engine = new DKGQueryEngine(store);
+    const read = (mode?: "core-cache" | "rpc-only") => withPublicSnapshotQueryTrust(store,graph,mode,()=>engine.query(
+      'SELECT ?value WHERE { <urn:entity> <urn:value> ?value }',
+      {contextGraphId:graph,view:"verifiable-memory",subGraphName:"v1"}));
+    for (const mode of [undefined,"rpc-only"] as const) await expect(read(mode)).rejects.toMatchObject({code:"CORE_CACHE_QUERY_TRUST_REQUIRED"});
+    const result = await read("core-cache");
+    expect(result.bindings).toEqual([{value:'"safe"'}]);
+    await assertPublicSnapshotQueryTrust(store,`${graph}-unrelated`);
+  } finally {await store.close();}
 });

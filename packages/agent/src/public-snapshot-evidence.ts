@@ -4,13 +4,16 @@ import type { PublicGraphSnapshot } from "@origintrail-official/dkg-chain";
 import {
   parseDeterministicKnowledgeAssetUal,
   contextGraphMetaUri,
-  sparqlIri,
+  sparqlString,
 } from "@origintrail-official/dkg-core";
 import type { TripleStore } from "@origintrail-official/dkg-storage";
 import type {
   VerifiedGraphScopedAsset,
   AuthenticatedGraphScopedAsset,
 } from "./sync/requester/graph-scoped-materialization.js";
+
+import { packKnowledgeAssetIdFromIdentity } from "./ka-identity.js";
+import { normalizeGraphScopedHex32 } from "./sync/graph-scoped-root.js";
 
 export type PublicSnapshotMode = "core-cache" | "rpc-only";
 export type PublicSnapshotObservation =
@@ -47,11 +50,13 @@ export async function assertPublicSnapshotQueryTrust(
   }
   if (accepted !== undefined && accepted !== "rpc-only")
     throw new Error("Unknown chain evidence mode");
-  const subject = contextGraphId
-    ? sparqlIri(contextGraphMetaUri(contextGraphId))
-    : "?graph";
+  // A parent/subGraphName query can resolve a descendant graph's VM partitions.
+  // Conservatively guard the whole canonical scope, including descendants.
+  const scope = contextGraphId
+    ? `FILTER(STRSTARTS(STR(?graph), ${sparqlString(contextGraphMetaUri(contextGraphId).replace(/_meta$/, ""))}))`
+    : "";
   const result = await store.query(
-    `SELECT ?mode WHERE { GRAPH <${SNAPSHOT_TRUST_GRAPH}> { ${subject} <${DKG}chainEvidenceMode> ?mode } } LIMIT 1`,
+    `SELECT ?mode WHERE { GRAPH <${SNAPSHOT_TRUST_GRAPH}> { ?graph <${DKG}chainEvidenceMode> ?mode } ${scope} } LIMIT 1`,
     queryOptions,
   );
   if (result.type !== "bindings")
@@ -80,21 +85,18 @@ export class PublicSnapshotEvidence {
     if (!this.isCurrent()) throw new Error("Snapshot job is no longer current");
     const s = this.snapshot;
     const identity = parseDeterministicKnowledgeAssetUal(asset.ual);
-    const id = (
-      (BigInt(identity.agentAddress) << 96n) |
-      BigInt(identity.kaNumber)
-    ).toString();
+    const id = packKnowledgeAssetIdFromIdentity(identity).toString();
     const expected = this.assets.get(id);
     const roots = asset.metadataQuads.filter(
       (q) => q.predicate === `${DKG}merkleRoot`,
     );
     // Content digest verification already ran in the existing exact-sync worker.
-    const root =
-      roots.length === 1
-        ? /^"(?:0x)?([0-9a-fA-F]{64})"(?:\^\^<[^>]+>)?$/.exec(
-            roots[0]!.object,
-          )?.[1]
-        : undefined;
+    const root = roots.length === 1
+      ? normalizeGraphScopedHex32(roots[0]!.object, "merkleRoot")
+      : undefined;
+    const blockNumber = Number(s.blockNumber);
+    if (!Number.isSafeInteger(blockNumber) || blockNumber < 0)
+      throw new Error("Snapshot block exceeds materialization ordering range");
     if (
       asset.contextGraphId !== s.contextGraphId ||
       identity.chainId !== s.chainId ||
@@ -133,7 +135,7 @@ export class PublicSnapshotEvidence {
           ...overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1(metadata, {
             ual: asset.ual, metaGraph: asset.metaGraph, receivedAt: new Date(),
           }, { status: "confirmed", confirmation: { kind: "finalized-materialization" },
-            materializedVersion: { blockNumber: 0, txIndex: 0 } }),
+            materializedVersion: { blockNumber, txIndex: 0 } }),
           ...Object.entries(fields).map(([key, value]) => ({
             subject: asset.ual,
             predicate: `${DKG}${key}`,

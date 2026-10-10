@@ -1,3 +1,7 @@
+import { sealPublicGraphSnapshot } from "@origintrail-official/dkg-chain";
+import { ethers } from "ethers";
+import { PublicSnapshotEvidence } from "../src/public-snapshot-evidence.js";
+import { materializeVerifiedGraphScopedAsset } from "../src/sync/requester/graph-scoped-materialization.js";
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -293,6 +297,31 @@ describe('graph-scoped finalization handler', () => {
       },
     };
   }
+
+  it.each([0,200])('preserves a snapshot-imported v2 against delayed v1 finalization (stamp %s)', async block => {
+    const {message,vmGraph} = await stageGraph();
+    const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
+    const dataQuads = [{subject:'urn:newer-snapshot',predicate:'urn:value',object:'"v2"',graph:vmGraph}];
+    const root = computeFlatKCRootV10(dataQuads.map(q=>({...q,graph:''})), []);
+    const metadataQuads = generateGraphKnowledgeAssetMetadata({contextGraphId:CG,ual:UAL,
+      merkleRoot:root,publisherPeerId:'core',accessPolicy:'public',allowedPeers:[],timestamp:new Date(),
+      assertionVersion:2,authorAddress:AUTHOR,publicTripleCount:1,privateTripleCount:0,assertionGraph:vmGraph},
+      {status:'confirmed',confirmation:{kind:'finalized-materialization',provenance:{batchId:PACKED_KA_ID,materializedVersion:{blockNumber:block,txIndex:0}}}});
+    const snapshot = sealPublicGraphSnapshot({version:1,chainId:'otp:20430',deploymentId:'test',contextGraphId:CG,
+      onChainId:'42',nameHash:ethers.id(CG),contextGraphStorage:AUTHOR,assetStorage:AUTHOR,blockNumber:String(block),
+      blockHash:RECOVERY_BLOCK_HASH,finalityConfirmations:1,observedAt:Date.now(),expiresAt:Date.now()+10000,
+      accessPolicy:0,assets:[{id:PACKED_KA_ID.toString(),root:ethers.hexlify(root),version:'2'}]});
+    const imported = new PublicSnapshotEvidence({snapshot,mode:'core-cache',sourceCore:'core'},()=>true).authenticate({
+      contextGraphId:CG,ual:UAL,assertionVersion:2n,assertionGraph:vmGraph,metaGraph,dataQuads,metadataQuads});
+    expect(await materializeVerifiedGraphScopedAsset({store,asset:imported.asset})).toBe('applied');
+    const query = `SELECT ?s ?p ?o WHERE { GRAPH <${vmGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o`;
+    const metaQuery = `SELECT ?p ?o WHERE { GRAPH <${metaGraph}> { <${UAL}> ?p ?o } } ORDER BY ?p ?o`;
+    const before = await store.query(query), metaBefore = await store.query(metaQuery);
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message),CG);
+    expect(await store.query(query)).toEqual(before);
+    expect(await store.query(metaQuery)).toEqual(metaBefore);
+    await store.close();
+  });
 
   async function stageNewerWorkspaceAssertion(
     swmGraph: string,

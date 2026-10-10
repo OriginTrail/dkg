@@ -1,3 +1,5 @@
+import { readCurrentAssertionVersion } from "../../graph-scoped-assertion-version.js";
+import { normalizeGraphScopedHex32 } from "../graph-scoped-root.js";
 import {
   assertSafeIri,
   parseDeterministicKnowledgeAssetUal,
@@ -44,7 +46,6 @@ const ATOMIC_REPLACE_UNSUPPORTED_MESSAGE_V1 = (capability: string): string => (
   + 'if it provides that guarantee.'
 );
 
-const ASSERTION_VERSION = 'http://dkg.io/ontology/assertionVersion';
 const MERKLE_ROOT = 'http://dkg.io/ontology/merkleRoot';
 const TRANSACTION_HASH = 'http://dkg.io/ontology/transactionHash';
 
@@ -495,40 +496,9 @@ async function readCurrentGraphKnowledgeAssetMetadata(
   }));
 }
 
-async function readCurrentAssertionVersion(
-  store: TripleStore,
-  metaGraph: string,
-  ual: string,
-  options: QueryOptions,
-): Promise<bigint | undefined> {
-  const result = await store.query(`
-    SELECT ?version WHERE {
-      GRAPH <${assertSafeIri(metaGraph)}> {
-        <${assertSafeIri(ual)}> <${ASSERTION_VERSION}> ?version .
-      }
-    }
-  `, options);
-  if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;
-
-  let latest: bigint | undefined;
-  for (const row of result.bindings) {
-    const raw = row.version;
-    const lexical = raw?.match(/^"([^"\\]*(?:\\.[^"\\]*)*)"(?:\^\^.*|@.*)?$/)?.[1] ?? raw;
-    if (lexical === undefined || !/^\d+$/.test(lexical)) {
-      throw new Error(`Invalid stored assertionVersion metadata for ${ual}: ${raw ?? '<missing>'}`);
-    }
-    const version = BigInt(lexical);
-    if (latest === undefined || version > latest) latest = version;
-  }
-  return latest;
-}
 
 function parseBytes32Literal(raw: string, field: string): Uint8Array {
-  const lexical = raw.match(/^"([^"]*)"(?:\^\^.*|@.*)?$/)?.[1] ?? raw;
-  const hex = lexical.replace(/^0x/i, '');
-  if (!/^[0-9a-f]{64}$/i.test(hex)) {
-    throw new Error(`Graph-scoped durable sync ${field} must be 32 bytes of hexadecimal data`);
-  }
+  const hex = normalizeGraphScopedHex32(raw, field);
   return Uint8Array.from(hex.match(/.{2}/g)!.map((pair) => Number.parseInt(pair, 16)));
 }
 

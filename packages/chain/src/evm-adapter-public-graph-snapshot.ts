@@ -19,6 +19,9 @@ import { readFirstProviderWithTransientRetry } from "./rpc-provider-fallback.js"
 import { isContractViewRetryable } from "./rpc-failover-client.js";
 import type { ChainReadOptions } from "./chain-adapter.js";
 
+import { readRpcTuple } from "./rpc-read-lifecycle.js";
+import { activeRpcRequestAbortSignal } from "./rpc-request-transport.js";
+
 export class PublicGraphSnapshotMethods extends EVMChainAdapterBase {
   /** A complete public inventory read at one numbered block on one endpoint. No moving-head cache mixing. */
   async readPublicGraphSnapshot(
@@ -45,9 +48,9 @@ export class PublicGraphSnapshotMethods extends EVMChainAdapterBase {
       const number = anchor.number;
       const at = { blockTag: number };
       const hub = new Contract(this.hubAddress, loadAbi("Hub"), provider);
-      const [cgAddress, kaAddress] = await Promise.all([
-        hub.getAssetStorageAddress("ContextGraphStorage", at),
-        hub.getAssetStorageAddress("DKGKnowledgeAssets", at),
+      const [cgAddress, kaAddress] = await readRpcTuple([
+        () => hub.getAssetStorageAddress("ContextGraphStorage", at),
+        () => hub.getAssetStorageAddress("DKGKnowledgeAssets", at),
       ]);
       const cg = new Contract(
         cgAddress,
@@ -60,10 +63,10 @@ export class PublicGraphSnapshotMethods extends EVMChainAdapterBase {
         provider,
       );
       const id = BigInt(onChainId);
-      const [state, nameHash, countRaw] = await Promise.all([
-        cg.getContextGraph(id, at),
-        cg.getNameHash(id, at),
-        cg.getContextGraphKaCount(id, at),
+      const [state, nameHash, countRaw] = await readRpcTuple([
+        () => cg.getContextGraph(id, at),
+        () => cg.getNameHash(id, at),
+        () => cg.getContextGraphKaCount(id, at),
       ]);
       if (
         state.active !== true ||
@@ -212,10 +215,11 @@ async function readSnapshotCalls(
   // Local development chains may not deploy Multicall3. Preserve the same anchor and cancellation.
   const result: unknown[] = Array.from({ length: calls.length });
   let next = 0;
-  await Promise.all(
-    Array.from({ length: Math.min(8, calls.length) }, async () => {
+  await readRpcTuple(
+    Array.from({ length: Math.min(8, calls.length) }, () => async () => {
       while (next < calls.length) {
         signal.throwIfAborted();
+        activeRpcRequestAbortSignal()?.throwIfAborted();
         const i = next++;
         const c = calls[i]!;
         result[i] = await c.contract[c.method]!(...c.args, { blockTag });
