@@ -672,7 +672,7 @@ export class Rfc64PublicCatalogTransportV1 {
     );
   }
 
-  private async isCatalogPolicyAuthorized(
+  async isCatalogPolicyAuthorized(
     operation: Rfc64PublicCatalogOperationV1,
     remotePeerId: string,
     scope: Rfc64PublicCatalogPolicyScopeV1,

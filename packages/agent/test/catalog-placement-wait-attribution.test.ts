@@ -137,11 +137,7 @@ describe('catalog placement wait attribution', () => {
 
     expect(handoff).toHaveBeenCalledTimes(1);
     expect(handoff.mock.calls[0]?.[0].peers).toEqual([PARKED_PEER]);
-    expect(handoff.mock.results[0]?.value).toMatchObject({
-      status: 'queued',
-      announcedPeers: [],
-      failedPeers: [],
-    });
+    expect(handoff.mock.results[0]?.value).toEqual({ status: 'queued' });
     expect(appliedHead()).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
     expect(repairs().list()).toEqual([]);
     // The attempt's announce phase is the hand-off: no time, and no peer delivered inside it.

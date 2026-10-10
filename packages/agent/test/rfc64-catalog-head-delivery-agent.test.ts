@@ -54,6 +54,7 @@ function outcome(
     failedPeers: [],
     refusedPeers: [],
     supersededHeads: 0,
+    checkpointCapacityExceeded: false,
     durationMs: 12.4,
     notDeliverable: null,
     ...overrides,
@@ -62,7 +63,7 @@ function outcome(
 
 describe('RFC-64 catalog head delivery: agent hand-off', () => {
   it('hands a committed head to the catalog service and returns its receipt', () => {
-    const receipt = { status: 'queued', announcement: ANNOUNCEMENT, announcedPeers: [], failedPeers: [] };
+    const receipt = { status: 'queued' };
     const deliverCatalogHead = vi.fn(() => receipt);
     const { agent } = agentWith({ deliverCatalogHead });
 
@@ -73,12 +74,8 @@ describe('RFC-64 catalog head delivery: agent hand-off', () => {
   it('never throws without a running service: the head is simply not queued', async () => {
     const { agent } = agentWith(undefined);
 
-    expect(agent.deliverRfc64CatalogHeadV1({ announcement: ANNOUNCEMENT, peers: [PEER_A] })).toEqual({
-      status: 'not-queued',
-      announcement: ANNOUNCEMENT,
-      announcedPeers: [],
-      failedPeers: [],
-    });
+    expect(agent.deliverRfc64CatalogHeadV1({ announcement: ANNOUNCEMENT, peers: [PEER_A] }))
+      .toEqual({ status: 'not-queued' });
     await expect(agent.whenRfc64CatalogHeadDeliveryIdleV1()).resolves.toBeUndefined();
   });
 
@@ -139,7 +136,8 @@ describe('RFC-64 catalog head delivery: what a finished fan-out logs', () => {
       'rfc64_catalog_head_delivery'
       + ` head=${ANNOUNCEMENT.catalogHeadObjectDigest}`
       + ` cg=${ANNOUNCEMENT.contextGraphId}`
-      + ' version=7 delivered=0 failed=0 refused=2 superseded=0 durationMs=12 notDeliverable=null',
+      + ' version=7 delivered=0 failed=0 refused=2 superseded=0 checkpointCapacityExceeded=false'
+      + ' durationMs=12 notDeliverable=null',
     );
   });
 
@@ -161,6 +159,26 @@ describe('RFC-64 catalog head delivery: what a finished fan-out logs', () => {
     expect(message).toContain('error=stream reset by peer');
     expect(message).not.toContain('outsider');
     expect(String(debug.mock.calls[0]![1])).toContain('delivered=1 failed=1 refused=3 superseded=2');
+  });
+
+  it('warns when a catalog changed more often than its delivery could check-point', () => {
+    const { agent, debug, warn } = agentWith(undefined);
+
+    agent.reportRfc64CatalogHeadDeliveryV1(outcome({
+      announcedPeers: [PEER_A],
+      supersededHeads: 70_000,
+      checkpointCapacityExceeded: true,
+    }));
+
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn.mock.calls[0]![1]).toBe(
+      'RFC-64 catalog head delivery fell further behind than its checkpoints cover'
+      + ` head=${ANNOUNCEMENT.catalogHeadObjectDigest}`
+      + ` cg=${ANNOUNCEMENT.contextGraphId}`
+      + ' version=7:'
+      + ' peers more than a lineage window behind the newest head cannot apply it',
+    );
+    expect(String(debug.mock.calls[0]![1])).toContain('superseded=70000 checkpointCapacityExceeded=true');
   });
 
   it('reports a head that could not be fanned out at debug level only', () => {

@@ -562,7 +562,8 @@ export class Rfc64PublicCatalogServiceV1 {
     this.#headDelivery = new Rfc64CatalogHeadDeliveryV1({
       send: (remotePeerId, announcement, sendOptions) =>
         this.#transport.announceCatalogHead(remotePeerId, announcement, sendOptions),
-      authorize: authorizeCatalogOperation,
+      isPeerAuthorized: (remotePeerId, announcement) =>
+        this.#transport.isCatalogPolicyAuthorized('announce-outbound', remotePeerId, announcement),
       assertDeliverable: (announcement, remotePeers) => {
         this.#requireStarted();
         assertSupportedCatalogFanout(

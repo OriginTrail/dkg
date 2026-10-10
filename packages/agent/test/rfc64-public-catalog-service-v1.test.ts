@@ -2817,7 +2817,7 @@ describe('RFC-64 public catalog service v1 head hand-off (GH#3081)', () => {
       peers: ['outsider-1', 'member-ok', 'outsider-2', 'member-stalled'],
     });
 
-    expect(receipt).toMatchObject({ status: 'queued', announcedPeers: [], failedPeers: [] });
+    expect(receipt).toEqual({ status: 'queued' });
     expect(router.sends).toEqual([]);
     await service.whenCatalogHeadDeliveryIdle();
     // Nothing about the private graph reached a peer outside its roster.

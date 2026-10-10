@@ -24,7 +24,10 @@
  *   hand-off named is sent that head or a newer one.
  * - Two heads sent one after the other are at most half the lineage window apart. When a newer
  *   head would be further than that from the head sent before it, the waiting head is kept as a
- *   checkpoint and sent first.
+ *   checkpoint and sent first. Checkpoints live in memory only, so their number is limited. Past
+ *   the limit the newest head replaces the waiting one all the same, and the scope's next fan-out
+ *   says so (`checkpointCapacityExceeded`): a receiver that the newest head leaves more than a
+ *   lineage window behind cannot apply it, as if it had been away for that many changes.
  *
  * A scope here is one policy generation of one author catalog. A graph authored before its
  * registration has an owner-signed catalog and, after it, a catalog of the registered generation.
@@ -41,9 +44,10 @@
  * mutation that handed the head off: that caller's request deadline, cancellation and work
  * priority end with the caller, and a delivery outlives it.
  *
- * Bounds: one fan-out and at most {@link RFC64_CATALOG_HEAD_DELIVERY_MAX_WAITING_HEADS_V1}
+ * Bounds: one fan-out and at most {@link RFC64_CATALOG_HEAD_DELIVERY_MAX_WAITING_HEADS_PER_SCOPE_V1}
  * waiting heads per scope (the newest, and checkpoints only when a backlog is that deep), at most
- * {@link RFC64_CATALOG_HEAD_DELIVERY_MAX_SCOPES_V1} scopes,
+ * {@link RFC64_CATALOG_HEAD_DELIVERY_MAX_CHECKPOINTS_V1} checkpoints in all scopes together, at
+ * most {@link RFC64_CATALOG_HEAD_DELIVERY_MAX_SCOPES_V1} scopes,
  * {@link RFC64_CATALOG_HEAD_DELIVERY_MAX_ACTIVE_FANOUTS_V1} hand-off fan-outs selecting peers and
  * starting sends at a time, sends started in waves of
  * {@link RFC64_CATALOG_HEAD_FANOUT_WAVE_PEERS_V1}, and one time budget for all the sends of a
@@ -57,10 +61,6 @@ import { AsyncResource } from 'node:async_hooks';
 
 import type { SendOptions } from '@origintrail-official/dkg-core';
 
-import type {
-  Rfc64CatalogAccessAuthorizationInputV1,
-  Rfc64CatalogAccessAuthorizationV1,
-} from './catalog-access-policy-v1.js';
 import { RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1 } from './catalog-head-lineage-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1,
@@ -94,10 +94,16 @@ export const RFC64_CATALOG_HEAD_DELIVERY_MAX_VERSION_STEP_V1 =
   RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1 / 2;
 /**
  * Waiting heads one scope may hold: the newest, and the checkpoints before it. Only a backlog of
- * more than {@link RFC64_CATALOG_HEAD_DELIVERY_MAX_VERSION_STEP_V1} versions needs a second one.
- * Past this many the newest waiting head is replaced whatever the distance: memory stays bounded.
+ * more than {@link RFC64_CATALOG_HEAD_DELIVERY_MAX_VERSION_STEP_V1} versions needs a second one,
+ * so this many cover a scope whose changes are 65,536 versions ahead of its last fan-out. Past
+ * that the newest waiting head is replaced whatever the distance, and its fan-out reports it.
  */
-export const RFC64_CATALOG_HEAD_DELIVERY_MAX_WAITING_HEADS_V1 = 4;
+export const RFC64_CATALOG_HEAD_DELIVERY_MAX_WAITING_HEADS_PER_SCOPE_V1 = 64;
+/**
+ * Checkpoints all scopes may hold together. Every scope keeps a place for its newest head; this
+ * keeps many deep backlogs from adding up.
+ */
+export const RFC64_CATALOG_HEAD_DELIVERY_MAX_CHECKPOINTS_V1 = 4_096;
 /**
  * Hand-off fan-outs that select their peers and start their sends at once; further scopes wait
  * their turn with their newest head. A fan-out that has started every send gives its turn back:
@@ -136,10 +142,10 @@ export interface DeliverRfc64PublicCatalogHeadInputV1 {
 }
 
 /**
- * What a hand-off did. Nothing is delivered at hand-off, so both peer lists are empty; the
- * fan-out reports through {@link Rfc64CatalogHeadDeliveryOptionsV1.onDelivered}.
+ * What a hand-off did with the head. It says nothing about delivery: the fan-out runs later and
+ * reports through {@link Rfc64CatalogHeadDeliveryOptionsV1.onDelivered}.
  */
-export interface Rfc64CatalogHeadHandoffV1 extends AnnounceRfc64PublicCatalogHeadResultV1 {
+export interface Rfc64CatalogHeadHandoffV1 {
   /**
    * - `queued`: the scope's owner sends this head to these peers, or a newer one handed off before
    *   its turn.
@@ -150,12 +156,24 @@ export interface Rfc64CatalogHeadHandoffV1 extends AnnounceRfc64PublicCatalogHea
   readonly status: 'queued' | 'nobody' | 'not-queued';
 }
 
+const HANDOFF_QUEUED_V1: Rfc64CatalogHeadHandoffV1 = Object.freeze({ status: 'queued' });
+const HANDOFF_NOBODY_V1: Rfc64CatalogHeadHandoffV1 = Object.freeze({ status: 'nobody' });
+/** The receipt of a hand-off that no owner took, also used when there is no service to take it. */
+export const RFC64_CATALOG_HEAD_HANDOFF_NOT_QUEUED_V1: Rfc64CatalogHeadHandoffV1 =
+  Object.freeze({ status: 'not-queued' });
+
 /** One finished fan-out of a handed-off head. */
 export interface Rfc64CatalogHeadDeliveryOutcomeV1 extends AnnounceRfc64PublicCatalogHeadResultV1 {
   /** Peers this node's own policy refused when the fan-out ran. Nothing was sent to them. */
   readonly refusedPeers: readonly string[];
   /** Earlier heads of the scope replaced before they were sent, since its last fan-out. */
   readonly supersededHeads: number;
+  /**
+   * True when, since the scope's last fan-out, a waiting head was replaced although no checkpoint
+   * slot was free: more versions than a receiver can prove its way across may now lie between two
+   * sent heads of this scope.
+   */
+  readonly checkpointCapacityExceeded: boolean;
   readonly durationMs: number;
   /** Why the head was not fanned out at all, for example its policy is no longer accepted. */
   readonly notDeliverable: string | null;
@@ -168,10 +186,14 @@ export interface Rfc64CatalogHeadDeliveryOptionsV1 {
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     sendOptions: SendOptions,
   ) => Promise<void>;
-  /** The authorizer the head transport itself asks; `null` is a refusal. */
-  readonly authorize: (
-    input: Rfc64CatalogAccessAuthorizationInputV1,
-  ) => Promise<Rfc64CatalogAccessAuthorizationV1 | null>;
+  /**
+   * Whether this node's own policy lets it announce `announcement` to the peer now: the head
+   * transport's own decision, asked without sending anything.
+   */
+  readonly isPeerAuthorized: (
+    remotePeerId: string,
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+  ) => Promise<boolean>;
   /** Throws when a handed-off head may not be fanned out now. Runs when its fan-out starts. */
   readonly assertDeliverable: (
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
@@ -190,6 +212,10 @@ export interface Rfc64CatalogHeadDeliveryOptionsV1 {
   readonly runFanout?: (fanout: () => Promise<void>) => Promise<void>;
   /** Monotonic milliseconds. */
   readonly now?: () => number;
+  /** Override of {@link RFC64_CATALOG_HEAD_DELIVERY_MAX_WAITING_HEADS_PER_SCOPE_V1}. */
+  readonly maxWaitingHeadsPerScope?: number;
+  /** Override of {@link RFC64_CATALOG_HEAD_DELIVERY_MAX_CHECKPOINTS_V1}. */
+  readonly maxCheckpoints?: number;
 }
 
 interface WaitingHeadV1 {
@@ -203,6 +229,7 @@ interface ScopeDeliveryV1 {
   /** Version of the head sent last, or of the one before the first head this owner was given. */
   sentVersion: bigint;
   superseded: number;
+  checkpointCapacityExceeded: boolean;
   run: Promise<void> | null;
 }
 
@@ -230,12 +257,19 @@ export class Rfc64CatalogHeadDeliveryV1 {
   readonly #scopes = new Map<string, ScopeDeliveryV1>();
   readonly #announces = new Set<Promise<unknown>>();
   readonly #turnWaiters: Array<() => void> = [];
+  readonly #maxWaitingHeadsPerScope: number;
+  readonly #maxCheckpoints: number;
   #activeFanouts = 0;
+  /** Checkpoints held by all scopes together: every waiting head that is not its scope's newest. */
+  #checkpoints = 0;
 
   constructor(options: Rfc64CatalogHeadDeliveryOptionsV1) {
     this.#options = options;
     this.#now = options.now ?? (() => performance.now());
     this.#runFanout = options.runFanout ?? ((fanout) => fanout());
+    this.#maxWaitingHeadsPerScope = options.maxWaitingHeadsPerScope
+      ?? RFC64_CATALOG_HEAD_DELIVERY_MAX_WAITING_HEADS_PER_SCOPE_V1;
+    this.#maxCheckpoints = options.maxCheckpoints ?? RFC64_CATALOG_HEAD_DELIVERY_MAX_CHECKPOINTS_V1;
   }
 
   /** Scopes with a head waiting for, or in, its fan-out. */
@@ -274,31 +308,30 @@ export class Rfc64CatalogHeadDeliveryV1 {
         peers: this.#remotePeers(input.peers),
       });
     } catch {
-      return rfc64CatalogHeadHandoffV1('not-queued', input?.announcement);
+      return RFC64_CATALOG_HEAD_HANDOFF_NOT_QUEUED_V1;
     }
-    if (head.peers.length === 0) return rfc64CatalogHeadHandoffV1('nobody', head.announcement);
-    if (this.#lifecycle.signal.aborted) {
-      return rfc64CatalogHeadHandoffV1('not-queued', head.announcement);
-    }
+    if (head.peers.length === 0) return HANDOFF_NOBODY_V1;
+    if (this.#lifecycle.signal.aborted) return RFC64_CATALOG_HEAD_HANDOFF_NOT_QUEUED_V1;
     const key = scopeKeyV1(head.announcement);
     const version = BigInt(head.announcement.catalogVersion);
     const scope = this.#scopes.get(key);
     if (scope === undefined) {
       if (this.#scopes.size >= RFC64_CATALOG_HEAD_DELIVERY_MAX_SCOPES_V1) {
-        return rfc64CatalogHeadHandoffV1('not-queued', head.announcement);
+        return RFC64_CATALOG_HEAD_HANDOFF_NOT_QUEUED_V1;
       }
       const created: ScopeDeliveryV1 = {
         waiting: [head],
         sentVersion: version - 1n,
         superseded: 0,
+        checkpointCapacityExceeded: false,
         run: null,
       };
       this.#scopes.set(key, created);
       created.run = this.#ownerContext.runInAsyncScope(() => this.#runScope(key, created));
-      return rfc64CatalogHeadHandoffV1('queued', head.announcement);
+      return HANDOFF_QUEUED_V1;
     }
     this.#coalesce(scope, head, version);
-    return rfc64CatalogHeadHandoffV1('queued', head.announcement);
+    return HANDOFF_QUEUED_V1;
   }
 
   /** Add `head` to a scope whose owner is busy, keeping what the module comment promises. */
@@ -319,14 +352,21 @@ export class Rfc64CatalogHeadDeliveryV1 {
     const sentBefore = waiting.length > 1
       ? BigInt(waiting.at(-2)!.announcement.catalogVersion)
       : scope.sentVersion;
-    if (
-      version - sentBefore > BigInt(RFC64_CATALOG_HEAD_DELIVERY_MAX_VERSION_STEP_V1)
-      && waiting.length < RFC64_CATALOG_HEAD_DELIVERY_MAX_WAITING_HEADS_V1
-    ) {
+    if (version - sentBefore > BigInt(RFC64_CATALOG_HEAD_DELIVERY_MAX_VERSION_STEP_V1)) {
       // Replacing the waiting head would put more versions between two sent heads than a
       // receiver is sure to prove its way across: keep it as a checkpoint and send it first.
-      waiting.push(head);
-      return;
+      if (
+        waiting.length < this.#maxWaitingHeadsPerScope
+        && this.#checkpoints < this.#maxCheckpoints
+      ) {
+        // The waiting head becomes a checkpoint and `head` the scope's newest.
+        waiting.push(head);
+        this.#checkpoints += 1;
+        return;
+      }
+      // No place is left for another checkpoint. Memory stays bounded and no change waits: the
+      // newest head still replaces the waiting one, and its fan-out reports the oversized step.
+      scope.checkpointCapacityExceeded = true;
     }
     waiting[waiting.length - 1] = withPeersV1(head, newest.peers);
     scope.superseded += 1;
@@ -357,8 +397,12 @@ export class Rfc64CatalogHeadDeliveryV1 {
         // Read after the wait: a newer head may have replaced the one that asked for the turn,
         // and close may have dropped it.
         const head = scope.waiting.shift();
+        // A head that leaves others waiting behind it was a checkpoint.
+        if (scope.waiting.length > 0) this.#checkpoints -= 1;
         const superseded = scope.superseded;
         scope.superseded = 0;
+        const capacityExceeded = scope.checkpointCapacityExceeded;
+        scope.checkpointCapacityExceeded = false;
         if (head !== undefined) scope.sentVersion = BigInt(head.announcement.catalogVersion);
         let holdsTurn = true;
         const releaseTurn = (): void => {
@@ -368,7 +412,9 @@ export class Rfc64CatalogHeadDeliveryV1 {
         };
         try {
           if (head !== undefined) {
-            await this.#runFanout(() => this.#deliverHead(head, superseded, releaseTurn));
+            await this.#runFanout(
+              () => this.#deliverHead(head, superseded, capacityExceeded, releaseTurn),
+            );
           }
         } catch {
           // A host that fails to run the fan-out drops this head only; the owner carries on.
@@ -389,6 +435,7 @@ export class Rfc64CatalogHeadDeliveryV1 {
   async #deliverHead(
     head: WaitingHeadV1,
     supersededHeads: number,
+    checkpointCapacityExceeded: boolean,
     onSendsStarted: () => void,
   ): Promise<void> {
     const startedAt = this.#now();
@@ -405,7 +452,7 @@ export class Rfc64CatalogHeadDeliveryV1 {
         async (peerId) => (
           this.#lifecycle.signal.aborted
             ? null
-            : this.#isLocallyAuthorized(peerId, head.announcement)
+            : this.#isPeerAuthorized(peerId, head.announcement)
         ),
       );
       const eligible = head.peers.filter((peerId, index) => {
@@ -429,7 +476,7 @@ export class Rfc64CatalogHeadDeliveryV1 {
         if (
           attempt.failure instanceof Rfc64PublicCatalogTransportErrorV1
           && attempt.failure.code === 'catalog-transport-policy-denied'
-          && !(await this.#isLocallyAuthorized(attempt.peerId, head.announcement))
+          && !(await this.#isPeerAuthorized(attempt.peerId, head.announcement))
         ) refusedPeers.push(attempt.peerId);
         else delivered.push(attempt);
       }
@@ -444,6 +491,7 @@ export class Rfc64CatalogHeadDeliveryV1 {
         ...describeAttemptsV1(head.announcement, delivered),
         refusedPeers: Object.freeze(refusedPeers),
         supersededHeads,
+        checkpointCapacityExceeded,
         durationMs: Math.max(0, this.#now() - startedAt),
         notDeliverable,
       }));
@@ -528,22 +576,13 @@ export class Rfc64CatalogHeadDeliveryV1 {
     };
   }
 
-  /** The decision the head transport makes before a send, without sending. Never cached. */
-  async #isLocallyAuthorized(
+  /** The head transport's decision, asked now and never cached. A decision that fails refuses. */
+  async #isPeerAuthorized(
     remotePeerId: string,
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
   ): Promise<boolean> {
     try {
-      const authorization = await this.#options.authorize(Object.freeze({
-        operation: 'announce-outbound',
-        remotePeerId,
-        networkId: announcement.networkId,
-        contextGraphId: announcement.contextGraphId,
-        policyDigest: announcement.policyDigest,
-      }));
-      return authorization !== null
-        && (authorization.accessPolicy === 0 || authorization.accessPolicy === 1)
-        && authorization.policyDigest === announcement.policyDigest;
+      return (await this.#options.isPeerAuthorized(remotePeerId, announcement)) === true;
     } catch {
       return false;
     }
@@ -586,21 +625,6 @@ async function settledOrElapsedV1(
   } finally {
     clearTimeout(timer);
   }
-}
-
-const NO_PEERS_V1: readonly never[] = Object.freeze([]);
-
-/** The receipt of a hand-off: nothing has been delivered yet, whatever its status. */
-export function rfc64CatalogHeadHandoffV1(
-  status: Rfc64CatalogHeadHandoffV1['status'],
-  announcement: Rfc64PublicCatalogHeadAnnouncementV1,
-): Rfc64CatalogHeadHandoffV1 {
-  return Object.freeze({
-    status,
-    announcement,
-    announcedPeers: NO_PEERS_V1,
-    failedPeers: NO_PEERS_V1,
-  });
 }
 
 function describeAttemptsV1(

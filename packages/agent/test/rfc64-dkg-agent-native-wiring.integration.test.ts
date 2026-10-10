@@ -977,12 +977,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       },
     });
     vi.spyOn(author, 'deliverRfc64CatalogHeadV1')
-      .mockImplementation(({ announcement }) => ({
-        status: 'queued',
-        announcement,
-        announcedPeers: [],
-        failedPeers: [],
-      }));
+      .mockImplementation(() => ({ status: 'queued' }));
     await expect(author.recordRfc64PublicCatalogAssetV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       assertionCoordinate: 'bounded-operational-status-applied-heads' as never,
@@ -1506,12 +1501,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       },
     });
     const announce = vi.spyOn(author, 'deliverRfc64CatalogHeadV1')
-      .mockImplementation(({ announcement }) => ({
-        status: 'queued',
-        announcement,
-        announcedPeers: [],
-        failedPeers: [],
-      }));
+      .mockImplementation(() => ({ status: 'queued' }));
 
     expect((author as any).config.rfc64CatalogAuthoringPolicy).toMatchObject({
       byContextGraph: {
@@ -1717,12 +1707,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         remotePeer: { toString: () => peerId },
       })) as never);
     const announce = vi.spyOn(author, 'deliverRfc64CatalogHeadV1')
-      .mockImplementation(({ announcement }) => ({
-        status: 'queued',
-        announcement,
-        announcedPeers: [],
-        failedPeers: [],
-      }));
+      .mockImplementation(() => ({ status: 'queued' }));
     const assertionCoordinate = 'default-bounded-catalog-peers';
     const shareOperationId = 'default-bounded-catalog-peers-operation';
     await seedSignedSwmWorkspaceV1(author, {

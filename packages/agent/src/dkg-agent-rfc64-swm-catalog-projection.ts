@@ -49,7 +49,7 @@ import { snapshotRfc64CatalogDeploymentProfileV1 } from
 import type { Rfc64PublicCatalogServiceV1 } from
   './rfc64/public-catalog-service-v1.js';
 import {
-  rfc64CatalogHeadHandoffV1,
+  RFC64_CATALOG_HEAD_HANDOFF_NOT_QUEUED_V1,
   type DeliverRfc64PublicCatalogHeadInputV1,
   type Rfc64CatalogHeadDeliveryOptionsV1,
   type Rfc64CatalogHeadDeliveryOutcomeV1,
@@ -568,7 +568,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     input: DeliverRfc64PublicCatalogHeadInputV1,
   ): Rfc64CatalogHeadHandoffV1 {
     return this.rfc64PublicCatalogServiceV1?.deliverCatalogHead(input)
-      ?? rfc64CatalogHeadHandoffV1('not-queued', input.announcement);
+      ?? RFC64_CATALOG_HEAD_HANDOFF_NOT_QUEUED_V1;
   }
 
   /** Await the fan-outs of handed-off heads (tests / graceful shutdown coordination). */
@@ -597,25 +597,35 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
   /**
    * One finished fan-out of a handed-off head. Peers this node's own policy refused received
    * nothing and are not failures: they appear only in the debug line, so a head with no eligible
-   * peer writes nothing at warn level.
+   * peer writes nothing at warn level. A catalog that changed more often than its delivery could
+   * check-point is worth a warning: a peer left more than a lineage window behind stays behind.
    */
   reportRfc64CatalogHeadDeliveryV1(
     this: DKGAgent,
     outcome: Rfc64CatalogHeadDeliveryOutcomeV1,
   ): void {
+    const ctx = createOperationContext('system');
+    const head = ` head=${outcome.announcement.catalogHeadObjectDigest}`
+      + ` cg=${outcome.announcement.contextGraphId}`
+      + ` version=${outcome.announcement.catalogVersion}`;
     this.log.debug(
-      createOperationContext('system'),
-      'rfc64_catalog_head_delivery'
-        + ` head=${outcome.announcement.catalogHeadObjectDigest}`
-        + ` cg=${outcome.announcement.contextGraphId}`
-        + ` version=${outcome.announcement.catalogVersion}`
+      ctx,
+      `rfc64_catalog_head_delivery${head}`
         + ` delivered=${outcome.announcedPeers.length}`
         + ` failed=${outcome.failedPeers.length}`
         + ` refused=${outcome.refusedPeers.length}`
         + ` superseded=${outcome.supersededHeads}`
+        + ` checkpointCapacityExceeded=${outcome.checkpointCapacityExceeded}`
         + ` durationMs=${Math.round(outcome.durationMs)}`
         + ` notDeliverable=${JSON.stringify(outcome.notDeliverable?.slice(0, 160) ?? null)}`,
     );
+    if (outcome.checkpointCapacityExceeded) {
+      this.log.warn(
+        ctx,
+        `RFC-64 catalog head delivery fell further behind than its checkpoints cover${head}:`
+          + ' peers more than a lineage window behind the newest head cannot apply it',
+      );
+    }
     this.warnRfc64CatalogAnnounceFailuresV1(outcome);
   }
 

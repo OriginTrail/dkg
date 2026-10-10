@@ -47,6 +47,8 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-public-catalog-reconciliation-failure-v1.test.ts",
   "test/rfc64-public-catalog-service-v1.test.ts",
   "test/rfc64-public-catalog-head-delivery-v1.test.ts",
+  "test/rfc64-public-catalog-head-delivery-scopes-v1.test.ts",
+  "test/rfc64-public-catalog-head-delivery-lifecycle-v1.test.ts",
   "test/rfc64-catalog-head-delivery-agent.test.ts",
   "test/rfc64-public-catalog-issuer-delegation-v1.test.ts",
   "test/rfc64-public-catalog-gate1.integration.test.ts",

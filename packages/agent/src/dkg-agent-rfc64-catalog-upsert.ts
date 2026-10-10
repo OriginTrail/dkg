@@ -57,21 +57,19 @@ export interface UpsertConfirmedRfc64PublicRootCatalogAssetParamsV1 {
 }
 
 /**
- * GH#3081 — what one catalog mutation reports while it runs: how long each phase took, whether it
- * resolved or rejected, and the receipt of handing its head off for delivery (the fan-out itself
- * runs outside the mutation and delivers nothing inside it). Observation only; an observer never
- * changes the mutation, and `measure` passes the work's result or rejection through unchanged.
+ * GH#3081 — what one catalog mutation reports while it runs: how long each phase took and whether
+ * it resolved or rejected. The delivery of its head is not among them: the mutation hands the head
+ * off and returns, and the fan-out reports itself. Observation only; an observer never changes the
+ * mutation, and `measure` passes the work's result or rejection through unchanged.
  */
 export interface Rfc64CatalogMutationObserverV1 {
   now(): number;
-  measure<T>(phase: 'state' | 'successor' | 'cas' | 'announce', work: () => Promise<T>, startedAt?: number): Promise<T>;
-  announced(delivery: AnnounceRfc64PublicCatalogHeadResultV1): void;
+  measure<T>(phase: 'state' | 'successor' | 'cas', work: () => Promise<T>, startedAt?: number): Promise<T>;
 }
 
 const UNOBSERVED_CATALOG_MUTATION_V1: Rfc64CatalogMutationObserverV1 = Object.freeze({
   now: () => 0,
   measure: <T>(_phase: unknown, work: () => Promise<T>) => work(),
-  announced: () => {},
 });
 
 export interface ReconcileRfc64PublicRootCatalogExactSetParamsV1 {
@@ -584,11 +582,8 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     if (!signal?.aborted) {
       // The head is durable. Hand it to the catalog service's delivery owner and return: the
       // fan-out runs outside this serialized mutation, so the next change never waits for a peer
-      // (GH#3081). The hand-off delivers nothing itself, so the announce phase takes no time.
-      observer.announced(this.deliverRfc64CatalogHeadV1({
-        announcement: successor.announcement,
-        peers,
-      }));
+      // (GH#3081). The fan-out reports itself; the mutation has nothing to observe about it.
+      this.deliverRfc64CatalogHeadV1({ announcement: successor.announcement, peers });
     }
     return Object.freeze({
       applied: committed.appliedHead,
