@@ -29,7 +29,7 @@ import { syncOpenedPeerConnection, type PeerConnectionSyncPorts } from './sync/p
 import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
-  registerExperimentalExactBatchResponder,
+  registerExperimentalExactBatchResponder, ExactBatchResponderRefusal,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED, PROTOCOL_SYNC_CHANGELOG, PROTOCOL_QUERY_REMOTE, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
   PROTOCOL_NETWORK_IDENTITY, advertisesSyncProtocol,
@@ -3276,9 +3276,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               admission: resources,
               parseSyncRequest: this.parseSyncRequest.bind(this),
               authorizeSyncRequest: this.authorizeSyncRequest.bind(this),
-              isPublicContextGraph: async (cg, signal) => (await this.resolveRegisteredContextGraphAuthority(cg, {
-                authorityReadMode: 'finalized-index-or-live', signal,
-              })).kind === 'public',
+              isPublicContextGraph: async (cg, signal) => {
+                const authority = await this.resolveRegisteredContextGraphAuthority(cg, {
+                  authorityReadMode: 'finalized-index-or-live', signal,
+                });
+                // A missed authority read is a transient serving setback, not
+                // evidence that a registered public graph became private.
+                if (authority.kind === 'unavailable') throw new ExactBatchResponderRefusal('BUSY');
+                return authority.kind === 'public';
+              },
+              onRefusal: (stage, code) => this.log.info(createOperationContext('sync'),
+                `Exact batch responder refusal stage=${stage} code=${code}`),
               servingWithheld: (cg) => this.contextGraphServingWithheld(cg),
               onExport: (assetIndex, wholePayloadExports, operationContext) => this.log.info(operationContext,
                 `Exact batch responder export asset=${assetIndex} wholePayloadExports=${wholePayloadExports}`),
