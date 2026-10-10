@@ -85,6 +85,7 @@ describe('entity discovery using current scoped graph content', () => {
     await expect(f.service.search(id, 'catalog', 'ocean', 2, f.reader, new AbortController().signal, performance.now() - 1))
       .rejects.toMatchObject({ code: 'QUERY_DEADLINE_EXCEEDED' });
     expect(() => parseSpec({ ...spec, textPredicates: ['urn:p> } SERVICE <http://invalid> {'] })).toThrow('ENTITY_INVALID_REQUEST');
+    expect(() => parseSpec({ ...spec, textPredicates: ['urn:p' + String.fromCharCode(1)] })).toThrow('ENTITY_INVALID_REQUEST');
   });
   it('re-embeds content changes and preserves the checkpoint on embedding failure', async () => {
     const f = await fixture(); await f.index();

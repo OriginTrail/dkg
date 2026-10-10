@@ -6,7 +6,7 @@ export const PAGE_SIZE = 8;
 export const MAX_DOCUMENT_ROWS = 256;
 export function iri(value: unknown): string {
   if (typeof value !== 'string' || value.length > 2048 || !/^[a-z][a-z0-9+.-]*:/i.test(value)
-      || /[<>"{}|^`\\\s\x00-\x1f]/u.test(value)) throw new EntitySearchError('ENTITY_INVALID_REQUEST', 400);
+      || /[<>"{}|^`\\\s]/u.test(value) || [...value].some(char => char.charCodeAt(0) < 32)) throw new EntitySearchError('ENTITY_INVALID_REQUEST', 400);
   return `<${value}>`;
 }
 export function parseSpec(raw: EntityIndexSpec): EntityIndexSpec {

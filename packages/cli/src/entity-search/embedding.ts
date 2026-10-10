@@ -10,7 +10,7 @@ export class LocalEntityEmbedder implements EntityEmbedder {
   constructor(private config: EntityEmbeddingConfig) {
     const url = new URL(config.baseURL ?? 'http://127.0.0.1:11434');
     const host = url.hostname.replace(/^\[|\]$/g, '');
-    if (config.provider !== 'ollama' || !isIP(host) || !(host === '::1' || /^127\./.test(host))
+    if (config.provider !== 'ollama' || !isIP(host) || !(host === '::1' || host.startsWith('127.'))
       || url.protocol !== 'http:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash
       || !/^[a-f0-9]{64}$/.test(config.digest) || !config.model || config.model.length > 256
       || !Number.isInteger(config.dimensions) || config.dimensions < 1 || config.dimensions > 4096
