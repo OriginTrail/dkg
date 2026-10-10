@@ -88,9 +88,9 @@ describe('@unit ConvictionStakingStorage', () => {
 
   it('Should have correct name and version', async () => {
     expect(await ConvictionStakingStorage.name()).to.equal('ConvictionStakingStorage');
-    // v10.0.6 — one-shot delta boost accounting (audit G-6) on top of v10.0.5's
-    // bucketed expiries + bounded per-node pending expiry slots.
-    expect(await ConvictionStakingStorage.version()).to.equal('10.0.6');
+    // v10.0.7 — late-settlement gross-reward reconciliation on top of v10.0.6's
+    // one-shot delta boost accounting and bounded pending expiry slots.
+    expect(await ConvictionStakingStorage.version()).to.equal('10.0.7');
   });
 
   // ------------------------------------------------------------
