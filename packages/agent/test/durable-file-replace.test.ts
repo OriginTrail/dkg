@@ -102,7 +102,7 @@ it('journal admission propagates directory EPERM before applying confirmed state
     expect(JSON.parse(await readFile(join(parent, 'named-ka-vm-lifecycle-repairs.json'), 'utf8')).entries).toEqual([]);
   } finally { failure.phase = ''; await owner.stop(); }
 });
-describe.skipIf(process.platform === 'win32')('newly created directory ancestry', () => {
+describe('newly created directory ancestry', () => {
   async function nested() {
     const root = await directory(), created = join(root, 'new'), dataDir = join(created, 'nested');
     const syncedAtApply: string[][] = [], apply = vi.fn(async () => { syncedAtApply.push([...synced]); });
