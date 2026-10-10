@@ -63,10 +63,14 @@ check_paused_store_status() {
   # ready answer after the pause is the baseline for subsequent outage reads.
   last_ready_count="$(field "$paused_status" storeQuads)"
   [ -n "$last_ready_count" ] || fail "ordinary status lost its ready count: $paused_status"
+  plain_started="$(date +%s)"
   next_paused_status="$(status_body '/api/status')"
+  plain_elapsed="$(( $(date +%s) - plain_started ))"
+  [ "$plain_elapsed" -lt 5 ] || fail "second ordinary /api/status blocked for ${plain_elapsed}s on the paused store"
   [ "$(field "$next_paused_status" storeQuadsStatus)" = "ready" ] || fail "ordinary status lost its cached count: $next_paused_status"
   [ "$(field "$next_paused_status" storeQuads)" = "$last_ready_count" ] || fail "ordinary status changed the last ready count during the outage: $next_paused_status"
   [ -z "$(field "$paused_status" storeReachability)" ] || fail "ordinary status unexpectedly probed the paused store: $paused_status"
+  [ -z "$(field "$next_paused_status" storeReachability)" ] || fail "second ordinary status unexpectedly probed the paused store: $next_paused_status"
   paused_probe="$(status_body '/api/status?probeStore=true')"
   paused_reachability="$(field "$paused_probe" storeReachability)"
   case "$paused_reachability" in

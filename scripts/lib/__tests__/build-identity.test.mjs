@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, cpSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, cpSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
@@ -17,7 +17,7 @@ function fixture(t) {
   const dir = mkdtempSync(join(tmpdir(), 'dkg-build-identity-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   mkdirSync(join(dir, 'packages/cli'), { recursive: true });
-  writeFileSync(join(dir, 'packages/cli/package.json'), JSON.stringify({ name: cli.name, scripts: { 'build:compile': cli.scripts['build:compile'] } }));
+  writeFileSync(join(dir, 'packages/cli/package.json'), JSON.stringify({ name: cli.name, dkgBuildIdentity: cli.dkgBuildIdentity, scripts: { 'build:compile': cli.scripts['build:compile'] } }));
   mkdirSync(join(dir, 'bin'));
   mkdirSync(join(dir, 'packages/storage'), { recursive: true });
   cpSync(join(root, 'packages/storage/blazegraph-namespace-contract.cjs'), join(dir, 'packages/storage/blazegraph-namespace-contract.cjs'));
@@ -31,6 +31,14 @@ function fixture(t) {
   writeFileSync(join(dir, 'bin/tsc'), '#!/bin/sh\nmkdir -p dist\ncp ../../source.txt dist/source.txt\n', { mode: 0o755 });
   return dir;
 }
+function useLegacyBuild(dir) {
+  const manifest = JSON.parse(readFileSync(join(dir, 'packages/cli/package.json'), 'utf8'));
+  delete manifest.dkgBuildIdentity;
+  writeFileSync(join(dir, 'packages/cli/package.json'), JSON.stringify(manifest));
+  run('git', ['add', 'packages/cli/package.json'], dir);
+  run('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'legacy build'], dir);
+}
+
 function compile(dir) {
   // Invoke the declared compilation phase used by the prepared production build.
   run('pnpm', ['run', 'build:compile'], join(dir, 'packages/cli'), { PATH: `${join(dir, 'bin')}:${process.env.PATH}` });
@@ -62,7 +70,7 @@ test('dirty source builds cannot claim a clean exact commit', t => {
 test('devnet preserves an existing compiler identity instead of restamping live HEAD', t => {
   const dir = fixture(t);
   writeFileSync(join(dir, 'packages/cli/build-info.json'), JSON.stringify({ commit: '0'.repeat(40) }));
-  run('bash', ['-c', 'source "$1"; write_devnet_version_build_info "$2"', 'bash', join(root, 'scripts/devnet.sh'), dir], root, { DEVNET_SOURCE_ONLY: '1' });
+  run('bash', ['-c', 'source "$1"; write_devnet_version_build_info "$2" "$3"', 'bash', join(root, 'scripts/devnet.sh'), dir, JSON.stringify(captureDevnetBuild(dir))], root, { DEVNET_SOURCE_ONLY: '1' });
   assert.equal(JSON.parse(readFileSync(join(dir, 'packages/cli/build-info.json'), 'utf8')).commit, '0'.repeat(40));
 });
 
@@ -74,21 +82,27 @@ test('real Turbo reuses dependencies while recompiling and restamping the CLI', 
   mkdirSync(join(dir, 'packages/dependency'));
   writeFileSync(join(dir, 'packages/dependency/package.json'), JSON.stringify({ name: '@fixture/dep', version: '1.0.0', scripts: { build: 'mkdir -p dist && echo dependency > dist/value' } }));
   const compilation = cli.scripts['build:compile'];
-  writeFileSync(join(dir, 'packages/cli/package.json'), JSON.stringify({ name: cli.name, version: '1.0.0', dependencies: { '@fixture/dep': 'workspace:*' }, scripts: { build: 'pnpm run build:compile', 'build:compile': compilation } }));
+  writeFileSync(join(dir, 'packages/cli/package.json'), JSON.stringify({ name: cli.name, version: '1.0.0', dkgBuildIdentity: cli.dkgBuildIdentity, dependencies: { '@fixture/dep': 'workspace:*' }, scripts: { build: 'pnpm run build:compile', 'build:compile': compilation } }));
   writeFileSync(join(dir, '.gitignore'), 'bin/\nnode_modules/\n.turbo/\npackages/*/dist/\npackages/*/.turbo/\npackages/cli/build-info.json\n');
   run('pnpm', ['install', '--lockfile-only', '--ignore-scripts'], dir);
   run('git', ['add', '.'], dir);
   run('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'workspace'], dir);
   const turbo = join(root, 'node_modules/.bin/turbo');
-  const args = ['run', 'build', '--filter=' + cli.name];
-  const env = { PATH: `${join(dir, 'bin')}:${process.env.PATH}`, TURBO_TELEMETRY_DISABLED: '1' };
+  const args = ['run', 'build', '--filter=' + cli.name, '--summarize'];
+  const env = { PATH: `${join(dir, 'bin')}:${process.env.PATH}`, TURBO_TELEMETRY_DISABLED: '1', GITHUB_ACTIONS: 'true' };
   run(turbo, args, dir, env);
+  const summaries = new Set(readdirSync(join(dir, '.turbo/runs')));
   writeFileSync(join(dir, 'source.txt'), 'B\n');
   run('git', ['add', 'source.txt'], dir);
   run('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'B'], dir);
-  const second = run(turbo, args, dir, env);
-  assert.match(second, /@fixture\/dep:build: cache hit/);
-  assert.match(second, /dkg:build: cache bypass/);
+  run(turbo, args, dir, env);
+  const newSummaries = readdirSync(join(dir, '.turbo/runs')).filter(file => !summaries.has(file));
+  assert.equal(newSummaries.length, 1);
+  const summary = JSON.parse(readFileSync(join(dir, '.turbo/runs', newSummaries[0]), 'utf8'));
+  const dependency = summary.tasks.find(task => task.taskId === '@fixture/dep#build');
+  const compilationTask = summary.tasks.find(task => task.taskId === cli.name + '#build');
+  assert.equal(dependency.cache.status, 'HIT');
+  assert.equal(compilationTask.resolvedTaskDefinition.cache, false);
   assert.equal(JSON.parse(readFileSync(join(dir, 'packages/cli/build-info.json'), 'utf8')).commit, run('git', ['rev-parse', 'HEAD'], dir));
   assert.equal(readFileSync(join(dir, 'packages/cli/dist/source.txt'), 'utf8'), 'B\n');
 });
@@ -101,11 +115,12 @@ test('missing Git metadata is explicitly unknown instead of a live checkout clai
   assert.equal(info.dirty, null);
 });
 
-function pausedStatusCheck(statusBody) {
+function pausedStatusCheck(statusBody, setup = '') {
   return spawnSync('bash', ['-c', `
     set -euo pipefail
     source "$1"
     healthy_count=123
+    ${setup}
     status_body() { ${statusBody}
     }
     say() { :; }
@@ -196,7 +211,7 @@ git -C ../.. -c user.name=Test -c user.email=test@example.invalid commit -qm B
   assert.equal(compiled.commit, `${a}-dirty`);
   const b = run('git', ['rev-parse', 'HEAD'], dir);
   assert.notEqual(b, a);
-  run('bash', ['-c', 'source "$1"; write_devnet_version_build_info "$2"', 'bash', join(root, 'scripts/devnet.sh'), dir], root, { DEVNET_SOURCE_ONLY: '1' });
+  run('bash', ['-c', 'source "$1"; write_devnet_version_build_info "$2" "$3"', 'bash', join(root, 'scripts/devnet.sh'), dir, JSON.stringify(captureDevnetBuild(dir))], root, { DEVNET_SOURCE_ONLY: '1' });
   const ensured = JSON.parse(readFileSync(join(dir, 'packages/cli/build-info.json'), 'utf8'));
   assert.equal(ensured.commit, `${a}-dirty`);
   assert.equal(ensured.dirty, true);
@@ -222,7 +237,7 @@ test('devnet preserves unknown compiler identity verbatim', t => {
   const unknown = { commit: 'unknown', dirty: null, distTag: 'monorepo', buildTime: '2026-10-10T00:00:00Z' };
   const text = JSON.stringify(unknown) + '\n';
   writeFileSync(join(dir, 'packages/cli/build-info.json'), text);
-  run('bash', ['-c', 'source "$1"; write_devnet_version_build_info "$2"', 'bash', join(root, 'scripts/devnet.sh'), dir], root, { DEVNET_SOURCE_ONLY: '1' });
+  run('bash', ['-c', 'source "$1"; write_devnet_version_build_info "$2" "$3"', 'bash', join(root, 'scripts/devnet.sh'), dir, JSON.stringify(captureDevnetBuild(dir))], root, { DEVNET_SOURCE_ONLY: '1' });
   assert.equal(readFileSync(join(dir, 'packages/cli/build-info.json'), 'utf8'), text);
 });
 
@@ -238,6 +253,7 @@ test('linked worktree owns and certifies its clean source identity', t => {
 
 test('legacy devnet build replaces an unchanged stale stamp only after rebuilding', t => {
   const dir = fixture(t);
+  useLegacyBuild(dir);
   writeFileSync(join(dir, 'package.json'), '{}');
   run('git', ['add', 'package.json'], dir);
   run('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'root manifest'], dir);
@@ -263,4 +279,108 @@ test('unchanged uncertified compiler metadata cannot become a clean legacy stamp
     ensureDevnetBuildInfo(dir, before);
     assert.equal(readFileSync(join(dir, 'packages/cli/build-info.json'), 'utf8'), text);
   }
+});
+
+
+test('paused status rejects a delayed second ordinary read', () => {
+  const r = pausedStatusCheck(`
+    local count="$(cat "$calls")"
+    if [ "$1" = '/api/status?probeStore=true' ]; then
+      printf '%s' '{"storeReachability":"no-answer"}'
+    else
+      [ "$count" != first ] || sleep 6
+      printf first > "$calls"
+      printf '%s' '{"storeQuadsStatus":"ready","storeQuads":124}'
+    fi
+  `, `calls="$(mktemp)"; trap 'rm -f "$calls"' EXIT`);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /ordinary .*blocked/);
+});
+
+test('paused status rejects a second ordinary response carrying probe evidence', () => {
+  const r = pausedStatusCheck(`
+    if [ "$1" = '/api/status?probeStore=true' ]; then
+      printf '%s' '{"storeReachability":"no-answer"}'
+    elif [ -s "$calls" ]; then
+      printf '%s' '{"storeQuadsStatus":"ready","storeQuads":124,"storeReachability":"unreachable"}'
+    else
+      printf first > "$calls"
+      printf '%s' '{"storeQuadsStatus":"ready","storeQuads":124}'
+    fi
+  `, `calls="$(mktemp)"; trap 'rm -f "$calls"' EXIT`);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /ordinary status unexpectedly probed/);
+});
+
+test('legacy certification requires source identity captured before the build', t => {
+  const dir = fixture(t);
+  useLegacyBuild(dir);
+  assert.throws(() => ensureDevnetBuildInfo(dir), /captured.*identity|capture.*build/i);
+});
+
+test('legacy stamping ignores metadata serialization when certifying the rebuilt checkout', t => {
+  const dir = fixture(t);
+  useLegacyBuild(dir);
+  compile(dir);
+  const old = JSON.parse(readFileSync(join(dir, 'packages/cli/build-info.json'), 'utf8'));
+  writeFileSync(join(dir, 'source.txt'), 'B\n');
+  run('git', ['add', 'source.txt'], dir);
+  run('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'B'], dir);
+  const before = captureDevnetBuild(dir);
+  writeFileSync(join(dir, 'packages/cli/build-info.json'), JSON.stringify(old));
+  ensureDevnetBuildInfo(dir, before);
+  assert.equal(JSON.parse(readFileSync(join(dir, 'packages/cli/build-info.json'), 'utf8')).commit,
+    run('git', ['rev-parse', 'HEAD'], dir));
+});
+
+
+test('matching dirty identities cannot reuse compiled X after another uncommitted edit Y', t => {
+  const dir = fixture(t);
+  writeFileSync(join(dir, 'package.json'), '{}');
+  run('git', ['add', 'package.json'], dir);
+  run('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'root manifest'], dir);
+  const head = run('git', ['rev-parse', 'HEAD'], dir);
+  writeFileSync(join(dir, 'source.txt'), 'X\n');
+  const x = compile(dir);
+  writeFileSync(join(dir, 'packages/cli/dist/cli.js'), '// compiled X');
+  writeFileSync(join(dir, 'source.txt'), 'Y\n');
+  assert.equal(run('git', ['rev-parse', 'HEAD'], dir), head);
+  assert.equal(x.commit, `${head}-dirty`);
+  assert.equal(readFileSync(join(dir, 'packages/cli/dist/source.txt'), 'utf8'), 'X\n');
+  const check = spawnSync(process.execPath, [join(root, 'scripts/stamp-cli-build-info.mjs'), '--check-devnet-cache', dir]);
+  assert.equal(check.status, 1);
+  writeFileSync(join(dir, 'bin/pnpm'), `#!/bin/bash
+if [ "$1" = run ] && [ "$2" = build ]; then cd packages/cli; ${cli.scripts['build:compile']}; fi
+`, { mode: 0o755 });
+  run('bash', ['-c', 'source "$1"; DEVNET_VERSIONS_DIR="$2"; prepare_version "$3"', 'bash', join(root, 'scripts/devnet.sh'), resolve(dir, '..'), dir.split('/').at(-1)], root,
+    { DEVNET_SOURCE_ONLY: '1', PATH: `${join(dir, 'bin')}:${process.env.PATH}` });
+  assert.equal(readFileSync(join(dir, 'packages/cli/dist/source.txt'), 'utf8'), 'Y\n');
+  assert.equal(JSON.parse(readFileSync(join(dir, 'packages/cli/build-info.json'), 'utf8')).commit, x.commit);
+});
+
+test('matching unknown identities cannot skip recompilation after source changes', t => {
+  const dir = fixture(t);
+  writeFileSync(join(dir, 'package.json'), '{}');
+  rmSync(join(dir, '.git'), { recursive: true });
+  writeFileSync(join(dir, 'source.txt'), 'X\n');
+  assert.equal(compile(dir).commit, 'unknown');
+  writeFileSync(join(dir, 'packages/cli/dist/cli.js'), '// compiled X');
+  writeFileSync(join(dir, 'source.txt'), 'Y\n');
+  const check = spawnSync(process.execPath, [join(root, 'scripts/stamp-cli-build-info.mjs'), '--check-devnet-cache', dir]);
+  assert.equal(check.status, 1);
+  writeFileSync(join(dir, 'bin/pnpm'), `#!/bin/bash
+if [ "$1" = run ] && [ "$2" = build ]; then cd packages/cli; ${cli.scripts['build:compile']}; fi
+`, { mode: 0o755 });
+  run('bash', ['-c', 'source "$1"; DEVNET_VERSIONS_DIR="$2"; prepare_version "$3"', 'bash', join(root, 'scripts/devnet.sh'), resolve(dir, '..'), dir.split('/').at(-1)], root,
+    { DEVNET_SOURCE_ONLY: '1', PATH: `${join(dir, 'bin')}:${process.env.PATH}` });
+  assert.equal(readFileSync(join(dir, 'packages/cli/dist/source.txt'), 'utf8'), 'Y\n');
+  const info = JSON.parse(readFileSync(join(dir, 'packages/cli/build-info.json'), 'utf8'));
+  assert.equal(info.commit, 'unknown');
+  assert.equal(info.dirty, null);
+});
+
+test('compiler-owned certification refuses a missing stamp without relabeling the checkout', t => {
+  const dir = fixture(t);
+  const captured = captureDevnetBuild(dir);
+  assert.throws(() => ensureDevnetBuildInfo(dir, captured), /Compiler-owned build did not produce/);
 });

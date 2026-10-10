@@ -2,7 +2,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 
 export function buildInfoPayload({ commit, distTag, ciRun = null, buildTime = new Date().toISOString(), dirty }) {
   if (typeof distTag !== 'string' || distTag.length === 0) {
@@ -37,7 +36,7 @@ function readBuildMetadata(rootDir) {
     const text = fs.readFileSync(metadataPath(rootDir), 'utf8');
     const payload = JSON.parse(text);
     if (typeof payload?.commit !== 'string' || payload.commit.length === 0) return null;
-    return { payload, fingerprint: createHash('sha256').update(text).digest('hex') };
+    return payload;
   } catch { return null; }
 }
 
@@ -71,27 +70,29 @@ export function certifyCapturedBuildIdentity(rootDir, captured) {
 
 export function devnetBuildCacheMatchesCheckout(rootDir) {
   const current = captureSourceBuildIdentity(rootDir);
-  const info = readBuildMetadata(rootDir)?.payload;
+  const info = readBuildMetadata(rootDir);
   // Historical clean stamps omit dirty; unknown/dirty evidence never certifies a cache hit.
   return current.dirty === false && info?.commit === current.commit
     && (info.dirty === undefined || info.dirty === false);
 }
 
 export function captureDevnetBuild(rootDir) {
-  return {
-    identity: captureSourceBuildIdentity(rootDir),
-    metadataFingerprint: readBuildMetadata(rootDir)?.fingerprint ?? null,
-  };
+  const manifest = JSON.parse(fs.readFileSync(path.join(rootDir, 'packages', 'cli', 'package.json'), 'utf8'));
+  if (manifest.dkgBuildIdentity === 'compiler') return { owner: 'compiler' };
+  if (manifest.dkgBuildIdentity !== undefined) throw new Error('Unsupported CLI build identity capability');
+  // Historical build commands do not stamp their output. Capture BEFORE they run.
+  return { owner: 'legacy', identity: captureSourceBuildIdentity(rootDir) };
 }
 
-export function ensureDevnetBuildInfo(rootDir, before) {
-  const existing = readBuildMetadata(rootDir);
-  // Uncertified stamps remain uncertified even if byte-identical to prebuild metadata.
-  const uncertified = existing && (!/^[a-f0-9]{40}$/i.test(existing.payload.commit)
-    || (existing.payload.dirty !== undefined && existing.payload.dirty !== false));
-  // Compilation owns a newly produced identity, even when dirty or unknown.
-  if (existing && (uncertified || !before || existing.fingerprint !== before.metadataFingerprint)) return existing.payload;
-  // Legacy builds produce no stamp. Certify only the checkout captured BEFORE building.
-  const identity = certifyCapturedBuildIdentity(rootDir, before?.identity ?? captureSourceBuildIdentity(rootDir));
+export function ensureDevnetBuildInfo(rootDir, build) {
+  if (build?.owner === 'compiler') {
+    const metadata = readBuildMetadata(rootDir);
+    if (!metadata) throw new Error('Compiler-owned build did not produce build identity');
+    return metadata;
+  }
+  if (build?.owner !== 'legacy' || !build.identity) {
+    throw new Error('Captured prebuild source identity is required for legacy certification');
+  }
+  const identity = certifyCapturedBuildIdentity(rootDir, build.identity);
   return writeBuildMetadata({ rootDir, distTag: 'devnet', ...identity }).payload;
 }

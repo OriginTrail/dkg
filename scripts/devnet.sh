@@ -956,9 +956,8 @@ node_cli_entry() {
   version_cli_entry "$(node_version_ref "$node_num" "$role")"
 }
 
-# Older checkouts report only a short commit from /api/status without the
-# build-info file release packages carry. Give devnet worktrees truthful full
-# checkout metadata so release-layout checks can pin the exact tag commit.
+# Modern compilers own their output identity. Historical checkouts receive
+# truthful metadata from the identity captured before their build begins.
 write_devnet_version_build_info() {
   local dest="$1" before="${2:-}"
   node "$(dirname "${BASH_SOURCE[0]}")/stamp-cli-build-info.mjs" --ensure-devnet "$dest" "$before"
