@@ -790,12 +790,12 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       ['missing block', undefined],
       ['negative depth', { ...queue, depth: -1 }],
       ['fractional age', { ...queue, oldestWaiterAgeMs: 1.5 }],
-      ['no pending count', { ...queue, pending: undefined }],
+      ['negative pending count', { ...queue, pending: -1 }],
+      ['pending count that is not a number', { ...queue, pending: '4' }],
       ['fractional pending age', { ...queue, oldestPendingAgeMs: 0.5 }],
-      ['missing pending age', (({ oldestPendingAgeMs: _dropped, ...rest }) => rest)(queue)],
       ['string flag', { ...queue, passRunning: 'yes' }],
       ['array', [queue]],
-    ])('degrades a version-skewed queue to null: %s', async (_label, finalizedPrivatePlacement) => {
+    ])('degrades a malformed queue to null: %s', async (_label, finalizedPrivatePlacement) => {
       const response = await requestStatusWithAgent(
         { readRfc64SwmCatalogProjectionSupervisorStatusV1: () => supervisorStatus(finalizedPrivatePlacement) },
         {},
@@ -805,6 +805,23 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       );
       expect(response.status).toBe(200);
       expect(response.body.rfc64Catalog.finalizedPrivatePlacementQueue).toBeNull();
+    });
+
+    it.each([
+      ['neither backlog field', (({ pending: _p, oldestPendingAgeMs: _a, ...rest }) => rest)(queue)],
+      ['no pending count', (({ pending: _p, ...rest }) => rest)(queue)],
+      ['no pending age', (({ oldestPendingAgeMs: _a, ...rest }) => rest)(queue)],
+    ])('reads the rest of the block from a provider that predates the backlog fields: %s', async (_label, older) => {
+      const response = await requestStatusWithAgent(
+        { readRfc64SwmCatalogProjectionSupervisorStatusV1: () => supervisorStatus(older) },
+        {},
+        '/api/status',
+        null,
+        catalogActivation,
+      );
+      expect(response.status).toBe(200);
+      // What the provider sent, and nothing made up for what it did not.
+      expect(response.body.rfc64Catalog.finalizedPrivatePlacementQueue).toEqual(older);
     });
 
     it('keeps status available when the supervisor is not bound', async () => {

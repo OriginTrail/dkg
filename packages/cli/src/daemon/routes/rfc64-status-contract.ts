@@ -112,26 +112,38 @@ export function sanitizeRfc64CatalogShadowExecutionStatusV1(
 }
 
 /**
+ * The queue aggregate as the route reports it. The two backlog fields came after the others, so
+ * they are optional on read: a provider that predates them still has the rest of its block read.
+ */
+export type SanitizedFinalizedPrivatePlacementQueueV1 = Readonly<
+  Omit<FinalizedPrivatePlacementQueueStatusV1, 'pending' | 'oldestPendingAgeMs'>
+  & Partial<Pick<FinalizedPrivatePlacementQueueStatusV1, 'pending' | 'oldestPendingAgeMs'>>
+>;
+
+/**
  * GH#3081 — allow-list for the finalized-private placement queue aggregate. Counts, three
  * durations and one flag are rebuilt field by field, so no repair key, UAL, author or graph id a
  * provider might attach can cross the HTTP boundary; any other shape reads as null. `pending` and
  * `oldestPendingAgeMs` are the backlog: placements owed, whether or not anything still asks for them.
+ * A provider that omits either still has the block read without it; one that sends it sends it
+ * well-formed, or the block reads as null like any other malformed shape.
  */
 export function sanitizeRfc64FinalizedPrivatePlacementQueueV1(
   input: unknown,
-): Readonly<FinalizedPrivatePlacementQueueStatusV1> | null {
+): SanitizedFinalizedPrivatePlacementQueueV1 | null {
   if (
     !isRecordV1(input)
-    || !hasNonNegativeSafeIntegersV1(input, ['depth', 'pending', 'waiters', 'cooldownSkips'])
+    || !hasNonNegativeSafeIntegersV1(input, ['depth', 'waiters', 'cooldownSkips'])
     || typeof input.passRunning !== 'boolean'
-    || !isNullableNonNegativeSafeIntegerV1(input.oldestPendingAgeMs)
+    || (input.pending !== undefined && !isNonNegativeSafeIntegerV1(input.pending))
+    || (input.oldestPendingAgeMs !== undefined && !isNullableNonNegativeSafeIntegerV1(input.oldestPendingAgeMs))
     || !isNullableNonNegativeSafeIntegerV1(input.oldestWaiterAgeMs)
     || !isNullableNonNegativeSafeIntegerV1(input.lastPassDurationMs)
   ) return null;
   return Object.freeze({
     depth: input.depth as number,
-    pending: input.pending as number,
-    oldestPendingAgeMs: input.oldestPendingAgeMs,
+    ...(input.pending === undefined ? {} : { pending: input.pending }),
+    ...(input.oldestPendingAgeMs === undefined ? {} : { oldestPendingAgeMs: input.oldestPendingAgeMs }),
     waiters: input.waiters as number,
     oldestWaiterAgeMs: input.oldestWaiterAgeMs,
     passRunning: input.passRunning,
