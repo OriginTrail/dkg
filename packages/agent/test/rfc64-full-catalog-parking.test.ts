@@ -20,6 +20,8 @@ import {
 import { Rfc64SwmCatalogProjectionOwnerV1 } from '../src/dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
 import { AuthorCatalogFullErrorV1 } from '../src/internal/author-catalog-capacity.js';
 import {
+  FULL_CATALOG_MOVED_HEAD_RECHECK_INTERVAL_MS_V1,
+  FULL_CATALOG_NAMED_SCOPES_SWEEP_V1,
   FULL_CATALOG_RECHECK_INTERVAL_MS_V1,
   FullCatalogParkingV1,
   MAX_FULL_CATALOG_DETAILED_SCOPES_V1,
@@ -98,6 +100,13 @@ function node() {
     free(repair: Marker, kaNumber: number) {
       const catalog = catalogOf(repair);
       expect(catalog.held.delete(ual(kaNumber))).toBe(true);
+      catalog.version += 1;
+    },
+    /** Swap rows at the same count, as an exact-set change does, and commit the new head. */
+    swap(repair: Marker, removed: readonly number[], added: readonly string[]) {
+      const catalog = catalogOf(repair);
+      for (const kaNumber of removed) expect(catalog.held.delete(ual(kaNumber))).toBe(true);
+      for (const kaUal of added) catalog.held.add(kaUal);
       catalog.version += 1;
     },
     rows: (repair: Marker) => catalogOf(repair).held.size,
@@ -227,7 +236,9 @@ describe('finalized-private placements of a full author catalog', () => {
 
   it('keeps every full scope parked when there are more of them than lists of held assets are kept', async () => {
     const model = node();
-    const scopes = MAX_FULL_CATALOG_DETAILED_SCOPES_V1 + 6;
+    // More than either bound: the lists of held assets kept, and the sweep of log times.
+    const scopes = FULL_CATALOG_NAMED_SCOPES_SWEEP_V1 + 14;
+    expect(scopes).toBeGreaterThan(MAX_FULL_CATALOG_DETAILED_SCOPES_V1);
     const graph = (index: number) => `full-catalog-${index}` as ContextGraphIdV1;
     const first = Array.from({ length: scopes }, (_value, index) => marker(graph(index), CAP + 1));
     for (const refused of first) model.fill(refused);
@@ -237,12 +248,15 @@ describe('finalized-private placements of a full author catalog', () => {
     await s.pass();
     expect(model.state.attempts).toHaveLength(scopes);
     expect(s.capacity()).toEqual({ parkedPlacements: scopes, scopesAtCap: scopes });
+    expect(s.lines('catalog_full')).toHaveLength(scopes);
 
-    // Pass after pass, nothing is attempted: no scope lost what keeps its marker parked.
+    // Pass after pass, nothing is attempted and no scope is named again: none lost what keeps
+    // its marker parked, or the time it was last named.
     model.state.attempts.length = 0;
     await s.advance(10 * 60_000);
     expect(model.state.attempts).toEqual([]);
     expect(s.capacity()).toEqual({ parkedPlacements: scopes, scopesAtCap: scopes });
+    expect(s.lines('catalog_full')).toHaveLength(scopes);
 
     // The earliest scopes no longer have the list of what their catalog holds: a new marker of
     // one gets an attempt of its own. The latest still has it: its new marker is parked on it.
@@ -329,19 +343,55 @@ describe('finalized-private placements of a full author catalog', () => {
     expect(model.state.attempts).toEqual([NEW_A.kaUal, newerVersion.kaUal]);
     expect(model.state.markers).toEqual([NEW_A, NEW_B]);
     expect(model.rows(NEW_A)).toBe(CAP);
-    // The replacement committed a new head with the same rows: what was parked stays parked.
-    await s.advance(60_000);
-    expect(model.state.attempts).toEqual([NEW_A.kaUal, newerVersion.kaUal]);
+
+    // The replacement committed a new head with the same rows. The scope reads it once: the
+    // marker parked longest is attempted, refused again, and nothing else is attempted.
+    await s.advance(5_000);
+    expect(model.state.attempts).toEqual([NEW_A.kaUal, newerVersion.kaUal, NEW_A.kaUal]);
+    await s.advance(10 * 60_000);
+    expect(model.state.attempts).toHaveLength(3);
     expect(s.capacity()).toEqual({ parkedPlacements: 2, scopesAtCap: 1 });
 
-    // A marker that was never parked is not taken on a word read under an earlier head: it gets
-    // its own attempt, and the one after it is parked on that fresh refusal.
-    const afterReplacement = marker(FULL_GRAPH, CAP + 4);
-    const afterThat = marker(FULL_GRAPH, CAP + 5);
-    model.state.markers = [...model.state.markers, afterReplacement, afterThat];
+    // New markers at the head that refusal read are parked on it without an attempt.
+    model.state.markers = [...model.state.markers, marker(FULL_GRAPH, CAP + 4), marker(FULL_GRAPH, CAP + 5)];
     await s.pass();
-    expect(model.state.attempts).toEqual([NEW_A.kaUal, newerVersion.kaUal, afterReplacement.kaUal]);
+    expect(model.state.attempts).toHaveLength(3);
     expect(s.capacity()).toEqual({ parkedPlacements: 4, scopesAtCap: 1 });
+  });
+
+  it('attempts parked placements whose assets got rows while the catalog stayed full', async () => {
+    const model = node();
+    model.fill(NEW_A);
+    // Three markers for assets the catalog does not hold. The first two are later versions of
+    // assets whose earlier version is about to get a row.
+    const laterVersionA = marker(FULL_GRAPH, CAP + 1, '2');
+    const laterVersionB = marker(FULL_GRAPH, CAP + 2, '2');
+    model.state.markers = [laterVersionA, laterVersionB, NEW_C];
+    const s = supervisor(model);
+    await s.pass();
+    expect(model.state.attempts).toEqual([laterVersionA.kaUal]);
+    expect(s.capacity()).toEqual({ parkedPlacements: 3, scopesAtCap: 1 });
+
+    // An exact-set change removes two rows and adds those two assets: the same count, another head.
+    model.swap(NEW_A, [1, 2], [laterVersionA.kaUal, laterVersionB.kaUal]);
+    expect(model.rows(NEW_A)).toBe(CAP);
+    model.state.attempts.length = 0;
+
+    // The head moved on, so the scope does not wait for its hour: one attempt a pass, each by
+    // the marker parked longest, for as long as an attempt places its marker.
+    await s.advance(5_000);
+    expect(model.state.attempts).toEqual([laterVersionA.kaUal]);
+    expect(model.state.markers).toEqual([laterVersionB, NEW_C]);
+    await s.advance(5_000);
+    expect(model.state.attempts).toEqual([laterVersionA.kaUal, laterVersionB.kaUal]);
+    expect(model.state.markers).toEqual([NEW_C]);
+    // The third asset still has no row: it is refused at the new head, and parked on that.
+    await s.advance(5_000);
+    expect(model.state.attempts).toEqual([laterVersionA.kaUal, laterVersionB.kaUal, NEW_C.kaUal]);
+    await s.advance(HOUR - 20_000);
+    expect(model.state.attempts).toHaveLength(3);
+    expect(model.state.markers).toEqual([NEW_C]);
+    expect(s.capacity()).toEqual({ parkedPlacements: 1, scopesAtCap: 1 });
   });
 
   it('attempts parked placements again once the applied head shows a free row', async () => {
@@ -387,7 +437,7 @@ describe('finalized-private placements of a full author catalog', () => {
     expect(model.state.attempts).toEqual([NEW_A.kaUal]);
   });
 
-  it('keeps a placement parked when its safety-net attempt fails for another reason at a head that moved on', async () => {
+  it('spaces the attempts for a moved head by a minute while they fail for another reason', async () => {
     const model = node();
     model.fill(NEW_A);
     model.state.markers = [NEW_A, NEW_B];
@@ -399,18 +449,22 @@ describe('finalized-private placements of a full author catalog', () => {
     await s.pass();
     expect(model.state.attempts).toEqual([NEW_A.kaUal, newerVersion.kaUal]);
 
-    // The safety-net attempt of the first marker fails before the catalog is asked. Nothing says
-    // the catalog has room, so the marker stays parked instead of going to the failure timer.
+    // The attempt for the moved head fails before the catalog is asked. Nothing says the catalog
+    // has room, so that marker stays parked instead of going to the failure timer ...
     model.state.failing.add(NEW_A.kaUal);
     model.state.attempts.length = 0;
-    await s.advance(HOUR);
+    await s.advance(5_000);
     expect(model.state.attempts).toEqual([NEW_A.kaUal]);
-    await s.advance(HOUR - 5_000);
+    await s.advance(FULL_CATALOG_MOVED_HEAD_RECHECK_INTERVAL_MS_V1 - 5_000);
     expect(model.state.attempts).toEqual([NEW_A.kaUal]);
     expect(s.lines('catalog_private_repair_failed')).toHaveLength(1);
     expect(s.capacity()).toEqual({ parkedPlacements: 2, scopesAtCap: 1 });
+    // ... and a minute later the other marker gets the attempt. Its refusal reads the new head.
     await s.advance(5_000);
     expect(model.state.attempts).toEqual([NEW_A.kaUal, NEW_B.kaUal]);
+    await s.advance(HOUR - FULL_CATALOG_MOVED_HEAD_RECHECK_INTERVAL_MS_V1 - 10_000);
+    expect(model.state.attempts).toHaveLength(2);
+    expect(s.capacity()).toEqual({ parkedPlacements: 2, scopesAtCap: 1 });
   });
 
   it('does no catalog work for the safety-net attempt while the lane is inactive', async () => {
@@ -620,16 +674,16 @@ describe('full catalog parking', () => {
     const keys = new Set(['a', ...markers.map((_marker, index) => `m${index}`)]);
 
     // The pass that first sees them holds each against the head as it is now: one read each.
-    p.passStarted(keys);
     read.mockClear();
+    p.passStarted(keys);
     expect(p.park('a', NEW_A)).toBe(true);
     for (const [index, parked] of markers.entries()) expect(p.park(`m${index}`, parked)).toBe(true);
     expect(read).toHaveBeenCalledTimes(1 + markers.length);
 
     // Every later pass reads the scope's row once.
     for (let pass = 0; pass < 3; pass++) {
-      p.passStarted(keys);
       read.mockClear();
+      p.passStarted(keys);
       expect(p.park('a', NEW_A)).toBe(true);
       for (const [index, parked] of markers.entries()) expect(p.park(`m${index}`, parked)).toBe(true);
       expect(read).toHaveBeenCalledTimes(1);
@@ -693,6 +747,13 @@ describe('full catalog parking', () => {
     p.passStarted(new Set());
     expect(p.status([])).toEqual({ parkedPlacements: 0, scopesAtCap: 0 });
     expect(p.park('b', NEW_B)).toBe(false);
+
+    // The same when the marker a pass chose for the safety net is the last one to leave.
+    p.placementRefused('c', NEW_C, refusal());
+    clock.now = 2 * HOUR;
+    p.passStarted(new Set(['c']));
+    p.passStarted(new Set());
+    expect(p.status([])).toEqual({ parkedPlacements: 0, scopesAtCap: 0 });
   });
 
   it('survives a log sink that throws', () => {
