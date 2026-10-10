@@ -20,7 +20,7 @@ const term = (value: oxigraph.Term) => value.termType === 'Literal'
   : { type: value.termType, value: value.value };
 
 async function run(mode: string, populated: 'named' | 'default' | false,
-  options: { lowDisk?: boolean; redirect?: 'query' | 'mutation'; assets?: number; group?: number; corrupt?: 'missing' | 'wrong-graph'; alteredInput?: boolean } = {}) {
+  options: { trailingSlash?: boolean; lowDisk?: boolean; redirect?: 'query' | 'mutation'; assets?: number; group?: number; corrupt?: 'missing' | 'wrong-graph'; alteredInput?: boolean } = {}) {
   const home = await mkdtemp(join(tmpdir(), 'ingest-guard-'));
   const nq = '<urn:s> <urn:p> "plain" <urn:g> .\n<urn:s> <urn:link> <urn:o> <urn:g> .\n<urn:s> <urn:lang> "hello"@en <urn:g> .\n<urn:s> <urn:number> "42"^^<http://www.w3.org/2001/XMLSchema#integer> <urn:g> .\n# comment without a final newline';
   const assets = [];
@@ -73,7 +73,7 @@ async function run(mode: string, populated: 'named' | 'default' | false,
     args.push('--import', join(home, 'guard.mjs'));
   }
   args.push(resolve('scripts/ingest-floor-benchmark.mjs'), '--manifest', join(home, 'manifest.json'),
-    '--endpoint', url, '--mode', mode, '--out', join(home, 'out.json'), '--storage-path', join(home, 'journal'));
+    '--endpoint', options.trailingSlash ? `${url}/` : url, '--mode', mode, '--out', join(home, 'out.json'), '--storage-path', join(home, 'journal'));
   if (options.group !== undefined) args.push('--group', String(options.group));
   await mkdir(join(home, 'journal'));
   let output = '';
@@ -163,4 +163,10 @@ describe('storage benchmark safety and RDF boundaries', () => {
     expect(r.mutations).toBe(0); expect(r.quads).toEqual([]);
   });
 
+});
+
+it.each(['atomic','rdf'])('accepts the adapter-normalized trailing slash in %s mode', async mode => {
+  const r = await run(mode,false,{trailingSlash:true});
+  expect(r.code,r.output).toBe(0);
+  expect(r.report).toMatchObject({complete:true,graphCountsMatch:true,actualQuads:5});
 });

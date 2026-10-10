@@ -26,12 +26,13 @@ const mode = options.mode;
 if (!['atomic', 'rdf'].includes(mode)) throw new Error('mode must be atomic or rdf');
 const endpoint = new URL(options.endpoint);
 if (endpoint.protocol !== 'http:' || endpoint.username || endpoint.password || !['127.0.0.1', '[::1]'].includes(endpoint.hostname)) throw new Error('Only loopback test stores are allowed');
+const endpointUrl = endpoint.href.replace(/\/$/, '');
 // This standalone benchmark owns its process: constrain both the adapter and
 // direct RDF POSTs before dispatch, including redirects on initially local URLs.
 const fetchEndpoint = globalThis.fetch;
 globalThis.fetch = (input, init) => {
   const destination = new URL(input instanceof Request ? input.url : input);
-  if (destination.href !== endpoint.href) throw new Error('Benchmark endpoint changed');
+  if (destination.href.replace(/\/$/, '') !== endpointUrl) throw new Error('Benchmark endpoint changed');
   return fetchEndpoint(input, { ...init, redirect: 'error' });
 };
 const output = resolve(options.out);
@@ -41,7 +42,7 @@ if (!Number.isSafeInteger(groupSize) || groupSize < 1 || groupSize > 100) throw 
 const limit = Number(options.limit ?? manifest.assets.length);
 if (!Number.isSafeInteger(limit) || limit < 1 || limit > manifest.assets.length) throw new Error('Invalid limit');
 const selected = manifest.assets.slice(0, limit);
-const store = new SparqlHttpStore({ queryEndpoint: endpoint.href, consistencyProfile: 'atomic-readback', timeout: 120000 });
+const store = new SparqlHttpStore({ queryEndpoint: endpointUrl, consistencyProfile: 'atomic-readback', timeout: 120000 });
 const numeric = term => {
   const value = countValue(term);
   if (value === null || !Number.isSafeInteger(Number(value))) throw new Error('Invalid or oversized SPARQL count');
@@ -96,7 +97,7 @@ try {
       }
     } else {
       const payload = parsed.map(({ asset, nq }) => `${nq}\n<${asset.graph}> <urn:benchmark:status> "confirmed" <urn:benchmark:meta> .\n`).join('');
-      const response = await fetch(endpoint, {
+      const response = await fetch(endpointUrl, {
         method: 'POST', headers: { 'content-type': 'application/n-quads' }, body: payload,
         signal: AbortSignal.timeout(120000),
       });
