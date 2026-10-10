@@ -7,7 +7,7 @@ import type {
 import type { PublicSnapshotMode } from "./public-snapshot-evidence.js";
 export interface AgentQueryOptions {
   contextGraphId?: string;
-  accessDenied?: 'empty' | 'error';
+  accessDenied?: "empty" | "error";
   redactQuery?: boolean;
   maxResponseBytes?: number;
   /** Explicit acceptance of configured-core chain evidence for this graph. */

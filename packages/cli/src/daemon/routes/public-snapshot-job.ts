@@ -8,6 +8,12 @@ import type { RequestContext } from "./context.js";
 
 interface Job {
   id: string;
+  request: {
+    contextGraphId: string;
+    onChainId: string;
+    mode: string;
+    trustedCorePeerIds: readonly string[];
+  };
   state: "running" | "complete" | "failed";
   startedAt: number;
   finishedAt?: number;
@@ -65,7 +71,14 @@ export async function handlePublicSnapshotJob({
       ) ||
       typeof input.contextGraphId !== "string" ||
       typeof input.onChainId !== "string" ||
-      !Array.isArray(input.trustedCorePeerIds)
+      !Array.isArray(input.trustedCorePeerIds) ||
+      input.trustedCorePeerIds.length < 1 ||
+      input.trustedCorePeerIds.length > 4 ||
+      input.trustedCorePeerIds.some(
+        (p) => typeof p !== "string" || !p || p.length > 256,
+      ) ||
+      ![undefined, "core-cache", "rpc-only"].includes(input.mode) ||
+      !/^[1-9][0-9]{0,77}$/.test(input.onChainId)
     )
       throw new Error("Invalid request");
   } catch {
@@ -77,6 +90,12 @@ export async function handlePublicSnapshotJob({
     return;
   }
   const job: Job = {
+    request: {
+      contextGraphId: input.contextGraphId,
+      onChainId: input.onChainId,
+      mode: input.mode ?? "core-cache",
+      trustedCorePeerIds: [...input.trustedCorePeerIds],
+    },
     id: randomUUID(),
     state: "running",
     startedAt: Date.now(),

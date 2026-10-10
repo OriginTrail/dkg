@@ -47,3 +47,7 @@ await agent.query('SELECT ?s WHERE { ?s ?p ?o } LIMIT 20', {
 Local validation uses real DKG nodes, libp2p streaming, an isolated deployed Hardhat chain and separate Oxigraph stores. It checks core-cache transfers with receiver asset-RPC methods forbidden, independent RPC-only recovery, public/private behavior, evidence labeling and query refusal without acceptance. Contract tests reject stale/mis-scoped/malformed evidence; existing durable-materialization and private-query regression tests protect the reused boundaries.
 
 This implementation retains ten-asset streaming batches and sequential supplier fallback (up to four configured peers). It does not yet implement 100 MB chunks, concurrent suppliers, resumable graph sessions, background sampling audits or a large-graph five-minute performance guarantee. The storage benchmark is a separate lower-bound measurement. Cold snapshot generation still costs RPC work at the core; only a warm cache avoids that work for additional consumers.
+
+The bounded SELECT and entity-discovery endpoints accept the same `chainEvidenceMode`
+and echo it in successful responses. Omitting it retains the independent policy;
+clients must not silently treat an unacknowledged trust selection as accepted.

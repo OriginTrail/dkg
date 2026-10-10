@@ -22,7 +22,7 @@ export async function handleBoundedQueryRoutes(ctx: RequestContext): Promise<voi
       version: BOUNDED_QUERY_VERSION, maxRows: BOUNDED_QUERY_MAX_ROWS,
       maxResultBytes: BOUNDED_QUERY_MAX_BYTES, maxTimeoutMs: BOUNDED_QUERY_MAX_TIMEOUT_MS,
       coverage: 'local-only', truncation: 'error',
-      paging: 'offset',
+      paging: 'offset', chainEvidenceModes: ['rpc-only', 'core-cache'],
     });
     return;
   }
@@ -37,6 +37,7 @@ export async function handleBoundedQueryRoutes(ctx: RequestContext): Promise<voi
       || timeoutMs < 1 || timeoutMs > BOUNDED_QUERY_MAX_TIMEOUT_MS
       || !['complete', 'page'].includes(mode) || !Number.isSafeInteger(offset)
       || offset < 0 || offset > 1_000_000 || (mode === 'complete' && offset !== 0)
+      || ![undefined, 'core-cache', 'rpc-only'].includes(parsed.chainEvidenceMode)
       || ![undefined, 'verifiable-memory', 'shared-working-memory'].includes(parsed.view)) {
     jsonResponse(res, 400, { code: 'BOUNDED_QUERY_INVALID_REQUEST', error: 'Unsupported version, view or deadline' });
     return;
@@ -55,6 +56,7 @@ export async function handleBoundedQueryRoutes(ctx: RequestContext): Promise<voi
   try {
     const options = {
       contextGraphId: parsed.contextGraphId, callerAgentAddress, view: parsed.view,
+      chainEvidenceMode: parsed.chainEvidenceMode,
       includeContextGraphPartitions: parsed.includeContextGraphPartitions === true,
       signal, priority: lifecycle.priority, source: lifecycle.source,
       accessDenied: 'error' as const, redactQuery: true, maxResponseBytes: BOUNDED_QUERY_MAX_BYTES,
@@ -72,6 +74,7 @@ export async function handleBoundedQueryRoutes(ctx: RequestContext): Promise<voi
     jsonResponse(res, 200, {
       version: BOUNDED_QUERY_VERSION, queryId: randomUUID(), observedAt: new Date().toISOString(),
       contextGraphId: parsed.contextGraphId, coverage: 'local-only', mode,
+      chainEvidenceMode: parsed.chainEvidenceMode ?? 'rpc-only',
       resultComplete: mode === 'complete',
       ...(mode === 'page' ? { pageComplete: true, hasMore, offset, nextOffset: offset + rows.length } : {}),
       result: bounded.result,

@@ -47,7 +47,6 @@ import {
 
   Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
   validateContextGraphId,
-  TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
   isTrustLevelQuad,
@@ -84,7 +83,7 @@ import {
   ratchetSwmSenderChainKey,
   uint64ForProto,
   SWM_SENDER_KEY_SKIPPED_MESSAGE_CACHE_LIMIT,
-  type DKGNodeConfig, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
+  type DKGNodeConfig, type AssertionDescriptor, type AssertionEvent, type AssertionState,
   type SwmSenderKeyMessageMsg,
   type SwmSenderKeyPackageAckReasonCode,
   type SwmSenderKeyPackageMsg,

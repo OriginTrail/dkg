@@ -193,7 +193,7 @@ async function readSnapshotCalls(
     });
   }
   // Local development chains may not deploy Multicall3. Preserve the same anchor and cancellation.
-  const result: unknown[] = new Array(calls.length);
+  const result: unknown[] = Array.from({ length: calls.length });
   let next = 0;
   await Promise.all(
     Array.from({ length: Math.min(8, calls.length) }, async () => {
