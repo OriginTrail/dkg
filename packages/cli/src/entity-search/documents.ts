@@ -32,12 +32,12 @@ function selection(spec: EntityIndexSpec): string {
     ${spec.types.length ? `?entity a ?type . VALUES ?type { ${spec.types.map(iri).join(' ')} }` : ''} }`;
 }
 export class EntityGraphReader {
-  constructor(private agent: { query: OmitThisParameter<DKGAgent['query']> }, readonly callerAgentAddress?: string, private priority: 'normal' | 'background' = 'normal') {}
+  constructor(private agent: { query: OmitThisParameter<DKGAgent['query']> }, readonly callerAgentAddress?: string, private priority: 'normal' | 'background' = 'normal', private chainEvidenceMode?: 'core-cache' | 'rpc-only') {}
   async query(spec: EntityIndexSpec, sparql: string, signal: AbortSignal, deadline: number) {
     checkDeadline(signal, deadline);
     const result = await this.agent.query(sparql, { contextGraphId: spec.contextGraphId, view: spec.view,
       includeContextGraphPartitions: true, callerAgentAddress: this.callerAgentAddress,
-      accessDenied: 'error', redactQuery: true, signal, source: 'api.entities', priority: this.priority, maxResponseBytes: 256 * 1024 });
+      accessDenied: 'error', redactQuery: true, chainEvidenceMode: this.chainEvidenceMode, signal, source: 'api.entities', priority: this.priority, maxResponseBytes: 256 * 1024 });
     checkDeadline(signal, deadline);
     return result.bindings;
   }

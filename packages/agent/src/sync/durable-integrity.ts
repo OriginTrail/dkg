@@ -1,3 +1,4 @@
+import { normalizeGraphScopedHex32 as normalizeHex32 } from "./graph-scoped-root.js";
 import { createHash } from 'node:crypto';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -1749,11 +1750,6 @@ function safeCount(raw: string, field: string): number {
   return Number(value);
 }
 
-function normalizeHex32(raw: string, field: string): string {
-  const hex = stripLiteral(raw).replace(/^0x/i, '').toLowerCase();
-  if (!/^[0-9a-f]{64}$/.test(hex)) throw new Error(`${field} must be exactly 32 bytes of hexadecimal data`);
-  return hex;
-}
 
 function hexToBytes(hex: string): Uint8Array {
   return Uint8Array.from(hex.match(/.{2}/g)!.map((pair) => Number.parseInt(pair, 16)));

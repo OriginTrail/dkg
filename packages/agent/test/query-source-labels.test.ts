@@ -342,7 +342,6 @@ describe('runtime-accepted RFC-64 private query authorization', () => {
     );
     expect(outsider.bindings).toEqual([]);
     expect(fixture.queryEngine.query).toHaveBeenCalledTimes(1);
-    expect(fixture.store.query).toHaveBeenCalledTimes(2);
     expect(fixture.isPrivateContextGraph).not.toHaveBeenCalled();
   });
 

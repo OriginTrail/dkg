@@ -134,3 +134,19 @@ it('rejects synchronous store results completed after the absolute deadline', as
     expect(JSON.parse(read.res.body).code).toBe('QUERY_DEADLINE_EXCEEDED');
   } finally { await store.close(); }
 });
+
+it('forwards explicit core trust, labels the result and refuses unknown modes', async () => {
+  const agent = { query: vi.fn(async () => ({bindings:[]})) };
+  const read = context(agent, {chainEvidenceMode:'core-cache'});
+  await handleBoundedQueryRoutes(read.ctx);
+  expect(agent.query.mock.calls[0][1].chainEvidenceMode).toBe('core-cache');
+  expect(JSON.parse(read.res.body).chainEvidenceMode).toBe('core-cache');
+  const invalid = context(agent, {chainEvidenceMode:'auto'});
+  await handleBoundedQueryRoutes(invalid.ctx);
+  expect(invalid.res.statusCode).toBe(400);
+  agent.query.mockRejectedValueOnce(Object.assign(new Error('trust required'),{code:'CORE_CACHE_QUERY_TRUST_REQUIRED'}));
+  const strict = context(agent);
+  await handleBoundedQueryRoutes(strict.ctx);
+  expect(strict.res.statusCode).toBe(409);
+  expect(JSON.parse(strict.res.body).code).toBe('CORE_CACHE_QUERY_TRUST_REQUIRED');
+});

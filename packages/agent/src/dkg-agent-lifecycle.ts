@@ -1,3 +1,4 @@
+import { createRemoteQueryHandler } from "./remote-query-handler.js";
 import { syncReconcilerEnabled, syncOnConnectEnabled, durableSyncEnabled } from './internal/lifecycle-sync-policy.js';
 import { emptySwmRecoveryResult } from './sync/shared-memory-completion.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
@@ -129,6 +130,7 @@ import {
   type ChallengePinnedGraphScopedAsset,
   type GraphScopedMaterializationOutcome,
   type VerifiedGraphScopedAsset,
+  type AuthenticatedGraphScopedAsset,
   type VerifyContextGraphBinding,
 } from './sync/requester/graph-scoped-materialization.js';
 import {
@@ -186,7 +188,7 @@ import {
 import { ethers } from 'ethers';
 import { join } from 'node:path';
 import {
-  DKGQueryEngine, QueryHandler,
+  DKGQueryEngine,
   emptyQueryResultForKind,
   validateReadOnlySparql,
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
@@ -1637,6 +1639,17 @@ export interface ContextGraphCatchupOptions {
   sourceOverride?: SyncAdmissionSource;
 }
 
+interface ExactKnowledgeAssetSyncOptions {
+  onWorkStarted?: () => void;
+  signal?: AbortSignal;
+  isCurrent?: () => boolean;
+  forceFreshExactSession?: boolean;
+  exactRecoveryTransportMode?: ExactRecoveryTransportMode;
+  registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
+  authenticateGraphScopedAsset?: (asset: VerifiedGraphScopedAsset) => AuthenticatedGraphScopedAsset | Promise<AuthenticatedGraphScopedAsset>;
+  totalTimeoutMs?: number;
+}
+
 export type DurableSyncOptions = {
   stopOnBackoffWorthyFailure?: boolean;
   /**
@@ -1679,6 +1692,7 @@ export type DurableSyncOptions = {
    * stream pre-flight to rely on. Handed only to that pass's own exchange; absent otherwise.
    */
   registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
+  authenticateGraphScopedAsset?: (asset: VerifiedGraphScopedAsset) => AuthenticatedGraphScopedAsset | Promise<AuthenticatedGraphScopedAsset>;
   /** Owner-private retained META prefix for bounded durable recovery. */
   durableMetaContinuation?: DurableMetaContinuation;
   /** Admission override for foreground VM recovery. */
@@ -1742,6 +1756,7 @@ type LegacyDurableContextGraphOptions = {
   durableMetaContinuation?: DurableMetaContinuation;
   exactRecoveryTransportMode?: ExactRecoveryTransportMode;
   registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
+  authenticateGraphScopedAsset?: (asset: VerifiedGraphScopedAsset) => AuthenticatedGraphScopedAsset | Promise<AuthenticatedGraphScopedAsset>;
 };
 
 const DURABLE_AUTHENTICATION_MAX_ATTEMPTS = 5;
@@ -2640,25 +2655,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (this.config.queryAccess?.defaultPolicy === 'public') {
       this.log.warn(ctx, 'Query access policy is "public" — all remote queries will be accepted. Set queryAccess.defaultPolicy to "deny" for stricter security.');
     }
-    // #1105: even under deny-by-default, a CG whose live on-chain
-    // accessPolicy is public (0) is remotely queryable — otherwise
-    // `accessPolicy: "public"` at CG creation has no remote-query effect
-    // and every devnet/fresh install (which ships no queryAccess config)
-    // denies everything. Explicit queryAccess.contextGraphs entries still
-    // override; isContextGraphPublicOnChain fails closed on any lookup
-    // error, so private/curated/unregistered CGs remain denied.
-    const queryRemoteHandler = new QueryHandler(this.queryEngine, queryAccessConfig, {
-      isContextGraphPublic: (contextGraphId: string) =>
-        withRpcUsageSite(
-          CG_AUTH_RPC_SITES.remoteQuery,
-          () => this.isContextGraphPublicOnChain(contextGraphId, createOperationContext('query')),
-        ),
-      // A graph held back from sync is not queried either, for an operator
-      // whose queryAccess opens it (see contextGraphServingWithheld). The
-      // handler applies this to the id its access policy and lookups use,
-      // once it has checked that id is a string.
-      servingWithheld: (contextGraphId: string) => this.contextGraphServingWithheld(contextGraphId),
-    });
+    const queryRemoteHandler = createRemoteQueryHandler(this, queryAccessConfig);
     // rc.9 PR-9: PROTOCOL_QUERY_REMOTE migrated onto the Universal
     // Messenger substrate. Wire prefix bumped to /dkg/10.0.1/* (hard
     // cutover; rc.8 ↔ rc.9 cross-version query stops working) so
@@ -3895,6 +3892,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Subscriptions known only by an on-chain name hash sync nothing until the
     // cleartext id is found; serve and resolve names for this node's lifetime.
     this.startContextGraphNameResolution(signal);
+    this.startPublicGraphSnapshots();
 
     // Reconnect-on-gossip: when a gossip message arrives from a peer we're
     // not currently connected to, best-effort dial them. This catches the
@@ -5855,6 +5853,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 forceFreshExactSession: options?.forceFreshExactSession,
                 exactRecoveryTransportMode: options?.exactRecoveryTransportMode,
                 registeredPublicEvidence: options?.registeredPublicEvidence,
+                authenticateGraphScopedAsset: options?.authenticateGraphScopedAsset,
                 authenticationTimeoutMs,
                 operationFetchDeadline: operationBoundary.fetchDeadline,
                 operationDeadline: operationBoundary.deadline,
@@ -6044,43 +6043,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeerId: string,
     contextGraphId: string,
     assetUals: readonly string[],
-    options?: {
-      onWorkStarted?: () => void;
-      signal?: AbortSignal;
-      isCurrent?: () => boolean;
-      forceFreshExactSession?: boolean;
-      exactRecoveryTransportMode?: ExactRecoveryTransportMode;
-      registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
-      totalTimeoutMs?: number;
-    },
+    options?: ExactKnowledgeAssetSyncOptions,
   ): Promise<ExactKnowledgeAssetSyncResult>;
   syncExactKnowledgeAssetsFromPeerDetailed(this: DKGAgent,
     remotePeerId: string,
     contextGraphId: string,
     selection: ExactAssetSelection,
-    options?: {
-      onWorkStarted?: () => void;
-      signal?: AbortSignal;
-      isCurrent?: () => boolean;
-      forceFreshExactSession?: boolean;
-      exactRecoveryTransportMode?: ExactRecoveryTransportMode;
-      registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
-      totalTimeoutMs?: number;
-    },
+    options?: ExactKnowledgeAssetSyncOptions,
   ): Promise<ExactKnowledgeAssetSyncResult>;
   async syncExactKnowledgeAssetsFromPeerDetailed(this: DKGAgent,
     remotePeerId: string,
     contextGraphId: string,
     selectionInput: ExactAssetSelection | readonly string[],
-    options: {
-      onWorkStarted?: () => void;
-      signal?: AbortSignal;
-      isCurrent?: () => boolean;
-      forceFreshExactSession?: boolean;
-      exactRecoveryTransportMode?: ExactRecoveryTransportMode;
-      registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
-      totalTimeoutMs?: number;
-    } = {},
+    options: ExactKnowledgeAssetSyncOptions = {},
   ): Promise<ExactKnowledgeAssetSyncResult> {
     const selection: ExactAssetSelection = Array.isArray(selectionInput)
       ? createUalOnlyExactAssetSelection(selectionInput)
@@ -6098,6 +6073,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         forceFreshExactSession: options.forceFreshExactSession,
         exactRecoveryTransportMode: options.exactRecoveryTransportMode,
         registeredPublicEvidence: options.registeredPublicEvidence,
+        authenticateGraphScopedAsset: options.authenticateGraphScopedAsset,
         ...(options.totalTimeoutMs === undefined ? {} : { totalTimeoutMs: options.totalTimeoutMs }),
         stopOnBackoffWorthyFailure: true,
         priority: VM_RECOVERY_SYNC_PRIORITY,
@@ -6174,6 +6150,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       forceFreshExactSession,
       exactRecoveryTransportMode = 'stream-preferred',
       registeredPublicEvidence,
+      authenticateGraphScopedAsset,
       authenticationTimeoutMs = fetchTimeoutMs,
       operationFetchDeadline,
       operationDeadline,
@@ -6389,7 +6366,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           recaptureBindingGeneration,
           assertCurrent,
         }): Promise<GraphScopedMaterializationOutcome> => {
-          const authentication = await authenticateDurableGraphScopedAsset({
+          const authentication = authenticateGraphScopedAsset ? await authenticateGraphScopedAsset(asset) : await authenticateDurableGraphScopedAsset({
             chain: this.chain,
             asset,
             verifyContextGraphBinding,

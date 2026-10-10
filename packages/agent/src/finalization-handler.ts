@@ -1,3 +1,4 @@
+import { readCurrentAssertionVersion } from "./graph-scoped-assertion-version.js";
 import {
   decodeFinalizationMessage,
   contextGraphMetaUri,
@@ -94,7 +95,6 @@ import {
   createDurableFinalizationRecoveryEligibility,
   type FinalizationRecoveryEligibility,
 } from './finalization-recovery-eligibility.js';
-
 /**
  * Resolves a local context-graph id (the topic/CG name used in gossip) to
  * its on-chain numeric id. Returns `null`/`undefined` for CGs that aren't
@@ -105,9 +105,7 @@ import {
 export type ResolveContextGraphOnChainId = (
   contextGraphId: string,
 ) => Promise<string | null | undefined>;
-
 export type MarkContextGraphMetaDirtyFromQuads = (quads: readonly Quad[]) => void;
-
 function stripOptionalLiteral(value: string | undefined): string | undefined {
   if (!value) return undefined;
   if (value.startsWith('"')) {
@@ -2028,6 +2026,8 @@ export class FinalizationHandler {
     const safeAccess = resolveGraphScopedAccessEnvelope(head, requestedAccess);
 
     const outcome = await withMaterializationLock(metaGraph, scope.ual, async () => {
+      const currentAssertion = await readCurrentAssertionVersion(this.store, metaGraph, scope.ual);
+      if (currentAssertion !== undefined && currentAssertion > BigInt(scope.assertionVersion)) return 'stale' as const;
       const currentMaterializedVersion = await readMaterializedVersion(
         this.store,
         metaGraph,

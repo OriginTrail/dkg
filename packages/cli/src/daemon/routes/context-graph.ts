@@ -1,3 +1,4 @@
+import { handlePublicSnapshotJob } from './public-snapshot-job.js';
 // daemon/routes/context-graph.ts
 //
 // Route handlers for context-graph (+ contextGraph, sub-graph) CRUD, participants, join flow, manifest publish/install.
@@ -688,6 +689,11 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   // Node-wide gates consume the principal established by authentication; route code must not
   // reinterpret token storage or agent-token resolution.
   const isNodeAdminCaller = (): boolean => canAdministerNode(authentication);
+  if (path === '/api/context-graph/snapshot-sync') {
+    if (!isNodeAdminCaller()) { jsonResponse(res,403,{error:'Node administrator required'}); return; }
+    await handlePublicSnapshotJob(ctx);
+    return;
+  }
   const writePreflightCallerAgentAddress = actor.authenticatedAgentAddress;
   const requestToken = authentication.acceptedToken;
   const writePreflightContextGraphOpts = {

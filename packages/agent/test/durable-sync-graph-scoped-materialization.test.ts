@@ -20,7 +20,7 @@ import {
   shouldApplyMaterialization,
 } from '@origintrail-official/dkg-publisher';
 import { processDurableBatchForWire } from '../src/sync-verify-worker-impl.js';
-import { runDurableSync } from '../src/sync/requester/durable-sync.js';
+import { runDurableSync, runDurableSyncDetailed } from '../src/sync/requester/durable-sync.js';
 import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { DKGAgent } from '../src/dkg-agent.js';
@@ -2474,4 +2474,42 @@ describe('durable graph-scoped KA materialization', () => {
     expect(data.type === 'bindings' ? data.bindings.map((row) => row.s) : []).toEqual([v1Data.subject]);
     expect(await values(store, 'assertionVersion')).toEqual(['"1"']);
   });
+});
+
+it.each(['failed','stale','quarantined'] as const)('keeps only the applied identity when a later exact asset is %s', async outcome => {
+  const secondUal = ual.slice(0,-1)+'2', secondGraph = assertionGraph.slice(0,-1)+'2';
+  const data = [dataQuad(2),{...dataQuad(2),subject:'urn:second',graph:secondGraph}];
+  const meta = data.flatMap((q,i) => {
+    const root = computeFlatKCRootV10([{...q,graph:''}],[]);
+    return finalizedMaterializationMetadata(2,root).map(row=>({...row,
+      subject:i===0 ? ual : secondUal,
+      object:row.object===ual ? (i===0 ? ual : secondUal) : row.object===assertionGraph ? q.graph : row.object}));
+  });
+  const store = new OxigraphStore(), seen: string[] = [];
+  try {
+    const detailed = await runDurableSyncDetailed({ctx,remotePeerId:'exact-partial-test',contextGraphIds:[contextGraphId],
+      durableSyncBudget:uniformDurableSyncBudget(()=>Date.now()+60000),
+      exactAssetSelectionFor:()=>({kind:'ual-only',assetUals:[ual,secondUal]}),
+      fetchSyncPages:async ({phase})=>page(phase,phase==='data'?data:meta),
+      processDurableBatchInWorker:async (data,meta,_ctx,acceptUnverified,mode)=>{
+        const verified=processDurableBatchForWire(data,meta,acceptUnverified,mode);
+        return {...verified,verifiedData:verified.verifiedDataIndexes.map(i=>data[i]!),verifiedMeta:verified.verifiedMetaIndexes.map(i=>meta[i]!)};
+      },
+      storeInsert:({quads})=>store.insert(quads),
+      storeGraphScopedAsset:async ({asset})=>{
+        seen.push(asset.ual);
+        if(asset.ual===secondUal) {
+          if(outcome==='failed') throw new Error('Second asset authentication refused');
+          return outcome;
+        }
+        return materializeVerifiedGraphScopedAsset({store,asset});
+      },
+      deleteCheckpoint:()=>{},setCheckpoint:()=>{},logInfo:()=>{},logWarn:()=>{},logDebug:()=>{},
+    });
+    expect(seen).toEqual([ual,secondUal]);
+    expect(detailed.committedExactAssetUals).toEqual([ual]);
+    expect(await graphQuads(store,assertionGraph)).toHaveLength(1);
+    expect(await graphQuads(store,secondGraph)).toEqual([]);
+    if(outcome==='failed') expect(detailed.result.failedPhases).toBe(1);
+  } finally {await store.close();}
 });
