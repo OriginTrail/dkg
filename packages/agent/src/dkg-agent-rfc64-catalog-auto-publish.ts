@@ -873,11 +873,11 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
             // rows have none, while every admitted post-confirmation placement
             // survives a crash or transient signing/catalog failure.
             await persistence.finalizedPrivatePlacementRepairs.put(repair);
-            finalizedPrivateAttempt = this.requestRfc64FinalizedPrivateCatalogPlacementRepairV1({
+            finalizedPrivateAttempt = this.requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1({
               repair,
               ctx: params.ctx,
-            }).whenAttempted;
-            placementWait.requested(finalizedPrivateAttempt);
+            }, placementWait.observer).whenAttempted;
+            placementWait.requested();
             return;
           }
           const result = await this.removeRfc64SwmAuthorInventoryShadowV1({

@@ -11,17 +11,16 @@ import type { Rfc64PublicCatalogTransportErrorCodeV1 } from '../rfc64/public-cat
  * swallows its own failure, and the output is one log line per slow observer call plus an
  * aggregate, identity-free view of the finalized-private queue for `/api/status`.
  *
- * The supervisor binds the records to the work it already owns. Each accepted waiter gets a
- * record when it is registered (its request time and the cooldown skips it waits through); an
- * admitted attempt returns a recorder that the supervisor passes to the repair body beside the
- * data-only marker, and the body charges its phases to it (the coverage check and asset resolution
- * in the projection; the locked state read, successor production, applied-head CAS and
- * announcement in the upsert); and when the supervisor releases a key's waiters after an attempt,
- * the admission binds its record to each of them. Nothing is matched by object identity or relies
- * on how many repairs run at once; a repair run outside the supervisor reports to the inert
- * recorder. An observer call
- * finds its waiter through the promise it awaits, so its line describes exactly the attempt that
- * released it. The line splits the call's wait into the time to request the repair (the asset lock
+ * Everything travels explicitly with the work the supervisor already owns. An observer call hands
+ * its wait's `observer` to the supervisor with its request; the supervisor keeps it beside the
+ * waiter's settle callback and tells it about the cooldown skips it waits through and the attempt
+ * that releases it. An admitted attempt returns a recorder that the supervisor passes to the repair
+ * body beside the data-only marker, and the body charges its phases to it (the coverage check and
+ * asset resolution in the projection; the locked state read, successor production, applied-head
+ * CAS and announcement in the upsert). Nothing is matched by object identity or relies on how many
+ * repairs run at once; a repair run outside the supervisor reports to the inert recorder, so a line
+ * describes exactly the attempt that released its call. It splits the call's wait into the time to
+ * request the repair (the asset lock
  * and the durable marker write), the time queued in the supervisor (earlier markers, cooldown,
  * the next pass) and the attempt, broken down by phase; `otherMs` is the attempt time no phase
  * claims (lock waits, lane and inventory reads, marker deletion). Per-send announcement timing is
@@ -62,13 +61,33 @@ export interface CatalogPlacementDeliveryV1 {
   readonly failedPeers: readonly Readonly<{ readonly code?: Rfc64PublicCatalogTransportErrorCodeV1 }>[];
 }
 
+/** What one admitted attempt recorded, read by the waiters it releases. */
+export interface CatalogPlacementAttemptRecordV1 {
+  readonly admittedAt: number;
+  endedAt?: number;
+  failed?: boolean;
+  covered?: boolean;
+  readonly phaseMs: Record<CatalogPlacementPhase, number>;
+  peers: number;
+  failedPeers: number;
+  deniedPeers: number;
+}
+
 /** What the supervisor holds for the attempt it admitted. */
 export interface CatalogPlacementAdmissionV1 {
   /** The recorder the supervisor passes to the repair body, beside the data-only marker. */
   readonly attempt: CatalogPlacementAttemptV1;
+  /** What the attempt recorded; absent when observation itself failed, which reads as no attempt. */
+  readonly record?: Readonly<CatalogPlacementAttemptRecordV1>;
   end(outcome: 'completed' | 'failed'): void;
-  /** The supervisor released these waiters after this attempt: bind each one to it. */
-  released(waiters: Iterable<object> | undefined): void;
+}
+
+/** What the supervisor tells the observer call that requested a waiter about that waiter. */
+export interface CatalogPlacementWaiterObserverV1 {
+  /** A pass skipped the waiter's repair because its retry cooldown had not elapsed. */
+  cooldownSkipped(): void;
+  /** The supervisor released the waiter: after `admission`'s attempt, or with none. */
+  released(admission?: CatalogPlacementAdmissionV1): void;
 }
 
 /** What the repair body charges its phases to: its admitted attempt, or the inert recorder. */
@@ -87,8 +106,10 @@ export interface CatalogPlacementAttemptV1 {
 
 /** One observer call's wait. */
 export interface CatalogPlacementWaitV1 {
-  /** The observer asked the supervisor for a placement and waits on `whenAttempted`. */
-  requested(whenAttempted: Promise<void> | null): void;
+  /** Handed to the supervisor with this call's request; told about the waiter it registers. */
+  readonly observer: CatalogPlacementWaiterObserverV1;
+  /** The observer asked the supervisor for a placement. */
+  requested(): void;
   /** The observer is returning: write the line when the wait reached the threshold. */
   end(log: Pick<Logger, 'info'>): void;
 }
@@ -116,24 +137,6 @@ const DEFAULT_SOURCES: CatalogPlacementTimingSourcesV1 = {
   logThresholdMs: CATALOG_PLACEMENT_WAIT_LOG_THRESHOLD_MS,
 };
 
-interface PlacementAttemptRecordV1 {
-  readonly admittedAt: number;
-  endedAt?: number;
-  failed?: boolean;
-  covered?: boolean;
-  readonly phaseMs: Record<CatalogPlacementPhase, number>;
-  peers: number;
-  failedPeers: number;
-  deniedPeers: number;
-}
-
-/** One supervisor waiter: when it was accepted, what it waited through, and what released it. */
-interface PlacementWaiterRecordV1 {
-  readonly requestedAt: number;
-  cooldownSkips: number;
-  attempt?: PlacementAttemptRecordV1;
-}
-
 export const INERT_CATALOG_PLACEMENT_ATTEMPT_V1: CatalogPlacementAttemptV1 = Object.freeze({
   now: () => 0,
   measure: <T>(_phase: unknown, work: () => Promise<T>) => work(),
@@ -144,9 +147,12 @@ export const INERT_CATALOG_PLACEMENT_ATTEMPT_V1: CatalogPlacementAttemptV1 = Obj
 const INERT_ADMISSION: CatalogPlacementAdmissionV1 = Object.freeze({
   attempt: INERT_CATALOG_PLACEMENT_ATTEMPT_V1,
   end: () => {},
-  released: () => {},
 });
-const INERT_WAIT: CatalogPlacementWaitV1 = Object.freeze({ requested: () => {}, end: () => {} });
+const INERT_WAIT: CatalogPlacementWaitV1 = Object.freeze({
+  observer: Object.freeze({ cooldownSkipped: () => {}, released: () => {} }),
+  requested: () => {},
+  end: () => {},
+});
 
 function observe(callback: () => void): void {
   try {
@@ -166,8 +172,6 @@ function logfmtValue(value: string): string {
 /** One agent's placement timing and finalized-private queue evidence. */
 export class CatalogPlacementTimingV1 {
   readonly #sources: CatalogPlacementTimingSourcesV1;
-  /** Each accepted waiter's record, keyed by its settle callback and by the promise it settles. */
-  readonly #waiters = new WeakMap<object, PlacementWaiterRecordV1>();
   readonly #observerCalls = new Map<string, number>();
   #depth = 0;
   #passStartedAt: number | undefined;
@@ -178,19 +182,19 @@ export class CatalogPlacementTimingV1 {
     this.#sources = { ...DEFAULT_SOURCES, ...sources };
   }
 
-  /** Supervisor: a waiter was accepted; its record lives exactly as long as the waiter does. */
-  waiterAdded(settle: object, whenAttempted: object): void {
-    observe(() => {
-      const record: PlacementWaiterRecordV1 = { requestedAt: this.#sources.clock(), cooldownSkips: 0 };
-      this.#waiters.set(settle, record);
-      this.#waiters.set(whenAttempted, record);
-    });
+  /** The timing clock, for the supervisor's waiter request times; NaN when it fails. */
+  now(): number {
+    try {
+      return this.#sources.clock();
+    } catch {
+      return Number.NaN;
+    }
   }
 
   /** Supervisor: one attempt starts now; its recorder travels to the repair body explicitly. */
   admit(): CatalogPlacementAdmissionV1 {
     try {
-      const record: PlacementAttemptRecordV1 = {
+      const record: CatalogPlacementAttemptRecordV1 = {
         admittedAt: this.#sources.clock(),
         phaseMs: Object.fromEntries(CATALOG_PLACEMENT_PHASES.map((phase) => [phase, 0])) as
           Record<CatalogPlacementPhase, number>,
@@ -200,15 +204,10 @@ export class CatalogPlacementTimingV1 {
       };
       const admission: CatalogPlacementAdmissionV1 = {
         attempt: this.#recorder(record),
+        record,
         end: (outcome) => observe(() => {
           record.endedAt = this.#sources.clock();
           record.failed = outcome === 'failed';
-        }),
-        released: (waiters) => observe(() => {
-          for (const waiter of waiters ?? []) {
-            const waiterRecord = this.#waiters.get(waiter);
-            if (waiterRecord !== undefined) waiterRecord.attempt = record;
-          }
         }),
       };
       return Object.freeze(admission);
@@ -217,14 +216,10 @@ export class CatalogPlacementTimingV1 {
     }
   }
 
-  /** Supervisor: a pass skipped these waiters' repair because its retry cooldown had not elapsed. */
-  cooldownSkipped(waiters: Iterable<object> | undefined): void {
+  /** Supervisor: a pass skipped a marker because its retry cooldown had not elapsed. */
+  cooldownSkipped(): void {
     observe(() => {
       this.#cooldownSkips += 1;
-      for (const waiter of waiters ?? []) {
-        const record = this.#waiters.get(waiter);
-        if (record !== undefined) record.cooldownSkips += 1;
-      }
     });
   }
 
@@ -247,30 +242,17 @@ export class CatalogPlacementTimingV1 {
 
   /** Supervisor status: aggregates only, from the waiters the supervisor holds. */
   queueStatus(
-    waiters: ReadonlyMap<string, ReadonlySet<object>>,
+    waiters: Readonly<{ count: number; oldestRequestedAt: number | undefined }>,
     passRunning: boolean,
   ): Readonly<FinalizedPrivatePlacementQueueStatusV1> {
-    let waiterCount = 0;
-    let oldestRequestedAt: number | undefined;
-    let now = Number.NaN;
-    try {
-      now = this.#sources.clock();
-      for (const settles of waiters.values()) {
-        waiterCount += settles.size;
-        for (const settle of settles) {
-          const requestedAt = this.#waiters.get(settle)?.requestedAt;
-          if (requestedAt !== undefined && (oldestRequestedAt === undefined || requestedAt < oldestRequestedAt)) {
-            oldestRequestedAt = requestedAt;
-          }
-        }
-      }
-    } catch { /* observation only */ }
+    const now = this.now();
+    const { oldestRequestedAt } = waiters;
     const oldestWaiterAgeMs = oldestRequestedAt === undefined || !Number.isFinite(now)
       ? null
       : Math.max(0, Math.round(now - oldestRequestedAt));
     return Object.freeze({
       depth: this.#depth,
-      waiters: waiterCount,
+      waiters: waiters.count,
       oldestWaiterAgeMs,
       passRunning,
       lastPassDurationMs: this.#lastPassDurationMs,
@@ -279,7 +261,7 @@ export class CatalogPlacementTimingV1 {
   }
 
   /** The repair body's view of one admitted attempt: it charges phases to that record only. */
-  #recorder(record: PlacementAttemptRecordV1): CatalogPlacementAttemptV1 {
+  #recorder(record: CatalogPlacementAttemptRecordV1): CatalogPlacementAttemptV1 {
     const elapsedSince = (startedAt: number): number => {
       const elapsed = this.#sources.clock() - startedAt;
       return Number.isFinite(elapsed) && elapsed > 0 ? elapsed : 0;
@@ -321,26 +303,29 @@ export class CatalogPlacementTimingV1 {
       const observerCall = (this.#observerCalls.get(key) ?? 0) + 1;
       rememberBounded(this.#observerCalls, key, observerCall, MAX_TRACKED_ENTRIES);
       const startedAt = this.#sources.clock();
-      let requested: Readonly<{ at: number; whenAttempted: object | null }> | undefined;
-      return {
-        requested: (whenAttempted) => observe(() => {
-          requested = { at: this.#sources.clock(), whenAttempted };
+      let requestedAt: number | undefined;
+      let cooldownSkips = 0;
+      let attempt: Readonly<CatalogPlacementAttemptRecordV1> | undefined;
+      return Object.freeze({
+        observer: Object.freeze({
+          cooldownSkipped: () => observe(() => {
+            cooldownSkips += 1;
+          }),
+          released: (admission?: CatalogPlacementAdmissionV1) => observe(() => {
+            if (admission?.record !== undefined) attempt = admission.record;
+          }),
         }),
-        end: (log) => observe(() => {
+        requested: () => observe(() => {
+          requestedAt = this.#sources.clock();
+        }),
+        end: (log: Pick<Logger, 'info'>) => observe(() => {
           const totalMs = this.#sources.clock() - startedAt;
           if (!(totalMs >= this.#sources.logThresholdMs)) return;
-          const waiter = requested?.whenAttempted ? this.#waiters.get(requested.whenAttempted) : undefined;
           log.info(ctx, describeWaitV1({
-            asset,
-            ctx,
-            observerCall,
-            startedAt,
-            totalMs,
-            requestedAt: waiter?.requestedAt ?? requested?.at,
-            waiter,
+            asset, ctx, observerCall, startedAt, totalMs, requestedAt, cooldownSkips, attempt,
           }));
         }),
-      };
+      });
     } catch {
       return INERT_WAIT;
     }
@@ -349,7 +334,7 @@ export class CatalogPlacementTimingV1 {
 
 /**
  * The `rfc64_catalog_placement_wait` line. `requestedAt` is undefined on the public lane, which
- * never asks for a placement; `waiter` is undefined when the supervisor did not accept the request.
+ * never asks for a placement; `attempt` is undefined when no attempt released the call's waiter.
  */
 function describeWaitV1(wait: Readonly<{
   asset: CatalogPlacementAssetV1;
@@ -358,10 +343,10 @@ function describeWaitV1(wait: Readonly<{
   startedAt: number;
   totalMs: number;
   requestedAt: number | undefined;
-  waiter: PlacementWaiterRecordV1 | undefined;
+  cooldownSkips: number;
+  attempt: Readonly<CatalogPlacementAttemptRecordV1> | undefined;
 }>): string {
-  const { requestedAt } = wait;
-  const attempt = wait.waiter?.attempt;
+  const { requestedAt, attempt } = wait;
   const outcome = requestedAt === undefined
     ? 'not-awaited'
     : attempt === undefined ? 'no-attempt' : attempt.failed === true ? 'failed' : 'completed';
@@ -394,7 +379,7 @@ function describeWaitV1(wait: Readonly<{
     ['failedPeers', attempt === undefined ? '-' : String(attempt.failedPeers)],
     ['deniedPeers', attempt === undefined ? '-' : String(attempt.deniedPeers)],
     ['covered', attempt?.covered === undefined ? '-' : String(attempt.covered)],
-    ['cooldownSkips', requestedAt === undefined ? '-' : String(wait.waiter?.cooldownSkips ?? 0)],
+    ['cooldownSkips', requestedAt === undefined ? '-' : String(wait.cooldownSkips)],
   ];
   return `rfc64_catalog_placement_wait ${fields
     .map(([key, value]) => `${key}=${logfmtValue(value)}`)

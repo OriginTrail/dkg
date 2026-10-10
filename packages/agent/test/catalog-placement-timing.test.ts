@@ -1,7 +1,8 @@
 /**
- * GH#3081 — the catalog placement timing: how one observer wait is split, that a waiter is bound to
- * exactly the attempt that released it (through the real finalized-private supervisor too), the
- * aggregate queue view, the bounds, and that a failure to observe never surfaces.
+ * GH#3081 — the catalog placement timing: how one observer wait is split, that a wait hears exactly
+ * the attempt that released its own waiter (through the real finalized-private supervisor too), the
+ * supervisor's waiter registry, the aggregate queue view, the bounds, and that a failure to observe
+ * never surfaces.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -12,6 +13,7 @@ import {
 } from '@origintrail-official/dkg-core';
 
 import { Rfc64SwmCatalogProjectionOwnerV1 } from '../src/dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
+import { FinalizedPrivatePlacementWaitersV1 } from '../src/internal/finalized-private-placement-waiters.js';
 import {
   CATALOG_PLACEMENT_WAIT_LOG_THRESHOLD_MS,
   CatalogPlacementTimingV1,
@@ -34,14 +36,6 @@ function harness(logThresholdMs = 0) {
   return { timing, clock, lines, log };
 }
 
-/** What the supervisor registers for one accepted request: its settle callback and its promise. */
-function supervisorWaiter(timing: CatalogPlacementTimingV1) {
-  const settle = () => {};
-  const whenAttempted = Promise.resolve();
-  timing.waiterAdded(settle, whenAttempted);
-  return { settle, whenAttempted };
-}
-
 function fields(message: string): Record<string, string> {
   const [event, ...pairs] = message.split(' ');
   expect(event).toBe('rfc64_catalog_placement_wait');
@@ -56,8 +50,7 @@ describe('catalog placement timing', () => {
     const { timing, clock, lines, log } = harness();
     const wait = timing.beginWait(ASSET, createOperationContext('publishFromSWM', 'job-7'));
     clock.now = 1_200;
-    const waiter = supervisorWaiter(timing);
-    wait.requested(waiter.whenAttempted);
+    wait.requested();
     clock.now = 31_200;
     const admission = timing.admit();
     const { attempt } = admission;
@@ -76,7 +69,7 @@ describe('catalog placement timing', () => {
     }));
     clock.now = 154_100;
     admission.end('completed');
-    admission.released([waiter.settle]);
+    wait.observer.released(admission);
     clock.now = 154_101;
     wait.end(log);
 
@@ -94,30 +87,28 @@ describe('catalog placement timing', () => {
     const { timing, clock, lines, log } = harness();
     const ctx = createOperationContext('publishFromSWM');
     const first = timing.beginWait(ASSET, ctx);
-    const firstWaiter = supervisorWaiter(timing);
-    first.requested(firstWaiter.whenAttempted);
+    first.requested();
     const firstAttempt = timing.admit();
     clock.now = 10;
     firstAttempt.end('completed');
-    firstAttempt.released([firstWaiter.settle]);
+    first.observer.released(firstAttempt);
     first.end(log);
 
     clock.now = 20;
     const second = timing.beginWait(ASSET, ctx);
-    const secondWaiter = supervisorWaiter(timing);
-    second.requested(secondWaiter.whenAttempted);
+    second.requested();
     clock.now = 25;
     const secondAttempt = timing.admit();
     clock.now = 28;
     secondAttempt.end('failed');
-    secondAttempt.released([secondWaiter.settle]);
+    second.observer.released(secondAttempt);
     clock.now = 30;
     second.end(log);
 
-    // A key that leaves the queue releases its waiter without an admission to bind it.
+    // A key that leaves the queue releases its waiter without an attempt.
     const third = timing.beginWait(ASSET, ctx);
-    const thirdWaiter = supervisorWaiter(timing);
-    third.requested(thirdWaiter.whenAttempted);
+    third.requested();
+    third.observer.released();
     clock.now = 31;
     third.end(log);
 
@@ -135,11 +126,10 @@ describe('catalog placement timing', () => {
     const admission = timing.admit();
     clock.now = 100;
     const wait = timing.beginWait(ASSET, createOperationContext('publishFromSWM'));
-    const waiter = supervisorWaiter(timing);
-    wait.requested(waiter.whenAttempted);
+    wait.requested();
     clock.now = 400;
     admission.end('failed');
-    admission.released([waiter.settle]);
+    wait.observer.released(admission);
     wait.end(log);
     expect(fields(lines[0]!.message)).toMatchObject({
       outcome: 'failed', totalMs: '300', queueMs: '0', attemptMs: '300', otherMs: '400',
@@ -160,7 +150,7 @@ describe('catalog placement timing', () => {
     const { timing, clock, lines, log } = harness();
     const wait = timing.beginWait(ASSET, createOperationContext('publish'));
     clock.now = 3;
-    wait.requested(Promise.resolve());
+    wait.requested();
     clock.now = 9;
     wait.end(log);
     expect(fields(lines[0]!.message)).toMatchObject({
@@ -170,34 +160,29 @@ describe('catalog placement timing', () => {
 
   it('counts the cooldown skips a waiter waited through and writes nothing below the threshold', () => {
     const { timing, clock, lines, log } = harness(CATALOG_PLACEMENT_WAIT_LOG_THRESHOLD_MS);
-    const earlier = supervisorWaiter(timing);
-    timing.cooldownSkipped([earlier.settle]);
     const wait = timing.beginWait(ASSET, createOperationContext('publish'));
-    const waiter = supervisorWaiter(timing);
-    wait.requested(waiter.whenAttempted);
-    timing.cooldownSkipped([earlier.settle, waiter.settle]);
-    timing.cooldownSkipped(undefined);
-    timing.cooldownSkipped([waiter.settle]);
+    wait.requested();
+    wait.observer.cooldownSkipped();
+    wait.observer.cooldownSkipped();
     clock.now = CATALOG_PLACEMENT_WAIT_LOG_THRESHOLD_MS - 1;
     wait.end(log);
     expect(lines).toEqual([]);
 
     const slow = timing.beginWait(ASSET, createOperationContext('publish'));
-    const slowWaiter = supervisorWaiter(timing);
-    slow.requested(slowWaiter.whenAttempted);
-    timing.cooldownSkipped([slowWaiter.settle]);
+    slow.requested();
+    slow.observer.cooldownSkipped();
     clock.now += CATALOG_PLACEMENT_WAIT_LOG_THRESHOLD_MS;
     slow.end(log);
     expect(fields(lines[0]!.message)).toMatchObject({ cooldownSkips: '1', observerCall: '2' });
     // Every skipped marker counts once in the aggregate, waiters or not.
-    expect(timing.queueStatus(new Map(), false).cooldownSkips).toBe(5);
+    for (let skip = 0; skip < 3; skip += 1) timing.cooldownSkipped();
+    expect(timing.queueStatus({ count: 0, oldestRequestedAt: undefined }, false).cooldownSkips).toBe(3);
   });
 
   it('counts policy denials from the transport\'s typed code, never from the failure text', () => {
     const { timing, lines, log } = harness();
     const wait = timing.beginWait(ASSET, createOperationContext('publish'));
-    const waiter = supervisorWaiter(timing);
-    wait.requested(waiter.whenAttempted);
+    wait.requested();
     const admission = timing.admit();
     const { attempt } = admission;
     const failures = [
@@ -207,7 +192,7 @@ describe('catalog placement timing', () => {
     ];
     attempt.announced({ announcedPeers: [], failedPeers: failures });
     admission.end('completed');
-    admission.released([waiter.settle]);
+    wait.observer.released(admission);
     wait.end(log);
     expect(fields(lines[0]!.message)).toMatchObject({ peers: '3', failedPeers: '3', deniedPeers: '1' });
   });
@@ -215,8 +200,7 @@ describe('catalog placement timing', () => {
   it('charges a phase that rejects to that phase, and passes the rejection through', async () => {
     const { timing, clock, lines, log } = harness();
     const wait = timing.beginWait(ASSET, createOperationContext('publish'));
-    const waiter = supervisorWaiter(timing);
-    wait.requested(waiter.whenAttempted);
+    wait.requested();
     const admission = timing.admit();
     const failure = new Error('storage timeout');
     await expect(admission.attempt.measure('asset', async () => {
@@ -224,7 +208,7 @@ describe('catalog placement timing', () => {
       throw failure;
     })).rejects.toBe(failure);
     admission.end('failed');
-    admission.released([waiter.settle]);
+    wait.observer.released(admission);
     wait.end(log);
     expect(fields(lines[0]!.message)).toMatchObject({
       outcome: 'failed', assetMs: '6000', otherMs: '0', covered: '-',
@@ -235,11 +219,9 @@ describe('catalog placement timing', () => {
     const { timing, clock, lines, log } = harness();
     const ctx = createOperationContext('publish');
     const firstWait = timing.beginWait(ASSET, ctx);
-    const firstWaiter = supervisorWaiter(timing);
-    firstWait.requested(firstWaiter.whenAttempted);
+    firstWait.requested();
     const secondWait = timing.beginWait(ASSET, ctx);
-    const secondWaiter = supervisorWaiter(timing);
-    secondWait.requested(secondWaiter.whenAttempted);
+    secondWait.requested();
     const first = timing.admit();
     const second = timing.admit();
     let advance!: () => void;
@@ -254,8 +236,8 @@ describe('catalog placement timing', () => {
     first.attempt.covered(covered);
     second.end('failed');
     first.end('completed');
-    second.released([secondWaiter.settle]);
-    first.released([firstWaiter.settle]);
+    secondWait.observer.released(second);
+    firstWait.observer.released(first);
     firstWait.end(log);
     secondWait.end(log);
     expect(fields(lines[0]!.message)).toMatchObject({
@@ -268,27 +250,25 @@ describe('catalog placement timing', () => {
 
   it('reports the finalized-private queue as aggregates of the waiters the supervisor holds', () => {
     const { timing, clock } = harness();
-    expect(timing.queueStatus(new Map(), false)).toEqual({
+    const waiters = new FinalizedPrivatePlacementWaitersV1();
+    expect(timing.queueStatus(waiters.summary(), false)).toEqual({
       depth: 0, waiters: 0, oldestWaiterAgeMs: null, passRunning: false, lastPassDurationMs: null, cooldownSkips: 0,
     });
     timing.passStarted(3);
-    const first = supervisorWaiter(timing);
+    waiters.add('key-a', timing.now());
     clock.now = 400;
-    const second = supervisorWaiter(timing);
-    const third = supervisorWaiter(timing);
-    timing.cooldownSkipped([third.settle]);
+    waiters.add('key-a', timing.now());
+    waiters.add('key-b', timing.now());
+    timing.cooldownSkipped();
     clock.now = 1_000;
-    const waiters = new Map<string, ReadonlySet<object>>([
-      ['key-a', new Set([first.settle, second.settle])],
-      ['key-b', new Set([third.settle])],
-    ]);
-    expect(timing.queueStatus(waiters, true)).toEqual({
+    expect(timing.queueStatus(waiters.summary(), true)).toEqual({
       depth: 3, waiters: 3, oldestWaiterAgeMs: 1_000, passRunning: true, lastPassDurationMs: null, cooldownSkips: 1,
     });
     clock.now = 1_250;
     timing.passEnded();
     timing.passEnded();
-    expect(timing.queueStatus(new Map([['key-b', new Set([third.settle])]]), false)).toEqual({
+    waiters.release('key-a');
+    expect(timing.queueStatus(waiters.summary(), false)).toEqual({
       depth: 3, waiters: 1, oldestWaiterAgeMs: 850, passRunning: false, lastPassDurationMs: 1_250, cooldownSkips: 1,
     });
   });
@@ -312,22 +292,22 @@ describe('catalog placement timing', () => {
     const throwingLog = { info: () => { throw new Error('log failed'); } };
     expect(() => {
       const wait = timing.beginWait(ASSET, createOperationContext('publish'));
-      const settle = () => {};
-      timing.waiterAdded(settle, Promise.resolve());
-      wait.requested(null);
+      wait.requested();
       const admission = timing.admit();
       const { attempt } = admission;
       attempt.covered(false);
       attempt.announced({ announcedPeers: [], failedPeers: [] });
       admission.end('failed');
-      timing.cooldownSkipped([settle]);
-      admission.released([settle]);
-      admission.released(undefined);
+      timing.cooldownSkipped();
+      wait.observer.cooldownSkipped();
+      wait.observer.released(admission);
+      wait.observer.released();
       timing.passStarted(1);
       timing.passEnded();
       wait.end(throwingLog);
-      expect(timing.queueStatus(new Map([['key', new Set([settle])]]), true)).toMatchObject({
-        waiters: 0, oldestWaiterAgeMs: null, passRunning: true,
+      expect(timing.now()).toBeNaN();
+      expect(timing.queueStatus({ count: 1, oldestRequestedAt: Number.NaN }, true)).toMatchObject({
+        waiters: 1, oldestWaiterAgeMs: null, passRunning: true,
       });
     }).not.toThrow();
 
@@ -436,8 +416,8 @@ describe('catalog placement timing through the finalized-private supervisor', ()
       observe: (marker: Rfc64FinalizedPrivatePlacementRepairV1, options: { put?: boolean } = {}) => {
         if (options.put !== false && !markers.includes(marker)) markers = [...markers, marker];
         const wait = timing.beginWait(ASSET, ctx);
-        const request = owner.requestFinalizedPrivate({ repair: marker, ctx });
-        wait.requested(request.whenAttempted);
+        const request = owner.requestFinalizedPrivate({ repair: marker, ctx, observer: wait.observer });
+        wait.requested();
         return { wait, request };
       },
     };
@@ -521,5 +501,62 @@ describe('catalog placement timing through the finalized-private supervisor', ()
       expect.objectContaining({ observerCall: '2', outcome: 'completed', cooldownSkips: '1' }),
       expect.objectContaining({ observerCall: '3', outcome: 'no-attempt', cooldownSkips: '0' }),
     ]);
+  });
+});
+
+describe('finalized-private placement waiters', () => {
+  function recordingObserver() {
+    const heard: string[] = [];
+    return {
+      heard,
+      observer: {
+        cooldownSkipped: () => { heard.push('cooldown'); },
+        released: (admission?: unknown) => { heard.push(admission === undefined ? 'released' : 'released-after-attempt'); },
+      },
+    };
+  }
+
+  it('tells each waiter\'s own observer about its cooldown skips and the attempt that released it', async () => {
+    const waiters = new FinalizedPrivatePlacementWaitersV1();
+    const first = recordingObserver();
+    const other = recordingObserver();
+    const firstWaiter = waiters.add('key-a', 1, first.observer);
+    const unobserved = waiters.add('key-a', 2);
+    const otherWaiter = waiters.add('key-b', 3, other.observer);
+    waiters.cooldownSkipped('key-a');
+    const admission = new CatalogPlacementTimingV1({ clock: () => 0 }).admit();
+    waiters.release('key-a', admission);
+    await Promise.all([firstWaiter.whenAttempted, unobserved.whenAttempted]);
+    expect(first.heard).toEqual(['cooldown', 'released-after-attempt']);
+    expect(other.heard).toEqual([]);
+    expect([...waiters.keys()]).toEqual(['key-b']);
+    // A key that left the queue, or a closing supervisor, releases without an attempt.
+    waiters.releaseAll();
+    await otherWaiter.whenAttempted;
+    expect(other.heard).toEqual(['released']);
+    expect(waiters.summary()).toEqual({ count: 0, oldestRequestedAt: undefined });
+  });
+
+  it('settles every waiter even when its observer throws', async () => {
+    const waiters = new FinalizedPrivatePlacementWaitersV1();
+    const throwing = {
+      cooldownSkipped: () => { throw new Error('observer failed'); },
+      released: () => { throw new Error('observer failed'); },
+    };
+    const waiter = waiters.add('key', 0, throwing);
+    expect(() => waiters.cooldownSkipped('key')).not.toThrow();
+    expect(() => waiters.release('key')).not.toThrow();
+    await expect(waiter.whenAttempted).resolves.toBeUndefined();
+  });
+
+  it('counts unobserved waiters in the summary and forgets a withdrawn one', async () => {
+    const waiters = new FinalizedPrivatePlacementWaitersV1();
+    waiters.add('key', 50);
+    const refused = waiters.add('key', 10);
+    waiters.add('key', Number.NaN);
+    expect(waiters.summary()).toEqual({ count: 3, oldestRequestedAt: 10 });
+    refused.withdraw();
+    await refused.whenAttempted;
+    expect(waiters.summary()).toEqual({ count: 2, oldestRequestedAt: 50 });
   });
 });
