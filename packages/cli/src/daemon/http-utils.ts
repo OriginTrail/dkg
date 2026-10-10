@@ -150,6 +150,7 @@ export function respondContextGraphReadAuthorityUnavailable(
   res: ServerResponse,
   attribution: ContextGraphReadAuthorityAttribution,
   ctx: OperationContext = createOperationContext('query'),
+  code: typeof CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE | 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE' = CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
 ): void {
   readAuthorityDiagnostics.record(ctx, attribution);
   jsonResponse(
@@ -157,7 +158,7 @@ export function respondContextGraphReadAuthorityUnavailable(
     503,
     {
       error: 'Context Graph read authority is temporarily unavailable; retry once chain and metadata access recover.',
-      code: CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
+      code,
       retryable: true,
     },
     undefined,
