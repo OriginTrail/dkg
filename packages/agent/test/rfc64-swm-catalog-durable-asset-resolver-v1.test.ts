@@ -1,10 +1,12 @@
 import {
+  ASSERTION_SEAL_PREDICATES,
   buildAssertionSealQuads,
   buildAuthorAttestationTypedData,
   computeCanonicalGraphScopedAuthorSealDigestV1,
   computeKaProjectionDigestV1,
   contextGraphAssertionUri,
   contextGraphMetaUri,
+  contextGraphPrivateUri,
   createGraphKnowledgeAssetScope,
   encodeCanonicalCgSharedPublicRootProjectionV1,
   knowledgeAssetLayerGraphUri,
@@ -271,6 +273,233 @@ describe('RFC-64 durable SWM inventory catalog asset resolver', () => {
     });
   });
 });
+
+describe('RFC-64 durable catalog asset resolver and the author it is asked for', () => {
+  it('refuses a seal when the author is not named by its canonical address', async () => {
+    // Control objects carry lowercase addresses; a seal found for another spelling of the author
+    // is not accepted as that author's.
+    await expect(resolveRfc64InventoryWorkspaceCatalogAssetV1({
+      store,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR_WALLET.address as EvmAddressV1,
+      laneKind: 'private',
+      row,
+    })).rejects.toThrow(`durable RFC-64 catalog asset ${seal.kaUal} has a different seal coordinate`);
+  });
+});
+
+describe('RFC-64 durable catalog asset resolver after the assertion was re-opened for editing', () => {
+  function resolveConfirmedRepair(
+    canonicalSeal: CanonicalGraphScopedAuthorSealV1,
+    retainedSeal?: CanonicalGraphScopedAuthorSealV1,
+  ) {
+    return resolveRfc64ConfirmedVmRepairCatalogAssetV1({
+      store,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+      ...(retainedSeal === undefined ? {} : { retainedSeal }),
+      identity: {
+        assertionCoordinate: ASSERTION_COORDINATE,
+        assertionVersion: canonicalSeal.assertionVersion,
+        kaUal: canonicalSeal.kaUal,
+        sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(canonicalSeal),
+      },
+    });
+  }
+
+  it('places a confirmed repair from the archived seal when the active seal is gone', async () => {
+    await seedVmProjection(store, seal, PROJECTION_QUADS);
+    await reopenForEditing(store);
+
+    await expect(resolveConfirmedRepair(seal)).resolves.toMatchObject({
+      assertionCoordinate: ASSERTION_COORDINATE,
+      projectionBytes: PROJECTION_BYTES,
+      seal,
+    });
+  });
+
+  it('places a retained private row from the archived seal when the next version is already sealed', async () => {
+    const nextVersion = await createSeal({
+      assertionVersion: '2',
+      privateMerkleRoot: `0x${'22'.repeat(32)}` as Digest32V1,
+    });
+    await seedVmProjection(store, seal, PROJECTION_QUADS);
+    await reopenForEditing(store);
+    await seedDurableSeal(store, nextVersion);
+
+    await expect(resolve('private')).resolves.toMatchObject({
+      assertionCoordinate: ASSERTION_COORDINATE,
+      projectionBytes: PROJECTION_BYTES,
+      seal,
+    });
+    await expect(resolveConfirmedRepair(seal)).resolves.toMatchObject({ seal });
+  });
+
+  it('keeps a shared public row resolvable for the ordinary projection', async () => {
+    // The row is still in the author's signed inventory while its assertion is open for editing,
+    // and one row that cannot be resolved fails the whole projection of that author.
+    const graphManager = new GraphManager(store);
+    await storeKnowledgeAssetOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      shareOperationId: row.shareOperationId,
+      kaUal: seal.kaUal,
+      assertionVersion: seal.assertionVersion,
+      quads: PROJECTION_QUADS,
+      privateTripleCount: 0,
+      publisherPeerId: 'rfc64-finalized-catalog-test',
+      accessPolicy: 'public',
+      agentAddress: AUTHOR,
+      timestamp: new Date('2026-09-01T00:00:00.000Z'),
+    });
+    await storeKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      shareOperationId: row.shareOperationId,
+      kaUal: seal.kaUal,
+      assertionVersion: seal.assertionVersion,
+    });
+    await reopenForEditing(store);
+
+    await expect(resolve('public')).resolves.toMatchObject({
+      assertionCoordinate: ASSERTION_COORDINATE,
+      projectionBytes: PROJECTION_BYTES,
+      seal,
+    });
+  });
+
+  it('keeps refusing an identity that neither the active nor the archived seal carries', async () => {
+    const other = await createSeal({
+      assertionVersion: '2',
+      privateMerkleRoot: `0x${'22'.repeat(32)}` as Digest32V1,
+    });
+    await seedVmProjection(store, seal, PROJECTION_QUADS);
+    await reopenForEditing(store);
+
+    // Only the archive exists and it holds version 1: version 2 has no seal at all.
+    await expect(resolveConfirmedRepair(other)).rejects.toThrow(
+      `durable RFC-64 catalog asset ${other.kaUal} has no strict author seal`,
+    );
+    // With version 2 sealed as the active seal, a third identity differs from both.
+    await seedDurableSeal(store, other);
+    const third = await createSeal({
+      assertionVersion: '3',
+      privateMerkleRoot: `0x${'33'.repeat(32)}` as Digest32V1,
+    });
+    await expect(resolveConfirmedRepair(third)).rejects.toThrow(
+      `durable RFC-64 catalog asset ${third.kaUal} has a different author seal`,
+    );
+  });
+
+  it('does not let an active seal that cannot be canonicalized shadow the archived one', async () => {
+    const nextVersion = await createSeal({
+      assertionVersion: '2',
+      privateMerkleRoot: `0x${'22'.repeat(32)}` as Digest32V1,
+    });
+    await seedVmProjection(store, seal, PROJECTION_QUADS);
+    await reopenForEditing(store);
+    // The active subject carries a seal without the reserved-id binding: it parses, and it has no
+    // canonical form.
+    await seedDurableSeal(store, nextVersion);
+    await store.deleteByPattern({
+      graph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
+      subject: contextGraphAssertionUri(CONTEXT_GRAPH_ID, AUTHOR, ASSERTION_COORDINATE),
+      predicate: ASSERTION_SEAL_PREDICATES.RESERVED_KA_ID,
+    });
+
+    await expect(resolveConfirmedRepair(seal)).resolves.toMatchObject({ seal });
+    // An identity the archive does not carry either is still reported by the strict path.
+    await expect(resolveConfirmedRepair(nextVersion)).rejects.toThrow(
+      'conversion requires a complete graph-scoped v2 author seal',
+    );
+  });
+
+  it('places a version from the seal the caller was handed once the archive has moved on', async () => {
+    const nextVersion = await createSeal({
+      assertionVersion: '2',
+      privateMerkleRoot: `0x${'22'.repeat(32)}` as Digest32V1,
+    });
+    await seedVmProjection(store, seal, PROJECTION_QUADS);
+    // Two edit cycles: the next version was sealed and re-opened in turn, so the one archive
+    // holds its seal and the active subject is empty.
+    await store.deleteByPattern({
+      graph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
+      subject: contextGraphAssertionUri(CONTEXT_GRAPH_ID, AUTHOR, ASSERTION_COORDINATE),
+    });
+    await seedDurableSeal(store, nextVersion);
+    await reopenForEditing(store);
+
+    // The stored seals alone cannot place the first version any more.
+    await expect(resolveConfirmedRepair(seal)).rejects.toThrow(
+      `durable RFC-64 catalog asset ${seal.kaUal} has no strict author seal`,
+    );
+    await expect(resolveConfirmedRepair(seal, seal)).resolves.toMatchObject({
+      assertionCoordinate: ASSERTION_COORDINATE,
+      projectionBytes: PROJECTION_BYTES,
+      seal,
+    });
+    await expect(resolveRfc64InventoryWorkspaceCatalogAssetV1({
+      store,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+      laneKind: 'private',
+      row,
+      retainedSeal: seal,
+    })).resolves.toMatchObject({ seal });
+    // A handed seal is taken on the same exact match: another version's changes nothing.
+    await expect(resolveConfirmedRepair(seal, nextVersion)).rejects.toThrow(
+      `durable RFC-64 catalog asset ${seal.kaUal} has no strict author seal`,
+    );
+  });
+
+  it('prefers a stored seal to the one the caller was handed', async () => {
+    await seedVmProjection(store, seal, PROJECTION_QUADS);
+    // Same seal, another object: the resolved one is built from the stored subject.
+    const handed = Object.freeze({ ...seal });
+
+    const resolved = await resolveConfirmedRepair(seal, handed);
+    expect(resolved.seal).toEqual(seal);
+    expect(resolved.seal).not.toBe(handed);
+  });
+
+  it('still verifies the content against the archived seal', async () => {
+    await seedVmProjection(store, seal, [{ ...PROJECTION_QUADS[0]!, object: '"Mallory"' }]);
+    await reopenForEditing(store);
+
+    await expect(resolveConfirmedRepair(seal)).rejects.toThrow(
+      `durable finalized VM projection differs for ${seal.kaUal}`,
+    );
+  });
+
+  it('does not read the archive while the active seal is the identity\'s', async () => {
+    await seedVmProjection(store, seal, PROJECTION_QUADS);
+    const query = vi.spyOn(store, 'query');
+
+    await expect(resolveConfirmedRepair(seal)).resolves.toMatchObject({ seal });
+    expect(query.mock.calls.filter(([sparql]) => String(sparql).includes('_recovery_seal'))).toEqual([]);
+  });
+});
+
+/**
+ * What a pull-from leaves of the seal: the active seal's predicates copied to the archive subject
+ * in the private partition, and the active subject cleared.
+ */
+async function reopenForEditing(target: OxigraphStore): Promise<void> {
+  const assertionUri = contextGraphAssertionUri(CONTEXT_GRAPH_ID, AUTHOR, ASSERTION_COORDINATE);
+  const metaGraph = contextGraphMetaUri(CONTEXT_GRAPH_ID);
+  const active = await target.query(
+    `CONSTRUCT { <${assertionUri}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${assertionUri}> ?p ?o } }`,
+  );
+  if (active.type !== 'quads' || active.quads.length === 0) throw new Error('expected an active seal');
+  await target.insert(active.quads.map((quad) => ({
+    ...quad,
+    subject: `${assertionUri}/_recovery_seal`,
+    graph: contextGraphPrivateUri(CONTEXT_GRAPH_ID),
+  })));
+  await target.deleteByPattern({ graph: metaGraph, subject: assertionUri });
+}
 
 function resolve(laneKind: 'public' | 'private') {
   return resolveRfc64InventoryWorkspaceCatalogAssetV1({

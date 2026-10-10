@@ -1,8 +1,10 @@
 /**
- * GH#3081 — attribution of a confirmed publication's catalog-placement wait through the real
- * observer, finalized-private supervisor and catalog upsert. The finalized-private lane is forced
- * on the agent's real open-policy lane, so the projection, successor and CAS run for real; the
- * timing clock moves only where a row parks the work, which makes every segment exact.
+ * GH#3081 — attribution of the time a confirmed publication's catalog placement takes, through the
+ * real observer, finalized-private supervisor and catalog upsert. The observer returns once the
+ * placement is owed, so every line is written when the supervisor releases the request. The
+ * finalized-private lane is forced on the agent's real open-policy lane, so the projection,
+ * successor and CAS run for real; the timing clock moves only where a row parks the work, which
+ * makes every segment exact.
  */
 import { describe, expect, it, vi } from 'vitest';
 
@@ -208,6 +210,7 @@ describe('catalog placement wait attribution', () => {
     });
 
     await observe(agent, 'failure', seal, 'job-failure');
+    await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
 
     // The failed repair keeps its durable marker for the retry.
     expect(repairs().list()).toHaveLength(1);
@@ -259,14 +262,13 @@ describe('catalog placement wait attribution', () => {
     const blocked = agent.requestRfc64FinalizedPrivateCatalogPlacementRepairV1({ repair: blocker });
     expect(blocked.accepted).toBe(true);
     await blockerEntered;
-    const queued = observe(agent, 'queued', seal, 'job-queued');
-    await vi.waitFor(() => {
-      expect(agent.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.finalizedPrivatePlacement)
-        .toMatchObject({ waiters: 2 });
-    }, { timeout: 10_000, interval: 10 });
+    // The observer returns while its placement is queued behind the blocker.
+    await observe(agent, 'queued', seal, 'job-queued');
     clock.now = 30_000;
     expect(agent.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.finalizedPrivatePlacement).toEqual({
       depth: 1,
+      pending: 2,
+      oldestPendingAgeMs: 30_000,
       waiters: 2,
       oldestWaiterAgeMs: 30_000,
       passRunning: true,
@@ -275,7 +277,6 @@ describe('catalog placement wait attribution', () => {
     });
     releaseBlocker();
     await blocked.whenAttempted;
-    await queued;
     await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
 
     expect(repairs().list()).toEqual([]);
@@ -286,8 +287,10 @@ describe('catalog placement wait attribution', () => {
       + 'deniedPeers=0 covered=false cooldownSkips=0',
     ]);
     // A waiter wake armed by the first pass may re-list the queue after it drained, so the final
-    // depth is whichever pass ran last; the waiters are gone either way.
+    // depth is whichever pass ran last; the waiters are gone and nothing is owed either way.
     expect(agent.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.finalizedPrivatePlacement).toMatchObject({
+      pending: 0,
+      oldestPendingAgeMs: null,
       waiters: 0,
       oldestWaiterAgeMs: null,
       passRunning: false,
