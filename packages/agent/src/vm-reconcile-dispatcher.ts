@@ -654,6 +654,22 @@ export class VmReconcileSchedulingRuntime<T> {
   noteLocalRpcRefusal(key: string): void {
     this.localRpcRefusals.refused(key);
   }
+
+  /**
+   * The graph's running pass was overtaken: its target changed under it on a
+   * node that is not shutting down (see
+   * `internal/vm-reconcile-overtaken-pass.ts`). The graph waits like one whose
+   * read was refused and is asked again from there. One window bounds both:
+   * a graph whose passes keep ending either way is left to the periodic sweep
+   * once it has run out. Undefined when it has, or when the wait did not take
+   * the graph.
+   */
+  deferForOvertakenPass(
+    key: string,
+    options: LocalAdmissionWaitOptions,
+  ): 'parked' | 'again' | undefined {
+    return this.deferForLocalRpcRefusal(key, options);
+  }
   releaseLiveHold(key: string): void { this.dispatcher.releaseLiveHold(key); }
   triggerPeriodic(key: string): void { this.dispatcher.triggerPeriodic(key); }
   tryTriggerPeriodic(key: string): boolean { return this.dispatcher.tryTriggerPeriodic(key); }

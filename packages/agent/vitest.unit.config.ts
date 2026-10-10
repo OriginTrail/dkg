@@ -82,6 +82,7 @@ export default defineConfig({
       "test/vm-recovery-local-admission.test.ts",
       "test/vm-reconcile-read-authority-wait.test.ts",
       "test/vm-reconcile-local-rpc-refusal.test.ts",
+      "test/vm-reconcile-overtaken-pass.test.ts",
       "test/unanswered-authority-read.test.ts",
       "test/unanswered-authority-recheck.test.ts",
       "test/swm-gossip-unanswered-authority.test.ts",
