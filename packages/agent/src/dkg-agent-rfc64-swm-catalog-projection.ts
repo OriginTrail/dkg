@@ -45,7 +45,10 @@ import { rfc64SwmInventoryShadowRuntimeV1 } from
   './rfc64/swm-inventory-shadow-runtime-v1.js';
 import { snapshotRfc64CatalogDeploymentProfileV1 } from
   './rfc64/catalog-authority-config-v1.js';
-import { catalogHeadDeliveryReportV1 } from './internal/catalog-head-delivery-report.js';
+import {
+  catalogHeadDeliveryReportV1,
+  type CatalogHeadDeliveryStatusV1,
+} from './internal/catalog-head-delivery-report.js';
 import type { Rfc64PublicCatalogServiceV1 } from
   './rfc64/public-catalog-service-v1.js';
 import {
@@ -593,6 +596,11 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
   /** Await the fan-outs of handed-off heads (tests / graceful shutdown coordination). */
   whenRfc64CatalogHeadDeliveryIdleV1(this: DKGAgent): Promise<void> {
     return this.rfc64PublicCatalogServiceV1?.whenCatalogHeadDeliveryIdle() ?? Promise.resolve();
+  }
+
+  /** Head delivery in counts since this process started, for `/api/status`: no identities. */
+  readRfc64CatalogHeadDeliveryStatusV1(this: DKGAgent): Readonly<CatalogHeadDeliveryStatusV1> {
+    return catalogHeadDeliveryReportV1(this).status();
   }
 
   /**

@@ -26,20 +26,70 @@ import type { Rfc64PublicCatalogHeadAnnouncementV1 } from '../rfc64/public-catal
  * The policy did not answer, so a node in that state delivers to nobody, and it says so at warn.
  *
  * Every visible line is written at most once per {@link CATALOG_HEAD_DELIVERY_LOG_WINDOW_MS} for
- * its subject (a catalog, or a reason), and the next one says how many it stands for.
+ * its subject (a catalog, or a reason), and the next one says how many it stands for. Nothing is
+ * held back from the counts: {@link CatalogHeadDeliveryReportV1.status} has every hand-off and
+ * every reported head, for `/api/status`.
  */
 export const CATALOG_HEAD_DELIVERY_LOG_WINDOW_MS = 60_000;
 const MAX_TRACKED_SUBJECTS = 1_024;
 
 type DeliveryLog = Pick<Logger, 'debug' | 'info' | 'warn'>;
 
+/**
+ * Head delivery in counts since this process started. Counts only: no peer, author or graph id.
+ * A peer counts once for every head it was named for.
+ */
+export interface CatalogHeadDeliveryStatusV1 {
+  /** Hand-offs the delivery owner took. */
+  readonly handoffsQueued: number;
+  /** Hand-offs with nobody to send to. */
+  readonly handoffsNobody: number;
+  /** Hand-offs nobody took. Their heads stay durable and reach peers later, or through replay. */
+  readonly handoffsNotQueued: number;
+  /** Heads whose delivery ended and was reported: fanned out, or not deliverable. */
+  readonly reportedHeads: number;
+  readonly deliveredPeers: number;
+  readonly failedPeers: number;
+  /** Peers this node's policy refused. Nothing was sent to them. */
+  readonly refusedPeers: number;
+  /** Peers this node's policy check did not answer for. Nothing was sent to them either. */
+  readonly uncheckedPeers: number;
+  /** Peers a head was sent to whose authorization could not be confirmed afterwards. */
+  readonly unconfirmedPeers: number;
+  /** Waiting heads a newer head of their catalog replaced before they were sent. */
+  readonly supersededHeads: number;
+  /** Reported heads that were not fanned out at all. */
+  readonly undeliverableHeads: number;
+  /** Reported heads before which a waiting head could not be kept. */
+  readonly checkpointCapacityExceeded: number;
+}
+
 export class CatalogHeadDeliveryReportV1 {
   readonly #now: () => number;
   /** When each subject last wrote a line, and how many lines it held back since. */
   readonly #subjects = new Map<string, { writtenAt: number; heldBack: number }>();
+  readonly #counts: { -readonly [Counter in keyof CatalogHeadDeliveryStatusV1]: number } = {
+    handoffsQueued: 0,
+    handoffsNobody: 0,
+    handoffsNotQueued: 0,
+    reportedHeads: 0,
+    deliveredPeers: 0,
+    failedPeers: 0,
+    refusedPeers: 0,
+    uncheckedPeers: 0,
+    unconfirmedPeers: 0,
+    supersededHeads: 0,
+    undeliverableHeads: 0,
+    checkpointCapacityExceeded: 0,
+  };
 
   constructor(now: () => number = () => performance.now()) {
     this.#now = now;
+  }
+
+  /** What has been counted so far. */
+  status(): Readonly<CatalogHeadDeliveryStatusV1> {
+    return Object.freeze({ ...this.#counts });
   }
 
   /** The receipt of one hand-off. Only a hand-off that nobody took writes a line. */
@@ -49,6 +99,9 @@ export class CatalogHeadDeliveryReportV1 {
     receipt: Rfc64CatalogHeadHandoffV1,
   ): void {
     observe(() => {
+      if (receipt.status === 'queued') this.#counts.handoffsQueued += 1;
+      else if (receipt.status === 'nobody') this.#counts.handoffsNobody += 1;
+      else this.#counts.handoffsNotQueued += 1;
       if (receipt.status !== 'not-queued') return;
       const reason = receipt.reason ?? 'unavailable';
       // No free scope, or a peer list the hand-off rejects, is this node's own trouble. A node
@@ -66,6 +119,15 @@ export class CatalogHeadDeliveryReportV1 {
       const scope = `${outcome.announcement.contextGraphId} ${outcome.announcement.authorAddress}`;
       const unchecked = outcome.uncheckedPeers.length;
       const unconfirmed = outcome.unconfirmedPeers.length;
+      this.#counts.reportedHeads += 1;
+      this.#counts.deliveredPeers += outcome.announcedPeers.length;
+      this.#counts.failedPeers += outcome.failedPeers.length;
+      this.#counts.refusedPeers += outcome.refusedPeers.length;
+      this.#counts.uncheckedPeers += unchecked;
+      this.#counts.unconfirmedPeers += unconfirmed;
+      this.#counts.supersededHeads += outcome.supersededHeads;
+      if (outcome.notDeliverable !== null) this.#counts.undeliverableHeads += 1;
+      if (outcome.checkpointCapacityExceeded) this.#counts.checkpointCapacityExceeded += 1;
       log.debug(
         createOperationContext('system'),
         `rfc64_catalog_head_delivery${head}`

@@ -359,3 +359,99 @@ describe('RFC-64 catalog head delivery: what a finished fan-out logs', () => {
     expect(() => agent.reportRfc64CatalogHeadDeliveryV1(outcome({ uncheckedPeers: [PEER_A] }))).not.toThrow();
   });
 });
+
+describe('RFC-64 catalog head delivery: counts for status', () => {
+  const NOTHING_YET = {
+    handoffsQueued: 0,
+    handoffsNobody: 0,
+    handoffsNotQueued: 0,
+    reportedHeads: 0,
+    deliveredPeers: 0,
+    failedPeers: 0,
+    refusedPeers: 0,
+    uncheckedPeers: 0,
+    unconfirmedPeers: 0,
+    supersededHeads: 0,
+    undeliverableHeads: 0,
+    checkpointCapacityExceeded: 0,
+  };
+
+  it('starts at zero and counts every hand-off by its receipt', () => {
+    const receipts = [
+      { status: 'queued' }, { status: 'queued' }, { status: 'nobody' },
+      { status: 'not-queued', reason: 'full' },
+    ];
+    const { agent } = agentWith({ deliverCatalogHead: () => receipts.shift() });
+    expect(agent.readRfc64CatalogHeadDeliveryStatusV1()).toEqual(NOTHING_YET);
+
+    for (let handOff = 0; handOff < 4; handOff += 1) {
+      agent.deliverRfc64CatalogHeadV1({ announcement: ANNOUNCEMENT, peers: [PEER_A] });
+    }
+    // A head its mutation did not hand off is a hand-off nobody took.
+    agent.reportRfc64CatalogHeadNotHandedOffV1(ANNOUNCEMENT);
+
+    expect(agent.readRfc64CatalogHeadDeliveryStatusV1()).toEqual({
+      ...NOTHING_YET, handoffsQueued: 2, handoffsNobody: 1, handoffsNotQueued: 2,
+    });
+  });
+
+  it('counts the peers of every reported head, the unchecked ones apart from the refused', () => {
+    const { agent } = agentWith(undefined);
+
+    agent.reportRfc64CatalogHeadDeliveryV1(outcome({
+      announcedPeers: [PEER_A],
+      failedPeers: [{ peerId: PEER_B, error: 'stream reset by peer' }],
+      refusedPeers: ['outsider-1', 'outsider-2', 'outsider-3'],
+      uncheckedPeers: ['unknown-1', 'unknown-2'],
+      unconfirmedPeers: ['left-1'],
+      supersededHeads: 4,
+    }));
+    agent.reportRfc64CatalogHeadDeliveryV1(outcome({
+      uncheckedPeers: ['unknown-1'],
+      checkpointCapacityExceeded: true,
+    }));
+    agent.reportRfc64CatalogHeadDeliveryV1(outcome({ notDeliverable: 'the owner closed' }));
+
+    expect(agent.readRfc64CatalogHeadDeliveryStatusV1()).toEqual({
+      ...NOTHING_YET,
+      reportedHeads: 3,
+      deliveredPeers: 1,
+      failedPeers: 1,
+      refusedPeers: 3,
+      uncheckedPeers: 3,
+      unconfirmedPeers: 1,
+      supersededHeads: 4,
+      undeliverableHeads: 1,
+      checkpointCapacityExceeded: 1,
+    });
+  });
+
+  it('counts what the log holds back, and what a failing log sink loses', () => {
+    const clock = { now: 0 };
+    const { agent, warn } = agentWith(undefined);
+    installCatalogHeadDeliveryReportV1(agent, new CatalogHeadDeliveryReportV1(() => clock.now));
+
+    for (let head = 0; head < 5; head += 1) {
+      agent.reportRfc64CatalogHeadDeliveryV1(outcome({ uncheckedPeers: [PEER_A, PEER_B] }));
+    }
+    // One warning stands for the five heads of this minute; the counts have all of them.
+    expect(messages(warn)).toHaveLength(1);
+    expect(agent.readRfc64CatalogHeadDeliveryStatusV1()).toMatchObject({ reportedHeads: 5, uncheckedPeers: 10 });
+
+    agent.log.debug = () => { throw new Error('log sink closed'); };
+    agent.reportRfc64CatalogHeadDeliveryV1(outcome({ uncheckedPeers: [PEER_A] }));
+    expect(agent.readRfc64CatalogHeadDeliveryStatusV1()).toMatchObject({ reportedHeads: 6, uncheckedPeers: 11 });
+  });
+
+  it('answers with a copy that later reports do not change', () => {
+    const { agent } = agentWith(undefined);
+    agent.reportRfc64CatalogHeadDeliveryV1(outcome({ refusedPeers: [PEER_A] }));
+
+    const before = agent.readRfc64CatalogHeadDeliveryStatusV1();
+    agent.reportRfc64CatalogHeadDeliveryV1(outcome({ refusedPeers: [PEER_A, PEER_B] }));
+
+    expect(Object.isFrozen(before)).toBe(true);
+    expect(before).toMatchObject({ reportedHeads: 1, refusedPeers: 1 });
+    expect(agent.readRfc64CatalogHeadDeliveryStatusV1()).toMatchObject({ reportedHeads: 2, refusedPeers: 3 });
+  });
+});

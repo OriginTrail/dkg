@@ -264,6 +264,9 @@ export type {
   Rfc64SwmCatalogProjectionSupervisorStatusV1,
 } from './dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
 export type {
+  CatalogHeadDeliveryStatusV1,
+} from './internal/catalog-head-delivery-report.js';
+export type {
   FinalizedPrivatePlacementQueueStatusV1,
 } from './internal/catalog-placement-timing.js';
 export type {

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type {
+  CatalogHeadDeliveryStatusV1,
   FinalizedPrivatePlacementQueueStatusV1,
   Rfc64CatalogShadowExecutionStatusV1,
 } from '@origintrail-official/dkg-agent';
@@ -109,6 +110,37 @@ export function sanitizeRfc64CatalogShadowExecutionStatusV1(
       lastPassCompletedAtMs: validatedReceiver.lastPassCompletedAtMs,
     }),
   });
+}
+
+const CATALOG_HEAD_DELIVERY_COUNTERS_V1 = [
+  'handoffsQueued',
+  'handoffsNobody',
+  'handoffsNotQueued',
+  'reportedHeads',
+  'deliveredPeers',
+  'failedPeers',
+  'refusedPeers',
+  'uncheckedPeers',
+  'unconfirmedPeers',
+  'supersededHeads',
+  'undeliverableHeads',
+  'checkpointCapacityExceeded',
+] as const satisfies readonly (keyof CatalogHeadDeliveryStatusV1)[];
+
+/**
+ * GH#3081 — allow-list for catalog head delivery in counts. The counters are rebuilt one by one,
+ * so no peer, author or graph id a provider might attach can cross the HTTP boundary. A block
+ * with a counter that is missing or not a non-negative integer reads as null.
+ */
+export function sanitizeRfc64CatalogHeadDeliveryStatusV1(
+  input: unknown,
+): Readonly<CatalogHeadDeliveryStatusV1> | null {
+  if (!isRecordV1(input) || !hasNonNegativeSafeIntegersV1(input, CATALOG_HEAD_DELIVERY_COUNTERS_V1)) {
+    return null;
+  }
+  return Object.freeze(Object.fromEntries(
+    CATALOG_HEAD_DELIVERY_COUNTERS_V1.map((counter) => [counter, input[counter]]),
+  )) as Readonly<CatalogHeadDeliveryStatusV1>;
 }
 
 /**

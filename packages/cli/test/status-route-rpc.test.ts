@@ -684,6 +684,114 @@ describe('/api/status RFC-64 private recovery privacy', () => {
     expect(JSON.stringify(response.body)).not.toContain('must-not-leak');
   });
 
+  describe('catalog head delivery counts (GH#3081)', () => {
+    const privateContextGraph =
+      '0x1111111111111111111111111111111111111111/private-head-delivery';
+    const peerId = '12D3KooWAUCFb3hwTLUu3bhMqAsqtF1YH1sTUaMuTXiyvC1z7k65';
+    const catalogActivation = {
+      enabled: true,
+      selectedContextGraphs: [privateContextGraph],
+      selectedPublicContextGraphs: [],
+      selectedPrivateContextGraphs: [privateContextGraph],
+      rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
+    } as never;
+    const delivery = {
+      handoffsQueued: 12,
+      handoffsNobody: 1,
+      handoffsNotQueued: 2,
+      reportedHeads: 9,
+      deliveredPeers: 20,
+      failedPeers: 3,
+      refusedPeers: 40,
+      uncheckedPeers: 5,
+      unconfirmedPeers: 1,
+      supersededHeads: 3,
+      undeliverableHeads: 1,
+      checkpointCapacityExceeded: 0,
+    };
+
+    it('surfaces the counters and nothing a provider attaches to them', async () => {
+      const readDelivery = vi.fn(() => ({
+        ...delivery,
+        uncheckedPeerIds: [peerId],
+        lastContextGraphId: privateContextGraph,
+      }));
+      const response = await requestStatusWithAgent(
+        { readRfc64CatalogHeadDeliveryStatusV1: readDelivery },
+        {},
+        '/api/status',
+        null,
+        catalogActivation,
+      );
+
+      expect(response.status).toBe(200);
+      expect(readDelivery).toHaveBeenCalledOnce();
+      expect(response.body.rfc64Catalog.catalogHeadDelivery).toEqual(delivery);
+      const serialized = JSON.stringify(response.body.rfc64Catalog.catalogHeadDelivery);
+      expect(serialized).not.toContain(peerId);
+      expect(serialized).not.toContain(privateContextGraph);
+    });
+
+    it.each([
+      ['a missing counter', (({ uncheckedPeers: _unchecked, ...rest }) => rest)(delivery)],
+      ['a negative counter', { ...delivery, refusedPeers: -1 }],
+      ['a fractional counter', { ...delivery, deliveredPeers: 1.5 }],
+      ['a counter that is not a number', { ...delivery, reportedHeads: '9' }],
+      ['an array', [delivery]],
+      ['no answer', undefined],
+    ])('degrades malformed counts to null: %s', async (_label, answer) => {
+      const response = await requestStatusWithAgent(
+        { readRfc64CatalogHeadDeliveryStatusV1: () => answer },
+        {},
+        '/api/status',
+        null,
+        catalogActivation,
+      );
+      expect(response.status).toBe(200);
+      expect(response.body.rfc64Catalog.catalogHeadDelivery).toBeNull();
+    });
+
+    it('keeps status available when the provider throws, and when an agent has no counts', async () => {
+      const throwing = await requestStatusWithAgent(
+        {
+          readRfc64CatalogHeadDeliveryStatusV1: () => {
+            throw new Error('delivery report is not available');
+          },
+        },
+        {},
+        '/api/status',
+        null,
+        catalogActivation,
+      );
+      expect(throwing.status).toBe(200);
+      expect(throwing.body.rfc64Catalog.catalogHeadDelivery).toBeNull();
+
+      const without = await requestStatusWithAgent({}, {}, '/api/status', null, catalogActivation);
+      expect(without.status).toBe(200);
+      expect(without.body.rfc64Catalog.catalogHeadDelivery).toBeNull();
+    });
+
+    it('reports nothing while the catalog is disabled', async () => {
+      const readDelivery = vi.fn(() => delivery);
+      const response = await requestStatusWithAgent(
+        { readRfc64CatalogHeadDeliveryStatusV1: readDelivery },
+        {},
+        '/api/status',
+        null,
+        {
+          enabled: false,
+          selectedContextGraphs: [],
+          selectedPublicContextGraphs: [],
+          selectedPrivateContextGraphs: [],
+          rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
+        } as never,
+      );
+      expect(response.status).toBe(200);
+      expect(response.body.rfc64Catalog.catalogHeadDelivery).toBeNull();
+      expect(readDelivery).not.toHaveBeenCalled();
+    });
+  });
+
   describe('finalized-private placement queue (GH#3081)', () => {
     const privateContextGraph =
       '0x1111111111111111111111111111111111111111/private-placement-queue';
