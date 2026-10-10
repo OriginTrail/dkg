@@ -818,6 +818,161 @@ describe('/api/status RFC-64 private recovery privacy', () => {
     });
   });
 
+  describe('author catalog capacity (GH#3134)', () => {
+    const fullContextGraph =
+      '0x1111111111111111111111111111111111111111/full-author-catalog';
+    const fullAuthor = '0x3333333333333333333333333333333333333333';
+    const parkedUal = `did:dkg:otp:20430/${fullAuthor}/1025`;
+    const catalogActivation = {
+      enabled: true,
+      selectedContextGraphs: [fullContextGraph],
+      selectedPublicContextGraphs: [],
+      selectedPrivateContextGraphs: [fullContextGraph],
+      rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
+    } as never;
+    // The queue as an agent from before the aggregate reports it: valid, and without it.
+    const queue = {
+      depth: 3,
+      pending: 3,
+      oldestPendingAgeMs: 7_200_000,
+      waiters: 0,
+      oldestWaiterAgeMs: null,
+      passRunning: false,
+      lastPassDurationMs: 2,
+      cooldownSkips: 0,
+    };
+    const supervisorStatus = (extra: Record<string, unknown>) => ({
+      running: false,
+      pass: 9,
+      retryIntervalMs: 5_000,
+      lastPassStartedAtMs: 10,
+      lastPassCompletedAtMs: 20,
+      repairs: [{
+        contextGraphId: fullContextGraph,
+        authorAddress: fullAuthor,
+        outcome: 'failed',
+        diagnostic: { kind: 'catalog_full', stage: 'unknown', source: 'unknown', stageElapsedMs: null },
+      }],
+      finalizedPrivatePlacement: queue,
+      ...extra,
+    });
+    const requestCapacity = (extra: Record<string, unknown>) => requestStatusWithAgent(
+      { readRfc64SwmCatalogProjectionSupervisorStatusV1: vi.fn(() => supervisorStatus(extra)) },
+      {},
+      '/api/status',
+      null,
+      catalogActivation,
+    );
+
+    it('surfaces the two counts next to the queue, and nothing that names a graph, author or asset', async () => {
+      const response = await requestCapacity({
+        authorCatalogCapacity: {
+          scopesAtCap: 1,
+          parkedPlacements: 3,
+          contextGraphId: fullContextGraph,
+          authorAddress: fullAuthor,
+          parkedKaUals: [parkedUal],
+        },
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.body.rfc64Catalog.authorCatalogCapacity).toEqual({ scopesAtCap: 1, parkedPlacements: 3 });
+      expect(response.body.rfc64Catalog.finalizedPrivatePlacementQueue).toMatchObject({ depth: 3, waiters: 0 });
+      expect(Object.keys(response.body.rfc64Catalog)).toContain('authorCatalogCapacity');
+      const serialized = JSON.stringify(response.body.rfc64Catalog);
+      expect(serialized).not.toContain(fullAuthor);
+      expect(serialized).not.toContain(parkedUal);
+      expect(JSON.stringify(response.body.rfc64Catalog.authorCatalogCapacity)).not.toContain(fullContextGraph);
+    });
+
+    it('reports a node with no full catalog as zeros', async () => {
+      const response = await requestCapacity({ authorCatalogCapacity: { scopesAtCap: 0, parkedPlacements: 0 } });
+      expect(response.body.rfc64Catalog.authorCatalogCapacity).toEqual({ scopesAtCap: 0, parkedPlacements: 0 });
+    });
+
+    it.each([
+      ['an agent from before the aggregate', {}],
+      ['a negative count', { authorCatalogCapacity: { scopesAtCap: -1, parkedPlacements: 0 } }],
+      ['a missing count', { authorCatalogCapacity: { scopesAtCap: 1 } }],
+      ['a fractional count', { authorCatalogCapacity: { scopesAtCap: 1, parkedPlacements: 0.5 } }],
+      ['an array', { authorCatalogCapacity: [{ scopesAtCap: 1, parkedPlacements: 1 }] }],
+    ])('reads %s as null without touching the rest of the block', async (_label, extra) => {
+      const response = await requestCapacity(extra);
+
+      expect(response.status).toBe(200);
+      expect(response.body.rfc64Catalog.authorCatalogCapacity).toBeNull();
+      // The queue next to it, and the block around both, are what they would be without it.
+      expect(response.body.rfc64Catalog.finalizedPrivatePlacementQueue).toMatchObject({
+        depth: 3, waiters: 0, passRunning: false, cooldownSkips: 0,
+      });
+      expect(response.body.rfc64Catalog).toMatchObject({
+        enabled: true,
+        selectedPrivateContextGraphs: [fullContextGraph],
+      });
+    });
+
+    it('keeps the counts when the queue beside them is in another shape', async () => {
+      const response = await requestCapacity({
+        finalizedPrivatePlacement: { depth: 'three' },
+        authorCatalogCapacity: { scopesAtCap: 2, parkedPlacements: 5 },
+      });
+      expect(response.status).toBe(200);
+      expect(response.body.rfc64Catalog.finalizedPrivatePlacementQueue).toBeNull();
+      expect(response.body.rfc64Catalog.authorCatalogCapacity).toEqual({ scopesAtCap: 2, parkedPlacements: 5 });
+    });
+
+    it('reads the supervisor once for both aggregates, and reports null for both when it is not bound', async () => {
+      const readSupervisor = vi.fn(() => supervisorStatus({
+        authorCatalogCapacity: { scopesAtCap: 1, parkedPlacements: 1 },
+      }));
+      await requestStatusWithAgent(
+        { readRfc64SwmCatalogProjectionSupervisorStatusV1: readSupervisor },
+        {},
+        '/api/status',
+        null,
+        catalogActivation,
+      );
+      expect(readSupervisor).toHaveBeenCalledOnce();
+
+      const unbound = await requestStatusWithAgent(
+        {
+          readRfc64SwmCatalogProjectionSupervisorStatusV1: () => {
+            throw new Error('RFC-64 SWM catalog projection owner is not bound');
+          },
+        },
+        {},
+        '/api/status',
+        null,
+        catalogActivation,
+      );
+      expect(unbound.status).toBe(200);
+      expect(unbound.body.rfc64Catalog.authorCatalogCapacity).toBeNull();
+      expect(unbound.body.rfc64Catalog.finalizedPrivatePlacementQueue).toBeNull();
+    });
+
+    it('reports nothing while the catalog is disabled', async () => {
+      const readSupervisor = vi.fn(() => supervisorStatus({
+        authorCatalogCapacity: { scopesAtCap: 1, parkedPlacements: 1 },
+      }));
+      const response = await requestStatusWithAgent(
+        { readRfc64SwmCatalogProjectionSupervisorStatusV1: readSupervisor },
+        {},
+        '/api/status',
+        null,
+        {
+          enabled: false,
+          selectedContextGraphs: [],
+          selectedPublicContextGraphs: [],
+          selectedPrivateContextGraphs: [],
+          rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
+        } as never,
+      );
+      expect(response.status).toBe(200);
+      expect(response.body.rfc64Catalog.authorCatalogCapacity).toBeNull();
+      expect(readSupervisor).not.toHaveBeenCalled();
+    });
+  });
+
   it('rejects contradictory derived shadow-safety evidence at the HTTP boundary', () => {
     const valid = {
       schemaVersion: 1,
