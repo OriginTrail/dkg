@@ -4,14 +4,6 @@
  * finalized-private supervisor, catalog upsert, successor producer and durable stores. The
  * durable stores are counted and the core row verifier is counted; nothing is replaced.
  */
-import {
-  contextGraphAssertionUri,
-  createOperationContext,
-  encodeCanonicalCgSharedPublicRootProjectionV1,
-  type AssertionSeal,
-  type AuthorCatalogScopeV1,
-  type TimestampMsV1,
-} from '@origintrail-official/dkg-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const verifications = vi.hoisted(() => ({ transferredBundle: 0 }));
@@ -29,7 +21,6 @@ vi.mock('@origintrail-official/dkg-core', async (importOriginal) => {
 });
 
 import type { DKGAgent } from '../src/index.js';
-import { loadBoundedAuthorCatalogHistoryV1 } from '../src/dkg-agent-rfc64-catalog.js';
 import {
   Rfc64CatalogMutationMemoryV1,
   installRfc64CatalogMutationMemoryV1,
@@ -37,205 +28,36 @@ import {
   resolveCatalogMutationMemoryLimitsV1,
   rfc64CatalogMutationMemoryV1,
 } from '../src/internal/catalog-mutation-memory.js';
-import type { Rfc64PersistenceV1 } from '../src/rfc64/persistence-v1.js';
-import type { Rfc64PublicCatalogSuccessorAssetInputV1 } from
-  '../src/rfc64/public-catalog-successor-producer-v1.js';
 import {
-  AUTHOR,
-  AUTHOR_WALLET,
-  CONTEXT_GRAPH_ID,
-  NATIVE_DEPLOYMENT,
-  NETWORK_ID,
-  PROJECTION_QUADS,
-  authorSealV1,
-  catalogScopeDigestV1,
-  seedInventoryAssetV1,
-  startRepairAgentV1,
-} from './support/rfc64-local-catalog-repair-fixture.js';
+  PLACEMENT_MUTATION as MUTATION,
+  PLACEMENT_PROJECTION as PROJECTION,
+  PLACEMENT_SCOPE as SCOPE,
+  PLACEMENT_SCOPE_DIGEST as SCOPE_DIGEST,
+  appliedCatalogObjectsV1 as appliedCatalogObjects,
+  appliedPlacementHeadV1 as appliedHead,
+  kaNumbersV1 as kaNumbers,
+  observeConfirmationV1 as observe,
+  placeAssetV1 as place,
+  placementAssetV1 as asset,
+  placementPersistenceV1 as persistenceOf,
+  placementPolicyDigestV1 as policyDigest,
+  shareAssetV1 as share,
+  startPlacementAgentV1 as startPlacementAgent,
+  upsertPlacementV1,
+  watchPlacementStoresV1,
+} from './support/rfc64-catalog-placement-fixture.js';
+import { AUTHOR, NETWORK_ID } from './support/rfc64-local-catalog-repair-fixture.js';
 
-const SCOPE = Object.freeze({
-  networkId: NETWORK_ID,
-  contextGraphId: CONTEXT_GRAPH_ID,
-  governanceChainId: null,
-  governanceContractAddress: null,
-  ownershipTransitionDigest: null,
-  subGraphName: null,
-  authorAddress: AUTHOR,
-  era: '0',
-  bucketCount: '1',
-}) as AuthorCatalogScopeV1;
-const MUTATION = Object.freeze({
-  scope: SCOPE,
-  author: AUTHOR_WALLET,
-  deployment: NATIVE_DEPLOYMENT,
-  peers: [],
-  catalogIssuerDelegationEffectiveAt: '0' as TimestampMsV1,
-  catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
-});
-const PROJECTION = encodeCanonicalCgSharedPublicRootProjectionV1(PROJECTION_QUADS);
-const SCOPE_DIGEST = catalogScopeDigestV1();
+/** A state served from memory: the applied head and its delegation are read again, no bundle is. */
+const SERVED_FROM_MEMORY = Object.freeze({ bundles: 0, controlObjects: 2 });
 
-/** An author whose confirmed private placements go through the real repair path. */
-async function startPlacementAgent(name: string): Promise<DKGAgent> {
-  const agent = await startRepairAgentV1({
-    name,
-    autoPublish: {
-      peers: [],
-      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
-    },
-  });
-  vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
-  agent.acceptOpenContextGraphPolicyV1({
-    networkId: NETWORK_ID,
-    contextGraphId: CONTEXT_GRAPH_ID,
-    ownerAddress: AUTHOR,
-  });
-  // Only the confirmed repair places a row, as on a finalized-private lane.
-  vi.spyOn(agent, 'reconcileRfc64PublicCatalogFromSwmInventoryV1').mockResolvedValue(null);
-  const realLane = (agent as any).resolveRfc64CatalogAuthoringLaneV1.bind(agent);
-  vi.spyOn(agent as any, 'resolveRfc64CatalogAuthoringLaneV1').mockImplementation(
-    (contextGraphId: unknown, subGraphName: unknown) => {
-      const lane = realLane(contextGraphId, subGraphName);
-      return lane === null ? null : { ...lane, acceptsFinalizedVmRepair: true };
-    },
-  );
-  return agent;
+function upsert(agent: DKGAgent, placed: Parameters<typeof upsertPlacementV1>[1], author?: unknown) {
+  return upsertPlacementV1(agent, placed, { author });
 }
 
-/** Observe one chain confirmation and let the placement it asks for run to its end. */
-async function observe(agent: DKGAgent, suffix: string, seal: AssertionSeal): Promise<void> {
-  await agent.observeRfc64ConfirmedVmV1({
-    contextGraphId: CONTEXT_GRAPH_ID,
-    assertionCoordinate: `repair-${suffix}`,
-    shareOperationId: `repair-operation-${suffix}`,
-    seal,
-    assertionUri: contextGraphAssertionUri(CONTEXT_GRAPH_ID, AUTHOR, `repair-${suffix}`),
-    ctx: createOperationContext('publishFromSWM', `job-${suffix}`),
-    publicationLabel: 'queued publish',
-  });
-  // Whether or not the observer waits for the placement, the supervisor has finished it here.
-  await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
-}
-
-/** Share an asset: its durable workspace copy and its author-inventory row. */
-async function share(agent: DKGAgent, kaNumber: number): Promise<AssertionSeal> {
-  const { seal } = await seedInventoryAssetV1(agent, `reuse-${kaNumber}`, BigInt(kaNumber));
-  await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
-  return seal;
-}
-
-/** Share an asset and observe its chain confirmation: one placement through the supervisor. */
-async function place(agent: DKGAgent, kaNumber: number): Promise<AssertionSeal> {
-  const seal = await share(agent, kaNumber);
-  await observe(agent, `reuse-${kaNumber}`, seal);
-  return seal;
-}
-
-async function asset(kaNumber: number, assertionVersion = '1'): Promise<Rfc64PublicCatalogSuccessorAssetInputV1> {
-  return Object.freeze({
-    assertionCoordinate: `upsert-${kaNumber}` as never,
-    projectionBytes: PROJECTION,
-    seal: await authorSealV1(BigInt(kaNumber), assertionVersion),
-  });
-}
-
-function upsert(agent: DKGAgent, placed: Rfc64PublicCatalogSuccessorAssetInputV1, author: unknown = AUTHOR_WALLET) {
-  return agent.upsertConfirmedRfc64PublicRootCatalogAssetV1({ ...MUTATION, author: author as never, asset: placed });
-}
-
-function appliedHead(agent: DKGAgent) {
-  return agent.readRfc64AppliedCatalogHeadV1({ catalogScopeDigest: SCOPE_DIGEST, authorAddress: AUTHOR });
-}
-
-function persistenceOf(agent: DKGAgent): Rfc64PersistenceV1 {
-  return (agent as any).rfc64PersistenceV1;
-}
-
-/** Count what the agent reads from its durable stores from now on; `failNextCas` fails one CAS. */
+/** Count the agent's durable reads from now on; a reset also restarts the count of verified rows. */
 function watchDurableStores(agent: DKGAgent) {
-  const real = persistenceOf(agent);
-  const reads = { bundles: 0, controlObjects: 0, appliedHead: 0, inventorySnapshot: 0, cas: 0 };
-  let casFailure: Error | undefined;
-  const views: Record<string, unknown> = {
-    kaBundles: {
-      ...real.kaBundles,
-      readKaBundleByDigest: (...args: Parameters<typeof real.kaBundles.readKaBundleByDigest>) => {
-        reads.bundles += 1;
-        return real.kaBundles.readKaBundleByDigest(...args);
-      },
-    },
-    controlObjects: {
-      ...real.controlObjects,
-      getVerifiedObject: (...args: Parameters<typeof real.controlObjects.getVerifiedObject>) => {
-        reads.controlObjects += 1;
-        return real.controlObjects.getVerifiedObject(...args);
-      },
-      getVerifiedObjectByDigest: (
-        ...args: Parameters<typeof real.controlObjects.getVerifiedObjectByDigest>
-      ) => {
-        reads.controlObjects += 1;
-        return real.controlObjects.getVerifiedObjectByDigest(...args);
-      },
-    },
-    inventory: {
-      ...real.inventory,
-      readAppliedCatalogHeadV1: (...args: Parameters<typeof real.inventory.readAppliedCatalogHeadV1>) => {
-        reads.appliedHead += 1;
-        return real.inventory.readAppliedCatalogHeadV1(...args);
-      },
-      compareAndSwapAppliedCatalogHeadV1: (
-        ...args: Parameters<typeof real.inventory.compareAndSwapAppliedCatalogHeadV1>
-      ) => {
-        reads.cas += 1;
-        if (casFailure !== undefined) {
-          const failure = casFailure;
-          casFailure = undefined;
-          throw failure;
-        }
-        return real.inventory.compareAndSwapAppliedCatalogHeadV1(...args);
-      },
-    },
-    swmAuthorInventory: {
-      ...real.swmAuthorInventory,
-      readSwmAuthorInventorySnapshotV1: (
-        ...args: Parameters<typeof real.swmAuthorInventory.readSwmAuthorInventorySnapshotV1>
-      ) => {
-        reads.inventorySnapshot += 1;
-        return real.swmAuthorInventory.readSwmAuthorInventorySnapshotV1(...args);
-      },
-    },
-  };
-  (agent as any).rfc64PersistenceV1 = new Proxy(real, {
-    get(target, property) {
-      if (typeof property === 'string' && Object.hasOwn(views, property)) return views[property];
-      const value: unknown = Reflect.get(target, property, target);
-      return typeof value === 'function' ? value.bind(target) : value;
-    },
-  });
-  return {
-    reads,
-    reset(): void {
-      for (const key of Object.keys(reads) as (keyof typeof reads)[]) reads[key] = 0;
-      verifications.transferredBundle = 0;
-    },
-    failNextCas(failure: Error): void {
-      casFailure = failure;
-    },
-  };
-}
-
-/** The signed head, directory root and bucket the agent's applied head names. */
-async function appliedCatalogObjects(agent: DKGAgent) {
-  const persistence = persistenceOf(agent);
-  const state = await readVerifiedRfc64CatalogMutationStateV1(persistence, appliedHead(agent)!);
-  return {
-    state,
-    history: await loadBoundedAuthorCatalogHistoryV1(persistence, state.previousHead),
-  };
-}
-
-function kaNumbers(assets: readonly Rfc64PublicCatalogSuccessorAssetInputV1[]): string[] {
-  return assets.map(({ seal }) => `${seal.kaUal.split('/').at(-1)}@${seal.assertionVersion}`);
+  return watchPlacementStoresV1(agent, () => { verifications.transferredBundle = 0; });
 }
 
 describe('RFC-64 catalog placement over a remembered catalog', () => {
@@ -267,8 +89,9 @@ describe('RFC-64 catalog placement over a remembered catalog', () => {
         verified: 1,
         // Each unchanged row's bundle, once: the producer's proof that it is durably there.
         bundles: placement.rows,
-        // The successor's predecessor: head, directory root and bucket, from the durable store.
-        controlObjects: 3,
+        // The successor's predecessor (head, directory root and bucket), and the applied head and
+        // its delegation again before each of the two uses of the remembered state.
+        controlObjects: 3 + 2 * 2,
         // The authority for every use of the remembered state: coverage, then under the lock.
         appliedHead: 2,
         inventorySnapshot: 1,
@@ -297,7 +120,9 @@ describe('RFC-64 catalog placement over a remembered catalog', () => {
     expect(signer).not.toHaveBeenCalled();
     expect(applied).not.toHaveBeenCalled();
     expect(announce).not.toHaveBeenCalled();
-    expect(stores.reads).toEqual({ bundles: 0, controlObjects: 0, appliedHead: 1, inventorySnapshot: 0, cas: 0 });
+    // What the answer rests on is read from the durable store again, and nothing else: the applied
+    // head record, the head and its delegation, and the bundle of the row the marker is about.
+    expect(stores.reads).toEqual({ bundles: 1, controlObjects: 2, appliedHead: 1, inventorySnapshot: 0, cas: 0 });
     expect(verifications.transferredBundle).toBe(0);
     expect(appliedHead(agent)).toEqual(head);
     expect(persistenceOf(agent).finalizedPrivatePlacementRepairs.list()).toEqual([]);
@@ -363,7 +188,7 @@ describe('RFC-64 catalog placement over a remembered catalog', () => {
       await upsert(agent, placed);
       stores.reset();
       const remembered = await memory.read(persistenceOf(agent), SCOPE_DIGEST, AUTHOR, policyDigest(agent));
-      expect(stores.reads).toMatchObject({ bundles: 0, controlObjects: 0 });
+      expect(stores.reads).toMatchObject(SERVED_FROM_MEMORY);
       expect(remembered).toEqual(
         await readVerifiedRfc64CatalogMutationStateV1(persistenceOf(agent), appliedHead(agent)!),
       );
@@ -373,7 +198,7 @@ describe('RFC-64 catalog placement over a remembered catalog', () => {
     expect(appliedHead(agent)).toMatchObject({ inventoryRowCount: '1', catalogVersion: '6' });
     stores.reset();
     const remembered = await memory.read(persistenceOf(agent), SCOPE_DIGEST, AUTHOR, policyDigest(agent));
-    expect(stores.reads).toMatchObject({ bundles: 0, controlObjects: 0 });
+    expect(stores.reads).toMatchObject(SERVED_FROM_MEMORY);
     expect(remembered).toEqual(
       await readVerifiedRfc64CatalogMutationStateV1(persistenceOf(agent), appliedHead(agent)!),
     );
@@ -394,7 +219,7 @@ describe('RFC-64 catalog placement over a remembered catalog', () => {
     const stores = watchDurableStores(agent);
     stores.reset();
     const remembered = await memory.read(persistenceOf(agent), SCOPE_DIGEST, AUTHOR, policyDigest(agent));
-    expect(stores.reads).toMatchObject({ bundles: 0, controlObjects: 0 });
+    expect(stores.reads).toMatchObject(SERVED_FROM_MEMORY);
     expect(remembered).toEqual(
       await readVerifiedRfc64CatalogMutationStateV1(persistenceOf(agent), appliedHead(agent)!),
     );
@@ -497,7 +322,7 @@ describe('RFC-64 catalog placement over a remembered catalog', () => {
 
     // Same policy: answered from memory. The seal digest differs, so the row is not covered.
     await expect(covers()).resolves.toBe(false);
-    expect(stores.reads).toMatchObject({ bundles: 0, controlObjects: 0, appliedHead: 1 });
+    expect(stores.reads).toMatchObject({ ...SERVED_FROM_MEMORY, appliedHead: 1 });
 
     const digest = vi.spyOn(service, 'acceptedPolicyDigestForCatalogScope')
       .mockReturnValue(`0x${'ab'.repeat(32)}`);
@@ -537,7 +362,3 @@ describe('RFC-64 catalog placement over a remembered catalog', () => {
     expect(verifications.transferredBundle).toBe(4);
   }, 60_000);
 });
-
-function policyDigest(agent: DKGAgent): string {
-  return (agent as any).rfc64PublicCatalogServiceV1.acceptedPolicyDigestForCatalogScope(SCOPE);
-}

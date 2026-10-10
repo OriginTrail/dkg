@@ -86,7 +86,7 @@ export async function producerGenesisV1(
   });
   const genesis = await produceEmptyAuthorCatalogGenesisV1({
     scope,
-    catalogIssuerDelegationDigest: authorization.catalogIssuerDelegation.objectDigest,
+    catalogIssuerDelegationDigest: authorization.catalogIssuerDelegation.objectDigest as Digest32V1,
     issuedAt: '1773900000000' as never,
     signer: producerSignerV1(),
   });

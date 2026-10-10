@@ -35,7 +35,7 @@ vi.mock('@origintrail-official/dkg-core', async (importOriginal) => {
 
 import {
   Rfc64SuccessorRowVerificationV1,
-  Rfc64VerifiedCatalogRowsV1,
+  Rfc64VerifiedCatalogRowSetV1,
 } from '../src/internal/verified-catalog-rows.js';
 import type { Rfc64PublicCatalogSuccessorAssetInputV1 } from
   '../src/rfc64/public-catalog-successor-producer-v1.js';
@@ -76,7 +76,7 @@ function produce(
   assets: readonly Rfc64PublicCatalogSuccessorAssetInputV1[],
   step: number,
   options: Readonly<{
-    verifiedRows?: Rfc64VerifiedCatalogRowsV1;
+    verifiedRows?: Rfc64VerifiedCatalogRowSetV1;
     signDigest?: (digest: Uint8Array) => Promise<string>;
     signal?: AbortSignal;
     deployment?: typeof PRODUCER_DEPLOYMENT;
@@ -118,7 +118,7 @@ async function successiveSets(): Promise<readonly (readonly Rfc64PublicCatalogSu
 /** A catalog of `rows` rows whose every row is remembered. */
 async function rememberedCatalog(rows: number) {
   const genesis = await producerGenesisV1();
-  const verifiedRows = new Rfc64VerifiedCatalogRowsV1();
+  const verifiedRows = new Rfc64VerifiedCatalogRowSetV1();
   const assets: Rfc64PublicCatalogSuccessorAssetInputV1[] = [];
   let history = genesis.history;
   for (let row = 1; row <= rows; row += 1) {
@@ -139,7 +139,7 @@ describe('RFC-64 successor production over rows already verified', () => {
   it('signs the same bytes and reports the same evidence as a production that verifies every row', async () => {
     const genesis = await producerGenesisV1();
     const sets = await successiveSets();
-    const verifiedRows = new Rfc64VerifiedCatalogRowsV1();
+    const verifiedRows = new Rfc64VerifiedCatalogRowSetV1();
     let plainHistory = genesis.history;
     let reusingHistory = genesis.history;
     const plainCounts: number[] = [];
@@ -354,7 +354,7 @@ describe('RFC-64 successor production over rows already verified', () => {
   });
 
   it('keeps what one completed successor holds and nothing else', async () => {
-    const rows = new Rfc64VerifiedCatalogRowsV1();
+    const rows = new Rfc64VerifiedCatalogRowSetV1();
     const outcome = { transfer: {}, projection: {} } as never;
     rows.replace('scope-a', new Map([['row-1', outcome], ['row-2', outcome]]));
     expect(rows.find('scope-a', 'row-1')).toBe(outcome);

@@ -4305,6 +4305,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     try {
       await this.rfc64CatalogMutationCoordinatorV1.closeAndDrain();
     } finally {
+      this.clearRfc64CatalogMutationMemoryV1();
       this.rfc64PublicCatalogSynchronizationEvidenceV1.clear();
       this.rfc64PublicCatalogReconciliationFailuresV1.clear();
       rfc64DirectAcceptedCompatibilityV1.delete(this);

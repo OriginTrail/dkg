@@ -3,8 +3,11 @@
 import {
   assertSignedAuthorCatalogHeadEnvelopeV1,
   assertSignedAuthorCatalogIssuerDelegationEnvelopeV1,
+  canonicalizeCanonicalGraphScopedAuthorSealBytesV1,
+  computeCanonicalGraphScopedAuthorSealDigestV1,
   computeControlSignatureVariantDigestHex,
   decodeOpaqueKaBundleV1,
+  encodeOpaqueKaBundleV1,
   parseCanonicalGraphScopedAuthorSealV1,
   type AuthorCatalogScopeV1,
   type Digest32V1,
@@ -14,16 +17,23 @@ import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dk
 import {
   loadBoundedAuthorCatalogHistoryV1,
   type BoundedAuthorCatalogHistoryV1,
+  type PublishAuthorCatalogExactSetSuccessorResultV1,
   type Rfc64CatalogSuccessorAssetInputV1,
   type Rfc64StagedAuthorCatalogHeadRefV1,
 } from '../dkg-agent-rfc64-catalog.js';
 import type { AppliedCatalogHeadSnapshotV1 } from '../rfc64/inventory-v1/index.js';
 import type { Rfc64PersistenceV1 } from '../rfc64/persistence-v1.js';
+import { computeRfc64AppliedInventoryDigestV1 } from
+  '../rfc64/public-catalog-inventory-completeness-v1.js';
 import { compareRfc64PublicCatalogSuccessorAssetsByKaIdV1 } from
   '../rfc64/public-catalog-successor-asset-v1.js';
 import type { Rfc64PublicCatalogIssuerAuthorizationV1 } from
   '../rfc64/public-catalog-successor-producer-v1.js';
-import { Rfc64VerifiedCatalogRowsV1 } from './verified-catalog-rows.js';
+import {
+  Rfc64VerifiedCatalogRowSetV1,
+  type Rfc64VerifiedCatalogRowsV1,
+  type VerifiedCatalogRowV1,
+} from './verified-catalog-rows.js';
 
 /**
  * GH#3081 / GH#3072 — what this process has verified about the author catalogs it mutates.
@@ -41,11 +51,16 @@ import { Rfc64VerifiedCatalogRowsV1 } from './verified-catalog-rows.js';
  *   from, so a head moved by any other writer is read again from the durable store;
  * - the policy accepted for the scope is the one it was read under (a lane is a function of that
  *   policy and the scope, and the delegation is named by the head);
- * - no mutation of the scope has failed since.
+ * - the applied head and its delegation are still in the durable store, read and verified again;
+ * - no mutation of the scope has failed between its read of the state and its applied-head CAS.
  *
  * It never replaces a check: the applied-head CAS on the expected digest stays the authority, and
- * the successor still reads its predecessor from the durable store and verifies it. Memory is
- * bounded by a number of scopes and a number of retained bytes, and nothing is persisted.
+ * the successor still reads its predecessor from the durable store and verifies it. What a state
+ * served from memory does not read again is the head's directory root and bucket and the bundles
+ * of its rows. A successor reads the root, the bucket and every unchanged row's bundle back;
+ * before a decision about one row ends work without a successor, that row's bundle is read back
+ * too ({@link Rfc64CatalogMutationMemoryV1.confirmRowBundle}). Memory is bounded by a number of
+ * scopes and a number of retained bytes, and nothing is persisted.
  */
 
 export interface Rfc64CatalogMutationStateV1 {
@@ -71,9 +86,12 @@ export interface Rfc64CatalogMutationMemoryLimitsV1 {
 export const RETAINED_STATE_ROW_BYTES_V1 = 4 * 1024;
 export const RETAINED_VERIFIED_ROW_BYTES_V1 = 12 * 1024;
 
-/** One exact set is at most 64 MiB of bundles and 1,024 rows, so one full catalog always fits. */
+/**
+ * One exact set is at most 64 MiB of bundles and 1,024 rows, so one full catalog always fits. The
+ * bytes are what bounds the memory; the scope count only bounds how many small catalogs share it.
+ */
 export const DEFAULT_CATALOG_MUTATION_MEMORY_LIMITS_V1: Rfc64CatalogMutationMemoryLimitsV1 =
-  Object.freeze({ maxScopes: 16, maxRetainedBytes: 96 * 1024 * 1024 });
+  Object.freeze({ maxScopes: 64, maxRetainedBytes: 96 * 1024 * 1024 });
 
 /** `DKG_RFC64_CATALOG_MUTATION_MEMORY=0` makes every placement read and verify the durable catalog. */
 export function resolveCatalogMutationMemoryLimitsV1(
@@ -88,20 +106,18 @@ interface RememberedScopeV1 {
   state: Rfc64CatalogMutationStateV1 | undefined;
   authority: string | undefined;
   stateBytes: number;
+  /**
+   * The state is the one the running mutation's own applied-head CAS made, and no successor of it
+   * has been asked for since.
+   */
+  committed: boolean;
+  readonly rows: Rfc64VerifiedCatalogRowSetV1;
+  /** What a production of the scope is given: lookups, and admission through this memory. */
   readonly verifiedRows: Rfc64VerifiedCatalogRowsV1;
 }
 
-function forgottenScopeV1(): RememberedScopeV1 {
-  return {
-    state: undefined,
-    authority: undefined,
-    stateBytes: 0,
-    verifiedRows: new Rfc64VerifiedCatalogRowsV1(),
-  };
-}
-
 function scopeBytesV1(scope: RememberedScopeV1): number {
-  return scope.stateBytes + scope.verifiedRows.size * RETAINED_VERIFIED_ROW_BYTES_V1;
+  return scope.stateBytes + scope.rows.size * RETAINED_VERIFIED_ROW_BYTES_V1;
 }
 
 /** Where a state this memory handed out belongs, so only such a state can be carried forward. */
@@ -135,12 +151,47 @@ function stateBytesV1(state: Rfc64CatalogMutationStateV1): number {
   return bytes;
 }
 
+/**
+ * The applied head and its delegation, read from the durable store and verified again. Everything
+ * a kept state holds was derived from them.
+ */
+async function appliedHeadDurablyHeldV1(
+  persistence: Rfc64PersistenceV1,
+  state: Rfc64CatalogMutationStateV1,
+): Promise<boolean> {
+  try {
+    const [head, delegation] = await Promise.all([
+      state.previousHead.objectDigest,
+      state.catalogIssuerAuthorization.catalogIssuerDelegation.objectDigest as Digest32V1,
+    ].map((objectDigest) => persistence.controlObjects.getVerifiedObjectByDigest({
+      objectDigest,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    })));
+    return head !== null && delegation !== null;
+  } catch {
+    // The read of the durable catalog that follows says what is wrong with the object.
+    return false;
+  }
+}
+
+function sameBytesV1(left: Uint8Array, right: Uint8Array): boolean {
+  return left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index]);
+}
+
+/** The successor this path signed, as `advance` reads it. */
+export type Rfc64SignedCatalogSuccessorV1 = Pick<
+  PublishAuthorCatalogExactSetSuccessorResultV1,
+  'headObjectDigest' | 'signatureVariantDigest' | 'assets'
+>;
+
 export class Rfc64CatalogMutationMemoryV1 {
   readonly #limits: Rfc64CatalogMutationMemoryLimitsV1;
   readonly #readVerified: typeof readVerifiedRfc64CatalogMutationStateV1;
   /** Least recently used first. */
   readonly #scopes = new Map<string, RememberedScopeV1>();
   readonly #origins = new WeakMap<Rfc64CatalogMutationStateV1, StateOriginV1>();
+  /** The seal digest of an asset a state holds; such an asset is the mutation's own copy and never changes. */
+  readonly #sealDigests = new WeakMap<Rfc64CatalogSuccessorAssetInputV1, Digest32V1>();
 
   constructor(
     limits: Rfc64CatalogMutationMemoryLimitsV1 = DEFAULT_CATALOG_MUTATION_MEMORY_LIMITS_V1,
@@ -174,37 +225,74 @@ export class Rfc64CatalogMutationMemoryV1 {
     const key = scopeKeyV1(catalogScopeDigest, authorAddress);
     const current = persistence.inventory.readAppliedCatalogHeadV1(catalogScopeDigest, authorAddress);
     if (current === null) {
-      this.#scopes.delete(key);
+      this.#forget(key);
       return null;
     }
     const remembered = this.#scopes.get(key);
-    if (remembered?.state !== undefined) {
+    const state = remembered?.state;
+    if (remembered !== undefined && state !== undefined) {
       if (
         authority !== undefined
         && remembered.authority === authority
-        && sameAppliedHeadV1(remembered.state.current, current)
+        && sameAppliedHeadV1(state.current, current)
+        && await appliedHeadDurablyHeldV1(persistence, state)
       ) {
-        this.#touch(key, remembered);
-        return remembered.state;
+        // The durable check gave other work a turn: only a scope still in place is refreshed.
+        if (this.#scopes.get(key) === remembered) this.#touch(key, remembered);
+        return state;
       }
-      // Another writer moved the head, or the scope's policy changed: start over from the store.
-      this.#scopes.delete(key);
+      // Another writer moved the head, the scope's policy changed, or the head's own objects are
+      // no longer in the durable store: start over from the store.
+      if (this.#scopes.get(key) === remembered) this.#forget(key);
     }
-    const state = await this.#readVerified(persistence, current);
-    if (authority !== undefined) this.#keep(key, authority, state);
-    return state;
+    let read: Rfc64CatalogMutationStateV1;
+    try {
+      read = await this.#readVerified(persistence, current);
+    } catch (cause) {
+      this.#forget(key);
+      throw cause;
+    }
+    if (authority !== undefined) this.#keep(key, authority, read);
+    return read;
+  }
+
+  /**
+   * One serialized mutation of the scope starts. If it fails, everything remembered about the
+   * scope is read and verified again, with one exception: a failure that follows the mutation's
+   * own applied-head CAS, before a further successor was asked for, says nothing about the catalog
+   * (the announcement of the committed head, a cancellation between two successors). The committed
+   * state stays.
+   */
+  mutation(catalogScopeDigest: Digest32V1, authorAddress: string): Readonly<{ failed(): void }> {
+    const key = scopeKeyV1(catalogScopeDigest, authorAddress);
+    const known = this.#scopes.get(key);
+    if (known !== undefined) known.committed = false;
+    return Object.freeze({
+      failed: (): void => {
+        if (this.#scopes.get(key)?.committed !== true) this.#forget(key);
+      },
+    });
+  }
+
+  /** A successor of `state` is asked for: from here to its applied-head CAS a failure forgets the scope. */
+  producing(state: Rfc64CatalogMutationStateV1): void {
+    const origin = this.#origins.get(state);
+    const scope = origin === undefined ? undefined : this.#scopes.get(origin.key);
+    if (scope !== undefined) scope.committed = false;
   }
 
   /**
    * The state after this path's own applied-head CAS: the committed head, the set that was signed
    * and the unchanged authorization. It is kept only as the successor of a state this memory
-   * handed out, under the authority that state was read under, and only when the committed
-   * record names the successor that was signed.
+   * handed out, under the authority that state was read under, and only when the committed record
+   * names the successor that was signed and `assets` hold, row for row, the seals of that
+   * successor's rows. A committed record that says anything else leaves nothing remembered about
+   * the scope.
    */
   advance(
     previous: Rfc64CatalogMutationStateV1,
     applied: AppliedCatalogHeadSnapshotV1,
-    successor: Readonly<{ headObjectDigest: Digest32V1; signatureVariantDigest: Digest32V1 }>,
+    successor: Rfc64SignedCatalogSuccessorV1,
     assets: readonly Rfc64CatalogSuccessorAssetInputV1[],
   ): Rfc64CatalogMutationStateV1 {
     const next: Rfc64CatalogMutationStateV1 = Object.freeze({
@@ -218,63 +306,197 @@ export class Rfc64CatalogMutationMemoryV1 {
       expectedCurrentCatalogHeadDigest: applied.currentCatalogHeadDigest,
     });
     const origin = this.#origins.get(previous);
-    if (origin !== undefined && applied.currentCatalogHeadDigest === successor.headObjectDigest) {
-      this.#keep(origin.key, origin.authority, next);
+    if (origin === undefined) return next;
+    if (!this.#namesTheSignedSet(applied, successor, next.assets)) {
+      this.#forget(origin.key);
+    } else if (this.#keep(origin.key, origin.authority, next)) {
+      this.#scopes.get(origin.key)!.committed = true;
     }
     return next;
   }
 
-  /** A mutation of the scope failed: its state and its verified rows are read and verified again. */
-  forget(catalogScopeDigest: Digest32V1, authorAddress: string): void {
-    this.#scopes.delete(scopeKeyV1(catalogScopeDigest, authorAddress));
+  /**
+   * Before a decision about one row ends work without producing a successor (a covered repair
+   * retires its durable marker), that row's bundle is read from the durable store again: it must
+   * be there and hold the remembered bytes. Anything else forgets the scope and fails the
+   * decision, as a read of the durable catalog would.
+   */
+  async confirmRowBundle(
+    persistence: Rfc64PersistenceV1,
+    catalogScopeDigest: Digest32V1,
+    authorAddress: string,
+    asset: Rfc64CatalogSuccessorAssetInputV1,
+  ): Promise<void> {
+    try {
+      const encoded = encodeOpaqueKaBundleV1(
+        asset.projectionBytes,
+        canonicalizeCanonicalGraphScopedAuthorSealBytesV1(asset.seal),
+      );
+      const stored = await persistence.kaBundles.readKaBundleByDigest(encoded.blobDigest);
+      if (stored === null) {
+        throw new Error(`RFC-64 applied catalog bundle ${encoded.blobDigest} is unavailable`);
+      }
+      if (!sameBytesV1(stored, encoded.bundleBytes)) {
+        throw new Error('RFC-64 applied catalog bundle differs from its signed predecessor row');
+      }
+    } catch (cause) {
+      this.forget(catalogScopeDigest, authorAddress);
+      throw cause;
+    }
   }
 
-  /** The rows of this scope verified so far, or undefined when nothing is remembered. */
+  /** Its state and its verified rows are read and verified again. */
+  forget(catalogScopeDigest: Digest32V1, authorAddress: string): void {
+    this.#forget(scopeKeyV1(catalogScopeDigest, authorAddress));
+  }
+
+  /** The durable stores are closing: nothing read from them is served to whoever opens them next. */
+  clear(): void {
+    // A Map may lose entries while it is walked.
+    for (const key of this.#scopes.keys()) this.#forget(key);
+  }
+
+  /**
+   * Where a production of the scope looks up the rows verified so far and files the rows of the
+   * successor it completes, or undefined when nothing is remembered. Handing it out is the start
+   * of a production.
+   */
   verifiedRows(
     catalogScopeDigest: Digest32V1,
     authorAddress: string,
   ): Rfc64VerifiedCatalogRowsV1 | undefined {
     if (this.#limits.maxScopes < 1) return undefined;
     const key = scopeKeyV1(catalogScopeDigest, authorAddress);
-    const remembered = this.#scopes.get(key) ?? forgottenScopeV1();
-    this.#touch(key, remembered);
-    this.#evict(key);
-    return remembered.verifiedRows;
+    const scope = this.#scope(key);
+    scope.committed = false;
+    this.#touch(key, scope);
+    this.#evict();
+    return scope.verifiedRows;
   }
 
-  #keep(key: string, authority: string, state: Rfc64CatalogMutationStateV1): void {
-    if (this.#limits.maxScopes < 1) return;
-    const remembered = this.#scopes.get(key) ?? forgottenScopeV1();
-    const stateBytes = stateBytesV1(state);
-    remembered.state = undefined;
-    remembered.authority = undefined;
-    remembered.stateBytes = 0;
-    // A state that does not fit the whole budget beside its own verified rows is read every
-    // time; the rows stay verified.
-    if (stateBytes + scopeBytesV1(remembered) <= this.#limits.maxRetainedBytes) {
-      remembered.state = state;
-      remembered.authority = authority;
-      remembered.stateBytes = stateBytes;
-      this.#origins.set(state, { key, authority });
+  /** The committed record and the signed successor agree, and `assets` are that successor's seals. */
+  #namesTheSignedSet(
+    applied: AppliedCatalogHeadSnapshotV1,
+    successor: Rfc64SignedCatalogSuccessorV1,
+    assets: readonly Rfc64CatalogSuccessorAssetInputV1[],
+  ): boolean {
+    const rows = successor.assets;
+    try {
+      return applied.currentCatalogHeadDigest === successor.headObjectDigest
+        && applied.inventoryRowCount === String(rows.length)
+        && rows.length === assets.length
+        // The seal names its KA, UAL and assertion version: the same digest is the same row's seal.
+        && assets.every((asset, index) => rows[index]!.sealDigest === this.#sealDigestOf(asset))
+        && applied.appliedInventoryDigest === computeRfc64AppliedInventoryDigestV1({
+          catalogScopeDigest: applied.catalogScopeDigest,
+          rows,
+        });
+    } catch {
+      // Rows or seals that cannot be hashed name nothing.
+      return false;
     }
-    this.#touch(key, remembered);
-    this.#evict(key);
   }
 
-  #touch(key: string, remembered: RememberedScopeV1): void {
+  /** One hash per asset object: a successor repeats every object of its predecessor's state but one. */
+  #sealDigestOf(asset: Rfc64CatalogSuccessorAssetInputV1): Digest32V1 {
+    let digest = this.#sealDigests.get(asset);
+    if (digest === undefined) {
+      digest = computeCanonicalGraphScopedAuthorSealDigestV1(asset.seal);
+      this.#sealDigests.set(asset, digest);
+    }
+    return digest;
+  }
+
+  /** The scope's entry, new when nothing is remembered about it; the caller places it. */
+  #scope(key: string): RememberedScopeV1 {
+    const known = this.#scopes.get(key);
+    if (known !== undefined) return known;
+    const rows = new Rfc64VerifiedCatalogRowSetV1();
+    const scope: RememberedScopeV1 = {
+      state: undefined,
+      authority: undefined,
+      stateBytes: 0,
+      committed: false,
+      rows,
+      // A production keeps this for as long as it runs. Once the scope is forgotten or evicted
+      // its rows are gone, and the production files nothing back.
+      verifiedRows: Object.freeze({
+        get size(): number {
+          return rows.size;
+        },
+        find: (binding: string | undefined, canonicalRow: string) => rows.find(binding, canonicalRow),
+        replace: (binding: string | undefined, verified: ReadonlyMap<string, VerifiedCatalogRowV1>) => {
+          if (this.#scopes.get(key) !== scope) return;
+          rows.replace(binding, verified);
+          this.#settle(key, scope);
+        },
+        clear: () => {
+          if (this.#scopes.get(key) === scope) this.#forget(key);
+        },
+      }),
+    };
+    return scope;
+  }
+
+  #forget(key: string): void {
+    const scope = this.#scopes.get(key);
+    if (scope === undefined) return;
     this.#scopes.delete(key);
-    this.#scopes.set(key, remembered);
+    this.#dropState(scope);
+    scope.rows.clear();
   }
 
-  /** Drop the least recently used scopes, never `keep`, until both bounds hold. */
-  #evict(keep: string): void {
+  #dropState(scope: RememberedScopeV1): void {
+    scope.state = undefined;
+    scope.authority = undefined;
+    scope.stateBytes = 0;
+    scope.committed = false;
+  }
+
+  /** Keep `state` for the scope if it fits; says whether it was kept. */
+  #keep(key: string, authority: string, state: Rfc64CatalogMutationStateV1): boolean {
+    if (this.#limits.maxScopes < 1) return false;
+    const scope = this.#scope(key);
+    this.#dropState(scope);
+    scope.state = state;
+    scope.authority = authority;
+    scope.stateBytes = stateBytesV1(state);
+    this.#settle(key, scope);
+    if (scope.state !== state) return false;
+    this.#origins.set(state, { key, authority });
+    return true;
+  }
+
+  /**
+   * The scope grew, by its state or by its verified rows: make both bounds hold again, here and
+   * now. The scope itself comes first. Rows that do not fit the whole budget are not kept; a state
+   * that does not fit beside its own rows is read every time and the rows stay verified. Then the
+   * least recently used other scopes go.
+   */
+  #settle(key: string, scope: RememberedScopeV1): void {
+    const budget = this.#limits.maxRetainedBytes;
+    if (scope.rows.size * RETAINED_VERIFIED_ROW_BYTES_V1 > budget) scope.rows.clear();
+    if (scopeBytesV1(scope) > budget) this.#dropState(scope);
+    this.#touch(key, scope);
+    this.#evict();
+  }
+
+  #touch(key: string, scope: RememberedScopeV1): void {
+    this.#scopes.delete(key);
+    this.#scopes.set(key, scope);
+  }
+
+  /**
+   * Drop the least recently used scopes until both bounds hold. The scope just used is the last
+   * in line, and it fits on its own.
+   */
+  #evict(): void {
     let bytes = 0;
     for (const scope of this.#scopes.values()) bytes += scopeBytesV1(scope);
     for (const [key, scope] of this.#scopes) {
       if (this.#scopes.size <= this.#limits.maxScopes && bytes <= this.#limits.maxRetainedBytes) return;
-      if (key === keep) continue;
       bytes -= scopeBytesV1(scope);
-      this.#scopes.delete(key);
+      this.#forget(key);
     }
   }
 }
@@ -339,7 +561,7 @@ async function loadRfc64CatalogSuccessorAssetsV1(
     assets.push(Object.freeze({
       assertionCoordinate: row.assertionCoordinate,
       projectionBytes: new Uint8Array(decoded.projectionBytes),
-      seal: parseCanonicalGraphScopedAuthorSealV1(decoded.sealBytes),
+      seal: Object.freeze(parseCanonicalGraphScopedAuthorSealV1(decoded.sealBytes)),
     }));
   }
   return assets;

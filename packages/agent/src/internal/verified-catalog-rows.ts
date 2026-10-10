@@ -65,8 +65,25 @@ function bindingKeyV1(
   return [computeAuthorCatalogScopeDigestV1(scope), ...pins].join('\n');
 }
 
+/**
+ * What a production is given: where it looks up rows this process verified, and where it files
+ * the rows of the successor it completed. Whoever owns the storage decides what is kept (the
+ * catalog mutation memory keeps it within its byte budget); a production never changes by itself
+ * how much is retained.
+ */
+export interface Rfc64VerifiedCatalogRowsV1 {
+  /** Rows remembered now. */
+  readonly size: number;
+  /** The outcome for exactly this row under exactly this scope and deployment. */
+  find(binding: string | undefined, canonicalRow: string): VerifiedCatalogRowV1 | undefined;
+  /** A successor completed: its rows, and only they, are the remembered set. */
+  replace(binding: string | undefined, rows: ReadonlyMap<string, VerifiedCatalogRowV1>): void;
+  /** A production failed: nothing verified for this catalog is trusted again. */
+  clear(): void;
+}
+
 /** The verified rows of one author catalog scope: those of its latest completed successor. */
-export class Rfc64VerifiedCatalogRowsV1 {
+export class Rfc64VerifiedCatalogRowSetV1 implements Rfc64VerifiedCatalogRowsV1 {
   #binding: string | undefined;
   #rows: ReadonlyMap<string, VerifiedCatalogRowV1> = new Map();
 
@@ -74,13 +91,11 @@ export class Rfc64VerifiedCatalogRowsV1 {
     return this.#rows.size;
   }
 
-  /** The outcome for exactly this row under exactly this scope and deployment. */
   find(binding: string | undefined, canonicalRow: string): VerifiedCatalogRowV1 | undefined {
     if (binding === undefined || binding !== this.#binding) return undefined;
     return this.#rows.get(canonicalRow);
   }
 
-  /** A successor completed: its rows, and only they, are the remembered set. */
   replace(binding: string | undefined, rows: ReadonlyMap<string, VerifiedCatalogRowV1>): void {
     if (binding === undefined || rows.size === 0) {
       this.clear();
