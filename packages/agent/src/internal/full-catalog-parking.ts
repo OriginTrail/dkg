@@ -39,7 +39,7 @@ import { findAuthorCatalogFullErrorV1 } from './author-catalog-capacity.js';
  *   stays parked unless that attempt places it. Its refusal reads afresh what the catalog holds,
  *   and markers whose asset is then found there are attempted. When the attempt places its
  *   marker, the catalog held a row the refusal did not name, so the next parked marker follows
- *   in the next pass, and so on until one is refused;
+ *   in the next pass, and so on until one is refused. No other refusal moves that interval;
  * - the log names the graph and author when a scope first refuses and at most once an interval
  *   after that; status carries two counts and no identity.
  *
@@ -213,14 +213,17 @@ export class FullCatalogParkingV1 {
     const scopeKey = catalogScopeDigestV1(repair);
     // A marker whose scope cannot be named keeps the ordinary failure handling.
     if (scopeKey === undefined) return false;
-    const now = this.#now();
+    const known = this.#scopes.get(scopeKey);
     this.#scopes.set(scopeKey, {
       catalogScopeDigest: scopeKey,
       contextGraphId: repair.contextGraphId,
       authorAddress: repair.authorAddress,
       rows: full.rowCount,
       rowCap: full.rowCap,
-      recheckAtMs: now + FULL_CATALOG_RECHECK_INTERVAL_MS_V1,
+      // A refusal brings what the catalog holds now. It does not move the safety net of a scope
+      // already known: the attempt a new marker gets of its own, where the list was dropped,
+      // would otherwise postpone the hour of what has been parked longer, for ever.
+      recheckAtMs: known?.recheckAtMs ?? this.#now() + FULL_CATALOG_RECHECK_INTERVAL_MS_V1,
       attempted: undefined,
       dueMarker: undefined,
     });

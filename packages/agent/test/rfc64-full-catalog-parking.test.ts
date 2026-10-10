@@ -271,6 +271,40 @@ describe('finalized-private placements of a full author catalog', () => {
     expect(model.state.markers).not.toContain(newerVersion);
   });
 
+  it('does not let a later refusal of a scope postpone its hourly attempt', async () => {
+    const model = node();
+    // One more full scope than lists of held assets are kept: the first scope's list is the one
+    // that goes, so a new marker of that scope gets an attempt of its own.
+    const scopes = MAX_FULL_CATALOG_DETAILED_SCOPES_V1 + 1;
+    const graph = (index: number) => `full-catalog-${index}` as ContextGraphIdV1;
+    const parked = Array.from({ length: scopes }, (_value, index) => marker(graph(index), CAP + 1, '2'));
+    for (const refused of parked) model.fill(refused);
+    model.state.markers = [...parked];
+    const s = supervisor(model);
+    await s.pass();
+    expect(model.state.attempts).toHaveLength(scopes);
+
+    // The first scope's parked asset gets a row at the same count. Half an hour later a new asset
+    // arrives in every scope. Each is refused on an attempt of its own, and the last of those
+    // refusals drops the first scope's fresh list again before its parked marker is next decided.
+    model.swap(parked[0]!, [1], [parked[0]!.kaUal]);
+    await s.advance(30 * 60_000);
+    model.state.attempts.length = 0;
+    model.state.markers = [...model.state.markers, ...parked.map((_marker, index) => marker(graph(index), CAP + 2))];
+    await s.pass();
+    expect(model.state.attempts).toHaveLength(scopes);
+    expect(model.state.markers).toContain(parked[0]);
+
+    // Those refusals moved no scope's hour. The first scope's attempt comes when it was due,
+    // goes to the marker parked longest, and places it.
+    model.state.attempts.length = 0;
+    await s.advance(30 * 60_000 - 5_000);
+    expect(model.state.attempts).toEqual([]);
+    await s.advance(5_000);
+    expect(model.state.attempts).toContain(parked[0]!.kaUal);
+    expect(model.state.markers).not.toContain(parked[0]);
+  });
+
   it('does not let a placement that keeps failing for another reason hold the safety net', async () => {
     const model = node();
     model.fill(NEW_A);
