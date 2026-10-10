@@ -5,6 +5,7 @@ import { GossipSubManager } from '../src/gossipsub-manager.js';
 import { DKGEvent, TypedEventBus } from '../src/event-bus.js';
 import { PeerDiscoveryManager } from '../src/discovery.js';
 import { multiaddr } from '@multiformats/multiaddr';
+import { peerIdFromString } from '@libp2p/peer-id';
 
 async function connectNodes(a: DKGNode, b: DKGNode): Promise<void> {
   const bAddr = b.multiaddrs[0];
@@ -55,6 +56,23 @@ describe('DKGNode', () => {
     const peers = node1.libp2p.getPeers().map((p) => p.toString());
     expect(peers).toContain(node2.peerId);
   }, 10000);
+
+  it('advertises a protocol registered after peers have already identified', async () => {
+    const node1 = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false });
+    const node2 = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false });
+    nodes.push(node1, node2);
+    await node1.start();
+    await node2.start();
+    await connectNodes(node1, node2);
+
+    const remotePeer = peerIdFromString(node2.peerId);
+    const lateProtocol = '/test/late-sync-advertisement/1.0.0';
+    expect((await node1.libp2p.peerStore.get(remotePeer)).protocols).not.toContain(lateProtocol);
+    new ProtocolRouter(node2).register(lateProtocol, async () => new Uint8Array());
+    await vi.waitFor(async () => {
+      expect((await node1.libp2p.peerStore.get(remotePeer)).protocols).toContain(lateProtocol);
+    }, { timeout: 6_000, interval: 100 });
+  }, 10_000);
 
   it('getConnections returns ConnectionInfo with direct transport for local peers', async () => {
     const node1 = new DKGNode({
