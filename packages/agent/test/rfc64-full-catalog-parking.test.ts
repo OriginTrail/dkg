@@ -131,13 +131,14 @@ function node() {
 
 function supervisor(model: ReturnType<typeof node>, options: { readHead?: boolean } = {}) {
   let revision: CatalogRepairRevisionHintV1 = { scopeIdentity: 'scope', headRevision: 'inventory-1' };
+  let laneActive = true;
   const warn = vi.fn();
   const reconcile = vi.fn(async (): Promise<null> => null);
   const owner = new Rfc64SwmCatalogProjectionOwnerV1({
     resolvePartition: () => ({ retryIntervalMs: 5_000, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }) as never,
     listLocalAuthorAddresses: () => [AUTHOR],
     acceptsPublicRootLane: () => true,
-    acceptsFinalizedPrivateLane: () => true,
+    acceptsFinalizedPrivateLane: () => laneActive,
     readRepairRevision: () => revision,
     listFinalizedPrivateRepairs: () => model.state.markers,
     repairFinalizedPrivatePlacement: model.place,
@@ -157,6 +158,7 @@ function supervisor(model: ReturnType<typeof node>, options: { readHead?: boolea
     advance: async (ms: number) => { await vi.advanceTimersByTimeAsync(ms); await owner.whenIdle(); },
     shareTimeRequest: () => owner.request({ contextGraphId: FULL_GRAPH, authorAddress: AUTHOR, ctx }),
     setInventoryHead: (head: string) => { revision = { scopeIdentity: 'scope', headRevision: head }; },
+    setLaneActive: (active: boolean) => { laneActive = active; },
   };
 }
 
@@ -350,6 +352,34 @@ describe('finalized-private placements of a full author catalog', () => {
     expect(after.lines('catalog_full')).toEqual([expect.objectContaining({ parkedPlacements: 3 })]);
     await after.advance(HOUR - 5_000);
     expect(model.state.attempts).toEqual([NEW_A.kaUal]);
+  });
+
+  it('does no catalog work for the safety-net attempt while the lane is inactive', async () => {
+    const model = node();
+    model.fill(NEW_A);
+    model.state.markers = [NEW_A, NEW_B];
+    const s = supervisor(model);
+    await s.pass();
+    expect(model.place).toHaveBeenCalledTimes(1);
+
+    // The lane goes inactive, as it does under the kill switch or a policy change. What is
+    // parked stays parked, and the hourly attempt stops at the lane check every attempt makes.
+    s.setLaneActive(false);
+    await s.advance(HOUR);
+    expect(model.place).toHaveBeenCalledTimes(1);
+    expect(s.lines('catalog_private_repair_failed')).toEqual([
+      expect.objectContaining({ diagnostic: expect.objectContaining({ kind: 'lane_inactive' }) }),
+    ]);
+    // That marker is parked again, not retried on the failure timer: no further attempt at all.
+    await s.advance(HOUR - 5_000);
+    expect(model.place).toHaveBeenCalledTimes(1);
+    expect(s.lines('catalog_private_repair_failed')).toHaveLength(1);
+    expect(model.state.markers).toEqual([NEW_A, NEW_B]);
+
+    s.setLaneActive(true);
+    await s.advance(5_000);
+    expect(model.state.attempts).toEqual([NEW_A.kaUal, NEW_B.kaUal]);
+    expect(s.capacity()).toEqual({ parkedPlacements: 2, scopesAtCap: 1 });
   });
 
   it('releases a request for a parked placement without an attempt', async () => {

@@ -38,7 +38,9 @@ import {
   CONTEXT_GRAPH_ID,
   NATIVE_DEPLOYMENT,
   NETWORK_ID,
+  PROJECTION_QUADS,
   agents,
+  assertionSealV1,
   authorSealV1,
   bootstrapConfigV1,
   catalogScopeDigestV1,
@@ -262,6 +264,14 @@ describe('a full author catalog', () => {
     expect([...(refusal as AuthorCatalogFullErrorV1).heldKaUals].sort())
       .toEqual(held.map((asset) => asset.seal.kaUal).sort());
     // Nothing was built, signed, committed or announced.
+    expect(author.footprint()).toEqual(before);
+    // The explicit authoring entry point places through the same upsert, and is refused the same way.
+    await expect(author.agent.recordRfc64PublicCatalogAssetV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: 'recorded-6' as never,
+      publicQuads: PROJECTION_QUADS,
+      seal: assertionSealV1(await authorSealV1(6n)),
+    })).rejects.toBeInstanceOf(AuthorCatalogFullErrorV1);
     expect(author.footprint()).toEqual(before);
 
     // A newer version of an asset the catalog holds replaces its row at the cap.
