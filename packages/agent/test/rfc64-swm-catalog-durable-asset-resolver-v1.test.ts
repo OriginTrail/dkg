@@ -274,6 +274,20 @@ describe('RFC-64 durable SWM inventory catalog asset resolver', () => {
   });
 });
 
+describe('RFC-64 durable catalog asset resolver and the author it is asked for', () => {
+  it('refuses a seal when the author is not named by its canonical address', async () => {
+    // Control objects carry lowercase addresses; a seal found for another spelling of the author
+    // is not accepted as that author's.
+    await expect(resolveRfc64InventoryWorkspaceCatalogAssetV1({
+      store,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR_WALLET.address as EvmAddressV1,
+      laneKind: 'private',
+      row,
+    })).rejects.toThrow(`durable RFC-64 catalog asset ${seal.kaUal} has a different seal coordinate`);
+  });
+});
+
 describe('RFC-64 durable catalog asset resolver after the assertion was re-opened for editing', () => {
   function resolveConfirmedRepair(canonicalSeal: CanonicalGraphScopedAuthorSealV1) {
     return resolveRfc64ConfirmedVmRepairCatalogAssetV1({

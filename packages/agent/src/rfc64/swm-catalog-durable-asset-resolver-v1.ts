@@ -292,58 +292,65 @@ async function resolveStrictSealV1(
     source: 'agent.rfc64.swmInventory.catalogReconcile.seal',
     signal: params.signal,
   };
-  let candidate = await resolveDurableGraphScopedAuthorSealCandidateV1(sealQuery);
-  if (!isSealOfIdentityV1(candidate, params, identity)) {
-    // The assertion was re-opened for editing after this exact version was sealed: its seal is
-    // archived and the active subject is empty or carries the next version. The identity names
-    // the seal by digest, so the archived copy is accepted only when it is that seal.
-    const archived = await resolveArchivedGraphScopedAuthorSealCandidateV1(sealQuery);
-    if (isSealOfIdentityV1(archived, params, identity)) candidate = archived;
-  }
-  if (candidate === undefined) {
-    throw new CatalogRepairIntegrityErrorV1(`durable RFC-64 catalog asset ${identity.kaUal} has no strict author seal`);
-  }
+  const active = checkStrictSealV1(
+    await resolveDurableGraphScopedAuthorSealCandidateV1(sealQuery),
+    params,
+    identity,
+  );
+  if (active.ok) return Object.freeze({ graphManager: new GraphManager(params.store), seal: active.seal });
+  // The assertion was re-opened for editing after this exact version was sealed: its seal is
+  // archived and the active subject is empty or carries the next version. The identity names
+  // the seal by digest, so the archived copy is taken only when it is that seal.
+  const archived = checkStrictSealV1(
+    await resolveArchivedGraphScopedAuthorSealCandidateV1(sealQuery),
+    params,
+    identity,
+  );
+  if (archived.ok) return Object.freeze({ graphManager: new GraphManager(params.store), seal: archived.seal });
+  // Neither is the seal the identity names: report what is wrong with the active one.
+  throw active.failure;
+}
+
+type StrictSealCheckV1 =
+  | Readonly<{ ok: true; seal: CanonicalGraphScopedAuthorSealV1 }>
+  | Readonly<{ ok: false; failure: unknown }>;
+
+/**
+ * Check one seal candidate against the identity, once: its canonical seal when it is exactly the
+ * seal the identity names (coordinate, version, asset and digest), or the reason it is not.
+ */
+function checkStrictSealV1(
+  candidate: GraphScopedAssertionSealCandidate | undefined,
+  params: Readonly<DurableCatalogAssetResolverBaseV1>,
+  identity: Readonly<Rfc64DurableCatalogAssetIdentityV1>,
+): StrictSealCheckV1 {
+  const refused = (reason: string): StrictSealCheckV1 => Object.freeze({
+    ok: false,
+    failure: new CatalogRepairIntegrityErrorV1(`durable RFC-64 catalog asset ${identity.kaUal} ${reason}`),
+  });
+  if (candidate === undefined) return refused('has no strict author seal');
   if (
     candidate.coordinate.scope !== params.contextGraphId
     || candidate.coordinate.agentAddress.toLowerCase() !== params.authorAddress
     || candidate.coordinate.name !== identity.assertionCoordinate
   ) {
-    throw new CatalogRepairIntegrityErrorV1(
-      `durable RFC-64 catalog asset ${identity.kaUal} has a different seal coordinate`,
-    );
+    return refused('has a different seal coordinate');
   }
-  const seal = canonicalGraphScopedAuthorSealFromAssertionSealV1(candidate.seal);
+  let seal: CanonicalGraphScopedAuthorSealV1;
+  try {
+    seal = canonicalGraphScopedAuthorSealFromAssertionSealV1(candidate.seal);
+  } catch (failure) {
+    // Reported as it was thrown when no other candidate is the identity's seal.
+    return Object.freeze({ ok: false, failure });
+  }
   if (
     seal.assertionVersion !== identity.assertionVersion
     || seal.kaUal !== identity.kaUal
     || computeCanonicalGraphScopedAuthorSealDigestV1(seal) !== identity.sealDigest
   ) {
-    throw new CatalogRepairIntegrityErrorV1(`durable RFC-64 catalog asset ${identity.kaUal} has a different author seal`);
+    return refused('has a different author seal');
   }
-  return Object.freeze({ graphManager: new GraphManager(params.store), seal });
-}
-
-/** True when `candidate` is exactly the seal `identity` names: its coordinate, version, asset and digest. */
-function isSealOfIdentityV1(
-  candidate: GraphScopedAssertionSealCandidate | undefined,
-  params: Readonly<DurableCatalogAssetResolverBaseV1>,
-  identity: Readonly<Rfc64DurableCatalogAssetIdentityV1>,
-): candidate is GraphScopedAssertionSealCandidate {
-  if (
-    candidate === undefined
-    || candidate.coordinate.scope !== params.contextGraphId
-    || candidate.coordinate.agentAddress.toLowerCase() !== params.authorAddress
-    || candidate.coordinate.name !== identity.assertionCoordinate
-  ) return false;
-  try {
-    const seal = canonicalGraphScopedAuthorSealFromAssertionSealV1(candidate.seal);
-    return seal.assertionVersion === identity.assertionVersion
-      && seal.kaUal === identity.kaUal
-      && computeCanonicalGraphScopedAuthorSealDigestV1(seal) === identity.sealDigest;
-  } catch {
-    // A seal that cannot be canonicalized is not this identity's; the strict checks report it.
-    return false;
-  }
+  return Object.freeze({ ok: true, seal });
 }
 
 function laneAcceptsWorkspaceHeadV1(

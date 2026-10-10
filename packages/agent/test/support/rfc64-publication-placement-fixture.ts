@@ -172,7 +172,7 @@ export async function fulfilledWithinV1<T>(work: Promise<T>, what: string, ms = 
   const settlement = await settledWithinV1(work, ms);
   if (settlement.status === 'fulfilled') return settlement.value;
   if (settlement.status === 'rejected') throw settlement.reason;
-  throw new Error(`${what} was still pending after ${ms} ms`);
+  throw new Error(`${what}: still pending after ${ms} ms`);
 }
 
 /** Real event-loop turns until `condition` holds, bounded by wall clock. */

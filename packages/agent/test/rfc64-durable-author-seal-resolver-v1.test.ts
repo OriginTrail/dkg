@@ -130,6 +130,17 @@ describe('RFC-64 archived author seal resolver', () => {
     });
   });
 
+  it('reads the archive of a sub-graph assertion from that sub-graph\'s private partition', async () => {
+    const candidate = await resolveArchived(archivedSealQuads(LOWERCASE_AUTHOR, 'notes'), 'notes');
+    expect(candidate?.coordinate).toMatchObject({
+      scope: `${CONTEXT_GRAPH_ID}/notes`,
+      agentAddress: LOWERCASE_AUTHOR,
+      name: ASSERTION_COORDINATE,
+    });
+    // The root partition holds nothing for it.
+    await expect(resolveArchived(archivedSealQuads(LOWERCASE_AUTHOR), 'notes')).resolves.toBeUndefined();
+  });
+
   it('answers nothing when no seal was archived, whatever the active subject holds', async () => {
     await expect(resolveArchived([])).resolves.toBeUndefined();
     // An active seal lives in the meta graph and is not an archive.
