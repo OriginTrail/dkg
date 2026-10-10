@@ -114,7 +114,7 @@ function agentFor(store: OxigraphStore, dir: string, version: number) {
   agent.chain = { getEvmChainId: vi.fn(async () => 31337n), getKnowledgeAssetsLifecycleAddress: vi.fn(async () => AUTHOR), readKnowledgeAssetVersionSnapshot: vi.fn(async () => ({ latestRoot: HEX, rootCount: BigInt(version) })) };
   agent.getContextGraphOnChainId = async () => '1';
   agent.createV10ACKProvider = () => undefined;
-  agent._resolveEncryptInlinePayload = async () => undefined; agent._resolveEncryptInlineChunked = async () => undefined;
+  agent._resolveInlineEncryption = async () => ({ encryptInlinePayload: undefined, encryptInlineChunked: undefined });
   agent._buildPrecomputedUpdateAttestationForSeal = async () => ({});
   agent.afterConfirmedGraphScopedVmPublishV1 = async () => undefined;
   agent.gossipSession = new GossipSession();

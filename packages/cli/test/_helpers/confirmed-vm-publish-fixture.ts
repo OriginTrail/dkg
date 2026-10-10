@@ -59,8 +59,8 @@ export async function confirmedVmPublishFixture(contextGraphId: string, name: st
   agent.chain = { getEvmChainId: async () => 31337n, getKnowledgeAssetsLifecycleAddress: async () => author,
     readKnowledgeAssetVersionSnapshot: async () => ({ latestRoot: rootHex, rootCount: 1n }) };
   agent.getContextGraphOnChainId = async () => '1';
-  agent.createV10ACKProvider = () => undefined; agent._resolveEncryptInlinePayload = async () => undefined;
-  agent._resolveEncryptInlineChunked = async () => undefined; agent.afterConfirmedGraphScopedVmPublishV1 = async () => undefined;
+  agent.createV10ACKProvider = () => undefined; agent.afterConfirmedGraphScopedVmPublishV1 = async () => undefined;
+  agent._resolveInlineEncryption = async () => ({ encryptInlinePayload: undefined, encryptInlineChunked: undefined });
   const result = { status: 'confirmed' as const, ual: publishedUal, kaId: packed, merkleRoot: root, kaManifest: [],
     onChainResult: { txHash: `0x${'cd'.repeat(32)}`, blockNumber: 2, txIndex: 0, kaId: packed, batchId: packed,
       startKAId: packed, endKAId: packed, publisherAddress: author } };
