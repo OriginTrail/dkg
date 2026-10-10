@@ -15,7 +15,7 @@ import type { RandomSamplingRuntime } from './random-sampling-runtime.js';
  * unchanged. The constructor is `protected` (was `private`) so subclasses can
  * be declared; external construction still goes through `DKGAgent.create`.
  */
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
 import { PeerCapabilityRegistry } from './p2p/peer-capability.js';
@@ -31,6 +31,7 @@ import {
 } from './finalization-recovery-sqlite-store.js';
 import type { FinalizationRecoveryHealth } from './finalization-recovery-store.js';
 import { FinalizationRuntime } from './finalization-runtime.js';
+import type { NamedKaVmLifecycleRepair } from './named-ka-vm-lifecycle-repair.js';
 import type { Rfc64PublicCatalogServiceV1 } from './rfc64/public-catalog-service-v1.js';
 import { Rfc64BackgroundWorkDispatcherV1 } from
   './rfc64/background-work-dispatcher-v1.js';
@@ -1321,6 +1322,7 @@ export class DKGAgentBase {
   protected profileProvisioningInFlight = false;
   protected readonly config: ResolvedDKGAgentConfig;
   protected started = false;
+  protected namedKaVmLifecycleRepair?: NamedKaVmLifecycleRepair;
   /**
    * Lazily resolved so partial test hosts built on the prototype (and any
    * configuration that predates the resolved field) still receive the

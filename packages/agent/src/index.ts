@@ -368,6 +368,12 @@ export {
   isRootlessUpdateError,
   type RootlessUpdateErrorCode,
 } from './rootless-update-error.js';
+export { ConfirmedNamedKaVmLifecycleRecoveryError, isConfirmedNamedKaVmLifecycleRecoveryError,
+  type ConfirmedNamedKaVmPublication, type ConfirmedNamedKaVmLifecycleRecovery,
+  type ConfirmedNamedKaVmPublicationView, type ConfirmedNamedKaVmLifecycleRecoveryView,
+  type ConfirmedNamedKaVmLifecycleRecoveryErrorPayload,
+} from './named-ka-vm-lifecycle-recovery-error.js';
+export type { NamedKaVmPublishResult } from './named-ka-vm-publish-result.js';
 export type {
   ContextGraphReadAuthorityDecision,
   ContextGraphReadAuthorityDependency,

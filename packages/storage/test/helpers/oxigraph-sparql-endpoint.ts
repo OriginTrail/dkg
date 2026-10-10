@@ -68,15 +68,29 @@ export interface OxigraphSparqlEndpoint {
   queryEndpoint: string;
   updateEndpoint: string;
   store: InstanceType<typeof oxigraph.Store>;
+  /** Test-owner contract, granted only with an awaited durable mutation barrier. */
+  writesDurableOnAcknowledgement: boolean;
   close: () => Promise<void>;
 }
 
-export async function startOxigraphSparqlEndpoint(): Promise<OxigraphSparqlEndpoint> {
+export async function startOxigraphSparqlEndpoint(options: {
+  /** Persist the complete store before acknowledging any successful mutation. */
+  persistBeforeAcknowledgement?: (store: InstanceType<typeof oxigraph.Store>) => Promise<void>;
+} = {}): Promise<OxigraphSparqlEndpoint> {
   const store = new oxigraph.Store();
+  let mutationTail = Promise.resolve();
+  const mutate = (apply: () => void) => {
+    const result = mutationTail.then(async () => {
+      apply();
+      await options.persistBeforeAcknowledgement?.(store);
+    });
+    mutationTail = result.catch(() => undefined);
+    return result;
+  };
   const server: Server = createServer((req, res) => {
     let body = '';
     req.on('data', (c) => { body += c; });
-    req.on('end', () => {
+    req.on('end', async () => {
       try {
         const contentType = String(req.headers['content-type'] ?? '');
         // Daemon reset/ownership requests use SPARQL Protocol form encoding;
@@ -85,13 +99,13 @@ export async function startOxigraphSparqlEndpoint(): Promise<OxigraphSparqlEndpo
           ? new URLSearchParams(body)
           : undefined;
         if (contentType.includes('text/x-nquads') || contentType.includes('application/n-quads')) {
-          store.load(body, { format: 'application/n-quads' });
+          await mutate(() => store.load(body, { format: 'application/n-quads' }));
           res.writeHead(200);
           res.end();
           return;
         }
         if (req.url?.includes('/update') || contentType.includes('application/sparql-update') || form?.has('update')) {
-          store.update(form?.get('update') ?? body);
+          await mutate(() => store.update(form?.get('update') ?? body));
           res.writeHead(204);
           res.end();
           return;
@@ -140,6 +154,10 @@ export async function startOxigraphSparqlEndpoint(): Promise<OxigraphSparqlEndpo
     queryEndpoint: `${base}/query`,
     updateEndpoint: `${base}/update`,
     store,
-    close: () => new Promise<void>((r) => server.close(() => r())),
+    writesDurableOnAcknowledgement: options.persistBeforeAcknowledgement !== undefined,
+    close: async () => {
+      await mutationTail;
+      await new Promise<void>((r) => server.close(() => r()));
+    },
   };
 }

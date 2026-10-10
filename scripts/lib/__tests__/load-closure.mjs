@@ -74,6 +74,10 @@ export const UNFOLLOWED_LOADS = new Map([
     "the package's own proof-worker-entry beside it, or one a caller passes; random-sampling code its rule routes"],
   ['packages/rdf-utils/scripts/rdf-literal-escape-benchmark.mjs: import.meta.filename',
     'the benchmark itself, re-run as its own worker process'],
+  ['packages/storage/test/oxigraph-worker-certified-directory-sync.test.ts: script',
+    "a temporary script written by the test, loading storage's own built oxigraph-worker adapter; storage source and test changes select the storage lanes"],
+  ['packages/storage/test/oxigraph-worker-platform-persistence.test.ts: script',
+    "a temporary script written by the test, loading storage's own built oxigraph-worker adapter; storage source and test changes select the storage lanes"],
   ['packages/storage/src/adapters/oxigraph-worker.ts: this.workerPath',
     "the storage package's own oxigraph-worker-impl (beside it, or its dist/ build), storage code its rule routes"],
   // Programs a child-process call runs that no reading identifies: tools, or

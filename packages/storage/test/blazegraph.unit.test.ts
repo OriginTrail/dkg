@@ -1047,6 +1047,18 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect(fetchCalls).toHaveLength(0);
   });
 
+  it('certifies acknowledged writes as restart-durable by default and exposes no commitment when opted out', async () => {
+    const durable = new BlazegraphStore(baseUrl);
+    expect(durable.commitment?.durability).toBe('restart-durable');
+    // Each acknowledged request already committed its own journal transaction: the barrier sends nothing.
+    await expect(durable.commitment!.commit({ source: 'blazegraph-commit-test' })).resolves.toBeUndefined();
+    expect(fetchCalls).toHaveLength(0);
+    expect(new BlazegraphStore(baseUrl, { writesDurableOnAcknowledgement: true }).commitment?.durability).toBe('restart-durable');
+    expect(new BlazegraphStore(baseUrl, { writesDurableOnAcknowledgement: false }).commitment).toBeUndefined();
+    expect(() => new BlazegraphStore(baseUrl, { writesDurableOnAcknowledgement: 'false' as unknown as boolean }))
+      .toThrow('blazegraph writesDurableOnAcknowledgement must be boolean');
+  });
+
   it('insert throws when a literal exceeds MUTF-8 65535 limit', async () => {
     setFetch(async () => new Response(null, { status: 200 }));
     const s = new BlazegraphStore(baseUrl);

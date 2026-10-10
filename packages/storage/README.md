@@ -35,10 +35,37 @@ const result = await store.query('SELECT * WHERE { ?s ?p ?o } LIMIT 10');
 
 ## Oxigraph persistence contract
 
+Confirmed named KA lifecycle repair keeps its fsynced journal until the metadata
+store certifies persistence through its explicit `persist` callable. Snapshot
+adapters expose that callable only with a persistence path and complete `flush()` before the
+journal entry is retired. A SPARQL endpoint that durably commits before returning
+successful mutation responses may opt in with
+`options.writesDurableOnAcknowledgement: true`; this promise is independent of
+its `consistencyProfile` transaction/readback guarantees. Use that option only
+when the endpoint guarantees persistence. The `blazegraph` adapter defaults it to
+`true`, because Blazegraph forces each acknowledged commit to its standard
+`DiskRW` journal; set it to `false` for a `MemStore`/`Transient` journal or
+`forceOnCommit=No`. Without either a durability barrier
+or that acknowledgement contract, confirmed repair remains pending with its
+journal evidence retained. Transparent decorators and the agent store facade
+compose this callable explicitly. Queued decorators drain their completed mutations
+before the inner barrier; optional `flush`, acknowledgement flags on arbitrary objects,
+and decorator topology do not certify persistence. The external-literal decorator
+syncs newly created or verified blob files and their directory entries before
+acknowledging the referencing mutation; sync failures propagate and retry verifies
+the existing immutable bytes.
+
 This contract applies to `OxigraphStore` when it is created with a persistence
 path (`oxigraph-persistent`) and to `oxigraph-worker` when that worker is given
 a persistence path. Plain `oxigraph`, and a worker without a persistence path,
 are in-memory stores and provide no restart durability.
+
+Standalone SDK agents without a data directory use the separate explicit
+`commitEphemeral` capability of those memory adapters. Decorators compose it
+through the same queue-draining boundary. This permits confirmed metadata to
+finish within the current process; it cannot retire a durable repair journal.
+Durable hosts require `persist`, and uncertified remote endpoints expose neither
+capability. A standalone agent backed by a durable store still uses `persist`.
 
 ### Mutation and flush semantics
 
@@ -50,7 +77,10 @@ are in-memory stores and provide no restart durability.
   and then writes the current state.
 - A snapshot is written to a sibling temporary file, the file is synced, and
   then atomically renamed over the persistence file. The containing directory
-  is synced when the platform supports it. A crash before the rename retains
+  is synced when the platform supports it. If the snapshot path's directories
+  had to be created, every parent of a new directory is synced too, up to and
+  including the first one that already existed; after a failed sync the next
+  flush retries that whole range. A crash before the rename retains
   the previous complete snapshot; a temporary file may remain for cleanup.
 - Background flush failures are logged. Explicit `flush()` and `close()` calls
   reject on write, sync, or rename failures so their callers can report that

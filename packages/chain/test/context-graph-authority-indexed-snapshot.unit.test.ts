@@ -425,6 +425,23 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
     gate.release();
   });
 
+  it.each([null, {}, '9', new Set(['9'])])(
+    'refuses a malformed authority selector container before any chain scan: %j',
+    async (targets) => {
+      const { adapter, evidence } = makeIndexedAuthorityAdapter();
+      const reader = adapter.contextGraphAuthorityIndexRevisionReader!;
+      await expect(Reflect.apply(reader.readContextGraphAuthorityIndexRevisions, reader, [targets]))
+        .rejects.toThrow('authority revision target set is invalid');
+      await expect(Reflect.apply(reader.resolveFinalizedContextGraphIdsByNameHashes!, reader, [targets]))
+        .rejects.toThrow('authority name-hash target set is invalid');
+      expect(evidence.headReads).toEqual([]);
+      expect(evidence.blockReads).toEqual([]);
+      expect(evidence.networkReads).toEqual([]);
+      expect(evidence.indexRanges).toEqual([]);
+      expect(evidence.staticCalls).toEqual([]);
+    },
+  );
+
   it('plans authority-index pages within a 10,000-block provider cap', async () => {
     const { adapter, evidence } = makeIndexedAuthorityAdapter({
       finalizedNumber: 20_020,

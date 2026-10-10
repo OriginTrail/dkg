@@ -16,7 +16,8 @@
  *     `code:'LEGACY_KA_READ_ONLY'` before invoking the engine.
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { createServer, type Server } from 'node:http';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -24,14 +25,14 @@ import { join } from 'node:path';
 import { ethers } from 'ethers';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import {
-  generateEd25519Keypair,
+  generateEd25519Keypair, TypedEventBus,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MAX_UINT72_DECIMAL,
   PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
   formatPublishAuthorNotCustodialMessage,
 } from '@origintrail-official/dkg-core';
 import {
-  AsyncLiftJobConflictError,
+  AsyncLiftJobConflictError, DKGPublisher, TripleStoreAsyncLiftPublisher,
   LiftJobPendingChainProofError,
   PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE,
   storeKnowledgeAssetOperationPublicQuads,
@@ -41,6 +42,8 @@ import {
   GraphManager, createTripleStore, StoreOperationTimeoutError, StoreSchedulerBusyError,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
+import { confirmedVmPublishFixture } from './_helpers/confirmed-vm-publish-fixture.js';
+import { handlePublisherRoutes } from '../src/daemon/routes/publisher.js';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import { daemonState } from '../src/daemon/state.js';
 import { addPublisherWallet } from '../src/publisher-wallets.js';
@@ -169,7 +172,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     server = createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
       try {
-        await handleKnowledgeAssetsRoutes({
+        const context = {
           req,
           res,
           agent,
@@ -207,7 +210,9 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
             : requestAuthentication({ kind: 'anonymous' }),
           emitMemoryGraphChanged: () => {},
           emitNotification: () => {},
-        } as any);
+        } as any;
+        await handleKnowledgeAssetsRoutes(context);
+        if (!res.writableEnded) await handlePublisherRoutes(context);
         if (!res.writableEnded) {
           res.statusCode = 404;
           res.end();
@@ -1420,6 +1425,15 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     const res = await post('vm/publish', { contextGraphId: CG_ID });
     expect(res.status).toBe(expectedStatus);
     if (reason) expect(res.body.error).toContain(reason);
+  });
+
+  it('reports a confirmed transaction with pending local lifecycle repair', async () => {
+    await startWith({}, {
+      publishFromFinalizedAssertion: async () => ({ status: 'confirmed', ual: 'did:dkg:confirmed/1', lifecycleRepairPending: true }),
+    });
+    const res = await post('vm/publish', { contextGraphId: CG_ID });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ status: 'confirmed', ual: 'did:dkg:confirmed/1', lifecycleRepairPending: true });
   });
 
   // GH#1786 — the resident-author selector. The load-bearing property is that it can
@@ -2833,4 +2847,90 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       expect(res.body.kaUal).toBe('did:dkg:test/1/46');
     });
   });
+  describe('confirmed publication whose lifecycle journal admission fails', () => {
+    it('keeps async enqueue temporal truth and retains the existing no-resend job recovery lane', async () => {
+      const fixture = await confirmedVmPublishFixture(CG_ID, ASSERTION_NAME);
+      const staging = new DKGPublisher({ store: fixture.store, chain: new MockChainAdapter(),
+        eventBus: new TypedEventBus(), keypair: await generateEd25519Keypair() });
+      await fixture.stage(staging);
+      const handler = createKnowledgeAssetVmPublishHandler(fixture.agent);
+      let captured: any;
+      const queue = new TripleStoreAsyncLiftPublisher(fixture.store, { knowledgeAssetVmPublishHandler: {
+        execute: async input => { try { return await handler.execute(input); } catch (error) { captured = error; throw error; } },
+      } });
+      await startWith({}, { resolveFinalizedAssertionVmPublishIntent: async () => fixture.request,
+        preflightKnowledgeAssetVmPublishSnapshot: async () => undefined }, {}, queue as any,
+        { publisher: queue, walletIds: ['wallet-1'], wallets: [{ address: fixture.author }] });
+      const accepted = await post('vm/publish-async', { contextGraphId: CG_ID });
+      expect(accepted.status).toBe(202); expect(accepted.body.status).toBe('accepted');
+      expect(accepted.body.ual).toBeUndefined(); expect(fixture.publish).not.toHaveBeenCalled();
+      const processed = await queue.processNext('wallet-1');
+      expect(captured).toMatchObject({ code: 'KA_VM_LIFECYCLE_REPAIR_REQUIRED', confirmedPublication: fixture.result,
+        lifecycleRecovery: { action: 'recover_confirmed_publication', publicationRetrySafe: false, assertionVersion: '1' } });
+      expect(processed).toMatchObject({ jobId: accepted.body.jobId, status: 'broadcast',
+        broadcast: { txHash: fixture.result.onChainResult.txHash, merkleRoot: fixture.rootHex } });
+      expect(await queue.recover()).toBe(0); expect(await queue.processNext('wallet-1')).toBeNull();
+      const response = await fetch(`${baseUrl}/api/publisher/job?id=${encodeURIComponent(accepted.body.jobId)}`);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ job: { status: 'broadcast', broadcast: { txHash: fixture.result.onChainResult.txHash } } });
+      expect(fixture.publish).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not flatten a structured confirmed error if it reaches async admission', async () => {
+      const fixture = await confirmedVmPublishFixture(CG_ID, ASSERTION_NAME);
+      let error: any;
+      try { await fixture.agent.publishFromFinalizedAssertion(CG_ID, ASSERTION_NAME); } catch (failure) { error = failure; }
+      await startWith({}, { resolveFinalizedAssertionVmPublishIntent: async () => { throw error; } });
+      const response = await post('vm/publish-async', { contextGraphId: CG_ID });
+      expect(response.status).toBe(207);
+      expect(response.body).toMatchObject({ status: 'confirmed', ual: fixture.result.ual,
+        lifecycleRepairAdmitted: false, lifecycleRecoveryRequired: true });
+      expect(response.body.jobCreated).toBeUndefined(); expect(fixture.publish).toHaveBeenCalledTimes(1);
+    });
+
+    it('preserves the confirmed receipt and local recovery requirement on vm/publish', async () => {
+      const fixture = await confirmedVmPublishFixture(CG_ID, ASSERTION_NAME);
+      await startWith({}, { publishFromFinalizedAssertion: fixture.agent.publishFromFinalizedAssertion.bind(fixture.agent) });
+      const response = await post('vm/publish', { contextGraphId: CG_ID });
+      expect(response.status).toBe(207);
+      expect(response.body).toMatchObject({ status: 'confirmed', ual: fixture.result.ual, merkleRoot: fixture.rootHex,
+        txHash: fixture.result.onChainResult.txHash, blockNumber: 2, code: 'KA_VM_LIFECYCLE_REPAIR_REQUIRED',
+        lifecycleRecoveryRequired: true, lifecycleRepairAdmitted: false, lifecycleRepairPending: false,
+        onChainResult: { txHash: fixture.result.onChainResult.txHash, blockNumber: 2, kaId: fixture.result.kaId.toString() },
+        recovery: { action: 'recover_confirmed_publication', publicationRetrySafe: false, contextGraphId: CG_ID,
+          name: ASSERTION_NAME, agentAddress: fixture.author, assertionVersion: '1', publishedUal: fixture.result.ual } });
+      expect(response.body.error).not.toMatch(/re-?publish|resubmit/i);
+      expect(fixture.publish).toHaveBeenCalledTimes(1); expect(fixture.fault.admissions).toBe(1);
+    });
+
+    it('preserves confirmed evidence in the atomic create publication tail', async () => {
+      const fixture = await confirmedVmPublishFixture(CG_ID, ASSERTION_NAME);
+      await startWith({ create: async () => fixture.assertionUri, history: async () => undefined, write: async () => 1,
+        finalize: async () => ({ merkleRoot: fixture.result.merkleRoot, authorAddress: fixture.author }),
+        promote: async () => ({ promotedCount: 1, sealed: true, publishReady: true }) },
+        { publishFromFinalizedAssertion: fixture.agent.publishFromFinalizedAssertion.bind(fixture.agent) });
+      const response = await postRoot({ contextGraphId: CG_ID, name: ASSERTION_NAME,
+        quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: '' }], alsoShareSwm: true, alsoPublishVm: true });
+      expect(response.status).toBe(207);
+      expect(response.body).toMatchObject({ created: true, status: 'confirmed', ual: fixture.result.ual,
+        merkleRoot: fixture.rootHex, lifecycleRecoveryRequired: true, lifecycleRepairAdmitted: false,
+        recovery: { action: 'recover_confirmed_publication', publicationRetrySafe: false } });
+      expect(response.body.retryAction).toBeUndefined(); expect(fixture.publish).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps a durably admitted repair distinct from unadmitted recovery', async () => {
+      const fixture = await confirmedVmPublishFixture(CG_ID, ASSERTION_NAME, false);
+      // The graph-store commit fails after write-ahead admission; the journal owns its retry.
+      const commit = vi.spyOn(fixture.store, 'atomicUpdate').mockRejectedValueOnce(new StoreOperationTimeoutError({
+        backend: 'managed-oxigraph', operation: 'atomicUpdate', outcome: 'not_started',
+      }));
+      await startWith({}, { publishFromFinalizedAssertion: fixture.agent.publishFromFinalizedAssertion.bind(fixture.agent) });
+      const response = await post('vm/publish', { contextGraphId: CG_ID });
+      expect(response.status).toBe(200); expect(response.body.lifecycleRepairPending).toBe(true);
+      expect(commit).toHaveBeenCalledTimes(1);
+      expect(response.body.lifecycleRecoveryRequired).toBeUndefined(); expect(response.body.recovery).toBeUndefined();
+      expect(fixture.publish).toHaveBeenCalledTimes(1);
+    });
+  });
+
 });

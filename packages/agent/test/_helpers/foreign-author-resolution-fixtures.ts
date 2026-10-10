@@ -55,6 +55,7 @@ function makeLog() {
 export function stubAgent(store: TripleStore, defaultAgentAddress: string) {
   const agent = Object.create(DKGAgent.prototype) as any;
   agent.store = store;
+  agent.writeLocks = new Map<string, Promise<void>>();
   agent.log = makeLog();
   agent.defaultAgentAddress = defaultAgentAddress;
   Object.defineProperty(agent, 'peerId', {

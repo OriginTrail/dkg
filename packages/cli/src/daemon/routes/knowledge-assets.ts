@@ -48,7 +48,7 @@ import {
 } from "../http-utils.js";
 import { validateWritableQuads } from "../knowledge-asset-quad-validation.js";
 import { validatePreSignedAuthorAttestation } from "./memory.js";
-import { recordAssertionActivity, recordConvictionCostCovered } from "../activity-notification.js";
+import { recordActivityAndNotify, recordPcaDiscount } from "./knowledge-assets-activity.js";
 import {
   handleKaImportArtifactResolve,
   handleKaImportArtifactRead,
@@ -89,6 +89,7 @@ import {
   type NormalizedFinalizedPublishOptions,
 } from "../../finalized-publish-options.js";
 import { storageAckPeerIdsFromPublishResult } from "./storage-ack-peers.js";
+import { confirmedVmRecoveryRequiredResponse, vmPublishResponseBody, type FinalizedPublishResult } from './vm-publish-response.js';
 import { authenticatedAgentAddress } from '../../auth.js';
 
 import {
@@ -102,14 +103,6 @@ import {
 
 const PREFIX = "/api/knowledge-assets";
 
-type FinalizedPublishResult = Awaited<
-  ReturnType<RequestContext["agent"]["publishFromFinalizedAssertion"]>
-> & {
-  /** Backward-compatible response aliases still accepted by the HTTP route. */
-  authorAddress?: string;
-  kas?: unknown[];
-};
-
 // Decode + validate a `:name` path segment (parity with the legacy routes,
 // which `safeDecodeURIComponent` then `validateAssertionName` every name). A
 // B3 read identifier is exempt — it's validated by `classifyKaIdentifier`.
@@ -122,52 +115,6 @@ function decodeAndValidateName(seg: string, res: RequestContext["res"]): string 
     return null;
   }
   return seg;
-}
-
-// Best-effort assertion-activity row + notification SSE for a lifecycle event.
-// Never throws — activity tracking must not break a write/publish path.
-function recordActivityAndNotify(
-  ctx: RequestContext,
-  input: {
-    contextGraphId: string;
-    kind: "created" | "promoted" | "published";
-    actorAgentAddress: string;
-    subGraphName?: string;
-    tripleCount?: number;
-  },
-): void {
-  try {
-    recordAssertionActivity(ctx.dashDb, {
-      contextGraphId: input.contextGraphId,
-      kind: input.kind,
-      actorAgentAddress: input.actorAgentAddress,
-      subGraphName: input.subGraphName,
-      ...(typeof input.tripleCount === "number" ? { tripleCount: input.tripleCount } : {}),
-    });
-    ctx.emitNotification?.({ contextGraphId: input.contextGraphId, type: "assertion_activity" });
-  } catch {
-    /* activity/notification is advisory — never block the lifecycle op */
-  }
-}
-function recordPcaDiscount(ctx: RequestContext, contextGraphId: string, onChain: any): void {
-  const cc = onChain?.convictionCostCovered;
-  const publisher = onChain?.publisherAddress;
-  if (!cc || !publisher) return;
-  try {
-    recordConvictionCostCovered(ctx.dashDb, {
-      contextGraphId,
-      publisherAddress: publisher,
-      accountId: cc.accountId,
-      epoch: cc.epoch,
-      baseCost: cc.baseCost,
-      discountedCost: cc.discountedCost,
-      drawnFromEpoch: cc.drawnFromEpoch,
-      drawnFromTopUp: cc.drawnFromTopUp,
-    });
-    ctx.emitNotification?.({ contextGraphId, type: "pca_cost_covered" });
-  } catch {
-    /* confirmed-discount notification is advisory */
-  }
 }
 
 const FINALIZE_ONLY_CREATE_FIELDS = [
@@ -1104,6 +1051,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           });
           result.kaId = pub?.kaId;
           result.ual = pub?.ual;
+          if (pub?.lifecycleRepairPending) result.lifecycleRepairPending = true;
           result.txHash = pub?.onChainResult?.txHash;
           const storageAckPeerIds = storageAckPeerIdsFromPublishResult(pub);
           if (storageAckPeerIds.length > 0) {
@@ -1124,6 +1072,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           }
           recordPcaDiscount(ctx, resolvedContextGraphId, pub?.onChainResult);
         } catch (e: any) {
+          const confirmedRecovery = confirmedVmRecoveryRequiredResponse(e);
+          if (confirmedRecovery) return jsonResponse(res, 207, { created: true, ...result, ...confirmedRecovery,
+            ...(errors.length > 0 ? { errors } : {}), phase: 'vm-publish' });
           if (respondWithPartialStoreFailure(e, 'vm-publish')) return;
           errors.push({ phase: "vm-publish", error: sanitizeRpcMessage(e?.message ?? String(e)) });
         }
@@ -1622,6 +1573,8 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           ...(subGraphName ? { subGraphName } : {}),
         });
       } catch (err: any) {
+        const confirmedRecovery = confirmedVmRecoveryRequiredResponse(err);
+        if (confirmedRecovery) return jsonResponse(res, 207, confirmedRecovery);
         // A store read may have an indeterminate outcome while this request has
         // not created a publish job. Keep these separate; enqueue itself may
         // persist a job before throwing, so never make a no-job claim then.
@@ -1766,26 +1719,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           recordActivityAndNotify(ctx, { contextGraphId, kind: "published", actorAgentAddress: pub?.seal?.authorAddress ?? pub?.authorAddress ?? requestAgentAddress, subGraphName });
         }
         recordPcaDiscount(ctx, contextGraphId, pub?.onChainResult);
-        const storageAckPeerIds = storageAckPeerIdsFromPublishResult(pub);
         // Full publish payload (PR #971) so clients can reconcile sealed↔minted.
-        return jsonResponse(res, httpStatus, {
-          kaId: pub?.kaId,
-          status: pub?.status,
-          ual: pub?.ual,
-          txHash: pub?.onChainResult?.txHash,
-          ...(pub?.assertionUri !== undefined ? { assertionUri: pub.assertionUri } : {}),
-          ...(pub?.seal?.authorAddress ?? pub?.authorAddress ? { authorAddress: pub?.seal?.authorAddress ?? pub?.authorAddress } : {}),
-          ...(pub?.merkleRoot !== undefined
-            ? { merkleRoot: typeof pub.merkleRoot === "string" ? pub.merkleRoot : hex(pub.merkleRoot) }
-            : {}),
-          ...(Array.isArray(pub?.kas) ? { kas: pub.kas } : {}),
-          ...(pub?.onChainResult?.blockNumber !== undefined ? { blockNumber: pub.onChainResult.blockNumber } : {}),
-          ...(pub?.onChainResult?.convictionCostCovered ? { convictionCostCovered: pub.onChainResult.convictionCostCovered } : {}),
-          ...(typeof pub?.contextGraphError === "string" ? { contextGraphError: pub.contextGraphError } : {}),
-          ...(storageAckPeerIds.length > 0 ? { storageAckPeerIds } : {}),
-          ...(reason ? { error: reason } : {}),
-        });
+        return jsonResponse(res, httpStatus, vmPublishResponseBody(pub, reason));
       } catch (e: any) {
+        const confirmedRecovery = confirmedVmRecoveryRequiredResponse(e);
+        if (confirmedRecovery) return jsonResponse(res, 207, confirmedRecovery);
         const msg = e?.message ?? String(e);
         // A vm/publish on a KA that hasn't been finalized, or hasn't been
         // shared to SWM, is a caller precondition error (4xx), not a

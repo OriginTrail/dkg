@@ -20,6 +20,7 @@ export default defineConfig({
           'test/messenger-outbox-memory.test.ts',
           'test/live-daemon-isolation.test.ts',
           'test/async-vm-publish-registration.test.ts',
+          'test/vm-publish-response-contract.test.ts',
           // #2892 — real in-memory queue and supervisor; no chain or daemon process.
           'test/async-promote-supervisor-bookkeeping.test.ts',
           'test/promote-queue-config.test.ts',
@@ -40,6 +41,7 @@ export default defineConfig({
           'test/preferred-relays.test.ts',
           'test/reconcile-503-mapping.test.ts',
           'test/sealed-create-retry-route.test.ts',
+          'test/private-share-authority-retry.test.ts',
           'test/config.test.ts',
           'test/status-route-rpc.test.ts',
           // Pure: in-process status route and a chain adapter over scripted endpoints.
@@ -257,6 +259,8 @@ export default defineConfig({
           'test/oxigraph-reclaim-policy.test.ts',
           'test/oxigraph-orphan-native.test.ts',
           'test/oxigraph-managed.test.ts',
+          'test/oxigraph-managed-lifecycle-persistence.test.ts',
+          'test/oxigraph-persistence.test.ts',
           // Opt-in via BLAZEGRAPH_INTEGRATION_TEST=1. Skips silently
           // (no fetch / no docker spawn) when the env-var is unset, so
           // keeping it in the fast unit lane costs nothing.

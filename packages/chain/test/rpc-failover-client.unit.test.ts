@@ -161,6 +161,19 @@ describe('RpcReadDescriptor — explicit read attribution ownership', () => {
     expect(Object.isFrozen(descriptor)).toBe(true);
   });
 
+  it.each([
+    ['', undefined],
+    ['   ', undefined],
+    ['valid label', ''],
+    ['valid label', '   '],
+  ] as const)('refuses invalid attribution before dispatching an RPC read (%j, %j)', (label, consumer) => {
+    const provider = { read: recorder(async () => 'OK') };
+    const client = makeClient([provider], ['https://health.example']);
+    expect(() => client.read(createRpcReadDescriptor(label, consumer), (p: any) => p.read()))
+      .toThrow(/must be a non-empty string/);
+    expect(provider.read.calls).toHaveLength(0);
+  });
+
   it('supports a deliberate unattributed read', () => {
     const descriptor = createRpcReadDescriptor('health probe', null);
     const provider = { read: recorder(async () => 'OK') };

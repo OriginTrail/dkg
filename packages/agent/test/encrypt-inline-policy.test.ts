@@ -37,6 +37,7 @@ import {
   type PublishOptions,
 } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
+import { GossipSession } from '../src/gossip-session.js';
 import { computeSwmSenderKeyRecipientRouteHash } from '../src/dkg-agent-swm-state.js';
 
 // Hand-rolled call recorder (replaces vitest spy factories): wraps an
@@ -1020,6 +1021,8 @@ function makeQueuedAgentHarness(options: {
   }));
   const agentLike: any = {
     peerId: options.peerId,
+    writeLocks: new Map(),
+    gossipSession: new GossipSession(),
     defaultAgentAddress: QUEUED_TEST_AUTHOR,
     chain: options.chain ?? {},
     store: {
@@ -1043,6 +1046,7 @@ function makeQueuedAgentHarness(options: {
     _stampPointer: recorder(async () => undefined),
     resolveRfc64CatalogAuthoringLaneV1: () => null,
   };
+  Object.setPrototypeOf(bindInlineEncryptionFactory(agentLike), DKGAgent.prototype); // bind first: `??=` keeps an inherited resolver
   agentLike.afterConfirmedGraphScopedVmPublishV1 =
     (DKGAgent.prototype as any).afterConfirmedGraphScopedVmPublishV1;
   agentLike.retireLegacySwmAfterConfirmedLocalPublish =

@@ -2,6 +2,7 @@
 
 import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
 import {
+  composeTripleStoreCommitment,
   deleteByPatternWithoutCount,
   describeRfc64AuthorCommitCasV1,
   isStoreOperationNotStarted,
@@ -249,6 +250,16 @@ export function createListContextGraphsCacheInvalidatingStore(
         'update',
       )
       : undefined,
+    // Preserve explicit whole-request atomicity and the same outcome-aware invalidation as UPDATE.
+    atomicUpdate: innerStore.atomicUpdate
+      ? (sparql, options) => invalidateAfterMutation(
+        () => innerStore.atomicUpdate!(sparql, options),
+        () => true,
+        { everything: true },
+        'update',
+      )
+      : undefined,
+    commitment: composeTripleStoreCommitment(innerStore),
     flush: innerStore.flush ? (options) => innerStore.flush!(options) : undefined,
     close() {
       return innerStore.close();

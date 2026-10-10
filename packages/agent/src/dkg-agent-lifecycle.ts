@@ -4072,6 +4072,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }, MESSAGE_OUTBOX_TICK_MS);
     if (this.messengerOutboxTimer.unref) this.messengerOutboxTimer.unref();
 
+    this.getOrCreateNamedKaVmLifecycleRepair().start();
     // The durable finalization inbox is an executable retry queue, not only a
     // write-ahead journal. Its lifecycle is independent of chain-cursor
     // progress so entries received after a watermark advance are still
