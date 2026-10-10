@@ -121,9 +121,9 @@ describe('RFC-64 catalog head delivery: one owner per scope, newest head', () =>
     ]);
   });
 
-  it('keeps the peers carried over within the wire limit, the newest head\'s own peers first', async () => {
+  it('keeps a waiting head for the peers a newer head has no room for', async () => {
     vi.useFakeTimers();
-    const { delivery, sends, behaviour } = harness();
+    const { delivery, sends, outcomes, behaviour } = harness();
     behaviour.set('slow-peer', 'stall');
     const earlier = peers(RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1, 'earlier');
     const newest = peers(RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 - 2, 'newest');
@@ -135,8 +135,110 @@ describe('RFC-64 catalog head delivery: one owner per scope, newest head', () =>
     await vi.advanceTimersByTimeAsync(BUDGET_MS);
     await settle();
 
-    expect(sends.slice(1).map(({ peerId }) => peerId)).toEqual([...newest, ...earlier.slice(0, 2)]);
-    expect(sends.slice(1).every(({ version }) => version === '3')).toBe(true);
+    // One fan-out addresses 64 peers. The newer head takes its own and the first two of the
+    // earlier head's; the earlier head stays for the other 62 and is sent to them first.
+    expect(sends.slice(1).map(({ peerId, version }) => [peerId, version])).toEqual([
+      ...earlier.slice(2).map((peerId) => [peerId, '2']),
+      ...newest.map((peerId) => [peerId, '3']),
+      ...earlier.slice(0, 2).map((peerId) => [peerId, '3']),
+    ]);
+    // No head was replaced, and nothing had to be given up.
+    expect(outcomes.slice(1).map((outcome) => [
+      outcome.announcement.catalogVersion,
+      outcome.supersededHeads,
+      outcome.checkpointCapacityExceeded,
+    ])).toEqual([['2', 0, false], ['3', 0, false]]);
+  });
+
+  it('sends two full peer lists a head each, and a peer the selection dropped the head it was named for', async () => {
+    vi.useFakeTimers();
+    const { delivery, sends, behaviour } = harness();
+    behaviour.set('slow-peer', 'stall');
+    const limit = RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1;
+    const first = peers(limit, 'first');
+    const second = peers(limit, 'second');
+    const other = author(1);
+    // What a node with more connections than one fan-out addresses hands off: the selection
+    // moves by one peer between two changes.
+    const connected = peers(limit + 1, 'connected');
+
+    delivery.deliver({ announcement: head('1'), peers: ['slow-peer'] });
+    delivery.deliver({ announcement: head('1', other), peers: ['slow-peer'] });
+    await settle();
+    delivery.deliver({ announcement: head('2'), peers: first });
+    delivery.deliver({ announcement: head('3'), peers: second });
+    delivery.deliver({ announcement: head('2', other), peers: connected.slice(0, limit) });
+    delivery.deliver({ announcement: head('3', other), peers: connected.slice(1) });
+    await vi.advanceTimersByTimeAsync(BUDGET_MS);
+    await settle();
+
+    const sentBy = (sender: string): string[][] => sends
+      .filter(({ author: by, peerId }) => by === sender && peerId !== 'slow-peer')
+      .map(({ peerId, version }) => [peerId, version]);
+    expect(sentBy(AUTHOR)).toEqual([
+      ...first.map((peerId) => [peerId, '2']),
+      ...second.map((peerId) => [peerId, '3']),
+    ]);
+    expect(sentBy(other)).toEqual([
+      [connected[0]!, '2'],
+      ...connected.slice(1).map((peerId) => [peerId, '3']),
+    ]);
+  });
+
+  it('keeps an older head handed off late for the peers the newest head has no room for', async () => {
+    vi.useFakeTimers();
+    const { delivery, sends, outcomes, behaviour } = harness();
+    behaviour.set('slow-peer', 'stall');
+    const own = peers(RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1, 'own');
+    const late = peers(3, 'late');
+
+    delivery.deliver({ announcement: head('1'), peers: ['slow-peer'] });
+    await settle();
+    delivery.deliver({ announcement: head('5'), peers: own });
+    delivery.deliver({ announcement: head('4'), peers: [own[0]!, ...late] });
+    await vi.advanceTimersByTimeAsync(BUDGET_MS);
+    await settle();
+
+    expect(sends.slice(1).map(({ peerId, version }) => [peerId, version])).toEqual([
+      ...late.map((peerId) => [peerId, '4']),
+      ...own.map((peerId) => [peerId, '5']),
+    ]);
+    expect(outcomes.reduce((sum, { supersededHeads }) => sum + supersededHeads, 0)).toBe(0);
+  });
+
+  it('reports peers it had to leave out because no place was free to keep their head', async () => {
+    vi.useFakeTimers();
+    const { delivery, sends, outcomes, behaviour } = harness({ maxWaitingHeadsPerScope: 1 });
+    behaviour.set('slow-peer', 'stall');
+    const limit = RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1;
+    const first = peers(limit, 'first');
+    const second = peers(limit, 'second');
+    const other = author(1);
+
+    delivery.deliver({ announcement: head('1'), peers: ['slow-peer'] });
+    delivery.deliver({ announcement: head('1', other), peers: ['slow-peer'] });
+    await settle();
+    delivery.deliver({ announcement: head('2'), peers: first });
+    delivery.deliver({ announcement: head('3'), peers: second });
+    // In the other scope the head that cannot be kept is an older one handed off late.
+    delivery.deliver({ announcement: head('3', other), peers: second });
+    delivery.deliver({ announcement: head('2', other), peers: first });
+    await vi.advanceTimersByTimeAsync(BUDGET_MS);
+    await settle();
+
+    // Each scope may hold one waiting head: the newest goes to its own peers and the fan-out
+    // says that something was given up.
+    for (const sender of [AUTHOR, other]) {
+      expect(sends
+        .filter(({ author: by, peerId }) => by === sender && peerId !== 'slow-peer')
+        .map(({ peerId, version }) => [peerId, version]))
+        .toEqual(second.map((peerId) => [peerId, '3']));
+    }
+    expect(outcomes.slice(2).map((outcome) => [
+      outcome.announcement.catalogVersion,
+      outcome.supersededHeads,
+      outcome.checkpointCapacityExceeded,
+    ])).toEqual([['3', 1, true], ['3', 1, true]]);
   });
 
   it('keeps the heads of two policy generations of one catalog scope apart', async () => {

@@ -597,8 +597,9 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
   /**
    * One finished fan-out of a handed-off head. Peers this node's own policy refused received
    * nothing and are not failures: they appear only in the debug line, so a head with no eligible
-   * peer writes nothing at warn level. A catalog that changed more often than its delivery could
-   * check-point is worth a warning: a peer left more than a lineage window behind stays behind.
+   * peer writes nothing at warn level. A delivery that had to give up a waiting head it should
+   * have kept is worth a warning: the peers named for that head may have missed it, and a peer
+   * left more than a lineage window behind stays behind.
    */
   reportRfc64CatalogHeadDeliveryV1(
     this: DKGAgent,
@@ -622,8 +623,9 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     if (outcome.checkpointCapacityExceeded) {
       this.log.warn(
         ctx,
-        `RFC-64 catalog head delivery fell further behind than its checkpoints cover${head}:`
-          + ' peers more than a lineage window behind the newest head cannot apply it',
+        `RFC-64 catalog head delivery could not keep a waiting head${head}:`
+          + ' peers named for it may have been left out, and a peer more than a lineage window'
+          + ' behind the newest head cannot apply it',
       );
     }
     this.warnRfc64CatalogAnnounceFailuresV1(outcome);

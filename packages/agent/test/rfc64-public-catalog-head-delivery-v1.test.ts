@@ -262,6 +262,34 @@ describe('RFC-64 catalog head delivery: peers the local policy refuses', () => {
     expect(outcomes[0]!.failedPeers[1]).not.toHaveProperty('code');
   });
 
+  it('asks about the peers whose send was denied four at a time, and keeps their order', async () => {
+    vi.useFakeTimers();
+    const asked = new Map<string, number>();
+    const { delivery, outcomes, behaviour } = harness({
+      // Selection is answered at once; the question after a denied send takes 100 ms.
+      isPeerAuthorized: (peerId) => {
+        const times = (asked.get(peerId) ?? 0) + 1;
+        asked.set(peerId, times);
+        return times === 1
+          ? Promise.resolve(true)
+          : new Promise((resolve) => { setTimeout(() => resolve(true), 100); });
+      },
+    });
+    const denying = peers(8, 'denying');
+    for (const peerId of denying) behaviour.set(peerId, 'remote-denial');
+
+    delivery.deliver({ announcement: head('1'), peers: ['member', ...denying] });
+    await vi.advanceTimersByTimeAsync(199);
+    expect(outcomes).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+
+    // Eight questions of 100 ms each, four at a time.
+    expect(outcomes[0]!.durationMs).toBe(200);
+    expect(outcomes[0]!.announcedPeers).toEqual(['member']);
+    expect(outcomes[0]!.failedPeers.map(({ peerId }) => peerId)).toEqual(denying);
+    expect(outcomes[0]!.refusedPeers).toEqual([]);
+  });
+
   it('fails closed when the policy decision throws or is anything but a plain yes', async () => {
     // What a yes takes (the policy cell, its generation) is the transport's to decide and is
     // covered there and in the service suite. Here: no answer, or an unclear one, is a refusal.

@@ -161,7 +161,7 @@ describe('RFC-64 catalog head delivery: what a finished fan-out logs', () => {
     expect(String(debug.mock.calls[0]![1])).toContain('delivered=1 failed=1 refused=3 superseded=2');
   });
 
-  it('warns when a catalog changed more often than its delivery could check-point', () => {
+  it('warns when a delivery had to give up a waiting head it should have kept', () => {
     const { agent, debug, warn } = agentWith(undefined);
 
     agent.reportRfc64CatalogHeadDeliveryV1(outcome({
@@ -172,11 +172,12 @@ describe('RFC-64 catalog head delivery: what a finished fan-out logs', () => {
 
     expect(warn).toHaveBeenCalledOnce();
     expect(warn.mock.calls[0]![1]).toBe(
-      'RFC-64 catalog head delivery fell further behind than its checkpoints cover'
+      'RFC-64 catalog head delivery could not keep a waiting head'
       + ` head=${ANNOUNCEMENT.catalogHeadObjectDigest}`
       + ` cg=${ANNOUNCEMENT.contextGraphId}`
       + ' version=7:'
-      + ' peers more than a lineage window behind the newest head cannot apply it',
+      + ' peers named for it may have been left out, and a peer more than a lineage window'
+      + ' behind the newest head cannot apply it',
     );
     expect(String(debug.mock.calls[0]![1])).toContain('superseded=70000 checkpointCapacityExceeded=true');
   });

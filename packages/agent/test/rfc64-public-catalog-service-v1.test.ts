@@ -482,6 +482,16 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     await expect(service.publishOpenAuthorCatalogGenesis(genesisInput(service, { peers: [] })))
       .resolves.toMatchObject({ announcedPeers: [], failedPeers: [] });
     expect(store.stageVerifiedObjects).toHaveBeenCalledTimes(2);
+
+    // Delivering a handed-off head is serving as well: its peers are selected as outbound
+    // announcements, which the inactive receiver does not hold back.
+    router.sendResponse = async () => Uint8Array.of(1);
+    expect(service.deliverCatalogHead({
+      announcement: announcement(policy.policyDigest),
+      peers: ['peer-member'],
+    })).toEqual({ status: 'queued' });
+    await service.whenCatalogHeadDeliveryIdle();
+    expect(countEvent(router, `send:${RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1}`)).toBe(1);
     await service.close();
   });
 

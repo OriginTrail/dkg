@@ -20,14 +20,19 @@
  * keep a replacement inside what that allows:
  *
  * - The newest handed-off head is never dropped in favour of an older one.
- * - The peers of a replaced head are carried over to the head that replaces it, so every peer a
- *   hand-off named is sent that head or a newer one.
+ * - The peers of a replaced head are carried over to the head that replaces it, as far as the
+ *   peers of one fan-out go. A waiting head whose peers do not all fit is not replaced for them:
+ *   it stays, for those peers only, and is sent first. So every peer a hand-off named is sent
+ *   that head or a newer one.
  * - Two heads sent one after the other are at most half the lineage window apart. When a newer
  *   head would be further than that from the head sent before it, the waiting head is kept as a
- *   checkpoint and sent first. Checkpoints live in memory only, so their number is limited. Past
- *   the limit the newest head replaces the waiting one all the same, and the scope's next fan-out
- *   says so (`checkpointCapacityExceeded`): a receiver that the newest head leaves more than a
- *   lineage window behind cannot apply it, as if it had been away for that many changes.
+ *   checkpoint and sent first.
+ *
+ * A head kept for either reason waits in memory, so there is a limit to them. Past the limit the
+ * newest head replaces the waiting one all the same, and the scope's next fan-out says so
+ * (`checkpointCapacityExceeded`): peers of the replaced head may have been left out, and a
+ * receiver that the newest head leaves more than a lineage window behind cannot apply it, as if it
+ * had been away for that many changes.
  *
  * A scope here is one policy generation of one author catalog. A graph authored before its
  * registration has an owner-signed catalog and, after it, a catalog of the registered generation.
@@ -45,8 +50,9 @@
  * priority end with the caller, and a delivery outlives it.
  *
  * Bounds: one fan-out and at most {@link RFC64_CATALOG_HEAD_DELIVERY_MAX_WAITING_HEADS_PER_SCOPE_V1}
- * waiting heads per scope (the newest, and checkpoints only when a backlog is that deep), at most
- * {@link RFC64_CATALOG_HEAD_DELIVERY_MAX_CHECKPOINTS_V1} checkpoints in all scopes together, at
+ * waiting heads per scope (the newest, and heads kept before it only when a backlog is that deep
+ * or names that many peers), at most
+ * {@link RFC64_CATALOG_HEAD_DELIVERY_MAX_CHECKPOINTS_V1} kept heads in all scopes together, at
  * most {@link RFC64_CATALOG_HEAD_DELIVERY_MAX_SCOPES_V1} scopes,
  * {@link RFC64_CATALOG_HEAD_DELIVERY_MAX_ACTIVE_FANOUTS_V1} hand-off fan-outs selecting peers and
  * starting sends at a time, sends started in waves of
@@ -93,15 +99,17 @@ export const RFC64_CATALOG_HEAD_DELIVERY_MAX_SCOPES_V1 = 1_024;
 export const RFC64_CATALOG_HEAD_DELIVERY_MAX_VERSION_STEP_V1 =
   RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1 / 2;
 /**
- * Waiting heads one scope may hold: the newest, and the checkpoints before it. Only a backlog of
- * more than {@link RFC64_CATALOG_HEAD_DELIVERY_MAX_VERSION_STEP_V1} versions needs a second one,
- * so this many cover a scope whose changes are 65,536 versions ahead of its last fan-out. Past
- * that the newest waiting head is replaced whatever the distance, and its fan-out reports it.
+ * Waiting heads one scope may hold: the newest, and the heads kept before it. A second one is
+ * needed only by a backlog of more than {@link RFC64_CATALOG_HEAD_DELIVERY_MAX_VERSION_STEP_V1}
+ * versions, or by one that names more peers than a fan-out addresses, so this many cover a scope
+ * whose changes are 65,536 versions ahead of its last fan-out. Past that the newest waiting head
+ * is replaced whatever it costs, and the scope's next fan-out reports it.
  */
 export const RFC64_CATALOG_HEAD_DELIVERY_MAX_WAITING_HEADS_PER_SCOPE_V1 = 64;
 /**
- * Checkpoints all scopes may hold together. Every scope keeps a place for its newest head; this
- * keeps many deep backlogs from adding up.
+ * Kept heads (checkpoints, and heads waiting for peers a newer head had no room for) all scopes
+ * may hold together. Every scope keeps a place for its newest head; this keeps many deep backlogs
+ * from adding up.
  */
 export const RFC64_CATALOG_HEAD_DELIVERY_MAX_CHECKPOINTS_V1 = 4_096;
 /**
@@ -169,9 +177,9 @@ export interface Rfc64CatalogHeadDeliveryOutcomeV1 extends AnnounceRfc64PublicCa
   /** Earlier heads of the scope replaced before they were sent, since its last fan-out. */
   readonly supersededHeads: number;
   /**
-   * True when, since the scope's last fan-out, a waiting head was replaced although no checkpoint
-   * slot was free: more versions than a receiver can prove its way across may now lie between two
-   * sent heads of this scope.
+   * True when, since the scope's last fan-out, a waiting head was replaced although it should
+   * have been kept and no place was free: more versions than a receiver can prove its way across
+   * may now lie between two sent heads of this scope, or peers of the replaced head were left out.
    */
   readonly checkpointCapacityExceeded: boolean;
   readonly durationMs: number;
@@ -260,7 +268,7 @@ export class Rfc64CatalogHeadDeliveryV1 {
   readonly #maxWaitingHeadsPerScope: number;
   readonly #maxCheckpoints: number;
   #activeFanouts = 0;
-  /** Checkpoints held by all scopes together: every waiting head that is not its scope's newest. */
+  /** Kept heads of all scopes together: every waiting head that is not its scope's newest. */
   #checkpoints = 0;
 
   constructor(options: Rfc64CatalogHeadDeliveryOptionsV1) {
@@ -342,33 +350,45 @@ export class Rfc64CatalogHeadDeliveryV1 {
       waiting.push(head);
       return;
     }
+    const last = waiting.length - 1;
+    const hasPlace = waiting.length < this.#maxWaitingHeadsPerScope
+      && this.#checkpoints < this.#maxCheckpoints;
     if (version < BigInt(newest.announcement.catalogVersion)) {
       // Never trade the newest waiting head for an older one handed off late: its peers get the
-      // newest instead.
-      waiting[waiting.length - 1] = withPeersV1(newest, head.peers);
+      // newest instead, and the older head goes only to the peers the newest has no room for.
+      const { fits, rest } = mergePeersV1(newest.peers, head.peers);
+      waiting[last] = waitingHeadV1(newest, fits);
+      if (rest.length > 0 && hasPlace) {
+        waiting.splice(last, 0, waitingHeadV1(head, rest));
+        this.#checkpoints += 1;
+        return;
+      }
+      if (rest.length > 0) scope.checkpointCapacityExceeded = true;
       scope.superseded += 1;
       return;
     }
     const sentBefore = waiting.length > 1
       ? BigInt(waiting.at(-2)!.announcement.catalogVersion)
       : scope.sentVersion;
-    if (version - sentBefore > BigInt(RFC64_CATALOG_HEAD_DELIVERY_MAX_VERSION_STEP_V1)) {
-      // Replacing the waiting head would put more versions between two sent heads than a
-      // receiver is sure to prove its way across: keep it as a checkpoint and send it first.
-      if (
-        waiting.length < this.#maxWaitingHeadsPerScope
-        && this.#checkpoints < this.#maxCheckpoints
-      ) {
-        // The waiting head becomes a checkpoint and `head` the scope's newest.
-        waiting.push(head);
+    // Replacing the waiting head would put more versions between two sent heads than a receiver
+    // is sure to prove its way across: it has to stay as a checkpoint and be sent first.
+    const stepTooLarge = version - sentBefore
+      > BigInt(RFC64_CATALOG_HEAD_DELIVERY_MAX_VERSION_STEP_V1);
+    const { fits, rest } = mergePeersV1(head.peers, newest.peers);
+    if (stepTooLarge || rest.length > 0) {
+      if (hasPlace) {
+        // A checkpoint keeps its own peers. A head that stays only because the newer one has no
+        // room for all its peers keeps just those; the newer head takes the others over.
+        if (!stepTooLarge) waiting[last] = waitingHeadV1(newest, rest);
+        waiting.push(stepTooLarge ? head : waitingHeadV1(head, fits));
         this.#checkpoints += 1;
         return;
       }
-      // No place is left for another checkpoint. Memory stays bounded and no change waits: the
-      // newest head still replaces the waiting one, and its fan-out reports the oversized step.
+      // No place is left to keep the waiting head. Memory stays bounded and no change waits: the
+      // newest head replaces it all the same, and the scope's next fan-out reports it.
       scope.checkpointCapacityExceeded = true;
     }
-    waiting[waiting.length - 1] = withPeersV1(head, newest.peers);
+    waiting[last] = waitingHeadV1(head, fits);
     scope.superseded += 1;
   }
 
@@ -463,21 +483,25 @@ export class Rfc64CatalogHeadDeliveryV1 {
       // selection cannot use up the time an eligible peer has to answer.
       session = this.#beginFanout();
       const attempts = await this.#sendAll(session, head.announcement, eligible, onSendsStarted);
-      for (const attempt of attempts) {
-        if (attempt.sent) {
-          delivered.push(attempt);
-          continue;
-        }
-        // A send the close path cut short is neither a refusal nor a failed delivery.
-        if (this.#lifecycle.signal.aborted) continue;
-        // A policy denial at send time is either the transport's own recheck (the peer stopped
-        // being authorized after selection, and nothing was sent) or the remote peer's answer.
-        // The current local decision tells them apart.
-        if (
-          attempt.failure instanceof Rfc64PublicCatalogTransportErrorV1
+      // A policy denial at send time is either the transport's own recheck (the peer stopped
+      // being authorized after selection, and nothing was sent) or the remote peer's answer.
+      // The current local decision tells them apart; it is asked as selection asks.
+      const refusedAtSend = await mapWithConcurrency(
+        attempts,
+        ELIGIBILITY_CONCURRENCY_V1,
+        async (attempt) => (
+          !attempt.sent
+          && !this.#lifecycle.signal.aborted
+          && attempt.failure instanceof Rfc64PublicCatalogTransportErrorV1
           && attempt.failure.code === 'catalog-transport-policy-denied'
           && !(await this.#isPeerAuthorized(attempt.peerId, head.announcement))
-        ) refusedPeers.push(attempt.peerId);
+        ),
+      );
+      for (const [index, attempt] of attempts.entries()) {
+        if (attempt.sent) delivered.push(attempt);
+        // A send the close path cut short is neither a refusal nor a failed delivery.
+        else if (this.#lifecycle.signal.aborted) continue;
+        else if (refusedAtSend[index]) refusedPeers.push(attempt.peerId);
         else delivered.push(attempt);
       }
       if (this.#lifecycle.signal.aborted) notDeliverable = CLOSED_MESSAGE_V1;
@@ -668,11 +692,26 @@ function scopeKeyV1(announcement: Rfc64PublicCatalogHeadAnnouncementV1): string 
   ].join('\n');
 }
 
-/** `head` with the peers of a head it stands in for added after its own, up to the wire limit. */
-function withPeersV1(head: WaitingHeadV1, morePeers: readonly string[]): WaitingHeadV1 {
-  const peers = [...new Set([...head.peers, ...morePeers])]
-    .slice(0, RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1);
-  return peers.length === head.peers.length
+/**
+ * `own` followed by the peers of `more` that are not among them, split at the number of peers one
+ * fan-out addresses.
+ */
+function mergePeersV1(
+  own: readonly string[],
+  more: readonly string[],
+): { readonly fits: readonly string[]; readonly rest: readonly string[] } {
+  const all = [...new Set([...own, ...more])];
+  return {
+    fits: all.slice(0, RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1),
+    rest: all.slice(RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1),
+  };
+}
+
+/** `head` for exactly `peers`. */
+function waitingHeadV1(head: WaitingHeadV1, peers: readonly string[]): WaitingHeadV1 {
+  const unchanged = peers.length === head.peers.length
+    && peers.every((peerId, index) => peerId === head.peers[index]);
+  return unchanged
     ? head
-    : Object.freeze({ announcement: head.announcement, peers: Object.freeze(peers) });
+    : Object.freeze({ announcement: head.announcement, peers: Object.freeze([...peers]) });
 }
