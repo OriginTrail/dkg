@@ -33,6 +33,7 @@ import {
   catalogPlacementTimingV1,
   shareCatalogPlacementTimingV1,
   type CatalogPlacementAdmissionV1,
+  type CatalogPlacementAttemptV1,
   type FinalizedPrivatePlacementQueueStatusV1,
 } from './internal/catalog-placement-timing.js';
 
@@ -127,8 +128,10 @@ interface ProjectionOwnerDependenciesV1 {
   readonly listFinalizedPrivateRepairs: () => readonly Readonly<
     Rfc64FinalizedPrivatePlacementRepairV1
   >[];
+  /** `placement` is the admitted attempt's recorder (GH#3081, observation only). */
   readonly repairFinalizedPrivatePlacement: (
     repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
+    placement: CatalogPlacementAttemptV1,
   ) => Promise<void>;
   readonly reconcile: (params: Readonly<{
     readonly contextGraphId: ContextGraphIdV1;
@@ -481,13 +484,13 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       }
       const attemptGeneration = entry.retry.generation;
       entry.attempts += 1;
-      const placement = catalogPlacementTimingV1(this).admit(repair);
+      const placement = catalogPlacementTimingV1(this).admit();
       try {
         if (!this.#dependencies.acceptsFinalizedPrivateLane(repair.contextGraphId)) {
           throw new CatalogRepairLaneInactiveErrorV1();
         }
         await withDefaultStoreWorkPriority('background', () => (
-          this.#dependencies.repairFinalizedPrivatePlacement(repair)
+          this.#dependencies.repairFinalizedPrivatePlacement(repair, placement.attempt)
         ));
         placement.end('completed');
         state.finalizedPrivateRetries.delete(key);
@@ -508,7 +511,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
   #settlePrivateWaiters(state: ProjectionSupervisorStateV1, key: string, attempt?: CatalogPlacementAdmissionV1): void {
     const waiters = state.finalizedPrivateAttemptWaiters.get(key);
     state.finalizedPrivateAttemptWaiters.delete(key);
-    catalogPlacementTimingV1(this).waitersSettled(waiters, attempt);
+    attempt?.released(waiters);
     if (waiters !== undefined) for (const settle of waiters) settle();
   }
 

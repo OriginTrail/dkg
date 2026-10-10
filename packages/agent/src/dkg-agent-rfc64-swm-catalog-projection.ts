@@ -53,7 +53,12 @@ import { markRfc64LegacySwmRepublishedV1 } from
   './rfc64/legacy-swm-boundary-v1.js';
 import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 } from
   './rfc64/catalog-peers-v1.js';
-import { catalogPlacementTimingV1 } from './internal/catalog-placement-timing.js';
+import {
+  INERT_CATALOG_PLACEMENT_ATTEMPT_V1,
+  type CatalogPlacementAttemptV1,
+} from './internal/catalog-placement-timing.js';
+import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
+  './rfc64/finalized-private-placement-repair-store-v1.js';
 
 const RFC64_DEFAULT_CATALOG_DELEGATION_EXPIRES_AT_V1 =
   '253402300799000' as TimestampMsV1;
@@ -123,9 +128,21 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
   }
 
   /**
+   * Idempotent durable repair of one finalized-private placement. The supervisor runs the observed
+   * variant with its admitted attempt's recorder; a call from anywhere else is unobserved.
+   */
+  async repairRfc64FinalizedPrivateCatalogPlacementV1(
+    this: DKGAgent,
+    repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
+  ): Promise<'repaired' | 'already-complete'> {
+    return this.repairObservedRfc64FinalizedPrivateCatalogPlacementV1(repair, INERT_CATALOG_PLACEMENT_ATTEMPT_V1);
+  }
+
+  /**
    * Move one chain-confirmed private placement from the pending SWM inventory
    * into the durable catalog. The catalog retains prior finalized placements;
-   * pre-finalized rows are never projected through this lane.
+   * pre-finalized rows are never projected through this lane. Phases are
+   * charged to `placement` (GH#3081, observation only).
    */
   protected async publishRfc64FinalizedPrivateCatalogPlacementV1(
     this: DKGAgent,
@@ -138,6 +155,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       readonly kaUal: CanonicalDeterministicUalV1;
       readonly sealDigest: Digest32V1;
     }>,
+    placement: CatalogPlacementAttemptV1,
   ): Promise<AppliedCatalogHeadSnapshotV1 | null> {
     const lane = this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, null);
     if (lane === null || !lane.acceptsFinalizedVmRepair) {
@@ -173,7 +191,6 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       ...inventoryScope,
       bucketCount: '1',
     }) as AuthorCatalogScopeV1;
-    const placement = catalogPlacementTimingV1(this).attemptFor(params);
     const coverageStartedAt = placement.now();
     const covered = await this.rfc64CatalogCoversConfirmedSwmRowV1({
       scope,

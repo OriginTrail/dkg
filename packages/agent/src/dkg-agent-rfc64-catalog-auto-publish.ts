@@ -83,7 +83,7 @@ import {
 } from './rfc64/finalized-private-placement-repair-store-v1.js';
 import { loadExactAppliedCatalogRowsV1 } from
   './rfc64/applied-catalog-authority-transition-v1.js';
-import { catalogPlacementTimingV1 } from './internal/catalog-placement-timing.js';
+import { catalogPlacementTimingV1, type CatalogPlacementAttemptV1 } from './internal/catalog-placement-timing.js';
 
 export type {
   Rfc64SwmAuthorInventoryShadowMutationResultV1,
@@ -904,10 +904,11 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     placementWait.end(this.log);
   }
 
-  /** Idempotent durable repair body owned by the catalog supervisor. */
-  async repairRfc64FinalizedPrivateCatalogPlacementV1(
+  /** Idempotent durable repair body owned by the catalog supervisor, charged to the attempt it admitted. */
+  protected async repairObservedRfc64FinalizedPrivateCatalogPlacementV1(
     this: DKGAgent,
     repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
+    placement: CatalogPlacementAttemptV1,
   ): Promise<'repaired' | 'already-complete'> {
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
@@ -918,7 +919,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     });
     let outcome: 'repaired' | 'already-complete' | null = null;
     await rfc64SwmInventoryShadowRuntimeV1(this).runExclusive(assetKey, async () => {
-      const applied = await this.publishRfc64FinalizedPrivateCatalogPlacementV1(repair);
+      const applied = await this.publishRfc64FinalizedPrivateCatalogPlacementV1(repair, placement);
       if (applied === null) {
         await persistence.finalizedPrivatePlacementRepairs.delete(repair);
         outcome = 'already-complete';

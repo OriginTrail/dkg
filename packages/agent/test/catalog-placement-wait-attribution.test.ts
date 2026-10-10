@@ -17,6 +17,7 @@ import {
 import { DKGAgent } from '../src/index.js';
 import {
   CatalogPlacementTimingV1,
+  INERT_CATALOG_PLACEMENT_ATTEMPT_V1,
   installCatalogPlacementTimingV1,
 } from '../src/internal/catalog-placement-timing.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
@@ -189,14 +190,17 @@ describe('catalog placement wait attribution', () => {
     const blockerEntered = new Promise<void>((resolve) => { enterBlocker = resolve; });
     let releaseBlocker!: () => void;
     const blockerGate = new Promise<void>((resolve) => { releaseBlocker = resolve; });
-    const repair = agent.repairRfc64FinalizedPrivateCatalogPlacementV1.bind(agent);
-    vi.spyOn(agent, 'repairRfc64FinalizedPrivateCatalogPlacementV1').mockImplementation(async (candidate) => {
-      if (candidate.kaUal !== blocker.kaUal) return repair(candidate);
-      enterBlocker();
-      await blockerGate;
-      await repairs().delete(candidate);
-      return 'repaired';
-    });
+    // The supervisor runs the observed repair, passing its admitted attempt's recorder.
+    const repair = (agent as any).repairObservedRfc64FinalizedPrivateCatalogPlacementV1.bind(agent);
+    vi.spyOn(agent as any, 'repairObservedRfc64FinalizedPrivateCatalogPlacementV1').mockImplementation(
+      async (candidate: any, placement: unknown) => {
+        if (candidate.kaUal !== blocker.kaUal) return repair(candidate, placement);
+        enterBlocker();
+        await blockerGate;
+        await repairs().delete(candidate);
+        return 'repaired';
+      },
+    );
 
     await repairs().put(blocker);
     const blocked = agent.requestRfc64FinalizedPrivateCatalogPlacementRepairV1({ repair: blocker });
@@ -249,5 +253,15 @@ describe('catalog placement wait attribution', () => {
       operationName: 'publishFromSWM',
       sourceOperationId: 'job-recovered',
     });
+  });
+
+  it('runs a repair called outside the supervisor against the inert recorder', async () => {
+    const agentLike = Object.create(DKGAgent.prototype) as DKGAgent;
+    const observed = vi.fn(async () => 'already-complete' as const);
+    Reflect.set(agentLike, 'repairObservedRfc64FinalizedPrivateCatalogPlacementV1', observed);
+    const marker = Object.freeze({ kaUal: 'did:dkg:otp:20430/0x1/1' }) as unknown as
+      Rfc64FinalizedPrivatePlacementRepairV1;
+    await expect(agentLike.repairRfc64FinalizedPrivateCatalogPlacementV1(marker)).resolves.toBe('already-complete');
+    expect(observed).toHaveBeenCalledWith(marker, INERT_CATALOG_PLACEMENT_ATTEMPT_V1);
   });
 });

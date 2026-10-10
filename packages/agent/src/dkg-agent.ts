@@ -1103,8 +1103,8 @@ export class DKGAgent extends DKGAgentBase {
         listFinalizedPrivateRepairs: () => (
           this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.list() ?? []
         ),
-        repairFinalizedPrivatePlacement: async (repair) => {
-          await this.repairRfc64FinalizedPrivateCatalogPlacementV1(repair);
+        repairFinalizedPrivatePlacement: async (repair, placement) => {
+          await this.repairObservedRfc64FinalizedPrivateCatalogPlacementV1(repair, placement);
         },
         reconcile: (params) => this.reconcileRfc64PublicCatalogFromSwmInventoryV1(params),
         warn: (ctx, message) => this.log.warn(ctx, message),

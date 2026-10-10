@@ -15,10 +15,10 @@ import { Rfc64SwmCatalogProjectionOwnerV1 } from '../src/dkg-agent-rfc64-swm-cat
 import {
   CATALOG_PLACEMENT_WAIT_LOG_THRESHOLD_MS,
   CatalogPlacementTimingV1,
-  INERT_CATALOG_PLACEMENT_ATTEMPT_V1,
   catalogPlacementTimingV1,
   installCatalogPlacementTimingV1,
   shareCatalogPlacementTimingV1,
+  type CatalogPlacementAttemptV1,
 } from '../src/internal/catalog-placement-timing.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
   '../src/rfc64/finalized-private-placement-repair-store-v1.js';
@@ -54,14 +54,13 @@ function fields(message: string): Record<string, string> {
 describe('catalog placement timing', () => {
   it('splits an observer wait into request, queue and the phases of the attempt that released it', () => {
     const { timing, clock, lines, log } = harness();
-    const repair = {};
     const wait = timing.beginWait(ASSET, createOperationContext('publishFromSWM', 'job-7'));
     clock.now = 1_200;
     const waiter = supervisorWaiter(timing);
     wait.requested(waiter.whenAttempted);
     clock.now = 31_200;
-    const admission = timing.admit(repair);
-    const attempt = timing.attemptFor(repair);
+    const admission = timing.admit();
+    const { attempt } = admission;
     const coverage = attempt.now();
     clock.now = 33_000;
     attempt.covered(false, coverage);
@@ -85,7 +84,7 @@ describe('catalog placement timing', () => {
     }, announce);
     clock.now = 154_100;
     admission.end('completed');
-    timing.waitersSettled([waiter.settle], admission);
+    admission.released([waiter.settle]);
     clock.now = 154_101;
     wait.end(log);
 
@@ -101,15 +100,14 @@ describe('catalog placement timing', () => {
 
   it('describes each observer call by the attempt that released its own waiter', () => {
     const { timing, clock, lines, log } = harness();
-    const repair = {};
     const ctx = createOperationContext('publishFromSWM');
     const first = timing.beginWait(ASSET, ctx);
     const firstWaiter = supervisorWaiter(timing);
     first.requested(firstWaiter.whenAttempted);
-    const firstAttempt = timing.admit(repair);
+    const firstAttempt = timing.admit();
     clock.now = 10;
     firstAttempt.end('completed');
-    timing.waitersSettled([firstWaiter.settle], firstAttempt);
+    firstAttempt.released([firstWaiter.settle]);
     first.end(log);
 
     clock.now = 20;
@@ -117,18 +115,17 @@ describe('catalog placement timing', () => {
     const secondWaiter = supervisorWaiter(timing);
     second.requested(secondWaiter.whenAttempted);
     clock.now = 25;
-    const secondAttempt = timing.admit(repair);
+    const secondAttempt = timing.admit();
     clock.now = 28;
     secondAttempt.end('failed');
-    timing.waitersSettled([secondWaiter.settle], secondAttempt);
+    secondAttempt.released([secondWaiter.settle]);
     clock.now = 30;
     second.end(log);
 
-    // A key that leaves the queue releases its waiter with no attempt to bind.
+    // A key that leaves the queue releases its waiter without an admission to bind it.
     const third = timing.beginWait(ASSET, ctx);
     const thirdWaiter = supervisorWaiter(timing);
     third.requested(thirdWaiter.whenAttempted);
-    timing.waitersSettled([thirdWaiter.settle]);
     clock.now = 31;
     third.end(log);
 
@@ -143,14 +140,14 @@ describe('catalog placement timing', () => {
 
   it('charges a waiter that joined an attempt already in flight from its own request onward', () => {
     const { timing, clock, lines, log } = harness();
-    const admission = timing.admit({});
+    const admission = timing.admit();
     clock.now = 100;
     const wait = timing.beginWait(ASSET, createOperationContext('publishFromSWM'));
     const waiter = supervisorWaiter(timing);
     wait.requested(waiter.whenAttempted);
     clock.now = 400;
     admission.end('failed');
-    timing.waitersSettled([waiter.settle], admission);
+    admission.released([waiter.settle]);
     wait.end(log);
     expect(fields(lines[0]!.message)).toMatchObject({
       outcome: 'failed', totalMs: '300', queueMs: '0', attemptMs: '300', otherMs: '400',
@@ -206,12 +203,11 @@ describe('catalog placement timing', () => {
 
   it('counts policy denials from the transport\'s typed code, never from the failure text', () => {
     const { timing, lines, log } = harness();
-    const repair = {};
     const wait = timing.beginWait(ASSET, createOperationContext('publish'));
     const waiter = supervisorWaiter(timing);
     wait.requested(waiter.whenAttempted);
-    const admission = timing.admit(repair);
-    const attempt = timing.attemptFor(repair);
+    const admission = timing.admit();
+    const { attempt } = admission;
     const failures = [
       { error: 'the peer refused this announcement', code: DENIED },
       { error: '[catalog-transport-policy-denied] text alone is display, not evidence' },
@@ -219,30 +215,38 @@ describe('catalog placement timing', () => {
     ];
     attempt.announced({ announcedPeers: [], failedPeers: failures }, attempt.now());
     admission.end('completed');
-    timing.waitersSettled([waiter.settle], admission);
+    admission.released([waiter.settle]);
     wait.end(log);
     expect(fields(lines[0]!.message)).toMatchObject({ peers: '3', failedPeers: '3', deniedPeers: '1' });
   });
 
-  it('charges the repair body only to the attempt in flight for the exact listed marker', () => {
+  it('keeps two attempts admitted at once apart, each charged only through its own recorder', () => {
     const { timing, clock, lines, log } = harness();
-    const repair = { kaUal: ASSET.kaUal, assertionVersion: ASSET.assertionVersion };
-    expect(timing.attemptFor(repair)).toBe(INERT_CATALOG_PLACEMENT_ATTEMPT_V1);
-    const wait = timing.beginWait(ASSET, createOperationContext('publish'));
-    const waiter = supervisorWaiter(timing);
-    wait.requested(waiter.whenAttempted);
-    const admission = timing.admit(repair);
-    // A direct call with an equal but different marker is not the supervisor's attempt.
-    expect(timing.attemptFor({ ...repair })).toBe(INERT_CATALOG_PLACEMENT_ATTEMPT_V1);
-    const attempt = timing.attemptFor(repair);
-    const startedAt = attempt.now();
-    clock.now = 50;
-    admission.end('completed');
-    expect(timing.attemptFor(repair)).toBe(INERT_CATALOG_PLACEMENT_ATTEMPT_V1);
-    attempt.covered(true, startedAt);
-    timing.waitersSettled([waiter.settle], admission);
-    wait.end(log);
-    expect(fields(lines[0]!.message)).toMatchObject({ covered: 'true', coverageMs: '50', otherMs: '0' });
+    const ctx = createOperationContext('publish');
+    const firstWait = timing.beginWait(ASSET, ctx);
+    const firstWaiter = supervisorWaiter(timing);
+    firstWait.requested(firstWaiter.whenAttempted);
+    const secondWait = timing.beginWait(ASSET, ctx);
+    const secondWaiter = supervisorWaiter(timing);
+    secondWait.requested(secondWaiter.whenAttempted);
+    const first = timing.admit();
+    const second = timing.admit();
+    const startedAt = first.attempt.now();
+    clock.now = 40;
+    first.attempt.covered(true, startedAt);
+    second.attempt.phase('successor', startedAt);
+    second.end('failed');
+    first.end('completed');
+    second.released([secondWaiter.settle]);
+    first.released([firstWaiter.settle]);
+    firstWait.end(log);
+    secondWait.end(log);
+    expect(fields(lines[0]!.message)).toMatchObject({
+      observerCall: '1', outcome: 'completed', covered: 'true', coverageMs: '40', successorMs: '0',
+    });
+    expect(fields(lines[1]!.message)).toMatchObject({
+      observerCall: '2', outcome: 'failed', covered: '-', coverageMs: '0', successorMs: '40',
+    });
   });
 
   it('reports the finalized-private queue as aggregates of the waiters the supervisor holds', () => {
@@ -294,15 +298,15 @@ describe('catalog placement timing', () => {
       const settle = () => {};
       timing.waiterAdded(settle, Promise.resolve());
       wait.requested(null);
-      const admission = timing.admit({});
-      const attempt = timing.attemptFor({});
+      const admission = timing.admit();
+      const { attempt } = admission;
       attempt.phase('state', attempt.now());
       attempt.covered(false, attempt.now());
       attempt.announced({ announcedPeers: [], failedPeers: [] }, attempt.now());
       admission.end('failed');
       timing.cooldownSkipped([settle]);
-      timing.waitersSettled([settle], admission);
-      timing.waitersSettled(undefined);
+      admission.released([settle]);
+      admission.released(undefined);
       timing.passStarted(1);
       timing.passEnded();
       wait.end(throwingLog);
@@ -358,8 +362,10 @@ describe('catalog placement timing through the finalized-private supervisor', ()
 
   /**
    * A real owner whose repair body the row drives: each run parks until the row releases it. The
-   * marker list stands in for the durable queue: an observation puts its marker, a successful
-   * repair deletes it, a failed one leaves it for the retry.
+   * body works on a snapshot of its marker, as a repair boundary may, so its phases can reach the
+   * waiters only through the recorder the supervisor passes in. The marker list stands in for the
+   * durable queue: an observation puts its marker, a successful repair deletes it, a failed one
+   * leaves it for the retry.
    */
   function supervisedFixture() {
     const clock = { now: 0 };
@@ -370,17 +376,20 @@ describe('catalog placement timing through the finalized-private supervisor', ()
     let entered!: Promise<void>;
     const armEntry = () => { entered = new Promise((resolve) => { enter = resolve; }); };
     armEntry();
-    const repair = vi.fn(async (marker: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>) => {
-      const attempt = timing.attemptFor(marker);
-      const startedAt = attempt.now();
+    const repair = vi.fn(async (
+      marker: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
+      placement: CatalogPlacementAttemptV1,
+    ) => {
+      const snapshot = { ...marker };
+      const startedAt = placement.now();
       const failure = await new Promise<Error | undefined>((resolve) => {
         releases.push(resolve);
         enter();
       });
-      attempt.phase('successor', startedAt);
+      placement.phase('successor', startedAt);
       armEntry();
       if (failure !== undefined) throw failure;
-      markers = markers.filter((candidate) => candidate !== marker);
+      markers = markers.filter((candidate) => candidate.kaUal !== snapshot.kaUal);
     });
     const owner = new Rfc64SwmCatalogProjectionOwnerV1({
       resolvePartition: () => ({ retryIntervalMs: 0, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),

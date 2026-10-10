@@ -12,10 +12,13 @@ import type { Rfc64PublicCatalogTransportErrorCodeV1 } from '../rfc64/public-cat
  *
  * The supervisor binds the records to the work it already owns. Each accepted waiter gets a
  * record when it is registered (its request time and the cooldown skips it waits through); an
- * admitted attempt gets a record that the repair body charges its phases to (the coverage check
- * and asset resolution in the projection; the locked state read, successor production,
- * applied-head CAS and announcement in the upsert); and when the supervisor releases a key's
- * waiters after an attempt, it attaches that attempt's record to each of them. An observer call
+ * admitted attempt returns a recorder that the supervisor passes to the repair body beside the
+ * data-only marker, and the body charges its phases to it (the coverage check and asset resolution
+ * in the projection; the locked state read, successor production, applied-head CAS and
+ * announcement in the upsert); and when the supervisor releases a key's waiters after an attempt,
+ * the admission binds its record to each of them. Nothing is matched by object identity or relies
+ * on how many repairs run at once; a repair run outside the supervisor reports to the inert
+ * recorder. An observer call
  * finds its waiter through the promise it awaits, so its line describes exactly the attempt that
  * released it. The line splits the call's wait into the time to request the repair (the asset lock
  * and the durable marker write), the time queued in the supervisor (earlier markers, cooldown,
@@ -60,10 +63,14 @@ export interface CatalogPlacementDeliveryV1 {
 
 /** What the supervisor holds for the attempt it admitted. */
 export interface CatalogPlacementAdmissionV1 {
+  /** The recorder the supervisor passes to the repair body, beside the data-only marker. */
+  readonly attempt: CatalogPlacementAttemptV1;
   end(outcome: 'completed' | 'failed'): void;
+  /** The supervisor released these waiters after this attempt: bind each one to it. */
+  released(waiters: Iterable<object> | undefined): void;
 }
 
-/** What the repair body charges its phases to: the attempt in flight for its marker, or nothing. */
+/** What the repair body charges its phases to: its admitted attempt, or the inert recorder. */
 export interface CatalogPlacementAttemptV1 {
   now(): number;
   phase(phase: CatalogPlacementPhase, startedAt: number): void;
@@ -127,7 +134,11 @@ export const INERT_CATALOG_PLACEMENT_ATTEMPT_V1: CatalogPlacementAttemptV1 = Obj
   announced: () => {},
 });
 
-const INERT_ADMISSION: CatalogPlacementAdmissionV1 = Object.freeze({ end: () => {} });
+const INERT_ADMISSION: CatalogPlacementAdmissionV1 = Object.freeze({
+  attempt: INERT_CATALOG_PLACEMENT_ATTEMPT_V1,
+  end: () => {},
+  released: () => {},
+});
 const INERT_WAIT: CatalogPlacementWaitV1 = Object.freeze({ requested: () => {}, end: () => {} });
 
 function boundedSet<V>(map: Map<string, V>, key: string, value: V): void {
@@ -160,9 +171,7 @@ export class CatalogPlacementTimingV1 {
   readonly #sources: CatalogPlacementTimingSourcesV1;
   /** Each accepted waiter's record, keyed by its settle callback and by the promise it settles. */
   readonly #waiters = new WeakMap<object, PlacementWaiterRecordV1>();
-  readonly #admissions = new WeakMap<CatalogPlacementAdmissionV1, PlacementAttemptRecordV1>();
   readonly #observerCalls = new Map<string, number>();
-  #inFlight: Readonly<{ repair: object; record: PlacementAttemptRecordV1 }> | undefined;
   #depth = 0;
   #passStartedAt: number | undefined;
   #lastPassDurationMs: number | null = null;
@@ -181,8 +190,8 @@ export class CatalogPlacementTimingV1 {
     });
   }
 
-  /** Supervisor: one attempt for `repair`, the exact marker the pass listed, starts now. */
-  admit(repair: object): CatalogPlacementAdmissionV1 {
+  /** Supervisor: one attempt starts now; its recorder travels to the repair body explicitly. */
+  admit(): CatalogPlacementAdmissionV1 {
     try {
       const record: PlacementAttemptRecordV1 = {
         admittedAt: this.#sources.clock(),
@@ -192,16 +201,20 @@ export class CatalogPlacementTimingV1 {
         failedPeers: 0,
         deniedPeers: 0,
       };
-      this.#inFlight = Object.freeze({ repair, record });
       const admission: CatalogPlacementAdmissionV1 = {
+        attempt: this.#recorder(record),
         end: (outcome) => observe(() => {
           record.endedAt = this.#sources.clock();
           record.failed = outcome === 'failed';
-          if (this.#inFlight?.record === record) this.#inFlight = undefined;
+        }),
+        released: (waiters) => observe(() => {
+          for (const waiter of waiters ?? []) {
+            const waiterRecord = this.#waiters.get(waiter);
+            if (waiterRecord !== undefined) waiterRecord.attempt = record;
+          }
         }),
       };
-      this.#admissions.set(admission, record);
-      return admission;
+      return Object.freeze(admission);
     } catch {
       return INERT_ADMISSION;
     }
@@ -214,21 +227,6 @@ export class CatalogPlacementTimingV1 {
       for (const waiter of waiters ?? []) {
         const record = this.#waiters.get(waiter);
         if (record !== undefined) record.cooldownSkips += 1;
-      }
-    });
-  }
-
-  /**
-   * Supervisor: these waiters are being released. When an attempt released them, each one is
-   * bound to that attempt's record; a key that left the queue without one binds nothing.
-   */
-  waitersSettled(waiters: Iterable<object> | undefined, admission?: CatalogPlacementAdmissionV1): void {
-    observe(() => {
-      const attempt = admission === undefined ? undefined : this.#admissions.get(admission);
-      if (attempt === undefined) return;
-      for (const waiter of waiters ?? []) {
-        const record = this.#waiters.get(waiter);
-        if (record !== undefined) record.attempt = attempt;
       }
     });
   }
@@ -283,43 +281,35 @@ export class CatalogPlacementTimingV1 {
     });
   }
 
-  /** Repair body: the attempt in flight for this exact marker, or an inert one. */
-  attemptFor(repair: object): CatalogPlacementAttemptV1 {
-    try {
-      const inFlight = this.#inFlight;
-      if (inFlight === undefined || inFlight.repair !== repair || inFlight.record.endedAt !== undefined) {
-        return INERT_CATALOG_PLACEMENT_ATTEMPT_V1;
-      }
-      const { record } = inFlight;
-      const elapsedSince = (startedAt: number): number => {
-        const elapsed = this.#sources.clock() - startedAt;
-        return Number.isFinite(elapsed) && elapsed > 0 ? elapsed : 0;
-      };
-      return {
-        now: () => {
-          try {
-            return this.#sources.clock();
-          } catch {
-            return Number.NaN;
-          }
-        },
-        phase: (phase, startedAt) => observe(() => {
-          record.phaseMs[phase] += elapsedSince(startedAt);
-        }),
-        covered: (covered, startedAt) => observe(() => {
-          record.phaseMs.coverage += elapsedSince(startedAt);
-          record.covered = covered;
-        }),
-        announced: (delivery, startedAt) => observe(() => {
-          record.phaseMs.announce += elapsedSince(startedAt);
-          record.peers += delivery.announcedPeers.length + delivery.failedPeers.length;
-          record.failedPeers += delivery.failedPeers.length;
-          record.deniedPeers += delivery.failedPeers.filter(({ code }) => code === POLICY_DENIED_CODE).length;
-        }),
-      };
-    } catch {
-      return INERT_CATALOG_PLACEMENT_ATTEMPT_V1;
-    }
+  /** The repair body's view of one admitted attempt: it charges phases to that record only. */
+  #recorder(record: PlacementAttemptRecordV1): CatalogPlacementAttemptV1 {
+    const elapsedSince = (startedAt: number): number => {
+      const elapsed = this.#sources.clock() - startedAt;
+      return Number.isFinite(elapsed) && elapsed > 0 ? elapsed : 0;
+    };
+    const recorder: CatalogPlacementAttemptV1 = {
+      now: () => {
+        try {
+          return this.#sources.clock();
+        } catch {
+          return Number.NaN;
+        }
+      },
+      phase: (phase, startedAt) => observe(() => {
+        record.phaseMs[phase] += elapsedSince(startedAt);
+      }),
+      covered: (covered, startedAt) => observe(() => {
+        record.phaseMs.coverage += elapsedSince(startedAt);
+        record.covered = covered;
+      }),
+      announced: (delivery, startedAt) => observe(() => {
+        record.phaseMs.announce += elapsedSince(startedAt);
+        record.peers += delivery.announcedPeers.length + delivery.failedPeers.length;
+        record.failedPeers += delivery.failedPeers.length;
+        record.deniedPeers += delivery.failedPeers.filter(({ code }) => code === POLICY_DENIED_CODE).length;
+      }),
+    };
+    return Object.freeze(recorder);
   }
 
   /** Observer: one post-confirmation observer call for `asset` starts now. */
