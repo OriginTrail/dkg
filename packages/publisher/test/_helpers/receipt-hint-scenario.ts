@@ -9,6 +9,7 @@ import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   TripleStoreAsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
+  type LiftJobTailStep,
   type PublishResult,
 } from '../../src/index.js';
 import {
@@ -53,6 +54,11 @@ export function createReceiptHintHarness() {
   async function parkedHintScenario(options: {
     hintTxHash?: string;
     tailAction?: 'park' | 'throw';
+    /**
+     * Runs as the executor's post-receipt tail in place of the park; `ended` is how an executor
+     * reports that a step of that tail just ended.
+     */
+    tail?: (ended: (step: LiftJobTailStep) => void) => Promise<void>;
     operationKind?: 'create' | 'update';
     finalizeRecovered?: () => Promise<void>;
     config?: Partial<AsyncLiftPublisherConfig>;
@@ -84,7 +90,11 @@ export function createReceiptHintHarness() {
           if (options.tailAction === 'throw') {
             throw new Error('post-write-ahead failure: recovery owns the record from here');
           }
-          await tailParked;
+          if (options.tail !== undefined) {
+            await options.tail((step) => input.publishOptions.onPostConfirmationStep?.(step));
+          } else {
+            await tailParked;
+          }
           // The rows never consume this result: detached executions drop it by design, and the
           // no-detach row pins the historical inline path, where this stub has always settled
           // with `undefined`. Returning a synthetic PublishResult here would CHANGE what

@@ -3,7 +3,7 @@
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { PersistedLiftJob } from './lift-job.js';
 import { getLiftJobTransactionEvidence } from './async-lift-publisher-utils.js';
-import { LiftJobCompletionTiming } from './lift-job-completion-timing.js';
+import { LiftJobCompletionTiming, type LiftJobTailStep } from './lift-job-completion-timing.js';
 
 const sharedByStore = new WeakMap<TripleStore, Map<string, LiftJobChainObservations>>();
 
@@ -20,6 +20,14 @@ export class LiftJobChainObservations {
    * only, like the observations themselves; replaceable, for example to inject a clock.
    */
   completion = new LiftJobCompletionTiming();
+
+  /**
+   * GH#3081 — the hook a queue hands the executor of `jobId`: each step of the executor's work
+   * after the confirmation, reported as it ends, lands on the job's timeline. Observation only.
+   */
+  tailObserver(jobId: string): (step: LiftJobTailStep) => void {
+    return (step) => this.completion.tailStep(jobId, step);
+  }
 
   /**
    * The observations of one store and control graph in this process. A daemon serves job views

@@ -1247,7 +1247,7 @@ export class TripleStoreAsyncLiftPublisher
         validation: validated.validation,
         resolved: validated.resolved,
         publishOptions: {
-          ...prepared.publishOptions,
+          ...prepared.publishOptions, onPostConfirmationStep: this.chainObservations.tailObserver(claimed.jobId),
           operationCtx: prepared.publishOptions.operationCtx ?? createOperationContext('publishFromSWM', claimed.jobId),
           onBeforeBroadcast: broadcastRecorder.onBeforeBroadcast,
           // The endpoint has accepted the exact signed transaction recorded
