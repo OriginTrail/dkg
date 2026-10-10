@@ -82,6 +82,8 @@ function buildCtx(opts: {
   };
 
   const agent = {
+    peerId: 'node-default-peer',
+    getDefaultAgentAddress: () => '0xnode-default-agent',
     resolveContextGraphReadAuthority: async (
       contextGraphId: string,
       o: { callerAgentAddress?: string } = {},

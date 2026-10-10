@@ -81,7 +81,7 @@ describe('VectorStore — Tri-Modal Memory §21 compliance', () => {
     expect(id1).toBe('fixed-id');
     expect(id2).toBe('fixed-id');
     expect(await store.count()).toBe(1);
-    const results = await store.search(makeVec(8, 2), { contextGraphId: 'cg-a', memoryLayers: ['wm'], limit: 1 });
+    const results = await store.search(makeVec(8, 2), { workingMemoryScope: { kind: 'nodeOperator' }, contextGraphId: 'cg-a', memoryLayers: ['wm'], limit: 1 });
     expect(results).toHaveLength(1);
     expect(results[0].label).toBe('v2');
   });
@@ -89,7 +89,7 @@ describe('VectorStore — Tri-Modal Memory §21 compliance', () => {
   it('search: identical vector returns similarity == 1.0', async () => {
     const q = makeVec(8, 42);
     await store.insert({ ...baseRec(), embedding: q });
-    const [hit] = await store.search(q, { contextGraphId: 'cg-a', memoryLayers: ['wm'], limit: 1 });
+    const [hit] = await store.search(q, { workingMemoryScope: { kind: 'nodeOperator' }, contextGraphId: 'cg-a', memoryLayers: ['wm'], limit: 1 });
     expect(hit).toBeDefined();
     expect(hit.similarity).toBeGreaterThan(0.9999);
     expect(hit.similarity).toBeLessThanOrEqual(1.0001);
@@ -99,7 +99,7 @@ describe('VectorStore — Tri-Modal Memory §21 compliance', () => {
     const a = [1, 0, 0, 0, 0, 0, 0, 0];
     const b = [0, 1, 0, 0, 0, 0, 0, 0];
     await store.insert({ ...baseRec(), embedding: a });
-    const [hit] = await store.search(b, { contextGraphId: 'cg-a', memoryLayers: ['wm'], limit: 1 });
+    const [hit] = await store.search(b, { workingMemoryScope: { kind: 'nodeOperator' }, contextGraphId: 'cg-a', memoryLayers: ['wm'], limit: 1 });
     expect(Math.abs(hit.similarity)).toBeLessThan(1e-6);
   });
 
@@ -107,7 +107,7 @@ describe('VectorStore — Tri-Modal Memory §21 compliance', () => {
     const nonZero = [1, 2, 3, 4, 5, 6, 7, 8];
     const zero = [0, 0, 0, 0, 0, 0, 0, 0];
     await store.insert({ ...baseRec(), embedding: nonZero });
-    const [hit] = await store.search(zero, { contextGraphId: 'cg-a', memoryLayers: ['wm'], limit: 1 });
+    const [hit] = await store.search(zero, { workingMemoryScope: { kind: 'nodeOperator' }, contextGraphId: 'cg-a', memoryLayers: ['wm'], limit: 1 });
     expect(Number.isFinite(hit.similarity)).toBe(true);
     expect(hit.similarity).toBe(0);
   });
@@ -116,7 +116,7 @@ describe('VectorStore — Tri-Modal Memory §21 compliance', () => {
     const shared = makeVec(8, 99);
     await store.insert({ ...baseRec({ contextGraphId: 'cg-a', entityUri: 'e-a' }), embedding: shared });
     await store.insert({ ...baseRec({ contextGraphId: 'cg-b', entityUri: 'e-b' }), embedding: shared });
-    const results = await store.search(shared, { contextGraphId: 'cg-a', memoryLayers: ['wm', 'swm', 'vm'], limit: 10 });
+    const results = await store.search(shared, { workingMemoryScope: { kind: 'nodeOperator' }, contextGraphId: 'cg-a', memoryLayers: ['wm', 'swm', 'vm'], limit: 10 });
     expect(results).toHaveLength(1);
     expect(results[0].entityUri).toBe('e-a');
   });
@@ -127,13 +127,13 @@ describe('VectorStore — Tri-Modal Memory §21 compliance', () => {
     await store.insert({ ...baseRec({ memoryLayer: 'swm', entityUri: 'e-swm' }), embedding: q });
     await store.insert({ ...baseRec({ memoryLayer: 'vm', entityUri: 'e-vm' }), embedding: q });
 
-    const vmOnly = await store.search(q, { contextGraphId: 'cg-a', memoryLayers: ['vm'], limit: 10 });
+    const vmOnly = await store.search(q, { workingMemoryScope: { kind: 'nodeOperator' }, contextGraphId: 'cg-a', memoryLayers: ['vm'], limit: 10 });
     expect(vmOnly.map((r) => r.entityUri).sort()).toEqual(['e-vm']);
 
-    const swmVm = await store.search(q, { contextGraphId: 'cg-a', memoryLayers: ['swm', 'vm'], limit: 10 });
+    const swmVm = await store.search(q, { workingMemoryScope: { kind: 'nodeOperator' }, contextGraphId: 'cg-a', memoryLayers: ['swm', 'vm'], limit: 10 });
     expect(swmVm.map((r) => r.entityUri).sort()).toEqual(['e-swm', 'e-vm']);
 
-    const all = await store.search(q, { contextGraphId: 'cg-a', memoryLayers: ['wm', 'swm', 'vm'], limit: 10 });
+    const all = await store.search(q, { workingMemoryScope: { kind: 'nodeOperator' }, contextGraphId: 'cg-a', memoryLayers: ['wm', 'swm', 'vm'], limit: 10 });
     expect(all.map((r) => r.entityUri).sort()).toEqual(['e-swm', 'e-vm', 'e-wm']);
   });
 
@@ -149,7 +149,7 @@ describe('VectorStore — Tri-Modal Memory §21 compliance', () => {
   it('search: dimension mismatch silently skips rows instead of throwing', async () => {
     await store.insert({ ...baseRec(), embedding: makeVec(8, 1), entityUri: 'e-8' });
     await store.insert({ ...baseRec(), embedding: makeVec(16, 1), entityUri: 'e-16' });
-    const results = await store.search(makeVec(8, 1), { contextGraphId: 'cg-a', memoryLayers: ['wm'], limit: 10 });
+    const results = await store.search(makeVec(8, 1), { workingMemoryScope: { kind: 'nodeOperator' }, contextGraphId: 'cg-a', memoryLayers: ['wm'], limit: 10 });
     expect(results).toHaveLength(1);
     expect(results[0].entityUri).toBe('e-8');
   });
@@ -159,7 +159,7 @@ describe('VectorStore — Tri-Modal Memory §21 compliance', () => {
     await store.insert({ ...baseRec({ entityUri: 'e-perfect' }), embedding: [1, 0, 0, 0, 0, 0, 0, 0] });
     await store.insert({ ...baseRec({ entityUri: 'e-partial' }), embedding: [1, 1, 0, 0, 0, 0, 0, 0] });
     await store.insert({ ...baseRec({ entityUri: 'e-far' }), embedding: [0, 0, 0, 0, 0, 0, 0, 1] });
-    const r = await store.search(q, { contextGraphId: 'cg-a', memoryLayers: ['wm'], limit: 10 });
+    const r = await store.search(q, { workingMemoryScope: { kind: 'nodeOperator' }, contextGraphId: 'cg-a', memoryLayers: ['wm'], limit: 10 });
     expect(r.map((x) => x.entityUri)).toEqual(['e-perfect', 'e-partial', 'e-far']);
     for (let i = 0; i < r.length - 1; i++) {
       expect(r[i].similarity).toBeGreaterThanOrEqual(r[i + 1].similarity);
@@ -170,7 +170,7 @@ describe('VectorStore — Tri-Modal Memory §21 compliance', () => {
     const q = [1, 0, 0, 0, 0, 0, 0, 0];
     await store.insert({ ...baseRec({ entityUri: 'e-perfect' }), embedding: [1, 0, 0, 0, 0, 0, 0, 0] });
     await store.insert({ ...baseRec({ entityUri: 'e-ortho' }), embedding: [0, 1, 0, 0, 0, 0, 0, 0] });
-    const r = await store.search(q, { contextGraphId: 'cg-a', memoryLayers: ['wm'], limit: 10, minSimilarity: 0.5 });
+    const r = await store.search(q, { workingMemoryScope: { kind: 'nodeOperator' }, contextGraphId: 'cg-a', memoryLayers: ['wm'], limit: 10, minSimilarity: 0.5 });
     expect(r.map((x) => x.entityUri)).toEqual(['e-perfect']);
   });
 
@@ -179,7 +179,7 @@ describe('VectorStore — Tri-Modal Memory §21 compliance', () => {
     for (let i = 0; i < 10; i++) {
       await store.insert({ ...baseRec({ entityUri: `e-${i}` }), embedding: q });
     }
-    const r = await store.search(q, { contextGraphId: 'cg-a', memoryLayers: ['wm'], limit: 3 });
+    const r = await store.search(q, { workingMemoryScope: { kind: 'nodeOperator' }, contextGraphId: 'cg-a', memoryLayers: ['wm'], limit: 3 });
     expect(r).toHaveLength(3);
   });
 
@@ -210,7 +210,7 @@ describe('VectorStore — Tri-Modal Memory §21 compliance', () => {
 
   it('createdAt defaults to valid ISO-8601 when omitted', async () => {
     await store.insert(baseRec());
-    const r = await store.search(baseRec().embedding, { contextGraphId: 'cg-a', memoryLayers: ['wm'], limit: 1 });
+    const r = await store.search(baseRec().embedding, { workingMemoryScope: { kind: 'nodeOperator' }, contextGraphId: 'cg-a', memoryLayers: ['wm'], limit: 1 });
     expect(r).toHaveLength(1);
     // No direct exposure of createdAt — but we can at least assert the row round-trips
     expect(r[0].similarity).toBeGreaterThan(0);
@@ -219,7 +219,7 @@ describe('VectorStore — Tri-Modal Memory §21 compliance', () => {
   it('float32 round-trip: embedding values survive BLOB encode/decode within float32 precision', async () => {
     const original = [0.1234567, -0.7654321, 1e-6, -1e-6, 3.14, -3.14, 0, 1];
     await store.insert({ ...baseRec(), embedding: original, entityUri: 'roundtrip' });
-    const [hit] = await store.search(original, { contextGraphId: 'cg-a', memoryLayers: ['wm'], limit: 1 });
+    const [hit] = await store.search(original, { workingMemoryScope: { kind: 'nodeOperator' }, contextGraphId: 'cg-a', memoryLayers: ['wm'], limit: 1 });
     expect(hit).toBeDefined();
     // Float32 precision ~= 1e-7; cosine self-similarity must be very close to 1
     expect(hit.similarity).toBeGreaterThan(0.9999);
