@@ -16,6 +16,21 @@ export default defineConfig({
           'test/mcp-physical-config.test.ts',
           'test/mcp-config-metadata.test.ts',
           'test/api-client.test.ts',
+          'test/blazegraph-docker.test.ts',
+          'test/blazegraph-container-inspection.test.ts',
+          'test/blazegraph-survivability.test.ts',
+          'test/blazegraph-harden.test.ts',
+          'test/blazegraph-harden-execution.test.ts',
+          'test/blazegraph-harden-rollback.test.ts',
+          'test/harden-migration-binding.test.ts',
+          'test/harden-recovery-barrier.test.ts',
+          'test/harden-crash-recovery.test.ts',
+          'test/harden-checkpoint-durability.test.ts',
+          'test/blazegraph-harden-docker.test.ts',
+          'test/store-monitor.test.ts',
+          'test/store-harden-command.test.ts',
+          'test/daemon-store-monitor-wiring.test.ts',
+          'test/status-route-store-monitor.test.ts',
           'test/finalized-publish-options.test.ts',
           'test/messenger-outbox-memory.test.ts',
           'test/live-daemon-isolation.test.ts',
@@ -140,6 +155,7 @@ export default defineConfig({
           // producer-quiescent shutdown drain. Real WorkerCatchupRunner behind
           // a fake worker thread; no hardhat.
           'test/daemon-catchup-telemetry-shutdown.test.ts',
+          'test/shutdown-wait.test.ts',
           'test/catchup-runner-worker-killswitch.test.ts',
           // #2050 — `DKG_SWM_CATCHUP_PASS_BUDGET_MS=0` continuation-pass kill
           // switch, end to end through the worker with per-job config resolution.
@@ -200,6 +216,7 @@ export default defineConfig({
           'test/validate-store-config.test.ts',
           'test/store-wizard.test.ts',
           'test/blazegraph-docker.test.ts',
+          'test/blazegraph-container-inspection.test.ts',
           'test/blazegraph-image-metadata.test.ts',
           'test/store-identity-tag.test.ts',
           'test/publisher-runner-lu11.test.ts',

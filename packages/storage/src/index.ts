@@ -4,6 +4,8 @@ export {
   assertBlazegraphNamespace,
   blazegraphNamespaceApiUrlFromBaseUrl,
   blazegraphNamespaceApiUrlFromSparqlEndpoint,
+  blazegraphNamespaceEndpointParts,
+  type BlazegraphNamespaceEndpointParts,
   normalizeBlazegraphNamespace,
   normalizeBlazegraphNamespaceApiUrl,
   renderBlazegraphNamespaceXml,

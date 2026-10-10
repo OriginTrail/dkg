@@ -750,6 +750,11 @@ jobs:
       - name: "Verify provisioned Blazegraph image contract"
         if: matrix.shard == 1
         run: bash scripts/ci/verify-blazegraph-image-contract.sh
+      - name: "Verify migration journal roundtrip with the pinned Blazegraph image"
+        if: matrix.shard == 1
+        env:
+          BLAZEGRAPH_HARDEN_INTEGRATION_TEST: '1'
+        run: pnpm --filter @origintrail-official/dkg test:unit test/blazegraph-harden-docker.test.ts
       - name: "CLI tests (shard ${{ matrix.shard }}/${{ matrix.shards }})"
         run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
       - name: Upload Vitest JUnit report

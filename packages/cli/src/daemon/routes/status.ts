@@ -69,7 +69,7 @@ import {
   resolveVmReconcilerEnabled,
 } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
-import { resolveManagedOxigraphPort } from '../oxigraph-managed.js';
+import { projectStoreStatus } from '../store-status.js';
 import { parseStatusQuery, type StoreQuadsStatusFields } from '../../status-store-quads-wire.js';
 import { requestExternalStoreQuads, peekCachedExternalStoreQuads } from '../store-quads-cache.js';
 import { probeExternalStore } from '../store-reachability.js';
@@ -788,27 +788,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       networkConfig: resolveNetworkConfigName(config),
       networkId,
       networkName: network?.networkName ?? null,
-      storeBackend: config.store?.backend ?? "oxigraph-worker",
-      // External backend visibility (RFC 120 / plan PR 1 item 3). For
-      // local backends the URL/count stay null and count status/age are omitted.
-      storeUrl: isExternalBackend(config.store?.backend)
-        ? (() => {
-            const opts = (config.store?.options ?? {}) as Record<string, unknown>;
-            const url = typeof opts.url === 'string' ? opts.url
-              : typeof opts.queryEndpoint === 'string' ? opts.queryEndpoint
-              : null;
-            return url;
-          })()
-        : config.store?.backend === 'oxigraph-server'
-          // Managed local server: report its loopback endpoint so `dkg status`
-          // renders the external-store health path (storeQuads/unreachable)
-          // instead of printing it like a quad-less local store.
-          ? (() => {
-              const opts = (config.store?.options ?? {}) as Record<string, unknown>;
-              const port = resolveManagedOxigraphPort(opts);
-              return `http://127.0.0.1:${port}/query`;
-            })()
-          : null,
+      ...projectStoreStatus(config.store, daemonState.storeMonitor),
       // A managed `oxigraph-server` keeps `config.store.backend` as
       // "oxigraph-server" (so it persists/labels correctly), but its quad
       // count is still worth surfacing — it's the only store-health signal

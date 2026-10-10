@@ -367,11 +367,14 @@ import {
   skipChainResetWipe,
 } from './chain-reset-wipe.js';
 import {
-  checkExternalStoreReachable,
   checkOrSetStoreIdentity,
-  formatHealthCheckFailure,
   formatIdentityTagMismatch,
 } from './store-health-check.js';
+import {
+  ensureStoreReachableAtBoot,
+  startDaemonStoreMonitor,
+  stopDaemonStoreMonitor,
+} from './store-monitor-wiring.js';
 import { startManagedOxigraph } from './oxigraph-managed.js';
 import { buildAgentRuntimeStoreConfig } from './agent-runtime-store-config.js';
 import type { OxigraphServerHandle } from './oxigraph-server.js';
@@ -1607,16 +1610,7 @@ async function runDaemonInnerWithStartupOwnership(
   // wiped local files but stale remote data; we'd rather not start at
   // all and let them fix the URL.
   if (isExternalBackend(runtimeStore?.backend)) {
-    const health = await checkExternalStoreReachable({
-      storeConfig: runtimeStore,
-    });
-    if (!health.ok) {
-      log(formatHealthCheckFailure(health));
-      process.exit(1);
-    }
-    log(
-      `External triple-store reachable: ${health.backend} ${health.endpoint}`,
-    );
+    await ensureStoreReachableAtBoot(runtimeStore, dkgDir(), log);
 
     // Namespace identity check (RFC 120, plan PR 3 item 3). Refuses to
     // start if another DKG node has already booted against this same
@@ -2603,6 +2597,8 @@ async function runDaemonInnerWithStartupOwnership(
     }
   }, PING_INTERVAL_MS);
   if (pingTimer.unref) pingTimer.unref();
+
+  startDaemonStoreMonitor({ storeConfig: runtimeStore, dkgHome: dkgDir(), state: daemonState, log });
 
   // Version check + auto-update. Each mode's gate holds off a per-node random
   // delay between detecting an update and applying it, so a release never
@@ -3774,6 +3770,10 @@ async function runDaemonInnerWithStartupOwnership(
       );
     };
     const cleanup = (async () => {
+      const monitorRetirement = stopDaemonStoreMonitor(daemonState);
+      // Observe rejection immediately, then join the original promise below.
+      void monitorRetirement.catch(() => undefined);
+      let backingStoresClosed = false;
       try {
         autoUpdate.stop();
         clearInterval(pingTimer);
@@ -3850,16 +3850,17 @@ async function runDaemonInnerWithStartupOwnership(
         // retirement timeout is a dependency quarantine, not an ordinary
         // best-effort cleanup failure: killing Oxigraph/SQLite underneath the
         // still-running writer would defeat the agent's fail-stop boundary.
-        const backingStoresClosed = await closeDaemonBackingStoresAfterTeardown(teardown, {
+        backingStoresClosed = await closeDaemonBackingStoresAfterTeardown(teardown, {
           retryAgentStop: () => agent.stop(),
           stopManagedOxigraph: () => managedOxigraph?.stop() ?? Promise.resolve(),
           closeDashboardDb: () => dashDb.close(),
           log,
         });
-        if (backingStoresClosed) log("Stopped.");
       } finally {
-        await cleanupStateFiles();
+        try { await monitorRetirement; }
+        finally { await cleanupStateFiles(); }
       }
+      if (backingStoresClosed) log("Stopped.");
     })().catch((err: any) => {
       log(`Shutdown cleanup error: ${err?.message ?? String(err)}`);
     }).finally(async () => {

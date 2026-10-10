@@ -70,6 +70,10 @@ function runDevnetBlazegraphSmoke(metadata: string, namespaceStatus = '201'): {
     resolve(REPO_ROOT, 'packages/cli/blazegraph-image-metadata.cjs'),
     join(parserDir, 'blazegraph-image-metadata.cjs'),
   );
+  const storageDir = join(root, 'packages', 'storage');
+  mkdirSync(storageDir, { recursive: true });
+  copyFileSync(resolve(REPO_ROOT, 'packages/storage/blazegraph-namespace-contract.cjs'),
+    join(storageDir, 'blazegraph-namespace-contract.cjs'));
   writeFileSync(join(root, 'blazegraph-image.json'), metadata);
   try {
     const result = spawnSync('bash', [
@@ -447,6 +451,36 @@ describe('provisionBlazegraphDocker', () => {
     expect(httpCalls.some((call) => call.url.endsWith('/bigdata/namespace'))).toBe(false);
   });
 
+  it('reattaches the migrated journal volume when a stopped container cannot start', async () => {
+    const { runner, calls } = mockDocker({
+      matchers: [
+        { when: (a) => a[0] === '--version', respond: dockerVersionOk },
+        { when: (a) => a[0] === 'inspect', respond: () => { const result = dockerInspectStopped(); const rows = JSON.parse(result.stdout); rows[0].Mounts[0].Name = 'dkg-blazegraph-mynode-hardened-data'; return { ...result, stdout: JSON.stringify(rows) }; } },
+        { when: (a) => a[0] === 'start', respond: () => ({ stdout: '', stderr: 'config drift', exitCode: 1 }) },
+        { when: (a) => a[0] === 'rm', respond: () => ({ stdout: '', stderr: '', exitCode: 0 }) },
+        { when: (a) => a[0] === 'run', respond: () => ({ stdout: 'container-id', stderr: '', exitCode: 0 }) },
+      ],
+    });
+    const { fn, calls: httpCalls } = mockFetch((url) => {
+      if (url.endsWith('/bigdata/status')) return new Response('ok', { status: 200 });
+      if (url.includes('/sparql/properties')) return new Response(null, { status: 200 });
+      if (url.endsWith('/bigdata/namespace')) return new Response('unexpected', { status: 500 });
+      return new Response(null, { status: 200 });
+    });
+    const result = await provisionBlazegraphDocker({
+      namespace: 'mynode',
+      docker: runner,
+      fetch: fn,
+      isPortFree: async () => true,
+      log: () => {},
+    });
+    expect(result.reused).toBe(false);
+    expect(result.namespaceCreated).toBe(false);
+    expect(calls.some((c) => c[0] === 'rm')).toBe(true);
+    expect(calls.find((c) => c[0] === 'run')).toContain(`type=volume,source=dkg-blazegraph-mynode-hardened-data,target=${BLAZEGRAPH_DATA_PATH}`);
+    expect(httpCalls.some((call) => call.url.endsWith('/bigdata/namespace'))).toBe(false);
+  });
+
   it('does not delete a stopped legacy container when `docker start` fails', async () => {
     const { runner, calls } = mockDocker({
       matchers: [
@@ -470,6 +504,23 @@ describe('provisionBlazegraphDocker', () => {
     expect(calls.some((call) => call[0] === 'rm')).toBe(false);
     expect(calls.some((call) => call[0] === 'run')).toBe(false);
     expect(logs.some((message) => message.includes('will not recreate it automatically'))).toBe(true);
+  });
+
+  it.each(['missing-state', 'nonboolean-state', 'multiple-containers'])('does not recreate from invalid %s journal evidence', async shape => {
+    const owned = JSON.parse(dockerInspectStopped().stdout)[0] as Record<string, unknown>;
+    const values = shape === 'multiple-containers' ? [owned, { State: { Running: true } }]
+      : [{ ...owned, State: shape === 'missing-state' ? {} : { Running: 'false' } }];
+    const { runner, calls } = mockDocker({ matchers: [
+      { when: args => args[0] === '--version', respond: dockerVersionOk },
+      { when: args => args[0] === 'inspect', respond: () => ({ stdout: JSON.stringify(values), stderr: '', exitCode: 0 }) },
+      { when: args => args[0] === 'start', respond: () => ({ stdout: '', stderr: 'cannot start', exitCode: 1 }) },
+    ] });
+    const { fn, calls: httpCalls } = mockFetch(() => new Response('ok', { status: 200 }));
+    await expect(provisionBlazegraphDocker({ namespace: 'mynode', docker: runner, fetch: fn,
+      isPortFree: async () => true, log: () => {},
+    })).rejects.toThrow(/journal could not be confirmed in the expected named volume/s);
+    expect(calls.map(args => args[0])).toEqual(['--version', 'inspect', 'start']);
+    expect(httpCalls).toEqual([]);
   });
 
   it('does not claim a journal policy when docker inspect JSON is malformed', async () => {
