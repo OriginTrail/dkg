@@ -8,10 +8,6 @@ import {
   captureDevnetBuild, devnetBuildCacheMatchesCheckout, ensureDevnetBuildInfo,
 } from './lib/build-info.mjs';
 
-export function stampCliBuildInfo(rootDir = resolve(import.meta.dirname, '..'), distTag = 'monorepo') {
-  return writeBuildMetadata({ rootDir, distTag, ...captureSourceBuildIdentity(rootDir) }).payload;
-}
-
 export function compileAndStampCliBuildInfo(rootDir = resolve(import.meta.dirname, '..'), distTag = 'monorepo') {
   const captured = captureSourceBuildIdentity(rootDir);
   const status = runBuildCommand('tsc', ['--noEmitOnError']);
@@ -26,7 +22,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     else if (operation === '--capture-devnet') console.log(JSON.stringify(captureDevnetBuild(rootDir)));
     else if (operation === '--check-devnet-cache') process.exitCode = devnetBuildCacheMatchesCheckout(rootDir) ? 0 : 1;
     else if (operation === '--ensure-devnet') ensureDevnetBuildInfo(rootDir, before ? JSON.parse(before) : undefined);
-    else stampCliBuildInfo(operation, rootDir);
+    else throw new Error(`Unsupported build identity operation: ${operation ?? '<missing>'}`);
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

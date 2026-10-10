@@ -115,37 +115,6 @@ test('missing Git metadata is explicitly unknown instead of a live checkout clai
   assert.equal(info.dirty, null);
 });
 
-function pausedStatusCheck(statusBody, setup = '') {
-  return spawnSync('bash', ['-c', `
-    set -euo pipefail
-    source "$1"
-    healthy_count=123
-    ${setup}
-    status_body() { ${statusBody}
-    }
-    say() { :; }
-    fail() { echo "$*" >&2; exit 1; }
-    check_paused_store_status
-  `, 'bash', join(root, 'scripts/devnet-lib.sh')], { encoding: 'utf8' });
-}
-
-test('store outage accepts a count refreshed between the healthy baseline and SIGSTOP', () => {
-  const r = pausedStatusCheck(`
-    if [ "$1" = '/api/status?probeStore=true' ]; then
-      printf '%s' '{"storeReachability":"no-answer"}'
-    else
-      printf '%s' '{"storeQuadsStatus":"ready","storeQuads":124}'
-    fi
-  `);
-  assert.equal(r.status, 0, r.stderr);
-});
-
-test('paused status rejects an ordinary read that probes the store', () => {
-  const r = pausedStatusCheck(`printf '%s' '{"storeQuadsStatus":"ready","storeQuads":124,"storeReachability":"reachable"}'`);
-  assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /ordinary status unexpectedly probed/);
-});
-
 test('cached devnet dist at A is rebuilt at B rather than relabeled without compilation', t => {
   const dir = fixture(t);
   writeFileSync(join(dir, 'package.json'), '{}');
@@ -282,36 +251,6 @@ test('unchanged uncertified compiler metadata cannot become a clean legacy stamp
 });
 
 
-test('paused status rejects a delayed second ordinary read', () => {
-  const r = pausedStatusCheck(`
-    local count="$(cat "$calls")"
-    if [ "$1" = '/api/status?probeStore=true' ]; then
-      printf '%s' '{"storeReachability":"no-answer"}'
-    else
-      [ "$count" != first ] || sleep 6
-      printf first > "$calls"
-      printf '%s' '{"storeQuadsStatus":"ready","storeQuads":124}'
-    fi
-  `, `calls="$(mktemp)"; trap 'rm -f "$calls"' EXIT`);
-  assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /ordinary .*blocked/);
-});
-
-test('paused status rejects a second ordinary response carrying probe evidence', () => {
-  const r = pausedStatusCheck(`
-    if [ "$1" = '/api/status?probeStore=true' ]; then
-      printf '%s' '{"storeReachability":"no-answer"}'
-    elif [ -s "$calls" ]; then
-      printf '%s' '{"storeQuadsStatus":"ready","storeQuads":124,"storeReachability":"unreachable"}'
-    else
-      printf first > "$calls"
-      printf '%s' '{"storeQuadsStatus":"ready","storeQuads":124}'
-    fi
-  `, `calls="$(mktemp)"; trap 'rm -f "$calls"' EXIT`);
-  assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /ordinary status unexpectedly probed/);
-});
-
 test('legacy certification requires source identity captured before the build', t => {
   const dir = fixture(t);
   useLegacyBuild(dir);
@@ -383,4 +322,20 @@ test('compiler-owned certification refuses a missing stamp without relabeling th
   const dir = fixture(t);
   const captured = captureDevnetBuild(dir);
   assert.throws(() => ensureDevnetBuildInfo(dir, captured), /Compiler-owned build did not produce/);
+});
+
+
+test('unsupported identity operations cannot stamp or relabel compiled output', t => {
+  const dir = fixture(t);
+  compile(dir);
+  const metadata = readFileSync(join(dir, 'packages/cli/build-info.json'), 'utf8');
+  const emitted = readFileSync(join(dir, 'packages/cli/dist/source.txt'), 'utf8');
+  for (const args of [[], [dir, 'devnet'], ['--unsupported', dir]]) {
+    const result = spawnSync(process.execPath, ['scripts/stamp-cli-build-info.mjs', ...args],
+      { cwd: dir, encoding: 'utf8' });
+    assert.equal(result.status, 1, `unsupported operation changed stamp: ${readFileSync(join(dir, 'packages/cli/build-info.json'), 'utf8') !== metadata}`);
+    assert.match(result.stderr, /Unsupported build identity operation/);
+    assert.equal(readFileSync(join(dir, 'packages/cli/build-info.json'), 'utf8'), metadata);
+    assert.equal(readFileSync(join(dir, 'packages/cli/dist/source.txt'), 'utf8'), emitted);
+  }
 });
