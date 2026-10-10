@@ -153,6 +153,15 @@ describe('exact batch normal verifier/materializer binding', () => {
       f.isPublic.mockRejectedValue(new ExactBatchResponderRefusal('BUSY'));
       await expect(f.binding.authorizeRequest(f.signed, 'requester', new AbortController().signal))
         .rejects.toMatchObject({ refusal: 'BUSY' } satisfies Partial<ExactBatchResponderRefusal>);
+
+      f.isPublic.mockRejectedValueOnce(new ExactBatchResponderRefusal('DENIED'));
+      await expect(f.binding.authorizeRequest(f.signed, 'requester', new AbortController().signal))
+        .rejects.toMatchObject({ refusal: 'DENIED' } satisfies Partial<ExactBatchResponderRefusal>);
+
+      const unexpected = new Error('Authority lookup failed unexpectedly');
+      f.isPublic.mockRejectedValueOnce(unexpected);
+      await expect(f.binding.authorizeRequest(f.signed, 'requester', new AbortController().signal))
+        .rejects.toBe(unexpected);
       expect(f.exportCache.stats().exports).toBe(0);
     } finally { await f.close(); }
   });
@@ -173,6 +182,11 @@ describe('exact batch normal verifier/materializer binding', () => {
       f.authorize.mockRejectedValueOnce(new StoreOperationTimeoutError({ backend: 'blazegraph', operation: 'query' }));
       await expect(f.binding.authorizeRequest(f.signed, 'requester', new AbortController().signal))
         .rejects.toMatchObject({ refusal: 'BUSY' } satisfies Partial<ExactBatchResponderRefusal>);
+
+      const unexpected = new Error('Authorization failed unexpectedly');
+      f.authorize.mockRejectedValueOnce(unexpected);
+      await expect(f.binding.authorizeRequest(f.signed, 'requester', new AbortController().signal))
+        .rejects.toBe(unexpected);
       expect(f.exportCache.stats().exports).toBe(0);
     } finally { await f.close(); }
   });
