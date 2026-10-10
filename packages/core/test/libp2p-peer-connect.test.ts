@@ -132,6 +132,89 @@ describe('planLibp2pPeerConnectionAddresses', () => {
   });
 });
 
+describe('peer-id fallback request deadline', () => {
+  it('settles a non-cooperative lookup at the deadline and leaves the caller live', async () => {
+    vi.useFakeTimers();
+    const caller = new AbortController();
+    let finish!: () => void;
+    let dialSignal: AbortSignal | undefined;
+    let outcome: unknown;
+    const host = {
+      getConnections: () => [],
+      dial: vi.fn((_target: unknown, options?: { signal?: AbortSignal }) => {
+        dialSignal = options?.signal;
+        return new Promise<void>(resolve => { finish = resolve; });
+      }),
+      peerStore: { merge: vi.fn(async () => undefined) },
+    };
+    const pending = connectLibp2pPeer(host, TARGET, [], {
+      signal: caller.signal, candidateTimeoutMs: 25,
+    }).then(() => { outcome = 'resolved'; }, error => { outcome = error; });
+    try {
+      await vi.advanceTimersByTimeAsync(25);
+      expect(outcome).toMatchObject({ name: 'TimeoutError' });
+      expect(dialSignal?.aborted).toBe(true);
+      expect(caller.signal.aborted).toBe(false);
+      expect(host.dial).toHaveBeenCalledOnce();
+      // A late successful lookup cannot turn the timed-out request into success.
+      finish();
+      await pending;
+      expect(outcome).toMatchObject({ name: 'TimeoutError' });
+    } finally {
+      finish();
+      await pending;
+      vi.useRealTimers();
+    }
+  });
+
+  it('settles caller cancellation even when the fallback ignores its signal', async () => {
+    const caller = new AbortController();
+    const reason = new Error('caller stopped');
+    let finish!: () => void;
+    let outcome: unknown;
+    const remove = vi.spyOn(caller.signal, 'removeEventListener');
+    const host = {
+      getConnections: () => [],
+      dial: vi.fn(() => new Promise<void>(resolve => { finish = resolve; })),
+      peerStore: { merge: vi.fn(async () => undefined) },
+    };
+    const pending = connectLibp2pPeer(host, TARGET, [], { signal: caller.signal })
+      .then(() => { outcome = 'resolved'; }, error => { outcome = error; });
+    try {
+      caller.abort(reason);
+      // Observe the request promise, with a bounded independent control so the
+      // unchanged hanging fallback fails without leaving a test stuck forever.
+      await Promise.race([pending, new Promise(resolve => setTimeout(resolve, 30))]);
+      expect(outcome).toBe(reason);
+      expect(remove).toHaveBeenCalledWith('abort', expect.any(Function));
+    } finally {
+      finish();
+      await pending;
+    }
+  });
+
+  it('bounds peer-id resolution without a caller signal too', async () => {
+    vi.useFakeTimers();
+    let finish!: () => void;
+    let outcome: unknown;
+    const host = {
+      getConnections: () => [],
+      dial: vi.fn(() => new Promise<void>(resolve => { finish = resolve; })),
+      peerStore: { merge: vi.fn(async () => undefined) },
+    };
+    const pending = connectLibp2pPeer(host, TARGET, [], { candidateTimeoutMs: 25 })
+      .then(() => { outcome = 'resolved'; }, error => { outcome = error; });
+    try {
+      await vi.advanceTimersByTimeAsync(25);
+      expect(outcome).toMatchObject({ name: 'TimeoutError' });
+    } finally {
+      finish();
+      await pending;
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('connectLibp2pPeer', () => {
   it('skips a private direct candidate and walks the following explicit circuit', async () => {
     const calls: string[] = [];

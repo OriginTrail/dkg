@@ -7,6 +7,7 @@ import { PeerConnectionUnresolvedError } from './network.js';
 import { canonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
 import type { ConfiguredRelayTarget } from './relay-target.js';
 import { startRequestAbortLifecycle } from '../request-abort-lifecycle.js';
+import { resolveWithinAbort } from '../abort-boundary.js';
 
 export interface Libp2pConnectHost {
   getConnections(): Array<{ remotePeer: { toString(): string } }>;
@@ -365,11 +366,18 @@ export async function connectLibp2pPeer(
     if (lastCandidateError !== undefined) throw lastCandidateError;
     throw new PeerConnectionUnresolvedError();
   }
+  // A supplied signal disables libp2p's own dial/DHT timeout. Own a local
+  // deadline even for a long-lived caller, and settle our wait if a transport
+  // ignores cancellation. A late lookup never authorizes a timed-out request.
+  const fallback = startRequestAbortLifecycle(
+    options.candidateTimeoutMs ?? DEFAULT_CANDIDATE_TIMEOUT_MS, [options.signal],
+  );
   try {
-    await host.dial(
-      peerIdFromString(canonicalPeerId),
-      options.signal ? { signal: options.signal } : undefined,
+    await resolveWithinAbort(
+      signal => host.dial(peerIdFromString(canonicalPeerId), { signal }),
+      fallback.signal,
     );
+    fallback.signal.throwIfAborted();
   } catch (error) {
     if (options.signal?.aborted) throw error;
     if (error instanceof Error && error.name === 'NoValidAddressesError') {
@@ -380,5 +388,7 @@ export async function connectLibp2pPeer(
       error.cause = lastCandidateError;
     }
     throw error;
+  } finally {
+    fallback.release();
   }
 }
