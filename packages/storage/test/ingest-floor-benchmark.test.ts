@@ -20,13 +20,13 @@ const term = (value: oxigraph.Term) => value.termType === 'Literal'
   : { type: value.termType, value: value.value };
 
 async function run(mode: string, populated: 'named' | 'default' | false,
-  options: { lowDisk?: boolean; redirect?: 'query' | 'mutation'; assets?: number; group?: number } = {}) {
+  options: { lowDisk?: boolean; redirect?: 'query' | 'mutation'; assets?: number; group?: number; corrupt?: 'missing' | 'wrong-graph' } = {}) {
   const home = await mkdtemp(join(tmpdir(), 'ingest-guard-'));
   const nq = '<urn:s> <urn:p> "plain" <urn:g> .\n<urn:s> <urn:link> <urn:o> <urn:g> .\n<urn:s> <urn:lang> "hello"@en <urn:g> .\n<urn:s> <urn:number> "42"^^<http://www.w3.org/2001/XMLSchema#integer> <urn:g> .\n# comment without a final newline';
   const assets = [];
   for (let i = 0; i < (options.assets ?? 1); i++) {
     const graph = i === 0 ? 'urn:g' : `urn:g:${i}`;
-    const text = nq.replaceAll('<urn:g>', `<${graph}>`);
+    const text = nq.replaceAll('<urn:g>', `<${graph}>`).replaceAll('<urn:s>', i === 0 ? '<urn:s>' : `<urn:s:${i}>`);
     const file = `input-${i}.nq`;
     await writeFile(join(home, file), text);
     assets.push({ file, graph, quads: 4, sha256: createHash('sha256').update(text).digest('hex') });
@@ -37,7 +37,8 @@ async function run(mode: string, populated: 'named' | 'default' | false,
   if (populated) endpoint.store.load(`<urn:old> <urn:p> "keep" ${populated === 'named' ? '<urn:g> ' : ''}.`, { format: 'application/n-quads' });
   let url = endpoint.queryEndpoint;
   const servers: Server[] = [];
-  if (options.redirect) {
+  if (options.redirect || options.corrupt) {
+    let corrupted = false;
     const target = createServer((_req, res) => { redirectedRequests++; res.end('unexpected'); });
     servers.push(target);
     const destination = await listen(target);
@@ -46,8 +47,13 @@ async function run(mode: string, populated: 'named' | 'default' | false,
       for await (const chunk of req) chunks.push(Buffer.from(chunk));
       const type = String(req.headers['content-type']);
       const mutation = type.includes('n-quads') || type.includes('sparql-update');
-      if (options.redirect === 'query' || mutation) {
+      if (options.redirect === 'query' || (options.redirect === 'mutation' && mutation)) {
         res.writeHead(307, { location: destination }); res.end(); return;
+      }
+      if (options.corrupt && !corrupted && Buffer.concat(chunks).toString().includes('SELECT ?g (COUNT(*)')) {
+        corrupted = true;
+        endpoint.store.update('DELETE DATA { GRAPH <urn:g> { <urn:s> <urn:p> "plain" } }');
+        if (options.corrupt === 'wrong-graph') endpoint.store.update('INSERT DATA { GRAPH <urn:g:1> { <urn:s> <urn:p> "plain" } }');
       }
       const response = await fetch(endpoint.queryEndpoint, { method: 'POST',
         headers: { 'content-type': type, accept: String(req.headers.accept) }, body: Buffer.concat(chunks) });
@@ -130,6 +136,16 @@ describe('storage benchmark safety and RDF boundaries', () => {
       ].sort());
       expect(r.quads.filter(q => q.graph.value === 'urn:benchmark:meta' && q.subject.value === graph))
         .toEqual([expect.objectContaining({predicate:expect.objectContaining({value:'urn:benchmark:status'}),object:expect.objectContaining({value:'confirmed'})})]);
+    }
+  });
+
+  it.each(['atomic', 'rdf'])('fails completion verification for missing and misplaced quads in %s mode', async mode => {
+    for (const corrupt of ['missing','wrong-graph'] as const) {
+      const r=await run(mode,false,{assets:3,group:2,corrupt});
+      expect(r.code,r.output).toBe(1);
+      expect(r.report).toMatchObject({complete:false,graphCountsMatch:false,quads:12,actualQuads:corrupt==='missing'?14:15});
+      expect(r.report.error).toContain('Stored graph/count verification failed');
+      expect(r.mutations).toBe(mode==='rdf'?2:3);
     }
   });
 

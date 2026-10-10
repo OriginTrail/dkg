@@ -47,11 +47,6 @@ const numeric = term => {
   if (value === null || !Number.isSafeInteger(Number(value))) throw new Error('Invalid or oversized SPARQL count');
   return Number(value);
 };
-const count = async () => {
-  // sparql-scan-allow: R2 -- Post-ingest integrity check of a fresh owned loopback store containing only the fixed manifest corpus; outside the timed ingestion path.
-  const result = await store.query('SELECT (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } }');
-  return numeric(result.bindings[0].n);
-};
 const existing = await store.query('SELECT ?g WHERE { GRAPH ?g { FILTER EXISTS { ?s ?p ?o } } } LIMIT 1');
 const defaultExisting = await store.query('SELECT ?s WHERE { ?s ?p ?o } LIMIT 1');
 if (existing.bindings.length !== 0 || defaultExisting.bindings.length !== 0) throw new Error('Refusing a nonempty store; supply a fresh owned namespace');
@@ -116,10 +111,14 @@ try {
   }
   result.ingestWallMs = elapsed(start);
   const check = performance.now();
-  result.actualQuads = await count();
   // sparql-scan-allow: R2 -- Fixed-corpus integrity check in the benchmark-only fresh store; enumeration deliberately detects unexpected graphs as well as missing data.
   const grouped = await store.query('SELECT ?g (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?g');
   const counts = new Map(grouped.bindings.map(row => [row.g, numeric(row.n)]));
+  result.actualQuads = [...counts.values()].reduce((sum, n) => {
+    const next = sum + n;
+    if (!Number.isSafeInteger(next)) throw new Error('Stored quad total exceeds safe integer');
+    return next;
+  }, 0);
   result.graphCountsMatch = selected.every(asset => counts.get(asset.graph) === asset.quads)
     && counts.size === selected.length + 1 && counts.get('urn:benchmark:meta') === selected.length;
   result.verificationMs = elapsed(check);
