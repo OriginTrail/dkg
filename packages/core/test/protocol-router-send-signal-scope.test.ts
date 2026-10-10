@@ -126,6 +126,34 @@ describe('ProtocolRouter releases per-send abort signals (#2812)', () => {
     expect(attachedTo(stop.signal)).toEqual({ listeners: 0, dependants: 0 });
   });
 
+  it.each(['pooled fallback', 'retry loop'] as const)('reports a typed timeout when %s exhausts the wall-clock budget before the timer runs', async (phase) => {
+    let clock = Date.now();
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    const stop = new AbortController();
+    let dials = 0;
+    const router = new ProtocolRouter(makeNode(stop.signal, async () => {
+      dials += 1;
+      // An event-loop stall can exhaust wall time before the deadline callback runs.
+      clock += 5_000;
+      throw new Error(phase === 'pooled fallback' ? 'no valid addresses' : 'stream reset');
+    }), { peerResolver });
+    if (phase === 'pooled fallback') {
+      router.enablePooling(PROTOCOL, {
+        protocolId: '/dkg/test-pooled/1.0.0', keepaliveIntervalMs: 0, idleTimeoutMs: 0,
+        peerIdFromString: (peer) => ({ toString: () => peer }) as unknown,
+      });
+    }
+    try {
+      await expect(router.send(FAKE_PEER_ID, PROTOCOL, new Uint8Array([1]), 3_000)).rejects.toMatchObject({
+        name: 'TimeoutError', message: phase === 'pooled fallback'
+          ? 'send timeout: pooled fallback exhausted the 3000ms budget before one-shot attempt'
+          : 'send timeout elapsed',
+      });
+      expect(dials).toBe(1);
+      expect(attachedTo(stop.signal)).toEqual({ listeners: 0, dependants: 0 });
+    } finally { now.mockRestore(); await router.closePooling(); }
+  });
+
   it('still aborts an in-flight send when the node stops', async () => {
     const stop = new AbortController();
     let dialed: () => void = () => {};

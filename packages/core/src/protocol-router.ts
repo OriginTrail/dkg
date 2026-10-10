@@ -1106,8 +1106,8 @@ export class ProtocolRouter {
     // moment the total budget is exhausted. Codex PR #560 round 4.
     const remainingMs = Math.max(0, timeoutMs - (Date.now() - overallStartedAt));
     if (remainingMs === 0) {
-      throw new Error(
-        `send timeout: pooled fallback exhausted the ${timeoutMs}ms budget before one-shot attempt`,
+      throw new DOMException(
+        `send timeout: pooled fallback exhausted the ${timeoutMs}ms budget before one-shot attempt`, 'TimeoutError',
       );
     }
     const startedAt = overallStartedAt;
@@ -1196,7 +1196,7 @@ export class ProtocolRouter {
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const remaining = timeoutMs - (Date.now() - startedAt);
       if (remaining <= 0) {
-        lastErr = new Error('send timeout elapsed');
+        lastErr = new DOMException('send timeout elapsed', 'TimeoutError');
         throw lastErr;
       }
       // The request deadline already ends where this attempt's remaining
@@ -1289,7 +1289,7 @@ export class ProtocolRouter {
               reject(asAbortError(overallSignal.reason));
               return;
             }
-            reject(new Error(`send timeout: backoff aborted by overall deadline (${timeoutMs}ms)`));
+            reject(new DOMException(`send timeout: backoff aborted by overall deadline (${timeoutMs}ms)`, 'TimeoutError'));
           };
           if (overallSignal.aborted) {
             onAbort();
