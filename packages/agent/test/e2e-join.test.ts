@@ -340,6 +340,9 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
     };
     const immediateSync = vi.fn(async () => {});
     (joiner as any).runImmediatePostApprovalSync = immediateSync;
+    // A sync that fetched nothing is followed by the metadata recovery, which
+    // would reach the real curator and sync again; keep it out of this count.
+    (joiner as any).recoverPendingJoinApprovalMetadata = vi.fn(async () => {});
     const onApproved = (event: any) => {
       if (String(event?.agentAddress).toLowerCase() === retryAddr.toLowerCase()) {
         approvedEvents += 1;

@@ -4897,13 +4897,11 @@ export class PublishMethods extends DKGAgentBase {
     try {
       await this._finalizeRecoveredQueuedKnowledgeAssetVmPublish(input, ctx);
     } catch (error) {
-      this.log.warn(
-        ctx,
-        `Named KA recovery for "${input.request.name}" remains pending: ` +
-          (error instanceof Error ? error.message : String(error)),
-      );
+      // One line when the reason appears or changes, then summaries: see the module.
+      this.namedKaRecoveryPendingLog.deferred(input.request, error, (line) => this.log.warn(ctx, line));
       throw error;
     }
+    this.namedKaRecoveryPendingLog.finalized(input.request);
   }
 
   async _finalizeRecoveredQueuedKnowledgeAssetVmPublish(
@@ -4927,6 +4925,7 @@ export class PublishMethods extends DKGAgentBase {
       // normalizer performs. They all precede any mutation, so bounding them is safe and is what
       // keeps a stalled endpoint from holding the global claim lock past the budget.
       signal,
+      onVersionView: () => this.namedKaRecoveryPendingLog.versionViewRead(),
     });
 
     const onChainCgId = normalizeOptionalContextGraphId(

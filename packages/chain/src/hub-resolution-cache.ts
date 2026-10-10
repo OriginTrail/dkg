@@ -31,6 +31,8 @@ export class HubResolutionCache<T> {
   private cached: T | null = null;
   private resolvedAt = 0;
   private inflight: Promise<T> | null = null;
+  /** The cancellation the in-flight resolve runs under, where it has one. */
+  private inflightOwner: AbortSignal | undefined;
   /**
    * Monotonic generation counter. Bumped on every `invalidate()` so an
    * in-flight resolve started under generation N cannot write back its
@@ -60,17 +62,22 @@ export class HubResolutionCache<T> {
    * Concurrent callers during a re-resolve share the same in-flight
    * promise so we don't issue duplicate Hub reads, but only as long
    * as no `invalidate()` has fired in the interim — see `generation`.
+   * A resolve that runs under its caller's cancellation (`owner`) is
+   * shared only until that is aborted: then it ends with a cancellation
+   * that is no later caller's, so the next caller resolves in its place,
+   * and only that one writes the cache.
    */
-  async get(): Promise<T> {
+  async get(owner?: AbortSignal): Promise<T> {
     const now = this.opts.now?.() ?? Date.now();
     if (this.cached !== null) {
       const ttl = this.opts.ttlMs ?? 0;
       const stale = ttl > 0 && now - this.resolvedAt > ttl;
       if (!stale) return this.cached;
     }
-    if (this.inflight) return this.inflight;
+    if (this.inflight && this.inflightOwner?.aborted !== true) return this.inflight;
     const startGeneration = this.generation;
-    this.inflight = (async () => {
+    let resolving: Promise<T> | undefined;
+    resolving = (async () => {
       try {
         const value = await this.resolve();
         // If `invalidate()` ran while we were awaiting, the cache
@@ -78,23 +85,27 @@ export class HubResolutionCache<T> {
         // already be coalescing a fresh resolve). Returning `value`
         // to our awaiters is fine — they asked under our generation
         // — but we must not write it back to `cached` or future
-        // synchronous reads would observe the stale address.
-        if (this.generation === startGeneration) {
+        // synchronous reads would observe the stale address. The same
+        // holds for a resolve that another took the place of, after its
+        // owner was cancelled: only the one still in flight writes.
+        if (this.generation === startGeneration && this.inflight === resolving) {
           this.cached = value;
           this.resolvedAt = this.opts.now?.() ?? Date.now();
         }
         return value;
       } finally {
         // Only clear `inflight` if we still own it. A concurrent
-        // `invalidate()` may have already replaced it (effectively),
-        // but checking by reference identity covers both the
-        // single-resolve and racing cases.
-        if (this.generation === startGeneration) {
+        // `invalidate()`, or a resolve that took the place of one whose
+        // owner was cancelled, may hold it now; checking by reference
+        // identity covers both the single-resolve and racing cases.
+        if (this.inflight === resolving) {
           this.inflight = null;
         }
       }
     })();
-    return this.inflight;
+    this.inflight = resolving;
+    this.inflightOwner = owner;
+    return resolving;
   }
 
   /**
