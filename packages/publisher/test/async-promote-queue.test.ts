@@ -132,6 +132,8 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     }).then((transition) => { settled = true; return transition; });
     try {
       await flushing;
+      // Let the queue return if it skipped the held persistence acknowledgement.
+      await new Promise<void>((resolve) => setImmediate(resolve));
       expect(settled).toBe(false);
       release();
       expect(await failure).toEqual(retryable
