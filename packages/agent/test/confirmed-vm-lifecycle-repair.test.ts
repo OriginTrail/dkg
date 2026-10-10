@@ -390,16 +390,64 @@ describe('review regression boundaries', () => {
     expect(await store.query(`ASK { GRAPH <${META}> { <${wmGraph}> <${DKG}memoryLayer> "WM" } }`)).toMatchObject({ type: 'boolean', value: true });
     await repair.stop();
   });
+  it('preserves a newer unpublished draft that was finalized with the same root as the repaired version', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-same-root-draft-repair-')); dirs.push(dir);
+    const store = await persistentStore(); stores.push(store);
+    const scope = createGraphKnowledgeAssetScope(UAL, 1), vmGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.VerifiableMemory, scope);
+    const sealAt = (assertionVersion: number) => buildAssertionSealQuads({ assertionUri: ASSERTION, metaGraph: META, merkleRoot: ROOT,
+      authorAddress: AUTHOR, authorAttestationR: new Uint8Array(32).fill(1), authorAttestationVS: new Uint8Array(32).fill(2), authorSchemeVersion: 1,
+      chainId: 31337n, kav10Address: AUTHOR, reservedKaId: PACKED, finalizedAtIso: new Date().toISOString(),
+      contentScopeVersion: 2, kaUal: UAL, assertionVersion, publicTripleCount: 1, privateTripleCount: 0 });
+    const integer = (value: number) => `"${value}"^^<http://www.w3.org/2001/XMLSchema#integer>`;
+    await store.insert([...sealAt(1), ...QUADS.map(quad => ({ ...quad, graph: vmGraph })),
+      { subject: LIFECYCLE, predicate: `${DKG}contentScopeVersion`, object: integer(2), graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}assertionVersion`, object: integer(1), graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}kaId`, object: '"1"', graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}reservedUal`, object: UAL, graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}swmCurrentAssertion`, object: JSON.stringify(HEX.slice(2)), graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}state`, object: '"shared"', graph: META },
+      { subject: LIFECYCLE, predicate: `${DKG}memoryLayer`, object: '"SWM"', graph: META },
+    ]);
+    // Version 1 confirms. Its metadata becomes visible, but the snapshot barrier fails.
+    vi.spyOn(store, 'flush').mockRejectedValueOnce(Object.assign(new Error('snapshot persistence failed'), { code: 'EIO' }));
+    let now = 1_000;
+    const repair = new NamedKaVmLifecycleRepair({ writeLocks: new Map(), dataDir: dir, now: () => now, isCurrent: async () => true, warn: () => undefined,
+      apply: value => applyPublishedNamedKaVmLifecycle(store, value) });
+    expect(await repair.submit(input)).toBe('pending');
+    expect(await store.query(`ASK { GRAPH <${META}> { <${LIFECYCLE}> <${DKG}state> "published" } }`)).toMatchObject({ value: true });
+    // Before the retry, pull VM into WM and finalize the unchanged content as version 2, again with root R.
+    const publisher = new DKGPublisher({ store, chain: new MockChainAdapter(), eventBus: new TypedEventBus(), keypair: await generateEd25519Keypair() });
+    await publisher.assertionPullFrom(CG, NAME, AUTHOR, 'vm');
+    await store.deleteByPattern({ graph: META, subject: LIFECYCLE, predicate: `${DKG}assertionVersion` });
+    await store.insert([...sealAt(2), { subject: LIFECYCLE, predicate: `${DKG}assertionVersion`, object: integer(2), graph: META }]);
+    const workspace = async () => {
+      const rows = await store.query(`SELECT ?p ?o WHERE { GRAPH <${META}> { <${LIFECYCLE}> ?p ?o } }`);
+      if (rows.type !== 'bindings') throw new Error('Expected lifecycle rows');
+      return Object.fromEntries(rows.bindings.map(row => [row.p, row.o]));
+    };
+    const layers = () => store.query(`SELECT ?s ?layer WHERE { GRAPH <${META}> { ?s <${DKG}memoryLayer> ?layer
+      FILTER(?s IN (<${ASSERTION}>, <${knowledgeAssetLayerGraphUri(CG, MemoryLayer.WorkingMemory, scope)}>)) } } ORDER BY ?s ?layer`);
+    const draft = await workspace(), draftLayers = await layers(), wmGraph = draft[`${DKG}assertionGraph`];
+    expect(draft[`${DKG}state`]).toBe('"created"'); expect(draft[`${DKG}memoryLayer`]).toBe('"WM"');
+    now = 6_000; await repair.runDue();
+    expect(decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'))).size).toBe(0);
+    const values = await workspace();
+    // The version-1 repair restamps its VM descriptor without claiming the version-2 draft.
+    expect(values[`${DKG}state`]).toBe('"created"'); expect(values[`${DKG}memoryLayer`]).toBe('"WM"');
+    expect(values[`${DKG}assertionGraph`]).toBe(wmGraph); expect(await layers()).toEqual(draftLayers);
+    expect(values[`${DKG}vmCurrentAssertion`]).toBe(JSON.stringify(HEX.slice(2))); expect(values[`${DKG}publishedUal`]).toBe(JSON.stringify(PUBLISHED));
+    await repair.stop();
+  });
   it.each(['matching-pointers', 'divergent-seal', 'reopened-draft', 'tentative-prior'] as const)('decodes canonical escaped RDF workspace values for %s', async scenario => {
     const store = await persistentStore(); stores.push(store);
     const reopened = scenario === 'reopened-draft', tentative = scenario === 'tentative-prior';
     const preserve = reopened || scenario === 'divergent-seal';
     const rows = {
       state: reopened ? 'created' : 'shared', layer: reopened ? 'WM' : 'SWM',
-      ...(!reopened ? { wm: tentative ? PRIOR : HEX.slice(2), swm: HEX.slice(2), activeSeal: scenario === 'divergent-seal' ? PRIOR : HEX.slice(2) } : {}),
+      ...(!reopened ? { wm: tentative ? PRIOR : HEX.slice(2), swm: HEX.slice(2), activeSeal: scenario === 'divergent-seal' ? PRIOR : HEX.slice(2), activeSealVersion: input.assertionVersion } : {}),
     };
-    await store.insert(Object.entries(rows).map(([key, value]) => ({ subject: key === 'activeSeal' ? ASSERTION : LIFECYCLE,
-      predicate: key === 'activeSeal' ? 'http://dkg.io/ontology/assertionMerkleRoot' : `${DKG}${({ wm: 'wmCurrentAssertion', swm: 'swmCurrentAssertion', layer: 'memoryLayer' } as Record<string, string>)[key] ?? key}`,
+    await store.insert(Object.entries(rows).map(([key, value]) => ({ subject: key.startsWith('activeSeal') ? ASSERTION : LIFECYCLE,
+      predicate: `${DKG}${({ wm: 'wmCurrentAssertion', swm: 'swmCurrentAssertion', layer: 'memoryLayer', activeSeal: 'assertionMerkleRoot', activeSealVersion: 'assertionVersion' } as Record<string, string>)[key] ?? key}`,
       object: JSON.stringify(value), graph: META })));
     const query = store.query.bind(store);
     const encoded = (value: string) => '"' + '\\u' + value.charCodeAt(0).toString(16).padStart(4, '0') + value.slice(1) + '"^^<http://www.w3.org/2001/XMLSchema#string>';

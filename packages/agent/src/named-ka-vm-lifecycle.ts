@@ -28,6 +28,8 @@ export interface NamedKaVmLifecycleFields {
 /** A confirmed command cannot bypass the certified persistence barrier. */
 export interface PublishedNamedKaVmLifecycleInput extends NamedKaVmLifecycleFields {
   readonly packedKaId?: bigint;
+  /** With the root, identifies this publication's own seal; a re-finalize can repeat the root. */
+  readonly assertionVersion: string;
   readonly tentative?: never;
 }
 /** Tentative updates consume the prior sealed WM projection without claiming a VM graph. */
@@ -55,6 +57,7 @@ interface WorkspaceLifecycleValues {
   readonly wm?: string;
   readonly swm?: string;
   readonly activeSeal?: string;
+  readonly activeSealVersion?: string;
   readonly state?: string;
   readonly layer?: string;
 }
@@ -63,7 +66,13 @@ interface WorkspaceLifecycleValues {
 function decodeWorkspaceLifecycleValues(bindings: Record<string, string> | undefined): WorkspaceLifecycleValues {
   const root = (term?: string) => stripMetadataLiteral(term)?.toLowerCase().replace(/^0x/, '');
   return { wm: root(bindings?.wm), swm: root(bindings?.swm), activeSeal: root(bindings?.activeSeal),
+    activeSealVersion: stripMetadataLiteral(bindings?.activeSealVersion)?.trim(),
     state: stripMetadataLiteral(bindings?.state)?.toLowerCase(), layer: stripMetadataLiteral(bindings?.layer)?.toUpperCase() };
+}
+/** A missing or malformed version on either side never proves that the seal is this publication's. */
+function sameAssertionVersion(sealed: string | undefined, confirmed: string): boolean {
+  const digits = /^[0-9]+$/;
+  return sealed !== undefined && digits.test(sealed) && digits.test(confirmed) && BigInt(sealed) === BigInt(confirmed);
 }
 function checkedRoot(value: string): string {
   const root = value.toLowerCase().replace(/^0x/, '');
@@ -82,7 +91,12 @@ function planPublishedNamedKaVmLifecycle(
   const { wm, swm, activeSeal } = workspace;
   const reopenedDraft = workspace.state === 'created' && workspace.layer === MemoryLayer.WorkingMemory && activeSeal === undefined;
   const consumedTentativePrior = input.tentative === true && prior !== undefined && wm === prior;
-  const preserveWorkspace = reopenedDraft || (activeSeal !== undefined && activeSeal !== root)
+  // An unchanged re-finalize seals a newer version under the same root, so a
+  // confirmed command owns the active seal only at its own assertion version.
+  // Tentative commands carry no version and keep the root comparison.
+  const ownsActiveSeal = activeSeal === root
+    && (input.tentative === true || sameAssertionVersion(workspace.activeSealVersion, input.assertionVersion));
+  const preserveWorkspace = reopenedDraft || (activeSeal !== undefined && !ownsActiveSeal)
     || (wm !== undefined && wm !== root && !consumedTentativePrior) || (swm !== undefined && swm !== root);
   const deletes: Pick<Quad, 'subject' | 'predicate'>[] = [], inserts: Omit<Quad, 'graph'>[] = [];
   const replace = (subject: string, predicate: string, object: string) => {
@@ -169,12 +183,13 @@ async function applyNamedKaVmLifecycle(
     });
   }
   const iri = (value: string) => formatSparqlTerm(value, { position: 'subject' });
-  const rows = await store.query(`SELECT ?wm ?swm ?state ?layer ?activeSeal WHERE { GRAPH ${iri(metaGraph)} {
+  const rows = await store.query(`SELECT ?wm ?swm ?state ?layer ?activeSeal ?activeSealVersion WHERE { GRAPH ${iri(metaGraph)} {
     OPTIONAL { ${iri(lifecycleUri)} <${WM_CURRENT_ASSERTION_PRED}> ?wm }
     OPTIONAL { ${iri(lifecycleUri)} <${SWM_CURRENT_ASSERTION_PRED}> ?swm }
     OPTIONAL { ${iri(lifecycleUri)} <${STATE_PRED}> ?state }
     OPTIONAL { ${iri(lifecycleUri)} <${MEMORY_LAYER_PRED}> ?layer }
     OPTIONAL { ${iri(assertionUri)} <${ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT}> ?activeSeal }
+    OPTIONAL { ${iri(assertionUri)} <${ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION}> ?activeSealVersion }
   } } LIMIT 2`, { source: 'agent.publish.confirmedLifecycleWorkspaceGuard' });
   if (rows.type !== 'bindings' || rows.bindings.length > 1) {
     throw new NamedKaVmLifecycleIntegrityError('Invalid workspace pointers during confirmed lifecycle repair');

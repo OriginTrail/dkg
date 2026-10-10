@@ -148,6 +148,7 @@ async function seedPublished(
     publishedUal: seal.kaUal,
     merkleRoot: ethers.hexlify(seal.merkleRoot),
     packedKaId: seal.reservedKaId,
+    assertionVersion: seal.assertionVersion,
   });
   if (opts.record === false) return;
   await seedConfirmedRecord(store, seal, opts);
