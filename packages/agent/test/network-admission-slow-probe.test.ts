@@ -50,24 +50,29 @@ describe('slow identity admission', () => {
   });
   it('retries a 3.5-second responder once without treating its timeout as identity proof', async () => {
     vi.useFakeTimers();
-    let first = true;
-    const send = vi.fn<NetworkAdmissionCoordinatorOptions['sendIdentityProbe']>(async (_peer, data, options) => {
-      if (!first) return signed(data);
-      first = false;
-      return new Promise<Uint8Array>((resolve, reject) => {
-        const late = setTimeout(() => { void signed(data).then(resolve, reject); }, 3_500);
-        const timeout = setTimeout(() => { clearTimeout(late); reject(new DOMException('probe deadline', 'TimeoutError')); }, options.timeoutMs);
-        options.signal?.addEventListener('abort', () => { clearTimeout(late); clearTimeout(timeout); reject(options.signal!.reason); }, { once: true });
-      });
-    });
-    const h = fixture(send);
+    const routed = routerProbe('slow');
+    const h = fixture(routed.send);
+    const verified = vi.spyOn(h.admission, 'markVerifiedSameNetwork');
+    const settled = vi.fn();
+    const startedAt = Date.now();
     const attempt = h.coordinator.ensureAdmitted(PEER, ctx);
-    const outcome = expect(attempt).resolves.toBe(true);
+    const outcome = attempt.then((value) => { settled(); return { value }; }, (error: unknown) => { settled(); return { error }; });
     await vi.advanceTimersByTimeAsync(2_999);
     expect(h.coordinator.isAcceptedPeer(PEER)).toBe(false);
-    await vi.advanceTimersByTimeAsync(501);
-    await outcome;
-    expect(send).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(3_002);
+    // Both attempts take 3.5s: the retry is still pending beyond its first 3s.
+    expect(Date.now() - startedAt).toBe(6_001);
+    expect(settled).not.toHaveBeenCalled();
+    expect(verified).not.toHaveBeenCalled();
+    expect(h.coordinator.isAcceptedPeer(PEER)).toBe(false);
+    expect(h.admission.getRetryableProbeBackoff(PEER)).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(499);
+    expect(await outcome).toEqual({ value: true });
+    expect(Date.now() - startedAt).toBe(6_500);
+    expect(verified).toHaveBeenCalledOnce();
+    expect(routed.send.mock.calls.map((call) => call[2].timeoutMs)).toEqual([3_000, 15_000]);
+    expect(routed.dials()).toBe(2);
+    expect(routed.errors).toEqual([expect.objectContaining({ name: 'AbortError', cause: expect.objectContaining({ name: 'TimeoutError' }) })]);
     expect(h.admission.getRetryableProbeBackoff(PEER)).toBeUndefined();
     expect(h.close).not.toHaveBeenCalled();
   });
@@ -184,7 +189,7 @@ describe('slow identity admission', () => {
 });
 
 /** Actual send/read/backoff scopes, with only the libp2p stream endpoint simulated. */
-function routerProbe(phase: 'backoff' | 'read') {
+function routerProbe(phase: 'backoff' | 'read' | 'slow') {
   let dials = 0;
   const errors: unknown[] = [];
   const stop = new AbortController();
@@ -201,11 +206,20 @@ function routerProbe(phase: 'backoff' | 'read') {
         }
         let data!: Uint8Array;
         let finish!: () => void;
+        let stopped = false;
+        let responseTimer: ReturnType<typeof setTimeout> | undefined;
         const waiting = new Promise<void>((resolve) => { finish = resolve; });
         return {
           writeStatus: 'open', send: (request: Uint8Array) => { data = request; },
-          close: async () => {}, abort: () => finish(),
+          close: async () => {}, abort: () => { stopped = true; clearTimeout(responseTimer); finish(); },
           async *[Symbol.asyncIterator]() {
+            if (phase === 'slow') {
+              responseTimer = setTimeout(finish, 3_500);
+              await waiting;
+              if (stopped) return;
+              yield await signed(data);
+              return;
+            }
             if (first) { await waiting; return; }
             yield await signed(data);
           },

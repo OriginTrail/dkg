@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import {
   PROTOCOL_NETWORK_IDENTITY,
   createOperationContext,
+  isTransportTimeoutError,
   type DkgNetworkIdentity,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
@@ -446,7 +447,7 @@ export class NetworkAdmissionCoordinator {
         response = await this.sendIdentityProbe(remotePeer, data, { timeoutMs: this.probeTimeoutMs, signal });
       } catch (error) {
         if (signal.aborted) throw abortErrorFromSignal(signal.reason);
-        if (!identityProbeTimedOut(error)) throw error;
+        if (!isTransportTimeoutError(error)) throw error;
         // A busy peer can miss the first deadline. The same shared owner makes
         // exactly one longer attempt before recording any failure/backoff.
         response = await this.sendIdentityProbe(remotePeer, data, { timeoutMs: this.probeRetryTimeoutMs, signal });
@@ -550,11 +551,6 @@ function notifyBestEffort(notify: () => void): void {
   } catch {
     // Transport hints must never change an admission verdict.
   }
-}
-
-function identityProbeTimedOut(error: unknown): boolean {
-  return error instanceof Error && (error.name === 'TimeoutError'
-    || (error.name === 'AbortError' && error.cause instanceof Error && error.cause.name === 'TimeoutError'));
 }
 
 function abortErrorFromSignal(reason: unknown): Error {
