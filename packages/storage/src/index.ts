@@ -189,6 +189,7 @@ export {
   type BoundedGraphPayloadResult,
 } from './bounded-rdf.js';
 export { StoreResponseTooLargeError } from './http-response-limit.js';
+export { SparqlResultsShapeError } from './sparql-results-shape-error.js';
 export {
   MAX_RFC64_SEMANTIC_READ_TIMEOUT_MS_V1,
   Rfc64SemanticReadGatewayErrorV1,

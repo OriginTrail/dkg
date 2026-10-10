@@ -51,4 +51,17 @@ describe('RFC 3987 absolute IRI syntax', () => {
     expect(isAbsoluteRfc3987IriV1('urn:test:\uE000')).toBe(false);
     expect(isAbsoluteRfc3987IriV1('urn:test:value#\uE000')).toBe(false);
   });
+
+  it.each([
+    ['alpha/path?x=1#part', true],
+    ['caf%C3%A9', true],
+    ['café', true],
+    ['bad value', false],
+    ['bad\\value', false],
+    ['bad%zz', false],
+    ['bad#one#two', false],
+  ])('keeps opaque and authority-shaped component scans in parity for %j', (tail, expected) => {
+    expect(isAbsoluteRfc3987IriV1(`urn:test:${tail}`)).toBe(expected);
+    expect(isAbsoluteRfc3987IriV1(`https://example.org/${tail}`)).toBe(expected);
+  });
 });
