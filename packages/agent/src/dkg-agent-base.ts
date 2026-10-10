@@ -1,4 +1,3 @@
-import { wakeRollingContextGraphSubscriptionPromotion } from './context-graph-subscription-authority-recovery.js';
 
 export { createListContextGraphsCacheInvalidatingStore } from './internal/context-graph-cache-invalidating-store.js';
 import type { VmRecoveryCoreTransportPreferencePolicy } from './vm-recovery-core-transport-preference.js';
@@ -1427,7 +1426,7 @@ export class DKGAgentBase {
    */
   protected requestContextGraphSubscriptionPromotion(contextGraphId: string): void {
     this.contextGraphSubscriptionRollingChecks.prefer(contextGraphId);
-    wakeRollingContextGraphSubscriptionPromotion(this.contextGraphSubscriptionRehydrationPromotionRuntime);
+    this.contextGraphSubscriptionRehydrationPromotionRuntime?.request();
   }
 
   /**

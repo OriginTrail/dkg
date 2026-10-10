@@ -832,7 +832,7 @@ import {
   type PersistedContextGraphSubscriptionActivationOptions,
   promoteDormantContextGraphSubscriptions,
   rehydratedSubscriptionReachedSafeState,
-  wakeRollingContextGraphSubscriptionPromotion,
+  wakeDeferredContextGraphSubscriptionAuthorityRecovery,
 } from './context-graph-subscription-authority-recovery.js';
 import { CoalescingRecurringTask } from './coalescing-recurring-task.js';
 import {
@@ -4172,7 +4172,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     const rehydrationPromotion = new CoalescingRecurringTask({
       retryIntervalMs: REHYDRATION_ROLLING_RETRY_MS,
-      requestWhileRunning: 'drop',
+      requestWhileRunning: 'coalesce',
       runPass: async (signal) => this.promoteDormantContextGraphSubscriptions(signal),
       onError: (error) => {
         this.log.warn(
@@ -9314,7 +9314,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             createOperationContext('init'),
             `Rehydrated context-graph subscription "${contextGraphId}" reached a safe state; rolling activation slot released`,
           );
-          wakeRollingContextGraphSubscriptionPromotion(this.contextGraphSubscriptionRehydrationPromotionRuntime);
+          this.contextGraphSubscriptionRehydrationPromotionRuntime?.request();
         }
       } else {
         // Readiness can regress after a later metadata/bootstrap reset. Keep
@@ -9324,7 +9324,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     } else if (this.contextGraphSubscriptionRehydrationSlotIds?.delete(contextGraphId)) {
       // An unsubscribe/deactivation also frees a slot, even though it does not
       // satisfy the normal synced readiness signal.
-      wakeRollingContextGraphSubscriptionPromotion(this.contextGraphSubscriptionRehydrationPromotionRuntime);
+      this.contextGraphSubscriptionRehydrationPromotionRuntime?.request();
     }
     const configuredRfc64Authority =
       this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId];
@@ -10434,14 +10434,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * an unsubscribe/delete racing with the timer cannot resurrect stale state.
    */
   async promoteDormantContextGraphSubscriptions(this: DKGAgent, signal: AbortSignal): Promise<'rearm' | 'idle'> {
-    const isStarted = () => this.started;
-    const currentStatus = () => this.contextGraphSubscriptionRehydrationStatus;
     return promoteDormantContextGraphSubscriptions({
-      get started() { return isStarted(); },
-      get contextGraphSubscriptionRehydrationStatus() { return currentStatus(); },
-      config: this.config,
-      contextGraphSubscriptionRehydrationPromotionRuntime: this.contextGraphSubscriptionRehydrationPromotionRuntime,
-      contextGraphSubscriptionAuthorityRecoveryRuntime: this.contextGraphSubscriptionAuthorityRecoveryRuntime,
+      store: this.config.contextGraphSubscriptionStore,
+      getStatus: () => this.contextGraphSubscriptionRehydrationStatus,
+      isCurrent: (ownerSignal) => this.started
+        && this.contextGraphSubscriptionRehydrationPromotionRuntime?.owns(ownerSignal) === true,
       contextGraphSubscriptionRollingChecks: this.contextGraphSubscriptionRollingChecks,
       contextGraphSubscriptionRehydrationPendingIds: this.contextGraphSubscriptionRehydrationPendingIds,
       contextGraphSubscriptionRehydrationSlotIds: this.contextGraphSubscriptionRehydrationSlotIds,
@@ -10451,10 +10448,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       log: this.log,
       updateContextGraphSubscriptionRehydrationStatusAfterClear: this.updateContextGraphSubscriptionRehydrationStatusAfterClear.bind(this),
       updateContextGraphSubscriptionRehydrationStatusAfterPersist: this.updateContextGraphSubscriptionRehydrationStatusAfterPersist.bind(this),
-      persistContextGraphSubscriptionStrict: this.persistContextGraphSubscriptionStrict.bind(this),
-      reconcileRfc64CatalogResponsibilityV1: this.reconcileRfc64CatalogResponsibilityV1.bind(this),
-      resolveContextGraphSubscriptionBootstrapAuthority: this.resolveContextGraphSubscriptionBootstrapAuthority.bind(this),
-      activatePersistedContextGraphSubscriptionRecord: this.activatePersistedContextGraphSubscriptionRecord.bind(this),
+      resolveAuthority: (row, ownerSignal) => this.resolveContextGraphSubscriptionBootstrapAuthority(row.id, {
+        allowSubscriptionFallback: false, signal: ownerSignal,
+        durableSubscriptionBinding: { contextGraphId: row.id, onChainId: row.onChainId, onChainHash: row.onChainHash },
+      }),
+      activate: (row, onChainId, isCurrent) => activateRollingSubscriptionPromotion({
+        activate: this.activatePersistedContextGraphSubscriptionRecord.bind(this),
+        persistBinding: this.persistContextGraphSubscriptionStrict.bind(this),
+        reconcile: this.reconcileRfc64CatalogResponsibilityV1.bind(this),
+      }, row, onChainId, isCurrent),
+      wakeAuthorityRecovery: () => wakeDeferredContextGraphSubscriptionAuthorityRecovery(this.contextGraphSubscriptionAuthorityRecoveryRuntime),
       touchStatus: () => {
         const current = this.contextGraphSubscriptionRehydrationStatus;
         if (current !== null) this.contextGraphSubscriptionRehydrationStatus = { ...current, updatedAt: Date.now() };
@@ -11587,4 +11590,32 @@ async function listSharedMemoryMetaGraphs(store: TripleStore, contextGraphId: st
     metaGraphs.push(graph);
   }
   return metaGraphs;
+}
+
+/** Lifecycle-owned preparation, shared with the typed promotion fixture. */
+export interface RollingSubscriptionActivationLifecycle {
+  activate: (...args: Parameters<DKGAgent['activatePersistedContextGraphSubscriptionRecord']>) => Promise<unknown>;
+  persistBinding: (...args: Parameters<DKGAgent['persistContextGraphSubscriptionStrict']>) => Promise<void>;
+  reconcile: (...args: Parameters<DKGAgent['reconcileRfc64CatalogResponsibilityV1']>) => Promise<unknown>;
+}
+
+export async function activateRollingSubscriptionPromotion(
+  lifecycle: RollingSubscriptionActivationLifecycle,
+  row: ContextGraphSubscriptionRecord,
+  onChainId: string | undefined,
+  isCurrent: (subscription: ContextGraphSub) => boolean,
+): Promise<void> {
+  await lifecycle.activate(row, {
+    onChainId, updateRehydrationStatus: false,
+    prepare: async (subscription) => {
+      if (!isCurrent(subscription)) throw new Error('Persisted subscription promotion became stale');
+      if (onChainId !== undefined && onChainId !== row.onChainId) {
+        // A repaired binding must be durable before responsibility or network effects.
+        await lifecycle.persistBinding(row.id, subscription, row.syncScoped, () => isCurrent(subscription));
+      }
+      if (!isCurrent(subscription)) throw new Error('Persisted subscription promotion became stale');
+      await lifecycle.reconcile(row.id);
+    },
+    isCurrent,
+  });
 }

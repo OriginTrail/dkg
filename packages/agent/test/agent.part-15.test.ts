@@ -971,6 +971,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     it('reconciles rolling promotion races and retry outcomes', async () => {
       const inactive = {
         ...createPromotionHarness([]).agent,
+        store: undefined, getStatus: () => null, isCurrent: () => false,
         config: { contextGraphSubscriptionStore: undefined },
         contextGraphSubscriptionRehydrationStatus: null,
         contextGraphSubscriptionRehydrationPromotionRuntime: undefined,

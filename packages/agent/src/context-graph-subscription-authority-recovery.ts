@@ -36,14 +36,6 @@ export function wakeDeferredContextGraphSubscriptionAuthorityRecovery(
   if (!arm()) void recovery.whenIdle().then(arm, arm);
 }
 
-/** Preserve a wake handed over while a dropping activation pass is ending. */
-export function wakeRollingContextGraphSubscriptionPromotion(
-  promotion: Pick<CoalescingRecurringTask, 'request' | 'whenIdle'> | undefined,
-): void {
-  if (!promotion || promotion.request()) return;
-  void promotion.whenIdle().then(() => promotion.request(), () => promotion.request());
-}
-
 function hasCanonicalDurableBinding(
   row: ContextGraphSubscriptionRecord | null,
 ): boolean {
@@ -358,45 +350,37 @@ export function rehydratedSubscriptionReachedSafeState(
     && subscription.pendingMeta !== true;
 }
 
-/** The members the rolling pass reads, independent of the full agent/transport. */
+/** Rolling promotion owns candidate ordering and generation fences. */
 export interface RollingSubscriptionPromotionPorts {
-  readonly config: { contextGraphSubscriptionStore?: Pick<ContextGraphSubscriptionStore, 'load' | 'loadAll'> };
-  readonly contextGraphSubscriptionRehydrationStatus: Pick<ContextGraphSubscriptionRehydrationInternalStatus, 'rehydrationEnabled' | 'activationCap'> | null;
-  readonly contextGraphSubscriptionRehydrationPromotionRuntime?: Pick<CoalescingRecurringTask, 'owns'>;
-  readonly contextGraphSubscriptionAuthorityRecoveryRuntime?: Pick<CoalescingRecurringTask, 'schedule' | 'whenIdle'>;
+  readonly store?: Pick<ContextGraphSubscriptionStore, 'load' | 'loadAll'>;
+  getStatus(): Pick<ContextGraphSubscriptionRehydrationInternalStatus, 'rehydrationEnabled' | 'activationCap'> | null;
+  isCurrent(signal: AbortSignal): boolean;
   readonly contextGraphSubscriptionRollingChecks: RollingSubscriptionChecks;
   readonly contextGraphSubscriptionRehydrationPendingIds: Set<string>;
   readonly contextGraphSubscriptionRehydrationSlotIds: Set<string>;
   readonly contextGraphSubscriptionDormancyById: Map<string, ContextGraphDormancyReason>;
   readonly contextGraphSubscriptionPersistRevisions: ReadonlyMap<string, number>;
   readonly subscribedContextGraphs: ReadonlyMap<string, ContextGraphSub>;
-  readonly started: boolean;
   readonly log: { warn(ctx: OperationContext, message: string): void; info(ctx: OperationContext, message: string): void; debug(ctx: OperationContext, message: string): void };
   touchStatus(): void;
   updateContextGraphSubscriptionRehydrationStatusAfterClear(removed: readonly string[], revoked?: readonly string[]): void;
   updateContextGraphSubscriptionRehydrationStatusAfterPersist(id: string, intent: Pick<ContextGraphSubscriptionRecord, 'subscribed' | 'coreHosted'>): void;
-  persistContextGraphSubscriptionStrict(id: string, subscription: ContextGraphSub, syncScoped: boolean, isCurrent: () => boolean): Promise<void>;
-  reconcileRfc64CatalogResponsibilityV1(id: string): Promise<unknown>;
-  resolveContextGraphSubscriptionBootstrapAuthority(id: string, options: {
-    allowSubscriptionFallback: false; signal: AbortSignal;
-    durableSubscriptionBinding: { contextGraphId: string; onChainId?: string; onChainHash?: string };
-  }): Promise<ContextGraphReadAuthorityDecision>;
-  activatePersistedContextGraphSubscriptionRecord(row: ContextGraphSubscriptionRecord, options: PersistedContextGraphSubscriptionActivationOptions): Promise<unknown>;
+  resolveAuthority(row: ContextGraphSubscriptionRecord, signal: AbortSignal): Promise<ContextGraphReadAuthorityDecision>;
+  activate(row: ContextGraphSubscriptionRecord, onChainId: string | undefined, isCurrent: (subscription: ContextGraphSub) => boolean): Promise<void>;
+  wakeAuthorityRecovery(): void;
 }
 
 export async function promoteDormantContextGraphSubscriptions(
   ports: RollingSubscriptionPromotionPorts,
   signal: AbortSignal,
 ): Promise<'rearm' | 'idle'> {
-    const store = ports.config.contextGraphSubscriptionStore;
-    const status = ports.contextGraphSubscriptionRehydrationStatus;
-    const runtime = ports.contextGraphSubscriptionRehydrationPromotionRuntime;
+    const store = ports.store;
+    const status = ports.getStatus();
     if (
       !store
       || !status?.rehydrationEnabled
       || status.activationCap <= 0
-      || !ports.started
-      || !runtime?.owns(signal)
+      || !ports.isCurrent(signal)
     ) return 'idle';
 
     const ctx = createOperationContext('init');
@@ -417,7 +401,7 @@ export async function promoteDormantContextGraphSubscriptions(
 
     for (let i = 0; ; i++) {
       signal.throwIfAborted();
-      if (!runtime.owns(signal)) return 'idle';
+      if (!ports.isCurrent(signal)) return 'idle';
       if (ports.contextGraphSubscriptionRehydrationSlotIds.size >= status.activationCap) break;
       const contextGraphId = await pass.next(signal);
       if (contextGraphId === undefined) break;
@@ -426,7 +410,7 @@ export async function promoteDormantContextGraphSubscriptions(
 
       let row = await loadRow(contextGraphId);
       signal.throwIfAborted();
-      if (!runtime.owns(signal)) return 'idle';
+      if (!ports.isCurrent(signal)) return 'idle';
       if (row === null) {
         ports.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
         ports.updateContextGraphSubscriptionRehydrationStatusAfterClear([contextGraphId]);
@@ -455,21 +439,13 @@ export async function promoteDormantContextGraphSubscriptions(
         onChainHash: row.onChainHash,
       };
 
-      const authority = await pass.read(() => ports.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
-        allowSubscriptionFallback: false,
-        signal,
-        durableSubscriptionBinding: {
-          contextGraphId: candidateBinding.id,
-          onChainId: candidateBinding.onChainId,
-          onChainHash: candidateBinding.onChainHash,
-        },
-      }).catch((error: unknown) => unavailableContextGraphReadAuthorityDecision(
+      const authority = await pass.read(() => ports.resolveAuthority({ ...row!, ...candidateBinding }, signal).catch((error: unknown) => unavailableContextGraphReadAuthorityDecision(
         'legacy-local',
         'unexpected-authority-error',
         contextGraphReadAuthorityDependencyOf(error),
       )));
       signal.throwIfAborted();
-      if (!runtime.owns(signal)) return 'idle';
+      if (!ports.isCurrent(signal)) return 'idle';
 
       // Authority resolution may yield while an operator unsubscribes or a
       // store writer replaces the durable row. Reconcile that boundary before
@@ -477,7 +453,7 @@ export async function promoteDormantContextGraphSubscriptions(
       // answer can neither retire the new record nor resurrect the old one.
       const freshRow = await loadRow(contextGraphId);
       signal.throwIfAborted();
-      if (!runtime.owns(signal)) return 'idle';
+      if (!ports.isCurrent(signal)) return 'idle';
       if (freshRow === null) {
         ports.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
         ports.updateContextGraphSubscriptionRehydrationStatusAfterClear([contextGraphId]);
@@ -518,7 +494,7 @@ export async function promoteDormantContextGraphSubscriptions(
         const { outcome, source, reason } = authority;
         const dormancy = pass.leftDormant(contextGraphId, { outcome, source, reason });
         ports.contextGraphSubscriptionDormancyById.set(contextGraphId, dormancy);
-        if (dormancy === 'authorityUnavailable') wakeDeferredContextGraphSubscriptionAuthorityRecovery(ports.contextGraphSubscriptionAuthorityRecoveryRuntime);
+        if (dormancy === 'authorityUnavailable') ports.wakeAuthorityRecovery();
         ports.touchStatus();
         continue;
       }
@@ -527,8 +503,7 @@ export async function promoteDormantContextGraphSubscriptions(
       row = freshRow;
       const healedOnChainId = authority.onChainId?.toString();
       const isCurrentPromotion = (subscription: ContextGraphSub): boolean => (
-        ports.started
-        && runtime.owns(signal)
+        ports.isCurrent(signal)
         && ports.contextGraphSubscriptionRehydrationPendingIds.has(contextGraphId)
         && ports.contextGraphSubscriptionDormancyById.get(contextGraphId) === 'activationCap'
         && (ports.contextGraphSubscriptionPersistRevisions.get(contextGraphId) ?? 0)
@@ -537,31 +512,7 @@ export async function promoteDormantContextGraphSubscriptions(
       );
 
       try {
-        await ports.activatePersistedContextGraphSubscriptionRecord(row, {
-          onChainId: healedOnChainId,
-          updateRehydrationStatus: false,
-          prepare: async (subscription) => {
-            if (!isCurrentPromotion(subscription)) {
-              throw new Error('Persisted subscription promotion became stale');
-            }
-            if (healedOnChainId !== undefined && healedOnChainId !== row.onChainId) {
-              // A cold or strict finalized-index read repaired the binding.
-              // Commit it before responsibility, sync, or gossip effects can
-              // become visible so a crash cannot restore the stale value.
-              await ports.persistContextGraphSubscriptionStrict(
-                row.id,
-                subscription,
-                row.syncScoped,
-                () => isCurrentPromotion(subscription),
-              );
-            }
-            if (!isCurrentPromotion(subscription)) {
-              throw new Error('Persisted subscription promotion became stale');
-            }
-            await ports.reconcileRfc64CatalogResponsibilityV1(row.id);
-          },
-          isCurrent: isCurrentPromotion,
-        });
+        await ports.activate(row, healedOnChainId, isCurrentPromotion);
       } catch (error) {
         // Keep the durable row pending and retain its activation-cap dormancy;
         // the recurring owner will retry after its bounded delay.
@@ -572,7 +523,7 @@ export async function promoteDormantContextGraphSubscriptions(
         );
         return 'rearm';
       }
-      if (!runtime.owns(signal)) return 'idle';
+      if (!ports.isCurrent(signal)) return 'idle';
 
       pass.activated();
       ports.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);

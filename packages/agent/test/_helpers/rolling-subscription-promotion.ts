@@ -5,10 +5,13 @@ import { RollingSubscriptionChecks } from '../../src/context-graph-subscription-
 import type { RollingSubscriptionPromotionPorts } from '../../src/context-graph-subscription-authority-recovery.js';
 import type { ContextGraphSub, ContextGraphSubscriptionRecord } from '../../src/dkg-agent-types.js';
 import type { ContextGraphDormancyReason } from '../../src/context-graph-subscription-dormancy.js';
+import { activateRollingSubscriptionPromotion, type RollingSubscriptionActivationLifecycle } from '../../src/dkg-agent-lifecycle.js';
+import type { DKGAgent } from '../../src/dkg-agent.js';
+import { wakeDeferredContextGraphSubscriptionAuthorityRecovery } from '../../src/context-graph-subscription-authority-recovery.js';
 import type { CoalescingRecurringTask } from '../../src/coalescing-recurring-task.js';
 
 export type SavedPromotionRow = Partial<ContextGraphSubscriptionRecord> & { id: string };
-export type PromotionAuthorityRead = Parameters<RollingSubscriptionPromotionPorts['resolveContextGraphSubscriptionBootstrapAuthority']>[1];
+export type PromotionAuthorityRead = Parameters<DKGAgent['resolveContextGraphSubscriptionBootstrapAuthority']>[1];
 
 export function savedPromotionRow(row: SavedPromotionRow): ContextGraphSubscriptionRecord {
   return { subscribed: false, synced: false, syncScoped: false, ...row };
@@ -24,9 +27,9 @@ export function createRollingPromotionFixture(
     cap?: number;
     checks?: RollingSubscriptionChecks;
     authority?: 'allowed' | 'denied' | 'unavailable';
-    answer?: RollingSubscriptionPromotionPorts['resolveContextGraphSubscriptionBootstrapAuthority'];
+    answer?: DKGAgent['resolveContextGraphSubscriptionBootstrapAuthority'];
     load?: (id: string) => Promise<SavedPromotionRow | null>;
-    activate?: RollingSubscriptionPromotionPorts['activatePersistedContextGraphSubscriptionRecord'];
+    activate?: RollingSubscriptionActivationLifecycle['activate'];
   } = {},
 ) {
   const savedRows = new Map(rows.map(row => [row.id, savedPromotionRow(row)]));
@@ -39,6 +42,19 @@ export function createRollingPromotionFixture(
   };
   const host = {
     savedRows,
+    store: { load, loadAll: async () => [...savedRows.values()] },
+    getStatus: (): ReturnType<RollingSubscriptionPromotionPorts['getStatus']> => host.contextGraphSubscriptionRehydrationStatus,
+    isCurrent: (signal: AbortSignal): boolean => host.started && host.contextGraphSubscriptionRehydrationPromotionRuntime.owns(signal),
+    resolveAuthority: (row: ContextGraphSubscriptionRecord, signal: AbortSignal) => host.resolveContextGraphSubscriptionBootstrapAuthority(row.id, {
+      allowSubscriptionFallback: false, signal,
+      durableSubscriptionBinding: { contextGraphId: row.id, onChainId: row.onChainId, onChainHash: row.onChainHash },
+    }),
+    activate: (row: ContextGraphSubscriptionRecord, onChainId: string | undefined, isCurrent: (subscription: ContextGraphSub) => boolean) => activateRollingSubscriptionPromotion({
+      activate: host.activatePersistedContextGraphSubscriptionRecord,
+      persistBinding: host.persistContextGraphSubscriptionStrict,
+      reconcile: host.reconcileRfc64CatalogResponsibilityV1,
+    }, row, onChainId, isCurrent),
+    wakeAuthorityRecovery: () => wakeDeferredContextGraphSubscriptionAuthorityRecovery(host.contextGraphSubscriptionAuthorityRecoveryRuntime),
     config: { contextGraphSubscriptionStore: { load, loadAll: async () => [...savedRows.values()] } },
     contextGraphSubscriptionRehydrationStatus: { rehydrationEnabled: true, activationCap: options.cap ?? 64 },
     contextGraphSubscriptionRehydrationPromotionRuntime: runtime,
@@ -54,16 +70,16 @@ export function createRollingPromotionFixture(
     touchStatus: vi.fn(),
     updateContextGraphSubscriptionRehydrationStatusAfterClear: vi.fn<RollingSubscriptionPromotionPorts['updateContextGraphSubscriptionRehydrationStatusAfterClear']>(),
     updateContextGraphSubscriptionRehydrationStatusAfterPersist: vi.fn<RollingSubscriptionPromotionPorts['updateContextGraphSubscriptionRehydrationStatusAfterPersist']>(),
-    persistContextGraphSubscriptionStrict: vi.fn<RollingSubscriptionPromotionPorts['persistContextGraphSubscriptionStrict']>(async () => undefined),
-    reconcileRfc64CatalogResponsibilityV1: vi.fn<RollingSubscriptionPromotionPorts['reconcileRfc64CatalogResponsibilityV1']>(async () => undefined),
-    resolveContextGraphSubscriptionBootstrapAuthority: vi.fn<RollingSubscriptionPromotionPorts['resolveContextGraphSubscriptionBootstrapAuthority']>(options.answer ?? (async () => options.authority === 'unavailable'
+    persistContextGraphSubscriptionStrict: vi.fn<RollingSubscriptionActivationLifecycle['persistBinding']>(async () => undefined),
+    reconcileRfc64CatalogResponsibilityV1: vi.fn<RollingSubscriptionActivationLifecycle['reconcile']>(async () => undefined),
+    resolveContextGraphSubscriptionBootstrapAuthority: vi.fn<DKGAgent['resolveContextGraphSubscriptionBootstrapAuthority']>(options.answer ?? (async () => options.authority === 'unavailable'
       ? { outcome: 'unavailable', source: 'legacy-local', reason: 'test', metadataBootstrap: 'eligible', dependency: 'unknown' }
       : { outcome: options.authority ?? 'allowed', source: 'legacy-local', reason: 'test', metadataBootstrap: 'eligible' })),
-    activatePersistedContextGraphSubscriptionRecord: vi.fn<RollingSubscriptionPromotionPorts['activatePersistedContextGraphSubscriptionRecord']>(options.activate ?? (async row => {
+    activatePersistedContextGraphSubscriptionRecord: vi.fn<RollingSubscriptionActivationLifecycle['activate']>(options.activate ?? (async row => {
       host.subscribedContextGraphs.set(row.id, promotionSubscription({ subscribed: row.subscribed, coreHosted: row.coreHosted, metaSynced: false, pendingMeta: false }));
     })),
-  } satisfies RollingSubscriptionPromotionPorts & { savedRows: Map<string, ContextGraphSubscriptionRecord> };
-  return { agent: host, load };
+  };
+  return { agent: host, load } satisfies { agent: RollingSubscriptionPromotionPorts; load: typeof load };
 }
 
 export type RollingPromotionFixture = ReturnType<typeof createRollingPromotionFixture>['agent'];

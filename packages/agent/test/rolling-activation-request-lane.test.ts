@@ -461,7 +461,7 @@ describe('rolling activation and the chain request lane', () => {
     const retirement = new Promise<void>((resolve) => { retire = resolve; });
     let passes = 0;
     const runtime = new CoalescingRecurringTask({
-      requestWhileRunning: 'drop',
+      requestWhileRunning: 'coalesce',
       onError: vi.fn(),
       closingMessage: 'test promotion closing',
       runPass: async (signal) => {
@@ -479,7 +479,7 @@ describe('rolling activation and the chain request lane', () => {
       host.contextGraphSubscriptionDormancyById.set('new-row', 'activationCap');
       DKGAgentBase.prototype.requestContextGraphSubscriptionPromotion.call(host as never, 'new-row');
       retire();
-      await runtime.whenIdle();
+      // Coalescing retains ownership across the paced follow-up pass.
       await vi.advanceTimersByTimeAsync(1_000);
       await runtime.whenIdle();
       expect(passes).toBe(2);
@@ -493,7 +493,7 @@ describe('rolling activation and the chain request lane', () => {
     const onError = vi.fn();
     const runtime = new CoalescingRecurringTask({
       retryIntervalMs: 30_000,
-      requestWhileRunning: 'drop',
+      requestWhileRunning: 'coalesce',
       runPass: (signal) => promote(host, signal),
       onError,
       closingMessage: 'Rolling context-graph subscription activation closing',
