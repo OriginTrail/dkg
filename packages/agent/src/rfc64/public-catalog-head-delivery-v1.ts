@@ -16,9 +16,23 @@
  * needs the newest head only. It fetches the announced head by digest and applies that head's
  * whole set; when its own applied head is more than one version behind, it proves the lineage by
  * fetching the skipped signed heads from the provider (at most RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1
- * of them); and it treats a head older than its applied one as already satisfied. The newest
- * handed-off head is therefore never dropped in favour of an older one. A peer that missed an
- * announcement converges through connect-time replay, which sends the current head of each scope.
+ * of them); and it treats a head older than its applied one as already satisfied. Three rules
+ * keep a replacement inside what that allows:
+ *
+ * - The newest handed-off head is never dropped in favour of an older one.
+ * - The peers of a replaced head are carried over to the head that replaces it, so every peer a
+ *   hand-off named is sent that head or a newer one.
+ * - Two heads sent one after the other are at most half the lineage window apart. When a newer
+ *   head would be further than that from the head sent before it, the waiting head is kept as a
+ *   checkpoint and sent first.
+ *
+ * A scope here is one policy generation of one author catalog. A graph authored before its
+ * registration has an owner-signed catalog and, after it, a catalog of the registered generation.
+ * On the wire both carry the same graph, author and era, but their versions are numbered
+ * independently, so they are never compared with each other.
+ *
+ * A peer that missed an announcement converges through connect-time replay, which sends the
+ * current head of each scope.
  *
  * Nothing is persisted here and no refusal is remembered: every fan-out asks the current policy
  * again, and the transport asks once more immediately before and after each send.
@@ -27,7 +41,8 @@
  * mutation that handed the head off: that caller's request deadline, cancellation and work
  * priority end with the caller, and a delivery outlives it.
  *
- * Bounds: one waiting head and one fan-out per scope, at most
+ * Bounds: one fan-out and at most {@link RFC64_CATALOG_HEAD_DELIVERY_MAX_WAITING_HEADS_V1}
+ * waiting heads per scope (the newest, and checkpoints only when a backlog is that deep), at most
  * {@link RFC64_CATALOG_HEAD_DELIVERY_MAX_SCOPES_V1} scopes,
  * {@link RFC64_CATALOG_HEAD_DELIVERY_MAX_ACTIVE_FANOUTS_V1} hand-off fan-outs selecting peers and
  * starting sends at a time, sends started in waves of
@@ -46,7 +61,9 @@ import type {
   Rfc64CatalogAccessAuthorizationInputV1,
   Rfc64CatalogAccessAuthorizationV1,
 } from './catalog-access-policy-v1.js';
+import { RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1 } from './catalog-head-lineage-v1.js';
 import {
+  RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1,
   snapshotRfc64PublicCatalogAnnouncementPeersV1,
   snapshotRfc64RemoteCatalogAnnouncementPeersV1,
 } from './catalog-peers-v1.js';
@@ -68,6 +85,19 @@ export const RFC64_CATALOG_HEAD_FANOUT_WAVE_PEERS_V1 = 16;
 export const RFC64_CATALOG_HEAD_FANOUT_WAVE_INTERVAL_MS_V1 = 1_000;
 /** Catalog scopes that may hold a head waiting for its fan-out. */
 export const RFC64_CATALOG_HEAD_DELIVERY_MAX_SCOPES_V1 = 1_024;
+/**
+ * The most versions between two heads sent one after the other: half of what a receiver can prove
+ * its way across. A newer head replaces the waiting one only while it stays this close to the head
+ * sent before it.
+ */
+export const RFC64_CATALOG_HEAD_DELIVERY_MAX_VERSION_STEP_V1 =
+  RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1 / 2;
+/**
+ * Waiting heads one scope may hold: the newest, and the checkpoints before it. Only a backlog of
+ * more than {@link RFC64_CATALOG_HEAD_DELIVERY_MAX_VERSION_STEP_V1} versions needs a second one.
+ * Past this many the newest waiting head is replaced whatever the distance: memory stays bounded.
+ */
+export const RFC64_CATALOG_HEAD_DELIVERY_MAX_WAITING_HEADS_V1 = 4;
 /**
  * Hand-off fan-outs that select their peers and start their sends at once; further scopes wait
  * their turn with their newest head. A fan-out that has started every send gives its turn back:
@@ -101,7 +131,7 @@ export interface AnnounceRfc64PublicCatalogHeadResultV1 {
 
 export interface DeliverRfc64PublicCatalogHeadInputV1 {
   readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
-  /** Unique peer IDs, at most RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1. An empty list is nobody. */
+  /** Unique peer IDs, at most RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1. An empty list: nobody. */
   readonly peers: readonly string[];
 }
 
@@ -111,7 +141,8 @@ export interface DeliverRfc64PublicCatalogHeadInputV1 {
  */
 export interface Rfc64CatalogHeadHandoffV1 extends AnnounceRfc64PublicCatalogHeadResultV1 {
   /**
-   * - `queued`: the scope's owner sends this head, or a newer one handed off before its turn.
+   * - `queued`: the scope's owner sends this head to these peers, or a newer one handed off before
+   *   its turn.
    * - `nobody`: the peer list is empty once this node is removed from it.
    * - `not-queued`: the owner is closed, every scope slot is taken, or the input is malformed. The
    *   head stays durable and reaches peers through replay.
@@ -131,7 +162,7 @@ export interface Rfc64CatalogHeadDeliveryOutcomeV1 extends AnnounceRfc64PublicCa
 }
 
 export interface Rfc64CatalogHeadDeliveryOptionsV1 {
-  /** One announcement to one peer through the head transport, which rechecks the policy around it. */
+  /** One announcement to one peer through the head transport, which rechecks the policy there. */
   readonly send: (
     remotePeerId: string,
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
@@ -167,7 +198,10 @@ interface WaitingHeadV1 {
 }
 
 interface ScopeDeliveryV1 {
-  waiting: WaitingHeadV1 | null;
+  /** Oldest first. The last one is the newest head; the ones before it are checkpoints. */
+  readonly waiting: WaitingHeadV1[];
+  /** Version of the head sent last, or of the one before the first head this owner was given. */
+  sentVersion: bigint;
   superseded: number;
   run: Promise<void> | null;
 }
@@ -247,28 +281,55 @@ export class Rfc64CatalogHeadDeliveryV1 {
       return rfc64CatalogHeadHandoffV1('not-queued', head.announcement);
     }
     const key = scopeKeyV1(head.announcement);
+    const version = BigInt(head.announcement.catalogVersion);
     const scope = this.#scopes.get(key);
-    if (scope !== undefined) {
-      if (
-        scope.waiting !== null
-        && BigInt(head.announcement.catalogVersion)
-          < BigInt(scope.waiting.announcement.catalogVersion)
-      ) {
-        // Never trade the newest waiting head for an older one handed off late.
-        scope.superseded += 1;
-        return rfc64CatalogHeadHandoffV1('queued', head.announcement);
+    if (scope === undefined) {
+      if (this.#scopes.size >= RFC64_CATALOG_HEAD_DELIVERY_MAX_SCOPES_V1) {
+        return rfc64CatalogHeadHandoffV1('not-queued', head.announcement);
       }
-      if (scope.waiting !== null) scope.superseded += 1;
-      scope.waiting = head;
+      const created: ScopeDeliveryV1 = {
+        waiting: [head],
+        sentVersion: version - 1n,
+        superseded: 0,
+        run: null,
+      };
+      this.#scopes.set(key, created);
+      created.run = this.#ownerContext.runInAsyncScope(() => this.#runScope(key, created));
       return rfc64CatalogHeadHandoffV1('queued', head.announcement);
     }
-    if (this.#scopes.size >= RFC64_CATALOG_HEAD_DELIVERY_MAX_SCOPES_V1) {
-      return rfc64CatalogHeadHandoffV1('not-queued', head.announcement);
-    }
-    const created: ScopeDeliveryV1 = { waiting: head, superseded: 0, run: null };
-    this.#scopes.set(key, created);
-    created.run = this.#ownerContext.runInAsyncScope(() => this.#runScope(key, created));
+    this.#coalesce(scope, head, version);
     return rfc64CatalogHeadHandoffV1('queued', head.announcement);
+  }
+
+  /** Add `head` to a scope whose owner is busy, keeping what the module comment promises. */
+  #coalesce(scope: ScopeDeliveryV1, head: WaitingHeadV1, version: bigint): void {
+    const { waiting } = scope;
+    const newest = waiting.at(-1);
+    if (newest === undefined) {
+      waiting.push(head);
+      return;
+    }
+    if (version < BigInt(newest.announcement.catalogVersion)) {
+      // Never trade the newest waiting head for an older one handed off late: its peers get the
+      // newest instead.
+      waiting[waiting.length - 1] = withPeersV1(newest, head.peers);
+      scope.superseded += 1;
+      return;
+    }
+    const sentBefore = waiting.length > 1
+      ? BigInt(waiting.at(-2)!.announcement.catalogVersion)
+      : scope.sentVersion;
+    if (
+      version - sentBefore > BigInt(RFC64_CATALOG_HEAD_DELIVERY_MAX_VERSION_STEP_V1)
+      && waiting.length < RFC64_CATALOG_HEAD_DELIVERY_MAX_WAITING_HEADS_V1
+    ) {
+      // Replacing the waiting head would put more versions between two sent heads than a
+      // receiver is sure to prove its way across: keep it as a checkpoint and send it first.
+      waiting.push(head);
+      return;
+    }
+    waiting[waiting.length - 1] = withPeersV1(head, newest.peers);
+    scope.superseded += 1;
   }
 
   /** Resolves once no handed-off head is waiting or being sent (tests, shutdown coordination). */
@@ -281,7 +342,7 @@ export class Rfc64CatalogHeadDeliveryV1 {
   /** Abort every fan-out, drop every waiting head, and resolve once all of it has settled. */
   async close(): Promise<void> {
     if (!this.#lifecycle.signal.aborted) {
-      for (const scope of this.#scopes.values()) scope.waiting = null;
+      for (const scope of this.#scopes.values()) scope.waiting.length = 0;
       this.#lifecycle.abort(new DOMException(CLOSED_MESSAGE_V1, 'AbortError'));
     }
     await Promise.allSettled(this.#announces);
@@ -291,13 +352,14 @@ export class Rfc64CatalogHeadDeliveryV1 {
   /** The single owner of one scope's deliveries. Never rejects. */
   async #runScope(key: string, scope: ScopeDeliveryV1): Promise<void> {
     try {
-      while (scope.waiting !== null) {
+      while (scope.waiting.length > 0) {
         await this.#acquireTurn();
-        // Read after the wait: a newer head may have replaced the one that asked for the turn.
-        const head = scope.waiting;
+        // Read after the wait: a newer head may have replaced the one that asked for the turn,
+        // and close may have dropped it.
+        const head = scope.waiting.shift();
         const superseded = scope.superseded;
-        scope.waiting = null;
         scope.superseded = 0;
+        if (head !== undefined) scope.sentVersion = BigInt(head.announcement.catalogVersion);
         let holdsTurn = true;
         const releaseTurn = (): void => {
           if (!holdsTurn) return;
@@ -305,7 +367,7 @@ export class Rfc64CatalogHeadDeliveryV1 {
           this.#releaseTurn();
         };
         try {
-          if (head !== null) {
+          if (head !== undefined) {
             await this.#runFanout(() => this.#deliverHead(head, superseded, releaseTurn));
           }
         } catch {
@@ -509,7 +571,7 @@ export class Rfc64CatalogHeadDeliveryV1 {
   }
 }
 
-/** Resolves when every promise of `wave` has settled or `intervalMs` has passed, whichever is first. */
+/** Resolves when every promise of `wave` has settled or `intervalMs` has passed, whichever first. */
 async function settledOrElapsedV1(
   wave: readonly Promise<void>[],
   intervalMs: number,
@@ -567,6 +629,10 @@ function describeAttemptsV1(
   });
 }
 
+/**
+ * One policy generation of one author catalog. The policy digest is part of the key because two
+ * generations of a graph share every other announced field and number their versions separately.
+ */
 function scopeKeyV1(announcement: Rfc64PublicCatalogHeadAnnouncementV1): string {
   return [
     announcement.networkId,
@@ -574,5 +640,15 @@ function scopeKeyV1(announcement: Rfc64PublicCatalogHeadAnnouncementV1): string 
     announcement.subGraphName ?? '',
     announcement.authorAddress,
     announcement.catalogEra,
+    announcement.policyDigest,
   ].join('\n');
+}
+
+/** `head` with the peers of a head it stands in for added after its own, up to the wire limit. */
+function withPeersV1(head: WaitingHeadV1, morePeers: readonly string[]): WaitingHeadV1 {
+  const peers = [...new Set([...head.peers, ...morePeers])]
+    .slice(0, RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1);
+  return peers.length === head.peers.length
+    ? head
+    : Object.freeze({ announcement: head.announcement, peers: Object.freeze(peers) });
 }

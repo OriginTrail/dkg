@@ -8,9 +8,13 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import type { SendOptions } from '@origintrail-official/dkg-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1 } from '../src/rfc64/catalog-head-lineage-v1.js';
+import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 } from '../src/rfc64/catalog-peers-v1.js';
 import {
   RFC64_CATALOG_HEAD_DELIVERY_MAX_ACTIVE_FANOUTS_V1,
   RFC64_CATALOG_HEAD_DELIVERY_MAX_SCOPES_V1,
+  RFC64_CATALOG_HEAD_DELIVERY_MAX_VERSION_STEP_V1,
+  RFC64_CATALOG_HEAD_DELIVERY_MAX_WAITING_HEADS_V1,
   RFC64_CATALOG_HEAD_FANOUT_WAVE_INTERVAL_MS_V1,
   RFC64_CATALOG_HEAD_FANOUT_WAVE_PEERS_V1,
   Rfc64CatalogHeadDeliveryV1,
@@ -26,7 +30,11 @@ const BUDGET_MS = 10_000;
 const AUTHOR = `0x${'a1'.repeat(20)}`;
 const POLICY_DIGEST = `0x${'2e'.repeat(32)}`;
 
-function head(version: string, authorAddress = AUTHOR): Rfc64PublicCatalogHeadAnnouncementV1 {
+function head(
+  version: string,
+  authorAddress = AUTHOR,
+  policyDigest = POLICY_DIGEST,
+): Rfc64PublicCatalogHeadAnnouncementV1 {
   return {
     kind: 'rfc64-author-catalog-head-availability-v1',
     networkId: 'otp:20430',
@@ -35,7 +43,7 @@ function head(version: string, authorAddress = AUTHOR): Rfc64PublicCatalogHeadAn
     authorAddress,
     catalogEra: '0',
     catalogVersion: version,
-    policyDigest: POLICY_DIGEST,
+    policyDigest,
     catalogHeadObjectDigest: `0x${'aa'.repeat(32)}`,
     signatureVariantDigest: `0x${'bb'.repeat(32)}`,
   } as Rfc64PublicCatalogHeadAnnouncementV1;
@@ -626,6 +634,166 @@ describe('RFC-64 catalog head delivery: one owner per scope, newest head', () =>
     expect(outcomes.map(({ supersededHeads }) => supersededHeads)).toEqual([0, 1]);
   });
 
+  it('sends the newest head to the peers of every head it replaced', async () => {
+    vi.useFakeTimers();
+    const { delivery, sends, outcomes, behaviour } = harness();
+    behaviour.set('slow-peer', 'stall');
+
+    delivery.deliver({ announcement: head('1'), peers: ['slow-peer'] });
+    await settle();
+    // Two more changes commit while the first head is being sent, each naming another peer.
+    delivery.deliver({ announcement: head('2'), peers: ['peer-a'] });
+    delivery.deliver({ announcement: head('3'), peers: ['peer-b'] });
+    await vi.advanceTimersByTimeAsync(BUDGET_MS);
+    await settle();
+
+    // Version 2 is never sent, but the peer it was meant for gets the head that replaced it.
+    expect(sends.map(({ peerId, version }) => [peerId, version])).toEqual([
+      ['slow-peer', '1'],
+      ['peer-b', '3'],
+      ['peer-a', '3'],
+    ]);
+    expect(outcomes[1]).toMatchObject({ announcedPeers: ['peer-b', 'peer-a'], supersededHeads: 1 });
+  });
+
+  it('gives the peers of an older head handed off late the newest head', async () => {
+    vi.useFakeTimers();
+    const { delivery, sends, behaviour } = harness();
+    behaviour.set('slow-peer', 'stall');
+
+    delivery.deliver({ announcement: head('1'), peers: ['slow-peer'] });
+    await settle();
+    delivery.deliver({ announcement: head('5'), peers: ['peer-a'] });
+    delivery.deliver({ announcement: head('4'), peers: ['peer-b'] });
+    await vi.advanceTimersByTimeAsync(BUDGET_MS);
+    await settle();
+
+    expect(sends.map(({ peerId, version }) => [peerId, version])).toEqual([
+      ['slow-peer', '1'],
+      ['peer-a', '5'],
+      ['peer-b', '5'],
+    ]);
+  });
+
+  it('keeps the peers carried over within the wire limit, the newest head\'s own peers first', async () => {
+    vi.useFakeTimers();
+    const { delivery, sends, behaviour } = harness();
+    behaviour.set('slow-peer', 'stall');
+    const earlier = peers(RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1, 'earlier');
+    const newest = peers(RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 - 2, 'newest');
+
+    delivery.deliver({ announcement: head('1'), peers: ['slow-peer'] });
+    await settle();
+    delivery.deliver({ announcement: head('2'), peers: earlier });
+    delivery.deliver({ announcement: head('3'), peers: newest });
+    await vi.advanceTimersByTimeAsync(BUDGET_MS);
+    await settle();
+
+    expect(sends.slice(1).map(({ peerId }) => peerId)).toEqual([...newest, ...earlier.slice(0, 2)]);
+    expect(sends.slice(1).every(({ version }) => version === '3')).toBe(true);
+  });
+
+  it('keeps the heads of two policy generations of one catalog scope apart', async () => {
+    // A graph authored before its registration has owner-signed heads and, after it, heads of the
+    // registered generation. Both carry the same graph, author and era on the wire, and the new
+    // generation starts again at version 1.
+    vi.useFakeTimers();
+    const registered = `0x${'3f'.repeat(32)}`;
+    let accepted = POLICY_DIGEST;
+    const { delivery, sends, outcomes, behaviour } = harness({
+      assertDeliverable: (announcement) => {
+        if (announcement.policyDigest !== accepted) {
+          throw new Error('announcement is not bound to the accepted policy');
+        }
+      },
+    });
+    behaviour.set('slow-peer', 'stall');
+
+    delivery.deliver({ announcement: head('4'), peers: ['slow-peer'] });
+    await settle();
+    delivery.deliver({ announcement: head('5'), peers: ['slow-peer'] });
+    // The registration is accepted while version 4 is being sent and version 5 waits.
+    accepted = registered;
+    expect(delivery.deliver({
+      announcement: head('1', AUTHOR, registered),
+      peers: ['peer-a'],
+    }).status).toBe('queued');
+    await settle();
+
+    // The new generation's first head is not compared with the old generation's versions, and it
+    // does not wait behind them.
+    expect(sends.map(({ peerId, version }) => [peerId, version])).toEqual([
+      ['slow-peer', '4'],
+      ['peer-a', '1'],
+    ]);
+    await vi.advanceTimersByTimeAsync(BUDGET_MS);
+    await settle();
+
+    // The old generation's waiting head is no longer deliverable, and says so.
+    expect(sends).toHaveLength(2);
+    expect(outcomes.map(({ announcement, notDeliverable }) => [
+      announcement.catalogVersion,
+      announcement.policyDigest === registered ? 'registered' : 'owner-signed',
+      notDeliverable,
+    ])).toEqual([
+      ['1', 'registered', null],
+      ['4', 'owner-signed', null],
+      ['5', 'owner-signed', 'announcement is not bound to the accepted policy'],
+    ]);
+  });
+
+  it('keeps a checkpoint so that two sent heads are never further apart than a receiver can prove', async () => {
+    vi.useFakeTimers();
+    const { delivery, sends, outcomes, behaviour } = harness();
+    behaviour.set('slow-peer', 'stall');
+    const step = RFC64_CATALOG_HEAD_DELIVERY_MAX_VERSION_STEP_V1;
+    expect(step * 2).toBe(RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1);
+    const last = 2 * step + 3;
+
+    delivery.deliver({ announcement: head('1'), peers: ['slow-peer', 'peer-a'] });
+    await settle();
+    // More than a whole lineage window of versions commits while version 1 is being sent.
+    for (let version = 2; version <= last; version += 1) {
+      delivery.deliver({ announcement: head(String(version)), peers: ['slow-peer', 'peer-a'] });
+    }
+    expect(delivery.pendingScopes).toBe(1);
+    await vi.advanceTimersByTimeAsync(4 * BUDGET_MS);
+    await settle();
+
+    const sentToPeerA = sends.filter(({ peerId }) => peerId === 'peer-a')
+      .map(({ version }) => Number(version));
+    expect(sentToPeerA).toEqual([1, 1 + step, 1 + 2 * step, last]);
+    for (let index = 1; index < sentToPeerA.length; index += 1) {
+      expect(sentToPeerA[index]! - sentToPeerA[index - 1]!).toBeLessThanOrEqual(step);
+    }
+    // Every other waiting head was replaced, and each is counted once.
+    expect(outcomes.reduce((sum, { supersededHeads }) => sum + supersededHeads, 0))
+      .toBe(last - sentToPeerA.length);
+  });
+
+  it('bounds the checkpoints of one scope: past them the newest head still replaces the waiting one', async () => {
+    vi.useFakeTimers();
+    const { delivery, sends, behaviour } = harness();
+    behaviour.set('slow-peer', 'stall');
+    const step = RFC64_CATALOG_HEAD_DELIVERY_MAX_VERSION_STEP_V1;
+    const waitingHeads = RFC64_CATALOG_HEAD_DELIVERY_MAX_WAITING_HEADS_V1;
+    const last = (waitingHeads + 2) * step;
+
+    delivery.deliver({ announcement: head('1'), peers: ['slow-peer'] });
+    await settle();
+    for (let version = 2; version <= last; version += 1) {
+      delivery.deliver({ announcement: head(String(version)), peers: ['slow-peer'] });
+    }
+    await vi.advanceTimersByTimeAsync((waitingHeads + 1) * BUDGET_MS);
+    await settle();
+
+    expect(sends.map(({ version }) => Number(version))).toEqual([
+      1,
+      ...Array.from({ length: waitingHeads - 1 }, (_, index) => 1 + (index + 1) * step),
+      last,
+    ]);
+  });
+
   it('never runs two fan-outs of one scope at once, and runs different scopes side by side', async () => {
     vi.useFakeTimers();
     const { delivery, sends, behaviour, mostInFlightByAuthor } = harness();
@@ -669,14 +837,15 @@ describe('RFC-64 catalog head delivery: one owner per scope, newest head', () =>
     const peerOf = (index: number): string => `peer-of-scope-${index}`;
 
     for (let index = 0; index < scopes; index += 1) {
-      delivery.deliver({ announcement: head('1', author(index)), peers: [peerOf(index)] });
+      delivery.deliver({ announcement: head('5000', author(index)), peers: [peerOf(index)] });
     }
     await settle();
     expect(selecting).toEqual(
       Array.from({ length: RFC64_CATALOG_HEAD_DELIVERY_MAX_ACTIVE_FANOUTS_V1 }, (_, index) => peerOf(index)),
     );
-    // The last scope has not had its turn: a newer head replaces the one it is waiting with.
-    delivery.deliver({ announcement: head('2', author(scopes - 1)), peers: [peerOf(scopes - 1)] });
+    // The last scope has not had its turn: a newer head replaces the one it is waiting with,
+    // also when its owner's first head is far from version 1.
+    delivery.deliver({ announcement: head('5001', author(scopes - 1)), peers: [peerOf(scopes - 1)] });
 
     // One fan-out finishes selecting and starts its send: exactly one more scope gets a turn.
     finishSelection[0]!();
@@ -689,7 +858,7 @@ describe('RFC-64 catalog head delivery: one owner per scope, newest head', () =>
       await settle();
     }
     expect(sends).toHaveLength(scopes);
-    expect(sends.find(({ author: sender }) => sender === author(scopes - 1))!.version).toBe('2');
+    expect(sends.find(({ author: sender }) => sender === author(scopes - 1))!.version).toBe('5001');
   });
 
   it('gives its turn back once the sends have started: a peer that never answers holds no other scope', async () => {
