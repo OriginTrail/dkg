@@ -17,7 +17,6 @@ import {
   CatalogPlacementTimingV1,
   catalogPlacementTimingV1,
   installCatalogPlacementTimingV1,
-  shareCatalogPlacementTimingV1,
   type CatalogPlacementAttemptV1,
 } from '../src/internal/catalog-placement-timing.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
@@ -321,18 +320,14 @@ describe('catalog placement timing', () => {
     expect(() => wait.end(throwingLog)).not.toThrow();
   });
 
-  it('resolves one timing per agent, shared with the aliases bound to it and replaceable', () => {
+  it('resolves one timing per agent and lets a test install its own', () => {
     const agent = {};
-    const owner = {};
     const timing = catalogPlacementTimingV1(agent);
     expect(catalogPlacementTimingV1(agent)).toBe(timing);
-    expect(catalogPlacementTimingV1(owner)).not.toBe(timing);
-    shareCatalogPlacementTimingV1(owner, agent);
-    expect(catalogPlacementTimingV1(owner)).toBe(timing);
+    expect(catalogPlacementTimingV1({})).not.toBe(timing);
     const injected = new CatalogPlacementTimingV1({ logThresholdMs: 0 });
     installCatalogPlacementTimingV1(agent, injected);
     expect(catalogPlacementTimingV1(agent)).toBe(injected);
-    expect(catalogPlacementTimingV1(owner)).toBe(injected);
   });
 });
 
@@ -401,9 +396,9 @@ describe('catalog placement timing through the finalized-private supervisor', ()
       repairFinalizedPrivatePlacement: repair,
       reconcile: async () => null,
       warn: () => {},
+      placementTiming: () => timing,
     } as never);
     owners.push(owner);
-    installCatalogPlacementTimingV1(owner, timing);
     const lines: string[] = [];
     const log = { info: (_ctx: OperationContext, message: string) => { lines.push(message); } };
     return {

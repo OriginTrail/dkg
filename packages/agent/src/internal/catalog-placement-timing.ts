@@ -2,6 +2,7 @@
 
 import type { Logger, OperationContext } from '@origintrail-official/dkg-core';
 
+import { rememberBounded } from '../bounded-map.js';
 import type { Rfc64PublicCatalogTransportErrorCodeV1 } from '../rfc64/public-catalog-transport-v1.js';
 
 /**
@@ -140,16 +141,6 @@ const INERT_ADMISSION: CatalogPlacementAdmissionV1 = Object.freeze({
   released: () => {},
 });
 const INERT_WAIT: CatalogPlacementWaitV1 = Object.freeze({ requested: () => {}, end: () => {} });
-
-function boundedSet<V>(map: Map<string, V>, key: string, value: V): void {
-  map.delete(key);
-  while (map.size >= MAX_TRACKED_ENTRIES) {
-    const oldest = map.keys().next().value;
-    if (oldest === undefined) break;
-    map.delete(oldest);
-  }
-  map.set(key, value);
-}
 
 function observe(callback: () => void): void {
   try {
@@ -317,7 +308,7 @@ export class CatalogPlacementTimingV1 {
     try {
       const key = `${asset.kaUal}@${asset.assertionVersion}`;
       const observerCall = (this.#observerCalls.get(key) ?? 0) + 1;
-      boundedSet(this.#observerCalls, key, observerCall);
+      rememberBounded(this.#observerCalls, key, observerCall, MAX_TRACKED_ENTRIES);
       const startedAt = this.#sources.clock();
       let requested: Readonly<{ at: number; whenAttempted: object | null }> | undefined;
       return {
@@ -400,22 +391,15 @@ function describeWaitV1(wait: Readonly<{
 }
 
 const TIMINGS_V1 = new WeakMap<object, CatalogPlacementTimingV1>();
-const SHARED_OWNERS_V1 = new WeakMap<object, object>();
 
-/** The placement timing of one agent, created on first use; an alias resolves to its owner. */
+/** The placement timing of one agent (or standalone supervisor), created on first use. */
 export function catalogPlacementTimingV1(owner: object): CatalogPlacementTimingV1 {
-  const resolved = SHARED_OWNERS_V1.get(owner) ?? owner;
-  let timing = TIMINGS_V1.get(resolved);
+  let timing = TIMINGS_V1.get(owner);
   if (timing === undefined) {
     timing = new CatalogPlacementTimingV1();
-    TIMINGS_V1.set(resolved, timing);
+    TIMINGS_V1.set(owner, timing);
   }
   return timing;
-}
-
-/** Make `alias` (for example the agent's projection owner) record into `owner`'s timing. */
-export function shareCatalogPlacementTimingV1(alias: object, owner: object): void {
-  SHARED_OWNERS_V1.set(alias, owner);
 }
 
 /** Replace `owner`'s timing, for example with an injected clock or threshold. */
