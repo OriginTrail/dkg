@@ -13,6 +13,7 @@ export * from './publisher.js';
 export * from './publication-pricing.js';
 export * from './publication-payload-measurement.js';
 export { pickPublishLifecycleHooks } from './publish-lifecycle-hooks.js';
+export type { LiftJobTailStep, LiftJobTailStepObserver } from './lift-job-tail-steps.js';
 export { skolemize, isBlankNode, isSkolemizedUri, rootEntityFromSkolemized } from './skolemize.js';
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 export {

@@ -1277,7 +1277,7 @@ export class TripleStoreAsyncLiftPublisher
           },
         },
       };
-      const execution = handler.execute(executionInput);
+      const execution = handler.execute({ ...executionInput, onPostConfirmationStep: this.chainObservations.tailObserver(claimed.jobId) });
       const outcome = await Promise.race([
         execution.then((result) => ({ kind: 'settled' as const, result })),
         broadcastAccepted.then(() => ({ kind: 'accepted' as const })),

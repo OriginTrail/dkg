@@ -312,6 +312,8 @@ export default defineConfig({
       "test/rootless-update-error.test.ts",
       "test/changelog-requester.test.ts",
       "test/encrypt-inline-policy.test.ts",
+      // #3081 — the steps the queued executor reports after the confirmation (observation only).
+      "test/queued-publish-tail-steps.test.ts",
       "test/queued-publish-options.test.ts",
       "test/agents-meta-policy.test.ts",
       "test/agents-meta-sync-wiring.test.ts",
