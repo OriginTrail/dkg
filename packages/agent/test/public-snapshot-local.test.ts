@@ -342,7 +342,7 @@ describe("public snapshot recovery over live local nodes and chain", () => {
       await sink.connectTo(supplier.multiaddrs.find(a=>a.includes("/tcp/")&&!a.includes("/p2p-circuit"))!);
       const beforeRows = await mismatchStore.query("SELECT ?s ?p ?o ?g WHERE {GRAPH ?g {?s ?p ?o}} ORDER BY ?g ?s ?p ?o");
       const writes = vi.spyOn(mismatchStore,"replaceGraphAndSubject");
-      const evidence = new PublicSnapshotEvidence(independent,"core-cache",supplier.peerId,()=>true);
+      const evidence = new PublicSnapshotEvidence({snapshot: independent, mode:"core-cache", sourceCore:supplier.peerId},()=>true);
       const authenticate = vi.fn(asset => evidence.authenticate(asset));
       const rejected = await sink.syncExactKnowledgeAssetsFromPeerDetailed(supplier.peerId,graph,[ual],{
         forceFreshExactSession:true,exactRecoveryTransportMode:transport,totalTimeoutMs:15000,

@@ -65,4 +65,19 @@ describe('public snapshot job ownership', () => {
     await expect(run(a, mode)).resolves.toMatchObject({ assets:0,committed:0,completeAsOfSnapshot:true,current:false });
     if(mode === 'core-cache') expect(JSON.parse(new TextDecoder().decode(a.router.send.mock.calls[1][2]))).toMatchObject({refresh:true});
   });
+  it('retains the initial supplier when final coverage falls back to another core', async () => {
+    const {a} = fixture();
+    a.router.send.mockResolvedValueOnce(Buffer.from(JSON.stringify(snapshot())))
+      .mockRejectedValueOnce(new Error('initial supplier unavailable'))
+      .mockResolvedValueOnce(Buffer.from(JSON.stringify(snapshot())));
+    const result = await PublicSnapshotMethods.prototype.syncPublicGraphSnapshot.call(a, {...request, mode:'core-cache',trustedCorePeerIds:['core-a','core-b']});
+    expect(result).toMatchObject({sourceCore:'core-a',coverageSourceCore:'core-b',current:true});
+    expect(a.router.send.mock.calls.map((call: unknown[]) => call[0])).toEqual(['core-a','core-a','core-b']);
+  });
+  it('records local provenance for both independent RPC observations', async () => {
+    const {a}=fixture();
+    await expect(run(a,'rpc-only')).resolves.toMatchObject({mode:'rpc-only',sourceCore:null,coverageSourceCore:null});
+    expect(a.router.send).not.toHaveBeenCalled();
+  });
+
 });

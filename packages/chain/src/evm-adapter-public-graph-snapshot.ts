@@ -5,7 +5,7 @@ import {
   MULTICALL3_RUNTIME_CODE_HASH,
 } from "./evm-background-read-batching.js";
 import { EVMChainAdapterBase } from "./evm-adapter-base.js";
-import { confirmedStateBlockAtHead } from "./evm-adapter-constants.js";
+import { resolveEvmFinalityAnchorBlockV1 } from "./evm-finality-anchor.js";
 import { decodeKnowledgeAssetMerkleRootCount } from "./evm-knowledge-asset-update-context.js";
 import { loadAbi } from "./evm-adapter-abi.js";
 import {
@@ -36,15 +36,13 @@ export class PublicGraphSnapshotMethods extends EVMChainAdapterBase {
       if (BigInt(await provider.send("eth_chainId", [])) !== expected)
         throw new Error("Snapshot RPC chain mismatch");
       const observedAt = Date.now();
-      const head = await provider.getBlock("latest");
-      if (!head) throw new Error("Snapshot head unavailable");
-      const number = confirmedStateBlockAtHead(
-        head.number,
-        this.finalityConfirmations,
-      );
-      if (number === null) throw new Error("Snapshot finality unavailable");
-      const anchor = await provider.getBlock(number);
-      if (!anchor?.hash) throw new Error("Snapshot anchor unavailable");
+      const anchor = await resolveEvmFinalityAnchorBlockV1({
+        finalityConfirmations: this.finalityConfirmations,
+        readHead: () => provider.getBlock("latest"),
+        readBlockAt: number => provider.getBlock(number),
+        unavailable: detail => new Error(`Snapshot anchor unavailable: ${detail}`),
+      });
+      const number = anchor.number;
       const at = { blockTag: number };
       const hub = new Contract(this.hubAddress, loadAbi("Hub"), provider);
       const [cgAddress, kaAddress] = await Promise.all([
@@ -93,29 +91,12 @@ export class PublicGraphSnapshotMethods extends EVMChainAdapterBase {
             args: [id, offset + i],
           })),
         );
-        const rows = await calls(
-          ids.flatMap((assetId) => [
-            { contract: ka, method: "getLatestMerkleRoot", args: [assetId] },
-            {
-              contract: ka,
-              method: "getKnowledgeAssetUpdateContext",
-              args: [assetId],
-            },
-            { contract: cg, method: "kaToContextGraph", args: [assetId] },
-          ]),
+        const rows = await readSnapshotAssetRows(
+          ids.map(value => decodeSnapshotUint(value, "asset id")), ka, cg, calls,
         );
-        for (let i = 0; i < size; i++) {
-          const assetId = BigInt(ids[i] as bigint);
-          if (BigInt(rows[i * 3 + 2] as bigint) !== id)
-            throw new Error("Snapshot asset graph mismatch");
-          assets.push({
-            id: assetId.toString(),
-            root: String(rows[i * 3]).toLowerCase(),
-            version: decodeKnowledgeAssetMerkleRootCount(
-              rows[i * 3 + 1],
-              assetId,
-            ).toString(),
-          });
+        for (const row of rows) {
+          if (row.contextGraphId !== id) throw new Error("Snapshot asset graph mismatch");
+          assets.push({ id: row.assetId.toString(), root: row.root, version: row.version.toString() });
         }
       }
       signal.throwIfAborted();
@@ -160,6 +141,37 @@ interface SnapshotCall {
   contract: Contract;
   method: string;
   args: unknown[];
+}
+interface SnapshotAssetRow {
+  assetId: bigint;
+  root: string;
+  version: bigint;
+  contextGraphId: bigint;
+}
+function decodeSnapshotUint(value: unknown, label: string): bigint {
+  if (typeof value !== "bigint" || value < 0n) throw new Error(`Invalid snapshot ${label}`);
+  return value;
+}
+/** Own the wire layout and decoding together; callers receive only named asset evidence. */
+async function readSnapshotAssetRows(
+  ids: bigint[], ka: Contract, cg: Contract,
+  read: (calls: SnapshotCall[]) => Promise<unknown[]>,
+): Promise<SnapshotAssetRow[]> {
+  const calls: SnapshotCall[] = [];
+  const decodeRows = ids.map(assetId => {
+    const root = calls.push({ contract: ka, method: "getLatestMerkleRoot", args: [assetId] }) - 1;
+    const version = calls.push({ contract: ka, method: "getKnowledgeAssetUpdateContext", args: [assetId] }) - 1;
+    const graph = calls.push({ contract: cg, method: "kaToContextGraph", args: [assetId] }) - 1;
+    return (values: unknown[]): SnapshotAssetRow => {
+      const merkleRoot = values[root];
+      if (typeof merkleRoot !== "string") throw new Error("Invalid snapshot root");
+      return { assetId, root: merkleRoot.toLowerCase(),
+        version: decodeKnowledgeAssetMerkleRootCount(values[version], assetId),
+        contextGraphId: decodeSnapshotUint(values[graph], "graph binding") };
+    };
+  });
+  const values = await read(calls);
+  return decodeRows.map(decode => decode(values));
 }
 async function readSnapshotCalls(
   provider: JsonRpcProvider,
