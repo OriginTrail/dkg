@@ -194,4 +194,13 @@ export class NamedKaVmLifecycleRepair {
     });
     return this.stopping;
   }
+  /**
+   * Host shutdown fence: stop admission now and await the returned drain later.
+   * Scheduled repairs stay journaled for a same-instance restart, including process-local hosts.
+   */
+  beginStop(): Promise<void> {
+    const drain = this.stop();
+    void drain.catch(() => {});
+    return drain;
+  }
 }
