@@ -25,7 +25,7 @@ export interface ExactBatchResponderBindingOptions {
   readonly parseSyncRequest: (bytes: Uint8Array) => SyncRequestEnvelope;
   readonly authorizeSyncRequest: (request: SyncRequestEnvelope, peerId: string, options: { signal?: AbortSignal }) => Promise<boolean>;
   /** Positive normal CG policy read: the experimental pilot serves public CGs only. */
-  readonly isPublicContextGraph: (contextGraphId: string, signal: AbortSignal) => Promise<boolean>;
+  readonly resolvePublicContextGraphAuthority: (contextGraphId: string, signal: AbortSignal) => Promise<'public' | 'non-public' | 'unavailable'>;
   readonly servingWithheld?: (contextGraphId: string) => boolean;
   /** Closed, request-free reason for a pre-export refusal. */
   readonly onRefusal?: (stage: 'authorization' | 'public-authority' | 'serving' | 'export', code: 'BUSY' | 'DENIED' | 'ASSET_MISSING') => void;
@@ -73,17 +73,18 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
     noteRefusal(stage, code);
     throw new ExactBatchResponderRefusal(code);
   };
-  const requirePublicAuthority = async (contextGraphId: string, signal: AbortSignal): Promise<void> => {
+  const readPublicAuthority = async (contextGraphId: string, signal: AbortSignal): Promise<'public' | 'non-public' | 'unavailable'> => {
     try {
-      if (await options.isPublicContextGraph(contextGraphId, signal)) return;
+      return await options.resolvePublicContextGraphAuthority(contextGraphId, signal);
     } catch (error) {
       if (isStoreSchedulerBusyError(error) || isStoreOperationTimeoutError(error)) refuse('public-authority', 'BUSY');
-      if (error instanceof ExactBatchResponderRefusal) {
-        if (error.refusal === 'BUSY') refuse('public-authority', 'BUSY');
-        if (error.refusal === 'DENIED') refuse('public-authority', 'DENIED');
-      }
       throw error;
     }
+  };
+  const requirePublicAuthority = async (contextGraphId: string, signal: AbortSignal): Promise<void> => {
+    const authority = await readPublicAuthority(contextGraphId, signal);
+    if (authority === 'public') return;
+    if (authority === 'unavailable') refuse('public-authority', 'BUSY');
     refuse('public-authority', 'DENIED');
   };
   const authorizeRequest = async (bytes: Uint8Array, peerId: string, signal: AbortSignal): Promise<ExactBatchResponderAuthorization<AuthorizedExactBatchContext>> => {
@@ -140,7 +141,13 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
         let started = performance.now();
         const lease = await options.exportCache.acquireEncoded({ contextGraphId: request.contextGraphId, assetUal,
           signal: session.signal,
-          authorizeMissingAccessPolicy: () => options.isPublicContextGraph(request.contextGraphId, session.signal),
+          authorizeMissingAccessPolicy: async () => {
+            const authority = await readPublicAuthority(request.contextGraphId, session.signal);
+            if (authority === 'unavailable') refuse('public-authority', 'BUSY');
+            // A definitive policy change during an already prepared export
+            // is fenced by the cache as a changed source, before ASSET_END.
+            return authority === 'public';
+          },
           onStage: (stage, durationMs) => options.onStage?.(stage, assetIndex, durationMs, context),
           onFallback: (reason, budgetReason) => observeExactBatch(() => options.onFallback?.(reason, assetIndex, context, budgetReason)) });
         observeExactBatch(() => options.onStage?.('export', assetIndex,

@@ -203,7 +203,8 @@ async function busyFixture() {
   const parse = (bytes: Uint8Array) => ContextGraphResolveMethods.prototype.parseSyncRequest.call({
     parsePipeDelimitedSyncRequest: ContextGraphResolveMethods.prototype.parsePipeDelimitedSyncRequest,
   } as never, bytes);
-  const authorize = vi.fn(async () => true), isPublic = vi.fn(async () => true);
+  const authorize = vi.fn(async () => true);
+  const authority = vi.fn(async (): Promise<'public' | 'non-public' | 'unavailable'> => 'public');
   let resources!: ExperimentalExactBatchResponderResources;
   registerSyncHandler({ register: () => {}, protocolSync: '/fixture/legacy-sync', syncDeniedResponse: 'denied', syncPageSize: 500,
     sharedMemoryTtlMs: 0, store, peerId: 'source', parseSyncRequest: parse, authorizeSyncRequest: authorize,
@@ -211,7 +212,7 @@ async function busyFixture() {
   // Each stage asks the limiter synchronously, so a recorded stage is already running or queued.
   const asked: Stage[] = [];
   const binding = createExactBatchResponderBinding({ localPeerId: 'source', store, exportCache: resources.exportCache,
-    parseSyncRequest: parse, authorizeSyncRequest: authorize, isPublicContextGraph: isPublic,
+    parseSyncRequest: parse, authorizeSyncRequest: authorize, resolvePublicContextGraphAuthority: authority,
     admission: {
       withPreAuthorizationAdmission: (peer, signal, work) => {
         asked.push('pre-authorization'); return resources.withPreAuthorizationAdmission(peer, signal, work);
@@ -256,7 +257,7 @@ async function busyFixture() {
     expect(asked).toContain(stage);
   };
   const busyLines = () => info.mock.calls.map(([, message]) => message);
-  return { resources, authorize, isPublic, exchange, hold, untilAsked, busyLines };
+  return { resources, authorize, authority, exchange, hold, untilAsked, busyLines };
 }
 
 /** `dkg.sync.response.total{outcome="busy"}`, read through a real in-memory exporter. */
@@ -306,7 +307,7 @@ describe('exact-batch stream request the responder limiter does not admit', () =
       refusalObservation: { code: 'BUSY', startedAssets: 0, committedAssets: 0 } });
     expect(refused.wire.server.sentKinds).toEqual([K.REFUSE]);
     // Nothing of the request was worked on, and nothing of it is logged.
-    expect(f.authorize).not.toHaveBeenCalled(); expect(f.isPublic).not.toHaveBeenCalled();
+    expect(f.authorize).not.toHaveBeenCalled(); expect(f.authority).not.toHaveBeenCalled();
     expect(f.busyLines()).toEqual([
       `Exact batch responder busy stage=pre-authorization peer=${PEER.slice(-8)} reason="sync responder queue wait exceeded" running=3 queued=0`,
     ]);
@@ -327,7 +328,7 @@ describe('exact-batch stream request the responder limiter does not admit', () =
     const releases: Array<() => Promise<void>> = [];
     // While this request is being authorized, three other peers ask for slots:
     // two run beside it and the third takes its slot when authorization ends.
-    f.isPublic.mockImplementationOnce(async () => { releases.push(...['peer-a', 'peer-b', 'peer-c'].map(f.hold)); return true; });
+    f.authority.mockImplementationOnce(async () => { releases.push(...['peer-a', 'peer-b', 'peer-c'].map(f.hold)); return 'public' as const; });
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const refused = f.exchange();
     await f.untilAsked('response');

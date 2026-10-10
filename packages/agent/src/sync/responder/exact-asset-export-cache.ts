@@ -279,7 +279,6 @@ export function createBoundedExactAssetExportCache(params: {
   const readMetadata = async (
     request: ExactAssetEncodedExportRequest,
     expected?: Pick<ExactAssetExportRequest, 'graph' | 'expectedRows' | 'expectedIdentity'>,
-    missingIsRefusal = false,
   ): Promise<VerifiedMetadata | null> => {
     throwIfAborted(request.signal);
     const metaGraph = `did:dkg:context-graph:${request.contextGraphId}/_meta`;
@@ -315,7 +314,7 @@ export function createBoundedExactAssetExportCache(params: {
     throwIfAborted(request.signal);
     if (expected?.expectedIdentity !== undefined && identity !== expected.expectedIdentity) throw changed();
     if (parsed.state !== 'confirmed') {
-      if (missingIsRefusal && parsed.state === 'absent' && expected?.expectedIdentity === undefined) {
+      if (parsed.state === 'absent' && expected === undefined) {
         throw new ExactBatchAssetMissingError();
       }
       throw invalid();
@@ -543,7 +542,7 @@ export function createBoundedExactAssetExportCache(params: {
       throwIfAborted(scope.signal);
       if (!canReadWholeAsset) return refuse('store-capability', scope);
       const started = performance.now();
-      const metadata = await readMetadata(scope, undefined, true);
+      const metadata = await readMetadata(scope);
       observeExactBatch(() => scope.onStage?.('export-metadata-before', performance.now() - started));
       if (!metadata) return null;
       const request: ExactAssetExportRequest = { ...scope, graph: metadata.envelope.assertionGraph,
