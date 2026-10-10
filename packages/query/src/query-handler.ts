@@ -59,6 +59,8 @@ class UalResolutionError extends Error {
  * engine, and enforces result size limits.
  */
 export interface QueryHandlerDeps {
+  /** Recheck local evidence policy before a read and before releasing its result. */
+  assertReadEvidence?: (contextGraphId?: string) => Promise<void>;
   /**
    * #1105: optional resolver consulted when a CG has NO explicit
    * `queryAccess.contextGraphs` entry and `defaultPolicy` is 'deny'.
@@ -147,6 +149,10 @@ export class QueryHandler {
 
     // Dispatch to lookup handler
     try {
+      // UAL resolution is unscoped until the engine resolves it. Refuse it
+      // conservatively when any imported graph needs unsupported acceptance.
+      const evidenceScope = request.lookupType === 'ENTITY_BY_UAL' ? undefined : contextGraphId;
+      await this.deps.assertReadEvidence?.(evidenceScope);
       const limit = Math.min(request.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
       const timeout = Math.min(request.timeout ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
       const contextGraphPolicy = this.contextGraphPolicy(contextGraphId);
@@ -176,6 +182,7 @@ export class QueryHandler {
           response = errorResponse(opId, 'UNSUPPORTED_LOOKUP', `Unknown lookup type: ${request.lookupType}`);
       }
 
+      await this.deps.assertReadEvidence?.(evidenceScope);
       return this.enforceResultSize(response);
     } catch (err) {
       const busyError = storeSchedulerBusyCause(err);

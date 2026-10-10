@@ -50,6 +50,7 @@ describe('public snapshot job ownership', () => {
     let release!: (value: ReturnType<typeof snapshot>) => void;
     a.chain.readPublicGraphSnapshot.mockImplementationOnce(() => new Promise(resolve => {release = resolve;}));
     const job = run(a, 'rpc-only'); const rejected = expect(job).rejects.toThrow('ownership');
+    await Promise.resolve();
     expect(a.vmReconcilePhysicalRuns.size).toBe(1);
     if(change === 'subscription') invalidate();
     else { a.vmReconcileLifecycleController.abort(); a.vmReconcileLifecycleGeneration++; a.vmReconcileLifecycleController = new AbortController(); }

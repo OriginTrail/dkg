@@ -159,4 +159,23 @@ describe("job-scoped public snapshot evidence", () => {
       await store.close();
     }
   });
+  it.each(["core-cache", "rpc-only"] as const)("preserves typed local publication dates and same-version replay in %s", async mode => {
+    const store = new OxigraphStore();
+    try {
+      const evidence = new PublicSnapshotEvidence(snapshot, mode, mode === "core-cache" ? "core" : null, () => true);
+      const first = evidence.authenticate(asset()).asset;
+      const date = first.metadataQuads.find(q => q.predicate.endsWith("/publishedAt"))!.object;
+      expect(date).toMatch(/\^\^<http:\/\/www.w3.org\/2001\/XMLSchema#dateTime>$/);
+      expect(await materializeVerifiedGraphScopedAsset({store,asset:first})).toBe("applied");
+      const replay = evidence.authenticate(asset()).asset;
+      replay.metadataQuads.find(q => q.predicate.endsWith("/publishedAt"))!.object = '"2099-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>';
+      expect(await materializeVerifiedGraphScopedAsset({store,asset:replay})).toBe("applied");
+      const saved = await store.query(`SELECT ?date WHERE { GRAPH <${meta}> { <${ual}> <http://dkg.io/ontology/publishedAt> ?date . FILTER(?date > "2020-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>) } }`);
+      expect(saved.type).toBe("bindings");
+      if (saved.type !== "bindings") throw new Error("Expected bindings");
+      expect(saved.bindings).toHaveLength(1);
+      expect(Date.parse(saved.bindings[0]!.date.split('"')[1]!)).toBe(Date.parse(date.split('"')[1]!));
+    } finally { await store.close(); }
+  });
+
 });

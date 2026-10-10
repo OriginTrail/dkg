@@ -10,7 +10,7 @@ import {
   generateGraphKnowledgeAssetMetadata,
 } from "@origintrail-official/dkg-publisher";
 import { DKGAgent } from "../src/dkg-agent.js";
-import { assertPublicSnapshotQueryTrust } from "../src/public-snapshot-evidence.js";
+import { PublicSnapshotEvidence, assertPublicSnapshotQueryTrust } from "../src/public-snapshot-evidence.js";
 import {
   getSharedContext,
   createProvider,
@@ -261,6 +261,17 @@ describe("public snapshot recovery over live local nodes and chain", () => {
       },
     );
     expect(accepted.bindings?.length).toBe(12);
+    // The remote protocol has no evidence-acceptance field yet, so it must
+    // refuse marked graphs rather than silently weakening the caller's trust.
+    for (const response of [
+      await core.findEntitiesByType(receiver.peerId, graph, "http://schema.org/Thing"),
+      await core.queryRemoteSparql(receiver.peerId, graph, "SELECT ?s WHERE {?s ?p ?o} LIMIT 1"),
+      await core.lookupEntity(receiver.peerId, `did:dkg:evm:31337/${signer.address.toLowerCase()}/1`),
+    ]) {
+      expect(response.status).not.toBe("OK");
+      expect(response.bindings).toBeUndefined();
+      expect(response.ntriples).toBeUndefined();
+    }
     const rpcChain = new EVMChainAdapter(
       makeAdapterConfig(rpcUrl, hubAddress, HARDHAT_KEYS.REC2_OP),
     );
@@ -306,6 +317,43 @@ describe("public snapshot recovery over live local nodes and chain", () => {
     expect(independent.inventoryDigest).toBe(
       (await adapter.readPublicGraphSnapshot(graph, onChainId)).inventoryDigest,
     );
+    // Internally valid peer content B must not replace local content when
+    // the accepted chain snapshot still authenticates root A.
+    for (const transport of ["stream-required", "legacy"] as const) {
+      const n = transport === "legacy" ? 12 : 1;
+      const ual = `did:dkg:evm:31337/${signer.address.toLowerCase()}/${n}`;
+      const assertionGraph = `did:dkg:context-graph:${graph}/_verifiable_memory/${signer.address.toLowerCase()}/${n}`;
+      const metaGraph = `did:dkg:context-graph:${graph}/_meta`;
+      const privateRoot = n === 12 ? new Uint8Array(32).fill(7) : undefined;
+      const changed: Quad[] = [{subject:`urn:entity:${n}`,predicate:"http://schema.org/name",object:'"Unanchored replacement"',graph:assertionGraph}];
+      const root = computeFlatKCRootV10(changed, privateRoot ? [privateRoot] : []);
+      const metadata = generateGraphKnowledgeAssetMetadata({contextGraphId:graph,ual,assertionGraph,merkleRoot:root,publisherPeerId:"fixture",accessPolicy:"public",allowedPeers:[],timestamp:new Date(),assertionVersion:1,authorAddress:signer.address,publicTripleCount:1,privateTripleCount:privateRoot?1:0,privateMerkleRoot:privateRoot}, {status:"confirmed",confirmation:{kind:"finalized-materialization",provenance:{batchId:BigInt(n),materializedVersion:{blockNumber:0,txIndex:0}}}});
+      await source.replaceGraphAndSubject(assertionGraph, changed, metaGraph, ual, metadata);
+      // A fresh supplier avoids the encoded cache from the matching-content test.
+      const supplier = await make(`MismatchSource-${transport}`, "core", new EVMChainAdapter(makeAdapterConfig(rpcUrl,hubAddress,HARDHAT_KEYS.DEPLOYER)),source);
+      const mismatchStore = new OxigraphStore();
+      const beforeQuads: Quad[] = [
+        {subject:"urn:preserved",predicate:"urn:value",object:'"unchanged"',graph:assertionGraph},
+        {subject:ual,predicate:"urn:local-note",object:'"unchanged"',graph:metaGraph},
+      ];
+      await mismatchStore.insert(beforeQuads);
+      const sink = await make(`MismatchReceiver-${transport}`, "edge", new EVMChainAdapter(makeAdapterConfig(rpcUrl,hubAddress,HARDHAT_KEYS.REC1_OP)),mismatchStore);
+      sink.subscribeToContextGraph(graph,{onChainId,syncMode:"on-demand",trackSyncScope:false});
+      await sink.connectTo(supplier.multiaddrs.find(a=>a.includes("/tcp/")&&!a.includes("/p2p-circuit"))!);
+      const beforeRows = await mismatchStore.query("SELECT ?s ?p ?o ?g WHERE {GRAPH ?g {?s ?p ?o}} ORDER BY ?g ?s ?p ?o");
+      const writes = vi.spyOn(mismatchStore,"replaceGraphAndSubject");
+      const evidence = new PublicSnapshotEvidence(independent,"core-cache",supplier.peerId,()=>true);
+      const authenticate = vi.fn(asset => evidence.authenticate(asset));
+      const rejected = await sink.syncExactKnowledgeAssetsFromPeerDetailed(supplier.peerId,graph,[ual],{
+        forceFreshExactSession:true,exactRecoveryTransportMode:transport,totalTimeoutMs:15000,
+        authenticateGraphScopedAsset:authenticate,
+        registeredPublicEvidence:{usableFor:()=>true,revoke:()=>{}},
+      });
+      expect(authenticate).toHaveBeenCalled();
+      expect(rejected.committedExactAssetUals ?? []).toEqual([]);
+      expect(writes).not.toHaveBeenCalled();
+      expect(await mismatchStore.query("SELECT ?s ?p ?o ?g WHERE {GRAPH ?g {?s ?p ?o}} ORDER BY ?g ?s ?p ?o")).toEqual(beforeRows);
+    }
     const privateCreated = await adapter.createOnChainContextGraph({
       participantAgents: [],
       metadataBatchId: 0n,

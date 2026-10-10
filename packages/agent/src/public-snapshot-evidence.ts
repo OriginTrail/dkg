@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1 } from "@origintrail-official/dkg-publisher";
 import type { PublicGraphSnapshot } from "@origintrail-official/dkg-chain";
 import {
   parseDeterministicKnowledgeAssetUal,
@@ -103,11 +104,6 @@ export class PublicSnapshotEvidence {
       );
     }
     const discarded = new Set([
-      "status",
-      "transactionHash",
-      "confirmationKind",
-      "materializedVersion",
-      "publishedAt",
       "chainEvidenceMode",
       "chainEvidenceSource",
       "chainSnapshotDigest",
@@ -120,10 +116,6 @@ export class PublicSnapshotEvidence {
         !q.predicate.startsWith(DKG),
     );
     const fields: Record<string, string> = {
-      status: "confirmed",
-      confirmationKind: "finalized-materialization",
-      materializedVersion: "0:0",
-      publishedAt: new Date().toISOString(),
       chainEvidenceMode: this.mode,
       chainEvidenceSource: this.sourceCore ?? "local-rpc",
       chainSnapshotDigest: s.snapshotDigest,
@@ -134,7 +126,10 @@ export class PublicSnapshotEvidence {
       asset: {
         ...asset,
         metadataQuads: [
-          ...metadata,
+          ...overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1(metadata, {
+            ual: asset.ual, metaGraph: asset.metaGraph, receivedAt: new Date(),
+          }, { status: "confirmed", confirmation: { kind: "finalized-materialization" },
+            materializedVersion: { blockNumber: 0, txIndex: 0 } }),
           ...Object.entries(fields).map(([key, value]) => ({
             subject: asset.ual,
             predicate: `${DKG}${key}`,

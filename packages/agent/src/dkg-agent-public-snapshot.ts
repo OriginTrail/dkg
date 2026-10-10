@@ -6,6 +6,7 @@ import {
   type PublicGraphSnapshot,
 } from "@origintrail-official/dkg-chain";
 import { buildKnowledgeAssetUalFromOnChainIdV1, validateContextGraphId } from "@origintrail-official/dkg-core";
+import { runGraphScopedPhysicalOperation } from "./sync/requester/graph-scoped-operation-fence.js";
 import type { DKGAgent } from "./dkg-agent.js";
 import {
   PublicSnapshotEvidence,
@@ -103,193 +104,173 @@ export class PublicSnapshotMethods {
       throw new Error("Configure one to four trusted core peer identities");
     if (jobs.has(this)) throw new Error("A snapshot job is already running");
     if (!this.started || this.vmReconcileRotationClosed) throw new Error("Node is stopping");
-    let subscription = this.subscribedContextGraphs.get(contextGraphId);
+    const subscription = this.subscribedContextGraphs.get(contextGraphId);
     if (subscription && (!subscription.subscribed && !subscription.coreHosted))
       throw new Error("Graph subscription is inactive");
     if (subscription?.onChainId && subscription.onChainId !== onChainId)
       throw new Error("Graph binding differs from requested snapshot");
-    let bindingGeneration = this.contextGraphBindingState.capture(contextGraphId);
     const lifetime = this.vmReconcileLifecycleGeneration;
     jobs.add(this);
-    let retire!: () => void;
-    const physical = new Promise<void>(resolve => { retire = resolve; });
-    this.vmReconcilePhysicalRuns.add(physical);
     const startedAt = Date.now();
     const timeout = AbortSignal.timeout(3_600_000);
     const signal = AbortSignal.any([
       this.vmReconcileLifecycleController.signal, timeout,
       ...(options.signal ? [options.signal] : []),
     ]);
-    let active = true;
-    const isCurrent = () => active && !signal.aborted
-      && lifetime === this.vmReconcileLifecycleGeneration
-      && subscription === this.subscribedContextGraphs.get(contextGraphId)
-      && this.contextGraphBindingState.isGenerationCurrent(contextGraphId, bindingGeneration);
-    const assertCurrent = () => {
-      if (!isCurrent()) throw new Error("Snapshot job ownership changed");
-    };
-    const expected = {
-      chainId: this.chain.chainId,
-      deploymentId: this.chain.deploymentId!,
-      contextGraphId,
-      onChainId,
-    };
-    let sourceCore: string | null = null;
-    const read = async (refresh = false): Promise<PublicGraphSnapshot> => {
-      assertCurrent();
-      if (mode === "rpc-only") {
-        if (!this.chain.readPublicGraphSnapshot)
-          throw new Error(
-            "Independent snapshots are unsupported by this chain adapter",
-          );
-        const raw = await this.chain.readPublicGraphSnapshot(
-          contextGraphId,
-          onChainId,
-          { signal },
-        );
-        return decodePublicGraphSnapshot(
-          encoder.encode(JSON.stringify(raw)),
-          expected,
-        );
-      }
-      // Authenticated libp2p channel identity is the signer-equivalent trust boundary.
-      let failure: unknown;
-      for (const peer of peers) {
-        try {
-          const bytes = await this.router.send(
-            peer,
-            PUBLIC_GRAPH_SNAPSHOT_PROTOCOL,
-            encoder.encode(
-              JSON.stringify({
-                version: 1,
+    try {
+      return await runGraphScopedPhysicalOperation({
+        contextGraphId, signal,
+        isClosed: () => !this.started || this.vmReconcileRotationClosed,
+        captureSubscription: () => this.subscribedContextGraphs.get(contextGraphId),
+        captureBindingGeneration: () => this.contextGraphBindingState.capture(contextGraphId),
+        isBindingGenerationCurrent: generation => this.contextGraphBindingState.isGenerationCurrent(contextGraphId, generation),
+        assertLifecycleCurrent: () => { if (lifetime !== this.vmReconcileLifecycleGeneration) throw new Error("Snapshot job ownership changed"); },
+        closedError: () => new Error("Node is stopping"),
+        bindingChangedError: () => new Error("Snapshot job ownership changed"),
+        asAbortError: reason => new Error("Snapshot job ownership changed", { cause: reason }),
+        track: run => { this.vmReconcilePhysicalRuns.add(run); },
+        untrack: run => { this.vmReconcilePhysicalRuns.delete(run); },
+        operation: async control => {
+          const assertCurrent = control.assertCurrent;
+          const isCurrent = () => { try { assertCurrent(); return true; } catch { return false; } };
+          const expected = {
+            chainId: this.chain.chainId,
+            deploymentId: this.chain.deploymentId!,
+            contextGraphId,
+            onChainId,
+          };
+          let sourceCore: string | null = null;
+          const read = async (refresh = false): Promise<PublicGraphSnapshot> => {
+            assertCurrent();
+            if (mode === "rpc-only") {
+              if (!this.chain.readPublicGraphSnapshot)
+                throw new Error(
+                  "Independent snapshots are unsupported by this chain adapter",
+                );
+              const raw = await this.chain.readPublicGraphSnapshot(
                 contextGraphId,
                 onChainId,
-                refresh,
-              }),
-            ),
-            {
-              timeoutMs: 115_000,
-              signal,
-              maxReadBytes: PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES,
-            },
-          );
-          const snapshot = decodePublicGraphSnapshot(bytes, expected);
-          assertCurrent();
-          sourceCore = peer;
-          return snapshot;
-        } catch (error) {
-          failure = error;
-          signal.throwIfAborted();
-        }
-      }
-      throw new Error("No configured core supplied a valid public snapshot", {
-        cause: failure,
-      });
-    };
-    try {
-      const snapshot = await read();
-      assertCurrent();
-      const initialSourceCore = sourceCore;
-      const evidence = new PublicSnapshotEvidence(
-        snapshot,
-        mode,
-        sourceCore,
-        isCurrent,
-      );
-      // A validated public snapshot admits this job without scheduling the
-      // daemon's separate legacy subscribe/catch-up pipeline.
-      if (!subscription?.subscribed || !subscription.onChainId) {
-        this.subscribeToContextGraph(contextGraphId, {
-          onChainId,
-          syncMode: "on-demand",
-          trackSyncScope: false,
-          deferSharedMemoryGossipSubscribe: true,
-        });
-      }
-      subscription = this.subscribedContextGraphs.get(contextGraphId);
-      bindingGeneration = this.contextGraphBindingState.capture(contextGraphId);
-      assertCurrent();
-      if (mode === "core-cache") await markCoreTrustedGraph(this.store, contextGraphId);
-      assertCurrent();
-      const uals = snapshot.assets.map((a) => buildKnowledgeAssetUalFromOnChainIdV1(snapshot.chainId, snapshot.assetStorage, BigInt(a.id)));
-      const committed = new Set<string>();
-      for (let offset = 0; offset < uals.length; offset += 10) {
-        assertCurrent();
-        const batch = uals.slice(offset, offset + 10);
-        let remaining = batch;
-        for (const peer of peers) {
-          if (!remaining.length) break;
-          const result = await this.syncExactKnowledgeAssetsFromPeerDetailed(
-            peer,
-            contextGraphId,
-            remaining,
-            {
-              signal,
-              isCurrent: evidence.isCurrent,
-              forceFreshExactSession: true,
-              exactRecoveryTransportMode: "stream-preferred",
-              authenticateGraphScopedAsset: (asset) => evidence.authenticate(asset),
-              totalTimeoutMs: 120_000,
-              registeredPublicEvidence: {
-                usableFor: (id, s) =>
-                  id === contextGraphId && evidence.isCurrent() && !s?.aborted,
-                revoke: () => {},
-              },
-            },
-          );
-          for (const ual of result.committedExactAssetUals ?? [])
-            committed.add(ual);
-          remaining = batch.filter((ual) => !committed.has(ual));
-        }
-        // The stream profile excludes private commitments. Retry only missing
-        // assets through the established bounded singleton wire; content and
-        // snapshot authentication still feed the same atomic commit boundary.
-        for (const ual of remaining) {
-          for (const peer of peers) {
-            assertCurrent();
-            const result = await this.syncExactKnowledgeAssetsFromPeerDetailed(peer, contextGraphId, [ual], {
-              signal, isCurrent, forceFreshExactSession: true, exactRecoveryTransportMode: "legacy",
-              authenticateGraphScopedAsset: asset => evidence.authenticate(asset), totalTimeoutMs: 120_000,
+                { signal },
+              );
+              return decodePublicGraphSnapshot(
+                encoder.encode(JSON.stringify(raw)),
+                expected,
+              );
+            }
+            // Authenticated libp2p channel identity is the signer-equivalent trust boundary.
+            let failure: unknown;
+            for (const peer of peers) {
+              try {
+                const bytes = await this.router.send(
+                  peer,
+                  PUBLIC_GRAPH_SNAPSHOT_PROTOCOL,
+                  encoder.encode(
+                    JSON.stringify({
+                      version: 1,
+                      contextGraphId,
+                      onChainId,
+                      refresh,
+                    }),
+                  ),
+                  {
+                    timeoutMs: 115_000,
+                    signal,
+                    maxReadBytes: PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES,
+                  },
+                );
+                const snapshot = decodePublicGraphSnapshot(bytes, expected);
+                assertCurrent();
+                sourceCore = peer;
+                return snapshot;
+              } catch (error) {
+                failure = error;
+                signal.throwIfAborted();
+              }
+            }
+            throw new Error("No configured core supplied a valid public snapshot", {
+              cause: failure,
             });
-            for (const applied of result.committedExactAssetUals ?? []) committed.add(applied);
-            if (committed.has(ual)) break;
-          }
-        }
-        remaining = batch.filter(ual => !committed.has(ual));
-        if (remaining.length)
-          throw new Error(
-            `Snapshot recovery incomplete: ${committed.size}/${uals.length} committed`,
-          );
-      }
-      // A new inventory/root comparison is required before claiming current coverage.
-      const fresh = await read(true);
-      assertCurrent();
-      const current =
-        fresh.inventoryDigest === snapshot.inventoryDigest &&
-        fresh.assetStorage === snapshot.assetStorage &&
-        fresh.contextGraphStorage === snapshot.contextGraphStorage &&
-        BigInt(fresh.blockNumber) >= BigInt(snapshot.blockNumber);
-      return {
-        mode,
-        sourceCore: initialSourceCore,
-        coverageSourceCore: sourceCore,
-        snapshotDigest: snapshot.snapshotDigest,
-        blockNumber: snapshot.blockNumber,
-        blockHash: snapshot.blockHash,
-        inventoryDigest: snapshot.inventoryDigest,
-        assets: uals.length,
-        committed: committed.size,
-        completeAsOfSnapshot: true,
-        current,
-        startedAt,
-        finishedAt: Date.now(),
-        elapsedMs: Date.now() - startedAt,
-      };
+          };
+            const snapshot = await read();
+            assertCurrent();
+            const initialSourceCore = sourceCore;
+            const evidence = new PublicSnapshotEvidence(
+              snapshot,
+              mode,
+              sourceCore,
+              isCurrent,
+            );
+            // A validated public snapshot admits this job without scheduling the
+            // daemon's separate legacy subscribe/catch-up pipeline.
+            if (!subscription?.subscribed || !subscription.onChainId) {
+              control.admitSubscription(() => this.subscribeToContextGraph(contextGraphId, {
+                onChainId,
+                syncMode: "on-demand",
+                trackSyncScope: false,
+                deferSharedMemoryGossipSubscribe: true,
+              }));
+            }
+            assertCurrent();
+            if (mode === "core-cache") await markCoreTrustedGraph(this.store, contextGraphId);
+            assertCurrent();
+            const uals = snapshot.assets.map((a) => buildKnowledgeAssetUalFromOnChainIdV1(snapshot.chainId, snapshot.assetStorage, BigInt(a.id)));
+            const committed = new Set<string>();
+            const recover = async (batch: string[], transport: "stream-preferred" | "legacy") => {
+              for (const peer of peers) {
+                assertCurrent();
+                const remaining = batch.filter(ual => !committed.has(ual));
+                if (!remaining.length) break;
+                const result = await this.syncExactKnowledgeAssetsFromPeerDetailed(peer, contextGraphId, remaining, {
+                  signal, isCurrent, forceFreshExactSession: true,
+                  exactRecoveryTransportMode: transport,
+                  authenticateGraphScopedAsset: asset => evidence.authenticate(asset),
+                  totalTimeoutMs: 120_000,
+                  registeredPublicEvidence: {
+                    usableFor: (id, s) => id === contextGraphId && isCurrent() && !s?.aborted,
+                    revoke: () => {},
+                  },
+                });
+                for (const ual of result.committedExactAssetUals ?? []) committed.add(ual);
+              }
+              return batch.filter(ual => !committed.has(ual));
+            };
+            for (let offset = 0; offset < uals.length; offset += 10) {
+              const batch = uals.slice(offset, offset + 10);
+              const remaining = await recover(batch, "stream-preferred");
+              // The stream profile excludes private commitments. Only missing assets
+              // use the bounded singleton transport, with identical authentication.
+              for (const ual of remaining) await recover([ual], "legacy");
+              if (batch.some(ual => !committed.has(ual)))
+                throw new Error(`Snapshot recovery incomplete: ${committed.size}/${uals.length} committed`);
+            }
+            // A new inventory/root comparison is required before claiming current coverage.
+            const fresh = await read(true);
+            assertCurrent();
+            const current =
+              fresh.inventoryDigest === snapshot.inventoryDigest &&
+              fresh.assetStorage === snapshot.assetStorage &&
+              fresh.contextGraphStorage === snapshot.contextGraphStorage &&
+              BigInt(fresh.blockNumber) >= BigInt(snapshot.blockNumber);
+            return {
+              mode,
+              sourceCore: initialSourceCore,
+              coverageSourceCore: sourceCore,
+              snapshotDigest: snapshot.snapshotDigest,
+              blockNumber: snapshot.blockNumber,
+              blockHash: snapshot.blockHash,
+              inventoryDigest: snapshot.inventoryDigest,
+              assets: uals.length,
+              committed: committed.size,
+              completeAsOfSnapshot: true,
+              current,
+              startedAt,
+              finishedAt: Date.now(),
+              elapsedMs: Date.now() - startedAt,
+            };
+        },
+      });
     } finally {
-      active = false;
       jobs.delete(this);
-      retire();
-      this.vmReconcilePhysicalRuns.delete(physical);
     }
   }
 }

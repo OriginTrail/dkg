@@ -55,3 +55,10 @@ clients must not silently treat an unacknowledged trust selection as accepted.
 Snapshot observations allow up to five seconds of clock skew. A final coverage check sends an explicit refresh request: the supplier orders a new read after that request using its own cache generation, rather than comparing clocks across peers. Jobs and source builders drain with node shutdown, and subscription or binding changes invalidate the entire job.
 
 The normal stream profile is preferred. Missing assets outside that profile, including public assertions carrying private-root commitments, use bounded singleton recovery through the same verification, snapshot authentication and atomic materialization path. Private content is not requested.
+
+Remote query and UAL lookup protocols currently have no explicit core-cache
+acceptance field. They refuse reads from a marked graph (and conservatively
+refuse unscoped UAL lookups when any graph is marked) before execution and before
+releasing results. Local scoped queries may explicitly accept core-cache evidence.
+Imported `publishedAt` values are locally assigned RDF `xsd:dateTime` values;
+same-version replay preserves the original local receive time.

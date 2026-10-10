@@ -166,8 +166,8 @@ export function decodePublicGraphSnapshot(
 
 /** Bounded per-node warm cache; failures never replace the last good snapshot or extend its age. */
 export class PublicGraphSnapshotCache {
-  private readonly entries = new Map<string, PublicGraphSnapshot>();
-  private readonly pending = new Map<string, Promise<PublicGraphSnapshot>>();
+  private readonly entries = new Map<string, { snapshot: PublicGraphSnapshot; sequence: number }>();
+  private readonly pending = new Map<string, { promise: Promise<PublicGraphSnapshot>; sequence: number }>();
   constructor(
     private readonly read: (
       id: string,
@@ -177,8 +177,6 @@ export class PublicGraphSnapshotCache {
     private readonly clock: () => number = Date.now,
   ) {}
   private sequence = 0;
-  private readonly completed = new Map<string, number>();
-  private readonly building = new Map<string, number>();
   async get(id: string, onChainId: string, refresh = false): Promise<PublicGraphSnapshot> {
     const key = JSON.stringify([id, onChainId]);
     // A forced observation must begin after THIS request, in the supplier's
@@ -186,13 +184,12 @@ export class PublicGraphSnapshotCache {
     const minimum = refresh ? this.sequence + 1 : 0;
     for (;;) {
       const cached = this.entries.get(key);
-      if (cached && (this.completed.get(key) ?? 0) >= minimum
-        && this.clock() - cached.observedAt < 30_000 && this.clock() < cached.expiresAt) return cached;
+      if (cached && cached.sequence >= minimum
+        && this.clock() - cached.snapshot.observedAt < 30_000 && this.clock() < cached.snapshot.expiresAt) return cached.snapshot;
       const current = this.pending.get(key);
       if (current) {
-        const sequence = this.building.get(key)!;
-        const result = await current;
-        if (sequence >= minimum) return result;
+        const result = await current.promise;
+        if (current.sequence >= minimum) return result;
         continue;
       }
       if (this.pending.size >= 2) throw new Error("Snapshot builder busy");
@@ -200,12 +197,12 @@ export class PublicGraphSnapshotCache {
       const operation = this.read(id, onChainId, AbortSignal.timeout(110_000)).then(snapshot => {
         if (this.entries.size >= 8) {
           const oldest = this.entries.keys().next().value!;
-          this.entries.delete(oldest); this.completed.delete(oldest);
+          this.entries.delete(oldest);
         }
-        this.entries.set(key, snapshot); this.completed.set(key, sequence);
+        this.entries.set(key, { snapshot, sequence });
         return snapshot;
-      }).finally(() => { this.pending.delete(key); this.building.delete(key); });
-      this.pending.set(key, operation); this.building.set(key, sequence);
+      }).finally(() => { this.pending.delete(key); });
+      this.pending.set(key, { promise: operation, sequence });
       return operation;
     }
   }

@@ -11,6 +11,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   mergeSameVersionGraphKnowledgeAssetMetadataV1,
+  overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1,
   overlayLocallyTrustedKnowledgeAssetControls,
   readGraphKnowledgeAssetConfirmationKindV1,
   withMaterializationLock,
@@ -45,11 +46,7 @@ const ATOMIC_REPLACE_UNSUPPORTED_MESSAGE_V1 = (capability: string): string => (
 
 const ASSERTION_VERSION = 'http://dkg.io/ontology/assertionVersion';
 const MERKLE_ROOT = 'http://dkg.io/ontology/merkleRoot';
-const STATUS = 'http://dkg.io/ontology/status';
 const TRANSACTION_HASH = 'http://dkg.io/ontology/transactionHash';
-const MATERIALIZED_VERSION = 'http://dkg.io/ontology/materializedVersion';
-const PUBLISHED_AT = 'http://dkg.io/ontology/publishedAt';
-const XSD_DATE_TIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
 
 export interface VerifiedGraphScopedAsset {
   contextGraphId: string;
@@ -157,26 +154,7 @@ export async function authenticateVerifiedGraphScopedAsset(
   if (!Number.isFinite(receivedAtMs)) {
     throw new Error(`Graph-scoped durable sync ${asset.ual} has an invalid local receive time`);
   }
-  const locallyVisibleMetadata = (status: 'confirmed' | 'tentative'): Quad[] => [
-    {
-      subject: asset.ual,
-      predicate: PUBLISHED_AT,
-      object: `"${receivedAt.toISOString()}"^^<${XSD_DATE_TIME}>`,
-      graph: asset.metaGraph,
-    },
-    {
-      subject: asset.ual,
-      predicate: STATUS,
-      object: `"${status}"`,
-      graph: asset.metaGraph,
-    },
-  ];
-  const structuralMetadata = asset.metadataQuads.filter((quad) => (
-    quad.predicate !== PUBLISHED_AT
-    && quad.predicate !== STATUS
-    && quad.predicate !== MATERIALIZED_VERSION
-  ));
-  // The timestamp above is local receive time, not peer metadata. It is safe
+  // The timestamp is local receive time, not peer metadata. It is safe
   // for discovery ordering and keeps graph-scoped KAs visible without trusting
   // a peer-controlled dkg:publishedAt value. No-chain mode remains explicitly
   // tentative because it has integrity verification but no chain provenance.
@@ -184,7 +162,8 @@ export async function authenticateVerifiedGraphScopedAsset(
     return {
       asset: {
         ...asset,
-        metadataQuads: [...structuralMetadata, ...locallyVisibleMetadata('tentative')],
+        metadataQuads: overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1(asset.metadataQuads,
+          { ual: asset.ual, metaGraph: asset.metaGraph, receivedAt }, { status: 'tentative' }),
       },
       onChainContextGraphId: null,
     };
@@ -350,16 +329,13 @@ export async function authenticateVerifiedGraphScopedAsset(
   return {
     asset: {
       ...asset,
-      metadataQuads: [
-        ...structuralMetadata,
-        ...locallyVisibleMetadata('confirmed'),
-        {
-          subject: asset.ual,
-          predicate: MATERIALIZED_VERSION,
-          object: `"${materializedBlock}:${materializedTxIndex}"`,
-          graph: asset.metaGraph,
-        },
-      ],
+      metadataQuads: overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1(asset.metadataQuads,
+        { ual: asset.ual, metaGraph: asset.metaGraph, receivedAt }, {
+          status: 'confirmed', materializedVersion: { blockNumber: materializedBlock, txIndex: materializedTxIndex },
+          confirmation: claimed.kind === 'finalized-materialization'
+            ? { kind: 'finalized-materialization' }
+            : { kind: 'transaction', transactionHash: claimed.transactionHash },
+        }),
     },
     onChainContextGraphId: boundContextGraphId.toString(),
   };

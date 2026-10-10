@@ -222,6 +222,39 @@ export function mergeSameVersionGraphKnowledgeAssetMetadataV1(
   return merged;
 }
 
+/** Replace peer confirmation claims with facts established by this receiver. */
+export function overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1(
+  metadata: readonly Quad[],
+  scope: { ual: string; metaGraph: string; receivedAt: Date },
+  state: { status: 'tentative' } | {
+    status: 'confirmed';
+    materializedVersion: MaterializedVersion;
+    confirmation: { kind: 'finalized-materialization' } | { kind: 'transaction'; transactionHash: string };
+  },
+): Quad[] {
+  const controls = new Set([
+    GRAPH_KNOWLEDGE_ASSET_STATUS_PREDICATE, GRAPH_KNOWLEDGE_ASSET_PUBLISHED_AT_PREDICATE,
+    GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE, GRAPH_KNOWLEDGE_ASSET_TRANSACTION_HASH_PREDICATE,
+    MATERIALIZED_VERSION_PREDICATE,
+  ]);
+  const result = metadata.filter(q => !controls.has(q.predicate));
+  result.push(
+    mq(scope.ual, GRAPH_KNOWLEDGE_ASSET_STATUS_PREDICATE, lit(state.status), scope.metaGraph),
+    mq(scope.ual, GRAPH_KNOWLEDGE_ASSET_PUBLISHED_AT_PREDICATE,
+      `${lit(scope.receivedAt.toISOString())}^^<${XSD}dateTime>`, scope.metaGraph),
+  );
+  if (state.status === 'confirmed') {
+    result.push(
+      mq(scope.ual, GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE, lit(state.confirmation.kind), scope.metaGraph),
+      materializedVersionQuad(scope.metaGraph, scope.ual, state.materializedVersion),
+    );
+    if (state.confirmation.kind === 'transaction') result.push(
+      mq(scope.ual, GRAPH_KNOWLEDGE_ASSET_TRANSACTION_HASH_PREDICATE, lit(state.confirmation.transactionHash), scope.metaGraph),
+    );
+  }
+  return result;
+}
+
 /**
  * Constant-size VM metadata for one graph-scoped KA. RDF subjects in the KA
  * payload never become membership, token, ownership, or trust rows here.

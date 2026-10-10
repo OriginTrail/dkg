@@ -41,6 +41,26 @@ describe('QueryHandler', () => {
     ]);
   });
 
+
+  it.each(['SPARQL_QUERY', 'ENTITY_TRIPLES', 'ENTITIES_BY_TYPE', 'ENTITY_BY_UAL'] as const)(
+    'guards remote %s reads before dispatch', async lookupType => {
+      const guard = vi.fn(async () => { throw new Error('Explicit evidence acceptance required'); });
+      const handler = new QueryHandler(engine, {defaultPolicy:'public'}, {assertReadEvidence:guard});
+      const response = await handler.handle(makeRequest({lookupType,sparql:'SELECT ?s WHERE {?s ?p ?o}',entityUri:ENTITY_A,rdfType:SCHEMA_PERSON,ual:'did:dkg:evm:31337/0x1111111111111111111111111111111111111111/1'}),'peer');
+      expect(response.status).toBe('ERROR');
+      expect(response.bindings).toBeUndefined();
+      expect(response.ntriples).toBeUndefined();
+      expect(guard).toHaveBeenCalledWith(lookupType === 'ENTITY_BY_UAL' ? undefined : CONTEXT_GRAPH);
+    },
+  );
+  it('withholds remote results when evidence changes during execution', async () => {
+    const guard=vi.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('Evidence changed'));
+    const handler=new QueryHandler(engine,{defaultPolicy:'public'},{assertReadEvidence:guard});
+    const response=await handler.handle(makeRequest({lookupType:'ENTITY_TRIPLES',entityUri:ENTITY_A}),'peer');
+    expect(guard).toHaveBeenCalledTimes(2);
+    expect(response.status).toBe('ERROR');
+    expect(response.ntriples).toBeUndefined();
+  });
   describe('with public access policy', () => {
     let handler: QueryHandler;
 

@@ -117,4 +117,30 @@ describe("public graph snapshot contract", () => {
     expect((await cache.get("g", "1", true)).observedAt).toBe(1100);
     expect(read).toHaveBeenCalledTimes(2);
   });
+  it("forces a second build when refresh arrives during an older pending read", async () => {
+    const releases: Array<(value: ReturnType<typeof make>) => void> = [];
+    const read = vi.fn(() => new Promise<ReturnType<typeof make>>(resolve => releases.push(resolve)));
+    const cache = new PublicGraphSnapshotCache(read, () => 1000);
+    const cold = cache.get("g", "1");
+    let refreshed = false;
+    const refresh = cache.get("g", "1", true).then(value => { refreshed = true; return value; });
+    const first = make(); releases[0]!(first);
+    expect(await cold).toBe(first);
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    expect(refreshed).toBe(false);
+    const second = make(); releases[1]!(second);
+    expect(await refresh).toBe(second);
+    expect(await cache.get("g", "1")).toBe(second);
+  });
+
+  it("bounds retained entries and rebuilds an evicted key", async () => {
+    const read = vi.fn(async () => make());
+    const cache = new PublicGraphSnapshotCache(read, () => 1000);
+    for (let n = 0; n < 9; n++) await cache.get(`graph-${n}`, "1");
+    await cache.get("graph-8", "1");
+    expect(read).toHaveBeenCalledTimes(9);
+    await cache.get("graph-0", "1");
+    expect(read).toHaveBeenCalledTimes(10);
+  });
+
 });
