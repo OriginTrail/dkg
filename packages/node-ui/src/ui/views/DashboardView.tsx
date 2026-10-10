@@ -436,11 +436,9 @@ function CgRow({
             )
             : mem.partial
               ? (
-                // Some (not all) memory layers failed — the counts are
-                // a lower bound, not exact. Mark with a "~" + tooltip so
-                // the row doesn't silently undercount (Codex).
-                <span title="Partial — one or more memory layers were unavailable; counts are a lower bound">
-                  ~{abbrev(entities.total)} <span className="v10-cg-dim">entities</span> · ~{abbrev(triples.total)} <span className="v10-cg-dim">triples</span>
+                // Limits and unavailable layers both yield a loaded lower bound.
+                <span title="Loaded preview only — some memory layers are capped or unavailable; the context graph may contain more data">
+                  {entities.total.toLocaleString()}+ <span className="v10-cg-dim">entities</span> · {triples.total.toLocaleString()}+ <span className="v10-cg-dim">triples · loaded preview</span>
                 </span>
               )
               : <>{abbrev(entities.total)} <span className="v10-cg-dim">entities</span> · {abbrev(triples.total)} <span className="v10-cg-dim">triples</span></>}
@@ -655,7 +653,7 @@ export function DashboardView() {
                         keeps the bare number under the explicit
                         "summary" label below (Codex). */}
                     {agg.sizeApprox && !agg.triplesUnknown ? '~' : ''}
-                    {agg.entities.total.toLocaleString()}
+                    {agg.entities.total.toLocaleString()}{agg.sizePartial && !agg.sizeApprox ? '+' : ''}
                   </span>
                   {agg.triplesUnknown ? (
                     // Pure fallback: number is the published
@@ -675,7 +673,7 @@ export function DashboardView() {
                       entities / KA · approx.
                     </span>
                   ) : (
-                    <span className="v10-cg-dim">entities / Knowledge Assets</span>
+                    <span className="v10-cg-dim">{agg.sizePartial ? 'entities loaded' : 'entities / Knowledge Assets'}</span>
                   )}
                 </div>
                 {/* Hide the proportion bar whenever any row fell back —
@@ -687,9 +685,9 @@ export function DashboardView() {
                   <span className="v10-cg-size-big">
                     {agg.triplesUnknown
                       ? '—'
-                      : `${agg.sizeApprox ? '~' : ''}${agg.triples.total.toLocaleString()}`}
+                      : `${agg.sizeApprox ? '~' : ''}${agg.triples.total.toLocaleString()}${agg.sizePartial && !agg.sizeApprox ? '+' : ''}`}
                   </span>
-                  <span className="v10-cg-dim">triples</span>
+                  <span className="v10-cg-dim">{agg.sizePartial && !agg.sizeApprox ? 'triples loaded' : 'triples'}</span>
                 </div>
                 {agg.triplesUnknown || agg.sizeApprox ? null : <LayerBar counts={agg.triples} />}
               </div>
@@ -699,7 +697,7 @@ export function DashboardView() {
           <div className="stat-sub">
             {agg.hasCgs
               ? (agg.sizePartial
-                  ? 'Some context graphs could not report size; total is partial.'
+                  ? 'Partial preview — some memory layers are capped or unavailable. Context graphs may contain more data.'
                   : 'Totals across all your context graphs, summed over Working, Shared Working & Verifiable Memory. Knowledge Assets are entities that have been published to Verifiable Memory.')
               : 'No context graphs yet.'}
           </div>
