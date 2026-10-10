@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createOperationContext, ed25519Sign } from '@origintrail-official/dkg-core';
+import { createOperationContext, ed25519Sign, ProtocolRouter, PROTOCOL_NETWORK_IDENTITY, type DKGNode, type PeerResolver } from '@origintrail-official/dkg-core';
 import { NetworkAdmissionCoordinator, type NetworkAdmissionCoordinatorOptions } from '../src/p2p/network-admission-coordinator.js';
 import { NetworkAdmissionService } from '../src/p2p/network-admission.js';
 import { makeNetworkIdentityRequest, signNetworkIdentityResponse } from '../src/p2p/network-identity-proof.js';
@@ -97,18 +97,21 @@ describe('slow identity admission', () => {
     }
   });
 
-  it('cancels a held retry without recording failure or accepting a late proof', async () => {
+  it('cancels a held retry without recording failure or accepting a delivered late proof', async () => {
     let entered!: () => void;
+    let deliver!: (response: Uint8Array) => void;
+    let request!: Uint8Array;
     const retryEntered = new Promise<void>((resolve) => { entered = resolve; });
     let attempts = 0;
-    const send = vi.fn<NetworkAdmissionCoordinatorOptions['sendIdentityProbe']>(async (_peer, _data, options) => {
+    const send = vi.fn<NetworkAdmissionCoordinatorOptions['sendIdentityProbe']>(async (_peer, data) => {
       if (++attempts === 1) throw new DOMException('probe deadline', 'TimeoutError');
+      request = data;
       entered();
-      return new Promise<Uint8Array>((_resolve, reject) => {
-        options.signal!.addEventListener('abort', () => reject(options.signal!.reason), { once: true });
-      });
+      // A transport may finish after its caller aborts; exercise the late response guard.
+      return new Promise<Uint8Array>((resolve) => { deliver = resolve; });
     });
     const h = fixture(send);
+    const verified = vi.spyOn(h.admission, 'markVerifiedSameNetwork');
     const caller = new AbortController();
     const attempt = h.coordinator.ensureAdmitted(PEER, ctx, { signal: caller.signal });
     const cancelled = expect(attempt).rejects.toThrow('caller stopped');
@@ -116,11 +119,53 @@ describe('slow identity admission', () => {
     expect(send.mock.calls[1]![2].timeoutMs).toBe(15_000);
     caller.abort(new Error('caller stopped'));
     await cancelled;
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    // Observe the same shared attempt through its public boundary until it retires.
+    // A new observer cannot revive the controller the sole caller already aborted.
+    const retired = h.coordinator.ensureAdmitted(PEER, ctx).then(
+      (value) => ({ value }), (error: unknown) => ({ error }),
+    );
+    deliver(await signed(request));
+    expect(await retired).toMatchObject({ error: { name: 'AbortError', code: 'CONNECT_TIMEOUT' } });
     expect(send).toHaveBeenCalledTimes(2);
+    expect(verified).not.toHaveBeenCalled();
     expect(h.admission.getRetryableProbeBackoff(PEER)).toBeUndefined();
     expect(h.coordinator.isAcceptedPeer(PEER)).toBe(false);
     expect(h.coordinator.isRejectedPeer(PEER)).toBe(false);
+  });
+
+  it.each(['backoff', 'read'] as const)('retries the real router %s deadline once with a signed response', async (phase) => {
+    vi.useFakeTimers();
+    const routed = routerProbe(phase);
+    const h = fixture(routed.send);
+    const attempt = h.coordinator.ensureAdmitted(PEER, ctx);
+    const admitted = attempt.then((value) => ({ value }), (error: unknown) => ({ error }));
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(await admitted).toEqual({ value: true });
+    expect(routed.send.mock.calls.map((call) => call[2].timeoutMs)).toEqual([3_000, 15_000]);
+    expect(routed.dials()).toBe(2);
+    expect(routed.errors).toHaveLength(1);
+    expect(routed.errors[0]).toMatchObject(phase === 'backoff'
+      ? { name: 'TimeoutError' }
+      : { name: 'AbortError', cause: { name: 'TimeoutError' } });
+    expect(h.coordinator.isAcceptedPeer(PEER)).toBe(true);
+    expect(h.admission.getRetryableProbeBackoff(PEER)).toBeUndefined();
+  });
+
+  it.each(['backoff', 'read'] as const)('caller cancellation during real router %s prevents retry and peer blame', async (phase) => {
+    vi.useFakeTimers();
+    const routed = routerProbe(phase);
+    const h = fixture(routed.send);
+    const caller = new AbortController();
+    const cancelled = expect(h.coordinator.ensureAdmitted(PEER, ctx, { signal: caller.signal })).rejects.toThrow('caller stopped');
+    await vi.advanceTimersByTimeAsync(2_900);
+    caller.abort(new Error('caller stopped'));
+    await cancelled;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(routed.send).toHaveBeenCalledTimes(1);
+    expect(routed.dials()).toBe(1);
+    expect(h.coordinator.isAcceptedPeer(PEER)).toBe(false);
+    expect(h.coordinator.isRejectedPeer(PEER)).toBe(false);
+    expect(h.admission.getRetryableProbeBackoff(PEER)).toBeUndefined();
   });
 
   it('rejects a foreign-network signed proof after the retry instead of accepting connection liveness', async () => {
@@ -137,3 +182,41 @@ describe('slow identity admission', () => {
     expect(h.close).toHaveBeenCalledTimes(1);
   });
 });
+
+/** Actual send/read/backoff scopes, with only the libp2p stream endpoint simulated. */
+function routerProbe(phase: 'backoff' | 'read') {
+  let dials = 0;
+  const errors: unknown[] = [];
+  const stop = new AbortController();
+  const node = {
+    stopSignal: stop.signal,
+    libp2p: {
+      getConnections: () => [],
+      peerStore: { get: async () => { throw new Error('NotFound'); } },
+      dialProtocol: async () => {
+        const first = ++dials === 1;
+        if (first && phase === 'backoff') {
+          await new Promise((resolve) => setTimeout(resolve, 2_700));
+          throw new Error('stream reset');
+        }
+        let data!: Uint8Array;
+        let finish!: () => void;
+        const waiting = new Promise<void>((resolve) => { finish = resolve; });
+        return {
+          writeStatus: 'open', send: (request: Uint8Array) => { data = request; },
+          close: async () => {}, abort: () => finish(),
+          async *[Symbol.asyncIterator]() {
+            if (first) { await waiting; return; }
+            yield await signed(data);
+          },
+        };
+      },
+    },
+  } as unknown as DKGNode;
+  const router = new ProtocolRouter(node, { peerResolver: { resolve: async () => [] } as unknown as PeerResolver });
+  const send = vi.fn<NetworkAdmissionCoordinatorOptions['sendIdentityProbe']>(async (peer, data, options) => {
+    try { return await router.send(peer, PROTOCOL_NETWORK_IDENTITY, data, options); }
+    catch (error) { errors.push(error); throw error; }
+  });
+  return { send, errors, dials: () => dials };
+}
