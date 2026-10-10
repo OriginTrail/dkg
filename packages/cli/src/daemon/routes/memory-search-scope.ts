@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { resolveWorkingMemoryIdentityAliases } from '@origintrail-official/dkg-agent';
 import { canonicalKnowledgeAssetAgentAddress } from '@origintrail-official/dkg-core';
 import type { VectorWorkingMemoryScope } from '../../vector-store.js';
 import type { RequestActor } from './context.js';
@@ -66,9 +67,11 @@ export function memorySearchVectorScope(
   actor: RequestActor,
 ): VectorWorkingMemoryScope {
   if (actor.authentication.principal.kind === 'nodeOperator') return { kind: 'nodeOperator' };
-  const defaultAddress = agent.getDefaultAgentAddress() ?? agent.peerId;
   const caller = canonicalKnowledgeAssetAgentAddress(actor.effectiveAgentAddress);
-  const addresses = caller === canonicalKnowledgeAssetAgentAddress(defaultAddress)
-    ? [caller, agent.peerId] : [caller];
+  const identity = resolveWorkingMemoryIdentityAliases(
+    { defaultAgentAddress: agent.getDefaultAgentAddress(), peerId: agent.peerId },
+    caller, canonicalKnowledgeAssetAgentAddress,
+  );
+  const addresses = [caller, ...(identity.isDefaultAgentAddress ? identity.aliases ?? [] : [])];
   return { kind: 'agents', agentAddresses: addresses };
 }

@@ -7,6 +7,7 @@
  * so cross-calls resolve against the composed class.
  */
 
+import { resolveWorkingMemoryIdentityAliases } from './working-memory-identity.js';
 import { isAdmittedContextGraphSubscription } from './context-graph-subscription-policy.js';
 import { resolveRfc64PrivateReadRoster } from './rfc64/private-read-roster-v1.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -626,14 +627,10 @@ export class QueryMethods extends DKGAgentBase {
     // silent empty deny even though both sides are the same
     // identity. Canonicalize both sides: when the default agent is
     // known, fold its `peerId` alias onto its EVM address.
-    const defaultEvmLc = this.defaultAgentAddress?.toLowerCase();
-    const peerIdLc = this.peerId?.toLowerCase();
-    const canonicaliseWmId = (addr: string | undefined): string | undefined => {
-      if (!addr) return undefined;
-      const lc = addr.toLowerCase();
-      if (peerIdLc && lc === peerIdLc && defaultEvmLc) return defaultEvmLc;
-      return lc;
-    };
+    const resolveWmIdentity = (address: string | undefined) => resolveWorkingMemoryIdentityAliases(
+      { defaultAgentAddress: this.defaultAgentAddress, peerId: this.peerId }, address, (value) => value.toLowerCase(),
+    );
+    const canonicaliseWmId = (address: string | undefined) => resolveWmIdentity(address).canonicalAddress;
 
     // An authenticated (agent-bound) /api/query call could previously
     // OMIT `agentAddress` and fall through to the `this.peerId`
@@ -651,10 +648,7 @@ export class QueryMethods extends DKGAgentBase {
     // alias-aware (`canonicaliseWmId`), so both forms resolve to the
     // same canonical identity and still pass the caller===target
     // invariant.
-    const callerIsDefaultAgent =
-      !!callerAgentAddressStr
-      && !!defaultEvmLc
-      && callerAgentAddressStr.toLowerCase() === defaultEvmLc;
+    const callerIsDefaultAgent = resolveWmIdentity(callerAgentAddressStr).isDefaultAgentAddress;
     const agentAddressStr =
       opts.agentAddress
       ?? (opts.view === 'working-memory' && callerAgentAddressStr
@@ -695,17 +689,8 @@ export class QueryMethods extends DKGAgentBase {
     // era of WM data is stranded. Aliases never cross identities: they are
     // only emitted when the target IS the default agent (per
     // `canonicaliseWmId`), so A-1 isolation is unaffected.
-    let wmAddressAliases: string[] | undefined;
-    if (
-      opts.view === 'working-memory' &&
-      effectiveWmAddress &&
-      defaultEvmLc &&
-      peerIdLc &&
-      (effectiveWmAddress.toLowerCase() === defaultEvmLc || effectiveWmAddress.toLowerCase() === peerIdLc)
-    ) {
-      wmAddressAliases =
-        effectiveWmAddress.toLowerCase() === defaultEvmLc ? [this.peerId!] : [this.defaultAgentAddress!];
-    }
+    const wmAddressAliases = opts.view === 'working-memory'
+      ? resolveWmIdentity(effectiveWmAddress).aliases : undefined;
 
     const execute = () => this.queryEngine.query(sparql, {
       contextGraphId: opts.contextGraphId,

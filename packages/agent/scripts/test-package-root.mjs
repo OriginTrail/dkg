@@ -48,7 +48,8 @@ const expectedRfc64PublicCatalogReconciliationOutcomes = [
 ];
 
 if (
-  typeof root.DKGAgent !== 'function'
+  typeof root.resolveWorkingMemoryIdentityAliases !== 'function'
+  || typeof root.DKGAgent !== 'function'
   || typeof legacyAgent.DKGAgent !== 'function'
   || typeof legacyAgentBase.createListContextGraphsCacheInvalidatingStore !== 'function'
   || typeof legacyAgentPublish.createKnowledgeAssetVmPublishIntentKey !== 'function'

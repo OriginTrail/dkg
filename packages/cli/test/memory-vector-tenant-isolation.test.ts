@@ -100,6 +100,15 @@ async function search(store: VectorStore, principal: Parameters<typeof requestAu
 }
 
 describe('enabled vector memory search tenant isolation', () => {
+  it.each([PEER, PEER.toUpperCase()])('preserves exact peer ownership without granting reverse default aliases: %s', async (caller) => {
+    const store = createStore();
+    await insert(store, 'default-wallet', 'wm', A);
+    await insert(store, 'legacy-peer', 'wm', PEER);
+    const result = await search(store, { kind: 'agent', agentAddress: caller });
+    expect(result.map(row => row.entityUri))
+      .toEqual(caller === PEER ? ['legacy-peer'] : []);
+  });
+
   it('rejects an untyped new WM record whose owner was omitted', async () => {
     const store = createStore();
     await expect(store.insert({ embedding: [1, 0], sourceUri: 'source:unattributed', entityUri: 'unattributed',
