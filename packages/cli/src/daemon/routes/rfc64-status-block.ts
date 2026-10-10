@@ -13,6 +13,7 @@ import type {
   ResolvedRfc64PublicCatalogActivationConfig,
 } from '../../config.js';
 import {
+  sanitizeRfc64AuthorCatalogCapacityV1,
   sanitizeRfc64CatalogShadowExecutionStatusV1,
   sanitizeRfc64FinalizedPrivatePlacementQueueV1,
 } from './rfc64-status-contract.js';
@@ -37,18 +38,28 @@ export interface Rfc64StatusReaderV1 {
     OmitThisParameter<DKGAgent['readRfc64SwmCatalogProjectionSupervisorStatusV1']>;
 }
 
+const NO_SUPERVISOR_AGGREGATES_V1 = Object.freeze({
+  finalizedPrivatePlacementQueue: null,
+  authorCatalogCapacity: null,
+});
+
 /**
- * GH#3081 — only the aggregate finalized-private queue view leaves the supervisor status; its
- * per-author repairs never do. A provider that throws (for example before the supervisor is
- * bound) or answers in another shape reads as null rather than failing the route.
+ * GH#3081, GH#3134 — only two aggregates leave the supervisor status, each through its own
+ * allow-list: the finalized-private queue view and the author-catalog capacity counts. The
+ * per-author repairs never do. The supervisor is read once. A provider that throws (for example
+ * before the supervisor is bound) reads as null for both rather than failing the route, and one
+ * aggregate in another shape, or missing, is null on its own.
  */
-function readRfc64FinalizedPrivatePlacementQueueV1(agent: Rfc64StatusReaderV1) {
+function readRfc64ProjectionSupervisorAggregatesV1(agent: Rfc64StatusReaderV1) {
   try {
-    return sanitizeRfc64FinalizedPrivatePlacementQueueV1(
-      agent.readRfc64SwmCatalogProjectionSupervisorStatusV1?.()?.finalizedPrivatePlacement,
-    );
+    const supervisor = agent.readRfc64SwmCatalogProjectionSupervisorStatusV1?.();
+    return {
+      finalizedPrivatePlacementQueue:
+        sanitizeRfc64FinalizedPrivatePlacementQueueV1(supervisor?.finalizedPrivatePlacement),
+      authorCatalogCapacity: sanitizeRfc64AuthorCatalogCapacityV1(supervisor?.authorCatalogCapacity),
+    };
   } catch {
-    return null;
+    return NO_SUPERVISOR_AGGREGATES_V1;
   }
 }
 
@@ -190,9 +201,9 @@ export async function buildRfc64StatusBlocksV1(input: Readonly<{
         agent.readRfc64CatalogShadowExecutionStatusV1(),
       )
     : null;
-  const finalizedPrivatePlacementQueue = catalogActivation.enabled
-    ? readRfc64FinalizedPrivatePlacementQueueV1(agent)
-    : null;
+  const { finalizedPrivatePlacementQueue, authorCatalogCapacity } = catalogActivation.enabled
+    ? readRfc64ProjectionSupervisorAggregatesV1(agent)
+    : NO_SUPERVISOR_AGGREGATES_V1;
   const selectedPublicContextGraphs = new Set(
     catalogActivation.selectedPublicContextGraphs,
   );
@@ -290,6 +301,7 @@ export async function buildRfc64StatusBlocksV1(input: Readonly<{
       contextGraphs,
       shadowExecution,
       finalizedPrivatePlacementQueue,
+      authorCatalogCapacity,
       configuration,
       autoPublishEnabled: catalogActivation.autoPublish !== undefined,
       rollout,

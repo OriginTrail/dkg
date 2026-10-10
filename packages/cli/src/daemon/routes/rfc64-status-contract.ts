@@ -136,6 +136,26 @@ export function sanitizeRfc64FinalizedPrivatePlacementQueueV1(
   });
 }
 
+/**
+ * GH#3134 — allow-list for the author-catalog capacity aggregate: how many catalog scopes are at
+ * their row cap and how many placements are parked for them. The two counts are rebuilt field by
+ * field, so no graph id, author or UAL a provider might attach can cross the HTTP boundary. A
+ * provider that does not report the aggregate (an agent from before it existed) or reports another
+ * shape reads as null here, and nothing else in the status block depends on it.
+ */
+export function sanitizeRfc64AuthorCatalogCapacityV1(
+  input: unknown,
+): Readonly<{ scopesAtCap: number; parkedPlacements: number }> | null {
+  if (
+    !isRecordV1(input)
+    || !hasNonNegativeSafeIntegersV1(input, ['scopesAtCap', 'parkedPlacements'])
+  ) return null;
+  return Object.freeze({
+    scopesAtCap: input.scopesAtCap as number,
+    parkedPlacements: input.parkedPlacements as number,
+  });
+}
+
 function isRecordV1(value: unknown): value is Readonly<Record<string, unknown>> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);

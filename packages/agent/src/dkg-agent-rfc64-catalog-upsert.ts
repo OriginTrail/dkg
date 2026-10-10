@@ -44,6 +44,10 @@ import type { Rfc64PersistenceV1 } from './rfc64/persistence-v1.js';
 import {
   throwIfRfc64AbortedV1 as throwIfAbortedV1,
 } from './rfc64/abort-v1.js';
+import {
+  AuthorCatalogFullErrorV1,
+  assertAuthorCatalogTakesNewRowsV1,
+} from './internal/author-catalog-capacity.js';
 import type { Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1 } from
   './rfc64/swm-author-inventory-producer-v1.js';
 export interface UpsertConfirmedRfc64PublicRootCatalogAssetParamsV1 {
@@ -226,6 +230,8 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       const existingIndex = assets.findIndex(
         (asset) => asset.seal.reservedKaId === params.asset.seal.reservedKaId,
       );
+      // GH#3134 — a new asset needs a free row; a row the catalog holds is replaced in place.
+      if (existingIndex < 0) assertAuthorCatalogTakesNewRowsV1(assets, 1);
       if (
         existingIndex >= 0
         && sameRfc64SuccessorAssetV1(assets[existingIndex]!, params.asset)
@@ -649,13 +655,13 @@ export function planRfc64CatalogProjectionTargetV1(
   policy: Rfc64CatalogProjectionTargetPolicyV1,
 ): readonly Rfc64CatalogSuccessorAssetInputV1[] {
   if (policy === 'exact-replacement') return requested;
+  const retained = current.filter((existing) => !requested.some(
+    (candidate) => candidate.seal.reservedKaId === existing.seal.reservedKaId,
+  ));
+  // GH#3134 — requested rows the catalog does not hold are new; the others replace their rows.
+  assertAuthorCatalogTakesNewRowsV1(current, retained.length + requested.length - current.length);
   return snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1(
-    [
-      ...current.filter((existing) => !requested.some(
-        (candidate) => candidate.seal.reservedKaId === existing.seal.reservedKaId,
-      )),
-      ...requested,
-    ],
+    [...retained, ...requested],
     'RFC-64 monotonic-union target assets',
   );
 }
@@ -714,7 +720,7 @@ function insertOrFreeRfc64CatalogCapacityV1(
       return current.filter((_currentAsset, currentIndex) => currentIndex !== index);
     }
   }
-  throw new Error('RFC-64 exact-set planner cannot free capacity for a target-only asset');
+  throw new AuthorCatalogFullErrorV1(current, 1);
 }
 
 function insertRfc64CatalogAssetV1(
