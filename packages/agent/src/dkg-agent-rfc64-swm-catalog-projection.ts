@@ -19,7 +19,11 @@ import {
   type SwmAuthorInventoryScopeV1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
-import { storeLaneInflightLimit } from '@origintrail-official/dkg-storage';
+import { withOwnedRpcRequestContext } from '@origintrail-official/dkg-chain';
+import {
+  storeLaneInflightLimit,
+  withDefaultStoreWorkPriority,
+} from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 
 import { DKGAgentBase } from './dkg-agent-base.js';
@@ -41,8 +45,22 @@ import { rfc64SwmInventoryShadowRuntimeV1 } from
   './rfc64/swm-inventory-shadow-runtime-v1.js';
 import { snapshotRfc64CatalogDeploymentProfileV1 } from
   './rfc64/catalog-authority-config-v1.js';
+import {
+  catalogHeadDeliveryReportV1,
+  type CatalogHeadDeliveryStatusV1,
+} from './internal/catalog-head-delivery-report.js';
 import type { Rfc64PublicCatalogServiceV1 } from
   './rfc64/public-catalog-service-v1.js';
+import {
+  RFC64_CATALOG_HEAD_HANDOFF_CANCELLED_V1,
+  RFC64_CATALOG_HEAD_HANDOFF_UNAVAILABLE_V1,
+  type DeliverRfc64PublicCatalogHeadInputV1,
+  type Rfc64CatalogHeadDeliveryOptionsV1,
+  type Rfc64CatalogHeadDeliveryOutcomeV1,
+  type Rfc64CatalogHeadHandoffV1,
+} from './rfc64/public-catalog-head-delivery-v1.js';
+import type { Rfc64PublicCatalogHeadAnnouncementV1 } from
+  './rfc64/public-catalog-transport-v1.js';
 import { prepareRfc64SwmInventoryCatalogTargetV1 } from
   './rfc64/swm-inventory-catalog-reconciler-v1.js';
 import {
@@ -57,6 +75,7 @@ import {
   INERT_CATALOG_PLACEMENT_ATTEMPT_V1,
   type CatalogPlacementAttemptV1,
 } from './internal/catalog-placement-timing.js';
+import { readOwedPlacementSealV1 } from './internal/owed-placement-seals.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
   './rfc64/finalized-private-placement-repair-store-v1.js';
 
@@ -204,6 +223,9 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         contextGraphId: params.contextGraphId,
         authorAddress: params.authorAddress,
         identity: params,
+        // The seal this process was handed at the confirmation, for an assertion that was
+        // re-opened more than once since and whose stored seals have moved on.
+        retainedSeal: readOwedPlacementSealV1(this, params.sealDigest),
       })
       : resolveRfc64InventoryWorkspaceCatalogAssetV1({
         store: this.store,
@@ -212,6 +234,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         authorAddress: params.authorAddress,
         laneKind: lane.kind,
         row,
+        retainedSeal: readOwedPlacementSealV1(this, params.sealDigest),
       })));
     lane.service.acceptedPolicySnapshotForCatalogScope(scope);
     return this.upsertObservedRfc64PublicRootCatalogAssetV1({
@@ -543,6 +566,73 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       status: 'active',
       lane,
     });
+  }
+
+  /**
+   * Hand a head that a catalog mutation just committed to the catalog service's delivery owner
+   * and return at once: the fan-out to peers runs outside the serialized mutation (GH#3081).
+   * Never throws. A hand-off that nobody takes is logged; its head stays durable and reaches
+   * peers with the next head of its catalog or through replay.
+   */
+  deliverRfc64CatalogHeadV1(
+    this: DKGAgent,
+    input: DeliverRfc64PublicCatalogHeadInputV1,
+  ): Rfc64CatalogHeadHandoffV1 {
+    const receipt = this.rfc64PublicCatalogServiceV1?.deliverCatalogHead(input)
+      ?? RFC64_CATALOG_HEAD_HANDOFF_UNAVAILABLE_V1;
+    catalogHeadDeliveryReportV1(this).handoff(this.log, input?.announcement, receipt);
+    return receipt;
+  }
+
+  /** A committed head that its mutation did not hand off, because the caller had given up. */
+  reportRfc64CatalogHeadNotHandedOffV1(
+    this: DKGAgent,
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+  ): void {
+    catalogHeadDeliveryReportV1(this)
+      .handoff(this.log, announcement, RFC64_CATALOG_HEAD_HANDOFF_CANCELLED_V1);
+  }
+
+  /** Await the fan-outs of handed-off heads (tests / graceful shutdown coordination). */
+  whenRfc64CatalogHeadDeliveryIdleV1(this: DKGAgent): Promise<void> {
+    return this.rfc64PublicCatalogServiceV1?.whenCatalogHeadDeliveryIdle() ?? Promise.resolve();
+  }
+
+  /** Head delivery in counts since this process started, for `/api/status`: no identities. */
+  readRfc64CatalogHeadDeliveryStatusV1(this: DKGAgent): Readonly<CatalogHeadDeliveryStatusV1> {
+    return catalogHeadDeliveryReportV1(this).status();
+  }
+
+  /**
+   * The agent's side of head delivery. A fan-out is best-effort work that outlives the mutation
+   * that produced its head, so the store and chain reads of its policy decisions take the
+   * background lanes; its outcome goes to the log.
+   */
+  rfc64CatalogHeadDeliveryPortsV1(
+    this: DKGAgent,
+  ): Pick<Rfc64CatalogHeadDeliveryOptionsV1, 'onDelivered' | 'runFanout'> {
+    return Object.freeze({
+      runFanout: (fanout: () => Promise<void>) => withDefaultStoreWorkPriority(
+        'background',
+        () => withOwnedRpcRequestContext({ requestClass: 'background' }, fanout),
+      ),
+      onDelivered: (outcome: Rfc64CatalogHeadDeliveryOutcomeV1) =>
+        this.reportRfc64CatalogHeadDeliveryV1(outcome),
+    });
+  }
+
+  /**
+   * One finished fan-out of a handed-off head: the delivery report's lines (see
+   * `internal/catalog-head-delivery-report.ts`), then the warning for deliveries that failed.
+   * Peers this node's own policy refused received nothing and are not failures, so a head with
+   * no eligible peer writes nothing at warn level.
+   */
+  reportRfc64CatalogHeadDeliveryV1(
+    this: DKGAgent,
+    outcome: Rfc64CatalogHeadDeliveryOutcomeV1,
+  ): void {
+    catalogHeadDeliveryReportV1(this).delivered(this.log, outcome);
+    this.warnRfc64CatalogAnnounceFailuresV1(outcome);
   }
 
 }

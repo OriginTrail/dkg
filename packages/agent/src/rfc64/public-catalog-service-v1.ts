@@ -117,9 +117,19 @@ import type {
   Rfc64CatalogAuthorityPolicyV1,
 } from './public-catalog-activation-config-v1.js';
 import {
+  notingRfc64CatalogPolicyFailureV1,
+  observedRfc64CatalogAccessAuthorityV1,
+} from './catalog-policy-decision-probe-v1.js';
+import {
+  Rfc64CatalogHeadDeliveryV1,
+  type AnnounceRfc64PublicCatalogHeadResultV1,
+  type DeliverRfc64PublicCatalogHeadInputV1,
+  type Rfc64CatalogHeadDeliveryOptionsV1,
+  type Rfc64CatalogHeadHandoffV1,
+} from './public-catalog-head-delivery-v1.js';
+import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
   RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
-  Rfc64PublicCatalogTransportErrorV1,
   Rfc64PublicCatalogTransportV1,
   encodeRfc64PublicCatalogHeadAnnouncementV1,
   parseRfc64PublicCatalogHeadAnnouncementV1,
@@ -248,6 +258,11 @@ export interface Rfc64PublicCatalogServiceOptionsV1 {
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     remotePeerId: string,
   ) => void;
+  /** Host ports of head delivery: the lanes its policy reads take and its outcome observer. */
+  readonly catalogHeadDelivery?: Pick<
+    Rfc64CatalogHeadDeliveryOptionsV1,
+    'onDelivered' | 'runFanout'
+  >;
   /** Policy-authorized signal to replay durable current heads to one peer. */
   readonly onCatalogHeadReplayRequested?: (
     request: Readonly<Rfc64PublicCatalogHeadReplayRequestV1>,
@@ -379,18 +394,7 @@ export interface AnnounceRfc64PublicCatalogHeadInputV1 {
   readonly signal?: AbortSignal;
 }
 
-export interface AnnounceRfc64PublicCatalogHeadResultV1 {
-  /** Validated immutable snapshot used for every delivery attempt. */
-  readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
-  /** Input-order peers that returned the exact transport ACK. */
-  readonly announcedPeers: readonly string[];
-  /** Input-order peers whose bounded attempt threw or returned a non-ACK; `code` classifies typed failures. */
-  readonly failedPeers: ReadonlyArray<{
-    readonly peerId: string;
-    readonly error: string;
-    readonly code?: Rfc64PublicCatalogTransportErrorV1['code'];
-  }>;
-}
+export type { AnnounceRfc64PublicCatalogHeadResultV1 };
 
 export interface RequestRfc64CatalogHeadReplayInputV1 {
   readonly remotePeerId: string;
@@ -482,6 +486,7 @@ export class Rfc64PublicCatalogServiceV1 {
   readonly #policies: Rfc64CatalogAccessPolicyRegistryV1;
   readonly #receiver: Rfc64PublicCatalogReceiverV1;
   readonly #transport: Rfc64PublicCatalogTransportV1;
+  readonly #headDelivery: Rfc64CatalogHeadDeliveryV1;
   readonly #currentHeadDiscoveryTransport:
     Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1 | undefined;
   readonly #nativeTransport: Rfc64PublicCatalogNativeTransportV1 | undefined;
@@ -516,7 +521,9 @@ export class Rfc64PublicCatalogServiceV1 {
 
   constructor(options: Rfc64PublicCatalogServiceOptionsV1) {
     this.#controlObjects = options.controlObjects;
-    this.#policies = new Rfc64CatalogAccessPolicyRegistryV1(options.accessPolicyAuthority);
+    this.#policies = new Rfc64CatalogAccessPolicyRegistryV1(
+      observedRfc64CatalogAccessAuthorityV1(options.accessPolicyAuthority),
+    );
     this.#verifyIssuerSignature =
       options.verifyIssuerSignature ?? verifyControlEnvelopeIssuerSignatureV1;
     this.#transportTimeoutMs = options.transportTimeoutMs ?? DEFAULT_TRANSPORT_TIMEOUT_MS;
@@ -536,17 +543,15 @@ export class Rfc64PublicCatalogServiceV1 {
         reconciliationLane: 'catalog-apply',
       }));
 
+    const authorizeCatalogOperation: Rfc64CatalogAccessPolicyRegistryV1['authorize'] =
+      (input) => notingRfc64CatalogPolicyFailureV1(() => (
+        this.#authorityForOperation(input.contextGraphId, input.operation).track2Enabled
+          ? this.#policies.authorize(input)
+          : null
+      ));
     this.#transport = new Rfc64PublicCatalogTransportV1(options.router, {
       controlObjects: this.#controlObjects,
-      authorizeCatalogOperation: async (input) => {
-        const authority = this.#authorityForOperation(
-          input.contextGraphId,
-          input.operation,
-        );
-        return !authority.track2Enabled
-          ? null
-          : this.#policies.authorize(input);
-      },
+      authorizeCatalogOperation,
       verifyIssuerSignature: this.#verifyIssuerSignature,
       // Non-blocking: schedule() enqueues synchronously so the transport's ACK
       // path (which awaits this callback) is never stalled on a fetch.
@@ -559,6 +564,25 @@ export class Rfc64PublicCatalogServiceV1 {
         this.#requestAnnouncedCurrentHeadSynchronization(announcement, remotePeerId);
       },
       onCatalogHeadReplayRequested: options.onCatalogHeadReplayRequested,
+    });
+    this.#headDelivery = new Rfc64CatalogHeadDeliveryV1({
+      send: (remotePeerId, announcement, sendOptions) =>
+        this.#transport.announceCatalogHead(remotePeerId, announcement, sendOptions),
+      isPeerAuthorized: (remotePeerId, announcement) =>
+        this.#transport.isCatalogPolicyAuthorized('announce-outbound', remotePeerId, announcement),
+      assertDeliverable: (announcement, remotePeers) => {
+        this.#requireStarted();
+        assertSupportedCatalogFanout(
+          this.#assertAcceptedCatalogAnnouncement(announcement, 'announce-outbound'),
+          remotePeers,
+          this.#nativeTransport?.privateScopeBoundReadsConfigured === true,
+        );
+      },
+      localPeerId: options.localPeerId,
+      fanoutBudgetMs: this.#transportTimeoutMs,
+      // The host chooses these two and nothing else: the ports above stay the service's own.
+      onDelivered: options.catalogHeadDelivery?.onDelivered,
+      runFanout: options.catalogHeadDelivery?.runFanout,
     });
 
     this.#currentHeadDiscoveryTransport = options.currentHeadDiscovery === undefined
@@ -591,15 +615,7 @@ export class Rfc64PublicCatalogServiceV1 {
         readCatalogObjectByDigest: options.native.readCatalogObjectByDigest,
         readKaBundleByDigest: options.native.readKaBundleByDigest,
         resolveScopedReadCapability: options.native.resolveScopedReadCapability,
-        authorizeCatalogOperation: async (input) => {
-          const authority = this.#authorityForOperation(
-            input.contextGraphId,
-            input.operation,
-          );
-          return !authority.track2Enabled
-            ? null
-            : this.#policies.authorize(input);
-        },
+        authorizeCatalogOperation,
         verifyIssuerSignature: this.#verifyIssuerSignature,
       });
     const stagingReconciler = {
@@ -840,8 +856,9 @@ export class Rfc64PublicCatalogServiceV1 {
     this.#closed = true;
     this.#started = false;
     try {
-      // Keep both outbound transports live until the scheduler has drained.
-      // Post-close availability callbacks are harmless: schedule() rejects them.
+      // Abort and drain head delivery, then the scheduler: both outbound transports stay live
+      // until then. Post-close availability callbacks are harmless: schedule() rejects them.
+      await this.#headDelivery.close();
       await this.closeReceiverAdmissionAndDrain();
     } finally {
       this.#transport.stop();
@@ -1030,7 +1047,7 @@ export class Rfc64PublicCatalogServiceV1 {
       signatureVariantDigest: headKeys.signatureVariantDigest,
     });
 
-    const delivery = await this.#announceCatalogHeadSnapshot(announcement, peers);
+    const delivery = await this.#headDelivery.announce(announcement, peers);
 
     return Object.freeze({
       announcement: delivery.announcement,
@@ -1064,7 +1081,20 @@ export class Rfc64PublicCatalogServiceV1 {
       peers,
       this.#nativeTransport?.privateScopeBoundReadsConfigured === true,
     );
-    return this.#announceCatalogHeadSnapshot(announcement, peers, input.signal);
+    return this.#headDelivery.announce(announcement, peers, input.signal);
+  }
+
+  /**
+   * Hand an already durable head to the delivery owner and return at once (GH#3081). The fan-out
+   * runs outside the caller's catalog mutation: see `public-catalog-head-delivery-v1.ts`.
+   */
+  deliverCatalogHead(input: DeliverRfc64PublicCatalogHeadInputV1): Rfc64CatalogHeadHandoffV1 {
+    return this.#headDelivery.deliver(input);
+  }
+
+  /** Idle-await the fan-outs of handed-off heads (tests / graceful shutdown coordination). */
+  whenCatalogHeadDeliveryIdle(): Promise<void> {
+    return this.#headDelivery.whenIdle();
   }
 
   /** Ask one authorized peer to replay every durable current head for a CG. */
@@ -1753,37 +1783,6 @@ export class Rfc64PublicCatalogServiceV1 {
       contextGraphId,
       rfc64CatalogAuthorityDirectionV1(operation),
     );
-  }
-
-  async #announceCatalogHeadSnapshot(
-    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
-    peers: readonly string[],
-    signal?: AbortSignal,
-  ): Promise<AnnounceRfc64PublicCatalogHeadResultV1> {
-    const remotePeers = this.#localPeerId === undefined
-      ? snapshotRfc64PublicCatalogAnnouncementPeersV1(peers)
-      : snapshotRfc64RemoteCatalogAnnouncementPeersV1(peers, this.#localPeerId);
-    const announcedPeers: string[] = [];
-    const failedPeers: Array<AnnounceRfc64PublicCatalogHeadResultV1['failedPeers'][number]> = [];
-    for (const peerId of remotePeers) {
-      if (signal?.aborted) break;
-      try {
-        await this.#transport.announceCatalogHead(peerId, announcement, this.#sendOptions(signal));
-        announcedPeers.push(peerId);
-      } catch (error) {
-        // Classify where the typed error still exists: the message is display text only.
-        failedPeers.push({
-          peerId,
-          error: error instanceof Error ? error.message : String(error),
-          ...(error instanceof Rfc64PublicCatalogTransportErrorV1 ? { code: error.code } : {}),
-        });
-      }
-    }
-    return Object.freeze({
-      announcement,
-      announcedPeers: Object.freeze(announcedPeers),
-      failedPeers: Object.freeze(failedPeers.map((failure) => Object.freeze(failure))),
-    });
   }
 
   #assertAcceptedCatalogAnnouncement(

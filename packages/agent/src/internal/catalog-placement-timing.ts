@@ -6,30 +6,43 @@ import { rememberBounded } from '../bounded-map.js';
 import type { Rfc64PublicCatalogTransportErrorCodeV1 } from '../rfc64/public-catalog-transport-v1.js';
 
 /**
- * GH#3081 — where a confirmed publication waits for its RFC-64 catalog placement. Observation
- * only: no repair, admission or retry decision reads anything recorded here, every entry point
- * swallows its own failure, and the output is one log line per slow observer call plus an
- * aggregate, identity-free view of the finalized-private queue for `/api/status`.
+ * GH#3081 — how long a confirmed publication's RFC-64 catalog placement takes, and how many
+ * placements are owed. Observation only: no repair, admission or retry decision reads anything
+ * recorded here, every entry point swallows its own failure, and the output is one log line per
+ * slow placement request plus an aggregate, identity-free view of the finalized-private queue for
+ * `/api/status`.
+ *
+ * Nothing waits for a placement. The post-confirmation observer stores the durable marker, asks
+ * the supervisor for the placement and returns; the publication is terminal from there. The line
+ * is therefore written when the supervisor releases the request after its first attempt, not when
+ * the observer returns, and the backlog is counted from the markers that are owed, not from callers.
  *
  * Everything travels explicitly with the work the supervisor already owns. An observer call hands
  * its wait's `observer` to the supervisor with its request; the supervisor keeps it beside the
- * waiter's settle callback and tells it about the cooldown skips it waits through and the attempt
- * that releases it. An admitted attempt returns a recorder that the supervisor passes to the repair
- * body beside the data-only marker, and the body charges its phases to it (the coverage check and
- * asset resolution in the projection; the locked state read, successor production, applied-head
- * CAS and announcement in the upsert). Nothing is matched by object identity or relies on how many
- * repairs run at once; a repair run outside the supervisor reports to the inert recorder, so a line
- * describes exactly the attempt that released its call. It splits the call's wait into the time to
- * request the repair (the asset lock
- * and the durable marker write), the time queued in the supervisor (earlier markers, cooldown,
- * the next pass) and the attempt, broken down by phase; `otherMs` is the attempt time no phase
- * claims (lock waits, lane and inventory reads, marker deletion). Per-send announcement timing is
- * not measured: the announce phase is the whole sequential fan-out, with peer and failure counts.
+ * waiter's settle callback and tells it about the cooldown skips the request sits through and the
+ * attempt that releases it. An admitted attempt returns a recorder that the supervisor passes to
+ * the repair body beside the data-only marker, and the body charges its phases to it (the coverage
+ * check and asset resolution in the projection; the locked state read, successor production,
+ * applied-head CAS and hand-off in the upsert). Nothing is matched by object identity or relies
+ * on how many repairs run at once; a repair run outside the supervisor reports to the inert
+ * recorder, so a line describes exactly the attempt that released its call's request. It splits
+ * the time from the observer call to the end of that attempt into the time to request the
+ * placement (the durable marker write), the time queued in the supervisor (earlier markers,
+ * cooldown, the next pass) and the attempt, broken down by phase; `otherMs` is the attempt time no
+ * phase claims (lock waits, lane and inventory reads, marker deletion). The fan-out of a committed
+ * head is not part of an attempt: the upsert hands the head to the catalog service's delivery
+ * owner and returns, so a line's announce phase and peer counts stay at zero and the fan-out
+ * writes its own `rfc64_catalog_head_delivery` line.
  */
 
-/** An observer wait at or above this writes its line; shorter waits write nothing. */
+/** A placement request that takes this long or longer writes its line; shorter ones write nothing. */
 export const CATALOG_PLACEMENT_WAIT_LOG_THRESHOLD_MS = 5_000;
 const MAX_TRACKED_ENTRIES = 512;
+/**
+ * Owed markers this process keeps a first-seen time for. The rest are counted, not kept: a pass
+ * says how many markers there are, so the count stays exact at every pass start however many.
+ */
+const MAX_OWED_TRACKED = 4_096;
 const POLICY_DENIED_CODE: Rfc64PublicCatalogTransportErrorCodeV1 = 'catalog-transport-policy-denied';
 
 export const CATALOG_PLACEMENT_PHASES = [
@@ -43,7 +56,7 @@ export const CATALOG_PLACEMENT_PHASES = [
   'successor',
   /** The applied-head compare-and-swap. */
   'cas',
-  /** Best-effort announcement of the committed head to every selected peer, in sequence. */
+  /** Zero: the committed head is handed off for delivery; its fan-out runs outside the attempt. */
   'announce',
 ] as const;
 
@@ -79,6 +92,7 @@ export interface CatalogPlacementAdmissionV1 {
   readonly attempt: CatalogPlacementAttemptV1;
   /** What the attempt recorded; absent when observation itself failed, which reads as no attempt. */
   readonly record?: Readonly<CatalogPlacementAttemptRecordV1>;
+  /** `completed` means the marker is gone: the placement is no longer owed. */
   end(outcome: 'completed' | 'failed'): void;
 }
 
@@ -86,7 +100,10 @@ export interface CatalogPlacementAdmissionV1 {
 export interface CatalogPlacementWaiterObserverV1 {
   /** A pass skipped the waiter's repair because its retry cooldown had not elapsed. */
   cooldownSkipped(): void;
-  /** The supervisor released the waiter: after `admission`'s attempt, or with none. */
+  /**
+   * The supervisor released the request: after `admission`'s attempt, or with none (its marker
+   * left the queue, the supervisor closed, or it refused the request outright).
+   */
   released(admission?: CatalogPlacementAdmissionV1): void;
 }
 
@@ -104,13 +121,16 @@ export interface CatalogPlacementAttemptV1 {
   announced(delivery: CatalogPlacementDeliveryV1): void;
 }
 
-/** One observer call's wait. */
+/** One observer call, and the placement request it made. */
 export interface CatalogPlacementWaitV1 {
   /** Handed to the supervisor with this call's request; told about the waiter it registers. */
   readonly observer: CatalogPlacementWaiterObserverV1;
-  /** The observer asked the supervisor for a placement. */
+  /** The observer is asking the supervisor for a placement now, with this wait's `observer`. */
   requested(): void;
-  /** The observer is returning: write the line when the wait reached the threshold. */
+  /**
+   * The observer is returning. A request the supervisor still holds writes its line when the
+   * supervisor releases it; any other call writes it now. Either way only at the threshold.
+   */
   end(log: Pick<Logger, 'info'>): void;
 }
 
@@ -118,6 +138,20 @@ export interface CatalogPlacementWaitV1 {
 export interface FinalizedPrivatePlacementQueueStatusV1 {
   /** Markers the most recent supervisor pass listed (never a fresh read). */
   readonly depth: number;
+  /**
+   * Placements owed right now: the markers the latest pass listed and has not placed, and the
+   * markers stored since. This is the backlog; no caller waits on it. Beyond 4,096 owed
+   * placements a marker stored since the latest pass started is counted from the next pass.
+   */
+  readonly pending: number;
+  /**
+   * How long this process has known of the oldest pending placement, from its request or from
+   * the first pass that listed it; a marker that survived a restart counts from that pass. A
+   * first-seen time is kept for 4,096 placements; one beyond them counts from the pass that
+   * finds room for it.
+   */
+  readonly oldestPendingAgeMs: number | null;
+  /** Accepted requests whose first attempt has not ended. */
   readonly waiters: number;
   readonly oldestWaiterAgeMs: number | null;
   readonly passRunning: boolean;
@@ -173,6 +207,13 @@ function logfmtValue(value: string): string {
 export class CatalogPlacementTimingV1 {
   readonly #sources: CatalogPlacementTimingSourcesV1;
   readonly #observerCalls = new Map<string, number>();
+  /**
+   * When this process first knew of each placement still owed, by the supervisor's marker key:
+   * at most {@link MAX_OWED_TRACKED} of them. `#owedUntracked` counts the owed markers the
+   * latest pass listed beyond those.
+   */
+  readonly #owedSince = new Map<string, number>();
+  #owedUntracked = 0;
   #depth = 0;
   #passStartedAt: number | undefined;
   #lastPassDurationMs: number | null = null;
@@ -191,8 +232,21 @@ export class CatalogPlacementTimingV1 {
     }
   }
 
-  /** Supervisor: one attempt starts now; its recorder travels to the repair body explicitly. */
-  admit(): CatalogPlacementAdmissionV1 {
+  /** Supervisor: a durable marker exists for `key`, whether or not its request is then accepted. */
+  owed(key: string): void {
+    observe(() => {
+      // With markers that are only counted, a key that is not kept may be one of them: it is
+      // left to the next pass, which lists every marker.
+      if (this.#owedSince.has(key) || this.#owedUntracked > 0 || this.#owedSince.size >= MAX_OWED_TRACKED) return;
+      this.#owedSince.set(key, this.#sources.clock());
+    });
+  }
+
+  /**
+   * Supervisor: one attempt at the marker `key` starts now; its recorder travels to the repair
+   * body explicitly.
+   */
+  admit(key?: string): CatalogPlacementAdmissionV1 {
     try {
       const record: CatalogPlacementAttemptRecordV1 = {
         admittedAt: this.#sources.clock(),
@@ -206,8 +260,11 @@ export class CatalogPlacementTimingV1 {
         attempt: this.#recorder(record),
         record,
         end: (outcome) => observe(() => {
-          record.endedAt = this.#sources.clock();
           record.failed = outcome === 'failed';
+          if (outcome === 'completed' && key !== undefined && !this.#owedSince.delete(key) && this.#owedUntracked > 0) {
+            this.#owedUntracked -= 1;
+          }
+          record.endedAt = this.#sources.clock();
         }),
       };
       return Object.freeze(admission);
@@ -223,11 +280,21 @@ export class CatalogPlacementTimingV1 {
     });
   }
 
-  /** Supervisor: a pass listed `depth` durable markers. */
-  passStarted(depth: number): void {
+  /** Supervisor: a pass listed the durable markers with these keys; exactly they are owed now. */
+  passStarted(listed: ReadonlySet<string>): void {
     observe(() => {
-      this.#depth = depth;
-      this.#passStartedAt = this.#sources.clock();
+      this.#depth = listed.size;
+      const now = this.#sources.clock();
+      this.#passStartedAt = now;
+      for (const key of this.#owedSince.keys()) {
+        if (!listed.has(key)) this.#owedSince.delete(key);
+      }
+      for (const key of listed) {
+        if (this.#owedSince.size >= MAX_OWED_TRACKED) break;
+        if (!this.#owedSince.has(key)) this.#owedSince.set(key, now);
+      }
+      // Every key kept now is a listed one; the listed markers beyond them are owed and counted.
+      this.#owedUntracked = listed.size - this.#owedSince.size;
     });
   }
 
@@ -240,20 +307,25 @@ export class CatalogPlacementTimingV1 {
     });
   }
 
-  /** Supervisor status: aggregates only, from the waiters the supervisor holds. */
+  /** Supervisor status: aggregates only, from the markers owed and the requests the supervisor holds. */
   queueStatus(
     waiters: Readonly<{ count: number; oldestRequestedAt: number | undefined }>,
     passRunning: boolean,
   ): Readonly<FinalizedPrivatePlacementQueueStatusV1> {
     const now = this.now();
-    const { oldestRequestedAt } = waiters;
-    const oldestWaiterAgeMs = oldestRequestedAt === undefined || !Number.isFinite(now)
-      ? null
-      : Math.max(0, Math.round(now - oldestRequestedAt));
+    const ageMs = (since: number | undefined): number | null => (
+      since === undefined || !Number.isFinite(now - since) ? null : Math.max(0, Math.round(now - since))
+    );
+    let oldestOwedSince: number | undefined;
+    for (const since of this.#owedSince.values()) {
+      if (oldestOwedSince === undefined || since < oldestOwedSince) oldestOwedSince = since;
+    }
     return Object.freeze({
       depth: this.#depth,
+      pending: this.#owedSince.size + this.#owedUntracked,
+      oldestPendingAgeMs: ageMs(oldestOwedSince),
       waiters: waiters.count,
-      oldestWaiterAgeMs,
+      oldestWaiterAgeMs: ageMs(waiters.oldestRequestedAt),
       passRunning,
       lastPassDurationMs: this.#lastPassDurationMs,
       cooldownSkips: this.#cooldownSkips,
@@ -306,6 +378,18 @@ export class CatalogPlacementTimingV1 {
       let requestedAt: number | undefined;
       let cooldownSkips = 0;
       let attempt: Readonly<CatalogPlacementAttemptRecordV1> | undefined;
+      // The observer does not wait for the placement: the supervisor usually still holds the
+      // request when the observer returns, and the line is then written at the release.
+      let released = false;
+      let held = false;
+      let logAtRelease: Pick<Logger, 'info'> | undefined;
+      const writeLine = (log: Pick<Logger, 'info'>): void => {
+        const totalMs = this.#sources.clock() - startedAt;
+        if (!(totalMs >= this.#sources.logThresholdMs)) return;
+        log.info(ctx, describeWaitV1({
+          asset, ctx, observerCall, startedAt, totalMs, requestedAt, cooldownSkips, attempt,
+        }));
+      };
       return Object.freeze({
         observer: Object.freeze({
           cooldownSkipped: () => observe(() => {
@@ -313,17 +397,20 @@ export class CatalogPlacementTimingV1 {
           }),
           released: (admission?: CatalogPlacementAdmissionV1) => observe(() => {
             if (admission?.record !== undefined) attempt = admission.record;
+            released = true;
+            held = false;
+            const log = logAtRelease;
+            logAtRelease = undefined;
+            if (log !== undefined) writeLine(log);
           }),
         }),
         requested: () => observe(() => {
+          held = !released;
           requestedAt = this.#sources.clock();
         }),
         end: (log: Pick<Logger, 'info'>) => observe(() => {
-          const totalMs = this.#sources.clock() - startedAt;
-          if (!(totalMs >= this.#sources.logThresholdMs)) return;
-          log.info(ctx, describeWaitV1({
-            asset, ctx, observerCall, startedAt, totalMs, requestedAt, cooldownSkips, attempt,
-          }));
+          if (held) logAtRelease = log;
+          else writeLine(log);
         }),
       });
     } catch {
@@ -333,8 +420,9 @@ export class CatalogPlacementTimingV1 {
 }
 
 /**
- * The `rfc64_catalog_placement_wait` line. `requestedAt` is undefined on the public lane, which
- * never asks for a placement; `attempt` is undefined when no attempt released the call's waiter.
+ * The `rfc64_catalog_placement_wait` line: the time from one observer call to the end of the
+ * attempt that released its request. `requestedAt` is undefined on the public lane, which never
+ * asks for a placement; `attempt` is undefined when no attempt released the call's waiter.
  */
 function describeWaitV1(wait: Readonly<{
   asset: CatalogPlacementAssetV1;

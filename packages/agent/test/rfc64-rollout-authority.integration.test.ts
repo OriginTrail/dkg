@@ -1683,6 +1683,7 @@ describe('RFC-64 rollout authority integration', () => {
     });
     await publisher.awaitInFlightRfc64SwmInventoryObserversV1();
     await publisher.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    await publisher.whenRfc64CatalogHeadDeliveryIdleV1();
     await receiver.whenRfc64PublicCatalogReceiverIdleV1();
 
     const ownerInventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1({
@@ -1743,6 +1744,7 @@ describe('RFC-64 rollout authority integration', () => {
 
     await publisher.awaitInFlightRfc64SwmInventoryObserversV1();
     await publisher.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    await publisher.whenRfc64CatalogHeadDeliveryIdleV1();
     await receiver.whenRfc64PublicCatalogReceiverIdleV1();
     expect((publisher as any).rfc64PublicCatalogServiceV1.acceptedPolicySnapshot(
       NETWORK_ID,
