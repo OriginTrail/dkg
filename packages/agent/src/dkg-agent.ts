@@ -461,6 +461,7 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase, createListContextGraphsCacheInvalidatingStore } from './dkg-agent-base.js';
 import { createProjectionMutationObserver } from './internal/projection-mutation-observer.js';
+import { catalogPlacementTimingV1 } from './internal/catalog-placement-timing.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
@@ -1103,11 +1104,12 @@ export class DKGAgent extends DKGAgentBase {
         listFinalizedPrivateRepairs: () => (
           this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.list() ?? []
         ),
-        repairFinalizedPrivatePlacement: async (repair) => {
-          await this.repairRfc64FinalizedPrivateCatalogPlacementV1(repair);
+        repairFinalizedPrivatePlacement: async (repair, placement) => {
+          await this.repairObservedRfc64FinalizedPrivateCatalogPlacementV1(repair, placement);
         },
         reconcile: (params) => this.reconcileRfc64PublicCatalogFromSwmInventoryV1(params),
         warn: (ctx, message) => this.log.warn(ctx, message),
+        placementTiming: () => catalogPlacementTimingV1(this),
       }),
     );
     const authorityRefreshOwner = createRfc64CatalogAuthorityRefreshOwnerV1({

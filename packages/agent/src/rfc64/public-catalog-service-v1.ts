@@ -119,6 +119,7 @@ import type {
 import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
   RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
+  Rfc64PublicCatalogTransportErrorV1,
   Rfc64PublicCatalogTransportV1,
   encodeRfc64PublicCatalogHeadAnnouncementV1,
   parseRfc64PublicCatalogHeadAnnouncementV1,
@@ -383,8 +384,12 @@ export interface AnnounceRfc64PublicCatalogHeadResultV1 {
   readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
   /** Input-order peers that returned the exact transport ACK. */
   readonly announcedPeers: readonly string[];
-  /** Input-order peers whose bounded attempt threw or returned a non-ACK. */
-  readonly failedPeers: ReadonlyArray<{ readonly peerId: string; readonly error: string }>;
+  /** Input-order peers whose bounded attempt threw or returned a non-ACK; `code` classifies typed failures. */
+  readonly failedPeers: ReadonlyArray<{
+    readonly peerId: string;
+    readonly error: string;
+    readonly code?: Rfc64PublicCatalogTransportErrorV1['code'];
+  }>;
 }
 
 export interface RequestRfc64CatalogHeadReplayInputV1 {
@@ -1053,10 +1058,7 @@ export class Rfc64PublicCatalogServiceV1 {
       encodeRfc64PublicCatalogHeadAnnouncementV1(input.announcement),
     );
     const peers = snapshotRfc64PublicCatalogAnnouncementPeersV1(input.peers);
-    const heldPolicy = this.#assertAcceptedCatalogAnnouncement(
-      announcement,
-      'announce-outbound',
-    );
+    const heldPolicy = this.#assertAcceptedCatalogAnnouncement(announcement, 'announce-outbound');
     assertSupportedCatalogFanout(
       heldPolicy,
       peers,
@@ -1762,20 +1764,18 @@ export class Rfc64PublicCatalogServiceV1 {
       ? snapshotRfc64PublicCatalogAnnouncementPeersV1(peers)
       : snapshotRfc64RemoteCatalogAnnouncementPeersV1(peers, this.#localPeerId);
     const announcedPeers: string[] = [];
-    const failedPeers: Array<{ peerId: string; error: string }> = [];
+    const failedPeers: Array<AnnounceRfc64PublicCatalogHeadResultV1['failedPeers'][number]> = [];
     for (const peerId of remotePeers) {
       if (signal?.aborted) break;
       try {
-        await this.#transport.announceCatalogHead(
-          peerId,
-          announcement,
-          this.#sendOptions(signal),
-        );
+        await this.#transport.announceCatalogHead(peerId, announcement, this.#sendOptions(signal));
         announcedPeers.push(peerId);
       } catch (error) {
+        // Classify where the typed error still exists: the message is display text only.
         failedPeers.push({
           peerId,
           error: error instanceof Error ? error.message : String(error),
+          ...(error instanceof Rfc64PublicCatalogTransportErrorV1 ? { code: error.code } : {}),
         });
       }
     }

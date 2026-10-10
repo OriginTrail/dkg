@@ -595,7 +595,8 @@ describe('RFC-64 unchanged repair backoff', () => {
     await f.owner.requestFinalizedPrivate({ repair: replacement, ctx }).whenAttempted;
     await oldWaiter.whenAttempted;
     expect(f.repairPrivate).toHaveBeenCalledTimes(3);
-    expect(f.repairPrivate).toHaveBeenLastCalledWith(replacement);
+    // The second argument is the admitted attempt's placement recorder (GH#3081).
+    expect(f.repairPrivate).toHaveBeenLastCalledWith(replacement, expect.anything());
     const duplicate = f.owner.requestFinalizedPrivate({ repair: replacement, ctx });
     await f.owner.whenIdle();
     expect(f.repairPrivate).toHaveBeenCalledTimes(3);
