@@ -4,7 +4,7 @@ import {
   decodeReliableEnvelope,
   RELIABLE_ENVELOPE_VERSION,
   RESPONSE_GONE_MARKER,
-  isRecoverableSendError,
+  isRetryableLaterSendError,
   BoundedProtocolOutbox,
   type BoundedProtocolOutboxStore,
   type MessageIdempotencyStore,
@@ -124,7 +124,7 @@ class MessengerResponseRejectedError extends Error {
 
 function isRecoverableMessengerSendError(err: unknown, errMsg: string): boolean {
   return err instanceof MessengerResponseRejectedError ||
-    isRecoverableSendError(err) ||
+    isRetryableLaterSendError(err) || // not isRecoverableSendError: a refused protocol stays queued for the outbox
     shouldTriggerDhtWalk(errMsg);
 }
 

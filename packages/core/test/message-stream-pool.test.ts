@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { UnsupportedProtocolError } from '@libp2p/interface';
 import {
   MessageStreamPool,
   POOLED_MESSAGE_PROTOCOL,
@@ -1084,5 +1085,44 @@ describe('MessageStreamPool', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('PooledStreamResetError cause (typed transport classification)', () => {
+  const stubPeerIdFromString = (s: string): unknown => ({ toString: () => s });
+
+  it('keeps its name and its "pooled stream reset: <detail>" message, with an optional cause', () => {
+    const plain = new PooledStreamResetError('pool closed');
+    expect(plain.name).toBe('PooledStreamResetError');
+    expect(plain.message).toBe('pooled stream reset: pool closed');
+    expect('cause' in plain).toBe(false);
+
+    const inner = new Error('boom');
+    const wrapped = new PooledStreamResetError('boom', { cause: inner });
+    expect(wrapped.message).toBe('pooled stream reset: boom');
+    expect(wrapped.cause).toBe(inner);
+  });
+
+  it('wraps a failed dial verbatim and keeps the original error as its cause', async () => {
+    const node = makeFakeNode();
+    const refusal = new UnsupportedProtocolError('no such protocol');
+    node.libp2p.dialProtocol = async () => {
+      throw refusal;
+    };
+    const pool = new MessageStreamPool(node, {
+      peerIdFromString: stubPeerIdFromString,
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+    });
+
+    const failure = await pool
+      .send(PEER_A, new TextEncoder().encode('x'))
+      .then(() => undefined, (err: unknown) => err);
+
+    expect(failure).toBeInstanceOf(PooledStreamResetError);
+    expect((failure as PooledStreamResetError).message).toBe('pooled stream reset: no such protocol');
+    expect((failure as PooledStreamResetError).cause).toBe(refusal);
+
+    await pool.close();
   });
 });

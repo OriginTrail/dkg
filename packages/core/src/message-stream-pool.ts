@@ -315,14 +315,13 @@ export interface PerPeerStats {
 }
 
 /**
- * Error returned to callers whose request was rejected by stream
- * teardown / pool close. The message intentionally matches one of
- * the substrings in `isRecoverableSendError` so the substrate
- * outbox treats it as retryable.
+ * Error returned to callers whose request was rejected by stream teardown / pool close.
+ * `classifyTransportError` recognises it by `name` (retryable whatever the wording) and looks through it at
+ * `options.cause`, so a wrapped `UnsupportedProtocolError` is still a protocol refusal, not a plain reset.
  */
 export class PooledStreamResetError extends Error {
-  constructor(detail: string) {
-    super(`pooled stream reset: ${detail}`);
+  constructor(detail: string, options?: { cause?: unknown }) {
+    super(`pooled stream reset: ${detail}`, options);
     this.name = 'PooledStreamResetError';
   }
 }
@@ -1341,7 +1340,7 @@ export class MessageStreamPool {
 
   private toResetError(err: unknown, fallback: string): PooledStreamResetError {
     if (err instanceof PooledStreamResetError) return err;
-    if (err instanceof Error) return new PooledStreamResetError(err.message);
+    if (err instanceof Error) return new PooledStreamResetError(err.message, { cause: err }); // keeps the typed name
     return new PooledStreamResetError(fallback);
   }
 }

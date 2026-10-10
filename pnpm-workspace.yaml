@@ -20,6 +20,7 @@ packages:
   - "devnet/rpc-quiet-window"
   - "devnet/storage-ack-store-outage"
   - "devnet/subscription-persist-restart"
+  - "devnet/transport-error-fail-fast"
   - "devnet/v10-rs-prune"
   - "devnet/v10-rs-wallet-rotation"
   - "devnet/_bootstrap"

@@ -263,6 +263,7 @@ export {
   EXACT_BATCH_REFUSALS, encodeExactBatchFrame, decodeExactBatchFrames, validateExactBatchFrame,
   type ExactBatchFrame, type ExactBatchFrameKind, type ExactBatchRefusal,
 } from './experimental-exact-batch-wire.js';
+export { isRetryableLaterSendError } from './transport-error.js';
 export {
   MessageStreamPool,
   POOLED_MESSAGE_PROTOCOL,
