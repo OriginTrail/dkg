@@ -25,9 +25,9 @@ import { findAuthorCatalogFullErrorV1 } from './author-catalog-capacity.js';
  * catalog refuses every NEW asset the same way until a row is free, so retrying a refused
  * placement on the failure timer only repeats a read of the whole catalog. Instead:
  *
- * - a finalized-private placement refused as full keeps its durable marker and is parked. A parked
- *   marker costs a supervisor pass one applied-head row read: no attempt, no successor work and no
- *   catalog read;
+ * - a finalized-private placement refused as full keeps its durable marker and is parked. For
+ *   what is parked a supervisor pass reads one applied-head row a scope: no attempt, no successor
+ *   work and no catalog read;
  * - the refusal names the assets the catalog holds. A marker for one of them (a newer version, or
  *   a row placed meanwhile) is attempted as usual. A marker for any other asset of the same
  *   catalog, at the applied head the refusal read, is parked without an attempt of its own, so a
@@ -117,6 +117,8 @@ export class FullCatalogParkingV1 {
   readonly #parked = new Map<string, string>();
   /** When each graph and author was last named in the log. */
   readonly #namedAtMs = new Map<string, number>();
+  /** The applied head of each full scope as the current pass read it: one read a scope a pass. */
+  readonly #passHeads = new Map<string, AppliedHeadV1 | null | undefined>();
 
   constructor(dependencies: FullCatalogParkingDependenciesV1, now: () => number = () => Date.now()) {
     this.#dependencies = dependencies;
@@ -125,6 +127,7 @@ export class FullCatalogParkingV1 {
 
   /** A pass listed the durable markers with these keys: forget what left the queue. */
   passStarted(listed: ReadonlySet<string>): void {
+    this.#passHeads.clear();
     for (const key of this.#parked.keys()) {
       if (!listed.has(key)) this.#parked.delete(key);
     }
@@ -144,7 +147,7 @@ export class FullCatalogParkingV1 {
    * that attempt comes back through {@link placementRefused}.
    */
   parked(key: string, repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>): boolean {
-    const scopeKey = scopeKeyV1(repair);
+    const scopeKey = this.#parked.get(key) ?? scopeKeyV1(repair);
     const scope = this.#scopes.get(scopeKey);
     if (scope !== undefined && this.#keepsParked(scopeKey, scope, key, repair)) {
       this.#parked.set(key, scopeKey);
@@ -190,6 +193,8 @@ export class FullCatalogParkingV1 {
       asked: known?.asked ?? 0,
     }, MAX_FULL_SCOPES_V1);
     this.#parked.set(key, scopeKey);
+    // The pass may have read this scope's head before the attempt, when it still showed a free row.
+    this.#passHeads.delete(scopeKey);
     return true;
   }
 
@@ -229,7 +234,7 @@ export class FullCatalogParkingV1 {
     for (const [scopeKey, scope] of this.#scopes) {
       // A scope whose applied head shows a free row is no longer at its cap; the next pass
       // attempts its markers.
-      if (this.#hasFreeRow(scope) === true) continue;
+      if (hasFreeRowV1(this.#appliedHead(scope), scope) === true) continue;
       full.add(scopeKey);
       named.add(namedScopeV1(scope));
     }
@@ -251,7 +256,8 @@ export class FullCatalogParkingV1 {
     key: string,
     repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
   ): boolean {
-    if (this.#hasFreeRow(scope) === true) {
+    if (!this.#passHeads.has(scopeKey)) this.#passHeads.set(scopeKey, this.#appliedHead(scope));
+    if (hasFreeRowV1(this.#passHeads.get(scopeKey), scope) === true) {
       // A row is free: every marker of the scope is attempted again.
       this.#scopes.delete(scopeKey);
       for (const [parkedKey, parkedScope] of this.#parked) {
@@ -274,18 +280,12 @@ export class FullCatalogParkingV1 {
       }
     }
     // A marker that was not parked before is taken on the catalog's word only at the applied
-    // head that word was read under; at any other head it gets an attempt of its own.
+    // head that word was read under, read now; at any other head it gets an attempt of its own.
     return this.#parked.has(key) || this.#appliedHead(scope)?.digest === scope.headDigest;
   }
 
-  /** True or false when the applied head was read; undefined when it could not be. */
-  #hasFreeRow(scope: FullScopeV1): boolean | undefined {
-    const head = this.#appliedHead(scope);
-    return head === undefined ? undefined : head === null || head.rows < scope.rowCap;
-  }
-
   /** The scope's applied head, null when it has none, undefined when it cannot be read. */
-  #appliedHead(scope: FullScopeV1): Readonly<{ digest: string; rows: number }> | null | undefined {
+  #appliedHead(scope: FullScopeV1): AppliedHeadV1 | null | undefined {
     try {
       const head = this.#dependencies.readAppliedCatalogHead?.(scope.catalogScopeDigest, scope.authorAddress);
       return head === null || head === undefined
@@ -320,6 +320,14 @@ export class FullCatalogParkingV1 {
       }));
     } catch { /* Diagnostics must not alter repair state or waiter settlement. */ }
   }
+}
+
+/** The applied head of a scope, as far as parking reads it. */
+type AppliedHeadV1 = Readonly<{ digest: string; rows: number }>;
+
+/** True or false when the applied head was read; undefined when it could not be. */
+function hasFreeRowV1(head: AppliedHeadV1 | null | undefined, scope: FullScopeV1): boolean | undefined {
+  return head === undefined ? undefined : head === null || head.rows < scope.rowCap;
 }
 
 /** One exact author catalog scope, as a marker names it. */

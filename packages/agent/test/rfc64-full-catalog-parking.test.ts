@@ -188,9 +188,10 @@ describe('finalized-private placements of a full author catalog', () => {
     await s.advance(HOUR - 5_000);
     // Hundreds of passes: the other scope's failing marker kept its ordinary back-off ...
     expect(model.state.attempts.filter((kaUal) => kaUal === failingElsewhere.kaUal).length).toBeGreaterThan(50);
-    // ... and the parked markers cost each pass applied-head row reads and nothing else.
+    // ... and the two parked markers cost each of the 719 passes one applied-head row read for
+    // their scope, and nothing else.
     expect(fullScopeAttempts()).toEqual([NEW_A.kaUal]);
-    expect(model.readAppliedCatalogHead.mock.calls.length).toBeGreaterThan(headReadsBefore + 500);
+    expect(model.readAppliedCatalogHead.mock.calls.length).toBe(headReadsBefore + 719);
 
     await s.advance(5_000);
     // The safety net: one attempt for the scope, by one marker; the other stays parked.
@@ -311,7 +312,7 @@ describe('finalized-private placements of a full author catalog', () => {
   it('attempts parked placements again once the applied head shows a free row', async () => {
     const model = node();
     model.fill(NEW_A);
-    model.state.markers = [NEW_A, NEW_B];
+    model.state.markers = [NEW_A, NEW_B, NEW_C];
     const s = supervisor(model);
     await s.pass();
     expect(model.state.attempts).toEqual([NEW_A.kaUal]);
@@ -320,11 +321,12 @@ describe('finalized-private placements of a full author catalog', () => {
     expect(s.capacity()).toEqual({ parkedPlacements: 0, scopesAtCap: 0 });
     await s.advance(5_000);
 
-    // The first parked placement takes the free row; the second is refused afresh and parked.
+    // The first parked placement takes the free row; the second is refused afresh, and the third
+    // is parked on that refusal without an attempt.
     expect(model.state.attempts).toEqual([NEW_A.kaUal, NEW_A.kaUal, NEW_B.kaUal]);
-    expect(model.state.markers).toEqual([NEW_B]);
+    expect(model.state.markers).toEqual([NEW_B, NEW_C]);
     expect(model.rows(NEW_A)).toBe(CAP);
-    expect(s.capacity()).toEqual({ parkedPlacements: 1, scopesAtCap: 1 });
+    expect(s.capacity()).toEqual({ parkedPlacements: 2, scopesAtCap: 1 });
     await s.advance(60_000);
     expect(model.state.attempts).toHaveLength(3);
   });
@@ -496,15 +498,43 @@ describe('full catalog parking', () => {
     expect(p.status([])).toEqual({ parkedPlacements: 1, scopesAtCap: 1 });
   });
 
-  it('attempts every marker of a scope whose catalog is gone', () => {
+  it('attempts every marker of a scope whose catalog is gone, from the next pass on', () => {
     const read = vi.fn<() => ReturnType<typeof atCap> | null>(atCap);
     const { parking: p } = parking(read);
     p.placementRefused('a', NEW_A, refusal());
     expect(p.parked('b', NEW_B)).toBe(true);
     read.mockReturnValue(null);
+    // Status reads the head now; a pass keeps the one it read for the scope until it ends.
     expect(p.status([])).toEqual({ parkedPlacements: 0, scopesAtCap: 0 });
+    expect(p.parked('a', NEW_A)).toBe(true);
+    p.passStarted(new Set(['a', 'b']));
     expect(p.parked('a', NEW_A)).toBe(false);
     expect(p.parked('b', NEW_B)).toBe(false);
+  });
+
+  it('reads one applied-head row a scope a pass for what is parked, however many markers', () => {
+    const read = vi.fn(atCap);
+    const { parking: p } = parking(read);
+    p.placementRefused('a', NEW_A, refusal());
+    const markers = Array.from({ length: 50 }, (_value, index) => marker(FULL_GRAPH, CAP + 10 + index));
+    const keys = new Set(['a', ...markers.map((_marker, index) => `m${index}`)]);
+
+    // The pass that first sees them holds each against the head as it is now: one read each.
+    p.passStarted(keys);
+    read.mockClear();
+    expect(p.parked('a', NEW_A)).toBe(true);
+    for (const [index, parked] of markers.entries()) expect(p.parked(`m${index}`, parked)).toBe(true);
+    expect(read).toHaveBeenCalledTimes(1 + markers.length);
+
+    // Every later pass reads the scope's row once.
+    for (let pass = 0; pass < 3; pass++) {
+      p.passStarted(keys);
+      read.mockClear();
+      expect(p.parked('a', NEW_A)).toBe(true);
+      for (const [index, parked] of markers.entries()) expect(p.parked(`m${index}`, parked)).toBe(true);
+      expect(read).toHaveBeenCalledTimes(1);
+    }
+    expect(p.status([])).toEqual({ parkedPlacements: 51, scopesAtCap: 1 });
   });
 
   it('does not park a marker whose scope it cannot name', () => {
