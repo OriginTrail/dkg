@@ -8,17 +8,20 @@ import type { RequestContext } from './context.js';
 
 export async function handleEntityRoutes(ctx: RequestContext): Promise<void> {
   const { req, res, path, authentication, agent, entitySearch } = ctx;
-  if (!['/api/entities/index', '/api/entities/search'].includes(path)) return;
+  if (!['/api/entities/index', '/api/entities/search', '/api/entities/readiness'].includes(path)) return;
   if (req.method !== 'POST') { jsonResponse(res, 405, { code: 'METHOD_NOT_ALLOWED' }); return; }
   const indexing = path.endsWith('/index');
+  const readiness = path.endsWith('/readiness');
   if (indexing && !canAdministerNode(authentication)) {
     jsonResponse(res, 403, { code: 'NODE_OPERATOR_REQUIRED' }); return;
   }
   if (!entitySearch) { jsonResponse(res, 503, { code: 'ENTITY_SEARCH_DISABLED' }); return; }
   const body = safeParseJson(await readBody(req, SMALL_BODY_BYTES), res);
   if (!body || !validateRequiredContextGraphId(body.contextGraphId, res)) return;
-  const timeoutMs = body.timeoutMs ?? (indexing ? 30_000 : 2_000);
-  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > (indexing ? 30_000 : 5_000)
+  const preparation = readiness && body.warmup === true;
+  const timeoutMs = body.timeoutMs ?? (indexing || preparation ? 30_000 : 2_000);
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > (indexing || preparation ? 30_000 : 5_000)
+    || (body.warmup !== undefined && typeof body.warmup !== 'boolean')
     || (body.restart !== undefined && typeof body.restart !== 'boolean')) {
     jsonResponse(res, 400, { code: 'ENTITY_INVALID_REQUEST' }); return;
   }
@@ -29,7 +32,8 @@ export async function handleEntityRoutes(ctx: RequestContext): Promise<void> {
   try {
     const reply = indexing
       ? await entitySearch.index(body, reader, body.restart === true, signal, deadline)
-      : await entitySearch.search(body.indexId, body.contextGraphId, body.query, body.limit ?? 5, reader, signal, deadline);
+      : readiness ? await entitySearch.readiness(body.indexId, body.contextGraphId, preparation, reader, signal, deadline)
+        : await entitySearch.search(body.indexId, body.contextGraphId, body.query, body.limit ?? 5, reader, signal, deadline);
     jsonResponse(res, 200, { version: 1, ...reply });
   } catch (error) {
     if (lifecycle.signal.aborted || isApiQueryCallerDisconnected(error)) return;

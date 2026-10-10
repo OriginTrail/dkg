@@ -34,7 +34,8 @@ async function fixture(count = 3) {
   ]);
   await graph.insert([{ graph: 'did:dkg:context-graph:other/_verifiable_memory/a', subject: 'urn:secret', predicate: 'urn:description', object: '"ocean science"' },
     { graph: 'did:dkg:context-graph:other/_verifiable_memory/a', subject: 'urn:secret', predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'urn:Topic' }]);
-  const embedder = { fingerprint: 'test-model-v1', dimensions: 2, embed: vi.fn(async (text: string) => text.includes('ocean') ? [1, 0] : [0, 1]) };
+  const embedder = { fingerprint: 'test-model-v1', dimensions: 2, ready: vi.fn(async () => true),
+    embed: vi.fn(async (text: string) => text.includes('ocean') ? [1, 0] : [0, 1]) };
   const store = new EntityIndexStore(dir); cleanup.push(() => store.close());
   const service = new EntitySearchService(store, embedder), reader = new EntityGraphReader(agent as never, 'reader');
   const index = (restart = false) => service.index(spec, reader, restart, AbortSignal.timeout(5000), performance.now() + 5000);
@@ -123,6 +124,45 @@ it('local inference pins the model digest and dimensions and refuses remote infe
   vi.stubGlobal('fetch', fetch);
   expect(await provider.embed('science', 'query', AbortSignal.timeout(1000))).toEqual([1, 0]);
   await expect(provider.embed('science', 'query', AbortSignal.timeout(1000))).rejects.toMatchObject({ code: 'ENTITY_EMBEDDING_MODEL_CHANGED' });
+});
+
+it('checks current model residency and permits explicit warm-up only under current graph authority', async () => {
+  const f = await fixture(); const indexed = await f.index(); f.embedder.embed.mockClear();
+  const body = { contextGraphId: 'catalog', indexId: indexed.indexId };
+  const check = async (extra = {}) => {
+    const r = request(f, { ...body, ...extra }, 'nodeOperator', '/api/entities/readiness');
+    await handleEntityRoutes(r.ctx); return { status: r.res.statusCode, body: JSON.parse(r.res.body) };
+  };
+  f.embedder.ready.mockResolvedValue(false);
+  expect(await check()).toMatchObject({ status: 200, body: { ready: false } });
+  expect(f.embedder.embed).not.toHaveBeenCalled();
+  f.embedder.ready.mockResolvedValue(true);
+  expect(await check({ warmup: true })).toMatchObject({ status: 200, body: { ready: true, indexedEntities: 3 } });
+  expect(f.embedder.embed).toHaveBeenCalledTimes(1);
+  f.embedder.ready.mockResolvedValue(false);
+  expect((await check()).body.ready).toBe(false); // A previous warm-up is not permanent readiness.
+  f.deny();
+  expect(await check({ warmup: true })).toMatchObject({ status: 403, body: { code: 'QUERY_ACCESS_DENIED' } });
+  expect(f.embedder.embed).toHaveBeenCalledTimes(1);
+});
+
+it('bounds preparation, rejects expired work and releases admission on failure', async () => {
+  const f = await fixture(); const indexed = await f.index();
+  let release!: (v: number[]) => void;
+  f.embedder.embed.mockReturnValueOnce(new Promise<number[]>(resolve => { release = resolve; }));
+  const preparing = f.service.readiness(indexed.indexId, 'catalog', true, f.reader, AbortSignal.timeout(5000), performance.now() + 5000);
+  await expect(f.search()).rejects.toMatchObject({ code: 'ENTITY_SEARCH_BUSY' });
+  await expect(f.index()).rejects.toMatchObject({ code: 'ENTITY_INDEX_BUSY' });
+  release([1, 0]); expect((await preparing).ready).toBe(true);
+  await expect(f.service.readiness(indexed.indexId, 'catalog', false, f.reader, new AbortController().signal, performance.now() - 1))
+    .rejects.toMatchObject({ code: 'QUERY_DEADLINE_EXCEEDED' });
+  expect((await f.search()).entities).toHaveLength(2);
+  const provider = new LocalEntityEmbedder({ provider: 'ollama', model: 'test', digest: 'a'.repeat(64), dimensions: 2 });
+  const tags = () => Response.json({ models: [{ name: 'test:latest', digest: 'a'.repeat(64) }] });
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(tags()).mockResolvedValueOnce(Response.json({ models: [] }))
+    .mockResolvedValueOnce(tags()).mockResolvedValueOnce(Response.json({ models: [{ name: 'test:latest', digest: 'b'.repeat(64) }] })));
+  expect(await provider.ready(AbortSignal.timeout(1000))).toBe(false);
+  expect(await provider.ready(AbortSignal.timeout(1000))).toBe(false);
 });
 
 it('persists a partial scan across service recreation and keeps SWM and VM indexes separate', async () => {

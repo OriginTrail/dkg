@@ -39,14 +39,23 @@ export class LocalEntityEmbedder implements EntityEmbedder {
       return JSON.parse(Buffer.concat(chunks).toString());
     } finally { await reader.cancel(); }
   }
-  async embed(text: string, kind: 'query' | 'document', signal: AbortSignal): Promise<number[]> {
+  private async model(signal: AbortSignal): Promise<string> {
     const tags = await this.json('/api/tags', signal);
     const model = this.config.model.includes(':') ? this.config.model : this.config.model + ':latest';
     if (!tags.models?.some((v: { name: string; digest: string }) => v.name === model && v.digest === this.config.digest)) {
       throw new EntitySearchError('ENTITY_EMBEDDING_MODEL_CHANGED');
     }
+    return model;
+  }
+  async ready(signal: AbortSignal): Promise<boolean> {
+    const model = await this.model(signal);
+    const running = await this.json('/api/ps', signal);
+    return running.models?.some((v: { name: string; digest: string }) => v.name === model && v.digest === this.config.digest) === true;
+  }
+  async embed(text: string, kind: 'query' | 'document', signal: AbortSignal): Promise<number[]> {
+    const model = await this.model(signal);
     const prefix = kind === 'query' ? this.config.queryPrefix : this.config.documentPrefix;
-    const reply = await this.json('/api/embed', signal, { model, input: (prefix ?? '') + text, truncate: false });
+    const reply = await this.json('/api/embed', signal, { model, input: (prefix ?? '') + text, truncate: false, keep_alive: '5m' });
     const vector = reply.embeddings?.[0];
     validVector(vector, this.dimensions);
     return vector;

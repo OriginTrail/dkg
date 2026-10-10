@@ -6,10 +6,11 @@ import { EntitySearchError, checkDeadline, unitVector, type EntityEmbedder, type
 export class EntitySearchService {
   private busy = new Set<string>();
   private searches = 0;
+  private preparing = false;
   constructor(readonly store: EntityIndexStore, readonly embedder: EntityEmbedder) {}
   async index(rawSpec: unknown, reader: EntityGraphReader, restart: boolean, signal: AbortSignal, deadline: number) {
     const spec = parseSpec(rawSpec as EntityIndexSpec), id = indexKey(spec, this.embedder.fingerprint);
-    if (this.busy.size) throw new EntitySearchError('ENTITY_INDEX_BUSY', 429);
+    if (this.preparing || this.busy.size) throw new EntitySearchError('ENTITY_INDEX_BUSY', 429);
     this.busy.add(id);
     try {
       await reader.authorize(spec, signal, deadline);
@@ -45,11 +46,28 @@ export class EntitySearchService {
       modelFingerprint: state.fingerprint, indexedEntities: this.store.count(state.id), scanComplete: state.scanComplete,
       completedAt: state.completedAt, coverage: 'local-indexed-subset' as const, graphComplete: null };
   }
+  /** A fresh residency check, with explicit bounded warm-up outside a query's budget. */
+  async readiness(id: string, contextGraphId: string, warmup: boolean, reader: EntityGraphReader,
+    signal: AbortSignal, deadline: number) {
+    if (!/^[a-f0-9]{64}$/.test(id)) throw new EntitySearchError('ENTITY_INVALID_REQUEST', 400);
+    if (this.preparing || (warmup && (this.searches > 0 || this.busy.size > 0))) throw new EntitySearchError('ENTITY_SEARCH_BUSY', 429);
+    if (warmup) this.preparing = true;
+    try {
+      const state = this.store.state(id);
+      if (!state || state.spec.contextGraphId !== contextGraphId) throw new EntitySearchError('ENTITY_INDEX_NOT_FOUND', 404);
+      await reader.authorize(state.spec, signal, deadline);
+      if (state.fingerprint !== this.embedder.fingerprint) throw new EntitySearchError('ENTITY_EMBEDDING_MODEL_CHANGED');
+      if (warmup) await this.embedder.embed('readiness probe', 'query', signal);
+      const ready = await this.embedder.ready(signal);
+      checkDeadline(signal, deadline);
+      return { ...this.status(state), ready, observedAt: new Date().toISOString() };
+    } finally { if (warmup) this.preparing = false; }
+  }
   async search(id: string, contextGraphId: string, query: string, limit: number, reader: EntityGraphReader,
     signal: AbortSignal, deadline: number) {
     if (!/^[a-f0-9]{64}$/.test(id) || typeof query !== 'string' || !query.trim() || query.length > 6000
       || !Number.isInteger(limit) || limit < 1 || limit > 20) throw new EntitySearchError('ENTITY_INVALID_REQUEST', 400);
-    if (this.searches >= 2) throw new EntitySearchError('ENTITY_SEARCH_BUSY', 429);
+    if (this.preparing || this.searches >= 2) throw new EntitySearchError('ENTITY_SEARCH_BUSY', 429);
     this.searches++;
     try {
       const state = this.store.state(id);

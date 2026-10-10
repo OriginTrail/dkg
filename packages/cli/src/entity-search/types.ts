@@ -14,6 +14,7 @@ export interface EntityDocument {
 export interface EntityEmbedder {
   readonly fingerprint: string;
   readonly dimensions: number;
+  ready(signal: AbortSignal): Promise<boolean>;
   embed(text: string, kind: 'query' | 'document', signal: AbortSignal): Promise<number[]>;
 }
 export interface EntityEmbeddingConfig {

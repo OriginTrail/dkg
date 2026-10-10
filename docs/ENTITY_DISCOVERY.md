@@ -77,6 +77,21 @@ or full network coverage. Live graph edits can be missed behind the scan cursor;
 rescan to discover them. Every response labels coverage `local-indexed-subset`,
 `graphComplete: null` and searches `exhaustive: false`.
 
+## Prepare embedding readiness
+
+`POST /api/entities/readiness` accepts `contextGraphId`, `indexId`, and optional
+`warmup: true`. It checks current graph/view authorization and the pinned model
+digest. Without warm-up it only inspects model residency; `ready: false` means
+the model is not loaded. With warm-up it embeds a neutral probe, outside a
+search request, then verifies residency. It never rebuilds the index or syncs
+network data. Preparation permits up to 30 seconds and excludes concurrent
+index/search work. Ordinary status checks keep the two-second default.
+
+The response includes `ready`, `observedAt`, index progress and model fingerprint.
+Readiness is a point-in-time observation: eviction after the check is possible.
+Consumers should separate preparation time from query latency and retain normal
+query deadlines and unavailable outcomes. No model is downloaded automatically.
+
 ## Search and then use SPARQL
 
 ```sh
