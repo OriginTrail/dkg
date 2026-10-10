@@ -2246,6 +2246,34 @@ describe('RFC-64 rollout authority integration', () => {
     ]);
   });
 
+  it('does not hold a catalog change while a replay waits for its peer', async () => {
+    // GH#3081 — the replay used to send inside the mutation locks of every catalog it replayed.
+    const { provider, scope } = await startAppliedOpenReplayProvider('replay-outside-locks');
+    let releaseDelivery!: () => void;
+    let markDeliveryEntered!: () => void;
+    const deliveryGate = new Promise<void>((resolve) => { releaseDelivery = resolve; });
+    const deliveryEntered = new Promise<void>((resolve) => { markDeliveryEntered = resolve; });
+    vi.spyOn((provider as any).router, 'send').mockImplementation(async () => {
+      markDeliveryEntered();
+      await deliveryGate;
+      return Uint8Array.of(1);
+    });
+
+    const replay = provider.reannounceRfc64CatalogHeadsToPeerV1(
+      '12D3KooWReplayOutsideLocksPeer',
+    );
+    await deliveryEntered;
+    // The peer has not answered. A change of the replayed catalog takes its lock all the same.
+    await expect((provider as any).rfc64CatalogMutationCoordinatorV1.run(
+      scope,
+      async () => 'changed',
+    )).resolves.toBe('changed');
+    releaseDelivery();
+
+    // That change wrote nothing, so the replay completes.
+    await expect(replay).resolves.toMatchObject({ announced: 1, failed: 0 });
+  });
+
   it('rejects provider replay when durable inventory changes during delivery', async () => {
     const { provider, persistence, applied } =
       await startAppliedOpenReplayProvider('replay-delivery-race');
