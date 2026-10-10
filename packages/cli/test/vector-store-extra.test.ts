@@ -37,15 +37,14 @@ describe('VectorStore — Tri-Modal Memory §21 compliance', () => {
   });
 
   function baseRec(overrides: Partial<EmbeddingRecord> = {}): EmbeddingRecord {
-    return {
-      embedding: makeVec(8, 1),
-      sourceUri: 'dkg://cg-a/s1',
-      entityUri: 'dkg://cg-a/e1',
-      contextGraphId: 'cg-a',
-      memoryLayer: 'wm',
-      model: 'test-model',
-      ...overrides,
+    const { memoryLayer = 'wm', agentAddress, ...attributes } = overrides;
+    const common = {
+      embedding: makeVec(8, 1), sourceUri: 'dkg://cg-a/s1', entityUri: 'dkg://cg-a/e1',
+      contextGraphId: 'cg-a', model: 'test-model', ...attributes,
     };
+    return memoryLayer === 'wm'
+      ? { ...common, memoryLayer, agentAddress: agentAddress ?? { kind: 'unknown' } }
+      : { ...common, memoryLayer, ...(typeof agentAddress === 'string' ? { agentAddress } : {}) };
   }
 
   it('persists embeddings across close/reopen (WAL durability)', async () => {

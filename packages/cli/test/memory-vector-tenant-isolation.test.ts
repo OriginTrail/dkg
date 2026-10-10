@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
-import { VectorStore, type VectorWorkingMemoryScope } from '../src/vector-store.js';
+import { VectorStore, type EmbeddingRecord, type VectorWorkingMemoryScope } from '../src/vector-store.js';
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
 import { createRequestActor, type RequestContext } from '../src/daemon/routes/context.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
@@ -49,9 +49,12 @@ function createStore(legacy = false) {
 }
 
 async function insert(store: VectorStore, entityUri: string, memoryLayer: 'wm' | 'swm' | 'vm', agentAddress?: string) {
-  await store.insert({ embedding: [1, 0], entityUri, memoryLayer, agentAddress,
+  const common = { embedding: [1, 0], entityUri,
     sourceUri: `source:${entityUri}`, contextGraphId: CG, model: 'test',
-    label: `label:${entityUri}`, snippet: `secret:${entityUri}` });
+    label: `label:${entityUri}`, snippet: `secret:${entityUri}` };
+  await store.insert(memoryLayer === 'wm'
+    ? { ...common, memoryLayer, agentAddress: agentAddress ?? { kind: 'unknown' } }
+    : { ...common, memoryLayer, agentAddress });
 }
 
 function request(store: VectorStore, principal: Parameters<typeof requestAuthentication>[0], path = '/api/memory/search') {
@@ -97,6 +100,14 @@ async function search(store: VectorStore, principal: Parameters<typeof requestAu
 }
 
 describe('enabled vector memory search tenant isolation', () => {
+  it('rejects an untyped new WM record whose owner was omitted', async () => {
+    const store = createStore();
+    await expect(store.insert({ embedding: [1, 0], sourceUri: 'source:unattributed', entityUri: 'unattributed',
+      contextGraphId: CG, memoryLayer: 'wm', model: 'test' } as EmbeddingRecord))
+      .rejects.toThrow('Working-memory embedding requires explicit ownership');
+    expect(await store.count()).toBe(0);
+  });
+
   it('returns only the caller WM plus shared layers, with EVM case folding', async () => {
     const store = createStore();
     await insert(store, 'alice', 'wm', A);

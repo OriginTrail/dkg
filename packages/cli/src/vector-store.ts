@@ -14,19 +14,23 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { canonicalKnowledgeAssetAgentAddress } from '@origintrail-official/dkg-core';
 
-export interface EmbeddingRecord {
+interface EmbeddingRecordFields {
   id?: string;
   embedding: number[];
   sourceUri: string;
   entityUri: string;
   contextGraphId: string;
-  memoryLayer: 'wm' | 'swm' | 'vm';
-  agentAddress?: string;
   model: string;
   snippet?: string;
   label?: string;
   createdAt?: string;
 }
+
+/** New WM writes must choose an owner or explicitly declare it unknown. */
+export type EmbeddingRecord = EmbeddingRecordFields & (
+  | { memoryLayer: 'wm'; agentAddress: string | { readonly kind: 'unknown' } }
+  | { memoryLayer: 'swm' | 'vm'; agentAddress?: string }
+);
 
 export type VectorWorkingMemoryScope =
   | { readonly kind: 'agents'; readonly agentAddresses: readonly string[] }
@@ -98,6 +102,10 @@ export class VectorStore {
   }
 
   async insert(record: EmbeddingRecord): Promise<string> {
+    const owner = record.agentAddress;
+    if (record.memoryLayer === 'wm' && typeof owner !== 'string' && owner?.kind !== 'unknown') {
+      throw new TypeError('Working-memory embedding requires explicit ownership');
+    }
     const id = record.id ?? randomUUID();
     const blob = float32ToBlob(record.embedding);
     this.db.prepare(`
@@ -116,7 +124,7 @@ export class VectorStore {
       record.label ?? null,
       record.snippet ?? null,
       record.createdAt ?? new Date().toISOString(),
-      record.agentAddress === undefined ? null : canonicalKnowledgeAssetAgentAddress(record.agentAddress),
+      typeof owner === 'string' ? canonicalKnowledgeAssetAgentAddress(owner) : null,
     );
     return id;
   }
