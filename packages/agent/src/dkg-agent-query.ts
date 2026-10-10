@@ -7,6 +7,7 @@
  * so cross-calls resolve against the composed class.
  */
 
+import { deniedResult } from './query-denied-result.js';
 import { isAdmittedContextGraphSubscription } from './context-graph-subscription-policy.js';
 import { resolveRfc64PrivateReadRoster } from './rfc64/private-read-roster-v1.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -135,7 +136,6 @@ import { ethers } from 'ethers';
 import { join } from 'node:path';
 import {
   DKGQueryEngine, QueryHandler,
-  emptyQueryResultForKind,
   validateReadOnlySparql,
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
@@ -421,6 +421,11 @@ export class QueryMethods extends DKGAgentBase {
     sparql: string,
     options?: string | {
       contextGraphId?: string;
+      /** Security consumers must distinguish a denied dataset from no matches. */
+      accessDenied?: 'empty' | 'error';
+      /** Suppress caller-supplied query text in normal query diagnostics. */
+      redactQuery?: boolean;
+      maxResponseBytes?: number;
       graphSuffix?: '_shared_memory';
       includeSharedMemory?: boolean;
       /** @deprecated Use includeSharedMemory */
@@ -491,7 +496,7 @@ export class QueryMethods extends DKGAgentBase {
     const ctx = opts.operationCtx ?? createOperationContext('query');
     const sgLabel = opts.subGraphName ? `/${opts.subGraphName}` : '';
     const viewLabel = opts.view ? ` view=${opts.view}` : '';
-    this.log.info(ctx, `Query on contextGraph="${opts.contextGraphId ?? 'all'}"${sgLabel}${viewLabel} sparql="${sparql.slice(0, 80)}"`);
+    this.log.info(ctx, `Query on contextGraph="${opts.contextGraphId ?? 'all'}"${sgLabel}${viewLabel} sparql="${opts.redactQuery ? '[redacted]' : sparql.slice(0, 80)}"`);
 
     // Validate the SPARQL query is read-only BEFORE any access-denied
     // fast-path. `DKGQueryEngine.query` runs this guard too, but the
@@ -573,7 +578,7 @@ export class QueryMethods extends DKGAgentBase {
         // The id comes straight from the caller: a malformed one never gets
         // this answer, so the reply cannot depend on the existence check.
         if (
-          (
+          opts.accessDenied !== 'error' && (
             scopedReadAuthority.reason === 'finalized-name-absence-unaccepted'
             || scopedReadAuthority.reason === 'authority-circuit-open'
           )
@@ -582,7 +587,7 @@ export class QueryMethods extends DKGAgentBase {
           && !this.localContextGraphProvenance.hasLocalCreate(scopedContextGraphId)
           && !await this.contextGraphExists(scopedContextGraphId, { signal: opts.signal })
         ) {
-          return emptyQueryResultForKind(sparql);
+          return deniedResult(sparql, opts.accessDenied);
         }
         throw new ContextGraphReadAuthorityUnavailableError(
           opts.contextGraphId,
@@ -594,7 +599,7 @@ export class QueryMethods extends DKGAgentBase {
         // A-1 follow-up review: synthetic deny must match the SPARQL form
         // so ASK / CONSTRUCT / DESCRIBE clients get `false` / empty-quads
         // instead of a SELECT-shaped `{ bindings: [] }`.
-        return emptyQueryResultForKind(sparql);
+        return deniedResult(sparql, opts.accessDenied);
       }
     }
 
@@ -607,7 +612,7 @@ export class QueryMethods extends DKGAgentBase {
       }))
     ) {
       this.log.info(ctx, `Shared memory query denied for unauthorized or unconfirmed context graph "${opts.contextGraphId}"`);
-      return emptyQueryResultForKind(sparql);
+      return deniedResult(sparql, opts.accessDenied);
     }
 
     // A-1 canonicalization (Codex PR #242 iter-9 re-review): the
@@ -669,13 +674,8 @@ export class QueryMethods extends DKGAgentBase {
         ctx,
         `WM query denied: caller=${callerAgentAddressStr} cannot read agentAddress=${agentAddressStr} — A-1 isolation`,
       );
-      // A-1 follow-up review: preserve the SPARQL query-form shape on
-      // denial so ASK clients see `{ bindings: [{ result: 'false' }] }`
-      // and CONSTRUCT / DESCRIBE clients see `{ bindings: [], quads: [] }`.
-      // Returning a SELECT-shaped `{ bindings: [] }` on every form leaks
-      // the fact that access was denied (versus an empty match) via the
-      // changed response shape.
-      return emptyQueryResultForKind(sparql);
+      // Legacy callers retain empty-per-form; strict callers receive a typed denial.
+      return deniedResult(sparql, opts.accessDenied);
     }
 
     // #1106 (3): an UNAUTHENTICATED / admin caller omitting `agentAddress`
@@ -715,6 +715,7 @@ export class QueryMethods extends DKGAgentBase {
       signal: opts.signal,
       priority: opts.priority,
       source: opts.source,
+      maxResponseBytes: opts.maxResponseBytes,
       view: opts.view,
       agentAddress: effectiveWmAddress,
       agentAddressAliases: wmAddressAliases,
@@ -749,7 +750,7 @@ export class QueryMethods extends DKGAgentBase {
       execute,
       denied: () => {
         this.log.info(ctx, 'Unscoped query denied because the caller cannot read every possible context graph');
-        return emptyQueryResultForKind(sparql);
+        return deniedResult(sparql, opts.accessDenied);
       },
     });
     this.log.info(ctx, `Query returned ${result.bindings?.length ?? 0} bindings`);

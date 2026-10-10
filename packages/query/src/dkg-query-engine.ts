@@ -1,3 +1,4 @@
+import { storeOptions } from './query-store-options.js';
 import {
   asGraphWriteRevisionSource,
   isSparqlHttpResponseError,
@@ -83,15 +84,6 @@ export interface ViewResolution {
    * assertions) and verifiable-memory (multiple quorum graphs).
    */
   graphPrefixes: string[];
-}
-
-function storeOptions(options: QueryOptions | undefined): StoreQueryOptions | undefined {
-  if (!options?.signal && !options?.priority && !options?.source) return undefined;
-  return {
-    signal: options.signal,
-    priority: options.priority,
-    source: options.source,
-  };
 }
 
 function sharedDiscoveryStoreOptions(

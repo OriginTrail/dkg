@@ -10,6 +10,8 @@ export interface QueryResult {
 export interface QueryOptions {
   contextGraphId?: string;
   timeout?: number;
+  /** Bound HTTP store responses before parsing; embedded stores remain post-checked. */
+  maxResponseBytes?: number;
   /** Cancel queued and in-flight store work when the caller goes away. */
   signal?: AbortSignal;
   /** Store admission lane. External/API reads should use `background`. */
