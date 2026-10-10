@@ -877,7 +877,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
               repair,
               ctx: params.ctx,
             }).whenAttempted;
-            placementWait.requested();
+            placementWait.requested(finalizedPrivateAttempt);
             return;
           }
           const result = await this.removeRfc64SwmAuthorInventoryShadowV1({

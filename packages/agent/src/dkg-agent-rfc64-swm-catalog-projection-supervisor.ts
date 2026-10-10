@@ -32,6 +32,7 @@ import { CatalogRepairRetryV1, type CatalogRepairRevisionHintV1 } from './rfc64/
 import {
   catalogPlacementTimingV1,
   shareCatalogPlacementTimingV1,
+  type CatalogPlacementAdmissionV1,
   type FinalizedPrivatePlacementQueueStatusV1,
 } from './internal/catalog-placement-timing.js';
 
@@ -305,13 +306,13 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     const waiters = state.finalizedPrivateAttemptWaiters.get(key) ?? new Set<() => void>();
     waiters.add(settleAttempt);
     state.finalizedPrivateAttemptWaiters.set(key, waiters);
+    catalogPlacementTimingV1(this).waiterAdded(settleAttempt, whenAttempted);
     if (!state.finalizedPrivateRunner.request()) {
       waiters.delete(settleAttempt);
       if (waiters.size === 0) state.finalizedPrivateAttemptWaiters.delete(key);
       settleAttempt();
       return rejected();
     }
-    catalogPlacementTimingV1(this).waiterAdded(key, waiters.size === 1);
     return Object.freeze({ accepted: true, whenAttempted });
   }
 
@@ -475,7 +476,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       }
       this.#observePrivateLane(entry.retry, repair.contextGraphId);
       if (!entry.retry.eligible(Date.now())) {
-        catalogPlacementTimingV1(this).cooldownSkipped(repair);
+        catalogPlacementTimingV1(this).cooldownSkipped(state.finalizedPrivateAttemptWaiters.get(key));
         return;
       }
       const attemptGeneration = entry.retry.generation;
@@ -499,15 +500,15 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
           this.#warnFailure('catalog_private_repair_failed', error, entry.attempts, entry.retry);
         }
       } finally {
-        this.#settlePrivateWaiters(state, key);
+        this.#settlePrivateWaiters(state, key, placement);
       }
     });
   }
 
-  #settlePrivateWaiters(state: ProjectionSupervisorStateV1, key: string): void {
+  #settlePrivateWaiters(state: ProjectionSupervisorStateV1, key: string, attempt?: CatalogPlacementAdmissionV1): void {
     const waiters = state.finalizedPrivateAttemptWaiters.get(key);
     state.finalizedPrivateAttemptWaiters.delete(key);
-    catalogPlacementTimingV1(this).waitersSettled(key);
+    catalogPlacementTimingV1(this).waitersSettled(waiters, attempt);
     if (waiters !== undefined) for (const settle of waiters) settle();
   }
 
