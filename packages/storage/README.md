@@ -42,7 +42,10 @@ journal entry is retired. A SPARQL endpoint that durably commits before returnin
 successful mutation responses may opt in with
 `options.writesDurableOnAcknowledgement: true`; this promise is independent of
 its `consistencyProfile` transaction/readback guarantees. Use that option only
-when the endpoint guarantees persistence. Without either a durability barrier
+when the endpoint guarantees persistence. The `blazegraph` adapter defaults it to
+`true`, because Blazegraph forces each acknowledged commit to its standard
+`DiskRW` journal; set it to `false` for a `MemStore`/`Transient` journal or
+`forceOnCommit=No`. Without either a durability barrier
 or that acknowledgement contract, confirmed repair remains pending with its
 journal evidence retained. Transparent decorators and the agent store facade
 compose this callable explicitly. Queued decorators drain their completed mutations

@@ -8,11 +8,14 @@ export interface SparqlHttpPersistenceOptions {
    */
   writesDurableOnAcknowledgement?: boolean;
 }
-export function certifiedWriteAcknowledgement(options: SparqlHttpPersistenceOptions): boolean {
+/** Generic SPARQL endpoints certify nothing by default; an adapter that knows its engine may default to certified. */
+export function certifiedWriteAcknowledgement(
+  options: SparqlHttpPersistenceOptions, adapter = 'sparql-http', certifiedByDefault = false,
+): boolean {
   if (options.writesDurableOnAcknowledgement !== undefined && typeof options.writesDurableOnAcknowledgement !== 'boolean') {
-    throw new Error('sparql-http writesDurableOnAcknowledgement must be boolean');
+    throw new Error(`${adapter} writesDurableOnAcknowledgement must be boolean`);
   }
-  return options.writesDurableOnAcknowledgement === true;
+  return options.writesDurableOnAcknowledgement ?? certifiedByDefault;
 }
 
 function normalizeConsistencyProfile(value: unknown): SparqlHttpConsistencyProfile {

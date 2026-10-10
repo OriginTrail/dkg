@@ -148,6 +148,26 @@ When you pick the `blazegraph` backend in `dkg init` and leave the URL blank, th
 
 A reused legacy container is never recreated automatically, because doing so could discard its journal. If its volume or log policy does not match the current configuration, the CLI prints explicit backup/migration and unbounded-log warnings instead.
 
+### Blazegraph write durability
+
+The `blazegraph` backend treats every acknowledged write as durable. Blazegraph commits each SPARQL update and N-Quads insert as its own journal transaction and replies only after that commit, and its standard disk journal (`bufferMode=DiskRW`, which the provisioned image uses, with `forceOnCommit` left at its default `Force`) forces the commit to disk. The node relies on this, for example to finish confirmed Knowledge Asset lifecycle metadata and remove its repair record. This applies to Docker-provisioned and operator-supplied Blazegraph alike.
+
+If your Blazegraph journal is not durable (`bufferMode` `MemStore` or `Transient`, or `forceOnCommit=No`), set `writesDurableOnAcknowledgement` to `false`. The node then keeps confirmed lifecycle repairs pending, with their repair records retained, instead of completing them on writes a restart could lose:
+
+```json
+{
+  "store": {
+    "backend": "blazegraph",
+    "options": {
+      "url": "http://127.0.0.1:9999/bigdata/namespace/mynode/sparql",
+      "writesDurableOnAcknowledgement": false
+    }
+  }
+}
+```
+
+The value must be a boolean. Blazegraph reached through the generic `sparql-http` backend keeps that backend's default of `false`; set `writesDurableOnAcknowledgement: true` there only when the journal is durable as described above.
+
 ## Programmatic (DKGAgent)
 
 When creating an agent in code, pass `storeConfig`:

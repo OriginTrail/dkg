@@ -184,6 +184,27 @@ describe('certified adapter and decorator composition', () => {
 });
 
 
+describe('Blazegraph acknowledged-write commitment', () => {
+  it('reaches the outermost factory decorator by default and disappears when the operator opts out', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-blazegraph-commitment-')); directories.push(dir);
+    const fetch = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('the barrier sends no Blazegraph request'));
+    const config = (options: Record<string, unknown>) => ({ backend: 'blazegraph' as const,
+      options: { url: 'http://blazegraph.test/bigdata/namespace/dkg/sparql', ...options },
+      graphSetIndex: true, changelog: true, largeLiteralStorage: { directory: join(dir, 'literal-blobs') } });
+    const durable = await createTripleStore(config({})), volatile = await createTripleStore(config({ writesDurableOnAcknowledgement: false }));
+    try {
+      expect(durable).toBeInstanceOf(ChangelogStore);
+      expect(durable.commitment?.durability).toBe('restart-durable');
+      await durable.commitment!.commit({ source: 'blazegraph-factory-barrier' });
+      expect(volatile.commitment).toBeUndefined();
+      await expect(createTripleStore(config({ writesDurableOnAcknowledgement: 'false' })))
+        .rejects.toThrow('blazegraph writesDurableOnAcknowledgement must be boolean');
+      expect(fetch).not.toHaveBeenCalled();
+    } finally { await durable.close(); await volatile.close(); }
+  });
+});
+
+
 describe('explicit process-local commitment', () => {
   it.each(['embedded', 'worker'] as const)('commits a real memory %s without certifying restart durability', async adapter => {
     const backend = adapter === 'embedded' ? new OxigraphStore() : new OxigraphWorkerStore();

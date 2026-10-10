@@ -8,7 +8,7 @@ import { ethers } from 'ethers';
 import { assertionLifecycleUri, buildAssertionSealQuads, contextGraphAssertionUri, contextGraphMetaUri,
   createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, MemoryLayer, TypedEventBus, generateEd25519Keypair, parseAssertionSealQuads } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { ChangelogStore, GraphSetIndexStore, OxigraphStore, SparqlHttpStore, StoreOperationTimeoutError, UnsupportedTripleStoreCapabilityError, type Quad } from '@origintrail-official/dkg-storage';
+import { BlazegraphStore, ChangelogStore, GraphSetIndexStore, OxigraphStore, SparqlHttpStore, StoreOperationTimeoutError, UnsupportedTripleStoreCapabilityError, type Quad } from '@origintrail-official/dkg-storage';
 import { computeFlatKCRootV10, DKGPublisher, TripleStoreAsyncLiftPublisher,
   type KnowledgeAssetVmPublishRequest } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
@@ -466,6 +466,58 @@ describe('review regression boundaries', () => {
       expect(await agent._repairConfirmedNamedKaVmLifecycle(input, confirmedPublicationFor(input))).toBe(true); expect(fetch).not.toHaveBeenCalled();
       expect(decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'))).size).toBe(1);
     } finally { await agent.namedKaVmLifecycleRepair?.stop(); await remote.close(); }
+  });
+
+  /** Blazegraph answers 200 only after the request's journal commit; model that commit as a flushed snapshot. */
+  function blazegraphJournal(backing: OxigraphStore) {
+    const term = (value: string) => {
+      const literal = /^"([\s\S]*)"(?:\^\^<([^>]+)>)?$/.exec(value);
+      return literal ? { type: 'literal', value: JSON.parse(`"${literal[1]}"`), ...(literal[2] ? { datatype: literal[2] } : {}) } : { type: 'uri', value };
+    };
+    return vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const type = new Headers(init?.headers).get('Content-Type') ?? '', body = String(init?.body);
+      if (type.startsWith('application/sparql-query')) {
+        const result = await backing.query(body), projection = /SELECT\s+([\s\S]*?)\s+WHERE/i.exec(body)?.[1] ?? '';
+        if (result.type !== 'bindings') throw new Error('Expected SELECT bindings');
+        const vars = [...projection.matchAll(/\?(\w+)/g)].map(match => match[1]);
+        return Response.json({ head: { vars }, results: { bindings: result.bindings.map(row =>
+          Object.fromEntries(Object.entries(row).map(([name, value]) => [name, term(value)]))) } });
+      }
+      // The N-Quads bulk insert and each SPARQL UPDATE are one committed journal transaction.
+      await backing.update(type.startsWith('text/x-nquads')
+        ? `INSERT DATA { ${body.trim().split('\n').map(line => line.replace(/^(.*) (<[^>]*>) \.$/, 'GRAPH $2 { $1 . }')).join('\n')} }`
+        : body);
+      await backing.flush();
+      return new Response('<p>COMMIT</p>', { status: 200 });
+    });
+  }
+  it.each(['raw', 'agent-facade'] as const)('completes on Blazegraph, whose acknowledged updates are forced journal commits, through %s', async facade => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-blazegraph-stamp-')); dirs.push(dir);
+    const path = join(dir, 'blazegraph-journal.nq'), backing = new OxigraphStore(path), agent = agentFor(backing, dir, 1);
+    await backing.insert(metadataRows()); await backing.flush();
+    const fetch = blazegraphJournal(backing), blazegraph = new BlazegraphStore('http://blazegraph.test/bigdata/namespace/dkg/sparql');
+    agent.store = facade === 'raw' ? blazegraph : createListContextGraphsCacheInvalidatingStore(blazegraph, vi.fn(), vi.fn());
+    try {
+      const pending = await agent._repairConfirmedNamedKaVmLifecycle(input, confirmedPublicationFor(input));
+      expect([...decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'))).values()]).toEqual([]);
+      expect(pending).toBe(false); expect(agent.store.commitment?.durability).toBe('restart-durable'); expect(fetch).toHaveBeenCalled();
+      const reopened = new OxigraphStore(path); stores.push(reopened);
+      expect(await reopened.query(`ASK { GRAPH <${META}> { <${LIFECYCLE}> <${DKG}state> "published" ; <${DKG}memoryLayer> "VM" ;
+        <${DKG}vmCurrentAssertion> "${HEX.slice(2)}" ; <${DKG}publishedUal> ${JSON.stringify(PUBLISHED)} } }`)).toMatchObject({ value: true });
+    } finally { await agent.namedKaVmLifecycleRepair?.stop(); await blazegraph.close(); }
+  });
+  it('keeps the confirmed stamp pending on a Blazegraph journal its operator declares non-durable', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-volatile-blazegraph-stamp-')); dirs.push(dir);
+    const agent = agentFor(await persistentStore(), dir, 1), fetch = vi.spyOn(globalThis, 'fetch');
+    const blazegraph = new BlazegraphStore('http://volatile-blazegraph.test/sparql', { writesDurableOnAcknowledgement: false });
+    agent.store = createListContextGraphsCacheInvalidatingStore(blazegraph, vi.fn(), vi.fn());
+    try {
+      expect(agent.store.commitment).toBeUndefined();
+      await expect(applyPublishedNamedKaVmLifecycle(agent.store, input)).rejects.toMatchObject({ code: 'KA_VM_LIFECYCLE_DURABILITY_UNAVAILABLE' });
+      expect(await agent._repairConfirmedNamedKaVmLifecycle(input, confirmedPublicationFor(input))).toBe(true); expect(fetch).not.toHaveBeenCalled();
+      expect([...decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'))).values()])
+        .toMatchObject([{ attempts: 1, rejected: false, lastError: 'Confirmed lifecycle repair awaits an explicitly certified persistence barrier' }]);
+    } finally { await agent.namedKaVmLifecycleRepair?.stop(); await blazegraph.close(); }
   });
 
   it('commits once through the production agent wrapper without separate lifecycle writes', async () => {

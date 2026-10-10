@@ -14,6 +14,7 @@ import { registerTripleStoreAdapter } from '../triple-store.js';
 import { decodeSparqlJsonQueryResult } from '../sparql-json-query-result.js';
 import { toBlazegraphAsciiSafeNQuads } from './blazegraph-nquads.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
+import { blazegraphWriteCommitment, type BlazegraphPersistenceOptions } from './blazegraph-persistence.js';
 import {
   assertQuadLiteralsMutf8Safe,
   classifySparqlOperation,
@@ -101,7 +102,7 @@ const MAX_QUERY_MILLIS_HEADER = 'X-BIGDATA-MAX-QUERY-MILLIS';
  */
 const SERVER_QUERY_DEADLINE_FACTOR = 4;
 
-export interface BlazegraphStoreOptions {
+export interface BlazegraphStoreOptions extends BlazegraphPersistenceOptions {
   /** End-to-end timeout including scheduler wait, HTTP work, and response decoding. */
   timeout?: number;
   /** Optional scheduler injection for embedded callers and adapter-boundary tests. */
@@ -228,14 +229,15 @@ function createStoreOperationDeadline(
 }
 
 /**
- * BlazegraphStore — TripleStore adapter backed by a remote Blazegraph
- * SPARQL endpoint over HTTP.  Works with any Blazegraph 2.x instance
- * (standalone JAR, Docker, or embedded NanoSparqlServer).
- *
- * All operations are translated to standard SPARQL 1.1 Query / Update
- * plus Blazegraph's N-Quads bulk-insert endpoint.
+ * BlazegraphStore — TripleStore adapter backed by a remote Blazegraph 2.x
+ * SPARQL endpoint over HTTP (standalone JAR, Docker, or embedded
+ * NanoSparqlServer): standard SPARQL 1.1 Query / Update plus Blazegraph's
+ * N-Quads bulk-insert endpoint. Each acknowledged write is a forced journal
+ * commit, so `commitment` is restart-durable unless the operator opts out with
+ * `writesDurableOnAcknowledgement: false` (see BlazegraphPersistenceOptions).
  */
 export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapability {
+  readonly commitment: TripleStore['commitment'];
   readonly queryResponseLimitMode = 'pre-materialization' as const;
   readonly queryCancellation = 'interruptible' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
@@ -250,6 +252,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     this.url = url.replace(/\/$/, '');
     this.operationTimeoutMs = resolveOperationTimeout(options.timeout);
     this.scheduler = options.scheduler ?? externalStorePriorityScheduler;
+    this.commitment = blazegraphWriteCommitment(options);
     this.rfc64SharedProjectionStreamV1 = createRfc64HttpSharedProjectionRunnerV1({
       runConstruct: (request, consume) => this.runStreamingConstruct(request, consume),
       responseError: (status, excerpt) => new Error(
@@ -791,10 +794,6 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
 }
 
 // =====================================================================
-// Blazegraph JSON result types
-// =====================================================================
-
-// =====================================================================
 // N-Quad serialisation / parsing helpers (shared with oxigraph adapter)
 // =====================================================================
 
@@ -954,5 +953,6 @@ registerTripleStoreAdapter('blazegraph', async (opts) => {
   const url = opts?.url as string | undefined;
   if (!url) throw new Error('blazegraph adapter requires options.url (SPARQL endpoint)');
   const timeout = opts?.timeout as number | undefined;
-  return new BlazegraphStore(url, { timeout });
+  const writesDurableOnAcknowledgement = opts?.writesDurableOnAcknowledgement as boolean | undefined;
+  return new BlazegraphStore(url, { timeout, writesDurableOnAcknowledgement });
 });
