@@ -9,6 +9,7 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiClient } from '../src/api-client.js';
 import { registerLifecycleCommands } from '../src/commands/lifecycle.js';
+import * as manifest from '../src/daemon/manifest.js';
 import { handleStatusRoutes } from '../src/daemon/routes/status.js';
 import { invalidateExternalStoreQuadsCache } from '../src/daemon/store-quads-cache.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
@@ -187,6 +188,9 @@ describe('/api/status external-store quad count', () => {
   afterEach(cleanUpStoreQuads);
 
   it('reports the full source commit for exact-build devnet release checks', async () => {
+    vi.spyOn(manifest, 'loadBuildInfo').mockReturnValue({
+      commit: 'uncommitted', commitShort: '00000000', buildTime: null, distTag: 'monorepo', ciRun: null,
+    });
     const { server, baseUrl } = await startStatusServer(async () => COUNT_123, LOCAL_STORE);
     try {
       const expected = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim();
@@ -196,6 +200,20 @@ describe('/api/status external-store quad count', () => {
       await closeServer(server);
     }
   });
+
+  it.each(['a'.repeat(40), `${'a'.repeat(40)}-dirty`])(
+    'reports the immutable compiled identity %s even if the checkout now points at B', async commit => {
+      vi.spyOn(manifest, 'loadBuildInfo').mockReturnValue({
+        commit, commitShort: commit.slice(0, 8), buildTime: '2026-10-10T00:00:00Z', distTag: 'monorepo', ciRun: null,
+      });
+      const liveHead = vi.spyOn(manifest, 'getCurrentCommitFull').mockReturnValue('b'.repeat(40));
+      const { server, baseUrl } = await startStatusServer(async () => COUNT_123, LOCAL_STORE);
+      try {
+        expect((await fetchStatus(baseUrl)).body.commit).toBe(commit);
+        expect(liveHead).not.toHaveBeenCalled();
+      } finally { await closeServer(server); }
+    },
+  );
 
   it.each([
     ['an external SPARQL store', SPARQL_HTTP_STORE, 'http://127.0.0.1:9/query'],

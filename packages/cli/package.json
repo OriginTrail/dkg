@@ -27,7 +27,7 @@
     "preinstall": "node ./scripts/verify-node-sqlite-runtime.mjs",
     "build": "pnpm run build:prerequisites && pnpm run build:prepared",
     "build:prerequisites": "node scripts/build-prerequisites.mjs",
-    "build:prepared": "tsc && pnpm run test:types && node scripts/test-catchup-worker-package-boundary.mjs && node ../../scripts/copy-cli-runtime-assets.mjs",
+    "build:prepared": "node ../../scripts/stamp-cli-build-info.mjs --compile && pnpm run test:types && node scripts/test-catchup-worker-package-boundary.mjs && node ../../scripts/copy-cli-runtime-assets.mjs",
     "prepack": "node ../../scripts/copy-cli-runtime-assets.mjs",
     "benchmark:catchup-runner": "node scripts/catchup-runner-benchmark.cjs",
     "benchmark:daemon-responsiveness": "node scripts/daemon-responsiveness-benchmark.cjs",
