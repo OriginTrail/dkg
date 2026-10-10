@@ -8,6 +8,7 @@ import { performance } from 'node:perf_hooks';
 import oxigraph from 'oxigraph';
 import { formatCanonicalRdfTerm } from '@origintrail-official/dkg-rdf-utils';
 import { SparqlHttpStore } from '../dist/index.js';
+import { countValue } from '../../../scripts/lib/qa/query-observation.mjs';
 
 function args(argv) {
   const result = {};
@@ -41,7 +42,11 @@ const limit = Number(options.limit ?? manifest.assets.length);
 if (!Number.isSafeInteger(limit) || limit < 1 || limit > manifest.assets.length) throw new Error('Invalid limit');
 const selected = manifest.assets.slice(0, limit);
 const store = new SparqlHttpStore({ queryEndpoint: endpoint.href, consistencyProfile: 'atomic-readback', timeout: 120000 });
-const numeric = term => Number(/^"([0-9]+)"/.exec(term)?.[1] ?? term);
+const numeric = term => {
+  const value = countValue(term);
+  if (value === null || !Number.isSafeInteger(Number(value))) throw new Error('Invalid or oversized SPARQL count');
+  return Number(value);
+};
 const count = async () => {
   // sparql-scan-allow: R2 -- Post-ingest integrity check of a fresh owned loopback store containing only the fixed manifest corpus; outside the timed ingestion path.
   const result = await store.query('SELECT (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } }');

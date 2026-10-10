@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { spawn } from 'node:child_process';
-import { mkdtemp, writeFile, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -20,11 +20,18 @@ const term = (value: oxigraph.Term) => value.termType === 'Literal'
   : { type: value.termType, value: value.value };
 
 async function run(mode: string, populated: 'named' | 'default' | false,
-  options: { lowDisk?: boolean; redirect?: 'query' | 'mutation' } = {}) {
+  options: { lowDisk?: boolean; redirect?: 'query' | 'mutation'; assets?: number; group?: number } = {}) {
   const home = await mkdtemp(join(tmpdir(), 'ingest-guard-'));
   const nq = '<urn:s> <urn:p> "plain" <urn:g> .\n<urn:s> <urn:link> <urn:o> <urn:g> .\n<urn:s> <urn:lang> "hello"@en <urn:g> .\n<urn:s> <urn:number> "42"^^<http://www.w3.org/2001/XMLSchema#integer> <urn:g> .\n# comment without a final newline';
-  await writeFile(join(home, 'input.nq'), nq);
-  await writeFile(join(home, 'manifest.json'), JSON.stringify({ assets: [{ file: 'input.nq', graph: 'urn:g', quads: 4, sha256: createHash('sha256').update(nq).digest('hex') }] }));
+  const assets = [];
+  for (let i = 0; i < (options.assets ?? 1); i++) {
+    const graph = i === 0 ? 'urn:g' : `urn:g:${i}`;
+    const text = nq.replaceAll('<urn:g>', `<${graph}>`);
+    const file = `input-${i}.nq`;
+    await writeFile(join(home, file), text);
+    assets.push({ file, graph, quads: 4, sha256: createHash('sha256').update(text).digest('hex') });
+  }
+  await writeFile(join(home, 'manifest.json'), JSON.stringify({ assets }));
   let mutations = 0, redirectedRequests = 0;
   const endpoint = await startOxigraphSparqlEndpoint({ onMutation: () => { mutations++; } });
   if (populated) endpoint.store.load(`<urn:old> <urn:p> "keep" ${populated === 'named' ? '<urn:g> ' : ''}.`, { format: 'application/n-quads' });
@@ -56,6 +63,7 @@ async function run(mode: string, populated: 'named' | 'default' | false,
   }
   args.push(resolve('scripts/ingest-floor-benchmark.mjs'), '--manifest', join(home, 'manifest.json'),
     '--endpoint', url, '--mode', mode, '--out', join(home, 'out.json'), '--storage-path', join(home, 'journal'));
+  if (options.group !== undefined) args.push('--group', String(options.group));
   await mkdir(join(home, 'journal'));
   let output = '';
   try {
@@ -65,7 +73,8 @@ async function run(mode: string, populated: 'named' | 'default' | false,
       child.on('close', resolve);
     });
     const quads = endpoint.store.match().map(q => ({ subject: term(q.subject), predicate: term(q.predicate), object: term(q.object), graph: term(q.graph) }));
-    return { code, mutations, redirectedRequests, output, quads };
+    const report = await readFile(join(home, 'out.json'), 'utf8').then(JSON.parse).catch(() => null);
+    return { code, mutations, redirectedRequests, output, quads, report };
   } finally {
     for (const server of servers.reverse()) await close(server);
     await endpoint.close(); await rm(home, { recursive: true, force: true });
@@ -106,4 +115,22 @@ describe('storage benchmark safety and RDF boundaries', () => {
       expect(r.redirectedRequests).toBe(0); expect(r.mutations).toBe(0); expect(r.quads).toEqual([]);
     }
   });
+  it.each(['atomic', 'rdf'])('groups three assets with a partial final batch in %s mode', async mode => {
+    const r = await run(mode, false, { assets: 3, group: 2 });
+    expect(r.code, r.output).toBe(0);
+    expect(r.mutations).toBe(mode === 'rdf' ? 2 : 3);
+    expect(r.report).toMatchObject({ complete: true, assets: 3, groupSize: 2, quads: 12, actualQuads: 15, graphCountsMatch: true });
+    expect(r.report.batches.map((b: { assets: number; quads: number; offset: number }) => [b.offset,b.assets,b.quads])).toEqual([[0,2,8],[2,1,4]]);
+    expect(r.report.bytes).toBe(r.report.batches.reduce((sum: number, b: { bytes: number }) => sum+b.bytes, 0));
+    for (const graph of ['urn:g', 'urn:g:1', 'urn:g:2']) {
+      const data = r.quads.filter(q => q.graph.value === graph);
+      expect(data).toHaveLength(4);
+      expect(data.map(q => [q.predicate.value,q.object.value]).sort()).toEqual([
+        ['urn:p','plain'],['urn:link','urn:o'],['urn:lang','hello'],['urn:number','42'],
+      ].sort());
+      expect(r.quads.filter(q => q.graph.value === 'urn:benchmark:meta' && q.subject.value === graph))
+        .toEqual([expect.objectContaining({predicate:expect.objectContaining({value:'urn:benchmark:status'}),object:expect.objectContaining({value:'confirmed'})})]);
+    }
+  });
+
 });
