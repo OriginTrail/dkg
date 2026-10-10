@@ -1,3 +1,4 @@
+import { createEntityClient } from './entity-search/client.js';
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import type {
@@ -2463,6 +2464,8 @@ export class ApiClient {
   private async get<T>(path: string, opts: { auth?: boolean } = {}): Promise<T> {
     return this.send<T>(path, { headers: opts.auth === false ? {} : this.authHeaders() });
   }
+
+  readonly entities = createEntityClient((path, body, deadline) => this.post(path, body, deadline));
 
   private async post<T>(path: string, body: unknown, deadline: RequestDeadline = {}): Promise<T> {
     return this.send<T>(path, {

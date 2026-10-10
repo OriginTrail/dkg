@@ -142,6 +142,7 @@ export interface RequestContext {
   assertionImportLocks: Map<string, Promise<void>>;
   vectorStore: VectorStore;
   embeddingProvider: EmbeddingProvider | null;
+  entitySearch?: import('../../entity-search/service.js').EntitySearchService;
   validTokens: Set<string>;
   // API socket identity — trusted server-side state for manifestSelfClient
   // SSRF defence.
