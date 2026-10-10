@@ -8045,6 +8045,8 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       ctx: createOperationContext('publish'),
       publicationLabel: 'publish',
     });
+    // The observer returns once the placement is owed; the supervisor attempts it a turn later.
+    await author.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     // Confirmation is durable, but the injected first placement failure must
     // leave the pending row intact rather than losing the transition.
     expect(author.readRfc64AppliedCatalogHeadV1({

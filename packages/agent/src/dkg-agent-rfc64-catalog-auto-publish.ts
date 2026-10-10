@@ -786,11 +786,11 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   }
 
   /**
-   * Canonical post-confirmation observer. Public SWM-only lanes retract the
-   * pending row. A finalized private lane stores the durable marker of its
-   * now-chain-backed placement and hands the placement to the catalog
-   * supervisor, retaining its tier-neutral author-inventory row. It returns
-   * there: a confirmed publication never waits for a placement attempt.
+   * Canonical post-confirmation observer. A public SWM-only lane retracts the
+   * pending row, and the publication waits for that. A finalized private lane
+   * keeps its tier-neutral row, stores the durable marker of its now-chain-backed
+   * placement and asks the catalog supervisor for it: the publication waits
+   * for that one write, never for a placement attempt or the start of one.
    */
   async observeRfc64ConfirmedVmV1(
     this: DKGAgent,

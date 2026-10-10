@@ -216,9 +216,10 @@ export interface PlacementAgentV1 {
   readonly warnings: () => string[];
   /**
    * The lane the observer and the supervisor resolve. A row flips `acceptsFinalizedVmRepair` to
-   * stage a transition, or sets `unavailable` to make every resolution throw it.
+   * stage a transition, sets `inactive` to make every resolution answer that the graph has no
+   * lane, or sets `unavailable` to make every resolution throw it.
    */
-  readonly lane: { acceptsFinalizedVmRepair: boolean; unavailable?: Error };
+  readonly lane: { acceptsFinalizedVmRepair: boolean; inactive?: boolean; unavailable?: Error };
   /** When set, every durable marker write rejects with it. */
   failMarkerWrite: Error | undefined;
   /** Runs right after a durable marker write, before the placement is requested. */
@@ -326,6 +327,7 @@ export async function startPlacementAgentV1(
       vi.spyOn(internals, 'resolveRfc64CatalogAuthoringLaneV1').mockImplementation(
         (contextGraphId, subGraphName) => {
           if (lane.unavailable !== undefined) throw lane.unavailable;
+          if (lane.inactive === true) return null;
           const resolved = realLane(contextGraphId, subGraphName);
           return resolved === null
             ? null

@@ -271,6 +271,7 @@ export default defineConfig({
       "test/publication-terminal-before-catalog-placement.test.ts",
       "test/finalized-private-placement-ownership.test.ts",
       "test/owed-placement-seals.test.ts",
+      "test/next-turn-recurring-task.test.ts",
       "test/vm-recovery-transport-plan.test.ts",
       "test/vm-recovery-batch-timing-host.test.ts",
       "test/vm-recovery-pass-authority.test.ts",

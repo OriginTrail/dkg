@@ -38,6 +38,7 @@ import {
   type FinalizedPrivatePlacementQueueStatusV1,
 } from './internal/catalog-placement-timing.js';
 import { FinalizedPrivatePlacementWaitersV1 } from './internal/finalized-private-placement-waiters.js';
+import { NextTurnRecurringTaskV1 } from './internal/next-turn-recurring-task.js';
 import { retainOwedPlacementSealV1 } from './internal/owed-placement-seals.js';
 
 // Match the default background store lane; repair fanout must not flood its queue.
@@ -97,7 +98,7 @@ interface ProjectionSupervisorStateV1 {
   readonly repairs: MutableAuthorRepairStatusV1[];
   readonly runner: CoalescingRecurringTask;
   publicMutationTimer: ReturnType<typeof setTimeout> | undefined;
-  readonly finalizedPrivateRunner: CoalescingRecurringTask;
+  readonly finalizedPrivateRunner: NextTurnRecurringTaskV1;
   readonly finalizedPrivateWaiters: FinalizedPrivatePlacementWaitersV1;
   finalizedPrivateWaiterTimer: ReturnType<typeof setTimeout> | undefined;
   readonly finalizedPrivateRetries: Map<string, {
@@ -251,18 +252,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
         && repair.authorAddress === params.authorAddress)?.retry.observe(null);
       return false;
     }
-    let state = this.#state;
-    if (state === undefined) {
-      const retryIntervalMs = this.#dependencies.resolvePartition()?.retryIntervalMs
-        ?? DEFAULT_PROJECTION_RETRY_INTERVAL_MS_V1;
-      state = this.#createState(
-        retryIntervalMs,
-        retryIntervalMs,
-        [],
-        params.ctx,
-      );
-      this.#state = state;
-    }
+    const state = this.#ensureState(params.ctx);
     if (state.runner.closed) return false;
     let repair = state.repairs.find(
       (candidate) => candidate.contextGraphId === params.contextGraphId
@@ -301,24 +291,34 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       return Object.freeze({ accepted: false, whenAttempted: Promise.resolve() });
     };
     if (this.#admissionClosed) return rejected();
-    if (!this.#dependencies.acceptsFinalizedPrivateLane(params.repair.contextGraphId)) {
-      this.#state?.finalizedPrivateRetries.get(key)?.retry.observe(null);
+    const state = this.#ensureState(params.ctx);
+    if (state.finalizedPrivateRunner.closed) return rejected();
+    let laneAccepts = false;
+    try {
+      laneAccepts = this.#dependencies.acceptsFinalizedPrivateLane(params.repair.contextGraphId);
+    } finally {
+      // Refused, or the lane cannot be resolved now: the marker is durable and no request holds
+      // it, so a pass has to come back for it without waiting for other traffic or a restart.
+      if (!laneAccepts && (state.retryIntervalMs ?? 0) > 0) state.finalizedPrivateRunner.schedule(state.retryIntervalMs!);
+    }
+    if (!laneAccepts) {
+      state.finalizedPrivateRetries.get(key)?.retry.observe(null);
       return rejected();
     }
-    let state = this.#state;
-    if (state === undefined) {
-      const retryIntervalMs = this.#dependencies.resolvePartition()?.retryIntervalMs
-        ?? DEFAULT_PROJECTION_RETRY_INTERVAL_MS_V1;
-      state = this.#createState(retryIntervalMs, retryIntervalMs, [], params.ctx);
-      this.#state = state;
-    }
-    if (state.finalizedPrivateRunner.closed) return rejected();
     const waiter = state.finalizedPrivateWaiters.add(key, this.#timing().now(), params.observer);
-    if (!state.finalizedPrivateRunner.request()) {
+    // The pass starts one turn later: the caller pays for its durable marker, not for the listing
+    // of every marker and the start of the first repair.
+    if (!state.finalizedPrivateRunner.requestNextTurn()) {
       waiter.withdraw();
       return rejected();
     }
     return Object.freeze({ accepted: true, whenAttempted: waiter.whenAttempted });
+  }
+
+  #ensureState(ctx: OperationContext): ProjectionSupervisorStateV1 {
+    if (this.#state !== undefined) return this.#state;
+    const retryIntervalMs = this.#dependencies.resolvePartition()?.retryIntervalMs ?? DEFAULT_PROJECTION_RETRY_INTERVAL_MS_V1;
+    return this.#state = this.#createState(retryIntervalMs, retryIntervalMs, [], ctx);
   }
 
   status(): Readonly<Rfc64SwmCatalogProjectionSupervisorStatusV1> | null {
@@ -397,7 +397,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       },
       closingMessage: 'RFC-64 SWM catalog projection closing',
     });
-    const finalizedPrivateRunner = new CoalescingRecurringTask({
+    const finalizedPrivateRunner = new NextTurnRecurringTaskV1(new CoalescingRecurringTask({
       retryIntervalMs: finalizedPrivateRetryIntervalMs,
       runPass: async (signal) => {
         let failed = false;
@@ -422,7 +422,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
         );
       },
       closingMessage: 'RFC-64 finalized-private placement repair closing',
-    });
+    }));
     state = {
       retryIntervalMs,
       repairs,
