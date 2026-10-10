@@ -1,4 +1,4 @@
-export { persistFileAndParent, persistDirectoryRange, type DirectorySyncPolicy } from './file-durability.js';
+export { DurableDirectory, persistFileAndParent, persistDirectoryRange, type DirectorySyncPolicy, type DurableDirectoryOptions } from './file-durability.js';
 export {
   BlazegraphNamespaceManager,
   BLAZEGRAPH_NAMESPACE_XML_TEMPLATE,

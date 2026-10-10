@@ -6,46 +6,63 @@ import { dirname, resolve } from 'node:path';
 export type DirectorySyncPolicy = 'strict' | 'allow-unsupported';
 const UNSUPPORTED_DIRECTORY_CODES = new Set(['EINVAL', 'ENOTSUP', 'EPERM', 'EISDIR']);
 
-/**
- * Flush the visible file through a writable handle, then its parent directory and,
- * when `through` names an ancestor, every directory up to and including it.
- */
-export async function persistFileAndParent(
-  path: string, platform: NodeJS.Platform = process.platform, through?: string,
-): Promise<void> {
-  const absolutePath = resolve(path);
-  // Windows FlushFileBuffers requires GENERIC_WRITE; a read-only handle fails.
-  const file = await open(absolutePath, 'r+');
+/** Windows FlushFileBuffers requires GENERIC_WRITE; a read-only handle fails. */
+async function syncFile(path: string): Promise<void> {
+  const file = await open(path, 'r+');
   try { await file.sync(); } finally { await file.close(); }
+}
+
+/** Flush the visible file through a writable handle, then its parent directory. */
+export async function persistFileAndParent(path: string, platform: NodeJS.Platform = process.platform): Promise<void> {
+  const absolutePath = resolve(path);
+  await syncFile(absolutePath);
   const directory = dirname(absolutePath);
-  await persistDirectoryRange(directory, through === undefined ? directory : resolve(through), platform);
+  await persistDirectoryRange(directory, directory, platform);
+}
+
+export interface DurableDirectoryOptions {
+  /** Mode of each directory `create()` makes, filtered by the umask; existing directories keep theirs. */
+  readonly mode?: number;
+  /** Applies to every directory a barrier syncs. Strict by default. */
+  readonly policy?: DirectorySyncPolicy;
+  /** Defaults to `process.platform`, read at each barrier. */
+  readonly platform?: NodeJS.Platform;
 }
 
 /**
- * The directory of a file that is rewritten in place. A new directory entry lives
- * in its parent, so a barrier must sync each directory recursive mkdir created and
- * the first parent that already existed. mkdir reports its first new directory only
- * once: that range stays pending across failed barriers until one persists it.
+ * A directory whose entries must survive a crash. A new directory entry lives in
+ * its parent, so a barrier syncs this directory, each directory recursive mkdir
+ * created for it, and the first parent that already existed. mkdir reports its
+ * first new directory only once: that range stays pending across failed barriers
+ * until one persists it, so the owner of a durable path keeps one instance.
  */
-export class DurableFileDirectory {
-  private readonly directory: string;
+export class DurableDirectory {
+  readonly path: string;
   private pendingThrough?: string;
 
-  constructor(file: string) { this.directory = dirname(resolve(file)); }
+  constructor(path: string, private readonly options: DurableDirectoryOptions = {}) {
+    this.path = resolve(path);
+  }
 
   async create(): Promise<void> {
-    const firstCreated = await mkdir(this.directory, { recursive: true });
+    const firstCreated = await mkdir(this.path, { recursive: true, mode: this.options.mode });
     if (firstCreated === undefined) return;
     // Every candidate is an ancestor of this directory; the shorter path is the outer one.
     const through = dirname(resolve(firstCreated));
     if (this.pendingThrough === undefined || through.length < this.pendingThrough.length) this.pendingThrough = through;
   }
 
-  /** Flush `file` inside this directory, then every directory entry created since the last success. */
-  async persist(file: string, platform: NodeJS.Platform = process.platform): Promise<void> {
+  /** Sync this directory, then every directory entry created since the last successful barrier. */
+  async persist(): Promise<void> {
     const through = this.pendingThrough;
-    await persistFileAndParent(file, platform, through);
+    await persistDirectoryRange(this.path, through ?? this.path, this.options.platform ?? process.platform, this.options.policy);
     if (this.pendingThrough === through) this.pendingThrough = undefined;
+  }
+
+  /** Flush a file in this directory through a writable handle, then persist the directory. */
+  async persistFile(file: string): Promise<void> {
+    await syncFile(resolve(file));
+    await this.persist();
   }
 }
 

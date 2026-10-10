@@ -3,7 +3,8 @@ import oxigraph from 'oxigraph';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
 import { existsSync, readFileSync, renameSync } from 'node:fs';
 import { open, rename } from 'node:fs/promises';
-import { DurableFileDirectory } from '../file-durability.js';
+import { dirname } from 'node:path';
+import { DurableDirectory } from '../file-durability.js';
 import type {
   TripleStore,
   QueryOptions,
@@ -68,7 +69,7 @@ export class OxigraphStore implements TripleStore {
   readonly rfc64SemanticReadCertifiedV1 = true as const;
   private store: OxStore;
   private persistPath: string | undefined;
-  private snapshotDirectory?: DurableFileDirectory;
+  private snapshotDirectory?: DurableDirectory;
   // #1609: per-graph write generations, bumped on every local mutation (the
   // same choke points the sparql-http adapter pairs with its listGraphs-cache
   // invalidation). Feeds the chain-reconcile negative memo via
@@ -207,7 +208,7 @@ export class OxigraphStore implements TripleStore {
   private async flushNow(): Promise<void> {
     if (!this.persistPath || this.flushing) return;
     this.flushing = true;
-    const directory = this.snapshotDirectory ??= new DurableFileDirectory(this.persistPath);
+    const directory = this.snapshotDirectory ??= new DurableDirectory(dirname(this.persistPath));
     const tmpPath = `${this.persistPath}.tmp`;
     try {
       await directory.create();
@@ -231,7 +232,7 @@ export class OxigraphStore implements TripleStore {
       // visible rename is not proof of durability. Certified commitment callers
       // may erase recovery evidence only after the supported barrier succeeds.
       // Real file/dir I/O failures propagate; retries can re-dump visible state.
-      await directory.persist(this.persistPath);
+      await directory.persistFile(this.persistPath);
     } catch (err) {
       // Log here so we see the failure regardless of the caller — but
       // re-throw so explicit callers fail loudly. (Background callers

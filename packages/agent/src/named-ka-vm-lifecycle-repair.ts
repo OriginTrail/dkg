@@ -2,7 +2,7 @@
 import { NamedKaVmLifecycleIntegrityError, isNamedKaVmLifecycleIntegrityError } from './named-ka-vm-lifecycle-integrity-error.js';
 import { CoalescingRecurringTask } from './coalescing-recurring-task.js';
 import { readFile } from 'node:fs/promises';
-import { replaceDurableFile } from './durable-file-replace.js';
+import { DurableReplaceableFile } from './durable-file-replace.js';
 import { join } from 'node:path';
 import type { PublishedNamedKaVmLifecycleInput } from './named-ka-vm-lifecycle.js';
 import { assertionLifecycleWriteLockKey, withKeyedLocks } from '@origintrail-official/dkg-publisher';
@@ -30,6 +30,8 @@ export class NamedKaVmLifecycleRepair {
   private worker?: CoalescingRecurringTask;
   private stopping?: Promise<void>;
   private stopped = false;
+  /** Keeps a newly created dataDir ancestry pending until a journal barrier persists it. */
+  private journalFile?: DurableReplaceableFile;
 
   constructor(private readonly options: {
     dataDir?: string;
@@ -68,8 +70,8 @@ export class NamedKaVmLifecycleRepair {
   private async persist(): Promise<void> {
     const dir = this.options.dataDir;
     if (!dir) return;
-    await replaceDurableFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'),
-      JSON.stringify(encodeLifecycleRepairJournal(this.entries)), { fileMode: 0o600, directoryMode: 0o700 });
+    this.journalFile ??= new DurableReplaceableFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), { fileMode: 0o600, directoryMode: 0o700 });
+    await this.journalFile.replace(JSON.stringify(encodeLifecycleRepairJournal(this.entries)));
   }
 
   async submit(input: ConfirmedNamedKaVmLifecycleInput): Promise<NamedKaVmLifecycleRepairOutcome> {
