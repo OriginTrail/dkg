@@ -539,7 +539,6 @@ const DEFAULT_MAX_REHYDRATED_SUBSCRIPTIONS = 64;
 /** Yield to the event loop every N activations so concurrent store work can interleave. */
 const REHYDRATE_THROTTLE_BATCH = 8;
 /** Retry interval for a persisted-subscription activation that is waiting for a slot. */
-const REHYDRATION_ROLLING_RETRY_MS = 30_000;
 /**
  * How long startup rehydration waits on persisted rows' read authority before
  * leaving the rest to background authority recovery (#2815). Override via
@@ -826,7 +825,10 @@ import {
 } from './context-graph-subscription-dormancy.js';
 import {
   activatePersistedContextGraphSubscription as activatePersistedContextGraphSubscriptionTransaction,
+  activateRollingSubscriptionPromotion,
+  createRollingSubscriptionPromotionRuntime,
   DEFERRED_AUTHORITY_RECOVERY_RETRY_MS,
+  REHYDRATION_ROLLING_RETRY_MS,
   recoverDeferredContextGraphSubscriptionAuthorities,
   type DeferredContextGraphSubscriptionAuthorityRecoveryCursor,
   type PersistedContextGraphSubscriptionActivationOptions,
@@ -4170,9 +4172,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ?.dormantReasons.authorityUnavailable.length) {
       authorityRecovery.schedule();
     }
-    const rehydrationPromotion = new CoalescingRecurringTask({
-      retryIntervalMs: REHYDRATION_ROLLING_RETRY_MS,
-      requestWhileRunning: 'coalesce',
+    const rehydrationPromotion = createRollingSubscriptionPromotionRuntime({
       runPass: async (signal) => this.promoteDormantContextGraphSubscriptions(signal),
       onError: (error) => {
         this.log.warn(
@@ -4182,7 +4182,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           }`,
         );
       },
-      closingMessage: 'Rolling context-graph subscription activation closing',
     });
     this.contextGraphSubscriptionRehydrationPromotionRuntime = rehydrationPromotion;
     if (this.contextGraphSubscriptionRehydrationPendingIds.size > 0) {
@@ -11590,32 +11589,4 @@ async function listSharedMemoryMetaGraphs(store: TripleStore, contextGraphId: st
     metaGraphs.push(graph);
   }
   return metaGraphs;
-}
-
-/** Lifecycle-owned preparation, shared with the typed promotion fixture. */
-export interface RollingSubscriptionActivationLifecycle {
-  activate: (...args: Parameters<DKGAgent['activatePersistedContextGraphSubscriptionRecord']>) => Promise<unknown>;
-  persistBinding: (...args: Parameters<DKGAgent['persistContextGraphSubscriptionStrict']>) => Promise<void>;
-  reconcile: (...args: Parameters<DKGAgent['reconcileRfc64CatalogResponsibilityV1']>) => Promise<unknown>;
-}
-
-export async function activateRollingSubscriptionPromotion(
-  lifecycle: RollingSubscriptionActivationLifecycle,
-  row: ContextGraphSubscriptionRecord,
-  onChainId: string | undefined,
-  isCurrent: (subscription: ContextGraphSub) => boolean,
-): Promise<void> {
-  await lifecycle.activate(row, {
-    onChainId, updateRehydrationStatus: false,
-    prepare: async (subscription) => {
-      if (!isCurrent(subscription)) throw new Error('Persisted subscription promotion became stale');
-      if (onChainId !== undefined && onChainId !== row.onChainId) {
-        // A repaired binding must be durable before responsibility or network effects.
-        await lifecycle.persistBinding(row.id, subscription, row.syncScoped, () => isCurrent(subscription));
-      }
-      if (!isCurrent(subscription)) throw new Error('Persisted subscription promotion became stale');
-      await lifecycle.reconcile(row.id);
-    },
-    isCurrent,
-  });
 }

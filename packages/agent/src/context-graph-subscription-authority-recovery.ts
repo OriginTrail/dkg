@@ -14,12 +14,13 @@ import {
 } from './context-graph-subscription-dormancy.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { isCanonicalAuthoritativeContextGraphId } from './context-graph-binding-state.js';
-import type { CoalescingRecurringTask } from './coalescing-recurring-task.js';
+import { CoalescingRecurringTask } from './coalescing-recurring-task.js';
 import type { RollingSubscriptionChecks } from './context-graph-subscription-rolling-checks.js';
 
 const MAX_CONCURRENT_DEFERRED_ROW_LOADS = 4;
 /** How often recovery asks again while a row is unavailable. */
 export const DEFERRED_AUTHORITY_RECOVERY_RETRY_MS = 30_000;
+export const REHYDRATION_ROLLING_RETRY_MS = 30_000;
 
 /**
  * Have recovery ask its rows one retry interval from now, unless it is due
@@ -348,6 +349,48 @@ export function rehydratedSubscriptionReachedSafeState(
   return subscription.synced === true
     && subscription.metaSynced !== false
     && subscription.pendingMeta !== true;
+}
+
+/** One coalescing owner retains explicit wake-ups delivered as a pass ends. */
+export function createRollingSubscriptionPromotionRuntime(callbacks: {
+  runPass(signal: AbortSignal): Promise<'rearm' | 'idle'>;
+  onError(error: unknown): void;
+}): CoalescingRecurringTask {
+  return new CoalescingRecurringTask({
+    retryIntervalMs: REHYDRATION_ROLLING_RETRY_MS,
+    requestWhileRunning: 'coalesce',
+    runPass: callbacks.runPass,
+    onError: callbacks.onError,
+    closingMessage: 'Rolling context-graph subscription activation closing',
+  });
+}
+
+/** Binding repair and responsibility preparation for one subscription generation. */
+export interface RollingSubscriptionActivationPorts {
+  activate(row: ContextGraphSubscriptionRecord, options: PersistedContextGraphSubscriptionActivationOptions): Promise<unknown>;
+  persistBinding(id: string, subscription: ContextGraphSub, syncScoped: boolean, isCurrent: () => boolean): Promise<void>;
+  reconcile(id: string): Promise<unknown>;
+}
+
+export async function activateRollingSubscriptionPromotion(
+  ports: RollingSubscriptionActivationPorts,
+  row: ContextGraphSubscriptionRecord,
+  onChainId: string | undefined,
+  isCurrent: (subscription: ContextGraphSub) => boolean,
+): Promise<void> {
+  await ports.activate(row, {
+    onChainId, updateRehydrationStatus: false,
+    prepare: async (subscription) => {
+      if (!isCurrent(subscription)) throw new Error('Persisted subscription promotion became stale');
+      if (onChainId !== undefined && onChainId !== row.onChainId) {
+        // A repaired binding must be durable before responsibility or network effects.
+        await ports.persistBinding(row.id, subscription, row.syncScoped, () => isCurrent(subscription));
+      }
+      if (!isCurrent(subscription)) throw new Error('Persisted subscription promotion became stale');
+      await ports.reconcile(row.id);
+    },
+    isCurrent,
+  });
 }
 
 /** Rolling promotion owns candidate ordering and generation fences. */

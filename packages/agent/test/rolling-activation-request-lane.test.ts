@@ -4,9 +4,8 @@ import {
   activeRpcRequestContext,
   withRpcRequestContext,
 } from '@origintrail-official/dkg-chain';
-import { CoalescingRecurringTask } from '../src/coalescing-recurring-task.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
-import { promoteDormantContextGraphSubscriptions } from '../src/context-graph-subscription-authority-recovery.js';
+import { createRollingSubscriptionPromotionRuntime, promoteDormantContextGraphSubscriptions } from '../src/context-graph-subscription-authority-recovery.js';
 import { createRollingPromotionFixture, savedPromotionRow, promotionSubscription, type RollingPromotionFixture as Host, type PromotionAuthorityRead as AuthorityRead } from './_helpers/rolling-subscription-promotion.js';
 import {
   ROLLING_CHECK_MIN_PAUSE_MS,
@@ -460,10 +459,8 @@ describe('rolling activation and the chain request lane', () => {
     const ending = new Promise<void>((resolve) => { reachedEnding = resolve; });
     const retirement = new Promise<void>((resolve) => { retire = resolve; });
     let passes = 0;
-    const runtime = new CoalescingRecurringTask({
-      requestWhileRunning: 'coalesce',
+    const runtime = createRollingSubscriptionPromotionRuntime({
       onError: vi.fn(),
-      closingMessage: 'test promotion closing',
       runPass: async (signal) => {
         const result = await promote(host, signal);
         if (++passes === 1) { reachedEnding(); await retirement; }
@@ -491,12 +488,9 @@ describe('rolling activation and the chain request lane', () => {
   it('stops at once, without a failure report, when the node closes during a pause', async () => {
     const host = hostWith(backlog(20));
     const onError = vi.fn();
-    const runtime = new CoalescingRecurringTask({
-      retryIntervalMs: 30_000,
-      requestWhileRunning: 'coalesce',
+    const runtime = createRollingSubscriptionPromotionRuntime({
       runPass: (signal) => promote(host, signal),
       onError,
-      closingMessage: 'Rolling context-graph subscription activation closing',
     });
     host.contextGraphSubscriptionRehydrationPromotionRuntime = runtime;
     runtime.request();

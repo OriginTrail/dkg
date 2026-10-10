@@ -5,7 +5,7 @@ import { RollingSubscriptionChecks } from '../../src/context-graph-subscription-
 import type { RollingSubscriptionPromotionPorts } from '../../src/context-graph-subscription-authority-recovery.js';
 import type { ContextGraphSub, ContextGraphSubscriptionRecord } from '../../src/dkg-agent-types.js';
 import type { ContextGraphDormancyReason } from '../../src/context-graph-subscription-dormancy.js';
-import { activateRollingSubscriptionPromotion, type RollingSubscriptionActivationLifecycle } from '../../src/dkg-agent-lifecycle.js';
+import { activateRollingSubscriptionPromotion, type RollingSubscriptionActivationPorts } from '../../src/context-graph-subscription-authority-recovery.js';
 import type { DKGAgent } from '../../src/dkg-agent.js';
 import { wakeDeferredContextGraphSubscriptionAuthorityRecovery } from '../../src/context-graph-subscription-authority-recovery.js';
 import type { CoalescingRecurringTask } from '../../src/coalescing-recurring-task.js';
@@ -29,7 +29,7 @@ export function createRollingPromotionFixture(
     authority?: 'allowed' | 'denied' | 'unavailable';
     answer?: DKGAgent['resolveContextGraphSubscriptionBootstrapAuthority'];
     load?: (id: string) => Promise<SavedPromotionRow | null>;
-    activate?: RollingSubscriptionActivationLifecycle['activate'];
+    activate?: RollingSubscriptionActivationPorts['activate'];
   } = {},
 ) {
   const savedRows = new Map(rows.map(row => [row.id, savedPromotionRow(row)]));
@@ -70,12 +70,12 @@ export function createRollingPromotionFixture(
     touchStatus: vi.fn(),
     updateContextGraphSubscriptionRehydrationStatusAfterClear: vi.fn<RollingSubscriptionPromotionPorts['updateContextGraphSubscriptionRehydrationStatusAfterClear']>(),
     updateContextGraphSubscriptionRehydrationStatusAfterPersist: vi.fn<RollingSubscriptionPromotionPorts['updateContextGraphSubscriptionRehydrationStatusAfterPersist']>(),
-    persistContextGraphSubscriptionStrict: vi.fn<RollingSubscriptionActivationLifecycle['persistBinding']>(async () => undefined),
-    reconcileRfc64CatalogResponsibilityV1: vi.fn<RollingSubscriptionActivationLifecycle['reconcile']>(async () => undefined),
+    persistContextGraphSubscriptionStrict: vi.fn<RollingSubscriptionActivationPorts['persistBinding']>(async () => undefined),
+    reconcileRfc64CatalogResponsibilityV1: vi.fn<RollingSubscriptionActivationPorts['reconcile']>(async () => undefined),
     resolveContextGraphSubscriptionBootstrapAuthority: vi.fn<DKGAgent['resolveContextGraphSubscriptionBootstrapAuthority']>(options.answer ?? (async () => options.authority === 'unavailable'
       ? { outcome: 'unavailable', source: 'legacy-local', reason: 'test', metadataBootstrap: 'eligible', dependency: 'unknown' }
       : { outcome: options.authority ?? 'allowed', source: 'legacy-local', reason: 'test', metadataBootstrap: 'eligible' })),
-    activatePersistedContextGraphSubscriptionRecord: vi.fn<RollingSubscriptionActivationLifecycle['activate']>(options.activate ?? (async row => {
+    activatePersistedContextGraphSubscriptionRecord: vi.fn<RollingSubscriptionActivationPorts['activate']>(options.activate ?? (async row => {
       host.subscribedContextGraphs.set(row.id, promotionSubscription({ subscribed: row.subscribed, coreHosted: row.coreHosted, metaSynced: false, pendingMeta: false }));
     })),
   };
