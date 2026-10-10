@@ -315,7 +315,8 @@ describe('exact-batch stream request the responder limiter does not admit', () =
     for (const release of releases) await release();
     f.authorize.mockResolvedValueOnce(false);
     // Admitted now: it reaches authorization, which this fixture denies.
-    expect(await f.exchange().settled).toMatchObject({ code: 'EXACT_BATCH_PARTIAL', refusalObservation: undefined });
+    expect(await f.exchange().settled).toMatchObject({ code: 'EXACT_BATCH_PARTIAL',
+      refusalObservation: { code: 'DENIED', startedAssets: 0, committedAssets: 0 } });
     expect(f.authorize).toHaveBeenCalledOnce();
     expect(f.busyLines()).toHaveLength(1); expect(await metric.read()).toBe(1);
   });
