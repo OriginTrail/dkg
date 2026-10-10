@@ -114,7 +114,7 @@ type ProjectionReconciliationV1 = Awaited<ReturnType<
 
 export interface Rfc64FinalizedPrivatePlacementRepairRequestV1 {
   readonly accepted: boolean;
-  /** Settles after this exact repair's first admitted attempt, independent of other work. */
+  /** Settles after this exact repair's first admitted attempt; no publication waits on it (GH#3081). */
   readonly whenAttempted: Promise<void>;
 }
 
@@ -285,21 +285,22 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     return state.runner.request();
   }
 
-  /** Enqueue one already-durable chain-confirmed private placement transition. */
+  /** Enqueue one already-durable chain-confirmed private placement; accepted or not, its marker is owed. */
   requestFinalizedPrivate(params: Readonly<{
     readonly repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>;
     readonly ctx: OperationContext;
     /** GH#3081 — told about this waiter's cooldown skips and the attempt that releases it. */
     readonly observer?: CatalogPlacementWaiterObserverV1;
   }>): Rfc64FinalizedPrivatePlacementRepairRequestV1 {
-    const rejected = (): Rfc64FinalizedPrivatePlacementRepairRequestV1 => Object.freeze({
-      accepted: false,
-      whenAttempted: Promise.resolve(),
-    });
+    const key = finalizedPrivateRepairKeyV1(params.repair);
+    this.#timing().owed(key);
+    const rejected = (): Rfc64FinalizedPrivatePlacementRepairRequestV1 => {
+      try { params.observer?.released(); } catch { /* A refusal is a release with no attempt; observation only. */ }
+      return Object.freeze({ accepted: false, whenAttempted: Promise.resolve() });
+    };
     if (this.#admissionClosed) return rejected();
     if (!this.#dependencies.acceptsFinalizedPrivateLane(params.repair.contextGraphId)) {
-      this.#state?.finalizedPrivateRetries.get(finalizedPrivateRepairKeyV1(params.repair))
-        ?.retry.observe(null);
+      this.#state?.finalizedPrivateRetries.get(key)?.retry.observe(null);
       return rejected();
     }
     let state = this.#state;
@@ -310,7 +311,6 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       this.#state = state;
     }
     if (state.finalizedPrivateRunner.closed) return rejected();
-    const key = finalizedPrivateRepairKeyV1(params.repair);
     const waiter = state.finalizedPrivateWaiters.add(key, this.#timing().now(), params.observer);
     if (!state.finalizedPrivateRunner.request()) {
       waiter.withdraw();
@@ -458,8 +458,8 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     signal: AbortSignal,
   ): Promise<void> {
     const repairs = this.#dependencies.listFinalizedPrivateRepairs();
-    this.#timing().passStarted(repairs.length);
     const currentKeys = new Set(repairs.map(finalizedPrivateRepairKeyV1));
+    this.#timing().passStarted(currentKeys);
     for (const key of state.finalizedPrivateRetries.keys()) {
       if (!currentKeys.has(key)) state.finalizedPrivateRetries.delete(key);
     }
@@ -482,7 +482,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       }
       const attemptGeneration = entry.retry.generation;
       entry.attempts += 1;
-      const placement = this.#timing().admit();
+      const placement = this.#timing().admit(key);
       try {
         if (!this.#dependencies.acceptsFinalizedPrivateLane(repair.contextGraphId)) {
           throw new CatalogRepairLaneInactiveErrorV1();
