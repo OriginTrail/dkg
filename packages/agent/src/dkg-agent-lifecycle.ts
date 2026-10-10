@@ -3298,7 +3298,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 `Exact batch responder stage=${stage} asset=${assetIndex} durationMs=${durationMs.toFixed(3)}`),
             });
             registerExperimentalExactBatchResponder(this.router,
-              exactBatchTransportOptions(120_000), binding.authorizeRequest, binding.respond);
+              {
+                ...exactBatchTransportOptions(120_000),
+                onInboundOpen: (peerIdSuffix) => this.log.info(createOperationContext('sync'),
+                  `Exact batch inbound opened peer=${peerIdSuffix}`),
+                onInboundFailure: ({ peerIdSuffix, stage, errorName, errorCode, signalAborted }) =>
+                  this.log.warn(createOperationContext('sync'),
+                    `Exact batch inbound failed peer=${peerIdSuffix} stage=${stage} error=${errorName}${errorCode ? ` code=${errorCode}` : ''} aborted=${signalAborted}`),
+              }, binding.authorizeRequest, binding.respond);
           }
         : undefined,
       // Serve-skip policy (#1233): withhold the no-consumer agents/_meta snapshot

@@ -219,6 +219,15 @@ export interface DuplexStreamOptions {
   timeoutMs: number;
   signal?: AbortSignal;
   maxReadBufferBytes: number;
+  /** Optional, best-effort diagnostics. Never receives request bytes or error messages. */
+  onInboundOpen?: (peerIdSuffix: string) => void;
+  onInboundFailure?: (failure: {
+    peerIdSuffix: string;
+    stage: 'pre-read' | 'read-request' | 'peer-admission' | 'handler' | 'close';
+    errorName: string;
+    errorCode: string | undefined;
+    signalAborted: boolean;
+  }) => void;
 }
 
 export interface DuplexStreamRequest<T> {
@@ -786,22 +795,36 @@ export class ProtocolRouter {
       const signal = lifecycle.signal;
       const onAbort = () => abortStream(stream, signal.reason);
       let request: DuplexStreamRequest<T> | undefined;
+      let stage: 'pre-read' | 'read-request' | 'peer-admission' | 'handler' | 'close' = 'pre-read';
       stream.addEventListener('close', onClose, { once: true });
       signal.addEventListener('abort', onAbort, { once: true });
       try {
+        try { options.onInboundOpen?.(peerId.slice(-8)); } catch { /* Diagnostics never affect admission. */ }
         if (signal.aborted) throw asAbortError(signal.reason);
         this.rejectKnownRejectedInboundPeer(peerId, protocolId);
         this.boundDuplexStreamBuffers(stream, options.maxReadBufferBytes);
+        stage = 'read-request';
         request = await readRequest(stream, signal);
         if (request.requestData.byteLength > options.maxRequestBytes) throw new RangeError('Duplex request byte limit exceeded');
+        stage = 'peer-admission';
         await this.requirePeerAccepted(peerId, protocolId, 'inbound', { signal, timeoutMs: options.timeoutMs });
         if (signal.aborted) throw asAbortError(signal.reason);
+        stage = 'handler';
         await handler({ ...request, peerId, stream, signal });
         if (signal.aborted) throw asAbortError(signal.reason);
+        stage = 'close';
         stream.removeEventListener('close', onClose);
         await this.closeDuplexStream(stream, signal);
       } catch (error) {
         // Do not log authenticated request bytes, metadata, URLs or tokens.
+        const safeTag = (value: unknown): string | undefined => typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(value)
+          ? value : undefined;
+        try {
+          options.onInboundFailure?.({ peerIdSuffix: peerId.slice(-8), stage,
+            errorName: safeTag(error instanceof Error ? error.name : undefined) ?? 'UnknownError',
+            errorCode: safeTag(error !== null && typeof error === 'object' && 'code' in error ? error.code : undefined),
+            signalAborted: signal.aborted });
+        } catch { /* Diagnostics never affect stream failure handling. */ }
         abortStream(stream, error instanceof Error ? error : new Error('duplex stream failed'));
       } finally {
         stream.removeEventListener('close', onClose);
