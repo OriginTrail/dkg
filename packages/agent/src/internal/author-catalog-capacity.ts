@@ -30,8 +30,6 @@ export class AuthorCatalogFullErrorV1 extends Error {
     held: readonly HeldCatalogRowV1[],
     /** Rows for new assets the refused change asked for. */
     readonly newRows: number,
-    /** The applied head the rows were read under, when the caller read one. */
-    readonly appliedHeadDigest: string | null = null,
   ) {
     super(
       `RFC-64 author catalog holds ${held.length} of ${MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1} rows`
@@ -44,13 +42,9 @@ export class AuthorCatalogFullErrorV1 extends Error {
 }
 
 /** Refuse `newRows` rows for new assets when the catalog that holds `held` has no room for them. */
-export function assertAuthorCatalogTakesNewRowsV1(
-  held: readonly HeldCatalogRowV1[],
-  newRows: number,
-  appliedHeadDigest: string | null = null,
-): void {
+export function assertAuthorCatalogTakesNewRowsV1(held: readonly HeldCatalogRowV1[], newRows: number): void {
   if (held.length + newRows > MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1) {
-    throw new AuthorCatalogFullErrorV1(held, newRows, appliedHeadDigest);
+    throw new AuthorCatalogFullErrorV1(held, newRows);
   }
 }
 

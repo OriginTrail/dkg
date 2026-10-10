@@ -30,8 +30,9 @@ import { findAuthorCatalogFullErrorV1 } from './author-catalog-capacity.js';
  *   work and no catalog read;
  * - the refusal names the assets the catalog holds. A marker for one of them (a newer version, or
  *   a row placed meanwhile) is attempted as usual. A marker for any other asset of the same
- *   catalog, at the applied head the refusal read, is parked without an attempt of its own, so a
- *   restart costs one attempt a full catalog and not one a marker;
+ *   catalog is parked without an attempt of its own while the applied head shows no free row. A
+ *   restart therefore costs one attempt a full catalog, not one a marker, and a further new
+ *   asset published into a catalog known to be full costs none;
  * - parked markers are attempted again when the scope's applied head shows a free row;
  * - one parked marker a scope is attempted an interval as a safety net, because rows may have
  *   been swapped at the same count. It is the marker parked longest; it goes to the back and
@@ -65,7 +66,6 @@ export const FULL_CATALOG_NAMED_SCOPES_SWEEP_V1 = 256;
 
 /** The applied-head row of one author catalog scope, as far as capacity reads it. */
 export interface AppliedCatalogHeadRowV1 {
-  readonly currentCatalogHeadDigest: string;
   /** Canonical decimal row count of the applied bucket. */
   readonly inventoryRowCount: string;
 }
@@ -104,15 +104,13 @@ type ProjectionRepairV1 = Readonly<{
 }>;
 
 /** The applied head of a scope, as far as parking reads it. */
-type AppliedHeadV1 = Readonly<{ digest: string; rows: number }>;
+type AppliedHeadV1 = Readonly<{ rows: number }>;
 
 /** One full catalog scope: what its last refusal read, and when it is attempted again. */
 interface FullScopeV1 {
   readonly catalogScopeDigest: Digest32V1;
   readonly contextGraphId: string;
   readonly authorAddress: EvmAddressV1;
-  /** The applied head the refusal read what the catalog holds under. */
-  readonly headDigest: string | null;
   readonly rows: number;
   readonly rowCap: number;
   /** When the scope's next safety-net attempt is due. */
@@ -159,7 +157,6 @@ export class FullCatalogParkingV1 {
         scope.attempted = undefined;
         scope.recheckAtMs = now;
       }
-      this.#passHeads.set(scopeKey, this.#appliedHead(scope));
       if (now >= scope.recheckAtMs) due.add(scopeKey);
     }
     for (const [key, scopeKey] of this.#parked) {
@@ -221,7 +218,6 @@ export class FullCatalogParkingV1 {
       catalogScopeDigest: scopeKey,
       contextGraphId: repair.contextGraphId,
       authorAddress: repair.authorAddress,
-      headDigest: full.appliedHeadDigest,
       rows: full.rowCount,
       rowCap: full.rowCap,
       recheckAtMs: now + FULL_CATALOG_RECHECK_INTERVAL_MS_V1,
@@ -295,7 +291,7 @@ export class FullCatalogParkingV1 {
     key: string,
     repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
   ): 'attempt' | 'safety-net' | 'parked' {
-    // A scope first refused during this pass has no head read for it yet.
+    // One read a scope a pass, when its first marker is decided or after its refusal in this pass.
     if (!this.#passHeads.has(scopeKey)) this.#passHeads.set(scopeKey, this.#appliedHead(scope));
     if (hasFreeRowV1(this.#passHeads.get(scopeKey), scope) === true) {
       // A row is free: every marker of the scope is attempted again.
@@ -317,10 +313,11 @@ export class FullCatalogParkingV1 {
       return 'safety-net';
     }
     if (this.#parked.has(key)) return 'parked';
-    // A marker that was not parked before is taken on the catalog's word only while that word is
-    // kept, and only at the applied head it was read under, read now. Otherwise it gets an
-    // attempt of its own.
-    return held !== undefined && this.#appliedHead(scope)?.digest === scope.headDigest
+    // A marker that was not parked before is taken on the catalog's word while that word is kept
+    // and the applied head, as this pass read it, shows no free row. A head that moved on at the
+    // same count is no reason for an attempt: a newer version of a held asset moves it too, and
+    // the safety net is what refreshes the list. Otherwise it gets an attempt of its own.
+    return held !== undefined && hasFreeRowV1(this.#passHeads.get(scopeKey), scope) === false
       ? 'parked'
       : 'attempt';
   }
@@ -336,7 +333,7 @@ export class FullCatalogParkingV1 {
       const head = this.#dependencies.readAppliedCatalogHead?.(scope.catalogScopeDigest, scope.authorAddress);
       return head === null || head === undefined
         ? head
-        : { digest: head.currentCatalogHeadDigest, rows: Number(head.inventoryRowCount) };
+        : { rows: Number(head.inventoryRowCount) };
     } catch {
       // An unreadable head changes nothing: what is parked stays parked until the interval.
       return undefined;

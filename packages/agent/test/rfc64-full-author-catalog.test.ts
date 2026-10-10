@@ -259,7 +259,6 @@ describe('a full author catalog', () => {
       rowCount: CAP,
       rowCap: CAP,
       newRows: 1,
-      appliedHeadDigest: before.head?.currentCatalogHeadDigest,
     });
     expect([...(refusal as AuthorCatalogFullErrorV1).heldKaUals].sort())
       .toEqual(held.map((asset) => asset.seal.kaUal).sort());

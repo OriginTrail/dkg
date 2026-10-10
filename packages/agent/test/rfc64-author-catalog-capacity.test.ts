@@ -48,7 +48,7 @@ describe('author catalog capacity', () => {
     const held = rows(CAP);
     let refusal: unknown;
     try {
-      assertAuthorCatalogTakesNewRowsV1(held, 2, 'applied-head');
+      assertAuthorCatalogTakesNewRowsV1(held, 2);
     } catch (error) {
       refusal = error;
     }
@@ -59,7 +59,6 @@ describe('author catalog capacity', () => {
       rowCount: CAP,
       rowCap: CAP,
       newRows: 2,
-      appliedHeadDigest: 'applied-head',
       message: `RFC-64 author catalog holds ${CAP} of ${CAP} rows and cannot take 2 more`,
     });
     expect(AUTHOR_CATALOG_FULL_CODE_V1).toBe('catalog-full');
@@ -67,8 +66,6 @@ describe('author catalog capacity', () => {
     expect(heldKaUals.size).toBe(CAP);
     expect(heldKaUals.has(held[0]!.seal.kaUal)).toBe(true);
     expect(heldKaUals.has(`${held[0]!.seal.kaUal}0000`)).toBe(false);
-    // A refusal raised without an applied head (the pure planners) carries none.
-    expect(new AuthorCatalogFullErrorV1(held, 1).appliedHeadDigest).toBeNull();
   });
 
   it('is found behind the errors that wrap it, and nowhere else', () => {

@@ -123,11 +123,7 @@ function node() {
       const catalog = catalogOf(repair);
       if (!catalog.held.has(repair.kaUal)) {
         if (catalog.held.size >= CAP) {
-          throw new AuthorCatalogFullErrorV1(
-            [...catalog.held].map((kaUal) => ({ seal: { kaUal } })),
-            1,
-            `head-${catalog.version}`,
-          );
+          throw new AuthorCatalogFullErrorV1([...catalog.held].map((kaUal) => ({ seal: { kaUal } })), 1);
         }
         catalog.held.add(repair.kaUal);
       }
@@ -350,12 +346,11 @@ describe('finalized-private placements of a full author catalog', () => {
     expect(model.state.attempts).toHaveLength(2);
     expect(s.capacity()).toEqual({ parkedPlacements: 2, scopesAtCap: 1 });
 
-    // A new marker no longer finds the head the refusal read, so it gets an attempt of its own.
-    // That refusal reads the new head, and the marker after it is parked on it without one.
-    const afterTheUpdate = [marker(FULL_GRAPH, CAP + 4), marker(FULL_GRAPH, CAP + 5)];
-    model.state.markers = [...model.state.markers, ...afterTheUpdate];
+    // Nor are new markers that arrive after it: a replacement leaves what the catalog holds as
+    // the refusal found it, so they are parked on that without an attempt.
+    model.state.markers = [...model.state.markers, marker(FULL_GRAPH, CAP + 4), marker(FULL_GRAPH, CAP + 5)];
     await s.pass();
-    expect(model.state.attempts).toEqual([NEW_A.kaUal, newerVersion.kaUal, afterTheUpdate[0]!.kaUal]);
+    expect(model.state.attempts).toHaveLength(2);
     expect(s.capacity()).toEqual({ parkedPlacements: 4, scopesAtCap: 1 });
   });
 
@@ -398,6 +393,27 @@ describe('finalized-private placements of a full author catalog', () => {
     expect(model.state.attempts).toHaveLength(3);
     expect(model.state.markers).toEqual([NEW_C]);
     expect(s.capacity()).toEqual({ parkedPlacements: 1, scopesAtCap: 1 });
+  });
+
+  it('attempts a marker for an asset that lost its row once, and parks it on that refusal', async () => {
+    const model = node();
+    model.fill(NEW_A);
+    model.state.markers = [NEW_A];
+    const s = supervisor(model);
+    await s.pass();
+    // Asset 5 leaves the catalog and another asset takes its row: the same count.
+    model.swap(NEW_A, [5], [ual(CAP + 9)]);
+    const newerVersionOfRemoved = marker(FULL_GRAPH, 5, '2');
+    model.state.markers = [...model.state.markers, newerVersionOfRemoved];
+    model.state.attempts.length = 0;
+
+    // The list of the last refusal still names it, so it is attempted as a replacement. The
+    // catalog has no row for it now: that refusal brings the list as it is, and it is parked.
+    await s.pass();
+    expect(model.state.attempts).toEqual([newerVersionOfRemoved.kaUal]);
+    expect(s.capacity()).toEqual({ parkedPlacements: 2, scopesAtCap: 1 });
+    await s.advance(10 * 60_000);
+    expect(model.state.attempts).toHaveLength(1);
   });
 
   it('attempts parked placements again once the applied head shows a free row', async () => {
@@ -606,7 +622,7 @@ describe('share-time projection of a full author catalog', () => {
 });
 
 describe('full catalog parking', () => {
-  function parking(readAppliedCatalogHead?: () => { currentCatalogHeadDigest: string; inventoryRowCount: string } | null) {
+  function parking(readAppliedCatalogHead?: () => { inventoryRowCount: string } | null) {
     const clock = { now: 0 };
     const warn = vi.fn();
     const parkingV1 = new FullCatalogParkingV1(
@@ -615,8 +631,8 @@ describe('full catalog parking', () => {
     );
     return { parking: parkingV1, clock, warn };
   }
-  const refusal = () => new AuthorCatalogFullErrorV1(fullRows(), 1, 'head-1');
-  const atCap = () => ({ currentCatalogHeadDigest: 'head-1', inventoryRowCount: String(CAP) });
+  const refusal = () => new AuthorCatalogFullErrorV1(fullRows(), 1);
+  const atCap = () => ({ inventoryRowCount: String(CAP) });
 
   it('leaves any other failure to the ordinary handling', () => {
     const { parking: p } = parking(atCap);
@@ -679,15 +695,8 @@ describe('full catalog parking', () => {
     const markers = Array.from({ length: 50 }, (_value, index) => marker(FULL_GRAPH, CAP + 10 + index));
     const keys = new Set(['a', ...markers.map((_marker, index) => `m${index}`)]);
 
-    // The pass that first sees them holds each against the head as it is now: one read each.
-    read.mockClear();
-    p.passStarted(keys);
-    expect(p.park('a', NEW_A)).toBe(true);
-    for (const [index, parked] of markers.entries()) expect(p.park(`m${index}`, parked)).toBe(true);
-    expect(read).toHaveBeenCalledTimes(1 + markers.length);
-
-    // Every later pass reads the scope's row once.
-    for (let pass = 0; pass < 3; pass++) {
+    // The pass that first sees them and every later one read the scope's row once.
+    for (let pass = 0; pass < 4; pass++) {
       read.mockClear();
       p.passStarted(keys);
       expect(p.park('a', NEW_A)).toBe(true);

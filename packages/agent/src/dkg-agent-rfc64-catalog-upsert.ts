@@ -231,7 +231,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
         (asset) => asset.seal.reservedKaId === params.asset.seal.reservedKaId,
       );
       // GH#3134 — a new asset needs a free row; a row the catalog holds is replaced in place.
-      if (existingIndex < 0) assertAuthorCatalogTakesNewRowsV1(assets, 1, state.current?.currentCatalogHeadDigest);
+      if (existingIndex < 0) assertAuthorCatalogTakesNewRowsV1(assets, 1);
       if (
         existingIndex >= 0
         && sameRfc64SuccessorAssetV1(assets[existingIndex]!, params.asset)
