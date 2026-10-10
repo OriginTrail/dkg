@@ -140,6 +140,34 @@ describe('RFC-64 catalog head delivery: close', () => {
     });
   });
 
+  it('asks the policy about nobody when a fan-out only starts after close', async () => {
+    let startFanout!: () => void;
+    const hostReady = new Promise<void>((resolve) => { startFanout = resolve; });
+    const { delivery, sends, outcomes, decisions } = harness({
+      // The host takes a moment before it runs the fan-out, and the owner closes meanwhile.
+      runFanout: async (fanout) => {
+        await hostReady;
+        await fanout();
+      },
+    });
+
+    delivery.deliver({ announcement: head('1'), peers: peers(6) });
+    await Promise.resolve();
+    const closing = delivery.close();
+    startFanout();
+    await closing;
+
+    expect(decisions).toEqual([]);
+    expect(sends).toEqual([]);
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]).toMatchObject({
+      announcedPeers: [],
+      refusedPeers: [],
+      uncheckedPeers: [],
+      notDeliverable: 'RFC-64 catalog head delivery closed',
+    });
+  });
+
   it('settles an awaited announce that is in flight', async () => {
     vi.useFakeTimers();
     const { delivery, behaviour } = harness();
