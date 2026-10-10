@@ -14,12 +14,30 @@
  *   each size in CATALOG_PLACEMENT_BENCH_SIZES (default 10,100,700,1024).
  * - `measure` starts an agent on a copy of each saved snapshot and places
  *   CATALOG_PLACEMENT_BENCH_WINDOW (default 5) assets after a first one. The first placement after
- *   a start finds nothing in memory and is reported on its own. Two builds measured on the same
+ *   a start finds nothing in memory and is reported on its own. Two runs measured on the same
  *   snapshots place the same assets into the same catalog; the applied inventory digest each run
  *   prints says whether they signed the same rows, and the bytes still held after a full
- *   collection say what each build keeps in memory for a catalog of that size.
+ *   collection say what each run keeps in memory for a catalog of that size (measure one size per
+ *   process for that, with CATALOG_PLACEMENT_BENCH_SIZES: an agent that was stopped is not
+ *   collected while the run goes on).
  *
  * CATALOG_PLACEMENT_BENCH_OUT names a JSON file for the samples.
+ *
+ * Before and after, from one checkout. `DKG_RFC64_CATALOG_MUTATION_MEMORY=0` makes every placement
+ * read and verify the durable catalog, as every placement did before the memory existed:
+ *
+ *   # the catalogs, once (about 35 minutes for 1,024 rows)
+ *   CATALOG_PLACEMENT_BENCH_SNAPSHOT_DIR=$SNAP pnpm run benchmark:catalog-placement
+ *   # before, then after; repeat both, alternating, for more samples
+ *   DKG_RFC64_CATALOG_MUTATION_MEMORY=0 CATALOG_PLACEMENT_BENCH_MODE=measure \
+ *     CATALOG_PLACEMENT_BENCH_SNAPSHOT_DIR=$SNAP CATALOG_PLACEMENT_BENCH_OUT=$OUT/before-1.json \
+ *     pnpm run benchmark:catalog-placement
+ *   CATALOG_PLACEMENT_BENCH_MODE=measure \
+ *     CATALOG_PLACEMENT_BENCH_SNAPSHOT_DIR=$SNAP CATALOG_PLACEMENT_BENCH_OUT=$OUT/after-1.json \
+ *     pnpm run benchmark:catalog-placement
+ *   # medians per catalog size over all runs of each label
+ *   node test/benchmarks/catalog-placement-cost.compare.mjs \
+ *     before=$OUT/before-1.json after=$OUT/after-1.json
  */
 import {
   chmodSync,
@@ -35,14 +53,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 
-import {
-  MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
-  contextGraphAssertionUri,
-  createOperationContext,
-  type AssertionSeal,
-  type TimestampMsV1,
-} from '@origintrail-official/dkg-core';
-import { describe, expect, it, vi } from 'vitest';
+import { MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 } from '@origintrail-official/dkg-core';
+import { describe, expect, it } from 'vitest';
 
 import type { DKGAgent } from '../../src/index.js';
 import {
@@ -50,15 +62,11 @@ import {
   installCatalogPlacementTimingV1,
 } from '../../src/internal/catalog-placement-timing.js';
 import {
-  AUTHOR,
-  AUTHOR_WALLET,
-  CONTEXT_GRAPH_ID,
-  NETWORK_ID,
-  agents,
-  catalogScopeDigestV1,
-  seedInventoryAssetV1,
-  startRepairAgentV1,
-} from '../support/rfc64-local-catalog-repair-fixture.js';
+  appliedPlacementHeadV1 as appliedHead,
+  observeConfirmationV1,
+  startPlacementAgentV1,
+} from '../support/rfc64-catalog-placement-fixture.js';
+import { agents, seedInventoryAssetV1 } from '../support/rfc64-local-catalog-repair-fixture.js';
 
 const MODE = process.env.CATALOG_PLACEMENT_BENCH_MODE ?? 'grow';
 const ROWS = Number(process.env.CATALOG_PLACEMENT_BENCH_ROWS ?? MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1);
@@ -109,30 +117,10 @@ async function startPlacementAgent(dataDir: string): Promise<Readonly<{
   agent: DKGAgent;
   lines: string[];
 }>> {
-  const agent = await startRepairAgentV1({
-    name: 'placement-cost',
+  const agent = await startPlacementAgentV1('placement-cost', {
     dataDir,
     storePath: join(dataDir, 'oxigraph'),
-    autoPublish: {
-      peers: [],
-      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
-    },
   });
-  vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
-  agent.acceptOpenContextGraphPolicyV1({
-    networkId: NETWORK_ID,
-    contextGraphId: CONTEXT_GRAPH_ID,
-    ownerAddress: AUTHOR,
-  });
-  // Only the confirmed repair places a row, as on a finalized-private lane.
-  vi.spyOn(agent, 'reconcileRfc64PublicCatalogFromSwmInventoryV1').mockResolvedValue(null);
-  const realLane = (agent as any).resolveRfc64CatalogAuthoringLaneV1.bind(agent);
-  vi.spyOn(agent as any, 'resolveRfc64CatalogAuthoringLaneV1').mockImplementation(
-    (contextGraphId: unknown, subGraphName: unknown) => {
-      const lane = realLane(contextGraphId, subGraphName);
-      return lane === null ? null : { ...lane, acceptsFinalizedVmRepair: true };
-    },
-  );
   installCatalogPlacementTimingV1(agent, new CatalogPlacementTimingV1({ logThresholdMs: 0 }));
   const lines: string[] = [];
   const log = (agent as any).log;
@@ -151,21 +139,6 @@ async function startPlacementAgent(dataDir: string): Promise<Readonly<{
 async function stopPlacementAgent(agent: DKGAgent): Promise<void> {
   await agent.stop();
   agents.splice(agents.indexOf(agent), 1);
-}
-
-/** Observe one chain confirmation and let the placement it asks for run to its end. */
-async function observe(agent: DKGAgent, suffix: string, seal: AssertionSeal): Promise<void> {
-  await agent.observeRfc64ConfirmedVmV1({
-    contextGraphId: CONTEXT_GRAPH_ID,
-    assertionCoordinate: `repair-${suffix}`,
-    shareOperationId: `repair-operation-${suffix}`,
-    seal,
-    assertionUri: contextGraphAssertionUri(CONTEXT_GRAPH_ID, AUTHOR, `repair-${suffix}`),
-    ctx: createOperationContext('publishFromSWM', `job-${suffix}`),
-    publicationLabel: 'queued publish',
-  });
-  // Whether or not the observer waits for the placement, the supervisor has finished it here.
-  await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
 }
 
 function phasesOf(line: string): Record<string, number> {
@@ -212,8 +185,8 @@ async function placeNext(
   const suffix = `bench-${rows}`;
   const { seal } = await seedInventoryAssetV1(agent, suffix, BigInt(rows + 1));
   await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
-  const first = await measured(rows, lines, stall, () => observe(agent, suffix, seal));
-  const covered = await measured(rows + 1, lines, stall, () => observe(agent, suffix, seal));
+  const first = await measured(rows, lines, stall, () => observeConfirmationV1(agent, suffix, seal));
+  const covered = await measured(rows + 1, lines, stall, () => observeConfirmationV1(agent, suffix, seal));
   return { first, covered };
 }
 
@@ -254,13 +227,6 @@ function retainedBytes(): number | undefined {
   collect();
   const { heapUsed, arrayBuffers } = process.memoryUsage();
   return heapUsed + arrayBuffers;
-}
-
-function appliedHead(agent: DKGAgent) {
-  return agent.readRfc64AppliedCatalogHeadV1({
-    catalogScopeDigest: catalogScopeDigestV1(),
-    authorAddress: AUTHOR,
-  });
 }
 
 /** Grow one author catalog from nothing to ROWS rows, measuring every placement. */
