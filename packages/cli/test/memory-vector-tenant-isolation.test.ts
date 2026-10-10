@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { VectorStore, type VectorWorkingMemoryScope } from '../src/vector-store.js';
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
-import type { RequestContext } from '../src/daemon/routes/context.js';
+import { createRequestActor, type RequestContext } from '../src/daemon/routes/context.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 
 const A = '0xAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAa';
@@ -156,5 +156,19 @@ describe('enabled vector memory search tenant isolation', () => {
     expect(visible).toHaveLength(1);
     expect(await store.search([1, 0], { contextGraphId: CG, memoryLayers: ['wm'],
       limit: 10, workingMemoryScope: owned(A) })).toEqual([]);
+  });
+
+  it('uses the correlated actor when legacy context fields contradict it', async () => {
+    const store = createStore();
+    await insert(store, 'alice', 'wm', A);
+    await insert(store, 'bob', 'wm', B);
+    const { ctx, res, agent } = request(store, { kind: 'nodeOperator' });
+    Object.assign(ctx, { actor: createRequestActor(
+      requestAuthentication({ kind: 'agent', agentAddress: B }), () => A,
+    ) });
+    await handleMemoryRoutes(ctx);
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).results.map((row: { entityUri: string }) => row.entityUri)).toEqual(['bob']);
+    expect(agent.resolveContextGraphReadAuthority).toHaveBeenCalledWith(CG, { callerAgentAddress: B });
   });
 });

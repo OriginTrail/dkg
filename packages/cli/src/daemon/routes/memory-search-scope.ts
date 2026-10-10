@@ -2,13 +2,16 @@
 
 import { canonicalKnowledgeAssetAgentAddress } from '@origintrail-official/dkg-core';
 import type { VectorWorkingMemoryScope } from '../../vector-store.js';
+import type { RequestActor } from './context.js';
 
 type MemoryLayer = 'wm' | 'swm' | 'vm';
 
 export function memorySearchPlans(
-  memoryLayers: readonly MemoryLayer[], callerAgentAddress: string | undefined,
-  isNodeAdmin: boolean, listLocalAgents: () => ReadonlyArray<{ agentAddress: string }>,
+  memoryLayers: readonly MemoryLayer[], actor: RequestActor,
+  listLocalAgents: () => ReadonlyArray<{ agentAddress: string }>,
 ) {
+  const callerAgentAddress = actor.authenticatedAgentAddress;
+  const isNodeAdmin = actor.authentication.principal.kind === 'nodeOperator';
   // Working memory is per-agent, so the `wm` view needs an address:
   //   - an agent-scoped caller reads its OWN working memory, and
   //     `DKGAgent.query`'s A-1 check rejects anything else;
@@ -60,11 +63,11 @@ export function memorySearchPlans(
 /** Match the default agent's EVM/legacy-peer aliases without granting them to co-tenants. */
 export function memorySearchVectorScope(
   agent: { readonly peerId: string; getDefaultAgentAddress(): string | undefined },
-  callerAgentAddress: string | undefined, isNodeAdmin: boolean,
+  actor: RequestActor,
 ): VectorWorkingMemoryScope {
-  if (isNodeAdmin) return { kind: 'nodeOperator' };
+  if (actor.authentication.principal.kind === 'nodeOperator') return { kind: 'nodeOperator' };
   const defaultAddress = agent.getDefaultAgentAddress() ?? agent.peerId;
-  const caller = canonicalKnowledgeAssetAgentAddress(callerAgentAddress ?? defaultAddress);
+  const caller = canonicalKnowledgeAssetAgentAddress(actor.effectiveAgentAddress);
   const addresses = caller === canonicalKnowledgeAssetAgentAddress(defaultAddress)
     ? [caller, agent.peerId] : [caller];
   return { kind: 'agents', agentAddresses: addresses };

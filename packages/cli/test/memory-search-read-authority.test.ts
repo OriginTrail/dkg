@@ -144,6 +144,7 @@ function buildCtx(opts: {
     path: url.pathname,
     url,
     authentication: opts.authentication,
+    requestAgentAddress: '0xnode-default-agent',
   } as unknown as RequestContext;
 
   return { ctx, res, probe };
