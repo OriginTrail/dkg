@@ -129,6 +129,34 @@ describe('RFC-64 catalog placement over a remembered catalog', () => {
     expect(persistenceOf(agent).finalizedPrivatePlacementRepairs.list()).toEqual([]);
   }, 60_000);
 
+  it('reads the durable catalog once, as it does without the memory, when it remembers nothing about a placed asset', async () => {
+    const remembering = await startPlacementAgent('placement-reuse-cold-a');
+    const rereading = await startPlacementAgent('placement-reuse-cold-b');
+    installRfc64CatalogMutationMemoryV1(
+      rereading,
+      new Rfc64CatalogMutationMemoryV1(resolveCatalogMutationMemoryLimitsV1('0')),
+    );
+    const reads: Array<Record<string, number>> = [];
+    for (const agent of [rereading, remembering]) {
+      await place(agent, 1);
+      await place(agent, 2);
+      const seal = await place(agent, 3);
+      // As after a start: the catalog is durable and nothing about it is in memory.
+      rfc64CatalogMutationMemoryV1(agent).forget(SCOPE_DIGEST, AUTHOR);
+      const stores = watchDurableStores(agent);
+      await observe(agent, 'reuse-3', seal);
+      reads.push({ ...stores.reads });
+      expect(persistenceOf(agent).finalizedPrivatePlacementRepairs.list()).toEqual([]);
+    }
+
+    // The read that found the row placed was the whole durable catalog, every bundle included:
+    // the applied head, then head, directory root and bucket, and its delegation. Nothing of it
+    // is read a second time before the marker is retired.
+    expect(reads[1]).toEqual(reads[0]);
+    expect(reads[1]).toEqual({ bundles: 3, controlObjects: 1 + 3 + 1, appliedHead: 1, inventorySnapshot: 0, cas: 0 });
+    expect(rfc64CatalogMutationMemoryV1(remembering).retained.states).toBe(1);
+  }, 60_000);
+
   it('signs the same catalog, byte for byte, as an agent that reads and verifies everything every time', async () => {
     const remembering = await startPlacementAgent('placement-reuse-identical-a');
     const rereading = await startPlacementAgent('placement-reuse-identical-b');

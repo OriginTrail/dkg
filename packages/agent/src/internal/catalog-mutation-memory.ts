@@ -21,6 +21,7 @@ import {
   type Rfc64CatalogSuccessorAssetInputV1,
   type Rfc64StagedAuthorCatalogHeadRefV1,
 } from '../dkg-agent-rfc64-catalog.js';
+import { mapWithConcurrencyDrained } from '../map-with-concurrency.js';
 import type { AppliedCatalogHeadSnapshotV1 } from '../rfc64/inventory-v1/index.js';
 import type { Rfc64PersistenceV1 } from '../rfc64/persistence-v1.js';
 import { computeRfc64AppliedInventoryDigestV1 } from
@@ -55,13 +56,14 @@ import {
  * - no mutation of the scope has failed between its read of the state and its applied-head CAS.
  *
  * It never replaces a check: the applied-head CAS on the expected digest stays the authority, and
- * the successor still reads its predecessor from the durable store and verifies it. A state that
- * ends work without a successor does the same first: the head's directory root and bucket are
- * read back and verified, and for a decision about one row that row's bundle too
+ * the successor still reads its predecessor from the durable store and verifies it. A state
+ * served from memory that ends work without a successor does the same first: the head's directory
+ * root and bucket are read back and verified, and so is the bundle of every row the decision is
+ * about, which is one row for a placement and every row for a projection of the whole set
  * ({@link Rfc64CatalogMutationMemoryV1.confirmDurable}). What a state served from memory never
- * reads again by itself is the bundles of the rows no decision is about; a successor reads every
- * unchanged row's bundle back. Memory is bounded by a number of scopes and a number of retained
- * bytes, and nothing is persisted.
+ * reads again by itself is the bundles of the rows a placement is not about; a successor reads
+ * every unchanged row's bundle back. Memory is bounded by a number of scopes and a number of
+ * retained bytes, and nothing is persisted.
  */
 
 export interface Rfc64CatalogMutationStateV1 {
@@ -171,7 +173,41 @@ async function appliedHeadDurablyHeldV1(
 }
 
 function sameBytesV1(left: Uint8Array, right: Uint8Array): boolean {
-  return left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index]);
+  if (left.byteLength !== right.byteLength) return false;
+  for (let index = 0; index < left.byteLength; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
+}
+
+type SignedCatalogBucketRowV1 =
+  NonNullable<BoundedAuthorCatalogHistoryV1['previousBucket']>['payload']['rows'][number];
+
+/** Bundles of a whole set read back at once: as many as a successor reads or stages at once. */
+const CONFIRMED_BUNDLE_READ_CONCURRENCY_V1 = 8;
+
+/** `row` is the signed row of `asset`, and the bundle it names is in the durable store, byte for byte. */
+async function bundleDurablyHeldV1(
+  persistence: Rfc64PersistenceV1,
+  row: SignedCatalogBucketRowV1 | undefined,
+  asset: Rfc64CatalogSuccessorAssetInputV1,
+): Promise<void> {
+  const encoded = encodeOpaqueKaBundleV1(
+    asset.projectionBytes,
+    canonicalizeCanonicalGraphScopedAuthorSealBytesV1(asset.seal),
+  );
+  // The blob digest covers the projection and the seal, which names its KA: the same digest is
+  // the same row's bundle.
+  if (row?.transfer.blobDigest !== encoded.blobDigest) {
+    throw new Error('RFC-64 applied catalog bundle differs from its signed predecessor row');
+  }
+  const stored = await persistence.kaBundles.readKaBundleByDigest(encoded.blobDigest);
+  if (stored === null) {
+    throw new Error(`RFC-64 applied catalog bundle ${encoded.blobDigest} is unavailable`);
+  }
+  if (!sameBytesV1(stored, encoded.bundleBytes)) {
+    throw new Error('RFC-64 applied catalog bundle differs from its signed predecessor row');
+  }
 }
 
 /** The successor this path signed, as `advance` reads it. */
@@ -212,6 +248,11 @@ export class Rfc64CatalogMutationMemoryV1 {
   readonly #origins = new WeakMap<Rfc64CatalogMutationStateV1, StateOriginV1>();
   /** The seal digest of an asset a state holds; such an asset is the mutation's own copy and never changes. */
   readonly #sealDigests = new WeakMap<Rfc64CatalogSuccessorAssetInputV1, Digest32V1>();
+  /**
+   * States read from the durable store and not handed out from memory since: whoever holds one
+   * has read everything it rests on, bundles and all, in the call it is deciding in.
+   */
+  readonly #readByItsHolder = new WeakSet<Rfc64CatalogMutationStateV1>();
 
   constructor(
     limits: Rfc64CatalogMutationMemoryLimitsV1 = DEFAULT_CATALOG_MUTATION_MEMORY_LIMITS_V1,
@@ -259,6 +300,7 @@ export class Rfc64CatalogMutationMemoryV1 {
       ) {
         // The durable check gave other work a turn: only a scope still in place is refreshed.
         if (this.#scopes.get(key) === remembered) this.#touch(key, remembered);
+        this.#readByItsHolder.delete(state);
         return state;
       }
       // Another writer moved the head, the scope's policy changed, or the head's own objects are
@@ -272,6 +314,7 @@ export class Rfc64CatalogMutationMemoryV1 {
       this.#forget(key);
       throw cause;
     }
+    this.#readByItsHolder.add(read);
     if (authority !== undefined) this.#keep(key, authority, read);
     return read;
   }
@@ -339,9 +382,15 @@ export class Rfc64CatalogMutationMemoryV1 {
    * Before a state ends work without producing a successor: a covered repair retires its durable
    * marker, an upsert finds its asset already placed, a projection finds nothing to do. The
    * applied head's directory root and bucket are read from the durable store and verified again,
-   * as a successor would read them. For a decision about one row the bucket must name that row's
-   * remembered bundle, and the bundle must be in the store, byte for byte. Anything else forgets
-   * the scope and fails the decision, as a read of the durable catalog would.
+   * as a successor would read them. The bucket must name the remembered bundle of every row the
+   * decision is about, and each of those bundles must be in the store, byte for byte: the row of
+   * `asset`, or with no `asset` every row of the state, which must then be the bucket's rows and
+   * no other. Anything else forgets the scope and fails the decision, as a read of the durable
+   * catalog would.
+   *
+   * A state that `read` took from the durable store for this very decision is not read a second
+   * time: that read is the whole catalog, bundles included. So a decision never reads more than
+   * it does without the memory.
    */
   async confirmDurable(
     persistence: Rfc64PersistenceV1,
@@ -350,27 +399,27 @@ export class Rfc64CatalogMutationMemoryV1 {
     state: Rfc64CatalogMutationStateV1,
     asset?: Rfc64CatalogSuccessorAssetInputV1,
   ): Promise<void> {
-    // With the memory off the state was read from the durable store, bundles and all, just now.
-    if (this.#limits.maxScopes < 1) return;
+    if (this.#readByItsHolder.has(state)) return;
     try {
       const history = await loadBoundedAuthorCatalogHistoryV1(persistence, state.previousHead);
-      if (asset === undefined) return;
-      const encoded = encodeOpaqueKaBundleV1(
-        asset.projectionBytes,
-        canonicalizeCanonicalGraphScopedAuthorSealBytesV1(asset.seal),
+      const rows = history.previousBucket?.payload.rows ?? [];
+      if (asset !== undefined) {
+        await bundleDurablyHeldV1(
+          persistence,
+          rows.find(({ kaId }) => kaId === asset.seal.reservedKaId),
+          asset,
+        );
+        return;
+      }
+      if (rows.length !== state.assets.length) {
+        throw new Error('RFC-64 applied catalog rows differ from its signed predecessor bucket');
+      }
+      // Both are in mathematical KA order. A read that fails lets the reads under way finish.
+      await mapWithConcurrencyDrained(
+        state.assets,
+        CONFIRMED_BUNDLE_READ_CONCURRENCY_V1,
+        (held, index) => bundleDurablyHeldV1(persistence, rows[index], held),
       );
-      const row = history.previousBucket?.payload.rows.find(({ kaId }) => kaId === asset.seal.reservedKaId);
-      // The blob digest covers the projection and the seal: the same digest is the same bundle.
-      if (row?.transfer.blobDigest !== encoded.blobDigest) {
-        throw new Error('RFC-64 applied catalog bundle differs from its signed predecessor row');
-      }
-      const stored = await persistence.kaBundles.readKaBundleByDigest(encoded.blobDigest);
-      if (stored === null) {
-        throw new Error(`RFC-64 applied catalog bundle ${encoded.blobDigest} is unavailable`);
-      }
-      if (!sameBytesV1(stored, encoded.bundleBytes)) {
-        throw new Error('RFC-64 applied catalog bundle differs from its signed predecessor row');
-      }
     } catch (cause) {
       this.forget(catalogScopeDigest, authorAddress);
       throw cause;

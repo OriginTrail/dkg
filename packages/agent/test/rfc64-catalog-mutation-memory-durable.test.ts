@@ -16,6 +16,7 @@ import {
   Rfc64CatalogMutationMemoryV1,
   readVerifiedRfc64CatalogMutationStateV1,
   resolveCatalogMutationMemoryLimitsV1,
+  type Rfc64CatalogMutationStateV1,
   type Rfc64SignedCatalogSuccessorV1,
 } from '../src/internal/catalog-mutation-memory.js';
 import type { AppliedCatalogHeadSnapshotV1 } from '../src/rfc64/inventory-v1/index.js';
@@ -222,13 +223,18 @@ describe('RFC-64 catalog mutation memory over a real author catalog', () => {
   });
 
   describe('before a state ends work without a successor', () => {
-    /** A catalog of rows 1 and 2, a memory that holds its state, and that state's first row. */
+    /**
+     * A catalog of rows 1 and 2, a memory that has read its state and serves it, and that state's
+     * first row. A memory that is switched off reads the state from the durable store both times.
+     */
     async function remembered(memory = new Rfc64CatalogMutationMemoryV1()) {
       const catalog = await realCatalog();
       const rows = [await producerAssetV1(1), await producerAssetV1(2)];
       await catalog.advance(rows.slice(0, 1), 1);
       await catalog.advance(rows, 2);
-      const state = (await memory.read(catalog.persistence, catalog.scopeDigest, PRODUCER_AUTHOR, POLICY))!;
+      const read = () => memory.read(catalog.persistence, catalog.scopeDigest, PRODUCER_AUTHOR, POLICY);
+      await read();
+      const state = (await read())!;
       const history = catalog.history();
       catalog.reads.controlObjects.length = 0;
       catalog.reads.bundles.length = 0;
@@ -256,13 +262,13 @@ describe('RFC-64 catalog mutation memory over a real author catalog', () => {
       expect(memory.retained.states).toBe(1);
     });
 
-    it('reads the head, its directory root and its bucket back for a decision about the whole set', async () => {
-      const { catalog, memory, head, root, bucket, confirm } = await remembered();
+    it('reads the head, its directory root, its bucket and every row\'s bundle back for a decision about the whole set', async () => {
+      const { catalog, memory, state, head, root, bucket, confirm } = await remembered();
 
       await expect(confirm()).resolves.toBeUndefined();
 
       expect(catalog.reads.controlObjects).toEqual([head, root, bucket]);
-      expect(catalog.reads.bundles).toEqual([]);
+      expect(catalog.reads.bundles).toEqual(state.assets.map(bundleDigestOf));
       expect(memory.retained.states).toBe(1);
     });
 
@@ -328,13 +334,151 @@ describe('RFC-64 catalog mutation memory over a real author catalog', () => {
     });
 
     it('fails the decision and forgets the scope when the row\'s bundle is not there', async () => {
-      const { catalog, memory, row, confirm } = await remembered();
+      const { catalog, memory, state, row, confirm } = await remembered();
 
       catalog.bundles.delete(bundleDigestOf(row));
       await expect(confirm(row)).rejects.toThrow(/RFC-64 applied catalog bundle 0x[0-9a-f]{64} is unavailable/u);
       expect(memory.retained).toEqual({ scopes: 0, states: 0, bytes: 0 });
-      // The rest of the set is not asked for its bundles.
-      await expect(confirm()).resolves.toBeUndefined();
+      // A decision about another row does not ask for this one's bundle.
+      await expect(confirm(state.assets[1]!)).resolves.toBeUndefined();
+    });
+
+    describe('about the whole set', () => {
+      it.each([
+        ['first', 0],
+        ['second', 1],
+      ] as const)('fails the decision and forgets the scope when the bundle of the %s row is not there', async (_which, index) => {
+        const { catalog, memory, state, confirm } = await remembered();
+        const digest = bundleDigestOf(state.assets[index]!);
+        const bytes = catalog.bundles.get(digest)!;
+
+        catalog.bundles.delete(digest);
+        await expect(confirm()).rejects.toThrow(`RFC-64 applied catalog bundle ${digest} is unavailable`);
+        expect(memory.retained).toEqual({ scopes: 0, states: 0, bytes: 0 });
+
+        catalog.bundles.set(digest, bytes);
+        await expect(confirm()).resolves.toBeUndefined();
+      });
+
+      it.each([
+        ['first', 0],
+        ['second', 1],
+      ] as const)('fails the decision and forgets the scope when the stored bundle of the %s row is not the remembered bytes', async (_which, index) => {
+        const { catalog, memory, state, confirm } = await remembered();
+        const digest = bundleDigestOf(state.assets[index]!);
+        const bytes = catalog.bundles.get(digest)!;
+        const other = new Uint8Array(bytes);
+        other[0] ^= 1;
+
+        catalog.bundles.set(digest, other);
+        await expect(confirm()).rejects.toThrow('RFC-64 applied catalog bundle differs from its signed predecessor row');
+        expect(memory.retained).toEqual({ scopes: 0, states: 0, bytes: 0 });
+
+        // Nor a bundle that stops short of them, or one that carries on after them.
+        catalog.bundles.set(digest, bytes.subarray(0, bytes.byteLength - 1));
+        await expect(confirm()).rejects.toThrow('differs');
+        catalog.bundles.set(digest, new Uint8Array([...bytes, 0]));
+        await expect(confirm()).rejects.toThrow('differs');
+      });
+
+      it('fails the decision when the state does not hold the rows of the durable bucket, and no other', async () => {
+        const { catalog, memory, state } = await remembered();
+        const confirm = (assets: readonly Rfc64PublicCatalogSuccessorAssetInputV1[]) => memory.confirmDurable(
+          catalog.persistence,
+          catalog.scopeDigest,
+          PRODUCER_AUTHOR,
+          { ...state, assets },
+        );
+        const [first, second] = state.assets;
+        const rowsDiffer = 'RFC-64 applied catalog rows differ from its signed predecessor bucket';
+        const bundleDiffers = 'RFC-64 applied catalog bundle differs from its signed predecessor row';
+
+        // One row fewer than the bucket signs, and one more.
+        await expect(confirm([first!])).rejects.toThrow(rowsDiffer);
+        expect(memory.retained).toEqual({ scopes: 0, states: 0, bytes: 0 });
+        await expect(confirm([first!, second!, await producerAssetV1(9)])).rejects.toThrow(rowsDiffer);
+        // No bundle was asked for: the bucket alone says so.
+        expect(catalog.reads.bundles).toEqual([]);
+
+        // The right number of rows: another row in the place of one, the next version of one, and
+        // the bucket's own rows in another order.
+        await expect(confirm([first!, await producerAssetV1(9)])).rejects.toThrow(bundleDiffers);
+        await expect(confirm([await producerAssetV1(1, '2'), second!])).rejects.toThrow(bundleDiffers);
+        await expect(confirm([second!, first!])).rejects.toThrow(bundleDiffers);
+
+        await expect(confirm([first!, second!])).resolves.toBeUndefined();
+      });
+
+      /** A catalog of `count` rows, one successor a row, and a memory that holds its state. */
+      async function rememberedRows(count: number) {
+        const catalog = await realCatalog();
+        const memory = new Rfc64CatalogMutationMemoryV1();
+        const rows: Rfc64PublicCatalogSuccessorAssetInputV1[] = [];
+        for (let kaNumber = 1; kaNumber <= count; kaNumber += 1) {
+          rows.push(await producerAssetV1(kaNumber));
+          await catalog.advance(rows, kaNumber);
+        }
+        const read = () => memory.read(catalog.persistence, catalog.scopeDigest, PRODUCER_AUTHOR, POLICY);
+        await read();
+        const state = (await read())!;
+        /** Reads of the bundle store that were asked for and have not been answered. */
+        const waiting: Array<{ digest: string; answer: (failure?: Error) => void }> = [];
+        const stored = catalog.persistence.kaBundles.readKaBundleByDigest;
+        (catalog.persistence.kaBundles as unknown as { readKaBundleByDigest: unknown }).readKaBundleByDigest =
+          (digest: Digest32V1) => new Promise((resolve, reject) => {
+            waiting.push({
+              digest,
+              answer: (failure) => (failure === undefined ? resolve(stored(digest)) : reject(failure)),
+            });
+          });
+        let settled: 'resolved' | 'rejected' | undefined;
+        const confirmed = memory.confirmDurable(catalog.persistence, catalog.scopeDigest, PRODUCER_AUTHOR, state);
+        confirmed.then(() => { settled = 'resolved'; }, () => { settled = 'rejected'; });
+        return { memory, state, waiting, confirmed, settled: () => settled };
+      }
+
+      /** Let everything that can run without another answer from the bundle store run. */
+      async function turn(): Promise<void> {
+        for (let index = 0; index < 20; index += 1) await new Promise((resolve) => setImmediate(resolve));
+      }
+
+      it('reads at most eight bundles at once, and every one of them', async () => {
+        const { state, waiting, confirmed, settled } = await rememberedRows(11);
+        const asked: string[] = [];
+
+        await turn();
+        expect(waiting).toHaveLength(8);
+        // Each answer lets the next row be asked for, until every row was.
+        while (waiting.length > 0) {
+          expect(settled()).toBeUndefined();
+          const read = waiting.shift()!;
+          asked.push(read.digest);
+          read.answer();
+          await turn();
+          expect(waiting.length).toBeLessThanOrEqual(8);
+        }
+
+        await expect(confirmed).resolves.toBeUndefined();
+        expect([...asked].sort()).toEqual(state.assets.map(bundleDigestOf).sort());
+      });
+
+      it('asks for no further bundle after one read failed, and waits for the reads under way', async () => {
+        const { memory, waiting, confirmed, settled } = await rememberedRows(11);
+
+        await turn();
+        expect(waiting).toHaveLength(8);
+        waiting.shift()!.answer(new Error('the bundle store is closed'));
+        await turn();
+        // Seven reads are still under way: the decision has not failed yet, and no row was added.
+        expect(waiting).toHaveLength(7);
+        expect(settled()).toBeUndefined();
+
+        while (waiting.length > 0) waiting.shift()!.answer();
+        await expect(confirmed).rejects.toThrow('the bundle store is closed');
+        await turn();
+        expect(waiting).toHaveLength(0);
+        expect(memory.retained).toEqual({ scopes: 0, states: 0, bytes: 0 });
+      });
     });
 
     it('fails the decision and forgets the scope when the stored bundle is not the remembered bytes', async () => {
@@ -362,12 +506,64 @@ describe('RFC-64 catalog mutation memory over a real author catalog', () => {
       expect(memory.retained).toEqual({ scopes: 0, states: 0, bytes: 0 });
     });
 
+    it('reads nothing back for the call that read the state from the durable store itself', async () => {
+      const catalog = await realCatalog();
+      const memory = new Rfc64CatalogMutationMemoryV1();
+      const rows = [await producerAssetV1(1), await producerAssetV1(2)];
+      await catalog.advance(rows.slice(0, 1), 1);
+      await catalog.advance(rows, 2);
+      const read = () => memory.read(catalog.persistence, catalog.scopeDigest, PRODUCER_AUTHOR, POLICY);
+      const confirm = (state: Rfc64CatalogMutationStateV1, asset?: Rfc64PublicCatalogSuccessorAssetInputV1) => (
+        memory.confirmDurable(catalog.persistence, catalog.scopeDigest, PRODUCER_AUTHOR, state, asset)
+      );
+      const history = catalog.history();
+      const controlObjects = [
+        history.previousHead.objectDigest,
+        history.previousDirectoryPath[0]!.objectDigest,
+        history.previousBucket!.objectDigest,
+      ];
+
+      // That read was the whole catalog, every bundle included.
+      const own = (await read())!;
+      expect(catalog.reads.bundles).toHaveLength(2);
+      catalog.reads.controlObjects.length = 0;
+      catalog.reads.bundles.length = 0;
+      await confirm(own, own.assets[0]);
+      await confirm(own);
+      expect(catalog.reads).toEqual({ controlObjects: [], bundles: [] });
+
+      // Served from memory, the same state rests on a read some other call made.
+      await expect(read()).resolves.toBe(own);
+      catalog.reads.controlObjects.length = 0;
+      await confirm(own, own.assets[0]);
+      expect(catalog.reads).toEqual({ controlObjects, bundles: [bundleDigestOf(own.assets[0]!)] });
+
+      // So does the state a commit carried forward: no call has read its catalog.
+      const next = [...own.assets, await producerAssetV1(3)];
+      const step = await catalog.advance(next, 3);
+      const carried = memory.advance(own, step.applied, step.successor, next);
+      catalog.reads.controlObjects.length = 0;
+      catalog.reads.bundles.length = 0;
+      await confirm(carried);
+      expect(catalog.reads.controlObjects).toHaveLength(3);
+      expect(catalog.reads.bundles).toEqual(carried.assets.map(bundleDigestOf));
+
+      // A scope that was forgotten is read from the durable store again, by the call that asks.
+      memory.forget(catalog.scopeDigest, PRODUCER_AUTHOR);
+      const again = (await read())!;
+      catalog.reads.controlObjects.length = 0;
+      catalog.reads.bundles.length = 0;
+      await confirm(again);
+      expect(catalog.reads).toEqual({ controlObjects: [], bundles: [] });
+    });
+
     it('reads nothing back when the memory is switched off: the state was just read in full', async () => {
       const off = new Rfc64CatalogMutationMemoryV1(resolveCatalogMutationMemoryLimitsV1('0'));
       const { catalog, row, root, confirm } = await remembered(off);
 
       catalog.objects.delete(root);
       await expect(confirm(row)).resolves.toBeUndefined();
+      await expect(confirm()).resolves.toBeUndefined();
 
       expect(catalog.reads).toEqual({ controlObjects: [], bundles: [] });
     });

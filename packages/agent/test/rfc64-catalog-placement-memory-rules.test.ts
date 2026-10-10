@@ -22,6 +22,21 @@ vi.mock('@origintrail-official/dkg-core', async (importOriginal) => {
   };
 });
 
+/** Every call that retires the legacy markers of the rows a projection pass has placed. */
+const legacyRetirements = vi.hoisted(() => ({ republished: [] as string[][] }));
+vi.mock('../src/rfc64/legacy-swm-boundary-v1.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/rfc64/legacy-swm-boundary-v1.js')>();
+  return {
+    ...actual,
+    markRfc64LegacySwmRepublishedV1: (
+      ...args: Parameters<typeof actual.markRfc64LegacySwmRepublishedV1>
+    ) => {
+      legacyRetirements.republished.push(args[2].map(({ kaUal }) => kaUal.split('/').at(-1)!));
+      return actual.markRfc64LegacySwmRepublishedV1(...args);
+    },
+  };
+});
+
 import type { DKGAgent } from '../src/index.js';
 import {
   Rfc64CatalogMutationMemoryV1,
@@ -109,6 +124,7 @@ async function expectSameCatalog(remembering: DKGAgent, rereading: DKGAgent): Pr
 describe('RFC-64 catalog mutation memory on a running agent', () => {
   beforeEach(() => {
     verifications.transferredBundle = 0;
+    legacyRetirements.republished.length = 0;
   });
 
   afterEach(() => {
@@ -197,12 +213,64 @@ describe('RFC-64 catalog mutation memory on a running agent', () => {
       expect(actualPass!.results).toEqual([{ status: 'existing', sourceCurrent: true, successorsApplied: 0 }]);
       expect(expectedPass!.results).toEqual(actualPass!.results);
       await expectSameCatalog(remembering, rereading);
-      // The agent that remembers answered that pass without reading one bundle: it read the applied
-      // head and its delegation, then head, directory root and bucket. The other read all four bundles.
-      expect(actualPass!.reads).toMatchObject({ bundles: 0, controlObjects: 2 + 3, cas: 0 });
+      // The agent that remembers read the applied head and its delegation, then head, directory
+      // root and bucket, and every row's bundle back: the pass retires the legacy markers of all
+      // four rows. The other read the whole catalog, the same four bundles among it.
+      expect(actualPass!.reads).toMatchObject({ bundles: 4, controlObjects: 2 + 3, cas: 0 });
       expect(expectedPass!.reads).toMatchObject({ bundles: 4, cas: 0 });
+      expect(verifications.transferredBundle).toBe(0);
       expect(kaNumbers((await appliedCatalogObjects(remembering)).state.assets))
         .toEqual(['1@1', '2@1', '3@1', '4@1']);
+    }, 120_000);
+
+    it('retires no legacy marker for a pass that finds nothing to sign while a row\'s bundle is not in the durable store', async () => {
+      const remembering = await startPlacementAgent('projection-lost-bundle-a', { shareTimeProjection: true });
+      const rereading = withoutMemory(
+        await startPlacementAgent('projection-lost-bundle-b', { shareTimeProjection: true }),
+      );
+      const agents = [rereading, remembering];
+      const memory = rfc64CatalogMutationMemoryV1(remembering);
+      let now = 1_773_900_000_000;
+      vi.spyOn(Date, 'now').mockImplementation(() => now);
+      for (const kaNumber of [1, 2]) {
+        now += 1_000;
+        await both(agents, (agent) => share(agent, kaNumber));
+      }
+      await expectSameCatalog(remembering, rereading);
+      const { history } = await appliedCatalogObjects(remembering);
+      const bundleDigests = history.previousBucket!.payload.rows.map(({ transfer }) => transfer.blobDigest);
+      expect(bundleDigests).toHaveLength(2);
+      const stores = new Map(agents.map((agent) => [agent, watchDurableStores(agent)]));
+      /** One pass of the projection, as its supervisor runs it. */
+      const pass = (agent: DKGAgent) => agent.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        authorAddress: AUTHOR,
+      });
+      await both(agents, async (agent) => expect(await pass(agent)).toMatchObject({ status: 'existing' }));
+      expect(memory.retained.states).toBe(1);
+
+      for (const bundleDigest of bundleDigests) {
+        legacyRetirements.republished.length = 0;
+        now += 1_000;
+        const [expected, actual] = await both(agents, (agent) => {
+          stores.get(agent)!.lose(bundleDigest);
+          return rejectionOf(pass(agent));
+        });
+        // Both passes fail with the same words, before the step that retires the legacy markers of
+        // the rows they found placed: their supervisor repeats a pass that failed.
+        expect(actual).toBe(expected);
+        expect(actual).toContain(`RFC-64 applied catalog bundle ${bundleDigest} is unavailable`);
+        expect(legacyRetirements.republished).toEqual([]);
+        expect(memory.retained).toEqual({ scopes: 0, states: 0, bytes: 0 });
+
+        await both(agents, async (agent) => {
+          stores.get(agent)!.restore(bundleDigest);
+          expect(await pass(agent)).toMatchObject({ status: 'existing', successorsApplied: 0 });
+        });
+        expect(legacyRetirements.republished).toEqual([['1', '2'], ['1', '2']]);
+        expect(memory.retained.states).toBe(1);
+      }
+      await expectSameCatalog(remembering, rereading);
     }, 120_000);
   });
 
@@ -592,6 +660,43 @@ describe('RFC-64 catalog mutation memory on a running agent', () => {
       expect(memory.retained).toEqual({ scopes: 0, states: 0, bytes: 0 });
       stores.restore(gone);
       await expect(upToDate()).resolves.toMatchObject({ status: 'existing', successorsApplied: 0 });
+      expect(appliedHead(agent)).toEqual(head);
+    }, 60_000);
+
+    it.each([
+      ['first', 0],
+      ['second', 1],
+    ] as const)('reports no set as already placed while the bundle of its %s row is not in the durable store', async (which, index) => {
+      const agent = await startPlacementAgent(`memory-rules-set-lost-bundle-${which}`);
+      const memory = rfc64CatalogMutationMemoryV1(agent);
+      await upsert(agent, await asset(1));
+      await upsert(agent, await asset(2));
+      const head = appliedHead(agent);
+      const { history } = await appliedCatalogObjects(agent);
+      const bundleDigest = history.previousBucket!.payload.rows[index]!.transfer.blobDigest;
+      const stores = watchDurableStores(agent);
+      const upToDate = async () => agent.reconcileRfc64PublicRootCatalogExactSetV1({
+        ...MUTATION,
+        assets: [await asset(1), await asset(2)],
+      });
+
+      // A target the catalog already equals: the reconciliation would answer from the remembered state.
+      expect(memory.retained.states).toBe(1);
+      stores.lose(bundleDigest);
+      await expect(upToDate()).rejects.toThrow(`RFC-64 applied catalog bundle ${bundleDigest} is unavailable`);
+      expect(memory.retained).toEqual({ scopes: 0, states: 0, bytes: 0 });
+      // The read of the durable catalog that follows refuses it with the same words, as it always did.
+      await expect(upToDate()).rejects.toThrow(`RFC-64 applied catalog bundle ${bundleDigest} is unavailable`);
+      expect(appliedHead(agent)).toEqual(head);
+
+      stores.restore(bundleDigest);
+      await expect(upToDate()).resolves.toMatchObject({ status: 'existing', successorsApplied: 0 });
+      expect(memory.retained.states).toBe(1);
+      stores.reset();
+      await expect(upToDate()).resolves.toMatchObject({ status: 'existing', successorsApplied: 0 });
+      // From memory: the applied head and its delegation, then head, directory root, bucket and
+      // the bundle of each of the two rows.
+      expect(stores.reads).toMatchObject({ bundles: 2, controlObjects: 2 + 3, cas: 0 });
       expect(appliedHead(agent)).toEqual(head);
     }, 60_000);
 

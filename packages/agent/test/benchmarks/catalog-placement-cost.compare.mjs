@@ -39,7 +39,8 @@ function duration(ms) {
 /** Every sample of one kind that the runs of a label hold for one catalog size. */
 function samples(run, size, kind) {
   return run.results.filter((result) => result.size === size).flatMap(({ samples: held }) => (
-    kind === 'afterStart' ? [held.afterStart.first] : held[kind]
+    // A run of an earlier version of the benchmark holds no projection passes.
+    kind === 'afterStart' ? [held.afterStart.first] : held[kind] ?? []
   ));
 }
 
@@ -77,6 +78,12 @@ const phases = [
 table('One placement into a catalog of up to `rows` rows', 'first', [wall, cpu, ...phases, stall]);
 table('The same confirmation observed again (already covered)', 'covered', [wall, cpu, stall]);
 table('First placement after a start', 'afterStart', [wall, cpu, ...phases.slice(0, 3)]);
+table('A projection pass over the same catalog that finds nothing to sign', 'projection', [
+  wall,
+  cpu,
+  ['in the catalog mutation', (held) => duration(phase(held, 'catalogMs'))],
+  stall,
+]);
 
 console.log('\nWhat each run signed and kept\n');
 console.log('| rows | run | applied inventory digests | retained after a full collection |');
@@ -102,7 +109,8 @@ if (runs.length === 2) {
     ).toFixed(1);
     console.log(
       `rows=${size}: placement wall x${ratio('first', 'wallMs')} CPU x${ratio('first', 'cpuMs')};`
-      + ` already covered wall x${ratio('covered', 'wallMs')} CPU x${ratio('covered', 'cpuMs')}`,
+      + ` already covered wall x${ratio('covered', 'wallMs')} CPU x${ratio('covered', 'cpuMs')};`
+      + ` projection pass wall x${ratio('projection', 'wallMs')} CPU x${ratio('projection', 'cpuMs')}`,
     );
   }
 }

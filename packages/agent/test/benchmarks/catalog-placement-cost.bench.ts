@@ -14,12 +14,14 @@
  *   each size in CATALOG_PLACEMENT_BENCH_SIZES (default 10,100,700,1024).
  * - `measure` starts an agent on a copy of each saved snapshot and places
  *   CATALOG_PLACEMENT_BENCH_WINDOW (default 5) assets after a first one. The first placement after
- *   a start finds nothing in memory and is reported on its own. Two runs measured on the same
- *   snapshots place the same assets into the same catalog; the applied inventory digest each run
- *   prints says whether they signed the same rows, and the bytes still held after a full
- *   collection say what each run keeps in memory for a catalog of that size (measure one size per
- *   process for that, with CATALOG_PLACEMENT_BENCH_SIZES: an agent that was stopped is not
- *   collected while the run goes on).
+ *   a start finds nothing in memory and is reported on its own. As many passes of the share-time
+ *   projection then run over the same catalog: every row of the author's inventory is in it, so
+ *   each pass signs nothing. Two runs measured on the same snapshots place the same assets into
+ *   the same catalog; the applied inventory digest each run prints says whether they signed the
+ *   same rows, and the bytes still held after a full collection say what each run keeps in memory
+ *   for a catalog of that size (measure one size per process for that, with
+ *   CATALOG_PLACEMENT_BENCH_SIZES: an agent that was stopped is not collected while the run goes
+ *   on).
  *
  * CATALOG_PLACEMENT_BENCH_OUT names a JSON file for the samples.
  *
@@ -54,7 +56,7 @@ import { join } from 'node:path';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 
 import { MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 } from '@origintrail-official/dkg-core';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { DKGAgent } from '../../src/index.js';
 import {
@@ -66,7 +68,12 @@ import {
   observeConfirmationV1,
   startPlacementAgentV1,
 } from '../support/rfc64-catalog-placement-fixture.js';
-import { agents, seedInventoryAssetV1 } from '../support/rfc64-local-catalog-repair-fixture.js';
+import {
+  AUTHOR,
+  CONTEXT_GRAPH_ID,
+  agents,
+  seedInventoryAssetV1,
+} from '../support/rfc64-local-catalog-repair-fixture.js';
 
 const MODE = process.env.CATALOG_PLACEMENT_BENCH_MODE ?? 'grow';
 const ROWS = Number(process.env.CATALOG_PLACEMENT_BENCH_ROWS ?? MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1);
@@ -190,6 +197,51 @@ async function placeNext(
   return { first, covered };
 }
 
+/**
+ * Passes of the share-time projection over the catalog as it is: every row of the author's
+ * inventory is placed, so each pass resolves the rows, finds nothing to sign and ends there.
+ * `catalogMs` is the part spent in the catalog mutation. The fixture's stand-in for that
+ * projection is taken out first, so nothing is placed through the agent after this.
+ */
+async function projectNothing(
+  agent: DKGAgent,
+  stall: ReturnType<typeof monitorEventLoopDelay>,
+  rows: number,
+): Promise<PlacementSampleV1[]> {
+  vi.mocked(agent.reconcileRfc64PublicCatalogFromSwmInventoryV1).mockRestore();
+  let catalogMs = 0;
+  const reconcile = (agent as any).reconcileRfc64SwmInventoryCatalogV1.bind(agent);
+  (agent as any).reconcileRfc64SwmInventoryCatalogV1 = async (params: unknown) => {
+    const startedAt = performance.now();
+    try {
+      return await reconcile(params);
+    } finally {
+      catalogMs = performance.now() - startedAt;
+    }
+  };
+  const samples: PlacementSampleV1[] = [];
+  for (let pass = 0; pass < WINDOW; pass += 1) {
+    stall.reset();
+    const cpu = process.cpuUsage();
+    const startedAt = performance.now();
+    const result = await agent.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+    });
+    const wallMs = performance.now() - startedAt;
+    const used = process.cpuUsage(cpu);
+    expect(result).toMatchObject({ status: 'existing', successorsApplied: 0 });
+    samples.push({
+      rows,
+      wallMs,
+      cpuMs: (used.user + used.system) / 1_000,
+      stallMs: stall.max / 1e6,
+      phases: { catalogMs },
+    });
+  }
+  return samples;
+}
+
 function mean(values: readonly number[]): number {
   return values.reduce((sum, value) => sum + value, 0) / Math.max(1, values.length);
 }
@@ -299,14 +351,25 @@ async function measureSavedCatalogs(): Promise<void> {
     }
     const applied = appliedHead(agent);
     expect(applied).toMatchObject({ inventoryRowCount: String(size) });
+    const retained = retainedBytes();
+    const projection = await projectNothing(agent, stall, size);
+    expect(appliedHead(agent)).toEqual(applied);
     results.push({
       size,
-      retainedBytes: retainedBytes(),
+      retainedBytes: retained,
       appliedInventoryDigest: applied!.appliedInventoryDigest,
       afterStart: summarize([afterStart.first], size),
       placement: summarize(first, size),
       repeat: summarize(covered, size),
-      samples: { afterStart, first, covered },
+      projection: {
+        rows: size,
+        passes: projection.length,
+        wallMs: mean(projection.map(({ wallMs }) => wallMs)),
+        cpuMs: mean(projection.map(({ cpuMs }) => cpuMs)),
+        stallMaxMs: Math.max(0, ...projection.map(({ stallMs }) => stallMs)),
+        catalogMs: mean(projection.map(({ phases }) => phases.catalogMs ?? 0)),
+      },
+      samples: { afterStart, first, covered, projection },
     });
     await stopPlacementAgent(agent);
     rmSync(dataDir, { recursive: true, force: true });
@@ -319,6 +382,14 @@ async function measureSavedCatalogs(): Promise<void> {
     table('One placement into a catalog of up to `rows` rows', results.map(({ placement }) => placement)),
     '',
     table('The same confirmation observed again (already covered)', results.map(({ repeat }) => repeat)),
+    '',
+    'A projection pass over the same catalog that finds nothing to sign',
+    '| rows | passes | wallMs | cpuMs | stallMaxMs | catalogMs |',
+    '| ---: | ---: | ---: | ---: | ---: | ---: |',
+    ...results.map(({ projection }) => (
+      `| ${projection.rows} | ${projection.passes} | ${projection.wallMs.toFixed(1)} | ${projection.cpuMs.toFixed(1)}`
+      + ` | ${projection.stallMaxMs.toFixed(1)} | ${projection.catalogMs.toFixed(1)} |`
+    )),
     '',
     ...results.map(({ size, appliedInventoryDigest, retainedBytes: retained }) => (
       `rows=${size} appliedInventoryDigest=${appliedInventoryDigest}`

@@ -351,7 +351,8 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       );
       assertReplacementHistoryIsContiguousV1(state.assets, targetAssets);
       if (sameRfc64SuccessorAssetSetsV1(state.assets, targetAssets)) {
-        // Nothing to sign: the catalog that answer rests on is read back from the durable store.
+        // Nothing to sign: the catalog that answer rests on, every row's bundle included, is read
+        // back from the durable store.
         if (state.current !== null) await this.confirmRfc64CatalogDurableV1(persistence, params.scope, state);
         return Object.freeze({
           status: state.current === null ? 'empty' as const : 'existing' as const,
@@ -462,7 +463,8 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
 
   /**
    * Before `state` ends work without a successor: its head's directory root and bucket, and the
-   * bundle of the row the decision is about, are in the durable store.
+   * bundle of the row the decision is about (every row's when no `asset` is named), are in the
+   * durable store.
    */
   private confirmRfc64CatalogDurableV1(
     this: DKGAgent,
