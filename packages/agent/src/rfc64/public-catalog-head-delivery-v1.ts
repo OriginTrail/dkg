@@ -28,7 +28,8 @@
  *   that head or a newer one, unless this node's policy refuses the peer or cannot be asked.
  * - Two heads sent one after the other are at most half the lineage window apart. When a newer
  *   head would be further than that from the head sent before it, the waiting head is kept as a
- *   checkpoint and sent first.
+ *   checkpoint and sent first. A peer named with a later head is sent the kept heads ahead of it
+ *   as well, so the rule holds for each peer and not only for the scope.
  *
  * A head kept for either reason waits in memory, so there is a limit to them. Past the limit the
  * newest head replaces the waiting one all the same, and the scope's next fan-out says so
@@ -217,6 +218,8 @@ export interface Rfc64CatalogHeadDeliveryOptionsV1
 interface WaitingHeadV1 {
   readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
   readonly peers: readonly string[];
+  /** Kept because the next head is more than a step from the head sent before this one. */
+  readonly checkpoint?: true;
 }
 
 interface ScopeDeliveryV1 {
@@ -261,6 +264,7 @@ export class Rfc64CatalogHeadDeliveryV1 {
       isPeerAuthorized: options.isPeerAuthorized,
       fanoutBudgetMs: options.fanoutBudgetMs,
       selectionBudgetMs: options.selectionBudgetMs,
+      maxAbandonedSends: options.maxAbandonedSends,
       now: this.#now,
     }, this.#lifecycle.signal);
     this.#maxWaitingHeadsPerScope = options.maxWaitingHeadsPerScope
@@ -330,6 +334,22 @@ export class Rfc64CatalogHeadDeliveryV1 {
 
   /** Add `head` to a scope whose owner is busy, keeping what the module comment promises. */
   #coalesce(scope: ScopeDeliveryV1, head: WaitingHeadV1, version: bigint): void {
+    this.#placeHead(scope, head, version);
+    // A peer named now is also sent every checkpoint that waits ahead of the newest head. The
+    // checkpoints of a scope are a step apart; a peer that skipped one could be left with a jump
+    // it cannot prove its way across.
+    const { waiting } = scope;
+    for (let index = 0; index < waiting.length - 1; index += 1) {
+      const kept = waiting[index]!;
+      if (kept.checkpoint !== true) continue;
+      const { fits, rest } = mergePeersV1(kept.peers, head.peers);
+      if (rest.length > 0) scope.checkpointCapacityExceeded = true;
+      waiting[index] = waitingHeadV1(kept, fits);
+    }
+  }
+
+  /** Where `head` goes among the waiting heads of its scope: replace, keep, or be kept. */
+  #placeHead(scope: ScopeDeliveryV1, head: WaitingHeadV1, version: bigint): void {
     const { waiting } = scope;
     const newest = waiting.at(-1);
     if (newest === undefined) {
@@ -365,7 +385,9 @@ export class Rfc64CatalogHeadDeliveryV1 {
       if (hasPlace) {
         // A checkpoint keeps its own peers. A head that stays only because the newer one has no
         // room for all its peers keeps just those; the newer head takes the others over.
-        if (!stepTooLarge) waiting[last] = waitingHeadV1(newest, rest);
+        waiting[last] = stepTooLarge
+          ? Object.freeze({ ...newest, checkpoint: true as const })
+          : waitingHeadV1(newest, rest);
         waiting.push(stepTooLarge ? head : waitingHeadV1(head, fits));
         this.#checkpoints += 1;
         return;
@@ -579,7 +601,5 @@ function mergePeersV1(
 function waitingHeadV1(head: WaitingHeadV1, peers: readonly string[]): WaitingHeadV1 {
   const unchanged = peers.length === head.peers.length
     && peers.every((peerId, index) => peerId === head.peers[index]);
-  return unchanged
-    ? head
-    : Object.freeze({ announcement: head.announcement, peers: Object.freeze([...peers]) });
+  return unchanged ? head : Object.freeze({ ...head, peers: Object.freeze([...peers]) });
 }

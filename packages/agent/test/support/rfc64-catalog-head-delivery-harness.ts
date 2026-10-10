@@ -73,7 +73,8 @@ function policyDenied(message: string): Rfc64PublicCatalogTransportErrorV1 {
  * after it, and it reads the peer's own denial from the reply afterwards.
  *
  * The policy is the two sets: a peer in `refused` gets a plain no, and for a peer in
- * `undecidable` the decision cannot be made, as when an identity lookup fails.
+ * `undecidable` the decision cannot be made, as when an identity lookup fails. For a peer in
+ * `hungChecks` the transport's own check before the send never answers.
  */
 export function harness(
   overrides: Partial<Rfc64CatalogHeadDeliveryOptionsV1> & { readonly ackDelayMs?: number } = {},
@@ -86,6 +87,7 @@ export function harness(
   const behaviour = new Map<string, PeerBehaviour>();
   const refused = new Set<string>();
   const undecidable = new Set<string>();
+  const hungChecks = new Set<string>();
   /** Every peer the policy was asked about without a send, in order. */
   const decisions: string[] = [];
   const inFlightByAuthor = new Map<string, number>();
@@ -142,6 +144,7 @@ export function harness(
     transportCalls.push(peerId);
     const reply = await withCurrentRfc64CatalogPolicyV1(
       async () => {
+        if (hungChecks.has(peerId)) await new Promise(() => undefined);
         if (!authorizes(peerId)) throw policyDenied('catalog operation is not access-policy authorized');
       },
       () => exchange(peerId, announcement, sendOptions),
@@ -165,6 +168,7 @@ export function harness(
     behaviour,
     refused,
     undecidable,
+    hungChecks,
     decisions,
     mostInFlightByAuthor,
   };

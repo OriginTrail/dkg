@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { noteRfc64CatalogPolicyUndecidedV1 } from '../src/rfc64/catalog-policy-decision-probe-v1.js';
 import { RFC64_CATALOG_HEAD_DELIVERY_MAX_ACTIVE_FANOUTS_V1 } from '../src/rfc64/public-catalog-head-delivery-v1.js';
 import {
+  RFC64_CATALOG_HEAD_FANOUT_ABORT_GRACE_MS_V1,
   RFC64_CATALOG_HEAD_FANOUT_WAVE_INTERVAL_MS_V1,
   RFC64_CATALOG_HEAD_FANOUT_WAVE_PEERS_V1,
   RFC64_CATALOG_HEAD_MAX_DECISIONS_IN_FLIGHT_V1,
@@ -620,6 +621,59 @@ describe('RFC-64 catalog head delivery: one budget, bounded waves', () => {
     expect(new Set(outcomes[0]!.failedPeers.map(({ error }) => error))).toEqual(new Set([
       `RFC-64 catalog head fan-out exceeded its ${budgetMs} ms budget`,
     ]));
+  });
+
+  it('ends a fan-out a moment after its budget although the policy check of a send never answers', async () => {
+    vi.useFakeTimers();
+    const { delivery, sends, outcomes, hungChecks } = harness();
+    hungChecks.add('hung-check');
+
+    delivery.deliver({ announcement: head('1'), peers: ['member', 'hung-check'] });
+    await settle();
+    delivery.deliver({ announcement: head('2'), peers: ['member'] });
+    await vi.advanceTimersByTimeAsync(BUDGET_MS + RFC64_CATALOG_HEAD_FANOUT_ABORT_GRACE_MS_V1 - 1);
+    expect(outcomes).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    await settle();
+
+    // The budget ends the wait for a send, not only its time on the wire: a send gets a moment
+    // to unwind and is then left behind. Nothing went out to the peer whose check never
+    // answered, and it is a peer that did not get the head.
+    expect(outcomes[0]).toMatchObject({
+      announcedPeers: ['member'],
+      failedPeers: [{
+        peerId: 'hung-check',
+        error: `RFC-64 catalog head fan-out exceeded its ${BUDGET_MS} ms budget`,
+      }],
+      refusedPeers: [],
+    });
+    // The scope's next head was not held by it.
+    expect(sends.map(({ peerId, version }) => [peerId, version])).toEqual([
+      ['member', '1'],
+      ['member', '2'],
+    ]);
+    expect(delivery.pendingScopes).toBe(0);
+  });
+
+  it('starts no send while too many sends of earlier fan-outs have not ended', async () => {
+    vi.useFakeTimers();
+    const { delivery, sends, outcomes, hungChecks } = harness({ maxAbandonedSends: 2 });
+    hungChecks.add('hung-a');
+    hungChecks.add('hung-b');
+
+    delivery.deliver({ announcement: head('1'), peers: ['hung-a', 'hung-b'] });
+    await vi.advanceTimersByTimeAsync(BUDGET_MS + RFC64_CATALOG_HEAD_FANOUT_ABORT_GRACE_MS_V1);
+    await settle();
+    // Two sends outlived their fan-out, each on a policy read that cannot be cut short.
+    delivery.deliver({ announcement: head('2'), peers: ['member'] });
+    await settle();
+
+    expect(sends).toEqual([]);
+    expect(outcomes[1]!.announcedPeers).toEqual([]);
+    expect(outcomes[1]!.failedPeers).toEqual([{
+      peerId: 'member',
+      error: 'RFC-64 catalog head sends of earlier fan-outs have not ended: no new send is started',
+    }]);
   });
 
   it('takes the times stated for 4, 11 and 64 peers that acknowledge, are refused, stall, or a third each', async () => {

@@ -5,7 +5,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { RFC64_CATALOG_HEAD_DELIVERY_MAX_ACTIVE_FANOUTS_V1 } from '../src/rfc64/public-catalog-head-delivery-v1.js';
-import { RFC64_CATALOG_HEAD_FANOUT_WAVE_PEERS_V1 } from '../src/rfc64/public-catalog-head-fanout-v1.js';
+import {
+  RFC64_CATALOG_HEAD_FANOUT_ABORT_GRACE_MS_V1,
+  RFC64_CATALOG_HEAD_FANOUT_WAVE_PEERS_V1,
+} from '../src/rfc64/public-catalog-head-fanout-v1.js';
 import {
   BUDGET_MS,
   author,
@@ -164,6 +167,31 @@ describe('RFC-64 catalog head delivery: close', () => {
       announcedPeers: [],
       refusedPeers: [],
       uncheckedPeers: [],
+      notDeliverable: 'RFC-64 catalog head delivery closed',
+    });
+  });
+
+  it('waits at close only a moment for a send whose policy check never answers', async () => {
+    vi.useFakeTimers();
+    const { delivery, sends, outcomes, hungChecks } = harness();
+    hungChecks.add('hung-check');
+
+    delivery.deliver({ announcement: head('1'), peers: ['hung-check'] });
+    await settle();
+    let closed = false;
+    const closing = delivery.close().then(() => { closed = true; });
+    await vi.advanceTimersByTimeAsync(RFC64_CATALOG_HEAD_FANOUT_ABORT_GRACE_MS_V1 - 1);
+    // A send gets the time it needs to unwind ...
+    expect(closed).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    // ... and no longer: the read it is waiting for cannot be cut short.
+    await closing;
+
+    expect(sends).toEqual([]);
+    expect(delivery.pendingScopes).toBe(0);
+    expect(outcomes[0]).toMatchObject({
+      announcedPeers: [],
+      failedPeers: [],
       notDeliverable: 'RFC-64 catalog head delivery closed',
     });
   });

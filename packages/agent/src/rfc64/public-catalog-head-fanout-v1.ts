@@ -23,6 +23,12 @@
  * Sends start in waves of {@link RFC64_CATALOG_HEAD_FANOUT_WAVE_PEERS_V1} under one time budget
  * for all the sends of a fan-out, counted from its first send. A fan-out owns one abort
  * controller and one budget timer that every send of it shares; no signal is composed per send.
+ * A send also asks this node's policy, before and after the wire, and those reads cannot be cut
+ * short either. So once its signal has aborted, a fan-out waits for a send only for as long as a
+ * send needs to unwind ({@link RFC64_CATALOG_HEAD_FANOUT_ABORT_GRACE_MS_V1}). A send that is
+ * still not over then is reported with the fan-out and left to end by itself; with its signal
+ * aborted it can no longer put anything on the wire. Abandoned sends are counted, and past
+ * {@link RFC64_CATALOG_HEAD_MAX_ABANDONED_SENDS_V1} no new send is started.
  *
  * A send that the transport's policy wrapper denied is told apart by where it was denied. Before
  * the send, nothing went out: a refusal, or unchecked when that decision could not be made.
@@ -64,6 +70,20 @@ export const RFC64_CATALOG_HEAD_SELECTION_CONCURRENCY_V1 = 4;
  * selection's deadline included. Past it a peer is not asked about and counts as unchecked.
  */
 export const RFC64_CATALOG_HEAD_MAX_DECISIONS_IN_FLIGHT_V1 = 16;
+/**
+ * How long a fan-out whose signal has aborted (its budget ended, the owner closed, or the caller
+ * gave up) still waits for its sends to unwind. A send on the wire ends at once; one that is
+ * waiting for a policy read of its own does not, and is abandoned after this long.
+ */
+export const RFC64_CATALOG_HEAD_FANOUT_ABORT_GRACE_MS_V1 = 1_000;
+/**
+ * Sends that may be left to end by themselves after their fan-out ended, all fan-outs together.
+ * A send is in that state only while a policy read of its own is still in flight. Past this many,
+ * a new send is not started and is reported as failed.
+ */
+export const RFC64_CATALOG_HEAD_MAX_ABANDONED_SENDS_V1 = 4_096;
+const ABANDONED_SENDS_MESSAGE_V1 =
+  'RFC-64 catalog head sends of earlier fan-outs have not ended: no new send is started';
 
 export interface AnnounceRfc64PublicCatalogHeadResultV1 {
   /** Validated immutable snapshot used for every delivery attempt. */
@@ -100,6 +120,8 @@ export interface Rfc64CatalogHeadFanoutPortsV1 {
   readonly fanoutBudgetMs: number;
   /** Deadline of one selection, from its start (ms). Defaults to the budget of the sends. */
   readonly selectionBudgetMs?: number;
+  /** Override of {@link RFC64_CATALOG_HEAD_MAX_ABANDONED_SENDS_V1}. */
+  readonly maxAbandonedSends?: number;
   /** Monotonic milliseconds. */
   readonly now: () => number;
 }
@@ -125,6 +147,11 @@ export type Rfc64CatalogHeadSendV1 = Readonly<
 export interface Rfc64CatalogHeadFanoutSessionV1 {
   /** Aborts when the budget ends, the owner closes, or the awaiting caller's signal aborts. */
   readonly signal: AbortSignal;
+  /**
+   * Rejects with the signal's reason once the signal has aborted and the grace for unwinding has
+   * passed: what every send of the fan-out races, so that none can hold it for longer.
+   */
+  readonly abandoned: Promise<never>;
   remainingMs(): number;
   /** True when the budget, not the close path or a caller, ended the fan-out. */
   budgetEnded(): boolean;
@@ -146,6 +173,8 @@ export class Rfc64CatalogHeadFanoutV1 {
   /** Settles when the owner closes: what a selection waits on beside its work and its deadline. */
   readonly #closed: Promise<void>;
   #decisionsInFlight = 0;
+  /** Sends whose fan-out ended while a policy read of theirs was still in flight. */
+  #abandonedSends = 0;
 
   /** `lifecycle` aborts when the owner closes: every fan-out ends with it. */
   constructor(ports: Rfc64CatalogHeadFanoutPortsV1, lifecycle: AbortSignal) {
@@ -179,12 +208,28 @@ export class Rfc64CatalogHeadFanoutV1 {
       source.addEventListener('abort', onAbort, { once: true });
       detachers.push(() => source.removeEventListener('abort', onAbort));
     }
+    let grace: ReturnType<typeof setTimeout> | undefined;
+    const abandoned = new Promise<never>((_resolve, reject) => {
+      const onAbort = (): void => {
+        grace = setTimeout(
+          () => reject(controller.signal.reason),
+          RFC64_CATALOG_HEAD_FANOUT_ABORT_GRACE_MS_V1,
+        );
+        grace.unref?.();
+      };
+      if (controller.signal.aborted) onAbort();
+      else controller.signal.addEventListener('abort', onAbort, { once: true });
+    });
+    // Raced by the sends; with none left to race it, the rejection is nobody's to handle.
+    abandoned.catch(() => undefined);
     return {
       signal: controller.signal,
+      abandoned,
       remainingMs: () => Math.max(1, Math.ceil(deadlineAt - this.#ports.now())),
       budgetEnded: () => controller.signal.reason === budgetEnded,
       end: () => {
         clearTimeout(timer);
+        clearTimeout(grace);
         for (const detach of detachers.splice(0)) detach();
       },
     };
@@ -203,19 +248,34 @@ export class Rfc64CatalogHeadFanoutV1 {
   ): Promise<Rfc64CatalogHeadSendV1[]> {
     // Filled by index as each send settles; every index below `next` is filled once all have.
     const sends: Rfc64CatalogHeadSendV1[] = [];
+    const maxAbandonedSends = this.#ports.maxAbandonedSends
+      ?? RFC64_CATALOG_HEAD_MAX_ABANDONED_SENDS_V1;
     const attempt = async (index: number): Promise<void> => {
       const peerId = peers[index]!;
+      if (this.#abandonedSends >= maxAbandonedSends) {
+        sends[index] = { peerId, outcome: 'failed', failure: new Error(ABANDONED_SENDS_MESSAGE_V1) };
+        return;
+      }
       const probe: Rfc64CatalogPolicyProbeV1 = { undecided: false };
+      let ended = false;
+      const sending = withRfc64CatalogPolicyProbeV1(probe, async () => this.#ports.send(
+        peerId,
+        announcement,
+        { timeoutMs: session.remainingMs(), signal: session.signal },
+      )).finally(() => { ended = true; });
       try {
-        await withRfc64CatalogPolicyProbeV1(probe, async () => this.#ports.send(
-          peerId,
-          announcement,
-          { timeoutMs: session.remainingMs(), signal: session.signal },
-        ));
+        // The session's abort ends the wait, not only the wire: a policy read of this send that
+        // is still in flight must not hold the fan-out, its scope or the close path.
+        await Promise.race([sending, session.abandoned]);
         sends[index] = { peerId, outcome: 'sent' };
       } catch (failure) {
         sends[index] = { peerId, outcome: failedSendOutcomeV1(failure, probe), failure };
       }
+      if (ended) return;
+      // Left to end by itself. Its signal has aborted, so it cannot reach the wire any more.
+      this.#abandonedSends += 1;
+      void sending.then(() => undefined, () => undefined)
+        .then(() => { this.#abandonedSends -= 1; });
     };
     const started: Promise<void>[] = [];
     let next = 0;

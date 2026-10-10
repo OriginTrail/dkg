@@ -353,6 +353,34 @@ describe('RFC-64 catalog head delivery: one owner per scope, newest head', () =>
       .toBe(last - sentToPeerA.length);
   });
 
+  it('sends a peer that is named again later every kept head in between', async () => {
+    vi.useFakeTimers();
+    const { delivery, sends, outcomes, behaviour } = harness();
+    behaviour.set('slow-peer', 'stall');
+    const step = RFC64_CATALOG_HEAD_DELIVERY_MAX_VERSION_STEP_V1;
+    const last = 1 + 4 * step;
+
+    delivery.deliver({ announcement: head('1'), peers: ['slow-peer'] });
+    await settle();
+    // Peer B is named with two of the 4,096 heads that commit meanwhile, peer A with the others.
+    for (let version = 2; version <= last; version += 1) {
+      const named = version === 1 + step || version === 2 + 3 * step ? 'peer-b' : 'peer-a';
+      delivery.deliver({ announcement: head(String(version)), peers: [named] });
+    }
+    await vi.advanceTimersByTimeAsync(BUDGET_MS);
+    await settle();
+
+    const sentTo = (peerId: string): number[] => sends
+      .filter((send) => send.peerId === peerId)
+      .map(({ version }) => Number(version));
+    const kept = [1 + step, 1 + 2 * step, 1 + 3 * step, last];
+    expect(sentTo('peer-a')).toEqual(kept);
+    // B is not only sent the two heads that carry its name. With the kept heads between them it
+    // never has to prove its way across more than one step.
+    expect(sentTo('peer-b')).toEqual(kept);
+    expect(outcomes.some(({ checkpointCapacityExceeded }) => checkpointCapacityExceeded)).toBe(false);
+  });
+
   it('keeps a checkpoint for every step of a backlog as deep as one scope may hold', async () => {
     vi.useFakeTimers();
     const { delivery, sends, outcomes, behaviour } = harness();
