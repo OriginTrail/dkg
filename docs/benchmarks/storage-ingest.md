@@ -29,7 +29,9 @@ Run each mode against a separate empty namespace:
 node packages/storage/scripts/ingest-floor-benchmark.mjs \
   --manifest /absolute/path/manifest.json \
   --endpoint http://127.0.0.1:19985/blazegraph/namespace/kb/sparql \
-  --mode atomic --group 1 --out /absolute/path/atomic.json
+  --mode atomic --group 1 --storage-path /path/to/owned/journal-directory --out /absolute/path/atomic.json
 ```
 
 Use `--mode rdf --group 10` for grouped ingestion. The runner refuses non-loopback endpoints and nonempty stores, verifies input digests and graph counts, records read/parse/write time separately, and stops below 5 GiB free disk. Start a fresh database for each repeat and separately restart it to check persistence. The runner does not start, stop or delete database services.
+
+The required `--storage-path` must identify the filesystem holding the owned database journal. The 5 GiB guard checks that filesystem, independently of the report destination. Existing default-graph data is also refused.

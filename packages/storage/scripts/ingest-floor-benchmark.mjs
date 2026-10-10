@@ -6,6 +6,7 @@ import { readFile, writeFile, statfs } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import oxigraph from 'oxigraph';
+import { formatCanonicalRdfTerm } from '@origintrail-official/dkg-rdf-utils';
 import { SparqlHttpStore } from '../dist/index.js';
 
 function args(argv) {
@@ -17,7 +18,7 @@ function args(argv) {
   return result;
 }
 const options = args(process.argv.slice(2));
-if (!options.manifest || !options.endpoint || !options.out) throw new Error('Required: --manifest FILE --endpoint URL --mode atomic|rdf --out FILE');
+if (!options.manifest || !options.endpoint || !options.out || !options['storage-path']) throw new Error('Required: --manifest FILE --endpoint URL --mode atomic|rdf --out FILE --storage-path DIRECTORY');
 const manifestPath = resolve(options.manifest);
 const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
 const mode = options.mode;
@@ -25,6 +26,7 @@ if (!['atomic', 'rdf'].includes(mode)) throw new Error('mode must be atomic or r
 const endpoint = new URL(options.endpoint);
 if (!['127.0.0.1', '[::1]'].includes(endpoint.hostname)) throw new Error('Only loopback test stores are allowed');
 const output = resolve(options.out);
+const storagePath = resolve(options['storage-path']);
 const groupSize = Number(options.group ?? '1');
 if (!Number.isSafeInteger(groupSize) || groupSize < 1 || groupSize > 100) throw new Error('Invalid group');
 const limit = Number(options.limit ?? manifest.assets.length);
@@ -38,7 +40,8 @@ const count = async () => {
   return numeric(result.bindings[0].n);
 };
 const existing = await store.query('SELECT ?g WHERE { GRAPH ?g { FILTER EXISTS { ?s ?p ?o } } } LIMIT 1');
-if (existing.bindings.length !== 0) throw new Error('Refusing a nonempty store; supply a fresh owned namespace');
+const defaultExisting = await store.query('SELECT ?s WHERE { ?s ?p ?o } LIMIT 1');
+if (existing.bindings.length !== 0 || defaultExisting.bindings.length !== 0) throw new Error('Refusing a nonempty store; supply a fresh owned namespace');
 const elapsed = start => performance.now() - start;
 const sha = value => createHash('sha256').update(value).digest('hex');
 const result = {
@@ -50,7 +53,7 @@ const result = {
 const start = performance.now();
 try {
   for (let offset = 0; offset < selected.length; offset += groupSize) {
-    const disk = await statfs(dirname(output));
+    const disk = await statfs(storagePath);
     if (disk.bavail * disk.bsize < 5 * 1024 ** 3) throw new Error('Disk below 5 GiB guard');
     const batch = selected.slice(offset, offset + groupSize);
     const parsed = [];
@@ -68,7 +71,7 @@ try {
       if (terms.some(q => [q.subject,q.object,q.graph].some(t => t.termType === 'BlankNode'))) throw new Error('Use stable named-node identities; blank nodes are unsupported');
       const data = terms.map(q => ({
         subject: q.subject.value, predicate: q.predicate.value,
-        object: q.object.termType === 'NamedNode' ? q.object.value : q.object.toString(),
+        object: formatCanonicalRdfTerm(q.object),
         graph: q.graph.value,
       }));
       if (data.length !== asset.quads || data.some(q => q.graph !== asset.graph)) throw new Error('Input graph/count mismatch');
@@ -84,7 +87,7 @@ try {
         }]);
       }
     } else {
-      const payload = parsed.map(({ asset, nq }) => `${nq}<${asset.graph}> <urn:benchmark:status> "confirmed" <urn:benchmark:meta> .\n`).join('');
+      const payload = parsed.map(({ asset, nq }) => `${nq}\n<${asset.graph}> <urn:benchmark:status> "confirmed" <urn:benchmark:meta> .\n`).join('');
       const response = await fetch(endpoint, {
         method: 'POST', headers: { 'content-type': 'application/n-quads' }, body: payload,
         signal: AbortSignal.timeout(120000),
