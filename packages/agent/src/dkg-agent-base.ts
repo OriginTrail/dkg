@@ -50,6 +50,7 @@ import { GossipSession } from './gossip-session.js';
 import { ContextGraphBindingState } from './context-graph-binding-state.js';
 import { SlotFactsIndex } from './context-graph-claim-proof.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
+import { RollingSubscriptionChecks } from './context-graph-subscription-rolling-checks.js';
 import type { CoalescingRecurringTask } from './coalescing-recurring-task.js';
 import { SelectedSwmBootstrapAdmission } from './sync/selected-swm-bootstrap-admission.js';
 import {
@@ -1405,6 +1406,8 @@ export class DKGAgentBase {
   protected readonly contextGraphSubscriptionRehydrationSlotIds = new Set<string>();
   /** Non-hosted rows waiting behind the rolling rehydration cap. */
   protected readonly contextGraphSubscriptionRehydrationPendingIds = new Set<string>();
+  /** Which waiting row rolling activation checks next, and how soon; made anew when a start retires the runtime before. */
+  protected contextGraphSubscriptionRollingChecks = new RollingSubscriptionChecks();
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistAppliedRevisions = new Map<string, number>();
@@ -1416,6 +1419,27 @@ export class DKGAgentBase {
   }>();
   protected readonly listContextGraphsInFlight = new Map<string, Promise<Array<Record<string, unknown>>>>();
   protected listContextGraphsCacheGeneration = 0;
+
+  /**
+   * Ask rolling activation for one row the activation cap left dormant. The
+   * row is checked before the rest of the backlog, whose checks are paced.
+   */
+  protected requestContextGraphSubscriptionPromotion(contextGraphId: string): void {
+    this.contextGraphSubscriptionRollingChecks.prefer(contextGraphId);
+    this.contextGraphSubscriptionRehydrationPromotionRuntime?.request();
+  }
+
+  /**
+   * Close the runtime of rolling activation that a run before this start left.
+   * The order, the pace and the report totals of its checks end with it: an
+   * agent that is started again inherits none of them, while a row asked for
+   * during this start is remembered for the runtime that follows.
+   */
+  protected async retireContextGraphSubscriptionPromotionRuntime(): Promise<void> {
+    this.contextGraphSubscriptionRollingChecks = new RollingSubscriptionChecks();
+    await this.contextGraphSubscriptionRehydrationPromotionRuntime?.close();
+  }
+
   protected listContextGraphsCacheNow(): number {
     return performance.now();
   }

@@ -284,6 +284,10 @@ import {
   VmReconcileLocalRpcRefusalError,
   VmReconcileRefusedSliceReads,
 } from './internal/vm-reconcile-local-rpc-refusal.js';
+import {
+  askVmReconcileAgainAfterOvertakenPass,
+  VmReconcileOvertakenError,
+} from './internal/vm-reconcile-overtaken-pass.js';
 import type { ContextGraphReadAuthorityDecision } from './context-graph-read-authority.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 import { resolveVmRecoveryExperimentPolicy } from './vm-recovery-experiment-policy.js';
@@ -4269,6 +4273,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           if (
             err instanceof VmReconcileReadAuthorityUnansweredError
             || err instanceof VmReconcileLocalRpcRefusalError
+            || err instanceof VmReconcileOvertakenError
           ) return;
           this.log.warn(
             createOperationContext('system'),
@@ -4521,8 +4526,32 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // The pass ended on the refused read itself, the asset count above all.
       // It still ends as a failed pass, so live nudges from elsewhere stay
       // held; only the wait's own nudge lifts that hold.
-      if (!askAgainAfterLocalRpcRefusal(err, isLifecycleCurrent)) throw err;
-      throw new VmReconcileLocalRpcRefusalError(err);
+      if (askAgainAfterLocalRpcRefusal(err, isLifecycleCurrent)) {
+        throw new VmReconcileLocalRpcRefusalError(err);
+      }
+      // The pass stopped because its target is no longer the graph's current
+      // one, on a node that is not shutting down: the graph's row was stored
+      // again under it, by a subscribe request for a graph the node already
+      // holds, for one. That is not a failure of the graph. Asked again
+      // shortly, it gets a pass on the row as it is now; left as a failed pass
+      // it lost its live nudges until its turn in the periodic sweep. Only a
+      // graph the sweep would still select is asked again.
+      const stillReconciled = () => isLifecycleCurrent()
+        && this.isVmReconcileTargetSelected(localCgId);
+      const overtaken = askVmReconcileAgainAfterOvertakenPass({
+        contextGraphId: localCgId,
+        error: err,
+        automatic: source !== 'manual',
+        stillReconciled,
+        defer: () => this.vmReconcileScheduling?.deferForOvertakenPass(localCgId, {
+          signal: lifecycleSignal,
+          isCurrent: stillReconciled,
+          canAdmit: () => this.vmRecoverySyncAdmissionAvailable(localCgId),
+        }),
+        log: (level, message) => this.log[level](createOperationContext('system'), message),
+      });
+      if (overtaken) throw new VmReconcileOvertakenError(err);
+      throw err;
     });
     trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, physicalRun);
     return raceVmReconcileAbort(physicalRun, lifecycleSignal);

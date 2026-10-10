@@ -7,11 +7,32 @@ import type {
   ContextGraphSubscriptionRehydrationInternalStatus,
   ContextGraphSubscriptionStore,
 } from './dkg-agent-types.js';
-import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
+import {
+  contextGraphDormancyAfterAuthority,
+  type ContextGraphDormancyReason,
+} from './context-graph-subscription-dormancy.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { isCanonicalAuthoritativeContextGraphId } from './context-graph-binding-state.js';
+import type { CoalescingRecurringTask } from './coalescing-recurring-task.js';
 
 const MAX_CONCURRENT_DEFERRED_ROW_LOADS = 4;
+/** How often recovery asks again while a row is unavailable. */
+export const DEFERRED_AUTHORITY_RECOVERY_RETRY_MS = 30_000;
+
+/**
+ * Have recovery ask its rows one retry interval from now, unless it is due
+ * sooner. Recovery stops when it finds no unavailable row, so whoever leaves a
+ * row unavailable after that has to start it again.
+ */
+export function wakeDeferredContextGraphSubscriptionAuthorityRecovery(
+  recovery: Pick<CoalescingRecurringTask, 'schedule' | 'whenIdle'> | undefined,
+): void {
+  if (recovery === undefined) return;
+  const arm = (): boolean => recovery.schedule(DEFERRED_AUTHORITY_RECOVERY_RETRY_MS);
+  // A pass that is running declines this. If it is ending, it may have counted
+  // its rows before this one and stop: ask again once it has retired.
+  if (!arm()) void recovery.whenIdle().then(arm, arm);
+}
 
 function hasCanonicalDurableBinding(
   row: ContextGraphSubscriptionRecord | null,
@@ -248,15 +269,12 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
       || (ports.persistRevisions.get(contextGraphId) ?? 0) !== revision
     ) continue;
     if (authority.outcome !== 'allowed') {
-      if (authority.outcome === 'denied') {
-        ports.dormancyById.set(contextGraphId, 'authorityDenied');
-        ports.touchStatus();
-      } else if (authority.reason === 'chain-access-policy-unknown') {
-        // The chain answered: the id does not exist or is not active (a
-        // timeout or a failed read has its own reason and stays retryable).
-        // Retrying every pass only repeats that answer, so retire the row for
-        // this process like a deny. It stays durable; a restart checks it again.
-        ports.dormancyById.set(contextGraphId, 'deactivated');
+      // A denial and a chain-unknown id retire the row for this process;
+      // anything else stays unavailable and is asked again on a later pass.
+      const { outcome, reason } = authority;
+      const dormancy = contextGraphDormancyAfterAuthority({ outcome, reason });
+      if (dormancy !== 'authorityUnavailable') {
+        ports.dormancyById.set(contextGraphId, dormancy);
         ports.touchStatus();
       }
       continue;
