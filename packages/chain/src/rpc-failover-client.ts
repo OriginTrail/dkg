@@ -46,6 +46,7 @@
 import { type RpcReadDescriptor, createRpcReadDescriptor, type RpcReadDescriptorInput, type ReadOpts } from './rpc-read-descriptor.js';
 export { type RpcReadDescriptor, createRpcReadDescriptor, rpcReadDescriptor, type RpcReadDescriptorInput, type ReadOpts } from './rpc-read-descriptor.js';
 import type { SignedTransactionEnvelope } from './chain-adapter.js';
+import { bufferedGasLimit, wantsGasLimitBuffer, type GasLimitBufferOptions } from './gas-limit-buffer.js';
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
 import { withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import {
@@ -444,7 +445,7 @@ export class RpcFailoverClient {
     args: readonly unknown[],
     signer: Wallet,
     label: string,
-    opts?: { gasLimitBufferBps?: number },
+    opts?: GasLimitBufferOptions,
   ): Promise<SignedTransactionEnvelope> {
     const canonical = this.getEndpoints();
     // 'nonceWrite': the state machine starts a fresh-nonce populate on a backend
@@ -468,14 +469,14 @@ export class RpcFailoverClient {
           `${label} transaction population via RPC #${i + 1}`,
           () => connected[method].populateTransaction(...args) as Promise<ethers.TransactionRequest>,
         );
-        if (opts?.gasLimitBufferBps && populated.gasLimit == null) {
+        if (wantsGasLimitBuffer(opts) && populated.gasLimit == null) {
           try {
             const est = (await withRpcRequestTimeout<bigint>(
               RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
               `${label} gas estimation via RPC #${i + 1}`,
               () => connected[method].estimateGas(...args) as Promise<bigint>,
             ));
-            populated.gasLimit = (est * BigInt(10_000 + opts.gasLimitBufferBps)) / 10_000n;
+            populated.gasLimit = bufferedGasLimit(est, opts);
           } catch (estErr) {
             // A CALL_EXCEPTION is the contract's deterministic answer to THIS exact call. Running
             // `signer.populateTransaction(populated)` after that answer asks for the same gas

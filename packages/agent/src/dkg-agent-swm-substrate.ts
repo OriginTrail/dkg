@@ -397,6 +397,7 @@ import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
   withRpcUsageSite,
 } from '@origintrail-official/dkg-chain';
+import { SharedMemoryGossipAuthorityRead } from './internal/swm-gossip-authority-read.js';
 import { rfc64ExecutionPlanAllowsLegacySyncV1 } from
   './rfc64/public-catalog-activation-config-v1.js';
 import { projectRfc64CatalogTransportStateV1 } from
@@ -906,8 +907,21 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       }
       return;
     }
-    const canUseSharedMemory = await this.canUseSharedMemoryForContextGraph(contextGraphId);
+    const authorityRead = new SharedMemoryGossipAuthorityRead(
+      contextGraphId,
+      () => this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true,
+    );
+    const canUseSharedMemory = await authorityRead.run(() => this.canUseSharedMemoryForContextGraph(contextGraphId));
     if (!session.active || this.gossipSession !== session) return;
+    if (authorityRead.deferIfUnanswered({
+      session, canUseSharedMemory, isRegistered, log: this.log, ctx,
+      askAgain: () => this.queueSharedMemoryGossipSubscription(contextGraphId),
+    })) {
+      // A core that holds no member subscription may still host the curated
+      // substrate, as after a refusal (see below).
+      if (!isRegistered) await this.reconcileSwmHostModeSubscription(contextGraphId);
+      return;
+    }
     if (!canUseSharedMemory) {
       if (isRegistered) {
         // `gossip.unsubscribe()` drops EVERY handler on the topic,
@@ -1280,13 +1294,15 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           // proof finishes without invalidating the receiver's proof. Retry
           // one changed snapshot so the ordinary revoke race does not drop an
           // otherwise valid envelope, then fail closed under continued churn.
+          // This graph's own authority facts: a write to another graph cannot
+          // change its gate and must not drop the envelope (#2968).
           for (let attempt = 0; attempt < 2; attempt += 1) {
-            const metadataRevision = this.contextGraphMetaProjection.readAuthorityFactsRevision;
+            const metadataRevision = this.contextGraphMetaProjection.readContextGraphAuthorityFactsRevision(cgId);
             const meta = await this.getCgMeta(cgId);
             const allowedPeers =
               await this.resolveApprovedPrivateReplicaSwmAllowedPeersOverride(cgId);
             if (
-              this.contextGraphMetaProjection.readAuthorityFactsRevision
+              this.contextGraphMetaProjection.readContextGraphAuthorityFactsRevision(cgId)
                 === metadataRevision
             ) {
               return allowedPeers === undefined ? meta : { ...meta, allowedPeers };

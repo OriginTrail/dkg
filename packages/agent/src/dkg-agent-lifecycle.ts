@@ -870,6 +870,8 @@ import {
   type ContextGraphMembershipSnapshot,
 } from './join-approval-restart-projection.js';
 import { verifiedCuratorDialAddress } from './curator-dial-address.js';
+import { watchCuratorRegistrationRefusal } from './curator-registration-refusal.js';
+import { runJoinApprovalMetadataRecovery, runPostApprovalSyncWithMetadataRecovery } from './join-approval-metadata-refetch.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
@@ -3546,11 +3548,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             ));
             // Sync immediately by targeting the curator peer we just received
             // this notification from, instead of relying on the periodic
-            // catchup reconciler to pick it up minutes later. The previous
-            // `.catch(() => {})` swallowed every failure mode silently and
-            // also went through the regular peer-ranking path that produced
-            // zero sync attempts in the just-approved-but-no-meta-yet window.
-            void this.runImmediatePostApprovalSync(contextGraphId, peerId.toString());
+            // catchup reconciler to pick it up minutes later. A sync that ends
+            // without the curator's metadata (its fetches failed) continues
+            // with the bounded recovery a restarted approval gets, so the
+            // member is not left without the graph until the next restart.
+            void runPostApprovalSyncWithMetadataRecovery(this, contextGraphId, peerId.toString(),
+              verifiedCuratorDialAddress(payload.curatorDialAddress, peerId.toString()));
             this.eventBus.emit(DKGEvent.JOIN_APPROVED, {
               contextGraphId,
               agentAddress: approvedAddr,
@@ -8889,7 +8892,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    *
    * Reports whether a later attempt can still succeed: a failed fetch, a
    * snapshot that does not prove this member yet, or unavailable authority is
-   * `retry`; no approval binding or denied authority is `stop`.
+   * `retry`; no binding, denied authority or a refused registration is `stop`.
    */
   async resumePendingJoinApprovalMetadata(this: DKGAgent,
     contextGraphId: string,
@@ -8897,9 +8900,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     curatorDialAddress?: string,
   ): Promise<JoinApprovalMetadataRecoveryOutcome> {
     const ctx = createOperationContext('sync');
+    // Read once: the getter answers `undefined` again after a completed stop.
+    const stopSignal = this.node.stopSignal;
     const acceptance = await this.resolveApprovedMemberAcceptance(contextGraphId);
     if (!acceptance) return 'stop';
 
+    const registrationRefused = watchCuratorRegistrationRefusal(this, contextGraphId, curatorPeerId);
     const refreshed = await this.refreshMetaFromCurator(contextGraphId, {
       trustedCuratorPeerId: curatorPeerId,
       curatorDialAddressHint: curatorDialAddress,
@@ -8921,7 +8927,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         ctx,
         `Pending join-approval metadata recovery for "${contextGraphId}" did not establish authoritative metadata; keeping data lanes closed`,
       );
-      return 'retry';
+      return registrationRefused() ? 'stop' : 'retry';
     }
 
     const authority = await withRpcUsageSite(
@@ -8942,7 +8948,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // A shutdown that began during the reads above must not clear the row's
     // pending state or open its data lanes while the node tears down; the
     // next start recovers the row again.
-    const stopping = () => this.node.stopSignal?.aborted === true;
+    const stopping = () => stopSignal?.aborted === true;
     if (stopping()) return 'stop';
     await this.refreshMetaSyncedFlags([contextGraphId]);
     const current = this.subscribedContextGraphs.get(contextGraphId);
@@ -8957,13 +8963,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   /**
-   * Run the restricted pending-metadata recovery of a restarted join approval
-   * until it completes or can no longer complete (#2832). Right after a
-   * restart the node's authority reads can still be rebuilding its finalized
-   * index, so a single attempt could fail transiently and leave every data
-   * lane closed until the next restart. A `retry` outcome, or an attempt that
-   * throws, is tried again with backoff while the row is still a subscribed,
-   * join-approved, pending-metadata row; the node stopping ends the loop.
+   * Run the pending-metadata recovery of a join approval until it completes or
+   * can no longer complete: after a restart (#2832), and after a live approval
+   * whose own sync ended without the metadata (#3109). One attempt can fail
+   * transiently (authority reads rebuilding, curator out of reach) and would
+   * leave the graph closed until the next restart. A `retry` outcome, or an
+   * attempt that throws, is tried again with backoff while the row is still a
+   * subscribed, join-approved, pending-metadata row; a node stop ends the loop.
    */
   async recoverPendingJoinApprovalMetadata(this: DKGAgent,
     contextGraphId: string,
@@ -11052,16 +11058,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             `Restored persisted context-graph subscription "${row.id}" in restricted pending-metadata mode; VM, payload recovery, and SWM remain closed`,
           );
           if (curatorPeerId) {
-            void this.recoverPendingJoinApprovalMetadata(
-              row.id,
-              curatorPeerId,
-              newestApprovalByContextGraph?.get(row.id)?.curatorDialAddress,
-            ).catch((error) => {
-              this.log.warn(
-                ctx,
-                `Pending join-approval recovery for "${row.id}" stopped safely: ${error instanceof Error ? error.message : String(error)}`,
-              );
-            });
+            void runJoinApprovalMetadataRecovery(this, row.id, curatorPeerId,
+              newestApprovalByContextGraph?.get(row.id)?.curatorDialAddress);
           }
         }
         // Upgrade/self-heal path for late private-CG members whose payload and
