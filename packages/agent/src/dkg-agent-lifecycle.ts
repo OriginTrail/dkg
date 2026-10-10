@@ -397,7 +397,7 @@ import {
   resolveSyncResponderSnapshotPolicy,
 } from './sync/responder/sync-handler.js';
 import { createExactBatchResponderBinding } from './sync/responder/exact-batch-stream.js';
-import { exactBatchTransportOptions } from './sync/requester/exact-batch-stream.js';
+import { exactBatchResponderTransportOptions } from './sync/requester/exact-batch-stream.js';
 import type { VmRecoveryRegisteredPublicEvidence } from './vm-recovery-pass-authority.js';
 import { runExactBatchStreamDriver } from './sync/requester/exact-batch-stream-driver.js';
 import {
@@ -3298,14 +3298,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 `Exact batch responder stage=${stage} asset=${assetIndex} durationMs=${durationMs.toFixed(3)}`),
             });
             registerExperimentalExactBatchResponder(this.router,
-              {
-                ...exactBatchTransportOptions(120_000),
-                onInboundOpen: (peerIdSuffix) => this.log.info(createOperationContext('sync'),
-                  `Exact batch inbound opened peer=${peerIdSuffix}`),
-                onInboundFailure: ({ peerIdSuffix, stage, errorName, errorCode, signalAborted }) =>
-                  this.log.warn(createOperationContext('sync'),
-                    `Exact batch inbound failed peer=${peerIdSuffix} stage=${stage} error=${errorName}${errorCode ? ` code=${errorCode}` : ''} aborted=${signalAborted}`),
-              }, binding.authorizeRequest, binding.respond);
+              exactBatchResponderTransportOptions(120_000, (level, message) => this.log[level](createOperationContext('sync'), message)), binding.authorizeRequest, binding.respond);
           }
         : undefined,
       // Serve-skip policy (#1233): withhold the no-consumer agents/_meta snapshot

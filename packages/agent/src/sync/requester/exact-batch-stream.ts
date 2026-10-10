@@ -45,6 +45,14 @@ export function exactBatchTransportOptions(timeoutMs: number, signal?: AbortSign
       + EXACT_BATCH_MAX_REQUEST_BYTES + EXACT_BATCH_FRAME_HEADER_BYTES,
     windowSize: EXACT_BATCH_STREAM_WINDOW_SIZE };
 }
+/** Responder-only diagnostics contain no request bytes, graph identifiers or raw errors. */
+export function exactBatchResponderTransportOptions(timeoutMs: number,
+  log: (level: 'info' | 'warn', message: string) => void): ExactBatchTransportOptions {
+  return { ...exactBatchTransportOptions(timeoutMs),
+    onInboundOpen: peer => log('info', `Exact batch inbound opened peer=${peer}`),
+    onInboundFailure: ({ peerIdSuffix, stage, errorName, errorCode, signalAborted }) =>
+      log('warn', `Exact batch inbound failed peer=${peerIdSuffix} stage=${stage} error=${errorName}${errorCode ? ` code=${errorCode}` : ''} aborted=${signalAborted}`) };
+}
 /** Settled local observations only; these never grant recovery or holder credit. */
 export interface ExactBatchRefusalObservation {
   readonly code: ExactBatchRefusal;

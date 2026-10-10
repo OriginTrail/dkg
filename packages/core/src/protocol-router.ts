@@ -11,6 +11,8 @@ import {
   type MessageStreamPoolOptions,
 } from './message-stream-pool.js';
 import { withSpan, getMetrics } from './telemetry-api.js';
+import { boundDuplexStreamBuffers, notifyInboundFailure, notifyInboundOpen,
+  validateDuplexStreamOptions, type InboundDuplexDiagnostics, type InboundDuplexStage } from './duplex-stream-support.js';
 
 type AbortableByteStream = Stream | (AsyncIterable<Uint8Array> & { abort(reason?: unknown): void });
 
@@ -215,19 +217,10 @@ export interface ProtocolRegistrationOptions {
 }
 
 /** Bounded duplex scope; the caller owns its wire protocol and framing. */
-export interface DuplexStreamOptions {
+export interface DuplexStreamOptions extends InboundDuplexDiagnostics {
   timeoutMs: number;
   signal?: AbortSignal;
   maxReadBufferBytes: number;
-  /** Optional, best-effort diagnostics. Never receives request bytes or error messages. */
-  onInboundOpen?: (peerIdSuffix: string) => void;
-  onInboundFailure?: (failure: {
-    peerIdSuffix: string;
-    stage: 'pre-read' | 'read-request' | 'peer-admission' | 'handler' | 'close';
-    errorName: string;
-    errorCode: string | undefined;
-    signalAborted: boolean;
-  }) => void;
 }
 
 export interface DuplexStreamRequest<T> {
@@ -750,7 +743,7 @@ export class ProtocolRouter {
     options: DuplexStreamOptions,
     exchange: (stream: Stream, signal: AbortSignal) => Promise<T>,
   ): Promise<T> {
-    this.validateDuplexStreamOptions(options);
+    validateDuplexStreamOptions(options, this.maxReadBytes);
     const lifecycle = startRequestAbortLifecycle(options.timeoutMs, [options.signal, this.node.stopSignal]);
     const signal = lifecycle.signal;
     let stream: Stream | undefined;
@@ -763,7 +756,7 @@ export class ProtocolRouter {
         afterDialFailure: 'reuse-limited',
         cancelledResolution: 'throw',
       }));
-      this.boundDuplexStreamBuffers(stream, options.maxReadBufferBytes);
+      boundDuplexStreamBuffers(stream, options.maxReadBufferBytes);
       const result = await exchange(stream, signal);
       if (signal.aborted) throw asAbortError(signal.reason);
       await this.closeDuplexStream(stream, signal);
@@ -784,7 +777,7 @@ export class ProtocolRouter {
     }) => Promise<void>,
     options: DuplexStreamOptions & { maxRequestBytes: number },
   ): void {
-    this.validateDuplexStreamOptions(options);
+    validateDuplexStreamOptions(options, this.maxReadBytes);
     if (!Number.isSafeInteger(options.maxRequestBytes) || options.maxRequestBytes <= 0
       || options.maxRequestBytes > this.maxReadBytes) throw new RangeError('Invalid duplex request limit');
     this.node.libp2p.handle(protocolId, async (stream, connection) => {
@@ -795,14 +788,14 @@ export class ProtocolRouter {
       const signal = lifecycle.signal;
       const onAbort = () => abortStream(stream, signal.reason);
       let request: DuplexStreamRequest<T> | undefined;
-      let stage: 'pre-read' | 'read-request' | 'peer-admission' | 'handler' | 'close' = 'pre-read';
+      let stage: InboundDuplexStage = 'pre-read';
       stream.addEventListener('close', onClose, { once: true });
       signal.addEventListener('abort', onAbort, { once: true });
       try {
-        try { options.onInboundOpen?.(peerId.slice(-8)); } catch { /* Diagnostics never affect admission. */ }
+        notifyInboundOpen(options, peerId);
         if (signal.aborted) throw asAbortError(signal.reason);
         this.rejectKnownRejectedInboundPeer(peerId, protocolId);
-        this.boundDuplexStreamBuffers(stream, options.maxReadBufferBytes);
+        boundDuplexStreamBuffers(stream, options.maxReadBufferBytes);
         stage = 'read-request';
         request = await readRequest(stream, signal);
         if (request.requestData.byteLength > options.maxRequestBytes) throw new RangeError('Duplex request byte limit exceeded');
@@ -817,14 +810,7 @@ export class ProtocolRouter {
         await this.closeDuplexStream(stream, signal);
       } catch (error) {
         // Do not log authenticated request bytes, metadata, URLs or tokens.
-        const safeTag = (value: unknown): string | undefined => typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(value)
-          ? value : undefined;
-        try {
-          options.onInboundFailure?.({ peerIdSuffix: peerId.slice(-8), stage,
-            errorName: safeTag(error instanceof Error ? error.name : undefined) ?? 'UnknownError',
-            errorCode: safeTag(error !== null && typeof error === 'object' && 'code' in error ? error.code : undefined),
-            signalAborted: signal.aborted });
-        } catch { /* Diagnostics never affect stream failure handling. */ }
+        notifyInboundFailure(options, peerId, stage, error, signal);
         abortStream(stream, error instanceof Error ? error : new Error('duplex stream failed'));
       } finally {
         stream.removeEventListener('close', onClose);
@@ -834,17 +820,6 @@ export class ProtocolRouter {
         lifecycle.release();
       }
     }, { runOnLimitedConnection: true });
-  }
-
-  private validateDuplexStreamOptions(options: DuplexStreamOptions): void {
-    if (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs <= 0
-      || !Number.isSafeInteger(options.maxReadBufferBytes) || options.maxReadBufferBytes <= 0
-      || options.maxReadBufferBytes > this.maxReadBytes) throw new RangeError('Invalid duplex stream limits');
-  }
-
-  private boundDuplexStreamBuffers(stream: Stream, limit: number): void {
-    stream.maxReadBufferLength = Math.min(stream.maxReadBufferLength || limit, limit);
-    stream.maxWriteBufferLength = Math.min(stream.maxWriteBufferLength || limit, limit);
   }
 
   private async closeDuplexStream(stream: Stream, signal: AbortSignal): Promise<void> {
