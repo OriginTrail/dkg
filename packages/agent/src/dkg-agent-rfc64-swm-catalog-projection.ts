@@ -203,7 +203,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     }
     placement.phase('asset', assetStartedAt);
     lane.service.acceptedPolicySnapshotForCatalogScope(scope);
-    return this.upsertConfirmedRfc64PublicRootCatalogAssetV1({
+    return this.upsertObservedRfc64PublicRootCatalogAssetV1({
       scope,
       author: this.createRfc64CatalogAuthorSignerV1(params.authorAddress),
       asset,
@@ -211,8 +211,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       peers: this.resolveRfc64CatalogAnnouncementPeersV1(lane.announcementPeers),
       catalogIssuerDelegationEffectiveAt: lane.catalogIssuerDelegationEffectiveAt,
       catalogIssuerDelegationExpiresAt: lane.catalogIssuerDelegationExpiresAt,
-      placement,
-    });
+    }, placement);
   }
 
   /** Canonical selected-CG admission shared by inventory and projection. */
