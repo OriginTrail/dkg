@@ -191,34 +191,28 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       ...inventoryScope,
       bucketCount: '1',
     }) as AuthorCatalogScopeV1;
-    const coverageStartedAt = placement.now();
-    const covered = await this.rfc64CatalogCoversConfirmedSwmRowV1({
+    const covered = await placement.measure('coverage', () => this.rfc64CatalogCoversConfirmedSwmRowV1({
       scope,
       expectedRow: params,
-    });
-    placement.covered(covered, coverageStartedAt);
+    }));
+    placement.covered(covered);
     if (covered) return null;
-    const assetStartedAt = placement.now();
-    let asset: Rfc64CatalogSuccessorAssetInputV1;
-    if (row === undefined) {
-      asset = await resolveRfc64ConfirmedVmRepairCatalogAssetV1({
+    const asset: Rfc64CatalogSuccessorAssetInputV1 = await placement.measure('asset', () => (row === undefined
+      ? resolveRfc64ConfirmedVmRepairCatalogAssetV1({
         store: this.store,
         publicSnapshotStore: this.publicSnapshotStore,
         contextGraphId: params.contextGraphId,
         authorAddress: params.authorAddress,
         identity: params,
-      });
-    } else {
-      asset = await resolveRfc64InventoryWorkspaceCatalogAssetV1({
+      })
+      : resolveRfc64InventoryWorkspaceCatalogAssetV1({
         store: this.store,
         publicSnapshotStore: this.publicSnapshotStore,
         contextGraphId: params.contextGraphId,
         authorAddress: params.authorAddress,
         laneKind: lane.kind,
         row,
-      });
-    }
-    placement.phase('asset', assetStartedAt);
+      })));
     lane.service.acceptedPolicySnapshotForCatalogScope(scope);
     return this.upsertObservedRfc64PublicRootCatalogAssetV1({
       scope,

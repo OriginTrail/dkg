@@ -18,6 +18,7 @@ import {
   catalogPlacementTimingV1,
   installCatalogPlacementTimingV1,
   type CatalogPlacementAttemptV1,
+  type CatalogPlacementPhase,
 } from '../src/internal/catalog-placement-timing.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
   '../src/rfc64/finalized-private-placement-repair-store-v1.js';
@@ -51,7 +52,7 @@ function fields(message: string): Record<string, string> {
 }
 
 describe('catalog placement timing', () => {
-  it('splits an observer wait into request, queue and the phases of the attempt that released it', () => {
+  it('splits an observer wait into request, queue and the phases of the attempt that released it', async () => {
     const { timing, clock, lines, log } = harness();
     const wait = timing.beginWait(ASSET, createOperationContext('publishFromSWM', 'job-7'));
     clock.now = 1_200;
@@ -60,27 +61,19 @@ describe('catalog placement timing', () => {
     clock.now = 31_200;
     const admission = timing.admit();
     const { attempt } = admission;
-    const coverage = attempt.now();
-    clock.now = 33_000;
-    attempt.covered(false, coverage);
-    const asset = attempt.now();
-    clock.now = 33_500;
-    attempt.phase('asset', asset);
-    const state = attempt.now();
-    clock.now = 36_000;
-    attempt.phase('state', state);
-    const successor = attempt.now();
-    clock.now = 44_000;
-    attempt.phase('successor', successor);
-    const cas = attempt.now();
-    clock.now = 44_010;
-    attempt.phase('cas', cas);
-    const announce = attempt.now();
-    clock.now = 154_010;
-    attempt.announced({
-      announcedPeers: ['peer-a'],
-      failedPeers: [{ code: DENIED }, { code: DENIED }, {}],
-    }, announce);
+    const until = (phase: CatalogPlacementPhase, at: number) => attempt.measure(phase, async () => { clock.now = at; });
+    attempt.covered(await attempt.measure('coverage', async () => {
+      clock.now = 33_000;
+      return false;
+    }));
+    await until('asset', 33_500);
+    await until('state', 36_000);
+    await until('successor', 44_000);
+    await until('cas', 44_010);
+    attempt.announced(await attempt.measure('announce', async () => {
+      clock.now = 154_010;
+      return { announcedPeers: ['peer-a'], failedPeers: [{ code: DENIED }, { code: DENIED }, {}] };
+    }));
     clock.now = 154_100;
     admission.end('completed');
     admission.released([waiter.settle]);
@@ -212,14 +205,33 @@ describe('catalog placement timing', () => {
       { error: '[catalog-transport-policy-denied] text alone is display, not evidence' },
       { error: 'catalog-head announcement returned an invalid acknowledgement', code: 'catalog-transport-wire' as const },
     ];
-    attempt.announced({ announcedPeers: [], failedPeers: failures }, attempt.now());
+    attempt.announced({ announcedPeers: [], failedPeers: failures });
     admission.end('completed');
     admission.released([waiter.settle]);
     wait.end(log);
     expect(fields(lines[0]!.message)).toMatchObject({ peers: '3', failedPeers: '3', deniedPeers: '1' });
   });
 
-  it('keeps two attempts admitted at once apart, each charged only through its own recorder', () => {
+  it('charges a phase that rejects to that phase, and passes the rejection through', async () => {
+    const { timing, clock, lines, log } = harness();
+    const wait = timing.beginWait(ASSET, createOperationContext('publish'));
+    const waiter = supervisorWaiter(timing);
+    wait.requested(waiter.whenAttempted);
+    const admission = timing.admit();
+    const failure = new Error('storage timeout');
+    await expect(admission.attempt.measure('asset', async () => {
+      clock.now = 6_000;
+      throw failure;
+    })).rejects.toBe(failure);
+    admission.end('failed');
+    admission.released([waiter.settle]);
+    wait.end(log);
+    expect(fields(lines[0]!.message)).toMatchObject({
+      outcome: 'failed', assetMs: '6000', otherMs: '0', covered: '-',
+    });
+  });
+
+  it('keeps two attempts admitted at once apart, each charged only through its own recorder', async () => {
     const { timing, clock, lines, log } = harness();
     const ctx = createOperationContext('publish');
     const firstWait = timing.beginWait(ASSET, ctx);
@@ -230,10 +242,16 @@ describe('catalog placement timing', () => {
     secondWait.requested(secondWaiter.whenAttempted);
     const first = timing.admit();
     const second = timing.admit();
-    const startedAt = first.attempt.now();
+    let advance!: () => void;
+    const gate = new Promise<void>((resolve) => { advance = resolve; });
+    const both = Promise.all([
+      first.attempt.measure('coverage', () => gate.then(() => true)),
+      second.attempt.measure('successor', () => gate),
+    ]);
     clock.now = 40;
-    first.attempt.covered(true, startedAt);
-    second.attempt.phase('successor', startedAt);
+    advance();
+    const [covered] = await both;
+    first.attempt.covered(covered);
     second.end('failed');
     first.end('completed');
     second.released([secondWaiter.settle]);
@@ -286,7 +304,7 @@ describe('catalog placement timing', () => {
     expect(lines.map(({ message }) => fields(message).observerCall)).toEqual(['1', '2']);
   });
 
-  it('never throws, whatever fails underneath it', () => {
+  it('never throws, whatever fails underneath it', async () => {
     const timing = new CatalogPlacementTimingV1({
       clock: () => { throw new Error('clock failed'); },
       logThresholdMs: 0,
@@ -299,9 +317,8 @@ describe('catalog placement timing', () => {
       wait.requested(null);
       const admission = timing.admit();
       const { attempt } = admission;
-      attempt.phase('state', attempt.now());
-      attempt.covered(false, attempt.now());
-      attempt.announced({ announcedPeers: [], failedPeers: [] }, attempt.now());
+      attempt.covered(false);
+      attempt.announced({ announcedPeers: [], failedPeers: [] });
       admission.end('failed');
       timing.cooldownSkipped([settle]);
       admission.released([settle]);
@@ -318,6 +335,18 @@ describe('catalog placement timing', () => {
     const wait = working.beginWait(ASSET, createOperationContext('publish'));
     clock.now = 5;
     expect(() => wait.end(throwingLog)).not.toThrow();
+
+    // A clock that fails after admission never changes what a measured phase returns or throws.
+    let clockFails = false;
+    const flaky = new CatalogPlacementTimingV1({
+      clock: () => { if (clockFails) throw new Error('clock failed'); return 0; },
+      logThresholdMs: 0,
+    });
+    const flakyAttempt = flaky.admit().attempt;
+    clockFails = true;
+    await expect(flakyAttempt.measure('state', async () => 'kept')).resolves.toBe('kept');
+    const failure = new Error('work failed');
+    await expect(flakyAttempt.measure('asset', async () => { throw failure; })).rejects.toBe(failure);
   });
 
   it('resolves one timing per agent and lets a test install its own', () => {
@@ -376,12 +405,10 @@ describe('catalog placement timing through the finalized-private supervisor', ()
       placement: CatalogPlacementAttemptV1,
     ) => {
       const snapshot = { ...marker };
-      const startedAt = placement.now();
-      const failure = await new Promise<Error | undefined>((resolve) => {
+      const failure = await placement.measure('successor', () => new Promise<Error | undefined>((resolve) => {
         releases.push(resolve);
         enter();
-      });
-      placement.phase('successor', startedAt);
+      }));
       armEntry();
       if (failure !== undefined) throw failure;
       markers = markers.filter((candidate) => candidate.kaUal !== snapshot.kaUal);

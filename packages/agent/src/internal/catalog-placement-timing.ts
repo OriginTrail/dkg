@@ -74,9 +74,15 @@ export interface CatalogPlacementAdmissionV1 {
 /** What the repair body charges its phases to: its admitted attempt, or the inert recorder. */
 export interface CatalogPlacementAttemptV1 {
   now(): number;
-  phase(phase: CatalogPlacementPhase, startedAt: number): void;
-  covered(covered: boolean, startedAt: number): void;
-  announced(delivery: CatalogPlacementDeliveryV1, startedAt: number): void;
+  /**
+   * Await `work` as `phase`, charging the time since `startedAt` (default: now) to it whether the
+   * work resolves or rejects. What `work` returns or throws passes through unchanged.
+   */
+  measure<T>(phase: CatalogPlacementPhase, work: () => Promise<T>, startedAt?: number): Promise<T>;
+  /** The coverage check's answer, apart from its duration. */
+  covered(covered: boolean): void;
+  /** The announcement's delivery counts, apart from its duration. */
+  announced(delivery: CatalogPlacementDeliveryV1): void;
 }
 
 /** One observer call's wait. */
@@ -130,7 +136,7 @@ interface PlacementWaiterRecordV1 {
 
 export const INERT_CATALOG_PLACEMENT_ATTEMPT_V1: CatalogPlacementAttemptV1 = Object.freeze({
   now: () => 0,
-  phase: () => {},
+  measure: <T>(_phase: unknown, work: () => Promise<T>) => work(),
   covered: () => {},
   announced: () => {},
 });
@@ -286,15 +292,20 @@ export class CatalogPlacementTimingV1 {
           return Number.NaN;
         }
       },
-      phase: (phase, startedAt) => observe(() => {
-        record.phaseMs[phase] += elapsedSince(startedAt);
-      }),
-      covered: (covered, startedAt) => observe(() => {
-        record.phaseMs.coverage += elapsedSince(startedAt);
+      measure: async (phase, work, startedAt) => {
+        const start = startedAt ?? recorder.now();
+        try {
+          return await work();
+        } finally {
+          observe(() => {
+            record.phaseMs[phase] += elapsedSince(start);
+          });
+        }
+      },
+      covered: (covered) => observe(() => {
         record.covered = covered;
       }),
-      announced: (delivery, startedAt) => observe(() => {
-        record.phaseMs.announce += elapsedSince(startedAt);
+      announced: (delivery) => observe(() => {
         record.peers += delivery.announcedPeers.length + delivery.failedPeers.length;
         record.failedPeers += delivery.failedPeers.length;
         record.deniedPeers += delivery.failedPeers.filter(({ code }) => code === POLICY_DENIED_CODE).length;

@@ -164,6 +164,24 @@ describe('catalog placement wait attribution', () => {
     });
   }, 60_000);
 
+  it('charges a coverage check that fails after six seconds to coverage, not to other time', async () => {
+    const { agent, clock, placementLines, repairs } = await startPlacementAgent('placement-wait-failure');
+    const { seal } = await seedInventoryAssetV1(agent, 'failure', 84n);
+    await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    vi.spyOn(agent as any, 'rfc64CatalogCoversConfirmedSwmRowV1').mockImplementation(async () => {
+      clock.now += 6_000;
+      throw new Error('storage timeout');
+    });
+
+    await observe(agent, 'failure', seal, 'job-failure');
+
+    // The failed repair keeps its durable marker for the retry.
+    expect(repairs().list()).toHaveLength(1);
+    expect(fields(placementLines()[0]!)).toMatchObject({
+      outcome: 'failed', totalMs: '6000', attemptMs: '6000', coverageMs: '6000', covered: '-', otherMs: '0',
+    });
+  }, 60_000);
+
   it('shows a confirmation queued behind an earlier marker as queue time, and the queue in status', async () => {
     const { agent, clock, placementLines, repairs } = await startPlacementAgent('placement-wait-queue');
     const { seal } = await seedInventoryAssetV1(agent, 'queued', 82n);
