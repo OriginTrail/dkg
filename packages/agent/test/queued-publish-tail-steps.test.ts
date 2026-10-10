@@ -82,10 +82,13 @@ function harness(options: {
   observer?: (step: LiftJobTailStep) => void;
 } = {}) {
   const calls: string[] = [];
+  /** The options of every publish or update call the executor made. */
+  const passedOn: Array<Record<string, unknown>> = [];
   const call = (name: string) => async (): Promise<void> => { calls.push(name); };
   const publisher = {
-    publish: async () => {
+    publish: async (passed: Record<string, unknown>) => {
       calls.push('publish()');
+      passedOn.push(passed);
       return options.publish?.() ?? publishResult();
     },
     clearPublishedKnowledgeAssetSwm: async () => {
@@ -115,8 +118,9 @@ function harness(options: {
     },
     _resolveInlineEncryption: async () => ({}),
     _buildPrecomputedUpdateAttestationForSeal: async () => ({}),
-    update: async () => {
+    update: async (...passed: unknown[]) => {
       calls.push('update()');
+      passedOn.push(passed.at(-1) as Record<string, unknown>);
       return publishResult();
     },
     _stampPointer: async () => {},
@@ -133,12 +137,12 @@ function harness(options: {
     contextGraphId: 'tail-steps',
     quads: QUADS,
     v10ACKProvider: async () => [],
-    onPostConfirmationStep: options.observer ?? ((step: LiftJobTailStep) => { calls.push(`ended:${step}`); }),
   } as unknown as PublishOptions;
+  const onPostConfirmationStep = options.observer ?? ((step: LiftJobTailStep) => { calls.push(`ended:${step}`); });
   const execute = (queued: KnowledgeAssetVmPublishRequest = request()) => (
-    PublishMethods.prototype.publishQueuedKnowledgeAssetVmPublish.call(host, queued, publishOptions)
+    PublishMethods.prototype.publishQueuedKnowledgeAssetVmPublish.call(host, queued, publishOptions, { onPostConfirmationStep })
   );
-  return { calls, execute, host };
+  return { calls, passedOn, execute, host };
 }
 
 describe('the steps a queued executor reports after the confirmation', () => {
@@ -191,6 +195,21 @@ describe('the steps a queued executor reports after the confirmation', () => {
       'clearShareMarker()', 'ended:shareMarkerClear',
       'catalogObserver()', 'ended:catalogObserver',
     ]);
+  });
+
+  it('keeps the observer to itself: the publish and the update are called without it', async () => {
+    const created = harness();
+    await created.execute();
+    const updated = harness();
+    await updated.execute(request({ vmCurrentAssertion: `0x${'cd'.repeat(32)}` }));
+
+    expect(created.calls).toContain('ended:catalogObserver');
+    expect(updated.calls).toContain('ended:catalogObserver');
+    for (const passed of [...created.passedOn, ...updated.passedOn]) {
+      expect(passed).toBeTypeOf('object');
+      expect(passed).not.toHaveProperty('onPostConfirmationStep');
+    }
+    expect([created.passedOn.length, updated.passedOn.length]).toEqual([1, 1]);
   });
 
   it('reports the published-graph clear when it fails, and no retirement, which then does not run', async () => {

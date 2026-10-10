@@ -184,7 +184,7 @@ import  {
   type EncodedWorkspaceGossipPayload,
   type SharedMemoryPublicSnapshotStorageConfig,
 } from '@origintrail-official/dkg-publisher';
-import { pickPublishLifecycleHooks, type LiftJobTailStep, type PublishLifecycleHooks } from '@origintrail-official/dkg-publisher';
+import { pickPublishLifecycleHooks, type LiftJobTailStep, type LiftJobTailStepObserver, type PublishLifecycleHooks } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { join } from 'node:path';
 import {
@@ -5173,6 +5173,8 @@ export class PublishMethods extends DKGAgentBase {
       operationCtx?: OperationContext;
       onPhase?: PhaseCallback;
       publisherOverride?: DKGPublisher;
+      /** GH#3081 — observation only: where the queue hears of each step that ends after the confirmation. */
+      onPostConfirmationStep?: LiftJobTailStepObserver;
     },
   ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
     const ctx = opts?.operationCtx ?? publishOptions.operationCtx ?? createOperationContext('publishFromSWM');
@@ -5195,7 +5197,7 @@ export class PublishMethods extends DKGAgentBase {
     // so its timing line can say where this executor's tail went. Nothing here waits or reads.
     const endedTailStep = (step: LiftJobTailStep): void => {
       try {
-        publishOptions.onPostConfirmationStep?.(step);
+        opts?.onPostConfirmationStep?.(step);
       } catch { /* observation only */ }
     };
     const capturedPricingPolicy = request.pricingPolicy ?? 'network-visible';

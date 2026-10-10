@@ -15,7 +15,6 @@ export interface PreBroadcastRecord extends PreBroadcastSignal {
 }
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { TrustedCatalogTripleKeys } from './catalog-trust.js';
-import type { LiftJobTailStep } from './lift-job-completion-timing.js';
 import type { PublicationPricingPolicy } from './publication-pricing.js';
 
 export const DEFAULT_PUBLISH_EPOCHS = 12;
@@ -326,13 +325,6 @@ export interface BasePublicationOptions {
    * non-fail-closed: listener failure can never affect the publish.
    */
   onPublishConfirmed?: (confirmation: { readonly txHash: string }) => void | Promise<void>;
-  /**
-   * GH#3081 — observation only. A queued executor calls this as it ends each step of its work
-   * after the confirmation, so the queue can say where the time between the confirmation and the
-   * executor's return went. It carries the step's name and nothing else, is synchronous and never
-   * awaited, and its failure can never affect the publish: the executor contains a throw.
-   */
-  onPostConfirmationStep?: (step: LiftJobTailStep) => void;
   /**
    * Skip the publisher-level context-graph graph creation/ensure step.
    * Only callers that already validated the target context graph should set

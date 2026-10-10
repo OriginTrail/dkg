@@ -7,10 +7,9 @@ import { describe, expect, it, vi } from 'vitest';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import {
   LIFT_JOB_POST_FINALITY_INFO_THRESHOLD_MS,
-  LIFT_JOB_TAIL_STEPS,
   LiftJobCompletionTiming,
-  type LiftJobTailStep,
 } from '../src/lift-job-completion-timing.js';
+import { LIFT_JOB_TAIL_STEPS, type LiftJobTailStep } from '../src/lift-job-tail-steps.js';
 import { LiftJobChainObservations } from '../src/lift-job-chain-observations.js';
 
 const TX = `0x${'ab'.repeat(32)}`;

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
+import { LIFT_JOB_TAIL_STEPS, type LiftJobTailStep } from './lift-job-tail-steps.js';
 
 /**
  * GH#3081 — where an async publish job spends the time between the node observing its chain
@@ -30,35 +31,6 @@ import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
 /** A total at or above this logs at info; shorter totals log at debug. */
 export const LIFT_JOB_POST_FINALITY_INFO_THRESHOLD_MS = 10_000;
 const MAX_TRACKED_JOBS = 512;
-
-/**
- * What a queued executor does between the confirmation of its transaction and its return, in the
- * order it does it. The executor reports the end of each step it runs:
- *
- * - `publish`: the publish or update call returned, its own post-receipt work included;
- * - `receiptWrite`: the publish receipt was written;
- * - `publishedGraphClear`: the published asset's shared-memory graph was cleared;
- * - `legacySwmRetire`: the legacy shared-memory copy of the asset was retired;
- * - `remainingSwmClear`: the rest of shared memory was cleared, when the request asked for it;
- * - `lifecycleStamp`: the lifecycle record was stamped (for an update, its provenance too);
- * - `graphIdRead`: the on-chain id of the context graph was read for the announcement;
- * - `finalizationGossip`: the finalization was announced to the graph's topic;
- * - `shareMarkerClear`: the share-complete marker was cleared;
- * - `catalogObserver`: the post-confirmation catalog observer returned.
- */
-export const LIFT_JOB_TAIL_STEPS = [
-  'publish',
-  'receiptWrite',
-  'publishedGraphClear',
-  'legacySwmRetire',
-  'remainingSwmClear',
-  'lifecycleStamp',
-  'graphIdRead',
-  'finalizationGossip',
-  'shareMarkerClear',
-  'catalogObserver',
-] as const;
-export type LiftJobTailStep = typeof LIFT_JOB_TAIL_STEPS[number];
 
 /**
  * - `inline`: the executor finished in-band and its result wrote the terminal record.

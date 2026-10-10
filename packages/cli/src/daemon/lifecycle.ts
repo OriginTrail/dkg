@@ -855,10 +855,11 @@ type QueuedKnowledgeAssetVmPublishOptions = Parameters<DKGAgent['publishQueuedKn
 
 export function createKnowledgeAssetVmPublishHandler(agent: DKGAgent): KnowledgeAssetVmPublishHandler {
   const execute: KnowledgeAssetVmPublishHandler['execute'] = async (
-    { request, publishOptions, publisher }: AsyncKnowledgeAssetVmPublishExecutionInput,
+    { request, publishOptions, publisher, onPostConfirmationStep }: AsyncKnowledgeAssetVmPublishExecutionInput,
   ) => {
     const publishOpts: QueuedKnowledgeAssetVmPublishOptions = {
       ...(publisher ? { publisherOverride: publisher } : {}),
+      ...(onPostConfirmationStep ? { onPostConfirmationStep } : {}),
     };
     try {
       return await agent.publishQueuedKnowledgeAssetVmPublish(

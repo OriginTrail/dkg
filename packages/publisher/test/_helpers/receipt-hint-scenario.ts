@@ -91,7 +91,7 @@ export function createReceiptHintHarness() {
             throw new Error('post-write-ahead failure: recovery owns the record from here');
           }
           if (options.tail !== undefined) {
-            await options.tail((step) => input.publishOptions.onPostConfirmationStep?.(step));
+            await options.tail((step) => input.onPostConfirmationStep?.(step));
           } else {
             await tailParked;
           }

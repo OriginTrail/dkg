@@ -228,6 +228,28 @@ describe('async publish post-finality timing', () => {
     expect(seen?.operationId).not.toBe(jobId);
   });
 
+  it('hands the executor its step observer on the execution input, not in the publish options', async () => {
+    // The steps belong to the executor around the publish call. The options it passes on to that
+    // call carry no observer for a publish or an update to ignore.
+    const h = createReceiptHintHarness();
+    let seen: { observer: unknown; inPublishOptions: boolean } | undefined;
+    const publisher = h.createPublisher({
+      knowledgeAssetVmPublishHandler: {
+        execute: async (input) => {
+          seen = {
+            observer: input.onPostConfirmationStep,
+            inPublishOptions: 'onPostConfirmationStep' in input.publishOptions,
+          };
+          throw new Error('stop before the write-ahead');
+        },
+      },
+    });
+    await h.stageShareSnapshot();
+    await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.processNext('wallet-1');
+    expect(seen).toEqual({ observer: expect.any(Function), inPublishOptions: false });
+  });
+
   it('labels a held failed record finalized by the chain-proof dispatcher', async () => {
     const h = createAsyncLift2270Harness();
     h.reset();
