@@ -117,3 +117,20 @@ describe('bounded local query contract', () => {
     } finally { await store.close(); }
   });
 });
+
+// Real embedded execution must not return a late success before timers run.
+it('rejects synchronous store results completed after the absolute deadline', async () => {
+  const store = new OxigraphStore();
+  await store.insert(Array.from({ length: 300 }, (_, n) => ({
+    subject: `urn:s:${n}`, predicate: 'urn:p', object: '"x"', graph: 'did:dkg:context-graph:test',
+  })));
+  try {
+    const engine = new DKGQueryEngine(store);
+    const read = context({ query: engine.query.bind(engine) }, { timeoutMs: 1,
+      sparql: 'SELECT (COUNT(*) AS ?n) WHERE { GRAPH <did:dkg:context-graph:test> { ?a <urn:p> ?o . ?b <urn:p> ?o } }',
+    });
+    await handleBoundedQueryRoutes(read.ctx);
+    expect(read.res.statusCode).toBe(503);
+    expect(JSON.parse(read.res.body).code).toBe('QUERY_DEADLINE_EXCEEDED');
+  } finally { await store.close(); }
+});

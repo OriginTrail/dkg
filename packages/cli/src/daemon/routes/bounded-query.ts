@@ -48,6 +48,7 @@ export async function handleBoundedQueryRoutes(ctx: RequestContext): Promise<voi
     return;
   }
   const lifecycle = createStoreQueryRequestLifecycle(req, res, 'api.query.bounded');
+  const deadlineAt = performance.now() + timeoutMs;
   const deadline = AbortSignal.timeout(timeoutMs);
   const signal = AbortSignal.any([lifecycle.signal, deadline]);
   const callerAgentAddress = authenticatedAgentAddress(authentication);
@@ -60,6 +61,7 @@ export async function handleBoundedQueryRoutes(ctx: RequestContext): Promise<voi
     };
     const result = await agent.query(query.sparql + (offset ? ` OFFSET ${offset}` : ''), options);
     signal.throwIfAborted();
+    if (performance.now() >= deadlineAt) throw new DOMException("Query deadline exceeded", "TimeoutError");
     const hasMore = result.bindings.length > query.maxRows;
     const rows = mode === 'page' ? result.bindings.slice(0, query.maxRows) : result.bindings;
     const bounded = boundedResult(rows, query.maxRows);
@@ -76,7 +78,7 @@ export async function handleBoundedQueryRoutes(ctx: RequestContext): Promise<voi
     });
   } catch (error) {
     if (isApiQueryCallerDisconnected(error) || lifecycle.signal.aborted) return;
-    if (deadline.aborted) {
+    if (deadline.aborted || performance.now() >= deadlineAt) {
       jsonResponse(res, 503, { code: 'QUERY_DEADLINE_EXCEEDED', error: 'Local query deadline exceeded', retryable: true });
       return;
     }

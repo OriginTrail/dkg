@@ -314,6 +314,16 @@ describe('runtime-accepted RFC-64 private query authorization', () => {
     );
   });
 
+  it('fails explicitly when shared memory access is denied before querying', async () => {
+    const fixture = runtimePrivateQueryAgent();
+    Object.assign(fixture.agent, { canUseSharedMemoryForContextGraph: async () => false });
+    await expect(QueryMethods.prototype.query.call(fixture.agent as never,
+      'SELECT ?s WHERE { ?s ?p ?o }', { contextGraphId: RUNTIME_PRIVATE_CG,
+        view: 'shared-working-memory', callerAgentAddress: REMOTE_MEMBER, accessDenied: 'error',
+      })).rejects.toMatchObject({ code: 'QUERY_ACCESS_DENIED' });
+    expect(fixture.queryEngine.query).not.toHaveBeenCalled();
+  });
+
   it('filters a runtime-only private subscription from outsider unscoped reads', async () => {
     const fixture = runtimePrivateQueryAgent();
     const sparql = `SELECT ?s WHERE { GRAPH <did:dkg:context-graph:${RUNTIME_PRIVATE_CG}/_verifiable_memory> { ?s ?p ?o } }`;

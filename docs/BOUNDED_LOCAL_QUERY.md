@@ -91,5 +91,5 @@ SWM/VM entities as verified application rules. No query cache is introduced.
 
 Release validation must build the CLI, agent and query packages together. A new
 CLI linked to an older agent is not a supported deployment of this capability.
-The companion Blackbox rollout is opt-in until that package release and corpus
-parity/performance validation are complete.
+Consumers should opt in only after installing that package release and completing
+representative correctness and performance validation.
