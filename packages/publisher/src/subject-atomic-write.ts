@@ -6,6 +6,7 @@
 // pre-insert ordering; promote's single-subject guard) and calls this for the mutable
 // subject write.
 
+import { assertSafeIri } from '@origintrail-official/dkg-core';
 import {
   assertSubjectReplacementPayload,
   deleteByPatternWithoutCount,
@@ -54,4 +55,39 @@ export async function replaceSubjectAtomicallyOrFallback(
   if (replaced) return;
   await deleteByPatternWithoutCount(store, { subject, graph: graphUri });
   await store.insert(quads);
+}
+
+/**
+ * Replace a subject whose absence, even transient, is more permissive than any
+ * of its states: a reader that finds no locally trusted control entry applies
+ * peer-supplied controls instead. Atomic where the store supports it, under
+ * the same payload contract as {@link replaceSubjectAtomicallyOrFallback}.
+ * Otherwise the complete new row set is inserted before the rows of the
+ * previous snapshot that it no longer contains are pruned. A failure or crash
+ * therefore leaves the previous rows or their union with the new ones, never
+ * an absent subject, and a retry converges to exactly `quads`.
+ */
+export async function replaceSubjectAtomicallyOrInsertThenPrune(
+  store: TripleStore,
+  graphUri: string,
+  subject: string,
+  quads: Quad[],
+  source: string,
+): Promise<void> {
+  assertSubjectReplacementPayload(graphUri, subject, quads);
+  if (await tryReplaceSubjectAtomically(store, graphUri, subject, quads, { source })) return;
+  const safeSubject = assertSafeIri(subject);
+  const previous = await store.query(
+    `CONSTRUCT { <${safeSubject}> ?p ?o } WHERE { GRAPH <${assertSafeIri(graphUri)}> { <${safeSubject}> ?p ?o } }`,
+    { source },
+  );
+  // Refuse before mutating: without the snapshot, stale rows could never be pruned.
+  if (previous.type !== 'quads') throw new Error(`Subject snapshot for ${source} expected a quads result`);
+  await store.insert(quads, { source });
+  const next = new Set(quads.map((quad) => JSON.stringify([quad.predicate, quad.object])));
+  // CONSTRUCT rows carry no graph: delete them where they live.
+  const stale = previous.quads
+    .filter((quad) => !next.has(JSON.stringify([quad.predicate, quad.object])))
+    .map((quad) => ({ ...quad, subject, graph: graphUri }));
+  if (stale.length > 0) await store.delete(stale, { source });
 }

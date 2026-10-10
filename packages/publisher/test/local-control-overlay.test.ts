@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
+  OxigraphStore,
+  UnsupportedTripleStoreCapabilityError,
+  type Quad,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 import {
   overlayLocallyTrustedKnowledgeAssetControls,
   replaceLocallyTrustedKnowledgeAssetControlEnvelope,
@@ -89,5 +95,97 @@ describe('locally trusted KA control overlay', () => {
     await write('1', 'ownerOnly', []);
     expect(await controls(1)).toEqual(['"ownerOnly"']);
     expect(await controls(2)).toEqual(['"allowList"', '"next-peer"']);
+  });
+});
+
+type Interruption = 'insert' | 'partial insert' | 'delete';
+
+/**
+ * A best-effort SPARQL store: it has no single-subject commit boundary (the
+ * capability is absent, or refused before mutating), and a trusted-control
+ * write can stop at a chosen step, as an endpoint error or a crash would.
+ */
+function bestEffortStore(capability: 'absent' | 'refused') {
+  const inner = new OxigraphStore();
+  let stopAt: Interruption | undefined;
+  const trusted = (rows: readonly Quad[]) => rows.some((quad) => quad.graph === LOCAL_TRUSTED_KA_CONTROLS_GRAPH);
+  const store = new Proxy(inner, {
+    get(target, prop) {
+      if (prop === 'replaceSubject') {
+        return capability === 'absent' ? undefined : async () => {
+          throw new UnsupportedTripleStoreCapabilityError('replaceSubject', 'SparqlHttpStore');
+        };
+      }
+      if (prop === 'insert') {
+        return async (rows: Quad[]) => {
+          if (stopAt === 'partial insert' && trusted(rows)) {
+            await target.insert(rows.slice(0, Math.ceil(rows.length / 2)));
+          }
+          if ((stopAt === 'insert' || stopAt === 'partial insert') && trusted(rows)) {
+            throw new Error('store write interrupted');
+          }
+          return target.insert(rows);
+        };
+      }
+      if (prop === 'delete' || prop === 'deleteByPattern' || prop === 'deleteByPatternWithoutCount') {
+        const method = Reflect.get(target, prop, target) as (...args: unknown[]) => Promise<unknown>;
+        return async (arg: Quad[] | Partial<Quad>, ...rest: unknown[]) => {
+          const touches = Array.isArray(arg) ? trusted(arg) : arg.graph === LOCAL_TRUSTED_KA_CONTROLS_GRAPH;
+          if (stopAt === 'delete' && touches) throw new Error('store write interrupted');
+          return method.call(target, arg, ...rest);
+        };
+      }
+      const value = Reflect.get(target, prop, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  }) as unknown as TripleStore;
+  return { store, interrupt: (step?: Interruption) => { stopAt = step; } };
+}
+
+describe('locally trusted KA controls without an atomic subject replace', () => {
+  // A peer that synced the original grant can replay it through durable sync.
+  const replayedGrant = [
+    metadata('assertionVersion', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>'),
+    metadata('merkleRoot', `"${toHex(ROOT)}"`),
+    metadata('accessPolicy', '"allowList"'),
+    metadata('allowedPeer', '"Alice"'),
+    metadata('allowedPeer', '"Bob"'),
+    metadata('publisherPeerId', '"trusted-publisher"'),
+  ];
+  const write = (store: TripleStore, accessPolicy: 'allowList' | 'ownerOnly', allowedPeers: string[], assertionVersion = '1') =>
+    replaceLocallyTrustedKnowledgeAssetControlEnvelope(store, UAL, { assertionVersion, merkleRoot: ROOT },
+      { accessPolicy, allowedPeers, publisherPeerId: 'trusted-publisher' });
+  /** The controls durable sync would commit for `incoming`, or the reader's refusal. */
+  const committedControls = (store: TripleStore, incoming = replayedGrant) =>
+    overlayLocallyTrustedKnowledgeAssetControls(store, META_GRAPH, UAL, incoming).then(
+      (rows) => rows.filter((quad) => quad.predicate === `${DKG}accessPolicy` || quad.predicate === `${DKG}allowedPeer`)
+        .map((quad) => quad.object).sort(),
+      (error: Error) => error.message,
+    );
+
+  it.each(['absent', 'refused'] as const)('rewrites an identical envelope in place when the capability is %s', async (capability) => {
+    const { store } = bestEffortStore(capability);
+    await write(store, 'ownerOnly', []);
+    await write(store, 'ownerOnly', []);
+    expect(await store.countQuads(LOCAL_TRUSTED_KA_CONTROLS_GRAPH)).toBe(5);
+    expect(await committedControls(store)).toEqual(['"ownerOnly"']);
+  });
+
+  it.each((['absent', 'refused'] as const).flatMap((capability) => (
+    (['insert', 'partial insert', 'delete'] as const).map((step) => ({ capability, step }))
+  )))('keeps a revoked peer out of a replayed grant when the rewrite stops at $step (capability $capability)', async ({ capability, step }) => {
+    const { store, interrupt } = bestEffortStore(capability);
+    await write(store, 'allowList', ['next-peer'], '2');
+    await write(store, 'ownerOnly', []);
+    interrupt(step);
+    await expect(write(store, 'allowList', ['Alice'])).rejects.toThrow('store write interrupted');
+    // The previous envelope still decides, or the reader refuses the interim
+    // union; the replayed peer-supplied grant never does.
+    expect([['"ownerOnly"'], 'Locally trusted KA controls require exactly one valid accessPolicy'])
+      .toContainEqual(await committedControls(store));
+    interrupt();
+    await write(store, 'allowList', ['Alice']);
+    expect(await committedControls(store)).toEqual(['"Alice"', '"allowList"']);
+    expect(await committedControls(store, incomingMetadata(2))).toEqual(['"allowList"', '"next-peer"']);
   });
 });
