@@ -317,6 +317,21 @@ export {
   hostOnlyRpcText,
 } from './rpc-failover-log.js';
 export {
+  // Why a KA version snapshot could not be established: which endpoint gave no view (host
+  // only) and a closed class. The agent names it; `/api/status` reads the process-wide record.
+  describeKnowledgeAssetVersionSnapshotUnavailable,
+  getKnowledgeAssetVersionSnapshotHealth,
+  _resetKnowledgeAssetVersionSnapshotHealthForTest,
+  type KnowledgeAssetVersionSnapshotEndpointFailure,
+  type KnowledgeAssetVersionSnapshotEndpointFailureClass,
+  type KnowledgeAssetVersionSnapshotFailingEndpoint,
+  type KnowledgeAssetVersionSnapshotHealth,
+  type KnowledgeAssetVersionSnapshotReadOptions,
+  type KnowledgeAssetVersionSnapshotReadStage,
+  type KnowledgeAssetVersionSnapshotUnavailable,
+  type KnowledgeAssetVersionSnapshotUnavailableReason,
+} from './ka-version-snapshot-report.js';
+export {
   HubResolutionCache,
   type HubResolutionCacheOptions,
 } from './hub-resolution-cache.js';

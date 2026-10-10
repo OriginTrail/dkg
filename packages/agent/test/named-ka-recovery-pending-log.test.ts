@@ -1,0 +1,515 @@
+// SPDX-License-Identifier: Apache-2.0
+
+/**
+ * The `Named KA recovery ... remains pending` warning, rate-limited.
+ *
+ * Recovery of a confirmed publish is asked again on every tick while its cause lasts. These rows
+ * pin what the log shows for that: one line per asset when a reason appears or changes, a
+ * summary per reason every five minutes, and one line for the operator once the chain endpoints
+ * have been the named cause for a sustained run.
+ */
+
+import { describe, expect, it } from 'vitest';
+import type { KnowledgeAssetVersionSnapshotUnavailable } from '@origintrail-official/dkg-chain';
+import { versionViewCause } from '../src/named-ka-recovery-diagnostics.js';
+import {
+  NAMED_KA_RECOVERY_ENDPOINT_ESCALATION_AFTER_MS,
+  NAMED_KA_RECOVERY_ENDPOINT_ESCALATION_MIN_DEFERRALS,
+  NAMED_KA_RECOVERY_PENDING_SUMMARY_INTERVAL_MS,
+  NamedKaRecoveryPendingLog,
+} from '../src/named-ka-recovery-pending-log.js';
+import {
+  NO_ENDPOINT_SERVES,
+  NO_ENDPOINT_SERVES_WORDS,
+  NO_VIEW_REASON,
+} from './_helpers/named-ka-recovery-fixture.js';
+
+const MINUTE = 60_000;
+const TICK = 10_000;
+
+function asset(name: string) {
+  return { contextGraphId: 'cg-1', name };
+}
+
+/** A deferral as the recovery throws it: a message about the asset, and the reason without it. */
+function deferral(name: string, reason: string, fields: Record<string, unknown> = {}): Error {
+  return Object.assign(
+    new Error(`Named KA recovery rejected for "${name}": ${reason}`),
+    { code: 'KA_VM_RECOVERY_INCONSISTENT', pendingReason: reason, ...fields },
+  );
+}
+
+/** The deferral for a missing version view, with the adapter's report when it gave one. */
+function noViewDeferral(name: string, report?: KnowledgeAssetVersionSnapshotUnavailable): Error {
+  return deferral(name, `${NO_VIEW_REASON}${versionViewCause(report)}`, { versionViewUnavailable: report });
+}
+
+const OPERATOR_LINE = (pending: number, minutes: number, endpoints = NO_ENDPOINT_SERVES_WORDS) => (
+  'Operator action needed: publishes confirmed on chain are not finalizing on this node '
+  + `(${pending} pending, ${minutes} min). No configured chain endpoint supplies the current version `
+  + `at one pinned block: ${endpoints}. Fix an endpoint named here, or replace it in the chain RPC `
+  + 'configuration (rpcUrl / rpcUrls) and restart the node; the pending publishes then finalize '
+  + 'without being sent again.'
+);
+
+const operatorLines = (lines: string[]) => lines.filter((line) => line.startsWith('Operator action needed: '));
+
+/** One endpoint, failing one way and then another as one outage goes on. */
+const UNREACHABLE: KnowledgeAssetVersionSnapshotUnavailable = {
+  reason: 'endpoints-failed',
+  endpointCount: 1,
+  endpoints: [{ position: 1, host: 'only.example', stage: 'head-block', failure: 'network' }],
+};
+const UNREACHABLE_WORDS = 'endpoint 1 of 1 (only.example) could not be reached for the head block read';
+const SERVER_ERROR: KnowledgeAssetVersionSnapshotUnavailable = {
+  reason: 'endpoints-failed',
+  endpointCount: 1,
+  endpoints: [{ position: 1, host: 'only.example', stage: 'pinned-read', failure: 'http-server-error', httpStatus: 503 }],
+};
+
+const DEADLINE = 'named-KA recovery deadline reached before the chain reads completed';
+
+/** A deadline that cut the version read short, as the recovery throws it: one reason, and no endpoint to blame. */
+function deadlineDeferral(): Error {
+  const cutShort: KnowledgeAssetVersionSnapshotUnavailable = {
+    reason: 'aborted',
+    endpointCount: 2,
+    endpoints: [{ position: 1, host: 'rpc.example', stage: 'pinned-read', failure: 'timeout' }],
+  };
+  return Object.assign(new Error(`${DEADLINE}${versionViewCause(cutShort)}`), {
+    pendingReason: DEADLINE,
+    versionViewUnavailable: cutShort,
+  });
+}
+
+function harness(options: ConstructorParameters<typeof NamedKaRecoveryPendingLog>[0] = {}) {
+  const clock = { now: 1_000_000 };
+  const lines: string[] = [];
+  const log = new NamedKaRecoveryPendingLog({ now: () => clock.now, ...options });
+  const defer = (name: string, error: unknown) => {
+    const before = lines.length;
+    log.deferred(asset(name), error, (line) => lines.push(line));
+    return lines.slice(before);
+  };
+  /** One deferral per asset every tick for `ms`, starting one tick from now. Returns the new lines. */
+  const run = (names: string[], ms: number, error: (name: string) => unknown) => {
+    const before = lines.length;
+    for (let elapsed = TICK; elapsed <= ms; elapsed += TICK) {
+      clock.now += TICK;
+      for (const name of names) defer(name, error(name));
+    }
+    return lines.slice(before);
+  };
+  return { clock, lines, log, defer, run };
+}
+
+describe('NamedKaRecoveryPendingLog', () => {
+  it('logs the asset once, in the same words as before, and stays quiet while nothing changes', () => {
+    const { defer, run } = harness();
+    const error = noViewDeferral('ka-1', NO_ENDPOINT_SERVES);
+
+    expect(defer('ka-1', error)).toEqual([
+      `Named KA recovery for "ka-1" remains pending: Named KA recovery rejected for "ka-1": ${NO_VIEW_REASON}: ${NO_ENDPOINT_SERVES_WORDS}`,
+    ]);
+    // Four minutes of ticks: 24 more deferrals, no more lines.
+    expect(run(['ka-1'], 4 * MINUTE, () => error)).toEqual([]);
+  });
+
+  it('logs again when the reason changes, and again when it changes back', () => {
+    const { defer } = harness();
+    const first = new Error('store unavailable');
+    const second = new Error('context graph has no local on-chain id binding');
+
+    expect(defer('ka-1', first)).toHaveLength(1);
+    expect(defer('ka-1', first)).toEqual([]);
+    expect(defer('ka-1', second)).toEqual([
+      'Named KA recovery for "ka-1" remains pending: context graph has no local on-chain id binding',
+    ]);
+    expect(defer('ka-1', first)).toEqual(['Named KA recovery for "ka-1" remains pending: store unavailable']);
+  });
+
+  it('accepts a deferral that is not an Error', () => {
+    const { defer } = harness();
+
+    expect(defer('ka-1', 'plain text')).toEqual(['Named KA recovery for "ka-1" remains pending: plain text']);
+  });
+
+  it('thirteen assets no endpoint can serve: thirteen lines, one operator line at five minutes, then summaries', () => {
+    const { defer, run, lines } = harness();
+    const names = Array.from({ length: 13 }, (_, index) => `ka-${index + 1}`);
+    const error = (name: string) => noViewDeferral(name, NO_ENDPOINT_SERVES);
+
+    for (const name of names) defer(name, error(name));
+    expect(lines).toHaveLength(13);
+    expect(lines.every((line) => line.endsWith(NO_ENDPOINT_SERVES_WORDS))).toBe(true);
+
+    // Up to the last tick before five minutes: 29 ticks x 13 assets, nothing logged.
+    expect(run(names, NAMED_KA_RECOVERY_ENDPOINT_ESCALATION_AFTER_MS - TICK, error)).toEqual([]);
+
+    // The tick that completes five minutes: the operator is told once, by the first asset to defer.
+    expect(run(names, TICK, error)).toEqual([OPERATOR_LINE(13, 5)]);
+
+    // Five more minutes: one summary, no second operator line.
+    expect(run(names, NAMED_KA_RECOVERY_PENDING_SUMMARY_INTERVAL_MS, error)).toEqual([
+      `Named KA recovery remains pending for 13 asset(s) after 10 min (781 deferrals): ${NO_VIEW_REASON}: ${NO_ENDPOINT_SERVES_WORDS}`,
+    ]);
+    // And the next five, the same way.
+    expect(run(names, NAMED_KA_RECOVERY_PENDING_SUMMARY_INTERVAL_MS, error)).toEqual([
+      `Named KA recovery remains pending for 13 asset(s) after 15 min (1171 deferrals): ${NO_VIEW_REASON}: ${NO_ENDPOINT_SERVES_WORDS}`,
+    ]);
+  });
+
+  it('tells the operator of a node whose only endpoint refuses the pinned read', () => {
+    const only: KnowledgeAssetVersionSnapshotUnavailable = {
+      reason: 'endpoints-failed',
+      endpointCount: 1,
+      endpoints: [{ position: 1, host: 'only.example', stage: 'pinned-read', failure: 'http-client-error', httpStatus: 400 }],
+    };
+    const { defer, run } = harness();
+    const error = (name: string) => noViewDeferral(name, only);
+
+    defer('ka-1', error('ka-1'));
+
+    expect(run(['ka-1'], NAMED_KA_RECOVERY_ENDPOINT_ESCALATION_AFTER_MS, error)).toEqual([
+      OPERATOR_LINE(1, 5, 'endpoint 1 of 1 (only.example) refused a block-pinned read (http 400)'),
+    ]);
+  });
+
+  it('does not tell the operator to act on five minutes of sparse samples', () => {
+    // One deferral a minute: five minutes pass with too few of them to call it sustained.
+    const { clock, defer } = harness();
+    const error = noViewDeferral('ka-1', NO_ENDPOINT_SERVES);
+    const seen: string[] = [];
+
+    defer('ka-1', error);
+    for (let minute = 1; minute < NAMED_KA_RECOVERY_ENDPOINT_ESCALATION_MIN_DEFERRALS; minute += 1) {
+      clock.now += MINUTE;
+      seen.push(...defer('ka-1', error));
+    }
+
+    // Summaries at five and ten minutes, the operator line only with the twelfth deferral.
+    expect(seen).toEqual([
+      `Named KA recovery remains pending for 1 asset(s) after 5 min (6 deferrals): ${NO_VIEW_REASON}: ${NO_ENDPOINT_SERVES_WORDS}`,
+      `Named KA recovery remains pending for 1 asset(s) after 10 min (11 deferrals): ${NO_VIEW_REASON}: ${NO_ENDPOINT_SERVES_WORDS}`,
+      OPERATOR_LINE(1, 11),
+    ]);
+  });
+
+  it('two samples either side of a long gap are two runs, not one long one', () => {
+    const { clock, defer } = harness();
+    const error = noViewDeferral('ka-1', NO_ENDPOINT_SERVES);
+
+    defer('ka-1', error);
+    clock.now += 60 * MINUTE;
+
+    // The asset is reported afresh, and nothing is escalated or summarized on one sample.
+    expect(defer('ka-1', error)).toEqual([
+      `Named KA recovery for "ka-1" remains pending: Named KA recovery rejected for "ka-1": ${NO_VIEW_REASON}: ${NO_ENDPOINT_SERVES_WORDS}`,
+    ]);
+  });
+
+  it('a burst across many assets is one sample: two either side of a pause do not escalate', () => {
+    // Thirteen assets defer in one recovery tick, the process is suspended until five minutes
+    // after the first of them, and the next tick defers them again: fourteen deferrals by the
+    // first asset to defer, but two ticks. The summary still counts the deferrals.
+    const { clock, defer } = harness();
+    const names = Array.from({ length: 13 }, (_, index) => `ka-${index + 1}`);
+    const error = (name: string) => noViewDeferral(name, NO_ENDPOINT_SERVES);
+
+    for (const name of names) defer(name, error(name));
+    clock.now += NAMED_KA_RECOVERY_ENDPOINT_ESCALATION_AFTER_MS;
+
+    expect(names.flatMap((name) => defer(name, error(name)))).toEqual([
+      `Named KA recovery remains pending for 13 asset(s) after 5 min (14 deferrals): ${NO_VIEW_REASON}: ${NO_ENDPOINT_SERVES_WORDS}`,
+    ]);
+  });
+
+  it('after a burst and a shorter pause, the operator is told only once the run holds twelve ticks', () => {
+    // The same burst, four minutes of suspension, then a tick every 10 s: the run is five
+    // minutes old after eight ticks, and twelve come at 340 s.
+    const { clock, defer, run } = harness();
+    const names = Array.from({ length: 13 }, (_, index) => `ka-${index + 1}`);
+    const error = (name: string) => noViewDeferral(name, NO_ENDPOINT_SERVES);
+
+    for (const name of names) defer(name, error(name));
+    clock.now += 4 * MINUTE - TICK;
+    expect(operatorLines(run(names, MINUTE + 4 * TICK, error))).toEqual([]);
+    expect(operatorLines(run(names, TICK, error))).toEqual([OPERATOR_LINE(13, 6)]);
+  });
+
+  it.each([1, 13])('failures every 5 s still escalate on the tick that completes five minutes (%i asset(s))', (count) => {
+    const { clock, defer, lines } = harness();
+    const names = Array.from({ length: count }, (_, index) => `ka-${index + 1}`);
+    const error = (name: string) => noViewDeferral(name, NO_ENDPOINT_SERVES);
+    const tick = () => { for (const name of names) defer(name, error(name)); };
+
+    tick();
+    for (let elapsed = 5_000; elapsed < NAMED_KA_RECOVERY_ENDPOINT_ESCALATION_AFTER_MS; elapsed += 5_000) {
+      clock.now += 5_000;
+      tick();
+    }
+    expect(operatorLines(lines)).toEqual([]);
+
+    clock.now += 5_000;
+    tick();
+    expect(operatorLines(lines)).toEqual([OPERATOR_LINE(count, 5)]);
+  });
+
+  it.each<[string, KnowledgeAssetVersionSnapshotUnavailable | undefined]>([
+    ['a deadline cut the read short', {
+      reason: 'aborted',
+      endpointCount: 2,
+      endpoints: [{ position: 1, host: 'rpc.example', stage: 'head-block', failure: 'no-answer' }],
+    }],
+    ["the node's own request budget stopped the read", {
+      reason: 'local-pressure',
+      endpointCount: 2,
+      endpoints: [{ position: 1, host: 'rpc.example', stage: 'pinned-read', failure: 'http-client-error', httpStatus: 400 }],
+    }],
+    ['the storage binding changed', { reason: 'storage-binding-changed', endpointCount: 2, endpoints: [] }],
+    ['the storage binding changed after an endpoint had failed', {
+      reason: 'storage-binding-changed',
+      endpointCount: 2,
+      endpoints: [{ position: 1, host: 'rpc.example', stage: 'chain-id', failure: 'wrong-chain' }],
+    }],
+    ['the adapter gave no report', undefined],
+  ])('summarizes but never asks the operator to act on an endpoint when %s', (_name, report) => {
+    const { defer, run } = harness();
+    const error = (name: string) => noViewDeferral(name, report);
+
+    defer('ka-1', error('ka-1'));
+    const later = run(['ka-1'], 20 * MINUTE, error);
+
+    expect(later).toHaveLength(4);
+    expect(later.every((line) => line.startsWith('Named KA recovery remains pending for 1 asset(s) after '))).toBe(true);
+  });
+
+  it('one endpoint failing one way and then another is one run: the operator is told once', () => {
+    // Each failure gives the deferral a reason of its own. The endpoint is the cause of every one.
+    const { defer, run } = harness();
+    let deferrals = 0;
+    const error = (name: string) => noViewDeferral(name, deferrals++ % 2 === 0 ? UNREACHABLE : SERVER_ERROR);
+
+    defer('ka-1', error('ka-1'));
+    const later = run(['ka-1'], 10 * MINUTE, error);
+
+    expect(operatorLines(later)).toEqual([OPERATOR_LINE(1, 5, UNREACHABLE_WORDS)]);
+  });
+
+  it('assets the endpoints fail in different ways are one run: one operator line that counts them all', () => {
+    const { defer, run } = harness();
+    const reports: Record<string, KnowledgeAssetVersionSnapshotUnavailable> = {
+      'ka-1': UNREACHABLE,
+      'ka-2': SERVER_ERROR,
+    };
+    const error = (name: string) => noViewDeferral(name, reports[name]);
+
+    for (const name of Object.keys(reports)) defer(name, error(name));
+    const later = run(Object.keys(reports), 10 * MINUTE, error);
+
+    expect(operatorLines(later)).toEqual([OPERATOR_LINE(2, 5, UNREACHABLE_WORDS)]);
+  });
+
+  it.each<[string, (name: string) => Error]>([
+    ['a deadline', () => deadlineDeferral()],
+    ["the node's own request budget", (name) => noViewDeferral(name, {
+      reason: 'local-pressure',
+      endpointCount: 2,
+      endpoints: [{ position: 1, host: 'rpc.example', stage: 'pinned-read', failure: 'http-client-error', httpStatus: 400 }],
+    })],
+    ['a storage binding change', (name) => noViewDeferral(name, {
+      reason: 'storage-binding-changed',
+      endpointCount: 2,
+      endpoints: [],
+    })],
+  ])('%s between endpoint failures interrupts their run: the next one counts from its own start', (_name, other) => {
+    const { clock, defer, run } = harness();
+    const start = clock.now;
+    const endpoints = (name: string) => noViewDeferral(name, NO_ENDPOINT_SERVES);
+    // The endpoints fail for 100 s, then the other cause holds but for single endpoint failures
+    // at 240 s and 300 s: five minutes from the first failure to the last, never uninterrupted.
+    const error = (name: string) => {
+      const elapsed = clock.now - start;
+      return elapsed <= 100_000 || elapsed === 240_000 || elapsed === 300_000 ? endpoints(name) : other(name);
+    };
+
+    defer('ka-1', error('ka-1'));
+    expect(operatorLines(run(['ka-1'], 5 * MINUTE, error))).toEqual([]);
+
+    // From 300 s the endpoints fail every time: five minutes on, and not before, the operator is told.
+    expect(operatorLines(run(['ka-1'], 5 * MINUTE - TICK, endpoints))).toEqual([]);
+    expect(run(['ka-1'], TICK, endpoints)).toEqual([OPERATOR_LINE(1, 5)]);
+  });
+
+  it("another asset deferring for an unrelated cause does not interrupt the endpoints' run", () => {
+    // Only an asset the endpoints were named for, now deferring for something else, says they
+    // are not the cause. A store that is unavailable for another asset says nothing about them.
+    const { defer, run } = harness();
+    const error = (name: string) => (
+      name === 'ka-1' ? noViewDeferral(name, NO_ENDPOINT_SERVES) : new Error('store unavailable'));
+
+    defer('ka-1', error('ka-1'));
+    defer('ka-2', error('ka-2'));
+    expect(run(['ka-1', 'ka-2'], NAMED_KA_RECOVERY_ENDPOINT_ESCALATION_AFTER_MS - TICK, error)).toEqual([]);
+    expect(run(['ka-1', 'ka-2'], TICK, error)).toEqual([
+      OPERATOR_LINE(1, 5),
+      'Named KA recovery remains pending for 1 asset(s) after 5 min (31 deferrals): store unavailable',
+    ]);
+  });
+
+  it('a version view that is read ends the run: an endpoint answered, so the count starts over', () => {
+    const { defer, run, log } = harness();
+    const error = (name: string) => noViewDeferral(name, NO_ENDPOINT_SERVES);
+
+    defer('ka-1', error('ka-1'));
+    expect(run(['ka-1'], 4 * MINUTE, error)).toEqual([]);
+    log.versionViewRead();
+
+    // The run that began four minutes ago would have reached five in this stretch. It ended
+    // with the read, and the one that follows is not yet five minutes old.
+    expect(run(['ka-1'], NAMED_KA_RECOVERY_ENDPOINT_ESCALATION_AFTER_MS - TICK, error)).toEqual([]);
+    expect(run(['ka-1'], 2 * TICK, error)).toEqual([OPERATOR_LINE(1, 5)]);
+  });
+
+  it('a finalization alone does not end the run: it does not show that an endpoint answered', () => {
+    // Evidence from before the position check settles by the latest root, without a version
+    // view. Such an asset finalizing must not put off the line about the ones still held.
+    const { defer, run, log } = harness();
+    const error = (name: string) => noViewDeferral(name, NO_ENDPOINT_SERVES);
+
+    defer('ka-1', error('ka-1'));
+    expect(run(['ka-1'], 4 * MINUTE, error)).toEqual([]);
+    log.finalized(asset('ka-legacy'));
+
+    expect(run(['ka-1'], MINUTE, error)).toEqual([OPERATOR_LINE(1, 5)]);
+  });
+
+  it('a version view read ends only the runs the endpoints were named for', () => {
+    const { defer, run, log } = harness();
+    const error = () => new Error('store unavailable');
+
+    // With nothing pending it does nothing.
+    expect(() => log.versionViewRead()).not.toThrow();
+
+    // A store that is unavailable has nothing to do with an endpoint answering: its run goes
+    // on through the read, and its summary comes five minutes after it began, not later.
+    defer('ka-1', error());
+    expect(run(['ka-1'], 4 * MINUTE, error)).toEqual([]);
+    log.versionViewRead();
+
+    expect(run(['ka-1'], MINUTE, error)).toEqual([
+      'Named KA recovery remains pending for 1 asset(s) after 5 min (31 deferrals): store unavailable',
+    ]);
+  });
+
+  it('an asset that finalized and is deferred again is reported again', () => {
+    const { defer, log } = harness();
+    const error = noViewDeferral('ka-1', NO_ENDPOINT_SERVES);
+
+    expect(defer('ka-1', error)).toHaveLength(1);
+    log.finalized(asset('ka-1'));
+
+    expect(defer('ka-1', error)).toHaveLength(1);
+  });
+
+  it('groups assets by the reason the recovery gives, not by its message', () => {
+    // Two assets, one cause: the messages differ by the asset's name, the reason does not.
+    const { run } = harness();
+    const error = (name: string) => deferral(name, 'context graph 1 has no local on-chain id binding');
+
+    const lines = run(['ka-1', 'ka-2'], NAMED_KA_RECOVERY_PENDING_SUMMARY_INTERVAL_MS + TICK, error);
+
+    expect(lines).toEqual([
+      'Named KA recovery for "ka-1" remains pending: Named KA recovery rejected for "ka-1": context graph 1 has no local on-chain id binding',
+      'Named KA recovery for "ka-2" remains pending: Named KA recovery rejected for "ka-2": context graph 1 has no local on-chain id binding',
+      'Named KA recovery remains pending for 2 asset(s) after 5 min (61 deferrals): context graph 1 has no local on-chain id binding',
+    ]);
+  });
+
+  it('counts only assets still being deferred, and tells same-named assets of two graphs apart', () => {
+    const { clock, lines, log, run } = harness();
+    const reason = new Error('store unavailable');
+    const emit = (line: string) => lines.push(line);
+
+    log.deferred({ contextGraphId: 'cg-1', name: 'ka-1' }, reason, emit);
+    log.deferred({ contextGraphId: 'cg-2', name: 'ka-1' }, reason, emit);
+    log.deferred({ contextGraphId: 'cg-1', name: 'ka-1', subGraphName: 'sub' }, reason, emit);
+    expect(lines).toHaveLength(3);
+
+    // Only one of the three keeps deferring. Past five minutes the others no longer count.
+    const later = run(['ka-1'], NAMED_KA_RECOVERY_PENDING_SUMMARY_INTERVAL_MS + TICK, () => reason);
+    expect(later).toEqual([
+      'Named KA recovery remains pending for 3 asset(s) after 5 min (33 deferrals): store unavailable',
+    ]);
+    expect(clock.now).toBe(1_000_000 + 5 * MINUTE + TICK);
+    expect(run(['ka-1'], NAMED_KA_RECOVERY_PENDING_SUMMARY_INTERVAL_MS, () => reason)).toEqual([
+      'Named KA recovery remains pending for 1 asset(s) after 10 min (63 deferrals): store unavailable',
+    ]);
+  });
+
+  it('summarizes each reason on its own, with its own assets', () => {
+    const { run, lines } = harness();
+    const reasons: Record<string, Error> = {
+      'ka-1': new Error('store unavailable'),
+      'ka-2': new Error('store unavailable'),
+      'ka-3': new Error('context graph has no local on-chain id binding'),
+    };
+
+    const later = run(Object.keys(reasons), NAMED_KA_RECOVERY_PENDING_SUMMARY_INTERVAL_MS + TICK, (name) => reasons[name]);
+
+    // Three first lines, then one summary per reason once each is five minutes old.
+    expect(lines.slice(0, 3).every((line) => line.startsWith('Named KA recovery for "ka-'))).toBe(true);
+    expect(later.slice(3)).toEqual([
+      'Named KA recovery remains pending for 2 asset(s) after 5 min (61 deferrals): store unavailable',
+      'Named KA recovery remains pending for 1 asset(s) after 5 min (31 deferrals): '
+      + 'context graph has no local on-chain id binding',
+    ]);
+  });
+
+  it('still logs the plain line when its own bookkeeping fails', () => {
+    const lines: string[] = [];
+    const log = new NamedKaRecoveryPendingLog({ now: () => { throw new Error('clock'); } });
+
+    log.deferred(asset('ka-1'), new Error('store unavailable'), (line) => lines.push(line));
+    log.deferred(asset('ka-1'), new Error('store unavailable'), (line) => lines.push(line));
+
+    // Unlimited, as it was before: losing the limit must not lose the warning.
+    expect(lines).toEqual([
+      'Named KA recovery for "ka-1" remains pending: store unavailable',
+      'Named KA recovery for "ka-1" remains pending: store unavailable',
+    ]);
+  });
+
+  it('finalizing with nothing pending, or with an asset it cannot key, does nothing and does not throw', () => {
+    const { defer, log } = harness();
+
+    expect(() => log.finalized(asset('ka-1'))).not.toThrow();
+    defer('ka-1', new Error('store unavailable'));
+    const unkeyable = { contextGraphId: 'cg-1', get name(): string { throw new Error('no name'); } };
+
+    expect(() => log.finalized(unkeyable)).not.toThrow();
+    // The pending asset is untouched by the failed call.
+    expect(defer('ka-1', new Error('store unavailable'))).toEqual([]);
+  });
+
+  it('forgets the oldest asset past its ceiling rather than growing', () => {
+    const { defer } = harness();
+    const error = new Error('store unavailable');
+
+    for (let index = 0; index <= 4_096; index += 1) defer(`ka-${index}`, error);
+
+    // ka-0 was dropped to make room, so it reads as new; ka-4096 is still known.
+    expect(defer('ka-4096', error)).toEqual([]);
+    expect(defer('ka-0', error)).toHaveLength(1);
+  });
+
+  it('uses the documented bounds by default', () => {
+    expect(NAMED_KA_RECOVERY_PENDING_SUMMARY_INTERVAL_MS).toBe(5 * MINUTE);
+    expect(NAMED_KA_RECOVERY_ENDPOINT_ESCALATION_AFTER_MS).toBe(5 * MINUTE);
+    expect(NAMED_KA_RECOVERY_ENDPOINT_ESCALATION_MIN_DEFERRALS).toBe(12);
+    const lines: string[] = [];
+    // The default clock is the wall clock.
+    new NamedKaRecoveryPendingLog().deferred(asset('ka-1'), new Error('x'), (line) => lines.push(line));
+    expect(lines).toHaveLength(1);
+  });
+});

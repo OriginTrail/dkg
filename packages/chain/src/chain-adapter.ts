@@ -8,6 +8,7 @@ import type {
   RandomSamplingAvailability,
 } from './random-sampling-availability.js';
 import type { RandomSamplingReadContextReader } from './random-sampling-read-context.js';
+import type { KnowledgeAssetVersionSnapshotReadOptions } from './ka-version-snapshot-report.js';
 import type { ethers } from 'ethers';
 import type { RpcRequestClass } from './rpc-request-transport.js';
 import type { RpcUsageWindow } from './rpc-usage.js';
@@ -2290,10 +2291,14 @@ export interface ChainAdapter extends ExistingMintProvenanceReader {
    *
    * The pinned height uses `chain.finalityConfirmations`: confirmation 1 is the current head,
    * and larger values pin `head - confirmations + 1`.
+   *
+   * `options.onUnavailable` receives why a `null` was answered (each endpoint that was asked and
+   * supplied no view, host only, with a closed class). It is diagnostic: the `null` means the
+   * same without it.
    */
   readKnowledgeAssetVersionSnapshot?(
     kaId: bigint,
-    options?: ChainReadOptions,
+    options?: KnowledgeAssetVersionSnapshotReadOptions,
   ): Promise<KnowledgeAssetVersionSnapshot | null>;
 
   /**

@@ -59,8 +59,8 @@ import {
   enrichEvmError,
   MockChainAdapter,
   resolveRpcUrls,
-  getRpcFailoverStats,
 } from '@origintrail-official/dkg-chain';
+import { chainRpcStatusFields } from './status-chain-rpc.js';
 import type { DaemonRouteRpcTransport } from '../rpc-runtime.js';
 import {
   DKGAgent,
@@ -694,10 +694,6 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     const networkId = network?.networkId ?? await computeNetworkId(network?.genesisId);
     const chainConf = resolveChainConfig(config, network);
     const publicChainSummary = buildPublicChainSummary(chainConf);
-    // Process-wide multi-RPC write-failover counters (host-only; no URLs).
-    // Reflects WRITE failover/exhaustion across all chain adapters in this
-    // daemon process; read-path failover is internal to the FallbackProvider.
-    const rpcFailoverStats = getRpcFailoverStats();
     const blockExplorerUrl =
       config.blockExplorerUrl ?? deriveBlockExplorerUrl(chainConf?.chainId);
     const identityId = agent.publisher.getIdentityId();
@@ -897,23 +893,8 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       localAgentIntegrations,
       connectedLocalAgentIds: localAgentIntegrations.filter((integration) => integration.enabled).map((integration) => integration.id),
       autoUpdate: resolveAutoUpdateEnabled(config),
-      chain: publicChainSummary
-        ? {
-            ...publicChainSummary,
-            // Multi-RPC failover observability (counts only — no RPC URLs).
-            rpcFailovers: rpcFailoverStats.failovers,
-            rpcExhaustions: rpcFailoverStats.exhaustions,
-            rpcFailoversByClass: rpcFailoverStats.byErrorClass,
-            // Per-provider distribution (host-only). `served` is the success side
-            // — which endpoint is actually carrying the traffic — and `failed` is
-            // the failover side. Together they show provider health at a glance.
-            rpcServedByEndpointHost: rpcFailoverStats.servedByEndpointHost,
-            rpcFailoversByEndpointHost: rpcFailoverStats.byEndpointHost,
-            // Endpoint-stickiness: times the client stuck to a backup after a
-            // failover (a rising count = a configured primary is degraded).
-            rpcPreferredEstablishments: rpcFailoverStats.preferredEstablishments,
-          }
-        : null,
+      // The static summary plus process-wide endpoint observability (see status-chain-rpc.ts).
+      chain: publicChainSummary ? { ...publicChainSummary, ...chainRpcStatusFields() } : null,
       updateAvailable:
         daemonState.lastUpdateCheck.checkedAt > 0 ? !daemonState.lastUpdateCheck.upToDate : null,
       // True when this node pins an auto-update channel that has no acceptable
