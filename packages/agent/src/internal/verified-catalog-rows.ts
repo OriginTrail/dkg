@@ -78,8 +78,11 @@ export interface Rfc64VerifiedCatalogRowsV1 {
   find(binding: string | undefined, canonicalRow: string): VerifiedCatalogRowV1 | undefined;
   /** A successor completed: its rows, and only they, are the remembered set. */
   replace(binding: string | undefined, rows: ReadonlyMap<string, VerifiedCatalogRowV1>): void;
-  /** A production failed: nothing verified for this catalog is trusted again. */
-  clear(): void;
+  /**
+   * A production failed: nothing remembered about this catalog is trusted again. For a set that
+   * stands alone that is its rows; the catalog mutation memory forgets the scope's state as well.
+   */
+  invalidate(): void;
 }
 
 /** The verified rows of one author catalog scope: those of its latest completed successor. */
@@ -105,6 +108,11 @@ export class Rfc64VerifiedCatalogRowSetV1 implements Rfc64VerifiedCatalogRowsV1 
     this.#rows = new Map(rows);
   }
 
+  invalidate(): void {
+    this.clear();
+  }
+
+  /** Empty the set. */
   clear(): void {
     this.#binding = undefined;
     this.#rows = new Map();
@@ -244,7 +252,7 @@ export class Rfc64SuccessorRowVerificationV1 {
 
   /** The production failed: nothing verified for this catalog is trusted again. */
   abandon(): void {
-    this.#remembered?.clear();
+    this.#remembered?.invalidate();
   }
 
   /** What a remembered set holds for one produced row, and where a fresh outcome is filed. */

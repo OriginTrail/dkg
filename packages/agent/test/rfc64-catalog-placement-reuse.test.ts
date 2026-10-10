@@ -121,8 +121,9 @@ describe('RFC-64 catalog placement over a remembered catalog', () => {
     expect(applied).not.toHaveBeenCalled();
     expect(announce).not.toHaveBeenCalled();
     // What the answer rests on is read from the durable store again, and nothing else: the applied
-    // head record, the head and its delegation, and the bundle of the row the marker is about.
-    expect(stores.reads).toEqual({ bundles: 1, controlObjects: 2, appliedHead: 1, inventorySnapshot: 0, cas: 0 });
+    // head record; the head and its delegation; the head, its directory root and its bucket as a
+    // successor would read them; and the bundle of the row the marker is about.
+    expect(stores.reads).toEqual({ bundles: 1, controlObjects: 2 + 3, appliedHead: 1, inventorySnapshot: 0, cas: 0 });
     expect(verifications.transferredBundle).toBe(0);
     expect(appliedHead(agent)).toEqual(head);
     expect(persistenceOf(agent).finalizedPrivatePlacementRepairs.list()).toEqual([]);

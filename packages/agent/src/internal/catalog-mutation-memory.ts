@@ -55,12 +55,13 @@ import {
  * - no mutation of the scope has failed between its read of the state and its applied-head CAS.
  *
  * It never replaces a check: the applied-head CAS on the expected digest stays the authority, and
- * the successor still reads its predecessor from the durable store and verifies it. What a state
- * served from memory does not read again is the head's directory root and bucket and the bundles
- * of its rows. A successor reads the root, the bucket and every unchanged row's bundle back;
- * before a decision about one row ends work without a successor, that row's bundle is read back
- * too ({@link Rfc64CatalogMutationMemoryV1.confirmRowBundle}). Memory is bounded by a number of
- * scopes and a number of retained bytes, and nothing is persisted.
+ * the successor still reads its predecessor from the durable store and verifies it. A state that
+ * ends work without a successor does the same first: the head's directory root and bucket are
+ * read back and verified, and for a decision about one row that row's bundle too
+ * ({@link Rfc64CatalogMutationMemoryV1.confirmDurable}). What a state served from memory never
+ * reads again by itself is the bundles of the rows no decision is about; a successor reads every
+ * unchanged row's bundle back. Memory is bounded by a number of scopes and a number of retained
+ * bytes, and nothing is persisted.
  */
 
 export interface Rfc64CatalogMutationStateV1 {
@@ -106,11 +107,6 @@ interface RememberedScopeV1 {
   state: Rfc64CatalogMutationStateV1 | undefined;
   authority: string | undefined;
   stateBytes: number;
-  /**
-   * The state is the one the running mutation's own applied-head CAS made, and no successor of it
-   * has been asked for since.
-   */
-  committed: boolean;
   readonly rows: Rfc64VerifiedCatalogRowSetV1;
   /** What a production of the scope is given: lookups, and admission through this memory. */
   readonly verifiedRows: Rfc64VerifiedCatalogRowsV1;
@@ -184,6 +180,30 @@ export type Rfc64SignedCatalogSuccessorV1 = Pick<
   'headObjectDigest' | 'signatureVariantDigest' | 'assets'
 >;
 
+/**
+ * One serialized mutation of a scope, as the memory follows it. The mutation says when it asks for
+ * a successor, when that successor's applied-head CAS returned and whether it failed; what a
+ * failure forgets is decided from those three alone.
+ *
+ * A failure forgets everything remembered about the scope, with one exception: a failure after
+ * `committed`, before `producing` is called again, says nothing about the catalog (handing the
+ * committed head to its peers, a cancellation between two successors). What the commit left
+ * remembered stays.
+ */
+export interface Rfc64CatalogMutationV1 {
+  /** A successor is asked for: from here to `committed` a failure may come from the catalog. */
+  producing(): void;
+  /** The applied-head CAS of that successor returned: the state after it (see `advance`). */
+  committed(
+    previous: Rfc64CatalogMutationStateV1,
+    applied: AppliedCatalogHeadSnapshotV1,
+    successor: Rfc64SignedCatalogSuccessorV1,
+    assets: readonly Rfc64CatalogSuccessorAssetInputV1[],
+  ): Rfc64CatalogMutationStateV1;
+  /** The mutation failed. */
+  failed(): void;
+}
+
 export class Rfc64CatalogMutationMemoryV1 {
   readonly #limits: Rfc64CatalogMutationMemoryLimitsV1;
   readonly #readVerified: typeof readVerifiedRfc64CatalogMutationStateV1;
@@ -256,29 +276,29 @@ export class Rfc64CatalogMutationMemoryV1 {
     return read;
   }
 
-  /**
-   * One serialized mutation of the scope starts. If it fails, everything remembered about the
-   * scope is read and verified again, with one exception: a failure that follows the mutation's
-   * own applied-head CAS, before a further successor was asked for, says nothing about the catalog
-   * (the announcement of the committed head, a cancellation between two successors). The committed
-   * state stays.
-   */
-  mutation(catalogScopeDigest: Digest32V1, authorAddress: string): Readonly<{ failed(): void }> {
+  /** One serialized mutation of the scope starts. */
+  mutation(catalogScopeDigest: Digest32V1, authorAddress: string): Rfc64CatalogMutationV1 {
     const key = scopeKeyV1(catalogScopeDigest, authorAddress);
-    const known = this.#scopes.get(key);
-    if (known !== undefined) known.committed = false;
+    // Whether the last thing this mutation did was to commit a successor. `advance` has by then
+    // kept what the commit proves and forgotten the scope if the commit proves nothing.
+    let afterCommit = false;
     return Object.freeze({
+      producing: (): void => {
+        afterCommit = false;
+      },
+      committed: (
+        previous: Rfc64CatalogMutationStateV1,
+        applied: AppliedCatalogHeadSnapshotV1,
+        successor: Rfc64SignedCatalogSuccessorV1,
+        assets: readonly Rfc64CatalogSuccessorAssetInputV1[],
+      ): Rfc64CatalogMutationStateV1 => {
+        afterCommit = true;
+        return this.advance(previous, applied, successor, assets);
+      },
       failed: (): void => {
-        if (this.#scopes.get(key)?.committed !== true) this.#forget(key);
+        if (!afterCommit) this.#forget(key);
       },
     });
-  }
-
-  /** A successor of `state` is asked for: from here to its applied-head CAS a failure forgets the scope. */
-  producing(state: Rfc64CatalogMutationStateV1): void {
-    const origin = this.#origins.get(state);
-    const scope = origin === undefined ? undefined : this.#scopes.get(origin.key);
-    if (scope !== undefined) scope.committed = false;
   }
 
   /**
@@ -307,31 +327,43 @@ export class Rfc64CatalogMutationMemoryV1 {
     });
     const origin = this.#origins.get(previous);
     if (origin === undefined) return next;
-    if (!this.#namesTheSignedSet(applied, successor, next.assets)) {
+    if (this.#namesTheSignedSet(applied, successor, next.assets)) {
+      this.#keep(origin.key, origin.authority, next);
+    } else {
       this.#forget(origin.key);
-    } else if (this.#keep(origin.key, origin.authority, next)) {
-      this.#scopes.get(origin.key)!.committed = true;
     }
     return next;
   }
 
   /**
-   * Before a decision about one row ends work without producing a successor (a covered repair
-   * retires its durable marker), that row's bundle is read from the durable store again: it must
-   * be there and hold the remembered bytes. Anything else forgets the scope and fails the
-   * decision, as a read of the durable catalog would.
+   * Before a state ends work without producing a successor: a covered repair retires its durable
+   * marker, an upsert finds its asset already placed, a projection finds nothing to do. The
+   * applied head's directory root and bucket are read from the durable store and verified again,
+   * as a successor would read them. For a decision about one row the bucket must name that row's
+   * remembered bundle, and the bundle must be in the store, byte for byte. Anything else forgets
+   * the scope and fails the decision, as a read of the durable catalog would.
    */
-  async confirmRowBundle(
+  async confirmDurable(
     persistence: Rfc64PersistenceV1,
     catalogScopeDigest: Digest32V1,
     authorAddress: string,
-    asset: Rfc64CatalogSuccessorAssetInputV1,
+    state: Rfc64CatalogMutationStateV1,
+    asset?: Rfc64CatalogSuccessorAssetInputV1,
   ): Promise<void> {
+    // With the memory off the state was read from the durable store, bundles and all, just now.
+    if (this.#limits.maxScopes < 1) return;
     try {
+      const history = await loadBoundedAuthorCatalogHistoryV1(persistence, state.previousHead);
+      if (asset === undefined) return;
       const encoded = encodeOpaqueKaBundleV1(
         asset.projectionBytes,
         canonicalizeCanonicalGraphScopedAuthorSealBytesV1(asset.seal),
       );
+      const row = history.previousBucket?.payload.rows.find(({ kaId }) => kaId === asset.seal.reservedKaId);
+      // The blob digest covers the projection and the seal: the same digest is the same bundle.
+      if (row?.transfer.blobDigest !== encoded.blobDigest) {
+        throw new Error('RFC-64 applied catalog bundle differs from its signed predecessor row');
+      }
       const stored = await persistence.kaBundles.readKaBundleByDigest(encoded.blobDigest);
       if (stored === null) {
         throw new Error(`RFC-64 applied catalog bundle ${encoded.blobDigest} is unavailable`);
@@ -358,8 +390,7 @@ export class Rfc64CatalogMutationMemoryV1 {
 
   /**
    * Where a production of the scope looks up the rows verified so far and files the rows of the
-   * successor it completes, or undefined when nothing is remembered. Handing it out is the start
-   * of a production.
+   * successor it completes, or undefined when nothing is remembered.
    */
   verifiedRows(
     catalogScopeDigest: Digest32V1,
@@ -368,7 +399,6 @@ export class Rfc64CatalogMutationMemoryV1 {
     if (this.#limits.maxScopes < 1) return undefined;
     const key = scopeKeyV1(catalogScopeDigest, authorAddress);
     const scope = this.#scope(key);
-    scope.committed = false;
     this.#touch(key, scope);
     this.#evict();
     return scope.verifiedRows;
@@ -416,7 +446,6 @@ export class Rfc64CatalogMutationMemoryV1 {
       state: undefined,
       authority: undefined,
       stateBytes: 0,
-      committed: false,
       rows,
       // A production keeps this for as long as it runs. Once the scope is forgotten or evicted
       // its rows are gone, and the production files nothing back.
@@ -430,7 +459,7 @@ export class Rfc64CatalogMutationMemoryV1 {
           rows.replace(binding, verified);
           this.#settle(key, scope);
         },
-        clear: () => {
+        invalidate: () => {
           if (this.#scopes.get(key) === scope) this.#forget(key);
         },
       }),
@@ -450,7 +479,6 @@ export class Rfc64CatalogMutationMemoryV1 {
     scope.state = undefined;
     scope.authority = undefined;
     scope.stateBytes = 0;
-    scope.committed = false;
   }
 
   /** Keep `state` for the scope if it fits; says whether it was kept. */

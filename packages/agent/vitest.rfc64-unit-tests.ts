@@ -64,6 +64,8 @@ export const RFC64_UNIT_TESTS = [
   // #3081 / #3072 — one placement no longer reads and verifies the whole catalog three times.
   "test/rfc64-verified-catalog-rows.test.ts",
   "test/rfc64-catalog-mutation-memory.test.ts",
+  "test/rfc64-catalog-mutation-memory-bounds.test.ts",
+  "test/rfc64-catalog-mutation-memory-durable.test.ts",
   "test/rfc64-catalog-placement-reuse.test.ts",
   "test/rfc64-catalog-placement-memory-rules.test.ts",
   "test/rfc64-dkg-agent-successor-publication.integration.test.ts",

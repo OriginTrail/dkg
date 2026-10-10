@@ -166,14 +166,22 @@ export function placementPolicyDigestV1(agent: DKGAgent): string {
 /**
  * Count what the agent reads from its durable stores from now on. `failNextCas` fails one
  * applied-head CAS, `afterNextCas` runs once right after the next one that succeeds, with the
- * digest of the head it applied, and `onReset` runs with every `reset`. `lose` makes one stored bundle or control object read as absent, as it
- * would after its file was removed, until it is staged again or `restore`d.
+ * digest of the head it applied, and `onReset` runs with every `reset`. `lose` makes one stored
+ * bundle or control object read as absent, as it would after its file was removed, until it is
+ * staged again or `restore`d; `spoil` makes one control object unreadable, as it would be if its
+ * file no longer held what its digest names.
  */
 export function watchPlacementStoresV1(agent: DKGAgent, onReset: () => void = () => {}) {
   const real = placementPersistenceV1(agent);
   const reads = { bundles: 0, controlObjects: 0, appliedHead: 0, inventorySnapshot: 0, cas: 0 };
   const lost = new Set<string>();
+  const spoilt = new Set<string>();
   const stagedAgain: string[] = [];
+  /** Null for a lost control object, a rejection for a spoilt one, undefined for one to read. */
+  const stored = (digest: string): null | undefined => {
+    if (spoilt.has(digest)) throw new Error(`[control-store-corrupt] stored control object ${digest} does not verify`);
+    return lost.has(digest) ? null : undefined;
+  };
   let casFailure: Error | undefined;
   let afterCas: ((committedHeadDigest: string) => void) | undefined;
   const views: Record<string, unknown> = {
@@ -193,13 +201,15 @@ export function watchPlacementStoresV1(agent: DKGAgent, onReset: () => void = ()
       ...real.controlObjects,
       getVerifiedObject: async (...args: Parameters<typeof real.controlObjects.getVerifiedObject>) => {
         reads.controlObjects += 1;
-        return lost.has(args[0].objectDigest) ? null : real.controlObjects.getVerifiedObject(...args);
+        const absent = stored(args[0].objectDigest);
+        return absent === null ? null : real.controlObjects.getVerifiedObject(...args);
       },
       getVerifiedObjectByDigest: async (
         ...args: Parameters<typeof real.controlObjects.getVerifiedObjectByDigest>
       ) => {
         reads.controlObjects += 1;
-        return lost.has(args[0].objectDigest) ? null : real.controlObjects.getVerifiedObjectByDigest(...args);
+        const absent = stored(args[0].objectDigest);
+        return absent === null ? null : real.controlObjects.getVerifiedObjectByDigest(...args);
       },
     },
     inventory: {
@@ -256,8 +266,12 @@ export function watchPlacementStoresV1(agent: DKGAgent, onReset: () => void = ()
     lose(digest: string): void {
       lost.add(digest);
     },
+    spoil(digest: string): void {
+      spoilt.add(digest);
+    },
     restore(digest: string): void {
       lost.delete(digest);
+      spoilt.delete(digest);
     },
     /** Bundles that were lost and that the agent has put back since. */
     stagedAgain,

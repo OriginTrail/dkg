@@ -197,8 +197,9 @@ describe('RFC-64 catalog mutation memory on a running agent', () => {
       expect(actualPass!.results).toEqual([{ status: 'existing', sourceCurrent: true, successorsApplied: 0 }]);
       expect(expectedPass!.results).toEqual(actualPass!.results);
       await expectSameCatalog(remembering, rereading);
-      // The agent that remembers answered that pass without reading one bundle; the other read all four.
-      expect(actualPass!.reads).toMatchObject({ bundles: 0, controlObjects: 2, cas: 0 });
+      // The agent that remembers answered that pass without reading one bundle: it read the applied
+      // head and its delegation, then head, directory root and bucket. The other read all four bundles.
+      expect(actualPass!.reads).toMatchObject({ bundles: 0, controlObjects: 2 + 3, cas: 0 });
       expect(expectedPass!.reads).toMatchObject({ bundles: 4, cas: 0 });
       expect(kaNumbers((await appliedCatalogObjects(remembering)).state.assets))
         .toEqual(['1@1', '2@1', '3@1', '4@1']);
@@ -463,6 +464,8 @@ describe('RFC-64 catalog mutation memory on a running agent', () => {
         bundleDigest: row.transfer.blobDigest,
         headDigest: state.previousHead.objectDigest,
         delegationDigest: state.catalogIssuerAuthorization.catalogIssuerDelegation.objectDigest,
+        rootDigest: history.previousDirectoryPath[0]!.objectDigest,
+        bucketDigest: history.previousBucket!.objectDigest,
         markers: persistenceOf(agent).finalizedPrivatePlacementRepairs,
         memory: rfc64CatalogMutationMemoryV1(agent),
         stores: watchDurableStores(agent),
@@ -513,11 +516,14 @@ describe('RFC-64 catalog mutation memory on a running agent', () => {
     it.each([
       ['applied head', 'headDigest', 'RFC-64 applied author head is not durably staged'],
       ['delegation of the applied head', 'delegationDigest', 'RFC-64 applied author head delegation is not durably staged'],
+      ['directory root of the applied head', 'rootDigest', 'RFC-64 predecessor directory root is not staged'],
+      ['bucket of the applied head', 'bucketDigest', 'RFC-64 predecessor bucket is not staged'],
     ] as const)('refuses every use of the catalog while the %s is not in the durable store', async (_object, which, refusal) => {
       const context = await placed(`memory-rules-lost-${which}`);
       const { agent, repair, markers, memory, stores } = context;
       expect(memory.retained.states).toBe(1);
 
+      // The repair of a row that is placed: the answer would retire its marker.
       stores.lose(context[which]);
       await markers.put(repair);
       await expect(agent.repairRfc64FinalizedPrivateCatalogPlacementV1(repair)).rejects.toThrow(refusal);
@@ -528,7 +534,65 @@ describe('RFC-64 catalog mutation memory on a running agent', () => {
 
       stores.restore(context[which]);
       await expect(agent.repairRfc64FinalizedPrivateCatalogPlacementV1(repair)).resolves.toBe('already-complete');
+      expect(markers.list()).toEqual([]);
       await expect(upsert(agent, await asset(4))).resolves.toMatchObject({ inventoryRowCount: '4' });
+    }, 60_000);
+
+    it.each([
+      ['directory root', 'rootDigest'],
+      ['bucket', 'bucketDigest'],
+    ] as const)('keeps the marker of a placed row while the %s of the applied head cannot be read', async (_object, which) => {
+      const context = await placed(`memory-rules-spoilt-${which}`);
+      const { agent, repair, markers, memory, stores } = context;
+      expect(memory.retained.states).toBe(1);
+
+      stores.spoil(context[which]);
+      await markers.put(repair);
+      await expect(agent.repairRfc64FinalizedPrivateCatalogPlacementV1(repair))
+        .rejects.toThrow(`stored control object ${context[which]} does not verify`);
+      expect(markers.list()).toEqual([repair]);
+      expect(memory.retained).toEqual({ scopes: 0, states: 0, bytes: 0 });
+
+      stores.restore(context[which]);
+      await expect(agent.repairRfc64FinalizedPrivateCatalogPlacementV1(repair)).resolves.toBe('already-complete');
+      expect(markers.list()).toEqual([]);
+    }, 60_000);
+
+    it.each([
+      ['directory root', 'RFC-64 predecessor directory root is not staged'],
+      ['bucket', 'RFC-64 predecessor bucket is not staged'],
+    ] as const)('reports nothing as already done while the %s of the applied head is gone', async (object, refusal) => {
+      const agent = await startPlacementAgent(`memory-rules-nothing-done-${object.replace(' ', '-')}`);
+      const memory = rfc64CatalogMutationMemoryV1(agent);
+      await upsert(agent, await asset(1));
+      await upsert(agent, await asset(2));
+      const head = appliedHead(agent);
+      const { history } = await appliedCatalogObjects(agent);
+      const gone = object === 'bucket'
+        ? history.previousBucket!.objectDigest
+        : history.previousDirectoryPath[0]!.objectDigest;
+      const stores = watchDurableStores(agent);
+      const upToDate = async () => agent.reconcileRfc64PublicRootCatalogExactSetV1({
+        ...MUTATION,
+        assets: [await asset(1), await asset(2)],
+      });
+
+      // An asset that is already placed: the upsert would answer from the remembered state.
+      expect(memory.retained.states).toBe(1);
+      stores.lose(gone);
+      await expect(upsert(agent, await asset(1))).rejects.toThrow(refusal);
+      expect(memory.retained).toEqual({ scopes: 0, states: 0, bytes: 0 });
+      stores.restore(gone);
+      await expect(upsert(agent, await asset(1))).resolves.toEqual(head);
+
+      // A target the catalog already equals: so would the reconciliation.
+      expect(memory.retained.states).toBe(1);
+      stores.lose(gone);
+      await expect(upToDate()).rejects.toThrow(refusal);
+      expect(memory.retained).toEqual({ scopes: 0, states: 0, bytes: 0 });
+      stores.restore(gone);
+      await expect(upToDate()).resolves.toMatchObject({ status: 'existing', successorsApplied: 0 });
+      expect(appliedHead(agent)).toEqual(head);
     }, 60_000);
 
     it('forgets the scope when the head it has just committed cannot be read back for the next successor', async () => {
