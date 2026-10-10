@@ -381,6 +381,32 @@ describe('RFC-64 catalog head delivery: one owner per scope, newest head', () =>
     expect(outcomes.some(({ checkpointCapacityExceeded }) => checkpointCapacityExceeded)).toBe(false);
   });
 
+  it('reports a checkpoint that has no room for a peer named later', async () => {
+    vi.useFakeTimers();
+    const { delivery, sends, outcomes, behaviour } = harness();
+    behaviour.set('slow-peer', 'stall');
+    const step = RFC64_CATALOG_HEAD_DELIVERY_MAX_VERSION_STEP_V1;
+    const named = peers(RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1, 'named');
+
+    delivery.deliver({ announcement: head('1'), peers: ['slow-peer'] });
+    await settle();
+    // The head at 1 + step becomes a checkpoint with as many peers as one fan-out addresses.
+    delivery.deliver({ announcement: head(String(1 + step)), peers: named });
+    delivery.deliver({ announcement: head(String(2 + step)), peers: named });
+    // A peer that is named only now cannot be added to it.
+    delivery.deliver({ announcement: head(String(3 + step)), peers: ['late-peer'] });
+    await vi.advanceTimersByTimeAsync(BUDGET_MS);
+    await settle();
+
+    expect(sends.filter(({ peerId }) => peerId === 'late-peer').map(({ version }) => Number(version)))
+      .toEqual([3 + step]);
+    // The scope's next fan-out says that a head could not be given to everyone it was owed to.
+    expect(outcomes.map(({ announcement, checkpointCapacityExceeded }) => [
+      Number(announcement.catalogVersion),
+      checkpointCapacityExceeded,
+    ])).toEqual([[1, false], [1 + step, true], [2 + step, false], [3 + step, false]]);
+  });
+
   it('keeps a checkpoint for every step of a backlog as deep as one scope may hold', async () => {
     vi.useFakeTimers();
     const { delivery, sends, outcomes, behaviour } = harness();
