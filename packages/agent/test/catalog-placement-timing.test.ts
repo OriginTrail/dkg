@@ -24,7 +24,7 @@ import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
   '../src/rfc64/finalized-private-placement-repair-store-v1.js';
 
 const ASSET = Object.freeze({ kaUal: 'did:dkg:otp:20430/0x1111111111111111111111111111111111111111/7', assertionVersion: '3' });
-const DENIED = '[catalog-transport-policy-denied] catalog operation is not access-policy authorized';
+const DENIED = 'catalog-transport-policy-denied' as const;
 
 function harness(logThresholdMs = 0) {
   const clock = { now: 0 };
@@ -81,7 +81,7 @@ describe('catalog placement timing', () => {
     clock.now = 154_010;
     attempt.announced({
       announcedPeers: ['peer-a'],
-      failedPeers: [{ error: DENIED }, { error: DENIED }, { error: 'timeout' }],
+      failedPeers: [{ code: DENIED }, { code: DENIED }, {}],
     }, announce);
     clock.now = 154_100;
     admission.end('completed');
@@ -202,6 +202,26 @@ describe('catalog placement timing', () => {
     expect(fields(lines[0]!.message)).toMatchObject({ cooldownSkips: '1', observerCall: '2' });
     // Every skipped marker counts once in the aggregate, waiters or not.
     expect(timing.queueStatus(new Map(), false).cooldownSkips).toBe(5);
+  });
+
+  it('counts policy denials from the transport\'s typed code, never from the failure text', () => {
+    const { timing, lines, log } = harness();
+    const repair = {};
+    const wait = timing.beginWait(ASSET, createOperationContext('publish'));
+    const waiter = supervisorWaiter(timing);
+    wait.requested(waiter.whenAttempted);
+    const admission = timing.admit(repair);
+    const attempt = timing.attemptFor(repair);
+    const failures = [
+      { error: 'the peer refused this announcement', code: DENIED },
+      { error: '[catalog-transport-policy-denied] text alone is display, not evidence' },
+      { error: 'catalog-head announcement returned an invalid acknowledgement', code: 'catalog-transport-wire' as const },
+    ];
+    attempt.announced({ announcedPeers: [], failedPeers: failures }, attempt.now());
+    admission.end('completed');
+    timing.waitersSettled([waiter.settle], admission);
+    wait.end(log);
+    expect(fields(lines[0]!.message)).toMatchObject({ peers: '3', failedPeers: '3', deniedPeers: '1' });
   });
 
   it('charges the repair body only to the attempt in flight for the exact listed marker', () => {

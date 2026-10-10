@@ -31,7 +31,6 @@ import {
   startRepairAgentV1,
 } from './support/rfc64-local-catalog-repair-fixture.js';
 
-const DENIED = '[catalog-transport-policy-denied] catalog operation is not access-policy authorized';
 
 /** An author whose confirmed private placements go through the real repair path. */
 async function startPlacementAgent(name: string) {
@@ -113,7 +112,12 @@ describe('catalog placement wait attribution', () => {
       return Object.freeze({
         announcement: input.announcement,
         announcedPeers: Object.freeze(['peer-a', 'peer-b']),
-        failedPeers: Object.freeze([Object.freeze({ peerId: 'peer-c', error: DENIED })]),
+        // Classified by the transport's typed code; the wording is display text only.
+        failedPeers: Object.freeze([Object.freeze({
+          peerId: 'peer-c',
+          error: 'the peer refused this announcement',
+          code: 'catalog-transport-policy-denied' as const,
+        })]),
       });
     });
 

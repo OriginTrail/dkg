@@ -370,7 +370,7 @@ export interface PublishOpenAuthorCatalogSuccessorResultV1 {
   readonly kaUal: string;
   readonly inventoryRowCount: CountV1;
   readonly announcedPeers: readonly string[];
-  readonly failedPeers: ReadonlyArray<{ readonly peerId: string; readonly error: string }>;
+  readonly failedPeers: AnnounceRfc64PublicCatalogHeadResultV1['failedPeers'];
 }
 
 export interface PublishAuthorCatalogSuccessorAssetResultV1 {
@@ -401,7 +401,7 @@ export interface PublishAuthorCatalogExactSetSuccessorResultV1 {
   readonly assets: readonly Readonly<PublishAuthorCatalogSuccessorAssetResultV1>[];
   readonly inventoryRowCount: CountV1;
   readonly announcedPeers: readonly string[];
-  readonly failedPeers: ReadonlyArray<{ readonly peerId: string; readonly error: string }>;
+  readonly failedPeers: AnnounceRfc64PublicCatalogHeadResultV1['failedPeers'];
 }
 
 export type PublishOpenAuthorCatalogSuccessorAssetResultV1 =

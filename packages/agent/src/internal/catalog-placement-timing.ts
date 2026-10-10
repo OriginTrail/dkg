@@ -2,6 +2,8 @@
 
 import type { Logger, OperationContext } from '@origintrail-official/dkg-core';
 
+import type { Rfc64PublicCatalogTransportErrorCodeV1 } from '../rfc64/public-catalog-transport-v1.js';
+
 /**
  * GH#3081 — where a confirmed publication waits for its RFC-64 catalog placement. Observation
  * only: no repair, admission or retry decision reads anything recorded here, every entry point
@@ -25,7 +27,7 @@ import type { Logger, OperationContext } from '@origintrail-official/dkg-core';
 /** An observer wait at or above this writes its line; shorter waits write nothing. */
 export const CATALOG_PLACEMENT_WAIT_LOG_THRESHOLD_MS = 5_000;
 const MAX_TRACKED_ENTRIES = 512;
-const POLICY_DENIED_ERROR_PREFIX = '[catalog-transport-policy-denied]';
+const POLICY_DENIED_CODE: Rfc64PublicCatalogTransportErrorCodeV1 = 'catalog-transport-policy-denied';
 
 export const CATALOG_PLACEMENT_PHASES = [
   /** `rfc64CatalogCoversConfirmedSwmRowV1`: a verified applied-state load outside the lock. */
@@ -50,9 +52,10 @@ export interface CatalogPlacementAssetV1 {
   readonly assertionVersion: string;
 }
 
+/** An announcement's delivery; a failure's `code` is the transport's own typed classification. */
 export interface CatalogPlacementDeliveryV1 {
   readonly announcedPeers: readonly unknown[];
-  readonly failedPeers: readonly Readonly<{ readonly error: string }>[];
+  readonly failedPeers: readonly Readonly<{ readonly code?: Rfc64PublicCatalogTransportErrorCodeV1 }>[];
 }
 
 /** What the supervisor holds for the attempt it admitted. */
@@ -311,9 +314,7 @@ export class CatalogPlacementTimingV1 {
           record.phaseMs.announce += elapsedSince(startedAt);
           record.peers += delivery.announcedPeers.length + delivery.failedPeers.length;
           record.failedPeers += delivery.failedPeers.length;
-          record.deniedPeers += delivery.failedPeers.filter(
-            ({ error }) => error.startsWith(POLICY_DENIED_ERROR_PREFIX),
-          ).length;
+          record.deniedPeers += delivery.failedPeers.filter(({ code }) => code === POLICY_DENIED_CODE).length;
         }),
       };
     } catch {
