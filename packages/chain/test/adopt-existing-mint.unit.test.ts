@@ -250,12 +250,16 @@ describe('existing mint provenance', () => {
     await expect(adoption).rejects.toMatchObject({ code: 'KA_SUPERSEDED' });
   });
 
-  it('refuses missing roots through the shared content error', async () => {
+  it.each(['roots', 'graph binding'] as const)('leaves a lagging read without %s unavailable, then adopts once current', async (missing) => {
     const f = fixture();
-    f.roots.length = 0;
-    const adoption = f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID);
-    await expect(adoption).rejects.toBeInstanceOf(AdoptExistingMintRefusalError);
-    await expect(adoption).rejects.toMatchObject({ code: 'KA_ID_COLLISION' });
+    const [root] = f.roots;
+    if (missing === 'roots') f.roots.length = 0; else f.bindings.set(KA_ID, 0n);
+    await expect(f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID)).resolves.toBeNull();
+    expect(f.queryEventLogsPage).not.toHaveBeenCalled();
+    f.roots.splice(0, f.roots.length, root);
+    f.bindings.set(KA_ID, CG_ID);
+    await expect(f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID))
+      .resolves.toMatchObject({ txHash: HASH, kaId: KA_ID });
   });
 
   it('keeps root collision before superseded before graph mismatch refusals', async () => {

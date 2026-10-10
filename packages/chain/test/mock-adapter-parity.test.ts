@@ -781,9 +781,10 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     const collision = mock.getMintedKnowledgeAssetProvenance(created.batchId, new Uint8Array(32), 2n);
     await expect(collision).rejects.toBeInstanceOf(AdoptExistingMintRefusalError);
     await expect(collision).rejects.toMatchObject({ code: 'KA_ID_COLLISION' });
-    const missing = mock.getMintedKnowledgeAssetProvenance(created.batchId + 1n, root, 1n);
-    await expect(missing).rejects.toBeInstanceOf(AdoptExistingMintRefusalError);
-    await expect(missing).rejects.toMatchObject({ code: 'KA_ID_COLLISION' });
+    await expect(mock.getMintedKnowledgeAssetProvenance(created.batchId + 1n, root, 1n)).resolves.toBeNull();
+    (mock as any).collections.get(created.batchId).cgId = 0n;
+    await expect(mock.getMintedKnowledgeAssetProvenance(created.batchId, root, 1n)).resolves.toBeNull();
+    (mock as any).collections.get(created.batchId).cgId = 1n;
     mock.__setTransactionUnfinalized(created.txHash);
     await expect(mock.getMintedKnowledgeAssetProvenance(created.batchId, root, 1n)).resolves.toBeNull();
     mock.__setTransactionUnfinalized(created.txHash, false);

@@ -45,12 +45,10 @@ export async function getEvmMintedKnowledgeAssetProvenance(
   const roots: Array<{ publisher: string; merkleRoot: string; timestamp: bigint }> =
     await ports.readRoots(storage, kaId);
   if (!binding.isCurrent()) return null;
-  if (!roots || roots.length === 0) {
-    throw new AdoptExistingMintRefusalError(
-      'KA_ID_COLLISION',
-      `adopt-existing-mint: kaId ${kaId} reported minted but has no on-chain merkle roots`,
-    );
-  }
+  // The mint writes its first root and its write-once graph binding in one
+  // transaction, so an absent root or binding is a read behind the endpoint
+  // that reported the mint: unavailable evidence, never conflicting content.
+  if (!roots || roots.length === 0) return null;
   if (ethers.hexlify(roots[0].merkleRoot).toLowerCase() !== expectedHex) {
     throw new AdoptExistingMintRefusalError(
       'KA_ID_COLLISION',
@@ -69,7 +67,7 @@ export async function getEvmMintedKnowledgeAssetProvenance(
   {
     const boundCg = await ports.readContextGraphId(kaId);
     if (!binding.isCurrent()) return null;
-    if (boundCg === null) return null;
+    if (boundCg === null || boundCg === 0n) return null;
     if (boundCg !== expectedContextGraphId) {
       throw new AdoptExistingMintRefusalError(
         'KA_CG_MISMATCH',

@@ -49,14 +49,16 @@ export async function getMockMintedKnowledgeAssetProvenance(
   expectedContextGraphId: bigint,
 ): Promise<AdoptedMintPublishResult | null> {
   const collection = ports.collection;
-  if (collection === undefined || toHex(collection.merkleRoot).toLowerCase()
-    !== toHex(expectedMerkleRoot).toLowerCase()) {
+  // Same evidence rules as the EVM adapter: no stored root or graph binding is unavailable.
+  if (collection === undefined) return null;
+  if (toHex(collection.merkleRoot).toLowerCase() !== toHex(expectedMerkleRoot).toLowerCase()) {
     throw new AdoptExistingMintRefusalError('KA_ID_COLLISION',
       `Mock: minted KA ${kaId} does not match the sealed root`);
   }
   if (collection.updateContext.merkleRootsCount !== 1n) {
     throw new AdoptExistingMintRefusalError('KA_SUPERSEDED', `Mock: minted KA ${kaId} has been updated`);
   }
+  if (collection.cgId === 0n) return null;
   if (collection.cgId !== expectedContextGraphId) {
     throw new AdoptExistingMintRefusalError('KA_CG_MISMATCH',
       `Mock: minted KA ${kaId} belongs to another context graph`);
