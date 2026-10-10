@@ -24,7 +24,15 @@ const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
 const mode = options.mode;
 if (!['atomic', 'rdf'].includes(mode)) throw new Error('mode must be atomic or rdf');
 const endpoint = new URL(options.endpoint);
-if (!['127.0.0.1', '[::1]'].includes(endpoint.hostname)) throw new Error('Only loopback test stores are allowed');
+if (endpoint.protocol !== 'http:' || endpoint.username || endpoint.password || !['127.0.0.1', '[::1]'].includes(endpoint.hostname)) throw new Error('Only loopback test stores are allowed');
+// This standalone benchmark owns its process: constrain both the adapter and
+// direct RDF POSTs before dispatch, including redirects on initially local URLs.
+const fetchEndpoint = globalThis.fetch;
+globalThis.fetch = (input, init) => {
+  const destination = new URL(input instanceof Request ? input.url : input);
+  if (destination.href !== endpoint.href) throw new Error('Benchmark endpoint changed');
+  return fetchEndpoint(input, { ...init, redirect: 'error' });
+};
 const output = resolve(options.out);
 const storagePath = resolve(options['storage-path']);
 const groupSize = Number(options.group ?? '1');

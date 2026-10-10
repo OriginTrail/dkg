@@ -1,38 +1,109 @@
 import { describe, expect, it } from 'vitest';
-import { createServer } from 'node:http';
+import { createServer, type Server } from 'node:http';
 import { spawn } from 'node:child_process';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
-import oxigraph from 'oxigraph';
-async function run(mode: string, populated: 'named'|'default'|false, lowDisk = false) {
-  const home = await mkdtemp(join(tmpdir(),'ingest-guard-'));
-  const nq='<urn:s> <urn:p> "plain" <urn:g> .\n<urn:s> <urn:link> <urn:o> <urn:g> .\n<urn:s> <urn:lang> "hello"@en <urn:g> .\n<urn:s> <urn:number> "42"^^<http://www.w3.org/2001/XMLSchema#integer> <urn:g> .\n# comment without a final newline';
-  await writeFile(join(home,'input.nq'),nq);
-  await writeFile(join(home,'manifest.json'),JSON.stringify({assets:[{file:'input.nq',graph:'urn:g',quads:4,sha256:createHash('sha256').update(nq).digest('hex')}]}));
-  const graph=new oxigraph.Store(); let mutations=0;
-  if(populated) graph.load(`<urn:old> <urn:p> "keep" ${populated==='named'?'<urn:g> ':''}.`,{format:'application/n-quads'});
-  const server=createServer(async(req,res)=>{
-    const chunks=[]; for await(const c of req) chunks.push(c); const body=Buffer.concat(chunks).toString();
-    if(req.headers['content-type']?.includes('application/n-quads')) {mutations++;graph.load(body,{format:'application/n-quads'});res.end('ok');return;}
-    const params=new URLSearchParams(body);const query=req.method==='GET'?new URL(req.url!,'http://local').searchParams.get('query'):req.headers['content-type']?.includes('application/sparql-query')?body:params.get('query');
-    if(query) {const result=graph.query(query);res.setHeader('content-type','application/sparql-results+json');res.end(JSON.stringify({head:{vars:[...new Set(result.flatMap((row:Map<string,any>)=>[...row.keys()]))]},results:{bindings:result.map((row:Map<string,any>)=>Object.fromEntries([...row].map(([k,v])=>[k,{type:v.termType==='NamedNode'?'uri':'literal',value:v.value,datatype:v.datatype?.value}])) )}}));}
-    else { mutations++;graph.update(req.headers['content-type']?.includes('application/sparql-update')?body:params.get('update')!);res.end('ok'); }
-  });
-  await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));
-  const args:string[]=[];
-  if(lowDisk) { await writeFile(join(home,'guard.mjs'),`import fs from 'node:fs/promises'; import {syncBuiltinESMExports} from 'node:module'; fs.statfs=async path=>({bavail:String(path).endsWith('journal')?1:100000000,bsize:4096}); syncBuiltinESMExports();`);args.push('--import',join(home,'guard.mjs')); }
-  args.push(resolve('scripts/ingest-floor-benchmark.mjs'),'--manifest',join(home,'manifest.json'),'--endpoint',`http://127.0.0.1:${(server.address() as any).port}/sparql`,'--mode',mode,'--out',join(home,'out.json'),'--storage-path',join(home,'journal'));
-  await import('node:fs/promises').then(fs=>fs.mkdir(join(home,'journal')));
-  let output='';
-  try {const code=await new Promise<number|null>(r=>{const p=spawn(process.execPath,args,{timeout:10000});p.stdout.on('data',d=>output+=d);p.stderr.on('data',d=>output+=d);p.on('close',r);});return {code,mutations,output,size:graph.size,metadata:graph.match(null,null,null,oxigraph.namedNode('urn:benchmark:meta')).length};}
-  finally {await new Promise<void>(r=>server.close(()=>r()));await rm(home,{recursive:true,force:true});}
+import type oxigraph from 'oxigraph';
+import { startOxigraphSparqlEndpoint } from './helpers/oxigraph-sparql-endpoint.js';
+
+async function listen(server: Server): Promise<string> {
+  await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('Missing test endpoint');
+  return `http://127.0.0.1:${address.port}/query`;
 }
-describe('storage benchmark safety and RDF boundaries',()=>{
-  it.each(['atomic','rdf'])('refuses populated namespaces before %s writes',async mode=>{
-    for(const kind of ['named','default'] as const) {const r=await run(mode,kind);expect(r.code).not.toBe(0);expect(r.mutations).toBe(0);expect(r.size).toBe(1);expect(r.output).toContain('Refusing a nonempty');}
+const close = (server: Server) => new Promise<void>(resolve => server.close(() => resolve()));
+const term = (value: oxigraph.Term) => value.termType === 'Literal'
+  ? { type: value.termType, value: value.value, language: value.language, datatype: value.datatype.value }
+  : { type: value.termType, value: value.value };
+
+async function run(mode: string, populated: 'named' | 'default' | false,
+  options: { lowDisk?: boolean; redirect?: 'query' | 'mutation' } = {}) {
+  const home = await mkdtemp(join(tmpdir(), 'ingest-guard-'));
+  const nq = '<urn:s> <urn:p> "plain" <urn:g> .\n<urn:s> <urn:link> <urn:o> <urn:g> .\n<urn:s> <urn:lang> "hello"@en <urn:g> .\n<urn:s> <urn:number> "42"^^<http://www.w3.org/2001/XMLSchema#integer> <urn:g> .\n# comment without a final newline';
+  await writeFile(join(home, 'input.nq'), nq);
+  await writeFile(join(home, 'manifest.json'), JSON.stringify({ assets: [{ file: 'input.nq', graph: 'urn:g', quads: 4, sha256: createHash('sha256').update(nq).digest('hex') }] }));
+  let mutations = 0, redirectedRequests = 0;
+  const endpoint = await startOxigraphSparqlEndpoint({ onMutation: () => { mutations++; } });
+  if (populated) endpoint.store.load(`<urn:old> <urn:p> "keep" ${populated === 'named' ? '<urn:g> ' : ''}.`, { format: 'application/n-quads' });
+  let url = endpoint.queryEndpoint;
+  const servers: Server[] = [];
+  if (options.redirect) {
+    const target = createServer((_req, res) => { redirectedRequests++; res.end('unexpected'); });
+    servers.push(target);
+    const destination = await listen(target);
+    const proxy = createServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(Buffer.from(chunk));
+      const type = String(req.headers['content-type']);
+      const mutation = type.includes('n-quads') || type.includes('sparql-update');
+      if (options.redirect === 'query' || mutation) {
+        res.writeHead(307, { location: destination }); res.end(); return;
+      }
+      const response = await fetch(endpoint.queryEndpoint, { method: 'POST',
+        headers: { 'content-type': type, accept: String(req.headers.accept) }, body: Buffer.concat(chunks) });
+      res.writeHead(response.status, { 'content-type': String(response.headers.get('content-type')) });
+      res.end(await response.text());
+    });
+    servers.push(proxy); url = await listen(proxy);
+  }
+  const args: string[] = [];
+  if (options.lowDisk) {
+    await writeFile(join(home, 'guard.mjs'), `import fs from 'node:fs/promises'; import {syncBuiltinESMExports} from 'node:module'; fs.statfs=async path=>({bavail:String(path).endsWith('journal')?1:100000000,bsize:4096}); syncBuiltinESMExports();`);
+    args.push('--import', join(home, 'guard.mjs'));
+  }
+  args.push(resolve('scripts/ingest-floor-benchmark.mjs'), '--manifest', join(home, 'manifest.json'),
+    '--endpoint', url, '--mode', mode, '--out', join(home, 'out.json'), '--storage-path', join(home, 'journal'));
+  await mkdir(join(home, 'journal'));
+  let output = '';
+  try {
+    const code = await new Promise<number | null>(resolve => {
+      const child = spawn(process.execPath, args, { timeout: 10000 });
+      child.stdout.on('data', d => { output += d; }); child.stderr.on('data', d => { output += d; });
+      child.on('close', resolve);
+    });
+    const quads = endpoint.store.match().map(q => ({ subject: term(q.subject), predicate: term(q.predicate), object: term(q.object), graph: term(q.graph) }));
+    return { code, mutations, redirectedRequests, output, quads };
+  } finally {
+    for (const server of servers.reverse()) await close(server);
+    await endpoint.close(); await rm(home, { recursive: true, force: true });
+  }
+}
+
+describe('storage benchmark safety and RDF boundaries', () => {
+  it.each(['atomic', 'rdf'])('refuses populated namespaces before %s writes', async mode => {
+    for (const kind of ['named', 'default'] as const) {
+      const r = await run(mode, kind);
+      expect(r.code).not.toBe(0); expect(r.mutations).toBe(0); expect(r.quads).toHaveLength(1);
+      expect(r.output).toContain('Refusing a nonempty');
+    }
   });
-  it.each(['atomic','rdf'])('checks the journal filesystem before %s writes',async mode=>{const r=await run(mode,false,true);expect(r.code).toBe(1);expect(r.mutations).toBe(0);expect(r.output).toContain('Disk below');});
-  it.each(['atomic','rdf'])('preserves RDF terms and separates trailing comments in %s mode',async mode=>{const r=await run(mode,false);expect(r.output).not.toContain('Input graph/count mismatch');expect(r.code,r.output).toBe(0);expect(r.size).toBe(5);expect(r.metadata).toBe(1);});
+  it.each(['atomic', 'rdf'])('checks the journal filesystem before %s writes', async mode => {
+    const r = await run(mode, false, { lowDisk: true });
+    expect(r.code).toBe(1); expect(r.mutations).toBe(0); expect(r.output).toContain('Disk below');
+  });
+  it.each(['atomic', 'rdf'])('preserves RDF terms and separates trailing comments in %s mode', async mode => {
+    const r = await run(mode, false);
+    expect(r.code, r.output).toBe(0);
+    const named = (value: string) => ({ type: 'NamedNode', value });
+    const literal = (value: string, datatype = 'http://www.w3.org/2001/XMLSchema#string', language = '') => ({ type: 'Literal', value, datatype, language });
+    const expected = [
+      { subject: named('urn:s'), predicate: named('urn:p'), object: literal('plain'), graph: named('urn:g') },
+      { subject: named('urn:s'), predicate: named('urn:link'), object: named('urn:o'), graph: named('urn:g') },
+      { subject: named('urn:s'), predicate: named('urn:lang'), object: literal('hello', 'http://www.w3.org/1999/02/22-rdf-syntax-ns#langString', 'en'), graph: named('urn:g') },
+      { subject: named('urn:s'), predicate: named('urn:number'), object: literal('42', 'http://www.w3.org/2001/XMLSchema#integer'), graph: named('urn:g') },
+      { subject: named('urn:g'), predicate: named('urn:benchmark:status'), object: literal('confirmed'), graph: named('urn:benchmark:meta') },
+    ];
+    expect(r.quads).toHaveLength(expected.length);
+    expect(r.quads).toEqual(expect.arrayContaining(expected));
+  });
+  it.each(['atomic', 'rdf'])('refuses query and mutation redirects in %s mode', async mode => {
+    for (const redirect of ['query', 'mutation'] as const) {
+      const r = await run(mode, false, { redirect });
+      expect(r.code, r.output).not.toBe(0);
+      expect(r.redirectedRequests).toBe(0); expect(r.mutations).toBe(0); expect(r.quads).toEqual([]);
+    }
+  });
 });
