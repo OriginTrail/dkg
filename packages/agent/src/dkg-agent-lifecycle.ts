@@ -396,8 +396,7 @@ import {
   registerSyncHandler,
   resolveSyncResponderSnapshotPolicy,
 } from './sync/responder/sync-handler.js';
-import { createExactBatchResponderBinding } from './sync/responder/exact-batch-stream.js';
-import { exactBatchTransportOptions } from './sync/requester/exact-batch-stream.js';
+import { createExactBatchResponderBinding, exactBatchResponderTransportOptions } from './sync/responder/exact-batch-stream.js';
 import type { VmRecoveryRegisteredPublicEvidence } from './vm-recovery-pass-authority.js';
 import { runExactBatchStreamDriver } from './sync/requester/exact-batch-stream-driver.js';
 import {
@@ -3276,9 +3275,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               admission: resources,
               parseSyncRequest: this.parseSyncRequest.bind(this),
               authorizeSyncRequest: this.authorizeSyncRequest.bind(this),
-              isPublicContextGraph: async (cg, signal) => (await this.resolveRegisteredContextGraphAuthority(cg, {
-                authorityReadMode: 'finalized-index-or-live', signal,
-              })).kind === 'public',
+              resolvePublicContextGraphAuthority: async (cg, signal) => {
+                const authority = await this.resolveRegisteredContextGraphAuthority(cg, {
+                  authorityReadMode: 'finalized-index-or-live', signal,
+                });
+                if (authority.kind === 'unavailable') return 'unavailable';
+                return authority.kind === 'public' ? 'public' : 'non-public';
+              },
+              onRefusal: (stage, code) => this.log.info(createOperationContext('sync'),
+                `Exact batch responder refusal stage=${stage} code=${code}`),
               servingWithheld: (cg) => this.contextGraphServingWithheld(cg),
               onExport: (assetIndex, wholePayloadExports, operationContext) => this.log.info(operationContext,
                 `Exact batch responder export asset=${assetIndex} wholePayloadExports=${wholePayloadExports}`),
@@ -3290,7 +3295,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 `Exact batch responder stage=${stage} asset=${assetIndex} durationMs=${durationMs.toFixed(3)}`),
             });
             registerExperimentalExactBatchResponder(this.router,
-              exactBatchTransportOptions(120_000), binding.authorizeRequest, binding.respond);
+              exactBatchResponderTransportOptions(120_000, (level, message) => this.log[level](createOperationContext('sync'), message)), binding.authorizeRequest, binding.respond);
           }
         : undefined,
       // Serve-skip policy (#1233): withhold the no-consumer agents/_meta snapshot

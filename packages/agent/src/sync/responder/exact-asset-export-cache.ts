@@ -165,6 +165,12 @@ function invalid(): Error {
   });
 }
 
+/** An absent confirmed envelope cannot be served by the exact profile. */
+export class ExactBatchAssetMissingError extends Error {
+  readonly code = 'SYNC_EXACT_ASSET_MISSING';
+  constructor() { super('Exact asset has no confirmed export envelope'); }
+}
+
 function compareRows(a: SyncRow, b: SyncRow): number {
   return compareCodePoint(a.s, b.s) || compareCodePoint(a.p, b.p) || compareCodePoint(a.o, b.o);
 }
@@ -307,7 +313,12 @@ export function createBoundedExactAssetExportCache(params: {
     const { identity, confirmed: parsed } = metadata;
     throwIfAborted(request.signal);
     if (expected?.expectedIdentity !== undefined && identity !== expected.expectedIdentity) throw changed();
-    if (parsed.state !== 'confirmed') throw invalid();
+    if (parsed.state !== 'confirmed') {
+      if (parsed.state === 'absent' && expected === undefined) {
+        throw new ExactBatchAssetMissingError();
+      }
+      throw invalid();
+    }
     if (metadata.accessPolicy !== 'public') {
       if (metadata.accessPolicy !== 'absent' || parsed.envelope.privateTripleCount !== 0
         || !request.authorizeMissingAccessPolicy || (await request.authorizeMissingAccessPolicy()) !== true) {

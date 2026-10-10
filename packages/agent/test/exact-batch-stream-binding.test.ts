@@ -2,9 +2,9 @@ import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
 import { ethers } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
-import { MemoryLayer, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, type OperationContext } from '@origintrail-official/dkg-core';
+import { ExactBatchResponderRefusal, MemoryLayer, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, type OperationContext } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
-import { BlazegraphStore, OxigraphStore, StoreResponseTooLargeError, quadToNQuad, type Quad } from '@origintrail-official/dkg-storage';
+import { BlazegraphStore, OxigraphStore, StoreOperationTimeoutError, StoreResponseTooLargeError, StoreSchedulerBusyError, quadToNQuad, type Quad } from '@origintrail-official/dkg-storage';
 import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
 import { buildSyncRequestEnvelope } from '../src/sync/auth/request-build.js';
@@ -61,7 +61,8 @@ async function fixture(assetCount = 10, rows = 2000) {
   // The real normal authorizer intentionally allows public CG reads. A signed
   // START uses the real digest/builder, not a synthetic authorize()=>true port.
   const authorize = vi.fn((request, peer, options) => ContextGraphResolveMethods.prototype.authorizeSyncRequest.call(publicAgent as never, request, peer, options));
-  const isPublic = vi.fn(async (cg: string) => cg === contextGraphId);
+  const authority = vi.fn(async (cg: string): Promise<'public' | 'non-public' | 'unavailable'> =>
+    cg === contextGraphId ? 'public' : 'non-public');
   let resources!: ExperimentalExactBatchResponderResources;
   let legacyHandler!: (bytes: Uint8Array, peer: string, options?: { signal?: AbortSignal }) => Promise<Uint8Array>;
   registerSyncHandler({ register: (_protocol, handler) => { legacyHandler = handler; }, protocolSync: '/fixture/legacy-sync', syncDeniedResponse: 'denied', syncPageSize: 500,
@@ -73,7 +74,7 @@ async function fixture(assetCount = 10, rows = 2000) {
   const responderStage = vi.fn((_stage: string, _assetIndex: number, _durationMs: number, _context: OperationContext) => {});
   const responderFallback = vi.fn((_reason: string, _assetIndex: number, _context: unknown, _budgetReason?: string) => {});
   // The exact SAME legacy cache and admission limiter guard this binding.
-  const binding = createExactBatchResponderBinding({ localPeerId: 'source', store, exportCache, parseSyncRequest: parse, authorizeSyncRequest: authorize, isPublicContextGraph: isPublic,
+  const binding = createExactBatchResponderBinding({ localPeerId: 'source', store, exportCache, parseSyncRequest: parse, authorizeSyncRequest: authorize, resolvePublicContextGraphAuthority: authority,
     admission: resources, onStage: responderStage, onFallback: responderFallback,
     onExport: (_index, count) => exportCounts.push(count),
     onPayload: (_index, plain, encoded) => payloadSizes.push({ plain, encoded }) });
@@ -103,7 +104,7 @@ async function fixture(assetCount = 10, rows = 2000) {
       if (outcome === 'applied') applied.push(asset.ual); return outcome;
     },
   } satisfies Parameters<typeof consumeExactBatchVerifiedSession>[1];
-  return { items, contextGraphId, backing, store, target, binding, signed, receiver, reads, chainReads, applied, exportCache, authorize, parse, isPublic, resources, legacyHandler, exportCounts, payloadSizes, responderStage, responderFallback,
+  return { items, contextGraphId, backing, store, target, binding, signed, receiver, reads, chainReads, applied, exportCache, authorize, parse, authority, resources, legacyHandler, exportCounts, payloadSizes, responderStage, responderFallback,
     async close() { await worker.close(); vi.restoreAllMocks(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await backing.close(); await target.close(); } };
 }
 
@@ -132,7 +133,13 @@ async function run(f: Awaited<ReturnType<typeof fixture>>, wire = duplex(f.recei
   await wire.client.send(exactBatchStartFrame(f.signed));
   const request = await wire.server.next(); if (!request) throw new Error('START absent');
   const authorized = await f.binding.authorizeRequest(request.payload.slice(), 'requester', wire.server.signal);
-  const sender = f.binding.respond(authorized.context, wire.server, 'requester');
+  // The real registration in Core serializes typed refusals after the Agent
+  // binding returns. Preserve that boundary in this byte-codec fixture.
+  const sender = f.binding.respond(authorized.context, wire.server, 'requester').catch(async (error: unknown) => {
+    if (!(error instanceof ExactBatchResponderRefusal)) throw error;
+    await wire.server.send({ kind: K.REFUSE, assetIndex: 255, sequence: 0,
+      payload: new TextEncoder().encode(error.refusal) });
+  });
   const consumer = consumeExactBatchVerifiedSession(wire.client, receiver);
   try { return await Promise.all([sender, consumer]); } catch (error) {
     wire.abort(error); const settled = await Promise.allSettled([sender, consumer]);
@@ -142,6 +149,139 @@ async function run(f: Awaited<ReturnType<typeof fixture>>, wire = duplex(f.recei
 }
 
 describe('exact batch normal verifier/materializer binding', () => {
+  it('answers a missing public authority with a closed refusal before exporting bytes', async () => {
+    const f = await fixture(1, 2);
+    try {
+      f.authority.mockResolvedValue('non-public');
+      await expect(f.binding.authorizeRequest(f.signed, 'requester', new AbortController().signal))
+        .rejects.toMatchObject({ refusal: 'DENIED' } satisfies Partial<ExactBatchResponderRefusal>);
+      expect(f.exportCache.stats().exports).toBe(0);
+
+      f.authority.mockResolvedValue('unavailable');
+      await expect(f.binding.authorizeRequest(f.signed, 'requester', new AbortController().signal))
+        .rejects.toMatchObject({ refusal: 'BUSY' } satisfies Partial<ExactBatchResponderRefusal>);
+
+      f.authority.mockResolvedValueOnce('non-public');
+      await expect(f.binding.authorizeRequest(f.signed, 'requester', new AbortController().signal))
+        .rejects.toMatchObject({ refusal: 'DENIED' } satisfies Partial<ExactBatchResponderRefusal>);
+
+      const unexpected = new Error('Authority lookup failed unexpectedly');
+      f.authority.mockRejectedValueOnce(unexpected);
+      await expect(f.binding.authorizeRequest(f.signed, 'requester', new AbortController().signal))
+        .rejects.toBe(unexpected);
+      expect(f.exportCache.stats().exports).toBe(0);
+    } finally { await f.close(); }
+  });
+
+  it('answers store pressure during authorization or public authority with BUSY', async () => {
+    const f = await fixture(1, 2);
+    const busy = () => new StoreSchedulerBusyError('queue_full', 'normal', 'blazegraph.query', { storeOperation: 'query' });
+    try {
+      f.authorize.mockRejectedValueOnce(busy());
+      await expect(f.binding.authorizeRequest(f.signed, 'requester', new AbortController().signal))
+        .rejects.toMatchObject({ refusal: 'BUSY' } satisfies Partial<ExactBatchResponderRefusal>);
+      expect(f.authority).not.toHaveBeenCalled();
+
+      f.authority.mockRejectedValueOnce(busy());
+      await expect(f.binding.authorizeRequest(f.signed, 'requester', new AbortController().signal))
+        .rejects.toMatchObject({ refusal: 'BUSY' } satisfies Partial<ExactBatchResponderRefusal>);
+
+      f.authorize.mockRejectedValueOnce(new StoreOperationTimeoutError({ backend: 'blazegraph', operation: 'query' }));
+      await expect(f.binding.authorizeRequest(f.signed, 'requester', new AbortController().signal))
+        .rejects.toMatchObject({ refusal: 'BUSY' } satisfies Partial<ExactBatchResponderRefusal>);
+
+      const unexpected = new Error('Authorization failed unexpectedly');
+      f.authorize.mockRejectedValueOnce(unexpected);
+      await expect(f.binding.authorizeRequest(f.signed, 'requester', new AbortController().signal))
+        .rejects.toBe(unexpected);
+      expect(f.exportCache.stats().exports).toBe(0);
+    } finally { await f.close(); }
+  });
+
+  it('hands typed export pressure to Core for a BUSY frame before sending asset bytes', async () => {
+    const f = await fixture(1, 2), signal = new AbortController().signal;
+    const session = { signal, windowSize: 2 as const, assetUals: f.receiver.assetUals,
+      send: vi.fn(async (_frame: ExactBatchFrame) => {}), next: vi.fn(async () => undefined) };
+    try {
+      const acquire = vi.spyOn(f.exportCache, 'acquireEncoded');
+      const pressure = [
+        new StoreSchedulerBusyError('queue_full', 'normal', 'blazegraph.query', { storeOperation: 'query' }),
+        new StoreOperationTimeoutError({ backend: 'blazegraph', operation: 'query' }),
+      ];
+      for (const error of pressure) {
+        const authorized = await f.binding.authorizeRequest(f.signed, 'requester', signal);
+        acquire.mockRejectedValueOnce(error);
+        await expect(f.binding.respond(authorized.context, session, 'requester'))
+          .rejects.toMatchObject({ refusal: 'BUSY' } satisfies Partial<ExactBatchResponderRefusal>);
+        expect(session.send).not.toHaveBeenCalled();
+      }
+      const unexpected = new Error('Unexpected exporter failure');
+      const authorized = await f.binding.authorizeRequest(f.signed, 'requester', signal);
+      acquire.mockRejectedValueOnce(unexpected);
+      await expect(f.binding.respond(authorized.context, session, 'requester')).rejects.toBe(unexpected);
+      expect(session.send).not.toHaveBeenCalled();
+    } finally { await f.close(); }
+  });
+
+  it('answers an absent exact envelope with ASSET_MISSING instead of resetting the stream', async () => {
+    const f = await fixture(1, 2), wire = duplex(f.receiver.assetUals);
+    try {
+      await f.backing.delete(f.items[0]!.meta);
+      await expect(run(f, wire)).rejects.toMatchObject({ code: 'EXACT_BATCH_PARTIAL',
+        streamInterrupted: false, refusalObservation: { code: 'ASSET_MISSING' }, committedAssetUals: [] });
+      expect(wire.sent[1]).toEqual([{ kind: K.REFUSE, assetIndex: 255, sequence: 0,
+        payload: new TextEncoder().encode('ASSET_MISSING') }]);
+      expect(f.applied).toEqual([]);
+    } finally { await f.close(); }
+  });
+
+  it('isolates throwing and rejecting refusal observers from the wire refusal', async () => {
+    const f = await fixture(1, 2);
+    try {
+      f.authority.mockResolvedValue('non-public');
+      for (const onRefusal of [
+        () => { throw new Error('observer failed'); },
+        async () => { throw new Error('async observer failed'); },
+      ]) {
+        const binding = createExactBatchResponderBinding({ localPeerId: 'source', store: f.store,
+          exportCache: f.exportCache, parseSyncRequest: f.parse, authorizeSyncRequest: f.authorize,
+          resolvePublicContextGraphAuthority: f.authority, admission: f.resources, onRefusal });
+        await expect(binding.authorizeRequest(f.signed, 'requester', new AbortController().signal))
+          .rejects.toMatchObject({ refusal: 'DENIED' } satisfies Partial<ExactBatchResponderRefusal>);
+      }
+    } finally { await f.close(); }
+  });
+
+  it('sends BUSY after second-asset bytes when its final metadata fence times out', async () => {
+    const f = await fixture(2, 2);
+    const timeout = new StoreOperationTimeoutError({ backend: 'blazegraph', operation: 'query' });
+    const actualAcquire = f.exportCache.acquireEncoded.bind(f.exportCache);
+    const acquire = vi.spyOn(f.exportCache, 'acquireEncoded');
+    acquire.mockImplementation(async request => {
+      if (request.assetUal === f.items[1]!.ual) {
+        await vi.waitFor(() => expect(f.applied).toEqual([f.items[0]!.ual]), { timeout: 10_000 });
+      }
+      return actualAcquire(request);
+    });
+    const wire = duplex(f.receiver.assetUals, frame => {
+      if (frame.kind === K.DATA && frame.assetIndex === 1) {
+        vi.mocked(f.store.query).mockRejectedValueOnce(timeout);
+      }
+      return frame;
+    });
+    try {
+      await expect(run(f, wire)).rejects.toMatchObject({ code: 'EXACT_BATCH_PARTIAL',
+        streamInterrupted: false, refusalObservation: { code: 'BUSY' },
+        committedAssetUals: [f.items[0]!.ual] });
+      expect(f.applied).toEqual([f.items[0]!.ual]);
+      expect(wire.sent[1]).toContainEqual({ kind: K.REFUSE, assetIndex: 255,
+        sequence: 0, payload: new TextEncoder().encode('BUSY') });
+      expect(wire.sent[1]).not.toContainEqual(expect.objectContaining({ kind: K.ASSET_END, assetIndex: 1 }));
+      expect(wire.sent[0]).not.toContainEqual(expect.objectContaining({ kind: K.ACK, assetIndex: 1 }));
+      expect(f.resources.snapshotBudget.stats().bytesEstimate).toBe(f.exportCache.stats().encodedCacheBytes);
+    } finally { await f.close(); }
+  });
+
   it('keeps explicit authorization after the START buffers are copied and discarded', async () => {
     const f = await fixture(1, 20), wire = duplex(f.receiver.assetUals);
     try {
@@ -309,22 +449,35 @@ describe('exact batch normal verifier/materializer binding', () => {
           await expect(respond).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_INVALID' });
           expect(session.send).not.toHaveBeenCalled();
         } else {
-          await expect(respond).resolves.toBeUndefined();
-          expect(session.send).toHaveBeenCalledOnce();
-          const refusal = session.send.mock.calls[0]![0];
-          expect(refusal.kind).toBe(K.REFUSE);
-          expect(new TextDecoder().decode(refusal.payload)).toBe('RESOURCE_LIMIT');
+          await expect(respond).rejects.toMatchObject({ refusal: 'RESOURCE_LIMIT' } satisfies Partial<ExactBatchResponderRefusal>);
+          expect(session.send).not.toHaveBeenCalled();
         }
         expect(f.exportCache.stats().exports).toBe(0);
         expect(f.reads.some(source => source.endsWith('.payload'))).toBe(false);
       } finally { await f.close(); }
     });
 
+  it('does not turn a cancelled null export lease into a resource refusal frame', async () => {
+    const f = await fixture(1, 2), controller = new AbortController();
+    const cancelled = new Error('fixture export cancelled');
+    const session = { signal: controller.signal, windowSize: 2 as const, assetUals: f.receiver.assetUals,
+      send: vi.fn(async (_frame: ExactBatchFrame) => {}), next: vi.fn(async () => undefined) };
+    try {
+      const authorized = await f.binding.authorizeRequest(f.signed, 'requester', controller.signal);
+      vi.spyOn(f.exportCache, 'acquireEncoded').mockImplementationOnce(async () => {
+        controller.abort(cancelled);
+        return null;
+      });
+      await expect(f.binding.respond(authorized.context, session, 'requester')).rejects.toBe(cancelled);
+      expect(session.send).not.toHaveBeenCalled();
+    } finally { await f.close(); }
+  });
+
   it('never exports before normal authorization and public-only gates pass', async () => {
     const f = await fixture(1, 2);
     try {
-      f.isPublic.mockResolvedValue(false);
-      await expect(f.binding.authorizeRequest(f.signed, 'requester', new AbortController().signal)).rejects.toThrow('public');
+      f.authority.mockResolvedValue('non-public');
+      await expect(f.binding.authorizeRequest(f.signed, 'requester', new AbortController().signal)).rejects.toMatchObject({ refusal: 'DENIED' });
       expect(f.authorize).toHaveBeenCalledOnce(); expect(f.exportCache.stats().exports).toBe(0);
     } finally { await f.close(); }
   });
@@ -379,7 +532,7 @@ describe('exact batch normal verifier/materializer binding', () => {
       await f.backing.delete(f.items[0]!.meta.filter(quad => quad.predicate === 'http://dkg.io/ontology/accessPolicy'));
       await run(f, cold); await run(f, warm);
       expect(f.exportCounts).toEqual([1, 0]);
-      expect(f.isPublic).toHaveBeenCalledTimes(9); // START, per-asset, and every metadata fence.
+      expect(f.authority).toHaveBeenCalledTimes(9); // START, per-asset, and every metadata fence.
       expect(f.chainReads).toHaveLength(6);
       expect(f.applied).toEqual([...f.receiver.assetUals, ...f.receiver.assetUals]);
       expect(cold.sent[0]!.filter(frame => frame.kind === K.ACK)).toHaveLength(1);
@@ -398,7 +551,7 @@ describe('exact batch normal verifier/materializer binding', () => {
         f.applied.length = 0;
       }
       let reads = 0;
-      f.isPublic.mockImplementation(async () => ++reads < (mode === 'cold' ? 5 : 4));
+      f.authority.mockImplementation(async () => ++reads < (mode === 'cold' ? 5 : 4) ? 'public' : 'non-public');
       await expect(run(f, wire)).rejects.toMatchObject({ code: 'EXACT_BATCH_PARTIAL', committedAssetUals: [], cause: { code: 'SYNC_EXACT_EXPORT_CHANGED' } });
       expect(wire.sent[1]!.some(frame => frame.kind === K.DATA)).toBe(true);
       expect(wire.sent[1]!.some(frame => frame.kind === K.ASSET_END)).toBe(false);
@@ -413,8 +566,8 @@ describe('exact batch normal verifier/materializer binding', () => {
     try {
       await run(f, cold);
       const authorized = await f.binding.authorizeRequest(f.signed, 'requester', warm.server.signal);
-      f.isPublic.mockResolvedValue(false);
-      await expect(f.binding.respond(authorized.context, warm.server, 'requester')).rejects.toThrow('public');
+      f.authority.mockResolvedValue('non-public');
+      await expect(f.binding.respond(authorized.context, warm.server, 'requester')).rejects.toMatchObject({ refusal: 'DENIED' });
       expect(warm.sent[1]).toEqual([]);
       expect(f.exportCache.stats().encodedCacheHits).toBe(0);
       expect(f.reads.filter(source => source === 'sync.responder.exactAssetExport.payload')).toHaveLength(1);
@@ -454,7 +607,7 @@ describe('exact batch normal verifier/materializer binding', () => {
       expect(new TextDecoder().decode(f.signed).startsWith(`${f.contextGraphId}|0|500|data`)).toBe(true);
       await run(f, wire);
       expect(f.applied).toEqual(f.receiver.assetUals);
-      expect(f.authorize).toHaveBeenCalledOnce(); expect(f.isPublic).toHaveBeenCalled();
+      expect(f.authorize).toHaveBeenCalledOnce(); expect(f.authority).toHaveBeenCalled();
       expect(getIdentityId).not.toHaveBeenCalled(); expect(signMessage).not.toHaveBeenCalled();
       expect(wire.sent[0]!.filter(frame => frame.kind === K.ACK)).toHaveLength(2);
     } finally { wire.abort(); await f.close(); }
@@ -690,7 +843,7 @@ describe('exact batch normal verifier/materializer binding', () => {
     try {
       const authorized = await f.binding.authorizeRequest(f.signed, 'requester', wire.server.signal);
       const other = createExactBatchResponderBinding({ localPeerId: 'source', store: f.store, exportCache: f.exportCache,
-        parseSyncRequest: f.parse, authorizeSyncRequest: f.authorize, isPublicContextGraph: f.isPublic, admission: f.resources });
+        parseSyncRequest: f.parse, authorizeSyncRequest: f.authorize, resolvePublicContextGraphAuthority: f.authority, admission: f.resources });
       await expect(other.respond(authorized.context, wire.server, 'requester')).rejects.toThrow('not authorized');
       expect(f.exportCache.stats().exports).toBe(0);
       await Promise.all([f.binding.respond(authorized.context, wire.server, 'requester'),
