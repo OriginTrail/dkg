@@ -7,6 +7,12 @@ const survivesInventoryChange = (kind: CatalogRepairDiagnosticV1['kind']): boole
   || kind === 'store_timeout_not_started' || kind === 'store_timeout_indeterminate'
 );
 
+/**
+ * GH#3134 — a full catalog refuses the same way until a row is free, so it is not retried on the
+ * failure timer. A change of the author's inventory still resets the cooldown and gets one attempt.
+ */
+export const CATALOG_FULL_RETRY_INTERVAL_MS_V1 = 60 * 60_000;
+
 /** Producer-owned identity separates inventory churn from an authoring-scope transition. */
 export interface CatalogRepairRevisionHintV1 {
   readonly scopeIdentity: string;
@@ -60,7 +66,7 @@ export class CatalogRepairRetryV1 {
     const base = configuredIntervalMs !== undefined && configuredIntervalMs > 0
       ? configuredIntervalMs : 5_000;
     const delay = Math.min(Math.max(base, 60_000), base * 2 ** Math.min(30, this.consecutiveFailures - 1));
-    this.nextAttemptAtMs = nowMs + delay;
+    this.nextAttemptAtMs = nowMs + (kind === 'catalog_full' ? CATALOG_FULL_RETRY_INTERVAL_MS_V1 : delay);
     return true;
   }
 }

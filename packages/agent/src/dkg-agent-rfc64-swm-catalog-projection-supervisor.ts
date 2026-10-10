@@ -29,6 +29,12 @@ import {
   type CatalogRepairDiagnosticV1,
 } from './rfc64/catalog-repair-diagnostics-v1.js';
 import { CatalogRepairRetryV1, type CatalogRepairRevisionHintV1 } from './rfc64/catalog-repair-retry-v1.js';
+import { finalizedPrivateRepairKeyV1 } from './internal/finalized-private-placement-key.js';
+import {
+  FullCatalogParkingV1,
+  type AuthorCatalogCapacityStatusV1,
+  type FullCatalogParkingDependenciesV1,
+} from './internal/full-catalog-parking.js';
 import {
   catalogPlacementTimingV1,
   type CatalogPlacementAttemptV1,
@@ -72,6 +78,8 @@ export interface Rfc64SwmCatalogProjectionSupervisorStatusV1 {
   readonly repairs: readonly Rfc64PublicCatalogAuthorRepairStatusV1[];
   /** GH#3081 — aggregate finalized-private queue evidence; observation only. */
   readonly finalizedPrivatePlacement: Readonly<FinalizedPrivatePlacementQueueStatusV1>;
+  /** GH#3134 — aggregate: author catalogs at their row cap and the placements parked for them. */
+  readonly authorCatalogCapacity?: Readonly<AuthorCatalogCapacityStatusV1>;
 }
 
 interface MutableAuthorRepairStatusV1 {
@@ -139,6 +147,8 @@ interface ProjectionOwnerDependenciesV1 {
     readonly authorAddress: EvmAddressV1;
     readonly signal: AbortSignal;
   }>) => Promise<ProjectionReconciliationV1>;
+  /** GH#3134 — one author catalog scope's applied-head row; frees the placements parked on a full catalog. */
+  readonly readAppliedCatalogHead?: FullCatalogParkingDependenciesV1['readAppliedCatalogHead'];
   readonly warn: (ctx: OperationContext, message: string) => void;
   /** GH#3081 — the placement timing to record into, resolved at each use; the owner's own by default. */
   readonly placementTiming?: () => CatalogPlacementTimingV1;
@@ -148,12 +158,14 @@ interface ProjectionOwnerDependenciesV1 {
 export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwnerV1 {
   readonly #dependencies: ProjectionOwnerDependenciesV1;
   readonly #timing: () => CatalogPlacementTimingV1;
+  readonly #fullCatalogs: FullCatalogParkingV1;
   #state: ProjectionSupervisorStateV1 | undefined;
   #admissionClosed = false;
 
   constructor(dependencies: ProjectionOwnerDependenciesV1) {
     this.#dependencies = dependencies;
     this.#timing = dependencies.placementTiming ?? (() => catalogPlacementTimingV1(this));
+    this.#fullCatalogs = new FullCatalogParkingV1(dependencies);
   }
 
   /** Observe a real inactive edge without reopening admission or starting work. */
@@ -338,6 +350,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
         state.finalizedPrivateWaiters.summary(),
         state.finalizedPrivateRunner.running,
       ),
+      authorCatalogCapacity: this.#fullCatalogs.status(state.repairs),
     });
   }
 
@@ -406,6 +419,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
           throw error;
         } finally {
           this.#timing().passEnded();
+          this.#fullCatalogs.passEnded();
           // A failed durable queue read must not spin on an already-due waiter.
           this.#schedulePrivateWaiterWake(state, failed
             ? (finalizedPrivateRetryIntervalMs > 0
@@ -466,9 +480,12 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     for (const key of state.finalizedPrivateWaiters.keys()) {
       if (!currentKeys.has(key)) state.finalizedPrivateWaiters.release(key);
     }
+    this.#fullCatalogs.passStarted(currentKeys);
     await mapWithConcurrency(repairs, MAX_CONCURRENT_REPAIRS_V1, async (repair) => {
       if (signal.aborted) return;
       const key = finalizedPrivateRepairKeyV1(repair);
+      // GH#3134 — a placement its full catalog has no row for is parked: no attempt, nothing waits on it.
+      if (this.#fullCatalogs.parked(key, repair)) return state.finalizedPrivateWaiters.release(key);
       let entry = state.finalizedPrivateRetries.get(key);
       if (entry === undefined) {
         entry = { contextGraphId: repair.contextGraphId, retry: new CatalogRepairRetryV1(), attempts: 0 };
@@ -498,7 +515,8 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
           const changed = this.#observePrivateLane(entry.retry, repair.contextGraphId);
           entry.retry.fail(attemptGeneration, Date.now(), state.retryIntervalMs, catalogRepairDiagnosticV1(error).kind);
           if (changed) state.finalizedPrivateRunner.request();
-          this.#warnFailure('catalog_private_repair_failed', error, entry.attempts, entry.retry);
+          if (this.#fullCatalogs.placementRefused(key, repair, error)) state.finalizedPrivateRetries.delete(key);
+          else this.#warnFailure('catalog_private_repair_failed', error, entry.attempts, entry.retry);
         }
       } finally {
         state.finalizedPrivateWaiters.release(key, placement);
@@ -649,7 +667,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
         diagnostic: catalogRepairDiagnosticV1(error),
         updatedAtMs: Date.now(),
       });
-      this.#warnFailure('catalog_repair_failed', error, repair.attempts, repair.retry);
+      if (!this.#fullCatalogs.projectionRefused(repair, error)) this.#warnFailure('catalog_repair_failed', error, repair.attempts, repair.retry);
     }
   }
 }
@@ -692,28 +710,6 @@ function newPendingRepairV1(
     diagnostic: null,
     retry: new CatalogRepairRetryV1(),
   };
-}
-
-function finalizedPrivateRepairKeyV1(
-  repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
-): string {
-  return JSON.stringify([
-    repair.version,
-    repair.contextGraphId,
-    repair.authorAddress,
-    repair.inventoryScope.networkId,
-    repair.inventoryScope.contextGraphId,
-    repair.inventoryScope.governanceChainId,
-    repair.inventoryScope.governanceContractAddress,
-    repair.inventoryScope.ownershipTransitionDigest,
-    repair.inventoryScope.authorAddress,
-    repair.inventoryScope.subGraphName,
-    repair.inventoryScope.era,
-    repair.assertionCoordinate,
-    repair.kaUal,
-    repair.assertionVersion,
-    repair.sealDigest,
-  ]);
 }
 
 export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
