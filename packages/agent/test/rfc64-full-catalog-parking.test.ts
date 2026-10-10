@@ -387,6 +387,32 @@ describe('finalized-private placements of a full author catalog', () => {
     expect(model.state.attempts).toEqual([NEW_A.kaUal]);
   });
 
+  it('keeps a placement parked when its safety-net attempt fails for another reason at a head that moved on', async () => {
+    const model = node();
+    model.fill(NEW_A);
+    model.state.markers = [NEW_A, NEW_B];
+    const s = supervisor(model);
+    await s.pass();
+    // A newer version of a held asset commits a new head: what the refusal read is one head old.
+    const newerVersion = marker(FULL_GRAPH, 5, '2');
+    model.state.markers = [...model.state.markers, newerVersion];
+    await s.pass();
+    expect(model.state.attempts).toEqual([NEW_A.kaUal, newerVersion.kaUal]);
+
+    // The safety-net attempt of the first marker fails before the catalog is asked. Nothing says
+    // the catalog has room, so the marker stays parked instead of going to the failure timer.
+    model.state.failing.add(NEW_A.kaUal);
+    model.state.attempts.length = 0;
+    await s.advance(HOUR);
+    expect(model.state.attempts).toEqual([NEW_A.kaUal]);
+    await s.advance(HOUR - 5_000);
+    expect(model.state.attempts).toEqual([NEW_A.kaUal]);
+    expect(s.lines('catalog_private_repair_failed')).toHaveLength(1);
+    expect(s.capacity()).toEqual({ parkedPlacements: 2, scopesAtCap: 1 });
+    await s.advance(5_000);
+    expect(model.state.attempts).toEqual([NEW_A.kaUal, NEW_B.kaUal]);
+  });
+
   it('does no catalog work for the safety-net attempt while the lane is inactive', async () => {
     const model = node();
     model.fill(NEW_A);

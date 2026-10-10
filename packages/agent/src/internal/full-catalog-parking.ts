@@ -34,7 +34,8 @@ import { findAuthorCatalogFullErrorV1 } from './author-catalog-capacity.js';
  *   restart costs one attempt a full catalog and not one a marker;
  * - parked markers are attempted again when the scope's applied head shows a free row. As a
  *   safety net one of them is attempted an interval per scope: the one parked longest, which
- *   goes to the back when it is parked again. Its refusal reads afresh what the catalog holds;
+ *   goes to the back and stays parked unless that attempt places it. Its refusal reads afresh
+ *   what the catalog holds;
  * - the log names the graph and author when a scope first refuses and at most once an interval
  *   after that; status carries two counts and no identity.
  *
@@ -159,20 +160,26 @@ export class FullCatalogParkingV1 {
 
   /**
    * Decide one listed marker for this pass, and record the decision. True: it is parked, and the
-   * pass leaves it alone. False: attempt it as usual; a refusal of that attempt comes back
-   * through {@link placementRefused}. Asked once a marker a pass.
+   * pass leaves it alone. False: attempt it now; a refusal of that attempt comes back through
+   * {@link placementRefused}. Asked once a marker a pass.
    */
   park(key: string, repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>): boolean {
     // No full scope is known: nothing is parked, and no marker needs its scope named.
     if (this.#scopes.size === 0) return false;
     const scopeKey = this.#parked.get(key) ?? catalogScopeDigestV1(repair);
     const scope = scopeKey === undefined ? undefined : this.#scopes.get(scopeKey);
-    if (scopeKey !== undefined && scope !== undefined && this.#keepsParked(scopeKey, scope, key, repair)) {
-      this.#parked.set(key, scopeKey);
-      return true;
+    const decision = scopeKey === undefined || scope === undefined
+      ? 'attempt'
+      : this.#decide(scopeKey, scope, key, repair);
+    if (scopeKey === undefined || decision === 'attempt') {
+      this.#parked.delete(key);
+      return false;
     }
-    this.#parked.delete(key);
-    return false;
+    // The safety-net marker goes to the back, and stays parked: whatever its attempt fails on,
+    // it is not retried on the failure timer. A marker its attempt places leaves the queue.
+    if (decision === 'safety-net') this.#parked.delete(key);
+    this.#parked.set(key, scopeKey);
+    return decision === 'parked';
   }
 
   /**
@@ -261,12 +268,12 @@ export class FullCatalogParkingV1 {
     return Object.freeze({ parkedPlacements, scopesAtCap: named.size });
   }
 
-  #keepsParked(
+  #decide(
     scopeKey: string,
     scope: FullScopeV1,
     key: string,
     repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
-  ): boolean {
+  ): 'attempt' | 'safety-net' | 'parked' {
     if (!this.#passHeads.has(scopeKey)) this.#passHeads.set(scopeKey, this.#appliedHead(scope));
     if (hasFreeRowV1(this.#passHeads.get(scopeKey), scope) === true) {
       // A row is free: every marker of the scope is attempted again.
@@ -274,22 +281,24 @@ export class FullCatalogParkingV1 {
       for (const [parkedKey, parkedScope] of this.#parked) {
         if (parkedScope === scopeKey) this.#parked.delete(parkedKey);
       }
-      return false;
+      return 'attempt';
     }
     // The catalog holds a row of this asset: a newer version replaces it, an equal one is placed.
-    if (scope.heldKaUals?.has(repair.kaUal) === true) return false;
+    if (scope.heldKaUals?.has(repair.kaUal) === true) return 'attempt';
     if (scope.dueMarker === key) {
       // The safety net: one real attempt a scope an interval, by the marker this pass chose.
       // Its refusal reads afresh what the catalog holds.
       scope.dueMarker = undefined;
       scope.recheckAtMs = this.#now() + FULL_CATALOG_RECHECK_INTERVAL_MS_V1;
-      return false;
+      return 'safety-net';
     }
-    if (this.#parked.has(key)) return true;
+    if (this.#parked.has(key)) return 'parked';
     // A marker that was not parked before is taken on the catalog's word only while that word is
     // kept, and only at the applied head it was read under, read now. Otherwise it gets an
     // attempt of its own.
-    return scope.heldKaUals !== null && this.#appliedHead(scope)?.digest === scope.headDigest;
+    return scope.heldKaUals !== null && this.#appliedHead(scope)?.digest === scope.headDigest
+      ? 'parked'
+      : 'attempt';
   }
 
   /** Keep the list of held assets for a bounded number of scopes; a scope without it stays known. */
