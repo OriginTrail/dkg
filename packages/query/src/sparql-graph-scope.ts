@@ -13,6 +13,7 @@ import {
   type SparqlRewriteResult,
 } from './sparql-rewrite-result.js';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
+import { graphSubselectLimit } from './sparql-subselect-limit.js';
 
 function iriValue(token: SparqlLexicalToken | undefined): string | null {
   return token?.kind === 'iri' ? token.logicalValue : null;
@@ -234,7 +235,7 @@ function wrapWithProjectedGraphSubselect(
   const graphPattern = buildGraphPattern(inner, graphs);
   return ready(transitionGraphScope(
     scope,
-    `${scope.source.slice(0, openEnd)} { SELECT ${innerVariables.map((variable) => variable.source).join(' ')} WHERE { ${graphPattern} } } ${scope.source.slice(close)}`,
+    `${scope.source.slice(0, openEnd)} { SELECT ${innerVariables.map((variable) => variable.source).join(' ')} WHERE { ${graphPattern} }${graphSubselectLimit(scope)} } ${scope.source.slice(close)}`,
   ));
 }
 
