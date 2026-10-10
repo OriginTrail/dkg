@@ -161,7 +161,8 @@ describe("public snapshot recovery over live local nodes and chain", () => {
       });
       agents.push(a);
       await a.start();
-      a.subscribeToContextGraph(graph, { onChainId, syncMode: "on-demand" });
+      if (nodeRole === "core")
+        a.subscribeToContextGraph(graph, { onChainId, syncMode: "on-demand" });
       return a;
     };
     const core = await make("SnapshotCore", "core", adapter, source);
@@ -195,6 +196,9 @@ describe("public snapshot recovery over live local nodes and chain", () => {
           new Error("Receiver asset RPC forbidden in core-cache mode"),
         ),
     );
+    expect(
+      receiver.getSubscribedContextGraphs().get(graph)?.subscribed,
+    ).not.toBe(true);
     const t = performance.now();
     const result = await receiver.syncPublicGraphSnapshot({
       contextGraphId: graph,

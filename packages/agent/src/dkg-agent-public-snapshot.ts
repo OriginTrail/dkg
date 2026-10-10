@@ -84,10 +84,6 @@ export class PublicSnapshotMethods {
       !["core-cache", "rpc-only"].includes(mode)
     )
       throw new Error("Invalid snapshot job");
-    if (!this.subscribedContextGraphs.has(contextGraphId))
-      throw new Error(
-        "Subscribe to the public graph before starting snapshot recovery",
-      );
     const peers = [...new Set(options.trustedCorePeerIds)];
     if (
       !peers.length ||
@@ -175,6 +171,16 @@ export class PublicSnapshotMethods {
       );
       if (mode === "core-cache")
         await markCoreTrustedGraph(this.store, contextGraphId);
+      // A validated public snapshot admits this job without scheduling the
+      // daemon's separate legacy subscribe/catch-up pipeline.
+      if (!this.subscribedContextGraphs.get(contextGraphId)?.subscribed) {
+        this.subscribeToContextGraph(contextGraphId, {
+          onChainId,
+          syncMode: "on-demand",
+          trackSyncScope: false,
+          deferSharedMemoryGossipSubscribe: true,
+        });
+      }
       const uals = snapshot.assets.map((a) => {
         const id = BigInt(a.id),
           address = `0x${(id >> 96n).toString(16).padStart(40, "0")}`;
