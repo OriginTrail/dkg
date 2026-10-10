@@ -34,9 +34,11 @@ describe('live sync protocol readiness after a stale Identify record', () => {
 
   it('tries the pooled sync wire when the original wire is unsupported', async () => {
     const input = options();
-    input.probe.mockResolvedValueOnce('unsupported');
+    input.probe.mockImplementation(async (_peerId, protocol) => protocol === PROTOCOLS[1] ? 'supported' : 'unsupported');
     expect(await waitForAdvertisedOrLiveProtocol(input)).toBe(true);
     expect(input.probe).toHaveBeenCalledTimes(2);
+    expect(input.probe).toHaveBeenNthCalledWith(1, PEER, PROTOCOLS[0], undefined);
+    expect(input.probe).toHaveBeenNthCalledWith(2, PEER, PROTOCOLS[1], undefined);
   });
 
   it('honors cancellation during a live probe', async () => {
