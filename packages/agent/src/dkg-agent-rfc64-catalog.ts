@@ -4304,6 +4304,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   async closeRfc64PublicCatalogMutationPersistenceV1(this: DKGAgent): Promise<void> {
     try {
       await this.rfc64CatalogMutationCoordinatorV1.closeAndDrain();
+      await rfc64CatalogReplaySnapshotRuntimesV1.get(this)?.runtime.whenIdle();
     } finally {
       this.rfc64PublicCatalogSynchronizationEvidenceV1.clear();
       this.rfc64PublicCatalogReconciliationFailuresV1.clear();
@@ -4549,9 +4550,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     }
     let announced = 0;
     let failed = 0;
-    return rfc64CatalogReplaySnapshotRuntimeForV1(
-      this, persistence, this.rfc64CatalogMutationCoordinatorV1,
-    ).withSnapshot({
+    return rfc64CatalogReplaySnapshotRuntimeForV1(this, persistence, this.rfc64CatalogMutationCoordinatorV1)
+      .withSnapshot({
       selection: requestedScope === undefined
         ? Object.freeze({ kind: 'all' })
         : Object.freeze({

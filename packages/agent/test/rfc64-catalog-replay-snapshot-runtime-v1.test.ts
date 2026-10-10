@@ -387,6 +387,106 @@ describe('RFC-64 catalog replay snapshot runtime', () => {
     }
   });
 
+  it('rejects a scoped replay when another author\'s catalog appears in the graph while it delivers', async () => {
+    const requested = signedHead(catalogScope(CONTEXT_GRAPH_ID), '0');
+    const late = signedHead(catalogScope(CONTEXT_GRAPH_ID, OTHER_AUTHOR), '0');
+    const fixture = createReplayFixture([requested]);
+
+    // Every head that was sent is still current, but the set that was sent is no longer complete.
+    await expect(fixture.runtime.withSnapshot({
+      selection: scopedSelection(),
+      prepare: () => 'prepared',
+      deliver: async () => {
+        fixture.replaceAppliedHeads([requested, late]);
+        return 'delivered';
+      },
+    })).rejects.toThrow(/scoped catalog inventory changed during replay/u);
+  });
+
+  it('rejects a scoped replay whose catalog advanced while the final check was reading the index', async () => {
+    const scope = catalogScope(CONTEXT_GRAPH_ID);
+    const otherScope = catalogScope(OTHER_CONTEXT_GRAPH_ID);
+    const requested = signedHead(scope, '0');
+    const successor = signedHead(scope, '1');
+    const unrelated = signedHead(otherScope, '0');
+    const unrelatedSuccessor = signedHead(otherScope, '1');
+    const fixture = createReplayFixture([requested, unrelated]);
+    let holdReads = false;
+    let releaseRead!: () => void;
+    let markReading!: () => void;
+    const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
+    const reading = new Promise<void>((resolve) => { markReading = resolve; });
+    const read = fixture.readVerifiedCatalogHeadV1.getMockImplementation()!;
+    fixture.readVerifiedCatalogHeadV1.mockImplementation(async (digest) => {
+      if (holdReads) {
+        markReading();
+        await readGate;
+      }
+      return read(digest);
+    });
+
+    const replay = fixture.runtime.withSnapshot({
+      selection: scopedSelection(),
+      prepare: (entries) => entries.map(({ head }) => head.objectDigest),
+      deliver: async (digests) => {
+        // Another graph changes while the peer is slow, so the index has to be read again.
+        fixture.replaceAppliedHeads([requested, unrelatedSuccessor]);
+        holdReads = true;
+        return digests;
+      },
+    });
+    const rejected = expect(replay).rejects.toThrow(/scoped catalog inventory changed during replay/u);
+
+    await reading;
+    // While the final check reads the index, the replayed catalog's next head is committed. The
+    // index that comes back was started before it and still shows the head that was sent.
+    await fixture.coordinator.run(scope, async () => {
+      fixture.replaceAppliedHeads([successor, unrelatedSuccessor]);
+    });
+    releaseRead();
+
+    await rejected;
+  });
+
+  it('is idle only once a replay has been delivered and checked, and takes none after shutdown began', async () => {
+    const scope = catalogScope(CONTEXT_GRAPH_ID);
+    const fixture = createReplayFixture([signedHead(scope, '0')]);
+    let finishDelivery!: () => void;
+    let markDelivering!: () => void;
+    const delivered = new Promise<void>((resolve) => { finishDelivery = resolve; });
+    const delivering = new Promise<void>((resolve) => { markDelivering = resolve; });
+    await expect(fixture.runtime.whenIdle()).resolves.toBeUndefined();
+
+    const replay = fixture.runtime.withSnapshot({
+      selection: scopedSelection(),
+      prepare: (entries) => entries.length,
+      deliver: async (count) => {
+        markDelivering();
+        await delivered;
+        return count;
+      },
+    });
+    await delivering;
+    // Delivery holds no mutation lock, so the coordinator drains although the replay is not over.
+    await fixture.coordinator.closeAndDrain();
+    let idle = false;
+    const whenIdle = fixture.runtime.whenIdle().then(() => { idle = true; });
+    await new Promise((resolve) => { setImmediate(resolve); });
+    expect(idle).toBe(false);
+
+    // With the coordinator closed no further replay can be prepared.
+    await expect(fixture.runtime.withSnapshot({
+      selection: scopedSelection(),
+      prepare: () => 'prepared',
+      deliver: async () => 'delivered',
+    })).rejects.toThrow();
+
+    finishDelivery();
+    await expect(replay).resolves.toBe(1);
+    await whenIdle;
+    expect(idle).toBe(true);
+  });
+
   it('rejects a replay when a catalog change lands while it delivers, without having held that change', async () => {
     for (const [selection, message] of [
       [Object.freeze({ kind: 'all' as const }), /durable catalog inventory changed during replay/u],

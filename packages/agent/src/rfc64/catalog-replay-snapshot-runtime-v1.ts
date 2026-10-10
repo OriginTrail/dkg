@@ -90,10 +90,15 @@ function rfc64CatalogReplayMutationScopesV1(
  * ends: it rejects when the inventory moved before the locks settled, or while it delivered. The
  * second check is all that guards delivery now that the locks do not, so a replay that overlaps a
  * catalog change is rejected and its requester asks again.
+ *
+ * Delivery is no longer part of what the mutation coordinator drains, so the runtime keeps the
+ * replays that are under way itself: a shutdown closes the coordinator, which keeps a new replay
+ * from being prepared, and then waits for {@link whenIdle} before it lets go of the inventory.
  */
 export class Rfc64CatalogReplaySnapshotRuntimeV1 {
   readonly #storage: Rfc64CatalogReplaySnapshotStorageV1;
   readonly #mutationCoordinator: Rfc64CatalogMutationCoordinatorV1;
+  readonly #active = new Set<Promise<unknown>>();
   #indexToken: AppliedCatalogHeadsTokenV1 | null = null;
   #indexByScope: ReadonlyMap<string, readonly Rfc64CatalogReplayHeadV1[]> = new Map();
 
@@ -106,6 +111,23 @@ export class Rfc64CatalogReplaySnapshotRuntimeV1 {
   }
 
   async withSnapshot<Prepared, T>(
+    input: Readonly<WithRfc64CatalogReplaySnapshotInputV1<Prepared, T>>,
+  ): Promise<T> {
+    const replay = this.#replay(input);
+    this.#active.add(replay);
+    try {
+      return await replay;
+    } finally {
+      this.#active.delete(replay);
+    }
+  }
+
+  /** Resolves once no replay is being prepared, delivered or checked. */
+  async whenIdle(): Promise<void> {
+    while (this.#active.size > 0) await Promise.allSettled(this.#active);
+  }
+
+  async #replay<Prepared, T>(
     input: Readonly<WithRfc64CatalogReplaySnapshotInputV1<Prepared, T>>,
   ): Promise<T> {
     if (input.selection.kind === 'all') {
@@ -156,10 +178,26 @@ export class Rfc64CatalogReplaySnapshotRuntimeV1 {
     });
     const result = await input.deliver(snapshot.prepared);
     const currentEntries = (await this.#readIndex()).get(replayScopeKey) ?? [];
-    if (rfc64CatalogReplayEntriesFingerprintV1(currentEntries) !== snapshot.entriesFingerprint) {
+    if (
+      rfc64CatalogReplayEntriesFingerprintV1(currentEntries) !== snapshot.entriesFingerprint
+      // The index is read across awaits, and nothing holds these catalogs still any more: a head
+      // that advanced while it was read is in the inventory and not yet in the index.
+      || !this.#stillApplied(snapshot.entriesFingerprint)
+    ) {
       throw new Error('RFC-64 scoped catalog inventory changed during replay');
     }
     return result;
+  }
+
+  /** Whether every head of a prepared fingerprint is, right now, the applied head of its catalog. */
+  #stillApplied(entriesFingerprint: string): boolean {
+    if (entriesFingerprint === '') return true;
+    const applied = new Set(this.#storage.readAppliedCatalogHeadsSnapshotV1().heads.map((head) => [
+      head.catalogScopeDigest,
+      head.authorAddress,
+      head.currentCatalogHeadDigest,
+    ].join(':')));
+    return entriesFingerprint.split('\n').every((entry) => applied.has(entry));
   }
 
   #readInventoryToken(): AppliedCatalogHeadsTokenV1 {
