@@ -790,16 +790,15 @@ export class RpcFailoverClient {
         : attemptStartedAt + attemptBudgetMs;
       return async () => {
         const endpoint = attempt.endpoint;
-        attempt.recordStart();
         if (this.validateEndpoint) {
           await this.runProviderAttemptStage(
-            () => this.validateEndpoint!(endpoint),
+            () => { attempt.recordStart(); return this.validateEndpoint!(endpoint); },
             attemptDeadlineMs,
             `${label} chainId validation via RPC #${index + 1}`,
           );
         }
         return this.runProviderAttemptStage(
-          () => fn(endpoint.provider),
+          () => { attempt.recordStart(); return fn(endpoint.provider); },
           attemptDeadlineMs,
           `${label} via RPC #${index + 1}`,
         );
