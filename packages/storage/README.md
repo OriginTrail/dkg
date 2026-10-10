@@ -74,7 +74,10 @@ capability. A standalone agent backed by a durable store still uses `persist`.
   and then writes the current state.
 - A snapshot is written to a sibling temporary file, the file is synced, and
   then atomically renamed over the persistence file. The containing directory
-  is synced when the platform supports it. A crash before the rename retains
+  is synced when the platform supports it. If the snapshot path's directories
+  had to be created, every parent of a new directory is synced too, up to and
+  including the first one that already existed; after a failed sync the next
+  flush retries that whole range. A crash before the rename retains
   the previous complete snapshot; a temporary file may remain for cleanup.
 - Background flush failures are logged. Explicit `flush()` and `close()` calls
   reject on write, sync, or rename failures so their callers can report that

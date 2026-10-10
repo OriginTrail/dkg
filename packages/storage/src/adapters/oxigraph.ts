@@ -2,9 +2,8 @@ import { certifiedTripleStoreCommitment, type TripleStoreCommitCapability } from
 import oxigraph from 'oxigraph';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
 import { existsSync, readFileSync, renameSync } from 'node:fs';
-import { mkdir, open, rename } from 'node:fs/promises';
-import { dirname } from 'node:path';
-import { persistFileAndParent } from '../file-durability.js';
+import { open, rename } from 'node:fs/promises';
+import { DurableFileDirectory } from '../file-durability.js';
 import type {
   TripleStore,
   QueryOptions,
@@ -69,6 +68,7 @@ export class OxigraphStore implements TripleStore {
   readonly rfc64SemanticReadCertifiedV1 = true as const;
   private store: OxStore;
   private persistPath: string | undefined;
+  private snapshotDirectory?: DurableFileDirectory;
   // #1609: per-graph write generations, bumped on every local mutation (the
   // same choke points the sparql-http adapter pairs with its listGraphs-cache
   // invalidation). Feeds the chain-reconcile negative memo via
@@ -186,7 +186,9 @@ export class OxigraphStore implements TripleStore {
    *   3. Atomic rename(tmp -> persistPath) — POSIX guarantees atomicity, so
    *      a crash mid-step leaves the old persistPath intact.
    *   4. fsync the renamed file through a writable handle (Windows
-   *      FlushFileBuffers), and fsync its containing directory on POSIX.
+   *      FlushFileBuffers), and fsync its containing directory on POSIX,
+   *      plus every directory a flush created, through the first parent
+   *      that already existed.
    *
    * Previously a single `writeFile(persistPath, dump)` left the store
    * vulnerable to torn writes on SIGKILL (the file would be partially
@@ -205,10 +207,10 @@ export class OxigraphStore implements TripleStore {
   private async flushNow(): Promise<void> {
     if (!this.persistPath || this.flushing) return;
     this.flushing = true;
-    const dir = dirname(this.persistPath);
+    const directory = this.snapshotDirectory ??= new DurableFileDirectory(this.persistPath);
     const tmpPath = `${this.persistPath}.tmp`;
     try {
-      await mkdir(dir, { recursive: true });
+      await directory.create();
       const nquads = this.store.dump({ format: 'application/n-quads' });
 
       // 1+2: write to tmp, fsync to commit bytes.
@@ -224,11 +226,12 @@ export class OxigraphStore implements TripleStore {
       await rename(tmpPath, this.persistPath);
 
       // 4: the visible file must flush through a writable handle on Windows;
-      // POSIX additionally requires the containing directory's sync. A visible
-      // rename is not proof of durability. Certified commitment callers may
-      // erase recovery evidence only after the supported barrier succeeds.
+      // POSIX additionally requires the containing directory's sync, and the
+      // sync of each parent holding a directory entry this store created. A
+      // visible rename is not proof of durability. Certified commitment callers
+      // may erase recovery evidence only after the supported barrier succeeds.
       // Real file/dir I/O failures propagate; retries can re-dump visible state.
-      await persistFileAndParent(this.persistPath);
+      await directory.persist(this.persistPath);
     } catch (err) {
       // Log here so we see the failure regardless of the caller — but
       // re-throw so explicit callers fail loudly. (Background callers
