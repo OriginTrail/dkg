@@ -117,6 +117,21 @@ describe('ProtocolRouter.probeProtocol', () => {
     await expect(probe).rejects.toThrow(/node stopped/);
   });
 
+  it('propagates caller cancellation during a live probe', async () => {
+    const external = new AbortController();
+    const dialProtocol = vi.fn((_peer, _protocol, options: { signal: AbortSignal }) =>
+      new Promise((_resolve, reject) => {
+        if (options.signal.aborted) reject(options.signal.reason);
+        else options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+      }));
+    const router = new ProtocolRouter({
+      libp2p: { dialProtocol }, stopSignal: new AbortController().signal,
+    } as unknown as ConstructorParameters<typeof ProtocolRouter>[0]);
+    const probe = router.probeProtocol(PEER_ID, ACK_PROTOCOL, 3_000, external.signal);
+    external.abort(new Error('caller cancelled'));
+    await expect(probe).rejects.toThrow('caller cancelled');
+  });
+
   it('discovers a handler registered after an existing libp2p connection', async () => {
     const a = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false });
     const b = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false });

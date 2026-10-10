@@ -299,7 +299,7 @@ import {
   type CiphertextChunkCatchupRequest,
   type CiphertextChunkCatchupResponse,
 } from './swm/ciphertext-chunk-catchup.js';
-import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
+import { waitForPeerProtocol, waitForAdvertisedOrLiveProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { connectedPeerIds as liveConnectedPeerIds } from './p2p/connected-peer-ids.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
@@ -9095,15 +9095,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     pid: { toString(): string },
     signal?: AbortSignal,
   ): Promise<boolean> {
-    return waitForPeerProtocol(
-      this.node.libp2p.peerStore as any,
-      pid,
-      // Either id proves sync support (#2822; see `advertisesSyncProtocol`).
-      [PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED],
-      SYNC_PROTOCOL_CHECK_ATTEMPTS,
-      SYNC_PROTOCOL_CHECK_DELAY_MS,
-      signal,
-    );
+    return waitForAdvertisedOrLiveProtocol({
+      peerStore: this.node.libp2p.peerStore as any, peer: pid,
+      protocols: [PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED],
+      attempts: SYNC_PROTOCOL_CHECK_ATTEMPTS, delayMs: SYNC_PROTOCOL_CHECK_DELAY_MS, signal,
+      isConnected: peerId => this.node.libp2p.getConnections().some(c => c.remotePeer.toString() === peerId),
+      probe: (peerId, protocol, operationSignal) => this.router.probeProtocol(peerId, protocol, 3_000, operationSignal),
+    });
   }
 
   async refreshMetaSyncedFlags(this: DKGAgent, contextGraphIds: Iterable<string>): Promise<void> {
