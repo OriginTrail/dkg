@@ -35,12 +35,12 @@ import {
   ed25519Sign, encodeAccessRequest, decodeAccessResponse,
 } from '@origintrail-official/dkg-core';
 import { MockChainAdapter, type OnChainPublishResult, type AdoptedMintPublishResult } from '@origintrail-official/dkg-chain';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { LOCAL_TRUSTED_KA_CONTROLS_GRAPH, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { createKnowledgeAssetsWithMintAdoption } from '../src/adopt-existing-mint.js';
 import { setImmediate } from 'node:timers/promises';
 import { generatedPrivateCatalogTripleKeys, generatedPrivateCatalogFloorQuads } from '../src/catalog-trust.js';
 import {
-  overlayLocallyTrustedKnowledgeAssetControls, readLocallyTrustedKnowledgeAssetControlEnvelope,
+  generateSubGraphRegistration, overlayLocallyTrustedKnowledgeAssetControls, readLocallyTrustedKnowledgeAssetControlEnvelope,
   readMaterializedVersion, withMaterializationLock,
 } from '../src/metadata.js';
 import { computePrivateRootV10 } from '../src/merkle.js';
@@ -394,6 +394,64 @@ describe('publish adopt-existing-mint interception (KaIdAlreadyMinted)', () => {
       const permitted = await access(policy === 'allowList' ? 'Alice' : 'adoption-publisher');
       expect(permitted.granted).toBe(true);
       expect(new TextDecoder().decode(permitted.nquads)).toContain('private value');
+    } finally { await s.store.close(); }
+  });
+
+  /** Publish into `subGraphName` (root when undefined), then arm an adoption of that mint. */
+  async function adoptableSubGraphPublish(subGraphName: string | undefined) {
+    const s = await setupSealedGraphPublish([{ subject: 'urn:test:adopt-existing-mint',
+      predicate: 'urn:test:secret', object: '"private value"', graph: '' }]);
+    await s.store.insert(['A', 'B'].flatMap(name => generateSubGraphRegistration({
+      contextGraphId: CONTEXT_GRAPH_ID, subGraphName: name, createdBy: s.wallet.address, timestamp: new Date(0) })));
+    const original = await s.publisher.publish({ ...s.publishOptions, ...(subGraphName ? { subGraphName } : {}) });
+    expect(original.status).toBe('confirmed');
+    s.chain.mintError = kaIdAlreadyMintedRevert(s.reservedKaId);
+    s.chain.provenanceResult = await MockChainAdapter.prototype.getMintedKnowledgeAssetProvenance.call(
+      s.chain, s.reservedKaId, original.merkleRoot, BigInt(CONTEXT_GRAPH_ID));
+    const vmGraph = (name: string | undefined) => knowledgeAssetLayerGraphUri(CONTEXT_GRAPH_ID,
+      MemoryLayer.VerifiableMemory, createGraphKnowledgeAssetScope(s.ual, 1), name);
+    return { ...s, original, vmGraph, meta: `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_meta` };
+  }
+
+  it.each([
+    { from: 'A', to: 'B' },
+    { from: undefined, to: 'B' },
+    { from: 'A', to: undefined },
+  ])('refuses an adopted retry that moves the KA from sub-graph $from to $to before any write', async ({ from, to }) => {
+    const s = await adoptableSubGraphPublish(from);
+    try {
+      const state = async () => ({
+        metadata: await s.store.query(`CONSTRUCT { <${s.ual}> ?p ?o } WHERE { GRAPH <${s.meta}> { <${s.ual}> ?p ?o } }`),
+        trusted: await s.store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${LOCAL_TRUSTED_KA_CONTROLS_GRAPH}> { ?s ?p ?o } }`),
+        fence: await readMaterializedVersion(s.store, s.meta, s.ual),
+        data: await s.store.countQuads(s.vmGraph(from)),
+      });
+      const before = await state();
+      const compound = vi.spyOn(s.store, 'replaceGraphAndSubject');
+      const privateWrites = vi.spyOn(Reflect.get(s.publisher, 'privateStore'), 'replaceKnowledgeAssetPrivateTriples');
+      await expect(s.publisher.publish({ ...s.publishOptions, ...(to ? { subGraphName: to } : {}) })).rejects
+        .toThrow(`Graph-scoped KA publish cannot move ${s.ual} from ${from ?? '(root)'} to ${to ?? '(root)'}`);
+      // The retry reached adoption and failed before the materialization wrote anything.
+      expect(s.chain.provenanceCalls).toHaveLength(1);
+      expect(compound).not.toHaveBeenCalled();
+      expect(privateWrites).not.toHaveBeenCalled();
+      expect(await state()).toEqual(before);
+      expect(await s.store.countQuads(s.vmGraph(to))).toBe(0);
+    } finally { await s.store.close(); }
+  });
+
+  it.each(['A', undefined])('re-materializes an adopted retry into its own sub-graph %s', async subGraphName => {
+    const s = await adoptableSubGraphPublish(subGraphName);
+    try {
+      const retry = await s.publisher.publish({ ...s.publishOptions, ...(subGraphName ? { subGraphName } : {}) });
+      expect(retry.status).toBe('confirmed');
+      expect(retry.onChainResult?.txHash).toBe(s.original.onChainResult?.txHash);
+      expect(s.chain.provenanceCalls).toHaveLength(1);
+      await expect(s.store.query(`ASK { GRAPH <${s.vmGraph(subGraphName)}> {
+        <urn:test:adopt-existing-mint> <http://schema.org/name> "adopted" } }`)).resolves.toMatchObject({ value: true });
+      expect(await s.store.query(`SELECT ?name WHERE { GRAPH <${s.meta}> {
+        <${s.ual}> <http://dkg.io/ontology/subGraphName> ?name } }`))
+        .toMatchObject({ bindings: subGraphName ? [{ name: JSON.stringify(subGraphName) }] : [] });
     } finally { await s.store.close(); }
   });
 

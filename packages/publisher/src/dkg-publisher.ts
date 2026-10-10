@@ -4291,11 +4291,15 @@ export class DKGPublisher implements Publisher {
           : contextGraphLayerUri(contextGraphId, MemoryLayer.VerifiableMemory, vmAuthor, vmNumber, options.subGraphName);
         const vmQuads = normalizedQuads.map((q) => ({ ...q, graph: vmGraph }));
         this.log.info(ctx, `Storing ${vmQuads.length} triples in ${vmGraph} (post-confirmation)`);
+        const metaGraph = options.targetMetaGraphUri ?? this.graphManager.metaGraphUri(contextGraphId);
         const applied = graphPublish ? await materializeConfirmedGraphKnowledgeAsset({
           store: this.store, privateStore: this.privateStore, scope: graphPublish.scope,
-          contextGraphId, subGraphName: options.subGraphName,
-          metaGraph: options.targetMetaGraphUri ?? this.graphManager.metaGraphUri(contextGraphId),
-          vmGraph, prepare: async () => ({ vmQuads, privateQuads: canonicalPrivateQuads, metadataQuads: confirmedQuads }),
+          contextGraphId, subGraphName: options.subGraphName, metaGraph, vmGraph,
+          prepare: async () => {
+            // An adopted retry re-enters an existing KA, which keeps its sub-graph like an update.
+            await this.assertPublishKeepsSubGraph(metaGraph, graphPublish.scope.ual, options.subGraphName);
+            return { vmQuads, privateQuads: canonicalPrivateQuads, metadataQuads: confirmedQuads };
+          },
           version: { blockNumber: onChainResult.blockNumber ?? 0, txIndex: onChainResult.txIndex ?? 0 },
           persistCatalogEntry,
         }) : true;
@@ -5050,12 +5054,7 @@ export class DKGPublisher implements Publisher {
             labelMeta,
             graphUpdate.scope.ual,
           );
-          if (inherited.subGraphName !== options.subGraphName) {
-            throw new Error(
-              `Graph-scoped KA update cannot move ${graphUpdate.scope.ual} from ` +
-                `${inherited.subGraphName ?? '(root)'} to ${options.subGraphName ?? '(root)'}`,
-            );
-          }
+          assertSubGraphIdentityUnchanged('update', graphUpdate.scope.ual, inherited.subGraphName, options.subGraphName);
           const graphUpdateAccess = await this.resolveGraphScopedUpdateAccessMeta(
             labelMeta, graphUpdate.scope.ual, options, graphUpdate.privateTripleCount > 0,
           );
@@ -7227,6 +7226,38 @@ export class DKGPublisher implements Publisher {
     operation: string,
   ): Promise<void> {
     return replaceExactKnowledgeAssetGraph(this.store, graphUri, quads, operation);
+  }
+
+  /**
+   * A publish re-materializing an existing graph KA (an adopted mint retry)
+   * keeps the sub-graph its V2 metadata names. Absent metadata is a first
+   * materialization; several sub-graph values are ambiguous and refused.
+   */
+  private async assertPublishKeepsSubGraph(
+    metaGraph: string,
+    ual: string,
+    requested: string | undefined,
+  ): Promise<void> {
+    const dkg = 'http://dkg.io/ontology/';
+    const result = await this.store.query(
+      `SELECT ?subGraphName WHERE {
+         GRAPH <${assertSafeIri(metaGraph)}> {
+           <${assertSafeIri(ual)}> <${dkg}contentScopeVersion> ?scopeVersion .
+           OPTIONAL { <${assertSafeIri(ual)}> <${dkg}subGraphName> ?subGraphName }
+         }
+       }`,
+    );
+    if (result.type !== 'bindings') {
+      throw new Error(`Graph-scoped KA publish could not read the sub-graph metadata of ${ual}`);
+    }
+    if (result.bindings.length === 0) return;
+    const existing = new Set(result.bindings
+      .map((row) => rdfLexicalValue(row['subGraphName']))
+      .filter((value): value is string => value !== undefined && value.length > 0));
+    if (existing.size > 1) {
+      throw new Error(`Graph-scoped KA publish found ambiguous subGraphName metadata for ${ual}`);
+    }
+    assertSubGraphIdentityUnchanged('publish', ual, [...existing][0], requested);
   }
 
   /** Load the immutable access/sub-graph identity of an existing graph KA. */
@@ -9552,6 +9583,21 @@ function stripSparqlLiteral(value: string | undefined): string | undefined {
 
 function rdfLexicalValue(value: string | undefined): string | undefined {
   return stripSparqlLiteral(value);
+}
+
+/** A graph KA stays in the sub-graph (or root) of its first materialization. */
+function assertSubGraphIdentityUnchanged(
+  operation: 'publish' | 'update',
+  ual: string,
+  existing: string | undefined,
+  requested: string | undefined,
+): void {
+  if (existing !== requested) {
+    throw new Error(
+      `Graph-scoped KA ${operation} cannot move ${ual} from ` +
+        `${existing ?? '(root)'} to ${requested ?? '(root)'}`,
+    );
+  }
 }
 
 function addOwner(owners: Map<string, Set<string>>, root: string, owner: string): void {
