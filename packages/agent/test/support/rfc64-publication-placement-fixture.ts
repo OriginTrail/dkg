@@ -9,10 +9,12 @@
  * and the whole repair body (coverage check, successor, signature, applied-head CAS, announcement).
  *
  * What stands in for a chain: the executor reports its transaction as accepted and confirmed
- * without sending one, the two chain-proof resolvers answer `recovered`, and the recovery
- * finalizer's chain normalization and VM materialization answer as they do for a publish that is
- * already materialized. The test file mocks the normalizer module for that; see
- * {@link recoveredNamedKaPublishV1}.
+ * without sending one, the two chain-proof resolvers answer `recovered`, the recovery finalizer's
+ * chain normalization answers as it does for a publish that is the asset's current version (the
+ * test file mocks the normalizer module for that; see {@link recoveredNamedKaPublishV1}), and the
+ * agent's own finalization handler gives a staged answer about the VM content and writes none.
+ * The fixture's assets have no named lifecycle record, so recovery writes its receipt without
+ * stamping one, as it does for any assertion that moved on.
  *
  * Time: one clock the row moves by hand drives the publisher's job timestamps and the placement
  * timing, so a wait is exactly what the row parked.
@@ -21,9 +23,13 @@ import { afterEach, vi } from 'vitest';
 
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
+  MemoryLayer,
   canonicalGraphScopedAuthorSealFromAssertionSealV1,
+  createGraphKnowledgeAssetScope,
   createOperationContext,
+  knowledgeAssetLayerGraphUri,
   type AssertionSeal,
+  type Logger,
   type OperationContext,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
@@ -37,17 +43,31 @@ import {
 } from '@origintrail-official/dkg-publisher';
 
 import type { DKGAgent } from '../../src/index.js';
+import type { ChainReconciledKCOutcome } from '../../src/finalization-handler.js';
+import type { Rfc64FinalizedPrivatePlacementRepairRequestV1 } from
+  '../../src/dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
+import {
+  assertionSealFromQueuedKnowledgeAssetVmPublishRequest,
+  isGraphScopedKnowledgeAssetVmPublishRequest,
+} from '../../src/internal/knowledge-asset-vm-publish-request.js';
 import {
   CatalogPlacementTimingV1,
   installCatalogPlacementTimingV1,
+  type CatalogPlacementAttemptV1,
+  type CatalogPlacementWaiterObserverV1,
+  type FinalizedPrivatePlacementQueueStatusV1,
 } from '../../src/internal/catalog-placement-timing.js';
-import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
-  '../../src/rfc64/finalized-private-placement-repair-store-v1.js';
+import type {
+  Rfc64FinalizedPrivatePlacementRepairStoreV1,
+  Rfc64FinalizedPrivatePlacementRepairV1,
+} from '../../src/rfc64/finalized-private-placement-repair-store-v1.js';
+import type { AppliedCatalogHeadSnapshotV1 } from '../../src/rfc64/inventory-v1/index.js';
 import {
   AUTHOR,
   AUTHOR_WALLET,
   CONTEXT_GRAPH_ID,
   NETWORK_ID,
+  PROJECTION_QUADS,
   catalogScopeDigestV1,
   seedInventoryAssetV1,
   startRepairAgentV1,
@@ -114,18 +134,45 @@ export function gateV1(): GateV1 {
   return gate;
 }
 
+/** What became of some work within a bound of real time. */
+export type SettlementV1<T> =
+  | Readonly<{ status: 'fulfilled'; value: T }>
+  | Readonly<{ status: 'rejected'; reason: unknown }>
+  | Readonly<{ status: 'pending' }>;
+
 /**
- * True when `work` settled within `ms` of real time; a promise that is still pending reads false.
- * The default is generous: it is only ever spent when the work does not settle at all.
+ * What became of `work` within `ms` of real time. A row asserts on the whole answer, so work that
+ * rejected cannot pass for work that completed, and work that is still pending reads `pending`
+ * instead of hanging the row. The default bound is generous: it is only ever spent when the work
+ * does not settle at all.
  */
-export async function settlesWithinV1(work: Promise<unknown>, ms = 5_000): Promise<boolean> {
+export async function settledWithinV1<T>(work: Promise<T>, ms = 5_000): Promise<SettlementV1<T>> {
   let timer!: ReturnType<typeof setTimeout>;
-  const timedOut = new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), ms); });
+  const pending = new Promise<SettlementV1<T>>((resolve) => {
+    timer = setTimeout(() => resolve({ status: 'pending' }), ms);
+  });
   try {
-    return await Promise.race([work.then(() => true as const, () => true as const), timedOut]);
+    return await Promise.race([
+      work.then(
+        (value): SettlementV1<T> => ({ status: 'fulfilled', value }),
+        (reason: unknown): SettlementV1<T> => ({ status: 'rejected', reason }),
+      ),
+      pending,
+    ]);
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * The value `work` completed with, for a step a row needs to have succeeded. A rejection is thrown
+ * on as it is; work that is still pending after `ms` of real time fails the row by name.
+ */
+export async function fulfilledWithinV1<T>(work: Promise<T>, what: string, ms = 5_000): Promise<T> {
+  const settlement = await settledWithinV1(work, ms);
+  if (settlement.status === 'fulfilled') return settlement.value;
+  if (settlement.status === 'rejected') throw settlement.reason;
+  throw new Error(`${what} was still pending after ${ms} ms`);
 }
 
 /** Real event-loop turns until `condition` holds, bounded by wall clock. */
@@ -146,7 +193,7 @@ export interface PlacementAgentV1 {
   /** Rows in the author's applied catalog head, or null before the first placement. */
   readonly catalogRows: () => string | null;
   /** The finalized-private queue as `/api/status` reports it; undefined without supervisor state. */
-  readonly queue: () => Readonly<Record<string, unknown>> | undefined;
+  readonly queue: () => Readonly<FinalizedPrivatePlacementQueueStatusV1> | undefined;
   /** How often the real steps of a placement ran: the calls reach the real implementation. */
   readonly counts: () => PlacementCountsV1;
   /**
@@ -158,8 +205,8 @@ export interface PlacementAgentV1 {
   /** What happened at the terminal boundary and after it, in order, across all assets. */
   readonly events: () => readonly string[];
   readonly record: (event: string) => void;
-  /** The promise of every placement request the observer made, in order. */
-  readonly requests: () => ReadonlyArray<{ accepted: boolean; whenAttempted: Promise<void> }>;
+  /** Every placement request the observer made, in order. */
+  readonly requests: () => readonly Rfc64FinalizedPrivatePlacementRepairRequestV1[];
   readonly placementLines: () => string[];
   readonly warnings: () => string[];
   /**
@@ -191,6 +238,50 @@ interface StartPlacementAgentOptionsV1 {
   readonly beforeStart?: (agent: DKGAgent) => void | Promise<void>;
 }
 
+/** What the agent's completion tail takes; both completion paths build it from the queued request. */
+interface ConfirmedVmPublishTailInputV1 {
+  readonly status: PublishResult['status'];
+  readonly contextGraphId: string;
+  readonly subGraphName?: string;
+  readonly assertionCoordinate: string;
+  readonly shareOperationId?: string;
+  readonly seal: AssertionSeal;
+  readonly assertionUri: string;
+  readonly ctx: OperationContext;
+  readonly publicationLabel: 'publish' | 'queued publish';
+}
+
+/**
+ * The protected and private members of the agent that the fixture instruments or calls, with the
+ * signatures their owning classes declare. {@link internalsOf} is the one place the fixture steps
+ * over the agent's access modifiers; everything else goes through the agent's public type.
+ */
+interface PlacementAgentInternalsV1 {
+  readonly log: Pick<Logger, 'info' | 'warn'>;
+  readonly rfc64PersistenceV1: { finalizedPrivatePlacementRepairs: Rfc64FinalizedPrivatePlacementRepairStoreV1 };
+  resolveRfc64CatalogAuthoringLaneV1(
+    contextGraphId: string,
+    subGraphName: string | null | undefined,
+  ): Readonly<{ acceptsFinalizedVmRepair: boolean }> | null;
+  repairObservedRfc64FinalizedPrivateCatalogPlacementV1(
+    repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
+    placement: CatalogPlacementAttemptV1,
+  ): Promise<'repaired' | 'already-complete'>;
+  publishRfc64FinalizedPrivateCatalogPlacementV1(
+    repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
+    placement: CatalogPlacementAttemptV1,
+  ): Promise<AppliedCatalogHeadSnapshotV1 | null>;
+  requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1(
+    params: Readonly<{ repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>; ctx: OperationContext }>,
+    observer: CatalogPlacementWaiterObserverV1,
+  ): Rfc64FinalizedPrivatePlacementRepairRequestV1;
+  afterConfirmedGraphScopedVmPublishV1(input: ConfirmedVmPublishTailInputV1): Promise<void>;
+}
+
+function internalsOf(agent: DKGAgent): PlacementAgentInternalsV1 {
+  return agent as unknown as PlacementAgentInternalsV1;
+}
+
 /**
  * An author whose confirmed private placements go through the real repair path. The agent's real
  * open-policy lane is made a finalized-private one, and the ordinary projection is kept from
@@ -202,7 +293,7 @@ export async function startPlacementAgentV1(
   const clock = { now: 0 };
   const counted = { repairs: 0, coverageChecks: 0, successors: 0, signatures: 0, announcements: 0 };
   const events: string[] = [];
-  const requests: Array<{ accepted: boolean; whenAttempted: Promise<void> }> = [];
+  const requests: Rfc64FinalizedPrivatePlacementRepairRequestV1[] = [];
   const lane: PlacementAgentV1['lane'] = { acceptsFinalizedVmRepair: true };
   const failPlacements: Error[] = [];
   let placementGate: GateV1 | undefined;
@@ -219,12 +310,12 @@ export async function startPlacementAgentV1(
       catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
     },
     beforeStart: async (starting) => {
-      const internals = starting as any;
+      const internals = internalsOf(starting);
       vi.spyOn(starting, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
       vi.spyOn(starting, 'reconcileRfc64PublicCatalogFromSwmInventoryV1').mockResolvedValue(null);
       const realLane = internals.resolveRfc64CatalogAuthoringLaneV1.bind(starting);
       vi.spyOn(internals, 'resolveRfc64CatalogAuthoringLaneV1').mockImplementation(
-        (contextGraphId: unknown, subGraphName: unknown) => {
+        (contextGraphId, subGraphName) => {
           if (lane.unavailable !== undefined) throw lane.unavailable;
           const resolved = realLane(contextGraphId, subGraphName);
           return resolved === null
@@ -238,39 +329,35 @@ export async function startPlacementAgentV1(
       }));
       const repair = internals.repairObservedRfc64FinalizedPrivateCatalogPlacementV1.bind(starting);
       vi.spyOn(internals, 'repairObservedRfc64FinalizedPrivateCatalogPlacementV1').mockImplementation(
-        (...args: unknown[]) => {
+        (marker, placement) => {
           counted.repairs += 1;
-          return repair(...args);
+          return repair(marker, placement);
         },
       );
-      const placement = internals.publishRfc64FinalizedPrivateCatalogPlacementV1.bind(starting);
+      const placePrivate = internals.publishRfc64FinalizedPrivateCatalogPlacementV1.bind(starting);
       vi.spyOn(internals, 'publishRfc64FinalizedPrivateCatalogPlacementV1').mockImplementation(
-        async (...args: unknown[]) => {
+        async (marker, placement) => {
           const failure = failPlacements.shift();
           if (failure !== undefined) throw failure;
-          return placement(...args);
+          return placePrivate(marker, placement);
         },
       );
-      const coverage = internals.rfc64CatalogCoversConfirmedSwmRowV1.bind(starting);
-      vi.spyOn(internals, 'rfc64CatalogCoversConfirmedSwmRowV1').mockImplementation(
-        async (...args: unknown[]) => {
-          counted.coverageChecks += 1;
-          const covered = await coverage(...args);
-          events.push(`coverage-proof:${(args[0] as any).expectedRow.assertionCoordinate}:${covered}`);
-          return covered;
-        },
-      );
-      const successor = internals.publishAuthorCatalogExactSetSuccessorV1.bind(starting);
-      vi.spyOn(internals, 'publishAuthorCatalogExactSetSuccessorV1').mockImplementation(
-        async (...args: unknown[]) => {
-          counted.successors += 1;
-          await placementGate?.pass();
-          return successor(...args);
-        },
-      );
-      const signer = internals.createRfc64CatalogAuthorSignerV1.bind(starting);
-      vi.spyOn(internals, 'createRfc64CatalogAuthorSignerV1').mockImplementation((...args: unknown[]) => {
-        const real = signer(...args);
+      const coverage = starting.rfc64CatalogCoversConfirmedSwmRowV1.bind(starting);
+      vi.spyOn(starting, 'rfc64CatalogCoversConfirmedSwmRowV1').mockImplementation(async (params) => {
+        counted.coverageChecks += 1;
+        const covered = await coverage(params);
+        events.push(`coverage-proof:${params.expectedRow.assertionCoordinate}:${covered}`);
+        return covered;
+      });
+      const successor = starting.publishAuthorCatalogExactSetSuccessorV1.bind(starting);
+      vi.spyOn(starting, 'publishAuthorCatalogExactSetSuccessorV1').mockImplementation(async (params) => {
+        counted.successors += 1;
+        await placementGate?.pass();
+        return successor(params);
+      });
+      const signer = starting.createRfc64CatalogAuthorSignerV1.bind(starting);
+      vi.spyOn(starting, 'createRfc64CatalogAuthorSignerV1').mockImplementation((authorAddress, signal) => {
+        const real = signer(authorAddress, signal);
         return Object.freeze({
           address: real.address,
           signMessage: (message: Uint8Array) => {
@@ -287,7 +374,7 @@ export async function startPlacementAgentV1(
       // The observer's own request: the one whose waiter is told about the attempt that releases it.
       const requestRepair = internals.requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1.bind(starting);
       vi.spyOn(internals, 'requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1').mockImplementation(
-        (params: { repair: Rfc64FinalizedPrivatePlacementRepairV1 }, observer: unknown) => {
+        (params, observer) => {
           const request = requestRepair(params, observer);
           requests.push(request);
           events.push(`placement-requested:${params.repair.assertionCoordinate}:${request.accepted ? 'accepted' : 'refused'}`);
@@ -303,24 +390,25 @@ export async function startPlacementAgentV1(
     ownerAddress: AUTHOR,
   });
   // The marker store is frozen, so the row watches it through the persistence that hands it out.
-  const persistence = (agent as any).rfc64PersistenceV1;
+  const internals = internalsOf(agent);
+  const persistence = internals.rfc64PersistenceV1;
   const markerStore = persistence.finalizedPrivatePlacementRepairs;
-  persistence.finalizedPrivatePlacementRepairs = Object.freeze({
+  const watchedMarkerStore: Rfc64FinalizedPrivatePlacementRepairStoreV1 = Object.freeze({
     list: () => markerStore.list(),
-    put: async (repair: Rfc64FinalizedPrivatePlacementRepairV1) => {
+    put: async (repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>) => {
       if (hooks.failMarkerWrite !== undefined) throw hooks.failMarkerWrite;
       await markerStore.put(repair);
       events.push(`marker-stored:${repair.assertionCoordinate}`);
       hooks.afterMarkerStored?.();
     },
-    delete: async (repair: Rfc64FinalizedPrivatePlacementRepairV1) => {
+    delete: async (repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>) => {
       await markerStore.delete(repair);
       events.push(`marker-retired:${repair.assertionCoordinate}`);
     },
   });
-  const log = (agent as any).log;
-  const info = vi.spyOn(log, 'info');
-  const warn = vi.spyOn(log, 'warn');
+  persistence.finalizedPrivatePlacementRepairs = watchedMarkerStore;
+  const info = vi.spyOn(internals.log, 'info');
+  const warn = vi.spyOn(internals.log, 'warn');
   return Object.assign(hooks, {
     agent,
     clock,
@@ -331,8 +419,7 @@ export async function startPlacementAgentV1(
       catalogScopeDigest: catalogScopeDigestV1(),
       authorAddress: AUTHOR,
     })?.inventoryRowCount ?? null,
-    queue: () => agent.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.finalizedPrivatePlacement as
-      Readonly<Record<string, unknown>> | undefined,
+    queue: () => agent.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.finalizedPrivatePlacement,
     counts: () => ({ ...counted }),
     holdPlacements: () => {
       placementGate = gateV1();
@@ -390,6 +477,38 @@ export function observeConfirmedV1(
     ctx: createOperationContext('publishFromSWM', `job-${asset.suffix}`),
     publicationLabel,
   });
+}
+
+/**
+ * The tail a synchronous publish of `asset` awaits before it answers: `publishFromFinalizedAssertion`
+ * ends in this call and returns its result right after it.
+ */
+export function confirmedSynchronousPublishTailV1(agent: DKGAgent, asset: PlacementAssetV1): Promise<void> {
+  return internalsOf(agent).afterConfirmedGraphScopedVmPublishV1({
+    status: 'confirmed',
+    contextGraphId: CONTEXT_GRAPH_ID,
+    assertionCoordinate: asset.assertionCoordinate,
+    shareOperationId: asset.shareOperationId,
+    seal: asset.seal,
+    assertionUri: `urn:placement-fixture:${asset.assertionCoordinate}`,
+    ctx: createOperationContext('publishFromSWM', `publish-${asset.suffix}`),
+    publicationLabel: 'publish',
+  });
+}
+
+/**
+ * The author re-opens `asset` for editing, through the agent's own pull-from: the publisher
+ * verifies the shared content against the seal, archives that seal as the recovery commitment,
+ * clears the active one and seeds the draft.
+ */
+export async function reopenForEditingV1(agent: DKGAgent, asset: PlacementAssetV1): Promise<void> {
+  const vmGraph = knowledgeAssetLayerGraphUri(
+    CONTEXT_GRAPH_ID,
+    MemoryLayer.VerifiableMemory,
+    createGraphKnowledgeAssetScope(asset.seal.kaUal!, asset.seal.assertionVersion!),
+  );
+  await agent.store.insert(PROJECTION_QUADS.map((quad) => ({ ...quad, graph: vmGraph })));
+  await agent.assertion.pullFrom(CONTEXT_GRAPH_ID, asset.assertionCoordinate, 'vm', { agentAddress: AUTHOR });
 }
 
 /** The queued request a share of `asset` enqueues: its immutable seal, as the queue persists it. */
@@ -492,7 +611,7 @@ export interface PublicationPathV1 {
   /** Milliseconds on the fixture clock between finality observed and the terminal record. */
   readonly postFinalityWaitMs: (jobId: string) => Promise<number | null>;
   /** What the recovery finalizer's VM materialization answers; `promoted` unless a row changes it. */
-  materialization: 'promoted' | 'already-confirmed' | 'stale-target' | 'not-ready';
+  materialization: ChainReconciledKCOutcome;
 }
 
 /**
@@ -504,7 +623,7 @@ export function createPublicationPathV1(
   config: Partial<AsyncLiftPublisherConfig> = {},
 ): PublicationPathV1 {
   const { agent, clock } = fixture;
-  const internals = agent as any;
+  const internals = internalsOf(agent);
   let ids = 0;
   const queued = new Map<string, { request: KnowledgeAssetVmPublishRequest; asset: PlacementAssetV1 }>();
   const byTxHash = (txHash: string) => {
@@ -514,11 +633,11 @@ export function createPublicationPathV1(
   };
   const path: Pick<PublicationPathV1, 'materialization'> = { materialization: 'promoted' };
   vi.spyOn(agent, 'getContextGraphOnChainId').mockResolvedValue('1');
-  vi.spyOn(internals, 'getOrCreateFinalizationHandler').mockReturnValue({
-    handleChainReconciledKC: async () => {
-      fixture.record(`vm-materialization:${path.materialization}`);
-      return path.materialization;
-    },
+  // Recovery asks the agent's own finalization handler whether the VM content is there; only that
+  // answer is staged.
+  vi.spyOn(agent.getOrCreateFinalizationHandler(), 'handleChainReconciledKC').mockImplementation(async () => {
+    fixture.record(`vm-materialization:${path.materialization}`);
+    return path.materialization;
   });
 
   const publisher = new TripleStoreAsyncLiftPublisher(agent.store, {
@@ -537,26 +656,44 @@ export function createPublicationPathV1(
     ...config,
     knowledgeAssetVmPublishHandler: {
       execute: async (input): Promise<PublishResult> => {
-        const { asset } = [...queued.values()].find(({ request }) => request.name === input.request.name)!;
+        const { request } = input;
+        if (!isGraphScopedKnowledgeAssetVmPublishRequest(request)) {
+          throw new Error(`expected a graph-scoped queued publish for ${request.name}`);
+        }
+        const { asset } = [...queued.values()].find((entry) => entry.request.name === request.name)!;
         await input.publishOptions.onBeforeBroadcast?.({ txHash: asset.txHash, operationKind: 'create' });
         await input.publishOptions.onBroadcastAccepted?.({ txHash: asset.txHash, operationKind: 'create' });
         await new Promise((resolve) => setTimeout(resolve, 10));
         input.publishOptions.onPublishConfirmed?.({ txHash: asset.txHash });
-        // The last thing the agent's queued executor does once the publisher reports `confirmed`.
-        await internals.afterConfirmedGraphScopedVmPublishV1({
+        // The last thing the agent's queued executor does once the publisher reports `confirmed`,
+        // with the seal it rebuilds from the queued request.
+        const seal = assertionSealFromQueuedKnowledgeAssetVmPublishRequest(request);
+        try {
+          await internals.afterConfirmedGraphScopedVmPublishV1({
+            status: 'confirmed',
+            contextGraphId: request.contextGraphId,
+            subGraphName: request.subGraphName,
+            assertionCoordinate: request.name,
+            shareOperationId: request.shareOperationId,
+            seal,
+            assertionUri: `urn:placement-fixture:${request.name}`,
+            ctx: input.publishOptions.operationCtx ?? createOperationContext('publishFromSWM'),
+            publicationLabel: 'queued publish',
+          });
+        } catch (cause) {
+          // The publisher swallows what a detached execution rejects with; the row must not.
+          fixture.record(`executor-failed:${request.name}:${cause instanceof Error ? cause.message : String(cause)}`);
+          throw cause;
+        }
+        fixture.record(`executor-settled:${request.name}`);
+        // The publisher drops the result of a detached execution; recovery owns the record.
+        return {
+          kaId: asset.kaNumber,
+          ual: request.kaUal,
+          merkleRoot: seal.merkleRoot,
+          kaManifest: [],
           status: 'confirmed',
-          contextGraphId: input.request.contextGraphId,
-          subGraphName: input.request.subGraphName,
-          assertionCoordinate: input.request.name,
-          shareOperationId: input.request.shareOperationId,
-          seal: asset.seal,
-          assertionUri: `urn:placement-fixture:${input.request.name}`,
-          ctx: input.publishOptions.operationCtx as OperationContext,
-          publicationLabel: 'queued publish',
-        });
-        fixture.record(`executor-settled:${input.request.name}`);
-        // A detached execution's result is dropped by design; recovery owns the record.
-        return undefined as unknown as PublishResult;
+        };
       },
       finalizeRecovered: async (input) => {
         await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(input);
@@ -650,8 +787,8 @@ export async function drivePublicationsV1(input: {
       );
       if (await finalized()) break;
       if (parked.parked() === 0) {
-        // The next placement has not reached its announcement yet. Give it real turns: a loop of
-        // store reads alone settles in microtasks and would starve the timers the repair needs.
+        // The next placement has not reached the point where it parks yet. Give it real turns: a
+        // loop of store reads alone settles in microtasks and would starve the timers it needs.
         idlePasses = 0;
         await new Promise<void>((resolve) => setTimeout(resolve, 5));
         continue;

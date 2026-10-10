@@ -34,7 +34,7 @@ import {
   gateV1,
   observeConfirmedV1,
   seedPlacementAssetV1,
-  settlesWithinV1,
+  settledWithinV1,
   startPlacementAgentV1,
   untilV1,
 } from './support/rfc64-publication-placement-fixture.js';
@@ -98,7 +98,7 @@ describe('the finalized-private supervisor as the owner of a placement', () => {
       reconcile: async () => null,
       warn: () => {},
       placementTiming: () => timing,
-    } as never);
+    });
     owners.push(owner);
     return {
       owner, clock, state, parked, repaired,
@@ -133,7 +133,7 @@ describe('the finalized-private supervisor as the owner of a placement', () => {
 
     // Close fences admission, aborts the pass and waits for the attempt it already admitted.
     const closing = f.owner.close();
-    expect(await settlesWithinV1(closing, 200)).toBe(false);
+    expect(await settledWithinV1(closing, 200)).toEqual({ status: 'pending' });
     expect(f.owe(marker(3)).accepted).toBe(false);
     f.parked.releaseNext();
     await closing;
@@ -143,7 +143,8 @@ describe('the finalized-private supervisor as the owner of a placement', () => {
     expect(f.repaired).toEqual(['placement-1']);
     expect(f.state.markers.map(({ assertionCoordinate }) => assertionCoordinate))
       .toEqual(['placement-2', 'placement-3']);
-    expect(await settlesWithinV1(Promise.all([running.whenAttempted, queued.whenAttempted]), 200)).toBe(true);
+    expect(await settledWithinV1(Promise.all([running.whenAttempted, queued.whenAttempted]), 200))
+      .toEqual({ status: 'fulfilled', value: [undefined, undefined] });
     expect(f.owner.status()).toBeNull();
     // Nothing is left running that could start a placement later.
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -216,7 +217,7 @@ describe('the finalized-private supervisor as the owner of a placement', () => {
     const request = f.owe(marker(1));
     await f.parked.entered();
     // The observer does not wait on this promise; the owner still keeps it honest.
-    expect(await settlesWithinV1(request.whenAttempted, 200)).toBe(false);
+    expect(await settledWithinV1(request.whenAttempted, 200)).toEqual({ status: 'pending' });
     f.parked.releaseNext();
     await request.whenAttempted;
     expect(f.state.markers).toEqual([]);
@@ -365,24 +366,26 @@ describe('a confirmed private placement the observer handed to the supervisor', 
     const queued = await seedPlacementAssetV1(first.agent, 'queued', 86n);
     const parked = first.holdPlacements();
 
-    expect(await settlesWithinV1(observeConfirmedV1(first.agent, drained))).toBe(true);
+    expect(await settledWithinV1(observeConfirmedV1(first.agent, drained)))
+      .toEqual({ status: 'fulfilled', value: undefined });
     await parked.entered();
-    expect(await settlesWithinV1(observeConfirmedV1(first.agent, queued))).toBe(true);
+    expect(await settledWithinV1(observeConfirmedV1(first.agent, queued)))
+      .toEqual({ status: 'fulfilled', value: undefined });
     // One placement is parked in flight; the other is owed and queued behind it.
     expect(first.markers()).toHaveLength(2);
     expect(first.queue()).toMatchObject({ pending: 2, passRunning: true });
 
     // Shutdown waits for the placement in flight: it is drained, not abandoned.
     const stopping = first.agent.stop();
-    expect(await settlesWithinV1(stopping, 500)).toBe(false);
+    expect(await settledWithinV1(stopping, 500)).toEqual({ status: 'pending' });
     parked.release();
     await stopping;
     agents.splice(agents.indexOf(first.agent), 1);
 
     // Every request the observer made is settled and nothing keeps running after the stop: the
     // queued placement never reached its catalog work.
-    expect(await settlesWithinV1(Promise.all(first.requests().map(({ whenAttempted }) => whenAttempted)), 200))
-      .toBe(true);
+    expect(await settledWithinV1(Promise.all(first.requests().map(({ whenAttempted }) => whenAttempted)), 200))
+      .toEqual({ status: 'fulfilled', value: [undefined, undefined] });
     const stopped = first.counts();
     expect(stopped).toMatchObject({ coverageChecks: 1, successors: 1, announcements: 1 });
     await new Promise((resolve) => setTimeout(resolve, 100));

@@ -24,18 +24,24 @@ vi.mock('../src/named-ka-publish-recovery.js', async (importOriginal) => ({
   ) => recoveredNamedKaPublishV1(input),
 }));
 
+import { resolveDurableGraphScopedAuthorSealCandidateV1 } from '../src/durable-author-seal-resolver-v1.js';
 import {
   AUTHOR,
   CONTEXT_GRAPH_ID,
 } from './support/rfc64-local-catalog-repair-fixture.js';
 import {
+  confirmedSynchronousPublishTailV1,
   createPublicationPathV1,
   drivePublicationsV1,
+  fulfilledWithinV1,
   recoveredNamedKaPublishV1,
+  reopenForEditingV1,
   seedPlacementAssetV1,
-  settlesWithinV1,
+  settledWithinV1,
   startPlacementAgentV1,
   untilV1,
+  type PlacementAgentV1,
+  type PlacementAssetV1,
   type PlacementCountsV1,
 } from './support/rfc64-publication-placement-fixture.js';
 
@@ -60,6 +66,27 @@ function since(before: PlacementCountsV1, after: PlacementCountsV1): PlacementCo
 /** The steps of the terminal boundary, without the supervisor's own interleaved events. */
 function boundary(events: readonly string[]): string[] {
   return events.filter((event) => !event.startsWith('coverage-proof:') && !event.startsWith('marker-retired:'));
+}
+
+/** How each detached execution ended; the publisher itself swallows what one rejects with. */
+function executions(events: readonly string[]): string[] {
+  return events.filter((event) => event.startsWith('executor-'));
+}
+
+/** What happened to the markers: stored, proved covered or not, retired. */
+function markerLife(events: readonly string[]): string[] {
+  return events.filter((event) => /^(marker-stored|coverage-proof|marker-retired):/.test(event));
+}
+
+/** Whether the assertion of `asset` still carries an active author seal, as the repair reads it. */
+async function hasActiveSeal(fixture: PlacementAgentV1, asset: PlacementAssetV1): Promise<boolean> {
+  return await resolveDurableGraphScopedAuthorSealCandidateV1({
+    store: fixture.agent.store,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    agentAddress: AUTHOR,
+    assertionCoordinate: asset.assertionCoordinate,
+    source: 'test.placement.activeSeal',
+  }) !== undefined;
 }
 
 /** Author signatures the fixture counts: three for a catalog genesis, three for each successor. */
@@ -88,10 +115,10 @@ describe('a confirmed publication and its catalog placement', () => {
       // releases the placement: any wait the job sees is the placement's.
       clock.now = 1_000;
       // The executor tail returns although its placement attempt has not ended.
-      expect(await settlesWithinV1(path.publisher.drainDetachedExecutions())).toBe(true);
+      await fulfilledWithinV1(path.publisher.drainDetachedExecutions(), 'the executor tail');
       // Recovery proves the transaction, observes the same confirmation again from the agent's
-      // recovery finalizer, and writes the terminal record.
-      expect(await settlesWithinV1(path.publisher.recover())).toBe(true);
+      // recovery finalizer, and writes the terminal record: one job reconciled.
+      expect(await fulfilledWithinV1(path.publisher.recover(), 'the recovery pass')).toBe(1);
 
       const job = await path.job(jobId);
       expect(job?.status).toBe('finalized');
@@ -168,30 +195,32 @@ describe('a confirmed publication and its catalog placement', () => {
     const path = createPublicationPathV1(fixture);
     const parked = fixture.holdPlacements();
     try {
-      path.materialization = 'not-ready';
+      // The VM content is verified, and its confirmed metadata is not written yet.
+      path.materialization = 'verified-vm-metadata-pending';
       const jobId = await path.enqueue(asset);
       await path.broadcast('wallet-1');
       await parked.entered();
-      expect(await settlesWithinV1(path.publisher.drainDetachedExecutions())).toBe(true);
+      await fulfilledWithinV1(path.publisher.drainDetachedExecutions(), 'the executor tail');
 
       // Finality is observed, and the executor tail already stored the marker and requested the
-      // placement. Recovery still cannot prove the VM content, so the record stays live.
+      // placement. Recovery still cannot prove the VM content, so the pass settles nothing and
+      // the record stays live.
       clock.now = 1_000;
-      await path.publisher.recover();
+      expect(await fulfilledWithinV1(path.publisher.recover(), 'the recovery pass without VM content')).toBe(0);
       expect((await path.job(jobId))?.status).toBe('broadcast');
       expect(boundary(fixture.events())).toEqual([
         'marker-stored:repair-vm-content',
         'placement-requested:repair-vm-content:accepted',
         'executor-settled:repair-vm-content',
         'finality-observed:repair-vm-content',
-        'vm-materialization:not-ready',
+        'vm-materialization:verified-vm-metadata-pending',
       ]);
 
       // Once the VM content is there the next pass finalizes the job. The second it waited was
       // for the VM content; the placement is parked throughout.
       path.materialization = 'promoted';
       clock.now = 2_000;
-      expect(await settlesWithinV1(path.publisher.recover())).toBe(true);
+      expect(await fulfilledWithinV1(path.publisher.recover(), 'the recovery pass with VM content')).toBe(1);
       expect((await path.job(jobId))?.status).toBe('finalized');
       expect(await path.postFinalityWaitMs(jobId)).toBe(1_000);
       expect(parked.parked()).toBe(1);
@@ -219,10 +248,13 @@ describe('a confirmed publication and its catalog placement', () => {
       // The supervisor runs one placement at a time: the first is parked, five are queued behind it.
       await parked.entered();
       clock.now = 1_000;
-      expect(await settlesWithinV1(path.publisher.drainDetachedExecutions())).toBe(true);
+      await fulfilledWithinV1(path.publisher.drainDetachedExecutions(), 'the six executor tails');
+      expect(executions(fixture.events())).toEqual(
+        Array.from({ length: 6 }, (_, index) => `executor-settled:repair-burst-${index}`),
+      );
       // One pass of the recovery walk finalizes all six. No job waits behind another job's
       // placement, and none waits for its own.
-      expect(await settlesWithinV1(path.publisher.recover())).toBe(true);
+      expect(await fulfilledWithinV1(path.publisher.recover(), 'the recovery pass')).toBe(6);
       expect(await Promise.all(jobIds.map(async (jobId) => (await path.job(jobId))?.status)))
         .toEqual(Array.from({ length: 6 }, () => 'finalized'));
       expect(await Promise.all(jobIds.map((jobId) => path.postFinalityWaitMs(jobId))))
@@ -275,6 +307,7 @@ describe('a confirmed publication and its catalog placement', () => {
     const jobId = await path.enqueue(asset);
     await path.broadcast('wallet-1');
     await path.publisher.drainDetachedExecutions();
+    expect(executions(fixture.events())).toEqual(['executor-settled:repair-again']);
     await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     const placed = fixture.counts();
     expect(since(seeded, placed)).toEqual({
@@ -285,7 +318,7 @@ describe('a confirmed publication and its catalog placement', () => {
 
     // Recovery observes the same confirmation. The marker returns and the supervisor visits it
     // once more; the positive proof that the catalog covers the row is all that retires it.
-    await path.publisher.recover();
+    expect(await path.publisher.recover()).toBe(1);
     expect((await path.job(jobId))?.status).toBe('finalized');
     await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     expect(since(placed, fixture.counts())).toEqual({
@@ -293,7 +326,7 @@ describe('a confirmed publication and its catalog placement', () => {
     });
     expect(fixture.markers()).toEqual([]);
     expect(fixture.catalogRows()).toBe('1');
-    expect(fixture.events().filter((event) => !boundary([event]).length || event.startsWith('marker-stored:'))).toEqual([
+    expect(markerLife(fixture.events())).toEqual([
       'marker-stored:repair-again',
       'coverage-proof:repair-again:false',
       'marker-retired:repair-again',
@@ -317,15 +350,17 @@ describe('a confirmed publication and its catalog placement', () => {
       // The chain-proof dispatcher finalizes the held job inside the node-wide claim transaction.
       // The observer returns there with the placement owed, so the transaction ends.
       clock.now = 1_000;
-      expect(await settlesWithinV1(path.publisher.recover())).toBe(true);
+      expect(await fulfilledWithinV1(path.publisher.recover(), 'the recovery pass')).toBe(1);
       expect((await path.job(jobId))?.status).toBe('finalized');
       expect(await path.postFinalityWaitMs(jobId)).toBe(0);
 
       // The placement runs after it, and the claim lock is free while it is parked: another
-      // publish is admitted and claimed.
+      // publish is admitted, and a wallet claims exactly that job.
       await parked.entered();
-      expect(await settlesWithinV1(path.enqueue(other))).toBe(true);
-      expect(await settlesWithinV1(path.publisher.claimNext('wallet-2'))).toBe(true);
+      const otherJobId = await fulfilledWithinV1(path.enqueue(other), 'the admission of another publish');
+      expect(otherJobId).not.toBe(jobId);
+      const claimed = await fulfilledWithinV1(path.publisher.claimNext('wallet-2'), 'the claim of another publish');
+      expect(claimed).toMatchObject({ jobId: otherJobId, status: 'claimed', claim: { walletId: 'wallet-2' } });
       expect(parked.parked()).toBe(1);
       expect(fixture.markers()).toHaveLength(1);
     } finally {
@@ -343,18 +378,11 @@ describe('a confirmed publication and its catalog placement', () => {
     const parked = fixture.holdPlacements();
     try {
       // `publishFromFinalizedAssertion` ends in this call and returns its result right after it.
-      const tail = (agent as any).afterConfirmedGraphScopedVmPublishV1({
-        status: 'confirmed',
-        contextGraphId: CONTEXT_GRAPH_ID,
-        assertionCoordinate: asset.assertionCoordinate,
-        shareOperationId: asset.shareOperationId,
-        seal: asset.seal,
-        assertionUri: `urn:placement-fixture:${asset.assertionCoordinate}`,
-        ctx: { operationId: 'sync-publish', operationName: 'publishFromSWM' },
-        publicationLabel: 'publish',
-      });
-      expect(await settlesWithinV1(tail)).toBe(true);
+      // It completes, and does so while the placement it requested is parked.
+      expect(await settledWithinV1(confirmedSynchronousPublishTailV1(agent, asset)))
+        .toEqual({ status: 'fulfilled', value: undefined });
       await parked.entered();
+      expect(parked.parked()).toBe(1);
       expect(boundary(fixture.events())).toEqual([
         'marker-stored:repair-sync',
         'placement-requested:repair-sync:accepted',
@@ -366,6 +394,69 @@ describe('a confirmed publication and its catalog placement', () => {
     }
     expect(fixture.markers()).toEqual([]);
     expect(fixture.catalogRows()).toBe('1');
+  }, 120_000);
+
+  it('places a publication whose assertion was re-opened for editing while its placement was queued', async () => {
+    const fixture = await startPlacementAgentV1({ name: 'terminal-reopened' });
+    const { agent, clock } = fixture;
+    const blocking = await seedPlacementAssetV1(agent, 'blocking', 120n);
+    const reopened = await seedPlacementAssetV1(agent, 'reopened', 121n);
+    const path = createPublicationPathV1(fixture);
+    const parked = fixture.holdPlacements();
+    try {
+      const jobIds = [await path.enqueue(blocking)];
+      await path.broadcast('wallet-1');
+      await parked.entered();
+      jobIds.push(await path.enqueue(reopened));
+      await path.broadcast('wallet-2');
+      clock.now = 1_000;
+      await fulfilledWithinV1(path.publisher.drainDetachedExecutions(), 'the executor tails');
+      expect(executions(fixture.events())).toEqual([
+        'executor-settled:repair-blocking',
+        'executor-settled:repair-reopened',
+      ]);
+      expect(await fulfilledWithinV1(path.publisher.recover(), 'the recovery pass')).toBe(2);
+      // Both publications are terminal. The second one's placement is owed and has not started:
+      // it is queued behind the first, which is parked.
+      expect(await Promise.all(jobIds.map(async (jobId) => (await path.job(jobId))?.status)))
+        .toEqual(['finalized', 'finalized']);
+      expect(fixture.markers()).toHaveLength(2);
+      expect(parked.entries()).toBe(1);
+      expect(fixture.events().filter((event) => event.startsWith('coverage-proof:')))
+        .toEqual(['coverage-proof:repair-blocking:false']);
+
+      // Its publication has returned, so the author goes on editing it. The pull-from archives
+      // the published version's seal and clears the active one, which the queued placement was
+      // still going to read.
+      expect(await hasActiveSeal(fixture, reopened)).toBe(true);
+      await reopenForEditingV1(agent, reopened);
+      expect(await hasActiveSeal(fixture, reopened)).toBe(false);
+
+      // The placement still runs for the version that was published: the marker names its seal
+      // by digest, and the archived copy is that seal.
+      const before = fixture.counts();
+      parked.release();
+      await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+      expect(markerLife(fixture.events()).slice(-3)).toEqual([
+        'marker-retired:repair-blocking',
+        'coverage-proof:repair-reopened:false',
+        'marker-retired:repair-reopened',
+      ]);
+      expect(fixture.markers()).toEqual([]);
+      expect(fixture.catalogRows()).toBe('2');
+      expect(since(before, fixture.counts())).toMatchObject({ repairs: 1, successors: 1, announcements: 2 });
+      expect(fixture.queue()).toMatchObject({ pending: 0, oldestPendingAgeMs: null, waiters: 0 });
+      expect(fixture.placementLines().map(fields).map(({ source, outcome }) => ({ source, outcome }))).toEqual([
+        { source: jobIds[0], outcome: 'completed' },
+        { source: jobIds[0], outcome: 'completed' },
+        { source: jobIds[1], outcome: 'completed' },
+        { source: jobIds[1], outcome: 'completed' },
+      ]);
+    } finally {
+      parked.release();
+      await path.publisher.drainDetachedExecutions();
+      await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    }
   }, 120_000);
 
   it('finalizes a publication whose marker could not be stored, and says that nothing owes its placement', async () => {
@@ -381,9 +472,16 @@ describe('a confirmed publication and its catalog placement', () => {
     const jobId = await path.enqueue(asset);
     await path.broadcast('wallet-1');
     await path.publisher.drainDetachedExecutions();
-    await path.publisher.recover();
+    expect(await path.publisher.recover()).toBe(1);
 
     expect((await path.job(jobId))?.status).toBe('finalized');
+    // The failed write is not a failed publication: both completion paths ran to their end.
+    expect(fixture.events()).toEqual([
+      'executor-settled:repair-unrecorded',
+      'finality-observed:repair-unrecorded',
+      'vm-materialization:promoted',
+      'recovery-finalized:repair-unrecorded',
+    ]);
     expect(fixture.markers()).toEqual([]);
     expect(fixture.catalogRows()).toBeNull();
     expect(fixture.counts().repairs).toBe(0);
@@ -419,6 +517,7 @@ describe('the wait after finality, as the fixture measures it', () => {
       await parked.entered();
       clock.now = 1_000;
       await drivePublicationsV1({ fixture, path, parked, jobIds: [jobId], placementMs: 60_000 });
+      expect(executions(fixture.events())).toEqual(['executor-settled:repair-measured']);
       expect(await path.postFinalityWaitMs(jobId)).toBe(0);
     } finally {
       parked.release();
@@ -442,6 +541,9 @@ describe('the wait after finality, as the fixture measures it', () => {
       await parked.entered();
       clock.now = 1_000;
       await drivePublicationsV1({ fixture, path, parked, jobIds, placementMs: 20_000 });
+      expect(executions(fixture.events())).toEqual(
+        Array.from({ length: 6 }, (_, index) => `executor-settled:repair-measured-${index}`),
+      );
       expect(await Promise.all(jobIds.map((jobId) => path.postFinalityWaitMs(jobId))))
         .toEqual([0, 0, 0, 0, 0, 0]);
     } finally {
