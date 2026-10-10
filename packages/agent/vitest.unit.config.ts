@@ -270,6 +270,7 @@ export default defineConfig({
       // #3081 — a confirmed publication is terminal once its placement is durably owed.
       "test/publication-terminal-before-catalog-placement.test.ts",
       "test/finalized-private-placement-ownership.test.ts",
+      "test/owed-placement-seals.test.ts",
       "test/vm-recovery-transport-plan.test.ts",
       "test/vm-recovery-batch-timing-host.test.ts",
       "test/vm-recovery-pass-authority.test.ts",

@@ -24,7 +24,10 @@ vi.mock('../src/named-ka-publish-recovery.js', async (importOriginal) => ({
   ) => recoveredNamedKaPublishV1(input),
 }));
 
-import { resolveDurableGraphScopedAuthorSealCandidateV1 } from '../src/durable-author-seal-resolver-v1.js';
+import {
+  resolveArchivedGraphScopedAuthorSealCandidateV1,
+  resolveDurableGraphScopedAuthorSealCandidateV1,
+} from '../src/durable-author-seal-resolver-v1.js';
 import {
   AUTHOR,
   CONTEXT_GRAPH_ID,
@@ -36,6 +39,7 @@ import {
   fulfilledWithinV1,
   recoveredNamedKaPublishV1,
   reopenForEditingV1,
+  reopenNextVersionForEditingV1,
   seedPlacementAssetV1,
   settledWithinV1,
   startPlacementAgentV1,
@@ -78,15 +82,26 @@ function markerLife(events: readonly string[]): string[] {
   return events.filter((event) => /^(marker-stored|coverage-proof|marker-retired):/.test(event));
 }
 
-/** Whether the assertion of `asset` still carries an active author seal, as the repair reads it. */
-async function hasActiveSeal(fixture: PlacementAgentV1, asset: PlacementAssetV1): Promise<boolean> {
-  return await resolveDurableGraphScopedAuthorSealCandidateV1({
+/** The versions of the seals stored for `asset`, as the repair reads them; null where there is none. */
+async function storedSealVersions(
+  fixture: PlacementAgentV1,
+  asset: PlacementAssetV1,
+): Promise<{ active: string | null; archived: string | null }> {
+  const query = {
     store: fixture.agent.store,
     contextGraphId: CONTEXT_GRAPH_ID,
     agentAddress: AUTHOR,
     assertionCoordinate: asset.assertionCoordinate,
-    source: 'test.placement.activeSeal',
-  }) !== undefined;
+    source: 'test.placement.storedSeals',
+  };
+  const [active, archived] = await Promise.all([
+    resolveDurableGraphScopedAuthorSealCandidateV1(query),
+    resolveArchivedGraphScopedAuthorSealCandidateV1(query),
+  ]);
+  return {
+    active: active?.seal.assertionVersion ?? null,
+    archived: archived?.seal.assertionVersion ?? null,
+  };
 }
 
 /** Author signatures the fixture counts: three for a catalog genesis, three for each successor. */
@@ -396,66 +411,101 @@ describe('a confirmed publication and its catalog placement', () => {
     expect(fixture.catalogRows()).toBe('1');
   }, 120_000);
 
-  it('places a publication whose assertion was re-opened for editing while its placement was queued', async () => {
-    const fixture = await startPlacementAgentV1({ name: 'terminal-reopened' });
+  /**
+   * Two publications, both terminal: the first one's placement is parked, and the second one's is
+   * owed and queued behind it, not started.
+   */
+  async function queuedBehindParkedPlacement(name: string) {
+    const fixture = await startPlacementAgentV1({ name });
     const { agent, clock } = fixture;
     const blocking = await seedPlacementAssetV1(agent, 'blocking', 120n);
-    const reopened = await seedPlacementAssetV1(agent, 'reopened', 121n);
+    const queued = await seedPlacementAssetV1(agent, 'reopened', 121n);
     const path = createPublicationPathV1(fixture);
     const parked = fixture.holdPlacements();
-    try {
-      const jobIds = [await path.enqueue(blocking)];
-      await path.broadcast('wallet-1');
-      await parked.entered();
-      jobIds.push(await path.enqueue(reopened));
-      await path.broadcast('wallet-2');
-      clock.now = 1_000;
-      await fulfilledWithinV1(path.publisher.drainDetachedExecutions(), 'the executor tails');
-      expect(executions(fixture.events())).toEqual([
-        'executor-settled:repair-blocking',
-        'executor-settled:repair-reopened',
-      ]);
-      expect(await fulfilledWithinV1(path.publisher.recover(), 'the recovery pass')).toBe(2);
-      // Both publications are terminal. The second one's placement is owed and has not started:
-      // it is queued behind the first, which is parked.
-      expect(await Promise.all(jobIds.map(async (jobId) => (await path.job(jobId))?.status)))
-        .toEqual(['finalized', 'finalized']);
-      expect(fixture.markers()).toHaveLength(2);
-      expect(parked.entries()).toBe(1);
-      expect(fixture.events().filter((event) => event.startsWith('coverage-proof:')))
-        .toEqual(['coverage-proof:repair-blocking:false']);
+    const jobIds = [await path.enqueue(blocking)];
+    await path.broadcast('wallet-1');
+    await parked.entered();
+    jobIds.push(await path.enqueue(queued));
+    await path.broadcast('wallet-2');
+    clock.now = 1_000;
+    await fulfilledWithinV1(path.publisher.drainDetachedExecutions(), 'the executor tails');
+    expect(executions(fixture.events())).toEqual([
+      'executor-settled:repair-blocking',
+      'executor-settled:repair-reopened',
+    ]);
+    expect(await fulfilledWithinV1(path.publisher.recover(), 'the recovery pass')).toBe(2);
+    expect(await Promise.all(jobIds.map(async (jobId) => (await path.job(jobId))?.status)))
+      .toEqual(['finalized', 'finalized']);
+    expect(fixture.markers()).toHaveLength(2);
+    expect(parked.entries()).toBe(1);
+    expect(fixture.events().filter((event) => event.startsWith('coverage-proof:')))
+      .toEqual(['coverage-proof:repair-blocking:false']);
+    return { fixture, path, parked, queued, jobIds };
+  }
 
+  /** The queued placement ran after the parked one was let go: placed, and its marker retired. */
+  async function expectQueuedPlacementCompleted(
+    { fixture, parked, jobIds }: Awaited<ReturnType<typeof queuedBehindParkedPlacement>>,
+  ): Promise<void> {
+    const before = fixture.counts();
+    parked.release();
+    await fixture.agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    expect(markerLife(fixture.events()).slice(-3)).toEqual([
+      'marker-retired:repair-blocking',
+      'coverage-proof:repair-reopened:false',
+      'marker-retired:repair-reopened',
+    ]);
+    expect(fixture.markers()).toEqual([]);
+    expect(fixture.catalogRows()).toBe('2');
+    expect(since(before, fixture.counts())).toMatchObject({ repairs: 1, successors: 1, announcements: 2 });
+    expect(fixture.queue()).toMatchObject({ pending: 0, oldestPendingAgeMs: null, waiters: 0 });
+    expect(fixture.placementLines().map(fields).map(({ source, outcome }) => ({ source, outcome }))).toEqual([
+      { source: jobIds[0], outcome: 'completed' },
+      { source: jobIds[0], outcome: 'completed' },
+      { source: jobIds[1], outcome: 'completed' },
+      { source: jobIds[1], outcome: 'completed' },
+    ]);
+  }
+
+  it('places a publication whose assertion was re-opened for editing while its placement was queued', async () => {
+    const staged = await queuedBehindParkedPlacement('terminal-reopened');
+    const { fixture, path, parked, queued } = staged;
+    try {
       // Its publication has returned, so the author goes on editing it. The pull-from archives
       // the published version's seal and clears the active one, which the queued placement was
       // still going to read.
-      expect(await hasActiveSeal(fixture, reopened)).toBe(true);
-      await reopenForEditingV1(agent, reopened);
-      expect(await hasActiveSeal(fixture, reopened)).toBe(false);
+      expect(await storedSealVersions(fixture, queued)).toEqual({ active: '1', archived: null });
+      await reopenForEditingV1(fixture.agent, queued);
+      expect(await storedSealVersions(fixture, queued)).toEqual({ active: null, archived: '1' });
 
       // The placement still runs for the version that was published: the marker names its seal
       // by digest, and the archived copy is that seal.
-      const before = fixture.counts();
-      parked.release();
-      await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
-      expect(markerLife(fixture.events()).slice(-3)).toEqual([
-        'marker-retired:repair-blocking',
-        'coverage-proof:repair-reopened:false',
-        'marker-retired:repair-reopened',
-      ]);
-      expect(fixture.markers()).toEqual([]);
-      expect(fixture.catalogRows()).toBe('2');
-      expect(since(before, fixture.counts())).toMatchObject({ repairs: 1, successors: 1, announcements: 2 });
-      expect(fixture.queue()).toMatchObject({ pending: 0, oldestPendingAgeMs: null, waiters: 0 });
-      expect(fixture.placementLines().map(fields).map(({ source, outcome }) => ({ source, outcome }))).toEqual([
-        { source: jobIds[0], outcome: 'completed' },
-        { source: jobIds[0], outcome: 'completed' },
-        { source: jobIds[1], outcome: 'completed' },
-        { source: jobIds[1], outcome: 'completed' },
-      ]);
+      await expectQueuedPlacementCompleted(staged);
     } finally {
       parked.release();
       await path.publisher.drainDetachedExecutions();
-      await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+      await fixture.agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    }
+  }, 120_000);
+
+  it('places a publication whose assertion went through two edit cycles while its placement was queued', async () => {
+    const staged = await queuedBehindParkedPlacement('terminal-reopened-twice');
+    const { fixture, path, parked, queued } = staged;
+    try {
+      // The author re-opens the published version, seals and shares the next one, and re-opens
+      // that in turn. The one archive now holds the next version's seal: neither stored subject
+      // is the published version's seal any more.
+      await reopenForEditingV1(fixture.agent, queued);
+      await reopenNextVersionForEditingV1(fixture.agent, queued);
+      expect(await storedSealVersions(fixture, queued)).toEqual({ active: null, archived: '2' });
+
+      // The node was handed the published version's seal when it observed the confirmation, and
+      // the placement falls back on that.
+      await expectQueuedPlacementCompleted(staged);
+    } finally {
+      parked.release();
+      await path.publisher.drainDetachedExecutions();
+      await fixture.agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     }
   }, 120_000);
 

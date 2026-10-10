@@ -24,11 +24,16 @@ import { afterEach, vi } from 'vitest';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
+  buildAssertionSealQuads,
   canonicalGraphScopedAuthorSealFromAssertionSealV1,
+  contextGraphAssertionUri,
+  contextGraphMetaUri,
+  contextGraphPrivateUri,
   createGraphKnowledgeAssetScope,
   createOperationContext,
   knowledgeAssetLayerGraphUri,
   type AssertionSeal,
+  type CanonicalGraphScopedAuthorSealV1,
   type Logger,
   type OperationContext,
   type TimestampMsV1,
@@ -272,7 +277,11 @@ interface PlacementAgentInternalsV1 {
     placement: CatalogPlacementAttemptV1,
   ): Promise<AppliedCatalogHeadSnapshotV1 | null>;
   requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1(
-    params: Readonly<{ repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>; ctx: OperationContext }>,
+    params: Readonly<{
+      repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>;
+      seal: Readonly<CanonicalGraphScopedAuthorSealV1>;
+      ctx: OperationContext;
+    }>,
     observer: CatalogPlacementWaiterObserverV1,
   ): Rfc64FinalizedPrivatePlacementRepairRequestV1;
   afterConfirmedGraphScopedVmPublishV1(input: ConfirmedVmPublishTailInputV1): Promise<void>;
@@ -509,6 +518,38 @@ export async function reopenForEditingV1(agent: DKGAgent, asset: PlacementAssetV
   );
   await agent.store.insert(PROJECTION_QUADS.map((quad) => ({ ...quad, graph: vmGraph })));
   await agent.assertion.pullFrom(CONTEXT_GRAPH_ID, asset.assertionCoordinate, 'vm', { agentAddress: AUTHOR });
+}
+
+/**
+ * The stored seals of `asset` as a second edit cycle leaves them: its next version was sealed,
+ * shared and re-opened in turn, so the one recovery archive holds that version's seal and the
+ * active subject is empty. Written by hand, because the fixture's assets cannot be sealed and
+ * shared again for real; call it after {@link reopenForEditingV1}.
+ */
+export async function reopenNextVersionForEditingV1(agent: DKGAgent, asset: PlacementAssetV1): Promise<void> {
+  const { seal } = asset;
+  const assertionUri = contextGraphAssertionUri(CONTEXT_GRAPH_ID, AUTHOR, asset.assertionCoordinate);
+  const archive = { graph: contextGraphPrivateUri(CONTEXT_GRAPH_ID), subject: `${assertionUri}/_recovery_seal` };
+  await agent.store.deleteByPattern(archive);
+  await agent.store.insert(buildAssertionSealQuads({
+    assertionUri: archive.subject,
+    metaGraph: archive.graph,
+    merkleRoot: seal.merkleRoot,
+    authorAddress: seal.authorAddress,
+    authorAttestationR: seal.authorAttestationR,
+    authorAttestationVS: seal.authorAttestationVS,
+    authorSchemeVersion: seal.authorSchemeVersion,
+    chainId: seal.chainId,
+    kav10Address: seal.kav10Address,
+    reservedKaId: seal.reservedKaId!,
+    finalizedAtIso: seal.finalizedAtIso,
+    contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+    kaUal: seal.kaUal!,
+    assertionVersion: String(BigInt(seal.assertionVersion!) + 1n),
+    publicTripleCount: seal.publicTripleCount!,
+    privateTripleCount: seal.privateTripleCount!,
+  }));
+  await agent.store.deleteByPattern({ graph: contextGraphMetaUri(CONTEXT_GRAPH_ID), subject: assertionUri });
 }
 
 /** The queued request a share of `asset` enqueues: its immutable seal, as the queue persists it. */

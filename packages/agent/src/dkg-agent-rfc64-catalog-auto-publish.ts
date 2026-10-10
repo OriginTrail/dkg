@@ -876,7 +876,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
         await persistence.finalizedPrivatePlacementRepairs.put(repair);
         markerStored = true;
         placementWait.requested();
-        const request = this.requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1({ repair, ctx: params.ctx }, placementWait.observer);
+        const request = this.requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1({ repair, seal: confirmedSeal, ctx: params.ctx }, placementWait.observer);
         if (!request.accepted) this.log.warn(params.ctx, `Confirmed ${params.publicationLabel} for <${params.assertionUri}>: the RFC-64 catalog supervisor did not accept its placement now; the durable marker stays for its next pass or start`);
       } else {
         await shadowRuntime.runExclusive(assetKey, async () => {

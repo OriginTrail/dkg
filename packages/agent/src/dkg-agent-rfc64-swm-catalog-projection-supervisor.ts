@@ -6,6 +6,7 @@ import {
   assertCanonicalEvmAddress,
   assertContextGraphIdV1,
   createOperationContext,
+  type CanonicalGraphScopedAuthorSealV1,
   type ContextGraphIdV1,
   type Digest32V1,
   type EvmAddressV1,
@@ -37,6 +38,7 @@ import {
   type FinalizedPrivatePlacementQueueStatusV1,
 } from './internal/catalog-placement-timing.js';
 import { FinalizedPrivatePlacementWaitersV1 } from './internal/finalized-private-placement-waiters.js';
+import { retainOwedPlacementSealV1 } from './internal/owed-placement-seals.js';
 
 // Match the default background store lane; repair fanout must not flood its queue.
 const MAX_CONCURRENT_REPAIRS_V1 = 1;
@@ -769,13 +771,14 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
     });
   }
 
-  /** The same request, whose waiter tells `observer` about its cooldown skips and releasing attempt. */
+  /** The same request with an observer of its waiter. `seal`, the seal the marker names, is kept for the placement. */
   protected requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1(
     this: DKGAgent,
-    params: Readonly<{ readonly repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>; readonly ctx: OperationContext }>,
+    params: Readonly<{ readonly repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>; readonly seal: Readonly<CanonicalGraphScopedAuthorSealV1>; readonly ctx: OperationContext }>,
     observer: CatalogPlacementWaiterObserverV1,
   ): Rfc64FinalizedPrivatePlacementRepairRequestV1 {
-    return projectionOwnerV1(this).requestFinalizedPrivate({ ...params, observer });
+    retainOwedPlacementSealV1(this, params.repair.sealDigest, params.seal);
+    return projectionOwnerV1(this).requestFinalizedPrivate({ repair: params.repair, ctx: params.ctx, observer });
   }
 
   readRfc64SwmCatalogProjectionSupervisorStatusV1(
