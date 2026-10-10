@@ -71,18 +71,18 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
     noteRefusal(stage, code);
     throw new ExactBatchResponderRefusal(code);
   };
-  const readPublicAuthority = async (contextGraphId: string, signal: AbortSignal): Promise<'public' | 'non-public' | 'unavailable'> => {
+  const readPublicAuthority = async (contextGraphId: string, signal: AbortSignal): Promise<boolean> => {
     try {
-      return await options.resolvePublicContextGraphAuthority(contextGraphId, signal);
+      const authority = await options.resolvePublicContextGraphAuthority(contextGraphId, signal);
+      if (authority === 'unavailable') refuse('public-authority', 'BUSY');
+      return authority === 'public';
     } catch (error) {
       if (isStoreSchedulerBusyError(error) || isStoreOperationTimeoutError(error)) refuse('public-authority', 'BUSY');
       throw error;
     }
   };
   const requirePublicAuthority = async (contextGraphId: string, signal: AbortSignal): Promise<void> => {
-    const authority = await readPublicAuthority(contextGraphId, signal);
-    if (authority === 'public') return;
-    if (authority === 'unavailable') refuse('public-authority', 'BUSY');
+    if (await readPublicAuthority(contextGraphId, signal)) return;
     refuse('public-authority', 'DENIED');
   };
   const authorizeRequest = async (bytes: Uint8Array, peerId: string, signal: AbortSignal): Promise<ExactBatchResponderAuthorization<AuthorizedExactBatchContext>> => {
@@ -139,13 +139,9 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
         let started = performance.now();
         const lease = await options.exportCache.acquireEncoded({ contextGraphId: request.contextGraphId, assetUal,
           signal: session.signal,
-          authorizeMissingAccessPolicy: async () => {
-            const authority = await readPublicAuthority(request.contextGraphId, session.signal);
-            if (authority === 'unavailable') refuse('public-authority', 'BUSY');
-            // A definitive policy change during an already prepared export
-            // is fenced by the cache as a changed source, before ASSET_END.
-            return authority === 'public';
-          },
+          // A definitive policy change during an already prepared export is
+          // fenced by the cache as a changed source, before ASSET_END.
+          authorizeMissingAccessPolicy: () => readPublicAuthority(request.contextGraphId, session.signal),
           onStage: (stage, durationMs) => options.onStage?.(stage, assetIndex, durationMs, context),
           onFallback: (reason, budgetReason) => observeExactBatch(() => options.onFallback?.(reason, assetIndex, context, budgetReason)) });
         observeExactBatch(() => options.onStage?.('export', assetIndex,
