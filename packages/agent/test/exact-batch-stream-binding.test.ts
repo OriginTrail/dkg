@@ -457,6 +457,22 @@ describe('exact batch normal verifier/materializer binding', () => {
       } finally { await f.close(); }
     });
 
+  it('does not turn a cancelled null export lease into a resource refusal frame', async () => {
+    const f = await fixture(1, 2), controller = new AbortController();
+    const cancelled = new Error('fixture export cancelled');
+    const session = { signal: controller.signal, windowSize: 2 as const, assetUals: f.receiver.assetUals,
+      send: vi.fn(async (_frame: ExactBatchFrame) => {}), next: vi.fn(async () => undefined) };
+    try {
+      const authorized = await f.binding.authorizeRequest(f.signed, 'requester', controller.signal);
+      vi.spyOn(f.exportCache, 'acquireEncoded').mockImplementationOnce(async () => {
+        controller.abort(cancelled);
+        return null;
+      });
+      await expect(f.binding.respond(authorized.context, session, 'requester')).rejects.toBe(cancelled);
+      expect(session.send).not.toHaveBeenCalled();
+    } finally { await f.close(); }
+  });
+
   it('never exports before normal authorization and public-only gates pass', async () => {
     const f = await fixture(1, 2);
     try {

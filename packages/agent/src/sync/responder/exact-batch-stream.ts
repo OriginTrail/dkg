@@ -52,8 +52,6 @@ class AuthorizedExactBatchContext {
     return this.scope;
   }
 }
-class ProfileRefusal extends Error {}
-
 /** Responder-only diagnostics contain no request bytes, graph identifiers or raw errors. */
 export function exactBatchResponderTransportOptions(timeoutMs: number,
   log: (level: 'info' | 'warn', message: string) => void): ExactBatchTransportOptions {
@@ -152,7 +150,10 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
           onFallback: (reason, budgetReason) => observeExactBatch(() => options.onFallback?.(reason, assetIndex, context, budgetReason)) });
         observeExactBatch(() => options.onStage?.('export', assetIndex,
           Math.max(0, performance.now() - started - (lease?.encodingDurationMs ?? 0)), context));
-        if (!lease) throw new ProfileRefusal('Exact batch exporter profile refused');
+        if (!lease) {
+          session.signal.throwIfAborted();
+          throw new ExactBatchResponderRefusal('RESOURCE_LIMIT');
+        }
         try {
           // Bounded observation cannot affect exporter ownership or response.
           if (lease.wholePayloadExports !== undefined) {
@@ -187,9 +188,6 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
     } catch (error) {
       // Core serializes all closed refusals on the same stream, including a
       // late refusal after DATA. Integrity and source-change errors abort.
-      if (error instanceof ProfileRefusal && !session.signal.aborted) {
-        throw new ExactBatchResponderRefusal('RESOURCE_LIMIT');
-      }
       if (!session.signal.aborted && error instanceof ExactBatchAssetMissingError) {
         refuse('export', 'ASSET_MISSING');
       }
