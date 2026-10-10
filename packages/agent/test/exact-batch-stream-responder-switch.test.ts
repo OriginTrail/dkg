@@ -155,3 +155,36 @@ describe('a core whose exact-stream public authority cannot be read', () => {
     expect(authority).toHaveBeenCalledTimes(failure === 'store-busy' ? 0 : 1);
   }, 30_000);
 });
+
+describe('a core with no confirmed exact export envelope', () => {
+  it('sends ASSET_MISSING over the real stream instead of resetting it', async () => {
+    vi.stubEnv(CURRENT, '1'); vi.stubEnv(FIRST_DEPLOYED, undefined);
+    const create = (name: string, nodeRole: 'core' | 'edge') => DKGAgent.create({
+      name, nodeRole, listenHost: '127.0.0.1', listenPort: 0,
+      chainAdapter: new MockChainAdapter('mock:31337'),
+      store: Object.assign(new OxigraphStore(), { queryResponseLimitMode: 'pre-materialization' as const }),
+      randomSamplingUseWorkerThread: false,
+    });
+    const core = await create('ExactBatchMissingCore', 'core'); agents.push(core);
+    vi.spyOn(core, 'authorizeSyncRequest').mockResolvedValue(true);
+    vi.spyOn(core, 'resolveRegisteredContextGraphAuthority').mockResolvedValue({ kind: 'public', onChainId: 1n });
+    await core.start();
+    const edge = await create('ExactBatchMissingEdge', 'edge'); agents.push(edge);
+    await edge.start();
+    await edge.connectTo(core.multiaddrs.find(address => address.includes('/tcp/') && !address.includes('/p2p-circuit'))!);
+
+    const assetUals = ['did:dkg:mock:31337/0x0000000000000000000000000000000000000001/1'];
+    const unused = async () => { throw new Error('A public START needs no identity or signature'); };
+    const request = await buildSyncRequestEnvelope({ contextGraphId: 'public-missing-exact-asset', offset: 0, limit: 500,
+      includeSharedMemory: false, targetPeerId: core.peerId, requesterPeerId: edge.peerId, phase: 'data',
+      assetUals, needsAuth: false, getIdentityId: unused, computeSyncDigest: () => { throw new Error('unused'); }, signMessage: unused });
+    const frames = await exchangeExperimentalExactBatch(edge.router, core.peerId, exactBatchStartFrame(request),
+      { ...exactBatchTransportOptions(30_000), assetUals }, async session => {
+        const received: ExactBatchFrame[] = [];
+        for (let item = await session.next(); item; item = await session.next()) received.push(item);
+        return received;
+      });
+    expect(frames).toEqual([{ kind: K.REFUSE, assetIndex: 255, sequence: 0,
+      payload: new TextEncoder().encode('ASSET_MISSING') }]);
+  }, 30_000);
+});
