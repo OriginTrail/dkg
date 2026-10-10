@@ -1346,6 +1346,16 @@ export interface KnowledgeAssetVersionSnapshot {
   knowledgeAssetStorageGeneration?: number;
 }
 
+/** Options for `ChainAdapter.knowledgeAssetVersionSnapshotIsCurrent`. */
+export interface KnowledgeAssetVersionSnapshotLeaseOptions extends ChainReadOptions {
+  /**
+   * A block at or below the snapshot height, such as a receipt joined to the
+   * snapshot. The endpoint that certifies the snapshot must serve this hash at
+   * this height in the same observation; any other answer is false.
+   */
+  readonly includesBlock?: Readonly<{ blockNumber: number; blockHash: string }>;
+}
+
 /** Options honored only by the shared live-authority read. */
 export interface ContextGraphLiveAuthorityReadOptions extends ChainReadOptions {
   /**
@@ -2307,11 +2317,13 @@ export interface ChainAdapter extends ExistingMintProvenanceReader {
    * same confirmation-depth block hash and exact physical KAS binding generation.
    * A usable differing header returns false immediately; only unavailable or
    * unusable endpoint evidence advances to a fallback. Missing evidence is false.
+   * `options.includesBlock` extends the same proof to an older block on that
+   * endpoint's history.
    */
   knowledgeAssetVersionSnapshotIsCurrent?(
     kaId: bigint,
     snapshot: KnowledgeAssetVersionSnapshot,
-    options?: ChainReadOptions,
+    options?: KnowledgeAssetVersionSnapshotLeaseOptions,
   ): Promise<boolean>;
 
   /**

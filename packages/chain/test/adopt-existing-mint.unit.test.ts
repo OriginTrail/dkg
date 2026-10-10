@@ -105,6 +105,40 @@ function coldAssembledFixture() {
   return { ...f, chain, readContract };
 }
 
+/** One endpoint's canonical history: its head and the hash it serves at each height. */
+type ScriptedChain = { head: number; hashes: Record<number, string> };
+const forkHash = (fork: string, height: number) => `0x${fork.repeat(31)}${height.toString(16).padStart(2, '0')}`;
+
+/**
+ * Drive the real snapshot lease over scripted endpoints. Endpoint `finality`
+ * also answers the receipt gate; reassigning `views[i]` is a reorg there.
+ */
+function realLeaseFixture(views: ScriptedChain[], finality = 0) {
+  const f = fixture();
+  const providers = views.map((_, index) => ({
+    getBlockNumber: vi.fn(async () => views[index].head),
+    getBlock: vi.fn(async (tag: 'latest' | number) => {
+      const number = tag === 'latest' ? views[index].head : tag;
+      const hash = number <= views[index].head ? views[index].hashes[number] : undefined;
+      return hash === undefined ? null : { number, hash };
+    }),
+  }));
+  f.finalityProviderRead.mockImplementation(async (_label, read) => read(providers[finality]));
+  Object.assign(f.chain, { providers, finalityConfirmations: 1,
+    ensureConfiguredStaticChainIdValidated: vi.fn(async () => undefined),
+    knowledgeAssetVersionSnapshotIsCurrent: StorageReadMethods.prototype.knowledgeAssetVersionSnapshotIsCurrent });
+  const readCurrent = Reflect.get(f.chain, 'readKnowledgeAssetVersionSnapshot');
+  /** The refreshed snapshot certifies `views[0]` after `reorg` runs. */
+  const refreshAt = (blockNumber: number, reorg: () => void = () => {}) =>
+    readCurrent.mockImplementation(async () => {
+      reorg();
+      return { knowledgeAssetId: KA_ID, latestRoot: ROOT, rootCount: 1n, latestAuthor: f.receipt.authorAddress,
+        latestPublisher: ADDRESS, blockNumber, blockHash: views[0].hashes[blockNumber],
+        knowledgeAssetStorageAddress: ADDRESS, knowledgeAssetStorageGeneration: 1 };
+    });
+  return { ...f, providers, refreshAt };
+}
+
 describe('existing mint provenance', () => {
   it('requires coherent read methods on the concrete assembled adapter', () => {
     // This assignment also checks the public adapter's required type contract.
@@ -433,6 +467,44 @@ describe('existing mint provenance', () => {
     const f = fixture();
     f.provider.getBlock.mockResolvedValue({ number: 10, hash: `0x${'01'.repeat(32)}` });
     await expect(f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID)).resolves.toBeNull();
+  });
+
+  describe('joins the receipt to the refreshed snapshot history', () => {
+    // The receipt passes its gate at 10/BLOCK_HASH; fork B then replaces block 10
+    // with one carrying the same root and identities.
+    const receiptFork = (head: number): ScriptedChain => ({ head,
+      hashes: { 10: BLOCK_HASH, 11: forkHash('a1', 11), 12: forkHash('a1', 12) } });
+    const replacementFork = (head: number): ScriptedChain => ({ head,
+      hashes: { 10: forkHash('b2', 10), 11: forkHash('b2', 11), 12: forkHash('b2', 12) } });
+
+    it.each([10, 12])('does not adopt when a reorg after the receipt gate leaves a snapshot at %i on another history', async height => {
+      const views = [receiptFork(10)];
+      const f = realLeaseFixture(views);
+      f.refreshAt(height, () => { views[0] = replacementFork(height); });
+      await expect(f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID)).resolves.toBeNull();
+      // The receipt gate itself saw the original block before the reorg.
+      expect(f.providers[0].getBlock.mock.calls[0]).toEqual([10]);
+    });
+
+    it('does not adopt when the endpoint certifying the snapshot disagrees with the receipt endpoint', async () => {
+      const views = [replacementFork(12), receiptFork(12)];
+      const f = realLeaseFixture(views, 1);
+      f.refreshAt(12);
+      await expect(f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID)).resolves.toBeNull();
+      // A usable primary that serves another block at the receipt height is a
+      // verdict; the fallback that agrees with the receipt is not consulted.
+      expect(f.providers[1].getBlock.mock.calls).toEqual([[10]]);
+    });
+
+    it('adopts once the certifying endpoint still holds the receipt block below a newer snapshot', async () => {
+      const views = [receiptFork(12)];
+      const f = realLeaseFixture(views);
+      f.refreshAt(12);
+      await expect(f.chain.getMintedKnowledgeAssetProvenance(KA_ID, ethers.getBytes(ROOT), CG_ID))
+        .resolves.toEqual(f.receipt);
+      // Receipt gate, then one lease observation: receipt height before the pinned head.
+      expect(f.providers[0].getBlock.mock.calls).toEqual([[10], [10], ['latest']]);
+    });
   });
 
   it('finds a mid-history mint using block timestamps and a range-aware event read', async () => {

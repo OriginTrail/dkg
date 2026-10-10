@@ -549,7 +549,8 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     const consumers = [...source.slice(start, end).matchAll(
       /withRpcUsageConsumer\(\s*['"]([^'"]+)['"]/g,
     )].map((match) => match[1]!);
-    expect(consumers).toEqual(['getBlock', 'getBlock', 'getBlock', 'getBlock']);
+    // Snapshot head + pinned block, then lease included block + head + pinned block.
+    expect(consumers).toEqual(['getBlock', 'getBlock', 'getBlock', 'getBlock', 'getBlock']);
     for (const consumer of consumers) {
       expect(boundedRpcUsageSnapshotConsumerLabel(consumer)).toBe(consumer);
       expect(consumer).not.toBe('other');

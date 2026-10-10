@@ -18,7 +18,9 @@ export interface EvmExistingMintPorts {
   resolveCanonicalPublish(txHash: string, options: CanonicalFinalizationReceiptReadOptions): Promise<CanonicalFinalizationPublishResolution>;
   isReceiptFinalAndCanonical(receipt: CanonicalFinalizationReceipt): Promise<boolean>;
   readCurrentVersion(kaId: bigint): Promise<KnowledgeAssetVersionSnapshot | null>;
-  versionIsCurrent(kaId: bigint, snapshot: KnowledgeAssetVersionSnapshot): Promise<boolean>;
+  /** True only when one endpoint observation holds both the snapshot block and `includesBlock`. */
+  versionIsCurrent(kaId: bigint, snapshot: KnowledgeAssetVersionSnapshot,
+    includesBlock: Readonly<{ blockNumber: number; blockHash: string }>): Promise<boolean>;
 }
 
 /**
@@ -99,6 +101,11 @@ export async function getEvmMintedKnowledgeAssetProvenance(
     || current.knowledgeAssetStorageGeneration !== binding.generation
     || current.knowledgeAssetId !== kaId
     || !Number.isSafeInteger(current.blockNumber) || current.blockNumber < receipt.blockNumber
+    // A reorg after the receipt gate can leave a current snapshot on another
+    // history. At equal height the snapshot block must be the receipt block;
+    // a newer snapshot's lease proves the receipt block below it.
+    || (current.blockNumber === receipt.blockNumber
+      && current.blockHash?.toLowerCase() !== receipt.blockHash.toLowerCase())
     || typeof current.rootCount !== 'bigint' || current.rootCount < 1n) return null;
   if (current.rootCount > 1n) {
     throw new AdoptExistingMintRefusalError('KA_SUPERSEDED',
@@ -111,7 +118,8 @@ export async function getEvmMintedKnowledgeAssetProvenance(
   if (current.latestPublisher.toLowerCase() !== roots[0].publisher.toLowerCase()
     || (receipt.authorAddress !== undefined
       && current.latestAuthor.toLowerCase() !== receipt.authorAddress.toLowerCase())) return null;
-  try { if (!await ports.versionIsCurrent(kaId, current) || !binding.isCurrent()) return null; } catch { return null; }
+  const receiptBlock = { blockNumber: receipt.blockNumber, blockHash: receipt.blockHash };
+  try { if (!await ports.versionIsCurrent(kaId, current, receiptBlock) || !binding.isCurrent()) return null; } catch { return null; }
   // Retain the receipt parser's provenance. These three overrides come from
   // the verified storage/seal state rather than a second event decoder.
   const adopted = projectAdoptedMintPublishResult(publish, receipt);

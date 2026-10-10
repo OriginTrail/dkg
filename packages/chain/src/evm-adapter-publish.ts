@@ -847,7 +847,7 @@ export class PublishMethods extends EVMChainAdapterBase {
       resolveCanonicalPublish: (hash, options) => this.resolveCanonicalFinalizationPublish(hash, options),
       isReceiptFinalAndCanonical: (receipt) => this.isReceiptBlockFinalAndCanonical(receipt),
       readCurrentVersion: (id) => readCurrentVersion.call(this, id),
-      versionIsCurrent: (id, snapshot) => versionIsCurrent.call(this, id, snapshot),
+      versionIsCurrent: (id, snapshot, includesBlock) => versionIsCurrent.call(this, id, snapshot, { includesBlock }),
     }, kaId, expectedMerkleRoot, expectedContextGraphId);
   }
 
