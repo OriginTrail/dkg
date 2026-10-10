@@ -15,6 +15,7 @@ import {
 } from '@origintrail-official/dkg-core';
 
 import { DKGAgent } from '../src/index.js';
+import { NamedKaRecoveryPendingLog } from '../src/named-ka-recovery-pending-log.js';
 import {
   CatalogPlacementTimingV1,
   INERT_CATALOG_PLACEMENT_ATTEMPT_V1,
@@ -248,7 +249,11 @@ describe('catalog placement wait attribution', () => {
     const agent = Object.create(DKGAgent.prototype) as DKGAgent;
     const finalize = vi.fn(async (_input: unknown, _ctx: unknown) => {});
     (agent as any)._finalizeRecoveredQueuedKnowledgeAssetVmPublish = finalize;
-    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({ job: { jobId: 'job-recovered' } } as never);
+    (agent as any).namedKaRecoveryPendingLog = new NamedKaRecoveryPendingLog();
+    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+      job: { jobId: 'job-recovered' },
+      request: { contextGraphId: 'recovered-cg', name: 'recovered' },
+    } as never);
     expect(finalize.mock.calls[0]?.[1]).toMatchObject({
       operationName: 'publishFromSWM',
       sourceOperationId: 'job-recovered',
