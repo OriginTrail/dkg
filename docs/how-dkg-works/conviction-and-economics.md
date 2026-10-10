@@ -75,6 +75,8 @@ The daemon preflights authorization so a local curator cannot claim someone else
 
 An eligible active PCA can waive the liquid-TRAC Context Graph registration deposit for its owner or registered agents. Each registration consumes one bounded waiver slot (`committedTRAC / registrationDeposit`); it does not debit the PCA commitment. The signer always pays native gas, and the normal liquid-TRAC deposit applies when any waiver condition is not met.
 
+A graph with a curator PCA uses that PCA's quota. From `ContextGraphs` 10.0.5, any other graph (open, or curated by an EOA or Safe) uses the quota of the PCA the signer is registered to as an agent.
+
 ## Protocol Treasury Fee
 
 A governance-set protocol fee (default 3%, capped at 10%) is skimmed from the staker-bound TRAC on every paid publish, update, or lifetime extension. Publishers pay the same gross price — the fee comes out of the amount that would otherwise flow into the staker reward pool. The fee is dormant until governance sets a treasury recipient, so a fresh deployment charges nothing until it is enabled.
