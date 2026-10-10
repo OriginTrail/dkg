@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import {
-  decodePublicGraphSnapshot,
   PublicGraphSnapshotCache,
   PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES,
-  type PublicGraphSnapshot,
 } from "@origintrail-official/dkg-chain";
 import { buildKnowledgeAssetUalFromOnChainIdV1, validateContextGraphId } from "@origintrail-official/dkg-core";
 import { runGraphScopedPhysicalOperation } from "./sync/requester/graph-scoped-operation-fence.js";
@@ -14,8 +12,8 @@ import {
   type PublicSnapshotMode,
 } from "./public-snapshot-evidence.js";
 
-export const PUBLIC_GRAPH_SNAPSHOT_PROTOCOL =
-  "/dkg/10.0.0/public-graph-snapshot/1";
+import { createPublicSnapshotReader, PUBLIC_GRAPH_SNAPSHOT_PROTOCOL } from "./public-snapshot-reader.js";
+export { PUBLIC_GRAPH_SNAPSHOT_PROTOCOL } from "./public-snapshot-reader.js";
 const encoder = new TextEncoder();
 const jobs = new WeakSet<DKGAgent>();
 export interface PublicSnapshotSyncOptions {
@@ -139,134 +137,79 @@ export class PublicSnapshotMethods {
             contextGraphId,
             onChainId,
           };
-          let sourceCore: string | null = null;
-          const read = async (refresh = false): Promise<PublicGraphSnapshot> => {
-            assertCurrent();
-            if (mode === "rpc-only") {
-              if (!this.chain.readPublicGraphSnapshot)
-                throw new Error(
-                  "Independent snapshots are unsupported by this chain adapter",
-                );
-              const raw = await this.chain.readPublicGraphSnapshot(
-                contextGraphId,
-                onChainId,
-                { signal },
-              );
-              return decodePublicGraphSnapshot(
-                encoder.encode(JSON.stringify(raw)),
-                expected,
-              );
-            }
-            // Authenticated libp2p channel identity is the signer-equivalent trust boundary.
-            let failure: unknown;
+          const read = createPublicSnapshotReader({ mode, chain:this.chain, router:this.router,
+            peers, signal, expected, assertCurrent });
+          const initial = await read();
+          const snapshot = initial.snapshot;
+          assertCurrent();
+          const evidence = new PublicSnapshotEvidence(initial, isCurrent);
+          // A validated public snapshot admits this job without scheduling the
+          // daemon's separate legacy subscribe/catch-up pipeline.
+          if (!subscription?.subscribed || !subscription.onChainId) {
+            control.admitSubscription(() => this.subscribeToContextGraph(contextGraphId, {
+              onChainId,
+              syncMode: "on-demand",
+              trackSyncScope: false,
+              deferSharedMemoryGossipSubscribe: true,
+            }));
+          }
+          assertCurrent();
+          if (mode === "core-cache") await markCoreTrustedGraph(this.store, contextGraphId);
+          assertCurrent();
+          const uals = snapshot.assets.map((a) => buildKnowledgeAssetUalFromOnChainIdV1(snapshot.chainId, snapshot.assetStorage, BigInt(a.id)));
+          const committed = new Set<string>();
+          const recover = async (batch: string[], transport: "stream-preferred" | "legacy") => {
             for (const peer of peers) {
-              try {
-                const bytes = await this.router.send(
-                  peer,
-                  PUBLIC_GRAPH_SNAPSHOT_PROTOCOL,
-                  encoder.encode(
-                    JSON.stringify({
-                      version: 1,
-                      contextGraphId,
-                      onChainId,
-                      refresh,
-                    }),
-                  ),
-                  {
-                    timeoutMs: 115_000,
-                    signal,
-                    maxReadBytes: PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES,
-                  },
-                );
-                const snapshot = decodePublicGraphSnapshot(bytes, expected);
-                assertCurrent();
-                sourceCore = peer;
-                return snapshot;
-              } catch (error) {
-                failure = error;
-                signal.throwIfAborted();
-              }
+              assertCurrent();
+              const remaining = batch.filter(ual => !committed.has(ual));
+              if (!remaining.length) break;
+              const result = await this.syncExactKnowledgeAssetsFromPeerDetailed(peer, contextGraphId, remaining, {
+                signal, isCurrent, forceFreshExactSession: true,
+                exactRecoveryTransportMode: transport,
+                authenticateGraphScopedAsset: asset => evidence.authenticate(asset),
+                totalTimeoutMs: 120_000,
+                registeredPublicEvidence: {
+                  usableFor: (id, s) => id === contextGraphId && isCurrent() && !s?.aborted,
+                  revoke: () => {},
+                },
+              });
+              for (const ual of result.committedExactAssetUals ?? []) committed.add(ual);
             }
-            throw new Error("No configured core supplied a valid public snapshot", {
-              cause: failure,
-            });
+            return batch.filter(ual => !committed.has(ual));
           };
-            const snapshot = await read();
-            assertCurrent();
-            const initialSourceCore = sourceCore;
-            const evidence = new PublicSnapshotEvidence(
-              snapshot,
-              mode,
-              sourceCore,
-              isCurrent,
-            );
-            // A validated public snapshot admits this job without scheduling the
-            // daemon's separate legacy subscribe/catch-up pipeline.
-            if (!subscription?.subscribed || !subscription.onChainId) {
-              control.admitSubscription(() => this.subscribeToContextGraph(contextGraphId, {
-                onChainId,
-                syncMode: "on-demand",
-                trackSyncScope: false,
-                deferSharedMemoryGossipSubscribe: true,
-              }));
-            }
-            assertCurrent();
-            if (mode === "core-cache") await markCoreTrustedGraph(this.store, contextGraphId);
-            assertCurrent();
-            const uals = snapshot.assets.map((a) => buildKnowledgeAssetUalFromOnChainIdV1(snapshot.chainId, snapshot.assetStorage, BigInt(a.id)));
-            const committed = new Set<string>();
-            const recover = async (batch: string[], transport: "stream-preferred" | "legacy") => {
-              for (const peer of peers) {
-                assertCurrent();
-                const remaining = batch.filter(ual => !committed.has(ual));
-                if (!remaining.length) break;
-                const result = await this.syncExactKnowledgeAssetsFromPeerDetailed(peer, contextGraphId, remaining, {
-                  signal, isCurrent, forceFreshExactSession: true,
-                  exactRecoveryTransportMode: transport,
-                  authenticateGraphScopedAsset: asset => evidence.authenticate(asset),
-                  totalTimeoutMs: 120_000,
-                  registeredPublicEvidence: {
-                    usableFor: (id, s) => id === contextGraphId && isCurrent() && !s?.aborted,
-                    revoke: () => {},
-                  },
-                });
-                for (const ual of result.committedExactAssetUals ?? []) committed.add(ual);
-              }
-              return batch.filter(ual => !committed.has(ual));
-            };
-            for (let offset = 0; offset < uals.length; offset += 10) {
-              const batch = uals.slice(offset, offset + 10);
-              const remaining = await recover(batch, "stream-preferred");
-              // The stream profile excludes private commitments. Only missing assets
-              // use the bounded singleton transport, with identical authentication.
-              for (const ual of remaining) await recover([ual], "legacy");
-              if (batch.some(ual => !committed.has(ual)))
-                throw new Error(`Snapshot recovery incomplete: ${committed.size}/${uals.length} committed`);
-            }
-            // A new inventory/root comparison is required before claiming current coverage.
-            const fresh = await read(true);
-            assertCurrent();
-            const current =
-              fresh.inventoryDigest === snapshot.inventoryDigest &&
-              fresh.assetStorage === snapshot.assetStorage &&
-              fresh.contextGraphStorage === snapshot.contextGraphStorage &&
-              BigInt(fresh.blockNumber) >= BigInt(snapshot.blockNumber);
-            return {
-              mode,
-              sourceCore: initialSourceCore,
-              coverageSourceCore: sourceCore,
-              snapshotDigest: snapshot.snapshotDigest,
-              blockNumber: snapshot.blockNumber,
-              blockHash: snapshot.blockHash,
-              inventoryDigest: snapshot.inventoryDigest,
-              assets: uals.length,
-              committed: committed.size,
-              completeAsOfSnapshot: true,
-              current,
-              startedAt,
-              finishedAt: Date.now(),
-              elapsedMs: Date.now() - startedAt,
-            };
+          for (let offset = 0; offset < uals.length; offset += 10) {
+            const batch = uals.slice(offset, offset + 10);
+            const remaining = await recover(batch, "stream-preferred");
+            // The stream profile excludes private commitments. Only missing assets
+            // use the bounded singleton transport, with identical authentication.
+            for (const ual of remaining) await recover([ual], "legacy");
+            if (batch.some(ual => !committed.has(ual)))
+              throw new Error(`Snapshot recovery incomplete: ${committed.size}/${uals.length} committed`);
+          }
+          // A new inventory/root comparison is required before claiming current coverage.
+          const fresh = await read(true);
+          assertCurrent();
+          const current =
+            fresh.snapshot.inventoryDigest === snapshot.inventoryDigest &&
+            fresh.snapshot.assetStorage === snapshot.assetStorage &&
+            fresh.snapshot.contextGraphStorage === snapshot.contextGraphStorage &&
+            BigInt(fresh.snapshot.blockNumber) >= BigInt(snapshot.blockNumber);
+          return {
+            mode,
+            sourceCore: initial.sourceCore,
+            coverageSourceCore: fresh.sourceCore,
+            snapshotDigest: snapshot.snapshotDigest,
+            blockNumber: snapshot.blockNumber,
+            blockHash: snapshot.blockHash,
+            inventoryDigest: snapshot.inventoryDigest,
+            assets: uals.length,
+            committed: committed.size,
+            completeAsOfSnapshot: true,
+            current,
+            startedAt,
+            finishedAt: Date.now(),
+            elapsedMs: Date.now() - startedAt,
+          };
         },
       });
     } finally {

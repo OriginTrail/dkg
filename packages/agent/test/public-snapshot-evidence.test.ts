@@ -64,11 +64,7 @@ const asset = (): VerifiedGraphScopedAsset => ({
 describe("job-scoped public snapshot evidence", () => {
   it("labels local trust and removes peer receipt claims; closed jobs cannot authenticate", () => {
     let current = true;
-    const evidence = new PublicSnapshotEvidence(
-      snapshot,
-      "core-cache",
-      "configured-core",
-      () => current,
+    const evidence = new PublicSnapshotEvidence({snapshot, mode: "core-cache", sourceCore: "configured-core"}, () => current,
     );
     const result = evidence.authenticate(asset());
     expect(
@@ -93,11 +89,7 @@ describe("job-scoped public snapshot evidence", () => {
       if (kind === "graph") a.contextGraphId = "other";
       if (kind === "identity") a.ual = a.ual.slice(0, -1) + "2";
       expect(() =>
-        new PublicSnapshotEvidence(
-          snapshot,
-          "core-cache",
-          "core",
-          () => true,
+        new PublicSnapshotEvidence({snapshot, mode: "core-cache", sourceCore: "core"}, () => true,
         ).authenticate(a),
       ).toThrow("pinned");
     },
@@ -118,11 +110,7 @@ describe("job-scoped public snapshot evidence", () => {
       ).rejects.toThrow("explicit context graph");
       await assertPublicSnapshotQueryTrust(store, "other");
       await assertPublicSnapshotQueryTrust(store, graph, "core-cache");
-      const authenticated = new PublicSnapshotEvidence(
-        snapshot,
-        "core-cache",
-        "core",
-        () => true,
+      const authenticated = new PublicSnapshotEvidence({snapshot, mode: "core-cache", sourceCore: "core"}, () => true,
       ).authenticate(asset());
       expect(
         await materializeVerifiedGraphScopedAsset({
@@ -162,8 +150,9 @@ describe("job-scoped public snapshot evidence", () => {
   it.each(["core-cache", "rpc-only"] as const)("preserves typed local publication dates and same-version replay in %s", async mode => {
     const store = new OxigraphStore();
     try {
-      const evidence = new PublicSnapshotEvidence(snapshot, mode, mode === "core-cache" ? "core" : null, () => true);
+      const evidence = new PublicSnapshotEvidence(mode === "core-cache" ? {snapshot, mode, sourceCore: "core"} : {snapshot, mode, sourceCore: null}, () => true);
       const first = evidence.authenticate(asset()).asset;
+      expect(first.metadataQuads.find(q => q.predicate.endsWith("/chainEvidenceSource"))!.object).toBe(JSON.stringify(mode === "core-cache" ? "core" : "local-rpc"));
       const date = first.metadataQuads.find(q => q.predicate.endsWith("/publishedAt"))!.object;
       expect(date).toMatch(/\^\^<http:\/\/www.w3.org\/2001\/XMLSchema#dateTime>$/);
       expect(await materializeVerifiedGraphScopedAsset({store,asset:first})).toBe("applied");

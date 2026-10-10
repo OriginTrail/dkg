@@ -13,6 +13,9 @@ import type {
 } from "./sync/requester/graph-scoped-materialization.js";
 
 export type PublicSnapshotMode = "core-cache" | "rpc-only";
+export type PublicSnapshotObservation =
+  | { mode: "core-cache"; snapshot: PublicGraphSnapshot; sourceCore: string }
+  | { mode: "rpc-only"; snapshot: PublicGraphSnapshot; sourceCore: null };
 export const SNAPSHOT_TRUST_GRAPH = "urn:dkg:local:public-snapshot-trust";
 const DKG = "http://dkg.io/ontology/";
 /** Query guard is durable and conservative across partial jobs, upgrades and process restarts. */
@@ -65,13 +68,14 @@ export async function assertPublicSnapshotQueryTrust(
 export class PublicSnapshotEvidence {
   readonly assets: Map<string, PublicGraphSnapshot["assets"][number]>;
   constructor(
-    readonly snapshot: PublicGraphSnapshot,
-    readonly mode: PublicSnapshotMode,
-    readonly sourceCore: string | null,
+    readonly observation: PublicSnapshotObservation,
     readonly isCurrent: () => boolean,
   ) {
-    this.assets = new Map(snapshot.assets.map((a) => [a.id, a]));
+    this.assets = new Map(observation.snapshot.assets.map((a) => [a.id, a]));
   }
+  get snapshot() { return this.observation.snapshot; }
+  get mode() { return this.observation.mode; }
+  get sourceCore() { return this.observation.sourceCore; }
   authenticate(asset: VerifiedGraphScopedAsset): AuthenticatedGraphScopedAsset {
     if (!this.isCurrent()) throw new Error("Snapshot job is no longer current");
     const s = this.snapshot;
