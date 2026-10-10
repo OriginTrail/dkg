@@ -33,11 +33,12 @@ import { findAuthorCatalogFullErrorV1 } from './author-catalog-capacity.js';
  *   catalog, at the applied head the refusal read, is parked without an attempt of its own, so a
  *   restart costs one attempt a full catalog and not one a marker;
  * - parked markers are attempted again when the scope's applied head shows a free row;
- * - one parked marker a scope is attempted as a safety net: every interval, and sooner when the
- *   applied head is no longer the one the refusal read, because rows may have been swapped at the
- *   same count. It is the marker parked longest; it goes to the back and stays parked unless
- *   that attempt places it. Its refusal reads afresh what the catalog holds, and markers whose
- *   asset is then found there are attempted;
+ * - one parked marker a scope is attempted an interval as a safety net, because rows may have
+ *   been swapped at the same count. It is the marker parked longest; it goes to the back and
+ *   stays parked unless that attempt places it. Its refusal reads afresh what the catalog holds,
+ *   and markers whose asset is then found there are attempted. When the attempt places its
+ *   marker, the catalog held a row the refusal did not name, so the next parked marker follows
+ *   in the next pass, and so on until one is refused;
  * - the log names the graph and author when a scope first refuses and at most once an interval
  *   after that; status carries two counts and no identity.
  *
@@ -57,11 +58,6 @@ import { findAuthorCatalogFullErrorV1 } from './author-catalog-capacity.js';
  * interval the retry class gives the share-time projection of a full catalog.
  */
 export const FULL_CATALOG_RECHECK_INTERVAL_MS_V1 = CATALOG_FULL_RETRY_INTERVAL_MS_V1;
-/**
- * After a head that moved on, a scope is attempted again at most this often for as long as no
- * refusal has read the new head. An attempt that places its marker does not wait for it.
- */
-export const FULL_CATALOG_MOVED_HEAD_RECHECK_INTERVAL_MS_V1 = 60_000;
 /** Scopes whose list of held assets is kept; a list is at most a catalog's rows of UALs. */
 export const MAX_FULL_CATALOG_DETAILED_SCOPES_V1 = 64;
 /** Named scopes above which times that no longer suppress a log line are dropped. */
@@ -119,10 +115,8 @@ interface FullScopeV1 {
   readonly headDigest: string | null;
   readonly rows: number;
   readonly rowCap: number;
-  /** When the scope's next safety-net attempt is due whatever its head. */
+  /** When the scope's next safety-net attempt is due. */
   recheckAtMs: number;
-  /** The earliest next attempt on account of a head that moved on from `headDigest`. */
-  movedHeadRecheckAtMs: number;
   /** The marker the last safety-net attempt went to, until a pass no longer lists it. */
   attempted: string | undefined;
   /** The parked marker the current pass attempts as the safety net, when one is due. */
@@ -159,17 +153,14 @@ export class FullCatalogParkingV1 {
     for (const [scopeKey, scope] of this.#scopes) {
       scope.dueMarker = undefined;
       if (scope.attempted !== undefined && !listed.has(scope.attempted)) {
-        // The marker the last safety-net attempt went to was placed. What the refusal found is
-        // out of date, and the next attempt does not wait.
+        // The marker the last safety-net attempt went to was placed: the catalog held a row
+        // the refusal did not name. What it found is out of date, and the next attempt does
+        // not wait for the interval.
         scope.attempted = undefined;
-        scope.movedHeadRecheckAtMs = now;
+        scope.recheckAtMs = now;
       }
-      const head = this.#appliedHead(scope);
-      this.#passHeads.set(scopeKey, head);
-      // Due every interval, and sooner when the applied head is no longer the one the refusal
-      // read: rows may have been swapped at the same count, so what is parked may have a row now.
-      const headMoved = head !== null && head !== undefined && head.digest !== scope.headDigest;
-      if (now >= scope.recheckAtMs || (headMoved && now >= scope.movedHeadRecheckAtMs)) due.add(scopeKey);
+      this.#passHeads.set(scopeKey, this.#appliedHead(scope));
+      if (now >= scope.recheckAtMs) due.add(scopeKey);
     }
     for (const [key, scopeKey] of this.#parked) {
       if (!listed.has(key)) {
@@ -234,7 +225,6 @@ export class FullCatalogParkingV1 {
       rows: full.rowCount,
       rowCap: full.rowCap,
       recheckAtMs: now + FULL_CATALOG_RECHECK_INTERVAL_MS_V1,
-      movedHeadRecheckAtMs: now,
       attempted: undefined,
       dueMarker: undefined,
     });
@@ -321,11 +311,9 @@ export class FullCatalogParkingV1 {
     if (scope.dueMarker === key) {
       // The safety net: one real attempt for the scope, by the marker this pass chose. Its
       // refusal reads afresh what the catalog holds.
-      const now = this.#now();
       scope.dueMarker = undefined;
       scope.attempted = key;
-      scope.recheckAtMs = now + FULL_CATALOG_RECHECK_INTERVAL_MS_V1;
-      scope.movedHeadRecheckAtMs = now + FULL_CATALOG_MOVED_HEAD_RECHECK_INTERVAL_MS_V1;
+      scope.recheckAtMs = this.#now() + FULL_CATALOG_RECHECK_INTERVAL_MS_V1;
       return 'safety-net';
     }
     if (this.#parked.has(key)) return 'parked';
