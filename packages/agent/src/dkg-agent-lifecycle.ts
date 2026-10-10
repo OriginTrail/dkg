@@ -10292,10 +10292,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       current: (contextGraphId) => this.subscribedContextGraphs.get(contextGraphId),
       remove: (contextGraphId) => this.deleteContextGraphSubscription(contextGraphId),
       restoreInactive: (id, previous) => void this.setContextGraphSubscription(id, previous, { persist: false, preserveAdmittedWireBinding: true }),
-      rollbackNetworkEffects: (contextGraphId) => this.unsubscribeFromContextGraph(
-        contextGraphId,
-        { persist: false, updateRehydrationStatus: false },
-      ),
+      rollbackNetworkEffects: (contextGraphId) => {
+        // This provisional slot is being rolled back, not made ready for the
+        // next row. Do not let its own unsubscribe wake bypass failure backoff.
+        this.contextGraphSubscriptionRehydrationSlotIds.delete(contextGraphId);
+        this.unsubscribeFromContextGraph(contextGraphId, { persist: false, updateRehydrationStatus: false });
+      },
       trackSync: (contextGraphId) => this.trackSyncContextGraph(contextGraphId),
       subscribe: (contextGraphId) => this.subscribeToContextGraph(contextGraphId, {
         trackSyncScope: false,
@@ -10447,9 +10449,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       log: this.log,
       updateContextGraphSubscriptionRehydrationStatusAfterClear: this.updateContextGraphSubscriptionRehydrationStatusAfterClear.bind(this),
       updateContextGraphSubscriptionRehydrationStatusAfterPersist: this.updateContextGraphSubscriptionRehydrationStatusAfterPersist.bind(this),
-      resolveAuthority: (row, ownerSignal) => this.resolveContextGraphSubscriptionBootstrapAuthority(row.id, {
+      resolveAuthority: (binding, ownerSignal) => this.resolveContextGraphSubscriptionBootstrapAuthority(binding.contextGraphId, {
         allowSubscriptionFallback: false, signal: ownerSignal,
-        durableSubscriptionBinding: { contextGraphId: row.id, onChainId: row.onChainId, onChainHash: row.onChainHash },
+        durableSubscriptionBinding: binding,
       }),
       activate: (row, onChainId, isCurrent) => activateRollingSubscriptionPromotion({
         activate: this.activatePersistedContextGraphSubscriptionRecord.bind(this),

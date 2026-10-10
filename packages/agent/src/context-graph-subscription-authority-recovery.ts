@@ -4,6 +4,7 @@ import { createOperationContext, type OperationContext } from '@origintrail-offi
 import { unavailableContextGraphReadAuthorityDecision, contextGraphReadAuthorityDependencyOf, type ContextGraphReadAuthorityDecision } from './context-graph-read-authority.js';
 import type {
   ContextGraphSub,
+  DurableContextGraphSubscriptionBinding,
   ContextGraphSubscriptionRecord,
   ContextGraphSubscriptionRehydrationInternalStatus,
   ContextGraphSubscriptionStore,
@@ -408,7 +409,7 @@ export interface RollingSubscriptionPromotionPorts {
   touchStatus(): void;
   updateContextGraphSubscriptionRehydrationStatusAfterClear(removed: readonly string[], revoked?: readonly string[]): void;
   updateContextGraphSubscriptionRehydrationStatusAfterPersist(id: string, intent: Pick<ContextGraphSubscriptionRecord, 'subscribed' | 'coreHosted'>): void;
-  resolveAuthority(row: ContextGraphSubscriptionRecord, signal: AbortSignal): Promise<ContextGraphReadAuthorityDecision>;
+  resolveAuthority(binding: Readonly<DurableContextGraphSubscriptionBinding>, signal: AbortSignal): Promise<ContextGraphReadAuthorityDecision>;
   activate(row: ContextGraphSubscriptionRecord, onChainId: string | undefined, isCurrent: (subscription: ContextGraphSub) => boolean): Promise<void>;
   wakeAuthorityRecovery(): void;
 }
@@ -476,13 +477,13 @@ export async function promoteDormantContextGraphSubscriptions(
 
       const candidateRevision = ports.contextGraphSubscriptionPersistRevisions
         .get(contextGraphId) ?? 0;
-      const candidateBinding = {
-        id: row.id,
+      const candidateBinding: Readonly<DurableContextGraphSubscriptionBinding> = {
+        contextGraphId: row.id,
         onChainId: row.onChainId,
         onChainHash: row.onChainHash,
       };
 
-      const authority = await pass.read(() => ports.resolveAuthority({ ...row!, ...candidateBinding }, signal).catch((error: unknown) => unavailableContextGraphReadAuthorityDecision(
+      const authority = await pass.read(() => ports.resolveAuthority(candidateBinding, signal).catch((error: unknown) => unavailableContextGraphReadAuthorityDecision(
         'legacy-local',
         'unexpected-authority-error',
         contextGraphReadAuthorityDependencyOf(error),
@@ -522,7 +523,7 @@ export async function promoteDormantContextGraphSubscriptions(
       if (
         (ports.contextGraphSubscriptionPersistRevisions.get(contextGraphId) ?? 0)
           !== candidateRevision
-        || freshRow.id !== candidateBinding.id
+        || freshRow.id !== candidateBinding.contextGraphId
         || freshRow.onChainId !== candidateBinding.onChainId
         || freshRow.onChainHash !== candidateBinding.onChainHash
       ) {

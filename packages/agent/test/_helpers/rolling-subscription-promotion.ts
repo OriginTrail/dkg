@@ -3,7 +3,7 @@
 import { vi } from 'vitest';
 import { RollingSubscriptionChecks } from '../../src/context-graph-subscription-rolling-checks.js';
 import type { RollingSubscriptionPromotionPorts } from '../../src/context-graph-subscription-authority-recovery.js';
-import type { ContextGraphSub, ContextGraphSubscriptionRecord } from '../../src/dkg-agent-types.js';
+import type { ContextGraphSub, ContextGraphSubscriptionRecord, DurableContextGraphSubscriptionBinding } from '../../src/dkg-agent-types.js';
 import type { ContextGraphDormancyReason } from '../../src/context-graph-subscription-dormancy.js';
 import { activateRollingSubscriptionPromotion, type RollingSubscriptionActivationPorts } from '../../src/context-graph-subscription-authority-recovery.js';
 import type { DKGAgent } from '../../src/dkg-agent.js';
@@ -45,9 +45,8 @@ export function createRollingPromotionFixture(
     store: { load, loadAll: async () => [...savedRows.values()] },
     getStatus: (): ReturnType<RollingSubscriptionPromotionPorts['getStatus']> => host.contextGraphSubscriptionRehydrationStatus,
     isCurrent: (signal: AbortSignal): boolean => host.started && host.contextGraphSubscriptionRehydrationPromotionRuntime.owns(signal),
-    resolveAuthority: (row: ContextGraphSubscriptionRecord, signal: AbortSignal) => host.resolveContextGraphSubscriptionBootstrapAuthority(row.id, {
-      allowSubscriptionFallback: false, signal,
-      durableSubscriptionBinding: { contextGraphId: row.id, onChainId: row.onChainId, onChainHash: row.onChainHash },
+    resolveAuthority: (binding: Readonly<DurableContextGraphSubscriptionBinding>, signal: AbortSignal) => host.resolveContextGraphSubscriptionBootstrapAuthority(binding.contextGraphId, {
+      allowSubscriptionFallback: false, signal, durableSubscriptionBinding: binding,
     }),
     activate: (row: ContextGraphSubscriptionRecord, onChainId: string | undefined, isCurrent: (subscription: ContextGraphSub) => boolean) => activateRollingSubscriptionPromotion({
       activate: host.activatePersistedContextGraphSubscriptionRecord,
