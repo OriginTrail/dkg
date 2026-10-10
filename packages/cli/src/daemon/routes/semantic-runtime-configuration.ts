@@ -47,7 +47,7 @@ async function assertManager(ctx: RequestContext, kind: 'binding' | 'route', gra
 }
 
 async function prepareBinding(ctx: RequestContext, raw: Record<string, unknown>): Promise<SemanticProgramBinding> {
-  closed(raw, ['operationIri', 'contextGraphId', 'enabled', 'allowedCallerAgentAddresses', 'executorAgentAddress', 'program', 'query', 'sparqlRead', 'assetCreation', 'typescript', 'executionLayer']);
+  closed(raw, ['operationIri', 'contextGraphId', 'enabled', 'allowedCallerAgentAddresses', 'executorAgentAddress', 'program', 'query', 'sparqlRead', 'assetCreation', 'localLlm', 'typescript', 'executionLayer']);
   if (raw.enabled !== undefined && raw.enabled !== true) badRequest('Use DELETE to revoke a binding');
   if (!record(raw.program) || !Array.isArray(raw.allowedCallerAgentAddresses)) badRequest('program and allowedCallerAgentAddresses are required');
   closed(raw.program, ['contextGraphId', 'programIri', 'programLayer', 'sourceHash', 'authorAgentAddress']);

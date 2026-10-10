@@ -603,6 +603,65 @@ disconnect and daemon shutdown abort and drain the active model/MCP turn before
 the private MCP session is closed, so cancelled work cannot outlive teardown or
 enter hidden conversation history.
 
+### Invoking the native model from a Program
+
+An operator can expose this same read-only session to an approved TypeScript
+Program. Set `DKG_LLM_PROGRAM_AGENT` to the executor's agent address and
+`DKG_PROJECT` to its private Context Graph. The authenticated health response
+then includes `programCapability`: the graph, executor, tool IRI and a hash of
+the model endpoint, model, domain profile and adapter configuration. Credentials
+are not included.
+
+The owner approves the Program with a `localLlm` grant containing
+`toolIri: "urn:dkg:tool:safe-llm"` and that `configurationSha256`. The Program
+declares the same tool and requests `localLlm: { toolIri }`, then calls it:
+
+```typescript
+import { invoke_tool } from '@origintrail-official/dkg-graph-computer/program';
+
+export async function run(question: string) {
+  const response = await invoke_tool('urn:dkg:tool:safe-llm', { prompt: question });
+  return JSON.parse(response.output);
+}
+```
+
+The host checks the current grant before inference and before releasing its
+answer. Only the configured executor may call this capability; another graph
+or a changed model/tool configuration fails. The native execution KA stores
+the Program's output, including the authoritative tool evidence captured for
+the current turn. Replaying the same invocation does not repeat inference.
+An interrupted model effect retains the existing non-repeatable reconciliation
+rules. The unbound Rig safe-LLM adapter keeps its existing behavior.
+
+The daemon supplies its owned provider explicitly to the configured semantic
+runtime. Separate runtime instances do not share a global provider slot. Every
+model turn, including a standalone Program API invocation, has a session-owned
+cancellation controller; shutdown aborts and drains it before closing MCP.
+
+The operator configuration is rechecked before session initialization and on
+each approved turn. For Program sessions, MCP imports a private sibling copy of
+each adapter entry point containing exactly its verified bytes, then removes
+that copy after registration. The adapter directory must permit this temporary
+file creation. Relative imports retain their original directory resolution.
+These hashes pin entry points, not their transitive dependencies; deploy those
+dependencies in immutable, operator-controlled releases. A changed entry point
+or a failed required registration stops session initialization.
+
+An approved TypeScript Program may call the model, perform an approved read,
+and call the model again within its shared `maxCalls` budget. Each model call
+still has its own non-repeatable effect receipt. A configuration change after
+model dispatch withholds the answer and leaves an unknown effect requiring
+reconciliation; it is not recorded as a definitive pre-dispatch rejection.
+
+To route the native UI chat through such a Program, set
+`DKG_LLM_PROGRAM_EXECUTOR` to an absolute operator-owned module exporting
+`createProgramChatExecutor({ dkgHome, capability })`. Its `chat` method must
+invoke the approved Program and return the text and native execution receipt.
+JPB supplies this module and its installer in `jbp_digital_twin`. Program mode
+reports initialization failures and does not fall back to direct inference.
+Removing that setting restores direct chat. Both paths retain the same
+node-admin authorization and read-only tool boundary.
+
 ### Startup and readiness
 
 The daemon creates only the lightweight service during startup. MCP tool

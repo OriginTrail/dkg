@@ -49,8 +49,14 @@ describe('local LLM runtime factory initialization lifecycle', () => {
       logDir: '/tmp/dkg-local-llm-factory-test',
       signal: controller.signal,
       initializationTimeoutMs: 5_000,
+      adapterPaths: ['/reviewed/adapter.mjs'],
+      adapterHashes: [{ path: '/reviewed/adapter.mjs', sha256: 'a'.repeat(64) }],
     });
     await vi.waitFor(() => expect(sdk.client.connect).toHaveBeenCalledOnce());
+    expect(sdk.StdioClientTransport.mock.calls[0][0]).toMatchObject({ env: {
+      DKG_ADAPTERS: '/reviewed/adapter.mjs',
+      DKG_ADAPTER_HASHES: JSON.stringify([{ path: '/reviewed/adapter.mjs', sha256: 'a'.repeat(64) }]),
+    } });
 
     controller.abort(new Error('daemon shutdown'));
 
