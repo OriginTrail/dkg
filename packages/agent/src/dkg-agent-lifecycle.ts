@@ -396,8 +396,7 @@ import {
   registerSyncHandler,
   resolveSyncResponderSnapshotPolicy,
 } from './sync/responder/sync-handler.js';
-import { createExactBatchResponderBinding } from './sync/responder/exact-batch-stream.js';
-import { exactBatchResponderTransportOptions } from './sync/requester/exact-batch-stream.js';
+import { createExactBatchResponderBinding, exactBatchResponderTransportOptions } from './sync/responder/exact-batch-stream.js';
 import type { VmRecoveryRegisteredPublicEvidence } from './vm-recovery-pass-authority.js';
 import { runExactBatchStreamDriver } from './sync/requester/exact-batch-stream-driver.js';
 import {

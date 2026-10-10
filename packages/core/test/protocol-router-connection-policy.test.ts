@@ -168,6 +168,25 @@ describe('scoped duplex ownership', () => {
     expect(f.stream.abort).toHaveBeenCalled();
   });
 
+  it('isolates rejecting async open and failure observers from admission and cleanup', async () => {
+    const f = fixture();
+    f.admission.mockResolvedValue(false);
+    const handler = vi.fn();
+    const onInboundOpen = vi.fn(async () => { throw new Error('async open observer failed'); });
+    const onInboundFailure = vi.fn(async () => { throw new Error('async failure observer failed'); });
+    f.router.registerDuplexStream(PROTOCOL,
+      async () => ({ requestData: REQUEST, continuation: undefined }), handler,
+      { ...OPTIONS, maxRequestBytes: 10, onInboundOpen, onInboundFailure });
+    const inbound = f.handle.mock.calls[0]![1] as (stream: Stream, connection: ReturnType<typeof f.connection>) => Promise<void>;
+    await expect(inbound(f.stream as unknown as Stream, f.connection())).resolves.toBeUndefined();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(onInboundOpen).toHaveBeenCalledOnce();
+    expect(onInboundFailure).toHaveBeenCalledWith(expect.objectContaining({ stage: 'peer-admission' }));
+    expect(handler).not.toHaveBeenCalled();
+    expect(f.stream.abort).toHaveBeenCalled();
+    expect(getEventListeners(f.stop.signal, 'abort')).toHaveLength(0);
+  });
+
   it('stops before dialing when cancellation ends a pending resolver', async () => {
     const f = fixture();
     let entered!: () => void;

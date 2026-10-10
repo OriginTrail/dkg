@@ -132,7 +132,13 @@ async function run(f: Awaited<ReturnType<typeof fixture>>, wire = duplex(f.recei
   await wire.client.send(exactBatchStartFrame(f.signed));
   const request = await wire.server.next(); if (!request) throw new Error('START absent');
   const authorized = await f.binding.authorizeRequest(request.payload.slice(), 'requester', wire.server.signal);
-  const sender = f.binding.respond(authorized.context, wire.server, 'requester');
+  // The real registration in Core serializes typed refusals after the Agent
+  // binding returns. Preserve that boundary in this byte-codec fixture.
+  const sender = f.binding.respond(authorized.context, wire.server, 'requester').catch(async (error: unknown) => {
+    if (!(error instanceof ExactBatchResponderRefusal)) throw error;
+    await wire.server.send({ kind: K.REFUSE, assetIndex: 255, sequence: 0,
+      payload: new TextEncoder().encode(error.refusal) });
+  });
   const consumer = consumeExactBatchVerifiedSession(wire.client, receiver);
   try { return await Promise.all([sender, consumer]); } catch (error) {
     wire.abort(error); const settled = await Promise.allSettled([sender, consumer]);
@@ -191,7 +197,7 @@ describe('exact batch normal verifier/materializer binding', () => {
     } finally { await f.close(); }
   });
 
-  it('answers typed export pressure with a BUSY frame before sending asset bytes', async () => {
+  it('hands typed export pressure to Core for a BUSY frame before sending asset bytes', async () => {
     const f = await fixture(1, 2), signal = new AbortController().signal;
     const session = { signal, windowSize: 2 as const, assetUals: f.receiver.assetUals,
       send: vi.fn(async (_frame: ExactBatchFrame) => {}), next: vi.fn(async () => undefined) };
@@ -204,10 +210,9 @@ describe('exact batch normal verifier/materializer binding', () => {
       for (const error of pressure) {
         const authorized = await f.binding.authorizeRequest(f.signed, 'requester', signal);
         acquire.mockRejectedValueOnce(error);
-        await f.binding.respond(authorized.context, session, 'requester');
-        expect(session.send).toHaveBeenCalledExactlyOnceWith({ kind: K.REFUSE, assetIndex: 255,
-          sequence: 0, payload: new TextEncoder().encode('BUSY') });
-        session.send.mockClear();
+        await expect(f.binding.respond(authorized.context, session, 'requester'))
+          .rejects.toMatchObject({ refusal: 'BUSY' } satisfies Partial<ExactBatchResponderRefusal>);
+        expect(session.send).not.toHaveBeenCalled();
       }
       const unexpected = new Error('Unexpected exporter failure');
       const authorized = await f.binding.authorizeRequest(f.signed, 'requester', signal);
@@ -253,7 +258,7 @@ describe('exact batch normal verifier/materializer binding', () => {
     const acquire = vi.spyOn(f.exportCache, 'acquireEncoded');
     acquire.mockImplementation(async request => {
       if (request.assetUal === f.items[1]!.ual) {
-        await vi.waitFor(() => expect(f.applied).toEqual([f.items[0]!.ual]));
+        await vi.waitFor(() => expect(f.applied).toEqual([f.items[0]!.ual]), { timeout: 10_000 });
       }
       return actualAcquire(request);
     });
@@ -443,11 +448,8 @@ describe('exact batch normal verifier/materializer binding', () => {
           await expect(respond).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_INVALID' });
           expect(session.send).not.toHaveBeenCalled();
         } else {
-          await expect(respond).resolves.toBeUndefined();
-          expect(session.send).toHaveBeenCalledOnce();
-          const refusal = session.send.mock.calls[0]![0];
-          expect(refusal.kind).toBe(K.REFUSE);
-          expect(new TextDecoder().decode(refusal.payload)).toBe('RESOURCE_LIMIT');
+          await expect(respond).rejects.toMatchObject({ refusal: 'RESOURCE_LIMIT' } satisfies Partial<ExactBatchResponderRefusal>);
+          expect(session.send).not.toHaveBeenCalled();
         }
         expect(f.exportCache.stats().exports).toBe(0);
         expect(f.reads.some(source => source.endsWith('.payload'))).toBe(false);

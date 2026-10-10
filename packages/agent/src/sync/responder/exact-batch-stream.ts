@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-import { createOperationContext, ExactBatchResponderRefusal, type ExactBatchResponderAuthorization, type OperationContext } from '@origintrail-official/dkg-core';
+import { createOperationContext, ExactBatchResponderRefusal, type ExactBatchResponderAuthorization, type ExactBatchTransportOptions, type OperationContext } from '@origintrail-official/dkg-core';
 import { isStoreOperationTimeoutError, isStoreSchedulerBusyError, type TripleStore } from '@origintrail-official/dkg-storage';
 import type { SyncRequestEnvelope } from '../auth/request-build.js';
 import { requireExactAssetUals } from '../exact-assets.js';
 import { observeExactBatch } from '../exact-batch-observation.js';
+import { exactBatchTransportOptions } from '../exact-batch-transport-options.js';
 import {
   EXACT_BATCH_BATCH_INDEX, EXACT_BATCH_FRAME_KIND as K, EXACT_BATCH_MAX_FRAME_BYTES,
   EXACT_BATCH_STREAM_WINDOW_SIZE, ExactBatchSendWindow, type ExactBatchFrame,
@@ -14,7 +15,6 @@ import { ExactBatchAssetMissingError, type ExactAssetExportCache, type ExactAsse
 import type { SyncRowSnapshotBudgetError } from './snapshot-budget.js';
 import type { ExperimentalExactBatchResponderResources } from './sync-handler.js';
 
-const ENCODER = new TextEncoder();
 const EMPTY = new Uint8Array(0);
 export interface ExactBatchResponderBindingOptions {
   readonly localPeerId: string;
@@ -54,13 +54,22 @@ class AuthorizedExactBatchContext {
 }
 class ProfileRefusal extends Error {}
 
+/** Responder-only diagnostics contain no request bytes, graph identifiers or raw errors. */
+export function exactBatchResponderTransportOptions(timeoutMs: number,
+  log: (level: 'info' | 'warn', message: string) => void): ExactBatchTransportOptions {
+  return { ...exactBatchTransportOptions(timeoutMs),
+    onInboundOpen: peer => log('info', `Exact batch inbound opened peer=${peer}`),
+    onInboundFailure: ({ peerIdSuffix, stage, errorName, errorCode, signalAborted }) =>
+      log('warn', `Exact batch inbound failed peer=${peerIdSuffix} stage=${stage} error=${errorName}${errorCode ? ` code=${errorCode}` : ''} aborted=${signalAborted}`) };
+}
+
 /** Bind directly to Core's explicit registerExperimentalExactBatchResponder. */
 export function createExactBatchResponderBinding(options: ExactBatchResponderBindingOptions) {
   const authorizationOwner = {};
   const noteRefusal = (stage: 'authorization' | 'public-authority' | 'serving' | 'export', code: 'BUSY' | 'DENIED' | 'ASSET_MISSING'): void => {
     observeExactBatch(() => options.onRefusal?.(stage, code));
   };
-  const refuse = (stage: 'authorization' | 'public-authority' | 'serving' | 'export', code: 'BUSY' | 'DENIED'): never => {
+  const refuse = (stage: 'authorization' | 'public-authority' | 'serving' | 'export', code: 'BUSY' | 'DENIED' | 'ASSET_MISSING'): never => {
     noteRefusal(stage, code);
     throw new ExactBatchResponderRefusal(code);
   };
@@ -169,21 +178,16 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
       while (window.acknowledgedCount < assetUals.length) await readAck();
       if (!window.complete) throw new Error('Exact batch responder did not reach commit completion');
     } catch (error) {
-      // Only explicit bounded/capability refusal gets the closed resource
-      // response. Integrity, authorization and source-change errors abort.
+      // Core serializes all closed refusals on the same stream, including a
+      // late refusal after DATA. Integrity and source-change errors abort.
       if (error instanceof ProfileRefusal && !session.signal.aborted) {
-        await send({ kind: K.REFUSE, assetIndex: EXACT_BATCH_BATCH_INDEX, sequence: 0, payload: ENCODER.encode('RESOURCE_LIMIT') });
-        return;
+        throw new ExactBatchResponderRefusal('RESOURCE_LIMIT');
       }
       if (!session.signal.aborted && error instanceof ExactBatchAssetMissingError) {
-        noteRefusal('export', 'ASSET_MISSING');
-        await send({ kind: K.REFUSE, assetIndex: EXACT_BATCH_BATCH_INDEX, sequence: 0, payload: ENCODER.encode('ASSET_MISSING') });
-        return;
+        refuse('export', 'ASSET_MISSING');
       }
       if (!session.signal.aborted && (isStoreSchedulerBusyError(error) || isStoreOperationTimeoutError(error))) {
-        noteRefusal('export', 'BUSY');
-        await send({ kind: K.REFUSE, assetIndex: EXACT_BATCH_BATCH_INDEX, sequence: 0, payload: ENCODER.encode('BUSY') });
-        return;
+        refuse('export', 'BUSY');
       }
       throw error;
     } finally { window.close(); }
