@@ -1,3 +1,7 @@
+import type { OnChainPublishResult } from './publish-provenance.js';
+export type { OnChainPublishResult } from './publish-provenance.js';
+export type { AdoptedMintPublishResult } from './existing-mint-provenance.js';
+import type { ExistingMintProvenanceReader } from './existing-mint-provenance.js';
 import type { ContextGraphAuthorityIndexRevisionReader } from './context-graph-authority-index-reader.js';
 export type { ContextGraphAuthorityIndexRevisionReader } from './context-graph-authority-index-reader.js';
 import type {
@@ -260,66 +264,6 @@ export function buildKnowledgeAssetUal(
   kaId: bigint,
 ): string {
   return `did:dkg:${chainId}/${knowledgeAssetsContract.toLowerCase()}/${kaId.toString()}`;
-}
-
-export interface OnChainPublishResult {
-  batchId: bigint;
-  /** Greenfield: equals `batchId` when tokenId == kaId. */
-  kaId?: bigint;
-  /** Merkle root emitted by the exact publish transaction being resolved. */
-  merkleRoot?: Uint8Array;
-  /** `DKGKnowledgeAssets` contract address used in the UAL path segment. */
-  knowledgeAssetsContract?: string;
-  /** Absent for updates (no new KAs minted). */
-  startKAId?: bigint;
-  /** Absent for updates (no new KAs minted). */
-  endKAId?: bigint;
-  txHash: string;
-  blockNumber: number;
-  /**
-   * Transaction index within the block. Required as the tiebreaker in the
-   * GH#842 last-writer-wins guard so a publish and a same-block update don't
-   * compare equal (which would let a late stale publish-promotion clobber the
-   * already-applied update). Optional for back-compat with adapters that
-   * don't yet populate it. Best-effort callers may fall back to `0`; recovery
-   * paths that persist trusted provenance MUST defer or independently resolve
-   * the receipt index rather than inventing ordering evidence.
-   */
-  txIndex?: number;
-  blockTimestamp: number;
-  publisherAddress: string;
-  /**
-   * Chain-confirmed author identity for this publish. Sourced from the
-   * `KnowledgeAssetCreated` event's indexed `author` topic, which the
-   * V10.1 contract sets to the address recovered (or wallet address
-   * verified via EIP-1271) from the EIP-712 author attestation. Absent /
-   * `undefined` for legacy V9-ish publishes that go through
-   * `KnowledgeCollection.sol` (no attestation), and for adapter paths
-   * that don't read the event (callers SHOULD then fall back to
-   * `KnowledgeCollectionStorage.getLatestMerkleRootAuthor(batchId)` for
-   * the canonical chain truth).
-   */
-  authorAddress?: string;
-  gasUsed?: bigint;
-  effectiveGasPrice?: bigint;
-  gasCostWei?: bigint;
-  tokenAmount?: bigint;
-  /**
-   * B8 — present only when this publish drew on a Publishing Conviction
-   * Account (the `CostCovered` event was emitted). The cost fields are bigint
-   * (serialized as decimal strings via the daemon's bigint→string JSON replacer);
-   * `epoch` is a small int (number). The UI derives the discount bps from
-   * `baseCost`/`discountedCost`. Absent for a normal (non-PCA) publish → the
-   * confirmed-discount badge degrades hidden.
-   */
-  convictionCostCovered?: {
-    accountId: bigint;
-    epoch: number;
-    baseCost: bigint;
-    discountedCost: bigint;
-    drawnFromEpoch: bigint;
-    drawnFromTopUp: bigint;
-  };
 }
 
 /**
@@ -1402,6 +1346,16 @@ export interface KnowledgeAssetVersionSnapshot {
   knowledgeAssetStorageGeneration?: number;
 }
 
+/** Options for `ChainAdapter.knowledgeAssetVersionSnapshotIsCurrent`. */
+export interface KnowledgeAssetVersionSnapshotLeaseOptions extends ChainReadOptions {
+  /**
+   * A block at or below the snapshot height, such as a receipt joined to the
+   * snapshot. The endpoint that certifies the snapshot must serve this hash at
+   * this height in the same observation; any other answer is false.
+   */
+  readonly includesBlock?: Readonly<{ blockNumber: number; blockHash: string }>;
+}
+
 /** Options honored only by the shared live-authority read. */
 export interface ContextGraphLiveAuthorityReadOptions extends ChainReadOptions {
   /**
@@ -1501,7 +1455,7 @@ export interface KnowledgeAssetUpdateContext {
  * V9 introduces publisher-namespaced UALs: did:dkg:{chainId}/{publisherAddress}/{localKAId}
  * Publishers reserve ID ranges via their signer address, then batch-mint KAs from those ranges.
  */
-export interface ChainAdapter {
+export interface ChainAdapter extends ExistingMintProvenanceReader {
   chainType: 'evm' | 'solana';
   chainId: string;
   /**
@@ -2363,11 +2317,13 @@ export interface ChainAdapter {
    * same confirmation-depth block hash and exact physical KAS binding generation.
    * A usable differing header returns false immediately; only unavailable or
    * unusable endpoint evidence advances to a fallback. Missing evidence is false.
+   * `options.includesBlock` extends the same proof to an older block on that
+   * endpoint's history.
    */
   knowledgeAssetVersionSnapshotIsCurrent?(
     kaId: bigint,
     snapshot: KnowledgeAssetVersionSnapshot,
-    options?: ChainReadOptions,
+    options?: KnowledgeAssetVersionSnapshotLeaseOptions,
   ): Promise<boolean>;
 
   /**

@@ -597,6 +597,42 @@ describe('EVMChainAdapter.readKnowledgeAssetVersionSnapshot [GH#2270 PR#2300]', 
     ]);
   });
 
+  it.each([
+    { label: 'holds the included older block', blockNumber: 480, blockHash: hashForBlock(480), current: true },
+    { label: 'serves another hash at the included height', blockNumber: 480, blockHash: `0x${'99'.repeat(32)}`, current: false },
+    { label: 'certifies an included snapshot block', blockNumber: 500, blockHash: hashForBlock(500), current: true },
+  ])('currentness proves an included block on the endpoint that $label', async ({ blockNumber, blockHash, current }) => {
+    const { adapter, attempts } = adapterOver([
+      { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
+      { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
+    ]);
+
+    await expect(adapter.knowledgeAssetVersionSnapshotIsCurrent(
+      KA_ID, snapshotAt(), { includesBlock: { blockNumber, blockHash } },
+    )).resolves.toBe(current);
+    // One primary observation: an older header precedes the pinned head, and a
+    // differing usable header is a verdict rather than a reason to fall back.
+    expect(attempts).toEqual([
+      { provider: 0, call: 'getNetwork' },
+      ...(blockNumber < 500 ? [{ provider: 0, call: 'getBlock', blockTag: blockNumber }] : []),
+      { provider: 0, call: 'getBlock', blockTag: 'latest' },
+    ]);
+  });
+
+  it.each([
+    { label: 'another hash at the snapshot height', blockNumber: 500, blockHash: `0x${'99'.repeat(32)}` },
+    { label: 'a block above the snapshot', blockNumber: 501, blockHash: hashForBlock(501) },
+  ])('currentness refuses an included block naming $label without endpoint reads', async ({ blockNumber, blockHash }) => {
+    const { adapter, attempts } = adapterOver([
+      { blockNumber: 501, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },
+    ]);
+
+    await expect(adapter.knowledgeAssetVersionSnapshotIsCurrent(
+      KA_ID, snapshotAt(), { includesBlock: { blockNumber, blockHash } },
+    )).resolves.toBe(false);
+    expect(attempts).toEqual([]);
+  });
+
   it('currentness validates the header at the configured confirmation depth', async () => {
     const { adapter, attempts, reads } = adapterOver([
       { blockNumber: 500, latestRoot: `0x${'aa'.repeat(32)}`, rootCount: 3n },

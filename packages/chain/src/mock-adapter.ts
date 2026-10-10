@@ -55,6 +55,9 @@ import {
 } from './chain-adapter.js';
 import { ethers } from 'ethers';
 import { ChainWriteAheadHookError } from './write-ahead-hook-error.js';
+import type { AdoptedMintPublishResult } from './existing-mint-provenance.js';
+import { getMockMintedKnowledgeAssetProvenance, resolveMockPublishByTxHash } from './mock-publish-provenance.js';
+import { fromHex, toHex } from './byte-codec.js';
 import {
   isNonexistentContextGraphStorageRevert,
   readContextGraphStorageRangeV1,
@@ -430,32 +433,20 @@ export class MockChainAdapter implements ChainAdapter {
   }
 
   async resolvePublishByTxHash(txHash: string): Promise<OnChainPublishResult | null> {
-    const created = this.events.find((event) =>
-      (event.type === 'KCCreated' || event.type === 'KnowledgeBatchCreated') && event.data.txHash === txHash,
-    );
-    const txIndex = created?.data.txIndex;
-    if (!created || typeof txIndex !== 'number' || !Number.isSafeInteger(txIndex) || txIndex < 0) {
-      return null;
-    }
+    return resolveMockPublishByTxHash(this.events, this.signerAddress, txHash);
+  }
 
-    return {
-      batchId: BigInt(String(created.data.kaId ?? created.data.batchId ?? '0')),
-      kaId: created.data.kaId != null ? BigInt(String(created.data.kaId)) : undefined,
-      merkleRoot: created.data.merkleRoot != null ? fromHex(String(created.data.merkleRoot)) : undefined,
-      startKAId: created.data.startKAId != null ? BigInt(String(created.data.startKAId)) : undefined,
-      endKAId: created.data.endKAId != null ? BigInt(String(created.data.endKAId)) : undefined,
-      txHash,
-      blockNumber: created.blockNumber,
-      txIndex,
-      blockTimestamp: Math.floor(Date.now() / 1000),
-      publisherAddress: String(created.data.publisherAddress ?? this.signerAddress),
-      authorAddress: created.data.authorAddress != null
-        ? String(created.data.authorAddress)
-        : created.data.publisherAddress != null
-          ? String(created.data.publisherAddress)
-          : undefined,
-      tokenAmount: created.data.tokenAmount != null ? BigInt(String(created.data.tokenAmount)) : undefined,
-    };
+  async getMintedKnowledgeAssetProvenance(
+    kaId: bigint,
+    expectedMerkleRoot: Uint8Array,
+    expectedContextGraphId: bigint,
+  ): Promise<AdoptedMintPublishResult | null> {
+    return getMockMintedKnowledgeAssetProvenance({
+      collection: this.collections.get(kaId), events: this.events,
+      isUnfinalized: (hash) => this.unfinalizedTxHashes.has(hash), blockHash: mockBlockHash,
+      resolveCanonicalReceipt: (hash, options) => this.resolveCanonicalFinalizationReceipt(hash, options),
+      resolvePublish: (hash) => this.resolvePublishByTxHash(hash),
+    }, kaId, expectedMerkleRoot, expectedContextGraphId);
   }
 
   async resolvePublishTransaction(
@@ -2249,6 +2240,7 @@ export class MockChainAdapter implements ChainAdapter {
       publishOperationId: params.publishOperationId,
       merkleRoot: toHex(params.merkleRoot),
       byteSize: params.byteSize.toString(),
+      tokenAmount: params.tokenAmount.toString(),
       txHash,
       txIndex: this.txIndexInBlock,
       publisherAddress,
@@ -2758,23 +2750,8 @@ export class MockChainAdapter implements ChainAdapter {
   }
 }
 
-function toHex(bytes: Uint8Array): string {
-  return '0x' + Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-}
-
 function mockBlockHash(blockNumber: number): string {
   return `0x${blockNumber.toString(16).padStart(64, '0')}`;
-}
-
-function fromHex(hex: string): Uint8Array {
-  const h = hex.startsWith('0x') ? hex.slice(2) : hex;
-  const bytes = new Uint8Array(h.length / 2);
-  for (let i = 0; i < bytes.length; i++) {
-    bytes[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16);
-  }
-  return bytes;
 }
 
 /**

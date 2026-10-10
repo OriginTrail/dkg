@@ -83,6 +83,7 @@ describe('publish receipt block timestamp lookup', () => {
       txIndex: 4,
       blockTimestamp: TIMESTAMP,
       txHash: TX_HASH,
+      tokenAmount: 100n,
     });
     expect(finalizedBlockTimestamp).toHaveBeenCalledTimes(1);
     expect(finalizedBlockTimestamp).toHaveBeenCalledWith(123, BLOCK_HASH, {});

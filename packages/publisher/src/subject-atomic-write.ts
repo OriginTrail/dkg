@@ -4,8 +4,10 @@
 // one; keeping it in one place stops the queues drifting on fallback behavior or `source`
 // tagging. Each queue keeps only its own record-shaping concern (lift's request-first
 // pre-insert ordering; promote's single-subject guard) and calls this for the mutable
-// subject write.
+// subject write. The insert-then-prune convergence below is likewise the one copy that
+// locally trusted control entries and KA metadata rows share.
 
+import { assertSafeIri } from '@origintrail-official/dkg-core';
 import {
   assertSubjectReplacementPayload,
   deleteByPatternWithoutCount,
@@ -54,4 +56,64 @@ export async function replaceSubjectAtomicallyOrFallback(
   if (replaced) return;
   await deleteByPatternWithoutCount(store, { subject, graph: graphUri });
   await store.insert(quads);
+}
+
+/**
+ * Replace a subject whose absence, even transient, is more permissive than any
+ * of its states: a reader that finds no locally trusted control entry applies
+ * peer-supplied controls instead. Atomic where the store supports it, under
+ * the same payload contract as {@link replaceSubjectAtomicallyOrFallback}.
+ * Otherwise the complete new row set is inserted before the rows of the
+ * previous snapshot that it no longer contains are pruned. A failure or crash
+ * therefore leaves the previous rows or their union with the new ones, never
+ * an absent subject, and a retry converges to exactly `quads`.
+ */
+export async function replaceSubjectAtomicallyOrInsertThenPrune(
+  store: TripleStore,
+  graphUri: string,
+  subject: string,
+  quads: Quad[],
+  source: string,
+): Promise<void> {
+  assertSubjectReplacementPayload(graphUri, subject, quads);
+  if (await tryReplaceSubjectAtomically(store, graphUri, subject, quads, { source })) return;
+  // Refuse before mutating: without the snapshot, stale rows could never be pruned.
+  await insertThenPruneSubjectRows(store, graphUri, subject, quads, { requireSnapshot: true, source });
+}
+
+/**
+ * Converge one subject's rows in a shared graph to exactly `quads` (rows of
+ * `graphUri`) without one commit: insert the complete new row set, then prune
+ * the previous snapshot's rows that it no longer contains. A failure or crash
+ * leaves the previous rows or their union with the new ones, never an absent
+ * subject, and a retry converges. When the store returns no snapshot,
+ * `requireSnapshot` refuses before mutating; otherwise the rows are inserted
+ * and the prune is skipped.
+ */
+export async function insertThenPruneSubjectRows(
+  store: TripleStore,
+  graphUri: string,
+  subject: string,
+  quads: readonly Quad[],
+  policy: Readonly<{ requireSnapshot: boolean; source?: string }>,
+): Promise<void> {
+  const options = policy.source === undefined ? undefined : { source: policy.source };
+  const safeSubject = assertSafeIri(subject);
+  const previous = await store.query(
+    `CONSTRUCT { <${safeSubject}> ?p ?o } WHERE { GRAPH <${assertSafeIri(graphUri)}> { <${safeSubject}> ?p ?o } }`,
+    options,
+  );
+  if (previous.type !== 'quads' && policy.requireSnapshot) {
+    throw new Error(`Subject snapshot for ${policy.source ?? subject} expected a quads result`);
+  }
+  await store.insert([...quads], options);
+  if (previous.type !== 'quads') return;
+  // Only this subject's requested rows can keep a snapshot row.
+  const next = new Set(quads.filter((quad) => quad.subject === subject)
+    .map((quad) => JSON.stringify([quad.predicate, quad.object])));
+  // CONSTRUCT rows carry no graph: delete them where they live.
+  const stale = previous.quads
+    .filter((quad) => !next.has(JSON.stringify([quad.predicate, quad.object])))
+    .map((quad) => ({ ...quad, subject, graph: graphUri }));
+  if (stale.length > 0) await store.delete(stale, options);
 }

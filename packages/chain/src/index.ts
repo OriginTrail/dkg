@@ -1,5 +1,9 @@
 export * from './chain-adapter.js';
 export {
+  AdoptExistingMintRefusalError,
+  type AdoptExistingMintRefusalCode,
+} from './adopt-existing-mint-refusal-error.js';
+export {
   CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MAX_BYTES,
   CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MIN_TAIL_BLOCKS,
   CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MAX_TAIL_BLOCKS,
@@ -251,6 +255,7 @@ export {
   type EVMAdapterConfig,
   decodeEvmError,
   enrichEvmError,
+  getKaIdAlreadyMintedKaId,
   classifyRpcRetryDisposition,
   isRpcEndpointFailoverEligible,
   isRetryableRpcError,

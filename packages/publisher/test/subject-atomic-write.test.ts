@@ -18,7 +18,7 @@ import {
   type Quad,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
-import { replaceSubjectAtomicallyOrFallback } from '../src/subject-atomic-write.js';
+import { insertThenPruneSubjectRows, replaceSubjectAtomicallyOrFallback } from '../src/subject-atomic-write.js';
 
 const GRAPH = 'urn:test:subject-atomic-write';
 const SUBJECT = 'urn:test:subject-atomic-write:subject';
@@ -182,5 +182,37 @@ describe('#1938 replaceSubjectAtomicallyOrFallback', () => {
 
     expect(counts.graphDeletes).toBe(0);
     expect(await objectsFor(inner, SUBJECT)).toEqual([]);
+  });
+});
+
+describe('insertThenPruneSubjectRows', () => {
+  /** A store that answers the subject snapshot without a quads result. */
+  function snapshotlessStore(inner: OxigraphStore): TripleStore {
+    return new Proxy(inner, {
+      get(target, prop) {
+        if (prop === 'query') return async () => ({ type: 'bindings', bindings: [] });
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as unknown as TripleStore;
+  }
+
+  // Trusted controls refuse before mutating; KA metadata keeps the new rows unpruned.
+  it.each([true, false])('applies the caller policy when the store returns no snapshot (requireSnapshot %s)', async (requireSnapshot) => {
+    const inner = new OxigraphStore();
+    await inner.insert([quad(SUBJECT, '"old"')]);
+    const write = insertThenPruneSubjectRows(snapshotlessStore(inner), GRAPH, SUBJECT, [quad(SUBJECT, '"new"')], { requireSnapshot });
+    if (requireSnapshot) await expect(write).rejects.toThrow('expected a quads result');
+    else await write;
+    expect(await objectsFor(inner, SUBJECT)).toEqual(requireSnapshot ? ['"old"'] : ['"new"', '"old"']);
+  });
+
+  it('prunes a stale row that only another subject still carries', async () => {
+    const sibling = 'urn:test:subject-atomic-write:sibling';
+    const inner = new OxigraphStore();
+    await inner.insert([quad(SUBJECT, '"old"'), quad(SUBJECT, '"kept"'), quad(sibling, '"keep"')]);
+    await insertThenPruneSubjectRows(inner, GRAPH, SUBJECT, [quad(SUBJECT, '"kept"'), quad(sibling, '"old"')], { requireSnapshot: true });
+    expect(await objectsFor(inner, SUBJECT)).toEqual(['"kept"']);
+    expect(await objectsFor(inner, sibling)).toEqual(['"keep"', '"old"']);
   });
 });

@@ -45,6 +45,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import { MockChainAdapter } from '../src/mock-adapter.js';
 import { NoChainAdapter } from '../src/no-chain-adapter.js';
+import { AdoptExistingMintRefusalError } from '../src/index.js';
 import { ethers } from 'ethers';
 
 /** Collect all own method names across the whole prototype chain, minus `constructor`. */
@@ -77,10 +78,10 @@ const EVM_INTERNAL_METHODS = new Set<string>([
   // RPC capabilities. MockChainAdapter mirrors those public methods directly;
   // it has no provider pool or failover plumbing to dispatch through.
   'requestBrowserWalletRpc',
-  // Pure receipt projection behind the public canonical-finalization reader.
-  // The mock implements that public reader directly from its in-memory event
-  // state and has no ethers TransactionReceipt to project.
-  'projectCanonicalFinalizationReceipt',
+  // Private EVM evidence readers share the decoded receipt between canonical
+  // recovery and adoption. The mock's public capabilities read its event array.
+  'readExistingMintObservation',
+  'resolveCanonicalFinalizationPublish',
   // Physical EVM contract-binding and one-log generation fences. These are
   // protected implementation details rather than ChainAdapter capabilities;
   // the mock has neither Hub-bound contract handles nor a persisted one-log.
@@ -758,6 +759,41 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     await expect(mock.createKnowledgeAssets(params)).resolves.toMatchObject({
       publisherAddress: otherPublisher,
     });
+  });
+
+  it('adopts only an unchanged graph-bound mint with recoverable confirmed provenance', async () => {
+    const mock = new MockChainAdapter('mock:31337');
+    mock.minimumRequiredSignatures = 0;
+    const root = new Uint8Array(32).fill(7);
+    const created = await mock.createKnowledgeAssets({
+      publishOperationId: 'adopt-mock-mint', contextGraphId: 1n, merkleRoot: root,
+      knowledgeAssetsAmount: 1, byteSize: 1n, epochs: 1, tokenAmount: 1n,
+      isImmutable: false, merkleLeafCount: 1, publisherNodeIdentityId: 1n,
+      author: { address: '0x1111111111111111111111111111111111111111',
+        signature: { r: new Uint8Array(32), vs: new Uint8Array(32) }, schemeVersion: 1 },
+      ackSignatures: [],
+    });
+    await expect(mock.getMintedKnowledgeAssetProvenance(created.batchId, root, 1n))
+      .resolves.toMatchObject({ txHash: created.txHash, batchId: created.batchId });
+    const mismatch = mock.getMintedKnowledgeAssetProvenance(created.batchId, root, 2n);
+    await expect(mismatch).rejects.toBeInstanceOf(AdoptExistingMintRefusalError);
+    await expect(mismatch).rejects.toMatchObject({ code: 'KA_CG_MISMATCH' });
+    const collision = mock.getMintedKnowledgeAssetProvenance(created.batchId, new Uint8Array(32), 2n);
+    await expect(collision).rejects.toBeInstanceOf(AdoptExistingMintRefusalError);
+    await expect(collision).rejects.toMatchObject({ code: 'KA_ID_COLLISION' });
+    await expect(mock.getMintedKnowledgeAssetProvenance(created.batchId + 1n, root, 1n)).resolves.toBeNull();
+    (mock as any).collections.get(created.batchId).cgId = 0n;
+    await expect(mock.getMintedKnowledgeAssetProvenance(created.batchId, root, 1n)).resolves.toBeNull();
+    (mock as any).collections.get(created.batchId).cgId = 1n;
+    mock.__setTransactionUnfinalized(created.txHash);
+    await expect(mock.getMintedKnowledgeAssetProvenance(created.batchId, root, 1n)).resolves.toBeNull();
+    mock.__setTransactionUnfinalized(created.txHash, false);
+    (mock as any).collections.get(created.batchId).updateContext.merkleRootsCount = 2n;
+    const superseded = mock.getMintedKnowledgeAssetProvenance(created.batchId, root, 2n);
+    await expect(superseded).rejects.toBeInstanceOf(AdoptExistingMintRefusalError);
+    await expect(superseded).rejects.toMatchObject({ code: 'KA_SUPERSEDED' });
+    await expect(mock.getMintedKnowledgeAssetProvenance(created.batchId, new Uint8Array(32), 2n))
+      .rejects.toMatchObject({ code: 'KA_ID_COLLISION' });
   });
 
   it('preserves delegated V10 publisher attribution across mock updates', async () => {

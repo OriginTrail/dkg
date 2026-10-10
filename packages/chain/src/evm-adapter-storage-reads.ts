@@ -15,6 +15,7 @@ import type {
   ChainReadOptions,
   KnowledgeAssetUpdateContext,
   KnowledgeAssetVersionSnapshot,
+  KnowledgeAssetVersionSnapshotLeaseOptions,
 } from './chain-adapter.js';
 import {
   decodeKnowledgeAssetMerkleRootCount,
@@ -230,13 +231,14 @@ export class StorageReadMethods extends EVMChainAdapterBase {
   async knowledgeAssetVersionSnapshotIsCurrent(
     kaId: bigint,
     snapshot: KnowledgeAssetVersionSnapshot,
-    options: ChainReadOptions = {},
+    options: KnowledgeAssetVersionSnapshotLeaseOptions = {},
   ): Promise<boolean> {
     options.signal?.throwIfAborted();
     activeRpcRequestAbortSignal()?.throwIfAborted();
     const snapshotBlockHash = snapshot.blockHash;
     const snapshotStorageAddress = snapshot.knowledgeAssetStorageAddress;
     const snapshotStorageGeneration = snapshot.knowledgeAssetStorageGeneration;
+    const included = options.includesBlock;
     if (snapshot.knowledgeAssetId !== kaId
       || !Number.isSafeInteger(snapshot.blockNumber)
       || snapshot.blockNumber < 0
@@ -246,6 +248,13 @@ export class StorageReadMethods extends EVMChainAdapterBase {
       || !ethers.isAddress(snapshotStorageAddress)
       || !Number.isSafeInteger(snapshotStorageGeneration)
       || snapshotStorageGeneration! < 0) return false;
+    if (included !== undefined && (!Number.isSafeInteger(included.blockNumber) || included.blockNumber < 0
+      || included.blockNumber > snapshot.blockNumber || typeof included.blockHash !== 'string'
+      || !ethers.isHexString(included.blockHash, 32)
+      // At the snapshot height the included block is the snapshot block itself.
+      || (included.blockNumber === snapshot.blockNumber
+        && included.blockHash.toLowerCase() !== snapshotBlockHash.toLowerCase()))) return false;
+    const ancestor = included !== undefined && included.blockNumber < snapshot.blockNumber ? included : undefined;
 
     await this.init();
     options.signal?.throwIfAborted();
@@ -272,6 +281,16 @@ export class StorageReadMethods extends EVMChainAdapterBase {
         if (BigInt(network.chainId) !== expectedChainId) return null;
       }
       signal.throwIfAborted();
+      // Read the older block first: the pinned-hash comparison below then also
+      // rejects a reorg on this endpoint between the two header reads.
+      let ancestorHash: string | undefined;
+      if (ancestor !== undefined) {
+        const atHeight = await withRpcUsageConsumer('getBlock', () => provider.getBlock(ancestor.blockNumber));
+        signal.throwIfAborted();
+        if (atHeight === null || atHeight.number !== ancestor.blockNumber
+          || typeof atHeight.hash !== 'string' || !ethers.isHexString(atHeight.hash, 32)) return null;
+        ancestorHash = atHeight.hash.toLowerCase();
+      }
       const head = await withRpcUsageConsumer(
         'getBlock',
         () => provider.getBlock('latest'),
@@ -294,7 +313,7 @@ export class StorageReadMethods extends EVMChainAdapterBase {
         || block.number !== blockNumber
         || typeof block.hash !== 'string'
         || !ethers.isHexString(block.hash, 32)) return null;
-      return { blockNumber, blockHash: block.hash.toLowerCase() };
+      return { blockNumber, blockHash: block.hash.toLowerCase(), ancestorHash };
     };
     const view = await readFirstProviderWithTransientRetry(this.providers, readOne, {
       retryDelayMs: VERSION_SNAPSHOT_TRANSIENT_RETRY_DELAY_MS,
@@ -308,6 +327,7 @@ export class StorageReadMethods extends EVMChainAdapterBase {
     // to search the fallbacks for an endpoint matching an older snapshot.
     return view.blockNumber === snapshot.blockNumber
       && view.blockHash === snapshotBlockHash.toLowerCase()
+      && view.ancestorHash === ancestor?.blockHash.toLowerCase()
       && this.knowledgeAssetStorageBindingIsCurrent(kas, address, generation)
       && generation === snapshotStorageGeneration;
   }

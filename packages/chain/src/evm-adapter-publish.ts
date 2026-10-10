@@ -10,12 +10,11 @@
  */
 
 import { EVMChainAdapterBase, decodeConvictionCostCovered } from './evm-adapter-base.js';
-import { numericChainIdOf } from './evm-adapter-storage-reads.js';
-import { ethers, Wallet, Contract } from 'ethers';
+import { numericChainIdOf, type StorageReadMethods } from './evm-adapter-storage-reads.js';
+import { ethers, Wallet, Contract, type JsonRpcProvider } from 'ethers';
 import type {
   BatchMintParams,
   BatchMintResult,
-  CanonicalFinalizationReceipt,
   CanonicalFinalizationReceiptReadOptions,
   CanonicalFinalizationReceiptResolution,
   ChainReadOptions,
@@ -36,6 +35,9 @@ import { resolveQuotedPublisherCandidatePricing } from './publisher-plan.js';
 import { errorCode, errorMessage, InsufficientPublisherFundsError, PcaFundingUnknownError } from './evm-adapter-errors.js';
 import { isRetryableRpcError } from './evm-adapter-rpc.js';
 import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
+import type { AdoptedMintPublishResult } from './existing-mint-provenance.js';
+import { getEvmMintedKnowledgeAssetProvenance } from './evm-existing-mint.js';
+import { projectCanonicalFinalizationReceipt, resolveCanonicalFinalizationPublish, type CanonicalFinalizationPublishResolution } from './canonical-finalization-publish.js';
 import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
 import {
 } from './evm-adapter-constants.js';
@@ -650,7 +652,7 @@ export class PublishMethods extends EVMChainAdapterBase {
       }
       if (receipt.status !== 1) return { status: 'reverted' };
       if (!publish) return { status: 'unrecognized' };
-      const canonicalReceipt = this.projectCanonicalFinalizationReceipt(receipt, publish);
+      const canonicalReceipt = projectCanonicalFinalizationReceipt(receipt, publish);
       return {
         status: 'confirmed',
         publish,
@@ -810,77 +812,63 @@ export class PublishMethods extends EVMChainAdapterBase {
     return { receipt, publish: facts ? await this.enrichPublishReceipt(receipt, facts, options) : null };
   }
 
-  /**
-   * Project the strict recovery receipt from the exact receipt/publish pair a
-   * caller already read. This is deliberately pure: the caller owns the live
-   * canonicality/finality gate, and an incomplete projection simply leaves
-   * the existing canonical-receipt fallback in place.
-   */
-  private projectCanonicalFinalizationReceipt(
-    receipt: ethers.TransactionReceipt,
-    parsedPublish: OnChainPublishResult,
-  ): CanonicalFinalizationReceipt | null {
-    if (
-      !parsedPublish.merkleRoot
-      || !parsedPublish.publisherAddress
-      || !Number.isSafeInteger(receipt.index)
-      || receipt.index < 0
-      || !receipt.blockHash
-    ) {
-      return null;
-    }
-    const kaId = parsedPublish.kaId ?? parsedPublish.batchId;
-    const startKAId = parsedPublish.startKAId ?? kaId;
-    const endKAId = parsedPublish.endKAId ?? kaId;
-    return {
-      txHash: receipt.hash,
-      blockNumber: receipt.blockNumber,
-      blockHash: receipt.blockHash,
-      txIndex: receipt.index,
-      merkleRoot: parsedPublish.merkleRoot,
-      publisherAddress: parsedPublish.publisherAddress,
-      ...(parsedPublish.authorAddress
-        ? { authorAddress: parsedPublish.authorAddress }
-        : {}),
-      batchId: parsedPublish.batchId,
-      kaId,
-      startKAId,
-      endKAId,
-      ...(parsedPublish.knowledgeAssetsContract
-        ? { knowledgeAssetsContract: parsedPublish.knowledgeAssetsContract }
-        : {}),
-    };
+  async getMintedKnowledgeAssetProvenance(
+    kaId: bigint,
+    expectedMerkleRoot: Uint8Array,
+    expectedContextGraphId: bigint,
+  ): Promise<AdoptedMintPublishResult | null> {
+    // Concrete EVMChainAdapter assembly requires both storage-read methods.
+    // An incomplete mixin holder cannot prove current provenance; refuse it
+    // once at composition rather than treating a missing reader as a null read.
+    const readers = this as Partial<Pick<StorageReadMethods,
+      'readKnowledgeAssetVersionSnapshot' | 'knowledgeAssetVersionSnapshotIsCurrent'>>;
+    const readCurrentVersion = readers.readKnowledgeAssetVersionSnapshot;
+    const versionIsCurrent = readers.knowledgeAssetVersionSnapshotIsCurrent;
+    if (typeof readCurrentVersion !== 'function' || typeof versionIsCurrent !== 'function') return null;
+    await this.init();
+    const storage = this.contracts.knowledgeAssetStorage, graphStorage = this.contracts.contextGraphStorage;
+    const address = this.knowledgeAssetStorageBindingAddress(storage);
+    const generation = this.knowledgeAssetStorageBindingGeneration, hubGeneration = this.hubBindingGeneration;
+    if (!storage || address === undefined || !Number.isSafeInteger(generation) || generation < 0) return null;
+    return getEvmMintedKnowledgeAssetProvenance({
+      storage, storageBinding: { address, generation, isCurrent: () =>
+        this.knowledgeAssetStorageBindingIsCurrent(storage, address, generation)
+        && this.contracts.contextGraphStorage === graphStorage && this.hubBindingGeneration === hubGeneration },
+      readRoots: (storage, id) => this.readContract(storage, 'kas.getMerkleRoots', 'getMerkleRoots', id),
+      readContextGraphId: async (id) => graphStorage
+        ? BigInt(await this.readContract(graphStorage, 'cgStorage.kaToContextGraph', 'kaToContextGraph', id)) : null,
+      resolveDeployBlock: (address) => this.resolveKaStorageDeployBlock(address),
+      readBlockTimestamp: (block) => this.getBlockTimestamp(block),
+      readCreationLogs: async (storage, id, from, to, providers) => {
+        const { logs } = await this.queryEventLogsPage(storage, storage.filters.KnowledgeAssetCreated(id),
+          from, to, providers, new Map<JsonRpcProvider, Contract>(), 'adoptExistingMint');
+        return logs;
+      },
+      resolveCanonicalPublish: (hash, options) => this.resolveCanonicalFinalizationPublish(hash, options),
+      isReceiptFinalAndCanonical: (receipt) => this.isReceiptBlockFinalAndCanonical(receipt),
+      readCurrentVersion: (id) => readCurrentVersion.call(this, id),
+      versionIsCurrent: (id, snapshot, includesBlock) => versionIsCurrent.call(this, id, snapshot, { includesBlock }),
+    }, kaId, expectedMerkleRoot, expectedContextGraphId);
   }
 
   async resolveCanonicalFinalizationReceipt(
     txHash: string,
     options: CanonicalFinalizationReceiptReadOptions = {},
   ): Promise<CanonicalFinalizationReceiptResolution> {
-    await this.init();
-    const { receipt, publish: parsedPublish } = await this.readPublishReceipt(
-      txHash,
-      options,
-      'canonical finalization receipt',
-    );
-    if (!receipt) {
-      const transaction = await this.getTransactionWithFailover(txHash, options);
-      return transaction ? { status: 'pending' } : { status: 'not-found' };
-    }
-    if (receipt.status !== 1) return { status: 'rejected' };
-    if (
-      (options.expectedBlockHash !== undefined
-        && receipt.blockHash.toLowerCase() !== options.expectedBlockHash.toLowerCase())
-      || (options.expectedBlockNumber !== undefined
-        && receipt.blockNumber !== options.expectedBlockNumber)
-    ) {
-      return { status: 'reorged' };
-    }
+    const resolution = await this.resolveCanonicalFinalizationPublish(txHash, options);
+    return resolution.status === 'confirmed'
+      ? { status: 'confirmed', receipt: resolution.receipt } : resolution;
+  }
 
-    if (!parsedPublish) return { status: 'rejected' };
-    const canonicalReceipt = this.projectCanonicalFinalizationReceipt(receipt, parsedPublish);
-    return canonicalReceipt
-      ? { status: 'confirmed', receipt: canonicalReceipt }
-      : { status: 'rejected' };
+  private async resolveCanonicalFinalizationPublish(
+    txHash: string,
+    options: CanonicalFinalizationReceiptReadOptions = {},
+  ): Promise<CanonicalFinalizationPublishResolution> {
+    return resolveCanonicalFinalizationPublish({
+      init: () => this.init(),
+      readPublishReceipt: (hash, readOptions, label) => this.readPublishReceipt(hash, readOptions, label),
+      hasTransaction: async (hash, readOptions) => Boolean(await this.getTransactionWithFailover(hash, readOptions)),
+    }, txHash, options);
   }
 
   /** Apply header-read policy once, outside either event-format decoder. */
@@ -914,6 +902,7 @@ export class PublishMethods extends EVMChainAdapterBase {
     let merkleRoot: Uint8Array | undefined;
     let publisherAddress = '';
     let authorAddress: string | undefined;
+    let tokenAmount: bigint | undefined;
     let foundCreated = false;
     const storageAddress = String(kas.target).toLowerCase();
 
@@ -925,6 +914,7 @@ export class PublishMethods extends EVMChainAdapterBase {
         if (parsed?.name === 'KnowledgeAssetCreated') {
           kaId = BigInt(parsed.args.id);
           authorAddress = String(parsed.args.author);
+          tokenAmount = parsed.args.tokenAmount == null ? undefined : BigInt(parsed.args.tokenAmount);
           if (parsed.args.merkleRoot != null) {
             merkleRoot = ethers.getBytes(parsed.args.merkleRoot);
           }
@@ -962,6 +952,7 @@ export class PublishMethods extends EVMChainAdapterBase {
       txIndex: receipt.index,
       publisherAddress,
       authorAddress,
+      tokenAmount,
       ...(convictionCostCovered ? { convictionCostCovered } : {}),
     };
   }

@@ -314,6 +314,37 @@ export function enrichEvmError(err: unknown): string | null {
 }
 
 /**
+ * Adopt-existing-mint (see dkg-publisher adoptExistingMintOrRethrow): decode a
+ * `KaIdAlreadyMinted(uint256 kaId)` custom-error revert and return the minted
+ * kaId. Unlike `isTooLowAllowanceError` there is deliberately NO string-matching
+ * fallback: adoption is state-changing and must cross-check the decoded kaId
+ * against the locally reserved id, so we require the structured decode that
+ * `enrichEvmError` stamps at `err.revert`.
+ */
+export function getKaIdAlreadyMintedKaId(err: unknown): bigint | undefined {
+  const seen = new Set<object>();
+  let current = err;
+  while (current && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current);
+    enrichEvmError(current);
+    const e = current as { revert?: { name?: unknown; args?: unknown[] }; cause?: unknown };
+    if (e.revert?.name === 'KaIdAlreadyMinted') {
+      const raw = e.revert.args?.[0];
+      if (typeof raw !== 'bigint' && typeof raw !== 'string'
+        && !(typeof raw === 'number' && Number.isSafeInteger(raw))) return undefined;
+      try {
+        const kaId = BigInt(raw);
+        return kaId >= 0n && kaId < (1n << 256n) ? kaId : undefined;
+      } catch {
+        return undefined;
+      }
+    }
+    current = e.cause;
+  }
+  return undefined;
+}
+
+/**
  * #888 — true iff `err` is the V10 publish `TooLowAllowance(TRAC, ...)`
  * custom-error revert.
  *
