@@ -92,7 +92,10 @@ export function LayerStatsWidget({ entities, entityCount, triples, layer }: {
         layer={layer}
         items={[
           { id: 'entities', label: layerNoun(layer, entityCount), value: entityCount },
-          { id: 'triples', label: 'Triples', value: triples },
+          { id: 'triples', label: layer === 'vm' ? 'Stored triples (data + provenance)' : 'Stored triples', value: triples,
+            tooltip: layer === 'vm'
+              ? 'Publication adds provenance to the data. Raw triple counts can change between memory layers without losing entities.'
+              : 'Promotion normalizes draft blank nodes and can leave draft residue; publication adds provenance. Raw triple counts are not expected to match across memory layers.' },
           { id: 'connections', label: 'Connections', value: totalConns },
           { id: 'avg', label: 'Avg. connections / entity', value: avgConns },
           ...(docCount > 0 ? [{ id: 'documents', label: 'Documents', value: docCount }] : []),

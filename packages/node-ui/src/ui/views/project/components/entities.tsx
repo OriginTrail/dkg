@@ -400,7 +400,7 @@ export function VerifiableMemoryHeroBanner({ entities, tripleCount, contextGraph
         layer="vm"
         items={[
           { id: 'assets', value: totalAssets, label: 'Knowledge Assets' },
-          { id: 'triples', value: tripleCount.toLocaleString(), label: 'Verifiable Triples' },
+          { id: 'triples', value: tripleCount.toLocaleString(), label: 'Stored triples (data + provenance)', tooltip: 'Publication adds provenance to the data. Raw triple counts can change between memory layers without losing entities.' },
           { id: 'types', value: typeCount, label: 'Entity Types' },
         ]}
       />
