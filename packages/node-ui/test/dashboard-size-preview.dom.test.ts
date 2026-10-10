@@ -39,17 +39,21 @@ let container: HTMLDivElement;
 
 function addGraph(id: string, options: {
   triples?: number; subjects?: number; partial?: boolean; error?: string; assets?: number;
-  failedLayer?: boolean;
+  failedLayer?: boolean; layeredTriples?: LayeredTriple[];
 }) {
   probes.graphs.push({ id, name: id, accessPolicy: 'private', assetCount: options.assets ?? 0 } as ContextGraph);
   const subjects = options.subjects ?? 1;
-  const allTriples: LayeredTriple[] = Array.from({ length: options.triples ?? 0 }, (_, i) => ({
+  const allTriples: LayeredTriple[] = options.layeredTriples ?? Array.from({ length: options.triples ?? 0 }, (_, i) => ({
     subject: `urn:subject:${i % subjects}`, predicate: 'urn:value', object: `"value-${i}"`, layer: 'working',
   }));
   const entities = buildMemoryEntities(allTriples);
+  const counts = { wm: 0, swm: 0, vm: 0, total: entities.size };
+  for (const entity of entities.values()) {
+    counts[entity.trustLevel === 'working' ? 'wm' : entity.trustLevel === 'shared' ? 'swm' : 'vm']++;
+  }
   probes.memory.set(id, {
     entities, entityList: [...entities.values()], allTriples, graphTriples: [], trustMap: new Map(),
-    counts: { wm: entities.size, swm: 0, vm: 0, total: entities.size },
+    counts,
     loading: false, error: options.error ?? null, partial: options.partial ?? false,
     layerStatus: { wm: 'ok', swm: options.failedLayer ? 'error' : 'ok', vm: 'ok' }, refresh: () => {},
   });
@@ -81,14 +85,36 @@ afterEach(async () => {
 });
 
 describe('real DashboardView size presentation', () => {
-  it.each([false, true])('marks capped or unavailable memory as a loaded lower bound (failed layer: %s)', async (failedLayer) => {
+  it('does not assert a triple lower bound when a missing layer reveals promotion residue', async () => {
+    const working: LayeredTriple[] = [0, 1, 2].map((i) => ({
+      subject: 'urn:entity:A', predicate: `urn:edge:${i}`, object: 'urn:entity:B', layer: 'working',
+    }));
+    addGraph('residue', { layeredTriples: working, partial: true, failedLayer: true });
+    const preview = await render();
+    expect(preview.values).toEqual(['1+', '~3']);
+    expect(preview.labels[1].textContent).toBe('triples preview');
+    expect(preview.row.textContent).toContain('~3 triples · loaded preview');
+    expect(preview.card.textContent).toContain('may increase or decrease');
+
+    probes.graphs = [];
+    addGraph('residue', { layeredTriples: [...working,
+      { subject: 'urn:entity:A', predicate: 'urn:name', object: '"A"', layer: 'shared' },
+      { subject: 'urn:entity:B', predicate: 'urn:name', object: '"B"', layer: 'shared' },
+    ] });
+    const complete = await render();
+    expect(complete.values).toEqual(['2', '2']);
+    expect(complete.row.textContent).toContain('2 entities · 2 triples');
+    expect(complete.card.textContent).not.toContain('Partial preview');
+  });
+
+  it.each([false, true])('marks capped or unavailable memory as an entity lower bound and triple preview (failed layer: %s)', async (failedLayer) => {
     addGraph('preview', { triples: 50_001, subjects: 1_251, partial: true, failedLayer });
     const { row, card, values, labels } = await render();
-    expect(values).toEqual([`${(1_251).toLocaleString()}+`, `${(50_001).toLocaleString()}+`]);
-    expect(labels.map((element) => element.textContent)).toEqual(['entities loaded', 'triples loaded']);
+    expect(values).toEqual([`${(1_251).toLocaleString()}+`, `~${(50_001).toLocaleString()}`]);
+    expect(labels.map((element) => element.textContent)).toEqual(['entities loaded', 'triples preview']);
     expect(row.textContent).toContain(`${(1_251).toLocaleString()}+ entities`);
-    expect(row.textContent).toContain(`${(50_001).toLocaleString()}+ triples · loaded preview`);
-    expect(row.querySelector('[title]')?.getAttribute('title')).toMatch(/capped or unavailable.*more data/);
+    expect(row.textContent).toContain(`~${(50_001).toLocaleString()} triples · loaded preview`);
+    expect(row.querySelector('[title]')?.getAttribute('title')).toMatch(/capped or unavailable.*increase or decrease/);
     expect(card.textContent).toContain('Partial preview');
     expect(card.querySelectorAll('.v10-layerbar')).toHaveLength(2);
   });

@@ -22,8 +22,8 @@ export function dashboardSizePresentation(size: {
     entityLabel,
     entityTitle,
     tripleValue: size.triplesUnknown ? '—'
-      : `${prefix}${size.triples.total.toLocaleString()}${suffix}`,
-    tripleLabel: loaded ? 'triples loaded' : 'triples',
+      : `${size.sizePartial || size.sizeApprox ? '~' : ''}${size.triples.total.toLocaleString()}`,
+    tripleLabel: loaded ? 'triples preview' : 'triples',
     showLayerBars: !size.triplesUnknown && !size.sizeApprox,
   };
 }

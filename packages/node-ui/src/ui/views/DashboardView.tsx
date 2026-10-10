@@ -437,9 +437,9 @@ function CgRow({
             )
             : mem.partial
               ? (
-                // Limits and unavailable layers both yield a loaded lower bound.
-                <span title="Loaded preview only — some memory layers are capped or unavailable; the context graph may contain more data">
-                  {entities.total.toLocaleString()}+ <span className="v10-cg-dim">entities</span> · {triples.total.toLocaleString()}+ <span className="v10-cg-dim">triples · loaded preview</span>
+                // More layers can reveal residue and reduce canonical triple totals.
+                <span title="Loaded preview only — some memory layers are capped or unavailable; total triples may increase or decrease as layers load">
+                  {entities.total.toLocaleString()}+ <span className="v10-cg-dim">entities</span> · ~{triples.total.toLocaleString()} <span className="v10-cg-dim">triples · loaded preview</span>
                 </span>
               )
               : <>{abbrev(entities.total)} <span className="v10-cg-dim">entities</span> · {abbrev(triples.total)} <span className="v10-cg-dim">triples</span></>}
@@ -673,7 +673,7 @@ export function DashboardView() {
           <div className="stat-sub">
             {agg.hasCgs
               ? (agg.sizePartial
-                  ? 'Partial preview — some memory layers are capped or unavailable. Context graphs may contain more data.'
+                  ? 'Partial preview — some memory layers are capped or unavailable. Context graphs may contain more entities; triple totals may increase or decrease as layers load.'
                   : 'Totals across all your context graphs, summed over Working, Shared Working & Verifiable Memory. Knowledge Assets are entities that have been published to Verifiable Memory.')
               : 'No context graphs yet.'}
           </div>
