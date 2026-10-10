@@ -20,7 +20,7 @@ const term = (value: oxigraph.Term) => value.termType === 'Literal'
   : { type: value.termType, value: value.value };
 
 async function run(mode: string, populated: 'named' | 'default' | false,
-  options: { lowDisk?: boolean; redirect?: 'query' | 'mutation'; assets?: number; group?: number; corrupt?: 'missing' | 'wrong-graph' } = {}) {
+  options: { lowDisk?: boolean; redirect?: 'query' | 'mutation'; assets?: number; group?: number; corrupt?: 'missing' | 'wrong-graph'; alteredInput?: boolean } = {}) {
   const home = await mkdtemp(join(tmpdir(), 'ingest-guard-'));
   const nq = '<urn:s> <urn:p> "plain" <urn:g> .\n<urn:s> <urn:link> <urn:o> <urn:g> .\n<urn:s> <urn:lang> "hello"@en <urn:g> .\n<urn:s> <urn:number> "42"^^<http://www.w3.org/2001/XMLSchema#integer> <urn:g> .\n# comment without a final newline';
   const assets = [];
@@ -32,13 +32,22 @@ async function run(mode: string, populated: 'named' | 'default' | false,
     assets.push({ file, graph, quads: 4, sha256: createHash('sha256').update(text).digest('hex') });
   }
   await writeFile(join(home, 'manifest.json'), JSON.stringify({ assets }));
-  let mutations = 0, redirectedRequests = 0;
-  const endpoint = await startOxigraphSparqlEndpoint({ onMutation: () => { mutations++; } });
+  if (options.alteredInput) await writeFile(join(home, assets[0]!.file), nq.replace('"plain"', '"other"'));
+  let mutations = 0, successfulMutations = 0, redirectedRequests = 0, emittedRedirects = 0;
+  const expectedWrites = mode === 'atomic' ? assets.length : Math.ceil(assets.length / (options.group ?? 1));
+  const endpoint = await startOxigraphSparqlEndpoint({
+    onMutation: () => { mutations++; },
+    afterMutation: store => {
+      successfulMutations++;
+      if (!options.corrupt || successfulMutations !== expectedWrites) return;
+      store.update('DELETE DATA { GRAPH <urn:g> { <urn:s> <urn:p> "plain" } }');
+      if (options.corrupt === 'wrong-graph') store.update('INSERT DATA { GRAPH <urn:g:1> { <urn:s> <urn:p> "plain" } }');
+    },
+  });
   if (populated) endpoint.store.load(`<urn:old> <urn:p> "keep" ${populated === 'named' ? '<urn:g> ' : ''}.`, { format: 'application/n-quads' });
   let url = endpoint.queryEndpoint;
   const servers: Server[] = [];
-  if (options.redirect || options.corrupt) {
-    let corrupted = false;
+  if (options.redirect) {
     const target = createServer((_req, res) => { redirectedRequests++; res.end('unexpected'); });
     servers.push(target);
     const destination = await listen(target);
@@ -48,12 +57,8 @@ async function run(mode: string, populated: 'named' | 'default' | false,
       const type = String(req.headers['content-type']);
       const mutation = type.includes('n-quads') || type.includes('sparql-update');
       if (options.redirect === 'query' || (options.redirect === 'mutation' && mutation)) {
+        emittedRedirects++;
         res.writeHead(307, { location: destination }); res.end(); return;
-      }
-      if (options.corrupt && !corrupted && Buffer.concat(chunks).toString().includes('SELECT ?g (COUNT(*)')) {
-        corrupted = true;
-        endpoint.store.update('DELETE DATA { GRAPH <urn:g> { <urn:s> <urn:p> "plain" } }');
-        if (options.corrupt === 'wrong-graph') endpoint.store.update('INSERT DATA { GRAPH <urn:g:1> { <urn:s> <urn:p> "plain" } }');
       }
       const response = await fetch(endpoint.queryEndpoint, { method: 'POST',
         headers: { 'content-type': type, accept: String(req.headers.accept) }, body: Buffer.concat(chunks) });
@@ -80,7 +85,7 @@ async function run(mode: string, populated: 'named' | 'default' | false,
     });
     const quads = endpoint.store.match().map(q => ({ subject: term(q.subject), predicate: term(q.predicate), object: term(q.object), graph: term(q.graph) }));
     const report = await readFile(join(home, 'out.json'), 'utf8').then(JSON.parse).catch(() => null);
-    return { code, mutations, redirectedRequests, output, quads, report };
+    return { code, mutations, redirectedRequests, emittedRedirects, output, quads, report };
   } finally {
     for (const server of servers.reverse()) await close(server);
     await endpoint.close(); await rm(home, { recursive: true, force: true });
@@ -118,6 +123,7 @@ describe('storage benchmark safety and RDF boundaries', () => {
     for (const redirect of ['query', 'mutation'] as const) {
       const r = await run(mode, false, { redirect });
       expect(r.code, r.output).not.toBe(0);
+      expect(r.emittedRedirects).toBeGreaterThan(0);
       expect(r.redirectedRequests).toBe(0); expect(r.mutations).toBe(0); expect(r.quads).toEqual([]);
     }
   });
@@ -147,6 +153,14 @@ describe('storage benchmark safety and RDF boundaries', () => {
       expect(r.report.error).toContain('Stored graph/count verification failed');
       expect(r.mutations).toBe(mode==='rdf'?2:3);
     }
+  });
+
+  it.each(['atomic', 'rdf'])('rejects changed input values before %s writes', async mode => {
+    const r = await run(mode, false, { alteredInput: true });
+    expect(r.code, r.output).toBe(1);
+    expect(r.report).toMatchObject({ complete: false });
+    expect(r.report.error).toContain('Input digest mismatch');
+    expect(r.mutations).toBe(0); expect(r.quads).toEqual([]);
   });
 
 });
