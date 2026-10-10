@@ -516,8 +516,13 @@ describe('review regression boundaries', () => {
     } finally { await agent.namedKaVmLifecycleRepair?.stop(); await remote.close(); }
   });
 
-  /** Blazegraph answers 200 only after the request's journal commit; model that commit as a flushed snapshot. */
-  function blazegraphJournal(backing: OxigraphStore) {
+  /**
+   * Wiring double for BlazegraphStore's HTTP path: queries are answered from an in-memory
+   * Oxigraph store and each write is applied to it. It shows the agent drives Blazegraph's
+   * default restart-durable commitment to journal retirement, not that Blazegraph persists
+   * anything; test-live/confirmed-lifecycle-restart.blazegraph.test.ts restarts a real server.
+   */
+  function blazegraphEndpointDouble(backing: OxigraphStore) {
     const term = (value: string) => {
       const literal = /^"([\s\S]*)"(?:\^\^<([^>]+)>)?$/.exec(value);
       return literal ? { type: 'literal', value: JSON.parse(`"${literal[1]}"`), ...(literal[2] ? { datatype: literal[2] } : {}) } : { type: 'uri', value };
@@ -531,26 +536,23 @@ describe('review regression boundaries', () => {
         return Response.json({ head: { vars }, results: { bindings: result.bindings.map(row =>
           Object.fromEntries(Object.entries(row).map(([name, value]) => [name, term(value)]))) } });
       }
-      // The N-Quads bulk insert and each SPARQL UPDATE are one committed journal transaction.
       await backing.update(type.startsWith('text/x-nquads')
         ? `INSERT DATA { ${body.trim().split('\n').map(line => line.replace(/^(.*) (<[^>]*>) \.$/, 'GRAPH $2 { $1 . }')).join('\n')} }`
         : body);
-      await backing.flush();
       return new Response('<p>COMMIT</p>', { status: 200 });
     });
   }
-  it.each(['raw', 'agent-facade'] as const)('completes on Blazegraph, whose acknowledged updates are forced journal commits, through %s', async facade => {
+  it.each(['raw', 'agent-facade'] as const)('wires the BlazegraphStore default commitment to journal retirement through %s (endpoint double, no durability claim)', async facade => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-blazegraph-stamp-')); dirs.push(dir);
-    const path = join(dir, 'blazegraph-journal.nq'), backing = new OxigraphStore(path), agent = agentFor(backing, dir, 1);
-    await backing.insert(metadataRows()); await backing.flush();
-    const fetch = blazegraphJournal(backing), blazegraph = new BlazegraphStore('http://blazegraph.test/bigdata/namespace/dkg/sparql');
+    const backing = new OxigraphStore(), agent = agentFor(backing, dir, 1);
+    await backing.insert(metadataRows());
+    const fetch = blazegraphEndpointDouble(backing), blazegraph = new BlazegraphStore('http://blazegraph.test/bigdata/namespace/dkg/sparql');
     agent.store = facade === 'raw' ? blazegraph : createListContextGraphsCacheInvalidatingStore(blazegraph, vi.fn(), vi.fn());
     try {
       const pending = await agent._repairConfirmedNamedKaVmLifecycle(input, confirmedPublicationFor(input));
       expect([...decodeLifecycleRepairJournal(JSON.parse(await readFile(join(dir, 'named-ka-vm-lifecycle-repairs.json'), 'utf8'))).values()]).toEqual([]);
       expect(pending).toBe(false); expect(agent.store.commitment?.durability).toBe('restart-durable'); expect(fetch).toHaveBeenCalled();
-      const reopened = new OxigraphStore(path); stores.push(reopened);
-      expect(await reopened.query(`ASK { GRAPH <${META}> { <${LIFECYCLE}> <${DKG}state> "published" ; <${DKG}memoryLayer> "VM" ;
+      expect(await backing.query(`ASK { GRAPH <${META}> { <${LIFECYCLE}> <${DKG}state> "published" ; <${DKG}memoryLayer> "VM" ;
         <${DKG}vmCurrentAssertion> "${HEX.slice(2)}" ; <${DKG}publishedUal> ${JSON.stringify(PUBLISHED)} } }`)).toMatchObject({ value: true });
     } finally { await agent.namedKaVmLifecycleRepair?.stop(); await blazegraph.close(); }
   });
