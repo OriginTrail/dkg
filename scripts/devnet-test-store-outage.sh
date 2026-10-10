@@ -314,26 +314,7 @@ log_before=0
 say "pausing node${target_node}'s store (SIGSTOP ${STORE_PID}) ..."
 kill -STOP "$STORE_PID"
 
-plain_started="$(date +%s)"
-paused_status="$(status_body '/api/status')"
-plain_elapsed="$(( $(date +%s) - plain_started ))"
-[ "$plain_elapsed" -lt 5 ] || fail "ordinary /api/status blocked for ${plain_elapsed}s on the paused store"
-[ "$(field "$paused_status" storeQuadsStatus)" = "ready" ] || fail "ordinary status lost its cached count while the store was paused: $paused_status"
-# A refresh may finish after the healthy read but before SIGSTOP. The last
-# ready answer after the pause is the baseline for subsequent outage reads.
-last_ready_count="$(field "$paused_status" storeQuads)"
-[ -n "$last_ready_count" ] || fail "ordinary status lost its ready count: $paused_status"
-next_paused_status="$(status_body '/api/status')"
-[ "$(field "$next_paused_status" storeQuadsStatus)" = "ready" ] || fail "ordinary status lost its cached count: $next_paused_status"
-[ "$(field "$next_paused_status" storeQuads)" = "$last_ready_count" ] || fail "ordinary status changed the last ready count during the outage: $next_paused_status"
-[ -z "$(field "$paused_status" storeReachability)" ] || fail "ordinary status unexpectedly probed the paused store: $paused_status"
-paused_probe="$(status_body '/api/status?probeStore=true')"
-paused_reachability="$(field "$paused_probe" storeReachability)"
-case "$paused_reachability" in
-  no-answer|unreachable) : ;;
-  *) fail "explicit status probe did not report the paused store as unavailable: $paused_probe" ;;
-esac
-say "OK: ordinary status stayed responsive with its cached count; explicit probe reported ${paused_reachability}"
+check_paused_store_status
 
 if [ "${STORE_OUTAGE_STATUS_ONLY:-0}" != "1" ]; then
   say "publishing during the outage (from node${PUBLISHER_NODE}) ..."

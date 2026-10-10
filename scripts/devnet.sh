@@ -960,14 +960,8 @@ node_cli_entry() {
 # build-info file release packages carry. Give devnet worktrees truthful full
 # checkout metadata so release-layout checks can pin the exact tag commit.
 write_devnet_version_build_info() {
-  local dest="$1" info="$1/packages/cli/build-info.json" commit
-  commit="$(git -C "$dest" rev-parse HEAD)"
-  if [ -f "$info" ] && node -e '
-    const fs = require("node:fs");
-    try { process.exit(JSON.parse(fs.readFileSync(process.argv[1], "utf8")).commit === process.argv[2] ? 0 : 1); }
-    catch { process.exit(1); }
-  ' "$info" "$commit"; then return 0; fi
-  node "$(dirname "${BASH_SOURCE[0]}")/stamp-cli-build-info.mjs" "$dest" devnet
+  local dest="$1" before="${2:-}"
+  node "$(dirname "${BASH_SOURCE[0]}")/stamp-cli-build-info.mjs" --ensure-devnet "$dest" "$before"
 }
 
 # Check out <ref> as a worktree under DEVNET_VERSIONS_DIR and build it once.
@@ -980,14 +974,7 @@ prepare_version() {
   fi
   local dest="$DEVNET_VERSIONS_DIR/$ref"
   if [ -f "$dest/packages/cli/dist/cli.js" ] && [ "${DEVNET_VERSION_REBUILD:-0}" != "1" ] &&
-    node -e '
-      const fs = require("node:fs"), cp = require("node:child_process");
-      try {
-        const info = JSON.parse(fs.readFileSync(process.argv[1] + "/packages/cli/build-info.json", "utf8"));
-        const head = cp.execFileSync("git", ["rev-parse", "HEAD"], { cwd: process.argv[1], encoding: "utf8" }).trim();
-        process.exit(info.commit === head && info.dirty !== true ? 0 : 1);
-      } catch { process.exit(1); }
-    ' "$dest"; then
+    node "$(dirname "${BASH_SOURCE[0]}")/stamp-cli-build-info.mjs" --check-devnet-cache "$dest"; then
     log "Version '$ref' already prepared at $dest"
     return 0
   fi
@@ -996,9 +983,11 @@ prepare_version() {
     log "Checking out version '$ref' as a worktree at $dest ..."
     git -C "$REPO_ROOT" worktree add --force "$dest" "$ref"
   fi
+  local before
+  before="$(node "$(dirname "${BASH_SOURCE[0]}")/stamp-cli-build-info.mjs" --capture-devnet "$dest")"
   log "Building version '$ref' (runs once, then cached) ..."
   ( cd "$dest" && pnpm install --prefer-offline && pnpm run build )
-  write_devnet_version_build_info "$dest"
+  write_devnet_version_build_info "$dest" "$before"
   log "Version '$ref' prepared at $dest"
 }
 

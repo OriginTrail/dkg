@@ -27,7 +27,7 @@
     "preinstall": "node ./scripts/verify-node-sqlite-runtime.mjs",
     "build": "pnpm run build:prerequisites && pnpm run build:prepared",
     "build:prerequisites": "node scripts/build-prerequisites.mjs",
-    "build:prepared": "node ../../scripts/stamp-cli-build-info.mjs --compile && pnpm run test:types && node scripts/test-catchup-worker-package-boundary.mjs && node ../../scripts/copy-cli-runtime-assets.mjs",
+    "build:prepared": "pnpm run build:compile && pnpm run test:types && node scripts/test-catchup-worker-package-boundary.mjs && node ../../scripts/copy-cli-runtime-assets.mjs",
     "prepack": "node ../../scripts/copy-cli-runtime-assets.mjs",
     "benchmark:catchup-runner": "node scripts/catchup-runner-benchmark.cjs",
     "benchmark:daemon-responsiveness": "node scripts/daemon-responsiveness-benchmark.cjs",
@@ -41,7 +41,8 @@
     "test:types": "tsc --project tsconfig.type-tests.json",
     "test:benchmark:publish-async-get": "vitest run --config vitest.benchmark.config.ts",
     "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs cli",
-    "clean": "node -e \"const fs=require('fs');for(const d of['dist','network']){fs.rmSync(d,{recursive:true,force:true})};fs.rmSync('tsconfig.tsbuildinfo',{force:true})\""
+    "clean": "node -e \"const fs=require('fs');for(const d of['dist','network']){fs.rmSync(d,{recursive:true,force:true})};fs.rmSync('tsconfig.tsbuildinfo',{force:true})\"",
+    "build:compile": "node ../../scripts/stamp-cli-build-info.mjs --compile"
   },
   "dependencies": {
     "@iarna/toml": "^2.2.5",
