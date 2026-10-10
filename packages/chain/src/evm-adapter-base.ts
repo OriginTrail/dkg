@@ -65,10 +65,7 @@ import {
   withRpcRequestTimeout,
 } from './rpc-request-transport.js';
 import type { RpcRequestClass } from './rpc-request-transport.js';
-import { hostOnlyRpcText, rpcHost } from './rpc-failover-log.js';
-import {
-  RpcEndpointsExhaustedError,
-} from './chain-rpc-transport-error.js';
+import { hostOnlyRpcText } from './rpc-failover-log.js';
 import  {
   RpcFailoverClient,
   createRpcReadDescriptor,
@@ -76,6 +73,7 @@ import  {
   type ReadOpts,
   type ReceiptLookupOptions,
 } from './rpc-failover-client.js';
+import type { GasLimitBufferOptions } from './gas-limit-buffer.js';
 import { waitForReceiptWithDeadline } from './receipt-wait.js';
 import {
   RpcUsageTracker,
@@ -89,6 +87,7 @@ import {
   AbortableKeyedSingleFlight,
   ReadThroughTtlCache,
 } from './keyed-ttl-single-flight-cache.js';
+import { SharedAdapterInitialization, initializationBinder } from './evm-adapter-shared-init.js';
 import { IdentityIdCache, IDENTITY_ID_POSITIVE_TTL_MS, SIGNER_IDENTITY_ID_ZERO_TTL_MS } from './identity-id-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
 import type { PublisherConvictionPlanReader } from './publisher-plan.js';
@@ -147,7 +146,7 @@ type ContractWriteSender = (
   args: readonly unknown[],
   signer: Wallet,
   label: string,
-  opts?: { gasLimitBufferBps?: number },
+  opts?: GasLimitBufferOptions,
 ) => Promise<ethers.TransactionReceipt>;
 
 type SerializedSignerWriteContext = {
@@ -776,6 +775,14 @@ export class EVMChainAdapterBase {
   protected contracts: ContractCache;
 
   protected initialized = false;
+
+  /** The one initialization that callers of an uninitialized adapter share. */
+  private readonly sharedInit = new SharedAdapterInitialization({
+    rpcUrls: () => this.rpcUrls,
+    isInitialized: () => this.initialized,
+    markInitialized: () => { this.initialized = true; },
+    initContracts: (startsRequestClass) => this.initContracts(startsRequestClass),
+  });
 
   /** Monotonic fence for physical Hub binding generations, including ABA. */
   protected hubBindingGeneration = 0;
@@ -2176,7 +2183,7 @@ export class EVMChainAdapterBase {
     args: readonly unknown[],
     signer: Wallet,
     label: string,
-    opts?: { gasLimitBufferBps?: number },
+    opts?: GasLimitBufferOptions,
   ): Promise<SignedTransactionEnvelope> {
     return this.rpcFailover.populateAndSign(contract, method, args, signer, label, opts);
   }
@@ -2193,7 +2200,7 @@ export class EVMChainAdapterBase {
     args: readonly unknown[],
     signer: Wallet,
     label: string,
-    opts?: { gasLimitBufferBps?: number },
+    opts?: GasLimitBufferOptions,
   ): Promise<ethers.TransactionReceipt> {
     return this.withSerializedSignerWrite(
       signer,
@@ -2255,10 +2262,10 @@ export class EVMChainAdapterBase {
     // `prevrandao`/`blockhash`/`timestamp`. If the mined block drives a more
     // expensive code path than the estimate's, the tx runs out of gas and
     // reverts with empty (`0x`) data. `RandomSampling.createChallenge`
-    // (weighted CG draw + historical blockhash access) and `submitProof`
+    // (weighted CG draw that settles every graph it misses) and `submitProof`
     // (stake settle at `block.timestamp`) are such cases. When set, we estimate
-    // once and inflate the limit by `gasLimitBufferBps` basis points.
-    opts?: { gasLimitBufferBps?: number },
+    // once and add the headroom `bufferedGasLimit` computes from these options.
+    opts?: GasLimitBufferOptions,
   ): Promise<ethers.TransactionReceipt> {
     // Parent span for the whole send. Broadcast + receipt-wait open their own
     // nested spans/metrics (chain.tx_submit / chain.tx_wait) inside
@@ -3094,10 +3101,13 @@ export class EVMChainAdapterBase {
       return this.readHubContractAddress(name);
     }
     const key = `${this.hubAddress}:${this.chainId}:${name}`;
+    // The read runs under its caller's cancellation. Once that is aborted, as
+    // an initialization's is when the run is ended, nobody joins the read.
     return this.resolvedContractAddressCache.getOrLoad(
       key,
       key,
       () => this.readHubContractAddress(name),
+      activeRpcRequestAbortSignal(),
     );
   }
 
@@ -3158,41 +3168,31 @@ export class EVMChainAdapterBase {
       || err.message.includes('AddressDoesNotExist');
   }
 
-  protected async init(): Promise<void> {
-    if (this.initialized) return;
-    try {
-      await this.initContracts();
-    } catch (err) {
-      // `init()` sits on the critical path of every chain write
-      // (`createOnChainContextGraph`, publish, verify, …). If the Hub lookups
-      // fail because the configured RPC endpoint(s) are exhausted (perpetual
-      // 429 / unreachable), surface the same `RPC_ENDPOINTS_EXHAUSTED` contract
-      // the tx-send path uses, so callers (e.g. `/api/context-graph/register`
-      // → `classifyRegisterContextGraphError`) map it to a bounded 503 instead
-      // of a generic 500 — and never hang waiting on it (#894 follow-up). A
-      // non-RPC error (e.g. a genuine "contract not in Hub" misconfig) keeps
-      // its original shape.
-      if (classifyRpcRetryDisposition(err) === 'failover') {
-        throw new RpcEndpointsExhaustedError(
-          `chain initialisation failed on all configured RPC endpoints (${this.rpcUrls.map(rpcHost).join(', ')}): ${hostOnlyRpcText(errorMessage(err))}`,
-          { cause: err, rpcUrls: this.rpcUrls },
-        );
-      }
-      throw err;
-    }
+  protected init(): Promise<void> {
+    return this.sharedInit.ensure();
   }
 
-  protected async initContracts(): Promise<void> {
-    this.contracts.identity = await this.resolveContract('Identity');
-    this.contracts.profile = await this.resolveContract('Profile');
-    this.contracts.parametersStorage = await this.resolveContract('ParametersStorage');
+  /** Make the next caller initialize again, and end an initialization that is out. */
+  private rearmInit(): void {
+    this.initialized = false;
+    this.sharedInit.rearm();
+  }
+
+  protected async initContracts(startsRequestClass: RpcRequestClass = activeRpcRequestContext().requestClass): Promise<void> {
+    // Every binding this routine writes goes through `bind`, so an ended
+    // initialization binds nothing more (the random-sampling pair, further
+    // down, has a guard of its own).
+    const bind = initializationBinder(this.contracts);
+    bind('identity', await this.resolveContract('Identity'));
+    bind('profile', await this.resolveContract('Profile'));
+    bind('parametersStorage', await this.resolveContract('ParametersStorage'));
 
     // V8 `Staking` is archived (PRD §4.1 — `Staking.sol` moved under
     // contracts/archive/, deploy script 023 archived). Tolerate its absence
     // so the V10 surface still initialises; the contract slot is retained
     // only to keep stale Hub bindings on older deploys resolving cleanly.
     try {
-      this.contracts.staking = await this.resolveContract('Staking');
+      bind('staking', await this.resolveContract('Staking'));
     } catch (error) {
       rethrowInterruptedInitialization(error);
       // V8 Staking not deployed on this Hub — V10 surface continues.
@@ -3203,7 +3203,7 @@ export class EVMChainAdapterBase {
     // Profile 1.2.0 / ProfileStorage 1.1.0 deploy still init cleanly; the
     // relay-registry methods will throw with a clear message at call time.
     try {
-      this.contracts.profileStorage = await this.resolveContract('ProfileStorage');
+      bind('profileStorage', await this.resolveContract('ProfileStorage'));
     } catch (error) {
       rethrowInterruptedInitialization(error);
       // Older deployments without the relay registry surface.
@@ -3211,7 +3211,7 @@ export class EVMChainAdapterBase {
 
     // V10.1 KA storage. Legacy V8 KnowledgeCollection + V10.0 DKGKnowledgeAssets
     // are deleted in the rc.12 KC->KA rename — no fallback resolution.
-    this.contracts.knowledgeAssetStorage = await this.resolveAssetStorage('DKGKnowledgeAssets');
+    bind('knowledgeAssetStorage', await this.resolveAssetStorage('DKGKnowledgeAssets'));
 
     // V9 contracts (KnowledgeAssets + KnowledgeAssetsStorage) are archived
     // (PRD §4.1, deploy scripts 040+041 moved under deploy/archive). Keep
@@ -3220,36 +3220,36 @@ export class EVMChainAdapterBase {
     // split it out so a missing V9 binding doesn't strand AskStorage. The
     // V10 publish-token-amount path depends on AskStorage being resolved.
     try {
-      this.contracts.knowledgeAssets = await this.resolveContract('KnowledgeAssets');
-      this.contracts.knowledgeAssetsStorage = await this.resolveAssetStorage('KnowledgeAssetsStorage');
+      bind('knowledgeAssets', await this.resolveContract('KnowledgeAssets'));
+      bind('knowledgeAssetsStorage', await this.resolveAssetStorage('KnowledgeAssetsStorage'));
     } catch (error) {
       rethrowInterruptedInitialization(error);
       // V9 contracts not deployed — V9 publish/update surface unavailable.
     }
     try {
-      this.contracts.askStorage = await this.resolveContract('AskStorage');
+      bind('askStorage', await this.resolveContract('AskStorage'));
     } catch (error) {
       rethrowInterruptedInitialization(error);
       // Older deployments that pre-date AskStorage — token-amount derivation unavailable.
     }
 
     try {
-      this.contracts.contextGraphNameRegistry = await this.resolveContract('ContextGraphNameRegistry');
+      bind('contextGraphNameRegistry', await this.resolveContract('ContextGraphNameRegistry'));
     } catch (error) {
       rethrowInterruptedInitialization(error);
       // ContextGraphNameRegistry not registered in Hub — createContextGraph/listContextGraphsFromChain unavailable
     }
 
     try {
-      this.contracts.contextGraphs = await this.resolveContract('ContextGraphs');
-      this.contracts.contextGraphStorage = await this.resolveAssetStorage('ContextGraphStorage');
+      bind('contextGraphs', await this.resolveContract('ContextGraphs'));
+      bind('contextGraphStorage', await this.resolveAssetStorage('ContextGraphStorage'));
     } catch (error) {
       rethrowInterruptedInitialization(error);
       // ContextGraphs not deployed — context graph operations unavailable
     }
 
     try {
-      this.contracts.knowledgeAssetsLifecycle = await this.resolveContract('KnowledgeAssetsLifecycle');
+      bind('knowledgeAssetsLifecycle', await this.resolveContract('KnowledgeAssetsLifecycle'));
     } catch (error) {
       rethrowInterruptedInitialization(error);
       // Lifecycle not deployed — createKnowledgeAssets unavailable.
@@ -3257,14 +3257,14 @@ export class EVMChainAdapterBase {
     }
 
     try {
-      this.contracts.dkgPublishingConvictionNFT = await this.resolveContract('DKGPublishingConvictionNFT');
+      bind('dkgPublishingConvictionNFT', await this.resolveContract('DKGPublishingConvictionNFT'));
     } catch (error) {
       rethrowInterruptedInitialization(error);
       // DKGPublishingConvictionNFT not deployed — V10 PCA agent-resolution unavailable
     }
 
     try {
-      this.contracts.chronos = await this.resolveContract('Chronos');
+      bind('chronos', await this.resolveContract('Chronos'));
     } catch (error) {
       rethrowInterruptedInitialization(error);
       // Chronos not deployed — update-path growth-cost sizing falls back to
@@ -3284,13 +3284,15 @@ export class EVMChainAdapterBase {
     // address array, and started WITHOUT an await so a cold backfill can never
     // delay a chain write. Only the adapter the composition root gave a store
     // does anything at all here.
+    // An initialization that was ended meanwhile starts nothing.
+    activeRpcRequestAbortSignal()?.throwIfAborted();
     // Both starts spawn detached work. Its context must belong to the adapter,
     // not to whichever transient caller happened to initialize it first: the
-    // work keeps that caller's request class, as it always has, and nothing
-    // else of it. An authority read that finds the adapter uninitialized must
-    // not lend its admission priority to scans that run for the process's
-    // lifetime.
-    await withDetachedRpcRequestContext(activeRpcRequestContext().requestClass, async () => {
+    // work keeps the request class of the caller that started the run, as it
+    // always has, and nothing else of it. An authority read that finds the
+    // adapter uninitialized must not lend its admission priority to scans that
+    // run for the process's lifetime.
+    await withDetachedRpcRequestContext(startsRequestClass, async () => {
       this.startChainIndexRuntime();
       await this.startHubRotationListener();
     });
@@ -3302,7 +3304,7 @@ export class EVMChainAdapterBase {
       'Token',
     );
     if (tokenAddress !== ethers.ZeroAddress) {
-      this.contracts.token = new Contract(
+      bind('token', new Contract(
         tokenAddress,
         [
           'function approve(address,uint256) returns (bool)',
@@ -3310,10 +3312,9 @@ export class EVMChainAdapterBase {
           'function allowance(address,address) view returns (uint256)',
         ],
         this.signer,
-      );
+      ));
     }
 
-    this.initialized = true;
   }
 
   protected requireV9(): void {
@@ -4716,8 +4717,12 @@ export class EVMChainAdapterBase {
    */
   protected async resolveAndAssignRandomSamplingPair(): Promise<{ rs: Contract; rss: Contract }> {
     const generationBefore = this.randomSamplingPairCache.currentGeneration();
-    const pair = await this.randomSamplingPairCache.get();
-    if (this.randomSamplingPairCache.currentGeneration() === generationBefore) {
+    // Under the caller's cancellation, as the address reads: nobody joins a
+    // resolve whose caller was cancelled, and a caller cancelled meanwhile (an
+    // initialization that was ended) assigns nothing from its late result.
+    const owner = activeRpcRequestAbortSignal();
+    const pair = await this.randomSamplingPairCache.get(owner);
+    if (this.randomSamplingPairCache.currentGeneration() === generationBefore && owner?.aborted !== true) {
       this.contracts.randomSampling = pair.rs;
       this.contracts.randomSamplingStorage = pair.rss;
     }
@@ -5111,7 +5116,7 @@ export class EVMChainAdapterBase {
     // every binding. Do not clear boot-bound handles here: the callback can
     // fire between a public method's `await init()` and its first
     // `this.contracts.X` read.
-    this.initialized = false;
+    this.rearmInit();
   }
 
   /**
@@ -5146,7 +5151,7 @@ export class EVMChainAdapterBase {
     // the entire resolved-address memo along with every bound handle.
     this.resolvedContractAddressCache.invalidateAll();
     this.invalidateRandomSamplingPair();
-    this.initialized = false;
+    this.rearmInit();
   }
 
   protected requireContextGraphStorage(): Contract {
@@ -5179,6 +5184,7 @@ export class EVMChainAdapterBase {
    * so destroying once flushes everything).
    */
   destroy(): void {
+    this.sharedInit.destroy();
     this.hubBindingGeneration += 1;
     this.knowledgeAssetStorageBindingGeneration += 1;
     this.hubRotationPoller.stop();

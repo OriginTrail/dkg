@@ -279,6 +279,11 @@ import {
   isUnansweredVmReconcileReadAuthority,
   VmReconcileReadAuthorityUnansweredError,
 } from './internal/vm-reconcile-read-authority.js';
+import {
+  askVmReconcileAgainAfterLocalRpcRefusal,
+  VmReconcileLocalRpcRefusalError,
+  VmReconcileRefusedSliceReads,
+} from './internal/vm-reconcile-local-rpc-refusal.js';
 import type { ContextGraphReadAuthorityDecision } from './context-graph-read-authority.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 import { resolveVmRecoveryExperimentPolicy } from './vm-recovery-experiment-policy.js';
@@ -317,6 +322,7 @@ import type {
   VmRefreshQueue,
   VmRefreshTarget,
 } from './vm-refresh.js';
+import { readVmRefreshVersionView } from './vm-refresh-version-view.js';
 import { isBoundedOperationTimeoutError, runBoundedOperation } from './bounded-operation.js';
 
 /** Graph-scoped KA metadata marker; its presence names the metadata graph. */
@@ -603,6 +609,8 @@ type VmReconcileExecution = {
   persistWatermark: (localCgId: string, watermark: number) => void;
   /** Observation only; forwarded to the engine's pass-timing hook. */
   observePassTimings?: ChainReconcilerDeps['observePassTimings'];
+  /** Told of the chain reads that fail where the pass goes on without them. */
+  refusedReads?: VmReconcileRefusedSliceReads;
 };
 
 type VmReconcileOrdinalOptions = {
@@ -617,6 +625,8 @@ type VmReconcileOrdinalOptions = {
    * RPC requests per endpoint) there. Default true.
    */
   rememberFinalizedEvidence?: boolean;
+  /** Told of the chain read failure that left this ordinal for a later pass. */
+  onUnresolvable?: (error: unknown) => void;
 };
 
 /**
@@ -3924,14 +3934,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
       attempt: { outcome: 'current', detail: 'the copy holds the chain root and version' },
     } as const;
     if (typeof this.chain.readKnowledgeAssetVersionSnapshot !== 'function') return current;
-    const view = await this.chain.readKnowledgeAssetVersionSnapshot(target.kaId, { signal });
+    // Without a view the attempt retries, and says why the adapter had none when it reports that.
+    const versionRead = await readVmRefreshVersionView(
+      this.chain.readKnowledgeAssetVersionSnapshot.bind(this.chain), target.kaId, signal,
+    );
     if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
-    if (view === null) {
-      return {
-        kind: 'settled',
-        attempt: { outcome: 'retry', detail: 'no coherent chain view confirms the copy' },
-      };
-    }
+    if (versionRead.view === null) return { kind: 'settled', attempt: versionRead.retry };
+    const { view } = versionRead;
     const proofBlock = target.proofBlockNumber ?? target.blockNumber;
     if (proofBlock !== undefined && view.blockNumber < proofBlock) {
       return {
@@ -4113,8 +4122,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
       isCurrent,
       getKAContextGraphId: (kaId, readSignal) =>
         getKAContextGraphId(kaId, { signal: readSignal }),
-      readKnowledgeAssetVersionSnapshot: (kaId, readSignal) =>
-        readKnowledgeAssetVersionSnapshot(kaId, { signal: readSignal }),
+      readKnowledgeAssetVersionSnapshot: (kaId, readSignal, onUnavailable) =>
+        readKnowledgeAssetVersionSnapshot(kaId, { signal: readSignal, onUnavailable }),
       verifyLocalContextGraph: (onChainCgId) =>
         this.requireLocalCgMatchesOnChainSlot(
           localCgId,
@@ -4257,7 +4266,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
           }
           // Reported where the graph was parked (executeVmReconcileForCg): it
           // is asked again shortly and does not wait for the sweep.
-          if (err instanceof VmReconcileReadAuthorityUnansweredError) return;
+          if (
+            err instanceof VmReconcileReadAuthorityUnansweredError
+            || err instanceof VmReconcileLocalRpcRefusalError
+          ) return;
           this.log.warn(
             createOperationContext('system'),
             `VM reconcile for "${localCgId}" failed; retrying on the periodic sweep: ${err instanceof Error ? err.message : String(err)}`,
@@ -4300,6 +4312,25 @@ export class SwmHostModeMethods extends DKGAgentBase {
         { requestClass: 'background', ...(lifecycleSignal ? { signal: lifecycleSignal } : {}) },
         () => withDefaultStoreWorkPriority('background', work),
       );
+    // A chain read attempt that the node's own RPC admission refused was
+    // never sent, so it says nothing about the graph. An automatic pass that
+    // meets one leaves the graph waiting to be asked again shortly, as after
+    // an unanswered read-authority check. Without that its next attempt is
+    // the graph's turn in the periodic sweep, and after a failed pass its
+    // live nudges are dropped until then. An operator's request, any other
+    // failure, and a graph the wait does not take end as they always did.
+    const askAgainAfterLocalRpcRefusal = (refusal: unknown, isCurrent: () => boolean): boolean =>
+      askVmReconcileAgainAfterLocalRpcRefusal({
+        contextGraphId: localCgId,
+        refusal,
+        automatic: source !== 'manual',
+        defer: () => this.vmReconcileScheduling?.deferForLocalRpcRefusal(localCgId, {
+          signal: lifecycleSignal,
+          isCurrent,
+          canAdmit: () => this.vmRecoverySyncAdmissionAvailable(localCgId),
+        }),
+        log: (level, message) => this.log[level](createOperationContext('system'), message),
+      });
     const physicalRun = runInLane(async (): Promise<ContextGraphReconcileResult> => {
       const passStartedAt = performance.now();
       const passGapMs = vmReconcilePassGapMs(this, localCgId, passStartedAt);
@@ -4352,6 +4383,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       let pendingWatermark: number | undefined;
       let result: VmReconcileEngineResult;
       let engineTimings: ReconcilePassTimings | undefined;
+      const refusedReads = new VmReconcileRefusedSliceReads();
       try {
         result = await reconcileContextGraph(
           this.createVmReconcileDeps(
@@ -4363,6 +4395,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
               identityCursor: target.cursor,
               persistWatermark: (_lcg, watermark) => { pendingWatermark = watermark; },
               observePassTimings: (timings) => { engineTimings = timings; },
+              refusedReads,
             },
           ),
           workingCursor,
@@ -4426,6 +4459,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
             + `continue=${result.shouldContinueImmediately ? 1 : 0}`,
         );
       });
+      // A slice that met a refused read keeps the graph's ask-again window
+      // as it is, whichever way it continues below.
+      if (refusedReads.met) this.vmReconcileScheduling?.noteLocalRpcRefusal(localCgId);
       // The reconciler owns the continuation policy: productive slices, stale
       // bindings, and explicit provider rotations continue immediately, while
       // pending-only historical inventory yields to the periodic sweep.
@@ -4446,11 +4482,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
           && isTargetCurrent()
           && this.vmReconcileScheduling?.yieldLocalAdmissionTurn(localCgId, localAdmissionWait) === true;
         if (!yielded) this.vmReconcileScheduling?.triggerLive(localCgId);
-      } else if (isTargetCurrent()) {
+      } else if (
+        isTargetCurrent()
+        && !askAgainAfterLocalRpcRefusal(
+          refusedReads.askAgainFor({ visited: result.processed, outstanding: result.pending }),
+          isTargetCurrent,
+        )
+      ) {
         // RS heal is bounded, best-effort maintenance. Run it only after the
         // useful VM slice completed and only when that slice has no urgent
         // continuation. Store pressure must defer maintenance, never erase the
-        // main reconcile result or prevent foreground ordinal progress.
+        // main reconcile result or prevent foreground ordinal progress. A slice
+        // that is asked again for the reads it went without has its
+        // continuation in that pass.
         if (target.kind === 'subscription') {
           try {
             await this.healStrandedScopedKCs(
@@ -4473,6 +4517,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
       noteVmReconcilePassEnd(this, localCgId, performance.now());
       return response;
+    }).catch((err: unknown): never => {
+      // The pass ended on the refused read itself, the asset count above all.
+      // It still ends as a failed pass, so live nudges from elsewhere stay
+      // held; only the wait's own nudge lifts that hold.
+      if (!askAgainAfterLocalRpcRefusal(err, isLifecycleCurrent)) throw err;
+      throw new VmReconcileLocalRpcRefusalError(err);
     });
     trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, physicalRun);
     return raceVmReconcileAbort(physicalRun, lifecycleSignal);
@@ -4944,6 +4994,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     execution?: VmReconcileExecution,
   ): ChainReconcilerDeps {
     const capturedCursor = execution?.identityCursor ?? target.cursor;
+    const refusedReads = execution?.refusedReads;
     const isTargetCurrent = (): boolean => this.isVmReconcileTargetCurrent(
       localCgId,
       target,
@@ -4969,7 +5020,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
         // Capability-absent chains disable the reorg gate; transient RPC
         // failures still throw so the durable watermark cannot advance.
         if (typeof this.chain.getBlockNumber !== 'function') return undefined;
-        const headBlock = await this.chain.getBlockNumber();
+        let headBlock: number;
+        try {
+          headBlock = await this.chain.getBlockNumber();
+        } catch (err) {
+          // The engine holds the watermark and ends the slice; its pass is told why.
+          refusedReads?.headBlockFailed(err);
+          throw err;
+        }
         if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
         return headBlock;
       },
@@ -4979,6 +5037,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
           revalidateTarget,
           rememberFinalizedEvidence: context === undefined
             || context.headOrdinal - ordinal <= DKGAgentBase.VM_RECONCILE_BATCH_SIZE,
+          ...(refusedReads
+            ? { onUnresolvable: (err: unknown) => refusedReads.ordinalFailed(err) }
+            : {}),
         }),
       recoverPendingOrdinals: (lcg, ocg, targets, headBlock) =>
         this.recoverVmReconcileBatch(
@@ -7531,6 +7592,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
     const unresolvable = (err: unknown): OrdinalOutcome => {
       // RPC lag / unknown kaId — leave for the next sweep.
+      options.onUnresolvable?.(err);
       this.log.info(ctx, `Phase B: ordinal ${ordinal} of cg ${onChainCgId} not resolvable yet: ${err instanceof Error ? err.message : String(err)}`);
       return { status: 'pending' };
     };

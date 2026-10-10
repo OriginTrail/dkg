@@ -46,7 +46,6 @@ import {
 } from './rfc64/abort-v1.js';
 import type { Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1 } from
   './rfc64/swm-author-inventory-producer-v1.js';
-
 export interface UpsertConfirmedRfc64PublicRootCatalogAssetParamsV1 {
   readonly scope: AuthorCatalogScopeV1;
   readonly author: Rfc64CatalogAuthorSignerV1;
@@ -56,6 +55,23 @@ export interface UpsertConfirmedRfc64PublicRootCatalogAssetParamsV1 {
   readonly catalogIssuerDelegationEffectiveAt: TimestampMsV1;
   readonly catalogIssuerDelegationExpiresAt: TimestampMsV1;
 }
+
+/**
+ * GH#3081 — what one catalog mutation reports while it runs: how long each phase took, whether it
+ * resolved or rejected, and what its announcement delivered. Observation only; an observer never
+ * changes the mutation, and `measure` passes the work's result or rejection through unchanged.
+ */
+export interface Rfc64CatalogMutationObserverV1 {
+  now(): number;
+  measure<T>(phase: 'state' | 'successor' | 'cas' | 'announce', work: () => Promise<T>, startedAt?: number): Promise<T>;
+  announced(delivery: AnnounceRfc64PublicCatalogHeadResultV1): void;
+}
+
+const UNOBSERVED_CATALOG_MUTATION_V1: Rfc64CatalogMutationObserverV1 = Object.freeze({
+  now: () => 0,
+  measure: <T>(_phase: unknown, work: () => Promise<T>) => work(),
+  announced: () => {},
+});
 
 export interface ReconcileRfc64PublicRootCatalogExactSetParamsV1 {
   readonly scope: AuthorCatalogScopeV1;
@@ -167,6 +183,18 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     this: DKGAgent,
     params: UpsertConfirmedRfc64PublicRootCatalogAssetParamsV1,
   ): Promise<AppliedCatalogHeadSnapshotV1> {
+    return this.upsertObservedRfc64PublicRootCatalogAssetV1(params, UNOBSERVED_CATALOG_MUTATION_V1);
+  }
+
+  /**
+   * The same mutation, reporting its phases to `observer` (GH#3081; the finalized-private
+   * placement repair is the observed caller). The input stays data-only.
+   */
+  protected async upsertObservedRfc64PublicRootCatalogAssetV1(
+    this: DKGAgent,
+    params: UpsertConfirmedRfc64PublicRootCatalogAssetParamsV1,
+    observer: Rfc64CatalogMutationObserverV1,
+  ): Promise<AppliedCatalogHeadSnapshotV1> {
     const authority = this.assertRfc64CatalogAuthoringModeV1(params.scope.contextGraphId);
     if (params.scope.subGraphName !== null) {
       throw new Error('RFC-64 confirmed public asset upsert requires the root catalog lane');
@@ -185,14 +213,15 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     }
     service.acceptedPolicySnapshotForCatalogScope(params.scope);
     const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(params.scope);
+    const stateStartedAt = observer.now();
 
     return this.rfc64CatalogMutationCoordinatorV1.run(params.scope, async () => {
-      let state = await this.readRfc64CatalogMutationStateV1(
+      // The state phase includes the wait for the mutation lock, so it starts before `run`.
+      const state = await observer.measure('state', async () => (await this.readRfc64CatalogMutationStateV1(
         persistence,
         catalogScopeDigest,
         params.scope.authorAddress,
-      );
-      state ??= await this.createRfc64CatalogGenesisStateV1(params);
+      )) ?? this.createRfc64CatalogGenesisStateV1(params), stateStartedAt);
       const assets = state.assets;
       const existingIndex = assets.findIndex(
         (asset) => asset.seal.reservedKaId === params.asset.seal.reservedKaId,
@@ -241,6 +270,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
         assets,
         peers,
         authority.reconciliationLane === 'shadow-stage',
+        { observer },
       );
       return committed.applied;
     });
@@ -364,8 +394,7 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
           nextAssets,
           peers,
           authority.reconciliationLane === 'shadow-stage',
-          params.signal,
-          options.commitAppliedHead,
+          { signal: params.signal, commitAppliedHead: options.commitAppliedHead },
         );
         successorsApplied += 1;
         state = Object.freeze({
@@ -503,28 +532,38 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
     assets: readonly Rfc64CatalogSuccessorAssetInputV1[],
     peers: readonly string[],
     stageOnly: boolean,
-    signal?: AbortSignal,
-    commitAppliedHead?: (
-      commit: () => AppliedCatalogHeadSnapshotV1,
-    ) => Promise<Rfc64SourceAwareAppliedHeadCommitResultV1>,
+    options: Readonly<{
+      signal?: AbortSignal;
+      commitAppliedHead?: (
+        commit: () => AppliedCatalogHeadSnapshotV1,
+      ) => Promise<Rfc64SourceAwareAppliedHeadCommitResultV1>;
+      observer?: Rfc64CatalogMutationObserverV1;
+    }> = {},
   ) {
+    const { signal, commitAppliedHead } = options;
+    const observer = options.observer ?? UNOBSERVED_CATALOG_MUTATION_V1;
     // The plan before this call and the successor below are whole-set work.
-    await yieldMainThread();
-    throwIfAbortedV1(signal);
-    const successor = await this.publishAuthorCatalogExactSetSuccessorV1({
-      previousHead: state.previousHead,
-      author: params.author,
-      catalogIssuerAuthorization: state.catalogIssuerAuthorization,
-      assets,
-      deployment: params.deployment,
-      issuedAt: Date.now().toString() as TimestampMsV1,
-      peers: [],
-      signal,
-    });
-    throwIfAbortedV1(signal);
-    const appliedInventoryDigest = computeRfc64AppliedInventoryDigestV1({
-      catalogScopeDigest: successor.catalogScopeDigest,
-      rows: successor.assets,
+    const { successor, appliedInventoryDigest } = await observer.measure('successor', async () => {
+      await yieldMainThread();
+      throwIfAbortedV1(signal);
+      const produced = await this.publishAuthorCatalogExactSetSuccessorV1({
+        previousHead: state.previousHead,
+        author: params.author,
+        catalogIssuerAuthorization: state.catalogIssuerAuthorization,
+        assets,
+        deployment: params.deployment,
+        issuedAt: Date.now().toString() as TimestampMsV1,
+        peers: [],
+        signal,
+      });
+      throwIfAbortedV1(signal);
+      return {
+        successor: produced,
+        appliedInventoryDigest: computeRfc64AppliedInventoryDigestV1({
+          catalogScopeDigest: produced.catalogScopeDigest,
+          rows: produced.assets,
+        }),
+      };
     });
     const commit = (): AppliedCatalogHeadSnapshotV1 => (
       persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
@@ -538,15 +577,17 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
         stageOnly,
       }).snapshot
     );
-    const committed = commitAppliedHead === undefined
+    const committed = await observer.measure('cas', async () => (commitAppliedHead === undefined
       ? Object.freeze({ appliedHead: commit(), sourceCurrent: true })
-      : await commitAppliedHead(commit);
+      : commitAppliedHead(commit)));
     if (!signal?.aborted) {
-      this.warnRfc64CatalogAnnounceFailuresV1(await this.announceRfc64PublicCatalogHeadV1({
+      const delivery = await observer.measure('announce', () => this.announceRfc64PublicCatalogHeadV1({
         announcement: successor.announcement,
         peers,
         signal,
       }));
+      observer.announced(delivery);
+      this.warnRfc64CatalogAnnounceFailuresV1(delivery);
     }
     return Object.freeze({
       applied: committed.appliedHead,

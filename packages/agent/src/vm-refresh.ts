@@ -26,6 +26,8 @@
  * and the copy waits for the KA's next update or an explicit asset fetch.
  */
 
+import type { KnowledgeAssetVersionSnapshotUnavailable } from '@origintrail-official/dkg-chain';
+
 export interface VmRefreshTarget {
   readonly localCgId: string;
   readonly ual: string;
@@ -74,6 +76,11 @@ export type VmRefreshOutcome = 'current' | 'refreshed' | 'not-applicable' | 'ret
 export interface VmRefreshAttempt {
   readonly outcome: VmRefreshOutcome;
   readonly detail: string;
+  /**
+   * The chain adapter's report of why it had no version view, when that is why
+   * the attempt retries and the adapter said. `detail` has its words.
+   */
+  readonly versionViewUnavailable?: KnowledgeAssetVersionSnapshotUnavailable;
 }
 
 /**

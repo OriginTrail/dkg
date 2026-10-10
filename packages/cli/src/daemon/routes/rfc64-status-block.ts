@@ -12,7 +12,10 @@ import type {
   ResolvedRfc64CatalogActivationConfig,
   ResolvedRfc64PublicCatalogActivationConfig,
 } from '../../config.js';
-import { sanitizeRfc64CatalogShadowExecutionStatusV1 } from './rfc64-status-contract.js';
+import {
+  sanitizeRfc64CatalogShadowExecutionStatusV1,
+  sanitizeRfc64FinalizedPrivatePlacementQueueV1,
+} from './rfc64-status-contract.js';
 
 /** Narrow read-only agent capability used by the public RFC-64 status facade. */
 export interface Rfc64StatusReaderV1 {
@@ -30,6 +33,23 @@ export interface Rfc64StatusReaderV1 {
     OmitThisParameter<DKGAgent['readRfc64CatalogOperationalStatusV1']>;
   readonly readRfc64CatalogShadowExecutionStatusV1?:
     OmitThisParameter<DKGAgent['readRfc64CatalogShadowExecutionStatusV1']>;
+  readonly readRfc64SwmCatalogProjectionSupervisorStatusV1?:
+    OmitThisParameter<DKGAgent['readRfc64SwmCatalogProjectionSupervisorStatusV1']>;
+}
+
+/**
+ * GH#3081 — only the aggregate finalized-private queue view leaves the supervisor status; its
+ * per-author repairs never do. A provider that throws (for example before the supervisor is
+ * bound) or answers in another shape reads as null rather than failing the route.
+ */
+function readRfc64FinalizedPrivatePlacementQueueV1(agent: Rfc64StatusReaderV1) {
+  try {
+    return sanitizeRfc64FinalizedPrivatePlacementQueueV1(
+      agent.readRfc64SwmCatalogProjectionSupervisorStatusV1?.()?.finalizedPrivatePlacement,
+    );
+  } catch {
+    return null;
+  }
 }
 
 export interface Rfc64CatalogConfigurationEvidenceV1 {
@@ -170,6 +190,9 @@ export async function buildRfc64StatusBlocksV1(input: Readonly<{
         agent.readRfc64CatalogShadowExecutionStatusV1(),
       )
     : null;
+  const finalizedPrivatePlacementQueue = catalogActivation.enabled
+    ? readRfc64FinalizedPrivatePlacementQueueV1(agent)
+    : null;
   const selectedPublicContextGraphs = new Set(
     catalogActivation.selectedPublicContextGraphs,
   );
@@ -266,6 +289,7 @@ export async function buildRfc64StatusBlocksV1(input: Readonly<{
       authorityRpcCircuit,
       contextGraphs,
       shadowExecution,
+      finalizedPrivatePlacementQueue,
       configuration,
       autoPublishEnabled: catalogActivation.autoPublish !== undefined,
       rollout,

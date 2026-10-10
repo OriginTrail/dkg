@@ -684,6 +684,140 @@ describe('/api/status RFC-64 private recovery privacy', () => {
     expect(JSON.stringify(response.body)).not.toContain('must-not-leak');
   });
 
+  describe('finalized-private placement queue (GH#3081)', () => {
+    const privateContextGraph =
+      '0x1111111111111111111111111111111111111111/private-placement-queue';
+    const privateAuthor = '0x2222222222222222222222222222222222222222';
+    const privateUal = `did:dkg:otp:20430/${privateAuthor}/7`;
+    // A catalog-mode private graph: no shadow scope, so `shadowExecution` stays null here.
+    const catalogActivation = {
+      enabled: true,
+      selectedContextGraphs: [privateContextGraph],
+      selectedPublicContextGraphs: [],
+      selectedPrivateContextGraphs: [privateContextGraph],
+      rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
+    } as never;
+    const queue = {
+      depth: 2,
+      waiters: 1,
+      oldestWaiterAgeMs: 1_520,
+      passRunning: true,
+      lastPassDurationMs: 830,
+      cooldownSkips: 3,
+    };
+
+    function supervisorStatus(finalizedPrivatePlacement: unknown) {
+      return {
+        running: true,
+        pass: 4,
+        retryIntervalMs: 5_000,
+        lastPassStartedAtMs: 10,
+        lastPassCompletedAtMs: 20,
+        repairs: [{ contextGraphId: privateContextGraph, authorAddress: privateAuthor }],
+        finalizedPrivatePlacement,
+      };
+    }
+
+    it('surfaces only the aggregate queue, never the supervisor repairs or a provider extra', async () => {
+      const readSupervisor = vi.fn(() => supervisorStatus({
+        ...queue,
+        kaUal: privateUal,
+        repairKeys: [JSON.stringify([privateContextGraph, privateAuthor])],
+      }));
+      const response = await requestStatusWithAgent(
+        { readRfc64SwmCatalogProjectionSupervisorStatusV1: readSupervisor },
+        {},
+        '/api/status',
+        null,
+        catalogActivation,
+      );
+
+      expect(response.status).toBe(200);
+      expect(readSupervisor).toHaveBeenCalledOnce();
+      expect(response.body.rfc64Catalog.finalizedPrivatePlacementQueue).toEqual(queue);
+      expect(Object.keys(response.body.rfc64Catalog.finalizedPrivatePlacementQueue).sort()).toEqual([
+        'cooldownSkips',
+        'depth',
+        'lastPassDurationMs',
+        'oldestWaiterAgeMs',
+        'passRunning',
+        'waiters',
+      ]);
+      const serialized = JSON.stringify(response.body.rfc64Catalog);
+      expect(serialized).not.toContain(privateAuthor);
+      expect(serialized).not.toContain(privateUal);
+      expect(JSON.stringify(response.body.rfc64Catalog.finalizedPrivatePlacementQueue))
+        .not.toContain(privateContextGraph);
+    });
+
+    it('keeps an idle queue with nothing waiting', async () => {
+      const idle = { ...queue, waiters: 0, oldestWaiterAgeMs: null, passRunning: false, lastPassDurationMs: null };
+      const response = await requestStatusWithAgent(
+        { readRfc64SwmCatalogProjectionSupervisorStatusV1: () => supervisorStatus(idle) },
+        {},
+        '/api/status',
+        null,
+        catalogActivation,
+      );
+      expect(response.status).toBe(200);
+      expect(response.body.rfc64Catalog.finalizedPrivatePlacementQueue).toEqual(idle);
+    });
+
+    it.each([
+      ['missing block', undefined],
+      ['negative depth', { ...queue, depth: -1 }],
+      ['fractional age', { ...queue, oldestWaiterAgeMs: 1.5 }],
+      ['string flag', { ...queue, passRunning: 'yes' }],
+      ['array', [queue]],
+    ])('degrades a version-skewed queue to null: %s', async (_label, finalizedPrivatePlacement) => {
+      const response = await requestStatusWithAgent(
+        { readRfc64SwmCatalogProjectionSupervisorStatusV1: () => supervisorStatus(finalizedPrivatePlacement) },
+        {},
+        '/api/status',
+        null,
+        catalogActivation,
+      );
+      expect(response.status).toBe(200);
+      expect(response.body.rfc64Catalog.finalizedPrivatePlacementQueue).toBeNull();
+    });
+
+    it('keeps status available when the supervisor is not bound', async () => {
+      const response = await requestStatusWithAgent(
+        {
+          readRfc64SwmCatalogProjectionSupervisorStatusV1: () => {
+            throw new Error('RFC-64 SWM catalog projection owner is not bound');
+          },
+        },
+        {},
+        '/api/status',
+        null,
+        catalogActivation,
+      );
+      expect(response.status).toBe(200);
+      expect(response.body.rfc64Catalog.finalizedPrivatePlacementQueue).toBeNull();
+    });
+
+    it('reports nothing while the catalog is disabled', async () => {
+      const readSupervisor = vi.fn(() => supervisorStatus(queue));
+      const response = await requestStatusWithAgent(
+        { readRfc64SwmCatalogProjectionSupervisorStatusV1: readSupervisor },
+        {},
+        '/api/status',
+        null,
+        {
+          enabled: false,
+          selectedContextGraphs: [],
+          selectedPublicContextGraphs: [],
+          selectedPrivateContextGraphs: [],
+          rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
+        } as never,
+      );
+      expect(response.status).toBe(200);
+      expect(response.body.rfc64Catalog.finalizedPrivatePlacementQueue).toBeNull();
+      expect(readSupervisor).not.toHaveBeenCalled();
+    });
+  });
+
   it('rejects contradictory derived shadow-safety evidence at the HTTP boundary', () => {
     const valid = {
       schemaVersion: 1,
