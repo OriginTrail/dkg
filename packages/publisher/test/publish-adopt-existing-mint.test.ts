@@ -379,7 +379,8 @@ describe('publish adopt-existing-mint interception (KaIdAlreadyMinted)', () => {
       expect(completed).toBe(false);
       release();
       expect((await update).status).toBe('confirmed');
-      await retry;
+      // The adopted receipt stays confirmed, and callers learn its rows were not current.
+      expect(await retry).toMatchObject({ status: 'confirmed', materializationSuperseded: true });
       expect(await readMaterializedVersion(s.store, s.meta, s.ual)).toEqual(s.version);
       const vm = knowledgeAssetLayerGraphUri(CONTEXT_GRAPH_ID, MemoryLayer.VerifiableMemory,
         createGraphKnowledgeAssetScope(s.ual, 2));
@@ -415,6 +416,7 @@ describe('publish adopt-existing-mint interception (KaIdAlreadyMinted)', () => {
       const retry = await s.publisher.publish({ ...s.publishOptions, accessPolicy: policy,
         ...(policy === 'allowList' ? { allowedPeers: ['Alice'] } : {}) });
       expect(retry.status).toBe('confirmed');
+      expect(retry).not.toHaveProperty('materializationSuperseded');
       expect(retry.onChainResult?.txHash).toBe(original.onChainResult?.txHash);
       expect(s.chain.provenanceCalls).toHaveLength(1);
       // The trusted sidecar, not the replayed rows, decides the controls durable sync commits.

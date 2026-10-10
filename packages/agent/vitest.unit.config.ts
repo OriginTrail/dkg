@@ -43,6 +43,7 @@ export default defineConfig({
       "test/sqlite-module-loader.test.ts",
       "test/imported-artifact.test.ts",
       "test/publish-finalized-agent-lane.test.ts",
+      "test/named-publish-superseded-materialization.test.ts",
       "test/publish-foreign-author-resolution.test.ts",
       "test/finalize-version-after-abandoned-update.test.ts",
       "test/durable-integrity-seal-assertion-version.test.ts",

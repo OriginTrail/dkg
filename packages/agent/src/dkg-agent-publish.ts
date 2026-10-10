@@ -5584,13 +5584,19 @@ export class PublishMethods extends DKGAgentBase {
 
       if (result.status === 'confirmed') {
         await clearPublishedGraph('publish');
-        if (request.clearSharedMemoryAfter === true) {
+        if (request.clearSharedMemoryAfter === true && result.materializationSuperseded !== true) {
           await clearRemainingSharedMemory();
         }
       }
     }
 
-    if (result.status === 'confirmed') {
+    // As in the sync route: a superseded confirmed publish keeps its receipt
+    // and exact-version cleanup but moves no current lifecycle state.
+    const superseded = result.materializationSuperseded === true;
+    if (superseded) {
+      this.log.info(ctx, `Confirmed queued publish of <${lifecycleUri}> was superseded locally; lifecycle left unchanged`);
+    }
+    if (result.status === 'confirmed' && !superseded) {
       try {
         await this._stampQueuedKnowledgeAssetVmPublishedLifecycle(
           request,
@@ -5646,7 +5652,7 @@ export class PublishMethods extends DKGAgentBase {
       }
     }
 
-    if (result.status === 'confirmed') {
+    if (result.status === 'confirmed' && !superseded) {
       try {
         await publisher.clearSwmShareComplete(request.contextGraphId, request.name, agentAddress, request.subGraphName);
       } catch (err) {
@@ -6103,10 +6109,20 @@ export class PublishMethods extends DKGAgentBase {
       }
     }
 
+    // The publisher kept a newer local version of this KA over this confirmed
+    // transaction. Its receipt above stays; the current lifecycle state (VM
+    // pointer, published state, share marker, remaining shares) stays with the
+    // newer version, as recovery does for a stale target.
+    const superseded = result.materializationSuperseded === true;
+    if (superseded) {
+      this.log.info(opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+        `Confirmed publish of <${lifecycleUri}> was superseded locally; lifecycle left unchanged`);
+    }
+
     // Exact scope owns published-root cleanup. A caller's explicit request to
     // clear every remaining share is a separate family-wide destructive action
     // that runs only after a confirmed publish/update.
-    if (result.status === 'confirmed' && opts?.clearSharedMemoryAfter === true) {
+    if (result.status === 'confirmed' && opts?.clearSharedMemoryAfter === true && !superseded) {
       await publisher.clearRemainingSharedMemory(
         contextGraphId,
         opts?.subGraphName,
@@ -6118,7 +6134,7 @@ export class PublishMethods extends DKGAgentBase {
     // whenever the publish/update is confirmed. (For the mint path this is the
     // first VM pointer; for the update path the DELETE/INSERT above already set
     // it, and this idempotent re-stamp is a no-op.)
-    if (result.status === 'confirmed' || result.status === 'tentative') {
+    if ((result.status === 'confirmed' || result.status === 'tentative') && !superseded) {
       try {
         await this._stampPointer(lifecycleUri, VM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
         // OT-RFC-44 Design B — the assertion now lives at Verifiable Memory, so
@@ -6245,7 +6261,7 @@ export class PublishMethods extends DKGAgentBase {
     // chain commit) so a post-publish finalize(layer:"swm") can't pass the gate
     // against an empty SWM, and the next publish requires a fresh full share (which
     // re-sets the marker via assertionPromote). Covers BOTH MINT and UPDATE.
-    if (result.status === 'confirmed') {
+    if (result.status === 'confirmed' && !superseded) {
       try {
         await publisher.clearSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName);
       } catch (err) {

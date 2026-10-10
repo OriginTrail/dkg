@@ -4433,6 +4433,7 @@ export class DKGPublisher implements Publisher {
       merkleRoot: kcMerkleRoot,
       kaManifest: manifestEntries,
       status,
+      ...(confirmedMaterializationApplied ? {} : { materializationSuperseded: true as const }),
       onChainResult,
       localChainSkipReason, // GH #1013
       publicQuads: allSkolemizedQuads,

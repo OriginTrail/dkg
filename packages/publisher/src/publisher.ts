@@ -499,6 +499,14 @@ export interface PublishResult {
   status: 'tentative' | 'confirmed' | 'failed';
   onChainResult?: OnChainPublishResult;
   /**
+   * Set on a confirmed graph-scoped publish whose rows were not materialized
+   * because a newer version of the same KA already was, e.g. an adopted mint
+   * retry that lost the race to a local update. `onChainResult` is still this
+   * transaction's receipt; callers must not move current-state lifecycle
+   * pointers to this assertion.
+   */
+  materializationSuperseded?: true;
+  /**
    * GH #1013 — when a publish lands `tentative` (local-only), WHY it skipped
    * chain submission:
    *   - `no-chain`        — no on-chain CG id / chain not V10-ready: local is the
