@@ -1,3 +1,4 @@
+import { randomUUID } from '../../../lib/randomUUID.js';
 import React, { lazy, useEffect, useMemo, useState, Suspense } from 'react';
 import { api } from '../../../api-wrapper.js';
 import { forkSemanticProgram, invokeSemanticProgram, resolveSemanticProgram, promoteAssertion, describePromoteResult, describePromoteError, knowledgeAssetPublish, partialPublishWarning, PARTIAL_PUBLISH_STATUS_SUFFIX, type SemanticMemoryLayer, type SemanticProgramResolution, type PromoteOutcome, type PublishResult } from '../../../api.js';
@@ -64,7 +65,7 @@ function SemanticProgramPanel({
       setError('Choose where to store the Execution');
       return;
     }
-    const id = invocationId ?? crypto.randomUUID();
+    const id = invocationId ?? randomUUID();
     setInvocationId(id); // Retain on failure: retrying must use the same idempotency key.
     setRunning(true);
     setError(null);
@@ -94,7 +95,7 @@ function SemanticProgramPanel({
   };
 
   const beginFork = () => {
-    setForkIri(`urn:sr:program:${crypto.randomUUID()}`);
+    setForkIri(`urn:sr:program:${randomUUID()}`);
     setForkLayer('');
     setShowFork(true);
     setError(null);
