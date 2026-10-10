@@ -299,7 +299,7 @@ import {
   type CiphertextChunkCatchupRequest,
   type CiphertextChunkCatchupResponse,
 } from './swm/ciphertext-chunk-catchup.js';
-import { waitForPeerProtocol, waitForAdvertisedOrLiveProtocol } from './p2p/protocol-readiness.js';
+import { waitForAdvertisedOrLiveProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { connectedPeerIds as liveConnectedPeerIds } from './p2p/connected-peer-ids.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
