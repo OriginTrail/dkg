@@ -330,6 +330,7 @@ export default defineConfig({
       "test/context-graph-list-wire-only.test.ts",
       "test/cg-resolve-refresh.test.ts",
       "test/private-cg-membership-bootstrap.test.ts",
+      "test/join-approval-metadata-refetch.test.ts",
       "test/workspace-crypto-delegatee-filter.test.ts",
       "test/swm-public-snapshot-materialization.test.ts",
       "test/swm-public-cg-plaintext.test.ts",
