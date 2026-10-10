@@ -384,6 +384,46 @@ describe('catalog placement timing', () => {
     expect(timing.queueStatus(idle, false)).toMatchObject({ depth: 4_100, pending: 4_100 });
   });
 
+  it('keeps a first-seen time for at most 4,096 owed placements and still counts every one a pass lists', () => {
+    const { timing, clock } = harness();
+    const status = () => {
+      const { depth, pending, oldestPendingAgeMs } = timing.queueStatus({ count: 0, oldestRequestedAt: undefined }, false);
+      return { depth, pending, oldestPendingAgeMs };
+    };
+    const keys = Array.from({ length: 5_000 }, (_unused, index) => `key-${index}`);
+    clock.now = 1_000;
+    timing.passStarted(new Set(keys));
+    clock.now = 4_000;
+    expect(status()).toEqual({ depth: 5_000, pending: 5_000, oldestPendingAgeMs: 3_000 });
+
+    // A completed placement counts down whether its time was kept (the first 4,096) or not.
+    timing.admit('key-0').end('completed');
+    timing.admit('key-4999').end('completed');
+    expect(status().pending).toBe(4_998);
+    // While some markers are only counted, one stored now may be one of them: the next pass,
+    // which lists every marker, counts it.
+    timing.owed('key-new');
+    timing.owed('key-4500');
+    expect(status().pending).toBe(4_998);
+
+    // The next pass is exact again. It keeps nothing it no longer lists, and one of the markers
+    // that was only counted takes the room the completed one left, with this pass's time.
+    clock.now = 9_000;
+    timing.passStarted(new Set([...keys.slice(1, 4_999), 'key-new']));
+    expect(status()).toEqual({ depth: 4_999, pending: 4_999, oldestPendingAgeMs: 8_000 });
+
+    // With every marker of the first pass placed, the oldest one left is the one that took that
+    // room: its age counts from the pass that found it, not from the pass that first listed it.
+    clock.now = 10_000;
+    timing.passStarted(new Set(keys.slice(4_096, 4_999)));
+    clock.now = 12_000;
+    expect(status()).toEqual({ depth: 903, pending: 903, oldestPendingAgeMs: 3_000 });
+
+    // Back under the bound a stored marker counts at once again.
+    timing.owed('key-late');
+    expect(status().pending).toBe(904);
+  });
+
   it('keeps at most 512 assets of observer counts', () => {
     const { timing, lines, log } = harness();
     const ctx = createOperationContext('publish');

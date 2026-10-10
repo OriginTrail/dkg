@@ -37,8 +37,11 @@ import type { Rfc64PublicCatalogTransportErrorCodeV1 } from '../rfc64/public-cat
 /** A placement request that takes this long or longer writes its line; shorter ones write nothing. */
 export const CATALOG_PLACEMENT_WAIT_LOG_THRESHOLD_MS = 5_000;
 const MAX_TRACKED_ENTRIES = 512;
-/** Owed markers remembered between supervisor passes; a pass replaces them with what it listed. */
-const MAX_OWED_BETWEEN_PASSES = 4_096;
+/**
+ * Owed markers this process keeps a first-seen time for. The rest are counted, not kept: a pass
+ * says how many markers there are, so the count stays exact at every pass start however many.
+ */
+const MAX_OWED_TRACKED = 4_096;
 const POLICY_DENIED_CODE: Rfc64PublicCatalogTransportErrorCodeV1 = 'catalog-transport-policy-denied';
 
 export const CATALOG_PLACEMENT_PHASES = [
@@ -136,12 +139,15 @@ export interface FinalizedPrivatePlacementQueueStatusV1 {
   readonly depth: number;
   /**
    * Placements owed right now: the markers the latest pass listed and has not placed, and the
-   * markers stored since. This is the backlog; no caller waits on it.
+   * markers stored since. This is the backlog; no caller waits on it. Beyond 4,096 owed
+   * placements a marker stored since the latest pass started is counted from the next pass.
    */
   readonly pending: number;
   /**
    * How long this process has known of the oldest pending placement, from its request or from
-   * the first pass that listed it; a marker that survived a restart counts from that pass.
+   * the first pass that listed it; a marker that survived a restart counts from that pass. A
+   * first-seen time is kept for 4,096 placements; one beyond them counts from the pass that
+   * finds room for it.
    */
   readonly oldestPendingAgeMs: number | null;
   /** Accepted requests whose first attempt has not ended. */
@@ -200,8 +206,13 @@ function logfmtValue(value: string): string {
 export class CatalogPlacementTimingV1 {
   readonly #sources: CatalogPlacementTimingSourcesV1;
   readonly #observerCalls = new Map<string, number>();
-  /** When this process first knew of each placement still owed, by the supervisor's marker key. */
+  /**
+   * When this process first knew of each placement still owed, by the supervisor's marker key:
+   * at most {@link MAX_OWED_TRACKED} of them. `#owedUntracked` counts the owed markers the
+   * latest pass listed beyond those.
+   */
   readonly #owedSince = new Map<string, number>();
+  #owedUntracked = 0;
   #depth = 0;
   #passStartedAt: number | undefined;
   #lastPassDurationMs: number | null = null;
@@ -223,7 +234,9 @@ export class CatalogPlacementTimingV1 {
   /** Supervisor: a durable marker exists for `key`, whether or not its request is then accepted. */
   owed(key: string): void {
     observe(() => {
-      if (this.#owedSince.has(key) || this.#owedSince.size >= MAX_OWED_BETWEEN_PASSES) return;
+      // With markers that are only counted, a key that is not kept may be one of them: it is
+      // left to the next pass, which lists every marker.
+      if (this.#owedSince.has(key) || this.#owedUntracked > 0 || this.#owedSince.size >= MAX_OWED_TRACKED) return;
       this.#owedSince.set(key, this.#sources.clock());
     });
   }
@@ -247,7 +260,9 @@ export class CatalogPlacementTimingV1 {
         record,
         end: (outcome) => observe(() => {
           record.failed = outcome === 'failed';
-          if (outcome === 'completed' && key !== undefined) this.#owedSince.delete(key);
+          if (outcome === 'completed' && key !== undefined && !this.#owedSince.delete(key) && this.#owedUntracked > 0) {
+            this.#owedUntracked -= 1;
+          }
           record.endedAt = this.#sources.clock();
         }),
       };
@@ -274,8 +289,11 @@ export class CatalogPlacementTimingV1 {
         if (!listed.has(key)) this.#owedSince.delete(key);
       }
       for (const key of listed) {
+        if (this.#owedSince.size >= MAX_OWED_TRACKED) break;
         if (!this.#owedSince.has(key)) this.#owedSince.set(key, now);
       }
+      // Every key kept now is a listed one; the listed markers beyond them are owed and counted.
+      this.#owedUntracked = listed.size - this.#owedSince.size;
     });
   }
 
@@ -303,7 +321,7 @@ export class CatalogPlacementTimingV1 {
     }
     return Object.freeze({
       depth: this.#depth,
-      pending: this.#owedSince.size,
+      pending: this.#owedSince.size + this.#owedUntracked,
       oldestPendingAgeMs: ageMs(oldestOwedSince),
       waiters: waiters.count,
       oldestWaiterAgeMs: ageMs(waiters.oldestRequestedAt),
