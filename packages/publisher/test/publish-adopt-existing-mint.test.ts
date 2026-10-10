@@ -39,7 +39,10 @@ import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { createKnowledgeAssetsWithMintAdoption } from '../src/adopt-existing-mint.js';
 import { setImmediate } from 'node:timers/promises';
 import { generatedPrivateCatalogTripleKeys, generatedPrivateCatalogFloorQuads } from '../src/catalog-trust.js';
-import { readMaterializedVersion, withMaterializationLock } from '../src/metadata.js';
+import {
+  overlayLocallyTrustedKnowledgeAssetControls, readLocallyTrustedKnowledgeAssetControlEnvelope,
+  readMaterializedVersion, withMaterializationLock,
+} from '../src/metadata.js';
 import { computePrivateRootV10 } from '../src/merkle.js';
 import type { UpdateOptions } from '../src/publisher.js';
 import { DKGPublisher } from '../src/dkg-publisher.js';
@@ -345,7 +348,7 @@ describe('publish adopt-existing-mint interception (KaIdAlreadyMinted)', () => {
     } finally { release(); await Promise.allSettled([update, ...(retry ? [retry] : [])]); await s.store.close(); }
   });
 
-  it.each(['allowList', 'ownerOnly'] as const)('converges equal-version adoption metadata after revoking peers to %s', async policy => {
+  it.each(['allowList', 'ownerOnly'] as const)('converges equal-version adoption metadata and trusted controls after revoking peers to %s', async policy => {
     const privateQuads = [{ subject: 'urn:test:adopt-existing-mint', predicate: 'urn:test:secret', object: '"private value"', graph: '' }];
     const s = await setupSealedGraphPublish(privateQuads);
     try {
@@ -361,6 +364,11 @@ describe('publish adopt-existing-mint interception (KaIdAlreadyMinted)', () => {
         requesterSignature: await ed25519Sign(new TextEncoder().encode(s.ual), key.secretKey), requesterPublicKey: key.publicKey });
       async function access(peer: string) { return decodeAccessResponse(await handler.handler(request, peer as never)); }
       expect(await access('Bob')).toMatchObject({ granted: true, rejectionReason: '' });
+      // A peer that synced the original grant can replay these rows through durable sync.
+      const meta = `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_meta`;
+      const snapshot = await s.store.query(`CONSTRUCT { <${s.ual}> ?p ?o } WHERE { GRAPH <${meta}> { <${s.ual}> ?p ?o } }`);
+      if (snapshot.type !== 'quads') throw new Error('The original publish must leave visible KA metadata');
+      const replayed = snapshot.quads.map(quad => ({ ...quad, graph: meta }));
       s.chain.mintError = kaIdAlreadyMintedRevert(s.reservedKaId);
       s.chain.provenanceResult = await MockChainAdapter.prototype.getMintedKnowledgeAssetProvenance.call(
         s.chain, s.reservedKaId, original.merkleRoot, BigInt(CONTEXT_GRAPH_ID));
@@ -369,7 +377,15 @@ describe('publish adopt-existing-mint interception (KaIdAlreadyMinted)', () => {
       expect(retry.status).toBe('confirmed');
       expect(retry.onChainResult?.txHash).toBe(original.onChainResult?.txHash);
       expect(s.chain.provenanceCalls).toHaveLength(1);
-      const meta = `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_meta`;
+      // The trusted sidecar, not the replayed rows, decides the controls durable sync commits.
+      const trusted = { accessPolicy: policy, allowedPeers: policy === 'allowList' ? ['Alice'] : [],
+        publisherPeerId: 'adoption-publisher' };
+      await expect(readLocallyTrustedKnowledgeAssetControlEnvelope(s.store, meta, s.ual, replayed)).resolves.toEqual(trusted);
+      const overlaid = await overlayLocallyTrustedKnowledgeAssetControls(s.store, meta, s.ual, replayed);
+      const controls = (name: string) => overlaid.filter(quad => quad.predicate === `http://dkg.io/ontology/${name}`)
+        .map(quad => quad.object);
+      expect(controls('accessPolicy')).toEqual([JSON.stringify(policy)]);
+      expect(controls('allowedPeer')).toEqual(trusted.allowedPeers.map(peer => JSON.stringify(peer)));
       expect(await s.store.query(`SELECT ?policy WHERE { GRAPH <${meta}> { <${s.ual}> <http://dkg.io/ontology/accessPolicy> ?policy } }`))
         .toMatchObject({ bindings: [{ policy: JSON.stringify(policy) }] });
       const peers = await s.store.query(`SELECT ?peer WHERE { GRAPH <${meta}> { <${s.ual}> <http://dkg.io/ontology/allowedPeer> ?peer } }`);

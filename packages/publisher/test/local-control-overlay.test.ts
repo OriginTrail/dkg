@@ -16,9 +16,9 @@ function metadata(predicate: string, object: string): Quad {
   return { subject: UAL, predicate: `${DKG}${predicate}`, object, graph: META_GRAPH };
 }
 
-function incomingMetadata(): Quad[] {
+function incomingMetadata(version = 1): Quad[] {
   return [
-    metadata('assertionVersion', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>'),
+    metadata('assertionVersion', `"${version}"^^<http://www.w3.org/2001/XMLSchema#integer>`),
     metadata('merkleRoot', `"${toHex(ROOT)}"`),
     metadata('accessPolicy', '"allowList"'),
     metadata('allowedPeer', '"untrusted-peer"'),
@@ -71,5 +71,23 @@ describe('locally trusted KA control overlay', () => {
       metadata('publisherPeerId', '"trusted-publisher"'),
     ]));
     expect(result.every((quad) => quad.subject === UAL && quad.graph === META_GRAPH)).toBe(true);
+  });
+
+  it('replaces the complete envelope of a rewritten anchor and keeps other versions', async () => {
+    const store = new OxigraphStore();
+    const write = (assertionVersion: string, accessPolicy: 'allowList' | 'ownerOnly', allowedPeers: string[]) =>
+      replaceLocallyTrustedKnowledgeAssetControlEnvelope(store, UAL, { assertionVersion, merkleRoot: ROOT },
+        { accessPolicy, allowedPeers, publisherPeerId: 'trusted-publisher' });
+    const controls = async (version: number) => (await overlayLocallyTrustedKnowledgeAssetControls(
+      store, META_GRAPH, UAL, incomingMetadata(version),
+    )).filter((quad) => quad.predicate === `${DKG}accessPolicy` || quad.predicate === `${DKG}allowedPeer`)
+      .map((quad) => quad.object).sort();
+    await write('1', 'allowList', ['revoked-peer', 'trusted-peer']);
+    await write('2', 'allowList', ['next-peer']);
+    await write('1', 'allowList', ['trusted-peer']);
+    expect(await controls(1)).toEqual(['"allowList"', '"trusted-peer"']);
+    await write('1', 'ownerOnly', []);
+    expect(await controls(1)).toEqual(['"ownerOnly"']);
+    expect(await controls(2)).toEqual(['"allowList"', '"next-peer"']);
   });
 });

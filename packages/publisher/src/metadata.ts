@@ -1,5 +1,6 @@
 import { formatUncheckedWorkspaceOperationSubject } from './workspace-metadata-subjects.js';
 import { ENTITY_SHARE_METADATA_PREDICATES as ENTITY_SHARE } from './entity-share-metadata.js';
+import { replaceSubjectAtomicallyOrFallback } from './subject-atomic-write.js';
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { deleteByPatternWithoutCount, GraphManager, LOCAL_TRUSTED_KA_CONTROLS_GRAPH } from '@origintrail-official/dkg-storage';
 import {
@@ -646,7 +647,9 @@ export function parseConfirmedGraphKnowledgeAssetMetadataEnvelope(
 /**
  * Persist one validated local-control entry. Both the rolling-compatible
  * metadata-quad API and the typed envelope API terminate here; neither needs
- * to adapt through the other.
+ * to adapt through the other. Rewriting an anchor replaces that entry's whole
+ * envelope (one atomic subject replace where supported), never a union with
+ * revoked rows; entries of other versions and roots are untouched.
  */
 async function writeLocallyTrustedKnowledgeAssetControlEntry(
   store: TripleStore,
@@ -673,15 +676,9 @@ async function writeLocallyTrustedKnowledgeAssetControlEntry(
   if (storedVersion !== version || storedRoot !== root) {
     throw new Error('Locally trusted KA control entry does not match its assertion anchor');
   }
-  await store.insert([
-    ...controls,
-    {
-      subject: entry,
-      predicate: LOCAL_TRUSTED_KA_UAL_PREDICATE,
-      object: ual,
-      graph: LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
-    },
-  ]);
+  await replaceSubjectAtomicallyOrFallback(store, LOCAL_TRUSTED_KA_CONTROLS_GRAPH, entry, [...controls, {
+    subject: entry, predicate: LOCAL_TRUSTED_KA_UAL_PREDICATE, object: ual, graph: LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
+  }], 'publisher.localTrustedControls.writeEntry');
 }
 
 /** Persist locally authored access controls outside sync-visible metadata. */
