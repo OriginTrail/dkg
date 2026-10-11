@@ -543,12 +543,29 @@ describe('external signer author keys', () => {
       expect(edge.operationalKeys).toBeUndefined();
       expect((edge.chain as EVMChainAdapter).getSignerAddresses()).toEqual([payer.address]);
       expect(() => (edge.chain as EVMChainAdapter).getOperationalPrivateKey()).toThrow(/external signer/);
-      // An injected adapter that signs externally contributes no key either.
+      // An injected adapter that signs externally contributes no key either, and runs an edge node only.
       expect(constructConfiguredChainAdapter({ chainAdapter: edge.chain }).operationalKeys).toBeUndefined();
+      expect(constructConfiguredChainAdapter({ chainAdapter: edge.chain, nodeRole: 'edge' }).chain).toBe(edge.chain);
+      expect(() => constructConfiguredChainAdapter({ chainAdapter: edge.chain, nodeRole: 'core' })).toThrow(/edge nodes only/);
+      await expect(DKGAgent.create({
+        name: 'SuppliedExternalCore',
+        store: new OxigraphStore(),
+        chainAdapter: edge.chain,
+        nodeRole: 'core',
+      })).rejects.toThrow(/edge nodes only/);
     } finally {
       (edge.chain as EVMChainAdapter).destroy();
     }
     expect(() => constructConfiguredChainAdapter({ chainConfig, nodeRole: 'core' })).toThrow(/edge nodes only/);
+    // An injected adapter with a local operational key still runs a core node.
+    const { signers: _signers, ...localChainConfig } = chainConfig;
+    const localCore = new EVMChainAdapter({ ...localChainConfig, privateKey: HARDHAT_KEYS.CORE_OP, allowNoAdminSigner: true });
+    try {
+      expect(constructConfiguredChainAdapter({ chainAdapter: localCore, nodeRole: 'core' }).operationalKeys)
+        .toEqual([HARDHAT_KEYS.CORE_OP]);
+    } finally {
+      localCore.destroy();
+    }
     expect(() => constructConfiguredChainAdapter({
       chainConfig: { ...chainConfig, operationalKeys: [payer.privateKey] },
     })).toThrow(/either operationalKeys or signers/);
