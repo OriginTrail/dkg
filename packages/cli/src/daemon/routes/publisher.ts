@@ -1,4 +1,4 @@
-import { requireContextGraphReadAuthority } from './context-graph-read-authority.js';
+import { hasNodeOperatorReadAccess, requireContextGraphReadAuthority } from './context-graph-read-authority.js';
 // daemon/routes/publisher.ts
 //
 // Route handlers for publisher jobs / stats / cancel / retry / clear.
@@ -345,7 +345,7 @@ function publisherJobContextGraphId(job: PersistedLiftJob): string | undefined {
 }
 
 async function requirePublisherJobReadAuthority(ctx: RequestContext, job: PersistedLiftJob): Promise<boolean> {
-  if (actorFromRequestContext(ctx).authentication.principal.kind === 'nodeOperator') return true;
+  if (hasNodeOperatorReadAccess(ctx)) return true;
   const contextGraphId = publisherJobContextGraphId(job);
   if (contextGraphId === undefined) {
     jsonResponse(ctx.res, 403, { error: 'Not authorized to read this publisher job.' });
@@ -562,7 +562,7 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
         : undefined;
     const rawContextGraphId = url.searchParams.get('contextGraphId');
     const contextGraphId = rawContextGraphId === null ? null : normalizeContextGraphIdOrUri(rawContextGraphId);
-    if (contextGraphId !== null || authentication.principal.kind !== 'nodeOperator') {
+    if (contextGraphId !== null || !hasNodeOperatorReadAccess(ctx)) {
       if (!(await requireContextGraphReadAuthority(ctx, contextGraphId))) return;
     }
     const jobs = await publisherControl.list(
@@ -619,7 +619,7 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
   if (req.method === "GET" && path === "/api/publisher/journal") {
     const jobId = url.searchParams.get("jobId")?.trim() || undefined;
     if (jobId !== undefined) {
-      if (authentication.principal.kind !== 'nodeOperator') {
+      if (!hasNodeOperatorReadAccess(ctx)) {
         const job = await publisherControl.getStatus(jobId);
         if (!job) return jsonResponse(res, 404, { error: `Publisher job not found: ${jobId}` });
         if (!(await requirePublisherJobReadAuthority(ctx, job))) return;

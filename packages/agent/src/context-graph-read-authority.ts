@@ -50,6 +50,8 @@ interface ContextGraphReadAuthorityDecisionFields {
 /** An authoritative answer: the read is allowed or denied. */
 export interface SettledContextGraphReadAuthorityDecision extends ContextGraphReadAuthorityDecisionFields {
   outcome: 'allowed' | 'denied';
+  /** What the successful evidence authorizes; denial never conveys a grant. */
+  grantScope: 'public' | 'caller' | 'node' | 'none';
 }
 
 /** No authority source could answer; `dependency` says which one could not. */
@@ -101,7 +103,7 @@ export async function resolveScopedContextGraphQueryReadAuthority(
     && input.readCurrentBinding(input.contextGraphId)?.onChainId === undefined
     && input.readCurrentBinding(input.contextGraphId)?.pendingMeta !== true
   ) {
-    return { ...authority, outcome: 'allowed', reason: 'local-first-working-memory-owner' };
+    return { ...authority, outcome: 'allowed', grantScope: input.callerAgentAddress ? 'caller' : 'node', reason: 'local-first-working-memory-owner' };
   }
   return authority;
 }
@@ -169,8 +171,10 @@ const decision = (
   reason: string,
   onChainId?: bigint,
   metadataBootstrap: 'eligible' | 'forbidden' = outcome === 'denied' ? 'forbidden' : 'eligible',
+  grantScope: SettledContextGraphReadAuthorityDecision['grantScope'] = outcome === 'denied' ? 'none' : 'caller',
 ): SettledContextGraphReadAuthorityDecision => ({
   outcome,
+  grantScope,
   source,
   reason,
   metadataBootstrap,
@@ -215,7 +219,7 @@ export async function resolveContextGraphReadAuthorityResolution(
   input: ContextGraphReadAuthorityInput,
 ): Promise<ContextGraphReadAuthorityResolution> {
   if (input.isSystemContextGraph) {
-    return { decision: decision('allowed', 'system', 'system-context-graph') };
+    return { decision: decision('allowed', 'system', 'system-context-graph', undefined, 'eligible', 'public') };
   }
 
   let registeredAuthority: RegisteredContextGraphAuthority;
@@ -255,7 +259,7 @@ async function resolveReadAuthorityFromRegistration(
     );
   }
   if (registeredAuthority.kind === 'public') {
-    return decision('allowed', 'registered-chain', 'chain-public', registeredAuthority.onChainId);
+    return decision('allowed', 'registered-chain', 'chain-public', registeredAuthority.onChainId, 'eligible', 'public');
   }
   if (registeredAuthority.kind === 'private') {
     const onChainAgents = registeredAuthority.participantAgents;
@@ -279,7 +283,7 @@ async function resolveReadAuthorityFromRegistration(
     if (allowedPeers !== null && !allowedPeers.includes(input.getPeerId())) {
       return decision('denied', 'registered-chain', 'local-peer-not-allowed', registeredAuthority.onChainId);
     }
-    return decision('allowed', 'registered-chain', 'chain-participant', registeredAuthority.onChainId);
+    return decision('allowed', 'registered-chain', 'chain-participant', registeredAuthority.onChainId, 'eligible', input.callerAgentAddress ? 'caller' : 'node');
   }
 
   const approvedPrivateReplica = registeredAuthority.approvedPrivateReplicaAuthority;
@@ -294,11 +298,11 @@ async function resolveReadAuthorityFromRegistration(
       ?? input.rfc64LocalAgentAddress
       ?? input.defaultAgentAddress;
     return input.isAgentAllowed(effectiveCaller, rfc64Roster)
-      ? decision('allowed', 'rfc64-private', 'rfc64-participant')
+      ? decision('allowed', 'rfc64-private', 'rfc64-participant', undefined, 'eligible', input.callerAgentAddress ? 'caller' : 'node')
       : decision('denied', 'rfc64-private', 'agent-not-in-rfc64-roster');
   }
   if (input.hasAcceptedRfc64PublicPolicy) {
-    return decision('allowed', 'rfc64-public', 'accepted-public-policy');
+    return decision('allowed', 'rfc64-public', 'accepted-public-policy', undefined, 'eligible', 'public');
   }
 
   // A durable join approval may restore a minimal subscription row before its
@@ -315,7 +319,7 @@ async function resolveReadAuthorityFromRegistration(
   } catch (error) {
     return unavailable('legacy-local', 'local-access-policy-unavailable', contextGraphReadAuthorityDependencyOf(error));
   }
-  if (!isPrivate) return decision('allowed', 'legacy-local', 'local-public');
+  if (!isPrivate) return decision('allowed', 'legacy-local', 'local-public', undefined, 'eligible', 'public');
 
   let allowedPeers: string[] | null;
   try {
@@ -338,12 +342,12 @@ async function resolveReadAuthorityFromRegistration(
 
   if (agentGateAddresses !== null && allowedPeers !== null) {
     return allowedPeers.includes(input.getPeerId()) && agentGateAllowed
-      ? decision('allowed', 'legacy-local', 'local-agent-and-peer-allowlist')
+      ? decision('allowed', 'legacy-local', 'local-agent-and-peer-allowlist', undefined, 'eligible', input.callerAgentAddress ? 'caller' : 'node')
       : decision('denied', 'legacy-local', 'local-agent-or-peer-not-allowed');
   }
   if (agentGateAddresses !== null) {
     return agentGateAllowed
-      ? decision('allowed', 'legacy-local', 'local-agent-allowlist')
+      ? decision('allowed', 'legacy-local', 'local-agent-allowlist', undefined, 'eligible', input.callerAgentAddress ? 'caller' : 'node')
       : decision('denied', 'legacy-local', 'local-agent-not-allowed');
   }
 
@@ -359,12 +363,12 @@ async function resolveReadAuthorityFromRegistration(
   }
   if ((!participants || participants.length === 0) && allowedPeers !== null) {
     return allowedPeers.includes(input.getPeerId())
-      ? decision('allowed', 'legacy-local', 'legacy-peer-allowlist')
+      ? decision('allowed', 'legacy-local', 'legacy-peer-allowlist', undefined, 'eligible', 'node')
       : decision('denied', 'legacy-local', 'legacy-peer-not-allowed');
   }
   if (!participants || participants.length === 0) {
     return input.allowSubscriptionFallback && input.hasLegacySubscription
-      ? decision('allowed', 'legacy-local', 'legacy-subscription')
+      ? decision('allowed', 'legacy-local', 'legacy-subscription', undefined, 'eligible', 'node')
       : decision('denied', 'legacy-local', 'no-read-authority', undefined, 'eligible');
   }
   if (
@@ -381,7 +385,7 @@ async function resolveReadAuthorityFromRegistration(
       participant.toLowerCase() === input.defaultAgentAddress!.toLowerCase()
     ))
   ) {
-    return decision('allowed', 'legacy-local', 'legacy-local-agent-participant');
+    return decision('allowed', 'legacy-local', 'legacy-local-agent-participant', undefined, 'eligible', 'node');
   }
 
   let localIdentityId = 0n;
@@ -392,17 +396,17 @@ async function resolveReadAuthorityFromRegistration(
     // positive participant or peer fact into a denial, but supplies no allow.
   }
   if (localIdentityId > 0n && participants.includes(String(localIdentityId))) {
-    return decision('allowed', 'legacy-local', 'legacy-local-identity-participant');
+    return decision('allowed', 'legacy-local', 'legacy-local-identity-participant', undefined, 'eligible', 'node');
   }
   if (allowedPeers?.includes(input.getPeerId())) {
-    return decision('allowed', 'legacy-local', 'legacy-peer-invitation');
+    return decision('allowed', 'legacy-local', 'legacy-peer-invitation', undefined, 'eligible', 'node');
   }
   if (
     localIdentityId === 0n
     && input.allowSubscriptionFallback
     && input.hasLegacySubscription
   ) {
-    return decision('allowed', 'legacy-local', 'legacy-edge-subscription');
+    return decision('allowed', 'legacy-local', 'legacy-edge-subscription', undefined, 'eligible', 'node');
   }
   return decision('denied', 'legacy-local', 'legacy-participant-not-allowed');
 }

@@ -44,6 +44,32 @@ function input(overrides: Partial<ContextGraphReadAuthorityInput> = {}): Context
   };
 }
 
+describe('read-authority grant scope', () => {
+  const caller = '0xabc';
+  it.each([
+    { name: 'registered public', scope: 'public', overrides: { getRegisteredAuthority: async () => ({ kind: 'public' as const, onChainId: 5n }) } },
+    { name: 'registered caller', scope: 'caller', overrides: { callerAgentAddress: caller, isAgentAllowed: () => true, getRegisteredAuthority: async () => ({ kind: 'private' as const, onChainId: 5n, participantAgents: [caller] }) } },
+    { name: 'registered node', scope: 'node', overrides: { hasLocalAgentInRoster: () => true, getRegisteredAuthority: async () => ({ kind: 'private' as const, onChainId: 5n, participantAgents: [caller] }) } },
+    { name: 'RFC64 caller', scope: 'caller', overrides: { callerAgentAddress: caller, isAgentAllowed: () => true, resolveRfc64PrivateRoster: () => [caller] } },
+    { name: 'RFC64 node', scope: 'node', overrides: { defaultAgentAddress: caller, isAgentAllowed: () => true, resolveRfc64PrivateRoster: () => [caller] } },
+    { name: 'RFC64 public', scope: 'public', overrides: { hasAcceptedRfc64PublicPolicy: true } },
+    { name: 'legacy public', scope: 'public', overrides: { isPrivateLocalGraph: async () => false } },
+    { name: 'legacy caller gate', scope: 'caller', overrides: { callerAgentAddress: caller, getLocalAgentGate: async () => [caller], isAgentAllowed: () => true } },
+    { name: 'legacy node gate', scope: 'node', overrides: { getLocalAgentGate: async () => [caller], hasLocalAgentInRoster: () => true } },
+    { name: 'legacy caller participant', scope: 'caller', overrides: { callerAgentAddress: caller, getLegacyParticipants: async () => [caller] } },
+    { name: 'legacy node participant', scope: 'node', overrides: { defaultAgentAddress: caller, getLegacyParticipants: async () => [caller] } },
+    { name: 'legacy node subscription', scope: 'node', overrides: { allowSubscriptionFallback: true, hasLegacySubscription: true } },
+    { name: 'legacy node peer', scope: 'node', overrides: { getAllowedPeers: async () => ['peer-local'] } },
+  ] satisfies Array<{ name: string; scope: string; overrides: Partial<ContextGraphReadAuthorityInput> }>)(
+    '$name explicitly reports its grant scope', async ({ scope, overrides }) => {
+      expect(await resolveContextGraphReadAuthorityDecision(input(overrides))).toMatchObject({ outcome: 'allowed', grantScope: scope });
+    },
+  );
+  it('denial conveys no grant', async () => {
+    expect(await resolveContextGraphReadAuthorityDecision(input())).toMatchObject({ outcome: 'denied', grantScope: 'none' });
+  });
+});
+
 describe('read-authority dependency attribution (#2834)', () => {
   it('attributes a registration-status store failure to the store', async () => {
     await expect(resolveContextGraphReadAuthorityDecision(input({

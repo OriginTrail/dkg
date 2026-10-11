@@ -1,4 +1,4 @@
-import { requireContextGraphReadAuthority } from './context-graph-read-authority.js';
+import { hasNodeOperatorReadAccess, requireContextGraphReadAuthority } from './context-graph-read-authority.js';
 import {
   CclResourceNotFoundError,
   ContextGraphPolicyAuthorizationError,
@@ -8,7 +8,7 @@ import {
   readBody,
   SMALL_BODY_BYTES,
 } from '../http-utils.js';
-import { actorFromRequestContext, type RequestContext } from './context.js';
+import { type RequestContext } from './context.js';
 
 async function dispatchCclRoutes(ctx: RequestContext): Promise<void> {
   const { req, res, agent, url, path, requestAgentAddress } = ctx;
@@ -79,7 +79,7 @@ async function dispatchCclRoutes(ctx: RequestContext): Promise<void> {
 
   if (req.method === 'GET' && path === '/api/ccl/policy/list') {
     const contextGraphId = url.searchParams.get('contextGraphId');
-    if (contextGraphId !== null || actorFromRequestContext(ctx).authentication.principal.kind !== 'nodeOperator') {
+    if (contextGraphId !== null || !hasNodeOperatorReadAccess(ctx)) {
       if (!(await requireContextGraphReadAuthority(ctx, contextGraphId))) return;
     }
     const policies = await agent.listCclPolicies({

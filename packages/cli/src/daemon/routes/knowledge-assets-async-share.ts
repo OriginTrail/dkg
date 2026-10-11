@@ -1,4 +1,4 @@
-import { requireContextGraphReadAuthority } from './context-graph-read-authority.js';
+import { hasNodeOperatorReadAccess, requireContextGraphReadAuthority } from './context-graph-read-authority.js';
 // daemon/routes/knowledge-assets-async-share.ts
 //
 // Async SWM-share queue routes for the GitHub-shaped Knowledge Asset HTTP
@@ -23,7 +23,7 @@ import { requireContextGraphReadAuthority } from './context-graph-read-authority
 // error mapping, and response shapes are identical to the legacy handlers.
 // Shared logic lives in `./shared-assertion-helpers.js`.
 
-import { actorFromRequestContext, type RequestContext } from "./context.js";
+import { type RequestContext } from "./context.js";
 import { authenticatedAgentAddress } from '../../auth.js';
 import { respondTerminalClearOutcome } from "./terminal-clear-response.js";
 import {
@@ -172,7 +172,7 @@ export async function handleKaShareJobsList(ctx: RequestContext): Promise<void> 
       error: "limit must be a positive integer ≤ 1000",
     });
   }
-  if (contextGraphId !== undefined || actorFromRequestContext(ctx).authentication.principal.kind !== 'nodeOperator') {
+  if (contextGraphId !== undefined || !hasNodeOperatorReadAccess(ctx)) {
     if (!(await requireContextGraphReadAuthority(ctx, contextGraphId))) return;
   }
   const jobs = await agent.assertion.listPromoteAsyncJobs({

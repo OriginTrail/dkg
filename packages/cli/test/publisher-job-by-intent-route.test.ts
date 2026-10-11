@@ -202,7 +202,7 @@ function createContext(
     req: req as RequestContext['req'],
     res: createResponse() as unknown as ServerResponse,
     agent: { resolveContextGraphReadAuthority: async () => ({
-      outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant', metadataBootstrap: 'forbidden',
+      outcome: 'allowed', grantScope: 'caller', source: 'registered-chain', reason: 'chain-participant', metadataBootstrap: 'forbidden',
     }) } as RequestContext['agent'],
     publisherControl,
     publisherState: {

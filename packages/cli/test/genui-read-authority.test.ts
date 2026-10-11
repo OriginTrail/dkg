@@ -29,7 +29,7 @@ function fixture(body: object = { contextGraphId: 'private-cg', entityUri: entit
     bindings: options.subGraphName === 'meta'
       ? [{ hint: '"Use an entity card"', label: '"Entity label"' }] : triples,
   }));
-  const authority = vi.fn(async () => ({ outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant' }));
+  const authority = vi.fn(async () => ({ outcome: 'allowed', grantScope: 'caller', source: 'registered-chain', reason: 'chain-participant' }));
   const ctx = { req, res, path: '/api/genui/render', config: { llm: { apiKey: 'test' } },
     authentication: requestAuthentication({ kind: 'agent', agentAddress: caller }), requestAgentAddress: 'wrong-node-address',
     agent: { query, resolveContextGraphReadAuthority: authority },

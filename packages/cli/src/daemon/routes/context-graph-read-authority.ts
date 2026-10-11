@@ -15,24 +15,12 @@ import {
 } from '../store-query-lifecycle.js';
 import { actorFromRequestContext, type RequestContext } from './context.js';
 
-/**
- * Read-authority reasons that answer "may this NODE read the context graph?"
- * rather than "may this AGENT read it?".
- *
- * `resolveContextGraphReadAuthorityDecision` only consults `callerAgentAddress`
- * on its chain-registered, RFC-64 and agent-gated-local branches. Everything
- * below falls through to node-scoped facts (peer allowlist, local subscription,
- * the node's own default agent), so an agent-scoped caller must NOT inherit
- * them — doing so is the cross-CG read hole `/api/memory/search` is gated for.
- */
-const NODE_SCOPED_READ_AUTHORITY_REASONS: ReadonlySet<string> = new Set([
-  'legacy-peer-allowlist',
-  'legacy-peer-invitation',
-  'legacy-local-agent-participant',
-  'legacy-local-identity-participant',
-  'legacy-subscription',
-  'legacy-edge-subscription',
-]);
+/** Operator read access preserves disabled anonymous clients without widening accepted agents. */
+export function hasNodeOperatorReadAccess(ctx: RequestContext): boolean {
+  const { authentication } = actorFromRequestContext(ctx);
+  return authentication.principal.kind === 'nodeOperator'
+    || (authentication.mode === 'disabled' && authentication.principal.kind === 'anonymous');
+}
 
 /** One caller-bound authority gate for daemon reads outside the scoped query engine. */
 export async function requireContextGraphReadAuthority(
@@ -58,10 +46,10 @@ export async function requireContextGraphReadAuthority(
       respondContextGraphReadAuthorityUnavailable(ctx.res, authority);
       return false;
     }
-    // Legacy node membership and subscriptions cannot authorize a bearer agent.
+    // The resolver owns whether evidence grants this caller, the public, or only the node.
     if (authority.outcome !== 'allowed' || (
       actor.authenticatedAgentAddress !== undefined
-      && NODE_SCOPED_READ_AUTHORITY_REASONS.has(authority.reason)
+      && authority.grantScope !== 'caller' && authority.grantScope !== 'public'
     )) {
       jsonResponse(ctx.res, 403, { error: 'Not authorized to read this context graph.' });
       return false;

@@ -51,6 +51,7 @@ interface Decision {
   outcome: 'allowed' | 'denied' | 'unavailable';
   source: string;
   reason: string;
+  grantScope?: 'public' | 'caller' | 'node' | 'none';
 }
 
 interface Probe {
@@ -150,7 +151,7 @@ function buildCtx(opts: {
   return { ctx, res, probe };
 }
 
-const ALLOW_CHAIN: Decision = { outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant' };
+const ALLOW_CHAIN: Decision = { outcome: 'allowed', grantScope: 'caller', source: 'registered-chain', reason: 'chain-participant' };
 const DENY: Decision = { outcome: 'denied', source: 'registered-chain', reason: 'agent-not-in-chain-roster' };
 
 describe('POST /api/memory/search — context-graph read authority', () => {
@@ -313,7 +314,7 @@ describe('POST /api/memory/search — context-graph read authority', () => {
       const { ctx, res, probe } = buildCtx({
         body: { query: 'anything', contextGraphId: 'cg2' },
         authentication: requestAuthentication({ kind: 'agent', agentAddress: '0x123' }),
-        decisionFor: () => ({ outcome: 'allowed', source: 'legacy-local', reason }),
+        decisionFor: () => ({ outcome: 'allowed', grantScope: 'node', source: 'legacy-local', reason }),
       });
 
       await handleMemoryRoutes(ctx);
@@ -337,7 +338,7 @@ describe('POST /api/memory/search — context-graph read authority', () => {
       const { ctx, res, probe } = buildCtx({
         body: { query: 'anything', contextGraphId: 'cg1' },
         authentication: requestAuthentication({ kind: 'agent', agentAddress: '0x123' }),
-        decisionFor: () => ({ outcome: 'allowed', source: 'legacy-local', reason }),
+        decisionFor: () => ({ outcome: 'allowed', grantScope: reason === 'local-public' ? 'public' : 'caller', source: 'legacy-local', reason }),
       });
 
       await handleMemoryRoutes(ctx);
@@ -355,7 +356,7 @@ describe('POST /api/memory/search — context-graph read authority', () => {
       body: { query: 'anything', contextGraphId: 'cg1' },
       authentication: requestAuthentication({ kind: 'anonymous', mode: 'disabled' }),
       decisionFor: () => ({
-        outcome: 'allowed', source: 'legacy-local', reason: 'legacy-peer-allowlist',
+        outcome: 'allowed', grantScope: 'node', source: 'legacy-local', reason: 'legacy-peer-allowlist',
       }),
     });
 

@@ -1251,11 +1251,12 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
 
   // GET /api/knowledge-assets/:name/wm/extraction-status?contextGraphId=...&subGraphName=...
   // Faithful port of the legacy GET /api/assertion/:name/extraction-status. The
-  // handler reads + validates the query params itself (parity with legacy), so
-  // here we only decode/validate the :name segment before delegating.
+  // shared GET preflight owns parsing and authority; extraction keeps its
+  // actor-owned storage lane rather than the optional inspection author lane.
   if (method === "GET" && layer === "wm" && verb === "extraction-status") {
-    if (!(await readGetParams())) return;
-    return handleKaExtractionStatus(ctx, name);
+    const p = await readGetParams();
+    if (!p) return;
+    return handleKaExtractionStatus(ctx, name, { contextGraphId: p.cg, subGraphName: p.subGraphName });
   }
 
   // GET /api/knowledge-assets/:identifier/{wm,swm,vm} — per-layer status.

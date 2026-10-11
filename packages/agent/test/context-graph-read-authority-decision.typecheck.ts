@@ -25,5 +25,11 @@ export const allowed: ContextGraphReadAuthorityDecision = {
   outcome: 'allowed',
   source: 'system',
   reason: 'system-context-graph',
+  grantScope: 'public',
   metadataBootstrap: 'eligible',
+};
+
+// @ts-expect-error a settled grant must declare whether it is caller-, public-, or node-scoped
+export const allowedWithoutScope: ContextGraphReadAuthorityDecision = {
+  outcome: 'allowed', source: 'legacy-local', reason: 'renamed-for-diagnostics', metadataBootstrap: 'eligible',
 };

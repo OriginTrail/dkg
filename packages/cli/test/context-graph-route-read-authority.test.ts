@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { contextGraphAssertionUri } from '@origintrail-official/dkg-core';
 import { handleCclRoutes } from '../src/daemon/routes/ccl.js';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
@@ -52,7 +53,7 @@ function fixture(route: Route, outcome: 'allowed' | 'denied' | 'unavailable', op
   });
   const read = vi.fn(async () => [{ secret: SECRET }]);
   const query = vi.fn(async () => ({ bindings: [] }));
-  const authority = vi.fn(async () => ({ outcome, source: 'registered-chain', reason,
+  const authority = vi.fn(async () => ({ outcome, source: 'registered-chain', reason, grantScope: reason === 'legacy-subscription' ? 'node' : 'caller',
     ...(outcome === 'unavailable' ? { dependency: 'chain' } : {}) }));
   const job = { jobId: 'job', request: { jobType: 'knowledge-asset-vm-publish',
     knowledgeAssetVmPublish: { contextGraphId: CG }, contextGraphId: CG }, contextGraphId: CG };
@@ -62,10 +63,10 @@ function fixture(route: Route, outcome: 'allowed' | 'denied' | 'unavailable', op
     listSubGraphs: vi.fn(async () => []), getContextGraphAllowedAgents: read, query,
     canReadContextGraph: vi.fn(async () => outcome === 'allowed'),
   };
-  const publisherControl = { lookupKnowledgeAssetVmPublishJobByIntent: read,
+  const publisherControl = { describeConfiguredRetryState: () => ({ autoRetryEligible: false }), lookupKnowledgeAssetVmPublishJobByIntent: read,
     readJournalByIntent: read, readJournalByJob: read, inspectPreparedPayload: read, list: vi.fn(async () => [job]), getStatus: vi.fn(async () => job) };
   const url = new URL(route.path, 'http://localhost');
-  const ctx = { req, res, agent, publisherControl, config: { llm: { apiKey: 'fixture' } },
+  const ctx = { req, res, agent, publisherControl, publisherState: { runtime: null, availability: { available: false, reason: 'publisher_disabled', retryable: false, operatorActionRequired: true } }, config: { llm: { apiKey: 'fixture' } },
     path: url.pathname, url, requestAgentAddress: CALLER,
     authentication: requestAuthentication(operator ? { kind: 'nodeOperator' } : { kind: 'agent', agentAddress: CALLER }),
     extractionStatus: new Map(), tracker: {}, emitMemoryGraphChanged: vi.fn(),
@@ -137,7 +138,7 @@ describe('caller-bound graph reads', () => {
     const h = fixture(routes[0], 'allowed');
     let complete!: () => void;
     const pending = new Promise<void>(resolve => { complete = resolve; });
-    h.authority.mockImplementation(async () => { await pending; return { outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant' }; });
+    h.authority.mockImplementation(async () => { await pending; return { outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant', grantScope: 'caller' };  });
     const handling = routes[0].run(h.ctx);
     h.ctx.req.emit('aborted');
     complete();
@@ -183,6 +184,51 @@ describe('caller-bound graph reads', () => {
     expect(operator.publisherControl.readJournalByJob).toHaveBeenCalledWith('legacy');
     expect(operator.publisherControl.getStatus).not.toHaveBeenCalled();
   });
+
+  it.each([
+    { name: 'publisher inventory', path: '/api/publisher/jobs', run: handlePublisherRoutes },
+    { name: 'CCL inventory', path: '/api/ccl/policy/list', run: handleCclRoutes },
+    { name: 'share inventory', path: '/api/knowledge-assets/swm/share-jobs', run: handleKnowledgeAssetsRoutes },
+    { name: 'raw job', path: '/api/publisher/job?id=legacy', run: handlePublisherRoutes },
+    { name: 'raw payload', path: '/api/publisher/job-payload?id=legacy', run: handlePublisherRoutes },
+    { name: 'raw journal', path: '/api/publisher/journal?jobId=legacy', run: handlePublisherRoutes },
+  ])('$name preserves tokenless auth-disabled operator access', async route => {
+    const h = fixture(route, 'denied');
+    Object.assign(h.ctx, { authentication: requestAuthentication({ kind: 'anonymous', mode: 'disabled' }) });
+    h.publisherControl.getStatus.mockResolvedValue({ jobId: 'legacy', request: { jobType: 'lift', lift: {} } } as never);
+    await route.run(h.ctx);
+    expect(h.res.statusCode).toBe(200);
+    expect(h.authority).not.toHaveBeenCalled();
+  });
+
+  it('keeps an accepted agent credential scoped when authentication is disabled', async () => {
+    const h = fixture(routes[0], 'denied');
+    Object.assign(h.ctx, { authentication: requestAuthentication({ kind: 'agent', agentAddress: CALLER, mode: 'disabled' }) });
+    await routes[0].run(h.ctx);
+    expect(h.res.statusCode).toBe(403);
+    expect(h.authority).toHaveBeenCalled();
+    expect(h.read).not.toHaveBeenCalled();
+  });
+
+  it.each(['allowed', 'denied', 'unavailable'] as const)(
+    'extraction status uses one normalized subgraph scope for %s authority', async outcome => {
+      const route = { name: 'extraction status', path: `/api/knowledge-assets/asset/wm/extraction-status?contextGraphId=did:dkg:context-graph:${CG}&subGraphName=docs&agentAddress=0x3333333333333333333333333333333333333333`, run: handleKnowledgeAssetsRoutes };
+      const h = fixture(route, outcome);
+      const assertionUri = contextGraphAssertionUri(CG, CALLER, 'asset', 'docs');
+      h.ctx.extractionStatus.set(assertionUri, {
+        status: 'completed', fileHash: 'secret-file-hash', rootEntity: 'urn:private:entity',
+        detectedContentType: 'application/pdf', pipelineUsed: 'test', tripleCount: 1, startedAt: new Date().toISOString(),
+      });
+      await route.run(h.ctx);
+      expect(h.authority).toHaveBeenCalledExactlyOnceWith(CG, expect.objectContaining({ callerAgentAddress: CALLER }));
+      expect(h.res.statusCode).toBe(outcome === 'allowed' ? 200 : outcome === 'denied' ? 403 : 503);
+      if (outcome === 'allowed') expect(JSON.parse(h.res.body)).toMatchObject({ assertionUri, fileHash: 'secret-file-hash', rootEntity: 'urn:private:entity' });
+      else {
+        expect(h.res.body).not.toContain('secret-file-hash');
+        expect(h.res.body).not.toContain('urn:private:entity');
+      }
+    },
+  );
 
   it('propagates unrelated authority failures while removing the request listeners', async () => {
     const h = fixture(routes[0], 'allowed');

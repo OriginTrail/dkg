@@ -21,8 +21,6 @@ const residualCensus = [
   ['packages/agent/src/dkg-agent-join.ts', 'joinAdmissionRoster', 'this.getMemberRecoveryRosterSource'],
   ['packages/agent/src/dkg-agent-context-graph.ts', 'memberAdd', 'this.resolveRegisteredContextGraphAuthority'],
   ['packages/agent/src/dkg-agent-context-graph.ts', 'memberRemove', 'this.resolveRegisteredContextGraphAuthority'],
-  ['packages/cli/src/daemon/routes/query-catalog.ts', 'queryCatalog', 'agent.canReadContextGraph'],
-  ['packages/cli/src/daemon/routes/memory.ts', 'memorySearch', 'agent.resolveContextGraphReadAuthority'],
 ] as const;
 
 function escapeRegExp(value: string): string {
@@ -30,6 +28,15 @@ function escapeRegExp(value: string): string {
 }
 
 describe('Context Graph authority RPC residual-site census', () => {
+  it.each([
+    ['query-catalog', 'queryCatalog'],
+    ['memory', 'memorySearch'],
+  ])('%s retains its site through the shared caller-bound gate', (route, site) => {
+    const source = readFileSync(`${REPO_ROOT}packages/cli/src/daemon/routes/${route}.ts`, 'utf8');
+    expect(source).toContain(`requireContextGraphReadAuthority(ctx, contextGraphId, CG_AUTH_RPC_SITES.${site})`);
+    const gate = readFileSync(`${REPO_ROOT}packages/cli/src/daemon/routes/context-graph-read-authority.ts`, 'utf8');
+    expect(gate).toMatch(/withRpcUsageSite\(site, \(\) => ctx\.agent\.resolveContextGraphReadAuthority\(/);
+  });
   it.each(residualCensus)(
     '%s: %s labels %s',
     (relativePath, site, callee) => {

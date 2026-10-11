@@ -97,7 +97,7 @@ function fakeCatalogAgent(options: FakeCatalogAgentOptions = {}) {
     })),
     resolveAgentByToken: vi.fn(() => undefined),
     resolveContextGraphReadAuthority: vi.fn(async (): Promise<import('@origintrail-official/dkg-agent').ContextGraphReadAuthorityDecision> => ({
-      outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant', metadataBootstrap: 'forbidden',
+      outcome: 'allowed', grantScope: 'caller', source: 'registered-chain', reason: 'chain-participant', metadataBootstrap: 'forbidden',
     })),
     _test: { assertions, assertionGraphs, registered },
   };
@@ -196,7 +196,7 @@ describe('/api/profile/query-catalog/read', () => {
     const agent = fakeCatalogAgent();
     agent.resolveAgentByToken.mockReturnValue('0x1111111111111111111111111111111111111111');
     agent.resolveContextGraphReadAuthority.mockResolvedValue({
-      outcome: 'denied', source: 'registered-chain', reason: 'agent-not-in-chain-roster', metadataBootstrap: 'forbidden',
+      outcome: 'denied', grantScope: 'none', source: 'registered-chain', reason: 'agent-not-in-chain-roster', metadataBootstrap: 'forbidden',
     });
     const { context, response } = readContext(agent);
     context.requestAgentAddress = '0x1111111111111111111111111111111111111111';
@@ -222,7 +222,7 @@ describe('/api/profile/query-catalog/read', () => {
     const agentAddress = '0x1111111111111111111111111111111111111111';
     const agent = fakeCatalogAgent();
     agent.resolveContextGraphReadAuthority.mockResolvedValue({
-      outcome: 'denied', source: 'registered-chain', reason: 'agent-not-in-chain-roster', metadataBootstrap: 'forbidden',
+      outcome: 'denied', grantScope: 'none', source: 'registered-chain', reason: 'agent-not-in-chain-roster', metadataBootstrap: 'forbidden',
     });
     const { context, response } = readContext(agent);
     context.authentication = requestAuthentication({
@@ -245,7 +245,7 @@ describe('/api/profile/query-catalog/read', () => {
   it('reads the registered meta subgraph through all Context Graph layers', async () => {
     const agent = fakeCatalogAgent();
     agent.resolveContextGraphReadAuthority.mockResolvedValue({
-      outcome: 'denied', source: 'registered-chain', reason: 'agent-not-in-chain-roster', metadataBootstrap: 'forbidden',
+      outcome: 'denied', grantScope: 'none', source: 'registered-chain', reason: 'agent-not-in-chain-roster', metadataBootstrap: 'forbidden',
     });
     const { context, response } = readContext(agent);
     context.authentication = requestAuthentication({ kind: 'nodeOperator', token: 'node-admin-token' });

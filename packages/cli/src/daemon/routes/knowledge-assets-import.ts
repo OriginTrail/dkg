@@ -2234,21 +2234,13 @@ export async function handleKaImportFile(ctx: RequestContext, name: string): Pro
 // (daemon/routes/assertion.ts): identical name + contextGraphId + subGraphName
 // validation, extractionStatus map lookup, 404 mapping, and response shape. The
 // dispatcher passes the already-decoded `name`.
-export async function handleKaExtractionStatus(ctx: RequestContext, name: string): Promise<void> {
-  const { res, url, extractionStatus, requestAgentAddress } = ctx;
-  const assertionName = name;
-  const nameVal = validateAssertionName(assertionName);
-  if (!nameVal.valid)
-    return jsonResponse(res, 400, {
-      error: `Invalid assertion name: ${nameVal.reason}`,
-    });
-  const contextGraphId =
-    url.searchParams.get("contextGraphId") ??
-    url.searchParams.get("contextGraphId");
-  if (!validateRequiredContextGraphId(contextGraphId, res)) return;
-  const normalizedContextGraphId = normalizeContextGraphIdOrUri(contextGraphId!);
-  const subGraphName = url.searchParams.get("subGraphName") ?? undefined;
-  if (!validateOptionalSubGraphName(subGraphName, res)) return;
+export async function handleKaExtractionStatus(
+  ctx: RequestContext,
+  assertionName: string,
+  scope: Readonly<{ contextGraphId: string; subGraphName?: string }>,
+): Promise<void> {
+  const { res, extractionStatus, requestAgentAddress } = ctx;
+  const { contextGraphId: normalizedContextGraphId, subGraphName } = scope;
 
   const assertionUri = contextGraphAssertionUri(
     normalizedContextGraphId,
