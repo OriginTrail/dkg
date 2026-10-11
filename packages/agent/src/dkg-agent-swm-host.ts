@@ -933,7 +933,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     onChainId: string | undefined,
   ): boolean {
     if (this.isMemberModeRegisteredForCg(contextGraphId)
-      || [contextGraphId, this.localCgIdForWireId(this.canonicalSwmHostModeKey(contextGraphId))]
+      || this.hostModeSubscriptionKeys(contextGraphId)
         .some(id => isAdmittedContextGraphSubscription(this.subscribedContextGraphs.get(id)))) return false;
     if (onChainId === undefined) return true;
     if (/^0x[0-9a-fA-F]{64}$/.test(contextGraphId)) {
@@ -1244,16 +1244,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
    * {@link getSwmSubscriptionSource} does for the ACK path.
    */
   isMemberModeRegisteredForCg(this: DKGAgent, contextGraphId: string): boolean {
-    if (this.sharedMemoryGossipRegistered.has(contextGraphId)) return true;
-    for (const candidate of [
-      this.localCgIdForWireId(contextGraphId),
-      this.localCgIdForWireId(this.canonicalSwmHostModeKey(contextGraphId)),
-    ]) {
-      if (candidate !== contextGraphId && this.sharedMemoryGossipRegistered.has(candidate)) {
-        return true;
-      }
-    }
-    return false;
+    return this.hostModeSubscriptionKeys(contextGraphId)
+      .some(id => this.sharedMemoryGossipRegistered.has(id));
   }
 
   /**
@@ -1430,6 +1422,18 @@ export class SwmHostModeMethods extends DKGAgentBase {
     return rawCgId;
   }
 
+  /**
+   * Best-effort local host identity lookup, with no RPC or storage read.
+   * Prefer the persisted store owner, then the caller's exact spelling, the
+   * current wire-routing owner and finally a cold canonical wire row.
+   * Member refusal checks every spelling; a binding read takes the first hit.
+   */
+  hostModeSubscriptionKeys(this: DKGAgent, contextGraphId: string): string[] {
+    const wireId = this.canonicalSwmHostModeKey(contextGraphId);
+    return [...new Set([this.hostModePersistenceStoreKey(contextGraphId), contextGraphId,
+      this.localCgIdForWireId(wireId), wireId])];
+  }
+
   enqueueHostModePersistence(this: DKGAgent, contextGraphId: string, subscribe: boolean): void {
     if (!this.swmHostModeStore) return;
     // The in-memory queue stays wire-keyed so ordering dedups across
@@ -1438,9 +1442,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // {@link hostModePersistenceStoreKey}.
     const queueKey = this.canonicalSwmHostModeKey(contextGraphId);
     const storeCgId = this.hostModePersistenceStoreKey(contextGraphId);
-    const onChainId = this.subscribedContextGraphs.get(storeCgId)?.onChainId
-      ?? this.subscribedContextGraphs.get(contextGraphId)?.onChainId
-      ?? this.subscribedContextGraphs.get(queueKey)?.onChainId;
+    const onChainId = this.hostModeSubscriptionKeys(contextGraphId)
+      .map(id => this.subscribedContextGraphs.get(id)?.onChainId)
+      .find(id => id !== undefined);
     const store = this.swmHostModeStore;
     const op = subscribe ? 'mark' : 'unmark';
     const apply = async (): Promise<void> => {

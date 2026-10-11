@@ -23,6 +23,9 @@ interface RestorationOwner {
   bindSubscriptionOnChainId(id: string, row: ContextGraphSub, chainId: string): void;
   setContextGraphSubscription(id: string, row: ContextGraphSub, options?: { persist?: boolean }): ContextGraphSub;
   awaitHostModePersistence(id: string): Promise<void>;
+  enqueueHostModePersistence(id: string, subscribed: boolean): void;
+  sharedMemoryGossipRegistered: Set<string>;
+  isMemberModeRegisteredForCg(id: string): boolean;
 }
 function deferred() {
   let resolve!: () => void;
@@ -38,16 +41,17 @@ describe('host-mode restoration physical ownership', () => {
     for (const agent of agents.splice(0)) { await agent.stop(); await agent.store.close(); }
     for (const directory of directories.splice(0)) await rm(directory, { recursive: true, force: true });
   });
-  async function create() {
+  async function create(options: { stripCiphertext?: boolean; hostPublic?: boolean } = {}) {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-host-restore-owner-'));
     directories.push(dataDir);
+    const chain = new MockChainAdapter();
     const agent = await DKGAgent.create({ name: 'host-restore-owner', dataDir, listenHost: '127.0.0.1',
-      store: new OxigraphStore(), chainAdapter: new MockChainAdapter(), nodeRole: 'core', rfc64CatalogActivation: { enabled: false },
-      swmHostMode: { enabled: true, stripCiphertext: false, reconcileBatchSize: 1 } });
+      store: new OxigraphStore(), chainAdapter: chain, nodeRole: 'core', rfc64CatalogActivation: { enabled: false },
+      swmHostMode: { enabled: true, stripCiphertext: false, reconcileBatchSize: 1, ...options } });
     agents.push(agent);
     const markers = new SwmHostModeStore({ dataDir: join(dataDir, 'swm-host'), ...SwmHostModeStore.defaultLimits() });
     await markers.init();
-    return { agent, markers, owner: agent as unknown as RestorationOwner };
+    return { agent, chain, markers, owner: agent as unknown as RestorationOwner };
   }
 
   for (const heldIndex of [0, 1]) it(`started stop drains held ${heldIndex === 0 ? 'startup prefix' : 'background tail'} and restart resets its fence`, async () => {
@@ -136,6 +140,42 @@ describe('host-mode restoration physical ownership', () => {
       } finally { release.resolve(); await starting; }
     }, 60_000,
   );
+
+  for (const reverseMapped of [false, true]) it(`cold ${reverseMapped ? 'reverse-mapped wire' : 'cleartext'} marker restores its numeric public binding`, async () => {
+    const { agent, chain, markers, owner } = await create({ stripCiphertext: true, hostPublic: true });
+    const id = 'cold-public-binding';
+    const wireId = ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerCase();
+    const registration = await chain.createOnChainContextGraph({ accessPolicy: 0, publishPolicy: 1, nameHash: wireId });
+    const numericId = String(registration.contextGraphId);
+    if (reverseMapped) owner.setContextGraphSubscription(id, {
+      subscribed: false, synced: false, syncMode: 'always-on', onChainHash: wireId,
+    }, { persist: false });
+    await markers.markHostModeSubscribed(reverseMapped ? wireId : id, { onChainId: numericId });
+    const access = vi.spyOn(chain, 'getContextGraphAccessPolicy');
+    const publish = vi.spyOn(chain, 'getContextGraphPublishPolicy');
+    await agent.start();
+    await owner.swmHostModeRestoreDrain;
+    expect(owner.subscribedContextGraphs.get(id)?.onChainId).toBe(numericId);
+    expect(owner.subscribedContextGraphs.has(wireId)).toBe(false);
+    expect(access).toHaveBeenCalledWith(BigInt(numericId));
+    expect(publish).toHaveBeenCalledWith(BigInt(numericId));
+    expect(owner.swmHostModeSubscribed.has(owner.canonicalSwmHostModeKey(id))).toBe(true);
+  }, 60_000);
+
+  it('wire-only uppercase persistence retains the canonical numeric binding and member refusal', async () => {
+    const { agent, owner } = await create();
+    await agent.start();
+    const wireId = ethers.keccak256(ethers.toUtf8Bytes('cold-wire-only')).toLowerCase();
+    const uppercase = '0x' + wireId.slice(2).toUpperCase();
+    owner.subscribedContextGraphs.set(wireId, { subscribed: false, synced: false,
+      syncMode: 'always-on', onChainHash: wireId, onChainId: '42' });
+    owner.enqueueHostModePersistence(uppercase, true);
+    await owner.awaitHostModePersistence(uppercase);
+    expect(await owner.swmHostModeStore!.listHostModeSubscriptions())
+      .toContainEqual({ contextGraphId: wireId, onChainId: '42' });
+    owner.sharedMemoryGossipRegistered.add(wireId);
+    expect(owner.isMemberModeRegisteredForCg(uppercase)).toBe(true);
+  }, 60_000);
 
   it('cold binding restores reset generation, watermark and cursor and persist later canonical rebindings', async () => {
     const { agent, owner } = await create();

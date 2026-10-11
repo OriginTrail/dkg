@@ -472,9 +472,8 @@ export class SwmHostModeStore {
 
   /**
    * Returns the cleartext / wire ids of every CG marked
-   * `hostModeSubscribed: true` in its `.meta`. Used by the agent at
-   * startup to re-engage gossip handlers without waiting for the
-   * chain-event poller to re-derive them.
+   * `hostModeSubscribed: true` in its `.meta`. Historical string-only API;
+   * startup uses {@link listHostModeSubscriptions} to retain numeric bindings.
    */
   async listHostModeSubscribedCgs(): Promise<string[]> {
     return (await this.listHostModeSubscriptions()).map(({ contextGraphId }) => contextGraphId);
