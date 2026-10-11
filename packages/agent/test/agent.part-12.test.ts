@@ -273,6 +273,50 @@ describe('Genesis Knowledge', () => {
     });
 
 
+    it('rejects PCA curated registration when adding the author-key curator exceeds the participant cap', async () => {
+      const pcaOwner = new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address;
+      const payer = new ethers.Wallet(HARDHAT_KEYS.REC2_OP);
+      const author = new ethers.Wallet(HARDHAT_KEYS.EXTRA1).address;
+      const pcaAccountId = 82n;
+      const chain = new PcaCuratedRegistrationChainAdapter(
+        new Map([[pcaAccountId, pcaOwner]]),
+        payer.address,
+        new Map([[payer.address.toLowerCase(), pcaAccountId]]),
+      );
+      const agent = await DKGAgent.create({
+        name: 'PcaExternalAuthorCapBot',
+        store: new OxigraphStore(),
+        chainAdapter: chain,
+        chainConfig: {
+          rpcUrl: 'http://127.0.0.1:1',
+          hubAddress: ethers.ZeroAddress,
+          signers: [payer],
+          authors: externalAuthorKeys(HARDHAT_KEYS.EXTRA1),
+        },
+        nodeRole: 'edge',
+      });
+      await agent.start();
+
+      const id = 'reject-pca-external-author-participant-cap';
+      await agent.createContextGraph({ id, name: 'Reject PCA external author at the participant cap', callerAgentAddress: author });
+      // The graph already lists as many participant agents as a registration may carry.
+      await agent.store.insert(Array.from({ length: 256 }, (_, i) => ({
+        subject: `did:dkg:context-graph:${id}`,
+        predicate: DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT,
+        object: `"0x${(i + 1).toString(16).padStart(40, '0')}"`,
+        graph: contextGraphMetaUri(id),
+      })));
+      await expect(agent.registerContextGraph(id, {
+        callerAgentAddress: author,
+        publishPolicy: 0,
+        publishAuthorityAccountId: pcaAccountId,
+      })).rejects.toThrow(/participantAgents cannot exceed 256 addresses after adding the curator/);
+
+      expect(chain.createOnChainContextGraphCalls).toHaveLength(0);
+      await agent.stop().catch(() => {});
+    });
+
+
     it('rejects PCA curated registration when the curator is not an author key of the external signer', async () => {
       const pcaOwner = new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address;
       const payer = new ethers.Wallet(HARDHAT_KEYS.REC2_OP);

@@ -5,24 +5,33 @@
  * private key for such an agent: registration recovers its public key from a
  * signature the signer produces, and author attestations requested with that
  * agent are signed through the signer. Payer accounts are never usable as
- * authors, and a node without operational keys auto-registers no default agent.
+ * authors, and a node without operational keys auto-registers no default agent
+ * and answers no VERIFY proposals.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
 import {
   EVMChainAdapter,
+  MockChainAdapter,
   connectRemoteSigners,
   type RemoteSigners,
 } from '@origintrail-official/dkg-chain';
-import { TypedEventBus, buildUpdateAuthorAttestationTypedData, generateEd25519Keypair } from '@origintrail-official/dkg-core';
+import {
+  Logger,
+  TypedEventBus,
+  buildAuthorAttestationTypedData,
+  buildUpdateAuthorAttestationTypedData,
+  generateEd25519Keypair,
+} from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGPublisher } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
-import { registerSelfSovereignAgent } from '../src/agent-keystore.js';
+import { agentFromPrivateKey, registerSelfSovereignAgent } from '../src/agent-keystore.js';
 import { constructConfiguredChainAdapter } from '../src/configured-chain-adapter.js';
 import { externalSignerAgentPublicKey } from '../src/external-author-signing.js';
 import { planAuthorityIndexBootstrap } from '../src/authority-index-config.js';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
+import { HARDHAT_KEYS } from '../../chain/test/hardhat-harness.js';
 import { startFakeRemoteSigner, type FakeSigner } from '../../chain/test/helpers/fake-remote-signer.js';
 
 const PAYER_TOKEN = 'payer-credential-5e4d3c2b1a090807';
@@ -119,6 +128,19 @@ describe('external signer author keys', () => {
     expect(agent.getLocalAgentMode(agentKey.address)).toBe('self-sovereign');
   });
 
+  it('takes a supplied public key of an author key as is, and refuses a registration signed with another key', async () => {
+    const { fake, remote } = await externalSigners();
+    const before = fake.calls('eth_signTypedData_v4').length;
+    await expect(externalSignerAgentPublicKey({ chainConfig: { authors: remote.authors } }, agentKey.address, 'writer', agentKey.publicKey))
+      .resolves.toBe(agentKey.publicKey);
+    expect(fake.calls('eth_signTypedData_v4')).toHaveLength(before);
+
+    // A signer that answers for the address but signs with a different key.
+    const wrongKey = { chainConfig: { authors: { signerFor: async () => defaultAuthor } } };
+    await expect(externalSignerAgentPublicKey(wrongKey, agentKey.address, 'writer'))
+      .rejects.toThrow(/did not sign the registration/);
+  });
+
   it('signs author attestations for requests made with that agent\'s token through the external signer', async () => {
     const { fake, remote } = await externalSigners();
     const agent = await stubAgent(remote);
@@ -160,6 +182,47 @@ describe('external signer author keys', () => {
       ethers.Signature.from({ r: ethers.hexlify(update.signature.r), yParityAndS: ethers.hexlify(update.signature.vs) }),
     );
     expect(recovered).toBe(agentKey.address);
+  });
+
+  it('signs selection-publish attestations through the signer or a custodial key, and refuses other self-sovereign agents', async () => {
+    const { fake, remote } = await externalSigners();
+    const agent = await stubAgent(remote);
+    await agent.registerAgent('writer', { address: agentKey.address });
+    const custodial = agentFromPrivateKey(HARDHAT_KEYS.EXTRA3, 'custodial-writer');
+    agent.localAgents.set(custodial.agentAddress, custodial);
+    const outside = registerSelfSovereignAgent('outside', new ethers.Wallet(HARDHAT_KEYS.EXTRA2).signingKey.publicKey);
+    agent.localAgents.set(outside.agentAddress, outside);
+    const quads = [q('urn:external-authors:selection', 'urn:value', '"v1"')];
+
+    const before = fake.calls('eth_signTypedData_v4').length;
+    for (const author of [agentKey.address, custodial.agentAddress]) {
+      const attestation = await agent._buildPrecomputedAttestationForSelection(CG, quads, {
+        authorAgentAddress: author,
+        graphScoped: true,
+      });
+      const typed = buildAuthorAttestationTypedData({
+        chainId: 31337n,
+        kav10Address: KAV_ADDRESS,
+        merkleRoot: attestation.expectedMerkleRoot,
+        authorAddress: author,
+        reservedKaId: attestation.reservedKaId,
+      });
+      const signature = ethers.Signature.from({
+        r: ethers.hexlify(attestation.signature.r),
+        yParityAndS: ethers.hexlify(attestation.signature.vs),
+      });
+      expect(ethers.verifyTypedData(typed.domain, typed.types, typed.message, signature)).toBe(author);
+    }
+    // Only the agent whose key the signer holds was signed for through it.
+    const requests = fake.calls('eth_signTypedData_v4').slice(before);
+    expect(requests).toHaveLength(1);
+    expect(ethers.getAddress(String(requests[0].params[0]))).toBe(agentKey.address);
+    expect(requests[0].authorization).toBe(`Bearer ${AUTHOR_TOKEN}`);
+
+    await expect(agent._buildPrecomputedAttestationForSelection(CG, quads, {
+      authorAgentAddress: outside.agentAddress,
+      graphScoped: true,
+    })).rejects.toThrow(/registered as self-sovereign/);
   });
 
   it('refuses a self-sovereign agent whose key the signer does not hold as an author key', async () => {
@@ -208,6 +271,27 @@ describe('external signer author keys', () => {
       expect(agent.defaultAgentAddress).toBeUndefined();
     } finally {
       chain.destroy();
+    }
+  });
+
+  it('registers no VERIFY proposal handler when the node holds no operational key', async () => {
+    const { remote } = await externalSigners();
+    const messages: string[] = [];
+    Logger.setSink((record) => { messages.push(record.message); });
+    const agent = await DKGAgent.create({
+      name: 'ExternalSignerVerify',
+      store: new OxigraphStore(),
+      chainAdapter: new MockChainAdapter('mock:31337', payer.address),
+      chainConfig: { rpcUrl: 'http://127.0.0.1:1', hubAddress: ethers.ZeroAddress, signers: remote.operational },
+      nodeRole: 'edge',
+    });
+    try {
+      await agent.start();
+      expect(messages).toContain('VERIFY proposal handler not registered: EVM signing is delegated to an external signer');
+      expect(messages).not.toContain('Registered VERIFY proposal handler');
+    } finally {
+      Logger.setSink(null);
+      await agent.stop().catch(() => {});
     }
   });
 
