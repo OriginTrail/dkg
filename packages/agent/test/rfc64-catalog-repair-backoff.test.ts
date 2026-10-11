@@ -453,7 +453,7 @@ describe('RFC-64 unchanged repair backoff', () => {
     f.setPrivateRepairs([repair]);
     await f.owner.requestFinalizedPrivate({ repair, ctx }).whenAttempted;
     await f.advance(1_000);
-    const other = { ...repair, assertionCoordinate: 'other', kaUal: `${repair.kaUal}-other` };
+    const other = { ...repair, assertionCoordinate: 'other', kaUal: `did:dkg:otp:20430/${AUTHOR}/2` };
     f.setPrivateRepairs([repair, other]);
     f.setRevision('scope-1:head-2');
     await f.owner.requestFinalizedPrivate({ repair: other, ctx }).whenAttempted;
@@ -518,7 +518,7 @@ describe('RFC-64 unchanged repair backoff', () => {
   it('uses one wake for the earliest private waiter deadline and preserves later waiters', async () => {
     const f = fixture(0);
     const repair = privateRepair();
-    const other = { ...repair, assertionCoordinate: 'other', kaUal: `${repair.kaUal}-other` };
+    const other = { ...repair, assertionCoordinate: 'other', kaUal: `did:dkg:otp:20430/${AUTHOR}/2` };
     f.setPrivateRepairs([repair]);
     await f.owner.requestFinalizedPrivate({ repair, ctx }).whenAttempted;
     await f.advance(1_000);
