@@ -2002,6 +2002,8 @@ export class SharedMemoryHandler {
     contextGraphId: string,
     fromPeerId: string,
     options?: {
+      /** Captured hosting subscription for gate lookup; signature identity stays contextGraphId. */
+      authorityContextGraphId?: string;
       /**
        * GH #1124 — resolver the host-mode ingest caller injects to prove this CG
        * is FULLY OPEN (`accessPolicy === 0` AND `publishPolicy === 1`). This
@@ -2038,12 +2040,13 @@ export class SharedMemoryHandler {
     // Agent and peer gates are two views of the same authority snapshot. Read
     // the injected projection once so an authority-backed oracle is not
     // resolved twice for one host-mode envelope.
-    const readProjectedMeta = this.createContextGraphMetaOracleRead(contextGraphId);
+    const authorityContextGraphId = options?.authorityContextGraphId ?? contextGraphId;
+    const readProjectedMeta = this.createContextGraphMetaOracleRead(authorityContextGraphId);
     const agentGateAddresses = await withRpcUsageSite(
       CG_AUTH_RPC_SITES.hostEnvelope,
-      () => this.getContextGraphAgentGateAddresses(contextGraphId, readProjectedMeta),
+      () => this.getContextGraphAgentGateAddresses(authorityContextGraphId, readProjectedMeta),
     );
-    const allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId, readProjectedMeta);
+    const allowedPeers = await this.getContextGraphAllowedPeers(authorityContextGraphId, readProjectedMeta);
 
     // GH #1124 — resolve "fully-open (self-publishable) CG" HERE rather than
     // trusting a caller flag: the caller injects the (forced-fresh, fail-closed)

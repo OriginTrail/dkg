@@ -57,7 +57,7 @@ describe('confirmed-public host-mode policy', () => {
     expect(first.nextSeqno).toBe(1);
     expect((await send(signed)).denied).toMatch(/replayed/);
     const privateId = 'ordinary-private-reader';
-    g.wireSwmHostModeHandler(privateId, undefined, true);
+    g.wireSwmHostModeHandler(privateId, undefined, { kind: 'curated' });
     await g.swmHostModeStore!.append(privateId, new Uint8Array([9]));
     const privateRequest = await mintSignedCatchupRequest({ contextGraphId: privateId, sinceSeqno: 0,
       maxEntries: 32, maxBytes: 65536, requesterEoa: wallet.address, sign: digest => wallet.signMessage(digest) });
@@ -119,14 +119,14 @@ describe('confirmed-public host-mode policy', () => {
     g.isPrivateContextGraph = async () => false;
     g.isConfirmedPublicForHostMode = async () => true;
     expect(await (g as any).isCuratedForHostMode(cgId)).toBe(false);
-    const wired: Array<{ id: string; curated?: boolean }> = [];
-    g.wireSwmHostModeHandler = (id: string, _source?: SubscriptionSource, curated?: boolean) => {
-      wired.push({ id, curated });
+    const wired: Array<{ id: string; custody?: import('../../src/gossip-session.js').SwmHostModeCustody }> = [];
+    g.wireSwmHostModeHandler = (id: string, _source?: SubscriptionSource, custody?: import('../../src/gossip-session.js').SwmHostModeCustody) => {
+      wired.push({ id, custody }); return true;
     };
 
     await g.reconcileSwmHostModeSubscription(cgId);
 
-    expect(wired).toEqual([{ id: cgId, curated: false }]);
+    expect(wired).toEqual([{ id: cgId, custody: { kind: 'automatic-public', current: expect.any(Function) } }]);
   });
 
   it('chain-event auto-host eligibility covers the full operator matrix', async () => {
@@ -239,10 +239,10 @@ describe('confirmed-public host-mode policy', () => {
     // only case where the chain re-confirmation actually decides the outcome.
     const lateCuratedCg = 'cg-late-curated-catchup';
     const throwingCg = 'cg-policy-throws-catchup';
-    g.wireSwmHostModeHandler(publicCg, undefined, false); // public host tier
-    g.wireSwmHostModeHandler(curatedCg, undefined, true);
-    g.wireSwmHostModeHandler(lateCuratedCg, undefined, false);
-    g.wireSwmHostModeHandler(throwingCg, undefined, false);
+    g.wireSwmHostModeHandler(publicCg, undefined, { kind: 'automatic-public', current: g.swmHostModePublicPolicy().captureCurrent(publicCg) }); // public host tier
+    g.wireSwmHostModeHandler(curatedCg, undefined, { kind: 'curated' });
+    g.wireSwmHostModeHandler(lateCuratedCg, undefined, { kind: 'automatic-public', current: g.swmHostModePublicPolicy().captureCurrent(lateCuratedCg) });
+    g.wireSwmHostModeHandler(throwingCg, undefined, { kind: 'automatic-public', current: g.swmHostModePublicPolicy().captureCurrent(throwingCg) });
     const confirmed: string[] = [];
     g.isConfirmedPublicForHostMode = async (id: string) => {
       confirmed.push(id);

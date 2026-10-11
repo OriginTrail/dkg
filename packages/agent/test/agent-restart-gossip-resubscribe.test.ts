@@ -51,7 +51,7 @@ interface RestartInternals {
   config: { syncContextGraphs?: string[] };
   contextGraphSubscriptionDormancyById: Map<string, string>;
   contextGraphSubscriptionRehydrationAccountedIds: Set<string>;
-  wireSwmHostModeHandler(contextGraphId: string, source?: string, curated?: boolean): void;
+  wireSwmHostModeHandler(contextGraphId: string, source?: string, custody?: import('../src/gossip-session.js').SwmHostModeCustody): void;
   gossipWireIdFor(contextGraphId: string): string;
   rehydrateContextGraphsFromDurableState(): Promise<void>;
   updateContextGraphSubscriptionRehydrationStatusAfterPersist(
@@ -209,7 +209,7 @@ describe('DKGAgent same-instance restart re-subscribes gossip', () => {
     expect(internals.gossipRegistered.has(CG)).toBe(true);
     expect(internals.gossipRegistered.has(SYSTEM_CONTEXT_GRAPHS.AGENTS)).toBe(true);
     const hostCg = internals.gossipWireIdFor(OTHER_CG);
-    internals.wireSwmHostModeHandler(hostCg, 'manual', true);
+    internals.wireSwmHostModeHandler(hostCg, 'manual', { kind: 'curated' });
     expect(internals.swmHostModeHandlers.has(hostCg)).toBe(true);
     expect(internals.swmHostModeSubscribed.has(hostCg)).toBe(true);
     expect(internals.swmHostModeCurated.has(hostCg)).toBe(true);
@@ -323,7 +323,7 @@ describe('DKGAgent same-instance restart re-subscribes gossip', () => {
     await agent.start();
     const hostCg = internals.gossipWireIdFor(OTHER_CG);
     const hostTopic = contextGraphSharedMemoryTopic(hostCg);
-    internals.wireSwmHostModeHandler(hostCg, 'manual', true);
+    internals.wireSwmHostModeHandler(hostCg, 'manual', { kind: 'curated' });
     expect(internals.gossip.subscribedTopics).toContain(hostTopic);
 
     await agent.stop();
@@ -332,7 +332,7 @@ describe('DKGAgent same-instance restart re-subscribes gossip', () => {
 
     // The persisted-marker restore loop and the host reconciler both come
     // through here; a stale handler map would make this an idempotent no-op.
-    internals.wireSwmHostModeHandler(hostCg, 'reconciler', true);
+    internals.wireSwmHostModeHandler(hostCg, 'reconciler', { kind: 'curated' });
     expect(internals.gossip.subscribedTopics).toContain(hostTopic);
     expect(internals.swmHostModeHandlers.has(hostCg)).toBe(true);
   }, 60_000);
@@ -359,7 +359,7 @@ describe('DKGAgent same-instance restart re-subscribes gossip', () => {
     if (mode === 'member') {
       await createLocalContextGraph(agent);
       await expect.poll(() => internals.sharedMemoryGossipRegistered.has(CG)).toBe(true);
-    } else internals.wireSwmHostModeHandler(CG, 'manual', false);
+    } else internals.wireSwmHostModeHandler(CG, 'manual', { kind: 'manual-public' });
     const retained = callbackFor(internals.gossip);
     await retained(topic, new Uint8Array(), 'remote-peer');
     expect(mode === 'member' ? handle : ingest).toHaveBeenCalledOnce();
@@ -368,7 +368,7 @@ describe('DKGAgent same-instance restart re-subscribes gossip', () => {
     await agent.stop();
     await agent.start();
     if (mode === 'member') await expect.poll(() => internals.sharedMemoryGossipRegistered.has(CG)).toBe(true);
-    else internals.wireSwmHostModeHandler(CG, 'manual', false);
+    else internals.wireSwmHostModeHandler(CG, 'manual', { kind: 'manual-public' });
     await retained(topic, new Uint8Array(), 'remote-peer');
     expect(handle).not.toHaveBeenCalled();
     expect(ingest).not.toHaveBeenCalled();

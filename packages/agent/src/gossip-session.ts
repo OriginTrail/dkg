@@ -33,14 +33,10 @@ class SwmHostModeRegistrations {
   readonly handlers = registrationView(this.#records, row => row.handler);
   get(key: string): SwmHostModeRegistration | undefined { return this.#records.get(key); }
   has(key: string): boolean { return this.#records.has(key); }
-  register(key: string, registration: SwmHostModeRegistration): boolean {
-    if (this.#records.has(key)) return false;
-    this.#records.set(key, Object.freeze({ ...registration, custody: Object.freeze(registration.custody) }));
-    return true;
-  }
-  classify(key: string, custody: SwmHostModeCustody): void {
+  installOrRefresh(key: string, registration: SwmHostModeRegistration): void {
     const current = this.#records.get(key);
-    if (current) this.#records.set(key, Object.freeze({ ...current, custody: Object.freeze(custody) }));
+    // The first listener and discovery source remain authoritative on re-entry.
+    this.#records.set(key, Object.freeze({ ...(current ?? registration), custody: Object.freeze(registration.custody) }));
   }
   remove(key: string): SwmHostModeRegistration | undefined {
     const current = this.#records.get(key);

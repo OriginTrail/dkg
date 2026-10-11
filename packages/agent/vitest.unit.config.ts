@@ -99,6 +99,7 @@ export default defineConfig({
       "test/swm/host-mode-strip-ciphertext.test.ts",
       "test/swm/host-mode-public-policy.test.ts",
       "test/host-mode-public-restoration-policy.test.ts",
+      "test/host-mode-admission-custody.typechecked.test.ts",
       "test/rs-heal-stranded-kc-decorated.test.ts",
       "test/random-sampling-context-graph-resolver.test.ts",
       "test/random-sampling-proof-repair.test.ts",

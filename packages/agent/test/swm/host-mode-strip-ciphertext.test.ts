@@ -354,7 +354,7 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     const slot = String(registration.contextGraphId);
     f.g.setContextGraphSubscription(f.hash, { subscribed: false, synced: false, coreHosted: true, onChainId: slot, onChainHash: f.hash }, { persist: false });
     f.g.onChainAccessPolicyCache.set(slot, await f.chain.getContextGraphAccessPolicy(registration.contextGraphId));
-    f.core.wireSwmHostModeHandler(f.hash, SUBSCRIPTION_SOURCES.MANUAL, false);
+    f.core.wireSwmHostModeHandler(f.hash, SUBSCRIPTION_SOURCES.MANUAL, { kind: 'manual-public' });
     const handler = f.g.swmHostModeHandlers.get(f.hash)!;
     expect(f.g.wireIdToLocalCgId.get(f.hash)).toBe(f.hash);
     await expect(f.core.enableSwmHostModeFor(f.name)).resolves.toMatchObject({ subscribed: false, alreadySubscribed: false });
@@ -373,7 +373,7 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     const slot = String(registration.contextGraphId);
     f.g.setContextGraphSubscription(f.hash, { subscribed: false, synced: false, coreHosted: true, onChainId: slot, onChainHash: f.hash }, { persist: false });
     f.g.onChainAccessPolicyCache.set(slot, await f.chain.getContextGraphAccessPolicy(registration.contextGraphId));
-    f.core.wireSwmHostModeHandler(f.hash, SUBSCRIPTION_SOURCES.MANUAL, true);
+    f.core.wireSwmHostModeHandler(f.hash, SUBSCRIPTION_SOURCES.MANUAL, { kind: 'curated' });
     await f.core.awaitHostModePersistence(f.hash);
     const handler = f.g.swmHostModeHandlers.get(f.hash)!;
     const markers = await f.g.swmHostModeStore!.listHostModeSubscribedCgs();
@@ -503,7 +503,7 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     g.ingestSwmCiphertextChunkEnvelope = chunkIngest;
     installGossipStub(g);
 
-    g.wireSwmHostModeHandler(cgId, undefined, true);
+    g.wireSwmHostModeHandler(cgId, undefined, { kind: 'curated' });
     const handler = [...g.swmHostModeHandlers.values()][0]!;
     handler('', hostEnvelope(cgId, false), 'peer-legacy');
     handler('', hostEnvelope(cgId, true), 'peer-chunk');
@@ -522,7 +522,7 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     g.ingestSwmCiphertextChunkEnvelope = chunkIngest;
     installGossipStub(g);
 
-    g.wireSwmHostModeHandler(cgId, undefined, false);
+    g.wireSwmHostModeHandler(cgId, undefined, { kind: 'automatic-public', current: g.swmHostModePublicPolicy().captureCurrent(cgId) });
     const handler = [...g.swmHostModeHandlers.values()][0]!;
     handler('', hostEnvelope(cgId, false), 'peer-legacy');
     handler('', hostEnvelope(cgId, true), 'peer-chunk');
@@ -541,7 +541,7 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     g.ingestSwmCiphertextChunkEnvelope = chunkIngest;
     installGossipStub(g);
 
-    g.wireSwmHostModeHandler(cgId, undefined, false);
+    g.wireSwmHostModeHandler(cgId, undefined, { kind: 'automatic-public', current: g.swmHostModePublicPolicy().captureCurrent(cgId) });
     await installCurated(core, cgId);
     await g.reconcileSwmHostModeSubscription(cgId);
 

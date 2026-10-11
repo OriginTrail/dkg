@@ -31,8 +31,9 @@ export interface StripInternals {
   beacons: { lookupWireId(contextGraphId: string): { publisherAddress: string; curatorAddress: string; onChainContextGraphId?: string } | undefined };
   isPrivateContextGraph(cgId: string): Promise<boolean>;
   isConfirmedPublicForHostMode(cgId: string): Promise<boolean>;
-  wireSwmHostModeHandler(cgId: string, source?: SubscriptionSource, curated?: boolean): boolean;
+  wireSwmHostModeHandler(cgId: string, source?: SubscriptionSource, custody?: import('../../src/gossip-session.js').SwmHostModeCustody): boolean;
   reconcileSwmHostModeSubscription(cgId: string): Promise<void>;
+  swmHostModePublicPolicy(): { captureCurrent(id: string): () => boolean };
   ingestSwmHostModeEnvelope(cgId: string, data: Uint8Array, from: string): Promise<void>;
   ingestSwmCiphertextChunkEnvelope(cgId: string, data: Uint8Array, from: string): Promise<void>;
   enableSwmHostModeFor(cgId: string): Promise<{

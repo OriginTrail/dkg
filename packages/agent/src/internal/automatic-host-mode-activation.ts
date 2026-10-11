@@ -2,13 +2,13 @@
 import { SUBSCRIPTION_SOURCES, SYSTEM_CONTEXT_GRAPHS, createOperationContext, type SubscriptionSource, type Logger } from '@origintrail-official/dkg-core';
 import type { DKGAgent } from '../dkg-agent.js';
 import type { ContextGraphSub } from '../dkg-agent-types.js';
-import type { GossipSession } from '../gossip-session.js';
+import type { GossipSession, SwmHostModeCustody } from '../gossip-session.js';
 import { normalizeContextGraphNameHash } from '../context-graph-name-candidate.js';
 import type { ContextGraphBindingSubscription } from '../context-graph-binding-state.js';
 import type { SwmHostModeSubscriptionBinding } from '../swm/host-mode-store.js';
 
 type HostActivationMethods = Pick<DKGAgent,
-  | 'automaticSwmHostModeAdmissionAllowed' | 'restorePersistedHostModeBinding'
+  | 'automaticSwmHostModeAdmissionAllowed' | 'retireDormantSwmHostModeHandler' | 'restorePersistedHostModeBinding'
   | 'rfc64LegacySwmGossipAllowedForContextGraph' | 'unwireSwmHostModeHandler'
   | 'isMemberModeRegisteredForCg' | 'canonicalSwmHostModeKey' | 'swmHostModePublicPolicy'
   | 'swmHostModeStripCiphertext' | 'isCuratedForHostMode' | 'swmHostModeAccessPolicy'
@@ -26,6 +26,7 @@ interface ActivationLifetime {
 }
 
 type AdmissionIntent = 'discovered' | 'persisted-legacy';
+type HostModeAdmission = Readonly<{ custody: SwmHostModeCustody; current(): boolean }>;
 
 /** Capture the active agent session and only its current listener custody. */
 export function createAutomaticHostModeActivation(agent: HostActivationAgent, lifetime: ActivationLifetime) {
@@ -36,15 +37,8 @@ export function createAutomaticHostModeActivation(agent: HostActivationAgent, li
     const handler = session.hostModeRegistrations.get(key)?.handler;
     return () => session.hostModeRegistrations.get(key)?.handler === handler;
   };
-  const classify = (id: string, curated: boolean, current: () => boolean) => {
-    const key = agent.canonicalSwmHostModeKey(id);
-    session.hostModeRegistrations.classify(key, curated ? { kind: 'curated' }
-      : registration(id)?.source === SUBSCRIPTION_SOURCES.MANUAL ? { kind: 'manual-public' }
-        : { kind: 'automatic-public', current });
-  };
-
   /** Admission is distinct from activation; legacy persisted custody is explicit. */
-  const admit = async (id: string, intent: AdmissionIntent, current: () => boolean) => {
+  const admit = async (id: string, intent: AdmissionIntent, current: () => boolean): Promise<HostModeAdmission | null> => {
     const bindingCurrent = agent.swmHostModePublicPolicy().captureCurrent(id);
     const stillCurrent = () => current() && agent.automaticSwmHostModeAdmissionAllowed(id) && bindingCurrent();
     let curated: boolean;
@@ -68,13 +62,13 @@ export function createAutomaticHostModeActivation(agent: HostActivationAgent, li
     // every discovery path. Members backfill private data from their curator;
     // the explicit false kill-switch preserves legacy automatic custody.
     if (agent.swmHostModeStripCiphertext() && curated) {
-      if (registration(id) !== undefined) classify(id, true, bindingCurrent);
+      if (registration(id) !== undefined) agent.wireSwmHostModeHandler(id, registration(id)!.source, { kind: 'curated' });
       lifetime.log.info(createOperationContext('system'),
         `SWM host-mode subscription DECLINED for "${id}": private-ciphertext strip is ON ` +
         `(OT-RFC-49 WS-A — cores custody zero private SWM ciphertext for curated CGs; members backfill from the curator)`);
       return null;
     }
-    return { curated, current: stillCurrent };
+    return { custody: curated ? { kind: 'curated' } : { kind: 'automatic-public', current: stillCurrent }, current: stillCurrent };
   };
 
   /** One fenced activation flow for discovery, retry and persisted restoration. */
@@ -82,8 +76,12 @@ export function createAutomaticHostModeActivation(agent: HostActivationAgent, li
     ownerCurrent: () => boolean): Promise<void> => {
     let activationCurrent = captureActivationCurrent(id);
     const current = () => lifetime.current() && ownerCurrent() && activationCurrent();
-    if (!current() || !agent.automaticSwmHostModeAdmissionAllowed(id)
-      || (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(id)) return;
+    const canActivate = () => {
+      if (!current()) return false;
+      if (agent.automaticSwmHostModeAdmissionAllowed(id)) return true;
+      agent.retireDormantSwmHostModeHandler(id); return false;
+    };
+    if (!canActivate() || (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(id)) return;
     if (!agent.rfc64LegacySwmGossipAllowedForContextGraph(id)) {
       // Catalog authority removes an already-wired host as well as refusing
       // another independent path into the legacy SWM topic.
@@ -96,12 +94,12 @@ export function createAutomaticHostModeActivation(agent: HostActivationAgent, li
       // Automatic discovery never takes over the operator's handler or provenance.
       if (agent.swmHostModeStripCiphertext() && registration(id)?.custody.kind !== 'curated'
         && await agent.isCuratedForHostMode(id)) {
-        if (!current() || !agent.automaticSwmHostModeAdmissionAllowed(id) || agent.swmHostModeAccessPolicy(id) === 0) return;
-        classify(id, true, agent.swmHostModePublicPolicy().captureCurrent(id));
+        if (!canActivate() || agent.swmHostModeAccessPolicy(id) === 0) return;
+        agent.wireSwmHostModeHandler(id, SUBSCRIPTION_SOURCES.MANUAL, { kind: 'curated' });
       }
-      if (!current() || !agent.automaticSwmHostModeAdmissionAllowed(id)) return;
+      if (!canActivate()) return;
       await agent.maybeMarkRegisteredForHostMode(id, current);
-      if (current()) agent.automaticSwmHostModeAdmissionAllowed(id);
+      canActivate();
       return;
     }
     // Idempotent periodic re-entry still re-probes registration: a CG created
@@ -109,15 +107,16 @@ export function createAutomaticHostModeActivation(agent: HostActivationAgent, li
     // Canonical host keys make cleartext and wire-hash entry paths equivalent.
     const retainedLegacy = registration(id) !== undefined && !agent.swmHostModeStripCiphertext();
     const admission = await admit(id, retainedLegacy ? 'persisted-legacy' : intent, current);
-    if (admission === null || !agent.wireSwmHostModeHandler(id, source, admission.curated)) return;
+    if (admission === null) { canActivate(); return; }
+    if (!agent.wireSwmHostModeHandler(id, source, admission.custody)) return;
     activationCurrent = captureActivationCurrent(id);
-    classify(id, admission.curated, admission.current);
+    const admissionCurrent = () => canActivate() && admission.current();
     // Discovery awaits its new designation. Legacy restart preserves its historical
     // nonblocking marker enqueue before the registration probe.
     if (intent === 'discovered') await agent.awaitHostModePersistence(id);
-    if (!admission.current()) return;
-    await agent.maybeMarkRegisteredForHostMode(id, admission.current);
-    if (!admission.current()) return;
+    if (!admissionCurrent()) return;
+    await agent.maybeMarkRegisteredForHostMode(id, admissionCurrent);
+    if (!admissionCurrent()) return;
     if (intent === 'discovered') lifetime.log.info(createOperationContext('system'),
       `SWM host-mode subscription enabled for "${id}" (role=core)`);
   };
@@ -127,7 +126,8 @@ export function createAutomaticHostModeActivation(agent: HostActivationAgent, li
       activate(id, source, 'discovered', current),
     restore: async (entry: SwmHostModeSubscriptionBinding, strip: boolean, current: () => boolean): Promise<void> => {
       const id = entry.contextGraphId;
-      if (!lifetime.current() || !current() || !agent.automaticSwmHostModeAdmissionAllowed(id)) return;
+      if (!lifetime.current() || !current()) return;
+      if (!agent.automaticSwmHostModeAdmissionAllowed(id)) { agent.retireDormantSwmHostModeHandler(id); return; }
       try {
         if (!agent.restorePersistedHostModeBinding(id, entry.onChainId)) return;
         await activate(id, SUBSCRIPTION_SOURCES.RECONCILER, strip ? 'discovered' : 'persisted-legacy', current);
