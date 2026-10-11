@@ -12,46 +12,6 @@
   overflow: hidden;
 }
 
-/* ── Demo/mock-data fallback banner (GH #904) ── */
-.v10-mock-banner {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 14px;
-  font-size: 12px;
-  line-height: 1.4;
-  color: #7c2d12;
-  background: var(--amber-dim, rgba(251, 191, 36, 0.18));
-  border-bottom: 1px solid rgba(251, 191, 36, 0.45);
-  z-index: 30;
-}
-.v10-mock-banner strong {
-  font-weight: 700;
-}
-.v10-mock-banner-dot {
-  flex: 0 0 auto;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #f59e0b;
-  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.25);
-}
-.v10-mock-banner-reload {
-  flex: 0 0 auto;
-  margin-left: auto;
-  font-size: 11px;
-  font-weight: 600;
-  padding: 3px 12px;
-  border-radius: 6px;
-  cursor: pointer;
-  color: #7c2d12;
-  background: rgba(251, 191, 36, 0.35);
-  border: 1px solid rgba(251, 191, 36, 0.6);
-}
-.v10-mock-banner-reload:hover {
-  background: rgba(251, 191, 36, 0.55);
-}
-
 /* ── API token entry, shown when the node rejects the page's credentials ── */
 .v10-token-prompt {
   display: flex;

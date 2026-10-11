@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useRef, useCallback, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useCallback, useState, useSyncExternalStore } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { Header } from './components/Shell/Header.js';
 import { PanelLeft } from './components/Shell/PanelLeft.js';
@@ -8,13 +8,13 @@ import { PanelRight } from './components/Shell/PanelRight.js';
 import { useLayoutStore, maxBottomHeight } from './stores/layout.js';
 import { useAgentsStore } from './stores/agents.js';
 import { useTabsStore } from './stores/tabs.js';
-import { api } from './api-wrapper.js';
+import { api, detectMockMode, isUsingMocks, subscribeMockMode } from './api-wrapper.js';
 import { CONTEXT_GRAPH_PRIMER_TAB } from './lib/contextGraphPrimer.js';
 import { applyTheme } from './lib/applyTheme.js';
 import { useVisibilityPolling } from './hooks/useVisibilityPolling.js';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts.js';
 import { useShellRouting } from './hooks/useShellRouting.js';
-import { MockModeBanner } from './components/MockModeBanner.js';
+import { NodeUnavailableView } from './components/NodeUnavailableView.js';
 import { ApiTokenPrompt } from './components/ApiTokenPrompt.js';
 
 function useLiveStatus() {
@@ -196,7 +196,6 @@ function AppShell() {
 
   return (
     <div className="v10-app">
-      <MockModeBanner />
       <ApiTokenPrompt />
       <Header />
       <div className="v10-app-body">
@@ -245,6 +244,10 @@ function ContextGraphPrimerRoute() {
 }
 
 export function App() {
+  const usingMocks = useSyncExternalStore(subscribeMockMode, isUsingMocks, isUsingMocks);
+  useEffect(() => { void detectMockMode(); }, []);
+  if (usingMocks) return <NodeUnavailableView />;
+
   return (
     <Routes>
       <Route path="/network" element={
