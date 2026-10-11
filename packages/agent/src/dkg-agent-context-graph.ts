@@ -136,6 +136,7 @@ import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { buildAuthoritativePublicMetaQuads } from './context-graph-public-meta-proof.js';
 import { replaceContextGraphMetadataFact } from './context-graph-metadata-fact.js';
 import { addExternalAuthorCuratorAsParticipant, isExternalAuthorCurator } from './external-author-curator.js';
+import { externalAuthorControlDigestSigner } from './external-author-signing.js';
 import { addRegistrationParticipantAgent, type RegistrationRoster } from './context-graph-registration-roster.js';
 import {
   RFC64_UNREGISTERED_REPLICA_AUTHORITY_PREDICATE_V1,
@@ -616,10 +617,18 @@ export class ContextGraphMethods extends DKGAgentBase {
       const signerRecord = ownerAddress === effectiveCallerAddress
         ? this.getWorkspaceSigningAgentForAddress(ownerAddress)
         : null;
-      if (requiresAuthenticatedReplicaAuthority && signerRecord === null) {
+      let signDigest: ((digest: Uint8Array) => Promise<string>) | undefined;
+      if (signerRecord !== null) {
+        const wallet = new ethers.Wallet(signerRecord.privateKey);
+        signDigest = (digest) => wallet.signMessage(digest);
+      } else if (requiresAuthenticatedReplicaAuthority && ownerAddress !== undefined && ownerAddress === effectiveCallerAddress) {
+        // An owner whose key the external signer holds as an author key signs the seed there.
+        signDigest = await externalAuthorControlDigestSigner(this.config, ownerAddress);
+      }
+      if (requiresAuthenticatedReplicaAuthority && signDigest === undefined) {
         throw new Error(
           `Context graph "${opts.id}" requires an authenticated RFC-64 replica authority, ` +
-          `but this node has no custodial signing key for ${ownerAddress}.`,
+          `but this node holds no signing key for ${ownerAddress}.`,
         );
       }
       if (
@@ -627,10 +636,9 @@ export class ContextGraphMethods extends DKGAgentBase {
         && networkId !== 'none'
         && ownerAddress !== undefined
         && /^0x[0-9a-f]{40}$/iu.test(ownerAddress)
-        && signerRecord !== null
+        && signDigest !== undefined
       ) {
         const owner = ownerAddress as EvmAddressV1;
-        const wallet = new ethers.Wallet(signerRecord.privateKey);
         const seed = await mintRfc64UnregisteredReplicaAuthoritySeedV1({
           networkId: networkId as NetworkIdV1,
           contextGraphId: opts.id as ContextGraphIdV1,
@@ -641,10 +649,7 @@ export class ContextGraphMethods extends DKGAgentBase {
             normalisedPublishAuthorityAccountId?.toString(10) ?? '0',
           memberAddresses: [],
           rosterVersion: '0',
-          signer: Object.freeze({
-            issuer: owner,
-            signDigest: (digest: Uint8Array) => wallet.signMessage(digest),
-          }),
+          signer: Object.freeze({ issuer: owner, signDigest }),
         });
         mintedReplicaAuthoritySeed = Object.freeze({ networkId: networkId as NetworkIdV1, seed });
         // DEPRECATED compat path: the ontology system graph is being retired as

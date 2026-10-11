@@ -145,7 +145,7 @@ describe('RFC-64 unregistered replica authority', () => {
       name: 'Missing signer attempt',
       accessPolicy: 0,
       callerAgentAddress: externalOwner,
-    })).rejects.toThrow(/no custodial signing key/iu);
+    })).rejects.toThrow(/no signing key/iu);
     await expect(publisher.contextGraphExists(
       `${externalOwner}/missing-signer-attempt`,
     )).resolves.toBe(false);

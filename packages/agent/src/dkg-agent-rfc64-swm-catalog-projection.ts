@@ -53,6 +53,7 @@ import { markRfc64LegacySwmRepublishedV1 } from
   './rfc64/legacy-swm-boundary-v1.js';
 import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 } from
   './rfc64/catalog-peers-v1.js';
+import { externalAuthorControlDigestSigner, signsThroughExternalSigner } from './external-author-signing.js';
 
 const RFC64_DEFAULT_CATALOG_DELEGATION_EXPIRES_AT_V1 =
   '253402300799000' as TimestampMsV1;
@@ -245,27 +246,39 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     }
     const signMessageAs = this.chain.signMessageAs?.bind(this.chain);
     const signMessage = this.chain.signMessage?.bind(this.chain);
+    const signWithChain = async (message: Uint8Array): Promise<string> => {
+      const compact = await raceAgainstAbortV1(
+        () => (
+          signMessageAs !== undefined
+            ? signMessageAs(authorAddress, message)
+            : signMessage !== undefined
+              ? signMessage(message)
+              : Promise.reject(new Error('RFC-64 configured chain has no message signer'))
+        ),
+        signal,
+      );
+      const signature = ethers.Signature.from({
+        r: ethers.hexlify(compact.r),
+        yParityAndS: ethers.hexlify(compact.vs),
+      }).serialized;
+      if (ethers.verifyMessage(message, signature).toLowerCase() !== authorAddress) {
+        throw new Error('RFC-64 configured publisher cannot sign for the confirmed KA author');
+      }
+      return signature;
+    };
+    const config = this.config;
+    const chain = this.chain;
     return Object.freeze({
       address: authorAddress,
       signMessage: async (message: Uint8Array) => {
-        const compact = await raceAgainstAbortV1(
-          () => (
-            signMessageAs !== undefined
-              ? signMessageAs(authorAddress, message)
-              : signMessage !== undefined
-                ? signMessage(message)
-                : Promise.reject(new Error('RFC-64 configured chain has no message signer'))
-          ),
-          signal,
-        );
-        const signature = ethers.Signature.from({
-          r: ethers.hexlify(compact.r),
-          yParityAndS: ethers.hexlify(compact.vs),
-        }).serialized;
-        if (ethers.verifyMessage(message, signature).toLowerCase() !== authorAddress) {
-          throw new Error('RFC-64 configured publisher cannot sign for the confirmed KA author');
+        // An author key the external signer holds signs there. A node that signs
+        // externally never asks its payers to sign as an author.
+        const external = await externalAuthorControlDigestSigner(config, authorAddress);
+        if (external !== undefined) return raceAgainstAbortV1(() => external(message), signal);
+        if (signsThroughExternalSigner(chain)) {
+          throw new Error(`RFC-64: author ${authorAddress} has no key on this node and is no author key of its external signer`);
         }
-        return signature;
+        return signWithChain(message);
       },
     });
   }
