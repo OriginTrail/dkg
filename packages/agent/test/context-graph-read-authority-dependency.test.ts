@@ -5,6 +5,7 @@ import {
   ContextGraphReadAuthorityUnavailableError,
   contextGraphReadAuthorityDependencyOf,
   resolveContextGraphReadAuthorityDecision,
+  resolveScopedContextGraphQueryReadAuthority,
   type ContextGraphReadAuthorityInput,
 } from '../src/context-graph-read-authority.js';
 
@@ -60,11 +61,23 @@ describe('read-authority grant scope', () => {
     { name: 'legacy node participant', scope: 'node', overrides: { defaultAgentAddress: caller, getLegacyParticipants: async () => [caller] } },
     { name: 'legacy node subscription', scope: 'node', overrides: { allowSubscriptionFallback: true, hasLegacySubscription: true } },
     { name: 'legacy node peer', scope: 'node', overrides: { getAllowedPeers: async () => ['peer-local'] } },
+    { name: 'legacy node identity participant', scope: 'node', overrides: { getLegacyParticipants: async () => ['12'], getLocalIdentityId: async () => 12n } },
+    { name: 'legacy node invitation', scope: 'node', overrides: { getLegacyParticipants: async () => ['another-node'], getAllowedPeers: async () => ['peer-local'] } },
+    { name: 'legacy edge subscription', scope: 'node', overrides: { getLegacyParticipants: async () => ['another-node'], allowSubscriptionFallback: true, hasLegacySubscription: true } },
   ] satisfies Array<{ name: string; scope: string; overrides: Partial<ContextGraphReadAuthorityInput> }>)(
     '$name explicitly reports its grant scope', async ({ scope, overrides }) => {
       expect(await resolveContextGraphReadAuthorityDecision(input(overrides))).toMatchObject({ outcome: 'allowed', grantScope: scope });
     },
   );
+  it.each([undefined, caller])('keeps local working-memory grants scoped to caller %s', async callerAgentAddress => {
+    const decision = await resolveScopedContextGraphQueryReadAuthority({
+      contextGraphId: 'cg-2834', view: 'working-memory', callerAgentAddress, targetsSharedMemory: false,
+      resolveAuthority: async () => resolveContextGraphReadAuthorityDecision(input()),
+      isLocalFirstUnregistered: async () => true,
+      readCurrentBinding: () => ({}),
+    });
+    expect(decision).toMatchObject({ outcome: 'allowed', reason: 'local-first-working-memory-owner', grantScope: callerAgentAddress ? 'caller' : 'node' });
+  });
   it('denial conveys no grant', async () => {
     expect(await resolveContextGraphReadAuthorityDecision(input())).toMatchObject({ outcome: 'denied', grantScope: 'none' });
   });
