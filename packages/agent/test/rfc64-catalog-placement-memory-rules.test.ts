@@ -452,7 +452,7 @@ describe('RFC-64 catalog mutation memory on a running agent', () => {
       await expect(agent.repairRfc64FinalizedPrivateCatalogPlacementV1(repair))
         .rejects.toThrow('RFC-64 finalized-private placement repair lane is inactive');
       // Nothing was asked of the catalog, remembered or durable.
-      expect(stores.reads).toEqual({ bundles: 0, controlObjects: 0, appliedHead: 0, inventorySnapshot: 0, cas: 0 });
+      expect(stores.reads).toEqual({ bundles: 0, controlObjects: 0, appliedHead: 0, inventorySnapshot: 0, inventoryRow: 0, cas: 0 });
       expect(markers.list()).toEqual([repair]);
 
       const serving = agent.resolveRfc64CatalogServingAuthorityV1.bind(agent);

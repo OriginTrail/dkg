@@ -199,17 +199,14 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     }));
     placement.covered(covered);
     if (covered) return { status: 'already-covered', action: 'private-placement' };
-    // Only a placement that has work to do reads the author's whole inventory.
-    const snapshot = persistence.swmAuthorInventory.readSwmAuthorInventorySnapshotV1(
-      computeSwmAuthorInventoryScopeDigestV1(inventoryScope),
-      params.authorAddress,
+    // This placement needs one sealed asset, not a whole-author completeness claim.
+    const candidate = persistence.swmAuthorInventory.readSwmAuthorInventoryRowV1(
+      computeSwmAuthorInventoryScopeDigestV1(inventoryScope), params.authorAddress, params.kaUal,
+
     );
-    const row = snapshot?.rows.find((candidate) => (
-      candidate.assertionCoordinate === params.assertionCoordinate
-      && candidate.assertionVersion === params.assertionVersion
-      && candidate.kaUal === params.kaUal
-      && candidate.sealDigest === params.sealDigest
-    ));
+    const row = candidate !== null && candidate.assertionCoordinate === params.assertionCoordinate
+      && candidate.assertionVersion === params.assertionVersion && candidate.sealDigest === params.sealDigest
+      ? candidate : undefined;
     const asset: Rfc64CatalogSuccessorAssetInputV1 = await placement.measure('asset', () => (row === undefined
       ? resolveRfc64ConfirmedVmRepairCatalogAssetV1({
         store: this.store,

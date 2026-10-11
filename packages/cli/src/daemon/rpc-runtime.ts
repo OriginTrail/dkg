@@ -1,5 +1,6 @@
 import type {
   RpcRequestGovernor,
+  RpcRequestGovernorWindow,
   RpcUsageWindow,
 } from '@origintrail-official/dkg-chain';
 import {
@@ -31,6 +32,8 @@ export interface DaemonRpcEndpointProbe {
 
 /** One bound transport shared by every daemon-owned direct RPC route. */
 export interface DaemonRouteRpcTransport {
+  /** Non-draining snapshot; interval counters reset only at the daemon's log tick. */
+  snapshotGovernor(): RpcRequestGovernorWindow;
   createProvider(
     rpcUrl: string,
     rpcUrls?: readonly string[],
@@ -154,7 +157,7 @@ export function createDaemonRpcRuntime(
     ...(projected === undefined
       ? {}
       : { chainConfig: bindRuntimeRpcRequestGovernor(projected, governor) }),
-    routeTransport: Object.freeze({ createProvider, probeEndpoint }),
+    routeTransport: Object.freeze({ createProvider, probeEndpoint, snapshotGovernor: () => governor.snapshot() }),
     drainRouteRpcUsage: () => usage.drainRpcUsage(),
   });
 }
