@@ -186,20 +186,15 @@ describe('ManagedWorkRecoveryCoordinatorV1', () => {
     expect(coordinator.retain('query', 10, token)).toBeNull();
     expect(vi.getTimerCount()).toBe(0);
   });
-  it('counts retained server work only after its physical HTTP task settles', async () => {
+  it('keeps retained server work busy until confirmed generation termination', async () => {
     const state = { recovering: false, generation: 0 };
     const pending = vi.fn();
     const recover = vi.fn();
-    let finish!: () => void;
-    const physical = new Promise<void>((resolve) => { finish = resolve; });
     const coordinator = new ManagedWorkRecoveryCoordinatorV1({
       now: () => Date.now(), onPendingChange: pending,
       capability: { readState: () => state, recover },
     });
-    coordinator.retain('query', Date.now() + 1_000, coordinator.begin(state), physical);
-    expect(pending).not.toHaveBeenCalled();
-    finish();
-    await Promise.resolve();
+    coordinator.retain('query', Date.now() + 1_000, coordinator.begin(state));
     expect(pending).toHaveBeenCalledExactlyOnceWith(true);
     await vi.advanceTimersByTimeAsync(1_000);
     expect(recover).toHaveBeenCalledExactlyOnceWith('query');
@@ -268,22 +263,18 @@ describe('ManagedWorkRecoveryCoordinatorV1', () => {
     } finally { coordinator.close(); }
   });
 
-  it.each(['release', 'close'] as const)('a late physical settlement after %s cannot resurrect activity', async (stop) => {
+  it.each(['release', 'close'] as const)('released retained work after %s cannot request recovery', async (stop) => {
     const state = { recovering: false, generation: 0 };
     const pending = vi.fn();
     const recover = vi.fn();
-    let finish!: () => void;
-    const physical = new Promise<void>((resolve) => { finish = resolve; });
     const coordinator = new ManagedWorkRecoveryCoordinatorV1({
       now: () => Date.now(), onPendingChange: pending,
       capability: { readState: () => state, recover },
     });
-    const retention = coordinator.retain('query', Date.now() + 1_000, coordinator.begin(state), physical);
+    const retention = coordinator.retain('query', Date.now() + 1_000, coordinator.begin(state));
     if (stop === 'close') coordinator.close(); else retention?.release();
-    finish();
-    await Promise.resolve();
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(pending).not.toHaveBeenCalled();
+    expect(pending.mock.calls).toEqual([[true], [false]]);
     expect(recover).not.toHaveBeenCalled();
   });
 
@@ -296,18 +287,13 @@ describe('ManagedWorkRecoveryCoordinatorV1', () => {
         if (failure === 'throws') throw new Error('not signalled');
         state.admissionsPaused = true;
       });
-      let finish!: () => void;
-      const physical = new Promise<void>((resolve) => { finish = resolve; });
       const coordinator = new ManagedWorkRecoveryCoordinatorV1({
         now: () => Date.now(), onPendingChange: pending,
         capability: { readState: () => state, recover },
       });
       try {
-        const retention = coordinator.clientTimedOut('update', Date.now(), coordinator.begin(state), physical);
+        const retention = coordinator.clientTimedOut('update', Date.now(), coordinator.begin(state));
         expect(recover).toHaveBeenCalledExactlyOnceWith('update');
-        expect(pending).not.toHaveBeenCalled();
-        finish();
-        await Promise.resolve();
         expect(pending.mock.calls).toEqual([[true]]);
         await vi.advanceTimersByTimeAsync(999);
         expect(recover).toHaveBeenCalledTimes(1);

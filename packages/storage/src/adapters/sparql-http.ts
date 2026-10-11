@@ -1,3 +1,4 @@
+import { SparqlHttpResponseError } from './sparql-http-response-error.js';
 /**
  * SparqlHttpStore — TripleStore adapter for any SPARQL 1.1 Protocol endpoint.
  *
@@ -131,73 +132,10 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 const DEFAULT_SLOW_QUERY_THRESHOLD_MS = 10_000;
 const DEFAULT_SLOW_QUERY_SAMPLE_RATE = 1;
 const MANAGED_LIST_GRAPHS_CACHE_MS = 30_000;
-/**
- * A non-OK response from the configured SPARQL endpoint.
- *
- * GH#1758 — the upstream status used to be rendered into the message and then
- * recovered at the HTTP boundary with a regex, which coupled the daemon route
- * to this file's exact diagnostic wording. Carrying `status` as data lets the
- * route distinguish "the caller's SPARQL was malformed" (400/422) from
- * "the store rejected US" (401/403/404/429) without string matching.
- *
- * `message` is unchanged from the previous template so existing log greps and
- * error-message assertions keep working.
- */
-export class SparqlHttpResponseError extends Error {
-  /** Stable discriminant for cross-boundary recognition. */
-  readonly code = SPARQL_HTTP_RESPONSE_ERROR_CODE;
-  readonly status: number;
-  readonly operation: string;
-  readonly responseExcerpt: string;
-
-  constructor(operation: string, status: number, responseExcerpt: string) {
-    super(`SPARQL HTTP ${operation} failed (${status}): ${responseExcerpt}`);
-    this.name = 'SparqlHttpResponseError';
-    this.status = status;
-    this.operation = operation;
-    this.responseExcerpt = responseExcerpt;
-  }
-}
-
-/** Stable discriminant, so the guard does not key off a mutable class name. */
-export const SPARQL_HTTP_RESPONSE_ERROR_CODE = 'SPARQL_HTTP_RESPONSE';
-
-/**
- * The contract a cross-boundary consumer may rely on.
- *
- * PR #2330 review — the previous guard narrowed to the concrete class after
- * checking only `name` and `status`, so `{ name: 'SparqlHttpResponseError',
- * status: 400 }` satisfied it and TypeScript then permitted
- * `err.operation.toUpperCase()` on a value with no `operation`. Narrow to the
- * shape actually validated instead.
- */
-export interface SparqlHttpResponseErrorLike {
-  readonly code: typeof SPARQL_HTTP_RESPONSE_ERROR_CODE;
-  readonly status: number;
-  readonly operation: string;
-  readonly responseExcerpt: string;
-  readonly message: string;
-}
-
-/**
- * True when `err` carries the full SPARQL HTTP response contract — either as
- * the concrete class, or structurally when `instanceof` cannot survive the
- * boundary (workers, duplicate module instances). EVERY field the interface
- * promises is validated.
- */
-export function isSparqlHttpResponseError(err: unknown): err is SparqlHttpResponseErrorLike {
-  if (err instanceof SparqlHttpResponseError) return true;
-  if (typeof err !== 'object' || err === null) return false;
-  const c = err as Partial<Record<keyof SparqlHttpResponseErrorLike, unknown>>;
-  return (
-    c.code === SPARQL_HTTP_RESPONSE_ERROR_CODE &&
-    typeof c.status === 'number' &&
-    Number.isFinite(c.status) &&
-    typeof c.operation === 'string' &&
-    typeof c.responseExcerpt === 'string' &&
-    typeof c.message === 'string'
-  );
-}
+export {
+  SparqlHttpResponseError, SPARQL_HTTP_RESPONSE_ERROR_CODE, isSparqlHttpResponseError,
+  type SparqlHttpResponseErrorLike,
+} from './sparql-http-response-error.js';
 
 export const DEFAULT_SPARQL_HTTP_TIMEOUT_MS = 30_000;
 const monotonicNow = (): number => performance.now();
@@ -317,7 +255,8 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
   private readonly workLifecycle: AbortableStoreWorkLifecycle;
   private readonly managedAbandonedWorkRecovery: ManagedWorkRecoveryCoordinatorV1;
   private activeStoreOperations = 0;
-  private retainedManagedWork = 0;
+  private retainedManagedWorkPending = false;
+  private managedBusy = false;
   private listGraphsCache: string[] | null = null;
   private listGraphsCachedAt = 0;
   private listGraphsGeneration = 0;
@@ -382,7 +321,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
           }
         : undefined,
       onPendingChange: (pending) => {
-        this.retainedManagedWork = pending ? 1 : 0;
+        this.retainedManagedWorkPending = pending;
         this.reportManagedRuntimeActivity(managedRuntimeHooks);
       },
     });
@@ -409,12 +348,14 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     hooks: Readonly<ManagedOxigraphRuntimeHooksV1> | undefined,
   ): void {
     try {
-      const activeOperations = this.activeStoreOperations + this.retainedManagedWork;
+      const busy = this.activeStoreOperations > 0 || this.retainedManagedWorkPending;
+      if (busy === this.managedBusy) return;
+      this.managedBusy = busy;
       if (hooks?.registerActivity) {
         this.managedActivityLease ??= this.openManagedActivityLease(hooks);
-        this.managedActivityLease?.report(activeOperations);
+        this.managedActivityLease?.report(busy);
       } else {
-        hooks?.onActivityChange?.(activeOperations);
+        hooks?.onBusyChange?.(busy);
       }
     } catch {
       // Runtime observation cannot alter store operation semantics.
@@ -704,7 +645,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
         // shows that, so its retention stays.
         const retention = timeoutSignal.aborted
           ? null
-          : this.managedAbandonedWorkRecovery.retain(operation, deadline, recoveryToken, detachedRequest);
+          : this.managedAbandonedWorkRecovery.retain(operation, deadline, recoveryToken);
         const settled = () => {
           if (serverFinished) retention?.release();
         };
@@ -712,7 +653,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       }
       if (timeoutSignal.aborted) {
         this.managedAbandonedWorkRecovery.clientTimedOut(
-          operation, deadline, dispatched && !serverFinished ? recoveryToken : null, detachedRequest,
+          operation, deadline, dispatched && !serverFinished ? recoveryToken : null,
         );
         throw new StoreOperationTimeoutError({
           backend: this.managedOxigraph ? 'oxigraph-server' : 'sparql-http',

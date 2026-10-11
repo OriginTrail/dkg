@@ -2,16 +2,58 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
-import { createManagedOxigraphSparqlStoreV1 } from '../src/adapters/sparql-http.js';
+import { createManagedOxigraphSparqlStoreV1, SparqlHttpStore } from '../src/adapters/sparql-http.js';
 import { StorePriorityScheduler } from '../src/store-priority-scheduler.js';
 import { HEAD_GRAPH, PROJECTION_GRAPH, authorCommitInput } from './rfc64-author-commit-cas-harness.js';
 
 afterEach(() => vi.restoreAllMocks());
 
 describe('managed CAS maintenance boundary', () => {
+  it.each(['managed', 'generic'] as const)('preserves an actual HTTP403 rejection on a %s transactional store', async (kind) => {
+    const requests: string[] = [];
+    const server = createServer((request, response) => {
+      void (async () => {
+        const parts: Buffer[] = [];
+        for await (const part of request) parts.push(Buffer.from(part));
+        const body = Buffer.concat(parts).toString('utf8');
+        requests.push(body);
+        if (requests.length === 1) response.writeHead(403).end('write permission denied');
+        else response.writeHead(204).end();
+      })().catch(error => response.destroy(error));
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const options = {
+      queryEndpoint: `http://127.0.0.1:${(server.address() as AddressInfo).port}/query`,
+      consistencyProfile: 'atomic-readback' as const,
+    };
+    const store = kind === 'managed' ? createManagedOxigraphSparqlStoreV1(options)
+      : new SparqlHttpStore(options);
+    const before = [PROJECTION_GRAPH, HEAD_GRAPH].map(graph => store.getWriteRevision(graph));
+    try {
+      await expect(store.rfc64AuthorCommitCasV1(authorCommitInput())).rejects.toMatchObject({
+        name: 'SparqlHttpResponseError', status: 403,
+      });
+      expect(requests.some(body => body.startsWith('ASK'))).toBe(false);
+      expect([PROJECTION_GRAPH, HEAD_GRAPH].map(graph => store.getWriteRevision(graph))).toEqual(before);
+    } finally {
+      await store.close();
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    }
+  });
+
+  it('keeps an HTTP500 update failure indeterminate rather than asserting no commit', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('backend outcome unknown', { status: 500 }));
+    const store = createManagedOxigraphSparqlStoreV1({ queryEndpoint: 'http://127.0.0.1:7878/query' });
+    try {
+      await expect(store.rfc64AuthorCommitCasV1(authorCommitInput())).rejects.toMatchObject({ outcome: 'indeterminate' });
+      expect(store.getWriteRevision(PROJECTION_GRAPH)).toMatchObject({ stable: false });
+    } finally { await store.close(); }
+  });
+
   it('keeps the actual HTTP receipt and cleanup alive during a maintenance drain', async () => {
     const state = { recovering: false, admissionsPaused: false, generation: 0 };
-    let active = 0;
+    let active = false;
     let receiptStarted!: () => void;
     const receiptDispatched = new Promise<void>((resolve) => { receiptStarted = resolve; });
     let releaseReceipt!: () => void;
@@ -37,11 +79,11 @@ describe('managed CAS maintenance boundary', () => {
     const store = createManagedOxigraphSparqlStoreV1({
       queryEndpoint: `http://127.0.0.1:${(server.address() as AddressInfo).port}/query`,
       timeout: 2_000,
-    }, { getRecoveryState: () => ({ ...state }), onActivityChange: (count) => { active = count; } });
+    }, { getRecoveryState: () => ({ ...state }), onBusyChange: (count) => { active = count; } });
     const commit = store.rfc64AuthorCommitCasV1(authorCommitInput());
     try {
       await Promise.race([receiptDispatched, commit.then(() => { throw new Error('CAS ended before its receipt'); })]);
-      expect(active).toBeGreaterThan(0);
+      expect(active).toBe(true);
       await expect(store.query('ASK {}')).rejects.toMatchObject({ outcome: 'not_started' });
       expect(requests).toHaveLength(2);
       releaseReceipt();
@@ -58,7 +100,7 @@ describe('managed CAS maintenance boundary', () => {
 
   it('drains an admitted CAS through its receipt and cleanup while refusing fresh work', async () => {
     const state = { recovering: false, admissionsPaused: false, generation: 0 };
-    const activities: number[] = [];
+    const activities: boolean[] = [];
     const calls: string[] = [];
     let releaseUpdate!: () => void;
     const heldUpdate = new Promise<void>((resolve) => { releaseUpdate = resolve; });
@@ -85,7 +127,7 @@ describe('managed CAS maintenance boundary', () => {
       }),
     }, {
       getRecoveryState: () => ({ ...state }),
-      onActivityChange: (active) => { activities.push(active); },
+      onBusyChange: (active) => { activities.push(active); },
     });
     const before = store.getWriteRevision(PROJECTION_GRAPH);
     const commit = store.rfc64AuthorCommitCasV1(authorCommitInput());
@@ -98,8 +140,8 @@ describe('managed CAS maintenance boundary', () => {
       expect(calls[2]).toContain('DROP SILENT GRAPH');
       expect(store.getWriteRevision(PROJECTION_GRAPH)).toMatchObject({ stable: true });
       expect(store.getWriteRevision(PROJECTION_GRAPH).generation).toBeGreaterThan(before.generation);
-      const firstBusy = activities.findIndex((active) => active > 0);
-      expect(activities.slice(firstBusy, -1).every((active) => active > 0)).toBe(true);
+      const firstBusy = activities.findIndex((active) => active);
+      expect(activities.slice(firstBusy, -1).every((active) => active)).toBe(true);
       await expect(store.query('ASK {}')).rejects.toMatchObject({ outcome: 'not_started' });
       expect(calls).toHaveLength(3);
     } finally {
@@ -108,7 +150,7 @@ describe('managed CAS maintenance boundary', () => {
     }
   });
 
-  it.each(['terminated', 'malformed', 'transport'] as const)(
+  it.each(['terminated', 'malformed', 'transport', 'refused'] as const)(
     'marks all semantic graphs indeterminate after a submitted CAS loses its %s receipt',
     async (failure) => {
       const state = { recovering: false, admissionsPaused: false, generation: 0 };
@@ -121,6 +163,7 @@ describe('managed CAS maintenance boundary', () => {
         }
         if (String(init?.body).startsWith('ASK')) {
           if (failure === 'transport') throw new Error('receipt transport lost');
+          if (failure === 'refused') return new Response('read forbidden', { status: 403 });
           return new Response(JSON.stringify({ head: { vars: [] }, results: { bindings: [] } }));
         }
         return new Response(null, { status: 200 });

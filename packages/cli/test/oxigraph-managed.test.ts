@@ -927,14 +927,14 @@ require('node:http').createServer((_req, res) => res.end('orphan')).listen(Numbe
             updateEndpoint: `http://127.0.0.1:${port}/update`,
           },
         });
-        const activityReports: number[] = [];
+        const activityReports: boolean[] = [];
         const originalRegisterStoreActivity = result!.handle.registerStoreActivity.bind(result!.handle);
         const registerStoreActivity = vi
           .spyOn(result!.handle, 'registerStoreActivity')
           .mockImplementation(() => {
             const lease = originalRegisterStoreActivity();
             return {
-              report: (activeOperations: number) => {
+              report: (activeOperations: boolean) => {
                 activityReports.push(activeOperations);
                 lease.report(activeOperations);
               },
@@ -949,8 +949,8 @@ require('node:http').createServer((_req, res) => res.end('orphan')).listen(Numbe
             value: false,
           });
           expect(registerStoreActivity).toHaveBeenCalledOnce();
-          expect(activityReports).toContain(1);
-          expect(activityReports.at(-1)).toBe(0);
+          expect(activityReports).toContain(true);
+          expect(activityReports.at(-1)).toBe(false);
         } finally {
           await runtimeStore.close();
         }

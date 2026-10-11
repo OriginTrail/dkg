@@ -294,7 +294,7 @@ describe('managed WAL maintenance supervision (GH#2395)', () => {
     try {
       const firstPid = await fetchPid(port);
       const activity = handle.registerStoreActivity();
-      activity.report(1);
+      activity.report(true);
       await sleep(180);
       expect(await fetchPid(port)).toBe(firstPid);
       expect(measurements).toBeGreaterThanOrEqual(2);
@@ -306,7 +306,7 @@ describe('managed WAL maintenance supervision (GH#2395)', () => {
         generation: 0,
       });
 
-      activity.report(0);
+      activity.report(false);
       await sleep(40);
       expect(await fetchPid(port)).toBe(firstPid);
       let replacementPid = firstPid;

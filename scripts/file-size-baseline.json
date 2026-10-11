@@ -150,7 +150,7 @@
     "packages/random-sampling/src/prover.ts": 918,
     "packages/storage/src/adapters/blazegraph.ts": 958,
     "packages/storage/src/adapters/oxigraph-worker.ts": 920,
-    "packages/storage/src/adapters/sparql-http.ts": 1517,
+    "packages/storage/src/adapters/sparql-http.ts": 1458,
     "packages/storage/src/changelog-store.ts": 1161,
     "packages/storage/src/graph-manager.ts": 1050,
     "packages/storage/src/graph-set-index-store.ts": 934,

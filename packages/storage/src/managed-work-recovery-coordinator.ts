@@ -32,7 +32,6 @@ interface RetainedWork {
   readonly deadline: number;
   readonly lifecycleGeneration: number;
   readonly storeGeneration: number;
-  physicallyTracked: boolean;
 }
 
 /**
@@ -74,9 +73,8 @@ export class ManagedWorkRecoveryCoordinatorV1 {
     operation: StoreOperation,
     deadline: number,
     token: ManagedWorkRecoveryTokenV1 | null,
-    physicalWork?: Promise<unknown>,
   ): ManagedWorkRetentionV1 | null {
-    return this.#retain(operation, deadline, token, physicalWork, false);
+    return this.#retain(operation, deadline, token, false);
   }
 
   /** Own immediate timeout notification and its retained recovery backstop. */
@@ -84,9 +82,8 @@ export class ManagedWorkRecoveryCoordinatorV1 {
     operation: StoreOperation,
     deadline: number,
     token: ManagedWorkRecoveryTokenV1 | null,
-    physicalWork?: Promise<unknown>,
   ): ManagedWorkRetentionV1 | null {
-    const retention = this.#retain(operation, deadline, token, physicalWork, true);
+    const retention = this.#retain(operation, deadline, token, true);
     if (token !== null && retention === null) return null;
     try {
       this.#options.capability?.recover(operation);
@@ -103,7 +100,6 @@ export class ManagedWorkRecoveryCoordinatorV1 {
     operation: StoreOperation,
     deadline: number,
     token: ManagedWorkRecoveryTokenV1 | null,
-    physicalWork: Promise<unknown> | undefined,
     clientTimeout: boolean,
   ): ManagedWorkRetentionV1 | null {
     if (token === null || token.lifecycleGeneration !== this.#lifecycleGeneration) return null;
@@ -121,22 +117,12 @@ export class ManagedWorkRecoveryCoordinatorV1 {
       deadline,
       lifecycleGeneration: token.lifecycleGeneration,
       storeGeneration: token.storeGeneration,
-      physicallyTracked: physicalWork !== undefined,
     };
     this.#retained.add(read);
     // Preserve the fence before immediate timeout notification. Let that
     // attempt settle before retrying, keeping the original deadline intact.
     if (clientTimeout) this.#retryAt = Math.max(this.#retryAt, this.#options.now() + 1_000);
     this.#reportPending();
-    // The work lifecycle already counts a detached HTTP task. Only add a
-    // server-work fence after that physical task settles without proof that
-    // the server finished; otherwise one request would be counted twice.
-    const physicalSettled = () => {
-      if (!this.#retained.has(read)) return;
-      read.physicallyTracked = false;
-      this.#reportPending();
-    };
-    void physicalWork?.then(physicalSettled, physicalSettled);
     this.#arm();
     return {
       release: () => {
@@ -213,7 +199,7 @@ export class ManagedWorkRecoveryCoordinatorV1 {
   }
 
   #reportPending(): void {
-    const pending = [...this.#retained].some((work) => !work.physicallyTracked);
+    const pending = this.#retained.size > 0;
     if (pending === this.#reportedPending) return;
     this.#reportedPending = pending;
     try {

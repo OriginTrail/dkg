@@ -26,7 +26,7 @@ export async function runPreAgentStoreBootSteps(options: PreAgentStoreBootOption
   const { log } = options;
   const activity = options.managedOxigraph?.registerStoreActivity();
   try {
-    activity?.report(1);
+    activity?.report(true);
     // Refuse to start on invalid external-backend config (missing URL,
     // missing blob/snapshot directory). This fires before the health
     // check so operators see a single-line config error, not a confusing

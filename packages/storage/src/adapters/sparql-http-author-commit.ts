@@ -1,3 +1,4 @@
+import { isDefinitiveSparqlUpdateRejectionV1 } from './sparql-http-response-error.js';
 import type { AbortableStoreWorkLifecycle } from '../abortable-store-work-lifecycle.js';
 import type { GraphWriteGenTracker } from '../graph-write-gen.js';
 import {
@@ -27,16 +28,23 @@ export function runSparqlHttpAuthorCommitV1(input: {
       storeGeneration: input.storeGeneration,
       dispatched: false,
     };
+    let updateRejected = false;
     const scope = { kind: 'graphs' as const, graphs: input.touchedGraphs };
     try {
       return await executeRfc64AuthorCommitCasV1({
-        executeUpdate: () => input.executeUpdate(admission, signal),
+        executeUpdate: async () => {
+          try { await input.executeUpdate(admission, signal); }
+          catch (error) {
+            updateRejected = isDefinitiveSparqlUpdateRejectionV1(error);
+            throw error;
+          }
+        },
         readReceipt: () => input.readReceipt(admission, signal),
         cleanup: () => input.cleanup(admission),
         onCommitted: () => input.writeGen.recordWrite(scope),
       });
     } catch (error) {
-      if (!admission.dispatched) throw error;
+      if (!admission.dispatched || updateRejected) throw error;
       // Only a boolean receipt certifies commit/conflict. A refused or lost
       // receipt after dispatch cannot prove the semantic graphs stayed put.
       input.writeGen.beginWrite(scope).indeterminate();

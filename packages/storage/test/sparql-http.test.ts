@@ -1800,7 +1800,7 @@ describe('SparqlHttpStore (test server)', () => {
   it('reports concurrent store activity without letting the observer affect results', async () => {
     const originalFetch = globalThis.fetch;
     const releases: Array<() => void> = [];
-    const activity: number[] = [];
+    const activity: boolean[] = [];
     globalThis.fetch = (async () => await new Promise<Response>((resolve) => {
       releases.push(() => resolve(new Response(
         JSON.stringify({ head: {}, boolean: true }),
@@ -1811,22 +1811,22 @@ describe('SparqlHttpStore (test server)', () => {
       const store = createManagedOxigraphSparqlStoreV1({
         queryEndpoint: 'http://127.0.0.1:7878/query',
       }, {
-        onActivityChange: (activeOperations) => {
+        onBusyChange: (activeOperations) => {
           activity.push(activeOperations);
-          if (activeOperations === 2) throw new Error('observer failure');
+          if (activeOperations) throw new Error('observer failure');
         },
       });
       const first = store.query('ASK { ?s ?p ?o }');
       const second = store.query('ASK { ?s ?p ?o }');
       while (releases.length < 2) await Promise.resolve();
-      expect(activity).toEqual([1, 2]);
+      expect(activity).toEqual([true]);
 
       releases[0]!();
       await first;
-      expect(activity).toEqual([1, 2, 1]);
+      expect(activity).toEqual([true]);
       releases[1]!();
       await second;
-      expect(activity).toEqual([1, 2, 1, 0]);
+      expect(activity).toEqual([true, false]);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -1835,15 +1835,15 @@ describe('SparqlHttpStore (test server)', () => {
   it('aggregates activity independently for two stores sharing one runtime', async () => {
     const originalFetch = globalThis.fetch;
     const releases: Array<() => void> = [];
-    const activeByStore = new Map<symbol, number>();
-    const aggregateActivity: number[] = [];
+    const activeByStore = new Map<symbol, boolean>();
+    const aggregateActivity: boolean[] = [];
     const registerActivity = () => {
       const key = Symbol('store');
-      activeByStore.set(key, 0);
+      activeByStore.set(key, false);
       return {
-        report(active: number) {
+        report(active: boolean) {
           activeByStore.set(key, active);
-          aggregateActivity.push([...activeByStore.values()].reduce((sum, value) => sum + value, 0));
+          aggregateActivity.push([...activeByStore.values()].some(Boolean));
         },
         dispose() {
           activeByStore.delete(key);
@@ -1863,14 +1863,14 @@ describe('SparqlHttpStore (test server)', () => {
       const first = firstStore.query('ASK { ?s ?p ?o }');
       const second = secondStore.query('ASK { ?s ?p ?o }');
       while (releases.length < 2) await Promise.resolve();
-      expect(aggregateActivity).toContain(2);
+      expect(aggregateActivity).toContain(true);
 
       releases[0]!();
       await first;
-      expect(aggregateActivity.at(-1)).toBe(1);
+      expect(aggregateActivity.at(-1)).toBe(true);
       releases[1]!();
       await second;
-      expect(aggregateActivity.at(-1)).toBe(0);
+      expect(aggregateActivity.at(-1)).toBe(false);
       await firstStore.close();
       await secondStore.close();
     } finally {
@@ -1884,27 +1884,27 @@ describe('SparqlHttpStore (test server)', () => {
     const response = new Promise<Response>((resolve) => {
       release = () => resolve(new Response('', { status: 200 }));
     });
-    const activity: number[] = [];
+    const activity: boolean[] = [];
     globalThis.fetch = (async () => response) as typeof fetch;
     try {
       const store = createManagedOxigraphSparqlStoreV1({
         queryEndpoint: 'http://127.0.0.1:7878/query',
         updateEndpoint: 'http://127.0.0.1:7878/update',
       }, {
-        onActivityChange: (activeOperations) => activity.push(activeOperations),
+        onBusyChange: (activeOperations) => activity.push(activeOperations),
       });
       const updating = store.update('INSERT DATA { GRAPH <http://ex.org/g> { <http://ex.org/s> <http://ex.org/p> "o" } }');
-      while (activity.at(-1) !== 1) await Promise.resolve();
-      expect(activity.at(-1)).toBe(1);
+      while (activity.at(-1) !== true) await Promise.resolve();
+      expect(activity.at(-1)).toBe(true);
       release();
       await updating;
-      expect(activity.at(-1)).toBe(0);
+      expect(activity.at(-1)).toBe(false);
     } finally {
       globalThis.fetch = originalFetch;
     }
   });
 
-  it('counts queued work before dispatch and removes it when the caller aborts', async () => {
+  it('keeps the busy fence until physical work drains despite a queued caller abort', async () => {
     const originalFetch = globalThis.fetch;
     const releases: Array<() => void> = [];
     let fetchCalls = 0;
@@ -1918,7 +1918,7 @@ describe('SparqlHttpStore (test server)', () => {
       });
     }) as typeof fetch;
     try {
-      const activity: number[] = [];
+      const activity: boolean[] = [];
       const scheduler = new StorePriorityScheduler({
         maxConcurrent: 1,
         ackReservedSlots: 0,
@@ -1929,7 +1929,7 @@ describe('SparqlHttpStore (test server)', () => {
         queryEndpoint: 'http://127.0.0.1:7878/query',
         scheduler,
       }, {
-        onActivityChange: (activeOperations) => activity.push(activeOperations),
+        onBusyChange: (activeOperations) => activity.push(activeOperations),
       });
       const first = store.query('ASK { ?s ?p ?o }');
       await waitForCondition(() => fetchCalls === 1, 'first query was not dispatched');
@@ -1938,17 +1938,17 @@ describe('SparqlHttpStore (test server)', () => {
         'ASK { ?queued ?p ?o }',
         { signal: queuedController.signal },
       );
-      await waitForCondition(() => activity.at(-1) === 2, 'queued work was not counted');
+      await waitForCondition(() => scheduler.snapshot.normalQueued === 1, 'queued work was not admitted');
       expect(fetchCalls).toBe(1);
 
       queuedController.abort(new Error('queued caller stopped'));
       await expect(queued).rejects.toThrow('queued caller stopped');
-      expect(activity).toEqual([1, 2, 1]);
+      expect(activity).toEqual([true]);
       expect(fetchCalls).toBe(1);
 
       releases[0]!();
       await first;
-      expect(activity).toEqual([1, 2, 1, 0]);
+      expect(activity).toEqual([true, false]);
     } finally {
       globalThis.fetch = originalFetch;
     }

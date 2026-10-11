@@ -24,7 +24,7 @@ export interface ManagedOxigraphRuntimeStateV1 {
 
 /** Per-adapter activity lease used when more than one store shares a runtime. */
 export interface ManagedOxigraphRuntimeActivityLeaseV1 {
-  report(activeOperations: number): void;
+  report(busy: boolean): void;
   dispose(): void;
 }
 
@@ -32,7 +32,7 @@ export interface ManagedOxigraphRuntimeActivityLeaseV1 {
 export interface ManagedOxigraphRuntimeHooksV1 {
   readonly onClientTimeout?: (operation: StoreOperation) => void;
   readonly getRecoveryState?: () => ManagedOxigraphRuntimeStateV1;
-  readonly onActivityChange?: (activeOperations: number) => void;
+  readonly onBusyChange?: (busy: boolean) => void;
   /** Prefer a per-store lease so a shared supervisor can aggregate activity. */
   readonly registerActivity?: () => ManagedOxigraphRuntimeActivityLeaseV1;
 }

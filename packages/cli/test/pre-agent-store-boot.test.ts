@@ -37,7 +37,7 @@ describe('pre-agent store boot ownership', () => {
     let reply!: (value: { ok: boolean }) => void;
     steps.health.mockImplementation(() => new Promise((resolve) => { reply = resolve; }));
     const boot = runPreAgentStoreBootSteps(options);
-    expect(activity.report).toHaveBeenCalledExactlyOnceWith(1);
+    expect(activity.report).toHaveBeenCalledExactlyOnceWith(true);
     expect(activity.dispose).not.toHaveBeenCalled();
     expect(steps.wipe).not.toHaveBeenCalled();
     reply({ ok: false });

@@ -13,7 +13,7 @@ import { buildAgentRuntimeStoreConfig } from '../src/daemon/agent-runtime-store-
 
 describe('daemon managed Oxigraph store construction', () => {
   it('retains managed RFC-64 authority through the final changelog-wrapped agent config', async () => {
-    const activity: number[] = [];
+    const activity: boolean[] = [];
     let recoveryReads = 0;
     const managedStore = createManagedOxigraphRuntimeStoreConfigV1({
       backend: 'sparql-http',
@@ -28,7 +28,7 @@ describe('daemon managed Oxigraph store construction', () => {
         recoveryReads += 1;
         return { recovering: false, generation: 0 };
       },
-      onActivityChange: (activeOperations) => { activity.push(activeOperations); },
+      onBusyChange: (activeOperations) => { activity.push(activeOperations); },
     });
     const eraGuard: ChangelogEraGuard = {
       async load() { return null; },
@@ -61,7 +61,7 @@ describe('daemon managed Oxigraph store construction', () => {
           value: true,
         });
         expect(recoveryReads).toBeGreaterThan(0);
-        expect(activity).toEqual([1, 0]);
+        expect(activity).toEqual([true, false]);
       } finally {
         await store.close();
       }

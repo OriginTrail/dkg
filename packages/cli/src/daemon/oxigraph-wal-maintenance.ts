@@ -23,7 +23,7 @@ export interface OxigraphWalMaintenanceOptions {
 }
 
 export interface OxigraphWalMaintenanceActivityLease {
-  report(activeOperations: number): void;
+  report(busy: boolean): void;
   dispose(): void;
 }
 
@@ -58,19 +58,18 @@ export function createOxigraphWalMaintenanceCoordinator(
   const now = options.now ?? Date.now;
   const schedule = options.schedule ?? setInterval;
   const cancel = options.cancel ?? clearInterval;
-  const activitySources = new Map<symbol, number>();
+  const activitySources = new Map<symbol, boolean>();
   let idleSince: number | null = null;
   let lastRestartAt = Number.NEGATIVE_INFINITY;
   let maintenancePending = false;
   let restartRequested = false;
   let stopped = false;
 
-  const totalActiveOperations = (): number =>
-    [...activitySources.values()].reduce((sum, active) => sum + active, 0);
+  const anyStoreBusy = (): boolean => [...activitySources.values()].some(Boolean);
 
   // One owner derives idle eligibility after activity and lifecycle changes.
   const refreshIdleClock = (reset = false): void => {
-    if (stopped || !options.serverAvailable() || totalActiveOperations() > 0) {
+    if (stopped || !options.serverAvailable() || anyStoreBusy()) {
       idleSince = null;
     } else if (reset || idleSince === null) {
       idleSince = now();
@@ -81,7 +80,7 @@ export function createOxigraphWalMaintenanceCoordinator(
     if (stopped) return;
     refreshIdleClock();
     const observedAt = now();
-    const activeOperations = totalActiveOperations();
+    const busy = anyStoreBusy();
     if (!options.serverAvailable() || restartRequested) return;
 
     // Measure while the server is busy. Waiting to observe an idle tick before
@@ -103,11 +102,11 @@ export function createOxigraphWalMaintenanceCoordinator(
       options.log(
         `[oxigraph] ${formatWalBytes(walBytes)} retained WAL reached the `
         + `${formatWalBytes(thresholdBytes)} maintenance threshold; `
-        + `pausing new store work until ${activeOperations} active operation(s) drain`,
+        + `pausing new store work until busy stores drain`,
       );
     }
 
-    if (activeOperations !== 0 || idleSince === null) return;
+    if (busy || idleSince === null) return;
     if (!maintenancePending) return;
     if (observedAt - idleSince < idleMs) return;
     const accepted = options.requestRestart(
@@ -126,13 +125,13 @@ export function createOxigraphWalMaintenanceCoordinator(
   return {
     registerActivity(): OxigraphWalMaintenanceActivityLease {
       const key = Symbol('oxigraph-store-activity');
-      activitySources.set(key, 0);
+      activitySources.set(key, false);
       let disposed = false;
       return {
-        report(active: number): void {
+        report(busy: boolean): void {
           if (stopped || disposed) return;
-          if (!Number.isSafeInteger(active) || active < 0) return;
-          activitySources.set(key, active);
+          if (typeof busy !== 'boolean') return;
+          activitySources.set(key, busy);
           refreshIdleClock();
         },
         dispose(): void {

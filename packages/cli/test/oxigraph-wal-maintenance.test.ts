@@ -110,14 +110,14 @@ describe('Oxigraph WAL maintenance coordinator', () => {
 
     controlled.setNow(70);
     const activity = controlled.coordinator.registerActivity();
-    activity.report(1);
+    activity.report(true);
     controlled.setNow(100);
     controlled.tick();
     expect(measureRetainedWalBytes).toHaveBeenCalledOnce();
     expect(controlled.coordinator.admissionsPaused()).toBe(true);
     expect(requestRestart).not.toHaveBeenCalled();
 
-    activity.report(0);
+    activity.report(false);
     controlled.setNow(179);
     controlled.tick();
     expect(requestRestart).not.toHaveBeenCalled();
@@ -197,21 +197,21 @@ describe('Oxigraph WAL maintenance coordinator', () => {
     const first = controlled.coordinator.registerActivity();
     const second = controlled.coordinator.registerActivity();
 
-    first.report(1);
-    second.report(0);
+    first.report(true);
+    second.report(false);
     controlled.setNow(80);
     controlled.tick();
     expect(requestRestart).not.toHaveBeenCalled();
 
     // Releasing one adapter while the other remains busy must not open the
     // maintenance window.
-    first.report(0);
-    second.report(1);
+    first.report(false);
+    second.report(true);
     controlled.setNow(160);
     controlled.tick();
     expect(requestRestart).not.toHaveBeenCalled();
 
-    second.report(0);
+    second.report(false);
     controlled.setNow(239);
     controlled.tick();
     expect(requestRestart).not.toHaveBeenCalled();

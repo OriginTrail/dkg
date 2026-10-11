@@ -19,7 +19,7 @@ function harness(managed = true) {
   }) as typeof fetch;
   const recovery = { recovering: false, generation: 0 };
   const recover = vi.fn();
-  const activity: number[] = [];
+  const activity: boolean[] = [];
   const options = {
     queryEndpoint: 'http://127.0.0.1:7878/query',
     timeout: 1_000,
@@ -28,7 +28,7 @@ function harness(managed = true) {
   const hooks = {
     getRecoveryState: () => ({ ...recovery }),
     onClientTimeout: recover,
-    onActivityChange: (activeOperations: number) => activity.push(activeOperations),
+    onBusyChange: (activeOperations: boolean) => activity.push(activeOperations),
   };
   // The generic store is handed the full legacy capability shape on purpose:
   // the 'external' case only proves the "generic stores cannot gain managed
@@ -101,18 +101,18 @@ describe('managed abandoned read recovery', () => {
     const { store, recover, activity, abandon } = harness();
     try {
       await abandon();
-      expect(activity.at(-1)).toBe(1);
+      expect(activity.at(-1)).toBe(true);
       await vi.advanceTimersByTimeAsync(899);
-      expect(activity.at(-1)).toBe(1);
+      expect(activity.at(-1)).toBe(true);
       expect(recover).not.toHaveBeenCalled();
 
       await vi.advanceTimersByTimeAsync(1);
       expect(recover).toHaveBeenCalledOnce();
       // The supervisor notification does not itself settle HTTP work. This
       // fixture has no server to kill; close must still abort and drain it.
-      expect(activity.at(-1)).toBe(1);
+      expect(activity.at(-1)).toBe(true);
       await store.close();
-      expect(activity.at(-1)).toBe(0);
+      expect(activity.at(-1)).toBe(false);
     } finally { await store.close(); }
   });
 
@@ -121,18 +121,18 @@ describe('managed abandoned read recovery', () => {
     try {
       await abandonMutation();
       expect(recover).not.toHaveBeenCalled();
-      expect(activity.at(-1)).toBe(1);
+      expect(activity.at(-1)).toBe(true);
 
       await vi.advanceTimersByTimeAsync(899);
       expect(recover).not.toHaveBeenCalled();
-      expect(activity.at(-1)).toBe(1);
+      expect(activity.at(-1)).toBe(true);
 
       await vi.advanceTimersByTimeAsync(1);
       expect(recover).toHaveBeenCalledExactlyOnceWith('update');
-      expect(activity.at(-1)).toBe(1);
+      expect(activity.at(-1)).toBe(true);
       recovery.generation += 1;
       await vi.advanceTimersByTimeAsync(1_000);
-      expect(activity.at(-1)).toBe(0);
+      expect(activity.at(-1)).toBe(false);
     } finally { await store.close(); }
   });
 
