@@ -14,7 +14,8 @@ interface RestorationOwner {
   swmHostModeStore?: SwmHostModeStore;
   restoreSwmHostModeSubscriptions(): Promise<void>;
   swmHostModeRestoration?: import('../src/internal/host-mode-restoration.js').HostModeRestoration;
-  swmHostModeSubscribed: Map<string, unknown>;
+  swmHostModeSubscribed: ReadonlyMap<string, unknown>;
+  wireSwmHostModeHandler(id: string): boolean;
   subscribedContextGraphs: Map<string, ContextGraphSub>;
   reconcileCursors: Map<string, unknown>;
   canonicalSwmHostModeKey(id: string): string;
@@ -197,7 +198,7 @@ describe('host-mode restoration physical ownership', () => {
     expect(restored).toMatchObject({ onChainId: '11', lastReconciledOrdinal: 0 });
     expect(owner.reconcileCursors.has(id)).toBe(false);
     expect(owner.contextGraphBindingState.capture(id)).toBeGreaterThan(generation);
-    owner.swmHostModeSubscribed.set(owner.canonicalSwmHostModeKey(id), 'reconciler');
+    expect(owner.wireSwmHostModeHandler(id)).toBe(true);
     // Clone-based callers commit through the canonical setter.
     const next = { ...restored };
     owner.bindSubscriptionOnChainId(id, next, '12');

@@ -7,125 +7,17 @@ import { normalizeContextGraphNameHash } from '../context-graph-name-candidate.j
 import type { ContextGraphBindingSubscription } from '../context-graph-binding-state.js';
 import type { SwmHostModeSubscriptionBinding } from '../swm/host-mode-store.js';
 
-interface AutomaticHostModePorts {
-  current(): boolean;
-  admissionAllowed(id: string): boolean;
-  restoreBinding(id: string, onChainId: string | undefined): boolean;
-  reserved(id: string): boolean;
-  legacyAllowed(id: string): boolean;
-  unwire(id: string): void;
-  member(id: string): boolean;
-  source(id: string): SubscriptionSource | undefined;
-  curated(id: string): boolean | undefined;
-  captureCurrent(id: string): () => boolean;
-  captureActivationCurrent(id: string): () => boolean;
-  strip(): boolean;
-  hostPublic(): boolean;
-  probeCurated(id: string): Promise<boolean>;
-  accessPolicy(id: string): number | undefined;
-  confirmedPublic(id: string): Promise<boolean>;
-  wire(id: string, source: SubscriptionSource, curated: boolean): boolean;
-  classify(id: string, curated: boolean, bindingCurrent: () => boolean): void;
-  persisted(id: string): Promise<void>;
-  markRegistered(id: string, current: () => boolean): Promise<void>;
-  declined(id: string): void;
-  enabled(id: string): void;
-  failed(id: string, strip: boolean, error: unknown): void;
-}
+type HostActivationMethods = Pick<DKGAgent,
+  | 'automaticSwmHostModeAdmissionAllowed' | 'restorePersistedHostModeBinding'
+  | 'rfc64LegacySwmGossipAllowedForContextGraph' | 'unwireSwmHostModeHandler'
+  | 'isMemberModeRegisteredForCg' | 'canonicalSwmHostModeKey' | 'swmHostModePublicPolicy'
+  | 'swmHostModeStripCiphertext' | 'isCuratedForHostMode' | 'swmHostModeAccessPolicy'
+  | 'isConfirmedPublicForHostMode' | 'wireSwmHostModeHandler' | 'awaitHostModePersistence'
+  | 'maybeMarkRegisteredForHostMode' | 'setContextGraphSubscription'>;
+// The factory receives the original agent receiver; its methods retain that receiver.
+type HostActivationAgent = { [K in keyof HostActivationMethods]: OmitThisParameter<HostActivationMethods[K]> };
 
-type AdmissionIntent = 'discovered' | 'persisted-legacy';
-
-/** Admission is distinct from activation; legacy persisted custody is explicit. */
-async function admit(
-  ports: AutomaticHostModePorts, id: string, intent: AdmissionIntent, current: () => boolean,
-): Promise<{ curated: boolean; current: () => boolean } | null> {
-  const bindingCurrent = ports.captureCurrent(id);
-  const stillCurrent = () => current() && ports.admissionAllowed(id) && bindingCurrent();
-  let curated: boolean;
-  if (intent === 'persisted-legacy') {
-    // Strip-off legacy markers retain custody even without a public proof.
-    // A later ordinary reconcile retries that proof rather than freezing this fallback.
-    curated = !(ports.hostPublic() && await ports.confirmedPublic(id));
-  } else {
-    // GH #1611: public plaintext hosting is opt-in and needs both chain policy
-    // axes. Numeric policy, verified beacons or private metadata prove curation;
-    // a name commitment alone does not prove an access policy.
-    const probed = await ports.probeCurated(id);
-    if (!stillCurrent()) return null;
-    const policy = ports.accessPolicy(id);
-    curated = policy === undefined ? probed : policy === 1;
-    if (!curated && (!ports.hostPublic() || !await ports.confirmedPublic(id))) return null;
-  }
-  if (!stillCurrent()) return null;
-  // OT-RFC-49 WS-A: with the strip ON, hosting follows access. Declining
-  // curated custody starves both legacy .meta and LU-11 chunk ingest, for
-  // every discovery path. Members backfill private data from their curator;
-  // the explicit false kill-switch preserves legacy automatic custody.
-  if (ports.strip() && curated) {
-    if (ports.source(id) !== undefined) ports.classify(id, true, bindingCurrent);
-    ports.declined(id);
-    return null;
-  }
-  return { curated, current: stillCurrent };
-}
-
-/** One fenced activation flow for discovery, retry and persisted restoration. */
-function automaticHostModeActivation(ports: AutomaticHostModePorts) {
-  const activate = async (id: string, source: SubscriptionSource, intent: AdmissionIntent,
-    ownerCurrent: () => boolean): Promise<void> => {
-    let activationCurrent = ports.captureActivationCurrent(id);
-    const current = () => ports.current() && ownerCurrent() && activationCurrent();
-    if (!current() || !ports.admissionAllowed(id) || ports.reserved(id)) return;
-    if (!ports.legacyAllowed(id)) {
-      // Catalog authority removes an already-wired host as well as refusing
-      // another independent path into the legacy SWM topic.
-      ports.unwire(id); return;
-    }
-    // Member apply already covers consumption. The adapter's shape-agnostic
-    // probe sees cleartext and wire-hash registration; wiring also refuses it.
-    if (ports.member(id)) return;
-    if (ports.source(id) === SUBSCRIPTION_SOURCES.MANUAL) {
-      // Automatic discovery never takes over the operator's handler or provenance.
-      if (ports.strip() && ports.curated(id) === false && await ports.probeCurated(id)) {
-        if (!current() || !ports.admissionAllowed(id) || ports.accessPolicy(id) === 0) return;
-        ports.classify(id, true, ports.captureCurrent(id));
-      }
-      if (!current() || !ports.admissionAllowed(id)) return;
-      await ports.markRegistered(id, current);
-      if (current()) ports.admissionAllowed(id);
-      return;
-    }
-    // Idempotent periodic re-entry still re-probes registration: a CG created
-    // offline must not remain on the 6h/1MiB pre-registration retention limits.
-    // Canonical host keys make cleartext and wire-hash entry paths equivalent.
-    const retainedLegacy = ports.source(id) !== undefined && !ports.strip();
-    const admission = await admit(ports, id, retainedLegacy ? 'persisted-legacy' : intent, current);
-    if (admission === null || !ports.wire(id, source, admission.curated)) return;
-    activationCurrent = ports.captureActivationCurrent(id);
-    ports.classify(id, admission.curated, admission.current);
-    // Discovery awaits its new designation. Legacy restart preserves its historical
-    // nonblocking marker enqueue before the registration probe.
-    if (intent === 'discovered') await ports.persisted(id);
-    if (!admission.current()) return;
-    await ports.markRegistered(id, admission.current);
-    if (!admission.current()) return;
-    if (intent === 'discovered') ports.enabled(id);
-  };
-  return {
-    reconcile: (id: string, source: SubscriptionSource, current: () => boolean) =>
-      activate(id, source, 'discovered', current),
-    restore: async (entry: SwmHostModeSubscriptionBinding, strip: boolean, current: () => boolean): Promise<void> => {
-      const id = entry.contextGraphId;
-      if (!ports.current() || !current() || !ports.admissionAllowed(id)) return;
-      try {
-        if (!ports.restoreBinding(id, entry.onChainId)) return;
-        await activate(id, SUBSCRIPTION_SOURCES.RECONCILER, strip ? 'discovered' : 'persisted-legacy', current);
-      } catch (error) { ports.failed(id, strip, error); }
-    },
-  };
-}
-
-interface ActivationLifetimePorts {
+interface ActivationLifetime {
   session: GossipSession;
   current(): boolean;
   hostPublic(): boolean;
@@ -133,54 +25,123 @@ interface ActivationLifetimePorts {
   subscriptions: ReadonlyMap<string, ContextGraphSub>;
 }
 
+type AdmissionIntent = 'discovered' | 'persisted-legacy';
+
 /** Capture the active agent session and only its current listener custody. */
-export function createAutomaticHostModeActivation(agent: DKGAgent, lifetime: ActivationLifetimePorts) {
+export function createAutomaticHostModeActivation(agent: HostActivationAgent, lifetime: ActivationLifetime) {
   const session = lifetime.session;
-  const activation = automaticHostModeActivation({
-    current: lifetime.current,
-    admissionAllowed: id => agent.automaticSwmHostModeAdmissionAllowed(id),
-    restoreBinding: (id, onChainId) => agent.restorePersistedHostModeBinding(id, onChainId),
-    reserved: id => (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(id),
-    legacyAllowed: id => agent.rfc64LegacySwmGossipAllowedForContextGraph(id),
-    unwire: id => agent.unwireSwmHostModeHandler(id),
-    member: id => agent.isMemberModeRegisteredForCg(id),
-    source: id => session.swmHostModeSubscribed.get(agent.canonicalSwmHostModeKey(id)),
-    curated: id => session.swmHostModeCurated.get(agent.canonicalSwmHostModeKey(id)),
-    captureCurrent: id => agent.swmHostModePublicPolicy().captureCurrent(id),
-    captureActivationCurrent: id => {
-      const key = agent.canonicalSwmHostModeKey(id);
-      const handler = session.swmHostModeHandlers.get(key);
-      return () => session.swmHostModeHandlers.get(key) === handler;
+  const registration = (id: string) => session.hostModeRegistrations.get(agent.canonicalSwmHostModeKey(id));
+  const captureActivationCurrent = (id: string) => {
+    const key = agent.canonicalSwmHostModeKey(id);
+    const handler = session.hostModeRegistrations.get(key)?.handler;
+    return () => session.hostModeRegistrations.get(key)?.handler === handler;
+  };
+  const classify = (id: string, curated: boolean, current: () => boolean) => {
+    const key = agent.canonicalSwmHostModeKey(id);
+    session.hostModeRegistrations.classify(key, curated ? { kind: 'curated' }
+      : registration(id)?.source === SUBSCRIPTION_SOURCES.MANUAL ? { kind: 'manual-public' }
+        : { kind: 'automatic-public', current });
+  };
+
+  /** Admission is distinct from activation; legacy persisted custody is explicit. */
+  const admit = async (id: string, intent: AdmissionIntent, current: () => boolean) => {
+    const bindingCurrent = agent.swmHostModePublicPolicy().captureCurrent(id);
+    const stillCurrent = () => current() && agent.automaticSwmHostModeAdmissionAllowed(id) && bindingCurrent();
+    let curated: boolean;
+    if (intent === 'persisted-legacy') {
+      // Strip-off legacy markers retain custody even without a public proof.
+      // A later ordinary reconcile retries that proof rather than freezing this fallback.
+      curated = !(lifetime.hostPublic() && await agent.isConfirmedPublicForHostMode(id));
+    } else {
+      // GH #1611: public plaintext hosting is opt-in and needs both chain policy
+      // axes. Numeric policy, verified beacons or private metadata prove curation;
+      // a name commitment alone does not prove an access policy.
+      const probed = await agent.isCuratedForHostMode(id);
+      if (!stillCurrent()) return null;
+      const policy = agent.swmHostModeAccessPolicy(id);
+      curated = policy === undefined ? probed : policy === 1;
+      if (!curated && (!lifetime.hostPublic() || !await agent.isConfirmedPublicForHostMode(id))) return null;
+    }
+    if (!stillCurrent()) return null;
+    // OT-RFC-49 WS-A: with the strip ON, hosting follows access. Declining
+    // curated custody starves both legacy .meta and LU-11 chunk ingest, for
+    // every discovery path. Members backfill private data from their curator;
+    // the explicit false kill-switch preserves legacy automatic custody.
+    if (agent.swmHostModeStripCiphertext() && curated) {
+      if (registration(id) !== undefined) classify(id, true, bindingCurrent);
+      lifetime.log.info(createOperationContext('system'),
+        `SWM host-mode subscription DECLINED for "${id}": private-ciphertext strip is ON ` +
+        `(OT-RFC-49 WS-A — cores custody zero private SWM ciphertext for curated CGs; members backfill from the curator)`);
+      return null;
+    }
+    return { curated, current: stillCurrent };
+  };
+
+  /** One fenced activation flow for discovery, retry and persisted restoration. */
+  const activate = async (id: string, source: SubscriptionSource, intent: AdmissionIntent,
+    ownerCurrent: () => boolean): Promise<void> => {
+    let activationCurrent = captureActivationCurrent(id);
+    const current = () => lifetime.current() && ownerCurrent() && activationCurrent();
+    if (!current() || !agent.automaticSwmHostModeAdmissionAllowed(id)
+      || (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(id)) return;
+    if (!agent.rfc64LegacySwmGossipAllowedForContextGraph(id)) {
+      // Catalog authority removes an already-wired host as well as refusing
+      // another independent path into the legacy SWM topic.
+      agent.unwireSwmHostModeHandler(id); return;
+    }
+    // Member apply already covers consumption. The adapter's shape-agnostic
+    // probe sees cleartext and wire-hash registration; wiring also refuses it.
+    if (agent.isMemberModeRegisteredForCg(id)) return;
+    if (registration(id)?.source === SUBSCRIPTION_SOURCES.MANUAL) {
+      // Automatic discovery never takes over the operator's handler or provenance.
+      if (agent.swmHostModeStripCiphertext() && registration(id)?.custody.kind !== 'curated'
+        && await agent.isCuratedForHostMode(id)) {
+        if (!current() || !agent.automaticSwmHostModeAdmissionAllowed(id) || agent.swmHostModeAccessPolicy(id) === 0) return;
+        classify(id, true, agent.swmHostModePublicPolicy().captureCurrent(id));
+      }
+      if (!current() || !agent.automaticSwmHostModeAdmissionAllowed(id)) return;
+      await agent.maybeMarkRegisteredForHostMode(id, current);
+      if (current()) agent.automaticSwmHostModeAdmissionAllowed(id);
+      return;
+    }
+    // Idempotent periodic re-entry still re-probes registration: a CG created
+    // offline must not remain on the 6h/1MiB pre-registration retention limits.
+    // Canonical host keys make cleartext and wire-hash entry paths equivalent.
+    const retainedLegacy = registration(id) !== undefined && !agent.swmHostModeStripCiphertext();
+    const admission = await admit(id, retainedLegacy ? 'persisted-legacy' : intent, current);
+    if (admission === null || !agent.wireSwmHostModeHandler(id, source, admission.curated)) return;
+    activationCurrent = captureActivationCurrent(id);
+    classify(id, admission.curated, admission.current);
+    // Discovery awaits its new designation. Legacy restart preserves its historical
+    // nonblocking marker enqueue before the registration probe.
+    if (intent === 'discovered') await agent.awaitHostModePersistence(id);
+    if (!admission.current()) return;
+    await agent.maybeMarkRegisteredForHostMode(id, admission.current);
+    if (!admission.current()) return;
+    if (intent === 'discovered') lifetime.log.info(createOperationContext('system'),
+      `SWM host-mode subscription enabled for "${id}" (role=core)`);
+  };
+
+  return {
+    reconcile: (id: string, source: SubscriptionSource, current: () => boolean) =>
+      activate(id, source, 'discovered', current),
+    restore: async (entry: SwmHostModeSubscriptionBinding, strip: boolean, current: () => boolean): Promise<void> => {
+      const id = entry.contextGraphId;
+      if (!lifetime.current() || !current() || !agent.automaticSwmHostModeAdmissionAllowed(id)) return;
+      try {
+        if (!agent.restorePersistedHostModeBinding(id, entry.onChainId)) return;
+        await activate(id, SUBSCRIPTION_SOURCES.RECONCILER, strip ? 'discovered' : 'persisted-legacy', current);
+      } catch (error) {
+        lifetime.log.warn(createOperationContext('system'), strip
+          ? `Failed to re-evaluate persisted host-mode subscription for "${id}": ${error instanceof Error ? error.message : String(error)}`
+          : `Failed to restore host-mode subscription for "${id}": ${error instanceof Error ? error.message : String(error)}`);
+      }
     },
-    strip: () => agent.swmHostModeStripCiphertext(),
-    hostPublic: lifetime.hostPublic,
-    probeCurated: id => agent.isCuratedForHostMode(id),
-    accessPolicy: id => agent.swmHostModeAccessPolicy(id),
-    confirmedPublic: id => agent.isConfirmedPublicForHostMode(id),
-    wire: (id, source, curated) => agent.wireSwmHostModeHandler(id, source, curated),
-    classify: (id, curated, current) => {
-      const key = agent.canonicalSwmHostModeKey(id);
-      session.swmHostModeCurated.set(key, curated);
-      if (curated) session.swmHostModePublicBindingCurrent.delete(key);
-      else session.swmHostModePublicBindingCurrent.set(key, current);
-    },
-    persisted: id => agent.awaitHostModePersistence(id),
-    markRegistered: (id, current) => agent.maybeMarkRegisteredForHostMode(id, current),
-    declined: id => lifetime.log.info(createOperationContext('system'),
-      `SWM host-mode subscription DECLINED for "${id}": private-ciphertext strip is ON ` +
-      `(OT-RFC-49 WS-A — cores custody zero private SWM ciphertext for curated CGs; members backfill from the curator)`),
-    enabled: id => lifetime.log.info(createOperationContext('system'),
-      `SWM host-mode subscription enabled for "${id}" (role=core)`),
-    failed: (id, strip, error) => lifetime.log.warn(createOperationContext('system'), strip
-      ? `Failed to re-evaluate persisted host-mode subscription for "${id}": ${error instanceof Error ? error.message : String(error)}`
-      : `Failed to restore host-mode subscription for "${id}": ${error instanceof Error ? error.message : String(error)}`),
-  });
-  return { ...activation,
     refreshCanonicalHandoff: async (id: string, source: SubscriptionSource,
       ownerCurrent: () => boolean, handoffCurrent: () => boolean): Promise<void> => {
       const current = () => ownerCurrent() && handoffCurrent();
       if (source === SUBSCRIPTION_SOURCES.MANUAL || !lifetime.current() || !current()) return;
-      await activation.reconcile(id, source, current);
+      await activate(id, source, 'discovered', current);
     },
     adoptAuthenticatedEnvelopeIdentity: async (id: string, wireId: string, mayAdopt: () => boolean,
       ownerCurrent: () => boolean): Promise<void> => {
@@ -197,11 +158,11 @@ export function createAutomaticHostModeActivation(agent: DKGAgent, lifetime: Act
       }
       if (!lifetime.current() || !ownerCurrent()
         || lifetime.subscriptions.get(id)?.onChainHash !== wireId) return;
-      const source = session.swmHostModeSubscribed.get(wireId);
+      const source = session.hostModeRegistrations.get(wireId)?.source;
       if (source === undefined || source === SUBSCRIPTION_SOURCES.MANUAL) return;
       // The old callback stays fenced. Future callbacks receive a fresh
       // exemption only from the ordinary policy-aware activation flow.
-      await activation.reconcile(id, source, ownerCurrent);
+      await activate(id, source, 'discovered', ownerCurrent);
     },
   };
 }

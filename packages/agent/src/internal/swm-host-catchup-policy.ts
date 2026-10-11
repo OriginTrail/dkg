@@ -22,8 +22,8 @@ export function captureHostPolicyIdentityCurrent(ports: HostPolicyIdentityPorts,
   const wireOwner = ports.wireOwners.get(hostKey);
   return () => {
     return ports.localId(contextGraphId) === localId && ports.hostKey(contextGraphId) === hostKey
-      && ports.subscriptions.get(localId) === subscription
-      && subscription?.onChainId === onChainId && subscription?.onChainHash === onChainHash
+      && ports.subscriptions.get(localId)?.onChainId === onChainId
+      && ports.subscriptions.get(localId)?.onChainHash === onChainHash
       && ports.bindings.targetStillCurrent(localId, ports.subscriptions.get(localId), target)
       && ports.wireOwners.get(hostKey) === wireOwner;
   };

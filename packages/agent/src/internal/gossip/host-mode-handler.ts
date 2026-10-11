@@ -28,7 +28,7 @@ export function createSwmHostModeHandler(
     // non-curated manual subscription retains the public host-mode hatch.
     if (
       ports.swmHostModeStripCiphertext() &&
-      session.swmHostModeCurated.get(wireCgId) !== false
+      session.hostModeRegistrations.classifications.get(wireCgId) !== false
     ) {
       log.debug(
         createOperationContext('share'),

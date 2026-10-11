@@ -2,10 +2,13 @@ import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { join } from 'node:path';
+import { mkdir } from 'node:fs/promises';
+import { initializeRfc64LegacySwmBoundaryV1 } from '../src/rfc64/legacy-swm-boundary-v1.js';
+import { resolveRfc64PersistenceRootV1 } from '../src/rfc64/persistence-layout-v1.js';
 import { DKG_ONTOLOGY, encodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   encodeGossipEnvelope, computeGossipSigningPayload, computeGossipSigningPayloadV2,
   GOSSIP_ENVELOPE_VERSION, GOSSIP_TYPE_WORKSPACE_PUBLISH, GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED,
-  ciphertextChunkStoreGraph, CIPHERTEXT_CHUNK_PREDICATE, encodeWorkspacePublishRequest, GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
+  ciphertextChunkStoreGraph, CIPHERTEXT_CHUNK_PREDICATE, encodeWorkspacePublishRequest, GRAPH_KA_CONTENT_SCOPE_VERSION, sharedMemoryReadBothFilter } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { createHostModeTestFixture, hostEnvelope, type StripInternals } from './swm/host-mode.fixture.js';
@@ -28,8 +31,124 @@ async function publicBinding(core: DKGAgent, id: string) {
   return { g, hash, onChainId };
 }
 
+async function signedPublicEnvelope(id: string, index: number) {
+  const wallet = ethers.Wallet.createRandom();
+  const peer = 'signed-plain-public-publisher';
+  const timestamp = new Date().toISOString();
+  const agentAddress = wallet.address.toLowerCase();
+  const payload = encodeWorkspacePublishRequest({ contextGraphId: id,
+    nquads: new TextEncoder().encode(`<urn:public-proof:${index}> <http://schema.org/name> "Public" <did:dkg:context-graph:${id}> .`),
+    manifest: [], publisherPeerId: peer, shareOperationId: `public-proof-${index}`, timestampMs: Date.now(),
+    agentAddress, kaNumber: '1', contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+    kaUal: `did:dkg:otp:20430/${agentAddress}/1`, assertionVersion: '1',
+    publicTripleCount: 1, privateTripleCount: 0, accessPolicy: 'public', allowedPeers: [] });
+  return { peer, bytes: encodeGossipEnvelope({ version: GOSSIP_ENVELOPE_VERSION,
+    type: GOSSIP_TYPE_WORKSPACE_PUBLISH, contextGraphId: id, agentAddress: wallet.address, timestamp,
+    signature: ethers.getBytes(await wallet.signMessage(computeGossipSigningPayload(
+      GOSSIP_TYPE_WORKSPACE_PUBLISH, id, timestamp, payload))), payload }) };
+}
+
 describe('public host restoration policy fences', () => {
   const { makeCore } = createHostModeTestFixture();
+
+
+  it('routine Core custody recording preserves consecutive signed public hosting', async () => {
+    const core = await makeCore(true, { hostPublic: true });
+    const id = 'routine-core-hosting-record';
+    const { g, hash, onChainId } = await publicBinding(core, id);
+    await g.reconcileSwmHostModeSubscription(id);
+    const listener = g.swmHostModeHandlers.get(hash)!;
+    const ingest = vi.spyOn(g, 'ingestSwmHostModeEnvelope');
+    const first = await signedPublicEnvelope(id, 0);
+    listener('topic', first.bytes, first.peer);
+    await vi.waitFor(() => expect(ingest).toHaveBeenCalledTimes(1));
+    await ingest.mock.results[0].value;
+    expect((await g.swmHostModeStore!.iterate(id, 0))).toHaveLength(1);
+    const before = g.subscribedContextGraphs.get(id)!;
+    const generation = g.contextGraphBindingState.capture(id);
+    g.setContextGraphSubscription(id, { ...before, coreHosted: true }, { persist: false });
+    expect(g.subscribedContextGraphs.get(id)).not.toBe(before);
+    expect(g.subscribedContextGraphs.get(id)?.onChainId).toBe(onChainId);
+    expect(g.contextGraphBindingState.capture(id)).toBe(generation);
+    const second = await signedPublicEnvelope(id, 1);
+    listener('topic', second.bytes, second.peer);
+    await vi.waitFor(() => expect(ingest).toHaveBeenCalledTimes(2));
+    await ingest.mock.results[1].value;
+    expect((await g.swmHostModeStore!.iterate(id, 0)).map(row => Buffer.from(row.envelopeBytes)))
+      .toEqual([first.bytes, second.bytes].map(bytes => Buffer.from(bytes)));
+    expect(g.swmHostModeHandlers.get(hash)).toBe(listener);
+  });
+
+  it('restores legacy Core custody without member wiring or a new public opt-in', async () => {
+    const core = await makeCore(false);
+    const id = 'legacy-core-without-member-handler';
+    const { g, hash, onChainId } = await publicBinding(core, id);
+    g.setContextGraphSubscription(id, { ...g.subscribedContextGraphs.get(id)!,
+      coreHosted: true, subscribed: false }, { persist: false });
+    const generation = g.contextGraphBindingState.capture(id);
+    await g.swmHostModeStore!.markHostModeSubscribed(id, { onChainId: '999' });
+    expect(g.swmHostModeHandlers.has(hash)).toBe(false);
+    await g.restoreSwmHostModeSubscriptions();
+    await g.swmHostModeRestoration!.drained;
+    expect(g.swmHostModeHandlers.has(hash)).toBe(true);
+    expect(g.subscribedContextGraphs.get(id)?.onChainId).toBe(onChainId);
+    expect(g.contextGraphBindingState.capture(id)).toBe(generation);
+    const signed = await signedPublicEnvelope(id, 2);
+    const ingest = vi.spyOn(g, 'ingestSwmHostModeEnvelope');
+    g.swmHostModeHandlers.get(hash)!('topic', signed.bytes, signed.peer);
+    await vi.waitFor(() => expect(ingest).toHaveBeenCalledTimes(1));
+    await ingest.mock.results[0].value;
+    expect((await g.swmHostModeStore!.iterate(id, 0)).map(row => Buffer.from(row.envelopeBytes)))
+      .toEqual([Buffer.from(signed.bytes)]);
+  });
+
+  for (const transition of ['unchanged', 'rebind'] as const) it(
+    `rechecks real signed plaintext after held append (${transition})`, async () => {
+      const core = await makeCore(true, { hostPublic: true });
+      const id = 'held-plaintext-append';
+      const { g, hash } = await publicBinding(core, id);
+      // Real start establishes the persisted boundary before public apply.
+      // This direct-ingress fixture keeps networking off and supplies that same prerequisite.
+      const persistenceRoot = resolveRfc64PersistenceRootV1(g.config.dataDir);
+      await mkdir(persistenceRoot, { recursive: true, mode: 0o700 });
+      await initializeRfc64LegacySwmBoundaryV1(core, persistenceRoot, core.store);
+      await g.reconcileSwmHostModeSubscription(id);
+      const signed = await signedPublicEnvelope(id, 3);
+      const store = g.swmHostModeStore!;
+      const append = store.append.bind(store);
+      const entered = deferred(), release = deferred();
+      vi.spyOn(store, 'append').mockImplementation(async (...args) => {
+        const result = await append(...args); entered.resolve(); await release.promise; return result;
+      });
+      const shared = core.getOrCreateSharedMemoryHandler();
+      const apply = vi.spyOn(shared, 'handle');
+      const verify = vi.spyOn(shared, 'verifyHostModeEnvelopeAuthority');
+      const ingest = vi.spyOn(g, 'ingestSwmHostModeEnvelope');
+      g.swmHostModeHandlers.get(hash)!('topic', signed.bytes, signed.peer);
+      await vi.waitFor(() => expect(ingest).toHaveBeenCalledTimes(1));
+      const running = ingest.mock.results[0].value;
+      try {
+        await Promise.race([entered.promise, running.then(() => { throw new Error('ingest did not enter append'); })]);
+        expect(await verify.mock.results[0].value).toMatchObject({ accepted: true });
+        expect(apply).not.toHaveBeenCalled();
+        if (transition === 'rebind') {
+          const replacement = await g.chain.createOnChainContextGraph({ accessPolicy: 1, publishPolicy: 1,
+            nameHash: ethers.keccak256(ethers.toUtf8Bytes('held-plain-private')).toLowerCase() });
+          const privateId = String(replacement.contextGraphId);
+          g.setContextGraphSubscription(id, { subscribed: false, synced: false, syncMode: 'always-on',
+            onChainHash: hash, onChainId: privateId }, { persist: false });
+          g.onChainAccessPolicyCache.set(privateId, 1);
+        }
+        release.resolve(); await running;
+        expect((await store.iterate(id, 0)).map(row => Buffer.from(row.envelopeBytes)))
+          .toEqual([Buffer.from(signed.bytes)]);
+        expect(apply).toHaveBeenCalledTimes(transition === 'unchanged' ? 1 : 0);
+        if (transition === 'unchanged') expect(await apply.mock.results[0].value).toMatchObject({ applied: true });
+        const quads = await core.store.query(`SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } ${sharedMemoryReadBothFilter(`did:dkg:context-graph:${id}/_shared_memory`, '?g')} }`);
+        expect(quads.type).toBe('bindings');
+        if (quads.type === 'bindings') expect(quads.bindings.length > 0).toBe(transition === 'unchanged');
+      } finally { release.resolve(); await running; }
+    });
 
   it('strip-off cold restart retains public SWM for an ordinary signed reader', async () => {
     const id = 'cold-restart-public-reader';

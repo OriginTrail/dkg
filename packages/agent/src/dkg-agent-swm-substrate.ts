@@ -658,9 +658,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       try { this.gossip.unsubscribe(swmTopic); } catch { /* best-effort */ }
       this.sharedMemoryGossipRegistered.delete(contextGraphId);
       const hostKey = this.canonicalSwmHostModeKey(contextGraphId);
-      this.swmHostModeSubscribed.delete(hostKey);
-      this.swmHostModeCurated.delete(hostKey);
-      this.swmHostModeHandlers.delete(hostKey);
+      this.gossipSession.hostModeRegistrations.remove(hostKey);
       this.enqueueHostModePersistence(contextGraphId, false);
     }
 
@@ -898,9 +896,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         live.manager.unsubscribe(swmTopic);
         session.sharedMemoryGossipRegistered.delete(contextGraphId);
         const hostKey = this.canonicalSwmHostModeKey(contextGraphId);
-        session.swmHostModeSubscribed.delete(hostKey);
-        session.swmHostModeCurated.delete(hostKey);
-        session.swmHostModeHandlers.delete(hostKey);
+        session.hostModeRegistrations.remove(hostKey);
         this.enqueueHostModePersistence(contextGraphId, false);
       } else {
         // Remove a host-only handler surgically when no member handler owns the
@@ -964,9 +960,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         // immediate `reconcileSwmHostModeSubscription()` call below
         // would see a stale entry and early-return.
         const hostKey = this.canonicalSwmHostModeKey(contextGraphId);
-        session.swmHostModeSubscribed.delete(hostKey);
-        session.swmHostModeCurated.delete(hostKey);
-        session.swmHostModeHandlers.delete(hostKey);
+        session.hostModeRegistrations.remove(hostKey);
         this.enqueueHostModePersistence(contextGraphId, false);
         this.log.warn(ctx, `SWM gossip unsubscribed for "${contextGraphId}": local node is no longer authorized`);
       } else {

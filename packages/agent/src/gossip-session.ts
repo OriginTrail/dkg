@@ -3,15 +3,58 @@ import type { GossipSubManager, SubscriptionSource } from '@origintrail-official
 import type { ContextGraphSub } from './dkg-agent-types.js';
 import { UnansweredAuthorityRecheck } from './internal/unanswered-authority-recheck.js';
 
+export type SwmHostModeHandler = (topic: string, data: Uint8Array, from: string) => void;
+export type SwmHostModeCustody =
+  | Readonly<{ kind: 'curated' }>
+  | Readonly<{ kind: 'manual-public' }>
+  | Readonly<{ kind: 'automatic-public'; current: () => boolean }>;
+export type SwmHostModeRegistration = Readonly<{
+  source: SubscriptionSource;
+  handler: SwmHostModeHandler;
+  custody: SwmHostModeCustody;
+}>;
+
+/** Read-only historical probes derive from the registration, never side tables. */
+function registrationView<T>(records: ReadonlyMap<string, SwmHostModeRegistration>, project: (row: SwmHostModeRegistration) => T) {
+  return Object.freeze({
+    get size() { return records.size; },
+    has: (key: string) => records.has(key),
+    get: (key: string) => { const row = records.get(key); return row === undefined ? undefined : project(row); },
+    keys: () => records.keys(),
+    *values() { for (const row of records.values()) yield project(row); },
+  });
+}
+
+/** One transition owner for listener provenance, classification and custody. */
+class SwmHostModeRegistrations {
+  readonly #records = new Map<string, SwmHostModeRegistration>();
+  readonly sources = registrationView(this.#records, row => row.source);
+  readonly classifications = registrationView(this.#records, row => row.custody.kind === 'curated');
+  readonly handlers = registrationView(this.#records, row => row.handler);
+  get(key: string): SwmHostModeRegistration | undefined { return this.#records.get(key); }
+  has(key: string): boolean { return this.#records.has(key); }
+  register(key: string, registration: SwmHostModeRegistration): boolean {
+    if (this.#records.has(key)) return false;
+    this.#records.set(key, Object.freeze({ ...registration, custody: Object.freeze(registration.custody) }));
+    return true;
+  }
+  classify(key: string, custody: SwmHostModeCustody): void {
+    const current = this.#records.get(key);
+    if (current) this.#records.set(key, Object.freeze({ ...current, custody: Object.freeze(custody) }));
+  }
+  remove(key: string): SwmHostModeRegistration | undefined {
+    const current = this.#records.get(key);
+    if (!current) return undefined;
+    this.#records.delete(key);
+    return current;
+  }
+}
+
 /** All bookkeeping belongs to the manager whose wiring it describes. */
 export class GossipSession {
   readonly gossipRegistered = new Set<string>();
   readonly sharedMemoryGossipRegistered = new Set<string>();
-  readonly swmHostModeSubscribed = new Map<string, SubscriptionSource>();
-  readonly swmHostModeCurated = new Map<string, boolean>();
-  /** Automatic public exemptions belong to the binding that passed admission. */
-  readonly swmHostModePublicBindingCurrent = new Map<string, () => boolean>();
-  readonly swmHostModeHandlers = new Map<string, (topic: string, data: Uint8Array, from: string) => void>();
+  readonly hostModeRegistrations = new SwmHostModeRegistrations();
   /** Live intents snapshotted before the durable startup plan is read. */
   readonly startupLiveIntents = new Map<string, Pick<ContextGraphSub, 'syncMode'>>();
   #retired = false;

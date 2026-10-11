@@ -894,9 +894,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
     contextGraphId: string,
     onChainId: string | undefined,
   ): boolean {
+    const ownedRows = this.hostModeSubscriptionKeys(contextGraphId).map(id => this.subscribedContextGraphs.get(id));
     if (this.isMemberModeRegisteredForCg(contextGraphId)
-      || this.hostModeSubscriptionKeys(contextGraphId)
-        .some(id => isAdmittedContextGraphSubscription(this.subscribedContextGraphs.get(id)))) return false;
+      || ownedRows.some(row => row?.subscribed === true)) return false;
+    // Core custody protects its current binding; it does not supply a member handler.
+    if (ownedRows.some(isAdmittedContextGraphSubscription)) return true;
     if (onChainId === undefined) return true;
     if (/^0x[0-9a-fA-F]{64}$/.test(contextGraphId)) {
       this.stageOnChainContextGraphBindingFromNameHash(
@@ -1148,24 +1150,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (source !== SUBSCRIPTION_SOURCES.MANUAL
       && !this.automaticSwmHostModeAdmissionAllowed(contextGraphId)) return false;
     if (!this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)) {
-      const hostKey = this.canonicalSwmHostModeKey(contextGraphId);
-      const hadRuntimeHostState = session.swmHostModeHandlers.has(hostKey)
-        || session.swmHostModeSubscribed.has(hostKey)
-        || session.swmHostModeCurated.has(hostKey);
+      const hadRegistration = session.hostModeRegistrations.has(this.canonicalSwmHostModeKey(contextGraphId));
       this.unwireSwmHostModeHandler(contextGraphId);
-      const deletedStaleHandler = session.swmHostModeHandlers.delete(hostKey);
-      const deletedStaleSubscription = session.swmHostModeSubscribed.delete(hostKey);
-      const deletedStaleClassification = session.swmHostModeCurated.delete(hostKey);
-      if (deletedStaleHandler || deletedStaleSubscription || deletedStaleClassification) {
-        // Heal partially restored/stale bookkeeping even when its handler
-        // reference is absent, which makes unwireSwmHostModeHandler a no-op.
-        this.enqueueHostModePersistence(contextGraphId, false);
-      } else if (!hadRuntimeHostState) {
-        // The restart restore path calls this method from a persisted marker
-        // before rebuilding runtime maps. Clear that marker too, otherwise
-        // every catalog-authoritative restart would retry the legacy host path.
-        this.enqueueHostModePersistence(contextGraphId, false);
-      }
+      // A persisted marker may exist before any runtime registration is restored.
+      if (!hadRegistration) this.enqueueHostModePersistence(contextGraphId, false);
       return false;
     }
     // OT-RFC-38 / LU-6 Phase B — host-mode subscribes on the wire-form
@@ -1182,7 +1170,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // genuine no-op (instead of silently wiring a second handler on
     // the same topic).
     const wireCgId = this.canonicalSwmHostModeKey(contextGraphId);
-    if (session.swmHostModeHandlers.has(wireCgId)) {
+    if (session.hostModeRegistrations.has(wireCgId)) {
       // Idempotent re-entry — preserve the original source. The first
       // discovery path to wire the handler wins the provenance label;
       // a later path covering the same CG is "also true" but the
@@ -1207,27 +1195,25 @@ export class SwmHostModeMethods extends DKGAgentBase {
       return false;
     }
     const swmTopic = contextGraphWorkspaceTopic(wireCgId);
-    session.swmHostModeSubscribed.set(wireCgId, source);
-    session.swmHostModeCurated.set(wireCgId, curated);
-    live.manager.subscribe(swmTopic);
     const handoffCurrent = this.swmHostModePublicPolicy().captureCanonicalHandoff(contextGraphId);
-    const delegate = createSwmHostModeHandler(this, this.log, session, contextGraphId, wireCgId, () => {
-      const publicBindingCurrent = session.swmHostModePublicBindingCurrent.get(wireCgId);
+    const handler = createSwmHostModeHandler(this, this.log, session, contextGraphId, wireCgId, () => {
+      const registration = session.hostModeRegistrations.get(wireCgId);
+      const custody = registration?.custody;
       return () => session.active && this.gossipSession === session
-        && (!this.swmHostModeStripCiphertext() || (source === SUBSCRIPTION_SOURCES.MANUAL
-          ? this.isExactPublicManualSwmHostMode(contextGraphId, wireCgId)
-          : session.swmHostModeCurated.get(wireCgId) === false && publicBindingCurrent?.() === true));
+        && session.hostModeRegistrations.get(wireCgId)?.handler === handler
+        && (!this.swmHostModeStripCiphertext() || (custody?.kind === 'manual-public'
+          ? session.hostModeRegistrations.get(wireCgId)?.custody.kind === 'manual-public'
+            && this.isExactPublicManualSwmHostMode(contextGraphId, wireCgId)
+          : custody?.kind === 'automatic-public'
+            && session.hostModeRegistrations.get(wireCgId)?.custody.kind === 'automatic-public' && custody.current()));
     }, () => this.swmHostModeActivation().refreshCanonicalHandoff(contextGraphId, source,
-      () => session.active && this.gossipSession === session && session.swmHostModeHandlers.get(wireCgId) === handler,
+      () => session.active && this.gossipSession === session && session.hostModeRegistrations.get(wireCgId)?.handler === handler,
       handoffCurrent));
-    if (source !== SUBSCRIPTION_SOURCES.MANUAL && !curated) {
-      session.swmHostModePublicBindingCurrent.set(wireCgId,
-        this.swmHostModePublicPolicy().captureCurrent(contextGraphId));
-    }
-    // The delegate captures this callback's admitted public custody and carries
-    // it through authority/registration awaits to each persistence boundary.
-    const handler = delegate;
-    session.swmHostModeHandlers.set(wireCgId, handler);
+    // Source, listener and public exemption become one registration before delivery.
+    session.hostModeRegistrations.register(wireCgId, { source, handler, custody: curated ? { kind: 'curated' }
+      : source === SUBSCRIPTION_SOURCES.MANUAL ? { kind: 'manual-public' }
+        : { kind: 'automatic-public', current: this.swmHostModePublicPolicy().captureCurrent(contextGraphId) } });
+    live.manager.subscribe(swmTopic);
     live.manager.onMessage(swmTopic, handler);
     // B3: persist the host-mode designation so a restart re-engages
     // this handler before the chain-event poller catches up.
@@ -1259,14 +1245,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // before lookup so the unwire path is shape-agnostic just like
     // the wire path.
     const wireCgId = this.canonicalSwmHostModeKey(contextGraphId);
-    const handler = this.swmHostModeHandlers.get(wireCgId);
-    this.gossipSession.swmHostModePublicBindingCurrent.delete(wireCgId);
-    if (!handler) return;
+    const registration = this.gossipSession.hostModeRegistrations.remove(wireCgId);
+    if (!registration) return;
     const swmTopic = contextGraphWorkspaceTopic(wireCgId);
-    this.gossip.offMessage(swmTopic, handler);
-    this.swmHostModeHandlers.delete(wireCgId);
-    this.swmHostModeSubscribed.delete(wireCgId);
-    this.swmHostModeCurated.delete(wireCgId);
+    this.gossip.offMessage(swmTopic, registration.handler);
     // B3: clear the persisted host-mode designation so a restart
     // does NOT re-engage. Serialized via the per-CG persistence
     // queue (see `enqueueHostModePersistence` for the ordering
@@ -8641,8 +8623,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const onChainId = subscription?.onChainId;
     const onChainHash = subscription?.onChainHash;
     const generation = this.contextGraphBindingState.capture(localId);
-    const handler = session.swmHostModeHandlers.get(hostKey);
-    const source = session.swmHostModeSubscribed.get(hostKey);
+    const handler = session.hostModeRegistrations.get(hostKey)?.handler;
+    const source = session.hostModeRegistrations.get(hostKey)?.source;
     const wireOwner = this.wireIdToLocalCgId.get(hostKey);
     const requestIsCurrent = (): boolean => session.active && this.gossipSession === session
       && this.manualSwmHostModeLocalId(contextGraphId) === localId
@@ -8653,8 +8635,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
       && this.wireIdToLocalCgId.get(hostKey) === wireOwner;
     const curated = await this.isCuratedForHostMode(contextGraphId);
     if (!requestIsCurrent()
-      || session.swmHostModeHandlers.get(hostKey) !== handler
-      || session.swmHostModeSubscribed.get(hostKey) !== source) {
+      || session.hostModeRegistrations.get(hostKey)?.handler !== handler
+      || session.hostModeRegistrations.get(hostKey)?.source !== source) {
       return { subscribed: false, alreadySubscribed: false, hostingEnabled: true };
     }
     const strip = this.swmHostModeStripCiphertext();
@@ -8663,7 +8645,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // Absence of private evidence is not public proof. Close only this owner's
     // existing dispatch; retain its operator provenance and durable marker.
     if (strip && !publicPolicy) {
-      if (ownsHandler) session.swmHostModeCurated.set(hostKey, true);
+      if (ownsHandler) session.hostModeRegistrations.classify(hostKey, { kind: 'curated' });
       this.log.info(createOperationContext('system'),
         `SWM host-mode subscribe REFUSED for "${contextGraphId}": private-ciphertext strip requires exact public access policy`,
       );
@@ -8688,24 +8670,24 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // host-mode ingest/persistence.
       // Exact public policy can reopen this owner after an unknown-policy
       // refusal. Strip-off re-entry retains positive private classification.
-      this.swmHostModeCurated.set(
-        hostKey,
-        strip && ownsHandler && source === SUBSCRIPTION_SOURCES.MANUAL
-          ? false : this.swmHostModeCurated.get(hostKey) === true || curated,
-      );
+      const nextCurated = strip && ownsHandler && source === SUBSCRIPTION_SOURCES.MANUAL
+        ? false : this.swmHostModeCurated.get(hostKey) === true || curated;
+      session.hostModeRegistrations.classify(hostKey, nextCurated ? { kind: 'curated' }
+        : source === SUBSCRIPTION_SOURCES.MANUAL ? { kind: 'manual-public' }
+          : { kind: 'automatic-public', current: this.swmHostModePublicPolicy().captureCurrent(contextGraphId) });
       await this.maybeMarkRegisteredForHostMode(contextGraphId);
-      if (!requestIsCurrent() || session.swmHostModeHandlers.get(hostKey) !== handler
-        || session.swmHostModeSubscribed.get(hostKey) !== source
+      if (!requestIsCurrent() || session.hostModeRegistrations.get(hostKey)?.handler !== handler
+        || session.hostModeRegistrations.get(hostKey)?.source !== source
         || (strip && !this.isExactPublicManualSwmHostMode(contextGraphId, hostKey))) {
         return { subscribed: false, alreadySubscribed: false, hostingEnabled: true };
       }
       return { subscribed: false, alreadySubscribed: true, hostingEnabled: true };
     }
     this.wireSwmHostModeHandler(contextGraphId, SUBSCRIPTION_SOURCES.MANUAL, strip ? false : curated);
-    const createdHandler = session.swmHostModeHandlers.get(hostKey);
+    const createdHandler = session.hostModeRegistrations.get(hostKey)?.handler;
     const createdIsCurrent = (): boolean => requestIsCurrent() && createdHandler !== undefined
-      && session.swmHostModeHandlers.get(hostKey) === createdHandler
-      && session.swmHostModeSubscribed.get(hostKey) === SUBSCRIPTION_SOURCES.MANUAL
+      && session.hostModeRegistrations.get(hostKey)?.handler === createdHandler
+      && session.hostModeRegistrations.get(hostKey)?.source === SUBSCRIPTION_SOURCES.MANUAL
       && (!strip || this.isExactPublicManualSwmHostMode(contextGraphId, hostKey));
     await this.awaitHostModePersistence(contextGraphId);
     if (!createdIsCurrent()) return { subscribed: false, alreadySubscribed: false, hostingEnabled: true };
