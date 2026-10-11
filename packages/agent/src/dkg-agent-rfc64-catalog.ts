@@ -1116,10 +1116,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     return this.rfc64CatalogConnectionReplayRuntimeV1().prepareGraphActivation(peerId, contextGraphId);
   }
 
-  rfc64CatalogConnectionReplayRuntimeV1(this: DKGAgent): Rfc64CatalogReplayConnectionRuntimeV1 {
+  private rfc64CatalogConnectionReplayRuntimeV1(this: DKGAgent): Rfc64CatalogReplayConnectionRuntimeV1 {
     let runtime = rfc64CatalogReplayConnectionRuntimesV1.get(this);
     if (runtime === undefined) {
-      runtime = createRfc64CatalogReplayConnectionRuntimeV1({ agent: this,
+      runtime = createRfc64CatalogReplayConnectionRuntimeV1({ capabilities: this,
         reservePeer: (id, digest, peer) => this.rfc64CatalogReplayRecoveryRuntimeV1().reservePeer(id, digest, peer),
         replay: (contextGraphId, demand, signal) => this.requestRfc64CatalogHeadReplayV1(contextGraphId, { kind: 'connection-demand', demand }, signal),
         schedule: (slot, work) => this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(`catalog-connection-replay:${slot}`, work),

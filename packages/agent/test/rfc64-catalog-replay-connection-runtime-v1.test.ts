@@ -1,3 +1,7 @@
+import { RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1 } from '../src/rfc64/public-catalog-transport-v1.js';
+import { createRfc64CatalogReplayConnectionRuntimeV1 } from '../src/rfc64/catalog-replay-connection-adapter-v1.js';
+import { buildOpenOwnerContextGraphPolicyV1, computeOpenContextGraphPolicyDigestV1 } from '../src/rfc64/open-catalog-policy-v1.js';
+import { RFC64_ROLLOUT_AUTHOR, RFC64_ROLLOUT_CONTEXT_GRAPH_ID, RFC64_ROLLOUT_NETWORK_ID } from './_helpers/rfc64-rollout-agent-harness.js';
 import { Rfc64CatalogReplayRecoveryRuntimeV1 } from '../src/rfc64/catalog-replay-recovery-runtime-v1.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Rfc64CatalogReplayConnectionRuntimeV1, type Rfc64CatalogReplayConnectionRuntimePortsV1 } from
@@ -446,6 +450,59 @@ describe('connection staging versus canonical recovery execution', () => {
     return { connection, recovery, calls, pushed };
   }
 
+  it('keeps A staged during its announcement while B pulls only its own demand', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(10_000);
+    let releaseAnnouncement!: () => void;
+    let releasePulls!: () => void;
+    const announcement = new Promise<void>(resolve => { releaseAnnouncement = resolve; });
+    const pulls = new Promise<void>(resolve => { releasePulls = resolve; });
+    const called: string[] = [];
+    let activeStreams = 0;
+    let peakStreams = 0;
+    const enter = () => { peakStreams = Math.max(peakStreams, ++activeStreams); };
+    const recovery = new Rfc64CatalogReplayRecoveryRuntimeV1<never>({
+      requestPeer: async (_cg, peer) => {
+        called.push(peer); enter();
+        try { await pulls; return { status: 'completed', targets: [] }; }
+        finally { activeStreams--; }
+      },
+      whenReceiverIdleForContextGraph: async () => undefined,
+      targetIdentity: () => '', parityFailed: async () => false,
+    });
+    const connection = makeRuntime({ selectContextGraphIds: () => ['cg'],
+      reserveFence: (cg, peer) => recovery.reservePeer(cg, 'policy', peer),
+      reannounce: async peer => {
+        if (peer === 'a') {
+          enter();
+          try { await announcement; } finally { activeStreams--; }
+        }
+        return { failed: 0 };
+      },
+      replay: (cg, demand, signal) => recovery.request({ kind: 'connection-demand',
+        contextGraphId: cg, policyDigest: 'policy', demand, signal }), warn: vi.fn(),
+    });
+    try {
+      connection.prepareConnectionOpen('a')!.admit();
+      await vi.advanceTimersByTimeAsync(0);
+      connection.prepareConnectionOpen('b')!.admit();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(peakStreams).toBe(2);
+      expect(called).toEqual(['b']);
+      releasePulls(); await vi.advanceTimersByTimeAsync(0);
+      expect(recovery.status('cg', 'policy')?.active).toBe(true);
+      expect(connection.status().pendingScopes).toBe(1);
+      releaseAnnouncement(); await vi.advanceTimersByTimeAsync(0);
+      expect(called).toEqual(['b', 'a']);
+      expect(peakStreams).toBe(2);
+      expect(recovery.status('cg', 'policy')?.active).toBe(false);
+      expect(connection.status().pendingScopes).toBe(0);
+      await vi.advanceTimersByTimeAsync(59_999);
+      expect(called).toEqual(['b', 'a']);
+    } finally {
+      releasePulls(); releaseAnnouncement(); await vi.advanceTimersByTimeAsync(0);
+    }
+  });
+
   it('keeps cooling A fenced but not runnable while B completes independent recovery', async () => {
     vi.useFakeTimers(); vi.setSystemTime(10_000);
     const { connection, recovery, calls } = canonicalRuntime();
@@ -816,5 +873,48 @@ describe('selection reactivation during receiver drain', () => {
       expect(fences.every(done => done.mock.calls.length === 1)).toBe(true);
       expect(connection.status().pendingScopes).toBe(0);
     } finally { release(); }
+  });
+});
+
+
+describe('connection adapter current-policy capabilities', () => {
+  it('uses separate reservation and announcement snapshots without an agent dependency', async () => {
+    const initial = buildOpenOwnerContextGraphPolicyV1({ networkId: RFC64_ROLLOUT_NETWORK_ID,
+      contextGraphId: RFC64_ROLLOUT_CONTEXT_GRAPH_ID, ownerAddress: RFC64_ROLLOUT_AUTHOR });
+    const successor = Object.freeze({ ...initial, issuedAt: '1' as typeof initial.issuedAt });
+    const snapshot = (policy: typeof initial) => Object.freeze({ policy,
+      policyDigest: computeOpenContextGraphPolicyDigestV1(policy), roster: null });
+    let accepted: ReturnType<typeof snapshot> | null = snapshot(initial);
+    const initialDigest = accepted.policyDigest;
+    const readAcceptedPolicy = vi.fn(() => accepted);
+    const announce = vi.fn(async () => ({ failed: 0 }));
+    const reservePeer = vi.fn((_cg: string, _digest: string, peerId: string) => ({
+      peerId, generation: 1, admit: vi.fn(), release: vi.fn(),
+    }));
+    const scheduled = new Map<0 | 1 | 'deadline', (signal: AbortSignal) => Promise<void>>();
+    const controller = new AbortController();
+    const runtime = createRfc64CatalogReplayConnectionRuntimeV1({
+      capabilities: {
+        listActiveRfc64CatalogReplayContextGraphIdsV1: () => [RFC64_ROLLOUT_CONTEXT_GRAPH_ID],
+        readAcceptedRfc64CatalogAccessSnapshotV1: readAcceptedPolicy,
+        reannounceRfc64CatalogHeadsToPeerV1: announce,
+      },
+      reservePeer, replay: async () => ({ failed: 0 }), warn: vi.fn(),
+      schedule: (slot, work) => { scheduled.set(slot, work); return true; }, wait: async () => undefined,
+    });
+    runtime.prepareConnectionOpen('peer')!.admit();
+    expect(reservePeer).toHaveBeenCalledWith(RFC64_ROLLOUT_CONTEXT_GRAPH_ID, initialDigest, 'peer');
+    accepted = snapshot(successor);
+    await scheduled.get(0)!(controller.signal);
+    expect(announce).toHaveBeenCalledExactlyOnceWith('peer', {
+      kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1, networkId: RFC64_ROLLOUT_NETWORK_ID,
+      contextGraphId: RFC64_ROLLOUT_CONTEXT_GRAPH_ID, policyDigest: accepted.policyDigest,
+    }, controller.signal);
+    expect(readAcceptedPolicy).toHaveBeenCalledTimes(2);
+    expect(accepted.policyDigest).not.toBe(initialDigest);
+    accepted = null;
+    const unavailable = runtime.prepareConnectionOpen('unknown')!;
+    expect(reservePeer).toHaveBeenCalledOnce();
+    unavailable.reject(); runtime.reset();
   });
 });

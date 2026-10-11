@@ -68,6 +68,7 @@ import {
 } from '../../chain/test/loopback-rpc-harness.js';
 import { Rfc64PublicCatalogSuccessorProducerV1 } from
   '../src/rfc64/public-catalog-successor-producer-v1.js';
+import { Rfc64BackgroundWorkDispatcherV1 } from '../src/rfc64/background-work-dispatcher-v1.js';
 import { Rfc64CatalogReplayConnectionRuntimeV1 } from '../src/rfc64/catalog-replay-connection-runtime-v1.js';
 import { Rfc64CatalogReplayRecoveryRuntimeV1 } from
   '../src/rfc64/catalog-replay-recovery-runtime-v1.js';
@@ -2325,6 +2326,58 @@ describe('RFC-64 rollout authority integration', () => {
     expect(sentAnnouncements).toMatchObject([
       { catalogHeadObjectDigest: successor.headObjectDigest },
     ]);
+  });
+
+  it('aborts the real first announcement and drains without sending the second durable head', async () => {
+    const { provider, persistence, scope } = await startAppliedOpenReplayProvider('replay-announcement-abort');
+    const secondScope = Object.freeze({ ...scope, subGraphName: 'second' }) as AuthorCatalogScopeV1;
+    const second = await provider.publishAuthorCatalogGenesisV1({
+      scope: secondScope,
+      author: { address: AUTHOR, signMessage: digest => AUTHOR_WALLET.signMessage(digest) },
+      peers: [], issuedAt: '1773900000000' as TimestampMsV1,
+      catalogIssuerDelegationEffectiveAt: '1773899999000' as TimestampMsV1,
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+    });
+    const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(secondScope);
+    persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
+      catalogScopeDigest, authorAddress: AUTHOR, expectedCurrentCatalogHeadDigest: null,
+      currentCatalogHeadDigest: second.headObjectDigest,
+      appliedInventoryDigest: computeRfc64AppliedInventoryDigestV1({ catalogScopeDigest, rows: [] }),
+      catalogVersion: second.announcement.catalogVersion, inventoryRowCount: '0',
+    });
+    expect(persistence.inventory.listAppliedCatalogHeadsV1()).toHaveLength(2);
+    const owner = new Rfc64BackgroundWorkDispatcherV1();
+    let entered!: () => void;
+    const firstSend = new Promise<void>(resolve => { entered = resolve; });
+    let release!: () => void;
+    let transportSignal: AbortSignal | undefined;
+    let transportAborted = false;
+    const send = vi.spyOn(provider.router, 'send').mockImplementation(async (_peer, protocol, _data, options) => {
+      expect(protocol).toBe(RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1);
+      transportSignal = options?.signal;
+      return new Promise<Uint8Array>((resolve, reject) => {
+        release = () => resolve(Uint8Array.of(1));
+        transportSignal?.addEventListener('abort', () => {
+          transportAborted = true; reject(transportSignal?.reason);
+        }, { once: true });
+        entered();
+      });
+    });
+    expect(owner.scheduleKeyed('replay', async signal => {
+      await provider.reannounceRfc64CatalogHeadsToPeerV1('12D3KooWCancelledReplayPeer', undefined, signal);
+    })).toBe(true);
+    try {
+      await firstSend;
+      expect(transportSignal).toBeInstanceOf(AbortSignal);
+      expect(transportSignal?.aborted).toBe(false);
+      const drained = owner.closeAndDrain();
+      await vi.waitFor(() => expect(transportAborted).toBe(true));
+      await drained;
+      expect(transportSignal?.aborted).toBe(true);
+      expect(send).toHaveBeenCalledOnce();
+    } finally {
+      release(); await owner.closeAndDrain();
+    }
   });
 
   it('does not hold a catalog change while a replay waits for its peer', async () => {

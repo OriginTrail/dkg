@@ -294,13 +294,13 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
         }
         peer.windowStarted++;
         try {
-          demand.admit();
           try { failed = (await this.#ports.reannounce(peer.peerId, scope.contextGraphId, signal)).failed > 0; }
           catch (error) {
             failed = true;
             if (!signal.aborted) this.#ports.warn(`RFC-64 compatibility re-announcement failed for ${peer.peerId.slice(-8)}: ${error instanceof Error ? error.message : String(error)}`);
           }
           signal.throwIfAborted();
+          demand.admit();
           failed = (await this.#ports.replay(scope.contextGraphId, demand, signal)).failed > 0 || failed;
           if (failed) this.#ports.warn(`RFC-64 catalog replay incomplete for "${scope.contextGraphId}" after ${peer.peerId.slice(-8)} connected`);
         } catch (error) {

@@ -1,3 +1,4 @@
+import type { DKGAgent } from '../src/index.js';
 import type {
   Rfc64CatalogReplayRecoveryCommandV1,
 } from '../src/rfc64/catalog-replay-recovery-runtime-v1.js';
@@ -36,3 +37,10 @@ void pending;
 void full;
 void invalidPending;
 void invalidConnection;
+
+// Lifecycle machinery remains behind the package-root agent capabilities.
+declare const agent: DKGAgent;
+// @ts-expect-error Consumers cannot obtain or reset the mutable connection runtime.
+agent.rfc64CatalogConnectionReplayRuntimeV1().reset();
+void agent.prepareRfc64CatalogConnectionReplayV1('peer');
+void agent.prepareRfc64CatalogGraphActivationReplayV1('peer', 'cg');
