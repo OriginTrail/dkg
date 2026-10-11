@@ -47,7 +47,6 @@ import { collectEvmErrorText } from './evm-error-text.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import {
   classifyRpcRetryDisposition,
-  rethrowInterruptedInitialization,
   isRpcEndpointFailoverEligible,
   isRetryableRpcError,
   resolveRpcUrls,
@@ -113,7 +112,7 @@ import { ContextGraphRegistryRepairCoordinator } from
 import { EvmContextGraphNameHashFence } from './evm-context-graph-name-hash-fence.js';
 import { EvmContextGraphNameHashResolver } from './evm-context-graph-name-hash-resolver.js';
 import { BackgroundContractReadBatching } from './evm-background-read-batching.js';
-import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
+import { HubBindingNotFoundError, HubContractNotFoundError, HubAssetStorageNotFoundError } from './hub-contract-not-found-error.js';
 import { RandomSamplingContractsUnavailableError } from './random-sampling-availability.js';
 import type {
   RandomSamplingBlockContext,
@@ -606,6 +605,16 @@ export type SelectSignerSpec =
       /** Soft, fail-open bias toward a funded wallet whose per-wallet lock is free. Default false. */
       preferIdle?: boolean;
     };
+
+/** Initialization tolerates only genuine Hub absence, while cancellation wins a raced miss. */
+async function resolveOptionalHubBinding(resolve: () => Promise<void>): Promise<void> {
+  try {
+    await resolve();
+  } catch (error) {
+    activeRpcRequestAbortSignal()?.throwIfAborted();
+    if (!(error instanceof HubBindingNotFoundError)) throw error;
+  }
+}
 
 export class EVMChainAdapterBase {
   /** See `ChainAdapter.deploymentId`. */
@@ -3142,12 +3151,12 @@ export class EVMChainAdapterBase {
       );
     } catch (err) {
       if (this.isContractMissingRevert(err)) {
-        throw new Error(`Asset storage "${name}" not found in Hub at ${this.hubAddress}`, { cause: err });
+        throw new HubAssetStorageNotFoundError(name, this.hubAddress, { cause: err });
       }
       throw err;
     }
     if (address === ethers.ZeroAddress) {
-      throw new Error(`Asset storage "${name}" not found in Hub at ${this.hubAddress}`);
+      throw new HubAssetStorageNotFoundError(name, this.hubAddress);
     }
     return new Contract(address, loadAbi(abiName ?? name), this.signer);
   }
@@ -3156,9 +3165,9 @@ export class EVMChainAdapterBase {
    * The current Hub implementation reverts with `ContractDoesNotExist(name)`
    * (custom error from `UnorderedNamedContractDynamicSet.get`) when a name
    * is missing, instead of returning `address(0)`. We normalise both
-   * shapes onto the legacy `Contract "X" not found in Hub at <addr>` marker
-   * so downstream code (`getRandomSampling()`'s catch block) only needs
-   * to recognise one wording.
+   * shapes onto typed Hub absence. Contract capability callers retain the
+   * historical contract-miss class; asset-storage misses share its absence
+   * base so optional initialization has one positive policy.
    */
   protected isContractMissingRevert(err: unknown): boolean {
     if (!(err instanceof Error)) return false;
@@ -3190,23 +3199,19 @@ export class EVMChainAdapterBase {
     // contracts/archive/, deploy script 023 archived). Tolerate its absence
     // so the V10 surface still initialises; the contract slot is retained
     // only to keep stale Hub bindings on older deploys resolving cleanly.
-    try {
+    // V8 Staking not deployed on this Hub — V10 surface continues.
+    await resolveOptionalHubBinding(async () => {
       bind('staking', await this.resolveContract('Staking'));
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // V8 Staking not deployed on this Hub — V10 surface continues.
-    }
+    });
 
     // RFC 04 — ProfileStorage holds the relay registry views + events.
     // Tolerated as optional so adapters bound to a Hub that pre-dates the
     // Profile 1.2.0 / ProfileStorage 1.1.0 deploy still init cleanly; the
     // relay-registry methods will throw with a clear message at call time.
-    try {
+    // Older deployments without the relay registry surface.
+    await resolveOptionalHubBinding(async () => {
       bind('profileStorage', await this.resolveContract('ProfileStorage'));
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // Older deployments without the relay registry surface.
-    }
+    });
 
     // V10.1 KA storage. Legacy V8 KnowledgeCollection + V10.0 DKGKnowledgeAssets
     // are deleted in the rc.12 KC->KA rename — no fallback resolution.
@@ -3214,70 +3219,55 @@ export class EVMChainAdapterBase {
 
     // V9 contracts (KnowledgeAssets + KnowledgeAssetsStorage) are archived
     // (PRD §4.1, deploy scripts 040+041 moved under deploy/archive). Keep
-    // the try/catch so adapters bound to legacy deploys still resolve them.
+    // optional resolution so adapters bound to legacy deploys still resolve them.
     // AskStorage is V10-active (deploy script 017 still in the active set);
     // split it out so a missing V9 binding doesn't strand AskStorage. The
     // V10 publish-token-amount path depends on AskStorage being resolved.
-    try {
+    // V9 contracts not deployed — V9 publish/update surface unavailable.
+    await resolveOptionalHubBinding(async () => {
       bind('knowledgeAssets', await this.resolveContract('KnowledgeAssets'));
       bind('knowledgeAssetsStorage', await this.resolveAssetStorage('KnowledgeAssetsStorage'));
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // V9 contracts not deployed — V9 publish/update surface unavailable.
-    }
-    try {
+    });
+
+    // Older deployments that pre-date AskStorage — token-amount derivation unavailable.
+    await resolveOptionalHubBinding(async () => {
       bind('askStorage', await this.resolveContract('AskStorage'));
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // Older deployments that pre-date AskStorage — token-amount derivation unavailable.
-    }
+    });
 
-    try {
+    // ContextGraphNameRegistry not registered in Hub — createContextGraph/listContextGraphsFromChain unavailable
+    await resolveOptionalHubBinding(async () => {
       bind('contextGraphNameRegistry', await this.resolveContract('ContextGraphNameRegistry'));
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // ContextGraphNameRegistry not registered in Hub — createContextGraph/listContextGraphsFromChain unavailable
-    }
+    });
 
-    try {
+    // ContextGraphs not deployed — context graph operations unavailable
+    await resolveOptionalHubBinding(async () => {
       bind('contextGraphs', await this.resolveContract('ContextGraphs'));
       bind('contextGraphStorage', await this.resolveAssetStorage('ContextGraphStorage'));
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // ContextGraphs not deployed — context graph operations unavailable
-    }
+    });
 
-    try {
+    // Lifecycle not deployed — createKnowledgeAssets unavailable.
+    // V10.0 KnowledgeAssetsLifecycle fallback was removed in the rc.12 rename.
+    await resolveOptionalHubBinding(async () => {
       bind('knowledgeAssetsLifecycle', await this.resolveContract('KnowledgeAssetsLifecycle'));
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // Lifecycle not deployed — createKnowledgeAssets unavailable.
-      // V10.0 KnowledgeAssetsLifecycle fallback was removed in the rc.12 rename.
-    }
+    });
 
-    try {
+    // DKGPublishingConvictionNFT not deployed — V10 PCA agent-resolution unavailable
+    await resolveOptionalHubBinding(async () => {
       bind('dkgPublishingConvictionNFT', await this.resolveContract('DKGPublishingConvictionNFT'));
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // DKGPublishingConvictionNFT not deployed — V10 PCA agent-resolution unavailable
-    }
+    });
 
-    try {
+    // Chronos not deployed — update-path growth-cost sizing falls back to
+    // currentEpoch=0 (treats KC as having full `endEpoch` remaining lifetime).
+    // Greenfield V10 deployments always have Chronos; optional resolution is for older
+    // adapters bound to deploys that pre-date the Chronos registration.
+    await resolveOptionalHubBinding(async () => {
       bind('chronos', await this.resolveContract('Chronos'));
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // Chronos not deployed — update-path growth-cost sizing falls back to
-      // currentEpoch=0 (treats KC as having full `endEpoch` remaining lifetime).
-      // Greenfield V10 deployments always have Chronos; this catch is for older
-      // adapters bound to deploys that pre-date the Chronos registration.
-    }
+    });
 
-    try {
+    // RandomSampling not deployed — proof submission unavailable
+    await resolveOptionalHubBinding(async () => {
       await this.resolveAndAssignRandomSamplingPair();
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // RandomSampling not deployed — proof submission unavailable
-    }
+    });
 
     // THE tick. Started here because the Hub bindings resolved above ARE its
     // address array, and started WITHOUT an await so a cold backfill can never
