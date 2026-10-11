@@ -67,13 +67,3 @@ export interface SwmHostModeConfig {
    */
   stripCiphertext?: boolean;
 }
-
-export function normalizePositiveOnChainId(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  try {
-    const parsed = BigInt(value);
-    return parsed > 0n ? parsed.toString() : undefined;
-  } catch {
-    return undefined;
-  }
-}

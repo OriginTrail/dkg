@@ -27,7 +27,7 @@ export interface StripInternals {
   onChainAccessPolicyCache: Map<string, number>;
   subscribedContextGraphs: Map<string, ContextGraphSub>;
   setContextGraphSubscription(id: string, row: ContextGraphSubInput, options: { persist: false }): ContextGraphSub;
-  config: { swmHostMode?: { enabled?: boolean; stripCiphertext?: boolean; hostPublic?: boolean } };
+  config: { dataDir: string; swmHostMode?: { enabled?: boolean; stripCiphertext?: boolean; hostPublic?: boolean; reconcileBatchSize?: number } };
   beacons: { lookupWireId(contextGraphId: string): { publisherAddress: string; curatorAddress: string; onChainContextGraphId?: string } | undefined };
   isPrivateContextGraph(cgId: string): Promise<boolean>;
   isConfirmedPublicForHostMode(cgId: string): Promise<boolean>;
@@ -88,9 +88,9 @@ export function createHostModeTestFixture() {
 
   /** A core with a host-mode store installed. `strip` toggles the WS-A flag;
    * omit it to exercise the DEFAULT (strip ON). */
-  async function makeCore(strip?: boolean, options: { chain?: MockChainAdapter; saved?: ContextGraphSubscriptionRecord } = {}): Promise<DKGAgent> {
-    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-strip-ct-'));
-    tempDirs.push(dataDir);
+  async function makeCore(strip?: boolean, options: { chain?: MockChainAdapter; saved?: ContextGraphSubscriptionRecord; hostPublic?: boolean; reconcileBatchSize?: number; dataDir?: string } = {}): Promise<DKGAgent> {
+    const dataDir = options.dataDir ?? await mkdtemp(join(tmpdir(), 'dkg-strip-ct-'));
+    if (options.dataDir === undefined) tempDirs.push(dataDir);
     const core = await DKGAgent.create({
       name: 'StripCiphertextCore',
       chainAdapter: options.chain ?? new MockChainAdapter(),
@@ -100,14 +100,17 @@ export function createHostModeTestFixture() {
       dataDir,
       nodeRole: 'core',
       rfc64CatalogActivation: { enabled: false },
-      swmHostMode: strip === undefined ? { enabled: true } : { enabled: true, stripCiphertext: strip },
+      swmHostMode: { enabled: true, ...(strip === undefined ? {} : { stripCiphertext: strip }),
+        ...(options.hostPublic === undefined ? {} : { hostPublic: options.hostPublic }),
+        ...(options.reconcileBatchSize === undefined ? {} : { reconcileBatchSize: options.reconcileBatchSize }) },
     });
     agents.push(core);
     if (options.saved) (core as unknown as { node: unknown }).node = { peerId: '12D3KooWStripPolicy', libp2p: { getPeers: () => [] } };
     installGossipStub(core as unknown as StripInternals);
+    const limits = SwmHostModeStore.defaultLimits();
     const store = new SwmHostModeStore({
       dataDir: join(dataDir, 'swm-host'),
-      ...SwmHostModeStore.defaultLimits(),
+      unregisteredLimits: limits.unregistered, registeredLimits: limits.registered,
     });
     await store.init();
     (core as unknown as StripInternals).swmHostModeStore = store;

@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile, readdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { isCanonicalAuthoritativeContextGraphId } from '../../src/context-graph-binding-state.js';
 import { SwmHostModeStore, type SwmHostModeStartupReconcileReport } from '../../src/swm/host-mode-store.js';
 
 function cgKey(contextGraphId: string): string {
@@ -458,6 +459,21 @@ describe('SwmHostModeStore', () => {
       await second.markHostModeUnsubscribed(wireId);
       await second.markHostModeSubscribed(wireId);
       expect(await second.listHostModeSubscriptions()).toEqual([{ contextGraphId: wireId }]);
+    });
+
+    it('decodes persisted IDs through the canonical uint256 boundary while retaining zero-padding compatibility', async () => {
+      for (const [id, raw, expected] of [
+        ['padded', '0042', '42'],
+        ['maximum', ((1n << 256n) - 1n).toString(), ((1n << 256n) - 1n).toString()],
+        ['oversized', (1n << 256n).toString(), undefined],
+      ] as const) {
+        await writeFile(path.join(dir, `${cgKey(id)}.meta`), JSON.stringify({ contextGraphId: id,
+          seqno: 0, registered: false, hostModeSubscribed: true, hostModeOnChainId: raw }));
+        const reopened = new SwmHostModeStore({ dataDir: dir, unregisteredLimits: limits, registeredLimits: limits });
+        const row = (await reopened.listHostModeSubscriptions()).find(row => row.contextGraphId === id)!;
+        expect(row).toEqual({ contextGraphId: id, ...(expected === undefined ? {} : { onChainId: expected }) });
+        if (row.onChainId !== undefined) expect(isCanonicalAuthoritativeContextGraphId(row.onChainId)).toBe(true);
+      }
     });
 
     it('distinguishes an omitted binding from an explicit clear across reopen', async () => {

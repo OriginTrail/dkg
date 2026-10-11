@@ -217,7 +217,7 @@ describe('host-mode restoration physical ownership', () => {
 });
 
 describe('persisted host-mode restoration compatibility', () => {
-  const { tempDirs, agents, makeCore } = createHostModeTestFixture();
+  const { makeCore } = createHostModeTestFixture();
 
   it('closing before restoration prevents a later direct call from admitting work', async () => {
     const core = await makeCore(false);
@@ -267,26 +267,12 @@ describe('persisted host-mode restoration compatibility', () => {
   });
 
   it('cold restart restores a hash-only public host from its persisted chain binding', async () => {
-    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-strip-ct-restore-public-'));
-    tempDirs.push(dataDir);
     const wireId = ethers.keccak256(ethers.toUtf8Bytes('cg-public-cold-host')).toLowerCase();
     const onChainId = '42';
-
-    const first = await DKGAgent.create({
-      name: 'StripCiphertextFirstPublicCore',
-      listenHost: '127.0.0.1',
-      dataDir,
-      nodeRole: 'core',
-      rfc64CatalogActivation: { enabled: false },
-      swmHostMode: { enabled: true, hostPublic: true, stripCiphertext: true },
-    });
+    const first = await makeCore(true, { hostPublic: true });
+    const dataDir = (first as unknown as StripInternals).config.dataDir;
     const firstInternals = first as unknown as StripInternals;
-    const firstStore = new SwmHostModeStore({
-      dataDir: join(dataDir, 'swm-host'),
-      ...SwmHostModeStore.defaultLimits(),
-    });
-    await firstStore.init();
-    firstInternals.swmHostModeStore = firstStore;
+    const firstStore = firstInternals.swmHostModeStore!;
     (firstInternals as any).scheduleRfc64CatalogResponsibilityReconciliationV1 = () => {};
     expect(firstInternals.stageOnChainContextGraphBindingFromNameHash(wireId, onChainId))
       .toBe(wireId);
@@ -307,16 +293,7 @@ describe('persisted host-mode restoration compatibility', () => {
     }));
     chain.getContextGraphAccessPolicy = getContextGraphAccessPolicy;
     chain.getContextGraphPublishPolicy = getContextGraphPublishPolicy;
-    const restarted = await DKGAgent.create({
-      name: 'StripCiphertextRestartedPublicCore',
-      listenHost: '127.0.0.1',
-      dataDir,
-      nodeRole: 'core',
-      chainAdapter: chain,
-      rfc64CatalogActivation: { enabled: false },
-      swmHostMode: { enabled: true, hostPublic: true, stripCiphertext: true },
-    });
-    agents.push(restarted);
+    const restarted = await makeCore(true, { hostPublic: true, chain, dataDir });
     const restored = restarted as unknown as StripInternals;
     installGossipStub(restored);
     (restored as any).maybeMarkRegisteredForHostMode = async () => {};
@@ -332,23 +309,11 @@ describe('persisted host-mode restoration compatibility', () => {
   });
 
   it('restart restore contains a failing policy re-evaluation to keep startup alive', async () => {
-    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-strip-ct-restore-policy-error-'));
-    tempDirs.push(dataDir);
-    const core = await DKGAgent.create({
-      name: 'StripCiphertextRestorePolicyErrorCore',
-      listenHost: '127.0.0.1',
-      dataDir,
-      nodeRole: 'core',
-      rfc64CatalogActivation: { enabled: false },
-      swmHostMode: { enabled: true, hostPublic: true, stripCiphertext: true },
-    });
-    agents.push(core);
+    const core = await makeCore(true, { hostPublic: true });
     const g = core as unknown as StripInternals;
     installGossipStub(g);
     const cgId = 'cg-public-restore-error';
-    const store = new SwmHostModeStore({ dataDir: join(dataDir, 'swm-host'), ...SwmHostModeStore.defaultLimits() });
-    await store.init();
-    g.swmHostModeStore = store;
+    const store = g.swmHostModeStore!;
     await store.markHostModeSubscribed(cgId);
     await store.markHostModeSubscribed('zz-healthy-restoration');
     await expect(g.initializeSwmHostModeStore()).resolves.toBeUndefined();
@@ -368,23 +333,11 @@ describe('persisted host-mode restoration compatibility', () => {
   });
 
   it('restart restore wires persisted subscriptions when private-ciphertext strip is OFF', async () => {
-    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-strip-ct-restore-legacy-'));
-    tempDirs.push(dataDir);
-    const core = await DKGAgent.create({
-      name: 'StripCiphertextRestoreLegacyCore',
-      listenHost: '127.0.0.1',
-      dataDir,
-      nodeRole: 'core',
-      rfc64CatalogActivation: { enabled: false },
-      swmHostMode: { enabled: true, stripCiphertext: false },
-    });
-    agents.push(core);
+    const core = await makeCore(false);
     const g = core as unknown as StripInternals;
     installGossipStub(g);
     const cgId = 'cg-curated-restore';
-    const store = new SwmHostModeStore({ dataDir: join(dataDir, 'swm-host'), ...SwmHostModeStore.defaultLimits() });
-    await store.init();
-    g.swmHostModeStore = store;
+    const store = g.swmHostModeStore!;
     await store.markHostModeSubscribed(cgId);
     (g as any).maybeMarkRegisteredForHostMode = async () => {};
     const wired: string[] = [];
@@ -405,21 +358,9 @@ describe('persisted host-mode restoration compatibility', () => {
     // chain RPC pair on a `hostPublic` core), so the startup walk must be
     // capped the same way the periodic sweep is. Nothing may be dropped: the
     // tail still runs, just not on the boot path.
-    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-strip-ct-restore-batch-'));
-    tempDirs.push(dataDir);
-    const core = await DKGAgent.create({
-      name: 'StripCiphertextRestoreBatchCore',
-      listenHost: '127.0.0.1',
-      dataDir,
-      nodeRole: 'core',
-      rfc64CatalogActivation: { enabled: false },
-      swmHostMode: { enabled: true, stripCiphertext: false, reconcileBatchSize: 2 },
-    });
-    agents.push(core);
+    const core = await makeCore(false, { reconcileBatchSize: 2 });
     const g = core as unknown as StripInternals;
-    const store = new SwmHostModeStore({ dataDir: join(dataDir, 'swm-host'), ...SwmHostModeStore.defaultLimits() });
-    await store.init();
-    g.swmHostModeStore = store;
+    const store = g.swmHostModeStore!;
     installGossipStub(g);
     const cgIds = ['cg-b1', 'cg-b2', 'cg-b3', 'cg-b4', 'cg-b5'];
     for (const cgId of cgIds) await store.markHostModeSubscribed(cgId);
@@ -453,21 +394,9 @@ describe('persisted host-mode restoration compatibility', () => {
     // every envelope (member apply + opaque host append). The refusal lives in
     // `wireSwmHostModeHandler` itself (review #2614), so this drives the REAL
     // wiring point instead of a stub of it.
-    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-strip-ct-restore-member-race-'));
-    tempDirs.push(dataDir);
-    const core = await DKGAgent.create({
-      name: 'StripCiphertextRestoreMemberRaceCore',
-      listenHost: '127.0.0.1',
-      dataDir,
-      nodeRole: 'core',
-      rfc64CatalogActivation: { enabled: false },
-      swmHostMode: { enabled: true, stripCiphertext: false, reconcileBatchSize: 2 },
-    });
-    agents.push(core);
+    const core = await makeCore(false, { reconcileBatchSize: 2 });
     const g = core as unknown as StripInternals;
-    const store = new SwmHostModeStore({ dataDir: join(dataDir, 'swm-host'), ...SwmHostModeStore.defaultLimits() });
-    await store.init();
-    g.swmHostModeStore = store;
+    const store = g.swmHostModeStore!;
     const cgIds = ['cg-race-1', 'cg-race-2', 'cg-race-3', 'cg-race-4', 'cg-race-5'];
     for (const cgId of cgIds) await store.markHostModeSubscribed(cgId);
     installGossipStub(g);
@@ -505,21 +434,9 @@ describe('persisted host-mode restoration compatibility', () => {
     // pairing entirely, so the drain would wire a host handler onto the very
     // topic the member handler already owns (apply + opaque append). The
     // membership probe must resolve the hash back through `wireIdToLocalCgId`.
-    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-strip-ct-restore-hash-member-'));
-    tempDirs.push(dataDir);
-    const core = await DKGAgent.create({
-      name: 'StripCiphertextRestoreHashMemberCore',
-      listenHost: '127.0.0.1',
-      dataDir,
-      nodeRole: 'core',
-      rfc64CatalogActivation: { enabled: false },
-      swmHostMode: { enabled: true, stripCiphertext: false, reconcileBatchSize: 1 },
-    });
-    agents.push(core);
+    const core = await makeCore(false, { reconcileBatchSize: 1 });
     const g = core as unknown as StripInternals;
-    const store = new SwmHostModeStore({ dataDir: join(dataDir, 'swm-host'), ...SwmHostModeStore.defaultLimits() });
-    await store.init();
-    g.swmHostModeStore = store;
+    const store = g.swmHostModeStore!;
     const cgId = 'cg-hash-keyed-member';
     const wireId = ethers.keccak256(ethers.toUtf8Bytes(cgId)).toLowerCase();
     // One inline marker keeps the hash marker in the DEFERRED tail.
@@ -549,21 +466,9 @@ describe('persisted host-mode restoration compatibility', () => {
     // cleared the host-mode timers and joined every other background owner but
     // never this one, so the tail could still subscribe a gossip topic and
     // rewrite a marker while the node tore down.
-    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-strip-ct-restore-stop-'));
-    tempDirs.push(dataDir);
-    const core = await DKGAgent.create({
-      name: 'StripCiphertextRestoreStopCore',
-      listenHost: '127.0.0.1',
-      dataDir,
-      nodeRole: 'core',
-      rfc64CatalogActivation: { enabled: false },
-      swmHostMode: { enabled: true, stripCiphertext: false, reconcileBatchSize: 1 },
-    });
-    agents.push(core);
+    const core = await makeCore(false, { reconcileBatchSize: 1 });
     const g = core as unknown as StripInternals;
-    const store = new SwmHostModeStore({ dataDir: join(dataDir, 'swm-host'), ...SwmHostModeStore.defaultLimits() });
-    await store.init();
-    g.swmHostModeStore = store;
+    const store = g.swmHostModeStore!;
     const cgIds = ['cg-stop-1', 'cg-stop-2', 'cg-stop-3', 'cg-stop-4'];
     for (const cgId of cgIds) await store.markHostModeSubscribed(cgId);
     installGossipStub(g);
@@ -584,23 +489,11 @@ describe('persisted host-mode restoration compatibility', () => {
   });
 
   it('restart restore contains a failing legacy re-wire to keep startup alive', async () => {
-    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-strip-ct-restore-legacy-error-'));
-    tempDirs.push(dataDir);
-    const core = await DKGAgent.create({
-      name: 'StripCiphertextRestoreLegacyErrorCore',
-      listenHost: '127.0.0.1',
-      dataDir,
-      nodeRole: 'core',
-      rfc64CatalogActivation: { enabled: false },
-      swmHostMode: { enabled: true, stripCiphertext: false },
-    });
-    agents.push(core);
+    const core = await makeCore(false);
     const g = core as unknown as StripInternals;
     installGossipStub(g);
     const cgId = 'cg-curated-restore-error';
-    const store = new SwmHostModeStore({ dataDir: join(dataDir, 'swm-host'), ...SwmHostModeStore.defaultLimits() });
-    await store.init();
-    g.swmHostModeStore = store;
+    const store = g.swmHostModeStore!;
     await store.markHostModeSubscribed(cgId);
     await store.markHostModeSubscribed('zz-healthy-restoration');
     await expect(g.initializeSwmHostModeStore()).resolves.toBeUndefined();

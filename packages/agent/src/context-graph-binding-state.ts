@@ -80,6 +80,17 @@ export function isCanonicalAuthoritativeContextGraphId(
     && BigInt(value) <= ethers.MaxUint256;
 }
 
+/** Persistence compatibility accepts padded IDs, then establishes the canonical uint256 invariant. */
+export function normalizeAuthoritativeContextGraphId(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  try {
+    const normalized = BigInt(value).toString();
+    return isCanonicalAuthoritativeContextGraphId(normalized) ? normalized : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * The committed name hashes that name a local Context Graph id, lowercase:
  * its commitment keccak256(utf8(id)), and for a host-wire row (keyed by its

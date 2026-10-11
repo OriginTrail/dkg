@@ -29,7 +29,7 @@
 import { createHash } from 'node:crypto';
 import { promises as fs, type Dirent } from 'node:fs';
 import path from 'node:path';
-import { normalizePositiveOnChainId } from '../internal/swm-host-mode-contracts.js';
+import { normalizeAuthoritativeContextGraphId } from '../context-graph-binding-state.js';
 
 export interface SwmHostModeEntry {
   /** Monotonic per-store sequence number assigned at append time. */
@@ -444,7 +444,7 @@ export class SwmHostModeStore {
     await this.withCgWriteLock(contextGraphId, async () => {
       const meta = await this.loadMeta(contextGraphId);
       const bindingSpecified = Object.hasOwn(options, 'onChainId');
-      const onChainId = normalizePositiveOnChainId(options.onChainId);
+      const onChainId = normalizeAuthoritativeContextGraphId(options.onChainId);
       if (
         meta.hostModeSubscribed === true
         && (!bindingSpecified || meta.hostModeOnChainId === onChainId)
@@ -493,7 +493,7 @@ export class SwmHostModeStore {
     for (const { contextGraphId } of await this.listKnownCgs()) {
       const meta = await this.loadMeta(contextGraphId).catch(() => null);
       if (meta?.hostModeSubscribed === true) {
-        const onChainId = normalizePositiveOnChainId(meta.hostModeOnChainId);
+        const onChainId = normalizeAuthoritativeContextGraphId(meta.hostModeOnChainId);
         out.push({
           contextGraphId,
           ...(onChainId === undefined ? {} : { onChainId }),
@@ -698,7 +698,7 @@ export class SwmHostModeStore {
       parsed = undefined;
     }
     const logSeqno = await this.recoverLastSeqnoFromLog(contextGraphId);
-    const restoredOnChainId = normalizePositiveOnChainId(parsed?.hostModeOnChainId);
+    const restoredOnChainId = normalizeAuthoritativeContextGraphId(parsed?.hostModeOnChainId);
     const state: CgMetaState = {
       seqno: Math.max(parsed?.seqno ?? 0, logSeqno),
       registered: parsed?.registered ?? false,

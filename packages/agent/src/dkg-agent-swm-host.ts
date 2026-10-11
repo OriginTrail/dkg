@@ -1,3 +1,4 @@
+import { createHostModePublicPolicy } from './internal/swm-host-catchup-policy.js';
 import { HostModeRestoration } from './internal/host-mode-restoration.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -865,8 +866,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
    * With the strip ON we re-run the policy-aware reconciler rather than wiring
    * directly: it refuses stale curated custody and can safely restore a
    * confirmed-public subscription when `hostPublic` is enabled. With the strip
-   * OFF we re-engage the gossip handler directly and trust the previous
-   * decision (the curated check ran when the subscription was first wired) —
+   * OFF we retain legacy curated custody, but re-confirm the public tier so
+   * ordinary readers keep access to retained public SWM after a restart —
    * the chain-anchored authority check on every envelope ingest still catches
    * revocations even if curator state has changed since.
    *
@@ -891,9 +892,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
         await this.reconcileSwmHostModeSubscription(cgId, SUBSCRIPTION_SOURCES.RECONCILER, current);
         return;
       }
+      const bindingCurrent = this.swmHostModePublicPolicy().captureCurrent(cgId);
+      const publicHost = this.config.swmHostMode?.hostPublic === true
+        && await this.isConfirmedPublicForHostMode(cgId);
       // Binding admission also protects a rehydrated member before its
       // gossip handler is wired; wiring retains its own registration guard.
-      if (!current() || !this.wireSwmHostModeHandler(cgId, SUBSCRIPTION_SOURCES.RECONCILER, true)) return;
+      if (!current() || !bindingCurrent()
+        || !this.wireSwmHostModeHandler(cgId, SUBSCRIPTION_SOURCES.RECONCILER, !publicHost)) return;
       // Codex PR #620 R2: also re-probe registration state.
       // Without this, a host-only CG that was registered while
       // the node was offline stays on the 1MiB / 6h pre-reg
@@ -1017,13 +1022,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
     //
     // A numeric policy, verified curated beacon or native private metadata
     // proves curation. A name commitment alone does not prove access policy.
+    const bindingCurrent = this.swmHostModePublicPolicy().captureCurrent(contextGraphId);
     const probedCurated = await this.isCuratedForHostMode(contextGraphId);
+    if (!current() || !bindingCurrent()) return;
     // The numeric binding can change even while an already-resolved promise yields.
     const currentPolicy = this.swmHostModeAccessPolicy(contextGraphId);
     const curated = currentPolicy === undefined ? probedCurated : currentPolicy === 1;
     if (!curated && (this.config.swmHostMode?.hostPublic !== true
       || !await this.isConfirmedPublicForHostMode(contextGraphId))) return;
-    if (!current()
+    if (!current() || !bindingCurrent()
       || !this.automaticSwmHostModeAdmissionAllowed(contextGraphId)) return;
 
     // OT-RFC-49 WS-A — the private-ciphertext strip. With `stripCiphertext`
@@ -1093,6 +1100,18 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (this.swmHostModeSubscribed.get(hostKey) !== SUBSCRIPTION_SOURCES.MANUAL
       && this.wireIdToLocalCgId.get(hostKey) === localId) this.unwireSwmHostModeHandler(contextGraphId);
     return false;
+  }
+
+  swmHostModePublicPolicy(this: DKGAgent) {
+    const session = this.gossipSession;
+    return createHostModePublicPolicy({ subscriptions: this.subscribedContextGraphs,
+      bindings: this.contextGraphBindingState, wireOwners: this.wireIdToLocalCgId,
+      localId: id => this.swmHostModeLocalId(id), hostKey: id => this.canonicalSwmHostModeKey(id),
+      current: () => session.active && this.gossipSession === session,
+      classification: key => this.swmHostModeCurated.get(key),
+      publicReaderEnabled: key => this.config.swmHostMode?.hostPublic === true && this.swmHostModeSubscribed.has(key),
+      confirmedPublic: id => this.isConfirmedPublicForHostMode(id),
+    });
   }
 
   /** Numeric policy is authoritative over metadata and same-hash beacon hints. */
@@ -2270,29 +2289,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
       });
     }
 
-    // GH #1611 / Codex review #2614 — per-CG strip re-check. We only get here
-    // under the strip when this core hosts at least one non-curated CG, so
-    // confirm THIS request targets one of them before serving a byte. Both
-    // conditions are load-bearing and neither is redundant:
-    //   - `swmHostModeCurated.get(hostKey) === false` is the local, free gate.
-    //     It fails closed on an absent classification (legacy on-disk curated
-    //     ciphertext from before the strip rolled out has no entry here), and
-    //     it bounds the chain RPC below to CGs this core already hosts.
-    //   - `isConfirmedPublicForHostMode` re-derives accessPolicy===0 &&
-    //     publishPolicy===1 from chain state (short-TTL, fail-closed), so a CG
-    //     whose owner has since curated it stops being served within seconds
-    //     rather than for the life of the marker.
+    // Serving is evaluated before signature/replay; reader admission below
+    // explicitly revalidates the shared public proof after authentication.
     if (this.swmHostModeStripCiphertext()) {
-      const hostKey = this.canonicalSwmHostModeKey(req.contextGraphId);
-      const nonCurated = this.swmHostModeCurated.get(hostKey) === false;
-      let publicHostTier = false;
-      try {
-        // `&&` keeps the short-circuit: a locally curated CG never spends the
-        // chain RPC. A throw from the resolver is a DENIAL, not a transport
-        // failure — this responder always answers with a structured response.
-        publicHostTier = nonCurated && await this.isConfirmedPublicForHostMode(req.contextGraphId);
-      } catch { publicHostTier = false; }
-      if (!publicHostTier) {
+      const policy = await this.swmHostModePublicPolicy().evaluate(req.contextGraphId, 'serving');
+      if (!policy.mayServeUnderStrip) {
         this.log.debug(
           ctx,
           `host-catchup served NOTHING cg=${req.contextGraphId} from=${fromPeerId}: private-ciphertext ` +
@@ -8255,11 +8256,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
     // Public host custody is explicitly enabled and re-confirmed locally.
     // Authentication and replay defence above apply equally to ordinary readers.
-    const hostKey = this.canonicalSwmHostModeKey(req.contextGraphId);
-    if (this.config.swmHostMode?.hostPublic === true
-      && this.swmHostModeSubscribed.has(hostKey)
-      && this.swmHostModeCurated.get(hostKey) === false
-      && await this.isConfirmedPublicForHostMode(req.contextGraphId)) {
+    const publicPolicy = await this.swmHostModePublicPolicy().evaluate(req.contextGraphId, 'public-reader');
+    if (publicPolicy.mayAdmitPublicReader) {
       return { ok: true, recoveredSigner: requesterEoa };
     }
 
