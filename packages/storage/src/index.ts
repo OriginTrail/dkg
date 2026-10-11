@@ -15,6 +15,8 @@ export {
   type Quad,
   type TripleStore,
   type TripleStoreDecorator,
+  type LogicalStoreMutationCapability,
+  runLogicalStoreMutation,
   type BoundedQueryResponseCapability,
   type QueryResult,
   type QueryOptions,

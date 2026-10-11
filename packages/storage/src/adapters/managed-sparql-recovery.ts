@@ -1,94 +1,76 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { AbortableStoreWorkLifecycle, StoreWorkContext } from '../abortable-store-work-lifecycle.js';
 import type { ManagedOxigraphRuntimeStateV1 } from '../managed-oxigraph-runtime-store.js';
-import type { StoreOperation } from '../store-operation-outcome.js';
-import { findTripleStoreCapability, type QueryOptions } from '../triple-store.js';
+import { hasStoreOperationOutcome, type StoreOperation } from '../store-operation-outcome.js';
+import type { QueryOptions } from '../triple-store.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { isDefinitiveSparqlUpdateRejectionV1, isSparqlHttpResponseError } from './sparql-http-response-error.js';
 import { StoreOperationTimeoutError } from '../store-operation-timeout.js';
 
-/** Adapter-private continuation authority, never a public query option. */
+/** Mutable execution evidence owned by one adapter's asynchronous lifetime. */
 export interface SparqlHttpOperationAdmissionV1 {
   readonly storeGeneration: number | null;
   dispatched: boolean;
-  active?: boolean;
-  mutationDispatched?: boolean;
-  completedWrites?: number;
+  active: boolean;
+  mutationDispatched: boolean;
+  completedSemanticWrites: number;
 }
 
-/** One backend owns the opaque continuation; ordinary option objects cannot mint it. */
 interface LogicalMutationOwner {
   readonly lifecycle: AbortableStoreWorkLifecycle;
   readonly readState: () => ManagedOxigraphRuntimeStateV1 | null;
   readonly backend: 'oxigraph-server' | 'sparql-http';
 }
-const logicalOwners = new WeakMap<object, LogicalMutationOwner>();
-const continuations = new WeakMap<object, { readonly store: object; readonly admission: SparqlHttpOperationAdmissionV1 }>();
 
-/** @internal Installed by the adapter, not a serializable runtime/query option. */
-export function registerSparqlHttpLogicalMutationOwnerV1(store: object, owner: LogicalMutationOwner): void {
-  logicalOwners.set(store, owner);
-}
+/** One store-bound scope; telemetry copies and other adapters cannot transfer it. */
+export class SparqlHttpLogicalMutationScopeV1 {
+  private readonly scope = new AsyncLocalStorage<SparqlHttpOperationAdmissionV1>();
+  constructor(private readonly owner: LogicalMutationOwner) {}
 
-export function sparqlHttpContinuationAdmissionV1(
-  store: object, options: QueryOptions | undefined,
-): SparqlHttpOperationAdmissionV1 | undefined {
-  const continuation = options && continuations.get(options);
-  return continuation?.store === store && continuation.admission.active === true ? continuation.admission : undefined;
-}
-
-/** Copy telemetry/options without losing a private, store-bound continuation. */
-export function sparqlHttpContinuationOptionsV1(store: object, options: QueryOptions | undefined, updates: QueryOptions): QueryOptions {
-  const copy = { ...options, ...updates };
-  const admission = sparqlHttpContinuationAdmissionV1(store, options);
-  if (admission) continuations.set(copy, { store, admission });
-  return copy;
-}
-
-/** Keep activity and admission through both a mutation and its decorator bookkeeping. */
-export function runSparqlHttpLogicalMutationV1<T>(
-  store: unknown, operation: StoreOperation, options: QueryOptions | undefined,
-  work: (options: QueryOptions | undefined) => Promise<T>,
-): Promise<T> {
-  const backend = findTripleStoreCapability(store, (candidate): candidate is object =>
-    typeof candidate === 'object' && candidate !== null && logicalOwners.has(candidate));
-  if (!backend) return work(options);
-  const owner = logicalOwners.get(backend)!;
-  if (sparqlHttpContinuationAdmissionV1(backend, options)) return work(options);
-  const state = owner.readState();
-  if (refusesSparqlHttpAdmissionV1(state)) {
-    return Promise.reject(new StoreOperationTimeoutError({ backend: owner.backend, operation, outcome: 'not_started' }));
+  current(): SparqlHttpOperationAdmissionV1 | undefined {
+    const admission = this.scope.getStore();
+    return admission?.active ? admission : undefined;
   }
-  return owner.lifecycle.run(options?.signal, async signal => {
-    const admission: SparqlHttpOperationAdmissionV1 = { storeGeneration: state?.generation ?? null, dispatched: false, active: true };
-    const scoped = { ...options, signal };
-    continuations.set(scoped, { store: backend, admission });
-    try { return await work(scoped); }
-    catch (cause) {
-      if (!admission.mutationDispatched || (
-        !admission.completedWrites && isSparqlHttpResponseError(cause) && isDefinitiveSparqlUpdateRejectionV1(cause)
-        && cause.operation === operation
-      )) throw cause;
-      throw new StoreOperationTimeoutError({ backend: owner.backend, operation, outcome: 'indeterminate',
-        message: `${operation} outcome is indeterminate after mutation dispatch`, cause });
-    } finally {
-      admission.active = false;
-      continuations.delete(scoped);
+
+  run<T>(operation: StoreOperation, options: QueryOptions | undefined,
+    work: (options: QueryOptions | undefined) => Promise<T>): Promise<T> {
+    if (this.current()) return work(options);
+    const state = this.owner.readState();
+    if (refusesSparqlHttpAdmissionV1(state)) {
+      return Promise.reject(new StoreOperationTimeoutError({ backend: this.owner.backend, operation, outcome: 'not_started' }));
     }
-  });
+    return this.owner.lifecycle.run(options?.signal, signal => {
+      const admission: SparqlHttpOperationAdmissionV1 = {
+        storeGeneration: state?.generation ?? null, dispatched: false,
+        active: true, mutationDispatched: false, completedSemanticWrites: 0,
+      };
+      return this.scope.run(admission, async () => {
+        try { return await work({ ...options, signal }); }
+        catch (cause) {
+          if (!admission.mutationDispatched || hasStoreOperationOutcome(cause, operation, 'indeterminate') || (
+            admission.completedSemanticWrites === 0 && isSparqlHttpResponseError(cause)
+            && isDefinitiveSparqlUpdateRejectionV1(cause) && cause.operation === operation
+          )) throw cause;
+          throw new StoreOperationTimeoutError({ backend: this.owner.backend, operation, outcome: 'indeterminate',
+            message: `${operation} outcome is indeterminate after mutation dispatch`, cause });
+        } finally { admission.active = false; }
+      });
+    });
+  }
 }
 
-/** Counted deletes use the same lifetime even without a changelog decorator. */
+/** Counted deletes share the adapter owner used by CAS and decorator bookkeeping. */
 export function runSparqlHttpCountedDeleteV1(input: {
-  readonly store: object;
+  readonly scope: SparqlHttpLogicalMutationScopeV1;
   readonly operation: 'deleteByPattern' | 'deleteBySubjectPrefix';
   readonly options: QueryOptions | undefined;
   readonly count: (options: QueryOptions) => Promise<number>;
   readonly mutate: (options: QueryOptions | undefined) => Promise<void>;
 }): Promise<number> {
-  return runSparqlHttpLogicalMutationV1(input.store, input.operation, input.options, async options => {
-    const count = (stage: string) => input.count(sparqlHttpContinuationOptionsV1(input.store, options, {
+  return input.scope.run(input.operation, input.options, async options => {
+    const count = (stage: string) => input.count({ ...options,
       source: options?.source ?? `sparql-http.${input.operation}.${stage}`,
-    }));
+    });
     const before = await count('countBefore');
     await input.mutate(options);
     return Math.max(0, before - await count('countAfter'));

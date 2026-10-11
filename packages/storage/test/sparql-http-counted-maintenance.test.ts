@@ -13,7 +13,7 @@ import type { QueryOptions } from '../src/triple-store.js';
 const GRAPH = 'urn:test:counted-maintenance';
 afterEach(() => vi.restoreAllMocks());
 
-async function harness(failure?: 'count' | 'marker', pauseOn = (body: string) => body.startsWith('DELETE') && body.includes(`<${GRAPH}>`)) {
+async function harness(failure?: 'count' | 'marker' | 'cas403', pauseOn = (body: string) => body.startsWith('DELETE') && body.includes(`<${GRAPH}>`)) {
   const engine = new oxigraph.Store();
   engine.update(`INSERT DATA { GRAPH <${GRAPH}> { <urn:target:a> <urn:p> "a" . <urn:other:b> <urn:p> "b" } }`);
   const state = { recovering: false, admissionsPaused: false, generation: 0 };
@@ -29,6 +29,9 @@ async function harness(failure?: 'count' | 'marker', pauseOn = (body: string) =>
       const body = Buffer.concat(parts).toString('utf8'); requests.push(body);
       const update = request.headers['content-type']?.startsWith('application/sparql-update');
       if (update) {
+        if (failure === 'cas403' && body.includes('authorCommitApplied') && body.includes('INSERT DATA')) {
+          response.writeHead(403).end('semantic CAS denied'); return;
+        }
         if (committed && failure === 'marker' && body.includes(CHANGELOG_GRAPH)) {
           response.writeHead(500).end('marker outcome unavailable'); return;
         }
@@ -54,10 +57,11 @@ async function harness(failure?: 'count' | 'marker', pauseOn = (body: string) =>
     queryEndpoint: `http://127.0.0.1:${(server.address() as AddressInfo).port}/query`, timeout: 2000,
     scheduler: new StorePriorityScheduler({ maxConcurrent: 1, ackReservedSlots: 0, healthReservedSlots: 0, normalReservedSlots: 0, backgroundReservedSlots: 0 }),
   }, { getRecoveryState: () => ({ ...state }), registerActivity: () => ({ report: busy => activity.push(busy), dispose() {} }) });
-  const log = new ChangelogStore(new GraphSetIndexStore(raw));
+  const index = new GraphSetIndexStore(raw);
+  const log = new ChangelogStore(index);
   await log.changelogHead(); // Production enabled wrapper, already seeded durable log.
   activity.length = 0; requests.length = 0;
-  return { log, raw, state, activity, requests, deleted, release, engine,
+  return { log, index, raw, state, activity, requests, deleted, release, engine,
     endpoint: `http://127.0.0.1:${(server.address() as AddressInfo).port}/query`,
     async close() { release(); await log.close(); await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); },
   };
@@ -69,6 +73,66 @@ const mutations = {
 };
 
 describe('counted deletion maintenance with the enabled changelog', () => {
+  it.each(['uncounted', 'pattern', 'prefix', 'delete', 'update', 'replace', 'cas'] as const)('retains bare graph-index %s maintenance under the shared logical lifetime', async kind => {
+    const h = await harness(undefined, body => kind === 'cas'
+      ? body.includes('authorCommitApplied') && body.includes('INSERT DATA')
+      : body.includes(`<${GRAPH}>`) && body.startsWith('DELETE'));
+    if (kind === 'cas') await seedOldState(h.raw);
+    await h.index.listGraphs(); // Warm production index so post-write maintenance must probe.
+    h.requests.length = 0;
+    const work = kind === 'uncounted' ? h.index.deleteByPatternWithoutCount({ graph: GRAPH, subject: 'urn:target:a' })
+      : kind === 'pattern' ? h.index.deleteByPattern({ graph: GRAPH, subject: 'urn:target:a' })
+      : kind === 'prefix' ? h.index.deleteBySubjectPrefix(GRAPH, 'urn:target:')
+      : kind === 'delete' ? h.index.delete([{ graph: GRAPH, subject: 'urn:target:a', predicate: 'urn:p', object: '"a"' }])
+      : kind === 'update' ? h.index.update(`DELETE WHERE { GRAPH <${GRAPH}> { <urn:target:a> ?p ?o } }`, { touchedGraphs: [GRAPH] })
+      : kind === 'replace' ? h.index.replaceSubject(GRAPH, 'urn:target:a', [{ graph: GRAPH, subject: 'urn:target:a', predicate: 'urn:p', object: '"replacement"' }])
+      : h.index.rfc64AuthorCommitCasV1(authorCommitInput());
+    const settled = work.then(value => ({ value }), error => ({ error }));
+    try {
+      await Promise.race([h.deleted, settled.then(() => { throw new Error('mutation ended before pause'); })]);
+      const requests = h.requests.length;
+      await expect(h.raw.query('ASK {}')).rejects.toMatchObject({ outcome: 'not_started' });
+      expect(h.requests).toHaveLength(requests);
+      h.release();
+      expect(await settled).toEqual({ value: kind === 'cas' ? 'committed' : kind === 'pattern' || kind === 'prefix' ? 1 : undefined });
+      expect(h.requests.some(body => body.trimStart().startsWith('ASK') && body.includes(`<${kind === 'cas' ? PROJECTION_GRAPH : GRAPH}>`))).toBe(true);
+      expect(h.activity.at(-1)).toBe(false);
+    } finally { await h.close(); }
+  });
+
+  it.each(['drop', 'uncounted', 'delete', 'update'] as const)('retains admitted %s mutation through its graph-index and changelog writes', async kind => {
+    const h = await harness(undefined, body => body.includes(`<${GRAPH}>`) && /^(DROP|DELETE)/.test(body));
+    const work = kind === 'drop' ? h.log.dropGraph(GRAPH)
+      : kind === 'uncounted' ? h.log.deleteByPatternWithoutCount({ graph: GRAPH, subject: 'urn:target:a' })
+      : kind === 'delete' ? h.log.delete([{ graph: GRAPH, subject: 'urn:target:a', predicate: 'urn:p', object: '"a"' }])
+      : h.log.update(`DELETE WHERE { GRAPH <${GRAPH}> { <urn:target:a> ?p ?o } }`, { touchedGraphs: [GRAPH] });
+    const settled = work.then(() => ({ success: true }), error => ({ error }));
+    try {
+      await Promise.race([h.deleted, settled.then(() => { throw new Error('mutation ended before maintenance pause'); })]);
+      expect(h.engine.query(`ASK { GRAPH <${GRAPH}> { <urn:target:a> ?p ?o } }`)).toBe(false);
+      const requests = h.requests.length;
+      await expect(h.raw.query('ASK {}')).rejects.toMatchObject({ outcome: 'not_started' });
+      await expect(h.raw.insert([{ graph: GRAPH, subject: 'urn:fresh', predicate: 'urn:p', object: '"fresh"' }])).rejects.toMatchObject({ outcome: 'not_started' });
+      expect(h.requests).toHaveLength(requests);
+      h.release(); expect(await settled).toEqual({ success: true });
+      expect(h.engine.query(`ASK { GRAPH <${CHANGELOG_GRAPH}> { ?s <urn:dkg:changelog#graph> <${GRAPH}> } }`)).toBe(true);
+      expect(h.log.needsReconcile).toBe(false);
+      expect(h.activity.at(-1)).toBe(false);
+    } finally { await h.close(); }
+  });
+
+  it('preserves a definite CAS rejection through successful staging cleanup and the changelog wrapper', async () => {
+    const h = await harness('cas403'); await seedOldState(h.raw);
+    const before = h.raw.getWriteRevision(PROJECTION_GRAPH);
+    try {
+      await expect(h.log.rfc64AuthorCommitCasV1(authorCommitInput())).rejects.toMatchObject({ name: 'SparqlHttpResponseError', status: 403 });
+      expect(h.requests.some(body => body.startsWith('DROP SILENT GRAPH') && !body.includes('INSERT DATA'))).toBe(true);
+      expect(h.requests.some(body => body.startsWith('ASK') && body.includes('authorCommitApplied'))).toBe(false);
+      expect(h.raw.getWriteRevision(PROJECTION_GRAPH)).toEqual(before);
+      expect(h.engine.query(`ASK { GRAPH <${PROJECTION_GRAPH}> { <urn:test:rfc64:new:1> ?p ?o } }`)).toBe(false);
+    } finally { await h.close(); }
+  });
+
   it.each(['pattern', 'prefix'] as const)('drains %s deletion, graph-index and marker work while fresh operations stay refused', async kind => {
     const h = await harness(); const mutation = mutations[kind](h.log);
     const settled = mutation.then(value => ({ value }), error => ({ error }));
@@ -101,7 +165,7 @@ describe('counted deletion maintenance with the enabled changelog', () => {
     } finally { await h.close(); }
   });
 
-  it('keeps opaque continuations store-bound, unforgeable by copying and retired after completion', async () => {
+  it('keeps logical admission store-bound and prevents options copying or completed scopes from admitting fresh work', async () => {
     const h = await harness();
     let scoped: QueryOptions | undefined;
     const original = h.raw.countQuads.bind(h.raw);
@@ -120,6 +184,33 @@ describe('counted deletion maintenance with the enabled changelog', () => {
       h.release(); await expect(mutation).resolves.toBe(1);
       await expect(h.raw.query('ASK {}', scoped)).rejects.toMatchObject({ outcome: 'not_started' });
     } finally { await other.close(); await h.close(); }
+  });
+
+  it('shares nested lifetime through telemetry copies without transferring admission to another store or late work', async () => {
+    const h = await harness(undefined, body => body.startsWith('INSERT DATA') && body.includes(`<${GRAPH}>`));
+    const other = createManagedOxigraphSparqlStoreV1({ queryEndpoint: h.endpoint }, {
+      getRecoveryState: () => ({ recovering: false, admissionsPaused: true, generation: 0 }),
+    });
+    let releaseLate!: () => void;
+    const lateGate = new Promise<void>(resolve => { releaseLate = resolve; });
+    let late!: Promise<unknown>;
+    const work = h.raw.runLogicalMutation('insert', { source: 'test.outer' }, async options => {
+      late = lateGate.then(() => h.raw.query('ASK {}', { ...options, source: 'test.late' }));
+      void late.catch(() => undefined);
+      await h.raw.insert([{ graph: GRAPH, subject: 'urn:nested', predicate: 'urn:p', object: '"nested"' }], options);
+      await expect(other.query('ASK {}', options)).rejects.toMatchObject({ outcome: 'not_started' });
+      return h.raw.runLogicalMutation('deleteByPattern', { ...options, source: 'test.nested' }, copied =>
+        h.raw.query(`ASK { GRAPH <${GRAPH}> { <urn:nested> ?p ?o } }`, { ...copied, source: 'test.read' }));
+    });
+    try {
+      await h.deleted;
+      await expect(h.raw.query('ASK {}')).rejects.toMatchObject({ outcome: 'not_started' });
+      h.release(); await expect(work).resolves.toEqual({ type: 'boolean', value: true });
+      const requestCount = h.requests.length;
+      releaseLate(); await expect(late).rejects.toMatchObject({ outcome: 'not_started' });
+      expect(h.requests).toHaveLength(requestCount);
+      expect(h.activity.at(-1)).toBe(false);
+    } finally { releaseLate(); await other.close(); await h.close(); }
   });
 
   it('refuses continuation after a managed generation changes and retains reconciliation evidence', async () => {

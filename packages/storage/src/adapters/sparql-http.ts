@@ -117,9 +117,8 @@ export { ABANDONED_READ_DRAIN_BUDGET_BYTES } from './managed-sparql-recovery.js'
 export type { SparqlHttpRecoveryState, SparqlHttpManagedRecoveryV1 } from './managed-sparql-recovery.js';
 import { ManagedWorkRecoveryCoordinatorV1 } from
   '../managed-work-recovery-coordinator.js';
-import { refusesSparqlHttpAdmissionV1, registerSparqlHttpLogicalMutationOwnerV1,
-  runSparqlHttpCountedDeleteV1, sparqlHttpContinuationAdmissionV1, sparqlHttpContinuationOptionsV1,
-  type SparqlHttpOperationAdmissionV1 } from './managed-sparql-recovery.js';
+import { refusesSparqlHttpAdmissionV1, SparqlHttpLogicalMutationScopeV1,
+  runSparqlHttpCountedDeleteV1 } from './managed-sparql-recovery.js';
 import { runSparqlHttpAuthorCommitV1 } from './sparql-http-author-commit.js';
 
 /** Every SPARQL statement this adapter builds by interpolation. */
@@ -327,7 +326,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
         this.reportManagedRuntimeActivity(managedRuntimeHooks);
       },
     });
-    registerSparqlHttpLogicalMutationOwnerV1(this, {
+    this.logicalMutationScope = new SparqlHttpLogicalMutationScopeV1({
       lifecycle: this.workLifecycle, readState: () => this.readRecoveryState(),
       backend: this.managedOxigraph ? 'oxigraph-server' : 'sparql-http',
     });
@@ -433,12 +432,19 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     return executeRfc64SemanticReadCapabilityV1(this, operation, options);
   }
 
+  private readonly logicalMutationScope: SparqlHttpLogicalMutationScopeV1;
+
+  runLogicalMutation<T>(operation: StoreOperation, options: QueryOptions | undefined,
+    work: (options: QueryOptions | undefined) => Promise<T>): Promise<T> {
+    return this.logicalMutationScope.run(operation, options, work);
+  }
+
   private runStoreWork<T>(
     operation: StoreOperation,
     options: QueryOptions | undefined,
     work: (signal: AbortSignal | undefined, context: StoreWorkContext) => Promise<T>,
-    admission?: SparqlHttpOperationAdmissionV1,
   ): Promise<T> {
+    const admission = this.logicalMutationScope.current();
     const recovery = this.readRecoveryState();
     if (refusesSparqlHttpAdmissionV1(recovery, admission)) {
       return Promise.reject(this.recoveryError(operation, 'not_started'));
@@ -519,8 +525,8 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     options: SparqlHttpQueryOptions | undefined,
     consume: (response: Response) => Promise<T>,
     policy: SparqlHttpReadPolicy,
-    admission?: SparqlHttpOperationAdmissionV1,
   ): Promise<T> {
+    const admission = this.logicalMutationScope.current();
     const recoveryAtStart = this.readRecoveryState();
     if (refusesSparqlHttpAdmissionV1(recoveryAtStart, admission)) {
       throw this.recoveryError(storeOperation, 'not_started');
@@ -685,9 +691,8 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     update: string,
     options?: QueryOptions,
     operation: StoreOperation = 'update',
-    admission?: SparqlHttpOperationAdmissionV1,
   ): Promise<void> {
-    return this.postUpdate(update, options, operation, () => undefined, admission);
+    return this.postUpdate(update, options, operation, () => undefined, false);
   }
 
   /** One owner for mutation/cleanup admission, dispatch and recovery retention. */
@@ -696,9 +701,9 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     options: QueryOptions | undefined,
     operation: StoreOperation,
     beforeDispatch: () => void,
-    admission?: SparqlHttpOperationAdmissionV1,
+    semanticWrite = true,
   ): Promise<void> {
-    admission ??= sparqlHttpContinuationAdmissionV1(this, options);
+    const admission = this.logicalMutationScope.current();
     // Direct POST (W3C SPARQL 1.1 Protocol §2.2.2): the update is the raw
     // request body with `application/sparql-update`, not URL-encoded form
     // data. See postQuery for why form encoding breaks large payloads.
@@ -726,7 +731,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
           body: update,
           signal,
         });
-        if (res.ok && admission) admission.completedWrites = (admission.completedWrites ?? 0) + 1;
+        if (res.ok && admission && semanticWrite) admission.completedSemanticWrites += 1;
         if (!res.ok) {
           // Keep scheduler admission until the response body has settled too;
           // otherwise retries can dispatch while an error body is unwinding.
@@ -759,7 +764,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       } finally {
         signalScope.dispose();
       }
-    }, admission);
+    });
   }
 
   async insert(quads: DKGQuad[], options?: QueryOptions): Promise<void> {
@@ -785,7 +790,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
 
   async deleteByPattern(pattern: Partial<DKGQuad>, options?: QueryOptions): Promise<number> {
     return runSparqlHttpCountedDeleteV1({
-      store: this, operation: 'deleteByPattern', options,
+      scope: this.logicalMutationScope, operation: 'deleteByPattern', options,
       count: scoped => this.countQuads(pattern.graph, scoped),
       mutate: scoped => this.applyDeleteByPattern(pattern, scoped),
     });
@@ -807,7 +812,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
 
   async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
     return runSparqlHttpCountedDeleteV1({
-      store: this, operation: 'deleteBySubjectPrefix', options,
+      scope: this.logicalMutationScope, operation: 'deleteBySubjectPrefix', options,
       count: scoped => this.countQuads(graphUri, scoped),
       mutate: scoped => this.runUpdatePlan(statements.deleteBySubjectPrefix(graphUri, prefix), scoped),
     });
@@ -824,7 +829,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       // CONTENT a raw UPDATE mutates — an unscoped lifecycle is the only sound scope.
       scope: { kind: 'all' },
       update: sparql,
-      options: sparqlHttpContinuationOptionsV1(this, options, { source: options?.source ?? 'sparql-http.update' }),
+      options: { ...options, source: options?.source ?? 'sparql-http.update' },
       operation: 'update',
     });
   }
@@ -850,12 +855,12 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     await this.runRemoteGraphMutation({
       scope: { kind: 'graphs', graphs: [graphUri] },
       update: plan.update,
-      options: sparqlHttpContinuationOptionsV1(this, options, { source: options?.source ?? 'sparql-http.replaceGraph' }),
+      options: { ...options, source: options?.source ?? 'sparql-http.replaceGraph' },
       operation: 'replaceGraph',
       cleanup: plan.cleanup
         ? {
           update: plan.cleanup,
-          options: sparqlHttpContinuationOptionsV1(this, options, { source: 'sparql-http.replaceGraph.cleanup' }),
+          options: { ...options, source: 'sparql-http.replaceGraph.cleanup' },
           operation: 'replaceGraph',
         }
         : undefined,
@@ -897,11 +902,11 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     await this.runRemoteGraphMutation({
       scope: { kind: 'graphs', graphs: [graphUri, metaGraphUri] },
       update: plan.update,
-      options: sparqlHttpContinuationOptionsV1(this, options, { source: options?.source ?? 'sparql-http.replaceGraphAndSubject' }),
+      options: { ...options, source: options?.source ?? 'sparql-http.replaceGraphAndSubject' },
       operation: 'replaceGraphAndSubject',
       cleanup: {
         update: plan.cleanup,
-        options: sparqlHttpContinuationOptionsV1(this, options, { source: 'sparql-http.replaceGraphAndSubject.cleanup' }),
+        options: { ...options, source: 'sparql-http.replaceGraphAndSubject.cleanup' },
         operation: 'replaceGraphAndSubject',
       },
     });
@@ -928,7 +933,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     await this.runRemoteGraphMutation({
       scope: { kind: 'graphs', graphs: [graphUri] },
       update,
-      options: sparqlHttpContinuationOptionsV1(this, options, { source: options?.source ?? 'sparql-http.replaceSubject' }),
+      options: { ...options, source: options?.source ?? 'sparql-http.replaceSubject' },
       operation: 'replaceSubject',
     });
   }
@@ -950,43 +955,28 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       label: 'SparqlHttpStore.rfc64AuthorCommitCasV1',
     });
     statements.checkIris.rfc64AuthorCommitCasV1(plan);
-    const state = this.readRecoveryState();
-    if (refusesSparqlHttpAdmissionV1(state, sparqlHttpContinuationAdmissionV1(this, options))) throw this.recoveryError('rfc64AuthorCommitCasV1', 'not_started');
-    return runSparqlHttpAuthorCommitV1({
-      lifecycle: this.workLifecycle,
-      signal: options?.signal,
-      storeGeneration: state?.generation ?? null,
-      admission: sparqlHttpContinuationAdmissionV1(this, options),
-      touchedGraphs: [...plan.touchedGraphs],
-      writeGen: this.writeGen,
+    return this.runLogicalMutation('rfc64AuthorCommitCasV1', options, scoped => runSparqlHttpAuthorCommitV1({
+      wasDispatched: () => this.logicalMutationScope.current()?.mutationDispatched === true,
+      touchedGraphs: [...plan.touchedGraphs], writeGen: this.writeGen,
       indeterminateError: (cause) => new StoreOperationTimeoutError({
         backend: this.managedOxigraph ? 'oxigraph-server' : 'sparql-http',
-        operation: 'rfc64AuthorCommitCasV1',
-        outcome: 'indeterminate',
+        operation: 'rfc64AuthorCommitCasV1', outcome: 'indeterminate',
         message: `RFC-64 CAS outcome is indeterminate: ${cause instanceof Error ? cause.message : 'receipt unavailable'}`,
         cause,
       }),
-      executeUpdate: (admission, signal) => this.runRemoteGraphMutation({
-        // The transactional request always mutates private receipt/staging
-        // graphs, while semantic graphs change only when the receipt is true.
-        scope: { kind: 'graphs', graphs: [plan.receiptGraph] },
-        update: plan.update,
-        options: { ...options, signal, source: options?.source ?? 'sparql-http.rfc64AuthorCommitCasV1' },
+      executeUpdate: () => this.runRemoteGraphMutation({
+        // The receipt graph changes before commit/conflict is known; semantic
+        // graph revisions advance only after a true receipt.
+        scope: { kind: 'graphs', graphs: [plan.receiptGraph] }, update: plan.update,
+        options: { ...scoped, source: scoped?.source ?? 'sparql-http.rfc64AuthorCommitCasV1' },
         operation: 'rfc64AuthorCommitCasV1',
-        admission,
       }),
-      readReceipt: (admission, signal) => this.queryWithOperation(plan.receiptAsk, {
-        ...options,
-        signal,
-        source: 'sparql-http.rfc64AuthorCommitCasV1.receipt',
-      }, 'rfc64AuthorCommitCasV1', admission),
-      cleanup: (admission) => this.postCleanupUpdate(
-        plan.cleanup,
-        { ...cleanupOptions, source: 'sparql-http.rfc64AuthorCommitCasV1.cleanup' },
-        'rfc64AuthorCommitCasV1',
-        admission,
-      ),
-    });
+      readReceipt: () => this.queryWithOperation(plan.receiptAsk, {
+        ...scoped, source: 'sparql-http.rfc64AuthorCommitCasV1.receipt',
+      }, 'rfc64AuthorCommitCasV1'),
+      cleanup: () => this.postCleanupUpdate(plan.cleanup,
+        { ...cleanupOptions, source: 'sparql-http.rfc64AuthorCommitCasV1.cleanup' }, 'rfc64AuthorCommitCasV1'),
+    }));
   }
 
   private supportsConsistency(
@@ -1004,7 +994,6 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       update: plan.update,
       options: { ...options, source: options?.source ?? `sparql-http.${plan.operation}` },
       operation: plan.operation,
-      admission: sparqlHttpContinuationAdmissionV1(this, options),
     });
   }
 
@@ -1014,7 +1003,6 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       plan.sparql,
       { ...options, source: options?.source ?? `sparql-http.${plan.operation}` },
       plan.operation,
-      sparqlHttpContinuationAdmissionV1(this, options),
     );
   }
 
@@ -1029,7 +1017,6 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     update: string;
     options?: QueryOptions;
     operation: StoreOperation;
-    admission?: SparqlHttpOperationAdmissionV1;
     cleanup?: {
       update: string;
       options?: QueryOptions;
@@ -1042,9 +1029,9 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
         // Begin the semantic write only after all pre-dispatch refusals.
         lifecycle = this.writeGen.beginWrite(opts.scope);
         this.invalidateListGraphsCache();
-        const admission = opts.admission ?? sparqlHttpContinuationAdmissionV1(this, opts.options);
+        const admission = this.logicalMutationScope.current();
         if (admission) { admission.dispatched = true; admission.mutationDispatched = true; }
-      }, opts.admission);
+      });
     } catch (error) {
       if (opts.cleanup) {
         await this.postCleanupUpdate(
@@ -1075,9 +1062,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     sparql: string,
     options: SparqlHttpQueryOptions | undefined,
     storeOperation?: StoreOperation,
-    admission?: SparqlHttpOperationAdmissionV1,
   ): Promise<QueryResult> {
-    admission ??= sparqlHttpContinuationAdmissionV1(this, options);
     const trimmed = sparql.trim();
     // PREFIX / BASE prologues precede the query form. Use the shared scanner
     // so graph-producing queries negotiate N-Quads instead of SPARQL JSON.
@@ -1106,7 +1091,6 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
             effectiveOptions,
             canonicalOperation,
             readPolicy,
-            admission,
           );
         }
 
@@ -1135,7 +1119,6 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
             return decodeSparqlJsonQueryResult(text, isAsk ? 'ask' : 'select');
           },
           readPolicy,
-          admission,
         );
       } finally {
         this.maybeEmitSlowQuery({
@@ -1144,7 +1127,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
           startedAt,
         });
       }
-    }, admission);
+    });
   }
 
   private async queryConstruct(
@@ -1152,7 +1135,6 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     options: SparqlHttpQueryOptions | undefined,
     storeOperation: StoreOperation,
     readPolicy: SparqlHttpReadPolicy,
-    admission?: SparqlHttpOperationAdmissionV1,
   ): Promise<ConstructResult> {
     return this.postQuery(
       sparql,
@@ -1179,7 +1161,6 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
         return { type: 'quads', quads };
       },
       readPolicy,
-      admission,
     );
   }
 
