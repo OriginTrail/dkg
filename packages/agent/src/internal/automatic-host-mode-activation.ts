@@ -39,9 +39,12 @@ export function createAutomaticHostModeActivation(agent: HostActivationAgent, li
     return () => session.hostModeRegistrations.get(key)?.handler === handler;
   };
   /** Admission is distinct from activation; legacy persisted custody is explicit. */
-  const admit = async (id: string, intent: AdmissionIntent, current: () => boolean): Promise<HostModeAdmission | null> => {
+  const admit = async (id: string, intent: AdmissionIntent, evidenceCurrent: () => boolean,
+    expectedListenerCurrent: () => boolean): Promise<HostModeAdmission | null> => {
     const bindingCurrent = agent.swmHostModePublicPolicy().captureCurrent(id);
-    const stillCurrent = () => current() && agent.automaticSwmHostModeAdmissionAllowed(id) && bindingCurrent();
+    // Evidence belongs to this binding and lifetime, independently of listener installation.
+    const stillCurrent = () => evidenceCurrent() && agent.automaticSwmHostModeAdmissionAllowed(id) && bindingCurrent();
+    const pendingCurrent = () => expectedListenerCurrent() && stillCurrent();
     let curated: boolean;
     if (intent === 'persisted-legacy') {
       // Strip-off legacy markers retain custody even without a public proof.
@@ -52,12 +55,12 @@ export function createAutomaticHostModeActivation(agent: HostActivationAgent, li
       // axes. Numeric policy, verified beacons or private metadata prove curation;
       // a name commitment alone does not prove an access policy.
       const probed = await agent.isCuratedForHostMode(id);
-      if (!stillCurrent()) return null;
+      if (!pendingCurrent()) return null;
       const policy = agent.swmHostModeAccessPolicy(id);
       curated = policy === undefined ? probed : policy === 1;
       if (!curated && (!lifetime.hostPublic() || !await agent.isConfirmedPublicForHostMode(id))) return null;
     }
-    if (!stillCurrent()) return null;
+    if (!pendingCurrent()) return null;
     // OT-RFC-49 WS-A: with the strip ON, hosting follows access. Declining
     // curated custody starves both legacy .meta and LU-11 chunk ingest, for
     // every discovery path. Members backfill private data from their curator;
@@ -69,16 +72,17 @@ export function createAutomaticHostModeActivation(agent: HostActivationAgent, li
         `(OT-RFC-49 WS-A — cores custody zero private SWM ciphertext for curated CGs; members backfill from the curator)`);
       return null;
     }
-    return { custody: curated ? { kind: 'curated' } : { kind: 'automatic-public', current: stillCurrent }, current: stillCurrent };
+    return Object.freeze({ custody: curated ? { kind: 'curated' } : { kind: 'automatic-public', current: stillCurrent }, current: stillCurrent });
   };
 
   /** One fenced activation flow for discovery, retry and persisted restoration. */
   const activate = async (id: string, source: SubscriptionSource, intent: AdmissionIntent,
     ownerCurrent: () => boolean): Promise<void> => {
-    let activationCurrent = captureActivationCurrent(id);
-    const current = () => lifetime.current() && ownerCurrent() && activationCurrent();
-    const canActivate = () => {
-      if (!current()) return false;
+    const expectedListenerCurrent = captureActivationCurrent(id);
+    const evidenceCurrent = () => lifetime.current() && ownerCurrent();
+    const current = () => evidenceCurrent() && expectedListenerCurrent();
+    const canActivate = (listenerCurrent: () => boolean = expectedListenerCurrent) => {
+      if (!evidenceCurrent() || !listenerCurrent()) return false;
       if (agent.automaticSwmHostModeAdmissionAllowed(id)) return true;
       agent.retireDormantSwmHostModeHandler(id); return false;
     };
@@ -107,11 +111,11 @@ export function createAutomaticHostModeActivation(agent: HostActivationAgent, li
     // offline must not remain on the 6h/1MiB pre-registration retention limits.
     // Canonical host keys make cleartext and wire-hash entry paths equivalent.
     const retainedLegacy = registration(id) !== undefined && !agent.swmHostModeStripCiphertext();
-    const admission = await admit(id, retainedLegacy ? 'persisted-legacy' : intent, current);
+    const admission = await admit(id, retainedLegacy ? 'persisted-legacy' : intent, evidenceCurrent, expectedListenerCurrent);
     if (admission === null) { canActivate(); return; }
     if (!agent.wireSwmHostModeHandler(id, source, admission.custody)) return;
-    activationCurrent = captureActivationCurrent(id);
-    const admissionCurrent = () => canActivate() && admission.current();
+    const installedListenerCurrent = captureActivationCurrent(id);
+    const admissionCurrent = () => canActivate(installedListenerCurrent) && admission.current();
     // Discovery awaits its new designation. Legacy restart preserves its historical
     // nonblocking marker enqueue before the registration probe.
     if (intent === 'discovered') await agent.awaitHostModePersistence(id);

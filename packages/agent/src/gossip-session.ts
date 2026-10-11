@@ -36,7 +36,13 @@ class SwmHostModeRegistrations {
   installOrRefresh(key: string, registration: SwmHostModeRegistration): void {
     const current = this.#records.get(key);
     // The first listener and discovery source remain authoritative on re-entry.
-    this.#records.set(key, Object.freeze({ ...(current ?? registration), custody: Object.freeze(registration.custody) }));
+    const handler = (current ?? registration).handler;
+    const evidence = registration.custody;
+    // Installation owns the listener fence; admission evidence never changes its target.
+    const custody: SwmHostModeCustody = evidence.kind === 'automatic-public'
+      ? { kind: 'automatic-public', current: () => this.#records.get(key)?.handler === handler && evidence.current() }
+      : evidence;
+    this.#records.set(key, Object.freeze({ ...(current ?? registration), custody: Object.freeze(custody) }));
   }
   remove(key: string): SwmHostModeRegistration | undefined {
     const current = this.#records.get(key);

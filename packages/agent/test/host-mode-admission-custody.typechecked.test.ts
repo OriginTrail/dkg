@@ -7,7 +7,7 @@ import { computeGossipSigningPayload, computeGossipSigningPayloadV2, encodeEncry
   GOSSIP_TYPE_WORKSPACE_PUBLISH, GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED,
   CIPHERTEXT_CHUNK_PREDICATE, ciphertextChunkStoreGraph, SUBSCRIPTION_SOURCES } from '@origintrail-official/dkg-core';
 import type { GossipSession } from '../src/gossip-session.js';
-import { createHostModeTestFixture, type StripInternals } from './swm/host-mode.fixture.js';
+import { createHostModeTestFixture, hostEnvelope, type StripInternals } from './swm/host-mode.fixture.js';
 
 function deferred() {
   let resolve!: () => void;
@@ -187,6 +187,63 @@ describe('host admission and captured custody', () => {
     } finally { release.resolve(); await retry; }
   });
 
+  it.each([false, true])('pending admission keeps its original listener snapshot (refresh=%s)', async refresh => {
+    const core = await makeCore(true, { hostPublic: true }), g = core as unknown as Host;
+    const id = 'held-listener-replacement', hash = ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerCase();
+    const created = await g.chain.createOnChainContextGraph({ accessPolicy: 0, publishPolicy: 1, nameHash: hash });
+    g.setContextGraphSubscription(id, { subscribed: false, synced: false, syncMode: 'always-on',
+      onChainHash: hash, onChainId: String(created.contextGraphId) }, { persist: false });
+    if (refresh) expect(g.wireSwmHostModeHandler(id, SUBSCRIPTION_SOURCES.CHAIN_EVENT, { kind: 'curated' })).toBe(true);
+    const prior = g.gossipSession.hostModeRegistrations.get(hash);
+    const entered = deferred(), release = deferred();
+    const getPolicy = g.chain.getContextGraphPublishPolicy.bind(g.chain);
+    vi.spyOn(g.chain, 'getContextGraphPublishPolicy').mockImplementation(async slot => {
+      entered.resolve(); await release.promise; return getPolicy(slot);
+    });
+    const pending = g.reconcileSwmHostModeSubscription(id);
+    try {
+      await entered.promise;
+      core.unwireSwmHostModeHandler(id);
+      expect(g.wireSwmHostModeHandler(id, SUBSCRIPTION_SOURCES.MANUAL, { kind: 'curated' })).toBe(true);
+      const replacement = g.gossipSession.hostModeRegistrations.get(hash)!;
+      expect(replacement.handler).not.toBe(prior?.handler);
+      release.resolve(); await pending;
+      expect(g.gossipSession.hostModeRegistrations.get(hash)).toBe(replacement);
+      expect(replacement.custody.kind).toBe('curated');
+      expect(replacement.source).toBe(SUBSCRIPTION_SOURCES.MANUAL);
+    } finally { release.resolve(); await pending; }
+  });
+
+  it.each([false, true])('registration owns captured public dispatch and retired refusal (chunked=%s)', async chunked => {
+    const core = await makeCore(true, { hostPublic: true }), g = core as unknown as Host;
+    const id = 'installed-public-dispatch', hash = ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerCase();
+    const created = await g.chain.createOnChainContextGraph({ accessPolicy: 0, publishPolicy: 1, nameHash: hash });
+    g.setContextGraphSubscription(id, { subscribed: false, synced: false, syncMode: 'always-on',
+      onChainHash: hash, onChainId: String(created.contextGraphId) }, { persist: false });
+    const ingest = vi.spyOn(g, chunked ? 'ingestSwmCiphertextChunkEnvelope' : 'ingestSwmHostModeEnvelope').mockResolvedValue();
+    const bytes = hostEnvelope(id, chunked);
+    expect(g.wireSwmHostModeHandler(id, SUBSCRIPTION_SOURCES.MANUAL, { kind: 'curated' })).toBe(true);
+    const curated = g.gossipSession.hostModeRegistrations.get(hash)!;
+    curated.handler('topic', bytes, 'peer');
+    await new Promise(resolve => setImmediate(resolve));
+    expect(ingest).not.toHaveBeenCalled();
+    core.unwireSwmHostModeHandler(id);
+    await g.reconcileSwmHostModeSubscription(id);
+    const first = g.gossipSession.hostModeRegistrations.get(hash)!;
+    expect(first.custody.kind).toBe('automatic-public');
+    if (first.custody.kind === 'automatic-public') expect(first.custody.current()).toBe(true);
+    first.handler('topic', bytes, 'peer');
+    expect(ingest).toHaveBeenCalledTimes(1);
+    const captured = ingest.mock.calls[0][3];
+    expect(captured?.()).toBe(true);
+    await g.reconcileSwmHostModeSubscription(id);
+    expect(g.gossipSession.hostModeRegistrations.get(hash)!.handler).toBe(first.handler);
+    core.unwireSwmHostModeHandler(id);
+    first.handler('topic', bytes, 'peer');
+    expect(captured?.()).toBe(false);
+    if (first.custody.kind === 'automatic-public') expect(first.custody.current()).toBe(false);
+    expect(ingest).toHaveBeenCalledTimes(1);
+  });
 
   it('refreshes typed custody while retaining first source and the original listener', async () => {
     const core = await makeCore(false), g = core as unknown as Host;
@@ -200,7 +257,8 @@ describe('host admission and captured custody', () => {
     const refreshed = g.gossipSession.hostModeRegistrations.get(key)!;
     expect(refreshed.handler).toBe(original.handler);
     expect(refreshed.source).toBe(SUBSCRIPTION_SOURCES.CHAIN_EVENT);
-    expect(refreshed.custody).toEqual({ kind: 'automatic-public', current });
+    expect(refreshed.custody.kind).toBe('automatic-public');
+    if (refreshed.custody.kind === 'automatic-public') expect(refreshed.custody.current()).toBe(false);
     expect(onMessage).toHaveBeenCalledTimes(1);
   });
 

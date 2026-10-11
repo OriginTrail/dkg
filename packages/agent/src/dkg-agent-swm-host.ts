@@ -1206,7 +1206,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
     const swmTopic = contextGraphWorkspaceTopic(wireCgId);
     const handoffCurrent = this.swmHostModePublicPolicy().captureCanonicalHandoff(contextGraphId);
-    const handler = createSwmHostModeHandler(this, this.log, session, contextGraphId, wireCgId, () => {
+    const handler = createSwmHostModeHandler(this, this.log, session, contextGraphId, () => {
       const registration = session.hostModeRegistrations.get(wireCgId);
       const custody = registration?.custody;
       return () => session.active && this.gossipSession === session

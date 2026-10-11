@@ -34,8 +34,8 @@ export interface StripInternals {
   wireSwmHostModeHandler(cgId: string, source?: SubscriptionSource, custody?: import('../../src/gossip-session.js').SwmHostModeCustody): boolean;
   reconcileSwmHostModeSubscription(cgId: string): Promise<void>;
   swmHostModePublicPolicy(): { captureCurrent(id: string): () => boolean };
-  ingestSwmHostModeEnvelope(cgId: string, data: Uint8Array, from: string): Promise<void>;
-  ingestSwmCiphertextChunkEnvelope(cgId: string, data: Uint8Array, from: string): Promise<void>;
+  ingestSwmHostModeEnvelope(cgId: string, data: Uint8Array, from: string, admissionCurrent?: () => boolean): Promise<void>;
+  ingestSwmCiphertextChunkEnvelope(cgId: string, data: Uint8Array, from: string, admissionCurrent?: () => boolean): Promise<void>;
   enableSwmHostModeFor(cgId: string): Promise<{
     subscribed: boolean; alreadySubscribed: boolean; hostingEnabled: boolean; memberMode?: boolean;
   }>;

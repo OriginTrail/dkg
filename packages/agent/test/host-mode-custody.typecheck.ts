@@ -1,4 +1,5 @@
 import type { GossipSession, SwmHostModeCustody } from '../src/gossip-session.js';
+import { createSwmHostModeHandler } from '../src/internal/gossip/host-mode-handler.js';
 import type { DKGAgent } from '../src/dkg-agent.js';
 import { SUBSCRIPTION_SOURCES } from '@origintrail-official/dkg-core';
 
@@ -13,3 +14,6 @@ const incomplete: SwmHostModeCustody = { kind: 'automatic-public' };
 // @ts-expect-error There is no separate classification mutation after installation.
 session.hostModeRegistrations.classify('owned', descriptor);
 void incomplete;
+
+// @ts-expect-error Every handler requires its registration-owned admission capture.
+createSwmHostModeHandler(agent, { warn: () => {}, debug: () => {} }, session, 'owned');

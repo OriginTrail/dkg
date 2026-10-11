@@ -6,37 +6,22 @@ import {
 import type { GossipSession } from '../../gossip-session.js';
 
 interface HostModeHandlerPorts {
-  swmHostModeStripCiphertext(): boolean;
-  ingestSwmCiphertextChunkEnvelope(contextGraphId: string, data: Uint8Array, from: string, admissionCurrent?: () => boolean): Promise<unknown>;
-  ingestSwmHostModeEnvelope(contextGraphId: string, data: Uint8Array, from: string, admissionCurrent?: () => boolean): Promise<unknown>;
+  ingestSwmCiphertextChunkEnvelope(contextGraphId: string, data: Uint8Array, from: string, admissionCurrent: () => boolean): Promise<unknown>;
+  ingestSwmHostModeEnvelope(contextGraphId: string, data: Uint8Array, from: string, admissionCurrent: () => boolean): Promise<unknown>;
 }
 
-/** Dispatch only through the session and classification which own this handler. */
+/** Registration owns admission; both ingestion paths retain its captured fence. */
 export function createSwmHostModeHandler(
   ports: HostModeHandlerPorts,
   log: Pick<Logger, 'debug' | 'warn'>,
   session: GossipSession,
   contextGraphId: string,
-  wireCgId: string,
-  captureAdmissionCurrent: () => () => boolean = () => () => session.active,
+  captureAdmissionCurrent: () => () => boolean,
   refreshAdmission?: () => Promise<void>,
 ): (topic: string, data: Uint8Array, from: string) => void {
   const dispatch = (_topic: string, data: Uint8Array, from: string) => {
     const admissionCurrent = captureAdmissionCurrent();
     if (!session.active || !admissionCurrent()) return;
-    // Fail closed when the classification is absent. Only an explicitly
-    // non-curated manual subscription retains the public host-mode hatch.
-    if (
-      ports.swmHostModeStripCiphertext() &&
-      session.hostModeRegistrations.classifications.get(wireCgId) !== false
-    ) {
-      log.debug(
-        createOperationContext('share'),
-        `Dropping host-mode envelope on cg=${contextGraphId} from=${from}: ` +
-        `private-ciphertext strip is ON for a curated CG (OT-RFC-49 WS-A)`,
-      );
-      return;
-    }
     // OT-RFC-38 LU-11: peek envelope type and dispatch. Chunked
     // envelopes (`type='share-write-chunked'`) take the V2 chunk
     // persistence path; everything else flows through the legacy
