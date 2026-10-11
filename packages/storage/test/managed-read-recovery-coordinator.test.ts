@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { ManagedOxigraphRecoveryPhaseV1 } from '../src/managed-oxigraph-runtime-store.js';
 import { ManagedWorkRecoveryCoordinatorV1 } from
   '../src/managed-work-recovery-coordinator.js';
 
@@ -7,6 +8,65 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
 describe('ManagedWorkRecoveryCoordinatorV1', () => {
+  it('uses actual generation progress without completion polling and retains cancelled signalling', async () => {
+    const pending = vi.fn();
+    const readState = vi.fn(() => ({ recovering: false, generation: 0 }));
+    const observers = new Set<(phase: ManagedOxigraphRecoveryPhaseV1) => void>();
+    const requestRecovery = vi.fn((generation: number) => ({ generation,
+      subscribe(observe: (phase: ManagedOxigraphRecoveryPhaseV1) => void) {
+        observers.add(observe); observe('verifying'); return () => { observers.delete(observe); };
+      },
+    }));
+    const recover = vi.fn();
+    const coordinator = new ManagedWorkRecoveryCoordinatorV1({ now: () => Date.now(),
+      onPendingChange: pending, capability: { readState, recover, requestRecovery } });
+    const retention = coordinator.clientTimedOut('query', Date.now(), coordinator.begin(readState()));
+    const readsAtRequest = readState.mock.calls.length;
+    const notify = (phase: ManagedOxigraphRecoveryPhaseV1) => {
+      for (const observe of [...observers]) observe(phase);
+    };
+    try {
+      expect(requestRecovery).toHaveBeenCalledExactlyOnceWith(0, 'query');
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(requestRecovery).toHaveBeenCalledTimes(1);
+      expect(readState).toHaveBeenCalledTimes(readsAtRequest);
+      notify('signalled');
+      expect(pending.mock.calls).toEqual([[true]]);
+      notify('cancelled');
+      await vi.advanceTimersByTimeAsync(999);
+      expect(requestRecovery).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(requestRecovery).toHaveBeenCalledTimes(2);
+      notify('terminated');
+      expect(pending.mock.calls).toEqual([[true], [false]]);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(observers.size).toBe(0);
+      expect(recover).not.toHaveBeenCalled();
+      retention?.release();
+    } finally { coordinator.close(); }
+  });
+
+  it('closes progress subscriptions and ignores retired-generation notifications on reuse', () => {
+    let observe!: (phase: ManagedOxigraphRecoveryPhaseV1) => void;
+    const unsubscribe = vi.fn();
+    const pending = vi.fn();
+    const state = { recovering: false, generation: 0 };
+    const coordinator = new ManagedWorkRecoveryCoordinatorV1({ now: () => Date.now(),
+      onPendingChange: pending, capability: { readState: () => state, recover: vi.fn(),
+        requestRecovery: generation => ({ generation, subscribe(callback) {
+          observe = callback; callback('signalled'); return unsubscribe;
+        } }),
+      } });
+    coordinator.clientTimedOut('update', Date.now(), coordinator.begin(state));
+    coordinator.close();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+    const retention = coordinator.retain('query', Date.now() + 100, coordinator.begin(state));
+    observe('terminated');
+    expect(pending.mock.calls).toEqual([[true], [false], [true]]);
+    retention?.release(); coordinator.close();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('does not let a stale token replace the current store generation timer', async () => {
     const state = { recovering: false, generation: 0 };
     const recover = vi.fn();

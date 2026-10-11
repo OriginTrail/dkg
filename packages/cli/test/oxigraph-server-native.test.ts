@@ -131,6 +131,7 @@ describe(
         getRecoveryState: () => handle.getRecoveryState(),
         registerActivity: () => handle.registerStoreActivity(),
         onClientTimeout: (operation) => handle.requestRestart(`${operation} timed out`),
+        requestRecovery: (generation, operation) => handle.requestRecovery!(generation, `${operation} timed out`),
       });
 
       try {

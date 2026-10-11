@@ -22,6 +22,16 @@ export interface ManagedOxigraphRuntimeStateV1 {
   readonly generation: number;
 }
 
+/** Progress belongs to the supervised process generation, not a caller's timeout. */
+export type ManagedOxigraphRecoveryPhaseV1 =
+  | 'verifying' | 'signalled' | 'cancelled' | 'terminated' | 'reopened' | 'stopped';
+
+export interface ManagedOxigraphRecoveryHandleV1 {
+  readonly generation: number;
+  /** Delivers the current phase immediately, then actual supervisor transitions. */
+  subscribe(observe: (phase: ManagedOxigraphRecoveryPhaseV1) => void): () => void;
+}
+
 /** Per-adapter activity lease used when more than one store shares a runtime. */
 export interface ManagedOxigraphRuntimeActivityLeaseV1 {
   report(busy: boolean): void;
@@ -31,6 +41,8 @@ export interface ManagedOxigraphRuntimeActivityLeaseV1 {
 /** Runtime control plane supplied only by the daemon-owned construction path. */
 export interface ManagedOxigraphRuntimeHooksV1 {
   readonly onClientTimeout?: (operation: StoreOperation) => void;
+  /** Bound to the original process; signalling is not confirmed termination. */
+  readonly requestRecovery?: (generation: number, operation: StoreOperation) => ManagedOxigraphRecoveryHandleV1 | undefined;
   readonly getRecoveryState?: () => ManagedOxigraphRuntimeStateV1;
   /** One per-store lease lets a shared supervisor aggregate activity. */
   readonly registerActivity?: () => ManagedOxigraphRuntimeActivityLeaseV1;

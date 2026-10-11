@@ -48,7 +48,8 @@ import {
 } from './oxigraph-wal-maintenance.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { awaitOxigraphStoreOpen, type OxigraphStoreOpenAttempt, type StoreOpenOutcome } from './oxigraph-store-open.js';
-import type { ManagedOxigraphRuntimeStateV1 } from '@origintrail-official/dkg-storage';
+import { OxigraphRecoveryProgressOwner } from './oxigraph-recovery-progress.js';
+import type { ManagedOxigraphRecoveryHandleV1, ManagedOxigraphRuntimeStateV1 } from '@origintrail-official/dkg-storage';
 import { findListenOwnerPid } from './oxigraph-listen-port.js';
 import {
   createOxigraphLaunchStrategy,
@@ -161,6 +162,8 @@ export interface OxigraphServerHandle {
    * accepted requests re-verify listener ownership before sending a signal.
    */
   requestRestart(reason: string): boolean;
+  /** Observe reclamation and reopen of the named original generation. */
+  requestRecovery?(generation: number, reason: string): ManagedOxigraphRecoveryHandleV1 | undefined;
   /**
    * Register one store's activity lease. The lease is the only way to fence
    * WAL maintenance, so a supervisor shared by several adapters aggregates
@@ -284,6 +287,8 @@ export async function startOxigraphServer(
 
   let lifecycle: LifecycleState = { phase: 'starting', oxigraph: null, generation: 0 };
   let restarts = 0;
+  const recoveryProgress = new OxigraphRecoveryProgressOwner(() => lifecycle.generation, requestRestart);
+  const requestRecovery = recoveryProgress.request.bind(recoveryProgress);
   // Tail of the child's stderr, surfaced in the startup error so a bind
   // failure (`Address already in use`) is visible to the operator.
   let lastStderr = '';
@@ -300,6 +305,7 @@ export async function startOxigraphServer(
     cooldownMs: opts.walRestartCooldownMs,
     measureRetainedWalBytes: io.measureRetainedWalBytes,
     requestRestart,
+    requestRecovery: reason => requestRecovery(lifecycle.generation, reason),
     serverAvailable: () => lifecycle.phase === 'ready' && childAlive(lifecycle.oxigraph),
     log,
   });
@@ -348,6 +354,7 @@ export async function startOxigraphServer(
       // nothing treats the (now foreign-or-dead) endpoint as ours, then hand
       // off to revive(), which respawns and re-proves ownership before
       // restoring `ready`.
+      recoveryProgress.childExited(lifecycle.generation);
       markStoreDown();
       const generation = lifecycle.generation
         + (lifecycle.phase === 'restart-signalled' ? 0 : 1);
@@ -450,6 +457,9 @@ export async function startOxigraphServer(
       setLifecycle({ ...current, oxigraph });
       return oxigraph;
     });
+    // The launch owner first reclaims the old store holder, including orphaned
+    // listeners behind exited wrappers. A signal or wrapper exit alone is insufficient.
+    if (kind === 'restart' && outcome.kind === 'launched') recoveryProgress.publish('terminated');
     return outcome.kind === 'launched' ? { ...outcome, readyBudget } : outcome;
   };
 
@@ -468,7 +478,7 @@ export async function startOxigraphServer(
   // Oxigraph itself.
   const commitReady = (oxigraph: OxigraphLaunchHandle, listenerPid: number, generation: number): void => {
     setLifecycle({ phase: 'ready', oxigraph, listenerPid, generation });
-    walMaintenance.restartCompleted();
+    if (recoveryProgress.phase === 'terminated') recoveryProgress.publish('reopened');
     restarts = 0;
     // A store count requested while the child was down failed and is cached
     // as unreachable; drop it now that the child is healthy, or /api/status
@@ -543,6 +553,7 @@ export async function startOxigraphServer(
   // cannot reclaim a launch whose wrapper already exited (that needs process
   // probes); the next start's reclaim does, by the owner record.
   const killSync = (): void => {
+    recoveryProgress.publish('stopped');
     walMaintenance.stop();
     const candidate = lifecycle.oxigraph;
     setLifecycle({
@@ -582,6 +593,7 @@ export async function startOxigraphServer(
         listenerPid: request.listenerPid,
         generation: request.generation,
       });
+      recoveryProgress.publish('cancelled');
       return;
     }
     try {
@@ -594,6 +606,7 @@ export async function startOxigraphServer(
         reason: request.reason,
         generation: request.generation + 1,
       });
+      recoveryProgress.publish('signalled');
     } catch {
       log('[oxigraph] recovery restart could not signal the verified listener');
       setLifecycle({
@@ -602,6 +615,7 @@ export async function startOxigraphServer(
         listenerPid: request.listenerPid,
         generation: request.generation,
       });
+      recoveryProgress.publish('cancelled');
     }
   };
 
@@ -610,6 +624,7 @@ export async function startOxigraphServer(
       lifecycle.phase !== 'ready'
       || !childAlive(lifecycle.oxigraph)
     ) return false;
+    recoveryProgress.begin(lifecycle.generation);
     const normalizedReason = reason.trim().slice(0, 500) || 'unspecified health failure';
     const request: Extract<LifecycleState, { phase: 'restart-verifying' }> = {
       phase: 'restart-verifying',
@@ -642,6 +657,7 @@ export async function startOxigraphServer(
     // spawn (GH#1400) — every stop path, successful or not, comes through
     // here, so no caller has to remember a handoff.
     process.removeListener('exit', exitGuard);
+    recoveryProgress.publish('stopped');
     walMaintenance.stop();
     if (lifecycle.phase === 'stopping') return;
     const candidate = lifecycle.oxigraph;
@@ -748,6 +764,7 @@ export async function startOxigraphServer(
       queryEndpoint,
       updateEndpoint,
       requestRestart,
+      requestRecovery,
       registerStoreActivity,
       getRecoveryState,
       stop,

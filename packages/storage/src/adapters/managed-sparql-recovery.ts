@@ -30,12 +30,6 @@ export class SparqlHttpLogicalMutationScopeV1 {
     return state?.active ? state : undefined;
   }
 
-  /** Scheduler callbacks retain this store's captured owner, never another queued caller's. */
-  bindWork<T>(work: () => T): () => T {
-    const state = this.current();
-    return state ? () => this.scope.run(state, work) : () => this.scope.exit(work);
-  }
-
   hasDispatchedMutation(): boolean {
     const state = this.current();
     return state !== undefined && state.progress !== 'not-dispatched';

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { ManagedOxigraphRuntimeStateV1 } from './managed-oxigraph-runtime-store.js';
+import type { ManagedOxigraphRecoveryHandleV1, ManagedOxigraphRuntimeStateV1 } from './managed-oxigraph-runtime-store.js';
 import type { StoreOperation } from './store-operation-outcome.js';
 
 export interface ManagedWorkRecoveryTokenV1 {
@@ -10,7 +10,8 @@ export interface ManagedWorkRecoveryTokenV1 {
 
 export interface ManagedWorkRecoveryCapabilityV1 {
   readonly readState: () => ManagedOxigraphRuntimeStateV1 | null;
-  readonly recover: (operation: StoreOperation) => void;
+  readonly recover?: (operation: StoreOperation) => void;
+  readonly requestRecovery?: (generation: number, operation: StoreOperation) => ManagedOxigraphRecoveryHandleV1 | undefined;
 }
 
 export interface ManagedWorkRecoveryCoordinatorOptionsV1 {
@@ -51,6 +52,8 @@ export class ManagedWorkRecoveryCoordinatorV1 {
   readonly #retained = new Set<RetainedWork>();
   #reportedPending = false;
   #retryAt = 0;
+  readonly #awaiting = new Set<number>();
+  readonly #subscriptions = new Map<number, () => void>();
   #armed?: {
     readonly timer: ReturnType<typeof setTimeout>;
     readonly read: RetainedWork;
@@ -85,12 +88,11 @@ export class ManagedWorkRecoveryCoordinatorV1 {
   ): ManagedWorkRetentionV1 | null {
     const retention = this.#retain(operation, deadline, token, true);
     if (token !== null && retention === null) return null;
-    try {
-      this.#options.capability?.recover(operation);
-    } catch {
-      // Supervisor failure cannot replace the typed client timeout.
+    if (retention !== null && token !== null) this.#request(token.storeGeneration, operation);
+    else {
+      try { this.#options.capability?.recover?.(operation); } catch { /* Keep timeout compatibility. */ }
     }
-    this.#retireConfirmedGeneration(this.#readState());
+    if (!this.#options.capability?.requestRecovery) this.#retireConfirmedGeneration(this.#readState());
     this.#arm();
     this.#reportPending();
     return retention;
@@ -127,7 +129,11 @@ export class ManagedWorkRecoveryCoordinatorV1 {
     return {
       release: () => {
         if (!this.#retained.delete(read)) return;
-        if (this.#armed?.read === read) this.#arm();
+        if (![...this.#retained].some(work => work.storeGeneration === read.storeGeneration)) {
+          this.#subscriptions.get(read.storeGeneration)?.();
+          this.#subscriptions.delete(read.storeGeneration); this.#awaiting.delete(read.storeGeneration);
+        }
+        this.#arm();
         this.#reportPending();
       },
     };
@@ -138,6 +144,8 @@ export class ManagedWorkRecoveryCoordinatorV1 {
     clearTimeout(this.#armed?.timer);
     this.#armed = undefined;
     this.#retryAt = 0;
+    for (const dispose of this.#subscriptions.values()) dispose();
+    this.#subscriptions.clear(); this.#awaiting.clear();
     this.#retained.clear();
     this.#reportPending();
   }
@@ -146,6 +154,7 @@ export class ManagedWorkRecoveryCoordinatorV1 {
   #arm(): void {
     let earliest: RetainedWork | undefined;
     for (const read of this.#retained) {
+      if (this.#awaiting.has(read.storeGeneration)) continue;
       if (earliest === undefined || read.deadline < earliest.deadline) earliest = read;
     }
     const dueAt = earliest === undefined ? 0 : Math.max(earliest.deadline, this.#retryAt);
@@ -162,30 +171,57 @@ export class ManagedWorkRecoveryCoordinatorV1 {
 
   #expire(read: RetainedWork): void {
     this.#armed = undefined;
-    const current = this.#readState();
-    this.#retireConfirmedGeneration(current);
-    if (
-      this.#retained.has(read)
-      && read.lifecycleGeneration === this.#lifecycleGeneration
-      && current !== null
-      && !current.recovering
-      && current.generation === read.storeGeneration
-    ) {
-      try {
-        this.#options.capability?.recover(read.operation);
-      } catch {
-        // Recovery notification must never escape a retained timer callback.
-      }
+    if (this.#options.capability?.requestRecovery) {
+      if (this.#retained.has(read)) this.#request(read.storeGeneration, read.operation);
+    } else {
+      // Notification-only legacy capabilities cannot report physical completion.
+      const current = this.#readState();
+      this.#retireConfirmedGeneration(current);
+      if (this.#retained.has(read) && current !== null && !current.recovering
+        && current.generation === read.storeGeneration) this.#request(read.storeGeneration, read.operation);
     }
-    // A request can fail ownership verification or signalling. Only an
-    // advanced generation proves reclamation; keep its activity fence and
+    // A request can fail ownership verification or signalling. Only
+    // supervisor reclamation (or legacy generation advancement) releases the fence;
     // retry at a bounded rate. Admission pause alone does not stop recovery:
     // maintenance itself may be draining this abandoned work. The supervisor
     // coalesces requests while ownership verification is already in progress.
-    this.#retireConfirmedGeneration(this.#readState());
+    if (!this.#options.capability?.requestRecovery) this.#retireConfirmedGeneration(this.#readState());
     this.#retryAt = this.#retained.has(read) ? this.#options.now() + 1_000 : 0;
     this.#arm();
     this.#reportPending();
+  }
+
+  #request(generation: number, operation: StoreOperation): void {
+    const request = this.#options.capability?.requestRecovery;
+    if (!request) {
+      try { this.#options.capability?.recover?.(operation); } catch { /* Preserve caller result. */ }
+      return;
+    }
+    if (this.#awaiting.has(generation)) return;
+    let handle: ManagedOxigraphRecoveryHandleV1 | undefined;
+    try { handle = request(generation, operation); } catch { /* Retry at the bounded deadline. */ }
+    if (!handle || handle.generation !== generation) return;
+    const lifetime = this.#lifecycleGeneration;
+    this.#awaiting.add(generation);
+    let dispose: () => void;
+    try { dispose = handle.subscribe(phase => {
+      if (lifetime !== this.#lifecycleGeneration) return;
+      if (phase === 'terminated' || phase === 'reopened') {
+        for (const read of this.#retained) {
+          if (read.storeGeneration === generation) this.#retained.delete(read);
+        }
+        this.#awaiting.delete(generation);
+      } else if (phase === 'cancelled') {
+        this.#awaiting.delete(generation);
+        this.#retryAt = this.#options.now() + 1_000;
+      } else if (phase !== 'stopped') return;
+      this.#subscriptions.get(generation)?.(); this.#subscriptions.delete(generation);
+      this.#arm(); this.#reportPending();
+    }); } catch {
+      this.#awaiting.delete(generation); return;
+    }
+    if (this.#awaiting.has(generation)) this.#subscriptions.set(generation, dispose);
+    else dispose();
   }
 
   #retireConfirmedGeneration(current: ManagedOxigraphRuntimeStateV1 | null): void {

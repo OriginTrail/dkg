@@ -47,6 +47,39 @@ function controlledCoordinator(overrides: {
 }
 
 describe('Oxigraph WAL maintenance coordinator', () => {
+  it('uses supervisor cancellation/reopen notifications for idle retry and cooldown', () => {
+    let now = 0; let tick = () => {};
+    const observers = new Set<(phase: import('@origintrail-official/dkg-storage').ManagedOxigraphRecoveryPhaseV1) => void>();
+    const requestRecovery = vi.fn(() => ({ generation: 0, subscribe(observe: (phase: import('@origintrail-official/dkg-storage').ManagedOxigraphRecoveryPhaseV1) => void) {
+      observers.add(observe); observe('verifying'); return () => { observers.delete(observe); };
+    } }));
+    const requestRestart = vi.fn();
+    const coordinator = createOxigraphWalMaintenanceCoordinator({ location: '/tmp/wal-progress', thresholdBytes: 100,
+      idleMs: 10, cooldownMs: 100, measureRetainedWalBytes: () => 101,
+      requestRecovery, requestRestart, serverAvailable: () => true, log() {}, now: () => now,
+      schedule(callback) { tick = callback; return { unref() {} } as ReturnType<typeof setInterval>; }, cancel() {},
+    });
+    const notify = (phase: import('@origintrail-official/dkg-storage').ManagedOxigraphRecoveryPhaseV1) => {
+      for (const observe of [...observers]) observe(phase);
+    };
+    try {
+      tick(); now = 10; tick();
+      expect(requestRecovery).toHaveBeenCalledOnce();
+      now = 1_000; tick(); notify('signalled'); tick();
+      expect(requestRecovery).toHaveBeenCalledOnce();
+      expect(coordinator.admissionsPaused()).toBe(true);
+      notify('cancelled'); now = 1_009; tick();
+      expect(requestRecovery).toHaveBeenCalledOnce();
+      now = 1_010; tick(); expect(requestRecovery).toHaveBeenCalledTimes(2);
+      notify('terminated'); expect(coordinator.admissionsPaused()).toBe(true);
+      now = 1_020; notify('reopened'); expect(coordinator.admissionsPaused()).toBe(false);
+      now = 1_119; tick(); expect(requestRecovery).toHaveBeenCalledTimes(2);
+      now = 1_120; tick(); expect(coordinator.admissionsPaused()).toBe(true);
+      expect(requestRestart).not.toHaveBeenCalled();
+    } finally { coordinator.stop(); }
+    expect(observers.size).toBe(0);
+  });
+
   it.each([undefined, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '100'])(
     'resolves invalid threshold %s to the canonical 4 GiB default',
     (value) => {

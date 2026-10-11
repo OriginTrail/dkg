@@ -228,6 +228,8 @@ export {
   createManagedOxigraphRuntimeStoreConfigV1,
   withManagedOxigraphRuntimeStoreConfigV1,
   type ManagedOxigraphRuntimeActivityLeaseV1,
+  type ManagedOxigraphRecoveryHandleV1,
+  type ManagedOxigraphRecoveryPhaseV1,
   type ManagedOxigraphRuntimeHooksV1,
   type ManagedOxigraphRuntimeStateV1,
   type ManagedOxigraphRuntimeStoreConfigV1,

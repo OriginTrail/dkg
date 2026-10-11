@@ -1,3 +1,4 @@
+import type { ManagedOxigraphRecoveryPhaseV1, ManagedOxigraphRuntimeHooksV1 } from '../src/managed-oxigraph-runtime-store.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createManagedOxigraphSparqlStoreV1, SparqlHttpStore } from '../src/adapters/sparql-http.js';
 
@@ -8,7 +9,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function harness(managed = true) {
+function harness(managed = true, extraHooks: ManagedOxigraphRuntimeHooksV1 = {}) {
   let dispatched!: () => void;
   let started = new Promise<void>((resolve) => { dispatched = resolve; });
   globalThis.fetch = vi.fn(async (_input: unknown, init?: RequestInit) => {
@@ -34,7 +35,7 @@ function harness(managed = true) {
   // the 'external' case only proves the "generic stores cannot gain managed
   // authority" boundary if the adapter had something to ignore.
   const store = managed
-    ? createManagedOxigraphSparqlStoreV1(options, hooks)
+    ? createManagedOxigraphSparqlStoreV1(options, { ...hooks, ...extraHooks })
     : new SparqlHttpStore({
       ...options,
       managedRecovery: { readState: hooks.getRecoveryState, recover },
@@ -68,6 +69,26 @@ function harness(managed = true) {
 }
 
 describe('managed abandoned read recovery', () => {
+  it('consumes the runtime progress capability without a legacy timeout notifier', async () => {
+    let observe!: (phase: ManagedOxigraphRecoveryPhaseV1) => void;
+    const requestRecovery = vi.fn((generation: number) => ({ generation, subscribe(callback: (phase: ManagedOxigraphRecoveryPhaseV1) => void) {
+      observe = callback; callback('verifying'); return () => {};
+    } }));
+    const { store, activity, abandonMutation, recovery } = harness(true, { onClientTimeout: undefined, requestRecovery });
+    try {
+      await abandonMutation();
+      await vi.advanceTimersByTimeAsync(900);
+      expect(requestRecovery).toHaveBeenCalledExactlyOnceWith(0, 'update');
+      recovery.generation = 1;
+      observe('signalled');
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(activity.at(-1)).toBe(true);
+      expect(requestRecovery).toHaveBeenCalledTimes(1);
+      observe('terminated');
+      expect(activity.at(-1)).toBe(false);
+    } finally { await store.close(); }
+  });
+
   it.each([
     ['SELECT ?s WHERE { ?s ?p ?o }', 'query'],
     ['CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }', 'construct'],

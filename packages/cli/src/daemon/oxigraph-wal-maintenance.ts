@@ -1,3 +1,4 @@
+import type { ManagedOxigraphRecoveryHandleV1 } from '@origintrail-official/dkg-storage';
 import { formatWalBytes } from './oxigraph-wal.js';
 
 export const DEFAULT_WAL_RESTART_THRESHOLD_BYTES = 4 * 1024 ** 3;
@@ -15,6 +16,7 @@ export interface OxigraphWalMaintenanceOptions {
   cooldownMs?: number;
   measureRetainedWalBytes: (location: string) => number;
   requestRestart: (reason: string) => boolean;
+  requestRecovery?: (reason: string) => ManagedOxigraphRecoveryHandleV1 | undefined;
   serverAvailable: () => boolean;
   log: (message: string) => void;
   now?: () => number;
@@ -62,7 +64,9 @@ export function createOxigraphWalMaintenanceCoordinator(
   let idleSince: number | null = null;
   let lastRestartAt = Number.NEGATIVE_INFINITY;
   let maintenancePending = false;
+  // Real supervision owns recovery progress; the boolean serves legacy callbacks only.
   let restartRequested = false;
+  let recoverySubscription: (() => void) | undefined;
   let stopped = false;
 
   const anyStoreBusy = (): boolean => [...activitySources.values()].some(Boolean);
@@ -81,7 +85,7 @@ export function createOxigraphWalMaintenanceCoordinator(
     refreshIdleClock();
     const observedAt = now();
     const busy = anyStoreBusy();
-    if (!options.serverAvailable() || restartRequested) return;
+    if (!options.serverAvailable() || restartRequested || recoverySubscription) return;
 
     // Measure while the server is busy. Waiting to observe an idle tick before
     // looking at disk means a continuously loaded node can grow past the
@@ -109,14 +113,27 @@ export function createOxigraphWalMaintenanceCoordinator(
     if (busy || idleSince === null) return;
     if (!maintenancePending) return;
     if (observedAt - idleSince < idleMs) return;
-    const accepted = options.requestRestart(
-      `retained WAL reached the ${formatWalBytes(thresholdBytes)} maintenance threshold `
-      + `after ${Math.round((observedAt - idleSince) / 1_000)}s idle`,
-    );
-    if (accepted) {
+    const reason = `retained WAL reached the ${formatWalBytes(thresholdBytes)} maintenance threshold `
+      + `after ${Math.round((observedAt - idleSince) / 1_000)}s idle`;
+    if (options.requestRecovery) {
+      const recovery = options.requestRecovery(reason);
+      if (!recovery) return;
+      let ended = false;
+      const dispose = recovery.subscribe(phase => {
+        if (stopped) return;
+        if (phase === 'reopened') {
+          lastRestartAt = now(); maintenancePending = false;
+        } else if (phase !== 'cancelled' && phase !== 'stopped') return;
+        ended = true;
+        recoverySubscription?.(); recoverySubscription = undefined;
+        refreshIdleClock(true);
+      });
+      if (ended) dispose(); else recoverySubscription = dispose;
+    } else if (options.requestRestart(reason)) {
       restartRequested = true;
       refreshIdleClock(true);
     }
+
   };
 
   const timer = schedule(evaluate, checkIntervalMs);
@@ -145,9 +162,8 @@ export function createOxigraphWalMaintenanceCoordinator(
     admissionsPaused(): boolean {
       return !stopped && maintenancePending;
     },
-    // A cancelled restart needs no notification of its own: the supervisor puts
-    // the lifecycle back to `ready` through setLifecycle, which calls this and
-    // reopens the idle window from scratch.
+    // Legacy notification-only restarts observe readiness here. Real recovery
+    // cancellation and reopen arrive through the generation-bound handle.
     serverLifecycleChanged(): void {
       if (stopped) return;
       if (options.serverAvailable()) restartRequested = false;
@@ -165,6 +181,7 @@ export function createOxigraphWalMaintenanceCoordinator(
       stopped = true;
       maintenancePending = false;
       restartRequested = false;
+      recoverySubscription?.(); recoverySubscription = undefined;
       activitySources.clear();
       refreshIdleClock();
       cancel(timer);

@@ -1878,6 +1878,39 @@ describe('SparqlHttpStore (test server)', () => {
     }
   });
 
+  it('keeps a fresh busy lease when reuse races the close handoff microtask', async () => {
+    const leases = new Map<number, boolean>();
+    let nextLease = 0;
+    let release!: () => void;
+    let entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const response = new Promise<Response>(resolve => {
+      release = () => resolve(new Response(JSON.stringify({ boolean: true })));
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => { entered(); return response; };
+    const store = createManagedOxigraphSparqlStoreV1({ queryEndpoint: 'http://127.0.0.1:7878/query' }, {
+      registerActivity: () => {
+        const id = nextLease++;
+        leases.set(id, false);
+        return { report: busy => leases.set(id, busy), dispose: () => { leases.delete(id); } };
+      },
+    });
+    let query: Promise<unknown> | undefined;
+    try {
+      const closing = store.close();
+      query = Promise.resolve().then(() => store.query('ASK {}'));
+      await started;
+      await closing;
+      expect([...leases.values()]).toContain(true);
+      release();
+      await expect(query).resolves.toEqual({ type: 'boolean', value: true });
+      expect([...leases.values()]).not.toContain(true);
+    } finally {
+      release(); await query; await store.close(); globalThis.fetch = originalFetch;
+    }
+  });
+
   it('disposes one activity lease on close and reacquires it when the store is reused', async () => {
     const reports: boolean[][] = [], disposals: number[] = [];
     const originalFetch = globalThis.fetch;

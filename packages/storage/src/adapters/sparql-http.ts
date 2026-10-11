@@ -294,6 +294,10 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       ?? managedRecovery?.readState;
     this.managedActivityLease = this.openManagedActivityLease(managedRuntimeHooks);
     this.workLifecycle = new AbortableStoreWorkLifecycle({
+      onGenerationClosed: () => {
+        try { this.managedActivityLease?.dispose(); } catch { /* Runtime observation cannot alter close. */ }
+        this.managedActivityLease = null;
+      },
       onActivityChange: (activeOperations) => {
         this.activeStoreOperations = activeOperations;
         this.reportManagedRuntimeActivity(managedRuntimeHooks);
@@ -315,10 +319,11 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     this.onSlowQuery = options.onSlowQuery;
     this.managedAbandonedWorkRecovery = new ManagedWorkRecoveryCoordinatorV1({
       now: this.now,
-      capability: this.managedOxigraph && this.onClientTimeout
+      capability: this.managedOxigraph && (this.onClientTimeout || managedRuntimeHooks?.requestRecovery)
         ? {
             readState: () => this.readRecoveryState(),
             recover: this.onClientTimeout,
+            requestRecovery: managedRuntimeHooks?.requestRecovery,
           }
         : undefined,
       onPendingChange: (pending) => {
@@ -454,7 +459,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
         return this.scheduler.run(
           options?.priority,
           options?.source ?? `sparql-http.${operation}`,
-          this.logicalMutationScope.bindWork(() => work(signal, context)),
+          () => work(signal, context),
           signal,
           { storeOperation: operation },
         );
@@ -1293,12 +1298,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     // already left (`runDetached`), while rejecting work attempted during
     // close. A fresh generation is installed only after the drain completes.
     await this.workLifecycle.close(new Error('SparqlHttpStore closed'));
-    try {
-      this.managedActivityLease?.dispose();
-    } catch {
-      // Runtime observation cannot alter store close semantics.
-    }
-    this.managedActivityLease = null;
+
   }
 }
 

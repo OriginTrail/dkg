@@ -381,6 +381,34 @@ describe('startOxigraphServer (real child processes)', () => {
     }
   });
 
+  it('exposes one generation handle and keeps signalling distinct from physical reclamation', async () => {
+    const port = await freePort();
+    const phases: string[] = [];
+    const handle = await startOxigraphServer(startOpts(port, {
+      restartBackoffBaseMs: 20, restartBackoffMaxMs: 20,
+      io: { killProcess: () => true }, // Accepted signal, deliberately no actual termination.
+    }));
+    let unsubscribe: (() => void) | undefined;
+    try {
+      const pid = await fetchPid(port);
+      const recovery = handle.requestRecovery!(0, 'held physical termination');
+      expect(recovery?.generation).toBe(0);
+      unsubscribe = recovery!.subscribe(phase => phases.push(phase));
+      expect(handle.requestRecovery!(0, 'duplicate')).toBe(recovery);
+      for (let i = 0; i < 50 && !phases.includes('signalled'); i++) await sleep(10);
+      expect(phases).toEqual(['verifying', 'signalled']);
+      expect(await fetchPid(port)).toBe(pid);
+      expect(handle.getRecoveryState().generation).toBe(1); // State is not termination proof.
+      process.kill(pid, 'SIGKILL');
+      for (let i = 0; i < 100 && !phases.includes('reopened'); i++) await sleep(20);
+      expect(phases).toEqual(['verifying', 'signalled', 'terminated', 'reopened']);
+      expect(await fetchPid(port)).not.toBe(pid);
+      const late: string[] = [];
+      recovery!.subscribe(phase => late.push(phase))();
+      expect(late).toEqual(['reopened']);
+    } finally { unsubscribe?.(); await handle.stop(); }
+  });
+
   it('cancels recovery without signalling when listener ownership changes', async () => {
     const port = await freePort();
     const logs: string[] = [];
@@ -424,13 +452,17 @@ describe('startOxigraphServer (real child processes)', () => {
       }]).catch((error) => error);
       await updateStarted;
       reportChangedOwner = true;
-      expect(handle.requestRestart('ownership-negative-path')).toBe(true);
+      const progress: string[] = [];
+      const recovery = handle.requestRecovery!(0, 'ownership-negative-path');
+      expect(recovery).toBeDefined();
+      recovery!.subscribe(phase => progress.push(phase));
 
       for (let i = 0; i < 50 && !logs.some((line) => line.includes('ownership changed')); i++) {
         await sleep(20);
       }
 
       expect(killProcess).not.toHaveBeenCalled();
+      expect(progress).toEqual(['verifying', 'cancelled']);
       expect(handle.getRecoveryState())
         .toEqual({ recovering: false, admissionsPaused: false, generation: 0 });
       const definitiveError = new Error('definitive backend failure after cancelled restart');

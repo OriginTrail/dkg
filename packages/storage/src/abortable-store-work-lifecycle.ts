@@ -181,6 +181,8 @@ export interface StoreWorkContext {
 export interface AbortableStoreWorkLifecycleOptions {
   /** Observation of all physical work, including detached requests. */
   readonly onActivityChange?: (activeOperations: number) => void;
+  /** Release generation-owned resources after draining, before reusable admission opens. */
+  readonly onGenerationClosed?: () => void;
 }
 
 export class AbortableStoreWorkLifecycle {
@@ -242,6 +244,7 @@ export class AbortableStoreWorkLifecycle {
     const task = (async () => {
       await Promise.allSettled(draining);
       if (this.generation === generation) {
+        try { this.options.onGenerationClosed?.(); } catch { /* Observation cannot prevent reuse. */ }
         this.generation = createGeneration();
       }
     })();
