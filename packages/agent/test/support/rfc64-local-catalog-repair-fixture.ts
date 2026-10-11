@@ -230,6 +230,7 @@ export function bootstrapConfigV1(
 
 export async function authorSealV1(
   kaNumber: bigint,
+  assertionVersion = '1',
 ): Promise<CanonicalGraphScopedAuthorSealV1> {
   const kaId = ((BigInt(AUTHOR) << 96n) | kaNumber).toString();
   const assertionMerkleRoot = ethers.hexlify(
@@ -259,7 +260,7 @@ export async function authorSealV1(
     assertionFinalizedAt: '2026-07-19T12:34:56.789Z',
     contentScopeVersion: '2',
     kaUal: `did:dkg:${NETWORK_ID}/${AUTHOR}/${kaNumber}`,
-    assertionVersion: '1',
+    assertionVersion,
     publicTripleCount: String(PROJECTION_QUADS.length),
     privateTripleCount: '0',
     privateMerkleRoot: null,
