@@ -67,6 +67,8 @@ import type {
   ContextGraphAuthorityHistoryStore,
   ContextGraphAuthorityIndexStore,
   ContextGraphRegistryScanCursorStore,
+  EvmSigner,
+  ExternalAuthorSigners,
   RpcRequestAdmission,
 } from '@origintrail-official/dkg-chain';
 import type { QueryAccessConfig } from '@origintrail-official/dkg-query';
@@ -1780,15 +1782,11 @@ export interface DKGAgentConfig {
    */
   publisherAddress?: string;
   /**
-   * EVM chain configuration. If omitted, publishing won't have on-chain finality.
-   * `adminPrivateKey` is the private key for the profile admin wallet used
-   * only for profile/key-management transactions. Nodes may omit it when they
-   * already have an on-chain identity and do not need profile creation/key-repair
-   * privileges; profile mutation paths will fail fast if admin authority is
-   * required but unavailable.
-   * `operationalKeys` are the private keys for operational wallets.
-   * The first key is the primary signer (identity, staking); all are used
-   * round-robin for publish TXs to avoid nonce collisions on parallel publishes.
+   * EVM chain configuration; without it publishing has no on-chain finality.
+   * `adminPrivateKey`: profile admin key, only for profile/key-management txs (optional;
+   * those paths fail fast without it). `operationalKeys`: operational wallet keys (first =
+   * primary signer; all pay publish txs round-robin), or `signers`: external signers, so no
+   * operational key is held. `authors`: external author keys (asset owners) that never pay.
    */
   chainConfig?: {
     rpcUrl: string;
@@ -1801,7 +1799,9 @@ export interface DKGAgentConfig {
     /** Optional TRAC token contract override. When omitted, the adapter resolves Hub.Token. */
     tokenAddress?: string;
     adminPrivateKey?: string;
-    operationalKeys: string[];
+    operationalKeys?: string[];
+    signers?: readonly EvmSigner[];
+    authors?: ExternalAuthorSigners;
     chainId?: string;
     /** Overall submitted-transaction receipt deadline (default 10 minutes). */
     receiptTimeoutMs?: number;

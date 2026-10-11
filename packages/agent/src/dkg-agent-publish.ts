@@ -125,7 +125,8 @@ import {
   type Quad,
   type LargeLiteralStorageConfig,
 } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type EvmSigner, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { externalAuthorSignerFor, signAuthorTypedDataCompact } from './external-author-signing.js';
 import  {
   DKGPublisher,
   PublishHandler,
@@ -3131,6 +3132,7 @@ export class PublishMethods extends DKGAgentBase {
     const schemeVersion = opts?.schemeVersion ?? AUTHOR_SCHEME_VERSION_V1;
     let authorAddress: string;
     let signerPrivateKey: string | undefined;
+    let externalAuthor: EvmSigner | undefined;
     let preSigned: PreSignedAuthorAttestation | undefined;
     if (opts?.preSignedAuthorAttestation != null) {
       preSigned = opts.preSignedAuthorAttestation;
@@ -3146,14 +3148,16 @@ export class PublishMethods extends DKGAgentBase {
           `assertionFinalize: authorAgentAddress ${opts.authorAgentAddress} is not a registered local agent on this node`,
         );
       }
-      if (mode === 'self-sovereign') {
+      // A self-sovereign agent whose key the node's external signer holds signs through it.
+      if (mode === 'self-sovereign') externalAuthor = await externalAuthorSignerFor(this.config, opts.authorAgentAddress);
+      if (mode === 'self-sovereign' && !externalAuthor) {
         throw new Error(
           `assertionFinalize: agent ${opts.authorAgentAddress} is registered as self-sovereign — ` +
             `this node does not hold its private key. Use preSignedAuthorAttestation instead.`,
         );
       }
-      signerPrivateKey = this.getCustodialAgentPrivateKey(opts.authorAgentAddress);
-      if (!signerPrivateKey) {
+      signerPrivateKey = externalAuthor ? undefined : this.getCustodialAgentPrivateKey(opts.authorAgentAddress);
+      if (!signerPrivateKey && !externalAuthor) {
         // #1116 (round 11) — CAPABILITY GAP (no local signing key for this agent).
         throw Object.assign(
           new Error(
@@ -3173,7 +3177,7 @@ export class PublishMethods extends DKGAgentBase {
         throw Object.assign(
           new Error(
             'assertionFinalize: no agent override supplied and no publisher signer is available. ' +
-              'Either supply authorAgentAddress / preSignedAuthorAttestation, or configure a publisher private key on the daemon.',
+              'Either supply authorAgentAddress / preSignedAuthorAttestation, or configure a publisher key or default author on the daemon.',
           ),
           { code: SEAL_CAPABILITY_GAP_CODE },
         );
@@ -3457,6 +3461,8 @@ export class PublishMethods extends DKGAgentBase {
       }
       r = ethers.getBytes(sig.r);
       vs = ethers.getBytes(sig.yParityAndS);
+    } else if (externalAuthor) {
+      ({ r, vs } = await signAuthorTypedDataCompact(externalAuthor, typedData));
     } else if (signerPrivateKey) {
       const wallet = new ethers.Wallet(
         signerPrivateKey.startsWith('0x') ? signerPrivateKey : '0x' + signerPrivateKey,
@@ -3689,6 +3695,7 @@ export class PublishMethods extends DKGAgentBase {
     const schemeVersion = opts?.schemeVersion ?? AUTHOR_SCHEME_VERSION_V1;
     let authorAddress: string;
     let signerPrivateKey: string | undefined;
+    let externalAuthor: EvmSigner | undefined;
     let preSigned: PreSignedAuthorAttestation | undefined;
     if (opts?.preSignedAuthorAttestation != null) {
       preSigned = opts.preSignedAuthorAttestation;
@@ -3700,14 +3707,15 @@ export class PublishMethods extends DKGAgentBase {
           `Selection-based VM publish: authorAgentAddress ${opts.authorAgentAddress} is not a registered local agent on this node`,
         );
       }
-      if (mode === 'self-sovereign') {
+      if (mode === 'self-sovereign') externalAuthor = await externalAuthorSignerFor(this.config, opts.authorAgentAddress);
+      if (mode === 'self-sovereign' && !externalAuthor) {
         throw new Error(
           `Selection-based VM publish: agent ${opts.authorAgentAddress} is registered as self-sovereign — ` +
             `this node does not hold its private key. Use preSignedAuthorAttestation instead.`,
         );
       }
-      signerPrivateKey = this.getCustodialAgentPrivateKey(opts.authorAgentAddress);
-      if (!signerPrivateKey) {
+      signerPrivateKey = externalAuthor ? undefined : this.getCustodialAgentPrivateKey(opts.authorAgentAddress);
+      if (!signerPrivateKey && !externalAuthor) {
         throw new Error(
           `Selection-based VM publish: custodial agent ${opts.authorAgentAddress} has no private key on file`,
         );
@@ -3718,7 +3726,7 @@ export class PublishMethods extends DKGAgentBase {
       if (!fallbackAddress) {
         throw new Error(
           'Selection-based VM publish: no agent override supplied and no publisher signer is available. ' +
-            'Either supply authorAgentAddress / preSignedAuthorAttestation, or configure a publisher private key on the daemon.',
+            'Either supply authorAgentAddress / preSignedAuthorAttestation, or configure a publisher key or default author on the daemon.',
         );
       }
       authorAddress = fallbackAddress;
@@ -3825,6 +3833,8 @@ export class PublishMethods extends DKGAgentBase {
       }
       r = preSigned.signature.r;
       vs = preSigned.signature.vs;
+    } else if (externalAuthor) {
+      ({ r, vs } = await signAuthorTypedDataCompact(externalAuthor, typedData));
     } else if (signerPrivateKey) {
       const wallet = new ethers.Wallet(
         signerPrivateKey.startsWith('0x') ? signerPrivateKey : '0x' + signerPrivateKey,
@@ -6486,9 +6496,10 @@ export class PublishMethods extends DKGAgentBase {
       schemeVersion: seal.authorSchemeVersion,
     });
     const custodialKey = this.getCustodialAgentPrivateKey(seal.authorAddress);
+    const externalAuthor = custodialKey ? undefined : await externalAuthorSignerFor(this.config, seal.authorAddress);
     // GH#1786 — one predicate owns "can this node re-sign for that author", shared with
     // the pre-enqueue preflight on the async lane so the two cannot drift.
-    if (!custodialKey
+    if (!custodialKey && !externalAuthor
       // Sync signing path: the publisher resolved here IS the one about to sign.
       && !(await this._canReSignUpdateAttestationForAuthor(
         seal.authorAddress, publisherOverride ?? this.publisher,
@@ -6497,7 +6508,9 @@ export class PublishMethods extends DKGAgentBase {
     }
     let r: Uint8Array;
     let vs: Uint8Array;
-    if (custodialKey) {
+    if (externalAuthor) {
+      ({ r, vs } = await signAuthorTypedDataCompact(externalAuthor, typedData));
+    } else if (custodialKey) {
       const wallet = new ethers.Wallet(custodialKey.startsWith('0x') ? custodialKey : '0x' + custodialKey);
       const sigHex = await wallet.signTypedData(typedData.domain, typedData.types, typedData.message);
       const sig = ethers.Signature.from(sigHex);
@@ -6535,6 +6548,7 @@ export class PublishMethods extends DKGAgentBase {
     publisher: DKGPublisher,
   ): Promise<boolean> {
     if (this.getCustodialAgentPrivateKey(authorAddress)) return true;
+    if (await externalAuthorSignerFor(this.config, authorAddress)) return true;
     const fallbackAddress = await publisher.publisherFallbackAuthorAddress();
     return Boolean(fallbackAddress && fallbackAddress.toLowerCase() === authorAddress.toLowerCase());
   }

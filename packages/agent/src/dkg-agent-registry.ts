@@ -237,6 +237,7 @@ import {
   type KeystoreEntry,
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
+import { externalSignerAgentPublicKey } from './external-author-signing.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
@@ -641,15 +642,13 @@ export class AgentRegistryMethods extends DKGAgentBase {
   // Agent Registry — multi-agent identity management
   // ---------------------------------------------------------------------------
 
-  /**
-   * Register a new agent on this node.
-   * - Custodial (publicKey omitted): node generates secp256k1 keypair
-   * - Self-sovereign (publicKey provided): agent holds its own key
-   */
+  /** Register an agent: custodial (node-held key), self-sovereign (`publicKey`) or by `address` held by the external signer. */
   async registerAgent(this: DKGAgent,
     name: string,
     opts?: {
       publicKey?: string;
+      /** An author key of the node's external signer; registered self-sovereign (the node stores no key). */
+      address?: string;
       framework?: string;
       encryptionKeyAlgorithm?: typeof WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519;
       publicEncryptionKey?: string;
@@ -661,16 +660,17 @@ export class AgentRegistryMethods extends DKGAgentBase {
         throw new Error(`Agent name "${name}" already registered on this node`);
       }
     }
-    if (opts?.publicKey && (opts.publicEncryptionKey || opts.encryptionKeyProof) && !(opts.publicEncryptionKey && opts.encryptionKeyProof)) {
+    const publicKey = opts?.address === undefined ? opts?.publicKey : await externalSignerAgentPublicKey(this.config, opts.address, name, opts.publicKey);
+    if (publicKey && (opts?.publicEncryptionKey || opts?.encryptionKeyProof) && !(opts.publicEncryptionKey && opts.encryptionKeyProof)) {
       throw new Error('Self-sovereign agents must provide both publicEncryptionKey and encryptionKeyProof');
     }
 
-    const record = opts?.publicKey
+    const record = publicKey
       ? registerSelfSovereignAgent(
         name,
-        opts.publicKey,
-        opts.framework,
-        opts.publicEncryptionKey && opts.encryptionKeyProof
+        publicKey,
+        opts?.framework,
+        opts?.publicEncryptionKey && opts.encryptionKeyProof
           ? {
             encryptionKeyAlgorithm: opts.encryptionKeyAlgorithm ?? WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
             publicEncryptionKey: opts.publicEncryptionKey,

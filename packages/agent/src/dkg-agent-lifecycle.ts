@@ -3002,6 +3002,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         return verifyHandler.handler(data, peerId);
       });
       this.log.info(ctx, 'Registered VERIFY proposal handler');
+    } else if (this.config.chainConfig?.signers?.length) {
+      this.log.info(ctx, 'VERIFY proposal handler not registered: EVM signing is delegated to an external signer');
     }
 
     // Start chain event poller for trustless confirmation of tentative publishes

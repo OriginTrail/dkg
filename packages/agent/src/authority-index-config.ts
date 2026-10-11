@@ -98,7 +98,7 @@ export interface AuthorityIndexBootstrapInput {
   readonly authorityIndex?: unknown;
   readonly nodeRole?: 'core' | 'edge';
   readonly chainAdapter?: unknown;
-  readonly chainConfig?: { readonly operationalKeys?: readonly string[] };
+  readonly chainConfig?: { readonly operationalKeys?: readonly string[]; readonly signers?: readonly unknown[] };
   readonly localContextGraphAuthorityIndexStore?: unknown;
   /** The network file's relay multiaddrs; see `DKGAgentConfig.networkRelays`. */
   readonly networkRelays?: readonly string[];
@@ -164,14 +164,14 @@ export function planAuthorityIndexBootstrap(input: AuthorityIndexBootstrapInput)
 /**
  * Core-snapshot mode needs the agent to construct its own EVM adapter, so it
  * installs the snapshot transport and trust namespace together, with
- * operational keys and a durable local index store.
+ * operational keys (or external signers) and a durable local index store.
  */
 function unmetCoreSnapshotPrerequisite(input: AuthorityIndexBootstrapInput): string | undefined {
   if (input.chainAdapter !== undefined) {
     return 'the chain adapter is injected (such as the mock chain), not a configured EVM chain';
   }
   if (input.chainConfig === undefined) return 'no EVM chain is configured';
-  if (!input.chainConfig.operationalKeys?.length) return 'no operational key is configured';
+  if (!input.chainConfig.operationalKeys?.length && !input.chainConfig.signers?.length) return 'no operational key is configured';
   if (input.localContextGraphAuthorityIndexStore === undefined) {
     return 'no local authority index store is available';
   }

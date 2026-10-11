@@ -504,6 +504,8 @@ export interface DKGPublisherConfig {
   publisherAddressResolver?: (contextGraphId?: bigint) => Promise<string | undefined>;
   /** EVM private key for signing publish requests (hex string with 0x prefix) */
   publisherPrivateKey?: string;
+  /** Author (asset owner) signing attestations instead of the paying wallet; `null`: the paying wallet never authors. */
+  authorSigner?: Pick<PublisherSigner, 'address' | 'signTypedData'> | null;
   /**
    * Additional EVM private keys whose identities can act as receiver
    * signers for the `contextGraphSignatures` path of `publishSharedMemory`
@@ -1168,6 +1170,7 @@ export class DKGPublisher implements Publisher {
   private readonly publisherAddress?: string;
   private readonly publisherAddressResolver?: (contextGraphId?: bigint) => Promise<string | undefined>;
   private readonly publisherWallet?: ethers.Wallet;
+  private readonly authorSigner?: Pick<PublisherSigner, 'address' | 'signTypedData'> | null;
   private readonly publisherPlanner: PublisherPlanner;
   private adapterSignMessagePublisherAddress?: string;
   private readonly adapterSignMessageProbeCache = new Map<string, boolean>();
@@ -1204,6 +1207,7 @@ export class DKGPublisher implements Publisher {
     this.keypair = config.keypair;
     this.publisherNodeIdentityId = config.publisherNodeIdentityId ?? 0n;
     this.publisherAddressResolver = config.publisherAddressResolver;
+    this.authorSigner = config.authorSigner;
 
     const configuredPublisherAddress = normalizePublisherAddress(config.publisherAddress);
     if (config.publisherPrivateKey) {
@@ -1512,25 +1516,25 @@ export class DKGPublisher implements Publisher {
     return { address: await this.inferAdapterPublisherAddress(contextGraphId, options) };
   }
 
-  /** RFC-001 §9 fallback author when no agent override is supplied. Returns undefined if no signer configured. */
+  /** RFC-001 §9 fallback author (the configured author, else the publisher) when no agent override is supplied. */
   async publisherFallbackAuthorAddress(): Promise<string | undefined> {
-    return this.resolvePublisherAddress();
+    return this.authorSigner === null ? undefined : this.authorSigner?.address ?? this.resolvePublisherAddress();
   }
 
-  /** Sign EIP-712 typed data with the publisher's own wallet. Returns KAv10's compact (r, vs). */
+  /** Sign EIP-712 typed data as the configured author, else with the publisher's own wallet. Returns KAv10's compact (r, vs). */
   async signAuthorAttestationAsPublisher(typedData: {
     domain: { name: string; version: string; chainId: bigint; verifyingContract: string };
     types: Record<string, Array<{ name: string; type: string }>>;
     message: Record<string, unknown>;
   }): Promise<{ r: Uint8Array; vs: Uint8Array }> {
-    const address = await this.resolvePublisherAddress();
+    const address = this.authorSigner === null ? undefined : this.authorSigner?.address ?? await this.resolvePublisherAddress();
     if (!address) {
       throw new Error(
-        'signAuthorAttestationAsPublisher: no publisher signer is configured. ' +
-          'Configure publisherPrivateKey or use a chain adapter that exposes signTypedData.',
+        'signAuthorAttestationAsPublisher: no author signer is configured. ' +
+          'Configure an author signer, publisherPrivateKey, or a chain adapter that exposes signTypedData.',
       );
     }
-    const signer = await this.getPublisherSigner(address);
+    const signer = this.authorSigner ?? await this.getPublisherSigner(address);
     if (!signer) {
       throw new Error(
         `signAuthorAttestationAsPublisher: failed to resolve a signer for ${address}.`,
