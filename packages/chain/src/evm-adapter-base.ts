@@ -90,7 +90,7 @@ import { SharedAdapterInitialization, initializationBinder } from './evm-adapter
 import { IdentityIdCache, IDENTITY_ID_POSITIVE_TTL_MS, SIGNER_IDENTITY_ID_ZERO_TTL_MS } from './identity-id-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
 import { preferredFundableCandidate } from './signer-selection.js';
-import type { PublisherCandidateFundingAssessment, PublisherFundingSelection } from './evm-publisher-funding.js';
+import type { PublisherCandidateFundingAssessment, PublisherUnfundedCandidateFundingAssessment, PublisherFundingSelection } from './evm-publisher-funding.js';
 import type { PublisherConvictionPlanReader } from './publisher-plan.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import type {
@@ -2713,10 +2713,11 @@ export class EVMChainAdapterBase {
     if (unknown?.kind === 'unavailable') {
       return { kind: 'unavailable', assessments: refreshed, error: new PcaFundingUnknownError(errorCode(unknown.error)) };
     }
-    const diagnostics = refreshed.map(({ candidate, funding }) => ({
+    const unfunded = refreshed.filter((assessment): assessment is PublisherUnfundedCandidateFundingAssessment<T> => assessment.kind === 'unfunded');
+    const diagnostics = unfunded.map(({ candidate, funding }) => ({
       address: candidate.address, nativeWei: funding.native, tracWei: funding.trac,
     }));
-    return { kind: 'unfunded', assessments: refreshed, error: new InsufficientPublisherFundsError(
+    return { kind: 'unfunded', assessments: unfunded, error: new InsufficientPublisherFundsError(
       formatNoFundedPublisherWalletMessage(diagnostics), diagnostics,
     ) };
   }

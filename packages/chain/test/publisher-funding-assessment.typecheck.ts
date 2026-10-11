@@ -1,5 +1,6 @@
 import { preferredFundableCandidate } from '../src/signer-selection.js';
 import { reconcilePublisherCandidateFunding, type PublisherCandidateFundingAssessment, type PublisherFundingSelection, type PublisherPcaPricingEvidence } from '../src/evm-publisher-funding.js';
+import { InsufficientPublisherFundsError } from '../src/evm-adapter-errors.js';
 
 const candidate = { address: 'wallet' };
 // @ts-expect-error A funded verdict must identify its wallet.
@@ -31,3 +32,12 @@ const independentPolicy: Parameters<typeof reconcilePublisherCandidateFunding>[0
   readFunding: async () => ({ native: 1n, trac: 0n }), nativeFloorWei: 0n, tracFloorWei: 0n,
 };
 void [missingEligibility, independentPolicy];
+
+type UnfundedSelection = Extract<PublisherFundingSelection<typeof candidate>, { kind: 'unfunded' }>;
+const unfundedError = new InsufficientPublisherFundsError('type-only', []);
+const settledEvidence = { candidate, funding: { native: 1n, trac: 0n }, refreshPcaEligibility: async () => true };
+// @ts-expect-error An unfunded selection cannot contain a funded assessment.
+const contradictoryUnfunded: UnfundedSelection = { kind: 'unfunded', assessments: [{ ...settledEvidence, kind: 'funded' }], error: unfundedError };
+// @ts-expect-error Unavailable evidence belongs to the unavailable selection.
+const unavailableUnfunded: UnfundedSelection = { kind: 'unfunded', assessments: [{ candidate, funding: settledEvidence.funding, kind: 'unavailable', error: new Error() }], error: unfundedError };
+void [contradictoryUnfunded, unavailableUnfunded];

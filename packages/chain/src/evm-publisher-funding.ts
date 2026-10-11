@@ -5,10 +5,18 @@ import { isRetryableRpcError } from './evm-adapter-rpc.js';
 import type { PublisherConvictionPlanReader } from './publisher-plan.js';
 
 /** The verdict retains its candidate, observed balances, and owner-bound fresh eligibility. */
+interface PublisherSettledFundingEvidence<T> {
+  candidate: T;
+  funding: PublisherCandidateBalances;
+  /** Refresh at the decision point using this candidate's assessed funding mode. */
+  refreshPcaEligibility: () => Promise<boolean>;
+}
+
+export type PublisherUnfundedCandidateFundingAssessment<T> = PublisherSettledFundingEvidence<T> & { kind: 'unfunded' };
+
 export type PublisherCandidateFundingAssessment<T> =
-  | { kind: 'funded' | 'unfunded'; candidate: T; funding: PublisherCandidateBalances;
-      /** Refresh at the decision point using this candidate's assessed funding mode. */
-      refreshPcaEligibility: () => Promise<boolean> }
+  | (PublisherSettledFundingEvidence<T> & { kind: 'funded' })
+  | PublisherUnfundedCandidateFundingAssessment<T>
   | { kind: 'unavailable'; candidate: T; funding: PublisherCandidateBalances; error: unknown };
 
 export interface PublisherCandidateBalances {
@@ -19,7 +27,7 @@ export interface PublisherCandidateBalances {
 /** Funding selection is settled evidence, not an exception-driven policy branch. */
 export type PublisherFundingSelection<T> =
   | { kind: 'funded'; candidate: T }
-  | { kind: 'unfunded'; assessments: readonly PublisherCandidateFundingAssessment<T>[];
+  | { kind: 'unfunded'; assessments: readonly PublisherUnfundedCandidateFundingAssessment<T>[];
       error: import('./evm-adapter-errors.js').InsufficientPublisherFundsError }
   | { kind: 'unavailable'; assessments: readonly PublisherCandidateFundingAssessment<T>[];
       error: import('./evm-adapter-errors.js').PcaFundingUnknownError };
@@ -40,31 +48,28 @@ export async function reconcilePublisherCandidateFunding<T extends {
   reprice: (candidate: T) => Promise<T>;
   conviction: () => PublisherConvictionPlanReader | undefined;
 }): Promise<T> {
-  const candidates = [...input.candidates];
-  let selection = await input.assess(candidates.slice());
+  let selection = await input.assess([...input.candidates]);
   if (selection.kind === 'funded') return selection.candidate;
   if (selection.kind === 'unavailable') throw selection.error;
-  if (!candidates.some((candidate) => candidate.pcaPricing.kind === 'unavailable')) throw selection.error;
-  const canStillUsePca = async (candidate: T, assessments: readonly PublisherCandidateFundingAssessment<T>[]): Promise<boolean> => {
-    const assessment = assessments.find((value) => value.candidate === candidate);
-    return assessment?.kind === 'unfunded' && await assessment.refreshPcaEligibility();
-  };
+  if (!selection.assessments.some(({ candidate }) => candidate.pcaPricing.kind === 'unavailable')) throw selection.error;
 
   // A failed lock/coverage lookup can leave a direct-spend lifetime that is
   // wrong for a real PCA. Re-price only candidates that can still use PCA.
-  for (let index = 0; index < candidates.length; index += 1) {
-    const candidate = candidates[index];
-    if (candidate.pcaPricing.kind === 'available' || !await canStillUsePca(candidate, selection.assessments)) continue;
-    candidates[index] = await input.reprice(candidate);
+  const repricedCandidates: T[] = [];
+  for (const assessment of selection.assessments) {
+    const candidate = assessment.candidate;
+    repricedCandidates.push(candidate.pcaPricing.kind === 'available' || !await assessment.refreshPcaEligibility()
+      ? candidate : await input.reprice(candidate));
   }
 
-  selection = await input.assess(candidates.slice());
+  selection = await input.assess(repricedCandidates);
   if (selection.kind === 'funded') return selection.candidate;
   if (selection.kind === 'unavailable') throw selection.error;
   // A strict false can be only a lifetime mismatch against direct-spend
   // fallback pricing. It did not probe coverage at the PCA's real lock.
-  for (const candidate of candidates) {
-    if (candidate.pcaPricing.kind === 'available' || !await canStillUsePca(candidate, selection.assessments)) continue;
+  for (const assessment of selection.assessments) {
+    const candidate = assessment.candidate;
+    if (candidate.pcaPricing.kind === 'available' || !await assessment.refreshPcaEligibility()) continue;
     const reader = input.conviction();
     if (!reader) continue;
     let accountId: bigint;

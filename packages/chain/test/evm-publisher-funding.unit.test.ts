@@ -71,6 +71,35 @@ describe('EVM publish funding candidate ownership', () => {
     expect(reprice).toHaveBeenCalledExactlyOnceWith(candidate);
   });
 
+  it('uses ordered owned assessment records in both reconciliation phases', async () => {
+    const candidates: readonly Candidate[] = Object.freeze(['first', 'second'].map((address) => Object.freeze({
+      address, publishEpochs: 12, tokenAmount: 120n,
+      pcaPricing: { kind: 'unavailable' as const, error: Object.assign(new Error('lock read failed'), { code: `LOCK_${address}` }) },
+    })));
+    const error = new InsufficientPublisherFundsError('not funded at fallback lifetime', []);
+    const order: string[] = [];
+    const getAccountId = vi.fn(async () => 42n);
+    let stage = 0;
+    await expect(reconcilePublisherCandidateFunding({
+      candidates,
+      assess: async (current): Promise<PublisherFundingSelection<Candidate>> => {
+        const phase = ++stage;
+        return { kind: 'unfunded', error, assessments: current.map((candidate) => ({
+          kind: 'unfunded', candidate: { ...candidate }, funding: { native: 10n, trac: 0n },
+          refreshPcaEligibility: async () => {
+            order.push(`phase${phase}:${candidate.address}`);
+            return phase === 1 || candidate.address === 'second';
+          },
+        })) };
+      },
+      reprice: async (candidate) => { order.push(`reprice:${candidate.address}`); return { ...candidate, tokenAmount: 240n }; },
+      conviction: () => ({ getAccountId, getLockDurationEpochs: async () => 24, canCover: async () => false }),
+    })).rejects.toMatchObject({ name: 'PcaFundingUnknownError', readCode: 'LOCK_SECOND' });
+    expect(order).toEqual(['phase1:first', 'reprice:first', 'phase1:second', 'reprice:second', 'phase2:first', 'phase2:second']);
+    expect(getAccountId).toHaveBeenCalledExactlyOnceWith('second');
+    expect(candidates.map((candidate) => candidate.tokenAmount)).toEqual([120n, 120n]);
+  });
+
   it('propagates the assessed unknown error without repricing or extra funding reads', async () => {
     const candidate = { address: 'wallet', publishEpochs: 12, tokenAmount: 120n, pcaPricing: { kind: 'available' as const } };
     const error = new PcaFundingUnknownError('CALL_EXCEPTION');
