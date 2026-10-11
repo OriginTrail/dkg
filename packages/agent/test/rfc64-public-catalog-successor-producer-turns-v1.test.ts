@@ -30,15 +30,16 @@ const timeSlice = vi.hoisted(() => ({
   yields: true,
   onTurn: undefined as ((turn: number) => void) | undefined,
 }));
-vi.mock('../src/main-thread-time-slice.js', () => ({
-  createMainThreadTimeSlice: () => async (): Promise<void> => {
+vi.mock('../src/main-thread-time-slice.js', () => {
+  const yieldMainThread = async (): Promise<void> => {
     if (!timeSlice.yields) return;
     timeSlice.turns += 1;
     const turn = timeSlice.turns;
     await new Promise<void>((resolve) => setImmediate(resolve));
     timeSlice.onTurn?.(turn);
-  },
-}));
+  };
+  return { yieldMainThread, createMainThreadTimeSlice: () => yieldMainThread };
+});
 
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'66'.repeat(32)}`);
 const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
@@ -83,10 +84,10 @@ describe('RFC-64 exact-set successor producer: turns of the main thread', () => 
     const firstSignature = events.indexOf('sign');
     const firstStage = events.indexOf('stage-bundle');
     // Row preparation and the pre-signature checks are two full passes; the
-    // canonical producer's first block and the signature each take a turn of
-    // their own.
+    // canonical producer's predecessor and replacement blocks and the signature
+    // each take a turn of their own.
     expect(events.slice(0, firstSignature).filter((event) => event === 'turn'))
-      .toHaveLength(2 * ROWS + 2);
+      .toHaveLength(2 * ROWS + 3);
     expect(events.slice(0, firstSignature)).not.toContain('stage-bundle');
     // Bucket, directory node and head, then one more pass over the rows.
     expect(signDigest).toHaveBeenCalledTimes(3);
@@ -299,9 +300,9 @@ describe('RFC-64 exact-set successor producer: turns of the main thread', () => 
       const controller = new AbortController();
       const reason = new Error('superseded');
       // Two passes over the rows come first, then the canonical producer's
-      // own turn, then one turn per signature.
+      // predecessor and replacement turns, then one turn per signature.
       timeSlice.onTurn = (turn) => {
-        if (turn === 2 * ROWS + 2 + signed) controller.abort(reason);
+        if (turn === 2 * ROWS + 3 + signed) controller.abort(reason);
       };
 
       // The caller's own reason, not a failure of the supplied history.
