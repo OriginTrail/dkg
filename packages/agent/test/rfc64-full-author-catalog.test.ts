@@ -30,6 +30,7 @@ import {
 
 import type { DKGAgent } from '../src/index.js';
 import { AuthorCatalogFullErrorV1 } from '../src/internal/author-catalog-capacity.js';
+import { rfc64CatalogMutationMemoryV1 } from '../src/internal/catalog-mutation-memory.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
   '../src/rfc64/finalized-private-placement-repair-store-v1.js';
 import {
@@ -454,5 +455,25 @@ describe('a full author catalog', () => {
     expect(restarted.lines('catalog_full')).toEqual([expect.objectContaining({ parkedPlacements: 3 })]);
     for (let pass = 0; pass < 3; pass++) await restarted.pass();
     expect(restarted.seen.placementAttempts).toHaveLength(1);
+  }, 90_000);
+
+  it('keeps what is remembered about a full catalog across its refusal', async () => {
+    const author = await startAuthor('full-catalog-memory');
+    const seals: AssertionSeal[] = [];
+    for (let index = 0; index < CAP + 1; index++) {
+      seals.push((await seedInventoryAssetV1(author.agent, `asset-${index}`, BigInt(81 + index))).seal);
+    }
+    for (let index = 0; index < CAP; index++) await author.confirm(`asset-${index}`, seals[index]!);
+    const memory = rfc64CatalogMutationMemoryV1(author.agent);
+    const remembered = memory.retained;
+    expect(remembered.states).toBe(1);
+
+    // The refusal is raised from the state the mutation has just read, before a successor is
+    // asked for. That state is still the applied head's, so the next placement of this catalog
+    // does not read and verify every row again.
+    await author.confirm(`asset-${CAP}`, seals[CAP]!);
+    expect(author.seen.placementAttempts.at(-1)).toBe(seals[CAP]!.kaUal);
+    expect(author.capacity()).toEqual({ parkedPlacements: 1, scopesAtCap: 1 });
+    expect(memory.retained).toEqual(remembered);
   }, 90_000);
 });

@@ -444,7 +444,8 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
 
   /**
    * One serialized mutation of `scope`. A mutation that fails leaves nothing remembered about the
-   * scope, unless it failed after its own applied-head CAS: that state is the committed one.
+   * scope, unless it failed after its own applied-head CAS: that state is the committed one. A
+   * refusal for a full catalog is not such a failure.
    */
   private runRfc64CatalogMutationV1<T>(
     this: DKGAgent,
@@ -460,7 +461,10 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       try {
         return await mutate(mutation);
       } catch (cause) {
-        mutation.failed();
+        // GH#3134 — a full catalog refuses a new row from the row count of the state it has
+        // just read, before a successor is asked for: what is remembered is still the applied
+        // head's, and forgetting it would make the next placement read the whole catalog again.
+        if (!(cause instanceof AuthorCatalogFullErrorV1)) mutation.failed();
         throw cause;
       }
     }, signal);
