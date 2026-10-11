@@ -1643,9 +1643,13 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     throwIfOperationAborted(options.signal);
     const isPrivate = await this.isPrivateContextGraph(request.contextGraphId, { signal: options.signal });
     throwIfOperationAborted(options.signal);
-    if (!isPrivate) {
-      return true;
-    }
+    const metadataReady = await this.hasReadyMetadataRegistration(request.contextGraphId);
+    throwIfOperationAborted(options.signal);
+    if (!metadataReady && request.phase !== 'meta') return false;
+    if (!isPrivate && metadataReady) return true;
+    // A withheld projection can serve only authenticated control metadata.
+    // The ordinary private crypto/ACL owner remains authoritative for that
+    // narrow recovery exception; the public fast path cannot bypass readiness.
     const verifyIdentity = this.chain.verifySyncIdentity ?? this.chain.verifyACKIdentity;
     return authorizePrivateSyncRequest({
       ctx: createOperationContext('sync'),

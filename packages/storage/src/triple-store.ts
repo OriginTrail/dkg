@@ -286,6 +286,9 @@ export interface TripleStore {
    * fall back to `insert(quads)` for already-stored terms.
    */
   update?(sparql: string, options?: UpdateOptions): Promise<void>;
+  /** One SPARQL DELETE/INSERT operation is committed atomically by this backend.
+   * This certifies transaction visibility, never restart durability. */
+  readonly atomicUpdateCertified?: boolean;
 
   countQuads(graphUri?: string, options?: QueryOptions): Promise<number>;
 
@@ -337,6 +340,22 @@ export function asBoundedQueryResponseCapability(store: unknown): BoundedQueryRe
     && (candidate as Partial<BoundedQueryResponseCapability>).queryResponseLimitMode === 'pre-materialization'
     && typeof (candidate as Partial<BoundedQueryResponseCapability>).query === 'function'
   ));
+}
+
+/** Discover an atomic-update certificate without bypassing outer mutation decorators. */
+export function hasAtomicUpdateCertificate(store: TripleStore): boolean {
+  return findTripleStoreCapability(store, (candidate): candidate is TripleStore => (
+    typeof candidate === 'object' && candidate !== null
+    && (candidate as TripleStore).atomicUpdateCertified === true
+    && typeof (candidate as TripleStore).update === 'function'
+  )) !== null;
+}
+
+/** A leaf flush implements the durability contract; a wrapper's no-op forwarding is insufficient. */
+export function hasPersistenceBarrier(store: TripleStore): boolean {
+  return typeof store.flush === 'function' && findTripleStoreCapability(store,
+    (candidate): candidate is TripleStore => typeof candidate === 'object' && candidate !== null
+      && !('innerStore' in candidate) && typeof (candidate as TripleStore).flush === 'function') !== null;
 }
 
 /**

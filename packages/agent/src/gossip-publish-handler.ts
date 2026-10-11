@@ -1,3 +1,4 @@
+import { admitsMetadataGossip } from './internal/context-graph-authority/metadata-readiness.js';
 import {
   decodePublishRequest, SYSTEM_CONTEXT_GRAPHS, isAgentRegistryContextGraph, DKG_ONTOLOGY,
   CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE, type OntologyBindingSlotClass,
@@ -164,6 +165,7 @@ export interface GossipPublishHandlerCallbacks {
    * callback returned `false`).
    */
   hasConfirmedMetaState?: (id: string) => Promise<boolean>;
+  hasReadyMetadataRegistration?: (id: string) => Promise<boolean>;
   getCgMeta?: (id: string) => Promise<ContextGraphMetaRecord>;
   /** Resolve the topic Context Graph to its authoritative on-chain id. */
   getContextGraphOnChainId?: (id: string) => Promise<string | null>;
@@ -417,36 +419,15 @@ export class GossipPublishHandler {
           }
         }
 
-        // CGs whose _meta hasn't been fetched yet: deny until _meta sync
-        // completes. A null allowlist with metaSynced=false could mean the CG
-        // is curated but the allowlist hasn't arrived via authenticated sync.
-        // System contextGraphs (agents/ontology) are exempt — always open.
-        // Gossip race: `DKGAgent#refreshMetaSyncedFlags` flips `metaSynced`
-        // eagerly at the end of every sync cycle, but a gossip publish can
-        // arrive on a freshly subscribed node *before* the first sync has
-        // run. Ask the agent's own helper whether the CG is already
-        // confirmable from the local store (system contextGraph, populated
-        // `_meta`, or `<cg> rdf:type dkg:ContextGraph` in ontology — the same
-        // check Viktor introduced in `hasConfirmedMetaState`). If yes,
-        // update the flag through the agent subscription setter and proceed; if no, keep the strict
-        // deny behavior so curated CGs without a synced allowlist can't
-        // leak through.
-        if (allowedPeers === null
-          && request.contextGraphId !== SYSTEM_CONTEXT_GRAPHS.AGENTS
-          && request.contextGraphId !== SYSTEM_CONTEXT_GRAPHS.ONTOLOGY) {
-          const sub = this.subscribedContextGraphs.get(request.contextGraphId);
-          if (sub && sub.metaSynced === false) {
-            const confirmed = this.callbacks.hasConfirmedMetaState
-              ? await this.callbacks.hasConfirmedMetaState(request.contextGraphId)
-              : false;
-            if (confirmed) {
-              this.setContextGraphSubscription(request.contextGraphId, { ...sub, metaSynced: true });
-            } else {
-              this.log.warn(ctx, `Gossip publish deferred: context graph "${request.contextGraphId}" _meta not yet synced — defaulting to deny`);
-              return;
-            }
-          }
-        }
+        if (!(await admitsMetadataGossip({
+          contextGraphId: request.contextGraphId, allowedPeers,
+          subscription: this.subscribedContextGraphs.get(request.contextGraphId),
+          ready: this.callbacks.hasReadyMetadataRegistration,
+          confirmed: this.callbacks.hasConfirmedMetaState,
+          setSubscription: (next) => this.setContextGraphSubscription(request.contextGraphId, next),
+          warn: (message) => this.log.warn(ctx, message),
+        }))) return;
+
       }
 
       // Structural validation (I-002): reject malformed gossip before inserting.

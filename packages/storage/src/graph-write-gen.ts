@@ -92,6 +92,12 @@ export class GraphWriteGenTracker implements GraphWriteGenSource, GraphWriteRevi
   }
 
   /** Begin one dispatched write and return its named terminal boundary. */
+  /** Run one transactional local write while preserving active-write revisions. */
+  async trackAtomicWrite<T>(scope: GraphWriteScope, work: () => Promise<T>): Promise<T> {
+    const lifecycle = this.beginWrite(scope);
+    try { return await work(); } finally { lifecycle.settle(); }
+  }
+
   beginWrite(scope: GraphWriteScope): GraphWriteLifecycle {
     if (scope.kind === 'all') return this.beginUnscopedWrite();
     return this.beginGraphWrites(scope.graphs);

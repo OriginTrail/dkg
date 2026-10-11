@@ -184,6 +184,7 @@ const TERMINAL: ReadonlySet<WorkerLifecycle> = new Set<WorkerLifecycle>([
 ]);
 
 export class OxigraphWorkerStore implements TripleStore {
+  readonly atomicUpdateCertified = true;
   readonly writeRevisionCoverage = 'all-writers' as const;
   readonly queryCancellation = 'interruptible' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
@@ -849,15 +850,11 @@ export class OxigraphWorkerStore implements TripleStore {
     scope: GraphWriteScope,
     work: () => Promise<T>,
   ): Promise<T> {
-    const lifecycle = this.writeGen.beginWrite(scope);
-    try {
-      return await work();
-    } finally {
-      // One worker message is transactional; a returned error means it settled
-      // without a partial write, while success publishes the committed state.
-      lifecycle.settle();
-    }
+    // One worker message is transactional; a returned error means it settled
+    // without a partial write, while success publishes the committed state.
+    return this.writeGen.trackAtomicWrite(scope, work);
   }
+
   async countQuads(graphUri?: string): Promise<number> { return this.call('countQuads', graphUri); }
   async flush(): Promise<void> { return this.call('flush'); }
 

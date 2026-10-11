@@ -12,7 +12,8 @@ import {
   type PeerResolver,
 } from '@origintrail-official/dkg-core';
 import {
-  tryReplaceSubjectAtomically,
+  hasAtomicUpdateCertificate,
+  hasPersistenceBarrier,
   tryUpdateWithTouchedGraphs,
   type Quad,
   type TripleStore,
@@ -49,6 +50,12 @@ import {
   noteCuratorMetaRefreshStarted,
   noteCuratorRegistrationRefusal,
 } from './curator-registration-refusal.js';
+
+import {
+  captureMetadataReadiness, metadataReadinessCaptureIsCurrent,
+  beginMetadataReplacement, completeMetadataReplacement, snapshotMetadataRegistration,
+  type MetadataReadinessCapture,
+} from './internal/context-graph-authority/metadata-readiness.js';
 
 export interface CuratorMetaRefreshOptions {
   signal?: AbortSignal;
@@ -252,73 +259,6 @@ function preservesCuratorRegistrationBinding(
     const incomingId = stripLiteral(quad.object);
     return !isCanonicalAuthoritativeContextGraphId(incomingId) || incomingId === currentId;
   });
-}
-
-/**
- * Apply the chain slot and wire-id carried by an authenticated curator
- * snapshot to the late member's durable subscription row.
- *
- * These facts deliberately come from the already-validated private `_meta`
- * snapshot.  Reading only the system ontology graph is insufficient for a
- * late member: the registration announcement on that public topic is a
- * one-shot event and may have happened before the member joined.
- */
-function applyCuratorRegistrationBinding(
-  agent: CuratorMetaRefreshAgent,
-  contextGraphId: string,
-  snapshot: readonly Quad[],
-): void {
-  const sub = agent.subscribedContextGraphs?.get(contextGraphId);
-  if (!sub || !preservesCuratorRegistrationBinding(agent, contextGraphId, snapshot)) return;
-
-  const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
-  const metaGraph = contextGraphMetaGraphUri(contextGraphId);
-  const onChainIdPredicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`;
-  const onChainHashPredicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`;
-  let onChainId: string | undefined;
-  let onChainHash: string | undefined;
-  let invalidOnChainId = false;
-
-  for (const quad of snapshot) {
-    if (quad.graph !== metaGraph || quad.subject !== contextGraphUri) continue;
-    const value = stripLiteral(quad.object);
-    if (quad.predicate === onChainIdPredicate) {
-      if (isCanonicalAuthoritativeContextGraphId(value)) {
-        onChainId = value;
-      } else {
-        invalidOnChainId = true;
-      }
-    } else if (
-      quad.predicate === onChainHashPredicate
-      && /^0x[0-9a-fA-F]{64}$/.test(value)
-    ) {
-      onChainHash = value.toLowerCase();
-    }
-  }
-
-  // Treat the numeric slot and commitment as one registration claim. A
-  // malformed or out-of-uint256 slot must not leave behind a hash-only durable
-  // binding or turn untrusted metadata into a strict-writer exception.
-  if (invalidOnChainId) return;
-
-  let changed = false;
-  if (onChainId && sub.onChainId !== onChainId) {
-    if (agent.bindSubscriptionOnChainId) {
-      agent.bindSubscriptionOnChainId(contextGraphId, sub, onChainId);
-    } else {
-      sub.onChainId = onChainId;
-    }
-    changed = true;
-  }
-  if (onChainHash && sub.onChainHash?.toLowerCase() !== onChainHash) {
-    if (agent.recordCgWireId) {
-      agent.recordCgWireId(contextGraphId, onChainHash);
-    } else {
-      sub.onChainHash = onChainHash;
-    }
-    changed = true;
-  }
-  if (changed) agent.persistContextGraphSubscription?.(contextGraphId);
 }
 
 const inFlightCuratorMetaRefreshesByAgent = new WeakMap<
@@ -579,131 +519,32 @@ function replaceCuratorMetaProjectionSparql(
 
 /**
  * Install `authoritative` as the graph's curator projection. A refusal before
- * its first write leaves the projection unchanged. Subject-based stores also
- * recheck root activation after awaited delegation commits: a late refusal
- * preserves the root definition, while earlier admitted delegation writes remain.
+ * its first write leaves the projection unchanged. Recheck ownership and the
+ * approved-member acceptance after staging, immediately before one certified
+ * update activates the complete curator projection.
  */
 async function atomicallyReplaceCuratorMetaSnapshot(
   agent: CuratorMetaRefreshAgent,
   contextGraphId: string,
   authoritative: AuthoritativeMetaSnapshot,
   ctx: OperationContext,
+  isCurrent: () => boolean,
 ): Promise<boolean> {
   const snapshot = authoritative.quads;
   const activationHolds = async (): Promise<boolean> => (
-    (authoritative.approvedMember === undefined || await authoritative.approvedMember.stillHolds())
+    isCurrent()
+    && (authoritative.approvedMember === undefined || await authoritative.approvedMember.stillHolds())
+    && isCurrent()
     && preservesCuratorRegistrationBinding(agent, contextGraphId, snapshot)
   );
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
-  const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
-  const delegationPrefix = `did:dkg:agent-delegation:${contextGraphId}:`;
   const invalidateTargetProjections = () => {
     agent.contextGraphMetaProjection.markDirty(contextGraphId);
     agent.invalidateListContextGraphsCache();
   };
 
-  // A remote endpoint can safely replace one subject in a shared graph without
-  // staging a second graph. Prefer that primitive here. Besides avoiding the
-  // whole-projection staging race under concurrent VM materialization, the
-  // ordering is fail closed: new delegation proofs land before the root ACL,
-  // the root subject is the activation boundary, and stale delegations are
-  // removed only after their allowedAgent row is gone.
-  if (typeof agent.store.replaceSubject === 'function') {
-    const [localRevocations, existingDelegationSubjects] = await Promise.all([
-      agent.store.query(`
-        SELECT ?o WHERE {
-          GRAPH <${assertSafeIri(metaGraph)}> {
-            <${assertSafeIri(contextGraphUri)}> <${DKG_ONTOLOGY.DKG_REVOKED_AGENT}> ?o .
-          }
-        }
-      `, { source: 'agent.metaRefresh.readLocalRevocations' }),
-      agent.store.query(`
-        SELECT DISTINCT ?s WHERE {
-          GRAPH <${assertSafeIri(metaGraph)}> {
-            ?s (
-              <${DKG_ONTOLOGY.DKG_DELEGATION_AGENT}> |
-              <${DKG_ONTOLOGY.DKG_DELEGATION_ISSUED_AT}> |
-              <${DKG_ONTOLOGY.DKG_DELEGATION_EXPIRES_AT}> |
-              <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER}> |
-              <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_KEY}>
-            ) ?delegationValue .
-          }
-          FILTER(STRSTARTS(STR(?s), ${JSON.stringify(delegationPrefix)}))
-        }
-      `, { source: 'agent.metaRefresh.readLocalDelegations' }),
-    ]);
-    if (
-      localRevocations.type !== 'bindings'
-      || existingDelegationSubjects.type !== 'bindings'
-    ) {
-      throw new Error('Curator metadata replacement requires control-plane bindings');
-    }
-
-    const desiredBySubject = new Map<string, Quad[]>();
-    for (const quad of snapshot) {
-      const rows = desiredBySubject.get(quad.subject) ?? [];
-      rows.push(quad);
-      desiredBySubject.set(quad.subject, rows);
-    }
-    const rootRows = desiredBySubject.get(contextGraphUri) ?? [];
-    const localRevocationRows: Quad[] = localRevocations.bindings
-      .filter((row) => typeof row['o'] === 'string')
-      .map((row) => ({
-        subject: contextGraphUri,
-        predicate: DKG_ONTOLOGY.DKG_REVOKED_AGENT,
-        object: row['o']!,
-        graph: metaGraph,
-      }));
-    const rootRowKeys = new Set(rootRows.map((quad) => `${quad.predicate}\u0000${quad.object}`));
-    const rootReplacement = [
-      ...rootRows,
-      ...localRevocationRows.filter(
-        (quad) => !rootRowKeys.has(`${quad.predicate}\u0000${quad.object}`),
-      ),
-    ];
-    const desiredDelegations = [...desiredBySubject.entries()]
-      .filter(([subject]) => subject.startsWith(delegationPrefix))
-      .sort(([left], [right]) => left.localeCompare(right));
-    const existingDelegations = new Set(
-      existingDelegationSubjects.bindings
-        .map((row) => row['s'])
-        .filter((subject): subject is string => (
-          typeof subject === 'string' && subject.startsWith(delegationPrefix)
-        )),
-    );
-
-    // Each subject below is its own commit, and a delegation for an agent the
-    // current root already allows takes effect as soon as it lands. So the
-    // acceptance is asked before the first of them: a refusal must leave the
-    // projection exactly as it was, and no store API commits them together.
-    if (!(await activationHolds())) return false;
-    invalidateTargetProjections();
-    try {
-      const replaceSubject = async (subject: string, quads: Quad[]): Promise<void> => {
-        const replaced = await tryReplaceSubjectAtomically(
-          agent.store,
-          metaGraph,
-          subject,
-          quads,
-          { source: 'agent.metaRefresh.replaceSubject' },
-        );
-        if (!replaced) {
-          throw new Error('Triple store lost atomic subject-replacement capability');
-        }
-      };
-      for (const [subject, quads] of desiredDelegations) {
-        await replaceSubject(subject, quads);
-        existingDelegations.delete(subject);
-      }
-      if (!(await activationHolds())) return false;
-      await replaceSubject(contextGraphUri, rootReplacement);
-      for (const staleSubject of [...existingDelegations].sort()) {
-        await replaceSubject(staleSubject, []);
-      }
-    } finally {
-      invalidateTargetProjections();
-    }
-    return true;
+  if (!hasAtomicUpdateCertificate(agent.store)) {
+    throw new Error('Triple store has no certified atomic curator metadata update');
   }
 
   const stagingGraph = `urn:dkg:curator-meta-refresh:${randomUUID()}`;
@@ -764,6 +605,10 @@ async function executeCuratorMetaRefresh(
   options: CuratorMetaRefreshOptions,
   ctx: OperationContext,
 ): Promise<boolean> {
+  // Capture identity before dialing or fetching; same-object ABA cannot revive it.
+  const original = captureMetadataReadiness(agent, contextGraphId);
+  let captured: MetadataReadinessCapture | undefined;
+  let mutationStarted = false;
   // Numbered as it starts, so a watch tells its refusal from an earlier refresh's.
   const refresh = noteCuratorMetaRefreshStarted(agent, contextGraphId, curatorPeerId);
   const connectionResult = ensureCuratorConnected(
@@ -789,7 +634,14 @@ async function executeCuratorMetaRefresh(
       options,
       ctx,
     );
-    if (!snapshot) return false;
+    if (!snapshot || !metadataReadinessCaptureIsCurrent(agent, contextGraphId, original)) return false;
+    const registration = snapshotMetadataRegistration(contextGraphId, snapshot.quads);
+    if (registration.kind === 'invalid' || (registration.kind === 'absent' && original.onChainId !== undefined)) {
+      throw new Error('Curator metadata registration tuple is missing or invalid');
+    }
+    if (!hasAtomicUpdateCertificate(agent.store) || !hasPersistenceBarrier(agent.store)) {
+      throw new Error('Curator metadata replacement requires atomic update and persistence capabilities');
+    }
     if (!preservesCuratorRegistrationBinding(agent, contextGraphId, snapshot.quads)) {
       // Counted, so a caller that retries failed refreshes does not fetch it again.
       noteCuratorRegistrationRefusal(agent, contextGraphId, curatorPeerId, refresh);
@@ -798,7 +650,10 @@ async function executeCuratorMetaRefresh(
         + `its registration conflicts with owned slot ${agent.subscribedContextGraphs?.get(contextGraphId)?.onChainId}`);
       return false;
     }
-    if (!(await atomicallyReplaceCuratorMetaSnapshot(agent, contextGraphId, snapshot, ctx))) {
+    captured = await beginMetadataReplacement(agent, contextGraphId, original);
+    mutationStarted = true;
+    if (!(await atomicallyReplaceCuratorMetaSnapshot(agent, contextGraphId, snapshot, ctx,
+      () => metadataReadinessCaptureIsCurrent(agent, contextGraphId, captured!)))) {
       if (!preservesCuratorRegistrationBinding(agent, contextGraphId, snapshot.quads)) {
         noteCuratorRegistrationRefusal(agent, contextGraphId, curatorPeerId, refresh);
       }
@@ -809,13 +664,7 @@ async function executeCuratorMetaRefresh(
       );
       return false;
     }
-    // The relayed snapshot carries no binding claims any more (stripped above);
-    // skipping the binding step keeps the subscription row untouched even if a
-    // future field slipped past the strip list. Chain bindings for such a
-    // graph arrive only through the finalized-index / name-hash paths.
-    if (options.ignoreRegistrationBinding !== true) {
-      applyCuratorRegistrationBinding(agent, contextGraphId, snapshot.quads);
-    }
+    await completeMetadataReplacement(agent, contextGraphId, captured, registration);
     agent.syncCheckpoints.delete(snapshot.checkpointKey);
     agent.log.info(
       ctx,
@@ -823,6 +672,23 @@ async function executeCuratorMetaRefresh(
     );
     return true;
   } catch (error) {
+    // An outer decorator may fail after the inner atomic commit. Readiness was
+    // already durably withheld; delete only this still-owned curator projection,
+    // leaving concurrent KA rows and node-local revocation tombstones untouched.
+    if (mutationStarted && captured && metadataReadinessCaptureIsCurrent(agent, contextGraphId, captured)) {
+      const stagingGraph = `urn:dkg:curator-meta-refresh:${randomUUID()}`;
+      const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+      try {
+        await tryUpdateWithTouchedGraphs(agent.store,
+          replaceCuratorMetaProjectionSparql(contextGraphId, metaGraph, stagingGraph),
+          [metaGraph], { source: 'agent.metaRefresh.revokeFailedProjection' });
+        await agent.store.flush?.({ source: 'agent.metaRefresh.revokeFailedProjection.flush' });
+      } catch (cleanupError) {
+        agent.log.warn(ctx, `Curator projection remains quarantined after cleanup failure: ${String(cleanupError)}`);
+      }
+      agent.contextGraphMetaProjection.markDirty(contextGraphId);
+      agent.invalidateListContextGraphsCache();
+    }
     throwIfCuratorMetaRefreshAborted(options.signal);
     agent.log.warn(
       ctx,

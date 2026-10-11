@@ -1,3 +1,4 @@
+import { resolveConsistencyProfile, type SparqlHttpConsistencyProfile } from './sparql-http-consistency.js';
 /**
  * SparqlHttpStore — TripleStore adapter for any SPARQL 1.1 Protocol endpoint.
  *
@@ -320,10 +321,7 @@ function snapshotManagedRecoveryCapability(
   });
 }
 
-export type SparqlHttpConsistencyProfile =
-  | 'best-effort'
-  | 'atomic-update'
-  | 'atomic-readback';
+export type { SparqlHttpConsistencyProfile } from './sparql-http-consistency.js';
 
 export interface SparqlHttpStoreOptions {
   /** SPARQL query endpoint URL (required). */
@@ -388,6 +386,7 @@ export interface SparqlHttpStoreOptions {
 }
 
 export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapability {
+  readonly atomicUpdateCertified: boolean;
   readonly queryResponseLimitMode = 'pre-materialization' as const;
   readonly writeRevisionCoverage = 'process-local' as const;
   readonly queryCancellation = 'interruptible' as const;
@@ -449,6 +448,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     this.consistencyProfile = this.managedOxigraph
       ? 'atomic-readback'
       : resolveConsistencyProfile(options);
+    this.atomicUpdateCertified = this.consistencyProfile !== 'best-effort';
     this.scheduler = options.scheduler ?? externalStorePriorityScheduler;
     this.now = options.now ?? monotonicNow;
     this.slowQueryThresholdMs = normalizeNonNegativeNumber(
@@ -1456,38 +1456,6 @@ export function createManagedOxigraphSparqlStoreV1(
     config.options as unknown as SparqlHttpStoreOptions,
     getManagedOxigraphRuntimeConstructionAuthorityV1(config),
   );
-}
-
-function normalizeConsistencyProfile(value: unknown): SparqlHttpConsistencyProfile {
-  if (value === undefined) return 'best-effort';
-  if (value === 'best-effort' || value === 'atomic-update' || value === 'atomic-readback') {
-    return value;
-  }
-  throw new Error(
-    'sparql-http consistencyProfile must be best-effort, atomic-update, or atomic-readback',
-  );
-}
-
-function resolveConsistencyProfile(
-  options: Pick<SparqlHttpStoreOptions, 'consistencyProfile' | 'atomicUpdates'>,
-): SparqlHttpConsistencyProfile {
-  const profile = normalizeConsistencyProfile(options.consistencyProfile);
-  if (options.atomicUpdates === undefined) return profile;
-
-  const legacyProfile: SparqlHttpConsistencyProfile = options.atomicUpdates
-    ? 'atomic-update'
-    : 'best-effort';
-  if (options.consistencyProfile === undefined) return legacyProfile;
-
-  const compatible = options.atomicUpdates
-    ? profile === 'atomic-update' || profile === 'atomic-readback'
-    : profile === 'best-effort';
-  if (!compatible) {
-    throw new Error(
-      'sparql-http atomicUpdates conflicts with consistencyProfile; remove the deprecated alias',
-    );
-  }
-  return profile;
 }
 
 function normalizeNonNegativeNumber(value: number | undefined, fallback: number): number {

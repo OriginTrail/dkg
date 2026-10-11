@@ -51,6 +51,7 @@ export type ContextGraphBindingTransition = {
 /** The durable portion of a subscription that owns an authoritative binding. */
 export type ContextGraphBindingSubscription = {
   onChainId?: string;
+  onChainHash?: string;
 };
 
 export type ContextGraphBindingSubscriptionState = ContextGraphBindingSubscription & {
@@ -143,6 +144,8 @@ export class ContextGraphBindingState {
   >();
 
   private readonly generations = new Map<string, number>();
+  /** Primitive snapshots survive callers mutating the previous object in place. */
+  private readonly canonicalFacts = new Map<string, ContextGraphBindingSubscriptionState>();
 
   /** Bounded, short-lived chain attestations keyed by numeric on-chain id. */
   private readonly chainAttestedResolutions = new Map<
@@ -223,6 +226,18 @@ export class ContextGraphBindingState {
     const reverseCandidateCleared = retainsReverseCandidate
       ? false
       : this.clear(localCgId);
+    const previousFacts = this.canonicalFacts.get(localCgId) ?? previous;
+    this.canonicalFacts.set(localCgId, { onChainId: next.onChainId, onChainHash: next.onChainHash,
+      subscribed: next.subscribed, coreHosted: next.coreHosted });
+    // Canonical setters can replace an authoritative row without touching the
+    // reverse-candidate map. Fence those transitions too, including A-B-A and
+    // deletion/recreation, even when the caller reused the subscription object.
+    if (previousFacts?.onChainId !== next.onChainId
+      || previousFacts?.onChainHash?.toLowerCase() !== next.onChainHash?.toLowerCase()
+      || (previousFacts?.subscribed === true || previousFacts?.coreHosted === true) !== admitted) {
+      this.bump(localCgId);
+      this.forgetChainAttestedResolutionsForLocalId(localCgId);
+    }
     if (!admitted) this.forgetChainAttestedResolutionsForLocalId(localCgId);
     return {
       reverseCandidateCleared,

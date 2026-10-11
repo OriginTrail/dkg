@@ -156,6 +156,7 @@ export interface ContextGraphReadAuthorityInput {
   defaultAgentAddress?: string;
   hasAcceptedRfc64PublicPolicy: boolean;
   isPendingMetadata: boolean;
+  hasReadyMetadataRegistration?(): Promise<boolean>;
   isPrivateLocalGraph(): Promise<boolean>;
   getLocalAgentGate(): Promise<string[] | null>;
   getLegacyParticipants(): Promise<string[] | null>;
@@ -216,6 +217,10 @@ export async function resolveContextGraphReadAuthorityResolution(
 ): Promise<ContextGraphReadAuthorityResolution> {
   if (input.isSystemContextGraph) {
     return { decision: decision('allowed', 'system', 'system-context-graph') };
+  }
+
+  if (input.hasReadyMetadataRegistration && !(await input.hasReadyMetadataRegistration())) {
+    return { decision: decision('denied', 'registered-chain', 'metadata-registration-not-ready', undefined, 'forbidden') };
   }
 
   let registeredAuthority: RegisteredContextGraphAuthority;

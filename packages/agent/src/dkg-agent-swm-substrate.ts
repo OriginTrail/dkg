@@ -1273,6 +1273,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           setContextGraphSubscription: (id, next, options) => this.setContextGraphSubscription(id, next, options),
           recordDiscoveredContextGraph: (id, next) => { this.recordDiscoveredContextGraph(id, next); },
           hasConfirmedMetaState: (id) => this.hasConfirmedMetaState(id),
+          hasReadyMetadataRegistration: (id) => this.hasReadyMetadataRegistration(id),
           getCgMeta: (id) => this.getCgMeta(id),
           getContextGraphOnChainId: (id) => this.getContextGraphOnChainId(id),
           classifyOnChainSlot: (onChainId) => this.classifyOntologyBindingSlot(onChainId),

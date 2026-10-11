@@ -319,75 +319,42 @@ describe('automatic chain and curator discovery retain owned binding', () => {
     expect(f.state.subscribedContextGraphs.get(LOCAL)?.onChainId).toBe(OWNED);
   });
 
-  it.each([
-    { initial: undefined, observed: OWNED, refused: true },
-    { initial: FOREIGN, observed: OWNED, refused: true },
-    { initial: undefined, observed: FOREIGN, refused: false },
-  ])('rechecks curator root activation after a committed delegation initial=$initial observed=$observed', async ({ initial, observed, refused }) => {
+  it.each([undefined, FOREIGN])('rechecks the captured binding after staged insertion initial=%s', async (initial) => {
     const f = await curatorFixture(false, false);
     f.state.setContextGraphSubscription(LOCAL, {
-      ...f.state.subscribedContextGraphs.get(LOCAL)!,
-      onChainId: initial, onChainHash: initial ? HASH : undefined,
+      ...f.state.subscribedContextGraphs.get(LOCAL)!, onChainId: initial,
+      onChainHash: initial ? HASH : undefined,
     }, { persist: false });
-    await f.agent.store.insert([
-      ...buildAuthoritativePublicMetaQuads(LOCAL),
-      { subject, predicate: CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE, object: '"582"', graph: meta },
-    ]);
-    const rootRows = () => f.agent.store.query(
-      'SELECT ?p ?o WHERE { GRAPH <' + meta + '> { <' + subject + '> ?p ?o } } ORDER BY ?p ?o',
-    );
-    const before = await rootRows();
-    const delegation = 'did:dkg:agent-delegation:' + LOCAL + ':root-activation-race';
-    f.quads.push({
-      subject: delegation, predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER,
-      object: '"fixture-peer"', graph: meta,
-    });
-    const replace = f.agent.store.replaceSubject!.bind(f.agent.store);
-    const commits: string[] = [];
-    vi.spyOn(f.agent.store, 'replaceSubject').mockImplementation(async (graph, replacedSubject, quads, options) => {
-      const result = await replace(graph, replacedSubject, quads, options);
-      commits.push(replacedSubject);
-      if (replacedSubject === delegation) {
-        // This earlier native subject commit passed its own admission boundary.
+    await f.agent.store.insert(buildAuthoritativePublicMetaQuads(LOCAL));
+    const before = await rawClaims(f.agent);
+    const insert = f.agent.store.insert.bind(f.agent.store);
+    vi.spyOn(f.agent.store, 'insert').mockImplementation(async (quads, options) => {
+      await insert(quads, options);
+      if (options?.source === 'agent.metaRefresh.stage') {
         f.state.setContextGraphSubscription(LOCAL, {
-          ...f.state.subscribedContextGraphs.get(LOCAL)!,
-          onChainId: observed, onChainHash: HASH,
+          ...f.state.subscribedContextGraphs.get(LOCAL)!, onChainId: OWNED, onChainHash: HASH,
         }, { persist: false });
       }
-      return result;
     });
-
-    await expect(f.refresh()).resolves.toBe(!refused);
-    if (refused) {
-      expect(commits).toEqual([delegation]);
-      expect(await rootRows()).toEqual(before);
-    } else {
-      expect(commits).toEqual([delegation, subject]);
-    }
-    const retainedDelegation = await f.agent.store.query(
-      'ASK WHERE { GRAPH <' + meta + '> { <' + delegation + '> <'
-      + DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER + '> "fixture-peer" } }',
-    );
-    expect(retainedDelegation).toEqual({ type: 'boolean', value: true });
-    expect(f.state.subscribedContextGraphs.get(LOCAL)?.onChainId).toBe(observed);
-  });
-
-  it('rechecks the native binding after awaited projection reads before activation', async () => {
-    const f = await curatorFixture(false, false);
-    const query = f.agent.store.query.bind(f.agent.store);
-    vi.spyOn(f.agent.store, 'query').mockImplementation(async (sparql, options) => {
-      const result = await query(sparql, options);
-      if (options?.source === 'agent.metaRefresh.readLocalRevocations') {
-        f.state.setContextGraphSubscription(LOCAL, {
-          ...f.state.subscribedContextGraphs.get(LOCAL)!,
-          onChainId: OWNED, onChainHash: HASH,
-        }, { persist: false });
-      }
-      return result;
-    });
-    const replace = vi.spyOn(f.agent.store, 'replaceSubject');
+    const update = vi.spyOn(f.agent.store, 'update');
     await expect(f.refresh()).resolves.toBe(false);
-    expect(replace).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+    expect(await rawClaims(f.agent)).toEqual(before);
     expect(f.state.subscribedContextGraphs.get(LOCAL)?.onChainId).toBe(OWNED);
   });
+
+  it('rechecks the native binding after the awaited snapshot fetch before activation', async () => {
+    const f = await curatorFixture(false, false);
+    f.fetch.mockImplementation(async () => {
+      f.state.setContextGraphSubscription(LOCAL, {
+        ...f.state.subscribedContextGraphs.get(LOCAL)!, onChainId: OWNED, onChainHash: HASH,
+      }, { persist: false });
+      return { quads: f.quads, checkpointKey: 'changed-during-fetch', resumedFromOffset: 0, completed: true } as SyncPageResult;
+    });
+    const insert = vi.spyOn(f.agent.store, 'insert');
+    await expect(f.refresh()).resolves.toBe(false);
+    expect(insert).not.toHaveBeenCalled();
+    expect(f.state.subscribedContextGraphs.get(LOCAL)?.onChainId).toBe(OWNED);
+  });
+
 });

@@ -32,6 +32,8 @@ export {
   isStoreWorkPriority,
   registerTripleStoreAdapter,
   findTripleStoreCapability,
+  hasAtomicUpdateCertificate,
+  hasPersistenceBarrier,
   asBoundedQueryResponseCapability,
   deleteByPatternWithoutCount,
   createTripleStore,

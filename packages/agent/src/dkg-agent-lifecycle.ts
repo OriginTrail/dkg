@@ -1,3 +1,4 @@
+import { hasReadyMetadataRegistration, refreshReadyMetadataFlags } from './internal/context-graph-authority/metadata-readiness.js';
 import { syncReconcilerEnabled, syncOnConnectEnabled, durableSyncEnabled } from './internal/lifecycle-sync-policy.js';
 import { emptySwmRecoveryResult } from './sync/shared-memory-completion.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
@@ -35,7 +36,7 @@ import {
   PROTOCOL_NETWORK_IDENTITY, advertisesSyncProtocol,
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
   contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
-  contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
+  contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
   contextGraphVerifiableMemoryUri, contextGraphVerifiableMemoryMetaUri,
   contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
   deriveCuratorDidFromCgId,
@@ -51,7 +52,7 @@ import {
   decodeGossipEnvelope, type GossipEnvelopeMsg,
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
-  getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
+  getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   validateSubGraphName,
   Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri,
@@ -773,8 +774,6 @@ import {
   type SyncPeerResolution,
 } from './dkg-agent-cg-resolve.js';
 import { runCuratorMetaRefreshFromPeer } from './curator-meta-refresh.js';
-import { isCanonicalAuthoritativeContextGraphId } from
-  './context-graph-binding-state.js';
 import { projectDormantContextGraphIdentities } from './context-graph-dormant-identity.js';
 import {
   normalizePublishContextGraphId,
@@ -9107,108 +9106,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   async refreshMetaSyncedFlags(this: DKGAgent, contextGraphIds: Iterable<string>): Promise<void> {
-    for (const contextGraphId of contextGraphIds) {
-      const sub = this.subscribedContextGraphs.get(contextGraphId);
-      if (!sub || (!sub.subscribed && sub.coreHosted !== true)) continue;
-      if (await this.hasConfirmedMetaState(contextGraphId)) {
-        if (this.subscribedContextGraphs.get(contextGraphId) !== sub) continue;
-        // Confirmed private metadata can fill an unbound late member's numeric id.
-        // Persist this readiness binding so completed catch-up survives restart.
-        const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
-        const metaGraph = contextGraphMetaGraphUri(contextGraphId);
-        const onChainIdPredicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`;
-        const onChainHashPredicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`;
-        const registrationResult = await this.store.query(
-          `
-            SELECT ?predicate ?value WHERE {
-              GRAPH <${metaGraph}> {
-                <${contextGraphUri}> ?predicate ?value .
-                VALUES ?predicate {
-                  <${onChainIdPredicate}>
-                  <${onChainHashPredicate}>
-                }
-              }
-            }
-          `,
-          { source: 'agent.durableSync.registrationBinding' },
-        );
-        if (this.subscribedContextGraphs.get(contextGraphId) !== sub) continue;
-        let confirmedOnChainId: string | undefined;
-        let confirmedOnChainHash: string | undefined;
-        let invalidOnChainId = false;
-        if (registrationResult.type === 'bindings') {
-          for (const row of registrationResult.bindings) {
-            const predicate = row['predicate'];
-            const value = stripLiteral(row['value'] ?? '');
-            if (predicate === onChainIdPredicate) {
-              if (isCanonicalAuthoritativeContextGraphId(value)) {
-                confirmedOnChainId = value;
-              } else {
-                invalidOnChainId = true;
-              }
-            } else if (
-              predicate === onChainHashPredicate
-              && /^0x[0-9a-fA-F]{64}$/.test(value)
-            ) {
-              confirmedOnChainHash = value.toLowerCase();
-            }
-          }
-        }
-        if (invalidOnChainId) {
-          confirmedOnChainId = undefined;
-          confirmedOnChainHash = undefined;
-        }
+    await refreshReadyMetadataFlags(this, contextGraphIds);
+  }
 
-        let current = this.subscribedContextGraphs.get(contextGraphId) ?? sub;
-        if (confirmedOnChainId && isCanonicalAuthoritativeContextGraphId(current.onChainId) && current.onChainId !== confirmedOnChainId) {
-          this.log.warn(createOperationContext('sync'), `Ignored conflicting confirmed-meta binding for ${contextGraphId}: retained ${current.onChainId}, observed ${confirmedOnChainId}`);
-          continue;
-        }
-        let registrationChanged = false;
-        let nextOnChainHash = current.onChainHash;
-        if (confirmedOnChainId && current.onChainId !== confirmedOnChainId) {
-          this.bindSubscriptionOnChainId(contextGraphId, current, confirmedOnChainId);
-          registrationChanged = true;
-        }
-        if (
-          confirmedOnChainHash
-          && current.onChainHash?.toLowerCase() !== confirmedOnChainHash
-        ) {
-          nextOnChainHash = confirmedOnChainHash;
-          registrationChanged = true;
-        }
-        if (registrationChanged) {
-          this.setContextGraphSubscription(contextGraphId, {
-            ...current,
-            onChainHash: nextOnChainHash,
-          });
-          current = this.subscribedContextGraphs.get(contextGraphId) ?? current;
-        }
-
-        const metadataWasPending = current.metaSynced !== true || current.pendingMeta === true;
-        if (current.metaSynced !== true) {
-          this.setContextGraphSubscription(contextGraphId, { ...current, metaSynced: true });
-        }
-        current = this.subscribedContextGraphs.get(contextGraphId) ?? current;
-        if (current.pendingMeta) {
-          // Meta arrived; the freshly-joined "waiting for sync" state
-          // (set by the join-approved handler) no longer applies — the
-          // CG will now surface via the normal `_meta` branch in
-          // `listContextGraphs`.
-          this.setContextGraphSubscription(contextGraphId, { ...current, metaSynced: true, pendingMeta: false });
-        }
-        if (metadataWasPending) this.announceJoinMetadataConfirmedV1(contextGraphId);
-        // Private responsibility depends on the live ACL projection, not only
-        // on subscription fields. A curator refresh can add/remove the local
-        // agent while `metaSynced`, `subscribed`, and the chain binding all stay
-        // unchanged, so the canonical setter has no transition to observe.
-        // Reconcile after the authoritative metadata proof itself and await the
-        // result so callers leave this readiness boundary with a settled
-        // default RFC-64 selection.
-        await this.reconcileRfc64CatalogResponsibilityV1(contextGraphId);
-        this.queueSharedMemoryGossipSubscription(contextGraphId);
-      }
-    }
+  async hasReadyMetadataRegistration(this: DKGAgent, contextGraphId: string): Promise<boolean> {
+    return hasReadyMetadataRegistration(this, contextGraphId);
   }
 
   setContextGraphSubscription(this: DKGAgent,
@@ -9892,7 +9794,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       syncScoped?: boolean;
       isCurrent?: () => boolean;
       requireDurableMemberIntent: boolean;
-      operation: 'join approval' | 'chain discovery' | 'core hosting' | 'on-chain id binding' | 'VM reconcile cursor';
+      operation: 'join approval' | 'chain discovery' | 'core hosting' | 'on-chain id binding' | 'VM reconcile cursor' | 'metadata readiness';
     },
   ): Promise<void> {
     const store = this.config.contextGraphSubscriptionStore;
@@ -9926,7 +9828,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         + 'durable subscription intent or host state is missing',
       );
     }
-    const record = persistence.record;
+    const record = input.operation === 'metadata readiness'
+      ? { ...persistence.record, metaSynced: sub.metaSynced }
+      : persistence.record;
     // Queue behind any fire-and-forget writes scheduled by subscribe/mark so
     // this final authoritative snapshot is the last write before the ACK.
     await this.enqueueContextGraphSubscriptionPersistWrite(input.contextGraphId, async () => {
@@ -11119,6 +11023,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       readonly signal?: AbortSignal;
     } = {},
   ): Promise<boolean> {
+    if (options.purpose !== 'approved-member' && !(await this.hasReadyMetadataRegistration(contextGraphId))) return false;
     return confirmContextGraphMetadataV1({
       chain: this.chain,
       resolveActivePublicChainProof: () => this.resolveActivePublicContextGraphChainProof(

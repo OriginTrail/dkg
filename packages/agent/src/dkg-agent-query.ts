@@ -1114,6 +1114,7 @@ export class QueryMethods extends DKGAgentBase {
           && policyEnvelope.payload.accessPolicy === 0
         ))
       ),
+      hasReadyMetadataRegistration: () => this.hasReadyMetadataRegistration(contextGraphId),
       isPendingMetadata:
         this.subscribedContextGraphs.get(contextGraphId)?.pendingMeta === true,
       isPrivateLocalGraph: () => this.isPrivateContextGraph(contextGraphId),
