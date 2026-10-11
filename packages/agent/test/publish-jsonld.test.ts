@@ -28,6 +28,8 @@ import {
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { startFakeRemoteSigner } from '../../chain/test/helpers/fake-remote-signer.js';
+import { connectRemoteSigners } from '@origintrail-official/dkg-chain';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { ethers } from 'ethers';
 import { installHardhatACKProvider } from './_helpers/v10-acks.js';
@@ -721,6 +723,80 @@ describe('publishJsonLd', () => {
       }).serialized,
     );
     expect(recoveredFromSeal.toLowerCase()).toBe(tenant.agentAddress.toLowerCase());
+  }, CHAIN_JSONLD_TIMEOUT_MS);
+
+  it('async publish with authorAgentAddress of an agent whose author key an external signer holds signs through it', async () => {
+    const authorKey = new ethers.Wallet(HARDHAT_KEYS.EXTRA2);
+    const fake = await startFakeRemoteSigner({
+      credentials: [
+        { token: 'async-payer-credential', keys: [HARDHAT_KEYS.EXTRA3] },
+        { token: 'async-author-credential', keys: [authorKey.privateKey] },
+      ],
+    });
+    try {
+      const remote = await connectRemoteSigners({
+        url: fake.url,
+        authToken: 'async-payer-credential',
+        author: { authToken: 'async-author-credential' },
+      });
+      const { rpcUrl, hubAddress } = getSharedContext();
+      const { agent, store } = await createAgent('AsyncExternalAuthorBot', {
+        chainConfig: { rpcUrl, hubAddress, authors: remote.authors },
+      });
+      await agent.createContextGraph({ id: 'async-external-author', name: 'AsyncExternalAuthor', description: '' });
+      await agent.registerContextGraph('async-external-author');
+      const writer = await agent.registerAgent('ExternalWriter', { address: authorKey.address });
+      expect(writer.mode).toBe('self-sovereign');
+      const content = (id: string) => ({
+        public: { '@context': 'http://schema.org/', '@id': `http://example.org/${id}`, '@type': 'Thing', 'name': id },
+      });
+
+      const before = fake.requests.length;
+      const { captureID } = await agent.publishAsync(
+        'did:dkg:context-graph:async-external-author',
+        content('AsyncExternalAuthorEntity'),
+        { localOnly: true, authorAgentAddress: writer.agentAddress },
+      );
+
+      // The author attestation was requested from the signer, with the author credential, and nothing else.
+      const signed = fake.requests.slice(before).filter((request) => request.method !== 'eth_accounts');
+      expect(signed.map((request) => [request.method, request.authorization]))
+        .toEqual([['eth_signTypedData_v4', 'Bearer async-author-credential']]);
+      expect(ethers.getAddress(String(signed[0].params[0]))).toBe(authorKey.address);
+
+      const seal = expectQueuedKaRequest(await new TripleStoreAsyncLiftPublisher(store).getStatus(captureID)).seal;
+      expect(ethers.getAddress(seal!.authorAddress)).toBe(authorKey.address);
+      const reservedKaId = BigInt(seal!.reservedKaId!);
+      expect(reservedKaId >> 96n).toBe(BigInt(authorKey.address));
+      const chain = (agent as unknown as {
+        chain: { getKnowledgeAssetsLifecycleAddress(): Promise<string>; getEvmChainId(): Promise<bigint> };
+      }).chain;
+      const typed = buildAuthorAttestationTypedData({
+        chainId: await chain.getEvmChainId(),
+        kav10Address: await chain.getKnowledgeAssetsLifecycleAddress(),
+        merkleRoot: ethers.getBytes(seal!.merkleRoot),
+        authorAddress: seal!.authorAddress,
+        reservedKaId,
+        schemeVersion: seal!.schemeVersion,
+      });
+      const recovered = ethers.recoverAddress(
+        ethers.TypedDataEncoder.hash(typed.domain, typed.types, typed.message),
+        ethers.Signature.from({ r: seal!.signature.r, yParityAndS: seal!.signature.vs }).serialized,
+      );
+      expect(recovered).toBe(authorKey.address);
+
+      // A self-sovereign agent whose key the signer does not hold is still refused.
+      const outside = await agent.registerAgent('OutsideWriter', {
+        publicKey: new ethers.Wallet(HARDHAT_KEYS.EXTRA1).signingKey.publicKey,
+      });
+      await expect(agent.publishAsync(
+        'did:dkg:context-graph:async-external-author',
+        content('AsyncOutsideAuthorEntity'),
+        { localOnly: true, authorAgentAddress: outside.agentAddress },
+      )).rejects.toThrow(/self-sovereign/);
+    } finally {
+      await fake.close();
+    }
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('async publish rejects authorAgentAddress for unknown / self-sovereign agents', async () => {
