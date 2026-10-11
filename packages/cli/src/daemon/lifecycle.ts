@@ -1676,6 +1676,8 @@ async function runDaemonInnerWithStartupOwnership(
     evmSigning = await resolveDaemonEvmSigning({ config, chainType: chainBase?.type, dataDir: dkgDir(), log });
   } catch (err) {
     log(`FATAL: ${err instanceof Error ? err.message : String(err)}`);
+    // A detached worker logs to daemon.log only: write the reason before exiting.
+    await daemonLogFileWriter.flush().catch(() => {});
     process.exit(1);
   }
 
