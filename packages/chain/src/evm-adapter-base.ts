@@ -2658,18 +2658,16 @@ export class EVMChainAdapterBase {
     // Mode-aware read: native-only selections (RS) touch only the native slot
     // so their high-frequency probes can't poison the cached TRAC balance.
     const assessments = await this._scanCandidateFunding(candidates, () => funding);
-    const funded = assessments.filter((assessment) => assessment.kind === 'funded');
-    if (funded.length > 0) {
-      // Idle preference is a SOFT, fail-open bias: among funded candidates,
-      // prefer one whose per-wallet send lock is currently free so a
-      // deadline-bound write doesn't queue behind a slow in-flight send. Falls
-      // straight through to the first funded candidate when none is idle or the
-      // preference is off — so it can never EXCLUDE a wallet, only reorder.
-      return preferredFundableCandidate(funded, {
-        ...policy, idleAwareSelectionDisabled: this.idleAwareSelectionDisabled,
-        laneState: (address) => this.signerTxSerializer.state(address),
-      });
-    }
+    // Idle preference is a SOFT, fail-open bias: among funded candidates,
+    // prefer one whose per-wallet send lock is currently free so a
+    // deadline-bound write doesn't queue behind a slow in-flight send. Falls
+    // straight through to the first funded candidate when none is idle or the
+    // preference is off — so it can never EXCLUDE a wallet, only reorder.
+    const selected = preferredFundableCandidate(assessments.filter((assessment) => assessment.kind === 'funded'), {
+      ...policy, idleAwareSelectionDisabled: this.idleAwareSelectionDisabled,
+      laneState: (address) => this.signerTxSerializer.state(address),
+    });
+    if (selected !== undefined) return selected;
     let best = assessments[0];
     for (const assessment of assessments.slice(1)) {
       const a = assessment.funding;
@@ -2690,13 +2688,11 @@ export class EVMChainAdapterBase {
     fundingFor: (candidate: T) => NativeAndTracFundingMode,
     policy: { preferIdle: boolean },
   ): Promise<PublisherFundingSelection<T>> {
-    const choose = (assessments: PublisherCandidateFundingAssessment<T>[]): T | undefined => {
-      const funded = assessments.filter((assessment) => assessment.kind === 'funded');
-      return funded.length === 0 ? undefined : preferredFundableCandidate(funded, {
+    const choose = (assessments: PublisherCandidateFundingAssessment<T>[]): T | undefined =>
+      preferredFundableCandidate(assessments.filter((assessment) => assessment.kind === 'funded'), {
         ...policy, idleAwareSelectionDisabled: this.idleAwareSelectionDisabled,
         laneState: (address) => this.signerTxSerializer.state(address),
       });
-    };
     const initial = await this._scanCandidateFunding(candidates, fundingFor);
     const selected = choose(initial);
     if (selected !== undefined) return { kind: 'funded', candidate: selected };

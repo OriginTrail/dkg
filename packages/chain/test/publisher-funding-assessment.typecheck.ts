@@ -13,9 +13,11 @@ void [missingCandidate, missingEvidence, contradictoryEvidence];
 const policy = { preferIdle: false, idleAwareSelectionDisabled: false, laneState: () => 'idle' as const };
 const assessed = [{ candidate, funding: { native: 1n, trac: 0n } }];
 const selected = preferredFundableCandidate(assessed, policy);
-const selectedAddress: string = selected.address;
+const selectedAddress: string | undefined = selected?.address;
+// @ts-expect-error A possibly empty assessment list cannot guarantee a candidate.
+const guaranteedCandidate: typeof candidate = selected;
 // @ts-expect-error Selection owns candidate-bearing records, not a separate index array.
 preferredFundableCandidate([candidate], [0], policy);
 // @ts-expect-error A balance snapshot without its candidate cannot be selected.
 preferredFundableCandidate([{ funding: { native: 1n, trac: 0n } }], policy);
-void selectedAddress;
+void [selectedAddress, guaranteedCandidate];
