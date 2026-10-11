@@ -3,8 +3,8 @@ import {
   NoChainAdapter,
   type ChainAdapter,
   type EVMAdapterConfig,
-  type OperationalSignerSource,
 } from '@origintrail-official/dkg-chain';
+import { operationalSignerSourceOf } from './agent-chain-signer-source.js';
 import type { DKGAgentConfig } from './dkg-agent-types.js';
 import { signsThroughExternalSigner } from './external-author-signing.js';
 
@@ -49,18 +49,11 @@ export function constructConfiguredChainAdapter(
     }
     return { chain, operationalKeys };
   }
-  const signers = config.chainConfig?.signers ?? [];
-  if (config.chainConfig && signers.length > 0) {
-    if (operationalKeys?.length) {
-      throw new Error('DKGAgentConfig.chainConfig: configure either operationalKeys or signers, not both');
-    }
-    if (core) throw new Error(EXTERNAL_SIGNERS_EDGE_ONLY);
-  }
-  if (config.chainConfig && (operationalKeys?.length || signers.length > 0)) {
-    // Exactly one source of operational wallets reaches the adapter.
-    const source: OperationalSignerSource = signers.length > 0
-      ? { signers }
-      : { privateKey: operationalKeys![0], additionalKeys: operationalKeys!.slice(1) };
+  // Exactly one source of operational wallets reaches the adapter, if the configuration names one.
+  const source = config.chainConfig === undefined ? undefined : operationalSignerSourceOf(config.chainConfig);
+  if (config.chainConfig && source) {
+    const external = source.signers !== undefined;
+    if (external && core) throw new Error(EXTERNAL_SIGNERS_EDGE_ONLY);
     const evmConfigBase = {
       rpcUrl: config.chainConfig.rpcUrl,
       rpcUrls: config.chainConfig.rpcUrls,
@@ -91,7 +84,7 @@ export function constructConfiguredChainAdapter(
     const chain = config.chainConfig.adminPrivateKey
       ? new EVMChainAdapter({ ...evmConfigBase, adminPrivateKey: config.chainConfig.adminPrivateKey })
       : new EVMChainAdapter({ ...evmConfigBase, allowNoAdminSigner: true });
-    return { chain, operationalKeys: signers.length > 0 ? undefined : operationalKeys };
+    return { chain, operationalKeys: external ? undefined : operationalKeys };
   }
   return { chain: new NoChainAdapter(), operationalKeys };
 }

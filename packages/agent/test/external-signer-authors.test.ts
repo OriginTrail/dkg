@@ -34,6 +34,7 @@ import { DKGPublisher } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { agentFromPrivateKey, registerSelfSovereignAgent } from '../src/agent-keystore.js';
 import { constructConfiguredChainAdapter } from '../src/configured-chain-adapter.js';
+import { operationalSignerSourceOf } from '../src/agent-chain-signer-source.js';
 import {
   externalAuthorGossipSigner,
   externalSignerAgentPublicKey,
@@ -558,6 +559,19 @@ describe('external signer author keys', () => {
       Logger.setSink(null);
       await agent.stop().catch(() => {});
     }
+  });
+
+  it('normalizes the one configured source of operational wallets for the adapter', async () => {
+    const { remote } = await externalSigners();
+    const [primary, additional] = [HARDHAT_KEYS.CORE_OP, HARDHAT_KEYS.PUBLISHER];
+    expect(operationalSignerSourceOf({ operationalKeys: [primary, additional] }))
+      .toEqual({ privateKey: primary, additionalKeys: [additional] });
+    expect(operationalSignerSourceOf({ signers: remote.operational })).toEqual({ signers: remote.operational });
+    expect(operationalSignerSourceOf({})).toBeUndefined();
+    expect(operationalSignerSourceOf({ operationalKeys: [], signers: [] })).toBeUndefined();
+    // Untyped callers that name both are refused.
+    expect(() => operationalSignerSourceOf({ operationalKeys: [primary], signers: remote.operational }))
+      .toThrow(/either operationalKeys or signers/);
   });
 
   it('builds the agent adapter from external signers on edge nodes only', async () => {

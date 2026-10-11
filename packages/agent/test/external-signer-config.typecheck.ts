@@ -29,6 +29,11 @@ export const withAuthors: ChainConfig = {
   },
 };
 export const localKeys: ChainConfig = { ...endpoint, operationalKeys: ['0x01'] };
+// No source at all: wallets that come with a supplied chain adapter, author keys beside it, or no writes.
+export const sourceFree: ChainConfig = { ...endpoint };
+export const authorsOnly: ChainConfig = { ...endpoint, authors: withAuthors.authors! };
+// @ts-expect-error one source of operational wallets: local keys or external signers, never both
+export const mixedSources: ChainConfig = { ...endpoint, operationalKeys: ['0x01'], signers: external };
 // @ts-expect-error a local wallet is configured by its key (operationalKeys), never as a signer
 export const localSigner: ChainConfig = { ...endpoint, signers: [localWallet] };
 // @ts-expect-error signers are wholly external: no local wallet beside them

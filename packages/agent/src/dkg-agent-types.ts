@@ -68,9 +68,9 @@ import type {
   ContextGraphAuthorityIndexStore,
   ContextGraphRegistryScanCursorStore,
   ExternalAuthorSigners,
-  ExternalEvmSigner,
   RpcRequestAdmission,
 } from '@origintrail-official/dkg-chain';
+import type { AgentChainSignerSource } from './agent-chain-signer-source.js';
 import type { QueryAccessConfig } from '@origintrail-official/dkg-query';
 import type { SkillHandler } from './messaging.js';
 import type { CclFactResolutionMode } from './ccl-fact-resolution.js';
@@ -1784,9 +1784,9 @@ export interface DKGAgentConfig {
   /**
    * EVM chain configuration; without it publishing has no on-chain finality. `adminPrivateKey`:
    * profile admin key, only for profile/key-management txs (optional; those paths fail fast without
-   * it). `operationalKeys`: operational wallet keys (first = primary signer; all pay publish txs
-   * round-robin), or `signers`: external signers only, so no operational key is held (not with a
-   * supplied `chainAdapter`). `authors`: external author keys (asset owners) that never pay.
+   * it). One source of operational wallets (`AgentChainSignerSource`): `operationalKeys` (first =
+   * primary signer; all pay publish txs round-robin), or `signers` (external only, not with a
+   * supplied `chainAdapter`), or neither. `authors`: external author keys that never pay.
    */
   chainConfig?: {
     rpcUrl: string;
@@ -1799,8 +1799,6 @@ export interface DKGAgentConfig {
     /** Optional TRAC token contract override. When omitted, the adapter resolves Hub.Token. */
     tokenAddress?: string;
     adminPrivateKey?: string;
-    operationalKeys?: string[];
-    signers?: readonly ExternalEvmSigner[];
     authors?: ExternalAuthorSigners;
     chainId?: string;
     /** Overall submitted-transaction receipt deadline (default 10 minutes). */
@@ -1854,7 +1852,7 @@ export interface DKGAgentConfig {
      */
     minPublisherNativeWei?: bigint;
     minPublisherTracWei?: bigint;
-  };
+  } & AgentChainSignerSource;
   /** Cross-agent query access configuration. */
   queryAccess?: QueryAccessConfig;
   /** User-selected context graph IDs to sync automatically on peer connect. */
