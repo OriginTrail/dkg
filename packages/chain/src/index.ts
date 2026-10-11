@@ -249,6 +249,7 @@ export type { MockChainAdapterOptions } from './mock-adapter.js';
 export {
   EVMChainAdapter,
   type EVMAdapterConfig,
+  type EVMAdapterOptions,
   decodeEvmError,
   enrichEvmError,
   classifyRpcRetryDisposition,

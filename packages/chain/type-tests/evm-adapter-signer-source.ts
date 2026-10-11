@@ -1,4 +1,4 @@
-import { EVMChainAdapter, type EVMAdapterConfig, type EvmSigner } from '../dist/index.js';
+import { EVMChainAdapter, type EVMAdapterConfig, type EVMAdapterOptions, type EvmSigner } from '../dist/index.js';
 
 // Compile against the published declarations: an adapter takes exactly one
 // source of operational wallets, local keys or external signers.
@@ -17,3 +17,9 @@ export const additionalKeysOnly: EVMAdapterConfig = { ...options, additionalKeys
 export const keyAndSigners: EVMAdapterConfig = { ...options, privateKey: '0x01', signers };
 // @ts-expect-error additional local keys cannot join external signers
 export const signersAndKeys: EVMAdapterConfig = { ...options, signers, additionalKeys: ['0x02'] };
+
+// The options without a source compose with either kind, for code that extended the configuration.
+export interface WrappedAdapterOptions extends EVMAdapterOptions {
+  label: string;
+}
+export const wrapped: WrappedAdapterOptions & EVMAdapterConfig = { ...options, label: 'node', privateKey: '0x01' };
