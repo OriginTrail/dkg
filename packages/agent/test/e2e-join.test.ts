@@ -313,6 +313,9 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
       return startCatalog(ctx);
     });
     const prepare = vi.spyOn(joiner, 'prepareRfc64CatalogConnectionReplayV1');
+    // Capture real signed successor output, rather than inferring catalog
+    // transfer from entity data that can arrive through another lane.
+    const signedHeads = vi.spyOn(curator, 'publishAuthorCatalogExactSetSuccessorV1');
     try {
       await provider.start();
       for (const { id, onChainId } of bindings) {
@@ -351,12 +354,24 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
         60_000,
       );
       expect(caughtUp).toHaveLength(1);
+      const produced = await pollUntil(async () => {
+        const heads = signedHeads.mock.settledResults
+          .filter(result => result.type === 'fulfilled')
+          .map(result => result.value);
+        return heads.findLast(head => head.catalogScope.contextGraphId === freshHeadCg);
+      }, head => head !== undefined, 60_000);
+      expect(produced).toBeDefined();
+      const headRef = { catalogScopeDigest: produced!.catalogScopeDigest,
+        authorAddress: produced!.catalogScope.authorAddress };
+      const applied = await pollUntil(async () => joiner.readRfc64AppliedCatalogHeadV1(headRef),
+        head => head?.currentCatalogHeadDigest === produced!.headObjectDigest, 60_000);
+      expect(applied?.currentCatalogHeadDigest).toBe(produced!.headObjectDigest);
       // Foreground work completed while the physical replay stream remained held.
       expect(incoming).toBe(1);
       expect(joiner.readRfc64CatalogRuntimeSelectionV1().connectionReplay?.pendingScopes).toBeGreaterThanOrEqual(2);
     } finally {
       release();
-      restoreRegistration?.(); startup.mockRestore(); prepare.mockRestore(); heldDeadline.mockRestore();
+      restoreRegistration?.(); startup.mockRestore(); prepare.mockRestore(); heldDeadline.mockRestore(); signedHeads.mockRestore();
       try {
         // A genuine reconnect may leave owned cooldown demand after physical
         // streams retire; the agent stop below retires that deferred work.

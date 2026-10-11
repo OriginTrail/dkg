@@ -432,6 +432,38 @@ describe('catalog reconnect work ownership', () => {
 
 // These controls use recovery's actual worklist, rather than a fake fence.
 describe('connection staging versus canonical recovery execution', () => {
+  it('retains a full replay requested while every connected peer is staged', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(10_000);
+    let parityFails = true;
+    const announcement = Promise.withResolvers<void>();
+    const requestPeer = vi.fn(async () => ({ status: 'completed' as const, targets: [] }));
+    const recovery = new Rfc64CatalogReplayRecoveryRuntimeV1<never>({ requestPeer,
+      whenReceiverIdleForContextGraph: async () => undefined,
+      targetIdentity: () => '', parityFailed: async () => parityFails,
+    });
+    const full = () => recovery.request({ kind: 'full-connected-peers', contextGraphId: 'cg',
+      policyDigest: 'policy', connectedPeerIds: ['peer'] });
+    await expect(full()).resolves.toEqual({ requested: 1, failed: 1 });
+    expect(recovery.status('cg', 'policy')?.failed).toBe(true);
+    parityFails = false;
+    const connection = makeRuntime({ selectContextGraphIds: () => ['cg'],
+      reserveFence: (cg, peer) => recovery.reservePeer(cg, 'policy', peer),
+      reannounce: async () => { await announcement.promise; return { failed: 0 }; },
+      replay: (cg, demand, signal) => recovery.request({ kind: 'connection-demand',
+        contextGraphId: cg, policyDigest: 'policy', demand, signal }), warn: vi.fn(),
+    });
+    try {
+      connection.prepareConnectionOpen('peer')!.admit(); await vi.advanceTimersByTimeAsync(0);
+      await expect(full()).resolves.toEqual({ requested: 0, failed: 0 });
+      expect(requestPeer).toHaveBeenCalledOnce();
+      expect(recovery.status('cg', 'policy')).toMatchObject({ active: true, failed: true });
+      announcement.resolve(); await vi.advanceTimersByTimeAsync(0);
+      expect(requestPeer).toHaveBeenCalledTimes(2);
+      expect(recovery.status('cg', 'policy')).toMatchObject({ active: false, failed: false });
+      expect(connection.status().pendingScopes).toBe(0);
+    } finally { announcement.resolve(); await vi.advanceTimersByTimeAsync(0); }
+  });
+
   function canonicalRuntime() {
     const calls: string[] = [];
     const recovery = new Rfc64CatalogReplayRecoveryRuntimeV1<never>({

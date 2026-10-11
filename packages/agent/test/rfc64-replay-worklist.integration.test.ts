@@ -3,6 +3,7 @@ import {
   type ContextGraphPolicyV1,
 } from '@origintrail-official/dkg-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Rfc64CatalogReplayRecoveryRuntimeV1 } from '../src/rfc64/catalog-replay-recovery-runtime-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
 } from '../src/rfc64/public-catalog-transport-v1.js';
@@ -362,5 +363,82 @@ describe('RFC-64 replay worklist lifecycle', () => {
     expect(requestReplay.mock.calls.map(([{ remotePeerId }]: [{ remotePeerId: string }]) => (
       remotePeerId
     ))).toEqual([peerA, peerB]);
+  });
+});
+
+
+describe('staged full-pass completeness custody', () => {
+  function failingParityRuntime() {
+    let parityFails = true;
+    const requestPeer = vi.fn(async () => ({ status: 'completed' as const, targets: [] }));
+    const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<never>({ requestPeer,
+      whenReceiverIdleForContextGraph: async () => undefined,
+      targetIdentity: () => '', parityFailed: async () => parityFails,
+    });
+    const full = (peers: readonly string[]) => runtime.request({ kind: 'full-connected-peers',
+      contextGraphId: 'cg', policyDigest: 'policy', connectedPeerIds: peers });
+    const demand = (value: { peerId: string; generation: number }) => runtime.request({
+      kind: 'connection-demand', contextGraphId: 'cg', policyDigest: 'policy', demand: value });
+    return { runtime, full, demand, requestPeer, repaired: () => { parityFails = false; } };
+  }
+
+  it('requires the replacement reservation generation to execute before clearing parity', async () => {
+    const { runtime, full, demand, repaired } = failingParityRuntime();
+    await expect(full(['peer'])).resolves.toEqual({ requested: 1, failed: 1 }); repaired();
+    const older = runtime.reservePeer('cg', 'policy', 'peer')!;
+    await expect(full(['peer'])).resolves.toEqual({ requested: 0, failed: 0 });
+    const replacement = runtime.reservePeer('cg', 'policy', 'peer')!;
+    older.admit();
+    await expect(demand(older)).resolves.toEqual({ requested: 1, failed: 0 });
+    expect(runtime.status('cg', 'policy')?.failed).toBe(true);
+    older.release();
+    replacement.admit();
+    await expect(demand(replacement)).resolves.toEqual({ requested: 1, failed: 0 });
+    expect(runtime.status('cg', 'policy')?.failed).toBe(false); replacement.release();
+  });
+
+  it('does not donate cancelled staged coverage to an unrelated scoped replay', async () => {
+    const { runtime, full, demand, repaired } = failingParityRuntime();
+    await full(['peer']); repaired();
+    const cancelled = runtime.reservePeer('cg', 'policy', 'peer')!;
+    await full(['peer']); cancelled.release();
+    const unrelated = runtime.markPeerPending('cg', 'policy', 'other')!;
+    await demand(unrelated);
+    expect(runtime.status('cg', 'policy')?.failed).toBe(true); unrelated.release();
+    await full(['other']); expect(runtime.status('cg', 'policy')?.failed).toBe(false);
+  });
+
+  it('cannot donate staged coverage across replacement of the policy owner', async () => {
+    const { runtime, full, demand, repaired } = failingParityRuntime();
+    const old = runtime.reservePeer('cg', 'old-policy', 'peer')!;
+    await runtime.request({ kind: 'full-connected-peers', contextGraphId: 'cg',
+      policyDigest: 'old-policy', connectedPeerIds: ['peer'] });
+    await full(['other']); repaired(); old.admit(); old.release();
+    const current = runtime.markPeerPending('cg', 'policy', 'other')!;
+    await demand(current); expect(runtime.status('cg', 'policy')?.failed).toBe(true);
+    current.release(); await full(['other']);
+    expect(runtime.status('cg', 'policy')?.failed).toBe(false);
+  });
+
+  it('checks both settled provider promises when the last staged peer completes', async () => {
+    let parityFails = true;
+    const parity = vi.fn(async (_cg: string, _targets: readonly string[]) => parityFails);
+    const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<string>({
+      requestPeer: async (_cg, peer) => ({ status: 'completed', targets: peer === 'old' ? [] : [peer] }),
+      whenReceiverIdleForContextGraph: async () => undefined, targetIdentity: target => target,
+      parityFailed: parity,
+    });
+    const full = (peers: readonly string[]) => runtime.request({ kind: 'full-connected-peers',
+      contextGraphId: 'cg', policyDigest: 'policy', connectedPeerIds: peers });
+    await full(['old']); parityFails = false;
+    const a = runtime.reservePeer('cg', 'policy', 'a')!;
+    const b = runtime.reservePeer('cg', 'policy', 'b')!;
+    await expect(full(['a', 'b'])).resolves.toEqual({ requested: 0, failed: 0 });
+    a.admit(); await runtime.request({ kind: 'connection-demand', contextGraphId: 'cg', policyDigest: 'policy', demand: a });
+    expect(runtime.status('cg', 'policy')?.failed).toBe(true); a.release();
+    b.admit(); await runtime.request({ kind: 'connection-demand', contextGraphId: 'cg', policyDigest: 'policy', demand: b });
+    expect(parity).toHaveBeenLastCalledWith('cg', ['a', 'b']);
+    expect(runtime.promisedTargets('cg', 'policy')).toEqual(['a', 'b']);
+    expect(runtime.status('cg', 'policy')?.failed).toBe(false); b.release();
   });
 });

@@ -12,6 +12,10 @@ import type { Rfc64CatalogReplayPeerDemandV1, Rfc64CatalogReplayPeerReservationV
 export class Rfc64CatalogReplayPeerWorklistV1 {
   readonly #pending = new Map<string, number>();
   readonly #staged = new Map<string, number>();
+  /** Full-pass coverage waits for these exact staged generations to execute. */
+  readonly #fullCoveragePending = new Map<string, number>();
+  #fullRequested = false;
+  #splitFullPass = false;
   #nextGeneration = 0;
   #remaining = RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1;
   #overflowed = false;
@@ -28,6 +32,7 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
     }
     const generation = ++this.#nextGeneration;
     this.#staged.set(peerId, generation);
+    if (this.#fullCoveragePending.has(peerId)) this.#fullCoveragePending.set(peerId, generation);
     let released = false;
     return Object.freeze({
       peerId, generation,
@@ -41,6 +46,10 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
         released = true;
         if (this.#staged.get(peerId) === generation) this.#staged.delete(peerId);
         if (this.#pending.get(peerId) === generation) this.#pending.delete(peerId);
+        if (this.#fullCoveragePending.get(peerId) === generation) {
+          // Released without execution: a later unrelated run cannot donate its coverage.
+          this.#fullCoveragePending.clear(); this.#fullRequested = false; this.#splitFullPass = false;
+        }
       },
     });
   }
@@ -58,6 +67,27 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
     if (new Set([...this.#pending.keys(), ...this.#staged.keys()]).size >= RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1) return false;
     this.#pending.set(peerId, ++this.#nextGeneration);
     return true;
+  }
+
+  /** Retain staged coverage without taking transport admission from its connection owner. */
+  seedFullPass(peers: readonly string[]): void {
+    const staged = new Map<string, number>();
+    let covered = true;
+    for (const peer of peers) {
+      const generation = this.#staged.get(peer);
+      if (generation !== undefined) staged.set(peer, generation);
+      else if (!this.seedBounded(peer)) covered = false;
+    }
+    if (!covered) return;
+    this.#fullRequested = true;
+    for (const [peer, generation] of staged) this.#fullCoveragePending.set(peer, generation);
+    this.#splitFullPass ||= staged.size > 0;
+  }
+
+  get fullPassEntitled(): boolean { return this.#fullRequested && this.#fullCoveragePending.size === 0; }
+  get splitFullPass(): boolean { return this.#splitFullPass; }
+  settleFullPass(): void {
+    if (this.#fullCoveragePending.size === 0) { this.#fullRequested = false; this.#splitFullPass = false; }
   }
 
   /** Forget a queued demand for a peer that can no longer be replayed from. */
@@ -93,6 +123,10 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
     for (const demand of demands) {
       if (this.#pending.get(demand.peerId) === demand.generation) {
         this.#pending.delete(demand.peerId);
+      }
+      const coveredGeneration = this.#fullCoveragePending.get(demand.peerId);
+      if (coveredGeneration !== undefined && demand.generation >= coveredGeneration) {
+        this.#fullCoveragePending.delete(demand.peerId);
       }
     }
     this.#remaining -= demands.length;
