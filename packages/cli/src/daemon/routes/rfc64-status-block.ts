@@ -15,6 +15,7 @@ import type {
 import {
   sanitizeRfc64CatalogShadowExecutionStatusV1,
   sanitizeRfc64FinalizedPrivatePlacementQueueV1,
+  sanitizeRfc64CatalogHeadDeliveryStatusV1,
 } from './rfc64-status-contract.js';
 
 /** Narrow read-only agent capability used by the public RFC-64 status facade. */
@@ -35,6 +36,8 @@ export interface Rfc64StatusReaderV1 {
     OmitThisParameter<DKGAgent['readRfc64CatalogShadowExecutionStatusV1']>;
   readonly readRfc64SwmCatalogProjectionSupervisorStatusV1?:
     OmitThisParameter<DKGAgent['readRfc64SwmCatalogProjectionSupervisorStatusV1']>;
+  readonly readRfc64CatalogHeadDeliveryStatusV1?:
+    OmitThisParameter<DKGAgent['readRfc64CatalogHeadDeliveryStatusV1']>;
 }
 
 /**
@@ -47,6 +50,18 @@ function readRfc64FinalizedPrivatePlacementQueueV1(agent: Rfc64StatusReaderV1) {
     return sanitizeRfc64FinalizedPrivatePlacementQueueV1(
       agent.readRfc64SwmCatalogProjectionSupervisorStatusV1?.()?.finalizedPrivatePlacement,
     );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * GH#3081 — catalog head delivery in counts since the node started. A provider that throws or
+ * answers in another shape reads as null rather than failing the route.
+ */
+function readRfc64CatalogHeadDeliveryV1(agent: Rfc64StatusReaderV1) {
+  try {
+    return sanitizeRfc64CatalogHeadDeliveryStatusV1(agent.readRfc64CatalogHeadDeliveryStatusV1?.());
   } catch {
     return null;
   }
@@ -184,6 +199,9 @@ export async function buildRfc64StatusBlocksV1(input: Readonly<{
   const contextGraphs = typeof agent.readRfc64CatalogOperationalStatusV1 === 'function'
     ? await agent.readRfc64CatalogOperationalStatusV1()
     : [];
+  const catalogHeadDelivery = catalogActivation.enabled
+    ? readRfc64CatalogHeadDeliveryV1(agent)
+    : null;
   const shadowExecution = catalogActivation.enabled
     && typeof agent.readRfc64CatalogShadowExecutionStatusV1 === 'function'
     ? sanitizeRfc64CatalogShadowExecutionStatusV1(
@@ -288,6 +306,7 @@ export async function buildRfc64StatusBlocksV1(input: Readonly<{
       responsibilities,
       authorityRpcCircuit,
       contextGraphs,
+      catalogHeadDelivery,
       shadowExecution,
       finalizedPrivatePlacementQueue,
       configuration,
