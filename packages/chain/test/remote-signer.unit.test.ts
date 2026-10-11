@@ -192,6 +192,28 @@ describe('remote signer transport', () => {
     const err = (() => { try { new RemoteSignerClient({ url: 'https://user:secret@signer' }); } catch (e) { return e; } })();
     expect(String(err)).not.toContain('secret');
   });
+
+  it('rejects malformed, mismatched and oversized answers, and reaches https endpoints', async () => {
+    expect(() => new RemoteSignerClient({ url: 'http://[' })).toThrow(/not a valid URL/);
+    const wrongId = await fakeSigner({
+      rawResponse: () => ({ status: 200, body: JSON.stringify({ jsonrpc: '2.0', id: 999, result: [] }) }),
+    });
+    await expect(client(wrongId).listAccounts()).rejects.toThrow(/malformed JSON-RPC response/);
+    const oversized = await fakeSigner({ rawResponse: () => ({ status: 200, body: 'x'.repeat(4 * 1024 * 1024 + 1) }) });
+    await expect(client(oversized).listAccounts()).rejects.toThrow(/sent more than/);
+    const notAnAccount = await fakeSigner({ tamper: (method, result) => method === 'eth_accounts' ? ['not-an-address'] : result });
+    await expect(client(notAnAccount).listAccounts()).rejects.toMatchObject({ code: 'REMOTE_SIGNER_BAD_RESPONSE' });
+
+    const closed = createServer();
+    await new Promise<void>((resolve) => closed.listen(0, '127.0.0.1', resolve));
+    const port = (closed.address() as { port: number }).port;
+    await new Promise<void>((resolve) => closed.close(() => resolve()));
+    const secure = new RemoteSignerClient({ url: `https://127.0.0.1:${port}`, timeoutMs: 2_000 });
+    expect(secure.endpoint).toBe(`https://127.0.0.1:${port}`);
+    expect(secure.timeoutMs).toBe(2_000);
+    await expect(secure.listAccounts()).rejects.toMatchObject({ code: 'REMOTE_SIGNER_UNAVAILABLE' });
+    secure.destroy();
+  });
 });
 
 describe('RemoteSigner verification', () => {
@@ -298,6 +320,39 @@ describe('RemoteSigner verification', () => {
       .rejects.toMatchObject({ code: 'REMOTE_SIGNER_BAD_RESPONSE' });
   });
 
+  it('rejects an answer that is not a signed transaction', async () => {
+    const unsigned = await fakeSigner({
+      tamper: (method, result) => method === 'eth_signTransaction' ? ethers.Transaction.from(String(result)).unsignedSerialized : result,
+    });
+    await expect(new RemoteSigner(WALLET_A.address, client(unsigned)).signTransaction(TX))
+      .rejects.toMatchObject({ code: 'REMOTE_SIGNER_INVALID_SIGNATURE' });
+    const notHex = await fakeSigner({ tamper: (method, result) => method === 'eth_signTransaction' ? 42 : result });
+    await expect(new RemoteSigner(WALLET_A.address, client(notHex)).signTransaction(TX))
+      .rejects.toMatchObject({ code: 'REMOTE_SIGNER_BAD_RESPONSE' });
+  });
+
+  it('refuses transactions and typed data it cannot sign externally', async () => {
+    const signer = await fakeSigner();
+    const remote = new RemoteSigner(WALLET_A.address, client(signer));
+    const { maxFeePerGas: _fee, maxPriorityFeePerGas: _tip, ...withoutFees } = TX;
+    const unsignable: ethers.TransactionRequest[] = [
+      { ...TX, authorizationList: [] },
+      { ...withoutFees, type: 0 },
+      { ...TX, type: 4 },
+    ];
+    for (const tx of unsignable) {
+      await expect(remote.signTransaction(tx)).rejects.toMatchObject({ code: 'REMOTE_SIGNER_TRANSACTION_NOT_SIGNABLE' });
+    }
+    // A name in typed data needs a provider to resolve it before anything is sent.
+    const named = { ...DOMAIN, verifyingContract: 'signer.example' };
+    await expect(remote.signTypedData(named, TYPES, VALUE)).rejects.toMatchObject({
+      code: 'REMOTE_SIGNER_TRANSACTION_NOT_SIGNABLE',
+    });
+    expect(signer.requests).toHaveLength(0);
+    const resolving = remote.connect({ resolveName: async () => DOMAIN.verifyingContract } as unknown as ethers.Provider);
+    expect(await resolving.signTypedData(named, TYPES, VALUE)).toBe(await WALLET_A.signTypedData(DOMAIN, TYPES, VALUE));
+  });
+
   it('signs typed data with eth_signTypedData_v4 and falls back once to eth_signTypedData', async () => {
     const v4 = await fakeSigner();
     const remote = new RemoteSigner(WALLET_A.address, client(v4));
@@ -355,6 +410,29 @@ describe('RemoteSigner verification', () => {
     });
     await expect(new RemoteSigner(WALLET_A.address, client(otherKey)).signTypedData(DOMAIN, TYPES, VALUE))
       .rejects.toMatchObject({ code: 'REMOTE_SIGNER_INVALID_SIGNATURE' });
+  });
+
+  it('accepts 64-byte compact signatures and rejects malformed ones', async () => {
+    const answering = (rewrite: (signature: string) => string) => fakeSigner({
+      tamper: (method, result) => method === 'eth_signTypedData_v4' ? rewrite(String(result)) : result,
+    });
+    const compact = await answering((signature) => ethers.Signature.from(signature).compactSerialized);
+    expect(await new RemoteSigner(WALLET_A.address, client(compact)).signTypedData(DOMAIN, TYPES, VALUE))
+      .toBe(await WALLET_A.signTypedData(DOMAIN, TYPES, VALUE));
+
+    const malformed: Array<[string, (signature: string) => string, string]> = [
+      ['not hex', () => 'not-hex', 'REMOTE_SIGNER_BAD_RESPONSE'],
+      ['two bytes', () => '0x1234', 'REMOTE_SIGNER_BAD_RESPONSE'],
+      ['recovery id 5', (signature) => ethers.concat([ethers.dataSlice(signature, 0, 64), '0x05']), 'REMOTE_SIGNER_INVALID_SIGNATURE'],
+      ['r of zero', (signature) => ethers.concat([ethers.ZeroHash, ethers.dataSlice(signature, 32)]), 'REMOTE_SIGNER_INVALID_SIGNATURE'],
+      // r = 5 is not the x coordinate of a curve point, so nothing recovers from it.
+      ['unrecoverable', () => ethers.concat([ethers.toBeHex(5n, 32), ethers.toBeHex(1n, 32), '0x1b']), 'REMOTE_SIGNER_INVALID_SIGNATURE'],
+    ];
+    for (const [label, rewrite, code] of malformed) {
+      const signer = await answering(rewrite);
+      await expect(new RemoteSigner(WALLET_A.address, client(signer)).signTypedData(DOMAIN, TYPES, VALUE), label)
+        .rejects.toMatchObject({ code });
+    }
   });
 
   it('connect() keeps the account and transport and binds the provider', async () => {
@@ -434,6 +512,34 @@ describe('payer and author accounts', () => {
     await expect(connectRemoteSigners({ url: signer.url, authToken: TOKEN, author: { address: WALLET_D.address } }))
       .rejects.toMatchObject({ code: 'REMOTE_SIGNER_ADDRESS_NOT_AVAILABLE' });
   });
+
+  it('refuses a signer without payer or author accounts, and invalid payer addresses', async () => {
+    const signer = await fakeSigner({
+      credentials: [
+        { token: TOKEN, keys: [KEY_A] },
+        { token: AUTHOR_TOKEN, keys: [] },
+      ],
+    });
+    await expect(connectRemoteSigners({ url: signer.url, authToken: TOKEN, author: { authToken: AUTHOR_TOKEN } }))
+      .rejects.toThrow(/serves no account/);
+    await expect(connectRemoteSigners({ url: signer.url, authToken: TOKEN, author: { address: WALLET_A.address } }))
+      .rejects.toThrow(/serves no payer account/);
+    await expect(connectRemoteSigners({ url: signer.url, authToken: TOKEN, addresses: ['not-an-address'] }))
+      .rejects.toMatchObject({ code: 'REMOTE_SIGNER_CONFIG' });
+  });
+
+  it('describes the author connection and ignores lookups that are not addresses', async () => {
+    const signer = await fakeSigner({
+      credentials: [
+        { token: TOKEN, keys: [KEY_A] },
+        { token: AUTHOR_TOKEN, keys: [KEY_B] },
+      ],
+    });
+    const { authors } = await connectRemoteSigners({ url: signer.url, authToken: TOKEN, author: { authToken: AUTHOR_TOKEN } });
+    expect(authors!.endpoint).toBe(signer.url);
+    expect(authors!.addresses).toEqual([WALLET_B.address]);
+    expect(await authors!.signerFor('not-an-address')).toBeUndefined();
+  });
 });
 
 describe('chain.signer configuration', () => {
@@ -460,6 +566,42 @@ describe('chain.signer configuration', () => {
     for (const [raw, message] of bad) {
       expect(() => resolveChainSignerConfig(raw), JSON.stringify(raw)).toThrow(message);
     }
+  });
+
+  it('keeps every optional setting, and connects an author block with its own credential', async () => {
+    expect(resolveChainSignerConfig({
+      type: 'remote',
+      url: 'https://signer.internal',
+      authTokenEnv: 'SIGNER_TOKEN',
+      api: 'clef',
+      addresses: [WALLET_A.address],
+      timeoutMs: 5_000,
+      author: { address: WALLET_B.address, authTokenEnv: 'SIGNER_AUTHOR_TOKEN' },
+    })).toEqual({
+      type: 'remote',
+      url: 'https://signer.internal',
+      authTokenEnv: 'SIGNER_TOKEN',
+      api: 'clef',
+      addresses: [WALLET_A.address],
+      timeoutMs: 5_000,
+      author: { address: WALLET_B.address, authTokenEnv: 'SIGNER_AUTHOR_TOKEN' },
+    });
+    expect(() => resolveChainSignerConfig({ type: 'remote', url: 'http://x', api: 'other' })).toThrow(/api must be/);
+
+    const signer = await fakeSigner({
+      credentials: [
+        { token: TOKEN, keys: [KEY_A] },
+        { token: AUTHOR_TOKEN, keys: [KEY_B] },
+      ],
+    });
+    const connected = await connectConfiguredRemoteSigners(
+      resolveChainSignerConfig({
+        type: 'remote', url: signer.url, authTokenEnv: 'SIGNER_TOKEN', author: { authTokenEnv: 'SIGNER_AUTHOR_TOKEN' },
+      })!,
+      { env: { SIGNER_TOKEN: TOKEN, SIGNER_AUTHOR_TOKEN: AUTHOR_TOKEN } },
+    );
+    expect(connected.operational.map((s) => s.address)).toEqual([WALLET_A.address]);
+    expect(connected.authors!.defaultAuthor!.address).toBe(WALLET_B.address);
   });
 
   it('reads the bearer token from a file or the environment, and warns on a shared file', async () => {
@@ -582,5 +724,15 @@ describe('EVMChainAdapter with external signers', () => {
     expect(() => new EVMChainAdapter({ ...base, signers: [operational[0], operational[0]] }))
       .toThrow(/more than once/);
     expect(() => new EVMChainAdapter({ ...base })).toThrow(/privateKey or at least one signer/);
+  });
+
+  it('still exposes the key of a local operational wallet', () => {
+    const adapter = new EVMChainAdapter({ ...base, privateKey: KEY_C, allowNoAdminSigner: true });
+    try {
+      expect(adapter.getOperationalPrivateKey()).toBe(KEY_C);
+      expect(adapter.getACKSignerKey()).toBe(KEY_C);
+    } finally {
+      adapter.destroy();
+    }
   });
 });
