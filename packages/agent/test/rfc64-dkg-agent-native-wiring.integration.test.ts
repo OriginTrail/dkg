@@ -2097,6 +2097,9 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       authorAddress: AUTHOR,
     })?.rows).toHaveLength(2);
 
+    // Private inventory/catalog rows remain tier-neutral after VM confirmation.
+    // A completed obligation must not retract either exact signed asset.
+    const inventoryBeforeVm = author.readRfc64SwmAuthorInventorySnapshotV1({ inventoryScopeDigest, authorAddress: AUTHOR });
     const announcementCountBeforeVm = announce.mock.calls.length;
     await author.observeRfc64ConfirmedVmV1({
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -2112,13 +2115,13 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       inventoryScopeDigest,
       authorAddress: AUTHOR,
     })).toMatchObject({
-      head: { payload: { totalRows: '1' } },
-      rows: [expect.objectContaining({ assertionCoordinate: allowListCoordinate })],
+      head: { payload: { totalRows: '2' } },
+      rows: expect.arrayContaining([expect.objectContaining({ assertionCoordinate }), expect.objectContaining({ assertionCoordinate: allowListCoordinate })]),
     });
     expect(author.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
-    })).toMatchObject({ catalogVersion: '3', inventoryRowCount: '1' });
+    })).toMatchObject({ catalogVersion: '2', inventoryRowCount: '2' });
     await whenDeliveredAndReceiverIdle(provider);
     expect(provider.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
@@ -2128,8 +2131,8 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         catalogScopeDigest: catalogScopeDigest(),
         authorAddress: AUTHOR,
       })?.currentCatalogHeadDigest,
-      catalogVersion: '3',
-      inventoryRowCount: '1',
+      catalogVersion: '2',
+      inventoryRowCount: '2',
     });
     await author.observeRfc64ConfirmedVmV1({
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -2144,20 +2147,21 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(author.readRfc64SwmAuthorInventorySnapshotV1({
       inventoryScopeDigest,
       authorAddress: AUTHOR,
-    })).toMatchObject({ head: { payload: { totalRows: '0' } }, rows: [] });
+    })).toMatchObject({ head: { payload: { totalRows: '2' } }, rows: expect.arrayContaining([expect.objectContaining({ assertionCoordinate }), expect.objectContaining({ assertionCoordinate: allowListCoordinate })]) });
     expect(author.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
-    })).toMatchObject({ catalogVersion: '4', inventoryRowCount: '0' });
+    })).toMatchObject({ catalogVersion: '2', inventoryRowCount: '2' });
     await whenDeliveredAndReceiverIdle(provider);
     expect(provider.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
-    })).toMatchObject({ catalogVersion: '4', inventoryRowCount: '0' });
-    expect(announce).toHaveBeenCalledTimes(announcementCountBeforeVm + 2);
+    })).toMatchObject({ catalogVersion: '2', inventoryRowCount: '2' });
+    expect(announce).toHaveBeenCalledTimes(announcementCountBeforeVm);
     expect(announce.mock.calls.at(-1)?.[0]).toMatchObject({
       peers: [providerPeerId],
     });
+    expect(author.readRfc64SwmAuthorInventorySnapshotV1({ inventoryScopeDigest, authorAddress: AUTHOR })).toEqual(inventoryBeforeVm);
   }, 60_000);
 
   it('repairs durable selected-private inventory through its complete provider on restart', async () => {

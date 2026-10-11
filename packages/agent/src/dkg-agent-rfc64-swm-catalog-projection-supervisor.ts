@@ -152,6 +152,7 @@ interface ProjectionOwnerDependenciesV1 {
   }>) => Promise<ProjectionReconciliationV1>;
   /** GH#3134 — one author catalog scope's applied-head row; frees the placements parked on a full catalog. */
   readonly readAppliedCatalogHead?: FullCatalogParkingDependenciesV1['readAppliedCatalogHead'];
+  readonly resolvePlacementCatalogScope?: FullCatalogParkingDependenciesV1['resolvePlacementCatalogScope'];
   readonly warn: (ctx: OperationContext, message: string) => void;
   /** GH#3081 — the placement timing to record into, resolved at each use; the owner's own by default. */
   readonly placementTiming?: () => CatalogPlacementTimingV1;

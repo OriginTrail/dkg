@@ -425,6 +425,35 @@ describe('a full author catalog', () => {
     expect(author.seen.placementAttempts).toHaveLength(CAP + 3);
   }, 90_000);
 
+  it('retires the exact public inventory row without capacity parking after a lane transition', async () => {
+    const author = await startAuthor('full-catalog-public-retirement');
+    for (let index = 0; index < CAP; index++) {
+      const seeded = await seedInventoryAssetV1(author.agent, `held-${index}`, BigInt(140 + index));
+      await author.confirm(`held-${index}`, seeded.seal);
+    }
+    const pending = await seedInventoryAssetV1(author.agent, 'public-transition', 150n);
+    await author.confirm('public-transition', pending.seal);
+    expect(author.capacity()).toMatchObject({ parkedPlacements: 1, scopesAtCap: 1 });
+    const before = author.footprint();
+    const internals = author.agent as unknown as Record<string, (...args: any[]) => any>;
+    const lane = internals.resolveRfc64CatalogAuthoringLaneV1!(CONTEXT_GRAPH_ID, null);
+    vi.mocked(internals.resolveRfc64CatalogAuthoringLaneV1!).mockReturnValue({
+      ...lane, acceptsFinalizedVmRepair: false, projectionTargetPolicy: 'exact-replacement',
+    });
+    const remove = vi.spyOn(author.agent, 'removeRfc64SwmAuthorInventoryConfirmedRowV1');
+    await author.pass();
+    expect(remove).toHaveBeenCalledOnce();
+    expect(remove.mock.calls[0]?.[0].expectedRow).toMatchObject({ kaUal: pending.seal.kaUal });
+    expect(author.markers()).toEqual([]);
+    // Removal signs exactly one inventory successor; it does not rewrite/announce the catalog.
+    expect(author.footprint()).toEqual({ ...before, signatures: before.signatures + 1 });
+    const inventory = author.agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: pending.scopeDigest, authorAddress: AUTHOR,
+    });
+    expect(inventory?.rows).toHaveLength(CAP);
+    expect(inventory?.rows.some(({ kaUal }) => kaUal === pending.seal.kaUal)).toBe(false);
+  }, 60_000);
+
   it('keeps placements parked across a restart, with one attempt for the catalog and none a marker', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-full-catalog-restart-'));
     tempDirs.push(dataDir);

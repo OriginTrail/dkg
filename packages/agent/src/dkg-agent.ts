@@ -1107,6 +1107,7 @@ export class DKGAgent extends DKGAgentBase {
         },
         reconcile: (params) => this.reconcileRfc64PublicCatalogFromSwmInventoryV1(params),
         readAppliedCatalogHead: (scope, author) => this.rfc64PersistenceV1?.inventory.readAppliedCatalogHeadV1(scope, author),
+        resolvePlacementCatalogScope: (repair) => this.resolveRfc64FinalizedPlacementScopeV1(repair).capacityScope,
         warn: (ctx, message) => this.log.warn(ctx, message),
         placementTiming: () => catalogPlacementTimingV1(this),
       }),

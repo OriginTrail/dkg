@@ -165,24 +165,8 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     params: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
     placement: CatalogPlacementAttemptV1,
   ): Promise<AppliedCatalogHeadSnapshotV1 | null> {
-    const lane = this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, null);
-    if (lane === null || (!lane.acceptsFinalizedVmRepair && (params.version === 1 || lane.kind !== 'public'))) {
-      throw new Error('RFC-64 finalized-private placement repair lane is inactive');
-    }
-    const currentInventoryScope = Object.freeze({
-      ...lane.scopeBase,
-      authorAddress: params.authorAddress,
-    }) as SwmAuthorInventoryScopeV1;
-    if (
-      params.version === 1
-      && computeSwmAuthorInventoryScopeDigestV1(currentInventoryScope)
-      !== computeSwmAuthorInventoryScopeDigestV1(params.inventoryScope)
-    ) {
-      throw new Error(
-        'RFC-64 finalized-private placement repair conflicts with a policy transition',
-      );
-    }
-    if (params.version === 2 && !lane.acceptsFinalizedVmRepair) {
+    const { lane, currentInventoryScope, inventoryScope, scope, action } = this.resolveRfc64FinalizedPlacementScopeV1(params);
+    if (action === 'retire-public-row') {
       // Public VM discovery is chain-owned; this owed transition removes only the exact SWM row.
       const removed = await this.removeRfc64SwmAuthorInventoryConfirmedRowV1({
         scope: currentInventoryScope, expectedRow: params,
@@ -199,13 +183,8 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       });
       return null;
     }
-    const inventoryScope = params.version === 1 ? params.inventoryScope : currentInventoryScope;
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
-    const scope = Object.freeze({
-      ...inventoryScope,
-      bucketCount: '1',
-    }) as AuthorCatalogScopeV1;
     const covered = await placement.measure('coverage', () => this.rfc64CatalogCoversConfirmedSwmRowV1({
       scope,
       expectedRow: params,
@@ -253,6 +232,33 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       catalogIssuerDelegationEffectiveAt: lane.catalogIssuerDelegationEffectiveAt,
       catalogIssuerDelegationExpiresAt: lane.catalogIssuerDelegationExpiresAt,
     }, placement);
+  }
+
+  /** One current scope owner for placement execution and capacity parking. V1 remains pinned. */
+  protected resolveRfc64FinalizedPlacementScopeV1(this: DKGAgent, params: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>) {
+    const lane = this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, null);
+    if (lane === null || (!lane.acceptsFinalizedVmRepair && (params.version === 1 || lane.kind !== 'public'))) {
+      throw new Error('RFC-64 finalized-private placement repair lane is inactive');
+    }
+    const currentInventoryScope = Object.freeze({
+      ...lane.scopeBase,
+      authorAddress: params.authorAddress,
+    }) as SwmAuthorInventoryScopeV1;
+    if (
+      params.version === 1
+      && computeSwmAuthorInventoryScopeDigestV1(currentInventoryScope)
+      !== computeSwmAuthorInventoryScopeDigestV1(params.inventoryScope)
+    ) {
+      throw new Error(
+        'RFC-64 finalized-private placement repair conflicts with a policy transition',
+      );
+    }
+    const inventoryScope = params.version === 1 ? params.inventoryScope : currentInventoryScope;
+    const scope = Object.freeze({ ...inventoryScope, bucketCount: '1' }) as AuthorCatalogScopeV1;
+    const common = { lane, currentInventoryScope, inventoryScope, scope };
+    return lane.acceptsFinalizedVmRepair
+      ? Object.freeze({ ...common, action: 'place-private-row' as const, capacityScope: scope })
+      : Object.freeze({ ...common, action: 'retire-public-row' as const, capacityScope: undefined });
   }
 
   /** Canonical selected-CG admission shared by inventory and projection. */

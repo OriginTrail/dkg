@@ -1,3 +1,4 @@
+import { confirmedPublicationCatalogConfigV1 } from './support/confirmed-publication-harness.js';
 import { describe, expect, it } from 'vitest';
 import {
   buildAssertionSealQuads,
@@ -112,6 +113,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
 
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
+    agent.config = confirmedPublicationCatalogConfigV1();
     agent.chain = {};
     agent.defaultAgentAddress = DEFAULT_AGENT;
     Object.defineProperty(agent, 'peerId', {
@@ -198,16 +200,10 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     expect(remainingClearCalls).toHaveLength(1);
     expect(remainingClearCalls[0].slice(0, 2)).toEqual([CG, undefined]);
     expect(result.status).toBe('confirmed');
-    expect(rfc64SwmInventoryRemovalCalls).toHaveLength(1);
-    expect(rfc64SwmInventoryRemovalCalls[0]).toMatchObject({
-      contextGraphId: CG,
-      seal: {
-        authorAddress: AGENT_B,
-        reservedKaId: RESERVED_KA_ID,
-        kaUal: KA_UAL,
-      },
-    });
-    expect(warnings).toEqual(expect.arrayContaining([
+    // This explicitly disabled fixture owes no catalog work. Enabled delayed
+    // removal and persistent failure are covered by native placement tests.
+    expect(rfc64SwmInventoryRemovalCalls).toEqual([]);
+    expect(warnings).not.toEqual(expect.arrayContaining([
       expect.stringContaining('simulated escaped RFC-64 SWM inventory removal failure'),
     ]));
   });
@@ -219,6 +215,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
 
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
+    agent.config = confirmedPublicationCatalogConfigV1();
     agent.chain = {};
     agent.defaultAgentAddress = AGENT_B;
     Object.defineProperty(agent, 'peerId', { value: 'peer-source-empty', configurable: true });
@@ -270,6 +267,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     let publishCalls = 0;
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
+    agent.config = confirmedPublicationCatalogConfigV1();
     agent.chain = {};
     agent.defaultAgentAddress = AGENT_B;
     Object.defineProperty(agent, 'peerId', { value: 'peer-legacy-finalized', configurable: true });
@@ -315,6 +313,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     const updateCalls: any[][] = [];
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
+    agent.config = confirmedPublicationCatalogConfigV1();
     agent.chain = {};
     agent.defaultAgentAddress = AGENT_B;
     Object.defineProperty(agent, 'peerId', { value: 'peer-update', configurable: true });
@@ -384,6 +383,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     let publishes = 0;
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
+    agent.config = confirmedPublicationCatalogConfigV1();
     agent.chain = {};
     agent.defaultAgentAddress = AGENT_B;
     Object.defineProperty(agent, 'peerId', { value: 'peer-namespace', configurable: true });
