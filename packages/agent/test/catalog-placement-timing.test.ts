@@ -1,8 +1,9 @@
 /**
- * GH#3081 — the catalog placement timing: how one observer wait is split, that a wait hears exactly
- * the attempt that released its own waiter (through the real finalized-private supervisor too), the
- * supervisor's waiter registry, the aggregate queue view, the bounds, and that a failure to observe
- * never surfaces.
+ * GH#3081 — the catalog placement timing: how the time from one observer call to the end of its
+ * placement attempt is split, that a wait hears exactly the attempt that released its own waiter
+ * (through the real finalized-private supervisor too), that its line is written at that release
+ * because the observer does not wait for it, the supervisor's waiter registry, the aggregate queue
+ * view with the placements still owed, the bounds, and that a failure to observe never surfaces.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -151,6 +152,8 @@ describe('catalog placement timing', () => {
     const wait = timing.beginWait(ASSET, createOperationContext('publish'));
     clock.now = 3;
     wait.requested();
+    // A refusal is a release with no attempt, told at once.
+    wait.observer.released();
     clock.now = 9;
     wait.end(log);
     expect(fields(lines[0]!.message)).toMatchObject({
@@ -165,6 +168,7 @@ describe('catalog placement timing', () => {
     wait.observer.cooldownSkipped();
     wait.observer.cooldownSkipped();
     clock.now = CATALOG_PLACEMENT_WAIT_LOG_THRESHOLD_MS - 1;
+    wait.observer.released();
     wait.end(log);
     expect(lines).toEqual([]);
 
@@ -172,6 +176,7 @@ describe('catalog placement timing', () => {
     slow.requested();
     slow.observer.cooldownSkipped();
     clock.now += CATALOG_PLACEMENT_WAIT_LOG_THRESHOLD_MS;
+    slow.observer.released();
     slow.end(log);
     expect(fields(lines[0]!.message)).toMatchObject({ cooldownSkips: '1', observerCall: '2' });
     // Every skipped marker counts once in the aggregate, waiters or not.
@@ -252,9 +257,10 @@ describe('catalog placement timing', () => {
     const { timing, clock } = harness();
     const waiters = new FinalizedPrivatePlacementWaitersV1();
     expect(timing.queueStatus(waiters.summary(), false)).toEqual({
-      depth: 0, waiters: 0, oldestWaiterAgeMs: null, passRunning: false, lastPassDurationMs: null, cooldownSkips: 0,
+      depth: 0, pending: 0, oldestPendingAgeMs: null, waiters: 0, oldestWaiterAgeMs: null,
+      passRunning: false, lastPassDurationMs: null, cooldownSkips: 0,
     });
-    timing.passStarted(3);
+    timing.passStarted(new Set(['key-a', 'key-b', 'key-c']));
     waiters.add('key-a', timing.now());
     clock.now = 400;
     waiters.add('key-a', timing.now());
@@ -262,15 +268,160 @@ describe('catalog placement timing', () => {
     timing.cooldownSkipped();
     clock.now = 1_000;
     expect(timing.queueStatus(waiters.summary(), true)).toEqual({
-      depth: 3, waiters: 3, oldestWaiterAgeMs: 1_000, passRunning: true, lastPassDurationMs: null, cooldownSkips: 1,
+      depth: 3, pending: 3, oldestPendingAgeMs: 1_000, waiters: 3, oldestWaiterAgeMs: 1_000,
+      passRunning: true, lastPassDurationMs: null, cooldownSkips: 1,
     });
     clock.now = 1_250;
     timing.passEnded();
     timing.passEnded();
     waiters.release('key-a');
+    // No attempt completed, so every listed marker is still owed although one key lost its waiters.
     expect(timing.queueStatus(waiters.summary(), false)).toEqual({
-      depth: 3, waiters: 1, oldestWaiterAgeMs: 850, passRunning: false, lastPassDurationMs: 1_250, cooldownSkips: 1,
+      depth: 3, pending: 3, oldestPendingAgeMs: 1_250, waiters: 1, oldestWaiterAgeMs: 850,
+      passRunning: false, lastPassDurationMs: 1_250, cooldownSkips: 1,
     });
+  });
+
+  it('writes the line when the supervisor releases a request whose observer already returned', async () => {
+    const { timing, clock, lines, log } = harness();
+    const wait = timing.beginWait(ASSET, createOperationContext('publishFromSWM', 'job-9'));
+    clock.now = 20;
+    wait.requested();
+    // The observer returns here: the publication is terminal and the placement still queued.
+    wait.end(log);
+    expect(lines).toEqual([]);
+
+    clock.now = 5_020;
+    const admission = timing.admit('key-a');
+    await expect(admission.attempt.measure('successor', async () => {
+      clock.now = 9_020;
+      throw new Error('the successor could not be signed');
+    })).rejects.toThrow('the successor could not be signed');
+    admission.end('failed');
+    expect(lines).toEqual([]);
+    wait.observer.released(admission);
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]!.ctx.sourceOperationId).toBe('job-9');
+    expect(fields(lines[0]!.message)).toMatchObject({
+      observerCall: '1', outcome: 'failed', totalMs: '9020', requestMs: '20', queueMs: '5000',
+      attemptMs: '4000', successorMs: '4000', source: 'job-9',
+    });
+    // One line per request: a second release of the same waiter writes nothing more.
+    wait.observer.released(admission);
+    wait.observer.released();
+    expect(lines).toHaveLength(1);
+  });
+
+  it('writes a returned observer\'s line as unattempted when its marker left the queue', () => {
+    const { timing, clock, lines, log } = harness();
+    const wait = timing.beginWait(ASSET, createOperationContext('publish'));
+    wait.requested();
+    wait.end(log);
+    clock.now = 70;
+    expect(lines).toEqual([]);
+    wait.observer.released();
+    expect(lines.map(({ message }) => fields(message))).toEqual([
+      expect.objectContaining({ outcome: 'no-attempt', totalMs: '70', queueMs: '-', attemptMs: '-' }),
+    ]);
+  });
+
+  it('writes at once for a request that was released before the observer reported it', () => {
+    const { timing, clock, lines, log } = harness();
+    const wait = timing.beginWait(ASSET, createOperationContext('publish'));
+    const admission = timing.admit();
+    admission.end('completed');
+    wait.observer.released(admission);
+    clock.now = 4;
+    wait.requested();
+    wait.end(log);
+    expect(lines.map(({ message }) => fields(message))).toEqual([
+      expect.objectContaining({ outcome: 'completed', totalMs: '4' }),
+    ]);
+  });
+
+  it('counts a placement as owed from its request until an attempt completes it', () => {
+    const { timing, clock } = harness();
+    const pending = () => {
+      const { pending: count, oldestPendingAgeMs } = timing.queueStatus({ count: 0, oldestRequestedAt: undefined }, false);
+      return { pending: count, oldestPendingAgeMs };
+    };
+    clock.now = 100;
+    timing.owed('key-a');
+    clock.now = 300;
+    timing.owed('key-b');
+    // A repeated request for a marker already owed keeps its first time.
+    clock.now = 900;
+    timing.owed('key-a');
+    expect(pending()).toEqual({ pending: 2, oldestPendingAgeMs: 800 });
+
+    // A failed attempt leaves the marker owed; a completed one retires it.
+    timing.admit('key-a').end('failed');
+    expect(pending()).toEqual({ pending: 2, oldestPendingAgeMs: 800 });
+    timing.admit('key-a').end('completed');
+    expect(pending()).toEqual({ pending: 1, oldestPendingAgeMs: 600 });
+    // An attempt admitted without a key retires nothing.
+    timing.admit().end('completed');
+    expect(pending()).toEqual({ pending: 1, oldestPendingAgeMs: 600 });
+
+    // A pass lists what is durable: a marker it does not list is gone, and one it lists that
+    // nothing requested here (it survived a restart) is owed from this pass on.
+    clock.now = 1_000;
+    timing.passStarted(new Set(['key-c']));
+    clock.now = 1_400;
+    expect(pending()).toEqual({ pending: 1, oldestPendingAgeMs: 400 });
+    timing.passStarted(new Set());
+    expect(pending()).toEqual({ pending: 0, oldestPendingAgeMs: null });
+  });
+
+  it('stops remembering new markers between passes at its bound, until a pass lists them', () => {
+    const { timing } = harness();
+    const idle = { count: 0, oldestRequestedAt: undefined };
+    for (let index = 0; index < 4_100; index += 1) timing.owed(`key-${index}`);
+    expect(timing.queueStatus(idle, false).pending).toBe(4_096);
+    const listed = new Set(Array.from({ length: 4_100 }, (_unused, index) => `key-${index}`));
+    timing.passStarted(listed);
+    expect(timing.queueStatus(idle, false)).toMatchObject({ depth: 4_100, pending: 4_100 });
+  });
+
+  it('keeps a first-seen time for at most 4,096 owed placements and still counts every one a pass lists', () => {
+    const { timing, clock } = harness();
+    const status = () => {
+      const { depth, pending, oldestPendingAgeMs } = timing.queueStatus({ count: 0, oldestRequestedAt: undefined }, false);
+      return { depth, pending, oldestPendingAgeMs };
+    };
+    const keys = Array.from({ length: 5_000 }, (_unused, index) => `key-${index}`);
+    clock.now = 1_000;
+    timing.passStarted(new Set(keys));
+    clock.now = 4_000;
+    expect(status()).toEqual({ depth: 5_000, pending: 5_000, oldestPendingAgeMs: 3_000 });
+
+    // A completed placement counts down whether its time was kept (the first 4,096) or not.
+    timing.admit('key-0').end('completed');
+    timing.admit('key-4999').end('completed');
+    expect(status().pending).toBe(4_998);
+    // While some markers are only counted, one stored now may be one of them: the next pass,
+    // which lists every marker, counts it.
+    timing.owed('key-new');
+    timing.owed('key-4500');
+    expect(status().pending).toBe(4_998);
+
+    // The next pass is exact again. It keeps nothing it no longer lists, and one of the markers
+    // that was only counted takes the room the completed one left, with this pass's time.
+    clock.now = 9_000;
+    timing.passStarted(new Set([...keys.slice(1, 4_999), 'key-new']));
+    expect(status()).toEqual({ depth: 4_999, pending: 4_999, oldestPendingAgeMs: 8_000 });
+
+    // With every marker of the first pass placed, the oldest one left is the one that took that
+    // room: its age counts from the pass that found it, not from the pass that first listed it.
+    clock.now = 10_000;
+    timing.passStarted(new Set(keys.slice(4_096, 4_999)));
+    clock.now = 12_000;
+    expect(status()).toEqual({ depth: 903, pending: 903, oldestPendingAgeMs: 3_000 });
+
+    // Back under the bound a stored marker counts at once again.
+    timing.owed('key-late');
+    expect(status().pending).toBe(904);
   });
 
   it('keeps at most 512 assets of observer counts', () => {
@@ -302,12 +453,14 @@ describe('catalog placement timing', () => {
       wait.observer.cooldownSkipped();
       wait.observer.released(admission);
       wait.observer.released();
-      timing.passStarted(1);
+      timing.owed('key');
+      timing.admit('key').end('completed');
+      timing.passStarted(new Set(['key']));
       timing.passEnded();
       wait.end(throwingLog);
       expect(timing.now()).toBeNaN();
       expect(timing.queueStatus({ count: 1, oldestRequestedAt: Number.NaN }, true)).toMatchObject({
-        waiters: 1, oldestWaiterAgeMs: null, passRunning: true,
+        waiters: 1, oldestWaiterAgeMs: null, oldestPendingAgeMs: null, passRunning: true,
       });
     }).not.toThrow();
 
@@ -315,6 +468,12 @@ describe('catalog placement timing', () => {
     const wait = working.beginWait(ASSET, createOperationContext('publish'));
     clock.now = 5;
     expect(() => wait.end(throwingLog)).not.toThrow();
+
+    // Neither does a line that fails when the supervisor releases the request it was left for.
+    const left = working.beginWait(ASSET, createOperationContext('publish'));
+    left.requested();
+    left.end(throwingLog);
+    expect(() => left.observer.released()).not.toThrow();
 
     // A clock that fails after admission never changes what a measured phase returns or throws.
     let clockFails = false;
