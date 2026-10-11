@@ -96,6 +96,23 @@ describe('daemon EVM signing', () => {
     expect(log).not.toContain(AUTHOR_TOKEN);
   });
 
+  it('runs with payers only when no author keys are configured', async () => {
+    const dir = await tempDir();
+    const fake = await fakeSigner();
+    const tokens = await tokenFiles(dir);
+    const lines: string[] = [];
+    const signing = await resolveDaemonEvmSigning({
+      config: { nodeRole: 'edge', chain: { signer: { type: 'remote', url: fake.url, authTokenFile: tokens.payer } } },
+      chainType: 'evm',
+      dataDir: dir,
+      log: (line) => lines.push(line),
+    });
+    expect(signing.mode).toBe('remote');
+    if (signing.mode !== 'remote') return;
+    expect(signing.chainSigning.authors).toBeUndefined();
+    expect(lines.join('\n')).toContain('Author keys: none configured');
+  });
+
   it('refuses core nodes, the mock chain and the async publisher runtime before any key exists', async () => {
     const dir = await tempDir();
     const signer = { type: 'remote' as const, socketPath: join(dir, 'unused.sock') };
