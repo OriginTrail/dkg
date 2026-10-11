@@ -3,7 +3,7 @@
 import type { Digest32V1 } from '@origintrail-official/dkg-core';
 import type { Rfc64OperationalAppliedHeadV1 } from './catalog-operational-applied-heads-v1.js';
 import { rfc64CatalogTargetScopeKeyV1 } from './catalog-operational-applied-heads-v1.js';
-import { aggregateRfc64DigestV1, projectRfc64OperationalRowCountsV1, rfc64CatalogTargetExactIdentityKeyV1, sumDecimalCountsV1 } from './catalog-operational-targets-v1.js';
+import { aggregateRfc64DigestV1, projectRfc64ResolvedRowCountsV1, resolveRfc64ExpectedHeadsV1, rfc64CatalogTargetExactIdentityKeyV1, sumDecimalCountsV1 } from './catalog-operational-targets-v1.js';
 import type { Rfc64CatalogReplayRecoveryStatusV1 } from './catalog-replay-recovery-runtime-v1.js';
 import type { Rfc64PublicCatalogHeadAnnouncementV1 } from './public-catalog-transport-v1.js';
 
@@ -59,28 +59,16 @@ export function evaluateRfc64CatalogCompletionV1(input: Rfc64CatalogCompletionFa
   const pendingTargets = authoritativeTargets.filter(isPending);
   const liveTargetsPending = targets.some(isPending);
   const catalogHeadDigest = aggregateRfc64DigestV1(heads.map(({ snapshot }) => snapshot.currentCatalogHeadDigest));
-  const expectedHeads = new Map(heads.map(({ scopeKey, snapshot }) => [scopeKey, {
-    version: snapshot.catalogVersion, digest: snapshot.currentCatalogHeadDigest as Digest32V1 | null,
-  }]));
-  for (const target of pendingTargets) {
-    const key = rfc64CatalogTargetScopeKeyV1(target);
-    const held = expectedHeads.get(key);
-    if (held === undefined || BigInt(target.catalogVersion) > BigInt(held.version)) {
-      expectedHeads.set(key, { version: target.catalogVersion, digest: target.catalogHeadObjectDigest });
-    } else if (target.catalogVersion === held.version && target.catalogHeadObjectDigest !== held.digest) {
-      held.digest = null;
-    }
-  }
-  const expectedDigests = [...expectedHeads.values()].map(({ digest }) => digest);
-  const expectedCatalogHeadDigest = expectedDigests.some((digest) => digest === null)
-    ? null : aggregateRfc64DigestV1(expectedDigests as Digest32V1[]);
+  const expectedHeads = resolveRfc64ExpectedHeadsV1(heads, authoritativeTargets);
+  const expectedCatalogHeadDigest = [...expectedHeads.values()].some(({ ambiguous }) => ambiguous)
+    ? null : aggregateRfc64DigestV1([...expectedHeads.values()].map(({ catalogHeadObjectDigest }) => catalogHeadObjectDigest));
   const inventoryDigest = aggregateRfc64DigestV1(heads.map(({ snapshot }) => snapshot.appliedInventoryDigest));
   const rowCount = heads.length === 0 ? null : sumDecimalCountsV1(heads.map(({ snapshot }) => snapshot.inventoryRowCount));
   const rowProjectionUnavailable = targetCapacityExceeded || replayActive || replayUnverified
     || (replayFailed && promisedTargets === null);
   const rowProjection = rowProjectionUnavailable
     ? Object.freeze({ expectedRowCount: null, missingRowCount: null })
-    : projectRfc64OperationalRowCountsV1(heads, authoritativeTargets, promisedRowCounts);
+    : projectRfc64ResolvedRowCountsV1(expectedHeads, promisedRowCounts);
   const corroborated = replay !== null && !replayUnsettled && !targetCapacityExceeded
     && promisedTargets !== null && promisedTargets.length > 0
     && !authoritativeTargets.some(isPending)
