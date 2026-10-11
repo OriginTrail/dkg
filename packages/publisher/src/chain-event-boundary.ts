@@ -31,7 +31,7 @@ export function prepareCollectionUpdateEvent(incoming: ChainEvent): { readonly e
   const metadata = event.updateIdentity;
   return { event, replayKey: [
     event.type,
-    metadata.blockNumber ?? event.blockNumber,
+    metadata.blockNumber,
     metadata.blockHash,
     metadata.logIndex,
     metadata.txHash,

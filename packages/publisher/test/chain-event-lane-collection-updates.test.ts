@@ -147,6 +147,44 @@ describe('ChainEventPoller collection updates', () => {
     expect(seen).toEqual(identities);
   });
 
+  it('delivers stronger block evidence after an unpositioned update and suppresses both exact replays', async () => {
+    const unpositioned = normalizeKnowledgeAssetUpdateIdentity({});
+    const positioned = normalizeKnowledgeAssetUpdateIdentity({ blockNumber: 160 });
+    const events: ChainEvent[] = [{ type: 'KnowledgeAssetUpdated', blockNumber: 160,
+      updateIdentity: unpositioned, data: { batchId: '42', merkleRoot: '0x' + '44'.repeat(32) } }];
+    let head = 200;
+    let now = 0;
+    const { adapter, filters } = makeChain({ head: () => head, events });
+    const seen: Array<Parameters<OnCollectionUpdated>[0]> = [];
+    const saved: number[] = [];
+    const poller = new ChainEventPoller({ chain: adapter, publishHandler: makeHandler(),
+      intervalMs: 12_000, clock: () => now,
+      onCollectionUpdated: async (info) => { seen.push(info); },
+      cursorPersistence: { async loadLane() { return undefined; }, async saveLane(_lane, block) { saved.push(block); } } });
+    const poll = () => (poller as unknown as { poll(): Promise<void> }).poll();
+    await poll();
+    expect(seen).toHaveLength(1);
+    expect(seen[0].eventIdentity).toBe(unpositioned);
+    now = 12_000;
+    head = 201;
+    await poll();
+    expect(seen).toHaveLength(1);
+    events[0] = { ...events[0], updateIdentity: positioned };
+    now = 24_000;
+    head = 202;
+    await poll();
+    expect(seen).toHaveLength(2);
+    expect(seen[0].eventIdentity).toBe(unpositioned);
+    expect(seen[1].eventIdentity).toBe(positioned);
+    expect(seen.map((info) => info.blockNumber)).toEqual([160, 160]);
+    now = 36_000;
+    head = 203;
+    await poll();
+    expect(seen).toHaveLength(2);
+    expect(saved).toEqual([200, 201, 202, 203]);
+    expect(filters.at(-1)).toMatchObject({ fromBlock: 139, toBlock: 203 });
+  });
+
   it('delivers a canonical-only replacement fork on a later poll and suppresses exact replays', async () => {
     const oldIdentity = normalizeKnowledgeAssetUpdateIdentity({ blockNumber: 160,
       logIndex: 7, blockHash: '0xold', txHash: '0xsame' });
