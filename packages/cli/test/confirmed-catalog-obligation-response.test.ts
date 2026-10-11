@@ -1,12 +1,22 @@
 import { describe, expect, it } from 'vitest';
 import { ConfirmedCatalogObligationErrorV1 } from '@origintrail-official/dkg-agent';
-import { createOperationContext } from '@origintrail-official/dkg-core';
+import { createOperationContext, type AssertionSeal } from '@origintrail-official/dkg-core';
 import { confirmedCatalogObligationResponse } from '../src/daemon/routes/confirmed-catalog-obligation.js';
-import { authorSealV1, assertionSealV1, AUTHOR, CONTEXT_GRAPH_ID } from '../../agent/test/support/rfc64-local-catalog-repair-fixture.js';
+
+const AUTHOR = `0x${'11'.repeat(20)}`;
+const CONTEXT_GRAPH_ID = `${AUTHOR}/response`;
+function sealFor(kaNumber: bigint, assertionVersion = '1'): AssertionSeal {
+  return { merkleRoot: new Uint8Array(32).fill(0xab), authorAddress: AUTHOR,
+    authorAttestationR: new Uint8Array(32).fill(1), authorAttestationVS: new Uint8Array(32).fill(2),
+    authorSchemeVersion: 1, chainId: 31337n, kav10Address: `0x${'22'.repeat(20)}`,
+    reservedKaId: (BigInt(AUTHOR) << 96n) | kaNumber, finalizedAtIso: '2026-01-01T00:00:00.000Z',
+    contentScopeVersion: 2, kaUal: `did:dkg:evm:31337/${AUTHOR}/${kaNumber}`,
+    assertionVersion, publicTripleCount: 1, privateTripleCount: 0, rootEntities: [] };
+}
 
 describe('the shared confirmed catalog HTTP response contract', () => {
   it.each([false, true])('retains JSON-safe confirmed %s update transaction identity', async update => {
-    const seal = assertionSealV1(await authorSealV1(73n, update ? '2' : '1'));
+    const seal = sealFor(73n, update ? '2' : '1');
     const transaction = { txHash: `0x${'ab'.repeat(32)}`, blockNumber: 71, txIndex: 2,
       batchId: seal.reservedKaId!, kaId: seal.reservedKaId!,
       ...(!update ? { startKAId: seal.reservedKaId!, endKAId: seal.reservedKaId! } : {}) };
@@ -27,7 +37,7 @@ describe('the shared confirmed catalog HTTP response contract', () => {
   });
   it('cannot fabricate a confirmed response for an ordinary error or missing transaction', async () => {
     expect(confirmedCatalogObligationResponse(new Error('not confirmed'))).toBeNull();
-    const seal = assertionSealV1(await authorSealV1(74n));
+    const seal = sealFor(74n);
     expect(confirmedCatalogObligationResponse(new ConfirmedCatalogObligationErrorV1({ contextGraphId: CONTEXT_GRAPH_ID,
       assertionCoordinate: 'asset', seal, assertionUri: 'urn:test:asset', ctx: createOperationContext('publish'), publicationLabel: 'publish' },
     undefined, new Error('journal refused')))).toBeNull();
