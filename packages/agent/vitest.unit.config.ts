@@ -361,6 +361,7 @@ export default defineConfig({
       "test/swm-snapshot-materializer.test.ts",
       "test/shared-memory-metadata-admission.test.ts",
       "test/swm-protocol-root-ownership.test.ts",
+      "test/swm-shared-record-contracts.test.ts",
       "test/shared-memory-metadata-continuation.test.ts",
       "test/shared-memory-metadata-fetcher.test.ts",
       "test/shared-memory-metadata-boundary.typechecked.test.ts",

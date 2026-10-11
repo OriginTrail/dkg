@@ -1,50 +1,19 @@
 import {
   contextGraphSharedMemoryMetaUri,
-  DKG_ROOT_ENTITY_LEGACY,
   isEntityPredicate,
   isSafeIri,
   validateSubGraphName,
 } from '@origintrail-official/dkg-core';
 import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
+import { ENTITY_SHARE_METADATA_PREDICATES as F, ENTITY_SHARE_METADATA_SIDECAR_PREDICATES,
+  SWM_WORKSPACE_OPERATION, isSwmRecordRowAllowed,
+} from './swm-metadata-vocabulary.js';
+import { decodeSwmOperationIdentity, matchesSwmMetadataIdentity, swmMetadataLiteralValue } from './swm-metadata-identity.js';
+export { ENTITY_SHARE_METADATA_PREDICATES, ENTITY_SHARE_METADATA_SIDECAR_PREDICATES,
+  ENTITY_SHARE_SNAPSHOT_MERKLE_ROOT_PREDICATE, ENTITY_SHARE_SNAPSHOT_CONTENT_DIGEST_PREDICATE,
+} from './swm-metadata-vocabulary.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { isWorkspaceKnowledgeAssetHeadSubject, workspaceOperationPublicSliceSubject, workspaceOperationSubject } from './workspace-metadata-subjects.js';
-
-const DKG = 'http://dkg.io/ontology/';
-const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-const PROV_ATTRIBUTION = 'http://www.w3.org/ns/prov#wasAttributedTo';
-export const ENTITY_SHARE_SNAPSHOT_MERKLE_ROOT_PREDICATE = `${DKG}snapshotMerkleRoot`;
-export const ENTITY_SHARE_SNAPSHOT_CONTENT_DIGEST_PREDICATE = `${DKG}snapshotContentDigest`;
-/** Agent-local annotations accepted as sidecars, never as protocol rows. */
-export const ENTITY_SHARE_METADATA_SIDECAR_PREDICATES: ReadonlySet<string> =
-  new Set([
-    ENTITY_SHARE_SNAPSHOT_MERKLE_ROOT_PREDICATE,
-    ENTITY_SHARE_SNAPSHOT_CONTENT_DIGEST_PREDICATE,
-  ]);
-
-/** Canonical field vocabulary shared by the entity-share writer and decoder. */
-export const ENTITY_SHARE_METADATA_PREDICATES = Object.freeze({
-  type: RDF_TYPE,
-  contextGraphId: `${DKG}contextGraphId`,
-  shareOperationId: `${DKG}shareOperationId`,
-  subGraphName: `${DKG}subGraphName`,
-  publisherPeerId: `${DKG}publisherPeerId`,
-  publishedAt: `${DKG}publishedAt`,
-  wasAttributedTo: PROV_ATTRIBUTION,
-  rootEntity: DKG_ROOT_ENTITY_LEGACY,
-  publicSliceRootEntity: `${DKG}publicSliceRootEntity`,
-  publicQuadsDigest: `${DKG}publicQuadsDigest`,
-  publicQuadsCount: `${DKG}publicQuadsCount`,
-  publicSnapshotRef: `${DKG}publicSnapshotRef`,
-  publicSnapshotGraph: `${DKG}publicSnapshotGraph`,
-});
-const F = ENTITY_SHARE_METADATA_PREDICATES;
-const COMMON_FIELDS = [
-  F.contextGraphId, F.shareOperationId, F.subGraphName,
-  F.publisherPeerId, F.publishedAt, F.wasAttributedTo,
-];
-const SLICE_FIELDS: ReadonlySet<string> = new Set([...COMMON_FIELDS, F.publicSliceRootEntity,
-  F.publicQuadsDigest, F.publicQuadsCount, F.publicSnapshotRef, F.publicSnapshotGraph]);
-const OPERATION_FIELDS: ReadonlySet<string> = new Set([...COMMON_FIELDS, F.type]);
 
 interface MetadataSubject { readonly subject: string; readonly graph: string }
 export interface EntityShareSliceDescriptor extends MetadataSubject {
@@ -70,8 +39,7 @@ function oneValue(rows: readonly Quad[], predicate: string): string | undefined 
   return values.size === 1 ? [...values][0] : undefined;
 }
 function literal(rows: readonly Quad[], predicate: string): string | undefined {
-  const value = oneValue(rows, predicate);
-  return value === undefined ? undefined : parseRdfLiteralTerm(value)?.value;
+  return swmMetadataLiteralValue(rows, predicate, 'snapshot-readiness');
 }
 function operationSubject(contextGraphId: string, operationId: string): string | undefined {
   try { return workspaceOperationSubject(contextGraphId, operationId); } catch { return undefined; }
@@ -102,11 +70,12 @@ export function decodeEntityShareMetadata(contextGraphId: string, metadata: read
     const operationId = literal(protocolRows, F.shareOperationId);
     const subGraphName = literal(protocolRows, F.subGraphName);
     if (cg !== contextGraphId || !operationId
-        || (subGraphName === undefined && protocolRows.some(row => row.predicate === F.subGraphName))) return other;
+        || !matchesSwmMetadataIdentity(protocolRows, { contextGraphId: cg, shareOperationId: operationId, subGraphName }, 'snapshot-readiness')) return other;
     if ((subGraphName !== undefined && !validateSubGraphName(subGraphName).valid)
         || graph !== contextGraphSharedMemoryMetaUri(cg, subGraphName)) return other;
     const operation = operationSubject(cg, operationId);
-    if (!operation) return other;
+    const identity = operation && decodeSwmOperationIdentity(operation, graph);
+    if (!identity || identity.contextGraphId !== cg || identity.subGraphName !== subGraphName) return other;
     const root = oneValue(protocolRows, F.publicSliceRootEntity);
     const digest = literal(protocolRows, F.publicQuadsDigest);
     const count = literal(protocolRows, F.publicQuadsCount);
@@ -115,12 +84,12 @@ export function decodeEntityShareMetadata(contextGraphId: string, metadata: read
     const validRef = explicitRef !== undefined || !protocolRows.some(row => row.predicate === F.publicSnapshotRef);
     if (root && isSafeIri(root) && digest && ref && validRef && count !== undefined
         && /^\d+$/.test(count) && Number.isSafeInteger(Number(count))
-        && protocolRows.every(row => SLICE_FIELDS.has(row.predicate))
+        && protocolRows.every(row => isSwmRecordRowAllowed('publicSliceV1', row, 'snapshot-readiness'))
         && subject === workspaceOperationPublicSliceSubject(cg, operationId, root, subGraphName)) {
       return { kind: 'slice', ref, graph, subject, rootEntity: root, operationSubject: operation, subGraphName, metadataRows: protocolRows };
     }
-    if (subject !== operation || oneValue(protocolRows, F.type) !== `${DKG}WorkspaceOperation`
-        || !protocolRows.every(row => OPERATION_FIELDS.has(row.predicate) || isEntityPredicate(row.predicate))) return other;
+    if (subject !== operation || oneValue(protocolRows, F.type) !== SWM_WORKSPACE_OPERATION
+        || !protocolRows.every(row => isSwmRecordRowAllowed('legacyOperationV1', row, 'snapshot-readiness'))) return other;
     const rootEntities = [...new Set(protocolRows.filter(row => isEntityPredicate(row.predicate)).map(row => row.object))];
     if (rootEntities.length === 0 || !rootEntities.every(isSafeIri)) return other;
     return { kind: 'operation', graph, subject, rootEntities, subGraphName,

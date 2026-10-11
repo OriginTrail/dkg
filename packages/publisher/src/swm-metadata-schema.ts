@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { DKG_ENTITY } from '@origintrail-official/dkg-core';
-import { ENTITY_SHARE_METADATA_PREDICATES } from './entity-share-metadata.js';
+import { SWM_PREDICATES as P, SWM_WORKSPACE_OPERATION } from './swm-metadata-vocabulary.js';
+export { SWM_PREDICATES, SWM_WORKSPACE_OPERATION, SWM_HEAD_SUFFIX, SWM_READ_FIELDS,
+  isSwmRecordRowAllowed, selectSwmRecordRows, type SwmRecordRole, type SwmRecordReadPolicy,
+} from './swm-metadata-vocabulary.js';
+export { decodeSwmOperationIdentity, matchesSwmMetadataIdentity, swmMetadataLiteralValue,
+  type SwmOperationIdentity, type SwmMetadataIdentityPolicy,
+} from './swm-metadata-identity.js';
 export {
   workspaceOperationSubject as swmOperationSubject,
   workspaceKnowledgeAssetHeadSubject as swmKnowledgeAssetHeadSubject,
@@ -10,57 +15,6 @@ export {
 } from './workspace-metadata-subjects.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
-const DKG = 'http://dkg.io/ontology/';
-export const SWM_WORKSPACE_OPERATION = `${DKG}WorkspaceOperation`;
-export const SWM_HEAD_SUFFIX = '#dkg-swm-head';
-export const SWM_PREDICATES = {
-  ...ENTITY_SHARE_METADATA_PREDICATES,
-  entity: DKG_ENTITY,
-  contentScopeVersion: `${DKG}contentScopeVersion`, kaUal: `${DKG}kaUal`,
-  assertionVersion: `${DKG}assertionVersion`, assertionGraph: `${DKG}assertionGraph`,
-  privateTripleCount: `${DKG}privateTripleCount`, privateMerkleRoot: `${DKG}privateMerkleRoot`,
-  accessPolicy: `${DKG}accessPolicy`, allowedPeer: `${DKG}allowedPeer`,
-  publicStagedQuads: `${DKG}publicStagedQuads`, workspaceOwner: `${DKG}workspaceOwner`,
-} as const;
-
-const P = SWM_PREDICATES;
-const COMMON = {
-  contextGraphId: P.contextGraphId, shareOperationId: P.shareOperationId,
-  publisherPeerId: P.publisherPeerId, publishedAt: P.publishedAt,
-  subGraphName: P.subGraphName, wasAttributedTo: P.wasAttributedTo,
-};
-const PUBLIC_SNAPSHOT = {
-  publicQuadsDigest: P.publicQuadsDigest, publicQuadsCount: P.publicQuadsCount,
-  publicSnapshotGraph: P.publicSnapshotGraph,
-  // Read compatibility: current producers use the digest as the store reference.
-  publicSnapshotRef: P.publicSnapshotRef,
-};
-
-/** Inbound predicate allowlists, including historical read-only wire fields. */
-export const SWM_READ_FIELDS = {
-  legacyOperationV1: {
-    ...COMMON, type: P.type, rootEntity: P.rootEntity,
-    entity: P.entity, // Historical member alias; current writers emit rootEntity.
-  },
-  graphOperationV2: {
-    ...COMMON, ...PUBLIC_SNAPSHOT, type: P.type,
-    contentScopeVersion: P.contentScopeVersion, kaUal: P.kaUal,
-    assertionVersion: P.assertionVersion, privateTripleCount: P.privateTripleCount,
-    privateMerkleRoot: P.privateMerkleRoot, accessPolicy: P.accessPolicy, allowedPeer: P.allowedPeer,
-  },
-  headV2: {
-    contentScopeVersion: P.contentScopeVersion, kaUal: P.kaUal,
-    assertionVersion: P.assertionVersion, assertionGraph: P.assertionGraph,
-    shareOperationId: P.shareOperationId,
-  },
-  publicSliceV1: {
-    ...COMMON, ...PUBLIC_SNAPSHOT, publicSliceRootEntity: P.publicSliceRootEntity,
-    publicStagedQuads: P.publicStagedQuads, // Historical inline JSON payload.
-  },
-  ownershipV1: { workspaceOwner: P.workspaceOwner, wasAttributedTo: P.wasAttributedTo },
-} as const;
-
-export type SwmRecordRole = keyof typeof SWM_READ_FIELDS;
 /** Current producers cannot emit historical member/payload/reference aliases. */
 interface CurrentWriteTerms {
   readonly entity?: never;
@@ -172,17 +126,3 @@ export function emitGraphSwmOperationHeader(subject: string, graph: string, term
 export function emitGraphSwmSnapshotFragment(subject: string, graph: string, terms: GraphSwmSnapshotFragmentTerms): Quad[] {
   return emitTerms('graphSnapshotFragment', subject, graph, terms);
 }
-
-const READ_PREDICATES: ReadonlyMap<string, ReadonlySet<string>> = new Map(Object.entries(SWM_READ_FIELDS)
-  .map(([role, fields]) => [role, new Set(Object.values(fields))]));
-
-export function isSwmRecordRowAllowed(role: SwmRecordRole, row: Quad): boolean {
-  return READ_PREDICATES.get(role)!.has(row.predicate)
-    && (row.predicate !== P.type || row.object === SWM_WORKSPACE_OPERATION);
-}
-
-/** Preserve row order and duplicates while excluding fields from other roles. */
-export function selectSwmRecordRows(role: SwmRecordRole, rows: readonly Quad[]): Quad[] {
-  return rows.filter(row => isSwmRecordRowAllowed(role, row));
-}
-

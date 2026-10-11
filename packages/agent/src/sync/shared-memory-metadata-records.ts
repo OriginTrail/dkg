@@ -4,7 +4,8 @@ import { GRAPH_KA_CONTENT_SCOPE_VERSION, contextGraphSharedMemoryMetaUri, isSafe
 import {
   SWM_HEAD_SUFFIX, SWM_PREDICATES as P, SWM_WORKSPACE_OPERATION,
   decodeWorkspaceOperationPublicSliceSubject, isSwmRecordRowAllowed, workspaceKnowledgeAssetHeadSubject, workspaceOperationSubject,
-  type SwmRecordRole,
+  decodeSwmOperationIdentity, matchesSwmMetadataIdentity, swmMetadataLiteralValue,
+  type SwmRecordRole, type SwmOperationIdentity,
 } from '@origintrail-official/dkg-publisher';
 import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import type { Quad } from '@origintrail-official/dkg-storage';
@@ -33,12 +34,7 @@ export interface AdmittedSwmRecord {
   readonly rows: readonly Quad[];
   readonly sourceIndices: readonly number[];
 }
-interface OperationIdentity {
-  readonly contextGraphId: string;
-  readonly shareOperationId: string;
-  readonly subGraphName?: string;
-}
-export interface AdmittedLegacySwmOperation extends AdmittedSwmRecord, OperationIdentity {
+export interface AdmittedLegacySwmOperation extends AdmittedSwmRecord, SwmOperationIdentity {
   readonly role: 'legacyOperation';
   readonly roots: ReadonlySet<string>;
   readonly members: ReadonlyArray<{ sourceIndex: number; root: string }>;
@@ -116,45 +112,10 @@ function selectRows(source: SwmRecordSource, role: SwmRecordRole): IndexedSwmRow
 function rejection(source: SwmRecordSource, recordRole: SwmRecordRejection['recordRole'], reason: SwmRecordRejection['reason']): SwmRecordRejection {
   return { role: 'rejected', recordRole, reason, subject: source.subject, metaGraph: source.metaGraph };
 }
-function literalValue(rows: readonly Quad[], predicate: string): string | undefined {
-  const values = new Set<string>();
-  for (const row of rows) {
-    if (row.predicate !== predicate) continue;
-    const literal = parseRdfLiteralTerm(row.object);
-    if (!literal) return undefined;
-    values.add(literal.value);
-  }
-  return values.size === 1 ? [...values][0] : undefined;
-}
-function matchesLiteral(rows: readonly Quad[], predicate: string, expected: string | undefined, required = false): boolean {
-  if (!rows.some(row => row.predicate === predicate)) return !required;
-  const value = literalValue(rows, predicate);
-  return value !== undefined && value === expected;
-}
+const literalValue = swmMetadataLiteralValue;
 function legacyRoot(object: string): string | undefined {
   const root = object.startsWith('"') ? parseRdfLiteralTerm(object)?.value : object;
   return root && isSafeIri(root) ? root : undefined;
-}
-function operationIdentity(subject: string, metaGraph: string): OperationIdentity | undefined {
-  const graphId = metaGraph.slice('did:dkg:context-graph:'.length, -'/_shared_memory_meta'.length);
-  const candidates: Array<{ contextGraphId: string; subGraphName?: string }> = [{ contextGraphId: graphId }];
-  const slash = graphId.lastIndexOf('/');
-  if (slash > 0 && validateSubGraphName(graphId.slice(slash + 1)).valid) {
-    candidates.push({ contextGraphId: graphId.slice(0, slash), subGraphName: graphId.slice(slash + 1) });
-  }
-  for (const candidate of candidates) {
-    const prefix = `urn:dkg:share:${candidate.contextGraphId}:`;
-    if (!subject.startsWith(prefix)) continue;
-    const shareOperationId = subject.slice(prefix.length);
-    if (!shareOperationId || workspaceOperationSubject(candidate.contextGraphId, shareOperationId) !== subject) continue;
-    return { ...candidate, shareOperationId };
-  }
-  return undefined;
-}
-function matchesIdentity(rows: readonly Quad[], identity: OperationIdentity, required: boolean): boolean {
-  return matchesLiteral(rows, P.contextGraphId, identity.contextGraphId, required)
-    && matchesLiteral(rows, P.shareOperationId, identity.shareOperationId, required)
-    && matchesLiteral(rows, P.subGraphName, identity.subGraphName, required && identity.subGraphName !== undefined);
 }
 function operationCreator(rows: readonly Quad[]): string | undefined {
   let peer: string | undefined;
@@ -171,10 +132,10 @@ export function decodeSwmOperation(source: SwmRecordSource, scope: SharedMemoryA
   if (!source.subject.startsWith('urn:dkg:share:')) return undefined;
   const rows = source.rows.map(row => row.quad);
   if (!rows.some(row => row.predicate === P.type && row.object === SWM_WORKSPACE_OPERATION)) return undefined;
-  const identity = operationIdentity(source.subject, source.metaGraph);
+  const identity = decodeSwmOperationIdentity(source.subject, source.metaGraph);
   if (!identity || (scope.kind === 'context' && identity.contextGraphId !== scope.contextGraphId)) return rejection(source, 'operation', 'nonCanonicalSubject');
   const modern = rows.some(row => row.predicate === P.contentScopeVersion);
-  if (!matchesIdentity(rows, identity, modern)) return rejection(source, 'operation', 'identityMismatch');
+  if (!matchesSwmMetadataIdentity(rows, identity, modern ? 'graph-admission' : 'historical-admission')) return rejection(source, 'operation', 'identityMismatch');
   if (modern) {
     if (Number(literalValue(rows, P.contentScopeVersion)) !== GRAPH_KA_CONTENT_SCOPE_VERSION) return rejection(source, 'operation', 'unsupportedVersion');
     return { ...recordRows(source, selectRows(source, 'graphOperationV2')), role: 'graphOperation' };
@@ -210,7 +171,7 @@ export function decodeSwmPublicSlice(source: SwmRecordSource, operations: Readon
   if (!identity) return undefined;
   const rows = source.rows.map(row => row.quad);
   if (contextGraphSharedMemoryMetaUri(identity.contextGraphId, identity.subGraphName) !== source.metaGraph
-    || !matchesIdentity(rows, identity, false)) return rejection(source, 'publicSlice', 'identityMismatch');
+    || !matchesSwmMetadataIdentity(rows, identity, 'historical-admission')) return rejection(source, 'publicSlice', 'identityMismatch');
   const operation = operations.get(swmRecordKey(source.metaGraph, workspaceOperationSubject(identity.contextGraphId, identity.shareOperationId)));
   if (!operation?.roots.has(identity.rootEntity)) return rejection(source, 'publicSlice', 'missingLegacyRoot');
   if (rows.some(row => row.predicate === P.publicSliceRootEntity && legacyRoot(row.object) !== identity.rootEntity)) return rejection(source, 'publicSlice', 'identityMismatch');

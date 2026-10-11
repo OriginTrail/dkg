@@ -523,7 +523,7 @@ export { AccessClient, type AccessResult } from './access-client.js';
 export * from './share-batching.js';
 export { withKeyedLocks, swmKaWriteLockKey } from './keyed-lock.js';
 
-export { SWM_READ_FIELDS, SWM_PREDICATES, SWM_WORKSPACE_OPERATION, SWM_HEAD_SUFFIX, emitLegacySwmOperation, emitSwmHead, emitSwmPublicSlice, emitSwmOwnership, isSwmRecordRowAllowed, selectSwmRecordRows, swmOperationSubject, swmKnowledgeAssetHeadSubject, swmPublicSliceSubject, decodeSwmPublicSliceSubject, type SwmRecordRole, type LegacySwmOperationTerms, type SwmHeadTerms, type SwmPublicSliceTerms, type SwmOwnershipTerms } from './swm-metadata-schema.js';
+export { SWM_READ_FIELDS, SWM_PREDICATES, SWM_WORKSPACE_OPERATION, SWM_HEAD_SUFFIX, emitLegacySwmOperation, emitSwmHead, emitSwmPublicSlice, emitSwmOwnership, isSwmRecordRowAllowed, selectSwmRecordRows, swmOperationSubject, swmKnowledgeAssetHeadSubject, swmPublicSliceSubject, decodeSwmPublicSliceSubject, type SwmRecordRole, type SwmRecordReadPolicy, decodeSwmOperationIdentity, matchesSwmMetadataIdentity, swmMetadataLiteralValue, type SwmOperationIdentity, type SwmMetadataIdentityPolicy, type LegacySwmOperationTerms, type SwmHeadTerms, type SwmPublicSliceTerms, type SwmOwnershipTerms } from './swm-metadata-schema.js';
 export { withSnapshotScope, snapshotOperation, WorkspaceSnapshotScope, snapshotReferenceCheck, type WorkspaceSnapshotLifecycle } from './workspace-snapshot-lifecycle.js';
 
 export {

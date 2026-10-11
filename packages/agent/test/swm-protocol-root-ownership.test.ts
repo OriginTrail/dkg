@@ -28,17 +28,20 @@ describe('durable ownership of roots with protocol roles', () => {
     for (const directory of directories.splice(0)) await rm(directory, { recursive: true, force: true });
   });
 
-  it.each(['operation', 'head', 'public-slice'] as const)(
+  it.each(['operation', 'head', 'public-slice', 'entity-only'] as const)(
     'sync and physical store reopen preserve the first writer of a %s-shaped root', async role => {
       const share = swmFixtures(CG).share({
         ual: 'did:dkg:hardhat:31337/0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/1',
         version: 1, operationId: 'modern-op', marker: 'modern',
       });
       const slice = `urn:dkg:public-stage:${CG}:_:legacy-op:urn%3Adata%3Aslice-member`;
-      const root = role === 'operation' ? OP : role === 'head' ? share.headSubject : slice;
+      const root = role === 'operation' ? OP : role === 'head' ? share.headSubject
+        : role === 'entity-only' ? 'urn:data:entity-only' : slice;
       const roots = role === 'public-slice' ? [root, 'urn:data:slice-member'] : [root];
       const legacy = generateShareMetadata({ contextGraphId: CG, shareOperationId: 'legacy-op',
-        rootEntities: roots, publisherPeerId: PEER, timestamp: new Date(0) }, META);
+        rootEntities: roots, publisherPeerId: PEER, timestamp: new Date(0) }, META)
+        .map(row => role === 'entity-only' && row.predicate === 'http://dkg.io/ontology/rootEntity'
+          ? { ...row, predicate: 'http://dkg.io/ontology/entity' } : row);
       const slicePayload = [q('urn:data:slice-member', 'urn:data:value', '"slice payload"', '')];
       const sliceDigest = workspacePublicQuadsDigest(slicePayload);
       const protocol = role === 'head' ? share.meta : role === 'public-slice' ? [
@@ -50,7 +53,7 @@ describe('durable ownership of roots with protocol roles', () => {
       ] : [];
       const owner = generateOwnershipQuads([{ rootEntity: root, creatorPeerId: PEER }], META);
       const injected = q(root, 'http://dkg.io/ontology/workspaceOwner', '"attacker"');
-      const metadata = [...legacy, ...protocol, ...owner, injected];
+      const metadata = [...legacy, ...protocol, ...owner, ...(role === 'entity-only' ? [] : [injected])];
       const data = [q(root, 'urn:data:value', '"retained"', DATA)];
       const directory = await mkdtemp(join(tmpdir(), 'dkg-protocol-root-owner-'));
       directories.push(directory);
