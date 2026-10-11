@@ -1,3 +1,4 @@
+import { requireContextGraphReadAuthority } from './context-graph-read-authority.js';
 // daemon/routes/publisher.ts
 //
 // Route handlers for publisher jobs / stats / cancel / retry / clear.
@@ -336,6 +337,23 @@ import type { RequestContext } from './context.js';
 import { actorFromRequestContext } from './context.js';
 
 
+/** Persisted raw-lift jobs have no authenticated CG identity and remain operator-only. */
+function publisherJobContextGraphId(job: PersistedLiftJob): string | undefined {
+  return job.request.jobType === 'knowledge-asset-vm-publish'
+    ? job.request.knowledgeAssetVmPublish.contextGraphId
+    : undefined;
+}
+
+async function requirePublisherJobReadAuthority(ctx: RequestContext, job: PersistedLiftJob): Promise<boolean> {
+  if (actorFromRequestContext(ctx).authentication.principal.kind === 'nodeOperator') return true;
+  const contextGraphId = publisherJobContextGraphId(job);
+  if (contextGraphId === undefined) {
+    jsonResponse(ctx.res, 403, { error: 'Not authorized to read this publisher job.' });
+    return false;
+  }
+  return requireContextGraphReadAuthority(ctx, contextGraphId);
+}
+
 interface PublisherLifecycleFacts {
   contextGraphId: string;
   name: string;
@@ -542,10 +560,16 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
       typeof url.searchParams.get("status") === "string"
         ? url.searchParams.get("status")!
         : undefined;
+    const rawContextGraphId = url.searchParams.get('contextGraphId');
+    const contextGraphId = rawContextGraphId === null ? null : normalizeContextGraphIdOrUri(rawContextGraphId);
+    if (contextGraphId !== null || authentication.principal.kind !== 'nodeOperator') {
+      if (!(await requireContextGraphReadAuthority(ctx, contextGraphId))) return;
+    }
     const jobs = await publisherControl.list(
       status ? { status: status as any } : undefined,
     );
-    return jsonResponse(res, 200, { jobs });
+    return jsonResponse(res, 200, { jobs: contextGraphId === null ? jobs
+      : jobs.filter(job => publisherJobContextGraphId(job) === contextGraphId) });
   }
 
   // GET /api/publisher/job?id=...  (new route, wrapped response)
@@ -557,6 +581,7 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
       return jsonResponse(res, 404, {
         error: `Publisher job not found: ${jobId}`,
       });
+    if (!(await requirePublisherJobReadAuthority(ctx, job))) return;
     return jsonResponse(res, 200, wrappedJobDetailBody(ctx, job));
   }
 
@@ -569,6 +594,7 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
       return jsonResponse(res, 404, {
         error: `Publisher job not found: ${jobId}`,
       });
+    if (!(await requirePublisherJobReadAuthority(ctx, job))) return;
     const payload = await publisherControl.inspectPreparedPayload(jobId);
     return jsonResponse(res, 200, wrappedJobDetailBody(ctx, job, payload));
   }
@@ -580,6 +606,7 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
   if (req.method === "GET" && path === "/api/publisher/job-by-intent") {
     const facts = parsePublisherLifecycleFactsFromQuery(url, res, requestAgentAddress);
     if (!facts) return; // a 400 was already sent
+    if (!(await requireContextGraphReadAuthority(ctx, facts.contextGraphId))) return;
     const lookup = await publisherControl.lookupKnowledgeAssetVmPublishJobByIntent(facts);
     const { kind, ...rest } = lookup;
     return jsonResponse(res, 200, { result: kind, ...rest });
@@ -592,11 +619,17 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
   if (req.method === "GET" && path === "/api/publisher/journal") {
     const jobId = url.searchParams.get("jobId")?.trim() || undefined;
     if (jobId !== undefined) {
+      if (authentication.principal.kind !== 'nodeOperator') {
+        const job = await publisherControl.getStatus(jobId);
+        if (!job) return jsonResponse(res, 404, { error: `Publisher job not found: ${jobId}` });
+        if (!(await requirePublisherJobReadAuthority(ctx, job))) return;
+      }
       const result = await publisherControl.readJournalByJob(jobId);
       return jsonResponse(res, 200, result);
     }
     const facts = parsePublisherLifecycleFactsFromQuery(url, res, requestAgentAddress);
     if (!facts) return; // a 400 was already sent
+    if (!(await requireContextGraphReadAuthority(ctx, facts.contextGraphId))) return;
     const result = await publisherControl.readJournalByIntent(facts);
     return jsonResponse(res, 200, result);
   }
@@ -614,9 +647,11 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     // GH#2270 — this legacy shape spreads the job at the top level, so `retryState` joins it
     // there (as `payload` already does); the shared builder keeps every job field's value.
     if (segments[1] === "payload") {
-      const payload = await publisherControl.inspectPreparedPayload(jobId);
+      if (!(await requirePublisherJobReadAuthority(ctx, job))) return;
+    const payload = await publisherControl.inspectPreparedPayload(jobId);
       return jsonResponse(res, 200, legacyJobDetailBody(ctx, job, payload));
     }
+    if (!(await requirePublisherJobReadAuthority(ctx, job))) return;
     return jsonResponse(res, 200, legacyJobDetailBody(ctx, job));
   }
 

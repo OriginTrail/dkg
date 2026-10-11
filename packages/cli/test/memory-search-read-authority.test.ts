@@ -244,7 +244,8 @@ describe('POST /api/memory/search — context-graph read authority', () => {
     expect(probe.storeQueried).toBe(false);
     expect(probe.sparql).toBe('');
     const parsed = JSON.parse(res.body);
-    expect(parsed.error).toContain('cg2');
+    expect(parsed.error).toBe('Not authorized to read this context graph.');
+    expect(res.body).not.toContain('cg2');
     expect(parsed.results).toBeUndefined();
     expect(parsed.resultCount).toBeUndefined();
   });

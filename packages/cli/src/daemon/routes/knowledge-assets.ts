@@ -1,3 +1,4 @@
+import { requireContextGraphReadAuthority } from './context-graph-read-authority.js';
 // Route handlers for the GitHub-shaped Knowledge Asset HTTP surface.
 //
 // OT-RFC-43 §10.5 — one coherent resource model for a Knowledge Asset (KA):
@@ -1191,7 +1192,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
   // contextGraphId, validate subGraphName, extract optional agentAddress. For
   // agent-scoped bearer tokens, omitted agentAddress defaults to the token's
   // storage lane so GETs see the same draft the write routes created.
-  function readGetParams(): { cg: string; subGraphName?: string; agentAddress?: string } | null {
+  async function readGetParams(): Promise<{ cg: string; subGraphName?: string; agentAddress?: string } | null> {
     if (decodeAndValidateName(name, res) === null) return null;
     const rawCg = url.searchParams.get("contextGraphId");
     if (!validateRequiredContextGraphId(rawCg, res)) return null;
@@ -1203,13 +1204,15 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       return null;
     }
     const agentAddress = explicitAgentAddress ?? writePreflightCallerAgentAddress;
-    return { cg: normalizeContextGraphIdOrUri(rawCg as string), subGraphName, agentAddress };
+    const cg = normalizeContextGraphIdOrUri(rawCg as string);
+    if (!(await requireContextGraphReadAuthority(ctx, cg))) return null;
+    return { cg, subGraphName, agentAddress };
   }
 
   // GET /api/knowledge-assets/:identifier — KA metadata / lifecycle state.
   // `:identifier` is a plain name OR a B3 kaId (did:dkg UAL / `0x<addr>:<n>`).
   if (method === "GET" && segs.length === 1) {
-    const p = readGetParams();
+    const p = await readGetParams();
     if (!p) return;
     const hist = await resolveDescriptor(p.cg, p.subGraphName, p.agentAddress);
     if (!hist) return jsonResponse(res, 404, { error: `No knowledge asset "${name}" in context graph "${p.cg}"` });
@@ -1219,7 +1222,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
   // GET /api/knowledge-assets/:identifier/wm/quads — dump the WM draft's quads.
   // Parity with the legacy POST /api/assertion/:name/query (read, not SPARQL).
   if (method === "GET" && layer === "wm" && verb === "quads") {
-    const p = readGetParams();
+    const p = await readGetParams();
     if (!p) return;
     // B3: ONLY a did:dkg / 0x<agent>:<number> kaId alias needs resolving to the
     // lifecycle name before querying — otherwise the raw alias is passed as the
@@ -1251,7 +1254,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
   // handler reads + validates the query params itself (parity with legacy), so
   // here we only decode/validate the :name segment before delegating.
   if (method === "GET" && layer === "wm" && verb === "extraction-status") {
-    if (decodeAndValidateName(name, res) === null) return;
+    if (!(await readGetParams())) return;
     return handleKaExtractionStatus(ctx, name);
   }
 
@@ -1259,7 +1262,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
   // Returns that layer's pointer + that layer's derived status so per-layer
   // divergence (e.g. WM ahead of VM after wm/pull-from) is observable.
   if (method === "GET" && (layer === "wm" || layer === "swm" || layer === "vm") && !verb) {
-    const p = readGetParams();
+    const p = await readGetParams();
     if (!p) return;
     const hist = await resolveDescriptor(p.cg, p.subGraphName, p.agentAddress);
     if (!hist) return jsonResponse(res, 404, { error: `No knowledge asset "${name}"` });

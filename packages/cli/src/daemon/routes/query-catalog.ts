@@ -1,4 +1,5 @@
-import type { RequestContext } from './context.js';
+import { requireContextGraphReadAuthority } from './context-graph-read-authority.js';
+import { actorFromRequestContext, type RequestContext } from './context.js';
 import {
   assertSafeIri,
   assertSafeRdfTerm,
@@ -33,7 +34,6 @@ import {
 import { authenticatedAgentAddress } from '../../auth.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
-  withRpcUsageSite,
 } from '@origintrail-official/dkg-chain';
 
 const QUERY_CATALOG_RESULT_LIMIT = 5_000;
@@ -159,20 +159,8 @@ export async function handleQueryCatalogRoutes(ctx: RequestContext): Promise<boo
     const contextGraphId = parsed.contextGraphId;
     if (!validateRequiredContextGraphId(contextGraphId, res)) return true;
 
-    const callerAgentAddress = authenticatedAgentAddress(authentication);
-    const isNodeAdmin = authentication.principal.kind === 'nodeOperator';
-    if (
-      !isNodeAdmin
-      && !(await withRpcUsageSite(
-        CG_AUTH_RPC_SITES.queryCatalog,
-        () => agent.canReadContextGraph(contextGraphId, { callerAgentAddress }),
-      ))
-    ) {
-      jsonResponse(res, 403, {
-        error: `Not authorized to read query catalog for context graph "${contextGraphId}".`,
-      });
-      return true;
-    }
+    const callerAgentAddress = actorFromRequestContext(ctx).authenticatedAgentAddress;
+    if (!(await requireContextGraphReadAuthority(ctx, contextGraphId, CG_AUTH_RPC_SITES.queryCatalog))) return true;
 
     const lifecycle = createStoreQueryRequestLifecycle(
       req,
