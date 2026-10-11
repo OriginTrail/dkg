@@ -14,7 +14,7 @@ import {
   connectRemoteSigners,
   type RemoteSigners,
 } from '@origintrail-official/dkg-chain';
-import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
+import { TypedEventBus, buildUpdateAuthorAttestationTypedData, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGPublisher } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
@@ -119,17 +119,19 @@ describe('external signer author keys', () => {
     expect(agent.getLocalAgentMode(agentKey.address)).toBe('self-sovereign');
   });
 
-  it('signs author attestations for that agent through the external signer', async () => {
+  it('signs author attestations for requests made with that agent\'s token through the external signer', async () => {
     const { fake, remote } = await externalSigners();
     const agent = await stubAgent(remote);
-    agent.defaultAgentAddress = agentKey.address;
-    const record = registerSelfSovereignAgent('writer', agentKey.publicKey);
-    agent.localAgents.set(record.agentAddress, record);
+    const record = await agent.registerAgent('writer', { address: agentKey.address });
+    // What the daemon routes do for an agent-scoped token.
+    const tokenAgent = agent.resolveAgentByToken(record.authToken);
+    expect(tokenAgent).toBe(agentKey.address);
+    agent.defaultAgentAddress = tokenAgent;
 
     await agent.assertion.create(CG, NAME);
     await agent.assertion.write(CG, NAME, [q('urn:external-authors:asset', 'urn:value', '"v1"')]);
     const before = fake.calls('eth_signTypedData_v4').length;
-    const seal = await agent.assertion.finalize(CG, NAME, { authorAgentAddress: agentKey.address });
+    const seal = await agent.assertion.finalize(CG, NAME, { authorAgentAddress: tokenAgent });
 
     expect(ethers.getAddress(seal.authorAddress)).toBe(agentKey.address);
     expect(seal.reservedKaId >> 96n).toBe(BigInt(agentKey.address));
@@ -138,6 +140,39 @@ describe('external signer author keys', () => {
     expect(ethers.getAddress(String(requests[0].params[0]))).toBe(agentKey.address);
     expect(requests[0].authorization).toBe(`Bearer ${AUTHOR_TOKEN}`);
     expect(fake.calls('eth_signTransaction')).toHaveLength(0);
+
+    // The update attestation for an asset this agent owns is signed the same way.
+    expect(await agent._canReSignUpdateAttestationForAuthor(agentKey.address, agent.publisher)).toBe(true);
+    expect(await agent._canReSignUpdateAttestationForAuthor(payer.address, agent.publisher)).toBe(false);
+    const kaId = seal.reservedKaId;
+    const update = await agent._buildPrecomputedUpdateAttestationForSeal(kaId, seal);
+    const typed = buildUpdateAuthorAttestationTypedData({
+      chainId: 31337n,
+      kav10Address: KAV_ADDRESS,
+      kaId,
+      newMerkleRoot: seal.merkleRoot,
+      authorAddress: agentKey.address,
+    });
+    const recovered = ethers.verifyTypedData(
+      typed.domain,
+      typed.types,
+      typed.message,
+      ethers.Signature.from({ r: ethers.hexlify(update.signature.r), yParityAndS: ethers.hexlify(update.signature.vs) }),
+    );
+    expect(recovered).toBe(agentKey.address);
+  });
+
+  it('refuses a self-sovereign agent whose key the signer does not hold as an author key', async () => {
+    const { remote } = await externalSigners();
+    const agent = await stubAgent(remote);
+    // A payer key registered as an agent is still never signed for as an author.
+    const record = registerSelfSovereignAgent('payer-as-agent', payer.publicKey);
+    agent.localAgents.set(record.agentAddress, record);
+    agent.defaultAgentAddress = payer.address;
+    await agent.assertion.create(CG, NAME);
+    await agent.assertion.write(CG, NAME, [q('urn:external-authors:payer', 'urn:value', '"v1"')]);
+    await expect(agent.assertion.finalize(CG, NAME, { authorAgentAddress: payer.address }))
+      .rejects.toThrow(/registered as self-sovereign/);
   });
 
   it('uses the configured default author, never a payer, when no agent is named', async () => {

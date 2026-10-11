@@ -1453,7 +1453,7 @@ export class PublishMethods extends DKGAgentBase {
       if (mode === undefined) {
         throw new Error(`publishAsync: ${opts.authorAgentAddress} is not a registered local agent`);
       }
-      if (mode === 'self-sovereign') {
+      if (mode === 'self-sovereign' && !(await externalAuthorSignerFor(this.config, opts.authorAgentAddress))) {
         throw new Error(
           `publishAsync: agent ${opts.authorAgentAddress} is self-sovereign — supply ` +
             'authorSignTypedData callback or preSignedAuthorAttestation instead',
