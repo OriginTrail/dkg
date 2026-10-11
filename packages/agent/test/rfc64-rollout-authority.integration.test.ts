@@ -8255,6 +8255,7 @@ it('retains a genuine last-close reconnect raised during the receiver drain', as
   vi.spyOn(edge, 'queueSyncFromPeerOnConnect').mockReturnValue(true);
   vi.spyOn(edge, 'reannounceRfc64CatalogHeadsToPeerV1').mockResolvedValue({ announced: 0, failed: 0, manifest: [] });
   const service = (edge as any).rfc64PublicCatalogServiceV1;
+  const reserve = vi.spyOn(Rfc64CatalogReplayRecoveryRuntimeV1.prototype, 'reservePeer');
   const request = vi.spyOn(service, 'requestCatalogHeadReplay').mockResolvedValue({
     kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2, heads: [],
   });
@@ -8276,10 +8277,20 @@ it('retains a genuine last-close reconnect raised during the receiver drain', as
     // Closing one of several live connections is not a new peer generation.
     edge.node.libp2p.dispatchEvent(new CustomEvent('connection:close', { detail: { remotePeer, timeline: { open: now, close: now } } } as any));
     open();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(edge.readRfc64CatalogRuntimeSelectionV1().connectionReplay?.pendingScopes).toBe(1);
+    expect(reserve.mock.calls.filter(call => call[2] === peer)).toHaveLength(1);
+    const currentFence = reserve.mock.results.find((_, i) => reserve.mock.calls[i][2] === peer)?.value;
+    expect(currentFence).not.toBeNull();
     connected = false;
     edge.node.libp2p.dispatchEvent(new CustomEvent('connection:close', { detail: { remotePeer, timeline: { open: now, close: now } } } as any));
     connected = true; open();
     await new Promise(resolve => setTimeout(resolve, 0));
+    expect(edge.readRfc64CatalogRuntimeSelectionV1().connectionReplay?.pendingScopes).toBe(2);
+    const peerFences = reserve.mock.results.filter((_, i) => reserve.mock.calls[i][2] === peer).map(result => result.value);
+    expect(peerFences).toHaveLength(2);
+    expect(peerFences[0]).toBe(currentFence);
+    expect(peerFences[1]).not.toBe(currentFence);
     release();
     await vi.waitFor(() => expect(edge.readRfc64CatalogRuntimeSelectionV1().connectionReplay?.activePeers).toBe(0));
     expect(request).toHaveBeenCalledOnce();

@@ -30,6 +30,8 @@ export class Rfc64CatalogReplayScopeLifecycleV1 {
     return [this.#current, this.#successor].some(demand => demand?.phase.state === 'waiting-for-fence');
   }
   canEvict(now: number): boolean { return this.outstanding === 0 && this.#eligibleAt <= now; }
+  /** A completed cooldown may yield placement without retiring its queued fence. */
+  canDefer(now: number): boolean { return this.#eligibleAt !== 0 && this.ready(now); }
 
   reserve(connectionGeneration: number, reserveFence: () => FenceV1 | null): Rfc64CatalogReplayScopeAdmissionV1 | null {
     const current = this.#current;

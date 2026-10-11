@@ -171,9 +171,13 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
 
   #installScope(peer: PeerV1, scope: ScopeV1, now: number): boolean {
     if (peer.scopes.size >= MAX_SCOPES_PER_PEER) {
-      const idle = [...peer.scopes.values()].find(candidate => candidate.canEvict(now));
-      if (idle === undefined) return false;
-      peer.scopes.delete(idle.contextGraphId);
+      if (peer.active) return false;
+      const displaced = [...peer.scopes.values()].find(candidate => candidate.canEvict(now))
+        ?? [...peer.scopes.values()].find(candidate => candidate.canDefer(now));
+      if (displaced === undefined) return false;
+      peer.scopes.delete(displaced.contextGraphId);
+      // Only placement moves: reconnect generation, cooldown and fence stay owned.
+      if (displaced.outstanding > 0) peer.deferred.set(displaced.contextGraphId, displaced);
     }
     peer.scopes.set(scope.contextGraphId, scope);
     return true;
@@ -189,13 +193,16 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     }
   }
 
-  #continue(peer: PeerV1, now: number): void {
-    this.#pruneSelection(peer, new Set(this.#ports.selectContextGraphIds()));
+  #continue(peer: PeerV1, now: number, selected: ReadonlySet<string>): void {
+    this.#pruneSelection(peer, selected);
     for (const scope of [...peer.scopes.values(), ...peer.deferred.values()]) {
       scope.retryFence(() => this.#ports.reserveFence(scope.contextGraphId, peer.peerId));
     }
-    for (const [id, scope] of peer.deferred) {
-      if (scope.queued && this.#installScope(peer, scope, now)) peer.deferred.delete(id);
+    // A physical turn retains its captured scopes. Snapshot overflow so a displaced
+    // scope cannot be promoted again in this same synchronous sweep.
+    if (peer.active) return;
+    for (const [id, scope] of [...peer.deferred]) {
+      if (scope.ready(now) && this.#installScope(peer, scope, now)) peer.deferred.delete(id);
     }
   }
 
@@ -234,7 +241,8 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
       try {
         if (signal.aborted || this.#closed) return;
         const now = Date.now();
-        for (const peer of this.#byPeer.values()) this.#continue(peer, now);
+        const selected = new Set(this.#ports.selectContextGraphIds());
+        for (const peer of this.#byPeer.values()) this.#continue(peer, now, selected);
         const peer = [...this.#byPeer.values()].find(candidate => this.#ready(candidate, now));
         if (peer === undefined) return;
         await this.#runTurn(peer, signal);
@@ -253,8 +261,10 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
           if (deadline === Infinity) return;
           // One owned notifier; stream slots never wait for future eligibility.
           await this.#ports.wait(signal, Math.min(1_000, Math.max(1, deadline - Date.now())));
-          for (const peer of this.#byPeer.values()) this.#continue(peer, Date.now());
-          if ([...this.#byPeer.values()].some(peer => this.#ready(peer, Date.now()))) this.#schedule();
+          const now = Date.now();
+          const selected = new Set(this.#ports.selectContextGraphIds());
+          for (const peer of this.#byPeer.values()) this.#continue(peer, now, selected);
+          if ([...this.#byPeer.values()].some(peer => this.#ready(peer, now))) this.#schedule();
         }
       } finally { if (signal.aborted) this.#retire(); }
     })) this.#retire();

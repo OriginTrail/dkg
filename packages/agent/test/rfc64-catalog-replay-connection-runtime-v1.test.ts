@@ -511,6 +511,63 @@ describe('connection staging versus canonical recovery execution', () => {
 
 
 describe('deferred replay completeness custody', () => {
+  it('rotates the 257th graph into execution despite reconnects before every cooldown', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(10_000);
+    const ids = Array.from({ length: 257 }, (_, i) => `cg-${String(i).padStart(3, '0')}`);
+    const calls: { cg: string; at: number }[] = [];
+    const recovery = new Rfc64CatalogReplayRecoveryRuntimeV1<never>({
+      requestPeer: async cg => { calls.push({ cg, at: Date.now() }); return { status: 'completed', targets: [] }; },
+      whenReceiverIdleForContextGraph: async () => undefined, targetIdentity: () => '', parityFailed: async () => false,
+    });
+    const connection = makeRuntime({ selectContextGraphIds: () => ids,
+      reserveFence: (cg, peer) => recovery.reservePeer(cg, 'policy', peer),
+      reannounce: async () => ({ failed: 0 }),
+      replay: (cg, demand, signal) => recovery.request({ kind: 'connection-demand', contextGraphId: cg,
+        policyDigest: 'policy', demand, signal }), warn: vi.fn(),
+    });
+    connection.prepareConnectionOpen('peer')!.admit(); await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toHaveLength(256);
+    for (let reconnect = 1; reconnect <= 3; reconnect++) {
+      await vi.advanceTimersByTimeAsync(30_000);
+      connection.disconnected('peer'); connection.prepareConnectionOpen('peer')?.admit();
+      await vi.advanceTimersByTimeAsync(0);
+      if (reconnect === 1) {
+        expect(recovery.status('cg-256', 'policy')?.active).toBe(true);
+        expect(calls.some(call => call.cg === 'cg-256')).toBe(false);
+      } else {
+        expect(calls.some(call => call.cg === 'cg-256')).toBe(true);
+      }
+    }
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(connection.status().pendingScopes).toBe(0);
+    for (const cg of ids) {
+      expect(recovery.status(cg, 'policy')?.active).toBe(false);
+      const completedAt = calls.filter(call => call.cg === cg).map(call => call.at);
+      expect(completedAt.length).toBeGreaterThanOrEqual(cg === 'cg-256' ? 1 : 2);
+      for (let i = 1; i < completedAt.length; i++) expect(completedAt[i] - completedAt[i - 1]).toBeGreaterThanOrEqual(60_000);
+    }
+  });
+
+  it.each([1, 12])('reads selection once per synchronous worker and deadline sweep with %i peers', async peerCount => {
+    const scheduled = new Map<0 | 1 | 'deadline', (signal: AbortSignal) => Promise<void>>();
+    const select = vi.fn(() => ['cg']);
+    const controller = new AbortController(); const cancelled = new Error('deadline control complete');
+    let waits = 0;
+    const connection = makeRuntime({ selectContextGraphIds: select, reserveFence: () => null,
+      reannounce: async () => ({ failed: 0 }), replay: async () => ({ failed: 0 }), warn: vi.fn(),
+      schedule: (slot, work) => { scheduled.set(slot, work); return true; },
+      wait: async () => { if (++waits === 2) { controller.abort(cancelled); throw cancelled; } },
+    });
+    for (let i = 0; i < peerCount; i++) connection.prepareConnectionOpen(`peer-${i}`)!.admit();
+    select.mockClear();
+    await scheduled.get(0)!(controller.signal);
+    expect(select).toHaveBeenCalledOnce();
+    select.mockClear();
+    await expect(scheduled.get('deadline')!(controller.signal)).rejects.toBe(cancelled);
+    expect(select).toHaveBeenCalledOnce();
+    expect(waits).toBe(2);
+  });
+
   it('fences the 257th graph before execution and retains its fence through cooldown', async () => {
     vi.useFakeTimers(); vi.setSystemTime(10_000);
     const ids = Array.from({ length: 257 }, (_, i) => `cg-${String(i).padStart(3, '0')}`);
