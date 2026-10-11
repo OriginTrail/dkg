@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 
 import {
@@ -36,6 +36,7 @@ import {
   type UnsignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
+import * as mainThreadTimeSlice from '../src/main-thread-time-slice.js';
 
 import {
   Rfc64AuthorCatalogProductionErrorV1,
@@ -58,6 +59,40 @@ const catalogWallet = new ethers.Wallet(CATALOG_PRIVATE_KEY);
 const otherWallet = new ethers.Wallet(OTHER_PRIVATE_KEY);
 
 describe('RFC-64 author catalog producer', () => {
+  it('gives timers a turn after predecessor verification and preserves every signed byte', async () => {
+    const genesis = await emptyGenesis();
+    const input = {
+      previousHead: genesis.head,
+      previousDirectoryPath: genesis.directoryPath,
+      previousBucket: null,
+      selectedBucketId: '0' as DecimalU64V1,
+      nextRows: [makeRow(1n, 'cooperative')],
+      issuedAt: '1700000000001' as TimestampMsV1,
+      signer: signer(catalogWallet),
+    };
+    const noTurn = vi.spyOn(mainThreadTimeSlice, 'createMainThreadTimeSlice')
+      .mockReturnValue(async () => {});
+    let reference;
+    try { reference = await produceSparseAuthorCatalogSuccessorV1(input); }
+    finally { noTurn.mockRestore(); }
+    let timerRan = false;
+    const timer = setTimeout(() => {
+      timerRan = true;
+      input.nextRows[0] = makeRow(2n, 'mutated-after-validation');
+    }, 0);
+    const cooperativeSigner = {
+      issuer: input.signer.issuer,
+      signDigest: async (digest: Parameters<Rfc64AuthorCatalogEip191SignerV1['signDigest']>[0]): Promise<string> => {
+        expect(timerRan, 'replacement signing monopolized the predecessor verification turn').toBe(true);
+        return input.signer.signDigest(digest);
+      },
+    };
+    try {
+      const produced = await produceSparseAuthorCatalogSuccessorV1({ ...input, signer: cooperativeSigner });
+      expect(produced).toEqual(reference);
+    } finally { clearTimeout(timer); }
+  });
+
   it('produces a signed immutable empty genesis with canonical staging order', async () => {
     const produced = await produceEmptyAuthorCatalogGenesisV1({
       scope: scope('1'),
