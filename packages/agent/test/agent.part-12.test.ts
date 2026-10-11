@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, vi, DKGAgentWallet, buildAgentProfile, collectPublishableMultiaddrs, CclEvaluator, DiscoveryClient, ProfileManager, encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret, DKGAgent, AGENT_REGISTRY_CONTEXT_GRAPH, parseCclPolicy, OxigraphStore, getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, PROTOCOL_STORAGE_ACK, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphWorkspaceGraphUri, contextGraphMetaUri, sparqlString, DKGQueryEngine, sha256, EVMChainAdapter, MockChainAdapter, createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS, mintTokens, ethers, tmpdir, mkdtemp, readFile, readdir, rm, join, fileURLToPath, _wrapAgentPublisherForSeal, CapturingContextGraphChainAdapter, AsyncSignerAddressContextGraphChainAdapter, SignerListContextGraphChainAdapter, PcaCuratedRegistrationChainAdapter, NonRegisteringACKChainAdapter, FlakyRegistrationACKChainAdapter, TransientIdentityFailureChainAdapter, BrandNewCoreTransientChainAdapter, PermanentProfileFailureChainAdapter, RetryPathPermanentFailureChainAdapter, ContextAuthorizedPublisherChainAdapter, buildSnapshotFactQuads, ReferenceEvaluator, loadYaml, CCL_FACT_NS, OperationalKeyOnlyPublishChainAdapter, ExternalOperationalKeyPublishChainAdapter, AddressOnlyExternalOperationalKeyPublishChainAdapter, AsyncAddressSignMessageAsPublishChainAdapter, GenericSignMessageExternalOperationalKeyPublishChainAdapter, MultiSignerGenericSignMessagePublishChainAdapter, SingleAddressMismatchedGenericSignMessagePublishChainAdapter, SingleSignerAdapterPublishChainAdapter, ReservingAuthorityContextGraphChainAdapter, type Quad, type ChainAdapter, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type OnChainPublishResult, type V10PublishDirectParams } from './agent.shared';
+import type { ExternalAuthorSigners } from '@origintrail-official/dkg-chain';
 
 
 
@@ -13,6 +14,23 @@ beforeAll(async () => {
 afterAll(async () => {
   await revertSnapshot(_fileSnapshot);
 });
+
+/** Author keys of an external signer that serves exactly these keys. */
+function externalAuthorKeys(...privateKeys: string[]): ExternalAuthorSigners {
+  const wallets = privateKeys.map((key) => new ethers.Wallet(key));
+  return {
+    signerFor: async (address) => wallets.find((wallet) => wallet.address.toLowerCase() === address.toLowerCase()),
+  };
+}
+
+/** Participant agents recorded in the context graph's own `_meta` graph. */
+async function localParticipantAgents(agent: DKGAgent, contextGraphId: string): Promise<string[]> {
+  const result = await agent.store.query(
+    `SELECT ?agent WHERE { GRAPH <${contextGraphMetaUri(contextGraphId)}> { ` +
+    `<did:dkg:context-graph:${contextGraphId}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}> ?agent } }`,
+  );
+  return result.type === 'bindings' ? result.bindings.map((row) => String(row['agent']).replace(/^"|"$/g, '')) : [];
+}
 
 describe('Genesis Knowledge', () => {
 
@@ -175,6 +193,206 @@ describe('Genesis Knowledge', () => {
       })).rejects.toThrow(/not a registered agent of PCA account 99.*registered account: 100/i);
 
       expect(chain.createOnChainContextGraphCalls).toHaveLength(0);
+      await agent.stop().catch(() => {});
+    });
+
+
+    // With an external signer the curator can be one of its author keys, which
+    // never sign a transaction. The payer signing the registration (here a
+    // registered agent of the PCA) owns the Context Graph NFT; the author key
+    // stays the local curator and becomes a participant agent.
+    it('accepts PCA curated registration when the curator is an author key of the external signer', async () => {
+      const pcaOwner = new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address;
+      const payer = new ethers.Wallet(HARDHAT_KEYS.REC2_OP);
+      const author = new ethers.Wallet(HARDHAT_KEYS.EXTRA1).address;
+      const pcaAccountId = 77n;
+      const chain = new PcaCuratedRegistrationChainAdapter(
+        new Map([[pcaAccountId, pcaOwner]]),
+        payer.address,
+        new Map([[payer.address.toLowerCase(), pcaAccountId]]),
+      );
+      const agent = await DKGAgent.create({
+        name: 'PcaExternalAuthorCuratorBot',
+        store: new OxigraphStore(),
+        chainAdapter: chain,
+        chainConfig: {
+          rpcUrl: 'http://127.0.0.1:1',
+          hubAddress: ethers.ZeroAddress,
+          signers: [payer],
+          authors: externalAuthorKeys(HARDHAT_KEYS.EXTRA1),
+        },
+        nodeRole: 'edge',
+      });
+      await agent.start();
+
+      await agent.createContextGraph({
+        id: 'accept-pca-external-author',
+        name: 'Accept PCA external author',
+        accessPolicy: 1,
+        callerAgentAddress: author,
+      });
+      await expect(agent.registerContextGraph('accept-pca-external-author', {
+        callerAgentAddress: author,
+        publishAuthorityAccountId: pcaAccountId,
+      })).resolves.toMatchObject({ onChainId: expect.any(String) });
+
+      // Publicly discoverable with a curated publish policy: the curator is not
+      // allow-listed at create time, so only the registration makes it a participant.
+      await agent.createContextGraph({
+        id: 'accept-pca-external-author-public',
+        name: 'Accept PCA external author (public)',
+        callerAgentAddress: author,
+      });
+      await expect(agent.registerContextGraph('accept-pca-external-author-public', {
+        callerAgentAddress: author,
+        accessPolicy: 0,
+        publishPolicy: 0,
+        publishAuthorityAccountId: pcaAccountId,
+      })).resolves.toMatchObject({ onChainId: expect.any(String) });
+
+      expect(chain.createOnChainContextGraphCalls).toHaveLength(2);
+      expect(chain.createOnChainContextGraphCalls[0]).toMatchObject({
+        accessPolicy: 1,
+        publishPolicy: 0,
+        publishAuthority: pcaOwner,
+        publishAuthorityAccountId: pcaAccountId,
+      });
+      expect(chain.createOnChainContextGraphCalls[0]?.participantAgents).toContain(author);
+      expect(chain.createOnChainContextGraphCalls[1]).toMatchObject({
+        accessPolicy: 0,
+        publishPolicy: 0,
+        publishAuthority: pcaOwner,
+        publishAuthorityAccountId: pcaAccountId,
+        participantAgents: [author],
+      });
+      for (const id of ['accept-pca-external-author', 'accept-pca-external-author-public']) {
+        expect(await localParticipantAgents(agent, id)).toEqual([author]);
+        expect(await agent.getContextGraphCurator(id)).toBe(`did:dkg:agent:${author}`);
+      }
+      await agent.stop().catch(() => {});
+    });
+
+
+    it('rejects PCA curated registration when the curator is not an author key of the external signer', async () => {
+      const pcaOwner = new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address;
+      const payer = new ethers.Wallet(HARDHAT_KEYS.REC2_OP);
+      const curator = new ethers.Wallet(HARDHAT_KEYS.EXTRA2).address;
+      const pcaAccountId = 78n;
+      const chain = new PcaCuratedRegistrationChainAdapter(
+        new Map([[pcaAccountId, pcaOwner]]),
+        payer.address,
+        new Map([[payer.address.toLowerCase(), pcaAccountId]]),
+      );
+      const agent = await DKGAgent.create({
+        name: 'PcaNotExternalAuthorCuratorBot',
+        store: new OxigraphStore(),
+        chainAdapter: chain,
+        chainConfig: {
+          rpcUrl: 'http://127.0.0.1:1',
+          hubAddress: ethers.ZeroAddress,
+          signers: [payer],
+          authors: externalAuthorKeys(HARDHAT_KEYS.EXTRA1),
+        },
+        nodeRole: 'edge',
+      });
+      await agent.start();
+
+      await agent.createContextGraph({
+        id: 'reject-pca-not-external-author',
+        name: 'Reject PCA curator without external author key',
+        accessPolicy: 1,
+        callerAgentAddress: curator,
+      });
+      await expect(agent.registerContextGraph('reject-pca-not-external-author', {
+        callerAgentAddress: curator,
+        publishAuthorityAccountId: pcaAccountId,
+      })).rejects.toThrow(/local curator .* differs from registration chain signer/);
+
+      expect(chain.createOnChainContextGraphCalls).toHaveLength(0);
+      expect(await localParticipantAgents(agent, 'reject-pca-not-external-author')).toEqual([]);
+      await agent.stop().catch(() => {});
+    });
+
+
+    it('rejects PCA curated registration by an author-key curator when the node signs with local keys', async () => {
+      const pcaOwner = new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address;
+      const payer = new ethers.Wallet(HARDHAT_KEYS.REC2_OP);
+      const author = new ethers.Wallet(HARDHAT_KEYS.EXTRA1).address;
+      const pcaAccountId = 79n;
+      const chain = new PcaCuratedRegistrationChainAdapter(
+        new Map([[pcaAccountId, pcaOwner]]),
+        payer.address,
+        new Map([[payer.address.toLowerCase(), pcaAccountId]]),
+      );
+      const agent = await DKGAgent.create({
+        name: 'PcaLocalKeysAuthorCuratorBot',
+        store: new OxigraphStore(),
+        chainAdapter: chain,
+        chainConfig: {
+          rpcUrl: 'http://127.0.0.1:1',
+          hubAddress: ethers.ZeroAddress,
+          operationalKeys: [HARDHAT_KEYS.REC2_OP],
+          authors: externalAuthorKeys(HARDHAT_KEYS.EXTRA1),
+        },
+        nodeRole: 'edge',
+      });
+      await agent.start();
+
+      await agent.createContextGraph({
+        id: 'reject-pca-author-local-keys',
+        name: 'Reject PCA author curator with local keys',
+        accessPolicy: 1,
+        callerAgentAddress: author,
+      });
+      await expect(agent.registerContextGraph('reject-pca-author-local-keys', {
+        callerAgentAddress: author,
+        publishAuthorityAccountId: pcaAccountId,
+      })).rejects.toThrow(/local curator .* differs from registration chain signer/);
+
+      expect(chain.createOnChainContextGraphCalls).toHaveLength(0);
+      expect(await localParticipantAgents(agent, 'reject-pca-author-local-keys')).toEqual([]);
+      await agent.stop().catch(() => {});
+    });
+
+
+    it('rejects PCA curated registration by an author-key curator when the external signer payer is not an agent of that PCA', async () => {
+      const pcaOwner = new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address;
+      const payer = new ethers.Wallet(HARDHAT_KEYS.REC2_OP);
+      const author = new ethers.Wallet(HARDHAT_KEYS.EXTRA1).address;
+      const targetPcaAccountId = 80n;
+      const otherPcaAccountId = 81n;
+      const chain = new PcaCuratedRegistrationChainAdapter(
+        new Map([[targetPcaAccountId, pcaOwner]]),
+        payer.address,
+        new Map([[payer.address.toLowerCase(), otherPcaAccountId]]),
+      );
+      const agent = await DKGAgent.create({
+        name: 'PcaExternalAuthorWrongAgentBot',
+        store: new OxigraphStore(),
+        chainAdapter: chain,
+        chainConfig: {
+          rpcUrl: 'http://127.0.0.1:1',
+          hubAddress: ethers.ZeroAddress,
+          signers: [payer],
+          authors: externalAuthorKeys(HARDHAT_KEYS.EXTRA1),
+        },
+        nodeRole: 'edge',
+      });
+      await agent.start();
+
+      await agent.createContextGraph({
+        id: 'reject-pca-external-author-wrong-agent',
+        name: 'Reject PCA external author, wrong agent',
+        accessPolicy: 1,
+        callerAgentAddress: author,
+      });
+      await expect(agent.registerContextGraph('reject-pca-external-author-wrong-agent', {
+        callerAgentAddress: author,
+        publishAuthorityAccountId: targetPcaAccountId,
+      })).rejects.toThrow(/not a registered agent of PCA account 80.*registered account: 81/i);
+
+      expect(chain.createOnChainContextGraphCalls).toHaveLength(0);
+      expect(await localParticipantAgents(agent, 'reject-pca-external-author-wrong-agent')).toEqual([]);
       await agent.stop().catch(() => {});
     });
 

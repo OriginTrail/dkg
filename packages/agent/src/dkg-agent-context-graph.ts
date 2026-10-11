@@ -135,6 +135,7 @@ import {
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { buildAuthoritativePublicMetaQuads } from './context-graph-public-meta-proof.js';
 import { replaceContextGraphMetadataFact } from './context-graph-metadata-fact.js';
+import { addExternalAuthorCuratorAsParticipant, isExternalAuthorCurator } from './external-author-curator.js';
 import {
   RFC64_UNREGISTERED_REPLICA_AUTHORITY_PREDICATE_V1,
   mintRfc64UnregisteredReplicaAuthoritySeedV1,
@@ -1514,6 +1515,7 @@ export class ContextGraphMethods extends DKGAgentBase {
       //
       //   owner mode: local curator == tx signer == PCA owner
       //   agent mode: local curator == tx signer == registered PCA agent
+      //   external signer: author-key curator != tx signer (owner or agent); see external-author-curator.ts
       //
       // The advertised publishAuthority remains the live PCA owner in both
       // modes, as required by ContextGraphs._validatePCACoherence. In agent
@@ -1529,7 +1531,8 @@ export class ContextGraphMethods extends DKGAgentBase {
 
         const normalizedChainSigner = ethers.getAddress(chainSigner);
         const signerIsOwner = normalizedChainSigner.toLowerCase() === publishAuthority.toLowerCase();
-        if (ownerAddress.toLowerCase() !== normalizedChainSigner.toLowerCase()) {
+        const externalAuthorCurator = await isExternalAuthorCurator(this.config, ownerAddress, normalizedChainSigner);
+        if (ownerAddress.toLowerCase() !== normalizedChainSigner.toLowerCase() && !externalAuthorCurator) {
           throw new Error(
             `Context graph "${id}" cannot be PCA-registered: local curator ${ownerAddress} differs from registration chain signer ${normalizedChainSigner}. The local curator must control the wallet that will own the on-chain Context Graph NFT.`,
           );
@@ -1551,12 +1554,13 @@ export class ContextGraphMethods extends DKGAgentBase {
               `(registered account: ${signerAccountId}). The signer must own the PCA or be registered to that exact account.`,
             );
           }
-          this.log.info(
+          if (!externalAuthorCurator) this.log.info(
             ctx,
             `PCA-curated CG "${id}": registered agent ${normalizedChainSigner} will own the Context Graph NFT; ` +
             `PCA account ${publishAuthorityAccountId} owner ${publishAuthority} remains the live publish authority.`,
           );
         }
+        if (externalAuthorCurator) participantAgents = await addExternalAuthorCuratorAsParticipant(this, id, ownerAddress, normalizedChainSigner, (message) => this.log.info(ctx, message));
       } else if (publishAuthority && ownerAddress.toLowerCase() !== publishAuthority.toLowerCase()) {
         // EOA mode: publishAuthority is the chain signer; local curator must
         // equal it unless the explicit auto-promotion path below is allowed.
