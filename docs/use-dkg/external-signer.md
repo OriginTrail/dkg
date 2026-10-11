@@ -92,6 +92,10 @@ The address must be an author account of the signer; payer accounts are refused.
 
 Payers need native gas. For the publish cost they need either TRAC or registration as an agent of a Publishing Conviction Account by its owner (for example `dkg pca register-agent <accountId> <address>` on the owning node). Wallet selection treats a payer covered by such an account as funded even when it holds no TRAC; the account then covers the publish (a publish lifetime equal to the account's lock duration). Author accounts need no funds.
 
+### Curated context graphs backed by a Publishing Conviction Account
+
+An agent registered by address can curate a context graph backed by a Publishing Conviction Account: with the agent's token, create the graph and register it with `publishPolicy: 0` and `pcaAccountId` (`POST /api/context-graph/register`). The author key signs no transactions, so the first payer account sends the registration. That payer must be the account's owner or a registered agent of that exact account and receives the Context Graph NFT; the agent stays the graph's curator on the node and is added as a participant agent. Every registered agent of the account is an authorized publisher of the graph, so register each payer that should publish to it. The registration deposit is waived while the account meets the waiver floor and has quota left (see [Publishing Conviction](publishing-conviction.md#use-pca-with-a-curated-context-graph)); otherwise it is pulled from that payer, which then needs TRAC.
+
 ## JSON-RPC methods
 
 The node speaks the standard Ethereum JSON-RPC signing API. Addresses are sent in lowercase.
