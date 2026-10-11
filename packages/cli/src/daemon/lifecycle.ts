@@ -43,6 +43,7 @@ import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSy
 import * as osModule from 'node:os';
 import type { NetworkInterfaceInfo } from 'node:os';
 import { formatAuthorityIndexStartupLine } from './authority-index-startup-line.js';
+import { resolveDaemonEvmSigning, type DaemonEvmSigning } from './evm-signing.js';
 import { checkCoreRelayPrereqs } from './core-prereq-check.js';
 import { rotateDaemonLogIfNeeded } from './log-rotation.js';
 import { resolveUpdateTelemetryVersionStatus } from './update-telemetry-status.js';
@@ -69,7 +70,6 @@ import {
 import {
   DKGAgent,
   describeContextGraphOnChainIdResolution,
-  loadOpWallets,
   refusesPrivateContextGraphByOnChainId,
   KaNumberAllocator,
   planAuthorityIndexBootstrap,
@@ -1670,17 +1670,13 @@ async function runDaemonInnerWithStartupOwnership(
     }
   }
 
-  // Load admin + operational wallets from ~/.dkg/wallets.json (auto-generated on first run)
-  const opWallets = await loadOpWallets(dkgDir());
-  log(`Admin wallet:`);
-  if (opWallets.adminWallet) {
-    log(`  ${opWallets.adminWallet.address}`);
-  } else {
-    log(`  (missing from legacy wallets.json; auto-registration requires adding the profile admin key)`);
-  }
-  log(`Operational wallets (${opWallets.wallets.length}):`);
-  for (const w of opWallets.wallets) {
-    log(`  ${w.address}`);
+  // Operational keys from ~/.dkg/wallets.json, or an external signer (chain.signer).
+  let evmSigning: DaemonEvmSigning;
+  try {
+    evmSigning = await resolveDaemonEvmSigning({ config, chainType: chainBase?.type, dataDir: dkgDir(), log });
+  } catch (err) {
+    log(`FATAL: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
   }
 
   // Field-level merge of CLI config + network/<env>.json#chain.
@@ -1805,7 +1801,7 @@ async function runDaemonInnerWithStartupOwnership(
     : undefined;
   const mockChainAdapter = chainBase?.type === 'mock'
     ? (() => {
-        const signerAddress = opWallets.wallets[0]?.address;
+        const signerAddress = evmSigning.addresses.wallets[0]?.address;
         const adapter = new MockChainAdapter(chainBase.chainId ?? 'mock:31337', signerAddress);
         if (signerAddress && mockIdentityId != null) {
           adapter.seedIdentity(signerAddress, mockIdentityId);
@@ -1966,13 +1962,7 @@ async function runDaemonInnerWithStartupOwnership(
     // Only forward chain to the agent when both required fields resolved.
     // resolveChainConfig() may return a partial block if neither config nor
     // network supplies one of them; the agent expects rpcUrl + hubAddress.
-    chainConfig: runtimeEvmChainConfig ? {
-      ...runtimeEvmChainConfig,
-      ...(opWallets.adminWallet
-        ? { adminPrivateKey: opWallets.adminWallet.privateKey }
-        : {}),
-      operationalKeys: opWallets.wallets.map((w) => w.privateKey),
-    } : undefined,
+    chainConfig: runtimeEvmChainConfig ? { ...runtimeEvmChainConfig, ...evmSigning.chainSigning } : undefined,
     sharedMemoryTtlMs: resolveSharedMemoryTtlMs(config),
     // RFC ka-metadata-trim P3.3 — lifecycle PROV event writes (default true).
     metadataProvenanceEvents: config.metadata?.provenanceEvents,
@@ -3664,7 +3654,7 @@ async function runDaemonInnerWithStartupOwnership(
         rfc64PublicCatalog,
         startedAt,
         dashDb,
-        opWallets,
+        opWallets: evmSigning.addresses,
         network,
         tracker,
         memoryManager,

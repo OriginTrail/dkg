@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { readFile, writeFile, unlink, appendFile } from 'node:fs/promises';
 import { ethers } from 'ethers';
-import { resolveRpcUrls } from '@origintrail-official/dkg-chain';
+import { connectConfiguredRemoteSigners, resolveChainSignerConfig, resolveRpcUrls } from '@origintrail-official/dkg-chain';
 import {
   dkgAuthTokenPath,
   FAUCET_WALLETS_PER_REQUEST,
@@ -128,8 +128,13 @@ program
     try {
       const config = await loadConfig();
       const { network } = await loadResolvedNetworkConfig(config, loadNetworkConfig);
-      const { loadOpWallets } = await import('@origintrail-official/dkg-agent');
-      const opWallets = await loadOpWallets(dkgDir());
+      // With an external signer the addresses come from the signer and no
+      // wallets.json is read or created.
+      const remoteSigner = resolveChainSignerConfig(config.chain?.signer);
+      const external = remoteSigner === undefined ? undefined : await connectConfiguredRemoteSigners(remoteSigner);
+      const opWallets = external === undefined
+        ? await (await import('@origintrail-official/dkg-agent')).loadOpWallets(dkgDir())
+        : { adminWallet: undefined, wallets: external.operational.map((signer) => ({ address: signer.address })) };
 
       if (!opWallets.wallets.length) {
         console.error('No operational wallets found. Run "dkg start" to auto-generate them.');
@@ -177,11 +182,13 @@ program
             console.log('  (unable to query balances)');
           }
         }
+      } else if (external) {
+        console.log('  (none: the node holds no admin key; perform admin-key operations outside the node)');
       } else {
         console.log('  (missing from legacy wallets.json; add the profile admin key to enable key management)');
       }
 
-      console.log(`\nOperational wallets (${opWallets.wallets.length}):\n`);
+      console.log(`\n${external ? 'Payer wallets (external signer)' : 'Operational wallets'} (${opWallets.wallets.length}):\n`);
       for (let i = 0; i < opWallets.wallets.length; i++) {
         const addr = opWallets.wallets[i].address;
         const label = i === 0 ? '(primary)' : `(pool #${i + 1})`;
@@ -197,10 +204,22 @@ program
         }
       }
 
+      if (external?.authors) {
+        console.log(`\nAuthor keys (external signer; own published assets, never pay):\n`);
+        for (const address of external.authors.addresses) {
+          const label = address === external.authors.defaultAuthor?.address ? '(default)' : '(agent)';
+          console.log(`  ${label} ${address}`);
+        }
+      }
+
       console.log(`\n  Chain: ${chainId}`);
       if (rpcUrl) console.log(`  RPC:   ${rpcUrl}`);
       if (chainResolved?.rpcUrls?.length) console.log(`  RPC backups: ${chainResolved.rpcUrls.join(', ')}`);
-      console.log(`  File:  ~/.dkg/wallets.json`);
+      console.log(external ? `  Signer: ${external.operational[0].client.endpoint}` : `  File:  ~/.dkg/wallets.json`);
+      if (external) {
+        console.log('\nFund the payer wallets with gas, and TRAC or a Publishing Conviction Account that covers them.\n');
+        return;
+      }
       console.log('\nFund these addresses with ETH (gas) and TRAC (staking/publishing).');
       if (opWallets.adminWallet) {
         console.log('The admin wallet is used for profile key management. The primary operational wallet is used for staking; all operational wallets are used for publishing.\n');
@@ -222,6 +241,14 @@ program
   .action(async (amount: string, opts: ActionOpts) => {
     try {
       const config = await loadConfig();
+      if (resolveChainSignerConfig(config.chain?.signer) !== undefined) {
+        console.error(
+          'dkg set-ask signs with a local operational key. With chain.signer.type "remote" the node holds ' +
+          'no such key (external signing is supported for edge nodes, which have no ask); call ' +
+          'Profile.updateAsk with your own signing tooling instead.',
+        );
+        process.exit(1);
+      }
       const { network } = await loadResolvedNetworkConfig(config, loadNetworkConfig);
       const { loadOpWallets } = await import('@origintrail-official/dkg-agent');
       const opWallets = await loadOpWallets(dkgDir());

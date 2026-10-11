@@ -185,7 +185,7 @@ export interface McpSetupActionDeps {
    * funding have wallets to target even if the daemon never fully boots.
    * Idempotent. From `@origintrail-official/dkg-agent`; injectable for tests.
    */
-  loadOpWallets: typeof import('@origintrail-official/dkg-agent').loadOpWallets;
+  loadOpWallets: (dataDir: string) => Promise<unknown>;
   /**
    * Shared best-effort faucet orchestrator — the SAME one openclaw/hermes use.
    * Reads `wallets.json` (with retry when the daemon was started this run),
