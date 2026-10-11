@@ -48,12 +48,14 @@ export const deniedWithCallerGrant: ContextGraphReadAuthorityDecision = {
 
 // A draft read names an explicit author lane; it does not change general read authority.
 import type { DKGAgent } from '../src/index.js';
-import { resolveKnowledgeAssetDraftReadAuthority, type KnowledgeAssetDraftReadAuthorityOptions } from '../src/context-graph-read-authority.js';
+import { resolveKnowledgeAssetDraftReadAuthority, type KnowledgeAssetDraftReadAuthorityOptions, type KnowledgeAssetDraftReadAuthorityResolution } from '../src/context-graph-read-authority.js';
 declare const draftAgent: DKGAgent;
 const draftOptions: KnowledgeAssetDraftReadAuthorityOptions = {
   callerAgentAddress: '0xcaller', draft: { agentAddress: '0xcaller', literalName: 'compact:name' },
 };
-const draftDecision: Promise<ContextGraphReadAuthorityDecision> = resolveKnowledgeAssetDraftReadAuthority(draftAgent, 'cg', draftOptions);
+const draftDecision: Promise<KnowledgeAssetDraftReadAuthorityResolution> = resolveKnowledgeAssetDraftReadAuthority(draftAgent, 'cg', draftOptions);
 // @ts-expect-error A draft proof cannot omit its selected author lane.
 const missingDraftAuthor: KnowledgeAssetDraftReadAuthorityOptions = { draft: { literalName: 'compact:name' } };
-void [draftDecision, missingDraftAuthor];
+// @ts-expect-error The combined resolution cannot be mistaken for a decision that discards resource evidence.
+const discardedEvidence: Promise<ContextGraphReadAuthorityDecision> = resolveKnowledgeAssetDraftReadAuthority(draftAgent, 'cg', draftOptions);
+void [draftDecision, missingDraftAuthor, discardedEvidence];

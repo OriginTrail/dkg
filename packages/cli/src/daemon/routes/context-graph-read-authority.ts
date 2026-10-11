@@ -8,6 +8,7 @@ import {
   resolveKnowledgeAssetDraftReadAuthority,
   type ContextGraphReadAuthorityDecision,
   type KnowledgeAssetDraftReadAuthorityOptions,
+  type KnowledgeAssetDraftReadAuthorityResolution,
 } from '@origintrail-official/dkg-agent/dist/context-graph-read-authority.js';
 import {
   jsonResponse,
@@ -33,9 +34,10 @@ export async function requireContextGraphReadAuthority(
   contextGraphId: unknown,
   site: ContextGraphAuthorityRpcSite = CONTEXT_GRAPH_AUTHORITY_RPC_SITES.query,
 ): Promise<boolean> {
-  return requireReadAuthority(ctx, contextGraphId, site, (id, callerAgentAddress, signal) => (
-    ctx.agent.resolveContextGraphReadAuthority(id, { callerAgentAddress, signal })
-  ));
+  return (await requireReadAuthority(ctx, contextGraphId, site, async (id, callerAgentAddress, signal) => ({
+    decision: await ctx.agent.resolveContextGraphReadAuthority(id, { callerAgentAddress, signal }),
+    value: true,
+  }), true)) !== null;
 }
 
 /** A local curator proof authorizes only the caller's own draft inspection lane. */
@@ -43,34 +45,37 @@ export async function requireKnowledgeAssetDraftReadAuthority(
   ctx: RequestContext,
   contextGraphId: unknown,
   draft: KnowledgeAssetDraftReadAuthorityOptions['draft'],
-): Promise<boolean> {
-  return requireReadAuthority(ctx, contextGraphId, CONTEXT_GRAPH_AUTHORITY_RPC_SITES.query, (id, callerAgentAddress, signal) => (
-    resolveKnowledgeAssetDraftReadAuthority(ctx.agent, id, { callerAgentAddress, draft, signal })
-  ));
+): Promise<Pick<KnowledgeAssetDraftReadAuthorityResolution, 'literalDescriptor'> | null> {
+  return requireReadAuthority<Pick<KnowledgeAssetDraftReadAuthorityResolution, 'literalDescriptor'>>(ctx, contextGraphId, CONTEXT_GRAPH_AUTHORITY_RPC_SITES.query, async (id, callerAgentAddress, signal) => {
+    const resolution = await resolveKnowledgeAssetDraftReadAuthority(ctx.agent, id, { callerAgentAddress, draft, signal });
+    return { decision: resolution.decision, value: { literalDescriptor: resolution.literalDescriptor } };
+  }, {});
 }
 
-async function requireReadAuthority(
+async function requireReadAuthority<T>(
   ctx: RequestContext,
   contextGraphId: unknown,
   site: ContextGraphAuthorityRpcSite,
-  resolveAuthority: (id: string, caller: string | undefined, signal: AbortSignal) => Promise<ContextGraphReadAuthorityDecision>,
-): Promise<boolean> {
-  if (!validateRequiredContextGraphId(contextGraphId, ctx.res)) return false;
+  resolveAuthority: (id: string, caller: string | undefined, signal: AbortSignal) => Promise<{ decision: ContextGraphReadAuthorityDecision; value: T }>,
+  operatorValue: T,
+): Promise<T | null> {
+  if (!validateRequiredContextGraphId(contextGraphId, ctx.res)) return null;
   const validatedId = contextGraphId as string;
   const actor = actorFromRequestContext(ctx);
-  if (hasNodeOperatorReadAccess(ctx)) return true;
+  if (hasNodeOperatorReadAccess(ctx)) return operatorValue;
   const lifecycle = createStoreQueryRequestLifecycle(ctx.req, ctx.res, 'api.context_graph.read_authority');
   try {
     lifecycle.signal.throwIfAborted();
-    const authority = await withRpcUsageSite(site, () => resolveAuthority(
+    const resolution = await withRpcUsageSite(site, () => resolveAuthority(
       validatedId, actor.authenticatedAgentAddress, lifecycle.signal,
     ));
     lifecycle.signal.throwIfAborted();
+    const authority = resolution.decision;
     // Unavailable authority is retryable, not a terminal caller refusal. The
     // canonical response hides the CG, authority source and internal reason.
     if (authority.outcome === 'unavailable') {
       respondContextGraphReadAuthorityUnavailable(ctx.res, authority);
-      return false;
+      return null;
     }
     // The resolver owns whether evidence grants this caller, the public, or only the node.
     if (authority.outcome !== 'allowed' || (
@@ -78,13 +83,13 @@ async function requireReadAuthority(
       && authority.grantScope !== 'caller' && authority.grantScope !== 'public'
     )) {
       jsonResponse(ctx.res, 403, { error: 'Not authorized to read this context graph.' });
-      return false;
+      return null;
     }
-    return true;
+    return resolution.value;
   } catch (error) {
     if (!lifecycle.signal.aborted && !isApiQueryCallerDisconnected(error)) throw error;
     if (!ctx.res.writableEnded) ctx.res.end();
-    return false;
+    return null;
   } finally {
     lifecycle.dispose();
   }

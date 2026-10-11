@@ -1,3 +1,4 @@
+import { normalizeContextGraphIdOrUri } from '../../context-graph-identifiers.js';
 import { hasNodeOperatorReadAccess, requireContextGraphReadAuthority } from './context-graph-read-authority.js';
 // daemon/routes/publisher.ts
 //
@@ -210,7 +211,6 @@ import {
   safeParseJson,
   validateOptionalSubGraphName,
   validateRequiredContextGraphId,
-  normalizeContextGraphIdOrUri,
   validateEntities,
   validateConditions,
   MAX_BODY_BYTES,

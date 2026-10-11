@@ -1,3 +1,4 @@
+import { normalizeContextGraphIdOrUri } from '../../context-graph-identifiers.js';
 // daemon/routes/knowledge-assets-import.ts
 //
 // Collection-level import-artifact + semantic-enrichment routes for the
@@ -39,7 +40,6 @@ import {
   safeParseJson,
   safeDecodeURIComponent,
   validateOptionalSubGraphName,
-  normalizeContextGraphIdOrUri,
   resolveRequiredWriteContextGraphId,
   oversizedRdfLiteralResponseBody,
   SMALL_BODY_BYTES,

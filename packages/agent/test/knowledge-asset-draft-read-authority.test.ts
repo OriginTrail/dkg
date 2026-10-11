@@ -28,26 +28,39 @@ describe('dedicated draft authority retains the general graph-read contract', ()
     expect(await agent.resolveContextGraphReadAuthority(CG, { callerAgentAddress: owner }))
       .toMatchObject({ outcome: 'allowed', grantScope: 'node', source: 'legacy-local' });
   });
+  const readDraftAuthority = async (options: Parameters<typeof resolveKnowledgeAssetDraftReadAuthority>[2]) =>
+    (await resolveKnowledgeAssetDraftReadAuthority(agent, CG, options)).decision;
   afterAll(async () => { try { await agent?.stop(); } finally { await store.close(); } });
 
   it('narrows the node grant only for the real curator own draft lane', async () => {
-    expect(await resolveKnowledgeAssetDraftReadAuthority(agent, CG, { callerAgentAddress: owner, draft: { agentAddress: owner } }))
+    expect(await readDraftAuthority({ callerAgentAddress: owner, draft: { agentAddress: owner } }))
       .toMatchObject({ outcome: 'allowed', grantScope: 'caller', reason: 'local-curator-draft' });
     for (const options of [{ callerAgentAddress: owner },
       { callerAgentAddress: owner, draft: { agentAddress: other } },
       { callerAgentAddress: other, draft: { agentAddress: other } }]) {
-      expect(await resolveKnowledgeAssetDraftReadAuthority(agent, CG, options))
+      expect(await readDraftAuthority(options))
         .toMatchObject({ outcome: 'allowed', grantScope: 'node' });
     }
     expect(await agent.resolveContextGraphReadAuthority(CG, { callerAgentAddress: owner }))
       .toMatchObject({ outcome: 'allowed', grantScope: 'node' });
   });
 
+  it('does not promote node scope from curator evidence without local-create provenance', async () => {
+    expect(agent.curatorDidMatchesChecksumAgent((await agent.getContextGraphCurator(CG)) ?? undefined, owner)).toBe(true);
+    const local = vi.spyOn(agent, 'isLocalFirstUnregisteredContextGraph').mockResolvedValue(false);
+    try {
+      expect(await readDraftAuthority({
+        callerAgentAddress: owner, draft: { agentAddress: owner },
+      })).toMatchObject({ outcome: 'allowed', grantScope: 'node', source: 'legacy-local' });
+      expect(local).toHaveBeenCalledWith(CG);
+    } finally { local.mockRestore(); }
+  });
+
   it('requires the caller-lane literal lifecycle before overriding a foreign compact alias', async () => {
-    expect(await resolveKnowledgeAssetDraftReadAuthority(agent, CG, {
+    expect(await readDraftAuthority({
       callerAgentAddress: owner, draft: { agentAddress: owner, literalName: `${other}:5` },
     })).toMatchObject({ outcome: 'allowed', grantScope: 'caller' });
-    expect(await resolveKnowledgeAssetDraftReadAuthority(agent, CG, {
+    expect(await readDraftAuthority({
       callerAgentAddress: owner, draft: { agentAddress: owner, literalName: `${other}:6` },
     })).toMatchObject({ outcome: 'allowed', grantScope: 'node' });
   });
@@ -67,7 +80,7 @@ describe('dedicated draft authority retains the general graph-read contract', ()
       return originalMeta(...args);
     });
     try {
-      expect(await resolveKnowledgeAssetDraftReadAuthority(agent, CG, { callerAgentAddress: owner, draft: { agentAddress: owner } }))
+      expect(await readDraftAuthority({ callerAgentAddress: owner, draft: { agentAddress: owner } }))
         .toMatchObject({ outcome: 'unavailable', source: 'legacy-local', reason: 'draft-provenance-unavailable' });
     } finally { meta.mockRestore(); authority.mockRestore(); }
   });
@@ -87,7 +100,7 @@ describe('dedicated draft authority retains the general graph-read contract', ()
       return result;
     });
     try {
-      await expect(resolveKnowledgeAssetDraftReadAuthority(agent, CG, {
+      await expect(readDraftAuthority({
         callerAgentAddress: owner, draft: { agentAddress: owner }, signal: controller.signal,
       })).rejects.toBe(reason);
     } finally { meta.mockRestore(); authority.mockRestore(); }

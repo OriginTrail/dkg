@@ -92,6 +92,39 @@ describe('real local curator draft provenance through HTTP admission', () => {
     expect(res.statusCode, res.body).toBe(suffix === '/wm/extraction-status' ? 404 : 200);
     if (suffix === '/wm/quads') expect(res.body).toContain('literal secret');
   });
+  it.each(['', '/wm', '/wm/quads', '/wm/extraction-status'])('carries the single caller-lane literal lookup into %s', async suffix => {
+    const assertion = agent.assertion;
+    const history = vi.spyOn(assertion, 'history');
+    const facade = vi.spyOn(agent, 'assertion', 'get').mockReturnValue(assertion);
+    try {
+      const res = await read(compactLiteralName, suffix);
+      expect(res.statusCode, res.body).toBe(suffix === '/wm/extraction-status' ? 404 : 200);
+      const literalCalls = history.mock.calls.filter(([cg, name, opts]) => cg === CG
+        && name === compactLiteralName && opts?.agentAddress?.toLowerCase() === owner.toLowerCase());
+      expect(literalCalls).toHaveLength(1);
+      if (suffix === '/wm/quads') expect(res.body).toContain('literal secret');
+    } finally { facade.mockRestore(); history.mockRestore(); }
+  });
+  it('retains node-only HTTP refusal when matching curator metadata lacks local-create provenance', async () => {
+    const local = vi.spyOn(agent, 'isLocalFirstUnregisteredContextGraph').mockResolvedValue(false);
+    try {
+      const res = await read('asset');
+      expect(res.statusCode).toBe(403);
+      expect(res.body).not.toContain('legacy secret');
+      expect(local).toHaveBeenCalledWith(CG);
+    } finally { local.mockRestore(); }
+  });
+  it('reads plain-name WM quads without requiring a lifecycle descriptor', async () => {
+    const assertion = agent.assertion;
+    const history = vi.spyOn(assertion, 'history').mockResolvedValue(null);
+    const facade = vi.spyOn(agent, 'assertion', 'get').mockReturnValue(assertion);
+    try {
+      const res = await read('asset');
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.body).toContain('legacy secret');
+      expect(history).not.toHaveBeenCalled();
+    } finally { facade.mockRestore(); history.mockRestore(); }
+  });
   it('refuses another caller inspecting the curator lane', async () => {
     const res = await read('asset', '/wm/quads', other, `&agentAddress=${owner}`);
     expect(res.statusCode).toBe(403);
