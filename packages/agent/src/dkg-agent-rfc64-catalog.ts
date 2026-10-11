@@ -176,7 +176,7 @@ import {
   type Rfc64CatalogExecutionPlanV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
 import {
-  Rfc64CatalogResponsibilityRegistryV1,
+  Rfc64CatalogResponsibilityRegistryV1, projectRfc64CatalogRuntimeSelectionV1,
   type Rfc64CatalogResponsibilitySelectionV1,
 } from './rfc64/catalog-responsibility-registry-v1.js';
 import { Rfc64CatalogResponsibilityRosterV1 } from './internal/rfc64-catalog-responsibility-roster-v1.js';
@@ -3971,26 +3971,22 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     });
   }
 
+  /** Authority selection excludes connection-replay operational diagnostics. */
+  readRfc64CatalogSelectionV1(this: DKGAgent): Omit<Rfc64CatalogRuntimeSelectionStatusV1, 'connectionReplay'> {
+    return projectRfc64CatalogRuntimeSelectionV1({ nodeRole: this.config.nodeRole ?? 'edge',
+      configuredContextGraphIds: Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority),
+      responsibilities: this.readRfc64CatalogResponsibilitiesV1(), subscriptions: this.subscribedContextGraphs });
+  }
+
   /** Safe runtime selection projection for daemon status and release harnesses. */
-  readRfc64CatalogRuntimeSelectionV1(
-    this: DKGAgent,
-  ): Readonly<Rfc64CatalogRuntimeSelectionStatusV1> {
-    const responsibilities = this.readRfc64CatalogResponsibilitiesV1();
-    const eligibleContextGraphs = Object.freeze([...new Set([
-      ...Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority),
-      ...responsibilities.map(({ contextGraphId }) => contextGraphId),
-    ])].sort());
-    const subscriptionDriven = (this.config.nodeRole ?? 'edge') === 'edge';
-    return Object.freeze({
-      subscriptionDriven,
-      eligibleContextGraphs,
-      connectionReplay: rfc64CatalogReplayConnectionRuntimesV1.get(this)?.status(),
-      selectedContextGraphs: subscriptionDriven
-        ? Object.freeze(eligibleContextGraphs.filter((contextGraphId) => (
-          this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true
-        )))
-        : eligibleContextGraphs,
-    });
+  readRfc64CatalogRuntimeSelectionV1(this: DKGAgent): Readonly<Rfc64CatalogRuntimeSelectionStatusV1> {
+    return Object.freeze({ ...this.readRfc64CatalogSelectionV1(),
+      connectionReplay: rfc64CatalogReplayConnectionRuntimesV1.get(this)?.status() });
+  }
+
+  /** Connection lifetime owns the last-close boundary; cooldown state is retained. */
+  noteRfc64CatalogReplayPeerDisconnectedV1(this: DKGAgent, peerId: string): void {
+    rfc64CatalogReplayConnectionRuntimesV1.get(this)?.disconnected(peerId);
   }
 
   /** Start the complete agent-owned RFC-64 catalog runtime. */

@@ -68,6 +68,7 @@ import {
 } from '../../chain/test/loopback-rpc-harness.js';
 import { Rfc64PublicCatalogSuccessorProducerV1 } from
   '../src/rfc64/public-catalog-successor-producer-v1.js';
+import { Rfc64CatalogReplayConnectionRuntimeV1 } from '../src/rfc64/catalog-replay-connection-runtime-v1.js';
 import { Rfc64CatalogReplayRecoveryRuntimeV1 } from
   '../src/rfc64/catalog-replay-recovery-runtime-v1.js';
 import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 } from
@@ -8240,3 +8241,63 @@ function assertionSealFromCanonical(seal: CanonicalGraphScopedAuthorSealV1): Ass
     rootEntities: [],
   };
 }
+
+
+it('retains a genuine last-close reconnect raised during the receiver drain', async () => {
+  const edge = await startAgent({ name: 'replay-last-close-successor', activation: activation('catalog') });
+  const peer = '12D3KooWReconnectDuringReceiverDrain';
+  const remotePeer = { toString: () => peer };
+  let connected = true;
+  vi.spyOn(edge.node.libp2p, 'getPeers').mockImplementation(() => connected ? [remotePeer] as never : []);
+  vi.spyOn((edge as any).networkAdmissionCoordinator, 'ensureAdmitted').mockResolvedValue(true);
+  vi.spyOn(edge as any, 'enrichPeerStoreFromInboundCircuit').mockResolvedValue(undefined);
+  vi.spyOn(edge as any, 'drainPendingSenderKeyForPeer').mockResolvedValue(0);
+  vi.spyOn(edge, 'queueSyncFromPeerOnConnect').mockReturnValue(true);
+  vi.spyOn(edge, 'reannounceRfc64CatalogHeadsToPeerV1').mockResolvedValue({ announced: 0, failed: 0, manifest: [] });
+  const service = (edge as any).rfc64PublicCatalogServiceV1;
+  const request = vi.spyOn(service, 'requestCatalogHeadReplay').mockResolvedValue({
+    kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2, heads: [],
+  });
+  let release!: () => void;
+  let entered!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  vi.spyOn(service, 'whenReceiverIdleForContextGraph').mockImplementationOnce(async () => { entered(); await held; });
+  let now = Date.now();
+  const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+  const open = () => edge.node.libp2p.dispatchEvent(new CustomEvent('connection:open', { detail: {
+    remotePeer, remoteAddr: { toString: () => '/ip4/127.0.0.1/tcp/1' },
+    direction: 'inbound', timeline: { open: now },
+  } } as any));
+  try {
+    open(); await started;
+    for (let i = 0; i < 20; i++) open();
+    expect(request).toHaveBeenCalledOnce();
+    // Closing one of several live connections is not a new peer generation.
+    edge.node.libp2p.dispatchEvent(new CustomEvent('connection:close', { detail: { remotePeer, timeline: { open: now, close: now } } } as any));
+    open();
+    connected = false;
+    edge.node.libp2p.dispatchEvent(new CustomEvent('connection:close', { detail: { remotePeer, timeline: { open: now, close: now } } } as any));
+    connected = true; open();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    release();
+    await vi.waitFor(() => expect(edge.readRfc64CatalogRuntimeSelectionV1().connectionReplay?.activePeers).toBe(0));
+    expect(request).toHaveBeenCalledOnce();
+    expect(edge.readRfc64CatalogRuntimeSelectionV1().connectionReplay?.pendingScopes).toBe(1);
+    now += 60_001;
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2), { timeout: 3_000 });
+    await vi.waitFor(() => expect(edge.readRfc64CatalogRuntimeSelectionV1().connectionReplay?.pendingScopes).toBe(0));
+  } finally { release(); clock.mockRestore(); }
+}, 15_000);
+
+it('reads SWM authority selection without traversing connection replay diagnostics', async () => {
+  const edge = await startAgent({ name: 'replay-lightweight-selection', activation: activation('catalog') });
+  const reservation = edge.prepareRfc64CatalogConnectionReplayV1('12D3KooWSelectionProbe');
+  reservation?.reject();
+  const status = vi.spyOn(Rfc64CatalogReplayConnectionRuntimeV1.prototype, 'status');
+  const authority = edge.resolveRfc64SwmRecoveryRuntimeAuthorityV1(CONTEXT_GRAPH_ID);
+  expect(authority.active).toBe(true);
+  expect(status).not.toHaveBeenCalled();
+  expect(edge.readRfc64CatalogRuntimeSelectionV1().connectionReplay).toBeDefined();
+  expect(status).toHaveBeenCalledOnce();
+});

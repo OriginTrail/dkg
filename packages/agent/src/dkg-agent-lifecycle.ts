@@ -25,7 +25,7 @@ import { setTimeout as waitForPeerEventTurn } from 'node:timers/promises';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
 import { captureExactBatchStreamRefusalScope } from './sync/exact-batch-stream-capability.js';
 import { createStorageACKRegistrationPlan } from './p2p/storage-ack-registrar.js';
-import { syncOpenedPeerConnection, type PeerConnectionSyncPorts } from './sync/peer-connection.js';
+import { syncOpenedPeerConnection, syncClosedPeerConnection, type PeerConnectionSyncPorts } from './sync/peer-connection.js';
 import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -3875,22 +3875,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }, evt.detail), (error) => handleSyncError(evt.detail.remotePeer.toString(), error));
     }, { signal });
 
-    // Remember when the last live connection to a peer is gone. A3 keeps
-    // `lastSuccessfulSyncAt` and reconciler backoff across relay flaps, but
-    // the next `connection:open` must not suppress catch-up using a sync
-    // timestamp from before an offline gap. `lastSyncDisconnectedAt` is the
-    // boundary that distinguishes stale pre-disconnect success from a fresh
-    // sync in the current live session.
     this.node.libp2p.addEventListener('connection:close', (evt) => {
-      const remotePeer = evt.detail.remotePeer.toString();
-      if (remotePeer === this.node.libp2p.peerId.toString()) return;
-      const stillConnected = this.node.libp2p
-        .getPeers()
-        .some((p) => p.toString() === remotePeer);
-      if (stillConnected) return;
-      this.peerCapabilityRegistry.forget(remotePeer);
-      peerEvents.forgetSkippedNoSync(remotePeer);
-      this.lastSyncDisconnectedAt.set(remotePeer, Date.now());
+      syncClosedPeerConnection({ remotePeer: evt.detail.remotePeer.toString(),
+        localPeerId: this.node.libp2p.peerId.toString(), connectedPeers: this.node.libp2p.getPeers(),
+        onLastConnectionClosed: remotePeer => {
+          this.peerCapabilityRegistry.forget(remotePeer);
+          peerEvents.forgetSkippedNoSync(remotePeer);
+          this.lastSyncDisconnectedAt.set(remotePeer, Date.now());
+          this.noteRfc64CatalogReplayPeerDisconnectedV1(remotePeer);
+        } });
     }, { signal });
 
     // Event-driven sync-retry: libp2p emits `peer:update` whenever a

@@ -102,3 +102,22 @@ export async function syncOpenedPeerConnection(
     rejectCatalogReplay();
   }
 }
+
+/**
+ * Remember when the last live connection to a peer is gone. A3 keeps
+ * `lastSuccessfulSyncAt` and reconciler backoff across relay flaps, but
+ * the next `connection:open` must not suppress catch-up using a sync
+ * timestamp from before an offline gap. `lastSyncDisconnectedAt` is the
+ * boundary that distinguishes stale pre-disconnect success from a fresh
+ * sync in the current live session. Catalog replay uses the same boundary.
+ */
+export function syncClosedPeerConnection(input: Readonly<{
+  remotePeer: string;
+  localPeerId: string;
+  connectedPeers: readonly { toString(): string }[];
+  onLastConnectionClosed(remotePeer: string): void;
+}>): void {
+  if (input.remotePeer === input.localPeerId
+    || input.connectedPeers.some(peer => peer.toString() === input.remotePeer)) return;
+  input.onLastConnectionClosed(input.remotePeer);
+}

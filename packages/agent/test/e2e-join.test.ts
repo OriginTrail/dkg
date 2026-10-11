@@ -22,7 +22,7 @@ import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 import { TEST_SNAPSHOT_CONFIG } from '../../../scripts/testing/snapshot-storage.js';
 import { installHardhatACKProvider } from './_helpers/v10-acks.js';
 import { DKGAgent } from '../src/index.js';
-import { Rfc64PublicCatalogTransportV1 } from '../src/rfc64/public-catalog-transport-v1.js';
+import { RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V2 } from '../src/rfc64/public-catalog-transport-v1.js';
 import type { ContextGraphSubscriptionRecord } from '../src/index.js';
 import {
   decodeReliableEnvelope,
@@ -274,31 +274,39 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
       name: 'Catalog Capacity Provider', dataDir, listenPort: 0, nodeRole: 'edge',
       chainAdapter: sharedChain, chainConfig: makeSharedChainConfig(), kaNumberAllocator: makeTestKaNumberAllocator() });
     capacityProvider = provider;
-    await provider.start();
-    for (const { id, onChainId } of bindings) {
-      provider.setContextGraphSubscription(id, { subscribed: true, synced: false, syncMode: 'eager', onChainId });
-      await provider.reconcileRfc64CatalogResponsibilityV1(id);
-    }
     let release!: () => void;
     const held = new Promise<void>(resolve => { release = resolve; });
     let incoming = 0;
-    // Hold the actual registered catalog transport handler and delegate its
-    // original authorization/provider response after release. No custom lane.
-    const transport = Rfc64PublicCatalogTransportV1.prototype as unknown as {
-      readonly router: DKGAgent['router'];
-      handleReplayRequestV2(data: Uint8Array, peerId: string): Promise<Uint8Array>;
-    };
-    const original = transport.handleReplayRequestV2;
-    const handler = vi.spyOn(transport, 'handleReplayRequestV2').mockImplementation(async function (data, peerId) {
-      const request = JSON.parse(new TextDecoder().decode(data));
-      if (this.router === provider.router && peerId === joiner.peerId && capacityIds.includes(request.contextGraphId)) {
-        incoming++;
-        await held;
-      }
-      return original.call(this, data, peerId);
+    // The router is created during agent startup. Install the typed wrapper
+    // immediately before catalog startup registers the actual V2 transport.
+    // Its authorization and response receive the original stream options.
+    const startCatalog = provider.startRfc64CatalogRuntimeV1.bind(provider);
+    let restoreRegistration: (() => void) | undefined;
+    const startup = vi.spyOn(provider, 'startRfc64CatalogRuntimeV1').mockImplementation(ctx => {
+      const register = provider.router.register.bind(provider.router);
+      const handler = vi.spyOn(provider.router, 'register').mockImplementation((protocol, callback, options) => {
+        if (protocol !== RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V2) {
+          return register(protocol, callback, options);
+        }
+        return register(protocol, async (data, peerId, streamOptions) => {
+          const request = JSON.parse(new TextDecoder().decode(data));
+          if (peerId.toString() === joiner.peerId && capacityIds.includes(request.contextGraphId)) {
+            incoming++;
+            await held;
+          }
+          return callback(data, peerId, streamOptions);
+        }, options);
+      });
+      restoreRegistration = () => handler.mockRestore();
+      return startCatalog(ctx);
     });
     const prepare = vi.spyOn(joiner, 'prepareRfc64CatalogConnectionReplayV1');
     try {
+      await provider.start();
+      for (const { id, onChainId } of bindings) {
+        provider.setContextGraphSubscription(id, { subscribed: true, synced: false, syncMode: 'eager', onChainId });
+        await provider.reconcileRfc64CatalogResponsibilityV1(id);
+      }
       await joiner.connectTo(provider.multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!);
       await vi.waitFor(() => expect(incoming).toBe(1), { timeout: 10_000 });
       expect(prepare).toHaveBeenCalledWith(provider.peerId);
@@ -336,7 +344,7 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
       expect(joiner.readRfc64CatalogRuntimeSelectionV1().connectionReplay?.pendingScopes).toBeGreaterThanOrEqual(2);
     } finally {
       release();
-      handler.mockRestore(); prepare.mockRestore();
+      restoreRegistration?.(); startup.mockRestore(); prepare.mockRestore();
       try {
         // A genuine reconnect may leave owned cooldown demand after physical
         // streams retire; the agent stop below retires that deferred work.

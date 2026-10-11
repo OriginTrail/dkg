@@ -22,12 +22,15 @@ export interface Rfc64CatalogReplayConnectionReservationV1 {
   reject(): void;
 }
 
-type PendingScopeV1 = Readonly<{ state: 'reserved'; lease: Rfc64CatalogReplayPeerReservationV1 }>
-  | Readonly<{ state: 'admitted'; lease: Rfc64CatalogReplayPeerReservationV1 }>;
+type PendingScopeV1 = Readonly<{ state: 'reserved' | 'admitted';
+  connectionGeneration: number; lease: Rfc64CatalogReplayPeerReservationV1 }>;
 
 interface ScopeV1 {
   readonly contextGraphId: string;
   pending: PendingScopeV1 | null;
+  successor: PendingScopeV1 | null;
+  executing: boolean;
+  retryReservation: boolean;
   failures: number;
   eligibleAt: number;
 }
@@ -41,8 +44,10 @@ interface PeerV1 {
   failed: number;
   windowStartedAt: number;
   windowStarted: number;
-  continuation: { after: string | null; through: string } | null;
-  readonly activated: Set<string>;
+  connected: boolean;
+  connectionGeneration: number;
+  /** Completeness custody, separate from the capped executable scope table. */
+  readonly deferred: Map<string, ScopeV1>;
 }
 
 const DEFAULT_DEBOUNCE_MS = 60_000;
@@ -87,8 +92,8 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
   /** Called only after the lifecycle background owner has physically drained. */
   reset(): void {
     for (const peer of this.#byPeer.values()) {
-      for (const scope of peer.scopes.values()) {
-        this.#settle(scope);
+      for (const scope of [...peer.scopes.values(), ...peer.deferred.values()]) {
+        this.#settle(scope); this.#settle(scope);
       }
     }
     this.#byPeer.clear();
@@ -103,7 +108,8 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     return Object.freeze({
       activePeers: [...this.#byPeer.values()].filter(peer => peer.active).length,
       pendingScopes: [...this.#byPeer.values()].reduce((count, peer) => count
-        + [...peer.scopes.values()].filter(scope => scope.pending !== null).length, 0),
+        + [...peer.scopes.values(), ...peer.deferred.values()].reduce((count, scope) => count
+          + Number(scope.pending !== null) + Number(scope.successor !== null), 0), 0),
       suppressed: this.#suppressed,
       peers: Object.freeze([...this.#byPeer.values()].map(peer => Object.freeze({
         peerIdSuffix: peer.peerId.slice(-8), started: peer.started, failed: peer.failed,
@@ -123,36 +129,44 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     if (peer === undefined) {
       if (this.#byPeer.size >= this.#maxPeers) {
         const idle = [...this.#byPeer.values()].filter(candidate => !candidate.active
-          && candidate.continuation === null && candidate.activated.size === 0
-          && ![...candidate.scopes.values()].some(scope => scope.pending !== null))
+          && candidate.deferred.size === 0
+          && ![...candidate.scopes.values()].some(scope => scope.pending !== null || scope.retryReservation))
           .sort((left, right) => left.lastUsedAt - right.lastUsedAt)[0];
         if (idle === undefined) { this.#suppressed++; return null; }
         this.#byPeer.delete(idle.peerId);
       }
       peer = { peerId, scopes: new Map(), active: false, lastUsedAt: nowMs,
-        started: 0, failed: 0, windowStartedAt: nowMs, windowStarted: 0, continuation: null, activated: new Set() };
+        started: 0, failed: 0, windowStartedAt: nowMs, windowStarted: 0,
+        connected: true, connectionGeneration: 1, deferred: new Map() };
       this.#byPeer.set(peerId, peer);
     }
     peer.lastUsedAt = nowMs;
-    const reservations: { scope: ScopeV1; pending: PendingScopeV1 }[] = [];
-    const deferred: string[] = [];
-    let after: string | null = null;
+    if (contextGraphId === undefined && !peer.connected) {
+      peer.connected = true; peer.connectionGeneration++;
+    }
+    const reservations: { scope: ScopeV1; pending: PendingScopeV1 | null }[] = [];
     for (const id of selected) {
       const scope = this.#scope(peer, id, nowMs);
-      if (scope === null) { deferred.push(id); continue; }
       if (scope.pending !== null) {
-        if (deferred.length === 0) after = id;
-        this.#suppressed++; continue;
+        if (scope.pending.connectionGeneration === peer.connectionGeneration || scope.successor !== null
+          || (scope.pending.state === 'admitted' && !scope.executing)) { this.#suppressed++; continue; }
+        if (!scope.executing) {
+          // Before execution, the newest admission takes custody of the same
+          // unsampled fence. An older admission cannot release its replacement.
+          const pending = { ...scope.pending, connectionGeneration: peer.connectionGeneration };
+          scope.pending = pending; reservations.push({ scope, pending }); continue;
+        }
       }
-      const pending = this.#stage(scope, peerId, 'reserved');
-      if (pending === null) { deferred.push(id); continue; }
+      const pending = this.#stage(scope, peer, 'reserved');
       reservations.push({ scope, pending });
-      if (deferred.length === 0) after = id;
     }
-    if (reservations.length === 0 && deferred.length === 0) return null;
+    if (reservations.length === 0) return null;
     let settled = false;
     const release = (): void => {
-      for (const { scope, pending } of reservations) this.#settle(scope, pending);
+      for (const { scope, pending } of reservations) {
+        if (pending !== null) this.#settle(scope, pending);
+        else if (scope.pending === null) peer.deferred.delete(scope.contextGraphId);
+      }
     };
     return Object.freeze({
       reject: () => { if (!settled) { settled = true; release(); } },
@@ -161,69 +175,78 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
         settled = true;
         if (this.#closed) { release(); return; }
         for (const { scope, pending } of reservations) {
-          if (scope.pending === pending) scope.pending = { state: 'admitted', lease: pending.lease };
-        }
-        if (deferred.length > 0) {
-          if (contextGraphId === undefined) {
-            // Only a sorted cursor is retained, not a lease/array for every graph.
-            peer.continuation ??= { after, through: selected[selected.length - 1] };
-          } else peer.activated.add(contextGraphId);
+          if (pending === null) { scope.retryReservation = true; continue; }
+          const admitted = { ...pending, state: 'admitted' as const };
+          if (scope.pending === pending) scope.pending = admitted;
+          else if (scope.successor === pending) scope.successor = admitted;
         }
         this.#schedule();
       },
     });
   }
 
-  #scope(peer: PeerV1, id: string, nowMs: number): ScopeV1 | null {
-    let scope = peer.scopes.get(id);
-    if (scope !== undefined) return scope;
-    if (peer.scopes.size >= MAX_SCOPES_PER_PEER) {
-      const idle = [...peer.scopes.values()].find(candidate => candidate.pending === null
-        && candidate.eligibleAt <= nowMs);
-      if (idle === undefined) return null;
-      peer.scopes.delete(idle.contextGraphId);
-    }
-    scope = { contextGraphId: id, pending: null, failures: 0, eligibleAt: 0 };
-    peer.scopes.set(id, scope);
+  /** Only the lifecycle's last-live-connection close opens a new generation. */
+  disconnected(peerId: string): void {
+    const peer = this.#byPeer.get(peerId);
+    if (peer !== undefined) peer.connected = false;
+  }
+
+  #scope(peer: PeerV1, id: string, nowMs: number): ScopeV1 {
+    const existing = peer.scopes.get(id) ?? peer.deferred.get(id);
+    if (existing !== undefined) return existing;
+    const scope: ScopeV1 = { contextGraphId: id, pending: null, successor: null,
+      executing: false, retryReservation: false, failures: 0, eligibleAt: 0 };
+    if (!this.#installScope(peer, scope, nowMs)) peer.deferred.set(id, scope);
     return scope;
   }
 
-  #stage(scope: ScopeV1, peerId: string, state: PendingScopeV1['state']): PendingScopeV1 | null {
-    const lease = this.#ports.reserveFence(scope.contextGraphId, peerId);
+  #installScope(peer: PeerV1, scope: ScopeV1, now: number): boolean {
+    if (peer.scopes.size >= MAX_SCOPES_PER_PEER) {
+      const idle = [...peer.scopes.values()].find(candidate => candidate.pending === null
+        && !candidate.retryReservation && candidate.eligibleAt <= now);
+      if (idle === undefined) return false;
+      peer.scopes.delete(idle.contextGraphId);
+    }
+    peer.scopes.set(scope.contextGraphId, scope);
+    return true;
+  }
+
+  #stage(scope: ScopeV1, peer: PeerV1, state: PendingScopeV1['state']): PendingScopeV1 | null {
+    const lease = this.#ports.reserveFence(scope.contextGraphId, peer.peerId);
     if (lease === null) return null;
-    const pending: PendingScopeV1 = state === 'reserved'
-      ? { state: 'reserved', lease } : { state: 'admitted', lease };
-    scope.pending = pending;
+    const pending = { state, lease, connectionGeneration: peer.connectionGeneration };
+    if (scope.pending === null) scope.pending = pending;
+    else scope.successor = pending;
     return pending;
   }
 
   #settle(scope: ScopeV1, pending = scope.pending): void {
-    if (pending === null || scope.pending !== pending) return;
-    pending.lease.release();
-    scope.pending = null;
+    if (pending === null) return;
+    if (scope.successor === pending) { pending.lease.release(); scope.successor = null; }
+    else if (scope.pending === pending) {
+      pending.lease.release();
+      scope.pending = scope.successor; scope.successor = null;
+    }
   }
 
   #continue(peer: PeerV1, now: number): void {
-    if (peer.continuation === null && peer.activated.size === 0) return;
-    const selected = [...new Set(this.#ports.selectContextGraphIds())].sort();
-    const stage = (id: string): boolean => {
-      const scope = this.#scope(peer, id, now);
-      return scope !== null && (scope.pending !== null || this.#stage(scope, peer.peerId, 'admitted') !== null);
-    };
-    // Exact activation staging is bounded by the authoritative active graph set.
-    for (const id of peer.activated) {
-      if (!selected.includes(id)) { peer.activated.delete(id); continue; }
-      if (!stage(id)) return;
-      peer.activated.delete(id);
+    const selected = new Set(this.#ports.selectContextGraphIds());
+    for (const [id, scope] of peer.deferred) {
+      if (!selected.has(id)) {
+        this.#settle(scope); this.#settle(scope); peer.deferred.delete(id); continue;
+      }
+      if (scope.retryReservation && scope.pending === null) {
+        if (this.#stage(scope, peer, 'admitted') === null) continue;
+        scope.retryReservation = false;
+      }
+      if (scope.pending?.state === 'admitted' && this.#installScope(peer, scope, now)) {
+        peer.deferred.delete(id);
+      }
     }
-    const continuation = peer.continuation;
-    if (continuation === null) return;
-    for (const id of selected) {
-      if ((continuation.after !== null && id <= continuation.after) || id > continuation.through) continue;
-      if (!stage(id)) return;
-      continuation.after = id;
+    for (const scope of peer.scopes.values()) {
+      if (scope.retryReservation && scope.pending === null
+        && this.#stage(scope, peer, 'admitted') !== null) scope.retryReservation = false;
     }
-    peer.continuation = null;
   }
 
   #runnable(peer: PeerV1, now: number): readonly { scope: ScopeV1; pending: PendingScopeV1 }[] {
@@ -239,14 +262,15 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     let deadline = Infinity;
     const now = Date.now();
     for (const peer of this.#byPeer.values()) {
-      if ((peer.continuation !== null || peer.activated.size > 0) && this.#runnable(peer, now).length === 0) {
+      if (peer.deferred.size > 0 && this.#runnable(peer, now).length === 0) {
         deadline = Math.min(deadline, now + 1_000);
       }
       for (const scope of peer.scopes.values()) {
+        if (scope.retryReservation) deadline = Math.min(deadline, now + 1_000);
         if (scope.pending?.state === 'admitted' && scope.eligibleAt > now) {
           deadline = Math.min(deadline, scope.eligibleAt);
         }
-        if ((peer.continuation !== null || peer.activated.size > 0) && scope.pending === null) {
+        if (peer.deferred.size > 0 && scope.pending === null) {
           deadline = Math.min(deadline, scope.eligibleAt > now ? scope.eligibleAt : now + 1_000);
         }
       }
@@ -298,6 +322,7 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
       const scopes = this.#runnable(peer, Date.now()).slice(0, MAX_SCOPES_PER_TURN);
       for (const { scope, pending } of scopes) {
         if (signal.aborted || this.#closed) return;
+        scope.executing = true;
         const demand = pending.lease;
         let failed = false;
         peer.started++;
@@ -321,6 +346,7 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
           failed = true;
           if (!signal.aborted) this.#ports.warn(`RFC-64 catalog replay failed after ${peer.peerId.slice(-8)} connected: ${error instanceof Error ? error.message : String(error)}`);
         } finally {
+          scope.executing = false;
           if (failed) peer.failed++;
           scope.failures = failed ? scope.failures + 1 : 0;
           scope.eligibleAt = Date.now() + (failed

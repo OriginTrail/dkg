@@ -508,3 +508,98 @@ describe('connection staging versus canonical recovery execution', () => {
     expect(calls.slice(0, firstC).filter(peer => peer === 'b').length).toBeLessThan(12);
   });
 });
+
+
+describe('deferred replay completeness custody', () => {
+  it('fences the 257th graph before execution and retains its fence through cooldown', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(10_000);
+    const ids = Array.from({ length: 257 }, (_, i) => `cg-${String(i).padStart(3, '0')}`);
+    const seen: string[] = [];
+    const recovery = new Rfc64CatalogReplayRecoveryRuntimeV1<never>({
+      requestPeer: async cg => { seen.push(cg); return { status: 'completed', targets: [] }; },
+      whenReceiverIdleForContextGraph: async () => undefined,
+      targetIdentity: () => '', parityFailed: async () => false,
+    });
+    const connection = makeRuntime({ selectContextGraphIds: () => ids,
+      reserveFence: (cg, peer) => recovery.reservePeer(cg, 'policy', peer),
+      reannounce: async () => ({ failed: 0 }),
+      replay: (cg, demand, signal) => recovery.request({ kind: 'connection-demand', contextGraphId: cg,
+        policyDigest: 'policy', demand, signal }), warn: vi.fn(),
+    }, 100);
+    const reservation = connection.prepare('peer')!;
+    expect(recovery.status('cg-256', 'policy')?.active).toBe(true);
+    expect(recovery.revisionForContextGraph('cg-256')).toBeDefined();
+    reservation.admit(); await vi.advanceTimersByTimeAsync(0);
+    expect(seen).toHaveLength(256);
+    expect(recovery.status('cg-256', 'policy')?.active).toBe(true);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(seen).toHaveLength(257);
+    expect(recovery.status('cg-256', 'policy')?.active).toBe(false);
+    expect(connection.status().pendingScopes).toBe(0);
+  });
+});
+
+
+describe('reconnected peer generation custody', () => {
+  it('transfers an unsampled admission fence without letting the old rejection cancel it', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(10_000);
+    const recovery = new Rfc64CatalogReplayRecoveryRuntimeV1<never>({
+      requestPeer: async () => ({ status: 'completed', targets: [] }),
+      whenReceiverIdleForContextGraph: async () => undefined, targetIdentity: () => '', parityFailed: async () => false,
+    });
+    const reserve = vi.fn((cg: string, peer: string) => recovery.reservePeer(cg, 'policy', peer));
+    const replay = vi.fn((cg: string, demand: Parameters<Rfc64CatalogReplayConnectionRuntimePortsV1['replay']>[1], signal: AbortSignal) => recovery.request({
+      kind: 'connection-demand', contextGraphId: cg, policyDigest: 'policy', demand, signal,
+    }));
+    const connection = makeRuntime({ selectContextGraphIds: () => ['cg'], reserveFence: reserve,
+      reannounce: async () => ({ failed: 0 }), replay, warn: vi.fn() }, 100);
+    const older = connection.prepare('peer')!;
+    connection.disconnected('peer');
+    const replacement = connection.prepare('peer')!;
+    expect(reserve).toHaveBeenCalledOnce();
+    older.reject();
+    expect(recovery.status('cg', 'policy')?.active).toBe(true);
+    replacement.admit(); await vi.advanceTimersByTimeAsync(0);
+    expect(replay).toHaveBeenCalledOnce();
+    expect(recovery.status('cg', 'policy')?.active).toBe(false);
+    expect(connection.status().pendingScopes).toBe(0);
+  });
+
+  it('acquires H2 after the held H1 receiver drains without a third connection event', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(10_000);
+    let version = 1;
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const request = vi.fn(async () => ({ status: 'completed' as const, targets: [{ id: 'head', version }] }));
+    const idle = vi.fn(async () => { if (request.mock.calls.length === 1) await held; });
+    const recovery = new Rfc64CatalogReplayRecoveryRuntimeV1<{ id: string; version: number }>({
+      requestPeer: request, whenReceiverIdleForContextGraph: idle, targetIdentity: target => `${target.id}:${target.version}`,
+      pruneSupersededTargets: targets => targets.filter(target => target.version === Math.max(...targets.map(item => item.version))),
+      parityFailed: async () => false,
+    });
+    const connection = makeRuntime({ selectContextGraphIds: () => ['cg'],
+      reserveFence: (cg, peer) => recovery.reservePeer(cg, 'policy', peer),
+      reannounce: async () => ({ failed: 0 }),
+      replay: (cg, demand, signal) => recovery.request({ kind: 'connection-demand', contextGraphId: cg,
+        policyDigest: 'policy', demand, signal }), warn: vi.fn(),
+    }, 100);
+    try {
+      connection.prepare('peer')!.admit(); await vi.advanceTimersByTimeAsync(0);
+      expect(request).toHaveBeenCalledOnce();
+      expect(idle).toHaveBeenCalledOnce();
+      version = 2; connection.disconnected('peer'); connection.prepare('peer')!.admit();
+      for (let i = 0; i < 20; i++) expect(connection.prepare('peer')).toBeNull();
+      expect(connection.status().pendingScopes).toBe(2);
+      expect(recovery.status('cg', 'policy')?.active).toBe(true);
+      release(); await vi.advanceTimersByTimeAsync(0);
+      expect(connection.status().pendingScopes).toBe(1);
+      expect(recovery.status('cg', 'policy')?.active).toBe(true);
+      await vi.advanceTimersByTimeAsync(99); expect(request).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(recovery.promisedTargets('cg', 'policy')).toEqual([{ id: 'head', version: 2 }]);
+      expect(recovery.status('cg', 'policy')?.active).toBe(false);
+      expect(connection.status().pendingScopes).toBe(0);
+    } finally { release(); }
+  });
+});
