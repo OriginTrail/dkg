@@ -13,10 +13,10 @@
  */
 import { ethers } from 'ethers';
 import { DKG_ONTOLOGY, contextGraphMetaUri } from '@origintrail-official/dkg-core';
-import type { EvmSigner, ExternalAuthorSigners } from '@origintrail-official/dkg-chain';
+import type { ChainAdapter, EvmSigner, ExternalAuthorSigners } from '@origintrail-official/dkg-chain';
 import { MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS } from './dkg-agent-constants.js';
 import type { DKGAgent } from './dkg-agent.js';
-import { externalAuthorSignerFor } from './external-author-signing.js';
+import { externalAuthorSignerFor, signsThroughExternalSigner } from './external-author-signing.js';
 
 interface ExternalSignerConfig {
   readonly chainConfig?: {
@@ -31,10 +31,11 @@ interface ExternalSignerConfig {
  */
 export async function isExternalAuthorCurator(
   config: ExternalSignerConfig | undefined,
+  chain: Pick<ChainAdapter, 'usesExternalSigner'> | undefined,
   curator: string,
   registrationSigner: string,
 ): Promise<boolean> {
-  if (!config?.chainConfig?.signers?.length) return false;
+  if (!signsThroughExternalSigner(config, chain)) return false;
   if (curator.toLowerCase() === registrationSigner.toLowerCase()) return false;
   return (await externalAuthorSignerFor(config, curator)) !== undefined;
 }

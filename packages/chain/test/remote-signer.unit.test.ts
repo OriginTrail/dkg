@@ -711,6 +711,7 @@ describe('EVMChainAdapter with external signers', () => {
       expect(adapter.getSignerAddresses()).toEqual([WALLET_A.address, WALLET_B.address]);
       expect(adapter.getSignerAddress()).toBe(WALLET_A.address);
       expect(() => adapter.getOperationalPrivateKey()).toThrow(OperationalKeyUnavailableError);
+      expect(adapter.usesExternalSigner()).toBe(true);
       expect(adapter.getACKSignerKey()).toBeUndefined();
       const signature = await adapter.signTypedDataAs(WALLET_B.address, DOMAIN, TYPES, VALUE);
       expect(signature).toBe(await WALLET_B.signTypedData(DOMAIN, TYPES, VALUE));
@@ -733,6 +734,7 @@ describe('EVMChainAdapter with external signers', () => {
     const adapter = new EVMChainAdapter({ ...base, privateKey: KEY_C, allowNoAdminSigner: true });
     try {
       expect(adapter.getOperationalPrivateKey()).toBe(KEY_C);
+      expect(adapter.usesExternalSigner()).toBe(false);
       expect(adapter.getACKSignerKey()).toBe(KEY_C);
     } finally {
       adapter.destroy();

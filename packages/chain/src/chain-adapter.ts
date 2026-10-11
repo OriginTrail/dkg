@@ -1963,6 +1963,13 @@ export interface ChainAdapter {
   ): Promise<string>;
 
   /**
+   * Whether the operational wallets sign through an external signer, so the
+   * node holds none of their keys. Such a paying wallet never authors an
+   * asset: callers must not fall back to it as the author.
+   */
+  usesExternalSigner?(): boolean;
+
+  /**
    * Return `true` iff `address` has deployed bytecode on this chain.
    *
    * RFC-001 / V10 author attestations dispatch on `authorAddress.code.length`

@@ -449,6 +449,7 @@ import {
   isLocalOxigraphConfig,
   sliceIntoCiphertextChunks,
 } from './dkg-agent-helpers.js';
+import { signsThroughExternalSigner } from './external-author-signing.js';
 import { resolveSyncReconcilerTiming } from './sync/reconciler-timing.js';
 import {
   swmSenderStateKey,
@@ -1542,8 +1543,8 @@ export class DKGAgent extends DKGAgentBase {
       eventBus,
       keypair,
       publisherPrivateKey: useLegacyAdapterOperationalKeyFallback ? legacyAdapterOperationalKey : undefined,
-      // With external signers a paying wallet never authors: only a configured author does.
-      authorSigner: config.chainConfig?.authors?.defaultAuthor ?? (config.chainConfig?.signers?.length ? null : undefined),
+      // With external signers a paying wallet never authors, however the adapter was built: only a configured author does.
+      authorSigner: config.chainConfig?.authors?.defaultAuthor ?? (signsThroughExternalSigner(config, chain) ? null : undefined),
       publisherAddress: config.publisherAddress,
       publisherAddressResolver: config.publisherAddress || useLegacyAdapterOperationalKeyFallback
         ? undefined

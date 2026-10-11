@@ -1531,7 +1531,7 @@ export class ContextGraphMethods extends DKGAgentBase {
 
         const normalizedChainSigner = ethers.getAddress(chainSigner);
         const signerIsOwner = normalizedChainSigner.toLowerCase() === publishAuthority.toLowerCase();
-        const externalAuthorCurator = await isExternalAuthorCurator(this.config, ownerAddress, normalizedChainSigner);
+        const externalAuthorCurator = await isExternalAuthorCurator(this.config, this.chain, ownerAddress, normalizedChainSigner);
         if (ownerAddress.toLowerCase() !== normalizedChainSigner.toLowerCase() && !externalAuthorCurator) {
           throw new Error(
             `Context graph "${id}" cannot be PCA-registered: local curator ${ownerAddress} differs from registration chain signer ${normalizedChainSigner}. The local curator must control the wallet that will own the on-chain Context Graph NFT.`,

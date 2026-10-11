@@ -33,10 +33,18 @@ import { DKGPublisher } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { agentFromPrivateKey, registerSelfSovereignAgent } from '../src/agent-keystore.js';
 import { constructConfiguredChainAdapter } from '../src/configured-chain-adapter.js';
-import { externalAuthorGossipSigner, externalSignerAgentPublicKey, signWorkspaceGossip } from '../src/external-author-signing.js';
+import {
+  externalAuthorGossipSigner,
+  externalSignerAgentPublicKey,
+  registerExternalDefaultAgent,
+  signWorkspaceGossip,
+  signsThroughExternalSigner,
+} from '../src/external-author-signing.js';
+import { isExternalAuthorCurator } from '../src/external-author-curator.js';
 import { planAuthorityIndexBootstrap } from '../src/authority-index-config.js';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 import { HARDHAT_KEYS } from '../../chain/test/hardhat-harness.js';
+import { getSharedContext } from '../../chain/test/evm-test-context.js';
 import { startFakeRemoteSigner, type FakeSigner } from '../../chain/test/helpers/fake-remote-signer.js';
 
 const PAYER_TOKEN = 'payer-credential-5e4d3c2b1a090807';
@@ -275,6 +283,52 @@ describe('external signer author keys', () => {
     const seal = await agent.assertion.finalize(CG, NAME);
     expect(ethers.getAddress(seal.authorAddress)).toBe(defaultAuthor.address);
     expect(ethers.getAddress(seal.authorAddress)).not.toBe(payer.address);
+  });
+
+  it('never falls back to a payer as author when the supplied chain adapter signs externally', async () => {
+    const { fake, remote } = await externalSigners();
+    const { rpcUrl, hubAddress } = getSharedContext();
+    // Built by the caller and passed in: the agent's own configuration names no signer.
+    const chain = new EVMChainAdapter({ rpcUrl, hubAddress, chainId: 'evm:31337', signers: remote.operational, allowNoAdminSigner: true });
+    const agent = await DKGAgent.create({
+      name: 'SuppliedExternalAdapter',
+      store: new OxigraphStore(),
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      kaNumberAllocator: makeTestKaNumberAllocator(),
+      chainAdapter: chain,
+      nodeRole: 'edge',
+    });
+    await agent.start();
+    try {
+      expect(agent.getDefaultAgentAddress()).toBeUndefined();
+      await agent.assertion.create(CG, NAME);
+      await agent.assertion.write(CG, NAME, [q('urn:external-authors:supplied', 'urn:value', '"v1"')]);
+      const before = fake.requests.length;
+      await expect(agent.assertion.finalize(CG, NAME)).rejects.toMatchObject({ code: 'SEAL_CAPABILITY_GAP' });
+      expect(fake.requests.slice(before).filter((request) => request.method !== 'eth_accounts')).toEqual([]);
+    } finally {
+      await agent.stop().catch(() => {});
+      chain.destroy();
+    }
+  });
+
+  it('decides external signing from the chain adapter as well as from the configured signers', async () => {
+    const { remote } = await externalSigners();
+    const authorsOnly = { chainConfig: { authors: remote.authors } };
+    const external = { usesExternalSigner: () => true };
+    expect(signsThroughExternalSigner(authorsOnly, external)).toBe(true);
+    expect(signsThroughExternalSigner(authorsOnly, { usesExternalSigner: () => false })).toBe(false);
+    expect(signsThroughExternalSigner({ chainConfig: { signers: remote.operational } }, undefined)).toBe(true);
+    expect(await isExternalAuthorCurator(authorsOnly, external, agentKey.address, payer.address)).toBe(true);
+    expect(await isExternalAuthorCurator(authorsOnly, undefined, agentKey.address, payer.address)).toBe(false);
+
+    const agent = await stubAgent(remote);
+    agent.config = authorsOnly;
+    expect(await registerExternalDefaultAgent(agent, authorsOnly, undefined, 'node')).toBeUndefined();
+    expect(agent.localAgents.size).toBe(0);
+    expect(await registerExternalDefaultAgent(agent, authorsOnly, external, 'node')).toBe(defaultAuthor.address);
+    expect(agent.getLocalAgentMode(defaultAuthor.address)).toBe('self-sovereign');
   });
 
   it('auto-registers no default agent from payer accounts alone, or when no author key can be registered', async () => {

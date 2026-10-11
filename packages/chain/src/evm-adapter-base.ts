@@ -3022,6 +3022,11 @@ export class EVMChainAdapterBase {
     return operationalPrivateKeyOf(this.signer);
   }
 
+  /** Whether the operational wallets sign through an external signer (one source signs for the whole pool). */
+  usesExternalSigner(): boolean {
+    return isExternalEvmSigner(this.signer);
+  }
+
   protected walletKeyHash(address: string): string {
     return ethers.keccak256(ethers.solidityPacked(['address'], [ethers.getAddress(address)]));
   }

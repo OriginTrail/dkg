@@ -1379,7 +1379,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
     }
     if (!opKey) {
       // No operational key: with an external signer, one of its author keys (no key stored).
-      const author = await registerExternalDefaultAgent(this, this.config, this.config.name ?? 'owner', this.config.framework);
+      const author = await registerExternalDefaultAgent(this, this.config, this.chain, this.config.name ?? 'owner', this.config.framework);
       if (author) { this.defaultAgentAddress = author; await this.markDefaultAgent(author); }
       return;
     }
