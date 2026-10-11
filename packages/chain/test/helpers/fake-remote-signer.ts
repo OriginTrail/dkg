@@ -111,10 +111,11 @@ export async function startFakeRemoteSigner(options: FakeSignerOptions): Promise
           send(res, 200, { jsonrpc: '2.0', id: body.id, result: sent });
         } catch (err) {
           const code = (err as { code?: unknown }).code === METHOD_NOT_FOUND ? METHOD_NOT_FOUND : -32000;
+          // Only an error's message goes back to the client, never the thrown value itself.
           send(res, 200, {
             jsonrpc: '2.0',
             id: body.id,
-            error: { code, message: err instanceof Error ? err.message : String(err) },
+            error: { code, message: err instanceof Error ? err.message : 'signing failed' },
           });
         }
       })();
