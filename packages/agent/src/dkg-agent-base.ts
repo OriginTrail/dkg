@@ -1,3 +1,4 @@
+import type { HostModeRestoration } from './internal/host-mode-restoration.js';
 
 export { createListContextGraphsCacheInvalidatingStore } from './internal/context-graph-cache-invalidating-store.js';
 import type { VmRecoveryCoreTransportPreferencePolicy } from './vm-recovery-core-transport-preference.js';
@@ -672,18 +673,18 @@ export class DKGAgentBase {
    * field.
    *
    * Session-scoped, together with {@link swmHostModeCurated} and
-   * {@link swmHostModeHandlers}: they describe handlers installed on the
+   * {@link swmHostModeHandlers}: they are read-only projections of registrations installed on the
    * current `GossipSubManager` and are owned by its {@link GossipSession}
    * (restart contract on {@link DKGAgentBase}). The persisted host-mode
    * markers in `swmHostModeStore` are the durable side.
    */
-  protected get swmHostModeSubscribed() { return this.gossipSession.swmHostModeSubscribed; }
+  protected get swmHostModeSubscribed() { return this.gossipSession.hostModeRegistrations.sources; }
   /**
    * Cached curation classification for each host-mode handler. The handler
    * reads this map before dispatch so the strip can cover both legacy and
    * chunked envelopes without a store-backed policy lookup per message.
    */
-  protected get swmHostModeCurated() { return this.gossipSession.swmHostModeCurated; }
+  protected get swmHostModeCurated() { return this.gossipSession.hostModeRegistrations.classifications; }
   /**
    * Per-CG reference to the host-mode gossip handler closure. Kept
    * so we can call `gossip.offMessage(topic, handler)` to remove
@@ -697,11 +698,13 @@ export class DKGAgentBase {
    * Keyed by the canonical wire-form id (same invariant as
    * `swmHostModeSubscribed`); see {@link canonicalSwmHostModeKey}.
    */
-  protected get swmHostModeHandlers() { return this.gossipSession.swmHostModeHandlers; }
+  protected get swmHostModeHandlers() { return this.gossipSession.hostModeRegistrations.handlers; }
   /** Async lock for the host-mode reconciler so simultaneous calls don't double-subscribe. */
   protected hostModeReconcileInflight?: Promise<void>;
   /** Rotating cursor for bounded host-mode reconcile sweeps over known context graphs. */
   protected hostModeReconcileCursor = 0;
+  /** Restoration work belongs to one captured gossip lifetime. */
+  protected swmHostModeRestoration?: HostModeRestoration;
   /**
    * OT-RFC-43 A2 — the KA-number allocator, retained on the agent (also
    * forwarded to the publisher as `kaAllocator`). Held here so

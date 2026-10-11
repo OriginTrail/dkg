@@ -93,7 +93,7 @@ async function fixture(options: { capped?: boolean; host?: boolean; marker?: boo
     const ingest = vi.spyOn(agent, 'ingestSwmHostModeEnvelope');
     const bytes = new Uint8Array([1]);
     await gossip.deliver(topic, bytes);
-    expect(ingest).toHaveBeenCalledExactlyOnceWith(rawId, bytes, 'owned-dormancy-probe');
+    expect(ingest).toHaveBeenCalledExactlyOnceWith(rawId, bytes, 'owned-dormancy-probe', expect.any(Function));
     await ingest.mock.results[0].value; ingest.mockRestore();
   };
   return { agent, state, gossip, chain, assertAbsent, assertDispatch };
@@ -165,12 +165,12 @@ describe('automatic SWM host admission honors durable dormancy', () => {
   }, 15000);
   it('does not recreate a dormant listener through the direct automatic wire choke point', async () => {
     const f = await fixture();
-    f.agent.wireSwmHostModeHandler(LOCAL, SUBSCRIPTION_SOURCES.RECONCILER, true);
+    f.agent.wireSwmHostModeHandler(LOCAL, SUBSCRIPTION_SOURCES.RECONCILER, { kind: 'curated' });
     await f.assertAbsent();
   });
   it('retires its own automatic listener on dormant reentry', async () => {
     const f = await fixture({ skipPlan: true });
-    f.agent.wireSwmHostModeHandler(LOCAL, SUBSCRIPTION_SOURCES.RECONCILER, true);
+    f.agent.wireSwmHostModeHandler(LOCAL, SUBSCRIPTION_SOURCES.RECONCILER, { kind: 'curated' });
     await f.assertDispatch();
     await f.agent.rehydrateContextGraphSubscriptions(null);
     await f.agent.reconcileSwmHostModeSubscription(LOCAL);
@@ -234,7 +234,7 @@ describe('automatic SWM host admission honors durable dormancy', () => {
     } else {
       const original = f.agent.maybeMarkRegisteredForHostMode.bind(f.agent);
       vi.spyOn(f.agent, 'maybeMarkRegisteredForHostMode').mockImplementationOnce(async id => { entered(); await held; await original(id); });
-      if (window === 'existing-registration') f.agent.wireSwmHostModeHandler(LOCAL, SUBSCRIPTION_SOURCES.RECONCILER, true);
+      if (window === 'existing-registration') f.agent.wireSwmHostModeHandler(LOCAL, SUBSCRIPTION_SOURCES.RECONCILER, { kind: 'curated' });
     }
     const operation = window === 'restore-registration'
       ? f.agent.restoreSwmHostModeSubscriptions() : f.agent.reconcileSwmHostModeSubscription(LOCAL);
@@ -258,7 +258,7 @@ describe('automatic SWM host admission honors durable dormancy', () => {
       subscribed: false, synced: false, onChainId: SLOT, onChainHash: HASH,
     }, { persist: false });
     f.state.onChainAccessPolicyCache.set(SLOT, await f.chain.getContextGraphAccessPolicy(582n));
-    f.agent.wireSwmHostModeHandler(LOCAL, SUBSCRIPTION_SOURCES.MANUAL, false);
+    f.agent.wireSwmHostModeHandler(LOCAL, SUBSCRIPTION_SOURCES.MANUAL, { kind: 'manual-public' });
     const handler = f.state.swmHostModeHandlers.get(HASH);
     expect(handler).toBeDefined();
     probe.mockClear(); release(); await reconciling;
@@ -267,7 +267,7 @@ describe('automatic SWM host admission honors durable dormancy', () => {
     expect(f.state.swmHostModeSubscribed.get(HASH)).toBe(SUBSCRIPTION_SOURCES.MANUAL);
     const ingest = vi.spyOn(f.agent, 'ingestSwmHostModeEnvelope'); const bytes = new Uint8Array([1]);
     await replacement.deliver(contextGraphWorkspaceTopic(HASH), bytes);
-    expect(ingest).toHaveBeenCalledExactlyOnceWith(LOCAL, bytes, 'owned-dormancy-probe');
+    expect(ingest).toHaveBeenCalledExactlyOnceWith(LOCAL, bytes, 'owned-dormancy-probe', expect.any(Function));
     await ingest.mock.results[0].value;
   });
   it('rechecks numeric policy after the caller awaits an immediate private-policy result', async () => {
@@ -285,7 +285,7 @@ describe('automatic SWM host admission honors durable dormancy', () => {
     const variant = HASH.toUpperCase().replace('0X', '0x');
     expect(f.state.contextGraphSubscriptionDormancyById.has(HASH)).toBe(true);
     expect(f.state.subscribedContextGraphs.has(variant)).toBe(false);
-    f.agent.wireSwmHostModeHandler(variant, SUBSCRIPTION_SOURCES.RECONCILER, true);
+    f.agent.wireSwmHostModeHandler(variant, SUBSCRIPTION_SOURCES.RECONCILER, { kind: 'curated' });
     await f.assertAbsent();
   });
   it('keeps an exact hash-shaped cleartext identity distinct from the normalized dormant wire row', async () => {

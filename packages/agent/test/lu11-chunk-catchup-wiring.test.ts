@@ -87,6 +87,7 @@ interface WiringInternals {
     contextGraphId: string,
     data: Uint8Array,
     fromPeerId: string,
+    admissionCurrent: () => boolean,
   ): Promise<void>;
   store: {
     insert(quads: { subject: string; predicate: string; object: string; graph: string }[]): Promise<void>;
@@ -577,7 +578,7 @@ describe('DKGAgent.ingestSwmCiphertextChunkEnvelope — gossip ingester wiring (
       payload,
     });
 
-    await internals.ingestSwmCiphertextChunkEnvelope(cgId, envelopeBytes, REMOTE_PEER);
+    await internals.ingestSwmCiphertextChunkEnvelope(cgId, envelopeBytes, REMOTE_PEER, () => true);
 
     const persisted = await chunkPersistedAt(internals, {
       canonicalCgId: canonical,
@@ -605,7 +606,7 @@ describe('DKGAgent.ingestSwmCiphertextChunkEnvelope — gossip ingester wiring (
 
     // Must not throw, must not persist anything.
     await expect(
-      internals.ingestSwmCiphertextChunkEnvelope(cgId, envelopeBytes, REMOTE_PEER),
+      internals.ingestSwmCiphertextChunkEnvelope(cgId, envelopeBytes, REMOTE_PEER, () => true),
     ).resolves.toBeUndefined();
 
     const canonical = internals.gossipWireIdFor(cgId);
@@ -643,7 +644,7 @@ describe('DKGAgent.ingestSwmCiphertextChunkEnvelope — gossip ingester wiring (
       payload,
     });
 
-    await internals.ingestSwmCiphertextChunkEnvelope(subscriptionCgId, envelopeBytes, REMOTE_PEER);
+    await internals.ingestSwmCiphertextChunkEnvelope(subscriptionCgId, envelopeBytes, REMOTE_PEER, () => true);
 
     // Codex review (round 2) feedback: assert NOTHING persisted
     // under EITHER cg's canonical graph. Previously only the
@@ -691,7 +692,7 @@ describe('DKGAgent.ingestSwmCiphertextChunkEnvelope — gossip ingester wiring (
       payload,
     });
 
-    await internals.ingestSwmCiphertextChunkEnvelope(cgId, envelopeBytes, REMOTE_PEER);
+    await internals.ingestSwmCiphertextChunkEnvelope(cgId, envelopeBytes, REMOTE_PEER, () => true);
 
     expect(await chunkPersistedAt(internals, { canonicalCgId: canonical, batchId, chunkIndex: 1 })).toBeNull();
   });
@@ -725,7 +726,7 @@ describe('DKGAgent.ingestSwmCiphertextChunkEnvelope — gossip ingester wiring (
       type: GOSSIP_TYPE_WORKSPACE_PUBLISH, // V1, not chunked
     });
 
-    await internals.ingestSwmCiphertextChunkEnvelope(cgId, envelopeBytes, REMOTE_PEER);
+    await internals.ingestSwmCiphertextChunkEnvelope(cgId, envelopeBytes, REMOTE_PEER, () => true);
 
     expect(await chunkPersistedAt(internals, { canonicalCgId: canonical, batchId, chunkIndex: 0 })).toBeNull();
   });

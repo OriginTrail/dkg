@@ -3,13 +3,79 @@ import type { GossipSubManager, SubscriptionSource } from '@origintrail-official
 import type { ContextGraphSub } from './dkg-agent-types.js';
 import { UnansweredAuthorityRecheck } from './internal/unanswered-authority-recheck.js';
 
+export type SwmHostModeHandler = (topic: string, data: Uint8Array, from: string) => void;
+export type SwmHostModeCustody =
+  | Readonly<{ kind: 'curated' }>
+  | Readonly<{ kind: 'manual-public' }>
+  | Readonly<{ kind: 'automatic-public'; current: () => boolean }>;
+export type SwmHostModeRegistration = Readonly<{
+  source: SubscriptionSource;
+  handler: SwmHostModeHandler;
+  custody: SwmHostModeCustody;
+  listenerToken: symbol;
+}>;
+
+/** Read-only historical probes derive from the registration, never side tables. */
+function registrationView<T>(records: ReadonlyMap<string, SwmHostModeRegistration>, project: (row: SwmHostModeRegistration) => T) {
+  return Object.freeze({
+    get size() { return records.size; },
+    has: (key: string) => records.has(key),
+    get: (key: string) => { const row = records.get(key); return row === undefined ? undefined : project(row); },
+    keys: () => records.keys(),
+    *values() { for (const row of records.values()) yield project(row); },
+  });
+}
+
+/** One transition owner for listener provenance, classification and custody. */
+class SwmHostModeRegistrations {
+  readonly #records = new Map<string, SwmHostModeRegistration>();
+  constructor(private readonly sessionCurrent: () => boolean) {}
+  readonly sources = registrationView(this.#records, row => row.source);
+  readonly classifications = registrationView(this.#records, row => row.custody.kind === 'curated');
+  readonly handlers = registrationView(this.#records, row => row.handler);
+  get(key: string): SwmHostModeRegistration | undefined { return this.#records.get(key); }
+  has(key: string): boolean { return this.#records.has(key); }
+  /** Captures either a pending (absent) listener or the installed token, never row identity. */
+  captureListener(key: string, token = this.#records.get(key)?.listenerToken): () => boolean {
+    return () => this.sessionCurrent() && this.#records.get(key)?.listenerToken === token;
+  }
+  /** Listener fencing and custody interpretation belong to this registration owner. */
+  captureAdmission(key: string, token: symbol, policy: {
+    bindingCurrent(): boolean;
+    stripCiphertext(): boolean;
+    manualPublicCurrent(): boolean;
+  }): () => boolean {
+    const custody = this.#records.get(key)?.custody;
+    const listenerCurrent = this.captureListener(key, token);
+    return () => listenerCurrent() && policy.bindingCurrent()
+      && (!policy.stripCiphertext() || (custody?.kind === 'manual-public'
+        ? this.#records.get(key)?.custody.kind === 'manual-public' && policy.manualPublicCurrent()
+        : custody?.kind === 'automatic-public'
+          && this.#records.get(key)?.custody.kind === 'automatic-public' && custody.current()));
+  }
+  installOrRefresh(key: string, registration: SwmHostModeRegistration): void {
+    const current = this.#records.get(key);
+    // First source/listener/token survive custody refresh; removed/reinstalled listeners never do.
+    const owned = current ?? registration;
+    const evidence = registration.custody;
+    const listenerCurrent = this.captureListener(key, owned.listenerToken);
+    const custody: SwmHostModeCustody = evidence.kind === 'automatic-public'
+      ? { kind: 'automatic-public', current: () => listenerCurrent() && evidence.current() } : evidence;
+    this.#records.set(key, Object.freeze({ ...owned, custody: Object.freeze(custody) }));
+  }
+  remove(key: string): SwmHostModeRegistration | undefined {
+    const current = this.#records.get(key);
+    if (!current) return undefined;
+    this.#records.delete(key);
+    return current;
+  }
+}
+
 /** All bookkeeping belongs to the manager whose wiring it describes. */
 export class GossipSession {
   readonly gossipRegistered = new Set<string>();
   readonly sharedMemoryGossipRegistered = new Set<string>();
-  readonly swmHostModeSubscribed = new Map<string, SubscriptionSource>();
-  readonly swmHostModeCurated = new Map<string, boolean>();
-  readonly swmHostModeHandlers = new Map<string, (topic: string, data: Uint8Array, from: string) => void>();
+  readonly hostModeRegistrations = new SwmHostModeRegistrations(() => this.active);
   /** Live intents snapshotted before the durable startup plan is read. */
   readonly startupLiveIntents = new Map<string, Pick<ContextGraphSub, 'syncMode'>>();
   #retired = false;

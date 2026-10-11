@@ -7,7 +7,7 @@
  * `ContextGraphCreated` tail, ContextGraphStorage id enumeration (historical
  * discovery, see context-graph-storage-discovery.ts) and boot restore of the
  * enumeration checkpoint. The path binds the observation to a local row,
- * seeds the authorization caches, nudges host mode for curated graphs and
+ * seeds the authorization caches, nudges host mode for eligible graphs and
  * merges the chain-public facts that `listContextGraphs` rows carry.
  */
 
@@ -341,7 +341,7 @@ export class ContextGraphChainObservationMethods extends DKGAgentBase {
   ): void {
     if (
       incoming.nameHash === null
-      || incoming.accessPolicy !== 1
+      || !this.hostModeAutoHostEligible(incoming.accessPolicy, incoming.publishPolicy)
       || localId === null
       || incoming.active === false
     ) {

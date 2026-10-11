@@ -2250,6 +2250,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
     if (this.started) return;
+    await this.swmHostModeRestoration?.close();
+    this.swmHostModeRestoration = undefined;
     this.storageACKRegistrationRuntime.retireCurrentGeneration();
     this.chain.contextGraphAuthorityIndexSnapshots?.open();
     // Validate and capture the substrate before persistence/network startup.
@@ -9288,6 +9290,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.wireIdToLocalCgId.delete(previousWireId);
     }
     this.subscribedContextGraphs.set(contextGraphId, canonicalNext);
+    if (previous?.onChainId !== canonicalNext.onChainId
+      && this.swmHostModeSubscribed.has(this.canonicalSwmHostModeKey(contextGraphId))) {
+      this.enqueueHostModePersistence(contextGraphId, true);
+    }
     const wireOwnerId = this.wireIdToLocalCgId.get(nextWireId);
     const wireOwner = wireOwnerId === undefined ? undefined : this.subscribedContextGraphs.get(wireOwnerId);
     const preserveWireOwner = options?.deferWireAdoption === true || (

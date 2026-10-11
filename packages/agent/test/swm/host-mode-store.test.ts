@@ -1,8 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { promises as fs } from 'node:fs';
 import { mkdtemp, rm, writeFile, readdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { isCanonicalAuthoritativeContextGraphId } from '../../src/context-graph-binding-state.js';
 import { SwmHostModeStore, type SwmHostModeStartupReconcileReport } from '../../src/swm/host-mode-store.js';
 
 function cgKey(contextGraphId: string): string {
@@ -52,6 +54,104 @@ describe('SwmHostModeStore', () => {
 
     const tail = await store.iterate(cgId, 1);
     expect(tail.map((e) => e.seqno)).toEqual([2, 3]);
+  });
+
+  it('persists authority-bound history floors across reopen without recycling sequence numbers', async () => {
+    const limits = { perCgByteCap: 1024 * 1024, ttlMs: 60_000 };
+    const first = new SwmHostModeStore({ dataDir: dir, unregisteredLimits: limits, registeredLimits: limits });
+    const id = 'retained-authority-history';
+    await first.markHostModeSubscribed(id, { onChainId: '0010' });
+    await first.append(id, new Uint8Array([10]));
+    await first.markHostModeSubscribed(id, { onChainId: '11' });
+    await first.append(id, new Uint8Array([11]));
+    const reopened = new SwmHostModeStore({ dataDir: dir, unregisteredLimits: limits, registeredLimits: limits });
+    expect(await reopened.iterate(id, 0, 32, '10')).toEqual([]);
+    expect((await reopened.iterate(id, 0, 32, '11')).map(row => row.seqno)).toEqual([2]);
+    await reopened.markHostModeSubscribed(id, { onChainId: '0011' });
+    expect((await reopened.iterate(id, 0, 32, '11')).map(row => row.seqno)).toEqual([2]);
+    await reopened.markHostModeUnsubscribed(id);
+    await reopened.markHostModeSubscribed(id, { onChainId: '11' });
+    expect((await reopened.iterate(id, 0, 32, '11')).map(row => row.seqno)).toEqual([2]);
+    await reopened.markHostModeSubscribed(id);
+    expect((await reopened.iterate(id, 0, 32, '11')).map(row => row.seqno)).toEqual([2]);
+    await reopened.markHostModeSubscribed(id, { onChainId: undefined });
+    expect(await reopened.iterate(id, 0, 32, '11')).toEqual([]);
+    expect(await reopened.iterate(id, 0)).toEqual([]);
+    expect(await reopened.append(id, new Uint8Array([12]))).toBe(3);
+    expect((await reopened.stats()).perCg[id].entries).toBe(3);
+  });
+
+  it('does not attribute legacy unbound history to a newly claimed public binding', async () => {
+    const limits = { perCgByteCap: 1024 * 1024, ttlMs: 60_000 };
+    const store = new SwmHostModeStore({ dataDir: dir, unregisteredLimits: limits, registeredLimits: limits });
+    await store.append('unproven-history', new Uint8Array([99]));
+    expect(await store.iterate('unproven-history', 0, 32, '11')).toEqual([]);
+    await store.markHostModeSubscribed('unproven-history', { onChainId: '11' });
+    expect(await store.iterate('unproven-history', 0, 32, '11')).toEqual([]);
+    await store.append('unproven-history', new Uint8Array([11]));
+    expect((await store.iterate('unproven-history', 0, 32, '11')).map(row => row.seqno)).toEqual([2]);
+  });
+
+  it('keeps old numeric metadata readable privately but cannot certify its history for public reactivation', async () => {
+    const limits = { perCgByteCap: 1024 * 1024, ttlMs: 60_000 };
+    const id = 'legacy-numeric-history';
+    const old = new SwmHostModeStore({ dataDir: dir, unregisteredLimits: limits, registeredLimits: limits });
+    await old.append(id, new Uint8Array([90]));
+    await writeFile(path.join(dir, `${cgKey(id)}.meta`), JSON.stringify({
+      contextGraphId: id, seqno: 1, registered: true, hostModeSubscribed: true, hostModeOnChainId: '10',
+    }));
+    const reopened = new SwmHostModeStore({ dataDir: dir, unregisteredLimits: limits, registeredLimits: limits });
+    expect((await reopened.iterate(id, 0)).map(row => row.seqno)).toEqual([1]);
+    expect(await reopened.iterate(id, 0, 32, '10')).toEqual([]);
+    await reopened.markHostModeSubscribed(id, { onChainId: '10' });
+    expect(await reopened.iterate(id, 0, 32, '10')).toEqual([]);
+    expect((await reopened.stats()).perCg[id].entries).toBe(1);
+    await reopened.append(id, new Uint8Array([10]));
+    expect((await reopened.iterate(id, 0, 32, '10')).map(row => row.seqno)).toEqual([2]);
+  });
+
+  it('checks captured admission inside the actual append queue before changing binding or writing bytes', async () => {
+    const limits = { perCgByteCap: 1024 * 1024, ttlMs: 60_000 };
+    const store = new SwmHostModeStore({ dataDir: dir, unregisteredLimits: limits, registeredLimits: limits });
+    await store.markHostModeSubscribed('guarded-retention', { onChainId: '10' });
+    await store.append('guarded-retention', new Uint8Array([10]));
+    expect(await store.append('guarded-retention', new Uint8Array([11]), { onChainId: '11', current: () => false })).toBeUndefined();
+    expect((await store.iterate('guarded-retention', 0, 32, '10')).map(row => row.seqno)).toEqual([1]);
+    let checks = 0;
+    expect(await store.append('guarded-retention', new Uint8Array([13]), { onChainId: '10', current: () => ++checks === 1 })).toBeUndefined();
+    expect(await store.append('guarded-retention', new Uint8Array([12]), { onChainId: '10', current: () => true })).toBe(2);
+  });
+
+  it('serializes the history snapshot and payload read with queued authority changes', async () => {
+    const limits = { perCgByteCap: 1024 * 1024, ttlMs: 60_000 };
+    const store = new SwmHostModeStore({ dataDir: dir, unregisteredLimits: limits, registeredLimits: limits });
+    const id = 'held-bound-history-read';
+    await store.markHostModeSubscribed(id, { onChainId: '10' });
+    await store.append(id, new Uint8Array([10]));
+    let entered!: () => void, release!: () => void;
+    const readEntered = new Promise<void>(resolve => { entered = resolve; });
+    const readRelease = new Promise<void>(resolve => { release = resolve; });
+    const original = fs.readFile.bind(fs);
+    const read = vi.spyOn(fs, 'readFile').mockImplementation(async (file, options) => {
+      if (String(file) === path.join(dir, `${cgKey(id)}.log`)) {
+        entered(); await readRelease;
+      }
+      return original(file, options);
+    });
+    const pending = store.iterate(id, 0, 32, '10');
+    let rebound = false;
+    try {
+      await readEntered;
+      const change = store.markHostModeSubscribed(id, { onChainId: '11' }).then(() => { rebound = true; });
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(rebound).toBe(false);
+      release();
+      expect((await pending).map(row => row.envelopeBytes)).toEqual([new Uint8Array([10])]);
+      await change;
+      await store.append(id, new Uint8Array([11]));
+      expect(await store.iterate(id, 0, 32, '10')).toEqual([]);
+      expect((await store.iterate(id, 0, 32, '11')).map(row => row.envelopeBytes)).toEqual([new Uint8Array([11])]);
+    } finally { release(); await pending; read.mockRestore(); }
   });
 
   it('persists seqno across new store instances', async () => {
@@ -442,6 +542,47 @@ describe('SwmHostModeStore', () => {
       const second = new SwmHostModeStore({ dataDir: dir, unregisteredLimits: limits, registeredLimits: limits });
       const restored = await second.listHostModeSubscribedCgs();
       expect(restored).toEqual(['curator/cg-host']);
+    });
+
+    it('persists the numeric chain binding beside a host marker', async () => {
+      const wireId = `0x${'ab'.repeat(32)}`;
+      const first = new SwmHostModeStore({ dataDir: dir, unregisteredLimits: limits, registeredLimits: limits });
+      await first.markHostModeSubscribed(wireId, { onChainId: '0042' });
+
+      const second = new SwmHostModeStore({ dataDir: dir, unregisteredLimits: limits, registeredLimits: limits });
+      expect(await second.listHostModeSubscriptions()).toEqual([{
+        contextGraphId: wireId,
+        onChainId: '42',
+      }]);
+
+      await second.markHostModeUnsubscribed(wireId);
+      await second.markHostModeSubscribed(wireId);
+      expect(await second.listHostModeSubscriptions()).toEqual([{ contextGraphId: wireId }]);
+    });
+
+    it('decodes persisted IDs through the canonical uint256 boundary while retaining zero-padding compatibility', async () => {
+      for (const [id, raw, expected] of [
+        ['padded', '0042', '42'],
+        ['maximum', ((1n << 256n) - 1n).toString(), ((1n << 256n) - 1n).toString()],
+        ['oversized', (1n << 256n).toString(), undefined],
+      ] as const) {
+        await writeFile(path.join(dir, `${cgKey(id)}.meta`), JSON.stringify({ contextGraphId: id,
+          seqno: 0, registered: false, hostModeSubscribed: true, hostModeOnChainId: raw }));
+        const reopened = new SwmHostModeStore({ dataDir: dir, unregisteredLimits: limits, registeredLimits: limits });
+        const row = (await reopened.listHostModeSubscriptions()).find(row => row.contextGraphId === id)!;
+        expect(row).toEqual({ contextGraphId: id, ...(expected === undefined ? {} : { onChainId: expected }) });
+        if (row.onChainId !== undefined) expect(isCanonicalAuthoritativeContextGraphId(row.onChainId)).toBe(true);
+      }
+    });
+
+    it('distinguishes an omitted binding from an explicit clear across reopen', async () => {
+      const first = new SwmHostModeStore({ dataDir: dir, unregisteredLimits: limits, registeredLimits: limits });
+      await first.markHostModeSubscribed('retained-marker', { onChainId: '42' });
+      await first.markHostModeSubscribed('retained-marker');
+      expect(await first.listHostModeSubscriptions()).toEqual([{ contextGraphId: 'retained-marker', onChainId: '42' }]);
+      await first.markHostModeSubscribed('retained-marker', { onChainId: undefined });
+      const reopened = new SwmHostModeStore({ dataDir: dir, unregisteredLimits: limits, registeredLimits: limits });
+      expect(await reopened.listHostModeSubscriptions()).toEqual([{ contextGraphId: 'retained-marker' }]);
     });
 
     it('listHostModeSubscribedCgs returns only flagged CGs', async () => {

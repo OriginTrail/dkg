@@ -2757,7 +2757,8 @@ export class DKGAgent extends DKGAgentBase {
   }
 
   async stop(): Promise<void> {
-    if (!this.started) return;
+    const hostModeRestoreDrain = this.stopSwmHostModeRestoration();
+    if (!this.started) return hostModeRestoreDrain;
     // Fence ACK routes, retries, and self sends before shutdown awaits.
     const storageACKDrain = this.storageACKRegistrationRuntime.closeAndDrain();
     void storageACKDrain.catch(() => {});
@@ -2871,7 +2872,7 @@ export class DKGAgent extends DKGAgentBase {
         for (const settled of snapshot) this.graphScopedStorePhysicalRuns?.delete(settled);
       }
     };
-    const drains: Promise<unknown>[] = [drainPhysicalRuns(), rfc64BackgroundDrain];
+    const drains: Promise<unknown>[] = [drainPhysicalRuns(), rfc64BackgroundDrain, hostModeRestoreDrain];
     drains.push(authorityIndexSnapshotDrain);
     if (onDemandPhonebookDrain) drains.push(onDemandPhonebookDrain);
     if (authorityRetryDrain) drains.push(authorityRetryDrain);

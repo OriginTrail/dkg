@@ -8,6 +8,7 @@ import { contextGraphWorkspaceTopic, createGraphKnowledgeAssetScope } from '@ori
 import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/index.js';
 import type { CursorState } from '../src/reconcile-cursor.js';
+import type { GossipSession } from '../src/gossip-session.js';
 import { packKnowledgeAssetIdFromIdentity } from '../src/ka-identity.js';
 import { graphHoldsTriple, knowledgeAssetVerifiedMemoryGraph, stageKnowledgeAssetInSharedMemory } from './_helpers/staged-knowledge-asset.js';
 import type { ContextGraphMembershipRecord, ContextGraphSub, ContextGraphSubInput, ContextGraphSubscriptionRecord } from '../src/dkg-agent-types.js';
@@ -16,6 +17,7 @@ const LOCAL = 'activation-custody';
 const HASH = ethers.keccak256(ethers.toUtf8Bytes(LOCAL)).toLowerCase();
 const SLOT = '582';
 interface Internals {
+  gossipSession: GossipSession;
   subscribedContextGraphs: Map<string, ContextGraphSub>;
   wireIdToLocalCgId: Map<string, string>;
   reconcileCursors: Map<string, CursorState>;
@@ -122,8 +124,12 @@ async function fixture(role: 'member' | 'host', options: { target?: 'member' | '
     expect(gossip.handlers.get(hostTopic)).toEqual([state.swmHostModeHandlers.get(HASH)]);
     ingest.mockClear();
     await gossip.deliver(hostTopic, probe, 'owned-custody-probe');
-    expect(ingest).toHaveBeenCalledExactlyOnceWith(HASH, probe, 'owned-custody-probe');
+    const admissionCurrent = ingest.mock.calls[0]?.[3];
+    expect(admissionCurrent).toBeTypeOf('function');
+    expect(admissionCurrent?.()).toBe(true);
+    expect(ingest).toHaveBeenCalledExactlyOnceWith(HASH, probe, 'owned-custody-probe', admissionCurrent);
     await ingest.mock.results[0].value;
+    return admissionCurrent;
   };
   await assertHostLive();
   const originalTopics = new Set(gossip.subscribed);
@@ -182,6 +188,16 @@ describe('persisted activation commits admitted wire adoption after successful e
     expect(f.state.subscribedContextGraphs.get(LOCAL)).toMatchObject({ subscribed: false, coreHosted: true, lastReconciledOrdinal: 1 });
     await f.drain();
   });
+  it('carries live custody into ingestion and refuses the captured retired session', async () => {
+    const f = await fixture('host');
+    const admissionCurrent = await f.assertHostLive();
+    f.state.gossipSession.retire();
+    expect(admissionCurrent?.()).toBe(false);
+    f.ingest.mockClear();
+    await f.gossip.deliver(f.hostTopic, f.probe, 'owned-retired-session');
+    expect(f.ingest).not.toHaveBeenCalled();
+  });
+
   it('stops dispatch when the native host listener is unwired', async () => {
     const f = await fixture('host');
     f.agent.unwireSwmHostModeHandler(HASH);

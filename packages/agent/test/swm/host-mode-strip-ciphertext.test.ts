@@ -22,21 +22,10 @@
  * With the flag OFF (baseline), every path engages exactly as before — proving
  * the strip is gated and reversible via the kill-switch.
  */
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createHostModeTestFixture, installCurated, installGossipStub, hostEnvelope, type StripInternals } from './host-mode.fixture.js';
+import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { DKGAgent } from '../../src/index.js';
-import { SwmHostModeStore } from '../../src/swm/host-mode-store.js';
-import type { ContextGraphSub, ContextGraphSubInput, ContextGraphSubscriptionRecord } from '../../src/dkg-agent-types.js';
 import {
-  encodeGossipEnvelope,
-  GOSSIP_ENVELOPE_VERSION,
-  GOSSIP_TYPE_WORKSPACE_PUBLISH,
-  GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED,
-  type SubscriptionSource,
   SUBSCRIPTION_SOURCES,
 } from '@origintrail-official/dkg-core';
 import {
@@ -51,117 +40,8 @@ import {
   decodeCiphertextChunkCatchupResponse,
 } from '../../src/swm/ciphertext-chunk-catchup.js';
 
-interface StripInternals {
-  swmHostModeStore?: SwmHostModeStore;
-  swmHostModeHandlers: Map<string, (topic: string, data: Uint8Array, from: string) => void>;
-  swmHostModeCurated: Map<string, boolean>;
-  swmHostModeSubscribed: Map<string, SubscriptionSource>;
-  wireIdToLocalCgId: Map<string, string>;
-  contextGraphBindingState: { capture(id: string): number };
-  gossip: {
-    subscribe(topic: string): void;
-    unsubscribe(topic: string): void;
-    offMessage(topic: string, handler: (topic: string, data: Uint8Array, from: string) => void): void;
-    onMessage(topic: string, handler: (topic: string, data: Uint8Array, from: string) => void): void;
-  };
-  chain: MockChainAdapter;
-  onChainAccessPolicyCache: Map<string, number>;
-  subscribedContextGraphs: Map<string, ContextGraphSub>;
-  setContextGraphSubscription(id: string, row: ContextGraphSubInput, options: { persist: false }): ContextGraphSub;
-  config: { swmHostMode?: { enabled?: boolean; stripCiphertext?: boolean } };
-  isPrivateContextGraph(cgId: string): Promise<boolean>;
-  wireSwmHostModeHandler(cgId: string, source?: SubscriptionSource, curated?: boolean): void;
-  reconcileSwmHostModeSubscription(cgId: string): Promise<void>;
-  ingestSwmHostModeEnvelope(cgId: string, data: Uint8Array, from: string): Promise<void>;
-  ingestSwmCiphertextChunkEnvelope(cgId: string, data: Uint8Array, from: string): Promise<void>;
-  enableSwmHostModeFor(cgId: string): Promise<{
-    subscribed: boolean; alreadySubscribed: boolean; hostingEnabled: boolean; memberMode?: boolean;
-  }>;
-  handleSwmHostCatchup(data: Uint8Array, fromPeerId: string): Promise<Uint8Array>;
-  handleGetCiphertextChunk(data: Uint8Array, fromPeerId: string): Promise<Uint8Array>;
-}
-
-async function installCurated(core: DKGAgent, id: string): Promise<void> {
-  const g = core as unknown as StripInternals;
-  const hash = ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerCase();
-  const registration = await g.chain.createOnChainContextGraph({ accessPolicy: 1, publishPolicy: 1, nameHash: hash });
-  g.subscribedContextGraphs.set(id, { subscribed: true, synced: true, syncMode: 'always-on', onChainHash: hash, onChainId: String(registration.contextGraphId) });
-  g.onChainAccessPolicyCache.set(String(registration.contextGraphId), await g.chain.getContextGraphAccessPolicy(registration.contextGraphId));
-}
-
-function hostEnvelope(contextGraphId: string, chunked: boolean): Uint8Array {
-  return encodeGossipEnvelope({
-    version: GOSSIP_ENVELOPE_VERSION,
-    type: chunked ? GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED : GOSSIP_TYPE_WORKSPACE_PUBLISH,
-    contextGraphId,
-    agentAddress: ethers.ZeroAddress,
-    timestamp: String(Date.now()),
-    signature: new Uint8Array(65),
-    payload: new Uint8Array([1, 2, 3]),
-    ...(chunked ? { swmMessageIndex: 0 } : {}),
-  });
-}
-
-function installGossipStub(g: StripInternals): void {
-  g.gossip = {
-    subscribe: vi.fn(),
-    unsubscribe: vi.fn(),
-    offMessage: vi.fn(),
-    onMessage: vi.fn(),
-  };
-}
-
 describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
-  const tempDirs: string[] = [];
-  const agents: DKGAgent[] = [];
-
-  afterEach(async () => {
-    await Promise.all(agents.splice(0).map((a) => a.stop().catch(() => {}).then(() => a.store.close().catch(() => {}))));
-    await Promise.all(tempDirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
-  });
-
-  /** A core with a host-mode store installed. `strip` toggles the WS-A flag;
-   * omit it to exercise the DEFAULT (strip ON). */
-  async function makeCore(strip?: boolean, options: { chain?: MockChainAdapter; saved?: ContextGraphSubscriptionRecord } = {}): Promise<DKGAgent> {
-    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-strip-ct-'));
-    tempDirs.push(dataDir);
-    const core = await DKGAgent.create({
-      name: 'StripCiphertextCore',
-      chainAdapter: options.chain ?? new MockChainAdapter(),
-      ...(options.saved ? { contextGraphSubscriptionRehydrationEnabled: false,
-        contextGraphSubscriptionStore: { loadAll: async () => [{ ...options.saved! }], save: async () => {}, delete: async () => {} } } : {}),
-      listenHost: '127.0.0.1',
-      dataDir,
-      nodeRole: 'core',
-      rfc64CatalogActivation: { enabled: false },
-      swmHostMode: strip === undefined ? { enabled: true } : { enabled: true, stripCiphertext: strip },
-    });
-    agents.push(core);
-    if (options.saved) (core as unknown as { node: unknown }).node = { peerId: '12D3KooWStripPolicy', libp2p: { getPeers: () => [] } };
-    installGossipStub(core as unknown as StripInternals);
-    const store = new SwmHostModeStore({
-      dataDir: join(dataDir, 'swm-host'),
-      ...SwmHostModeStore.defaultLimits(),
-    });
-    await store.init();
-    (core as unknown as StripInternals).swmHostModeStore = store;
-    return core;
-  }
-
-  async function policyCore(policy: 0 | 1, strip?: boolean, cleartext = false) {
-    const name = 'manual-strip-policy'; const hash = ethers.keccak256(ethers.toUtf8Bytes(name)).toLowerCase();
-    const chain = new MockChainAdapter('mock:31337', undefined, { initialContextGraphId: 582n });
-    await chain.createOnChainContextGraph({ accessPolicy: policy, publishPolicy: 1, nameHash: hash });
-    const id = cleartext ? name : hash;
-    const core = await makeCore(strip, { chain, saved: { id, subscribed: true, synced: true, syncScoped: true,
-      onChainId: '582', onChainHash: hash } });
-    await core.rehydrateContextGraphSubscriptions(null);
-    const g = core as unknown as StripInternals;
-    expect(g.subscribedContextGraphs.get(id)).toMatchObject({ subscribed: false, coreHosted: false, onChainId: '582' });
-    expect(g.onChainAccessPolicyCache.has('582')).toBe(false);
-    expect(await core.isPrivateContextGraph(id)).toBe(false);
-    return { core, g, name, hash, id, chain };
-  }
+  const { makeCore, policyCore } = createHostModeTestFixture();
 
   // ── 1. reconcile subscribe-decline (primary choke point) ─────────────────
 
@@ -171,7 +51,7 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     const cgId = 'cg-curated-default';
     await installCurated(core, cgId);
     const wired: string[] = [];
-    g.wireSwmHostModeHandler = (id: string) => { wired.push(id); };
+    g.wireSwmHostModeHandler = (id: string) => { wired.push(id); return true; };
 
     await g.reconcileSwmHostModeSubscription(cgId);
 
@@ -185,7 +65,7 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     const cgId = 'cg-curated-stripped';
     await installCurated(core, cgId);
     const wired: string[] = [];
-    g.wireSwmHostModeHandler = (id: string) => { wired.push(id); };
+    g.wireSwmHostModeHandler = (id: string) => { wired.push(id); return true; };
 
     await g.reconcileSwmHostModeSubscription(cgId);
 
@@ -193,20 +73,28 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     expect(g.swmHostModeHandlers.size).toBe(0);
   });
 
+
+
+
+
   it('strip OFF (baseline) WIRES host-mode subscribe for a curated CG', async () => {
     const core = await makeCore(false);
     const g = core as unknown as StripInternals;
     const cgId = 'cg-curated-baseline';
     await installCurated(core, cgId);
     const wired: string[] = [];
-    g.wireSwmHostModeHandler = (id: string) => { wired.push(id); };
+    g.wireSwmHostModeHandler = (id: string) => { wired.push(id); return true; };
 
     await g.reconcileSwmHostModeSubscription(cgId);
 
     expect(wired).toEqual([cgId]);
   });
 
-  // ── 2. operator override hatch CLOSED (WS-A divergence from rung-1) ───────
+
+
+
+
+
 
   it('strip ON CLOSES the operator override `enableSwmHostModeFor` for a curated CG', async () => {
     const core = await makeCore(true);
@@ -214,7 +102,7 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     const cgId = 'cg-operator-curated';
     g.isPrivateContextGraph = async () => true; // curated
     const wired: string[] = [];
-    g.wireSwmHostModeHandler = (id: string) => { wired.push(id); };
+    g.wireSwmHostModeHandler = (id: string) => { wired.push(id); return true; };
 
     const result = await g.enableSwmHostModeFor(cgId);
 
@@ -251,12 +139,77 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     await installCurated(core, cgId); // native private policy
     g.isPrivateContextGraph = async () => false;        // no local _meta
     const wired: string[] = [];
-    g.wireSwmHostModeHandler = (id: string) => { wired.push(id); };
+    g.wireSwmHostModeHandler = (id: string) => { wired.push(id); return true; };
 
     const result = await g.enableSwmHostModeFor(cgId);
 
     expect(result).toEqual({ subscribed: false, alreadySubscribed: false, hostingEnabled: true });
     expect(wired).toEqual([]);
+  });
+
+  it('strip ON CLOSES the operator hatch for a beacon-discovered CG (onChainHash + verified beacon)', async () => {
+    // Curation probe source (b): a beacon-driven pre-reg auto-host has an
+    // `onChainHash` but NO numeric binding and no local `_meta`. Curation is
+    // proved by the VERIFIED beacon recorded for that wire id — after this PR
+    // the bare `onChainHash` is no longer sufficient on its own, so this branch
+    // is what keeps the hatch closed for the beacon topology.
+    const core = await makeCore(true);
+    const g = core as unknown as StripInternals;
+    const cgId = 'cg-beacon-host-only';
+    const wireId = ethers.keccak256(ethers.toUtf8Bytes(cgId)).toLowerCase();
+    g.subscribedContextGraphs.set(cgId, { subscribed: false, synced: false, onChainHash: wireId });
+    g.isPrivateContextGraph = async () => false;        // no local _meta
+    const wired: string[] = [];
+    g.wireSwmHostModeHandler = (id: string) => { wired.push(id); return true; };
+
+    // Without the beacon the CG reads as NOT curated, so the hatch stays open.
+    expect(await (g as any).isCuratedForHostMode(cgId)).toBe(false);
+
+    g.beaconCuratorByWireId.set(wireId, '0x' + '11'.repeat(20));
+
+    expect(await (g as any).isCuratedForHostMode(cgId)).toBe(true);
+    const result = await g.enableSwmHostModeFor(cgId);
+
+    expect(result).toEqual({ subscribed: false, alreadySubscribed: false, hostingEnabled: true });
+    expect(wired).toEqual([]);
+  });
+
+  it('strip ON CLOSES the operator hatch for a cold-restored chain binding it cannot clear', async () => {
+    // Codex review #2614 — the curation probe answers from IN-MEMORY state
+    // (`onChainAccessPolicyCache`, `beaconCuratorByWireId`) plus the local
+    // `_meta`. Right after a restart on a host-only core all three are cold, so
+    // a genuinely curated CG restored from its persisted marker reads NOT
+    // curated. A local `false` must not authorize custody for a CG that carries
+    // chain provenance: the chain-authoritative verdict decides, and an
+    // unavailable/negative answer refuses.
+    const core = await makeCore(true);
+    const g = core as unknown as StripInternals;
+    const cgId = 'cg-cold-restored-curated';
+    const wireId = ethers.keccak256(ethers.toUtf8Bytes(cgId)).toLowerCase();
+    // Exactly the state `restorePersistedHostModeBinding` materialises from a
+    // hash-keyed marker: an `onChainHash` + `onChainId` row, EMPTY policy cache,
+    // no beacon, no local `_meta`.
+    expect(g.stageOnChainContextGraphBindingFromNameHash(wireId, '7')).toBe(wireId);
+    expect(g.onChainAccessPolicyCache.size).toBe(0);
+    expect(g.beaconCuratorByWireId.size).toBe(0);
+    g.isPrivateContextGraph = async () => false;         // host-only core: no _meta
+    g.isConfirmedPublicForHostMode = async () => false;  // chain cannot clear it
+    expect(await (g as any).isCuratedForHostMode(wireId)).toBe(false);
+    installGossipStub(g);
+
+    const result = await g.enableSwmHostModeFor(wireId);
+
+    expect(result).toEqual({ subscribed: false, alreadySubscribed: false, hostingEnabled: true });
+    expect(g.swmHostModeHandlers.size).toBe(0);
+    expect(g.swmHostModeSubscribed.size).toBe(0);
+  });
+
+  it('strip ON admits an exact cold-restored public name and chain binding', async () => {
+    const { g, name, hash, chain } = await policyCore(0, true, true);
+    g.onChainAccessPolicyCache.set('582', await chain.getContextGraphAccessPolicy(582n));
+    const result = await g.enableSwmHostModeFor(name);
+    expect(result.subscribed).toBe(true);
+    expect(g.swmHostModeCurated.get(hash)).toBe(false);
   });
 
   it('strip ON does NOT affect the operator override for a PUBLIC/uncurated CG', async () => {
@@ -401,7 +354,7 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     const slot = String(registration.contextGraphId);
     f.g.setContextGraphSubscription(f.hash, { subscribed: false, synced: false, coreHosted: true, onChainId: slot, onChainHash: f.hash }, { persist: false });
     f.g.onChainAccessPolicyCache.set(slot, await f.chain.getContextGraphAccessPolicy(registration.contextGraphId));
-    f.core.wireSwmHostModeHandler(f.hash, SUBSCRIPTION_SOURCES.MANUAL, false);
+    f.core.wireSwmHostModeHandler(f.hash, SUBSCRIPTION_SOURCES.MANUAL, { kind: 'manual-public' });
     const handler = f.g.swmHostModeHandlers.get(f.hash)!;
     expect(f.g.wireIdToLocalCgId.get(f.hash)).toBe(f.hash);
     await expect(f.core.enableSwmHostModeFor(f.name)).resolves.toMatchObject({ subscribed: false, alreadySubscribed: false });
@@ -410,7 +363,7 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     expect(f.g.swmHostModeSubscribed.get(f.hash)).toBe(SUBSCRIPTION_SOURCES.MANUAL);
     const ingest = vi.spyOn(f.core, 'ingestSwmHostModeEnvelope').mockResolvedValue(undefined);
     handler('', hostEnvelope(f.hash, false), 'foreign-owner-probe');
-    expect(ingest).toHaveBeenCalledExactlyOnceWith(f.hash, expect.any(Uint8Array), 'foreign-owner-probe');
+    expect(ingest).toHaveBeenCalledExactlyOnceWith(f.hash, expect.any(Uint8Array), 'foreign-owner-probe', expect.any(Function));
   });
 
   it('public manual reentry stands down for an existing private different-slot owner', async () => {
@@ -420,7 +373,7 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     const slot = String(registration.contextGraphId);
     f.g.setContextGraphSubscription(f.hash, { subscribed: false, synced: false, coreHosted: true, onChainId: slot, onChainHash: f.hash }, { persist: false });
     f.g.onChainAccessPolicyCache.set(slot, await f.chain.getContextGraphAccessPolicy(registration.contextGraphId));
-    f.core.wireSwmHostModeHandler(f.hash, SUBSCRIPTION_SOURCES.MANUAL, true);
+    f.core.wireSwmHostModeHandler(f.hash, SUBSCRIPTION_SOURCES.MANUAL, { kind: 'curated' });
     await f.core.awaitHostModePersistence(f.hash);
     const handler = f.g.swmHostModeHandlers.get(f.hash)!;
     const markers = await f.g.swmHostModeStore!.listHostModeSubscribedCgs();
@@ -550,7 +503,7 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     g.ingestSwmCiphertextChunkEnvelope = chunkIngest;
     installGossipStub(g);
 
-    g.wireSwmHostModeHandler(cgId, undefined, true);
+    g.wireSwmHostModeHandler(cgId, undefined, { kind: 'curated' });
     const handler = [...g.swmHostModeHandlers.values()][0]!;
     handler('', hostEnvelope(cgId, false), 'peer-legacy');
     handler('', hostEnvelope(cgId, true), 'peer-chunk');
@@ -569,7 +522,7 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     g.ingestSwmCiphertextChunkEnvelope = chunkIngest;
     installGossipStub(g);
 
-    g.wireSwmHostModeHandler(cgId, undefined, false);
+    g.wireSwmHostModeHandler(cgId, undefined, { kind: 'automatic-public', current: g.swmHostModePublicPolicy().captureCurrent(cgId) });
     const handler = [...g.swmHostModeHandlers.values()][0]!;
     handler('', hostEnvelope(cgId, false), 'peer-legacy');
     handler('', hostEnvelope(cgId, true), 'peer-chunk');
@@ -588,7 +541,7 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     g.ingestSwmCiphertextChunkEnvelope = chunkIngest;
     installGossipStub(g);
 
-    g.wireSwmHostModeHandler(cgId, undefined, false);
+    g.wireSwmHostModeHandler(cgId, undefined, { kind: 'automatic-public', current: g.swmHostModePublicPolicy().captureCurrent(cgId) });
     await installCurated(core, cgId);
     await g.reconcileSwmHostModeSubscription(cgId);
 
@@ -605,12 +558,14 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
   it('strip ON RETIRES handleSwmHostCatchup — serves nothing private', async () => {
     const core = await makeCore(true);
     const g = core as unknown as StripInternals;
-    // Garbage request bytes are fine: the strip denies BEFORE decoding.
+    // Garbage request bytes are fine: with no public host tier on this core
+    // the strip still denies BEFORE decoding.
     const resp = await g.handleSwmHostCatchup(new Uint8Array([1, 2, 3]), '12D3KooWPeer');
     const decoded = decodeSwmHostCatchupResponse(resp);
     expect(decoded.entries).toEqual([]);
     expect(decoded.denied ?? '').toMatch(/strip is on/i);
   });
+
 
   it('strip ON RETIRES handleGetCiphertextChunk — serves nothing private (incl. RFC-39 operator branch)', async () => {
     const core = await makeCore(true);

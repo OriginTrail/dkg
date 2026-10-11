@@ -29,6 +29,8 @@
 import { createHash } from 'node:crypto';
 import { promises as fs, type Dirent } from 'node:fs';
 import path from 'node:path';
+import { nextHostModeBinding, type CgMetaState } from '../internal/host-mode-binding-history.js';
+import { normalizeAuthoritativeContextGraphId } from '../context-graph-binding-state.js';
 
 export interface SwmHostModeEntry {
   /** Monotonic per-store sequence number assigned at append time. */
@@ -119,26 +121,10 @@ const DEFAULT_REGISTERED_LIMITS: SwmHostModeStoreLimits = {
 const ENTRY_HEADER_BYTES = 8 + 8 + 4;
 const META_FILE = '_meta.json';
 
-interface CgMetaState {
-  seqno: number;
-  registered: boolean;
+
+export interface SwmHostModeSubscriptionBinding {
   contextGraphId: string;
-  /**
-   * OT-RFC-38 LU-6 B3 — true when the agent has actively engaged
-   * host-mode for this CG (subscribed to its SWM gossip topic in
-   * opaque-ciphertext mode). Persisted so a restart can re-engage
-   * the gossip handler before the chain-event poller catches up
-   * (chain events outside the lookback window would otherwise be
-   * silently lost, stranding hosted CGs without an apply path).
-   *
-   * Distinct from `registered` (which tracks on-chain registration
-   * for limits + rate-limit purposes). A CG can be host-mode
-   * subscribed but unregistered (pre-registration auto-host via
-   * beacon) and vice-versa (registered but the curator revoked
-   * this core via off-protocol means — the next reconcile loop
-   * will clear `hostModeSubscribed`).
-   */
-  hostModeSubscribed?: boolean;
+  onChainId?: string;
 }
 
 /**
@@ -326,8 +312,17 @@ export class SwmHostModeStore {
    * Concurrent appends for the same CG are serialized via
    * `inflightWrites` so the file-level seqno stays monotonic.
    */
-  async append(contextGraphId: string, envelopeBytes: Uint8Array): Promise<number> {
-    return this.withCgWriteLock(contextGraphId, () => this.appendUnlocked(contextGraphId, envelopeBytes));
+  async append(contextGraphId: string, envelopeBytes: Uint8Array): Promise<number>;
+  async append(contextGraphId: string, envelopeBytes: Uint8Array, admission: { onChainId?: string; current(): boolean }): Promise<number | undefined>;
+  async append(contextGraphId: string, envelopeBytes: Uint8Array, admission?: { onChainId?: string; current(): boolean }): Promise<number | undefined> {
+    return this.withCgWriteLock(contextGraphId, async () => {
+      if (admission) {
+        if (!admission.current()) return undefined;
+        await this.markHostModeSubscribedUnlocked(contextGraphId, { onChainId: admission.onChainId });
+        if (!admission.current()) return undefined;
+      }
+      return this.appendUnlocked(contextGraphId, envelopeBytes);
+    });
   }
 
   /**
@@ -388,8 +383,18 @@ export class SwmHostModeStore {
     contextGraphId: string,
     sinceSeqno: number,
     limit?: number,
+    expectedOnChainId?: string,
   ): Promise<SwmHostModeEntry[]> {
+    return this.withCgWriteLock(contextGraphId, () => this.iterateUnlocked(contextGraphId, sinceSeqno, limit, expectedOnChainId));
+  }
+
+  /** Metadata and payload share the same binding snapshot under the existing CG lock. */
+  private async iterateUnlocked(contextGraphId: string, sinceSeqno: number, limit?: number, expectedOnChainId?: string): Promise<SwmHostModeEntry[]> {
     await this.init();
+    const meta = await this.loadMeta(contextGraphId);
+    if (expectedOnChainId !== undefined && (meta.retainedOnChainId !== expectedOnChainId
+      || meta.retainedBindingStartSeqno === undefined)) return [];
+    const readableSince = Math.max(sinceSeqno, meta.retainedBindingStartSeqno ?? 0);
     const filePath = this.logPath(contextGraphId);
     const exists = await fileExists(filePath);
     if (!exists) return [];
@@ -405,7 +410,7 @@ export class SwmHostModeStore {
       if (payloadEnd > buf.length) {
         break;
       }
-      if (seqno > sinceSeqno) {
+      if (seqno > readableSince) {
         out.push({
           seqno,
           timestampMs,
@@ -424,13 +429,18 @@ export class SwmHostModeStore {
    * mode). Persisted so a restart can re-engage the gossip handler
    * before the chain-event poller catches up. Idempotent.
    */
-  async markHostModeSubscribed(contextGraphId: string): Promise<void> {
-    await this.withCgWriteLock(contextGraphId, async () => {
-      const meta = await this.loadMeta(contextGraphId);
-      if (meta.hostModeSubscribed === true) return;
-      meta.hostModeSubscribed = true;
-      await this.persistMeta(contextGraphId, meta);
-    });
+  async markHostModeSubscribed(
+    contextGraphId: string,
+    options: { onChainId?: string } = {},
+  ): Promise<void> {
+    await this.withCgWriteLock(contextGraphId, () => this.markHostModeSubscribedUnlocked(contextGraphId, options));
+  }
+
+  private async markHostModeSubscribedUnlocked(contextGraphId: string, options: { onChainId?: string }): Promise<void> {
+    const meta = await this.loadMeta(contextGraphId);
+    const next = nextHostModeBinding(meta, options);
+    if (next === meta) return;
+    await this.persistMeta(contextGraphId, next);
   }
 
   /**
@@ -444,22 +454,36 @@ export class SwmHostModeStore {
       const meta = await this.loadMeta(contextGraphId);
       if (meta.hostModeSubscribed !== true) return;
       meta.hostModeSubscribed = false;
+      delete meta.hostModeOnChainId;
       await this.persistMeta(contextGraphId, meta);
     });
   }
 
   /**
    * Returns the cleartext / wire ids of every CG marked
-   * `hostModeSubscribed: true` in its `.meta`. Used by the agent at
-   * startup to re-engage gossip handlers without waiting for the
-   * chain-event poller to re-derive them.
+   * `hostModeSubscribed: true` in its `.meta`. Historical string-only API;
+   * startup uses {@link listHostModeSubscriptions} to retain numeric bindings.
    */
   async listHostModeSubscribedCgs(): Promise<string[]> {
+    return (await this.listHostModeSubscriptions()).map(({ contextGraphId }) => contextGraphId);
+  }
+
+  /**
+   * Restore records with their authoritative numeric binding when available.
+   * Legacy metadata has no `onChainId` and remains supported.
+   */
+  async listHostModeSubscriptions(): Promise<SwmHostModeSubscriptionBinding[]> {
     await this.init();
-    const out: string[] = [];
+    const out: SwmHostModeSubscriptionBinding[] = [];
     for (const { contextGraphId } of await this.listKnownCgs()) {
       const meta = await this.loadMeta(contextGraphId).catch(() => null);
-      if (meta?.hostModeSubscribed === true) out.push(contextGraphId);
+      if (meta?.hostModeSubscribed === true) {
+        const onChainId = normalizeAuthoritativeContextGraphId(meta.hostModeOnChainId);
+        out.push({
+          contextGraphId,
+          ...(onChainId === undefined ? {} : { onChainId }),
+        });
+      }
     }
     return out;
   }
@@ -659,11 +683,18 @@ export class SwmHostModeStore {
       parsed = undefined;
     }
     const logSeqno = await this.recoverLastSeqnoFromLog(contextGraphId);
+    const restoredOnChainId = normalizeAuthoritativeContextGraphId(parsed?.hostModeOnChainId);
+    const retainedOnChainId = normalizeAuthoritativeContextGraphId(parsed?.retainedOnChainId);
+    const historyFloor = parsed?.retainedBindingStartSeqno;
     const state: CgMetaState = {
       seqno: Math.max(parsed?.seqno ?? 0, logSeqno),
       registered: parsed?.registered ?? false,
       contextGraphId,
       ...(parsed?.hostModeSubscribed === true ? { hostModeSubscribed: true } : {}),
+      ...(restoredOnChainId === undefined ? {} : { hostModeOnChainId: restoredOnChainId }),
+      ...(retainedOnChainId === undefined ? {} : { retainedOnChainId }),
+      ...(typeof historyFloor === 'number' && Number.isSafeInteger(historyFloor) && historyFloor >= 0
+        ? { retainedBindingStartSeqno: historyFloor } : {}),
     };
     // If the log says more than the meta does, persist the
     // reconciled cursor so subsequent cold loads don't have to

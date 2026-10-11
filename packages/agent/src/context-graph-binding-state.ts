@@ -41,6 +41,12 @@ export type ContextGraphBindingTarget = ContextGraphBinding & {
   bindingGeneration: number;
 };
 
+/** An absent binding is also a captured target, invalidated by a later claim. */
+export type CapturedContextGraphBindingTarget = ContextGraphBindingTarget | {
+  bindingKind: 'unbound';
+  bindingGeneration: number;
+};
+
 export type ContextGraphBindingTransition = {
   previous: ContextGraphBinding | undefined;
   current: ContextGraphBinding;
@@ -78,6 +84,17 @@ export function isCanonicalAuthoritativeContextGraphId(
     // the event loop or allocate proportionally to attacker-controlled input.
     && value.length <= 78
     && BigInt(value) <= ethers.MaxUint256;
+}
+
+/** Persistence compatibility accepts padded IDs, then establishes the canonical uint256 invariant. */
+export function normalizeAuthoritativeContextGraphId(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  try {
+    const normalized = BigInt(value).toString();
+    return isCanonicalAuthoritativeContextGraphId(normalized) ? normalized : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -332,13 +349,24 @@ export class ContextGraphBindingState {
     return this.capture(localCgId) === generation;
   }
 
+  captureTarget(
+    localCgId: string,
+    subscription: ContextGraphBindingSubscription | undefined,
+  ): CapturedContextGraphBindingTarget {
+    const binding = this.currentBindingFor(localCgId, subscription);
+    const bindingGeneration = this.capture(localCgId);
+    return binding === undefined
+      ? { bindingKind: 'unbound', bindingGeneration }
+      : { ...binding, bindingGeneration };
+  }
+
   targetStillCurrent(
     localCgId: string,
     subscription: ContextGraphBindingSubscription | undefined,
-    target: ContextGraphBindingTarget,
+    target: CapturedContextGraphBindingTarget,
   ): boolean {
     const current = this.currentBindingFor(localCgId, subscription);
-    return bindingsEqual(current, target)
+    return (target.bindingKind === 'unbound' ? current === undefined : bindingsEqual(current, target))
       && this.isGenerationCurrent(localCgId, target.bindingGeneration);
   }
 
