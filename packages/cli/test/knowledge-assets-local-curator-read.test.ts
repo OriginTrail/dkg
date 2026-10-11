@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { EventEmitter } from 'node:events';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { DKGAgent, KaNumberAllocator, type AssertionHistoryDescriptor } from '@origintrail-official/dkg-agent';
+import { DKGAgent, KaNumberAllocator } from '@origintrail-official/dkg-agent';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { contextGraphAssertionUri, contextGraphDataGraphUri, contextGraphMetaUri, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
@@ -11,6 +11,7 @@ import { makeTestKaNumberStore } from '../../agent/test/_helpers/ka-allocator.js
 import { requestAuthentication } from './_helpers/request-authentication.js';
 
 const CG = 'legacy-curator-draft';
+type AssertionHistory = NonNullable<Awaited<ReturnType<DKGAgent['assertion']['history']>>>;
 function context(agent: DKGAgent, caller: string, path: string) {
   const url = new URL(path, 'http://localhost');
   const req = Object.assign(new EventEmitter(), { method: 'GET', headers: {}, aborted: false });
@@ -32,8 +33,8 @@ describe('real local curator draft provenance through HTTP admission', () => {
   let other: string;
   let kaNumber: string;
   let compactLiteralName: string;
-  let numberedAlias: AssertionHistoryDescriptor;
-  let compactLiteral: AssertionHistoryDescriptor;
+  let numberedAlias: AssertionHistory;
+  let compactLiteral: AssertionHistory;
   let foreignAliasOnly: string;
   const deniedCg = `${CG}-denied`;
   const revokedCg = `${CG}-revoked`;
