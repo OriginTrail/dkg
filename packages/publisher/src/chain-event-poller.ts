@@ -1,5 +1,7 @@
 import {
   withRpcRequestContext,
+  normalizeKnowledgeAssetUpdateIdentity,
+  type KnowledgeAssetUpdateIdentity,
   type ChainAdapter,
   type ChainEvent,
 } from '@origintrail-official/dkg-chain';
@@ -46,13 +48,8 @@ export type OnContextGraphCreated = (info: {
 export type OnCollectionUpdated = (info: {
   merkleRoot: Uint8Array;
   batchId: bigint;
-  blockNumber: number;
-  /** Transaction that committed the update, when the adapter reports it. */
-  txHash?: string;
-  /** Position of the update log within its block, when available. */
-  logIndex?: number;
-  /** Fork identity of the event's block, when available. */
-  blockHash?: string;
+  /** Canonical identity, including explicit legacy/unpositioned evidence. */
+  eventIdentity: KnowledgeAssetUpdateIdentity;
   signal?: AbortSignal;
 }) => Promise<void>;
 
@@ -487,16 +484,9 @@ export class ChainEventPoller {
       : data['merkleRoot'] as Uint8Array;
     const batchId = BigInt(data['batchId'] as string ?? '0');
 
-    const txHash = typeof data['txHash'] === 'string' && data['txHash'].length > 0
-      ? data['txHash'] as string
-      : undefined;
-    const logIndex = typeof data['logIndex'] === 'number'
-      && Number.isSafeInteger(data['logIndex']) && data['logIndex'] >= 0
-      ? data['logIndex']
-      : undefined;
-    const blockHash = typeof data['blockHash'] === 'string' && data['blockHash'].length > 0
-      ? data['blockHash'] as string
-      : undefined;
+    const eventIdentity = event.updateIdentity ?? normalizeKnowledgeAssetUpdateIdentity({
+      blockNumber: event.blockNumber, txHash: data['txHash'], logIndex: data['logIndex'], blockHash: data['blockHash'],
+    });
 
     this.log.info(ctx,
       `Chain event: KnowledgeAssetUpdated block=${event.blockNumber} batchId=${batchId}`,
@@ -508,10 +498,7 @@ export class ChainEventPoller {
     await this.onCollectionUpdated({
       merkleRoot,
       batchId,
-      blockNumber: event.blockNumber,
-      ...(txHash === undefined ? {} : { txHash }),
-      ...(logIndex === undefined ? {} : { logIndex }),
-      ...(blockHash === undefined ? {} : { blockHash }),
+      eventIdentity,
       signal,
     });
   }

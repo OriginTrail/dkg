@@ -542,6 +542,7 @@ describe('KnowledgeAssetUpdated over the one log', () => {
     expect(events).toEqual([{
       type: 'KnowledgeAssetUpdated',
       blockNumber: 60,
+      updateIdentity: { eventKind: 'log', blockNumber: 60, logIndex: 0, blockHash: hash(60), txHash: hash(0xcc) },
       data: {
         kaId: '900',
         batchId: '900',
@@ -578,6 +579,7 @@ describe('KnowledgeAssetUpdated over the one log', () => {
     expect(events).toEqual([expect.objectContaining({
       type: 'KnowledgeAssetUpdated',
       blockNumber: 130,
+      updateIdentity: { eventKind: 'log', blockNumber: 130, logIndex: 8, blockHash: hash(130), txHash: hash(0xdd) },
       data: expect.objectContaining({
         kaId: '901',
         batchId: '901',

@@ -26,26 +26,14 @@
  * and the copy waits for the KA's next update or an explicit asset fetch.
  */
 
-import type { KnowledgeAssetVersionSnapshotUnavailable } from '@origintrail-official/dkg-chain';
+import { knowledgeAssetUpdateKey, compareKnowledgeAssetUpdates, type KnowledgeAssetUpdateIdentity, type KnowledgeAssetVersionSnapshotUnavailable } from '@origintrail-official/dkg-chain';
 
-export interface VmRefreshTarget {
+export type VmRefreshTarget = KnowledgeAssetUpdateIdentity & {
   readonly localCgId: string;
   readonly ual: string;
   readonly kaId: bigint;
   /** Root the update event announced, 0x-prefixed lowercase hex. */
   readonly merkleRoot: string;
-  /**
-   * Block of the update event, when known. A chain view older than it has
-   * not seen the update, so it can never settle the target as current. Only
-   * targets with a block hold the event lane's persisted cursor.
-   */
-  readonly blockNumber?: number;
-  /** Hash of the event's block, to distinguish a replacement fork. */
-  readonly blockHash?: string;
-  /** Position within the block, so two updates with the same root remain distinct. */
-  readonly logIndex?: number;
-  /** Transaction identity when a log position is unavailable or a block reorganizes. */
-  readonly txHash?: string;
   /** Required chain-view height when an unseen event arrives behind a held one. */
   readonly proofBlockNumber?: number;
   /**
@@ -58,9 +46,7 @@ export interface VmRefreshTarget {
 }
 
 /** A due target with the failed attempts before it. */
-export interface VmRefreshDue extends VmRefreshTarget {
-  readonly failures: number;
-}
+export type VmRefreshDue = VmRefreshTarget & { readonly failures: number };
 
 /**
  * What one attempt concluded.
@@ -90,10 +76,7 @@ export interface VmRefreshAttempt {
 export type VmRefreshOfferResult = 'recorded' | 'held' | 'full';
 
 /** A target given up at its maximum age, with the failed attempts behind it. */
-export interface VmRefreshGivenUp extends VmRefreshTarget {
-  readonly failures: number;
-  readonly heldMs: number;
-}
+export type VmRefreshGivenUp = VmRefreshTarget & { readonly failures: number; readonly heldMs: number };
 
 export interface VmRefreshQueueOptions {
   /** Upper bound on targets held across all graphs; a full set refuses new ones. */
@@ -121,28 +104,7 @@ function recordKey(localCgId: string, ual: string): string {
 }
 
 function updateKey(target: VmRefreshTarget): string {
-  // Complete positions remain distinct, including across forks. Legacy
-  // adapters without a position can only coalesce the evidence they supply.
-  if (target.blockNumber === undefined) return JSON.stringify(['legacy', target.merkleRoot]);
-  if (target.logIndex !== undefined) {
-    return JSON.stringify([
-      'log', target.blockNumber, target.logIndex, target.blockHash,
-      target.txHash, target.merkleRoot,
-    ]);
-  }
-  if (target.txHash !== undefined) {
-    return JSON.stringify([
-      'transaction', target.blockNumber, target.blockHash, target.txHash, target.merkleRoot,
-    ]);
-  }
-  return JSON.stringify(['legacy-block', target.blockNumber, target.merkleRoot]);
-}
-
-function behindHeld(incoming: VmRefreshTarget, held: VmRefreshTarget): boolean {
-  if (incoming.blockNumber === undefined || held.blockNumber === undefined) return false;
-  if (incoming.blockNumber !== held.blockNumber) return incoming.blockNumber < held.blockNumber;
-  return incoming.logIndex !== undefined && held.logIndex !== undefined
-    && incoming.logIndex < held.logIndex;
+  return knowledgeAssetUpdateKey(target, target.merkleRoot);
 }
 
 export class VmRefreshQueue {
@@ -186,9 +148,11 @@ export class VmRefreshQueue {
   offer(target: VmRefreshTarget, delayMs = 0): VmRefreshOfferResult {
     const key = recordKey(target.localCgId, target.ual);
     const held = this.#records.get(key);
-    const keyOfUpdate = updateKey(target);
-    if (held !== undefined
-      && (updateKey(held.target) === keyOfUpdate || held.seenUpdateKeys.has(keyOfUpdate))) {
+    // Reject malformed JavaScript callers before admitting an untyped record.
+    updateKey(target);
+    const comparison = held === undefined ? undefined
+      : compareKnowledgeAssetUpdates(target, target.merkleRoot, held.target, held.target.merkleRoot, held.seenUpdateKeys);
+    if (comparison !== undefined && comparison.kind !== 'replacement') {
       return 'held';
     }
     if (held === undefined && this.#records.size >= this.#maxEntries) {
@@ -199,7 +163,7 @@ export class VmRefreshQueue {
     if (held !== undefined) seenUpdateKeys.add(updateKey(held.target));
     // The queue is bounded, and so is the replay memory for a busy KA.
     if (seenUpdateKeys.size > 128) seenUpdateKeys.delete(seenUpdateKeys.values().next().value!);
-    const behind = held !== undefined && behindHeld(target, held.target);
+
     const previousProof = held?.target.proofBlockNumber ?? held?.target.blockNumber;
     const incomingProof = target.proofBlockNumber ?? target.blockNumber;
     const proofBlockNumber = previousProof === undefined ? incomingProof
@@ -210,7 +174,7 @@ export class VmRefreshQueue {
     this.#records.set(key, {
       target: Object.freeze({
         ...target,
-        ...(held?.target.merkleRoot === target.merkleRoot || behind ? { checkVersion: true } : {}),
+        ...(comparison?.kind === 'replacement' && comparison.checkVersion ? { checkVersion: true } : {}),
         ...(proofBlockNumber !== undefined && proofBlockNumber !== target.blockNumber
           ? { proofBlockNumber } : {}),
       }),

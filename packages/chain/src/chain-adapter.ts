@@ -1,3 +1,5 @@
+import type { ChainEvent } from './knowledge-asset-update-identity.js';
+export type { ChainEvent } from './knowledge-asset-update-identity.js';
 import type { ContextGraphAuthorityIndexRevisionReader } from './context-graph-authority-index-reader.js';
 export type { ContextGraphAuthorityIndexRevisionReader } from './context-graph-authority-index-reader.js';
 import type {
@@ -501,12 +503,6 @@ export interface KAUpdateVerification {
   txIndex?: number;
   /** Chain-truth Merkle-root array length after this update. */
   merkleRootCount?: bigint;
-}
-
-export interface ChainEvent {
-  type: string;
-  blockNumber: number;
-  data: Record<string, unknown>;
 }
 
 /**

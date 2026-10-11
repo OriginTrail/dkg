@@ -3061,12 +3061,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // fails holds the lane, and the lane never persists its cursor past
         // an unsettled refresh, so a restart replays that update.
         onCollectionUpdated: this.vmReconcileEnabled()
-          ? async ({ batchId, merkleRoot, blockNumber, txHash, logIndex, blockHash, signal }) => {
+          ? async ({ batchId, merkleRoot, eventIdentity, signal }) => {
               await this.handleKAUpdatedNudge(batchId, merkleRoot, ctx, {
-                blockNumber,
-                ...(txHash === undefined ? {} : { txHash }),
-                ...(logIndex === undefined ? {} : { logIndex }),
-                ...(blockHash === undefined ? {} : { blockHash }),
+                eventIdentity,
                 signal,
               });
             }
