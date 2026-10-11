@@ -31,10 +31,12 @@ const KEY_A = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690
 const KEY_B = '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a';
 const KEY_C = '0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6';
 const KEY_D = '0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a';
+const KEY_E = '0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba';
 const WALLET_A = new ethers.Wallet(KEY_A);
 const WALLET_B = new ethers.Wallet(KEY_B);
 const WALLET_C = new ethers.Wallet(KEY_C);
 const WALLET_D = new ethers.Wallet(KEY_D);
+const WALLET_E = new ethers.Wallet(KEY_E);
 const TOKEN = 'payer-token-1b2c3d4e5f60718293a4b5c6';
 const AUTHOR_TOKEN = 'author-token-9f8e7d6c5b4a39281706f5e4';
 const N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
@@ -540,12 +542,49 @@ describe('payer and author accounts', () => {
     expect(result.operational.map((s) => s.address)).toEqual([WALLET_A.address, WALLET_B.address]);
   });
 
+  it('selects the first author of several candidates with at most one account lookup', async () => {
+    const authorKeys = [KEY_C];
+    const signer = await fakeSigner({
+      credentials: [
+        { token: TOKEN, keys: [KEY_A, KEY_B] },
+        { token: AUTHOR_TOKEN, keys: authorKeys },
+      ],
+    });
+    const { authors } = await connectRemoteSigners({ url: signer.url, authToken: TOKEN, author: { authToken: AUTHOR_TOKEN } });
+    const lookups = () => signer.calls('eth_accounts').filter((call) => call.authorization === `Bearer ${AUTHOR_TOKEN}`).length;
+    const absent = ['0x00000000000000000000000000000000000000e1', '0x00000000000000000000000000000000000000e2'];
+    const select = async (candidates: string[]) => {
+      const before = lookups();
+      const found = await authors!.firstSignerOf(candidates);
+      return { address: found?.address, signer: found?.signer.address, lookups: lookups() - before };
+    };
+
+    // A known author first: no lookup at all.
+    expect(await select([WALLET_C.address, absent[0]])).toEqual({ address: WALLET_C.address, signer: WALLET_C.address, lookups: 0 });
+    // A key added since the last lookup, ahead of a known one, still comes first.
+    authorKeys.push(KEY_D);
+    expect(await select([WALLET_D.address, WALLET_C.address])).toEqual({ address: WALLET_D.address, signer: WALLET_D.address, lookups: 1 });
+    // Several candidates that are not author keys cost one lookup, which finds a key added since.
+    authorKeys.push(KEY_E);
+    const added = WALLET_E.address.toLowerCase();
+    expect(await select([...absent, added])).toEqual({ address: added, signer: WALLET_E.address, lookups: 1 });
+    expect(await select(absent)).toEqual({ address: undefined, signer: undefined, lookups: 1 });
+    // A payer is never an author, even once the author credential serves it too.
+    authorKeys.push(KEY_A);
+    expect(await select([WALLET_A.address, 'not-an-address'])).toEqual({ address: undefined, signer: undefined, lookups: 0 });
+    expect(await select([absent[0], WALLET_A.address])).toEqual({ address: undefined, signer: undefined, lookups: 1 });
+  });
+
   it('reserves a named author on the main connection and rejects overlapping settings', async () => {
     const signer = await fakeSigner({ credentials: [{ token: TOKEN, keys: [KEY_A, KEY_B, KEY_C] }] });
     const result = await connectRemoteSigners({ url: signer.url, authToken: TOKEN, author: { address: WALLET_B.address } });
     expect(result.operational.map((s) => s.address)).toEqual([WALLET_A.address, WALLET_C.address]);
     expect(result.authors!.defaultAuthor!.address).toBe(WALLET_B.address);
     expect(await result.authors!.signerFor(WALLET_C.address)).toBeUndefined();
+    // Only the named author is one, so a selection never asks for the accounts.
+    const lookups = signer.calls('eth_accounts').length;
+    expect((await result.authors!.firstSignerOf([WALLET_D.address, WALLET_B.address]))?.signer).toBe(result.authors!.defaultAuthor);
+    expect(signer.calls('eth_accounts')).toHaveLength(lookups);
     await expect(connectRemoteSigners({
       url: signer.url, authToken: TOKEN, addresses: [WALLET_B.address], author: { address: WALLET_B.address },
     })).rejects.toMatchObject({ code: 'REMOTE_SIGNER_CONFIG' });

@@ -31,6 +31,9 @@ const config = {
     authors: {
       addresses: [held.address],
       signerFor: async (address: string) => (address === held.address ? held : undefined),
+      firstSignerOf: async (addresses: readonly string[]) => (
+        addresses.includes(held.address) ? { address: held.address, signer: held } : undefined
+      ),
     },
   },
 };

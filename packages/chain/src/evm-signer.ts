@@ -41,6 +41,12 @@ export interface ExternalAuthorSigners {
   readonly addresses: readonly string[];
   /** The signer for `address` when it is one of these author keys; otherwise undefined. */
   signerFor(address: string): Promise<EvmSigner | undefined>;
+  /**
+   * The first of `addresses`, in order, that is one of these author keys, with
+   * its signer: one selection over one view of the author accounts, however
+   * many of the addresses are not author keys.
+   */
+  firstSignerOf(addresses: readonly string[]): Promise<{ address: string; signer: EvmSigner } | undefined>;
 }
 
 export function isExternalEvmSigner(signer: unknown): signer is ExternalEvmSigner {

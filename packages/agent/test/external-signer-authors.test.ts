@@ -197,7 +197,11 @@ describe('external signer author keys', () => {
     expect(fake.calls('eth_signTypedData_v4')).toHaveLength(before);
 
     // A signer that answers for the address but signs with a different key.
-    const wrongKey = { chainConfig: { authors: { addresses: [agentKey.address], signerFor: async () => defaultAuthor } } };
+    const wrongKey = { chainConfig: { authors: {
+      addresses: [agentKey.address],
+      signerFor: async () => defaultAuthor,
+      firstSignerOf: async ([address]: readonly string[]) => ({ address, signer: defaultAuthor }),
+    } } };
     await expect(externalSignerAgentPublicKey(wrongKey, agentKey.address, 'writer'))
       .rejects.toThrow(/did not sign the registration/);
   });
@@ -292,11 +296,18 @@ describe('external signer author keys', () => {
     const held = registerSelfSovereignAgent('writer', agentKey.publicKey);
     const custodial = agentFromPrivateKey(HARDHAT_KEYS.EXTRA3, 'custodial');
     const outside = registerSelfSovereignAgent('outside', new ethers.Wallet(HARDHAT_KEYS.EXTRA2).signingKey.publicKey);
-    const allowed = new Set([held.agentAddress, outside.agentAddress].map((address) => address.toLowerCase()));
-    // Not allowed, or allowed but not held by the signer: no gossip signer.
-    expect(await externalAuthorGossipSigner(config, [custodial, outside], allowed)).toBeUndefined();
-    const signer = await externalAuthorGossipSigner(config, [custodial, outside, held], allowed);
+    const elsewhere = registerSelfSovereignAgent('elsewhere', new ethers.Wallet(HARDHAT_KEYS.EXTRA1).signingKey.publicKey);
+    const allowed = new Set([held, outside, elsewhere].map((record) => record.agentAddress.toLowerCase()));
+    const lookups = () => fake.calls('eth_accounts').filter((call) => call.authorization === `Bearer ${AUTHOR_TOKEN}`).length;
+    // Not allowed, or allowed but not held by the signer: no gossip signer. The
+    // allowed agents the signer does not hold cost one account lookup, not one each.
+    let before = lookups();
+    expect(await externalAuthorGossipSigner(config, [custodial, outside, elsewhere], allowed)).toBeUndefined();
+    expect(lookups() - before).toBe(1);
+    before = lookups();
+    const signer = await externalAuthorGossipSigner(config, [custodial, outside, elsewhere, held], allowed);
     expect(signer?.agentAddress).toBe(agentKey.address);
+    expect(lookups() - before).toBe(1);
 
     const payload = computeGossipSigningPayload('share-write', CG, '2026-01-01T00:00:00.000Z', new Uint8Array([1, 2, 3]));
     expect(ethers.verifyMessage(payload, await signer!.signMessage(payload))).toBe(agentKey.address);
@@ -443,9 +454,9 @@ describe('external signer author keys', () => {
     try {
       for (const authors of [
         undefined,
-        { addresses: [], signerFor: async () => undefined },
+        { addresses: [], signerFor: async () => undefined, firstSignerOf: async () => undefined },
         // Listed, but not served as an author key: the registration is refused.
-        { addresses: [payer.address], signerFor: async () => undefined },
+        { addresses: [payer.address], signerFor: async () => undefined, firstSignerOf: async () => undefined },
       ]) {
         const agent = Object.create(DKGAgent.prototype) as any;
         agent.config = { chainConfig: { signers: remote.operational, ...(authors ? { authors } : {}) } };

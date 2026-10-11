@@ -97,22 +97,46 @@ export class RemoteAuthorSigners implements ExternalAuthorSigners {
   }
 
   async signerFor(address: string): Promise<RemoteSigner | undefined> {
-    let target: string;
-    try {
-      target = getAddress(address);
-    } catch {
-      return undefined;
+    return (await this.firstSignerOf([address]))?.signer;
+  }
+
+  /**
+   * The first of `addresses`, in order, that is an author key. The accounts are
+   * asked for again at most once per call, and only when an address before
+   * the first known author is unknown: keys added to the signer after startup
+   * become usable without a restart, and the selection keeps its order.
+   */
+  async firstSignerOf(addresses: readonly string[]): Promise<{ address: string; signer: RemoteSigner } | undefined> {
+    const candidates: Array<{ address: string; target: string }> = [];
+    for (const address of addresses) {
+      let target: string;
+      try {
+        target = getAddress(address);
+      } catch {
+        continue;
+      }
+      if (!this.#payers.has(target)) candidates.push({ address, target });
     }
-    if (this.#payers.has(target)) return undefined;
-    if (this.defaultAuthor?.address === target) return this.defaultAuthor;
-    if (this.#defaultOnly) return undefined;
-    if (!this.#accounts.includes(target)) {
-      // Keys added to the signer after startup become usable without a restart.
-      const refreshed = await this.#client.listAccounts();
-      this.#accounts = refreshed.filter((account) => !this.#payers.has(account));
-      if (!this.#accounts.includes(target)) return undefined;
+    let refreshed = false;
+    for (const { address, target } of candidates) {
+      if (!refreshed && !this.#defaultOnly && !this.#isAuthor(target)) {
+        refreshed = true;
+        const served = await this.#client.listAccounts();
+        this.#accounts = served.filter((account) => !this.#payers.has(account));
+      }
+      if (this.#isAuthor(target)) return { address, signer: this.#signerOf(target) };
     }
-    return new RemoteSigner(target, this.#client, this.#provider);
+    return undefined;
+  }
+
+  #isAuthor(address: string): boolean {
+    return this.defaultAuthor?.address === address || (!this.#defaultOnly && this.#accounts.includes(address));
+  }
+
+  #signerOf(address: string): RemoteSigner {
+    return this.defaultAuthor?.address === address
+      ? this.defaultAuthor
+      : new RemoteSigner(address, this.#client, this.#provider);
   }
 }
 

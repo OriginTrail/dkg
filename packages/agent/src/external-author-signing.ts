@@ -66,20 +66,24 @@ export function localGossipSigner(agentAddress: string, privateKey: string): Wor
   return { agentAddress, signMessage: (message) => wallet.signMessage(message) };
 }
 
-/** The gossip signer of the first of `agents` in `allowed` whose author key the external signer holds. */
+/**
+ * The gossip signer of the first of `agents` in `allowed` whose author key the
+ * external signer holds, chosen in one selection over the author accounts.
+ */
 export async function externalAuthorGossipSigner(
   config: ExternalAuthorConfig | undefined,
   agents: Iterable<AgentKeyRecord>,
   allowed: ReadonlySet<string>,
 ): Promise<WorkspaceGossipSigner | undefined> {
-  for (const record of agents) {
-    if (!allowed.has(record.agentAddress.toLowerCase())) continue;
-    const externalSigner = await externalAuthorSignerFor(config, record.agentAddress);
-    if (externalSigner) {
-      return { agentAddress: record.agentAddress, signMessage: (message) => externalSigner.signMessage(message) };
-    }
-  }
-  return undefined;
+  const authors = config?.chainConfig?.authors;
+  if (authors === undefined) return undefined;
+  const candidates = [...agents]
+    .map((record) => record.agentAddress)
+    .filter((address) => allowed.has(address.toLowerCase()) && ethers.isAddress(address));
+  const found = await authors.firstSignerOf(candidates);
+  if (found === undefined) return undefined;
+  const { address, signer } = found;
+  return { agentAddress: address, signMessage: (message) => signer.signMessage(message) };
 }
 
 /**
