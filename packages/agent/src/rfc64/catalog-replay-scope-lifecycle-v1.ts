@@ -13,6 +13,7 @@ export interface Rfc64CatalogReplayScopeExecutionV1 { readonly lease: FenceV1 }
 
 /** Owns demand independently of executable-table placement or fence availability. */
 export class Rfc64CatalogReplayScopeLifecycleV1 {
+  #selection: 'selected' | 'retired' = 'selected';
   #current: DemandV1 | null = null;
   #successor: DemandV1 | null = null;
   readonly #executions = new WeakMap<Rfc64CatalogReplayScopeExecutionV1, DemandV1>();
@@ -32,11 +33,13 @@ export class Rfc64CatalogReplayScopeLifecycleV1 {
 
   reserve(connectionGeneration: number, reserveFence: () => FenceV1 | null): Rfc64CatalogReplayScopeAdmissionV1 | null {
     const current = this.#current;
-    if (current !== null && (current.connectionGeneration === connectionGeneration || this.#successor !== null
+    const reactivated = this.#selection === 'retired';
+    if (current !== null && ((!reactivated && current.connectionGeneration === connectionGeneration) || this.#successor !== null
       || current.phase.state === 'queued' || current.phase.state === 'waiting-for-fence')) return null;
     // Transfer an unsampled fence to a fresh stable token. Old admission callbacks
     // cannot release or admit the replacement, even when there was no fence yet.
     const lease = current?.phase.state === 'awaiting-admission' ? current.phase.lease : reserveFence();
+    this.#selection = 'selected';
     const demand: DemandV1 = { connectionGeneration, phase: { state: 'awaiting-admission', lease } };
     if (current?.phase.state === 'awaiting-admission') { current.phase = { state: 'retired' }; this.#current = demand; }
     else if (current === null) this.#current = demand;
@@ -81,6 +84,7 @@ export class Rfc64CatalogReplayScopeLifecycleV1 {
 
   /** Selection removal retires queued custody, retaining an executing lease until physical drain. */
   retireSelection(): void {
+    this.#selection = 'retired';
     if (this.#successor !== null) this.#release(this.#successor);
     if (this.#current !== null && !this.executing) this.#release(this.#current);
   }

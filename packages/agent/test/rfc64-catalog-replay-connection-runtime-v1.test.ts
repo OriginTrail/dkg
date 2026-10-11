@@ -708,3 +708,53 @@ describe('selection retirement preserves physical custody', () => {
     } finally { release(); }
   });
 });
+
+// Reselecting a graph is an activation edge even on the same live connection.
+describe('selection reactivation during receiver drain', () => {
+  it('retains one reactivation successor without releasing the executing canonical fence', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(10_000);
+    let selected = ['cg']; let version = 1; let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const request = vi.fn(async (cg: string) => ({ status: 'completed' as const,
+      targets: [{ id: cg, version }] }));
+    let firstCg = true;
+    const recovery = new Rfc64CatalogReplayRecoveryRuntimeV1<{ id: string; version: number }>({
+      requestPeer: request, whenReceiverIdleForContextGraph: async cg => {
+        if (cg === 'cg' && firstCg) { firstCg = false; await held; }
+      }, targetIdentity: target => `${target.id}:${target.version}`,
+      pruneSupersededTargets: targets => targets.filter(target => target.version === Math.max(...targets.map(item => item.version))),
+      parityFailed: async () => false,
+    });
+    const fences: ReturnType<typeof vi.fn>[] = [];
+    const announce = vi.fn(async (_peer: string, _cg: string) => ({ failed: 0 }));
+    const connection = makeRuntime({ selectContextGraphIds: () => selected,
+      reserveFence: (cg, peer) => {
+        const fence = recovery.reservePeer(cg, 'policy', peer); if (fence === null) return null;
+        const done = vi.fn(() => fence.release()); if (cg === 'cg') fences.push(done);
+        return { ...fence, release: done };
+      }, reannounce: announce,
+      replay: (cg, demand, signal) => recovery.request({ kind: 'connection-demand', contextGraphId: cg,
+        policyDigest: 'policy', demand, signal }), warn: vi.fn(),
+    }, 100);
+    try {
+      connection.prepareConnectionOpen('peer')!.admit(); await vi.advanceTimersByTimeAsync(0);
+      expect(request.mock.calls.filter(([cg]) => cg === 'cg')).toHaveLength(1);
+      selected = ['other']; connection.prepareGraphActivation('other-peer', 'other')!.admit();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fences[0]).not.toHaveBeenCalled();
+      selected = ['cg', 'other']; version = 2;
+      const activation = connection.prepareGraphActivation('peer', 'cg');
+      expect(activation).not.toBeNull(); activation!.admit();
+      for (let i = 0; i < 20; i++) expect(connection.prepareGraphActivation('peer', 'cg')).toBeNull();
+      expect(fences).toHaveLength(2); expect(fences[0]).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(request.mock.calls.filter(([cg]) => cg === 'cg')).toHaveLength(1);
+      release(); await vi.advanceTimersByTimeAsync(100);
+      expect(request.mock.calls.filter(([cg]) => cg === 'cg')).toHaveLength(2);
+      expect(announce.mock.calls.filter(([, cg]) => cg === 'cg')).toHaveLength(2);
+      expect(recovery.promisedTargets('cg', 'policy')).toEqual([{ id: 'cg', version: 2 }]);
+      expect(fences.every(done => done.mock.calls.length === 1)).toBe(true);
+      expect(connection.status().pendingScopes).toBe(0);
+    } finally { release(); }
+  });
+});
