@@ -104,9 +104,10 @@ export class NetworkAdmissionService {
     peerId: string,
     reason: string,
     kind: NetworkAdmissionProbeBackoffKind,
+    maxDelayMs?: number,
   ): void {
     const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
-    this.probeRetry.recordFailure(canonicalPeerId, reason, kind);
+    this.probeRetry.recordFailure(canonicalPeerId, reason, kind, maxDelayMs);
   }
 
   /** Claim the short ACK-preflight lease owned by the active retry window. */

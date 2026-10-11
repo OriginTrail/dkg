@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import {
   PROTOCOL_NETWORK_IDENTITY,
+  createOperationContext,
+  isTransportTimeoutError,
   type DkgNetworkIdentity,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
@@ -48,6 +50,8 @@ export interface NetworkAdmissionCoordinatorOptions {
     warn(ctx: OperationContext, message: string): void;
   };
   probeTimeoutMs?: number;
+  /** One longer retry for a transport deadline; caller cancellation still wins. Default 15s. */
+  probeRetryTimeoutMs?: number;
 }
 
 export interface NetworkAdmissionAttemptOptions {
@@ -200,6 +204,7 @@ export class NetworkAdmissionCoordinator {
   private readonly onPeerVerified?: (peerId: string) => void;
   private readonly log?: NetworkAdmissionCoordinatorOptions['log'];
   private readonly probeTimeoutMs: number;
+  private readonly probeRetryTimeoutMs: number;
   private readonly inFlight = new Map<CanonicalPeerId, InFlightAdmissionAttempt>();
 
   constructor(options: NetworkAdmissionCoordinatorOptions) {
@@ -217,6 +222,7 @@ export class NetworkAdmissionCoordinator {
     this.onPeerVerified = options.onPeerVerified;
     this.log = options.log;
     this.probeTimeoutMs = options.probeTimeoutMs ?? 3_000;
+    this.probeRetryTimeoutMs = options.probeRetryTimeoutMs ?? 15_000;
   }
 
   get enabled(): boolean {
@@ -252,12 +258,16 @@ export class NetworkAdmissionCoordinator {
         throw new Error('network identity is not configured');
       }
       const request = parseNetworkIdentityRequest(data);
+      const ctx = createOperationContext('connect');
+      const startedAt = performance.now();
+      notifyBestEffort(() => this.log?.info(ctx, `Network identity request received from ${request.requesterPeerId.slice(-8)}`));
       const response = await signNetworkIdentityResponse({
         request,
         identity: this.identity,
         responderPeerId: this.selfPeerId,
         sign: this.sign,
       });
+      notifyBestEffort(() => this.log?.info(ctx, `Network identity response signed in ${Math.round(performance.now() - startedAt)}ms`));
       return new TextEncoder().encode(JSON.stringify(response));
     });
   }
@@ -400,7 +410,10 @@ export class NetworkAdmissionCoordinator {
     ctx: OperationContext,
     message: string,
   ): never {
-    this.admission.rememberRetryableProbeFailure(remotePeer, message, 'transient');
+    // Connection liveness permits an earlier re-probe, never admission without
+    // a signed identity. Disconnected peers retain exponential suppression.
+    const connected = [...this.getConnections()].some(({ remotePeer: peer }) => peer.toString() === remotePeer);
+    this.admission.rememberRetryableProbeFailure(remotePeer, message, 'transient', connected ? 3_000 : undefined);
     this.log?.warn(
       ctx,
       `Network identity probe for ${remotePeer.slice(-8)} failed retryably: ${message}${this.describeProbeBackoff(remotePeer)}`,
@@ -429,11 +442,16 @@ export class NetworkAdmissionCoordinator {
     let response: Uint8Array;
     if (signal.aborted) throw abortErrorFromSignal(signal.reason);
     try {
-      response = await this.sendIdentityProbe(
-        remotePeer,
-        new TextEncoder().encode(JSON.stringify(request)),
-        { timeoutMs: this.probeTimeoutMs, signal },
-      );
+      const data = new TextEncoder().encode(JSON.stringify(request));
+      try {
+        response = await this.sendIdentityProbe(remotePeer, data, { timeoutMs: this.probeTimeoutMs, signal });
+      } catch (error) {
+        if (signal.aborted) throw abortErrorFromSignal(signal.reason);
+        if (!isTransportTimeoutError(error)) throw error;
+        // A busy peer can miss the first deadline. The same shared owner makes
+        // exactly one longer attempt before recording any failure/backoff.
+        response = await this.sendIdentityProbe(remotePeer, data, { timeoutMs: this.probeRetryTimeoutMs, signal });
+      }
     } catch (err) {
       if (signal.aborted) throw abortErrorFromSignal(signal.reason);
       const message = err instanceof Error ? err.message : String(err);
