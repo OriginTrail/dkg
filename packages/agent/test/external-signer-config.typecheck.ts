@@ -10,6 +10,24 @@ const endpoint = { rpcUrl: 'http://127.0.0.1:8545', hubAddress: '0x0000000000000
 
 // External signers are the source the agent builds its own adapter from.
 export const externalSigners: ChainConfig = { ...endpoint, signers: external };
+// Author keys need only the author signing capability.
+const author = {
+  address: '0x0000000000000000000000000000000000000002',
+  signTypedData: async () => '0x',
+  signMessage: async () => '0x',
+};
+export const withAuthors: ChainConfig = {
+  ...endpoint,
+  signers: external,
+  authors: {
+    defaultAuthor: author,
+    addresses: [author.address],
+    signerFor: async () => author,
+    firstSignerOf: async (addresses) => (
+      addresses.includes(author.address) ? { address: author.address, signer: author } : undefined
+    ),
+  },
+};
 export const localKeys: ChainConfig = { ...endpoint, operationalKeys: ['0x01'] };
 // @ts-expect-error a local wallet is configured by its key (operationalKeys), never as a signer
 export const localSigner: ChainConfig = { ...endpoint, signers: [localWallet] };

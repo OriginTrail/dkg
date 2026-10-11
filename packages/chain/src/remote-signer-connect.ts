@@ -22,7 +22,7 @@
  * the author connection.
  */
 import { getAddress, type Provider } from 'ethers';
-import type { ExternalAuthorSigners } from './evm-signer.js';
+import type { AuthorSigner, ExternalAuthorSigners } from './evm-signer.js';
 import { RemoteSigner, RemoteSignerClient, type RemoteSignerClientOptions } from './remote-signer.js';
 import { RemoteSignerError } from './remote-signer-errors.js';
 
@@ -60,7 +60,7 @@ export interface RemoteSigners {
 
 /** Author keys of an external signer; see the module comment. */
 export class RemoteAuthorSigners implements ExternalAuthorSigners {
-  readonly defaultAuthor?: RemoteSigner;
+  readonly defaultAuthor?: AuthorSigner;
   readonly #client: RemoteSignerClient;
   readonly #provider: Provider | null;
   readonly #payers: ReadonlySet<string>;
@@ -96,7 +96,7 @@ export class RemoteAuthorSigners implements ExternalAuthorSigners {
     return this.#defaultOnly ? (this.defaultAuthor ? [this.defaultAuthor.address] : []) : this.#accounts;
   }
 
-  async signerFor(address: string): Promise<RemoteSigner | undefined> {
+  async signerFor(address: string): Promise<AuthorSigner | undefined> {
     return (await this.firstSignerOf([address]))?.signer;
   }
 
@@ -106,7 +106,7 @@ export class RemoteAuthorSigners implements ExternalAuthorSigners {
    * the first known author is unknown: keys added to the signer after startup
    * become usable without a restart, and the selection keeps its order.
    */
-  async firstSignerOf(addresses: readonly string[]): Promise<{ address: string; signer: RemoteSigner } | undefined> {
+  async firstSignerOf(addresses: readonly string[]): Promise<{ address: string; signer: AuthorSigner } | undefined> {
     const candidates: Array<{ address: string; target: string }> = [];
     for (const address of addresses) {
       let target: string;
@@ -133,7 +133,7 @@ export class RemoteAuthorSigners implements ExternalAuthorSigners {
     return this.defaultAuthor?.address === address || (!this.#defaultOnly && this.#accounts.includes(address));
   }
 
-  #signerOf(address: string): RemoteSigner {
+  #signerOf(address: string): AuthorSigner {
     return this.defaultAuthor?.address === address
       ? this.defaultAuthor
       : new RemoteSigner(address, this.#client, this.#provider);

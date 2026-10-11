@@ -4,7 +4,7 @@ import { assertKaSlotOwnershipAvailable, assertionAllocationLockKey } from './as
 import { assertWorkingMemoryLifecycleMutable } from './working-memory-lifecycle.js';
 import { PublishedSnapshotRetirement } from './published-snapshot-retirement.js';
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
-import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
+import type { AuthorSigner, ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
 import type { PreBroadcastRecord } from './publisher.js';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
@@ -505,7 +505,7 @@ export interface DKGPublisherConfig {
   /** EVM private key for signing publish requests (hex string with 0x prefix) */
   publisherPrivateKey?: string;
   /** Author (asset owner) signing attestations instead of the paying wallet; `null`, or omitted over a chain whose wallets sign externally: the paying wallet never authors. */
-  authorSigner?: Pick<PublisherSigner, 'address' | 'signTypedData'> | null;
+  authorSigner?: Pick<AuthorSigner, 'address' | 'signTypedData'> | null;
   /**
    * Additional EVM private keys whose identities can act as receiver
    * signers for the `contextGraphSignatures` path of `publishSharedMemory`
@@ -1170,7 +1170,7 @@ export class DKGPublisher implements Publisher {
   private readonly publisherAddress?: string;
   private readonly publisherAddressResolver?: (contextGraphId?: bigint) => Promise<string | undefined>;
   private readonly publisherWallet?: ethers.Wallet;
-  private readonly authorSigner?: Pick<PublisherSigner, 'address' | 'signTypedData'> | null;
+  private readonly authorSigner?: Pick<AuthorSigner, 'address' | 'signTypedData'> | null;
   private readonly publisherPlanner: PublisherPlanner;
   private adapterSignMessagePublisherAddress?: string;
   private readonly adapterSignMessageProbeCache = new Map<string, boolean>();

@@ -8,11 +8,8 @@
  * the publisher's own fallback stay explicit at their call sites.
  */
 import { ethers } from 'ethers';
-import type { EvmSigner } from '@origintrail-official/dkg-chain';
+import type { AuthorSigner } from '@origintrail-official/dkg-chain';
 import { externalAuthorSignerFor, type ExternalAuthorConfig } from './external-author-signing.js';
-
-/** Signs author attestations for one author address. */
-export type AuthorSigner = Pick<EvmSigner, 'signTypedData'>;
 
 /** The node's local agents, as far as author signing needs them. */
 interface LocalAgentKeys {

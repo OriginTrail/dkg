@@ -9,7 +9,7 @@
  * for it) whose author attestations the node requests from the signer.
  */
 import { ethers } from 'ethers';
-import type { ChainAdapter, EvmSigner, ExternalAuthorSigners } from '@origintrail-official/dkg-chain';
+import type { AuthorSigner, ChainAdapter, ExternalAuthorSigners } from '@origintrail-official/dkg-chain';
 import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
 import type { AgentKeyRecord } from './agent-keystore.js';
 import type { DKGAgent } from './dkg-agent.js';
@@ -40,7 +40,7 @@ interface TypedDataInput {
 export async function externalAuthorSignerFor(
   config: ExternalAuthorConfig | undefined,
   address: string,
-): Promise<EvmSigner | undefined> {
+): Promise<AuthorSigner | undefined> {
   const authors = config?.chainConfig?.authors;
   if (authors === undefined || !ethers.isAddress(address)) return undefined;
   return authors.signerFor(address);
@@ -116,7 +116,7 @@ export async function registerExternalDefaultAgent(
 
 /** Sign author typed data and return KAv10's compact (r, vs) form. */
 export async function signAuthorTypedDataCompact(
-  signer: Pick<EvmSigner, 'signTypedData'>,
+  signer: Pick<AuthorSigner, 'signTypedData'>,
   typedData: TypedDataInput,
 ): Promise<{ r: Uint8Array; vs: Uint8Array }> {
   const sig = ethers.Signature.from(

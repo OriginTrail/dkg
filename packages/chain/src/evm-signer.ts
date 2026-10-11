@@ -29,24 +29,40 @@ export interface ExternalEvmSigner extends EvmSigner {
 }
 
 /**
+ * What an author key does for its address: it signs EIP-712 typed data (author
+ * attestations, agent registrations) and EIP-191 messages (shared-memory
+ * gossip), and never signs or pays for a transaction, which is an
+ * `EvmSigner`'s job. A local wallet and a `RemoteSigner` both provide it.
+ */
+export interface AuthorSigner {
+  readonly address: string;
+  signTypedData(
+    domain: ethers.TypedDataDomain,
+    types: Record<string, ethers.TypedDataField[]>,
+    value: Record<string, unknown>,
+  ): Promise<string>;
+  signMessage(message: string | Uint8Array): Promise<string>;
+}
+
+/**
  * Author keys held outside the node. The author of a published knowledge
  * asset is its owner, and can be a different key than the operational wallets
- * paying for transactions: these keys only ever sign author attestations
- * (EIP-712 typed data) and never pay for a transaction.
+ * paying for transactions: these keys only ever sign as authors and never pay
+ * for a transaction.
  */
 export interface ExternalAuthorSigners {
   /** Author for requests that name no agent, if one is configured. */
-  readonly defaultAuthor?: EvmSigner;
+  readonly defaultAuthor?: AuthorSigner;
   /** The author accounts known so far, in the signer's order. */
   readonly addresses: readonly string[];
   /** The signer for `address` when it is one of these author keys; otherwise undefined. */
-  signerFor(address: string): Promise<EvmSigner | undefined>;
+  signerFor(address: string): Promise<AuthorSigner | undefined>;
   /**
    * The first of `addresses`, in order, that is one of these author keys, with
    * its signer: one selection over one view of the author accounts, however
    * many of the addresses are not author keys.
    */
-  firstSignerOf(addresses: readonly string[]): Promise<{ address: string; signer: EvmSigner } | undefined>;
+  firstSignerOf(addresses: readonly string[]): Promise<{ address: string; signer: AuthorSigner } | undefined>;
 }
 
 export function isExternalEvmSigner(signer: unknown): signer is ExternalEvmSigner {
