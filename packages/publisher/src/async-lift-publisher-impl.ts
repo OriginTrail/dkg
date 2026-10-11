@@ -135,6 +135,7 @@ import {
   summarizeJournal,
   serializeVmPublishIntentIndex,
   compareAcceptedJobs,
+  projectListedLiftJobs,
   createKnowledgeAssetVmPublishSnapshotMetadata,
   createKnowledgeAssetVmPublishSnapshotRequest,
   createKnowledgeAssetVmPublishJobRequest,
@@ -947,18 +948,15 @@ export class TripleStoreAsyncLiftPublisher
     return missing.length;
   }
 
-  async list(filter: { status?: LiftJobState } = {}): Promise<PersistedLiftJob[]> {
+  async list(filter: { status?: LiftJobState; contextGraphId?: string } = {}): Promise<PersistedLiftJob[]> {
     await this.ensureGraph();
     const statusFilter = filter.status ? `FILTER (?status = ${literal(filter.status)})` : '';
     const result = await this.store.query(
       `SELECT ?payload ?status WHERE { GRAPH <${this.graphUri}> { ?job <${STATUS_PREDICATE}> ?status ; <${PAYLOAD_PREDICATE}> ?payload . ${statusFilter} } }`,
       { source: 'publisher.asyncLift.list' },
     );
-    return expectBindings(result)
-      .map((row) => this.parseJobPayloadForScan(row['payload']))
-      .filter((job): job is PersistedLiftJob => job !== null)
-      .map((job) => this.chainObservations.project(job))
-      .sort(compareAcceptedJobs);
+    return projectListedLiftJobs(expectBindings(result).map(row => this.parseJobPayloadForScan(row['payload'])),
+      filter.contextGraphId, job => this.chainObservations.project(job));
   }
 
   /**

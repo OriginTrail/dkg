@@ -259,9 +259,10 @@ publisherCmd
         const { createPublisherInspector } = await import('../publisher-runner.js');
         const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
         try {
-          jobs = await inspector.publisher.list(status ? { status: status as any } : undefined);
-          if (contextGraphId) jobs = jobs.filter(job => job.request.jobType === 'knowledge-asset-vm-publish'
-            && job.request.knowledgeAssetVmPublish.contextGraphId === normalizeContextGraphIdOrUri(contextGraphId));
+          jobs = await inspector.publisher.list({
+            ...(status ? { status: status as any } : {}),
+            ...(contextGraphId ? { contextGraphId: normalizeContextGraphIdOrUri(contextGraphId) } : {}),
+          });
         } finally {
           await inspector.stop();
         }

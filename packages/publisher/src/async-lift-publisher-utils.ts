@@ -66,6 +66,18 @@ export function expectBindings(result: QueryResult): Array<Record<string, string
   return result.bindings;
 }
 
+/** Canonical inventory projection; graph-scoped listings exclude legacy raw-lift jobs. */
+export function projectListedLiftJobs(
+  jobs: readonly (PersistedLiftJob | null)[],
+  contextGraphId: string | undefined,
+  project: (job: PersistedLiftJob) => PersistedLiftJob,
+): PersistedLiftJob[] {
+  return jobs.filter((job): job is PersistedLiftJob => job !== null && (
+    contextGraphId === undefined || (job.request.jobType === 'knowledge-asset-vm-publish'
+      && job.request.knowledgeAssetVmPublish.contextGraphId === contextGraphId)
+  )).map(project).sort(compareAcceptedJobs);
+}
+
 export function compareAcceptedJobs(a: PersistedLiftJob, b: PersistedLiftJob): number {
   const timeDelta = a.timestamps.acceptedAt - b.timestamps.acceptedAt;
   if (timeDelta !== 0) return timeDelta;

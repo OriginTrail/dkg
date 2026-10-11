@@ -62,6 +62,7 @@ interface Probe {
   sparql: string;
   /** Memory-layer views the route actually fanned out to. */
   readonly views: string[];
+  readonly events: string[];
 }
 
 function buildCtx(opts: {
@@ -74,10 +75,11 @@ function buildCtx(opts: {
   const url = new URL('http://127.0.0.1/api/memory/search');
   const probe: Probe = {
     authorityChecks: [], swmChecks: [], storeQueried: false, vectorSearched: false, sparql: '',
-    views: [],
+    views: [], events: [],
   };
 
   const resolveAuthority: DKGAgent['resolveContextGraphReadAuthority'] = async (contextGraphId, o = {}) => {
+    probe.events.push('authority');
     probe.authorityChecks.push({ contextGraphId, callerAgentAddress: o.callerAgentAddress });
     return opts.decisionFor(contextGraphId);
   };
@@ -95,6 +97,7 @@ function buildCtx(opts: {
     // The route fans the text search out per memory-layer view through the
     // guarded `DKGAgent.query` path.
     query: async (sparql: string, o: Record<string, any> = {}) => {
+      probe.events.push('retrieve');
       probe.storeQueried = true;
       probe.sparql = sparql;
       if (o.view) probe.views.push(o.view);
@@ -369,12 +372,11 @@ describe('POST /api/memory/search — context-graph read authority', () => {
   });
 
   it('lets an anonymous caller keep a node-scoped allow', async () => {
-    // A caller with no agent identity IS the node for authorization purposes,
-    // so node-scoped reasons are the correct basis for it. Narrowing them
-    // here would break auth-disabled self-reads.
+    // Public anonymous reads still resolve authority; an explicit node grant may
+    // authorize them without granting an authenticated agent the node's access.
     const { ctx, res, probe } = buildCtx({
       body: { query: 'anything', contextGraphId: 'cg1' },
-      authentication: requestAuthentication({ kind: 'anonymous', mode: 'disabled' }),
+      authentication: requestAuthentication({ kind: 'anonymous', mode: 'public' }),
       decisionFor: () => ({
         outcome: 'allowed', grantScope: 'node', source: 'legacy-local', metadataBootstrap: 'eligible', reason: 'legacy-peer-allowlist',
       }),
@@ -384,6 +386,9 @@ describe('POST /api/memory/search — context-graph read authority', () => {
 
     expect(res.statusCode).toBe(200);
     expect(probe.storeQueried).toBe(true);
+    expect(probe.authorityChecks).toEqual([{ contextGraphId: 'cg1', callerAgentAddress: undefined }]);
+    expect(probe.views).not.toHaveLength(0);
+    expect(probe.events).toEqual(['authority', ...probe.views.map(() => 'retrieve')]);
   });
 
   it('drops the swm layer when the shared-memory gate refuses it', async () => {

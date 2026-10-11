@@ -566,11 +566,11 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     if (contextGraphId !== null || !hasNodeOperatorReadAccess(ctx)) {
       if (!(await requireContextGraphReadAuthority(ctx, contextGraphId))) return;
     }
-    const jobs = await publisherControl.list(
-      status ? { status: status as any } : undefined,
-    );
-    return jsonResponse(res, 200, { jobs: contextGraphId === null ? jobs
-      : jobs.filter(job => publisherJobContextGraphId(job) === contextGraphId) });
+    const jobs = await publisherControl.list({
+      ...(status ? { status: status as any } : {}),
+      ...(contextGraphId === null ? {} : { contextGraphId }),
+    });
+    return jsonResponse(res, 200, { jobs });
   }
 
   // GET /api/publisher/job?id=...  (new route, wrapped response)

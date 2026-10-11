@@ -132,7 +132,7 @@
     "packages/node-ui/src/ui/views/ProjectView.tsx": 1010,
     "packages/publisher/src/ack-collector.ts": 1332,
     "packages/publisher/src/async-lift-claim-session.ts": 1027,
-    "packages/publisher/src/async-lift-publisher-impl.ts": 3823,
+    "packages/publisher/src/async-lift-publisher-impl.ts": 3821,
     "packages/publisher/src/async-lift-publisher-types.ts": 913,
     "packages/publisher/src/async-lift-retry-disposition.ts": 931,
     "packages/publisher/src/async-promote-queue-impl.ts": 982,

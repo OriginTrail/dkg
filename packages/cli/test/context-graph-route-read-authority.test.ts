@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Command } from 'commander';
-import * as configModule from '../src/config.js';
 import { ApiClient } from '../src/api-client.js';
 import { registerPublisherCommand } from '../src/commands/publisher.js';
 import { EventEmitter } from 'node:events';
@@ -174,19 +173,12 @@ describe('caller-bound graph reads', () => {
     expect(h.publisherControl.list).not.toHaveBeenCalled();
   });
 
-  it('returns only the authorized CG from a mixed publisher inventory', async () => {
-    const route = { name: 'mixed inventory', path: `/api/publisher/jobs?contextGraphId=${CG}`, run: handlePublisherRoutes };
+  it('passes the authorized CG to the publisher inventory owner', async () => {
+    const route = { name: 'scoped inventory', path: `/api/publisher/jobs?contextGraphId=${CG}`, run: handlePublisherRoutes };
     const h = fixture(route, decisions.allowed);
-    const [ownJob] = await h.publisherControl.list();
-    h.publisherControl.list.mockClear();
-    h.publisherControl.list.mockResolvedValue([
-      ownJob,
-      { ...ownJob, jobId: 'other', request: { ...ownJob.request, knowledgeAssetVmPublish: { contextGraphId: 'another-private-cg' } } },
-      { ...ownJob, jobId: 'legacy', request: { jobType: 'lift', lift: {} } } as unknown as typeof ownJob,
-    ]);
     await route.run(h.ctx);
     expect(h.res.statusCode).toBe(200);
-    expect(JSON.parse(h.res.body).jobs.map((job: { jobId: string }) => job.jobId)).toEqual(['job']);
+    expect(h.publisherControl.list).toHaveBeenCalledExactlyOnceWith({ contextGraphId: CG });
   });
   it.each([false, true])('publisher jobs client and command preserve scoped status listing (operator=%s)', async operator => {
     const h = fixture(routes[19], decisions.allowed, operator);
@@ -194,7 +186,7 @@ describe('caller-bound graph reads', () => {
     const otherJob = { ...ownJob, jobId: 'other', request: { ...ownJob.request,
       knowledgeAssetVmPublish: { contextGraphId: 'another-private-cg' } } };
     h.publisherControl.list.mockClear();
-    h.publisherControl.list.mockResolvedValue([ownJob, otherJob]);
+    h.publisherControl.list.mockResolvedValue(operator ? [ownJob, otherJob] : [ownJob]);
     const requests: URL[] = [];
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
       const url = new URL(String(input));
@@ -212,32 +204,12 @@ describe('caller-bound graph reads', () => {
     expect(requests).toHaveLength(1);
     expect(requests[0].searchParams.get('status')).toBe('accepted');
     expect(requests[0].searchParams.get('contextGraphId')).toBe(operator ? null : `did:dkg:context-graph:${CG}`);
-    expect(h.publisherControl.list).toHaveBeenCalledExactlyOnceWith({ status: 'accepted' });
+    expect(h.publisherControl.list).toHaveBeenCalledExactlyOnceWith(operator
+      ? { status: 'accepted' } : { status: 'accepted', contextGraphId: CG });
     expect(JSON.parse(String(output.mock.calls[0][0])).map((job: { jobId: string }) => job.jobId))
       .toEqual(operator ? ['job', 'other'] : ['job']);
     if (operator) expect(h.authority).not.toHaveBeenCalled();
     else expect(h.authority).toHaveBeenCalledWith(CG, expect.objectContaining({ callerAgentAddress: CALLER }));
-  });
-
-  it('applies the same optional graph filter to stopped-daemon operator inventory', async () => {
-    vi.spyOn(ApiClient, 'connect').mockRejectedValue(new Error('Daemon is not running'));
-    vi.spyOn(configModule, 'loadConfig').mockResolvedValue({} as never);
-    const stop = vi.fn(async () => {});
-    const list = vi.fn(async () => [
-      { jobId: 'own', request: { jobType: 'knowledge-asset-vm-publish', knowledgeAssetVmPublish: { contextGraphId: CG } } },
-      { jobId: 'other', request: { jobType: 'knowledge-asset-vm-publish', knowledgeAssetVmPublish: { contextGraphId: 'other' } } },
-      { jobId: 'legacy', request: { jobType: 'lift' } },
-    ]);
-    vi.doMock('../src/publisher-runner.js', () => ({ createPublisherInspector: async () => ({ publisher: { list }, stop }) }));
-    const output = vi.spyOn(console, 'log').mockImplementation(() => {});
-    const program = new Command().exitOverride();
-    registerPublisherCommand(program);
-    try {
-      await program.parseAsync(['publisher', 'jobs', '--status', 'accepted', '--context-graph', `did:dkg:context-graph:${CG}`], { from: 'user' });
-    } finally { vi.doUnmock('../src/publisher-runner.js'); }
-    expect(list).toHaveBeenCalledExactlyOnceWith({ status: 'accepted' });
-    expect(JSON.parse(String(output.mock.calls[0][0])).map((job: { jobId: string }) => job.jobId)).toEqual(['own']);
-    expect(stop).toHaveBeenCalledOnce();
   });
 
   it('keeps a publisher job with no provable CG identity operator-only', async () => {

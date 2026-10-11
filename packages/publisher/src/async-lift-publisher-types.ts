@@ -211,7 +211,7 @@ export interface AsyncLiftPublisher {
    */
   update(jobId: string, status: LiftJobState, data?: Partial<LiftJob>): Promise<void>;
   getStatus(jobId: string): Promise<PersistedLiftJob | null>;
-  list(filter?: { status?: LiftJobState }): Promise<PersistedLiftJob[]>;
+  list(filter?: { status?: LiftJobState; contextGraphId?: string }): Promise<PersistedLiftJob[]>;
   inspectPreparedPayload(jobId: string): Promise<AsyncPreparedPublishPayload | null>;
   processNext(walletId: string): Promise<PersistedLiftJob | null>;
   /** @deprecated Prefer `administrative.recordPublishResultById`; workers use a claim session. */
