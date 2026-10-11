@@ -3,20 +3,21 @@
 /**
  * A read that an endpoint refuses by policy stops starting at that endpoint.
  *
- * The first two blocks are the memory on its own: which errors count, and the
- * attempts it builds from a stickiness order. The third is the failover client
+ * The first two blocks cover refusal classification and the ordering owner
+ * applying the memory before binding ordinary/substitute outcomes. The third is the failover client
  * over real stickiness, with the case this exists for: an endpoint that serves
  * contract calls and answers every receipt lookup with HTTP 403.
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   ENDPOINT_READ_REFUSAL_TTL_MS,
   EndpointReadRefusals,
   isEndpointPolicyRefusal,
 } from '../src/endpoint-read-refusals.js';
-import type { SignPopulatedFn } from '../src/rpc-failover-client.js';
+import { EndpointStickiness } from '../src/endpoint-stickiness.js';
+import { RpcFailoverClient, type SignPopulatedFn, type RpcEndpoint } from '../src/rpc-failover-client.js';
 import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
 import { makeClient, NEVER_SIGN, recorder, retryable429 } from './rpc-failover-test-helpers.js';
 
@@ -36,15 +37,13 @@ function httpError(status: number, statusText: string): Error {
 }
 const refused403 = () => httpError(403, 'Forbidden');
 
-/** A stickiness order whose bound recorders write what they were told to `log`. */
+/** Observe only public attempt plans and preference state. */
 function stickyOrder(...urls: string[]) {
-  const log: string[] = [];
-  const attempts = urls.map((rpcUrl) => ({
-    endpoint: { rpcUrl },
-    recordSuccess: () => { log.push(`success ${rpcUrl}`); },
-    recordFailure: () => { log.push(`failure ${rpcUrl}`); },
-  }));
-  return { attempts, log };
+  const owner = new EndpointStickiness({ now: () => 0, ttlMs: 30_000, isEnabled: () => true });
+  return { endpoints: urls.map(rpcUrl => ({ rpcUrl })), owner };
+}
+function readAttempts(memory: EndpointReadRefusals, label: string, order: ReturnType<typeof stickyOrder>) {
+  return order.owner.readAttempts(order.endpoints, 'stickyRead', { label, memory });
 }
 const urlsOf = (attempts: Array<{ endpoint: { rpcUrl: string } }>) => attempts.map(({ endpoint }) => endpoint.rpcUrl);
 
@@ -56,7 +55,7 @@ function runPass(
   failing: Record<string, Error> = {},
 ): { tried: string[]; servedBy: string | undefined } {
   const tried: string[] = [];
-  for (const attempt of refusals.attempts(label, order.attempts)) {
+  for (const attempt of readAttempts(refusals, label, order)) {
     tried.push(attempt.endpoint.rpcUrl);
     const error = failing[attempt.endpoint.rpcUrl];
     if (error === undefined) {
@@ -91,7 +90,7 @@ describe('isEndpointPolicyRefusal', () => {
   });
 });
 
-describe('EndpointReadRefusals.attempts', () => {
+describe('EndpointStickiness complete refusal-aware plan', () => {
   it('is the stickiness order and its recorders until an endpoint has refused the read', () => {
     const refusals = new EndpointReadRefusals({ now: () => 0 });
     const order = stickyOrder(REFUSER, PRIMARY, THIRD);
@@ -99,9 +98,10 @@ describe('EndpointReadRefusals.attempts', () => {
     const pass = runPass(refusals, LABEL, order, { [REFUSER]: retryable429() });
 
     expect(pass).toEqual({ tried: [REFUSER, PRIMARY], servedBy: PRIMARY });
-    expect(order.log).toEqual([`failure ${REFUSER}`, `success ${PRIMARY}`]);
+    expect(order.owner.hasPreference()).toBe(true);
+    expect(urlsOf(order.owner.readAttempts(order.endpoints, 'receiptRead', { label: 'preference inspection', memory: refusals }))).toEqual([PRIMARY, REFUSER, THIRD]);
     // A throttle is not remembered: the next pass starts at the same endpoint.
-    expect(urlsOf(refusals.attempts(LABEL, stickyOrder(REFUSER, PRIMARY, THIRD).attempts)))
+    expect(urlsOf(readAttempts(refusals, LABEL, stickyOrder(REFUSER, PRIMARY, THIRD))))
       .toEqual([REFUSER, PRIMARY, THIRD]);
   });
 
@@ -111,38 +111,41 @@ describe('EndpointReadRefusals.attempts', () => {
 
     runPass(refusals, LABEL, order, { [REFUSER]: refused403() });
 
-    expect(order.log).toEqual([`failure ${REFUSER}`, `success ${PRIMARY}`]);
-    expect(urlsOf(refusals.attempts(LABEL, stickyOrder(REFUSER, PRIMARY, THIRD).attempts)))
+    expect(order.owner.hasPreference()).toBe(true);
+    expect(urlsOf(order.owner.readAttempts(order.endpoints, 'receiptRead', { label: 'preference inspection', memory: refusals }))).toEqual([PRIMARY, REFUSER, THIRD]);
+    expect(urlsOf(readAttempts(refusals, LABEL, stickyOrder(REFUSER, PRIMARY, THIRD))))
       .toEqual([PRIMARY, THIRD, REFUSER]);
-    expect(urlsOf(refusals.attempts('kas.getLatestMerkleRoot', stickyOrder(REFUSER, PRIMARY, THIRD).attempts)))
+    expect(urlsOf(readAttempts(refusals, 'kas.getLatestMerkleRoot', stickyOrder(REFUSER, PRIMARY, THIRD))))
       .toEqual([REFUSER, PRIMARY, THIRD]);
   });
 
   describe('when the endpoint stickiness starts at has refused the read', () => {
     function refusedByTheFirst() {
       const refusals = new EndpointReadRefusals({ now: () => 0 });
-      runPass(refusals, LABEL, stickyOrder(REFUSER, PRIMARY, THIRD), { [REFUSER]: refused403() });
+      refusals.recordFailure(LABEL, REFUSER, refused403(), 'ordinary');
       return refusals;
     }
 
-    it('goes to the others and tells stickiness nothing', () => {
+    it('serves a substitute without creating a preference', () => {
       const refusals = refusedByTheFirst();
       const order = stickyOrder(REFUSER, PRIMARY, THIRD);
 
       const pass = runPass(refusals, LABEL, order);
 
       expect(pass).toEqual({ tried: [PRIMARY], servedBy: PRIMARY });
-      expect(order.log).toEqual([]);
+      expect(order.owner.hasPreference()).toBe(false);
+      expect(urlsOf(order.owner.attempts(order.endpoints, 'nonceWrite'))).toEqual([REFUSER, PRIMARY, THIRD]);
     });
 
-    it('tells stickiness nothing about the others failing either', () => {
+    it('keeps substitute failures out of the preference state', () => {
       const refusals = refusedByTheFirst();
       const order = stickyOrder(REFUSER, PRIMARY, THIRD);
 
       const pass = runPass(refusals, LABEL, order, { [PRIMARY]: retryable429() });
 
       expect(pass).toEqual({ tried: [PRIMARY, THIRD], servedBy: THIRD });
-      expect(order.log).toEqual([]);
+      expect(order.owner.hasPreference()).toBe(false);
+      expect(urlsOf(order.owner.attempts(order.endpoints, 'nonceWrite'))).toEqual([REFUSER, PRIMARY, THIRD]);
     });
 
     it('starts the next pass at the endpoint that served it instead', () => {
@@ -172,7 +175,7 @@ describe('EndpointReadRefusals.attempts', () => {
       });
 
       expect(pass).toEqual({ tried: [PRIMARY, THIRD, REFUSER], servedBy: undefined });
-      expect(order.log).toEqual([`failure ${REFUSER}`]);
+      expect(refusals.constraints(LABEL, order.endpoints.map(e => e.rpcUrl)).refusing).toEqual(new Set([REFUSER]));
     });
 
     it('forgets the refusal when that endpoint serves the read after all', () => {
@@ -181,8 +184,8 @@ describe('EndpointReadRefusals.attempts', () => {
 
       runPass(refusals, LABEL, order, { [PRIMARY]: retryable429(), [THIRD]: retryable429() });
 
-      expect(order.log).toEqual([`success ${REFUSER}`]);
-      expect(urlsOf(refusals.attempts(LABEL, stickyOrder(REFUSER, PRIMARY, THIRD).attempts)))
+      expect(refusals.constraints(LABEL, order.endpoints.map(e => e.rpcUrl)).refusing.size).toBe(0);
+      expect(urlsOf(readAttempts(refusals, LABEL, stickyOrder(REFUSER, PRIMARY, THIRD))))
         .toEqual([REFUSER, PRIMARY, THIRD]);
     });
 
@@ -190,7 +193,7 @@ describe('EndpointReadRefusals.attempts', () => {
       const refusals = refusedByTheFirst();
       runPass(refusals, LABEL, stickyOrder(REFUSER, PRIMARY, THIRD), { [PRIMARY]: refused403() });
 
-      expect(urlsOf(refusals.attempts(LABEL, stickyOrder(REFUSER, PRIMARY, THIRD).attempts)))
+      expect(urlsOf(readAttempts(refusals, LABEL, stickyOrder(REFUSER, PRIMARY, THIRD))))
         .toEqual([THIRD, REFUSER, PRIMARY]);
     });
   });
@@ -206,7 +209,8 @@ describe('EndpointReadRefusals.attempts', () => {
 
     // The endpoint stickiness starts at was tried first, so what follows means what it meant.
     expect(pass).toEqual({ tried: [PRIMARY, THIRD], servedBy: THIRD });
-    expect(order.log).toEqual([`failure ${PRIMARY}`, `success ${THIRD}`]);
+    expect(order.owner.hasPreference()).toBe(true);
+    expect(urlsOf(order.owner.readAttempts(order.endpoints, 'receiptRead', { label: 'preference inspection', memory: refusals }))).toEqual([THIRD, PRIMARY, REFUSER]);
   });
 
   it('changes nothing when every endpoint has refused the read', () => {
@@ -218,21 +222,22 @@ describe('EndpointReadRefusals.attempts', () => {
     const pass = runPass(refusals, LABEL, order, everyoneRefuses);
 
     expect(pass.tried).toEqual([REFUSER, PRIMARY, THIRD]);
-    expect(order.log).toEqual([`failure ${REFUSER}`, `failure ${PRIMARY}`, `failure ${THIRD}`]);
+    expect(order.owner.hasPreference()).toBe(false);
+    expect(refusals.constraints(LABEL, order.endpoints.map(e => e.rpcUrl)).refusing).toEqual(new Set([REFUSER, PRIMARY, THIRD]));
   });
 
   it('forgets a refusal after its time, and a new refusal renews it', () => {
     let clock = 1_000;
     const refusals = new EndpointReadRefusals({ now: () => clock });
-    const next = () => urlsOf(refusals.attempts(LABEL, stickyOrder(REFUSER, PRIMARY).attempts));
-    runPass(refusals, LABEL, stickyOrder(REFUSER, PRIMARY), { [REFUSER]: refused403() });
+    const next = () => urlsOf(readAttempts(refusals, LABEL, stickyOrder(REFUSER, PRIMARY)));
+    refusals.recordFailure(LABEL, REFUSER, refused403(), 'ordinary');
 
     clock += ENDPOINT_READ_REFUSAL_TTL_MS - 1;
     expect(next()).toEqual([PRIMARY, REFUSER]);
     clock += 1;
     expect(next()).toEqual([REFUSER, PRIMARY]);
 
-    runPass(refusals, LABEL, stickyOrder(REFUSER, PRIMARY), { [REFUSER]: refused403() });
+    refusals.recordFailure(LABEL, REFUSER, refused403(), 'ordinary');
     clock += ENDPOINT_READ_REFUSAL_TTL_MS - 1;
     expect(next()).toEqual([PRIMARY, REFUSER]);
   });
@@ -240,26 +245,28 @@ describe('EndpointReadRefusals.attempts', () => {
   it('keeps a bounded number of refusals, the most recently seen ones', () => {
     const refusals = new EndpointReadRefusals({ now: () => 0, maxEntries: 2 });
     for (const label of ['read a', 'read b', 'read a', 'read c']) {
-      runPass(refusals, label, stickyOrder(PRIMARY, REFUSER), { [PRIMARY]: retryable429(), [REFUSER]: refused403() });
+      refusals.recordFailure(label, REFUSER, refused403(), 'ordinary');
     }
-    const next = (label: string) => urlsOf(refusals.attempts(label, stickyOrder(PRIMARY, REFUSER, THIRD).attempts));
+    const next = (label: string) => urlsOf(readAttempts(refusals, label, stickyOrder(PRIMARY, REFUSER, THIRD)));
 
     expect(next('read b')).toEqual([PRIMARY, REFUSER, THIRD]);
     expect(next('read a')).toEqual([PRIMARY, THIRD, REFUSER]);
     expect(next('read c')).toEqual([PRIMARY, THIRD, REFUSER]);
   });
 
-  it('is the stickiness order with nothing remembered when told not to remember', () => {
+  it.each(['transparentRead', 'stickyRead'] as const)('ignores and does not update refusal memory for %s when ineligible', (intent) => {
     const refusals = new EndpointReadRefusals({ now: () => 0 });
-    const order = stickyOrder(REFUSER, PRIMARY);
-    const [first, second] = refusals.attempts(LABEL, order.attempts, false);
-
+    refusals.recordFailure(LABEL, REFUSER, refused403(), 'ordinary');
+    const endpoints = [REFUSER, PRIMARY].map(rpcUrl => ({ rpcUrl }));
+    const owner = new EndpointStickiness({ now: () => 0, ttlMs: 30_000, isEnabled: () => intent === 'transparentRead' });
+    expect(urlsOf(owner.readAttempts(endpoints, intent, { label: LABEL, memory: refusals }))).toEqual([REFUSER, PRIMARY]);
+    const [first, second] = owner.readAttempts(endpoints, intent, { label: 'unremembered', memory: refusals });
     first!.recordFailure(refused403());
     second!.recordSuccess();
-
-    expect(order.log).toEqual([`failure ${REFUSER}`, `success ${PRIMARY}`]);
-    expect(urlsOf(refusals.attempts(LABEL, stickyOrder(REFUSER, PRIMARY).attempts))).toEqual([REFUSER, PRIMARY]);
+    expect(owner.hasPreference()).toBe(false);
+    expect(refusals.constraints('unremembered', endpoints.map(e => e.rpcUrl)).refusing.size).toBe(0);
   });
+
 });
 
 describe('RpcFailoverClient with an endpoint that refuses receipt lookups', () => {
@@ -481,6 +488,41 @@ describe('RpcFailoverClient with an endpoint that refuses receipt lookups', () =
     expect(primary.getTransactionReceipt.calls).toHaveLength(2);
   });
 
+  it.each([false, true])('keeps a due primary re-probe when the checked stage expires before transport (validation=%s)', async (withValidation) => {
+    let clock = 0;
+    const primary = {};
+    const backup = {};
+    const validateEndpoint = vi.fn(async (_endpoint: RpcEndpoint) => undefined);
+    const client = new RpcFailoverClient(
+      () => [
+        { rpcUrl: PRIMARY, provider: primary as RpcEndpoint['provider'] },
+        { rpcUrl: REFUSER, provider: backup as RpcEndpoint['provider'] },
+      ],
+      NEVER_SIGN, () => 'evm:31337',
+      { stickiness: { enabled: true, ttlMs: 30_000, now: () => clock }, ...(withValidation ? { validateEndpoint } : {}) },
+    );
+    await expect(client.read('warm backup', async provider => {
+      if (provider === primary) throw retryable429();
+      return 'backup';
+    })).resolves.toBe('backup');
+    validateEndpoint.mockClear();
+    clock = 35_000;
+    const transport = vi.fn(async (provider: RpcEndpoint['provider']) => provider === primary ? 'primary' : 'backup');
+    // Budget preparation sees one remaining millisecond; the checked stage sees
+    // expiry. The stickiness clock remains due throughout this wall-clock seam.
+    const wallClock = vi.spyOn(Date, 'now').mockReturnValueOnce(35_000).mockReturnValue(35_001);
+    try {
+      await expect(client.read('deadline-blocked read', transport, { deadlineMs: 35_001 }))
+        .rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+      expect(validateEndpoint).not.toHaveBeenCalled();
+      expect(transport).not.toHaveBeenCalled();
+    } finally { wallClock.mockRestore(); }
+    clock = 35_001;
+    await expect(client.read('healthy read after blocked stage', transport)).resolves.toBe('primary');
+    expect(transport.mock.calls).toEqual([[primary]]);
+    if (withValidation) expect(validateEndpoint.mock.calls.map(([endpoint]) => endpoint.rpcUrl)).toEqual([PRIMARY]);
+  });
+
   it('does not spend the primary re-probe on a read the primary refuses', async () => {
     let clock = 0;
     const primary = {
@@ -499,7 +541,7 @@ describe('RpcFailoverClient with an endpoint that refuses receipt lookups', () =
     expect(primary.view.calls).toHaveLength(1);
 
     // A read the primary serves still finds it again, and clears the preference.
-    clock = 70_000;
+    clock = 35_001;
     await expect(client.read('kas.otherView', (p: any) => p.other())).resolves.toBe('primary');
     await expect(client.read('kas.otherView', (p: any) => p.other())).resolves.toBe('primary');
     expect(backup.other.calls).toHaveLength(0);
