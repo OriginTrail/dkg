@@ -432,6 +432,12 @@ export const PATH_TRIGGERS = Object.freeze([
     reason: 'the agent memory-layer tests import the CLI markdown extractor',
   },
   {
+    patterns: [/^packages\/cli\/src\/publisher-chain-proof\.ts$/],
+    lanes: ['tornado_agent'],
+    evmScopes: [],
+    reason: 'the agent memory-layer tests load the CLI confirmed-publication proof helper',
+  },
+  {
     patterns: [/^packages\/cli\/src\/(?:auth|boolean-env-override|config|oxigraph-memory-limits|runtime-assets)\.ts$/],
     // The EPCIS lanes are Blazegraph and supporting; the CLI rule already
     // selects Blazegraph.
