@@ -1,5 +1,8 @@
 # Opt-in bulk atomic ingestion: partial local comparison
 
+A separate [fresh nine-trial rerun completed on October 11](bulk-atomic-ingest-20261011.md).
+The incomplete attempt below is preserved without combining its trials with that run.
+
 The implementation passed the storage and native-engine checks. Six of the
 planned nine full-size sync trials completed and passed coverage, direct-query,
 and subsequent journal-restart checks. The original controller stopped the run
