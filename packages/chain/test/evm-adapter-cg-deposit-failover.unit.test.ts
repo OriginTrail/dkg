@@ -16,7 +16,6 @@
  */
 import { describe, it, expect } from 'vitest';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
-import { markTransactionNotSubmitted } from '../src/transaction-submission.js';
 
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const ADMIN_PK = '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a';
@@ -40,10 +39,8 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   return Object.assign(fn, { calls });
 }
 
-// The create's gas estimation reverting, before any transaction was sent (the
-// write path marks every failure before its broadcast).
 const tooLowAllowanceRevert = () =>
-  markTransactionNotSubmitted(new Error('execution reverted: TooLowAllowance(0xTRAC, 0, 1)'));
+  new Error('execution reverted: TooLowAllowance(0xTRAC, 0, 1)');
 const retryable429 = () => { const e = new Error('429 too many requests'); (e as any).status = 429; return e; };
 
 describe('createOnChainContextGraph — TooLowAllowance recovery uses the failover deposit read (#1340)', () => {
@@ -183,18 +180,6 @@ describe('createOnChainContextGraph — TooLowAllowance recovery uses the failov
     const { a, ensureSpy } = makeCgAdapter({ depositRead: async () => 0n });
     await expect(a.createOnChainContextGraph(CG_PARAMS)).rejects.toThrow('TooLowAllowance');
     expect(ensureSpy.calls).toEqual([]);
-  });
-
-  it('never recovers a TooLowAllowance failure of a create that may have been sent', async () => {
-    let reads = 0;
-    const { a, ensureSpy, sendSpy } = makeCgAdapter({
-      depositRead: async () => { reads += 1; return DEPOSIT; },
-      firstRevert: () => new Error('execution reverted: TooLowAllowance(0xTRAC, 0, 1)'),
-    });
-    await expect(a.createOnChainContextGraph(CG_PARAMS)).rejects.toThrow('TooLowAllowance');
-    expect(reads).toBe(0);
-    expect(ensureSpy.calls).toEqual([]);
-    expect(sendSpy.calls).toHaveLength(1); // no second create
   });
 
   it('guard intact: a non-TooLowAllowance first revert → deposit NOT read, no approve', async () => {

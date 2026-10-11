@@ -41,7 +41,6 @@ import { isRetryableRpcError, isRpcEndpointFailoverEligible } from './evm-adapte
 import { isContextGraphAuthorityIndexRetryableError } from './context-graph-authority-index.js';
 import { markContextGraphRegistrationNotSubmitted } from
   './context-graph-registration-error.js';
-import { isTransactionNotSubmitted } from './transaction-submission.js';
 import {
   contextGraphAuthorityAnchorUnavailableV1,
 } from
@@ -826,9 +825,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           // unrelated first-attempt revert (invalid access/publish policy, PCA
           // coherence failure, paused contract, insufficient balance, RPC error)
           // must NOT trigger a state-changing TRAC approval before re-failing.
-          // It is the revert of a create that was never sent (its gas
-          // estimation), so the retry below is the only create transaction.
-          if (!isTooLowAllowanceError(err) || !isTransactionNotSubmitted(err)) {
+          if (!isTooLowAllowanceError(err)) {
             throw err;
           }
           // #1340: read the deposit through the RPC-failover facade (`readContract`),

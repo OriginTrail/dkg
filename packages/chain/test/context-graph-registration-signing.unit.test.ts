@@ -1,15 +1,16 @@
 /**
  * A context graph registration whose transaction was never sent leaves the
- * graph unregistered: a failure before the broadcast, such as the external
- * signer refusing to sign the create transaction, or the deposit approval
- * before it, is a definitive registration failure. A failure after the
- * broadcast keeps the outcome open.
+ * graph unregistered: the external signer refusing to sign the create
+ * transaction, or the deposit approval before it, is a definitive
+ * registration failure. A failure after the broadcast keeps the outcome open,
+ * and so does an error another write could share, which is never marked.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import { connectRemoteSigners } from '../src/remote-signer-connect.js';
 import { classifyContextGraphRegistrationFailure } from '../src/context-graph-registration-error.js';
 import { createRpcTimeoutError } from '../src/chain-rpc-transport-error.js';
+import { isTransactionNotSubmitted } from '../src/transaction-submission.js';
 import { startFakeRemoteSigner } from './helpers/fake-remote-signer.js';
 
 // Well-known Hardhat development account.
@@ -134,6 +135,21 @@ describe('a context graph registration whose transaction was never sent', () => 
     expect(creates()).toBe(1);
     expect(signed()).toEqual([APPROVE]);
     expect(sent).not.toHaveBeenCalled();
+  });
+
+  it('marks only the signing step, so an error several writes can share never carries the mark', async () => {
+    // A rejection more than one write can receive, like a shared endpoint validation or an abort reason.
+    const shared = new Error('configured chain id does not match the endpoint');
+    const { adapter, sent } = await registration({ refuse: () => false });
+    adapter.prepareAcrossProviders.mockRejectedValueOnce(shared);
+    await expect(adapter.createOnChainContextGraph(PARAMS)).rejects.toBe(shared);
+    expect(isTransactionNotSubmitted(shared)).toBe(false);
+
+    // The same error surfacing after another registration's broadcast keeps that outcome open.
+    sent.mockRejectedValueOnce(shared);
+    const error = await adapter.createOnChainContextGraph(PARAMS).catch((err: unknown) => err);
+    expect(error).toBe(shared);
+    expect(classifyContextGraphRegistrationFailure(error)).toBe('outcome-ambiguous');
   });
 
   it('keeps the outcome open when the create was sent and its receipt is lost', async () => {
