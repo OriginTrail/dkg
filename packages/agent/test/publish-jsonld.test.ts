@@ -747,8 +747,9 @@ describe('publishJsonLd', () => {
       await agent.registerContextGraph('async-external-author');
       const writer = await agent.registerAgent('ExternalWriter', { address: authorKey.address });
       expect(writer.mode).toBe('self-sovereign');
+      // An inline context, so the test does not fetch one.
       const content = (id: string) => ({
-        public: { '@context': 'http://schema.org/', '@id': `http://example.org/${id}`, '@type': 'Thing', 'name': id },
+        public: { '@context': { '@vocab': 'http://schema.org/' }, '@id': `http://example.org/${id}`, '@type': 'Thing', 'name': id },
       });
 
       const before = fake.requests.length;
