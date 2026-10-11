@@ -19,8 +19,7 @@ export function createOxigraphRecoveryProgress(generation: number) {
   });
   return {
     handle,
-    constructor(private readonly generation: () => number, private readonly start: (reason: string) => boolean) {}
-  get phase() { return phase; },
+    get phase() { return phase; },
     publish(next: ManagedOxigraphRecoveryPhaseV1) {
       if (terminal() || phase === next) return;
       phase = next;
