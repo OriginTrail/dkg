@@ -1,4 +1,4 @@
-import { requireNormalizedCollectionUpdateEvent, type NormalizedCollectionUpdateEvent } from './chain-event-boundary.js';
+import { prepareCollectionUpdateEvent, type NormalizedCollectionUpdateEvent } from './chain-event-boundary.js';
 import {
   withRpcRequestContext,
   type KnowledgeAssetUpdateIdentity,
@@ -367,7 +367,10 @@ export class ChainEventPoller {
         eventTypes: () => ['KnowledgeAssetUpdated'],
         cursorStrategy: () => ({ kind: 'live-tail', legacyAggregateCursor: true }),
         cadenceMs: this.intervalMs,
-        dispatch: (event, ctx, signal) => this.handleCollectionUpdated(requireNormalizedCollectionUpdateEvent(event), ctx, signal),
+        prepare: (incoming) => {
+          const prepared = prepareCollectionUpdateEvent(incoming);
+          return { ...prepared, dispatch: (ctx, signal) => this.handleCollectionUpdated(prepared.event, ctx, signal) };
+        },
         persistCeiling: () => this.collectionUpdatesPersistCeiling?.(),
         // The chain index holds back 50 blocks for reorg repair. Revisiting
         // 64 blocks also catches replacements already passed in the live cursor.

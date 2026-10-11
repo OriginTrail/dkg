@@ -9,26 +9,29 @@ export type NormalizedCollectionUpdateEvent = ChainEvent & {
   readonly updateIdentity: KnowledgeAssetUpdateIdentity;
 };
 
-export function requireNormalizedCollectionUpdateEvent(event: ChainEvent): NormalizedCollectionUpdateEvent {
-  if (event.type !== 'KnowledgeAssetUpdated' || event.updateIdentity === undefined) {
-    throw new TypeError('Update event requires a normalized identity');
-  }
-  return event as NormalizedCollectionUpdateEvent;
+function isNormalizedCollectionUpdateEvent(event: ChainEvent): event is NormalizedCollectionUpdateEvent {
+  return event.type === 'KnowledgeAssetUpdated' && event.updateIdentity !== undefined;
 }
 
-/** Adapt legacy evidence and bind replay identity before generic lane dispatch. */
-export function prepareChainEvent(incoming: ChainEvent): { readonly event: ChainEvent; readonly replayKey: string } {
-  const event = incoming.type === 'KnowledgeAssetUpdated' && incoming.updateIdentity === undefined
-    ? { ...incoming, updateIdentity: normalizeKnowledgeAssetUpdateIdentity({
+/** The collection-update lane binds legacy evidence and replay identity once. */
+export function prepareCollectionUpdateEvent(incoming: ChainEvent): { readonly event: NormalizedCollectionUpdateEvent; readonly replayKey: string } {
+  let event: NormalizedCollectionUpdateEvent;
+  if (isNormalizedCollectionUpdateEvent(incoming)) {
+    event = incoming;
+  } else {
+    if (incoming.type !== 'KnowledgeAssetUpdated') {
+      throw new TypeError('Update event requires a normalized identity');
+    }
+    event = { ...incoming, type: 'KnowledgeAssetUpdated', updateIdentity: normalizeKnowledgeAssetUpdateIdentity({
       blockNumber: incoming.blockNumber, txHash: incoming.data.txHash,
       logIndex: incoming.data.logIndex, blockHash: incoming.data.blockHash,
-    }) } : incoming;
+    }) };
+  }
   const data = event.data;
-  const metadata = event.type === 'KnowledgeAssetUpdated'
-    ? requireNormalizedCollectionUpdateEvent(event).updateIdentity : data;
+  const metadata = event.updateIdentity;
   return { event, replayKey: [
     event.type,
-    event.type === 'KnowledgeAssetUpdated' ? metadata.blockNumber ?? event.blockNumber : event.blockNumber,
+    metadata.blockNumber ?? event.blockNumber,
     metadata.blockHash,
     metadata.logIndex,
     metadata.txHash,

@@ -4,7 +4,6 @@ import {
   type EventFilter,
   type EventScanHorizonLease,
 } from '@origintrail-official/dkg-chain';
-import { prepareChainEvent } from './chain-event-boundary.js';
 import { createOperationContext, type Logger, type OperationContext } from '@origintrail-official/dkg-core';
 import {
   createLaneCursorStore,
@@ -57,13 +56,12 @@ const DEFAULT_LIVE_SEED_LOOKBACK_BLOCKS = 500;
 const FAILURE_BACKOFF_INITIAL_MS = 60_000;
 const FAILURE_BACKOFF_MAX_MS = 5 * 60_000;
 
-export interface ChainEventPollerLaneSpec {
+interface ChainEventPollerLaneSchedule {
   name: ChainEventPollerLane;
   enabled(): boolean;
   eventTypes(): readonly string[];
   cursorStrategy(): ChainEventPollerLaneCursorStrategy;
   cadenceMs: number;
-  dispatch(event: ChainEvent, ctx: OperationContext, signal?: AbortSignal): Promise<void>;
   /**
    * Highest block this lane may persist as scanned, when its dispatched events
    * left work that is not settled yet. The lane keeps scanning past it in
@@ -74,6 +72,15 @@ export interface ChainEventPollerLaneSpec {
   /** Revisit this many scanned blocks so replacement-fork logs are delivered. */
   replayLookbackBlocks?: number;
 }
+
+export type ChainEventPollerLaneSpec = ChainEventPollerLaneSchedule & (
+  | { dispatch(event: ChainEvent, ctx: OperationContext, signal?: AbortSignal): Promise<void>; prepare?: never }
+  | { dispatch?: never; prepare(event: ChainEvent): {
+    readonly event: ChainEvent;
+    readonly replayKey: string;
+    dispatch(ctx: OperationContext, signal?: AbortSignal): Promise<void>;
+  } }
+);
 
 interface ChainEventPollerLaneRuntime {
   spec: ChainEventPollerLaneSpec;
@@ -451,14 +458,25 @@ export class ChainEventLaneRunner {
     try {
       for await (const incoming of this.chain.listenForEvents(filter)) {
         signal?.throwIfAborted();
-        const prepared = prepareChainEvent(incoming);
-        const event = prepared.event;
+        const spec = lane.spec;
+        let event = incoming;
+        let identity: string | undefined;
+        let dispatch: () => Promise<void>;
+        if (spec.prepare !== undefined) {
+          const prepared = spec.prepare(incoming);
+          event = prepared.event;
+          identity = lookback > 0 ? prepared.replayKey : undefined;
+          dispatch = () => prepared.dispatch(ctx, signal);
+        } else {
+          const handle = spec.dispatch;
+          identity = lookback > 0 ? this.replayIdentity(incoming) : undefined;
+          dispatch = () => handle(incoming, ctx, signal);
+        }
         if (lease !== undefined && !await this.eventScanLeaseHolds(lease)) {
           leaseExpired = true;
           throw new Error('event scan horizon lease expired before event dispatch');
         }
         signal?.throwIfAborted();
-        const identity = lookback > 0 ? prepared.replayKey : undefined;
         if (identity !== undefined) {
           let atBlock = observed.get(event.blockNumber);
           if (atBlock === undefined) {
@@ -470,7 +488,7 @@ export class ChainEventLaneRunner {
           atBlock.add(identity);
           if (alreadySeen) continue;
         }
-        await lane.spec.dispatch(event, ctx, signal);
+        await dispatch();
         signal?.throwIfAborted();
         if (lease !== undefined && !await this.eventScanLeaseHolds(lease)) {
           leaseExpired = true;
@@ -516,6 +534,19 @@ export class ChainEventLaneRunner {
       advanced: advanced || reset,
       ...(advanced && lease !== undefined ? { lease, stateBefore } : {}),
     };
+  }
+
+  private replayIdentity(event: ChainEvent): string {
+    const data = event.data;
+    return [
+      event.type,
+      event.blockNumber,
+      data.blockHash,
+      data.logIndex,
+      data.txHash,
+      data.batchId,
+      data.merkleRoot,
+    ].map((part) => String(part ?? '')).join('\0');
   }
 
 
