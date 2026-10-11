@@ -648,7 +648,7 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     // there (as `payload` already does); the shared builder keeps every job field's value.
     if (segments[1] === "payload") {
       if (!(await requirePublisherJobReadAuthority(ctx, job))) return;
-    const payload = await publisherControl.inspectPreparedPayload(jobId);
+      const payload = await publisherControl.inspectPreparedPayload(jobId);
       return jsonResponse(res, 200, legacyJobDetailBody(ctx, job, payload));
     }
     if (!(await requirePublisherJobReadAuthority(ctx, job))) return;
