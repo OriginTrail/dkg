@@ -324,6 +324,10 @@ describe('Genesis Knowledge', () => {
       })).rejects.toThrow(/participantAgents cannot exceed 256 addresses after adding the curator/);
 
       expect(chain.createOnChainContextGraphCalls).toHaveLength(0);
+      // The refused addition left the stored roster as it was.
+      const roster = await agent.getContextGraphParticipantAgentAddresses(id);
+      expect(roster).toHaveLength(256);
+      expect(roster).not.toContain(author);
       await agent.stop().catch(() => {});
     });
 

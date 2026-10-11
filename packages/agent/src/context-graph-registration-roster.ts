@@ -23,10 +23,12 @@ export interface RegistrationRoster {
 }
 
 /**
- * Add `agent` as a participant agent of the context graph (idempotent: RDF
- * triples deduplicate) and return the participant agents to register on-chain.
- * `adding` describes the addition in the error raised when the roster then
- * exceeds what a registration may carry.
+ * Add `agent` as a participant agent of the context graph and return the
+ * participant agents to register on-chain. The roster with `agent` added
+ * (checksummed, without duplicates) is validated first: one that would exceed
+ * what a registration may carry is refused, with `adding` describing the
+ * addition, and nothing is stored. Storing it is idempotent (RDF triples
+ * deduplicate), so an agent the roster already lists keeps its size.
  */
 export async function addRegistrationParticipantAgent(
   roster: RegistrationRoster,
@@ -34,19 +36,21 @@ export async function addRegistrationParticipantAgent(
   agent: string,
   adding: string,
 ): Promise<string[]> {
-  await roster.insert([{
-    subject: `did:dkg:context-graph:${contextGraphId}`,
-    predicate: DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT,
-    object: `"${ethers.getAddress(agent)}"`,
-    graph: contextGraphMetaUri(contextGraphId),
-  }]);
-  roster.markDirty(contextGraphId);
-  const participantAgents = await roster.participantAgents(contextGraphId);
-  if (participantAgents.length > MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS) {
+  const participant = ethers.getAddress(agent);
+  const current = await roster.participantAgents(contextGraphId);
+  const listed = current.some((address) => address.toLowerCase() === participant.toLowerCase());
+  if (current.length + (listed ? 0 : 1) > MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS) {
     throw new Error(
       `Context graph "${contextGraphId}" cannot be registered on-chain: participantAgents cannot exceed ` +
       `${MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS} addresses after ${adding} as a participant.`,
     );
   }
-  return participantAgents;
+  await roster.insert([{
+    subject: `did:dkg:context-graph:${contextGraphId}`,
+    predicate: DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT,
+    object: `"${participant}"`,
+    graph: contextGraphMetaUri(contextGraphId),
+  }]);
+  roster.markDirty(contextGraphId);
+  return roster.participantAgents(contextGraphId);
 }
