@@ -68,6 +68,7 @@ export async function evaluateHostCatchupPolicy(
 /** Bind graph identity and catch-up policy to the caller's active gossip lifetime. */
 export function createHostModePublicPolicy(ports: HostPolicyIdentityPorts & Omit<CatchupPolicyPorts, 'captureCurrent'> & {
   current(): boolean;
+  isWireIdKeyedSubscription(localId: string): boolean;
 }) {
   const captureCurrent = (id: string): (() => boolean) => {
     const bindingCurrent = captureHostPolicyIdentityCurrent(ports, id);
@@ -84,7 +85,7 @@ export function createHostModePublicPolicy(ports: HostPolicyIdentityPorts & Omit
         if (!ports.current() || wireId === null || localId !== wireId || target.bindingKind === 'unbound') return false;
         const nextLocalId = ports.localId(id);
         const next = ports.subscriptions.get(nextLocalId);
-        return nextLocalId !== localId && localContextGraphIdMatchesCommittedNameHash(nextLocalId, wireId)
+        return nextLocalId !== localId && localContextGraphIdMatchesCommittedNameHash(nextLocalId, wireId, ports.isWireIdKeyedSubscription)
           && next?.onChainHash === wireId && ports.wireOwners.get(wireId) === nextLocalId
           && ports.bindings.currentBindingFor(nextLocalId, next)?.onChainId === target.onChainId;
       };

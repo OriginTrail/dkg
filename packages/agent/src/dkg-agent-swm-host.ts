@@ -978,6 +978,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       classification: key => this.swmHostModeCurated.get(key),
       publicReaderEnabled: key => this.config.swmHostMode?.hostPublic === true && this.swmHostModeSubscribed.has(key),
       confirmedPublic: id => this.isConfirmedPublicForHostMode(id),
+      isWireIdKeyedSubscription: id => this.isWireIdKeyedSubscription(id),
     });
   }
 
