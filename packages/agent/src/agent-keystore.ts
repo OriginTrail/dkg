@@ -14,6 +14,9 @@
 
 import { ethers } from 'ethers';
 import { randomBytes, createHash } from 'node:crypto';
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
+import { withKeyedLocks } from '@origintrail-official/dkg-publisher';
 import {
   WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
   computeWorkspaceAgentEncryptionKeyProofPayload,
@@ -104,7 +107,8 @@ export function hashAgentToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
 
-const keystoreWrites = new Map<string, Promise<void>>();
+/** One lock per keystore file. */
+const keystoreWriteLocks = new Map<string, Promise<void>>();
 
 /**
  * Add or replace `address`'s entry in the keystore file at `path`. The writes
@@ -112,9 +116,7 @@ const keystoreWrites = new Map<string, Promise<void>>();
  * other's entries in the read-modify-write.
  */
 export function writeKeystoreEntry(path: string, address: string, entry: KeystoreEntry): Promise<void> {
-  const write = async () => {
-    const { readFile, writeFile, mkdir, chmod } = await import('node:fs/promises');
-    const { dirname } = await import('node:path');
+  return withKeyedLocks(keystoreWriteLocks, [path], async () => {
     let existing: Record<string, KeystoreEntry> = {};
     try {
       existing = JSON.parse(await readFile(path, 'utf-8'));
@@ -123,14 +125,7 @@ export function writeKeystoreEntry(path: string, address: string, entry: Keystor
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, JSON.stringify(existing, null, 2), { mode: 0o600 });
     await chmod(path, 0o600);
-  };
-  const next = (keystoreWrites.get(path) ?? Promise.resolve()).then(write);
-  const settled = next.catch(() => undefined);
-  keystoreWrites.set(path, settled);
-  void settled.then(() => {
-    if (keystoreWrites.get(path) === settled) keystoreWrites.delete(path);
   });
-  return next;
 }
 
 /** Throws when `name` is already the name of one of `agents` (agent names are unique on a node). */
