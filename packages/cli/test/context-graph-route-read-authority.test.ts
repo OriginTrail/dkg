@@ -304,6 +304,20 @@ describe('caller-bound graph reads', () => {
     },
   );
 
+  it.each(['caller', 'public', 'node'] as const)('uses canonical %s admission through both graph and KA HTTP consumers', async grantScope => {
+    for (const route of [routes[0], routes[2]]) {
+      const h = fixture(route, { ...decisions.allowed, grantScope });
+      await route.run(h.ctx);
+      expect(h.res.statusCode).toBe(grantScope === 'node' ? 403 : 200);
+      expect(h.read).toHaveBeenCalledTimes(grantScope === 'node' ? 0 : 1);
+      Object.assign(h.ctx, { authentication: requestAuthentication({ kind: 'anonymous' }) });
+      h.res.writableEnded = false;
+      await route.run(h.ctx);
+      expect(h.res.statusCode).toBe(200);
+      expect(h.authority).toHaveBeenLastCalledWith(CG, expect.objectContaining({ callerAgentAddress: undefined }));
+    }
+  });
+
   it('propagates unrelated authority failures while removing the request listeners', async () => {
     const h = fixture(routes[0], decisions.allowed);
     const error = new Error('unrelated programming failure');

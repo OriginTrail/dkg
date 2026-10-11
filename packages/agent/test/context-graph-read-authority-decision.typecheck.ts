@@ -51,10 +51,28 @@ import type { DKGAgent } from '../src/index.js';
 import { resolveKnowledgeAssetRead, type KnowledgeAssetReadInput, type KnowledgeAssetReadOptions, type KnowledgeAssetReadResolution } from '../src/knowledge-asset-read-resolution.js';
 declare const draftAgent: DKGAgent;
 const draftOptions: KnowledgeAssetReadOptions = { callerAgentAddress: '0xcaller' };
-const draftInput: KnowledgeAssetReadInput = { cg: 'cg', name: 'compact:name', agentAddress: '0xcaller', read: 'quads' };
+const draftInput: KnowledgeAssetReadInput = { cg: 'cg', name: 'compact:name', agentAddress: '0xcaller', kind: 'identifier', lookup: 'quads' };
 const draftDecision: Promise<KnowledgeAssetReadResolution> = resolveKnowledgeAssetRead(draftAgent, draftInput, draftOptions);
 // @ts-expect-error A KA read must name the requested resource operation.
 const missingReadOperation: KnowledgeAssetReadInput = { cg: 'cg', name: 'compact:name' };
 // @ts-expect-error The combined resolution cannot discard its resource evidence.
 const discardedEvidence: Promise<ContextGraphReadAuthorityDecision> = resolveKnowledgeAssetRead(draftAgent, draftInput, draftOptions);
 void [draftDecision, missingReadOperation, discardedEvidence];
+
+// Admission and resource evidence are correlated; granted node evidence is not caller admission.
+declare const kaResolution: KnowledgeAssetReadResolution;
+if (kaResolution.outcome === 'admitted') {
+  const name: string = kaResolution.target.name;
+  const allowedOutcome: 'allowed' = kaResolution.decision.outcome;
+  void [name, allowedOutcome];
+} else {
+  const noTarget: null = kaResolution.target;
+  void noTarget;
+}
+// @ts-expect-error An admitted KA read must carry its resolved resource.
+const admittedWithoutTarget: KnowledgeAssetReadResolution = { outcome: 'admitted', decision: allowed, target: null };
+// @ts-expect-error An unavailable KA read cannot carry a readable target.
+const unavailableWithTarget: KnowledgeAssetReadResolution = { outcome: 'unavailable', decision: unavailableWithDependency, target: { kind: 'name', cg: 'cg', name: 'asset', descriptor: null } };
+// @ts-expect-error A literal target's owner explicitly suppresses domain lookup.
+const literalWithAliasLookup: KnowledgeAssetReadInput = { cg: 'cg', name: 'asset', kind: 'literal', lookup: 'descriptor' };
+void [admittedWithoutTarget, unavailableWithTarget, literalWithAliasLookup];

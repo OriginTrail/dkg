@@ -1,3 +1,4 @@
+import type { KnowledgeAssetReadTarget } from '@origintrail-official/dkg-agent/dist/knowledge-asset-read-resolution.js';
 import { normalizeContextGraphIdOrUri } from '../../context-graph-identifiers.js';
 // daemon/routes/knowledge-assets-import.ts
 //
@@ -2235,15 +2236,14 @@ export async function handleKaImportFile(ctx: RequestContext, name: string): Pro
 // dispatcher passes the already-decoded `name`.
 export async function handleKaExtractionStatus(
   ctx: RequestContext,
-  assertionName: string,
-  scope: Readonly<{ contextGraphId: string; subGraphName?: string }>,
+  target: Pick<KnowledgeAssetReadTarget, 'cg' | 'name' | 'subGraphName'> & { readonly agentAddress: string },
 ): Promise<void> {
-  const { res, extractionStatus, requestAgentAddress } = ctx;
-  const { contextGraphId: normalizedContextGraphId, subGraphName } = scope;
+  const { res, extractionStatus } = ctx;
+  const { cg: normalizedContextGraphId, name: assertionName, agentAddress, subGraphName } = target;
 
   const assertionUri = contextGraphAssertionUri(
     normalizedContextGraphId,
-    requestAgentAddress,
+    agentAddress,
     assertionName,
     subGraphName,
   );

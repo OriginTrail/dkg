@@ -4,7 +4,7 @@ import {
   withRpcUsageSite,
   type ContextGraphAuthorityRpcSite,
 } from '@origintrail-official/dkg-chain';
-import type { ContextGraphReadAuthorityDecision } from '@origintrail-official/dkg-agent/dist/context-graph-read-authority.js';
+import { admitContextGraphReadCaller, type ContextGraphCallerReadAdmission } from '@origintrail-official/dkg-agent/dist/context-graph-read-authority.js';
 import { resolveKnowledgeAssetRead, type KnowledgeAssetReadInput, type KnowledgeAssetReadTarget } from '@origintrail-official/dkg-agent/dist/knowledge-asset-read-resolution.js';
 import {
   jsonResponse,
@@ -31,7 +31,7 @@ export async function requireContextGraphReadAuthority(
   site: ContextGraphAuthorityRpcSite = CONTEXT_GRAPH_AUTHORITY_RPC_SITES.query,
 ): Promise<boolean> {
   return (await requireReadAuthority(ctx, contextGraphId, site, async (id, callerAgentAddress, signal) => ({
-    decision: await ctx.agent.resolveContextGraphReadAuthority(id, { callerAgentAddress, signal }),
+    ...admitContextGraphReadCaller(await ctx.agent.resolveContextGraphReadAuthority(id, { callerAgentAddress, signal }), callerAgentAddress),
     value: true,
   }), async () => true)) !== null;
 }
@@ -43,7 +43,7 @@ export async function requireKnowledgeAssetRead(
 ): Promise<KnowledgeAssetReadTarget | null> {
   return requireReadAuthority(ctx, input.cg, CONTEXT_GRAPH_AUTHORITY_RPC_SITES.query, async (cg, callerAgentAddress, signal) => {
     const resolution = await resolveKnowledgeAssetRead(ctx.agent, { ...input, cg }, { callerAgentAddress, signal });
-    return { decision: resolution.decision, value: resolution.target };
+    return { ...resolution, value: resolution.target };
   }, async () => (await resolveKnowledgeAssetRead(ctx.agent, input, { nodeOperator: true,
     callerAgentAddress: actorFromRequestContext(ctx).authenticatedAgentAddress,
   })).target);
@@ -53,7 +53,7 @@ async function requireReadAuthority<T>(
   ctx: RequestContext,
   contextGraphId: unknown,
   site: ContextGraphAuthorityRpcSite,
-  resolveAuthority: (id: string, caller: string | undefined, signal: AbortSignal) => Promise<{ decision: ContextGraphReadAuthorityDecision; value: T }>,
+  resolveAuthority: (id: string, caller: string | undefined, signal: AbortSignal) => Promise<ContextGraphCallerReadAdmission & { value: T }>,
   operatorValue: () => Promise<T>,
 ): Promise<T | null> {
   if (!validateRequiredContextGraphId(contextGraphId, ctx.res)) return null;
@@ -67,18 +67,13 @@ async function requireReadAuthority<T>(
       validatedId, actor.authenticatedAgentAddress, lifecycle.signal,
     ));
     lifecycle.signal.throwIfAborted();
-    const authority = resolution.decision;
     // Unavailable authority is retryable, not a terminal caller refusal. The
     // canonical response hides the CG, authority source and internal reason.
-    if (authority.outcome === 'unavailable') {
-      respondContextGraphReadAuthorityUnavailable(ctx.res, authority);
+    if (resolution.outcome === 'unavailable') {
+      respondContextGraphReadAuthorityUnavailable(ctx.res, resolution.decision);
       return null;
     }
-    // The resolver owns whether evidence grants this caller, the public, or only the node.
-    if (authority.outcome !== 'allowed' || (
-      actor.authenticatedAgentAddress !== undefined
-      && authority.grantScope !== 'caller' && authority.grantScope !== 'public'
-    )) {
+    if (resolution.outcome === 'refused') {
       jsonResponse(ctx.res, 403, { error: 'Not authorized to read this context graph.' });
       return null;
     }

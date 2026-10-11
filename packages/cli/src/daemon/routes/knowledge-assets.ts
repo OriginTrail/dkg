@@ -1,5 +1,6 @@
 import { normalizeContextGraphIdOrUri } from '../../context-graph-identifiers.js';
-import { classifyKaIdentifier, resolveKnowledgeAssetReadTarget, type KnowledgeAssetReadTarget } from './knowledge-asset-read-target.js';
+import { classifyKaIdentifier, type KnowledgeAssetReadTarget } from '@origintrail-official/dkg-agent/dist/knowledge-asset-read-resolution.js';
+import { requireKnowledgeAssetRead } from './context-graph-read-authority.js';
 // Route handlers for the GitHub-shaped Knowledge Asset HTTP surface.
 //
 // OT-RFC-43 §10.5 — one coherent resource model for a Knowledge Asset (KA):
@@ -26,7 +27,7 @@ import { classifyKaIdentifier, resolveKnowledgeAssetReadTarget, type KnowledgeAs
 // by its lifecycle NAME (the file handle) + `contextGraphId`. Minter-namespaced
 // `(agent, number)` addressing is layered on by Option 1 later, on these same
 // routes, as an additional accepted identifier form.
-import type { RequestContext } from "./context.js";
+import { actorFromRequestContext, type RequestContext } from "./context.js";
 import { reportBatchRejectionWithLifecycle } from "@origintrail-official/dkg-agent";
 import {
   jsonResponse,
@@ -1126,11 +1127,12 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       jsonResponse(res, 400, { error: '"agentAddress" must be a 0x-prefixed 20-byte EVM address' });
       return null;
     }
-    const agentAddress = explicitAgentAddress ?? writePreflightCallerAgentAddress;
+    const literal = verb === 'extraction-status';
+    const agentAddress = literal ? actorFromRequestContext(ctx).effectiveAgentAddress : explicitAgentAddress ?? writePreflightCallerAgentAddress;
     const cg = normalizeContextGraphIdOrUri(rawCg as string);
-    return resolveKnowledgeAssetReadTarget(ctx, {
+    return requireKnowledgeAssetRead(ctx, {
       cg, name, layer, subGraphName, agentAddress,
-      read: verb === 'extraction-status' ? 'extraction-status' : verb === 'quads' ? 'quads' : 'descriptor',
+      ...(literal ? { kind: 'literal', lookup: 'none' } : { kind: 'identifier', lookup: verb === 'quads' ? 'quads' : 'descriptor' }),
     });
   }
 
@@ -1174,7 +1176,8 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
   if (method === "GET" && layer === "wm" && verb === "extraction-status") {
     const p = await readGetParams();
     if (!p) return;
-    return handleKaExtractionStatus(ctx, name, { contextGraphId: p.cg, subGraphName: p.subGraphName });
+    if (p.agentAddress === undefined) throw new Error('Extraction read target has no actor lane');
+    return handleKaExtractionStatus(ctx, { ...p, agentAddress: p.agentAddress });
   }
 
   // GET /api/knowledge-assets/:identifier/{wm,swm,vm} — per-layer status.

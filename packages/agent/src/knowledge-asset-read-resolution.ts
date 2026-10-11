@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { AssertionHistoryDescriptor, DKGAgent } from './dkg-agent.js';
 import {
+  admitContextGraphReadCaller,
   contextGraphReadAuthorityDependencyOf,
+  type ContextGraphCallerReadAdmission,
   unavailableContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityDecision,
 } from './context-graph-read-authority.js';
@@ -48,14 +50,17 @@ export interface KnowledgeAssetReadTarget {
   readonly descriptor: AssertionHistoryDescriptor | null;
 }
 
-export interface KnowledgeAssetReadInput {
+/** Literal targets have already been normalized by their owning caller. */
+export type KnowledgeAssetReadInput = {
   cg: string;
   name: string;
   subGraphName?: string;
   agentAddress?: string;
   layer?: string;
-  read: 'descriptor' | 'quads' | 'extraction-status';
-}
+} & (
+  | { kind: 'literal'; lookup: 'none' }
+  | { kind: 'identifier'; lookup: 'descriptor' | 'quads' }
+);
 
 export interface KnowledgeAssetReadOptions {
   callerAgentAddress?: string;
@@ -64,10 +69,9 @@ export interface KnowledgeAssetReadOptions {
   nodeOperator?: boolean;
 }
 
-export interface KnowledgeAssetReadResolution {
-  readonly decision: ContextGraphReadAuthorityDecision;
-  readonly target: KnowledgeAssetReadTarget | null;
-}
+export type KnowledgeAssetReadResolution =
+  | (Extract<ContextGraphCallerReadAdmission, { outcome: 'admitted' }> & { readonly target: KnowledgeAssetReadTarget })
+  | (Exclude<ContextGraphCallerReadAdmission, { outcome: 'admitted' }> & { readonly target: null });
 
 /** KA admission, author lanes and literal-before-alias precedence have one owner. */
 export async function resolveKnowledgeAssetRead(
@@ -82,11 +86,8 @@ export async function resolveKnowledgeAssetRead(
     ? { outcome: 'allowed', source: 'system', reason: 'node-operator-read', grantScope: 'node', metadataBootstrap: 'forbidden' }
     : await agent.resolveContextGraphReadAuthority(cg, { callerAgentAddress: caller, signal });
   signal?.throwIfAborted();
-  // Extraction jobs are keyed by the actor's literal name even before create,
-  // irrespective of an optional inspection author or compact-looking spelling.
-  const extraction = input.read === 'extraction-status';
-  const identifier = extraction ? { kind: 'name' as const } : classifyKaIdentifier(name);
-  const agentAddress = extraction ? caller : input.agentAddress;
+  const identifier = input.kind === 'literal' ? { kind: 'name' as const } : classifyKaIdentifier(name);
+  const { agentAddress } = input;
   let literalLookup: Promise<AssertionHistoryDescriptor | null> | undefined;
   const readLiteral = () => literalLookup ??= agent.assertion.history(cg, name, { agentAddress, subGraphName });
   const ownIdentifier = identifier.kind === 'name' || (agentAddress !== undefined
@@ -105,7 +106,7 @@ export async function resolveKnowledgeAssetRead(
         if (!meta.revokedAgents.some(address => address.toLowerCase() === caller.toLowerCase())
           && agent.curatorDidMatchesChecksumAgent(curator ?? undefined, caller)) {
           // Only an actual caller-lane lifecycle can turn a foreign alias into
-          // a literal draft. Extraction metadata never requires that lifecycle.
+          // a literal draft. An explicitly literal target needs no alias lifecycle.
           const literalAdmitted = ownIdentifier || await readLiteral() !== null;
           signal?.throwIfAborted();
           if (literalAdmitted) decision = { ...decision, grantScope: 'caller', reason: 'local-curator-draft' };
@@ -113,15 +114,15 @@ export async function resolveKnowledgeAssetRead(
       }
     } catch (error) {
       signal?.throwIfAborted();
-      return { decision: unavailableContextGraphReadAuthorityDecision(
+      return { outcome: 'unavailable', decision: unavailableContextGraphReadAuthorityDecision(
         'legacy-local', 'draft-provenance-unavailable', contextGraphReadAuthorityDependencyOf(error),
       ), target: null };
     }
   }
-  if (decision.outcome !== 'allowed' || (!options.nodeOperator && caller !== undefined
-    && decision.grantScope !== 'caller' && decision.grantScope !== 'public')) return { decision, target: null };
+  const admission = admitContextGraphReadCaller(decision, options.nodeOperator ? undefined : caller);
+  if (admission.outcome !== 'admitted') return { ...admission, target: null };
   const target: KnowledgeAssetReadTarget = { kind: identifier.kind, cg, name, subGraphName, agentAddress, descriptor: null };
-  if (extraction || (identifier.kind === 'name' && input.read === 'quads')) return { decision, target };
+  if (input.lookup === 'none' || (identifier.kind === 'name' && input.lookup === 'quads')) return { ...admission, target };
   let descriptor: AssertionHistoryDescriptor | null;
   if (identifier.kind === 'kaId') {
     const literal = AGENT_NUMBER_RE.test(name) ? await readLiteral() : null;
@@ -131,5 +132,5 @@ export async function resolveKnowledgeAssetRead(
     descriptor = await readLiteral();
   }
   signal?.throwIfAborted();
-  return { decision, target: { ...target, name: descriptor?.name ?? name, descriptor } };
+  return { ...admission, target: { ...target, name: descriptor?.name ?? name, descriptor } };
 }

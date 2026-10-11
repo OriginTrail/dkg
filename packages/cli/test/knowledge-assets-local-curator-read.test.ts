@@ -128,7 +128,7 @@ describe('real local curator draft provenance through HTTP admission', () => {
   it.each(['in_progress', 'failed'] as const)('reads actor-owned compact-name extraction %s without a lifecycle', async status => {
     const name = `${other}:987654`;
     expect(await agent.assertion.history(CG, name, { agentAddress: owner })).toBeNull();
-    const h = context(agent, owner, `/api/knowledge-assets/${encodeURIComponent(name)}/wm/extraction-status?contextGraphId=${CG}`);
+    const h = context(agent, owner, `/api/knowledge-assets/${encodeURIComponent(name)}/wm/extraction-status?contextGraphId=${CG}&agentAddress=${other}`);
     const uri = contextGraphAssertionUri(CG, owner, name);
     h.ctx.extractionStatus.set(uri, { status, fileHash: 'keccak256:original-file',
       detectedContentType: 'application/pdf', pipelineUsed: 'markitdown', tripleCount: 0,

@@ -28,8 +28,8 @@ describe('dedicated draft authority retains the general graph-read contract', ()
     expect(await agent.resolveContextGraphReadAuthority(CG, { callerAgentAddress: owner }))
       .toMatchObject({ outcome: 'allowed', grantScope: 'node', source: 'legacy-local' });
   });
-  const readDraftAuthority = async (options: KnowledgeAssetReadOptions, target: Partial<KnowledgeAssetReadInput> = {}) =>
-    (await resolveKnowledgeAssetRead(agent, { cg: CG, name: 'asset', agentAddress: owner, read: 'quads', ...target }, options)).decision;
+  const readDraftAuthority = async (options: KnowledgeAssetReadOptions, target: Partial<Pick<KnowledgeAssetReadInput, 'cg' | 'name' | 'agentAddress' | 'layer' | 'subGraphName'>> = {}) =>
+    (await resolveKnowledgeAssetRead(agent, { cg: CG, name: 'asset', agentAddress: owner, kind: 'identifier', lookup: 'quads', ...target }, options)).decision;
   afterAll(async () => { try { await agent?.stop(); } finally { await store.close(); } });
 
   it('narrows the node grant only for the real curator own draft lane', async () => {
@@ -72,7 +72,7 @@ describe('dedicated draft authority retains the general graph-read contract', ()
     const history = vi.spyOn(assertion, 'history');
     const facade = vi.spyOn(agent, 'assertion', 'get').mockReturnValue(assertion);
     try {
-      expect(await resolveKnowledgeAssetRead(agent, { cg: CG, name: `${other}:5`, agentAddress: owner, read: 'descriptor' },
+      expect(await resolveKnowledgeAssetRead(agent, { cg: CG, name: `${other}:5`, agentAddress: owner, kind: 'identifier', lookup: 'descriptor' },
         { callerAgentAddress: owner })).toMatchObject({ decision: { outcome: 'denied' }, target: null });
       expect(meta).not.toHaveBeenCalled();
       expect(history).not.toHaveBeenCalled();
@@ -84,23 +84,42 @@ describe('dedicated draft authority retains the general graph-read contract', ()
     const history = vi.spyOn(assertion, 'history');
     const facade = vi.spyOn(agent, 'assertion', 'get').mockReturnValue(assertion);
     try {
-      expect(await resolveKnowledgeAssetRead(agent, { cg: CG, name: `${other}:5`, agentAddress: owner, read: 'descriptor' },
+      expect(await resolveKnowledgeAssetRead(agent, { cg: CG, name: `${other}:5`, agentAddress: owner, kind: 'identifier', lookup: 'descriptor' },
         { callerAgentAddress: owner })).toMatchObject({ decision: { grantScope: 'caller' }, target: { name: `${other}:5` } });
       expect(history).toHaveBeenCalledTimes(1);
     } finally { facade.mockRestore(); history.mockRestore(); }
   });
 
-  it('admits extraction as an actor-owned literal without an assertion lookup', async () => {
+  it('admits an owner-normalized literal without an assertion lookup', async () => {
     const name = `${other}:987654`;
     const assertion = agent.assertion;
     const history = vi.spyOn(assertion, 'history');
     const facade = vi.spyOn(agent, 'assertion', 'get').mockReturnValue(assertion);
     try {
-      expect(await resolveKnowledgeAssetRead(agent, { cg: CG, name, agentAddress: other, layer: 'wm', read: 'extraction-status' },
+      expect(await resolveKnowledgeAssetRead(agent, { cg: CG, name, agentAddress: owner, layer: 'wm', kind: 'literal', lookup: 'none' },
         { callerAgentAddress: owner })).toMatchObject({ decision: { grantScope: 'caller' },
         target: { kind: 'name', name, agentAddress: owner, descriptor: null } });
       expect(history).not.toHaveBeenCalled();
     } finally { facade.mockRestore(); history.mockRestore(); }
+  });
+
+  it.each(['caller', 'public', 'node'] as const)('correlates %s scope with KA admission before resource reads', async grantScope => {
+    const authority = vi.spyOn(agent, 'resolveContextGraphReadAuthority').mockResolvedValue({
+      outcome: 'allowed', grantScope, source: 'registered-chain', reason: 'scope-matrix', metadataBootstrap: 'eligible',
+    });
+    const assertion = agent.assertion;
+    const history = vi.spyOn(assertion, 'history');
+    const facade = vi.spyOn(agent, 'assertion', 'get').mockReturnValue(assertion);
+    try {
+      const result = await resolveKnowledgeAssetRead(agent, { cg: CG, name: 'asset', agentAddress: owner,
+        kind: 'identifier', lookup: 'descriptor' }, { callerAgentAddress: other });
+      expect(result.outcome).toBe(grantScope === 'node' ? 'refused' : 'admitted');
+      expect(result.target === null).toBe(grantScope === 'node');
+      expect(history).toHaveBeenCalledTimes(grantScope === 'node' ? 0 : 1);
+      const anonymous = await resolveKnowledgeAssetRead(agent, { cg: CG, name: 'asset', kind: 'literal', lookup: 'none' }, {});
+      expect(anonymous.outcome).toBe('admitted');
+      expect(anonymous.target).toMatchObject({ name: 'asset' });
+    } finally { facade.mockRestore(); history.mockRestore(); authority.mockRestore(); }
   });
 
   it('does not fall through to an alias after cancellation during its literal lookup', async () => {
@@ -114,7 +133,7 @@ describe('dedicated draft authority retains the general graph-read contract', ()
     const alias = vi.spyOn(assertion, 'resolveByKaId');
     const facade = vi.spyOn(agent, 'assertion', 'get').mockReturnValue(assertion);
     try {
-      await expect(resolveKnowledgeAssetRead(agent, { cg: CG, name: `${owner}:55`, agentAddress: owner, read: 'descriptor' },
+      await expect(resolveKnowledgeAssetRead(agent, { cg: CG, name: `${owner}:55`, agentAddress: owner, kind: 'identifier', lookup: 'descriptor' },
         { callerAgentAddress: owner, signal: controller.signal })).rejects.toBe(reason);
       expect(alias).not.toHaveBeenCalled();
     } finally { facade.mockRestore(); alias.mockRestore(); history.mockRestore(); }

@@ -65,6 +65,24 @@ export type ContextGraphReadAuthorityDecision =
   | SettledContextGraphReadAuthorityDecision
   | UnavailableContextGraphReadAuthorityDecision;
 
+/** Caller admission is distinct from a node-scoped graph grant. */
+export type ContextGraphCallerReadAdmission =
+  | { readonly outcome: 'admitted'; readonly decision: Extract<SettledContextGraphReadAuthorityDecision, { outcome: 'allowed' }> }
+  | { readonly outcome: 'refused'; readonly decision: SettledContextGraphReadAuthorityDecision }
+  | { readonly outcome: 'unavailable'; readonly decision: UnavailableContextGraphReadAuthorityDecision };
+
+export function admitContextGraphReadCaller(
+  decision: ContextGraphReadAuthorityDecision,
+  callerAgentAddress: string | undefined,
+): ContextGraphCallerReadAdmission {
+  if (decision.outcome === 'unavailable') return { outcome: 'unavailable', decision };
+  if (decision.outcome === 'denied' || (callerAgentAddress !== undefined
+    && decision.grantScope !== 'caller' && decision.grantScope !== 'public')) {
+    return { outcome: 'refused', decision };
+  }
+  return { outcome: 'admitted', decision };
+}
+
 interface ScopedContextGraphQueryReadAuthorityInput {
   contextGraphId: string;
   view?: string;
