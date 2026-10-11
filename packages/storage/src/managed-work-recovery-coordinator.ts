@@ -9,7 +9,7 @@ export interface ManagedWorkRecoveryTokenV1 {
 }
 
 export interface ManagedWorkRecoveryCapabilityV1 {
-  readonly readState: () => ManagedOxigraphRuntimeStateV1;
+  readonly readState: () => ManagedOxigraphRuntimeStateV1 | null;
   readonly recover: (operation: StoreOperation) => void;
 }
 
@@ -55,6 +55,7 @@ export class ManagedWorkRecoveryCoordinatorV1 {
   #armed?: {
     readonly timer: ReturnType<typeof setTimeout>;
     readonly read: RetainedWork;
+    readonly dueAt: number;
   };
 
   constructor(options: ManagedWorkRecoveryCoordinatorOptionsV1) {
@@ -74,7 +75,36 @@ export class ManagedWorkRecoveryCoordinatorV1 {
     deadline: number,
     token: ManagedWorkRecoveryTokenV1 | null,
     physicalWork?: Promise<unknown>,
-    recoveryRequested = false,
+  ): ManagedWorkRetentionV1 | null {
+    return this.#retain(operation, deadline, token, physicalWork, false);
+  }
+
+  /** Own immediate timeout notification and its retained recovery backstop. */
+  clientTimedOut(
+    operation: StoreOperation,
+    deadline: number,
+    token: ManagedWorkRecoveryTokenV1 | null,
+    physicalWork?: Promise<unknown>,
+  ): ManagedWorkRetentionV1 | null {
+    const retention = this.#retain(operation, deadline, token, physicalWork, true);
+    if (token !== null && retention === null) return null;
+    try {
+      this.#options.capability?.recover(operation);
+    } catch {
+      // Supervisor failure cannot replace the typed client timeout.
+    }
+    this.#retireConfirmedGeneration(this.#readState());
+    this.#arm();
+    this.#reportPending();
+    return retention;
+  }
+
+  #retain(
+    operation: StoreOperation,
+    deadline: number,
+    token: ManagedWorkRecoveryTokenV1 | null,
+    physicalWork: Promise<unknown> | undefined,
+    clientTimeout: boolean,
   ): ManagedWorkRetentionV1 | null {
     if (token === null || token.lifecycleGeneration !== this.#lifecycleGeneration) return null;
     const current = this.#readState();
@@ -94,10 +124,9 @@ export class ManagedWorkRecoveryCoordinatorV1 {
       physicallyTracked: physicalWork !== undefined,
     };
     this.#retained.add(read);
-    // An active caller timeout has already notified the supervisor. Preserve
-    // its fence immediately, but let that asynchronous attempt settle before
-    // retrying. The original operation deadline itself is unchanged.
-    if (recoveryRequested) this.#retryAt = Math.max(this.#retryAt, this.#options.now() + 1_000);
+    // Preserve the fence before immediate timeout notification. Let that
+    // attempt settle before retrying, keeping the original deadline intact.
+    if (clientTimeout) this.#retryAt = Math.max(this.#retryAt, this.#options.now() + 1_000);
     this.#reportPending();
     // The work lifecycle already counts a detached HTTP task. Only add a
     // server-work fence after that physical task settles without proof that
@@ -133,15 +162,16 @@ export class ManagedWorkRecoveryCoordinatorV1 {
     for (const read of this.#retained) {
       if (earliest === undefined || read.deadline < earliest.deadline) earliest = read;
     }
-    if (this.#armed?.read === earliest) return;
+    const dueAt = earliest === undefined ? 0 : Math.max(earliest.deadline, this.#retryAt);
+    if (this.#armed?.read === earliest && this.#armed?.dueAt === dueAt) return;
     clearTimeout(this.#armed?.timer);
     this.#armed = undefined;
     if (earliest === undefined) { this.#retryAt = 0; return; }
     const read = earliest;
     const timer = setTimeout(() => this.#expire(read),
-      Math.max(0, Math.max(read.deadline, this.#retryAt) - this.#options.now()));
+      Math.max(0, dueAt - this.#options.now()));
     timer.unref?.();
-    this.#armed = { timer, read };
+    this.#armed = { timer, read, dueAt };
   }
 
   #expire(read: RetainedWork): void {

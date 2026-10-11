@@ -3,6 +3,22 @@ import type { StoreWorkContext } from '../abortable-store-work-lifecycle.js';
 import type { ManagedOxigraphRuntimeStateV1 } from '../managed-oxigraph-runtime-store.js';
 import type { StoreOperation } from '../store-operation-outcome.js';
 
+/** Adapter-private continuation authority, never a public query option. */
+export interface SparqlHttpOperationAdmissionV1 {
+  readonly storeGeneration: number | null;
+  dispatched: boolean;
+}
+
+export function refusesSparqlHttpAdmissionV1(
+  state: ManagedOxigraphRuntimeStateV1 | null,
+  admission?: SparqlHttpOperationAdmissionV1,
+): boolean {
+  if (state === null) return false;
+  return state.recovering
+    || (admission?.storeGeneration != null && state.generation !== admission.storeGeneration)
+    || (state.admissionsPaused === true && admission?.dispatched !== true);
+}
+
 /**
  * What a caller's abort after dispatch does to the HTTP request of a read. It
  * is a required argument of {@link SparqlHttpStore.postQuery}, so no read path

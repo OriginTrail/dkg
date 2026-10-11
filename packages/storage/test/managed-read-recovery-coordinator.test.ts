@@ -287,4 +287,60 @@ describe('ManagedWorkRecoveryCoordinatorV1', () => {
     expect(recover).not.toHaveBeenCalled();
   });
 
+  it.each(['cancelled', 'throws'] as const)(
+    'owns immediate timeout notification and retries a %s restart behind one physical fence',
+    async (failure) => {
+      const state = { recovering: false, admissionsPaused: false, generation: 0 };
+      const pending = vi.fn();
+      const recover = vi.fn(() => {
+        if (failure === 'throws') throw new Error('not signalled');
+        state.admissionsPaused = true;
+      });
+      let finish!: () => void;
+      const physical = new Promise<void>((resolve) => { finish = resolve; });
+      const coordinator = new ManagedWorkRecoveryCoordinatorV1({
+        now: () => Date.now(), onPendingChange: pending,
+        capability: { readState: () => state, recover },
+      });
+      try {
+        const retention = coordinator.clientTimedOut('update', Date.now(), coordinator.begin(state), physical);
+        expect(recover).toHaveBeenCalledExactlyOnceWith('update');
+        expect(pending).not.toHaveBeenCalled();
+        finish();
+        await Promise.resolve();
+        expect(pending.mock.calls).toEqual([[true]]);
+        await vi.advanceTimersByTimeAsync(999);
+        expect(recover).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(recover).toHaveBeenCalledTimes(2);
+        retention?.release();
+        expect(pending.mock.calls).toEqual([[true], [false]]);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally { coordinator.close(); }
+    },
+  );
+
+  it('retires an accepted immediate timeout restart and ignores stale timeout tokens', () => {
+    const { state, recover, coordinator } = setup();
+    const token = coordinator.begin(state);
+    coordinator.clientTimedOut('query', Date.now(), token);
+    expect(recover).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+    coordinator.clientTimedOut('query', Date.now(), token);
+    expect(recover).toHaveBeenCalledTimes(1);
+    const fresh = coordinator.begin(state);
+    coordinator.close();
+    coordinator.clientTimedOut('query', Date.now(), fresh);
+    expect(recover).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps timeout notification compatibility without a readable generation or retention', () => {
+    const recover = vi.fn(() => { throw new Error('supervisor absent'); });
+    const coordinator = new ManagedWorkRecoveryCoordinatorV1({
+      now: () => Date.now(), capability: { readState: () => null, recover },
+    });
+    expect(() => coordinator.clientTimedOut('query', Date.now(), null)).not.toThrow();
+    expect(recover).toHaveBeenCalledExactlyOnceWith('query');
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });
