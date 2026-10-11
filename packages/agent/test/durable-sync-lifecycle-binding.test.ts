@@ -554,7 +554,7 @@ describe('durable sync lifecycle chain binding', () => {
       );
       expect(runLegacyDurableSyncDetailed.mock.calls[0]?.[6]).toMatchObject({
         exactRecoveryTransportMode, signal, onWorkStarted, isCurrent,
-        exactAssetSelection: { kind: 'ual-only', assetUals: [ual] },
+        exactAssetFetchPolicy: { kind: 'durable-materialization', selection: { kind: 'ual-only', assetUals: [ual] }, forceFreshSession: false, allowDurableCheckpoints: true },
       });
     },
   );
@@ -579,7 +579,7 @@ describe('durable sync lifecycle chain binding', () => {
 
     expect(runLegacyDurableSyncDetailed).toHaveBeenCalledTimes(1);
     expect(runLegacyDurableSyncDetailed.mock.calls[0]?.[6]).toMatchObject({
-      exactAssetSelection: { kind: 'ual-only', assetUals: [exactUal] },
+      exactAssetFetchPolicy: { kind: 'durable-materialization', selection: { kind: 'ual-only', assetUals: [exactUal] }, forceFreshSession: false, allowDurableCheckpoints: true },
       stopOnBackoffWorthyFailure: true,
       priority: 1_000,
       // The admission SOURCE is what makes this show up as `durable:vm-recovery`

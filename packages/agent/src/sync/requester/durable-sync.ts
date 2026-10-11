@@ -50,10 +50,11 @@ import {
 import {
   classifyExactDurableFetch,
   classifyExactAssetResponderCapability,
-  exactAssetFetchSessionPolicy,
+  resolveExactAssetFetchSessionPolicy, exactAssetFetchSessionPolicy,
   filterExactAssetDurablePayload,
   mergeExactAssetResponderCapability,
   mergeExactDurableFetchDisposition,
+  type ExactAssetFetchSessionPolicy,
   type ExactAssetResponderCapability,
   type ExactDurableFetchDisposition,
 } from './exact-durable-fetch.js';
@@ -337,6 +338,7 @@ export interface DurableSyncContext {
   exactAssetSelectionFor?: (
     contextGraphId: string,
   ) => UalOnlyExactAssetSelection | undefined;
+  exactAssetFetchPolicyFor?: (contextGraphId: string) => Exclude<ExactAssetFetchSessionPolicy, { kind: 'ephemeral-challenge' }> | undefined;
   /** Present only for the graph-owned bounded recovery runner. */
   durableMetaContinuation?: DurableMetaContinuation;
   stopOnBackoffWorthyFailure?: boolean;
@@ -386,7 +388,7 @@ export interface DurableSyncContext {
  */
 export interface ChallengeExactAssetFetchContext extends Omit<
   DurableSyncContext,
-  'exactAssetSelectionFor' | 'storeGraphScopedAsset' | 'deleteCheckpoint' | 'setCheckpoint'
+  'exactAssetSelectionFor' | 'exactAssetFetchPolicyFor' | 'storeGraphScopedAsset' | 'deleteCheckpoint' | 'setCheckpoint'
 > {
   challengeSelectionFor: (
     contextGraphId: string,
@@ -398,9 +400,9 @@ export interface ChallengeExactAssetFetchContext extends Omit<
 
 interface InternalDurableSyncContext extends Omit<
   DurableSyncContext,
-  'exactAssetSelectionFor'
+  'exactAssetFetchPolicyFor'
 > {
-  exactAssetSelectionFor?: (contextGraphId: string) => ExactAssetSelection | undefined;
+  exactAssetFetchPolicyFor?: (contextGraphId: string) => ExactAssetFetchSessionPolicy | undefined;
   authenticateChallengePinnedAsset?: (
     request: DurableSyncChallengePinnedAuthenticationRequest,
   ) => Promise<ChallengePinnedGraphScopedAsset>;
@@ -585,7 +587,7 @@ export async function runChallengeExactAssetFetch(
   } = context;
   const detailed = await runDurableSyncWithBudget({
     ...sharedContext,
-    exactAssetSelectionFor: challengeSelectionFor,
+    exactAssetFetchPolicyFor: (contextGraphId) => exactAssetFetchSessionPolicy(challengeSelectionFor(contextGraphId)),
     authenticateChallengePinnedAsset,
     // Proof bytes are invocation-local. The proof-only entry point cannot
     // observe or mutate durable checkpoints, and the executor forces fresh
@@ -792,10 +794,8 @@ async function runDurableSyncWithBudget(
         ? Math.min(contextGraphBudget.metaFetchDeadline ?? deadline, deadline)
         : deadline;
       const sinceBatchId = sinceBatchIdFor?.(pid);
-      const exactAssetSelection = exactAssetSelectionFor?.(pid);
-      const exactFetchPolicy = exactAssetSelection === undefined
-        ? undefined
-        : exactAssetFetchSessionPolicy(exactAssetSelection);
+      const exactFetchPolicy = resolveExactAssetFetchSessionPolicy(pid, context.exactAssetFetchPolicyFor, exactAssetSelectionFor);
+      const exactAssetSelection = exactFetchPolicy?.selection;
       const isProofOnlyChallengeFetch = exactFetchPolicy?.kind === 'ephemeral-challenge';
       if (isProofOnlyChallengeFetch && !proofOnlyChallengeFetch) {
         throw new Error('Challenge-pinned exact retrieval requires the proof-only entry point');

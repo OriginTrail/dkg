@@ -972,7 +972,7 @@ describe('DKGAgent sync fetch coalescing', () => {
         PEER_A,
         SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
         exactSelection(EXACT_UAL_7),
-        { forceFreshExactSession: true },
+        { exactFetchPurpose: 'vm-update-refresh' },
       );
       firstMetaFetch.resolve(emptySyncPage('meta'));
 

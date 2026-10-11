@@ -3869,7 +3869,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         peerWindowIndex: target.failures,
         // An update keeps the UAL. Its old responder session can outlive the
         // previous version, so every refresh attempt needs a new snapshot.
-        forceFreshExactSession: true,
+        exactFetchPurpose: 'vm-update-refresh',
         // A candidate that cannot be reached (after a restart, the curator
         // is often not connected yet) yields to the next one.
         peerStepTimeoutMs: DKGAgentBase.VM_REFRESH_PEER_STEP_TIMEOUT_MS,
@@ -4084,7 +4084,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
        */
       peerStepTimeoutMs?: number;
       /** Start a new exact-asset snapshot for this update refresh attempt. */
-      forceFreshExactSession?: boolean;
+      exactFetchPurpose?: 'vm-update-refresh';
     },
   ): Promise<ContextGraphAssetFetchResult> {
     const { isCurrent, signal, peerStepTimeoutMs } = options;
@@ -4224,7 +4224,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
             // holds its older exact-asset page session. A refresh must start
             // from a new snapshot on every attempt; its pages still share one
             // session within this invocation.
-            forceFreshExactSession: options.forceFreshExactSession === true,
+            exactFetchPurpose: options.exactFetchPurpose,
           },
         );
       },

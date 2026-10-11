@@ -361,6 +361,9 @@ import {
 } from './sync/requester/durable-sync.js';
 import { createGraphScopedPhysicalOperationFence } from './sync/requester/graph-scoped-operation-fence.js';
 import {
+  exactAssetFetchSessionPolicy,
+  requireUalOnlyExactAssetSelection,
+  type ExactAssetFetchSessionPolicy,
   mergeExactAssetResponderCapability,
   mergeExactDurableFetchDisposition,
   type ExactDurableFetchDisposition,
@@ -1673,8 +1676,8 @@ export type DurableSyncOptions = {
   onAtomicCommitStarted?: (contextGraphId: string, ual: string) => void;
   /** Atomic VM-recovery selection; challenge-pinned assets cannot omit their pins. */
   exactAssetSelection?: ExactAssetSelection;
-  /** VM update refreshes must not reuse a responder snapshot from an older KA version. */
-  forceFreshExactSession?: boolean;
+  /** Selection-bound requester policy; a refresh always identifies its exact assets. */
+  exactAssetFetchPolicy?: ExactAssetFetchSessionPolicy;
   /** Internal transport decision; required streams never replay an enlarged selection. */
   exactRecoveryTransportMode?: ExactRecoveryTransportMode;
   /**
@@ -1734,8 +1737,7 @@ type LegacyDurableContextGraphOptions = {
   stopOnBackoffWorthyFailure?: boolean;
   onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>;
   fetchTimeoutMs?: number;
-  exactAssetSelection?: ExactAssetSelection;
-  forceFreshExactSession?: boolean;
+  exactAssetFetchPolicy?: ExactAssetFetchSessionPolicy;
   authenticationTimeoutMs?: number;
   operationFetchDeadline?: number;
   operationDeadline?: number;
@@ -5795,7 +5797,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const admissionBoundary = new DurableSyncAdmissionBoundary(options?.onWorkStarted);
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
-    const exactAssetSelection = options?.exactAssetSelection;
+    const exactAssetFetchPolicy = options?.exactAssetFetchPolicy ?? (options?.exactAssetSelection === undefined
+      ? undefined : exactAssetFetchSessionPolicy(options.exactAssetSelection));
+    const exactAssetSelection = exactAssetFetchPolicy?.selection;
     const exactAssetUals = exactAssetSelection === undefined
       ? undefined
       : exactAssetUalsForSelection(exactAssetSelection);
@@ -5852,8 +5856,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 sinceBatchIdFor,
                 stopOnBackoffWorthyFailure,
                 fetchTimeoutMs,
-                exactAssetSelection,
-                forceFreshExactSession: options?.forceFreshExactSession,
+                exactAssetFetchPolicy,
                 exactRecoveryTransportMode: options?.exactRecoveryTransportMode,
                 registeredPublicEvidence: options?.registeredPublicEvidence,
                 authenticationTimeoutMs,
@@ -5973,7 +5976,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       hasSignal: Boolean(operationBoundary.signal),
       hasCurrentFence: Boolean(options?.isCurrent),
       hasChallengePinnedSelection: exactAssetSelection?.kind === 'challenge-pinned',
-      hasForcedFreshExactSession: options?.forceFreshExactSession === true,
+      hasForcedFreshExactSession: exactAssetFetchPolicy?.kind === 'vm-update-refresh',
       hasRegisteredPublicEvidence: options?.registeredPublicEvidence !== undefined,
       exactAssetUals,
       settlementSliceTimeoutMs: options?.settlementSliceTimeoutMs,
@@ -6049,7 +6052,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       onWorkStarted?: () => void;
       signal?: AbortSignal;
       isCurrent?: () => boolean;
-      forceFreshExactSession?: boolean;
+      exactFetchPurpose?: 'vm-update-refresh';
       exactRecoveryTransportMode?: ExactRecoveryTransportMode;
       registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
       totalTimeoutMs?: number;
@@ -6063,7 +6066,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       onWorkStarted?: () => void;
       signal?: AbortSignal;
       isCurrent?: () => boolean;
-      forceFreshExactSession?: boolean;
+      exactFetchPurpose?: 'vm-update-refresh';
       exactRecoveryTransportMode?: ExactRecoveryTransportMode;
       registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
       totalTimeoutMs?: number;
@@ -6077,7 +6080,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       onWorkStarted?: () => void;
       signal?: AbortSignal;
       isCurrent?: () => boolean;
-      forceFreshExactSession?: boolean;
+      exactFetchPurpose?: 'vm-update-refresh';
       exactRecoveryTransportMode?: ExactRecoveryTransportMode;
       registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
       totalTimeoutMs?: number;
@@ -6095,8 +6098,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       undefined,
       undefined,
       {
-        exactAssetSelection: selection,
-        forceFreshExactSession: options.forceFreshExactSession,
+        exactAssetFetchPolicy: options.exactFetchPurpose === 'vm-update-refresh'
+          ? exactAssetFetchSessionPolicy(requireUalOnlyExactAssetSelection(selection), 'vm-update-refresh')
+          : exactAssetFetchSessionPolicy(selection),
         exactRecoveryTransportMode: options.exactRecoveryTransportMode,
         registeredPublicEvidence: options.registeredPublicEvidence,
         ...(options.totalTimeoutMs === undefined ? {} : { totalTimeoutMs: options.totalTimeoutMs }),
@@ -6171,8 +6175,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       stopOnBackoffWorthyFailure,
       onVerifiedFullSnapshot,
       fetchTimeoutMs = SYNC_TOTAL_TIMEOUT_MS,
-      exactAssetSelection,
-      forceFreshExactSession,
+      exactAssetFetchPolicy,
       exactRecoveryTransportMode = 'stream-preferred',
       registeredPublicEvidence,
       authenticationTimeoutMs = fetchTimeoutMs,
@@ -6183,6 +6186,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       isCurrent,
       durableMetaContinuation,
     } = options;
+    const exactAssetSelection = exactAssetFetchPolicy?.selection;
     const assertLifecycleCurrent = () => {
       if (isCurrent?.() === false) {
         throw asSyncFetchAbortError(new Error(
@@ -6308,7 +6312,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             sinceBatchId,
             signal: fetchContext.signal,
             forceFreshSession: forceFreshSession
-              || forceFreshExactSession === true
               || onVerifiedFullSnapshot !== undefined,
             manifestDigest,
             manifestPrefixDigestAtOffset,
@@ -6326,8 +6329,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         );
       },
       sinceBatchIdFor,
-      exactAssetSelectionFor: exactAssetSelection?.kind === 'ual-only'
-        ? () => exactAssetSelection
+      exactAssetFetchPolicyFor: exactAssetFetchPolicy?.kind !== 'ephemeral-challenge'
+        ? () => exactAssetFetchPolicy
         : undefined,
       durableMetaContinuation,
       stopOnBackoffWorthyFailure,

@@ -7,6 +7,8 @@ import {
   exactAssetCommitmentsForSelection,
   exactAssetUalsForSelection,
   type ExactAssetSelection,
+  type UalOnlyExactAssetSelection,
+  type ChallengePinnedExactAssetSelection,
 } from '../exact-assets.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
@@ -26,36 +28,72 @@ export type ExactAssetResponderCapability = 'legacy-filter-unsupported';
 export type ExactAssetFetchSessionPolicy =
   | Readonly<{
       kind: 'durable-materialization';
+      selection: UalOnlyExactAssetSelection;
       forceFreshSession: false;
       allowDurableCheckpoints: true;
       requesterScope?: never;
     }>
   | Readonly<{
+      kind: 'vm-update-refresh';
+      selection: UalOnlyExactAssetSelection;
+      forceFreshSession: true;
+      allowDurableCheckpoints: true;
+      requesterScope?: never;
+    }>
+  | Readonly<{
       kind: 'ephemeral-challenge';
+      selection: ChallengePinnedExactAssetSelection;
       forceFreshSession: true;
       allowDurableCheckpoints: false;
       requesterScope: `challenge-exact:${string}`;
     }>;
 
 /** Keep exact retrieval semantics next to filtering and completion policy. */
+export function exactAssetFetchSessionPolicy(selection: UalOnlyExactAssetSelection, purpose: 'vm-update-refresh'): Extract<ExactAssetFetchSessionPolicy, { kind: 'vm-update-refresh' }>;
+export function exactAssetFetchSessionPolicy(selection: ExactAssetSelection): ExactAssetFetchSessionPolicy;
 export function exactAssetFetchSessionPolicy(
   selection: ExactAssetSelection,
+  purpose?: 'vm-update-refresh',
 ): ExactAssetFetchSessionPolicy {
+  if (purpose === 'vm-update-refresh') {
+    return { kind: 'vm-update-refresh', selection: requireUalOnlyExactAssetSelection(selection), forceFreshSession: true, allowDurableCheckpoints: true };
+  }
+
   if (selection.kind === 'ual-only') {
     return {
       kind: 'durable-materialization',
+      selection,
       forceFreshSession: false,
       allowDurableCheckpoints: true,
     };
   }
   return {
     kind: 'ephemeral-challenge',
+    selection,
     forceFreshSession: true,
     allowDurableCheckpoints: false,
     requesterScope: `challenge-exact:${selection.commitments
       .map((commitment) => `${commitment.merkleRootHex}:${commitment.merkleLeafCount}`)
       .join('.')}`,
   };
+}
+
+/** New exact owners carry selection and session semantics together; normalize the historical ordinary-selection port here. */
+export function resolveExactAssetFetchSessionPolicy(
+  contextGraphId: string,
+  policyFor: ((contextGraphId: string) => ExactAssetFetchSessionPolicy | undefined) | undefined,
+  selectionFor: ((contextGraphId: string) => ExactAssetSelection | undefined) | undefined,
+): ExactAssetFetchSessionPolicy | undefined {
+  const policy = policyFor?.(contextGraphId);
+  if (policy !== undefined) return policy;
+  const selection = selectionFor?.(contextGraphId);
+  return selection === undefined ? undefined : exactAssetFetchSessionPolicy(selection);
+}
+
+/** Refresh is a durable UAL selection, never a challenge or a full graph. */
+export function requireUalOnlyExactAssetSelection(selection: ExactAssetSelection): UalOnlyExactAssetSelection {
+  if (selection.kind !== 'ual-only') throw new Error('VM update refresh requires a UAL-only exact selection');
+  return selection;
 }
 
 function descriptorMatchesCommitment(

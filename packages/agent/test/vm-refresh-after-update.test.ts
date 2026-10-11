@@ -399,7 +399,7 @@ async function bootMember(options: {
     peerId: string,
     _localCgId: string,
     requested: readonly string[],
-    fetchOptions?: { forceFreshExactSession?: boolean },
+    fetchOptions?: { exactFetchPurpose?: 'vm-update-refresh' },
   ) => {
     void fetchOptions;
     const captured = options.captureVersionAtFetchStart
@@ -1000,7 +1000,7 @@ describe('VM refresh worker (#2858)', () => {
 
     await internals.runVmRefreshesForCg(CG, CG, () => true);
     expect(fetches.calls).toHaveLength(1);
-    expect(fetches.calls[0]?.[3]?.forceFreshExactSession).toBe(true);
+    expect(fetches.calls[0]?.[3]?.exactFetchPurpose).toBe('vm-update-refresh');
     expect(await localRootHex(internals.store, ual)).toBe(rootA);
     expect(logLines(info)).toContain(
       `VM refresh of ${ual} in "${CG}" did not complete `
@@ -1018,7 +1018,7 @@ describe('VM refresh worker (#2858)', () => {
     vi.setSystemTime(Date.now() + 60_000);
     await internals.runVmRefreshesForCg(CG, CG, () => true);
     expect(fetches.calls).toHaveLength(2);
-    expect(fetches.calls[1]?.[3]?.forceFreshExactSession).toBe(true);
+    expect(fetches.calls[1]?.[3]?.exactFetchPurpose).toBe('vm-update-refresh');
     expect(await localRootHex(internals.store, ual)).toBe(ethers.hexlify(rootB));
     expect(internals.vmRefreshQueue.size).toBe(0);
   });

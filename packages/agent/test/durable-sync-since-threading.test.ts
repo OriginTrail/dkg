@@ -22,6 +22,7 @@ import {
   type ChallengePinnedExactAssetSelection,
   type UalOnlyExactAssetSelection,
 } from '../src/sync/exact-assets.js';
+import { exactAssetFetchSessionPolicy } from '../src/sync/requester/exact-durable-fetch.js';
 import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
 import { SyncTargetSupersededError } from '../src/sync/error-tags.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
@@ -570,6 +571,26 @@ describe('exact-asset rolling-upgrade filter', () => {
       expect(calls.some(({ contextGraphId }) => contextGraphId === 'mfacts')).toBe(true);
       expect(summary.backoffWorthyFailures).toBe(0);
     });
+  });
+
+  it.each(['ordinary', 'vm-update-refresh'] as const)('lets the %s exact policy own both page session choices', async (purpose) => {
+    const selection = createUalOnlyExactAssetSelection(['did:dkg:base:84532/0x0000000000000000000000000000000000000001/7']);
+    const policy = purpose === 'vm-update-refresh'
+      ? exactAssetFetchSessionPolicy(selection, purpose) : exactAssetFetchSessionPolicy(selection);
+    const { calls, context } = makeContext({ contextGraphIds: [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY], pageQuads: { data: [], meta: [] } });
+    await runDurableSync({ ...context, exactAssetFetchPolicyFor: () => policy });
+    expect(calls.map(({ phase, assetUals, forceFreshSession }) => ({ phase, assetUals, forceFreshSession })))
+      .toEqual([
+        { phase: 'meta', assetUals: [...selection.assetUals], forceFreshSession: purpose === 'vm-update-refresh' },
+        { phase: 'data', assetUals: [...selection.assetUals], forceFreshSession: purpose === 'vm-update-refresh' },
+      ]);
+    expect(policy.allowDurableCheckpoints).toBe(true);
+  });
+
+  it('refuses challenge pins passed through the untyped refresh factory boundary', () => {
+    const pinned = createChallengePinnedExactAssetSelection([{ assetUal: 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7', merkleRootHex: '1'.repeat(64), merkleLeafCount: 1n }]);
+    expect(() => Reflect.apply(exactAssetFetchSessionPolicy, undefined, [pinned, 'vm-update-refresh']))
+      .toThrow('VM update refresh requires a UAL-only exact selection');
   });
 
   it('does not thread a filter when exactAssetSelectionFor is not wired', async () => {
