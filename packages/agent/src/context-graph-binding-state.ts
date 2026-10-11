@@ -41,6 +41,12 @@ export type ContextGraphBindingTarget = ContextGraphBinding & {
   bindingGeneration: number;
 };
 
+/** An absent binding is also a captured target, invalidated by a later claim. */
+export type CapturedContextGraphBindingTarget = ContextGraphBindingTarget | {
+  bindingKind: 'unbound';
+  bindingGeneration: number;
+};
+
 export type ContextGraphBindingTransition = {
   previous: ContextGraphBinding | undefined;
   current: ContextGraphBinding;
@@ -343,13 +349,24 @@ export class ContextGraphBindingState {
     return this.capture(localCgId) === generation;
   }
 
+  captureTarget(
+    localCgId: string,
+    subscription: ContextGraphBindingSubscription | undefined,
+  ): CapturedContextGraphBindingTarget {
+    const binding = this.currentBindingFor(localCgId, subscription);
+    const bindingGeneration = this.capture(localCgId);
+    return binding === undefined
+      ? { bindingKind: 'unbound', bindingGeneration }
+      : { ...binding, bindingGeneration };
+  }
+
   targetStillCurrent(
     localCgId: string,
     subscription: ContextGraphBindingSubscription | undefined,
-    target: ContextGraphBindingTarget,
+    target: CapturedContextGraphBindingTarget,
   ): boolean {
     const current = this.currentBindingFor(localCgId, subscription);
-    return bindingsEqual(current, target)
+    return (target.bindingKind === 'unbound' ? current === undefined : bindingsEqual(current, target))
       && this.isGenerationCurrent(localCgId, target.bindingGeneration);
   }
 

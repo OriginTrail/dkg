@@ -1,5 +1,6 @@
 import { createHostModePublicPolicy } from './internal/swm-host-catchup-policy.js';
 import { HostModeRestoration } from './internal/host-mode-restoration.js';
+import { createAutomaticHostModeActivation } from './internal/automatic-host-mode-activation.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -880,43 +881,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
     stripOn: boolean,
     restorationCurrent?: () => boolean,
   ): Promise<void> {
-    const { contextGraphId: cgId, onChainId } = entry;
     const session = this.gossipSession;
     const restoration = this.swmHostModeRestoration;
     const current = (): boolean => session.active && this.gossipSession === session
       && (restorationCurrent?.() ?? !restoration?.closed);
-    if (!current() || !this.automaticSwmHostModeAdmissionAllowed(cgId)) return;
-    try {
-      if (!this.restorePersistedHostModeBinding(cgId, onChainId)) return;
-      if (stripOn) {
-        await this.reconcileSwmHostModeSubscription(cgId, SUBSCRIPTION_SOURCES.RECONCILER, current);
-        return;
-      }
-      const bindingCurrent = this.swmHostModePublicPolicy().captureCurrent(cgId);
-      const publicHost = this.config.swmHostMode?.hostPublic === true
-        && await this.isConfirmedPublicForHostMode(cgId);
-      // Binding admission also protects a rehydrated member before its
-      // gossip handler is wired; wiring retains its own registration guard.
-      if (!current() || !bindingCurrent()
-        || !this.wireSwmHostModeHandler(cgId, SUBSCRIPTION_SOURCES.RECONCILER, !publicHost)) return;
-      // Codex PR #620 R2: also re-probe registration state.
-      // Without this, a host-only CG that was registered while
-      // the node was offline stays on the 1MiB / 6h pre-reg
-      // limits after restart and can prune valid ciphertext
-      // permanently — `GraphManager.listContextGraphs()` only
-      // sees local store graphs, so the periodic reconciler
-      // can't heal it later either.
-      await this.maybeMarkRegisteredForHostMode(cgId, current);
-      if (current()) this.automaticSwmHostModeAdmissionAllowed(cgId);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.log.warn(
-        createOperationContext('system'),
-        stripOn
-          ? `Failed to re-evaluate persisted host-mode subscription for "${cgId}": ${msg}`
-          : `Failed to restore host-mode subscription for "${cgId}": ${msg}`,
-      );
-    }
+    await this.swmHostModeActivation().restore(entry, stripOn, current);
   }
 
   /** Cold host hints cannot replace admitted custody or its chain binding. */
@@ -957,115 +926,46 @@ export class SwmHostModeMethods extends DKGAgentBase {
     source: SubscriptionSource = SUBSCRIPTION_SOURCES.RECONCILER,
     ownerCurrent: () => boolean = () => true,
   ): Promise<void> {
+    await this.swmHostModeActivation().reconcile(contextGraphId, source, ownerCurrent);
+  }
+
+  /** Capture one gossip lifetime for the shared admission/activation owner. */
+  swmHostModeActivation(this: DKGAgent) {
     const session = this.gossipSession;
-    const current = (): boolean => session.active && this.gossipSession === session && ownerCurrent();
-    const live = session.live();
-    if (live === null || !current()) return;
-    if (!this.swmHostModeStore) return;
-    if (!this.automaticSwmHostModeAdmissionAllowed(contextGraphId)) return;
-    if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) return;
-    if (!this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)) {
-      // Host reconciliation is a second, independent path into the same
-      // legacy SWM topic. Catalog authority must remove an already-wired host
-      // handler as well as refuse a new one.
-      this.unwireSwmHostModeHandler(contextGraphId);
-      return;
-    }
-    if (this.isMemberModeRegisteredForCg(contextGraphId)) {
-      // Member-mode subscription already active — apply path covers
-      // local consumption; no need to also opaquely store. The probe is
-      // shape-agnostic so a sweep driven by the wire HASH still sees a
-      // registration recorded under the cleartext id (and vice versa);
-      // `wireSwmHostModeHandler` enforces the same refusal as a backstop.
-      return;
-    }
-    const hostKey = this.canonicalSwmHostModeKey(contextGraphId);
-    if (this.swmHostModeSubscribed.has(hostKey)) {
-      // Codex PR #610 R2: idempotent re-entry on the periodic
-      // reconcile path must still re-probe on-chain registration
-      // state. Without this, a core that subscribed while the CG
-      // was unregistered stays on the 6h/1MiB pre-registration
-      // limits forever — even after the CG is registered — and
-      // ciphertext gets pruned much earlier than intended.
-      // Mirrors the same safeguard in `enableSwmHostModeFor`.
-      //
-      // The `has()` check goes through `canonicalSwmHostModeKey` so
-      // a reconcile call with cleartext finds an entry written by
-      // the chain-event/beacon path with the hash form (and vice
-      // versa). Codex PR #672 review `id=3302086589`.
-      if (
-        this.swmHostModeStripCiphertext() &&
-        this.swmHostModeCurated.get(hostKey) === false &&
-        await this.isCuratedForHostMode(contextGraphId)
-      ) {
-        // A manually hosted CG can become curated later. Upgrade the cached
-        // classification so the existing handler starts stripping immediately.
-        if (!current()
-          || !this.automaticSwmHostModeAdmissionAllowed(contextGraphId)
-          || this.swmHostModeAccessPolicy(contextGraphId) === 0) return;
-        session.swmHostModeCurated.set(hostKey, true);
-      }
-      if (!current()
-        || !this.automaticSwmHostModeAdmissionAllowed(contextGraphId)) return;
-      await this.maybeMarkRegisteredForHostMode(contextGraphId, current);
-      if (!current()) return;
-      this.automaticSwmHostModeAdmissionAllowed(contextGraphId);
-      return;
-    }
-
-    // Curated/private CGs use the existing opaque host-mode path. Public CGs
-    // normally do not need a host because their plaintext SWM is delivered by
-    // members, but that leaves a reachability hole when no member is directly
-    // dialable (GH #1611). Public hosting is therefore an explicit operator
-    // opt-in and is admitted only after the chain-authoritative public/open-
-    // publish policy check below.
-    //
-    // A numeric policy, verified curated beacon or native private metadata
-    // proves curation. A name commitment alone does not prove access policy.
-    const bindingCurrent = this.swmHostModePublicPolicy().captureCurrent(contextGraphId);
-    const probedCurated = await this.isCuratedForHostMode(contextGraphId);
-    if (!current() || !bindingCurrent()) return;
-    // The numeric binding can change even while an already-resolved promise yields.
-    const currentPolicy = this.swmHostModeAccessPolicy(contextGraphId);
-    const curated = currentPolicy === undefined ? probedCurated : currentPolicy === 1;
-    if (!curated && (this.config.swmHostMode?.hostPublic !== true
-      || !await this.isConfirmedPublicForHostMode(contextGraphId))) return;
-    if (!current() || !bindingCurrent()
-      || !this.automaticSwmHostModeAdmissionAllowed(contextGraphId)) return;
-
-    // OT-RFC-49 WS-A — the private-ciphertext strip. With `stripCiphertext`
-    // ON (default), a core declines ALL host-mode custody for a curated CG:
-    // "hosting follows access". Random sampling now proves the public
-    // `_catalog`, so the core no longer needs the ciphertext — private data
-    // lives member-side and members backfill from the curator. Declining the
-    // subscribe HERE is the primary choke point: it starves both the legacy
-    // `.meta` host-mode ingest AND the LU-11 chunk ingest (both are wired by
-    // `wireSwmHostModeHandler`), regardless of how the CG was discovered
-    // (reconciler / beacon / chain-event all funnel through this method).
-    // Unlike rung-1's narrower `stripNonParticipants` gate, WS-A strips for
-    // EVERY curated CG regardless of participation. Set `false` to restore
-    // legacy auto-host (kill-switch / A/B baseline).
-    if (this.swmHostModeStripCiphertext() && curated) {
-      this.log.info(
-        createOperationContext('system'),
-        `SWM host-mode subscription DECLINED for "${contextGraphId}": private-ciphertext strip is ON ` +
-        `(OT-RFC-49 WS-A — cores custody zero private SWM ciphertext for curated CGs; members backfill from the curator)`,
-      );
-      return;
-    }
-
-    this.wireSwmHostModeHandler(contextGraphId, source, curated);
-    await this.awaitHostModePersistence(contextGraphId);
-    if (!current()
-      || !this.automaticSwmHostModeAdmissionAllowed(contextGraphId)) return;
-    await this.maybeMarkRegisteredForHostMode(contextGraphId, current);
-    if (!current()
-      || !this.automaticSwmHostModeAdmissionAllowed(contextGraphId)) return;
-
-    this.log.info(
-      createOperationContext('system'),
-      `SWM host-mode subscription enabled for "${contextGraphId}" (role=core)`,
-    );
+    return createAutomaticHostModeActivation({
+      current: () => session.active && this.gossipSession === session && this.swmHostModeStore !== undefined,
+      admissionAllowed: id => this.automaticSwmHostModeAdmissionAllowed(id),
+      restoreBinding: (id, onChainId) => this.restorePersistedHostModeBinding(id, onChainId),
+      reserved: id => (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(id),
+      legacyAllowed: id => this.rfc64LegacySwmGossipAllowedForContextGraph(id),
+      unwire: id => this.unwireSwmHostModeHandler(id),
+      member: id => this.isMemberModeRegisteredForCg(id),
+      source: id => session.swmHostModeSubscribed.get(this.canonicalSwmHostModeKey(id)),
+      curated: id => session.swmHostModeCurated.get(this.canonicalSwmHostModeKey(id)),
+      captureCurrent: id => this.swmHostModePublicPolicy().captureCurrent(id),
+      strip: () => this.swmHostModeStripCiphertext(),
+      hostPublic: () => this.config.swmHostMode?.hostPublic === true,
+      probeCurated: id => this.isCuratedForHostMode(id),
+      accessPolicy: id => this.swmHostModeAccessPolicy(id),
+      confirmedPublic: id => this.isConfirmedPublicForHostMode(id),
+      wire: (id, source, curated) => this.wireSwmHostModeHandler(id, source, curated),
+      classify: (id, curated, current) => {
+        const key = this.canonicalSwmHostModeKey(id);
+        session.swmHostModeCurated.set(key, curated);
+        if (curated) session.swmHostModePublicBindingCurrent.delete(key);
+        else session.swmHostModePublicBindingCurrent.set(key, current);
+      },
+      persisted: id => this.awaitHostModePersistence(id),
+      markRegistered: (id, current) => this.maybeMarkRegisteredForHostMode(id, current),
+      declined: id => this.log.info(createOperationContext('system'),
+        `SWM host-mode subscription DECLINED for "${id}": private-ciphertext strip is ON ` +
+        `(OT-RFC-49 WS-A — cores custody zero private SWM ciphertext for curated CGs; members backfill from the curator)`),
+      enabled: id => this.log.info(createOperationContext('system'),
+        `SWM host-mode subscription enabled for "${id}" (role=core)`),
+      failed: (id, strip, error) => this.log.warn(createOperationContext('system'), strip
+        ? `Failed to re-evaluate persisted host-mode subscription for "${id}": ${error instanceof Error ? error.message : String(error)}`
+        : `Failed to restore host-mode subscription for "${id}": ${error instanceof Error ? error.message : String(error)}`),
+    });
   }
 
   /**
@@ -1344,15 +1244,21 @@ export class SwmHostModeMethods extends DKGAgentBase {
     session.swmHostModeCurated.set(wireCgId, curated);
     live.manager.subscribe(swmTopic);
     const delegate = createSwmHostModeHandler(this, this.log, session, contextGraphId, wireCgId);
-    // Manual public custody must remain proven after enable returns or yields.
-    // Automatic callbacks retain their existing positive-private admission.
-    const handler = source === SUBSCRIPTION_SOURCES.MANUAL
-      ? (topic: string, data: Uint8Array, from: string): void => {
-        if (this.swmHostModeStripCiphertext()
-          && !this.isExactPublicManualSwmHostMode(contextGraphId, wireCgId)) return;
-        delegate(topic, data, from);
+    if (source !== SUBSCRIPTION_SOURCES.MANUAL && !curated) {
+      session.swmHostModePublicBindingCurrent.set(wireCgId,
+        this.swmHostModePublicPolicy().captureCurrent(contextGraphId));
+    }
+    // Public custody is an exemption only for the binding that passed admission.
+    // Reconciliation can refresh automatic proof after a new successful lookup.
+    const handler = (topic: string, data: Uint8Array, from: string): void => {
+      if (this.swmHostModeStripCiphertext()) {
+        if (source === SUBSCRIPTION_SOURCES.MANUAL) {
+          if (!this.isExactPublicManualSwmHostMode(contextGraphId, wireCgId)) return;
+        } else if (session.swmHostModeCurated.get(wireCgId) === false
+          && session.swmHostModePublicBindingCurrent.get(wireCgId)?.() !== true) return;
       }
-      : delegate;
+      delegate(topic, data, from);
+    };
     session.swmHostModeHandlers.set(wireCgId, handler);
     live.manager.onMessage(swmTopic, handler);
     // B3: persist the host-mode designation so a restart re-engages
@@ -1386,6 +1292,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // the wire path.
     const wireCgId = this.canonicalSwmHostModeKey(contextGraphId);
     const handler = this.swmHostModeHandlers.get(wireCgId);
+    this.gossipSession.swmHostModePublicBindingCurrent.delete(wireCgId);
     if (!handler) return;
     const swmTopic = contextGraphWorkspaceTopic(wireCgId);
     this.gossip.offMessage(swmTopic, handler);

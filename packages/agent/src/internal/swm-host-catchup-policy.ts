@@ -17,18 +17,13 @@ export function captureHostPolicyIdentityCurrent(ports: HostPolicyIdentityPorts,
   const subscription = ports.subscriptions.get(localId);
   const onChainId = subscription?.onChainId;
   const onChainHash = subscription?.onChainHash;
-  const binding = ports.bindings.currentBindingFor(localId, subscription);
-  const generation = ports.bindings.capture(localId);
+  const target = ports.bindings.captureTarget(localId, subscription);
   const wireOwner = ports.wireOwners.get(hostKey);
   return () => {
-    const current = ports.bindings.currentBindingFor(localId, ports.subscriptions.get(localId));
     return ports.localId(contextGraphId) === localId && ports.hostKey(contextGraphId) === hostKey
       && ports.subscriptions.get(localId) === subscription
       && subscription?.onChainId === onChainId && subscription?.onChainHash === onChainHash
-      && ports.bindings.isGenerationCurrent(localId, generation)
-      && current?.bindingKind === binding?.bindingKind && current?.onChainId === binding?.onChainId
-      && (current?.bindingKind !== 'reverse-name-hash'
-        || (binding?.bindingKind === 'reverse-name-hash' && current.nameHash === binding.nameHash))
+      && ports.bindings.targetStillCurrent(localId, ports.subscriptions.get(localId), target)
       && ports.wireOwners.get(hostKey) === wireOwner;
   };
 }

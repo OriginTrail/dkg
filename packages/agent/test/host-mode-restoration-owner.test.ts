@@ -321,11 +321,12 @@ describe('persisted host-mode restoration compatibility', () => {
     vi.spyOn(g.swmHostModeStore!, 'listHostModeSubscriptions').mockImplementation(async () =>
       (await listing()).sort((a, b) => Number(b.contextGraphId === cgId) - Number(a.contextGraphId === cgId)));
     const calls: string[] = [];
-    g.reconcileSwmHostModeSubscription = async (id) => {
+    vi.spyOn(core, 'isCuratedForHostMode').mockImplementation(async (id) => {
       calls.push(id);
       if (id === cgId) throw new Error('simulated policy probe failure');
-      g.wireSwmHostModeHandler(id, undefined, false);
-    };
+      return false;
+    });
+    vi.spyOn(g, 'isConfirmedPublicForHostMode').mockResolvedValue(true);
 
     await expect(g.restoreSwmHostModeSubscriptions()).resolves.toBeUndefined();
     expect(calls).toEqual([cgId, 'zz-healthy-restoration']);

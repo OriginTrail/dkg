@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { DKGAgent } from '../src/index.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { createHostModeTestFixture, type StripInternals } from './swm/host-mode.fixture.js';
+import { createHostModeTestFixture, hostEnvelope, type StripInternals } from './swm/host-mode.fixture.js';
 import { mintSignedCatchupRequest } from '../src/swm/host-catchup-sign.js';
 import { decodeSwmHostCatchupResponse, encodeSwmHostCatchupRequest } from '../src/swm/host-catchup-wire.js';
 
@@ -52,6 +52,59 @@ describe('public host restoration policy fences', () => {
     expect(Buffer.from(response.entries[0].envelopeB64, 'base64')).toEqual(Buffer.from(retained));
     expect(restored.swmHostModeCurated.get(hash)).toBe(false);
     expect(restored.subscribedContextGraphs.get(id)?.onChainId).toBe(onChainId);
+  });
+
+  it('retries a strip-off persisted public classification after a temporary policy failure', async () => {
+    const id = 'retry-public-restore-policy';
+    const core = await makeCore(false, { hostPublic: true });
+    const { g, hash, onChainId } = await publicBinding(core, id);
+    await g.swmHostModeStore!.markHostModeSubscribed(id, { onChainId });
+    const retained = new Uint8Array([12, 13]);
+    await g.swmHostModeStore!.append(id, retained);
+    const policy = vi.spyOn(g.chain, 'getContextGraphPublishPolicy').mockRejectedValueOnce(new Error('temporary policy failure'));
+    await g.restoreSwmHostModeSubscriptions();
+    await g.swmHostModeRestoration!.drained;
+    expect(policy).toHaveBeenCalled();
+    expect(g.swmHostModeCurated.get(hash)).toBe(true);
+    const wallet = ethers.Wallet.createRandom();
+    const request = async () => {
+      const signed = await mintSignedCatchupRequest({ contextGraphId: id, sinceSeqno: 0,
+        maxEntries: 32, maxBytes: 65536, requesterEoa: wallet.address, sign: digest => wallet.signMessage(digest) });
+      return decodeSwmHostCatchupResponse(await g.handleSwmHostCatchup(encodeSwmHostCatchupRequest(signed), 'ordinary-reader'));
+    };
+    expect((await request()).denied).toBeDefined();
+    await g.reconcileSwmHostModeSubscription(id);
+    expect(g.swmHostModeCurated.get(hash)).toBe(false);
+    const response = await request();
+    expect(response.denied).toBeUndefined();
+    expect(response.entries).toHaveLength(1);
+    expect(Buffer.from(response.entries[0].envelopeB64, 'base64')).toEqual(Buffer.from(retained));
+  });
+
+  it.each([false, true])('fences automatic public dispatch after private rebinding (chunked=%s)', async chunked => {
+    const core = await makeCore(true, { hostPublic: true });
+    const id = 'automatic-public-binding-fence';
+    const { g, hash } = await publicBinding(core, id);
+    await g.reconcileSwmHostModeSubscription(id);
+    const bytes = hostEnvelope(id, chunked);
+    const persisted = new Uint8Array([31, 32]);
+    const ingest = vi.spyOn(g, chunked ? 'ingestSwmCiphertextChunkEnvelope' : 'ingestSwmHostModeEnvelope')
+      .mockImplementation(async () => { await g.swmHostModeStore!.append(id, persisted); });
+    const handler = g.swmHostModeHandlers.get(hash)!;
+    expect(handler).toBeDefined();
+    handler('topic', bytes, 'authorized-publisher');
+    await vi.waitFor(() => expect(ingest).toHaveBeenCalledTimes(1));
+    await vi.waitFor(async () => expect((await g.swmHostModeStore!.stats()).perCg[id].entries).toBe(1));
+    const replacement = await g.chain.createOnChainContextGraph({ accessPolicy: 1, publishPolicy: 1,
+      nameHash: ethers.keccak256(ethers.toUtf8Bytes('automatic-private-slot')).toLowerCase() });
+    const privateId = String(replacement.contextGraphId);
+    g.setContextGraphSubscription(id, { subscribed: false, synced: false, syncMode: 'always-on',
+      onChainHash: hash, onChainId: privateId }, { persist: false });
+    g.onChainAccessPolicyCache.set(privateId, 1);
+    handler('topic', bytes, 'authorized-publisher');
+    await Promise.resolve();
+    expect(ingest).toHaveBeenCalledTimes(1);
+    expect((await g.swmHostModeStore!.stats()).perCg[id].entries).toBe(1);
   });
 
   for (const reverse of [false, true]) it(`held public proof cannot admit a replacement private ${reverse ? 'reverse' : 'authoritative'} binding`, async () => {

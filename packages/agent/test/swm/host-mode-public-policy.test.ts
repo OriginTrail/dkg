@@ -4,9 +4,27 @@ import { SUBSCRIPTION_SOURCES, type SubscriptionSource } from '@origintrail-offi
 import { decodeSwmHostCatchupResponse, encodeSwmHostCatchupRequest, SWM_HOST_CATCHUP_WIRE_VERSION } from '../../src/swm/host-catchup-wire.js';
 import { mintSignedCatchupRequest } from '../../src/swm/host-catchup-sign.js';
 import { createHostModeTestFixture, installGossipStub, type StripInternals } from './host-mode.fixture.js';
+import { ContextGraphBindingState } from '../../src/context-graph-binding-state.js';
+import { captureHostPolicyIdentityCurrent } from '../../src/internal/swm-host-catchup-policy.js';
 
 describe('confirmed-public host-mode policy', () => {
   const { makeCore } = createHostModeTestFixture();
+
+  it.each(['authoritative', 'reverse', 'unbound'] as const)('captures the canonical %s policy target until its binding changes', kind => {
+    const id = 'captured-host-policy';
+    const hash = ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerCase();
+    const bindings = new ContextGraphBindingState();
+    const row: { onChainId?: string; onChainHash: string } = { onChainHash: hash };
+    const subscriptions = new Map([[id, row]]);
+    if (kind === 'authoritative') row.onChainId = '10';
+    if (kind === 'reverse') bindings.bindReverseCandidate(id, row, '10', hash);
+    const current = captureHostPolicyIdentityCurrent({ subscriptions, bindings, wireOwners: new Map(),
+      localId: () => id, hostKey: () => hash }, id);
+    expect(current()).toBe(true);
+    if (kind === 'reverse') bindings.bindReverseCandidate(id, row, '11', hash);
+    else row.onChainId = '11';
+    expect(current()).toBe(false);
+  });
 
   it('serves a fresh ordinary public reader while refusing bad signatures, stale requests, replay and private data', async () => {
     const core = await makeCore(true);
@@ -50,6 +68,45 @@ describe('confirmed-public host-mode policy', () => {
     const privateBaseline = await send(privateRequest);
     expect(privateBaseline.entries).toEqual([]);
     expect(privateBaseline.denied).toMatch(/authority/);
+  });
+
+  it.each([true, false])('rejects a signed nonmember when catch-up public proof loses its binding (strip=%s)', async strip => {
+    const core = await makeCore(strip, { hostPublic: true });
+    const g = core as unknown as StripInternals;
+    const id = 'held-catchup-public-binding';
+    const hash = ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerCase();
+    const registered = await g.chain.createOnChainContextGraph({ accessPolicy: 0, publishPolicy: 1, nameHash: hash });
+    g.setContextGraphSubscription(id, { subscribed: false, synced: false, syncMode: 'always-on',
+      onChainHash: hash, onChainId: String(registered.contextGraphId) }, { persist: false });
+    await g.reconcileSwmHostModeSubscription(id);
+    await g.swmHostModeStore!.append(id, new Uint8Array([19, 20, 21]));
+    const wallet = ethers.Wallet.createRandom();
+    expect(await g.chain.getIdentityIdForAddress(wallet.address)).toBe(0n);
+    const signed = await mintSignedCatchupRequest({ contextGraphId: id, sinceSeqno: 0,
+      maxEntries: 32, maxBytes: 65536, requesterEoa: wallet.address, sign: digest => wallet.signMessage(digest) });
+    let entered!: () => void, release!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const actualPublicProof = g.isConfirmedPublicForHostMode.bind(g);
+    const proof = vi.spyOn(g, 'isConfirmedPublicForHostMode').mockImplementation(async graph => {
+      const confirmed = await actualPublicProof(graph);
+      expect(confirmed).toBe(true);
+      entered(); await gate; return confirmed;
+    });
+    const catching = g.handleSwmHostCatchup(encodeSwmHostCatchupRequest(signed), 'ordinary-held-peer');
+    try {
+      await reached;
+      const replacement = await g.chain.createOnChainContextGraph({ accessPolicy: 1, publishPolicy: 1,
+        nameHash: ethers.keccak256(ethers.toUtf8Bytes('catchup-private-slot')).toLowerCase() });
+      g.setContextGraphSubscription(id, { subscribed: false, synced: false, syncMode: 'always-on',
+        onChainHash: hash, onChainId: String(replacement.contextGraphId) }, { persist: false });
+      expect(g.swmHostModeCurated.get(hash)).toBe(false);
+      release();
+      const response = decodeSwmHostCatchupResponse(await catching);
+      expect(response.denied).toBeDefined();
+      expect(response.entries).toEqual([]);
+      expect((await g.swmHostModeStore!.stats()).perCg[id].entries).toBe(1);
+    } finally { release(); await catching; proof.mockRestore(); }
   });
 
   it('hostPublic opt-in wires a confirmed public CG even while private strip is ON', async () => {

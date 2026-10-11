@@ -9,6 +9,8 @@ export class GossipSession {
   readonly sharedMemoryGossipRegistered = new Set<string>();
   readonly swmHostModeSubscribed = new Map<string, SubscriptionSource>();
   readonly swmHostModeCurated = new Map<string, boolean>();
+  /** Automatic public exemptions belong to the binding that passed admission. */
+  readonly swmHostModePublicBindingCurrent = new Map<string, () => boolean>();
   readonly swmHostModeHandlers = new Map<string, (topic: string, data: Uint8Array, from: string) => void>();
   /** Live intents snapshotted before the durable startup plan is read. */
   readonly startupLiveIntents = new Map<string, Pick<ContextGraphSub, 'syncMode'>>();
