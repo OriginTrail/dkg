@@ -11,7 +11,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { PCA_FUNDING_UNKNOWN_CODE, PCA_FUNDING_UNKNOWN_MESSAGE } from '@origintrail-official/dkg-core';
-import { PcaFundingUnknownError } from '@origintrail-official/dkg-chain';
+import { PcaFundingUnknownError } from '@origintrail-official/dkg-chain/dist/evm-adapter-errors.js';
 import {
   isNoFundedPublisherWalletLike,
   noFundedPublisherWalletBody,
