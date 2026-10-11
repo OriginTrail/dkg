@@ -82,7 +82,8 @@ test('CLI exposes explicit standalone and prepared build paths', () => {
   assert.equal(packageJson.scripts.prebuild, undefined);
   assert.equal(packageJson.scripts.build, 'pnpm run build:prerequisites && pnpm run build:prepared');
   assert.equal(packageJson.scripts['build:prerequisites'], 'node scripts/build-prerequisites.mjs');
-  assert.match(packageJson.scripts['build:prepared'], /^tsc /);
+  assert.match(packageJson.scripts['build:prepared'], /^pnpm run build:compile &&/);
+  assert.equal(packageJson.scripts['build:compile'], 'node ../../scripts/stamp-cli-build-info.mjs --compile');
 });
 
 test('standalone CLI prerequisite entrypoint always builds its dependency graph', () => {

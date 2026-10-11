@@ -60,6 +60,7 @@ export const UNFOLLOWED_LOADS = new Map([
   ['packages/cli/src/migration.ts: cmd',
     'the pnpm install and runtime build commands it runs in an update slot, a checkout outside the repository\'s files'],
   ['packages/cli/test/auto-update-versioned-e2e.test.ts: cmd', 'the git commands its git() helper runs in temporary repositories'],
+  ["packages/cli/test/auto-update-versioned-e2e.test.ts: join(releasesDirPath, 'current/packages/cli/dist/cli.js')", 'the generated CLI in a temporary activated slot; its real identity reader is bundled from the repository manifest source'],
   ["packages/cli/test/blazegraph-image-metadata.test.ts: join(cleanCliDir, 'blazegraph-image-metadata.cjs')",
     "a copy of packages/cli/blazegraph-image-metadata.cjs in a temporary checkout; the file itself routes by the CLI rule"],
   ['packages/cli/test/blue-green-integration.test.ts: cmd', 'the git commands its git() helper runs in temporary repositories'],

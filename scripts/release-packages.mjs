@@ -5,6 +5,8 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { cliRuntimeAssetManifest } from './copy-cli-runtime-assets.mjs';
+import { writeBuildMetadata } from './lib/build-info.mjs';
+export { buildInfoPayload } from './lib/build-info.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const ROOT_DIR = path.resolve(path.dirname(SCRIPT_PATH), '..');
@@ -17,11 +19,6 @@ export const NODE_SQLITE_INSTALL_GUARD = Object.freeze({
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
-}
-
-function writeJson(filePath, value) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 export function releasePackageJsonPaths(rootDir = ROOT_DIR) {
@@ -188,26 +185,8 @@ function gitHead(rootDir) {
   return runCapture('git', ['rev-parse', 'HEAD'], { cwd: rootDir });
 }
 
-export function buildInfoPayload({ commit, distTag, ciRun = null, buildTime = new Date().toISOString() }) {
-  if (typeof distTag !== 'string' || distTag.length === 0) {
-    throw new Error('--dist-tag is required for build-info generation');
-  }
-  const resolvedCommit = commit && commit.length > 0 ? commit : 'unknown';
-  return {
-    commit: resolvedCommit,
-    commitShort: resolvedCommit.slice(0, 8) || '00000000',
-    buildTime,
-    distTag,
-    ciRun,
-  };
-}
-
-export function writeBuildInfo({ rootDir = ROOT_DIR, distTag, commit, ciRun, buildTime } = {}) {
-  const resolvedCommit = commit ?? gitHead(rootDir);
-  const payload = buildInfoPayload({ commit: resolvedCommit, distTag, ciRun, buildTime });
-  const outputPath = path.join(rootDir, 'packages', 'cli', 'build-info.json');
-  writeJson(outputPath, payload);
-  return { outputPath, payload };
+export function writeBuildInfo({ rootDir = ROOT_DIR, commit, ...identity } = {}) {
+  return writeBuildMetadata({ rootDir, commit: commit ?? gitHead(rootDir), ...identity });
 }
 
 function parseArgs(argv) {

@@ -131,8 +131,8 @@ command -v lsof >/dev/null 2>&1 || skip "lsof not available (needed to find the 
 # Canonical devnet helpers (otReviewAgent #1517: reuse the shared harness, don't
 # grow another local auth/curl/JSON variant): node_token, node_port, api(),
 # code_of/body_of, field(). Contract: DEVNET_DIR + API_PORT_BASE set above.
-# shellcheck source=devnet-lib.sh
-. "$REPO_ROOT/scripts/devnet-lib.sh" || skip "cannot source scripts/devnet-lib.sh"
+# shellcheck source=devnet-store-outage-lib.sh
+. "$REPO_ROOT/scripts/devnet-store-outage-lib.sh" || skip "cannot source scripts/devnet-store-outage-lib.sh"
 
 # --- live topology (one structured parser — otReviewAgent #1517: no shell-quoted
 # JS expressions). One line per node dir: "<n> <role> <backend> <port>", where
@@ -314,20 +314,7 @@ log_before=0
 say "pausing node${target_node}'s store (SIGSTOP ${STORE_PID}) ..."
 kill -STOP "$STORE_PID"
 
-plain_started="$(date +%s)"
-paused_status="$(status_body '/api/status')"
-plain_elapsed="$(( $(date +%s) - plain_started ))"
-[ "$plain_elapsed" -lt 5 ] || fail "ordinary /api/status blocked for ${plain_elapsed}s on the paused store"
-[ "$(field "$paused_status" storeQuadsStatus)" = "ready" ] || fail "ordinary status lost its cached count while the store was paused: $paused_status"
-[ "$(field "$paused_status" storeQuads)" = "$healthy_count" ] || fail "ordinary status changed the cached count during the outage: $paused_status"
-[ -z "$(field "$paused_status" storeReachability)" ] || fail "ordinary status unexpectedly probed the paused store: $paused_status"
-paused_probe="$(status_body '/api/status?probeStore=true')"
-paused_reachability="$(field "$paused_probe" storeReachability)"
-case "$paused_reachability" in
-  no-answer|unreachable) : ;;
-  *) fail "explicit status probe did not report the paused store as unavailable: $paused_probe" ;;
-esac
-say "OK: ordinary status stayed responsive with its cached count; explicit probe reported ${paused_reachability}"
+check_paused_store_status
 
 if [ "${STORE_OUTAGE_STATUS_ONLY:-0}" != "1" ]; then
   say "publishing during the outage (from node${PUBLISHER_NODE}) ..."
