@@ -19,7 +19,7 @@ type CatalogRepairStageV1 = keyof typeof SOURCES;
 type CatalogRepairFailureKindV1 =
   | 'queue_wait' | 'queue_full' | 'store_timeout_not_started'
   | 'store_timeout_indeterminate' | 'transport' | 'cancelled'
-  | 'integrity' | 'lane_inactive' | 'unknown';
+  | 'integrity' | 'lane_inactive' | 'catalog_full' | 'unknown';
 
 export interface CatalogRepairDiagnosticV1 {
   readonly kind: CatalogRepairFailureKindV1;
@@ -62,6 +62,8 @@ export async function observeCatalogRepairStageV1<T>(
 
 const TRANSPORT_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENOTFOUND', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET']);
 const INTEGRITY_CODES = new Set(['swm-catalog-reconcile-signature', 'swm-catalog-reconcile-binding', 'swm-catalog-reconcile-input']);
+// GH#3134 — the catalog has no row for a new asset, or the inventory to project is larger than a catalog.
+const CAPACITY_CODES = new Set(['catalog-full', 'swm-catalog-reconcile-capacity']);
 
 /** Only closed classifications escape; never copy arbitrary message/name/code/source. */
 export function catalogRepairDiagnosticV1(error: unknown): Readonly<CatalogRepairDiagnosticV1> {
@@ -89,6 +91,7 @@ export function catalogRepairDiagnosticV1(error: unknown): Readonly<CatalogRepai
       else {
         const code = Reflect.get(current, 'code');
         if (typeof code === 'string' && INTEGRITY_CODES.has(code)) kind = 'integrity';
+        else if (typeof code === 'string' && CAPACITY_CODES.has(code)) kind = 'catalog_full';
         else if (typeof code === 'string' && TRANSPORT_CODES.has(code)) kind = 'transport';
         else if (Reflect.get(current, 'name') === 'AbortError') kind = 'cancelled';
       }

@@ -6,6 +6,8 @@ import {
   assertSafeIri,
   contextGraphAssertionUri,
   contextGraphMetaUri,
+  contextGraphPrivateUri,
+  contextGraphSubGraphPrivateUri,
   parseGraphScopedAssertionSealCandidate,
   type ContextGraphIdV1,
   type GraphScopedAssertionSealCandidate,
@@ -32,20 +34,7 @@ export interface ResolveDurableGraphScopedAuthorSealCandidateParamsV1 {
 export async function resolveDurableGraphScopedAuthorSealCandidateV1(
   params: ResolveDurableGraphScopedAuthorSealCandidateParamsV1,
 ): Promise<GraphScopedAssertionSealCandidate | undefined> {
-  const assertionUris = Object.freeze(Array.from(new Set([
-    contextGraphAssertionUri(
-      params.contextGraphId,
-      params.agentAddress.toLowerCase(),
-      params.assertionCoordinate,
-      params.subGraphName,
-    ),
-    contextGraphAssertionUri(
-      params.contextGraphId,
-      ethers.getAddress(params.agentAddress),
-      params.assertionCoordinate,
-      params.subGraphName,
-    ),
-  ])));
+  const assertionUris = assertionUriSpellingsV1(params);
   const metaGraph = contextGraphMetaUri(params.contextGraphId);
   // sparql-scan-allow: R4 -- exact CG meta graph and at most two exact assertion IRIs are bound by VALUES
   const sealResult = await params.store.query(
@@ -61,4 +50,62 @@ export async function resolveDurableGraphScopedAuthorSealCandidateV1(
     throw new Error('durable assertion has ambiguous author seal subjects');
   }
   return candidates[0];
+}
+
+/**
+ * The seal that re-opening an assertion for editing archived. The publisher's pull-from copies the
+ * last finalized seal to `<assertion>/_recovery_seal` in the context graph's private partition
+ * before it clears the active one, and a later finalize writes the next version's seal to the
+ * active subject. Work that still names the archived version by its exact seal digest, such as a
+ * catalog placement owed for a confirmed publication, reads it here. The caller compares the
+ * candidate with that digest; this function only locates and parses it.
+ */
+export async function resolveArchivedGraphScopedAuthorSealCandidateV1(
+  params: ResolveDurableGraphScopedAuthorSealCandidateParamsV1,
+): Promise<GraphScopedAssertionSealCandidate | undefined> {
+  const assertionUris = assertionUriSpellingsV1(params);
+  const archiveOf = (assertionUri: string): string => `${assertionUri}/_recovery_seal`;
+  const recoveryGraph = params.subGraphName === undefined
+    ? contextGraphPrivateUri(params.contextGraphId)
+    : contextGraphSubGraphPrivateUri(params.contextGraphId, params.subGraphName);
+  // sparql-scan-allow: R4 -- exact private partition graph and at most two exact archive IRIs are bound by VALUES
+  const sealResult = await params.store.query(
+    `CONSTRUCT { ?archive ?p ?o } WHERE { GRAPH <${assertSafeIri(recoveryGraph)}> { VALUES ?archive { ${assertionUris.map((assertionUri) => `<${assertSafeIri(archiveOf(assertionUri))}>`).join(' ')} } ?archive ?p ?o } }`,
+    { source: params.source, signal: params.signal },
+  );
+  const sealQuads = sealResult.type === 'quads' ? sealResult.quads : [];
+  const candidates = assertionUris.flatMap((assertionUri) => {
+    // The archive keeps the seal's predicates under its own subject; the seal itself is the assertion's.
+    const candidate = parseGraphScopedAssertionSealCandidate(
+      sealQuads
+        .filter((quad) => quad.subject === archiveOf(assertionUri))
+        .map((quad) => ({ ...quad, subject: assertionUri })),
+      assertionUri,
+    );
+    return candidate === undefined ? [] : [candidate];
+  });
+  if (candidates.length > 1) {
+    throw new Error('durable assertion has ambiguous archived author seal subjects');
+  }
+  return candidates[0];
+}
+
+/** The lowercase and the EIP-55 spelling of one assertion subject; see the note above. */
+function assertionUriSpellingsV1(
+  params: ResolveDurableGraphScopedAuthorSealCandidateParamsV1,
+): readonly string[] {
+  return Object.freeze(Array.from(new Set([
+    contextGraphAssertionUri(
+      params.contextGraphId,
+      params.agentAddress.toLowerCase(),
+      params.assertionCoordinate,
+      params.subGraphName,
+    ),
+    contextGraphAssertionUri(
+      params.contextGraphId,
+      ethers.getAddress(params.agentAddress),
+      params.assertionCoordinate,
+      params.subGraphName,
+    ),
+  ])));
 }
