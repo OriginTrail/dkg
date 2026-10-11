@@ -54,6 +54,8 @@ import {
  *   policy and the scope, and the delegation is named by the head);
  * - the applied head and its delegation are still in the durable store, read and verified again;
  * - no mutation of the scope has failed between its read of the state and its applied-head CAS.
+ *   A refusal for a full catalog is not reported as a failure: it is decided from the row count
+ *   of that state before a successor is asked for.
  *
  * It never replaces a check: the applied-head CAS on the expected digest stays the authority, and
  * the successor still reads its predecessor from the durable store and verifies it. A state
