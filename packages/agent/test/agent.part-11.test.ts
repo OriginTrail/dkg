@@ -318,6 +318,45 @@ decisions: []
     });
 
 
+    it('adds the calling agent as a participant agent when the chain signer is promoted to on-chain owner', async () => {
+      const chain = new AsyncSignerAddressContextGraphChainAdapter();
+      const agent = await DKGAgent.create({
+        name: 'EoaPromotionRosterBot',
+        store: new OxigraphStore(),
+        chainAdapter: chain,
+        nodeRole: 'core',
+      });
+      await agent.start();
+      const caller = new ethers.Wallet(HARDHAT_KEYS.CORE_OP).address;
+
+      // Public with a curated publish policy: the caller is not allow-listed at
+      // create time, so the promotion is what makes it a participant.
+      await agent.createContextGraph({ id: 'eoa-promotion-roster', name: 'EOA promotion roster', callerAgentAddress: caller });
+      await expect(agent.registerContextGraph('eoa-promotion-roster', { callerAgentAddress: caller, publishPolicy: 0 }))
+        .resolves.toMatchObject({ onChainId: expect.any(String) });
+      expect(chain.createOnChainContextGraphCalls.at(-1)).toMatchObject({
+        accessPolicy: 0,
+        publishPolicy: 0,
+        publishAuthority: ethers.getAddress(chain.signerAddress),
+        participantAgents: [caller],
+      });
+      expect(await agent.getContextGraphParticipantAgentAddresses('eoa-promotion-roster')).toEqual([caller]);
+
+      // A graph that already lists as many participant agents as a registration may carry.
+      await agent.createContextGraph({ id: 'eoa-promotion-roster-cap', name: 'EOA promotion roster cap', callerAgentAddress: caller });
+      await agent.store.insert(Array.from({ length: 256 }, (_, i) => ({
+        subject: 'did:dkg:context-graph:eoa-promotion-roster-cap',
+        predicate: DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT,
+        object: `"0x${(i + 1).toString(16).padStart(40, '0')}"`,
+        graph: contextGraphMetaUri('eoa-promotion-roster-cap'),
+      })));
+      const calls = chain.createOnChainContextGraphCalls.length;
+      await expect(agent.registerContextGraph('eoa-promotion-roster-cap', { callerAgentAddress: caller, publishPolicy: 0 }))
+        .rejects.toThrow(/participantAgents cannot exceed 256 addresses after auto-adding the calling agent as a participant/);
+      expect(chain.createOnChainContextGraphCalls).toHaveLength(calls);
+      await agent.stop().catch(() => {});
+    });
+
     it('uses best-effort adapter publisher-address inference for curated CG registration', async () => {
       const chain = new SignerListContextGraphChainAdapter();
       const agent = await DKGAgent.create({

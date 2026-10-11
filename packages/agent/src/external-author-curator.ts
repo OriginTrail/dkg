@@ -11,11 +11,8 @@
  * registration's `participantAgents`), as the EOA auto-promotion in
  * `registerContextGraph` does for a curator that is not the chain signer.
  */
-import { ethers } from 'ethers';
-import { DKG_ONTOLOGY, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import type { ChainAdapter, EvmSigner, ExternalAuthorSigners } from '@origintrail-official/dkg-chain';
-import { MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS } from './dkg-agent-constants.js';
-import type { DKGAgent } from './dkg-agent.js';
+import { addRegistrationParticipantAgent, type RegistrationRoster } from './context-graph-registration-roster.js';
 import { externalAuthorSignerFor, signsThroughExternalSigner } from './external-author-signing.js';
 
 interface ExternalSignerConfig {
@@ -42,11 +39,10 @@ export async function isExternalAuthorCurator(
 
 /**
  * Add the external-author curator as a participant agent of the context graph
- * and return the participant agents to register on-chain. The agent's store
- * marks the metadata projection dirty on write, so the re-read includes it.
+ * and return the participant agents to register on-chain.
  */
 export async function addExternalAuthorCuratorAsParticipant(
-  agent: DKGAgent,
+  roster: RegistrationRoster,
   contextGraphId: string,
   curator: string,
   registrationSigner: string,
@@ -56,20 +52,5 @@ export async function addExternalAuthorCuratorAsParticipant(
     `PCA-curated CG "${contextGraphId}": curator ${curator} is an author key of the external signer and signs no transactions. ` +
     `Adding it as a participantAgent; local DKG_CURATOR stays ${curator}; on-chain NFT mints to chain signer ${registrationSigner}.`,
   );
-  await agent.store.insert([
-    {
-      subject: `did:dkg:context-graph:${contextGraphId}`,
-      predicate: DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT,
-      object: `"${ethers.getAddress(curator)}"`,
-      graph: contextGraphMetaUri(contextGraphId),
-    },
-  ]);
-  const participantAgents = await agent.getContextGraphParticipantAgentAddresses(contextGraphId);
-  if (participantAgents.length > MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS) {
-    throw new Error(
-      `Context graph "${contextGraphId}" cannot be registered on-chain: participantAgents cannot exceed ` +
-      `${MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS} addresses after adding the curator as a participant.`,
-    );
-  }
-  return participantAgents;
+  return addRegistrationParticipantAgent(roster, contextGraphId, curator, 'adding the curator');
 }

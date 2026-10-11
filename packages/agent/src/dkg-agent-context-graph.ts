@@ -136,6 +136,7 @@ import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { buildAuthoritativePublicMetaQuads } from './context-graph-public-meta-proof.js';
 import { replaceContextGraphMetadataFact } from './context-graph-metadata-fact.js';
 import { addExternalAuthorCuratorAsParticipant, isExternalAuthorCurator } from './external-author-curator.js';
+import { addRegistrationParticipantAgent, type RegistrationRoster } from './context-graph-registration-roster.js';
 import {
   RFC64_UNREGISTERED_REPLICA_AUTHORITY_PREDICATE_V1,
   mintRfc64UnregisteredReplicaAuthoritySeedV1,
@@ -1455,6 +1456,12 @@ export class ContextGraphMethods extends DKGAgentBase {
         `${MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS} addresses after merging local allowedAgents.`,
       );
     }
+    // Adds a curator that is not the registration's chain signer as a participant agent.
+    const roster: RegistrationRoster = {
+      insert: (quads) => this.store.insert(quads),
+      markDirty: (contextGraphId) => this.contextGraphMetaProjection.markDirty(contextGraphId),
+      participantAgents: (contextGraphId) => this.getContextGraphParticipantAgentAddresses(contextGraphId),
+    };
     let publishAuthority: string | undefined;
     if (publishPolicy === EVM_PUBLISH_CURATED) {
       if (isPcaCurated) {
@@ -1560,7 +1567,7 @@ export class ContextGraphMethods extends DKGAgentBase {
             `PCA account ${publishAuthorityAccountId} owner ${publishAuthority} remains the live publish authority.`,
           );
         }
-        if (externalAuthorCurator) participantAgents = await addExternalAuthorCuratorAsParticipant(this, id, ownerAddress, normalizedChainSigner, (message) => this.log.info(ctx, message));
+        if (externalAuthorCurator) participantAgents = await addExternalAuthorCuratorAsParticipant(roster, id, ownerAddress, normalizedChainSigner, (message) => this.log.info(ctx, message));
       } else if (publishAuthority && ownerAddress.toLowerCase() !== publishAuthority.toLowerCase()) {
         // EOA mode: publishAuthority is the chain signer; local curator must
         // equal it unless the explicit auto-promotion path below is allowed.
@@ -1623,28 +1630,10 @@ export class ContextGraphMethods extends DKGAgentBase {
           `Local DKG_CURATOR stays ${ownerAddress}; on-chain NFT mints to ${publishAuthority}. ` +
           `Pass { strictEoaCuratorMatch: true } to suppress this relaxation.`,
         );
-        // Persist the calling agent as a local participant agent
-        // so SWM writes pass the agent gate. Idempotent — RDF
-        // triples deduplicate.
-        await this.store.insert([
-          {
-            subject: contextGraphUri,
-            predicate: DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT,
-            object: `"${ethers.getAddress(ownerAddress)}"`,
-            graph: cgMetaGraph,
-          },
-        ]);
-        this.contextGraphMetaProjection.markDirty(id);
-        // Re-fetch participantAgents so the on-chain
-        // registration also lists the calling agent (matches
-        // what the local agent gate now enforces).
-        participantAgents = await this.getContextGraphParticipantAgentAddresses(id);
-        if (participantAgents.length > MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS) {
-          throw new Error(
-            `Context graph "${id}" cannot be registered on-chain: participantAgents cannot exceed ` +
-            `${MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS} addresses after auto-adding the calling agent as a participant.`,
-          );
-        }
+        // Persist the calling agent as a local participant agent so SWM
+        // writes pass the agent gate, and list it in the on-chain
+        // registration too (matches what the local agent gate now enforces).
+        participantAgents = await addRegistrationParticipantAgent(roster, id, ownerAddress, 'auto-adding the calling agent');
         // Treat the chain signer as the local on-chain owner from
         // here on — downstream PCA/signer parity checks compare
         // against this value.
