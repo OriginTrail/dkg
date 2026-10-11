@@ -280,6 +280,7 @@ export default defineConfig({
           'test/okf-subcommands.test.ts',
           'test/okf-private-lifecycle.test.ts',
           'test/okf-subgraph-roundtrip.test.ts',
+          'test/okf-scoped-verify.test.ts',
           'test/epcis-route-readiness.test.ts',
           // Notifications-pane redesign (A3) — assertion_activity emitter
           // helper. Pure logic + a tmp SQLite DashboardDB, no hardhat.
