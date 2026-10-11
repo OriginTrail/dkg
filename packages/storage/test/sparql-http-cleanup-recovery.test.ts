@@ -31,7 +31,7 @@ describe('managed atomic staging cleanup recovery', () => {
       queryEndpoint: `${endpoint}/query`, updateEndpoint: `${endpoint}/update`, timeout: 500,
     }, {
       getRecoveryState: () => ({ ...recovery }),
-      onClientTimeout: recover, onBusyChange: (count) => activity.push(count),
+      onClientTimeout: recover, registerActivity: () => ({ report: (count) => activity.push(count), dispose() {} }),
     });
     const caller = new AbortController();
     try {
@@ -74,7 +74,7 @@ describe('managed client deadline activity fence', () => {
         queryEndpoint: endpoint, updateEndpoint: endpoint, timeout: 100,
       }, {
         getRecoveryState: () => state, onClientTimeout: recover,
-        onBusyChange: (count) => activity.push(count),
+        registerActivity: () => ({ report: (count) => activity.push(count), dispose() {} }),
       });
       try {
         await expect(operation === 'query'

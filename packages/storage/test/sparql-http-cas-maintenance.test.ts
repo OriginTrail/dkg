@@ -79,7 +79,7 @@ describe('managed CAS maintenance boundary', () => {
     const store = createManagedOxigraphSparqlStoreV1({
       queryEndpoint: `http://127.0.0.1:${(server.address() as AddressInfo).port}/query`,
       timeout: 2_000,
-    }, { getRecoveryState: () => ({ ...state }), onBusyChange: (count) => { active = count; } });
+    }, { getRecoveryState: () => ({ ...state }), registerActivity: () => ({ report: (count) => { active = count; }, dispose() {} }) });
     const commit = store.rfc64AuthorCommitCasV1(authorCommitInput());
     try {
       await Promise.race([receiptDispatched, commit.then(() => { throw new Error('CAS ended before its receipt'); })]);
@@ -127,7 +127,7 @@ describe('managed CAS maintenance boundary', () => {
       }),
     }, {
       getRecoveryState: () => ({ ...state }),
-      onBusyChange: (active) => { activities.push(active); },
+      registerActivity: () => ({ report: (active) => { activities.push(active); }, dispose() {} }),
     });
     const before = store.getWriteRevision(PROJECTION_GRAPH);
     const commit = store.rfc64AuthorCommitCasV1(authorCommitInput());

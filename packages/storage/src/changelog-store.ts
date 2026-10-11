@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { runSparqlHttpLogicalMutationV1 } from './adapters/managed-sparql-recovery.js';
 import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
 import {
   loadSortedGraphCatalog, type SortedGraphCatalog, type SortedGraphSetSource,
@@ -325,17 +326,14 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
       // markers cross-graph — the same log-erasure vector, so reject it too.
       this.assertNoReservedTerm(pattern);
     }
-    return this.runExclusive(async () => {
-      const removed = await this.inner.deleteByPattern(pattern, options);
-      if (removed > 0) {
-        if (pattern.graph) {
-          await this.markPostMutation([pattern.graph], options);
-        } else {
-          // No graph hint → cannot attribute which graphs shrank/emptied.
-          this.flagReconcile('deleteByPattern(no-graph)');
-        }
-      }
-      return removed;
+    return this.runAtomicMutation({
+      operation: 'deleteByPattern', touchedGraphs: pattern.graph ? [pattern.graph] : [], options,
+      execute: scoped => this.inner.deleteByPattern(pattern, scoped),
+      committed: removed => {
+        // No graph hint → cannot attribute which graphs shrank/emptied.
+        if (removed > 0 && !pattern.graph) this.flagReconcile('deleteByPattern(no-graph)');
+        return removed > 0;
+      },
     });
   }
 
@@ -368,12 +366,10 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
   async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
     if (!this.enabled) return this.inner.deleteBySubjectPrefix(graphUri, prefix, options);
     this.assertNotReserved(graphUri, 'deleteBySubjectPrefix');
-    return this.runExclusive(async () => {
-      const removed = await this.inner.deleteBySubjectPrefix(graphUri, prefix, options);
-      if (removed > 0) {
-        await this.markPostMutation([graphUri], options);
-      }
-      return removed;
+    return this.runAtomicMutation({
+      operation: 'deleteBySubjectPrefix', touchedGraphs: [graphUri], options,
+      execute: scoped => this.inner.deleteBySubjectPrefix(graphUri, prefix, scoped),
+      committed: removed => removed > 0,
     });
   }
 
@@ -403,7 +399,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
       operation: 'replaceGraph',
       touchedGraphs: [graphUri],
       options,
-      execute: () => this.inner.replaceGraph!(graphUri, quads, options),
+      execute: options => this.inner.replaceGraph!(graphUri, quads, options),
     });
   }
 
@@ -437,7 +433,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
       operation: 'replaceGraphAndSubject',
       touchedGraphs: [graphUri, metaGraphUri],
       options,
-      execute: () => this.inner.replaceGraphAndSubject!(
+      execute: options => this.inner.replaceGraphAndSubject!(
         graphUri,
         graphQuads,
         metaGraphUri,
@@ -468,7 +464,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
       operation: 'replaceSubject',
       touchedGraphs: [graphUri],
       options,
-      execute: () => this.inner.replaceSubject!(graphUri, subject, quads, options),
+      execute: options => this.inner.replaceSubject!(graphUri, subject, quads, options),
     });
   }
 
@@ -492,7 +488,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
       operation: 'rfc64AuthorCommitCasV1',
       touchedGraphs: manifest.touchedGraphs,
       options,
-      execute: () => this.inner.rfc64AuthorCommitCasV1!(source, options),
+      execute: options => this.inner.rfc64AuthorCommitCasV1!(source, options),
       committed: result => result === 'committed',
     });
   }
@@ -786,18 +782,18 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     return run;
   }
 
-  /** Shared outcome-aware lifecycle for every certified atomic mutation. */
+  /** Shared outcome-aware lifecycle for counted and certified atomic mutations. */
   private runAtomicMutation<T>(args: {
     operation: StoreOperation;
     touchedGraphs: readonly string[];
     options?: QueryOptions;
-    execute: () => Promise<T>;
+    execute: (options?: QueryOptions) => Promise<T>;
     committed?: (result: T) => boolean;
   }): Promise<T> {
-    return this.runExclusive(async () => {
+    return this.runExclusive(() => runSparqlHttpLogicalMutationV1(this.inner, args.operation, args.options, async options => {
       let result: T;
       try {
-        result = await args.execute();
+        result = await args.execute(options);
       } catch (error) {
         if (!isStoreOperationNotStarted(error, args.operation)) {
           this.flagReconcile(`${args.operation}(indeterminate-failure)`);
@@ -805,10 +801,10 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
         throw error;
       }
       if ((args.committed?.(result) ?? true)) {
-        await this.markPostMutation(args.touchedGraphs, args.options);
+        await this.markPostMutation(args.touchedGraphs, options);
       }
       return result;
-    });
+    }));
   }
 
   /**

@@ -13,6 +13,7 @@ export function runSparqlHttpAuthorCommitV1(input: {
   readonly lifecycle: AbortableStoreWorkLifecycle;
   readonly signal: AbortSignal | undefined;
   readonly storeGeneration: number | null;
+  readonly admission?: SparqlHttpOperationAdmissionV1;
   readonly touchedGraphs: readonly string[];
   readonly writeGen: GraphWriteGenTracker;
   readonly executeUpdate: (admission: SparqlHttpOperationAdmissionV1, signal: AbortSignal | undefined) => Promise<void>;
@@ -24,7 +25,7 @@ export function runSparqlHttpAuthorCommitV1(input: {
   // drain the whole admitted operation. No outer scheduler slot is acquired:
   // even a one-slot endpoint can run the individual HTTP continuations.
   return input.lifecycle.run(input.signal, async (signal) => {
-    const admission: SparqlHttpOperationAdmissionV1 = {
+    const admission: SparqlHttpOperationAdmissionV1 = input.admission ?? {
       storeGeneration: input.storeGeneration,
       dispatched: false,
     };

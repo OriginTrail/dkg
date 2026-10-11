@@ -1811,10 +1811,10 @@ describe('SparqlHttpStore (test server)', () => {
       const store = createManagedOxigraphSparqlStoreV1({
         queryEndpoint: 'http://127.0.0.1:7878/query',
       }, {
-        onBusyChange: (activeOperations) => {
+        registerActivity: () => ({ report: (activeOperations) => {
           activity.push(activeOperations);
           if (activeOperations) throw new Error('observer failure');
-        },
+        }, dispose() {} }),
       });
       const first = store.query('ASK { ?s ?p ?o }');
       const second = store.query('ASK { ?s ?p ?o }');
@@ -1878,6 +1878,38 @@ describe('SparqlHttpStore (test server)', () => {
     }
   });
 
+  it('disposes one activity lease on close and reacquires it when the store is reused', async () => {
+    const reports: boolean[][] = [], disposals: number[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response(JSON.stringify({ boolean: true }));
+    const store = createManagedOxigraphSparqlStoreV1({ queryEndpoint: 'http://127.0.0.1:7878/query' }, {
+      registerActivity: () => {
+        const id = reports.push([]) - 1;
+        return { report: busy => reports[id]!.push(busy), dispose() { disposals.push(id); throw new Error('observer dispose failed'); } };
+      },
+    });
+    try {
+      await expect(store.query('ASK {}')).resolves.toEqual({ type: 'boolean', value: true });
+      await expect(store.close()).resolves.toBeUndefined();
+      await expect(store.query('ASK {}')).resolves.toEqual({ type: 'boolean', value: true });
+      await expect(store.close()).resolves.toBeUndefined();
+      expect(reports).toEqual([[true, false], [true, false]]);
+      expect(disposals).toEqual([0, 1]);
+    } finally { globalThis.fetch = originalFetch; await store.close(); }
+  });
+
+  it('isolates activity registration failures from store results and retries registration', async () => {
+    const registerActivity = vi.fn(() => { throw new Error('observer registration failed'); });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response(JSON.stringify({ boolean: true }));
+    const store = createManagedOxigraphSparqlStoreV1({ queryEndpoint: 'http://127.0.0.1:7878/query' }, { registerActivity });
+    try {
+      await expect(store.query('ASK {}')).resolves.toEqual({ type: 'boolean', value: true });
+      await expect(store.close()).resolves.toBeUndefined();
+      expect(registerActivity.mock.calls.length).toBeGreaterThan(1);
+    } finally { globalThis.fetch = originalFetch; await store.close(); }
+  });
+
   it('keeps the managed activity fence busy during an in-flight mutation', async () => {
     const originalFetch = globalThis.fetch;
     let release!: () => void;
@@ -1891,7 +1923,7 @@ describe('SparqlHttpStore (test server)', () => {
         queryEndpoint: 'http://127.0.0.1:7878/query',
         updateEndpoint: 'http://127.0.0.1:7878/update',
       }, {
-        onBusyChange: (activeOperations) => activity.push(activeOperations),
+        registerActivity: () => ({ report: (activeOperations) => activity.push(activeOperations), dispose() {} }),
       });
       const updating = store.update('INSERT DATA { GRAPH <http://ex.org/g> { <http://ex.org/s> <http://ex.org/p> "o" } }');
       while (activity.at(-1) !== true) await Promise.resolve();
@@ -1929,7 +1961,7 @@ describe('SparqlHttpStore (test server)', () => {
         queryEndpoint: 'http://127.0.0.1:7878/query',
         scheduler,
       }, {
-        onBusyChange: (activeOperations) => activity.push(activeOperations),
+        registerActivity: () => ({ report: (activeOperations) => activity.push(activeOperations), dispose() {} }),
       });
       const first = store.query('ASK { ?s ?p ?o }');
       await waitForCondition(() => fetchCalls === 1, 'first query was not dispatched');

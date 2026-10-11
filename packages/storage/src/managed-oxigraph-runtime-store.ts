@@ -32,8 +32,7 @@ export interface ManagedOxigraphRuntimeActivityLeaseV1 {
 export interface ManagedOxigraphRuntimeHooksV1 {
   readonly onClientTimeout?: (operation: StoreOperation) => void;
   readonly getRecoveryState?: () => ManagedOxigraphRuntimeStateV1;
-  readonly onBusyChange?: (busy: boolean) => void;
-  /** Prefer a per-store lease so a shared supervisor can aggregate activity. */
+  /** One per-store lease lets a shared supervisor aggregate activity. */
   readonly registerActivity?: () => ManagedOxigraphRuntimeActivityLeaseV1;
 }
 

@@ -28,7 +28,7 @@ function harness(managed = true) {
   const hooks = {
     getRecoveryState: () => ({ ...recovery }),
     onClientTimeout: recover,
-    onBusyChange: (activeOperations: boolean) => activity.push(activeOperations),
+    registerActivity: () => ({ report: (activeOperations: boolean) => activity.push(activeOperations), dispose() {} }),
   };
   // The generic store is handed the full legacy capability shape on purpose:
   // the 'external' case only proves the "generic stores cannot gain managed

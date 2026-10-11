@@ -28,7 +28,7 @@ describe('daemon managed Oxigraph store construction', () => {
         recoveryReads += 1;
         return { recovering: false, generation: 0 };
       },
-      onBusyChange: (activeOperations) => { activity.push(activeOperations); },
+      registerActivity: () => ({ report: (activeOperations) => { activity.push(activeOperations); }, dispose() {} }),
     });
     const eraGuard: ChangelogEraGuard = {
       async load() { return null; },
