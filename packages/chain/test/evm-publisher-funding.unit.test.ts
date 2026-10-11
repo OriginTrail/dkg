@@ -2,9 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { reconcilePublisherCandidateFunding, type PublisherFundingSelection, type PublisherPcaPricingEvidence } from '../src/evm-publisher-funding.js';
 import { InsufficientPublisherFundsError, PcaFundingUnknownError } from '../src/evm-adapter-errors.js';
 
+type Candidate = { address: string; publishEpochs: number; tokenAmount: bigint; pcaPricing: PublisherPcaPricingEvidence };
+
 describe('EVM publish funding candidate ownership', () => {
   it('assesses explicit repriced snapshots without changing the caller array, with sequential repricing', async () => {
-    type Candidate = { address: string; publishEpochs: number; tokenAmount: bigint; pcaPricing: PublisherPcaPricingEvidence };
     const pricing: PublisherPcaPricingEvidence = { kind: 'unavailable', error: new Error('pricing temporarily unavailable') };
     const candidates: readonly Candidate[] = Object.freeze([
       Object.freeze({ address: 'first', publishEpochs: 12, tokenAmount: 120n, pcaPricing: pricing }),
@@ -19,7 +20,10 @@ describe('EVM publish funding candidate ownership', () => {
     const error = new InsufficientPublisherFundsError('not yet funded', []);
     const assess = vi.fn(async (current: readonly Candidate[] = candidates): Promise<PublisherFundingSelection<Candidate>> => {
       observed.push(current);
-      if (observed.length === 1) return { kind: 'unfunded', assessments: [], error };
+      if (observed.length === 1) return { kind: 'unfunded', assessments: current.map((candidate) => ({
+        kind: 'unfunded' as const, candidate, funding: { native: 10n, trac: 0n },
+        refreshPcaEligibility: async () => true,
+      })), error };
       expect(current.map((candidate) => candidate.tokenAmount)).toEqual([240n, 240n]);
       return { kind: 'funded', candidate: current[1] };
     });
@@ -32,9 +36,7 @@ describe('EVM publish funding candidate ownership', () => {
         order.push(`${candidate.address}:end`);
         return { ...candidate, tokenAmount: 240n, publishEpochs: 24, pcaPricing: { kind: 'available' as const } };
       },
-      readFunding: async () => ({ native: 10n, trac: 0n }),
       conviction: () => undefined,
-      nativeFloorWei: 0n, tracFloorWei: 0n,
     });
     await firstReprice;
     expect(order).toEqual(['first:start']);
@@ -50,16 +52,33 @@ describe('EVM publish funding candidate ownership', () => {
     expect(candidates.map((candidate) => candidate.tokenAmount)).toEqual([120n, 120n]);
   });
 
+  it('consumes assessment-owned fresh eligibility without independent funding policy', async () => {
+    const candidate: Candidate = { address: 'wallet', publishEpochs: 12, tokenAmount: 120n,
+      pcaPricing: { kind: 'unavailable', error: new Error('pricing read failed') } };
+    const repriced = { ...candidate, publishEpochs: 24, tokenAmount: 240n, pcaPricing: { kind: 'available' as const } };
+    const refreshPcaEligibility = vi.fn(async () => true);
+    const error = new InsufficientPublisherFundsError('not funded at fallback lifetime', []);
+    const reprice = vi.fn(async () => repriced);
+    let calls = 0;
+    await expect(reconcilePublisherCandidateFunding({
+      candidates: [candidate],
+      assess: async (): Promise<PublisherFundingSelection<Candidate>> => ++calls === 1
+        ? { kind: 'unfunded', assessments: [{ kind: 'unfunded', candidate, funding: { native: 10n, trac: 0n }, refreshPcaEligibility }], error }
+        : { kind: 'funded', candidate: repriced },
+      reprice, conviction: () => undefined,
+    })).resolves.toBe(repriced);
+    expect(refreshPcaEligibility).toHaveBeenCalledTimes(1);
+    expect(reprice).toHaveBeenCalledExactlyOnceWith(candidate);
+  });
+
   it('propagates the assessed unknown error without repricing or extra funding reads', async () => {
     const candidate = { address: 'wallet', publishEpochs: 12, tokenAmount: 120n, pcaPricing: { kind: 'available' as const } };
     const error = new PcaFundingUnknownError('CALL_EXCEPTION');
-    const readFunding = vi.fn();
     const reprice = vi.fn();
     await expect(reconcilePublisherCandidateFunding({
       candidates: [candidate], assess: async () => ({ kind: 'unavailable', assessments: [], error }),
-      reprice, readFunding, conviction: () => undefined, nativeFloorWei: 0n, tracFloorWei: 0n,
+      reprice, conviction: () => undefined,
     })).rejects.toBe(error);
-    expect(readFunding).not.toHaveBeenCalled();
     expect(reprice).not.toHaveBeenCalled();
   });
 });

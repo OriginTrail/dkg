@@ -38,8 +38,6 @@ import { errorCode, errorMessage } from './evm-adapter-errors.js';
 import { isRetryableRpcError } from './evm-adapter-rpc.js';
 import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
 import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
-import {
-} from './evm-adapter-constants.js';
 
 type PublisherCandidatePlan = PublisherPublishPlan & {
   signer: Wallet;
@@ -172,10 +170,7 @@ export class PublishMethods extends EVMChainAdapterBase {
         pca: { kind: 'publish', epochs: plan.publishEpochs },
       }), { preferIdle: false }),
       reprice: (plan) => this._publisherCandidatePlan(plan.signer, request, quote),
-      readFunding: (address) => this.getWalletFunding(address, { forceRefresh: true }),
       conviction: () => this.publisherConvictionPlanReader(),
-      nativeFloorWei: this.minPublisherNativeWei,
-      tracFloorWei: this.minPublisherTracWei,
     });
   }
 

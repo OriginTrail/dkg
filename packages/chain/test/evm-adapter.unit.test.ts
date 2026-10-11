@@ -5066,6 +5066,69 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     expect(coverReadStrict[0]).toBe(true);
   });
 
+  it.each([
+    { name: 'native floor equality', native: 5n, trac: 0n, pca: true, eligible: false },
+    { name: 'direct funding', native: 10n, trac: 100n, pca: true, eligible: false },
+    { name: 'short own TRAC', native: 10n, trac: 10n, pca: true, eligible: true },
+    { name: 'TRAC floor equality', native: 10n, trac: 5n, pca: true, eligible: true },
+    { name: 'PCA disabled', native: 10n, trac: 0n, pca: false, eligible: false },
+  ])('refreshes assessed PCA eligibility: $name', async ({ native, trac, pca, eligible }) => {
+    const { a, walletA, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), 10n);
+    tracByAddr.set(lc(walletA.address), 0n);
+    const selection = await (a as any)._assessFundedCandidates([walletA], () => ({
+      kind: 'native+trac', nativeFloorWei: 5n, tracFloorWei: 5n, requiredTracWei: 100n,
+      pca: pca ? { kind: 'publish', epochs: 12 } : { kind: 'none' },
+    }), { preferIdle: false });
+    expect(selection.kind).toBe('unfunded');
+    const assessment = selection.assessments[0];
+    expect(assessment.candidate).toBe(walletA);
+    const reads = (a as any).provider.getBalance.calls.length;
+    nativeByAddr.set(lc(walletA.address), native);
+    tracByAddr.set(lc(walletA.address), trac);
+    await expect(assessment.refreshPcaEligibility()).resolves.toBe(eligible);
+    expect((a as any).provider.getBalance.calls.length).toBe(reads + 1);
+  });
+
+  it('refreshes a later wallet after an earlier PCA repricing waits', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), ONE);
+    nativeByAddr.set(lc(walletB.address), 0n);
+    tracByAddr.set(lc(walletA.address), 0n);
+    tracByAddr.set(lc(walletB.address), 0n);
+    (a as any).contracts.dkgPublishingConvictionNFT = {};
+    (a as any).getConvictionAgentAccountId = recorder(async (address: string) => lc(address) === lc(walletA.address) ? 41n : 42n);
+    (a as any).getConvictionAccountLockDurationEpochs = recorder(async () => 24);
+    (a as any).convictionAccountCanCover = recorder(async (account: bigint) => account === 42n);
+    let release!: () => void;
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    let entered!: () => void;
+    const firstReprice = new Promise<void>((resolve) => { entered = resolve; });
+    const plansByAddress = new Map<string, number>();
+    const order: string[] = [];
+    (a as any)._publisherCandidatePlan = async (signer: ethers.Wallet) => {
+      const visits = plansByAddress.get(signer.address) ?? 0;
+      plansByAddress.set(signer.address, visits + 1);
+      const base = { signer, address: signer.address, publisherAddress: signer.address };
+      if (visits === 0) return { ...base, publishEpochs: 12, tokenAmount: 120n,
+        pcaPricing: { kind: 'unavailable', error: new Error('transient lock probe') } };
+      order.push(signer.address);
+      if (signer.address === walletA.address) { entered(); await hold; }
+      return { ...base, publishEpochs: 24, tokenAmount: 240n, pcaPricing: { kind: 'available' } };
+    };
+    const pending = a.resolvePublisherPublishPlan({
+      contextGraphId: CG, billableByteSize: 100n, effectiveByteSize: 100n, defaultPublishEpochs: 12,
+    });
+    try {
+      await firstReprice;
+      expect(order).toEqual([walletA.address]);
+      nativeByAddr.set(lc(walletB.address), ONE);
+      release();
+      await expect(pending).resolves.toEqual({ publisherAddress: walletB.address, publishEpochs: 24, tokenAmount: 240n });
+      expect(order).toEqual([walletA.address, walletB.address]);
+    } finally { release(); }
+  });
+
   it('reports confirmed non-coverage after failed PCA planning as insufficient funds', async () => {
     const { a, walletA, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
     nativeByAddr.set(lc(walletA.address), ONE);

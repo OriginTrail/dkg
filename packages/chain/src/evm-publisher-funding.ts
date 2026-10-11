@@ -4,9 +4,11 @@ import { errorCode, PcaFundingUnknownError } from './evm-adapter-errors.js';
 import { isRetryableRpcError } from './evm-adapter-rpc.js';
 import type { PublisherConvictionPlanReader } from './publisher-plan.js';
 
-/** The funding verdict retains the exact candidate and its observed balances. */
+/** The verdict retains its candidate, observed balances, and owner-bound fresh eligibility. */
 export type PublisherCandidateFundingAssessment<T> =
-  | { kind: 'funded' | 'unfunded'; candidate: T; funding: PublisherCandidateBalances }
+  | { kind: 'funded' | 'unfunded'; candidate: T; funding: PublisherCandidateBalances;
+      /** Refresh at the decision point using this candidate's assessed funding mode. */
+      refreshPcaEligibility: () => Promise<boolean> }
   | { kind: 'unavailable'; candidate: T; funding: PublisherCandidateBalances; error: unknown };
 
 export interface PublisherCandidateBalances {
@@ -36,27 +38,23 @@ export async function reconcilePublisherCandidateFunding<T extends {
   candidates: readonly T[];
   assess: (candidates: readonly T[]) => Promise<PublisherFundingSelection<T>>;
   reprice: (candidate: T) => Promise<T>;
-  readFunding: (address: string) => Promise<PublisherCandidateBalances>;
   conviction: () => PublisherConvictionPlanReader | undefined;
-  nativeFloorWei: bigint;
-  tracFloorWei: bigint;
 }): Promise<T> {
   const candidates = [...input.candidates];
   let selection = await input.assess(candidates.slice());
   if (selection.kind === 'funded') return selection.candidate;
   if (selection.kind === 'unavailable') throw selection.error;
   if (!candidates.some((candidate) => candidate.pcaPricing.kind === 'unavailable')) throw selection.error;
-  const canStillUsePca = async (candidate: T): Promise<boolean> => {
-    const funds = await input.readFunding(candidate.address);
-    if (funds.native !== null && funds.native <= input.nativeFloorWei) return false;
-    return funds.trac !== null && !(funds.trac > input.tracFloorWei && funds.trac >= candidate.tokenAmount);
+  const canStillUsePca = async (candidate: T, assessments: readonly PublisherCandidateFundingAssessment<T>[]): Promise<boolean> => {
+    const assessment = assessments.find((value) => value.candidate === candidate);
+    return assessment?.kind === 'unfunded' && await assessment.refreshPcaEligibility();
   };
 
   // A failed lock/coverage lookup can leave a direct-spend lifetime that is
   // wrong for a real PCA. Re-price only candidates that can still use PCA.
   for (let index = 0; index < candidates.length; index += 1) {
     const candidate = candidates[index];
-    if (candidate.pcaPricing.kind === 'available' || !await canStillUsePca(candidate)) continue;
+    if (candidate.pcaPricing.kind === 'available' || !await canStillUsePca(candidate, selection.assessments)) continue;
     candidates[index] = await input.reprice(candidate);
   }
 
@@ -66,7 +64,7 @@ export async function reconcilePublisherCandidateFunding<T extends {
   // A strict false can be only a lifetime mismatch against direct-spend
   // fallback pricing. It did not probe coverage at the PCA's real lock.
   for (const candidate of candidates) {
-    if (candidate.pcaPricing.kind === 'available' || !await canStillUsePca(candidate)) continue;
+    if (candidate.pcaPricing.kind === 'available' || !await canStillUsePca(candidate, selection.assessments)) continue;
     const reader = input.conviction();
     if (!reader) continue;
     let accountId: bigint;

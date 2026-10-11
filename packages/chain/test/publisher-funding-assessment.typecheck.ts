@@ -1,5 +1,5 @@
 import { preferredFundableCandidate } from '../src/signer-selection.js';
-import type { PublisherFundingSelection, PublisherPcaPricingEvidence } from '../src/evm-publisher-funding.js';
+import { reconcilePublisherCandidateFunding, type PublisherCandidateFundingAssessment, type PublisherFundingSelection, type PublisherPcaPricingEvidence } from '../src/evm-publisher-funding.js';
 
 const candidate = { address: 'wallet' };
 // @ts-expect-error A funded verdict must identify its wallet.
@@ -21,3 +21,13 @@ preferredFundableCandidate([candidate], [0], policy);
 // @ts-expect-error A balance snapshot without its candidate cannot be selected.
 preferredFundableCandidate([{ funding: { native: 1n, trac: 0n } }], policy);
 void [selectedAddress, guaranteedCandidate];
+
+// @ts-expect-error Settled candidate evidence must own its refreshed PCA eligibility.
+const missingEligibility: PublisherCandidateFundingAssessment<typeof candidate> = { kind: 'unfunded', candidate, funding: { native: 1n, trac: 0n } };
+const independentPolicy: Parameters<typeof reconcilePublisherCandidateFunding>[0] = {
+  candidates: [], assess: async () => { throw new Error('type-only port'); },
+  reprice: async (value) => value, conviction: () => undefined,
+  // @ts-expect-error Reconciliation cannot configure a second balance/floor policy.
+  readFunding: async () => ({ native: 1n, trac: 0n }), nativeFloorWei: 0n, tracFloorWei: 0n,
+};
+void [missingEligibility, independentPolicy];

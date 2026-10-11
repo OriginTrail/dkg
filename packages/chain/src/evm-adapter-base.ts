@@ -2646,7 +2646,13 @@ export class EVMChainAdapterBase {
         if (!strictPcaRead) throw result.reason;
         return { kind: 'unavailable', candidate, funding, error: result.reason };
       }
-      return { kind: result.value ? 'funded' : 'unfunded', candidate, funding };
+      const mode = fundingModes[index];
+      return {
+        kind: result.value ? 'funded' : 'unfunded', candidate, funding,
+        refreshPcaEligibility: async () => this.walletFundingPath(
+          await this.getWalletFunding(candidate.address, { forceRefresh: true, metrics: mode.kind }), mode,
+        ) === 'pca',
+      };
     });
   }
 
@@ -2715,6 +2721,20 @@ export class EVMChainAdapterBase {
     ) };
   }
 
+  /** Canonical native/direct/PCA interpretation shared by funding and reconciliation. */
+  private walletFundingPath(
+    f: { native: bigint | null; trac: bigint | null },
+    funding: FundingMode,
+  ): 'unfunded' | 'direct' | 'pca' {
+    const nativeOk = f.native === null || f.native > funding.nativeFloorWei;
+    if (!nativeOk) return 'unfunded'; // even a PCA agent needs gas
+    if (funding.kind === 'native-only') return 'direct';
+    const ownTracOk = f.trac === null
+      || (f.trac > funding.tracFloorWei && f.trac >= funding.requiredTracWei);
+    if (ownTracOk) return 'direct';
+    return funding.pca.kind === 'none' ? 'unfunded' : 'pca';
+  }
+
   /**
    * The single fundability predicate, parameterized by {@link FundingMode}:
    * native gas above the floor, AND — for `native+trac` — own-TRAC covers the
@@ -2733,13 +2753,8 @@ export class EVMChainAdapterBase {
     funding: FundingMode,
     strictPcaRead = false,
   ): Promise<boolean> {
-    const nativeOk = f.native === null || f.native > funding.nativeFloorWei;
-    if (!nativeOk) return false; // even a PCA agent needs gas
-    if (funding.kind === 'native-only') return true;
-    const ownTracOk = f.trac === null
-      || (f.trac > funding.tracFloorWei && f.trac >= funding.requiredTracWei);
-    if (ownTracOk) return true;
-    if (funding.pca.kind === 'none') return false;
+    const path = this.walletFundingPath(f, funding);
+    if (path !== 'pca' || funding.kind === 'native-only') return path === 'direct';
     return this.isConvictionFundedAgent(
       address,
       funding.requiredTracWei,
