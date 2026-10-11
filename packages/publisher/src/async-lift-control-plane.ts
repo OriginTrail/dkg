@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { validateContextGraphId } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { AdmissionJournalEntry, LiftJob, LiftJobHex, LiftJobRequest, PersistedJournalKind, PersistedLiftJob } from './lift-job.js';
 import {
@@ -595,11 +596,10 @@ export function journalEntriesContextGraphId(entries: readonly AdmissionJournalE
   if (keys.size === 0) return null;
   if (keys.size !== 1) throw new Error('Publisher journal has conflicting lifecycle provenance');
   const components = [...keys][0]!.split(String.fromCharCode(0x1f));
-  if (components.length !== 4 || !components[0] || !components[1]
-    || components.some(component => [...component].some(character => {
-      const code = character.charCodeAt(0);
-      return code < 0x20 || code === 0x7f;
-    }))) {
+  // The writer excludes only the tuple delimiter from names and other lane
+  // components. Graph identity has its own canonical validation; applying that
+  // restriction to every component would reject valid writer-created journals.
+  if (components.length !== 4 || !validateContextGraphId(components[0]).valid || !components[1]) {
     throw new Error('Publisher journal has malformed lifecycle provenance');
   }
   return components[0];
