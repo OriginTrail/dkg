@@ -79,7 +79,11 @@ describe('confirmed-public host-mode policy', () => {
     g.setContextGraphSubscription(id, { subscribed: false, synced: false, syncMode: 'always-on',
       onChainHash: hash, onChainId: String(registered.contextGraphId) }, { persist: false });
     await g.reconcileSwmHostModeSubscription(id);
-    await g.swmHostModeStore!.append(id, new Uint8Array([19, 20, 21]));
+    const retainedBytes = new Uint8Array([19, 20, 21]);
+    await g.swmHostModeStore!.append(id, retainedBytes);
+    const beforeProof = await g.swmHostModeStore!.iterate(id, 0);
+    expect(beforeProof).toHaveLength(1);
+    expect(beforeProof[0].envelopeBytes).toEqual(retainedBytes);
     const wallet = ethers.Wallet.createRandom();
     expect(await g.chain.getIdentityIdForAddress(wallet.address)).toBe(0n);
     const signed = await mintSignedCatchupRequest({ contextGraphId: id, sinceSeqno: 0,
@@ -105,7 +109,10 @@ describe('confirmed-public host-mode policy', () => {
       const response = decodeSwmHostCatchupResponse(await catching);
       expect(response.denied).toBeDefined();
       expect(response.entries).toEqual([]);
-      expect((await g.swmHostModeStore!.stats()).perCg[id].entries).toBe(1);
+      // Retention is the actual log, independent of concurrent designation metadata writes.
+      const retained = await g.swmHostModeStore!.iterate(id, 0);
+      expect(retained).toHaveLength(1);
+      expect(retained[0].envelopeBytes).toEqual(retainedBytes);
     } finally { release(); await catching; proof.mockRestore(); }
   });
 
