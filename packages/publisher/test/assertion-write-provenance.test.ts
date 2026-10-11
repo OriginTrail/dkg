@@ -4,6 +4,7 @@ import { TypedEventBus, assertionLifecycleUri, contextGraphMetaUri, generateEd25
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { generateSubGraphRegistration } from '../src/metadata.js';
+import { generateAssertionWrittenMetadata } from '../src/index.js';
 
 const CG = 'write-provenance';
 const AUTHOR = `0x${'11'.repeat(20)}`;
@@ -37,6 +38,23 @@ async function writeEvents(store: OxigraphStore) {
 }
 
 describe('assertion write provenance', () => {
+  it('exposes a standalone generator with explicit time and zero-count support', async () => {
+    const store = new OxigraphStore();
+    const metadata = generateAssertionWrittenMetadata({
+      contextGraphId: CG, agentAddress: AUTHOR, assertionName: NAME,
+      assertionGraph: 'urn:write:graph', quadCount: 0, timestamp: new Date('2026-10-11T00:00:00.000Z'),
+    });
+    await store.insert(metadata);
+    const events = await writeEvents(store);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      actor: toAgentDid(AUTHOR), assertion: assertionLifecycleUri(CG, AUTHOR, NAME), graph: 'urn:write:graph',
+      count: '"0"^^<http://www.w3.org/2001/XMLSchema#integer>',
+    });
+    expect(Date.parse(String(events[0].time).match(/^"([^"]+)"/)![1])).toBe(Date.parse('2026-10-11T00:00:00.000Z'));
+    expect(events[0].time).toContain('http://www.w3.org/2001/XMLSchema#dateTime');
+  });
+
   it.each([undefined, 'science'])('records each successful write in scope %s, including repeated payloads', async (sub) => {
     const { store, publisher } = await fixture(true, sub);
     const payload = [{ subject: 'urn:write:entity', predicate: 'http://schema.org/name', object: '"First"' }];
