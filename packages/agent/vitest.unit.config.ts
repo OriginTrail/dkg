@@ -18,6 +18,7 @@ export default defineConfig({
     allowOnly: false,
     coverage: coverageForPackage("agent"),
     include: [
+      "test/assertion-write-history.test.ts",
       "test/authority-index-snapshot-runtime.test.ts",
       "test/authority-index-snapshot-service.test.ts",
       "test/authority-index-snapshot-wiring.test.ts",

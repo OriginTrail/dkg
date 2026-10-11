@@ -4350,9 +4350,10 @@ export class DKGAgent extends DKGAgentBase {
 
         // Layer transition by event class (the writers no longer persist it):
         //   created  ⇒ none→WM   · promoted  ⇒ WM→SWM
-        //   updated  ⇒ VM→VM     · discarded ⇒ WM→none
+        //   written ⇒ WM→WM     · updated ⇒ VM→VM     · discarded ⇒ WM→none
         const LAYER_BY_TYPE: Record<string, { from: string; to: string }> = {
           created: { from: 'none', to: MemoryLayer.WorkingMemory },
+          written: { from: MemoryLayer.WorkingMemory, to: MemoryLayer.WorkingMemory },
           promoted: { from: MemoryLayer.WorkingMemory, to: MemoryLayer.SharedWorkingMemory },
           published: { from: MemoryLayer.SharedWorkingMemory, to: MemoryLayer.VerifiableMemory },
           updated: { from: MemoryLayer.VerifiableMemory, to: MemoryLayer.VerifiableMemory },
@@ -4369,7 +4370,7 @@ export class DKGAgent extends DKGAgentBase {
               const typeSuffix = (b['type'] ?? '').replace(DKG_NS, '').replace('Assertion', '').toLowerCase();
               const derived = LAYER_BY_TYPE[typeSuffix];
               eventMap.set(eventUri, {
-                type: (typeSuffix || stateStr) as AssertionState,
+                type: (typeSuffix || stateStr) as AssertionEvent['type'],
                 timestamp: strip(b['timestamp']) ?? '',
                 fromLayer: strip(b['fromLayer']) ?? derived?.from ?? '',
                 toLayer: strip(b['toLayer']) ?? derived?.to ?? '',
