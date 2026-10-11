@@ -31,6 +31,10 @@ export interface RpcTimingDistribution {
 export interface RpcRequestTimingClassSnapshot {
   /** Time from asking the governor for a permit until the permit was granted. */
   readonly admissionWait: RpcTimingDistribution;
+  /** Failed admission waits, separated by the owner that ended the wait. */
+  readonly admissionDeadlineWait: RpcTimingDistribution;
+  readonly admissionCancelledWait: RpcTimingDistribution;
+  readonly admissionRejectedWait: RpcTimingDistribution;
   /** Time from sending the HTTP attempt until its response (or failure). */
   readonly endpointLatency: RpcTimingDistribution;
   readonly endpointFailures: number;
@@ -50,6 +54,9 @@ interface MutableDistribution {
 
 interface MutableClassTiming {
   admissionWait: MutableDistribution;
+  admissionDeadlineWait: MutableDistribution;
+  admissionCancelledWait: MutableDistribution;
+  admissionRejectedWait: MutableDistribution;
   endpointLatency: MutableDistribution;
   endpointFailures: number;
 }
@@ -61,6 +68,9 @@ function emptyDistribution(): MutableDistribution {
 function emptyClassTiming(): MutableClassTiming {
   return {
     admissionWait: emptyDistribution(),
+    admissionDeadlineWait: emptyDistribution(),
+    admissionCancelledWait: emptyDistribution(),
+    admissionRejectedWait: emptyDistribution(),
     endpointLatency: emptyDistribution(),
     endpointFailures: 0,
   };
@@ -96,6 +106,9 @@ function freezeDistribution(distribution: MutableDistribution): RpcTimingDistrib
 function freezeClass(timing: MutableClassTiming): RpcRequestTimingClassSnapshot {
   return Object.freeze({
     admissionWait: freezeDistribution(timing.admissionWait),
+    admissionDeadlineWait: freezeDistribution(timing.admissionDeadlineWait),
+    admissionCancelledWait: freezeDistribution(timing.admissionCancelledWait),
+    admissionRejectedWait: freezeDistribution(timing.admissionRejectedWait),
     endpointLatency: freezeDistribution(timing.endpointLatency),
     endpointFailures: timing.endpointFailures,
   });
@@ -107,6 +120,18 @@ export function recordRpcAdmissionWait(
   waitMs: number,
 ): void {
   observe(processTiming[requestClass].admissionWait, waitMs);
+}
+
+/** Failed waits are observable without changing admitted-attempt accounting. */
+export function recordFailedRpcAdmissionWait(
+  requestClass: RpcTimingRequestClass,
+  waitMs: number,
+  outcome: 'deadline' | 'cancelled' | 'rejected',
+): void {
+  const timing = processTiming[requestClass];
+  observe(outcome === 'deadline' ? timing.admissionDeadlineWait
+    : outcome === 'cancelled' ? timing.admissionCancelledWait
+      : timing.admissionRejectedWait, waitMs);
 }
 
 /** Record one physical attempt's endpoint round trip; `ok=false` marks a failed attempt. */
@@ -146,6 +171,9 @@ function diffClass(
 ): RpcRequestTimingClassSnapshot {
   return Object.freeze({
     admissionWait: diffDistribution(before.admissionWait, after.admissionWait),
+    admissionDeadlineWait: diffDistribution(before.admissionDeadlineWait, after.admissionDeadlineWait),
+    admissionCancelledWait: diffDistribution(before.admissionCancelledWait, after.admissionCancelledWait),
+    admissionRejectedWait: diffDistribution(before.admissionRejectedWait, after.admissionRejectedWait),
     endpointLatency: diffDistribution(before.endpointLatency, after.endpointLatency),
     endpointFailures: after.endpointFailures - before.endpointFailures,
   });
