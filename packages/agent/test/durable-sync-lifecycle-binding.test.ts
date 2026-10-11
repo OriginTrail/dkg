@@ -87,6 +87,7 @@ vi.mock('../src/sync/requester/finalized-swm-twin-reconciliation.js', async (imp
 import { PROTOCOL_SYNC_CHANGELOG, createOperationContext } from '@origintrail-official/dkg-core';
 import { resolveSyncGlobalBackpressure, withGlobalSyncBackpressure } from '../src/sync/backpressure.js';
 import { createDurableSyncAccumulator } from '../src/sync/durable-progress.js';
+import { exactAssetFetchSessionPolicy } from '../src/sync/requester/exact-durable-fetch.js';
 import { createUalOnlyExactAssetSelection } from '../src/sync/exact-assets.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import {
@@ -554,7 +555,7 @@ describe('durable sync lifecycle chain binding', () => {
       );
       expect(runLegacyDurableSyncDetailed.mock.calls[0]?.[6]).toMatchObject({
         exactRecoveryTransportMode, signal, onWorkStarted, isCurrent,
-        exactAssetSelection: { kind: 'ual-only', assetUals: [ual] },
+        exactAssetFetchPolicy: { kind: 'durable-materialization', selection: { kind: 'ual-only', assetUals: [ual] }, forceFreshSession: false, allowDurableCheckpoints: true },
       });
     },
   );
@@ -579,7 +580,7 @@ describe('durable sync lifecycle chain binding', () => {
 
     expect(runLegacyDurableSyncDetailed).toHaveBeenCalledTimes(1);
     expect(runLegacyDurableSyncDetailed.mock.calls[0]?.[6]).toMatchObject({
-      exactAssetSelection: { kind: 'ual-only', assetUals: [exactUal] },
+      exactAssetFetchPolicy: { kind: 'durable-materialization', selection: { kind: 'ual-only', assetUals: [exactUal] }, forceFreshSession: false, allowDurableCheckpoints: true },
       stopOnBackoffWorthyFailure: true,
       priority: 1_000,
       // The admission SOURCE is what makes this show up as `durable:vm-recovery`
@@ -1054,6 +1055,24 @@ describe('durable sync lifecycle chain binding', () => {
     expect(runChangelogLane).toHaveBeenCalledTimes(1);
     expect(runLegacyDurableSync).not.toHaveBeenCalled();
 
+    const selected = createUalOnlyExactAssetSelection([ual]);
+    const selectedOptions = [
+      { exactAssetSelection: selected, forceFreshExactSession: true },
+      { exactAssetFetchPolicy: exactAssetFetchSessionPolicy(selected, 'vm-update-refresh') },
+    ];
+    for (const options of selectedOptions) {
+      await LifecycleSyncMethods.prototype.syncFromPeerDetailed.call(
+        agentLike, 'peer-changelog-capable', [contextGraphId], undefined, undefined, undefined, options,
+      );
+      expect(runChangelogLane).toHaveBeenCalledTimes(1);
+      expect(runLegacyDurableSync.mock.calls.at(-1)?.[6]).toBe(options);
+    }
+    await LifecycleSyncMethods.prototype.syncFromPeerDetailed.call(
+      agentLike, 'peer-changelog-capable', [contextGraphId], undefined, undefined, undefined,
+      { forceFreshExactSession: true },
+    );
+    expect(runChangelogLane).toHaveBeenCalledTimes(2);
+
     const controller = new AbortController();
     controller.abort(new Error('caller cancelled before lane selection'));
     await LifecycleSyncMethods.prototype.syncFromPeerDetailed.call(
@@ -1065,9 +1084,9 @@ describe('durable sync lifecycle chain binding', () => {
       undefined,
       { signal: controller.signal },
     );
-    expect(runChangelogLane).toHaveBeenCalledTimes(1);
-    expect(runLegacyDurableSync).toHaveBeenCalledTimes(1);
-    expect(runLegacyDurableSync.mock.calls[0]?.[6]).toMatchObject({
+    expect(runChangelogLane).toHaveBeenCalledTimes(2);
+    expect(runLegacyDurableSync).toHaveBeenCalledTimes(3);
+    expect(runLegacyDurableSync.mock.calls.at(-1)?.[6]).toMatchObject({
       signal: controller.signal,
     });
   });
