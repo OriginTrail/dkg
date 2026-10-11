@@ -5,6 +5,11 @@ import {
   type ContextGraphAuthorityRpcSite,
 } from '@origintrail-official/dkg-chain';
 import {
+  resolveKnowledgeAssetDraftReadAuthority,
+  type ContextGraphReadAuthorityDecision,
+  type KnowledgeAssetDraftReadAuthorityOptions,
+} from '@origintrail-official/dkg-agent/dist/context-graph-read-authority.js';
+import {
   jsonResponse,
   respondContextGraphReadAuthorityUnavailable,
   validateRequiredContextGraphId,
@@ -28,23 +33,27 @@ export async function requireContextGraphReadAuthority(
   contextGraphId: unknown,
   site: ContextGraphAuthorityRpcSite = CONTEXT_GRAPH_AUTHORITY_RPC_SITES.query,
 ): Promise<boolean> {
-  return requireReadAuthority(ctx, contextGraphId, site);
+  return requireReadAuthority(ctx, contextGraphId, site, (id, callerAgentAddress, signal) => (
+    ctx.agent.resolveContextGraphReadAuthority(id, { callerAgentAddress, signal })
+  ));
 }
 
 /** A local curator proof authorizes only the caller's own draft inspection lane. */
 export async function requireKnowledgeAssetDraftReadAuthority(
   ctx: RequestContext,
   contextGraphId: unknown,
-  draftAgentAddress: string | undefined,
+  draft: KnowledgeAssetDraftReadAuthorityOptions['draft'],
 ): Promise<boolean> {
-  return requireReadAuthority(ctx, contextGraphId, CONTEXT_GRAPH_AUTHORITY_RPC_SITES.query, draftAgentAddress);
+  return requireReadAuthority(ctx, contextGraphId, CONTEXT_GRAPH_AUTHORITY_RPC_SITES.query, (id, callerAgentAddress, signal) => (
+    resolveKnowledgeAssetDraftReadAuthority(ctx.agent, id, { callerAgentAddress, draft, signal })
+  ));
 }
 
 async function requireReadAuthority(
   ctx: RequestContext,
   contextGraphId: unknown,
   site: ContextGraphAuthorityRpcSite,
-  draftAgentAddress?: string,
+  resolveAuthority: (id: string, caller: string | undefined, signal: AbortSignal) => Promise<ContextGraphReadAuthorityDecision>,
 ): Promise<boolean> {
   if (!validateRequiredContextGraphId(contextGraphId, ctx.res)) return false;
   const validatedId = contextGraphId as string;
@@ -53,9 +62,8 @@ async function requireReadAuthority(
   const lifecycle = createStoreQueryRequestLifecycle(ctx.req, ctx.res, 'api.context_graph.read_authority');
   try {
     lifecycle.signal.throwIfAborted();
-    const authority = await withRpcUsageSite(site, () => ctx.agent.resolveContextGraphReadAuthority(
-      validatedId,
-      { callerAgentAddress: actor.authenticatedAgentAddress, signal: lifecycle.signal },
+    const authority = await withRpcUsageSite(site, () => resolveAuthority(
+      validatedId, actor.authenticatedAgentAddress, lifecycle.signal,
     ));
     lifecycle.signal.throwIfAborted();
     // Unavailable authority is retryable, not a terminal caller refusal. The
@@ -64,28 +72,11 @@ async function requireReadAuthority(
       respondContextGraphReadAuthorityUnavailable(ctx.res, authority);
       return false;
     }
-    // A positive node grant does not let one bearer inherit another author's draft.
-    // Canonical local-create/unregistered provenance and curator identity narrow that
-    // grant to this caller's lane. Explicit refusals and unavailable evidence never fall back.
-    let ownLocalDraft = false;
-    const caller = actor.authenticatedAgentAddress;
-    if (authority.outcome === 'allowed' && authority.source === 'legacy-local'
-      && authority.grantScope === 'node' && caller !== undefined
-      && draftAgentAddress?.toLowerCase() === caller.toLowerCase()
-      && await ctx.agent.isLocalFirstUnregisteredContextGraph(validatedId)) {
-      lifecycle.signal.throwIfAborted();
-      const meta = await ctx.agent.getCgMeta(validatedId, { signal: lifecycle.signal });
-      lifecycle.signal.throwIfAborted();
-      const curator = await ctx.agent.getContextGraphCurator(validatedId, { signal: lifecycle.signal });
-      ownLocalDraft = !meta.revokedAgents.some(address => address.toLowerCase() === caller.toLowerCase())
-        && ctx.agent.curatorDidMatchesChecksumAgent(curator ?? undefined, caller);
-      lifecycle.signal.throwIfAborted();
-    }
     // The resolver owns whether evidence grants this caller, the public, or only the node.
-    if (!ownLocalDraft && (authority.outcome !== 'allowed' || (
+    if (authority.outcome !== 'allowed' || (
       actor.authenticatedAgentAddress !== undefined
       && authority.grantScope !== 'caller' && authority.grantScope !== 'public'
-    ))) {
+    )) {
       jsonResponse(ctx.res, 403, { error: 'Not authorized to read this context graph.' });
       return false;
     }

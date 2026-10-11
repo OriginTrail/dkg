@@ -31,6 +31,7 @@ describe('real local curator draft provenance through HTTP admission', () => {
   let owner: string;
   let other: string;
   let kaNumber: string;
+  let compactLiteralName: string;
   const deniedCg = `${CG}-denied`;
   const revokedCg = `${CG}-revoked`;
   const foreignCg = `${CG}-foreign-curator`;
@@ -55,6 +56,10 @@ describe('real local curator draft provenance through HTTP admission', () => {
         predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT, ...(cg === deniedCg ? { object: `"${owner}"` } : {}) });
       await agent.renameContextGraph(cg, cg, cg === foreignCg ? other : owner);
     }
+    compactLiteralName = `${other}:5`;
+    await agent.assertion.create(CG, compactLiteralName, { agentAddress: owner });
+    await agent.assertion.write(CG, compactLiteralName, [{ subject: 'urn:legacy:literal', predicate: 'http://schema.org/name',
+      object: '"literal secret"', graph: '' }], { agentAddress: owner });
     expect((await agent.getCgMeta(revokedCg)).revokedAgents.map(address => address.toLowerCase())).toContain(owner.toLowerCase());
     kaNumber = (await agent.assertion.history(CG, 'asset', { agentAddress: owner }))!.kaNumber!;
     expect(kaNumber).toBeDefined();
@@ -81,6 +86,11 @@ describe('real local curator draft provenance through HTTP admission', () => {
     const res = await read(alias);
     expect(res.statusCode, res.body).toBe(200);
     expect(res.body).toContain('legacy secret');
+  });
+  it.each(['', '/wm', '/wm/quads', '/wm/extraction-status'])('keeps own compact-looking literal precedence at %s', async suffix => {
+    const res = await read(compactLiteralName, suffix);
+    expect(res.statusCode, res.body).toBe(suffix === '/wm/extraction-status' ? 404 : 200);
+    if (suffix === '/wm/quads') expect(res.body).toContain('literal secret');
   });
   it('refuses another caller inspecting the curator lane', async () => {
     const res = await read('asset', '/wm/quads', other, `&agentAddress=${owner}`);
@@ -115,13 +125,33 @@ describe('real local curator draft provenance through HTTP admission', () => {
     expect(res.statusCode).toBe(403);
     expect(res.body).not.toContain('legacy secret');
   });
-  it('refuses when canonical local evidence cannot be read', async () => {
-    const meta = vi.spyOn(agent, 'getCgMeta').mockRejectedValueOnce(new Error('local metadata unavailable'));
+  it('refuses a later draft-provenance metadata outage after a real legacy node grant', async () => {
+    const originalAuthority = agent.resolveContextGraphReadAuthority.bind(agent);
+    const originalMeta = agent.getCgMeta.bind(agent);
+    let authoritySettled = false;
+    let laterMetadataReads = 0;
+    const authority = vi.spyOn(agent, 'resolveContextGraphReadAuthority').mockImplementation(async (...args) => {
+      const decision = await originalAuthority(...args);
+      expect(decision).toMatchObject({ outcome: 'allowed', source: 'legacy-local', grantScope: 'node' });
+      authoritySettled = true;
+      return decision;
+    });
+    const meta = vi.spyOn(agent, 'getCgMeta').mockImplementation(async (...args) => {
+      if (authoritySettled) {
+        laterMetadataReads++;
+        throw new Error('later draft metadata unavailable');
+      }
+      return originalMeta(...args);
+    });
     try {
       const res = await read('asset');
+      expect(authoritySettled).toBe(true);
+      expect(laterMetadataReads).toBe(1);
       expect(res.statusCode).toBe(503);
+      expect(JSON.parse(res.body)).toMatchObject({ code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE' });
+      expect(res.body).not.toContain('later draft metadata unavailable');
       expect(res.body).not.toContain('legacy secret');
-    } finally { meta.mockRestore(); }
+    } finally { meta.mockRestore(); authority.mockRestore(); }
   });
   it('keeps unavailable authority retryable without curator fallback', async () => {
     const authority = vi.spyOn(agent, 'resolveContextGraphReadAuthority').mockResolvedValueOnce({

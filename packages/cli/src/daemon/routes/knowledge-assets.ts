@@ -1208,8 +1208,12 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     const identifier = classifyKaIdentifier(name);
     const ownDraftIdentifier = identifier.kind === 'name' || (agentAddress !== undefined
       && (identifier.kaId >> 96n) === BigInt(agentAddress));
-    const draftLane = (layer === undefined || layer === 'wm') && ownDraftIdentifier ? agentAddress : undefined;
-    if (!(await requireKnowledgeAssetDraftReadAuthority(ctx, cg, draftLane))) return null;
+    // A compact spelling can still be a literal name in this author's lane.
+    // The draft authority owner verifies its lifecycle after resolving authority.
+    const draft = (layer === undefined || layer === 'wm') && agentAddress !== undefined
+      && (ownDraftIdentifier || AGENT_NUMBER_RE.test(name))
+      ? { agentAddress, ...(ownDraftIdentifier ? {} : { literalName: name, subGraphName }) } : undefined;
+    if (!(await requireKnowledgeAssetDraftReadAuthority(ctx, cg, draft))) return null;
     return { cg, subGraphName, agentAddress };
   }
 

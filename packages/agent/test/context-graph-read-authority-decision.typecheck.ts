@@ -45,3 +45,15 @@ export const deniedWithCallerGrant: ContextGraphReadAuthorityDecision = {
   // @ts-expect-error a denied decision cannot convey a caller grant
   grantScope: 'caller',
 };
+
+// A draft read names an explicit author lane; it does not change general read authority.
+import type { DKGAgent } from '../src/index.js';
+import { resolveKnowledgeAssetDraftReadAuthority, type KnowledgeAssetDraftReadAuthorityOptions } from '../src/context-graph-read-authority.js';
+declare const draftAgent: DKGAgent;
+const draftOptions: KnowledgeAssetDraftReadAuthorityOptions = {
+  callerAgentAddress: '0xcaller', draft: { agentAddress: '0xcaller', literalName: 'compact:name' },
+};
+const draftDecision: Promise<ContextGraphReadAuthorityDecision> = resolveKnowledgeAssetDraftReadAuthority(draftAgent, 'cg', draftOptions);
+// @ts-expect-error A draft proof cannot omit its selected author lane.
+const missingDraftAuthor: KnowledgeAssetDraftReadAuthorityOptions = { draft: { literalName: 'compact:name' } };
+void [draftDecision, missingDraftAuthor];

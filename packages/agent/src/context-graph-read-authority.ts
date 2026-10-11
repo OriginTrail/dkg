@@ -9,6 +9,7 @@
  * the distinction between an authoritative denial and unavailable authority.
  */
 
+import type { DKGAgent } from './dkg-agent.js';
 import { CONTEXT_GRAPH_AUTHORITY_RPC_SITES, withRpcUsageSite } from '@origintrail-official/dkg-chain';
 import {
   contextGraphReadAuthorityDependencyOf,
@@ -105,6 +106,49 @@ export async function resolveScopedContextGraphQueryReadAuthority(
     return { ...authority, outcome: 'allowed', grantScope: input.callerAgentAddress ? 'caller' : 'node', reason: 'local-first-working-memory-owner' };
   }
   return authority;
+}
+
+export interface KnowledgeAssetDraftReadAuthorityOptions {
+  callerAgentAddress?: string;
+  draft?: { agentAddress: string; literalName?: string; subGraphName?: string };
+  signal?: AbortSignal;
+}
+
+/** Draft-only local provenance never authorizes another lane or general graph reads. */
+export async function resolveKnowledgeAssetDraftReadAuthority(
+  agent: DKGAgent,
+  contextGraphId: string,
+  options: KnowledgeAssetDraftReadAuthorityOptions,
+): Promise<ContextGraphReadAuthorityDecision> {
+  const { callerAgentAddress: caller, draft, signal } = options;
+  signal?.throwIfAborted();
+  const authority = await agent.resolveContextGraphReadAuthority(contextGraphId, { callerAgentAddress: caller, signal });
+  signal?.throwIfAborted();
+  if (authority.outcome !== 'allowed' || authority.source !== 'legacy-local'
+    || authority.grantScope !== 'node' || caller === undefined
+    || draft?.agentAddress.toLowerCase() !== caller.toLowerCase()) return authority;
+  try {
+    if (!await agent.isLocalFirstUnregisteredContextGraph(contextGraphId)) return authority;
+    signal?.throwIfAborted();
+    // Compact identifiers are also historical literal names. Only a lifecycle
+    // in this already-authorized caller lane can override a foreign alias.
+    if (draft.literalName !== undefined && !await agent.assertion.history(contextGraphId, draft.literalName, {
+      agentAddress: caller, subGraphName: draft.subGraphName,
+    })) return authority;
+    signal?.throwIfAborted();
+    const meta = await agent.getCgMeta(contextGraphId, { signal });
+    signal?.throwIfAborted();
+    const curator = await agent.getContextGraphCurator(contextGraphId, { signal });
+    signal?.throwIfAborted();
+    if (meta.revokedAgents.some(address => address.toLowerCase() === caller.toLowerCase())
+      || !agent.curatorDidMatchesChecksumAgent(curator ?? undefined, caller)) return authority;
+    return { ...authority, grantScope: 'caller', reason: 'local-curator-draft' };
+  } catch (error) {
+    signal?.throwIfAborted();
+    return unavailableContextGraphReadAuthorityDecision(
+      'legacy-local', 'draft-provenance-unavailable', contextGraphReadAuthorityDependencyOf(error),
+    );
+  }
 }
 
 export const CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE =
