@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { join } from 'node:path';
+import { DKG_ONTOLOGY, encodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
+  encodeGossipEnvelope, computeGossipSigningPayload, computeGossipSigningPayloadV2,
+  GOSSIP_ENVELOPE_VERSION, GOSSIP_TYPE_WORKSPACE_PUBLISH, GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED,
+  ciphertextChunkStoreGraph, CIPHERTEXT_CHUNK_PREDICATE } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { createHostModeTestFixture, hostEnvelope, type StripInternals } from './swm/host-mode.fixture.js';
@@ -106,6 +112,79 @@ describe('public host restoration policy fences', () => {
     expect(ingest).toHaveBeenCalledTimes(1);
     expect((await g.swmHostModeStore!.stats()).perCg[id].entries).toBe(1);
   });
+
+  for (const chunked of [false, true]) for (const transition of ['unchanged', 'rebind', 'close'] as const) {
+    it(`rechecks real signed custody after held authority (chunked=${chunked}, transition=${transition})`, async () => {
+      const core = await makeCore(true, { hostPublic: true });
+      // The close control starts the real lifecycle; stop on an unstarted
+      // fixture would only close restoration and leave its gossip stub live.
+      if (transition === 'close') await core.start();
+      const id = 'held-real-host-envelope';
+      const { g, hash } = await publicBinding(core, id);
+      const wallet = ethers.Wallet.createRandom();
+      await core.store.insert([{ subject: `did:dkg:context-graph:${id}`, predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+        object: `"${wallet.address}"`, graph: `did:dkg:context-graph:${id}/_meta` }]);
+      await g.reconcileSwmHostModeSubscription(id);
+      const payload = chunked ? new Uint8Array([...new Uint8Array(32).fill(19), 20, 21]) : encodeEncryptedWorkspacePayload({
+        version: '1', type: ENCRYPTED_WORKSPACE_ENVELOPE_TYPE, contextGraphId: id, senderIdentity: wallet.address,
+        operationId: 'held-real', shareOperationId: 'held-real', timestampMs: Date.now(), cipherAlgorithm: 'aes-256-gcm',
+        nonce: new Uint8Array(12), ciphertext: new Uint8Array([20, 21]), recipients: [],
+        keyAgreementAlgorithm: 'x25519', ephemeralPublicKey: new Uint8Array(32) });
+      const type = chunked ? GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED : GOSSIP_TYPE_WORKSPACE_PUBLISH;
+      const timestamp = new Date().toISOString();
+      const digest = chunked ? computeGossipSigningPayloadV2(type, id, timestamp, payload, 0)
+        : computeGossipSigningPayload(type, id, timestamp, payload);
+      const bytes = encodeGossipEnvelope({ version: GOSSIP_ENVELOPE_VERSION, type, contextGraphId: id,
+        agentAddress: wallet.address, timestamp, signature: ethers.getBytes(await wallet.signMessage(digest)), payload,
+        ...(chunked ? { swmMessageIndex: 0 } : {}) });
+      const verifier = core.getOrCreateSharedMemoryHandler();
+      const verify = verifier.verifyHostModeEnvelopeAuthority.bind(verifier);
+      const entered = deferred(), release = deferred();
+      vi.spyOn(verifier, 'verifyHostModeEnvelopeAuthority').mockImplementation(async (...args) => {
+        const verdict = await verify(...args);
+        expect(verdict.accepted).toBe(true);
+        entered.resolve(); await release.promise; return verdict;
+      });
+      // This spy only observes the actual async ingestion promise; it does not
+      // replace authority, ingestion or either persistence implementation.
+      const ingest = vi.spyOn(g, chunked ? 'ingestSwmCiphertextChunkEnvelope' : 'ingestSwmHostModeEnvelope');
+      const handler = g.swmHostModeHandlers.get(hash)!;
+      const writes = vi.spyOn(core.store, 'insert');
+      handler('topic', bytes, 'real-signed-publisher');
+      try {
+        await Promise.race([entered.promise, ingest.mock.results[0].value.then(() => {
+          throw new Error('ingest settled before real authority entered');
+        })]);
+        if (transition === 'rebind') {
+          const replacement = await g.chain.createOnChainContextGraph({ accessPolicy: 1, publishPolicy: 1,
+            nameHash: ethers.keccak256(ethers.toUtf8Bytes('held-real-private-slot')).toLowerCase() });
+          const privateId = String(replacement.contextGraphId);
+          g.setContextGraphSubscription(id, { subscribed: false, synced: false, syncMode: 'always-on',
+            onChainHash: hash, onChainId: privateId }, { persist: false });
+          g.onChainAccessPolicyCache.set(privateId, 1);
+        } else if (transition === 'close') await core.stop();
+        release.resolve();
+        await ingest.mock.results[0].value;
+        if (chunked) {
+          const chunkWrites = writes.mock.calls.flatMap(([quads]) => quads).filter(quad =>
+            quad.graph === ciphertextChunkStoreGraph(hash) && quad.predicate === CIPHERTEXT_CHUNK_PREDICATE);
+          expect(chunkWrites).toHaveLength(transition === 'unchanged' ? 1 : 0);
+          // stop closes the actual triple store. Reopen its persisted snapshot
+          // for the post-shutdown assertion rather than querying a dead worker.
+          const reopened = transition === 'close' ? new OxigraphStore(join(g.config.dataDir, 'store.nq')) : undefined;
+          try {
+            const result = await (reopened ?? core.store).query(`SELECT ?value WHERE { GRAPH <${ciphertextChunkStoreGraph(hash)}> {
+              ?s <${CIPHERTEXT_CHUNK_PREDICATE}> ?value } }`);
+            expect(result.type).toBe('bindings');
+            if (result.type === 'bindings') expect(result.bindings).toHaveLength(transition === 'unchanged' ? 1 : 0);
+          } finally { await reopened?.close(); }
+        } else {
+          const entries = (await g.swmHostModeStore!.stats()).perCg[id]?.entries ?? 0;
+          expect(entries).toBe(transition === 'unchanged' ? 1 : 0);
+        }
+      } finally { release.resolve(); await ingest.mock.results[0]?.value; }
+    });
+  }
 
   for (const reverse of [false, true]) it(`held public proof cannot admit a replacement private ${reverse ? 'reverse' : 'authoritative'} binding`, async () => {
     const core = await makeCore(true, { hostPublic: true });

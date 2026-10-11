@@ -363,7 +363,7 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
     expect(f.g.swmHostModeSubscribed.get(f.hash)).toBe(SUBSCRIPTION_SOURCES.MANUAL);
     const ingest = vi.spyOn(f.core, 'ingestSwmHostModeEnvelope').mockResolvedValue(undefined);
     handler('', hostEnvelope(f.hash, false), 'foreign-owner-probe');
-    expect(ingest).toHaveBeenCalledExactlyOnceWith(f.hash, expect.any(Uint8Array), 'foreign-owner-probe');
+    expect(ingest).toHaveBeenCalledExactlyOnceWith(f.hash, expect.any(Uint8Array), 'foreign-owner-probe', expect.any(Function));
   });
 
   it('public manual reentry stands down for an existing private different-slot owner', async () => {

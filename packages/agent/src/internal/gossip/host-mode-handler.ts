@@ -7,8 +7,8 @@ import type { GossipSession } from '../../gossip-session.js';
 
 interface HostModeHandlerPorts {
   swmHostModeStripCiphertext(): boolean;
-  ingestSwmCiphertextChunkEnvelope(contextGraphId: string, data: Uint8Array, from: string): Promise<unknown>;
-  ingestSwmHostModeEnvelope(contextGraphId: string, data: Uint8Array, from: string): Promise<unknown>;
+  ingestSwmCiphertextChunkEnvelope(contextGraphId: string, data: Uint8Array, from: string, admissionCurrent?: () => boolean): Promise<unknown>;
+  ingestSwmHostModeEnvelope(contextGraphId: string, data: Uint8Array, from: string, admissionCurrent?: () => boolean): Promise<unknown>;
 }
 
 /** Dispatch only through the session and classification which own this handler. */
@@ -18,9 +18,11 @@ export function createSwmHostModeHandler(
   session: GossipSession,
   contextGraphId: string,
   wireCgId: string,
+  captureAdmissionCurrent: () => () => boolean = () => () => session.active,
 ): (topic: string, data: Uint8Array, from: string) => void {
   return (_topic: string, data: Uint8Array, from: string) => {
-    if (!session.active) return;
+    const admissionCurrent = captureAdmissionCurrent();
+    if (!session.active || !admissionCurrent()) return;
     // Fail closed when the classification is absent. Only an explicitly
     // non-curated manual subscription retains the public host-mode hatch.
     if (
@@ -46,7 +48,7 @@ export function createSwmHostModeHandler(
       envelopeType = peek?.type;
     } catch { /* drop into legacy path */ }
     if (envelopeType === GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED) {
-      ports.ingestSwmCiphertextChunkEnvelope(contextGraphId, data, from).catch((err: unknown) => {
+      ports.ingestSwmCiphertextChunkEnvelope(contextGraphId, data, from, admissionCurrent).catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err);
         log.warn(
           createOperationContext('system'),
@@ -55,7 +57,7 @@ export function createSwmHostModeHandler(
       });
       return;
     }
-    ports.ingestSwmHostModeEnvelope(contextGraphId, data, from).catch((err: unknown) => {
+    ports.ingestSwmHostModeEnvelope(contextGraphId, data, from, admissionCurrent).catch((err: unknown) => {
       const msg = err instanceof Error ? err.message : String(err);
       log.warn(
         createOperationContext('system'),

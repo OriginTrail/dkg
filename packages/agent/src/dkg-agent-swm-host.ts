@@ -931,41 +931,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
   /** Capture one gossip lifetime for the shared admission/activation owner. */
   swmHostModeActivation(this: DKGAgent) {
-    const session = this.gossipSession;
-    return createAutomaticHostModeActivation({
-      current: () => session.active && this.gossipSession === session && this.swmHostModeStore !== undefined,
-      admissionAllowed: id => this.automaticSwmHostModeAdmissionAllowed(id),
-      restoreBinding: (id, onChainId) => this.restorePersistedHostModeBinding(id, onChainId),
-      reserved: id => (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(id),
-      legacyAllowed: id => this.rfc64LegacySwmGossipAllowedForContextGraph(id),
-      unwire: id => this.unwireSwmHostModeHandler(id),
-      member: id => this.isMemberModeRegisteredForCg(id),
-      source: id => session.swmHostModeSubscribed.get(this.canonicalSwmHostModeKey(id)),
-      curated: id => session.swmHostModeCurated.get(this.canonicalSwmHostModeKey(id)),
-      captureCurrent: id => this.swmHostModePublicPolicy().captureCurrent(id),
-      strip: () => this.swmHostModeStripCiphertext(),
-      hostPublic: () => this.config.swmHostMode?.hostPublic === true,
-      probeCurated: id => this.isCuratedForHostMode(id),
-      accessPolicy: id => this.swmHostModeAccessPolicy(id),
-      confirmedPublic: id => this.isConfirmedPublicForHostMode(id),
-      wire: (id, source, curated) => this.wireSwmHostModeHandler(id, source, curated),
-      classify: (id, curated, current) => {
-        const key = this.canonicalSwmHostModeKey(id);
-        session.swmHostModeCurated.set(key, curated);
-        if (curated) session.swmHostModePublicBindingCurrent.delete(key);
-        else session.swmHostModePublicBindingCurrent.set(key, current);
-      },
-      persisted: id => this.awaitHostModePersistence(id),
-      markRegistered: (id, current) => this.maybeMarkRegisteredForHostMode(id, current),
-      declined: id => this.log.info(createOperationContext('system'),
-        `SWM host-mode subscription DECLINED for "${id}": private-ciphertext strip is ON ` +
-        `(OT-RFC-49 WS-A — cores custody zero private SWM ciphertext for curated CGs; members backfill from the curator)`),
-      enabled: id => this.log.info(createOperationContext('system'),
-        `SWM host-mode subscription enabled for "${id}" (role=core)`),
-      failed: (id, strip, error) => this.log.warn(createOperationContext('system'), strip
-        ? `Failed to re-evaluate persisted host-mode subscription for "${id}": ${error instanceof Error ? error.message : String(error)}`
-        : `Failed to restore host-mode subscription for "${id}": ${error instanceof Error ? error.message : String(error)}`),
-    });
+    return createAutomaticHostModeActivation(this);
   }
 
   /**
@@ -1243,22 +1209,20 @@ export class SwmHostModeMethods extends DKGAgentBase {
     session.swmHostModeSubscribed.set(wireCgId, source);
     session.swmHostModeCurated.set(wireCgId, curated);
     live.manager.subscribe(swmTopic);
-    const delegate = createSwmHostModeHandler(this, this.log, session, contextGraphId, wireCgId);
+    const delegate = createSwmHostModeHandler(this, this.log, session, contextGraphId, wireCgId, () => {
+      const publicBindingCurrent = session.swmHostModePublicBindingCurrent.get(wireCgId);
+      return () => session.active && this.gossipSession === session
+        && (!this.swmHostModeStripCiphertext() || (source === SUBSCRIPTION_SOURCES.MANUAL
+          ? this.isExactPublicManualSwmHostMode(contextGraphId, wireCgId)
+          : session.swmHostModeCurated.get(wireCgId) === false && publicBindingCurrent?.() === true));
+    });
     if (source !== SUBSCRIPTION_SOURCES.MANUAL && !curated) {
       session.swmHostModePublicBindingCurrent.set(wireCgId,
         this.swmHostModePublicPolicy().captureCurrent(contextGraphId));
     }
-    // Public custody is an exemption only for the binding that passed admission.
-    // Reconciliation can refresh automatic proof after a new successful lookup.
-    const handler = (topic: string, data: Uint8Array, from: string): void => {
-      if (this.swmHostModeStripCiphertext()) {
-        if (source === SUBSCRIPTION_SOURCES.MANUAL) {
-          if (!this.isExactPublicManualSwmHostMode(contextGraphId, wireCgId)) return;
-        } else if (session.swmHostModeCurated.get(wireCgId) === false
-          && session.swmHostModePublicBindingCurrent.get(wireCgId)?.() !== true) return;
-      }
-      delegate(topic, data, from);
-    };
+    // The delegate captures this callback's admitted public custody and carries
+    // it through authority/registration awaits to each persistence boundary.
+    const handler = delegate;
     session.swmHostModeHandlers.set(wireCgId, handler);
     live.manager.onMessage(swmTopic, handler);
     // B3: persist the host-mode designation so a restart re-engages
@@ -1481,9 +1445,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
     contextGraphId: string,
     data: Uint8Array,
     fromPeerId: string,
+    admissionCurrent: () => boolean = () => true,
   ): Promise<void> {
     if (!this.swmHostModeStore) return;
-    if (data.length === 0) return;
+    if (data.length === 0 || !admissionCurrent()) return;
     const ctx = createOperationContext('share');
     let envelope: GossipEnvelopeMsg | undefined;
     try {
@@ -1567,7 +1532,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // Security-preserving: a ciphertext envelope on a public CG just stays in the
     // curated authority path / opaque append and heals via catchup.
     const confirmedPublic = !isCiphertext && await this.isConfirmedPublicForHostMode(storageCgId);
-    if (!isCiphertext && !confirmedPublic) return;
+    if (!admissionCurrent() || (!isCiphertext && !confirmedPublic)) return;
 
     // Authority check. Curated traffic verifies the envelope signature against
     // the CG's agent allowlist. For a self-publishable (open) CG, inject the
@@ -1597,6 +1562,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           ),
         },
     );
+    if (!admissionCurrent()) return;
     if (!verdict.accepted) {
       // 'no agent allowlist' on a NON-public CG is the expected brief chain-event
       // race (curated allowlist not loaded yet) — recoverable via member catchup,
@@ -1633,13 +1599,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // would still hit the per-curator window and likely get dropped
     // — a known race when the curator publishes immediately after
     // their `registerContextGraph` tx confirms.
-    await this.maybeMarkRegisteredForHostMode(storageCgId);
+    await this.maybeMarkRegisteredForHostMode(storageCgId, admissionCurrent);
+    if (!admissionCurrent()) return;
     let isRegistered = false;
     try {
       isRegistered = await this.swmHostModeStore.isRegistered(storageCgId);
     } catch {
       isRegistered = false;
     }
+    if (!admissionCurrent()) return;
     if (!isRegistered && this.discoveryRateLimit) {
       // `beaconCuratorByWireId` is keyed by the WIRE id (hash);
       // `subscriptionWireId` IS the wire id already (we hashed
@@ -1744,6 +1712,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
     }
 
+    if (!admissionCurrent()) return;
     const seqno = await this.swmHostModeStore.append(storageCgId, data);
     this.log.debug(
       ctx,
@@ -1780,8 +1749,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
     contextGraphId: string,
     data: Uint8Array,
     fromPeerId: string,
+    admissionCurrent: () => boolean = () => true,
   ): Promise<void> {
-    if (data.length === 0) return;
+    if (data.length === 0 || !admissionCurrent()) return;
     const ctx = createOperationContext('share');
     let envelope: GossipEnvelopeMsg | undefined;
     try {
@@ -1823,6 +1793,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // arbitrary ciphertext under a victim's (cgId, batchId) keys.
     const handlerSm = this.getOrCreateSharedMemoryHandler();
     const verdict = await handlerSm.verifyHostModeEnvelopeAuthority(data, storageCgId, fromPeerId);
+    if (!admissionCurrent()) return;
     if (!verdict.accepted) {
       // Same transient-race classification as the LU-6 host-mode
       // path: "no agent allowlist yet" is the post-create / pre-

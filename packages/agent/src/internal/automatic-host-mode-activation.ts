@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-import { SUBSCRIPTION_SOURCES, type SubscriptionSource } from '@origintrail-official/dkg-core';
+import { SUBSCRIPTION_SOURCES, SYSTEM_CONTEXT_GRAPHS, createOperationContext, type SubscriptionSource } from '@origintrail-official/dkg-core';
+import type { DKGAgent } from '../dkg-agent.js';
 import type { SwmHostModeSubscriptionBinding } from '../swm/host-mode-store.js';
 
 interface AutomaticHostModePorts {
@@ -13,6 +14,7 @@ interface AutomaticHostModePorts {
   source(id: string): SubscriptionSource | undefined;
   curated(id: string): boolean | undefined;
   captureCurrent(id: string): () => boolean;
+  captureActivationCurrent(id: string): () => boolean;
   strip(): boolean;
   hostPublic(): boolean;
   probeCurated(id: string): Promise<boolean>;
@@ -34,7 +36,7 @@ async function admit(
   ports: AutomaticHostModePorts, id: string, intent: AdmissionIntent, current: () => boolean,
 ): Promise<{ curated: boolean; current: () => boolean } | null> {
   const bindingCurrent = ports.captureCurrent(id);
-  const stillCurrent = () => current() && bindingCurrent() && ports.admissionAllowed(id);
+  const stillCurrent = () => current() && ports.admissionAllowed(id) && bindingCurrent();
   let curated: boolean;
   if (intent === 'persisted-legacy') {
     // Strip-off legacy markers retain custody even without a public proof.
@@ -64,10 +66,11 @@ async function admit(
 }
 
 /** One fenced activation flow for discovery, retry and persisted restoration. */
-export function createAutomaticHostModeActivation(ports: AutomaticHostModePorts) {
+function automaticHostModeActivation(ports: AutomaticHostModePorts) {
   const activate = async (id: string, source: SubscriptionSource, intent: AdmissionIntent,
     ownerCurrent: () => boolean): Promise<void> => {
-    const current = () => ports.current() && ownerCurrent();
+    let activationCurrent = ports.captureActivationCurrent(id);
+    const current = () => ports.current() && ownerCurrent() && activationCurrent();
     if (!current() || !ports.admissionAllowed(id) || ports.reserved(id)) return;
     if (!ports.legacyAllowed(id)) {
       // Catalog authority removes an already-wired host as well as refusing
@@ -94,6 +97,7 @@ export function createAutomaticHostModeActivation(ports: AutomaticHostModePorts)
     const retainedLegacy = ports.source(id) !== undefined && !ports.strip();
     const admission = await admit(ports, id, retainedLegacy ? 'persisted-legacy' : intent, current);
     if (admission === null || !ports.wire(id, source, admission.curated)) return;
+    activationCurrent = ports.captureActivationCurrent(id);
     ports.classify(id, admission.curated, admission.current);
     // Discovery awaits its new designation. Legacy restart preserves its historical
     // nonblocking marker enqueue before the registration probe.
@@ -115,4 +119,48 @@ export function createAutomaticHostModeActivation(ports: AutomaticHostModePorts)
       } catch (error) { ports.failed(id, strip, error); }
     },
   };
+}
+
+/** Capture the active agent session and only its current listener custody. */
+export function createAutomaticHostModeActivation(agent: DKGAgent) {
+  const session = agent.gossipSession;
+  return automaticHostModeActivation({
+    current: () => session.active && agent.gossipSession === session && agent.swmHostModeStore !== undefined,
+    admissionAllowed: id => agent.automaticSwmHostModeAdmissionAllowed(id),
+    restoreBinding: (id, onChainId) => agent.restorePersistedHostModeBinding(id, onChainId),
+    reserved: id => (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(id),
+    legacyAllowed: id => agent.rfc64LegacySwmGossipAllowedForContextGraph(id),
+    unwire: id => agent.unwireSwmHostModeHandler(id),
+    member: id => agent.isMemberModeRegisteredForCg(id),
+    source: id => session.swmHostModeSubscribed.get(agent.canonicalSwmHostModeKey(id)),
+    curated: id => session.swmHostModeCurated.get(agent.canonicalSwmHostModeKey(id)),
+    captureCurrent: id => agent.swmHostModePublicPolicy().captureCurrent(id),
+    captureActivationCurrent: id => {
+      const key = agent.canonicalSwmHostModeKey(id);
+      const handler = session.swmHostModeHandlers.get(key);
+      return () => session.swmHostModeHandlers.get(key) === handler;
+    },
+    strip: () => agent.swmHostModeStripCiphertext(),
+    hostPublic: () => agent.config.swmHostMode?.hostPublic === true,
+    probeCurated: id => agent.isCuratedForHostMode(id),
+    accessPolicy: id => agent.swmHostModeAccessPolicy(id),
+    confirmedPublic: id => agent.isConfirmedPublicForHostMode(id),
+    wire: (id, source, curated) => agent.wireSwmHostModeHandler(id, source, curated),
+    classify: (id, curated, current) => {
+      const key = agent.canonicalSwmHostModeKey(id);
+      session.swmHostModeCurated.set(key, curated);
+      if (curated) session.swmHostModePublicBindingCurrent.delete(key);
+      else session.swmHostModePublicBindingCurrent.set(key, current);
+    },
+    persisted: id => agent.awaitHostModePersistence(id),
+    markRegistered: (id, current) => agent.maybeMarkRegisteredForHostMode(id, current),
+    declined: id => agent.log.info(createOperationContext('system'),
+      `SWM host-mode subscription DECLINED for "${id}": private-ciphertext strip is ON ` +
+      `(OT-RFC-49 WS-A — cores custody zero private SWM ciphertext for curated CGs; members backfill from the curator)`),
+    enabled: id => agent.log.info(createOperationContext('system'),
+      `SWM host-mode subscription enabled for "${id}" (role=core)`),
+    failed: (id, strip, error) => agent.log.warn(createOperationContext('system'), strip
+      ? `Failed to re-evaluate persisted host-mode subscription for "${id}": ${error instanceof Error ? error.message : String(error)}`
+      : `Failed to restore host-mode subscription for "${id}": ${error instanceof Error ? error.message : String(error)}`),
+  });
 }

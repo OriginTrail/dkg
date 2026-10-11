@@ -93,7 +93,7 @@ async function fixture(options: { capped?: boolean; host?: boolean; marker?: boo
     const ingest = vi.spyOn(agent, 'ingestSwmHostModeEnvelope');
     const bytes = new Uint8Array([1]);
     await gossip.deliver(topic, bytes);
-    expect(ingest).toHaveBeenCalledExactlyOnceWith(rawId, bytes, 'owned-dormancy-probe');
+    expect(ingest).toHaveBeenCalledExactlyOnceWith(rawId, bytes, 'owned-dormancy-probe', expect.any(Function));
     await ingest.mock.results[0].value; ingest.mockRestore();
   };
   return { agent, state, gossip, chain, assertAbsent, assertDispatch };
@@ -267,7 +267,7 @@ describe('automatic SWM host admission honors durable dormancy', () => {
     expect(f.state.swmHostModeSubscribed.get(HASH)).toBe(SUBSCRIPTION_SOURCES.MANUAL);
     const ingest = vi.spyOn(f.agent, 'ingestSwmHostModeEnvelope'); const bytes = new Uint8Array([1]);
     await replacement.deliver(contextGraphWorkspaceTopic(HASH), bytes);
-    expect(ingest).toHaveBeenCalledExactlyOnceWith(LOCAL, bytes, 'owned-dormancy-probe');
+    expect(ingest).toHaveBeenCalledExactlyOnceWith(LOCAL, bytes, 'owned-dormancy-probe', expect.any(Function));
     await ingest.mock.results[0].value;
   });
   it('rechecks numeric policy after the caller awaits an immediate private-policy result', async () => {
