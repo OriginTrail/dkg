@@ -18,6 +18,7 @@ import {
   EVMChainAdapter,
   MockChainAdapter,
   connectRemoteSigners,
+  type ExternalAuthorSigners,
   type RemoteSigners,
 } from '@origintrail-official/dkg-chain';
 import {
@@ -45,7 +46,7 @@ import { planAuthorityIndexBootstrap } from '../src/authority-index-config.js';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 import { HARDHAT_KEYS } from '../../chain/test/hardhat-harness.js';
 import { getSharedContext } from '../../chain/test/evm-test-context.js';
-import { startFakeRemoteSigner, type FakeSigner } from '../../chain/test/helpers/fake-remote-signer.js';
+import { startFakeRemoteSigner, type FakeSigner, type FakeSignerOptions } from '../../chain/test/helpers/fake-remote-signer.js';
 
 const PAYER_TOKEN = 'payer-credential-5e4d3c2b1a090807';
 const AUTHOR_TOKEN = 'author-credential-0706050403020100';
@@ -61,12 +62,13 @@ afterEach(async () => {
   while (started.length > 0) await started.pop()!.close();
 });
 
-async function externalSigners(): Promise<{ fake: FakeSigner; remote: RemoteSigners }> {
+async function externalSigners(options: Partial<FakeSignerOptions> = {}): Promise<{ fake: FakeSigner; remote: RemoteSigners }> {
   const fake = await startFakeRemoteSigner({
     credentials: [
       { token: PAYER_TOKEN, keys: [payer.privateKey] },
       { token: AUTHOR_TOKEN, keys: [defaultAuthor.privateKey, agentKey.privateKey] },
     ],
+    ...options,
   });
   started.push(fake);
   const remote = await connectRemoteSigners({
@@ -273,16 +275,65 @@ describe('external signer author keys', () => {
       .rejects.toThrow(/registered as self-sovereign/);
   });
 
-  it('uses the configured default author, never a payer, when no agent is named', async () => {
-    const { remote } = await externalSigners();
-    const agent = await stubAgent(remote);
-    agent.defaultAgentAddress = defaultAuthor.address;
-    expect(await agent.publisher.publisherFallbackAuthorAddress()).toBe(defaultAuthor.address);
-    await agent.assertion.create(CG, NAME);
-    await agent.assertion.write(CG, NAME, [q('urn:external-authors:node', 'urn:value', '"v1"')]);
-    const seal = await agent.assertion.finalize(CG, NAME);
-    expect(ethers.getAddress(seal.authorAddress)).toBe(defaultAuthor.address);
-    expect(ethers.getAddress(seal.authorAddress)).not.toBe(payer.address);
+  it('authors an unnamed finalize with the configured author through the signer, and fails without one before any payer signs', async () => {
+    // The signer refuses agent registrations, so the started node registers no default agent.
+    const { fake, remote } = await externalSigners({
+      reject: (method, request) => (
+        method === 'eth_signTypedData_v4' && JSON.parse(String(request.params[1])).primaryType === 'AgentRegistration'
+          ? { code: -32000, message: 'agent registrations are not signed here' }
+          : undefined
+      ),
+    });
+    const start = async (authors?: ExternalAuthorSigners) => {
+      const agent = await DKGAgent.create({
+        name: 'ExternalSignerFinalize',
+        store: new OxigraphStore(),
+        listenHost: '127.0.0.1',
+        listenPort: 0,
+        kaNumberAllocator: makeTestKaNumberAllocator(),
+        chainAdapter: new MockChainAdapter('mock:31337', payer.address),
+        chainConfig: {
+          rpcUrl: 'http://127.0.0.1:1',
+          hubAddress: ethers.ZeroAddress,
+          signers: remote.operational,
+          ...(authors ? { authors } : {}),
+        },
+        nodeRole: 'edge',
+      });
+      await agent.start();
+      return agent;
+    };
+    const signingRequests = (from: number) => fake.requests.slice(from).filter((request) => request.method !== 'eth_accounts');
+
+    const agent = await start(remote.authors);
+    try {
+      expect(agent.getDefaultAgentAddress()).toBeUndefined();
+      await agent.assertion.create(CG, NAME);
+      await agent.assertion.write(CG, NAME, [q('urn:external-authors:node', 'urn:value', '"v1"')]);
+      const before = fake.requests.length;
+      const seal = await agent.assertion.finalize(CG, NAME);
+      expect(ethers.getAddress(seal.authorAddress)).toBe(defaultAuthor.address);
+      const signed = signingRequests(before);
+      expect(signed.map((request) => [request.method, request.authorization]))
+        .toEqual([['eth_signTypedData_v4', `Bearer ${AUTHOR_TOKEN}`]]);
+      expect(ethers.getAddress(String(signed[0].params[0]))).toBe(defaultAuthor.address);
+      expect(JSON.parse(String(signed[0].params[1])).primaryType).toBe('AuthorAttestation');
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+
+    // With payer accounts only there is no author, and nothing is signed.
+    const payersOnly = await start();
+    try {
+      expect(payersOnly.getDefaultAgentAddress()).toBeUndefined();
+      await payersOnly.assertion.create(CG, NAME);
+      await payersOnly.assertion.write(CG, NAME, [q('urn:external-authors:node', 'urn:value', '"v1"')]);
+      const before = fake.requests.length;
+      await expect(payersOnly.assertion.finalize(CG, NAME)).rejects.toMatchObject({ code: 'SEAL_CAPABILITY_GAP' });
+      expect(signingRequests(before)).toEqual([]);
+    } finally {
+      await payersOnly.stop().catch(() => {});
+    }
   });
 
   it('never falls back to a payer as author when the supplied chain adapter signs externally', async () => {
