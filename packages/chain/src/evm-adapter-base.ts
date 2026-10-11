@@ -1936,28 +1936,26 @@ export class EVMChainAdapterBase {
     signer: EvmSigner,
     populated: ethers.TransactionRequest,
   ): Promise<SignedTransactionEnvelope> {
+    const populate = async () => {
+      const filled = await signer.populateTransaction(populated);
+      if (this.maxFeePerGasWei === undefined) return filled;
+      let baseFeePerGas: bigint | null | undefined;
+      if (filled.maxFeePerGas !== null && filled.maxFeePerGas !== undefined) {
+        baseFeePerGas = (await signer.provider?.getBlock('latest'))?.baseFeePerGas;
+      }
+      return applyTransactionFeeCap(filled, this.maxFeePerGasWei, baseFeePerGas);
+    };
     // An external signer is called outside the per-endpoint attempt deadline
     // (`RpcFailoverClient.populateAndSign`), so its RPC population keeps it here.
     const filled = isExternalEvmSigner(signer)
-      ? await withRpcRequestTimeout(RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS, 'transaction population',
-        () => this.populateWithFeeCap(signer, populated))
-      : await this.populateWithFeeCap(signer, populated);
+      ? await withRpcRequestTimeout(RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS, 'transaction population', populate)
+      : await populate();
     const signedTx = await signer.signTransaction(filled);
     // GH#2270 PR-3 r3 — ONE decode of the signed bytes, here, for both facts the send window
     // needs. The nonce used to be re-parsed at the dispatch boundary from the same string.
     const parsed = ethers.Transaction.from(signedTx);
     const nonce = Number.isSafeInteger(parsed.nonce) && parsed.nonce >= 0 ? parsed.nonce : undefined;
     return { signedTx, txHash: parsed.hash ?? '0x', ...(nonce === undefined ? {} : { nonce }) };
-  }
-
-  private async populateWithFeeCap(signer: EvmSigner, populated: ethers.TransactionRequest) {
-    const filled = await signer.populateTransaction(populated);
-    if (this.maxFeePerGasWei === undefined) return filled;
-    let baseFeePerGas: bigint | null | undefined;
-    if (filled.maxFeePerGas !== null && filled.maxFeePerGas !== undefined) {
-      baseFeePerGas = (await signer.provider?.getBlock('latest'))?.baseFeePerGas;
-    }
-    return applyTransactionFeeCap(filled, this.maxFeePerGasWei, baseFeePerGas);
   }
 
   /**
