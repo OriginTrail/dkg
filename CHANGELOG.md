@@ -2,6 +2,573 @@
 
 All notable changes to the DKG V10 node are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.0.24] - 2026-10-11
+
+A patch for queued publications into private Context Graphs. A queued
+publication into a private graph stayed non-terminal for minutes after its
+transaction was final. It waited for the placement of its asset in the
+author's catalog, behind the placements before it, and each placement read
+and verified the whole catalog three times and told peers about the new
+head while it held the catalog lock. The publication is now terminal once
+finality is observed, the verified content is stored and the placement is
+recorded and requested. A placement no longer reads and verifies the whole
+catalog for each asset, and peers are told about a new head outside the
+catalog change. A new asset for a full author catalog is refused once and
+reported; its placement was retried for ever. After a start, a chain index
+that could not start is started again, a graph whose reconcile pass was
+refused or overtaken is asked again within seconds, and the checks of saved
+subscriptions no longer take the node's whole chain request budget.
+Random-sampling proof and challenge transactions are sent with more gas
+headroom, a vector search over Working Memory covers the asking agent's own
+entries, and a member whose metadata fetch failed right after a live
+approval no longer needs a restart, which fixes a 10.0.23 known issue
+(#3109).
+
+**No smart-contract, ABI or deployment registry changes.** Message formats
+are unchanged; a node now announces only the newest head of a catalog
+(#3130).
+
+### Upgrading from 10.0.23
+
+| Change | Impact | Action |
+| --- | --- | --- |
+| A queued publication into a private Context Graph is terminal before its catalog placement has run (#3127) | The job is terminal once finality is observed, the verified content is stored and the placement is recorded and requested. The author's catalog can list the asset later. A synchronous publish no longer waits for a placement attempt either. Placements that are still owed are counted as `pending`, with `oldestPendingAgeMs`, under `rfc64Catalog.finalizedPrivatePlacementQueue` in `GET /api/status` | None. Read `pending` to see whether placements are still owed |
+| A new catalog head is delivered after the catalog change, and only to peers the node's own policy admits (#3130) | The warn line `RFC-64 catalog head announce failed for F/T peer(s)` keeps its text, but `T` counts eligible peers only, and a head with no eligible peer writes nothing at warn level. Peers that the policy check could not answer for get a warn line of their own, `RFC-64 catalog head delivery could not check U/T peer(s) ...`. `rfc64Catalog.catalogHeadDelivery` in `GET /api/status` counts hand-offs and peers by outcome since the node started | None. A refused peer no longer counts as a failed one. `uncheckedPeers` growing while `deliveredPeers` stands still means the policy check answers for nobody |
+| A new asset for a full author catalog is refused once, parked and reported (#3143) | The asset is published and finalized as before. Its placement is no longer retried at intervals of up to 60 s. The node writes a `catalog_full` warning when a catalog first refuses and then at most one an hour, for a refused placement and for a refused share-time projection each on its own, and counts `scopesAtCap` and `parkedPlacements` under `rfc64Catalog.authorCatalogCapacity` in `GET /api/status`. `catalog_private_repair_failed` and `catalog_repair_failed` are not written for this reason. A parked placement still counts as owed in `finalizedPrivatePlacementQueue` | Watch `authorCatalogCapacity`. The change adds no capacity; see Known issues |
+| A node keeps the verified state of its author catalogs in memory (#3133) | At most 64 catalog scopes (one author in one graph) and 96 MiB in all, least recently used first out. Nothing is persisted. The first placement into a catalog after a start reads and verifies the whole catalog, as every placement did | None. `DKG_RFC64_CATALOG_MUTATION_MEMORY=0` switches the memory off; see `docs/use-dkg/run-node.md` |
+| The wait of a queued publication after finality is logged and shown in status (#3120, #3136) | Two new log lines: `async_publish_post_finality`, one per finalized queued job, at info when the wait after finality is 10 s or more and at debug otherwise, and `rfc64_catalog_placement_wait` for a catalog placement that takes 5 s or more. New block `rfc64Catalog.finalizedPrivatePlacementQueue` in `GET /api/status`. The execution, recovery and placement lines of one job carry `[from:<jobId>]` | None. The lines and the block are additive |
+| A vector search over Working Memory covers the asking agent's own entries (#3150) | The local vector store is migrated at start, and its existing rows are kept. Working Memory embeddings written before the upgrade have no recorded writer and no longer appear in an agent's vector search. Shared Working Memory and Verifiable Memory keep their graph-wide scope | None. A search by the node operator still reads the embeddings that have no recorded writer |
+| Random-sampling transactions are signed with a higher gas limit (#3117, #3122) | A proof is signed with its gas estimate plus 50 %, where it had no headroom, and a challenge creation with its estimate plus the larger of 50 % and 2,500,000 gas, where it had 50 %. Unused gas is refunded, but the wallet must hold the limit times the fee cap before the transaction is accepted: about 2.83M gas for a challenge creation, where it was 0.49M. A creation that still runs out of gas burns its whole limit | None for a funded wallet. The wallet that signs random-sampling transactions must be able to pay the higher limit up front |
+| A chain index start that cannot complete for now is tried again (#3116) | The start is repeated after 5 s and then at doubling waits of up to 60 s, until the index attaches. The node logs `[chain] one-log chain index start deferred (retrying, next attempt in 5s): <error>` once, says every 30 minutes that the start is still deferred, with the latest failure, and logs once more when the index comes up. A line that begins `[chain] one-log chain index disabled:` is still written for a failure another attempt cannot change | None. A node that logged the `disabled` line for a transient failure no longer needs a restart to get its index |
+| A Verifiable Memory reconcile pass that was refused locally or overtaken is asked again (#3123, #3135) | Two new info lines: `VM reconcile for "<graph>" is waiting for local RPC admission; asking again shortly: <the refusal>` and `VM reconcile for "<graph>" was overtaken by a change to the graph's subscription or binding; asking again shortly`. For these two causes the warning `VM reconcile for "<graph>" failed; retrying on the periodic sweep: ...` is written only once asking again has stopped; a graph is asked again within a window of five minutes | None. No setting is added |
+| The checks of saved subscriptions that the activation cap left dormant are paced after a start (#3119) | On a node with several hundred saved subscriptions that the chain does not confirm, the last one is checked about three quarters of an hour after the start, where it was a few minutes. A graph the chain confirms waits for the rows before it only when its saved row has no chain id and nothing asks for it: 44 minutes in the measured run, where it was 3. One `WARN` summary when a pass has no row left, and every five minutes while it runs, replaces one `WARN` per row; the per-row line is written at debug level. A row whose chain id the chain does not know shows as `deactivated` on `GET /api/context-graph/subscriptions` at once | None. No setting is added and no saved row is changed. An explicit subscribe does not wait for these checks |
+| A missing asset version view names the chain endpoints that failed (#3099, #3106) | `GET /api/status` gains `chain.versionSnapshot`. The recovery deferral, the conflict of an exact-asset fetch (`Knowledge Asset <ual> has no coherent on-chain version snapshot: <why>`, the HTTP 409 body of the operator asset fetch) and the Verifiable Memory refresh check (`no coherent chain view confirms the copy: <why>`) end with the cause: each endpoint that gave no view, by its position in the configured list and its host. The `remains pending` warning is logged once per asset when a reason appears or changes, then as one summary per reason every 5 minutes | None. The earlier text is the start of each message. A line that begins `Operator action needed:` names an endpoint to fix or replace |
+| A subscribe or unsubscribe that fails on an authority outage returns an operation id (#3151) | The response carries an operation id, and exactly one server log line matches it. The subscription error code, the generic response body and the retry headers are unchanged | None. Use the operation id to find the line in the node's log |
+| A slow identity probe is retried once before the peer is suppressed (#3154) | A probe that ends on a transport deadline is retried once with a response deadline of 15 s, where the first deadline is 3 s. Later suppression of that peer is capped at 3 s while it has an open connection. The validation of the signed proof, quarantine and the back-off for disconnected peers are unchanged | None |
+| A failed asynchronous share reports the transition that was stored (#3155) | The worker takes the terminal or retrying transition of a failed attempt from the write that stored it, where it read the job's outcome in a separate step that could fail or see a later attempt. Bookkeeping that could not be resolved is reported as uncertain, not as a fatal failure. The operator diagnostics and the documentation (`docs/use-dkg/knowledge-asset-lifecycle.md`) are updated with it | None |
+
+### Known issues
+
+- **RFC-64 catalog replay loop**: replays that come back incomplete repeat on
+  every reconnect. Keep `rfc64Catalog.rollout.killSwitch` on wherever it is
+  set.
+- **An author's catalog for a Context Graph holds 1,024 assets** (#3134): the
+  catalog is one signed bucket of at most 1,024 rows. A further new asset
+  of that author in that graph is published, finalized and stored as
+  before, but the catalog does not list it. Its placement is refused once
+  and parked, and the node reports it: a `catalog_full` warning when a
+  catalog first refuses and then at most one an hour, for the placement
+  and for the share-time projection each, and
+  `rfc64Catalog.authorCatalogCapacity` in `GET /api/status`. A newer
+  version of an asset the catalog holds is still placed, and a removal
+  frees a row. A member on the default configuration keeps receiving such
+  assets: in a test on a public testnet a member of a private graph with
+  1,050 assets from one author held all of them. By the receiver's rules,
+  a member that takes a private graph through catalogs stops receiving an
+  author's updates once that author's catalog cannot list one of the
+  author's finalized assets; this is read from the code and was not
+  reproduced. Capacity beyond one bucket is tracked in #3134.
+- **Under a burst of publications the author's catalog can trail them by
+  minutes** (#3128): a publication no longer waits for its placement, and
+  placements still run one at a time, in a fixed order. In a test on a
+  public testnet with the catalog at 700 to 880 rows one placement took 6
+  to 21 s at the median, and the catalog trailed a burst of 60
+  publications by up to about five minutes in one run and by under 20 s in
+  another. `pending` and `oldestPendingAgeMs` under
+  `rfc64Catalog.finalizedPrivatePlacementQueue` in `GET /api/status` show
+  the backlog.
+- **A finalized publication into a private graph can stay out of the
+  author's catalog** (#3128): a publication is terminal once its placement
+  is recorded, and in three cases, all older than this release, a
+  confirmation ends with nothing recorded. The catalog lane cannot be
+  resolved at the confirmation, which is logged as
+  `RFC-64 catalog authority was unavailable`; the graph has no catalog
+  lane at that moment, which writes no line; or the write of the placement
+  marker fails, which is logged as
+  `finalized-private placement was not recorded, so nothing owes it`. The
+  asset then reaches the catalog only through the projection that its
+  share requested, which the node retries when it fails. A fourth case
+  concerns one version: when an assertion is re-opened for editing twice
+  while the placement of its published version is still queued, and the
+  node then restarts, that version cannot be placed. Every attempt writes
+  `catalog_private_repair_failed` with `kind: integrity` and
+  `stage: seal`, at most once a minute, and the placement stays counted
+  in `pending` until the catalog holds a later version of the asset. Both
+  are tracked in #3128.
+- **A head replay to a peer that connects during a burst of publications
+  can be rejected** (#3129): a replay is rejected when a catalog change
+  overlaps it, before its snapshot or while it is sent, and during a burst
+  that is most replays. The requester asks again. Such a peer converges
+  when the burst pauses, through a later replay or the next delivered
+  head.
+- **A publish job on an older public Context Graph can wait several seconds
+  after finality in the clean-up of Shared Working Memory**: observed on a
+  test node. The executor's work after the confirmation has three
+  clean-up steps for Shared Working Memory, and which of them holds the
+  wait is not established. The fields `tailPublishedGraphClearMs`,
+  `tailLegacySwmRetireMs` and `tailRemainingSwmClearMs` of the
+  `async_publish_post_finality` line are the place to look (#3136). There
+  is no fix yet.
+- **A subscriber of a public Context Graph can receive a new asset minutes
+  late** (#3052): while a node applies a catalog update for a graph it
+  refuses Shared Working Memory writes for that graph. A sync round that
+  overlaps the update writes none of the snapshots it fetched, and the node
+  does not pull that graph again at once: the assets arrive with a later
+  round or through the catalog, in our tests 6 to 7 minutes after they were
+  shared. An asset that was finalized in the meantime is then fetched on its
+  own, and those fetches can fail and be retried minutes apart: on a graph
+  of a few hundred assets that was being published to, single assets took up
+  to 15 minutes. Nothing is lost, and this is not new in this release.
+- **A member that restarted before its empty private graph was proven ready
+  stays not ready** (#3109): the readiness proof of an empty registered
+  private graph now runs again when the member's copy of the metadata
+  becomes authoritative (#3108). A node that restarted after that moment and
+  before the proof succeeded keeps the graph subscribed and not writable
+  until the member subscribes again or content arrives. Members that reached
+  this state on an earlier version are in the same position after the
+  upgrade. Subscribe again.
+- **A read by a newly approved member of an unregistered private graph can
+  answer a retryable 503** (#3064): before it reads such a graph, the
+  member's node has to accept a proof that the graph's name is not
+  registered on chain. One slow or discarded run of that proof no longer
+  fails a read (#3074), but in the seconds after an approval a read can
+  still answer 503 with `CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE`. Send the
+  read again.
+- **A member of private graphs that are not registered on chain reads the
+  chain much more often than other nodes** (#3064): the node rebuilds the
+  proof that a graph's name is not registered very often, and those reads
+  are held back only by its chain request budget. Other chain work on that
+  node, a publish included, can wait behind them.
+- **Recovery through the batch stream depends on the Cores that serve it**:
+  only Cores with the switch set serve the stream. A Core that is busy
+  answers `BUSY` and is asked again after a short pause, and a stream that
+  breaks is opened once more with the same Core (#2979, #2987); a stream that
+  stalls without closing is not detected. After a busy attempt, and after a
+  broken one on a Core that has already served the graph, the Core keeps its
+  turn, but between two stream attempts the node can probe peers without the
+  stream. Each such probe is bounded to two minutes while a stream-capable
+  Core is connected, three times out of four (#2978), and large assets still
+  take minutes each there. Serve the stream from more than one Core that
+  holds the graph.
+- **The catalog of an unregistered private graph can stay unverified on a
+  member** (#2993): after the approval, data and reads reach a member Core
+  within seconds and a member Edge after about a minute, but the member's
+  catalog status reaches `complete` only after about eight minutes on a
+  Core and may not reach it on an Edge, because the curator gives up its
+  replay to the approved peer before the member is ready. Delivery and reads
+  do not depend on it. These timings were measured before #3036, which
+  retries an incomplete private catalog within a short budget; they were not
+  measured again.
+- **Two peers that connect while both are still starting do not sync with each
+  other until they reconnect** (#2854): a node learns a peer's protocols when
+  the connection opens. Two nodes that both connected before either
+  registered its handlers recover on reconnect.
+- **A member added to a private Context Graph only by wallet address does not
+  receive its Shared Working Memory until it joins** (#2862): the member needs
+  the graph's metadata, which the curator sends on an approved join request.
+  Have the member send a signed join request; a pre-authorized member is
+  approved automatically.
+- **A restarted member Edge may not reconnect to its private graph's curator
+  Edge if the curator is unreachable** (#2865): approval now carries a
+  validated listener hint and recovery retries the curator connection
+  (#3058). This does not make an unavailable curator reachable. If automatic
+  discovery cannot establish the connection, connect to a reachable curator
+  multiaddr with `POST /api/connect`.
+- **Copies already stale before the upgrade may wait for another update**
+  (#2866): the update lane initially replays about 500 blocks. Older stale
+  copies, and refresh targets given up after 24 hours, need the next update
+  or an explicit asset fetch. The rate-limited backfill is not in this
+  release.
+- **The successor of an abandoned shared update draft is shared under the same
+  number** (#2964): peers' share gate, the RFC-64 catalog and curator
+  confirmation (`swmAwaitCuratorAck`) do not replace a draft with another of
+  the same number, so peers may keep showing the earlier draft until the
+  update is published, and the replacement replaces the private payload
+  sealed under that number.
+- **A catalog authority refresh can wait for the next five-minute pass on a
+  node with constant store writes** (#2968): a refresh that is composed while
+  the node's authority facts change is composed again, up to six more times
+  within about four seconds. On a node whose unrelated writes never pause,
+  every attempt can be discarded, and a newly approved member then receives
+  the catalog only after the next periodic pass.
+- **Some lifecycle pointer stamps are still only logged when they fail**
+  (#2962): the Verifiable Memory stamps after a confirmed publish, and the
+  shared pointer stamp of `publishAsync` between its share and its publish.
+
+### Fixed
+
+- **A queued publication into a private Context Graph is terminal once its
+  catalog placement is recorded** (#3081, #3127): a confirmed publication
+  into a private graph stayed non-terminal until the first attempt at
+  placing its asset in the author's catalog had ended. Placements run one
+  at a time on a node, so a job waited behind the placements of the jobs
+  before it, for work that does not decide whether the publication
+  succeeded. The job is now terminal once finality is observed, the
+  verified content is stored, the placement marker is stored and the
+  placement is requested. The catalog supervisor owns the attempt, its
+  retries and its drain at shutdown as before, and a marker that was not
+  placed before a restart is placed after it. A synchronous publish answers
+  at the same point. A recovery pass finalizes every proven job, where each
+  waited behind the placement of the one before it, and the finalize of a
+  held failed job no longer keeps the queue's node-wide claim lock while a
+  placement runs. In a test on a public testnet, with one private graph,
+  queued publications three at a time and the author catalog at 700 to 880
+  rows, a burst of 60 publications took 1,313 s on the previous code, and a
+  publication waited 816 s at the median after finality (1,122 s at the
+  90th percentile). That run was the bad case, in which one placement held
+  the catalog lock. With this change and #3133, #3136, #3141 and #3143 the
+  same burst took 430 to 630 s, and a publication waited 2.7 to 9.8 s at
+  the median (5.6 to 21 s at the 90th percentile). In a later run with
+  #3130 as well, 30 publications into a full catalog all finalized,
+  waiting 0.8 s at the median after finality (1.9 s at the 90th
+  percentile, 3.8 s at the most).
+- **A catalog placement no longer reads and verifies the whole catalog for
+  each asset** (#3072, #3081, #3133): placing one confirmed asset read and
+  verified the whole applied catalog twice, for the coverage check and
+  again under the catalog lock, and verified every row a third time while
+  it produced the successor. The node now keeps the verified state of a
+  catalog's applied head in memory. It uses that state only while the
+  durable applied-head record is unchanged, and it reads and verifies the
+  head and its delegation from the durable store on every use. A row whose
+  exact bytes were verified earlier in the same process is not verified
+  again. A confirmation that is observed a second time, or whose row is
+  already in the catalog, is answered once the head's history and that
+  row's bundle have been read back, without the bundles of all the other
+  rows. The signed head, directory node and bucket are byte for byte what
+  the previous code signs for the same inputs. In the change's benchmark on
+  one machine, a placement into a catalog of 700 rows took 7.83 s with the
+  memory switched off, which is the earlier behaviour, and 2.04 s with it;
+  at 1,024 rows it took 11.8 s and 3.00 s. The first placement into a
+  catalog after a start costs what it did. On the previous code, in a test
+  on a public testnet, a burst of 60 publications took 287 s with the
+  catalog at 30 to 90 rows and 969 to 1,129 s at 390 to 690 rows.
+- **A new catalog head is delivered outside the catalog change, and only to
+  peers the node's own policy admits** (#3081, #3130): a catalog change
+  committed its head and then waited, still holding the catalog's lock,
+  until its peers had been told, one peer at a time and each with a budget
+  of 10 s. A lane with no configured peers addressed every connected peer.
+  For a private graph most of those are not members: the node refused each
+  one locally, sent it nothing and logged the head as a failed announce at
+  warn level. The change now hands the committed head to a delivery owner
+  and returns. One owner per catalog asks the policy about every peer and
+  then sends the newest head in waves of 16, under one budget for all the
+  sends. A refused peer is left out and is not a failure. A peer the
+  policy check could not answer for is sent nothing, counted on its own
+  and logged at warn. A newer head replaces one that is still waiting, as
+  long as it stays within 1,024 versions of the head sent before it: a
+  receiver fetches the head it is told about and proves the lineage across
+  the versions it skipped, which receivers do since 10.0.15. Receivers
+  older than 10.0.15 accept only the direct successor of the head they
+  hold and were not tested with this release. A head that was not
+  delivered reaches a peer with the catalog's next head or through
+  replay. With one peer that never answers, two changes of one catalog
+  were placed after 10.5 s and 20.8 s before, and after 0.4 to 0.5 s and
+  0.65 to 0.75 s now.
+- **A head replay to a connecting peer no longer holds the catalog locks
+  while it sends** (#3081, #3129, #3141): a node replays its catalog heads
+  to a peer on every new connection, on the peer's request and after a
+  join approval. The replay took the lock of every catalog it replayed and
+  sent head after head inside those locks, so a peer that did not answer
+  held every change of those catalogs for up to 10 s a head. A replay now
+  prepares its manifest under the locks and sends it after they are
+  released. When the sends have ended, the inventory is compared once more
+  and the replay is rejected as before if it moved. In a test on a public
+  testnet a placement waited up to 392 s for the catalog lock or the state
+  read under it before the change. With the change the longest such wait
+  in two bursts of 60 publications was 28 s in one and 0 s in the other. A
+  replay that a catalog change overlaps is still rejected; see Known
+  issues.
+- **A new asset for a full author catalog is refused once, parked and
+  reported** (#3134, #3143): an author's catalog for a Context Graph is one
+  signed bucket of at most 1,024 rows. The placement of a further new
+  asset failed inside the successor producer, was reported as
+  `catalog_private_repair_failed` with kind `unknown` and neither graph nor
+  author, and was retried for ever at intervals of up to 60 s. Every retry
+  read and verified the whole catalog, and every publication after the
+  catalog had filled added one more such placement. The asset is still
+  published and finalized as before. The node now refuses its row before
+  it builds anything, keeps the placement's marker and parks it: a pass
+  over parked placements reads one row a catalog and attempts nothing.
+  Parked placements are attempted again when the catalog shows a free row,
+  and one of them every hour. A newer version of an asset the catalog
+  holds is placed as before. The refusal is written as a `catalog_full`
+  warning and counted in `GET /api/status`. This adds no capacity; see
+  Known issues. In a test on a public testnet 170 queued publications took
+  a catalog of about 880 rows across the cap. All 170 finalized, with a
+  median wait of 3.2 s after finality, and the 26 placements past the cap
+  stayed parked and were not retried.
+- **A vector search over Working Memory covers the asking agent's own
+  entries** (#2652, #3150): embeddings of Working Memory now record which
+  agent wrote them, and a vector search filters Working Memory by that
+  identity before it ranks. Shared Working Memory and Verifiable Memory
+  keep their graph-wide scope. The local vector store is migrated at
+  start, and its existing rows are kept. Working Memory embeddings written
+  before the upgrade have no recorded writer and no longer appear in an
+  agent's vector search; a search by the node operator still reads them.
+  The authorization checks of a Context Graph and of its Shared Working
+  Memory, and the text search, behave as before.
+- **A chain index start that could not complete is started again** (#3115,
+  #3116): at start a node builds its chain index from the deploy block of
+  every indexed contract. Each read of that search has a 4 s deadline that
+  also covers its wait in the node's own request queue. One read still
+  queued at its deadline, or a head probe that no endpoint answered, ended
+  the start with a line that begins
+  `[chain] one-log chain index disabled:`, and the node ran without the
+  index until its next restart. A start that fails for a reason another
+  attempt can change (the node's own request capacity, a timeout, a
+  throttled or failing endpoint, a network error) is now repeated after
+  5 s and then at doubling waits of up to 60 s, until the index attaches.
+  It logs one line when it is deferred, one every 30 minutes while it
+  stays deferred, and one when the index comes up. A failure another
+  attempt cannot change ends the start as before, with the same line.
+- **Random-sampling proof and challenge transactions are sent with more gas
+  headroom** (#3117, #3122): a proof transaction was sent with its bare gas
+  estimate. The proof settles the node's stake to the time of its block,
+  and an estimate taken on the block that holds the node's challenge skips
+  that work, so the same call needs more gas from the next block on. Such a
+  transaction was mined and reverted, and the next tick sent the proof
+  again: no proof was missed, and each case cost one failed transaction. On
+  four nodes this happened in 3 of 12, 7 of 12, 5 of 13 and 8 of 9 proof
+  periods of one morning. A proof is now signed with its estimate plus
+  50 %. A challenge creation already had that headroom, but what a creation
+  costs depends on which Context Graphs the draw of its block lands on, and
+  the block it is mined in can need several times the estimate. It is now
+  signed with its estimate plus the larger of 50 % and 2,500,000 gas. In
+  23.6 days of one test network's public history 557 of 5,336 challenge
+  creations failed, every one out of gas. Replayed on a local copy of that
+  network's state, 38 of 300 creations failed with the old limit and one
+  with the new, in a block where no limit succeeds. In 9.3 days of one
+  main network's history none of 4,791 creations failed.
+- **A graph whose reconcile pass was refused by the node's own request
+  limiter is asked again within seconds** (#3028, #3123): a Verifiable
+  Memory reconcile pass that met a chain read the node's own request
+  limiter had refused ended there, and its graph waited for its turn in
+  the periodic sweep, with its chain-event nudges dropped meanwhile. The
+  sweep goes round the bound graphs four at a tick, so on a node with 40
+  graphs that turn came ten minutes later. It happened above all right
+  after a start, when background reads are held back: a member that had
+  missed one asset while it was down still lacked it nine minutes after
+  its start. The graph is now asked again 2.5 s later, one graph at a
+  time, for up to five minutes; after that the pass ends as it did and the
+  sweep retries it. A read that was sent and then failed or timed out, and
+  an answer from the chain, are handled as before.
+- **A graph whose reconcile pass was overtaken by an update of its
+  subscription is asked again** (#3135): a reconcile pass works on the
+  graph's subscription row as it was when the pass began and stops when
+  the row has been stored again. Ordinary work does that on a running
+  node: a subscribe request for a graph the node already holds, catch-up,
+  or a sync round. The pass then ended as failed, with the warning
+  `VM reconcile for "<graph>" failed; retrying on the periodic sweep: VM reconcile queue is closed for node shutdown`
+  on a node that was not shutting down, and the graph got no further pass
+  until the periodic sweep, minutes later. Such a pass now leaves the
+  graph to be asked again 2.5 s later, on the row as it is then. In a test
+  with a publisher and a subscriber node, 39 of 40 published assets were
+  in the subscriber's Verifiable Memory at the first check with the fix,
+  and 11 of 20 without it.
+- **The checks of saved subscriptions after a start no longer take the
+  node's whole chain request budget** (#3118, #3119): after a start a node
+  checks the saved subscriptions that its activation cap left dormant. It
+  checked them back to back, and on a node with several hundred such rows
+  that took the whole chain request budget for minutes after every start,
+  while the node's other chain reads waited or were refused. A check that
+  activates nothing is now followed by a pause of at least 5 s, at least
+  four times the time the check took and at most 30 s. A row that
+  something asked for is checked first, then rows with a saved chain id,
+  then the rest. In a test process with 571 saved rows, 565 of them not
+  confirmed by the chain, the checks made 10 chain reads a second for two
+  minutes before the change and 1.3 a second after it, and the node's
+  ordinary foreground reads waited up to 88 s for admission before and at
+  most 1 ms after. The last row was checked 44 minutes after the start,
+  where it was 2 min 39 s.
+- **Rolling activation of saved subscriptions keeps its cap and its
+  wakes** (#3125, #3156): rolling activation could exceed its cap when
+  another request took the last slot during an authority read, and it
+  could miss a wake that was requested as a pass ended. The pass now
+  checks the cap again after its reads, and a wake that arrives as a pass
+  ends is kept. The pacing of the checks uses a monotonic clock, so a
+  change of the wall clock cannot lengthen a pause.
+- **Join metadata is fetched again when the fetch after a live approval
+  fails** (#3109, #3110): when a join is approved on a running node, the
+  member fetches the curator's metadata in at most two attempts and then
+  asks for a broadcast catch-up, which does not carry private metadata. If
+  both fetches failed in transport, nothing fetched the metadata again
+  until the node restarted, and every write of the member was answered
+  `CONTEXT_GRAPH_NOT_FOUND`. The member now goes on with the bounded
+  recovery that start-up already uses: one attempt at once, then after
+  15 s, 30 s, 1 min and 2 min, and every 5 min from there, until the
+  metadata is confirmed, the approval is withdrawn or the node stops.
+  Metadata that the node refused because it names another registration
+  than the one its own row holds is not fetched again. Fixes a 10.0.23
+  known issue.
+- **Gossip reconcile and catalog responsibility keep their state when an
+  authority read gets no answer** (#3042): two places that act on an
+  authority check reduced it to yes or no, so a chain read that got no
+  answer counted as a refusal. In the Shared Working Memory gossip
+  reconcile a subscription the node holds now stays, and one it does not
+  hold is not made. For the catalog of a private graph a responsibility
+  the node holds as a member stays. The graph is asked again shortly, one
+  graph every 2.5 s. A refusal and every other answered result take effect
+  at once, as before.
+- **The Shared Working Memory gate no longer drops a valid envelope because
+  another graph's metadata changed** (#2968, #3011): the gate took its
+  snapshot of a graph's metadata again when a node-wide revision had
+  moved, and gave up after two attempts. A metadata write to any other
+  graph moves that revision, so on a busy node both attempts saw a change,
+  the gate failed with
+  `metadata authority kept changing while resolving its SWM gate` and the
+  envelope was dropped. The gate now compares the graph's own
+  authority-facts revision. A change to the graph itself still takes a
+  fresh snapshot.
+- **Concurrent callers share one chain adapter initialization** (#3043):
+  every caller that found the chain adapter uninitialized ran its own
+  initialization of about 18 chain reads, in its own request class. After
+  a reset of the contract bindings, every caller that arrived before the
+  first one had finished repeated the reads, and the copies waited behind
+  each other in the node's own request queue. One initialization now
+  serves all the callers that wait for it, in the foreground class. On a
+  local chain a node ran 8, 12 and 19 initializations at once in three
+  starts before the change and one in each start after it, and the first
+  registration after the reset took 1.8, 3.0 and 10.2 s before and 0.11 to
+  0.13 s after.
+- **A read that another endpoint serves no longer spends the first
+  endpoint's re-probe** (#3022, #3152): when the first chain endpoint
+  refuses a kind of read, that read is served by another endpoint. Such a
+  read used up the re-probe that was due for the first endpoint, although
+  the first endpoint was not asked. The re-probe is now used only when the
+  first endpoint is tried, so it stays available to the next ordinary
+  read.
+- **A dial by peer id alone has a deadline** (#2864, #3149): the fallback
+  that finds a peer by its id passed on only the caller's signal, which
+  switched off the transport's default limits, and a Verifiable Memory
+  reconcile could wait on it without end. The fallback now runs under a
+  deadline, and the caller's wait ends there even when the transport
+  ignores the cancellation. A dial that completes after its deadline does
+  not count as a success.
+- **A slow identity probe is retried once before the peer is suppressed**
+  (#2860, #3154): a peer whose identity responder was busy for longer
+  than the 3 s deadline went into exponential suppression before it could
+  prove its network. A probe that ends on a transport deadline is now
+  retried once with a response deadline of 15 s, and later suppression is
+  capped at 3 s while the peer has an open connection. The validation of
+  the signed proof, quarantine and the back-off for disconnected peers
+  are unchanged.
+- **A subscribe or unsubscribe that fails on an authority outage returns
+  an operation id** (#2843, #3151): the response now carries an operation
+  id, and exactly one server log line matches it. The subscription error
+  code, the generic response body and the retry headers are unchanged.
+- **A failed asynchronous share reports the transition that was stored**
+  (#2896, #3155): after a failed attempt the worker read the job's outcome
+  in a separate step, which could fail or see a later attempt. The queue
+  now returns the exact terminal or retrying transition with the write
+  that stored it, and bookkeeping that could not be resolved is returned
+  as an uncertain result, not as a fatal one.
+
+### Changed
+
+- **A publish into a private graph resolves its recipients and its curated
+  context once** (#3069, #3086): each Verifiable Memory publish resolved
+  the curated context twice, for payload and for chunk encryption, and
+  concurrent resolutions of a private roster repeated every per-agent key
+  lookup. One context is now resolved per publish attempt, with one policy
+  probe and one sender-key setup pass where there were two of each. Key
+  lookups are shared between concurrent callers and remembered for one
+  second; the memo is bypassed while a key or route write is pending.
+  After a sender-key setup the recipient authority is read once more, and
+  the resolution starts over when the roster or a route changed meanwhile.
+  An authority that still moves after three setups fails the attempt with
+  a typed authority failure, which a queued Knowledge Asset publish
+  records as `authority_unavailable` and retries.
+- **A missing asset version view names the endpoints that failed** (#3097,
+  #3099, #3106): after a publish is confirmed the node reads the asset's
+  version from the chain at one pinned block, from the first endpoint and
+  then from the others. An endpoint that failed that read was passed over
+  without a word, and when no endpoint served it, recovery deferred on
+  every tick with the same message and no cause. The read now keeps which
+  endpoint failed, by its position in the configured list and its host, at
+  which step, and a closed class for why. No URL and no provider error
+  text is kept. The recovery deferral, the exact-asset fetch and the
+  Verifiable Memory refresh check append that cause to their messages. The
+  `remains pending` warning is logged once per asset when a reason appears
+  or changes and then as one summary per reason every 5 minutes, where it
+  was logged on every tick. When no endpoint has served the read for 5
+  minutes and at least 12 deferrals, one line that begins
+  `Operator action needed:` says what is not finalizing, why, and what to
+  do. What each caller decides is unchanged.
+- **A node built from source keeps the identity of its build** (#2852,
+  #3153): a source build captures the commit it is built from before it
+  compiles and stores it only when the build succeeds, and status keeps
+  reporting that commit after the checkout has moved on. A build from a
+  changed or unidentifiable tree is not certified, and a failed
+  compilation keeps the earlier outputs and their metadata. When the
+  auto-updater builds from source, it clears stale build metadata in its
+  inactive slot first, and a failed clean-up or build leaves the active
+  slot untouched. The devnet scripts rebuild stale executables.
+- **The dashboard says when a size is a preview** (#1015, #1026, #3147,
+  #3148): a memory layer that was capped or unavailable looked like a
+  complete graph size. Rows and the total now show a loaded preview, with
+  `+` on an entity count that is a lower bound and `~` on a triple count
+  that can still change, and tooltips explain the cap and the
+  uncertainty. The triple counts of Working, Shared Working and
+  Verifiable Memory are labelled as stored triples, and the Verifiable
+  Memory count as data plus provenance.
+- **Test and CI plumbing** (#3131, #3132): the timing baseline from which
+  CI plans the ten agent test shards is refreshed. 264 of the 644 agent
+  test files had no measured time and were planned at 60 s each, so a
+  branch that added a test file could move the heavy files into one shard,
+  which was then cancelled at its 10-minute limit although no test had
+  failed.
+
+### Added
+
+- **Timing of a queued publication's wait after finality** (#3081, #3120,
+  #3136): one `async_publish_post_finality` line per finalized queued job,
+  at info when the wait is 10 s or more and at debug otherwise. It names
+  the path the job took (`inline`, `detached`, `held-failed` or
+  `interrupted`) and splits the wait into `tailMs`, `recoveryAdmissionMs`,
+  `recoveryRetryMs`, `proofMs`, `recoveryMs` and `terminalWriteMs`, which
+  sum to `totalMs`. `tailMs`, the executor's work after the confirmation,
+  is split again by step: `tailPublishMs`, `tailReceiptWriteMs`,
+  `tailPublishedGraphClearMs`, `tailLegacySwmRetireMs`,
+  `tailRemainingSwmClearMs`, `tailLifecycleStampMs`, `tailGraphIdReadMs`,
+  `tailFinalizationGossipMs`, `tailShareMarkerClearMs`,
+  `tailCatalogObserverMs` and `tailRestMs`. A part whose step did not run
+  prints `-`. One `rfc64_catalog_placement_wait` line is written for a
+  catalog placement that takes 5 s or more, with `requestMs`, `queueMs`
+  and `attemptMs`, and the attempt by phase (`coverageMs`, `assetMs`,
+  `stateMs`, `successorMs`, `casMs`, `otherMs`). Its `announceMs`, `peers`,
+  `failedPeers` and `deniedPeers` are always 0, because a head is no
+  longer delivered inside an attempt (#3130). The lines of one job carry
+  `[from:<jobId>]`. The marks are kept in memory, so a restart loses them.
+- **Author catalog blocks in `GET /api/status`** (#3120, #3127, #3130,
+  #3143): three blocks under `rfc64Catalog`, with counts only and no
+  graph, author, asset or peer. `finalizedPrivatePlacementQueue` counts
+  the placements that are owed (`depth`, `pending`, `oldestPendingAgeMs`,
+  `waiters`, `oldestWaiterAgeMs`, `passRunning`, `lastPassDurationMs`,
+  `cooldownSkips`). `authorCatalogCapacity` counts the catalogs that
+  refused a new row for lack of room and the placements parked for them
+  (`scopesAtCap`, `parkedPlacements`). `catalogHeadDelivery` counts head
+  deliveries since the node started (`handoffsQueued`, `handoffsNobody`,
+  `handoffsNotQueued`, `reportedHeads`, `deliveredPeers`, `failedPeers`,
+  `refusedPeers`, `uncheckedPeers`, `unconfirmedPeers`, `supersededHeads`,
+  `undeliverableHeads`, `checkpointCapacityExceeded`). A parked placement
+  is still owed, so a full catalog shows in the first block as a backlog
+  that does not drain: `pending` minus `parkedPlacements` is what waits
+  for an attempt.
+- **`chain.versionSnapshot` in `GET /api/status`** (#3097, #3099): the
+  endpoints that failed the asset version read, by position and host. An
+  endpoint that reads pass over stays on record while they succeed on
+  another one.
+- **`DKG_RFC64_CATALOG_MUTATION_MEMORY`** (#3133): set to `0`, it switches
+  off the in-memory catalog state, and every placement reads and verifies
+  the durable catalog as before. Described in `docs/use-dkg/run-node.md`.
+- **An out-of-gas hint on a reverted write** (#3117, #3122): a receipt
+  carries neither the gas limit nor revert data, so the error of a write
+  that was mined and reverted gave no hint of the cause. When at most 1/32
+  of the gas limit was left, the message now ends
+  `it used <n> of its <m> gas limit, so it probably ran out of gas`. V10
+  publish and update transactions have their own receipt handling and do
+  not get the hint.
+
 ## [10.0.23] - 2026-10-09
 
 A patch for shares and publishes on busy nodes, for private Context Graphs
