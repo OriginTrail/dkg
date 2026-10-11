@@ -56,6 +56,7 @@ export interface FakeSigner {
 }
 
 const METHOD_NOT_FOUND = -32601;
+const INVALID_PARAMS = -32602;
 
 export async function startFakeRemoteSigner(options: FakeSignerOptions): Promise<FakeSigner> {
   const api = options.api ?? 'eth';
@@ -110,7 +111,8 @@ export async function startFakeRemoteSigner(options: FakeSignerOptions): Promise
           const sent = options.tamper ? await options.tamper(method, result, request, wallet) : result;
           send(res, 200, { jsonrpc: '2.0', id: body.id, result: sent });
         } catch (err) {
-          const code = (err as { code?: unknown }).code === METHOD_NOT_FOUND ? METHOD_NOT_FOUND : -32000;
+          const thrown = (err as { code?: unknown }).code;
+          const code = thrown === METHOD_NOT_FOUND || thrown === INVALID_PARAMS ? thrown : -32000;
           // Only an error's message goes back to the client, never the thrown value itself.
           send(res, 200, {
             jsonrpc: '2.0',
@@ -185,7 +187,14 @@ async function answer(
     case 'eth:eth_signTypedData':
     case 'clef:account_signTypedData': {
       const wallet = byAddress(params[0]);
-      const payload = (typeof params[1] === 'string' ? JSON.parse(params[1]) : params[1]) as {
+      // eth_signTypedData_v4 takes the typed data as a JSON string, while
+      // eth_signTypedData (as Web3Signer documents it) and account_signTypedData
+      // take it as an object.
+      const asJson = method === 'eth_signTypedData_v4';
+      if (asJson !== (typeof params[1] === 'string')) {
+        throw Object.assign(new Error(`invalid params: ${method} takes the typed data as ${asJson ? 'a JSON string' : 'an object'}`), { code: INVALID_PARAMS });
+      }
+      const payload = (asJson ? JSON.parse(params[1] as string) : params[1]) as {
         domain: ethers.TypedDataDomain;
         types: Record<string, ethers.TypedDataField[]>;
         message: Record<string, unknown>;

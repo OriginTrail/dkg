@@ -104,7 +104,7 @@ The node speaks the standard Ethereum JSON-RPC signing API. Addresses are sent i
 | --- | --- | --- |
 | List accounts | `eth_accounts` | `account_list` |
 | Sign a transaction | `eth_signTransaction` `[tx]`, returns the raw signed transaction | `account_signTransaction` `[tx]`, returns `{ raw, tx }` |
-| Sign EIP-712 typed data | `eth_signTypedData_v4` `[address, typedDataJson]`; if the signer answers "method not found" (`-32601`), `eth_signTypedData` with the same parameters | `account_signTypedData` `[address, typedData]` |
+| Sign EIP-712 typed data | `eth_signTypedData_v4` `[address, typedDataJson]` (the typed data as a JSON string); if the signer answers "method not found" (`-32601`), `eth_signTypedData` `[address, typedData]` (the typed data as an object) | `account_signTypedData` `[address, typedData]` |
 | Sign an EIP-191 message | `eth_sign` `[address, hexData]`; on "method not found", `personal_sign` `[hexData, address]` | `account_signData` `["text/plain", address, hexData]` |
 
 Transactions are sent fully populated: `from`, `to`, `gas`, `nonce`, `value`, `data`, `chainId`, and `type: "0x2"` with `maxFeePerGas` and `maxPriorityFeePerGas` (or `gasPrice` on chains without EIP-1559). The signer must sign exactly that transaction and must not change any field or broadcast it.

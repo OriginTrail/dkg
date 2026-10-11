@@ -141,13 +141,18 @@ export class RemoteSignerClient {
     return raw;
   }
 
-  /** Returns the signature over the EIP-712 `payload` (as produced by `TypedDataEncoder.getPayload`). */
+  /**
+   * Returns the signature over the EIP-712 `payload` (as produced by
+   * `TypedDataEncoder.getPayload`). `eth_signTypedData_v4` takes the payload as
+   * a JSON string; `eth_signTypedData` and `account_signTypedData` take it as
+   * an object.
+   */
   signTypedData(address: string, payload: Record<string, unknown>): Promise<unknown> {
     const account = address.toLowerCase();
     return this.#callWithFallback('signTypedData', (method) => (
-      method === 'account_signTypedData'
-        ? [account, payload]
-        : [account, JSON.stringify(payload)]
+      method === 'eth_signTypedData_v4'
+        ? [account, JSON.stringify(payload)]
+        : [account, payload]
     ));
   }
 

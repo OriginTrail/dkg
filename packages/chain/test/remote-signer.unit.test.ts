@@ -353,7 +353,7 @@ describe('RemoteSigner verification', () => {
     expect(await resolving.signTypedData(named, TYPES, VALUE)).toBe(await WALLET_A.signTypedData(DOMAIN, TYPES, VALUE));
   });
 
-  it('signs typed data with eth_signTypedData_v4 and falls back once to eth_signTypedData', async () => {
+  it('signs typed data with eth_signTypedData_v4 (a JSON string) and falls back once to eth_signTypedData (an object)', async () => {
     const v4 = await fakeSigner();
     const remote = new RemoteSigner(WALLET_A.address, client(v4));
     expect(await remote.signTypedData(DOMAIN, TYPES, VALUE)).toBe(await WALLET_A.signTypedData(DOMAIN, TYPES, VALUE));
@@ -375,7 +375,10 @@ describe('RemoteSigner verification', () => {
     await new RemoteSigner(WALLET_B.address, shared).signTypedData(DOMAIN, TYPES, VALUE);
     expect(legacyName.calls('eth_signTypedData_v4')).toHaveLength(1);
     expect(legacyName.calls('eth_signTypedData')).toHaveLength(2);
-    expect(legacyName.calls('eth_signTypedData')[0].params).toEqual(request.params);
+    // The same payload, as the object eth_signTypedData takes; this signer refuses a JSON string there.
+    expect(legacyName.calls('eth_signTypedData')[0].params).toEqual([request.params[0], payload]);
+    await expect(shared.transport.request('eth_signTypedData', request.params))
+      .rejects.toMatchObject({ code: 'REMOTE_SIGNER_REJECTED', rpcCode: -32602 });
   });
 
   it('signs EIP-191 messages with eth_sign, falling back to personal_sign', async () => {
