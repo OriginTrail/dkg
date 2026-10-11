@@ -48,7 +48,7 @@ export const deniedWithCallerGrant: ContextGraphReadAuthorityDecision = {
 
 // KA resolution carries its admission and resource together; graph authority stays input-driven.
 import type { DKGAgent } from '../src/index.js';
-import { resolveKnowledgeAssetRead, type KnowledgeAssetReadInput, type KnowledgeAssetReadOptions, type KnowledgeAssetReadResolution } from '../src/knowledge-asset-read-resolution.js';
+import { resolveKnowledgeAssetRead, resolveKnowledgeAssetReadTarget, type KnowledgeAssetReadInput, type KnowledgeAssetReadOptions, type KnowledgeAssetReadResolution, type KnowledgeAssetReadTarget } from '../src/knowledge-asset-read-resolution.js';
 declare const draftAgent: DKGAgent;
 const draftOptions: KnowledgeAssetReadOptions = { callerAgentAddress: '0xcaller' };
 const draftInput: KnowledgeAssetReadInput = { cg: 'cg', name: 'compact:name', agentAddress: '0xcaller', kind: 'identifier', lookup: 'quads' };
@@ -58,6 +58,11 @@ const missingReadOperation: KnowledgeAssetReadInput = { cg: 'cg', name: 'compact
 // @ts-expect-error The combined resolution cannot discard its resource evidence.
 const discardedEvidence: Promise<ContextGraphReadAuthorityDecision> = resolveKnowledgeAssetRead(draftAgent, draftInput, draftOptions);
 void [draftDecision, missingReadOperation, discardedEvidence];
+
+const operatorTarget: Promise<KnowledgeAssetReadTarget> = resolveKnowledgeAssetReadTarget(draftAgent, draftInput);
+// @ts-expect-error Transport operator privileges are not graph-authority admission evidence.
+const transportBypass: KnowledgeAssetReadOptions = { nodeOperator: true };
+void [operatorTarget, transportBypass];
 
 // Admission and resource evidence are correlated; granted node evidence is not caller admission.
 declare const kaResolution: KnowledgeAssetReadResolution;

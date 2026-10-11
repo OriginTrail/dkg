@@ -5,7 +5,6 @@ import {
   contextGraphReadAuthorityDependencyOf,
   type ContextGraphCallerReadAdmission,
   unavailableContextGraphReadAuthorityDecision,
-  type ContextGraphReadAuthorityDecision,
 } from './context-graph-read-authority.js';
 
 const AGENT_NUMBER_RE = /^0x[0-9a-fA-F]{40}:[0-9]+$/;
@@ -65,8 +64,6 @@ export type KnowledgeAssetReadInput = {
 export interface KnowledgeAssetReadOptions {
   callerAgentAddress?: string;
   signal?: AbortSignal;
-  /** Trusted daemon operator access preserves its existing graph-read bypass. */
-  nodeOperator?: boolean;
 }
 
 export type KnowledgeAssetReadResolution =
@@ -80,16 +77,12 @@ export async function resolveKnowledgeAssetRead(
   options: KnowledgeAssetReadOptions,
 ): Promise<KnowledgeAssetReadResolution> {
   const { callerAgentAddress: caller, signal } = options;
-  const { cg, name, subGraphName } = input;
+  const { cg, name } = input;
   signal?.throwIfAborted();
-  let decision: ContextGraphReadAuthorityDecision = options.nodeOperator
-    ? { outcome: 'allowed', source: 'system', reason: 'node-operator-read', grantScope: 'node', metadataBootstrap: 'forbidden' }
-    : await agent.resolveContextGraphReadAuthority(cg, { callerAgentAddress: caller, signal });
+  let decision = await agent.resolveContextGraphReadAuthority(cg, { callerAgentAddress: caller, signal });
   signal?.throwIfAborted();
-  const identifier = input.kind === 'literal' ? { kind: 'name' as const } : classifyKaIdentifier(name);
+  const { identifier, readLiteral, resolveTarget } = createKnowledgeAssetTargetLookup(agent, input, signal);
   const { agentAddress } = input;
-  let literalLookup: Promise<AssertionHistoryDescriptor | null> | undefined;
-  const readLiteral = () => literalLookup ??= agent.assertion.history(cg, name, { agentAddress, subGraphName });
   const ownIdentifier = identifier.kind === 'name' || (agentAddress !== undefined
     && (identifier.kaId >> 96n) === BigInt(agentAddress));
   if (decision.outcome === 'allowed' && decision.source === 'legacy-local' && decision.grantScope === 'node'
@@ -119,18 +112,43 @@ export async function resolveKnowledgeAssetRead(
       ), target: null };
     }
   }
-  const admission = admitContextGraphReadCaller(decision, options.nodeOperator ? undefined : caller);
+  const admission = admitContextGraphReadCaller(decision, caller);
   if (admission.outcome !== 'admitted') return { ...admission, target: null };
-  const target: KnowledgeAssetReadTarget = { kind: identifier.kind, cg, name, subGraphName, agentAddress, descriptor: null };
-  if (input.lookup === 'none' || (identifier.kind === 'name' && input.lookup === 'quads')) return { ...admission, target };
-  let descriptor: AssertionHistoryDescriptor | null;
-  if (identifier.kind === 'kaId') {
-    const literal = AGENT_NUMBER_RE.test(name) ? await readLiteral() : null;
+  return { ...admission, target: await resolveTarget() };
+}
+
+/** Resource lookup only; transport callers own any operator authorization. */
+export async function resolveKnowledgeAssetReadTarget(
+  agent: DKGAgent,
+  input: KnowledgeAssetReadInput,
+  options: { signal?: AbortSignal } = {},
+): Promise<KnowledgeAssetReadTarget> {
+  options.signal?.throwIfAborted();
+  return createKnowledgeAssetTargetLookup(agent, input, options.signal).resolveTarget();
+}
+
+function createKnowledgeAssetTargetLookup(
+  agent: DKGAgent,
+  input: KnowledgeAssetReadInput,
+  signal?: AbortSignal,
+) {
+  const { cg, name, subGraphName, agentAddress } = input;
+  const identifier = input.kind === 'literal' ? { kind: 'name' as const } : classifyKaIdentifier(name);
+  let literalLookup: Promise<AssertionHistoryDescriptor | null> | undefined;
+  const readLiteral = () => literalLookup ??= agent.assertion.history(cg, name, { agentAddress, subGraphName });
+  const resolveTarget = async (): Promise<KnowledgeAssetReadTarget> => {
+    const target: KnowledgeAssetReadTarget = { kind: identifier.kind, cg, name, subGraphName, agentAddress, descriptor: null };
+    if (input.lookup === 'none' || (identifier.kind === 'name' && input.lookup === 'quads')) return target;
+    let descriptor: AssertionHistoryDescriptor | null;
+    if (identifier.kind === 'kaId') {
+      const literal = AGENT_NUMBER_RE.test(name) ? await readLiteral() : null;
+      signal?.throwIfAborted();
+      descriptor = literal ?? await agent.assertion.resolveByKaId?.(cg, identifier.kaId, { subGraphName }) ?? null;
+    } else {
+      descriptor = await readLiteral();
+    }
     signal?.throwIfAborted();
-    descriptor = literal ?? await agent.assertion.resolveByKaId?.(cg, identifier.kaId, { subGraphName }) ?? null;
-  } else {
-    descriptor = await readLiteral();
-  }
-  signal?.throwIfAborted();
-  return { ...admission, target: { ...target, name: descriptor?.name ?? name, descriptor } };
+    return { ...target, name: descriptor?.name ?? name, descriptor };
+  };
+  return { identifier, readLiteral, resolveTarget };
 }

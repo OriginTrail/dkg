@@ -5,7 +5,7 @@ import {
   type ContextGraphAuthorityRpcSite,
 } from '@origintrail-official/dkg-chain';
 import { admitContextGraphReadCaller, type ContextGraphCallerReadAdmission } from '@origintrail-official/dkg-agent/dist/context-graph-read-authority.js';
-import { resolveKnowledgeAssetRead, type KnowledgeAssetReadInput, type KnowledgeAssetReadTarget } from '@origintrail-official/dkg-agent/dist/knowledge-asset-read-resolution.js';
+import { resolveKnowledgeAssetRead, resolveKnowledgeAssetReadTarget, type KnowledgeAssetReadInput, type KnowledgeAssetReadTarget } from '@origintrail-official/dkg-agent/dist/knowledge-asset-read-resolution.js';
 import {
   jsonResponse,
   respondContextGraphReadAuthorityUnavailable,
@@ -44,9 +44,7 @@ export async function requireKnowledgeAssetRead(
   return requireReadAuthority(ctx, input.cg, CONTEXT_GRAPH_AUTHORITY_RPC_SITES.query, async (cg, callerAgentAddress, signal) => {
     const resolution = await resolveKnowledgeAssetRead(ctx.agent, { ...input, cg }, { callerAgentAddress, signal });
     return { ...resolution, value: resolution.target };
-  }, async () => (await resolveKnowledgeAssetRead(ctx.agent, input, { nodeOperator: true,
-    callerAgentAddress: actorFromRequestContext(ctx).authenticatedAgentAddress,
-  })).target);
+  }, () => resolveKnowledgeAssetReadTarget(ctx.agent, input));
 }
 
 async function requireReadAuthority<T>(

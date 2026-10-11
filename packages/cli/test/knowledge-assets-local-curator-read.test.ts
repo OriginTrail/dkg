@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { EventEmitter } from 'node:events';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { DKGAgent, KaNumberAllocator } from '@origintrail-official/dkg-agent';
+import { DKGAgent, KaNumberAllocator, type AssertionHistoryDescriptor } from '@origintrail-official/dkg-agent';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { contextGraphAssertionUri, contextGraphDataGraphUri, contextGraphMetaUri, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
@@ -32,6 +32,9 @@ describe('real local curator draft provenance through HTTP admission', () => {
   let other: string;
   let kaNumber: string;
   let compactLiteralName: string;
+  let numberedAlias: AssertionHistoryDescriptor;
+  let compactLiteral: AssertionHistoryDescriptor;
+  let foreignAliasOnly: string;
   const deniedCg = `${CG}-denied`;
   const revokedCg = `${CG}-revoked`;
   const foreignCg = `${CG}-foreign-curator`;
@@ -56,10 +59,26 @@ describe('real local curator draft provenance through HTTP admission', () => {
         predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT, ...(cg === deniedCg ? { object: `"${owner}"` } : {}) });
       await agent.renameContextGraph(cg, cg, cg === foreignCg ? other : owner);
     }
-    compactLiteralName = `${other}:5`;
+    for (const name of ['numbered-alias', 'alias-only']) {
+      await agent.assertion.create(CG, name, { agentAddress: other });
+      await agent.assertion.write(CG, name, [{ subject: `urn:legacy:${name}`, predicate: 'http://schema.org/name',
+        object: `"${name} secret"`, graph: '' }], { agentAddress: other });
+      await agent.assertion.finalize(CG, name, { agentAddress: other, authorAgentAddress: other });
+    }
+    numberedAlias = (await agent.assertion.history(CG, 'numbered-alias', { agentAddress: other }))!;
+    expect(numberedAlias.kaNumber).toBeDefined();
+    compactLiteralName = `${other}:${numberedAlias.kaNumber}`;
+    const aliasOnly = (await agent.assertion.history(CG, 'alias-only', { agentAddress: other }))!;
+    foreignAliasOnly = `${other}:${aliasOnly.kaNumber}`;
     await agent.assertion.create(CG, compactLiteralName, { agentAddress: owner });
     await agent.assertion.write(CG, compactLiteralName, [{ subject: 'urn:legacy:literal', predicate: 'http://schema.org/name',
       object: '"literal secret"', graph: '' }], { agentAddress: owner });
+    compactLiteral = (await agent.assertion.history(CG, compactLiteralName, { agentAddress: owner }))!;
+    expect(await agent.assertion.resolveByKaId(CG, (BigInt(other) << 96n) | BigInt(numberedAlias.kaNumber!)))
+      .toMatchObject({ name: numberedAlias.name, wmCurrentAssertion: numberedAlias.wmCurrentAssertion });
+    expect(numberedAlias.name).not.toBe(compactLiteral.name);
+    expect(numberedAlias.wmCurrentAssertion).toBeTruthy();
+    expect(compactLiteral.wmCurrentAssertion).toBeUndefined();
     expect((await agent.getCgMeta(revokedCg)).revokedAgents.map(address => address.toLowerCase())).toContain(owner.toLowerCase());
     kaNumber = (await agent.assertion.history(CG, 'asset', { agentAddress: owner }))!.kaNumber!;
     expect(kaNumber).toBeDefined();
@@ -90,7 +109,39 @@ describe('real local curator draft provenance through HTTP admission', () => {
   it.each(['', '/wm', '/wm/quads', '/wm/extraction-status'])('keeps own compact-looking literal precedence at %s', async suffix => {
     const res = await read(compactLiteralName, suffix);
     expect(res.statusCode, res.body).toBe(suffix === '/wm/extraction-status' ? 404 : 200);
-    if (suffix === '/wm/quads') expect(res.body).toContain('literal secret');
+    if (suffix === '' || suffix === '/wm') {
+      expect(JSON.parse(res.body)).toMatchObject({ name: compactLiteral.name, assertionGraph: compactLiteral.assertionGraph,
+        status: 'draft-open' });
+      expect(JSON.parse(res.body).wmCurrentAssertion).toBeUndefined();
+    }
+    if (suffix === '/wm/quads') {
+      expect(JSON.parse(res.body).quads).toContainEqual(expect.objectContaining({ subject: 'urn:legacy:literal', object: '"literal secret"' }));
+      expect(res.body).not.toContain('numbered-alias secret');
+    }
+  });
+  it.each(['', '/wm', '/wm/quads'])('falls back to the own numbered alias when no caller-lane literal exists at %s', async suffix => {
+    const compact = `${owner}:${kaNumber}`;
+    expect(await agent.assertion.history(CG, compact, { agentAddress: owner })).toBeNull();
+    const res = await read(compact, suffix);
+    expect(res.statusCode, res.body).toBe(200);
+    if (suffix === '/wm/quads') expect(res.body).toContain('legacy secret');
+    else expect(JSON.parse(res.body)).toMatchObject({ name: 'asset', kaNumber, status: 'wm-sealed' });
+  });
+  it.each(['operator', 'disabled-anonymous'] as const)('preserves %s inspection of the competing literal without domain admission', async kind => {
+    const authority = vi.spyOn(agent, 'resolveContextGraphReadAuthority').mockRejectedValue(new Error('no graph grant'));
+    try {
+      for (const suffix of ['', '/wm', '/wm/quads']) {
+        const h = context(agent, owner, `/api/knowledge-assets/${encodeURIComponent(compactLiteralName)}${suffix}?contextGraphId=${CG}&agentAddress=${owner}`);
+        const ctx: RequestContext = { ...h.ctx, authentication: requestAuthentication(kind === 'operator'
+          ? { kind: 'nodeOperator' } : { kind: 'anonymous', mode: 'disabled' }) };
+        await handleKnowledgeAssetsRoutes(ctx);
+        expect(h.res.statusCode, h.res.body).toBe(200);
+        if (suffix === '/wm/quads') expect(h.res.body).toContain('literal secret');
+        else expect(JSON.parse(h.res.body)).toMatchObject({ name: compactLiteral.name, assertionGraph: compactLiteral.assertionGraph, status: 'draft-open' });
+        expect(h.res.body).not.toContain('numbered-alias secret');
+      }
+      expect(authority).not.toHaveBeenCalled();
+    } finally { authority.mockRestore(); }
   });
   it.each(['', '/wm', '/wm/quads', '/wm/extraction-status'])('carries the single caller-lane literal lookup into %s', async suffix => {
     const assertion = agent.assertion;
@@ -170,7 +221,7 @@ describe('real local curator draft provenance through HTTP admission', () => {
     }
   });
   it('rejects a foreign alias even with the default caller lane', async () => {
-    expect((await read(`${other}:${kaNumber}`)).statusCode).toBe(403);
+    expect((await read(foreignAliasOnly)).statusCode).toBe(403);
   });
   it.each(['/swm', '/vm'])('does not extend draft-only evidence to %s', async suffix => {
     expect((await read('asset', suffix)).statusCode).toBe(403);

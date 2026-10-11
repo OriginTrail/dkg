@@ -5,7 +5,7 @@ import { contextGraphDataGraphUri, contextGraphMetaUri, DKG_ONTOLOGY } from '@or
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent, KaNumberAllocator } from '../src/index.js';
 import { makeTestKaNumberStore } from './_helpers/ka-allocator.js';
-import { resolveKnowledgeAssetRead, type KnowledgeAssetReadInput, type KnowledgeAssetReadOptions } from '../src/knowledge-asset-read-resolution.js';
+import { resolveKnowledgeAssetRead, resolveKnowledgeAssetReadTarget, type KnowledgeAssetReadInput, type KnowledgeAssetReadOptions } from '../src/knowledge-asset-read-resolution.js';
 
 const CG = 'draft-read-authority-owner';
 
@@ -88,6 +88,25 @@ describe('dedicated draft authority retains the general graph-read contract', ()
         { callerAgentAddress: owner })).toMatchObject({ decision: { grantScope: 'caller' }, target: { name: `${other}:5` } });
       expect(history).toHaveBeenCalledTimes(1);
     } finally { facade.mockRestore(); history.mockRestore(); }
+  });
+
+  it('looks up an operator-selected resource without manufacturing authority or reading curator provenance', async () => {
+    const authority = vi.spyOn(agent, 'resolveContextGraphReadAuthority').mockRejectedValue(new Error('not a domain admission'));
+    const meta = vi.spyOn(agent, 'getCgMeta');
+    const curator = vi.spyOn(agent, 'getContextGraphCurator');
+    const assertion = agent.assertion;
+    const history = vi.spyOn(assertion, 'history');
+    const facade = vi.spyOn(agent, 'assertion', 'get').mockReturnValue(assertion);
+    try {
+      const target = await resolveKnowledgeAssetReadTarget(agent, { cg: CG, name: `${other}:5`, agentAddress: owner,
+        kind: 'identifier', lookup: 'descriptor' });
+      expect(target).toMatchObject({ name: `${other}:5`, descriptor: { name: `${other}:5`, agentAddress: owner } });
+      expect(target).not.toHaveProperty('decision');
+      expect(authority).not.toHaveBeenCalled();
+      expect(meta).not.toHaveBeenCalled();
+      expect(curator).not.toHaveBeenCalled();
+      expect(history).toHaveBeenCalledExactlyOnceWith(CG, `${other}:5`, { agentAddress: owner, subGraphName: undefined });
+    } finally { facade.mockRestore(); history.mockRestore(); curator.mockRestore(); meta.mockRestore(); authority.mockRestore(); }
   });
 
   it('admits an owner-normalized literal without an assertion lookup', async () => {
