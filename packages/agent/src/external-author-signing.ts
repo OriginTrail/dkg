@@ -14,7 +14,7 @@ import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
 import type { AgentKeyRecord } from './agent-keystore.js';
 import type { DKGAgent } from './dkg-agent.js';
 
-interface ExternalAuthorConfig {
+export interface ExternalAuthorConfig {
   readonly chainConfig?: { readonly signers?: readonly unknown[]; readonly authors?: ExternalAuthorSigners };
 }
 
