@@ -81,10 +81,11 @@ const EVM_INTERNAL_METHODS = new Set<string>([
   // The mock implements that public reader directly from its in-memory event
   // state and has no ethers TransactionReceipt to project.
   'projectCanonicalFinalizationReceipt',
-  // TS-private ethers-log decoder behind the canonical-finalization reader.
+  // TS-private receipt facts/history beneath the verifier and confirmation reader.
   // TypeScript erases private visibility on the prototype; the mock implements
-  // the public reader from its event state and has no ethers update logs.
-  'decodeV10UpdateConfirmationReceipt',
+  // the public capabilities from its event state without ethers logs or root history.
+  'decodeUpdateReceiptFacts',
+  'authenticateUpdateReceipt',
   // Physical EVM contract-binding and one-log generation fences. These are
   // protected implementation details rather than ChainAdapter capabilities;
   // the mock has neither Hub-bound contract handles nor a persisted one-log.

@@ -67,7 +67,7 @@ import type {
   Rfc64FinalizedPrivatePlacementRepairStoreV1,
   Rfc64FinalizedPrivatePlacementRepairV1,
 } from '../../src/rfc64/finalized-private-placement-repair-store-v1.js';
-import type { ConfirmedCatalogObligationCompletionV1 } from '../../src/dkg-agent-rfc64-swm-catalog-projection.js';
+import type { ConfirmedCatalogObligationCompletionV1, Rfc64CatalogAuthoringLaneDecisionV1 } from '../../src/dkg-agent-rfc64-swm-catalog-projection.js';
 import {
   AUTHOR,
   AUTHOR_WALLET,
@@ -268,10 +268,10 @@ interface ConfirmedVmPublishTailInputV1 {
 interface PlacementAgentInternalsV1 {
   readonly log: Pick<Logger, 'info' | 'warn'>;
   readonly rfc64PersistenceV1: { finalizedPrivatePlacementRepairs: Rfc64FinalizedPrivatePlacementRepairStoreV1 };
-  resolveRfc64CatalogAuthoringLaneV1(
+  resolveRfc64CatalogAuthoringLaneDecisionV1(
     contextGraphId: string,
     subGraphName: string | null | undefined,
-  ): Readonly<{ acceptsFinalizedVmRepair: boolean }> | null;
+  ): Rfc64CatalogAuthoringLaneDecisionV1<Readonly<{ acceptsFinalizedVmRepair: boolean }>>;
   repairObservedRfc64FinalizedPrivateCatalogPlacementV1(
     repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
     placement: CatalogPlacementAttemptV1,
@@ -326,15 +326,15 @@ export async function startPlacementAgentV1(
       const internals = internalsOf(starting);
       vi.spyOn(starting, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
       vi.spyOn(starting, 'reconcileRfc64PublicCatalogFromSwmInventoryV1').mockResolvedValue(null);
-      const realLane = internals.resolveRfc64CatalogAuthoringLaneV1.bind(starting);
-      vi.spyOn(internals, 'resolveRfc64CatalogAuthoringLaneV1').mockImplementation(
+      const realLane = internals.resolveRfc64CatalogAuthoringLaneDecisionV1.bind(starting);
+      vi.spyOn(internals, 'resolveRfc64CatalogAuthoringLaneDecisionV1').mockImplementation(
         (contextGraphId, subGraphName) => {
-          if (lane.unavailable !== undefined) throw lane.unavailable;
-          if (lane.inactive === true) return null;
-          const resolved = realLane(contextGraphId, subGraphName);
-          return resolved === null
-            ? null
-            : { ...resolved, acceptsFinalizedVmRepair: lane.acceptsFinalizedVmRepair };
+          if (lane.unavailable !== undefined) return { status: 'unavailable', error: lane.unavailable };
+          if (lane.inactive === true) return { status: 'inactive' };
+          const decision = realLane(contextGraphId, subGraphName);
+          return decision.status === 'active'
+            ? { ...decision, lane: { ...decision.lane, acceptsFinalizedVmRepair: lane.acceptsFinalizedVmRepair } }
+            : decision;
         },
       );
       installCatalogPlacementTimingV1(starting, new CatalogPlacementTimingV1({

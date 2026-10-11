@@ -113,13 +113,13 @@ function instrument(agent: DKGAgent) {
   const internals = agent as unknown as Record<string, (...args: any[]) => any>;
   vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
   const projection = vi.spyOn(agent, 'reconcileRfc64PublicCatalogFromSwmInventoryV1').mockResolvedValue(null);
-  const realLane = internals.resolveRfc64CatalogAuthoringLaneV1!.bind(agent);
-  vi.spyOn(internals, 'resolveRfc64CatalogAuthoringLaneV1').mockImplementation(
+  const realLane = internals.resolveRfc64CatalogAuthoringLaneDecisionV1!.bind(agent);
+  vi.spyOn(internals, 'resolveRfc64CatalogAuthoringLaneDecisionV1').mockImplementation(
     (contextGraphId: unknown, subGraphName: unknown) => {
-      const lane = realLane(contextGraphId, subGraphName);
-      return lane === null
-        ? null
-        : { ...lane, acceptsFinalizedVmRepair: true, projectionTargetPolicy: 'monotonic-union' };
+      const decision = realLane(contextGraphId, subGraphName);
+      return decision.status === 'active'
+        ? { ...decision, lane: { ...decision.lane, acceptsFinalizedVmRepair: true, projectionTargetPolicy: 'monotonic-union' } }
+        : decision;
     },
   );
 
@@ -445,8 +445,8 @@ describe('a full author catalog', () => {
     const internals = author.agent as unknown as Record<string, (...args: any[]) => any>;
     const lane = internals.resolveRfc64CatalogAuthoringLaneV1!(CONTEXT_GRAPH_ID, null);
     expect(lane).not.toBeNull();
-    vi.mocked(internals.resolveRfc64CatalogAuthoringLaneV1!).mockReturnValue({
-      ...lane, acceptsFinalizedVmRepair: false, projectionTargetPolicy: 'exact-replacement',
+    vi.mocked(internals.resolveRfc64CatalogAuthoringLaneDecisionV1!).mockReturnValue({
+      status: 'active', lane: { ...lane, acceptsFinalizedVmRepair: false, projectionTargetPolicy: 'exact-replacement' },
     });
     const seeded = await seedInventoryAssetV1(author.agent, 'selected-confirmation', 151n);
     const persistence = (author.agent as unknown as {
@@ -552,8 +552,8 @@ describe('a full author catalog', () => {
     const before = author.footprint();
     const internals = author.agent as unknown as Record<string, (...args: any[]) => any>;
     const lane = internals.resolveRfc64CatalogAuthoringLaneV1!(CONTEXT_GRAPH_ID, null);
-    vi.mocked(internals.resolveRfc64CatalogAuthoringLaneV1!).mockReturnValue({
-      ...lane, acceptsFinalizedVmRepair: false, projectionTargetPolicy: 'exact-replacement',
+    vi.mocked(internals.resolveRfc64CatalogAuthoringLaneDecisionV1!).mockReturnValue({
+      status: 'active', lane: { ...lane, acceptsFinalizedVmRepair: false, projectionTargetPolicy: 'exact-replacement' },
     });
     const remove = vi.spyOn(author.agent, 'removeRfc64SwmAuthorInventoryConfirmedRowV1');
     await author.pass();

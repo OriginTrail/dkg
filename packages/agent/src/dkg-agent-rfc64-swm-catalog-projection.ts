@@ -117,12 +117,12 @@ type ResolvedRfc64CatalogAuthoringLaneV1 =
     readonly acceptsFinalizedVmRepair: boolean;
   }>;
 
-type Rfc64CatalogAuthoringLaneDecisionV1 =
+export type Rfc64CatalogAuthoringLaneDecisionV1<Lane = ResolvedRfc64CatalogAuthoringLaneV1> =
   | Readonly<{ readonly status: 'inactive' }>
   | Readonly<{ readonly status: 'unavailable'; readonly error: Error }>
   | Readonly<{
     readonly status: 'active';
-    readonly lane: ResolvedRfc64CatalogAuthoringLaneV1;
+    readonly lane: Lane;
   }>;
 
 export function rfc64CatalogLaneAcceptsWorkspaceHeadV1(
@@ -244,7 +244,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
 
   /** Current authority, action and scope shared by repair admission and execution. */
   protected resolveRfc64FinalizedPlacementDecisionV1(this: DKGAgent, repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>) {
-    return resolveFinalizedPlacementDecisionV1(repair, () => this.resolveRfc64CatalogAuthoringLaneV1(repair.contextGraphId, null));
+    return resolveFinalizedPlacementDecisionV1(repair, () => this.resolveRfc64CatalogAuthoringLaneDecisionV1(repair.contextGraphId, null));
   }
 
   /** Canonical selected-CG admission shared by inventory and projection. */

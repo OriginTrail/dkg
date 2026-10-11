@@ -93,7 +93,7 @@ describe('the finalized-private supervisor as the owner of a placement', () => {
     const state = {
       markers: [] as Rfc64FinalizedPrivatePlacementRepairV1[],
       laneActive: true,
-      /** When set, the lane cannot be resolved at all: the check throws it. */
+      /** When set, the canonical lane decision reports unavailability. */
       laneUnavailable: undefined as Error | undefined,
       /** How often a pass listed the durable markers. */
       listings: 0,
@@ -109,9 +109,7 @@ describe('the finalized-private supervisor as the owner of a placement', () => {
       }),
       listLocalAuthorAddresses: () => [AUTHOR],
       acceptsPublicRootLane: () => true,
-      resolveFinalizedPlacementDecision: (repair) => state.laneUnavailable === undefined
-        ? pinnedPrivatePlacementDecisionV1(repair, state.laneActive)
-        : { ...pinnedPrivatePlacementDecisionV1(repair, false), status: 'unavailable', error: state.laneUnavailable },
+      resolveFinalizedPlacementDecision: (repair) => pinnedPrivatePlacementDecisionV1(repair, state.laneActive, state.laneUnavailable),
       readRepairRevision: () => ({ scopeIdentity: 'scope-1', headRevision: 'head-1' }),
       listFinalizedPrivateRepairs: () => {
         state.listings += 1;
@@ -396,8 +394,8 @@ describe('a confirmed private placement the observer handed to the supervisor', 
     const { agent } = fixture;
     const asset = await seedPlacementAssetV1(agent, 'unrequested', 87n);
 
-    // The lane cannot be resolved at all when the supervisor checks it: the request throws after
-    // the marker was stored.
+    // The canonical lane decision reports unavailability after the marker was stored; the
+    // observer still retains its request failure diagnostic.
     fixture.afterMarkerStored = () => { fixture.lane.unavailable = new Error('the catalog policy is not accepted yet'); };
     await observeConfirmedV1(agent, asset);
     fixture.afterMarkerStored = undefined;
@@ -435,6 +433,35 @@ describe('a confirmed private placement the observer handed to the supervisor', 
     await fixture.agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     expect(fixture.markers()).toEqual([]);
     expect(fixture.catalogRows()).toBe('1');
+  }, 60_000);
+
+  it.each(['unavailable', 'inactive'] as const)('projects canonical %s directly without the nullable publication adapter', async (state) => {
+    const fixture = await startPlacementAgentV1({ name: `ownership-direct-decision-${state}` });
+    const asset = await seedPlacementAssetV1(fixture.agent, state, 89n);
+    await fixture.agent.closeRfc64SwmCatalogProjectionSupervisorV1();
+    await observeConfirmedV1(fixture.agent, asset);
+    const marker = fixture.markers()[0]!;
+    expect(marker).toBeDefined();
+    const before = fixture.counts();
+    const failure = new Error('the accepted catalog policy is temporarily unavailable');
+    if (state === 'unavailable') fixture.lane.unavailable = failure;
+    else fixture.lane.inactive = true;
+    const internals = fixture.agent as unknown as {
+      resolveRfc64CatalogAuthoringLaneV1(): unknown;
+    };
+    const publicationAdapter = vi.spyOn(internals, 'resolveRfc64CatalogAuthoringLaneV1')
+      .mockImplementation(() => { throw new Error('placement must not call the nullable publication adapter'); });
+    if (state === 'unavailable') {
+      await expect(fixture.agent.repairRfc64FinalizedPrivateCatalogPlacementV1(marker)).rejects.toBe(failure);
+    } else {
+      await expect(fixture.agent.repairRfc64FinalizedPrivateCatalogPlacementV1(marker))
+        .rejects.toThrow('RFC-64 finalized-private placement repair lane is inactive');
+    }
+    expect(publicationAdapter).not.toHaveBeenCalled();
+    expect(fixture.markers()).toEqual([marker]);
+    expect(fixture.counts()).toMatchObject({
+      successors: before.successors, signatures: before.signatures, announcements: before.announcements,
+    });
   }, 60_000);
 
   it.each([false, true])('retires exactly one marker after explicit completion, public=%s', async publicLane => {

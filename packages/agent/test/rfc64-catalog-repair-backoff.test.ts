@@ -87,6 +87,31 @@ const retainedFailures = [
 ] as const;
 
 describe('RFC-64 unchanged repair backoff', () => {
+  it('retains unavailable evidence and pinned V1 capacity directly from the canonical lane decision', () => {
+    const repair = privateRepair();
+    const failure = new Error('accepted policy temporarily unavailable');
+    const readLane = vi.fn(() => ({ status: 'unavailable' as const, error: failure }));
+    const decision = resolveFinalizedPlacementDecisionV1(repair, readLane);
+    expect(readLane).toHaveBeenCalledOnce();
+    expect(decision.status).toBe('unavailable');
+    if (decision.status !== 'unavailable') throw new Error('expected unavailable placement');
+    expect(decision.error).toBe(failure);
+    expect(decision.capacityScope).toEqual({ ...repair.inventoryScope, bucketCount: '1' });
+  });
+
+  it.each([new Error('unexpected lane read failure'), 'unexpected non-Error lane read failure'])
+    ('contains unexpected lane exceptions at the placement boundary: %s', failure => {
+      const repair = privateRepair();
+      const readLane = vi.fn(() => { throw failure; });
+      const decision = resolveFinalizedPlacementDecisionV1(repair, readLane);
+      expect(readLane).toHaveBeenCalledOnce();
+      expect(decision.status).toBe('unavailable');
+      if (decision.status !== 'unavailable') throw new Error('expected unavailable placement');
+      if (failure instanceof Error) expect(decision.error).toBe(failure);
+      else expect(decision.error.message).toBe(failure);
+      expect(decision.capacityScope).toEqual({ ...repair.inventoryScope, bucketCount: '1' });
+    });
+
   it('backs unchanged failures off exponentially with a finite cap', async () => {
     const f = fixture();
     const attempts: number[] = [];
@@ -599,9 +624,9 @@ describe('RFC-64 unchanged repair backoff', () => {
     };
     let lane: 'private' | 'public' | 'inactive' | 'unavailable' = 'private';
     f.resolvePlacement.mockImplementation((selected) => resolveFinalizedPlacementDecisionV1(selected, () => {
-      if (lane === 'unavailable') throw new Error('authority is unavailable');
-      if (lane === 'inactive') return null;
-      return { kind: lane, acceptsFinalizedVmRepair: lane === 'private', scopeBase: legacy.inventoryScope };
+      if (lane === 'unavailable') return { status: 'unavailable', error: new Error('authority is unavailable') };
+      if (lane === 'inactive') return { status: 'inactive' };
+      return { status: 'active', lane: { kind: lane, acceptsFinalizedVmRepair: lane === 'private', scopeBase: legacy.inventoryScope } };
     }));
     f.setPrivateRepairs([repair]);
     await f.owner.requestFinalizedPrivate({ repair, ctx }).whenAttempted;

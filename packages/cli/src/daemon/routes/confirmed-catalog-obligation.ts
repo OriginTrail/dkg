@@ -20,7 +20,7 @@ export function confirmedCatalogObligationResponse(error: unknown) {
     retryUrl: `/api/knowledge-assets/${encodeURIComponent(recovery.assertionCoordinate)}/vm/observe-confirmed` };
 }
 
-/** The ordinary CG write preflight has already run; retain the credential's author custody as well. */
+/** The ordinary CG write preflight has run; retain author or current curator custody. */
 export async function handleConfirmedCatalogObligationRecovery(
   ctx: RequestContext, contextGraphId: string, name: string, parsed: Record<string, unknown>,
 ): Promise<void> {
@@ -40,7 +40,14 @@ export async function handleConfirmedCatalogObligationRecovery(
   }
   if (actor.authenticatedAgentAddress !== undefined
     && candidate.seal?.authorAddress !== actor.authenticatedAgentAddress.toLowerCase()) {
-    return jsonResponse(ctx.res, 403, { error: 'Confirmed catalog recovery belongs to another author' });
+    // VM publication separates the caller from its selected resident author.
+    // A different credential must prove current curator authority, not merely membership.
+    try {
+      await ctx.agent.assertContextGraphOwner(contextGraphId, actor.authenticatedAgentAddress,
+        'recover a confirmed member publication');
+    } catch {
+      return jsonResponse(ctx.res, 403, { error: 'Confirmed catalog recovery requires the author or context graph curator' });
+    }
   }
   if (candidate.contextGraphId !== contextGraphId || candidate.assertionCoordinate !== name
     || candidate.subGraphName !== null || parsed.subGraphName !== undefined) {

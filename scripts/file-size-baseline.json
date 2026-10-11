@@ -69,7 +69,7 @@
     "packages/chain/src/evm-adapter-base.ts": 5218,
     "packages/chain/src/evm-adapter-context-graph.ts": 1805,
     "packages/chain/src/evm-adapter-conviction.ts": 843,
-    "packages/chain/src/evm-adapter-publish.ts": 1516,
+    "packages/chain/src/evm-adapter-publish.ts": 1494,
     "packages/chain/src/evm-context-graph-authority-index-reader.ts": 1352,
     "packages/chain/src/evm-context-graph-name-hash-fence.ts": 1026,
     "packages/chain/src/mock-adapter.ts": 2791,

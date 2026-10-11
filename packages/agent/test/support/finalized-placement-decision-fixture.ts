@@ -5,9 +5,9 @@ import type { Rfc64FinalizedPrivatePlacementRepairV1 } from '../../src/rfc64/fin
 export function pinnedPrivatePlacementDecisionV1(repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>, active = true, unavailable?: Error) {
   if (repair.version !== 1) throw new Error('the pinned test lane requires a V1 marker');
   return resolveFinalizedPlacementDecisionV1(repair, () => {
-    if (unavailable !== undefined) throw unavailable;
-    return active ? {
-      kind: 'private', acceptsFinalizedVmRepair: true, scopeBase: repair.inventoryScope,
-    } : null;
+    if (unavailable !== undefined) return { status: 'unavailable', error: unavailable };
+    return active ? { status: 'active', lane: {
+      kind: 'private' as const, acceptsFinalizedVmRepair: true, scopeBase: repair.inventoryScope,
+    } } : { status: 'inactive' };
   });
 }

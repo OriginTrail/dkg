@@ -7,6 +7,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { CatalogRepairRevisionHintV1 } from '../rfc64/catalog-repair-retry-v1.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from '../rfc64/finalized-private-placement-repair-store-v1.js';
+import type { Rfc64CatalogAuthoringLaneDecisionV1 } from '../dkg-agent-rfc64-swm-catalog-projection.js';
 
 interface PlacementLaneV1 {
   readonly kind: 'private' | 'public';
@@ -30,20 +31,30 @@ export type FinalizedPlacementDecisionV1<Lane = unknown> =
 /** The same decision is re-read at admission, execution, retry and capacity parking. */
 export function resolveFinalizedPlacementDecisionV1<Lane extends PlacementLaneV1>(
   repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
-  readLane: () => Lane | null,
+  readLane: () => Rfc64CatalogAuthoringLaneDecisionV1<Lane>,
 ): FinalizedPlacementDecisionV1<Lane> {
   // V1 capacity remains pinned even while its lane is temporarily unavailable.
   const pinnedCapacityScope = repair.version === 1
     ? Object.freeze({ ...repair.inventoryScope, bucketCount: '1' }) as AuthorCatalogScopeV1 : undefined;
   try {
-    const lane = readLane();
-    if (lane === null || (!lane.acceptsFinalizedVmRepair && (repair.version === 1 || lane.kind !== 'public'))) {
+    const decision = readLane();
+    if (decision.status === 'unavailable') {
+      return Object.freeze({ ...decision, capacityScope: pinnedCapacityScope });
+    }
+    if (decision.status === 'inactive') {
+      return Object.freeze({ ...decision, capacityScope: pinnedCapacityScope });
+    }
+    const { lane } = decision;
+    if (!lane.acceptsFinalizedVmRepair && (repair.version === 1 || lane.kind !== 'public')) {
       return Object.freeze({ status: 'inactive', capacityScope: pinnedCapacityScope });
     }
     const currentInventoryScope = Object.freeze({ ...lane.scopeBase, authorAddress: repair.authorAddress });
     if (repair.version === 1 && computeSwmAuthorInventoryScopeDigestV1(currentInventoryScope)
       !== computeSwmAuthorInventoryScopeDigestV1(repair.inventoryScope)) {
-      throw new Error('RFC-64 finalized-private placement repair conflicts with a policy transition');
+      return Object.freeze({
+        status: 'unavailable', capacityScope: pinnedCapacityScope,
+        error: new Error('RFC-64 finalized-private placement repair conflicts with a policy transition'),
+      });
     }
     const inventoryScope = repair.version === 1 ? repair.inventoryScope : currentInventoryScope;
     const scope = Object.freeze({ ...inventoryScope, bucketCount: '1' }) as AuthorCatalogScopeV1;

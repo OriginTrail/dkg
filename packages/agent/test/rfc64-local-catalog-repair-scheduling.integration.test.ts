@@ -354,8 +354,8 @@ describe('RFC-64 local SWM catalog projection repair', () => {
       '0x1111111111111111111111111111111111111111/private-repair' as ContextGraphIdV1;
     const ordinaryContextGraphId =
       '0x1111111111111111111111111111111111111111/blocked-repair' as ContextGraphIdV1;
-    vi.spyOn(agent as any, 'resolveRfc64CatalogAuthoringLaneV1')
-      .mockImplementation((contextGraphId: string) => ({
+    vi.spyOn(agent as any, 'resolveRfc64CatalogAuthoringLaneDecisionV1')
+      .mockImplementation((contextGraphId: string) => ({ status: 'active', lane: {
         kind: contextGraphId === privateContextGraphId ? 'private' : 'public',
         projectionTargetPolicy: contextGraphId === privateContextGraphId
           ? 'monotonic-union'
@@ -366,7 +366,7 @@ describe('RFC-64 local SWM catalog projection repair', () => {
           governanceContractAddress: null, ownershipTransitionDigest: null,
           subGraphName: null, era: '1',
         },
-      } as never));
+      } } as never));
     let markOrdinaryEntered!: () => void;
     let releaseOrdinary!: () => void;
     const ordinaryEntered = new Promise<void>((resolve) => { markOrdinaryEntered = resolve; });
@@ -449,7 +449,7 @@ describe('RFC-64 local SWM catalog projection repair', () => {
     const repairStore = (agent as any).rfc64PersistenceV1
       .finalizedPrivatePlacementRepairs;
     await repairStore.put(repair);
-    vi.spyOn(agent as any, 'resolveRfc64CatalogAuthoringLaneV1').mockReturnValue({
+    vi.spyOn(agent as any, 'resolveRfc64CatalogAuthoringLaneDecisionV1').mockReturnValue({ status: 'active', lane: {
       projectionTargetPolicy: 'monotonic-union',
       acceptsFinalizedVmRepair: true,
       scopeBase: Object.freeze({
@@ -461,7 +461,7 @@ describe('RFC-64 local SWM catalog projection repair', () => {
         subGraphName: null,
         era: '2',
       }),
-    } as never);
+    } } as never);
 
     await expect(agent.repairRfc64FinalizedPrivateCatalogPlacementV1(repair))
       .rejects.toThrow('conflicts with a policy transition');

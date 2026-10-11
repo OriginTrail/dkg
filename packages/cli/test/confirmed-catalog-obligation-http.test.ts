@@ -28,7 +28,7 @@ afterAll(async () => { await revertSnapshot(snapshot); });
 
 /** Real named publish + SQLite refusal + actual HTTP serialization and canonical receipt recovery. */
 describe('confirmed catalog obligation across synchronous HTTP', () => {
-  it.each(['standalone', 'atomic', 'update', 'same-root-update'] as const)('retains and recovers %s evidence without another transaction', async lane => {
+  it.each(['standalone', 'atomic', 'update', 'same-root-update', 'curator-member'] as const)('retains and recovers %s evidence without another transaction', async lane => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-confirmed-http-'));
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const agent = await DKGAgent.create({ name: 'ConfirmedHTTP', listenPort: 0, nodeRole: 'core',
@@ -43,11 +43,20 @@ describe('confirmed catalog obligation across synchronous HTTP', () => {
       await agent.start(); await installHardhatACKProvider(agent, chain);
       const cg = `confirmed-http-${lane}`; const name = `sealed-${lane}`;
       await agent.createContextGraph({ id: cg, name: cg }); await agent.registerContextGraph(cg);
+      const curatorAddress = new ethers.Wallet(HARDHAT_KEYS.CORE_OP).address;
+      const authorAddress = lane === 'curator-member'
+        ? (await agent.registerAgent('ConfirmedMember')).agentAddress
+        : curatorAddress;
+      if (lane === 'curator-member') {
+        await agent.inviteAgentToContextGraph(cg, authorAddress, curatorAddress);
+        await agent.inviteAgentToContextGraph(cg, new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address, curatorAddress);
+      }
       const otherCg = `${cg}-other`;
       await agent.createContextGraph({ id: otherCg, name: otherCg }); await agent.registerContextGraph(otherCg);
       const host = agent as unknown as {
         rfc64PersistenceV1: { finalizedPrivatePlacementRepairs: Rfc64FinalizedPrivatePlacementRepairStoreV1 };
         resolveRfc64CatalogAuthoringLaneV1(cg: string): unknown;
+        resolveRfc64CatalogAuthoringLaneDecisionV1(cg: string): unknown;
       };
       const repairs = host.rfc64PersistenceV1.finalizedPrivatePlacementRepairs;
       let refusing = true;
@@ -56,6 +65,7 @@ describe('confirmed catalog obligation across synchronous HTTP', () => {
         put: async repair => { if (refusing) throw new Error('injected inventory SQLite write refusal'); await repairs.put(repair); },
       });
       vi.spyOn(host, 'resolveRfc64CatalogAuthoringLaneV1').mockReturnValue(null);
+      vi.spyOn(host, 'resolveRfc64CatalogAuthoringLaneDecisionV1').mockReturnValue(Object.freeze({ status: 'inactive' }));
       const observe = vi.spyOn(agent, 'observeRfc64ConfirmedVmV1');
       const submit = vi.spyOn(agent, 'publishFromFinalizedAssertion');
       server = createServer(async (req, res) => {
@@ -63,10 +73,12 @@ describe('confirmed catalog obligation across synchronous HTTP', () => {
         const authentication = req.headers.authorization === 'Bearer foreign'
           ? requestAuthentication({ kind: 'agent', agentAddress: new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address })
           : req.headers.authorization === 'Bearer author'
-            ? requestAuthentication({ kind: 'agent', agentAddress: new ethers.Wallet(HARDHAT_KEYS.CORE_OP).address })
-            : req.headers.authorization === 'Bearer anonymous'
-              ? requestAuthentication({ kind: 'anonymous' })
-              : requestAuthentication({ kind: 'nodeOperator' });
+            ? requestAuthentication({ kind: 'agent', agentAddress: authorAddress })
+            : req.headers.authorization === 'Bearer curator'
+              ? requestAuthentication({ kind: 'agent', agentAddress: curatorAddress })
+              : req.headers.authorization === 'Bearer anonymous'
+                ? requestAuthentication({ kind: 'anonymous' })
+                : requestAuthentication({ kind: 'nodeOperator' });
         try {
           await handleKnowledgeAssetsRoutes({ req, res, agent, url, path: url.pathname, authentication,
             requestAgentAddress: new ethers.Wallet(HARDHAT_KEYS.CORE_OP).address,
@@ -90,8 +102,10 @@ describe('confirmed catalog obligation across synchronous HTTP', () => {
       let creationTransaction: { transactionHash: string; blockNumber: number } | undefined;
       let priorUpdate: ConfirmedCatalogObligationRecoveryV1 | undefined;
       if (lane !== 'atomic') {
-        await agent.assertion.create(cg, name); await agent.assertion.write(cg, name, quads);
-        await agent.assertion.promote(cg, name);
+        const memberLane = lane === 'curator-member' ? { agentAddress: authorAddress } : {};
+        await agent.assertion.create(cg, name, memberLane); await agent.assertion.write(cg, name, quads, memberLane);
+        await agent.assertion.promote(cg, name, { ...memberLane,
+          ...(lane === 'curator-member' ? { authorAgentAddress: authorAddress } : {}) });
         if (lane === 'update' || lane === 'same-root-update') {
           refusing = false;
           const creation = await agent.publishFromFinalizedAssertion(cg, name);
@@ -102,7 +116,9 @@ describe('confirmed catalog obligation across synchronous HTTP', () => {
           await agent.assertion.promote(cg, name);
           refusing = true;
         }
-        response = await post(`/api/knowledge-assets/${name}/vm/publish`, { contextGraphId: cg });
+        response = await post(`/api/knowledge-assets/${name}/vm/publish`, { contextGraphId: cg,
+          ...(lane === 'curator-member' ? { selectedAuthorAgentAddress: authorAddress } : {}) },
+          lane === 'curator-member' ? 'curator' : 'node');
         if (lane === 'same-root-update') {
           expect(response.status, JSON.stringify(response.body)).toBe(207);
           priorUpdate = response.body.recovery as ConfirmedCatalogObligationRecoveryV1;
@@ -125,6 +141,13 @@ describe('confirmed catalog obligation across synchronous HTTP', () => {
       const evidence = response.body.recovery as ConfirmedCatalogObligationRecoveryV1;
       expect(evidence.assertionCoordinate).toBe(name);
       expect(evidence.contextGraphId).toBe(cg);
+      expect(evidence.seal.authorAddress).toBe(authorAddress.toLowerCase());
+      if (lane === 'curator-member') {
+        expect(authorAddress.toLowerCase()).not.toBe(curatorAddress.toLowerCase());
+        expect(submit).toHaveBeenCalledWith(cg, name, expect.objectContaining({
+          callerAgentAddress: curatorAddress, selectedAuthorAgentAddress: authorAddress,
+        }));
+      }
       if (priorUpdate) {
         expect(evidence.seal.assertionVersion).toBe('3');
         expect(evidence.seal.assertionMerkleRoot).toBe(priorUpdate.seal.assertionMerkleRoot);
@@ -144,6 +167,15 @@ describe('confirmed catalog obligation across synchronous HTTP', () => {
       expect(repairs.list()).toEqual([]); const initialObservations = observe.mock.calls.length;
       const retry = response.body.retryUrl as string;
       expect((await post(retry, { contextGraphId: cg, recovery: evidence }, 'foreign')).status).toBe(403);
+      if (lane === 'curator-member') {
+        const foreignAddress = new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address;
+        await agent.removeAgentFromContextGraph(cg, foreignAddress, curatorAddress);
+        expect((await agent.getCgMeta(cg)).revokedAgents.map(address => address.toLowerCase())).toContain(foreignAddress.toLowerCase());
+        expect((await post(retry, { contextGraphId: cg, recovery: evidence }, 'foreign')).status).toBe(403);
+        const owner = vi.spyOn(agent, 'getContextGraphOwner').mockRejectedValueOnce(new Error('injected owner read refusal'));
+        expect((await post(retry, { contextGraphId: cg, recovery: evidence }, 'curator')).status).toBe(403);
+        owner.mockRestore();
+      }
       expect((await post(retry, { contextGraphId: cg, recovery: evidence }, 'anonymous')).status).toBe(403);
       expect((await post(retry, { contextGraphId: cg, recovery: [] })).status).toBe(400);
       expect((await post(retry, { contextGraphId: cg, recovery: { ...evidence, assertionCoordinate: 'other' } })).status).toBe(400);
@@ -156,8 +188,8 @@ describe('confirmed catalog obligation across synchronous HTTP', () => {
       expect((await post(retry, { contextGraphId: cg, recovery: { ...evidence,
         seal: { ...evidence.seal, authorAttestationR: `0x${'11'.repeat(32)}` } } })).status).toBe(409);
       // A valid local seal under the other CG must still fail the actual receipt's CG binding.
-      const originalSubject = contextGraphAssertionUri(cg, new ethers.Wallet(HARDHAT_KEYS.CORE_OP).address, name);
-      const otherSubject = contextGraphAssertionUri(otherCg, new ethers.Wallet(HARDHAT_KEYS.CORE_OP).address, name);
+      const originalSubject = contextGraphAssertionUri(cg, authorAddress, name);
+      const otherSubject = contextGraphAssertionUri(otherCg, authorAddress, name);
       // sparql-scan-allow: R4 -- exact known CG meta graph and assertion subject in this native fixture
       const storedSeal = await agent.store.query(`CONSTRUCT { <${originalSubject}> ?p ?o } WHERE { GRAPH <${contextGraphMetaUri(cg)}> { <${originalSubject}> ?p ?o } }`);
       if (storedSeal.type !== 'quads' || storedSeal.quads.length === 0) throw new Error('missing original stored seal');
@@ -167,8 +199,15 @@ describe('confirmed catalog obligation across synchronous HTTP', () => {
       const stillPending = await post(retry, { contextGraphId: cg, recovery: evidence });
       expect(stillPending.status).toBe(503); expect(stillPending.body.recovery).toEqual(evidence);
       refusing = false;
-      expect((await post(retry, { contextGraphId: cg, recovery: evidence })).status).toBe(200);
+      const recovered = await post(retry, { contextGraphId: cg, recovery: evidence }, lane === 'curator-member' ? 'curator' : 'node');
+      expect(recovered.status, JSON.stringify(recovered.body)).toBe(200);
+      if (lane === 'curator-member') {
+        expect((await post(retry, { contextGraphId: otherCg, recovery: { ...evidence, contextGraphId: otherCg } }, 'curator')).status).toBe(409);
+      }
       expect((await post(retry, { contextGraphId: cg, recovery: evidence }, 'author')).status).toBe(200);
+      if (lane === 'curator-member') {
+        expect((await post(retry, { contextGraphId: cg, recovery: evidence }, 'curator')).status).toBe(200);
+      }
       expect(repairs.list()).toHaveLength(1);
       expect(repairs.list()[0]).toMatchObject({ version: 2, seal: evidence.seal });
       expect(submit).toHaveBeenCalledTimes(lane === 'same-root-update' ? 3 : lane === 'update' ? 2 : 1);
