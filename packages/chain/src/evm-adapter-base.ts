@@ -2658,28 +2658,27 @@ export class EVMChainAdapterBase {
     // Mode-aware read: native-only selections (RS) touch only the native slot
     // so their high-frequency probes can't poison the cached TRAC balance.
     const assessments = await this._scanCandidateFunding(candidates, () => funding);
-    const fundableIdx = assessments.flatMap((assessment, index) => assessment.kind === 'funded' ? [index] : []);
-    const fundings = assessments.map((assessment) => assessment.funding);
-    if (fundableIdx.length > 0) {
+    const funded = assessments.filter((assessment) => assessment.kind === 'funded');
+    if (funded.length > 0) {
       // Idle preference is a SOFT, fail-open bias: among funded candidates,
       // prefer one whose per-wallet send lock is currently free so a
       // deadline-bound write doesn't queue behind a slow in-flight send. Falls
       // straight through to the first funded candidate when none is idle or the
       // preference is off — so it can never EXCLUDE a wallet, only reorder.
-      return preferredFundableCandidate(candidates, fundableIdx, {
+      return preferredFundableCandidate(funded, {
         ...policy, idleAwareSelectionDisabled: this.idleAwareSelectionDisabled,
         laneState: (address) => this.signerTxSerializer.state(address),
       });
     }
-    let bestIdx = 0;
-    for (let i = 1; i < candidates.length; i += 1) {
-      const a = fundings[i];
-      const b = fundings[bestIdx];
+    let best = assessments[0];
+    for (const assessment of assessments.slice(1)) {
+      const a = assessment.funding;
+      const b = best.funding;
       const an = a.native ?? -1n;
       const bn = b.native ?? -1n;
-      if (an > bn || (an === bn && (a.trac ?? -1n) > (b.trac ?? -1n))) bestIdx = i;
+      if (an > bn || (an === bn && (a.trac ?? -1n) > (b.trac ?? -1n))) best = assessment;
     }
-    return candidates[bestIdx];
+    return best?.candidate;
   }
 
   /**
@@ -2692,8 +2691,8 @@ export class EVMChainAdapterBase {
     policy: { preferIdle: boolean },
   ): Promise<PublisherFundingSelection<T>> {
     const choose = (assessments: PublisherCandidateFundingAssessment<T>[]): T | undefined => {
-      const funded = assessments.flatMap((assessment, index) => assessment.kind === 'funded' ? [index] : []);
-      return funded.length === 0 ? undefined : preferredFundableCandidate(candidates, funded, {
+      const funded = assessments.filter((assessment) => assessment.kind === 'funded');
+      return funded.length === 0 ? undefined : preferredFundableCandidate(funded, {
         ...policy, idleAwareSelectionDisabled: this.idleAwareSelectionDisabled,
         laneState: (address) => this.signerTxSerializer.state(address),
       });

@@ -5527,6 +5527,27 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       pca: { kind: 'provisional-publish' as const },
     };
 
+    it.each([
+      { name: 'native balance takes precedence over TRAC', native: [2n, 1n], trac: [0n, 100n], expected: 0 },
+      { name: 'TRAC breaks equal native balances', native: [0n, 0n], trac: [1n, 2n], expected: 1 },
+      { name: 'equal balances retain candidate order', native: [0n, 0n], trac: [1n, 1n], expected: 0 },
+      { name: 'native floor equality remains unfunded', native: [100n, 99n], trac: [0n, 100n], expected: 0 },
+    ])('unfunded fallback: $name', async ({ native, trac, expected }) => {
+      const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
+      const wallets = [walletA, walletB];
+      for (const [index, wallet] of wallets.entries()) {
+        nativeByAddr.set(lc(wallet.address), native[index]);
+        tracByAddr.set(lc(wallet.address), trac[index]);
+      }
+      const chosen = await (a as any).selectSigner({
+        txClass: 'rotatable-free',
+        funding: { ...nativeAndTrac, nativeFloorWei: 100n, pca: { kind: 'none' } },
+        preferIdle: true,
+      });
+      expect(chosen).toBe(wallets[expected]);
+    });
+
     it('native-only funding gates on GAS ALONE — a gas-funded zero-TRAC wallet stays fundable', async () => {
       const { a, walletA, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
       registerPool(a);

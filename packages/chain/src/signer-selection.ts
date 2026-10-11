@@ -3,8 +3,7 @@
 import type { SignerTxLaneState } from './signer-tx-serializer.js';
 
 export function preferredFundableCandidate<T extends { address: string }>(
-  candidates: readonly T[],
-  fundableIdx: readonly number[],
+  assessments: readonly { candidate: T }[],
   policy: { preferIdle: boolean; idleAwareSelectionDisabled: boolean; laneState: (address: string) => SignerTxLaneState },
 ): T {
   if (policy.preferIdle && !policy.idleAwareSelectionDisabled) {
@@ -23,14 +22,14 @@ export function preferredFundableCandidate<T extends { address: string }>(
     };
     const rank = (address: string): number =>
       laneRank[policy.laneState(address)];
-    let best: number | undefined;
+    let best: T | undefined;
     let bestRank = Number.POSITIVE_INFINITY;
-    for (const index of fundableIdx) {
-      const r = rank(candidates[index].address);
-      if (r < bestRank) { bestRank = r; best = index; }
+    for (const { candidate } of assessments) {
+      const r = rank(candidate.address);
+      if (r < bestRank) { bestRank = r; best = candidate; }
       if (bestRank === 0) break;
     }
-    if (best !== undefined) return candidates[best];
+    if (best !== undefined) return best;
   }
-  return candidates[fundableIdx[0]];
+  return assessments[0]?.candidate;
 }
