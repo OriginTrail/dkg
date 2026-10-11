@@ -23,6 +23,10 @@ export class DKGError extends Error {
  * node-ui. dkg-chain re-exports NO_FUNDED_PUBLISHER_WALLET_CODE for chain-side
  * imports.
  */
+/** Safe cross-package contract for inconclusive strict PCA funding reads. */
+export const PCA_FUNDING_UNKNOWN_CODE = 'PCA_FUNDING_UNKNOWN';
+export const PCA_FUNDING_UNKNOWN_MESSAGE = 'PCA funding verification is inconclusive; retry when chain reads recover.';
+
 export const NO_FUNDED_PUBLISHER_WALLET_CODE = 'NO_FUNDED_PUBLISHER_WALLET';
 
 /**

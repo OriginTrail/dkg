@@ -12,6 +12,8 @@ import {
   validateContextGraphId,
   validateSubGraphName,
   isSafeIri,
+  PCA_FUNDING_UNKNOWN_CODE,
+  PCA_FUNDING_UNKNOWN_MESSAGE,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   messageIndicatesNoFundedPublisherWallet,
   Logger,
@@ -222,11 +224,11 @@ export function noFundedPublisherWalletBody(message: string): { code: string; er
  * Use a fixed message: the underlying RPC error may contain private endpoint
  * details and its transport code is intentionally not the public error code. */
 export function respondIfPcaFundingUnknown(res: ServerResponse, err: unknown): boolean {
-  if ((err as { code?: unknown } | null)?.code !== 'PCA_FUNDING_UNKNOWN') return false;
+  if ((err as { code?: unknown } | null)?.code !== PCA_FUNDING_UNKNOWN_CODE) return false;
   res.setHeader('Retry-After', '1');
   jsonResponse(res, 503, {
-    code: 'PCA_FUNDING_UNKNOWN',
-    error: 'PCA funding verification is inconclusive; retry when chain reads recover.',
+    code: PCA_FUNDING_UNKNOWN_CODE,
+    error: PCA_FUNDING_UNKNOWN_MESSAGE,
     retryable: true,
   });
   return true;
