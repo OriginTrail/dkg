@@ -3,16 +3,20 @@
 import {
   getKnowledgeAssetVersionSnapshotHealth,
   getRpcFailoverStats,
+  snapshotRpcRequestTiming,
 } from '@origintrail-official/dkg-chain';
+import type { DaemonRouteRpcTransport } from '../rpc-runtime.js';
 
 /**
  * Chain endpoint observability for `/api/status.chain`: process-wide, across
  * every chain adapter in this daemon. Counts, hosts and closed classes only,
  * never an RPC URL.
  */
-export function chainRpcStatusFields() {
+export function chainRpcStatusFields(transport?: DaemonRouteRpcTransport) {
   const rpcFailoverStats = getRpcFailoverStats();
   return {
+    rpcRequestTiming: snapshotRpcRequestTiming(),
+    rpcRequestGovernor: transport?.snapshotGovernor() ?? null,
     // Multi-RPC failover observability (counts only — no RPC URLs).
     rpcFailovers: rpcFailoverStats.failovers,
     rpcExhaustions: rpcFailoverStats.exhaustions,
