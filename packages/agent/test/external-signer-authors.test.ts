@@ -10,7 +10,7 @@
  * proposals.
  */
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
@@ -141,6 +141,52 @@ describe('external signer author keys', () => {
     expect(record.agentAddress).toBe(agentKey.address);
     expect(record.privateKey).toBeUndefined();
     expect(agent.getLocalAgentMode(agentKey.address)).toBe('self-sovereign');
+  });
+
+  it('keeps agent names unique when registrations by address wait on the signer together', async () => {
+    const [first, second, third] = [HARDHAT_KEYS.EXTRA1, HARDHAT_KEYS.EXTRA2, HARDHAT_KEYS.EXTRA3].map((key) => new ethers.Wallet(key));
+    const fake = await startFakeRemoteSigner({
+      credentials: [
+        { token: PAYER_TOKEN, keys: [payer.privateKey] },
+        { token: AUTHOR_TOKEN, keys: [first.privateKey, second.privateKey, third.privateKey] },
+      ],
+    });
+    started.push(fake);
+    const remote = await connectRemoteSigners({ url: fake.url, authToken: PAYER_TOKEN, author: { authToken: AUTHOR_TOKEN } });
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-agent-names-'));
+    try {
+      const agent = await stubAgent(remote);
+      agent.config = { ...agent.config, dataDir: dir };
+      const settled = await Promise.allSettled([
+        agent.registerAgent('writer', { address: first.address }),
+        agent.registerAgent('writer', { address: second.address }),
+        agent.registerAgent('editor', { address: third.address }),
+      ]);
+      // Both "writer" registrations were signed for; exactly one of them is kept.
+      expect(fake.calls('eth_signTypedData_v4')).toHaveLength(3);
+      const writers = settled.slice(0, 2);
+      const kept = writers.filter((result) => result.status === 'fulfilled') as Array<PromiseFulfilledResult<{ agentAddress: string }>>;
+      const refused = writers.filter((result) => result.status === 'rejected') as PromiseRejectedResult[];
+      expect(kept).toHaveLength(1);
+      expect(refused).toHaveLength(1);
+      expect(String(refused[0].reason)).toMatch(/Agent name "writer" already registered/);
+      expect(settled[2].status).toBe('fulfilled');
+      const winner = kept[0].value.agentAddress;
+      const loser = winner === first.address ? second.address : first.address;
+
+      // The refused registration left nothing behind: not in memory, the store or the keystore.
+      expect(agent.listLocalAgents().map((record: { name: string; agentAddress: string }) => `${record.name}:${record.agentAddress}`).sort())
+        .toEqual([`editor:${third.address}`, `writer:${winner}`].sort());
+      const stored = await agent.store.query(
+        'SELECT ?agent WHERE { GRAPH <did:dkg:system/agents> { ?agent <https://schema.org/name> "writer" } }',
+      ) as { bindings: Array<Record<string, string>> };
+      expect(stored.bindings.map((row) => row.agent)).toEqual([`did:dkg:agent:${winner}`]);
+      const keystore = JSON.parse(await readFile(join(dir, 'agent-keystore.json'), 'utf8')) as Record<string, unknown>;
+      expect(Object.keys(keystore).sort()).toEqual([winner, third.address].map((address) => address.toLowerCase()).sort());
+      expect(keystore[loser.toLowerCase()]).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('takes a supplied public key of an author key as is, and refuses a registration signed with another key', async () => {

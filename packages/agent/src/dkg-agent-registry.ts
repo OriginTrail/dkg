@@ -224,7 +224,7 @@ import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
 import { runSyncOnConnect } from './sync/on-connect/sync-on-connect.js';
 import {
-  generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
+  assertAgentNameFree, generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey, writeKeystoreEntry,
   ensureWorkspaceEncryptionKey,
   hashAgentToken,
   activeWorkspaceEncryptionKeys,
@@ -655,12 +655,10 @@ export class AgentRegistryMethods extends DKGAgentBase {
       encryptionKeyProof?: string;
     },
   ): Promise<AgentKeyRecord> {
-    for (const existing of this.localAgents.values()) {
-      if (existing.name === name) {
-        throw new Error(`Agent name "${name}" already registered on this node`);
-      }
-    }
+    assertAgentNameFree(this.localAgents.values(), name);
     const publicKey = opts?.address === undefined ? opts?.publicKey : await externalSignerAgentPublicKey(this.config, opts.address, name, opts.publicKey);
+    // Again after the signer answered: a concurrent registration may have taken the name meanwhile.
+    assertAgentNameFree(this.localAgents.values(), name);
     if (publicKey && (opts?.publicEncryptionKey || opts?.encryptionKeyProof) && !(opts.publicEncryptionKey && opts.encryptionKeyProof)) {
       throw new Error('Self-sovereign agents must provide both publicEncryptionKey and encryptionKeyProof');
     }
@@ -1428,15 +1426,8 @@ export class AgentRegistryMethods extends DKGAgentBase {
     const ksPath = this.keystorePath();
     if (!ksPath) return;
     try {
-      const { readFile, writeFile, mkdir, chmod } = await import('node:fs/promises');
-      const { dirname } = await import('node:path');
-      let existing: Record<string, KeystoreEntry> = {};
-      try {
-        const raw = await readFile(ksPath, 'utf-8');
-        existing = JSON.parse(raw);
-      } catch { /* first write */ }
       const defaultActive = activeWorkspaceEncryptionKeys(record)[0];
-      existing[record.agentAddress.toLowerCase()] = {
+      await writeKeystoreEntry(ksPath, record.agentAddress, {
         authToken: record.authToken,
         ...(record.privateKey ? { privateKey: record.privateKey } : {}),
         ...(record.workspaceEncryptionKeys.length
@@ -1446,10 +1437,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
         ...(defaultActive?.publicEncryptionKey ? { publicEncryptionKey: defaultActive.publicEncryptionKey } : {}),
         ...(defaultActive?.privateEncryptionKey ? { privateEncryptionKey: defaultActive.privateEncryptionKey } : {}),
         ...(defaultActive?.encryptionKeyProof ? { encryptionKeyProof: defaultActive.encryptionKeyProof } : {}),
-      };
-      await mkdir(dirname(ksPath), { recursive: true });
-      await writeFile(ksPath, JSON.stringify(existing, null, 2), { mode: 0o600 });
-      await chmod(ksPath, 0o600);
+      });
     } catch {
       // Non-fatal — agent still works, just won't survive restart
     }
