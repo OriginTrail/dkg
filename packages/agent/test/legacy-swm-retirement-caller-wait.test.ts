@@ -21,6 +21,7 @@ import { DKGAgent } from '../src/index.js';
 import {
   LEGACY_SWM_RETIREMENT_CALLER_WAIT_MS,
   LEGACY_SWM_RETIREMENT_REPEAT_BASE_MS,
+  peekOwedLegacySwmRetirementsV1,
 } from '../src/internal/owed-legacy-swm-retirements.js';
 import { RFC64_LEGACY_SWM_FENCE_WAIT_LIMIT_MS } from '../src/rfc64/legacy-swm-boundary-fence-v1.js';
 import {
@@ -105,8 +106,9 @@ async function publishedAsset(options: { started?: boolean } = {}) {
 
   const internals = agent as unknown as {
     log: { info: (ctx: unknown, line: string) => void; warn: (ctx: unknown, line: string) => void };
-    owedLegacySwmRetirementsV1: { owed: number; running: number; closeAndDrain: () => Promise<void> };
   };
+  // The node makes its owner of retirements when the first one is asked for.
+  const owner = () => peekOwedLegacySwmRetirementsV1(agent);
   // What the node logs about retirements it owes; its other lines are not this suite's.
   const lines: string[] = [];
   const keep = (level: string) => (_ctx: unknown, line: string): void => {
@@ -119,10 +121,10 @@ async function publishedAsset(options: { started?: boolean } = {}) {
     store,
     fenceLines,
     lines,
-    owed: () => internals.owedLegacySwmRetirementsV1.owed,
-    running: () => internals.owedLegacySwmRetirementsV1.running,
+    owed: () => owner()?.owed ?? 0,
+    running: () => owner()?.running ?? 0,
     /** What the node's stop does with the retirements it owns. */
-    closeRetirements: () => internals.owedLegacySwmRetirementsV1.closeAndDrain(),
+    closeRetirements: () => agent.closeOwedLegacySwmRetirementsV1(),
     /** Hold the retirement at work: its read of the shared copy does not come back until released. */
     holdTheRead: () => {
       const query = store.query.bind(store);

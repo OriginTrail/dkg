@@ -108,10 +108,11 @@ interface OwedRetirementV1 {
 
 const WAITED_OUT = Symbol('waited-out');
 
+// Repeats start from a timer. They run in the context this module was loaded in, which is no
+// caller's: an owner is made on first use, inside whatever asked first.
+const NO_CALLER = new AsyncResource('OwedLegacySwmRetirementsV1');
+
 export class OwedLegacySwmRetirementsV1 {
-  // Repeats start from a timer. They run in the context this owner was built in, not in the
-  // context of the caller whose wait ended.
-  readonly #resource = new AsyncResource('OwedLegacySwmRetirementsV1');
   readonly #owed = new Map<string, OwedRetirementV1>();
   /** Every attempt that has started and not ended, the first of a retirement and its repeats. */
   readonly #running = new Set<Promise<SettledV1>>();
@@ -253,7 +254,7 @@ export class OwedLegacySwmRetirementsV1 {
     entry.timer = setTimeout(() => {
       entry.timer = null;
       if (run !== this.#run || run.signal.aborted || this.#owed.get(key) !== entry) return;
-      void this.#resource.runInAsyncScope(() => this.#start(attempt, run))
+      void NO_CALLER.runInAsyncScope(() => this.#start(attempt, run))
         .then((next) => this.#afterAttempt(key, attempt, run, next, entry, repeats + 1));
     }, inMs);
     entry.timer.unref?.();
@@ -273,4 +274,27 @@ export class OwedLegacySwmRetirementsV1 {
       this.#onEvent?.(event);
     } catch { /* observation only */ }
   }
+}
+
+/**
+ * One owner per agent-like host, created on first use. Keyed by host identity and not stored on
+ * the class, so that a prototype-bound test host owns one exactly as a constructed agent does.
+ */
+const ownersByHost = new WeakMap<object, OwedLegacySwmRetirementsV1>();
+
+export function owedLegacySwmRetirementsOfV1(
+  host: object,
+  onEvent: NonNullable<OwedLegacySwmRetirementsOptionsV1['onEvent']>,
+): OwedLegacySwmRetirementsV1 {
+  let owner = ownersByHost.get(host);
+  if (owner === undefined) {
+    owner = new OwedLegacySwmRetirementsV1({ onEvent });
+    ownersByHost.set(host, owner);
+  }
+  return owner;
+}
+
+/** The host's owner if it ever asked for a retirement; lifecycle hooks never create one. */
+export function peekOwedLegacySwmRetirementsV1(host: object): OwedLegacySwmRetirementsV1 | undefined {
+  return ownersByHost.get(host);
 }

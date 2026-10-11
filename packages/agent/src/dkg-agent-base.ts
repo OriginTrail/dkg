@@ -32,10 +32,6 @@ import {
 import type { FinalizationRecoveryHealth } from './finalization-recovery-store.js';
 import { FinalizationRuntime } from './finalization-runtime.js';
 import type { Rfc64PublicCatalogServiceV1 } from './rfc64/public-catalog-service-v1.js';
-import {
-  describeOwedLegacySwmRetirementEventV1,
-  OwedLegacySwmRetirementsV1,
-} from './internal/owed-legacy-swm-retirements.js';
 import { Rfc64BackgroundWorkDispatcherV1 } from
   './rfc64/background-work-dispatcher-v1.js';
 import type { Rfc64PublicCatalogWorkloadOwnerV1 } from
@@ -1373,13 +1369,6 @@ export class DKGAgentBase {
         }`,
       );
     });
-  /** GH#3081 — legacy SWM boundary retirements whose caller stopped waiting, and their repeats. */
-  protected readonly owedLegacySwmRetirementsV1 = new OwedLegacySwmRetirementsV1({
-    onEvent: (event) => {
-      const { level, line } = describeOwedLegacySwmRetirementEventV1(event);
-      this.log[level](createOperationContext('system'), line);
-    },
-  });
   /** Exact process-local post-verification evidence, keyed by applied head. */
   protected readonly rfc64PublicCatalogSynchronizationEvidenceV1 =
     new Map<string, Rfc64CatalogSynchronizationEvidenceV1>();

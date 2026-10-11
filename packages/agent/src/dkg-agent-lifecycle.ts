@@ -865,6 +865,11 @@ import {
 import { reconcileRfc64CatalogAuthorityPlanV1 } from
   './rfc64/catalog-rollout-authority-reconciliation-v1.js';
 import {
+  describeOwedLegacySwmRetirementEventV1,
+  owedLegacySwmRetirementsOfV1,
+  peekOwedLegacySwmRetirementsV1,
+} from './internal/owed-legacy-swm-retirements.js';
+import {
   describeRfc64LegacySwmFenceEventV1,
   initializeRfc64LegacySwmBoundaryV1,
   rfc64LateLegacySwmCompanionResolverV1,
@@ -2028,7 +2033,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // retirement, which then goes on without it and is repeated if it did not get its turn. The
     // retirement stays this node's until it ended: stop() ends its wait and drains its work.
     const assertionVersion = String(input.assertionVersion);
-    await this.owedLegacySwmRetirementsV1.retire(
+    const owed = owedLegacySwmRetirementsOfV1(this, (event) => {
+      const { level, line } = describeOwedLegacySwmRetirementEventV1(event);
+      this.log[level](createOperationContext('system'), line);
+    });
+    await owed.retire(
       JSON.stringify([input.contextGraphId, input.subGraphName ?? null, input.kaUal, assertionVersion]),
       (signal) => retireRfc64LegacySwmAfterFinalizedVmV1(
         this,
@@ -2039,6 +2048,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         signal,
       ),
     );
+  }
+
+  /** GH#3081 — for stop(): end the legacy SWM retirements that still wait, drain the ones at work. */
+  closeOwedLegacySwmRetirementsV1(this: DKGAgent): Promise<void> {
+    return peekOwedLegacySwmRetirementsV1(this)?.closeAndDrain() ?? Promise.resolve();
   }
 
   async retireFinalizedSwmTwinCandidate(
@@ -2275,7 +2289,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     await this.contextGraphSubscriptionAuthorityRecoveryRuntime?.close();
     await this.retireContextGraphSubscriptionPromotionRuntime();
     this.rfc64BackgroundWorkDispatcherV1.reopen();
-    this.owedLegacySwmRetirementsV1.reopen();
+    peekOwedLegacySwmRetirementsV1(this)?.reopen();
     this.contextGraphMembershipPersistence.reopen();
     // stop() drained and closed subscription writes; a restarted agent admits
     // them again. Writes issued before the first start() left it open.
