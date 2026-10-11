@@ -102,7 +102,7 @@ export class RollingSubscriptionChecks {
     this.#maxPauseMs = options.maxPauseMs ?? ROLLING_CHECK_MAX_PAUSE_MS;
     this.#pausePerCheckTime = options.pausePerCheckTime ?? ROLLING_CHECK_PAUSE_PER_CHECK_TIME;
     this.#reportIntervalMs = options.reportIntervalMs ?? ROLLING_CHECK_REPORT_INTERVAL_MS;
-    this.#now = options.now ?? (() => Date.now());
+    this.#now = options.now ?? (() => performance.now());
   }
 
   /** Check this row before the rest of the backlog. */
@@ -201,8 +201,8 @@ export class RollingSubscriptionChecks {
 
   /** Wait until the next check may start, or until `signal` aborts. */
   async #pause(signal: AbortSignal): Promise<void> {
-    // The clock is the wall clock; a step backwards must not stretch a pause.
-    const waitMs = Math.min(this.#notBeforeMs - this.#now(), this.#maxPauseMs);
+    // Elapsed check time and waiting use the same monotonic clock.
+    const waitMs = this.#notBeforeMs - this.#now();
     if (waitMs <= 0) return;
     await new Promise<void>((resolve, reject) => {
       const onAbort = (): void => {

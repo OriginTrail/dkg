@@ -4,9 +4,9 @@ import {
   activeRpcRequestContext,
   withRpcRequestContext,
 } from '@origintrail-official/dkg-chain';
-import { CoalescingRecurringTask } from '../src/coalescing-recurring-task.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
-import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
+import { createRollingSubscriptionPromotionRuntime, promoteDormantContextGraphSubscriptions } from '../src/context-graph-subscription-authority-recovery.js';
+import { createRollingPromotionFixture, savedPromotionRow, promotionSubscription, type RollingPromotionFixture as Host, type PromotionAuthorityRead as AuthorityRead } from './_helpers/rolling-subscription-promotion.js';
 import {
   ROLLING_CHECK_MIN_PAUSE_MS,
   RollingSubscriptionChecks,
@@ -49,33 +49,7 @@ const ALLOWED = Object.freeze({
 
 type Answer = typeof ABSENT | typeof UNKNOWN | typeof DENIED | typeof ALLOWED;
 
-interface SavedRow {
-  id: string;
-  subscribed: boolean;
-  synced: boolean;
-  coreHosted?: boolean;
-  onChainId?: string;
-  onChainHash?: string;
-}
-
-/** What the pass hands the authority read for one row. */
-interface AuthorityRead {
-  signal: AbortSignal;
-  durableSubscriptionBinding: { contextGraphId: string; onChainId?: string; onChainHash?: string };
-}
-
-interface Host {
-  [key: string]: any;
-  savedRows: Map<string, SavedRow>;
-  contextGraphSubscriptionRehydrationPendingIds: Set<string>;
-  contextGraphSubscriptionRehydrationSlotIds: Set<string>;
-  contextGraphSubscriptionDormancyById: Map<string, string>;
-  subscribedContextGraphs: Map<string, any>;
-}
-
-const promote = (host: Host, signal: AbortSignal): Promise<'rearm' | 'idle'> => (
-  LifecycleSyncMethods.prototype.promoteDormantContextGraphSubscriptions.call(host as never, signal)
-);
+const promote = promoteDormantContextGraphSubscriptions;
 
 describe('rolling activation and the chain request lane', () => {
   let governor: RpcRequestGovernor;
@@ -126,50 +100,22 @@ describe('rolling activation and the chain request lane', () => {
       cap?: number;
     } = {},
   ): Host {
-    const rows = new Map<string, SavedRow>(ids.map((id) => [id, { id, subscribed: true, synced: false }]));
     const answer = options.answer ?? (() => ABSENT);
-    const host: Host = {
-      savedRows: rows,
-      config: {
-        contextGraphSubscriptionStore: {
-          load: async (id: string) => {
-            const row = rows.get(id);
-            return row ? { ...row } : null;
-          },
+    const fixture = createRollingPromotionFixture(ids.map(id => ({ id, subscribed: true, synced: false })), {
+      cap: options.cap,
+      checks: options.checks ?? new RollingSubscriptionChecks(),
+      answer: (id, read) => withRpcRequestContext(
+        { requestClass: 'foreground', admissionPriority: 'authority', signal: read.signal },
+        async () => {
+          for (let i = 0; i < READS_PER_CHECK; i++) await chainRead();
+          return answer(id, read);
         },
+      ),
+      activate: async row => {
+        fixture.agent.subscribedContextGraphs.set(row.id, promotionSubscription({ subscribed: true, synced: true, metaSynced: true }));
       },
-      contextGraphSubscriptionRehydrationStatus: {
-        rehydrationEnabled: true,
-        activationCap: options.cap ?? 64,
-        updatedAt: 0,
-      },
-      contextGraphSubscriptionRehydrationPromotionRuntime: { owns: () => true, request: vi.fn() },
-      contextGraphSubscriptionRollingChecks: options.checks ?? new RollingSubscriptionChecks(),
-      contextGraphSubscriptionRehydrationPendingIds: new Set(ids),
-      contextGraphSubscriptionRehydrationSlotIds: new Set<string>(),
-      contextGraphSubscriptionDormancyById: new Map(ids.map((id) => [id, 'activationCap'])),
-      contextGraphSubscriptionPersistRevisions: new Map<string, number>(),
-      subscribedContextGraphs: new Map<string, any>(),
-      started: true,
-      log: { warn: vi.fn(), info: vi.fn(), debug: vi.fn() },
-      updateContextGraphSubscriptionRehydrationStatusAfterClear: vi.fn(),
-      updateContextGraphSubscriptionRehydrationStatusAfterPersist: vi.fn(),
-      persistContextGraphSubscriptionStrict: vi.fn(async () => undefined),
-      reconcileRfc64CatalogResponsibilityV1: vi.fn(async () => undefined),
-      resolveContextGraphSubscriptionBootstrapAuthority: vi.fn((id: string, read: AuthorityRead) => (
-        withRpcRequestContext(
-          { requestClass: 'foreground', admissionPriority: 'authority', signal: read.signal },
-          async () => {
-            for (let i = 0; i < READS_PER_CHECK; i++) await chainRead();
-            return answer(id, read);
-          },
-        )
-      )),
-      activatePersistedContextGraphSubscriptionRecord: vi.fn(async (row: { id: string }) => {
-        host.subscribedContextGraphs.set(row.id, { subscribed: true, synced: true, metaSynced: true });
-      }),
-    };
-    return host;
+    });
+    return fixture.agent;
   }
 
   /**
@@ -284,7 +230,7 @@ describe('rolling activation and the chain request lane', () => {
     const host = hostWith([...backlog(40), ...bound], {
       answer: (id) => (id.startsWith('zz-bound-') ? ALLOWED : ABSENT),
     });
-    for (const id of bound) host.subscribedContextGraphs.set(id, { subscribed: false, onChainId: '7' });
+    for (const id of bound) host.subscribedContextGraphs.set(id, promotionSubscription({ subscribed: false, onChainId: '7' }));
     void promote(host, new AbortController().signal);
 
     // Ten checks of five reads each, with no pause between them.
@@ -418,7 +364,7 @@ describe('rolling activation and the chain request lane', () => {
     it('does not mark a row dormant that was activated while a refusal was on its way', async () => {
       const host = hostWithRowReadAs(DENIED, (h) => {
         // An explicit subscribe: the row is active and no longer waits.
-        h.subscribedContextGraphs.set(ID, { subscribed: true, onChainId: '7' });
+        h.subscribedContextGraphs.set(ID, promotionSubscription({ subscribed: true, onChainId: '7' }));
       });
 
       await expect(runPass(host)).resolves.toBe('idle');
@@ -484,15 +430,67 @@ describe('rolling activation and the chain request lane', () => {
     expect(host.contextGraphSubscriptionRehydrationPendingIds.size).toBe(0);
   });
 
+  it('keeps the activation cap when a slot is taken during the authority read', async () => {
+    const host = hostWith(['confirmed'], {
+      cap: 1,
+      answer: () => {
+        host.contextGraphSubscriptionRehydrationSlotIds.add('already-active');
+        return ALLOWED;
+      },
+    });
+    const pass = promote(host, new AbortController().signal);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(await pass).toBe('idle');
+    expect(host.activatePersistedContextGraphSubscriptionRecord).not.toHaveBeenCalled();
+    expect(host.contextGraphSubscriptionRehydrationPendingIds.has('confirmed')).toBe(true);
+    expect(host.contextGraphSubscriptionDormancyById.get('confirmed')).toBe('activationCap');
+    host.contextGraphSubscriptionRehydrationSlotIds.clear();
+    host.resolveContextGraphSubscriptionBootstrapAuthority.mockResolvedValue(ALLOWED);
+    const retry = promote(host, new AbortController().signal);
+    await vi.advanceTimersByTimeAsync(ROLLING_CHECK_MIN_PAUSE_MS);
+    await retry;
+    expect(host.activatePersistedContextGraphSubscriptionRecord).toHaveBeenCalledOnce();
+  });
+
+  it('repeats a request handed over after the running pass has already counted its rows', async () => {
+    const host = hostWith([], { answer: () => ALLOWED });
+    let reachedEnding!: () => void;
+    let retire!: () => void;
+    const ending = new Promise<void>((resolve) => { reachedEnding = resolve; });
+    const retirement = new Promise<void>((resolve) => { retire = resolve; });
+    let passes = 0;
+    const runtime = createRollingSubscriptionPromotionRuntime({
+      onError: vi.fn(),
+      runPass: async (signal) => {
+        const result = await promote(host, signal);
+        if (++passes === 1) { reachedEnding(); await retirement; }
+        return result;
+      },
+    });
+    host.contextGraphSubscriptionRehydrationPromotionRuntime = runtime;
+    try {
+      runtime.request();
+      await ending;
+      host.savedRows.set('new-row', savedPromotionRow({ id: 'new-row', subscribed: true, synced: false }));
+      host.contextGraphSubscriptionRehydrationPendingIds.add('new-row');
+      host.contextGraphSubscriptionDormancyById.set('new-row', 'activationCap');
+      DKGAgentBase.prototype.requestContextGraphSubscriptionPromotion.call(host as never, 'new-row');
+      retire();
+      // Coalescing retains ownership across the paced follow-up pass.
+      await vi.advanceTimersByTimeAsync(1_000);
+      await runtime.whenIdle();
+      expect(passes).toBe(2);
+      expect(host.activatePersistedContextGraphSubscriptionRecord).toHaveBeenCalledOnce();
+      expect(host.contextGraphSubscriptionRehydrationPendingIds.size).toBe(0);
+    } finally { retire(); await runtime.close(); }
+  });
+
   it('stops at once, without a failure report, when the node closes during a pause', async () => {
     const host = hostWith(backlog(20));
     const onError = vi.fn();
-    const runtime = new CoalescingRecurringTask({
-      retryIntervalMs: 30_000,
-      requestWhileRunning: 'drop',
+    const runtime = createRollingSubscriptionPromotionRuntime({
       runPass: (signal) => promote(host, signal),
       onError,
-      closingMessage: 'Rolling context-graph subscription activation closing',
     });
     host.contextGraphSubscriptionRehydrationPromotionRuntime = runtime;
     runtime.request();
