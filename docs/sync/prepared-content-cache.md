@@ -91,3 +91,5 @@ The local 564-KA measurement compares fresh receivers and cold source caches,
 then a restarted source using the persisted cache, plus RPC-only with a fresh
 source cache. The restarted-source trial must record zero whole-payload exports
 and complete identity/root coverage; elapsed time alone cannot prove reuse.
+
+Completed local results: [564-KA comparison](prepared-content-cache-benchmark.md).
