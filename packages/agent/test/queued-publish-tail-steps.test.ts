@@ -20,6 +20,7 @@ import {
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { DKGAgent } from '../src/dkg-agent.js';
 import { PublishMethods } from '../src/dkg-agent-publish.js';
+import { confirmedPublicationCatalogConfigV1 } from './support/confirmed-publication-harness.js';
 
 const AUTHOR = `0x${'11'.repeat(20)}` as const;
 const KAV10 = `0x${'44'.repeat(20)}` as const;
@@ -99,6 +100,7 @@ function harness(options: {
     clearSwmShareComplete: call('clearShareMarker()'),
   };
   const host = Object.setPrototypeOf({
+    config: confirmedPublicationCatalogConfigV1(false),
     publisher,
     peerId: 'peer-1',
     defaultAgentAddress: AUTHOR,
