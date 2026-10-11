@@ -47,15 +47,3 @@ export function normalizeKnowledgeAssetUpdateIdentity(metadata: KnowledgeAssetUp
   if (txHash !== undefined) return { eventKind: 'transaction', blockNumber, txHash, ...(blockHash === undefined ? {} : { blockHash }) };
   return { eventKind: 'legacy-block', blockNumber, ...(blockHash === undefined ? {} : { blockHash }) };
 }
-
-export function knowledgeAssetUpdateKey(identity: KnowledgeAssetUpdateIdentity, merkleRoot: string): string {
-  // Complete positions remain distinct, including across forks. Legacy
-  // adapters without a position can only coalesce the evidence they supply.
-  switch (identity.eventKind) {
-    case 'legacy-unpositioned': return JSON.stringify(['legacy', merkleRoot]);
-    case 'legacy-block': return JSON.stringify(['legacy-block', identity.blockNumber, merkleRoot]);
-    case 'transaction': return JSON.stringify(['transaction', identity.blockNumber, identity.blockHash, identity.txHash, merkleRoot]);
-    case 'log': return JSON.stringify(['log', identity.blockNumber, identity.logIndex, identity.blockHash, identity.txHash, merkleRoot]);
-    default: throw new TypeError('Knowledge Asset update identity is invalid');
-  }
-}

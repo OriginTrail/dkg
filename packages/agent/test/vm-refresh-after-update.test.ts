@@ -509,6 +509,27 @@ describe('VmRefreshQueue', () => {
     expect(queue.due('another-graph', 10)).toEqual([]);
   });
 
+  it.each([undefined, 160])('coalesces legacy hash hints without restarting retry at block %s', (blockNumber) => {
+    const queue = queueAt(() => 1_000);
+    const held = target('0xb2', undefined, blockNumber, undefined, { blockHash: '0xaaa' });
+    const replay = target('0xb2', undefined, blockNumber, undefined, { blockHash: '0xbbb' });
+    expect(queue.offer(held)).toBe('recorded');
+    queue.settle(held, 'retry');
+    expect(queue.offer(replay)).toBe('held');
+    expect(queue.due(CG, 1)).toEqual([]);
+    expect(queue.snapshot()).toMatchObject([{ blockHash: '0xaaa', failures: 1, nextAttemptAt: 61_000 }]);
+    queue.settle(replay, 'current');
+    expect(queue.size).toBe(0);
+  });
+
+  it('refuses an untyped update before creating a queue record', () => {
+    const queue = queueAt(() => 0);
+    const malformed = { localCgId: CG, ual: 'bad', kaId: 1n, merkleRoot: '0xb2' } as VmRefreshTarget;
+    expect(() => queue.offer(malformed)).toThrow('identity is invalid');
+    expect(queue.size).toBe(0);
+    expect(queue.refusedTotal).toBe(0);
+  });
+
   it('settles only the attempted root and doubles the retry delay to its ceiling', () => {
     let now = 0;
     const queue = new VmRefreshQueue({

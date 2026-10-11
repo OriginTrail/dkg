@@ -180,11 +180,14 @@ describe('ChainEventPoller collection updates', () => {
     expect(seen).toEqual([oldIdentity, canonical]);
   });
 
-  it('redelivers a replacement block below its in-memory cursor without restarting', async () => {
+  it.each([
+    { position: 'log', metadata: { txHash: '0xsame', logIndex: 7 } },
+    { position: 'legacy-block', metadata: {} },
+  ])('redelivers a $position replacement block below its cursor without restarting', async ({ metadata }) => {
     const oldFork: ChainEvent = {
       type: 'KnowledgeAssetUpdated', blockNumber: 160,
       data: { batchId: '42', merkleRoot: '0x' + '44'.repeat(32),
-        blockHash: '0xold', txHash: '0xsame', logIndex: 7 },
+        blockHash: '0xold', ...metadata },
     };
     const events = [oldFork];
     let head = 200;

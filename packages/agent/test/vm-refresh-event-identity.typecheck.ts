@@ -10,3 +10,8 @@ const noTransaction: KnowledgeAssetUpdateIdentity = { eventKind: 'transaction', 
 // @ts-expect-error Legacy unpositioned evidence cannot carry a partial position.
 const legacyLog: KnowledgeAssetUpdateIdentity = { eventKind: 'legacy-unpositioned', logIndex: 7 };
 void [partial, logWithoutBlock, noTransaction, legacyLog];
+
+import * as chainIdentityApi from '@origintrail-official/dkg-chain';
+// @ts-expect-error Refresh coalescing is private queue policy, not a generic chain identity API.
+const privateRefreshKey = chainIdentityApi.knowledgeAssetUpdateKey;
+void privateRefreshKey;

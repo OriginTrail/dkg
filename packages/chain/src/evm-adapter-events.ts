@@ -292,6 +292,8 @@ export class EventsMethods extends EVMChainAdapterBase {
                 author: typeof parsed.args.author === 'string' ? parsed.args.author : '',
                 txHash: log.transactionHash,
                 txIndex,
+                ...(typeof logIndex === 'number' ? { logIndex } : {}),
+                ...(typeof blockHash === 'string' ? { blockHash } : {}),
               },
             };
           }

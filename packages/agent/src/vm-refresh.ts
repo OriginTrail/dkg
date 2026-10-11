@@ -26,7 +26,7 @@
  * and the copy waits for the KA's next update or an explicit asset fetch.
  */
 
-import { knowledgeAssetUpdateKey, type KnowledgeAssetUpdateIdentity, type KnowledgeAssetVersionSnapshotUnavailable } from '@origintrail-official/dkg-chain';
+import type { KnowledgeAssetUpdateIdentity, KnowledgeAssetVersionSnapshotUnavailable } from '@origintrail-official/dkg-chain';
 
 export type VmRefreshTarget = KnowledgeAssetUpdateIdentity & {
   readonly localCgId: string;
@@ -103,8 +103,17 @@ function recordKey(localCgId: string, ual: string): string {
   return `${localCgId}\0${ual}`;
 }
 
-function updateKey(target: VmRefreshTarget): string {
-  return knowledgeAssetUpdateKey(target, target.merkleRoot);
+function updateKey(identity: VmRefreshTarget): string {
+  const merkleRoot = identity.merkleRoot;
+  // Refresh coalescing keeps historical root/block equivalence for legacy
+  // hints. Positioned events remain distinct, including across forks.
+  switch (identity.eventKind) {
+    case 'legacy-unpositioned': return JSON.stringify(['legacy', merkleRoot]);
+    case 'legacy-block': return JSON.stringify(['legacy-block', identity.blockNumber, merkleRoot]);
+    case 'transaction': return JSON.stringify(['transaction', identity.blockNumber, identity.blockHash, identity.txHash, merkleRoot]);
+    case 'log': return JSON.stringify(['log', identity.blockNumber, identity.logIndex, identity.blockHash, identity.txHash, merkleRoot]);
+    default: throw new TypeError('Knowledge Asset update identity is invalid');
+  }
 }
 
 export class VmRefreshQueue {

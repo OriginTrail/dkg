@@ -347,6 +347,8 @@ describe('chain-lifecycle-extra — V10 lifecycle + adapter invariants', () => {
           merkleRoot: ethers.hexlify(newMerkleRoot),
           author: coreOp.address,
           txHash: updateResult.hash,
+          logIndex: updateLog!.index,
+          blockHash: updateReceipt!.blockHash,
         }),
       }]);
     }, 120_000);
