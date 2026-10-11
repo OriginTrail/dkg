@@ -17,11 +17,11 @@ describe('runDaemonInner managed store boot/runtime wiring', () => {
   it.each([false, true])(
     'fences direct managed-store boot work and preserves RFC-64 authority when changelog=%s',
     async (changelog) => {
-      let bootActivity = 0;
-      const reportBootActivity = vi.fn((active: number) => { bootActivity = active; });
-      const disposeBootActivity = vi.fn(() => { bootActivity = 0; });
+      let bootActivity = false;
+      const reportBootActivity = vi.fn((busy: boolean) => { bootActivity = busy; });
+      const disposeBootActivity = vi.fn(() => { bootActivity = false; });
       const observeBootActivity = () => {
-        expect(bootActivity).toBe(1);
+        expect(bootActivity).toBe(true);
       };
       mocks.checkExternalStoreReachable.mockImplementationOnce(async () => {
         observeBootActivity();
@@ -85,8 +85,8 @@ describe('runDaemonInner managed store boot/runtime wiring', () => {
           changelog,
         },
       }, async (createArg) => {
-        expect(bootActivity).toBe(0);
-        expect(reportBootActivity).toHaveBeenCalledExactlyOnceWith(1);
+        expect(bootActivity).toBe(false);
+        expect(reportBootActivity).toHaveBeenCalledExactlyOnceWith(true);
         expect(disposeBootActivity).toHaveBeenCalledOnce();
         const originalFetch = globalThis.fetch;
         globalThis.fetch = (async (_input, init) => {
