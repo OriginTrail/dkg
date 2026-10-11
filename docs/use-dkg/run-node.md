@@ -377,3 +377,9 @@ An explicit `0` disables extra recovery rounds while preserving the initial
 round and its existing transport deadline. The page and round count limits
 remain active for every setting. The public recovery lane retains its separate
 `DKG_SWM_CATCHUP_PASS_BUDGET_MS` setting.
+
+### Legacy ontology privacy during startup
+
+An upgraded node may retain old Context Graph bindings in its public `ontology` graph. The node withholds ontology sync, changelog sync and remote queries while any candidate is deferred or its public access policy remains unproven. Local-only startup inspection does not prove an unknown binding public. Later discovery passes classify at most 16 new slots per pass and reuse known slot classifications, moving or deleting curated metadata before serving resumes.
+
+An unavailable classifier or a persistently unreadable slot can keep ontology unavailable indefinitely. This is an intentional privacy boundary: elapsed time does not authorize exposing a potentially curated graph's name or binding. Other graphs continue using their existing serving policies. Restore chain-read availability or correct the retained binding; ordinary bounded relocation passes then reopen ontology once every candidate is classified or relocated.

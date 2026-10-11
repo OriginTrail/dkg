@@ -2075,7 +2075,7 @@ export class DKGAgent extends DKGAgentBase {
         ...(options.signal ? { signal: options.signal } : {}),
       });
     } catch (err) {
-      if (this.ontologyRelocation === 'pending') this.ontologyRelocation = 'withheld';
+      this.ontologyRelocation = 'withheld';
       throw err;
     }
     if (result.movedToMeta.length > 0 || result.deletedForeign > 0) {
@@ -2089,12 +2089,12 @@ export class DKGAgent extends DKGAgentBase {
           `${result.movedToMeta.length} moved to their own _meta, ${result.deletedForeign} removed`,
       );
     }
-    if (result.deferred > 0) {
+    if (result.deferred > 0 || result.unclassified > 0) {
       this.log.info(
         createOperationContext('system'),
-        `Context graph metadata relocation stopped early: ${result.deferred} candidate(s) left for a later pass`,
+        `Context graph metadata relocation is incomplete: ${result.deferred} deferred, ${result.unclassified} unclassified candidate(s)`,
       );
-      if (this.ontologyRelocation === 'pending') this.ontologyRelocation = 'withheld';
+      this.ontologyRelocation = 'withheld';
     } else if (this.ontologyRelocation !== 'relocated') {
       if (this.ontologyRelocation === 'withheld') {
         this.log.info(
@@ -2110,11 +2110,11 @@ export class DKGAgent extends DKGAgentBase {
   /**
    * Whether peers asking for `contextGraphId` are to be told to retry later
    * rather than be served it: `ontology`, until a metadata relocation pass
-   * has reached every candidate. Until then it may still hold private
+   * has classified or relocated every candidate. Until then it may still hold private
    * metadata that earlier builds wrote there, and it is a public graph, so
    * sync, changelog sync and remote queries would hand those rows to anyone.
-   * Nothing in this build writes private metadata to ontology, so once a pass
-   * finishes, the graph stays servable for the life of the agent.
+   * Unknown bindings remain local until proven public or removed; later
+   * bounded passes can reopen serving, with no time-based privacy exception.
    */
   contextGraphServingWithheld(contextGraphId: string): boolean {
     return contextGraphId === SYSTEM_CONTEXT_GRAPHS.ONTOLOGY && this.ontologyRelocation !== 'relocated';

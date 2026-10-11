@@ -298,7 +298,7 @@ export async function relocatePrivateContextGraphMetadata(
       }
       verdict = slotRelocationVerdict(slotClasses);
     } else {
-      verdict = 'keep';
+      verdict = 'unproven';
     }
     if (verdict === 'unproven') unclassified += 1;
     if (verdict !== 'remove') continue;

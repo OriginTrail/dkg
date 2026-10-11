@@ -540,7 +540,7 @@ describe('relocating curated and private metadata that earlier builds left in on
       store,
       localAccessPolicy: async () => null,
     });
-    expect(withoutChain).toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 0, deferred: 0 });
+    expect(withoutChain).toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 1, deferred: 0 });
 
     const later = await relocatePrivateContextGraphMetadata({
       store,
@@ -903,7 +903,7 @@ describe('bounded and interrupted relocation passes', () => {
     await expect(agent.relocatePrivateContextGraphMetadata({ classifyOnChain: false, signal: AbortSignal.abort() }))
       .resolves.toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 0, deferred: 2 });
     expect(info.mock.calls.map(([, message]) => message))
-      .toContain('Context graph metadata relocation stopped early: 2 candidate(s) left for a later pass');
+      .toContain('Context graph metadata relocation is incomplete: 2 deferred, 0 unclassified candidate(s)');
     expect(await ontologyRowsAbout(agent, renamed)).toEqual([`${DKG_ONTOLOGY.SCHEMA_NAME} "Renamed"`]);
     expect(agent.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)).toBe(true);
     expect(agent.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.AGENTS)).toBe(false);
@@ -916,6 +916,32 @@ describe('bounded and interrupted relocation passes', () => {
     expect(agent.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)).toBe(false);
     expect(info.mock.calls.map(([, message]) => message))
       .toContain('Context graph metadata relocation reached every candidate; serving the ontology graph to peers again');
+  });
+
+  it('keeps ontology withheld across bounded classification passes until every binding is proven', async () => {
+    const { agent, chain } = await createAgent('relocate-classification-budget');
+    const ids = Array.from({ length: 17 }, (_, index) => `0xabc/bounded-${index}`);
+    const slots = await Promise.all(ids.map(() => createOnChain(chain, 0)));
+    await agent.store.insert(ids.map((id, index) => bindingQuad(id, slots[index]!)));
+    const reads = vi.spyOn(chain, 'getContextGraphAccessPolicy');
+
+    const localOnly = await agent.relocatePrivateContextGraphMetadata({ classifyOnChain: false });
+    expect(localOnly).toMatchObject({ deferred: 0, unclassified: 17 });
+    expect(reads).not.toHaveBeenCalled();
+    expect(agent.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)).toBe(true);
+
+    const bounded = await agent.relocatePrivateContextGraphMetadata();
+    expect(bounded).toMatchObject({ deferred: 0, unclassified: 1 });
+    expect(reads).toHaveBeenCalledTimes(16);
+    expect(agent.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)).toBe(true);
+
+    const complete = await agent.relocatePrivateContextGraphMetadata();
+    expect(complete).toMatchObject({ deferred: 0, unclassified: 0 });
+    expect(reads).toHaveBeenCalledTimes(17);
+    expect(agent.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)).toBe(false);
+    for (const [index, id] of ids.entries()) {
+      await expect(lookupBinding(agent.store, id)).resolves.toBe(slots[index]);
+    }
   });
 
   it('keeps ontology withheld after a pass that fails, until one finishes', async () => {
@@ -965,7 +991,7 @@ describe('bounded and interrupted relocation passes', () => {
     });
     const without = await relocatePrivateContextGraphMetadata({ store: unbudgeted.store, localAccessPolicy });
 
-    expect(withBudget).toEqual({ movedToMeta: [held], deletedForeign: 1, unclassified: 0, deferred: 0 });
+    expect(withBudget).toEqual({ movedToMeta: [held], deletedForeign: 1, unclassified: 1, deferred: 0 });
     expect(withBudget).toEqual(without);
     expect(await contents(budgeted.store)).toEqual(await contents(unbudgeted.store));
     expect(await ontologyRowsAbout(budgeted, held)).toEqual([]);
@@ -1388,13 +1414,15 @@ describe('relocation at startup', () => {
     }
   }, 30_000);
 
-  it('serves ontology to peers only once a startup pass that ran out of time has been finished', async () => {
+  it.each(['deferred', 'unclassified'] as const)('serves ontology only after %s startup candidates are proven safe', async (incomplete) => {
     const privateId = '0xabc/held-private-at-start';
     const publicId = '0xabc/public-at-start';
+    const chain = new MockChainAdapter();
+    const curatedSlot = await createOnChain(chain, 1);
     const agent = await DKGAgent.create({
-      name: 'metadata-placement-startup-withheld',
+      name: `metadata-placement-startup-withheld-${incomplete}`,
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: chain,
       // Opens ontology to remote queries too, so that path is covered.
       queryAccess: { defaultPolicy: 'public' },
     }) as TestAgent;
@@ -1403,11 +1431,12 @@ describe('relocation at startup', () => {
     // An upgraded node's private graph, whose definition and name an earlier
     // build also wrote to ontology, next to a public graph's definition.
     await agent.store.insert([
-      { subject, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: metaGraph },
-      { subject, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"private"', graph: metaGraph },
-      ontologyQuad(subject, DKG_ONTOLOGY.RDF_TYPE, DKG_ONTOLOGY.DKG_CONTEXT_GRAPH),
+      ...(incomplete === 'deferred' ? [
+        { subject, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: metaGraph },
+        { subject, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"private"', graph: metaGraph },
+        ontologyQuad(subject, DKG_ONTOLOGY.DKG_ACCESS_POLICY, '"private"'),
+      ] : [bindingQuad(privateId, curatedSlot)]),
       ontologyQuad(subject, DKG_ONTOLOGY.SCHEMA_NAME, '"Private Plans"'),
-      ontologyQuad(subject, DKG_ONTOLOGY.DKG_ACCESS_POLICY, '"private"'),
       ontologyQuad(contextGraphDataGraphUri(publicId), DKG_ONTOLOGY.RDF_TYPE, DKG_ONTOLOGY.DKG_CONTEXT_GRAPH),
       ontologyQuad(contextGraphDataGraphUri(publicId), DKG_ONTOLOGY.SCHEMA_NAME, '"Open Data"'),
     ]);
@@ -1417,7 +1446,9 @@ describe('relocation at startup', () => {
     let release!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });
     vi.spyOn(agent, 'relocatePrivateContextGraphMetadata').mockImplementation(async (options = {}) => {
-      if (options.budgetMs !== undefined) return relocate({ ...options, budgetMs: 0 });
+      if (options.budgetMs !== undefined) return relocate({
+        ...options, ...(incomplete === 'deferred' ? { budgetMs: 0 } : {}),
+      });
       await held;
       return relocate(options);
     });
