@@ -1,0 +1,206 @@
+{
+  "result": "INCOMPLETE_DISK_GUARD",
+  "benchmarkComplete": false,
+  "plannedTrials": 9,
+  "completedTrials": 6,
+  "measuredCode": {
+    "commit": "f1ee15204c01ad5739f3c71cbcb3e0de6a89f9e7",
+    "baseCommit": "b8e0bfa197da0eece6b428a457865f4aa14b1df2",
+    "packageVersion": "10.0.23",
+    "releaseStatus": "unreleased PR code",
+    "fixtureSha256": "6839939f3876c7ff79a1e17fbfa00b04291f41a3ffabbacb6857decd2524dbad",
+    "manifestSha256": "d62cc71781ab24a48be25d346f6567e8b479600cabbaf96fbad3b170b06c64b8",
+    "storageBuildHashes": {
+      "packages/storage/dist/adapters/bulk-atomic-ingest.js": "43f8a5d3b98d41bf24db24c1ae24360eb2b5ca4b7c10cc8404a28f9ad1cb8c41",
+      "packages/storage/dist/adapters/sparql-http.js": "7d8c470f79b7b88da305e79fabf1cc9e29e8d0fb32167f721b0d2f9cb18fddb3"
+    }
+  },
+  "baselineCommit": "ac9989454d9c3259195516ca657948f0f7bdc4bb",
+  "corpus": {
+    "assets": 564,
+    "dataQuads": 3751526,
+    "rawInputBytes": 580640763,
+    "encodedPayloadBytesPerTrial": 56140435,
+    "serializedPayloadBytesPerTrial": 1060848527,
+    "sourcePreparationSecondsExcluded": 245.663855917
+  },
+  "comparison": {
+    "core-cold": {
+      "trials": 2,
+      "queryReadySecondsMedian": {
+        "before": 284.969691875,
+        "after": 281.4929218959999,
+        "reductionPercent": 1.2200490361357952
+      },
+      "syncSecondsMedian": {
+        "before": 282.06880270899995,
+        "after": 278.3676889584999,
+        "reductionPercent": 1.3121315490952523
+      },
+      "atomicWriteSecondsMedian": {
+        "before": 132.22858592100394,
+        "after": 127.01004649200136,
+        "reductionPercent": 3.946604580737356
+      },
+      "baselineTrials": 3
+    },
+    "core-warm": {
+      "trials": 2,
+      "queryReadySecondsMedian": {
+        "before": 232.93494454200007,
+        "after": 226.82872500000005,
+        "reductionPercent": 2.6214270057273503
+      },
+      "syncSecondsMedian": {
+        "before": 229.90164533399977,
+        "after": 223.91424772899992,
+        "reductionPercent": 2.6043300370040323
+      },
+      "atomicWriteSecondsMedian": {
+        "before": 130.8506881640041,
+        "after": 124.42618554250227,
+        "reductionPercent": 4.909796586969096
+      },
+      "baselineTrials": 3
+    },
+    "rpc-only": {
+      "trials": 2,
+      "queryReadySecondsMedian": {
+        "before": 286.7945392499999,
+        "after": 298.9607323125,
+        "reductionPercent": -4.2421285615535265
+      },
+      "syncSecondsMedian": {
+        "before": 283.719886833,
+        "after": 294.283583125,
+        "reductionPercent": -3.723283697141011
+      },
+      "atomicWriteSecondsMedian": {
+        "before": 132.49454428699985,
+        "after": 136.9685786115008,
+        "reductionPercent": -3.3767687179704575
+      },
+      "baselineTrials": 3
+    }
+  },
+  "trials": [
+    {
+      "mode": "core-cold-1",
+      "syncSeconds": 276.92592925,
+      "queryReadySeconds": 279.99780525,
+      "atomicWriteSeconds": 125.5599529310001,
+      "committedAssets": 564,
+      "coveragePassed": true
+    },
+    {
+      "mode": "core-cold-2",
+      "syncSeconds": 279.8094486669998,
+      "queryReadySeconds": 282.98803854199986,
+      "atomicWriteSeconds": 128.46014005300262,
+      "committedAssets": 564,
+      "coveragePassed": true
+    },
+    {
+      "mode": "core-warm-1",
+      "syncSeconds": 223.218822375,
+      "queryReadySeconds": 226.02270525,
+      "atomicWriteSeconds": 123.92441895800143,
+      "committedAssets": 564,
+      "coveragePassed": true
+    },
+    {
+      "mode": "core-warm-2",
+      "syncSeconds": 224.60967308299988,
+      "queryReadySeconds": 227.63474475000007,
+      "atomicWriteSeconds": 124.92795212700311,
+      "committedAssets": 564,
+      "coveragePassed": true
+    },
+    {
+      "mode": "rpc-only-1",
+      "syncSeconds": 282.6826673330001,
+      "queryReadySeconds": 285.51297124999996,
+      "atomicWriteSeconds": 129.38559954600083,
+      "committedAssets": 564,
+      "coveragePassed": true
+    },
+    {
+      "mode": "rpc-only-2",
+      "syncSeconds": 305.8844989169999,
+      "queryReadySeconds": 312.4084933750001,
+      "atomicWriteSeconds": 144.55155767700077,
+      "committedAssets": 564,
+      "coveragePassed": true
+    }
+  ],
+  "restartProof": [
+    {
+      "label": "source",
+      "assets": 564,
+      "triples": 3751526,
+      "identityAndRootsMatch": true,
+      "tripleCountMatches": true
+    },
+    {
+      "label": "core-cold-1",
+      "assets": 564,
+      "triples": 3751526,
+      "identityAndRootsMatch": true,
+      "tripleCountMatches": true
+    },
+    {
+      "label": "core-cold-2",
+      "assets": 564,
+      "triples": 3751526,
+      "identityAndRootsMatch": true,
+      "tripleCountMatches": true
+    },
+    {
+      "label": "core-warm-1",
+      "assets": 564,
+      "triples": 3751526,
+      "identityAndRootsMatch": true,
+      "tripleCountMatches": true
+    },
+    {
+      "label": "core-warm-2",
+      "assets": 564,
+      "triples": 3751526,
+      "identityAndRootsMatch": true,
+      "tripleCountMatches": true
+    },
+    {
+      "label": "rpc-only-1",
+      "assets": 564,
+      "triples": 3751526,
+      "identityAndRootsMatch": true,
+      "tripleCountMatches": true
+    },
+    {
+      "label": "rpc-only-2",
+      "assets": 564,
+      "triples": 3751526,
+      "identityAndRootsMatch": true,
+      "tripleCountMatches": true
+    }
+  ],
+  "resources": {
+    "minimumRecordedFreeGiB": 7.015708923339844,
+    "peakLoadAverage1m": 15.05859375,
+    "diskGuardGiB": 7
+  },
+  "limitations": [
+    "Same-host native Blazegraph and isolated Hardhat; no WAN or mainnet-RPC latency. Source and receiver agents share a Node.js process with separate verification workers.",
+    "Reconstructed public RDF projection is not the byte-identical historical mainnet payload.",
+    "Cold/warm refers to source application caches, not a fresh OS/database page cache.",
+    "RPC-only uses the new coherent snapshot implementation, not the old per-asset RPC path.",
+    "Reported stage totals overlap: source export contains substages and acknowledgement waits include receiver work.",
+    "Timing starts at the sync call after isolated agents are started and connected; source fixture preparation and node startup are excluded.",
+    "Direct query readiness excludes semantic embedding/index construction and model warmup.",
+    "The local development host was not dedicated; no builds or additional local test suites were run during the full measurement.",
+    "Only two candidate trials per mode completed versus three baseline trials. All completed results retained, including the slower second RPC-only trial.",
+    "Rising disk/memory pressure coincided with the slowdown; its causal contribution is not established.",
+    "The partial medians do not demonstrate a material end-to-end improvement. A clean full rerun remains required.",
+    "Historical baseline predates later core-cache review hardening. Same corpus and fixture with only receiver storage option changed; not a randomized controlled deployment benchmark."
+  ]
+}

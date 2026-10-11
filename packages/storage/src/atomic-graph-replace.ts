@@ -70,25 +70,36 @@ export function buildAtomicGraphAndSubjectReplaceUpdate(
   metadataSubject: string,
   metadataQuads: readonly Quad[],
 ): AtomicGraphAndSubjectReplaceUpdate {
+  const plan = buildGraphAndSubjectPublication(
+    graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads,
+  );
+  const stagingBlocks = [
+    graphQuads.length > 0 ? formatGraphBlock(plan.stagingGraphs[0], graphQuads) : undefined,
+    metadataQuads.length > 0 ? formatGraphBlock(plan.stagingGraphs[1], metadataQuads) : undefined,
+  ].filter((block): block is string => block !== undefined);
+  const stagePayload = stagingBlocks.length > 0
+    ? `INSERT DATA {\n${stagingBlocks.join('\n')}\n};\n`
+    : '';
+  return { ...plan, update: `${plan.cleanup};\n${stagePayload}${plan.update}` };
+}
+
+/** Internal publication half, shared by SPARQL staging and native RDF loading. */
+export function buildGraphAndSubjectPublication(
+  graphUri: string,
+  graphQuads: readonly Quad[],
+  metaGraphUri: string,
+  metadataSubject: string,
+  metadataQuads: readonly Quad[],
+): AtomicGraphAndSubjectReplaceUpdate {
   const target = assertSafeIri(graphUri);
   const metaGraph = assertSafeIri(metaGraphUri);
   const subject = assertSafeIri(metadataSubject);
   assertReplacementPayload(target, graphQuads);
   assertSubjectReplacementPayload(metaGraph, subject, metadataQuads);
-
   const dataStagingGraph = `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}${randomUUID()}`;
   const metaStagingGraph = `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}${randomUUID()}`;
   const stagingGraphs = [dataStagingGraph, metaStagingGraph];
-  const cleanup = stagingGraphs
-    .map((graph) => `DROP SILENT GRAPH <${graph}>`)
-    .join(';\n');
-  const stagingBlocks = [
-    graphQuads.length > 0 ? formatGraphBlock(dataStagingGraph, graphQuads) : undefined,
-    metadataQuads.length > 0 ? formatGraphBlock(metaStagingGraph, metadataQuads) : undefined,
-  ].filter((block): block is string => block !== undefined);
-  const stagePayload = stagingBlocks.length > 0
-    ? `INSERT DATA {\n${stagingBlocks.join('\n')}\n};\n`
-    : '';
+  const cleanup = stagingGraphs.map((graph) => `DROP SILENT GRAPH <${graph}>`).join(';\n');
   const insertMetadata = metadataQuads.length > 0
     ? `INSERT { GRAPH <${metaGraph}> { <${subject}> ?p ?o } }\n` +
       `WHERE { GRAPH <${metaStagingGraph}> { <${subject}> ?p ?o } };\n`
@@ -96,17 +107,10 @@ export function buildAtomicGraphAndSubjectReplaceUpdate(
   const replaceData = graphQuads.length > 0
     ? `MOVE GRAPH <${dataStagingGraph}> TO GRAPH <${target}>`
     : `DROP SILENT GRAPH <${target}>`;
-
   return {
-    stagingGraphs,
-    cleanup,
-    update:
-      `${cleanup};\n` +
-      stagePayload +
-      `DELETE WHERE { GRAPH <${metaGraph}> { <${subject}> ?p ?o } };\n` +
-      insertMetadata +
-      `${replaceData};\n` +
-      `DROP SILENT GRAPH <${metaStagingGraph}>`,
+    stagingGraphs, cleanup,
+    update: `DELETE WHERE { GRAPH <${metaGraph}> { <${subject}> ?p ?o } };\n` +
+      insertMetadata + `${replaceData};\nDROP SILENT GRAPH <${metaStagingGraph}>`,
   };
 }
 

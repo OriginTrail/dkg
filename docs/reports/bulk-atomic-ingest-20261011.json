@@ -1,0 +1,285 @@
+{
+  "result": "PASS_LOCAL_SYNC_AND_DURABILITY",
+  "benchmarkComplete": true,
+  "plannedTrials": 9,
+  "completedTrials": 9,
+  "measuredCode": {
+    "commit": "ddd219dd5cb276206babe0d9191e418c4fb2c7af",
+    "baseCommit": "b8e0bfa197da0eece6b428a457865f4aa14b1df2",
+    "packageVersion": "10.0.23",
+    "releaseStatus": "unreleased PR code",
+    "fixtureSha256": "6839939f3876c7ff79a1e17fbfa00b04291f41a3ffabbacb6857decd2524dbad",
+    "manifestSha256": "d62cc71781ab24a48be25d346f6567e8b479600cabbaf96fbad3b170b06c64b8",
+    "implementationCommit": "f1ee15204c01ad5739f3c71cbcb3e0de6a89f9e7",
+    "documentationOnlySinceImplementation": true,
+    "storageBuildHashes": {
+      "packages/storage/dist/adapters/bulk-atomic-ingest.js": "43f8a5d3b98d41bf24db24c1ae24360eb2b5ca4b7c10cc8404a28f9ad1cb8c41",
+      "packages/storage/dist/adapters/sparql-http.js": "7d8c470f79b7b88da305e79fabf1cc9e29e8d0fb32167f721b0d2f9cb18fddb3"
+    },
+    "controllerSha256": "f47a29a8126c54ca2ef4b2cd96be91ea056f5c29b03a4cfe2886d77b3bee826c",
+    "dependencyLockSha256": "200e6174037aac2c6239a03965928ed7a28d91d8d2fb475427f603e4c5496d4e",
+    "blazegraphJarSha256": "930c38b5bce7c0ae99701c1f6ef3057c52f3f385d938e1397a3e05561c7df5de"
+  },
+  "baselineCommit": "ac9989454d9c3259195516ca657948f0f7bdc4bb",
+  "corpus": {
+    "assets": 564,
+    "dataQuads": 3751526,
+    "rawInputBytes": 580640763,
+    "encodedPayloadBytesPerTrial": [
+      56140435,
+      56140435,
+      56140435,
+      56140435,
+      56140435,
+      56140435,
+      56140435,
+      56140435,
+      56140435
+    ],
+    "serializedPayloadBytesPerTrial": [
+      1060848527,
+      1060848527,
+      1060848527,
+      1060848527,
+      1060848527,
+      1060848527,
+      1060848527,
+      1060848527,
+      1060848527
+    ],
+    "sourcePreparationSecondsExcluded": 243.844357541
+  },
+  "comparison": {
+    "core-cold": {
+      "trials": 3,
+      "queryReadySecondsMedian": {
+        "before": 284.969691875,
+        "after": 276.801150333,
+        "reductionPercent": 2.8664597586690377
+      },
+      "syncSecondsMedian": {
+        "before": 282.06880270899995,
+        "after": 274.3951900419999,
+        "reductionPercent": 2.720475498638053
+      },
+      "atomicWriteSecondsMedian": {
+        "before": 132.22858592100394,
+        "after": 123.38381163199804,
+        "reductionPercent": 6.689003158734486
+      },
+      "baselineTrials": 3
+    },
+    "core-warm": {
+      "trials": 3,
+      "queryReadySecondsMedian": {
+        "before": 232.93494454200007,
+        "after": 225.53646983299998,
+        "reductionPercent": 3.1761978536741564
+      },
+      "syncSecondsMedian": {
+        "before": 229.90164533399977,
+        "after": 223.088302625,
+        "reductionPercent": 2.9635902340330644
+      },
+      "atomicWriteSecondsMedian": {
+        "before": 130.8506881640041,
+        "after": 121.87382921800075,
+        "reductionPercent": 6.86038344311346
+      },
+      "baselineTrials": 3
+    },
+    "rpc-only": {
+      "trials": 3,
+      "queryReadySecondsMedian": {
+        "before": 286.7945392499999,
+        "after": 273.75953733299997,
+        "reductionPercent": 4.545066287206145
+      },
+      "syncSecondsMedian": {
+        "before": 283.719886833,
+        "after": 271.28848533299987,
+        "reductionPercent": 4.381575658571069
+      },
+      "atomicWriteSecondsMedian": {
+        "before": 132.49454428699985,
+        "after": 122.1794016700026,
+        "reductionPercent": 7.785333858466926
+      },
+      "baselineTrials": 3
+    }
+  },
+  "trials": [
+    {
+      "mode": "core-cold-1",
+      "syncSeconds": 277.77237304199997,
+      "queryReadySeconds": 280.665992459,
+      "atomicWriteSeconds": 126.28570108799826,
+      "committedAssets": 564,
+      "coveragePassed": true
+    },
+    {
+      "mode": "core-warm-1",
+      "syncSeconds": 223.088302625,
+      "queryReadySeconds": 225.53646983299998,
+      "atomicWriteSeconds": 121.87382921800075,
+      "committedAssets": 564,
+      "coveragePassed": true
+    },
+    {
+      "mode": "rpc-only-1",
+      "syncSeconds": 275.163188417,
+      "queryReadySeconds": 277.56560137499997,
+      "atomicWriteSeconds": 126.08082729699952,
+      "committedAssets": 564,
+      "coveragePassed": true
+    },
+    {
+      "mode": "core-cold-2",
+      "syncSeconds": 274.3951900419999,
+      "queryReadySeconds": 276.801150333,
+      "atomicWriteSeconds": 123.38381163199804,
+      "committedAssets": 564,
+      "coveragePassed": true
+    },
+    {
+      "mode": "core-warm-2",
+      "syncSeconds": 230.54173425,
+      "queryReadySeconds": 232.91528158299997,
+      "atomicWriteSeconds": 129.2691265799969,
+      "committedAssets": 564,
+      "coveragePassed": true
+    },
+    {
+      "mode": "rpc-only-2",
+      "syncSeconds": 269.51814466700006,
+      "queryReadySeconds": 271.9638065000002,
+      "atomicWriteSeconds": 122.1794016700026,
+      "committedAssets": 564,
+      "coveragePassed": true
+    },
+    {
+      "mode": "core-cold-3",
+      "syncSeconds": 268.3026305419998,
+      "queryReadySeconds": 270.7770824170001,
+      "atomicWriteSeconds": 121.47804148999671,
+      "committedAssets": 564,
+      "coveragePassed": true
+    },
+    {
+      "mode": "core-warm-3",
+      "syncSeconds": 217.518699792,
+      "queryReadySeconds": 219.9964087500004,
+      "atomicWriteSeconds": 119.23845784400962,
+      "committedAssets": 564,
+      "coveragePassed": true
+    },
+    {
+      "mode": "rpc-only-3",
+      "syncSeconds": 271.28848533299987,
+      "queryReadySeconds": 273.75953733299997,
+      "atomicWriteSeconds": 120.58054958800645,
+      "committedAssets": 564,
+      "coveragePassed": true
+    }
+  ],
+  "restartProof": [
+    {
+      "label": "source",
+      "assets": 564,
+      "triples": 3751526,
+      "identityAndRootsMatch": true,
+      "tripleCountMatches": true
+    },
+    {
+      "label": "core-cold-1",
+      "assets": 564,
+      "triples": 3751526,
+      "identityAndRootsMatch": true,
+      "tripleCountMatches": true
+    },
+    {
+      "label": "core-warm-1",
+      "assets": 564,
+      "triples": 3751526,
+      "identityAndRootsMatch": true,
+      "tripleCountMatches": true
+    },
+    {
+      "label": "rpc-only-1",
+      "assets": 564,
+      "triples": 3751526,
+      "identityAndRootsMatch": true,
+      "tripleCountMatches": true
+    },
+    {
+      "label": "core-cold-2",
+      "assets": 564,
+      "triples": 3751526,
+      "identityAndRootsMatch": true,
+      "tripleCountMatches": true
+    },
+    {
+      "label": "core-warm-2",
+      "assets": 564,
+      "triples": 3751526,
+      "identityAndRootsMatch": true,
+      "tripleCountMatches": true
+    },
+    {
+      "label": "rpc-only-2",
+      "assets": 564,
+      "triples": 3751526,
+      "identityAndRootsMatch": true,
+      "tripleCountMatches": true
+    },
+    {
+      "label": "core-cold-3",
+      "assets": 564,
+      "triples": 3751526,
+      "identityAndRootsMatch": true,
+      "tripleCountMatches": true
+    },
+    {
+      "label": "core-warm-3",
+      "assets": 564,
+      "triples": 3751526,
+      "identityAndRootsMatch": true,
+      "tripleCountMatches": true
+    },
+    {
+      "label": "rpc-only-3",
+      "assets": 564,
+      "triples": 3751526,
+      "identityAndRootsMatch": true,
+      "tripleCountMatches": true
+    }
+  ],
+  "durabilityScope": "After reopening journals, compared confirmed asset identities and stored metadata roots with expected inventory, plus physical data quad counts. This is not a fresh recomputation of every assertion Merkle root.",
+  "resources": {
+    "minimumFreeGiB": 27.67083740234375,
+    "peakLoadAverage1m": 12.24365234375,
+    "diskGuardGiB": 7,
+    "startingFreeGiB": 41.118343353271484
+  },
+  "ownedTeardown": {
+    "at": "2026-10-11T03:09:42.919259+00:00",
+    "allOwnedStoreProcessesExited": true,
+    "ownedStorePortsReleased": true,
+    "ownedTestProcessGroupEmpty": true,
+    "journalsPreserved": true
+  },
+  "limitations": [
+    "Same-host native Blazegraph and isolated Hardhat; no WAN or mainnet-RPC latency. Source and receiver agents share a Node.js process with separate verification workers.",
+    "Reconstructed public RDF projection is not the byte-identical historical mainnet payload.",
+    "Cold/warm refers to source application caches, not a fresh OS/database page cache.",
+    "RPC-only uses the new coherent snapshot implementation, not the old per-asset RPC path.",
+    "Reported stage totals overlap: source export contains substages and acknowledgement waits include receiver work.",
+    "Timing starts at the sync call after isolated agents are started and connected; source fixture preparation and node startup are excluded.",
+    "Direct query readiness excludes semantic embedding/index construction and model warmup.",
+    "The local development host was not dedicated; no builds or additional local test suites were run during the full measurement.",
+    "The historical baseline predates later core-cache review hardening; this is not a randomized, matched-current-base A/B experiment.",
+    "Restart validation checks persisted identities, stored metadata roots and physical quad counts, not freshly recomputed assertion Merkle roots.",
+    "No large performance gain or mainnet timing is established by this local comparison."
+  ],
+  "timedTestIncludingPreparationSeconds": 2624.1154174580006
+}

@@ -111,6 +111,10 @@ import {
 } from
   '../managed-read-recovery-coordinator.js';
 
+import type { SparqlHttpStoreOptions, SparqlHttpConsistencyProfile } from './sparql-http-options.js';
+export type { SparqlHttpStoreOptions, SparqlHttpConsistencyProfile } from './sparql-http-options.js';
+import { buildBulkAtomicIngestPlan, stageBulkAtomicIngest, completeBulkAtomicIngest, type BulkAtomicIngestPlan } from './bulk-atomic-ingest.js';
+
 /** Every SPARQL statement this adapter builds by interpolation. */
 const statements = sparqlStatements('sparql-http');
 
@@ -320,73 +324,6 @@ function snapshotManagedRecoveryCapability(
   });
 }
 
-export type SparqlHttpConsistencyProfile =
-  | 'best-effort'
-  | 'atomic-update'
-  | 'atomic-readback';
-
-export interface SparqlHttpStoreOptions {
-  /** SPARQL query endpoint URL (required). */
-  queryEndpoint: string;
-  /** SPARQL update endpoint URL. Defaults to queryEndpoint if omitted (for stores that use one URL). */
-  updateEndpoint?: string;
-  /** Request timeout in ms. Default 30_000. */
-  timeout?: number;
-  /** Optional Authorization header value (e.g. "Bearer <token>" or "Basic <base64>"). */
-  auth?: string;
-  /**
-   * Marker used by higher-level daemon flows to distinguish daemon-owned
-   * endpoints from operator-provided URLs.
-   *
-   * Compatibility note: direct `new SparqlHttpStore({ managedByDkg: true })`
-   * callers keep the legacy adapter-local `listGraphs()` cache. The
-   * `createTripleStore({ backend: 'sparql-http', options: { managedByDkg: true } })`
-   * path suppresses that adapter-local cache and wraps the store in
-   * GraphSetIndexStore so managed daemon flows still have a single graph-list
-   * index/revalidation owner.
-   */
-  managedByDkg?: boolean;
-  /**
-   * @deprecated Ignored. Retained only so old persisted configuration fails
-   * closed instead of failing boot; it never grants managed guarantees.
-   */
-  managedOxigraph?: boolean;
-  /**
-   * Runtime-only managed-server recovery capability. Both operations must be
-   * present; incomplete runtime configurations are treated as unavailable.
-   */
-  managedRecovery?: SparqlHttpManagedRecoveryV1;
-  /**
-   * Certified endpoint guarantees. `atomic-update` means a whole
-   * multi-operation SPARQL Update is one transaction. `atomic-readback` adds
-   * that a query issued after a completed update observes that update, as
-   * required by receipt-bearing CAS. Daemon-owned Oxigraph endpoints imply
-   * `atomic-readback`; all other endpoints default to `best-effort`.
-   */
-  consistencyProfile?: SparqlHttpConsistencyProfile;
-  /**
-   * @deprecated Use `consistencyProfile: 'atomic-update'` instead.
-   *
-   * This compatibility alias preserves the pre-profile public API. It grants
-   * transactional update capability only; receipt-bearing CAS still requires
-   * `atomic-readback` or a daemon-certified managed Oxigraph endpoint.
-   */
-  atomicUpdates?: boolean;
-  /** Emit sampled slow-query events after this duration. Default 10_000 ms; set 0 to disable. */
-  slowQueryThresholdMs?: number;
-  /** Sampling rate for slow-query events, from 0 to 1. Default 1. */
-  slowQuerySampleRate?: number;
-  /** Optional sink for sampled slow-query events; defaults to a compact console warning. */
-  onSlowQuery?: (event: SparqlHttpSlowQueryEvent) => void;
-  /** Optional scheduler injection for embedded callers and adapter-boundary tests. */
-  scheduler?: StorePriorityScheduler;
-  /**
-   * Monotonic clock for slow-query telemetry. Graph-list revalidation clocks
-   * are owned by GraphSetIndexStore.
-   */
-  now?: () => number;
-}
-
 export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapability {
   readonly queryResponseLimitMode = 'pre-materialization' as const;
   readonly writeRevisionCoverage = 'process-local' as const;
@@ -409,6 +346,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
   private readonly managedOxigraph: boolean;
   private readonly managedRecovery?: SparqlHttpManagedRecoveryV1;
   private readonly consistencyProfile: SparqlHttpConsistencyProfile;
+  private readonly bulkAtomicIngest?: SparqlHttpStoreOptions['bulkAtomicIngest'];
   private readonly scheduler: StorePriorityScheduler;
 
   private readonly now: () => number;
@@ -449,6 +387,14 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     this.consistencyProfile = this.managedOxigraph
       ? 'atomic-readback'
       : resolveConsistencyProfile(options);
+    if (options.bulkAtomicIngest !== undefined) {
+      const format = options.bulkAtomicIngest?.format;
+      if (this.consistencyProfile !== 'atomic-readback'
+        || (format !== 'n-quads' && format !== 'blazegraph-n-quads')) {
+        throw new Error('bulkAtomicIngest requires atomic-readback and an explicit N-Quads format');
+      }
+      this.bulkAtomicIngest = { format };
+    }
     this.scheduler = options.scheduler ?? externalStorePriorityScheduler;
     this.now = options.now ?? monotonicNow;
     this.slowQueryThresholdMs = normalizeNonNegativeNumber(
@@ -984,7 +930,11 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
       label: 'SparqlHttpStore.replaceGraphAndSubject',
     });
-    const plan = buildAtomicGraphAndSubjectReplaceUpdate(
+    const bulk = this.bulkAtomicIngest && buildBulkAtomicIngestPlan(
+      graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads,
+      this.bulkAtomicIngest.format,
+    );
+    const plan = bulk ?? buildAtomicGraphAndSubjectReplaceUpdate(
       graphUri,
       graphQuads,
       metaGraphUri,
@@ -1003,6 +953,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       update: plan.update,
       options: { ...options, source: options?.source ?? 'sparql-http.replaceGraphAndSubject' },
       operation: 'replaceGraphAndSubject',
+      bulk: bulk ?? undefined,
       cleanup: {
         update: plan.cleanup,
         options: { ...options, source: 'sparql-http.replaceGraphAndSubject.cleanup' },
@@ -1114,6 +1065,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
   private async runRemoteGraphMutation(opts: {
     scope: GraphWriteScope;
     update: string;
+    bulk?: BulkAtomicIngestPlan;
     options?: QueryOptions;
     operation: StoreOperation;
     cleanup?: {
@@ -1138,19 +1090,41 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
           throwIfAborted(signal);
           lifecycle = this.writeGen.beginWrite(opts.scope);
           this.invalidateListGraphsCache();
+          if (opts.bulk) {
+            await stageBulkAtomicIngest(opts.bulk, {
+              updateEndpoint: this.updateEndpoint, queryEndpoint: this.queryEndpoint,
+              headers: this.headers, signal,
+              responseError: (status, text) => new SparqlHttpResponseError(opts.operation, status, text),
+            });
+            throwIfAborted(signal);
+          }
           const res = await fetch(this.updateEndpoint, {
             method: 'POST',
             headers: { ...this.headers, 'Content-Type': SPARQL_UPDATE_CONTENT_TYPE },
             body: opts.update,
             signal,
+            ...(opts.bulk ? { redirect: 'error' as const } : {}),
           });
-          if (!res.ok) {
-            const text = await res.text().catch(() => '');
+          if (!res.ok || (opts.bulk && res.status !== 200 && res.status !== 204)) {
+            const text = opts.bulk
+              ? await readSparqlResponseText(res, { operation: opts.operation, maxResponseBytes: 64 * 1024 })
+              : await res.text().catch(() => '');
             throw new SparqlHttpResponseError(
               opts.operation,
               res.status,
               text.slice(0, 300),
             );
+          }
+          if (opts.bulk) {
+            await readSparqlResponseText(res, {
+              operation: opts.operation, maxResponseBytes: 64 * 1024,
+              managedOxigraph: this.managedOxigraph,
+            });
+            await completeBulkAtomicIngest(opts.bulk, {
+              updateEndpoint: this.updateEndpoint, queryEndpoint: this.queryEndpoint,
+              headers: this.headers, signal,
+              responseError: (status, text) => new SparqlHttpResponseError(opts.operation, status, text),
+            });
           }
         } catch (error) {
           if (signal.aborted) {

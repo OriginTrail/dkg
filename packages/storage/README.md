@@ -163,6 +163,52 @@ the environment default:
 }
 ```
 
+## Bulk RDF staging with atomic publication
+
+`SparqlHttpStore.replaceGraphAndSubject` can use a native RDF loader instead of
+embedding the assertion in a large `INSERT DATA` statement. This is opt-in:
+
+```typescript
+const store = new SparqlHttpStore({
+  queryEndpoint,
+  updateEndpoint,
+  consistencyProfile: 'atomic-readback',
+  bulkAtomicIngest: { format: 'blazegraph-n-quads' },
+});
+```
+
+Use `format: 'n-quads'` for an endpoint certified to accept standard N-Quads.
+Use the Blazegraph dialect only with Blazegraph: its bulk parser needs ASCII
+escapes, including UTF-16 surrogate pairs, to preserve Unicode values.
+`updateEndpoint` must synchronously accept a named N-Quads POST and complete
+with HTTP 200 or 204. An ordinary SPARQL endpoint does **not** imply this
+capability. The option also requires atomic multi-operation SPARQL updates and
+read-after-write visibility (`atomic-readback`). Neither the URL nor a
+`managedByDkg` flag grants those guarantees. Unsupported configuration fails at
+construction; server refusal does not trigger a retry through another path.
+
+The adapter uploads data and one metadata subject into random internal graphs,
+checks both staged row counts inside one guarded atomic SPARQL update that
+publishes the data, metadata, and a unique receipt. The receipt must be read
+back successfully before staging cleanup and acknowledgment.
+The original graph and metadata remain visible until publication. It retains
+the existing materialization locks, version checks, root verification, and
+commit-before-ACK behavior. The complete operation uses one scheduler admission,
+one HTTP deadline, and one target write-generation scope. Staging, readback, or
+publication errors propagate; an uncertain remote commit remains indeterminate.
+Cleanup only targets the random graphs owned by that operation. A process crash
+or an upload finishing after client cancellation can leave an internal orphan;
+these graphs are excluded from graph enumeration, not automatically collected.
+
+The additional serialized staging buffer is bounded to 32 MiB per replacement.
+Empty-data operations, larger payloads, and literal aliases whose backend
+coalescing could make row-count validation ambiguous use the original SPARQL
+path, chosen before any upload. Noncanonical inputs that a backend coalesces
+unexpectedly fail the count check rather than publishing incomplete data.
+This is bulk ingestion **within one asset's atomic publication**, not a
+cross-asset transaction or a change to peer batching, stream windows, or supplier
+concurrency. The native `BlazegraphStore` adapter is unchanged.
+
 ## Internal Dependencies
 
 - `@origintrail-official/dkg-core` — configuration types, logging, constants
