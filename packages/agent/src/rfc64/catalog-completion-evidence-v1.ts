@@ -3,7 +3,7 @@
 import type { Digest32V1 } from '@origintrail-official/dkg-core';
 import type { Rfc64OperationalAppliedHeadV1 } from './catalog-operational-applied-heads-v1.js';
 import { rfc64CatalogTargetScopeKeyV1 } from './catalog-operational-applied-heads-v1.js';
-import { aggregateRfc64DigestV1, projectRfc64OperationalRowCountsV1, rfc64CatalogTargetExactIdentityKeyV1, sumDecimalCountsV1 } from './catalog-operational-targets-v1.js';
+import { aggregateRfc64DigestV1, projectRfc64ResolvedRowCountsV1, resolveRfc64ExpectedHeadsV1, rfc64CatalogTargetExactIdentityKeyV1, sumDecimalCountsV1 } from './catalog-operational-targets-v1.js';
 import type { Rfc64CatalogReplayRecoveryStatusV1 } from './catalog-replay-recovery-runtime-v1.js';
 import type { Rfc64PublicCatalogHeadAnnouncementV1 } from './public-catalog-transport-v1.js';
 
@@ -25,6 +25,7 @@ export interface Rfc64CatalogCompletionEvidenceV1 {
   readonly replayUnverified: boolean;
   readonly replayUnsettled: boolean;
   readonly pendingTargets: readonly Rfc64PublicCatalogHeadAnnouncementV1[];
+  readonly liveTargetsPending: boolean;
   readonly catalogHeadDigest: Digest32V1 | null;
   readonly expectedCatalogHeadDigest: Digest32V1 | null;
   readonly inventoryDigest: Digest32V1 | null;
@@ -55,25 +56,26 @@ export function evaluateRfc64CatalogCompletionV1(input: Rfc64CatalogCompletionFa
       || (target.catalogVersion === applied.snapshot.catalogVersion
         && target.catalogHeadObjectDigest !== applied.snapshot.currentCatalogHeadDigest);
   };
-  const pendingTargets = targets.filter(isPending);
+  const pendingTargets = authoritativeTargets.filter(isPending);
+  const liveTargetsPending = targets.some(isPending);
   const catalogHeadDigest = aggregateRfc64DigestV1(heads.map(({ snapshot }) => snapshot.currentCatalogHeadDigest));
-  const expectedHeadDigests = new Map(heads.map(({ scopeKey, snapshot }) => [scopeKey, snapshot.currentCatalogHeadDigest]));
-  for (const target of pendingTargets) expectedHeadDigests.set(rfc64CatalogTargetScopeKeyV1(target), target.catalogHeadObjectDigest);
-  const expectedCatalogHeadDigest = aggregateRfc64DigestV1([...expectedHeadDigests.values()]);
+  const expectedHeads = resolveRfc64ExpectedHeadsV1(heads, authoritativeTargets);
+  const expectedCatalogHeadDigest = [...expectedHeads.values()].some(({ ambiguous }) => ambiguous)
+    ? null : aggregateRfc64DigestV1([...expectedHeads.values()].map(({ catalogHeadObjectDigest }) => catalogHeadObjectDigest));
   const inventoryDigest = aggregateRfc64DigestV1(heads.map(({ snapshot }) => snapshot.appliedInventoryDigest));
   const rowCount = heads.length === 0 ? null : sumDecimalCountsV1(heads.map(({ snapshot }) => snapshot.inventoryRowCount));
   const rowProjectionUnavailable = targetCapacityExceeded || replayActive || replayUnverified
     || (replayFailed && promisedTargets === null);
   const rowProjection = rowProjectionUnavailable
     ? Object.freeze({ expectedRowCount: null, missingRowCount: null })
-    : projectRfc64OperationalRowCountsV1(heads, authoritativeTargets, promisedRowCounts);
+    : projectRfc64ResolvedRowCountsV1(expectedHeads, promisedRowCounts);
   const corroborated = replay !== null && !replayUnsettled && !targetCapacityExceeded
     && promisedTargets !== null && promisedTargets.length > 0
     && !authoritativeTargets.some(isPending)
     && rowCount !== null && BigInt(rowCount) > 0n
     && rowProjection.missingRowCount === '0' && rowProjection.expectedRowCount === rowCount;
   return Object.freeze({
-    replayActive, replayFailed, replayUnverified, replayUnsettled, pendingTargets,
+    replayActive, replayFailed, replayUnverified, replayUnsettled, pendingTargets, liveTargetsPending,
     catalogHeadDigest, expectedCatalogHeadDigest, inventoryDigest, rowCount, rowProjection, corroborated,
   });
 }

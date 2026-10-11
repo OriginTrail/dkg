@@ -1359,7 +1359,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       const promisedTargets = promisedTargetsByContextGraph.get(selection.contextGraphId) ?? null;
       const targetCapacityExceeded = targetTracker
         ?.capacityExceededForContextGraph(selection.contextGraphId) ?? false;
-      const { replayActive, replayFailed, replayUnverified, replayUnsettled, pendingTargets,
+      const { replayActive, replayFailed, replayUnverified, replayUnsettled, pendingTargets, liveTargetsPending,
         catalogHeadDigest, expectedCatalogHeadDigest, inventoryDigest, rowCount, rowProjection,
       } = evaluateRfc64CatalogCompletionV1({
         heads, targets, promisedTargets, promisedRowCounts, replay: currentReplayProgress,
@@ -1449,9 +1449,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
               ? 'blocked'
             : replayActive
               ? 'applying'
-            : pendingTargets.length > 0
+            : liveTargetsPending
               ? 'applying'
-            : legacyReadOnlyCount > 0
+            : pendingTargets.length > 0 || legacyReadOnlyCount > 0
               ? 'known-incomplete'
             : rowProjection.missingRowCount !== null
               && BigInt(rowProjection.missingRowCount) > 0n
