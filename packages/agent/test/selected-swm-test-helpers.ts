@@ -651,6 +651,7 @@ export const callSyncSharedMemoryFromPeerDetailed = async (
   agent: SelectedSwmLifecycleAgentFixture,
   contextGraphIds: string[],
   options: SyncSharedMemoryOptions,
+  remotePeerId = PEER,
 ): Promise<SharedMemorySyncResult> => {
   const method = LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailed as unknown as (
     this: SelectedSwmLifecycleAgentFixture,
@@ -658,7 +659,7 @@ export const callSyncSharedMemoryFromPeerDetailed = async (
     ids: string[],
     syncOptions: NonNullable<ProductionSyncSharedMemoryOptions>,
   ) => Promise<SharedMemorySyncResult>;
-  return method.call(agent, PEER, contextGraphIds, options);
+  return method.call(agent, remotePeerId, contextGraphIds, options);
 };
 
 export function createSelectedSwmLifecycleHarness(

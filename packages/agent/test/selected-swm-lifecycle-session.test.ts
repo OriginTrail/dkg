@@ -1,4 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
+import { SyncVerifyWorker } from '../src/sync-verify-worker.js';
+import { swmFixtures } from './swm-descriptor-fixtures.js';
+import { runSyncOnConnect, InMemoryPeerSyncLease } from '../src/sync/on-connect/sync-on-connect.js';
+import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import { ordinaryLane } from './_helpers/run-sync-on-connect.js';
 import type { SharedMemorySyncResult } from '../src/dkg-agent-types.js';
 import { classifySharedMemoryFreshness } from '../src/sync/shared-memory-freshness.js';
 import {
@@ -11,6 +16,83 @@ import {
 } from './selected-swm-test-helpers.js';
 
 describe('selected RFC-64 SWM lifecycle retained sessions', () => {
+  it.each([false, true])('does not certify a rejected protocol head through the real worker (malformed=%s)', async malformed => {
+    const publicCg = 'worker-rejected-head';
+    const share = swmFixtures(publicCg).share({
+      ual: 'did:dkg:hardhat:31337/0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/1',
+      version: 1, operationId: 'worker-head', marker: 'worker-head',
+    });
+    const invalidHead = 'urn:not-a-ka#dkg-swm-head';
+    const meta = share.meta.map(row => malformed && row.subject === share.headSubject
+      ? { ...row, subject: invalidHead } : row);
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest: { meta, payloadByRef: new Map([[share.digest, share.payload]]) },
+      clock: { now: () => 1_000, deadline: () => 61_000 },
+    });
+    const worker = new SyncVerifyWorker();
+    harness.agent.getOrCreateSyncVerifyWorker = () => worker;
+    try {
+      const result = await callSelectedSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+        selectedSwmPriority: true,
+      });
+      expect(await harness.agent.store.countQuads(share.assertionGraph)).toBe(malformed ? 0 : share.payload.length);
+      expect(result.scopeComplete).toBe(!malformed);
+      expect(result.shared.swmCoverage?.descriptorsAuthoritative).toBe(!malformed);
+      if (malformed) {
+        expect(result.shared.swmCoverage?.snapshotsResolved).toBe(0);
+        const rows = await harness.agent.store.query(`ASK { GRAPH <${share.meta[0].graph}> { <${invalidHead}> ?p ?o } }`);
+        expect(rows).toEqual({ type: 'boolean', value: false });
+      }
+    } finally {
+      await worker.close();
+      await harness.close();
+    }
+  });
+
+  it('defers an ordinary healthy peer locally when a sibling holds the shared retention budget', async () => {
+    const publicCg = 'ordinary-ordinary-retention';
+    const manifest = snapshotManifest(publicCg, 1);
+    const allowances: number[] = [];
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg }, manifest,
+      completeSwmProviders: [PEER, 'healthy-peer-B'],
+      clock: { now: () => 1_000, deadline: () => 61_000 },
+      metaContinuationLimits: { rows: 2, bytesEstimate: 100_000, globalRows: 1, globalBytesEstimate: 100_000 },
+      metaPages: [
+        { quads: manifest.meta.slice(0, 1), resumedFromOffset: 0, nextOffset: 1, completed: false, timedOut: true },
+        { quads: [], resumedFromOffset: 1, nextOffset: 1, completed: true, timedOut: false },
+        { quads: manifest.meta.slice(0, 1), resumedFromOffset: 0, nextOffset: 1, completed: false, timedOut: true },
+      ],
+      onMetaFetch: ({ maxAcceptedQuads }) => allowances.push(maxAcceptedQuads!),
+    });
+    const options = { sharedMemorySyncPlan: { targets: [{ contextGraphId: publicCg, lane: 'selected-public' as const }] } };
+    const accounting = vi.fn();
+    try {
+      await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], options);
+      const blocked = await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], options, 'healthy-peer-B');
+      expect(allowances).toEqual([1]);
+      expect(harness.agent.syncCheckpoints.size).toBe(1);
+      expect(blocked).toMatchObject({ localYield: true, timedOutPhases: 0, failedPeers: 0, backoffWorthyFailures: 0 });
+      expect(classifySharedMemoryFreshness(blocked).backoffWorthyFailure).toBe(false);
+      await expect(runSyncOnConnect({
+        remotePeer: 'healthy-peer-B', signal: new AbortController().signal, syncingPeers: new InMemoryPeerSyncLease(), knownCorePeerIds: new Set(),
+        getPeerProtocols: async () => [PROTOCOL_SYNC], getSyncContextGraphs: () => [publicCg],
+        getDurableSyncContextGraphs: () => [], syncFromPeer: async () => 0,
+        ordinarySharedMemoryLane: ordinaryLane(() => [publicCg], async () => blocked),
+        refreshMetaSyncedFlags: async () => {}, discoverContextGraphsFromStore: async () => 0,
+        syncSharedMemoryOnConnect: true, logInfo: () => {}, onSyncAccounting: accounting,
+      })).resolves.toBe('deferred-backpressure');
+      expect(accounting).not.toHaveBeenCalled();
+      await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], options);
+      const retry = await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], options, 'healthy-peer-B');
+      expect(retry.metadataContinuationYields).toBe(1);
+      expect(allowances).toEqual([1, 0, 1]);
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('completes private-only recovery without creating a public metadata transfer', async () => {
     const publicCg = 'private-only-public-control';
     const privateCg = '0x1111111111111111111111111111111111111111/private-only';

@@ -65,6 +65,7 @@ import {
   type RecoveryExecutionAdmission,
   type RecoveryExecutionGuard,
 } from './recovery-execution-guard.js';
+import { assertSwmRecoveryHeadsAccepted } from '../shared-memory-metadata-projections.js';
 import { canonicalQuadKey } from './quad-key.js';
 
 const sharedMemorySyncFetchSharingIdentity = createSyncFetchSharingIdentity();
@@ -379,15 +380,7 @@ export interface SharedMemorySyncContext {
     contextGraphId: string,
     registeredSubGraphNames?: readonly string[],
     excludedSubGraphNames?: readonly string[],
-  ) => Promise<{
-    verifiedData: Quad[];
-    verifiedMeta: Quad[];
-    totalFetchedDataQuads: number;
-    totalFetchedMetaQuads: number;
-    droppedDataTriples: number;
-    emptyResponses: number;
-    entityCreators: Array<{ dataGraph: string; entity: string; creator: string }>;
-  }>;
+  ) => Promise<import('../../sync-verify-worker.js').SharedMemoryBatchProcessResult>;
   ensureContextGraph: (contextGraphId: string) => Promise<void>;
   storeInsert: (quads: Quad[]) => Promise<void>;
   /**
@@ -664,6 +657,10 @@ async function runSharedMemorySyncCore(
         summary.bytesReceived += wsMetaResult.bytesReceived;
         summary.replayPhaseBytesReceived += wsMetaResult.bytesReceived;
         summary.metadataContinuationYields += 1;
+        if (wsMetaResult.localYield) {
+          summary.localYield = true;
+          summary.deferredBackpressure += 1;
+        }
         recordPhaseOutcome(wsMetaResult);
         break;
       }
@@ -811,6 +808,7 @@ async function runSharedMemorySyncCore(
       // no head rows to describe.
       if (snapshotMaterializer && wsMetaResult.completed) {
         try {
+          assertSwmRecoveryHeadsAccepted(processed.rejectedHeads ?? []);
           const descriptors = parseGraphScopedSwmRecoveryDescriptors({
             contextGraphId: pid,
             metaQuads: processed.verifiedMeta,

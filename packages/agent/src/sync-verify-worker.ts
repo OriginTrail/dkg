@@ -32,6 +32,8 @@ export interface SharedMemoryProcessResult {
 export interface SharedMemoryBatchProcessResult {
   verifiedData: Quad[];
   verifiedMeta: Quad[];
+  /** Rejected protocol heads are diagnostic evidence, never persistable rows. */
+  rejectedHeads?: readonly import('./sync/shared-memory-metadata-records.js').SwmRecordRejection[];
   totalFetchedDataQuads: number;
   totalFetchedMetaQuads: number;
   droppedDataTriples: number;

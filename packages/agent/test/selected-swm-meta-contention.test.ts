@@ -80,10 +80,9 @@ describe('selected SWM metadata retention contention', () => {
     expect(outcome.result.quads).toEqual([]);
     expect(outcome.result.bytesReceived).toBe(0);
     expect(outcome.result.completed).toBe(false);
-    // A voluntary yield is accounted like the timed-out page it stands in for,
-    // which is the shape `classifySelectedSwmRoundFreshness` treats as
-    // recoverable rather than as a peer failure.
-    expect(outcome.result.timedOut).toBe(true);
+    // Local pool pressure is an explicit scheduler yield, not a peer timeout.
+    expect(outcome.result.timedOut).toBe(false);
+    expect(outcome.result.localYield).toBe(true);
     expect(deleteCheckpoint).not.toHaveBeenCalledWith('cg-waiter:checkpoint');
   });
 
@@ -200,7 +199,8 @@ describe('selected SWM metadata retention contention', () => {
     expect(stalledFetch).not.toHaveBeenCalled();
     expect(outcome.result.quads).toEqual([]);
     expect(outcome.result.nextOffset).toBe(0);
-    expect(outcome.result.timedOut).toBe(true);
+    expect(outcome.result.timedOut).toBe(false);
+    expect(outcome.result.localYield).toBe(true);
     expect(stalled.continuation('cg-stalled').progress).toBe(0);
     expect(deleteCheckpoint).toHaveBeenCalledWith('cg-stalled:checkpoint');
 

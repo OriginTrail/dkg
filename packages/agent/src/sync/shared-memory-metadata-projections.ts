@@ -2,7 +2,7 @@
 
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { AdmittedSharedMemoryMetadata } from './shared-memory-metadata-admission.js';
-import { swmRecordKey, type AdmittedGraphSwmOperation, type AdmittedSwmHead, type SharedMemoryContextScope } from './shared-memory-metadata-records.js';
+import { swmRecordKey, type AdmittedGraphSwmOperation, type AdmittedSwmHead, type SharedMemoryContextScope, type SwmRecordRejection } from './shared-memory-metadata-records.js';
 
 /** Replay source positions, preserving duplicates and order without quad identity. */
 export function projectSwmPersistence(model: AdmittedSharedMemoryMetadata): Quad[] {
@@ -36,13 +36,7 @@ export function projectLegacySwmHydration(model: AdmittedSharedMemoryMetadata): 
 export function projectStrictSwmRecovery(model: AdmittedSharedMemoryMetadata<SharedMemoryContextScope>): {
   heads: AdmittedSwmHead[]; graphOperations: ReadonlyMap<string, AdmittedGraphSwmOperation>;
 } {
-  for (const rejection of model.rejections) {
-    if (rejection.recordRole !== 'head') continue;
-    if (rejection.reason === 'outOfScope') {
-      throw new Error(`Graph-scoped SWM head ${rejection.subject} is in an unregistered metadata graph ${rejection.metaGraph}`);
-    }
-    throw new Error(`Graph-scoped SWM head ${rejection.subject} has a non-canonical or mismatched kaUal`);
-  }
+  assertSwmRecoveryHeadsAccepted(model.rejections);
   const heads: AdmittedSwmHead[] = [];
   const graphOperations = new Map<string, AdmittedGraphSwmOperation>();
   for (const record of model.records) {
@@ -50,4 +44,15 @@ export function projectStrictSwmRecovery(model: AdmittedSharedMemoryMetadata<Sha
     else if (record.role === 'graphOperation') graphOperations.set(swmRecordKey(record.metaGraph, record.subject), record);
   }
   return { heads, graphOperations };
+}
+
+/** Rejection evidence must survive the worker's persistence projection. */
+export function assertSwmRecoveryHeadsAccepted(rejections: readonly SwmRecordRejection[]): void {
+  for (const rejection of rejections) {
+    if (rejection.recordRole !== 'head') continue;
+    if (rejection.reason === 'outOfScope') {
+      throw new Error(`Graph-scoped SWM head ${rejection.subject} is in an unregistered metadata graph ${rejection.metaGraph}`);
+    }
+    throw new Error(`Graph-scoped SWM head ${rejection.subject} has a non-canonical or mismatched kaUal`);
+  }
 }

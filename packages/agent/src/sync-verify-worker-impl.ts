@@ -371,6 +371,7 @@ function processSharedMemoryBatch(
   return {
     verifiedData: processed.validQuads,
     verifiedMeta: projectSwmPersistence(admitted),
+    rejectedHeads: admitted.rejections.filter(rejection => rejection.recordRole === 'head'),
     totalFetchedDataQuads,
     totalFetchedMetaQuads,
     droppedDataTriples: processed.dropped,

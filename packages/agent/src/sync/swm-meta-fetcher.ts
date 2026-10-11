@@ -422,7 +422,8 @@ export function createSwmMetaFetcher<Scope extends SwmMetaRetentionScope>(option
         nextOffset: state.nextOffset,
         checkpointKey: state.checkpointKey,
         completed: false,
-        timedOut: true,
+        timedOut: false,
+        localYield: true,
       };
     }
     try {
