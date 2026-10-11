@@ -8094,7 +8094,8 @@ export class DKGPublisher implements Publisher {
     rejectOversizedRdfLiterals(quads, 'assertionWrite.quads');
     await this.store.insert([...quads, ...generateAssertionWrittenMetadata({
       contextGraphId, agentAddress, assertionName: name, subGraphName,
-      assertionGraph: graphUri, quadCount: quads.length, timestamp: new Date(),
+      assertionGraph: graphUri, destinationGraphs: [...new Set(quads.map((quad) => quad.graph))],
+      quadCount: quads.length, timestamp: new Date(),
     }, { provenanceEvents: this.provenanceEvents })]);
   }
 

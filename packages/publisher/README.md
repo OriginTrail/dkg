@@ -48,7 +48,7 @@ await publisher.writeConditionalToWorkspace('urn:contextGraph:example', quads, {
 
 ## Internal Dependencies
 
-Successful `assertionWrite` calls add an `AssertionWritten` activity to the context graph's `_meta` graph alongside the payload insert. Each activity identifies the writer, timestamp, assertion and physical WM graph, and records the number of payload quads submitted in that call. Repeated writes have separate activities even when the store deduplicates their data. Setting `provenanceEvents: false` continues to omit lifecycle events while retaining payload and lifecycle state.
+Successful `assertionWrite` calls add an `AssertionWritten` activity to the context graph's `_meta` graph alongside the payload insert. Each activity identifies the writer, timestamp, assertion and every physical WM graph receiving payload quads, and records the total number of payload quads submitted in that call. Repeated writes have separate activities even when the store deduplicates their data. Assertion history reports these activities as `written` within WM while the lifecycle state remains unchanged. Setting `provenanceEvents: false` continues to omit lifecycle events while retaining payload and lifecycle state.
 
 - `@origintrail-official/dkg-core` — P2P networking, protocol streams, crypto
 - `@origintrail-official/dkg-chain` — on-chain KC creation and finalization

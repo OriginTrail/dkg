@@ -101,6 +101,27 @@ describe('assertion write provenance', () => {
     expect(await writeEvents(store)).toEqual([]);
   });
 
+  it.each([false, true])('records actual physical destinations for named-only/mixed writes: %s', async (mixed) => {
+    const { store, publisher } = await fixture(true, mixed ? 'science' : undefined);
+    const payload = [
+      { subject: 'urn:write:named', predicate: 'http://schema.org/name', object: '"Named"', graph: 'urn:source:g' },
+      ...(mixed ? [{ subject: 'urn:write:root', predicate: 'http://schema.org/name', object: '"Root"', graph: '' },
+        { subject: 'urn:write:other', predicate: 'http://schema.org/name', object: '"Other"', graph: 'urn:source:other' }] : []),
+    ];
+    await publisher.assertionWrite(CG, NAME, AUTHOR, payload, mixed ? 'science' : undefined);
+    const restored = await publisher.assertionQuery(CG, NAME, AUTHOR, mixed ? 'science' : undefined);
+    expect(restored.map((quad) => quad.graph).sort()).toEqual(payload.map((quad) => quad.graph).sort());
+    const actual = await store.query(`SELECT DISTINCT ?graph WHERE { GRAPH ?graph {
+      VALUES ?subject { <urn:write:named> <urn:write:root> <urn:write:other> }
+      ?subject <http://schema.org/name> ?object
+    } }`);
+    if (actual.type !== 'bindings') throw new Error('expected physical graph bindings');
+    const events = await writeEvents(store);
+    expect(new Set(events.map((event) => event.event)).size).toBe(1);
+    expect(events.map((event) => event.graph).sort()).toEqual(actual.bindings.map((row) => row.graph).sort());
+    expect(events.every((event) => Number(String(event.count).match(/\d+/)?.[0]) === payload.length)).toBe(true);
+  });
+
   it('respects lite provenance policy while still writing payload and lifecycle metadata', async () => {
     const { store, publisher } = await fixture(false);
     await publisher.assertionWrite(CG, NAME, AUTHOR, [{

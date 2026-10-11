@@ -12,8 +12,10 @@ export interface AssertionWrittenMeta {
   agentAddress: string;
   assertionName: string;
   subGraphName?: string;
-  /** Physical WM graph receiving this write. */
+  /** Canonical WM graph, used for writes with no payload quads. */
   assertionGraph: string;
+  /** Actual physical destinations after named-graph mapping. */
+  destinationGraphs?: readonly string[];
   /** Number of payload quads submitted in this call, including duplicates. */
   quadCount: number;
   timestamp: Date;
@@ -31,13 +33,14 @@ export function generateAssertionWrittenMetadata(
   const prov = 'http://www.w3.org/ns/prov#';
   const dkg = 'http://dkg.io/ontology/';
   const xsd = 'http://www.w3.org/2001/XMLSchema#';
+  const destinations = new Set(meta.destinationGraphs?.length ? meta.destinationGraphs : [meta.assertionGraph]);
   const terms = [
     ['http://www.w3.org/1999/02/22-rdf-syntax-ns#type', `${prov}Activity`],
     ['http://www.w3.org/1999/02/22-rdf-syntax-ns#type', `${dkg}AssertionWritten`],
     [`${prov}startedAtTime`, `"${meta.timestamp.toISOString()}"^^<${xsd}dateTime>`],
     [`${prov}wasAssociatedWith`, toAgentDid(meta.agentAddress)],
     [`${prov}used`, assertion],
-    [`${dkg}assertionGraph`, meta.assertionGraph],
+    ...[...destinations].map((destination) => [`${dkg}assertionGraph`, destination]),
     [`${dkg}quadCount`, `"${meta.quadCount}"^^<${xsd}integer>`],
   ];
   return terms.map(([predicate, object]) => ({ subject, predicate, object, graph }));
