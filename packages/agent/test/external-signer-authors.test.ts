@@ -37,8 +37,8 @@ import { constructConfiguredChainAdapter } from '../src/configured-chain-adapter
 import {
   externalAuthorGossipSigner,
   externalSignerAgentPublicKey,
+  localGossipSigner,
   registerExternalDefaultAgent,
-  signWorkspaceGossip,
   signsThroughExternalSigner,
 } from '../src/external-author-signing.js';
 import { isExternalAuthorCurator } from '../src/external-author-curator.js';
@@ -299,13 +299,16 @@ describe('external signer author keys', () => {
     expect(signer?.agentAddress).toBe(agentKey.address);
 
     const payload = computeGossipSigningPayload('share-write', CG, '2026-01-01T00:00:00.000Z', new Uint8Array([1, 2, 3]));
-    expect(ethers.verifyMessage(payload, await signWorkspaceGossip(signer!, payload))).toBe(agentKey.address);
+    expect(ethers.verifyMessage(payload, await signer!.signMessage(payload))).toBe(agentKey.address);
     const [request] = fake.calls('eth_sign');
     expect(request.authorization).toBe(`Bearer ${AUTHOR_TOKEN}`);
     expect(request.params).toEqual([agentKey.address.toLowerCase(), ethers.hexlify(payload)]);
-    // A key held on the node signs the same bytes itself.
-    const local = await signWorkspaceGossip({ ...custodial, privateKey: custodial.privateKey! }, payload);
-    expect(ethers.verifyMessage(payload, local)).toBe(custodial.agentAddress);
+    // A key held on the node signs the same bytes itself, with one wallet for every signature.
+    const local = localGossipSigner(custodial.agentAddress, custodial.privateKey!);
+    expect(local.agentAddress).toBe(custodial.agentAddress);
+    for (const bytes of [payload, computeGossipSigningPayload('share-write', CG, '2026-01-01T00:00:01.000Z', new Uint8Array([4]))]) {
+      expect(await local.signMessage(bytes)).toBe(await new ethers.Wallet(custodial.privateKey!).signMessage(bytes));
+    }
   });
 
   it('refuses a self-sovereign agent whose key the signer does not hold as an author key', async () => {

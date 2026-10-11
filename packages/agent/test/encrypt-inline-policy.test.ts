@@ -13,6 +13,8 @@ import {
   ciphertextChunkStoreGraph,
   ciphertextChunkStoreSubject,
   CIPHERTEXT_CHUNK_PREDICATE,
+  computeGossipSigningPayloadV2,
+  decodeGossipEnvelope,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
   contextGraphDataUri,
@@ -35,6 +37,7 @@ import {
   type KnowledgeAssetVmPublishRequest,
 } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
+import { localGossipSigner } from '../src/external-author-signing.js';
 
 // Hand-rolled call recorder (replaces vitest spy factories): wraps an
 // implementation, records every argument tuple on `.calls`, captures a
@@ -1478,10 +1481,7 @@ describe('DKGAgent._resolveEncryptInlineChunked nonce domain', () => {
         chainKey: new Uint8Array(32).fill(7),
         aeadCgId: '42',
       })),
-      resolveWorkspaceGossipSigningAgent: recorder(async () => ({
-        privateKey: signer.privateKey,
-        agentAddress: signer.address,
-      })),
+      resolveWorkspaceGossipSigningAgent: recorder(async () => localGossipSigner(signer.address, signer.privateKey)),
     } as any;
 
     const encryptInlineChunked = await (DKGAgent.prototype as any)
@@ -1521,6 +1521,18 @@ describe('DKGAgent._resolveEncryptInlineChunked nonce domain', () => {
 
     expect(Buffer.from(first.ciphertextChunksRoot).toString('hex'))
       .not.toBe(Buffer.from(second.ciphertextChunksRoot).toString('hex'));
+
+    // Every chunk envelope is signed by the one resolved gossip signer, over its V2 payload.
+    const envelopes = agentLike.gossip.publish.calls.map(([, data]: [string, Uint8Array]) => decodeGossipEnvelope(data));
+    expect(envelopes.length).toBeGreaterThan(0);
+    for (const envelope of envelopes) {
+      expect(envelope.agentAddress).toBe(signer.address);
+      const signed = computeGossipSigningPayloadV2(
+        envelope.type, envelope.contextGraphId, envelope.timestamp, envelope.payload, envelope.swmMessageIndex ?? 0,
+      );
+      expect(ethers.verifyMessage(signed, ethers.hexlify(envelope.signature))).toBe(signer.address);
+    }
+    expect(agentLike.resolveWorkspaceGossipSigningAgent.calls).toHaveLength(1);
   });
 
 });

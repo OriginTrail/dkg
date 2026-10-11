@@ -126,7 +126,7 @@ import {
   type LargeLiteralStorageConfig,
 } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
-import { externalAuthorSignerFor, signAuthorTypedDataCompact, signWorkspaceGossip, type WorkspaceGossipSigningAgent } from './external-author-signing.js';
+import { externalAuthorSignerFor, signAuthorTypedDataCompact, type WorkspaceGossipSigner } from './external-author-signing.js';
 import { heldAuthorSigner, registeredAgentAuthorSigner, type AuthorSigner } from './author-signer.js';
 import  {
   DKGPublisher,
@@ -898,7 +898,7 @@ export class PublishMethods extends DKGAgentBase {
     contextGraphId: string,
     payload: EncodedWorkspaceGossipPayload,
     ctx: OperationContext,
-    resolvedSigner?: WorkspaceGossipSigningAgent | null,
+    resolvedSigner?: WorkspaceGossipSigner | null,
     shareOperationId?: string,
   ): Promise<void>;
 
@@ -911,7 +911,7 @@ export class PublishMethods extends DKGAgentBase {
     contextGraphId: string,
     message: Uint8Array,
     ctx: OperationContext,
-    resolvedSigner?: WorkspaceGossipSigningAgent | null,
+    resolvedSigner?: WorkspaceGossipSigner | null,
     shareOperationId?: string,
   ): Promise<void>;
 
@@ -919,7 +919,7 @@ export class PublishMethods extends DKGAgentBase {
     contextGraphId: string,
     payloadOrMessage: EncodedWorkspaceGossipPayload | Uint8Array,
     ctx: OperationContext,
-    resolvedSigner?: WorkspaceGossipSigningAgent | null,
+    resolvedSigner?: WorkspaceGossipSigner | null,
     /**
      * Publisher-minted unique share ID. When provided, this share
      * is registered with `SwmAckQuorum` after fan-out so the
@@ -4187,7 +4187,7 @@ export class PublishMethods extends DKGAgentBase {
           payload,
           i,
         );
-        const signature = await signWorkspaceGossip(signer, signingPayload);
+        const signature = await signer.signMessage(signingPayload);
         const envelope = encodeGossipEnvelope({
           version: GOSSIP_ENVELOPE_VERSION,
           type: GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED,

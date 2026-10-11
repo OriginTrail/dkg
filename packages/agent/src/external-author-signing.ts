@@ -49,36 +49,37 @@ export async function externalAuthorSignerFor(
 }
 
 /**
- * An allowed agent that signs SWM gossip envelopes: with its key held on the
- * node, or through the external signer that holds its author key.
+ * An allowed agent's capability to sign SWM gossip envelopes: the EIP-191
+ * signature over a framed gossip signing payload, made with the agent's key
+ * held on the node or, over exactly the same bytes, by the external signer
+ * that holds its author key (`eth_sign`, or `personal_sign`), so receivers
+ * verify both alike.
  */
-export type WorkspaceGossipSigningAgent =
-  | (AgentKeyRecord & { privateKey: string; externalSigner?: undefined })
-  | (AgentKeyRecord & { externalSigner: EvmSigner });
+export interface WorkspaceGossipSigner {
+  readonly agentAddress: string;
+  signMessage(message: Uint8Array): Promise<string>;
+}
 
-/** The first of `agents` in `allowed` whose author key the external signer holds. */
+/** The gossip signer of an agent whose key is held on the node; its wallet is built once. */
+export function localGossipSigner(agentAddress: string, privateKey: string): WorkspaceGossipSigner {
+  const wallet = new ethers.Wallet(privateKey);
+  return { agentAddress, signMessage: (message) => wallet.signMessage(message) };
+}
+
+/** The gossip signer of the first of `agents` in `allowed` whose author key the external signer holds. */
 export async function externalAuthorGossipSigner(
   config: ExternalAuthorConfig | undefined,
   agents: Iterable<AgentKeyRecord>,
   allowed: ReadonlySet<string>,
-): Promise<WorkspaceGossipSigningAgent | undefined> {
+): Promise<WorkspaceGossipSigner | undefined> {
   for (const record of agents) {
     if (!allowed.has(record.agentAddress.toLowerCase())) continue;
     const externalSigner = await externalAuthorSignerFor(config, record.agentAddress);
-    if (externalSigner) return { ...record, externalSigner };
+    if (externalSigner) {
+      return { agentAddress: record.agentAddress, signMessage: (message) => externalSigner.signMessage(message) };
+    }
   }
   return undefined;
-}
-
-/**
- * The EIP-191 signature of `agent` over `message`, a framed gossip signing
- * payload. Through the external signer the exact same bytes are signed with
- * `eth_sign` (or `personal_sign`), so receivers verify both alike.
- */
-export function signWorkspaceGossip(agent: WorkspaceGossipSigningAgent, message: Uint8Array): Promise<string> {
-  return agent.externalSigner
-    ? agent.externalSigner.signMessage(message)
-    : new ethers.Wallet(agent.privateKey).signMessage(message);
 }
 
 /**

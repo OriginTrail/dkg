@@ -13,6 +13,7 @@ import {
   encodeWorkspacePublishRequest,
 } from '@origintrail-official/dkg-core';
 import { DKGAgent, agentFromPrivateKey, type AgentKeyRecord } from '../src/index.js';
+import { localGossipSigner, type WorkspaceGossipSigner } from '../src/external-author-signing.js';
 import { initializeRfc64LegacySwmBoundaryV1 } from '../src/rfc64/legacy-swm-boundary-v1.js';
 import { resolveRfc64PersistenceRootV1 } from '../src/rfc64/persistence-layout-v1.js';
 import { SwmHostModeStore } from '../src/swm/host-mode-store.js';
@@ -493,7 +494,7 @@ interface HostModeIngestInternals {
   encodeWorkspaceGossipMessage(
     contextGraphId: string,
     message: Uint8Array,
-    resolvedSigner?: AgentKeyRecord & { privateKey: string },
+    resolvedSigner?: WorkspaceGossipSigner,
   ): Promise<Uint8Array>;
   ingestSwmHostModeEnvelope(contextGraphId: string, data: Uint8Array, fromPeerId: string): Promise<void>;
   getSwmHostModeStats(): Promise<{ perCg?: Record<string, { entries: number }> } | undefined>;
@@ -726,7 +727,7 @@ describe('the mutable publish policy bit from the finalized authority index', ()
         privateTripleCount: 0,
         accessPolicy: 'public',
         allowedPeers: [],
-      }), { ...signer, privateKey: signer.privateKey });
+      }), localGossipSigner(signer.agentAddress, signer.privateKey));
     }
 
     async function hostedEntries(host: HostModeIngestInternals, contextGraphId: string) {
