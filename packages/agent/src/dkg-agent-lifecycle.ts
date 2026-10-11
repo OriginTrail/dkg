@@ -832,6 +832,8 @@ import {
   recoverDeferredContextGraphSubscriptionAuthorities,
   type DeferredContextGraphSubscriptionAuthorityRecoveryCursor,
   type PersistedContextGraphSubscriptionActivationOptions,
+  type ContextGraphSubscriptionRollbackSlotRelease,
+  releaseRollingSubscriptionSlot,
   promoteDormantContextGraphSubscriptions,
   rehydratedSubscriptionReachedSafeState,
   wakeDeferredContextGraphSubscriptionAuthorityRecovery,
@@ -9208,7 +9210,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   setContextGraphSubscription(this: DKGAgent,
     contextGraphId: string,
     next: ContextGraphSubInput,
-    options?: { persist?: boolean; updateRehydrationStatus?: boolean; preserveAdmittedWireBinding?: boolean; deferWireAdoption?: boolean },
+    options?: { persist?: boolean; updateRehydrationStatus?: boolean; preserveAdmittedWireBinding?: boolean; deferWireAdoption?: boolean; rollbackSlotRelease?: ContextGraphSubscriptionRollbackSlotRelease },
   ): ContextGraphSub {
     this.invalidateListContextGraphsCache();
     const previous = this.subscribedContextGraphs.get(contextGraphId);
@@ -9308,22 +9310,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       && canonicalNext.subscribed === true;
     if (rehydratedUserSubscription) {
       if (rehydratedSubscriptionReachedSafeState(canonicalNext)) {
-        if (this.contextGraphSubscriptionRehydrationSlotIds.delete(contextGraphId)) {
+        if (releaseRollingSubscriptionSlot(this.contextGraphSubscriptionRehydrationSlotIds, this.contextGraphSubscriptionRehydrationPromotionRuntime, contextGraphId, 'readiness')) {
           this.log.info(
             createOperationContext('init'),
             `Rehydrated context-graph subscription "${contextGraphId}" reached a safe state; rolling activation slot released`,
           );
-          this.contextGraphSubscriptionRehydrationPromotionRuntime?.request();
         }
       } else {
         // Readiness can regress after a later metadata/bootstrap reset. Keep
         // the rolling slot occupied until that new recovery cycle is safe.
         this.contextGraphSubscriptionRehydrationSlotIds.add(contextGraphId);
       }
-    } else if (this.contextGraphSubscriptionRehydrationSlotIds?.delete(contextGraphId)) {
+    } else {
       // An unsubscribe/deactivation also frees a slot, even though it does not
-      // satisfy the normal synced readiness signal.
-      this.contextGraphSubscriptionRehydrationPromotionRuntime?.request();
+      // satisfy the normal synced readiness signal. Rolling rollback alone
+      // leaves its failed candidate to the owner's failure timer.
+      releaseRollingSubscriptionSlot(this.contextGraphSubscriptionRehydrationSlotIds, this.contextGraphSubscriptionRehydrationPromotionRuntime, contextGraphId, options?.rollbackSlotRelease ?? 'deactivation');
     }
     const configuredRfc64Authority =
       this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId];
@@ -9584,7 +9586,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     for (const id of clearedSet) {
       if (systemContextGraphs.has(id)) continue;
       this.contextGraphSubscriptionRehydrationPendingIds.delete(id);
-      this.contextGraphSubscriptionRehydrationSlotIds.delete(id);
+      releaseRollingSubscriptionSlot(this.contextGraphSubscriptionRehydrationSlotIds, this.contextGraphSubscriptionRehydrationPromotionRuntime, id, 'clear');
       const wasAccounted = this.contextGraphSubscriptionRehydrationAccountedIds.delete(id);
       const wasDormant = dormancyById.delete(id);
       removeFrom(hostedActivatedIds, id);
@@ -9597,7 +9599,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     for (const id of new Set(deactivatedIds)) {
       if (systemContextGraphs.has(id) || clearedSet.has(id)) continue;
       this.contextGraphSubscriptionRehydrationPendingIds.delete(id);
-      this.contextGraphSubscriptionRehydrationSlotIds.delete(id);
+      releaseRollingSubscriptionSlot(this.contextGraphSubscriptionRehydrationSlotIds, this.contextGraphSubscriptionRehydrationPromotionRuntime, id, 'clear');
       if (!this.contextGraphSubscriptionRehydrationAccountedIds.has(id)) continue;
       removeFrom(hostedActivatedIds, id);
       if (!dormancyById.has(id)) {
@@ -10292,12 +10294,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       current: (contextGraphId) => this.subscribedContextGraphs.get(contextGraphId),
       remove: (contextGraphId) => this.deleteContextGraphSubscription(contextGraphId),
       restoreInactive: (id, previous) => void this.setContextGraphSubscription(id, previous, { persist: false, preserveAdmittedWireBinding: true }),
-      rollbackNetworkEffects: (contextGraphId) => {
-        // This provisional slot is being rolled back, not made ready for the
-        // next row. Do not let its own unsubscribe wake bypass failure backoff.
-        this.contextGraphSubscriptionRehydrationSlotIds.delete(contextGraphId);
-        this.unsubscribeFromContextGraph(contextGraphId, { persist: false, updateRehydrationStatus: false });
-      },
+      rollbackNetworkEffects: (contextGraphId, rollbackSlotRelease) => this.unsubscribeFromContextGraph(
+        contextGraphId, { persist: false, updateRehydrationStatus: false, rollbackSlotRelease },
+      ),
       trackSync: (contextGraphId) => this.trackSyncContextGraph(contextGraphId),
       subscribe: (contextGraphId) => this.subscribeToContextGraph(contextGraphId, {
         trackSyncScope: false,

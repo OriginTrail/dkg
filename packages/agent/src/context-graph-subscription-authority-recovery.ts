@@ -66,6 +66,21 @@ export interface DeferredContextGraphSubscriptionAuthorityRecoveryCursor {
   afterContextGraphId?: string;
 }
 
+/** Only the rolling owner retries its own failed activation on the failure timer. */
+export type ContextGraphSubscriptionRollbackSlotRelease = 'activation-rollback' | 'rolling-rollback';
+
+/** One occupied-to-released transition owns every rolling activation notification. */
+export function releaseRollingSubscriptionSlot(
+  slots: Set<string> | undefined,
+  runtime: Pick<CoalescingRecurringTask, 'request'> | undefined,
+  contextGraphId: string,
+  transition: 'readiness' | 'deactivation' | 'clear' | ContextGraphSubscriptionRollbackSlotRelease,
+): boolean {
+  if (!slots?.delete(contextGraphId)) return false;
+  if (transition !== 'rolling-rollback') runtime?.request();
+  return true;
+}
+
 export interface PersistedContextGraphSubscriptionActivationPorts {
   install(
     row: ContextGraphSubscriptionRecord,
@@ -80,7 +95,7 @@ export interface PersistedContextGraphSubscriptionActivationPorts {
   /** Restore the captured identity-only state after compensating activation. */
   restoreInactive?(contextGraphId: string, subscription: ContextGraphSub): void;
   /** Compensate sync scope and every partially installed network handler. */
-  rollbackNetworkEffects(contextGraphId: string): void;
+  rollbackNetworkEffects(contextGraphId: string, slotRelease: ContextGraphSubscriptionRollbackSlotRelease): void;
   trackSync(contextGraphId: string): void;
   subscribe(contextGraphId: string): void;
   persistMembership(contextGraphId: string): void;
@@ -91,6 +106,7 @@ export interface PersistedContextGraphSubscriptionActivationPorts {
 export interface PersistedContextGraphSubscriptionActivationOptions {
   readonly onChainId?: string;
   readonly restorePendingMeta?: boolean;
+  readonly rollbackSlotRelease?: ContextGraphSubscriptionRollbackSlotRelease;
   readonly updateRehydrationStatus?: boolean;
   readonly prepare?: (subscription: ContextGraphSub) => Promise<void>;
   readonly isCurrent?: (subscription: ContextGraphSub) => boolean;
@@ -116,7 +132,7 @@ export async function activatePersistedContextGraphSubscription(
     // activation's own transition and must be compensated as part of this call.
     if (!networkEffectsStarted && ports.current(row.id) !== subscription) return;
     try {
-      ports.rollbackNetworkEffects(row.id);
+      ports.rollbackNetworkEffects(row.id, options.rollbackSlotRelease ?? 'activation-rollback');
     } finally {
       ports.remove(row.id);
       if (previous && !previous.subscribed && previous.coreHosted !== true) {
@@ -380,7 +396,7 @@ export async function activateRollingSubscriptionPromotion(
   isCurrent: (subscription: ContextGraphSub) => boolean,
 ): Promise<void> {
   await ports.activate(row, {
-    onChainId, updateRehydrationStatus: false,
+    onChainId, updateRehydrationStatus: false, rollbackSlotRelease: 'rolling-rollback',
     prepare: async (subscription) => {
       if (!isCurrent(subscription)) throw new Error('Persisted subscription promotion became stale');
       if (onChainId !== undefined && onChainId !== row.onChainId) {

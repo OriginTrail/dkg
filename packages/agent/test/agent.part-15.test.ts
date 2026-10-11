@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, vi, DKGAgentWallet, buildAgentProfile, collectPublishableMultiaddrs, CclEvaluator, DiscoveryClient, ProfileManager, encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret, DKGAgent as RealDKGAgent, AGENT_REGISTRY_CONTEXT_GRAPH, parseCclPolicy, OxigraphStore, getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, PROTOCOL_STORAGE_ACK, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphWorkspaceGraphUri, contextGraphMetaUri, sparqlString, DKGQueryEngine, sha256, EVMChainAdapter, MockChainAdapter, createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS, mintTokens, ethers, tmpdir, mkdtemp, readFile, readdir, rm, join, fileURLToPath, _wrapAgentPublisherForSeal, CapturingContextGraphChainAdapter, AsyncSignerAddressContextGraphChainAdapter, SignerListContextGraphChainAdapter, PcaCuratedRegistrationChainAdapter, NonRegisteringACKChainAdapter, FlakyRegistrationACKChainAdapter, TransientIdentityFailureChainAdapter, BrandNewCoreTransientChainAdapter, PermanentProfileFailureChainAdapter, RetryPathPermanentFailureChainAdapter, ContextAuthorizedPublisherChainAdapter, buildSnapshotFactQuads, ReferenceEvaluator, loadYaml, CCL_FACT_NS, OperationalKeyOnlyPublishChainAdapter, ExternalOperationalKeyPublishChainAdapter, AddressOnlyExternalOperationalKeyPublishChainAdapter, AsyncAddressSignMessageAsPublishChainAdapter, GenericSignMessageExternalOperationalKeyPublishChainAdapter, MultiSignerGenericSignMessagePublishChainAdapter, SingleAddressMismatchedGenericSignMessagePublishChainAdapter, SingleSignerAdapterPublishChainAdapter, ReservingAuthorityContextGraphChainAdapter, type Quad, type ChainAdapter, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type OnChainPublishResult, type V10PublishDirectParams } from './agent.shared';
 import { createRollingSubscriptionPromotionRuntime, promoteDormantContextGraphSubscriptions } from '../src/context-graph-subscription-authority-recovery.js';
+import { CoalescingRecurringTask } from '../src/coalescing-recurring-task.js';
 import type { ContextGraphSubscriptionRecord } from '../src/dkg-agent-types.js';
 import { createRollingPromotionFixture as createPromotionHarness, promotionSubscription } from './_helpers/rolling-subscription-promotion.js';
 
@@ -1071,6 +1072,103 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       } finally {
         rejectSave(new Error('cleanup'));
         await runtime.close();
+        vi.useRealTimers();
+        await agent.stop();
+        vi.restoreAllMocks();
+      }
+    });
+
+    it('wakes rolling promotion after another recovery owner rolls back its provisional slot', async () => {
+      const rows = new Map<string, ContextGraphSubscriptionRecord>([
+        ['recovery-a', { id: 'recovery-a', subscribed: true, synced: false, syncScoped: true, onChainId: '7' }],
+        ['pending-b', { id: 'pending-b', subscribed: true, synced: false, syncScoped: true, onChainId: '9' }],
+        ['pending-c', { id: 'pending-c', subscribed: true, synced: false, syncScoped: true, onChainId: '10' }],
+        ['pending-d', { id: 'pending-d', subscribed: true, synced: false, syncScoped: true, onChainId: '11' }],
+      ]);
+      let exposeRows = false;
+      const save = vi.fn(async (record: ContextGraphSubscriptionRecord) => { rows.set(record.id, { ...record }); });
+      const agent = await DKGAgent.create({ name: 'RecoveryRollbackWakesRolling', chainAdapter: new MockChainAdapter(), contextGraphSubscriptionStore: {
+        load: async id => exposeRows ? rows.get(id) ?? null : null, loadAll: async () => exposeRows ? [...rows.values()] : [], save, delete: async id => { rows.delete(id); },
+      } });
+      const host = agent as any;
+      let rejectPreparation!: (error: Error) => void;
+      const preparation = new Promise<void>((_resolve, reject) => { rejectPreparation = reject; });
+      const reconcile = vi.spyOn(agent, 'reconcileRfc64CatalogResponsibilityV1').mockImplementation(async id => {
+        if (id === 'recovery-a') await preparation;
+      });
+      vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority').mockImplementation(async id => ({
+        outcome: 'allowed', source: 'registered-chain', reason: 'open-context-graph', metadataBootstrap: 'eligible', onChainId: id === 'recovery-a' ? 8n : BigInt(rows.get(id)!.onChainId!),
+      }));
+      await agent.start();
+      await host.contextGraphSubscriptionAuthorityRecoveryRuntime?.close();
+      await host.contextGraphSubscriptionRehydrationPromotionRuntime?.close();
+      exposeRows = true;
+      host.contextGraphSubscriptionRehydrationStatus = {
+        rehydrationEnabled: true, activationCap: 1, persistedTotal: 4, systemExcluded: 0,
+        hostedActivated: 0, hostedActivatedIds: [], activated: 0, capDisabled: false, completedAt: Date.now(), updatedAt: Date.now(),
+      };
+      host.contextGraphSubscriptionRehydrationAccountedIds.add('recovery-a');
+      host.contextGraphSubscriptionRehydrationAccountedIds.add('pending-b');
+      host.contextGraphSubscriptionRehydrationPendingIds.add('pending-b');
+      host.contextGraphSubscriptionDormancyById.set('recovery-a', 'authorityUnavailable');
+      host.contextGraphSubscriptionDormancyById.set('pending-b', 'activationCap');
+      for (const id of ['pending-c', 'pending-d']) {
+        host.contextGraphSubscriptionRehydrationAccountedIds.add(id);
+        host.contextGraphSubscriptionRehydrationPendingIds.add(id);
+        host.contextGraphSubscriptionDormancyById.set(id, 'activationCap');
+      }
+      const rollingPass = vi.fn(async (signal: AbortSignal) => agent.promoteDormantContextGraphSubscriptions(signal));
+      const rolling = createRollingSubscriptionPromotionRuntime({ runPass: rollingPass, onError: error => { throw error; } });
+      const recovery = new CoalescingRecurringTask({
+        retryIntervalMs: 30_000, requestWhileRunning: 'drop',
+        runPass: async signal => { await agent.retryUnavailableContextGraphSubscriptionAuthorities(signal); return 'rearm'; },
+        onError: error => { throw error; }, closingMessage: 'Authority recovery closing',
+      });
+      host.contextGraphSubscriptionRehydrationPromotionRuntime = rolling;
+      host.contextGraphSubscriptionAuthorityRecoveryRuntime = recovery;
+      vi.useFakeTimers();
+      try {
+        recovery.request();
+        rolling.schedule(30_000);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(reconcile).toHaveBeenCalledWith('recovery-a');
+        expect(host.contextGraphSubscriptionRehydrationSlotIds.has('recovery-a')).toBe(true);
+        await vi.advanceTimersByTimeAsync(35_000);
+        await rolling.whenIdle();
+        expect(rollingPass).toHaveBeenCalledTimes(1);
+        expect(rolling.scheduled).toBe(false);
+        expect(host.subscribedContextGraphs.has('pending-b')).toBe(false);
+        rejectPreparation(new Error('authority recovery preparation failed'));
+        await recovery.whenIdle();
+        await vi.advanceTimersByTimeAsync(0);
+        await rolling.whenIdle();
+        expect(host.subscribedContextGraphs.get('pending-b')?.subscribed).toBe(true);
+        expect(host.contextGraphSubscriptionRehydrationPendingIds.has('pending-b')).toBe(false);
+        expect(host.contextGraphSubscriptionRehydrationSlotIds.has('pending-b')).toBe(true);
+        expect(host.subscribedContextGraphs.has('recovery-a')).toBe(false);
+        expect(host.contextGraphSubscriptionDormancyById.get('recovery-a')).toBe('authorityUnavailable');
+        expect(reconcile).toHaveBeenCalledWith('pending-b');
+        rows.delete('pending-b');
+        agent.deleteContextGraphSubscription('pending-b');
+        agent.updateContextGraphSubscriptionRehydrationStatusAfterClear(['pending-b']);
+        await vi.advanceTimersByTimeAsync(0);
+        await rolling.whenIdle();
+        expect(host.subscribedContextGraphs.get('pending-c')?.subscribed).toBe(true);
+        expect(rollingPass).toHaveBeenCalledTimes(3);
+        agent.updateContextGraphSubscriptionRehydrationStatusAfterClear(['pending-b']);
+        await vi.advanceTimersByTimeAsync(0);
+        await rolling.whenIdle();
+        expect(rollingPass).toHaveBeenCalledTimes(3);
+        agent.unsubscribeFromContextGraph('pending-c', { persist: false });
+        agent.updateContextGraphSubscriptionRehydrationStatusAfterClear([], ['pending-c']);
+        await vi.advanceTimersByTimeAsync(0);
+        await rolling.whenIdle();
+        expect(host.subscribedContextGraphs.get('pending-d')?.subscribed).toBe(true);
+        expect(rollingPass).toHaveBeenCalledTimes(4);
+      } finally {
+        rejectPreparation(new Error('cleanup'));
+        await recovery.close();
+        await rolling.close();
         vi.useRealTimers();
         await agent.stop();
         vi.restoreAllMocks();

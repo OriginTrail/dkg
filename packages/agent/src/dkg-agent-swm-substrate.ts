@@ -10,6 +10,7 @@
  */
 
 
+import type { ContextGraphSubscriptionRollbackSlotRelease } from './context-graph-subscription-authority-recovery.js';
 import { isLocalPrivateMember } from './internal/local-private-member.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -611,6 +612,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     options?: {
       persist?: boolean;
       updateRehydrationStatus?: boolean;
+      rollbackSlotRelease?: ContextGraphSubscriptionRollbackSlotRelease;
       /** The cleartext id that supersedes this name-hash id (adoption). */
       supersededBy?: string;
     },
@@ -667,7 +669,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     this.setContextGraphSubscription(
       contextGraphId,
       { ...existing, subscribed: false },
-      { persist: options?.persist ?? true, updateRehydrationStatus: options?.updateRehydrationStatus },
+      { persist: options?.persist ?? true, updateRehydrationStatus: options?.updateRehydrationStatus, rollbackSlotRelease: options?.rollbackSlotRelease },
     );
 
     void this.reconcileSwmHostModeSubscription(contextGraphId).catch((err) => {
