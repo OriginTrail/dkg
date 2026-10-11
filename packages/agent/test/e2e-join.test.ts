@@ -277,6 +277,18 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
     let release!: () => void;
     const held = new Promise<void>(resolve => { release = resolve; });
     let incoming = 0;
+    // This fixture deliberately holds the reply through a real chain publish
+    // and catch-up. Keep its request deadline bounded by the fixture lifetime,
+    // rather than letting the ordinary 10s transport timeout retry the held
+    // request while foreground chain work is still completing.
+    const send = joiner.router.send.bind(joiner.router);
+    const heldDeadline = vi.spyOn(joiner.router, 'send').mockImplementation((peerId, protocol, data, options) => {
+      if (peerId === provider.peerId && protocol === RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V2
+        && capacityIds.includes(JSON.parse(new TextDecoder().decode(data)).contextGraphId)) {
+        return send(peerId, protocol, data, { ...(typeof options === 'object' ? options : {}), timeoutMs: 90_000 });
+      }
+      return send(peerId, protocol, data, options);
+    });
     // The router is created during agent startup. Install the typed wrapper
     // immediately before catalog startup registers the actual V2 transport.
     // Its authorization and response receive the original stream options.
@@ -344,7 +356,7 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
       expect(joiner.readRfc64CatalogRuntimeSelectionV1().connectionReplay?.pendingScopes).toBeGreaterThanOrEqual(2);
     } finally {
       release();
-      restoreRegistration?.(); startup.mockRestore(); prepare.mockRestore();
+      restoreRegistration?.(); startup.mockRestore(); prepare.mockRestore(); heldDeadline.mockRestore();
       try {
         // A genuine reconnect may leave owned cooldown demand after physical
         // streams retire; the agent stop below retires that deferred work.
