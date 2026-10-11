@@ -78,6 +78,7 @@ import  {
   type ReceiptLookupOptions,
 } from './rpc-failover-client.js';
 import { waitForReceiptWithDeadline } from './receipt-wait.js';
+import { markTransactionNotSubmitted } from './transaction-submission.js';
 import {
   RpcUsageTracker,
   withRpcUsageConsumer,
@@ -2282,8 +2283,16 @@ export class EVMChainAdapterBase {
         // Prepare with per-endpoint failover (shared with the V10 path), sign the
         // prepared tx once, then broadcast+confirm it. The V10 path signs the same
         // way and puts its `onBroadcast` WAL checkpoint between signing and broadcast.
-        const prepared = await this.prepareAcrossProviders(contract, method, args, signer, label, opts);
-        const { signedTx, txHash } = await this.signPreparedTransaction(prepared);
+        let signed: SignedTransactionEnvelope;
+        try {
+          signed = await this.signPreparedTransaction(
+            await this.prepareAcrossProviders(contract, method, args, signer, label, opts),
+          );
+        } catch (err) {
+          // Nothing reached an endpoint yet: this write sent no transaction.
+          throw markTransactionNotSubmitted(err);
+        }
+        const { signedTx, txHash } = signed;
         span.setAttribute('dkg.tx_hash', txHash);
         return this.sendSignedTransactionAndWait(signedTx, txHash, label);
       },

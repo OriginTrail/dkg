@@ -10,7 +10,8 @@
  * waiver floor, the deposit is waived and the payers need no TRAC. Every
  * registered agent of the account may publish into the graph: both payers
  * publish in parallel, the account covers the cost and the author owns the
- * assets.
+ * assets. A registration the signer refuses to sign sends nothing and leaves
+ * the graph unregistered, so it can be registered again.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
@@ -40,6 +41,7 @@ const author = new ethers.Wallet(HARDHAT_KEYS.EXTRA2);
 const CG = 'external-signer-pca-curated';
 const DEPOSIT = ethers.parseEther('100');
 const COMMITTED = ethers.parseEther('100000');
+const CREATE_CONTEXT_GRAPH = ethers.id('createContextGraph(address[],uint256,uint8,uint8,address,uint256,bytes32)').slice(0, 10);
 
 let snapshotId: string;
 let fake: FakeSigner;
@@ -49,6 +51,7 @@ let accountId: bigint;
 let agent: DKGAgent;
 let onChainId: bigint;
 let kaNumber = 0n;
+let refuseRegistration = false;
 
 async function hubContract(name: string, abi: string[], assetStorage = false): Promise<ethers.Contract> {
   const provider = createProvider();
@@ -152,6 +155,12 @@ describe('PCA-backed curated context graph with an external signer', () => {
         { token: PAYER_TOKEN, keys: payers.map((payer) => payer.privateKey) },
         { token: AUTHOR_TOKEN, keys: [author.privateKey] },
       ],
+      reject: (method, request) => (
+        refuseRegistration && method === 'eth_signTransaction'
+          && String((request.params[0] as { data?: unknown }).data).startsWith(CREATE_CONTEXT_GRAPH)
+          ? { code: -32000, message: 'policy refused the transaction' }
+          : undefined
+      ),
     });
     remote = await connectRemoteSigners({ url: fake.url, authToken: PAYER_TOKEN, author: { authToken: AUTHOR_TOKEN } });
     agent = await DKGAgent.create({
@@ -192,6 +201,20 @@ describe('PCA-backed curated context graph with an external signer', () => {
     expect(agent.getDefaultAgentAddress()).toBe(author.address);
     expect(agent.getLocalAgentMode(author.address)).toBe('self-sovereign');
     await agent.createContextGraph({ id: CG, name: 'External signer PCA curated', accessPolicy: 1 });
+
+    // The signer first refuses the registration transaction: nothing is sent, and the graph is
+    // left unregistered, not pending, so registering it again goes ahead.
+    const provider = createProvider();
+    const nonce = await provider.getTransactionCount(payers[0].address, 'pending');
+    const signingRequests = fake.calls('eth_signTransaction').length;
+    refuseRegistration = true;
+    await expect(agent.registerContextGraph(CG, { publishAuthorityAccountId: accountId }))
+      .rejects.toMatchObject({ code: 'REMOTE_SIGNER_REJECTED' });
+    refuseRegistration = false;
+    expect(fake.calls('eth_signTransaction')).toHaveLength(signingRequests + 1);
+    expect(await provider.getTransactionCount(payers[0].address, 'pending')).toBe(nonce);
+    expect(await agent.readLocalContextGraphRegistrationStatus(CG)).toBe('unregistered');
+
     const registered = await agent.registerContextGraph(CG, { publishAuthorityAccountId: accountId });
     onChainId = BigInt(registered.onChainId);
 
