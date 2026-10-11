@@ -505,26 +505,26 @@ describe('EVMChainAdapter PCA read cache', () => {
     expect(adapter.readContract.calls).toHaveLength(2);
   });
 
-  it('public top-up refreshes warmed account-info cache immediately', async () => {
+  it.each([false, true])('public top-up refreshes warmed account-info cache immediately (strict=%s)', async (strict) => {
     const adapter = pcaReadCacheAdapter([
       accountInfoTuple(OWNER, 100n, 0n),
       accountInfoTuple(OWNER, 100n, 50n),
     ]) as any;
     const calls = installPcaWriteStubs(adapter);
 
-    await expect(adapter.getPublishingConvictionAccountInfo(9n))
+    await expect(adapter.getPublishingConvictionAccountInfo(9n, { strict }))
       .resolves.toMatchObject({ topUpBuffer: 0n });
     expect(adapter.readContract.calls).toHaveLength(1);
 
     await adapter.topUpPublishingConvictionAccount(9n, 50n);
     expect(calls).toMatchObject([{ method: 'topUp', args: [9n, 50n] }]);
 
-    await expect(adapter.getPublishingConvictionAccountInfo(9n))
+    await expect(adapter.getPublishingConvictionAccountInfo(9n, { strict }))
       .resolves.toMatchObject({ topUpBuffer: 50n });
     expect(adapter.readContract.calls).toHaveLength(2);
   });
 
-  it('public top-up prevents older in-flight account-info reads from repopulating stale cache', async () => {
+  it.each([false, true])('public top-up prevents older in-flight account-info reads from repopulating stale cache (strict=%s)', async (strict) => {
     const first = deferred<unknown[]>();
     const second = deferred<unknown[]>();
     const adapter = pcaReadCacheAdapter([]) as any;
@@ -532,13 +532,13 @@ describe('EVMChainAdapter PCA read cache', () => {
     const reads = [first.promise, second.promise];
     adapter.readContract = recorder(async () => reads.shift()!);
 
-    const staleLookup = adapter.getPublishingConvictionAccountInfo(9n);
+    const staleLookup = adapter.getPublishingConvictionAccountInfo(9n, { strict });
     await Promise.resolve();
     expect(adapter.readContract.calls).toHaveLength(1);
 
     await adapter.topUpPublishingConvictionAccount(9n, 50n);
 
-    const freshLookup = adapter.getPublishingConvictionAccountInfo(9n);
+    const freshLookup = adapter.getPublishingConvictionAccountInfo(9n, { strict });
     await Promise.resolve();
     expect(adapter.readContract.calls).toHaveLength(2);
 
@@ -548,7 +548,7 @@ describe('EVMChainAdapter PCA read cache', () => {
     first.resolve(accountInfoTuple(OWNER, 100n, 0n));
     await expect(staleLookup).resolves.toMatchObject({ topUpBuffer: 0n });
 
-    await expect(adapter.getPublishingConvictionAccountInfo(9n))
+    await expect(adapter.getPublishingConvictionAccountInfo(9n, { strict }))
       .resolves.toMatchObject({ topUpBuffer: 50n });
     expect(adapter.readContract.calls).toHaveLength(2);
   });

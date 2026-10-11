@@ -39,7 +39,7 @@ import type {
   BrowserWalletRpcMethod,
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
-import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
+import { SignerTxSerializer } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
 import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, PcaFundingUnknownError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
@@ -89,6 +89,7 @@ import {
 import { SharedAdapterInitialization, initializationBinder } from './evm-adapter-shared-init.js';
 import { IdentityIdCache, IDENTITY_ID_POSITIVE_TTL_MS, SIGNER_IDENTITY_ID_ZERO_TTL_MS } from './identity-id-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
+import { preferredFundableCandidate, type PublisherCandidateFundingAssessment, type PublisherFundingSelection } from './publisher-plan.js';
 import type { PublisherConvictionPlanReader } from './publisher-plan.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import type {
@@ -2618,11 +2619,7 @@ export class EVMChainAdapterBase {
     fundingFor: (candidate: T) => FundingMode,
     forceRefresh = false,
     strictPcaRead = false,
-  ): Promise<{
-    fundings: Array<{ native: bigint | null; trac: bigint | null }>;
-    fundableIdx: number[];
-    inconclusiveReads: unknown[];
-  }> {
+  ): Promise<PublisherCandidateFundingAssessment<T>[]> {
     const fundingModes = candidates.map(fundingFor);
     const fundings = await Promise.all(
       candidates.map((candidate, index) => {
@@ -2641,50 +2638,15 @@ export class EVMChainAdapterBase {
         strictPcaRead,
       )),
     );
-    const fundableIdx: number[] = [];
-    const inconclusiveReads: unknown[] = [];
-    for (let index = 0; index < fundable.length; index += 1) {
-      const result = fundable[index];
-      if (result.status === 'fulfilled' && result.value) fundableIdx.push(index);
+    return fundable.map((result, index) => {
+      const candidate = candidates[index];
+      const funding = fundings[index];
       if (result.status === 'rejected') {
         if (!strictPcaRead) throw result.reason;
-        inconclusiveReads.push(result.reason);
+        return { kind: 'unavailable', candidate, funding, error: result.reason };
       }
-    }
-    return { fundings, fundableIdx, inconclusiveReads };
-  }
-
-  private _preferredFundableCandidate<T extends { address: string }>(
-    candidates: T[],
-    fundableIdx: number[],
-    preferIdle: boolean,
-  ): T {
-    if (preferIdle && !this.idleAwareSelectionDisabled) {
-      // GH#953 — soft-prefer a wallet with no in-flight or queued write.
-      // GH#1574 — a lane whose holder is wedged is NOT idle, but it is not
-      // healthy either: routing new work behind it inherits the wedge
-      // invisibly, which is the failure that issue reports. Rank the
-      // serializer's OWN health verdict rather than reading raw timings and
-      // re-deriving the threshold here — two copies of that policy would
-      // drift, and diagnostics could call a lane stalled while selection
-      // still called it healthy.
-      const laneRank: Record<SignerTxLaneState, number> = {
-        idle: 0,
-        busy: 1,
-        stalled: 2,
-      };
-      const rank = (address: string): number =>
-        laneRank[this.signerTxSerializer.state(address)];
-      let best: number | undefined;
-      let bestRank = Number.POSITIVE_INFINITY;
-      for (const index of fundableIdx) {
-        const r = rank(candidates[index].address);
-        if (r < bestRank) { bestRank = r; best = index; }
-        if (bestRank === 0) break;
-      }
-      if (best !== undefined) return candidates[best];
-    }
-    return candidates[fundableIdx[0]];
+      return { kind: result.value ? 'funded' : 'unfunded', candidate, funding };
+    });
   }
 
   protected async selectFundedSigner(
@@ -2694,17 +2656,19 @@ export class EVMChainAdapterBase {
   ): Promise<Wallet> {
     // Mode-aware read: native-only selections (RS) touch only the native slot
     // so their high-frequency probes can't poison the cached TRAC balance.
-    const { fundings, fundableIdx } = await this._scanCandidateFunding(
-      candidates,
-      () => funding,
-    );
+    const assessments = await this._scanCandidateFunding(candidates, () => funding);
+    const fundableIdx = assessments.flatMap((assessment, index) => assessment.kind === 'funded' ? [index] : []);
+    const fundings = assessments.map((assessment) => assessment.funding);
     if (fundableIdx.length > 0) {
       // Idle preference is a SOFT, fail-open bias: among funded candidates,
       // prefer one whose per-wallet send lock is currently free so a
       // deadline-bound write doesn't queue behind a slow in-flight send. Falls
       // straight through to the first funded candidate when none is idle or the
       // preference is off — so it can never EXCLUDE a wallet, only reorder.
-      return this._preferredFundableCandidate(candidates, fundableIdx, policy.preferIdle);
+      return preferredFundableCandidate(candidates, fundableIdx, {
+        ...policy, idleAwareSelectionDisabled: this.idleAwareSelectionDisabled,
+        laneState: (address) => this.signerTxSerializer.state(address),
+      });
     }
     let bestIdx = 0;
     for (let i = 1; i < candidates.length; i += 1) {
@@ -2721,36 +2685,38 @@ export class EVMChainAdapterBase {
    * Canonical fail-closed funded-candidate selector for publish plans: cached
    * scan, fresh terminal recheck, idle preference, diagnostics, and typed failure.
    */
-  protected async _selectFundedCandidateOrThrow<T extends { address: string }>(
+  protected async _assessFundedCandidates<T extends { address: string }>(
     candidates: T[],
     fundingFor: (candidate: T) => NativeAndTracFundingMode,
     policy: { preferIdle: boolean },
-  ): Promise<T> {
+  ): Promise<PublisherFundingSelection<T>> {
+    const choose = (assessments: PublisherCandidateFundingAssessment<T>[]): T | undefined => {
+      const funded = assessments.flatMap((assessment, index) => assessment.kind === 'funded' ? [index] : []);
+      return funded.length === 0 ? undefined : preferredFundableCandidate(candidates, funded, {
+        ...policy, idleAwareSelectionDisabled: this.idleAwareSelectionDisabled,
+        laneState: (address) => this.signerTxSerializer.state(address),
+      });
+    };
     const initial = await this._scanCandidateFunding(candidates, fundingFor);
-    if (initial.fundableIdx.length > 0) {
-      return this._preferredFundableCandidate(candidates, initial.fundableIdx, policy.preferIdle);
-    }
+    const selected = choose(initial);
+    if (selected !== undefined) return { kind: 'funded', candidate: selected };
 
     // Cached balances are appropriate for soft routing, but a terminal
     // whole-pool claim must be based on a fresh snapshot. Operators commonly
     // fund a wallet and retry immediately, inside the advisory cache TTL.
     const refreshed = await this._scanCandidateFunding(candidates, fundingFor, true, true);
-    if (refreshed.fundableIdx.length > 0) {
-      return this._preferredFundableCandidate(candidates, refreshed.fundableIdx, policy.preferIdle);
+    const rechecked = choose(refreshed);
+    if (rechecked !== undefined) return { kind: 'funded', candidate: rechecked };
+    const unknown = refreshed.find((assessment) => assessment.kind === 'unavailable');
+    if (unknown?.kind === 'unavailable') {
+      return { kind: 'unavailable', assessments: refreshed, error: new PcaFundingUnknownError(errorCode(unknown.error)) };
     }
-
-    const unknown = refreshed.inconclusiveReads;
-    if (unknown.length > 0) throw new PcaFundingUnknownError(errorCode(unknown[0]));
-
-    const diagnostics = candidates.map((candidate, index) => ({
-      address: candidate.address,
-      nativeWei: refreshed.fundings[index].native,
-      tracWei: refreshed.fundings[index].trac,
+    const diagnostics = refreshed.map(({ candidate, funding }) => ({
+      address: candidate.address, nativeWei: funding.native, tracWei: funding.trac,
     }));
-    throw new InsufficientPublisherFundsError(
-      formatNoFundedPublisherWalletMessage(diagnostics),
-      diagnostics,
-    );
+    return { kind: 'unfunded', assessments: refreshed, error: new InsufficientPublisherFundsError(
+      formatNoFundedPublisherWalletMessage(diagnostics), diagnostics,
+    ) };
   }
 
   /**

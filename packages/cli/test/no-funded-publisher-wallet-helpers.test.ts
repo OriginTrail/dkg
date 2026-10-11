@@ -10,6 +10,8 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { PCA_FUNDING_UNKNOWN_CODE, PCA_FUNDING_UNKNOWN_MESSAGE } from '@origintrail-official/dkg-core';
+import { PcaFundingUnknownError } from '@origintrail-official/dkg-chain';
 import {
   isNoFundedPublisherWalletLike,
   noFundedPublisherWalletBody,
@@ -103,6 +105,20 @@ describe('respondWithDaemonError', () => {
       error: 'PCA funding verification is inconclusive; retry when chain reads recover.',
       retryable: true,
     });
+  });
+
+  it('shares the actual chain error contract while hiding its private read cause', () => {
+    const res = mockRes();
+    const error = new PcaFundingUnknownError('PRIVATE_ENDPOINT_URL');
+    expect(error.code).toBe(PCA_FUNDING_UNKNOWN_CODE);
+    expect(error.message).toBe(PCA_FUNDING_UNKNOWN_MESSAGE);
+    respondWithDaemonError(res, error);
+    expect(res.statusCode).toBe(503);
+    expect(res.headers['Retry-After']).toBe('1');
+    expect(JSON.parse(res.body)).toEqual({
+      code: PCA_FUNDING_UNKNOWN_CODE, error: PCA_FUNDING_UNKNOWN_MESSAGE, retryable: true,
+    });
+    expect(res.body).not.toContain('PRIVATE_ENDPOINT_URL');
   });
 
   it('does not down-classify a genuine CALL_EXCEPTION revert to retryable', () => {
