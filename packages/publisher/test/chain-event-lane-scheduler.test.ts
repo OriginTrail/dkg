@@ -19,6 +19,26 @@ const scanLease = (
 ): EventScanHorizonLease => ({ throughBlockNumber, holds });
 
 describe('ChainEventPoller scheduler', () => {
+  it('preserves the default lane dispatch receiver and advances its cursor', async () => {
+    const event: ChainEvent = { type: 'AllowListUpdated', blockNumber: 50, data: {} };
+    const { adapter } = makeChain({ head: 100, events: [event] });
+    let receiver: unknown;
+    const seen: ChainEvent[] = [];
+    const saved: number[] = [];
+    const spec: ChainEventPollerLaneSpec = {
+      name: 'allowListUpdates', enabled: () => true, eventTypes: () => ['AllowListUpdated'],
+      cursorStrategy: () => ({ kind: 'live-tail', legacyAggregateCursor: true }), cadenceMs: 20,
+      async dispatch(incoming) { receiver = this; seen.push(incoming); },
+    };
+    const runner = new ChainEventLaneRunner({ chain: adapter, lanes: [spec], maxRange: 9_000,
+      clock: () => 0, log: { info() {}, warn() {}, error() {} } as any,
+      cursorPersistence: { async loadLane() { return undefined; }, async saveLane(_lane, block) { saved.push(block); } } });
+    await runner.poll();
+    expect(receiver).toBe(spec);
+    expect(seen).toEqual([event]);
+    expect(saved).toEqual([100]);
+  });
+
   it.each(['AllowListUpdated', 'KnowledgeAssetUpdated'])('does not prepare feature or replay metadata for a generic non-lookback %s lane', async (type) => {
     const metadata = Object.fromEntries(['blockHash', 'logIndex', 'txHash', 'batchId', 'merkleRoot'].map((name) => [name, 'unused']));
     for (const name of Object.keys(metadata)) Object.defineProperty(metadata, name, { get() { throw new Error(`unused replay metadata: ${name}`); } });

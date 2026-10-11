@@ -470,7 +470,7 @@ export class ChainEventLaneRunner {
         } else {
           const handle = spec.dispatch;
           identity = lookback > 0 ? this.replayIdentity(incoming) : undefined;
-          dispatch = () => handle(incoming, ctx, signal);
+          dispatch = () => handle.call(spec, incoming, ctx, signal);
         }
         if (lease !== undefined && !await this.eventScanLeaseHolds(lease)) {
           leaseExpired = true;
