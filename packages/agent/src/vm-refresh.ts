@@ -26,7 +26,7 @@
  * and the copy waits for the KA's next update or an explicit asset fetch.
  */
 
-import { knowledgeAssetUpdateKey, compareKnowledgeAssetUpdates, type KnowledgeAssetUpdateIdentity, type KnowledgeAssetVersionSnapshotUnavailable } from '@origintrail-official/dkg-chain';
+import { knowledgeAssetUpdateKey, type KnowledgeAssetUpdateIdentity, type KnowledgeAssetVersionSnapshotUnavailable } from '@origintrail-official/dkg-chain';
 
 export type VmRefreshTarget = KnowledgeAssetUpdateIdentity & {
   readonly localCgId: string;
@@ -149,12 +149,15 @@ export class VmRefreshQueue {
     const key = recordKey(target.localCgId, target.ual);
     const held = this.#records.get(key);
     // Reject malformed JavaScript callers before admitting an untyped record.
-    updateKey(target);
-    const comparison = held === undefined ? undefined
-      : compareKnowledgeAssetUpdates(target, target.merkleRoot, held.target, held.target.merkleRoot, held.seenUpdateKeys);
-    if (comparison !== undefined && comparison.kind !== 'replacement') {
+    const incomingKey = updateKey(target);
+    if (held !== undefined && (incomingKey === updateKey(held.target) || held.seenUpdateKeys.has(incomingKey))) {
       return 'held';
     }
+    const olderPosition = held !== undefined && target.blockNumber !== undefined && held.target.blockNumber !== undefined
+      && (target.blockNumber < held.target.blockNumber
+        || (target.blockNumber === held.target.blockNumber && target.logIndex !== undefined
+          && held.target.logIndex !== undefined && target.logIndex < held.target.logIndex));
+    const checkVersion = held !== undefined && (target.merkleRoot === held.target.merkleRoot || olderPosition);
     if (held === undefined && this.#records.size >= this.#maxEntries) {
       this.#refusedTotal += 1;
       return 'full';
@@ -174,7 +177,7 @@ export class VmRefreshQueue {
     this.#records.set(key, {
       target: Object.freeze({
         ...target,
-        ...(comparison?.kind === 'replacement' && comparison.checkVersion ? { checkVersion: true } : {}),
+        ...(checkVersion ? { checkVersion: true } : {}),
         ...(proofBlockNumber !== undefined && proofBlockNumber !== target.blockNumber
           ? { proofBlockNumber } : {}),
       }),

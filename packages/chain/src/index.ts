@@ -378,4 +378,4 @@ export {
   type EvmChainIndexRuntimeOptions,
 } from './evm-chain-index-runtime.js';
 
-export { normalizeKnowledgeAssetUpdateIdentity, knowledgeAssetUpdateKey, compareKnowledgeAssetUpdates, type KnowledgeAssetUpdateIdentity, type KnowledgeAssetUpdateMetadata, type KnowledgeAssetUpdateComparison } from './knowledge-asset-update-identity.js';
+export { normalizeKnowledgeAssetUpdateIdentity, knowledgeAssetUpdateKey, type KnowledgeAssetUpdateIdentity, type KnowledgeAssetUpdateMetadata } from './knowledge-asset-update-identity.js';

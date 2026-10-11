@@ -1,8 +1,9 @@
-import type {
-  ChainAdapter,
-  ChainEvent,
-  EventFilter,
-  EventScanHorizonLease,
+import {
+  normalizeKnowledgeAssetUpdateIdentity,
+  type ChainAdapter,
+  type ChainEvent,
+  type EventFilter,
+  type EventScanHorizonLease,
 } from '@origintrail-official/dkg-chain';
 import { createOperationContext, type Logger, type OperationContext } from '@origintrail-official/dkg-core';
 import {
@@ -448,8 +449,14 @@ export class ChainEventLaneRunner {
     const observed = new Map<number, Set<string>>();
 
     try {
-      for await (const event of this.chain.listenForEvents(filter)) {
+      for await (const incoming of this.chain.listenForEvents(filter)) {
         signal?.throwIfAborted();
+        // The replay filter and dispatch share one canonical update identity.
+        const event = incoming.type === 'KnowledgeAssetUpdated' && incoming.updateIdentity === undefined
+          ? { ...incoming, updateIdentity: normalizeKnowledgeAssetUpdateIdentity({
+            blockNumber: incoming.blockNumber, txHash: incoming.data.txHash,
+            logIndex: incoming.data.logIndex, blockHash: incoming.data.blockHash,
+          }) } : incoming;
         if (lease !== undefined && !await this.eventScanLeaseHolds(lease)) {
           leaseExpired = true;
           throw new Error('event scan horizon lease expired before event dispatch');
@@ -517,12 +524,14 @@ export class ChainEventLaneRunner {
 
   private replayIdentity(event: ChainEvent): string {
     const data = event.data;
+    const identity = event.type === 'KnowledgeAssetUpdated' ? event.updateIdentity : data;
+    if (identity === undefined) throw new TypeError('Update event requires a normalized identity');
     return [
       event.type,
-      event.blockNumber,
-      data.blockHash,
-      data.logIndex,
-      data.txHash,
+      event.type === 'KnowledgeAssetUpdated' ? identity.blockNumber ?? event.blockNumber : event.blockNumber,
+      identity.blockHash,
+      identity.logIndex,
+      identity.txHash,
       data.batchId,
       data.merkleRoot,
     ].map((part) => String(part ?? '')).join('\0');

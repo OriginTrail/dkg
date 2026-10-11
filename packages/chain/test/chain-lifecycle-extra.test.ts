@@ -328,9 +328,19 @@ describe('chain-lifecycle-extra — V10 lifecycle + adapter invariants', () => {
       })) {
         updates.push(event);
       }
+      const updateReceipt = await provider.getTransactionReceipt(updateResult.hash);
+      const updateLog = updateReceipt!.logs.find((log) => log.topics[0] === ethers.id(
+        'KnowledgeAssetUpdated(uint256,address,string,bytes32,uint256,uint96)',
+      ));
+      expect(updateLog).toBeDefined();
       expect(updates).toEqual([{
         type: 'KnowledgeAssetUpdated',
         blockNumber: updateResult.blockNumber,
+        updateIdentity: {
+          eventKind: 'log', blockNumber: updateResult.blockNumber,
+          logIndex: updateLog!.index, blockHash: updateReceipt!.blockHash.toLowerCase(),
+          txHash: updateResult.hash.toLowerCase(),
+        },
         data: expect.objectContaining({
           kaId: kaId.toString(),
           batchId: kaId.toString(),

@@ -1,6 +1,5 @@
 import {
   withRpcRequestContext,
-  normalizeKnowledgeAssetUpdateIdentity,
   type KnowledgeAssetUpdateIdentity,
   type ChainAdapter,
   type ChainEvent,
@@ -484,9 +483,8 @@ export class ChainEventPoller {
       : data['merkleRoot'] as Uint8Array;
     const batchId = BigInt(data['batchId'] as string ?? '0');
 
-    const eventIdentity = event.updateIdentity ?? normalizeKnowledgeAssetUpdateIdentity({
-      blockNumber: event.blockNumber, txHash: data['txHash'], logIndex: data['logIndex'], blockHash: data['blockHash'],
-    });
+    const eventIdentity = event.updateIdentity;
+    if (eventIdentity === undefined) throw new TypeError('Update event requires a normalized identity');
 
     this.log.info(ctx,
       `Chain event: KnowledgeAssetUpdated block=${event.blockNumber} batchId=${batchId}`,

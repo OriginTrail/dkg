@@ -59,26 +59,3 @@ export function knowledgeAssetUpdateKey(identity: KnowledgeAssetUpdateIdentity, 
     default: throw new TypeError('Knowledge Asset update identity is invalid');
   }
 }
-
-export type KnowledgeAssetUpdateComparison =
-  | { readonly kind: 'duplicate' | 'superseded' }
-  | { readonly kind: 'replacement'; readonly relation: 'older' | 'newer' | 'incomparable'; readonly checkVersion: boolean };
-
-/** One comparison owns exact replay, historical replay and replacement ordering. */
-export function compareKnowledgeAssetUpdates(
-  incoming: KnowledgeAssetUpdateIdentity, incomingRoot: string,
-  held: KnowledgeAssetUpdateIdentity, heldRoot: string,
-  supersededKeys: ReadonlySet<string>,
-): KnowledgeAssetUpdateComparison {
-  const incomingKey = knowledgeAssetUpdateKey(incoming, incomingRoot);
-  if (incomingKey === knowledgeAssetUpdateKey(held, heldRoot)) return { kind: 'duplicate' };
-  if (supersededKeys.has(incomingKey)) return { kind: 'superseded' };
-  let relation: 'older' | 'newer' | 'incomparable' = 'incomparable';
-  if (incoming.blockNumber !== undefined && held.blockNumber !== undefined) {
-    if (incoming.blockNumber !== held.blockNumber) relation = incoming.blockNumber < held.blockNumber ? 'older' : 'newer';
-    else if (incoming.logIndex !== undefined && held.logIndex !== undefined && incoming.logIndex !== held.logIndex) {
-      relation = incoming.logIndex < held.logIndex ? 'older' : 'newer';
-    }
-  }
-  return { kind: 'replacement', relation, checkVersion: incomingRoot === heldRoot || relation === 'older' };
-}
