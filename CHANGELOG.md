@@ -46,12 +46,19 @@ are unchanged; a node now announces only the newest head of a catalog
 | A subscribe or unsubscribe that fails on an authority outage returns an operation id (#3151) | The response carries an operation id, and exactly one server log line matches it. The subscription error code, the generic response body and the retry headers are unchanged | None. Use the operation id to find the line in the node's log |
 | A slow identity probe is retried once before the peer is suppressed (#3154) | A probe that ends on a transport deadline is retried once with a response deadline of 15 s, where the first deadline is 3 s. Later suppression of that peer is capped at 3 s while it has an open connection. The validation of the signed proof, quarantine and the back-off for disconnected peers are unchanged | None |
 | A failed asynchronous share reports the transition that was stored (#3155) | The worker takes the terminal or retrying transition of a failed attempt from the write that stored it, where it read the job's outcome in a separate step that could fail or see a later attempt. Bookkeeping that could not be resolved is reported as uncertain, not as a fatal failure. The operator diagnostics and the documentation (`docs/use-dkg/knowledge-asset-lifecycle.md`) are updated with it | None |
+| The `commit` of a node built from source can end in `-dirty` (#3153) | `GET /api/status` reports `<commit>-dirty` for a build from a checkout with local changes or untracked files. A release slot in which the git updater has set stale package copies aside counts as such a checkout (#3169). `commitShort` carries no suffix. Nodes installed from npm are not affected | None. Tooling that compares `commit` between nodes should compare `commitShort` or strip the suffix |
 
 ### Known issues
 
 - **RFC-64 catalog replay loop**: replays that come back incomplete repeat on
   every reconnect. Keep `rfc64Catalog.rollout.killSwitch` on wherever it is
   set.
+- **A node updated from git can report its build as `-dirty`** (#3169): a
+  source build is reported as `<commit>-dirty` when its checkout holds
+  untracked files, and the git updater can leave an untracked folder in
+  a release slot by itself, when it sets stale package copies aside. No
+  tracked file differs from the commit in that case, and the updater
+  keeps working. Nodes installed from npm are not affected.
 - **An author's catalog for a Context Graph holds 1,024 assets** (#3134): the
   catalog is one signed bucket of at most 1,024 rows. A further new asset
   of that author in that graph is published, finalized and stored as
@@ -498,11 +505,13 @@ are unchanged; a node now announces only the newest head of a catalog
   #3153): a source build captures the commit it is built from before it
   compiles and stores it only when the build succeeds, and status keeps
   reporting that commit after the checkout has moved on. A build from a
-  changed or unidentifiable tree is not certified, and a failed
-  compilation keeps the earlier outputs and their metadata. When the
-  auto-updater builds from source, it clears stale build metadata in its
-  inactive slot first, and a failed clean-up or build leaves the active
-  slot untouched. The devnet scripts rebuild stale executables.
+  changed or unidentifiable tree is not certified: its `commit` in
+  `GET /api/status` ends in `-dirty`, also when the tree only holds
+  untracked files. A failed compilation keeps the earlier outputs and
+  their metadata. When the auto-updater builds from source, it clears
+  stale build metadata in its inactive slot first, and a failed clean-up
+  or build leaves the active slot untouched. The devnet scripts rebuild
+  stale executables.
 - **The dashboard says when a size is a preview** (#1015, #1026, #3147,
   #3148): a memory layer that was capped or unavailable looked like a
   complete graph size. Rows and the total now show a loaded preview, with
