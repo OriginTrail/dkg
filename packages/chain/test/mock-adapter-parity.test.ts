@@ -68,7 +68,7 @@ const EVM_METHODS = collectMethodNames(EVMChainAdapter);
 const MOCK_METHODS = collectMethodNames(MockChainAdapter);
 const NO_CHAIN_METHODS = collectMethodNames(NoChainAdapter);
 
-// Normal protected prototype methods that are deliberately outside the
+// Normal protected/private prototype methods that are deliberately outside the
 // ChainAdapter API. Keeping this boundary explicit prevents production method
 // shape from being chosen merely to evade the runtime parity audit.
 const EVM_INTERNAL_METHODS = new Set<string>([
@@ -81,6 +81,10 @@ const EVM_INTERNAL_METHODS = new Set<string>([
   // The mock implements that public reader directly from its in-memory event
   // state and has no ethers TransactionReceipt to project.
   'projectCanonicalFinalizationReceipt',
+  // TS-private ethers-log decoder behind the canonical-finalization reader.
+  // TypeScript erases private visibility on the prototype; the mock implements
+  // the public reader from its event state and has no ethers update logs.
+  'decodeV10UpdateConfirmationReceipt',
   // Physical EVM contract-binding and one-log generation fences. These are
   // protected implementation details rather than ChainAdapter capabilities;
   // the mock has neither Hub-bound contract handles nor a persisted one-log.
