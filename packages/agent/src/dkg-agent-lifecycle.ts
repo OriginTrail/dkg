@@ -3889,7 +3889,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         .some((p) => p.toString() === remotePeer);
       if (stillConnected) return;
       this.peerCapabilityRegistry.forget(remotePeer);
-      this.closeRfc64CatalogConnectionReplaySessionV1(remotePeer);
       peerEvents.forgetSkippedNoSync(remotePeer);
       this.lastSyncDisconnectedAt.set(remotePeer, Date.now());
     }, { signal });

@@ -1119,11 +1119,14 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     if (runtime === undefined) {
       runtime = new Rfc64CatalogReplayConnectionRuntimeV1({
         selectContextGraphIds: () => this.listActiveRfc64CatalogReplayContextGraphIdsV1(),
-        acquireFence: (contextGraphId, replayPeerId) =>
-          this.markRfc64CatalogReplayPeerPendingV1(contextGraphId, replayPeerId),
+        reserveFence: (contextGraphId, replayPeerId) => {
+          const accepted = this.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId);
+          return accepted === null ? null : this.rfc64CatalogReplayRecoveryRuntimeV1()
+            .reservePeer(contextGraphId, accepted.policyDigest, replayPeerId);
+        },
         reannounce: (replayPeerId, id, signal) => {
           const accepted = this.readAcceptedRfc64CatalogAccessSnapshotV1(id);
-          return accepted === null ? Promise.resolve() : this.reannounceRfc64CatalogHeadsToPeerV1(replayPeerId, {
+          return accepted === null ? Promise.resolve(Object.freeze({ failed: 0 })) : this.reannounceRfc64CatalogHeadsToPeerV1(replayPeerId, {
             kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
             networkId: accepted.policy.networkId, contextGraphId: accepted.policy.contextGraphId,
             policyDigest: accepted.policyDigest,
@@ -1141,14 +1144,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       rfc64CatalogReplayConnectionRuntimesV1.set(this, runtime);
     }
     return runtime.prepare(peerId, Date.now(), contextGraphId);
-  }
-
-  /** Record transport retirement without erasing retained scope cooldowns. */
-  closeRfc64CatalogConnectionReplaySessionV1(
-    this: DKGAgent,
-    peerId: string,
-  ): void {
-    rfc64CatalogReplayConnectionRuntimesV1.get(this)?.peerDisconnected(peerId);
   }
 
   /** Forget process-local operational targets when receiver ownership ends. */

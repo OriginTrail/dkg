@@ -1,3 +1,4 @@
+import { Rfc64CatalogReplayRecoveryRuntimeV1 } from '../src/rfc64/catalog-replay-recovery-runtime-v1.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Rfc64CatalogReplayConnectionRuntimeV1, type Rfc64CatalogReplayConnectionRuntimePortsV1 } from
   '../src/rfc64/catalog-replay-connection-runtime-v1.js';
@@ -31,15 +32,14 @@ describe('RFC-64 catalog replay connection debounce', () => {
     const replay = vi.fn(async () => { await held; return { failed: 0 }; });
     const runtime = makeRuntime({
       selectContextGraphIds: () => Array.from({ length: 59 }, (_, i) => `cg-${i}`),
-      acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release: vi.fn() }),
-      reannounce: vi.fn(async () => undefined), replay, warn: vi.fn(),
+      reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit: () => undefined, release: vi.fn() }),
+      reannounce: vi.fn(async () => ({ failed: 0 })), replay, warn: vi.fn(),
     });
     try {
       for (const peer of ['a', 'b', 'c']) runtime.prepare(peer, 0)?.admit();
       await vi.waitFor(() => expect(replay).toHaveBeenCalledTimes(2));
       expect(replay.mock.calls.map((call) => call[1].peerId)).toEqual(['a', 'b']);
       for (let i = 1; i <= 20; i++) {
-        runtime.peerDisconnected('a');
         expect(runtime.prepare('a', i)).toBeNull();
       }
       expect(replay).toHaveBeenCalledTimes(2);
@@ -56,14 +56,13 @@ describe('RFC-64 catalog replay connection debounce', () => {
     const replay = vi.fn(async () => ({ failed: 0 }));
     const runtime = makeRuntime({
       selectContextGraphIds: () => ['cg'],
-      acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release: vi.fn() }),
-      reannounce: vi.fn(async () => undefined), replay, warn: vi.fn(),
+      reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit: () => undefined, release: vi.fn() }),
+      reannounce: vi.fn(async () => ({ failed: 0 })), replay, warn: vi.fn(),
       schedule: (slot, work) => owner.scheduleKeyed(`replay:${slot}`, work),
     }, 100);
     runtime.prepare('peer')!.admit();
     await vi.advanceTimersByTimeAsync(0);
     expect(runtime.status().pendingScopes).toBe(0);
-    runtime.peerDisconnected('peer');
     const deferred = runtime.prepare('peer');
     expect(deferred).not.toBeNull(); deferred?.admit();
     await vi.advanceTimersByTimeAsync(99);
@@ -75,10 +74,10 @@ describe('RFC-64 catalog replay connection debounce', () => {
 
   it('replays only the newly activated graph without re-announcing unrelated scopes', async () => {
     const replay = vi.fn(async () => ({ failed: 0 }));
-    const reannounce = vi.fn(async () => undefined);
+    const reannounce = vi.fn(async () => ({ failed: 0 }));
     const runtime = makeRuntime({
       selectContextGraphIds: () => ['old-cg', 'new-cg'],
-      acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release: vi.fn() }),
+      reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit: () => undefined, release: vi.fn() }),
       reannounce, replay, warn: vi.fn(),
     });
     runtime.prepare('peer', 0, 'new-cg')?.admit();
@@ -91,12 +90,13 @@ describe('RFC-64 catalog replay connection debounce', () => {
     const replay = vi.fn(async () => ({ failed: 0 }));
     const runtime = makeRuntime({
       selectContextGraphIds: () => ['public-cg'],
-      acquireFence: (_contextGraphId, peerId) => ({
+      reserveFence: (_contextGraphId, peerId) => ({
         peerId,
         generation: 1,
+        admit: () => undefined,
         release: vi.fn(),
       }),
-      reannounce: vi.fn(async () => undefined),
+      reannounce: vi.fn(async () => ({ failed: 0 })),
       replay,
       warn: vi.fn(),
     }, 100, 2);
@@ -116,6 +116,7 @@ describe('RFC-64 catalog replay connection debounce', () => {
     expect(replay).toHaveBeenCalledWith('public-cg', {
       peerId: 'peer-a',
       generation: 1,
+      admit: expect.any(Function),
       release: expect.any(Function),
     }, expect.any(AbortSignal));
 
@@ -139,8 +140,8 @@ describe('catalog reconnect work ownership', () => {
     const replay = vi.fn(async () => ({ failed: 1 }));
     const runtime = makeRuntime({
       selectContextGraphIds: () => ['cg'],
-      acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release }),
-      reannounce: async () => undefined, replay, warn: vi.fn(),
+      reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit: () => undefined, release }),
+      reannounce: async () => ({ failed: 0 }), replay, warn: vi.fn(),
     });
     try {
       let previousDelay = 0;
@@ -157,7 +158,6 @@ describe('catalog reconnect work ownership', () => {
         expect(delay).toBeLessThanOrEqual(600_000);
         expect(status.failed).toBe(attempt);
         expect(status.startedLastMinute).toBe(1);
-        runtime.peerDisconnected('failed-peer');
         const cooling = runtime.prepare('failed-peer', status.nextEligibleAt - 1);
         expect(cooling).not.toBeNull(); cooling?.reject();
         previousDelay = delay;
@@ -180,8 +180,8 @@ describe('catalog reconnect work ownership', () => {
     });
     const runtime = makeRuntime({
       selectContextGraphIds: () => ['old', 'new'],
-      acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release: vi.fn() }),
-      reannounce: async () => undefined, replay, warn: vi.fn(),
+      reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit: () => undefined, release: vi.fn() }),
+      reannounce: async () => ({ failed: 0 }), replay, warn: vi.fn(),
     });
     try {
       runtime.prepare('peer', Date.now(), 'old')?.admit();
@@ -202,8 +202,8 @@ describe('catalog reconnect work ownership', () => {
     let next: Rfc64CatalogReplayConnectionRuntimeV1;
     next = makeRuntime({
       selectContextGraphIds: () => ['old', 'new'],
-      acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release }),
-      reannounce: async () => undefined,
+      reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit: () => undefined, release }),
+      reannounce: async () => ({ failed: 0 }),
       replay: async cg => {
         calls.push(cg);
         if (cg === 'old') queueMicrotask(() => next.prepare('peer', Date.now(), 'new')?.admit());
@@ -221,8 +221,8 @@ describe('catalog reconnect work ownership', () => {
     const release = vi.fn();
     const runtime = makeRuntime({
       selectContextGraphIds: () => ['cg'],
-      acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release }),
-      reannounce: async () => undefined,
+      reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit: () => undefined, release }),
+      reannounce: async () => ({ failed: 0 }),
       replay: async () => { await held.promise; return { failed: 0 }; }, warn: vi.fn(),
     }, 100, 1);
     try {
@@ -238,13 +238,14 @@ describe('catalog reconnect work ownership', () => {
 
   it('releases rejected reservations once and handles an unavailable fence', () => {
     const release = vi.fn();
-    const acquireFence = vi.fn((_cg: string, peerId: string) =>
-      peerId === 'none' ? null : { peerId, generation: 1, release });
+    const reserveFence = vi.fn((_cg: string, peerId: string) =>
+      peerId === 'none' ? null : { peerId, generation: 1, admit: () => undefined, release });
     const runtime = makeRuntime({
-      selectContextGraphIds: () => ['cg'], acquireFence,
+      selectContextGraphIds: () => ['cg'], reserveFence,
       reannounce: vi.fn(), replay: vi.fn(), warn: vi.fn(),
     });
-    expect(runtime.prepare('none')).toBeNull();
+    const unavailable = runtime.prepare('none');
+    expect(unavailable).not.toBeNull(); unavailable?.reject();
     const reservation = runtime.prepare('a');
     reservation?.reject(); reservation?.reject(); reservation?.admit();
     expect(release).toHaveBeenCalledTimes(1);
@@ -253,7 +254,7 @@ describe('catalog reconnect work ownership', () => {
     retry?.reject();
     expect(runtime.status().pendingScopes).toBe(0);
     const empty = makeRuntime({
-      selectContextGraphIds: () => [], acquireFence,
+      selectContextGraphIds: () => [], reserveFence,
       reannounce: vi.fn(), replay: vi.fn(), warn: vi.fn(),
     });
     expect(empty.prepare('a')).toBeNull();
@@ -266,8 +267,8 @@ describe('catalog reconnect work ownership', () => {
     const replay = vi.fn(async () => { await held.promise; return { failed: 0 }; });
     const next = makeRuntime({
       selectContextGraphIds: () => ['a', 'b'],
-      acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release }),
-      reannounce: async () => undefined, replay, warn: vi.fn(),
+      reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit: () => undefined, release }),
+      reannounce: async () => ({ failed: 0 }), replay, warn: vi.fn(),
       schedule: (slot, work) => owner.scheduleKeyed(`cancel:${slot}`, work),
     });
     next.prepare('peer')!.admit();
@@ -285,7 +286,7 @@ describe('catalog reconnect work ownership', () => {
     const release = vi.fn();
     const runtime = makeRuntime({
       selectContextGraphIds: () => ['a', 'b'],
-      acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release }),
+      reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit: () => undefined, release }),
       reannounce: vi.fn(), replay: vi.fn(), warn: vi.fn(), schedule: () => false,
     });
     runtime.prepare('peer')?.admit();
@@ -298,7 +299,7 @@ describe('catalog reconnect work ownership', () => {
     const replay = vi.fn(async () => { throw new Error('catalog unavailable'); });
     const runtime = makeRuntime({
       selectContextGraphIds: () => ['cg'],
-      acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release: vi.fn() }),
+      reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit: () => undefined, release: vi.fn() }),
       reannounce: async () => { throw new Error('legacy unavailable'); }, replay, warn,
     });
     runtime.prepare('peer')?.admit();
@@ -315,8 +316,8 @@ describe('catalog reconnect work ownership', () => {
     const seen = new Set<string>();
     const runtime = makeRuntime({
       selectContextGraphIds: () => Array.from({ length: 257 }, (_, i) => `cg-${String(i).padStart(3, '0')}`),
-      acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release: vi.fn() }),
-      reannounce: async () => undefined,
+      reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit: () => undefined, release: vi.fn() }),
+      reannounce: async () => ({ failed: 0 }),
       replay: async cg => { seen.add(cg); return { failed: 0 }; }, warn: vi.fn(),
       schedule: (slot, work) => owner.scheduleKeyed(`replay:${slot}`, work),
     }, 100);
@@ -328,12 +329,31 @@ describe('catalog reconnect work ownership', () => {
     expect(runtime.status().pendingScopes).toBe(0);
   });
 
+  it('retains an exact activation while all 256 scope leases await network admission', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(10_000);
+    let ids = Array.from({ length: 256 }, (_, i) => `cg-${String(i).padStart(3, '0')}`);
+    const pushed: string[] = [];
+    const runtime = makeRuntime({ selectContextGraphIds: () => ids,
+      reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit: () => undefined, release: vi.fn() }),
+      reannounce: async (_peer, cg) => { pushed.push(cg); return { failed: 0 }; },
+      replay: async () => ({ failed: 0 }), warn: vi.fn() });
+    const heldAdmissions = runtime.prepare('peer')!;
+    ids = [...ids, 'cg-256'];
+    runtime.prepare('peer', Date.now(), 'cg-256')!.admit();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pushed).toEqual([]);
+    heldAdmissions.reject();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(pushed).toEqual(['cg-256']);
+    expect(runtime.status().pendingScopes).toBe(0);
+  });
+
   it('runs a ready third peer while two peers wait for their cooldown deadlines', async () => {
     vi.useFakeTimers(); vi.setSystemTime(10_000);
     const calls: string[] = [];
     const next = makeRuntime({ selectContextGraphIds: () => ['cg'],
-      acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release: vi.fn() }),
-      reannounce: async () => undefined,
+      reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit: () => undefined, release: vi.fn() }),
+      reannounce: async () => ({ failed: 0 }),
       replay: async (_cg, demand) => { calls.push(demand.peerId); return { failed: 0 }; }, warn: vi.fn(),
     }, 100);
     for (const peer of ['a', 'b']) next.prepare(peer)!.admit();
@@ -351,8 +371,8 @@ describe('catalog reconnect work ownership', () => {
     const selected = Array.from({ length: 256 }, (_, i) => `cg-${String(i).padStart(3, '0')}`);
     const calls: string[] = [];
     const next = makeRuntime({ selectContextGraphIds: () => selected,
-      acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release: vi.fn() }),
-      reannounce: async () => undefined,
+      reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit: () => undefined, release: vi.fn() }),
+      reannounce: async () => ({ failed: 0 }),
       replay: async cg => { calls.push(cg); return { failed: 0 }; }, warn: vi.fn(),
     }, 100);
     next.prepare('peer')!.admit(); await vi.advanceTimersByTimeAsync(0);
@@ -368,8 +388,8 @@ describe('catalog reconnect work ownership', () => {
     const held = deferred(); const signals = new Map<string | number, AbortSignal>();
     const release = vi.fn();
     const next = makeRuntime({ selectContextGraphIds: () => ['cg'],
-      acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release }),
-      reannounce: async () => undefined,
+      reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit: () => undefined, release }),
+      reannounce: async () => ({ failed: 0 }),
       replay: async (_cg, demand) => { if (demand.peerId === 'held') await held.promise; return { failed: 0 }; },
       warn: vi.fn(), schedule: (slot, work) => owner.scheduleKeyed(`shutdown:${slot}`, signal => {
         signals.set(slot, signal); return work(signal);
@@ -394,8 +414,8 @@ describe('catalog reconnect work ownership', () => {
     const selected = Array.from({ length: 256 }, (_, i) => `cg-${i}`);
     const calls: string[] = [];
     const next = makeRuntime({ selectContextGraphIds: () => selected,
-      acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release: vi.fn() }),
-      reannounce: async () => undefined,
+      reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit: () => undefined, release: vi.fn() }),
+      reannounce: async () => ({ failed: 0 }),
       replay: async cg => { calls.push(cg); return { failed: 0 }; }, warn: vi.fn(),
     }, 100);
     next.prepare('peer')!.admit(); await vi.advanceTimersByTimeAsync(0);
@@ -404,4 +424,87 @@ describe('catalog reconnect work ownership', () => {
     expect(calls).toHaveLength(256); expect(next.prepare('peer', Date.now(), 'removed')).toBeNull();
   });
 
+});
+
+// These controls use recovery's actual worklist, rather than a fake fence.
+describe('connection staging versus canonical recovery execution', () => {
+  function canonicalRuntime() {
+    const calls: string[] = [];
+    const recovery = new Rfc64CatalogReplayRecoveryRuntimeV1<never>({
+      requestPeer: async (_cg, peer) => { calls.push(peer); return { status: 'completed', targets: [] }; },
+      whenReceiverIdleForContextGraph: async () => ({ failed: 0 }),
+      targetIdentity: () => '', parityFailed: async () => false,
+    });
+    const pushed: string[] = [];
+    const connection = makeRuntime({
+      selectContextGraphIds: () => ['cg'],
+      reserveFence: (_cg, peer) => recovery.reservePeer('cg', 'policy', peer),
+      reannounce: async peer => { pushed.push(peer); return { failed: 0 }; },
+      replay: (_cg, demand, signal) => recovery.request({ kind: 'connection-demand', contextGraphId: 'cg', policyDigest: 'policy', demand, signal }),
+      warn: vi.fn(),
+    });
+    return { connection, recovery, calls, pushed };
+  }
+
+  it('keeps cooling A fenced but not runnable while B completes independent recovery', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(10_000);
+    const { connection, recovery, calls } = canonicalRuntime();
+    connection.prepare('a')!.admit();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toEqual(['a']);
+    vi.setSystemTime(11_000); connection.prepare('a')!.admit();
+    vi.setSystemTime(12_000); connection.prepare('b')!.admit();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toEqual(['a', 'b']);
+    expect(recovery.status('cg', 'policy')?.active).toBe(true);
+    await vi.advanceTimersByTimeAsync(57_999);
+    expect(calls).toEqual(['a', 'b']);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(calls).toEqual(['a', 'b', 'a']);
+    expect(recovery.status('cg', 'policy')?.active).toBe(false);
+  });
+
+  it('delivers the 65th peer head after 64 admission fences release without another event', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(10_000);
+    const { connection, pushed } = canonicalRuntime();
+    const pending = Array.from({ length: 64 }, (_, i) => connection.prepare(`held-${i}`)!);
+    expect(pending.every(Boolean)).toBe(true);
+    const last = connection.prepare('peer-65');
+    expect(last).not.toBeNull(); last!.admit();
+    await vi.advanceTimersByTimeAsync(0); expect(pushed).toEqual([]);
+    for (const reservation of pending) reservation.reject();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(pushed).toEqual(['peer-65']);
+    expect(connection.status().pendingScopes).toBe(0);
+  });
+
+  it('counts a resolved failed push while still pulling and retaining exponential backoff', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(10_000);
+    const replay = vi.fn(async () => ({ failed: 0 }));
+    const connection = makeRuntime({ selectContextGraphIds: () => ['cg'],
+      reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit: () => undefined, release: vi.fn() }),
+      reannounce: async () => ({ announced: 0, failed: 1, manifest: [] }), replay, warn: vi.fn() }, 100);
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      connection.prepare('peer')!.admit(); await vi.advanceTimersByTimeAsync(0);
+      const status = connection.status().peers[0];
+      expect(status.failed).toBe(attempt);
+      expect(status.nextEligibleAt - Date.now()).toBeGreaterThanOrEqual(100 * 2 ** (attempt - 1));
+      vi.setSystemTime(status.nextEligibleAt);
+    }
+    expect(replay).toHaveBeenCalledTimes(3);
+  });
+
+  it('rotates three ready peers before either large scope pass can drain', async () => {
+    const calls: string[] = [];
+    const connection = makeRuntime({ selectContextGraphIds: () => Array.from({ length: 12 }, (_, i) => `cg-${i}`),
+      reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit: () => undefined, release: vi.fn() }),
+      reannounce: async () => ({ failed: 0 }),
+      replay: async (_cg, demand) => { calls.push(demand.peerId); return { failed: 0 }; }, warn: vi.fn() });
+    for (const peer of ['a', 'b', 'c']) connection.prepare(peer)!.admit();
+    await vi.waitFor(() => expect(calls).toHaveLength(36));
+    const firstC = calls.indexOf('c');
+    expect(firstC).toBeLessThan(24);
+    expect(calls.slice(0, firstC).filter(peer => peer === 'a').length).toBeLessThan(12);
+    expect(calls.slice(0, firstC).filter(peer => peer === 'b').length).toBeLessThan(12);
+  });
 });
