@@ -173,7 +173,7 @@ export function placementPolicyDigestV1(agent: DKGAgent): string {
  */
 export function watchPlacementStoresV1(agent: DKGAgent, onReset: () => void = () => {}) {
   const real = placementPersistenceV1(agent);
-  const reads = { bundles: 0, controlObjects: 0, appliedHead: 0, inventorySnapshot: 0, cas: 0 };
+  const reads = { bundles: 0, controlObjects: 0, appliedHead: 0, inventorySnapshot: 0, inventoryRow: 0, cas: 0 };
   const lost = new Set<string>();
   const spoilt = new Set<string>();
   const stagedAgain: string[] = [];
@@ -236,6 +236,12 @@ export function watchPlacementStoresV1(agent: DKGAgent, onReset: () => void = ()
     },
     swmAuthorInventory: {
       ...real.swmAuthorInventory,
+      readSwmAuthorInventoryRowV1: (
+        ...args: Parameters<typeof real.swmAuthorInventory.readSwmAuthorInventoryRowV1>
+      ) => {
+        reads.inventoryRow += 1;
+        return real.swmAuthorInventory.readSwmAuthorInventoryRowV1(...args);
+      },
       readSwmAuthorInventorySnapshotV1: (
         ...args: Parameters<typeof real.swmAuthorInventory.readSwmAuthorInventorySnapshotV1>
       ) => {

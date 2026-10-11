@@ -30,15 +30,16 @@ const timeSlice = vi.hoisted(() => ({
   yields: true,
   onTurn: undefined as ((turn: number) => void) | undefined,
 }));
-vi.mock('../src/main-thread-time-slice.js', () => ({
-  createMainThreadTimeSlice: () => async (): Promise<void> => {
+vi.mock('../src/main-thread-time-slice.js', () => {
+  const yieldMainThread = async (): Promise<void> => {
     if (!timeSlice.yields) return;
     timeSlice.turns += 1;
     const turn = timeSlice.turns;
     await new Promise<void>((resolve) => setImmediate(resolve));
     timeSlice.onTurn?.(turn);
-  },
-}));
+  };
+  return { yieldMainThread, createMainThreadTimeSlice: () => yieldMainThread };
+});
 
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'66'.repeat(32)}`);
 const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;

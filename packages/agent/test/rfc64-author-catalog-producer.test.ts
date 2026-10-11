@@ -70,8 +70,8 @@ describe('RFC-64 author catalog producer', () => {
       issuedAt: '1700000000001' as TimestampMsV1,
       signer: signer(catalogWallet),
     };
-    const noTurn = vi.spyOn(mainThreadTimeSlice, 'createMainThreadTimeSlice')
-      .mockReturnValue(async () => {});
+    const noTurn = vi.spyOn(mainThreadTimeSlice, 'yieldMainThread')
+      .mockResolvedValue(undefined);
     let reference;
     try { reference = await produceSparseAuthorCatalogSuccessorV1(input); }
     finally { noTurn.mockRestore(); }

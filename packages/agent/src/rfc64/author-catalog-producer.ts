@@ -47,7 +47,7 @@ import {
   type TimestampMsV1,
   type UnsignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
-import { createMainThreadTimeSlice } from '../main-thread-time-slice.js';
+import { yieldMainThread } from '../main-thread-time-slice.js';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 
 import {
@@ -258,7 +258,7 @@ async function produceSparseAuthorCatalogSuccessorUncheckedV1(
   }
   const rows = snapshotRows(nextRowsInput);
   // Split predecessor verification from replacement encoding before the next CPU-heavy phase.
-  await createMainThreadTimeSlice(0)();
+  await yieldMainThread();
   const preparedBucket = prepareReplacementBucket(
     scope,
     selectedBucketId,
