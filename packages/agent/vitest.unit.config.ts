@@ -362,6 +362,7 @@ export default defineConfig({
       "test/shared-memory-metadata-admission.test.ts",
       "test/shared-memory-metadata-continuation.test.ts",
       "test/shared-memory-metadata-fetcher.test.ts",
+      "test/shared-memory-metadata-boundary.typechecked.test.ts",
       "test/swm-head-identity-preservation.test.ts",
       // #2079 — the already-materialized witness: the warm-path win, the count
       // gate that keeps it self-healing, and the digest binding that makes an

@@ -2,7 +2,7 @@
 
 /** Stable public/private target executor for graph-complete SWM recovery. */
 
-import { selectSharedMemoryMetadataFetcher } from './shared-memory-metadata-fetcher.js';
+import { normalizeSharedMemoryFetcherContext } from './shared-memory-metadata-fetcher.js';
 
 import {
   DKG_ONTOLOGY,
@@ -239,9 +239,10 @@ export class SwmTargetExecutorV1 {
   }
 
   async syncPublicTarget(
-    target: PublicSwmTargetV1,
+    input: PublicSwmTargetV1,
   ): Promise<SharedMemorySyncSummary> {
-    const metadataFetcher = selectSharedMemoryMetadataFetcher(target);
+    const target = normalizeSharedMemoryFetcherContext(input);
+    const metadataFetcher = target.metadataFetcher;
     if (!metadataFetcher) {
       throw new TypeError('Public SWM targets require a metadata fetcher');
     }

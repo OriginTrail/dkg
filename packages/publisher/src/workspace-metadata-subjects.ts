@@ -1,4 +1,4 @@
-import { assertSafeIri, createGraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
+import { assertSafeIri, createGraphKnowledgeAssetScope, isSafeIri, validateSubGraphName } from '@origintrail-official/dkg-core';
 
 /** Preserve the low-level metadata generators' existing raw-formatting contract. */
 export function formatUncheckedWorkspaceOperationSubject(contextGraphId: string, shareOperationId: string): string {
@@ -53,3 +53,22 @@ function safeWorkspaceIdPart(value: string, fieldName: 'contextGraphId' | 'share
 
   return normalized;
 }
+
+/** Decode only exact canonical public-slice identities beside their encoder. */
+export function decodeWorkspaceOperationPublicSliceSubject(subject: string): {
+  contextGraphId: string; shareOperationId: string; rootEntity: string; subGraphName?: string;
+} | undefined {
+  const prefix = 'urn:dkg:public-stage:';
+  if (!subject.startsWith(prefix)) return undefined;
+  try {
+    const parts = subject.slice(prefix.length).split(':').map(decodeURIComponent);
+    if (parts.length !== 4 || parts.some(part => !part)) return undefined;
+    const [contextGraphId, sub, shareOperationId, rootEntity] = parts;
+    const subGraphName = sub === '_' ? undefined : sub;
+    if (!isSafeIri(rootEntity) || (subGraphName !== undefined && !validateSubGraphName(subGraphName).valid)) return undefined;
+    workspaceOperationSubject(contextGraphId, shareOperationId);
+    if (workspaceOperationPublicSliceSubject(contextGraphId, shareOperationId, rootEntity, subGraphName) !== subject) return undefined;
+    return { contextGraphId, shareOperationId, rootEntity, ...(subGraphName ? { subGraphName } : {}) };
+  } catch { return undefined; }
+}
+

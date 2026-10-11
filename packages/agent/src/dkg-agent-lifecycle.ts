@@ -1,3 +1,4 @@
+import { createSharedMemoryWorkRunner } from './internal/sync/shared-memory-work.js';
 import { syncReconcilerEnabled, syncOnConnectEnabled, durableSyncEnabled } from './internal/lifecycle-sync-policy.js';
 import { emptySwmRecoveryResult } from './sync/shared-memory-completion.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
@@ -382,7 +383,6 @@ import {
   emptySharedMemorySyncResult,
   mergeSamePeerSharedMemoryDiagnostics,
   mergeFleetSharedMemoryDiagnostics,
-  recordSharedMemoryPhaseFailure,
 } from './sync/shared-memory-diagnostics.js';
 import {
   createSwmMetaFetcher,
@@ -7556,105 +7556,32 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       requestedScope,
     });
     const completedTargetKeys = new Set<string>();
-    const privateWork = (target: Rfc64SwmRecoveryTargetV1): ContextGraphSyncWork<SharedMemorySyncResult> => {
-      const { contextGraphId } = target;
-      return {
-        contextGraphId,
-        lane: 'swm_recovery',
-        operationId: `swm-recovery:${contextGraphId}:${remotePeerId.slice(-8)}`,
-        run: async (): Promise<SharedMemorySyncResult> => {
-          const recoveryLease = recoveryLeaseFor(contextGraphId);
-          try {
-            const recovered = await recoverPrivateContextGraph(
-              contextGraphId,
-              recoveryLease,
-              ({ completedRound, readySnapshots, totalSnapshots }) => {
-                this.log.info(
-                  ctx,
-                  `Continuing private SWM recovery for "${contextGraphId}" from ${remotePeerId.slice(-8)} `
-                  + `after round ${completedRound}: snapshots=${readySnapshots}/${totalSnapshots}`,
-                );
-              },
-            );
-            const result = emptySharedMemorySyncResult();
-            result.insertedDataTriples = recovered.insertedDataQuads;
-            result.insertedMetaTriples = recovered.insertedMetaQuads;
-            result.insertedTriples = recovered.insertedDataQuads + recovered.insertedMetaQuads;
-            result.droppedDataTriples = recovered.droppedDataTriples;
-            // A deadline-bounded recovery returns `completed=false` without
-            // mutating the store. Keep that retry signal inside this work item
-            // so every requester lane shares the same orchestration loop.
-            if (recovered.completed) {
-              result.completedPhases = 1;
-              completedTargetKeys.add(sharedMemoryRecoveryTargetKey(target));
-            } else {
-              // A recovery job can yield because this process exhausted its
-              // admission window. Preserve that local outcome through the
-              // lifecycle aggregation instead of treating it as a peer
-              // failure that should trigger backoff.
-              const failureCause = recovered.phaseFailureCause;
-              const failureCount = recovered.localYieldFailedPhases ?? 1;
-              recordSharedMemoryPhaseFailure(result, failureCause, failureCount);
-              if (failureCause !== 'local-budget') result.backoffWorthyFailures = 1;
-            }
-            return result;
-          } catch (error) {
-            if (getSyncBackpressureBusyError(error)) throw error;
-            this.log.warn(ctx, `Curator-recovery for private CG "${contextGraphId}" from ${remotePeerId} failed: ${error instanceof Error ? error.message : String(error)}`);
-            return {
-              ...emptySharedMemorySyncResult(),
-              failedPeers: 1,
-              backoffWorthyFailures: 1,
-            };
-          }
-        },
-      };
-    };
-    const runOrderedWork = (
-      work: ContextGraphSyncWork<SharedMemorySyncResult>[],
-      onResult: (item: ContextGraphSyncWork<SharedMemorySyncResult>, result: SharedMemorySyncResult) => void = () => {},
-    ) => {
-      return runOrderedContextGraphSyncs({
-        work,
-        priorities: this.config.syncContextGraphPriorities,
-        emptyResult: emptySharedMemorySyncResult,
-        runWithAdmission: (item, run) => {
-          const selectedPublicWork = transferMode === 'selected'
-            && item.lane === 'shared_memory';
-          return this.runContextGraphSyncWithBackpressure(
-            ctx,
-            item.contextGraphId,
-            item.lane,
-            item.operationId,
-            run,
-            {
-              priorityOverride: selectedPublicWork ? options?.priority : undefined,
-              source: options?.source,
-              selectedSwmPriority: selectedPublicWork,
-            },
-          );
-        },
-        merge: mergeSharedMemorySyncResults,
-        onResult,
-        markDeferred: (summary) => ({
-          ...summary,
-          deferredBackpressure: (summary.deferredBackpressure ?? 0) + 1,
-        }),
-        // Mirrors the durable fanout: a failed CG round is already recorded in
-        // the merged counters and must not cost the remaining CGs their turn.
-        // `failedPeers` is the peer-never-responded signal on the public lane;
-        // the private curator-recovery lane also reports it for its whole-round
-        // failures, which the consecutive-failure guard bounds instead of
-        // aborting on the first one.
-        isPeerTransportFailure: (part) => Boolean(
-          stopOnBackoffWorthyFailure && part.failedPeers > 0,
-        ),
-        onDeferred: (item, error) => this.log.info(
+    const { privateWork, runOrderedWork } = createSharedMemoryWorkRunner({
+      remotePeerId,
+      priorities: this.config.syncContextGraphPriorities,
+      recoveryLeaseFor,
+      recoverPrivateContextGraph,
+      onCompleted: target => completedTargetKeys.add(sharedMemoryRecoveryTargetKey(target)),
+      stopOnBackoffWorthyFailure,
+      logInfo: message => this.log.info(ctx, message),
+      logWarn: message => this.log.warn(ctx, message),
+      runWithAdmission: (item, run) => {
+        const selectedPublicWork = transferMode === 'selected'
+          && item.lane === 'shared_memory';
+        return this.runContextGraphSyncWithBackpressure(
           ctx,
-          `Deferring ${item.lane} at CG ${item.contextGraphId} due to local backpressure: ${error.message}`,
-        ),
-      });
-    };
+          item.contextGraphId,
+          item.lane,
+          item.operationId,
+          run,
+          {
+            priorityOverride: selectedPublicWork ? options?.priority : undefined,
+            source: options?.source,
+            selectedSwmPriority: selectedPublicWork,
+          },
+        );
+      },
+    });
 
     if (transferMode === 'private') {
       return runSyncSingleFlight(this, singleFlightKey, async () => execution(

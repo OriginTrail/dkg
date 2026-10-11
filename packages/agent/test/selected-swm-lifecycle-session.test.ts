@@ -444,9 +444,6 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
       metaContinuationLimits: { rows: 1, globalRows: 1, bytesEstimate: 4096, globalBytesEstimate: 4096 },
       metaPages: [
         { quads: oneRow, resumedFromOffset: 0, nextOffset: 1, completed: false, timedOut: true },
-        // The selected owner must reject this row because the ordinary owner
-        // still retains the only process-wide row allowance.
-        { quads: oneRow, resumedFromOffset: 0, nextOffset: 1, completed: false, timedOut: true },
         // The ordinary owner's empty EOF consumes no additional capacity and
         // retires its retained prefix through the real lifecycle path.
         { quads: [], resumedFromOffset: 1, nextOffset: 1, completed: true, timedOut: false },
@@ -466,17 +463,21 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
       expect(first.metadataContinuationYields).toBe(1);
       expect(harness.agent.syncCheckpoints.size).toBe(1);
       const blocked = await selected();
-      expect(blocked.failedPhases).toBeGreaterThan(0);
-      expect(allowances.map(item => item.rows)).toEqual([1, 0]);
+      // Shared-pool contention is a local yield: do not spend a doomed
+      // zero-row transport request or penalize the peer. The ordinary prefix
+      // still owns the single process-wide row and remains checkpointed.
+      expect(blocked.failedPhases).toBe(0);
+      expect(blocked.metadataContinuationYields).toBe(1);
+      expect(allowances.map(item => item.rows)).toEqual([1]);
       expect(harness.agent.syncCheckpoints.size).toBe(1);
       expect(allowances[0]!.scope).toMatch(/^ordinary-swm-meta:/);
-      expect(allowances[1]!.scope).toMatch(/^selected-swm-meta:/);
       await ordinary();
       expect(harness.agent.syncCheckpoints.size).toBe(0);
       const admitted = await selected();
       expect(admitted.metadataContinuationYields).toBe(1);
-      expect(allowances.map(item => item.rows)).toEqual([1, 0, 0, 1]);
-      expect(allowances[2]!.scope).toBe(allowances[0]!.scope);
+      expect(allowances.map(item => item.rows)).toEqual([1, 0, 1]);
+      expect(allowances[1]!.scope).toBe(allowances[0]!.scope);
+      expect(allowances[2]!.scope).toMatch(/^selected-swm-meta:/);
       expect(harness.agent.syncCheckpoints.size).toBe(1);
     } finally {
       if (previousBudget === undefined) delete process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS;

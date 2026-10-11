@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   normalizeSharedMemoryMetadataFetcher,
+  normalizeSharedMemoryFetcherContext,
   selectSharedMemoryMetadataFetcher,
 } from '../src/sync/requester/shared-memory-metadata-fetcher.js';
 import type {
@@ -56,6 +57,22 @@ describe('shared-memory metadata fetcher normalization', () => {
       },
       vi.fn(),
     );
+    await normalized.fetch(request);
+    normalized.release('cg');
+    expect(fetcher.calls).toEqual(['fetch:cg', 'release:cg']);
+  });
+
+  it('consumes the nested layout once without invoking or copying its receiver', async () => {
+    const fetcher = new ReceiverFetcher();
+    const guard = { signal: new AbortController().signal, assertCurrent: () => {} };
+    const input = { mode: { kind: 'selected-recovery' as const, recoveryGuard: guard, metadataFetcher: fetcher } };
+    const canonical = normalizeSharedMemoryFetcherContext(input);
+    expect(canonical.metadataFetcher).toBe(fetcher);
+    expect(canonical.mode).toEqual({ kind: 'selected-recovery', recoveryGuard: guard });
+    expect(Object.hasOwn(canonical.mode, 'metadataFetcher')).toBe(false);
+    expect(input.mode.metadataFetcher).toBe(fetcher);
+    expect(fetcher.calls).toEqual([]);
+    const normalized = normalizeSharedMemoryMetadataFetcher(canonical, vi.fn());
     await normalized.fetch(request);
     normalized.release('cg');
     expect(fetcher.calls).toEqual(['fetch:cg', 'release:cg']);

@@ -107,7 +107,7 @@ describe('selected SWM metadata retention budget', () => {
   });
 
   it('separates a lease-own prefix ceiling from shared-pool contention', () => {
-    const budget = createSelectedSwmMetaRetentionBudget({
+    const budget = createSwmMetaRetentionBudget({
       maxRows: 4,
       maxBytesEstimate: 400,
       maxPrefixRows: 1,
@@ -133,7 +133,7 @@ describe('selected SWM metadata retention budget', () => {
 
     // Below its own ceiling but blocked by rows the pool already handed to a
     // sibling: transient, and therefore reported as a different exhaustion.
-    const shared = createSelectedSwmMetaRetentionBudget({
+    const shared = createSwmMetaRetentionBudget({
       maxRows: 1,
       maxBytesEstimate: 400,
       maxPrefixRows: 4,

@@ -2,7 +2,6 @@ import { formatUncheckedWorkspaceOperationSubject } from './workspace-metadata-s
 import { emitLegacySwmOperation, emitGraphSwmOperationHeader, emitSwmOwnership, SWM_WORKSPACE_OPERATION } from './swm-metadata-schema.js';
 import { nextEventId } from './assertion-lifecycle-events.js';
 export { generateAssertionWrittenMetadata, type AssertionWrittenMeta } from './assertion-lifecycle-events.js';
-import { ENTITY_SHARE_METADATA_PREDICATES as ENTITY_SHARE } from './entity-share-metadata.js';
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { deleteByPatternWithoutCount, GraphManager, LOCAL_TRUSTED_KA_CONTROLS_GRAPH } from '@origintrail-official/dkg-storage';
 import {

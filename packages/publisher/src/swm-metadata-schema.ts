@@ -1,25 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { assertSafeIri, createGraphKnowledgeAssetScope, isSafeIri, validateSubGraphName } from '@origintrail-official/dkg-core';
+import { DKG_ENTITY } from '@origintrail-official/dkg-core';
+import { ENTITY_SHARE_METADATA_PREDICATES } from './entity-share-metadata.js';
+export {
+  workspaceOperationSubject as swmOperationSubject,
+  workspaceKnowledgeAssetHeadSubject as swmKnowledgeAssetHeadSubject,
+  workspaceOperationPublicSliceSubject as swmPublicSliceSubject,
+  decodeWorkspaceOperationPublicSliceSubject as decodeSwmPublicSliceSubject,
+} from './workspace-metadata-subjects.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
 const DKG = 'http://dkg.io/ontology/';
 export const SWM_WORKSPACE_OPERATION = `${DKG}WorkspaceOperation`;
 export const SWM_HEAD_SUFFIX = '#dkg-swm-head';
 export const SWM_PREDICATES = {
-  type: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
-  wasAttributedTo: 'http://www.w3.org/ns/prov#wasAttributedTo',
-  contextGraphId: `${DKG}contextGraphId`, shareOperationId: `${DKG}shareOperationId`,
-  publisherPeerId: `${DKG}publisherPeerId`, publishedAt: `${DKG}publishedAt`,
-  subGraphName: `${DKG}subGraphName`, rootEntity: `${DKG}rootEntity`, entity: `${DKG}entity`,
+  ...ENTITY_SHARE_METADATA_PREDICATES,
+  entity: DKG_ENTITY,
   contentScopeVersion: `${DKG}contentScopeVersion`, kaUal: `${DKG}kaUal`,
   assertionVersion: `${DKG}assertionVersion`, assertionGraph: `${DKG}assertionGraph`,
-  publicQuadsCount: `${DKG}publicQuadsCount`, privateTripleCount: `${DKG}privateTripleCount`,
-  privateMerkleRoot: `${DKG}privateMerkleRoot`, accessPolicy: `${DKG}accessPolicy`,
-  allowedPeer: `${DKG}allowedPeer`, publicQuadsDigest: `${DKG}publicQuadsDigest`,
-  publicSnapshotGraph: `${DKG}publicSnapshotGraph`, publicSnapshotRef: `${DKG}publicSnapshotRef`,
-  publicSliceRootEntity: `${DKG}publicSliceRootEntity`, publicStagedQuads: `${DKG}publicStagedQuads`,
-  workspaceOwner: `${DKG}workspaceOwner`,
+  privateTripleCount: `${DKG}privateTripleCount`, privateMerkleRoot: `${DKG}privateMerkleRoot`,
+  accessPolicy: `${DKG}accessPolicy`, allowedPeer: `${DKG}allowedPeer`,
+  publicStagedQuads: `${DKG}publicStagedQuads`, workspaceOwner: `${DKG}workspaceOwner`,
 } as const;
 
 const P = SWM_PREDICATES;
@@ -111,24 +112,40 @@ interface GraphSwmSnapshotFragmentTerms extends CurrentWriteTerms {
   readonly publicSnapshotGraph?: string;
 }
 
-const CURRENT_OPERATION_FIELDS = ['contextGraphId', 'shareOperationId', 'publisherPeerId', 'wasAttributedTo', 'publishedAt', 'subGraphName'] as const;
-// Write fields are deliberately independent of historical read allowlists.
+type CurrentFieldKeys<T> = { [K in keyof T]: Exclude<T[K], undefined> extends never ? never : K }[keyof T];
+interface WriteTermsByRole {
+  legacyOperationV1: LegacySwmOperationTerms;
+  headV2: SwmHeadTerms;
+  publicSliceV1: SwmPublicSliceTerms;
+  ownershipV1: SwmOwnershipTerms;
+  graphOperationHeader: GraphSwmOperationHeaderTerms;
+  graphSnapshotFragment: GraphSwmSnapshotFragmentTerms;
+}
+type CompleteWriteFields = {
+  [Role in keyof WriteTermsByRole]: Record<Extract<CurrentFieldKeys<WriteTermsByRole[Role]>, string>, true>;
+};
+const CURRENT_OPERATION_FIELDS = {
+  contextGraphId: true, shareOperationId: true, publisherPeerId: true,
+  wasAttributedTo: true, publishedAt: true, subGraphName: true,
+} as const;
+// Exhaustive mapped contracts catch missing or additional writer fields at compilation.
+// Historical read-only aliases are excluded by their optional-never term types.
 const WRITE_FIELDS = {
-  legacyOperationV1: [...CURRENT_OPERATION_FIELDS, 'type', 'rootEntity'],
-  headV2: ['contentScopeVersion', 'kaUal', 'assertionVersion', 'assertionGraph', 'shareOperationId'],
-  publicSliceV1: [...CURRENT_OPERATION_FIELDS, 'publicSliceRootEntity', 'publicQuadsDigest', 'publicQuadsCount', 'publicSnapshotGraph'],
-  ownershipV1: ['workspaceOwner'],
-  graphOperationHeader: [...CURRENT_OPERATION_FIELDS, 'type', 'contentScopeVersion', 'kaUal', 'assertionVersion',
-    'publicQuadsCount', 'privateTripleCount', 'privateMerkleRoot', 'accessPolicy', 'allowedPeer'],
-  graphSnapshotFragment: ['publicQuadsDigest', 'publicSnapshotGraph'],
-} as const satisfies Record<string, readonly (keyof typeof P)[]>;
+  legacyOperationV1: { ...CURRENT_OPERATION_FIELDS, type: true, rootEntity: true },
+  headV2: { contentScopeVersion: true, kaUal: true, assertionVersion: true, assertionGraph: true, shareOperationId: true },
+  publicSliceV1: { ...CURRENT_OPERATION_FIELDS, publicSliceRootEntity: true, publicQuadsDigest: true, publicQuadsCount: true, publicSnapshotGraph: true },
+  ownershipV1: { workspaceOwner: true },
+  graphOperationHeader: { ...CURRENT_OPERATION_FIELDS, type: true, contentScopeVersion: true, kaUal: true, assertionVersion: true,
+    publicQuadsCount: true, privateTripleCount: true, privateMerkleRoot: true, accessPolicy: true, allowedPeer: true },
+  graphSnapshotFragment: { publicQuadsDigest: true, publicSnapshotGraph: true },
+} as const satisfies CompleteWriteFields;
 
 /** Private serializer: preserve caller order and reject fields outside the writer contract. */
 function emitTerms(role: keyof typeof WRITE_FIELDS, subject: string, graph: string, terms: object): Quad[] {
   const rows: Quad[] = [];
-  const fields: readonly string[] = WRITE_FIELDS[role];
+  const fields = WRITE_FIELDS[role];
   for (const [field, value] of Object.entries(terms) as Array<[keyof typeof P, string | readonly string[] | undefined]>) {
-    if (!fields.includes(field)) throw new Error(`Unknown ${role} field: ${field}`);
+    if (!Object.hasOwn(fields, field)) throw new Error(`Unknown ${role} field: ${field}`);
     for (const object of typeof value === 'string' ? [value] : value ?? []) {
       rows.push({ subject, predicate: P[field], object, graph });
     }
@@ -169,45 +186,3 @@ export function selectSwmRecordRows(role: SwmRecordRole, rows: readonly Quad[]):
   return rows.filter(row => isSwmRecordRowAllowed(role, row));
 }
 
-export function swmOperationSubject(contextGraphId: string, shareOperationId: string): string {
-  const cg = safeWorkspaceIdPart(contextGraphId, 'contextGraphId');
-  const id = safeWorkspaceIdPart(shareOperationId, 'shareOperationId');
-  return assertSafeIri(`urn:dkg:share:${cg}:${id}`);
-}
-
-function safeWorkspaceIdPart(value: string, fieldName: 'contextGraphId' | 'shareOperationId'): string {
-  const normalized = value.trim();
-  if (normalized.length === 0) throw new Error(`Shared-memory resolution requires a non-empty ${fieldName}`);
-  if (/[\s<>"{}|^`\\]/.test(normalized)) throw new Error(`Shared-memory resolution rejected unsafe ${fieldName}: ${value}`);
-  return normalized;
-}
-
-export function swmKnowledgeAssetHeadSubject(kaUal: string): string {
-  return assertSafeIri(`${createGraphKnowledgeAssetScope(kaUal, 1).ual}${SWM_HEAD_SUFFIX}`);
-}
-
-export function swmPublicSliceSubject(contextGraphId: string, shareOperationId: string, rootEntity: string, subGraphName?: string): string {
-  return assertSafeIri(`urn:dkg:public-stage:${[contextGraphId, subGraphName ?? '_', shareOperationId, rootEntity].map(encodeURIComponent).join(':')}`);
-}
-
-export function decodeSwmPublicSliceSubject(subject: string): {
-  contextGraphId: string; shareOperationId: string; rootEntity: string; subGraphName?: string;
-} | undefined {
-  const prefix = 'urn:dkg:public-stage:';
-  if (!subject.startsWith(prefix)) return undefined;
-  try {
-    const parts = subject.slice(prefix.length).split(':').map(decodeURIComponent);
-    if (parts.length !== 4 || parts.some(part => !part)) return undefined;
-    const [contextGraphId, sub, shareOperationId, rootEntity] = parts;
-    const subGraphName = sub === '_' ? undefined : sub;
-    if (!isSafeIri(rootEntity) || (subGraphName !== undefined && !validateSubGraphName(subGraphName).valid)) return undefined;
-    swmOperationSubject(contextGraphId, shareOperationId);
-    if (swmPublicSliceSubject(contextGraphId, shareOperationId, rootEntity, subGraphName) !== subject) return undefined;
-    return { contextGraphId, shareOperationId, rootEntity, ...(subGraphName ? { subGraphName } : {}) };
-  } catch { return undefined; }
-}
-
-export function swmKnowledgeAssetOperationSnapshotGraph(contextGraphId: string, shareOperationId: string, subGraphName?: string): string {
-  const parts = [contextGraphId, subGraphName ?? '_', shareOperationId].map(encodeURIComponent);
-  return assertSafeIri(`did:dkg:context-graph:${parts[0]}/_shared_memory_snapshots/${parts[1]}/${parts[2]}/ka`);
-}

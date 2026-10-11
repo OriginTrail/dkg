@@ -3,7 +3,7 @@
 import { GRAPH_KA_CONTENT_SCOPE_VERSION, contextGraphSharedMemoryMetaUri, isSafeIri, validateSubGraphName } from '@origintrail-official/dkg-core';
 import {
   SWM_HEAD_SUFFIX, SWM_PREDICATES as P, SWM_WORKSPACE_OPERATION,
-  decodeSwmPublicSliceSubject, isSwmRecordRowAllowed, swmKnowledgeAssetHeadSubject, swmOperationSubject,
+  decodeWorkspaceOperationPublicSliceSubject, isSwmRecordRowAllowed, workspaceKnowledgeAssetHeadSubject, workspaceOperationSubject,
   type SwmRecordRole,
 } from '@origintrail-official/dkg-publisher';
 import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
@@ -88,7 +88,7 @@ export function indexSwmMetadata(quads: readonly Quad[], scope: SharedMemoryAdmi
 } {
   const groups = new Map<string, { subject: string; metaGraph: string; rows: IndexedSwmRow[] }>();
   quads.forEach((quad, sourceIndex) => {
-    const key = JSON.stringify([quad.graph, quad.subject]);
+    const key = swmRecordKey(quad.graph, quad.subject);
     let group = groups.get(key);
     if (!group) { group = { subject: quad.subject, metaGraph: quad.graph, rows: [] }; groups.set(key, group); }
     group.rows.push({ sourceIndex, quad });
@@ -146,7 +146,7 @@ function operationIdentity(subject: string, metaGraph: string): OperationIdentit
     const prefix = `urn:dkg:share:${candidate.contextGraphId}:`;
     if (!subject.startsWith(prefix)) continue;
     const shareOperationId = subject.slice(prefix.length);
-    if (!shareOperationId || swmOperationSubject(candidate.contextGraphId, shareOperationId) !== subject) continue;
+    if (!shareOperationId || workspaceOperationSubject(candidate.contextGraphId, shareOperationId) !== subject) continue;
     return { ...candidate, shareOperationId };
   }
   return undefined;
@@ -195,7 +195,7 @@ export function decodeSwmOperation(source: SwmRecordSource, scope: SharedMemoryA
 export function decodeSwmHead(source: SwmRecordSource): AdmittedSwmHead | SwmRecordRejection | undefined {
   if (!hasSwmHeadEnvelope(source)) return undefined;
   try {
-    if (swmKnowledgeAssetHeadSubject(source.subject.slice(0, -SWM_HEAD_SUFFIX.length)) !== source.subject) return rejection(source, 'head', 'nonCanonicalSubject');
+    if (workspaceKnowledgeAssetHeadSubject(source.subject.slice(0, -SWM_HEAD_SUFFIX.length)) !== source.subject) return rejection(source, 'head', 'nonCanonicalSubject');
   } catch { return rejection(source, 'head', 'nonCanonicalSubject'); }
   return { ...recordRows(source, selectRows(source, 'headV2')), role: 'head' };
 }
@@ -206,12 +206,12 @@ export function decodeSwmPublicSlice(source: SwmRecordSource, operations: Readon
   // historical partial slice rows on other canonical subjects readable.
   if (isLegacyRoot && !source.rows.some(({ quad }) => isSwmRecordRowAllowed('publicSliceV1', quad)
     && !isSwmRecordRowAllowed('ownershipV1', quad))) return undefined;
-  const identity = decodeSwmPublicSliceSubject(source.subject);
+  const identity = decodeWorkspaceOperationPublicSliceSubject(source.subject);
   if (!identity) return undefined;
   const rows = source.rows.map(row => row.quad);
   if (contextGraphSharedMemoryMetaUri(identity.contextGraphId, identity.subGraphName) !== source.metaGraph
     || !matchesIdentity(rows, identity, false)) return rejection(source, 'publicSlice', 'identityMismatch');
-  const operation = operations.get(swmRecordKey(source.metaGraph, swmOperationSubject(identity.contextGraphId, identity.shareOperationId)));
+  const operation = operations.get(swmRecordKey(source.metaGraph, workspaceOperationSubject(identity.contextGraphId, identity.shareOperationId)));
   if (!operation?.roots.has(identity.rootEntity)) return rejection(source, 'publicSlice', 'missingLegacyRoot');
   if (rows.some(row => row.predicate === P.publicSliceRootEntity && legacyRoot(row.object) !== identity.rootEntity)) return rejection(source, 'publicSlice', 'identityMismatch');
   return { ...recordRows(source, selectRows(source, 'publicSliceV1')), role: 'publicSlice' };

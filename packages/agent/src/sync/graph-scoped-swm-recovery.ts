@@ -11,7 +11,7 @@ import {
   canonicalPublisherWorkspaceOperationSemantics,
   selectEquivalentWorkspaceOperation,
   workspacePublicQuadsDigest,
-  SWM_PREDICATES as P, SWM_WORKSPACE_OPERATION, SWM_HEAD_SUFFIX, swmOperationSubject,
+  SWM_PREDICATES as P, SWM_WORKSPACE_OPERATION, SWM_HEAD_SUFFIX, workspaceOperationSubject,
   type WorkspaceOperationModel,
   type PublisherWorkspaceOperationSemantics,
   type WorkspaceOperationAccessEnvelope,
@@ -595,7 +595,7 @@ function resolveEquivalentHeadOperation(params: {
   }
 
   const candidates: RecoveryOperationCandidate[] = shareOperationIds.map((shareOperationId) => {
-    const operationSubject = swmOperationSubject(params.contextGraphId, shareOperationId);
+    const operationSubject = workspaceOperationSubject(params.contextGraphId, shareOperationId);
     const operationRows = params.graphOperations.get(
       `${params.metaGraph}\u0000${operationSubject}`,
     )?.rows ?? [];

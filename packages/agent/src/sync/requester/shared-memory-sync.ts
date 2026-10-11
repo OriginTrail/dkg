@@ -46,7 +46,11 @@ import {
   type SyncPageFetchOptions,
   type SyncPageResult,
 } from './page-fetch.js';
-import { normalizeSharedMemoryMetadataFetcher } from './shared-memory-metadata-fetcher.js';
+import {
+  completeSharedMemoryMetadataFetcher,
+  normalizeSharedMemoryFetcherContext,
+  type CanonicalSharedMemoryFetcherContext,
+} from './shared-memory-metadata-fetcher.js';
 import {
   canonicalGraphScopedSnapshotManifestQuads,
   canonicalizeGraphScopedSwmHeadRows,
@@ -446,7 +450,15 @@ function storedVersionOutranksDescriptor(stored: string, descriptorVersion: stri
   }
 }
 
-export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, SharedMemorySyncSummary>(async context => {
+export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, SharedMemorySyncSummary>(
+  context => runSharedMemorySyncCore(normalizeSharedMemoryFetcherContext(context)),
+);
+
+async function runSharedMemorySyncCore(
+  context: CanonicalSharedMemoryFetcherContext<Omit<SharedMemorySyncContext, 'publicSnapshotStore'> & {
+    publicSnapshotStore: WorkspaceSnapshotScope | undefined;
+  }>,
+): Promise<SharedMemorySyncSummary> {
   const {
     ctx,
     remotePeerId,
@@ -504,8 +516,8 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
       ...(recoveryBoundary.signal === undefined ? {} : { signal: recoveryBoundary.signal }),
     });
   };
-  const metadataFetcher = normalizeSharedMemoryMetadataFetcher(
-    context,
+  const metadataFetcher = completeSharedMemoryMetadataFetcher(
+    context.metadataFetcher,
     request => fetchRecoveryPages(
       request.contextGraphId,
       'meta',
@@ -1703,7 +1715,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
   }
 
   return summary;
-});
+}
 
 export interface PublicSnapshotMetadata {
   ref: string;
