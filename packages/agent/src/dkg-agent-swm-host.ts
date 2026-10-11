@@ -1,6 +1,6 @@
 import { createHostModePublicPolicy, resolveAutomaticHostModeLocalId } from './internal/swm-host-catchup-policy.js';
 import { HostModeRestoration } from './internal/host-mode-restoration.js';
-import { createAutomaticHostModeActivation, readSwmHostModeAccessPolicy } from './internal/automatic-host-mode-activation.js';
+import { createAutomaticHostModeActivation, readSwmHostModeAccessPolicy, reconcileKnownHostModeSubscriptions } from './internal/automatic-host-mode-activation.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -852,7 +852,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       list: () => store.listHostModeSubscriptions(),
       restore: (entry, current) => this.restorePersistedHostModeSubscription(entry, stripOn, current),
       current: () => session.active && this.gossipSession === session,
-      batchSize: normalizeHostModeReconcileBatchSize(this.config.swmHostMode?.reconcileBatchSize),
+      batchSize: () => normalizeHostModeReconcileBatchSize(this.config.swmHostMode?.reconcileBatchSize),
       failed: error => this.log.warn(createOperationContext('system'),
         `Failed to list persisted host-mode subscriptions: ${error instanceof Error ? error.message : String(error)}`),
     });
@@ -1376,33 +1376,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
     const inflight = (async () => {
       try {
-        const graphManager = new GraphManager(this.store);
-        // Enumerate local IDs and durable intent once; only the rotating bounded
-        // slice performs policy work, including cold markers with no graph data.
-        const [localIds, markers] = await Promise.all([
-          graphManager.listContextGraphs({
-            source: 'agent.swmHostMode.listContextGraphs',
-          }), store.listHostModeSubscriptions(),
-        ]);
-        if (!current()) return;
-        const knownCgs = [...new Set([...localIds, ...markers.map(entry => entry.contextGraphId)])].sort();
-        if (knownCgs.length === 0) {
-          this.hostModeReconcileCursor = 0;
-          return;
-        }
-        const batchSize = normalizeHostModeReconcileBatchSize(this.config.swmHostMode?.reconcileBatchSize);
-        const start = this.hostModeReconcileCursor % knownCgs.length;
-        const count = Math.min(batchSize, knownCgs.length);
-        for (let i = 0; i < count; i++) {
-          if (!current()) return;
-          const index = (start + i) % knownCgs.length;
-          const cgId = knownCgs[index];
-          try {
-            await this.reconcileSwmHostModeSubscription(cgId, SUBSCRIPTION_SOURCES.RECONCILER, current);
-          } finally {
-            this.hostModeReconcileCursor = (index + 1) % knownCgs.length;
-          }
-        }
+        await reconcileKnownHostModeSubscriptions({
+          store: this.store, markers: store, current,
+          batchSize: () => normalizeHostModeReconcileBatchSize(this.config.swmHostMode?.reconcileBatchSize),
+          cursor: () => this.hostModeReconcileCursor,
+          advanceCursor: cursor => { this.hostModeReconcileCursor = cursor; },
+          reconcile: id => this.reconcileSwmHostModeSubscription(id, SUBSCRIPTION_SOURCES.RECONCILER, current),
+        });
       } finally {
         this.hostModeReconcileInflight = undefined;
       }

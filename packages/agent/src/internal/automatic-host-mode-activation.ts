@@ -5,7 +5,8 @@ import type { ContextGraphSub } from '../dkg-agent-types.js';
 import type { GossipSession, SwmHostModeCustody } from '../gossip-session.js';
 import { normalizeContextGraphNameHash } from '../context-graph-name-candidate.js';
 import type { ContextGraphBindingSubscription } from '../context-graph-binding-state.js';
-import type { SwmHostModeSubscriptionBinding } from '../swm/host-mode-store.js';
+import type { SwmHostModeStore, SwmHostModeSubscriptionBinding } from '../swm/host-mode-store.js';
+import { GraphManager, type TripleStore } from '@origintrail-official/dkg-storage';
 
 type HostActivationMethods = Pick<DKGAgent,
   | 'automaticSwmHostModeAdmissionAllowed' | 'retireDormantSwmHostModeHandler' | 'restorePersistedHostModeBinding'
@@ -181,4 +182,34 @@ export function readSwmHostModeAccessPolicy(contextGraphId: string, ports: {
     sub = owner === undefined ? undefined : ports.subscriptions.get(owner);
   }
   return sub?.onChainId ? ports.accessPolicies.get(sub.onChainId) : undefined;
+}
+
+/** Enumerate intent once; the rotating slice bounds policy work for cold and populated graphs. */
+export async function reconcileKnownHostModeSubscriptions(ports: {
+  store: TripleStore;
+  markers: Pick<SwmHostModeStore, 'listHostModeSubscriptions'>;
+  current(): boolean;
+  batchSize(): number;
+  cursor(): number;
+  advanceCursor(cursor: number): void;
+  reconcile(id: string): Promise<void>;
+}): Promise<void> {
+  const [localIds, markers] = await Promise.all([
+    new GraphManager(ports.store).listContextGraphs({ source: 'agent.swmHostMode.listContextGraphs' }),
+    ports.markers.listHostModeSubscriptions(),
+  ]);
+  if (!ports.current()) return;
+  const knownCgs = [...new Set([...localIds, ...markers.map(entry => entry.contextGraphId)])].sort();
+  if (knownCgs.length === 0) { ports.advanceCursor(0); return; }
+  const start = ports.cursor() % knownCgs.length;
+  const count = Math.min(ports.batchSize(), knownCgs.length);
+  for (let i = 0; i < count; i++) {
+    if (!ports.current()) return;
+    const index = (start + i) % knownCgs.length;
+    try {
+      await ports.reconcile(knownCgs[index]);
+    } finally {
+      ports.advanceCursor((index + 1) % knownCgs.length);
+    }
+  }
 }

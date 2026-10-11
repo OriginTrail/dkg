@@ -116,3 +116,28 @@ export function workspaceHeadIncludesShareOperationId(
   const expected = shareOperationId.trim();
   return head.operationAliases.some((alias) => alias.shareOperationId === expected);
 }
+
+/**
+ * Unambiguous composite key for `seenShareOps`.
+ *
+ * **Why not `${cgId}|${shareOperationId}` (rc.9 PR-A codex follow-up
+ * #11)**: both `cgId` and `shareOperationId` are wire-supplied by
+ * the publishing peer, neither is structurally constrained to
+ * exclude `|`. A peer can therefore craft two distinct logical
+ * pairs that hash to the SAME composite-string key
+ * (`cgId="a|b" + op="c"` and `cgId="a" + op="b|c"` both produce
+ * `"a|b|c"`), letting them collide `redundantApplies` accounting:
+ * a legitimate apply on one pair could appear to be a "redundant"
+ * re-delivery of the other. The metric is operator-facing, so the
+ * skew is bounded but it would still let a hostile peer poison the
+ * counter for unrelated tenants.
+ *
+ * `JSON.stringify([cgId, shareOperationId])` is structurally
+ * unambiguous: array delimiters + quote-escaping make every
+ * (cgId, op) pair produce a unique key. The performance cost
+ * (one `JSON.stringify` per apply) is negligible — this runs only
+ * on legitimate deliveries that already passed validation.
+ */
+export function seenShareOpKey(cgId: string, shareOperationId: string): string {
+  return JSON.stringify([cgId, shareOperationId]);
+}
