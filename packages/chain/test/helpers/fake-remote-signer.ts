@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
  * In-process stand-in for an external JSON-RPC signer (Web3Signer-style `eth`
- * dialect or Clef-style `account` dialect), served over HTTP on loopback or
- * over HTTP on a unix domain socket. NOT a test file.
+ * dialect or Clef-style `account` dialect), served over HTTP or HTTPS on
+ * loopback, or over HTTP on a unix domain socket. NOT a test file.
  *
  * Accounts are scoped by bearer credential, as a multi-tenant signing service
  * would scope them: each credential maps to its own key set. The server signs
@@ -10,6 +10,7 @@
  * records every request so tests can assert on what the node sent.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
 import type { AddressInfo } from 'node:net';
 import { ethers } from 'ethers';
 
@@ -31,6 +32,8 @@ export interface FakeSignerOptions {
   api?: 'eth' | 'clef';
   /** Listen on this unix socket instead of 127.0.0.1. */
   socketPath?: string;
+  /** Serve HTTPS with this certificate and key; the signer's URL is then `https://localhost:<port>`. */
+  tls?: { cert: string; key: string };
   /** Methods answered with JSON-RPC -32601 (method not found). */
   unsupported?: Iterable<string>;
   /** Methods that are accepted but never answered. */
@@ -66,7 +69,7 @@ export async function startFakeRemoteSigner(options: FakeSignerOptions): Promise
   // Keys are read per request so a test can add keys to a running signer.
   const walletsOf = (keys: readonly string[]) => keys.map((key) => new ethers.Wallet(key));
 
-  const server: Server = createServer((req: IncomingMessage, res: ServerResponse) => {
+  const handle = (req: IncomingMessage, res: ServerResponse): void => {
     const chunks: Buffer[] = [];
     req.on('data', (chunk: Buffer) => chunks.push(chunk));
     req.on('end', () => {
@@ -122,7 +125,10 @@ export async function startFakeRemoteSigner(options: FakeSignerOptions): Promise
         }
       })();
     });
-  });
+  };
+  const server: Server | HttpsServer = options.tls
+    ? createHttpsServer({ cert: options.tls.cert, key: options.tls.key }, handle)
+    : createServer(handle);
 
   if (options.socketPath) {
     await new Promise<void>((resolve) => server.listen(options.socketPath, resolve));
@@ -133,7 +139,7 @@ export async function startFakeRemoteSigner(options: FakeSignerOptions): Promise
   return {
     ...(options.socketPath
       ? { socketPath: options.socketPath }
-      : { url: `http://127.0.0.1:${(address as AddressInfo).port}` }),
+      : { url: options.tls ? `https://localhost:${(address as AddressInfo).port}` : `http://127.0.0.1:${(address as AddressInfo).port}` }),
     requests,
     calls: (method) => requests.filter((request) => request.method === method),
     close: () => new Promise<void>((resolve) => {

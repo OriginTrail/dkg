@@ -3,14 +3,32 @@ import http from 'node:http';
 import http2 from 'node:http2';
 import net from 'node:net';
 import type { AddressInfo } from 'node:net';
+import tls from 'node:tls';
 
 /**
  * A test-only self-signed certificate for `localhost` and 127.0.0.1, valid
  * until 2126. `test/fixtures/localhost-tls/localhost.cnf` describes it and
  * gives the command that regenerates both files.
  */
-const LOCALHOST_CERT = readFileSync(new URL('../fixtures/localhost-tls/localhost-cert.pem', import.meta.url), 'utf8');
-const LOCALHOST_KEY = readFileSync(new URL('../fixtures/localhost-tls/localhost-key.pem', import.meta.url), 'utf8');
+export const LOCALHOST_CERT = readFileSync(new URL('../fixtures/localhost-tls/localhost-cert.pem', import.meta.url), 'utf8');
+export const LOCALHOST_KEY = readFileSync(new URL('../fixtures/localhost-tls/localhost-key.pem', import.meta.url), 'utf8');
+/**
+ * A test-only self-signed certificate for `signer.invalid` only, issued with
+ * the same test key (`test/fixtures/localhost-tls/other-host.cnf`): served on
+ * localhost, it fails the host name check even where it is trusted.
+ */
+export const OTHER_HOST_CERT = readFileSync(new URL('../fixtures/localhost-tls/other-host-cert.pem', import.meta.url), 'utf8');
+
+/** Run `run` while this process also trusts `cert`, as a CA it was configured with would be. */
+export async function withTrustedCertificate<T>(cert: string, run: () => Promise<T>): Promise<T> {
+  const defaults = tls.getCACertificates('default');
+  tls.setDefaultCACertificates([...defaults, cert]);
+  try {
+    return await run();
+  } finally {
+    tls.setDefaultCACertificates(defaults);
+  }
+}
 
 function closeAll(server: net.Server, connections: Set<{ destroy(): void }>): Promise<void> {
   for (const connection of connections) connection.destroy();

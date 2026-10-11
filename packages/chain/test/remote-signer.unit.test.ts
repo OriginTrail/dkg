@@ -25,6 +25,7 @@ import { EVMChainAdapter } from '../src/evm-adapter.js';
 import { makeClient, recorder } from './rpc-failover-test-helpers.js';
 import type { SignPopulatedFn } from '../src/rpc-failover-client.js';
 import { startFakeRemoteSigner, type FakeSigner, type FakeSignerOptions } from './helpers/fake-remote-signer.js';
+import { LOCALHOST_CERT, LOCALHOST_KEY, OTHER_HOST_CERT, withTrustedCertificate } from './helpers/local-tls.js';
 
 const KEY_A = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d';
 const KEY_B = '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a';
@@ -193,7 +194,7 @@ describe('remote signer transport', () => {
     expect(String(err)).not.toContain('secret');
   });
 
-  it('rejects malformed, mismatched and oversized answers, and reaches https endpoints', async () => {
+  it('rejects malformed, mismatched and oversized answers', async () => {
     expect(() => new RemoteSignerClient({ url: 'http://[' })).toThrow(/not a valid URL/);
     const wrongId = await fakeSigner({
       rawResponse: () => ({ status: 200, body: JSON.stringify({ jsonrpc: '2.0', id: 999, result: [] }) }),
@@ -203,16 +204,42 @@ describe('remote signer transport', () => {
     await expect(client(oversized).listAccounts()).rejects.toThrow(/sent more than/);
     const notAnAccount = await fakeSigner({ tamper: (method, result) => method === 'eth_accounts' ? ['not-an-address'] : result });
     await expect(client(notAnAccount).listAccounts()).rejects.toMatchObject({ code: 'REMOTE_SIGNER_BAD_RESPONSE' });
+  });
 
-    const closed = createServer();
-    await new Promise<void>((resolve) => closed.listen(0, '127.0.0.1', resolve));
-    const port = (closed.address() as { port: number }).port;
-    await new Promise<void>((resolve) => closed.close(() => resolve()));
-    const secure = new RemoteSignerClient({ url: `https://127.0.0.1:${port}`, timeoutMs: 2_000 });
-    expect(secure.endpoint).toBe(`https://127.0.0.1:${port}`);
-    expect(secure.timeoutMs).toBe(2_000);
-    await expect(secure.listAccounts()).rejects.toMatchObject({ code: 'REMOTE_SIGNER_UNAVAILABLE' });
-    secure.destroy();
+  it('checks the certificate of an https signer before it sends the credential', async () => {
+    const trusted = await fakeSigner({ tls: { cert: LOCALHOST_CERT, key: LOCALHOST_KEY } });
+    const port = new URL(trusted.url!).port;
+    const secure = new RemoteSignerClient({ url: trusted.url, authToken: TOKEN, timeoutMs: 5_000 });
+    cleanups.push(async () => secure.destroy());
+    expect(secure.endpoint).toBe(`https://localhost:${port}`);
+    expect(secure.timeoutMs).toBe(5_000);
+
+    // A certificate the node trusts, for the host it connects to.
+    await withTrustedCertificate(LOCALHOST_CERT, async () => {
+      expect(await secure.listAccounts()).toEqual([WALLET_A.address, WALLET_B.address]);
+    });
+    expect(trusted.requests.map((request) => request.authorization)).toEqual([`Bearer ${TOKEN}`]);
+
+    // The same signer, its certificate not trusted: the handshake fails and nothing is sent.
+    const untrusted = new RemoteSignerClient({ url: trusted.url, authToken: TOKEN, timeoutMs: 5_000 });
+    cleanups.push(async () => untrusted.destroy());
+    await expect(untrusted.listAccounts()).rejects.toMatchObject({
+      code: 'REMOTE_SIGNER_UNAVAILABLE',
+      message: expect.stringContaining('DEPTH_ZERO_SELF_SIGNED_CERT'),
+    });
+    expect(trusted.requests).toHaveLength(1);
+
+    // A trusted certificate for another host name: the handshake fails and nothing is sent.
+    const otherHost = await fakeSigner({ tls: { cert: OTHER_HOST_CERT, key: LOCALHOST_KEY } });
+    const mismatched = new RemoteSignerClient({ url: otherHost.url, authToken: TOKEN, timeoutMs: 5_000 });
+    cleanups.push(async () => mismatched.destroy());
+    await withTrustedCertificate(OTHER_HOST_CERT, async () => {
+      await expect(mismatched.listAccounts()).rejects.toMatchObject({
+        code: 'REMOTE_SIGNER_UNAVAILABLE',
+        message: expect.stringContaining('ERR_TLS_CERT_ALTNAME_INVALID'),
+      });
+    });
+    expect(otherHost.requests).toHaveLength(0);
   });
 });
 
