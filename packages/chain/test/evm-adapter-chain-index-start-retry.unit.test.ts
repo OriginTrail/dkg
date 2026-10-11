@@ -269,7 +269,7 @@ describe('one-log start that cannot complete for now', () => {
     await advanceUntil(() => indexLines(warn).length > 0, 4_500);
     expect(indexLines(warn)).toEqual([
       '[chain] one-log chain index start deferred (retrying, next attempt in 5s): '
-        + 'chainIndex deploy block eth_getCode at block 24 waited 4000ms for local RPC admission and was not sent',
+        + 'chainIndex deploy block eth_getCode at block 24 exhausted its 4000ms deadline waiting for local RPC admission with no endpoint request in flight',
     ]);
     expect(codeReads(CG_STORAGE)).toEqual([64, 32, 16]);
     expect(adapter.chainEventLog).toBeUndefined();
