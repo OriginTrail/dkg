@@ -12,6 +12,8 @@ import {
   VIZ_PRED_ANCHORED_IN, VIZ_PRED_SIGNED_BY, VIZ_PRED_CONSENSUS,
 } from '../../hooks/useVerifiableMemoryAnchors.js';
 import { memoryGraphLabels } from '../../lib/memoryLabels.js';
+import { LAYER_CONFIG } from './layer-presentation.js';
+export { LAYER_CONFIG, layerNoun, VM_TRIPLE_STAT } from './layer-presentation.js';
 
 export type LayerView = 'overview' | 'graph-overview' | 'query' | 'wm' | 'swm' | 'vm';
 export type LayerContentTab = 'items' | 'assertions' | 'graph' | 'docs';
@@ -164,56 +166,6 @@ export function entityMeta(e: MemoryEntity, profile?: { forType: (iri: string) =
   const primaryType = e.types[0] ? shortType(e.types[0]) : 'Entity';
   const info = TYPE_LABELS[primaryType] ?? TYPE_LABELS.Thing;
   return { ...info, type: primaryType };
-}
-
-// ─── Shared layer configuration ─────────────────────────────
-// Single source of truth for the visual identity of WM / SWM / VM.
-export const LAYER_CONFIG: Record<'wm' | 'swm' | 'vm', {
-  icon: string;
-  color: string;
-  title: string;
-  desc: string;
-  trustLabel: string;
-  trustLevel: TrustLevel;
-}> = {
-  wm: {
-    icon: '◇',
-    color: '#64748b',
-    title: 'Working Memory',
-    desc: 'Private agent scratchpad — ephemeral, fast local storage',
-    trustLabel: 'Working',
-    trustLevel: 'working',
-  },
-  swm: {
-    icon: '◈',
-    color: '#f59e0b',
-    title: 'Shared Working Memory',
-    desc: 'Team workspace — shared proposals, TTL-bounded',
-    trustLabel: 'Shared',
-    trustLevel: 'shared',
-  },
-  vm: {
-    icon: '◉',
-    color: '#22c55e',
-    title: 'Verifiable Memory',
-    desc: 'Endorsed, published, on-chain knowledge',
-    trustLabel: 'Verifiable',
-    trustLevel: 'verified',
-  },
-};
-
-export function layerNoun(
-  layer: 'wm' | 'swm' | 'vm' | TrustLevel,
-  count: number = 2,
-): string {
-  const normalized =
-    layer === 'working' ? 'wm' :
-    layer === 'shared' ? 'swm' :
-    layer === 'verified' ? 'vm' :
-    layer;
-  const plural = count !== 1;
-  if (normalized === 'vm') return plural ? 'Knowledge Assets' : 'Knowledge Asset';
-  return plural ? 'Entities' : 'Entity';
 }
 
 // ─── Shared graph styling ────────────────────────────────────
