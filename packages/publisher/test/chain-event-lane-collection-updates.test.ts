@@ -1,6 +1,6 @@
 import { normalizeKnowledgeAssetUpdateIdentity, type KnowledgeAssetUpdateIdentity, type ChainEvent } from '@origintrail-official/dkg-chain';
 import { describe, expect, it } from 'vitest';
-import { ChainEventPoller, type ChainEventPollerLane, type LaneCursorPersistence } from '../src/chain-event-poller.js';
+import { ChainEventPoller, type ChainEventPollerLane, type LaneCursorPersistence, type OnCollectionUpdated } from '../src/chain-event-poller.js';
 import { makeChain, makeHandler } from './helpers/chain-event-lane-fixture.js';
 
 describe('ChainEventPoller collection updates', () => {
@@ -19,7 +19,7 @@ describe('ChainEventPoller collection updates', () => {
       async loadLane() { return undefined; },
       async saveLane(lane, block) { saveCalls.push({ lane, block }); },
     };
-    const seen: Array<{ merkleRoot: Uint8Array; batchId: bigint; eventIdentity: KnowledgeAssetUpdateIdentity }> = [];
+    const seen: Array<Parameters<OnCollectionUpdated>[0]> = [];
     const poller = new ChainEventPoller({
       chain: adapter,
       publishHandler: makeHandler(),
@@ -37,6 +37,8 @@ describe('ChainEventPoller collection updates', () => {
     expect(Buffer.from(seen[0].merkleRoot).toString('hex')).toBe('44'.repeat(32));
     expect(seen[0].batchId).toBe(42n);
     expect(seen[0].eventIdentity.blockNumber).toBe(50);
+    expect(seen[0].blockNumber).toBe(50);
+    for (const field of ['txHash', 'logIndex', 'blockHash']) expect(field in seen[0]).toBe(false);
     expect(saveCalls).toEqual([{ lane: 'collectionUpdates', block: 100 }]);
   });
 
@@ -52,7 +54,7 @@ describe('ChainEventPoller collection updates', () => {
         },
       }],
     });
-    const seen: Array<{ eventIdentity: KnowledgeAssetUpdateIdentity }> = [];
+    const seen: Array<Parameters<OnCollectionUpdated>[0]> = [];
     const poller = new ChainEventPoller({
       chain: adapter,
       publishHandler: makeHandler(),
@@ -65,18 +67,58 @@ describe('ChainEventPoller collection updates', () => {
     expect(seen.map((info) => info.eventIdentity.txHash)).toEqual(['0x' + 'ab'.repeat(32)]);
     expect(seen.map((info) => info.eventIdentity.logIndex)).toEqual([7]);
     expect(seen.map((info) => info.eventIdentity.blockHash)).toEqual(['0x' + 'cd'.repeat(32)]);
+    expect(seen[0]).toMatchObject({ blockNumber: 50, logIndex: 7,
+      txHash: '0x' + 'ab'.repeat(32), blockHash: '0x' + 'cd'.repeat(32) });
   });
 
   it('preserves an adapter-owned identity instead of reconstructing it from legacy fields', async () => {
     const eventIdentity = normalizeKnowledgeAssetUpdateIdentity({ blockNumber: 50, logIndex: 7, txHash: '0xAB', blockHash: '0xCD' });
     const { adapter } = makeChain({ head: 100, events: [{ type: 'KnowledgeAssetUpdated', blockNumber: 50, updateIdentity: eventIdentity,
       data: { merkleRoot: '0x' + '44'.repeat(32), batchId: '42' } }] });
-    const seen: KnowledgeAssetUpdateIdentity[] = [];
+    const seen: Array<Parameters<OnCollectionUpdated>[0]> = [];
     const poller = new ChainEventPoller({ chain: adapter, publishHandler: makeHandler(), intervalMs: 60_000,
-      onCollectionUpdated: async (info) => { seen.push(info.eventIdentity); } });
+      onCollectionUpdated: async (info) => { seen.push(info); } });
     await (poller as unknown as { poll(): Promise<void> }).poll();
-    expect(seen).toEqual([eventIdentity]);
-    expect(seen[0]).toBe(eventIdentity);
+    expect(seen[0]).toMatchObject({ blockNumber: 50, logIndex: 7, txHash: '0xab', blockHash: '0xcd' });
+    expect(seen[0].eventIdentity).toBe(eventIdentity);
+  });
+
+  it('keeps legacy callback fields absent when the canonical adapter has no position evidence', async () => {
+    const eventIdentity = normalizeKnowledgeAssetUpdateIdentity({});
+    const { adapter } = makeChain({ head: 100, events: [{ type: 'KnowledgeAssetUpdated', blockNumber: 50,
+      updateIdentity: eventIdentity, data: { batchId: '42', merkleRoot: '0x' + '44'.repeat(32),
+        txHash: '0xlegacy', blockHash: '0xlegacy', logIndex: 9 } }] });
+    const seen: Array<Parameters<OnCollectionUpdated>[0]> = [];
+    const poller = new ChainEventPoller({ chain: adapter, publishHandler: makeHandler(),
+      intervalMs: 60_000, onCollectionUpdated: async (info) => { seen.push(info); } });
+    await (poller as unknown as { poll(): Promise<void> }).poll();
+    expect(seen).toHaveLength(1);
+    expect(seen[0].blockNumber).toBe(50);
+    expect(seen[0].eventIdentity).toBe(eventIdentity);
+    for (const field of ['txHash', 'logIndex', 'blockHash']) expect(field in seen[0]).toBe(false);
+  });
+
+  it('holds the page when an adapter returns a non-update to the collection update lane', async () => {
+    const { adapter } = makeChain({ head: 100 });
+    let incoming: ChainEvent = { type: 'ContextGraphCreated', blockNumber: 50,
+      updateIdentity: normalizeKnowledgeAssetUpdateIdentity({ blockNumber: 50 }),
+      data: { batchId: '42', merkleRoot: '0x' + '44'.repeat(32) } };
+    adapter.listenForEvents = async function* () { yield incoming; };
+    let now = 0;
+    const seen: Array<Parameters<OnCollectionUpdated>[0]> = [];
+    const saved: number[] = [];
+    const poller = new ChainEventPoller({ chain: adapter, publishHandler: makeHandler(),
+      intervalMs: 12_000, clock: () => now, onCollectionUpdated: async (info) => { seen.push(info); },
+      cursorPersistence: { async loadLane() { return undefined; }, async saveLane(_lane, block) { saved.push(block); } } });
+    const poll = () => (poller as unknown as { poll(): Promise<void> }).poll();
+    await poll();
+    expect(seen).toEqual([]);
+    expect(saved).toEqual([]);
+    incoming = { ...incoming, type: 'KnowledgeAssetUpdated' };
+    now = 60_000;
+    await poll();
+    expect(seen).toHaveLength(1);
+    expect(saved).toEqual([100]);
   });
 
   it('delivers distinct canonical-only logs with the same root and suppresses their exact replays', async () => {

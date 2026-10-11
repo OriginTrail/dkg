@@ -1,3 +1,4 @@
+import { requireNormalizedCollectionUpdateEvent, type NormalizedCollectionUpdateEvent } from './chain-event-boundary.js';
 import {
   withRpcRequestContext,
   type KnowledgeAssetUpdateIdentity,
@@ -49,6 +50,13 @@ export type OnCollectionUpdated = (info: {
   batchId: bigint;
   /** Canonical identity, including explicit legacy/unpositioned evidence. */
   eventIdentity: KnowledgeAssetUpdateIdentity;
+  blockNumber: number;
+  /** Transaction that committed the update, when the adapter reports it. */
+  txHash?: string;
+  /** Position of the update log within its block, when available. */
+  logIndex?: number;
+  /** Fork identity of the event's block, when available. */
+  blockHash?: string;
   signal?: AbortSignal;
 }) => Promise<void>;
 
@@ -359,7 +367,7 @@ export class ChainEventPoller {
         eventTypes: () => ['KnowledgeAssetUpdated'],
         cursorStrategy: () => ({ kind: 'live-tail', legacyAggregateCursor: true }),
         cadenceMs: this.intervalMs,
-        dispatch: (event, ctx, signal) => this.handleCollectionUpdated(event, ctx, signal),
+        dispatch: (event, ctx, signal) => this.handleCollectionUpdated(requireNormalizedCollectionUpdateEvent(event), ctx, signal),
         persistCeiling: () => this.collectionUpdatesPersistCeiling?.(),
         // The chain index holds back 50 blocks for reorg repair. Revisiting
         // 64 blocks also catches replacements already passed in the live cursor.
@@ -472,7 +480,7 @@ export class ChainEventPoller {
   }
 
   private async handleCollectionUpdated(
-    event: ChainEvent,
+    event: NormalizedCollectionUpdateEvent,
     ctx: OperationContext,
     signal?: AbortSignal,
   ): Promise<void> {
@@ -484,7 +492,6 @@ export class ChainEventPoller {
     const batchId = BigInt(data['batchId'] as string ?? '0');
 
     const eventIdentity = event.updateIdentity;
-    if (eventIdentity === undefined) throw new TypeError('Update event requires a normalized identity');
 
     this.log.info(ctx,
       `Chain event: KnowledgeAssetUpdated block=${event.blockNumber} batchId=${batchId}`,
@@ -497,6 +504,10 @@ export class ChainEventPoller {
       merkleRoot,
       batchId,
       eventIdentity,
+      blockNumber: eventIdentity.blockNumber ?? event.blockNumber,
+      ...(eventIdentity.txHash === undefined ? {} : { txHash: eventIdentity.txHash }),
+      ...(eventIdentity.logIndex === undefined ? {} : { logIndex: eventIdentity.logIndex }),
+      ...(eventIdentity.blockHash === undefined ? {} : { blockHash: eventIdentity.blockHash }),
       signal,
     });
   }

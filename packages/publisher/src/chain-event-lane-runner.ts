@@ -1,10 +1,10 @@
 import {
-  normalizeKnowledgeAssetUpdateIdentity,
   type ChainAdapter,
   type ChainEvent,
   type EventFilter,
   type EventScanHorizonLease,
 } from '@origintrail-official/dkg-chain';
+import { prepareChainEvent } from './chain-event-boundary.js';
 import { createOperationContext, type Logger, type OperationContext } from '@origintrail-official/dkg-core';
 import {
   createLaneCursorStore,
@@ -451,18 +451,14 @@ export class ChainEventLaneRunner {
     try {
       for await (const incoming of this.chain.listenForEvents(filter)) {
         signal?.throwIfAborted();
-        // The replay filter and dispatch share one canonical update identity.
-        const event = incoming.type === 'KnowledgeAssetUpdated' && incoming.updateIdentity === undefined
-          ? { ...incoming, updateIdentity: normalizeKnowledgeAssetUpdateIdentity({
-            blockNumber: incoming.blockNumber, txHash: incoming.data.txHash,
-            logIndex: incoming.data.logIndex, blockHash: incoming.data.blockHash,
-          }) } : incoming;
+        const prepared = prepareChainEvent(incoming);
+        const event = prepared.event;
         if (lease !== undefined && !await this.eventScanLeaseHolds(lease)) {
           leaseExpired = true;
           throw new Error('event scan horizon lease expired before event dispatch');
         }
         signal?.throwIfAborted();
-        const identity = lookback > 0 ? this.replayIdentity(event) : undefined;
+        const identity = lookback > 0 ? prepared.replayKey : undefined;
         if (identity !== undefined) {
           let atBlock = observed.get(event.blockNumber);
           if (atBlock === undefined) {
@@ -522,20 +518,6 @@ export class ChainEventLaneRunner {
     };
   }
 
-  private replayIdentity(event: ChainEvent): string {
-    const data = event.data;
-    const identity = event.type === 'KnowledgeAssetUpdated' ? event.updateIdentity : data;
-    if (identity === undefined) throw new TypeError('Update event requires a normalized identity');
-    return [
-      event.type,
-      event.type === 'KnowledgeAssetUpdated' ? identity.blockNumber ?? event.blockNumber : event.blockNumber,
-      identity.blockHash,
-      identity.logIndex,
-      identity.txHash,
-      data.batchId,
-      data.merkleRoot,
-    ].map((part) => String(part ?? '')).join('\0');
-  }
 
   /**
    * Pulls back a cursor that an earlier head-less scan carried past the chain.
