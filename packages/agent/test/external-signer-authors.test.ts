@@ -83,6 +83,13 @@ function silentLog() {
   return { info() {}, warn() {}, error() {}, debug() {} };
 }
 
+/** A mock chain whose operational wallets sign through an external signer, as it reports. */
+class ExternallySignedMockChain extends MockChainAdapter {
+  usesExternalSigner(): boolean {
+    return true;
+  }
+}
+
 async function stubAgent(remote: RemoteSigners, store = new OxigraphStore()) {
   const agent = Object.create(DKGAgent.prototype) as any;
   const chain = {
@@ -90,11 +97,12 @@ async function stubAgent(remote: RemoteSigners, store = new OxigraphStore()) {
     getEvmChainId: async () => 31337n,
     getKnowledgeAssetsLifecycleAddress: async () => KAV_ADDRESS,
     hasContractCode: async () => false,
+    usesExternalSigner: () => true,
   };
   agent.store = store;
   agent.log = silentLog();
   agent.chain = chain;
-  agent.config = { chainConfig: { signers: remote.operational, authors: remote.authors } };
+  agent.config = { chainConfig: { authors: remote.authors } };
   agent.localAgents = new Map();
   agent.agentTokenIndex = new Map();
   agent.kaNumberAllocator = makeTestKaNumberAllocator();
@@ -292,7 +300,7 @@ describe('external signer author keys', () => {
 
   it('signs shared-memory gossip as an allowed agent whose author key the signer holds', async () => {
     const { fake, remote } = await externalSigners();
-    const config = { chainConfig: { signers: remote.operational, authors: remote.authors } };
+    const config = { chainConfig: { authors: remote.authors } };
     const held = registerSelfSovereignAgent('writer', agentKey.publicKey);
     const custodial = agentFromPrivateKey(HARDHAT_KEYS.EXTRA3, 'custodial');
     const outside = registerSelfSovereignAgent('outside', new ethers.Wallet(HARDHAT_KEYS.EXTRA2).signingKey.publicKey);
@@ -351,11 +359,10 @@ describe('external signer author keys', () => {
         listenHost: '127.0.0.1',
         listenPort: 0,
         kaNumberAllocator: makeTestKaNumberAllocator(),
-        chainAdapter: new MockChainAdapter('mock:31337', payer.address),
+        chainAdapter: new ExternallySignedMockChain('mock:31337', payer.address),
         chainConfig: {
           rpcUrl: 'http://127.0.0.1:1',
           hubAddress: ethers.ZeroAddress,
-          signers: remote.operational,
           ...(authors ? { authors } : {}),
         },
         nodeRole: 'edge',
@@ -424,13 +431,27 @@ describe('external signer author keys', () => {
     }
   });
 
-  it('decides external signing from the chain adapter as well as from the configured signers', async () => {
+  it('decides external signing from the chain adapter, however it was made', async () => {
     const { remote } = await externalSigners();
     const authorsOnly = { chainConfig: { authors: remote.authors } };
     const external = { usesExternalSigner: () => true };
-    expect(signsThroughExternalSigner(authorsOnly, external)).toBe(true);
-    expect(signsThroughExternalSigner(authorsOnly, { usesExternalSigner: () => false })).toBe(false);
-    expect(signsThroughExternalSigner({ chainConfig: { signers: remote.operational } }, undefined)).toBe(true);
+    expect(signsThroughExternalSigner(external)).toBe(true);
+    expect(signsThroughExternalSigner({ usesExternalSigner: () => false })).toBe(false);
+    expect(signsThroughExternalSigner({})).toBe(false);
+    expect(signsThroughExternalSigner(undefined)).toBe(false);
+    // Configured signers build the agent's own adapter, which then says so; a supplied adapter brings its own wallets.
+    const built = constructConfiguredChainAdapter({
+      chainConfig: { rpcUrl: 'http://127.0.0.1:1', hubAddress: '0x00000000000000000000000000000000000000d4', signers: remote.operational },
+    });
+    try {
+      expect(signsThroughExternalSigner(built.chain)).toBe(true);
+    } finally {
+      (built.chain as EVMChainAdapter).destroy();
+    }
+    expect(() => constructConfiguredChainAdapter({
+      chainAdapter: new MockChainAdapter('mock:31337', payer.address),
+      chainConfig: { rpcUrl: 'http://127.0.0.1:1', hubAddress: ethers.ZeroAddress, signers: remote.operational },
+    })).toThrow(/cannot be combined with a supplied chainAdapter/);
     expect(await isExternalAuthorCurator(authorsOnly, external, agentKey.address, payer.address)).toBe(true);
     expect(await isExternalAuthorCurator(authorsOnly, undefined, agentKey.address, payer.address)).toBe(false);
 
@@ -459,7 +480,7 @@ describe('external signer author keys', () => {
         { addresses: [payer.address], signerFor: async () => undefined, firstSignerOf: async () => undefined },
       ]) {
         const agent = Object.create(DKGAgent.prototype) as any;
-        agent.config = { chainConfig: { signers: remote.operational, ...(authors ? { authors } : {}) } };
+        agent.config = { chainConfig: authors ? { authors } : {} };
         agent.chain = chain;
         agent.localAgents = new Map();
         agent.agentTokenIndex = new Map();
@@ -489,8 +510,8 @@ describe('external signer author keys', () => {
       const agent = await DKGAgent.create({
         name: 'ExternalSignerNode',
         store: new OxigraphStore(join(dir, 'store.nq')),
-        chainAdapter: new MockChainAdapter('mock:31337', remote.operational[0].address),
-        chainConfig: { rpcUrl: 'http://127.0.0.1:1', hubAddress: ethers.ZeroAddress, signers: remote.operational, authors: remote.authors },
+        chainAdapter: new ExternallySignedMockChain('mock:31337', remote.operational[0].address),
+        chainConfig: { rpcUrl: 'http://127.0.0.1:1', hubAddress: ethers.ZeroAddress, authors: remote.authors },
         nodeRole: 'edge',
       });
       await agent.start();
@@ -521,14 +542,12 @@ describe('external signer author keys', () => {
   });
 
   it('registers no VERIFY proposal handler when the node holds no operational key', async () => {
-    const { remote } = await externalSigners();
     const messages: string[] = [];
     Logger.setSink((record) => { messages.push(record.message); });
     const agent = await DKGAgent.create({
       name: 'ExternalSignerVerify',
       store: new OxigraphStore(),
-      chainAdapter: new MockChainAdapter('mock:31337', payer.address),
-      chainConfig: { rpcUrl: 'http://127.0.0.1:1', hubAddress: ethers.ZeroAddress, signers: remote.operational },
+      chainAdapter: new ExternallySignedMockChain('mock:31337', payer.address),
       nodeRole: 'edge',
     });
     try {

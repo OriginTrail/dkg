@@ -26,6 +26,7 @@ export interface EvmSigner extends ethers.Signer {
  */
 export interface ExternalEvmSigner extends EvmSigner {
   readonly isExternalSigner: true;
+  connect(provider: ethers.Provider | null): ExternalEvmSigner;
 }
 
 /**
@@ -115,10 +116,12 @@ export interface LocalOperationalSignerSource {
  * `RemoteSigner`s backed by an external signing service. The first is the
  * primary and all of them are used for parallel transaction submission;
  * raw-key accessors such as `getOperationalPrivateKey()` then throw
- * `OperationalKeyUnavailableError`.
+ * `OperationalKeyUnavailableError`. Every entry is an `ExternalEvmSigner`, so
+ * a pool is wholly external or wholly local: a local wallet is given by its
+ * key, as `privateKey` or one of `additionalKeys`.
  */
 export interface ExternalOperationalSignerSource {
-  signers: readonly EvmSigner[];
+  signers: readonly ExternalEvmSigner[];
   privateKey?: never;
   additionalKeys?: never;
 }
@@ -153,6 +156,11 @@ export function createOperationalSignerPool(
   }
   const seen = new Set<string>();
   return external.map((signer) => {
+    if (!isExternalEvmSigner(signer)) {
+      throw new Error(
+        `EVMChainAdapter signers must be external signers, and ${signer.address} is not: give a local wallet by its key (privateKey or additionalKeys)`,
+      );
+    }
     const key = signer.address.toLowerCase();
     if (seen.has(key)) throw new Error(`EVMChainAdapter signers contain ${signer.address} more than once`);
     seen.add(key);

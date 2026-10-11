@@ -894,6 +894,11 @@ describe('EVMChainAdapter with external signers', () => {
       .toThrow(/more than once/);
     expect(() => untyped({ ...base })).toThrow(/privateKey or at least one signer/);
     expect(() => untyped({ ...base, additionalKeys: [KEY_C] })).toThrow(/privateKey or at least one signer/);
+    // A local wallet is never one of the signers, alone or beside external ones: it is given by its key.
+    const local = new ethers.Wallet(KEY_C);
+    for (const signers of [[local], [operational[0], local]]) {
+      expect(() => untyped({ ...base, signers })).toThrow(`${local.address} is not: give a local wallet by its key`);
+    }
   });
 
   it('still exposes the key of a local operational wallet', () => {

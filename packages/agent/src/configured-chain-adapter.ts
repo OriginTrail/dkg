@@ -27,6 +27,8 @@ const EXTERNAL_SIGNERS_EDGE_ONLY = 'External EVM signers are supported for edge 
  * configured operational keys or external signers, or the no-chain adapter.
  * `operationalKeys` are the local keys only; with external signers it is
  * undefined, and nothing on this node holds an operational private key.
+ * Whether the node signs externally is then the adapter's to say
+ * (`signsThroughExternalSigner`), however it was made.
  */
 export function constructConfiguredChainAdapter(
   config: ChainAdapterConstructionConfig,
@@ -36,8 +38,11 @@ export function constructConfiguredChainAdapter(
   let operationalKeys = config.chainConfig?.operationalKeys;
   if (config.chainAdapter) {
     const chain = config.chainAdapter;
+    if (config.chainConfig?.signers?.length) {
+      throw new Error('DKGAgentConfig: chainConfig.signers build the agent\'s own chain adapter and cannot be combined with a supplied chainAdapter');
+    }
     // A supplied adapter whose wallets sign externally is held to the same rule as configured signers.
-    if (core && signsThroughExternalSigner(config, chain)) throw new Error(EXTERNAL_SIGNERS_EDGE_ONLY);
+    if (core && signsThroughExternalSigner(chain)) throw new Error(EXTERNAL_SIGNERS_EDGE_ONLY);
     if (!operationalKeys?.length) {
       const key = adapterOperationalPrivateKey(chain);
       if (key !== undefined) operationalKeys = [key];

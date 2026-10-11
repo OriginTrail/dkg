@@ -15,6 +15,13 @@ afterAll(async () => {
   await revertSnapshot(_fileSnapshot);
 });
 
+/** The PCA registration chain, with operational wallets that sign through an external signer. */
+class ExternallySignedPcaChain extends PcaCuratedRegistrationChainAdapter {
+  usesExternalSigner(): boolean {
+    return true;
+  }
+}
+
 /** Author keys of an external signer that serves exactly these keys. */
 function externalAuthorKeys(...privateKeys: string[]): ExternalAuthorSigners {
   const wallets = privateKeys.map((key) => new ethers.Wallet(key));
@@ -212,7 +219,7 @@ describe('Genesis Knowledge', () => {
       const payer = new ethers.Wallet(HARDHAT_KEYS.REC2_OP);
       const author = new ethers.Wallet(HARDHAT_KEYS.EXTRA1).address;
       const pcaAccountId = 77n;
-      const chain = new PcaCuratedRegistrationChainAdapter(
+      const chain = new ExternallySignedPcaChain(
         new Map([[pcaAccountId, pcaOwner]]),
         payer.address,
         new Map([[payer.address.toLowerCase(), pcaAccountId]]),
@@ -224,7 +231,6 @@ describe('Genesis Knowledge', () => {
         chainConfig: {
           rpcUrl: 'http://127.0.0.1:1',
           hubAddress: ethers.ZeroAddress,
-          signers: [payer],
           authors: externalAuthorKeys(HARDHAT_KEYS.EXTRA1),
         },
         nodeRole: 'edge',
@@ -284,7 +290,7 @@ describe('Genesis Knowledge', () => {
       const payer = new ethers.Wallet(HARDHAT_KEYS.REC2_OP);
       const author = new ethers.Wallet(HARDHAT_KEYS.EXTRA1).address;
       const pcaAccountId = 82n;
-      const chain = new PcaCuratedRegistrationChainAdapter(
+      const chain = new ExternallySignedPcaChain(
         new Map([[pcaAccountId, pcaOwner]]),
         payer.address,
         new Map([[payer.address.toLowerCase(), pcaAccountId]]),
@@ -296,7 +302,6 @@ describe('Genesis Knowledge', () => {
         chainConfig: {
           rpcUrl: 'http://127.0.0.1:1',
           hubAddress: ethers.ZeroAddress,
-          signers: [payer],
           authors: externalAuthorKeys(HARDHAT_KEYS.EXTRA1),
         },
         nodeRole: 'edge',
@@ -328,7 +333,7 @@ describe('Genesis Knowledge', () => {
       const payer = new ethers.Wallet(HARDHAT_KEYS.REC2_OP);
       const curator = new ethers.Wallet(HARDHAT_KEYS.EXTRA2).address;
       const pcaAccountId = 78n;
-      const chain = new PcaCuratedRegistrationChainAdapter(
+      const chain = new ExternallySignedPcaChain(
         new Map([[pcaAccountId, pcaOwner]]),
         payer.address,
         new Map([[payer.address.toLowerCase(), pcaAccountId]]),
@@ -340,7 +345,6 @@ describe('Genesis Knowledge', () => {
         chainConfig: {
           rpcUrl: 'http://127.0.0.1:1',
           hubAddress: ethers.ZeroAddress,
-          signers: [payer],
           authors: externalAuthorKeys(HARDHAT_KEYS.EXTRA1),
         },
         nodeRole: 'edge',
@@ -411,7 +415,7 @@ describe('Genesis Knowledge', () => {
       const author = new ethers.Wallet(HARDHAT_KEYS.EXTRA1).address;
       const targetPcaAccountId = 80n;
       const otherPcaAccountId = 81n;
-      const chain = new PcaCuratedRegistrationChainAdapter(
+      const chain = new ExternallySignedPcaChain(
         new Map([[targetPcaAccountId, pcaOwner]]),
         payer.address,
         new Map([[payer.address.toLowerCase(), otherPcaAccountId]]),
@@ -423,7 +427,6 @@ describe('Genesis Knowledge', () => {
         chainConfig: {
           rpcUrl: 'http://127.0.0.1:1',
           hubAddress: ethers.ZeroAddress,
-          signers: [payer],
           authors: externalAuthorKeys(HARDHAT_KEYS.EXTRA1),
         },
         nodeRole: 'edge',

@@ -1,8 +1,15 @@
-import { EVMChainAdapter, type EVMAdapterConfig, type EVMAdapterOptions, type EvmSigner } from '../dist/index.js';
+import {
+  EVMChainAdapter,
+  type EVMAdapterConfig,
+  type EVMAdapterOptions,
+  type EvmSigner,
+  type ExternalEvmSigner,
+} from '../dist/index.js';
 
 // Compile against the published declarations: an adapter takes exactly one
 // source of operational wallets, local keys or external signers.
-declare const signers: readonly EvmSigner[];
+declare const signers: readonly ExternalEvmSigner[];
+declare const localWallet: EvmSigner;
 const options = { rpcUrl: 'http://127.0.0.1:8545', hubAddress: '0x0000000000000000000000000000000000000001' };
 
 export const localKeys: EVMAdapterConfig = { ...options, privateKey: '0x01', additionalKeys: ['0x02'] };
@@ -17,6 +24,10 @@ export const additionalKeysOnly: EVMAdapterConfig = { ...options, additionalKeys
 export const keyAndSigners: EVMAdapterConfig = { ...options, privateKey: '0x01', signers };
 // @ts-expect-error additional local keys cannot join external signers
 export const signersAndKeys: EVMAdapterConfig = { ...options, signers, additionalKeys: ['0x02'] };
+// @ts-expect-error a local wallet is given by its key, never as a signer
+export const localSigner: EVMAdapterConfig = { ...options, signers: [localWallet] };
+// @ts-expect-error a pool is wholly external: no local wallet beside external signers
+export const mixedSigners: EVMAdapterConfig = { ...options, signers: [...signers, localWallet] };
 
 // The options without a source compose with either kind, for code that extended the configuration.
 export interface WrappedAdapterOptions extends EVMAdapterOptions {

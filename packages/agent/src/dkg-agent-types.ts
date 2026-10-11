@@ -67,8 +67,8 @@ import type {
   ContextGraphAuthorityHistoryStore,
   ContextGraphAuthorityIndexStore,
   ContextGraphRegistryScanCursorStore,
-  EvmSigner,
   ExternalAuthorSigners,
+  ExternalEvmSigner,
   RpcRequestAdmission,
 } from '@origintrail-official/dkg-chain';
 import type { QueryAccessConfig } from '@origintrail-official/dkg-query';
@@ -1782,11 +1782,11 @@ export interface DKGAgentConfig {
    */
   publisherAddress?: string;
   /**
-   * EVM chain configuration; without it publishing has no on-chain finality.
-   * `adminPrivateKey`: profile admin key, only for profile/key-management txs (optional;
-   * those paths fail fast without it). `operationalKeys`: operational wallet keys (first =
-   * primary signer; all pay publish txs round-robin), or `signers`: external signers, so no
-   * operational key is held. `authors`: external author keys (asset owners) that never pay.
+   * EVM chain configuration; without it publishing has no on-chain finality. `adminPrivateKey`:
+   * profile admin key, only for profile/key-management txs (optional; those paths fail fast without
+   * it). `operationalKeys`: operational wallet keys (first = primary signer; all pay publish txs
+   * round-robin), or `signers`: external signers only, so no operational key is held (not with a
+   * supplied `chainAdapter`). `authors`: external author keys (asset owners) that never pay.
    */
   chainConfig?: {
     rpcUrl: string;
@@ -1800,7 +1800,7 @@ export interface DKGAgentConfig {
     tokenAddress?: string;
     adminPrivateKey?: string;
     operationalKeys?: string[];
-    signers?: readonly EvmSigner[];
+    signers?: readonly ExternalEvmSigner[];
     authors?: ExternalAuthorSigners;
     chainId?: string;
     /** Overall submitted-transaction receipt deadline (default 10 minutes). */

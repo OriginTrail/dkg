@@ -15,19 +15,17 @@ import type { AgentKeyRecord } from './agent-keystore.js';
 import type { DKGAgent } from './dkg-agent.js';
 
 export interface ExternalAuthorConfig {
-  readonly chainConfig?: { readonly signers?: readonly unknown[]; readonly authors?: ExternalAuthorSigners };
+  readonly chainConfig?: { readonly authors?: ExternalAuthorSigners };
 }
 
 /**
- * Whether the node signs through an external signer: configured external
- * signers, or a supplied chain adapter whose wallets sign externally. Its
- * paying wallets then never author an asset.
+ * Whether the node signs through an external signer, as its chain adapter
+ * reports: the one classification, whether the agent built the adapter from
+ * configured external signers or was given it. Its paying wallets then never
+ * author an asset.
  */
-export function signsThroughExternalSigner(
-  config: ExternalAuthorConfig | undefined,
-  chain: Pick<ChainAdapter, 'usesExternalSigner'> | undefined,
-): boolean {
-  return Boolean(config?.chainConfig?.signers?.length) || chain?.usesExternalSigner?.() === true;
+export function signsThroughExternalSigner(chain: Pick<ChainAdapter, 'usesExternalSigner'> | undefined): boolean {
+  return chain?.usesExternalSigner?.() === true;
 }
 
 const log = new Logger('DKGAgent');
@@ -102,7 +100,7 @@ export async function registerExternalDefaultAgent(
   framework?: string,
 ): Promise<string | undefined> {
   const authors = config?.chainConfig?.authors;
-  if (!signsThroughExternalSigner(config, chain) || authors === undefined) return undefined;
+  if (!signsThroughExternalSigner(chain) || authors === undefined) return undefined;
   const address = authors.defaultAuthor?.address ?? authors.addresses[0];
   if (address === undefined) return undefined;
   const ctx = createOperationContext('system');

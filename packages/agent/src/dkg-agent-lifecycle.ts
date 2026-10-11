@@ -870,6 +870,7 @@ import {
   type ContextGraphMembershipSnapshot,
 } from './join-approval-restart-projection.js';
 import { verifiedCuratorDialAddress } from './curator-dial-address.js';
+import { signsThroughExternalSigner } from './external-author-signing.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
@@ -3002,7 +3003,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         return verifyHandler.handler(data, peerId);
       });
       this.log.info(ctx, 'Registered VERIFY proposal handler');
-    } else if (this.config.chainConfig?.signers?.length) {
+    } else if (signsThroughExternalSigner(this.chain)) {
       this.log.info(ctx, 'VERIFY proposal handler not registered: EVM signing is delegated to an external signer');
     }
 
