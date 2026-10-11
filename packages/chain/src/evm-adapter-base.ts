@@ -2649,7 +2649,7 @@ export class EVMChainAdapterBase {
       const mode = fundingModes[index];
       return {
         kind: result.value ? 'funded' : 'unfunded', candidate, funding,
-        refreshPcaEligibility: async () => this.walletFundingPath(
+        refreshPcaEligibility: async () => this._walletFundingPath(
           await this.getWalletFunding(candidate.address, { forceRefresh: true, metrics: mode.kind }), mode,
         ) === 'pca',
       };
@@ -2723,7 +2723,7 @@ export class EVMChainAdapterBase {
   }
 
   /** Canonical native/direct/PCA interpretation shared by funding and reconciliation. */
-  private walletFundingPath(
+  private _walletFundingPath(
     f: { native: bigint | null; trac: bigint | null },
     funding: FundingMode,
   ): 'unfunded' | 'direct' | 'pca' {
@@ -2754,7 +2754,7 @@ export class EVMChainAdapterBase {
     funding: FundingMode,
     strictPcaRead = false,
   ): Promise<boolean> {
-    const path = this.walletFundingPath(f, funding);
+    const path = this._walletFundingPath(f, funding);
     if (path !== 'pca' || funding.kind === 'native-only') return path === 'direct';
     return this.isConvictionFundedAgent(
       address,
