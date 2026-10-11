@@ -98,6 +98,7 @@ import {
   snapshotRfc64CatalogDeploymentProfileV1,
 } from './rfc64/catalog-authority-config-v1.js';
 import type { AcceptedOpenCatalogPolicyV1 } from './rfc64/open-catalog-policy-v1.js';
+import { rfc64CatalogLookupFailedAsV1 } from './rfc64/catalog-policy-decision-probe-v1.js';
 import {
   resolveRfc64CatalogAuthorizationRosterV1,
   type AcceptRfc64CatalogAccessSnapshotInputV1,
@@ -1834,10 +1835,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     remotePeerId: string,
     contextGraphId: ContextGraphIdV1,
   ): Promise<EvmAddressV1 | null> {
-    if (await this.hasConfirmedMetaState(contextGraphId).catch(() => false)) {
+    if (await this.hasConfirmedMetaState(contextGraphId).catch(rfc64CatalogLookupFailedAsV1(false))) {
       const delegatedAgents = new Set<EvmAddressV1>();
       const delegateePeers = await this.getContextGraphAllowedDelegateePeers(contextGraphId)
-        .catch(() => new Map<string, string[]>());
+        .catch(rfc64CatalogLookupFailedAsV1(new Map<string, string[]>()));
       for (const [agentAddress, peerIds] of delegateePeers) {
         const normalized = agentAddress.toLowerCase();
         if (
@@ -1855,7 +1856,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         const requesterState = await this.readRequesterJoinRequestState(
           contextGraphId,
           approvedAgent,
-        ).catch(() => null);
+        ).catch(rfc64CatalogLookupFailedAsV1(null));
         if (
           requesterState?.status === 'approved'
           && requesterState.curatorPeerId === remotePeerId
@@ -1864,7 +1865,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         ) {
           const current = await this.readRfc64CurrentCuratorAuthorityBindingV1(
             contextGraphId,
-          ).catch(() => null);
+          ).catch(rfc64CatalogLookupFailedAsV1(null));
           if (
             current?.agentAddress === requesterState.curatorAgentAddress
             && current.authorityEra === requesterState.curatorAuthorityEra
@@ -4256,6 +4257,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           );
         },
       },
+      catalogHeadDelivery: this.rfc64CatalogHeadDeliveryPortsV1(),
       onCatalogHeadReplayRequested: (request, remotePeerId) => {
         const admission = this.tryQueueRfc64CatalogHeadReplayV1(remotePeerId, request);
         if (admission.status === 'busy') return admission;
@@ -4304,7 +4306,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   async closeRfc64PublicCatalogMutationPersistenceV1(this: DKGAgent): Promise<void> {
     try {
       await this.rfc64CatalogMutationCoordinatorV1.closeAndDrain();
+      await rfc64CatalogReplaySnapshotRuntimesV1.get(this)?.runtime.whenIdle();
     } finally {
+      this.clearRfc64CatalogMutationMemoryV1();
       this.rfc64PublicCatalogSynchronizationEvidenceV1.clear();
       this.rfc64PublicCatalogReconciliationFailuresV1.clear();
       rfc64DirectAcceptedCompatibilityV1.delete(this);
@@ -4549,12 +4553,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     }
     let announced = 0;
     let failed = 0;
-    const replaySnapshotRuntime = rfc64CatalogReplaySnapshotRuntimeForV1(
-      this,
-      persistence,
-      this.rfc64CatalogMutationCoordinatorV1,
-    );
-    return replaySnapshotRuntime.withSnapshot({
+    return rfc64CatalogReplaySnapshotRuntimeForV1(this, persistence, this.rfc64CatalogMutationCoordinatorV1)
+      .withSnapshot({
       selection: requestedScope === undefined
         ? Object.freeze({ kind: 'all' })
         : Object.freeze({
@@ -4562,7 +4562,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             networkId: requestedScope.networkId,
             contextGraphId: requestedScope.contextGraphId,
           }),
-      operation: async (replayEntries) => {
+      prepare: (replayEntries) => {
         const manifest: Rfc64PublicCatalogHeadAnnouncementV1[] = [];
         for (const { head } of replayEntries) {
           const servingAuthority = this.resolveRfc64CatalogServingAuthorityV1(
@@ -4625,6 +4625,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         // where the offending scope can still be named, rather than letting
         // the encoder fail the whole response at delivery time.
         assertRfc64ReplayManifestScopesUniqueV1(manifest);
+        return manifest;
+      },
+      deliver: async (manifest) => {
         const completedManifest: Rfc64PublicCatalogHeadAnnouncementV1[] = [];
         for (const announcement of manifest) {
           try {
@@ -4937,6 +4940,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       controlObjects: persistence.controlObjects,
       stageKaBundle: persistence.kaBundles.putKaBundle,
       readKaBundleByDigest: persistence.kaBundles.readKaBundleByDigest,
+      verifiedRows: this.rfc64VerifiedCatalogRowsV1(scope),
     });
     // The history read above and the production below each walk the whole set.
     await yieldMainThread();
