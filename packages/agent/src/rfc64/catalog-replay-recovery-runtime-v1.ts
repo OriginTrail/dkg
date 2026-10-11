@@ -133,9 +133,9 @@ export interface Rfc64CatalogReplayRecoveryPortsV1<Target> {
  * finalized-private catalog placement a confirmed VM publish waits on. One
  * stuck graph therefore stalled unrelated publishes indefinitely.
  *
- * Exceeding the budget is treated exactly like an exhausted worklist: the pass
- * did NOT observe parity, so it reports failure and demands a full replay. It
- * never reports parity it has not seen.
+ * Exceeding the budget reports unverified freshness and retains promises;
+ * unlike worklist exhaustion, it provides no evidence that rows are missing.
+ * It never reports parity it has not seen.
  *
  * DERIVED, never a bare number: at exactly the receiver's maximum admission
  * deferral window this budget is a tie, and one lawfully-deferring task — a
@@ -171,10 +171,60 @@ export interface Rfc64CatalogReplayRecoveryStatusV1 {
 }
 
 
+/** Recovery owns expected generations, evidence and observation as one pass. */
+class FullReplayPassV1<Target> {
+  readonly #expected = new Map<string, { generation: number; replayed: boolean }>();
+  targets: readonly Target[] | null = Object.freeze([]);
+  replacesSnapshot = true;
+  unanswered = false;
+  constructor(readonly merge: (left: readonly Target[], right: readonly Target[]) => readonly Target[]) {}
+
+  include(demands: readonly (Rfc64CatalogReplayPeerDemandV1 & { staged: boolean })[], prior: readonly Target[] | null, received: readonly Target[]): boolean {
+    if (new Set([...this.#expected.keys(), ...demands.map(demand => demand.peerId)]).size > RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1) return false;
+    for (const demand of demands) {
+      if (this.#expected.get(demand.peerId)?.generation !== demand.generation) {
+        this.#expected.set(demand.peerId, { generation: demand.generation, replayed: false });
+      }
+    }
+    if (demands.some(demand => demand.staged)) {
+      this.replacesSnapshot = false;
+      this.#retain(prior ?? []);
+    }
+    this.#retain(received);
+    return true;
+  }
+  replace(demand: Rfc64CatalogReplayPeerDemandV1): void {
+    if (this.#expected.has(demand.peerId)) this.#expected.set(demand.peerId, { generation: demand.generation, replayed: false });
+  }
+  cancelled(demand: Rfc64CatalogReplayPeerDemandV1): boolean {
+    const expected = this.#expected.get(demand.peerId);
+    return expected?.generation === demand.generation && !expected.replayed;
+  }
+  record(demand: Rfc64CatalogReplayPeerDemandV1, targets: readonly Target[], unanswered: boolean): void {
+    const expected = this.#expected.get(demand.peerId);
+    if (expected !== undefined && demand.generation >= expected.generation) expected.replayed = true;
+    this.unanswered ||= unanswered;
+    // Retain immediately after the provider response, BEFORE receiver drain.
+    this.#retain(targets);
+  }
+  #retain(targets: readonly Target[]): void {
+    if (this.targets === null) return;
+    const live = this.merge(this.targets, targets);
+    this.targets = live.length > RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 ? null : Object.freeze([...live]);
+  }
+  get covered(): boolean { return [...this.#expected.values()].every(expected => expected.replayed); }
+  /** Only a receiver-drained parity read observes the completed generations. */
+  observe(): void {
+    for (const [peer, expected] of this.#expected) if (expected.replayed) this.#expected.delete(peer);
+  }
+}
+
 interface ReplayProgressV1<Target> {
   readonly policyDigest: string;
   revisionToken: object;
   readonly peerWorklist: Rfc64CatalogReplayPeerWorklistV1;
+  fullPass: FullReplayPassV1<Target> | null;
+  received: readonly Target[];
   /**
    * Provider-specific failures survive later scoped connection runs, each with
    * its consecutive-failure count so retries stay bounded.
@@ -184,7 +234,7 @@ interface ReplayProgressV1<Target> {
   requiresFullReplay: boolean;
   token: number;
   active: boolean;
-  /** The last full pass obtained no provider manifest at all. */
+  /** The last provider evidence has not yet corroborated applied rows. */
   unverified: boolean;
   /**
    * Bounded provider promises retained for the operational completeness
@@ -192,10 +242,9 @@ interface ReplayProgressV1<Target> {
    * recovery can only add evidence until another complete pass supersedes it.
    * `null` means no bounded authoritative snapshot is available.
    *
-   * It changes only when a run settles, and only from the promise set of the
-   * run's last parity read -- the one taken after the run confirmed no joined
-   * request left a peer queued. A run that exhausts its worklist, fails, or is
-   * aborted leaves it as the last settled run left it.
+   * Observed runs settle their final parity set. A receiver wait that times
+   * out also retains its manifest conservatively beside unverified status,
+   * so a later part cannot forget advertised but unchecked heads.
    */
   promisedTargets: readonly Target[] | null;
   completion: Promise<Readonly<Rfc64CatalogReplayRecoveryResultV1>> | null;
@@ -275,6 +324,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
     const progress = this.#progressFor(contextGraphId, policyDigest);
     const lease = progress.peerWorklist.reserve(peerId);
     if (lease === null) return null;
+    progress.fullPass?.replace(lease);
     if (!progress.active) { progress.active = true; this.#bumpRevision(progress); }
     let released = false;
     return Object.freeze({
@@ -283,6 +333,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
       release: () => {
         if (released) return;
         released = true;
+        if (progress.fullPass?.cancelled(lease)) progress.fullPass = null;
         lease.release();
         if (this.#byContextGraph.get(contextGraphId) !== progress) return;
         if (!progress.peerWorklist.hasPending && !progress.peerWorklist.hasStaged
@@ -320,7 +371,16 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
       // either, so it must not raise one. Staged peers retain exact coverage
       // until their connection owner permits execution; retained providers
       // crowding out the fill withhold entitlement for bounded retries.
-      progress.peerWorklist.seedFullPass(connectedPeers);
+      const coverage = connectedPeers.map(peer => {
+        const existing = progress.peerWorklist.generation(peer);
+        if (existing !== null) return existing;
+        return progress.peerWorklist.seedBounded(peer) ? progress.peerWorklist.generation(peer) : null;
+      });
+      if (coverage.some(demand => demand === null)) progress.fullPass = null;
+      else {
+        progress.fullPass ??= new FullReplayPassV1((left, right) => this.#mergePromises(left, right));
+        if (!progress.fullPass.include(coverage.filter(demand => demand !== null), progress.promisedTargets, progress.received)) progress.fullPass = null;
+      }
     } else {
       if (input.kind === 'connection-demand') progress.peerWorklist.seedDemand(input.demand);
       this.#seedRetainedProviders(progress);
@@ -333,11 +393,12 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
     if (!progress.peerWorklist.hasPending) {
       // Only staged generations can carry coverage into a later connection
       // run. An empty request without that custody cannot donate entitlement.
-      progress.peerWorklist.settleFullPass();
+      if (progress.fullPass?.covered) progress.fullPass = null;
       if (droppedProviders) this.#bumpRevision(progress);
       return Promise.resolve(Object.freeze({ requested: 0, failed: 0 }));
     }
     progress.peerWorklist.beginRun();
+    progress.received = [];
     progress.token += 1;
     const token = progress.token;
     progress.active = true;
@@ -374,16 +435,15 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
     let coveredPromised: readonly Target[] | null = null;
     let replayFailed = true;
     let requiresFullReplay = false;
-    // A spent idle-drain budget is NOT evidence that rows are missing, so it
-    // must not set `requiresFullReplay`. It is also not corroboration, so it
-    // must not let a full pass CLEAR a witness. It sits between the two.
+    // Unobserved receiver/parity work cannot clear either freshness witness.
     let drainUnobserved = false;
+    let received: readonly Target[] = [];
     try {
       input.signal?.throwIfAborted();
-      const manifests: Target[][] = [];
       for (;;) {
         const replayDemands = progress.peerWorklist.drain();
-        await Promise.all(replayDemands.map(async ({ peerId }) => {
+        await Promise.all(replayDemands.map(async (demand) => {
+          const { peerId } = demand;
           for (let attempt = 0; attempt < 2; attempt += 1) {
             try {
               input.signal?.throwIfAborted();
@@ -397,13 +457,17 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
                 // earlier provider failure recorded.
                 failed += 1;
                 unansweredPeers += 1;
+                progress.fullPass?.record(demand, [], true);
                 return;
               }
               progress.unresolvedPeers.delete(peerId);
               if (completion.status === 'completed') {
-                manifests.push([...completion.targets]);
+                received = this.#mergePromises(received, completion.targets);
+                progress.received = received;
+                drainUnobserved = true;
+                progress.fullPass?.record(demand, completion.targets, false);
                 requested += 1;
-              }
+              } else progress.fullPass?.record(demand, [], false);
               return;
             } catch (error) {
               if (input.signal?.aborted) throw input.signal.reason ?? error;
@@ -412,6 +476,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
                 failed += 1;
                 providerFailures += 1;
                 unansweredPeers += 1;
+                progress.fullPass?.record(demand, [], true);
               }
             }
           }
@@ -458,20 +523,10 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         }
         if (progress.peerWorklist.hasPending) continue;
 
-        const promisedByIdentity = new Map<string, Target>();
-        // Earlier parts of a staged full pass already settled their promises.
-        // Keep them in its final parity check and never replace with just the last part.
-        if (progress.peerWorklist.splitFullPass) {
-          for (const target of progress.promisedTargets ?? []) {
-            promisedByIdentity.set(this.#ports.targetIdentity(target), target);
-          }
-        }
-        for (const target of manifests.flat()) {
-          promisedByIdentity.set(this.#ports.targetIdentity(target), target);
-        }
-        const promised = [...promisedByIdentity.values()];
+        const promised = progress.fullPass?.targets === null ? null
+          : this.#mergePromises(progress.fullPass?.targets ?? [], received);
         input.signal?.throwIfAborted();
-        const parityFailed = promised.length
+        const parityFailed = promised === null || promised.length
           > RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1
           || await this.#ports.parityFailed(input.contextGraphId, promised);
         input.signal?.throwIfAborted();
@@ -486,6 +541,8 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         // Nothing awaits between here and the settle block, so the
         // full-pass coverage it reads is the one this set was checked under.
         coveredPromised = promised;
+        drainUnobserved = false;
+        progress.fullPass?.observe();
         if (parityFailed) {
           failed += 1;
           requiresFullReplay = true;
@@ -518,7 +575,8 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
     } finally {
       const current = this.#byContextGraph.get(input.contextGraphId);
       if (current === progress && current.token === token) {
-        const wasFullPass = current.peerWorklist.fullPassEntitled;
+        const pass = current.fullPass;
+        const wasFullPass = pass?.covered ?? false;
         current.active = current.peerWorklist.hasStaged;
         // The promise snapshot settles with the status it is read beside, under
         // this token fence and the revision bump below. A merged set past its
@@ -530,11 +588,15 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
           && !this.#settlePromisedTargets(
             current,
             coveredPromised,
-            wasFullPass && !current.peerWorklist.splitFullPass && unansweredPeers === 0,
+            pass !== null && wasFullPass && pass.replacesSnapshot && !pass.unanswered && unansweredPeers === 0,
           )
         ) {
           requiresFullReplay = true;
           replayFailed = true;
+        }
+        if (coveredPromised === null && received.length > 0) {
+          // Unobserved evidence remains a conservative operational target.
+          this.#settlePromisedTargets(current, received, false);
         }
         // Only evidence that applied rows may be missing (parity, worklist or
         // attribution overflow) fails the Context Graph. A provider that could
@@ -545,32 +607,12 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         // pass ended without seeing this graph's admissions drain, so whatever
         // witness was standing must keep standing.
         if (!replayFailed && !drainUnobserved && wasFullPass) current.requiresFullReplay = false;
-        current.peerWorklist.settleFullPass();
-        // SET side of the corroboration contract computed above: a full pass
-        // that reached no provider at all settles as uncorroborated, never as
-        // a clean Context Graph. Deliberately asymmetric -- raising it needs a
-        // full pass, clearing it needs only one answered replay: the claim
-        // being retracted is "nothing at all answered", which a single
-        // corroborated scoped replay already refutes, and a sticky-until-full-
-        // pass rule would report a node that is actively and successfully
-        // replaying as unknown-freshness. Peers that answered `not-provider`
-        // are an authoritative negative from a reachable peer, not absence of
-        // evidence, so they alone never raise it.
-        // In-memory only, like `requiresFullReplay` before it: a policy-digest
-        // rotation, `clear()` or a process restart drops it (see
-        // `#progressFor`). The next full connected-peers pass re-raises it, and
-        // until then `unresolvedPeerCount` reads as unknown rather than zero.
-        // The RAISE is gated on the COMMAND KIND, not on `wasFullPass`.
-        // Full-pass entitlement requires execution of every connected peer,
-        // including retained staged generations. Reusing that entitlement
-        // here would withhold the DUTY to raise one in exactly the case that most
-        // deserves it: a full-connected-peers pass that could not even queue every
-        // peer AND had every dial fail has `requested === 0`, no `#overflowed`
-        // (seedBounded defers rather than overflowing) and `#pending <= 64`, so no
-        // `requiresFullReplay` either -- it would settle a Context Graph with
-        // applied heads as `complete` having corroborated nothing. Incomplete
-        // coverage plus zero corroboration is MORE reason to report unverified,
-        // not less. The two directions are opposites and must not share a flag.
+        if (wasFullPass && !drainUnobserved) current.fullPass = null;
+        // Full commands with failed dials and no corroborating provider raise
+        // unknown freshness even when bounded admission could not grant coverage.
+        // A drained scoped response can retract "nothing answered"; it cannot
+        // clear missing-row evidence without the full pass's observed generations.
+        // Policy rotation, clear() and reset() discard process-local evidence.
         const wasConnectedPeerPass = input.kind === 'full-connected-peers';
         // A pass whose drain was never observed has not corroborated this
         // node's applied rows, whatever individual providers answered, so it
@@ -578,6 +620,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         if (requested > 0 && !drainUnobserved) current.unverified = false;
         else if (drainUnobserved) current.unverified = true;
         else if (wasConnectedPeerPass && providerFailures > 0) current.unverified = true;
+        current.received = [];
         current.completion = null;
         current.peerWorklist.settleOverflow();
         this.#bumpRevision(current);
@@ -611,27 +654,19 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
       progress.promisedTargets = Object.freeze([...promised]);
       return true;
     }
-    const merged = new Map<string, Target>();
-    for (const target of progress.promisedTargets) {
-      merged.set(this.#ports.targetIdentity(target), target);
-    }
-    for (const target of promised) {
-      merged.set(this.#ports.targetIdentity(target), target);
-    }
-    // `targetIdentity` is exact, so each head advance a scoped pass observes
-    // adds an entry while the superseded one stays and nothing prunes it
-    // between full passes. Pruning before the bound keeps the capacity latch a
-    // statement about live scopes -- which is what the projection reads --
-    // instead of one about how often those scopes advanced.
-    const live = this.#ports.pruneSupersededTargets === undefined
-      ? [...merged.values()]
-      : this.#ports.pruneSupersededTargets([...merged.values()]);
+    const live = this.#mergePromises(progress.promisedTargets, promised);
     if (live.length > RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1) {
       progress.promisedTargets = null;
       return false;
     }
     progress.promisedTargets = Object.freeze([...live]);
     return true;
+  }
+
+  #mergePromises(left: readonly Target[], right: readonly Target[]): readonly Target[] {
+    const exact = new Map<string, Target>();
+    for (const target of [...left, ...right]) exact.set(this.#ports.targetIdentity(target), target);
+    return this.#ports.pruneSupersededTargets?.([...exact.values()]) ?? [...exact.values()];
   }
 
   /**
@@ -647,6 +682,8 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         policyDigest,
         revisionToken: Object.freeze({}),
         peerWorklist: new Rfc64CatalogReplayPeerWorklistV1(),
+        fullPass: null,
+        received: [],
         unresolvedPeers: new Map(),
         requiresFullReplay: false,
         token: 0,

@@ -28,8 +28,6 @@ type ScopeV1 = Rfc64CatalogReplayScopeLifecycleV1;
 interface PeerV1 {
   readonly peerId: string;
   readonly scopes: Map<string, ScopeV1>;
-  /** Scheduling placement only; lifecycle and completeness custody stay in scopes. */
-  readonly executable: Set<string>;
   active: boolean;
   lastUsedAt: number;
   started: number;
@@ -42,7 +40,7 @@ interface PeerV1 {
 
 const DEFAULT_DEBOUNCE_MS = 60_000;
 const DEFAULT_MAX_PEERS = 256;
-const MAX_SCOPES_PER_PEER = 256;
+const MAX_SCOPE_SELECTION_BATCH = 256;
 const MAX_SCOPES_PER_TURN = 8;
 /**
  * Owns reconnect replay admission, retained cooldowns and bounded physical work.
@@ -92,7 +90,7 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
       peers: Object.freeze([...this.#byPeer.values()].map(peer => Object.freeze({
         peerIdSuffix: peer.peerId.slice(-8), started: peer.started, failed: peer.failed,
         startedLastMinute: now - peer.windowStartedAt < 60_000 ? peer.windowStarted : 0,
-        nextEligibleAt: Math.min(...this.#windowScopes(peer).map(scope => scope.eligibleAt)),
+        nextEligibleAt: Math.min(...[...peer.scopes.values()].map(scope => scope.eligibleAt)),
       }))),
     });
   }
@@ -123,7 +121,7 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
         if (idle === undefined) { this.#suppressed++; return null; }
         this.#byPeer.delete(idle.peerId);
       }
-      peer = { peerId, scopes: new Map(), executable: new Set(), active: false, lastUsedAt: nowMs,
+      peer = { peerId, scopes: new Map(), active: false, lastUsedAt: nowMs,
         started: 0, failed: 0, windowStartedAt: nowMs, windowStarted: 0,
         connected: true, connectionGeneration: 1 };
       this.#byPeer.set(peerId, peer);
@@ -134,7 +132,7 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     }
     const reservations: Rfc64CatalogReplayScopeAdmissionV1[] = [];
     for (const id of selected) {
-      const scope = this.#scope(peer, id, nowMs);
+      const scope = this.#scope(peer, id);
       const reservation = scope.reserve(peer.connectionGeneration, () => this.#ports.reserveFence(id, peer.peerId));
       if (reservation === null) this.#suppressed++;
       else reservations.push(reservation);
@@ -160,60 +158,42 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     if (peer !== undefined) peer.connected = false;
   }
 
-  #scope(peer: PeerV1, id: string, nowMs: number): ScopeV1 {
+  #scope(peer: PeerV1, id: string): ScopeV1 {
     const existing = peer.scopes.get(id);
     if (existing !== undefined) return existing;
     const scope = new Rfc64CatalogReplayScopeLifecycleV1(id, peer.peerId, this.#debounceMs);
     peer.scopes.set(id, scope);
-    this.#installScope(peer, scope, nowMs);
     return scope;
-  }
-
-  #installScope(peer: PeerV1, scope: ScopeV1, now: number): boolean {
-    if (peer.executable.has(scope.contextGraphId)) return true;
-    if (peer.executable.size >= MAX_SCOPES_PER_PEER) {
-      if (peer.active) return false;
-      const candidates = this.#windowScopes(peer);
-      const displaced = candidates.find(candidate => candidate.canEvict(now))
-        ?? candidates.find(candidate => candidate.canDefer(now));
-      if (displaced === undefined) return false;
-      peer.executable.delete(displaced.contextGraphId);
-    }
-    peer.executable.add(scope.contextGraphId);
-    return true;
   }
 
   #pruneSelection(peer: PeerV1, selected: ReadonlySet<string>): void {
     for (const [id, scope] of peer.scopes) {
       if (selected.has(id)) continue;
       scope.retireSelection();
-      if (!scope.executing) { peer.scopes.delete(id); peer.executable.delete(id); }
+      if (!scope.executing) peer.scopes.delete(id);
     }
   }
 
-  #continue(peer: PeerV1, now: number, selected: ReadonlySet<string>): void {
+  #continue(peer: PeerV1, selected: ReadonlySet<string>): void {
     this.#pruneSelection(peer, selected);
     for (const scope of peer.scopes.values()) {
       scope.retryFence(() => this.#ports.reserveFence(scope.contextGraphId, peer.peerId));
     }
-    // A physical turn retains its captured scopes. Snapshot overflow so a displaced
-    // scope cannot be promoted again in this same synchronous sweep.
-    if (peer.active) return;
-    const deferred = [...peer.scopes.values()].filter(scope => !peer.executable.has(scope.contextGraphId));
-    for (const scope of deferred) {
-      if (scope.ready(now)) this.#installScope(peer, scope, now);
-    }
-  }
-
-  #windowScopes(peer: PeerV1): readonly ScopeV1[] {
-    return Array.from(peer.executable).flatMap(id => {
-      const scope = peer.scopes.get(id);
-      return scope === undefined ? [] : [scope];
-    });
   }
 
   #runnable(peer: PeerV1, now: number): readonly ScopeV1[] {
-    return this.#windowScopes(peer).filter(scope => scope.ready(now));
+    // A scheduling batch, not a retained-state or lease limit. Earlier admission
+    // owners and cooldowns keep precedence; ready overflow takes positions of
+    // completed or cooled scopes, including reconnects queued during cooldown.
+    const scopes = [...peer.scopes.values()];
+    const retained = scopes.filter(scope => !scope.canEvict(now) && !scope.canDefer(now));
+    const selected = retained.slice(0, MAX_SCOPE_SELECTION_BATCH);
+    const occupied = new Set(selected);
+    for (const scope of [...scopes.filter(scope => scope.ready(now)), ...scopes.filter(scope => !scope.ready(now))]) {
+      if (selected.length === MAX_SCOPE_SELECTION_BATCH) break;
+      if (!occupied.has(scope)) selected.push(scope);
+    }
+    return selected.filter(scope => scope.ready(now));
   }
 
   #ready(peer: PeerV1, now: number): boolean {
@@ -224,18 +204,13 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     let deadline = Infinity;
     const now = Date.now();
     for (const peer of this.#byPeer.values()) {
-      const deferred = [...peer.scopes.values()].some(scope => !peer.executable.has(scope.contextGraphId)
-        && scope.outstanding > 0);
-      if (deferred && this.#runnable(peer, now).length === 0) {
-        deadline = Math.min(deadline, now + 1_000);
-      }
-      for (const scope of this.#windowScopes(peer)) {
+      const waiting = [...peer.scopes.values()].some(scope => scope.queued || scope.awaitingFence());
+      const noRunnable = this.#runnable(peer, now).length === 0;
+      if (waiting && noRunnable) deadline = Math.min(deadline, now + 1_000);
+      for (const scope of peer.scopes.values()) {
         if (scope.awaitingFence()) deadline = Math.min(deadline, now + 1_000);
-        if (scope.queued && scope.eligibleAt > now) {
+        if ((scope.queued || (waiting && noRunnable && scope.outstanding === 0)) && scope.eligibleAt > now) {
           deadline = Math.min(deadline, scope.eligibleAt);
-        }
-        if (deferred && scope.outstanding === 0) {
-          deadline = Math.min(deadline, scope.eligibleAt > now ? scope.eligibleAt : now + 1_000);
         }
       }
     }
@@ -250,7 +225,7 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
         if (signal.aborted || this.#closed) return;
         const now = Date.now();
         const selected = new Set(this.#ports.selectContextGraphIds());
-        for (const peer of this.#byPeer.values()) this.#continue(peer, now, selected);
+        for (const peer of this.#byPeer.values()) this.#continue(peer, selected);
         const peer = [...this.#byPeer.values()].find(candidate => this.#ready(candidate, now));
         if (peer === undefined) return;
         await this.#runTurn(peer, signal);
@@ -271,7 +246,7 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
           await this.#ports.wait(signal, Math.min(1_000, Math.max(1, deadline - Date.now())));
           const now = Date.now();
           const selected = new Set(this.#ports.selectContextGraphIds());
-          for (const peer of this.#byPeer.values()) this.#continue(peer, now, selected);
+          for (const peer of this.#byPeer.values()) this.#continue(peer, selected);
           if ([...this.#byPeer.values()].some(peer => this.#ready(peer, now))) this.#schedule();
         }
       } finally { if (signal.aborted) this.#retire(); }

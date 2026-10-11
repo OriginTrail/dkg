@@ -11,7 +11,7 @@ interface DemandV1 { readonly connectionGeneration: number; readonly selectionGe
 export interface Rfc64CatalogReplayScopeAdmissionV1 { admit(): void; reject(): void }
 export interface Rfc64CatalogReplayScopeExecutionV1 { readonly lease: FenceV1 }
 
-/** Owns demand independently of executable-table placement or fence availability. */
+/** Owns demand, admission and cooldown independently of fence availability. */
 export class Rfc64CatalogReplayScopeLifecycleV1 {
   #selection: Readonly<{ state: 'selected' | 'retired'; generation: number }> = { state: 'selected', generation: 0 };
   #current: DemandV1 | null = null;
@@ -30,7 +30,7 @@ export class Rfc64CatalogReplayScopeLifecycleV1 {
     return [this.#current, this.#successor].some(demand => demand?.phase.state === 'waiting-for-fence');
   }
   canEvict(now: number): boolean { return this.outstanding === 0 && this.#eligibleAt <= now; }
-  /** A completed cooldown may yield placement without retiring its queued fence. */
+  /** A cooled queued demand may yield scheduling precedence without retiring its fence. */
   canDefer(now: number): boolean { return this.#eligibleAt !== 0 && this.ready(now); }
 
   reserve(connectionGeneration: number, reserveFence: () => FenceV1 | null): Rfc64CatalogReplayScopeAdmissionV1 | null {

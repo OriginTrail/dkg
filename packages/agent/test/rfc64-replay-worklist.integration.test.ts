@@ -473,3 +473,86 @@ describe('staged full-pass completeness custody', () => {
     expect(runtime.status('cg', 'policy')?.failed).toBe(false); b.release();
   });
 });
+
+describe('split full replay evidence across receiver waits', () => {
+  it('prunes superseded heads before checking the 64-live-scope bound while retaining same-version forks', async () => {
+    type Head = Readonly<{ id: string; scope: string; version: number }>;
+    let version = 1;
+    let fork = false;
+    const parity = vi.fn(async (_cg: string, targets: readonly Head[]) => targets.some(target => target.id === 'fork'));
+    const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Head>({
+      requestPeer: async (_cg, peer) => ({ status: 'completed', targets: peer === 'old'
+        ? Array.from({ length: 64 }, (_, index) => ({ id: `${index}-1`, scope: String(index), version: 1 }))
+        : [...Array.from({ length: 32 }, (_, index) => {
+          const scope = String(index + (peer === 'b' ? 32 : 0));
+          return { id: `${scope}-${version}`, scope, version };
+        }), ...(fork && peer === 'a' ? [{ id: 'fork', scope: '0', version }] : [])] }),
+      whenReceiverIdleForContextGraph: async () => undefined, targetIdentity: target => target.id,
+      pruneSupersededTargets: targets => {
+        const latest = new Map<string, number>();
+        for (const target of targets) latest.set(target.scope, Math.max(latest.get(target.scope) ?? 0, target.version));
+        return targets.filter(target => target.version === latest.get(target.scope));
+      }, parityFailed: parity,
+    });
+    const full = (peers: readonly string[]) => runtime.request({ kind: 'full-connected-peers', contextGraphId: 'cg', policyDigest: 'policy', connectedPeerIds: peers });
+    await full(['old']); version = 2;
+    const a = runtime.reservePeer('cg', 'policy', 'a')!; const b = runtime.reservePeer('cg', 'policy', 'b')!;
+    await full(['a', 'b']);
+    for (const lease of [a, b]) {
+      lease.admit(); await runtime.request({ kind: 'connection-demand', contextGraphId: 'cg', policyDigest: 'policy', demand: lease }); lease.release();
+    }
+    expect(runtime.status('cg', 'policy')?.failed).toBe(false);
+    expect(runtime.promisedTargets('cg', 'policy')).toHaveLength(64);
+    expect(runtime.promisedTargets('cg', 'policy')?.every(target => target.version === 2)).toBe(true);
+    expect(parity.mock.calls.at(-1)?.[1]).toHaveLength(64);
+    // A same-version competing digest is not superseded: it must still fail closed.
+    fork = true;
+    await full(['a', 'b']);
+    expect(runtime.status('cg', 'policy')?.failed).toBe(true);
+  });
+
+  it('retains an earlier staged manifest after drain timeout so the final peer cannot clear an unchecked head', async () => {
+    let timeout = false; let initialFailure = true; let newHeadApplied = false;
+    const never = () => new Promise<void>(() => undefined);
+    const parity = vi.fn(async (_cg: string, targets: readonly string[]) => initialFailure || (!newHeadApplied && targets.includes('new-head')));
+    const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<string>({
+      requestPeer: async (_cg, peer) => ({ status: 'completed', targets: peer === 'a' ? ['new-head'] : ['old-head'] }),
+      whenReceiverIdleForContextGraph: () => timeout ? never() : Promise.resolve(),
+      sleep: () => timeout ? Promise.resolve() : never(), targetIdentity: target => target, parityFailed: parity,
+    });
+    const full = () => runtime.request({ kind: 'full-connected-peers', contextGraphId: 'cg', policyDigest: 'policy', connectedPeerIds: ['a', 'b'] });
+    await runtime.request({ kind: 'full-connected-peers', contextGraphId: 'cg', policyDigest: 'policy', connectedPeerIds: ['old'] }); initialFailure = false;
+    const a = runtime.reservePeer('cg', 'policy', 'a')!; const b = runtime.reservePeer('cg', 'policy', 'b')!;
+    await full(); timeout = true;
+    a.admit(); await runtime.request({ kind: 'connection-demand', contextGraphId: 'cg', policyDigest: 'policy', demand: a }); a.release();
+    expect(runtime.status('cg', 'policy')).toMatchObject({ failed: true, unverified: true });
+    timeout = false;
+    b.admit(); await runtime.request({ kind: 'connection-demand', contextGraphId: 'cg', policyDigest: 'policy', demand: b }); b.release();
+    expect(parity.mock.calls.at(-1)?.[1]).toContain('new-head');
+    expect(runtime.promisedTargets('cg', 'policy')).toContain('new-head');
+    expect(runtime.status('cg', 'policy')?.failed).toBe(true);
+    newHeadApplied = true; await full();
+    expect(runtime.status('cg', 'policy')).toMatchObject({ failed: false, unverified: false });
+  });
+});
+
+describe('cancelled receiver observation', () => {
+  it('retains the promised head as unverified when the caller aborts during receiver drain', async () => {
+    const entered = Promise.withResolvers<void>(); const controller = new AbortController();
+    const cancelled = new Error('receiver observation cancelled');
+    const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<string>({
+      requestPeer: async () => ({ status: 'completed', targets: ['unobserved-head'] }),
+      whenReceiverIdleForContextGraph: async (_cg, signal) => {
+        entered.resolve();
+        await new Promise<void>((_resolve, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
+      }, sleep: () => new Promise<void>(() => undefined), targetIdentity: target => target,
+      parityFailed: async () => false,
+    });
+    const run = runtime.request({ kind: 'full-connected-peers', contextGraphId: 'cg', policyDigest: 'policy',
+      connectedPeerIds: ['peer'], signal: controller.signal });
+    await entered.promise; controller.abort(cancelled);
+    await expect(run).rejects.toBe(cancelled);
+    expect(runtime.promisedTargets('cg', 'policy')).toEqual(['unobserved-head']);
+    expect(runtime.status('cg', 'policy')).toMatchObject({ failed: false, unverified: true });
+  });
+});
