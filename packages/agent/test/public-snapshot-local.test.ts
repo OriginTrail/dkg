@@ -159,13 +159,14 @@ describe("public snapshot recovery over live local nodes and chain", () => {
           queryResponseLimitMode: "pre-materialization" as const,
         }),
         randomSamplingUseWorkerThread: false,
+        syncOnConnectEnabled: false,
         syncReconcilerEnabled: false,
         vmReconcilerEnabled: false,
       });
       agents.push(a);
       await a.start();
       if (nodeRole === "core")
-        a.subscribeToContextGraph(graph, { onChainId, syncMode: "on-demand" });
+        a.subscribeToContextGraph(graph, { onChainId, syncMode: "on-demand", trackSyncScope: false });
       return a;
     };
     const core = await make("SnapshotCore", "core", adapter, source);
@@ -202,6 +203,20 @@ describe("public snapshot recovery over live local nodes and chain", () => {
     expect(
       receiver.getSubscribedContextGraphs().get(graph)?.subscribed,
     ).not.toBe(true);
+    await receiver.awaitInitialChainPoll();
+    receiver.subscribeToContextGraph(graph, { onChainId, syncMode: "on-demand", trackSyncScope: false, deferSharedMemoryGossipSubscribe: true });
+    receiver.recordCgWireId(graph, null);
+    // Cold-start enumeration can finish while the first snapshot batch is
+    // arriving. Use the real discovery/subscription path at that boundary.
+    const recover = receiver.syncExactKnowledgeAssetsFromPeerDetailed.bind(receiver);
+    let discoveredDuringRecovery = false;
+    vi.spyOn(receiver, "syncExactKnowledgeAssetsFromPeerDetailed").mockImplementation(async (...args) => {
+      if (!discoveredDuringRecovery) {
+        discoveredDuringRecovery = true;
+        await receiver.discoverContextGraphsFromStorage();
+      }
+      return recover(...args);
+    });
     const t = performance.now();
     const result = await receiver.syncPublicGraphSnapshot({
       contextGraphId: graph,
@@ -215,6 +230,7 @@ describe("public snapshot recovery over live local nodes and chain", () => {
       completeAsOfSnapshot: true,
       current: true,
     });
+    expect(discoveredDuringRecovery).toBe(true);
     expect(snapshotRead).toHaveBeenCalledTimes(2);
     for (const call of calls) {
       expect(call).not.toHaveBeenCalled();

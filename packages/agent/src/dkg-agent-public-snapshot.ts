@@ -142,16 +142,26 @@ export class PublicSnapshotMethods {
           const initial = await read();
           const snapshot = initial.snapshot;
           assertCurrent();
+          if (subscription?.onChainHash && subscription.onChainHash.toLowerCase() !== snapshot.nameHash.toLowerCase())
+            throw new Error("Graph name binding differs from requested snapshot");
           const evidence = new PublicSnapshotEvidence(initial, isCurrent);
           // A validated public snapshot admits this job without scheduling the
           // daemon's separate legacy subscribe/catch-up pipeline.
-          if (!subscription?.subscribed || !subscription.onChainId) {
-            control.admitSubscription(() => this.subscribeToContextGraph(contextGraphId, {
-              onChainId,
-              syncMode: "on-demand",
-              trackSyncScope: false,
-              deferSharedMemoryGossipSubscribe: true,
-            }));
+          if (!subscription?.subscribed || !subscription.onChainId || !subscription.onChainHash) {
+            control.admitSubscription(() => {
+              if (!subscription?.subscribed || !subscription.onChainId) {
+                this.subscribeToContextGraph(contextGraphId, {
+                  onChainId,
+                  syncMode: "on-demand",
+                  trackSyncScope: false,
+                  deferSharedMemoryGossipSubscribe: true,
+                });
+              }
+              // Admit the complete authenticated binding before capturing the
+              // job's subscription fence. Historical discovery of this same
+              // binding must not need to replace the row during materialization.
+              if (!subscription?.onChainHash) this.recordCgWireId(contextGraphId, snapshot.nameHash);
+            });
           }
           assertCurrent();
           if (mode === "core-cache") await markCoreTrustedGraph(this.store, contextGraphId);

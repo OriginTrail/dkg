@@ -20,11 +20,21 @@ function fixture() {
     router: { send: vi.fn(async () => Buffer.from(JSON.stringify(snapshot()))) },
     syncExactKnowledgeAssetsFromPeerDetailed: vi.fn(),
     subscribeToContextGraph: vi.fn(() => { generation++; a.subscribedContextGraphs.set(graph, { subscribed: true, onChainId: '1' }); }),
+    recordCgWireId: vi.fn((_id: string, hash: string) => {
+      a.subscribedContextGraphs.set(graph, { ...a.subscribedContextGraphs.get(graph), onChainHash: hash });
+    }),
   };
   return { a, invalidate: () => { generation++; a.subscribedContextGraphs.delete(graph); } };
 }
 const run = (a: any, mode: 'core-cache' | 'rpc-only') => PublicSnapshotMethods.prototype.syncPublicGraphSnapshot.call(a, {...request, mode});
 describe('public snapshot job ownership', () => {
+  it('does not overwrite a conflicting existing name binding', async () => {
+    const { a } = fixture();
+    a.subscribedContextGraphs.set(graph, { subscribed: true, onChainId: '1', onChainHash: ethers.id('different-graph') });
+    await expect(run(a, 'rpc-only')).rejects.toThrow('Graph name binding differs');
+    expect(a.recordCgWireId).not.toHaveBeenCalled();
+    expect(a.syncExactKnowledgeAssetsFromPeerDetailed).not.toHaveBeenCalled();
+  });
   it.each(['core-cache', 'rpc-only'] as const)('rejects deselected graphs before any %s read', async mode => {
     const {a} = fixture(); a.subscribedContextGraphs.set(graph, { subscribed: false, coreHosted: false });
     await expect(run(a, mode)).rejects.toThrow('inactive');
