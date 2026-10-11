@@ -1,6 +1,6 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { TripleStoreAsyncLiftPublisher, type AsyncLiftPublisherConfig } from '../src/index.js';
+import { readPublisherJournalWithScope, TripleStoreAsyncLiftPublisher, type AsyncLiftPublisherConfig } from '../src/index.js';
 import type { LiftJob } from '../src/lift-job.js';
 import {
   DEFAULT_CONTROL_GRAPH_URI,
@@ -160,6 +160,11 @@ describe('#1829 admission journal append (writeJob hook)', () => {
     const reloaded = createPublisher({ journalWrites: false });
     expect(journalEntriesContextGraphId((await reloaded.readJournalByJob(jobId)).entries)).toBe('music-social');
     expect(await reloaded.readJournalByJob(jobId)).toEqual(await publisher.readJournalByJob(jobId));
+    const getStatus = vi.spyOn(reloaded, 'getStatus').mockRejectedValue(new Error('cleared projection must not supply journal scope'));
+    const scoped = await readPublisherJournalWithScope(reloaded, jobId);
+    expect(scoped.scope).toEqual({ kind: 'context-graph', contextGraphId: 'music-social' });
+    expect(scoped.journal).toEqual(await publisher.readJournalByJob(jobId));
+    expect(getStatus).not.toHaveBeenCalled();
   });
 
   it('persists authoritative broadcast, included, and published-finalized projections', async () => {

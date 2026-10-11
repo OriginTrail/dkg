@@ -1,4 +1,4 @@
-import { requireContextGraphReadAuthority } from './context-graph-read-authority.js';
+import { requireKnowledgeAssetDraftReadAuthority } from './context-graph-read-authority.js';
 // Route handlers for the GitHub-shaped Knowledge Asset HTTP surface.
 //
 // OT-RFC-43 §10.5 — one coherent resource model for a Knowledge Asset (KA):
@@ -1205,7 +1205,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     }
     const agentAddress = explicitAgentAddress ?? writePreflightCallerAgentAddress;
     const cg = normalizeContextGraphIdOrUri(rawCg as string);
-    if (!(await requireContextGraphReadAuthority(ctx, cg))) return null;
+    const identifier = classifyKaIdentifier(name);
+    const ownDraftIdentifier = identifier.kind === 'name' || (agentAddress !== undefined
+      && (identifier.kaId >> 96n) === BigInt(agentAddress));
+    const draftLane = (layer === undefined || layer === 'wm') && ownDraftIdentifier ? agentAddress : undefined;
+    if (!(await requireKnowledgeAssetDraftReadAuthority(ctx, cg, draftLane))) return null;
     return { cg, subGraphName, agentAddress };
   }
 

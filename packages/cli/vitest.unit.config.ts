@@ -50,6 +50,7 @@ export default defineConfig({
       'test/query-route-lifecycle.test.ts',
       'test/query-catalog-profile-route.test.ts',
           'test/context-graph-route-read-authority.test.ts',
+          'test/knowledge-assets-local-curator-read.test.ts',
       'test/publisher-jobs-graph-inventory.test.ts',
           'test/genui-read-authority.test.ts',
       'test/store-unavailable-response.test.ts',

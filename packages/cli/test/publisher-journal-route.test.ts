@@ -6,6 +6,7 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { createPublisherControlFromStore } from '../src/publisher-runner.js';
 import { handlePublisherRoutes } from '../src/daemon/routes/publisher.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { createMixedPublisherInventory } from '../../publisher/test/_helpers/publisher-inventory.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 
 // #1829 — GET /api/publisher/journal route: read-only append-only journal, by jobId
@@ -85,9 +86,9 @@ describe('#1829 GET /api/publisher/journal', () => {
     const status = vi.spyOn(reloaded, 'getStatus');
     const journal = vi.spyOn(reloaded, 'readJournalByJob');
     const queries = vi.spyOn(store, 'query');
-    const ctx = createContext(`/api/publisher/journal?jobId=${jobId}&contextGraphId=unrelated-public`, reloaded);
     const caller = '0x3333333333333333333333333333333333333333';
-    ctx.authentication = requestAuthentication({ kind: 'agent', agentAddress: caller });
+    const ctx = createContext(`/api/publisher/journal?jobId=${jobId}&contextGraphId=unrelated-public`, reloaded, '0x0',
+      requestAuthentication({ kind: 'agent', agentAddress: caller }));
     const authority = vi.fn(async () => ({ outcome: allowed ? 'allowed' as const : 'denied' as const,
       source: 'registered-chain' as const, reason: 'chain-participant', grantScope: allowed ? 'caller' as const : 'none' as const,
       metadataBootstrap: 'forbidden' as const }));
@@ -101,6 +102,54 @@ describe('#1829 GET /api/publisher/journal', () => {
     if (allowed) expect(responseBody(ctx)).toEqual(retained);
     else expect((ctx.res as unknown as { body: string }).body).not.toContain(jobId);
     expect(await control.readJournalByJob(jobId)).toEqual(retained);
+  });
+
+  it.each([true, false])('uses the native job scope when its journal is empty (allowed=%s)', async allowed => {
+    const { control, jobId, store } = await newControlWithJob();
+    await store.deleteByPattern({ graph: 'urn:dkg:publisher:journal' });
+    const retained = await control.readJournalByJob(jobId);
+    expect(retained.entries).toEqual([]);
+    const caller = '0x3333333333333333333333333333333333333333';
+    const ctx = createContext(`/api/publisher/journal?jobId=${jobId}&contextGraphId=foreign-public`, control, '0x0',
+      requestAuthentication({ kind: 'agent', agentAddress: caller }));
+    const authority = vi.fn(async () => ({ outcome: allowed ? 'allowed' as const : 'denied' as const,
+      source: 'registered-chain' as const, reason: 'chain-participant', grantScope: allowed ? 'caller' as const : 'none' as const,
+      metadataBootstrap: 'forbidden' as const }));
+    Object.assign(ctx.agent, { resolveContextGraphReadAuthority: authority });
+    const read = vi.spyOn(control, 'readJournalByJob');
+    const status = vi.spyOn(control, 'getStatus');
+    await handlePublisherRoutes(ctx);
+    expect(responseStatus(ctx)).toBe(allowed ? 200 : 403);
+    expect(authority).toHaveBeenCalledExactlyOnceWith('music-social', expect.objectContaining({ callerAgentAddress: caller }));
+    expect(read).toHaveBeenCalledExactlyOnceWith(jobId);
+    expect(status).toHaveBeenCalledExactlyOnceWith(jobId);
+    if (allowed) expect(responseBody(ctx)).toEqual(retained);
+  });
+
+  it.each([true, false])('preserves empty raw-job journals only for operators (operator=%s)', async operator => {
+    const { store, publisher } = await createMixedPublisherInventory('music-social');
+    stores.push(store);
+    const ctx = createContext('/api/publisher/journal?jobId=legacy', publisher, '0x0',
+      requestAuthentication(operator ? { kind: 'nodeOperator' }
+        : { kind: 'agent', agentAddress: '0x3333333333333333333333333333333333333333' }));
+    const authority = vi.fn();
+    Object.assign(ctx.agent, { resolveContextGraphReadAuthority: authority });
+    await handlePublisherRoutes(ctx);
+    expect(responseStatus(ctx)).toBe(operator ? 200 : 403);
+    expect(authority).not.toHaveBeenCalled();
+    if (operator) expect(responseBody(ctx)).toMatchObject({ entries: [], maxSeq: -1 });
+  });
+
+  it.each([true, false])('keeps unknown empty journals compatible (operator=%s)', async operator => {
+    const { control } = await newControlWithJob();
+    const ctx = createContext('/api/publisher/journal?jobId=missing', control, '0x0',
+      requestAuthentication(operator ? { kind: 'nodeOperator' }
+        : { kind: 'agent', agentAddress: '0x3333333333333333333333333333333333333333' }));
+    const status = vi.spyOn(control, 'getStatus');
+    await handlePublisherRoutes(ctx);
+    expect(responseStatus(ctx)).toBe(operator ? 200 : 404);
+    expect(status).toHaveBeenCalledTimes(operator ? 0 : 1);
+    if (operator) expect(responseBody(ctx)).toMatchObject({ entries: [], maxSeq: -1 });
   });
 
   it('reads the journal facts-pure by lifecycle identity (200)', async () => {
@@ -138,7 +187,8 @@ describe('#1829 GET /api/publisher/journal', () => {
   });
 });
 
-function createContext(path: string, publisherControl: RequestContext['publisherControl'], requestAgentAddress = '0x0'): RequestContext {
+function createContext(path: string, publisherControl: RequestContext['publisherControl'], requestAgentAddress = '0x0',
+  authentication: RequestContext['authentication'] = requestAuthentication({ kind: 'anonymous' })): RequestContext {
   const url = new URL(`http://127.0.0.1${path}`);
   const req = Readable.from([]);
   Object.assign(req, { method: 'GET', url: path, headers: { host: '127.0.0.1' } });
@@ -147,7 +197,7 @@ function createContext(path: string, publisherControl: RequestContext['publisher
     res: createResponse() as unknown as ServerResponse,
     agent: { resolveContextGraphReadAuthority: async () => ({
       outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant', metadataBootstrap: 'forbidden',
-    }) } as RequestContext['agent'],
+    }) } as unknown as RequestContext['agent'],
     publisherControl,
     publisherState: {
       runtime: null,
@@ -175,9 +225,9 @@ function createContext(path: string, publisherControl: RequestContext['publisher
     apiPortRef: { value: 0 },
     url,
     path: url.pathname,
-    authentication: requestAuthentication({ kind: 'anonymous' }),
+    authentication,
     requestAgentAddress,
-  };
+  } as unknown as RequestContext;
 }
 
 function createResponse() {

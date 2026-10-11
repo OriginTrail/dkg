@@ -61,7 +61,9 @@ import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chai
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import {
-  journalEntriesContextGraphId,
+  publisherJobReadScope,
+  readPublisherJournalWithScope,
+  type PublisherReadScope,
   findReservedSubjectPrefix,
   isSafeJobId,
   isSkolemizedUri,
@@ -338,21 +340,17 @@ import type { RequestContext } from './context.js';
 import { actorFromRequestContext } from './context.js';
 
 
-/** Persisted raw-lift jobs have no authenticated CG identity and remain operator-only. */
-function publisherJobContextGraphId(job: PersistedLiftJob): string | undefined {
-  return job.request.jobType === 'knowledge-asset-vm-publish'
-    ? job.request.knowledgeAssetVmPublish.contextGraphId
-    : undefined;
-}
-
-async function requirePublisherJobReadAuthority(ctx: RequestContext, job: PersistedLiftJob): Promise<boolean> {
+async function requirePublisherReadScope(ctx: RequestContext, scope: PublisherReadScope): Promise<boolean> {
   if (hasNodeOperatorReadAccess(ctx)) return true;
-  const contextGraphId = publisherJobContextGraphId(job);
-  if (contextGraphId === undefined) {
+  if (scope.kind !== 'context-graph') {
     jsonResponse(ctx.res, 403, { error: 'Not authorized to read this publisher job.' });
     return false;
   }
-  return requireContextGraphReadAuthority(ctx, contextGraphId);
+  return requireContextGraphReadAuthority(ctx, scope.contextGraphId);
+}
+
+async function requirePublisherJobReadAuthority(ctx: RequestContext, job: PersistedLiftJob): Promise<boolean> {
+  return requirePublisherReadScope(ctx, publisherJobReadScope(job));
 }
 
 interface PublisherLifecycleFacts {
@@ -620,19 +618,15 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
   if (req.method === "GET" && path === "/api/publisher/journal") {
     const jobId = url.searchParams.get("jobId")?.trim() || undefined;
     if (jobId !== undefined) {
-      const result = await publisherControl.readJournalByJob(jobId);
-      if (!hasNodeOperatorReadAccess(ctx)) {
-        const journalContextGraphId = journalEntriesContextGraphId(result.entries);
-        if (journalContextGraphId !== null) {
-          if (!(await requireContextGraphReadAuthority(ctx, journalContextGraphId))) return;
-        } else {
-          const job = await publisherControl.getStatus(jobId);
-          if (!job) return jsonResponse(res, 404, { error: `Publisher job not found: ${jobId}` });
-          if (!(await requirePublisherJobReadAuthority(ctx, job))) return;
-        }
+      if (hasNodeOperatorReadAccess(ctx)) return jsonResponse(res, 200, await publisherControl.readJournalByJob(jobId));
+      const result = await readPublisherJournalWithScope(publisherControl, jobId);
+      if (result.scope.kind === 'missing') {
+        return jsonResponse(res, 404, { error: `Publisher job not found: ${jobId}` });
       }
-      return jsonResponse(res, 200, result);
+      if (!(await requirePublisherReadScope(ctx, result.scope))) return;
+      return jsonResponse(res, 200, result.journal);
     }
+
     const facts = parsePublisherLifecycleFactsFromQuery(url, res, requestAgentAddress);
     if (!facts) return; // a 400 was already sent
     if (!(await requireContextGraphReadAuthority(ctx, facts.contextGraphId))) return;

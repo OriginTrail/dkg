@@ -5,6 +5,7 @@ import { startLiveDaemon, stopLiveDaemon, postJson, getJson, type LiveDaemon } f
 const privateCg = `read-private-${Date.now().toString(36)}`;
 const callerCg = `read-caller-${Date.now().toString(36)}`;
 const secret = 'private tenant content';
+const draftCg = `curator-draft-${Date.now().toString(36)}`;
 let daemon: LiveDaemon;
 let allowed: { address: string; token: string };
 let excluded: { address: string; token: string };
@@ -34,6 +35,17 @@ describe('real HTTP caller-bound CG reads', () => {
       const registered = await request(owner.token, '/api/context-graph/register', { id, accessPolicy: 1 });
       expect(registered.status, JSON.stringify(registered.body)).toBe(200);
     }
+    const localCreated = await request(allowed.token, '/api/context-graph/create', {
+      id: draftCg, name: draftCg, accessPolicy: 1,
+    });
+    expect(localCreated.status, JSON.stringify(localCreated.body)).toBeLessThan(300);
+    const localAsset = await request(allowed.token, '/api/knowledge-assets', { contextGraphId: draftCg, name: 'local-draft' });
+    expect(localAsset.status, JSON.stringify(localAsset.body)).toBe(201);
+    const localWritten = await request(allowed.token, '/api/knowledge-assets/local-draft/wm/write', {
+      contextGraphId: draftCg,
+      quads: [{ subject: 'urn:local:draft', predicate: 'http://schema.org/name', object: '"curator draft content"', graph: '' }],
+    });
+    expect(localWritten.status, JSON.stringify(localWritten.body)).toBe(200);
     const created = await request(allowed.token, '/api/knowledge-assets', { contextGraphId: privateCg, name: 'private-asset' });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     const written = await request(allowed.token, '/api/knowledge-assets/private-asset/wm/write', {
@@ -43,6 +55,17 @@ describe('real HTTP caller-bound CG reads', () => {
     expect(written.status, JSON.stringify(written.body)).toBe(200);
   }, 120_000);
   afterAll(async () => { if (daemon) await stopLiveDaemon(daemon); });
+
+  it.each(['', '/wm', '/wm/quads', '/wm/extraction-status'])('reads the unregistered curator own local draft at %s', async suffix => {
+    const result = await request(allowed.token, `/api/knowledge-assets/local-draft${suffix}?contextGraphId=${draftCg}`);
+    expect(result.status, JSON.stringify(result.body)).toBe(suffix === '/wm/extraction-status' ? 404 : 200);
+    if (suffix === '/wm/quads') expect(JSON.stringify(result.body)).toContain('curator draft content');
+  });
+  it('does not let another agent read the unregistered curator draft', async () => {
+    const result = await request(excluded.token, `/api/knowledge-assets/local-draft/wm/quads?contextGraphId=${draftCg}&agentAddress=${allowed.address}`);
+    expect(result.status).toBe(403);
+    expect(JSON.stringify(result.body)).not.toContain('curator draft content');
+  });
 
   const reads = [
     { path: () => `/api/ccl/results?contextGraphId=${privateCg}` },
