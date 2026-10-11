@@ -156,6 +156,9 @@ describe('#1829 admission journal append (writeJob hook)', () => {
     await publisher.clear('finalized');
     expect(await publisher.getStatus(jobId)).toBeNull(); // record cleared from control plane
     expect(await journalRows()).toEqual(before); // journal untouched
+    const reloaded = createPublisher({ journalWrites: false });
+    expect(await reloaded.readJournalContextGraphIdByJob(jobId)).toBe('music-social');
+    expect(await reloaded.readJournalByJob(jobId)).toEqual(await publisher.readJournalByJob(jobId));
   });
 
   it('persists authoritative broadcast, included, and published-finalized projections', async () => {
@@ -226,6 +229,8 @@ describe('#1829 admission journal append (writeJob hook)', () => {
   it('readJournalByJob returns entries for that jobId', async () => {
     const publisher = createPublisher();
     const jobId = await driveToValidated(publisher);
+    expect(await publisher.readJournalContextGraphIdByJob('unknown-job')).toBeNull();
+    expect(await publisher.readJournalContextGraphIdByJob(jobId)).toBe('music-social');
     const res = await publisher.readJournalByJob(jobId);
     expect(res.entries.every((e) => e.jobId === jobId)).toBe(true);
     expect(res.entries.map((e) => e.kind)).toEqual(['admission', 'claimed', 'validated']);

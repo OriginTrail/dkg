@@ -620,9 +620,14 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     const jobId = url.searchParams.get("jobId")?.trim() || undefined;
     if (jobId !== undefined) {
       if (!hasNodeOperatorReadAccess(ctx)) {
-        const job = await publisherControl.getStatus(jobId);
-        if (!job) return jsonResponse(res, 404, { error: `Publisher job not found: ${jobId}` });
-        if (!(await requirePublisherJobReadAuthority(ctx, job))) return;
+        const journalContextGraphId = await publisherControl.readJournalContextGraphIdByJob(jobId);
+        if (journalContextGraphId !== null) {
+          if (!(await requireContextGraphReadAuthority(ctx, journalContextGraphId))) return;
+        } else {
+          const job = await publisherControl.getStatus(jobId);
+          if (!job) return jsonResponse(res, 404, { error: `Publisher job not found: ${jobId}` });
+          if (!(await requirePublisherJobReadAuthority(ctx, job))) return;
+        }
       }
       const result = await publisherControl.readJournalByJob(jobId);
       return jsonResponse(res, 200, result);

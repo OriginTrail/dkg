@@ -11,6 +11,7 @@ import {
   journalLineageKeyHash,
   serializeJournalEntry,
   parseJournalEntry,
+  journalEntriesContextGraphId,
 } from '../src/async-lift-control-plane.js';
 
 // #1829 — journal entry serialize/parse round-trip + xsd:integer seq + stable subject.
@@ -40,6 +41,14 @@ describe('#1829 admission journal serialize/parse', () => {
     for (const q of quads) row[q.predicate] = q.object;
     return row;
   }
+
+  it('derives durable CG provenance only from one complete journal lifecycle tuple', () => {
+    expect(journalEntriesContextGraphId([])).toBeNull();
+    expect(journalEntriesContextGraphId([entry(), entry({ seq: 4 })])).toBe('music-social');
+    expect(() => journalEntriesContextGraphId([entry(), entry({ lineageKey: ['other-cg', 'albums', '', '0xabc'].join(sep) })])).toThrow('conflicting lifecycle provenance');
+    expect(() => journalEntriesContextGraphId([entry({ lineageKey: 'music-social' })])).toThrow('malformed lifecycle provenance');
+    expect(() => journalEntriesContextGraphId([entry({ lineageKey: ['music-social\u0000', 'albums', '', '0xabc'].join(sep) })])).toThrow('malformed lifecycle provenance');
+  });
 
   it('round-trips every field through serialize -> parse', () => {
     const e = entry();

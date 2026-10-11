@@ -588,3 +588,71 @@ function pushOptional<T>(
   if (value === undefined) return;
   quads.push(quad(subject, predicate, formatter(value), graph));
 }
+
+/** Journal lifecycle tuples survive mutable job deletion and are writer-owned. */
+export function journalEntriesContextGraphId(entries: readonly AdmissionJournalEntry[]): string | null {
+  const keys = new Set(entries.map(entry => entry.lineageKey));
+  if (keys.size === 0) return null;
+  if (keys.size !== 1) throw new Error('Publisher journal has conflicting lifecycle provenance');
+  const components = [...keys][0]!.split(String.fromCharCode(0x1f));
+  if (components.length !== 4 || !components[0] || !components[1]
+    || components.some(component => [...component].some(character => {
+      const code = character.charCodeAt(0);
+      return code < 0x20 || code === 0x7f;
+    }))) {
+    throw new Error('Publisher journal has malformed lifecycle provenance');
+  }
+  return components[0];
+}
+
+// `entries` is the queried subset returned to the caller; `lineage` is the full
+// per-lineageKey set the completeness check is computed over (defaults to `entries`
+// for a full-lineage read). maxSeq/complete describe the LINEAGE (no seq gap); a
+// subset read never spuriously reports incomplete. On oxigraph `complete` is
+// authoritative; on external SPARQL backends (no fsync) the highest-seq entry can be
+// lost on crash without a visible gap — documented on JournalReadResult as best-effort.
+export function summarizeJournal(entries: AdmissionJournalEntry[], lineage: AdmissionJournalEntry[] = entries): JournalReadResult {
+  const maxSeq = lineage.reduce((max, e) => Math.max(max, e.seq), -1);
+  const complete = lineage.length === maxSeq + 1;
+  const txHashes = [...new Set(entries.map((e) => e.txHash).filter((h): h is string => h !== undefined))];
+  return { entries, maxSeq, complete, txHashes };
+}
+
+/** #1829 — read query for the append-only journal (facts-pure, or by jobId). */
+export interface JournalReadInput {
+  readonly contextGraphId: string;
+  readonly name: string;
+  readonly subGraphName?: string;
+  readonly agentAddress?: string;
+  /** Optional per-version filter WITHIN the lineage; never the lineage key itself. */
+  readonly intentKey?: string;
+}
+
+/**
+ * #1829 — result of a journal read. `entries` are seq-ordered; `maxSeq` is -1 for an
+ * empty lineage. `complete` = `entries.length === maxSeq + 1` (no seq gap) — authoritative
+ * on oxigraph-worker; best-effort on external SPARQL backends (no fsync, so the
+ * highest-seq entry can be lost on a crash without a gap being visible). `txHashes` are
+ * ATTEMPTED submissions — a reconciler MUST verify each against chain; a hash here is
+ * never proof the tx was sent (a pre-flush 'broadcast' entry can survive a rolled-back
+ * attempt).
+ */
+export interface JournalReadResult {
+  readonly entries: readonly AdmissionJournalEntry[];
+  readonly maxSeq: number;
+  readonly complete: boolean;
+  readonly txHashes: readonly string[];
+}
+
+/**
+ * #1829 — read-only append-only journal reader. Segregated off the base contract (like
+ * the #1828 recovery lookup): only the daemon control instance serves it.
+ */
+export interface VmPublishAdmissionJournalReader {
+  /** Facts-pure lineage read (derives lineageKey from facts, never the ephemeral index). */
+  readJournalByIntent(facts: JournalReadInput): Promise<JournalReadResult>;
+  /** All journal entries bearing this jobId (a successor job continues the lineage seq). */
+  readJournalByJob(jobId: string): Promise<JournalReadResult>;
+  /** Trusted journal CG provenance survives job deletion; null means absent, corrupt tuples throw. */
+  readJournalContextGraphIdByJob(jobId: string): Promise<string | null>;
+}

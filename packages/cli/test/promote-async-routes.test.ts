@@ -73,6 +73,9 @@ describe('async SWM-share queue daemon routes', () => {
 
   function makeAgent(tokenToAddress: Record<string, string> = {}) {
     return {
+      async resolveContextGraphReadAuthority() {
+        return { outcome: 'allowed', grantScope: 'caller', source: 'registered-chain', reason: 'chain-participant', metadataBootstrap: 'eligible' };
+      },
       async listContextGraphs() {
         return ['cg', 'cg-1', 'cg-2', 'graphify', 'team-graph'].map((id) => ({
           id,
@@ -163,7 +166,7 @@ describe('async SWM-share queue daemon routes', () => {
           requestAgentAddress: agent.resolveAgentByToken(requestToken) ?? 'did:dkg:agent:test',
           authentication: agent.resolveAgentByToken(requestToken)
             ? requestAuthentication({ kind: 'agent', agentAddress: agent.resolveAgentByToken(requestToken), token: requestToken })
-            : requestAuthentication({ kind: 'anonymous' }),
+            : requestAuthentication({ kind: 'anonymous', mode: 'disabled' }),
           emitMemoryGraphChanged: () => {},
           emitNotification: () => {},
         } as any);

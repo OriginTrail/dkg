@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import type { ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { createPublisherControlFromStore } from '../src/publisher-runner.js';
 import { handlePublisherRoutes } from '../src/daemon/routes/publisher.js';
@@ -52,12 +52,12 @@ describe('#1829 GET /api/publisher/journal', () => {
     };
   }
 
-  async function newControlWithJob(): Promise<{ control: ReturnType<typeof createPublisherControlFromStore>; jobId: string }> {
+  async function newControlWithJob(): Promise<{ control: ReturnType<typeof createPublisherControlFromStore>; jobId: string; store: OxigraphStore }> {
     const store = new OxigraphStore();
     stores.push(store);
     const control = createPublisherControlFromStore(store);
     const jobId = await control.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
-    return { control, jobId };
+    return { control, jobId, store };
   }
 
   it('reads the journal by jobId (200, admission entry present)', async () => {
@@ -70,6 +70,35 @@ describe('#1829 GET /api/publisher/journal', () => {
     expect(body.entries[0]?.kind).toBe('admission');
     expect(body.entries[0]?.jobId).toBe(jobId);
     expect(body.complete).toBe(true);
+  });
+
+  it.each([true, false])('keeps a cleared journal bound to its durable CG for an authorized=%s agent', async allowed => {
+    const { control, jobId, store } = await newControlWithJob();
+    await control.claimNext('wallet-1');
+    await control.update(jobId, 'validated', { validation: { canonicalRoots: [], canonicalRootMap: {}, swmQuadCount: 2, authorityProofRef: 'knowledge-asset-lifecycle', transitionType: 'CREATE' } });
+    await control.update(jobId, 'finalized', { finalization: { mode: 'local' } });
+    const retained = await control.readJournalByJob(jobId);
+    expect(retained.entries.length).toBeGreaterThan(1);
+    await control.clearTerminalJob(jobId);
+    expect(await control.getStatus(jobId)).toBeNull();
+    const reloaded = createPublisherControlFromStore(store);
+    const status = vi.spyOn(reloaded, 'getStatus');
+    const journal = vi.spyOn(reloaded, 'readJournalByJob');
+    const ctx = createContext(`/api/publisher/journal?jobId=${jobId}&contextGraphId=unrelated-public`, reloaded);
+    const caller = '0x3333333333333333333333333333333333333333';
+    ctx.authentication = requestAuthentication({ kind: 'agent', agentAddress: caller });
+    const authority = vi.fn(async () => ({ outcome: allowed ? 'allowed' as const : 'denied' as const,
+      source: 'registered-chain' as const, reason: 'chain-participant', grantScope: allowed ? 'caller' as const : 'none' as const,
+      metadataBootstrap: 'forbidden' as const }));
+    Object.assign(ctx.agent, { resolveContextGraphReadAuthority: authority });
+    await handlePublisherRoutes(ctx);
+    expect(authority).toHaveBeenCalledWith('music-social', expect.objectContaining({ callerAgentAddress: caller }));
+    expect(responseStatus(ctx)).toBe(allowed ? 200 : 403);
+    expect(status).not.toHaveBeenCalled();
+    expect(journal).toHaveBeenCalledTimes(allowed ? 1 : 0);
+    if (allowed) expect(responseBody(ctx)).toEqual(retained);
+    else expect((ctx.res as unknown as { body: string }).body).not.toContain(jobId);
+    expect(await control.readJournalByJob(jobId)).toEqual(retained);
   });
 
   it('reads the journal facts-pure by lifecycle identity (200)', async () => {

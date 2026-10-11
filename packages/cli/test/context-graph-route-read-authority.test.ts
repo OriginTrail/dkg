@@ -64,7 +64,7 @@ function fixture(route: Route, outcome: 'allowed' | 'denied' | 'unavailable', op
     canReadContextGraph: vi.fn(async () => outcome === 'allowed'),
   };
   const publisherControl = { describeConfiguredRetryState: () => ({ autoRetryEligible: false }), lookupKnowledgeAssetVmPublishJobByIntent: read,
-    readJournalByIntent: read, readJournalByJob: read, inspectPreparedPayload: read, list: vi.fn(async () => [job]), getStatus: vi.fn(async () => job) };
+    readJournalContextGraphIdByJob: vi.fn(async () => null), readJournalByIntent: read, readJournalByJob: read, inspectPreparedPayload: read, list: vi.fn(async () => [job]), getStatus: vi.fn(async () => job) };
   const url = new URL(route.path, 'http://localhost');
   const ctx = { req, res, agent, publisherControl, publisherState: { runtime: null, availability: { available: false, reason: 'publisher_disabled', retryable: false, operatorActionRequired: true } }, config: { llm: { apiKey: 'fixture' } },
     path: url.pathname, url, requestAgentAddress: CALLER,
