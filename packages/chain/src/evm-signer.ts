@@ -36,6 +36,8 @@ export interface ExternalEvmSigner extends EvmSigner {
 export interface ExternalAuthorSigners {
   /** Author for requests that name no agent, if one is configured. */
   readonly defaultAuthor?: EvmSigner;
+  /** The author accounts known so far, in the signer's order. */
+  readonly addresses: readonly string[];
   /** The signer for `address` when it is one of these author keys; otherwise undefined. */
   signerFor(address: string): Promise<EvmSigner | undefined>;
 }

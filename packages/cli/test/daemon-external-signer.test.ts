@@ -5,8 +5,9 @@
  * another, over a unix socket. The node must start without creating a key file,
  * report the signer's payer accounts, register an agent by an address the
  * signer holds (the registration is signed by the signer), refuse a payer
- * account as an agent, keep the credentials out of its output, and refuse to
- * start as a core node.
+ * account as an agent, create and register a context graph with the node token
+ * (curated by its default agent, the configured author), keep the credentials
+ * out of its output, and refuse to start as a core node.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -18,7 +19,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ethers } from 'ethers';
 import { TEST_SNAPSHOT_STORAGE } from '../../../scripts/testing/snapshot-storage.js';
-import { getSharedContext } from '../../chain/test/evm-test-context.js';
+import { createProvider, getSharedContext, HARDHAT_KEYS, revertSnapshot, takeSnapshot } from '../../chain/test/evm-test-context.js';
 import { startFakeRemoteSigner, type FakeSigner } from '../../chain/test/helpers/fake-remote-signer.js';
 
 const CLI_ENTRY = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist', 'cli.js');
@@ -139,6 +140,7 @@ describe('daemon with an external signer', () => {
   let fake: FakeSigner;
   let daemon: Daemon | undefined;
   let adminToken: string;
+  let snapshotId: string | undefined;
 
   const api = (path: string, init: RequestInit = {}) => fetch(`http://127.0.0.1:${daemon!.apiPort}${path}`, {
     ...init,
@@ -147,6 +149,10 @@ describe('daemon with an external signer', () => {
 
   beforeAll(async () => {
     if (!existsSync(CLI_ENTRY)) throw new Error(`CLI not built at ${CLI_ENTRY}`);
+    snapshotId = await takeSnapshot();
+    // The primary payer sends the context graph registration: give it gas.
+    const deployer = new ethers.Wallet(HARDHAT_KEYS.DEPLOYER, createProvider());
+    await (await deployer.sendTransaction({ to: payers[0].address, value: ethers.parseEther('1') })).wait();
     dir = await mkdtemp(join(tmpdir(), 'dkg-ext-'));
     fake = await startFakeRemoteSigner({
       socketPath: join(dir, 'signer.sock'),
@@ -169,6 +175,7 @@ describe('daemon with an external signer', () => {
     } finally {
       await fake?.close();
       if (dir) await rm(dir, { recursive: true, force: true });
+      if (snapshotId) await revertSnapshot(snapshotId);
     }
   }, 30_000);
 
@@ -213,6 +220,20 @@ describe('daemon with an external signer', () => {
     });
     expect(refused.status).toBe(400);
     expect(((await refused.json()) as { error: string }).error).toMatch(/not an author key of the external signer/);
+  });
+
+  it('creates and registers a context graph with the node token, curated by the default author', async () => {
+    const res = await api('/api/context-graph/create', {
+      method: 'POST',
+      body: JSON.stringify({ id: 'external-signer-node-graph', name: 'Node token graph', register: true }),
+    });
+    const body = await res.json() as Record<string, unknown>;
+    expect(res.status).toBe(200);
+    expect(body, JSON.stringify(body)).toMatchObject({ registered: true, onChainId: expect.any(String) });
+    const transactions = fake.calls('eth_signTransaction');
+    expect(transactions.length).toBeGreaterThan(0);
+    expect(transactions.every((request) => request.authorization === `Bearer ${PAYER_TOKEN}`)).toBe(true);
+    expect(await allOutput(daemon!)).toContain(`Auto-registered default agent "external-signer-test" → ${defaultAuthor.address}`);
   });
 
   it('logs the signer endpoint and accounts but never a credential', async () => {

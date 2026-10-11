@@ -237,7 +237,7 @@ import {
   type KeystoreEntry,
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
-import { externalSignerAgentPublicKey } from './external-author-signing.js';
+import { externalSignerAgentPublicKey, registerExternalDefaultAgent } from './external-author-signing.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
@@ -1367,8 +1367,8 @@ export class AgentRegistryMethods extends DKGAgentBase {
   }
 
   /**
-   * Auto-register the default "owner" agent from the first operational wallet.
-   * Called on boot when no agents have been previously registered.
+   * Auto-register the default "owner" agent from the first operational wallet
+   * (or an external signer's author key). Called on boot when no agents exist.
    */
   public async autoRegisterDefaultAgent(this: DKGAgent): Promise<void> {
     let opKey = this.config.chainConfig?.operationalKeys?.[0];
@@ -1377,13 +1377,13 @@ export class AgentRegistryMethods extends DKGAgentBase {
         opKey = (this.chain as any).getOperationalPrivateKey();
       } catch { /* adapter without key — skip */ }
     }
-    if (!opKey) return;
-
-    const record = agentFromPrivateKey(
-      opKey,
-      this.config.name ?? 'owner',
-      this.config.framework,
-    );
+    if (!opKey) {
+      // No operational key: with an external signer, one of its author keys (no key stored).
+      const author = await registerExternalDefaultAgent(this, this.config, this.config.name ?? 'owner', this.config.framework);
+      if (author) { this.defaultAgentAddress = author; await this.markDefaultAgent(author); }
+      return;
+    }
+    const record = agentFromPrivateKey(opKey, this.config.name ?? 'owner', this.config.framework);
 
     this.localAgents.set(record.agentAddress, record);
     this.agentTokenIndex.set(record.authToken, record.agentAddress);

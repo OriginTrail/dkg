@@ -73,7 +73,7 @@ Who signs the author attestation:
 
 - A request made with an **agent token** is authored by that agent. If the agent was registered by address (below), its attestation is signed by the external signer with `eth_signTypedData_v4`. A custodial agent, whose key you chose to keep on the node, still signs with that key.
 - A request made with the **node or admin token** is authored by the **default author**, through the signer. Without a default author such a publish fails with a clear error; the node never falls back to a payer.
-- No default agent is auto-registered with an external signer (there is no local operational key to derive one from), so nothing is silently authored with a key held on the node.
+- The node's default agent is the default author, else the signer's first author account. Node-token requests act as it where they need an agent, for example as the curator of the context graphs they create and register, while their publishes are still authored by the default author as above. It is registered by address on first start, like the agents below, so the node holds no key for it; with payer accounts only, the node has no default agent.
 
 ### Registering an agent whose key the signer holds
 

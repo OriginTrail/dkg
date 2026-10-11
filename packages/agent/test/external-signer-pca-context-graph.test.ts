@@ -2,8 +2,10 @@
  * A PCA-backed curated context graph registered by a node that signs through
  * an external signer, against the shared Hardhat node. The signer holds two
  * payers, both registered agents of a Publishing Conviction Account, and an
- * author key that curates the graph. An author key signs no transaction, so
- * the first payer signs the registration and owns the Context Graph NFT. With
+ * author key, which becomes the node's default agent and so curates the graph
+ * created and registered with the node-level identity. An author key signs no
+ * transaction, so the first payer signs the registration and owns the Context
+ * Graph NFT. With
  * the registration deposit active and the account's commitment above the
  * waiver floor, the deposit is waived and the payers need no TRAC. Every
  * registered agent of the account may publish into the graph: both payers
@@ -186,17 +188,11 @@ describe('PCA-backed curated context graph with an external signer', () => {
     expect(remote.operational.map((signer) => signer.address)).toEqual(payers.map((payer) => payer.address));
     expect(await tracBalances()).toEqual([0n, 0n]);
 
-    await agent.registerAgent('pca-curator', { address: author.address });
-    await agent.createContextGraph({
-      id: CG,
-      name: 'External signer PCA curated',
-      accessPolicy: 1,
-      callerAgentAddress: author.address,
-    });
-    const registered = await agent.registerContextGraph(CG, {
-      callerAgentAddress: author.address,
-      publishAuthorityAccountId: accountId,
-    });
+    // The signer's author key is the node's default agent, registered at start without a stored key.
+    expect(agent.getDefaultAgentAddress()).toBe(author.address);
+    expect(agent.getLocalAgentMode(author.address)).toBe('self-sovereign');
+    await agent.createContextGraph({ id: CG, name: 'External signer PCA curated', accessPolicy: 1 });
+    const registered = await agent.registerContextGraph(CG, { publishAuthorityAccountId: accountId });
     onChainId = BigInt(registered.onChainId);
 
     const waiver = await hubContract('ContextGraphWaiverStorage', [

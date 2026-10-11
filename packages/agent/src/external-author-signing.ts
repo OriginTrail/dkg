@@ -10,10 +10,14 @@
  */
 import { ethers } from 'ethers';
 import type { EvmSigner, ExternalAuthorSigners } from '@origintrail-official/dkg-chain';
+import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
+import type { DKGAgent } from './dkg-agent.js';
 
 interface ExternalAuthorConfig {
-  readonly chainConfig?: { readonly authors?: ExternalAuthorSigners };
+  readonly chainConfig?: { readonly signers?: readonly unknown[]; readonly authors?: ExternalAuthorSigners };
 }
+
+const log = new Logger('DKGAgent');
 
 interface TypedDataInput {
   domain: ethers.TypedDataDomain;
@@ -29,6 +33,35 @@ export async function externalAuthorSignerFor(
   const authors = config?.chainConfig?.authors;
   if (authors === undefined || !ethers.isAddress(address)) return undefined;
   return authors.signerFor(address);
+}
+
+/**
+ * Register the default agent of a node that signs through an external signer
+ * and so holds no operational key to derive one from: the signer's default
+ * author, else its first author account, registered by address like any agent
+ * the signer holds (the signer signs the registration; the node stores no key).
+ * Returns its address, or undefined when the signer serves no author account
+ * or the registration fails; the node then has no default agent.
+ */
+export async function registerExternalDefaultAgent(
+  agent: DKGAgent,
+  config: ExternalAuthorConfig | undefined,
+  name: string,
+  framework?: string,
+): Promise<string | undefined> {
+  const authors = config?.chainConfig?.authors;
+  if (!config?.chainConfig?.signers?.length || authors === undefined) return undefined;
+  const address = authors.defaultAuthor?.address ?? authors.addresses[0];
+  if (address === undefined) return undefined;
+  const ctx = createOperationContext('system');
+  try {
+    const record = await agent.registerAgent(name, { address, framework });
+    log.info(ctx, `Auto-registered default agent "${record.name}" → ${record.agentAddress}, an author key of the external signer`);
+    return record.agentAddress;
+  } catch (err) {
+    log.warn(ctx, `No default agent: registering author key ${address} of the external signer failed: ${err instanceof Error ? err.message : String(err)}`);
+    return undefined;
+  }
 }
 
 /** Sign author typed data and return KAv10's compact (r, vs) form. */

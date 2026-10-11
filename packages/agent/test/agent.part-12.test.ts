@@ -19,6 +19,7 @@ afterAll(async () => {
 function externalAuthorKeys(...privateKeys: string[]): ExternalAuthorSigners {
   const wallets = privateKeys.map((key) => new ethers.Wallet(key));
   return {
+    addresses: wallets.map((wallet) => wallet.address),
     signerFor: async (address) => wallets.find((wallet) => wallet.address.toLowerCase() === address.toLowerCase()),
   };
 }
