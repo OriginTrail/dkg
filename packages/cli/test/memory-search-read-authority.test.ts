@@ -1,3 +1,4 @@
+import type { ContextGraphReadAuthorityDecision, DKGAgent } from '@origintrail-official/dkg-agent';
 import { Logger, type CanonicalLogRecord } from '@origintrail-official/dkg-core';
 import { describe, it, expect, vi } from 'vitest';
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
@@ -47,12 +48,6 @@ function fakeReq(method: string, body: unknown) {
   } as any;
 }
 
-interface Decision {
-  outcome: 'allowed' | 'denied' | 'unavailable';
-  source: string;
-  reason: string;
-  grantScope?: 'public' | 'caller' | 'node' | 'none';
-}
 
 interface Probe {
   /** Args the route passed to the read-authority resolver, in call order. */
@@ -72,7 +67,7 @@ interface Probe {
 function buildCtx(opts: {
   body: unknown;
   authentication: RequestContext['authentication'];
-  decisionFor: (contextGraphId: string) => Decision;
+  decisionFor: (contextGraphId: string) => ContextGraphReadAuthorityDecision;
   swmAllowed?: boolean;
 }) {
   const res = fakeRes();
@@ -82,16 +77,14 @@ function buildCtx(opts: {
     views: [],
   };
 
+  const resolveAuthority: DKGAgent['resolveContextGraphReadAuthority'] = async (contextGraphId, o = {}) => {
+    probe.authorityChecks.push({ contextGraphId, callerAgentAddress: o.callerAgentAddress });
+    return opts.decisionFor(contextGraphId);
+  };
   const agent = {
     peerId: 'node-default-peer',
     getDefaultAgentAddress: () => '0xnode-default-agent',
-    resolveContextGraphReadAuthority: async (
-      contextGraphId: string,
-      o: { callerAgentAddress?: string } = {},
-    ) => {
-      probe.authorityChecks.push({ contextGraphId, callerAgentAddress: o.callerAgentAddress });
-      return opts.decisionFor(contextGraphId);
-    },
+    resolveContextGraphReadAuthority: resolveAuthority,
     canUseSharedMemoryForContextGraph: async (
       contextGraphId: string,
       o: { callerAgentAddress?: string } = {},
@@ -151,8 +144,8 @@ function buildCtx(opts: {
   return { ctx, res, probe };
 }
 
-const ALLOW_CHAIN: Decision = { outcome: 'allowed', grantScope: 'caller', source: 'registered-chain', reason: 'chain-participant' };
-const DENY: Decision = { outcome: 'denied', source: 'registered-chain', reason: 'agent-not-in-chain-roster' };
+const ALLOW_CHAIN: ContextGraphReadAuthorityDecision = { outcome: 'allowed', grantScope: 'caller', source: 'registered-chain', reason: 'chain-participant', metadataBootstrap: 'eligible' };
+const DENY: ContextGraphReadAuthorityDecision = { outcome: 'denied', grantScope: 'none', metadataBootstrap: 'forbidden', source: 'registered-chain', reason: 'agent-not-in-chain-roster' };
 
 describe('POST /api/memory/search — context-graph read authority', () => {
   it('denies an agent-scoped caller that has no read authority for the named CG', async () => {
@@ -273,7 +266,7 @@ describe('POST /api/memory/search — context-graph read authority', () => {
       body: { query: 'anything', contextGraphId: 'cg1' },
       authentication: requestAuthentication({ kind: 'agent', agentAddress: '0x123' }),
       decisionFor: () => ({
-        outcome: 'unavailable', source: 'registered-chain', reason: 'registered-authority-error',
+        outcome: 'unavailable', metadataBootstrap: 'eligible', source: 'registered-chain', reason: 'registered-authority-error',
         dependency: 'chain',
       }),
     });
@@ -324,11 +317,12 @@ describe('POST /api/memory/search — context-graph read authority', () => {
       'legacy-local-identity-participant',
       'legacy-subscription',
       'legacy-edge-subscription',
+      'renamed-for-diagnostics',
     ]) {
       const { ctx, res, probe } = buildCtx({
         body: { query: 'anything', contextGraphId: 'cg2' },
         authentication: requestAuthentication({ kind: 'agent', agentAddress: '0x123' }),
-        decisionFor: () => ({ outcome: 'allowed', grantScope: 'node', source: 'legacy-local', reason }),
+        decisionFor: () => ({ outcome: 'allowed', grantScope: 'node', source: 'legacy-local', metadataBootstrap: 'eligible', reason }),
       });
 
       await handleMemoryRoutes(ctx);
@@ -343,16 +337,16 @@ describe('POST /api/memory/search — context-graph read authority', () => {
     // The complement of the case above: `legacy-caller-participant` and the
     // agent-gate branches DO consult `callerAgentAddress`, so they must keep
     // working. Otherwise the fix would deny every legacy private CG outright.
-    for (const reason of [
-      'legacy-caller-participant',
-      'local-agent-allowlist',
-      'local-agent-and-peer-allowlist',
-      'local-public',
-    ]) {
+    for (const { reason, grantScope } of [
+      { reason: 'legacy-caller-participant', grantScope: 'caller' },
+      { reason: 'local-agent-allowlist', grantScope: 'caller' },
+      { reason: 'local-agent-and-peer-allowlist', grantScope: 'caller' },
+      { reason: 'local-public', grantScope: 'public' },
+    ] as const) {
       const { ctx, res, probe } = buildCtx({
         body: { query: 'anything', contextGraphId: 'cg1' },
         authentication: requestAuthentication({ kind: 'agent', agentAddress: '0x123' }),
-        decisionFor: () => ({ outcome: 'allowed', grantScope: reason === 'local-public' ? 'public' : 'caller', source: 'legacy-local', reason }),
+        decisionFor: () => ({ outcome: 'allowed', grantScope, source: 'legacy-local', metadataBootstrap: 'eligible', reason }),
       });
 
       await handleMemoryRoutes(ctx);
@@ -360,6 +354,18 @@ describe('POST /api/memory/search — context-graph read authority', () => {
       expect(res.statusCode, `reason=${reason}`).toBe(200);
       expect(probe.storeQueried, `reason=${reason}`).toBe(true);
     }
+  });
+
+  it.each(['caller', 'public', 'node'] as const)('authorizes %s scope independently of the diagnostic reason', async grantScope => {
+    const { ctx, res, probe } = buildCtx({
+      body: { query: 'anything', contextGraphId: 'cg1' },
+      authentication: requestAuthentication({ kind: 'agent', agentAddress: '0x123' }),
+      decisionFor: () => ({ outcome: 'allowed', grantScope, source: 'legacy-local', metadataBootstrap: 'eligible', reason: 'renamed-for-diagnostics' }),
+    });
+    await handleMemoryRoutes(ctx);
+    expect(res.statusCode).toBe(grantScope === 'node' ? 403 : 200);
+    expect(probe.storeQueried).toBe(grantScope !== 'node');
+    expect(probe.vectorSearched).toBe(grantScope !== 'node');
   });
 
   it('lets an anonymous caller keep a node-scoped allow', async () => {
@@ -370,7 +376,7 @@ describe('POST /api/memory/search — context-graph read authority', () => {
       body: { query: 'anything', contextGraphId: 'cg1' },
       authentication: requestAuthentication({ kind: 'anonymous', mode: 'disabled' }),
       decisionFor: () => ({
-        outcome: 'allowed', grantScope: 'node', source: 'legacy-local', reason: 'legacy-peer-allowlist',
+        outcome: 'allowed', grantScope: 'node', source: 'legacy-local', metadataBootstrap: 'eligible', reason: 'legacy-peer-allowlist',
       }),
     });
 

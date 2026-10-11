@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { ContextGraphReadAuthorityDecision, DKGAgent } from '@origintrail-official/dkg-agent';
 import { LlmClient } from '@origintrail-official/dkg-node-ui';
 import { handleQueryRoutes } from '../src/daemon/routes/query.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
@@ -29,7 +30,8 @@ function fixture(body: object = { contextGraphId: 'private-cg', entityUri: entit
     bindings: options.subGraphName === 'meta'
       ? [{ hint: '"Use an entity card"', label: '"Entity label"' }] : triples,
   }));
-  const authority = vi.fn(async () => ({ outcome: 'allowed', grantScope: 'caller', source: 'registered-chain', reason: 'chain-participant' }));
+  const decision: ContextGraphReadAuthorityDecision = { outcome: 'allowed', grantScope: 'caller', source: 'registered-chain', reason: 'chain-participant', metadataBootstrap: 'eligible' };
+  const authority = vi.fn<DKGAgent['resolveContextGraphReadAuthority']>(async () => decision);
   const ctx = { req, res, path: '/api/genui/render', config: { llm: { apiKey: 'test' } },
     authentication: requestAuthentication({ kind: 'agent', agentAddress: caller }), requestAgentAddress: 'wrong-node-address',
     agent: { query, resolveContextGraphReadAuthority: authority },
