@@ -725,17 +725,40 @@ describe('remote signer failures are final for the transaction path', () => {
     return { write: () => rpc.populateAndSign(contract, 'doWrite', [], signer, 'V10 publish'), contractPopulations };
   }
 
-  it('does not cut an external signing request off at the per-endpoint deadline', async () => {
+  it('does not cut a slow external signing request off, and asks for it once on one endpoint', async () => {
     vi.useFakeTimers();
-    const contract = { connect: () => ({ doWrite: { populateTransaction: async () => ({ to: '0xTO', data: '0x' }) } }) } as never;
-    const signPopulated = recorder(() => new Promise<{ signedTx: string; txHash: string }>((resolve) => {
-      setTimeout(() => resolve({ signedTx: '0xS', txHash: '0xH' }), RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS + 5_000);
+    const signed = await WALLET_A.signTransaction(TX);
+    const signTransaction = vi.fn(() => new Promise<string>((resolve) => {
+      // Within the signer's own deadline, but past the per-endpoint population deadline.
+      setTimeout(() => resolve(signed), RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS + 5_000);
     }));
-    const rpc = makeClient([{}], ['https://only.example'], signPopulated as SignPopulatedFn);
-    const pending = rpc.populateAndSign(contract, 'doWrite', [], externalSigner(), 'V10 publish');
+    const { write, contractPopulations } = twoEndpointWrite(() => ({ populateTransaction: async () => ({ ...TX }), signTransaction }));
+    const pending = write();
     await vi.advanceTimersByTimeAsync(RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS + 6_000);
-    await expect(pending).resolves.toEqual({ signedTx: '0xS', txHash: '0xH' });
-    expect(signPopulated.calls).toHaveLength(1);
+    await expect(pending).resolves.toMatchObject({ signedTx: signed, nonce: 7 });
+    expect(signTransaction).toHaveBeenCalledTimes(1);
+    // No backup endpoint was tried.
+    expect(contractPopulations[1].calls).toHaveLength(0);
+  });
+
+  it('bounds a stalled RPC population, fails it over and never signs the stalled one late', async () => {
+    vi.useFakeTimers();
+    const signed = await WALLET_A.signTransaction(TX);
+    let release!: () => void;
+    const stalled = new Promise<ethers.TransactionRequest>((resolve) => { release = () => resolve({ ...TX }); });
+    const signTransaction = vi.fn(async () => signed);
+    const { write, contractPopulations } = twoEndpointWrite((endpoint) => ({
+      populateTransaction: () => (endpoint === 0 ? stalled : Promise.resolve({ ...TX })),
+      signTransaction,
+    }));
+    const pending = write();
+    await vi.advanceTimersByTimeAsync(RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS + 1);
+    await expect(pending).resolves.toMatchObject({ signedTx: signed });
+    expect(contractPopulations[1].calls).toHaveLength(1);
+    expect(signTransaction).toHaveBeenCalledTimes(1);
+    release();
+    await vi.runAllTimersAsync();
+    expect(signTransaction).toHaveBeenCalledTimes(1);
   });
 
   it('makes any failure of a supplied external signer final, so it is asked to sign once across endpoints', async () => {
