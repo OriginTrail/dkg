@@ -397,6 +397,37 @@ describe('staged full-pass completeness custody', () => {
     expect(runtime.status('cg', 'policy')?.failed).toBe(false); replacement.release();
   });
 
+  it('withholds earlier full-pass entitlement when a joined bounded fill is incomplete', async () => {
+    let parityFails = true;
+    let hold = false;
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<never>({
+      requestPeer: async () => {
+        if (hold) { entered(); await gate; }
+        return { status: 'completed', targets: [] };
+      },
+      whenReceiverIdleForContextGraph: async () => undefined,
+      targetIdentity: () => '', parityFailed: async () => parityFails,
+    });
+    const full = (peers: readonly string[]) => runtime.request({ kind: 'full-connected-peers',
+      contextGraphId: 'cg', policyDigest: 'policy', connectedPeerIds: peers });
+    await full(['first']); parityFails = false; hold = true;
+    const running = full(['first']); await started;
+    const staged = Array.from({ length: 64 }, (_, index) => runtime.reservePeer('cg', 'policy', `staged-${index}`)!);
+    try {
+      expect(staged.every(Boolean)).toBe(true);
+      const joined = full(['new']); release();
+      await expect(Promise.all([running, joined])).resolves.toEqual([
+        { requested: 1, failed: 0 }, { requested: 1, failed: 0 },
+      ]);
+      expect(runtime.status('cg', 'policy')?.failed).toBe(true);
+    } finally { release(); for (const lease of staged) lease.release(); await running; }
+    await full(['new']); expect(runtime.status('cg', 'policy')?.failed).toBe(false);
+  });
+
   it('does not donate cancelled staged coverage to an unrelated scoped replay', async () => {
     const { runtime, full, demand, repaired } = failingParityRuntime();
     await full(['peer']); repaired();

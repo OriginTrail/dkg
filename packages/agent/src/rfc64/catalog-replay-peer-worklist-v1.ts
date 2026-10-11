@@ -78,7 +78,11 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
       if (generation !== undefined) staged.set(peer, generation);
       else if (!this.seedBounded(peer)) covered = false;
     }
-    if (!covered) return;
+    if (!covered) {
+      // A later partial command cannot inherit an earlier complete pass's entitlement.
+      this.#fullCoveragePending.clear(); this.#fullRequested = false; this.#splitFullPass = false;
+      return;
+    }
     this.#fullRequested = true;
     for (const [peer, generation] of staged) this.#fullCoveragePending.set(peer, generation);
     this.#splitFullPass ||= staged.size > 0;
