@@ -194,7 +194,6 @@ import {
 } from '../catchup-telemetry.js';
 import { createStoreQueryRequestLifecycle } from '../store-query-lifecycle.js';
 import { mayFollowOnChainIdToRow } from '../context-graph-on-chain-id-gate.js';
-import { attributionToken } from '../read-authority-diagnostics.js';
 import {
   admitContextGraphFollow,
   readContextGraphSubscriptionAdmission,
@@ -469,24 +468,6 @@ function respondReconcileError(res: ServerResponse, err: unknown): void {
   }
   return jsonResponse(res, 500, { error: message });
 }
-
-const SUBSCRIBE_AUTHORITY_LOG_REASONS = new Set([
-  'finalized-name-absence-unaccepted',
-  'chain-name-binding-unavailable',
-  'registered-authority-error',
-  'authority-circuit-open',
-  'local-chain-binding-unavailable',
-  'local-existence-unavailable',
-  'chain-access-policy-unavailable',
-  'chain-access-policy-timeout',
-  'chain-access-policy-unknown',
-  'chain-participant-authority-unavailable',
-  'chain-participant-authority-unsupported',
-  'chain-participant-authority-invalid',
-  'remote-local-authority-unaccepted',
-  'rfc64-private-read-roster-unavailable',
-  'no-read-authority',
-]);
 
 /** How the subscribe route answers an on-chain id that names nothing subscribable. */
 const UNRESOLVED_ON_CHAIN_ID_RESPONSES = {
@@ -1938,8 +1919,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         requestedContextGraphId,
         { signal: resolutionLifecycle.signal },
       ) ?? { kind: 'as-given' };
-    } catch {
-      return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
+    } catch (error) {
+      return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory, error);
     } finally {
       resolutionLifecycle.dispose();
     }
@@ -1975,19 +1956,12 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     try {
       ({ callerAgentAddress: callerAddr, authority: readAuthority } =
         await readContextGraphSubscriptionAdmission(agent, contextGraphId, requestAgentAddress));
-    } catch {
-      return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
+    } catch (error) {
+      return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory, error);
     }
     if (readAuthority.outcome === 'unavailable') {
-      // The public response remains generic, but the operator needs the typed
-      // authority dependency to distinguish a missing seed from a chain read
-      // outage. Never log the graph name or caller identity here.
-      const reason = SUBSCRIBE_AUTHORITY_LOG_REASONS.has(readAuthority.reason)
-        ? readAuthority.reason : 'other';
-      console.warn(`[context-graph-subscribe] authority unavailable: reason=${reason}`
-        + ` dependency=${readAuthority.dependency}`
-        + (readAuthority.detailCode === undefined ? '' : ` detail=${attributionToken(readAuthority.detailCode)}`));
-      return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
+      // Keep graph names and caller identities out of the public body and log.
+      return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory, readAuthority);
     }
     // A private graph named by its on-chain id: one decision, with one answer
     // whether or not this node holds its cleartext id.
