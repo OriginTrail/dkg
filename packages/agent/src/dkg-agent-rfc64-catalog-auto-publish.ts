@@ -48,10 +48,9 @@ import {
   runPromoteCommittedFinalization,
   workspaceHeadIncludesShareOperationId,
 } from '@origintrail-official/dkg-publisher';
-import { observeConfirmedCatalogObligationV1 } from './internal/confirmed-catalog-obligation.js';
+import { observeConfirmedCatalogObligationV1, selectConfirmedCatalogObligationForAgentV1 } from './internal/confirmed-catalog-obligation.js';
 import { recoverConfirmedCatalogObligationV1 } from './internal/confirmed-catalog-obligation-recovery.js';
 import { parseConfirmedCatalogObligationRecoveryV1 } from './confirmed-catalog-obligation-error.js';
-import { selectRfc64ConfirmedCatalogObligationV1 } from './rfc64/catalog-rollout-authority-v1.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
@@ -799,12 +798,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     params: ObserveRfc64ConfirmedVmParamsV1,
   ): Promise<void> {
     return observeConfirmedCatalogObligationV1(params, {
-      select: () => selectRfc64ConfirmedCatalogObligationV1({
-        plan: this.config.rfc64CatalogExecutionPlan, contextGraphId: params.contextGraphId,
-        subGraphName: params.subGraphName ?? null, authoring: this.config.rfc64CatalogAuthoringPolicy,
-        readResponsibilities: () => this.readRfc64CatalogResponsibilitiesV1(),
-        readServingAuthority: () => this.resolveRfc64CatalogServingAuthorityV1(params.contextGraphId),
-      }),
+      select: () => selectConfirmedCatalogObligationForAgentV1(this, { plan: this.config.rfc64CatalogExecutionPlan, authoring: this.config.rfc64CatalogAuthoringPolicy }, params),
       persistence: this.rfc64PersistenceV1, log: this.log,
       beginWait: (seal, ctx) => catalogPlacementTimingV1(this).beginWait(seal, ctx),
       confirmed: (seal) => {

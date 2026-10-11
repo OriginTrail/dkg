@@ -14,9 +14,10 @@ import { ConfirmedCatalogObligationErrorV1, type ConfirmedCatalogObligationInput
 import { buildInlinePayload, buildInlineChunked } from './internal/curated-inline-encryption.js';
 import { createContextGraphAuthorityError } from './internal/context-graph-authority/context-graph-authority.js';
 import { isAdmittedContextGraphSubscription } from './context-graph-subscription-policy.js';
-import { planKnowledgeAssetVmPublication, isGraphScopedKnowledgeAssetVmPublishRequest, assertionSealFromQueuedKnowledgeAssetVmPublishRequest, type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
+import { planKnowledgeAssetVmPublication, isGraphScopedKnowledgeAssetVmPublishRequest, assertionSealFromQueuedKnowledgeAssetVmPublishRequest, type KnowledgeAssetVmPublishRequestWithoutIntentKey, type FinalizedAssertionVmPublishOptions, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
 export { type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
 import { randomUUID } from 'node:crypto';
+import { assertConfirmedCatalogPublicationAdmissionV1 } from './internal/confirmed-catalog-obligation.js';
 import { preflightKnowledgeAssetVmPublishSnapshot } from './vm-publish-snapshot-preflight.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -1401,6 +1402,8 @@ export class PublishMethods extends DKGAgentBase {
     opts?: PublishAsyncOpts,
   ): Promise<{ captureID: string }> {
     const contextGraphId = normalizePublishContextGraphId(contextGraphIdOrUal);
+    const assertionName = `async-${randomUUID()}`;
+    assertConfirmedCatalogPublicationAdmissionV1(this, { plan: this.config.rfc64CatalogExecutionPlan, authoring: this.config.rfc64CatalogAuthoringPolicy }, { contextGraphId, assertionCoordinate: assertionName, subGraphName: opts?.subGraphName });
     const ctx = opts?.operationCtx ?? createOperationContext('publish');
 
     const exists = await this.contextGraphExists(contextGraphId);
@@ -1552,7 +1555,6 @@ export class PublishMethods extends DKGAgentBase {
           );
         })(),
     );
-    const assertionName = `async-${randomUUID()}`;
 
     // Reuse the named-KA lifecycle rather than maintaining a second async
     // content model. Finalize canonicalizes the complete RDF set once, assigns
@@ -4380,6 +4382,7 @@ export class PublishMethods extends DKGAgentBase {
       publisherOverride?: DKGPublisher;
     },
   ): Promise<KnowledgeAssetVmPublishRequest> {
+    assertConfirmedCatalogPublicationAdmissionV1(this, { plan: this.config.rfc64CatalogExecutionPlan, authoring: this.config.rfc64CatalogAuthoringPolicy }, { contextGraphId, assertionCoordinate: name, subGraphName: opts?.subGraphName });
     const agentAddress = await this.resolveFinalizedAssertionPublishAuthor(contextGraphId, name, opts);
     // GH#1778 — the ENQUEUING caller (token holder for the route path, or an
     // explicit author selector for a direct caller), persisted alongside the
@@ -4641,6 +4644,7 @@ export class PublishMethods extends DKGAgentBase {
     this: DKGAgent,
     request: KnowledgeAssetVmPublishRequest,
   ): Promise<void> {
+    assertConfirmedCatalogPublicationAdmissionV1(this, { plan: this.config.rfc64CatalogExecutionPlan, authoring: this.config.rfc64CatalogAuthoringPolicy }, { contextGraphId: request.contextGraphId, assertionCoordinate: request.name, subGraphName: request.subGraphName });
     return preflightKnowledgeAssetVmPublishSnapshot({
       store: this.store, publicSnapshotStore: this.publicSnapshotStore, log: this.log, request,
     });
@@ -4651,6 +4655,7 @@ export class PublishMethods extends DKGAgentBase {
     request: KnowledgeAssetVmPublishRequest,
     opts?: { publisherOverride?: DKGPublisher },
   ): Promise<AsyncKnowledgeAssetVmPublishPreflightResult> {
+    assertConfirmedCatalogPublicationAdmissionV1(this, { plan: this.config.rfc64CatalogExecutionPlan, authoring: this.config.rfc64CatalogAuthoringPolicy }, { contextGraphId: request.contextGraphId, assertionCoordinate: request.name, subGraphName: request.subGraphName });
     if (!isGraphScopedKnowledgeAssetVmPublishRequest(request)) {
       throw new LegacyKnowledgeAssetReadOnlyError();
     }
@@ -5184,6 +5189,7 @@ export class PublishMethods extends DKGAgentBase {
       onPostConfirmationStep?: LiftJobTailStepObserver;
     },
   ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
+    assertConfirmedCatalogPublicationAdmissionV1(this, { plan: this.config.rfc64CatalogExecutionPlan, authoring: this.config.rfc64CatalogAuthoringPolicy }, { contextGraphId: request.contextGraphId, assertionCoordinate: request.name, subGraphName: request.subGraphName });
     const ctx = opts?.operationCtx ?? publishOptions.operationCtx ?? createOperationContext('publishFromSWM');
     const publisher = opts?.publisherOverride ?? this.publisher;
     // GH#2270 PR-3 r4 — the cross-cutting execution hooks, gathered ONCE and threaded UNCHANGED
@@ -5706,25 +5712,9 @@ export class PublishMethods extends DKGAgentBase {
   async publishFromFinalizedAssertion(this: DKGAgent,
     contextGraphId: string,
     name: string,
-    opts?: {
-      subGraphName?: string;
-      agentAddress?: string;
-      /** GH#1778 — token/caller identity hint (routes); NOT an author selector. */
-      callerAgentAddress?: string;
-      /**
-       * GH#1786 — selects among the authors already resident at this coordinate.
-       * Coexists with `callerAgentAddress`; never changes the caller identity.
-       */
-      selectedAuthorAgentAddress?: string;
-      operationCtx?: OperationContext;
-      onPhase?: PhaseCallback;
-      publisherNodeIdentityIdOverride?: bigint;
-      publishEpochs?: number;
-      pricingPolicy?: PublishOptions['pricingPolicy'];
-      clearSharedMemoryAfter?: boolean;
-      publisherOverride?: DKGPublisher;
-    },
+    opts?: FinalizedAssertionVmPublishOptions,
   ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
+    assertConfirmedCatalogPublicationAdmissionV1(this, { plan: this.config.rfc64CatalogExecutionPlan, authoring: this.config.rfc64CatalogAuthoringPolicy }, { contextGraphId, assertionCoordinate: name, subGraphName: opts?.subGraphName });
     const agentAddress = await this.resolveFinalizedAssertionPublishAuthor(contextGraphId, name, opts);
     const publisher = opts?.publisherOverride ?? this.publisher;
     const assertionUri = contextGraphAssertionUri(

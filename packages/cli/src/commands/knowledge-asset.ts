@@ -177,8 +177,8 @@ function assertOneShotShareComplete(result: KnowledgeAssetCreateResponse, name: 
   }
 }
 
-function assertPublishComplete(result: KnowledgeAssetPublishResponse, name: string, contextGraphId: string): void {
-  if (result.code === 'CONFIRMED_CATALOG_OBLIGATION_PENDING' && result.catalogObligationPending === true) {
+function assertPublishComplete(result: KnowledgeAssetPublishResponse, name: string, contextGraphId: string): asserts result is Extract<KnowledgeAssetPublishResponse, { catalogObligationPending?: false }> {
+  if (result.catalogObligationPending === true) {
     console.log(JSON.stringify(result, null, 2));
     throw new Error('Publication is confirmed but catalog observation is pending. Retain this response and retry its observation; do not republish');
   }

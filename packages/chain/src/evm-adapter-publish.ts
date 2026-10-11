@@ -779,7 +779,8 @@ export class PublishMethods extends EVMChainAdapterBase {
    */
   private projectCanonicalFinalizationReceipt(
     receipt: ethers.TransactionReceipt,
-    parsedPublish: OnChainPublishResult,
+    parsedPublish: Pick<OnChainPublishResult, 'merkleRoot' | 'publisherAddress' | 'authorAddress'
+      | 'batchId' | 'kaId' | 'startKAId' | 'endKAId' | 'knowledgeAssetsContract'>,
   ): CanonicalFinalizationReceipt | null {
     if (
       !parsedPublish.merkleRoot
@@ -841,8 +842,7 @@ export class PublishMethods extends EVMChainAdapterBase {
     const updateFacts = !parsedPublish && options.includeKnowledgeAssetUpdates === true
       ? await this.decodeUpdateReceiptFacts(receipt, { kind: 'single-v10' }) : null;
     const confirmation = parsedPublish ?? (updateFacts ? { batchId: updateFacts.kaId, kaId: updateFacts.kaId,
-      startKAId: updateFacts.kaId, endKAId: updateFacts.kaId, txHash: receipt.hash,
-      blockNumber: receipt.blockNumber, txIndex: receipt.index, blockTimestamp: 0,
+      startKAId: updateFacts.kaId, endKAId: updateFacts.kaId,
       merkleRoot: updateFacts.merkleRoot, authorAddress: updateFacts.authorAddress,
       publisherAddress: receipt.from, knowledgeAssetsContract: updateFacts.knowledgeAssetsContract } : null);
     if (!confirmation) return { status: 'rejected' };

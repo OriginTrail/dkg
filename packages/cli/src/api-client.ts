@@ -1,3 +1,5 @@
+import type { KnowledgeAssetPublishResponse } from './knowledge-asset-publish-response.js';
+export type { KnowledgeAssetPublishResponse, ConfirmedCatalogObligationPendingResponseV1, ConfirmedCatalogTransactionResponseV1 } from './knowledge-asset-publish-response.js';
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import type {
@@ -240,19 +242,6 @@ export interface KnowledgeAssetShareOptions extends KnowledgeAssetShareTargetOpt
 }
 
 export type KnowledgeAssetShareAsyncOptions = KnowledgeAssetShareTargetOptions;
-
-export interface KnowledgeAssetPublishResponse {
-  kaId?: string;
-  ual?: string;
-  txHash?: string;
-  status?: string;
-  /** Core peers whose StorageACKs backed a confirmed VM publish. */
-  storageAckPeerIds?: string[];
-  error?: string;
-  errors?: KnowledgeAssetLifecycleError[];
-  contextGraphError?: unknown;
-  [key: string]: unknown;
-}
 
 export interface KnowledgeAssetLifecycleError {
   phase?: string;

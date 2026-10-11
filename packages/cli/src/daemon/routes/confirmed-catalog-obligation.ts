@@ -2,20 +2,23 @@
 import {
   ConfirmedCatalogObligationErrorV1, parseConfirmedCatalogObligationRecoveryV1,
 } from '@origintrail-official/dkg-agent';
+import type { ConfirmedCatalogObligationPendingResponseV1 } from '../../knowledge-asset-publish-response.js';
 import type { RequestContext } from './context.js';
 import { actorFromRequestContext } from './context.js';
 import { jsonResponse } from '../http-utils.js';
 
 /** A confirmed transaction is not a request to publish again. Keep the exact retry evidence in JSON. */
-export function confirmedCatalogObligationResponse(error: unknown) {
+export function confirmedCatalogObligationResponse(error: unknown): ConfirmedCatalogObligationPendingResponseV1 | null {
   if (!(error instanceof ConfirmedCatalogObligationErrorV1)) return null;
   const recovery = error.recoveryEvidence;
-  if (recovery === undefined) return null;
+  const transaction = error.transaction;
+  if (recovery === undefined || transaction === undefined) return null;
   return { code: error.code, error: error.message, status: 'confirmed' as const,
     catalogObligationPending: true, ual: recovery.seal.kaUal,
     authorAddress: recovery.seal.authorAddress, merkleRoot: recovery.seal.assertionMerkleRoot,
     txHash: recovery.transactionHash, blockNumber: recovery.blockNumber,
-    confirmedTransaction: error.transaction, recovery,
+    confirmedTransaction: { ...transaction, kaId: transaction.kaId?.toString(), batchId: transaction.batchId.toString(),
+      startKAId: transaction.startKAId?.toString(), endKAId: transaction.endKAId?.toString() }, recovery,
     retryAction: 'observe_confirmed_catalog_obligation',
     retryUrl: `/api/knowledge-assets/${encodeURIComponent(recovery.assertionCoordinate)}/vm/observe-confirmed` };
 }

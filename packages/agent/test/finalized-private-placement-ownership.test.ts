@@ -607,8 +607,10 @@ describe('a confirmed private placement the observer handed to the supervisor', 
     }
     await first.agent.stop();
     agents.splice(agents.indexOf(first.agent), 1);
-    const second = await startPlacementAgentV1({ name: 'ownership-sealless-restart', dataDir, storePath });
-    const observer = vi.spyOn(second.agent, 'observeRfc64ConfirmedVmV1');
+    let observer!: ReturnType<typeof vi.spyOn>;
+    const second = await startPlacementAgentV1({ name: 'ownership-sealless-restart', dataDir, storePath,
+      beforeStart: (agent) => { observer = vi.spyOn(agent, 'observeRfc64ConfirmedVmV1'); },
+    });
     await untilV1(() => second.markers().length === 0, 'the original sealed placement survives restart', 30_000);
     await second.agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     expect(second.catalogRows()).toBe('1');

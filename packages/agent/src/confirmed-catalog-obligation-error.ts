@@ -34,16 +34,9 @@ export function parseConfirmedCatalogObligationRecoveryV1(input: unknown): Reado
   try {
     const value = snapshotExactDataRecord(input, ['version', 'contextGraphId', 'assertionCoordinate',
       'subGraphName', 'seal', 'transactionHash', 'blockNumber'], 'confirmed catalog recovery');
-    if (typeof value.seal !== 'object' || value.seal === null
-      || ![Object.prototype, null].includes(Object.getPrototypeOf(value.seal))) throw new Error('Expected seal object');
-    const fields = Object.getOwnPropertyDescriptors(value.seal);
-    const seal: Record<string, unknown> = Object.create(null);
-    for (const key of Reflect.ownKeys(fields)) {
-      if (typeof key !== 'string') throw new Error('Expected string seal field');
-      const field = fields[key];
-      if (!field || !('value' in field) || !field.enumerable) throw new Error('Expected seal data field');
-      seal[key] = field.value;
-    }
+    const seal = snapshotExactDataRecord(value.seal,
+      typeof value.seal === 'object' && value.seal !== null ? Object.getOwnPropertyNames(value.seal) : [],
+      'Confirmed catalog seal');
     assertContextGraphIdV1(value.contextGraphId, 'confirmed recovery contextGraphId');
     assertAssertionCoordinateV1(value.assertionCoordinate, 'confirmed recovery assertionCoordinate');
     assertCanonicalGraphScopedAuthorSealV1(seal);

@@ -487,3 +487,11 @@ the active/recovery seal slots. An older binary cannot read version-2 records;
 finish pending obligations with this version before downgrading. Pending age
 remains measured from this process's observation, rather than from a persisted
 creation timestamp.
+
+Catalog-enabled root publication validates the immutable graph ID and assertion
+coordinate before synchronous submission or queue admission/execution. Catalog
+coordinates must be NFC and fit the protocol's 256 UTF-8 byte bound; identities
+are rejected, never normalized or renamed. Catalog-excluded publication retains
+its existing named-asset rules. A previously confirmed incompatible identity
+cannot be retroactively admitted or repaired by changing its name. Such existing
+transactions must retain their original evidence for explicit operator recovery.

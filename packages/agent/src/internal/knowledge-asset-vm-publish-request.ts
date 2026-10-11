@@ -1,9 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { createHash } from 'node:crypto';
-import { type AssertionSeal, GRAPH_KA_CONTENT_SCOPE_VERSION, createGraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
-import { type PublishOptions, type KnowledgeAssetVmPublishRequest, assertPublicationPricingPolicyApplicable } from '@origintrail-official/dkg-publisher';
+import { type AssertionSeal, type OperationContext, GRAPH_KA_CONTENT_SCOPE_VERSION, createGraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
+import { type PublishOptions, type DKGPublisher, type PhaseCallback, type KnowledgeAssetVmPublishRequest, assertPublicationPricingPolicyApplicable } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
+
+/** The finalized synchronous VM publication boundary retains its historical options. */
+export interface FinalizedAssertionVmPublishOptions {
+  subGraphName?: string;
+  agentAddress?: string;
+  /** GH#1778 — token/caller identity hint (routes); NOT an author selector. */
+  callerAgentAddress?: string;
+  /**
+   * GH#1786 — selects among the authors already resident at this coordinate.
+   * Coexists with `callerAgentAddress`; never changes the caller identity.
+   */
+  selectedAuthorAgentAddress?: string;
+  operationCtx?: OperationContext;
+  onPhase?: PhaseCallback;
+  publisherNodeIdentityIdOverride?: bigint;
+  publishEpochs?: number;
+  pricingPolicy?: PublishOptions['pricingPolicy'];
+  clearSharedMemoryAfter?: boolean;
+  publisherOverride?: DKGPublisher;
+}
 
 type KnowledgeAssetVmPublicationOperationPlan =
   | {

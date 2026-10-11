@@ -11,8 +11,36 @@ import {
   type Rfc64FinalizedPrivatePlacementRepairV1,
   type Rfc64FinalizedPrivatePlacementRepairStoreV1,
 } from '../rfc64/finalized-private-placement-repair-store-v1.js';
+import type { DKGAgent } from '../dkg-agent.js';
+import { selectRfc64ConfirmedCatalogObligationV1 } from '../rfc64/catalog-rollout-authority-v1.js';
 import type { ObserveRfc64ConfirmedVmParamsV1 } from '../dkg-agent-rfc64-catalog-auto-publish.js';
 import type { CatalogPlacementWaitV1, CatalogPlacementWaiterObserverV1 } from './catalog-placement-timing.js';
+
+type CatalogPublicationIdentityV1 = Readonly<{ contextGraphId: string; assertionCoordinate: string; subGraphName?: string | null }>;
+type CatalogAdmissionConfigurationV1 = Pick<Parameters<typeof selectRfc64ConfirmedCatalogObligationV1>[0], 'plan' | 'authoring'>;
+type CatalogAdmissionHostV1 = {
+  readonly [Key in 'readRfc64CatalogResponsibilitiesV1' | 'resolveRfc64CatalogServingAuthorityV1']:
+    OmitThisParameter<DKGAgent[Key]>;
+};
+
+/** Publication admission and confirmation share the exact desired-work selection. */
+export function selectConfirmedCatalogObligationForAgentV1(
+  host: CatalogAdmissionHostV1, config: CatalogAdmissionConfigurationV1, params: Pick<CatalogPublicationIdentityV1, 'contextGraphId' | 'subGraphName'>,
+): 'required' | 'excluded' {
+  return selectRfc64ConfirmedCatalogObligationV1({
+    plan: config.plan, contextGraphId: params.contextGraphId,
+    subGraphName: params.subGraphName ?? null, authoring: config.authoring,
+    readResponsibilities: () => host.readRfc64CatalogResponsibilitiesV1(),
+    readServingAuthority: () => host.resolveRfc64CatalogServingAuthorityV1(params.contextGraphId),
+  });
+}
+
+/** Refuse incompatible immutable identities before any publication preparation or submission. */
+export function assertConfirmedCatalogPublicationAdmissionV1(host: CatalogAdmissionHostV1, config: CatalogAdmissionConfigurationV1, params: CatalogPublicationIdentityV1): void {
+  if (selectConfirmedCatalogObligationForAgentV1(host, config, params) === 'excluded') return;
+  assertContextGraphIdV1(params.contextGraphId);
+  assertAssertionCoordinateV1(params.assertionCoordinate);
+}
 
 interface ConfirmationObserverPortsV1 {
   select(): 'required' | 'excluded';

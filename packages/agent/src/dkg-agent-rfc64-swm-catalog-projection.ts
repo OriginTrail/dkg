@@ -202,7 +202,6 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     // This placement needs one sealed asset, not a whole-author completeness claim.
     const candidate = persistence.swmAuthorInventory.readSwmAuthorInventoryRowV1(
       computeSwmAuthorInventoryScopeDigestV1(inventoryScope), params.authorAddress, params.kaUal,
-
     );
     const row = candidate !== null && candidate.assertionCoordinate === params.assertionCoordinate
       && candidate.assertionVersion === params.assertionVersion && candidate.sealDigest === params.sealDigest

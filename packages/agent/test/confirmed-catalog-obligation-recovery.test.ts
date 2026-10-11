@@ -104,7 +104,12 @@ describe('caller-retained confirmed catalog evidence', () => {
     const accessorSeal = { ...f.evidence.seal };
     Object.defineProperty(accessorSeal, 'authorAddress', { enumerable: true, get: getter });
     const accessor = Object.defineProperty({ ...f.evidence }, 'seal', { enumerable: true, get: getter });
-    for (const input of [null, [], { ...f.evidence, extra: true }, accessor,
+    const hiddenSeal = Object.defineProperty({ ...f.evidence.seal }, 'authorAddress', { enumerable: false, value: AUTHOR });
+    const symbolSeal = { ...f.evidence.seal, [Symbol('unexpected')]: true };
+    const inheritedSeal = Object.assign(Object.create({ unrelated: true }), f.evidence.seal);
+    expect(parseConfirmedCatalogObligationRecoveryV1({ ...f.evidence, seal: Object.assign(Object.create(null), f.evidence.seal) })).toEqual(f.evidence);
+    for (const input of [{ ...f.evidence, seal: hiddenSeal }, { ...f.evidence, seal: symbolSeal },
+      { ...f.evidence, seal: inheritedSeal }, null, [], { ...f.evidence, extra: true }, accessor,
       { ...f.evidence, seal: accessorSeal }, { ...f.evidence, version: 2 },
       { ...f.evidence, transactionHash: '0x1234' }, { ...f.evidence, blockNumber: 1.5 },
       { ...f.evidence, subGraphName: 'named' }, { ...f.evidence, contextGraphId: 1 },
