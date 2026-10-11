@@ -456,3 +456,34 @@ controlled recovery. Authority remains fail-closed: registered graphs use
 finalized chain state, private graphs require verified current membership, and
 only an operator assertion may mark a provider graph-complete. Broad automatic
 provider trust is not inferred from peer discovery.
+
+## Confirmed publication obligations
+
+For catalog-enabled root graphs, a confirmed publication records a version-2
+placement obligation in the existing inventory SQLite database before its
+completion tail returns. The record is independent of the currently resolved
+catalog lane and includes the canonical author seal, its digest and the exact
+assertion identity. It stores seal metadata only; private assertion payloads do
+not enter the repair queue. The encoded record is bounded to 8 KiB.
+
+An unavailable or inactive lane leaves that obligation pending. The supervisor
+resolves current authority when it retries. Private finalized-chain lanes prove
+or place the exact sealed asset; public lanes remove only its matching SWM
+inventory row and request ordinary projection. Catalog-disabled and legacy
+rollout modes do not create obligations.
+
+If the obligation write fails, publication completion fails. A transaction-bearing
+queued job retains its immutable request and is recovered from the same confirmed
+transaction before it can become terminal; it is not admitted for another send.
+A synchronous caller receives `ConfirmedCatalogObligationErrorV1`. It retains
+the immutable canonical seal, confirmed transaction identity and an owned
+`retryInput` for `observeRfc64ConfirmedVmV1`. That retry performs no transaction
+submission. The caller must retain this evidence for manual recovery; this does
+not provide an automatic synchronous recovery journal.
+
+The new reader accepts existing version-1 records with their original strict
+policy-scope fence. Version-2 records survive restart and later edits that replace
+the active/recovery seal slots. An older binary cannot read version-2 records;
+finish pending obligations with this version before downgrading. Pending age
+remains measured from this process's observation, rather than from a persisted
+creation timestamp.

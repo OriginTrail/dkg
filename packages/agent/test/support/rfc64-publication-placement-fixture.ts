@@ -1,3 +1,4 @@
+import type { ConfirmedCatalogTransactionEvidenceV1 } from '../../src/confirmed-catalog-obligation-error.js';
 /**
  * GH#3081 — one author whose confirmed private placements run through the real post-confirmation
  * observer, the real finalized-private supervisor and the real catalog repair, plus the real async
@@ -248,6 +249,7 @@ interface StartPlacementAgentOptionsV1 {
 /** What the agent's completion tail takes; both completion paths build it from the queued request. */
 interface ConfirmedVmPublishTailInputV1 {
   readonly status: PublishResult['status'];
+  readonly confirmedTransaction?: ConfirmedCatalogTransactionEvidenceV1;
   readonly contextGraphId: string;
   readonly subGraphName?: string;
   readonly assertionCoordinate: string;
@@ -496,9 +498,12 @@ export function observeConfirmedV1(
  * The tail a synchronous publish of `asset` awaits before it answers: `publishFromFinalizedAssertion`
  * ends in this call and returns its result right after it.
  */
-export function confirmedSynchronousPublishTailV1(agent: DKGAgent, asset: PlacementAssetV1): Promise<void> {
+export function confirmedSynchronousPublishTailV1(
+  agent: DKGAgent, asset: PlacementAssetV1, confirmedTransaction?: ConfirmedCatalogTransactionEvidenceV1,
+): Promise<void> {
   return internalsOf(agent).afterConfirmedGraphScopedVmPublishV1({
     status: 'confirmed',
+    confirmedTransaction,
     contextGraphId: CONTEXT_GRAPH_ID,
     assertionCoordinate: asset.assertionCoordinate,
     shareOperationId: asset.shareOperationId,
@@ -530,7 +535,9 @@ export async function reopenForEditingV1(agent: DKGAgent, asset: PlacementAssetV
  * active subject is empty. Written by hand, because the fixture's assets cannot be sealed and
  * shared again for real; call it after {@link reopenForEditingV1}.
  */
-export async function reopenNextVersionForEditingV1(agent: DKGAgent, asset: PlacementAssetV1): Promise<void> {
+export async function reopenNextVersionForEditingV1(
+  agent: DKGAgent, asset: PlacementAssetV1, nextVersion = BigInt(asset.seal.assertionVersion!) + 1n,
+): Promise<void> {
   const { seal } = asset;
   const assertionUri = contextGraphAssertionUri(CONTEXT_GRAPH_ID, AUTHOR, asset.assertionCoordinate);
   const archive = { graph: contextGraphPrivateUri(CONTEXT_GRAPH_ID), subject: `${assertionUri}/_recovery_seal` };
@@ -549,7 +556,7 @@ export async function reopenNextVersionForEditingV1(agent: DKGAgent, asset: Plac
     finalizedAtIso: seal.finalizedAtIso,
     contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
     kaUal: seal.kaUal!,
-    assertionVersion: String(BigInt(seal.assertionVersion!) + 1n),
+    assertionVersion: String(nextVersion),
     publicTripleCount: seal.publicTripleCount!,
     privateTripleCount: seal.privateTripleCount!,
   }));

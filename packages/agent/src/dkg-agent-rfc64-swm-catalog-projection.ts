@@ -6,16 +6,13 @@ import {
   assertCanonicalEvmAddress,
   assertContextGraphIdV1,
   computeSwmAuthorInventoryScopeDigestV1,
-  type AssertionCoordinateV1,
   type AuthorCatalogScopeV1,
   type AuthorLaneScopeV1,
   type CatalogSealDeploymentProfileV1,
-  type CanonicalDeterministicUalV1,
   type ContextGraphIdV1,
   type Digest32V1,
   type EvmAddressV1,
   type NetworkIdV1,
-  type PositiveDecimalU64V1,
   type SwmAuthorInventoryScopeV1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
@@ -165,19 +162,11 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
    */
   protected async publishRfc64FinalizedPrivateCatalogPlacementV1(
     this: DKGAgent,
-    params: Readonly<{
-      readonly contextGraphId: ContextGraphIdV1;
-      readonly authorAddress: EvmAddressV1;
-      readonly inventoryScope: SwmAuthorInventoryScopeV1;
-      readonly assertionCoordinate: AssertionCoordinateV1;
-      readonly assertionVersion: PositiveDecimalU64V1;
-      readonly kaUal: CanonicalDeterministicUalV1;
-      readonly sealDigest: Digest32V1;
-    }>,
+    params: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
     placement: CatalogPlacementAttemptV1,
   ): Promise<AppliedCatalogHeadSnapshotV1 | null> {
     const lane = this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, null);
-    if (lane === null || !lane.acceptsFinalizedVmRepair) {
+    if (lane === null || (!lane.acceptsFinalizedVmRepair && (params.version === 1 || lane.kind !== 'public'))) {
       throw new Error('RFC-64 finalized-private placement repair lane is inactive');
     }
     const currentInventoryScope = Object.freeze({
@@ -185,14 +174,32 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       authorAddress: params.authorAddress,
     }) as SwmAuthorInventoryScopeV1;
     if (
-      computeSwmAuthorInventoryScopeDigestV1(currentInventoryScope)
+      params.version === 1
+      && computeSwmAuthorInventoryScopeDigestV1(currentInventoryScope)
       !== computeSwmAuthorInventoryScopeDigestV1(params.inventoryScope)
     ) {
       throw new Error(
         'RFC-64 finalized-private placement repair conflicts with a policy transition',
       );
     }
-    const inventoryScope = params.inventoryScope;
+    if (params.version === 2 && !lane.acceptsFinalizedVmRepair) {
+      // Public VM discovery is chain-owned; this owed transition removes only the exact SWM row.
+      const removed = await this.removeRfc64SwmAuthorInventoryConfirmedRowV1({
+        scope: currentInventoryScope, expectedRow: params,
+      });
+      if (removed.status !== 'applied' && removed.status !== 'absent') {
+        throw new Error('RFC-64 confirmed public inventory transition did not complete');
+      }
+      rfc64SwmInventoryShadowRuntimeV1(this).record(Object.freeze({
+        status: removed.status, action: 'remove', attempts: removed.attempts,
+        headObjectDigest: removed.snapshot?.head.objectDigest ?? null, error: null,
+      }), params.contextGraphId, params.kaUal);
+      this.requestRfc64SwmCatalogProjectionV1({
+        contextGraphId: params.contextGraphId, authorAddress: params.authorAddress,
+      });
+      return null;
+    }
+    const inventoryScope = params.version === 1 ? params.inventoryScope : currentInventoryScope;
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
     const scope = Object.freeze({
@@ -225,7 +232,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         identity: params,
         // The seal this process was handed at the confirmation, for an assertion that was
         // re-opened more than once since and whose stored seals have moved on.
-        retainedSeal: readOwedPlacementSealV1(this, params.sealDigest),
+        retainedSeal: params.version === 2 ? params.seal : readOwedPlacementSealV1(this, params.sealDigest),
       })
       : resolveRfc64InventoryWorkspaceCatalogAssetV1({
         store: this.store,
@@ -234,7 +241,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         authorAddress: params.authorAddress,
         laneKind: lane.kind,
         row,
-        retainedSeal: readOwedPlacementSealV1(this, params.sealDigest),
+        retainedSeal: params.version === 2 ? params.seal : readOwedPlacementSealV1(this, params.sealDigest),
       })));
     lane.service.acceptedPolicySnapshotForCatalogScope(scope);
     return this.upsertObservedRfc64PublicRootCatalogAssetV1({

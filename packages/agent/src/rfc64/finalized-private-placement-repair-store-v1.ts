@@ -9,6 +9,10 @@ import {
   assertCanonicalEvmAddress,
   assertContextGraphIdV1,
   assertSwmAuthorInventoryScopeV1,
+  assertSubGraphNameV1,
+  canonicalizeCanonicalGraphScopedAuthorSealV1,
+  computeCanonicalGraphScopedAuthorSealDigestV1,
+  parseCanonicalGraphScopedAuthorSealV1,
   parseCanonicalDecimalU64,
   type AssertionCoordinateV1,
   type CanonicalDeterministicUalV1,
@@ -17,6 +21,8 @@ import {
   type EvmAddressV1,
   type PositiveDecimalU64V1,
   type SwmAuthorInventoryScopeV1,
+  type CanonicalGraphScopedAuthorSealV1,
+  type SubGraphNameV1,
 } from '@origintrail-official/dkg-core';
 
 import type { Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1 } from
@@ -25,7 +31,7 @@ import type { Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1 } from
 const UTF8_ENCODER = new TextEncoder();
 const UTF8_DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
-export interface Rfc64FinalizedPrivatePlacementRepairV1
+interface LegacyFinalizedPrivatePlacementRepairV1
   extends Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1 {
   readonly version: 1;
   readonly contextGraphId: ContextGraphIdV1;
@@ -37,6 +43,22 @@ export interface Rfc64FinalizedPrivatePlacementRepairV1
   readonly kaUal: CanonicalDeterministicUalV1;
   readonly sealDigest: Digest32V1;
 }
+
+/** Scope-independent confirmation evidence, atomically stored with its immutable seal. */
+interface ConfirmedCatalogPlacementRepairV2 extends Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1 {
+  readonly version: 2;
+  readonly contextGraphId: ContextGraphIdV1;
+  readonly authorAddress: EvmAddressV1;
+  readonly inventoryScope: null;
+  readonly subGraphName: SubGraphNameV1 | null;
+  readonly assertionCoordinate: AssertionCoordinateV1;
+  readonly seal: Readonly<CanonicalGraphScopedAuthorSealV1>;
+}
+
+/** V1 stays readable and retains its confirmation-time policy fence. New writes use V2. */
+export type Rfc64FinalizedPrivatePlacementRepairV1 =
+  | LegacyFinalizedPrivatePlacementRepairV1
+  | ConfirmedCatalogPlacementRepairV2;
 
 /** The repair queue is implemented by the single owned inventory connection. */
 export interface Rfc64FinalizedPrivatePlacementRepairOperationsV1 {
@@ -72,15 +94,18 @@ export function createRfc64FinalizedPrivatePlacementRepairStoreV1(
 export function snapshotRfc64FinalizedPrivatePlacementRepairV1(
   input: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
 ): Readonly<Rfc64FinalizedPrivatePlacementRepairV1> {
-  if (input.version !== 1) throw new TypeError('RFC-64 placement repair version is invalid');
+  if (input.version !== 1 && input.version !== 2) throw new TypeError('RFC-64 placement repair version is invalid');
   assertContextGraphIdV1(input.contextGraphId, 'placement repair contextGraphId');
   assertCanonicalEvmAddress(input.authorAddress, 'placement repair authorAddress');
-  assertSwmAuthorInventoryScopeV1(input.inventoryScope);
-  if (input.inventoryScope.authorAddress !== input.authorAddress) {
-    throw new TypeError('RFC-64 placement repair inventory scope author differs');
-  }
-  if (input.inventoryScope.contextGraphId !== input.contextGraphId) {
-    throw new TypeError('RFC-64 placement repair inventory scope graph differs');
+  if (input.version === 1) {
+    assertSwmAuthorInventoryScopeV1(input.inventoryScope);
+    if (input.inventoryScope.authorAddress !== input.authorAddress
+      || input.inventoryScope.contextGraphId !== input.contextGraphId) {
+      throw new TypeError('RFC-64 placement repair inventory scope differs');
+    }
+  } else {
+    if (input.inventoryScope !== null) throw new TypeError('RFC-64 confirmed placement must be scope-independent');
+    if (input.subGraphName !== null) assertSubGraphNameV1(input.subGraphName);
   }
   assertAssertionCoordinateV1(input.assertionCoordinate, 'placement repair assertionCoordinate');
   parseCanonicalDecimalU64(input.assertionVersion, 'placement repair assertionVersion');
@@ -89,6 +114,23 @@ export function snapshotRfc64FinalizedPrivatePlacementRepairV1(
   }
   const canonicalUal = assertCanonicalDeterministicUalV1(input.kaUal);
   assertCanonicalDigest(input.sealDigest, 'placement repair sealDigest');
+  const identity = {
+    contextGraphId: input.contextGraphId, authorAddress: input.authorAddress,
+    assertionCoordinate: input.assertionCoordinate, assertionVersion: input.assertionVersion,
+    kaUal: canonicalUal.ual, sealDigest: input.sealDigest,
+  };
+  if (input.version === 2) {
+    const seal = Object.freeze(parseCanonicalGraphScopedAuthorSealV1(
+      canonicalizeCanonicalGraphScopedAuthorSealV1(input.seal),
+    ));
+    if (seal.authorAddress !== input.authorAddress || seal.kaUal !== identity.kaUal
+      || seal.assertionVersion !== identity.assertionVersion
+      || computeCanonicalGraphScopedAuthorSealDigestV1(seal) !== identity.sealDigest) {
+      throw new TypeError('RFC-64 confirmed placement seal differs from its identity');
+    }
+    return Object.freeze({ ...identity, version: 2, inventoryScope: null,
+      subGraphName: input.subGraphName, seal });
+  }
   return Object.freeze({
     version: 1,
     contextGraphId: input.contextGraphId,
@@ -105,7 +147,11 @@ export function snapshotRfc64FinalizedPrivatePlacementRepairV1(
 export function encodeRfc64FinalizedPrivatePlacementRepairV1(
   repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
 ): Uint8Array {
-  return UTF8_ENCODER.encode(`${JSON.stringify(snapshotRfc64FinalizedPrivatePlacementRepairV1(repair))}\n`);
+  const bytes = UTF8_ENCODER.encode(`${JSON.stringify(snapshotRfc64FinalizedPrivatePlacementRepairV1(repair))}\n`);
+  if (repair.version === 2 && bytes.byteLength > 8192) {
+    throw new TypeError('RFC-64 confirmed placement exceeds the inventory record byte bound');
+  }
+  return bytes;
 }
 
 export function digestRfc64FinalizedPrivatePlacementRepairV1(
@@ -130,7 +176,8 @@ export function parseRfc64FinalizedPrivatePlacementRepairV1(
   const expectedKeys = [
     'assertionCoordinate', 'assertionVersion', 'authorAddress', 'contextGraphId',
     'inventoryScope', 'kaUal', 'sealDigest', 'version',
-  ];
+    ...(value.version === 2 ? ['seal', 'subGraphName'] : []),
+  ].sort();
   if (Object.keys(value).sort().join('\n') !== expectedKeys.join('\n')) {
     throw new Error('RFC-64 finalized-private placement repair has unknown fields');
   }

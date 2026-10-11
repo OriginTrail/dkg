@@ -1,3 +1,4 @@
+import { ConfirmedCatalogObligationErrorV1 } from '../src/confirmed-catalog-obligation-error.js';
 /**
  * E2E tests for the DKG V10 memory layer progression:
  *
@@ -28,8 +29,9 @@ import {
   SWM_CURRENT_ASSERTION_PRED,
   TripleStoreAsyncLiftPublisher,
   type KnowledgeAssetVmPublishRequest,
+  type AsyncKnowledgeAssetVmPublishRecoveryEvidence,
 } from '@origintrail-official/dkg-publisher';
-import { GraphManager, PrivateContentStore, createManagedOxigraphSparqlStoreV1, deleteByPatternWithoutCount } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createManagedOxigraphSparqlStoreV1, deleteByPatternWithoutCount, OxigraphStore } from '@origintrail-official/dkg-storage';
 import { startOxigraphSparqlEndpoint } from '../../storage/test/helpers/oxigraph-sparql-endpoint.js';
 import { installHardhatACKProvider } from './_helpers/v10-acks.js';
 import { extractFromMarkdown } from '../../cli/src/extraction/markdown-extractor.js';
@@ -46,6 +48,8 @@ import {
   knowledgeAssetLayerGraphUri,
   MemoryLayer,
 } from '@origintrail-official/dkg-core';
+import { createChainProofResolver } from '../../cli/src/publisher-chain-proof.js';
+import type { Rfc64FinalizedPrivatePlacementRepairStoreV1 } from '../src/rfc64/finalized-private-placement-repair-store-v1.js';
 import { makeSwmSyncHarness } from './_helpers/swm-sync-harness.js';
 
 type DKGAgent = RealDKGAgent;
@@ -1184,6 +1188,136 @@ describe('rootless graph-scoped KA lifecycle', () => {
     );
     expect(vmRows.bindings.map((row) => row['name'])).toContain('"Queued Async VM"');
   }, 60_000);
+
+  it('recovers a real confirmed queued transaction after catalog journal refusal without another submission', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-confirmed-catalog-obligation-'));
+    const publicSnapshotStore = new FileWorkspacePublicSnapshotStore(join(dataDir, 'snapshots'), undefined,
+      { gc: { enabled: false } });
+    const agent = await createAgent('ConfirmedCatalogObligation', {
+      dataDir,
+      store: new OxigraphStore(join(dataDir, 'store.nq')),
+      publicSnapshotStore,
+      rfc64CatalogActivation: undefined,
+      rfc64PublicCatalogAutoPublish: {
+        peers: [], catalogIssuerDelegationExpiresAt: '1893456000000',
+      },
+      syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
+    });
+    try {
+      await agent.createContextGraph({ id: CG_ID, name: 'Confirmed catalog obligation' });
+      await agent.registerContextGraph(CG_ID);
+      const name = 'confirmed-catalog-obligation';
+      await agent.assertion.create(CG_ID, name);
+      await agent.assertion.write(CG_ID, name, [
+        { subject: 'urn:confirmed:catalog', predicate: 'http://schema.org/name', object: '"Confirmed"' },
+      ]);
+      await agent.assertion.promote(CG_ID, name);
+      const request = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+      const host = agent as unknown as {
+        chain: import('@origintrail-official/dkg-chain').ChainAdapter;
+        rfc64PersistenceV1: { finalizedPrivatePlacementRepairs: Rfc64FinalizedPrivatePlacementRepairStoreV1 };
+        resolveRfc64CatalogAuthoringLaneV1: (cg: string, sg?: string | null) => unknown;
+      };
+      const repairs = host.rfc64PersistenceV1.finalizedPrivatePlacementRepairs;
+      const put = repairs.put.bind(repairs);
+      let refusing = true;
+      host.rfc64PersistenceV1.finalizedPrivatePlacementRepairs = Object.freeze({
+        list: () => repairs.list(),
+        delete: (repair) => repairs.delete(repair),
+        put: async (repair) => {
+          if (refusing) throw new Error('injected confirmed journal write refusal');
+          await put(repair);
+        },
+      });
+      // Authority readiness is independent of recording the chain-confirmed obligation.
+      vi.spyOn(host, 'resolveRfc64CatalogAuthoringLaneV1').mockImplementation(() => null);
+      const adapters = new Map([['wallet-1', host.chain]]);
+      const execute = vi.fn(({ request, publishOptions }) =>
+        agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions));
+      const publisher = new TripleStoreAsyncLiftPublisher(agent.store, {
+        publicSnapshotStore,
+        chainProofResolver: createChainProofResolver(adapters),
+        knowledgeAssetVmPublishRecoveryResolver: async (_job, lookup) => {
+          const resolution = await host.chain.resolveCanonicalFinalizationReceipt!(lookup.txHash);
+          if (resolution.status !== 'confirmed') return null;
+          const receipt = resolution.receipt;
+          const recovery: AsyncKnowledgeAssetVmPublishRecoveryEvidence = {
+            inclusion: { txHash: receipt.txHash as `0x${string}`, blockNumber: receipt.blockNumber,
+              blockHash: receipt.blockHash as `0x${string}` },
+            finalization: { mode: 'published', txHash: receipt.txHash as `0x${string}`,
+              ual: request.kaUal!, batchId: receipt.batchId.toString() as `${bigint}`,
+              startKAId: receipt.startKAId.toString() as `${bigint}`,
+              endKAId: receipt.endKAId.toString() as `${bigint}`,
+              publisherAddress: receipt.publisherAddress as `0x${string}` },
+            publishProof: { merkleRoot: ethers.hexlify(receipt.merkleRoot) as `0x${string}`,
+              authorAddress: receipt.authorAddress as `0x${string}`, txIndex: receipt.txIndex,
+              operationKind: 'create' },
+          };
+          return recovery;
+        },
+        knowledgeAssetVmPublishHandler: {
+          preflight: ({ request }) => agent.preflightQueuedKnowledgeAssetVmPublishExecution(request),
+          execute,
+          finalizeRecovered: (input) => agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(input),
+        },
+      });
+      const jobId = await publisher.enqueueKnowledgeAssetVmPublish(request);
+      await publisher.processNext('wallet-1');
+      const held = await publisher.getStatus(jobId);
+      expect(held?.status).not.toBe('finalized');
+      const txHash = held?.broadcast?.txHash ?? held?.recovery?.txHashChecked;
+      if (txHash === undefined) throw new Error(JSON.stringify(held));
+      expect(txHash).toMatch(/^0x[0-9a-f]{64}$/i);
+      const canonical = await host.chain.resolveCanonicalFinalizationReceipt!(txHash!);
+      expect(canonical.status).toBe('confirmed');
+      if (canonical.status !== 'confirmed') throw new Error('expected real confirmed receipt');
+      expect(canonical.receipt.kaId.toString()).toBe(request.seal.reservedKaId);
+      expect(repairs.list()).toEqual([]);
+      const provider = createProvider();
+      const signed = await provider.getTransaction(txHash!);
+      const nonceAfterConfirmation = await provider.getTransactionCount(signed!.from);
+      expect(await publisher.recover()).toBe(0);
+      expect((await publisher.getStatus(jobId))?.status).not.toBe('finalized');
+      refusing = false;
+      expect(await publisher.recover()).toBe(1);
+      expect((await publisher.getStatus(jobId))?.status).toBe('finalized');
+      expect(repairs.list()).toHaveLength(1);
+      expect(repairs.list()[0]).toMatchObject({ version: 2, inventoryScope: null, kaUal: request.kaUal });
+      expect(await publisher.processNext('wallet-1')).toBeNull();
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(await provider.getTransactionCount(signed!.from)).toBe(nonceAfterConfirmation);
+
+      // Standalone sync has no queue journal: it returns immutable confirmed evidence
+      // for an observer-only retry, rather than reporting success or sending again.
+      const syncName = 'sync-catalog-obligation';
+      await agent.assertion.create(CG_ID, syncName);
+      await agent.assertion.write(CG_ID, syncName, [
+        { subject: 'urn:confirmed:sync-catalog', predicate: 'http://schema.org/name', object: '"Sync"' },
+      ]);
+      await agent.assertion.promote(CG_ID, syncName);
+      refusing = true;
+      let pending: ConfirmedCatalogObligationErrorV1 | undefined;
+      try { await agent.publishFromFinalizedAssertion(CG_ID, syncName); }
+      catch (error) { if (!(error instanceof ConfirmedCatalogObligationErrorV1)) throw error; pending = error; }
+      if (pending?.transaction === undefined) throw new Error('confirmed synchronous evidence was lost');
+      expect((await host.chain.resolveCanonicalFinalizationReceipt!(pending.transaction.txHash)).status)
+        .toBe('confirmed');
+      expect(pending.retryInput.assertionCoordinate).toBe(syncName);
+      expect(Object.isFrozen(pending.seal)).toBe(true);
+      const syncNonce = await provider.getTransactionCount(signed!.from);
+      refusing = false;
+      await agent.observeRfc64ConfirmedVmV1(pending.retryInput);
+      expect(repairs.list()).toHaveLength(2);
+      expect(await provider.getTransactionCount(signed!.from)).toBe(syncNonce);
+    } finally {
+      vi.restoreAllMocks();
+      await agent.stop();
+      await agent.store.close();
+      agents.splice(agents.indexOf(agent), 1);
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  }, 120_000);
 
   it('repairs a named lifecycle after its async publish transaction confirmed during downtime', async () => {
     // This row drives the durable queue-recovery entry point explicitly. Keep

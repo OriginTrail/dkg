@@ -5,6 +5,8 @@ import { join } from 'node:path';
 
 import {
   assertCanonicalGraphScopedAuthorSealV1,
+  assertUnsignedContextGraphPolicyEnvelopeV1,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
   buildAssertionSealQuads,
   buildAuthorAttestationTypedData,
   computeAuthorCatalogScopeDigestV1,
@@ -17,6 +19,7 @@ import {
   type CatalogSealDeploymentProfileV1,
   type ContextGraphIdV1,
   type Digest32V1,
+  type DecimalU64V1,
   type EvmAddressV1,
   type NetworkIdV1,
 } from '@origintrail-official/dkg-core';
@@ -124,12 +127,12 @@ export async function startRepairAgentV1(
     syncOnConnectEnabled: false,
     durableSyncEnabled: false,
     agentProfileHeartbeatMs: 0,
-    syncContextGraphs: options.syncContextGraphs
-      ?? (options.activation !== undefined && options.activation.enabled !== false
+    syncContextGraphs: options.syncContextGraphs === undefined
+      ? (options.activation !== undefined && options.activation.enabled !== false
         ? options.activation.bootstrap?.acceptedPublicPolicies.map(
           ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
         ) ?? []
-        : []),
+        : []) : [...options.syncContextGraphs],
     ...(options.activation === undefined ? {} : {
       networkIdentity: {
         networkId: await computeNetworkId(),
@@ -202,8 +205,8 @@ export function catalogScopeDigestV1(): Digest32V1 {
     ownershipTransitionDigest: null,
     subGraphName: null,
     authorAddress: AUTHOR,
-    era: '0',
-    bucketCount: '1',
+    era: '0' as DecimalU64V1,
+    bucketCount: '1' as DecimalU64V1,
   });
 }
 
@@ -216,9 +219,11 @@ export function bootstrapConfigV1(
     contextGraphId: CONTEXT_GRAPH_ID,
     ownerAddress: AUTHOR,
   });
+  const policyEnvelope = unsignedOpenContextGraphPolicyEnvelopeV1(policy);
+  assertUnsignedContextGraphPolicyEnvelopeV1(policyEnvelope);
   return {
     acceptedPublicPolicies: [{
-      policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
+      policyEnvelope,
       targets: includeRemoteTarget ? [{
         authorAddress: AUTHOR,
         providers: ['12D3KooWRepairProvider'],
@@ -338,7 +343,7 @@ export async function seedDurableWorkspaceAssetV1(
     kav10Address: seal.kav10Address,
     reservedKaId: seal.reservedKaId!,
     finalizedAtIso: seal.finalizedAtIso,
-    contentScopeVersion: seal.contentScopeVersion!,
+    contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
     kaUal: seal.kaUal!,
     assertionVersion: seal.assertionVersion!,
     publicTripleCount: seal.publicTripleCount!,
@@ -379,7 +384,7 @@ export async function seedDurableWorkspaceAssetV1(
       ownershipTransitionDigest: null,
       subGraphName: null,
       authorAddress: AUTHOR,
-      era: '0',
+      era: '0' as DecimalU64V1,
     }),
   });
 }

@@ -10,7 +10,6 @@
 import {
   assertAssertionCoordinateV1,
   assertContextGraphIdV1,
-  assertSubGraphNameV1,
   assertSwmAuthorInventoryShareOperationIdV1,
   canonicalGraphScopedAuthorSealFromAssertionSealV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
@@ -786,11 +785,11 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   }
 
   /**
-   * Canonical post-confirmation observer. A public SWM-only lane retracts the
-   * pending row, and the publication waits for that. A finalized private lane
-   * keeps its tier-neutral row, stores the durable marker of its now-chain-backed
-   * placement and asks the catalog supervisor for it: the publication waits
-   * for that one write, never for a placement attempt or the start of one.
+   * Canonical post-confirmation observer. Enabled authoring records its sealed
+   * catalog obligation before publication completes, even while no lane can
+   * accept it. The supervisor later retracts the public SWM row or retains the
+   * private tier-neutral row and places its chain-backed catalog asset. The
+   * publication waits for the marker write, never for a placement attempt.
    */
   async observeRfc64ConfirmedVmV1(
     this: DKGAgent,
@@ -798,108 +797,51 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   ): Promise<void> {
     const subGraphName = params.subGraphName ?? null;
     const contextGraphId = params.contextGraphId;
-    const assertionCoordinate = params.assertionCoordinate;
-    let confirmedSeal: ReturnType<typeof canonicalGraphScopedAuthorSealFromAssertionSealV1>;
-    try {
-      assertContextGraphIdV1(contextGraphId, 'confirmed publish contextGraphId');
-      assertAssertionCoordinateV1(
-        assertionCoordinate,
-        'confirmed publish assertionCoordinate',
-      );
-      if (subGraphName !== null) {
-        assertSubGraphNameV1(subGraphName, 'confirmed publish subGraphName');
-      }
-      confirmedSeal = canonicalGraphScopedAuthorSealFromAssertionSealV1(params.seal);
-    } catch (cause) {
-      this.log.warn(
-        params.ctx,
-        `Confirmed ${params.publicationLabel} for <${params.assertionUri}> but RFC-64 post-confirmation observer input was invalid: ${cause instanceof Error ? cause.message : String(cause)}`,
-      );
-      return;
-    }
+    const plan = this.config.rfc64CatalogExecutionPlan;
+    // Deliberately disabled/legacy authoring and unsupported subgraphs owe no catalog work.
+    if (subGraphName !== null || plan.killSwitchActive
+      || (plan.contextGraphModes[contextGraphId] ?? plan.responsibilityDefaultMode) === 'legacy') return;
+    const authoring = this.config.rfc64CatalogAuthoringPolicy;
+    if (authoring?.publicDefault === undefined && authoring?.byContextGraph[contextGraphId] === undefined
+      && plan.selectedAuthority[contextGraphId]?.selected !== true
+      && !this.readRfc64CatalogResponsibilitiesV1().some((entry) => entry.contextGraphId === contextGraphId && entry.active)
+      && !this.resolveRfc64CatalogServingAuthorityV1(contextGraphId).authoringAllowed) return;
+    assertContextGraphIdV1(contextGraphId, 'confirmed publish contextGraphId');
+    assertAssertionCoordinateV1(params.assertionCoordinate, 'confirmed publish assertionCoordinate');
+    const confirmedSeal = canonicalGraphScopedAuthorSealFromAssertionSealV1(params.seal);
+    const repair = snapshotRfc64FinalizedPrivatePlacementRepairV1({
+      version: 2, contextGraphId: contextGraphId as ContextGraphIdV1,
+      authorAddress: confirmedSeal.authorAddress, inventoryScope: null, subGraphName: null,
+      assertionCoordinate: params.assertionCoordinate as AssertionCoordinateV1,
+      assertionVersion: confirmedSeal.assertionVersion, kaUal: confirmedSeal.kaUal,
+      sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(confirmedSeal), seal: confirmedSeal,
+    });
     const placementWait = catalogPlacementTimingV1(this).beginWait(confirmedSeal, params.ctx);
     const shadowRuntime = rfc64SwmInventoryShadowRuntimeV1(this);
-    const assetKey = rfc64SwmInventoryAssetKeyV1({
-      contextGraphId,
-      subGraphName,
-      authorAddress: confirmedSeal.authorAddress,
-      assertionCoordinate,
-    });
-    let finalizedPrivateInventoryScope: SwmAuthorInventoryScopeV1 | null = null;
-    try {
-      const lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, subGraphName);
-      if (lane?.acceptsFinalizedVmRepair === true) {
-        finalizedPrivateInventoryScope = Object.freeze({
-          ...lane.scopeBase,
-          authorAddress: confirmedSeal.authorAddress,
-        }) as SwmAuthorInventoryScopeV1;
-      }
-    } catch (cause) {
-      this.log.warn(
-        params.ctx,
-        `Confirmed ${params.publicationLabel} but RFC-64 catalog authority was unavailable: ${cause instanceof Error ? cause.message : String(cause)}`,
-      );
-      return;
-    }
-    // Fence every confirmed version, including confirmation-gated finalized
-    // private repairs, until the asset-tail repair and queued observers drain.
-    // Newer assertion versions use distinct fence entries and remain eligible.
-    // The fence is set before the first await and outlives this call.
     if (params.shareOperationId !== undefined) {
-      shadowRuntime.markVmConfirmed(
-        assetKey,
-        confirmedSeal.assertionVersion,
-        params.shareOperationId,
-      );
+      shadowRuntime.markVmConfirmed(rfc64SwmInventoryAssetKeyV1({
+        contextGraphId, subGraphName, authorAddress: confirmedSeal.authorAddress,
+        assertionCoordinate: params.assertionCoordinate,
+      }), confirmedSeal.assertionVersion, params.shareOperationId);
     }
-    let markerStored = false;
+    // No lane lookup precedes this atomic write. A write refusal must cross the completion
+    // boundary: the queue retains its confirmed transaction and immutable request for recovery.
     try {
-      if (finalizedPrivateInventoryScope !== null) {
-        const persistence = this.rfc64PersistenceV1;
-        if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
-        const repair = snapshotRfc64FinalizedPrivatePlacementRepairV1({
-          version: 1,
-          contextGraphId: contextGraphId as ContextGraphIdV1,
-          authorAddress: confirmedSeal.authorAddress,
-          inventoryScope: finalizedPrivateInventoryScope,
-          assertionCoordinate,
-          assertionVersion: confirmedSeal.assertionVersion,
-          kaUal: confirmedSeal.kaUal,
-          sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(confirmedSeal),
-        });
-        // GH#3081 — the terminal boundary of a confirmed private publication.
-        // This durable marker is the restart boundary: pre-confirmation rows
-        // have none, while every post-confirmation placement survives a crash
-        // or transient signing/catalog failure. The supervisor alone owns the
-        // attempt, its retries and its drain: nothing here waits for it, or
-        // queues on the asset tail that a running placement holds.
-        await persistence.finalizedPrivatePlacementRepairs.put(repair);
-        markerStored = true;
-        placementWait.requested();
-        const request = this.requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1({ repair, seal: confirmedSeal, ctx: params.ctx }, placementWait.observer);
-        if (!request.accepted) this.log.warn(params.ctx, `Confirmed ${params.publicationLabel} for <${params.assertionUri}>: the RFC-64 catalog supervisor did not accept its placement now; the durable marker stays for its next pass or start`);
-      } else {
-        await shadowRuntime.runExclusive(assetKey, async () => {
-          const result = await this.removeRfc64SwmAuthorInventoryShadowV1({
-            contextGraphId,
-            subGraphName,
-            seal: params.seal,
-          });
-          if (result.status === 'applied' || result.status === 'absent') {
-            this.requestRfc64SwmCatalogProjectionV1({
-              contextGraphId: contextGraphId as ContextGraphIdV1,
-              authorAddress: confirmedSeal.authorAddress,
-              ctx: params.ctx,
-            });
-          }
-        });
-      }
+      const persistence = this.rfc64PersistenceV1;
+      if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
+      await persistence.finalizedPrivatePlacementRepairs.put(repair);
     } catch (cause) {
-      placementWait.observer.released(); // A request that threw has no waiter to release it later.
-      const failed = finalizedPrivateInventoryScope === null ? 'SWM inventory shadow removal escaped its failure boundary'
-        : markerStored ? 'finalized-private placement could not be requested; its durable marker stays for the next pass or start'
-          : 'finalized-private placement was not recorded, so nothing owes it';
-      this.log.warn(params.ctx, `Confirmed ${params.publicationLabel} but RFC-64 ${failed}: ${cause instanceof Error ? cause.message : String(cause)}`);
+      placementWait.observer.released();
+      placementWait.end(this.log);
+      throw new Error('Confirmed publication catalog obligation was not durably recorded; recovery is required', { cause });
+    }
+    placementWait.requested();
+    try {
+      const request = this.requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1({ repair, seal: confirmedSeal, ctx: params.ctx }, placementWait.observer);
+      if (!request.accepted) this.log.warn(params.ctx, `Confirmed ${params.publicationLabel} for <${params.assertionUri}>: the RFC-64 catalog supervisor did not accept its placement now; the durable marker stays for its next pass or start`);
+    } catch (cause) {
+      placementWait.observer.released();
+      this.log.warn(params.ctx, `Confirmed ${params.publicationLabel} but RFC-64 finalized-private placement could not be requested; its durable marker stays for the next pass or start: ${cause instanceof Error ? cause.message : String(cause)}`);
     }
     placementWait.end(this.log);
   }

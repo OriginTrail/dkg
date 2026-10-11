@@ -2650,9 +2650,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       inventoryScopeDigest: scopeDigest,
       authorAddress: AUTHOR,
     })).toMatchObject({
-      head: { payload: { version: '1', totalRows: '0' } },
-      rows: [],
+      head: { payload: { version: '0', totalRows: '1' } },
     });
+    expect(restarted.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.list())
+      .toMatchObject([{ version: 2, inventoryScope: null, seal: canonicalSeal }]);
     expect(restarted.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
@@ -2660,6 +2661,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     releaseConfirmationProjection();
     await restarted.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     catalogReadSpy.mockRestore();
+    expect(restarted.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.list()).toEqual([]);
+    expect(restarted.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: scopeDigest, authorAddress: AUTHOR,
+    })).toMatchObject({ head: { payload: { version: '1', totalRows: '0' } }, rows: [] });
     expect(restarted.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,

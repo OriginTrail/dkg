@@ -1,3 +1,4 @@
+export { ConfirmedCatalogObligationErrorV1, type ConfirmedCatalogTransactionEvidenceV1 } from './confirmed-catalog-obligation-error.js';
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 export {
   authorityIndexTrustDomain,

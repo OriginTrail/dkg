@@ -1,3 +1,4 @@
+import { ConfirmedCatalogObligationErrorV1, type ConfirmedCatalogTransactionEvidenceV1 } from './confirmed-catalog-obligation-error.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -5140,6 +5141,8 @@ export class PublishMethods extends DKGAgentBase {
     // asset after recovery (private lanes keep their finalized placement).
     await this.afterConfirmedGraphScopedVmPublishV1({
       status: 'confirmed',
+      confirmedTransaction: { txHash: recovered.txHash, blockNumber: recovered.receiptBlockNumber,
+        batchId: recovered.reservedKaId, kaId: recovered.reservedKaId },
       contextGraphId: request.contextGraphId,
       subGraphName: request.subGraphName,
       assertionCoordinate: request.name,
@@ -5681,6 +5684,7 @@ export class PublishMethods extends DKGAgentBase {
 
     await this.afterConfirmedGraphScopedVmPublishV1({
       status: result.status,
+      confirmedTransaction: result.onChainResult,
       contextGraphId: request.contextGraphId,
       subGraphName: request.subGraphName,
       assertionCoordinate: request.name,
@@ -6281,6 +6285,7 @@ export class PublishMethods extends DKGAgentBase {
 
     await this.afterConfirmedGraphScopedVmPublishV1({
       status: result.status,
+      confirmedTransaction: result.onChainResult,
       contextGraphId,
       subGraphName: opts?.subGraphName,
       assertionCoordinate: name,
@@ -6298,6 +6303,7 @@ export class PublishMethods extends DKGAgentBase {
     this: DKGAgent,
     input: Readonly<{
       status: PublishResult['status'];
+      confirmedTransaction?: ConfirmedCatalogTransactionEvidenceV1;
       contextGraphId: string;
       subGraphName?: string;
       assertionCoordinate: string;
@@ -6309,7 +6315,8 @@ export class PublishMethods extends DKGAgentBase {
     }>,
   ): Promise<void> {
     if (input.status !== 'confirmed') return;
-    await this.observeRfc64ConfirmedVmV1(input);
+    try { await this.observeRfc64ConfirmedVmV1(input); }
+    catch (cause) { throw new ConfirmedCatalogObligationErrorV1(input, input.confirmedTransaction, cause); }
   }
 
   /** The local confirmed publisher has already written VM and drained this exact SWM root. */

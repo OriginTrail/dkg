@@ -1084,10 +1084,10 @@ export class DKGAgent extends DKGAgentBase {
           const lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null);
           return lane !== null;
         },
-        acceptsFinalizedPrivateLane: (contextGraphId) => (
-          this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null)
-            ?.acceptsFinalizedVmRepair === true
-        ),
+        acceptsFinalizedPrivateLane: (contextGraphId, repair) => {
+          const lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null);
+          return lane !== null && (lane.acceptsFinalizedVmRepair || (repair?.version === 2 && lane.kind === 'public'));
+        },
         readRepairRevision: (contextGraphId, authorAddress) => {
           const lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null);
           if (lane === null) return null;

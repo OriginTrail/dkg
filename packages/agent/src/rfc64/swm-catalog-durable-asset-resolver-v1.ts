@@ -60,8 +60,8 @@ interface DurableCatalogAssetResolverBaseV1 {
   readonly authorAddress: EvmAddressV1;
   readonly signal?: AbortSignal;
   /**
-   * The seal the caller was handed for exactly this asset version, if it still holds it. Read
-   * after the stored seals and taken on the same exact match with the identity's seal digest.
+   * The immutable seal durably retained for this exact asset version. It takes precedence
+   * over mutable active/archive slots only after an exact identity and digest match.
    */
   readonly retainedSeal?: Readonly<CanonicalGraphScopedAuthorSealV1>;
 }
@@ -291,6 +291,12 @@ async function resolveStrictSealV1(
   identity: Readonly<Rfc64DurableCatalogAssetIdentityV1>,
 ): Promise<ResolvedStrictSealV1> {
   throwIfAbortedV1(params.signal);
+  // A durable owed seal is already authenticated confirmation evidence; prefer its exact digest
+  // before reading mutable active/archive subjects, including after a restart or another edit.
+  if (params.retainedSeal !== undefined) {
+    const retained = checkCanonicalSealV1(params.retainedSeal, identity);
+    if (retained.ok) return Object.freeze({ graphManager: new GraphManager(params.store), seal: retained.seal });
+  }
   const sealQuery = {
     store: params.store,
     contextGraphId: params.contextGraphId,
@@ -314,12 +320,6 @@ async function resolveStrictSealV1(
     identity,
   );
   if (archived.ok) return Object.freeze({ graphManager: new GraphManager(params.store), seal: archived.seal });
-  // Re-opened more than once: the archive holds one seal, and it is a later version's by now.
-  // The seal the caller was handed for this version is taken on the same exact match.
-  if (params.retainedSeal !== undefined) {
-    const retained = checkCanonicalSealV1(params.retainedSeal, identity);
-    if (retained.ok) return Object.freeze({ graphManager: new GraphManager(params.store), seal: retained.seal });
-  }
   // None is the seal the identity names: report what is wrong with the active one.
   throw active.failure;
 }
