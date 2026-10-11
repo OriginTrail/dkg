@@ -743,10 +743,13 @@ describe('selection reactivation during receiver drain', () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(fences[0]).not.toHaveBeenCalled();
       selected = ['cg', 'other']; version = 2;
+      const refused = connection.prepareGraphActivation('peer', 'cg');
+      expect(refused).not.toBeNull(); refused!.reject();
+      expect(fences[1]).toHaveBeenCalledOnce();
       const activation = connection.prepareGraphActivation('peer', 'cg');
       expect(activation).not.toBeNull(); activation!.admit();
       for (let i = 0; i < 20; i++) expect(connection.prepareGraphActivation('peer', 'cg')).toBeNull();
-      expect(fences).toHaveLength(2); expect(fences[0]).not.toHaveBeenCalled();
+      expect(fences).toHaveLength(3); expect(fences[0]).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(0);
       expect(request.mock.calls.filter(([cg]) => cg === 'cg')).toHaveLength(1);
       release(); await vi.advanceTimersByTimeAsync(100);

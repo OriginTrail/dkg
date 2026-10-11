@@ -7,13 +7,13 @@ type PhaseV1 =
   | Readonly<{ state: 'waiting-for-fence' }>
   | Readonly<{ state: 'queued' | 'executing'; lease: FenceV1 }>
   | Readonly<{ state: 'retired' }>;
-interface DemandV1 { readonly connectionGeneration: number; phase: PhaseV1 }
+interface DemandV1 { readonly connectionGeneration: number; readonly selectionGeneration: number; phase: PhaseV1 }
 export interface Rfc64CatalogReplayScopeAdmissionV1 { admit(): void; reject(): void }
 export interface Rfc64CatalogReplayScopeExecutionV1 { readonly lease: FenceV1 }
 
 /** Owns demand independently of executable-table placement or fence availability. */
 export class Rfc64CatalogReplayScopeLifecycleV1 {
-  #selection: 'selected' | 'retired' = 'selected';
+  #selection: Readonly<{ state: 'selected' | 'retired'; generation: number }> = { state: 'selected', generation: 0 };
   #current: DemandV1 | null = null;
   #successor: DemandV1 | null = null;
   readonly #executions = new WeakMap<Rfc64CatalogReplayScopeExecutionV1, DemandV1>();
@@ -33,14 +33,15 @@ export class Rfc64CatalogReplayScopeLifecycleV1 {
 
   reserve(connectionGeneration: number, reserveFence: () => FenceV1 | null): Rfc64CatalogReplayScopeAdmissionV1 | null {
     const current = this.#current;
-    const reactivated = this.#selection === 'retired';
-    if (current !== null && ((!reactivated && current.connectionGeneration === connectionGeneration) || this.#successor !== null
+    if (current !== null && ((current.connectionGeneration === connectionGeneration
+      && current.selectionGeneration === this.#selection.generation) || this.#successor !== null
       || current.phase.state === 'queued' || current.phase.state === 'waiting-for-fence')) return null;
     // Transfer an unsampled fence to a fresh stable token. Old admission callbacks
     // cannot release or admit the replacement, even when there was no fence yet.
     const lease = current?.phase.state === 'awaiting-admission' ? current.phase.lease : reserveFence();
-    this.#selection = 'selected';
-    const demand: DemandV1 = { connectionGeneration, phase: { state: 'awaiting-admission', lease } };
+    this.#selection = { state: 'selected', generation: this.#selection.generation };
+    const demand: DemandV1 = { connectionGeneration, selectionGeneration: this.#selection.generation,
+      phase: { state: 'awaiting-admission', lease } };
     if (current?.phase.state === 'awaiting-admission') { current.phase = { state: 'retired' }; this.#current = demand; }
     else if (current === null) this.#current = demand;
     else this.#successor = demand;
@@ -84,7 +85,9 @@ export class Rfc64CatalogReplayScopeLifecycleV1 {
 
   /** Selection removal retires queued custody, retaining an executing lease until physical drain. */
   retireSelection(): void {
-    this.#selection = 'retired';
+    if (this.#selection.state === 'selected') {
+      this.#selection = { state: 'retired', generation: this.#selection.generation + 1 };
+    }
     if (this.#successor !== null) this.#release(this.#successor);
     if (this.#current !== null && !this.executing) this.#release(this.#current);
   }
