@@ -504,7 +504,7 @@ export interface DKGPublisherConfig {
   publisherAddressResolver?: (contextGraphId?: bigint) => Promise<string | undefined>;
   /** EVM private key for signing publish requests (hex string with 0x prefix) */
   publisherPrivateKey?: string;
-  /** Author (asset owner) signing attestations instead of the paying wallet; `null`: the paying wallet never authors. */
+  /** Author (asset owner) signing attestations instead of the paying wallet; `null`, or omitted over a chain whose wallets sign externally: the paying wallet never authors. */
   authorSigner?: Pick<PublisherSigner, 'address' | 'signTypedData'> | null;
   /**
    * Additional EVM private keys whose identities can act as receiver
@@ -1207,7 +1207,7 @@ export class DKGPublisher implements Publisher {
     this.keypair = config.keypair;
     this.publisherNodeIdentityId = config.publisherNodeIdentityId ?? 0n;
     this.publisherAddressResolver = config.publisherAddressResolver;
-    this.authorSigner = config.authorSigner;
+    this.authorSigner = config.authorSigner !== undefined ? config.authorSigner : (config.chain.usesExternalSigner?.() === true ? null : undefined);
 
     const configuredPublisherAddress = normalizePublisherAddress(config.publisherAddress);
     if (config.publisherPrivateKey) {

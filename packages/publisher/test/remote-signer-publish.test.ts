@@ -163,8 +163,6 @@ describe('DKGPublisher with an external signer', () => {
   }, 180_000);
 
   it('never falls back to a paying account as the author', async () => {
-    const publisher = await newPublisher(null);
-    expect(await publisher.publisherFallbackAuthorAddress()).toBeUndefined();
     const typed = buildAuthorAttestationTypedData({
       chainId: 31337n,
       kav10Address,
@@ -172,8 +170,21 @@ describe('DKGPublisher with an external signer', () => {
       authorAddress: payers[0].address,
       reservedKaId: (BigInt(payers[0].address) << 96n) | 1n,
     });
-    const typedBefore = fake.calls('eth_signTypedData_v4').length;
-    await expect(publisher.signAuthorAttestationAsPublisher(typed)).rejects.toThrow(/no author signer is configured/);
-    expect(fake.calls('eth_signTypedData_v4')).toHaveLength(typedBefore);
+    // Explicitly without an author, and with the author left out over a chain whose wallets sign externally.
+    for (const authorSigner of [null, undefined]) {
+      const publisher = await newPublisher(authorSigner);
+      expect(await publisher.publisherFallbackAuthorAddress()).toBeUndefined();
+      const typedBefore = fake.calls('eth_signTypedData_v4').length;
+      await expect(publisher.signAuthorAttestationAsPublisher(typed)).rejects.toThrow(/no author signer is configured/);
+      expect(fake.calls('eth_signTypedData_v4')).toHaveLength(typedBefore);
+    }
+    // A chain whose wallet signs locally keeps that wallet as the fallback author.
+    const local = new DKGPublisher({
+      store: new OxigraphStore(),
+      chain: core,
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+    });
+    expect(await local.publisherFallbackAuthorAddress()).toBe(core.getSignerAddress());
   });
 });
