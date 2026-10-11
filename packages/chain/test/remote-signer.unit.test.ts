@@ -686,6 +686,45 @@ describe('remote signer failures are final for the transaction path', () => {
     expect(populates[1].calls).toHaveLength(0);
   });
 
+  /**
+   * Two RPC endpoints, the adapter's own signing callback (as the transport is
+   * built in production) and an external signer for account A whose RPC
+   * population and signing the test controls for each endpoint it is bound to.
+   */
+  function twoEndpointWrite(signerFor: (endpoint: number) => {
+    populateTransaction(tx: ethers.TransactionRequest): Promise<ethers.TransactionRequest>;
+    signTransaction(tx: ethers.TransactionRequest): Promise<string>;
+  }) {
+    const adapter = new EVMChainAdapter({
+      rpcUrl: 'http://127.0.0.1:1',
+      hubAddress: '0x00000000000000000000000000000000000000d4',
+      chainId: 'evm:31337',
+      privateKey: KEY_C,
+      allowNoAdminSigner: true,
+    });
+    cleanups.push(async () => adapter.destroy());
+    const providers = [{ endpoint: 0 }, { endpoint: 1 }];
+    const contractPopulations = [recorder(async () => ({ ...TX })), recorder(async () => ({ ...TX }))];
+    const contract = {
+      connect: (runner: { endpoint: number }) => ({ doWrite: { populateTransaction: contractPopulations[runner.endpoint] } }),
+    } as never;
+    const bound = providers.map((_provider, endpoint) => ({
+      address: WALLET_A.address,
+      isExternalSigner: true as const,
+      endpoint,
+      ...signerFor(endpoint),
+    }));
+    const signer = {
+      address: WALLET_A.address,
+      isExternalSigner: true as const,
+      connect: (provider: { endpoint: number }) => bound[provider.endpoint],
+    } as never;
+    const rpc = makeClient(providers, ['https://a.example', 'https://b.example'], (boundSigner, populated) => (
+      (adapter as unknown as { signPopulatedTransaction: SignPopulatedFn }).signPopulatedTransaction(boundSigner, populated)
+    ));
+    return { write: () => rpc.populateAndSign(contract, 'doWrite', [], signer, 'V10 publish'), contractPopulations };
+  }
+
   it('does not cut an external signing request off at the per-endpoint deadline', async () => {
     vi.useFakeTimers();
     const contract = { connect: () => ({ doWrite: { populateTransaction: async () => ({ to: '0xTO', data: '0x' }) } }) } as never;
@@ -697,6 +736,27 @@ describe('remote signer failures are final for the transaction path', () => {
     await vi.advanceTimersByTimeAsync(RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS + 6_000);
     await expect(pending).resolves.toEqual({ signedTx: '0xS', txHash: '0xH' });
     expect(signPopulated.calls).toHaveLength(1);
+  });
+
+  it('makes any failure of a supplied external signer final, so it is asked to sign once across endpoints', async () => {
+    const signTransaction = vi.fn(async () => {
+      throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+    });
+    const { write, contractPopulations } = twoEndpointWrite(() => ({ populateTransaction: async () => ({ ...TX }), signTransaction }));
+    const error = await write().catch((err: unknown) => err);
+    expect(error).toMatchObject({ code: 'REMOTE_SIGNER_FAILED' });
+    expect((error as Error).message).toMatch(/failed to sign: socket hang up/);
+    expect((error as { cause?: unknown }).cause).toMatchObject({ code: 'ECONNRESET' });
+    expect(classifyRpcRetryDisposition(error)).toBe('fail');
+    expect(signTransaction).toHaveBeenCalledTimes(1);
+    expect(contractPopulations[1].calls).toHaveLength(0);
+
+    // Bytes from an external signer that do not decode are final as well.
+    const garbled = vi.fn(async () => '0x1234');
+    const second = twoEndpointWrite(() => ({ populateTransaction: async () => ({ ...TX }), signTransaction: garbled }));
+    await expect(second.write()).rejects.toMatchObject({ code: 'REMOTE_SIGNER_FAILED' });
+    expect(garbled).toHaveBeenCalledTimes(1);
+    expect(second.contractPopulations[1].calls).toHaveLength(0);
   });
 });
 

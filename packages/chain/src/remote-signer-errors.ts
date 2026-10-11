@@ -29,7 +29,9 @@ export type RemoteSignerErrorCode =
   /** A returned signed transaction differs from the transaction that was requested. */
   | 'REMOTE_SIGNER_TRANSACTION_MISMATCH'
   /** The transaction handed to the signer is not fully populated or not supported. */
-  | 'REMOTE_SIGNER_TRANSACTION_NOT_SIGNABLE';
+  | 'REMOTE_SIGNER_TRANSACTION_NOT_SIGNABLE'
+  /** An external signer failed to sign in a way it did not classify; its own error is the cause. */
+  | 'REMOTE_SIGNER_FAILED';
 
 export class RemoteSignerError extends Error {
   readonly code: RemoteSignerErrorCode;

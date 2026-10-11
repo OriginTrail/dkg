@@ -15,7 +15,7 @@
 import { decodeConvictionCostCovered } from './conviction-cost-covered.js';
 export { decodeConvictionCostCovered } from './conviction-cost-covered.js';
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
-import { createOperationalSignerPool, isExternalEvmSigner, operationalPrivateKeyOf, type EvmSigner } from './evm-signer.js';
+import { createOperationalSignerPool, isExternalEvmSigner, operationalPrivateKeyOf, signTransactionOnce, type EvmSigner } from './evm-signer.js';
 export type { EvmSigner } from './evm-signer.js';
 import { createFilterErrorSilencer, installFilterNotFoundConsoleSuppressor, formatProviderError } from './filter-error-silencer.js';
 import type { FilterErrorSilencer } from './filter-error-silencer.js';
@@ -1949,10 +1949,9 @@ export class EVMChainAdapterBase {
     // deadline for every signer; the signing request after it is not endpoint
     // work and is never cut off (`RpcFailoverClient.populateAndSign`).
     const filled = await withRpcRequestTimeout(RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS, 'transaction population', populate);
-    const signedTx = await signer.signTransaction(filled);
-    // GH#2270 PR-3 r3 — ONE decode of the signed bytes, here, for both facts the send window
-    // needs. The nonce used to be re-parsed at the dispatch boundary from the same string.
-    const parsed = ethers.Transaction.from(signedTx);
+    // GH#2270 PR-3 r3 — ONE decode of the signed bytes, at signing, for both facts the send
+    // window needs. The nonce used to be re-parsed at the dispatch boundary from the same string.
+    const { signedTx, parsed } = await signTransactionOnce(signer, filled);
     const nonce = Number.isSafeInteger(parsed.nonce) && parsed.nonce >= 0 ? parsed.nonce : undefined;
     return { signedTx, txHash: parsed.hash ?? '0x', ...(nonce === undefined ? {} : { nonce }) };
   }

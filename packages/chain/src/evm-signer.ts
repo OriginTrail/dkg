@@ -7,7 +7,8 @@
  * to one RPC endpoint per attempt. `ethers.Wallet` satisfies it, and so does
  * `RemoteSigner`, which delegates signing to an external signer.
  */
-import { Wallet, type ethers } from 'ethers';
+import { Transaction, Wallet, type ethers } from 'ethers';
+import { RemoteSignerError, isRemoteSignerError } from './remote-signer-errors.js';
 
 export interface EvmSigner extends ethers.Signer {
   /** Checksummed address, available without a round trip. */
@@ -45,6 +46,27 @@ export interface ExternalAuthorSigners {
 export function isExternalEvmSigner(signer: unknown): signer is ExternalEvmSigner {
   return typeof signer === 'object' && signer !== null
     && (signer as { isExternalSigner?: unknown }).isExternalSigner === true;
+}
+
+/**
+ * Sign a fully populated transaction once and decode the signed bytes. A
+ * failure of an external signer is final, whatever it looks like (a reset
+ * connection is not an RPC endpoint failure, and neither are bytes that do not
+ * decode): one that is not already a signer error is wrapped in one, so no
+ * endpoint failover or retry loop asks the signer for a second signature.
+ */
+export async function signTransactionOnce(
+  signer: EvmSigner,
+  tx: ethers.TransactionRequest,
+): Promise<{ signedTx: string; parsed: Transaction }> {
+  try {
+    const signedTx = await signer.signTransaction(tx);
+    return { signedTx, parsed: Transaction.from(signedTx) };
+  } catch (err) {
+    if (!isExternalEvmSigner(signer) || isRemoteSignerError(err)) throw err;
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new RemoteSignerError('REMOTE_SIGNER_FAILED', `External signer for ${signer.address} failed to sign: ${reason}`, { cause: err });
+  }
 }
 
 /** Thrown where a raw operational private key is requested but signing is external. */
