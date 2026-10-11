@@ -4085,6 +4085,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
       peerStepTimeoutMs?: number;
       /** Start a new exact-asset snapshot for this update refresh attempt. */
       exactFetchPurpose?: 'vm-update-refresh';
+      /** @deprecated Use exactFetchPurpose: 'vm-update-refresh'. */
+      forceFreshExactSession?: boolean;
     },
   ): Promise<ContextGraphAssetFetchResult> {
     const { isCurrent, signal, peerStepTimeoutMs } = options;
@@ -4225,6 +4227,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
             // from a new snapshot on every attempt; its pages still share one
             // session within this invocation.
             exactFetchPurpose: options.exactFetchPurpose,
+            forceFreshExactSession: options.forceFreshExactSession,
           },
         );
       },

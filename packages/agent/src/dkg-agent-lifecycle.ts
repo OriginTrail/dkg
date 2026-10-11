@@ -1750,6 +1750,10 @@ type LegacyDurableContextGraphOptions = {
   onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>;
   fetchTimeoutMs?: number;
   exactAssetFetchPolicy?: ExactAssetFetchSessionPolicy;
+  /** @deprecated Use the selection-bound exactAssetFetchPolicy. */
+  exactAssetSelection?: ExactAssetSelection;
+  /** @deprecated Use the vm-update-refresh exactAssetFetchPolicy. */
+  forceFreshExactSession?: boolean;
   authenticationTimeoutMs?: number;
   operationFetchDeadline?: number;
   operationDeadline?: number;
@@ -5728,10 +5732,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // the same flag that makes it a responder. Same signal SC4 uses to advertise the protocol.
     // The changelog lane does not yet expose cancellable verification/store
     // boundaries. Any caller-supplied signal therefore requires the fully
-    // signal-aware legacy lane.
+    // signal-aware legacy lane. Exact selections also require its filtering and
+    // proof-only/refresh policy; the changelog lane can only sync whole graphs.
     if (
       !options?.signal
       && options?.totalTimeoutMs === undefined
+      && options?.exactAssetFetchPolicy === undefined
+      && options?.exactAssetSelection === undefined
       && asChangelogReader(this.store) !== null
       && contextGraphIds.length > 0
     ) {
@@ -6170,7 +6177,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       stopOnBackoffWorthyFailure,
       onVerifiedFullSnapshot,
       fetchTimeoutMs = SYNC_TOTAL_TIMEOUT_MS,
-      exactAssetFetchPolicy,
       exactRecoveryTransportMode = 'stream-preferred',
       registeredPublicEvidence,
       authenticationTimeoutMs = fetchTimeoutMs,
@@ -6181,6 +6187,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       isCurrent,
       durableMetaContinuation,
     } = options;
+    const exactAssetFetchPolicy = normalizeExactAssetFetchPolicy(
+      options.exactAssetFetchPolicy, () => options.exactAssetSelection, options.forceFreshExactSession,
+    );
     const exactAssetSelection = exactAssetFetchPolicy?.selection;
     const assertLifecycleCurrent = () => {
       if (isCurrent?.() === false) {

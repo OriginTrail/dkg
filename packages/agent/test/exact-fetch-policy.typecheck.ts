@@ -62,3 +62,15 @@ const unsupportedLegacyRefresh: Pick<LegacyDurableSyncContext, 'exactAssetFetchP
   exactAssetFetchPolicyFor: () => refresh,
 };
 void unsupportedLegacyRefresh;
+
+declare const operation: Parameters<DKGAgent['runLegacyDurableSyncForContextGraph']>[0];
+void agent.runLegacyDurableSyncForContextGraph(operation, 'peer', 'cg', 1, {
+  exactAssetSelection: ordinary, forceFreshExactSession: true, exactRecoveryTransportMode: 'stream-required',
+});
+void agent.runLegacyDurableSyncForContextGraphDetailed(operation, 'peer', 'cg', 1, {
+  exactAssetSelection: challenge, forceFreshExactSession: false,
+});
+
+void agent.runExactAssetFetchForContextGraph('cg', ordinary.assetUals, {
+  isCurrent: () => true, forceFreshExactSession: true,
+});

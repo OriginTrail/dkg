@@ -994,16 +994,31 @@ describe('DKGAgent sync fetch coalescing', () => {
     }
   });
 
-  it.each([
-    ['detailed legacy true', true],
-    ['detailed legacy false', false],
-    ['detailed modern purpose wins', true],
-    ['durable legacy true', true],
-    ['durable legacy false', false],
-    ['durable explicit ordinary policy wins', false],
-    ['durable full graph is unaffected', false],
-    ['challenge keeps its distinct policy', true],
-  ] as const)('preserves public exact freshness compatibility on both phases: %s', async (mode, expectedFresh) => {
+  it.each<{ name: string; expectedFresh: boolean; invoke: (agent: DKGAgent) => Promise<unknown> }>([
+    { name: 'detailed legacy true', expectedFresh: true, invoke: agent => agent.syncExactKnowledgeAssetsFromPeerDetailed(
+      PEER_A, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, [EXACT_UAL_7], { forceFreshExactSession: true }) },
+    { name: 'detailed legacy false', expectedFresh: false, invoke: agent => agent.syncExactKnowledgeAssetsFromPeerDetailed(
+      PEER_A, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, [EXACT_UAL_7], { forceFreshExactSession: false }) },
+    { name: 'detailed modern purpose wins', expectedFresh: true, invoke: agent => agent.syncExactKnowledgeAssetsFromPeerDetailed(
+      PEER_A, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, [EXACT_UAL_7], { exactFetchPurpose: 'vm-update-refresh', forceFreshExactSession: false }) },
+    { name: 'durable legacy true', expectedFresh: true, invoke: agent => agent.runLegacyDurableSyncDetailed(
+      createOperationContext('sync'), PEER_A, [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY], undefined, undefined, undefined,
+      { exactAssetSelection: exactSelection(EXACT_UAL_7), forceFreshExactSession: true }) },
+    { name: 'durable legacy false', expectedFresh: false, invoke: agent => agent.runLegacyDurableSyncDetailed(
+      createOperationContext('sync'), PEER_A, [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY], undefined, undefined, undefined,
+      { exactAssetSelection: exactSelection(EXACT_UAL_7), forceFreshExactSession: false }) },
+    { name: 'durable explicit ordinary policy wins', expectedFresh: false, invoke: agent => agent.runLegacyDurableSyncDetailed(
+      createOperationContext('sync'), PEER_A, [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY], undefined, undefined, undefined,
+      { exactAssetSelection: exactSelection(EXACT_UAL_7), forceFreshExactSession: true,
+        exactAssetFetchPolicy: exactAssetFetchSessionPolicy(exactSelection(EXACT_UAL_7)) }) },
+    { name: 'durable full graph is unaffected', expectedFresh: false, invoke: agent => agent.runLegacyDurableSyncDetailed(
+      createOperationContext('sync'), PEER_A, [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY], undefined, undefined, undefined,
+      { forceFreshExactSession: true }) },
+    { name: 'challenge keeps its distinct policy', expectedFresh: true, invoke: agent => agent.syncExactKnowledgeAssetsFromPeerDetailed(
+      PEER_A, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, createChallengePinnedExactAssetSelection([{
+        assetUal: EXACT_UAL_7, merkleRootHex: '1'.repeat(64), merkleLeafCount: 1n,
+      }]), { forceFreshExactSession: true }) },
+  ])('preserves public exact freshness compatibility on both phases: $name', async ({ invoke, expectedFresh }) => {
     const fetchCalls: Array<{ phase: SyncPhase; forceFreshSession?: boolean }> = [];
     const agent = await createAgentWithSend(async () => new Uint8Array(0));
     stubLifecycleFetch(agent, async ({ phase, forceFreshSession }) => {
@@ -1016,29 +1031,8 @@ describe('DKGAgent sync fetch coalescing', () => {
       emptyResponses: 1, metaOnlyResponses: 0, verifiedPrivateOnlyResponses: 0,
       dataRejectedMissingMeta: 0,
     });
-    const selection = exactSelection(EXACT_UAL_7);
     try {
-      if (mode.startsWith('durable')) {
-        await agent.runLegacyDurableSyncDetailed(
-          createOperationContext('sync'), PEER_A, [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY],
-          undefined, undefined, undefined,
-          {
-            ...(mode === 'durable full graph is unaffected' ? {} : { exactAssetSelection: selection }),
-            ...(mode === 'durable explicit ordinary policy wins' ? { exactAssetFetchPolicy: exactAssetFetchSessionPolicy(selection) } : {}),
-            forceFreshExactSession: mode !== 'durable legacy false',
-          },
-        );
-      } else {
-        const selected = mode === 'challenge keeps its distinct policy'
-          ? createChallengePinnedExactAssetSelection([{
-            assetUal: EXACT_UAL_7, merkleRootHex: '1'.repeat(64), merkleLeafCount: 1n,
-          }])
-          : [EXACT_UAL_7];
-        await agent.syncExactKnowledgeAssetsFromPeerDetailed(PEER_A, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, selected, {
-          forceFreshExactSession: mode !== 'detailed legacy false' && mode !== 'detailed modern purpose wins',
-          ...(mode === 'detailed modern purpose wins' ? { exactFetchPurpose: 'vm-update-refresh' as const } : {}),
-        });
-      }
+      await invoke(agent);
       expect(fetchCalls).toEqual([
         { phase: 'meta', forceFreshSession: expectedFresh },
         { phase: 'data', forceFreshSession: expectedFresh },
@@ -1046,6 +1040,85 @@ describe('DKGAgent sync fetch coalescing', () => {
     } finally {
       await agent.stop().catch(() => {});
     }
+  });
+
+  it.each([
+    { name: 'result-only', invoke: (agent: DKGAgent, options: Parameters<DKGAgent['runLegacyDurableSyncForContextGraph']>[4]) =>
+      agent.runLegacyDurableSyncForContextGraph(createOperationContext('sync'), PEER_A, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, 1, options) },
+    { name: 'detailed', invoke: (agent: DKGAgent, options: Parameters<DKGAgent['runLegacyDurableSyncForContextGraphDetailed']>[4]) =>
+      agent.runLegacyDurableSyncForContextGraphDetailed(createOperationContext('sync'), PEER_A, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, 1, options) },
+  ])('preserves direct per-graph legacy selection and freshness: $name', async ({ invoke }) => {
+    const fetchCalls: Array<{ phase: SyncPhase; forceFreshSession?: boolean; assetUals?: string[] }> = [];
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    stubLifecycleFetch(agent, async ({ phase, forceFreshSession, assetUals }) => {
+      fetchCalls.push({ phase, forceFreshSession, assetUals });
+      return emptySyncPage(phase);
+    });
+    (agent as any).processDurableBatchInWorker = async () => ({
+      verifiedData: [], verifiedMeta: [], consumedUnpersistedMetaTriples: 0,
+      totalFetchedDataQuads: 0, totalFetchedMetaQuads: 0, rejectedKcs: 0,
+      emptyResponses: 1, metaOnlyResponses: 0, verifiedPrivateOnlyResponses: 0, dataRejectedMissingMeta: 0,
+    });
+    const selected = exactSelection(EXACT_UAL_7);
+    const explicitSelection = exactSelection(EXACT_UAL_8);
+    try {
+      for (const [options, expectedFresh, expectedUals] of [
+        [{ exactAssetSelection: selected, forceFreshExactSession: true }, true, selected.assetUals],
+        [{ exactAssetSelection: selected, forceFreshExactSession: false }, false, selected.assetUals],
+        [{ exactAssetSelection: selected, forceFreshExactSession: true,
+          exactAssetFetchPolicy: exactAssetFetchSessionPolicy(explicitSelection) }, false, explicitSelection.assetUals],
+      ] as const) {
+        fetchCalls.length = 0;
+        await invoke(agent, options);
+        expect(fetchCalls).toEqual([
+          { phase: 'meta', forceFreshSession: expectedFresh, assetUals: [...expectedUals] },
+          { phase: 'data', forceFreshSession: expectedFresh, assetUals: [...expectedUals] },
+        ]);
+      }
+    } finally { await agent.stop().catch(() => {}); }
+  });
+
+  it.each([
+    { name: 'legacy true', options: { forceFreshExactSession: true }, expectedFresh: true },
+    { name: 'legacy false', options: { forceFreshExactSession: false }, expectedFresh: false },
+    { name: 'modern purpose wins', options: { exactFetchPurpose: 'vm-update-refresh' as const, forceFreshExactSession: false }, expectedFresh: true },
+  ])('preserves the public exact-fetch helper freshness on physical pages: $name', async ({ options, expectedFresh }) => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const host = agent as any;
+    const ual = `did:dkg:${host.chain.chainId}/0x0000000000000000000000000000000000000001/7`;
+    let fetched = false;
+    const fetchCalls: Array<{ phase: SyncPhase; forceFreshSession?: boolean; assetUals?: string[] }> = [];
+    Object.assign(host.chain, {
+      getKAContextGraphId: async () => 1n,
+      readKnowledgeAssetVersionSnapshot: async () => ({ latestRoot: '0x' + '01'.repeat(32), rootCount: 1n,
+        latestAuthor: '0x0000000000000000000000000000000000000001',
+        latestPublisher: '0x0000000000000000000000000000000000000002', blockNumber: 100 }),
+    });
+    Object.assign(host, {
+      requireLocalCgMatchesOnChainSlot: async () => true,
+      ensurePeerConnected: async () => {}, waitForSyncProtocol: async () => true,
+      ensurePeerAdmittedForRecovery: async () => true,
+      node: { libp2p: { getConnections: () => [{ remotePeer: { toString: () => PEER_A } }] } },
+      getOrCreateFinalizationHandler: () => ({ handleExactChainReconciledKC: async () => fetched ? 'already-confirmed' : 'no-swm' }),
+      processDurableBatchInWorker: async () => ({ verifiedData: [], verifiedMeta: [], consumedUnpersistedMetaTriples: 0,
+        totalFetchedDataQuads: 0, totalFetchedMetaQuads: 0, rejectedKcs: 0,
+        emptyResponses: 1, metaOnlyResponses: 0, verifiedPrivateOnlyResponses: 0, dataRejectedMissingMeta: 0 }),
+    });
+    stubLifecycleFetch(agent, async ({ phase, forceFreshSession, assetUals }) => {
+      fetchCalls.push({ phase, forceFreshSession, assetUals });
+      if (phase === 'data') fetched = true;
+      return emptySyncPage(phase);
+    });
+    try {
+      const outcome = await agent.runExactAssetFetchForContextGraph(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, [ual], {
+        isCurrent: () => true, peerIds: [PEER_A], ...options,
+      });
+      expect(outcome.status).toBe('complete');
+      expect(fetchCalls).toEqual([
+        { phase: 'meta', forceFreshSession: expectedFresh, assetUals: [ual] },
+        { phase: 'data', forceFreshSession: expectedFresh, assetUals: [ual] },
+      ]);
+    } finally { await agent.stop().catch(() => {}); }
   });
 
   it('refuses an untyped modern refresh purpose with challenge pins before physical work', async () => {
