@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { DKGAgent } from '../src/index.js';
 import type { DurableSyncOptions } from '../src/dkg-agent-lifecycle.js';
+import type { LegacyDurableSyncContext } from '../src/sync/requester/durable-sync-compat.js';
 import type { DurableSyncContext } from '../src/sync/requester/durable-sync.js';
-import { createUalOnlyExactAssetSelection, createChallengePinnedExactAssetSelection } from '../src/sync/exact-assets.js';
+import { createUalOnlyExactAssetSelection, createChallengePinnedExactAssetSelection, type ExactAssetSelection } from '../src/sync/exact-assets.js';
 import { exactAssetFetchSessionPolicy, type ExactAssetFetchSessionPolicy } from '../src/sync/requester/exact-durable-fetch.js';
 
 const ordinary = createUalOnlyExactAssetSelection(['did:dkg:mock:31337/0x0000000000000000000000000000000000000001/7']);
@@ -44,3 +45,20 @@ declare const agent: DKGAgent;
 void agent.syncExactKnowledgeAssetsFromPeerDetailed('peer', 'cg', ordinary.assetUals, { forceFreshExactSession: true });
 void agent.syncExactKnowledgeAssetsFromPeerDetailed('peer', 'cg', ordinary, { forceFreshExactSession: false });
 void agent.syncExactKnowledgeAssetsFromPeerDetailed('peer', 'cg', ordinary, { exactFetchPurpose: 'vm-update-refresh', forceFreshExactSession: false });
+
+void agent.syncExactKnowledgeAssetsFromPeerDetailed('peer', 'cg', ordinary.assetUals, { exactFetchPurpose: 'vm-update-refresh' });
+void agent.syncExactKnowledgeAssetsFromPeerDetailed('peer', 'cg', challenge, { forceFreshExactSession: true });
+// @ts-expect-error modern refresh purpose requires UAL-only selection, never challenge pins
+void agent.syncExactKnowledgeAssetsFromPeerDetailed('peer', 'cg', challenge, { exactFetchPurpose: 'vm-update-refresh' });
+declare const generalSelection: ExactAssetSelection;
+// @ts-expect-error a general selection must narrow to UAL-only before modern refresh
+void agent.syncExactKnowledgeAssetsFromPeerDetailed('peer', 'cg', generalSelection, { exactFetchPurpose: 'vm-update-refresh' });
+const ordinaryLegacy: Pick<LegacyDurableSyncContext, 'exactAssetFetchPolicyFor'> = {
+  exactAssetFetchPolicyFor: () => exactAssetFetchSessionPolicy(ordinary),
+};
+void ordinaryLegacy;
+const unsupportedLegacyRefresh: Pick<LegacyDurableSyncContext, 'exactAssetFetchPolicyFor'> = {
+  // @ts-expect-error positional callbacks cannot enforce VM-refresh freshness
+  exactAssetFetchPolicyFor: () => refresh,
+};
+void unsupportedLegacyRefresh;

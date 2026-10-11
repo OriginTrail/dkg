@@ -24,6 +24,8 @@ import {
 } from '../src/sync/exact-assets.js';
 import { exactAssetFetchSessionPolicy } from '../src/sync/requester/exact-durable-fetch.js';
 import { normalizeDurableSyncContext, normalizeExactAssetFetchPolicy } from '../src/sync/requester/durable-sync-compat.js';
+import { createResponderPageOnlyExactGraphPlanMemo } from '../src/sync/responder/graph-plan.js';
+import { createSyncResponderSnapshotBudget } from '../src/sync/responder/snapshot-budget.js';
 import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
 import { SyncTargetSupersededError } from '../src/sync/error-tags.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
@@ -592,6 +594,64 @@ describe('exact-asset rolling-upgrade filter', () => {
     const pinned = createChallengePinnedExactAssetSelection([{ assetUal: 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7', merkleRootHex: '1'.repeat(64), merkleLeafCount: 1n }]);
     expect(() => Reflect.apply(exactAssetFetchSessionPolicy, undefined, [pinned, 'vm-update-refresh']))
       .toThrow('VM update refresh requires a UAL-only exact selection');
+  });
+
+  it('refreshes actual retained META/DATA responder plans through the modern callback', async () => {
+    const memo = createResponderPageOnlyExactGraphPlanMemo(10_000, 4, createSyncResponderSnapshotBudget({
+      maxRows: 16, maxBytesEstimate: 2 * 1024 * 1024, maxSnapshotRows: 16, maxSnapshotBytesEstimate: 1024 * 1024,
+    }));
+    const plan = (graph: string) => ({ entries: [{ graph, rowCount: 1 }], totalRows: 1,
+      pagedGraphs: new Set([graph]), cursors: new Map([[0, null]]) });
+    for (const phase of ['meta', 'data']) await memo.get(phase, async () => plan(`urn:older:${phase}`));
+    const observed: string[] = [];
+    const selection = createUalOnlyExactAssetSelection(['did:dkg:base:84532/0x0000000000000000000000000000000000000001/7']);
+    const { context } = makeContext({ contextGraphIds: [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY], pageQuads: { data: [], meta: [] } });
+    const fetch = context.fetchSyncPages;
+    context.fetchSyncPages = async (request) => {
+      const cached = await memo.get(request.phase, async () => plan(`urn:updated:${request.phase}`), { refresh: request.forceFreshSession === true });
+      observed.push(cached!.entries[0]!.graph);
+      return fetch(request);
+    };
+    await runDurableSync({ ...context, exactAssetFetchPolicyFor: () => exactAssetFetchSessionPolicy(selection) });
+    expect(observed).toEqual(['urn:older:meta', 'urn:older:data']);
+    observed.length = 0;
+    await runDurableSync({ ...context, exactAssetFetchPolicyFor: () => exactAssetFetchSessionPolicy(selection, 'vm-update-refresh') });
+    expect(observed).toEqual(['urn:updated:meta', 'urn:updated:data']);
+  });
+
+  it.each(['explicit-policy', 'deprecated-option'] as const)('refuses %s refresh on positional callbacks before reading cached older META/DATA', async (source) => {
+    const memo = createResponderPageOnlyExactGraphPlanMemo(10_000, 4, createSyncResponderSnapshotBudget({
+      maxRows: 16, maxBytesEstimate: 2 * 1024 * 1024, maxSnapshotRows: 16, maxSnapshotBytesEstimate: 1024 * 1024,
+    }));
+    const plan = (graph: string) => ({ entries: [{ graph, rowCount: 1 }], totalRows: 1,
+      pagedGraphs: new Set([graph]), cursors: new Map([[0, null]]) });
+    for (const phase of ['meta', 'data']) await memo.get(phase, async () => plan(`urn:older:${phase}`));
+    const selection = createUalOnlyExactAssetSelection(['did:dkg:base:84532/0x0000000000000000000000000000000000000001/7']);
+    const { context, insertedBatches } = makeContext({ contextGraphIds: [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY], pageQuads: { data: [], meta: [] } });
+    const { durableSyncBudget: _budget, fetchSyncPages: fetch, storeInsert, ...shared } = context;
+    const warnings: string[] = [];
+    const legacyFetch = vi.fn(async (...args: unknown[]) => {
+      const phase = args[4] as 'meta' | 'data';
+      await memo.get(phase, async () => plan(`urn:updated:${phase}`));
+      return fetch({ ctx: context.ctx, remotePeerId: context.remotePeerId, contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+        phase, graphUri: args[5] as string, fetchContext: { deadline: args[6] as number } });
+    });
+    const legacy = { ...shared, createContextGraphSyncDeadline: () => Date.now() + 10_000,
+      fetchSyncPages: legacyFetch, storeInsert: (quads: Quad[]) => storeInsert({ quads }),
+      exactAssetFetchPolicyFor: () => source === 'explicit-policy'
+        ? exactAssetFetchSessionPolicy(selection, 'vm-update-refresh')
+        : normalizeExactAssetFetchPolicy(undefined, () => selection, true)!,
+      logWarn: (_ctx: unknown, message: string) => warnings.push(message),
+    };
+    const result = await Reflect.apply(runDurableSync, undefined, [legacy]);
+    expect(result.failedPhases).toBe(1);
+    expect(warnings).toContainEqual(expect.stringContaining('VM update refresh requires a modern fetchSyncPages request callback'));
+    expect(legacyFetch).not.toHaveBeenCalled();
+    expect(insertedBatches).toEqual([]);
+    for (const phase of ['meta', 'data']) {
+      const cached = await memo.get(phase, async () => plan(`urn:unexpected:${phase}`));
+      expect(cached!.entries[0]!.graph).toBe(`urn:older:${phase}`);
+    }
   });
 
   it.each(['legacy-selection', 'bound-policy'] as const)('normalizes %s lazily before both ordinary page fetches', async (source) => {

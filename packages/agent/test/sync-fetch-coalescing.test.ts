@@ -1048,6 +1048,26 @@ describe('DKGAgent sync fetch coalescing', () => {
     }
   });
 
+  it('refuses an untyped modern refresh purpose with challenge pins before physical work', async () => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const fetch = vi.fn(async ({ phase }: { phase: SyncPhase }) => emptySyncPage(phase));
+    stubLifecycleFetch(agent, fetch);
+    const onWorkStarted = vi.fn();
+    const selection = createChallengePinnedExactAssetSelection([{
+      assetUal: EXACT_UAL_7, merkleRootHex: '1'.repeat(64), merkleLeafCount: 1n,
+    }]);
+    try {
+      await expect(Reflect.apply(agent.syncExactKnowledgeAssetsFromPeerDetailed, agent, [
+        PEER_A, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, selection,
+        { exactFetchPurpose: 'vm-update-refresh', forceFreshExactSession: true, onWorkStarted },
+      ])).rejects.toThrow('VM update refresh requires a UAL-only exact selection');
+      expect(fetch).not.toHaveBeenCalled();
+      expect(onWorkStarted).not.toHaveBeenCalled();
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('never coalesces challenge-pinned fetches whose commitments differ', async () => {
     const firstMetaFetch = deferred<SyncPageResult>();
     const requesterScopes: Array<SyncCheckpointScope | undefined> = [];

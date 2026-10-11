@@ -324,6 +324,7 @@ import {
   requireExactAssetSelection,
   type ExactAssetCommitment,
   type ExactAssetSelection,
+  type UalOnlyExactAssetSelection,
 } from './sync/exact-assets.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
 import { EXACT_SYNC_GZIP_ENCODING, resolveExactSyncGzipProfile } from './sync/wire-compression.js';
@@ -1643,6 +1644,14 @@ export interface ContextGraphCatchupOptions {
    */
   sourceOverride?: SyncAdmissionSource;
 }
+
+type ExactKnowledgeAssetSyncOptions = Pick<DurableSyncOptions,
+  'onWorkStarted' | 'signal' | 'isCurrent' | 'forceFreshExactSession'
+  | 'exactRecoveryTransportMode' | 'registeredPublicEvidence' | 'totalTimeoutMs'
+>;
+type ExactKnowledgeAssetRefreshSyncOptions = ExactKnowledgeAssetSyncOptions & {
+  exactFetchPurpose?: 'vm-update-refresh';
+};
 
 export type DurableSyncOptions = {
   stopOnBackoffWorthyFailure?: boolean;
@@ -6052,49 +6061,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeerId: string,
     contextGraphId: string,
     assetUals: readonly string[],
-    options?: {
-      onWorkStarted?: () => void;
-      signal?: AbortSignal;
-      isCurrent?: () => boolean;
-      exactFetchPurpose?: 'vm-update-refresh';
-      /** @deprecated Use exactFetchPurpose: 'vm-update-refresh' for VM refreshes. */
-      forceFreshExactSession?: boolean;
-      exactRecoveryTransportMode?: ExactRecoveryTransportMode;
-      registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
-      totalTimeoutMs?: number;
-    },
+    options?: ExactKnowledgeAssetRefreshSyncOptions,
+  ): Promise<ExactKnowledgeAssetSyncResult>;
+  syncExactKnowledgeAssetsFromPeerDetailed(this: DKGAgent,
+    remotePeerId: string,
+    contextGraphId: string,
+    selection: UalOnlyExactAssetSelection,
+    options?: ExactKnowledgeAssetRefreshSyncOptions,
   ): Promise<ExactKnowledgeAssetSyncResult>;
   syncExactKnowledgeAssetsFromPeerDetailed(this: DKGAgent,
     remotePeerId: string,
     contextGraphId: string,
     selection: ExactAssetSelection,
-    options?: {
-      onWorkStarted?: () => void;
-      signal?: AbortSignal;
-      isCurrent?: () => boolean;
-      exactFetchPurpose?: 'vm-update-refresh';
-      /** @deprecated Use exactFetchPurpose: 'vm-update-refresh' for VM refreshes. */
-      forceFreshExactSession?: boolean;
-      exactRecoveryTransportMode?: ExactRecoveryTransportMode;
-      registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
-      totalTimeoutMs?: number;
-    },
+    options?: ExactKnowledgeAssetSyncOptions & { exactFetchPurpose?: never },
   ): Promise<ExactKnowledgeAssetSyncResult>;
   async syncExactKnowledgeAssetsFromPeerDetailed(this: DKGAgent,
     remotePeerId: string,
     contextGraphId: string,
     selectionInput: ExactAssetSelection | readonly string[],
-    options: {
-      onWorkStarted?: () => void;
-      signal?: AbortSignal;
-      isCurrent?: () => boolean;
-      exactFetchPurpose?: 'vm-update-refresh';
-      /** @deprecated Use exactFetchPurpose: 'vm-update-refresh' for VM refreshes. */
-      forceFreshExactSession?: boolean;
-      exactRecoveryTransportMode?: ExactRecoveryTransportMode;
-      registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
-      totalTimeoutMs?: number;
-    } = {},
+    options: ExactKnowledgeAssetRefreshSyncOptions = {},
   ): Promise<ExactKnowledgeAssetSyncResult> {
     const selection: ExactAssetSelection = Array.isArray(selectionInput)
       ? createUalOnlyExactAssetSelection(selectionInput)

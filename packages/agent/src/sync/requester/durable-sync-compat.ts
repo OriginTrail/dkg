@@ -41,13 +41,17 @@ export function normalizeExactAssetFetchPolicy(
  */
 export interface LegacyDurableSyncContext extends Omit<
   DurableSyncContext,
-  'durableSyncBudget' | 'fetchSyncPages' | 'storeInsert' | 'storeGraphScopedAsset'
+  'durableSyncBudget' | 'fetchSyncPages' | 'storeInsert' | 'storeGraphScopedAsset' | 'exactAssetFetchPolicyFor'
 > {
   /**
    * @deprecated Deep-import compatibility for callers from before durable sync
    * split fetch and authentication into separate bounded phases.
    */
   createContextGraphSyncDeadline: (remainingContextGraphs: number) => number;
+  /** Positional callbacks cannot enforce VM-refresh session freshness. */
+  exactAssetFetchPolicyFor?: (contextGraphId: string) => Extract<
+    ExactAssetFetchSessionPolicy, { kind: 'durable-materialization' }
+  > | undefined;
   fetchSyncPages: (
     ctx: OperationContext,
     remotePeerId: string,
@@ -85,15 +89,22 @@ export function normalizeDurableSyncContext(
   context: DurableSyncContext | LegacyDurableSyncContext,
 ): NormalizedDurableSyncContext {
   const { exactAssetSelectionFor, exactAssetFetchPolicyFor, ...withoutLegacySelection } = context;
+  const usesLegacyFetch = !('durableSyncBudget' in withoutLegacySelection);
   // Preserve lazy per-CG reads and policy-before-legacy precedence while the
   // internal executor sees only one selection-bound representation.
   const policyContext = {
     ...withoutLegacySelection,
     exactAssetFetchPolicyFor: exactAssetFetchPolicyFor || exactAssetSelectionFor
-      ? (contextGraphId: string) => normalizeExactAssetFetchPolicy(
-        exactAssetFetchPolicyFor?.(contextGraphId),
-        () => exactAssetSelectionFor?.(contextGraphId),
-      )
+      ? (contextGraphId: string) => {
+        const policy = normalizeExactAssetFetchPolicy(
+          exactAssetFetchPolicyFor?.(contextGraphId),
+          () => exactAssetSelectionFor?.(contextGraphId),
+        );
+        if (usesLegacyFetch && policy?.kind === 'vm-update-refresh') {
+          throw new TypeError('VM update refresh requires a modern fetchSyncPages request callback');
+        }
+        return policy;
+      }
       : undefined,
   };
   if ('durableSyncBudget' in policyContext) return policyContext;
