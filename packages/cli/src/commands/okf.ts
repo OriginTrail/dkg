@@ -666,6 +666,7 @@ export function registerOkfCommand(program: Command): void {
     .command('verify <bundleDir>')
     .description('Compare a bulk-imported Context Graph against the bundle it was built from (completeness gate)')
     .requiredOption('--context-graph-id <id>', 'Context Graph to verify')
+    .option('--sub-graph-name <name>', 'Sub-graph within the Context Graph')
     .option('--iri-base <base>', `IRI namespace concept subjects were minted under (default ${DEFAULT_IRI_BASE})`)
     .option('--include-code-span-links', 'Match the import: treat code-span links as edges')
     .option(
@@ -707,6 +708,9 @@ export function registerOkfCommand(program: Command): void {
         const expectedConcepts = imported.concepts.length;
 
         const client = await ApiClient.connect();
+        const queryOptions = opts.subGraphName
+          ? { view: 'shared-working-memory' as const, subGraphName: String(opts.subGraphName) }
+          : { includeSharedMemory: true };
         const countFor = async (predicate: string): Promise<number> => {
           // Scope the count to subjects under this bundle's IRI base. A graph-wide
           // count would let unrelated pre-existing triples mask a real shortfall
@@ -714,9 +718,7 @@ export function registerOkfCommand(program: Command): void {
           const sparql =
             `SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s <${predicate}> ?o ` +
             `FILTER(STRSTARTS(STR(?s), "${iriBase}")) } }`;
-          const { result } = await client.query(sparql, contextGraphId, {
-            includeSharedMemory: true,
-          });
+          const { result } = await client.query(sparql, contextGraphId, queryOptions);
           const bindings = bindingsOf(result);
           const raw = cell(bindings[0]?.c) || '0';
           const m = /^"?(\d+)"?/.exec(raw);
@@ -743,7 +745,7 @@ export function registerOkfCommand(program: Command): void {
         let missingConcepts: string[] | undefined;
         if (opts.listMissing) {
           const sparql = `SELECT DISTINCT ?s WHERE { GRAPH ?g { ?s <${RDF_TYPE}> ?o } }`;
-          const { result } = await client.query(sparql, contextGraphId, { includeSharedMemory: true });
+          const { result } = await client.query(sparql, contextGraphId, queryOptions);
           const bindings = bindingsOf(result);
           const unwrap = (t: string): string => (t.startsWith('<') && t.endsWith('>') ? t.slice(1, -1) : t);
           const present = new Set(bindings.map((b) => unwrap(cell(b.s))));
@@ -760,6 +762,7 @@ export function registerOkfCommand(program: Command): void {
             {
               mode: 'verify',
               contextGraphId,
+              ...(opts.subGraphName ? { subGraphName: String(opts.subGraphName) } : {}),
               expectedConcepts,
               complete,
               predicates: rows,
