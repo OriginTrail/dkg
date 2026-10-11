@@ -48,6 +48,7 @@ import {
   runPromoteCommittedFinalization,
   workspaceHeadIncludesShareOperationId,
 } from '@origintrail-official/dkg-publisher';
+import { selectRfc64ConfirmedCatalogObligationV1 } from './rfc64/catalog-rollout-authority-v1.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
@@ -797,15 +798,12 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   ): Promise<void> {
     const subGraphName = params.subGraphName ?? null;
     const contextGraphId = params.contextGraphId;
-    const plan = this.config.rfc64CatalogExecutionPlan;
-    // Deliberately disabled/legacy authoring and unsupported subgraphs owe no catalog work.
-    if (subGraphName !== null || plan.killSwitchActive
-      || (plan.contextGraphModes[contextGraphId] ?? plan.responsibilityDefaultMode) === 'legacy') return;
-    const authoring = this.config.rfc64CatalogAuthoringPolicy;
-    if (authoring?.publicDefault === undefined && authoring?.byContextGraph[contextGraphId] === undefined
-      && plan.selectedAuthority[contextGraphId]?.selected !== true
-      && !this.readRfc64CatalogResponsibilitiesV1().some((entry) => entry.contextGraphId === contextGraphId && entry.active)
-      && !this.resolveRfc64CatalogServingAuthorityV1(contextGraphId).authoringAllowed) return;
+    if (selectRfc64ConfirmedCatalogObligationV1({
+      plan: this.config.rfc64CatalogExecutionPlan, contextGraphId, subGraphName,
+      authoring: this.config.rfc64CatalogAuthoringPolicy,
+      readResponsibilities: () => this.readRfc64CatalogResponsibilitiesV1(),
+      readServingAuthority: () => this.resolveRfc64CatalogServingAuthorityV1(contextGraphId),
+    }) === 'excluded') return;
     assertContextGraphIdV1(contextGraphId, 'confirmed publish contextGraphId');
     assertAssertionCoordinateV1(params.assertionCoordinate, 'confirmed publish assertionCoordinate');
     const confirmedSeal = canonicalGraphScopedAuthorSealFromAssertionSealV1(params.seal);
@@ -837,7 +835,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     }
     placementWait.requested();
     try {
-      const request = this.requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1({ repair, seal: confirmedSeal, ctx: params.ctx }, placementWait.observer);
+      const request = this.requestRfc64FinalizedPrivateCatalogPlacementRepairV1({ repair, ctx: params.ctx }, placementWait.observer);
       if (!request.accepted) this.log.warn(params.ctx, `Confirmed ${params.publicationLabel} for <${params.assertionUri}>: the RFC-64 catalog supervisor did not accept its placement now; the durable marker stays for its next pass or start`);
     } catch (cause) {
       placementWait.observer.released();

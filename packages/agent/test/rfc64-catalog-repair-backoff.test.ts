@@ -1,3 +1,4 @@
+import { pinnedPrivatePlacementDecisionV1 } from './support/finalized-placement-decision-fixture.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createOperationContext,
@@ -39,7 +40,8 @@ function fixture(retryIntervalMs = 5_000) {
     resolvePartition: () => ({ retryIntervalMs, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),
     listLocalAuthorAddresses: () => [AUTHOR],
     acceptsPublicRootLane: () => available,
-    acceptsFinalizedPrivateLane: () => available,
+    hasFinalizedPrivateLane: () => available,
+    resolveFinalizedPlacementDecision: (repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>) => pinnedPrivatePlacementDecisionV1(repair, available),
     readRepairRevision: readRevision,
     listFinalizedPrivateRepairs: listPrivateRepairs,
     repairFinalizedPrivatePlacement: repairPrivate,

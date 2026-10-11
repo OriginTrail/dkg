@@ -40,6 +40,7 @@ import { afterEach, expect } from 'vitest';
 
 import { DKGAgent } from '../../src/index.js';
 import type {
+  Rfc64CatalogActivationInputV1,
   Rfc64PublicCatalogActivationInputV1,
 } from '../../src/rfc64/public-catalog-activation-config-v1.js';
 import {
@@ -96,6 +97,7 @@ afterEach(async () => {
 
 interface StartRepairAgentOptionsV1 {
   readonly name: string;
+  readonly nodeRole?: 'core' | 'edge';
   readonly dataDir?: string;
   readonly storePath?: string;
   /** Replaces the in-memory store, for example with {@link scheduledRepairStoreV1}. */
@@ -104,6 +106,8 @@ interface StartRepairAgentOptionsV1 {
   readonly autoPublish?: Rfc64PublicCatalogAutoPublishConfigV1;
   readonly bootstrap?: Rfc64PublicCatalogBootstrapConfigV1;
   readonly activation?: Rfc64PublicCatalogActivationInputV1;
+  readonly rollout?: Rfc64CatalogActivationInputV1['rollout'];
+  readonly catalogActivation?: Rfc64CatalogActivationInputV1;
   readonly beforeStart?: (agent: DKGAgent) => void | Promise<void>;
 }
 
@@ -119,7 +123,7 @@ export async function startRepairAgentV1(
     listenHost: '127.0.0.1',
     listenPort: 0,
     bootstrapPeers: [],
-    nodeRole: 'edge',
+    nodeRole: options.nodeRole ?? 'edge',
     store: options.store ?? new OxigraphStore(options.storePath),
     syncSharedMemoryOnConnect: false,
     syncReconcilerEnabled: false,
@@ -127,13 +131,14 @@ export async function startRepairAgentV1(
     syncOnConnectEnabled: false,
     durableSyncEnabled: false,
     agentProfileHeartbeatMs: 0,
+    rfc64CatalogActivation: options.catalogActivation ?? (options.rollout === undefined ? undefined : { rollout: options.rollout }),
     syncContextGraphs: options.syncContextGraphs === undefined
       ? (options.activation !== undefined && options.activation.enabled !== false
         ? options.activation.bootstrap?.acceptedPublicPolicies.map(
           ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
         ) ?? []
         : []) : [...options.syncContextGraphs],
-    ...(options.activation === undefined ? {} : {
+    ...(options.activation === undefined && options.catalogActivation?.deploymentProfile === undefined ? {} : {
       networkIdentity: {
         networkId: await computeNetworkId(),
         chainId: NATIVE_DEPLOYMENT.networkId,
@@ -316,6 +321,7 @@ export async function seedDurableWorkspaceAssetV1(
   agent: DKGAgent,
   suffix: string,
   reservedKaId: bigint,
+  accessPolicy: 'public' | 'ownerOnly' = 'public',
 ): Promise<Readonly<{
   seal: AssertionSeal;
   scopeDigest: Digest32V1;
@@ -360,7 +366,7 @@ export async function seedDurableWorkspaceAssetV1(
     quads: PROJECTION_QUADS,
     privateTripleCount: 0,
     publisherPeerId: agent.peerId,
-    accessPolicy: 'public',
+    accessPolicy,
     agentAddress: AUTHOR,
     timestamp: new Date('2026-07-19T12:35:00.000Z'),
   });

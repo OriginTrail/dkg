@@ -1084,10 +1084,8 @@ export class DKGAgent extends DKGAgentBase {
           const lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null);
           return lane !== null;
         },
-        acceptsFinalizedPrivateLane: (contextGraphId, repair) => {
-          const lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null);
-          return lane !== null && (lane.acceptsFinalizedVmRepair || (repair?.version === 2 && lane.kind === 'public'));
-        },
+        hasFinalizedPrivateLane: (contextGraphId) => this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null)?.acceptsFinalizedVmRepair === true,
+        resolveFinalizedPlacementDecision: (repair) => this.resolveRfc64FinalizedPlacementDecisionV1(repair),
         readRepairRevision: (contextGraphId, authorAddress) => {
           const lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null);
           if (lane === null) return null;
@@ -1107,7 +1105,6 @@ export class DKGAgent extends DKGAgentBase {
         },
         reconcile: (params) => this.reconcileRfc64PublicCatalogFromSwmInventoryV1(params),
         readAppliedCatalogHead: (scope, author) => this.rfc64PersistenceV1?.inventory.readAppliedCatalogHeadV1(scope, author),
-        resolvePlacementCatalogScope: (repair) => this.resolveRfc64FinalizedPlacementScopeV1(repair).capacityScope,
         warn: (ctx, message) => this.log.warn(ctx, message),
         placementTiming: () => catalogPlacementTimingV1(this),
       }),

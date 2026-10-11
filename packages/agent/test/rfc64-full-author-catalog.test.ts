@@ -1,3 +1,4 @@
+import type { Rfc64PublicCatalogServiceV1 } from '../src/rfc64/public-catalog-service-v1.js';
 /**
  * GH#3134 — a full author catalog on a real agent: the real observer, supervisor, placement
  * repair, upsert, successor producer, signer and stores.
@@ -22,6 +23,14 @@ vi.mock('@origintrail-official/dkg-core', async (importOriginal) => {
 
 import {
   MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
+  computeAuthorCatalogScopeDigestV1,
+  computeContextGraphPolicyObjectDigestV1,
+  CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
+  MEMBER_ROSTER_OBJECT_TYPE_V1,
+  CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
+  type ContextGraphPolicyV1,
+  type MemberRosterV1,
+  type Digest32V1,
   contextGraphAssertionUri,
   createOperationContext,
   type AssertionSeal,
@@ -46,6 +55,7 @@ import {
   bootstrapConfigV1,
   catalogScopeDigestV1,
   seedInventoryAssetV1,
+  seedDurableWorkspaceAssetV1,
   startRepairAgentV1,
   tempDirs,
 } from './support/rfc64-local-catalog-repair-fixture.js';
@@ -83,11 +93,14 @@ type Marker = Rfc64FinalizedPrivatePlacementRepairV1;
  * the agent is instrumented before that, so a restarted author's first supervisor pass is the one
  * a restarted node runs, and it is observed.
  */
-async function startAuthor(name: string, persisted?: Readonly<{ dataDir: string; storePath: string }>) {
+async function startAuthor(name: string, persisted?: Readonly<{ dataDir: string; storePath: string }>, legacyDefault = false) {
   let instrumented!: ReturnType<typeof instrument>;
   const agent = await startRepairAgentV1({
     name,
     ...persisted,
+    ...(legacyDefault ? { nodeRole: 'core' as const, rollout: { defaultMode: 'legacy' as const }, activation: {
+      deploymentProfile: NATIVE_DEPLOYMENT, bootstrap: bootstrapConfigV1(undefined, false), autoPublish: AUTO_PUBLISH,
+    } } : {}),
     autoPublish: AUTO_PUBLISH,
     bootstrap: bootstrapConfigV1(undefined, false),
     beforeStart: (starting) => { instrumented = instrument(starting); },
@@ -117,12 +130,14 @@ function instrument(agent: DKGAgent) {
     signatures: 0,
     announcements: 0,
     catalogReads: 0,
+    placementErrors: [] as unknown[],
   };
   const realPlacement = internals.publishRfc64FinalizedPrivateCatalogPlacementV1!.bind(agent);
   vi.spyOn(internals, 'publishRfc64FinalizedPrivateCatalogPlacementV1').mockImplementation(
-    (params: { kaUal: string }, placement: unknown) => {
+    async (params: { kaUal: string }, placement: unknown) => {
       seen.placementAttempts.push(params.kaUal);
-      return realPlacement(params, placement);
+      try { return await realPlacement(params, placement); }
+      catch (error) { seen.placementErrors.push(error); throw error; }
     },
   );
   const realSuccessor = agent.publishAuthorCatalogExactSetSuccessorV1.bind(agent);
@@ -423,6 +438,106 @@ describe('a full author catalog', () => {
     expect(author.capacity()).toEqual({ parkedPlacements: 1, scopesAtCap: 1 });
     for (let pass = 0; pass < 3; pass++) await author.pass();
     expect(author.seen.placementAttempts).toHaveLength(CAP + 3);
+  }, 90_000);
+
+  it('records and retires a selected catalog confirmation under the legacy global default', async () => {
+    const author = await startAuthor('selected-catalog-legacy-default', undefined, true);
+    const internals = author.agent as unknown as Record<string, (...args: any[]) => any>;
+    const lane = internals.resolveRfc64CatalogAuthoringLaneV1!(CONTEXT_GRAPH_ID, null);
+    expect(lane).not.toBeNull();
+    vi.mocked(internals.resolveRfc64CatalogAuthoringLaneV1!).mockReturnValue({
+      ...lane, acceptsFinalizedVmRepair: false, projectionTargetPolicy: 'exact-replacement',
+    });
+    const seeded = await seedInventoryAssetV1(author.agent, 'selected-confirmation', 151n);
+    const persistence = (author.agent as unknown as {
+      rfc64PersistenceV1: { finalizedPrivatePlacementRepairs: {
+        list(): readonly Marker[]; put(repair: Marker): Promise<void>; delete(repair: Marker): Promise<void>;
+      } };
+    }).rfc64PersistenceV1;
+    const original = persistence.finalizedPrivatePlacementRepairs;
+    const recorded: Marker[] = [];
+    persistence.finalizedPrivatePlacementRepairs = {
+      ...original,
+      put: async (repair) => { recorded.push(repair); await original.put(repair); },
+    };
+    const remove = vi.spyOn(author.agent, 'removeRfc64SwmAuthorInventoryConfirmedRowV1');
+    await author.confirm('selected-confirmation', seeded.seal);
+    expect(recorded).toEqual([expect.objectContaining({ version: 2, seal: expect.objectContaining({ kaUal: seeded.seal.kaUal }) })]);
+    expect(remove).toHaveBeenCalledOnce();
+    expect(remove.mock.calls[0]?.[0].expectedRow.kaUal).toBe(seeded.seal.kaUal);
+    expect(author.markers()).toEqual([]);
+    expect(author.agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: seeded.scopeDigest, authorAddress: AUTHOR,
+    })?.rows).toEqual([]);
+  }, 60_000);
+
+  it('moves a full parked V2 obligation into the current private scope and leaves the former catalog unchanged', async () => {
+    const policy: ContextGraphPolicyV1 = {
+      networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: '20430', governanceContractAddress: '0x1111111111111111111111111111111111111111',
+      ownershipTransitionDigest: null, era: '0', version: '0', previousPolicyDigest: null,
+      accessPolicy: 1, publishPolicy: 1, publishAuthority: null, publishAuthorityAccountId: '0',
+      projectionId: CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1, administrativeDelegationDigest: null,
+      source: { kind: 'finalized-chain', chainId: '20430', contractAddress: '0x1111111111111111111111111111111111111111', blockNumber: '120', blockHash: `0x${'76'.repeat(32)}` },
+      effectiveAt: '0', issuedAt: '0',
+    };
+    const envelope = (payload: ContextGraphPolicyV1) => ({
+      issuer: AUTHOR, objectType: CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1, payload,
+      signatureEvidence: { kind: 'none' as const }, signatureSuite: 'eip191-personal-sign-digest-v1' as const,
+    });
+    const digestA = computeContextGraphPolicyObjectDigestV1(envelope(policy));
+    const roster = (accepted: ContextGraphPolicyV1, digest: Digest32V1): MemberRosterV1 => ({
+      networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID, ownershipTransitionDigest: accepted.ownershipTransitionDigest,
+      era: accepted.era, version: '0', previousRosterDigest: null, policyDigest: digest,
+      administrativeDelegationDigest: null, members: [{ agentAddress: AUTHOR, roles: ['holder', 'provider'] }], issuedAt: '0',
+    });
+    let author!: ReturnType<typeof instrument>;
+    const agent = await startRepairAgentV1({
+      name: 'actual-private-scope-transition', nodeRole: 'core',
+      catalogActivation: {
+        deploymentProfile: NATIVE_DEPLOYMENT,
+        accessPolicyAuthority: { localAgentAddress: AUTHOR, peerAgentBindings: [{ peerId: '12D3KooWRepairProvider', agentAddress: AUTHOR }] },
+        autoPublish: { catalogIssuerDelegationExpiresAt: AUTO_PUBLISH.catalogIssuerDelegationExpiresAt },
+        bootstrap: { acceptedPolicies: [{ policyEnvelope: envelope(policy), rosterEnvelope: {
+          issuer: AUTHOR, objectType: MEMBER_ROSTER_OBJECT_TYPE_V1, payload: roster(policy, digestA),
+          signatureEvidence: { kind: 'none' }, signatureSuite: 'eip191-personal-sign-digest-v1',
+        }, targets: [], completeSwmProviders: ['12D3KooWRepairProvider'] }] },
+      },
+      beforeStart: (starting) => { author = instrument(starting); },
+    });
+    await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    for (let index = 0; index < CAP; index++) {
+      const seeded = await seedDurableWorkspaceAssetV1(agent, `private-held-${index}`, BigInt(160 + index), 'ownerOnly');
+      await author.confirm(`private-held-${index}`, seeded.seal);
+    }
+    const scopeA = { ...SCOPE, governanceChainId: policy.governanceChainId, governanceContractAddress: policy.governanceContractAddress };
+    const digestScopeA = computeAuthorCatalogScopeDigestV1(scopeA);
+    const headA = agent.readRfc64AppliedCatalogHeadV1({ catalogScopeDigest: digestScopeA, authorAddress: AUTHOR });
+    expect(headA).toMatchObject({ inventoryRowCount: String(CAP) });
+    const pending = await seedDurableWorkspaceAssetV1(agent, 'private-moving', 170n, 'ownerOnly');
+    await author.confirm('private-moving', pending.seal);
+    expect(author.markers()).toHaveLength(1);
+    const owed = author.markers()[0]!;
+    expect(owed).toMatchObject({ version: 2, inventoryScope: null });
+    expect(author.capacity()).toMatchObject({ parkedPlacements: 1, scopesAtCap: 1 });
+    const internals = agent as unknown as { rfc64PublicCatalogServiceV1: Rfc64PublicCatalogServiceV1 };
+    const policyB: ContextGraphPolicyV1 = {
+      ...policy, ownershipTransitionDigest: `0x${'78'.repeat(32)}`, version: '1', previousPolicyDigest: digestA,
+    };
+    const digestB = computeContextGraphPolicyObjectDigestV1(envelope(policyB));
+    internals.rfc64PublicCatalogServiceV1.acceptPolicySnapshot({ policy: policyB, policyDigest: digestB, roster: roster(policyB, digestB) });
+    await author.pass();
+    expect(author.seen.placementErrors.filter((error) => !(error instanceof AuthorCatalogFullErrorV1))).toEqual([]);
+    const scopeB = { ...scopeA, ownershipTransitionDigest: policyB.ownershipTransitionDigest };
+    const headB = agent.readRfc64AppliedCatalogHeadV1({ catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scopeB), authorAddress: AUTHOR });
+    expect(headB).toMatchObject({ inventoryRowCount: '1' });
+    expect(author.markers()).toEqual([]);
+    expect(author.capacity()).toMatchObject({ parkedPlacements: 0 });
+    expect(agent.readRfc64AppliedCatalogHeadV1({ catalogScopeDigest: digestScopeA, authorAddress: AUTHOR })).toEqual(headA);
+    expect(author.seen.successorAssets.at(-1)).toEqual([expect.objectContaining({
+      assertionCoordinate: pending.assertionCoordinate, seal: expect.objectContaining({ kaUal: pending.seal.kaUal, assertionVersion: owed.assertionVersion }),
+    })]);
+    expect(author.seen.successorAssets.at(-1)?.[0]?.seal).toEqual(owed.version === 2 ? owed.seal : undefined);
   }, 90_000);
 
   it('retires the exact public inventory row without capacity parking after a lane transition', async () => {

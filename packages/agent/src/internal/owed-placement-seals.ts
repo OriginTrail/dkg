@@ -1,16 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * GH#3081 — the author seals of the catalog placements this process owes.
- *
- * A confirmed private publication is terminal once its placement is durably owed. The marker names
- * the confirmed version by seal digest, and the placement reads the seal when it runs. By then the
- * author may have re-opened the assertion more than once, and neither the assertion's active seal
- * nor its one recovery archive is that seal any longer. The post-confirmation observer was handed
- * the seal itself, so it is kept here, by digest, for the placement to fall back on.
- *
- * Process-local on purpose: the marker row is a strict persisted format that does not carry the
- * seal. After a restart a placement has the stored seals only.
+ * Legacy V1 placement markers name a seal digest without storing the seal. An explicit V1
+ * request may keep that seal in this process if reopening displaced its stored archive.
+ * V2 obligations carry their own immutable seal and never populate or read this cache.
  */
 import type { CanonicalGraphScopedAuthorSealV1, Digest32V1 } from '@origintrail-official/dkg-core';
 

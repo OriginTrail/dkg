@@ -1,3 +1,5 @@
+import { readOwedPlacementSealV1 } from '../src/internal/owed-placement-seals.js';
+import { pinnedPrivatePlacementDecisionV1 } from './support/finalized-placement-decision-fixture.js';
 /**
  * GH#3081 — the catalog supervisor alone owns a confirmed private placement once the observer has
  * stored its marker and asked for it. Nothing waits for the placement, so these rows pin what the
@@ -103,10 +105,13 @@ describe('the finalized-private supervisor as the owner of a placement', () => {
       }),
       listLocalAuthorAddresses: () => [AUTHOR],
       acceptsPublicRootLane: () => true,
-      acceptsFinalizedPrivateLane: () => {
+      hasFinalizedPrivateLane: () => {
         if (state.laneUnavailable !== undefined) throw state.laneUnavailable;
         return state.laneActive;
       },
+      resolveFinalizedPlacementDecision: (repair) => state.laneUnavailable === undefined
+        ? pinnedPrivatePlacementDecisionV1(repair, state.laneActive)
+        : { ...pinnedPrivatePlacementDecisionV1(repair, false), status: 'unavailable', error: state.laneUnavailable },
       readRepairRevision: () => ({ scopeIdentity: 'scope-1', headRevision: 'head-1' }),
       listFinalizedPrivateRepairs: () => {
         state.listings += 1;
@@ -424,6 +429,7 @@ describe('a confirmed private placement the observer handed to the supervisor', 
     expect(fixture.markers()).toHaveLength(1);
     expect(fixture.markers()[0]).toMatchObject({ version: 2, inventoryScope: null, seal: { kaUal: asset.seal.kaUal } });
     expect(fixture.counts().repairs).toBe(0);
+    expect(readOwedPlacementSealV1(fixture.agent, fixture.markers()[0]!.sealDigest)).toBeUndefined();
     fixture.lane.unavailable = undefined;
     fixture.lane.inactive = false;
     fixture.agent.startRfc64SwmCatalogProjectionSupervisorV1(ctx);

@@ -4,12 +4,12 @@ import {
   MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   computeAuthorCatalogScopeDigestV1,
   createOperationContext,
-  type AuthorCatalogScopeV1,
   type Digest32V1,
   type EvmAddressV1,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 
+import type { FinalizedPlacementDecisionV1 } from './finalized-placement-decision.js';
 import { rememberBounded } from '../bounded-map.js';
 import {
   catalogRepairDiagnosticV1,
@@ -82,7 +82,7 @@ export interface FullCatalogParkingDependenciesV1 {
     authorAddress: EvmAddressV1,
   ) => AppliedCatalogHeadRowV1 | null | undefined;
   /** V2 placements bind capacity to the current lane; public retirement needs no row. */
-  readonly resolvePlacementCatalogScope?: (repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>) => AuthorCatalogScopeV1 | undefined;
+  readonly resolveFinalizedPlacementDecision: (repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>) => FinalizedPlacementDecisionV1;
   readonly warn: (ctx: OperationContext, message: string) => void;
 }
 
@@ -349,10 +349,8 @@ export class FullCatalogParkingV1 {
 
   #scopeDigest(repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>): Digest32V1 | undefined {
     try {
-      const scope = repair.version === 1
-        ? { ...repair.inventoryScope, bucketCount: '1' } as AuthorCatalogScopeV1
-        : this.#dependencies.resolvePlacementCatalogScope?.(repair);
-      return scope === undefined ? undefined : computeAuthorCatalogScopeDigestV1(scope);
+      const decision = this.#dependencies.resolveFinalizedPlacementDecision(repair);
+      return decision.capacityScope === undefined ? undefined : computeAuthorCatalogScopeDigestV1(decision.capacityScope);
     } catch { return undefined; }
   }
 

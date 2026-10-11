@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   rfc64CatalogKillSwitchActiveV1,
@@ -9,6 +9,8 @@ import {
   resolveRfc64CatalogActivationsV1,
 } from '../src/rfc64/public-catalog-activation-config-v1.js';
 import {
+  selectRfc64ConfirmedCatalogObligationV1,
+  resolveRfc64CatalogResponsibilityAuthorityV1,
   mergeRfc64CatalogRolloutConfigsV1,
   resolveRfc64CatalogRolloutConfigV1,
   type Rfc64CatalogRolloutConfigV1,
@@ -28,7 +30,36 @@ import {
   publicBootstrapPolicy,
 } from './rfc64-catalog-activation-fixtures.js';
 
+import { Rfc64CatalogResponsibilityRegistryV1 } from '../src/rfc64/catalog-responsibility-registry-v1.js';
+
 describe('RFC-64 catalog rollout and compatibility merging', () => {
+  it('selects desired confirmed obligations without requiring a ready authoring lane', () => {
+    const activation = resolveRfc64CatalogActivationsV1({ catalog: { rollout: { defaultMode: 'catalog' } } }, chainIdentity);
+    const plan = resolveRfc64CatalogExecutionPlanV1({ activation: activation.catalog, configuredContextGraphs: [], responsibilityDefaultMode: 'catalog' });
+    const registry = new Rfc64CatalogResponsibilityRegistryV1();
+    const serving = vi.fn(() => resolveRfc64CatalogResponsibilityAuthorityV1({
+      contextGraphId: PUBLIC_CG, responsible: false, active: false, mode: 'catalog', killSwitchActive: false,
+    }));
+    const readResponsibilities = vi.fn(() => registry.snapshot());
+    const input = { plan, contextGraphId: PUBLIC_CG, subGraphName: null, authoring: undefined, readResponsibilities, readServingAuthority: serving };
+    expect(selectRfc64ConfirmedCatalogObligationV1(input)).toBe('excluded');
+    registry.setResponsibility(PUBLIC_CG, 'core-public');
+    expect(selectRfc64ConfirmedCatalogObligationV1(input)).toBe('required');
+    registry.setResponsibility(PUBLIC_CG, null);
+    serving.mockReturnValue(resolveRfc64CatalogResponsibilityAuthorityV1({
+      contextGraphId: PUBLIC_CG, responsible: true, active: true, mode: 'catalog', killSwitchActive: false,
+    }));
+    expect(selectRfc64ConfirmedCatalogObligationV1(input)).toBe('required');
+    serving.mockClear(); readResponsibilities.mockClear();
+    for (const excluded of [
+      { ...input, subGraphName: 'unsupported' },
+      { ...input, plan: { ...plan, killSwitchActive: true } },
+      { ...input, plan: { ...plan, responsibilityDefaultMode: 'legacy' as const } },
+    ]) expect(selectRfc64ConfirmedCatalogObligationV1(excluded)).toBe('excluded');
+    expect(serving).not.toHaveBeenCalled();
+    expect(readResponsibilities).not.toHaveBeenCalled();
+  });
+
   it('normalizes pre-defaultMode raw snapshots at the input boundary', () => {
     const legacySnapshot: Rfc64CatalogRolloutConfigV1 = {
       killSwitch: false,

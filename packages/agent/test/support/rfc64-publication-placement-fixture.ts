@@ -35,7 +35,6 @@ import {
   createOperationContext,
   knowledgeAssetLayerGraphUri,
   type AssertionSeal,
-  type CanonicalGraphScopedAuthorSealV1,
   type Logger,
   type OperationContext,
   type TimestampMsV1,
@@ -280,10 +279,9 @@ interface PlacementAgentInternalsV1 {
     repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
     placement: CatalogPlacementAttemptV1,
   ): Promise<AppliedCatalogHeadSnapshotV1 | null>;
-  requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1(
+  requestRfc64FinalizedPrivateCatalogPlacementRepairV1(
     params: Readonly<{
       repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>;
-      seal: Readonly<CanonicalGraphScopedAuthorSealV1>;
       ctx: OperationContext;
     }>,
     observer: CatalogPlacementWaiterObserverV1,
@@ -387,8 +385,8 @@ export async function startPlacementAgentV1(
         return handOff(input);
       });
       // The observer's own request: the one whose waiter is told about the attempt that releases it.
-      const requestRepair = internals.requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1.bind(starting);
-      vi.spyOn(internals, 'requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1').mockImplementation(
+      const requestRepair = internals.requestRfc64FinalizedPrivateCatalogPlacementRepairV1.bind(starting);
+      vi.spyOn(internals, 'requestRfc64FinalizedPrivateCatalogPlacementRepairV1').mockImplementation(
         (params, observer) => {
           const request = requestRepair(params, observer);
           requests.push(request);

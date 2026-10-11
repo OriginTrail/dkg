@@ -1,3 +1,4 @@
+import { pinnedPrivatePlacementDecisionV1 } from './support/finalized-placement-decision-fixture.js';
 /**
  * GH#3081 — the catalog placement timing: how the time from one observer call to the end of its
  * placement attempt is split, that a wait hears exactly the attempt that released its own waiter
@@ -556,7 +557,8 @@ describe('catalog placement timing through the finalized-private supervisor', ()
       resolvePartition: () => ({ retryIntervalMs: 0, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),
       listLocalAuthorAddresses: () => [AUTHOR],
       acceptsPublicRootLane: () => true,
-      acceptsFinalizedPrivateLane: () => true,
+      hasFinalizedPrivateLane: () => true,
+      resolveFinalizedPlacementDecision: pinnedPrivatePlacementDecisionV1,
       readRepairRevision: () => ({ scopeIdentity: 'scope-1', headRevision: 'head-1' }),
       listFinalizedPrivateRepairs: () => markers,
       repairFinalizedPrivatePlacement: repair,

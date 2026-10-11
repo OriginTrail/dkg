@@ -1129,7 +1129,7 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
     const put = recorder(async () => { markPutEntered(); await putGate; });
     const requested = recorder(() => ({ accepted: false, whenAttempted: Promise.resolve() }));
     agentLike.rfc64PersistenceV1 = { finalizedPrivatePlacementRepairs: { put } };
-    agentLike.requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1 = requested;
+    agentLike.requestRfc64FinalizedPrivateCatalogPlacementRepairV1 = requested;
     const catalogAuthoring = recorder(async () => null);
     const legacyCatalogAuthoring = recorder(async () => null);
     agentLike.recordRfc64PublicCatalogAssetV1 = catalogAuthoring;
@@ -1195,7 +1195,7 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
     agentLike.config = confirmedPublicationCatalogConfigV1(true);
     const put = recorder(async () => undefined);
     agentLike.rfc64PersistenceV1 = { finalizedPrivatePlacementRepairs: { put } };
-    agentLike.requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1 = recorder(() => {
+    agentLike.requestRfc64FinalizedPrivateCatalogPlacementRepairV1 = recorder(() => {
       throw new Error('simulated RFC-64 placement request failure');
     });
     const snapshotQuads = [{

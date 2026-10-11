@@ -6,7 +6,6 @@ import {
   assertCanonicalEvmAddress,
   assertContextGraphIdV1,
   computeSwmAuthorInventoryScopeDigestV1,
-  type AuthorCatalogScopeV1,
   type AuthorLaneScopeV1,
   type CatalogSealDeploymentProfileV1,
   type ContextGraphIdV1,
@@ -23,6 +22,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 
+import { resolveFinalizedPlacementDecisionV1 } from './internal/finalized-placement-decision.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type {
@@ -165,7 +165,10 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     params: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
     placement: CatalogPlacementAttemptV1,
   ): Promise<AppliedCatalogHeadSnapshotV1 | null> {
-    const { lane, currentInventoryScope, inventoryScope, scope, action } = this.resolveRfc64FinalizedPlacementScopeV1(params);
+    const decision = this.resolveRfc64FinalizedPlacementDecisionV1(params);
+    if (decision.status === 'unavailable') throw decision.error;
+    if (decision.status === 'inactive') throw new Error('RFC-64 finalized-private placement repair lane is inactive');
+    const { lane, currentInventoryScope, inventoryScope, scope, action } = decision;
     if (action === 'retire-public-row') {
       // Public VM discovery is chain-owned; this owed transition removes only the exact SWM row.
       const removed = await this.removeRfc64SwmAuthorInventoryConfirmedRowV1({
@@ -209,8 +212,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         contextGraphId: params.contextGraphId,
         authorAddress: params.authorAddress,
         identity: params,
-        // The seal this process was handed at the confirmation, for an assertion that was
-        // re-opened more than once since and whose stored seals have moved on.
+        // V2 is self-contained; only legacy V1 can fall back to a process-local seal.
         retainedSeal: params.version === 2 ? params.seal : readOwedPlacementSealV1(this, params.sealDigest),
       })
       : resolveRfc64InventoryWorkspaceCatalogAssetV1({
@@ -234,31 +236,9 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     }, placement);
   }
 
-  /** One current scope owner for placement execution and capacity parking. V1 remains pinned. */
-  protected resolveRfc64FinalizedPlacementScopeV1(this: DKGAgent, params: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>) {
-    const lane = this.resolveRfc64CatalogAuthoringLaneV1(params.contextGraphId, null);
-    if (lane === null || (!lane.acceptsFinalizedVmRepair && (params.version === 1 || lane.kind !== 'public'))) {
-      throw new Error('RFC-64 finalized-private placement repair lane is inactive');
-    }
-    const currentInventoryScope = Object.freeze({
-      ...lane.scopeBase,
-      authorAddress: params.authorAddress,
-    }) as SwmAuthorInventoryScopeV1;
-    if (
-      params.version === 1
-      && computeSwmAuthorInventoryScopeDigestV1(currentInventoryScope)
-      !== computeSwmAuthorInventoryScopeDigestV1(params.inventoryScope)
-    ) {
-      throw new Error(
-        'RFC-64 finalized-private placement repair conflicts with a policy transition',
-      );
-    }
-    const inventoryScope = params.version === 1 ? params.inventoryScope : currentInventoryScope;
-    const scope = Object.freeze({ ...inventoryScope, bucketCount: '1' }) as AuthorCatalogScopeV1;
-    const common = { lane, currentInventoryScope, inventoryScope, scope };
-    return lane.acceptsFinalizedVmRepair
-      ? Object.freeze({ ...common, action: 'place-private-row' as const, capacityScope: scope })
-      : Object.freeze({ ...common, action: 'retire-public-row' as const, capacityScope: undefined });
+  /** Current authority, action and scope shared by repair admission and execution. */
+  protected resolveRfc64FinalizedPlacementDecisionV1(this: DKGAgent, repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>) {
+    return resolveFinalizedPlacementDecisionV1(repair, () => this.resolveRfc64CatalogAuthoringLaneV1(repair.contextGraphId, null));
   }
 
   /** Canonical selected-CG admission shared by inventory and projection. */
