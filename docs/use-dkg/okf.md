@@ -48,6 +48,7 @@ Private allowlisting currently uses the OKF command's implemented flags. The bro
 dkg okf export okf-demo ./out
 dkg okf export okf-demo ./out --view shared-working-memory
 dkg okf export okf-demo ./out --view verifiable-memory
+dkg okf export okf-demo ./out --sub-graph-name science
 ```
 
 Export reads a context graph view and writes an OKF bundle to the output directory. Use export views to choose Working Memory, Shared Working Memory, or Verifiable Memory.
@@ -56,10 +57,17 @@ Export reads a context graph view and writes an OKF bundle to the output directo
 
 ```bash
 dkg okf verify ./bundle --context-graph-id okf-demo
-dkg okf verify ./bundle --context-graph-id okf-demo --list-missing
+dkg okf verify ./bundle --context-graph-id okf-demo --list-missing 20
+dkg okf verify ./bundle --context-graph-id okf-demo --sub-graph-name science --list-missing 20
 ```
 
-Verify compares the deterministic RDF expected from the local OKF bundle with triples currently visible from the node. Current verify behavior is SWM-oriented; sub-graph scoped verify is a known follow-up gap.
+Verify compares the deterministic RDF expected from the local OKF bundle with triples currently visible from the node. Without `--sub-graph-name`, it retains the existing context-graph read including SWM. With the flag, every count and missing-concept query reads only that sub-graph's SWM, using the same scope as export. Match the scope and mapping flags used for import:
+
+```bash
+dkg okf import ./bundle --context-graph-id okf-demo --sub-graph-name science --share
+dkg okf export okf-demo ./out --sub-graph-name science
+dkg okf verify ./out --context-graph-id okf-demo --sub-graph-name science --list-missing 20
+```
 
 ## VM Capstone
 
