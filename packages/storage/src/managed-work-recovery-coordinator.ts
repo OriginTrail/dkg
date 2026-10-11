@@ -51,6 +51,7 @@ export class ManagedWorkRecoveryCoordinatorV1 {
   #lifecycleGeneration = 0;
   readonly #retained = new Set<RetainedWork>();
   #reportedPending = false;
+  #retryAt = 0;
   #armed?: {
     readonly timer: ReturnType<typeof setTimeout>;
     readonly read: RetainedWork;
@@ -73,6 +74,7 @@ export class ManagedWorkRecoveryCoordinatorV1 {
     deadline: number,
     token: ManagedWorkRecoveryTokenV1 | null,
     physicalWork?: Promise<unknown>,
+    recoveryRequested = false,
   ): ManagedWorkRetentionV1 | null {
     if (token === null || token.lifecycleGeneration !== this.#lifecycleGeneration) return null;
     const current = this.#readState();
@@ -83,6 +85,7 @@ export class ManagedWorkRecoveryCoordinatorV1 {
     ) {
       return null;
     }
+    this.#retireConfirmedGeneration(current);
     const read: RetainedWork = {
       operation,
       deadline,
@@ -91,6 +94,10 @@ export class ManagedWorkRecoveryCoordinatorV1 {
       physicallyTracked: physicalWork !== undefined,
     };
     this.#retained.add(read);
+    // An active caller timeout has already notified the supervisor. Preserve
+    // its fence immediately, but let that asynchronous attempt settle before
+    // retrying. The original operation deadline itself is unchanged.
+    if (recoveryRequested) this.#retryAt = Math.max(this.#retryAt, this.#options.now() + 1_000);
     this.#reportPending();
     // The work lifecycle already counts a detached HTTP task. Only add a
     // server-work fence after that physical task settles without proof that
@@ -101,7 +108,7 @@ export class ManagedWorkRecoveryCoordinatorV1 {
       this.#reportPending();
     };
     void physicalWork?.then(physicalSettled, physicalSettled);
-    if (this.#armed === undefined || deadline < this.#armed.read.deadline) this.#arm();
+    this.#arm();
     return {
       release: () => {
         if (!this.#retained.delete(read)) return;
@@ -115,6 +122,7 @@ export class ManagedWorkRecoveryCoordinatorV1 {
     this.#lifecycleGeneration += 1;
     clearTimeout(this.#armed?.timer);
     this.#armed = undefined;
+    this.#retryAt = 0;
     this.#retained.clear();
     this.#reportPending();
   }
@@ -128,36 +136,50 @@ export class ManagedWorkRecoveryCoordinatorV1 {
     if (this.#armed?.read === earliest) return;
     clearTimeout(this.#armed?.timer);
     this.#armed = undefined;
-    if (earliest === undefined) return;
+    if (earliest === undefined) { this.#retryAt = 0; return; }
     const read = earliest;
-    const timer = setTimeout(() => this.#expire(read), Math.max(0, read.deadline - this.#options.now()));
+    const timer = setTimeout(() => this.#expire(read),
+      Math.max(0, Math.max(read.deadline, this.#retryAt) - this.#options.now()));
     timer.unref?.();
     this.#armed = { timer, read };
   }
 
   #expire(read: RetainedWork): void {
     this.#armed = undefined;
-    this.#retained.delete(read);
     const current = this.#readState();
+    this.#retireConfirmedGeneration(current);
     if (
-      read.lifecycleGeneration === this.#lifecycleGeneration
+      this.#retained.has(read)
+      && read.lifecycleGeneration === this.#lifecycleGeneration
       && current !== null
       && !current.recovering
       && current.generation === read.storeGeneration
     ) {
-      // One supervised restart reclaims every read still running against this
-      // store generation, so the others need no timer of their own.
-      for (const other of this.#retained) {
-        if (other.storeGeneration === read.storeGeneration) this.#retained.delete(other);
-      }
       try {
         this.#options.capability?.recover(read.operation);
       } catch {
         // Recovery notification must never escape a retained timer callback.
       }
     }
+    // A request can fail ownership verification or signalling. Only an
+    // advanced generation proves reclamation; keep its activity fence and
+    // retry at a bounded rate. Admission pause alone does not stop recovery:
+    // maintenance itself may be draining this abandoned work. The supervisor
+    // coalesces requests while ownership verification is already in progress.
+    this.#retireConfirmedGeneration(this.#readState());
+    this.#retryAt = this.#retained.has(read) ? this.#options.now() + 1_000 : 0;
     this.#arm();
     this.#reportPending();
+  }
+
+  #retireConfirmedGeneration(current: ManagedOxigraphRuntimeStateV1 | null): void {
+    for (const work of this.#retained) {
+      if (work.lifecycleGeneration !== this.#lifecycleGeneration
+        || (current !== null && current.generation !== work.storeGeneration)) {
+        this.#retained.delete(work);
+      }
+    }
+    if (this.#retained.size === 0) this.#retryAt = 0;
   }
 
   #reportPending(): void {

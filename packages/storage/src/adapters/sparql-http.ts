@@ -728,6 +728,9 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       }
       if (timeoutSignal.aborted) {
         this.notifyClientTimeout(operation);
+        if (dispatched && !serverFinished) {
+          this.managedAbandonedWorkRecovery.retain(operation, deadline, recoveryToken, detachedRequest, true);
+        }
         throw new StoreOperationTimeoutError({
           backend: this.managedOxigraph ? 'oxigraph-server' : 'sparql-http',
           operation,
@@ -757,6 +760,16 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     options?: QueryOptions,
     operation: StoreOperation = 'update',
   ): Promise<void> {
+    return this.postUpdate(update, options, operation, () => undefined);
+  }
+
+  /** One owner for mutation/cleanup admission, dispatch and recovery retention. */
+  private async postUpdate(
+    update: string,
+    options: QueryOptions | undefined,
+    operation: StoreOperation,
+    beforeDispatch: () => void,
+  ): Promise<void> {
     // Direct POST (W3C SPARQL 1.1 Protocol §2.2.2): the update is the raw
     // request body with `application/sparql-update`, not URL-encoded form
     // data. See postQuery for why form encoding breaks large payloads.
@@ -776,6 +789,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       // literals and DELETE DATA patterns silently stop matching.
       try {
         throwIfAborted(signal);
+        beforeDispatch();
         dispatched = true;
         const res = await fetch(this.updateEndpoint, {
           method: 'POST',
@@ -798,6 +812,9 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
         }
         if (timeoutSignal.aborted) {
           this.notifyClientTimeout(operation);
+          if (dispatched) {
+            this.managedAbandonedWorkRecovery.retain(operation, deadline, recoveryToken, undefined, true);
+          }
           throw new StoreOperationTimeoutError({
             backend: this.managedOxigraph ? 'oxigraph-server' : 'sparql-http',
             operation,
@@ -1090,71 +1107,10 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
   }): Promise<void> {
     let lifecycle: GraphWriteLifecycle | undefined;
     try {
-      await this.runStoreWork(opts.operation, opts.options, async (lifecycleSignal) => {
-        const recoveryAtStart = this.readRecoveryState();
-        if (this.admissionRefused(recoveryAtStart)) {
-          throw this.recoveryError(opts.operation, 'not_started');
-        }
-        const timeoutSignal = AbortSignal.timeout(this.timeout);
-        const deadline = this.now() + this.timeout;
-        const recoveryToken = this.managedAbandonedWorkRecovery.begin(recoveryAtStart);
-        const signalScope = composeAbortSignals(lifecycleSignal, timeoutSignal);
-        const signal = signalScope.signal ?? timeoutSignal;
-        let dispatched = false;
-        try {
-          // The lifecycle begins after every pre-dispatch refusal and directly
-          // before fetch. From this point onward the server may have committed.
-          throwIfAborted(signal);
-          lifecycle = this.writeGen.beginWrite(opts.scope);
-          this.invalidateListGraphsCache();
-          dispatched = true;
-          const res = await fetch(this.updateEndpoint, {
-            method: 'POST',
-            headers: { ...this.headers, 'Content-Type': SPARQL_UPDATE_CONTENT_TYPE },
-            body: opts.update,
-            signal,
-          });
-          if (!res.ok) {
-            const text = await res.text().catch(() => '');
-            throw new SparqlHttpResponseError(
-              opts.operation,
-              res.status,
-              text.slice(0, 300),
-            );
-          }
-        } catch (error) {
-          if (signal.aborted) {
-            getMetrics().storeCancellationCompletedTotal.add(1, {
-              operation: opts.operation,
-              source: opts.options?.source ?? `sparql-http.${opts.operation}`,
-            });
-          }
-          if (timeoutSignal.aborted) {
-            this.notifyClientTimeout(opts.operation);
-            throw new StoreOperationTimeoutError({
-              backend: this.managedOxigraph ? 'oxigraph-server' : 'sparql-http',
-              operation: opts.operation,
-              timeoutMs: this.timeout,
-              cause: error,
-            });
-          }
-          if (dispatched && signal.aborted) {
-            // Oxigraph may continue an update after its HTTP client disconnects.
-            // Fence maintenance until the original deadline, then force a
-            // supervised restart if the same server generation is still live.
-            this.managedAbandonedWorkRecovery.retain(
-              opts.operation,
-              deadline,
-              recoveryToken,
-            );
-          }
-          if (this.recoveryInterrupted(recoveryAtStart)) {
-            throw this.recoveryError(opts.operation, 'indeterminate', error);
-          }
-          throw error;
-        } finally {
-          signalScope.dispose();
-        }
+      await this.postUpdate(opts.update, opts.options, opts.operation, () => {
+        // Begin the semantic write only after all pre-dispatch refusals.
+        lifecycle = this.writeGen.beginWrite(opts.scope);
+        this.invalidateListGraphsCache();
       });
     } catch (error) {
       if (opts.cleanup) {

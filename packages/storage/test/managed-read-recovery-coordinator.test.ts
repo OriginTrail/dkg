@@ -33,7 +33,8 @@ describe('ManagedWorkRecoveryCoordinatorV1', () => {
 
   function setup() {
     const state = { recovering: false, generation: 0 };
-    const recover = vi.fn();
+    // The default supervisor accepts and confirms termination synchronously.
+    const recover = vi.fn(() => { state.generation += 1; });
     const coordinator = new ManagedWorkRecoveryCoordinatorV1({
       now: () => Date.now(),
       capability: { readState: () => ({ ...state }), recover },
@@ -202,7 +203,69 @@ describe('ManagedWorkRecoveryCoordinatorV1', () => {
     expect(pending).toHaveBeenCalledExactlyOnceWith(true);
     await vi.advanceTimersByTimeAsync(1_000);
     expect(recover).toHaveBeenCalledExactlyOnceWith('query');
+    expect(pending.mock.calls).toEqual([[true]]);
+    state.generation += 1;
+    await vi.advanceTimersByTimeAsync(1_000);
     expect(pending.mock.calls).toEqual([[true], [false]]);
+  });
+
+  it.each(['cancelled', 'throws'] as const)(
+    'keeps abandoned work fenced after a %s restart and retries until termination is confirmed',
+    async (failure) => {
+      const state = { recovering: false, admissionsPaused: false, generation: 0 };
+      const pending = vi.fn();
+      const recover = vi.fn(() => {
+        if (failure === 'throws') throw new Error('signal declined');
+        state.admissionsPaused = true;
+      });
+      const coordinator = new ManagedWorkRecoveryCoordinatorV1({
+        now: () => Date.now(), onPendingChange: pending,
+        capability: { readState: () => state, recover },
+      });
+      try {
+        coordinator.retain('update', Date.now() + 100, coordinator.begin(state));
+        await vi.advanceTimersByTimeAsync(100);
+        expect(recover).toHaveBeenCalledExactlyOnceWith('update');
+        expect(pending.mock.calls).toEqual([[true]]);
+        state.admissionsPaused = false;
+        await vi.advanceTimersByTimeAsync(999);
+        expect(recover).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(recover).toHaveBeenCalledTimes(2);
+        expect(pending.mock.calls).toEqual([[true]]);
+        state.generation = 1;
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(pending.mock.calls).toEqual([[true], [false]]);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally { coordinator.close(); }
+    },
+  );
+
+  it('keeps the fence across asynchronous verification and an unreadable state', async () => {
+    const state = { recovering: false, admissionsPaused: false, generation: 0 };
+    let readable = true;
+    const pending = vi.fn();
+    const recover = vi.fn(() => { state.admissionsPaused = true; });
+    const coordinator = new ManagedWorkRecoveryCoordinatorV1({
+      now: () => Date.now(), onPendingChange: pending,
+      capability: { readState: () => {
+        if (!readable) throw new Error('supervisor unavailable');
+        return state;
+      }, recover },
+    });
+    try {
+      const retention = coordinator.retain('update', Date.now() + 100, coordinator.begin(state));
+      await vi.advanceTimersByTimeAsync(3_100);
+      expect(recover).toHaveBeenCalledTimes(4);
+      expect(pending.mock.calls).toEqual([[true]]);
+      readable = false;
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(recover).toHaveBeenCalledTimes(4);
+      expect(pending.mock.calls).toEqual([[true]]);
+      retention?.release();
+      expect(pending.mock.calls).toEqual([[true], [false]]);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { coordinator.close(); }
   });
 
   it.each(['release', 'close'] as const)('a late physical settlement after %s cannot resurrect activity', async (stop) => {

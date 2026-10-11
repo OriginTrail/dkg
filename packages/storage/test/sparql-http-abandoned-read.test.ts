@@ -84,7 +84,8 @@ describe('managed abandoned read recovery', () => {
   });
 
   it('coalesces abandoned reads without extending the earliest deadline', async () => {
-    const { store, recover, abandon } = harness();
+    const { store, recovery, recover, abandon } = harness();
+    recover.mockImplementation(() => { recovery.generation += 1; });
     try {
       await abandon();
       await abandon();
@@ -116,7 +117,7 @@ describe('managed abandoned read recovery', () => {
   });
 
   it('keeps a caller-cancelled mutation fenced until supervised recovery can abandon it', async () => {
-    const { store, recover, activity, abandonMutation } = harness();
+    const { store, recovery, recover, activity, abandonMutation } = harness();
     try {
       await abandonMutation();
       expect(recover).not.toHaveBeenCalled();
@@ -128,6 +129,9 @@ describe('managed abandoned read recovery', () => {
 
       await vi.advanceTimersByTimeAsync(1);
       expect(recover).toHaveBeenCalledExactlyOnceWith('update');
+      expect(activity.at(-1)).toBe(1);
+      recovery.generation += 1;
+      await vi.advanceTimersByTimeAsync(1_000);
       expect(activity.at(-1)).toBe(0);
     } finally { await store.close(); }
   });
