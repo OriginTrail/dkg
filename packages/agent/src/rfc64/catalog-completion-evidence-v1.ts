@@ -25,6 +25,7 @@ export interface Rfc64CatalogCompletionEvidenceV1 {
   readonly replayUnverified: boolean;
   readonly replayUnsettled: boolean;
   readonly pendingTargets: readonly Rfc64PublicCatalogHeadAnnouncementV1[];
+  readonly liveTargetsPending: boolean;
   readonly catalogHeadDigest: Digest32V1 | null;
   readonly expectedCatalogHeadDigest: Digest32V1 | null;
   readonly inventoryDigest: Digest32V1 | null;
@@ -55,11 +56,24 @@ export function evaluateRfc64CatalogCompletionV1(input: Rfc64CatalogCompletionFa
       || (target.catalogVersion === applied.snapshot.catalogVersion
         && target.catalogHeadObjectDigest !== applied.snapshot.currentCatalogHeadDigest);
   };
-  const pendingTargets = targets.filter(isPending);
+  const pendingTargets = authoritativeTargets.filter(isPending);
+  const liveTargetsPending = targets.some(isPending);
   const catalogHeadDigest = aggregateRfc64DigestV1(heads.map(({ snapshot }) => snapshot.currentCatalogHeadDigest));
-  const expectedHeadDigests = new Map(heads.map(({ scopeKey, snapshot }) => [scopeKey, snapshot.currentCatalogHeadDigest]));
-  for (const target of pendingTargets) expectedHeadDigests.set(rfc64CatalogTargetScopeKeyV1(target), target.catalogHeadObjectDigest);
-  const expectedCatalogHeadDigest = aggregateRfc64DigestV1([...expectedHeadDigests.values()]);
+  const expectedHeads = new Map(heads.map(({ scopeKey, snapshot }) => [scopeKey, {
+    version: snapshot.catalogVersion, digest: snapshot.currentCatalogHeadDigest as Digest32V1 | null,
+  }]));
+  for (const target of pendingTargets) {
+    const key = rfc64CatalogTargetScopeKeyV1(target);
+    const held = expectedHeads.get(key);
+    if (held === undefined || BigInt(target.catalogVersion) > BigInt(held.version)) {
+      expectedHeads.set(key, { version: target.catalogVersion, digest: target.catalogHeadObjectDigest });
+    } else if (target.catalogVersion === held.version && target.catalogHeadObjectDigest !== held.digest) {
+      held.digest = null;
+    }
+  }
+  const expectedDigests = [...expectedHeads.values()].map(({ digest }) => digest);
+  const expectedCatalogHeadDigest = expectedDigests.some((digest) => digest === null)
+    ? null : aggregateRfc64DigestV1(expectedDigests as Digest32V1[]);
   const inventoryDigest = aggregateRfc64DigestV1(heads.map(({ snapshot }) => snapshot.appliedInventoryDigest));
   const rowCount = heads.length === 0 ? null : sumDecimalCountsV1(heads.map(({ snapshot }) => snapshot.inventoryRowCount));
   const rowProjectionUnavailable = targetCapacityExceeded || replayActive || replayUnverified
@@ -73,7 +87,7 @@ export function evaluateRfc64CatalogCompletionV1(input: Rfc64CatalogCompletionFa
     && rowCount !== null && BigInt(rowCount) > 0n
     && rowProjection.missingRowCount === '0' && rowProjection.expectedRowCount === rowCount;
   return Object.freeze({
-    replayActive, replayFailed, replayUnverified, replayUnsettled, pendingTargets,
+    replayActive, replayFailed, replayUnverified, replayUnsettled, pendingTargets, liveTargetsPending,
     catalogHeadDigest, expectedCatalogHeadDigest, inventoryDigest, rowCount, rowProjection, corroborated,
   });
 }

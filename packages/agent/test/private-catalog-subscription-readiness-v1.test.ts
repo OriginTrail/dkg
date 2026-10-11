@@ -92,6 +92,37 @@ describe('approved private catalog readiness handoff', () => {
     expect(evidence.corroborated).toBe(false);
   });
 
+  it.each([false, true])('projects the newest retained head regardless of promise order (reverse=%s)', async (reverse) => {
+    const f = await fixture({ restored: true });
+    const heads = await loadRfc64OperationalAppliedHeadsV1(f.state.persistence as never);
+    const two = readinessTarget(readinessHead({ version: '2' }));
+    const three = readinessTarget(readinessHead({ version: '3' }));
+    const promises = reverse ? [three, two] : [two, three];
+    const evidence = evaluateRfc64CatalogCompletionV1({ heads, targets: [], promisedTargets: promises,
+      promisedRowCounts: new Map(), replay: null, targetCapacityExceeded: false });
+    expect(evidence.pendingTargets).toHaveLength(2);
+    expect(evidence.liveTargetsPending).toBe(false);
+    expect(evidence.expectedCatalogHeadDigest).toBe(three.catalogHeadObjectDigest);
+    expect(evidence.corroborated).toBe(false);
+    const live = evaluateRfc64CatalogCompletionV1({ heads, targets: [three], promisedTargets: promises,
+      promisedRowCounts: new Map(), replay: null, targetCapacityExceeded: false });
+    expect(live.pendingTargets).toHaveLength(2);
+    expect(live.liveTargetsPending).toBe(true);
+    expect(live.expectedCatalogHeadDigest).toBe(three.catalogHeadObjectDigest);
+  });
+
+  it('reports an unknown expected digest for competing retained heads at the applied version', async () => {
+    const f = await fixture({ restored: true });
+    const heads = await loadRfc64OperationalAppliedHeadsV1(f.state.persistence as never);
+    const conflict = readinessTarget(readinessHead({ totalRows: '0' }));
+    const evidence = evaluateRfc64CatalogCompletionV1({ heads, targets: [], promisedTargets: [conflict],
+      promisedRowCounts: new Map(), replay: null, targetCapacityExceeded: false });
+    expect(evidence.pendingTargets).toEqual([conflict]);
+    expect(evidence.expectedCatalogHeadDigest).toBeNull();
+    expect(evidence.liveTargetsPending).toBe(false);
+    expect(evidence.corroborated).toBe(false);
+  });
+
   it.each([
     ['not subscribed', (f: Fixture) => { f.subscription.subscribed = false; }],
     ['service stopped', (f: Fixture) => { f.service.started = false; }],

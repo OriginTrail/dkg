@@ -596,7 +596,7 @@ const PROJECTION = new TextEncoder().encode(
   + '<https://example.org/alice> <https://schema.org/name> "Alice" .\n',
 );
 
-async function authorSeal(): Promise<CanonicalGraphScopedAuthorSealV1> {
+async function authorSeal(assertionVersion = '1'): Promise<CanonicalGraphScopedAuthorSealV1> {
   const kaNumber = 2647n;
   const kaId = ((BigInt(AUTHOR) << 96n) | kaNumber).toString();
   const typedData = buildAuthorAttestationTypedData({
@@ -623,7 +623,7 @@ async function authorSeal(): Promise<CanonicalGraphScopedAuthorSealV1> {
     assertionFinalizedAt: '2026-07-19T12:34:56.789Z',
     contentScopeVersion: '2',
     kaUal: `did:dkg:${NETWORK_ID}/${AUTHOR}/${kaNumber}`,
-    assertionVersion: '1',
+    assertionVersion,
     publicTripleCount: '2',
     privateTripleCount: '0',
     privateMerkleRoot: null,
@@ -1059,8 +1059,8 @@ describe('RFC-64 operational status: provider failure reporting', () => {
     )).resolves.toEqual({ requested: 1, failed: 1 });
 
     // Nothing blocks the graph and nothing is applying the successor -- the
-    // target tracker never saw it -- so only the row gap keeps it off
-    // `complete`.
+    // target tracker never saw it -- the retained head obligation and row
+    // gap both keep it off `complete` without claiming active application.
     expect(await readStatus(edge)).toMatchObject({
       phase: 'known-incomplete',
       stableReason: null,
@@ -1072,6 +1072,60 @@ describe('RFC-64 operational status: provider failure reporting', () => {
         unresolvedReplayPeers: 1,
       }),
     });
+  });
+
+  it.each(['replacement', 'removal'] as const)('retains an unapplied %s head when no positive row gap remains', async (change) => {
+    const edge = await startAgent({ name: `retained-head-${change}`, activation: activation('catalog') });
+    const genesis = await applyConsistentGenesisHead(edge);
+    const asset = { assertionCoordinate: 'retained-head-row' as never, projectionBytes: PROJECTION, seal: await authorSeal() };
+    const first = await edge.publishOpenAuthorCatalogExactSetSuccessorV1({
+      previousHead: { objectDigest: genesis.headObjectDigest, signatureVariantDigest: genesis.signatureVariantDigest },
+      author: AUTHOR_WALLET, catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+      assets: [asset], deployment: DEPLOYMENT, issuedAt: SUCCESSOR_ISSUED_AT, peers: [],
+    });
+    // Install a fixture snapshot derived from the genuine signed one-row set,
+    // using the same inventory commitment as the receiver's durable barrier.
+    const persistence = (edge as any).rfc64PersistenceV1;
+    persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
+      catalogScopeDigest: first.catalogScopeDigest, authorAddress: AUTHOR,
+      expectedCurrentCatalogHeadDigest: genesis.headObjectDigest,
+      currentCatalogHeadDigest: first.headObjectDigest,
+      appliedInventoryDigest: computeRfc64AppliedInventoryDigestV1({ catalogScopeDigest: first.catalogScopeDigest, rows: first.assets }),
+      catalogVersion: first.announcement.catalogVersion, inventoryRowCount: first.inventoryRowCount,
+    });
+    const successor = await edge.publishOpenAuthorCatalogExactSetSuccessorV1({
+      previousHead: { objectDigest: first.headObjectDigest, signatureVariantDigest: first.signatureVariantDigest },
+      author: AUTHOR_WALLET, catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+      assets: change === 'removal' ? [] : [{ ...asset, seal: await authorSeal('2') }],
+      deployment: DEPLOYMENT, issuedAt: '1773900002000' as TimestampMsV1, peers: [],
+    });
+    expect(successor.inventoryRowCount).toBe(change === 'removal' ? '0' : '1');
+    const providerPeer = '12D3KooWRetainedHeadProvider';
+    const emptyPeer = '12D3KooWRetainedHeadEmptyPeer';
+    const peers = vi.spyOn(edge.node.libp2p, 'getPeers');
+    const replay = vi.spyOn(replayService(edge), 'requestCatalogHeadReplay');
+    peers.mockReturnValue([{ toString: () => providerPeer }] as never);
+    replay.mockResolvedValue({ kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2, heads: [successor.announcement] });
+    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(CONTEXT_GRAPH_ID)).resolves.toEqual({ requested: 1, failed: 1 });
+    peers.mockReturnValue([{ toString: () => providerPeer }, { toString: () => emptyPeer }] as never);
+    replay.mockImplementation(async ({ remotePeerId }) => {
+      if (remotePeerId === providerPeer) throw new Rfc64PublicCatalogTransportErrorV1('catalog-transport-wire', 'provider unreachable');
+      return { kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2, heads: [] };
+    });
+    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(CONTEXT_GRAPH_ID)).resolves.toEqual({ requested: 1, failed: 1 });
+    const status = await readStatus(edge);
+    expect(status).toMatchObject({ phase: 'known-incomplete', stableReason: null, catalogVersion: '2',
+      expectedRowCount: change === 'removal' ? '0' : '1', appliedRowCount: '1', missingRowCount: '0', expectedInventoryDigest: null });
+    expect(status.expectedCatalogHeadDigest).not.toBe(status.appliedCatalogHeadDigest);
+
+    // Once that exact head is durably applied, the retained promise is satisfied.
+    persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
+      catalogScopeDigest: successor.catalogScopeDigest, authorAddress: AUTHOR,
+      expectedCurrentCatalogHeadDigest: first.headObjectDigest, currentCatalogHeadDigest: successor.headObjectDigest,
+      appliedInventoryDigest: computeRfc64AppliedInventoryDigestV1({ catalogScopeDigest: successor.catalogScopeDigest, rows: successor.assets }),
+      catalogVersion: successor.announcement.catalogVersion, inventoryRowCount: successor.inventoryRowCount,
+    });
+    expect(await readStatus(edge)).toMatchObject({ phase: 'complete', catalogVersion: '2', missingRowCount: '0' });
   });
 
   it('still blocks a Context Graph whose provider promises a head this node never applied', async () => {
