@@ -852,7 +852,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       list: () => store.listHostModeSubscriptions(),
       restore: (entry, current) => this.restorePersistedHostModeSubscription(entry, stripOn, current),
       current: () => session.active && this.gossipSession === session,
-      batchSize: () => normalizeHostModeReconcileBatchSize(this.config.swmHostMode?.reconcileBatchSize),
+      batchSize: normalizeHostModeReconcileBatchSize(this.config.swmHostMode?.reconcileBatchSize),
       failed: error => this.log.warn(createOperationContext('system'),
         `Failed to list persisted host-mode subscriptions: ${error instanceof Error ? error.message : String(error)}`),
     });
