@@ -44,7 +44,7 @@ import { HubResolutionCache } from './hub-resolution-cache.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
-import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, PcaFundingUnknownError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
+import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, isCausedByRemoteSigner, isHubStaleError, isInsufficientFundsError, InsufficientPublisherFundsError, PcaFundingUnknownError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import { collectEvmErrorText } from './evm-error-text.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import {
@@ -2935,6 +2935,8 @@ export class EVMChainAdapterBase {
     contextGraphId: bigint,
     requiredTracWei: bigint = 0n,
   ): Promise<unknown> {
+    // A signer's refusal is final as it is, never re-read as a funding failure.
+    if (isCausedByRemoteSigner(err)) return err;
     try {
       let selectedShort = isInsufficientFundsError(err);
       if (!selectedShort && this.looksLikeFundsRevert(err)) {
@@ -4744,8 +4746,7 @@ export class EVMChainAdapterBase {
       return await fn();
     } catch (err) {
       if (err instanceof Error) enrichEvmError(err);
-      const msg = err instanceof Error ? err.message : '';
-      if (HUB_STALE_ERROR_MARKERS.some((m) => msg.includes(m))) {
+      if (isHubStaleError(err)) {
         this.invalidateRandomSamplingPair();
         return await fn();
       }
@@ -4779,8 +4780,7 @@ export class EVMChainAdapterBase {
       return await fn();
     } catch (err) {
       if (err instanceof Error) enrichEvmError(err);
-      const msg = err instanceof Error ? err.message : '';
-      if (HUB_STALE_ERROR_MARKERS.some((m) => msg.includes(m))) {
+      if (isHubStaleError(err)) {
         this.invalidateAllBoundContracts();
         await this.init();
         return await fn();

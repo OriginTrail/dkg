@@ -16,6 +16,21 @@ import {
   messageIndicatesNoFundedPublisherWallet,
 } from '@origintrail-official/dkg-core';
 import { loadAbi, loadVendoredAbis } from './evm-adapter-abi.js';
+import { isRemoteSignerError } from './remote-signer-errors.js';
+
+/**
+ * True when `err`, or an error it wraps, is a failure of an external signer.
+ * Such a failure is final: no contract-error recovery may read its text as a
+ * revert and ask the signer for another signature.
+ */
+export function isCausedByRemoteSigner(err: unknown): boolean {
+  let current = err;
+  for (let depth = 0; depth < 8 && typeof current === 'object' && current !== null; depth += 1) {
+    if (isRemoteSignerError(current)) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
 
 export function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
@@ -136,6 +151,13 @@ export const HUB_STALE_ERROR_MARKERS = [
   'Only Contracts in Hub',
   'UnauthorizedAccess(Only Contracts in Hub)',
 ];
+
+/** A write reverted because a cached contract is no longer registered in the Hub; never a signer failure. */
+export function isHubStaleError(err: unknown): boolean {
+  if (isCausedByRemoteSigner(err)) return false;
+  const message = err instanceof Error ? err.message : '';
+  return HUB_STALE_ERROR_MARKERS.some((marker) => message.includes(marker));
+}
 
 let _errorInterface: Interface | null = null;
 let _pcaLogicInterface: Interface | null = null;
@@ -332,6 +354,8 @@ export function enrichEvmError(err: unknown): string | null {
  */
 export function isTooLowAllowanceError(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
+  // A signer's refusal is never a revert, whatever its text says.
+  if (isCausedByRemoteSigner(err)) return false;
   const e = err as {
     revert?: { name?: unknown };
     message?: unknown;
