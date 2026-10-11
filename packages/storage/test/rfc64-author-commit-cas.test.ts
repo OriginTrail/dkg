@@ -7,6 +7,7 @@ import {
   OxigraphStore,
   OxigraphWorkerStore,
   RFC64_AUTHOR_COMMIT_MAX_CONTROL_QUADS_V1,
+  describeRfc64AuthorCommitCasV1,
   SparqlHttpStore,
   type Rfc64AuthorCommitCasInputV1,
   type Rfc64AuthorCommitCasLegacyInputV1,
@@ -158,6 +159,56 @@ describe('RFC-64 certified author commit CAS v1', () => {
     expect(await objectFor(store, STATE_GRAPH, kaStateSubject, P_VALUE))
       .toBe('"new-ka-state"');
     expect(await objectFor(store, SEAL_GRAPH, INVALIDATED_SEAL, P_VALUE)).toBeUndefined();
+  });
+
+  it('summarizes what a semantic commit replaces and inserts from the canonical plan', () => {
+    const input = authorCommitInput();
+    const transitions = [
+      input.currentHead,
+      input.subgraphMutationGeneration,
+      input.contextGraphMutationGeneration,
+      input.appliedSet,
+    ];
+
+    const summary = describeRfc64AuthorCommitCasV1(input);
+
+    expect(summary.removals).toEqual([
+      { graph: input.sharedProjectionGraph },
+      { graph: input.authorSealGraph, subject: input.authorSealSubject },
+      ...transitions.map((transition) => ({ graph: transition.graphUri, subject: transition.subject })),
+    ]);
+    expect(summary.quads).toEqual([
+      ...input.sharedProjectionQuads,
+      ...input.authorSealQuads,
+      ...transitions.flatMap((transition) => transition.quads),
+    ]);
+  });
+
+  it('summarizes the exported legacy contract with its predicate replacement and seal invalidations', () => {
+    const input = legacyAuthorCommitInput();
+
+    const summary = describeRfc64AuthorCommitCasV1(input);
+
+    expect(summary.removals).toEqual([
+      { graph: input.sharedProjectionGraph },
+      { graph: input.authorSealGraph, subject: input.authorSealSubject },
+      ...[input.kaStateDigest, input.subgraphMutationGeneration, input.contextGraphMutationGeneration, input.appliedSet]
+        .map((transition) => ({ graph: transition.graphUri, subject: transition.subject })),
+      { graph: SEAL_GRAPH, subject: INVALIDATED_SEAL },
+      { graph: input.currentHeadGraph, subject: input.currentHeadSubject, predicate: input.currentHeadPredicate },
+    ]);
+    expect(summary.quads).toContainEqual({
+      graph: input.currentHeadGraph,
+      subject: input.currentHeadSubject,
+      predicate: input.currentHeadPredicate,
+      object: input.nextCurrentHeadObject,
+    });
+    expect(summary.quads).toEqual(expect.arrayContaining(input.sharedProjectionQuads as never[]));
+  });
+
+  it('refuses to summarize an input the canonical plan refuses', () => {
+    const input = { ...authorCommitInput(), currentHead: undefined } as unknown as Rfc64AuthorCommitCasInputV1;
+    expect(() => describeRfc64AuthorCommitCasV1(input)).toThrow(/semantic transition/);
   });
 
   it('preserves exported legacy commits through worker transport and reopen', async () => {
@@ -606,6 +657,16 @@ describe('RFC-64 certified author commit CAS v1', () => {
     await expect(store.rfc64AuthorCommitCasV1(authorCommitInput())).resolves.toBe('conflict');
     expect(store.getWriteGen(affectedPrefix)).toBe(affectedAfterCommit);
     expect(store.getWriteGen(unrelatedPrefix)).toBe(unrelatedBefore);
+  });
+
+  it('rejects a staged triple whose predicate is not an IRI', () => {
+    const projection = authorCommitInput().sharedProjectionQuads;
+    expect(() => buildRfc64AuthorCommitCasUpdateV1(authorCommitInput({
+      sharedProjectionQuads: [{ ...projection[0], predicate: '_:p' }, projection[1]],
+    }))).toThrow(/predicate cannot be a blank node/);
+    expect(() => buildRfc64AuthorCommitCasUpdateV1(authorCommitInput({
+      authorSealQuads: [quad(SEAL, 'urn:p q', '"new-seal"', SEAL_GRAPH)],
+    }))).toThrow(/^Unsafe or empty IRI value/);
   });
 
   it('rejects ambiguous or unbounded fixed-manifest inputs before building an update', () => {

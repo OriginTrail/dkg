@@ -244,6 +244,114 @@ function catalogEvidenceFor(input: ReturnType<typeof fixture>) {
 }
 
 describe('durable VM / SWM tier reconciliation', () => {
+  it.each([undefined, 'code'])('does not reread finalized VM when no SWM head exists for subgraph %s', async (subGraphName) => {
+    const store = new OxigraphStore();
+    const input = fixture(subGraphName);
+    await store.insert([...input.payload, ...input.asset.metadataQuads]);
+    const query = vi.spyOn(store, 'query');
+    const retire = vi.fn(async () => {});
+
+    await expect(reconcileFinalizedSwmTwin({
+      store,
+      writeLocks: new Map(),
+      asset: input.asset,
+      retire,
+    })).resolves.toBe('head-missing-or-ambiguous');
+
+    expect(retire).not.toHaveBeenCalled();
+    expect(query.mock.calls.map(([, options]) => options?.source)).toEqual([
+      'agent.durableSync.finalizedSwmTwin.readHead',
+    ]);
+  });
+
+  it('reconciles a later SWM arrival after a VM-first absence check', async () => {
+    const store = new OxigraphStore();
+    const input = fixture();
+    await store.insert([...input.payload, ...input.asset.metadataQuads]);
+    const writeLocks = new Map<string, Promise<void>>();
+    const retire = vi.fn(async (candidate: FinalizedSwmTwinRetirement) => {
+      await store.dropGraph(candidate.swmGraph);
+    });
+
+    await expect(reconcileFinalizedSwmTwin({
+      store,
+      writeLocks,
+      asset: input.asset,
+      retire,
+    })).resolves.toBe('head-missing-or-ambiguous');
+    expect(retire).not.toHaveBeenCalled();
+
+    await seedTwin(store, input);
+    await expect(reconcileFinalizedSwmTwinFromDescriptor({
+      store,
+      writeLocks,
+      contextGraphId: CG,
+      descriptor: descriptorFor(input),
+      retire,
+    })).resolves.toBe('retired');
+    expect(retire).toHaveBeenCalledTimes(1);
+    expect(await store.countQuads(input.swmGraph)).toBe(0);
+    expect(await store.countQuads(input.asset.assertionGraph)).toBe(input.payload.length);
+  });
+
+  it('preserves SWM when VM changes after the head check', async () => {
+    const store = new OxigraphStore();
+    const input = fixture();
+    await seedTwin(store, input);
+    const originalQuery = store.query.bind(store);
+    vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+      const result = await originalQuery(sparql, options);
+      if (options?.source === 'agent.durableSync.finalizedSwmTwin.readHead') {
+        await store.replaceGraph(input.asset.assertionGraph, input.payload.map((quad) => ({
+          ...quad,
+          object: '"updated-after-head-check"',
+        })));
+      }
+      return result;
+    });
+    const retire = vi.fn(async () => {});
+
+    await expect(reconcileFinalizedSwmTwin({
+      store,
+      writeLocks: new Map(),
+      asset: input.asset,
+      retire,
+    })).resolves.toBe('vm-changed');
+    expect(retire).not.toHaveBeenCalled();
+    expect(await store.countQuads(input.swmGraph)).toBe(input.payload.length);
+  });
+
+  it.each(['swm', 'catalog'] as const)('preserves VM-proof-first failure for %s arrival', async (arrival) => {
+    const store = new OxigraphStore();
+    const input = fixture();
+    await seedTwin(store, input, { vmObject: '"changed-after-materialization"' });
+    const originalQuery = store.query.bind(store);
+    const query = vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+      if (options?.source === 'agent.durableSync.finalizedSwmTwin.readHead') {
+        throw new Error('head read must not supersede the VM mismatch');
+      }
+      return originalQuery(sparql, options);
+    });
+    const retire = vi.fn(async () => {});
+    const common = { store, writeLocks: new Map<string, Promise<void>>(), retire };
+    const reconciliation = arrival === 'swm'
+      ? reconcileFinalizedSwmTwinFromDescriptor({
+          ...common,
+          contextGraphId: CG,
+          descriptor: descriptorFor(input),
+        })
+      : reconcileFinalizedSwmTwinFromCatalogProjection({
+          ...common,
+          evidence: catalogEvidenceFor(input),
+        });
+
+    await expect(reconciliation).resolves.toBe('vm-changed');
+    expect(retire).not.toHaveBeenCalled();
+    expect(query.mock.calls.map(([, options]) => options?.source)).toEqual([
+      'agent.durableSync.finalizedSwmTwin.readGraph',
+    ]);
+  });
+
   it.each([undefined, 'code'])('retires an exact finalized twin for subgraph %s', async (subGraphName) => {
     const store = new OxigraphStore();
     const input = fixture(subGraphName);

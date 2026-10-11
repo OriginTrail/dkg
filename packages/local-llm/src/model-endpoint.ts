@@ -4,18 +4,17 @@ export type LocalModelEndpointProbeStrategy =
   | Readonly<{ kind: 'llama.cpp' }>;
 
 export type LocalModelEndpointAvailability =
-  | Readonly<{
-    status: 'ready';
-    reachable: true;
-  }>
+  | Readonly<{ status: 'ready' }>
   | Readonly<{
     status: 'not-ready';
-    reachable: true;
+    error: string;
+  }>
+  | Readonly<{
+    status: 'incompatible';
     error: string;
   }>
   | Readonly<{
     status: 'offline';
-    reachable: false;
     error: string;
   }>;
 
@@ -40,7 +39,8 @@ interface ModelListEntry {
 type ModelListInspection =
   | Readonly<{ status: 'ready' }>
   | Readonly<{ status: 'fallback'; reason: string }>
-  | Readonly<{ status: 'not-ready'; reason: string }>;
+  | Readonly<{ status: 'not-ready'; reason: string }>
+  | Readonly<{ status: 'incompatible'; reason: string }>;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -102,7 +102,7 @@ function inspectModelList(
   const entries = parseModelList(value);
   if (!entries) {
     return {
-      status: 'not-ready',
+      status: 'incompatible',
       reason: 'OpenAI-compatible models probe returned no valid model list',
     };
   }
@@ -133,15 +133,55 @@ function inspectModelList(
 }
 
 function offline(error: string): LocalModelEndpointAvailability {
-  return Object.freeze({ status: 'offline', reachable: false, error });
+  return Object.freeze({ status: 'offline', error });
 }
 
 function notReady(attempts: readonly string[]): LocalModelEndpointAvailability {
   return Object.freeze({
     status: 'not-ready',
-    reachable: true,
     error: `Local LLM server is reachable but not ready: ${attempts.join('; ')}`,
   });
+}
+
+function incompatible(attempts: readonly string[]): LocalModelEndpointAvailability {
+  return Object.freeze({
+    status: 'incompatible',
+    error: `No compatible local LLM server was detected: ${attempts.join('; ')}`,
+  });
+}
+
+type LlamaCppHealthInspection =
+  | Readonly<{ status: 'ready' }>
+  | Readonly<{ status: 'not-ready'; reason: string }>
+  | Readonly<{ status: 'incompatible'; reason: string }>;
+
+function inspectLlamaCppHealth(
+  value: unknown,
+  httpStatus: number,
+): LlamaCppHealthInspection {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return { status: 'incompatible', reason: 'llama.cpp health fallback returned an invalid body' };
+  }
+  const record = value as Record<string, unknown>;
+  if (httpStatus >= 200 && httpStatus < 300 && record.status === 'ok') {
+    return { status: 'ready' };
+  }
+  const error = record.error;
+  if (httpStatus === 503 && typeof error === 'object' && error !== null && !Array.isArray(error)) {
+    const detail = error as Record<string, unknown>;
+    if (
+      detail.code === 503
+      && detail.type === 'unavailable_error'
+      && typeof detail.message === 'string'
+      && detail.message.trim().toLowerCase().startsWith('loading model')
+    ) {
+      return { status: 'not-ready', reason: detail.message.trim() };
+    }
+  }
+  return {
+    status: 'incompatible',
+    reason: `llama.cpp health fallback returned an unrecognized HTTP ${httpStatus} response`,
+  };
 }
 
 /**
@@ -171,6 +211,7 @@ export async function probeLocalModelEndpoint(
 
   const attempts: string[] = [];
   let reachable = false;
+  let detected = false;
   let useHealthFallback = strategy.kind !== 'ollama';
 
   try {
@@ -184,13 +225,17 @@ export async function probeLocalModelEndpoint(
       try {
         const inspection = inspectModelList(await response.json(), configuredModel, strategy);
         if (inspection.status === 'ready') {
-          return Object.freeze({ status: 'ready', reachable: true });
+          return Object.freeze({ status: 'ready' });
         }
         attempts.push(inspection.reason);
-        if (inspection.status === 'not-ready') return notReady(attempts);
+        if (inspection.status === 'incompatible') return incompatible(attempts);
+        if (inspection.status === 'not-ready') {
+          return notReady(attempts);
+        }
+        detected = true;
       } catch (error) {
         attempts.push(`OpenAI-compatible models probe returned invalid JSON: ${errorMessage(error)}`);
-        return notReady(attempts);
+        return incompatible(attempts);
       }
     } else {
       attempts.push(`OpenAI-compatible models probe returned HTTP ${response.status}`);
@@ -201,7 +246,7 @@ export async function probeLocalModelEndpoint(
   }
 
   if (!useHealthFallback) {
-    return reachable ? notReady(attempts) : offline(`Local LLM server is offline: ${attempts.join('; ')}`);
+    return reachable ? incompatible(attempts) : offline(`Local LLM server is offline: ${attempts.join('; ')}`);
   }
 
   try {
@@ -211,29 +256,19 @@ export async function probeLocalModelEndpoint(
       signal: AbortSignal.timeout(timeoutMs),
     });
     reachable = true;
-    if (response.ok) {
-      try {
-        const payload = await response.json() as { status?: unknown };
-        if (
-          typeof payload === 'object'
-          && payload !== null
-          && !Array.isArray(payload)
-          && payload.status === 'ok'
-        ) {
-          return Object.freeze({ status: 'ready', reachable: true });
-        }
-        attempts.push('llama.cpp health fallback did not return {"status":"ok"}');
-      } catch (error) {
-        attempts.push(`llama.cpp health fallback returned invalid JSON: ${errorMessage(error)}`);
-      }
-    } else {
-      attempts.push(`llama.cpp health fallback returned HTTP ${response.status}`);
+    try {
+      const inspection = inspectLlamaCppHealth(await response.json(), response.status);
+      if (inspection.status === 'ready') return Object.freeze({ status: 'ready' });
+      attempts.push(inspection.reason);
+      if (inspection.status === 'not-ready') return notReady(attempts);
+    } catch (error) {
+      attempts.push(`llama.cpp health fallback returned invalid JSON: ${errorMessage(error)}`);
     }
   } catch (error) {
     attempts.push(`llama.cpp health fallback failed: ${errorMessage(error)}`);
   }
 
   return reachable
-    ? notReady(attempts)
+    ? (detected ? notReady(attempts) : incompatible(attempts))
     : offline(`Local LLM server is offline: ${attempts.join('; ')}`);
 }

@@ -29,7 +29,6 @@ import {
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 
-import { mapWithConcurrency } from '../map-with-concurrency.js';
 import type { Rfc64PublicCatalogSuccessorAssetInputV1 } from
   './public-catalog-successor-producer-v1.js';
 import {
@@ -42,6 +41,13 @@ export const RFC64_SWM_INVENTORY_CATALOG_TARGET_MAX_ROWS_V1 =
 
 /** Bound read-only projection resolution so a large author lane does not serialize N store reads. */
 const RFC64_SWM_INVENTORY_CATALOG_RESOLVE_CONCURRENCY_V1 = 8;
+
+/** A usable caller width, never wider than the bound above. */
+function resolveConcurrencyV1(requested: number | undefined): number {
+  return Number.isSafeInteger(requested) && (requested as number) >= 1
+    ? Math.min(requested as number, RFC64_SWM_INVENTORY_CATALOG_RESOLVE_CONCURRENCY_V1)
+    : RFC64_SWM_INVENTORY_CATALOG_RESOLVE_CONCURRENCY_V1;
+}
 
 export type Rfc64SwmInventoryCatalogReconcilerErrorCodeV1 =
   | 'swm-catalog-reconcile-input'
@@ -63,9 +69,17 @@ export class Rfc64SwmInventoryCatalogReconcilerErrorV1 extends Error {
 
 export interface PrepareRfc64SwmInventoryCatalogTargetInputV1 {
   readonly snapshot: SwmAuthorInventorySnapshotV1;
+  readonly signal?: AbortSignal;
+  /**
+   * Most rows resolved at once, at most 8 (the default). A caller whose
+   * resolver reads through an admission lane passes what that lane admits at
+   * once: a wider fan-out queues its surplus reads behind their own siblings.
+   */
+  readonly resolveConcurrency?: number;
   /** Resolve the exact durable shared projection and seal named by one signed row. */
   readonly resolveAsset: (
     row: Readonly<SwmAuthorInventoryRowV1>,
+    signal: AbortSignal,
   ) => Promise<Rfc64PublicCatalogSuccessorAssetInputV1>;
 }
 
@@ -112,13 +126,14 @@ export async function prepareRfc64SwmInventoryCatalogTargetV1(
     ...inventoryScope,
     bucketCount: '1',
   }) as AuthorCatalogScopeV1;
-  const assets = await mapWithConcurrency(
+  const assets = await resolveCatalogAssetsWithDrainV1(
     snapshot.rows,
-    RFC64_SWM_INVENTORY_CATALOG_RESOLVE_CONCURRENCY_V1,
-    async (row): Promise<Rfc64PublicCatalogSuccessorAssetInputV1> => {
+    async (row, signal): Promise<Rfc64PublicCatalogSuccessorAssetInputV1> => {
       let resolved: Rfc64PublicCatalogSuccessorAssetInputV1;
       try {
-        resolved = await input.resolveAsset(row);
+        signal.throwIfAborted();
+        resolved = await input.resolveAsset(row, signal);
+        signal.throwIfAborted();
       } catch (cause) {
         fail(
           'swm-catalog-reconcile-resolution',
@@ -130,6 +145,8 @@ export async function prepareRfc64SwmInventoryCatalogTargetV1(
       assertAssetBindsInventoryRow(asset, row);
       return asset;
     },
+    resolveConcurrencyV1(input.resolveConcurrency),
+    input.signal,
   );
 
   return Object.freeze({
@@ -138,6 +155,47 @@ export async function prepareRfc64SwmInventoryCatalogTargetV1(
     catalogScope,
     assets: Object.freeze(assets),
   });
+}
+
+/** Failed repairs retain ownership of admitted reads until physical retirement. */
+async function resolveCatalogAssetsWithDrainV1<T>(
+  rows: readonly SwmAuthorInventoryRowV1[],
+  resolve: (row: Readonly<SwmAuthorInventoryRowV1>, signal: AbortSignal) => Promise<T>,
+  concurrency: number,
+  externalSignal?: AbortSignal,
+): Promise<T[]> {
+  externalSignal?.throwIfAborted();
+  const controller = new AbortController();
+  const results: T[] = [];
+  let next = 0;
+  let failed = false;
+  let failure: unknown;
+  const stop = (error: unknown) => {
+    if (failed) return;
+    failed = true;
+    failure = error;
+    controller.abort(error);
+  };
+  const onAbort = () => stop(externalSignal!.reason);
+  externalSignal?.addEventListener('abort', onAbort, { once: true });
+  try {
+    await Promise.all(Array.from({
+      length: Math.min(rows.length, concurrency),
+    }, async () => {
+      while (!failed && next < rows.length) {
+        const index = next++;
+        try {
+          results[index] = await resolve(rows[index]!, controller.signal);
+        } catch (error) {
+          stop(error);
+        }
+      }
+    }));
+  } finally {
+    externalSignal?.removeEventListener('abort', onAbort);
+  }
+  if (failed) throw failure;
+  return results;
 }
 
 function snapshotInventory(input: unknown): SwmAuthorInventorySnapshotV1 {

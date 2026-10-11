@@ -111,6 +111,34 @@ export class Rfc64ReceiverTaskLifecycleV1<
     return this.#queue.length === 0 && this.#deferred.size === 0 && this.#active.size === 0;
   }
 
+  /**
+   * Idleness for ONE context graph.
+   *
+   * A replay pass for graph A must not be held open by graph B's queued work:
+   * while it is parked, A latches its own replay-active flag, and the status
+   * projection withholds A's catalog parity for as long as that lasts. Every
+   * task already carries its own `contextGraphId` — `cancelContextGraph` fences
+   * on the same field — so scoping the question needs no new state. It is a
+   * linear scan where `isIdle` is O(1), bounded by the receiver's admission
+   * caps; an id that matches no task reads idle, so callers must pass the
+   * exact id their tasks were filed under.
+   *
+   * Deferred tasks count as busy, matching `isIdle`: a task waiting on its
+   * retry timer is work this context graph has not finished.
+   */
+  isIdleForContextGraph(contextGraphId: string): boolean {
+    for (const task of this.#queue) {
+      if (task.contextGraphId === contextGraphId) return false;
+    }
+    for (const task of this.#deferred) {
+      if (task.contextGraphId === contextGraphId) return false;
+    }
+    for (const task of this.#active) {
+      if (task.contextGraphId === contextGraphId) return false;
+    }
+    return true;
+  }
+
   pending(key: string): TTask | undefined {
     return this.#pendingByKey.get(key);
   }

@@ -89,6 +89,20 @@ export type PriorityAdmissionHandoffOptions<Payload> = Omit<
   'ownerKey' | 'queueLimit' | 'ownerQueueLimit' | 'reserveForHandoff'
 >;
 
+/** The terms of an admission that decide what the queue does with it. */
+export type PriorityAdmissionProbeOptions<Payload> = Pick<
+  PriorityAdmissionAcquireOptions<Payload>,
+  | 'payload' | 'ownerKey' | 'lane' | 'priority' | 'priorityClass'
+  | 'queueLimit' | 'ownerQueueLimit' | 'agingThresholdMs' | 'reserveForHandoff'
+>;
+
+/** What the queue does with one admission, decided before anything changes. */
+type AdmissionDecision<Payload> =
+  | { readonly kind: 'start' }
+  | { readonly kind: 'queue' }
+  | { readonly kind: 'displace'; readonly victim: InternalEntry<Payload> }
+  | { readonly kind: 'refuse'; readonly reason: 'global_queue_full' | 'owner_queue_full' };
+
 interface HandoffReservation {
   sequence: number;
   ownerKey: string;
@@ -167,16 +181,22 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
     return this.acquireInternal(options);
   }
 
-  private acquireInternal(
-    options: PriorityAdmissionAcquireOptions<Payload>,
-    handoffReservation?: HandoffReservation,
-  ): PriorityAdmission<Payload> {
-    if (options.signal?.aborted) throw abortError(options.signal.reason);
-    this.reconcileAgedTurnOwed();
-    const ownerKey = handoffReservation?.ownerKey ?? options.ownerKey ?? '';
-    const queuedBefore = this.queue.length;
-    const sequence = handoffReservation?.sequence ?? this.nextSequence++;
-    const base: PriorityAdmissionEntry<Payload> = {
+  /**
+   * Whether `acquire` would refuse these terms right now. A read of the same
+   * decision `acquire` acts on: it claims no capacity, queues nothing,
+   * displaces nothing, and records nothing.
+   */
+  wouldRefuse(options: PriorityAdmissionProbeOptions<Payload>): boolean {
+    const probe = this.entryFor(options, options.ownerKey ?? '', this.nextSequence);
+    return this.decide(probe, options).kind === 'refuse';
+  }
+
+  private entryFor(
+    options: PriorityAdmissionProbeOptions<Payload>,
+    ownerKey: string,
+    sequence: number,
+  ): PriorityAdmissionEntry<Payload> {
+    return {
       payload: options.payload,
       ownerKey,
       lane: options.lane,
@@ -186,6 +206,50 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
       enqueuedAt: this.now(),
       agingThresholdMs: options.agingThresholdMs,
     };
+  }
+
+  /**
+   * The one admission decision, with no side effect: start when capacity is
+   * free, no queued entry is runnable and a handoff reservation would still
+   * fit; otherwise queue while the bounds allow it, or by displacing a
+   * lower-priority entry; otherwise refuse. A handoff consumes the slot its
+   * running stage reserved, so it always queues.
+   */
+  private decide(
+    entry: PriorityAdmissionEntry<Payload>,
+    options: Pick<
+      PriorityAdmissionAcquireOptions<Payload>,
+      'priority' | 'queueLimit' | 'ownerQueueLimit' | 'reserveForHandoff'
+    >,
+    handoffReservation?: HandoffReservation,
+  ): AdmissionDecision<Payload> {
+    if (handoffReservation) return { kind: 'queue' };
+    const { ownerKey } = entry;
+    const globalFull = this.queue.length + this.handoffReservations.size >= options.queueLimit;
+    const ownerFull = options.ownerQueueLimit !== undefined
+      && this.countOwner(ownerKey) + this.countReservedOwner(ownerKey) >= options.ownerQueueLimit;
+    const reservationFull = options.reserveForHandoff === true && (globalFull || ownerFull);
+    const queuedRunnable = this.queue.some((queued) => (
+      !queued.settled && this.hooks.canRun(queued)
+    ));
+    if (this.hooks.canRun(entry) && !queuedRunnable && !reservationFull) return { kind: 'start' };
+    if (!globalFull && !ownerFull) return { kind: 'queue' };
+    const victim = this.selectDisplacementVictim(options, ownerKey, ownerFull);
+    return victim
+      ? { kind: 'displace', victim }
+      : { kind: 'refuse', reason: globalFull ? 'global_queue_full' : 'owner_queue_full' };
+  }
+
+  private acquireInternal(
+    options: PriorityAdmissionAcquireOptions<Payload>,
+    handoffReservation?: HandoffReservation,
+  ): PriorityAdmission<Payload> {
+    if (options.signal?.aborted) throw abortError(options.signal.reason);
+    this.reconcileAgedTurnOwed();
+    const ownerKey = handoffReservation?.ownerKey ?? options.ownerKey ?? '';
+    const queuedBefore = this.queue.length;
+    const sequence = handoffReservation?.sequence ?? this.nextSequence++;
+    const base = this.entryFor(options, ownerKey, sequence);
     if (this.hooks.observability && !this.hasStaticObservabilityCapacity) {
       this.updatePressureCapacity({
         queueLimit: options.queueLimit,
@@ -197,28 +261,9 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
       });
     }
 
-    const reservedGlobal = this.handoffReservations.size;
-    const reservedOwner = this.countReservedOwner(ownerKey);
-    const reservationGlobalFull = Boolean(
-      options.reserveForHandoff
-      && queuedBefore + reservedGlobal >= options.queueLimit,
-    );
-    const reservationOwnerFull = Boolean(
-      options.reserveForHandoff
-      && options.ownerQueueLimit !== undefined
-      && this.countOwner(ownerKey) + reservedOwner >= options.ownerQueueLimit,
-    );
-    const queuedRunnable = this.queue.some((entry) => (
-      !entry.settled && this.hooks.canRun(entry)
-    ));
+    const decision = this.decide(base, options, handoffReservation);
 
-    if (
-      !handoffReservation
-      && this.hooks.canRun(base)
-      && !queuedRunnable
-      && !reservationGlobalFull
-      && !reservationOwnerFull
-    ) {
+    if (decision.kind === 'start') {
       this.observePressureEnqueue(base);
       let release: PriorityAdmissionRelease;
       try {
@@ -241,25 +286,17 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
       return admission;
     }
 
-    const globalFull = queuedBefore + reservedGlobal >= options.queueLimit;
-    const ownerFull = options.ownerQueueLimit !== undefined
-      && this.countOwner(ownerKey) + reservedOwner >= options.ownerQueueLimit;
-    if (!handoffReservation && (globalFull || ownerFull)) {
-      const victim = this.selectDisplacementVictim(options, ownerKey, ownerFull);
-      if (!victim) {
-        this.recordDecision(base, 'rejected');
-        this.observePressureReject(
-          base,
-          globalFull ? 'global_queue_full' : 'owner_queue_full',
-        );
-        throw options.createBusyError(globalFull ? 'global_queue_full' : 'owner_queue_full');
-      }
-      if (victim) {
-        this.observePressureReject(victim, 'displaced');
-        this.remove(victim);
-        this.recordDecision(victim, 'displaced');
-        this.rejectOnce(victim, options.createDisplacedError(victim));
-      }
+    if (decision.kind === 'refuse') {
+      this.recordDecision(base, 'rejected');
+      this.observePressureReject(base, decision.reason);
+      throw options.createBusyError(decision.reason);
+    }
+    if (decision.kind === 'displace') {
+      const { victim } = decision;
+      this.observePressureReject(victim, 'displaced');
+      this.remove(victim);
+      this.recordDecision(victim, 'displaced');
+      this.rejectOnce(victim, options.createDisplacedError(victim));
     }
 
     if (handoffReservation) {
@@ -402,7 +439,7 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
   }
 
   private selectDisplacementVictim(
-    options: PriorityAdmissionAcquireOptions<Payload>,
+    options: Pick<PriorityAdmissionAcquireOptions<Payload>, 'priority'>,
     ownerKey: string,
     ownerFull: boolean,
   ): InternalEntry<Payload> | undefined {

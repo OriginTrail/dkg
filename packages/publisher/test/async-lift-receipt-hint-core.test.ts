@@ -9,6 +9,7 @@ import {
   kaVmRecoveryEvidence,
   recoveredResolution,
 } from '../../../scripts/testing/ka-vm-publish.js';
+import { readPersistedLiftJob } from './_helpers/persisted-lift-job.js';
 import { createReceiptHintHarness } from './_helpers/receipt-hint-scenario.js';
 
 describe('receipt-hint lane: core and evidence', () => {
@@ -16,6 +17,54 @@ describe('receipt-hint lane: core and evidence', () => {
 
   beforeEach(() => {
     h = createReceiptHintHarness();
+  });
+
+  it('exposes observations before the executor tail, and persists them with inclusion', async () => {
+    const { publisher, jobId, releaseTail } = await h.parkedHintScenario();
+    try {
+      const broadcast = await publisher.getStatus(jobId);
+      expect(broadcast?.status).toBe('broadcast');
+      const receiptAt = broadcast?.timestamps.receiptObservedAt;
+      expect(receiptAt).toBeGreaterThan(0);
+      expect(broadcast?.timestamps.finalityObservedAt).toBeUndefined();
+      expect((await publisher.list()).find((job) => job.jobId === jobId)?.timestamps.receiptObservedAt).toBe(receiptAt);
+      await publisher.recover();
+      const included = await publisher.getStatus(jobId);
+      expect(included?.status).toBe('included');
+      expect(included?.timestamps.receiptObservedAt).toBe(receiptAt);
+      expect(included?.timestamps.finalityObservedAt).toBeGreaterThanOrEqual(receiptAt!);
+      expect(included?.timestamps.finalityObservedAt).toBeLessThanOrEqual(included!.timestamps.includedAt!);
+      expect((await readPersistedLiftJob(h.store, jobId))?.timestamps).toEqual(included?.timestamps);
+      releaseTail();
+      await publisher.drainDetachedExecutions?.();
+      await publisher.recover();
+      const finalized = await publisher.getStatus(jobId);
+      expect(finalized?.status).toBe('finalized');
+      expect(finalized?.timestamps.receiptObservedAt).toBe(receiptAt);
+      expect(finalized?.timestamps.finalityObservedAt).toBe(included?.timestamps.finalityObservedAt);
+      expect(finalized?.timestamps.finalizedAt).toBeGreaterThanOrEqual(finalized!.timestamps.finalityObservedAt!);
+    } finally {
+      releaseTail();
+      await publisher.drainDetachedExecutions?.();
+    }
+  });
+
+  it('shows a receipt to another publisher instance over the same store before it is persisted', async () => {
+    // The daemon serves job views from a control instance, not from the one executing the job.
+    const { publisher, jobId, releaseTail } = await h.parkedHintScenario();
+    try {
+      const control = h.createPublisher();
+
+      const viewed = await control.getStatus(jobId);
+      expect(viewed?.status).toBe('broadcast');
+      expect(viewed?.timestamps.receiptObservedAt).toBeGreaterThan(viewed!.timestamps.broadcastAt!);
+      expect(viewed).toEqual(await publisher.getStatus(jobId));
+      expect((await control.list()).find((job) => job.jobId === jobId)).toEqual(viewed);
+      expect((await readPersistedLiftJob(h.store, jobId))?.timestamps).not.toHaveProperty('receiptObservedAt');
+    } finally {
+      releaseTail();
+      await publisher.drainDetachedExecutions?.();
+    }
   });
 
   it('frees the wallet through the receipt hint while the executor tail is still running', async () => {
@@ -101,6 +150,7 @@ describe('receipt-hint lane: core and evidence', () => {
     await publisher.reconcileTransactions();
     await publisher.reconcileTransactions();
     expect((await publisher.getStatus(jobId))?.status).toBe('broadcast');
+    expect((await publisher.getStatus(jobId))?.timestamps.receiptObservedAt).toBeUndefined();
     await h.expectWalletLock('wallet-1', 'held');
 
     // The normal settle path is untouched: tail settles, the demanded pass proves and finalizes.

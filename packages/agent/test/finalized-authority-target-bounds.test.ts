@@ -119,10 +119,15 @@ describe('finalized Context Graph authority target bounds', () => {
       });
 
     expect(reader.resolveFinalizedContextGraphIdsByNameHashes)
-      .toHaveBeenCalledWith([NAME_HASH], { signal: expect.any(AbortSignal) });
-    // The physical index fence still runs, so the reported detail is the
-    // guard's own message and not a teardown failure.
-    expect(reader.whenIdle).toHaveBeenCalledOnce();
+      .toHaveBeenCalledWith([NAME_HASH], {
+        signal: expect.any(AbortSignal),
+        // Registration discovery is a governed lane, so the adapter reports
+        // whether a projection answered: a cache-served binding must not be
+        // credited to the provider pool as recovery evidence.
+        onContextGraphAuthorityProjectionServed: expect.any(Function),
+      });
+    // Reader teardown is lifecycle-owned, outside this result's deadline.
+    expect(reader.whenIdle).not.toHaveBeenCalled();
     // An out-of-range finalized word must never fall through to the
     // compatibility current-state resolver, which would answer 42 instead.
     expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
@@ -150,7 +155,7 @@ describe('finalized Context Graph authority target bounds', () => {
         detail: SNAPSHOT_MISMATCH,
       });
 
-    expect(reader.whenIdle).toHaveBeenCalledOnce();
+    expect(reader.whenIdle).not.toHaveBeenCalled();
     expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
   });
 
@@ -170,8 +175,14 @@ describe('finalized Context Graph authority target bounds', () => {
       });
 
     expect(reader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes)
-      .toHaveBeenCalledWith([NAME_HASH], { signal: expect.any(AbortSignal) });
-    expect(reader.whenIdle).toHaveBeenCalledOnce();
+      .toHaveBeenCalledWith([NAME_HASH], {
+        signal: expect.any(AbortSignal),
+        // Registration discovery is a governed lane, so the adapter reports
+        // whether a projection answered: a cache-served binding must not be
+        // credited to the provider pool as recovery evidence.
+        onContextGraphAuthorityProjectionServed: expect.any(Function),
+      });
+    expect(reader.whenIdle).not.toHaveBeenCalled();
     // The finalized index owned the answer; the current-state resolver, which
     // returns the same id, was never consulted.
     expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
@@ -192,7 +203,13 @@ describe('finalized Context Graph authority target bounds', () => {
       });
 
     expect(reader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes)
-      .toHaveBeenCalledWith([NAME_HASH], { signal: expect.any(AbortSignal) });
+      .toHaveBeenCalledWith([NAME_HASH], {
+        signal: expect.any(AbortSignal),
+        // Registration discovery is a governed lane, so the adapter reports
+        // whether a projection answered: a cache-served binding must not be
+        // credited to the provider pool as recovery evidence.
+        onContextGraphAuthorityProjectionServed: expect.any(Function),
+      });
     expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
   });
 

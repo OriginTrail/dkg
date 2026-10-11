@@ -38,7 +38,7 @@ const profileArgs = [
   profileName,
   esbenchBin,
   '--config',
-  'esbench.config.mjs',
+  'bench/esbench.config.mjs',
   ...process.argv.slice(2),
 ];
 const env = createProfileEnvironment(process.env, {
@@ -140,7 +140,7 @@ async function linkExistingBenchmarkReports() {
   const {
     addLinkedReportNavigation,
     publishAsyncGetPages,
-  } = await import('../esbench.config.mjs');
+  } = await import('./esbench.config.mjs');
   const reportFiles = [
     'bench/results/latest.html',
     ...publishAsyncGetPages.map(([, file]) => file),

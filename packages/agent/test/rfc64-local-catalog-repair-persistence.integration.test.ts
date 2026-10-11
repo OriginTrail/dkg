@@ -86,12 +86,20 @@ describe('RFC-64 durable local SWM catalog projection repair', () => {
         attempts: 1,
       })]);
 
+    // Repeated active notifications must not turn a failure into a retry storm.
+    edge.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+    await edge.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    expect(repair).toHaveBeenCalledTimes(1);
+
     edge.unsubscribeFromContextGraph(CONTEXT_GRAPH_ID);
     edge.subscribeToContextGraph(CONTEXT_GRAPH_ID);
     await edge.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     expect(repair).toHaveBeenCalledTimes(2);
     expect(edge.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.repairs)
       .toEqual([expect.objectContaining({ outcome: 'failed', attempts: 2 })]);
+    edge.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+    await edge.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    expect(repair).toHaveBeenCalledTimes(2);
   }, 30_000);
 
   it('repairs durable additions and removals without remote author targets', async () => {

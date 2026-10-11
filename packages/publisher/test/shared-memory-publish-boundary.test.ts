@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { ethers } from 'ethers';
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   TRUST_LEVEL_PREDICATE,
@@ -389,6 +390,100 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     );
   });
 
+  it('uses one finalized creation pair without issuing separate name or policy reads', async () => {
+    const chain = privatePolicyChain();
+    let nameReads = 0;
+    let policyReads = 0;
+    chain.getContextGraphFinalizedCreation = async () => ({
+      nameHash: ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH)),
+      accessPolicy: 1,
+    });
+    chain.getContextGraphNameHash = async () => {
+      nameReads += 1;
+      throw new Error('separate name read must not run');
+    };
+    chain.getContextGraphAccessPolicy = async () => {
+      policyReads += 1;
+      throw new Error('separate policy read must not run');
+    };
+    const { publisher, store } = await makePublisher(chain);
+    await store.insert([
+      onChainIdQuad('1'),
+      q('urn:test:root:one'),
+      ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH, SWM_GRAPH),
+    ]);
+
+    await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, {
+      rootEntities: ['urn:test:root:one', CONTEXT_GRAPH_URI],
+    }, {
+      onChainContextGraphId: '1',
+      trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CONTEXT_GRAPH),
+    })).resolves.toMatchObject({ status: 'tentative' });
+    expect({ nameReads, policyReads }).toEqual({ nameReads: 0, policyReads: 0 });
+  });
+
+  it('does not splice live point reads onto a failed finalized creation proof', async () => {
+    const chain = privatePolicyChain({
+      nameHash: ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH)),
+    });
+    let nameReads = 0;
+    let policyReads = 0;
+    chain.getContextGraphFinalizedCreation = async () => {
+      throw new Error('lineage changed');
+    };
+    chain.getContextGraphNameHash = async () => {
+      nameReads += 1;
+      return ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH));
+    };
+    chain.getContextGraphAccessPolicy = async () => {
+      policyReads += 1;
+      return 1;
+    };
+    const { publisher, store } = await makeRealPublisher(chain);
+    await store.insert([onChainIdQuad('1')]);
+
+    await expect(publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      publishContextGraphId: '1',
+      quads: [
+        q('urn:test:root:one', 'http://schema.org/name', '"value"', ''),
+        ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH),
+      ],
+      trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CONTEXT_GRAPH),
+    })).rejects.toThrow(/trustedNonManifestCatalogTriples is only allowed/);
+    expect({ nameReads, policyReads }).toEqual({ nameReads: 0, policyReads: 0 });
+  });
+
+  it('keeps the live point-read fallback when the owner fast pair is unavailable', async () => {
+    const expectedNameHash = ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH));
+    const chain = privatePolicyChain({ nameHash: expectedNameHash });
+    let nameReads = 0;
+    let policyReads = 0;
+    chain.getContextGraphFinalizedCreation = async () => undefined;
+    chain.getContextGraphNameHash = async () => {
+      nameReads += 1;
+      return expectedNameHash;
+    };
+    chain.getContextGraphAccessPolicy = async () => {
+      policyReads += 1;
+      return 1;
+    };
+    const { publisher, store } = await makePublisher(chain);
+    await store.insert([
+      onChainIdQuad('1'),
+      q('urn:test:root:one'),
+      ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH, SWM_GRAPH),
+    ]);
+
+    await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, {
+      rootEntities: ['urn:test:root:one', CONTEXT_GRAPH_URI],
+    }, {
+      onChainContextGraphId: '1',
+      trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CONTEXT_GRAPH),
+    })).resolves.toMatchObject({ status: 'tentative' });
+    expect({ nameReads, policyReads }).toEqual({ nameReads: 1, policyReads: 1 });
+  });
+
   it('rejects trusted generated catalog floor for public direct publishes', async () => {
     const { publisher } = await makeRealPublisher();
 
@@ -571,6 +666,75 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     const subjects = new Set(publishSpy.calls[0][0].quads.map((qq: any) => qq.subject));
     expect(subjects.has('urn:test:root:one')).toBe(true);
     expect(subjects.has('urn:test:root:two')).toBe(true);
+  });
+});
+
+describe('publishFromSharedMemory VM registration guard', () => {
+  // The guard runs only on a real chain; mock and `none` chains skip it.
+  function registrationGuardChain() {
+    const chain = new NoChainAdapter() as any;
+    Object.defineProperty(chain, 'chainId', { value: 'evm:31337' });
+    return chain;
+  }
+
+  it('accepts a graph whose on-chain binding is only in its own _meta', async () => {
+    const { publisher, store, publishSpy } = await makePublisher(registrationGuardChain());
+    await store.insert([
+      q('urn:test:root:one'),
+      {
+        subject: CONTEXT_GRAPH_URI,
+        predicate: ON_CHAIN_ID_PREDICATE,
+        object: '"7"',
+        graph: `${CONTEXT_GRAPH_URI}/_meta`,
+      },
+    ]);
+
+    await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all')).resolves.toMatchObject({
+      status: 'tentative',
+    });
+    expect(publishSpy.calls).toHaveLength(1);
+  });
+
+  it('rejects a graph with neither a registration status nor an on-chain binding', async () => {
+    const { publisher, store, publishSpy } = await makePublisher(registrationGuardChain());
+    await store.insert([q('urn:test:root:one')]);
+
+    await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all')).rejects.toMatchObject({
+      code: 'CG_NOT_REGISTERED',
+    });
+    expect(publishSpy.calls).toHaveLength(0);
+  });
+
+  // An edge learns a public graph's id from the ContextGraphCreated event and
+  // syncs no `ontology` graph, so its store can hold only the local bootstrap's
+  // `unregistered` marker while the agent resolves the id from chain.
+  it('accepts the on-chain id the caller resolved when the store has no binding', async () => {
+    const { publisher, store, publishSpy } = await makePublisher(registrationGuardChain());
+    await store.insert([
+      q('urn:test:root:one'),
+      {
+        subject: CONTEXT_GRAPH_URI,
+        predicate: 'https://dkg.network/ontology#registrationStatus',
+        object: '"unregistered"',
+        graph: `${CONTEXT_GRAPH_URI}/_meta`,
+      },
+    ]);
+
+    await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', {
+      onChainContextGraphId: '7',
+    })).resolves.toMatchObject({ status: 'tentative' });
+    expect(publishSpy.calls).toHaveLength(1);
+    expect(publishSpy.calls[0][0].publishContextGraphId).toBe('7');
+  });
+
+  it('still rejects when the resolved on-chain id is blank', async () => {
+    const { publisher, store, publishSpy } = await makePublisher(registrationGuardChain());
+    await store.insert([q('urn:test:root:one')]);
+
+    await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', {
+      onChainContextGraphId: '  ',
+    })).rejects.toMatchObject({ code: 'CG_NOT_REGISTERED' });
+    expect(publishSpy.calls).toHaveLength(0);
   });
 });
 

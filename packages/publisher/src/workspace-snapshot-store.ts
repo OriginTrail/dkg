@@ -1,3 +1,4 @@
+import { FinalizedSnapshotCollector, SNAPSHOT_RETIREMENT_PATTERN } from './finalized-snapshot-collector.js';
 import {
   mkdir,
   readdir,
@@ -14,6 +15,7 @@ import { StringDecoder } from 'node:string_decoder';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { withSnapshotSource, readSnapshotSource, readSnapshotFileIdentity, sameSnapshotSource, sameSnapshotFileIdentity, snapshotPath, SnapshotSourceChangedError, type OpenedSnapshotSource, type SnapshotFileSource, type SnapshotFileIdentity, type SnapshotFileReader } from './workspace-snapshot-source.js';
 import { BoundedLruCache } from '@origintrail-official/dkg-core';
+import { snapshotHash, snapshotLifecycleGate, type WorkspaceSnapshotLifecycle } from './workspace-snapshot-lifecycle.js';
 
 export interface SharedMemoryPublicSnapshotStorageConfig {
   enabled?: boolean;
@@ -36,6 +38,10 @@ export interface SharedMemoryPublicSnapshotGarbageCollectionConfig {
   minAgeMs?: number;
   /** Remove abandoned atomic-write files after this age. Default: 1 hour. */
   staleTempAgeMs?: number;
+  /** Retire unreferenced confirmed-publish files without disk pressure. Default: false (opt in). */
+  finalizedCleanupEnabled?: boolean;
+  /** Grace after the last confirmed-publish retirement request. Default: 24 hours. */
+  finalizedRetentionMs?: number;
 }
 
 export interface SnapshotGarbageCollectionResult {
@@ -48,6 +54,8 @@ export interface SnapshotGarbageCollectionResult {
   readonly deletedTempBytes: number;
   readonly skippedActiveFiles: number;
   readonly failedDeletions: number;
+  readonly finalizedSnapshots: number;
+  readonly referencedSnapshots: number;
 }
 
 export interface FileWorkspacePublicSnapshotStoreOptions {
@@ -62,9 +70,16 @@ export interface FileWorkspacePublicSnapshotStoreOptions {
   }>;
   /** Test seam; production callers use Date.now(). */
   readonly now?: () => number;
+  readonly isSnapshotReferenced?: (ref: string) => Promise<boolean>;
 }
 
-export interface WorkspacePublicSnapshotStore {
+export interface WorkspacePublicSnapshotStore extends WorkspaceSnapshotIO {
+  /** All-or-nothing lifecycle capability; custom I/O stores retain their own policy. */
+  readonly lifecycle?: WorkspaceSnapshotLifecycle;
+}
+
+/** Snapshot bytes only: the scoped-write facade deliberately exposes this port. */
+export interface WorkspaceSnapshotIO {
   putSnapshot(input: {
     readonly digest: string;
     readonly quads: readonly Quad[];
@@ -103,6 +118,7 @@ export interface SnapshotPageIndexRecord {
 export interface SnapshotPageIndexStore {
   get(snapshotDigest: string): Promise<SnapshotPageIndexRecord | null>;
   upsert(record: SnapshotPageIndexRecord): Promise<void>;
+  delete?(snapshotDigest: string): Promise<void>;
 }
 
 const SNAPSHOT_PAGE_INDEX_VERSION = 1;
@@ -117,7 +133,7 @@ const DEFAULT_SNAPSHOT_GC_MIN_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
 const DEFAULT_SNAPSHOT_GC_STALE_TEMP_AGE_MS = 60 * 60 * 1_000;
 const DEFAULT_SNAPSHOT_GC_REFERENCE_FILESYSTEM_BYTES = 75 * GIB;
 const SNAPSHOT_FILE_PATTERN = /^([a-f0-9]{64})\.(?:nq|json)$/i;
-const SNAPSHOT_TEMP_FILE_PATTERN = /^([a-f0-9]{64})\.(?:nq|json)\.\d+\.\d+\.tmp$/i;
+const SNAPSHOT_TEMP_FILE_PATTERN = /^([a-f0-9]{64})\.(?:nq|json|retired)\.\d+\.[a-f0-9-]+\.tmp$/i;
 const SNAPSHOT_FILE_STAT_CONCURRENCY = 64;
 
 interface ResolvedSnapshotGarbageCollectionConfig {
@@ -129,6 +145,8 @@ interface ResolvedSnapshotGarbageCollectionConfig {
   hardReserveBytes: number;
   minAgeMs: number;
   staleTempAgeMs: number;
+  finalizedCleanupEnabled: boolean;
+  finalizedRetentionMs: number;
 }
 
 interface SnapshotStoreFile {
@@ -174,7 +192,6 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     string,
     Promise<{ readonly ref: string; readonly byteLength: number }>
   >();
-  private readonly activeSnapshots = new Map<string, number>();
   private readonly gcConfig: ResolvedSnapshotGarbageCollectionConfig;
   private readonly log?: (message: string) => void;
   private readonly getFilesystemSpace: (directory: string) => Promise<{
@@ -185,12 +202,16 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
   private readonly gcTimer?: NodeJS.Timeout;
   private garbageCollectionRun?: Promise<SnapshotGarbageCollectionResult>;
   private garbageCollectionRequiredWriteBytes = 0;
+  private readonly lifecycleGate: ReturnType<typeof snapshotLifecycleGate>;
+  readonly lifecycle: WorkspaceSnapshotLifecycle;
+  private readonly finalizedCollector: FinalizedSnapshotCollector;
 
   constructor(
     private readonly directory: string,
     private readonly pageIndexStore?: SnapshotPageIndexStore,
     options: FileWorkspacePublicSnapshotStoreOptions = {},
   ) {
+    this.lifecycleGate = snapshotLifecycleGate(directory);
     this.gcConfig = resolveSnapshotGarbageCollectionConfig(options.gc);
     this.log = options.log;
     const getAvailableBytes = options.getAvailableBytes;
@@ -202,6 +223,44 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
         })
         : filesystemSpace);
     this.now = options.now ?? Date.now;
+    const enabled = this.gcConfig.enabled && this.gcConfig.finalizedCleanupEnabled;
+    this.finalizedCollector = new FinalizedSnapshotCollector(directory, this.lifecycleGate, this.now, {
+      enabled, retentionMs: this.gcConfig.finalizedRetentionMs,
+      isSnapshotReferenced: options.isSnapshotReferenced, log: this.log,
+      removePayloads: async (hash, removed) => {
+        for (const format of ['nq', 'json'] as const) {
+          try {
+            const path = snapshotPath(this.directory, hash, format);
+            const file = await stat(path);
+            if (!file.isFile()) throw new Error('Snapshot retirement target is not a file');
+            await unlink(path);
+            removed(file.size);
+          } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+        }
+      },
+      removeDerivedState: async hash => {
+        this.pageIndexCache.delete(hash);
+        this.validationCache.delete(hash);
+        await this.pageIndexStore?.delete?.(`sha256:${hash}`);
+      },
+    });
+    this.lifecycle = {
+      // Operation-long leases keep files out of the collectors for a whole operation. They belong to
+      // finalized cleanup; a store without it keeps its earlier policy (a file is in use only while
+      // an individual read or write runs), so it does not offer the capability.
+      ...(enabled
+        ? {
+          finalizedCleanupEnabled: true as const,
+          operationLease: (ref: string) => this.lifecycleGate.acquire(snapshotHash(ref)),
+        }
+        : { finalizedCleanupEnabled: false as const }),
+      // `false` means the file is absent (ENOENT for every payload format) and nothing else does: any
+      // other failure to open it (EACCES, EIO, a directory or device at the path) rejects, and so does a
+      // failing gate, so reuse cannot mistake a present, unreadable file for a missing one. The lease the
+      // check needs is taken and released inside this call; the caller never owns one.
+      snapshotExists: async ref => this.withActiveSnapshotSource(snapshotHash(ref), async source => source !== null),
+      markPublished: refs => this.finalizedCollector.markPublishedSnapshots(refs),
+    };
     if (this.gcConfig.enabled) {
       this.gcTimer = setInterval(() => {
         void this.collectGarbage().then((result) => {
@@ -210,6 +269,7 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
             || result.deletedSnapshots > 0
             || result.deletedTempFiles > 0
             || result.failedDeletions > 0
+            || result.referencedSnapshots > 0
           ) {
             this.logGarbageCollection(result);
           }
@@ -242,6 +302,8 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     input: { readonly digest: string; readonly quads: readonly Quad[] },
     hash: string,
   ): Promise<{ readonly ref: string; readonly byteLength: number }> {
+    // Reuse is a new lifetime too; an earlier publish must not retire this use.
+    await this.finalizedCollector.cancel(hash);
     const filePath = snapshotPath(this.directory, hash, 'nq');
     const existingByteLength = await existingFileSize(filePath);
     if (existingByteLength !== null) {
@@ -418,6 +480,20 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     let failedDeletions = 0;
     const now = this.now();
     const files = await listSnapshotStoreFiles(this.directory);
+    const targetAvailableBytes = Math.max(
+      watermarks.targetFreeBytes,
+      watermarks.hardReserveBytes + requiredWriteBytes,
+    );
+    // Below the hard reserve, retirement candidates need not wait out their grace
+    // period. They still go through the same reference check (and fail closed).
+    const hardPressure = availableBytesBefore - requiredWriteBytes < watermarks.hardReserveBytes;
+    const finalized = await this.finalizedCollector.collect(files, hardPressure
+      ? { pressure: { bytesNeeded: Math.max(0, targetAvailableBytes - availableBytesBefore) } }
+      : {});
+    deletedSnapshots += finalized.deleted;
+    deletedSnapshotBytes += finalized.bytes;
+    availableBytesAfter += finalized.bytes;
+    failedDeletions += finalized.failed;
     const tempFiles = files.filter((file) => SNAPSHOT_TEMP_FILE_PATTERN.test(file.name));
     const staleTempFiles = await statSnapshotStoreFiles(
       tempFiles,
@@ -425,15 +501,15 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     );
 
     for (const file of staleTempFiles) {
-      if (this.isSnapshotActive(file.hash)) {
-        skippedActiveFiles += 1;
-        continue;
-      }
       try {
-        await unlink(file.path);
-        deletedTempFiles += 1;
-        deletedTempBytes += file.size;
-        availableBytesAfter += file.size;
+        const collected = await this.lifecycleGate.tryCollect(file.hash, async () => {
+          await unlink(file.path);
+          deletedTempFiles += 1;
+          deletedTempBytes += file.size;
+          availableBytesAfter += file.size;
+          return true;
+        });
+        if (collected === undefined) skippedActiveFiles += 1;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') failedDeletions += 1;
       }
@@ -442,11 +518,14 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     const triggered = availableBytesBefore < watermarks.triggerFreeBytes
       || availableBytesBefore - requiredWriteBytes < watermarks.hardReserveBytes;
     if (triggered) {
-      const targetAvailableBytes = Math.max(
-        watermarks.targetFreeBytes,
-        watermarks.hardReserveBytes + requiredWriteBytes,
-      );
-      const snapshotFiles = files.filter((file) => SNAPSHOT_FILE_PATTERN.test(file.name));
+      // Marked files were just judged by the collector (grace and reference check,
+      // or the reference check alone under hard pressure). Whatever it kept, including
+      // an unavailable checker or malformed record, must not fall to age-based eviction.
+      const retiredHashes = new Set(this.gcConfig.finalizedCleanupEnabled
+        ? files.filter(file => SNAPSHOT_RETIREMENT_PATTERN.test(file.name)).map(file => file.hash)
+        : []);
+      const snapshotFiles = files.filter((file) => SNAPSHOT_FILE_PATTERN.test(file.name)
+        && !retiredHashes.has(file.hash));
       const candidates = await statSnapshotStoreFiles(
         snapshotFiles,
         now - this.gcConfig.minAgeMs,
@@ -457,16 +536,19 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
 
       for (const file of candidates) {
         if (availableBytesAfter >= targetAvailableBytes) break;
-        if (this.isSnapshotActive(file.hash)) {
-          skippedActiveFiles += 1;
-          continue;
-        }
         try {
-          await unlink(file.path);
-          deletedSnapshots += 1;
-          deletedSnapshotBytes += file.size;
-          availableBytesAfter += file.size;
-          this.pageIndexCache.delete(file.hash);
+          const collected = await this.lifecycleGate.tryCollect(file.hash, async () => {
+            // A retirement may have been recorded after the directory scan.
+            if (this.gcConfig.finalizedCleanupEnabled
+              && await existingFileSize(this.finalizedCollector.path(file.hash)) !== null) return false;
+            await unlink(file.path);
+            deletedSnapshots += 1;
+            deletedSnapshotBytes += file.size;
+            availableBytesAfter += file.size;
+            this.pageIndexCache.delete(file.hash);
+            return true;
+          });
+          if (collected === undefined) skippedActiveFiles += 1;
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== 'ENOENT') failedDeletions += 1;
         }
@@ -483,6 +565,8 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
       deletedTempBytes,
       skippedActiveFiles,
       failedDeletions,
+      finalizedSnapshots: finalized.deleted,
+      referencedSnapshots: finalized.referenced,
     };
   }
 
@@ -533,19 +617,8 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     return this.withActiveSnapshot(hash, () => withSnapshotSource(this.directory, hash, operation));
   }
 
-  private async withActiveSnapshot<T>(hash: string, operation: () => Promise<T>): Promise<T> {
-    this.activeSnapshots.set(hash, (this.activeSnapshots.get(hash) ?? 0) + 1);
-    try {
-      return await operation();
-    } finally {
-      const remaining = (this.activeSnapshots.get(hash) ?? 1) - 1;
-      if (remaining > 0) this.activeSnapshots.set(hash, remaining);
-      else this.activeSnapshots.delete(hash);
-    }
-  }
-
-  private isSnapshotActive(hash: string): boolean {
-    return (this.activeSnapshots.get(hash) ?? 0) > 0;
+  private withActiveSnapshot<T>(hash: string, operation: () => Promise<T>): Promise<T> {
+    return this.lifecycleGate.use(hash, operation);
   }
 
   private logGarbageCollection(result: SnapshotGarbageCollectionResult): void {
@@ -554,7 +627,8 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
       + `snapshotBytes=${result.deletedSnapshotBytes} tempFiles=${result.deletedTempFiles} `
       + `tempBytes=${result.deletedTempBytes} availableBefore=${result.availableBytesBefore} `
       + `availableAfter=${result.availableBytesAfter} activeSkipped=${result.skippedActiveFiles} `
-      + `failed=${result.failedDeletions}`,
+      + `failed=${result.failedDeletions} finalized=${result.finalizedSnapshots} `
+      + `referenced=${result.referencedSnapshots}`,
     );
   }
 
@@ -631,15 +705,6 @@ function parseLegacyJsonSnapshot(raw: string, ref: string): Quad[] | null {
   });
 }
 
-function snapshotHash(ref: string): string {
-  const trimmed = ref.trim();
-  const hash = trimmed.startsWith('sha256:') ? trimmed.slice('sha256:'.length) : trimmed;
-  if (!/^[a-f0-9]{64}$/i.test(hash)) {
-    throw new Error(`Invalid shared-memory public snapshot ref ${ref}`);
-  }
-  return hash.toLowerCase();
-}
-
 function canonicalSnapshotDigest(ref: string): string {
   return `sha256:${snapshotHash(ref)}`;
 }
@@ -651,8 +716,16 @@ function resolveSnapshotGarbageCollectionConfig(
   if (typeof enabled !== 'boolean') {
     throw new Error('sharedMemoryPublicSnapshotStorage.gc.enabled must be a boolean');
   }
+  const finalizedCleanupEnabled = config?.finalizedCleanupEnabled ?? false;
+  if (typeof finalizedCleanupEnabled !== 'boolean') {
+    throw new Error('sharedMemoryPublicSnapshotStorage.gc.finalizedCleanupEnabled must be a boolean');
+  }
   const resolved = {
     enabled,
+    finalizedCleanupEnabled,
+    finalizedRetentionMs: snapshotGcInteger(
+      config?.finalizedRetentionMs, 24 * 60 * 60 * 1_000, 'finalizedRetentionMs', 0,
+    ),
     scaleDefaultWatermarksToFilesystem: config?.triggerFreeBytes === undefined
       && config?.targetFreeBytes === undefined
       && config?.hardReserveBytes === undefined,
@@ -767,24 +840,28 @@ async function existingFileSize(filePath: string): Promise<number | null> {
 }
 
 async function listSnapshotStoreFiles(directory: string): Promise<SnapshotStoreFile[]> {
-  let entries: Dirent<string>[];
-  try {
-    entries = await readdir(directory, { recursive: true, withFileTypes: true });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
-    throw error;
-  }
+  const read = async (path: string): Promise<Dirent<string>[]> => {
+    try { return await readdir(path, { withFileTypes: true }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
+  };
   const files: SnapshotStoreFile[] = [];
-  for (const entry of entries) {
-    if (!entry.isFile()) continue;
-    const match = entry.name.match(SNAPSHOT_FILE_PATTERN)
-      ?? entry.name.match(SNAPSHOT_TEMP_FILE_PATTERN);
-    if (!match?.[1]) continue;
-    files.push({
-      path: join(entry.parentPath, entry.name),
-      name: entry.name,
-      hash: match[1].toLowerCase(),
-    });
+  // A snapshot volume can be mounted here. Do not recursively enter lost+found,
+  // unrelated trees or symlinked directories before filtering payload names.
+  for (const first of await read(directory)) {
+    if (!first.isDirectory() || !/^[a-f0-9]{2}$/.test(first.name)) continue;
+    const firstPath = join(directory, first.name);
+    for (const second of await read(firstPath)) {
+      if (!second.isDirectory() || !/^[a-f0-9]{2}$/.test(second.name)) continue;
+      const secondPath = join(firstPath, second.name);
+      for (const entry of await read(secondPath)) {
+        if (!entry.isFile()) continue;
+        const match = entry.name.match(SNAPSHOT_FILE_PATTERN)
+          ?? entry.name.match(SNAPSHOT_TEMP_FILE_PATTERN)
+          ?? entry.name.match(SNAPSHOT_RETIREMENT_PATTERN);
+        if (!match?.[1] || !match[1].toLowerCase().startsWith(first.name + second.name)) continue;
+        files.push({ path: join(secondPath, entry.name), name: entry.name, hash: match[1].toLowerCase() });
+      }
+    }
   }
   return files;
 }
@@ -822,6 +899,8 @@ function emptyGarbageCollectionResult(): SnapshotGarbageCollectionResult {
     deletedTempBytes: 0,
     skippedActiveFiles: 0,
     failedDeletions: 0,
+    finalizedSnapshots: 0,
+    referencedSnapshots: 0,
   };
 }
 

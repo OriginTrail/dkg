@@ -234,10 +234,6 @@ export interface DkgMetrics {
   backpressureQueueWaitMs: Histogram;
   /** admitted-work duration by bounded scheduler, lane, and outcome */
   backpressureActiveDurationMs: Histogram;
-  /** scope={finalization|reconcile} */
-  storeScanSingleFlightJoinsTotal: Counter;
-  /** active unique scans by scope */
-  storeScanSingleFlightActive: UpDownCounter;
   /** bounded materialized result rows by static source */
   storeQueryResultRows: Histogram;
   /** conservative bounded materialized bytes by static source */
@@ -246,6 +242,16 @@ export interface DkgMetrics {
   storeCancellationCompletedTotal: Counter;
   /** scope and reason identify the bounded retry loop; attempt is capped */
   storeRetryAttemptsTotal: Counter;
+  /** adapter, operation,
+   *  position={graph|subject|predicate|object|datatype|subject-prefix},
+   *  kind={iri|literal|blank-node|relative-iri|rfc3987-iri},
+   *  enforcement={observe|reject} — malformed RDF terms reaching a storage
+   *  adapter's SPARQL builders, and relative or RFC 3987-invalid IRIs in the
+   *  quads it writes through its atomic-replace and RFC-64 builders or an
+   *  N-Quads load. `observe` = counted and logged, and the write was built
+   *  exactly as before validation existed (the pre-validation SPARQL still
+   *  strips characters from a malformed IRI). */
+  storeSparqlInvalidTermsTotal: Counter;
   /** current durable finalization entries whose retry gate is open */
   finalizationRecoveryDueEntries: Gauge;
   /** milliseconds since the oldest currently due finalization was received */
@@ -256,6 +262,12 @@ export interface DkgMetrics {
   finalizationRecoveryAdmissionTotal: Counter;
   /** durable finalization envelopes waiting for live-inbox capacity */
   finalizationRecoveryDeferredEntries: Gauge;
+  /** sampled StorageACK copies registered on chain but not in this core's VM past the stall threshold (last audit) */
+  vmPromotionStalledAcks: Gauge;
+  /** context graphs the ACK promotion audit recorded as core-hosted (backfill) */
+  vmPromotionBackfillRecordedTotal: Counter;
+  /** VM reconcile passes the ACK promotion watchdog re-triggered for stalled graphs */
+  vmPromotionRetriesTotal: Counter;
   /** process-local sync inflight sample */
   syncGlobalInflight: Histogram;
   /** ms; lane and priority_class are bounded sync scheduler enums */
@@ -345,6 +357,11 @@ export interface DkgMetrics {
   contextGraphCatchupJobsTotal: Counter;
   /** I9 — ms; walk jobs only, monotonic clock. admission={walk}. */
   contextGraphCatchupJobDurationMs: Histogram;
+  /** On-demand `agents` phonebook fetches. trigger={subscribe|vm-reconcile},
+   *  outcome={complete|partial|empty|failed|no-peers}, curator_resolved={true|false}. */
+  agentsPhonebookFetchTotal: Counter;
+  /** ms; on-demand `agents` phonebook fetches that reached a peer. trigger, outcome. */
+  agentsPhonebookFetchDurationMs: Histogram;
 }
 
 function buildMetrics(): DkgMetrics {
@@ -450,12 +467,6 @@ function buildMetrics(): DkgMetrics {
       description: 'Scheduler admitted-work duration by bounded scheduler, lane, and outcome',
       advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
     }),
-    storeScanSingleFlightJoinsTotal: meter.createCounter('dkg.store.scan_singleflight_joins_total', {
-      description: 'Equivalent expensive scans joined to an already running promise',
-    }),
-    storeScanSingleFlightActive: meter.createUpDownCounter('dkg.store.scan_singleflight_active', {
-      description: 'Currently running unique expensive scans',
-    }),
     storeQueryResultRows: meter.createHistogram('dkg.store.query_result_rows', {
       description: 'Rows retained by bounded expensive store reads',
       advice: { explicitBucketBoundaries: QUAD_COUNT_BUCKETS },
@@ -470,6 +481,9 @@ function buildMetrics(): DkgMetrics {
     }),
     storeRetryAttemptsTotal: meter.createCounter('dkg.store.retry_attempts_total', {
       description: 'Bounded expensive-work retry attempts',
+    }),
+    storeSparqlInvalidTermsTotal: meter.createCounter('dkg.store.sparql_invalid_terms_total', {
+      description: 'Malformed RDF terms reaching storage-adapter writes, by adapter, operation, position, kind and enforcement',
     }),
     finalizationRecoveryDueEntries: meter.createGauge(
       'dkg.finalization_recovery.due_entries',
@@ -493,6 +507,18 @@ function buildMetrics(): DkgMetrics {
     finalizationRecoveryDeferredEntries: meter.createGauge(
       'dkg.finalization_recovery.deferred_entries',
       { description: 'Durable finalization envelopes waiting for live-inbox capacity' },
+    ),
+    vmPromotionStalledAcks: meter.createGauge(
+      'dkg.vm_promotion.stalled_acks',
+      { description: 'Sampled StorageACK copies registered on chain but not in VM past the stall threshold' },
+    ),
+    vmPromotionBackfillRecordedTotal: meter.createCounter(
+      'dkg.vm_promotion.backfill_recorded_total',
+      { description: 'Context graphs the ACK promotion audit recorded as core-hosted' },
+    ),
+    vmPromotionRetriesTotal: meter.createCounter(
+      'dkg.vm_promotion.retries_total',
+      { description: 'VM reconcile passes re-triggered for graphs with stalled StorageACK copies' },
     ),
     syncGlobalInflight: meter.createHistogram('dkg.sync.global_inflight', {
       description: 'Sampled process-local sync inflight count',
@@ -590,6 +616,16 @@ function buildMetrics(): DkgMetrics {
       unit: 'ms',
       description: 'Walk catch-up job wall-time, monotonic clock',
       advice: { explicitBucketBoundaries: CATCHUP_DURATION_BUCKETS },
+    }),
+    agentsPhonebookFetchTotal: meter.createCounter('dkg.sync.agents_phonebook.fetch_total', {
+      description: 'On-demand agents phonebook fetches by trigger, outcome and whether a wanted curator resolved',
+    }),
+    agentsPhonebookFetchDurationMs: meter.createHistogram('dkg.sync.agents_phonebook.fetch_duration_ms', {
+      unit: 'ms',
+      description: 'Wall time of on-demand agents phonebook fetches that reached a peer',
+      // Full fetches take tens of seconds, and one that runs into its 120 s
+      // budget ends a little after it: the 300 s bound keeps both finite.
+      advice: { explicitBucketBoundaries: SYNC_OPERATION_DURATION_BUCKETS },
     }),
   };
 }

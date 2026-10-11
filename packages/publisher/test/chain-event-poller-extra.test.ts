@@ -472,16 +472,21 @@ describe('ChainEventPoller — fault isolation & lifecycle', () => {
   }, 30_000);
 });
 
-describe('ChainEventPoller — SPEC-GAP SG-6: adapter missing 4 extended event types', () => {
-  it('EVMChainAdapter.listenForEvents does NOT yield KnowledgeAssetUpdated / AllowListUpdated / ProfileCreated / ProfileUpdated', async () => {
+describe('ChainEventPoller — SPEC-GAP SG-6: adapter missing 3 extended event types', () => {
+  it('EVMChainAdapter.listenForEvents does NOT yield AllowListUpdated / ProfileCreated / ProfileUpdated', async () => {
     // Spec §5.1 names extended event types the poller declares callback
-    // slots for. Four are never produced by the real adapter (the V9
+    // slots for. Three are never produced by the real adapter (the V9
     // KnowledgeAssetsStorage branches were archived together with the
     // contract — see `packages/chain/src/archive/`). This test proves
     // the gap end-to-end against the V10 channels the adapter does
     // support today: we scan a broad block range asking for every
-    // currently-supported type plus the four missing ones, and assert
-    // the four missing ones are never yielded.
+    // currently-supported type plus the three missing ones, and assert
+    // the three missing ones are never yielded.
+    //
+    // `KnowledgeAssetUpdated` left this list with #2858: the adapter now
+    // yields it from DKGKnowledgeAssets (the VM refresh nudge). Its positive
+    // coverage lives with the adapter: `chain-lifecycle-extra.test.ts`
+    // (a real update on Hardhat) and `evm-adapter-events-one-log.unit.test.ts`.
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const provider = createProvider();
 
@@ -503,7 +508,7 @@ describe('ChainEventPoller — SPEC-GAP SG-6: adapter missing 4 extended event t
       yielded.push(ev.type);
     }
 
-    const missing = ['KnowledgeAssetUpdated', 'AllowListUpdated', 'ProfileCreated', 'ProfileUpdated'];
+    const missing = ['AllowListUpdated', 'ProfileCreated', 'ProfileUpdated'];
     for (const type of missing) {
       // This assertion is expected to PASS today (adapter never yields
       // these types). If a future PR extends the adapter correctly, the

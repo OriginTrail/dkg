@@ -690,6 +690,65 @@ describe('sync responder pagination interleaving', () => {
     expect(new Set(linesFromNquads(`${first}\n${second}`)).size).toBe(3);
   });
 
+  it('serves a fresh graph-scoped KA assertion graph once and never its legacy snapshot locator', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'graph-backed-swm-data-ttl';
+    const swmGraph = `did:dkg:context-graph:${cgId}/_shared_memory`;
+    const swmMetaGraph = `${swmGraph}_meta`;
+    const ual = 'did:dkg:testnet:20430/0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/1';
+    const assertionGraph = `${swmGraph}/0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/1`;
+    const shareOperationId = 'graph-backed-op';
+    const operationSubject = `urn:dkg:share:${cgId}:${shareOperationId}`;
+    const headSubject = `${ual}#dkg-swm-head`;
+    const snapshotGraph = `did:dkg:context-graph:${cgId}`
+      + `/_shared_memory_snapshots/_/${shareOperationId}/ka`;
+    const now = new Date().toISOString();
+    const int = (value: number) =>
+      `"${value}"^^<http://www.w3.org/2001/XMLSchema#integer>`;
+    const graphScopedRows: Quad[] = [
+      { graph: swmMetaGraph, subject: operationSubject, predicate: `${DKG_NS}contentScopeVersion`, object: int(GRAPH_KA_CONTENT_SCOPE_VERSION) },
+      { graph: swmMetaGraph, subject: operationSubject, predicate: `${DKG_NS}contextGraphId`, object: `"${cgId}"` },
+      { graph: swmMetaGraph, subject: operationSubject, predicate: `${DKG_NS}kaUal`, object: ual },
+      { graph: swmMetaGraph, subject: operationSubject, predicate: `${DKG_NS}assertionVersion`, object: int(1) },
+      { graph: swmMetaGraph, subject: operationSubject, predicate: `${DKG_NS}shareOperationId`, object: `"${shareOperationId}"` },
+      { graph: swmMetaGraph, subject: operationSubject, predicate: `${DKG_NS}publishedAt`, object: `"${now}"^^<http://www.w3.org/2001/XMLSchema#dateTime>` },
+      { graph: swmMetaGraph, subject: operationSubject, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: `${DKG_NS}WorkspaceOperation` },
+      { graph: swmMetaGraph, subject: operationSubject, predicate: `${DKG_NS}publicSnapshotGraph`, object: snapshotGraph },
+      { graph: swmMetaGraph, subject: headSubject, predicate: `${DKG_NS}contentScopeVersion`, object: int(GRAPH_KA_CONTENT_SCOPE_VERSION) },
+      { graph: swmMetaGraph, subject: headSubject, predicate: `${DKG_NS}kaUal`, object: ual },
+      { graph: swmMetaGraph, subject: headSubject, predicate: `${DKG_NS}assertionVersion`, object: int(1) },
+      { graph: swmMetaGraph, subject: headSubject, predicate: `${DKG_NS}shareOperationId`, object: `"${shareOperationId}"` },
+      { graph: swmMetaGraph, subject: headSubject, predicate: `${DKG_NS}assertionGraph`, object: assertionGraph },
+      { graph: assertionGraph, subject: 'urn:graph-backed:root', predicate: `${DKG_NS}label`, object: '"graph-backed"' },
+      { graph: assertionGraph, subject: 'urn:legacy:root', predicate: `${DKG_NS}label`, object: '"legacy"' },
+      { graph: snapshotGraph, subject: 'urn:graph-backed:root', predicate: `${DKG_NS}label`, object: '"must-not-serve"' },
+      // Put the same physical graph in the legacy root plan as well. Exact V2
+      // admission must win without duplicating the legacy root closure.
+      ...workspaceOpQuads(cgId, 'legacy-op', 'urn:legacy:root', swmMetaGraph, now),
+    ];
+    await store.insert(graphScopedRows);
+
+    const cap = registerTestSyncHandler(store, {
+      sharedMemoryTtlMs: 30 * 24 * 60 * 60 * 1000,
+      syncPageSize: 50,
+    });
+    const out = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: true,
+      phase: 'data',
+      offset: 0,
+      limit: 50,
+      syncSessionId: 'graph-backed-swm-data-session',
+    });
+
+    expect(lineGraphsFromNquads(out)).toEqual(new Set([assertionGraph]));
+    expect(linesFromNquads(out)).toHaveLength(2);
+    expect(new Set(linesFromNquads(out)).size).toBe(2);
+    expect(out).toContain('"graph-backed"');
+    expect(out).toContain('"legacy"');
+    expect(out).not.toContain('"must-not-serve"');
+  });
+
   it('falls back to store-bounded delta paging for an oversized sinceBatchId snapshot', async () => {
     const store = new OxigraphStore();
     const cgId = 'oversized-delta';

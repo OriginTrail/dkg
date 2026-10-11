@@ -62,18 +62,27 @@ export function createOxigraphWalMaintenanceCoordinator(
   let idleSince: number | null = null;
   let lastRestartAt = Number.NEGATIVE_INFINITY;
   let maintenancePending = false;
+  let restartRequested = false;
   let stopped = false;
 
   const totalActiveOperations = (): number =>
     [...activitySources.values()].reduce((sum, active) => sum + active, 0);
 
+  // One owner derives idle eligibility after activity and lifecycle changes.
+  const refreshIdleClock = (reset = false): void => {
+    if (stopped || !options.serverAvailable() || totalActiveOperations() > 0) {
+      idleSince = null;
+    } else if (reset || idleSince === null) {
+      idleSince = now();
+    }
+  };
+
   const evaluate = (): void => {
+    if (stopped) return;
+    refreshIdleClock();
     const observedAt = now();
     const activeOperations = totalActiveOperations();
-    if (!options.serverAvailable()) {
-      idleSince = null;
-      return;
-    }
+    if (!options.serverAvailable() || restartRequested) return;
 
     // Measure while the server is busy. Waiting to observe an idle tick before
     // looking at disk means a continuously loaded node can grow past the
@@ -98,14 +107,7 @@ export function createOxigraphWalMaintenanceCoordinator(
       );
     }
 
-    if (activeOperations !== 0) {
-      idleSince = null;
-      return;
-    }
-    if (idleSince === null) {
-      idleSince = observedAt;
-      return;
-    }
+    if (activeOperations !== 0 || idleSince === null) return;
     if (!maintenancePending) return;
     if (observedAt - idleSince < idleMs) return;
     const accepted = options.requestRestart(
@@ -113,17 +115,13 @@ export function createOxigraphWalMaintenanceCoordinator(
       + `after ${Math.round((observedAt - idleSince) / 1_000)}s idle`,
     );
     if (accepted) {
-      idleSince = null;
+      restartRequested = true;
+      refreshIdleClock(true);
     }
   };
 
   const timer = schedule(evaluate, checkIntervalMs);
   timer.unref?.();
-
-  const updateActivity = (activeOperations: number): void => {
-    if (activeOperations > 0) idleSince = null;
-    else if (options.serverAvailable() && idleSince === null) idleSince = now();
-  };
 
   return {
     registerActivity(): OxigraphWalMaintenanceActivityLease {
@@ -135,13 +133,13 @@ export function createOxigraphWalMaintenanceCoordinator(
           if (stopped || disposed) return;
           if (!Number.isSafeInteger(active) || active < 0) return;
           activitySources.set(key, active);
-          updateActivity(totalActiveOperations());
+          refreshIdleClock();
         },
         dispose(): void {
           if (disposed) return;
           disposed = true;
           activitySources.delete(key);
-          updateActivity(totalActiveOperations());
+          refreshIdleClock();
         },
       };
     },
@@ -153,20 +151,23 @@ export function createOxigraphWalMaintenanceCoordinator(
     // reopens the idle window from scratch.
     serverLifecycleChanged(): void {
       if (stopped) return;
-      idleSince = options.serverAvailable() && totalActiveOperations() === 0 ? now() : null;
+      if (options.serverAvailable()) restartRequested = false;
+      refreshIdleClock(true);
     },
     restartCompleted(): void {
       if (stopped || !maintenancePending) return;
       lastRestartAt = now();
       maintenancePending = false;
-      idleSince = null;
+      restartRequested = false;
+      refreshIdleClock(true);
     },
     stop(): void {
       if (stopped) return;
       stopped = true;
-      idleSince = null;
       maintenancePending = false;
+      restartRequested = false;
       activitySources.clear();
+      refreshIdleClock();
       cancel(timer);
     },
   };

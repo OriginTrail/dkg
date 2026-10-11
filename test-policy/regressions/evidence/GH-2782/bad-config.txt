@@ -1,0 +1,2 @@
+import { defineConfig } from 'vitest/config';
+export default defineConfig({ test: { allowOnly: false, include: ["test/regression-on-demand-cursor.test.ts"], pool: 'forks', maxWorkers: 1, testTimeout: 15000, hookTimeout: 15000, execArgv: ['--experimental-sqlite', '--no-warnings=ExperimentalWarning'] } });

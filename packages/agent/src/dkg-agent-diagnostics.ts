@@ -13,7 +13,7 @@
  * public surface and delegate here.
  */
 
-import { createOperationContext, PROTOCOL_MESSAGE, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import { advertisesSyncProtocol, createOperationContext, PROTOCOL_MESSAGE } from '@origintrail-official/dkg-core';
 import type { DKGNode, Logger } from '@origintrail-official/dkg-core';
 import type { SharedMemoryHandler } from '@origintrail-official/dkg-publisher';
 import type { Messenger } from './p2p/messenger.js';
@@ -282,8 +282,9 @@ export async function getPeerDiagnostics(
   // after sync moved off the messenger substrate), so a node
   // advertising the current protocol is reported sync-capable. Hard
   // cutover — peers on the older `/sync` wire ID are no longer
-  // compatible and intentionally report syncCapable=false.
-  const syncCapable = protocols.includes(PROTOCOL_SYNC);
+  // compatible and intentionally report syncCapable=false. The pooled
+  // overlay id (`/dkg/10.0.3/sync`) counts too (#2822).
+  const syncCapable = advertisesSyncProtocol(protocols);
   const syncCapability: PeerDiagnostics['syncStatus']['capability'] = peerStoreSnapshot == null
     ? 'unknown'
     : syncCapable

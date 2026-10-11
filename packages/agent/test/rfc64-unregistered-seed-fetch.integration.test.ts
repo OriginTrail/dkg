@@ -14,6 +14,7 @@
 import { multiaddr } from '@multiformats/multiaddr';
 import {
   contextGraphDataGraphUri,
+  DKG_ONTOLOGY,
   SYSTEM_CONTEXT_GRAPHS,
   type ContextGraphIdV1,
   type EvmAddressV1,
@@ -141,6 +142,68 @@ describe('RFC-64 unregistered authority seed fetch (agent)', () => {
     )).toBe(false);
     // The author's own persist happened once, at create, before any peer asked.
     expect(publisherSeeds.persist).toHaveBeenCalledOnce();
+  }, 60_000);
+
+  it.each([
+    ['', false],
+    [', also when shared metadata calls the graph private', true],
+  ] as const)('still bootstraps a public graph from a peer-served seed after this node signed a join request for it%s', async (_label, sharedPrivateClaim) => {
+    const resolveFinalized = vi.fn(async () => new Map());
+    const publisher = await startPublisher('seed-fetch-join-publisher');
+    const receiver = await startAgent({
+      name: 'seed-fetch-join-receiver',
+      config: {
+        rfc64CatalogDeploymentProfile: DEPLOYMENT,
+        chainAdapter: coldReplicaChainAdapter(resolveFinalized),
+      },
+    });
+    const receiverSeeds = spySeedStore(receiver);
+    allowAllNetworkAdmissionForTest(publisher);
+    allowAllNetworkAdmissionForTest(receiver);
+    await connectBothWays(receiver, publisher);
+
+    const nestedAgent = await publisher.registerAgent('nested-author');
+    const nestedOwner = nestedAgent.agentAddress.toLowerCase() as EvmAddressV1;
+    const contextGraphId = `${nestedOwner}/seed-fetch-join` as ContextGraphIdV1;
+    await publisher.createContextGraph({
+      id: contextGraphId,
+      name: 'Seed fetch after join request',
+      accessPolicy: 0,
+      callerAgentAddress: nestedOwner,
+    });
+    vi.spyOn(receiver, 'isLocalFirstUnregisteredContextGraph').mockResolvedValue(false);
+
+    // Signing a join request records this node's join intent for the graph,
+    // public or private, before any of its metadata or its seed is held here.
+    const joiner = await receiver.registerAgent('joiner');
+    await receiver.signJoinRequest(contextGraphId, joiner.agentAddress);
+    expect(Reflect.get(receiver, 'localApprovedAgentByCG').get(contextGraphId))
+      .toBe(joiner.agentAddress.toLowerCase());
+    if (sharedPrivateClaim) {
+      // Anyone can assert this in the shared ontology graph. Only the graph's
+      // own metadata decides whether the join proof governs it.
+      await storeOf(receiver).insert([{
+        graph: ONTOLOGY_GRAPH,
+        subject: contextGraphDataGraphUri(contextGraphId),
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"private"',
+      }]);
+      Reflect.get(receiver, 'contextGraphMetaProjection').markDirty(contextGraphId);
+    }
+    await expect(receiver.readRfc64UnregisteredAuthoritySeedV1({
+      networkId: NETWORK_ID,
+      contextGraphId,
+    })).resolves.toBeNull();
+
+    await expect(receiver.resolveContextGraphSubscriptionBootstrapAuthority(
+      contextGraphId,
+      { allowSubscriptionFallback: false },
+    )).resolves.toMatchObject({
+      outcome: 'allowed',
+      source: 'rfc64-public',
+    });
+    expect(receiverSeeds.persist).toHaveBeenCalledOnce();
+    expect(receiver.readAcceptedRfc64CatalogAccessPolicyV1(contextGraphId)).toBe('public');
   }, 60_000);
 
   it('never fans out when the seed is already held locally, even under a restart budget with a hanging peer', async () => {

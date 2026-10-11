@@ -2,8 +2,11 @@ import { RandomSamplingRuntime } from '../src/random-sampling-runtime.js';
 import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
 import { describe, expect, it, vi } from 'vitest';
 import { startProverLoop, type TickOutcome } from '@origintrail-official/dkg-random-sampling';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
+import { GossipSession } from '../src/gossip-session.js';
+import { StorageACKRegistrationRuntime } from '../src/p2p/storage-ack-registration-runtime.js';
 import { RandomSamplingShutdownTimeoutError } from '../src/random-sampling-bind.js';
 import { VmReconcileSchedulingRuntime } from '../src/chain-reconciler.js';
 import { FinalizationRuntime } from '../src/finalization-runtime.js';
@@ -11,6 +14,7 @@ import {
   ContextGraphMembershipPersistScheduler,
   ContextGraphMembershipPersistShutdownTimeoutError,
 } from '../src/context-graph-membership-persist-scheduler.js';
+import { ContextGraphSubscriptionPersistScheduler } from '../src/context-graph-subscription-persist-scheduler.js';
 import {
   VmReconcileQueueClosedError,
   VmReconcileShutdownTimeoutError,
@@ -26,13 +30,19 @@ import { Rfc64BackgroundWorkDispatcherV1 } from
 
 function syntheticShutdownAgent(): any {
   const agent = Object.create(DKGAgent.prototype) as any;
+  agent.chain = new MockChainAdapter();
   agent.peerSyncSession = PeerSyncSession.stopped();
   agent.lastSyncDisconnectedAt = new Map();
   agent.selectedSwmBootstrapAdmission = new SelectedSwmBootstrapAdmission();
   // Object.create deliberately bypasses DKGAgentBase field initializers. Keep
   // the synthetic shutdown fixture aligned with the production lifecycle
   // owners that stop() fences before dependency teardown.
+  agent.gossipSession = new GossipSession();
   agent.rfc64BackgroundWorkDispatcherV1 = new Rfc64BackgroundWorkDispatcherV1();
+  agent.storageACKRegistrationRuntime = new StorageACKRegistrationRuntime();
+  // stop() closes and drains this scheduler unconditionally: production always
+  // constructs it, so the fixture does too.
+  agent.contextGraphSubscriptionPersistence = new ContextGraphSubscriptionPersistScheduler();
   return agent;
 }
 

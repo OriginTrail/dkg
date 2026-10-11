@@ -5,9 +5,21 @@ export interface SelectedSwmMetaRetentionLimits {
   maxPrefixBytesEstimate: number;
 }
 
+/**
+ * Why a reservation carries no append capacity.
+ *
+ * `prefix` is this lease's own ceiling: no later pass can widen it, so the
+ * caller must keep failing closed on an over-long prefix. `shared` is
+ * transient contention from other leases, which a later pass can clear — the
+ * caller must not spend a fetch that is guaranteed to exceed a zero allowance.
+ */
+export type SelectedSwmMetaRetentionExhaustionV1 = 'prefix' | 'shared';
+
 export interface SelectedSwmMetaRetentionReservation {
   maxRows: number;
   maxBytesEstimate: number;
+  /** Set only when this reservation admits no rows or no bytes. */
+  exhaustion: SelectedSwmMetaRetentionExhaustionV1 | null;
   /** Atomically consume this reservation while replacing the lease's prefix. */
   commitReplace(rows: number, bytesEstimate: number): void;
   release(): void;
@@ -155,9 +167,20 @@ export function createSelectedSwmMetaRetentionBudget(
             reservedRows -= reservation.rows;
             reservedBytesEstimate -= reservation.bytesEstimate;
           };
+          // A lease at its own prefix ceiling stays exhausted no matter what
+          // the rest of the pool does, so that case is reported first.
+          const prefixExhausted = limits.maxPrefixRows - current.rows <= 0
+            || limits.maxPrefixBytesEstimate - current.bytesEstimate <= 0;
+          const exhaustion: SelectedSwmMetaRetentionExhaustionV1 | null =
+            reservationRows > 0 && reservationBytesEstimate > 0
+              ? null
+              : prefixExhausted
+                ? 'prefix'
+                : 'shared';
           return {
             maxRows: reservationRows,
             maxBytesEstimate: reservationBytesEstimate,
+            exhaustion,
             commitReplace(nextRows, nextBytesEstimate) {
               if (reservationReleased) {
                 throw new Error('Selected SWM metadata retention reservation is released');

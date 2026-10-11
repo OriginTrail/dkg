@@ -1,4 +1,4 @@
-// V10 Publishing Conviction NFT operator routes (see ARCHITECTURE.md
+// V10 Publishing Conviction NFT operator routes (see docs/ARCHITECTURE.md
 // § #519). Owner-gated writes: owner revert → 403, no-chain → 503.
 
 import { ethers } from 'ethers';

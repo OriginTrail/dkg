@@ -32,6 +32,7 @@ import { RpcFailoverClient, type RpcFailoverClientOptions, type SignPopulatedFn 
 import { isChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
 import { getRpcFailoverStats, _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
 import { RPC_READ_STALL_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
+import { fakeLogRpc } from './helpers/fake-log-rpc.js';
 
 const PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const HUB = '0x0000000000000000000000000000000000000001';
@@ -233,6 +234,63 @@ describe('RpcFailoverClient.read — read-failover loop logic (bare-mock, #1336)
     expect(thrown.message).toBe('connect ECONNREFUSED 127.0.0.1:8545');
     expect(thrown.message).not.toContain('all configured RPC endpoints');
     expect(only.read.calls).toHaveLength(1);
+  });
+
+  it('reduces every URL in the provider\'s message to its host, single- and multi-RPC', async () => {
+    const printers = [
+      vi.spyOn(console, 'warn').mockImplementation(() => {}),
+      vi.spyOn(console, 'log').mockImplementation(() => {}),
+    ];
+    // Real ethers errors from keyed endpoints that answer with a gateway's HTML
+    // page: ethers quotes the full request URL, key included, in its message.
+    // Fake keys only.
+    const htmlPage = (httpStatus: number, text: string) => ({
+      httpStatus,
+      contentType: 'text/html',
+      rawBody: `<html><body><h1>${httpStatus} ${text}</h1></body></html>`,
+    });
+    const primary = fakeLogRpc({
+      url: 'https://rpc.example.invalid/v2/FAKEKEY123?apikey=FAKEKEY123',
+      head: () => 100,
+      refuse: () => htmlPage(401, 'Unauthorized'),
+    });
+    const backup = fakeLogRpc({
+      url: 'https://backup.example.invalid/?apikey=FAKEKEY123',
+      head: () => 100,
+      refuse: () => htmlPage(502, 'Bad Gateway'),
+    });
+    const getLogs = (p: any) => p.getLogs({ fromBlock: 1, toBlock: 2 });
+    try {
+      const single: any = await makeClient([primary.provider], [primary.url])
+        .read('unit read', getLogs)
+        .catch((e: unknown) => e);
+      expect(single).toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+      expect(single.message).toMatch(/^server response 401 Unauthorized /);
+      expect(single.message).toContain('"requestUrl": "rpc.example.invalid"');
+      // The provider's own error stays attached, unchanged, for diagnosis.
+      expect(single.cause.message).toContain('https://rpc.example.invalid/v2/FAKEKEY123?apikey=FAKEKEY123');
+
+      const multi: any = await makeClient([primary.provider, backup.provider], [primary.url, backup.url])
+        .read('unit read', getLogs)
+        .catch((e: unknown) => e);
+      expect(multi).toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+      expect(multi.message).toContain(
+        'unit read read failed on all configured RPC endpoints (rpc.example.invalid, backup.example.invalid): '
+          + 'server response 502 Bad Gateway',
+      );
+      expect(multi.message).toContain('"requestUrl": "backup.example.invalid"');
+
+      const printed = printers
+        .flatMap((printer) => printer.mock.calls.map((call) => call.map(String).join(' ')))
+        .join('\n');
+      for (const text of [single.message, multi.message, printed]) {
+        expect(text).not.toMatch(/FAKEKEY123|\/v2\/|apikey=/);
+      }
+    } finally {
+      for (const printer of printers) printer.mockRestore();
+      primary.provider.destroy();
+      backup.provider.destroy();
+    }
   });
 
   it('does NOT fail over a deterministic non-retryable error (CALL_EXCEPTION) — throws it, backup untouched', async () => {

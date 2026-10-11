@@ -88,7 +88,13 @@ type ReaderCapability =
 function resolvedIdTargetFixture(capability: ReaderCapability) {
   const fixture = selectedFixture();
   const whenIdle = vi.fn(async () => undefined);
-  const resolveFinalizedContextGraphIdByNameHash = vi.fn(async () => ON_CHAIN_ID);
+  const resolveFinalizedContextGraphIdByNameHash = vi.fn(async (
+    _nameHash: string,
+    _options?: {
+      signal?: AbortSignal;
+      onContextGraphAuthorityProjectionServed?: (evidence: unknown) => void;
+    },
+  ) => ON_CHAIN_ID);
   Reflect.set(fixture.agent.chain, 'contextGraphAuthorityIndexRevisionReader', {
     resolveFinalizedContextGraphIdByNameHash,
     whenIdle,
@@ -143,7 +149,8 @@ describe('resolveFinalizedVmReconcileBinding snapshot acquisition', () => {
 
   it('reads the finalized snapshot through the capability reader and returns its evidence', async () => {
     const { capability, reader } = supportedCapability(async () => authoritySnapshot());
-    const { agent, whenIdle } = resolvedIdTargetFixture(capability);
+    const { agent, whenIdle, resolveFinalizedContextGraphIdByNameHash } =
+      resolvedIdTargetFixture(capability);
     const controller = new AbortController();
 
     const binding = await agent.resolveFinalizedVmReconcileBinding(
@@ -152,11 +159,27 @@ describe('resolveFinalizedVmReconcileBinding snapshot acquisition', () => {
       controller.signal,
     );
 
-    // The numeric id projected by the index is what gets read, and the caller's
-    // cancellation signal is forwarded into the chain read.
+    // The numeric id projected by the index is what gets read. The governed
+    // lane composes the caller's signal with the coordinator lifetime, so this
+    // asserts the forwarded cancellation still obeys the caller rather than
+    // asserting signal identity.
     expect(reader.getContextGraphAuthoritySnapshot).toHaveBeenCalledTimes(1);
     expect(reader.getContextGraphAuthoritySnapshot)
-      .toHaveBeenCalledWith(ON_CHAIN_ID, { signal: controller.signal });
+      .toHaveBeenCalledWith(ON_CHAIN_ID, {
+        signal: expect.any(AbortSignal),
+        onContextGraphAuthorityProjectionServed: expect.any(Function),
+      });
+    expect(resolveFinalizedContextGraphIdByNameHash)
+      .toHaveBeenCalledWith(NAME_HASH, {
+        signal: expect.any(AbortSignal),
+        onContextGraphAuthorityProjectionServed: expect.any(Function),
+      });
+    const forwarded = reader.getContextGraphAuthoritySnapshot.mock
+      .calls[0]![1]!.signal as AbortSignal;
+    expect(forwarded.aborted).toBe(false);
+    const reason = new Error('caller stopped the reconcile');
+    controller.abort(reason);
+    expect(forwarded).toMatchObject({ aborted: true, reason });
     expect(binding).toEqual({
       kind: 'resolved',
       nameHash: NAME_HASH,

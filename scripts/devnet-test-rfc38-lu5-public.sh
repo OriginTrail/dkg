@@ -73,7 +73,7 @@ WRITE_RESP=$(devnet_create_shared_ka "$EDGE_CURATOR_NODE" "$(cat <<EOF
   ] }
 EOF
 )")
-printf '%s' "$WRITE_RESP" | grep -qE '"triplesWritten":[1-9]' || fail "public SWM write failed: $WRITE_RESP"
+grep -qE '"triplesWritten":[1-9]' <<<"$WRITE_RESP" || fail "public SWM write failed: $WRITE_RESP"
 sleep 2
 
 log "Publishing public CG to VM..."
@@ -114,13 +114,13 @@ const fs = require("fs"); const path = require("path");
 # Critical regression guard: a public CG MUST NOT trigger the LU-5
 # chain-key AEAD wrap path.
 EDGE_NEW=$(tail -n "+$((EDGE_BASELINE + 1))" "$(node_log "$EDGE_CURATOR_NODE")")
-if printf '%s' "$EDGE_NEW" | grep -qE "LU-5: curated CG ${CG_LOCAL_ID//\//\\/} .* wrapping inline ACK payload"; then
+if grep -qE "LU-5: curated CG ${CG_LOCAL_ID//\//\\/} .* wrapping inline ACK payload" <<<"$EDGE_NEW"; then
   fail "regression: public CG triggered LU-5 chain-key AEAD wrap (should ONLY fire for curated CGs)"
 fi
 log "✓ public CG correctly skipped the LU-5 encryption path"
 
 # Public publishes use byteSize from plaintext (no [ciphertext] marker)
-if printf '%s' "$EDGE_NEW" | grep -qE "byteSize=[0-9]+ \[ciphertext\]"; then
+if grep -qE "byteSize=[0-9]+ \[ciphertext\]" <<<"$EDGE_NEW"; then
   warn "public CG publish log mentions [ciphertext] — verify byteSize override is curated-only"
 fi
 

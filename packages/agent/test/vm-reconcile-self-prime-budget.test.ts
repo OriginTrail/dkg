@@ -167,6 +167,40 @@ it('enforces the production unbound batch size through the agent-owned runtime',
   expect(canRead).toHaveBeenCalledTimes(DKGAgentBase.VM_RECONCILE_UNBOUND_BATCH_SIZE);
 });
 
+it('forwards the configured periodic bound cap through the production runtime factory', async () => {
+  const configuration = DKGAgentBase as unknown as { VM_RECONCILE_PERIODIC_BOUND_BATCH_SIZE: number };
+  const original = configuration.VM_RECONCILE_PERIODIC_BOUND_BATCH_SIZE;
+  configuration.VM_RECONCILE_PERIODIC_BOUND_BATCH_SIZE = 2;
+  try {
+    const agent = await DKGAgent.create({
+      name: 'ProductionBoundTimerCap',
+      chainAdapter: new MockChainAdapter(),
+      syncReconcilerEnabled: true,
+    });
+    agents.push(agent);
+    const internals = agent as unknown as Internals;
+    internals.node = {
+      peerId: '12D3KooWProductionBoundTimerCap',
+      libp2p: { getPeers: () => [] },
+    };
+    internals.openVmReconcileRotationState();
+    for (let i = 0; i < 5; i++) {
+      internals.subscribedContextGraphs.set(`bound-cg-${i}`, {
+        subscribed: true,
+        onChainId: String(i + 1),
+      });
+    }
+    const run = vi.spyOn(agent, 'executeVmReconcileForCg').mockResolvedValue({} as never);
+    agent.ensureVmReconcileScheduling();
+    internals.scheduleVmReconcileSweep();
+    await internals.vmReconcileScheduling.waitForIdle();
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(new Set(run.mock.calls.map(([id]) => id)).size).toBe(2);
+  } finally {
+    configuration.VM_RECONCILE_PERIODIC_BOUND_BATCH_SIZE = original;
+  }
+});
+
 it('caps discovery attempts through the production runtime factory', async () => {
   const agent = await DKGAgent.create({ name: 'ProductionSelfPrimeBudget', chainAdapter: new MockChainAdapter() });
   agents.push(agent);

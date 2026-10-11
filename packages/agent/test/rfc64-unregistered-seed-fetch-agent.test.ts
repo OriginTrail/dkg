@@ -10,6 +10,7 @@
  */
 import {
   contextGraphDataGraphUri,
+  PROTOCOL_STORAGE_ACK,
   type ContextGraphIdV1,
   type EvmAddressV1,
   type NetworkIdV1,
@@ -18,6 +19,7 @@ import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { DKGAgent } from '../src/dkg-agent.js';
+import { PeerCapabilityRegistry } from '../src/p2p/peer-capability.js';
 import {
   RFC64_UNREGISTERED_AUTHORITY_COMPAT_NEGATIVE_TTL_MS_V1,
   RFC64_UNREGISTERED_AUTHORITY_RESERVED_NON_CORE_PEERS_V1,
@@ -111,7 +113,9 @@ function createFetchAgent(options: FakeAgentOptions = {}) {
     configurable: true,
   });
   Reflect.set(agent, 'node', options.libp2p === undefined ? undefined : { libp2p: options.libp2p });
-  Reflect.set(agent, 'knownCorePeerIds', corePeerIds);
+  const peerCapabilities = new PeerCapabilityRegistry();
+  for (const peerId of corePeerIds) peerCapabilities.observe(peerId, { source: 'peer-update', protocols: [PROTOCOL_STORAGE_ACK] });
+  Reflect.set(agent, 'peerCapabilityRegistry', peerCapabilities);
   if (options.completeProviders !== undefined) {
     const completeProviders = options.completeProviders;
     Reflect.set(agent, 'rfc64SwmRecoveryRuntimeV1', {
@@ -451,6 +455,18 @@ describe('Rfc64SeedFetchMethods replica peer selection', () => {
     // edges backfill every slot the cores cannot use.
     expect(selected[0]).toBe(many.at(-1));
     expect(selected.slice(1)).toEqual(many.slice(0, CAP - 1));
+  });
+
+  it('reorders seed fetch peers when shared P2P role evidence changes', () => {
+    const { agent } = createFetchAgent({
+      libp2p: libp2pWith({ self: 'peer-self', peers: ['peer-edge', 'peer-promoted'] }),
+    });
+    const capabilities = Reflect.get(agent, 'peerCapabilityRegistry') as PeerCapabilityRegistry;
+    expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1()).toEqual(['peer-edge', 'peer-promoted']);
+    capabilities.observe('peer-promoted', { source: 'peer-update', protocols: [PROTOCOL_STORAGE_ACK] });
+    expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1()).toEqual(['peer-promoted', 'peer-edge']);
+    capabilities.observe('peer-promoted', { source: 'peer-update', protocols: ['/dkg/10.0.0/sync'] });
+    expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1()).toEqual(['peer-edge', 'peer-promoted']);
   });
 
   it('reserves window slots for non-core peers so a lone edge author is asked in the first window', () => {

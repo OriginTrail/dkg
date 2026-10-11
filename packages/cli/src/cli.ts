@@ -36,6 +36,27 @@ program
   .description('DKG V10 node CLI')
   .version(getCliVersion());
 
+/* c8 ignore start -- exercised by the Gate 2 runtime harness, not CLI tests. */
+const gate2AdapterCommand = process.argv[2] === 'rfc64-gate2-adapter';
+if (gate2AdapterCommand) {
+  // Testnet evidence must enter through the same built CLI module as a
+  // release daemon. The adapter remains a harness-only protocol behind this
+  // explicit command and is never registered in the public command tree.
+  const role = process.argv[3];
+  if (role !== 'author' && role !== 'receiver') {
+    throw new Error('rfc64-gate2-adapter requires an author or receiver role');
+  }
+  process.argv.splice(2, 2, role);
+  await import(new URL(
+    '../../../devnet/rfc64-gate2-multi-asset-completeness/adapter-process.ts',
+    import.meta.url,
+  ).href);
+  // The adapter owns the process after import; avoid handing its protocol
+  // arguments to Commander when the normal entrypoint continues below.
+  process.argv.splice(2);
+}
+/* c8 ignore stop */
+
 registerInitCommand(program);
 registerAgentCommand(program);
 registerAuthCommand(program);

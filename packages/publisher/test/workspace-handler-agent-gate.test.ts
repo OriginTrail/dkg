@@ -27,6 +27,7 @@ const META_GRAPH = contextGraphMetaUri(CONTEXT_GRAPH_ID);
 const ONTOLOGY_GRAPH = contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
 const WORKSPACE_GRAPH = contextGraphSharedMemoryUri(CONTEXT_GRAPH_ID);
 const PEER_ID = '12D3KooWAgentGatePeer';
+const OTHER_PEER_ID = '12D3KooWAgentGateOtherPeer';
 const ENTITY = 'urn:test:workspace-handler-agent-gate';
 
 let store: OxigraphStore;
@@ -254,6 +255,43 @@ describe('SharedMemoryHandler agent-gated gossip', () => {
     await handler.handle(await signWorkspaceMessage(allowed, encrypted), PEER_ID);
 
     await expectStoredName('Private Agent Signed');
+  });
+
+  it('rejects live ingest when the projected peer gate excludes a peer admitted by store metadata', async () => {
+    const allowed = ethers.Wallet.createRandom();
+    const recipientKey = recipientKeyFor(allowed.address);
+    let metaLookups = 0;
+    handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      sharedMemoryOwnedEntities: workspaceOwned,
+      localAgentAddresses: () => [allowed.address],
+      workspaceRecipientPrivateKeys: () => [recipientKey],
+      contextGraphMetaOracle: async () => {
+        metaLookups += 1;
+        return {
+          accessPolicy: 'private',
+          allowedAgents: [allowed.address],
+          allowedPeers: [OTHER_PEER_ID],
+        };
+      },
+    });
+    await insertPrivateAccessPolicy(META_GRAPH);
+    await insertAgentGate(DKG_ONTOLOGY.DKG_ALLOWED_AGENT, allowed.address);
+    await insertPeerGate(PEER_ID);
+
+    const raw = workspaceMessage('Projected Peer Denied', 'ws-agent-gate-projected-peer-denied');
+    const encrypted = await encryptWorkspaceMessage(allowed.address, raw, recipientKey);
+    const outcome = await handler.handle(
+      await signWorkspaceMessage(allowed, encrypted),
+      PEER_ID,
+    );
+
+    expect(outcome).toMatchObject({
+      applied: false,
+      retryable: false,
+    });
+    expect(outcome.reason).toContain(`peer "${PEER_ID}" not in allowlist`);
+    expect(metaLookups).toBe(1);
+    await expectWorkspaceEmpty();
   });
 
   it('rejects signed SWM gossip when the projection oracle tombstones the agent', async () => {

@@ -1,3 +1,4 @@
+import { snapshotOperation } from './workspace-snapshot-lifecycle.js';
 import { workspaceOperationSubject, workspaceOperationPublicSliceSubject, workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
 export { workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
 import { ENTITY_SHARE_METADATA_PREDICATES as ENTITY_SHARE } from './entity-share-metadata.js';
@@ -7,6 +8,7 @@ import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
   assertSafeIri,
+  contextGraphOnChainIdBindingQuery,
   createGraphKnowledgeAssetScope,
   isSafeIri,
   knowledgeAssetLayerGraphUri,
@@ -252,6 +254,8 @@ export interface ResolveKnowledgeAssetWorkspaceHeadParams {
   readonly contextGraphId: string;
   readonly kaUal: string;
   readonly subGraphName?: string;
+  /** Store lane, source label and cancellation for the head read. */
+  readonly queryOptions?: Parameters<TripleStore['query']>[1];
 }
 
 /**
@@ -613,6 +617,7 @@ export async function resolveKnowledgeAssetWorkspaceHead(
     `{ <${assertSafeIri(subject)}> ?p ?o . BIND(<${assertSafeIri(subject)}> AS ?s) } UNION ` +
     `{ <${assertSafeIri(subject)}> <${DKG}shareOperationId> ?id . ` +
     `?op <${DKG}shareOperationId> ?id ; ?p ?o . BIND(?op AS ?s) } } }`,
+    ...(params.queryOptions === undefined ? [] : [params.queryOptions]),
   );
   if (acquisition.type !== 'bindings') {
     throw new Error(
@@ -785,7 +790,7 @@ export async function resolveWorkspaceSelection(params: {
   return quads;
 }
 
-export async function storeWorkspaceOperationPublicQuads(params: {
+type StoreWorkspaceOperationPublicQuadsParams = {
   store: TripleStore;
   graphManager: GraphManager;
   contextGraphId: string;
@@ -807,7 +812,9 @@ export async function storeWorkspaceOperationPublicQuads(params: {
   subGraphName?: string;
   timestamp?: Date;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
-}): Promise<void> {
+};
+
+export const storeWorkspaceOperationPublicQuads = snapshotOperation<StoreWorkspaceOperationPublicQuadsParams, void>(async params => {
   const roots = normalizeRoots(params.rootEntities);
   if (roots.length === 0) return;
 
@@ -892,13 +899,13 @@ export async function storeWorkspaceOperationPublicQuads(params: {
     // read-both (an explicit legacy ref row wins when present).
   }
   await params.store.insert(snapshotQuads);
-}
+});
 
 /**
  * Store one immutable public snapshot for one complete graph-scoped KA.
  * Metadata and snapshot count are constant in the number of RDF subjects.
  */
-export async function storeKnowledgeAssetOperationPublicQuads(params: {
+type StoreKnowledgeAssetOperationPublicQuadsParams = {
   store: TripleStore;
   graphManager: GraphManager;
   contextGraphId: string;
@@ -915,7 +922,9 @@ export async function storeKnowledgeAssetOperationPublicQuads(params: {
   subGraphName?: string;
   timestamp?: Date;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
-}): Promise<void> {
+};
+
+export const storeKnowledgeAssetOperationPublicQuads = snapshotOperation<StoreKnowledgeAssetOperationPublicQuadsParams, void>(async params => {
   const scope = createGraphKnowledgeAssetScope(params.kaUal, params.assertionVersion);
   const subGraphName = normalizeOptionalSubGraphName(params.subGraphName);
   const workspaceMetaGraph = params.graphManager.sharedMemoryMetaUri(
@@ -982,7 +991,7 @@ export async function storeKnowledgeAssetOperationPublicQuads(params: {
     });
   }
   await params.store.insert(metadata);
-}
+});
 
 /** Resolve and integrity-check a complete graph-scoped KA operation snapshot. */
 export async function resolveKnowledgeAssetOperationPublicQuads(params: {
@@ -1586,10 +1595,8 @@ async function resolveOnChainContextGraphId(params: {
   store: TripleStore;
   contextGraphId: string;
 }): Promise<string | undefined> {
-  const ontologyGraph = 'did:dkg:context-graph:ontology';
-  const contextGraphUri = `did:dkg:context-graph:${params.contextGraphId}`;
   const result = await params.store.query(
-    `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <https://dkg.network/ontology#ContextGraphOnChainId> ?id } } LIMIT 1`,
+    contextGraphOnChainIdBindingQuery(params.contextGraphId),
   );
   if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;
   const value = stripLiteral(result.bindings[0]?.['id']);

@@ -1,7 +1,7 @@
 /**
  * `dkg doctor` orchestrator (OT-RFC-41 §4.7).
  *
- * Wires the state summary + six anomaly checks into a single
+ * Wires the state summary + seven anomaly checks into a single
  * {@link DoctorReport}. Used by the `dkg doctor` CLI command and
  * (in a narrow subset form) by `dkg update`'s pre-flight check.
  *
@@ -22,6 +22,7 @@ import { runInstallLayoutCheck } from './checks/install-layout.js';
 import { runVersionSkewCheck } from './checks/version-skew.js';
 import { runServedUiMismatchCheck } from './checks/served-ui-mismatch.js';
 import { runPluginRootCheck } from './checks/plugin-root.js';
+import { runNodeRuntimeCheck } from './checks/node-runtime.js';
 import { ALL_CHECK_IDS, type CheckId } from './policy.js';
 import type { DoctorDeps, DoctorReport, Finding, StateSummary } from './types.js';
 
@@ -31,7 +32,7 @@ export { collectStateSummary } from './state-summary.js';
 export { ALL_CHECK_IDS, UPDATE_PREFLIGHT_CHECKS, type CheckId } from './policy.js';
 
 export interface RunDoctorOptions {
-  /** Which checks to run; defaults to all six. */
+  /** Which checks to run; defaults to all seven. */
   checks?: readonly CheckId[];
   /** API port to probe. Defaults to 9200. */
   apiPort?: number;
@@ -70,6 +71,9 @@ export async function runDoctor(
           break;
         case 'plugin-root':
           next = await runPluginRootCheck(deps);
+          break;
+        case 'node-runtime':
+          next = runNodeRuntimeCheck(state);
           break;
         default: {
           // Defensive: unknown id — surface it but keep going.
@@ -214,6 +218,8 @@ export function formatDoctorReport(report: DoctorReport): string {
     return `  ${label.padEnd(28)} ${display}`;
   };
   lines.push(fmt('daemon.pid', s.daemon.pid));
+  lines.push(fmt('runtime.nodeVersion', s.runtime.nodeVersion));
+  lines.push(fmt('runtime.nodeSqlite', s.runtime.nodeSqliteAvailable));
   lines.push(fmt('daemon.entryPoint', s.daemon.entryPoint));
   lines.push(fmt('daemon.version', s.daemon.version));
   lines.push(fmt('daemon.commit', s.daemon.commit));

@@ -149,7 +149,7 @@ WRITE_RESP=$(devnet_create_shared_ka "$EDGE_CURATOR_NODE" "$(cat <<EOF
 EOF
 )")
 log "write response: $WRITE_RESP"
-printf '%s' "$WRITE_RESP" | grep -qE '"triplesWritten":[1-9]' || fail "SWM write did not report triplesWritten > 0"
+grep -qE '"triplesWritten":[1-9]' <<<"$WRITE_RESP" || fail "SWM write did not report triplesWritten > 0"
 
 sleep 2  # let SWM gossip settle
 
@@ -229,7 +229,7 @@ EDGE_BASELINE=$(cat "$LOG_BASELINE_DIR/$EDGE_CURATOR_NODE")
 EDGE_NEW=""
 for _ in $(seq 1 60); do
   EDGE_NEW=$(tail -n "+$((EDGE_BASELINE + 1))" "$EDGE_LOG")
-  if printf '%s' "$EDGE_NEW" | grep -qE 'LU-5: curated CG .* wrapping inline ACK payload with chain-key AEAD'; then
+  if grep -qE 'LU-5: curated CG .* wrapping inline ACK payload with chain-key AEAD' <<<"$EDGE_NEW"; then
     break
   fi
   sleep 1
@@ -238,7 +238,7 @@ done
 # LU-5 breadcrumb: agent layer wraps the inline ACK payload with the
 # chain-key AEAD for curated CGs. Hard-pin the exact log line so a future
 # regression to the publish path is caught immediately.
-if printf '%s' "$EDGE_NEW" | grep -qE 'LU-5: curated CG .* wrapping inline ACK payload with chain-key AEAD'; then
+if grep -qE 'LU-5: curated CG .* wrapping inline ACK payload with chain-key AEAD' <<<"$EDGE_NEW"; then
   log "✓ edge log shows LU-5 chain-key AEAD wrap fired"
 else
   fail "regression: LU-5 encryption breadcrumb missing in edge log (agent layer did not detect curated CG?)"
@@ -246,7 +246,7 @@ fi
 
 # Pin the publisher's ciphertext-byteSize log too — confirms the
 # encrypted-payload byteSize override is in effect.
-if printf '%s' "$EDGE_NEW" | grep -qE 'byteSize=[0-9]+ \[ciphertext\]'; then
+if grep -qE 'byteSize=[0-9]+ \[ciphertext\]' <<<"$EDGE_NEW"; then
   log "✓ edge log shows ciphertext byteSize override fired"
 else
   warn "expected '[ciphertext]' marker on the V10 submit log — check publisher byteSize override"
@@ -255,7 +255,7 @@ fi
 # attribution: edge publishes with attributionId=0 (no-attribution mode,
 # OT-RFC-38 §1.1). This used to be the "skip on-chain" path; the gate
 # fix in dkg-publisher.ts makes it the no-attribution submit path.
-if printf '%s' "$EDGE_NEW" | grep -qE 'Signing on-chain publish \(attributionId=0,'; then
+if grep -qE 'Signing on-chain publish \(attributionId=0,' <<<"$EDGE_NEW"; then
   log "✓ edge log shows attributionId=0 (no-attribution publish, OT-RFC-38 §1.1)"
 else
   warn "expected attributionId=0 publish — edge agent may have a Profile?"
@@ -263,7 +263,7 @@ fi
 
 # Gate regression: the OLD "Identity not set (0) — skipping on-chain publish"
 # warn MUST NOT appear.
-if printf '%s' "$EDGE_NEW" | grep -qE 'Identity not set \(0\)'; then
+if grep -qE 'Identity not set \(0\)' <<<"$EDGE_NEW"; then
   fail "regression: edge log still emits the dropped 'Identity not set (0) — skipping on-chain publish' gate"
 fi
 log "✓ no 'Identity not set' regression"
@@ -289,7 +289,7 @@ printf '%s\n' "$ACK_LINES" | sed 's/^/    /'
 # --- 9. Cross-check via /api/context-graph/list -----------------------------
 
 LIST_RESP=$(api_call "$EDGE_CURATOR_NODE" GET /api/context-graph/list)
-if printf '%s' "$LIST_RESP" | grep -q "$CG_LOCAL_ID"; then
+if grep -q "$CG_LOCAL_ID" <<<"$LIST_RESP"; then
   log "✓ CG $CG_LOCAL_ID visible in /api/context-graph/list on edge curator"
 else
   warn "CG missing from /api/context-graph/list (cosmetic, not blocking)"

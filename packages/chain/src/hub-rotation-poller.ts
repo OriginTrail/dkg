@@ -1,5 +1,9 @@
 import { Contract, ethers, type JsonRpcProvider } from 'ethers';
+import type { ChainEventLogHubRotationWindow } from './chain-event-log-binding.js';
+import { RPC_LOG_SCAN_TIMEOUT_MS } from './evm-adapter-constants.js';
+import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import type { ReadOpts } from './rpc-failover-client.js';
+import { withRpcRequestTimeout } from './rpc-request-transport.js';
 
 export type HubRotationReadProvider = <T>(
   label: string,
@@ -7,11 +11,30 @@ export type HubRotationReadProvider = <T>(
   opts?: ReadOpts,
 ) => Promise<T>;
 
+/**
+ * The node's ONE chain log, asked for the same window this poller used to
+ * fetch for itself. `undefined` means the log cannot prove it holds it.
+ */
+export type HubRotationLogSource = (
+  lastScannedBlock: number | undefined,
+  reorgBufferBlocks: number,
+) => Promise<ChainEventLogHubRotationWindow | undefined>;
+
 export interface HubRotationPollerConfig {
   readProvider: HubRotationReadProvider;
   intervalMs: number;
   reorgBufferBlocks: number;
   onContractName: (name: string) => void;
+  /**
+   * Where a pass gets its rotations. Consulted PER PASS, not once at start, so
+   * the moment the tick has coverage this poller stops touching the chain —
+   * and a log that is still cold, or that has fallen behind its own floor,
+   * degrades to the scan below rather than to a missed rotation.
+   *
+   * The two sources are mutually exclusive within a pass: there is never a
+   * configuration in which the Hub is scanned twice for one window.
+   */
+  logSource?: HubRotationLogSource;
 }
 
 interface HubRotationBinding {
@@ -22,7 +45,6 @@ interface HubRotationBinding {
 
 type HubRotationLogWithIdentity = ethers.Log & {
   blockHash?: unknown;
-  transactionHash?: unknown;
   index?: unknown;
   logIndex?: unknown;
 };
@@ -32,6 +54,7 @@ export class HubRotationPoller {
   private readonly intervalMs: number;
   private readonly reorgBufferBlocks: number;
   private readonly onContractName: (name: string) => void;
+  private readonly logSource: HubRotationLogSource | undefined;
   private timer: ReturnType<typeof setInterval> | null = null;
   private inFlight: Promise<void> | null = null;
   private lastScannedBlock: number | undefined;
@@ -45,6 +68,7 @@ export class HubRotationPoller {
     this.intervalMs = config.intervalMs;
     this.reorgBufferBlocks = config.reorgBufferBlocks;
     this.onContractName = config.onContractName;
+    this.logSource = config.logSource;
   }
 
   get isStarted(): boolean {
@@ -111,9 +135,61 @@ export class HubRotationPoller {
     return this.readProvider(label, fn, { ...opts, skipPreferred: true });
   }
 
+  /**
+   * Read the window out of the one log, or say the log could not answer it.
+   *
+   * ZERO chain requests on this path: that is the whole point, and it is the
+   * measured retirement of the `Hub_rotation_poll_getBlockNumber` /
+   * `Hub_rotation_poll_getLogs` pair. The stored row's (blockHash, logIndex)
+   * identity is the same one used by the live fallback: it remains stable
+   * across overlapping reads of one fork and changes for every reorg
+   * replacement, including a binding replaced by a removal of the same name
+   * and address.
+   */
+  private async pollOnceFromLog(generation: number): Promise<boolean> {
+    const logSource = this.logSource;
+    if (logSource === undefined) return false;
+    let window: ChainEventLogHubRotationWindow | undefined;
+    try {
+      window = await logSource(this.lastScannedBlock, this.reorgBufferBlocks);
+    } catch {
+      // A broken optional log path is the same refusal as a cold or lagging
+      // log: preserve Hub invalidation by paying for the live scan below.
+      return false;
+    }
+    if (window === undefined) return false;
+    if (!this.started || generation !== this.generation) return true;
+
+    if (this.lastScannedBlock == null) {
+      // BASELINE, and the listener enforces it for itself rather than trusting
+      // the window to be empty. Its live counterpart never replays history
+      // because its first read is a head; the log holds real history, so a
+      // listener that dispatched its first window would re-invalidate every
+      // Hub binding the backfill has walked in — on every restart.
+      this.lastScannedBlock = window.throughBlockNumber;
+      this.pruneSeenLogs(window.throughBlockNumber);
+      return true;
+    }
+
+    for (const rotation of window.rotations) {
+      const identity = this.canonicalLogIdentity(rotation.blockHash, rotation.logIndex);
+      if (this.seenLogIds.has(identity)) continue;
+      this.seenLogIds.set(identity, rotation.blockNumber);
+      this.onContractName(rotation.contractName);
+    }
+    this.lastScannedBlock = Math.max(this.lastScannedBlock, window.throughBlockNumber);
+    this.pruneSeenLogs(window.throughBlockNumber);
+    return true;
+  }
+
   async pollOnce(generation = this.generation): Promise<void> {
     const binding = this.binding;
     if (!this.started || !binding || binding.topics.length === 0 || generation !== this.generation) return;
+
+    // The `logSource !== undefined` test is deliberately SYNCHRONOUS: an
+    // adapter with no log must reach its first chain read on the same turn it
+    // always did, with no microtask inserted ahead of it.
+    if (this.logSource !== undefined && await this.pollOnceFromLog(generation)) return;
 
     const previousLastScannedBlock = this.lastScannedBlock;
     const head = await this.readTip(
@@ -123,15 +199,31 @@ export class HubRotationPoller {
     );
     if (!this.started || generation !== this.generation) return;
     const fromBlock = this.scanFromBlock(previousLastScannedBlock, head);
+    // After a long gap (a suspended host) the window can exceed a provider's
+    // eth_getLogs span cap; fit it rather than failing every poll until restart.
+    // A fitted window is several requests, so the watchdog deadline bounds each
+    // physical request (a hung backend still fails over, or fails the poll, after
+    // RPC_LOG_SCAN_TIMEOUT_MS on a one-RPC node too) instead of the whole attempt:
+    // one 30s budget over a split window would abort a slow-but-healthy catch-up
+    // and replay it every interval.
     const logs = await this.readTip<ethers.Log[]>(
       'Hub rotation poll getLogs',
-      (provider) => provider.getLogs({
-        address: binding.hubAddress,
+      (provider) => readAdaptiveEvmLogRange({
+        provider,
         fromBlock,
         toBlock: head,
-        topics: [binding.topics],
+        read: (rangeFrom, rangeTo) => withRpcRequestTimeout(
+          RPC_LOG_SCAN_TIMEOUT_MS,
+          `Hub rotation poll getLogs [${rangeFrom}, ${rangeTo}]`,
+          () => provider.getLogs({
+            address: binding.hubAddress,
+            fromBlock: rangeFrom,
+            toBlock: rangeTo,
+            topics: [binding.topics],
+          }),
+        ),
       }),
-      { policy: 'watchdogWideLogScan' },
+      { policy: 'durablePagedLogScan' },
     );
     if (!this.started || generation !== this.generation) return;
 
@@ -144,6 +236,9 @@ export class HubRotationPoller {
 
   private async recordInitialHead(generation: number): Promise<void> {
     if (!this.started || generation !== this.generation) return;
+    // The log answers the baseline too, so a node whose tick is already
+    // running never spends a head probe just to learn where "now" is.
+    if (this.logSource !== undefined && await this.pollOnceFromLog(generation)) return;
     const head = await this.readTip(
       'Hub rotation poll initial getBlockNumber',
       (provider) => provider.getBlockNumber(),
@@ -190,8 +285,10 @@ export class HubRotationPoller {
     return [
       'ContractChanged',
       'NewContract',
+      'ContractRemoved',
       'AssetStorageChanged',
       'NewAssetStorage',
+      'AssetStorageRemoved',
     ].map((eventName) => {
       const event = hub.interface.getEvent(eventName);
       if (!event?.topicHash) {
@@ -204,14 +301,13 @@ export class HubRotationPoller {
   private logIdentity(log: ethers.Log): string {
     const maybe = log as HubRotationLogWithIdentity;
     const blockHash = typeof maybe.blockHash === 'string' ? maybe.blockHash : undefined;
-    const transactionHash = typeof maybe.transactionHash === 'string' ? maybe.transactionHash : undefined;
     const index = typeof maybe.index === 'number'
       ? maybe.index
       : typeof maybe.logIndex === 'number'
         ? maybe.logIndex
         : undefined;
-    if (blockHash && transactionHash && index != null) {
-      return `${blockHash}:${transactionHash}:${index}`;
+    if (blockHash && index != null) {
+      return this.canonicalLogIdentity(blockHash, index);
     }
     return [
       log.blockNumber,
@@ -219,6 +315,10 @@ export class HubRotationPoller {
       log.topics.join(','),
       log.data,
     ].join(':');
+  }
+
+  private canonicalLogIdentity(blockHash: string, logIndex: number): string {
+    return `${blockHash.toLowerCase()}:${logIndex}`;
   }
 
   private rememberLog(identity: string, log: ethers.Log): void {

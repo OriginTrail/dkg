@@ -283,4 +283,58 @@ describe('ProtocolRouter.send + PeerResolver', () => {
       console.warn = originalWarn;
     }
   }, 15000);
+
+  it('stops resolving a cold peer once it connects and sends over that connection', async () => {
+    // Both nodes listen on loopback only, so kad-dht stays in client mode
+    // and neither routing table ever gains a peer: a cold findPeer parks
+    // in kad-dht's empty-routing-table wait until its signal aborts. The
+    // send must notice the target connecting mid-wait and go over that
+    // connection instead of spending its whole budget in the resolver.
+    const a = spawn();
+    const b = spawn();
+    await a.start();
+    await b.start();
+
+    const resolver = new PeerResolver({
+      network: new LibP2PNetwork(a),
+      registry: new StubNetworkStateRegistry(),
+      agentDirectory: { findRelayForPeer: async () => null },
+    });
+    const resolveSignals: AbortSignal[] = [];
+    const realResolve = resolver.resolve.bind(resolver);
+    resolver.resolve = (async (peerId, opts) => {
+      if (opts?.signal) resolveSignals.push(opts.signal);
+      return realResolve(peerId, opts);
+    }) as typeof resolver.resolve;
+
+    const routerA = new ProtocolRouter(a, { peerResolver: resolver });
+    const routerB = new ProtocolRouter(b);
+    const enc = new TextEncoder();
+    const dec = new TextDecoder();
+    routerB.register('/test/resolver-connect-race/1.0.0', async (data) =>
+      enc.encode(`echo:${dec.decode(data)}`),
+    );
+
+    const connectionOpenListeners = a.libp2p.listenerCount('connection:open');
+    const startedAt = Date.now();
+    let settled = false;
+    const sent = routerA
+      .send(b.peerId, '/test/resolver-connect-race/1.0.0', enc.encode('hi'), 3_000)
+      .finally(() => { settled = true; });
+    await new Promise((r) => setTimeout(r, 100));
+    expect(settled).toBe(false);
+    expect(resolveSignals).toHaveLength(1);
+    expect(a.libp2p.getConnections()).toHaveLength(0);
+
+    // The peer dials in: the connection is inbound on A.
+    await b.libp2p.dial(multiaddr(a.multiaddrs[0]));
+
+    expect(dec.decode(await sent)).toBe('echo:hi');
+    expect(Date.now() - startedAt).toBeLessThan(1_500);
+    expect(resolveSignals).toHaveLength(1);
+    expect(resolveSignals[0].aborted).toBe(true);
+    expect(a.libp2p.listenerCount('connection:open')).toBe(connectionOpenListeners);
+
+    await new Promise((r) => setTimeout(r, 50));
+  }, 15000);
 });

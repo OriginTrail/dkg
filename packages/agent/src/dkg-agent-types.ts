@@ -16,6 +16,7 @@
 
 import type { ethers } from 'ethers';
 import type { SharedMemorySyncDiagnostics } from './sync/shared-memory-diagnostics.js';
+import type { ChainAuthorityReadBudgets } from './chain-authority-read-budgets.js';
 export type {
   SharedMemorySyncDiagnostics,
   SharedMemorySyncResult,
@@ -62,6 +63,7 @@ import type {
 import type {
   ApprovalPolicy,
   ChainAdapter,
+  ChainEventLogStore,
   ContextGraphAuthorityHistoryStore,
   ContextGraphAuthorityIndexStore,
   ContextGraphRegistryScanCursorStore,
@@ -89,6 +91,8 @@ import type {
 } from './sync/policy.js';
 import type { SyncReconcilerTiming } from './sync/reconciler-timing.js';
 import type { FinalizationRecoveryStore } from './finalization-recovery-store.js';
+import type { AuthorityIndexConfig } from './authority-index-config.js';
+import type { ContextGraphStorageDiscoveryStore } from './context-graph-storage-discovery.js';
 
 // ── File-local structural types ─────────────────────────────────────
 
@@ -139,6 +143,12 @@ export type LocalSwmSenderKeySendState = {
   senderAgentAddress: string;
   epochId: string;
   membershipHash: string;
+  /**
+   * Exact transport-route snapshot seeded for this epoch. Optional only for
+   * sender state persisted before route-aware epoch rotation was introduced;
+   * such legacy state rotates once before it can be reused.
+   */
+  recipientRouteHash?: string;
   chainKey: Uint8Array;
   nextMessageIndex: number;
   senderSigningSecretKey: Uint8Array;
@@ -166,10 +176,10 @@ export type LocalSwmSenderKeyReceiveState = {
  * connection:open or a subsequent publish that re-resolves the
  * recipient set).
  *
- * Keyed in-memory by lowercased `recipientAgentAddress`. The triple
- * `(senderAgentAddress, recipientKeyId, epochId)` dedupes within an
- * agent's queue; newer epochs supersede older ones for the same
- * `(senderAgentAddress, recipientAgentAddress)` pair.
+ * Keyed in-memory by lowercased `recipientAgentAddress`. The tuple
+ * `(senderAgentAddress, recipientKeyId, recipientPeerId, epochId)`
+ * dedupes within an agent's queue; newer epochs supersede older ones for
+ * the same sender, recipient, context-graph, and subgraph scope.
  */
 export type PendingSenderKeyEntry = {
   /** Lower-cased EIP-55 sender agent address. */
@@ -177,6 +187,13 @@ export type PendingSenderKeyEntry = {
   /** Lower-cased EIP-55 recipient agent address (matches the map key). */
   recipientAgentAddress: string;
   recipientKeyId: string;
+  /**
+   * Exact peer route that still owes a positive setup ACK. Absent only for
+   * legacy rows and packages queued before any peer route was advertised;
+   * those drain only after the current verified recipient projection binds
+   * this exact key to a peer.
+   */
+  recipientPeerId?: string;
   epochId: string;
   contextGraphId: string;
   subGraphName?: string;
@@ -198,6 +215,7 @@ export type ACKSignerResolution = {
 };
 
 export interface SyncRequestEnvelope {
+  responseEncoding?: 'gzip-nquads-v1';
   contextGraphId: string;
   offset: number;
   limit: number;
@@ -587,7 +605,7 @@ export interface PeerDiagnostics {
   health: PeerHealth | null;
   /** Protocols this peer's identify-handshake advertised. */
   protocols: string[];
-  /** Convenience flag — peer speaks `PROTOCOL_SYNC`. */
+  /** Convenience flag — peer speaks `PROTOCOL_SYNC` (legacy or pooled id). */
   syncCapable: boolean;
   /**
    * Raw sync catch-up health. Sync no longer lives on the messenger
@@ -808,11 +826,24 @@ export interface ContextGraphSubscriptionRecord {
   syncScoped: boolean;
 }
 
+/**
+ * Exact durable identity carried from one freshly loaded subscription row into
+ * bootstrap authority resolution. It may shortcut or repair name-to-id
+ * discovery, but never substitutes for fresh policy or roster authority.
+ */
+export interface DurableContextGraphSubscriptionBinding {
+  contextGraphId: string;
+  onChainId?: string;
+  onChainHash?: string;
+}
+
+/** @deprecated Compatibility shape for retired negative-cache store adapters. */
 export interface VmReconcilePeerTopologyPeer {
   peerId: string;
   core: boolean;
 }
 
+/** @deprecated Compatibility shape; VM recovery no longer reads a miss cache. */
 export type VmReconcilePeerTopology =
   | { kind: 'unreadable' }
   | {
@@ -823,7 +854,7 @@ export type VmReconcilePeerTopology =
     peers: VmReconcilePeerTopologyPeer[];
   };
 
-/** Historical proof attached to a cached miss, separate from live topology. */
+/** @deprecated Historical shape for retired negative-cache store adapters. */
 export interface VmReconcilePeerTopologyEvidence {
   topology: VmReconcilePeerTopology;
   cleanMissPeerIds: string[];
@@ -834,10 +865,27 @@ export interface ContextGraphSubscriptionStore {
   load?(contextGraphId: string): Promise<ContextGraphSubscriptionRecord | null>;
   save(record: ContextGraphSubscriptionRecord): Promise<void>;
   delete(contextGraphId: string): Promise<void>;
+  /** @deprecated Compatibility only; VM recovery never calls this hook. */
   loadVmReconcileNegative?(cacheKey: string): Promise<VmReconcileNegativeRecord | null>;
+  /** @deprecated Compatibility only; VM recovery never calls this hook. */
   saveVmReconcileNegative?(record: VmReconcileNegativeRecord): Promise<void>;
+  /** @deprecated Compatibility only; VM recovery never calls this hook. */
   deleteVmReconcileNegative?(cacheKey: string): Promise<void>;
+  /** @deprecated Compatibility only; VM recovery never calls this hook. */
   deleteVmReconcileNegativesForContextGraph?(contextGraphId: string): Promise<void>;
+}
+
+/** @deprecated Retained for custom subscription stores; the runtime no longer consumes these records. */
+export interface VmReconcileNegativeRecord {
+  cacheKey: string;
+  localCgId: string;
+  failures: number;
+  nextRetryAt: number;
+  swmGen: string;
+  candidateNamespaces: Array<{ metaGraph: string; dataGraph: string }>;
+  peerTopologyKey: string;
+  peerTopology?: VmReconcilePeerTopology;
+  cleanMissPeerIds?: string[];
 }
 
 /**
@@ -872,24 +920,13 @@ export interface SelectedVmReconcileCursorRecord {
   watermark: number;
 }
 
-/** Restart-durable, generation-gated record of one authoritative no-match scan. */
-export interface VmReconcileNegativeRecord {
-  cacheKey: string;
-  localCgId: string;
-  failures: number;
-  nextRetryAt: number;
-  swmGen: string;
-  candidateNamespaces: Array<{ metaGraph: string; dataGraph: string }>;
-  /**
-   * Legacy serialized topology contract. Required during the v1-to-v2
-   * migration so existing custom stores can keep reading and persisting the
-   * field they were compiled against.
-   */
-  peerTopologyKey: string;
-  /** Typed topology used by v2-aware stores; absent when loading a legacy row. */
-  peerTopology?: VmReconcilePeerTopology;
-  /** V2 clean-miss evidence; absent legacy records conservatively imply none. */
-  cleanMissPeerIds?: string[];
+/** Fences for experimental transport reuse; never asset or absence authority. */
+export interface VmReconcilePublicCoreHolderCredit {
+  readonly deploymentId: string;
+  readonly lifecycleGeneration: number;
+  readonly bindingGeneration: number;
+  readonly selectedBindingGeneration: number | undefined;
+  readonly candidatePeerIds: readonly string[];
 }
 
 /** Process-local evidence for one chain-ordinal exact-recovery rotation. */
@@ -915,6 +952,12 @@ export interface VmReconcileRotationRecord {
   collectionDeadlineAt: number;
   /** Cursor only; every physical attempt advances it, regardless of outcome. */
   lastAttemptedPeerId?: string;
+  /**
+   * Peers whose last attempt for this target ended without a verdict on their
+   * data and left the target its turn at them (a busy answer, a broken
+   * stream). Ordering only: never read as attempted, present or absent.
+   */
+  streamSetbackPeerIds?: Set<string>;
   failures: number;
   nextRetryAt: number;
 }
@@ -1065,7 +1108,13 @@ export interface LocalContextGraphOriginPersistence {
   recordLocalOrigin(record: LocalContextGraphOriginRecord): Promise<void>;
 }
 
-export interface ContextGraphMembershipStore extends Partial<LocalContextGraphOriginPersistence> {
+export interface ContextGraphMembershipStore {
+  /**
+   * Optional graph-level origin journal. Presence statically guarantees the
+   * complete read/write capability; absence selects the legacy membership-row
+   * compatibility path.
+   */
+  localOrigins?: LocalContextGraphOriginPersistence;
   /**
    * Load persisted membership facts for restart recovery. Optional so custom
    * stores written before membership rehydration remain source-compatible.
@@ -1074,16 +1123,6 @@ export interface ContextGraphMembershipStore extends Partial<LocalContextGraphOr
     firstSeenAt?: number;
     updatedAt: number;
   }>>;
-  /**
-   * Load graph-level local-origin facts. Optional for source compatibility
-   * with custom stores predating the independent provenance journal.
-   */
-  loadLocalOrigins?(): Promise<LocalContextGraphOriginRecord[]>;
-  /**
-   * Insert a graph-level origin fact monotonically. Implementations must not
-   * replace an existing row for the same Context Graph id.
-   */
-  recordLocalOrigin?(record: LocalContextGraphOriginRecord): Promise<void>;
   upsert(record: ContextGraphMembershipRecord & { firstSeenAt?: number; updatedAt: number }): Promise<void>;
   delete(contextGraphId: string, principalType: ContextGraphMemberPrincipalType, principalId: string): Promise<void>;
 }
@@ -1463,6 +1502,30 @@ export interface DKGAgentConfig {
   bootstrapPeers?: string[];
   /** Multiaddrs of relay nodes for NAT traversal. */
   relayPeers?: string[];
+  /**
+   * The relay multiaddrs from the network file. An edge without
+   * `authorityIndex` seeds its authority index from these relays, each pinned
+   * by the PeerID in its multiaddr, and falls back to local history. Distinct
+   * from `relayPeers`, the connectivity set, which may carry operator relays
+   * the network never vouched for. Empty or absent keeps the edge on local
+   * history; the daemon passes none for `relay: "none"`.
+   */
+  networkRelays?: readonly string[];
+  /**
+   * Relay multiaddrs declared by the OTHER DKG networks bundled with this
+   * build (the daemon derives them from network/*.json). With a network
+   * identity the node refuses to dial these peers, store their addresses or
+   * accept their connections. `relayPeers` win over this static list only: a
+   * `relayPeers` entry that fails the network-identity proof is refused like
+   * any other peer (`DKGNodeConfig.otherNetworkRelays`).
+   */
+  otherNetworkRelays?: readonly string[];
+  /**
+   * Transport-level network peer isolation (`DKGNodeConfig.networkPeerIsolation`).
+   * Default true; false is the operator kill switch, leaving other networks'
+   * peers to network admission alone.
+   */
+  networkPeerIsolation?: boolean;
   /** Legacy ACK candidate allowlist. When set, unlisted connected peers are not dialed for ACKs. */
   ackCandidatePeerIds?: string[];
   /**
@@ -1495,6 +1558,8 @@ export interface DKGAgentConfig {
   sharedMemoryPublicSnapshotStorage?: SharedMemoryPublicSnapshotStorageConfig;
   /** Optional caller-owned snapshot store, used by the daemon to inject durable page indexing. */
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  /** Construct after the RDF store exists; an explicit publicSnapshotStore takes precedence. */
+  publicSnapshotStoreFactory?: (store: TripleStore) => WorkspacePublicSnapshotStore | undefined;
   /**
    * Max automatic-retry budget stamped onto async VM-publish jobs admitted
    * through this agent's `publishAsync` (EPCIS / Kafka plugin paths). Mirrors
@@ -1505,8 +1570,26 @@ export interface DKGAgentConfig {
   importedArtifactByteStore?: ImportedArtifactByteStore;
   /** When false, peer-connect sync skips SWM catch-up and relies on gossip for new SWM writes. */
   syncSharedMemoryOnConnect?: boolean;
-  /** Emergency switch for the periodic sync reconciler. Env DKG_SYNC_RECONCILER_ENABLED wins. */
+  /**
+   * Emergency switch for the periodic peer-sync reconciler only. Env
+   * DKG_SYNC_RECONCILER_ENABLED wins. It does not affect chain-driven VM
+   * reconciliation, which has its own `vmReconcilerEnabled` switch.
+   */
   syncReconcilerEnabled?: boolean;
+  /**
+   * Switch for chain-driven VM reconciliation (core-hosted recording, the
+   * KA-registered nudge and the VM reconcile sweep). Env
+   * DKG_VM_RECONCILER_ENABLED wins; default on. A core with it off declines
+   * every StorageACK, because it could not promote the ACKed data to VM.
+   */
+  vmReconcilerEnabled?: boolean;
+  /**
+   * Opt-in switch: prepare the sizing metadata of the next public-graph recovery
+   * batch while the current exact batch transfers, and size candidates with
+   * bounded in-order reads. Advisory planning evidence only. Env
+   * DKG_VM_RECOVERY_PREFETCH_ENABLED wins; default off.
+   */
+  vmRecoveryPrefetchEnabled?: boolean;
   /** Period between automatic sync-reconciler passes. Default: 5 minutes. */
   syncReconcilerIntervalMs?: number;
   /** Age after which a peer is eligible for automatic sync retry. Default: 10 minutes. */
@@ -1525,6 +1608,15 @@ export interface DKGAgentConfig {
    * remains available. Env DKG_SYNC_SYSTEM_CONTEXT_GRAPHS_ON_CONNECT wins.
    */
   syncSystemContextGraphsOnConnect?: boolean;
+  /**
+   * Fetch the `agents` phonebook once, bounded and on demand, when a public
+   * wallet-scoped Context Graph needs its owner's profile to reach holders
+   * (subscribe, saved-subscription restore, or VM recovery with an empty
+   * curator tier). Default true; inert when `agents` already syncs on every
+   * connect (see `syncSystemContextGraphsOnConnect`). Env
+   * DKG_ON_DEMAND_AGENTS_PHONEBOOK wins.
+   */
+  onDemandAgentsPhonebook?: boolean;
   /** Emergency switch for durable/SWM sync execution. Env DKG_DURABLE_SYNC_ENABLED wins. */
   durableSyncEnabled?: boolean;
   /**
@@ -1718,6 +1810,31 @@ export interface DKGAgentConfig {
      * increase reorganization risk; 1 gives no successor-block buffer. Defaults to 1.
      */
     finalityConfirmations?: number;
+    /**
+     * `chain.indexTickMs`: how long one completed finalized Context Graph
+     * authority projection answers reads before it is refreshed. Cache service
+     * is always capped at the five-minute RFC-64 accepted-authority interval.
+     * Defaults to 6000.
+     */
+    indexTickMs?: number;
+    /** Enable bounded authority reads at read-only gates; defaults to false. */
+    boundedAuthorityReads?: boolean;
+    /**
+     * `chain.authorityReadTimeoutMs`: request-scoped deadline (ms) for one
+     * on-chain Context Graph authority read (liveness, policy, roster, or the
+     * finalized-index snapshot behind a query/share/SWM decision). A read that
+     * misses it fails closed for that request. Env
+     * `DKG_CHAIN_AUTHORITY_READ_TIMEOUT_MS` wins. Defaults to 2500.
+     */
+    authorityReadTimeoutMs?: number;
+    /**
+     * `chain.authorityColdResolutionTimeoutMs`: budget (ms) for the detached
+     * cold finalized-authority resolution that keeps running after a request
+     * deadline trips so its result reaches the chain reader's projection
+     * cache. Never below `authorityReadTimeoutMs`. Env
+     * `DKG_CHAIN_AUTHORITY_COLD_RESOLUTION_TIMEOUT_MS` wins. Defaults to 20000.
+     */
+    authorityColdResolutionTimeoutMs?: number;
     /** Optional operator cap for transaction fee-per-gas fields (wei). */
     maxFeePerGasWei?: bigint;
     /**
@@ -1812,8 +1929,9 @@ export interface DKGAgentConfig {
   /**
    * Whether durable context-graph subscription rows become live subscriptions
    * during startup. Defaults to `true`. When `false`, startup still opens the
-   * same durable stores and leaves every row and RDF graph intact, but it does
-   * not restore those rows into gossip handlers or automatic sync scope.
+   * same durable stores and leaves every row and RDF graph intact. Canonical
+   * saved numeric identity is restored into inactive rows before discovery;
+   * subscription, hosting, readiness, gossip and automatic sync stay disabled.
    * Explicit subscriptions made after boot continue to work normally.
    */
   contextGraphSubscriptionRehydrationEnabled?: boolean;
@@ -1825,10 +1943,25 @@ export interface DKGAgentConfig {
   chainEventCursorStore?: ChainEventCursorPersistence;
   /** Durable ContextGraphNameRegistry discovery cursor store. Defaults to in-memory adapter state. */
   contextGraphRegistryScanCursorStore?: ContextGraphRegistryScanCursorStore;
+  /**
+   * Durable ContextGraphStorage enumeration checkpoint (cursor plus the chain
+   * facts below it), scoped to one chain deployment. Defaults to in-memory, in
+   * which case each process re-enumerates from id 1.
+   */
+  contextGraphStorageDiscoveryStore?: ContextGraphStorageDiscoveryStore;
   /** Process-owned local durable finalized Context Graph authority-history checkpoints. */
   localContextGraphAuthorityHistoryStore?: ContextGraphAuthorityHistoryStore;
   /** Process-owned durable contract-wide Context Graph authority index. */
   localContextGraphAuthorityIndexStore?: ContextGraphAuthorityIndexStore;
+  /**
+   * Durable backing for the node's ONE chain log. Giving it to the agent is
+   * what starts the single background tick: the agent's own chain adapter owns
+   * it, and every other adapter in the process reads the same log rather than
+   * opening a scanner of its own.
+   */
+  chainEventLogStore?: ChainEventLogStore;
+  /** Opt in to trusted core bootstrap and a bounded chain tail on edges. */
+  authorityIndex?: AuthorityIndexConfig;
   /**
    * Intentional cap on how many persisted context-graph subscriptions are
    * *activated* (gossip-subscribed + sync-tracked) when rehydrating at startup.
@@ -1840,6 +1973,18 @@ export interface DKGAgentConfig {
    * `DEFAULT_MAX_REHYDRATED_SUBSCRIPTIONS`. `0` disables the cap.
    */
   maxRehydratedContextGraphSubscriptions?: number;
+  /**
+   * How long (ms) startup rehydration may wait on the chain for persisted
+   * subscriptions' read authority before the agent finishes starting. Rows it
+   * has not resolved by then stay dormant as `authorityUnavailable`, and the
+   * background authority recovery resolves and activates them after start, so
+   * a large backlog of persisted rows no longer holds the node's start (and
+   * its API) for minutes. Rows with a durable join approval are always
+   * resolved during startup. Default
+   * `DEFAULT_REHYDRATION_STARTUP_AUTHORITY_BUDGET_MS` (10 s). `0` removes the
+   * budget: startup resolves every row, as before.
+   */
+  contextGraphSubscriptionRehydrationAuthorityBudgetMs?: number;
   /** Durable local cache for nodes/agents known to be members of a context graph. */
   contextGraphMembershipStore?: ContextGraphMembershipStore;
   /** Durable, fail-closed per-CG curator join policy and admission audit store. */
@@ -1910,6 +2055,8 @@ export type ResolvedDKGAgentConfig =
     contextGraphSubscriptionRehydrationEnabled: boolean;
     storageAckTiming: StorageAckTiming;
     syncReconcilerTiming: SyncReconcilerTiming;
+    /** Resolved once per boot from `chainConfig` and the environment overrides. */
+    chainAuthorityReadBudgets: ChainAuthorityReadBudgets;
     rfc64CatalogDeploymentProfile?: Readonly<CatalogSealDeploymentProfileV1>;
     rfc64CatalogBootstrap?: Readonly<Rfc64CatalogBootstrapConfigV1>;
     /** Sole immutable restart-stable D17/D18 runtime authority for this boot. */

@@ -59,6 +59,22 @@
  *              `config.json`, `node-ui.db` (dashboard state),
  *              `files/` (uploaded files), auto-update markers.
  *
+ * `node-ui.db` and the chain
+ * --------------------------
+ * `node-ui.db` is preserved WHOLE, and it holds chain-derived state: the
+ * folded Context Graph authority checkpoint and, from schema 38, the node's
+ * one chain log (`chain_index_cursor`, `chain_events`, `chain_index_coverage`).
+ * Those are not wiped here, so nothing in this hook stands between a redeploy
+ * and a node serving the old chain's answers.
+ *
+ * What does is the log's own lineage: the cursor pins the scope to the block
+ * hash observed at the deployment block, and the tick re-reads it on every pass
+ * that cannot verify its settled hash — which is exactly the shape a chain
+ * shorter than the cursor produces. A deterministic redeploy reproduces every
+ * address but not that hash, so the scope tombstones itself and every derived
+ * row goes with it (`chain-index-tick.ts:#verifyLineage`). Wiping the tables
+ * here would be a second line of defence; today there is only the first.
+ *
  * Per the runbook contract: keystore stays so the wallet identity is
  * constant across resets, and `ensureProfile` re-derives the on-chain
  * identityId on the new chain cleanly.

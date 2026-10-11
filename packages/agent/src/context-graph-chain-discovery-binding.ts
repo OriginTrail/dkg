@@ -1,5 +1,16 @@
 import { ethers } from 'ethers';
 import type { ChainAdapter, ContextGraphOnChain } from '@origintrail-official/dkg-chain';
+import { isCanonicalAuthoritativeContextGraphId } from './context-graph-binding-state.js';
+
+/** Automatic discovery may fill a binding, but cannot replace an owned canonical slot. */
+export function conflictsWithOwnedContextGraphBinding(
+  currentId: string | undefined,
+  incomingId: string | undefined,
+): boolean {
+  return isCanonicalAuthoritativeContextGraphId(currentId)
+    && isCanonicalAuthoritativeContextGraphId(incomingId)
+    && currentId !== incomingId;
+}
 
 export type DiscoveredContextGraphBinding =
   | {

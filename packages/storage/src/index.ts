@@ -15,6 +15,7 @@ export {
   type Quad,
   type TripleStore,
   type TripleStoreDecorator,
+  type BoundedQueryResponseCapability,
   type QueryResult,
   type QueryOptions,
   type StoreWorkPriority,
@@ -31,6 +32,7 @@ export {
   isStoreWorkPriority,
   registerTripleStoreAdapter,
   findTripleStoreCapability,
+  asBoundedQueryResponseCapability,
   deleteByPatternWithoutCount,
   createTripleStore,
   tryUpdateWithTouchedGraphs,
@@ -69,6 +71,10 @@ export {
   type Rfc64AuthorCommitSubjectReplacementV1,
 } from './rfc64-author-commit-cas.js';
 export {
+  describeRfc64AuthorCommitCasV1,
+  type Rfc64AuthorCommitMutationV1,
+} from './rfc64-author-commit-mutation.js';
+export {
   Rfc64SemanticAuthorCommitErrorV1,
   compileRfc64SemanticAuthorCommitV1,
   type Rfc64SemanticAuthorCommitErrorCodeV1,
@@ -88,6 +94,9 @@ export {
   isStoreSchedulerBusyError,
   externalStorePriorityScheduler,
   getExternalStorePrioritySchedulerSnapshot,
+  withDefaultStoreWorkPriority,
+  activeDefaultStoreWorkPriority,
+  storeLaneInflightLimit,
   DEFAULT_STORE_QUEUE_LIMIT,
   DEFAULT_STORE_QUEUE_WAIT_TIMEOUT_MS,
   type StorePrioritySchedulerSnapshot,
@@ -160,14 +169,24 @@ export {
   type GraphWriteScope,
 } from './graph-write-gen.js';
 export {
+  EXACT_GRAPH_EXPORT_MAX_ROWS,
+  EXACT_GRAPH_EXPORT_MAX_RESPONSE_BYTES,
   ExactGraphReadError,
   quadToNQuad,
   quadsToNQuads,
+  readBoundedGraphPayload,
+  readExactGraph,
   readExactGraphPaged,
   readExactGraphPagedWithDiscoveredCount,
+  supportsBoundedExactGraphExport,
   type ExactGraphReadErrorCode,
   type ExactGraphReadErrorKind,
   type ReadExactGraphPagedOptions,
+  type ReadExactGraphOptions,
+  type BoundedGraphPayloadProfile,
+  type ReadBoundedGraphPayloadOptions,
+  type BoundedGraphPayloadRefusalReason,
+  type BoundedGraphPayloadResult,
 } from './bounded-rdf.js';
 export { StoreResponseTooLargeError } from './http-response-limit.js';
 export {
@@ -208,6 +227,7 @@ export {
   withManagedOxigraphRuntimeStoreConfigV1,
   type ManagedOxigraphRuntimeActivityLeaseV1,
   type ManagedOxigraphRuntimeHooksV1,
+  type ManagedOxigraphRuntimeStateV1,
   type ManagedOxigraphRuntimeStoreConfigV1,
 } from './managed-oxigraph-runtime-store.js';
 export {

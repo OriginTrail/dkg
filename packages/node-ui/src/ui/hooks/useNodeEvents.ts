@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { currentApiToken } from '../lib/apiToken.js';
 
 export type MemoryGraphLayer = 'wm' | 'swm' | 'vm';
 
@@ -65,7 +66,7 @@ export function isMemoryGraphEventRelevant(
 function connect() {
   if (source) return;
 
-  const token = typeof window !== 'undefined' ? (window as any).__DKG_TOKEN__ : undefined;
+  const token = currentApiToken();
   const url = token ? `/api/events?token=${encodeURIComponent(token)}` : '/api/events';
   source = new EventSource(url);
 

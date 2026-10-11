@@ -83,6 +83,10 @@ export interface TelemetrySettingsCallbacks {
 /**
  * Handles all /api/metrics, /api/operations, /api/node-log, /api/query-history,
  * /api/saved-queries, and /ui routes. Returns true if the request was handled.
+ *
+ * `authToken` is embedded in the served dashboard shell as-is; the caller
+ * decides whether this request may receive it. Node-wide settings changes and
+ * node log reads require `callerCanAdministerNode`, which defaults to false.
  */
 export async function handleNodeUIRequest(
   req: IncomingMessage,
@@ -105,6 +109,8 @@ export async function handleNodeUIRequest(
    * consumer without the daemon duplicating route knowledge. (#1066 Item 1)
    */
   markMetricsConsumer?: () => void,
+  /** Whether the caller holds node-level admin scope. */
+  callerCanAdministerNode = false,
 ): Promise<boolean> {
   (res as any).__corsOrigin = corsOrigin ?? null;
   const path = url.pathname;
@@ -308,6 +314,7 @@ export async function handleNodeUIRequest(
   // --- Logs (compatibility endpoint) ---
 
   if (req.method === 'GET' && path === '/api/logs') {
+    if (!callerCanAdministerNode) return nodeAdminRequired(res, 'GET /api/logs', 'read node logs');
     const q = url.searchParams.get('q') ?? undefined;
     const operationId = url.searchParams.get('operationId') ?? undefined;
     const level = url.searchParams.get('level') ?? undefined;
@@ -323,6 +330,7 @@ export async function handleNodeUIRequest(
   // --- Node log (daemon.log file) ---
 
   if (req.method === 'GET' && path === '/api/node-log') {
+    if (!callerCanAdministerNode) return nodeAdminRequired(res, 'GET /api/node-log', 'read node logs');
     const logFilePath = join(db.dataDir, 'daemon.log');
     const rawLines = parseInt(url.searchParams.get('lines') ?? '500', 10);
     const tailLines = Number.isFinite(rawLines) && rawLines > 0 ? Math.min(rawLines, 5000) : 500;
@@ -399,6 +407,7 @@ export async function handleNodeUIRequest(
   }
 
   if (req.method === 'PUT' && path === '/api/settings/retention') {
+    if (!callerCanAdministerNode) return nodeAdminRequired(res, 'PUT /api/settings/retention', 'change node settings');
     const body = await readBody(req);
     const payload = JSON.parse(body ?? '{}') as { retentionDays?: number };
     const days = payload.retentionDays;
@@ -418,6 +427,7 @@ export async function handleNodeUIRequest(
   }
 
   if (req.method === 'PUT' && path === '/api/settings/telemetry') {
+    if (!callerCanAdministerNode) return nodeAdminRequired(res, 'PUT /api/settings/telemetry', 'change node settings');
     if (!telemetrySettings) return json(res, 501, { error: 'Telemetry not available' });
     const body = await readBody(req);
     const payload = JSON.parse(body ?? '{}') as { enabled?: boolean };
@@ -441,6 +451,7 @@ export async function handleNodeUIRequest(
   }
 
   if (req.method === 'PUT' && path === '/api/settings/llm' && llmSettings) {
+    if (!callerCanAdministerNode) return nodeAdminRequired(res, 'PUT /api/settings/llm', 'change node settings');
     const body = await readBody(req);
     const payload = JSON.parse(body ?? '{}') as {
       apiKey?: unknown;
@@ -771,6 +782,12 @@ async function serveStatic(res: ServerResponse, staticDir: string, urlPath: stri
   }
 
   return true;
+}
+
+function nodeAdminRequired(res: ServerResponse, route: string, action: string): true {
+  return json(res, 403, {
+    error: `${route} requires a node-level admin token; agent-scoped tokens cannot ${action}.`,
+  });
 }
 
 function json(res: ServerResponse, status: number, data: unknown): true {

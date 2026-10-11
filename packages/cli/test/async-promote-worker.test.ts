@@ -18,24 +18,30 @@ vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src
 import {
   OxigraphStore,
   StoreOperationTimeoutError,
+  StoreSchedulerBusyError,
 } from '@origintrail-official/dkg-storage';
 import {
   TripleStoreAsyncPromoteQueue,
+  createPromotePostCommitFailure,
+  createPromoteRetryableFailure,
   type AsyncPromoteQueue,
   type PromoteRequest,
-  type PromoteTerminalJobClearer,
 } from '@origintrail-official/dkg-publisher';
 import { classifyExactSwmGraphReplaceFailure } from '../../publisher/test/_helpers/promote-replay-safety.js';
+import { RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE } from '@origintrail-official/dkg-core';
 import {
   createPromoteWorkerSupervisor,
   runPromoteJob,
 } from '../src/daemon/worker/async-promote-worker.js';
 import {
   createAsyncPromoteWorkerFixture,
+  deferred,
+  promoteFailureDiagnostics,
   retryableBookkeepingFailure,
   type AsyncPromoteWorkerFixture,
 } from './_helpers/async-promote-worker-fixture.js';
 import { createClaimFailureBackoff } from '../src/daemon/worker/claim-failure-backoff.js';
+import { promoteJobToView } from '../src/daemon/routes/promote-job-view.js';
 
 const PROMOTE_RETRYABLE_FAILURE_CODE = 'PROMOTE_RETRYABLE_FAILURE';
 
@@ -84,29 +90,6 @@ describe('claim failure backoff', () => {
     expect(high.recordFailure()).toBe(30_000);
   });
 });
-
-function deferred<T = void>(): {
-  promise: Promise<T>;
-  resolve: (value?: T | PromiseLike<T>) => void;
-  reject: (reason?: unknown) => void;
-} {
-  let resolve!: (value?: T | PromiseLike<T>) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
-}
-
-const PROMOTE_FAILURE_LOG_PREFIX = '[async-promote-worker] ';
-
-function promoteFailureDiagnostics(logs: readonly string[]): Record<string, unknown>[] {
-  return logs
-    .filter((line) => line.startsWith(PROMOTE_FAILURE_LOG_PREFIX))
-    .map((line) => JSON.parse(line.slice(PROMOTE_FAILURE_LOG_PREFIX.length)) as Record<string, unknown>)
-    .filter((entry) => entry['event'] === 'async_promote_attempt_failed');
-}
 
 describe('runPromoteJob', () => {
   let fixture: AsyncPromoteWorkerFixture;
@@ -316,6 +299,346 @@ describe('runPromoteJob', () => {
     ]);
   });
 
+  it('logs only a typed, bounded authority reason behind a retryable promote prerequisite', async () => {
+    const job = await enqueueAndClaim();
+    await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        await markPromoteStarted();
+        throw createPromoteRetryableFailure(Object.assign(new Error('private detail'), {
+          code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+          reason: 'finalized-name-absence-unaccepted',
+          detail: 'private detail',
+        }));
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => logs.push(message),
+    });
+    const diagnostic = promoteFailureDiagnostics(logs)[0];
+    expect(diagnostic).toMatchObject({
+      errorCode: PROMOTE_RETRYABLE_FAILURE_CODE,
+      authorityReason: 'finalized-name-absence-unaccepted',
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain('private detail');
+    expect(diagnostic).not.toHaveProperty('causeCode');
+    // An authority error that carries no throw site logs none.
+    expect(diagnostic).not.toHaveProperty('authoritySite');
+  });
+
+  // GH#3067 — the log said which authority reason ended an attempt but not
+  // which check raised it, so a loop failure and a failed chain read looked alike.
+  describe('throw site and store failure of an attempt (GH#3067)', () => {
+    async function logOf(thrown: unknown) {
+      const job = await enqueueAndClaim();
+      const result = await runPromoteJob({
+        job,
+        queue,
+        workerId: 'worker-test',
+        runPromote: async (_request, markPromoteStarted) => {
+          await markPromoteStarted();
+          throw thrown;
+        },
+        now: fixture.clock.now,
+        heartbeatIntervalMs: 0,
+        log: (message) => logs.push(message),
+      });
+      return { result, diagnostic: promoteFailureDiagnostics(logs)[0], job };
+    }
+
+    const authorityCause = (extra: Record<string, unknown>) => Object.assign(new Error('private detail'), {
+      code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+      reason: 'chain-participant-authority-unavailable',
+      detail: 'private detail',
+      ...extra,
+    });
+
+    it.each([
+      'transport-unavailable',
+      'transport-changed',
+      'revision-moved',
+      'recipient-set-changed',
+    ])('logs the closed throw site %s behind a retryable authority failure', async (site) => {
+      const { diagnostic } = await logOf(createPromoteRetryableFailure(authorityCause({ site })));
+
+      expect(diagnostic).toMatchObject({
+        errorCode: PROMOTE_RETRYABLE_FAILURE_CODE,
+        authorityReason: 'chain-participant-authority-unavailable',
+        authoritySite: site,
+      });
+      expect(JSON.stringify(diagnostic)).not.toContain('private detail');
+    });
+
+    it.each([
+      'AKIAIOSFODNN7EXAMPLE',
+      'https://rpc.example/key',
+      'toString',
+      '__proto__',
+      'constructor',
+      'x'.repeat(1_000),
+      42,
+      null,
+      { site: 'revision-moved' },
+    ])('drops a throw site that is not in the closed set (%j) without leaking it', async (site) => {
+      const { result, diagnostic } = await logOf(createPromoteRetryableFailure(authorityCause({ site })));
+
+      expect(result.outcome).toBe('failed_retrying');
+      expect(diagnostic).not.toHaveProperty('authoritySite');
+      expect(diagnostic).toMatchObject({ authorityReason: 'chain-participant-authority-unavailable' });
+      if (typeof site === 'string') expect(JSON.stringify(diagnostic)).not.toContain(site);
+    });
+
+    it('survives a throw site whose getter throws and still does the queue bookkeeping', async () => {
+      const hostile = authorityCause({});
+      Object.defineProperty(hostile, 'site', { get() { throw new Error('hostile getter'); } });
+
+      const { result, diagnostic, job } = await logOf(createPromoteRetryableFailure(hostile));
+
+      expect(result.outcome).toBe('failed_retrying');
+      expect(await queue.getStatus(job.jobId)).toMatchObject({ state: 'failed_retrying' });
+      expect(diagnostic).not.toHaveProperty('authoritySite');
+    });
+
+    it('does not read a throw site from an error that is not an authority error', async () => {
+      const { diagnostic } = await logOf(createPromoteRetryableFailure(
+        Object.assign(new Error('x'), { code: 'SOMETHING_ELSE', reason: 'chain-participant-authority-unavailable', site: 'revision-moved' }),
+      ));
+
+      expect(diagnostic).not.toHaveProperty('authoritySite');
+    });
+
+    it.each([
+      {
+        name: 'a queue wait timeout',
+        thrown: () => new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'publisher.asyncPromote.claimNext.candidates'),
+        storeFailure: 'queue_wait',
+      },
+      {
+        name: 'a full queue',
+        thrown: () => new StoreSchedulerBusyError('queue_full', 'normal', 'publisher.asyncPromote.write'),
+        storeFailure: 'queue_full',
+      },
+      {
+        name: 'a store deadline before the operation started',
+        thrown: () => new StoreOperationTimeoutError({ backend: 'blazegraph', operation: 'query', outcome: 'not_started' }),
+        storeFailure: 'store_timeout_not_started',
+      },
+      {
+        name: 'a store deadline of a read that was already running',
+        thrown: () => new StoreOperationTimeoutError({ backend: 'blazegraph', operation: 'query', outcome: 'indeterminate' }),
+        storeFailure: 'store_timeout_indeterminate',
+      },
+    ])('names $name from a closed set instead of an unknown error', async ({ thrown, storeFailure }) => {
+      const { diagnostic } = await logOf(thrown());
+
+      expect(diagnostic).toMatchObject({ storeFailure });
+      expect(diagnostic).not.toHaveProperty('authorityReason');
+      expect(diagnostic).not.toHaveProperty('authoritySite');
+    });
+
+    it('names a store failure that a retryable promote failure wraps as its cause', async () => {
+      const { diagnostic } = await logOf(createPromoteRetryableFailure(
+        new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'agent.query'),
+      ));
+
+      expect(diagnostic).toMatchObject({ storeFailure: 'queue_wait' });
+    });
+
+    it('does not invent a store failure for an error that only looks like one', async () => {
+      const { diagnostic } = await logOf(Object.assign(new Error('queue wait timeout'), {
+        code: 'NOT_A_STORE_ERROR',
+        reason: 'queue_wait_timeout',
+        outcome: 'not_started',
+      }));
+
+      expect(diagnostic).not.toHaveProperty('storeFailure');
+    });
+  });
+
+  it('names the legacy SWM retirement fence behind a retryable promote, from a closed set', async () => {
+    const job = await enqueueAndClaim();
+    await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        await markPromoteStarted();
+        throw createPromoteRetryableFailure(Object.assign(
+          new Error('RFC-64 legacy SWM boundary retirement is in progress; retry promotion'),
+          { code: 'RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS' },
+        ));
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => logs.push(message),
+    });
+    expect(promoteFailureDiagnostics(logs)[0]).toMatchObject({
+      classification: 'transient',
+      retryable: true,
+      errorCode: PROMOTE_RETRYABLE_FAILURE_CODE,
+      causeCode: 'RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS',
+    });
+    expect(await queue.getStatus(job.jobId)).toMatchObject({ state: 'failed_retrying' });
+    // The allowlist is built from the shared contract code, so the wire value is what gets named.
+    expect(RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE)
+      .toBe('RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS');
+  });
+
+  describe('a promote refused by the legacy SWM retirement fence', () => {
+    const fenceFailure = () => createPromoteRetryableFailure(Object.assign(
+      new Error('RFC-64 legacy SWM boundary retirement is in progress; retry promotion'),
+      { code: 'RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS' },
+    ));
+
+    it('is retried by the queue and completes on the second attempt with the same request', async () => {
+      await queue.enqueue(makeRequest({ assertionName: 'fenced-share' }));
+      const seen: PromoteRequest[] = [];
+      const attempt = async (refuse: boolean) => {
+        const claimed = await queue.claimNext('worker-test');
+        if (!claimed) throw new Error('nothing to claim');
+        const result = await runPromoteJob({
+          job: claimed,
+          queue,
+          workerId: 'worker-test',
+          runPromote: async (request, markPromoteStarted) => {
+            seen.push(request);
+            await markPromoteStarted();
+            if (refuse) throw fenceFailure();
+            return { promotedCount: 1 };
+          },
+          now: fixture.clock.now,
+          heartbeatIntervalMs: 0,
+          log: (message) => logs.push(message),
+        });
+        return { claimed, result };
+      };
+
+      const first = await attempt(true);
+      expect(first.result).toMatchObject({
+        outcome: 'failed_retrying',
+        error: { classification: 'transient', retryable: true },
+      });
+      expect(await queue.getStatus(first.claimed.jobId)).toMatchObject({
+        state: 'failed_retrying',
+        attempt: { count: 1 },
+      });
+
+      fixture.clock.advance(120_000);
+      const second = await attempt(false);
+      expect(second.result.outcome).toBe('succeeded');
+      expect(second.claimed.jobId).toBe(first.claimed.jobId);
+      expect(await queue.getStatus(first.claimed.jobId)).toMatchObject({
+        state: 'succeeded',
+        attempt: { count: 2 },
+      });
+      expect(seen).toHaveLength(2);
+      expect(seen[1]).toEqual(seen[0]);
+    });
+
+    it('keeps retrying past its attempt budget for an hour after enqueue, then ends failed yet retryable; recover requeues it', async () => {
+      await queue.enqueue(makeRequest({ assertionName: 'fenced-forever' }));
+      // One attempt every 10 minutes: the budget of 3 is spent after 20 minutes,
+      // the window of the typed prerequisite failure ends at 60.
+      for (let attempt = 1; attempt <= 7; attempt += 1) {
+        const claimed = await queue.claimNext('worker-test');
+        expect(claimed).not.toBeNull();
+        await runPromoteJob({
+          job: claimed!,
+          queue,
+          workerId: 'worker-test',
+          runPromote: async (_request, markPromoteStarted) => {
+            await markPromoteStarted();
+            throw fenceFailure();
+          },
+          now: fixture.clock.now,
+          heartbeatIntervalMs: 0,
+          log: (message) => logs.push(message),
+        });
+        if (attempt < 7) {
+          expect((await queue.list({}))[0]).toMatchObject({
+            state: 'failed_retrying',
+            attempt: { count: attempt, maxRetries: 3 },
+          });
+        }
+        fixture.clock.advance(10 * 60_000);
+      }
+      const [job] = await queue.list({});
+      expect(job).toMatchObject({ state: 'failed', attempt: { count: 7 } });
+      expect(promoteJobToView(job)).toMatchObject({
+        state: 'failed',
+        attempts: 7,
+        maxAttempts: 3,
+        lastError: {
+          code: 'transient',
+          retryable: true,
+          diagnosticCode: 'PROMOTE_RETRYABLE_FAILURE',
+          message: 'A promote prerequisite is temporarily unavailable',
+        },
+      });
+      // It is not a post-commit failure, so the recovery sweep leaves it for the operator.
+      await expect(queue.recoverPostCommitFailures()).resolves.toEqual([]);
+      await queue.recover(job.jobId);
+      expect(await queue.getStatus(job.jobId)).toMatchObject({ state: 'queued' });
+    });
+  });
+
+  it.each([
+    'AKIAIOSFODNN7EXAMPLE',
+    'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+    'rfc64_legacy_swm_boundary_retirement_in_progress',
+    'constructor',
+    '__proto__',
+    'toString',
+    'hasOwnProperty',
+  ])('never logs the cause code %s: it is outside the closed set, however token-shaped', async (code) => {
+    const job = await enqueueAndClaim();
+    await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        await markPromoteStarted();
+        throw createPromoteRetryableFailure(Object.assign(new Error('private detail'), { code }));
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => logs.push(message),
+    });
+    const diagnostic = promoteFailureDiagnostics(logs)[0];
+    expect(diagnostic).toMatchObject({ errorCode: PROMOTE_RETRYABLE_FAILURE_CODE });
+    expect(diagnostic).not.toHaveProperty('causeCode');
+    // The authority marker keeps its own reason field; a stray secret must not appear anywhere.
+    if (code === 'AKIAIOSFODNN7EXAMPLE') expect(logs.join('\n')).not.toContain(code);
+  });
+
+  it('identifies a metadata-revision retry without logging the context graph id', async () => {
+    const job = await enqueueAndClaim();
+    await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        await markPromoteStarted();
+        throw createPromoteRetryableFailure(Object.assign(new Error('private graph id'), {
+          code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+          reason: 'local-existence-unavailable',
+          detail: 'Context graph "private graph id" metadata authority changed while resolving its agent gate',
+        }));
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => logs.push(message),
+    });
+    const diagnostic = promoteFailureDiagnostics(logs)[0];
+    expect(diagnostic).toMatchObject({
+      authorityReason: 'local-existence-unavailable',
+      authorityOrigin: 'agent-gate-revision',
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain('private graph id');
+  });
+
   it('uses publisher-owned diagnostics for a certified replay-safe failure', async () => {
     const job = await enqueueAndClaim();
     const replaySafeFailure = classifyExactSwmGraphReplaceFailure(
@@ -394,215 +717,6 @@ describe('runPromoteJob', () => {
     ]);
   });
 
-  it('logs bounded tagged failure evidence that survives terminal cleanup without leaking the message', async () => {
-    const job = await enqueueAndClaim();
-    const sensitiveMessage = 'query failed for secret-sentinel and https://rpc.example/private-key';
-    const failure = Object.assign(
-      new Error(`[promote:assertionScopedQuads] ${sensitiveMessage}`),
-      { name: 'CuratorRejectedError', code: 'CURATOR_REJECTED' },
-    );
-    const order: string[] = [];
-    let diagnosticPresentWhenFailBegan = false;
-    const fail = queue.fail.bind(queue);
-    queue.fail = async (jobId, claimToken, error) => {
-      order.push('queue.fail.begin');
-      diagnosticPresentWhenFailBegan = promoteFailureDiagnostics(logs).length === 1;
-      await fail(jobId, claimToken, error);
-      order.push('queue.fail.end');
-    };
-
-    const result = await runPromoteJob({
-      job,
-      queue,
-      workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
-        throw failure;
-      },
-      now: fixture.clock.now,
-      heartbeatIntervalMs: 0,
-      log: (message) => {
-        order.push('diagnostic');
-        logs.push(message);
-      },
-    });
-
-    expect(result.outcome).toBe('failed_terminal');
-    expect(order).toEqual(['diagnostic', 'queue.fail.begin', 'queue.fail.end']);
-    expect(diagnosticPresentWhenFailBegan).toBe(true);
-    const diagnostics = promoteFailureDiagnostics(logs);
-    expect(diagnostics).toEqual([
-      {
-        event: 'async_promote_attempt_failed',
-        schemaVersion: 1,
-        jobId: job.jobId,
-        attempt: 1,
-        maxAttempts: 3,
-        promoteStartedMarkerPersisted: true,
-        swmCommitObserved: false,
-        stage: 'assertionScopedQuads',
-        classification: 'fatal',
-        retryable: false,
-        errorName: 'CuratorRejectedError',
-        errorCode: 'CURATOR_REJECTED',
-      },
-    ]);
-    expect(diagnostics[0]).not.toHaveProperty('messageFingerprint');
-    expect(logs.join('\n')).not.toContain('secret-sentinel');
-    expect(logs.join('\n')).not.toContain('rpc.example');
-
-    const clearer = queue as AsyncPromoteQueue & PromoteTerminalJobClearer;
-    await expect(clearer.clearTerminalJob(job.jobId)).resolves.toEqual({ outcome: 'cleared' });
-    await expect(queue.getStatus(job.jobId)).resolves.toBeNull();
-    expect(promoteFailureDiagnostics(logs)).toEqual(diagnostics);
-  });
-
-  it('sanitizes caller-controlled error identity at the worker logging boundary', async () => {
-    const job = await enqueueAndClaim();
-    const secretToken = 'AKIAIOSFODNN7EXAMPLE';
-    const failure = Object.assign(new Error('[promote:callerControlled] secret-sentinel failure'), {
-      name: `Error${secretToken}`,
-      code: secretToken,
-    });
-    const result = await runPromoteJob({
-      job,
-      queue,
-      workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
-        throw failure;
-      },
-      now: fixture.clock.now,
-      heartbeatIntervalMs: 0,
-      log: (message) => logs.push(message),
-    });
-
-    expect(result.outcome).toBe('failed_terminal');
-    expect(promoteFailureDiagnostics(logs)).toEqual([expect.objectContaining({
-      stage: 'unknown', errorName: 'unknown', errorCode: 'unknown',
-      classification: 'fatal', retryable: false,
-    })]);
-    expect(promoteFailureDiagnostics(logs)[0]).not.toHaveProperty('messageFingerprint');
-    expect(logs.join('\n')).not.toContain(secretToken);
-    expect(logs.join('\n')).not.toContain('secret-sentinel');
-    expect(logs.join('\n')).not.toContain('callerControlled');
-    expect((await queue.getStatus(job.jobId))?.state).toBe('failed');
-  });
-
-  it('keeps fail-closed queue bookkeeping intact when the diagnostic logger throws', async () => {
-    const job = await enqueueAndClaim();
-
-    const result = await runPromoteJob({
-      job,
-      queue,
-      workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
-        throw new Error('[promote:assertionScopedQuads] unknown fatal failure');
-      },
-      now: fixture.clock.now,
-      heartbeatIntervalMs: 0,
-      log: () => {
-        throw new Error('logger unavailable');
-      },
-    });
-
-    expect(result).toMatchObject({
-      outcome: 'failed_terminal',
-      error: { classification: 'fatal', retryable: false },
-    });
-    expect((await queue.getStatus(job.jobId))?.state).toBe('failed');
-  });
-
-  it('does not wait for an unresolved logger before queue.fail reaches terminal state', async () => {
-    const job = await enqueueAndClaim();
-    const pendingLog = deferred<void>();
-    let loggerSettled = false;
-    void pendingLog.promise.then(() => {
-      loggerSettled = true;
-    });
-
-    const fail = queue.fail.bind(queue);
-    let failCompleted = false;
-    queue.fail = async (jobId, claimToken, error) => {
-      await fail(jobId, claimToken, error);
-      failCompleted = true;
-    };
-
-    const resultPromise = runPromoteJob({
-      job,
-      queue,
-      workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
-        throw new Error('[promote:assertionScopedQuads] unknown fatal failure');
-      },
-      now: fixture.clock.now,
-      heartbeatIntervalMs: 0,
-      log: () => pendingLog.promise,
-    });
-    let runSettled = false;
-    void resultPromise.then(
-      () => {
-        runSettled = true;
-      },
-      () => {
-        runSettled = true;
-      },
-    );
-
-    try {
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      expect(loggerSettled).toBe(false);
-      expect(failCompleted).toBe(true);
-      expect(runSettled).toBe(true);
-      expect((await queue.getStatus(job.jobId))?.state).toBe('failed');
-    } finally {
-      pendingLog.resolve();
-    }
-
-    await expect(resultPromise).resolves.toMatchObject({
-      outcome: 'failed_terminal',
-      error: { classification: 'fatal', retryable: false },
-    });
-  });
-
-  it('does not await an async diagnostic logger and absorbs its rejection', async () => {
-    const job = await enqueueAndClaim();
-    const unhandledRejections: unknown[] = [];
-    const onUnhandledRejection = (reason: unknown): void => {
-      unhandledRejections.push(reason);
-    };
-    process.on('unhandledRejection', onUnhandledRejection);
-
-    try {
-      const result = await runPromoteJob({
-        job,
-        queue,
-        workerId: 'worker-test',
-        runPromote: async (_request, markPromoteStarted) => {
-          await markPromoteStarted();
-          throw new Error('[promote:assertionScopedQuads] unknown fatal failure');
-        },
-        now: fixture.clock.now,
-        heartbeatIntervalMs: 0,
-        log: async () => {
-          throw new Error('async logger unavailable');
-        },
-      });
-
-      expect(result).toMatchObject({
-        outcome: 'failed_terminal',
-        error: { classification: 'fatal', retryable: false },
-      });
-      expect((await queue.getStatus(job.jobId))?.state).toBe('failed');
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      expect(unhandledRejections).toEqual([]);
-    } finally {
-      process.off('unhandledRejection', onUnhandledRejection);
-    }
-  });
-
   it('after maxRetries transient failures in a row, settles in failed (terminal)', async () => {
     const req = makeRequest({ assertionName: 'flaky' });
     await queue.enqueue(req);
@@ -642,6 +756,45 @@ describe('runPromoteJob', () => {
         log: () => {},
       }),
     ).rejects.toThrow(/active lease/);
+  });
+
+  it('persists the publisher diagnostic code of a post-commit failure for the recovery sweep', async () => {
+    const job = await enqueueAndClaim();
+    const result = await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async (_request, markPromoteStarted) => {
+        await markPromoteStarted();
+        throw createPromotePostCommitFailure(new Error('durable tail failed'));
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => logs.push(message),
+    });
+    expect(result.outcome).toBe('failed_terminal');
+    expect((await queue.getStatus(job.jobId))?.attempt.lastError).toMatchObject({
+      classification: 'fatal',
+      retryable: false,
+      diagnosticCode: 'PROMOTE_POST_COMMIT_FAILURE',
+    });
+
+    // An upstream error without a publisher disposition persists no code.
+    const untyped = await enqueueAndClaim(makeRequest({ assertionName: 'untyped' }));
+    await runPromoteJob({
+      job: untyped,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async () => {
+        throw new Error('assertion not found');
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => logs.push(message),
+    });
+    const untypedError = (await queue.getStatus(untyped.jobId))?.attempt.lastError;
+    expect(untypedError?.classification).toBe('fatal');
+    expect(untypedError).not.toHaveProperty('diagnosticCode');
   });
 });
 
@@ -763,6 +916,55 @@ describe('createPromoteWorkerSupervisor', () => {
     await sup.start();
     expect(await sup.tickOnce()).toBe(0);
     await sup.stop();
+  });
+
+  it('logs a job run that crashes and goes on to run the next job', async () => {
+    // The first claimed job loses its lease, so its run throws before any
+    // promote. The supervisor has to report that and stay in service: with no
+    // lease there is nothing to park, and the next job must still complete.
+    const crashLogs: string[] = [];
+    let claims = 0;
+    const firstClaimLeaseless = Object.create(queue) as AsyncPromoteQueue;
+    firstClaimLeaseless.claimNext = async (workerId) => {
+      const claimed = await queue.claimNext(workerId);
+      if (!claimed) return claimed;
+      claims += 1;
+      return claims === 1 ? { ...claimed, lease: undefined } : claimed;
+    };
+    await queue.enqueue(makeRequest('crashing'));
+    await queue.enqueue(makeRequest('healthy'));
+    const sup = createPromoteWorkerSupervisor({
+      agent: {
+        promoteQueue: firstClaimLeaseless,
+        assertion: { promote: async () => ({ promotedCount: 1 }) },
+      } as any,
+      workerConcurrency: 1,
+      pollIntervalMs: 1_000_000,
+      heartbeatIntervalMs: 0,
+      log: (message) => { crashLogs.push(message); },
+      workerIdPrefix: 'test',
+    });
+
+    await sup.start();
+    try {
+      expect(await sup.tickOnce()).toBe(1);
+      await vi.waitFor(() => {
+        expect(crashLogs.filter((line) => line.includes('crashed processing'))).toEqual([
+          expect.stringMatching(/^Worker test-slot-0 crashed processing \S+: .*active lease/),
+        ]);
+      });
+
+      // Still in service: the same started supervisor frees the slot, claims
+      // the next job and completes it. The poll is disabled in this test, so
+      // the claim is driven by an explicit tick.
+      expect(await sup.tickOnce()).toBe(1);
+      await vi.waitFor(async () => {
+        expect((await queue.getStats()).succeeded).toBe(1);
+      });
+      expect(sup.getCounters()).toMatchObject({ attempted: 2, succeeded: 1 });
+    } finally {
+      await sup.stop();
+    }
   });
 
   it('wakes immediately on enqueue while retaining a slow durable fallback poll', async () => {
@@ -1399,5 +1601,143 @@ describe('createPromoteWorkerSupervisor', () => {
     });
     await expect(sup.start()).rejects.toThrow(/recoverOnStartup failed: store offline/);
     expect(sup.getCounters().attempted).toBe(0);
+  });
+  describe('post-commit recovery sweep', () => {
+    const POST_COMMIT_MESSAGE = 'A promote post-commit step failed after Shared Memory was committed';
+
+    /**
+     * Seed through `target` so a running supervisor's enqueue wake cannot
+     * claim the row first (a second queue instance on the same store has no
+     * scheduler attached, mirroring durable rows written by another process).
+     */
+    async function seedPostCommitFailure(name: string, target: AsyncPromoteQueue = queue): Promise<string> {
+      const jobId = await target.enqueue(makeRequest(name));
+      const claimed = await target.claimNext('old-worker');
+      await target.fail(jobId, claimed!.lease!.claimToken, {
+        message: POST_COMMIT_MESSAGE,
+        retryable: false,
+        classification: 'fatal',
+        recordedAt: Date.now(),
+        diagnosticCode: 'PROMOTE_POST_COMMIT_FAILURE',
+      });
+      expect((await target.getStatus(jobId))?.state).toBe('failed');
+      return jobId;
+    }
+
+    function recoveryEvents(): Array<Record<string, unknown>> {
+      return logs
+        .filter((line) => line.includes('"event":"async_promote_post_commit_recovery"'))
+        .map((line) => JSON.parse(line.slice(line.indexOf('{'))) as Record<string, unknown>);
+    }
+
+    async function waitFor(predicate: () => boolean, label: string): Promise<void> {
+      const deadline = Date.now() + 2_000;
+      while (!predicate()) {
+        if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+
+    it('requeues a terminal post-commit failure at startup and replays it to success', async () => {
+      const jobId = await seedPostCommitFailure('post-commit');
+      const sup = createPromoteWorkerSupervisor({
+        agent: makeAgentStub(async () => ({ promotedCount: 0 })),
+        workerConcurrency: 1,
+        pollIntervalMs: 1_000_000,
+        postCommitRecoveryIntervalMs: 0,
+        heartbeatIntervalMs: 0,
+        log: (m) => logs.push(m),
+        workerIdPrefix: 'test',
+      });
+      await sup.start();
+
+      const requeued = (await queue.getStatus(jobId))!;
+      expect(requeued.state).toBe('failed_retrying');
+      expect(requeued.attempt).toMatchObject({ count: 1, maxRetries: 2 });
+      expect(recoveryEvents()).toEqual([expect.objectContaining({
+        trigger: 'startup', jobId, action: 'requeued', attempt: 1, maxAttempts: 2, nextRetryAt: expect.any(Number),
+      })]);
+      expect(sup.getCounters().postCommitRequeued).toBe(1);
+
+      // The replay runs through the normal claim path once the backoff passes.
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(await sup.tickOnce()).toBe(1);
+      await sup.stop();
+      expect((await queue.getStatus(jobId))?.state).toBe('succeeded');
+      expect(sup.getCounters().succeeded).toBe(1);
+    });
+
+    it('repeats the sweep on the configured interval and marks a spent budget exhausted', async () => {
+      const sup = createPromoteWorkerSupervisor({
+        agent: makeAgentStub(async () => ({ promotedCount: 0 })),
+        workerConcurrency: 1,
+        pollIntervalMs: 1_000_000,
+        postCommitRecoveryIntervalMs: 20,
+        heartbeatIntervalMs: 0,
+        log: (m) => logs.push(m),
+        workerIdPrefix: 'test',
+      });
+      await sup.start();
+      expect(recoveryEvents()).toEqual([]);
+
+      const externalQueue = new TripleStoreAsyncPromoteQueue(store, {
+        now: () => Date.now(),
+        backoff: () => 50,
+        maxRetries: 2,
+      });
+      const jobId = await seedPostCommitFailure('periodic', externalQueue);
+      await waitFor(() => recoveryEvents().some((e) => e.jobId === jobId), 'the periodic sweep');
+      expect(recoveryEvents()).toEqual([expect.objectContaining({
+        trigger: 'periodic', jobId, action: 'requeued', attempt: 1, maxAttempts: 2,
+      })]);
+      expect((await queue.getStatus(jobId))?.state).toBe('failed_retrying');
+
+      // A second post-commit failure on the replay spends the two-attempt budget.
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      const replay = await queue.claimNext('replay-worker');
+      expect(replay?.jobId).toBe(jobId);
+      expect(replay?.attempt.count).toBe(2);
+      await queue.fail(jobId, replay!.lease!.claimToken, {
+        message: POST_COMMIT_MESSAGE,
+        retryable: false,
+        classification: 'fatal',
+        recordedAt: Date.now(),
+        diagnosticCode: 'PROMOTE_POST_COMMIT_FAILURE',
+      });
+      await waitFor(() => recoveryEvents().some((e) => e.action === 'exhausted'), 'the exhausted verdict');
+      await sup.stop();
+      expect(recoveryEvents().filter((e) => e.action === 'exhausted')).toEqual([expect.objectContaining({
+        trigger: 'periodic', jobId, action: 'exhausted', attempt: 2, maxAttempts: 2,
+      })]);
+      const exhausted = (await queue.getStatus(jobId))!;
+      expect(exhausted.state).toBe('failed');
+      expect(exhausted.reason).toContain('automatic post-commit recovery exhausted after 2 attempts');
+      expect(sup.getCounters()).toMatchObject({ postCommitRequeued: 1, postCommitExhausted: 1 });
+      // The manual route keeps working on the exhausted row.
+      await queue.recover(jobId);
+      expect((await queue.getStatus(jobId))?.state).toBe('queued');
+    });
+
+    it('logs a failing sweep without blocking startup or polling', async () => {
+      const brokenQueue = Object.create(queue) as AsyncPromoteQueue;
+      brokenQueue.recoverPostCommitFailures = async () => {
+        throw new Error('control graph unavailable');
+      };
+      await queue.enqueue(makeRequest('still-runs'));
+      const sup = createPromoteWorkerSupervisor({
+        agent: { ...makeAgentStub(async () => ({ promotedCount: 1 })), promoteQueue: brokenQueue },
+        workerConcurrency: 1,
+        pollIntervalMs: 1_000_000,
+        postCommitRecoveryIntervalMs: 0,
+        heartbeatIntervalMs: 0,
+        log: (m) => logs.push(m),
+        workerIdPrefix: 'test',
+      });
+      await sup.start();
+      expect(logs.some((m) => m.includes('post-commit recovery sweep failed (startup): control graph unavailable'))).toBe(true);
+      expect(await sup.tickOnce()).toBe(1);
+      await sup.stop();
+      expect((await queue.getStats()).succeeded).toBe(1);
+    });
   });
 });

@@ -47,12 +47,27 @@ import {
   type OxigraphWalMaintenanceActivityLease,
 } from './oxigraph-wal-maintenance.js';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { awaitOxigraphStoreOpen, type OxigraphStoreOpenAttempt, type StoreOpenOutcome } from './oxigraph-store-open.js';
+import type { ManagedOxigraphRuntimeStateV1 } from '@origintrail-official/dkg-storage';
 import { findListenOwnerPid } from './oxigraph-listen-port.js';
 import {
   createOxigraphLaunchStrategy,
+  type OxigraphLaunchHandle,
   type OxigraphMemoryLimits,
 } from './oxigraph-launch-strategy.js';
-import { invalidateExternalStoreQuadsCache } from './routes/status.js';
+import { invalidateExternalStoreQuadsCache } from './store-quads-cache.js';
+import { OXIGRAPH_STOP_GRACE_MS } from './oxigraph-parent-watchdog.js';
+import {
+  oxigraphStoreArgs,
+  type OxigraphStoreLaunch,
+  type OxigraphStoreLaunchOutcome,
+  type OxigraphStoreOwnership,
+} from './oxigraph-store-launch.js';
+import { describeStoreHold, type StoreHold } from './oxigraph-reclaim-policy.js';
+import {
+  createOxigraphStoreOwnership,
+  type OxigraphStoreOwnershipInput,
+} from './oxigraph-store-ownership.js';
 import {
   readCgroupOomSnapshot,
   readCgroupOomKill,
@@ -125,6 +140,13 @@ export interface StartOxigraphServerOptions {
   memoryLimits?: OxigraphMemoryLimits;
   /** Runtime platform. Injectable so command construction is portable in tests. */
   platform?: NodeJS.Platform;
+  /**
+   * Build the store ownership for this start: the orphan reclaim before each
+   * spawn and the owner record of each launch. The default knows only
+   * `binaryPath`; the managed layer builds one with the reclaim catalog of
+   * the binary it resolved, and lifecycle tests supply their own.
+   */
+  storeOwnership?: (input: OxigraphStoreOwnershipInput) => OxigraphStoreOwnership;
   io?: Partial<OxigraphServerIo>;
 }
 
@@ -157,30 +179,11 @@ export interface OxigraphServerHandle {
   killSync(): void;
 }
 
-export interface OxigraphRecoveryState {
-  /**
-   * The listener was terminated or is being terminated. Work already
-   * dispatched into this generation has an indeterminate outcome.
-   */
-  recovering: boolean;
-  /**
-   * WAL maintenance has closed admission and is waiting for in-flight work to
-   * drain. The child is still alive and still answering what it already
-   * accepted, so this refuses new work without making dispatched work
-   * indeterminate.
-   */
-  admissionsPaused: boolean;
-  generation: number;
-}
+export type OxigraphRecoveryState = ManagedOxigraphRuntimeStateV1;
 
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_READY_TIMEOUT_MS = 30_000;
 const DEFAULT_READY_INTERVAL_MS = 500;
-// GH#1400 — a LEAK GUARD, not a flush window. Measured: oxigraph 0.5.8
-// installs no SIGTERM handler, so the child dies by default disposition and
-// the WAL is byte-identical across the signal. Raising this cannot buy a
-// RocksDB flush; it would only delay teardown.
-const DEFAULT_STOP_GRACE_MS = 5_000;
 const DEFAULT_RESTART_BASE_MS = 1_000;
 const DEFAULT_RESTART_MAX_MS = 30_000;
 export {
@@ -188,9 +191,6 @@ export {
   resolveWalRestartThresholdBytes,
 } from './oxigraph-wal-maintenance.js';
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((res) => setTimeout(res, ms));
-}
 
 function normalizePositiveInteger(value: number | undefined): number | undefined {
   return typeof value === 'number' && Number.isInteger(value) && value > 0
@@ -206,9 +206,12 @@ function normalizePositiveInteger(value: number | undefined): number | undefined
 export async function startOxigraphServer(
   opts: StartOxigraphServerOptions,
 ): Promise<OxigraphServerHandle> {
+  // One host policy for the whole launch: the launch strategy and the store
+  // ownership (reclaim, process probes, owner record) share it.
+  const platform = opts.platform ?? process.platform;
   const launchStrategy = createOxigraphLaunchStrategy({
     memoryLimits: opts.memoryLimits,
-    platform: opts.platform ?? process.platform,
+    platform,
     parentPid: process.pid,
     uid: typeof process.getuid === 'function' ? process.getuid() : -1,
   });
@@ -226,6 +229,14 @@ export async function startOxigraphServer(
     invalidateExternalStoreQuadsCache();
   };
   const log = opts.log ?? (() => {});
+  // Reclaims the store before each spawn and records each launch; stop()
+  // closes it.
+  const storeOwnership = (opts.storeOwnership ?? createOxigraphStoreOwnership)({
+    location: opts.location,
+    binaryPath: opts.binaryPath,
+    platform,
+    log,
+  });
   const host = opts.host ?? DEFAULT_HOST;
   const { port } = opts;
   const bind = `${host}:${port}`;
@@ -257,35 +268,30 @@ export async function startOxigraphServer(
   };
   const readyIntervalMs = opts.readyIntervalMs ?? DEFAULT_READY_INTERVAL_MS;
   const progressLogIntervalMs = normalizePositiveInteger(opts.progressLogIntervalMs) ?? 10_000;
-  const stopGraceMs = opts.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
+  const stopGraceMs = opts.stopGraceMs ?? OXIGRAPH_STOP_GRACE_MS;
   const restartBase = opts.restartBackoffBaseMs ?? DEFAULT_RESTART_BASE_MS;
   const restartMax = opts.restartBackoffMaxMs ?? DEFAULT_RESTART_MAX_MS;
   const queryTimeoutS = normalizePositiveInteger(opts.queryTimeoutS);
-  type LifecycleState =
-    | { phase: 'starting'; child: ChildProcess | null; generation: number }
-    | { phase: 'ready'; child: ChildProcess; listenerPid: number; generation: number }
-    | { phase: 'restart-verifying'; child: ChildProcess; listenerPid: number; reason: string; generation: number }
-    | { phase: 'restart-signalled'; child: ChildProcess; listenerPid: number; reason: string; generation: number }
-    | { phase: 'recovering'; child: ChildProcess | null; reason: string; generation: number }
-    | { phase: 'stopping'; child: ChildProcess | null; generation: number };
 
-  let lifecycle: LifecycleState = { phase: 'starting', child: null, generation: 0 };
+  // `oxigraph` is the current launch: its child and how to signal it.
+  type LifecycleState =
+    | { phase: 'starting'; oxigraph: OxigraphLaunchHandle | null; generation: number }
+    | { phase: 'ready'; oxigraph: OxigraphLaunchHandle; listenerPid: number; generation: number }
+    | { phase: 'restart-verifying'; oxigraph: OxigraphLaunchHandle; listenerPid: number; reason: string; generation: number }
+    | { phase: 'restart-signalled'; oxigraph: OxigraphLaunchHandle; listenerPid: number; reason: string; generation: number }
+    | { phase: 'recovering'; oxigraph: OxigraphLaunchHandle | null; reason: string; generation: number }
+    | { phase: 'stopping'; oxigraph: OxigraphLaunchHandle | null; generation: number };
+
+  let lifecycle: LifecycleState = { phase: 'starting', oxigraph: null, generation: 0 };
   let restarts = 0;
   // Tail of the child's stderr, surfaced in the startup error so a bind
   // failure (`Address already in use`) is visible to the operator.
   let lastStderr = '';
-  // Children whose `error` event fired (ENOENT/EACCES/loader mismatch): the
-  // process never ran, so `exitCode`/`signalCode` stay null and would make
-  // childAlive() wrongly report it alive. Track them so childAlive() and the
-  // ready/revive loops treat a spawn error as a dead child.
-  const erroredChildren = new WeakSet<ChildProcess>();
-  const oomSnapshots = new WeakMap<ChildProcess, CgroupOomSnapshot>();
   const isStopping = (): boolean => lifecycle.phase === 'stopping';
-  const childAlive = (candidate: ChildProcess | null): candidate is ChildProcess =>
-    candidate != null
-    && !erroredChildren.has(candidate)
-    && candidate.exitCode === null
-    && candidate.signalCode === null;
+  // A spawn error (ENOENT/EACCES/loader mismatch) counts as a dead child: the
+  // launch handle tracks it, since `exitCode`/`signalCode` stay null then.
+  const childAlive = (candidate: OxigraphLaunchHandle | null): candidate is OxigraphLaunchHandle =>
+    candidate !== null && candidate.alive();
   const walMaintenance = createOxigraphWalMaintenanceCoordinator({
     location: opts.location,
     thresholdBytes: resolveWalRestartThresholdBytes(opts.walRestartThresholdBytes),
@@ -294,7 +300,7 @@ export async function startOxigraphServer(
     cooldownMs: opts.walRestartCooldownMs,
     measureRetainedWalBytes: io.measureRetainedWalBytes,
     requestRestart,
-    serverAvailable: () => lifecycle.phase === 'ready' && childAlive(lifecycle.child),
+    serverAvailable: () => lifecycle.phase === 'ready' && childAlive(lifecycle.oxigraph),
     log,
   });
   const setLifecycle = (next: LifecycleState): void => {
@@ -302,39 +308,28 @@ export async function startOxigraphServer(
     walMaintenance.serverLifecycleChanged();
   };
 
-  const spawnChild = (): ChildProcess => {
-    const args = ['serve', '--location', opts.location, '--bind', bind];
+  const spawnChild = (): OxigraphLaunchHandle => {
+    const args = [...oxigraphStoreArgs(opts.location), '--bind', bind];
     if (queryTimeoutS !== undefined) args.push('--timeout-s', String(queryTimeoutS));
-    const spawnSpec = launchStrategy.nextSpawnSpec(opts.binaryPath, args);
-    const c = io.spawn(
-      spawnSpec.command,
-      spawnSpec.args,
-      {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        ...(spawnSpec.environment
-          ? { env: { ...process.env, ...spawnSpec.environment } }
-          : {}),
-      },
-    );
-    // Without this listener Node throws the `error` event as an uncaught
-    // exception, killing the daemon. Route it through the normal
-    // startup/revive failure path instead (the binary couldn't be executed).
+    const oxigraph = launchStrategy.launch(io.spawn, opts.binaryPath, args, ['ignore', 'pipe', 'pipe']);
+    const c = oxigraph.child;
+    // Route a spawn failure through the normal startup/revive failure path
+    // (the binary couldn't be executed), with the reason in the log.
     c.once('error', (err) => {
-      erroredChildren.add(c);
       lastStderr = `${lastStderr}spawn error: ${(err as Error).message}\n`.slice(-1_000);
       log(`[oxigraph] failed to launch binary: ${(err as Error).message}`);
     });
     c.stderr?.on('data', (b) => {
       const line = b.toString('utf-8').trim();
       if (line) {
-        launchStrategy.observeStderr(c, line);
+        oxigraph.observeStderr(line);
         lastStderr = `${lastStderr}${line}\n`.slice(-1_000);
         log(`[oxigraph] ${line}`);
       }
     });
     c.once('exit', (code, signal) => {
       if (lifecycle.phase === 'stopping') return;
-      if (lifecycle.child !== c) return;
+      if (lifecycle.oxigraph !== oxigraph) return;
       const requestedRecovery = lifecycle.phase === 'restart-verifying'
         || lifecycle.phase === 'restart-signalled'
         ? lifecycle
@@ -361,33 +356,20 @@ export async function startOxigraphServer(
       // SIGKILL-compatible child death. This catches MemoryMax/host OOM kills
       // without labelling unrelated non-SIGKILL exits as OOM.
       let oomNote = '';
-      const oomSnapshot = oomSnapshots.get(c);
-      if (launchStrategy.classifyOomExit({
-        child: c,
-        code,
-        signal,
-        snapshot: oomSnapshot,
-        readOomKill: io.readCgroupOomKill,
-      })) {
+      if (oxigraph.classifyOomExit({ code, signal, readOomKill: io.readCgroupOomKill })) {
         oomNote = ', OOM-killed by cgroup memory cap (or host OOM)';
       }
       const recoveryReason = requestedRecovery === null
         ? `server exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'null'}${oomNote})`
         : `server terminated for recovery (${requestedRecovery.reason}; signal=${signal ?? 'null'}${oomNote})`;
-      setLifecycle({ phase: 'recovering', child: null, reason: recoveryReason, generation });
+      setLifecycle({ phase: 'recovering', oxigraph: null, reason: recoveryReason, generation });
       scheduleRevive(recoveryReason);
     });
-    return c;
+    return oxigraph;
   };
 
-  const captureOomSnapshotForListener = (c: ChildProcess, listenerPid: number): void => {
-    if (oomSnapshots.has(c)) return;
-    const snapshot = io.readCgroupOomSnapshot(listenerPid);
-    if (snapshot) oomSnapshots.set(c, snapshot);
-  };
-
-  const probeReady = async (c: ChildProcess): Promise<number | null> => {
-    if (!childAlive(c)) return null;
+  const probeReady = async (oxigraph: OxigraphLaunchHandle): Promise<number | null> => {
+    if (!oxigraph.alive()) return null;
     try {
       const res = await io.fetch(queryEndpoint, {
         method: 'POST',
@@ -399,16 +381,11 @@ export async function startOxigraphServer(
         signal: AbortSignal.timeout(readyIntervalMs + 1_000),
       });
       if (!res.ok) return null;
-      const resolvedListenerPid = await launchStrategy.resolveListenerPid(
-        c,
-        port,
-        host,
-        io.findListenOwnerPid,
-      );
+      const resolvedListenerPid = await oxigraph.resolveListenerPid(port, host, io.findListenOwnerPid);
       // A health response is not ownership proof. On macOS, lsof can briefly omit a new row.
       // Return null and let the existing readiness loop retry. Never replace a missing owner
       // with the child PID because a foreign service can answer while this child fails to bind.
-      return resolvedListenerPid !== null && childAlive(c) ? resolvedListenerPid : null;
+      return resolvedListenerPid !== null && oxigraph.alive() ? resolvedListenerPid : null;
     } catch {
       return null;
     }
@@ -422,7 +399,7 @@ export async function startOxigraphServer(
     if (lifecycle.phase === 'stopping') return;
     setLifecycle({
       phase: 'recovering',
-      child: lifecycle.child,
+      oxigraph: lifecycle.oxigraph,
       reason,
       generation: lifecycle.generation,
     });
@@ -432,6 +409,71 @@ export async function startOxigraphServer(
     setTimeout(() => {
       void revive();
     }, delay).unref?.();
+  };
+
+  // The ready budget (GH#1400) of one spawn — measured after the reclaim and
+  // BEFORE the child starts, so the child cannot delete segments underneath
+  // the scan — and how much retained WAL it covers.
+  type ReadyBudget = { timeoutMs: number; walBytes: number };
+  const sizeReadyBudget = (kind: 'boot' | 'restart'): ReadyBudget => {
+    const ready = nextReadyTimeout();
+    if (ready.walBytes > 0) {
+      log(kind === 'boot'
+        ? `[oxigraph] ${formatWalBytes(ready.walBytes)} of retained write-ahead log to replay; ` +
+          `allowing up to ${Math.round(ready.timeoutMs / 1000)}s for the database to open.`
+        : `[oxigraph] restart: ${formatWalBytes(ready.walBytes)} of retained write-ahead log ` +
+          `to replay; allowing up to ${Math.round(ready.timeoutMs / 1000)}s.`);
+    }
+    return ready;
+  };
+
+  // Every spawn, boot and restart alike, is one store-ownership launch: it
+  // frees the store lock (a worker or watchdog that died without stopping its
+  // Oxigraph leaves it holding LOCK), spawns, and records the launch. The
+  // spawned launch becomes the lifecycle's current one as soon as it exists,
+  // so stop() reaches it while it is being recorded; one that cannot be
+  // recorded is killed by the store ownership before the launch rejects.
+  const launchOxigraph = async (
+    kind: 'boot' | 'restart',
+    current:
+      | { phase: 'starting'; generation: number }
+      | { phase: 'recovering'; reason: string; generation: number },
+  ): Promise<
+    | { kind: 'launched'; launch: OxigraphStoreLaunch; readyBudget: ReadyBudget }
+    | Exclude<OxigraphStoreLaunchOutcome, { kind: 'launched' }>
+  > => {
+    // Sized inside `spawn`: after the reclaim, before the child starts.
+    let readyBudget: ReadyBudget = { timeoutMs: 0, walBytes: 0 };
+    const outcome = await storeOwnership.launch(() => {
+      readyBudget = sizeReadyBudget(kind);
+      const oxigraph = spawnChild();
+      setLifecycle({ ...current, oxigraph });
+      return oxigraph;
+    });
+    return outcome.kind === 'launched' ? { ...outcome, readyBudget } : outcome;
+  };
+
+  const heldStore = (hold: StoreHold): string =>
+    `${opts.location}/LOCK may still be held by this node's Oxigraph ` +
+    `(${describeStoreHold(hold)}); not starting another over it`;
+
+  const awaitStoreOpen = (launch: OxigraphStoreLaunch, ready: ReadyBudget, attempt: OxigraphStoreOpenAttempt) =>
+    awaitOxigraphStoreOpen(launch, ready, { ...attempt, log, probeReady,
+      readCgroupOomSnapshot: io.readCgroupOomSnapshot, progressLogIntervalMs, readyIntervalMs });
+
+  // The one place a launch becomes the ready server. Callers commit right
+  // after a `ready` outcome, with no await in between, so the checks
+  // `awaitStoreOpen` made still hold. Keep the actual listener PID, not the
+  // watchdog or systemd-run wrapper, so timeout recovery terminates
+  // Oxigraph itself.
+  const commitReady = (oxigraph: OxigraphLaunchHandle, listenerPid: number, generation: number): void => {
+    setLifecycle({ phase: 'ready', oxigraph, listenerPid, generation });
+    walMaintenance.restartCompleted();
+    restarts = 0;
+    // A store count requested while the child was down failed and is cached
+    // as unreachable; drop it now that the child is healthy, or /api/status
+    // keeps reporting the store as unreachable.
+    invalidateExternalStoreQuadsCache();
   };
 
   // Respawn and re-validate ownership after a steady-state crash. Mirrors
@@ -451,95 +493,69 @@ export async function startOxigraphServer(
     // the session, so a mid-life respawn (onClientTimeout, a crashed child)
     // faces a larger replay than the daemon ever measured at startup. Reusing
     // the boot value re-arms the exact ratchet: kill a healthy replaying
-    // child, leave the WAL, retry, kill it again. Measured before the spawn,
-    // same as boot, so the child cannot delete segments underneath the scan.
-    const reviveReady = nextReadyTimeout();
-    const candidate = spawnChild();
-    setLifecycle({ phase: 'recovering', child: candidate, reason, generation });
-    if (reviveReady.walBytes > 0) {
-      log(
-        `[oxigraph] restart: ${formatWalBytes(reviveReady.walBytes)} of retained write-ahead log ` +
-          `to replay; allowing up to ${Math.round(reviveReady.timeoutMs / 1000)}s.`,
-      );
-    }
-    const reviveDeadline = Date.now() + reviveReady.timeoutMs;
-    let reviveProgressLog = Date.now();
-    while (Date.now() < reviveDeadline) {
-      // Same reasoning as the boot loop: RocksDB emits no progress records
-      // during replay, so without this a multi-minute restart is silent.
-      if (
-        reviveReady.walBytes > 0
-        && Date.now() - reviveProgressLog >= progressLogIntervalMs
-      ) {
-        reviveProgressLog = Date.now();
-        log(
-          `[oxigraph] restart still opening: ` +
-            `${Math.round((Date.now() - (reviveDeadline - reviveReady.timeoutMs)) / 1000)}s elapsed ` +
-            `of ${Math.round(reviveReady.timeoutMs / 1000)}s allowed.`,
-        );
-      }
-      if (
-        lifecycle.phase !== 'recovering'
-        || lifecycle.child !== candidate
-      ) return;
-      // Respawned child died (its own exit handler stays out of the way
-      // because `ready` is false). Retry with backoff; never adopt whatever
-      // may now be answering on the port.
-      if (!childAlive(candidate)) break;
-      const verifiedListenerPid = await probeReady(candidate);
-      if (verifiedListenerPid !== null && childAlive(candidate)) {
-        captureOomSnapshotForListener(candidate, verifiedListenerPid);
-        // Keep the actual listener PID, not the optional systemd-run wrapper,
-        // so timeout recovery terminates Oxigraph itself inside its scope.
-        setLifecycle({
-          phase: 'ready',
-          child: candidate,
-          listenerPid: verifiedListenerPid,
-          generation,
+    // child, leave the WAL, retry, kill it again.
+    let failure = `respawned server did not become ready on ${bind}`;
+    try {
+      const attempt = await launchOxigraph('restart', { phase: 'recovering', reason, generation });
+      // stop() closed the store ownership while it reclaimed the store.
+      if (attempt.kind === 'closed') return;
+      if (attempt.kind === 'blocked') {
+        // Nothing was spawned; a later attempt reclaims the store again.
+        failure = `restart deferred: ${heldStore(attempt.hold)}`;
+      } else {
+        const { oxigraph } = attempt.launch;
+        const opened = await awaitStoreOpen(attempt.launch, attempt.readyBudget, {
+          progress: (elapsedS, allowedS) =>
+            `[oxigraph] restart still opening: ${elapsedS}s elapsed of ${allowedS}s allowed.`,
+          superseded: () => lifecycle.phase !== 'recovering' || lifecycle.oxigraph !== oxigraph,
         });
-        // The replacement generation is healthy. Only now may WAL maintenance
-        // reopen admission and start its cooldown; accepting a kill request is
-        // not completion because ownership verification can still cancel it.
-        walMaintenance.restartCompleted();
-        restarts = 0;
-        log(`[oxigraph] server restarted and healthy on ${bind}.`);
-        return;
+        if (opened.outcome === 'ready') {
+          commitReady(oxigraph, opened.listenerPid, generation);
+          log(`[oxigraph] server restarted and healthy on ${bind}.`);
+          return;
+        }
       }
-      await sleep(readyIntervalMs);
+    } catch (error) {
+      // A store-ownership step that rejected (a defect) fails this attempt
+      // like a child that never became ready.
+      failure = `restart attempt failed: ${error instanceof Error ? error.message : String(error)}`;
     }
-    if (
-      lifecycle.phase !== 'recovering'
-      || lifecycle.child !== candidate
-    ) return;
+    if (isStopping() || lifecycle.phase !== 'recovering') return;
+    // A respawned child that died or never answered is retried with backoff.
+    // This attempt's launch, if it got that far, is the current one.
+    const candidate = lifecycle.oxigraph;
     // Timed out with the child still running but unresponsive. Kill it
     // before respawning — otherwise each retry stacks another live
     // `oxigraph serve`, and they fight over the port (self-inflicted
     // EADDRINUSE). Its exit handler won't restart (ready is false).
-    if (childAlive(candidate)) {
-      try {
-        candidate.kill('SIGKILL');
-      } catch {
-        /* best-effort */
-      }
+    try {
+      candidate?.terminate('SIGKILL');
+    } catch {
+      /* best-effort */
     }
-    setLifecycle({ phase: 'recovering', child: null, reason, generation });
-    scheduleRevive(`respawned server did not become ready on ${bind}`);
+    setLifecycle({ phase: 'recovering', oxigraph: null, reason, generation });
+    scheduleRevive(failure);
   };
 
   // Synchronous best-effort kill for process-exit handlers (which can't
   // await): signals the child so a fatal `process.exit()` elsewhere in
-  // boot doesn't orphan the server. Safe to call alongside `stop()`.
+  // boot doesn't orphan the server. Safe to call alongside `stop()`. It
+  // cannot reclaim a launch whose wrapper already exited (that needs process
+  // probes); the next start's reclaim does, by the owner record.
   const killSync = (): void => {
     walMaintenance.stop();
-    const candidate = lifecycle.child;
+    const candidate = lifecycle.oxigraph;
     setLifecycle({
       phase: 'stopping',
-      child: candidate,
+      oxigraph: candidate,
       generation: lifecycle.generation,
     });
+    // No further launches: a restart still reclaiming the store must not
+    // spawn after this.
+    void storeOwnership.close();
     markStoreDown();
     try {
-      if (childAlive(candidate)) candidate.kill('SIGTERM');
+      candidate?.terminate('SIGTERM');
     } catch {
       /* best-effort */
     }
@@ -550,24 +566,19 @@ export async function startOxigraphServer(
   ): Promise<void> => {
     let verifiedListenerPid: number | null = null;
     try {
-      verifiedListenerPid = await launchStrategy.resolveListenerPid(
-        request.child,
-        port,
-        host,
-        io.findListenOwnerPid,
-      );
+      verifiedListenerPid = await request.oxigraph.resolveListenerPid(port, host, io.findListenOwnerPid);
     } catch {
       /* handled by the fail-closed branch below */
     }
     if (
       lifecycle !== request
-      || !childAlive(request.child)
+      || !request.oxigraph.alive()
     ) return;
     if (verifiedListenerPid !== request.listenerPid) {
       log('[oxigraph] recovery restart cancelled: verified listener ownership changed');
       setLifecycle({
         phase: 'ready',
-        child: request.child,
+        oxigraph: request.oxigraph,
         listenerPid: request.listenerPid,
         generation: request.generation,
       });
@@ -578,7 +589,7 @@ export async function startOxigraphServer(
       if (!signalled) throw new Error('process signal was not accepted');
       setLifecycle({
         phase: 'restart-signalled',
-        child: request.child,
+        oxigraph: request.oxigraph,
         listenerPid: request.listenerPid,
         reason: request.reason,
         generation: request.generation + 1,
@@ -587,7 +598,7 @@ export async function startOxigraphServer(
       log('[oxigraph] recovery restart could not signal the verified listener');
       setLifecycle({
         phase: 'ready',
-        child: request.child,
+        oxigraph: request.oxigraph,
         listenerPid: request.listenerPid,
         generation: request.generation,
       });
@@ -597,12 +608,12 @@ export async function startOxigraphServer(
   function requestRestart(reason: string): boolean {
     if (
       lifecycle.phase !== 'ready'
-      || !childAlive(lifecycle.child)
+      || !childAlive(lifecycle.oxigraph)
     ) return false;
     const normalizedReason = reason.trim().slice(0, 500) || 'unspecified health failure';
     const request: Extract<LifecycleState, { phase: 'restart-verifying' }> = {
       phase: 'restart-verifying',
-      child: lifecycle.child,
+      oxigraph: lifecycle.oxigraph,
       listenerPid: lifecycle.listenerPid,
       reason: normalizedReason,
       generation: lifecycle.generation,
@@ -617,11 +628,10 @@ export async function startOxigraphServer(
     walMaintenance.registerActivity();
 
   const getRecoveryState = (): OxigraphRecoveryState => ({
-    recovering: lifecycle.phase === 'restart-verifying'
-      || lifecycle.phase === 'recovering'
+    recovering: lifecycle.phase === 'recovering'
       || lifecycle.phase === 'stopping'
       || lifecycle.phase === 'restart-signalled',
-    admissionsPaused: walMaintenance.admissionsPaused(),
+    admissionsPaused: lifecycle.phase === 'restart-verifying' || walMaintenance.admissionsPaused(),
     generation: lifecycle.generation,
   });
 
@@ -634,34 +644,52 @@ export async function startOxigraphServer(
     process.removeListener('exit', exitGuard);
     walMaintenance.stop();
     if (lifecycle.phase === 'stopping') return;
-    const candidate = lifecycle.child;
+    const candidate = lifecycle.oxigraph;
     setLifecycle({
       phase: 'stopping',
-      child: candidate,
+      oxigraph: candidate,
       generation: lifecycle.generation,
     });
+    // No further launches or owner records. Resolves once a reclaim or
+    // record in flight finishes, and, when the last launch's wrapper had
+    // already exited on its own, once its possibly surviving Oxigraph is
+    // reclaimed; so the store is quiet when stop() resolves.
+    const ownershipClosed = storeOwnership.close();
     markStoreDown();
-    const c = candidate;
-    if (!c || c.exitCode !== null || c.signalCode !== null) return;
+    if (!childAlive(candidate)) {
+      await ownershipClosed;
+      return;
+    }
     await new Promise<void>((resolve) => {
       let settled = false;
       const done = () => {
         if (settled) return;
         settled = true;
         clearTimeout(killTimer);
+        clearTimeout(giveUpTimer);
         resolve();
       };
-      c.once('exit', done);
-      c.kill('SIGTERM');
+      candidate.child.once('exit', done);
+      candidate.terminate('SIGTERM');
       const killTimer = setTimeout(() => {
-        if (c.exitCode === null && c.signalCode === null) {
+        if (candidate.alive()) {
           log('[oxigraph] did not exit on SIGTERM; sending SIGKILL');
-          c.kill('SIGKILL');
+          candidate.terminate('SIGKILL');
         }
       }, stopGraceMs);
+      // A child that cannot be signalled must not hang shutdown: after a
+      // second grace period, report it and stop waiting.
+      const giveUpTimer = setTimeout(() => {
+        if (candidate.alive()) {
+          log(`[oxigraph] server pid ${candidate.child.pid} did not exit ${2 * stopGraceMs}ms after SIGTERM; not waiting any longer`);
+        }
+        done();
+      }, 2 * stopGraceMs);
       killTimer.unref?.();
+      giveUpTimer.unref?.();
     });
-    log('[oxigraph] server stopped');
+    await ownershipClosed;
+    if (!candidate.alive()) log('[oxigraph] server stopped');
   };
 
   log(
@@ -671,21 +699,6 @@ export async function startOxigraphServer(
   );
   const launchSummary = launchStrategy.logSummary();
   if (launchSummary) log(launchSummary);
-  // GH#1400 — measure BEFORE the spawn, so the child cannot delete segments
-  // underneath the scan.
-  const bootReady = nextReadyTimeout();
-  if (bootReady.walBytes > 0) {
-    log(
-      `[oxigraph] ${formatWalBytes(bootReady.walBytes)} of retained write-ahead log to replay; ` +
-        `allowing up to ${Math.round(bootReady.timeoutMs / 1000)}s for the database to open.`,
-    );
-  }
-  const initialChild = spawnChild();
-  setLifecycle({
-    phase: 'starting',
-    child: initialChild,
-    generation: lifecycle.generation,
-  });
 
   // GH#1400 — the caller (daemon/lifecycle.ts) does not register its
   // `process.once('exit', killSync)` until AFTER this function resolves, so
@@ -702,67 +715,47 @@ export async function startOxigraphServer(
   // caller's own reaper remains harmless.
   process.on('exit', exitGuard);
 
-  const deadline = Date.now() + bootReady.timeoutMs;
-  const readyTimeoutMs = bootReady.timeoutMs;
-  let attempt = 0;
-  let childDied = false;
-  let lastProgressLog = Date.now();
-  while (Date.now() < deadline) {
-    // GH#1400 — RocksDB writes no progress records during replay, so this
-    // daemon-side line is the only thing distinguishing "recovering" from
-    // "hung" for an operator watching a multi-minute boot.
-    if (
-      bootReady.walBytes > 0
-      && Date.now() - lastProgressLog >= progressLogIntervalMs
-    ) {
-      lastProgressLog = Date.now();
-      log(
-        `[oxigraph] still opening: ${Math.round((Date.now() - (deadline - readyTimeoutMs)) / 1000)}s ` +
-          `elapsed of ${Math.round(readyTimeoutMs / 1000)}s allowed ` +
-          `(${formatWalBytes(bootReady.walBytes)} of write-ahead log).`,
-      );
-    }
-    attempt += 1;
-    // Our spawned child exited during startup — almost always a bind
-    // failure. Stop probing and fail fast; do NOT adopt whatever may be
-    // answering on the port (it could be a foreign SPARQL server).
-    if (!childAlive(initialChild)) {
-      childDied = true;
-      break;
-    }
-    const verifiedListenerPid = await probeReady(initialChild);
-    if (verifiedListenerPid !== null) {
-      // Only trust a 200 if the child WE spawned is the one still alive
-      // and bound — guards the race where a foreign server answers while
-      // our child has just died on EADDRINUSE.
-      if (childAlive(initialChild)) {
-        captureOomSnapshotForListener(initialChild, verifiedListenerPid);
-        // Persist the verified listener owner for targeted timeout recovery.
-        // This differs from `child.pid` when Oxigraph runs in a systemd scope.
-        setLifecycle({
-          phase: 'ready',
-          child: initialChild,
-          listenerPid: verifiedListenerPid,
-          generation: lifecycle.generation,
-        });
-        log(`Oxigraph server ready on ${bind} after ${attempt} probe(s).`);
-        return {
-          host,
-          port,
-          queryEndpoint,
-          updateEndpoint,
-          requestRestart,
-          registerStoreActivity,
-          getRecoveryState,
-          stop,
-          killSync,
-        };
-      }
-      childDied = true;
-      break;
-    }
-    await sleep(readyIntervalMs);
+  let bootReady: ReadyBudget;
+  let opened: StoreOpenOutcome;
+  try {
+    const generation = lifecycle.generation;
+    const attempt = await launchOxigraph('boot', { phase: 'starting', generation });
+    // Only killSync (process exit) closes the store ownership during boot.
+    if (attempt.kind === 'closed') throw new Error('Oxigraph server start was interrupted by process exit');
+    if (attempt.kind === 'blocked') throw new Error(`Oxigraph server not started on ${bind}: ${heldStore(attempt.hold)}`);
+    bootReady = attempt.readyBudget;
+    const { oxigraph } = attempt.launch;
+    opened = await awaitStoreOpen(attempt.launch, bootReady, {
+      // Only an exit-time kill (process.exit) moves boot out of `starting`.
+      superseded: () => lifecycle.phase !== 'starting' || lifecycle.oxigraph !== oxigraph,
+      progress: (elapsedS, allowedS) =>
+        `[oxigraph] still opening: ${elapsedS}s elapsed of ${allowedS}s allowed ` +
+        `(${formatWalBytes(bootReady.walBytes)} of write-ahead log).`,
+    });
+    if (opened.outcome === 'ready') commitReady(oxigraph, opened.listenerPid, generation);
+  } catch (error) {
+    // A launch that failed (a store it found held, or a store-ownership step
+    // that rejected) stops the child, which also releases the exit guard, and
+    // surfaces the error.
+    await stop();
+    throw error;
   }
+  if (opened.outcome === 'ready') {
+    log(`Oxigraph server ready on ${bind} after ${opened.probes} probe(s).`);
+    return {
+      host,
+      port,
+      queryEndpoint,
+      updateEndpoint,
+      requestRestart,
+      registerStoreActivity,
+      getRecoveryState,
+      stop,
+      killSync,
+    };
+  }
+  const childDied = opened.outcome === 'child-died';
+  const readyTimeoutMs = bootReady.timeoutMs;
 
   // Never became ready — stop the child so we don't leak it, then throw.
   // `stop()` removes the exit guard.

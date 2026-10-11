@@ -27,6 +27,8 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=devnet-publish-helpers.sh
 source "$SCRIPT_DIR/devnet-publish-helpers.sh"
+# shellcheck source=devnet-curated-join-helpers.sh
+source "$SCRIPT_DIR/devnet-curated-join-helpers.sh"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 API_PORT_BASE=9201
 CURATOR_NODE=5
@@ -70,6 +72,51 @@ parse_json() {
     })
   "
 }
+
+# LU-8 exercises the legacy batch-verification/reporting surface. Its
+# publisher finalizes every test KA into VM, removing the source SWM copies;
+# the default RFC-64 catalog receiver has no selected SWM snapshots for those
+# assets and intentionally skips legacy VM sync. Give the member the legacy
+# receiver lane for this compatibility scenario, then restore its exact config.
+LU8_MEMBER_CONFIG_BACKUP=""
+restore_member_config() {
+  local status="$1"
+  trap - EXIT INT TERM
+  if [ -n "$LU8_MEMBER_CONFIG_BACKUP" ] && [ -f "$LU8_MEMBER_CONFIG_BACKUP" ]; then
+    if cp "$LU8_MEMBER_CONFIG_BACKUP" "$(node_dir "$MEMBER_NODE")/config.json" &&
+       "$SCRIPT_DIR/devnet.sh" restart-node "$MEMBER_NODE" >/dev/null 2>&1; then
+      rm -f "$LU8_MEMBER_CONFIG_BACKUP"
+    else
+      warn "member config restore failed; backup retained at $LU8_MEMBER_CONFIG_BACKUP"
+      status=1
+    fi
+  fi
+  exit "$status"
+}
+
+configure_legacy_member() {
+  local config
+  config="$(node_dir "$MEMBER_NODE")/config.json"
+  [ -f "$config" ] || fail "member config missing: $config"
+  LU8_MEMBER_CONFIG_BACKUP=$(mktemp "${TMPDIR:-/tmp}/rfc38-lu8-member-XXXXXX")
+  cp "$config" "$LU8_MEMBER_CONFIG_BACKUP"
+  trap 'restore_member_config $?' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  node -e '
+    const fs = require("fs");
+    const path = process.argv[1];
+    const config = JSON.parse(fs.readFileSync(path, "utf8"));
+    config.rfc64Catalog = { ...config.rfc64Catalog,
+      rollout: { ...config.rfc64Catalog?.rollout, killSwitch: true } };
+    fs.writeFileSync(path, JSON.stringify(config, null, 2));
+  ' "$config"
+  "$SCRIPT_DIR/devnet.sh" restart-node "$MEMBER_NODE" >/dev/null 2>&1 ||
+    fail "member did not restart in the legacy receiver lane"
+  log "✓ member uses the legacy receiver lane for LU-8"
+}
+
+configure_legacy_member
 
 CURATOR_AGENT=$(api_call "$CURATOR_NODE" GET /api/agent/identity | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).agentAddress))')
 CURATOR_PEER=$(api_call "$CURATOR_NODE" GET /api/agent/identity | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).peerId))')
@@ -129,8 +176,65 @@ MERKLE_ROOT=$(parse_json "$KC_RESP" '.merkleRoot')
 [ -n "$MERKLE_ROOT" ] || fail "could not resolve merkleRoot via /api/kc: $KC_RESP"
 log "✓ published txHash=$TX_HASH merkleRoot=$MERKLE_ROOT"
 
-# Pause for gossip + chain settling
-sleep 5
+# Since v10.0.7 an Edge does not activate a discovered public CG merely by
+# seeing its metadata. Install the curator's registered graph through the
+# replica subscription route; a foreign wallet-scoped create cannot do that.
+log "Member subscribes to the curator's registered public CG..."
+SUBSCRIBED=""
+for attempt in $(seq 1 12); do
+  SUB_RESPONSE_WITH_STATUS=$(api_call_with_status "$MEMBER_NODE" POST /api/context-graph/subscribe "$(cat <<EOF
+{ "contextGraphId": "$PUB_CG", "includeSharedMemory": true }
+EOF
+)")
+  SUB_STATUS=$(printf '%s\n' "$SUB_RESPONSE_WITH_STATUS" | tail -n 1)
+  SUB_RESPONSE=$(printf '%s\n' "$SUB_RESPONSE_WITH_STATUS" | sed '$d')
+  SUBSCRIBED=$(parse_json "$SUB_RESPONSE" '.subscribed' 2>/dev/null || true)
+  [ "$SUB_STATUS" = 200 ] && [ "$SUBSCRIBED" = "$PUB_CG" ] && break
+  case "$SUB_STATUS" in
+    429|503) log "member subscribe attempt $attempt deferred (HTTP $SUB_STATUS)" ;;
+    *) fail "member subscribe failed (HTTP $SUB_STATUS): $SUB_RESPONSE" ;;
+  esac
+  sleep 5
+done
+[ "$SUBSCRIBED" = "$PUB_CG" ] || fail "member did not subscribe to the curator graph: $SUB_RESPONSE"
+MEMBER_ACTIVE=false
+for _ in $(seq 1 30); do
+  MEMBER_ACTIVE=$(api_call "$MEMBER_NODE" GET /api/context-graph/subscriptions | \
+    CG_ID="$PUB_CG" node -e '
+      let body = "";
+      process.stdin.on("data", chunk => body += chunk);
+      process.stdin.on("end", () => {
+        try {
+          const row = JSON.parse(body).subscriptions?.find(entry => entry.contextGraphId === process.env.CG_ID);
+          console.log(row?.subscribed === true ? "true" : "false");
+        } catch { console.log("false"); }
+      });
+    ')
+  [ "$MEMBER_ACTIVE" = true ] && break
+  sleep 2
+done
+[ "$MEMBER_ACTIVE" = true ] || fail "member subscription is not locally active for $PUB_CG"
+log "✓ member has an active subscription to the curator's public CG"
+
+# Subscription establishes read interest, not membership. This scenario's
+# rejection report writes into the public CG, so admit the reporting member
+# through the real signed join flow before testing that write.
+devnet_connect_member_to_curator "$MEMBER_NODE" "$CURATOR_NODE" ||
+  fail "member could not connect to curator before signed join"
+JOIN_BODY=$(devnet_signed_curated_join_body "$MEMBER_NODE" "$CURATOR_PEER" "$PUB_CG" rfc38-lu8-member) ||
+  fail "member sign-join failed"
+JOIN_REQUEST=$(devnet_request_curated_join "$MEMBER_NODE" "$PUB_CG" "$JOIN_BODY") ||
+  fail "member request-join failed"
+[ "$(parse_json "$JOIN_REQUEST" '.status')" = pending ] || fail "member request-join failed: $JOIN_REQUEST"
+sleep 2
+JOIN_APPROVAL=$(devnet_approve_curated_join "$CURATOR_NODE" "$PUB_CG" "$MEMBER_AGENT") ||
+  fail "curator approve-join request failed"
+[ "$(parse_json "$JOIN_APPROVAL" '.status')" = approved ] || fail "curator approve-join failed: $JOIN_APPROVAL"
+log "✓ curator approved the reporting member's signed join"
+
+devnet_wait_curated_member_ready "$MEMBER_NODE" "$PUB_CG" "$MEMBER_AGENT" ||
+  fail "approved member did not become locally ready for $PUB_CG"
+log "✓ reporting member has the curator allowlist locally"
 
 # ===========================================================================
 # SCENARIO 1 — Request validation + happy path on the member side.
@@ -155,7 +259,7 @@ VERIFY_MISSING_QUADS=$(printf '%s\n' "$VERIFY_MISSING_QUADS_WITH_STATUS" | sed '
 log "verify-batch missing-quads response: $VERIFY_MISSING_QUADS"
 [ "$VERIFY_MISSING_QUADS_STATUS" = "400" ] || fail "verify-batch missing-quads status=$VERIFY_MISSING_QUADS_STATUS (expected 400): $VERIFY_MISSING_QUADS"
 MISSING_QUADS_ERROR=$(parse_json "$VERIFY_MISSING_QUADS" '.error')
-if printf '%s' "$MISSING_QUADS_ERROR" | grep -q 'requires explicit `quads`'; then
+if grep -q 'requires explicit `quads`' <<<"$MISSING_QUADS_ERROR"; then
   log "✓ Scenario 1: verify-batch rejects omitted quads with HTTP 400 before ambiguous reconstruction"
 else
   fail "verify-batch missing-quads response did not mention explicit quads requirement: $VERIFY_MISSING_QUADS"
@@ -222,11 +326,38 @@ REPORT_BODY=$(VERIFY_BAD="$VERIFY_BAD" PUB_CG="$PUB_CG" STAMP="$STAMP" node -e '
     verifyResult: vr
   }));
 ')
-REPORT_RESP=$(api_call "$MEMBER_NODE" POST /api/knowledge-assets/batch-rejections/report "$REPORT_BODY")
+REPORT_DIGEST=""
+# A successful subscribe response only queues catch-up. Under a transient
+# authority RPC circuit, that job can fail before the member receives its
+# local graph declaration. Reporting a rejection is a write and must wait
+# for that declaration; retry the failed catch-up rather than counting the
+# durable subscription row itself as readiness.
+for attempt in $(seq 1 36); do
+  REPORT_RESP=$(api_call "$MEMBER_NODE" POST /api/knowledge-assets/batch-rejections/report "$REPORT_BODY")
+  REPORT_DIGEST=$(parse_json "$REPORT_RESP" '.record?.digest')
+  [ -z "$REPORT_DIGEST" ] || break
+  REPORT_CODE=$(parse_json "$REPORT_RESP" '.code')
+  case "$REPORT_CODE" in
+    CONTEXT_GRAPH_NOT_FOUND|CONTEXT_GRAPH_NOT_WRITABLE|CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE) ;;
+    *) fail "rejection report failed: $REPORT_RESP" ;;
+  esac
+  CATCHUP_RESP=$(api_call "$MEMBER_NODE" GET "/api/sync/catchup-status?contextGraphId=$PUB_CG")
+  CATCHUP_STATUS=$(parse_json "$CATCHUP_RESP" '.status')
+  [ "$CATCHUP_STATUS" != denied ] || fail "member catch-up was denied: $CATCHUP_RESP"
+  if [ "$CATCHUP_STATUS" = failed ] || [ "$CATCHUP_STATUS" = unreachable ] || [ "$CATCHUP_STATUS" = deferred ]; then
+    RETRY_SUB=$(api_call_with_status "$MEMBER_NODE" POST /api/context-graph/subscribe "{\"contextGraphId\":\"$PUB_CG\",\"includeSharedMemory\":true}")
+    RETRY_STATUS=$(printf '%s\n' "$RETRY_SUB" | tail -n 1)
+    case "$RETRY_STATUS" in
+      200|429|503) ;;
+      *) fail "member catch-up retry failed (HTTP $RETRY_STATUS): $RETRY_SUB" ;;
+    esac
+  fi
+  log "member graph declaration pending (attempt $attempt/36; catch-up ${CATCHUP_STATUS:-unknown})"
+  sleep 10
+done
+[ -n "$REPORT_DIGEST" ] || fail "member graph declaration did not recover for rejection reporting: $REPORT_RESP"
 log "report response: $REPORT_RESP"
 REPORT_GOSSIPED=$(parse_json "$REPORT_RESP" '.gossiped')
-REPORT_DIGEST=$(parse_json "$REPORT_RESP" '.record.digest')
-[ -n "$REPORT_DIGEST" ] || fail "no digest in report response: $REPORT_RESP"
 log "✓ Rejection record minted: digest=$REPORT_DIGEST gossiped=$REPORT_GOSSIPED"
 
 sleep 2

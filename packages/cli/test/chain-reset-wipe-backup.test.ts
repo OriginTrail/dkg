@@ -107,7 +107,7 @@ afterEach(() => {
 
 // Windows symlink creation depends on developer mode/privileges; this case
 // specifically proves the POSIX dangling-link stat failure requested in #1441.
-// test-disable-allow: D1 #1441 -- owner=cli lane=bura-cli expires=2026-10-09 POSIX stat-failure case executes in the required Linux CLI unit shards.
+// test-disable-allow: D1 #1441 -- owner=cli lane=bura-cli expires=2026-11-08 POSIX stat-failure case executes in the required Linux CLI unit shards.
 it.skipIf(process.platform === 'win32')('rotates a dangling backup symlink after statSync throws', async () => {
   const broken = 'store.nq.pre-wipe-broken';
   const path = join(dataDir, broken);

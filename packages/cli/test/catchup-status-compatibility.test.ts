@@ -44,4 +44,15 @@ describe('catch-up status compatibility', () => {
       queuedAt: 1,
     });
   });
+
+  it('exposes VM non-applicability without changing the legacy terminal vocabulary', () => {
+    const job: CatchupJob = {
+      jobId: 'unregistered-swm-job', contextGraphId: 'bare-private-graph',
+      includeWorkspace: true, status: 'done', queuedAt: 1,
+      durablePlane: 'not-applicable',
+    };
+    expect(toCatchupStatusResponse(job)).toMatchObject({
+      status: 'done', jobStatus: 'done', durablePlane: 'not-applicable',
+    });
+  });
 });

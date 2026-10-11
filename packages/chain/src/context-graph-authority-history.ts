@@ -12,6 +12,8 @@ import {
   type ContextGraphAuthorityGenerationState,
 } from './context-graph-authority-generation.js';
 import { KeyedSerializer } from './keyed-mutex.js';
+import { ContextGraphAuthorityIndexRetryableError } from
+  './context-graph-authority-index-errors.js';
 
 export const CONTEXT_GRAPH_AUTHORITY_HISTORY_MAX_ENTRIES = 1_024;
 
@@ -288,7 +290,12 @@ export class ContextGraphAuthorityHistoryCache {
         // after their concurrent current-state read and every field decode.
         const stableHash = await input.readBlockHash(input.finalized.number);
         if (stableHash?.toLowerCase() !== finalizedHash) {
-          throw new Error('finalized Context Graph authority anchor changed during resolution');
+          // At the operator's default depth the anchor is the head, so an
+          // ordinary tip reorg lands here. Retryable: re-resolve against the
+          // new tip rather than failing the authority read.
+          throw new ContextGraphAuthorityIndexRetryableError(
+            'finalized Context Graph authority anchor changed during resolution',
+          );
         }
         if (this.#epoch !== epoch) {
           throw new Error('Context Graph authority history was invalidated during resolution');

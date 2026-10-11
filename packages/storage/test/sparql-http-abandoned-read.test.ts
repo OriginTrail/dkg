@@ -37,7 +37,6 @@ function harness(managed = true) {
     ? createManagedOxigraphSparqlStoreV1(options, hooks)
     : new SparqlHttpStore({
       ...options,
-      onClientTimeout: recover,
       managedRecovery: { readState: hooks.getRecoveryState, recover },
     });
   async function abandon(sparql = 'SELECT ?s WHERE { ?s ?p ?o }') {
@@ -97,7 +96,7 @@ describe('managed abandoned read recovery', () => {
     } finally { await store.close(); }
   });
 
-  it('keeps cancelled server work active until its retained deadline is handled', async () => {
+  it('keeps physical work active after recovery is requested until that task settles', async () => {
     const { store, recover, activity, abandon } = harness();
     try {
       await abandon();
@@ -108,6 +107,10 @@ describe('managed abandoned read recovery', () => {
 
       await vi.advanceTimersByTimeAsync(1);
       expect(recover).toHaveBeenCalledOnce();
+      // The supervisor notification does not itself settle HTTP work. This
+      // fixture has no server to kill; close must still abort and drain it.
+      expect(activity.at(-1)).toBe(1);
+      await store.close();
       expect(activity.at(-1)).toBe(0);
     } finally { await store.close(); }
   });

@@ -7,6 +7,7 @@ import {
   releasesDir,
   slotEntryPoint,
 } from './config.js';
+import { ownModulePath } from './own-module-path.js';
 
 /** Fully assembled Node command used to start or probe this daemon entrypoint. */
 export interface DaemonNodeCommand {
@@ -20,11 +21,8 @@ export interface DaemonNodeCommand {
  * `cli.js`, while source execution (tsx / ts-node) runs `cli.ts`.
  */
 function cliEntryPointPath(): string {
-  const builtEntry = fileURLToPath(new URL('./cli.js', import.meta.url));
-  if (existsSync(builtEntry)) return builtEntry;
-  const sourceEntry = fileURLToPath(new URL('./cli.ts', import.meta.url));
-  if (existsSync(sourceEntry)) return sourceEntry;
-  return builtEntry;
+  const builtEntry = new URL('./cli.js', import.meta.url);
+  return ownModulePath(builtEntry)?.path ?? fileURLToPath(builtEntry);
 }
 
 /**

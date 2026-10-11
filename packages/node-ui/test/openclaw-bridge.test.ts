@@ -342,7 +342,12 @@ describe('PanelRight UI - connected agent flow', () => {
   it('persists verified attachment refs separately from assistant tool calls', () => {
     const persistTurnBlock = readCliFile('daemon.ts');
     expect(persistTurnBlock).toContain('await memoryManager.storeChatExchange(');
-    expect(persistTurnBlock).toContain('normalizedToolCalls,');
+    // The persist-turn payload (routes/openclaw-persist-turn.ts) keeps tool calls and
+    // attachment refs as two separate fields, and the durable-turn owner
+    // (chat-turn-persistence.ts) hands them to the store as two separate fields.
+    expect(persistTurnBlock).toMatch(/toolCalls,\s*attachmentRefs,/);
+    expect(persistTurnBlock).toContain('toolCalls: payload.toolCalls,');
+    expect(persistTurnBlock).toContain('attachmentRefs: payload.attachmentRefs,');
     expect(persistTurnBlock).not.toContain('mergePersistedToolCalls(');
     expect(persistTurnBlock).not.toContain('buildOpenClawAttachmentToolCalls(');
     expect(persistTurnBlock).toContain('sourceFileName');

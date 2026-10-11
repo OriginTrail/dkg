@@ -80,6 +80,16 @@ type RootRegisteredAuthorityUnavailableReason = import(
 type LegacyDeepRegisteredAuthority = import(
   '@origintrail-official/dkg-agent/dist/dkg-agent-cg-resolve.js'
 ).RegisteredContextGraphAuthority;
+type PrePeerGateApprovedReplicaAuthority = {
+  kind: 'unregistered';
+  approvedPrivateReplicaAuthority: {
+    approvedAgentAddress: string;
+    ownerAddress: string;
+    requestGeneration: string;
+    curatorPeerId: string;
+    memberAddresses: readonly string[];
+  };
+};
 type ExpectedLegacyRegisteredAuthority =
   | { kind: 'unregistered' }
   | { kind: 'public'; onChainId: bigint }
@@ -95,6 +105,7 @@ type ExpectedLegacyRegisteredAuthority =
       reason:
         | 'finalized-name-absence-unaccepted'
         | 'chain-name-binding-unavailable'
+        | 'authority-circuit-open'
         | 'local-chain-binding-unavailable'
         | 'local-existence-unavailable'
         | 'chain-access-policy-unavailable'
@@ -131,6 +142,12 @@ type LegacyAuthorityMatchesExpected = AssertTrue<
 type ExpectedAuthorityMatchesLegacy = AssertTrue<
   ExpectedLegacyRegisteredAuthority extends LegacyDeepRegisteredAuthority ? true : false
 >;
+type PrePeerGateApprovedReplicaMatchesRoot = AssertTrue<
+  PrePeerGateApprovedReplicaAuthority extends RootRegisteredAuthority ? true : false
+>;
+type PrePeerGateApprovedReplicaMatchesLegacy = AssertTrue<
+  PrePeerGateApprovedReplicaAuthority extends LegacyDeepRegisteredAuthority ? true : false
+>;
 type LivePolicyUnavailableMatchesExpected = AssertTrue<
   RootLivePolicyUnavailable extends ExpectedLivePolicyUnavailable ? true : false
 >;
@@ -156,6 +173,47 @@ type RegisteredUnavailableReasonMatchesExpected = AssertTrue<
 type ExpectedMatchesRegisteredUnavailableReason = AssertTrue<
   ExpectedRegisteredAuthorityUnavailable['reason'] extends
     RootRegisteredAuthorityUnavailableReason ? true : false
+>;
+// GH#3067: the closed set of throw sites the worker log may carry. Only the TYPE
+// is public; the error class, its marker and any runtime list stay internal.
+type RootAuthorityFailureSite = import(
+  '@origintrail-official/dkg-agent'
+).ContextGraphAuthorityFailureSite;
+type ExpectedAuthorityFailureSite =
+  | 'transport-unavailable'
+  | 'transport-changed'
+  | 'revision-moved'
+  | 'recipient-set-changed';
+type AuthorityFailureSiteMatchesExpected = AssertTrue<
+  RootAuthorityFailureSite extends ExpectedAuthorityFailureSite ? true : false
+>;
+type ExpectedMatchesAuthorityFailureSite = AssertTrue<
+  ExpectedAuthorityFailureSite extends RootAuthorityFailureSite ? true : false
+>;
+// The closed set of detail codes a read-authority log line may carry. As with
+// the failure sites, only the TYPE is public.
+type RootFinalizedAbsenceDetailCode = import(
+  '@origintrail-official/dkg-agent'
+).ContextGraphFinalizedAbsenceDetailCode;
+type ExpectedFinalizedAbsenceDetailCode =
+  | 'no-accepted-authority'
+  | 'replica-proof-timeout'
+  | 'replica-proof-error'
+  | 'replica-proof-absent'
+  | 'replica-metadata-moved'
+  | 'replica-binding-changed'
+  | 'replica-registered-metadata';
+type FinalizedAbsenceDetailCodeMatchesExpected = AssertTrue<
+  RootFinalizedAbsenceDetailCode extends ExpectedFinalizedAbsenceDetailCode ? true : false
+>;
+type ExpectedMatchesFinalizedAbsenceDetailCode = AssertTrue<
+  ExpectedFinalizedAbsenceDetailCode extends RootFinalizedAbsenceDetailCode ? true : false
+>;
+type RegisteredUnavailableDetailCode = NonNullable<
+  Extract<RootRegisteredAuthorityUnavailable, { detailCode?: unknown }>['detailCode']
+>;
+type RegisteredUnavailableCarriesDetailCode = AssertTrue<
+  RootFinalizedAbsenceDetailCode extends RegisteredUnavailableDetailCode ? true : false
 >;
 type DeepAuthorityStaysInternal =
   // @ts-expect-error The export map blocks authority implementation deep imports.
@@ -187,6 +245,8 @@ export type {
   ExpectedAuthorityMatchesRoot,
   LegacyAuthorityMatchesExpected,
   ExpectedAuthorityMatchesLegacy,
+  PrePeerGateApprovedReplicaMatchesRoot,
+  PrePeerGateApprovedReplicaMatchesLegacy,
   LivePolicyUnavailableMatchesExpected,
   ExpectedMatchesLivePolicyUnavailable,
   LivePolicyReasonMatchesExpected,
@@ -195,6 +255,11 @@ export type {
   ExpectedMatchesRegisteredUnavailable,
   RegisteredUnavailableReasonMatchesExpected,
   ExpectedMatchesRegisteredUnavailableReason,
+  AuthorityFailureSiteMatchesExpected,
+  ExpectedMatchesAuthorityFailureSite,
+  FinalizedAbsenceDetailCodeMatchesExpected,
+  ExpectedMatchesFinalizedAbsenceDetailCode,
+  RegisteredUnavailableCarriesDetailCode,
   GateAuthorityResultStaysInternal,
   AuthorityMarkerStaysInternal,
   DeepAuthorityStaysInternal,

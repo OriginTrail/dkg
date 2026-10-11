@@ -28,6 +28,8 @@ import {
   Rfc64PublicCatalogServiceV1,
   type Rfc64PublicCatalogReconcilerClientsV1,
 } from '../src/rfc64/public-catalog-service-v1.js';
+import type { Rfc64CatalogHeadDeliveryOutcomeV1 } from '../src/rfc64/public-catalog-head-delivery-v1.js';
+import { RFC64_CATALOG_HEAD_FANOUT_WAVE_PEERS_V1 } from '../src/rfc64/public-catalog-head-fanout-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_CURRENT_HEAD_QUERY_KIND_V1,
   RFC64_PUBLIC_CATALOG_CURRENT_HEAD_DISCOVERY_PROTOCOL_V1,
@@ -478,6 +480,16 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     await expect(service.publishOpenAuthorCatalogGenesis(genesisInput(service, { peers: [] })))
       .resolves.toMatchObject({ announcedPeers: [], failedPeers: [] });
     expect(store.stageVerifiedObjects).toHaveBeenCalledTimes(2);
+
+    // Delivering a handed-off head is serving as well: its peers are selected as outbound
+    // announcements, which the inactive receiver does not hold back.
+    router.sendResponse = async () => Uint8Array.of(1);
+    expect(service.deliverCatalogHead({
+      announcement: announcement(policy.policyDigest),
+      peers: ['peer-member'],
+    })).toEqual({ status: 'queued' });
+    await service.whenCatalogHeadDeliveryIdle();
+    expect(countEvent(router, `send:${RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1}`)).toBe(1);
     await service.close();
   });
 
@@ -844,6 +856,44 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     await scoped.service.close();
   });
 
+  it('classifies a locally refused private announce by its typed code', async () => {
+    // GH#3081 — the denials measured in the issue were this local outbound refusal, raised before
+    // any send, not a remote peer's denied reply; both must carry the same typed code.
+    const policy = catalogPolicy(`${CONTEXT_GRAPH_ID}-private-refused`, 1, 1);
+    const policyDigest = `0x${'2d'.repeat(32)}` as Digest32V1;
+    const router = new RecordingRouter();
+    router.sendResponse = async () => Uint8Array.of(1);
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: {
+        localAgentAddress: AUTHOR,
+        resolveRemoteAgentAddress: async (peerId: string) => (
+          peerId === 'private-member' ? OTHER_WALLET.address.toLowerCase() as EvmAddressV1 : null
+        ),
+      },
+      native: {
+        ...nativeOptions(() => inertReconciler()),
+        resolveScopedReadCapability: async () => null,
+      },
+    });
+    service.acceptPolicySnapshot({ policy, policyDigest, roster: memberRoster(policy, policyDigest) });
+    service.start();
+
+    const result = await service.announceCatalogHead({
+      announcement: { ...announcement(policyDigest), contextGraphId: policy.contextGraphId },
+      peers: ['private-outsider', 'private-member'],
+    });
+    expect(result.announcedPeers).toEqual(['private-member']);
+    expect(result.failedPeers).toEqual([{
+      peerId: 'private-outsider',
+      error: '[catalog-transport-policy-denied] catalog operation is not access-policy authorized',
+      code: 'catalog-transport-policy-denied',
+    }]);
+    expect(router.sends.map(({ peerId }) => peerId)).toEqual(['private-member']);
+    await service.close();
+  });
+
   it('denies a private-cell author that is absent from the current member roster', async () => {
     const service = new Rfc64PublicCatalogServiceV1({
       router: new RecordingRouter().asProtocolRouter(),
@@ -1131,6 +1181,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     expect(result.failedPeers).toEqual([{
       peerId: 'peer-fail',
       error: expect.stringContaining('invalid acknowledgement'),
+      code: 'catalog-transport-wire',
     }]);
     expect(Object.isFrozen(result)).toBe(true);
     expect(Object.isFrozen(result.announcedPeers)).toBe(true);
@@ -1164,6 +1215,40 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     await service.close();
   });
 
+  it('classifies a failed announce by its typed transport code and keeps the message as display text', async () => {
+    // GH#3081 — denial counts must not depend on error wording: the code is taken where the
+    // typed transport error is caught, before it becomes a message.
+    const router = new RecordingRouter();
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+    });
+    const policy = acceptPolicy(service);
+    router.sendResponse = async (_protocolId, _options, peerId) => {
+      if (peerId === 'peer-unreachable') throw new Error('[catalog-transport-policy-denied] lookalike text');
+      return Uint8Array.of(peerId === 'peer-denied' ? 0 : 1);
+    };
+    service.start();
+
+    const result = await service.announceCatalogHead({
+      announcement: announcement(policy.policyDigest),
+      peers: ['peer-denied', 'peer-unreachable', 'peer-ack'],
+    });
+    expect(result.announcedPeers).toEqual(['peer-ack']);
+    expect(result.failedPeers).toEqual([
+      {
+        peerId: 'peer-denied',
+        error: '[catalog-transport-policy-denied] remote peer denied the catalog-head announcement',
+        code: 'catalog-transport-policy-denied',
+      },
+      // Only a typed transport error is classified, whatever its text says.
+      { peerId: 'peer-unreachable', error: '[catalog-transport-policy-denied] lookalike text' },
+    ]);
+    expect(Object.isFrozen(result.failedPeers[0])).toBe(true);
+    await service.close();
+  });
+
   it('removes the local peer at the canonical outbound fan-out boundary', async () => {
     const router = new RecordingRouter();
     const service = new Rfc64PublicCatalogServiceV1({
@@ -1187,7 +1272,7 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     await service.close();
   });
 
-  it('propagates announcement cancellation and skips every later peer', async () => {
+  it('propagates announcement cancellation to the wave in flight and skips every later peer', async () => {
     const router = new RecordingRouter();
     const service = new Rfc64PublicCatalogServiceV1({
       router: router.asProtocolRouter(),
@@ -1197,12 +1282,16 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     const policy = acceptPolicy(service);
     const head = announcement(policy.policyDigest);
     const controller = new AbortController();
-    let markFirstEntered!: () => void;
-    const firstEntered = new Promise<void>((resolve) => { markFirstEntered = resolve; });
+    // GH#3081 — sends start in bounded waves that share the fan-out's one signal.
+    const firstWave = Array.from(
+      { length: RFC64_CATALOG_HEAD_FANOUT_WAVE_PEERS_V1 },
+      (_, index) => `peer-blocked-${index}`,
+    );
+    let markWaveEntered!: () => void;
+    const waveEntered = new Promise<void>((resolve) => { markWaveEntered = resolve; });
     router.sendResponse = async (_protocolId, options, peerId) => {
-      expect(peerId).toBe('peer-blocked');
-      expect(options?.signal).toBe(controller.signal);
-      markFirstEntered();
+      expect(firstWave).toContain(peerId);
+      if (peerId === firstWave.at(-1)) markWaveEntered();
       return new Promise<Uint8Array>((_resolve, reject) => {
         options?.signal?.addEventListener('abort', () => reject(options.signal?.reason), {
           once: true,
@@ -1213,16 +1302,54 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
 
     const announcing = service.announceCatalogHead({
       announcement: head,
-      peers: ['peer-blocked', 'peer-must-not-run'],
+      peers: [...firstWave, 'peer-must-not-run-1', 'peer-must-not-run-2'],
       signal: controller.signal,
     });
-    await firstEntered;
+    await waveEntered;
+    expect(new Set(router.sends.map(({ options }) => options?.signal)).size).toBe(1);
+    expect(router.sends[0]!.options?.signal?.aborted).toBe(false);
     controller.abort(new Error('repair closing'));
     await expect(announcing).resolves.toMatchObject({
       announcedPeers: [],
-      failedPeers: [{ peerId: 'peer-blocked', error: 'repair closing' }],
+      failedPeers: firstWave.map((peerId) => ({ peerId, error: 'repair closing' })),
     });
-    expect(router.sends.map(({ peerId }) => peerId)).toEqual(['peer-blocked']);
+    expect(router.sends.map(({ peerId }) => peerId)).toEqual(firstWave);
+    await service.close();
+  });
+
+  it('announces to a whole wave at once, so one stalled peer costs one budget and delays nobody in it', async () => {
+    const router = new RecordingRouter();
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+      transportTimeoutMs: 40,
+    });
+    const policy = acceptPolicy(service);
+    router.sendResponse = async (_protocolId, options, peerId) => {
+      if (peerId !== 'peer-stalled') return Uint8Array.of(1);
+      return new Promise<Uint8Array>((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => reject(options.signal?.reason), {
+          once: true,
+        });
+      });
+    };
+    service.start();
+
+    const result = await service.announceCatalogHead({
+      announcement: announcement(policy.policyDigest),
+      peers: ['peer-stalled', 'peer-a', 'peer-b'],
+    });
+
+    expect(result.announcedPeers).toEqual(['peer-a', 'peer-b']);
+    expect(result.failedPeers).toEqual([{
+      peerId: 'peer-stalled',
+      error: 'RFC-64 catalog head fan-out exceeded its 40 ms budget',
+    }]);
+    // Every send carries the fan-out's remaining budget as its own deadline.
+    expect(router.sends.every(({ options }) => (
+      typeof options?.timeoutMs === 'number' && options.timeoutMs > 0 && options.timeoutMs <= 40
+    ))).toBe(true);
     await service.close();
   });
 
@@ -2381,6 +2508,589 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
       stagedOnly: 0,
       applied: 0,
       failed: 1,
+    });
+    await service.close();
+  });
+});
+
+describe('RFC-64 public catalog service v1 already-satisfied announcements', () => {
+  function satisfiedHeadHarness(options: {
+    readonly holdReconcile?: Promise<void>;
+    readonly holdDiscovery?: Promise<void>;
+    readonly withoutPullLane?: boolean;
+  } = {}) {
+    const router = new RecordingRouter();
+    const applied = new Set<string>();
+    const knownSatisfied = new Set<string>();
+    const isHeadSatisfied = vi.fn(async (head: Rfc64PublicCatalogHeadAnnouncementV1) => (
+      applied.has(head.catalogHeadObjectDigest)
+    ));
+    const isHeadKnownSatisfied = vi.fn((head: Rfc64PublicCatalogHeadAnnouncementV1) => (
+      knownSatisfied.has(head.catalogHeadObjectDigest)
+    ));
+    const reconcileHead = vi.fn(async (
+      _peerId: string,
+      head: Rfc64PublicCatalogHeadAnnouncementV1,
+    ) => {
+      await options.holdReconcile;
+      applied.add(head.catalogHeadObjectDigest);
+      return 'applied' as const;
+    });
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+      ...(options.withoutPullLane === true ? {} : {
+        currentHeadDiscovery: { readCurrentAppliedCatalogHeadDigest: async () => null },
+      }),
+      receiver: { retryBackoffMs: 0 },
+      native: nativeOptions(() => ({ isHeadSatisfied, isHeadKnownSatisfied, reconcileHead })),
+    });
+    const policy = acceptPolicy(service);
+    const headAt = (catalogVersion: string, byte: string) => Object.freeze({
+      ...announcement(policy.policyDigest),
+      catalogVersion,
+      catalogHeadObjectDigest: `0x${byte.repeat(64)}` as Digest32V1,
+      signatureVariantDigest: `0x${byte.repeat(64)}` as Digest32V1,
+    }) as Rfc64PublicCatalogHeadAnnouncementV1;
+    const lastAnnounced = new Map<string, Rfc64PublicCatalogHeadAnnouncementV1>();
+    // The announcing peer's current head is the head it announced last.
+    const discovery = vi.spyOn(service, 'discoverCurrentCatalogHead').mockImplementation(
+      async ({ remotePeerId }) => {
+        await options.holdDiscovery;
+        const announced = lastAnnounced.get(remotePeerId)!;
+        return Object.freeze({ announcement: announced, head: {} as never });
+      },
+    );
+    const announce = async (head: Rfc64PublicCatalogHeadAnnouncementV1, peerId = 'peer-a') => {
+      lastAnnounced.set(peerId, head);
+      const ack = await router.invoke(
+        RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
+        encodeRfc64PublicCatalogHeadAnnouncementV1(head),
+        peerId,
+      );
+      // Admitted and acknowledged, whether or not it needed any work.
+      expect([...ack]).toEqual([1]);
+    };
+    service.start();
+    return {
+      service,
+      knownSatisfied,
+      isHeadSatisfied,
+      isHeadKnownSatisfied,
+      reconcileHead,
+      discovery,
+      headAt,
+      announce,
+    };
+  }
+
+  it('answers re-announced applied heads with no head read, receiver task, or pull', async () => {
+    const f = satisfiedHeadHarness();
+    const current = f.headAt('3', 'c');
+
+    await f.announce(current);
+    await f.service.whenReceiverIdle();
+    expect(f.reconcileHead).toHaveBeenCalledTimes(1);
+    expect(f.discovery).toHaveBeenCalledTimes(1);
+    const fullPathChecks = f.isHeadSatisfied.mock.calls.length;
+    expect(fullPathChecks).toBeGreaterThanOrEqual(2);
+    const receiverBefore = f.service.stats().receiver;
+
+    // The head is applied and its staged head verified once: every later
+    // connect re-announces it, directly and through each scoped replay.
+    f.knownSatisfied.add(current.catalogHeadObjectDigest);
+    for (let connect = 0; connect < 20; connect += 1) {
+      await f.announce(current, `peer-${connect % 4}`);
+    }
+    await f.service.whenReceiverIdle();
+
+    expect(f.isHeadSatisfied).toHaveBeenCalledTimes(fullPathChecks);
+    expect(f.reconcileHead).toHaveBeenCalledTimes(1);
+    expect(f.discovery).toHaveBeenCalledTimes(1);
+    expect(f.isHeadKnownSatisfied).toHaveBeenCalledTimes(21);
+    expect(f.service.stats()).toMatchObject({
+      announcedHeadsAlreadySatisfied: 20,
+      announcedCurrentHeadPendingScopes: 0,
+      receiver: receiverBefore,
+    });
+    await f.service.close();
+  });
+
+  it('keeps full verification and application for new and conflicting heads', async () => {
+    const f = satisfiedHeadHarness();
+    const current = f.headAt('3', 'c');
+    await f.announce(current);
+    await f.service.whenReceiverIdle();
+    f.knownSatisfied.add(current.catalogHeadObjectDigest);
+    await f.announce(current);
+    expect(f.service.stats().announcedHeadsAlreadySatisfied).toBe(1);
+
+    const successor = f.headAt('4', 'd');
+    const conflicting = f.headAt('3', 'e');
+    await f.announce(successor, 'peer-b');
+    await f.service.whenReceiverIdle();
+    await f.announce(conflicting, 'peer-c');
+    await f.service.whenReceiverIdle();
+
+    expect(f.reconcileHead.mock.calls.map(([peerId, head]) => [
+      peerId,
+      head.catalogHeadObjectDigest,
+    ])).toEqual([
+      ['peer-a', current.catalogHeadObjectDigest],
+      ['peer-b', successor.catalogHeadObjectDigest],
+      ['peer-c', conflicting.catalogHeadObjectDigest],
+    ]);
+    expect(f.discovery.mock.calls.map(([{ remotePeerId }]) => remotePeerId))
+      .toEqual(['peer-a', 'peer-b', 'peer-c']);
+    const checked = f.isHeadSatisfied.mock.calls.map(([head]) => head.catalogHeadObjectDigest);
+    expect(checked).toContain(successor.catalogHeadObjectDigest);
+    expect(checked).toContain(conflicting.catalogHeadObjectDigest);
+    expect(f.service.stats().announcedHeadsAlreadySatisfied).toBe(1);
+    await f.service.close();
+  });
+
+  it('lets a hint join a pending receiver task for the head instead of skipping it', async () => {
+    const releaseReconcile = deferred<void>();
+    const f = satisfiedHeadHarness({
+      holdReconcile: releaseReconcile.promise,
+      withoutPullLane: true,
+    });
+    const current = f.headAt('3', 'c');
+
+    await f.announce(current, 'peer-a');
+    await vi.waitFor(() => expect(f.reconcileHead).toHaveBeenCalledTimes(1));
+    // Durable by another route while the ambient task is still running: the
+    // hint must still reach that task as a provider and a fresh hint.
+    f.knownSatisfied.add(current.catalogHeadObjectDigest);
+    await f.announce(current, 'peer-b');
+    expect(f.service.stats()).toMatchObject({
+      announcedHeadsAlreadySatisfied: 0,
+      receiver: { scheduled: 2, dedupedInFlight: 1 },
+    });
+
+    releaseReconcile.resolve(undefined);
+    await f.service.whenReceiverIdle();
+    await f.announce(current, 'peer-c');
+    expect(f.service.stats()).toMatchObject({
+      announcedHeadsAlreadySatisfied: 1,
+      receiver: { scheduled: 2, applied: 1 },
+    });
+    await f.service.close();
+  });
+
+  it('lets a hint join a pull still pending for its scope instead of skipping it', async () => {
+    const releaseDiscovery = deferred<void>();
+    const f = satisfiedHeadHarness({ holdDiscovery: releaseDiscovery.promise });
+    const current = f.headAt('3', 'c');
+
+    await f.announce(current, 'peer-a');
+    await vi.waitFor(() => expect(f.discovery).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(f.service.stats().receiver.applied).toBe(1));
+    f.knownSatisfied.add(current.catalogHeadObjectDigest);
+    // No receiver work is left for the head, but the scope's pull is in
+    // flight: the hint is recorded for the next pull rather than dropped.
+    expect(f.service.stats().announcedCurrentHeadPendingScopes).toBe(0);
+    await f.announce(current, 'peer-c');
+    expect(f.service.stats()).toMatchObject({
+      announcedHeadsAlreadySatisfied: 0,
+      announcedCurrentHeadPendingScopes: 1,
+    });
+
+    releaseDiscovery.resolve(undefined);
+    await f.service.whenReceiverIdle();
+    expect(f.discovery.mock.calls.map(([{ remotePeerId }]) => remotePeerId))
+      .toEqual(['peer-a', 'peer-c']);
+    await f.announce(current, 'peer-d');
+    expect(f.service.stats()).toMatchObject({
+      announcedHeadsAlreadySatisfied: 1,
+      announcedCurrentHeadPendingScopes: 0,
+    });
+    expect(f.discovery).toHaveBeenCalledTimes(2);
+    await f.service.close();
+  });
+
+  it('never skips outside the catalog-apply lane or once the receiver is closed', async () => {
+    const isHeadKnownSatisfied = vi.fn(() => true);
+    const reconcileHead = vi.fn(async () => 'applied' as const);
+    let lane: 'catalog-apply' | 'shadow-stage' = 'shadow-stage';
+    const router = new RecordingRouter();
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+      receiver: { retryBackoffMs: 0, maxAttempts: 1 },
+      resolveContextGraphAuthority: (contextGraphId) => Object.freeze({
+        contextGraphId,
+        selected: true,
+        eligible: true,
+        active: true,
+        mode: lane === 'catalog-apply' ? 'catalog' : 'shadow',
+        killSwitchActive: false,
+        legacySyncAllowed: true,
+        track2Enabled: true,
+        authoringAllowed: true,
+        reconciliationLane: lane,
+      }) as never,
+      native: nativeOptions(() => ({
+        isHeadSatisfied: async () => true,
+        isHeadKnownSatisfied,
+        reconcileHead,
+      })),
+    });
+    const policy = acceptPolicy(service);
+    const head = announcement(policy.policyDigest);
+    const announce = () => router.invoke(
+      RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
+      encodeRfc64PublicCatalogHeadAnnouncementV1(head),
+    );
+    service.start();
+
+    await announce();
+    await service.whenReceiverIdle();
+    expect(isHeadKnownSatisfied).not.toHaveBeenCalled();
+    expect(service.stats()).toMatchObject({
+      announcedHeadsAlreadySatisfied: 0,
+      receiver: { scheduled: 1 },
+    });
+
+    lane = 'catalog-apply';
+    await announce();
+    expect(service.stats()).toMatchObject({
+      announcedHeadsAlreadySatisfied: 1,
+      receiver: { scheduled: 1 },
+    });
+
+    await service.closeReceiverAdmissionAndDrain();
+    await announce();
+    expect(service.stats().announcedHeadsAlreadySatisfied).toBe(1);
+    await service.close();
+  });
+});
+
+describe('RFC-64 public catalog service v1 head hand-off (GH#3081)', () => {
+  const MEMBER = OTHER_WALLET.address.toLowerCase() as EvmAddressV1;
+
+  /** A started service holding one private policy whose roster is the author and one member. */
+  function privateDeliveryService(options: {
+    readonly resolveRemoteAgentAddress: (peerId: string) => Promise<EvmAddressV1 | null>;
+    /** This node's own principal, looked up per decision instead of configured. */
+    readonly resolveLocalAgentAddress?: () => Promise<EvmAddressV1 | null>;
+    readonly sendResponse: RecordingRouter['sendResponse'];
+    readonly scopeBoundReads?: boolean;
+    readonly start?: boolean;
+    readonly hostPorts?: Record<string, unknown>;
+  }) {
+    const policy = catalogPolicy(`${CONTEXT_GRAPH_ID}-private-delivery`, 1, 1);
+    const policyDigest = `0x${'3d'.repeat(32)}` as Digest32V1;
+    const router = new RecordingRouter();
+    router.sendResponse = options.sendResponse;
+    const outcomes: Rfc64CatalogHeadDeliveryOutcomeV1[] = [];
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: options.resolveLocalAgentAddress === undefined
+        ? { localAgentAddress: AUTHOR, resolveRemoteAgentAddress: options.resolveRemoteAgentAddress }
+        : {
+          resolveLocalAgentAddress: options.resolveLocalAgentAddress,
+          resolveRemoteAgentAddress: options.resolveRemoteAgentAddress,
+        },
+      native: {
+        ...nativeOptions(() => inertReconciler()),
+        ...(options.scopeBoundReads === false ? {} : { resolveScopedReadCapability: async () => null }),
+      },
+      catalogHeadDelivery: {
+        onDelivered: (outcome) => { outcomes.push(outcome); },
+        ...options.hostPorts,
+      },
+      transportTimeoutMs: 40,
+    });
+    service.acceptPolicySnapshot({ policy, policyDigest, roster: memberRoster(policy, policyDigest) });
+    if (options.start !== false) service.start();
+    const head = { ...announcement(policyDigest), contextGraphId: policy.contextGraphId };
+    return { service, router, outcomes, head };
+  }
+
+  function stalledUntilAborted(options: SendOptions | undefined, onAbort?: () => void) {
+    return new Promise<Uint8Array>((_resolve, reject) => {
+      options?.signal?.addEventListener('abort', () => {
+        onAbort?.();
+        reject(options.signal?.reason);
+      }, { once: true });
+    });
+  }
+
+  it('returns before any send, sends nothing to peers the policy refuses and does not fail them', async () => {
+    const { service, router, outcomes, head } = privateDeliveryService({
+      resolveRemoteAgentAddress: async (peerId) => (peerId.startsWith('member') ? MEMBER : null),
+      sendResponse: async (_protocolId, options, peerId) => (
+        peerId === 'member-stalled' ? stalledUntilAborted(options) : Uint8Array.of(1)
+      ),
+    });
+
+    const receipt = service.deliverCatalogHead({
+      announcement: head,
+      peers: ['outsider-1', 'member-ok', 'outsider-2', 'member-stalled'],
+    });
+
+    expect(receipt).toEqual({ status: 'queued' });
+    expect(router.sends).toEqual([]);
+    await service.whenCatalogHeadDeliveryIdle();
+    // Nothing about the private graph reached a peer outside its roster.
+    expect(router.sends.map(({ peerId }) => peerId)).toEqual(['member-ok', 'member-stalled']);
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]).toMatchObject({
+      announcedPeers: ['member-ok'],
+      refusedPeers: ['outsider-1', 'outsider-2'],
+      failedPeers: [{
+        peerId: 'member-stalled',
+        error: 'RFC-64 catalog head fan-out exceeded its 40 ms budget',
+      }],
+      notDeliverable: null,
+    });
+    await service.close();
+  });
+
+  it('sends nothing to a peer that stops being a member between selection and send', async () => {
+    let lookups = 0;
+    const { service, router, outcomes, head } = privateDeliveryService({
+      resolveRemoteAgentAddress: async (peerId) => {
+        if (peerId !== 'leaving-member') return MEMBER;
+        lookups += 1;
+        // Selection still sees a member; the transport's own check before the send does not.
+        return lookups === 1 ? MEMBER : null;
+      },
+      sendResponse: async () => Uint8Array.of(1),
+    });
+
+    service.deliverCatalogHead({ announcement: head, peers: ['leaving-member', 'member-ok'] });
+    await service.whenCatalogHeadDeliveryIdle();
+
+    expect(router.sends.map(({ peerId }) => peerId)).toEqual(['member-ok']);
+    expect(outcomes[0]).toMatchObject({
+      announcedPeers: ['member-ok'],
+      failedPeers: [],
+      refusedPeers: ['leaving-member'],
+    });
+    // Selection, then the transport's check before the send. Where that check denied the send
+    // says that nothing went out: no further question is asked.
+    expect(lookups).toBe(2);
+    await service.close();
+  });
+
+  it('reports every peer as unchecked, not refused, when this node cannot establish its own principal', async () => {
+    let localLookups = 0;
+    const { service, router, outcomes, head } = privateDeliveryService({
+      // The read behind this node's own identity for the graph fails: the lookup has no answer.
+      resolveLocalAgentAddress: async () => {
+        localLookups += 1;
+        return null;
+      },
+      resolveRemoteAgentAddress: async () => MEMBER,
+      sendResponse: async () => Uint8Array.of(1),
+    });
+
+    service.deliverCatalogHead({ announcement: head, peers: ['member-a', 'member-b'] });
+    await service.whenCatalogHeadDeliveryIdle();
+
+    // Nothing is sent without a decision, and the two members are not written off as outsiders.
+    expect(router.sends).toEqual([]);
+    expect(outcomes[0]).toMatchObject({
+      announcedPeers: [],
+      failedPeers: [],
+      refusedPeers: [],
+      uncheckedPeers: ['member-a', 'member-b'],
+      notDeliverable: null,
+    });
+    // Each peer was asked about twice before the fan-out gave up on it.
+    expect(localLookups).toBe(4);
+    await service.close();
+  });
+
+  it('tells a peer whose identity lookup fails from a peer the roster does not hold', async () => {
+    const { service, router, outcomes, head } = privateDeliveryService({
+      resolveRemoteAgentAddress: async (peerId) => {
+        if (peerId === 'member-flaky') throw new Error('store query timed out');
+        return peerId === 'outsider' ? null : MEMBER;
+      },
+      sendResponse: async () => Uint8Array.of(1),
+    });
+
+    service.deliverCatalogHead({ announcement: head, peers: ['member-flaky', 'outsider', 'member-ok'] });
+    await service.whenCatalogHeadDeliveryIdle();
+
+    expect(router.sends.map(({ peerId }) => peerId)).toEqual(['member-ok']);
+    expect(outcomes[0]).toMatchObject({
+      announcedPeers: ['member-ok'],
+      failedPeers: [],
+      refusedPeers: ['outsider'],
+      uncheckedPeers: ['member-flaky'],
+    });
+    await service.close();
+  });
+
+  it('does not let its host replace the ports that decide who is sent what', async () => {
+    const hostSend = vi.fn(async () => undefined);
+    const hostDecision = vi.fn(async () => true);
+    const { service, router, outcomes, head } = privateDeliveryService({
+      resolveRemoteAgentAddress: async (peerId) => (peerId.startsWith('member') ? MEMBER : null),
+      sendResponse: async () => Uint8Array.of(1),
+      hostPorts: { send: hostSend, isPeerAuthorized: hostDecision, assertDeliverable: () => undefined },
+    });
+
+    service.deliverCatalogHead({ announcement: head, peers: ['outsider', 'member-ok'] });
+    await service.whenCatalogHeadDeliveryIdle();
+
+    expect(hostSend).not.toHaveBeenCalled();
+    expect(hostDecision).not.toHaveBeenCalled();
+    expect(router.sends.map(({ peerId }) => peerId)).toEqual(['member-ok']);
+    expect(outcomes[0]).toMatchObject({ announcedPeers: ['member-ok'], refusedPeers: ['outsider'] });
+    await service.close();
+  });
+
+  it('keeps a remote peer\'s denial as a failed delivery with its typed code', async () => {
+    const { service, outcomes, head } = privateDeliveryService({
+      resolveRemoteAgentAddress: async () => MEMBER,
+      sendResponse: async (_protocolId, _options, peerId) => (
+        Uint8Array.of(peerId === 'member-denying' ? 0 : 1)
+      ),
+    });
+
+    service.deliverCatalogHead({ announcement: head, peers: ['member-denying', 'member-ok'] });
+    await service.whenCatalogHeadDeliveryIdle();
+
+    expect(outcomes[0]).toMatchObject({
+      announcedPeers: ['member-ok'],
+      refusedPeers: [],
+      failedPeers: [{
+        peerId: 'member-denying',
+        error: '[catalog-transport-policy-denied] remote peer denied the catalog-head announcement',
+        code: 'catalog-transport-policy-denied',
+      }],
+    });
+    await service.close();
+  });
+
+  it('does not fan out a head that is no longer bound to the accepted policy', async () => {
+    const { service, router, outcomes, head } = privateDeliveryService({
+      resolveRemoteAgentAddress: async () => MEMBER,
+      sendResponse: async () => Uint8Array.of(1),
+    });
+
+    service.deliverCatalogHead({
+      announcement: { ...head, policyDigest: `0x${'3e'.repeat(32)}` as Digest32V1 },
+      peers: ['member-ok'],
+    });
+    await service.whenCatalogHeadDeliveryIdle();
+
+    expect(router.sends).toEqual([]);
+    expect(outcomes[0]).toMatchObject({
+      announcedPeers: [],
+      failedPeers: [],
+      refusedPeers: [],
+      notDeliverable: 'RFC-64 catalog announcement is not bound to the locally accepted policy snapshot',
+    });
+    await service.close();
+  });
+
+  it('does not fan out a private head without scope-bound content reads, or before start', async () => {
+    const unscoped = privateDeliveryService({
+      resolveRemoteAgentAddress: async () => MEMBER,
+      sendResponse: async () => Uint8Array.of(1),
+      scopeBoundReads: false,
+    });
+    unscoped.service.deliverCatalogHead({ announcement: unscoped.head, peers: ['member-ok'] });
+    await unscoped.service.whenCatalogHeadDeliveryIdle();
+    expect(unscoped.router.sends).toEqual([]);
+    expect(unscoped.outcomes[0]!.notDeliverable)
+      .toBe('RFC-64 private catalog peer fan-out requires scope-bound private content transport');
+    await unscoped.service.close();
+
+    const unstarted = privateDeliveryService({
+      resolveRemoteAgentAddress: async () => MEMBER,
+      sendResponse: async () => Uint8Array.of(1),
+      start: false,
+    });
+    expect(unstarted.service.deliverCatalogHead({
+      announcement: unstarted.head,
+      peers: ['member-ok'],
+    }).status).toBe('queued');
+    await unstarted.service.whenCatalogHeadDeliveryIdle();
+    expect(unstarted.router.sends).toEqual([]);
+    expect(unstarted.outcomes[0]!.notDeliverable)
+      .toBe('RFC-64 public catalog service is not started');
+    await unstarted.service.close();
+  });
+
+  it('aborts a handed-off fan-out on close before the transports stop, without a failed delivery', async () => {
+    let markEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+    const { service, router, outcomes, head } = privateDeliveryService({
+      resolveRemoteAgentAddress: async () => MEMBER,
+      sendResponse: async (_protocolId, options) => {
+        markEntered();
+        return stalledUntilAborted(options, () => { router.events.push('announce-send-aborted'); });
+      },
+    });
+
+    service.deliverCatalogHead({ announcement: head, peers: ['member-stalled'] });
+    await entered;
+    await service.close();
+
+    const aborted = router.events.indexOf('announce-send-aborted');
+    const stopped = router.events.indexOf(
+      `unregister:${RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1}`,
+    );
+    expect(aborted).toBeGreaterThanOrEqual(0);
+    expect(stopped).toBeGreaterThan(aborted);
+    expect(router.sends[0]!.options?.signal?.reason).toMatchObject({
+      name: 'AbortError',
+      message: 'RFC-64 catalog head delivery closed',
+    });
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]).toMatchObject({
+      announcedPeers: [],
+      failedPeers: [],
+      notDeliverable: 'RFC-64 catalog head delivery closed',
+    });
+    // A hand-off after close is not queued and never throws.
+    expect(service.deliverCatalogHead({ announcement: head, peers: ['member-stalled'] }).status)
+      .toBe('not-queued');
+    expect(router.sends).toHaveLength(1);
+  });
+
+  it('hands an open-policy head to every listed peer without resolving an identity', async () => {
+    const router = new RecordingRouter();
+    router.sendResponse = async () => Uint8Array.of(1);
+    const resolveRemoteAgentAddress = vi.fn(async () => null);
+    const outcomes: Rfc64CatalogHeadDeliveryOutcomeV1[] = [];
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: { localAgentAddress: AUTHOR, resolveRemoteAgentAddress },
+      localPeerId: 'peer-self',
+      catalogHeadDelivery: { onDelivered: (outcome) => { outcomes.push(outcome); } },
+    });
+    const policy = acceptPolicy(service);
+    service.start();
+
+    expect(service.deliverCatalogHead({
+      announcement: announcement(policy.policyDigest),
+      peers: ['peer-self'],
+    }).status).toBe('nobody');
+    service.deliverCatalogHead({
+      announcement: announcement(policy.policyDigest),
+      peers: ['peer-a', 'peer-self', 'peer-b'],
+    });
+    await service.whenCatalogHeadDeliveryIdle();
+
+    expect(router.sends.map(({ peerId }) => peerId)).toEqual(['peer-a', 'peer-b']);
+    expect(resolveRemoteAgentAddress).not.toHaveBeenCalled();
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]).toMatchObject({
+      announcedPeers: ['peer-a', 'peer-b'],
+      failedPeers: [],
+      refusedPeers: [],
     });
     await service.close();
   });

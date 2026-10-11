@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { isTestSurface, secondaryRoutes } from '../test-inventory-surface.mjs';
 
+// Route ownership for a specific CI obligation is pinned beside its workflow wiring,
+// e.g. the Gate 0 unit route in windows-persistence-ci.test.mjs.
+
 test('shell drivers and Python/YAML suites cannot disappear when their execution route is removed', () => {
   const files = ['scripts/devnet-test-publish.sh', 'ccl_v0_1/tests/run_all_tests.py', 'ccl_v0_1/tests/cases/owner.yaml', 'packages/adapter-hermes/pytests/test_cli.py', 'README.md'];
   const surface = files.filter(isTestSurface);
