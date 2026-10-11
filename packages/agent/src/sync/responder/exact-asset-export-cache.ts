@@ -1,3 +1,4 @@
+import type { PreparedContentCache } from './prepared-content-cache.js';
 import { assertSafeIri, compareCodePoint } from '@origintrail-official/dkg-core';
 import {
   StoreResponseTooLargeError,
@@ -106,6 +107,7 @@ export interface ExactAssetExportCache {
     exports: number;
     cacheHits: number;
     encodedCacheHits: number;
+    preparedCacheHits: number;
     encodedCacheEntries: number;
     encodedCacheBytes: number;
     fallbacks: Readonly<Partial<Record<ExactAssetExportFallbackReason, number>>>;
@@ -182,6 +184,7 @@ export function createBoundedExactAssetExportCache(params: {
   readonly ttlMs?: number;
   readonly maxEntries?: number;
   /** Test/operator construction may shrink, never raise, encoded retention. */
+  readonly preparedContentCache?: PreparedContentCache;
   readonly encodedTtlMs?: number;
   readonly encodedMaxEntries?: number;
   readonly encodedMaxBytes?: number;
@@ -212,6 +215,7 @@ export function createBoundedExactAssetExportCache(params: {
   let exports = 0;
   let cacheHits = 0;
   let encodedCacheHits = 0;
+  let preparedCacheHits = 0;
   const fallbacks: Partial<Record<ExactAssetExportFallbackReason, number>> = {};
   const refuse = (
     reason: ExactAssetExportFallbackReason,
@@ -522,7 +526,7 @@ export function createBoundedExactAssetExportCache(params: {
   return {
     stats() {
       pruneEncoded();
-      return Object.freeze({ exports, cacheHits, encodedCacheHits,
+      return Object.freeze({ exports, cacheHits, encodedCacheHits, preparedCacheHits,
         encodedCacheEntries: encodedCache.size, encodedCacheBytes,
         fallbacks: Object.freeze({ ...fallbacks }) });
     },
@@ -546,7 +550,26 @@ export function createBoundedExactAssetExportCache(params: {
       const { key: revision, reusable } = sourceRevision(request.graph, metadata.metaGraph);
       const key = encodedKey(request, metadata, revision);
       pruneEncoded();
-      const hit = reusable ? encodedCache.get(key) : undefined;
+      // Disk keys exclude process-local write generations. The full confirmed
+      // metadata identity selects an immutable assertion across restarts; fresh
+      // authority and the current process's revision fence still apply.
+      const diskKey = encodedKey(request, metadata, null);
+      let hit = reusable ? encodedCache.get(key) : undefined;
+      if (!hit && reusable && params.preparedContentCache) {
+        const readId = Symbol('prepared-content-read');
+        const rejected = reserve(readId, `${key}:prepared-read`, 0, RESPONSE_RESERVATION_BYTES, () => {});
+        if (rejected) return refuse('response-admission', request, rejected.reason);
+        try {
+          const prepared = await params.preparedContentCache.get(diskKey);
+          throwIfAborted(request.signal);
+          if (prepared) {
+            if (sourceRevision(request.graph, metadata.metaGraph).key !== revision) throw changed();
+            retainEncoded(key, prepared.body, prepared.plainBytes, metadata.identity);
+            hit = encodedCache.get(key);
+            if (hit) preparedCacheHits += 1;
+          }
+        } finally { budget.remove(readId); }
+      }
       if (hit && Date.now() - hit.lastUsedAt < encodedTtlMs) {
         // Only the independently verified immutable assertion copy is reused.
         // On revisionless stores this is not evidence that present physical
@@ -620,6 +643,12 @@ export function createBoundedExactAssetExportCache(params: {
             if (!retained && reusable) {
               retainEncoded(key, body, plainBytes, rows.identity);
               retained = true;
+              await params.preparedContentCache?.put(diskKey, { body, plainBytes });
+              // Persistence adds an async boundary: fence it before ASSET_END.
+              if (params.preparedContentCache) {
+                await rows.assertCurrent();
+                if (bytesToHex(sha256(body)) !== digest || bytesToHex(sha256(metaBytes)) !== metaDigest) throw invalid();
+              }
             }
           },
           release() {

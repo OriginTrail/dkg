@@ -1,3 +1,4 @@
+import type { SyncResponderCacheConfig } from './sync/responder/prepared-content-cache.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -87,7 +88,6 @@ import type {
 import type {
   SyncAdmissionConfig,
   SyncContextGraphPriorityConfig,
-  SyncResponderSnapshotLimitsConfig,
 } from './sync/policy.js';
 import type { SyncReconcilerTiming } from './sync/reconciler-timing.js';
 import type { FinalizationRecoveryStore } from './finalization-recovery-store.js';
@@ -1416,7 +1416,7 @@ export type FinalizationRecoveryStoreFactory = (
   dataDir: string,
 ) => Promise<FinalizationRecoveryStore>;
 
-export interface DKGAgentConfig {
+export interface DKGAgentConfig extends SyncResponderCacheConfig {
   name: string;
   /**
    * Construction seam for the durable finalization inbox. Embedders and tests
@@ -1630,8 +1630,6 @@ export interface DKGAgentConfig {
   syncGlobalQueueLimit?: number;
   /** Optional partitioned fast/slow sync admission. Omit for the legacy shared limiter. */
   syncAdmission?: SyncAdmissionConfig;
-  /** Daemon-local retained responder snapshot row/estimated-byte policy. */
-  syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
   /**
    * Local requester/responder priority by Context Graph ID. Higher runs first.
    * System Context Graphs default to a deprioritized priority so they run

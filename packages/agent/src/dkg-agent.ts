@@ -1,3 +1,4 @@
+import { resolvePreparedContentCacheConfig } from './sync/responder/prepared-content-cache.js';
 import { PublicSnapshotMethods } from './dkg-agent-public-snapshot.js';
 
 import { createACKSendP2P } from './internal/storage-ack-owned-request.js';
@@ -1265,6 +1266,7 @@ export class DKGAgent extends DKGAgentBase {
       );
     }
     validateSyncResponderSnapshotLimitsConfig(inputConfig.syncResponderSnapshotLimits);
+    resolvePreparedContentCacheConfig(inputConfig.preparedContentCache, inputConfig.dataDir);
     const normalizedConfig = normalizeStorageAckConfig({
       ...inputConfig,
       authorityIndex,

@@ -1,3 +1,4 @@
+import type { DKGAgentConfig } from '@origintrail-official/dkg-agent';
 import {
   createManagedOxigraphRuntimeStoreConfigV1,
   type ChangelogEraGuard,
@@ -32,4 +33,14 @@ export function buildAgentRuntimeStoreConfig(
   return input.managedStore
     ? createManagedOxigraphRuntimeStoreConfigV1(complete)
     : complete;
+}
+
+/** Keep responder performance retention settings together at the daemon boundary. */
+export function buildAgentResponderCacheConfig(config: Pick<DKGAgentConfig,
+  'syncResponderSnapshotLimits' | 'preparedContentCache' | 'syncContextGraphPriorities'>) {
+  return {
+    syncResponderSnapshotLimits: config.syncResponderSnapshotLimits,
+    preparedContentCache: config.preparedContentCache,
+    syncContextGraphPriorities: config.syncContextGraphPriorities,
+  };
 }

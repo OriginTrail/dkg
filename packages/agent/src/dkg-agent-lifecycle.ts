@@ -3260,6 +3260,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       sharedMemoryTtlMs: this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS,
       store: this.store,
       publicSnapshotStore: this.publicSnapshotStore,
+      preparedContentCache: this.config.preparedContentCache, dataDir: this.config.dataDir,
       peerId: this.peerId,
       parseSyncRequest: this.parseSyncRequest.bind(this),
       authorizeSyncRequest: this.authorizeSyncRequest.bind(this),

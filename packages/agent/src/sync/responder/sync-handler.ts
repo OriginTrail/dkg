@@ -1,3 +1,4 @@
+import { createPreparedContentCache, resolvePreparedContentCacheConfig, type PreparedContentCacheConfig } from './prepared-content-cache.js';
 import {
   createOperationContext,
   DEFAULT_MAX_READ_BYTES,
@@ -107,6 +108,8 @@ interface RegisterSyncHandlerParams {
   sharedMemoryTtlMs: number;
   store: TripleStore;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  preparedContentCache?: PreparedContentCacheConfig;
+  dataDir?: string;
   peerId: string;
   parseSyncRequest: (data: Uint8Array) => SyncRequestEnvelope;
   authorizeSyncRequest: (
@@ -494,7 +497,13 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT,
     responderSnapshotBudget,
   );
-  const exactAssetExportCache = createBoundedExactAssetExportCache({ store, budget: responderSnapshotBudget });
+  const preparedOptions = resolvePreparedContentCacheConfig(params.preparedContentCache, params.dataDir);
+  let cacheWarned = false;
+  const preparedContentCache = preparedOptions ? createPreparedContentCache(preparedOptions, () => {
+    if (!cacheWarned) params.logWarn(createOperationContext('sync'), 'Prepared content cache unavailable; using verified export');
+    cacheWarned = true;
+  }) : undefined;
+  const exactAssetExportCache = createBoundedExactAssetExportCache({ store, budget: responderSnapshotBudget, preparedContentCache });
   const swmDataExactGraphPlanMemo = createResponderExactGraphPagePlanMemo(
     DURABLE_DATA_SYNC_SESSION_TTL_MS,
     SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
