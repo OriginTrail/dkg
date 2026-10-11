@@ -78,12 +78,12 @@ import {
   resolveApprovedPrivateReplicaAuthority,
 } from './approved-private-replica.js';
 import {
-  createRfc64CatalogReplayRecoveryCommandV1, Rfc64CatalogReplayConnectionRuntimeV1,
+  Rfc64CatalogReplayConnectionRuntimeV1,
   type Rfc64CatalogReplayConnectionReservationV1,
 } from './rfc64/catalog-replay-connection-runtime-v1.js';
 import {
   Rfc64CatalogReplayRecoveryRuntimeV1,
-  type Rfc64CatalogReplayPeerDemandV1,
+  type Rfc64CatalogReplayRecoveryRequestV1,
   type Rfc64CatalogReplayPeerFenceLeaseV1,
 } from './rfc64/catalog-replay-recovery-runtime-v1.js';
 export { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from
@@ -1129,11 +1129,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             policyDigest: accepted.policyDigest,
           }, signal);
         },
-        schedule: work => this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed('catalog-connection-replay', work),
+        schedule: (slot, work) => this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(`catalog-connection-replay:${slot}`, work),
+        wait: waitForRfc64ScheduledResponsibilityDelayV1,
         replay: (contextGraphId, replayDemand, signal) =>
           this.requestRfc64CatalogHeadReplayV1(contextGraphId, {
             kind: 'connection-demand',
-            replayDemand,
+            demand: replayDemand,
           }, signal),
         warn: (message) => this.log.warn(createOperationContext('system'), message),
       });
@@ -4737,7 +4738,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     signal?: AbortSignal,
   ): Promise<Readonly<{ requested: number; failed: number }>> {
     return this.requestRfc64CatalogHeadReplayV1(contextGraphId, {
-      kind: 'connected-peers',
+      kind: 'full-connected-peers',
     }, signal);
   }
 
@@ -4755,14 +4756,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   private async requestRfc64CatalogHeadReplayV1(
     this: DKGAgent,
     contextGraphId: string,
-    request: Readonly<
-      | { kind: 'connected-peers' }
-      | { kind: 'pending-recovery' }
-      | {
-          kind: 'connection-demand';
-          replayDemand: Rfc64CatalogReplayPeerDemandV1;
-        }
-    >,
+    request: Rfc64CatalogReplayRecoveryRequestV1,
     signal?: AbortSignal,
   ): Promise<Readonly<{ requested: number; failed: number }>> {
     signal?.throwIfAborted();
@@ -4797,11 +4791,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       return result;
     };
     return settle(this.rfc64CatalogReplayRecoveryRuntimeV1().request(
-      createRfc64CatalogReplayRecoveryCommandV1(
-        { ...scope, ...(signal === undefined ? {} : { signal }) },
-        request,
-        () => this.node.libp2p.getPeers().map(peer => peer.toString()),
-      ),
+      request.kind === 'full-connected-peers'
+        ? { ...scope, signal, ...request, connectedPeerIds: this.node.libp2p.getPeers().map(peer => peer.toString()) }
+        : { ...scope, signal, ...request },
     ));
   }
 

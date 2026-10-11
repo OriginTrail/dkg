@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type {
-  Rfc64CatalogReplayRecoveryCommandV1,
   Rfc64CatalogReplayPeerDemandV1,
   Rfc64CatalogReplayPeerFenceLeaseV1,
 } from './catalog-replay-recovery-runtime-v1.js';
@@ -12,8 +11,9 @@ export interface Rfc64CatalogReplayConnectionRuntimePortsV1 {
   reannounce(peerId: string, contextGraphId: string, signal: AbortSignal): Promise<unknown>;
   replay(contextGraphId: string, demand: Rfc64CatalogReplayPeerDemandV1,
     signal: AbortSignal): Promise<Readonly<{ failed: number }>>;
-  /** Production schedules through the agent's abortable background owner. */
-  schedule?(work: (signal: AbortSignal) => Promise<void>): boolean;
+  /** Two stream keys plus one independent, abortable eligibility notifier. */
+  schedule(slot: 0 | 1 | 'deadline', work: (signal: AbortSignal) => Promise<void>): boolean;
+  wait(signal: AbortSignal, delayMs: number): Promise<void>;
   warn(message: string): void;
 }
 
@@ -39,13 +39,13 @@ interface PeerV1 {
   failed: number;
   windowStartedAt: number;
   windowStarted: number;
-  selectionOffset: number;
+  continuation: { after: string | null; through: string } | null;
+  readonly activated: Set<string>;
 }
 
 const DEFAULT_DEBOUNCE_MS = 60_000;
 const DEFAULT_MAX_PEERS = 256;
 const MAX_SCOPES_PER_PEER = 256;
-const MAX_ACTIVE_PEERS = 2;
 const MAX_SCOPES_PER_TURN = 8;
 const MAX_BACKOFF_MS = 10 * 60_000;
 
@@ -61,7 +61,8 @@ function retryDelay(peerId: string, scope: ScopeV1, debounceMs: number): number 
 
 /**
  * Owns reconnect replay admission, retained cooldowns and bounded physical work.
- * Completeness fences are acquired synchronously before network admission. Each
+ * Staged completeness fences are acquired synchronously before network admission;
+ * overflow selection resumes after that admission succeeds. Each
  * peer has one serial stream owner; at most two peers run on the node. Short
  * disconnects retain scope backoff, while bounded turns allow other peers to
  * progress. A new graph activation adds only that graph, even during a pass.
@@ -71,10 +72,8 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
   readonly #ports: Rfc64CatalogReplayConnectionRuntimePortsV1;
   readonly #debounceMs: number;
   readonly #maxPeers: number;
-  #scheduled = false;
   #closed = false;
   #suppressed = 0;
-  #wake: (() => void) | undefined;
 
   constructor(ports: Rfc64CatalogReplayConnectionRuntimePortsV1,
     debounceMs = DEFAULT_DEBOUNCE_MS, maxPeers = DEFAULT_MAX_PEERS) {
@@ -119,123 +118,167 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
   prepare(peerId: string, nowMs = Date.now(), contextGraphId?: string):
   Rfc64CatalogReplayConnectionReservationV1 | null {
     if (this.#closed) return null;
-    const selected = contextGraphId === undefined
-      ? [...new Set(this.#ports.selectContextGraphIds())].sort() : [contextGraphId];
+    const active = [...new Set(this.#ports.selectContextGraphIds())].sort();
+    const selected = contextGraphId === undefined ? active : active.includes(contextGraphId) ? [contextGraphId] : [];
     if (selected.length === 0) return null;
     let peer = this.#byPeer.get(peerId);
     if (peer === undefined) {
       if (this.#byPeer.size >= this.#maxPeers) {
         const idle = [...this.#byPeer.values()].filter(candidate => !candidate.active
+          && candidate.continuation === null && candidate.activated.size === 0
           && ![...candidate.scopes.values()].some(scope => scope.demand !== null))
           .sort((left, right) => left.lastUsedAt - right.lastUsedAt)[0];
         if (idle === undefined) { this.#suppressed++; return null; }
         this.#byPeer.delete(idle.peerId);
       }
       peer = { peerId, scopes: new Map(), active: false, lastUsedAt: nowMs,
-        started: 0, failed: 0, windowStartedAt: nowMs, windowStarted: 0, selectionOffset: 0 };
+        started: 0, failed: 0, windowStartedAt: nowMs, windowStarted: 0, continuation: null, activated: new Set() };
       this.#byPeer.set(peerId, peer);
     }
     peer.lastUsedAt = nowMs;
     const reservations: ScopeV1[] = [];
-    let firstDeferred: number | undefined;
-    const offset = contextGraphId === undefined ? peer.selectionOffset % selected.length : 0;
-    for (let index = 0; index < selected.length; index++) {
-      const selectedIndex = (offset + index) % selected.length;
-      const id = selected[selectedIndex];
-      let scope = peer.scopes.get(id);
-      if (scope === undefined) {
-        if (peer.scopes.size >= MAX_SCOPES_PER_PEER) {
-          const idle = [...peer.scopes.values()].find(candidate => candidate.demand === null
-            && candidate.eligibleAt <= nowMs);
-          if (idle === undefined) { firstDeferred ??= selectedIndex; continue; }
-          peer.scopes.delete(idle.contextGraphId);
-        }
-        scope = { contextGraphId: id, demand: null, admitted: false, failures: 0, eligibleAt: 0 };
-        peer.scopes.set(id, scope);
-      }
-      if (scope.demand !== null || scope.eligibleAt > nowMs) { this.#suppressed++; continue; }
+    const deferred: string[] = [];
+    let after: string | null = null;
+    for (const id of selected) {
+      const scope = this.#scope(peer, id, nowMs);
+      if (scope === null) { deferred.push(id); continue; }
+      if (deferred.length === 0) after = id;
+      if (scope.demand !== null) { this.#suppressed++; continue; }
       const demand = this.#ports.acquireFence(id, peerId);
       if (demand === null) continue;
       scope.demand = demand;
       reservations.push(scope);
     }
-    if (contextGraphId === undefined) peer.selectionOffset = firstDeferred ?? 0;
-    if (reservations.length === 0) return null;
+    if (reservations.length === 0 && deferred.length === 0) return null;
     let settled = false;
+    const release = (): void => {
+      for (const scope of reservations) { scope.demand?.release(); scope.demand = null; }
+    };
     return Object.freeze({
-      reject: () => {
-        if (settled) return;
-        settled = true;
-        for (const scope of reservations) {
-          scope.demand?.release();
-          scope.demand = null;
-        }
-      },
+      reject: () => { if (!settled) { settled = true; release(); } },
       admit: () => {
         if (settled) return;
         settled = true;
-        if (this.#closed) {
-          for (const scope of reservations) scope.demand?.release();
-          return;
-        }
+        if (this.#closed) { release(); return; }
         for (const scope of reservations) scope.admitted = true;
+        if (deferred.length > 0) {
+          if (contextGraphId === undefined) {
+            // Only a sorted cursor is retained, not a lease/array for every graph.
+            peer.continuation ??= { after, through: selected[selected.length - 1] };
+          } else peer.activated.add(contextGraphId);
+        }
         this.#schedule();
       },
     });
   }
 
+  #scope(peer: PeerV1, id: string, nowMs: number): ScopeV1 | null {
+    let scope = peer.scopes.get(id);
+    if (scope !== undefined) return scope;
+    if (peer.scopes.size >= MAX_SCOPES_PER_PEER) {
+      const idle = [...peer.scopes.values()].find(candidate => candidate.demand === null
+        && candidate.eligibleAt <= nowMs);
+      if (idle === undefined) return null;
+      peer.scopes.delete(idle.contextGraphId);
+    }
+    scope = { contextGraphId: id, demand: null, admitted: false, failures: 0, eligibleAt: 0 };
+    peer.scopes.set(id, scope);
+    return scope;
+  }
+
+  #continue(peer: PeerV1, now: number): void {
+    if (peer.continuation === null && peer.activated.size === 0) return;
+    const selected = [...new Set(this.#ports.selectContextGraphIds())].sort();
+    // Exact activation staging is bounded by the authoritative active graph set.
+    for (const id of peer.activated) {
+      if (!selected.includes(id)) { peer.activated.delete(id); continue; }
+      const scope = this.#scope(peer, id, now);
+      if (scope === null) break;
+      if (scope.demand === null) {
+        scope.demand = this.#ports.acquireFence(id, peer.peerId);
+        scope.admitted = scope.demand !== null;
+      }
+      peer.activated.delete(id);
+    }
+    const continuation = peer.continuation;
+    if (continuation === null) return;
+    for (const id of selected) {
+      if ((continuation.after !== null && id <= continuation.after) || id > continuation.through) continue;
+      const scope = this.#scope(peer, id, now);
+      if (scope === null) return;
+      if (scope.demand === null) {
+        scope.demand = this.#ports.acquireFence(id, peer.peerId);
+        scope.admitted = scope.demand !== null;
+      }
+      continuation.after = id;
+    }
+    peer.continuation = null;
+  }
+
+  #ready(peer: PeerV1, now: number): boolean {
+    return !peer.active && [...peer.scopes.values()].some(scope => scope.admitted
+      && scope.demand !== null && scope.eligibleAt <= now);
+  }
+
+  #nextDeadline(): number {
+    let deadline = Infinity;
+    const now = Date.now();
+    for (const peer of this.#byPeer.values()) {
+      for (const scope of peer.scopes.values()) {
+        if (scope.admitted && scope.demand !== null && scope.eligibleAt > now) {
+          deadline = Math.min(deadline, scope.eligibleAt);
+        }
+        if ((peer.continuation !== null || peer.activated.size > 0) && scope.demand === null) {
+          deadline = Math.min(deadline, Math.max(now, scope.eligibleAt));
+        }
+      }
+    }
+    return deadline;
+  }
+
 
   #schedule(): void {
     if (this.#closed) return;
-    if (this.#scheduled) { this.#wake?.(); return; }
-    this.#scheduled = true;
-    const work = async (signal: AbortSignal): Promise<void> => {
-      const runs = new Set<Promise<void>>();
-      const wake = (): void => { this.#wake?.(); };
-      signal.addEventListener('abort', wake, { once: true });
+    const worker = async (signal: AbortSignal): Promise<void> => {
+      try {
+        if (signal.aborted || this.#closed) return;
+        const now = Date.now();
+        for (const peer of this.#byPeer.values()) this.#continue(peer, now);
+        const peer = [...this.#byPeer.values()].find(candidate => this.#ready(candidate, now));
+        if (peer === undefined) return;
+        await this.#runTurn(peer, signal);
+        // Move a completed turn behind the other ready peers.
+        this.#byPeer.delete(peer.peerId); this.#byPeer.set(peer.peerId, peer);
+        if (!signal.aborted) this.#schedule();
+      } finally { if (signal.aborted) this.#retire(); }
+    };
+    for (const slot of [0, 1] as const) {
+      if (!this.#ports.schedule(slot, worker)) { this.#retire(); return; }
+    }
+    if (this.#nextDeadline() !== Infinity && !this.#ports.schedule('deadline', async signal => {
       try {
         while (!signal.aborted && !this.#closed) {
-          const peers = [...this.#byPeer.values()].filter(peer => !peer.active
-            && [...peer.scopes.values()].some(scope => scope.admitted && scope.demand !== null))
-            .slice(0, MAX_ACTIVE_PEERS - runs.size);
-          for (const peer of peers) {
-            let run!: Promise<void>;
-            run = this.#runTurn(peer, signal).finally(() => {
-              runs.delete(run);
-              this.#byPeer.delete(peer.peerId);
-              this.#byPeer.set(peer.peerId, peer);
-            });
-            runs.add(run);
-          }
-          if (runs.size === 0) return;
-          await Promise.race([...runs, new Promise<void>(resolve => { this.#wake = resolve; })]);
-          this.#wake = undefined;
+          const deadline = this.#nextDeadline();
+          if (deadline === Infinity) return;
+          // One owned notifier; stream slots never wait for future eligibility.
+          await this.#ports.wait(signal, Math.min(1_000, Math.max(1, deadline - Date.now())));
+          for (const peer of this.#byPeer.values()) this.#continue(peer, Date.now());
+          if ([...this.#byPeer.values()].some(peer => this.#ready(peer, Date.now()))) this.#schedule();
         }
-      } finally {
-        signal.removeEventListener('abort', wake);
-        this.#wake = undefined;
-        // Cancellation fences queued work, but retirement waits physical streams.
-        await Promise.allSettled(runs);
-        this.#scheduled = false;
-        if (signal.aborted || this.#closed) { this.#closed = true; this.reset(); }
-        else if ([...this.#byPeer.values()].some(peer => [...peer.scopes.values()]
-          .some(scope => scope.admitted && scope.demand !== null))) this.#schedule();
-      }
-    };
-    if (this.#ports.schedule === undefined) {
-      void work(new AbortController().signal);
-    } else if (!this.#ports.schedule(work)) {
-      this.#scheduled = false;
-      this.#closed = true;
-      this.reset();
-    }
+      } finally { if (signal.aborted) this.#retire(); }
+    })) this.#retire();
+  }
+
+  #retire(): void {
+    this.#closed = true;
+    if (![...this.#byPeer.values()].some(peer => peer.active)) this.reset();
   }
 
   async #runTurn(peer: PeerV1, signal: AbortSignal): Promise<void> {
     peer.active = true;
     try {
       const scopes = [...peer.scopes.values()].filter(scope => scope.admitted
-        && scope.demand !== null).slice(0, MAX_SCOPES_PER_TURN);
+        && scope.demand !== null && scope.eligibleAt <= Date.now()).slice(0, MAX_SCOPES_PER_TURN);
       for (const scope of scopes) {
         if (signal.aborted || this.#closed) return;
         const demand = scope.demand!;
@@ -269,26 +312,6 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
           scope.admitted = false;
         }
       }
-    } finally { peer.active = false; }
-  }
-}
-
-/** Translate the agent's request once into the replay owner's closed command. */
-export function createRfc64CatalogReplayRecoveryCommandV1(
-  scope: Readonly<{ contextGraphId: string; policyDigest: string; signal?: AbortSignal }>,
-  request: Readonly<
-    | { kind: 'connected-peers' }
-    | { kind: 'pending-recovery' }
-    | { kind: 'connection-demand'; replayDemand: Rfc64CatalogReplayPeerDemandV1 }
-  >,
-  connectedPeerIds: () => readonly string[],
-): Rfc64CatalogReplayRecoveryCommandV1 {
-  switch (request.kind) {
-    case 'connected-peers':
-      return { ...scope, kind: 'full-connected-peers', connectedPeerIds: connectedPeerIds() };
-    case 'pending-recovery':
-      return { ...scope, kind: 'pending-recovery' };
-    case 'connection-demand':
-      return { ...scope, kind: 'connection-demand', demand: request.replayDemand };
+    } finally { peer.active = false; if (this.#closed) this.#retire(); }
   }
 }

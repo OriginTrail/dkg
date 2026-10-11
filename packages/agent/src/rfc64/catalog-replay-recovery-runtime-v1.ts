@@ -59,23 +59,20 @@ export type Rfc64CatalogReplayPeerResultV1<Target> = Readonly<{
   status: 'local-unavailable';
 }>;
 
+export type Rfc64CatalogReplayRecoveryRequestV1 = Readonly<
+  | { kind: 'full-connected-peers' }
+  | { kind: 'pending-recovery' }
+  | { kind: 'connection-demand'; demand: Rfc64CatalogReplayPeerDemandV1 }
+>;
+
 /** Closed runtime commands; peer seeding and full-replay evidence cannot diverge. */
 export type Rfc64CatalogReplayRecoveryCommandV1 = Readonly<{
   readonly contextGraphId: string;
   readonly policyDigest: string;
   /** Lifecycle owner for peer transport, receiver drain, and parity handoff. */
   readonly signal?: AbortSignal;
-} & (
-  | {
-      readonly kind: 'full-connected-peers';
-      readonly connectedPeerIds: readonly string[];
-    }
-  | { readonly kind: 'pending-recovery' }
-  | {
-      readonly kind: 'connection-demand';
-      readonly demand: Rfc64CatalogReplayPeerDemandV1;
-    }
-)>;
+} & (Exclude<Rfc64CatalogReplayRecoveryRequestV1, { kind: 'full-connected-peers' }>
+  | { kind: 'full-connected-peers'; connectedPeerIds: readonly string[] })>;
 
 export interface Rfc64CatalogReplayRecoveryPortsV1<Target> {
   requestPeer(

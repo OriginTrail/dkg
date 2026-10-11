@@ -276,7 +276,11 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
         await joiner.router.send(demand.peerId, protocol, encoder.encode(id), { signal });
         return { failed: 0 };
       },
-      schedule: (work) => owner.scheduleKeyed('capacity-replay', work),
+      schedule: (slot, work) => owner.scheduleKeyed(`capacity-replay:${slot}`, work),
+      wait: async (signal, delay) => { await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, delay);
+        signal.addEventListener('abort', () => { clearTimeout(timer); reject(signal.reason); }, { once: true });
+      }); },
       warn: () => undefined,
     });
     try {

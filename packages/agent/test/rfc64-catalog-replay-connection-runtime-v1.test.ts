@@ -1,15 +1,35 @@
-import { describe, expect, it, vi } from 'vitest';
-import { createRfc64CatalogReplayRecoveryCommandV1 } from '../src/rfc64/catalog-replay-connection-runtime-v1.js';
-import { Rfc64CatalogReplayConnectionRuntimeV1 } from
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Rfc64CatalogReplayConnectionRuntimeV1, type Rfc64CatalogReplayConnectionRuntimePortsV1 } from
   '../src/rfc64/catalog-replay-connection-runtime-v1.js';
 import { Rfc64BackgroundWorkDispatcherV1 } from '../src/rfc64/background-work-dispatcher-v1.js';
+
+const owners: Rfc64BackgroundWorkDispatcherV1[] = [];
+afterEach(async () => {
+  await Promise.all(owners.splice(0).map(owner => owner.closeAndDrain()));
+  vi.useRealTimers();
+});
+
+function makeRuntime(ports: Omit<Rfc64CatalogReplayConnectionRuntimePortsV1, 'schedule' | 'wait'>
+  & Partial<Pick<Rfc64CatalogReplayConnectionRuntimePortsV1, 'schedule' | 'wait'>>,
+  debounceMs?: number, maxPeers?: number): Rfc64CatalogReplayConnectionRuntimeV1 {
+  const owner = new Rfc64BackgroundWorkDispatcherV1(); owners.push(owner);
+  return new Rfc64CatalogReplayConnectionRuntimeV1({
+    schedule: (slot, work) => owner.scheduleKeyed(`replay:${slot}`, work),
+    wait: (signal, delay) => new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, delay);
+      const abort = () => { clearTimeout(timer); reject(signal.reason); };
+      signal.addEventListener('abort', abort, { once: true });
+    }),
+    ...ports,
+  }, debounceMs, maxPeers);
+}
 
 describe('RFC-64 catalog replay connection debounce', () => {
   it('bounds a 59-graph reconnect burst to one stream per peer and two peers per node', async () => {
     let release!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });
     const replay = vi.fn(async () => { await held; return { failed: 0 }; });
-    const runtime = new Rfc64CatalogReplayConnectionRuntimeV1({
+    const runtime = makeRuntime({
       selectContextGraphIds: () => Array.from({ length: 59 }, (_, i) => `cg-${i}`),
       acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release: vi.fn() }),
       reannounce: vi.fn(async () => undefined), replay, warn: vi.fn(),
@@ -30,23 +50,33 @@ describe('RFC-64 catalog replay connection debounce', () => {
     }
   });
 
-  it('retains the completed replay cooldown across a short disconnect', async () => {
+  it('retains reconnect demand and executes only at the completed cooldown boundary', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(10_000);
+    const owner = new Rfc64BackgroundWorkDispatcherV1(); owners.push(owner);
     const replay = vi.fn(async () => ({ failed: 0 }));
-    const runtime = new Rfc64CatalogReplayConnectionRuntimeV1({
+    const runtime = makeRuntime({
       selectContextGraphIds: () => ['cg'],
       acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release: vi.fn() }),
       reannounce: vi.fn(async () => undefined), replay, warn: vi.fn(),
+      schedule: (slot, work) => owner.scheduleKeyed(`replay:${slot}`, work),
     }, 100);
-    runtime.prepare('peer', 0)?.admit();
-    await vi.waitFor(() => expect(replay).toHaveBeenCalledTimes(1));
+    runtime.prepare('peer')!.admit();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(runtime.status().pendingScopes).toBe(0);
     runtime.peerDisconnected('peer');
-    expect(runtime.prepare('peer', 1)).toBeNull();
+    const deferred = runtime.prepare('peer');
+    expect(deferred).not.toBeNull(); deferred?.admit();
+    await vi.advanceTimersByTimeAsync(99);
+    expect(replay).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(replay).toHaveBeenCalledTimes(2);
+    expect(runtime.status().pendingScopes).toBe(0);
   });
 
   it('replays only the newly activated graph without re-announcing unrelated scopes', async () => {
     const replay = vi.fn(async () => ({ failed: 0 }));
     const reannounce = vi.fn(async () => undefined);
-    const runtime = new Rfc64CatalogReplayConnectionRuntimeV1({
+    const runtime = makeRuntime({
       selectContextGraphIds: () => ['old-cg', 'new-cg'],
       acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release: vi.fn() }),
       reannounce, replay, warn: vi.fn(),
@@ -59,7 +89,7 @@ describe('RFC-64 catalog replay connection debounce', () => {
 
   it('evicts only the oldest idle peer when the table reaches capacity', async () => {
     const replay = vi.fn(async () => ({ failed: 0 }));
-    const runtime = new Rfc64CatalogReplayConnectionRuntimeV1({
+    const runtime = makeRuntime({
       selectContextGraphIds: () => ['public-cg'],
       acquireFence: (_contextGraphId, peerId) => ({
         peerId,
@@ -78,7 +108,8 @@ describe('RFC-64 catalog replay connection debounce', () => {
     runtime.prepare('peer-c', 2)?.admit();
     await vi.waitFor(() => expect(runtime.status().pendingScopes).toBe(0));
 
-    expect(runtime.prepare('peer-b', 3)).toBeNull();
+    const coolingB = runtime.prepare('peer-b', 3);
+    expect(coolingB).not.toBeNull(); coolingB?.reject();
     const retriedA = runtime.prepare('peer-a', 3);
     expect(retriedA).not.toBeNull();
     retriedA?.reject();
@@ -106,7 +137,7 @@ describe('catalog reconnect work ownership', () => {
     const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
     const release = vi.fn();
     const replay = vi.fn(async () => ({ failed: 1 }));
-    const runtime = new Rfc64CatalogReplayConnectionRuntimeV1({
+    const runtime = makeRuntime({
       selectContextGraphIds: () => ['cg'],
       acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release }),
       reannounce: async () => undefined, replay, warn: vi.fn(),
@@ -118,17 +149,22 @@ describe('catalog reconnect work ownership', () => {
         await vi.waitFor(() => expect(runtime.status().pendingScopes).toBe(0));
         const status = runtime.status().peers[0];
         const delay = status.nextEligibleAt - now;
-        expect(delay).toBeGreaterThanOrEqual(previousDelay);
+        const base = Math.min(600_000, 60_000 * 2 ** (attempt - 1));
+        expect(delay).toBeGreaterThanOrEqual(base);
+        expect(delay).toBeLessThanOrEqual(Math.min(600_000, Math.floor(base * 1.25)));
+        if (attempt <= 4) expect(delay).toBeGreaterThan(previousDelay);
+        if (attempt >= 5) expect(delay).toBe(600_000);
         expect(delay).toBeLessThanOrEqual(600_000);
         expect(status.failed).toBe(attempt);
         expect(status.startedLastMinute).toBe(1);
         runtime.peerDisconnected('failed-peer');
-        expect(runtime.prepare('failed-peer', status.nextEligibleAt - 1)).toBeNull();
+        const cooling = runtime.prepare('failed-peer', status.nextEligibleAt - 1);
+        expect(cooling).not.toBeNull(); cooling?.reject();
         previousDelay = delay;
         now = status.nextEligibleAt;
       }
       expect(replay).toHaveBeenCalledTimes(8);
-      expect(release).toHaveBeenCalledTimes(8);
+      expect(release).toHaveBeenCalledTimes(16);
       now += 60_000;
       expect(runtime.status().peers[0].startedLastMinute).toBe(0);
     } finally { clock.mockRestore(); runtime.reset(); }
@@ -142,7 +178,7 @@ describe('catalog reconnect work ownership', () => {
       if (cg === 'old') await held.promise;
       return { failed: 0 };
     });
-    const runtime = new Rfc64CatalogReplayConnectionRuntimeV1({
+    const runtime = makeRuntime({
       selectContextGraphIds: () => ['old', 'new'],
       acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release: vi.fn() }),
       reannounce: async () => undefined, replay, warn: vi.fn(),
@@ -160,52 +196,30 @@ describe('catalog reconnect work ownership', () => {
     } finally { held.resolve(); }
   });
 
-  it('hands an admission made during physical retirement to the background owner', async () => {
-    const retiring = deferred();
-    const drain = deferred();
-    const allSettled = Promise.allSettled.bind(Promise);
-    let intercepted = false;
-    const retirement = vi.spyOn(Promise, 'allSettled').mockImplementation((values) => {
-      const pending = [...values];
-      if (!intercepted && pending.length === 0) {
-        intercepted = true;
-        retiring.resolve();
-        return drain.promise.then(() => allSettled(pending));
-      }
-      return allSettled(pending);
-    });
-    const owner = new Rfc64BackgroundWorkDispatcherV1();
+  it('hands a completion-time admission to the keyed background owner', async () => {
     const release = vi.fn();
-    const replay = vi.fn(async () => ({ failed: 0 }));
-    const runtime = new Rfc64CatalogReplayConnectionRuntimeV1({
+    const calls: string[] = [];
+    let next: Rfc64CatalogReplayConnectionRuntimeV1;
+    next = makeRuntime({
       selectContextGraphIds: () => ['old', 'new'],
       acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release }),
-      reannounce: async () => undefined, replay, warn: vi.fn(),
-      schedule: (work) => owner.scheduleKeyed('connection-replay', work),
+      reannounce: async () => undefined,
+      replay: async cg => {
+        calls.push(cg);
+        if (cg === 'old') queueMicrotask(() => next.prepare('peer', Date.now(), 'new')?.admit());
+        return { failed: 0 };
+      }, warn: vi.fn(),
     });
-    try {
-      runtime.prepare('peer', Date.now(), 'old')?.admit();
-      await retiring.promise;
-      const admitted = runtime.prepare('peer', Date.now(), 'new');
-      expect(admitted).not.toBeNull();
-      admitted!.admit();
-      expect(replay.mock.calls.map((call) => call[0])).toEqual(['old']);
-      drain.resolve();
-      await owner.whenIdle();
-      expect(replay.mock.calls.map((call) => call[0])).toEqual(['old', 'new']);
-      expect(release).toHaveBeenCalledTimes(2);
-      expect(runtime.status().pendingScopes).toBe(0);
-    } finally {
-      drain.resolve();
-      retirement.mockRestore();
-      await owner.closeAndDrain();
-    }
+    next.prepare('peer', Date.now(), 'old')!.admit();
+    await vi.waitFor(() => expect(calls).toEqual(['old', 'new']));
+    expect(release).toHaveBeenCalledTimes(2);
+    expect(next.status().pendingScopes).toBe(0);
   });
 
   it('does not evict an active or queued peer at capacity', async () => {
     const held = deferred();
     const release = vi.fn();
-    const runtime = new Rfc64CatalogReplayConnectionRuntimeV1({
+    const runtime = makeRuntime({
       selectContextGraphIds: () => ['cg'],
       acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release }),
       reannounce: async () => undefined,
@@ -226,7 +240,7 @@ describe('catalog reconnect work ownership', () => {
     const release = vi.fn();
     const acquireFence = vi.fn((_cg: string, peerId: string) =>
       peerId === 'none' ? null : { peerId, generation: 1, release });
-    const runtime = new Rfc64CatalogReplayConnectionRuntimeV1({
+    const runtime = makeRuntime({
       selectContextGraphIds: () => ['cg'], acquireFence,
       reannounce: vi.fn(), replay: vi.fn(), warn: vi.fn(),
     });
@@ -238,7 +252,7 @@ describe('catalog reconnect work ownership', () => {
     expect(retry).not.toBeNull();
     retry?.reject();
     expect(runtime.status().pendingScopes).toBe(0);
-    const empty = new Rfc64CatalogReplayConnectionRuntimeV1({
+    const empty = makeRuntime({
       selectContextGraphIds: () => [], acquireFence,
       reannounce: vi.fn(), replay: vi.fn(), warn: vi.fn(),
     });
@@ -247,34 +261,29 @@ describe('catalog reconnect work ownership', () => {
 
   it('physically drains a held stream on cancellation and fences queued scopes', async () => {
     const held = deferred();
-    const controller = new AbortController();
-    let work: ((signal: AbortSignal) => Promise<void>) | undefined;
+    const owner = new Rfc64BackgroundWorkDispatcherV1();
     const release = vi.fn();
     const replay = vi.fn(async () => { await held.promise; return { failed: 0 }; });
-    const runtime = new Rfc64CatalogReplayConnectionRuntimeV1({
+    const next = makeRuntime({
       selectContextGraphIds: () => ['a', 'b'],
       acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release }),
       reannounce: async () => undefined, replay, warn: vi.fn(),
-      schedule: (next) => { work = next; return true; },
+      schedule: (slot, work) => owner.scheduleKeyed(`cancel:${slot}`, work),
     });
-    runtime.prepare('peer')?.admit();
-    let drained = false;
-    const drain = work!(controller.signal).then(() => { drained = true; });
+    next.prepare('peer')!.admit();
     await vi.waitFor(() => expect(replay).toHaveBeenCalledTimes(1));
-    controller.abort();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(drained).toBe(false);
-    expect(release).not.toHaveBeenCalled();
+    let drained = false;
+    const drain = owner.closeAndDrain().then(() => { drained = true; });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(drained).toBe(false); expect(release).not.toHaveBeenCalled();
     held.resolve(); await drain;
-    expect(replay).toHaveBeenCalledTimes(1);
-    expect(release).toHaveBeenCalledTimes(2);
-    expect(runtime.prepare('peer')).toBeNull();
-    expect(runtime.status().pendingScopes).toBe(0);
+    expect(replay).toHaveBeenCalledTimes(1); expect(release).toHaveBeenCalledTimes(2);
+    expect(next.prepare('peer')).toBeNull(); expect(next.status().pendingScopes).toBe(0);
   });
 
   it('releases all fences when the background owner refuses admission', () => {
     const release = vi.fn();
-    const runtime = new Rfc64CatalogReplayConnectionRuntimeV1({
+    const runtime = makeRuntime({
       selectContextGraphIds: () => ['a', 'b'],
       acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release }),
       reannounce: vi.fn(), replay: vi.fn(), warn: vi.fn(), schedule: () => false,
@@ -287,7 +296,7 @@ describe('catalog reconnect work ownership', () => {
   it('still requests the authoritative catalog after a compatibility announcement fails', async () => {
     const warn = vi.fn();
     const replay = vi.fn(async () => { throw new Error('catalog unavailable'); });
-    const runtime = new Rfc64CatalogReplayConnectionRuntimeV1({
+    const runtime = makeRuntime({
       selectContextGraphIds: () => ['cg'],
       acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release: vi.fn() }),
       reannounce: async () => { throw new Error('legacy unavailable'); }, replay, warn,
@@ -300,42 +309,99 @@ describe('catalog reconnect work ownership', () => {
     expect(warn.mock.calls.flat().join(' ')).toContain('catalog unavailable');
   });
 
-  it('rotates bounded scope state so graphs beyond the table limit are not starved', async () => {
-    let now = 10_000;
-    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+  it('continues all 257 graphs after one admitted connection without another prepare', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(10_000);
+    const owner = new Rfc64BackgroundWorkDispatcherV1(); owners.push(owner);
     const seen = new Set<string>();
-    const runtime = new Rfc64CatalogReplayConnectionRuntimeV1({
+    const runtime = makeRuntime({
       selectContextGraphIds: () => Array.from({ length: 257 }, (_, i) => `cg-${String(i).padStart(3, '0')}`),
       acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release: vi.fn() }),
       reannounce: async () => undefined,
-      replay: async (cg) => { seen.add(cg); return { failed: 0 }; }, warn: vi.fn(),
+      replay: async cg => { seen.add(cg); return { failed: 0 }; }, warn: vi.fn(),
+      schedule: (slot, work) => owner.scheduleKeyed(`replay:${slot}`, work),
     }, 100);
-    try {
-      runtime.prepare('peer', now)?.admit();
-      await vi.waitFor(() => expect(runtime.status().pendingScopes).toBe(0));
-      expect(seen.size).toBe(256);
-      now += 100;
-      runtime.prepare('peer', now)?.admit();
-      await vi.waitFor(() => expect(runtime.status().pendingScopes).toBe(0));
-      expect(seen.size).toBe(257);
-    } finally { clock.mockRestore(); runtime.reset(); }
+    runtime.prepare('peer')!.admit();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(seen.size).toBe(256);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(seen.size).toBe(257);
+    expect(runtime.status().pendingScopes).toBe(0);
   });
 
-  it('keeps command-specific peer selection lazy and preserves the exact fence and signal', () => {
-    const connected = vi.fn(() => ['peer']);
-    const signal = new AbortController().signal;
-    const scope = { contextGraphId: 'cg', policyDigest: 'digest', signal };
-    const demand = { peerId: 'peer', generation: 4 };
-    expect(createRfc64CatalogReplayRecoveryCommandV1(scope,
-      { kind: 'pending-recovery' }, connected)).toEqual({ ...scope, kind: 'pending-recovery' });
-    const command = createRfc64CatalogReplayRecoveryCommandV1(scope,
-      { kind: 'connection-demand', replayDemand: demand }, connected);
-    expect(command).toEqual({ ...scope, kind: 'connection-demand', demand });
-    if (command.kind === 'connection-demand') expect(command.demand).toBe(demand);
-    expect(connected).not.toHaveBeenCalled();
-    expect(createRfc64CatalogReplayRecoveryCommandV1(scope,
-      { kind: 'connected-peers' }, connected)).toEqual({ ...scope,
-      kind: 'full-connected-peers', connectedPeerIds: ['peer'] });
-    expect(connected).toHaveBeenCalledTimes(1);
+  it('runs a ready third peer while two peers wait for their cooldown deadlines', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(10_000);
+    const calls: string[] = [];
+    const next = makeRuntime({ selectContextGraphIds: () => ['cg'],
+      acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release: vi.fn() }),
+      reannounce: async () => undefined,
+      replay: async (_cg, demand) => { calls.push(demand.peerId); return { failed: 0 }; }, warn: vi.fn(),
+    }, 100);
+    for (const peer of ['a', 'b']) next.prepare(peer)!.admit();
+    await vi.advanceTimersByTimeAsync(0);
+    for (const peer of ['a', 'b']) next.prepare(peer)!.admit();
+    next.prepare('c')!.admit();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toEqual(['a', 'b', 'c']);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(calls).toEqual(['a', 'b', 'c', 'a', 'b']);
   });
+
+  it('retains exact activation overflow without replaying unrelated retained scopes', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(10_000);
+    const selected = Array.from({ length: 256 }, (_, i) => `cg-${String(i).padStart(3, '0')}`);
+    const calls: string[] = [];
+    const next = makeRuntime({ selectContextGraphIds: () => selected,
+      acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release: vi.fn() }),
+      reannounce: async () => undefined,
+      replay: async cg => { calls.push(cg); return { failed: 0 }; }, warn: vi.fn(),
+    }, 100);
+    next.prepare('peer')!.admit(); await vi.advanceTimersByTimeAsync(0);
+    selected.push('new-cg'); next.prepare('peer', Date.now(), 'new-cg')!.admit();
+    await vi.advanceTimersByTimeAsync(99); expect(calls).toHaveLength(256);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(calls.slice(256)).toEqual(['new-cg']);
+    expect(next.status().pendingScopes).toBe(0);
+  });
+  it('retires both stream keys and the eligibility notifier through one dispatcher shutdown', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(10_000);
+    const owner = new Rfc64BackgroundWorkDispatcherV1();
+    const held = deferred(); const signals = new Map<string | number, AbortSignal>();
+    const release = vi.fn();
+    const next = makeRuntime({ selectContextGraphIds: () => ['cg'],
+      acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release }),
+      reannounce: async () => undefined,
+      replay: async (_cg, demand) => { if (demand.peerId === 'held') await held.promise; return { failed: 0 }; },
+      warn: vi.fn(), schedule: (slot, work) => owner.scheduleKeyed(`shutdown:${slot}`, signal => {
+        signals.set(slot, signal); return work(signal);
+      }),
+    }, 100);
+    next.prepare('cooling')!.admit(); await vi.advanceTimersByTimeAsync(0);
+    next.prepare('cooling')!.admit(); next.prepare('held')!.admit();
+    await vi.advanceTimersByTimeAsync(0);
+    expect([...signals.keys()].sort()).toEqual([0, 1, 'deadline']);
+    let drained = false;
+    const drain = owner.closeAndDrain().then(() => { drained = true; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect([...signals.values()].every(signal => signal.aborted)).toBe(true);
+    expect(drained).toBe(false);
+    held.resolve(); await drain;
+    expect(next.status().pendingScopes).toBe(0);
+    expect(next.prepare('held')).toBeNull(); expect(release).toHaveBeenCalledTimes(3);
+  });
+
+  it('prunes a deferred activation when authoritative graph membership ends', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(10_000);
+    const selected = Array.from({ length: 256 }, (_, i) => `cg-${i}`);
+    const calls: string[] = [];
+    const next = makeRuntime({ selectContextGraphIds: () => selected,
+      acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release: vi.fn() }),
+      reannounce: async () => undefined,
+      replay: async cg => { calls.push(cg); return { failed: 0 }; }, warn: vi.fn(),
+    }, 100);
+    next.prepare('peer')!.admit(); await vi.advanceTimersByTimeAsync(0);
+    selected.push('removed'); next.prepare('peer', Date.now(), 'removed')!.admit();
+    selected.pop(); await vi.advanceTimersByTimeAsync(100);
+    expect(calls).toHaveLength(256); expect(next.prepare('peer', Date.now(), 'removed')).toBeNull();
+  });
+
 });
