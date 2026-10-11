@@ -49,7 +49,7 @@ let core: EVMChainAdapter;
 let contextGraphId: bigint;
 let kaNumber = 0n;
 
-function addressesOf(wallets: Wallet[]): string[] {
+function addressesOf(wallets: ReadonlyArray<{ address: string }>): string[] {
   return wallets.map((wallet) => wallet.address);
 }
 

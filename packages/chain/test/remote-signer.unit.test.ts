@@ -558,7 +558,7 @@ describe('remote signer failures are final for the transaction path', () => {
 describe('EVMChainAdapter with external signers', () => {
   const base = { rpcUrl: 'http://127.0.0.1:1', hubAddress: '0x00000000000000000000000000000000000000d4', chainId: 'evm:31337' };
 
-  it('uses the signers as its operational pool and exposes no private key', async () => {
+  it('uses the external signers as its operational accounts and exposes no private key', async () => {
     const signer = await fakeSigner();
     const { operational } = await connectRemoteSigners({ url: signer.url, authToken: TOKEN });
     const adapter = new EVMChainAdapter({ ...base, signers: operational, allowNoAdminSigner: true });

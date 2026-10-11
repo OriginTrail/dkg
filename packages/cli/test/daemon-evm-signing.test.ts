@@ -55,7 +55,7 @@ async function tokenFiles(dir: string): Promise<{ payer: string; author: string 
 describe('daemon EVM signing', () => {
   it('keeps the local wallets.json behaviour when no signer is configured', async () => {
     const dir = await tempDir();
-    const signing = await resolveDaemonEvmSigning({ config: {}, chainType: 'evm', dataDir: dir, log: () => {} });
+    const signing = await resolveDaemonEvmSigning({ config: { nodeRole: 'edge' }, chainType: 'evm', dataDir: dir, log: () => {} });
     expect(signing.mode).toBe('local');
     expect(existsSync(join(dir, 'wallets.json'))).toBe(true);
     if (signing.mode !== 'local') return;
@@ -103,13 +103,13 @@ describe('daemon EVM signing', () => {
       config: { nodeRole: 'core', chain: { signer } }, chainType: 'evm', dataDir: dir, log: () => {},
     })).rejects.toThrow(/edge nodes only/);
     await expect(resolveDaemonEvmSigning({
-      config: { chain: { signer } }, chainType: 'mock', dataDir: dir, log: () => {},
+      config: { nodeRole: 'edge', chain: { signer } }, chainType: 'mock', dataDir: dir, log: () => {},
     })).rejects.toThrow(/requires an EVM chain/);
     await expect(resolveDaemonEvmSigning({
-      config: { chain: { signer }, publisher: { enabled: true } }, chainType: 'evm', dataDir: dir, log: () => {},
+      config: { nodeRole: 'edge', chain: { signer }, publisher: { enabled: true } }, chainType: 'evm', dataDir: dir, log: () => {},
     })).rejects.toThrow(/publisher\.enabled/);
     await expect(resolveDaemonEvmSigning({
-      config: { chain: { signer: { type: 'remote' } as never } }, chainType: 'evm', dataDir: dir, log: () => {},
+      config: { nodeRole: 'edge', chain: { signer: { type: 'remote' } as never } }, chainType: 'evm', dataDir: dir, log: () => {},
     })).rejects.toThrow(/set url or socketPath/);
     expect(existsSync(join(dir, 'wallets.json'))).toBe(false);
   });
@@ -117,7 +117,7 @@ describe('daemon EVM signing', () => {
   it('fails startup when the external signer cannot be reached', async () => {
     const dir = await tempDir();
     await expect(resolveDaemonEvmSigning({
-      config: { chain: { signer: { type: 'remote', socketPath: join(dir, 'absent.sock') } } },
+      config: { nodeRole: 'edge', chain: { signer: { type: 'remote', socketPath: join(dir, 'absent.sock') } } },
       chainType: 'evm',
       dataDir: dir,
       log: () => {},

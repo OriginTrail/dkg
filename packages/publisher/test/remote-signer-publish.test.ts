@@ -36,7 +36,7 @@ let snapshotId: string;
 let fake: FakeSigner;
 let remote: RemoteSigners;
 let chain: EVMChainAdapter;
-let core: EVMChainAdapter;
+let core: ReturnType<typeof createEVMAdapter>;
 let contextGraphId: string;
 let kav10Address: string;
 
