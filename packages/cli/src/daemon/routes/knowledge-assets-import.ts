@@ -39,7 +39,6 @@ import {
   safeParseJson,
   safeDecodeURIComponent,
   validateOptionalSubGraphName,
-  validateRequiredContextGraphId,
   normalizeContextGraphIdOrUri,
   resolveRequiredWriteContextGraphId,
   oversizedRdfLiteralResponseBody,
