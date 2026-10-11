@@ -255,8 +255,6 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
   private readonly onSlowQuery?: (event: SparqlHttpSlowQueryEvent) => void;
   private readonly workLifecycle: AbortableStoreWorkLifecycle;
   private readonly managedAbandonedWorkRecovery: ManagedWorkRecoveryCoordinatorV1;
-  private activeStoreOperations = 0;
-  private retainedManagedWorkPending = false;
   private managedBusy = false;
   private listGraphsCache: string[] | null = null;
   private listGraphsCachedAt = 0;
@@ -299,8 +297,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
         this.managedActivityLease = null;
       },
       onActivityChange: (activeOperations) => {
-        this.activeStoreOperations = activeOperations;
-        this.reportManagedRuntimeActivity(managedRuntimeHooks);
+        this.reportManagedRuntimeActivity(managedRuntimeHooks, activeOperations > 0);
       },
     });
     this.consistencyProfile = this.managedOxigraph
@@ -326,10 +323,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
             requestRecovery: managedRuntimeHooks?.requestRecovery,
           }
         : undefined),
-      onPendingChange: (pending) => {
-        this.retainedManagedWorkPending = pending;
-        this.reportManagedRuntimeActivity(managedRuntimeHooks);
-      },
+      retainActivity: () => this.workLifecycle.retainActivity(),
     });
     this.logicalMutationScope = new SparqlHttpLogicalMutationScopeV1({
       lifecycle: this.workLifecycle, readState: () => this.readRecoveryState(),
@@ -355,10 +349,9 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
   }
 
   private reportManagedRuntimeActivity(
-    hooks: Readonly<ManagedOxigraphRuntimeHooksV1> | undefined,
+    hooks: Readonly<ManagedOxigraphRuntimeHooksV1> | undefined, busy: boolean,
   ): void {
     try {
-      const busy = this.activeStoreOperations > 0 || this.retainedManagedWorkPending;
       if (busy === this.managedBusy) return;
       this.managedBusy = busy;
       this.managedActivityLease ??= this.openManagedActivityLease(hooks);

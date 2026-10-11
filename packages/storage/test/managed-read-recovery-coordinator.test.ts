@@ -8,14 +8,42 @@ import { normalizeManagedSparqlRecoveryV1, type ManagedSparqlRecoverySourceV1 } 
 /** Drive both historical input shapes through the store boundary's one protocol. */
 function createCoordinator(options: Omit<ManagedWorkRecoveryCoordinatorOptionsV1, 'capability'> & {
   readonly capability?: ManagedSparqlRecoverySourceV1;
+  readonly onPendingChange?: (pending: boolean) => void;
 }): ManagedWorkRecoveryCoordinatorV1 {
-  return new ManagedWorkRecoveryCoordinatorV1({ ...options, capability: normalizeManagedSparqlRecoveryV1(options.capability) });
+  let activities = 0;
+  return new ManagedWorkRecoveryCoordinatorV1({ ...options,
+    capability: normalizeManagedSparqlRecoveryV1(options.capability),
+    retainActivity: () => {
+      if (activities++ === 0) options.onPendingChange?.(true);
+      return { release() { if (--activities === 0) options.onPendingChange?.(false); } };
+    },
+  });
 }
 
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
 describe('ManagedWorkRecoveryCoordinatorV1', () => {
+  it('releases confirmed work even when its observer disposer throws and closes for reuse', () => {
+    const activity = vi.fn();
+    let observe!: (phase: ManagedOxigraphRecoveryPhaseV1) => void;
+    const state = { recovering: false, generation: 0 };
+    const coordinator = createCoordinator({ now: () => Date.now(), onPendingChange: activity,
+      capability: { readState: () => state, requestRecovery: generation => ({ generation,
+        subscribe(callback) { observe = callback; callback('signalled'); return () => { throw new Error('dispose'); }; },
+      }) },
+    });
+    coordinator.clientTimedOut('update', Date.now(), coordinator.begin(state));
+    expect(activity.mock.calls).toEqual([[true]]);
+    expect(() => observe('terminated')).not.toThrow();
+    expect(activity.mock.calls).toEqual([[true], [false]]);
+    coordinator.close();
+    const retained = coordinator.retain('query', Date.now() + 1000, coordinator.begin(state));
+    expect(retained).not.toBeNull();
+    coordinator.close();
+    expect(activity.mock.calls).toEqual([[true], [false], [true], [false]]);
+  });
+
   it.each(['legacy', 'modern'] as const)('keeps %s untracked timeout notification separate from completion', protocol => {
     const recover = vi.fn();
     const requestRecovery = vi.fn();

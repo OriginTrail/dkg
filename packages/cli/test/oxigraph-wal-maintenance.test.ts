@@ -56,6 +56,37 @@ function controlledCoordinator(overrides: {
 }
 
 describe('Oxigraph WAL maintenance coordinator', () => {
+  it('accepts a confirmed independent reopen while maintenance is draining', () => {
+    let walBytes = 101;
+    const request = vi.fn();
+    const fixture = controlledCoordinator({ measureRetainedWalBytes: () => walBytes, onRequest: request });
+    const activity = fixture.coordinator.registerActivity();
+    fixture.setServerAvailable(true);
+    activity.report(true);
+    fixture.tick();
+    expect(fixture.coordinator.admissionsPaused()).toBe(true);
+    // Another supervisor recovery reclaims the old store before maintenance
+    // has requested a handle of its own. Only its confirmed reopen satisfies it.
+    fixture.setServerAvailable(false);
+    fixture.coordinator.serverLifecycleChanged();
+    expect(fixture.coordinator.admissionsPaused()).toBe(true);
+    walBytes = 0;
+    activity.report(false);
+    fixture.setNow(20);
+    fixture.setServerAvailable(true);
+    fixture.coordinator.serverLifecycleChanged('confirmed-reopen');
+    expect(fixture.coordinator.admissionsPaused()).toBe(false);
+    fixture.setNow(100); fixture.tick();
+    expect(request).not.toHaveBeenCalled();
+    // The confirmed reopen starts cooldown even if WAL rises again meanwhile.
+    walBytes = 101;
+    fixture.setNow(119); fixture.tick();
+    expect(fixture.coordinator.admissionsPaused()).toBe(false);
+    fixture.setNow(120); fixture.tick();
+    expect(request).toHaveBeenCalledOnce();
+    activity.dispose(); fixture.coordinator.stop();
+  });
+
   it('drains abandoned work after two completed spontaneous recoveries before its original deadline', async () => {
     vi.useFakeTimers();
     const startedAt = Date.now();
@@ -71,7 +102,7 @@ describe('Oxigraph WAL maintenance coordinator', () => {
     });
     const activity = wal.registerActivity();
     const pending = vi.fn((busy: boolean) => activity.report(busy));
-    const recovery = new ManagedWorkRecoveryCoordinatorV1({ now: () => Date.now(), onPendingChange: pending,
+    const recovery = new ManagedWorkRecoveryCoordinatorV1({ now: () => Date.now(), retainActivity: () => { pending(true); return { release() { pending(false); } }; },
       capability: normalizeManagedSparqlRecoveryV1({ readState: () => state,
         requestRecovery: (generation, operation) => progress.request(generation, operation) }) });
     try {

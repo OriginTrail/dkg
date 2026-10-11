@@ -477,7 +477,9 @@ export async function startOxigraphServer(
   // Oxigraph itself.
   const commitReady = (oxigraph: OxigraphLaunchHandle, listenerPid: number, generation: number): void => {
     setLifecycle({ phase: 'ready', oxigraph, listenerPid, generation });
-    if (recoveryProgress.phase === 'terminated') recoveryProgress.publish('reopened');
+    if (recoveryProgress.phase === 'terminated' && recoveryProgress.publish('reopened')) {
+      walMaintenance.serverLifecycleChanged('confirmed-reopen');
+    }
     restarts = 0;
     // A store count requested while the child was down failed and is cached
     // as unreachable; drop it now that the child is healthy, or /api/status

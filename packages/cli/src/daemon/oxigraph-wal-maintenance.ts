@@ -31,7 +31,7 @@ export interface OxigraphWalMaintenanceActivityLease {
 export interface OxigraphWalMaintenanceCoordinator {
   registerActivity(): OxigraphWalMaintenanceActivityLease;
   admissionsPaused(): boolean;
-  serverLifecycleChanged(): void;
+  serverLifecycleChanged(completion?: 'confirmed-reopen'): void;
   stop(): void;
 }
 
@@ -154,8 +154,14 @@ export function createOxigraphWalMaintenanceCoordinator(
       return !stopped && maintenancePending;
     },
     // Cancellation and reopen arrive through the generation-bound handle.
-    serverLifecycleChanged(): void {
+    serverLifecycleChanged(completion?: 'confirmed-reopen'): void {
       if (stopped) return;
+      // Any confirmed supervised reopen has reclaimed the retained WAL,
+      // including a crash or client-timeout recovery during maintenance drain.
+      if (completion === 'confirmed-reopen') {
+        lastRestartAt = now(); maintenancePending = false;
+        recoverySubscription?.(); recoverySubscription = undefined;
+      }
       refreshIdleClock(true);
     },
     stop(): void {

@@ -43,6 +43,38 @@ function pidIsGone(pid: number): boolean {
 }
 
 describe('startOxigraphServer WAL-aware readiness (GH#1400)', () => {
+  it.each(['timeout', 'crash'] as const)('clears a draining WAL pause after %s recovery without restarting its replacement', async cause => {
+    const port = await freePort();
+    const location = await mkdtemp(join(tmpdir(), 'oxi-wal-independent-'));
+    let walBytes = 101;
+    const lines: string[] = [];
+    const handle = await startOxigraphServer({ binaryPath: fixture.binaryPath, location, port,
+      log: line => lines.push(line), readyIntervalMs: 20, readyTimeoutMs: 5_000,
+      restartBackoffBaseMs: 20, walRestartThresholdBytes: 100,
+      walMaintenanceCheckIntervalMs: 20, walRestartIdleMs: 80, walRestartCooldownMs: 500,
+      io: { measureRetainedWalBytes: () => walBytes },
+    });
+    const activity = handle.registerStoreActivity();
+    try {
+      activity.report(true);
+      expect(await waitForCondition(() => handle.getRecoveryState().admissionsPaused === true)).toBe(true);
+      const originalPid = await fetchPid(port);
+      walBytes = 0;
+      if (cause === 'timeout') expect(handle.requestRestart('query exceeded its client deadline')).toBe(true);
+      else process.kill(originalPid, 'SIGKILL');
+      expect(await waitForCondition(() => handle.getRecoveryState().generation > 0 && !handle.getRecoveryState().recovering)).toBe(true);
+      expect(handle.getRecoveryState().admissionsPaused).toBe(false);
+      const replacementPid = await fetchPid(port);
+      expect(replacementPid).not.toBe(originalPid);
+      activity.report(false);
+      await sleep(150);
+      expect(await fetchPid(port)).toBe(replacementPid);
+      expect(lines.filter(line => line.includes('restart #'))).toHaveLength(1);
+    } finally {
+      activity.dispose(); await handle.stop(); await rm(location, { recursive: true, force: true });
+    }
+  });
+
   it('extends boot past the base and reports periodic replay progress', async () => {
     const port = await freePort();
     const location = await mkdtemp(join(tmpdir(), 'oxi-wal-auto-'));

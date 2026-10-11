@@ -44,11 +44,13 @@ export class OxigraphRecoveryProgressOwner {
   childExited(generation: number): void {
     if (!this.#current || this.phase === 'cancelled' || this.phase === 'reopened') this.begin(generation);
   }
-  publish(phase: ManagedOxigraphRecoveryPhaseV1): void {
+  publish(phase: ManagedOxigraphRecoveryPhaseV1): boolean {
     const current = this.#current;
-    if (current?.publish(phase) && phase === 'terminated') {
+    const accepted = current?.publish(phase) ?? false;
+    if (current && accepted && phase === 'terminated') {
       this.#terminatedThrough = Math.max(this.#terminatedThrough, current.handle.generation);
     }
+    return accepted;
   }
   request(generation: number, reason: string): ManagedOxigraphRecoveryHandleV1 | undefined {
     if (!Number.isSafeInteger(generation) || generation < 0) return undefined;

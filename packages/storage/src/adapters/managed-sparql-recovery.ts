@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { AbortableStoreWorkLifecycle, StoreWorkContext } from '../abortable-store-work-lifecycle.js';
-import type { ManagedOxigraphRecoveryHandleV1, ManagedOxigraphRecoveryPhaseV1, ManagedOxigraphRuntimeStateV1 } from '../managed-oxigraph-runtime-store.js';
+import type { ManagedOxigraphRecoveryHandleV1, ManagedOxigraphRuntimeStateV1 } from '../managed-oxigraph-runtime-store.js';
 import type { ManagedWorkRecoveryCapabilityV1 } from '../managed-work-recovery-coordinator.js';
 import { hasStoreOperationOutcome, type StoreOperation } from '../store-operation-outcome.js';
 import type { QueryOptions } from '../triple-store.js';
@@ -187,17 +187,7 @@ export interface ManagedSparqlRecoverySourceV1 {
   readonly requestRecovery?: (generation: number, operation: StoreOperation) => ManagedOxigraphRecoveryHandleV1 | undefined;
 }
 
-interface GenerationProgress {
-  readonly observers: Set<(phase: ManagedOxigraphRecoveryPhaseV1) => void>;
-  subscription?: { dispose?: () => void };
-}
-
-/**
- * One generation progress contract for the coordinator. Modern runtimes report
- * physical completion; legacy runtimes certify it only by generation advancement.
- * Legacy state polling occurs on the coordinator's ordinary deadline/retry reads,
- * without another timer. Closing or releasing a generation disposes its observation.
- */
+/** Normalize compatibility once; the coordinator owns each returned handle directly. */
 export function normalizeManagedSparqlRecoveryV1(
   source: ManagedSparqlRecoverySourceV1 | undefined,
 ): ManagedWorkRecoveryCapabilityV1 | undefined {
@@ -205,18 +195,6 @@ export function normalizeManagedSparqlRecoveryV1(
   const read = source.readState;
   const recover = source.recover;
   const request = source.requestRecovery;
-  const generations = new Map<number, GenerationProgress>();
-  const disposeSubscription = (record: GenerationProgress) => {
-    const subscription = record.subscription;
-    record.subscription = undefined;
-    subscription?.dispose?.();
-  };
-  const notify = (record: GenerationProgress, phase: ManagedOxigraphRecoveryPhaseV1) => {
-    if (phase === 'cancelled' || phase === 'stopped' || phase === 'terminated' || phase === 'reopened') {
-      disposeSubscription(record);
-    }
-    for (const observe of Array.from(record.observers)) observe(phase);
-  };
   const readState = () => {
     try {
       const state = read.call(source);
@@ -225,61 +203,19 @@ export function normalizeManagedSparqlRecoveryV1(
     return null;
   };
   const notifyTimeout = (operation: StoreOperation) => {
-    try { recover?.call(source, operation); } catch { /* Notification cannot replace the caller's result. */ }
-  };
-  const readLegacyState = () => {
-    const state = readState();
-    if (state !== null) {
-      for (const [generation, record] of Array.from(generations)) {
-        if (state.generation !== generation) notify(record, 'terminated');
-      }
-    }
-    return state;
-  };
-  const requestLegacyRecovery = (generation: number | null, operation: StoreOperation) => {
-    if (generation === null) { notifyTimeout(operation); readLegacyState(); return; }
-    const record = generations.get(generation);
-    const state = readLegacyState();
-    if (!record || generations.get(generation) !== record) return;
-    if (state !== null && !state.recovering && state.generation === generation) notifyTimeout(operation);
-    readLegacyState();
-    if (generations.get(generation) === record) notify(record, 'cancelled');
-  };
-  const observeRequests = (requestRecovery: NonNullable<ManagedSparqlRecoverySourceV1['requestRecovery']>) => (generation: number | null, operation: StoreOperation) => {
-    if (generation === null) { notifyTimeout(operation); return; }
-    const record = generations.get(generation);
-    if (!record) return;
-    const handle = requestRecovery.call(source, generation, operation);
-    if (!handle || handle.generation !== generation || generations.get(generation) !== record) return;
-    const subscription: NonNullable<GenerationProgress['subscription']> = {};
-    record.subscription = subscription;
-    notify(record, 'verifying');
-    let dispose: () => void;
-    try {
-      dispose = handle.subscribe(phase => {
-        if (generations.get(generation) === record && record.subscription === subscription) notify(record, phase);
-      });
-    } catch {
-      if (record.subscription === subscription) notify(record, 'cancelled');
-      return;
-    }
-    // Synchronous progress can retire the generation before subscribe returns.
-    if (generations.get(generation) === record && record.subscription === subscription) subscription.dispose = dispose;
-    else dispose();
+    try { recover?.call(source, operation); } catch { /* Preserve the caller's timeout result. */ }
   };
   return Object.freeze({
-    readState: request === undefined ? readLegacyState : readState,
-    requestRecovery: request === undefined ? requestLegacyRecovery : observeRequests(request),
-    subscribeProgress(generation: number, observe: (phase: ManagedOxigraphRecoveryPhaseV1) => void) {
-      let record = generations.get(generation);
-      if (!record) { record = { observers: new Set() }; generations.set(generation, record); }
-      record.observers.add(observe);
-      const captured = record;
-      return () => {
-        if (!captured.observers.delete(observe) || captured.observers.size !== 0) return;
-        if (generations.get(generation) === captured) generations.delete(generation);
-        disposeSubscription(captured);
-      };
+    completion: request === undefined ? 'generation-change' : 'handle',
+    readState,
+    requestRecovery(generation: number | null, operation: StoreOperation) {
+      if (generation === null) { notifyTimeout(operation); return undefined; }
+      if (request !== undefined) return request.call(source, generation, operation);
+      // Legacy input certifies completion only through an advanced generation;
+      // no synthetic signalling/completion handle or observer registry is needed.
+      const state = readState();
+      if (state !== null && !state.recovering && state.generation === generation) notifyTimeout(operation);
+      return undefined;
     },
   });
 }

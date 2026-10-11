@@ -234,6 +234,26 @@ export class AbortableStoreWorkLifecycle {
     return trackInFlight(() => this.reportActivity(generation), generation, task, signalScope.dispose);
   }
 
+  /** Retained server work is activity even after its caller/HTTP task has settled. */
+  retainActivity(): Readonly<{ release(): void }> {
+    const generation = this.generation;
+    if (generation.closing) return Object.freeze({ release() {} });
+    let complete!: () => void;
+    let released = false;
+    const completion = new Promise<void>(resolve => { complete = resolve; });
+    const release = () => {
+      if (released) return;
+      released = true;
+      generation.controller.signal.removeEventListener('abort', release);
+      if (generation.inFlight.delete(completion)) this.reportActivity(generation);
+      complete();
+    };
+    generation.controller.signal.addEventListener('abort', release, { once: true });
+    generation.inFlight.add(completion);
+    this.reportActivity(generation);
+    return Object.freeze({ release });
+  }
+
   close(reason: Error): Promise<void> {
     if (this.closePromise) return this.closePromise;
 
