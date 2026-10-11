@@ -2871,7 +2871,7 @@ export class DKGAgent extends DKGAgentBase {
         for (const settled of snapshot) this.graphScopedStorePhysicalRuns?.delete(settled);
       }
     };
-    const drains: Promise<unknown>[] = [drainPhysicalRuns(), rfc64BackgroundDrain];
+    const drains: Promise<unknown>[] = [drainPhysicalRuns(), rfc64BackgroundDrain, this.owedLegacySwmRetirementsV1.closeAndDrain()];
     drains.push(authorityIndexSnapshotDrain);
     if (onDemandPhonebookDrain) drains.push(onDemandPhonebookDrain);
     if (authorityRetryDrain) drains.push(authorityRetryDrain);

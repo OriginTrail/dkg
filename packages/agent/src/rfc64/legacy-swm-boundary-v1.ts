@@ -583,6 +583,11 @@ export type Rfc64LegacySwmFinalizedVmRetirementV1 = 'retired' | 'kept' | 'not-ru
  * and the drain are the ASSET's: this reads and deletes only that asset's
  * graph, head and markers, so shares of other assets of the graph are
  * neither refused nor waited for.
+ *
+ * The answer says what became of it, so that a caller can come back for a
+ * retirement that did not get its turn. The call runs up to the raised fence
+ * before it first waits. `signal` is the caller's lifetime: an abort ends a
+ * retirement that is still waiting for its turn, with `not-run`.
  */
 export async function retireRfc64LegacySwmAfterFinalizedVmV1(
   owner: object,
@@ -590,23 +595,7 @@ export async function retireRfc64LegacySwmAfterFinalizedVmV1(
   kaUalInput: string,
   assertionVersionInput: string,
   subGraphName?: string,
-): Promise<boolean> {
-  return (await attemptRfc64LegacySwmRetirementAfterFinalizedVmV1(
-    owner, contextGraphId, kaUalInput, assertionVersionInput, subGraphName,
-  )) === 'retired';
-}
-
-/**
- * {@link retireRfc64LegacySwmAfterFinalizedVmV1}, answering what became of it,
- * so that a caller can come back for a retirement that did not get its turn.
- * It runs up to the raised fence inside the call.
- */
-export async function attemptRfc64LegacySwmRetirementAfterFinalizedVmV1(
-  owner: object,
-  contextGraphId: string,
-  kaUalInput: string,
-  assertionVersionInput: string,
-  subGraphName?: string,
+  signal?: AbortSignal,
 ): Promise<Rfc64LegacySwmFinalizedVmRetirementV1> {
   if (subGraphName !== undefined) return 'kept';
   const state = rfc64LegacySwmBoundaryStatesV1.get(owner);
@@ -623,7 +612,7 @@ export async function attemptRfc64LegacySwmRetirementAfterFinalizedVmV1(
   // conservative state, until a later retirement removes it.
   const outcome = await runRfc64LegacySwmRetirementV1(
     state.fence,
-    { source: 'finalized-vm-retirement', contextGraphId, kaUal },
+    { source: 'finalized-vm-retirement', contextGraphId, kaUal, ...(signal === undefined ? {} : { signal }) },
     async () => {
       if (state.entriesByContextGraph.get(contextGraphId)?.has(kaUal) !== true) return false;
       const scope = createGraphKnowledgeAssetScope(kaUal, assertionVersion);

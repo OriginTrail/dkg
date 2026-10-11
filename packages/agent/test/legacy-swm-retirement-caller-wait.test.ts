@@ -76,10 +76,11 @@ async function until(condition: () => boolean, what: string): Promise<void> {
 }
 
 /**
- * A created, never-started agent with a real boundary. Its asset was shared and published: the
- * shared copy is gone, and the marker the share left is what the retirement removes.
+ * A created agent with a real boundary, started only when the row is about its stop. Its asset
+ * was shared and published: the shared copy is gone, and the marker the share left is what the
+ * retirement removes.
  */
-async function publishedAsset() {
+async function publishedAsset(options: { started?: boolean } = {}) {
   const store = new OxigraphStore();
   const agent = await DKGAgent.create({
     name: 'RetirementWaitNode',
@@ -90,8 +91,10 @@ async function publishedAsset() {
     chainAdapter: new NoChainAdapter(),
     nodeRole: 'edge',
     skills: [],
+    rfc64CatalogActivation: { enabled: false },
   });
   agents.push(agent);
+  if (options.started === true) await agent.start();
   const fenceLines: string[] = [];
   await initializeRfc64LegacySwmBoundaryV1(agent, await secureDir(), store, {
     onFenceEvent: (event) => fenceLines.push(`${event.kind}:${event.source}:${event.waitingOn ?? '-'}`),
@@ -102,8 +105,7 @@ async function publishedAsset() {
 
   const internals = agent as unknown as {
     log: { info: (ctx: unknown, line: string) => void; warn: (ctx: unknown, line: string) => void };
-    owedLegacySwmRetirementsV1: { owed: number };
-    rfc64BackgroundWorkDispatcherV1: { closeAndDrain: () => Promise<void> };
+    owedLegacySwmRetirementsV1: { owed: number; running: number; closeAndDrain: () => Promise<void> };
   };
   // What the node logs about retirements it owes; its other lines are not this suite's.
   const lines: string[] = [];
@@ -118,7 +120,24 @@ async function publishedAsset() {
     fenceLines,
     lines,
     owed: () => internals.owedLegacySwmRetirementsV1.owed,
-    stopBackgroundWork: () => internals.rfc64BackgroundWorkDispatcherV1.closeAndDrain(),
+    running: () => internals.owedLegacySwmRetirementsV1.running,
+    /** What the node's stop does with the retirements it owns. */
+    closeRetirements: () => internals.owedLegacySwmRetirementsV1.closeAndDrain(),
+    /** Hold the retirement at work: its read of the shared copy does not come back until released. */
+    holdTheRead: () => {
+      const query = store.query.bind(store);
+      let finishRead!: () => void;
+      const readHeld = new Promise<void>((resolve) => { finishRead = resolve; });
+      const held = { reading: false, finishRead };
+      vi.spyOn(store, 'query').mockImplementation(async (sparql, queryOptions) => {
+        if (queryOptions?.source === 'agent.rfc64.legacySwmBoundary.finalizedVmGraph') {
+          held.reading = true;
+          await readHeld;
+        }
+        return query(sparql, queryOptions);
+      });
+      return held;
+    },
     markers: () => readRfc64LegacySwmBoundaryCountV1(agent, GRAPH),
     retire: () => agent.retireLegacySwmAfterVerifiedVmTwin({
       contextGraphId: GRAPH,
@@ -170,22 +189,11 @@ describe('the retirement of a published asset\'s legacy SWM marker', () => {
 
   it('keeps the asset fenced after its caller has left, until the retirement has ended', async () => {
     const node = await publishedAsset();
-    // The retirement is at work: its read of the shared copy does not come back yet.
-    const query = node.store.query.bind(node.store);
-    let finishRead!: () => void;
-    const readHeld = new Promise<void>((resolve) => { finishRead = resolve; });
-    let reading = false;
-    vi.spyOn(node.store, 'query').mockImplementation(async (sparql, options) => {
-      if (options?.source === 'agent.rfc64.legacySwmBoundary.finalizedVmGraph') {
-        reading = true;
-        await readHeld;
-      }
-      return query(sparql, options);
-    });
+    const held = node.holdTheRead();
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
 
     const asked = node.retire();
-    await until(() => reading, 'the retirement reads the shared copy');
+    await until(() => held.reading, 'the retirement reads the shared copy');
     await vi.advanceTimersByTimeAsync(LEGACY_SWM_RETIREMENT_CALLER_WAIT_MS);
     await asked;
 
@@ -196,7 +204,7 @@ describe('the retirement of a published asset\'s legacy SWM marker', () => {
       .settle(false);
     expect(node.markers()).toBe(1);
 
-    finishRead();
+    held.finishRead();
     await until(() => node.markers() === 0, 'the marker is retired');
     // The fence dropped with the retirement: the later share is admitted now.
     prepareRfc64LateLegacySwmBoundaryV1(node.agent, GRAPH, UAL, 'a-later-share', '2').settle(false);
@@ -229,7 +237,30 @@ describe('the retirement of a published asset\'s legacy SWM marker', () => {
     expect(node.lines[1]).toBe(`info Legacy SWM boundary retirement ${key} ended on repeat 1: retired`);
   });
 
-  it('owes nothing once the node has closed its background work', async () => {
+  it('ends a retirement that still waits for its turn when the node stops, and owes it nothing more', async () => {
+    const node = await publishedAsset();
+    const lease = await acquireRfc64LegacySwmBoundaryReceiverLeaseV1(node.agent, scopeOf(GRAPH));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+
+    const asked = node.retire();
+    await vi.advanceTimersByTimeAsync(LEGACY_SWM_RETIREMENT_CALLER_WAIT_MS);
+    await asked;
+    expect(node.running()).toBe(1);
+
+    // Nothing moves the clock here: the wait ends because the node stops, not at the fence's bound.
+    await node.closeRetirements();
+    expect(node.running()).toBe(0);
+    expect(node.owed()).toBe(0);
+    expect(node.fenceLines).toEqual([]);
+    // Its fence is down, and the marker stays, as the marker of a retirement that gave up always did.
+    lease.release();
+    prepareRfc64LateLegacySwmBoundaryV1(node.agent, GRAPH, UAL, 'a-later-share', '2').settle(false);
+    await vi.advanceTimersByTimeAsync(LEGACY_SWM_RETIREMENT_REPEAT_BASE_MS);
+    expect(node.markers()).toBe(1);
+    expect(node.lines).toEqual([]);
+  });
+
+  it('drops the repeat of a retirement that gave up when the node stops', async () => {
     const node = await publishedAsset();
     const lease = await acquireRfc64LegacySwmBoundaryReceiverLeaseV1(node.agent, scopeOf(GRAPH));
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
@@ -239,12 +270,32 @@ describe('the retirement of a published asset\'s legacy SWM marker', () => {
     await asked;
     await until(() => node.owed() === 1, 'the retirement is owed a repeat');
 
-    await node.stopBackgroundWork();
+    await node.closeRetirements();
     expect(node.owed()).toBe(0);
 
-    // The marker stays, as the marker of a retirement that gave up always did.
     lease.release();
     await vi.advanceTimersByTimeAsync(LEGACY_SWM_RETIREMENT_REPEAT_BASE_MS);
     expect(node.markers()).toBe(1);
+  });
+
+  it('holds the stop of the node until a retirement that is at work has ended', async () => {
+    const node = await publishedAsset({ started: true });
+    const held = node.holdTheRead();
+
+    const asked = node.retire();
+    await until(() => held.reading, 'the retirement reads the shared copy');
+    let stopped = false;
+    const stopping = node.agent.stop().then(() => { stopped = true; });
+    for (let turns = 0; turns < 200; turns += 1) await turn();
+    // The store is still open: the retirement owns it until its reads and its delete are through.
+    expect(stopped).toBe(false);
+    expect(node.running()).toBe(1);
+
+    held.finishRead();
+    await stopping;
+    await asked;
+    expect(stopped).toBe(true);
+    expect(node.running()).toBe(0);
+    expect(node.markers()).toBe(0);
   });
 });

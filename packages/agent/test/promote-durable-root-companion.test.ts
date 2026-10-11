@@ -148,7 +148,7 @@ describe('promote companion under the legacy SWM retirement fence (real agent wi
     other.settle(false);
 
     inFlight.settle(false);
-    await expect(retirement).resolves.toBe(false);
+    await expect(retirement).resolves.toBe('kept');
     const companion = promoteCompanion(UAL_A, 'second-share-of-a');
     expect(readRfc64LegacySwmBoundaryCountV1(agent, CONTEXT_GRAPH_ID)).toBe(1);
     companion.settle(false);
@@ -197,7 +197,7 @@ describe('promote companion under the legacy SWM retirement fence (real agent wi
     expect(readRfc64LegacySwmBoundaryCountV1(agent, CONTEXT_GRAPH_ID)).toBe(2);
 
     release();
-    await expect(retirement).resolves.toBe(true);
+    await expect(retirement).resolves.toBe('retired');
     // A's marker is retired; B's prepared share is still tracked until it settles.
     expect(readRfc64LegacySwmBoundaryCountV1(agent, CONTEXT_GRAPH_ID)).toBe(1);
     other.settle(false);

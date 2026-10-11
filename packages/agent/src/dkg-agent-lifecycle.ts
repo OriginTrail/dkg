@@ -865,10 +865,10 @@ import {
 import { reconcileRfc64CatalogAuthorityPlanV1 } from
   './rfc64/catalog-rollout-authority-reconciliation-v1.js';
 import {
-  attemptRfc64LegacySwmRetirementAfterFinalizedVmV1,
   describeRfc64LegacySwmFenceEventV1,
   initializeRfc64LegacySwmBoundaryV1,
   rfc64LateLegacySwmCompanionResolverV1,
+  retireRfc64LegacySwmAfterFinalizedVmV1,
 } from
   './rfc64/legacy-swm-boundary-v1.js';
 import {
@@ -2025,18 +2025,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }>,
   ): Promise<void> {
     // GH#3081 — nothing a caller does next depends on the marker. It waits a short time for the
-    // retirement, which then goes on without it and is repeated if it did not get its turn.
+    // retirement, which then goes on without it and is repeated if it did not get its turn. The
+    // retirement stays this node's until it ended: stop() ends its wait and drains its work.
     const assertionVersion = String(input.assertionVersion);
     await this.owedLegacySwmRetirementsV1.retire(
       JSON.stringify([input.contextGraphId, input.subGraphName ?? null, input.kaUal, assertionVersion]),
-      () => attemptRfc64LegacySwmRetirementAfterFinalizedVmV1(
+      (signal) => retireRfc64LegacySwmAfterFinalizedVmV1(
         this,
         input.contextGraphId,
         input.kaUal,
         assertionVersion,
         input.subGraphName,
+        signal,
       ),
-      this.rfc64BackgroundWorkDispatcherV1.shutdownSignal,
     );
   }
 
@@ -2274,6 +2275,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     await this.contextGraphSubscriptionAuthorityRecoveryRuntime?.close();
     await this.retireContextGraphSubscriptionPromotionRuntime();
     this.rfc64BackgroundWorkDispatcherV1.reopen();
+    this.owedLegacySwmRetirementsV1.reopen();
     this.contextGraphMembershipPersistence.reopen();
     // stop() drained and closed subscription writes; a restarted agent admits
     // them again. Writes issued before the first start() left it open.

@@ -13,7 +13,6 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 
 import {
   acquireRfc64LegacySwmBoundaryReceiverLeaseV1,
-  attemptRfc64LegacySwmRetirementAfterFinalizedVmV1,
   awaitRfc64LateLegacySwmBoundaryAdmissionV1,
   initializeRfc64LegacySwmBoundaryV1,
   markRfc64LegacySwmRepublishedV1,
@@ -186,7 +185,7 @@ describe('RFC-64 legacy SWM fence coordinator', () => {
     await tick();
     expect(ran).toBe(false);
     expect(() => assertRfc64LegacySwmPreparationAdmittedV1(fence, CG, KA)).not.toThrow();
-    expect(fence.graphMutationTails.size).toBe(0);
+    expect(fence.graphTurns.activeScopeCount).toBe(0);
   });
 
   describe('whose turn a retirement waits for', () => {
@@ -211,7 +210,7 @@ describe('RFC-64 legacy SWM fence coordinator', () => {
       lease.open();
       await holder;
       await tick();
-      expect(fence.graphMutationTails.size).toBe(0);
+      expect(fence.graphTurns.activeScopeCount).toBe(0);
     });
 
     it('holds the retirement of an asset back for a lease of its own graph, and for a retirement at work in it', async () => {
@@ -315,7 +314,45 @@ describe('RFC-64 legacy SWM fence coordinator', () => {
       await Promise.all([asset, graphWide, otherLease]);
       expect(order).toEqual(['asset-started', 'asset-ended', 'graph', 'other-lease']);
       await tick();
-      expect(fence.graphMutationTails.size).toBe(0);
+      expect(fence.graphTurns.activeScopeCount).toBe(0);
+    });
+
+    it('ends a wait for its turn in silence when its owner stops, and leaves work that has started alone', async () => {
+      const events: Rfc64LegacySwmFenceEventV1[] = [];
+      const fence = createRfc64LegacySwmFenceCoordinatorV1({ onFenceEvent: (event) => events.push(event) });
+      const owner = new AbortController();
+      const atWork = gate();
+      const order: string[] = [];
+      const working = runRfc64LegacySwmRetirementV1(fence, { ...assetOf(CG, KA), signal: owner.signal }, async () => {
+        order.push('first-started');
+        await atWork.promise;
+        return 'retired';
+      });
+      const waiting = runRfc64LegacySwmRetirementV1(
+        fence, { ...assetOf(CG, OTHER_KA), signal: owner.signal }, async () => { order.push('second'); },
+      );
+      await tick();
+      expect(() => assertRfc64LegacySwmPreparationAdmittedV1(fence, CG, OTHER_KA)).toThrow();
+
+      owner.abort();
+      // The one that waited is over at once, with its fence down and nothing said about it.
+      await expect(waiting).resolves.toEqual({ ran: false });
+      expect(() => assertRfc64LegacySwmPreparationAdmittedV1(fence, CG, OTHER_KA)).not.toThrow();
+      expect(events).toEqual([]);
+      // The one at work keeps its fence and ends on its own.
+      expect(() => assertRfc64LegacySwmPreparationAdmittedV1(fence, CG, KA)).toThrow();
+      atWork.open();
+      await expect(working).resolves.toEqual({ ran: true, value: 'retired' });
+      expect(order).toEqual(['first-started']);
+
+      // An owner that has stopped raises no fence and takes no turn.
+      await expect(runRfc64LegacySwmRetirementV1(
+        fence, { ...assetOf(CG, KA), signal: owner.signal }, async () => { order.push('after-stop'); },
+      )).resolves.toEqual({ ran: false });
+      expect(order).toEqual(['first-started']);
+      await tick();
+      expect(fence.scopes.size).toBe(0);
+      expect(fence.graphTurns.activeScopeCount).toBe(0);
     });
 
     it('gives a whole-graph retirement that gave up on the node-wide turn no turn in its graph', async () => {
@@ -341,7 +378,7 @@ describe('RFC-64 legacy SWM fence coordinator', () => {
       await holder;
       await tick();
       expect(ran).toBe(false);
-      expect(fence.graphMutationTails.size).toBe(0);
+      expect(fence.graphTurns.activeScopeCount).toBe(0);
     });
   });
 
@@ -510,7 +547,7 @@ describe('RFC-64 legacy SWM boundary behind the fence coordinator', () => {
     });
 
     await expect(retireRfc64LegacySwmAfterFinalizedVmV1(owner, BOUNDARY_CG, BOUNDARY_UAL, '1'))
-      .resolves.toBe(false);
+      .resolves.toBe('not-run');
     // A rejection, so the projection pass fails and its supervisor repeats it.
     await expect(markRfc64LegacySwmRepublishedV1(
       owner, BOUNDARY_CG, [{ kaUal: BOUNDARY_UAL, assertionVersion: '1' }],
@@ -543,16 +580,14 @@ describe('RFC-64 legacy SWM boundary behind the fence coordinator', () => {
     // The lease holds the graph's turn for as long as the row likes.
     const lease = await acquireRfc64LegacySwmBoundaryReceiverLeaseV1(owner, BOUNDARY_SCOPE);
 
-    await expect(attemptRfc64LegacySwmRetirementAfterFinalizedVmV1(owner, BOUNDARY_CG, BOUNDARY_UAL, '1'))
-      .resolves.toBe('kept');
     await expect(retireRfc64LegacySwmAfterFinalizedVmV1(owner, BOUNDARY_CG, BOUNDARY_UAL, '1'))
-      .resolves.toBe(false);
-    // Neither waited for the lease, and neither gave up: no fence was raised at all.
+      .resolves.toBe('kept');
+    // It did not wait for the lease and did not give up: no fence was raised at all.
     expect(events).toEqual([]);
     // A named sub-graph and an owner without a boundary have nothing to retire either.
-    await expect(attemptRfc64LegacySwmRetirementAfterFinalizedVmV1(owner, BOUNDARY_CG, BOUNDARY_UAL, '1', 'notes'))
+    await expect(retireRfc64LegacySwmAfterFinalizedVmV1(owner, BOUNDARY_CG, BOUNDARY_UAL, '1', 'notes'))
       .resolves.toBe('kept');
-    await expect(attemptRfc64LegacySwmRetirementAfterFinalizedVmV1({}, BOUNDARY_CG, BOUNDARY_UAL, '1'))
+    await expect(retireRfc64LegacySwmAfterFinalizedVmV1({}, BOUNDARY_CG, BOUNDARY_UAL, '1'))
       .resolves.toBe('kept');
 
     lease.release();
@@ -567,17 +602,17 @@ describe('RFC-64 legacy SWM boundary behind the fence coordinator', () => {
       contextGraphId: BOUNDARY_CG, kaUal: BOUNDARY_UAL, shareOperationId: 'first-share', assertionVersion: '1',
     });
     // The share is still in flight: the retirement waits for it and gives up at the bound.
-    await expect(attemptRfc64LegacySwmRetirementAfterFinalizedVmV1(owner, BOUNDARY_CG, BOUNDARY_UAL, '1'))
+    await expect(retireRfc64LegacySwmAfterFinalizedVmV1(owner, BOUNDARY_CG, BOUNDARY_UAL, '1'))
       .resolves.toBe('not-run');
     expect(events.map((event) => [event.kind, event.waitingOn])).toEqual([['wait-exceeded', 'preparations']]);
     expect(readRfc64LegacySwmBoundaryCountV1(owner, BOUNDARY_CG)).toBe(1);
 
     share.settle(true);
-    await expect(attemptRfc64LegacySwmRetirementAfterFinalizedVmV1(owner, BOUNDARY_CG, BOUNDARY_UAL, '1'))
+    await expect(retireRfc64LegacySwmAfterFinalizedVmV1(owner, BOUNDARY_CG, BOUNDARY_UAL, '1'))
       .resolves.toBe('retired');
     expect(readRfc64LegacySwmBoundaryCountV1(owner, BOUNDARY_CG)).toBe(0);
     // Asked again, there is nothing left of the asset to retire.
-    await expect(attemptRfc64LegacySwmRetirementAfterFinalizedVmV1(owner, BOUNDARY_CG, BOUNDARY_UAL, '1'))
+    await expect(retireRfc64LegacySwmAfterFinalizedVmV1(owner, BOUNDARY_CG, BOUNDARY_UAL, '1'))
       .resolves.toBe('kept');
   });
 
@@ -591,7 +626,7 @@ describe('RFC-64 legacy SWM boundary behind the fence coordinator', () => {
       owner, { ...BOUNDARY_SCOPE, contextGraphId: otherGraph } as AuthorCatalogScopeV1,
     );
 
-    await expect(attemptRfc64LegacySwmRetirementAfterFinalizedVmV1(owner, BOUNDARY_CG, BOUNDARY_UAL, '1'))
+    await expect(retireRfc64LegacySwmAfterFinalizedVmV1(owner, BOUNDARY_CG, BOUNDARY_UAL, '1'))
       .resolves.toBe('retired');
     expect(readRfc64LegacySwmBoundaryCountV1(owner, BOUNDARY_CG)).toBe(0);
     expect(events).toEqual([]);

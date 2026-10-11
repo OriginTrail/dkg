@@ -11,6 +11,11 @@
  * only. One that outlives the wait is owed here: it runs to its end, and one that did not get its
  * turn, or failed, is repeated with a growing pause until it ran.
  *
+ * This owner has the lifetime of the node's run. Every attempt it started is its own until the
+ * attempt ended, whether its caller still waits or not: closing ends the ones that are still
+ * waiting for their turn through the signal they were given, and waits for the ones at work, so
+ * no retirement reads or writes after the close has resolved.
+ *
  * Process-local. A marker whose retirement is owed when the process stops stays, as the marker of
  * a retirement that gave up always did: the next confirmed publication of its asset retires it,
  * and so does the projection of an author catalog that holds the asset.
@@ -85,7 +90,13 @@ export interface OwedLegacySwmRetirementsOptionsV1 {
   readonly onEvent?: (event: OwedLegacySwmRetirementEventV1) => void;
 }
 
-type AttemptV1 = () => Promise<LegacySwmRetirementAttemptV1>;
+/**
+ * One attempt. It is called inside the call that asks for it, and `signal` aborts when this owner
+ * closes: an attempt that is still waiting for its turn then has to end.
+ */
+export type LegacySwmRetirementAttemptFnV1 =
+  (signal: AbortSignal) => Promise<LegacySwmRetirementAttemptV1>;
+
 type SettledV1 =
   | Readonly<{ outcome: LegacySwmRetirementAttemptV1 }>
   | Readonly<{ error: unknown }>;
@@ -93,7 +104,6 @@ type SettledV1 =
 interface OwedRetirementV1 {
   /** The pause that is running; null while the repeat itself runs. */
   timer: ReturnType<typeof setTimeout> | null;
-  readonly lifecycle: AbortSignal;
 }
 
 const WAITED_OUT = Symbol('waited-out');
@@ -103,7 +113,11 @@ export class OwedLegacySwmRetirementsV1 {
   // context of the caller whose wait ended.
   readonly #resource = new AsyncResource('OwedLegacySwmRetirementsV1');
   readonly #owed = new Map<string, OwedRetirementV1>();
-  readonly #watched = new WeakSet<AbortSignal>();
+  /** Every attempt that has started and not ended, the first of a retirement and its repeats. */
+  readonly #running = new Set<Promise<SettledV1>>();
+  /** One per run of the node; what an attempt of an earlier run ends with is nobody's. */
+  #run = new AbortController();
+  #closed = false;
   readonly #callerWaitMs: number;
   readonly #repeatBaseMs: number;
   readonly #repeatMaxMs: number;
@@ -125,17 +139,24 @@ export class OwedLegacySwmRetirementsV1 {
     return this.#owed.size;
   }
 
+  /** Attempts that have started and not ended. */
+  get running(): number {
+    return this.#running.size;
+  }
+
   /**
    * Start the retirement that `key` names and wait for it, for the caller's wait at most.
    *
    * `attempt` is called inside this call, so a fence it raises is up before this returns its
    * promise. A failure inside the wait is thrown to the caller, as it was when the caller waited
    * to the end. Whatever the attempt ends with after the wait is this owner's. An attempt that
-   * did not run or failed is repeated either way, unless `lifecycle` has aborted: a stopping node
-   * owes nothing.
+   * did not run or failed is repeated either way. A closed owner starts nothing: the node is
+   * stopping, and the marker stays.
    */
-  async retire(key: string, attempt: AttemptV1, lifecycle: AbortSignal): Promise<void> {
-    const settled = settle(attempt);
+  async retire(key: string, attempt: LegacySwmRetirementAttemptFnV1): Promise<void> {
+    if (this.#closed) return;
+    const run = this.#run;
+    const settled = this.#start(attempt, run);
     let timer: ReturnType<typeof setTimeout> | undefined;
     const waitedOut = new Promise<typeof WAITED_OUT>((resolve) => {
       timer = setTimeout(() => resolve(WAITED_OUT), this.#callerWaitMs);
@@ -147,56 +168,96 @@ export class OwedLegacySwmRetirementsV1 {
       clearTimeout(timer);
     }
     if (first === WAITED_OUT) {
-      void settled.then((late) => this.#afterAttempt(key, attempt, lifecycle, late, 0));
+      void settled.then((late) => this.#afterAttempt(key, attempt, run, late, null, 0));
       return;
     }
-    this.#afterAttempt(key, attempt, lifecycle, first, 0);
+    this.#afterAttempt(key, attempt, run, first, null, 0);
     if ('error' in first) throw first.error;
   }
 
-  /** `repeats` is the number of repeats that have run for this retirement. */
+  /**
+   * Admit no more retirements, drop what is owed, end the attempts that are waiting for their
+   * turn, and resolve once every attempt that had started has ended.
+   */
+  async closeAndDrain(): Promise<void> {
+    this.#closed = true;
+    this.#run.abort();
+    for (const entry of this.#owed.values()) {
+      if (entry.timer !== null) clearTimeout(entry.timer);
+    }
+    this.#owed.clear();
+    while (this.#running.size > 0) await Promise.allSettled(this.#running);
+  }
+
+  /** Admit retirements again after a close. */
+  reopen(): void {
+    if (!this.#closed) return;
+    this.#run = new AbortController();
+    this.#closed = false;
+  }
+
+  /** Start `attempt` now, as this owner's until it ended. A throw of the call is its failure. */
+  #start(attempt: LegacySwmRetirementAttemptFnV1, run: AbortController): Promise<SettledV1> {
+    let started: Promise<LegacySwmRetirementAttemptV1>;
+    try {
+      started = attempt(run.signal);
+    } catch (error) {
+      return Promise.resolve({ error });
+    }
+    const settled: Promise<SettledV1> = started.then(
+      (outcome) => ({ outcome }),
+      (error: unknown) => ({ error }),
+    );
+    this.#running.add(settled);
+    void settled.then(() => { this.#running.delete(settled); });
+    return settled;
+  }
+
+  /**
+   * `owner` is the entry of the repeat that just ran, or null for a first attempt; `repeats` is
+   * the number of repeats that have run for it.
+   */
   #afterAttempt(
     key: string,
-    attempt: AttemptV1,
-    lifecycle: AbortSignal,
+    attempt: LegacySwmRetirementAttemptFnV1,
+    run: AbortController,
     settled: SettledV1,
+    owner: OwedRetirementV1 | null,
     repeats: number,
   ): void {
+    // The node stopped, and may run again: nothing of this run touches what the next one owes.
+    if (run !== this.#run || run.signal.aborted) return;
     const owed = this.#owed.get(key);
+    if (owner !== null && owed !== owner) return;
     if ('outcome' in settled && settled.outcome !== 'not-run') {
       // A first attempt that ended well leaves a pending repeat alone: it finds nothing to do.
-      if (repeats === 0) return;
+      if (owner === null) return;
       this.#owed.delete(key);
       this.#report({ kind: 'repeated', key, outcome: settled.outcome, repeats });
       return;
     }
     const cause = 'error' in settled ? { error: settled.error } : {};
     // One repeat serves every request for the same retirement.
-    if (repeats === 0 && owed !== undefined) return;
-    if (lifecycle.aborted) {
-      this.#owed.delete(key);
-      return;
-    }
+    if (owner === null && owed !== undefined) return;
     if (repeats >= this.#maxRepeats) {
       this.#owed.delete(key);
       this.#report({ kind: 'abandoned', key, reason: 'repeats-exhausted', ...cause });
       return;
     }
-    if (owed === undefined && this.#owed.size >= this.#maxOwed) {
+    if (owner === null && this.#owed.size >= this.#maxOwed) {
       this.#report({ kind: 'abandoned', key, reason: 'too-many-owed', ...cause });
       return;
     }
     const inMs = Math.min(this.#repeatMaxMs, this.#repeatBaseMs * 2 ** repeats);
-    const entry: OwedRetirementV1 = owed ?? { timer: null, lifecycle };
+    const entry: OwedRetirementV1 = owner ?? { timer: null };
     entry.timer = setTimeout(() => {
       entry.timer = null;
-      if (lifecycle.aborted || this.#owed.get(key) !== entry) return;
-      void this.#resource.runInAsyncScope(() => settle(attempt))
-        .then((next) => this.#afterAttempt(key, attempt, lifecycle, next, repeats + 1));
+      if (run !== this.#run || run.signal.aborted || this.#owed.get(key) !== entry) return;
+      void this.#resource.runInAsyncScope(() => this.#start(attempt, run))
+        .then((next) => this.#afterAttempt(key, attempt, run, next, entry, repeats + 1));
     }, inMs);
     entry.timer.unref?.();
     this.#owed.set(key, entry);
-    this.#forgetAt(lifecycle);
     this.#report({
       kind: 'repeating',
       key,
@@ -207,33 +268,9 @@ export class OwedLegacySwmRetirementsV1 {
     });
   }
 
-  /** When `lifecycle` aborts, the retirements owed under it are dropped with their pauses. */
-  #forgetAt(lifecycle: AbortSignal): void {
-    if (this.#watched.has(lifecycle)) return;
-    this.#watched.add(lifecycle);
-    lifecycle.addEventListener('abort', () => {
-      for (const [key, entry] of this.#owed) {
-        if (entry.lifecycle !== lifecycle) continue;
-        if (entry.timer !== null) clearTimeout(entry.timer);
-        this.#owed.delete(key);
-      }
-    }, { once: true });
-  }
-
   #report(event: OwedLegacySwmRetirementEventV1): void {
     try {
       this.#onEvent?.(event);
     } catch { /* observation only */ }
   }
-}
-
-/** Start `attempt` now. A throw of the call itself is its failure like any other. */
-function settle(attempt: AttemptV1): Promise<SettledV1> {
-  let started: Promise<LegacySwmRetirementAttemptV1>;
-  try {
-    started = attempt();
-  } catch (error) {
-    return Promise.resolve({ error });
-  }
-  return started.then((outcome) => ({ outcome }), (error: unknown) => ({ error }));
 }

@@ -2,6 +2,8 @@
 
 import { RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE } from '@origintrail-official/dkg-core';
 
+import { Rfc64SerializedScopeRuntimeV1 } from './serialized-scope-runtime-v1.js';
+
 /** Who raised a fence. Named in every refusal and in every fence event. */
 export type Rfc64LegacySwmFenceSourceV1 =
   | 'finalized-vm-retirement'
@@ -91,8 +93,8 @@ export interface Rfc64LegacySwmFenceCoordinatorV1 {
   mutationTail: Promise<void>;
   /** How many of them hold or await the node-wide turn. */
   nodeWideTurnsPending: number;
-  /** The chain of each graph that has a lease or a retirement waiting or at work. */
-  readonly graphMutationTails: Map<string, Promise<void>>;
+  /** The turns of each graph that has a lease or a retirement waiting or at work. */
+  readonly graphTurns: Rfc64SerializedScopeRuntimeV1;
   readonly waitLimitMs: number;
   readonly longFenceMs: number;
   readonly now: () => number;
@@ -106,7 +108,7 @@ export function createRfc64LegacySwmFenceCoordinatorV1(
     scopes: new Map(),
     mutationTail: Promise.resolve(),
     nodeWideTurnsPending: 0,
-    graphMutationTails: new Map(),
+    graphTurns: new Rfc64SerializedScopeRuntimeV1('RFC-64 legacy SWM graph turn'),
     waitLimitMs: options.waitLimitMs ?? RFC64_LEGACY_SWM_FENCE_WAIT_LIMIT_MS,
     longFenceMs: options.longFenceMs ?? RFC64_LEGACY_SWM_FENCE_LONG_MS,
     now: options.now ?? (() => performance.now()),
@@ -244,6 +246,10 @@ export type Rfc64LegacySwmRetirementOutcomeV1<T> =
  * place is the conservative state, and the next pass retires them. Without the
  * bound one preparation that never settles would hold its chain, and through
  * it the fence of everything that waits there, for as long as it hangs.
+ *
+ * `signal` ends the waits early, in silence: a retirement that has not
+ * started its work when the signal aborts drops its fence and answers
+ * `ran: false`. Work that has started runs to its end.
  */
 export async function runRfc64LegacySwmRetirementV1<T>(
   fence: Rfc64LegacySwmFenceCoordinatorV1,
@@ -252,9 +258,12 @@ export async function runRfc64LegacySwmRetirementV1<T>(
     contextGraphId: string;
     /** Present for an asset fence; absent for the graph's. */
     kaUal?: string;
+    /** The owner's lifetime: an abort ends a retirement that is still waiting. */
+    signal?: AbortSignal;
   }>,
   work: (dropFence: () => void) => Promise<T>,
 ): Promise<Rfc64LegacySwmRetirementOutcomeV1<T>> {
+  if (target.signal?.aborted) return { ran: false };
   const scopeKey = target.kaUal === undefined
     ? target.contextGraphId
     : rfc64LegacySwmAssetScopeKeyV1(target.contextGraphId, target.kaUal);
@@ -304,6 +313,13 @@ export async function runRfc64LegacySwmRetirementV1<T>(
     resolveAbandoned();
   }, fence.waitLimitMs);
   timer.unref?.();
+  const stopWaiting = (): void => {
+    if (workStarted || gaveUp) return;
+    gaveUp = true;
+    dropFence();
+    resolveAbandoned();
+  };
+  target.signal?.addEventListener('abort', stopWaiting, { once: true });
   const notRun = { ran: false } as const;
 
   const run = async (): Promise<Rfc64LegacySwmRetirementOutcomeV1<T>> => {
@@ -315,17 +331,11 @@ export async function runRfc64LegacySwmRetirementV1<T>(
     clearTimeout(timer);
     return { ran: true, value: await work(dropFence) };
   };
-  const takeGraphTurn = (): Promise<Rfc64LegacySwmRetirementOutcomeV1<T>> => {
-    const graph = target.contextGraphId;
-    const outcome = (fence.graphMutationTails.get(graph) ?? Promise.resolve()).then(run);
-    const tail = outcome.then(() => undefined, () => undefined);
-    fence.graphMutationTails.set(graph, tail);
-    // An idle graph keeps no chain.
-    void tail.then(() => {
-      if (fence.graphMutationTails.get(graph) === tail) fence.graphMutationTails.delete(graph);
-    });
-    return outcome;
-  };
+  // Joins the graph's queue inside the call. The turn lasts as long as the work, whatever
+  // became of the caller in the meantime.
+  const takeGraphTurn = (): Promise<Rfc64LegacySwmRetirementOutcomeV1<T>> => (
+    fence.graphTurns.run(target.contextGraphId, run)
+  );
   let turn: Promise<Rfc64LegacySwmRetirementOutcomeV1<T>>;
   if (target.kaUal !== undefined) {
     turn = takeGraphTurn();
@@ -341,6 +351,7 @@ export async function runRfc64LegacySwmRetirementV1<T>(
     return await Promise.race([turn, abandoned.then(() => notRun)]);
   } finally {
     clearTimeout(timer);
+    target.signal?.removeEventListener('abort', stopWaiting);
     dropFence();
   }
 }
