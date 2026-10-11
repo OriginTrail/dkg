@@ -73,6 +73,7 @@ import  {
   RpcFailoverClient,
   createRpcReadDescriptor,
   rpcReadDescriptor,
+  type PreparedTransaction,
   type ReadOpts,
   type ReceiptLookupOptions,
 } from './rpc-failover-client.js';
@@ -122,7 +123,7 @@ import type {
   RandomSamplingReadContextReader,
 } from './random-sampling-read-context.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
-import { RPC_READ_STALL_TIMEOUT_MS, RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS, CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRIES, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE,
+import { RPC_READ_STALL_TIMEOUT_MS, CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRIES, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE,
   TX_SERIALIZER_OBSERVE_AFTER_MS,
   TX_SERIALIZER_OBSERVE_INTERVAL_MS,
   resolveTxSerializerStallAfterMs,
@@ -642,8 +643,8 @@ export class EVMChainAdapterBase {
    * The pure per-endpoint RPC transport mechanism. Owns the read-failover loop +
    * the named timeout-policy matrix + typed exhaustion; constructed with a LIVE
    * endpoint thunk over `this.providers` / `this.rpcUrls` and the
-   * `signPopulatedTransaction` callback, so it never holds a back-reference to
-   * the adapter and never owns tx-safety state.
+   * `prepareSignerTransaction` hook, so it never holds a back-reference to the
+   * adapter, never signs and never owns tx-safety state.
    */
   protected readonly rpcFailover: RpcFailoverClient;
   /** Background views coalesced into one Multicall3 request (see `evm-background-read-batching.ts`). */
@@ -1419,23 +1420,24 @@ export class EVMChainAdapterBase {
     this.provider = this.primaryProvider;
     // Construct the transport client AFTER `this.providers`/`this.rpcUrls` are
     // set (above). The endpoint thunk reads `providers`/`rpcUrls` live (so a
-    // reassignment of `(a as any).providers` is observed) and signing routes back
-    // to `signPopulatedTransaction` so that helper stays on the adapter. No
-    // failover read can run before this point — the constructor below only builds
-    // Wallets/Contracts and a lazily-resolved HubResolutionCache.
+    // reassignment of `(a as any).providers` is observed) and the signer-side
+    // preparation routes back to `prepareSignerTransaction`, so the fee-cap policy
+    // stays on the adapter. No failover read can run before this point — the
+    // constructor below only builds Wallets/Contracts and a lazily-resolved
+    // HubResolutionCache.
     this.rpcFailover = new RpcFailoverClient(
       // Mapped at CALL time inside the thunk (NOT captured), so a reassignment of
       // `(a as any).providers` / `(a as any).rpcUrls` after construction still
       // propagates live. `providers`/`rpcUrls` are built in lockstep
       // (`providers = rpcUrls.map(...)`), so index i pairs provider[i]↔rpcUrl[i].
       () => this.providers.map((provider, i) => ({ provider, rpcUrl: this.rpcUrls[i] })),
-      (signer, populated) => this.signPopulatedTransaction(signer, populated),
       // `this.chainId` is assigned later in this constructor (after the client is
       // built), so pass a LIVE thunk — resolved at metric-record time — rather
       // than capturing the still-undefined field value here.
       () => this.chainId,
       {
         validateEndpoint: async (endpoint) => { await this.ensureConfiguredStaticChainIdValidated(endpoint.provider); },
+        prepareForSigning: (signer, populated) => this.prepareSignerTransaction(signer, populated),
         // Endpoint-stickiness config. The kill-switch is resolved HERE at the config
         // boundary (LIVE per-check so flipping the env + restart disables it) so the
         // transport core stays free of any process-global dependency.
@@ -1887,7 +1889,7 @@ export class EVMChainAdapterBase {
    * Rebind a CONTRACT to a `provider` for one per-endpoint VIEW read, leaving the
    * boot-bound `this.contracts.*` handle untouched. The sole remaining base caller
    * is the `getMaxKaNumberForAuthor` staticCall (a `readProvider` lambda); the
-   * write-path signer rebind lives in the module's `populateAndSign`. The
+   * write-path signer rebind lives in the module's `prepareTransaction`. The
    * `as Contract` recovers the dynamic-method index signature ethers'
    * `BaseContract.connect` drops.
    */
@@ -1932,37 +1934,47 @@ export class EVMChainAdapterBase {
     return (await this.receiptFinality.read(receipt, options)) !== null;
   }
 
-  protected async signPopulatedTransaction(
+  /**
+   * The signer-side preparation of a contract-populated transaction (nonce, gas
+   * and fee reads) with the configured fee cap. `RpcFailoverClient.prepareTransaction`
+   * runs it on each endpoint under the per-endpoint deadline; it never signs.
+   */
+  protected async prepareSignerTransaction(
     signer: EvmSigner,
     populated: ethers.TransactionRequest,
-  ): Promise<SignedTransactionEnvelope> {
-    const populate = async () => {
-      const filled = await signer.populateTransaction(populated);
-      if (this.maxFeePerGasWei === undefined) return filled;
-      let baseFeePerGas: bigint | null | undefined;
-      if (filled.maxFeePerGas !== null && filled.maxFeePerGas !== undefined) {
-        baseFeePerGas = (await signer.provider?.getBlock('latest'))?.baseFeePerGas;
-      }
-      return applyTransactionFeeCap(filled, this.maxFeePerGasWei, baseFeePerGas);
-    };
-    // The RPC population (nonce, gas, fees) is bounded by the per-endpoint
-    // deadline for every signer; the signing request after it is not endpoint
-    // work and is never cut off (`RpcFailoverClient.populateAndSign`).
-    const filled = await withRpcRequestTimeout(RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS, 'transaction population', populate);
+  ): Promise<ethers.TransactionRequest> {
+    const filled = await signer.populateTransaction(populated);
+    if (this.maxFeePerGasWei === undefined) return filled;
+    let baseFeePerGas: bigint | null | undefined;
+    if (filled.maxFeePerGas !== null && filled.maxFeePerGas !== undefined) {
+      baseFeePerGas = (await signer.provider?.getBlock('latest'))?.baseFeePerGas;
+    }
+    return applyTransactionFeeCap(filled, this.maxFeePerGasWei, baseFeePerGas);
+  }
+
+  /**
+   * Sign a prepared transaction, once: callers sign after preparation and its
+   * retries and recoveries are complete, so a signer failure is final whatever
+   * it says. It is not endpoint work and has no RPC deadline; an external signer
+   * bounds its own request.
+   */
+  protected async signPreparedTransaction(prepared: PreparedTransaction): Promise<SignedTransactionEnvelope> {
     // GH#2270 PR-3 r3 — ONE decode of the signed bytes, at signing, for both facts the send
     // window needs. The nonce used to be re-parsed at the dispatch boundary from the same string.
-    const { signedTx, parsed } = await signTransactionOnce(signer, filled);
+    const { signedTx, parsed } = await signTransactionOnce(prepared.signer, prepared.transaction);
     const nonce = Number.isSafeInteger(parsed.nonce) && parsed.nonce >= 0 ? parsed.nonce : undefined;
     return { signedTx, txHash: parsed.hash ?? '0x', ...(nonce === undefined ? {} : { nonce }) };
   }
 
   /**
-   * #888: populate + sign a V10 write tx (shared by publish + update) with a
-   * one-shot recovery for a stale-RPC `TooLowAllowance` revert. Gas estimation
-   * during populate can read a stale TRAC allowance and revert even though the
-   * approve succeeded; this is strictly pre-broadcast, so on that ONE revert we
-   * force a fresh approve (`ensureV10ApproveTrac(force=true)`) and retry exactly
-   * once. Any other error, or a second `TooLowAllowance`, propagates.
+   * #888: prepare a V10 write tx (shared by publish + update) with a one-shot
+   * recovery for a stale-RPC `TooLowAllowance` revert, then sign it once. Gas
+   * estimation during preparation can read a stale TRAC allowance and revert
+   * even though the approve succeeded; this is strictly pre-broadcast, so on that
+   * ONE revert we force a fresh approve (`ensureV10ApproveTrac(force=true)`) and
+   * prepare again exactly once. Any other error, or a second `TooLowAllowance`,
+   * propagates. The signature comes after every retry and recovery, so a signer
+   * failure is never read as a revert or an endpoint failure.
    */
   protected async populateAndSignV10WithAllowanceRecovery(
     signer: EvmSigner,
@@ -1974,22 +1986,23 @@ export class EVMChainAdapterBase {
     reapproveLabel: string,
     approvalSender: ContractWriteSender = this.sendContractTransaction.bind(this),
   ): Promise<SignedTransactionEnvelope> {
-    // Per-endpoint populate+sign failover lives in the shared
-    // `populateAndSignAcrossProviders` (so a 429ing primary can't fail-fast the
+    // Per-endpoint preparation failover lives in the shared
+    // `prepareAcrossProviders` (so a 429ing primary can't fail-fast the
     // publish); the #888 stale-allowance recovery stays a strict ONE-SHOT. OUTER
     // (this loop) owns the SINGLE `forcedReapprove` latch + the lone forced
     // approve; INNER iterates the bare providers. `TooLowAllowance` is a
     // CALL_EXCEPTION (non-retryable), so the inner loop does NOT fail over on it —
     // it propagates up here. The latch is never reset per endpoint, so at most
     // ONE forced approve fires per publish regardless of endpoints tried. Only the
-    // one returned signed tx is broadcast; the whole thing runs inside the
-    // per-wallet `SignerTxSerializer` (#953), strictly pre-broadcast / pre-WAL.
+    // one signed tx is broadcast; the whole thing runs inside the per-wallet
+    // `SignerTxSerializer` (#953), strictly pre-broadcast / pre-WAL.
     let forcedReapprove = false;
-    for (;;) {
+    let prepared: PreparedTransaction | undefined;
+    while (prepared === undefined) {
       try {
-        for (let preparationPass = 0; ; preparationPass += 1) {
+        for (let preparationPass = 0; prepared === undefined; preparationPass += 1) {
           try {
-            return await this.populateAndSignAcrossProviders(
+            prepared = await this.prepareAcrossProviders(
               kaContract,
               method,
               [methodParams],
@@ -2030,11 +2043,12 @@ export class EVMChainAdapterBase {
             true,
             approvalSender,
           );
-          continue; // re-run the WHOLE inner per-provider populate loop, allowance now in place
+          continue; // re-run the WHOLE inner per-provider preparation loop, allowance now in place
         }
         throw err; // any other error, or a SECOND TooLowAllowance, propagates
       }
     }
+    return this.signPreparedTransaction(prepared);
   }
 
   protected async sendSignedTransactionAndWait(
@@ -2111,7 +2125,7 @@ export class EVMChainAdapterBase {
       // nonce is what makes absence PROVABLE — once the wallet's account nonce at a FINALIZED
       // block is past this slot, and the transaction is still not found, it can never mine.
       //
-      // It arrives already parsed, from the one decode `signPopulatedTransaction` does at signing.
+      // It arrives already parsed, from the one decode `signPreparedTransaction` does at signing.
       // A signer that could not provide one leaves it undefined and the recovery side stays
       // fail-closed; nothing is re-derived here.
       try {
@@ -2159,32 +2173,23 @@ export class EVMChainAdapterBase {
     return receipt;
   }
 
-  protected async sendPopulatedTransaction(
-    signer: EvmSigner,
-    populated: ethers.TransactionRequest,
-    label: string,
-  ): Promise<ethers.TransactionReceipt> {
-    const { signedTx, txHash } = await this.signPopulatedTransaction(signer, populated);
-    return this.sendSignedTransactionAndWait(signedTx, txHash, label);
-  }
-
   /**
-   * Thin delegator to `this.rpcFailover.populateAndSign` — the per-endpoint
-   * populate+sign loop (which reaches `signPopulatedTransaction` via the injected
-   * callback). Called by `populateAndSignV10WithAllowanceRecovery` (the
-   * `forcedReapprove` latch owner) and `sendContractTransaction`. STRICTLY
-   * pre-broadcast — the caller owns the WAL split and broadcasts the single
-   * returned tx.
+   * Thin delegator to `this.rpcFailover.prepareTransaction` — the per-endpoint
+   * preparation loop (which runs `prepareSignerTransaction` through the injected
+   * hook). Called by `populateAndSignV10WithAllowanceRecovery` (the
+   * `forcedReapprove` latch owner) and `sendContractTransaction`, which sign the
+   * prepared tx once afterwards. STRICTLY pre-signing — the caller owns the
+   * signature, the WAL split and the broadcast.
    */
-  protected async populateAndSignAcrossProviders(
+  protected async prepareAcrossProviders(
     contract: Contract,
     method: string,
     args: readonly unknown[],
     signer: EvmSigner,
     label: string,
     opts?: { gasLimitBufferBps?: number },
-  ): Promise<SignedTransactionEnvelope> {
-    return this.rpcFailover.populateAndSign(contract, method, args, signer, label, opts);
+  ): Promise<PreparedTransaction> {
+    return this.rpcFailover.prepareTransaction(contract, method, args, signer, label, opts);
   }
 
   /**
@@ -2269,17 +2274,16 @@ export class EVMChainAdapterBase {
   ): Promise<ethers.TransactionReceipt> {
     // Parent span for the whole send. Broadcast + receipt-wait open their own
     // nested spans/metrics (chain.tx_submit / chain.tx_wait) inside
-    // sendSignedTransactionAndWait; populate+sign failover is counted inside
-    // populateAndSignAcrossProviders.
+    // sendSignedTransactionAndWait; preparation failover is counted inside
+    // prepareAcrossProviders.
     return withSpan(
       'chain.tx_send',
       async (span) => {
-        // Populate+sign with per-endpoint failover (shared with the V10 path),
-        // then broadcast+confirm the single signed tx. Split so `onBroadcast`
-        // (the WAL checkpoint) can sit between sign and broadcast for V10 callers.
-        const { signedTx, txHash } = await this.populateAndSignAcrossProviders(
-          contract, method, args, signer, label, opts,
-        );
+        // Prepare with per-endpoint failover (shared with the V10 path), sign the
+        // prepared tx once, then broadcast+confirm it. The V10 path signs the same
+        // way and puts its `onBroadcast` WAL checkpoint between signing and broadcast.
+        const prepared = await this.prepareAcrossProviders(contract, method, args, signer, label, opts);
+        const { signedTx, txHash } = await this.signPreparedTransaction(prepared);
         span.setAttribute('dkg.tx_hash', txHash);
         return this.sendSignedTransactionAndWait(signedTx, txHash, label);
       },

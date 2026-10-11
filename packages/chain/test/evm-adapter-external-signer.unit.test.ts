@@ -1,17 +1,17 @@
 /**
  * An EVM adapter whose operational wallets sign through an external signer.
- * A signer's failure is final for the transaction path: no contract-error
- * recovery reads a signer's refusal as a revert and asks for another
- * signature, whatever text the signer returned. The RPC population of a
- * transaction is bounded by the per-endpoint deadline, for every signer, and
- * the signing request after it is not.
+ * A transaction is prepared first, across the endpoints, and then signed once.
+ * A signer's failure is final: no contract-error recovery that re-runs a whole
+ * write reads a signer's refusal as a revert and asks for another signature,
+ * whatever text the signer returned. The RPC population of a transaction is
+ * bounded by the per-endpoint deadline, for every signer, and the signing
+ * request after it is not.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import { connectRemoteSigners } from '../src/remote-signer-connect.js';
 import { RemoteSignerError } from '../src/remote-signer-errors.js';
-import { classifyRpcRetryDisposition } from '../src/evm-adapter-rpc.js';
 import { RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
 import {
   InsufficientPublisherFundsError,
@@ -88,8 +88,9 @@ describe('contract recovery never re-signs after a signer refusal', () => {
     const adapter = await adapterFor(fake);
     const approvals: unknown[] = [];
     adapter.ensureV10ApproveTrac = async (...args: unknown[]) => { approvals.push(args); };
-    adapter.populateAndSignAcrossProviders = (_contract: unknown, _method: unknown, _args: unknown, signer: unknown) => (
-      adapter.signPopulatedTransaction(signer, TX)
+    // Preparation succeeds; the signature after it is refused.
+    adapter.prepareAcrossProviders = async (_contract: unknown, _method: unknown, _args: unknown, signer: unknown) => (
+      { transaction: TX, signer }
     );
     await expect(adapter.populateAndSignV10WithAllowanceRecovery(adapter.signer, {}, 'publish', {}, KAV, 1n, 'publish approval'))
       .rejects.toMatchObject({ code: 'REMOTE_SIGNER_REJECTED' });
@@ -98,15 +99,18 @@ describe('contract recovery never re-signs after a signer refusal', () => {
 
     // A genuine TooLowAllowance revert from gas estimation still forces one approval and one retry.
     let attempts = 0;
-    adapter.populateAndSignAcrossProviders = async () => {
+    adapter.prepareAcrossProviders = async (_contract: unknown, _method: unknown, _args: unknown, signer: unknown) => {
       attempts += 1;
       if (attempts === 1) throw Object.assign(new Error('execution reverted'), { revert: { name: 'TooLowAllowance' } });
-      return { signedTx: '0x02', txHash: '0xab' };
+      return { transaction: TX, signer };
     };
+    const signPrepared = vi.fn(async () => ({ signedTx: '0x02', txHash: '0xab' }));
+    adapter.signPreparedTransaction = signPrepared;
     await expect(adapter.populateAndSignV10WithAllowanceRecovery(adapter.signer, {}, 'publish', {}, KAV, 1n, 'publish approval'))
       .resolves.toMatchObject({ txHash: '0xab' });
     expect(attempts).toBe(2);
     expect(approvals).toHaveLength(1);
+    expect(signPrepared).toHaveBeenCalledTimes(1);
   });
 
   it('does not re-resolve the Hub and sign again when the signer refuses with a stale-contract text', async () => {
@@ -118,7 +122,8 @@ describe('contract recovery never re-signs after a signer refusal', () => {
     adapter.init = init;
     adapter.invalidateAllBoundContracts = invalidateAll;
     adapter.invalidateRandomSamplingPair = invalidatePair;
-    const sign = () => adapter.signPopulatedTransaction(adapter.signer, TX);
+    // These wrappers re-run a whole write, the signature included.
+    const sign = () => adapter.signPreparedTransaction({ transaction: TX, signer: adapter.signer });
     await expect(adapter.withHubStaleRetryAny(sign)).rejects.toMatchObject({ code: 'REMOTE_SIGNER_REJECTED' });
     await expect(adapter.withHubStaleRetry(sign)).rejects.toMatchObject({ code: 'REMOTE_SIGNER_REJECTED' });
     expect(fake.calls('eth_signTransaction')).toHaveLength(2);
@@ -154,73 +159,79 @@ describe('contract recovery never re-signs after a signer refusal', () => {
 describe('the RPC population of a transaction is bounded, its signing request is not', () => {
   const payer = new ethers.Wallet(PAYER_KEY);
 
-  /** A signer for the payer account whose RPC population (nonce, gas, fees) waits until released. */
-  function stalledPopulation(external: boolean) {
+  /**
+   * An adapter over two endpoints and a payer signer whose RPC population
+   * (nonce, gas, fees) on the first endpoint, when `stallFirst`, waits until
+   * released. A write runs the adapter's own two steps: preparation across the
+   * endpoints, then the one signature.
+   */
+  function twoEndpoints(options: {
+    external: boolean;
+    stallFirst: boolean;
+    signTransaction: (tx: ethers.TransactionRequest) => Promise<string>;
+  }) {
     let release!: () => void;
-    const populated = new Promise<ethers.TransactionRequest>((resolve) => { release = () => resolve(TX); });
-    const signTransaction = vi.fn(async (tx: ethers.TransactionRequest) => payer.signTransaction(tx));
-    const signer = {
+    const stalled = new Promise<ethers.TransactionRequest>((resolve) => { release = () => resolve(TX); });
+    const providers = [{ endpoint: 0 }, { endpoint: 1 }];
+    const bound = providers.map(({ endpoint }) => ({
       address: payer.address,
       provider: null,
-      ...(external ? { isExternalSigner: true as const } : {}),
-      populateTransaction: vi.fn(() => populated),
-      signTransaction,
-      connect: () => signer,
+      ...(options.external ? { isExternalSigner: true as const } : {}),
+      populateTransaction: vi.fn(() => (options.stallFirst && endpoint === 0 ? stalled : Promise.resolve(TX))),
+      signTransaction: options.signTransaction,
+    }));
+    const signer = {
+      address: payer.address,
+      ...(options.external ? { isExternalSigner: true as const } : {}),
+      connect: (provider: { endpoint: number }) => bound[provider.endpoint],
     };
-    return { signer, signTransaction, release };
-  }
-
-  function localAdapter(): any {
-    const adapter = new EVMChainAdapter({
+    const adapter: any = new EVMChainAdapter({
       rpcUrl: 'http://127.0.0.1:1',
+      rpcUrls: ['http://127.0.0.1:2'],
       hubAddress: '0x00000000000000000000000000000000000000d4',
       chainId: 'evm:31337',
+      staticNetwork: false,
       privateKey: PAYER_KEY,
       allowNoAdminSigner: true,
     });
     cleanups.push(() => adapter.destroy());
-    return adapter;
+    adapter.providers = providers;
+    const contract = { connect: () => ({ doWrite: { populateTransaction: async () => ({ to: KAV, data: TX.data }) } }) };
+    const write = async () => adapter.signPreparedTransaction(
+      await adapter.prepareAcrossProviders(contract, 'doWrite', [], signer, 'publish'),
+    );
+    return { write, bound, release };
   }
 
   for (const kind of ['external', 'local'] as const) {
     it(`fails a stalled population of ${kind === 'external' ? 'an external' : 'a local'} signer over at the deadline, and never signs it late`, async () => {
       vi.useFakeTimers();
-      const adapter = localAdapter();
-      const { signer, signTransaction, release } = stalledPopulation(kind === 'external');
-      const outcome = adapter.signPopulatedTransaction(signer, TX).then(
-        () => 'signed',
-        (error: unknown) => error,
-      );
+      const signTransaction = vi.fn(async (tx: ethers.TransactionRequest) => payer.signTransaction(tx));
+      const { write, bound, release } = twoEndpoints({ external: kind === 'external', stallFirst: true, signTransaction });
+      const pending = write();
       await vi.advanceTimersByTimeAsync(RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS + 1);
-      const error = await outcome;
-      expect(error).toMatchObject({ code: 'RPC_TIMEOUT' });
-      // A timed-out population moves on to the next endpoint.
-      expect(classifyRpcRetryDisposition(error)).toBe('failover');
+      // The stalled endpoint was cut off at the deadline; the next one prepared the transaction.
+      await expect(pending).resolves.toMatchObject({ nonce: 3 });
+      expect(bound[1].populateTransaction).toHaveBeenCalledTimes(1);
+      expect(signTransaction).toHaveBeenCalledTimes(1);
 
-      // The population the endpoint finally answers is never signed.
+      // The population the first endpoint finally answers is never signed.
       release();
       await vi.runAllTimersAsync();
-      expect(signTransaction).not.toHaveBeenCalled();
+      expect(signTransaction).toHaveBeenCalledTimes(1);
     });
   }
 
   it('does not cut off a slow external signing request at the population deadline', async () => {
     vi.useFakeTimers();
-    const adapter = localAdapter();
     const signTransaction = vi.fn((tx: ethers.TransactionRequest) => new Promise<string>((resolve) => {
       setTimeout(() => resolve(payer.signTransaction(tx)), RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS + 5_000);
     }));
-    const signer = {
-      address: payer.address,
-      provider: null,
-      isExternalSigner: true as const,
-      populateTransaction: async () => TX,
-      signTransaction,
-      connect: () => signer,
-    };
-    const pending = adapter.signPopulatedTransaction(signer, TX);
+    const { write, bound } = twoEndpoints({ external: true, stallFirst: false, signTransaction });
+    const pending = write();
     await vi.advanceTimersByTimeAsync(RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS + 6_000);
     await expect(pending).resolves.toMatchObject({ nonce: 3 });
     expect(signTransaction).toHaveBeenCalledTimes(1);
+    expect(bound[1].populateTransaction).not.toHaveBeenCalled();
   });
 });

@@ -16,8 +16,7 @@ import {
   isTransientRpcTransportFailureWithoutTransaction,
 } from '../src/chain-rpc-transport-error.js';
 import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
-import type { SignPopulatedFn } from '../src/rpc-failover-client.js';
-import { makeClient, recorder, retryable429 } from './rpc-failover-test-helpers.js';
+import { makeClient, NEVER_PREPARE, recorder, retryable429 } from './rpc-failover-test-helpers.js';
 
 afterEach(() => { _resetRpcFailoverStatsForTest(); });
 
@@ -35,10 +34,6 @@ const alwaysFailingContract = () => ({
   connect: () => ({ doWrite: { populateTransaction: () => Promise.reject(retryable429()) } }),
 }) as any;
 
-const NEVER_SIGNED: SignPopulatedFn = async () => {
-  throw new Error('sign must not be reached: preparation never completes');
-};
-
 async function caught(run: () => Promise<unknown>): Promise<unknown> {
   try {
     await run();
@@ -51,9 +46,9 @@ async function caught(run: () => Promise<unknown>): Promise<unknown> {
 describe('isTransientRpcTransportFailureWithoutTransaction — real producers', () => {
   it('qualifies a write PREPARATION that exhausted every endpoint (nothing signed, no txHash)', async () => {
     const providers = [{}, {}];
-    const client = makeClient(providers, URLS, NEVER_SIGNED);
+    const client = makeClient(providers, URLS, NEVER_PREPARE);
 
-    const err = await caught(() => client.populateAndSign(alwaysFailingContract(), 'doWrite', [], makeSigner(), 'publish'));
+    const err = await caught(() => client.prepareTransaction(alwaysFailingContract(), 'doWrite', [], makeSigner(), 'publish'));
 
     expect(err).toBeInstanceOf(RpcEndpointsExhaustedError);
     expect((err as RpcEndpointsExhaustedError).code).toBe('RPC_ENDPOINTS_EXHAUSTED');
@@ -62,9 +57,9 @@ describe('isTransientRpcTransportFailureWithoutTransaction — real producers', 
   });
 
   it('qualifies the single-endpoint preparation exhaustion too (the producer keeps the provider text, URLs reduced to hosts)', async () => {
-    const client = makeClient([{}], [URLS[0]], NEVER_SIGNED);
+    const client = makeClient([{}], [URLS[0]], NEVER_PREPARE);
 
-    const err = await caught(() => client.populateAndSign(alwaysFailingContract(), 'doWrite', [], makeSigner(), 'publish'));
+    const err = await caught(() => client.prepareTransaction(alwaysFailingContract(), 'doWrite', [], makeSigner(), 'publish'));
 
     expect(err).toBeInstanceOf(RpcEndpointsExhaustedError);
     expect(isTransientRpcTransportFailureWithoutTransaction(err)).toBe(true);

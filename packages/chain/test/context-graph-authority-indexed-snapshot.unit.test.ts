@@ -334,7 +334,6 @@ function bindProductionRpcTipReader(
       provider: provider as any,
       rpcUrl: `https://authority-${index + 1}.example`,
     })),
-    async () => { throw new Error('authority read must not sign'); },
     () => 'evm:31337',
     { stickiness: { enabled: false } },
   );

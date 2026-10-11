@@ -551,13 +551,15 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
     (a as any).sendContractTransaction = publicSend;
     const scopedSend = recorder(async () => fakeReceipt('approve'));
     let populateCalls = 0;
-    (a as any).populateAndSignAcrossProviders = recorder(async () => {
+    (a as any).prepareAcrossProviders = recorder(async () => {
       populateCalls += 1;
       if (populateCalls === 1) {
         throw Object.assign(new Error('execution reverted'), { revert: { name: 'TooLowAllowance' } });
       }
-      return { signedTx: 'pub', txHash: '0xpub' };
+      return { transaction: { nonce: 1 }, signer };
     });
+    const signPreparedTransaction = recorder(async () => ({ signedTx: 'pub', txHash: '0xpub' }));
+    (a as any).signPreparedTransaction = signPreparedTransaction;
 
     const result = await (a as any).populateAndSignV10WithAllowanceRecovery(
       signer,
@@ -572,6 +574,7 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
 
     expect(result).toEqual({ signedTx: 'pub', txHash: '0xpub' });
     expect(populateCalls).toBe(2);
+    expect(signPreparedTransaction.calls).toHaveLength(1); // signed once, after the recovery
     expect(publicSend.calls).toEqual([]);
     expect(scopedSend.calls).toHaveLength(1);
     expect(scopedSend.calls[0].slice(1, 2)).toEqual(['approve']);

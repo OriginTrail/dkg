@@ -191,7 +191,6 @@ function harness(options?: {
   const client = options?.failoverClient === true
     ? new RpcFailoverClient(
       () => [{ provider: provider as never, rpcUrl: 'https://rpc-0.example' }],
-      async () => { throw new Error('chain index tests must not sign transactions'); },
       () => 'evm:31337',
     )
     : undefined;

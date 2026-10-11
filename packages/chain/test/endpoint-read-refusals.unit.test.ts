@@ -16,9 +16,8 @@ import {
   EndpointReadRefusals,
   isEndpointPolicyRefusal,
 } from '../src/endpoint-read-refusals.js';
-import type { SignPopulatedFn } from '../src/rpc-failover-client.js';
 import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
-import { makeClient, NEVER_SIGN, recorder, retryable429 } from './rpc-failover-test-helpers.js';
+import { makeClient, NEVER_PREPARE, recorder, retryable429 } from './rpc-failover-test-helpers.js';
 
 const PRIMARY = 'https://primary.example';
 const REFUSER = 'https://refuser.example';
@@ -294,7 +293,7 @@ describe('RpcFailoverClient with an endpoint that refuses receipt lookups', () =
   it('sends a receipt lookup to the refusing endpoint once, then starts at the others', async () => {
     const { primary, refuser, third } = endpoints();
     let clock = 0;
-    const client = makeClient([primary, refuser, third], URLS, NEVER_SIGN, { enabled: true, now: () => clock });
+    const client = makeClient([primary, refuser, third], URLS, NEVER_PREPARE, { enabled: true, now: () => clock });
 
     await expect(call(client)).resolves.toBe('refuser'); // the preference moves to the refuser
     await expect(client.getReceipt('0xhash')).resolves.toBe(receipt);
@@ -315,7 +314,7 @@ describe('RpcFailoverClient with an endpoint that refuses receipt lookups', () =
   it('leaves the preference for other reads where it was', async () => {
     const { primary, refuser } = endpoints();
     let clock = 0;
-    const client = makeClient([primary, refuser], URLS.slice(0, 2), NEVER_SIGN, { enabled: true, now: () => clock });
+    const client = makeClient([primary, refuser], URLS.slice(0, 2), NEVER_PREPARE, { enabled: true, now: () => clock });
 
     await call(client);              // primary throttles, the refuser serves: preferred
     await client.getReceipt('0xhash'); // refused once: this clears the preference, as before
@@ -339,7 +338,7 @@ describe('RpcFailoverClient with an endpoint that refuses receipt lookups', () =
    */
   async function refuserPreferredAndPrimaryFailingReceipts() {
     const { primary, refuser, third } = endpoints();
-    const client = makeClient([primary, refuser, third], URLS, NEVER_SIGN, { enabled: true });
+    const client = makeClient([primary, refuser, third], URLS, NEVER_PREPARE, { enabled: true });
     await call(client);
     await client.getReceipt('0xhash'); // refused by the refuser, served by the primary
     await call(client);              // the preference is on the refuser again
@@ -388,27 +387,26 @@ describe('RpcFailoverClient with an endpoint that refuses receipt lookups', () =
       populatedAt.push(at);
       return at === 'primary' ? Promise.reject(retryable429()) : Promise.resolve({ to: '0xTO', data: '0x' });
     } } }) } as any;
-    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
     const client = makeClient(
-      [primary, backup], URLS.slice(0, 2), signPopulated as SignPopulatedFn, { enabled: true },
+      [primary, backup], URLS.slice(0, 2), async (_signer, populated) => populated, { enabled: true },
     );
 
-    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w'); // write-proven: the backup
-    await client.getReceipt('0xold');                                          // refused there once
-    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w'); // write-proven again
+    await client.prepareTransaction(contract, 'doWrite', [], makeSigner(), 'w'); // write-proven: the backup
+    await client.getReceipt('0xold');                                             // refused there once
+    await client.prepareTransaction(contract, 'doWrite', [], makeSigner(), 'w'); // write-proven again
     expect(populatedAt).toEqual(['primary', 'backup', 'primary', 'backup']);
 
     await expect(client.getReceipt('0xold')).resolves.toBe(receipt);
     expect(backup.getTransactionReceipt.calls).toHaveLength(1);
 
     populatedAt.length = 0;
-    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w');
+    await client.prepareTransaction(contract, 'doWrite', [], makeSigner(), 'w');
     expect(populatedAt).toEqual(['backup']);
   });
 
   it('still reaches the refusing endpoint when no other endpoint answers', async () => {
     const { primary, refuser } = endpoints();
-    const client = makeClient([primary, refuser], URLS.slice(0, 2), NEVER_SIGN, { enabled: true });
+    const client = makeClient([primary, refuser], URLS.slice(0, 2), NEVER_PREPARE, { enabled: true });
     await call(client);
     await client.getReceipt('0xhash');
     primary.getTransactionReceipt = recorder(async (): Promise<typeof receipt> => { throw retryable429(); });
@@ -420,7 +418,7 @@ describe('RpcFailoverClient with an endpoint that refuses receipt lookups', () =
 
   it('remembers the refusal per read: another read still starts at that endpoint', async () => {
     const { primary, refuser } = endpoints();
-    const client = makeClient([primary, refuser], URLS.slice(0, 2), NEVER_SIGN, { enabled: true });
+    const client = makeClient([primary, refuser], URLS.slice(0, 2), NEVER_PREPARE, { enabled: true });
     await call(client);
     await client.getReceipt('0xhash');
     await call(client);
@@ -432,7 +430,7 @@ describe('RpcFailoverClient with an endpoint that refuses receipt lookups', () =
   it('tries the endpoint again after the refusal has lapsed', async () => {
     const { primary, refuser } = endpoints();
     let clock = 0;
-    const client = makeClient([primary, refuser], URLS.slice(0, 2), NEVER_SIGN, { enabled: true, now: () => clock });
+    const client = makeClient([primary, refuser], URLS.slice(0, 2), NEVER_PREPARE, { enabled: true, now: () => clock });
     await call(client);
     await client.getReceipt('0xhash');
     await call(client);
@@ -447,7 +445,7 @@ describe('RpcFailoverClient with an endpoint that refuses receipt lookups', () =
   it('does not treat a throttle as a refusal', async () => {
     const { state, primary, refuser } = endpoints();
     refuser.getTransactionReceipt = recorder(async (): Promise<typeof receipt> => { throw retryable429(); });
-    const client = makeClient([primary, refuser], URLS.slice(0, 2), NEVER_SIGN, { enabled: true });
+    const client = makeClient([primary, refuser], URLS.slice(0, 2), NEVER_PREPARE, { enabled: true });
 
     for (let i = 0; i < 3; i += 1) {
       state.primaryThrottles = true;
@@ -461,7 +459,7 @@ describe('RpcFailoverClient with an endpoint that refuses receipt lookups', () =
   it('keeps the configured order for a tip-sensitive read', async () => {
     const primary = { head: recorder(async (): Promise<number> => { throw refused403(); }) };
     const backup = { head: recorder(async () => 7) };
-    const client = makeClient([primary, backup], URLS.slice(0, 2), NEVER_SIGN, { enabled: true });
+    const client = makeClient([primary, backup], URLS.slice(0, 2), NEVER_PREPARE, { enabled: true });
     const head = () => client.read('chain head', (p: any) => p.head(), { skipPreferred: true });
 
     await expect(head()).resolves.toBe(7);
@@ -473,7 +471,7 @@ describe('RpcFailoverClient with an endpoint that refuses receipt lookups', () =
   it('keeps the configured order for every read when endpoint ordering is switched off', async () => {
     const primary = { getTransactionReceipt: recorder(async (): Promise<typeof receipt> => { throw refused403(); }) };
     const backup = { getTransactionReceipt: recorder(async () => receipt) };
-    const client = makeClient([primary, backup], URLS.slice(0, 2), NEVER_SIGN, { enabled: false });
+    const client = makeClient([primary, backup], URLS.slice(0, 2), NEVER_PREPARE, { enabled: false });
 
     await client.getReceipt('0xhash');
     await client.getReceipt('0xhash');
@@ -489,7 +487,7 @@ describe('RpcFailoverClient with an endpoint that refuses receipt lookups', () =
     };
     const backup = { view: recorder(async () => 'backup'), other: recorder(async () => 'backup') };
     const client = makeClient(
-      [primary, backup], URLS.slice(0, 2), NEVER_SIGN, { enabled: true, ttlMs: 30_000, now: () => clock },
+      [primary, backup], URLS.slice(0, 2), NEVER_PREPARE, { enabled: true, ttlMs: 30_000, now: () => clock },
     );
     const view = () => client.read('kas.refusedView', (p: any) => p.view());
 

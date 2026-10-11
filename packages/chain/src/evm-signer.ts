@@ -18,11 +18,10 @@ export interface EvmSigner extends ethers.Signer {
 
 /**
  * A signer whose key is held outside this process (a remote signing service,
- * an HSM, ...). As for every signer, the adapter bounds the RPC population of
- * a transaction (nonce, gas, fees) by its per-endpoint deadline and never puts
- * the signing request under that deadline. A failure of such a signer is never
- * failed over to another endpoint either: it is not an endpoint failure, and
- * one prepared transaction is signed at most once.
+ * an HSM, ...). As for every signer, the adapter prepares a transaction first
+ * (nonce, gas, fees, each endpoint under its deadline, with failover) and then
+ * asks for the signature once, outside every retry: the signing request has no
+ * RPC deadline, and its failure is final.
  */
 export interface ExternalEvmSigner extends EvmSigner {
   readonly isExternalSigner: true;
@@ -58,9 +57,10 @@ export function isExternalEvmSigner(signer: unknown): signer is ExternalEvmSigne
 /**
  * Sign a fully populated transaction once and decode the signed bytes. A
  * failure of an external signer is final, whatever it looks like (a reset
- * connection is not an RPC endpoint failure, and neither are bytes that do not
- * decode): one that is not already a signer error is wrapped in one, so no
- * endpoint failover or retry loop asks the signer for a second signature.
+ * connection, bytes that do not decode): one that is not already a signer error
+ * is wrapped in one, so that the recoveries which re-run a whole write (a
+ * Hub-stale revert, a context graph's deposit allowance) never read its text as
+ * a revert and ask the signer again.
  */
 export async function signTransactionOnce(
   signer: EvmSigner,

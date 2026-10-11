@@ -6,21 +6,21 @@ describe('write transport endpoint validation (#1455)', () => {
     const error = Object.assign(new Error('endpoint chain mismatch'), { code: 'RPC_CHAIN_ID_MISMATCH' });
     const validateEndpoint = vi.fn(async () => { throw error; });
     const populateTransaction = vi.fn(async () => ({}));
-    const signPopulated = vi.fn(async () => ({ signedTx: '0xsigned', txHash: '0xhash' }));
+    const prepareForSigning = vi.fn(async () => ({}));
     const provider = { broadcastTransaction: vi.fn(), getTransactionReceipt: vi.fn() };
     const client = new RpcFailoverClient(
       () => [{ provider, rpcUrl: 'https://invalid-chain.example' }] as unknown as RpcEndpoint[],
-      signPopulated, () => 'evm:31337', { validateEndpoint },
+      () => 'evm:31337', { validateEndpoint, prepareForSigning },
     );
     const contract = { connect: () => ({ write: { populateTransaction } }) };
     const signer = { connect: () => ({}) };
-    const result = phase === 'populate' ? client.populateAndSign(contract as never, 'write', [], signer as never, 'test')
+    const result = phase === 'populate' ? client.prepareTransaction(contract as never, 'write', [], signer as never, 'test')
       : phase === 'broadcast' ? client.broadcast('0xsigned', '0xhash', 'test')
       : client.getReceipt('0xhash');
     await expect(result).rejects.toBe(error);
     expect(validateEndpoint).toHaveBeenCalledOnce();
     expect(populateTransaction).not.toHaveBeenCalled();
-    expect(signPopulated).not.toHaveBeenCalled();
+    expect(prepareForSigning).not.toHaveBeenCalled();
     expect(provider.broadcastTransaction).not.toHaveBeenCalled();
     expect(provider.getTransactionReceipt).not.toHaveBeenCalled();
   });

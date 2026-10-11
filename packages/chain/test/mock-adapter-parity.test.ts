@@ -191,13 +191,14 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'getTransactionReceiptWithFailover',
   'getTransactionWithFailover',
   'waitForReceiptWithFailover',
-  'signPopulatedTransaction',
+  'prepareSignerTransaction',
+  'signPreparedTransaction',
   // #1336 read-facade + populate plumbing: the chain-concept read facades over
   // the `RpcFailoverClient` transport — `readContract` (string-method point read),
   // `readContractWithOptions` (the cancellable string-method variant),
   // `readContractWith` (policy/classifier-bearing contract read), and the raw
   // `readProvider` — plus the event-log scan wrapper, the contract rebind helper,
-  // and the populate+sign-across-providers delegator. Protected EVM-only helpers
+  // and the prepare-across-providers delegator. Protected EVM-only helpers
   // over `this.providers[]` (the mock has no RPC provider pool), not ChainAdapter
   // contract methods — same category as the write-failover helpers above.
   'readContract',
@@ -208,9 +209,8 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'readProviderRetryingNull',
   'queryFilterWithFailover',
   'rebindContract',
-  'populateAndSignAcrossProviders',
+  'prepareAcrossProviders',
   'sendSignedTransactionAndWait',
-  'sendPopulatedTransaction',
   'sendContractTransaction',
   // TS-private / protected write-serialization plumbing. The EVM adapter uses
   // this scope to expose an unlocked sender only while the per-wallet serializer

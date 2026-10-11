@@ -18,12 +18,12 @@ import {
 import { RemoteSignerError, isRemoteSignerError } from '../src/remote-signer-errors.js';
 import { connectRemoteSigners } from '../src/remote-signer-connect.js';
 import { connectConfiguredRemoteSigners, resolveChainSignerConfig } from '../src/remote-signer-config.js';
-import { classifyRpcRetryDisposition, isRetryableRpcError } from '../src/evm-adapter-rpc.js';
 import { RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
 import { OperationalKeyUnavailableError, isExternalEvmSigner } from '../src/evm-signer.js';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
-import { makeClient, recorder } from './rpc-failover-test-helpers.js';
-import type { SignPopulatedFn } from '../src/rpc-failover-client.js';
+import { recorder } from './rpc-failover-test-helpers.js';
+import type { PreparedTransaction } from '../src/rpc-failover-client.js';
+import type { SignedTransactionEnvelope } from '../src/chain-adapter.js';
 import { startFakeRemoteSigner, type FakeSigner, type FakeSignerOptions } from './helpers/fake-remote-signer.js';
 import { LOCALHOST_CERT, LOCALHOST_KEY, OTHER_HOST_CERT, withTrustedCertificate } from './helpers/local-tls.js';
 
@@ -736,38 +736,11 @@ describe('chain.signer configuration', () => {
 });
 
 describe('remote signer failures are final for the transaction path', () => {
-  it('classifies every remote signer error as non-retryable and non-failover', () => {
-    for (const code of ['REMOTE_SIGNER_TIMEOUT', 'REMOTE_SIGNER_UNAVAILABLE', 'REMOTE_SIGNER_HTTP_ERROR'] as const) {
-      const err = new RemoteSignerError(code, 'Remote signer at unix:/s is unavailable for eth_signTransaction (ECONNREFUSED) timed out 503');
-      expect(classifyRpcRetryDisposition(err)).toBe('fail');
-      expect(isRetryableRpcError(err)).toBe(false);
-    }
-  });
-
-  const externalSigner = () => ({
-    address: WALLET_A.address,
-    isExternalSigner: true,
-    connect: () => ({ address: WALLET_A.address, isExternalSigner: true }),
-  }) as never;
-
-  it('does not fail a signer error over to another RPC endpoint', async () => {
-    const populates = [recorder(async () => ({ to: '0xTO', data: '0x' })), recorder(async () => ({ to: '0xTO', data: '0x' }))];
-    let endpoint = 0;
-    const contract = { connect: () => ({ doWrite: { populateTransaction: populates[endpoint++] } }) } as never;
-    const signPopulated = recorder(async () => {
-      throw new RemoteSignerError('REMOTE_SIGNER_UNAVAILABLE', 'Remote signer at unix:/s is unavailable for eth_signTransaction (ECONNRESET)');
-    });
-    const rpc = makeClient([{}, {}], ['https://a.example', 'https://b.example'], signPopulated as SignPopulatedFn);
-    await expect(rpc.populateAndSign(contract, 'doWrite', [], externalSigner(), 'V10 publish'))
-      .rejects.toMatchObject({ code: 'REMOTE_SIGNER_UNAVAILABLE' });
-    expect(signPopulated.calls).toHaveLength(1);
-    expect(populates[1].calls).toHaveLength(0);
-  });
-
   /**
-   * Two RPC endpoints, the adapter's own signing callback (as the transport is
-   * built in production) and an external signer for account A whose RPC
-   * population and signing the test controls for each endpoint it is bound to.
+   * Two RPC endpoints and an external signer for account A whose RPC population
+   * and signing the test controls for each endpoint it is bound to. A write runs
+   * the adapter's own two steps, as every contract write does: preparation
+   * across the endpoints (with failover), then the one signature.
    */
   function twoEndpointWrite(signerFor: (endpoint: number) => {
     populateTransaction(tx: ethers.TransactionRequest): Promise<ethers.TransactionRequest>;
@@ -775,13 +748,16 @@ describe('remote signer failures are final for the transaction path', () => {
   }) {
     const adapter = new EVMChainAdapter({
       rpcUrl: 'http://127.0.0.1:1',
+      rpcUrls: ['http://127.0.0.1:2'],
       hubAddress: '0x00000000000000000000000000000000000000d4',
       chainId: 'evm:31337',
+      staticNetwork: false,
       privateKey: KEY_C,
       allowNoAdminSigner: true,
     });
     cleanups.push(async () => adapter.destroy());
     const providers = [{ endpoint: 0 }, { endpoint: 1 }];
+    (adapter as unknown as { providers: unknown[] }).providers = providers;
     const contractPopulations = [recorder(async () => ({ ...TX })), recorder(async () => ({ ...TX }))];
     const contract = {
       connect: (runner: { endpoint: number }) => ({ doWrite: { populateTransaction: contractPopulations[runner.endpoint] } }),
@@ -797,11 +773,25 @@ describe('remote signer failures are final for the transaction path', () => {
       isExternalSigner: true as const,
       connect: (provider: { endpoint: number }) => bound[provider.endpoint],
     } as never;
-    const rpc = makeClient(providers, ['https://a.example', 'https://b.example'], (boundSigner, populated) => (
-      (adapter as unknown as { signPopulatedTransaction: SignPopulatedFn }).signPopulatedTransaction(boundSigner, populated)
-    ));
-    return { write: () => rpc.populateAndSign(contract, 'doWrite', [], signer, 'V10 publish'), contractPopulations };
+    const steps = adapter as unknown as {
+      prepareAcrossProviders(...args: unknown[]): Promise<PreparedTransaction>;
+      signPreparedTransaction(prepared: PreparedTransaction): Promise<SignedTransactionEnvelope>;
+    };
+    const write = async () => steps.signPreparedTransaction(
+      await steps.prepareAcrossProviders(contract, 'doWrite', [], signer, 'V10 publish'),
+    );
+    return { write, contractPopulations };
   }
+
+  it('does not fail a signer error over to another RPC endpoint', async () => {
+    const signTransaction = vi.fn(async (): Promise<string> => {
+      throw new RemoteSignerError('REMOTE_SIGNER_UNAVAILABLE', 'Remote signer at unix:/s is unavailable for eth_signTransaction (ECONNRESET)');
+    });
+    const { write, contractPopulations } = twoEndpointWrite(() => ({ populateTransaction: async () => ({ ...TX }), signTransaction }));
+    await expect(write()).rejects.toMatchObject({ code: 'REMOTE_SIGNER_UNAVAILABLE' });
+    expect(signTransaction).toHaveBeenCalledTimes(1);
+    expect(contractPopulations[1].calls).toHaveLength(0);
+  });
 
   it('does not cut a slow external signing request off, and asks for it once on one endpoint', async () => {
     vi.useFakeTimers();
@@ -840,7 +830,7 @@ describe('remote signer failures are final for the transaction path', () => {
   });
 
   it('makes any failure of a supplied external signer final, so it is asked to sign once across endpoints', async () => {
-    const signTransaction = vi.fn(async () => {
+    const signTransaction = vi.fn(async (): Promise<string> => {
       throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
     });
     const { write, contractPopulations } = twoEndpointWrite(() => ({ populateTransaction: async () => ({ ...TX }), signTransaction }));
@@ -848,7 +838,6 @@ describe('remote signer failures are final for the transaction path', () => {
     expect(error).toMatchObject({ code: 'REMOTE_SIGNER_FAILED' });
     expect((error as Error).message).toMatch(/failed to sign: socket hang up/);
     expect((error as { cause?: unknown }).cause).toMatchObject({ code: 'ECONNRESET' });
-    expect(classifyRpcRetryDisposition(error)).toBe('fail');
     expect(signTransaction).toHaveBeenCalledTimes(1);
     expect(contractPopulations[1].calls).toHaveLength(0);
 
