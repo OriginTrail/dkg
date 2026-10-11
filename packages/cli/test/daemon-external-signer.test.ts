@@ -6,8 +6,11 @@
  * report the signer's payer accounts, register an agent by an address the
  * signer holds (the registration is signed by the signer), refuse a payer
  * account as an agent, create and register a context graph with the node token
- * (curated by its default agent, the configured author), keep the credentials
- * out of its output, and refuse to start as a core node.
+ * (curated by its default agent, the configured author), run the whole publish
+ * journey into a PCA-backed public graph with a curated publish policy (a core
+ * node holding the Hardhat core profile's keys hosts it and acknowledges
+ * storage), keep the credentials out of its output, and refuse to start as a
+ * core node.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -18,8 +21,20 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ethers } from 'ethers';
+import { DKGAgent } from '@origintrail-official/dkg-agent';
+import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
+import { DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, contextGraphDataUri } from '@origintrail-official/dkg-core';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TEST_SNAPSHOT_STORAGE } from '../../../scripts/testing/snapshot-storage.js';
-import { createProvider, getSharedContext, HARDHAT_KEYS, revertSnapshot, takeSnapshot } from '../../chain/test/evm-test-context.js';
+import {
+  createEVMAdapter,
+  createProvider,
+  getSharedContext,
+  HARDHAT_KEYS,
+  revertSnapshot,
+  takeSnapshot,
+} from '../../chain/test/evm-test-context.js';
+import { makeAdapterConfig, mintTokens } from '../../chain/test/hardhat-harness.js';
 import { startFakeRemoteSigner, type FakeSigner } from '../../chain/test/helpers/fake-remote-signer.js';
 
 const CLI_ENTRY = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist', 'cli.js');
@@ -28,6 +43,19 @@ const AUTHOR_TOKEN = 'daemon-author-credential-9876f5e4d3c2b1a0';
 const payers = [ethers.Wallet.createRandom(), ethers.Wallet.createRandom()];
 const defaultAuthor = ethers.Wallet.createRandom();
 const agentKey = ethers.Wallet.createRandom();
+const JOURNEY_CG = 'external-signer-journey';
+const JOURNEY_ENTITY = 'urn:external-signer-journey:entity';
+
+/** The length-framed fields (uint32 big-endian length, then the bytes) of a gossip signing payload. */
+function framedFields(bytes: Uint8Array): Uint8Array[] {
+  const fields: Uint8Array[] = [];
+  for (let offset = 0; offset < bytes.length;) {
+    const length = new DataView(bytes.buffer, bytes.byteOffset + offset, 4).getUint32(0, false);
+    fields.push(bytes.subarray(offset + 4, offset + 4 + length));
+    offset += 4 + length;
+  }
+  return fields;
+}
 
 interface Daemon {
   home: string;
@@ -52,7 +80,12 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function spawnDaemon(home: string, nodeRole: 'edge' | 'core', socketPath: string): Promise<Daemon> {
+async function spawnDaemon(
+  home: string,
+  nodeRole: 'edge' | 'core',
+  socketPath: string,
+  bootstrapPeers: string[] = [],
+): Promise<Daemon> {
   const { rpcUrl, hubAddress } = getSharedContext();
   const apiPort = await freePort();
   const tokenFile = join(home, 'signer.token');
@@ -69,6 +102,7 @@ async function spawnDaemon(home: string, nodeRole: 'edge' | 'core', socketPath: 
     apiHost: '127.0.0.1',
     nodeRole,
     relay: 'none',
+    ...(bootstrapPeers.length > 0 ? { bootstrapPeers } : {}),
     auth: { enabled: true },
     store: { backend: 'oxigraph-worker', options: { path: join(home, 'store.nq') } },
     chain: {
@@ -141,6 +175,9 @@ describe('daemon with an external signer', () => {
   let daemon: Daemon | undefined;
   let adminToken: string;
   let snapshotId: string | undefined;
+  let pcaOwner: ReturnType<typeof createEVMAdapter> | undefined;
+  let accountId: bigint;
+  let core: DKGAgent | undefined;
 
   const api = (path: string, init: RequestInit = {}) => fetch(`http://127.0.0.1:${daemon!.apiPort}${path}`, {
     ...init,
@@ -150,9 +187,32 @@ describe('daemon with an external signer', () => {
   beforeAll(async () => {
     if (!existsSync(CLI_ENTRY)) throw new Error(`CLI not built at ${CLI_ENTRY}`);
     snapshotId = await takeSnapshot();
-    // The primary payer sends the context graph registration: give it gas.
-    const deployer = new ethers.Wallet(HARDHAT_KEYS.DEPLOYER, createProvider());
-    await (await deployer.sendTransaction({ to: payers[0].address, value: ethers.parseEther('1') })).wait();
+    // Payers with gas and TRAC, registered as agents of a Publishing Conviction
+    // Account so that they may publish into the graph it backs.
+    const provider = createProvider();
+    const { hubAddress } = getSharedContext();
+    const deployer = new ethers.Wallet(HARDHAT_KEYS.DEPLOYER, provider);
+    for (const payer of payers) {
+      await (await deployer.sendTransaction({ to: payer.address, value: ethers.parseEther('1') })).wait();
+      await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, payer.address, ethers.parseEther('1000'));
+    }
+    pcaOwner = createEVMAdapter(HARDHAT_KEYS.EXTRA1);
+    await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, pcaOwner.getSignerAddress(), ethers.parseEther('100000'));
+    ({ accountId } = await pcaOwner.createPublishingConvictionAccount(ethers.parseEther('100000')));
+    for (const payer of payers) await pcaOwner.registerPublishingConvictionAgent(accountId, payer.address);
+    // A core node with the Hardhat core profile's keys, for storage acknowledgements.
+    core = await DKGAgent.create({
+      name: 'external-signer-test-core',
+      store: new OxigraphStore(),
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      nodeRole: 'core',
+      chainAdapter: new EVMChainAdapter(makeAdapterConfig(getSharedContext().rpcUrl, getSharedContext().hubAddress, HARDHAT_KEYS.CORE_OP)),
+      rfc64CatalogActivation: { enabled: false },
+      syncOnConnectEnabled: false,
+    });
+    await core.start();
+    const coreAddress = core.multiaddrs.find((address) => address.includes('/tcp/') && !address.includes('/p2p-circuit'))!;
     dir = await mkdtemp(join(tmpdir(), 'dkg-ext-'));
     fake = await startFakeRemoteSigner({
       socketPath: join(dir, 'signer.sock'),
@@ -163,16 +223,18 @@ describe('daemon with an external signer', () => {
     });
     const home = join(dir, 'edge');
     await mkdir(home);
-    daemon = await spawnDaemon(home, 'edge', fake.socketPath!);
+    daemon = await spawnDaemon(home, 'edge', fake.socketPath!, [coreAddress]);
     await waitUntilReady(daemon);
     adminToken = (await readFile(join(home, 'auth.token'), 'utf8'))
       .split('\n').map((line) => line.trim()).find((line) => line.length > 0 && !line.startsWith('#'))!;
-  }, 90_000);
+  }, 120_000);
 
   afterAll(async () => {
     try {
       expect(await stop(daemon)).toBe(0);
     } finally {
+      await core?.stop().catch(() => {});
+      pcaOwner?.destroy();
       await fake?.close();
       if (dir) await rm(dir, { recursive: true, force: true });
       if (snapshotId) await revertSnapshot(snapshotId);
@@ -235,6 +297,83 @@ describe('daemon with an external signer', () => {
     expect(transactions.every((request) => request.authorization === `Bearer ${PAYER_TOKEN}`)).toBe(true);
     expect(await allOutput(daemon!)).toContain(`Auto-registered default agent "external-signer-test" → ${defaultAuthor.address}`);
   });
+
+  it('runs the publish journey with the node token and no local key', async () => {
+    const created = await api('/api/context-graph/create', {
+      method: 'POST',
+      body: JSON.stringify({
+        id: JOURNEY_CG,
+        name: 'External signer journey',
+        register: true,
+        accessPolicy: 0,
+        publishPolicy: 0,
+        pcaAccountId: accountId.toString(),
+      }),
+    });
+    const graph = await created.json() as { registered?: boolean; onChainId?: string };
+    expect(created.status).toBe(200);
+    expect(graph, JSON.stringify(graph)).toMatchObject({ registered: true, onChainId: expect.any(String) });
+    // The core hosts the graph.
+    await core!.store.insert([{
+      subject: contextGraphDataUri(JOURNEY_CG),
+      predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+      object: `"${graph.onChainId}"`,
+      graph: contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
+    }]);
+    core!.subscribeToContextGraph(JOURNEY_CG);
+    await sleep(2_000);
+
+    const before = fake.requests.length;
+    const shared = await api('/api/knowledge-assets', {
+      method: 'POST',
+      body: JSON.stringify({
+        contextGraphId: JOURNEY_CG,
+        name: 'journey-asset',
+        quads: [{ subject: JOURNEY_ENTITY, predicate: 'http://schema.org/name', object: '"Journey entity"' }],
+        alsoShareSwm: true,
+        // The node is the curator: no acknowledgement round trip is needed.
+        awaitCuratorAck: true,
+      }),
+    });
+    const share = await shared.json() as Record<string, unknown>;
+    expect(shared.status, JSON.stringify(share)).toBe(201);
+    expect(share).toMatchObject({ swmShared: true });
+    let received = 0;
+    for (let attempt = 0; attempt < 40 && received === 0; attempt++) {
+      const rows = await core!.query(
+        `SELECT ?name WHERE { <${JOURNEY_ENTITY}> <http://schema.org/name> ?name }`,
+        { contextGraphId: JOURNEY_CG, graphSuffix: '_shared_memory' },
+      );
+      received = rows.bindings.length;
+      if (received === 0) await sleep(500);
+    }
+    expect(received).toBe(1);
+
+    const published = await api('/api/knowledge-assets/journey-asset/vm/publish', {
+      method: 'POST',
+      body: JSON.stringify({ contextGraphId: JOURNEY_CG }),
+    });
+    const publish = await published.json() as Record<string, unknown>;
+    expect(published.status, JSON.stringify(publish)).toBe(200);
+
+    // The author key signed the author attestation and the shared-memory
+    // gossip envelope (four length-framed fields: type, context graph,
+    // timestamp, payload); the payers signed transactions only.
+    const journey = fake.requests.slice(before);
+    const author = journey.filter((request) => request.authorization === `Bearer ${AUTHOR_TOKEN}`);
+    expect(author.map((request) => request.method).sort()).toEqual(['eth_sign', 'eth_signTypedData_v4']);
+    const gossip = author.find((request) => request.method === 'eth_sign')!;
+    expect(ethers.getAddress(String(gossip.params[0]))).toBe(defaultAuthor.address);
+    const fields = framedFields(ethers.getBytes(String(gossip.params[1])));
+    expect(fields).toHaveLength(4);
+    expect(new TextDecoder().decode(fields[0])).toBe('share-write');
+    expect(new Set(journey.filter((request) => request.authorization === `Bearer ${PAYER_TOKEN}`)
+      .map((request) => request.method))).toEqual(new Set(['eth_signTransaction']));
+    // Since the node started, no message or digest was signed with a payer key.
+    expect(fake.requests.filter((request) => (
+      request.authorization === `Bearer ${PAYER_TOKEN}` && /sign(?!Transaction)/i.test(request.method)
+    ))).toEqual([]);
+  }, 180_000);
 
   it('logs the signer endpoint and accounts but never a credential', async () => {
     const output = await allOutput(daemon!);

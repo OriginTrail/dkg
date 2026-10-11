@@ -11,6 +11,7 @@
 import { ethers } from 'ethers';
 import type { EvmSigner, ExternalAuthorSigners } from '@origintrail-official/dkg-chain';
 import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
+import type { AgentKeyRecord } from './agent-keystore.js';
 import type { DKGAgent } from './dkg-agent.js';
 
 interface ExternalAuthorConfig {
@@ -33,6 +34,39 @@ export async function externalAuthorSignerFor(
   const authors = config?.chainConfig?.authors;
   if (authors === undefined || !ethers.isAddress(address)) return undefined;
   return authors.signerFor(address);
+}
+
+/**
+ * An allowed agent that signs SWM gossip envelopes: with its key held on the
+ * node, or through the external signer that holds its author key.
+ */
+export type WorkspaceGossipSigningAgent =
+  | (AgentKeyRecord & { privateKey: string; externalSigner?: undefined })
+  | (AgentKeyRecord & { externalSigner: EvmSigner });
+
+/** The first of `agents` in `allowed` whose author key the external signer holds. */
+export async function externalAuthorGossipSigner(
+  config: ExternalAuthorConfig | undefined,
+  agents: Iterable<AgentKeyRecord>,
+  allowed: ReadonlySet<string>,
+): Promise<WorkspaceGossipSigningAgent | undefined> {
+  for (const record of agents) {
+    if (!allowed.has(record.agentAddress.toLowerCase())) continue;
+    const externalSigner = await externalAuthorSignerFor(config, record.agentAddress);
+    if (externalSigner) return { ...record, externalSigner };
+  }
+  return undefined;
+}
+
+/**
+ * The EIP-191 signature of `agent` over `message`, a framed gossip signing
+ * payload. Through the external signer the exact same bytes are signed with
+ * `eth_sign` (or `personal_sign`), so receivers verify both alike.
+ */
+export function signWorkspaceGossip(agent: WorkspaceGossipSigningAgent, message: Uint8Array): Promise<string> {
+  return agent.externalSigner
+    ? agent.externalSigner.signMessage(message)
+    : new ethers.Wallet(agent.privateKey).signMessage(message);
 }
 
 /**

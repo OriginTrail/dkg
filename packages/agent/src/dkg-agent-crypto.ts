@@ -263,6 +263,7 @@ import {
   type KeystoreEntry,
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
+import { externalAuthorGossipSigner, signWorkspaceGossip, type WorkspaceGossipSigningAgent } from './external-author-signing.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
@@ -3709,7 +3710,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
 
   async resolveWorkspaceGossipSigningAgent(this: DKGAgent,
     contextGraphId: string,
-  ): Promise<(AgentKeyRecord & { privateKey: string }) | null> {
+  ): Promise<WorkspaceGossipSigningAgent | null> {
     const authority = await withRpcUsageSite(
       CG_AUTH_RPC_SITES.signer,
       () => this.resolveContextGraphAgentGateAuthority(contextGraphId),
@@ -3739,6 +3740,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         return { ...record, privateKey: record.privateKey };
       }
     }
+    const external = await externalAuthorGossipSigner(this.config, this.localAgents.values(), allowedSet);
+    if (external) return external;
 
     throw new Error(`Cannot gossip SWM write for agent-gated context graph "${contextGraphId}": no local allowed signing agent key`);
   }
@@ -3746,7 +3749,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async encodeWorkspaceGossipMessage(this: DKGAgent,
     contextGraphId: string,
     message: Uint8Array,
-    resolvedSigner?: (AgentKeyRecord & { privateKey: string }) | null,
+    resolvedSigner?: WorkspaceGossipSigningAgent | null,
   ): Promise<Uint8Array> {
     const signer = resolvedSigner === undefined
       ? await this.resolveWorkspaceGossipSigningAgent(contextGraphId)
@@ -3763,7 +3766,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       timestamp,
       payload,
     );
-    const signature = await new ethers.Wallet(signer.privateKey).signMessage(signingPayload);
+    const signature = await signWorkspaceGossip(signer, signingPayload);
     return encodeGossipEnvelope({
       version: GOSSIP_ENVELOPE_VERSION,
       type: GOSSIP_TYPE_WORKSPACE_PUBLISH,

@@ -126,7 +126,7 @@ import {
   type LargeLiteralStorageConfig,
 } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type EvmSigner, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
-import { externalAuthorSignerFor, signAuthorTypedDataCompact } from './external-author-signing.js';
+import { externalAuthorSignerFor, signAuthorTypedDataCompact, signWorkspaceGossip, type WorkspaceGossipSigningAgent } from './external-author-signing.js';
 import  {
   DKGPublisher,
   PublishHandler,
@@ -318,7 +318,6 @@ import {
   attachRevocationToWorkspaceEncryptionKey,
   migrateLegacyWorkspaceEncryptionFields,
   refreshDefaultEncryptionKeyView,
-  type AgentKeyRecord,
   type KeystoreEntry,
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
@@ -898,7 +897,7 @@ export class PublishMethods extends DKGAgentBase {
     contextGraphId: string,
     payload: EncodedWorkspaceGossipPayload,
     ctx: OperationContext,
-    resolvedSigner?: (AgentKeyRecord & { privateKey: string }) | null,
+    resolvedSigner?: WorkspaceGossipSigningAgent | null,
     shareOperationId?: string,
   ): Promise<void>;
 
@@ -911,7 +910,7 @@ export class PublishMethods extends DKGAgentBase {
     contextGraphId: string,
     message: Uint8Array,
     ctx: OperationContext,
-    resolvedSigner?: (AgentKeyRecord & { privateKey: string }) | null,
+    resolvedSigner?: WorkspaceGossipSigningAgent | null,
     shareOperationId?: string,
   ): Promise<void>;
 
@@ -919,7 +918,7 @@ export class PublishMethods extends DKGAgentBase {
     contextGraphId: string,
     payloadOrMessage: EncodedWorkspaceGossipPayload | Uint8Array,
     ctx: OperationContext,
-    resolvedSigner?: (AgentKeyRecord & { privateKey: string }) | null,
+    resolvedSigner?: WorkspaceGossipSigningAgent | null,
     /**
      * Publisher-minted unique share ID. When provided, this share
      * is registered with `SwmAckQuorum` after fan-out so the
@@ -4185,7 +4184,6 @@ export class PublishMethods extends DKGAgentBase {
         `allowed agent before publishing.`,
       );
     }
-    const signerWallet = new ethers.Wallet(signer.privateKey);
     const signerAgentAddress = signer.agentAddress;
     const log = this.log;
     const ctx = createOperationContext('publish');
@@ -4250,7 +4248,7 @@ export class PublishMethods extends DKGAgentBase {
           payload,
           i,
         );
-        const signature = await signerWallet.signMessage(signingPayload);
+        const signature = await signWorkspaceGossip(signer, signingPayload);
         const envelope = encodeGossipEnvelope({
           version: GOSSIP_ENVELOPE_VERSION,
           type: GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED,

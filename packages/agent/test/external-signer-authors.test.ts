@@ -25,6 +25,7 @@ import {
   TypedEventBus,
   buildAuthorAttestationTypedData,
   buildUpdateAuthorAttestationTypedData,
+  computeGossipSigningPayload,
   generateEd25519Keypair,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
@@ -32,7 +33,7 @@ import { DKGPublisher } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { agentFromPrivateKey, registerSelfSovereignAgent } from '../src/agent-keystore.js';
 import { constructConfiguredChainAdapter } from '../src/configured-chain-adapter.js';
-import { externalSignerAgentPublicKey } from '../src/external-author-signing.js';
+import { externalAuthorGossipSigner, externalSignerAgentPublicKey, signWorkspaceGossip } from '../src/external-author-signing.js';
 import { planAuthorityIndexBootstrap } from '../src/authority-index-config.js';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 import { HARDHAT_KEYS } from '../../chain/test/hardhat-harness.js';
@@ -227,6 +228,28 @@ describe('external signer author keys', () => {
       authorAgentAddress: outside.agentAddress,
       graphScoped: true,
     })).rejects.toThrow(/registered as self-sovereign/);
+  });
+
+  it('signs shared-memory gossip as an allowed agent whose author key the signer holds', async () => {
+    const { fake, remote } = await externalSigners();
+    const config = { chainConfig: { signers: remote.operational, authors: remote.authors } };
+    const held = registerSelfSovereignAgent('writer', agentKey.publicKey);
+    const custodial = agentFromPrivateKey(HARDHAT_KEYS.EXTRA3, 'custodial');
+    const outside = registerSelfSovereignAgent('outside', new ethers.Wallet(HARDHAT_KEYS.EXTRA2).signingKey.publicKey);
+    const allowed = new Set([held.agentAddress, outside.agentAddress].map((address) => address.toLowerCase()));
+    // Not allowed, or allowed but not held by the signer: no gossip signer.
+    expect(await externalAuthorGossipSigner(config, [custodial, outside], allowed)).toBeUndefined();
+    const signer = await externalAuthorGossipSigner(config, [custodial, outside, held], allowed);
+    expect(signer?.agentAddress).toBe(agentKey.address);
+
+    const payload = computeGossipSigningPayload('share-write', CG, '2026-01-01T00:00:00.000Z', new Uint8Array([1, 2, 3]));
+    expect(ethers.verifyMessage(payload, await signWorkspaceGossip(signer!, payload))).toBe(agentKey.address);
+    const [request] = fake.calls('eth_sign');
+    expect(request.authorization).toBe(`Bearer ${AUTHOR_TOKEN}`);
+    expect(request.params).toEqual([agentKey.address.toLowerCase(), ethers.hexlify(payload)]);
+    // A key held on the node signs the same bytes itself.
+    const local = await signWorkspaceGossip({ ...custodial, privateKey: custodial.privateKey! }, payload);
+    expect(ethers.verifyMessage(payload, local)).toBe(custodial.agentAddress);
   });
 
   it('refuses a self-sovereign agent whose key the signer does not hold as an author key', async () => {

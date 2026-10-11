@@ -109,7 +109,7 @@ The node speaks the standard Ethereum JSON-RPC signing API. Addresses are sent i
 
 Transactions are sent fully populated: `from`, `to`, `gas`, `nonce`, `value`, `data`, `chainId`, and `type: "0x2"` with `maxFeePerGas` and `maxPriorityFeePerGas` (or `gasPrice` on chains without EIP-1559). The signer must sign exactly that transaction and must not change any field or broadcast it.
 
-Payer accounts sign transactions and, for some node-to-node proofs such as authenticated sync requests, EIP-191 messages over 32-byte digests. Author accounts sign only typed data: author attestations under the `KnowledgeAssetsLifecycle` domain (version `3.0.0`, the chain id, and the `KnowledgeAssetsLifecycle` contract as verifying contract), with primary type `AuthorAttestation` or `UpdateAuthorAttestation`, and agent registrations as above.
+Payer accounts sign transactions and, for some node-to-node proofs such as authenticated sync requests, EIP-191 messages over 32-byte digests. Author accounts sign typed data: author attestations under the `KnowledgeAssetsLifecycle` domain (version `3.0.0`, the chain id, and the `KnowledgeAssetsLifecycle` contract as verifying contract), with primary type `AuthorAttestation` or `UpdateAuthorAttestation`, and agent registrations as above. When an agent whose key the signer holds shares into a public context graph with a curated publish policy, its author account also signs the shared-memory envelope as an EIP-191 message (`eth_sign`): four length-framed fields (a big-endian uint32 length, then the bytes) holding `share-write`, the context graph id, an ISO-8601 timestamp and the share payload.
 
 ## What the node verifies
 
