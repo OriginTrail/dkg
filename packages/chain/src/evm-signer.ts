@@ -95,32 +95,54 @@ export function operationalPrivateKeyOf(signer: EvmSigner): string {
   return privateKey;
 }
 
-export interface OperationalSignerSource {
-  /** Primary operational key; mutually exclusive with `signers`. */
-  privateKey?: string;
-  /** Additional operational keys; only together with `privateKey`. */
+/** Operational wallets whose keys this process holds. */
+export interface LocalOperationalSignerSource {
+  /** Primary operational wallet key (identity registration, staking, ...). */
+  privateKey: string;
+  /** Additional operational wallet keys for parallel transaction submission. */
   additionalKeys?: readonly string[];
-  /** Operational signers that hold their keys elsewhere; the first is the primary. */
-  signers?: readonly EvmSigner[];
+  signers?: never;
 }
 
 /**
+ * Operational signers whose keys are held outside this process, for example
+ * `RemoteSigner`s backed by an external signing service. The first is the
+ * primary and all of them are used for parallel transaction submission;
+ * raw-key accessors such as `getOperationalPrivateKey()` then throw
+ * `OperationalKeyUnavailableError`.
+ */
+export interface ExternalOperationalSignerSource {
+  signers: readonly EvmSigner[];
+  privateKey?: never;
+  additionalKeys?: never;
+}
+
+/** Where an adapter's operational wallets come from: local keys or external signers, never both. */
+export type OperationalSignerSource = LocalOperationalSignerSource | ExternalOperationalSignerSource;
+
+/**
  * Build the adapter's operational signer pool from local keys or external
- * signers, each bound to `provider`. Exactly one source must be configured.
+ * signers, each bound to `provider`. Exactly one source must be configured;
+ * that is checked here too, for callers the types do not reach.
  */
 export function createOperationalSignerPool(
   source: OperationalSignerSource,
   provider: ethers.Provider,
 ): EvmSigner[] {
-  const external = source.signers ?? [];
+  const { privateKey, additionalKeys, signers } = source as {
+    privateKey?: string;
+    additionalKeys?: readonly string[];
+    signers?: readonly EvmSigner[];
+  };
+  const external = signers ?? [];
   if (external.length === 0) {
-    if (!source.privateKey) {
+    if (!privateKey) {
       throw new Error('EVMChainAdapter requires an operational privateKey or at least one signer');
     }
-    return [source.privateKey, ...(source.additionalKeys ?? [])]
+    return [privateKey, ...(additionalKeys ?? [])]
       .map((key) => new Wallet(key, provider));
   }
-  if (source.privateKey || (source.additionalKeys?.length ?? 0) > 0) {
+  if (privateKey || (additionalKeys?.length ?? 0) > 0) {
     throw new Error('EVMChainAdapter accepts either privateKey/additionalKeys or signers, not both');
   }
   const seen = new Set<string>();

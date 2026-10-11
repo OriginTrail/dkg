@@ -272,6 +272,9 @@ export {
   type EvmSigner,
   type ExternalAuthorSigners,
   type ExternalEvmSigner,
+  type ExternalOperationalSignerSource,
+  type LocalOperationalSignerSource,
+  type OperationalSignerSource,
 } from './evm-signer.js';
 export {
   RemoteSigner,

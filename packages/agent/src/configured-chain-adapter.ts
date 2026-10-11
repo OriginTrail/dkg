@@ -3,6 +3,7 @@ import {
   NoChainAdapter,
   type ChainAdapter,
   type EVMAdapterConfig,
+  type OperationalSignerSource,
 } from '@origintrail-official/dkg-chain';
 import type { DKGAgentConfig } from './dkg-agent-types.js';
 import { signsThroughExternalSigner } from './external-author-signing.js';
@@ -51,14 +52,16 @@ export function constructConfiguredChainAdapter(
     if (core) throw new Error(EXTERNAL_SIGNERS_EDGE_ONLY);
   }
   if (config.chainConfig && (operationalKeys?.length || signers.length > 0)) {
+    // Exactly one source of operational wallets reaches the adapter.
+    const source: OperationalSignerSource = signers.length > 0
+      ? { signers }
+      : { privateKey: operationalKeys![0], additionalKeys: operationalKeys!.slice(1) };
     const evmConfigBase = {
       rpcUrl: config.chainConfig.rpcUrl,
       rpcUrls: config.chainConfig.rpcUrls,
       rpcRequestAdmission: config.chainConfig.rpcRequestAdmission,
       walletRpcUrls: config.chainConfig.walletRpcUrls,
-      ...(signers.length > 0
-        ? { signers }
-        : { privateKey: operationalKeys![0], additionalKeys: operationalKeys!.slice(1) }),
+      ...source,
       hubAddress: config.chainConfig.hubAddress,
       tokenAddress: config.chainConfig.tokenAddress,
       chainId: config.chainConfig.chainId,

@@ -21,7 +21,7 @@ import { connectConfiguredRemoteSigners, resolveChainSignerConfig } from '../src
 import { classifyRpcRetryDisposition, isRetryableRpcError } from '../src/evm-adapter-rpc.js';
 import { RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
 import { OperationalKeyUnavailableError, isExternalEvmSigner } from '../src/evm-signer.js';
-import { EVMChainAdapter } from '../src/evm-adapter.js';
+import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { makeClient, recorder } from './rpc-failover-test-helpers.js';
 import type { SignPopulatedFn } from '../src/rpc-failover-client.js';
 import { startFakeRemoteSigner, type FakeSigner, type FakeSignerOptions } from './helpers/fake-remote-signer.js';
@@ -833,11 +833,16 @@ describe('EVMChainAdapter with external signers', () => {
   it('rejects mixing local keys with external signers, or duplicate signers', async () => {
     const signer = await fakeSigner();
     const { operational } = await connectRemoteSigners({ url: signer.url, authToken: TOKEN });
-    expect(() => new EVMChainAdapter({ ...base, privateKey: KEY_C, signers: operational }))
+    // The configuration types rule out a mixed or missing source; untyped callers are checked at runtime.
+    const untyped = (config: object) => new EVMChainAdapter(config as EVMAdapterConfig);
+    expect(() => untyped({ ...base, privateKey: KEY_C, signers: operational }))
+      .toThrow(/either privateKey\/additionalKeys or signers/);
+    expect(() => untyped({ ...base, signers: operational, additionalKeys: [KEY_C] }))
       .toThrow(/either privateKey\/additionalKeys or signers/);
     expect(() => new EVMChainAdapter({ ...base, signers: [operational[0], operational[0]] }))
       .toThrow(/more than once/);
-    expect(() => new EVMChainAdapter({ ...base })).toThrow(/privateKey or at least one signer/);
+    expect(() => untyped({ ...base })).toThrow(/privateKey or at least one signer/);
+    expect(() => untyped({ ...base, additionalKeys: [KEY_C] })).toThrow(/privateKey or at least one signer/);
   });
 
   it('still exposes the key of a local operational wallet', () => {
