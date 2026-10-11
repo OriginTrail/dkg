@@ -8,6 +8,7 @@
  * `this: DKGAgent` so cross-calls resolve against the composed class.
  */
 
+import type { KnowledgeAssetUpdateIdentity } from '@origintrail-official/dkg-chain';
 import { orderVmRecoveryCandidates } from './vm-recovery-candidate-order.js';
 import {
   isCanonicalAuthoritativeContextGraphId, localContextGraphIdMatchesCommittedNameHash,
@@ -3360,31 +3361,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
     kaId: bigint,
     merkleRoot: Uint8Array,
     ctx: OperationContext,
-    options: {
-      readonly blockNumber?: number;
-      readonly logIndex?: number;
-      readonly blockHash?: string;
-      readonly txHash?: string;
-      readonly signal?: AbortSignal;
-    } = {},
+    options: { readonly eventIdentity?: KnowledgeAssetUpdateIdentity; readonly signal?: AbortSignal } = {},
   ): Promise<VmRefreshTarget[]> {
     const { signal } = options;
-    const blockNumber = options.blockNumber !== undefined
-      && Number.isSafeInteger(options.blockNumber)
-      && options.blockNumber >= 0
-      ? options.blockNumber
-      : undefined;
-    const eventTxHash = typeof options.txHash === 'string' && options.txHash.length > 0
-      ? options.txHash.toLowerCase()
-      : undefined;
-    const logIndex = options.logIndex !== undefined
-      && Number.isSafeInteger(options.logIndex)
-      && options.logIndex >= 0
-      ? options.logIndex
-      : undefined;
-    const blockHash = typeof options.blockHash === 'string' && options.blockHash.length > 0
-      ? options.blockHash.toLowerCase()
-      : undefined;
+    const eventIdentity = Object.freeze(options.eventIdentity ? { ...options.eventIdentity } : { eventKind: 'legacy-unpositioned' as const });
+    const { blockNumber, blockHash, txHash: eventTxHash } = eventIdentity;
     signal?.throwIfAborted();
     const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
     const lifecycleSignal = this.vmReconcileLifecycleController?.signal;
@@ -3466,10 +3447,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         ual,
         kaId,
         merkleRoot: eventRoot,
-        ...(blockNumber === undefined ? {} : { blockNumber }),
-        ...(logIndex === undefined ? {} : { logIndex }),
-        ...(blockHash === undefined ? {} : { blockHash }),
-        ...(eventTxHash === undefined ? {} : { txHash: eventTxHash }),
+        ...eventIdentity,
         ...(sameRoot ? { checkVersion: true } : {}),
       };
       const delayMs = local.staged ? DKGAgentBase.VM_REFRESH_STAGED_GRACE_MS : 0;

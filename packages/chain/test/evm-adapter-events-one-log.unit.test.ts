@@ -542,6 +542,7 @@ describe('KnowledgeAssetUpdated over the one log', () => {
     expect(events).toEqual([{
       type: 'KnowledgeAssetUpdated',
       blockNumber: 60,
+      updateIdentity: { eventKind: 'log', blockNumber: 60, logIndex: 0, blockHash: hash(60), txHash: hash(0xcc) },
       data: {
         kaId: '900',
         batchId: '900',
@@ -578,6 +579,7 @@ describe('KnowledgeAssetUpdated over the one log', () => {
     expect(events).toEqual([expect.objectContaining({
       type: 'KnowledgeAssetUpdated',
       blockNumber: 130,
+      updateIdentity: { eventKind: 'log', blockNumber: 130, logIndex: 8, blockHash: hash(130), txHash: hash(0xdd) },
       data: expect.objectContaining({
         kaId: '901',
         batchId: '901',
@@ -589,6 +591,27 @@ describe('KnowledgeAssetUpdated over the one log', () => {
       }),
     })]);
     adapter.destroy();
+  });
+
+  it.each([
+    { label: 'raw hash spelling', index: 8, blockHash: '0xAB', aliases: { logIndex: 8, blockHash: '0xAB' } },
+    { label: 'numeric partial position and empty hash', index: 7.5, blockHash: '', aliases: { logIndex: 7.5, blockHash: '' } },
+    { label: 'invalid optional types', index: '8', blockHash: 130, aliases: {} },
+  ])('preserves historical RPC alias shape for $label', async ({ index, blockHash, aliases }) => {
+    const encoded = kaInterface.encodeEventLog(kaInterface.getEvent('KnowledgeAssetUpdated')!,
+      [901n, AUTHOR, 'update-op', ROOT_V2, 12n, 1n]);
+    const { adapter } = makeKaAdapter(undefined, [{ blockNumber: 130, index, blockHash,
+      transactionHash: hash(0xdd), topics: encoded.topics, data: encoded.data }]);
+    try {
+      const [event] = await collect(adapter, ['KnowledgeAssetUpdated'], 10, 140) as Array<{
+        data: Record<string, unknown>; updateIdentity: { logIndex?: number; blockHash?: string };
+      }>;
+      expect(event.data).toEqual({ kaId: '901', batchId: '901', merkleRoot: ROOT_V2,
+        author: ethers.getAddress(AUTHOR), txHash: hash(0xdd), txIndex: undefined, ...aliases });
+      expect(event.updateIdentity.logIndex).toBe(Number.isSafeInteger(index) ? index : undefined);
+      expect(event.updateIdentity.blockHash).toBe(typeof blockHash === 'string' && blockHash.length > 0
+        ? blockHash.toLowerCase() : undefined);
+    } finally { adapter.destroy(); }
   });
 
   it('keeps the live scan when no log is attached, and after a DKGKnowledgeAssets rotation', async () => {

@@ -1,5 +1,7 @@
+import { prepareCollectionUpdateEvent, type NormalizedCollectionUpdateEvent } from './chain-event-boundary.js';
 import {
   withRpcRequestContext,
+  type KnowledgeAssetUpdateIdentity,
   type ChainAdapter,
   type ChainEvent,
 } from '@origintrail-official/dkg-chain';
@@ -46,6 +48,8 @@ export type OnContextGraphCreated = (info: {
 export type OnCollectionUpdated = (info: {
   merkleRoot: Uint8Array;
   batchId: bigint;
+  /** Canonical identity, including explicit legacy/unpositioned evidence. */
+  eventIdentity: KnowledgeAssetUpdateIdentity;
   blockNumber: number;
   /** Transaction that committed the update, when the adapter reports it. */
   txHash?: string;
@@ -363,7 +367,10 @@ export class ChainEventPoller {
         eventTypes: () => ['KnowledgeAssetUpdated'],
         cursorStrategy: () => ({ kind: 'live-tail', legacyAggregateCursor: true }),
         cadenceMs: this.intervalMs,
-        dispatch: (event, ctx, signal) => this.handleCollectionUpdated(event, ctx, signal),
+        prepare: (incoming) => {
+          const prepared = prepareCollectionUpdateEvent(incoming);
+          return { ...prepared, dispatch: (ctx, signal) => this.handleCollectionUpdated(prepared.event, ctx, signal) };
+        },
         persistCeiling: () => this.collectionUpdatesPersistCeiling?.(),
         // The chain index holds back 50 blocks for reorg repair. Revisiting
         // 64 blocks also catches replacements already passed in the live cursor.
@@ -476,7 +483,7 @@ export class ChainEventPoller {
   }
 
   private async handleCollectionUpdated(
-    event: ChainEvent,
+    event: NormalizedCollectionUpdateEvent,
     ctx: OperationContext,
     signal?: AbortSignal,
   ): Promise<void> {
@@ -487,16 +494,7 @@ export class ChainEventPoller {
       : data['merkleRoot'] as Uint8Array;
     const batchId = BigInt(data['batchId'] as string ?? '0');
 
-    const txHash = typeof data['txHash'] === 'string' && data['txHash'].length > 0
-      ? data['txHash'] as string
-      : undefined;
-    const logIndex = typeof data['logIndex'] === 'number'
-      && Number.isSafeInteger(data['logIndex']) && data['logIndex'] >= 0
-      ? data['logIndex']
-      : undefined;
-    const blockHash = typeof data['blockHash'] === 'string' && data['blockHash'].length > 0
-      ? data['blockHash'] as string
-      : undefined;
+    const eventIdentity = event.updateIdentity;
 
     this.log.info(ctx,
       `Chain event: KnowledgeAssetUpdated block=${event.blockNumber} batchId=${batchId}`,
@@ -508,10 +506,11 @@ export class ChainEventPoller {
     await this.onCollectionUpdated({
       merkleRoot,
       batchId,
-      blockNumber: event.blockNumber,
-      ...(txHash === undefined ? {} : { txHash }),
-      ...(logIndex === undefined ? {} : { logIndex }),
-      ...(blockHash === undefined ? {} : { blockHash }),
+      eventIdentity,
+      blockNumber: eventIdentity.blockNumber ?? event.blockNumber,
+      ...(eventIdentity.txHash === undefined ? {} : { txHash: eventIdentity.txHash }),
+      ...(eventIdentity.logIndex === undefined ? {} : { logIndex: eventIdentity.logIndex }),
+      ...(eventIdentity.blockHash === undefined ? {} : { blockHash: eventIdentity.blockHash }),
       signal,
     });
   }
