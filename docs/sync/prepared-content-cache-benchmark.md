@@ -27,6 +27,12 @@ cache: the historical value lies within this run's warm range. The implemented
 benefit is preserving prepared content across restart and memory eviction.
 Cold-cache times were essentially unchanged in these runs.
 
+The timings above remain tied to implementation `f1d680cc5`. Subsequent review
+changes replace per-write LRU sorting with ordered-map bookkeeping and add
+source-fence/symlink regression tests; the nine-trial timing comparison has not
+been repeated for that follow-up. It must not be presented as a new measurement
+of the review revision.
+
 ## Where time went
 
 | Measured stage | Empty content cache median | Restarted prepared-cache median |

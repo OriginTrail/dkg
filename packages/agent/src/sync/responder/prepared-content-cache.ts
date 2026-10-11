@@ -66,7 +66,8 @@ export function createPreparedContentCache(
   onError: () => void = () => {},
 ): PreparedContentCache {
   const { directory, maxBytes, maxEntries, ttlMs } = options;
-  const entries = new Map<string, { size: number; used: number }>();
+  // Iteration order is oldest first; successful reads/writes move to the end.
+  const entries = new Map<string, { size: number }>();
   let initialized = false, total = 0;
   let tail: Promise<unknown> = Promise.resolve();
   // Reads and writes serialize within the bounded responder admission. No
@@ -85,10 +86,9 @@ export function createPreparedContentCache(
     entries.delete(name);
   };
   const evict = async (incomingBytes = 0, incomingEntries = 0) => {
-    for (const [name] of [...entries].sort((a, b) => a[1].used - b[1].used)) {
-      if (total + incomingBytes <= maxBytes && entries.size + incomingEntries <= maxEntries) break;
-      await remove(name);
-    }
+    while (entries.size > 0 && (
+      total + incomingBytes > maxBytes || entries.size + incomingEntries > maxEntries
+    )) await remove(entries.keys().next().value!);
   };
   async function initialize() {
     if (initialized) return;
@@ -97,6 +97,7 @@ export function createPreparedContentCache(
     entries.clear(); total = 0;
     // Ignore unrelated files. Never follow links or recursively clean a directory.
     const dir = await readdir(directory, { withFileTypes: true });
+    const discovered: Array<{ name: string; size: number; mtimeMs: number }> = [];
     for (const file of dir) {
       // Exclusive directory ownership makes these abandoned atomic writes.
       if (file.isFile() && TEMP_PATTERN.test(file.name)) { await unlink(join(directory, file.name)); continue; }
@@ -104,7 +105,10 @@ export function createPreparedContentCache(
       const stat = await lstat(join(directory, file.name));
       if (!stat.isFile()) continue;
       if (stat.size > HEADER_LIMIT + 4 + EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES) { await remove(file.name); continue; }
-      entries.set(file.name, { size: stat.size, used: stat.mtimeMs }); total += stat.size;
+      discovered.push({ name: file.name, size: stat.size, mtimeMs: stat.mtimeMs });
+    }
+    for (const file of discovered.sort((a, b) => a.mtimeMs - b.mtimeMs)) {
+      entries.set(file.name, { size: file.size }); total += file.size;
     }
     await evict(); initialized = true;
   }
@@ -138,7 +142,7 @@ export function createPreparedContentCache(
           await handle.close();
           if (!result) await remove(name);
           else {
-            const entry = entries.get(name)!; entry.used = Date.now();
+            const entry = entries.get(name)!; entries.delete(name); entries.set(name, entry);
             await utimes(join(directory, name), new Date(), new Date()).catch(() => {});
           }
         }
@@ -165,7 +169,7 @@ export function createPreparedContentCache(
           await handle.sync(); await handle.close();
           await rename(temp, join(directory, name));
           const old = entries.get(name); if (old) total -= old.size;
-          entries.set(name, { size, used: Date.now() }); total += size;
+          entries.delete(name); entries.set(name, { size }); total += size;
         } finally {
           await handle.close().catch(() => {});
           await unlink(temp).catch(error => { if (error.code !== 'ENOENT') throw error; });

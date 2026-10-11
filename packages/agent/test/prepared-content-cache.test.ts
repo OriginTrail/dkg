@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, readdir, readFile, writeFile, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, writeFile, rm, symlink, stat, utimes } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createPreparedContentCache, resolvePreparedContentCacheConfig } from '../src/sync/responder/prepared-content-cache.js';
@@ -11,6 +12,7 @@ async function fixture(limits = {}) {
   return { directory, options, cache: createPreparedContentCache(options), restart: () => createPreparedContentCache(options) };
 }
 const value = { body: new TextEncoder().encode('bounded immutable assertion'), plainBytes: 100 };
+const entryPath = (directory: string, key: string) => join(directory, createHash('sha256').update(key).digest('hex') + '.prepared');
 afterEach(async () => { await Promise.all(dirs.splice(0).map(dir => rm(dir, { recursive: true, force: true }))); });
 
 describe('persistent prepared content', () => {
@@ -62,6 +64,46 @@ describe('persistent prepared content', () => {
     const link = join(f.directory, 'link'); await symlink(f.directory, link);
     expect(await createPreparedContentCache({ ...f.options, directory: link }).get('key')).toBeNull();
     expect(await readFile(join(f.directory, 'unrelated'), 'utf8')).toBe('keep');
+  });
+  it('refuses a symlink replacing an indexed entry even when its target is valid prepared content', async () => {
+    const f = await fixture(); await f.cache.put('key', value);
+    const path = entryPath(f.directory, 'key'), target = join(f.directory, 'valid-target');
+    const bytes = await readFile(path); await writeFile(target, bytes);
+    const before = await stat(target);
+    await rm(path); await symlink(target, path);
+    expect(await f.cache.get('key')).toBeNull();
+    expect(await readFile(target)).toEqual(bytes);
+    expect((await stat(target)).mtimeMs).toBe(before.mtimeMs);
+  });
+  it.each([false, true])('evicts the least recently read entry (reopen=%s)', async reopen => {
+    const f = await fixture({ maxEntries: 2 });
+    await f.cache.put('a', value); await f.cache.put('b', value);
+    // Distinct stored timestamps make the reopen assertion independent of filesystem precision.
+    await utimes(entryPath(f.directory, 'a'), 1, 1);
+    await utimes(entryPath(f.directory, 'b'), 2, 2);
+    expect(await f.cache.get('a')).toEqual(value);
+    const cache = reopen ? f.restart() : f.cache;
+    await cache.put('c', value);
+    expect(await cache.get('b')).toBeNull();
+    expect(await cache.get('a')).toEqual(value);
+    expect(await cache.get('c')).toEqual(value);
+  });
+  it('moves a successfully rewritten entry to newest', async () => {
+    const f = await fixture({ maxEntries: 3 });
+    await f.cache.put('a', value); await f.cache.put('b', value); await f.cache.put('a', value);
+    expect(await readdir(f.directory)).toHaveLength(2);
+    await f.cache.put('c', value); await f.cache.put('d', value);
+    expect(await f.cache.get('b')).toBeNull();
+    expect(await f.cache.get('a')).toEqual(value);
+  });
+  it('accounts for physical replacement bytes while evicting to the byte limit', async () => {
+    const f = await fixture({ maxBytes: 800 });
+    await f.cache.put('a', value); await f.cache.put('b', value);
+    await f.cache.put('b', { body: new Uint8Array(500), plainBytes: 500 });
+    const sizes = await Promise.all((await readdir(f.directory)).map(async name => (await stat(join(f.directory, name))).size));
+    expect(sizes.reduce((sum, size) => sum + size, 0)).toBeLessThanOrEqual(800);
+    expect(await f.cache.get('a')).toBeNull();
+    expect((await f.cache.get('b'))!.body).toHaveLength(500);
   });
   it('fails open on unavailable IO without modifying other files', async () => {
     const f = await fixture(); const file = join(f.directory, 'file'); await writeFile(file, 'keep');
