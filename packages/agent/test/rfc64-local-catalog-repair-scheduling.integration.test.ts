@@ -356,10 +356,16 @@ describe('RFC-64 local SWM catalog projection repair', () => {
       '0x1111111111111111111111111111111111111111/blocked-repair' as ContextGraphIdV1;
     vi.spyOn(agent as any, 'resolveRfc64CatalogAuthoringLaneV1')
       .mockImplementation((contextGraphId: string) => ({
+        kind: contextGraphId === privateContextGraphId ? 'private' : 'public',
         projectionTargetPolicy: contextGraphId === privateContextGraphId
           ? 'monotonic-union'
           : 'exact-replacement',
         acceptsFinalizedVmRepair: contextGraphId === privateContextGraphId,
+        scopeBase: {
+          networkId: NETWORK_ID, contextGraphId, governanceChainId: null,
+          governanceContractAddress: null, ownershipTransitionDigest: null,
+          subGraphName: null, era: '1',
+        },
       } as never));
     let markOrdinaryEntered!: () => void;
     let releaseOrdinary!: () => void;
@@ -400,11 +406,14 @@ describe('RFC-64 local SWM catalog projection repair', () => {
       authorAddress: AUTHOR,
     })).toBe(true);
     await ordinaryEntered;
-    const request = agent.requestRfc64FinalizedPrivateCatalogPlacementRepairV1({ repair });
-    expect(request.accepted).toBe(true);
-    await request.whenAttempted;
-    expect(repairAttempt).toHaveBeenCalledWith(repair, expect.anything());
-    releaseOrdinary();
+    try {
+      const request = agent.requestRfc64FinalizedPrivateCatalogPlacementRepairV1({ repair });
+      expect(request.accepted).toBe(true);
+      await request.whenAttempted;
+      expect(repairAttempt).toHaveBeenCalledWith(repair, expect.anything());
+    } finally {
+      releaseOrdinary();
+    }
     await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
   }, 30_000);
 
