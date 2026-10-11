@@ -23,10 +23,10 @@ interface TypedDataInput {
 
 /** The external signer for `address`, when it is one of the configured author keys. */
 export async function externalAuthorSignerFor(
-  config: ExternalAuthorConfig,
+  config: ExternalAuthorConfig | undefined,
   address: string,
 ): Promise<EvmSigner | undefined> {
-  const authors = config.chainConfig?.authors;
+  const authors = config?.chainConfig?.authors;
   if (authors === undefined || !ethers.isAddress(address)) return undefined;
   return authors.signerFor(address);
 }
@@ -57,14 +57,14 @@ const REGISTRATION_TYPES = {
  * public key is recovered from that signature.
  */
 export async function externalSignerAgentPublicKey(
-  config: ExternalAuthorConfig,
+  config: ExternalAuthorConfig | undefined,
   address: string,
   name: string,
   publicKey?: string,
 ): Promise<string> {
   if (!ethers.isAddress(address)) throw new Error(`Invalid agent address "${address}"`);
   const agent = ethers.getAddress(address);
-  if (config.chainConfig?.authors === undefined) {
+  if (config?.chainConfig?.authors === undefined) {
     throw new Error(
       'Registering an agent by address requires external author keys (the external signer\'s author connection)',
     );
