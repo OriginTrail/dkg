@@ -17,11 +17,11 @@ export interface EvmSigner extends ethers.Signer {
 
 /**
  * A signer whose key is held outside this process (a remote signing service,
- * an HSM, ...). The adapter keeps the RPC population of such a transaction
- * (nonce, gas, fees) under its per-endpoint deadline but never puts the
- * signing request itself under that deadline and never fails it over to
- * another endpoint: a signer failure is not an endpoint failure, and one
- * prepared transaction is signed at most once.
+ * an HSM, ...). As for every signer, the adapter bounds the RPC population of
+ * a transaction (nonce, gas, fees) by its per-endpoint deadline and never puts
+ * the signing request under that deadline. A failure of such a signer is never
+ * failed over to another endpoint either: it is not an endpoint failure, and
+ * one prepared transaction is signed at most once.
  */
 export interface ExternalEvmSigner extends EvmSigner {
   readonly isExternalSigner: true;

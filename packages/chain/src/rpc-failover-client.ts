@@ -47,7 +47,7 @@ import { type RpcReadDescriptor, createRpcReadDescriptor, type RpcReadDescriptor
 export { type RpcReadDescriptor, createRpcReadDescriptor, rpcReadDescriptor, type RpcReadDescriptorInput, type ReadOpts } from './rpc-read-descriptor.js';
 import type { SignedTransactionEnvelope } from './chain-adapter.js';
 import { JsonRpcProvider, Contract, ethers } from 'ethers';
-import { isExternalEvmSigner, type EvmSigner } from './evm-signer.js';
+import type { EvmSigner } from './evm-signer.js';
 import { withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import {
   classifyRpcRetryDisposition,
@@ -142,7 +142,9 @@ class ProviderSetExhaustedError extends RpcEndpointsExhaustedError {
 /**
  * The adapter's transaction-signing helper, injected as a callback so signing is
  * reached only through this thunk and the module holds no signer state. Used by
- * `populateAndSign`.
+ * `populateAndSign`, which does not time the callback: it bounds its own RPC
+ * work (the signer's nonce, gas and fee reads) with the per-endpoint deadline,
+ * while producing the signature is not endpoint work and is never cut off.
  */
 export type SignPopulatedFn = (
   signer: EvmSigner,
@@ -516,17 +518,11 @@ export class RpcFailoverClient {
             );
           }
         }
-        // An external signer bounds its own request, and the RPC population
-        // inside `signPopulated` keeps this deadline. Its signing request is
-        // never cut off here: a signer failure is not an endpoint failure and
-        // must not fail over into a second signature for the same transaction.
-        const signed = isExternalEvmSigner(rpcSigner)
-          ? await this.signPopulated(rpcSigner, populated)
-          : await withRpcRequestTimeout(
-            RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
-            `${label} transaction signing via RPC #${i + 1}`,
-            () => this.signPopulated(rpcSigner, populated),
-          );
+        // `signPopulated` bounds its own RPC population with the per-endpoint
+        // deadline. The signature is never cut off here: an external signer
+        // bounds its own request, and a signer failure is not an endpoint
+        // failure, so it must not fail over into a second signature.
+        const signed = await this.signPopulated(rpcSigner, populated);
         // Signed on this endpoint → 'nonceWrite' marks it WRITE-proven (nonce-safe)
         // so it's preferred for the read-your-write ops that follow (the caller's
         // broadcast + receipt + confirming re-reads) AND for subsequent populates.

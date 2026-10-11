@@ -1945,11 +1945,10 @@ export class EVMChainAdapterBase {
       }
       return applyTransactionFeeCap(filled, this.maxFeePerGasWei, baseFeePerGas);
     };
-    // An external signer is called outside the per-endpoint attempt deadline
-    // (`RpcFailoverClient.populateAndSign`), so its RPC population keeps it here.
-    const filled = isExternalEvmSigner(signer)
-      ? await withRpcRequestTimeout(RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS, 'transaction population', populate)
-      : await populate();
+    // The RPC population (nonce, gas, fees) is bounded by the per-endpoint
+    // deadline for every signer; the signing request after it is not endpoint
+    // work and is never cut off (`RpcFailoverClient.populateAndSign`).
+    const filled = await withRpcRequestTimeout(RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS, 'transaction population', populate);
     const signedTx = await signer.signTransaction(filled);
     // GH#2270 PR-3 r3 — ONE decode of the signed bytes, here, for both facts the send window
     // needs. The nonce used to be re-parsed at the dispatch boundary from the same string.

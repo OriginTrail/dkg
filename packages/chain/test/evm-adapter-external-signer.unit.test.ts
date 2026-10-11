@@ -2,13 +2,17 @@
  * An EVM adapter whose operational wallets sign through an external signer.
  * A signer's failure is final for the transaction path: no contract-error
  * recovery reads a signer's refusal as a revert and asks for another
- * signature, whatever text the signer returned.
+ * signature, whatever text the signer returned. The RPC population of a
+ * transaction is bounded by the per-endpoint deadline, for every signer, and
+ * the signing request after it is not.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import { connectRemoteSigners } from '../src/remote-signer-connect.js';
 import { RemoteSignerError } from '../src/remote-signer-errors.js';
+import { classifyRpcRetryDisposition } from '../src/evm-adapter-rpc.js';
+import { RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
 import {
   InsufficientPublisherFundsError,
   isHubStaleError,
@@ -144,5 +148,79 @@ describe('contract recovery never re-signs after a signer refusal', () => {
     const shortfall = new Error('insufficient funds for gas * price + value');
     expect(await adapter.enrichInsufficientPublisherFundsError(shortfall, adapter.signer, 1n))
       .toBeInstanceOf(InsufficientPublisherFundsError);
+  });
+});
+
+describe('the RPC population of a transaction is bounded, its signing request is not', () => {
+  const payer = new ethers.Wallet(PAYER_KEY);
+
+  /** A signer for the payer account whose RPC population (nonce, gas, fees) waits until released. */
+  function stalledPopulation(external: boolean) {
+    let release!: () => void;
+    const populated = new Promise<ethers.TransactionRequest>((resolve) => { release = () => resolve(TX); });
+    const signTransaction = vi.fn(async (tx: ethers.TransactionRequest) => payer.signTransaction(tx));
+    const signer = {
+      address: payer.address,
+      provider: null,
+      ...(external ? { isExternalSigner: true as const } : {}),
+      populateTransaction: vi.fn(() => populated),
+      signTransaction,
+      connect: () => signer,
+    };
+    return { signer, signTransaction, release };
+  }
+
+  function localAdapter(): any {
+    const adapter = new EVMChainAdapter({
+      rpcUrl: 'http://127.0.0.1:1',
+      hubAddress: '0x00000000000000000000000000000000000000d4',
+      chainId: 'evm:31337',
+      privateKey: PAYER_KEY,
+      allowNoAdminSigner: true,
+    });
+    cleanups.push(() => adapter.destroy());
+    return adapter;
+  }
+
+  for (const kind of ['external', 'local'] as const) {
+    it(`fails a stalled population of ${kind === 'external' ? 'an external' : 'a local'} signer over at the deadline, and never signs it late`, async () => {
+      vi.useFakeTimers();
+      const adapter = localAdapter();
+      const { signer, signTransaction, release } = stalledPopulation(kind === 'external');
+      const outcome = adapter.signPopulatedTransaction(signer, TX).then(
+        () => 'signed',
+        (error: unknown) => error,
+      );
+      await vi.advanceTimersByTimeAsync(RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS + 1);
+      const error = await outcome;
+      expect(error).toMatchObject({ code: 'RPC_TIMEOUT' });
+      // A timed-out population moves on to the next endpoint.
+      expect(classifyRpcRetryDisposition(error)).toBe('failover');
+
+      // The population the endpoint finally answers is never signed.
+      release();
+      await vi.runAllTimersAsync();
+      expect(signTransaction).not.toHaveBeenCalled();
+    });
+  }
+
+  it('does not cut off a slow external signing request at the population deadline', async () => {
+    vi.useFakeTimers();
+    const adapter = localAdapter();
+    const signTransaction = vi.fn((tx: ethers.TransactionRequest) => new Promise<string>((resolve) => {
+      setTimeout(() => resolve(payer.signTransaction(tx)), RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS + 5_000);
+    }));
+    const signer = {
+      address: payer.address,
+      provider: null,
+      isExternalSigner: true as const,
+      populateTransaction: async () => TX,
+      signTransaction,
+      connect: () => signer,
+    };
+    const pending = adapter.signPopulatedTransaction(signer, TX);
+    await vi.advanceTimersByTimeAsync(RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS + 6_000);
+    await expect(pending).resolves.toMatchObject({ nonce: 3 });
+    expect(signTransaction).toHaveBeenCalledTimes(1);
   });
 });
