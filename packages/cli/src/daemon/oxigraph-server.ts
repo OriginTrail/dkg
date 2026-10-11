@@ -304,7 +304,6 @@ export async function startOxigraphServer(
     idleMs: opts.walRestartIdleMs,
     cooldownMs: opts.walRestartCooldownMs,
     measureRetainedWalBytes: io.measureRetainedWalBytes,
-    requestRestart,
     requestRecovery: reason => requestRecovery(lifecycle.generation, reason),
     serverAvailable: () => lifecycle.phase === 'ready' && childAlive(lifecycle.oxigraph),
     log,

@@ -31,8 +31,15 @@ export interface ManagedWorkRetentionV1 {
 interface RetainedWork {
   readonly operation: StoreOperation;
   readonly deadline: number;
-  readonly lifecycleGeneration: number;
-  readonly storeGeneration: number;
+}
+
+interface RetainedGeneration {
+  readonly generation: number;
+  readonly operations: Set<RetainedWork>;
+  status:
+    | { readonly phase: 'waiting'; retryAt: number }
+    | { readonly phase: 'observing'; dispose?: () => void }
+    | { readonly phase: 'stopped' };
 }
 
 /**
@@ -49,11 +56,8 @@ interface RetainedWork {
 export class ManagedWorkRecoveryCoordinatorV1 {
   readonly #options: ManagedWorkRecoveryCoordinatorOptionsV1;
   #lifecycleGeneration = 0;
-  readonly #retained = new Set<RetainedWork>();
+  readonly #generations = new Map<number, RetainedGeneration>();
   #reportedPending = false;
-  #retryAt = 0;
-  readonly #awaiting = new Set<number>();
-  readonly #subscriptions = new Map<number, () => void>();
   #armed?: {
     readonly timer: ReturnType<typeof setTimeout>;
     readonly read: RetainedWork;
@@ -88,8 +92,7 @@ export class ManagedWorkRecoveryCoordinatorV1 {
   ): ManagedWorkRetentionV1 | null {
     const retention = this.#retain(operation, deadline, token, true);
     if (token !== null && retention === null) return null;
-    if (retention !== null && token !== null) this.#request(token.storeGeneration, operation);
-    else {
+    if (retention === null) {
       try { this.#options.capability?.recover?.(operation); } catch { /* Keep timeout compatibility. */ }
     }
     if (!this.#options.capability?.requestRecovery) this.#retireConfirmedGeneration(this.#readState());
@@ -113,26 +116,31 @@ export class ManagedWorkRecoveryCoordinatorV1 {
     ) {
       return null;
     }
-    this.#retireConfirmedGeneration(current);
+    if (!this.#options.capability?.requestRecovery) this.#retireConfirmedGeneration(current);
     const read: RetainedWork = {
       operation,
       deadline,
-      lifecycleGeneration: token.lifecycleGeneration,
-      storeGeneration: token.storeGeneration,
     };
-    this.#retained.add(read);
+    let record = this.#generations.get(token.storeGeneration);
+    if (!record) {
+      record = { generation: token.storeGeneration, operations: new Set(), status: { phase: 'waiting', retryAt: 0 } };
+      this.#generations.set(record.generation, record);
+    }
+    record.operations.add(read);
     // Preserve the fence before immediate timeout notification. Let that
     // attempt settle before retrying, keeping the original deadline intact.
-    if (clientTimeout) this.#retryAt = Math.max(this.#retryAt, this.#options.now() + 1_000);
+    if (clientTimeout && record.status.phase === 'waiting') {
+      record.status.retryAt = Math.max(record.status.retryAt, this.#options.now() + 1_000);
+    }
     this.#reportPending();
     this.#arm();
+    if (clientTimeout && this.#generations.get(record.generation) === record) this.#request(record, operation);
+    const retainedGeneration = record;
     return {
       release: () => {
-        if (!this.#retained.delete(read)) return;
-        if (![...this.#retained].some(work => work.storeGeneration === read.storeGeneration)) {
-          this.#subscriptions.get(read.storeGeneration)?.();
-          this.#subscriptions.delete(read.storeGeneration); this.#awaiting.delete(read.storeGeneration);
-        }
+        if (this.#generations.get(retainedGeneration.generation) !== retainedGeneration
+          || !retainedGeneration.operations.delete(read)) return;
+        if (retainedGeneration.operations.size === 0) this.#retire(retainedGeneration);
         this.#arm();
         this.#reportPending();
       },
@@ -143,99 +151,101 @@ export class ManagedWorkRecoveryCoordinatorV1 {
     this.#lifecycleGeneration += 1;
     clearTimeout(this.#armed?.timer);
     this.#armed = undefined;
-    this.#retryAt = 0;
-    for (const dispose of this.#subscriptions.values()) dispose();
-    this.#subscriptions.clear(); this.#awaiting.clear();
-    this.#retained.clear();
+    for (const record of Array.from(this.#generations.values())) this.#retire(record);
     this.#reportPending();
+  }
+
+  #retire(record: RetainedGeneration): void {
+    if (this.#generations.get(record.generation) !== record) return;
+    this.#generations.delete(record.generation);
+    if (record.status.phase === 'observing') record.status.dispose?.();
   }
 
   /** Point the single timer at the earliest outstanding read (or stop it). */
   #arm(): void {
-    let earliest: RetainedWork | undefined;
-    for (const read of this.#retained) {
-      if (this.#awaiting.has(read.storeGeneration)) continue;
-      if (earliest === undefined || read.deadline < earliest.deadline) earliest = read;
+    let earliest: { record: RetainedGeneration; read: RetainedWork; dueAt: number } | undefined;
+    for (const record of this.#generations.values()) {
+      if (record.status.phase !== 'waiting') continue;
+      for (const read of record.operations) {
+        const dueAt = Math.max(read.deadline, record.status.retryAt);
+        if (earliest === undefined || dueAt < earliest.dueAt) earliest = { record, read, dueAt };
+      }
     }
-    const dueAt = earliest === undefined ? 0 : Math.max(earliest.deadline, this.#retryAt);
-    if (this.#armed?.read === earliest && this.#armed?.dueAt === dueAt) return;
+    if (this.#armed?.read === earliest?.read && this.#armed?.dueAt === earliest?.dueAt) return;
     clearTimeout(this.#armed?.timer);
     this.#armed = undefined;
-    if (earliest === undefined) { this.#retryAt = 0; return; }
-    const read = earliest;
-    const timer = setTimeout(() => this.#expire(read),
-      Math.max(0, dueAt - this.#options.now()));
+    if (earliest === undefined) return;
+    const { record, read, dueAt } = earliest;
+    const timer = setTimeout(() => this.#expire(record, read), Math.max(0, dueAt - this.#options.now()));
     timer.unref?.();
     this.#armed = { timer, read, dueAt };
   }
 
-  #expire(read: RetainedWork): void {
+  #expire(record: RetainedGeneration, read: RetainedWork): void {
     this.#armed = undefined;
     if (this.#options.capability?.requestRecovery) {
-      if (this.#retained.has(read)) this.#request(read.storeGeneration, read.operation);
+      if (record.operations.has(read)) this.#request(record, read.operation);
     } else {
       // Notification-only legacy capabilities cannot report physical completion.
       const current = this.#readState();
       this.#retireConfirmedGeneration(current);
-      if (this.#retained.has(read) && current !== null && !current.recovering
-        && current.generation === read.storeGeneration) this.#request(read.storeGeneration, read.operation);
+      if (this.#generations.get(record.generation) === record && current !== null && !current.recovering
+        && current.generation === record.generation) this.#request(record, read.operation);
+      this.#retireConfirmedGeneration(this.#readState());
     }
     // A request can fail ownership verification or signalling. Only
     // supervisor reclamation (or legacy generation advancement) releases the fence;
     // retry at a bounded rate. Admission pause alone does not stop recovery:
     // maintenance itself may be draining this abandoned work. The supervisor
     // coalesces requests while ownership verification is already in progress.
-    if (!this.#options.capability?.requestRecovery) this.#retireConfirmedGeneration(this.#readState());
-    this.#retryAt = this.#retained.has(read) ? this.#options.now() + 1_000 : 0;
+    if (record.status.phase === 'waiting') record.status.retryAt = this.#options.now() + 1_000;
     this.#arm();
     this.#reportPending();
   }
 
-  #request(generation: number, operation: StoreOperation): void {
+  #request(record: RetainedGeneration, operation: StoreOperation): void {
+    if (this.#generations.get(record.generation) !== record || record.status.phase !== 'waiting') return;
     const request = this.#options.capability?.requestRecovery;
     if (!request) {
       try { this.#options.capability?.recover?.(operation); } catch { /* Preserve caller result. */ }
       return;
     }
-    if (this.#awaiting.has(generation)) return;
     let handle: ManagedOxigraphRecoveryHandleV1 | undefined;
-    try { handle = request(generation, operation); } catch { /* Retry at the bounded deadline. */ }
-    if (!handle || handle.generation !== generation) return;
+    try { handle = request(record.generation, operation); } catch { /* Retry at the bounded deadline. */ }
+    if (!handle || handle.generation !== record.generation || this.#generations.get(record.generation) !== record) return;
     const lifetime = this.#lifecycleGeneration;
-    this.#awaiting.add(generation);
+    const observation: Extract<RetainedGeneration['status'], { phase: 'observing' }> = { phase: 'observing' };
+    record.status = observation;
     let dispose: () => void;
     try { dispose = handle.subscribe(phase => {
-      if (lifetime !== this.#lifecycleGeneration) return;
+      if (lifetime !== this.#lifecycleGeneration || this.#generations.get(record.generation) !== record
+        || record.status !== observation) return;
       if (phase === 'terminated' || phase === 'reopened') {
-        for (const read of this.#retained) {
-          if (read.storeGeneration === generation) this.#retained.delete(read);
-        }
-        this.#awaiting.delete(generation);
-      } else if (phase === 'cancelled') {
-        this.#awaiting.delete(generation);
-        this.#retryAt = this.#options.now() + 1_000;
-      } else if (phase !== 'stopped') return;
-      this.#subscriptions.get(generation)?.(); this.#subscriptions.delete(generation);
+        this.#retire(record);
+      } else if (phase === 'cancelled' || phase === 'stopped') {
+        record.status = phase === 'cancelled'
+          ? { phase: 'waiting', retryAt: this.#options.now() + 1_000 } : { phase: 'stopped' };
+        observation.dispose?.();
+      } else return;
       this.#arm(); this.#reportPending();
     }); } catch {
-      this.#awaiting.delete(generation); return;
+      if (record.status === observation) record.status = { phase: 'waiting', retryAt: this.#options.now() + 1_000 };
+      return;
     }
-    if (this.#awaiting.has(generation)) this.#subscriptions.set(generation, dispose);
+    // subscribe reports the current phase synchronously. A settled generation
+    // must dispose this very subscription, not retain it after its notification.
+    if (this.#generations.get(record.generation) === record && record.status === observation) observation.dispose = dispose;
     else dispose();
   }
 
   #retireConfirmedGeneration(current: ManagedOxigraphRuntimeStateV1 | null): void {
-    for (const work of this.#retained) {
-      if (work.lifecycleGeneration !== this.#lifecycleGeneration
-        || (current !== null && current.generation !== work.storeGeneration)) {
-        this.#retained.delete(work);
-      }
+    for (const record of this.#generations.values()) {
+      if (current !== null && current.generation !== record.generation) this.#retire(record);
     }
-    if (this.#retained.size === 0) this.#retryAt = 0;
   }
 
   #reportPending(): void {
-    const pending = this.#retained.size > 0;
+    const pending = this.#generations.size > 0;
     if (pending === this.#reportedPending) return;
     this.#reportedPending = pending;
     try {

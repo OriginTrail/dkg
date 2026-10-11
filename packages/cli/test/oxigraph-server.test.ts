@@ -277,36 +277,39 @@ describe('startOxigraphServer (real child processes)', () => {
     expect(await portAnswers(port)).toBe(false);
   });
 
-  it('restarts the child after an unexpected crash (real SIGKILL), with a new pid', async () => {
+  it('retains confirmed reclamation across two spontaneous crashes without requesting a third restart', async () => {
     const port = await freePort();
     const handle = await startOxigraphServer(startOpts(port));
     try {
-      const pid1 = await fetchPid(port);
-      expect(pid1).toBeGreaterThan(0);
-
-      // Genuinely crash the supervised child from outside.
-      process.kill(pid1, 'SIGKILL');
-
-      // The supervisor must respawn it (backoff base 100ms). Poll until the
-      // probe answers again with a DIFFERENT real pid.
-      let pid2 = 0;
-      for (let i = 0; i < 100; i++) {
-        await sleep(100);
-        try {
-          pid2 = await fetchPid(port);
-          if (pid2 && pid2 !== pid1) break;
-        } catch {
-          /* not back yet */
+      let pid = await fetchPid(port);
+      expect(pid).toBeGreaterThan(0);
+      for (const generation of [1, 2]) {
+        // Genuinely crash the supervised child from outside. Launch must first
+        // reclaim its physical store ownership before the replacement is ready.
+        process.kill(pid, 'SIGKILL');
+        let replacement = 0;
+        for (let i = 0; i < 100; i++) {
+          await sleep(100);
+          try {
+            replacement = await fetchPid(port);
+            if (replacement && replacement !== pid) break;
+          } catch { /* not back yet */ }
         }
+        expect(replacement, 'supervisor never respawned the crashed child').toBeGreaterThan(0);
+        expect(replacement).not.toBe(pid);
+        pid = replacement;
+        for (let i = 0; i < 50 && handle.getRecoveryState().recovering; i++) await sleep(20);
+        expect(handle.getRecoveryState()).toEqual({ recovering: false, admissionsPaused: false, generation });
       }
-      expect(pid2, 'supervisor never respawned the crashed child').toBeGreaterThan(0);
-      expect(pid2).not.toBe(pid1);
-      for (let i = 0; i < 50 && handle.getRecoveryState().recovering; i++) await sleep(20);
-      expect(handle.getRecoveryState())
-        .toEqual({ recovering: false, admissionsPaused: false, generation: 1 });
-    } finally {
-      await handle.stop();
-    }
+      for (const generation of [0, 1]) {
+        const phases: string[] = [];
+        const dispose = handle.requestRecovery!(generation, 'old abandoned work')!.subscribe(phase => phases.push(phase));
+        expect(phases).toEqual(['terminated']); dispose();
+      }
+      expect(handle.requestRecovery!(3, 'unconfirmed future')).toBeUndefined();
+      expect(handle.getRecoveryState()).toEqual({ recovering: false, admissionsPaused: false, generation: 2 });
+      expect(await fetchPid(port)).toBe(pid);
+    } finally { await handle.stop(); }
   });
 
   it('drops a store count that failed while the child was recovering once it is healthy again', async () => {

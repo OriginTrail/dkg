@@ -67,6 +67,73 @@ describe('ManagedWorkRecoveryCoordinatorV1', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('keeps modern generation records independent until physical completion or individual release', () => {
+    const state = { recovering: false, generation: 0 };
+    const pending = vi.fn();
+    let observe!: (phase: ManagedOxigraphRecoveryPhaseV1) => void;
+    const dispose = vi.fn();
+    const coordinator = new ManagedWorkRecoveryCoordinatorV1({ now: () => Date.now(), onPendingChange: pending,
+      capability: { readState: () => state, requestRecovery: generation => ({ generation, subscribe(callback) {
+        observe = callback; callback('signalled'); return dispose;
+      } }) } });
+    try {
+      coordinator.clientTimedOut('update', Date.now(), coordinator.begin(state));
+      state.generation = 1;
+      const first = coordinator.retain('query', Date.now() + 100, coordinator.begin(state));
+      const second = coordinator.retain('construct', Date.now() + 200, coordinator.begin(state));
+      first?.release(); second?.release(); second?.release();
+      expect(pending.mock.calls).toEqual([[true]]);
+      expect(dispose).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+      observe('terminated');
+      expect(pending.mock.calls).toEqual([[true], [false]]);
+      expect(dispose).toHaveBeenCalledOnce();
+    } finally { coordinator.close(); }
+  });
+
+  it('disposes synchronous stopped observation but retains its fence until independently released', async () => {
+    const state = { recovering: false, generation: 0 };
+    const pending = vi.fn(); const dispose = vi.fn();
+    let observe!: (phase: ManagedOxigraphRecoveryPhaseV1) => void;
+    const requestRecovery = vi.fn((generation: number) => ({ generation, subscribe(callback: typeof observe) {
+      observe = callback; callback('stopped'); return dispose;
+    } }));
+    const coordinator = new ManagedWorkRecoveryCoordinatorV1({ now: () => Date.now(), onPendingChange: pending,
+      capability: { readState: () => state, requestRecovery } });
+    try {
+      const retention = coordinator.clientTimedOut('update', Date.now(), coordinator.begin(state));
+      expect(dispose).toHaveBeenCalledOnce(); expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(30_000);
+      observe('terminated');
+      expect(pending.mock.calls).toEqual([[true]]); expect(requestRecovery).toHaveBeenCalledOnce();
+      retention?.release(); expect(pending.mock.calls).toEqual([[true], [false]]);
+      expect(dispose).toHaveBeenCalledOnce();
+    } finally { coordinator.close(); }
+  });
+
+  it('does not let synchronous completion or an old release retire a reentrant same-key record', async () => {
+    const state = { recovering: false, generation: 0 };
+    let observe!: (phase: ManagedOxigraphRecoveryPhaseV1) => void;
+    const dispose = vi.fn();
+    const replacement: { retention: import('../src/managed-work-recovery-coordinator.js').ManagedWorkRetentionV1 | null } = { retention: null };
+    const requestRecovery = vi.fn((generation: number) => ({ generation, subscribe(callback: typeof observe) {
+      observe = callback; callback('terminated'); return dispose;
+    } }));
+    const pending = vi.fn((busy: boolean) => {
+      if (!busy && !replacement.retention) replacement.retention = coordinator.retain('construct', Date.now() + 100, coordinator.begin(state));
+    });
+    const coordinator = new ManagedWorkRecoveryCoordinatorV1({ now: () => Date.now(), onPendingChange: pending,
+      capability: { readState: () => state, requestRecovery } });
+    try {
+      const old = coordinator.clientTimedOut('query', Date.now(), coordinator.begin(state));
+      expect(pending.mock.calls).toEqual([[true], [false], [true]]);
+      expect(dispose).toHaveBeenCalledOnce(); old?.release(); observe('terminated');
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(99); expect(requestRecovery).toHaveBeenCalledOnce();
+      replacement.retention?.release(); expect(vi.getTimerCount()).toBe(0);
+    } finally { coordinator.close(); }
+  });
+
   it('does not let a stale token replace the current store generation timer', async () => {
     const state = { recovering: false, generation: 0 };
     const recover = vi.fn();

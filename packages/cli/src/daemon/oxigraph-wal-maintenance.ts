@@ -15,8 +15,7 @@ export interface OxigraphWalMaintenanceOptions {
   idleMs?: number;
   cooldownMs?: number;
   measureRetainedWalBytes: (location: string) => number;
-  requestRestart: (reason: string) => boolean;
-  requestRecovery?: (reason: string) => ManagedOxigraphRecoveryHandleV1 | undefined;
+  requestRecovery: (reason: string) => ManagedOxigraphRecoveryHandleV1 | undefined;
   serverAvailable: () => boolean;
   log: (message: string) => void;
   now?: () => number;
@@ -33,7 +32,6 @@ export interface OxigraphWalMaintenanceCoordinator {
   registerActivity(): OxigraphWalMaintenanceActivityLease;
   admissionsPaused(): boolean;
   serverLifecycleChanged(): void;
-  restartCompleted(): void;
   stop(): void;
 }
 
@@ -64,8 +62,6 @@ export function createOxigraphWalMaintenanceCoordinator(
   let idleSince: number | null = null;
   let lastRestartAt = Number.NEGATIVE_INFINITY;
   let maintenancePending = false;
-  // Real supervision owns recovery progress; the boolean serves legacy callbacks only.
-  let restartRequested = false;
   let recoverySubscription: (() => void) | undefined;
   let stopped = false;
 
@@ -85,7 +81,7 @@ export function createOxigraphWalMaintenanceCoordinator(
     refreshIdleClock();
     const observedAt = now();
     const busy = anyStoreBusy();
-    if (!options.serverAvailable() || restartRequested || recoverySubscription) return;
+    if (!options.serverAvailable() || recoverySubscription) return;
 
     // Measure while the server is busy. Waiting to observe an idle tick before
     // looking at disk means a continuously loaded node can grow past the
@@ -115,24 +111,19 @@ export function createOxigraphWalMaintenanceCoordinator(
     if (observedAt - idleSince < idleMs) return;
     const reason = `retained WAL reached the ${formatWalBytes(thresholdBytes)} maintenance threshold `
       + `after ${Math.round((observedAt - idleSince) / 1_000)}s idle`;
-    if (options.requestRecovery) {
-      const recovery = options.requestRecovery(reason);
-      if (!recovery) return;
-      let ended = false;
-      const dispose = recovery.subscribe(phase => {
-        if (stopped) return;
-        if (phase === 'reopened') {
-          lastRestartAt = now(); maintenancePending = false;
-        } else if (phase !== 'cancelled' && phase !== 'stopped') return;
-        ended = true;
-        recoverySubscription?.(); recoverySubscription = undefined;
-        refreshIdleClock(true);
-      });
-      if (ended) dispose(); else recoverySubscription = dispose;
-    } else if (options.requestRestart(reason)) {
-      restartRequested = true;
+    const recovery = options.requestRecovery(reason);
+    if (!recovery) return;
+    let ended = false;
+    const dispose = recovery.subscribe(phase => {
+      if (stopped) return;
+      if (phase === 'reopened') {
+        lastRestartAt = now(); maintenancePending = false;
+      } else if (phase !== 'cancelled' && phase !== 'stopped') return;
+      ended = true;
+      recoverySubscription?.(); recoverySubscription = undefined;
       refreshIdleClock(true);
-    }
+    });
+    if (ended) dispose(); else recoverySubscription = dispose;
 
   };
 
@@ -162,25 +153,15 @@ export function createOxigraphWalMaintenanceCoordinator(
     admissionsPaused(): boolean {
       return !stopped && maintenancePending;
     },
-    // Legacy notification-only restarts observe readiness here. Real recovery
-    // cancellation and reopen arrive through the generation-bound handle.
+    // Cancellation and reopen arrive through the generation-bound handle.
     serverLifecycleChanged(): void {
       if (stopped) return;
-      if (options.serverAvailable()) restartRequested = false;
-      refreshIdleClock(true);
-    },
-    restartCompleted(): void {
-      if (stopped || !maintenancePending) return;
-      lastRestartAt = now();
-      maintenancePending = false;
-      restartRequested = false;
       refreshIdleClock(true);
     },
     stop(): void {
       if (stopped) return;
       stopped = true;
       maintenancePending = false;
-      restartRequested = false;
       recoverySubscription?.(); recoverySubscription = undefined;
       activitySources.clear();
       refreshIdleClock();

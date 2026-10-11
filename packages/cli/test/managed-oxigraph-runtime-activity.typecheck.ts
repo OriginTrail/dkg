@@ -9,3 +9,16 @@ const obsoleteHooks: ManagedOxigraphRuntimeHooksV1 = {
 };
 void leaseHooks;
 void obsoleteHooks;
+
+import type { OxigraphWalMaintenanceCoordinator, OxigraphWalMaintenanceOptions }
+  from '../src/daemon/oxigraph-wal-maintenance.js';
+
+type RecoveryRequired = {} extends Pick<OxigraphWalMaintenanceOptions, 'requestRecovery'> ? false : true;
+const recoveryRequired: RecoveryRequired = true;
+declare const maintenance: OxigraphWalMaintenanceCoordinator;
+// @ts-expect-error Physical recovery progress is the only completion protocol.
+maintenance.restartCompleted();
+// @ts-expect-error Boolean restart requests cannot replace generation progress.
+const obsoleteRestartOption: keyof OxigraphWalMaintenanceOptions = 'requestRestart';
+void recoveryRequired;
+void obsoleteRestartOption;
