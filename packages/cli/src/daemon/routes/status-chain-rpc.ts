@@ -16,7 +16,7 @@ export function chainRpcStatusFields(transport?: DaemonRouteRpcTransport) {
   const rpcFailoverStats = getRpcFailoverStats();
   return {
     rpcRequestTiming: snapshotRpcRequestTiming(),
-    rpcRequestGovernor: transport?.snapshotGovernor?.() ?? null,
+    rpcRequestGovernor: transport?.snapshotGovernor() ?? null,
     // Multi-RPC failover observability (counts only — no RPC URLs).
     rpcFailovers: rpcFailoverStats.failovers,
     rpcExhaustions: rpcFailoverStats.exhaustions,

@@ -33,7 +33,7 @@ export interface DaemonRpcEndpointProbe {
 /** One bound transport shared by every daemon-owned direct RPC route. */
 export interface DaemonRouteRpcTransport {
   /** Non-draining snapshot; interval counters reset only at the daemon's log tick. */
-  snapshotGovernor?(): RpcRequestGovernorWindow;
+  snapshotGovernor(): RpcRequestGovernorWindow;
   createProvider(
     rpcUrl: string,
     rpcUrls?: readonly string[],

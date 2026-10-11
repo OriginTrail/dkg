@@ -207,7 +207,7 @@ describe('/api/status chain endpoint observability', () => {
       expect(JSON.stringify(body.chain)).not.toContain(SECRET);
     }
     expect(runtime.governor.drainWindow().foregroundAdmitted).toBe(1);
-    expect(runtime.routeTransport.snapshotGovernor!().foregroundAdmitted).toBe(0);
+    expect(runtime.routeTransport.snapshotGovernor().foregroundAdmitted).toBe(0);
   });
 
   async function statusChain(): Promise<Record<string, any>> {
