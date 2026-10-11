@@ -100,7 +100,8 @@ describe('public host restoration policy fences', () => {
     expect(handler).toBeDefined();
     handler('topic', bytes, 'authorized-publisher');
     await vi.waitFor(() => expect(ingest).toHaveBeenCalledTimes(1));
-    await vi.waitFor(async () => expect((await g.swmHostModeStore!.stats()).perCg[id].entries).toBe(1));
+    await ingest.mock.results[0].value;
+    expect((await g.swmHostModeStore!.iterate(id, 0)).map(entry => entry.envelopeBytes)).toEqual([persisted]);
     const replacement = await g.chain.createOnChainContextGraph({ accessPolicy: 1, publishPolicy: 1,
       nameHash: ethers.keccak256(ethers.toUtf8Bytes('automatic-private-slot')).toLowerCase() });
     const privateId = String(replacement.contextGraphId);
@@ -110,7 +111,7 @@ describe('public host restoration policy fences', () => {
     handler('topic', bytes, 'authorized-publisher');
     await Promise.resolve();
     expect(ingest).toHaveBeenCalledTimes(1);
-    expect((await g.swmHostModeStore!.stats()).perCg[id].entries).toBe(1);
+    expect((await g.swmHostModeStore!.iterate(id, 0)).map(entry => entry.envelopeBytes)).toEqual([persisted]);
   });
 
   for (const chunked of [false, true]) for (const transition of ['unchanged', 'rebind', 'close'] as const) {
