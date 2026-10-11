@@ -280,6 +280,27 @@ describe('the retirement of a published asset\'s legacy SWM marker', () => {
     expect(node.markers()).toBe(1);
   });
 
+  it('starts no retirement that is first asked for after the node began to stop, and admits them again when it starts', async () => {
+    // Nothing on this node has asked for a retirement yet, so stop() finds no owner of them.
+    const node = await publishedAsset({ started: true });
+    await node.agent.stop();
+
+    // Work that was still draining asks now, for the first time on this node.
+    const held = node.holdTheRead();
+    await node.retire();
+    // It met a closed owner: no attempt, no read of the store, and the marker stays.
+    expect(held.reading).toBe(false);
+    expect(node.running()).toBe(0);
+    expect(node.owed()).toBe(0);
+    expect(node.markers()).toBe(1);
+
+    held.finishRead();
+    await node.agent.start();
+    await node.retire();
+    expect(held.reading).toBe(true);
+    expect(node.markers()).toBe(0);
+  });
+
   it('holds the stop of the node until a retirement that is at work has ended', async () => {
     const node = await publishedAsset({ started: true });
     const held = node.holdTheRead();
