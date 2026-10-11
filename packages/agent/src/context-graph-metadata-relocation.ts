@@ -162,6 +162,17 @@ interface Candidate {
   held: boolean;
 }
 
+// Proven slot policies are immutable, but the general classifier's bounded
+// memo can evict them before a large relocation finishes. Retain progress only
+// for candidates still present in this store, bound to their exact bindings.
+const publicBindingProgress = new WeakMap<TripleStore, Map<string, string>>();
+
+function bindingFingerprint(candidate: Candidate): string {
+  return JSON.stringify(candidate.ontologyRows
+    .filter((row) => row.predicate === CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE)
+    .map((row) => stripLiteral(row.object).trim()).sort());
+}
+
 async function candidates(store: TripleStore, ontologyGraph: string): Promise<Map<string, Candidate>> {
   // Every context-graph subject in ontology that carries a binding, a policy or
   // a name but no public definition, with all of its ontology rows and whether
@@ -266,6 +277,12 @@ export async function relocatePrivateContextGraphMetadata(
   let unclassified = 0;
 
   const pending = await candidates(store, ontologyGraph);
+  const provenPublic = publicBindingProgress.get(store) ?? new Map<string, string>();
+  publicBindingProgress.set(store, provenPublic);
+  for (const [subject, fingerprint] of provenPublic) {
+    const candidate = pending.get(subject);
+    if (!candidate || bindingFingerprint(candidate) !== fingerprint) provenPublic.delete(subject);
+  }
   let examined = 0;
   let lastYield = performance.now();
   for (const [subject, candidate] of pending) {
@@ -290,6 +307,8 @@ export async function relocatePrivateContextGraphMetadata(
     let verdict: RelocationVerdict;
     if (typeof local === 'string') {
       verdict = local;
+    } else if (provenPublic.get(subject) === bindingFingerprint(candidate)) {
+      verdict = 'keep';
     } else if (deps.classifyOnChainSlot) {
       const slotClasses: OntologyBindingSlotClass[] = [];
       for (const onChainId of local.onChainIds) {
@@ -297,11 +316,13 @@ export async function relocatePrivateContextGraphMetadata(
         if (slotClasses.at(-1) === 'curated') break;
       }
       verdict = slotRelocationVerdict(slotClasses);
+      if (verdict === 'keep') provenPublic.set(subject, bindingFingerprint(candidate));
     } else {
       verdict = 'unproven';
     }
     if (verdict === 'unproven') unclassified += 1;
     if (verdict !== 'remove') continue;
+    provenPublic.delete(subject);
 
     const activities = ontologyRows
       .filter((row) => row.predicate === DKG_ONTOLOGY.PROV_GENERATED_BY)

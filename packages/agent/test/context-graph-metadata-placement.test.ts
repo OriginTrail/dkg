@@ -29,6 +29,7 @@ import { OxigraphStore, deleteByPatternWithoutCount, type Quad, type TripleStore
 import { DKGAgent } from '../src/index.js';
 import {
   METADATA_RELOCATION_STARTUP_BUDGET_MS,
+  METADATA_RELOCATION_MAX_CHAIN_CLASSIFICATIONS,
   localRelocationVerdict,
   relocatePrivateContextGraphMetadata,
   slotRelocationVerdict,
@@ -1374,6 +1375,72 @@ describe('ontology binding slot classifier', () => {
     await expect(withReads.classify('05')).resolves.toBe('unknown');
     await expect(withReads.classify('1'.repeat(79))).resolves.toBe('unknown');
     expect(accessPolicy).not.toHaveBeenCalled();
+  });
+});
+
+describe('relocation progress and serving transitions', () => {
+  it('eventually proves more public bindings than the classifier cache can retain', async () => {
+    const { agent, chain } = await createAgent('relocation-over-cache');
+    const count = 1041;
+    await agent.store.insert(Array.from({ length: count }, (_, index) => bindingQuad(`0xabc/public-${index}`, String(index + 1))));
+    vi.spyOn(chain, 'isContextGraphActiveOnChain').mockResolvedValue(true);
+    const reads = vi.spyOn(chain, 'getContextGraphAccessPolicy').mockResolvedValue(0);
+    let remaining = count;
+    for (let pass = 0; pass <= Math.ceil(count / METADATA_RELOCATION_MAX_CHAIN_CLASSIFICATIONS); pass += 1) {
+      const before = reads.mock.calls.length;
+      const result = await agent.relocatePrivateContextGraphMetadata();
+      expect(reads.mock.calls.length - before).toBeLessThanOrEqual(METADATA_RELOCATION_MAX_CHAIN_CLASSIFICATIONS);
+      expect(result.deletedForeign).toBe(0);
+      remaining = result.unclassified + result.deferred;
+      if (remaining === 0) break;
+      expect(agent.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)).toBe(true);
+    }
+    expect(remaining).toBe(0);
+    expect(reads).toHaveBeenCalledTimes(count);
+    expect(agent.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)).toBe(false);
+    expect((await agent.store.query(`SELECT ?s WHERE { GRAPH <${ONTOLOGY_GRAPH}> { ?s <${ON_CHAIN_ID}> ?id } }`)).type).toBe('bindings');
+    expect(await lookupBinding(agent.store, '0xabc/public-1040')).toBe('1041');
+  }, 30_000);
+
+  it('does not reuse public progress for changed or removed bindings', async () => {
+    const { agent, chain } = await createAgent('relocation-progress-identity');
+    vi.spyOn(chain, 'isContextGraphActiveOnChain').mockResolvedValue(true);
+    vi.spyOn(chain, 'getContextGraphAccessPolicy').mockResolvedValue(0);
+    const id = '0xabc/changed-progress';
+    await agent.store.insert([bindingQuad(id, '1')]);
+    await agent.relocatePrivateContextGraphMetadata();
+    expect(agent.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)).toBe(false);
+    await deleteByPatternWithoutCount(agent.store, { graph: ONTOLOGY_GRAPH, subject: contextGraphDataGraphUri(id) });
+    await agent.store.insert([bindingQuad(id, '2')]);
+    await expect(agent.relocatePrivateContextGraphMetadata({ classifyOnChain: false })).resolves.toMatchObject({ unclassified: 1 });
+    expect(agent.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)).toBe(true);
+    await agent.relocatePrivateContextGraphMetadata();
+    await deleteByPatternWithoutCount(agent.store, { graph: ONTOLOGY_GRAPH, subject: contextGraphDataGraphUri(id) });
+    await agent.relocatePrivateContextGraphMetadata({ classifyOnChain: false });
+    await agent.store.insert([bindingQuad(id, '2')]);
+    await expect(agent.relocatePrivateContextGraphMetadata({ classifyOnChain: false })).resolves.toMatchObject({ unclassified: 1 });
+    expect(await ontologyRowsAbout(agent, id)).toHaveLength(1);
+    expect(await lookupBinding(agent.store, id)).toBe('2');
+  });
+
+  it.each(['unclassified', 'deferred', 'failing'] as const)('withholds a previously serving graph after a later %s pass and then reopens', async (mode) => {
+    const { agent, chain } = await createAgent(`relocation-reopen-${mode}`);
+    await agent.relocatePrivateContextGraphMetadata({ classifyOnChain: false });
+    expect(agent.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)).toBe(false);
+    await agent.store.insert([bindingQuad('0xabc/new-binding', '9001')]);
+    vi.spyOn(chain, 'isContextGraphActiveOnChain').mockResolvedValue(true);
+    vi.spyOn(chain, 'getContextGraphAccessPolicy').mockResolvedValue(0);
+    if (mode === 'failing') {
+      vi.spyOn(agent.store, 'query').mockRejectedValueOnce(new Error('relocation store read failed'));
+      await expect(agent.relocatePrivateContextGraphMetadata()).rejects.toThrow('relocation store read failed');
+    } else {
+      const result = await agent.relocatePrivateContextGraphMetadata(mode === 'deferred' ? { budgetMs: 0 } : { classifyOnChain: false });
+      expect(result[mode]).toBe(1);
+    }
+    expect(agent.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)).toBe(true);
+    await agent.relocatePrivateContextGraphMetadata();
+    expect(agent.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)).toBe(false);
+    expect(await lookupBinding(agent.store, '0xabc/new-binding')).toBe('9001');
   });
 });
 

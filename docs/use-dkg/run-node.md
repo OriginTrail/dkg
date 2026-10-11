@@ -380,7 +380,7 @@ remain active for every setting. The public recovery lane retains its separate
 
 ### Legacy ontology privacy during startup
 
-An upgraded node may retain old Context Graph bindings in its public `ontology` graph. The node withholds ontology sync, changelog sync and remote queries while any candidate is deferred or its public access policy remains unproven. Local-only startup inspection does not prove an unknown binding public. Later discovery passes classify at most 16 new slots per pass and reuse known slot classifications, moving or deleting curated metadata before serving resumes.
+An upgraded node may retain old Context Graph bindings in its public `ontology` graph. The node withholds ontology sync, changelog sync and remote queries while any candidate is deferred or its public access policy remains unproven. Local-only startup inspection does not prove an unknown binding public. Later discovery passes classify at most 16 new slots per pass and reuse known slot classifications, moving or deleting curated metadata before serving resumes. Proven public bindings retain process-local progress tied to their exact slot IDs, independently of the bounded general classifier cache; progress is discarded when those bindings change or disappear.
 
 An unavailable classifier or a persistently unreadable slot can keep ontology unavailable indefinitely. This is an intentional privacy boundary: elapsed time does not authorize exposing a potentially curated graph's name or binding. Other graphs continue using their existing serving policies. Restore chain-read availability or correct the retained binding; ordinary bounded relocation passes then reopen ontology once every candidate is classified or relocated.
 
