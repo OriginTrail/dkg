@@ -22,6 +22,7 @@ import {
   noteRpcFailover,
   notePreferredEndpoint,
   noteRpcServed,
+  snapshotRpcRequestTiming,
 } from '@origintrail-official/dkg-chain';
 import {
   resolveRfc64CatalogActivationsV1,
@@ -32,6 +33,8 @@ import { handleStatusRoutes } from '../src/daemon/routes/status.js';
 import { chainRpcStatusFields } from '../src/daemon/routes/status-chain-rpc.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
+import { createDaemonRpcRuntime, type DaemonRouteRpcTransport } from '../src/daemon/rpc-runtime.js';
+import type { ResolvedChainConfig } from '../src/config.js';
 
 const SECRET = 'v3/SECRET-PATH-KEY?apikey=SECRET-QUERY-KEY';
 
@@ -84,7 +87,7 @@ async function readVersionSnapshot(refusing: ReadonlyArray<(typeof ENDPOINTS)[nu
   }).readKnowledgeAssetVersionSnapshot(7n);
 }
 
-async function startStatusServer(): Promise<{ server: Server; baseUrl: string }> {
+async function startStatusServer(routeRpcTransport?: DaemonRouteRpcTransport): Promise<{ server: Server; baseUrl: string }> {
   const activationState = resolveRfc64CatalogActivationsV1(
     { persistenceAvailable: false },
     resolveRfc64PublicCatalogActivationChainIdentityV1(undefined),
@@ -94,6 +97,7 @@ async function startStatusServer(): Promise<{ server: Server; baseUrl: string }>
     await handleStatusRoutes({
       req,
       res,
+      routeRpcTransport,
       publisherState: {
         runtime: null,
         availability: {
@@ -163,6 +167,8 @@ describe('/api/status chain endpoint observability', () => {
     const stats = getRpcFailoverStats();
 
     expect(chainRpcStatusFields()).toEqual({
+      rpcRequestTiming: snapshotRpcRequestTiming(),
+      rpcRequestGovernor: null,
       rpcFailovers: 1,
       rpcExhaustions: 1,
       rpcFailoversByClass: { THROTTLE_429: 1 },
@@ -179,6 +185,29 @@ describe('/api/status chain endpoint observability', () => {
       },
     });
     expect(chainRpcStatusFields().rpcFailoversByClass).toEqual(stats.byErrorClass);
+  });
+
+  it('exposes the real shared governor window without draining it or sending a probe', async () => {
+    const runtime = createDaemonRpcRuntime({
+      type: 'evm', rpcUrl: `https://one.example/${SECRET}`, chainId: 'evm:31337',
+      rpcRequestBudget: { startupJitterMs: 0 },
+    } as ResolvedChainConfig)!;
+    await runtime.governor.acquire('foreground');
+    const started = await startStatusServer(runtime.routeTransport);
+    server = started.server;
+    for (let repeat = 0; repeat < 2; repeat += 1) {
+      const response = await fetch(`${started.baseUrl}/api/status`);
+      expect(response.status).toBe(200);
+      const body = await response.json() as { chain: Record<string, unknown> };
+      expect(body.chain.rpcRequestGovernor).toMatchObject({
+        maxRequestsPerSecond: 10, foregroundAdmitted: 1, backgroundAdmitted: 0,
+        foregroundQueued: 0, backgroundQueued: 0,
+      });
+      expect(body.chain.rpcRequestTiming).toEqual(snapshotRpcRequestTiming());
+      expect(JSON.stringify(body.chain)).not.toContain(SECRET);
+    }
+    expect(runtime.governor.drainWindow().foregroundAdmitted).toBe(1);
+    expect(runtime.routeTransport.snapshotGovernor!().foregroundAdmitted).toBe(0);
   });
 
   async function statusChain(): Promise<Record<string, any>> {

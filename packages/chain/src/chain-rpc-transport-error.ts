@@ -163,10 +163,12 @@ export function createRpcTimeoutError(
 }
 
 /**
- * An endpoint attempt whose deadline expired while its request still waited in
- * the process-local RPC governor, before anything was sent. It carries the
+ * An endpoint attempt whose deadline expired while its next request waited in
+ * the process-local RPC governor, with no endpoint request still in flight. It carries the
  * local-capacity code, so failover treats it like a full queue: no endpoint is
  * blamed and none is tried next, because every endpoint shares that queue.
+ * Earlier requests may have completed in this operation. This classification
+ * is not evidence that the enclosing publication has never dispatched a write.
  */
 export function createRpcAdmissionTimeoutError(
   message: string,
