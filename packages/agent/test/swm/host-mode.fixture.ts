@@ -87,13 +87,14 @@ export function createHostModeTestFixture() {
   });
 
   /** A core with a host-mode store installed. `strip` toggles the WS-A flag;
-   * omit it to exercise the DEFAULT (strip ON). */
-  async function makeCore(strip?: boolean, options: { chain?: MockChainAdapter; saved?: ContextGraphSubscriptionRecord; hostPublic?: boolean; reconcileBatchSize?: number; dataDir?: string } = {}): Promise<DKGAgent> {
+   * omit it to exercise the DEFAULT (strip ON). A null chain preserves the
+   * agent’s default NoChain adapter for legacy restoration scenarios. */
+  async function makeCore(strip?: boolean, options: { chain?: MockChainAdapter | null; saved?: ContextGraphSubscriptionRecord; hostPublic?: boolean; reconcileBatchSize?: number; dataDir?: string } = {}): Promise<DKGAgent> {
     const dataDir = options.dataDir ?? await mkdtemp(join(tmpdir(), 'dkg-strip-ct-'));
     if (options.dataDir === undefined) tempDirs.push(dataDir);
     const core = await DKGAgent.create({
       name: 'StripCiphertextCore',
-      chainAdapter: options.chain ?? new MockChainAdapter(),
+      ...(options.chain === null ? {} : { chainAdapter: options.chain ?? new MockChainAdapter() }),
       ...(options.saved ? { contextGraphSubscriptionRehydrationEnabled: false,
         contextGraphSubscriptionStore: { loadAll: async () => [{ ...options.saved! }], save: async () => {}, delete: async () => {} } } : {}),
       listenHost: '127.0.0.1',

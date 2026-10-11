@@ -269,7 +269,7 @@ describe('persisted host-mode restoration compatibility', () => {
   it('cold restart restores a hash-only public host from its persisted chain binding', async () => {
     const wireId = ethers.keccak256(ethers.toUtf8Bytes('cg-public-cold-host')).toLowerCase();
     const onChainId = '42';
-    const first = await makeCore(true, { hostPublic: true });
+    const first = await makeCore(true, { hostPublic: true, chain: null });
     const dataDir = (first as unknown as StripInternals).config.dataDir;
     const firstInternals = first as unknown as StripInternals;
     const firstStore = firstInternals.swmHostModeStore!;
@@ -309,7 +309,7 @@ describe('persisted host-mode restoration compatibility', () => {
   });
 
   it('restart restore contains a failing policy re-evaluation to keep startup alive', async () => {
-    const core = await makeCore(true, { hostPublic: true });
+    const core = await makeCore(true, { hostPublic: true, chain: null });
     const g = core as unknown as StripInternals;
     installGossipStub(g);
     const cgId = 'cg-public-restore-error';
@@ -333,7 +333,7 @@ describe('persisted host-mode restoration compatibility', () => {
   });
 
   it('restart restore wires persisted subscriptions when private-ciphertext strip is OFF', async () => {
-    const core = await makeCore(false);
+    const core = await makeCore(false, { chain: null });
     const g = core as unknown as StripInternals;
     installGossipStub(g);
     const cgId = 'cg-curated-restore';
@@ -358,7 +358,7 @@ describe('persisted host-mode restoration compatibility', () => {
     // chain RPC pair on a `hostPublic` core), so the startup walk must be
     // capped the same way the periodic sweep is. Nothing may be dropped: the
     // tail still runs, just not on the boot path.
-    const core = await makeCore(false, { reconcileBatchSize: 2 });
+    const core = await makeCore(false, { reconcileBatchSize: 2, chain: null });
     const g = core as unknown as StripInternals;
     const store = g.swmHostModeStore!;
     installGossipStub(g);
@@ -394,7 +394,7 @@ describe('persisted host-mode restoration compatibility', () => {
     // every envelope (member apply + opaque host append). The refusal lives in
     // `wireSwmHostModeHandler` itself (review #2614), so this drives the REAL
     // wiring point instead of a stub of it.
-    const core = await makeCore(false, { reconcileBatchSize: 2 });
+    const core = await makeCore(false, { reconcileBatchSize: 2, chain: null });
     const g = core as unknown as StripInternals;
     const store = g.swmHostModeStore!;
     const cgIds = ['cg-race-1', 'cg-race-2', 'cg-race-3', 'cg-race-4', 'cg-race-5'];
@@ -434,7 +434,7 @@ describe('persisted host-mode restoration compatibility', () => {
     // pairing entirely, so the drain would wire a host handler onto the very
     // topic the member handler already owns (apply + opaque append). The
     // membership probe must resolve the hash back through `wireIdToLocalCgId`.
-    const core = await makeCore(false, { reconcileBatchSize: 1 });
+    const core = await makeCore(false, { reconcileBatchSize: 1, chain: null });
     const g = core as unknown as StripInternals;
     const store = g.swmHostModeStore!;
     const cgId = 'cg-hash-keyed-member';
@@ -466,7 +466,7 @@ describe('persisted host-mode restoration compatibility', () => {
     // cleared the host-mode timers and joined every other background owner but
     // never this one, so the tail could still subscribe a gossip topic and
     // rewrite a marker while the node tore down.
-    const core = await makeCore(false, { reconcileBatchSize: 1 });
+    const core = await makeCore(false, { reconcileBatchSize: 1, chain: null });
     const g = core as unknown as StripInternals;
     const store = g.swmHostModeStore!;
     const cgIds = ['cg-stop-1', 'cg-stop-2', 'cg-stop-3', 'cg-stop-4'];
@@ -489,7 +489,7 @@ describe('persisted host-mode restoration compatibility', () => {
   });
 
   it('restart restore contains a failing legacy re-wire to keep startup alive', async () => {
-    const core = await makeCore(false);
+    const core = await makeCore(false, { chain: null });
     const g = core as unknown as StripInternals;
     installGossipStub(g);
     const cgId = 'cg-curated-restore-error';
