@@ -26,7 +26,7 @@ import {
 } from './rpc-usage.js';
 import { rpcRequestAbortReason } from './rpc-request-abort.js';
 import { chainRpcFetch } from './rpc-http1-dispatcher.js';
-import { recordRpcAdmissionWait, recordRpcEndpointLatency } from './rpc-request-timing.js';
+import { recordRpcAdmissionWait, recordFailedRpcAdmissionWait, recordRpcEndpointLatency } from './rpc-request-timing.js';
 
 export type RpcRequestClass = 'foreground' | 'background';
 
@@ -40,14 +40,15 @@ export type RpcRequestClass = 'foreground' | 'background';
 export type RpcRequestAdmissionPriority = 'authority';
 
 /**
- * What one deadline-bound attempt has done at the HTTP boundary: requests still
- * waiting for local admission, and requests that left the process. A nested
+ * What one deadline-bound attempt is doing at the HTTP boundary: requests still
+ * waiting for local admission, and requests awaiting an endpoint response. A nested
  * deadline (a shared chainId validation inside an endpoint attempt) reports to
  * every enclosing attempt as well.
  */
 interface RpcAttemptProgress {
   waitingForAdmission: number;
-  dispatched: number;
+  inFlight: number;
+  readonly timeoutSignal: AbortSignal;
   readonly enclosing?: RpcAttemptProgress;
 }
 
@@ -190,7 +191,7 @@ export function isRpcRequestTimeout(error: unknown): boolean {
  * is temporarily between cancellable stages (for example in retry backoff).
  *
  * A deadline that expires while the attempt's request still waits for local
- * governor admission, with nothing sent yet, says nothing about the endpoint:
+ * governor admission, with no endpoint request still in flight, says nothing about the endpoint:
  * it rejects with the local-capacity code instead of a timeout, so failover
  * neither blames this endpoint nor queues again behind the same governor.
  */
@@ -208,7 +209,8 @@ export async function withRpcRequestTimeout<T>(
   const enclosing = activeRpcRequestContext().attemptProgress;
   const progress: RpcAttemptProgress = {
     waitingForAdmission: 0,
-    dispatched: 0,
+    inFlight: 0,
+    timeoutSignal: timeoutController.signal,
     ...(enclosing === undefined ? {} : { enclosing }),
   };
   const timer = setTimeout(() => timeoutController.abort(timeoutError), timeoutMs);
@@ -218,11 +220,11 @@ export async function withRpcRequestTimeout<T>(
     onAbort = () => {
       if (
         timeoutController.signal.aborted
-        && progress.dispatched === 0
+        && progress.inFlight === 0
         && progress.waitingForAdmission > 0
       ) {
         reject(createRpcAdmissionTimeoutError(
-          `${label} waited ${timeoutMs}ms for local RPC admission and was not sent`,
+          `${label} exhausted its ${timeoutMs}ms deadline waiting for local RPC admission with no endpoint request in flight`,
           { cause: timeoutError },
         ));
         return;
@@ -437,11 +439,23 @@ async function admitAndObserveRpcAttempt(
       for (const _method of methods) await transport.admission.acquireActiveRequest();
       // Observation only: a refused or cancelled wait is not an admitted attempt.
       recordRpcAdmissionWait(activeRpcRequestContext().requestClass, performance.now() - waitStartedAt);
+    } catch (error) {
+      const signal = activeRpcRequestAbortSignal();
+      let deadline = false;
+      for (let attempt = progress; attempt !== undefined; attempt = attempt.enclosing) {
+        if (attempt.timeoutSignal.aborted && signal?.reason === attempt.timeoutSignal.reason) {
+          deadline = true;
+          break;
+        }
+      }
+      recordFailedRpcAdmissionWait(activeRpcRequestContext().requestClass,
+        performance.now() - waitStartedAt, deadline ? 'deadline'
+          : signal?.aborted ? 'cancelled' : 'rejected');
+      throw error;
     } finally {
       noteAttemptProgress(progress, (attempt) => { attempt.waitingForAdmission -= 1; });
     }
   }
-  noteAttemptProgress(progress, (attempt) => { attempt.dispatched += 1; });
   try {
     for (const method of methods) {
       transport.onRequest?.(method, transport.endpointSlot);
@@ -476,6 +490,9 @@ function createRpcProviderRequest(
         && config.discoveryStallTimeoutMs !== undefined
         ? { timeoutMs: config.discoveryStallTimeoutMs } : undefined);
     const callerSignal = activeRpcRequestAbortSignal();
+    if (callerSignal?.aborted) throwRpcRequestAbortReason(callerSignal);
+    const progress = activeRpcRequestContext().attemptProgress;
+    noteAttemptProgress(progress, (attempt) => { attempt.inFlight += 1; });
     const sentAt = performance.now();
     let answered = false;
     try {
@@ -491,6 +508,7 @@ function createRpcProviderRequest(
       }
       throw error;
     } finally {
+      noteAttemptProgress(progress, (attempt) => { attempt.inFlight -= 1; });
       recordRpcEndpointLatency(requestClass, performance.now() - sentAt, answered);
     }
   };
