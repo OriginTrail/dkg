@@ -13,6 +13,7 @@
     "test/**/*.typechecked.test.ts",
     "src/jsonld.d.ts",
     "test/_helpers/sync-requester-fixtures.ts",
-    "test/_helpers/rolling-subscription-promotion.ts"
+    "test/_helpers/rolling-subscription-promotion.ts",
+    "test/swm-protocol-root-ownership.test.ts"
   ]
 }

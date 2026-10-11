@@ -360,6 +360,7 @@ export default defineConfig({
       "test/approved-private-replica-proof-runs.test.ts",
       "test/swm-snapshot-materializer.test.ts",
       "test/shared-memory-metadata-admission.test.ts",
+      "test/swm-protocol-root-ownership.test.ts",
       "test/shared-memory-metadata-continuation.test.ts",
       "test/shared-memory-metadata-fetcher.test.ts",
       "test/shared-memory-metadata-boundary.typechecked.test.ts",

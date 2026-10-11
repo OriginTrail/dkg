@@ -217,9 +217,10 @@ export function decodeSwmPublicSlice(source: SwmRecordSource, operations: Readon
   return { ...recordRows(source, selectRows(source, 'publicSliceV1')), role: 'publicSlice' };
 }
 
-export function decodeSwmOwnership(source: SwmRecordSource, isLegacyRoot: boolean):
+export function decodeSwmOwnership(source: SwmRecordSource, isLegacyRoot: boolean, creatorPeers?: ReadonlySet<string>):
   (AdmittedSwmRecord & { readonly role: 'ownership' }) | undefined {
   if (!isLegacyRoot) return undefined;
-  const rows = selectRows(source, 'ownershipV1');
+  const rows = selectRows(source, 'ownershipV1').filter(({ quad }) => creatorPeers === undefined
+    || (quad.predicate === P.workspaceOwner && creatorPeers.has(parseRdfLiteralTerm(quad.object)?.value ?? '')));
   return rows.length ? { ...recordRows(source, rows), role: 'ownership' } : undefined;
 }

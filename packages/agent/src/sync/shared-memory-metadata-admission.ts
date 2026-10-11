@@ -26,6 +26,7 @@ export function admitSharedMemoryMetadata<Scope extends SharedMemoryAdmissionSco
   const records: DecodedSwmRecord[] = [];
   const operations = new Map<string, AdmittedLegacySwmOperation>();
   const roots = new Set<string>();
+  const rootCreators = new Map<string, Set<string>>();
   const protocolSubjects = new Set<string>();
   for (const source of sources) {
     const operation = decodeSwmOperation(source, scope);
@@ -37,18 +38,26 @@ export function admitSharedMemoryMetadata<Scope extends SharedMemoryAdmissionSco
     records.push(decoded);
     if (decoded.role === 'legacyOperation') {
       operations.set(key, decoded);
-      for (const root of decoded.roots) roots.add(swmRecordKey(source.metaGraph, root));
+      for (const root of decoded.roots) {
+        const rootKey = swmRecordKey(source.metaGraph, root);
+        roots.add(rootKey);
+        let creators = rootCreators.get(rootKey);
+        if (!creators) { creators = new Set(); rootCreators.set(rootKey, creators); }
+        if (decoded.creator) creators.add(decoded.creator);
+      }
     }
   }
   for (const source of sources) {
     const key = swmRecordKey(source.metaGraph, source.subject);
-    if (protocolSubjects.has(key)) continue;
-    const slice = decodeSwmPublicSlice(source, operations, roots.has(key));
+    const protocolSubject = protocolSubjects.has(key);
+    const slice = protocolSubject ? undefined : decodeSwmPublicSlice(source, operations, roots.has(key));
     if (slice) {
       if (slice.role === 'rejected') rejections.push(slice); else records.push(slice);
-      continue;
     }
-    const ownership = decodeSwmOwnership(source, roots.has(key));
+    // A legitimate user root may also name a protocol record. Preserve its
+    // durable owner only when an admitted same-lane operation names that peer.
+    const ownership = decodeSwmOwnership(source, roots.has(key),
+      protocolSubject || slice ? rootCreators.get(key) ?? new Set() : undefined);
     if (ownership) records.push(ownership);
   }
   return { scope, sourceQuads, records, rejections };
