@@ -68,9 +68,13 @@ import {
   sqlBlobsEqualV1,
 } from './scalars.js';
 import { INVENTORY_V1_STATEMENT_SQL } from './statements.js';
-import { prepareVerifiedSwmAuthorInventoryCommitInputV1 } from './swm-author-inventory-auth-v1.js';
+import {
+  prepareVerifiedMergeSwmAuthorInventoryCommitInputV1,
+  prepareVerifiedSwmAuthorInventoryCommitInputV1,
+} from './swm-author-inventory-auth-v1.js';
 import {
   encodeSwmAuthorInventoryKeyV1,
+  prepareMergeSwmAuthorInventoryCommitV1,
   prepareSwmAuthorInventoryCommitV1,
 } from './swm-author-inventory-commit-plan.js';
 import { SwmAuthorInventoryPersistenceV1 } from './swm-author-inventory-persistence.js';
@@ -88,12 +92,16 @@ import {
   type Rfc64UnregisteredAuthoritySeedRecordV1,
 } from '../unregistered-authority-seed-store-v1.js';
 import type {
+  CompareAndSwapMergeSwmAuthorInventoryInputV1,
   CompareAndSwapSwmAuthorInventoryInputV1,
+  DeleteSwmAuthorInventoryInputV1,
   SwmAuthorInventoryCasResultV1,
   SwmAuthorInventoryErrorCodeV1,
 } from './swm-author-inventory-contracts.js';
 export type {
+  CompareAndSwapMergeSwmAuthorInventoryInputV1,
   CompareAndSwapSwmAuthorInventoryInputV1,
+  DeleteSwmAuthorInventoryInputV1,
   SwmAuthorInventoryCasResultV1,
   SwmAuthorInventoryMutationV1,
 } from './swm-author-inventory-contracts.js';
@@ -197,6 +205,57 @@ export interface AppliedCatalogHeadSnapshotV1 {
   readonly inventoryRowCount: CountV1;
 }
 
+declare const appliedCatalogHeadsTokenBrandV1: unique symbol;
+
+/**
+ * Opaque identity of one applied-head listing. Two snapshots carry the same
+ * token exactly when they list the same rows, every field equal, in the same
+ * order.
+ */
+export type AppliedCatalogHeadsTokenV1 = string & {
+  readonly [appliedCatalogHeadsTokenBrandV1]: true;
+};
+
+/** Every applied head at one moment, with the identity of that listing. */
+export interface AppliedCatalogHeadsSnapshotV1 {
+  readonly token: AppliedCatalogHeadsTokenV1;
+  readonly heads: readonly AppliedCatalogHeadSnapshotV1[];
+}
+
+/**
+ * Every applied-head snapshot field. The `satisfies` clause fails the build
+ * when `AppliedCatalogHeadSnapshotV1` gains a field the token does not key,
+ * so a row change a token could miss cannot compile.
+ */
+const APPLIED_CATALOG_HEAD_TOKEN_FIELDS_V1 = Object.freeze(Object.keys({
+  catalogScopeDigest: true,
+  authorAddress: true,
+  currentCatalogHeadDigest: true,
+  appliedInventoryDigest: true,
+  catalogVersion: true,
+  inventoryRowCount: true,
+} satisfies Record<keyof AppliedCatalogHeadSnapshotV1, true>) as
+  (keyof AppliedCatalogHeadSnapshotV1)[]);
+
+/**
+ * Freeze a listing into a snapshot keyed by every field of every row, in
+ * listing order.
+ * @internal
+ */
+export function createAppliedCatalogHeadsSnapshotV1(
+  heads: readonly AppliedCatalogHeadSnapshotV1[],
+): AppliedCatalogHeadsSnapshotV1 {
+  const frozen = Object.freeze([...heads]);
+  return Object.freeze({
+    token: frozen
+      .map((head) => APPLIED_CATALOG_HEAD_TOKEN_FIELDS_V1
+        .map((field) => head[field])
+        .join(':'))
+      .join('\n') as AppliedCatalogHeadsTokenV1,
+    heads: frozen,
+  });
+}
+
 export interface CompareAndSwapAppliedCatalogHeadInputV1
   extends AppliedCatalogHeadSnapshotV1 {
   /** `null` initializes a scope; otherwise the exact current head must match. */
@@ -271,6 +330,10 @@ export class InventoryV1CandidateError extends Error {
 }
 
 export interface Rfc64SwmAuthorInventoryOperationsV1 {
+  readSwmAuthorInventoryHeadDigestV1(
+    inventoryScopeDigest: Digest32V1,
+    authorAddress: EvmAddressV1,
+  ): Digest32V1 | null;
   readSwmAuthorInventorySnapshotV1(
     inventoryScopeDigest: Digest32V1,
     authorAddress: EvmAddressV1,
@@ -278,6 +341,10 @@ export interface Rfc64SwmAuthorInventoryOperationsV1 {
   compareAndSwapSwmAuthorInventoryV1(
     input: CompareAndSwapSwmAuthorInventoryInputV1,
   ): SwmAuthorInventoryCasResultV1;
+  compareAndSwapMergeSwmAuthorInventoryV1(
+    input: CompareAndSwapMergeSwmAuthorInventoryInputV1,
+  ): SwmAuthorInventoryCasResultV1;
+  deleteSwmAuthorInventoryV1(input: DeleteSwmAuthorInventoryInputV1): void;
 }
 
 export interface Rfc64InventoryV1CandidateApi
@@ -333,6 +400,15 @@ export interface Rfc64InventoryV1CandidateApi
     authorAddress: EvmAddressV1,
   ): AppliedCatalogHeadSnapshotV1 | null;
   listAppliedCatalogHeadsV1(): readonly AppliedCatalogHeadSnapshotV1[];
+  /**
+   * Every applied head as one immutable snapshot. The rows are listed again
+   * after every call that may write them (compare-and-swap, delete, and their
+   * indeterminate COMMIT resolve/retry paths, however each ends) and after
+   * every low-level reopen; until then the previous snapshot is returned.
+   * That snapshot still equals the table: the inventory lease gives this
+   * process the only writer, and every write goes through these methods.
+   */
+  readAppliedCatalogHeadsSnapshotV1(): AppliedCatalogHeadsSnapshotV1;
   isStagedCatalogHeadV1(
     catalogScopeDigest: Digest32V1,
     authorAddress: EvmAddressV1,
@@ -363,6 +439,7 @@ export type Rfc64InventoryV1OperationsV1 = Pick<
   | 'deleteCandidateBucket'
   | 'readAppliedCatalogHeadV1'
   | 'listAppliedCatalogHeadsV1'
+  | 'readAppliedCatalogHeadsSnapshotV1'
   | 'isStagedCatalogHeadV1'
   | 'deleteAppliedCatalogHeadV1'
   | 'deleteAppliedCatalogHeadsV1'
@@ -407,6 +484,9 @@ export function createRfc64InventoryOperationsViewV1(
     deleteCandidateBucket: fence(inventory.deleteCandidateBucket.bind(inventory)),
     readAppliedCatalogHeadV1: fence(inventory.readAppliedCatalogHeadV1.bind(inventory)),
     listAppliedCatalogHeadsV1: fence(inventory.listAppliedCatalogHeadsV1.bind(inventory)),
+    readAppliedCatalogHeadsSnapshotV1: fence(
+      inventory.readAppliedCatalogHeadsSnapshotV1.bind(inventory),
+    ),
     isStagedCatalogHeadV1: fence(inventory.isStagedCatalogHeadV1.bind(inventory)),
     deleteAppliedCatalogHeadV1: fence(inventory.deleteAppliedCatalogHeadV1.bind(inventory)),
     deleteAppliedCatalogHeadsV1: fence(inventory.deleteAppliedCatalogHeadsV1.bind(inventory)),
@@ -422,6 +502,13 @@ export function createRfc64SwmAuthorInventoryOperationsViewV1(
   requireOwnerOpen: () => void,
 ): Rfc64SwmAuthorInventoryOperationsV1 {
   return Object.freeze({
+    readSwmAuthorInventoryHeadDigestV1: (
+      inventoryScopeDigest: Digest32V1,
+      authorAddress: EvmAddressV1,
+    ): Digest32V1 | null => {
+      requireOwnerOpen();
+      return inventory.readSwmAuthorInventoryHeadDigestV1(inventoryScopeDigest, authorAddress);
+    },
     readSwmAuthorInventorySnapshotV1: (
       inventoryScopeDigest: Digest32V1,
       authorAddress: EvmAddressV1,
@@ -437,6 +524,16 @@ export function createRfc64SwmAuthorInventoryOperationsViewV1(
     ): SwmAuthorInventoryCasResultV1 => {
       requireOwnerOpen();
       return inventory.compareAndSwapSwmAuthorInventoryV1(input);
+    },
+    compareAndSwapMergeSwmAuthorInventoryV1: (
+      input: CompareAndSwapMergeSwmAuthorInventoryInputV1,
+    ): SwmAuthorInventoryCasResultV1 => {
+      requireOwnerOpen();
+      return inventory.compareAndSwapMergeSwmAuthorInventoryV1(input);
+    },
+    deleteSwmAuthorInventoryV1: (input: DeleteSwmAuthorInventoryInputV1): void => {
+      requireOwnerOpen();
+      inventory.deleteSwmAuthorInventoryV1(input);
     },
   });
 }
@@ -613,6 +710,8 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
   #available = true;
   #closed = false;
   #activeWriteDeadline: number | null = null;
+  /** Cleared by every applied-head write attempt and every reopen. */
+  #appliedCatalogHeadsSnapshot: AppliedCatalogHeadsSnapshotV1 | null = null;
 
   constructor(
     private database: DatabaseSync,
@@ -690,6 +789,14 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     });
   }
 
+  readAppliedCatalogHeadsSnapshotV1(): AppliedCatalogHeadsSnapshotV1 {
+    this.assertOpen();
+    if (this.#appliedCatalogHeadsSnapshot !== null) return this.#appliedCatalogHeadsSnapshot;
+    const snapshot = createAppliedCatalogHeadsSnapshotV1(this.listAppliedCatalogHeadsV1());
+    this.#appliedCatalogHeadsSnapshot = snapshot;
+    return snapshot;
+  }
+
   isStagedCatalogHeadV1(
     catalogScopeDigest: Digest32V1,
     authorAddress: EvmAddressV1,
@@ -723,17 +830,21 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
       key: encodeAppliedHeadKey(input.catalogScopeDigest, input.authorAddress),
       expected: encodeAppliedDigest(input.expectedCurrentCatalogHeadDigest, 'expected current head'),
     })));
-    this.writeTransaction('delete applied catalog heads', () => {
-      for (const current of captured) this.deleteAppliedHeadInOpenTransaction(current);
-    }, {
-      resolve: () => captured.every(({ key }) => this.readAppliedHead(key) === null)
-        ? 'committed'
-        : 'not-committed',
-      retry: () => {
+    try {
+      this.writeTransaction('delete applied catalog heads', () => {
         for (const current of captured) this.deleteAppliedHeadInOpenTransaction(current);
-      },
-      resolvedCommittedResult: () => undefined,
-    });
+      }, {
+        resolve: () => captured.every(({ key }) => this.readAppliedHead(key) === null)
+          ? 'committed'
+          : 'not-committed',
+        retry: () => {
+          for (const current of captured) this.deleteAppliedHeadInOpenTransaction(current);
+        },
+        resolvedCommittedResult: () => undefined,
+      });
+    } finally {
+      this.#appliedCatalogHeadsSnapshot = null;
+    }
   }
 
   private deleteAppliedHeadInOpenTransaction(currentInput: Readonly<{
@@ -794,7 +905,21 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     } catch (cause) {
       if (cause instanceof InventoryV1CandidateError) throw cause;
       throw databaseError('failed to compare-and-swap applied catalog head', cause);
+    } finally {
+      this.#appliedCatalogHeadsSnapshot = null;
     }
+  }
+
+  readSwmAuthorInventoryHeadDigestV1(
+    inventoryScopeDigest: Digest32V1,
+    authorAddress: EvmAddressV1,
+  ): Digest32V1 | null {
+    this.assertOpen();
+    const persistence = this.swmAuthorInventoryPersistenceV1();
+    const key = encodeSwmAuthorInventoryKeyV1(
+      inventoryScopeDigest, authorAddress, swmAuthorInventoryErrorV1,
+    );
+    return this.readTransaction(() => persistence.readHeadDigest(key));
   }
 
   readSwmAuthorInventorySnapshotV1(
@@ -809,6 +934,45 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
       swmAuthorInventoryErrorV1,
     );
     return this.readTransaction(() => persistence.read(key));
+  }
+
+  deleteSwmAuthorInventoryV1(input: DeleteSwmAuthorInventoryInputV1): void {
+    this.assertOpen();
+    const persistence = this.swmAuthorInventoryPersistenceV1();
+    const key = encodeSwmAuthorInventoryKeyV1(
+      input.inventoryScopeDigest,
+      input.authorAddress,
+      swmAuthorInventoryErrorV1,
+    );
+    const expectedHead = digest32ToSqlBlobV1(input.expectedCurrentHeadDigest);
+    const deleteExact = (): void => {
+      const current = persistence.read(key);
+      if (current === null) return;
+      if (current.head.objectDigest !== input.expectedCurrentHeadDigest) {
+        throw swmAuthorInventoryErrorV1(
+          'swm-inventory-cas-conflict',
+          `SWM inventory deletion expected ${input.expectedCurrentHeadDigest}`
+            + ` but found ${current.head.objectDigest}`,
+        );
+      }
+      const statement = this.prepare(INVENTORY_V1_STATEMENT_SQL.deleteSwmAuthorHeadCas);
+      const result = this.statement(() => statement.run({
+        scope: key.scope,
+        author: key.author,
+        expectedHead,
+      }));
+      if (Number(result.changes) !== 1 || persistence.read(key) !== null) {
+        throw swmAuthorInventoryErrorV1(
+          'swm-inventory-database-corrupt',
+          'SWM inventory deletion did not remove exactly the expected head and rows',
+        );
+      }
+    };
+    this.writeTransaction('delete SWM author inventory', deleteExact, {
+      resolve: () => persistence.read(key) === null ? 'committed' : 'not-committed',
+      retry: deleteExact,
+      resolvedCommittedResult: () => undefined,
+    });
   }
 
   compareAndSwapSwmAuthorInventoryV1(
@@ -840,6 +1004,38 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     } catch (cause) {
       if (cause instanceof InventoryV1CandidateError) throw cause;
       throw databaseError('failed to compare-and-swap SWM author inventory', cause);
+    }
+  }
+
+  compareAndSwapMergeSwmAuthorInventoryV1(
+    input: CompareAndSwapMergeSwmAuthorInventoryInputV1,
+  ): SwmAuthorInventoryCasResultV1 {
+    this.assertOpen();
+    const persistence = this.swmAuthorInventoryPersistenceV1();
+    const verified = prepareVerifiedMergeSwmAuthorInventoryCommitInputV1(
+      input,
+      swmAuthorInventoryErrorV1,
+    );
+    const prepared = prepareMergeSwmAuthorInventoryCommitV1(
+      verified,
+      swmAuthorInventoryErrorV1,
+    );
+    try {
+      return this.writeTransaction(
+        'compare-and-swap exact-merge SWM author inventory',
+        () => persistence.applyExactMerge(prepared),
+        {
+          resolve: () => persistence.resolveExactMerge(prepared),
+          retry: () => persistence.applyExactMerge(prepared),
+          resolvedCommittedResult: () => Object.freeze({
+            status: 'applied' as const,
+            snapshot: prepared.snapshot,
+          }),
+        },
+      );
+    } catch (cause) {
+      if (cause instanceof InventoryV1CandidateError) throw cause;
+      throw databaseError('failed to exact-merge SWM author inventory', cause);
     }
   }
 
@@ -2415,6 +2611,8 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
       );
     }
     this.invalidateTraversals();
+    // A new low-level handle: nothing listed through the old one is reused.
+    this.#appliedCatalogHeadsSnapshot = null;
     const previous = this.database;
     // Mark unavailable before invoking external lifecycle code. No exception,
     // identity return, malformed handle, or failed verification can leave this

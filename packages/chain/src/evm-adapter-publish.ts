@@ -15,9 +15,11 @@ import { ethers, Wallet, Contract } from 'ethers';
 import type {
   BatchMintParams,
   BatchMintResult,
+  CanonicalFinalizationReceipt,
   CanonicalFinalizationReceiptReadOptions,
   CanonicalFinalizationReceiptResolution,
   ChainReadOptions,
+  PublishReceiptReadOptions,
   FinalizedChainProofSnapshot,
   KAUpdateVerification,
   OnChainPublishResult,
@@ -30,17 +32,18 @@ import type {
 } from './chain-adapter.js';
 import { publisherPublishPlanByteSize } from './chain-adapter.js';
 import { floorPublishTokenAmount, computeUpdateACKDigest, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
-import {
-  resolveQuotedPublisherCandidatePricing,
-  type PublisherConvictionPlanReader,
-} from './publisher-plan.js';
-import { errorMessage } from './evm-adapter-errors.js';
+import { resolveQuotedPublisherCandidatePricing } from './publisher-plan.js';
+import { reconcilePublisherCandidateFunding, type PublisherPcaPricingEvidence } from './evm-publisher-funding.js';
+import { errorCode, errorMessage } from './evm-adapter-errors.js';
+import { isRetryableRpcError } from './evm-adapter-rpc.js';
 import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
 import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
-import {
-} from './evm-adapter-constants.js';
 
-type PublisherCandidatePlan = PublisherPublishPlan & { signer: Wallet; address: string };
+type PublisherCandidatePlan = PublisherPublishPlan & {
+  signer: Wallet;
+  address: string;
+  pcaPricing: PublisherPcaPricingEvidence;
+};
 
 /**
  * GH#2270 PR-3 r2 — does this error mean "that ERC-721 token does not exist"?
@@ -111,14 +114,6 @@ export class PublishMethods extends EVMChainAdapterBase {
     return (BigInt(ask) * publicByteSize * BigInt(epochs)) / 1024n;
   }
 
-  /**
-   * Optional typed bridge supplied by the conviction mixin in the concrete
-   * adapter assembly. Publish planning owns the policy that consumes it.
-   */
-  protected publisherConvictionPlanReader(): PublisherConvictionPlanReader | undefined {
-    return undefined;
-  }
-
   private async _publisherCandidatePlan(
     signer: Wallet,
     request: PublisherPublishPlanRequest,
@@ -148,7 +143,35 @@ export class PublishMethods extends EVMChainAdapterBase {
       publisherAddress: signer.address,
       publishEpochs: pricing.publishEpochs,
       tokenAmount: pricing.tokenAmount,
+      pcaPricing: diagnostics?.pcaProbeError !== undefined && (
+        isRetryableRpcError(diagnostics.pcaProbeError)
+        || errorCode(diagnostics.pcaProbeError) === 'CALL_EXCEPTION'
+      )
+        ? { kind: 'unavailable', error: diagnostics.pcaProbeError }
+        : { kind: 'available' },
     };
+  }
+
+  /** Reconcile an earlier pricing probe with fresh, candidate-specific evidence.
+   * A failed planning read is not itself proof that the final funding read is
+   * unknown: the wallet may have no gas, no PCA, or a recovered PCA read. */
+  private async _selectFundedPublisherPlanOrThrow(
+    plans: PublisherCandidatePlan[],
+    request: PublisherPublishPlanRequest,
+    quote: (epochs: number, purpose: 'pca' | 'direct') => Promise<bigint>,
+  ): Promise<PublisherCandidatePlan> {
+    return reconcilePublisherCandidateFunding({
+      candidates: plans,
+      assess: (currentPlans) => this._assessFundedCandidates(currentPlans, (plan) => ({
+        kind: 'native+trac',
+        nativeFloorWei: this.minPublisherNativeWei,
+        tracFloorWei: this.minPublisherTracWei,
+        requiredTracWei: plan.tokenAmount,
+        pca: { kind: 'publish', epochs: plan.publishEpochs },
+      }), { preferIdle: false }),
+      reprice: (plan) => this._publisherCandidatePlan(plan.signer, request, quote),
+      conviction: () => this.publisherConvictionPlanReader(),
+    });
   }
 
   /**
@@ -184,21 +207,11 @@ export class PublishMethods extends EVMChainAdapterBase {
         request.publisherAddress,
       );
       const plan = await this._publisherCandidatePlan(signer, request, quote);
-      await this.selectFundedSignerOrThrow(
-        [signer],
-        {
-          kind: 'native+trac',
-          nativeFloorWei: this.minPublisherNativeWei,
-          tracFloorWei: this.minPublisherTracWei,
-          requiredTracWei: plan.tokenAmount,
-          pca: { kind: 'publish', epochs: plan.publishEpochs },
-        },
-        { preferIdle: false },
-      );
+      const selected = await this._selectFundedPublisherPlanOrThrow([plan], request, quote);
       return {
-        publisherAddress: plan.publisherAddress,
-        publishEpochs: plan.publishEpochs,
-        tokenAmount: plan.tokenAmount,
+        publisherAddress: selected.publisherAddress,
+        publishEpochs: selected.publishEpochs,
+        tokenAmount: selected.tokenAmount,
       };
     }
 
@@ -212,17 +225,7 @@ export class PublishMethods extends EVMChainAdapterBase {
       for (const signer of authorized) {
         plans.push(await this._publisherCandidatePlan(signer, request, quote));
       }
-      return this._selectFundedCandidateOrThrow(
-        plans,
-        (plan) => ({
-          kind: 'native+trac',
-          nativeFloorWei: this.minPublisherNativeWei,
-          tracFloorWei: this.minPublisherTracWei,
-          requiredTracWei: plan.tokenAmount,
-          pca: { kind: 'publish', epochs: plan.publishEpochs },
-        }),
-        { preferIdle: false },
-      );
+      return this._selectFundedPublisherPlanOrThrow(plans, request, quote);
     });
     // Do not expose the internal Wallet carried only for cursor advancement.
     return {
@@ -542,7 +545,7 @@ export class PublishMethods extends EVMChainAdapterBase {
 
   async resolvePublishByTxHash(
     txHash: string,
-    options: ChainReadOptions = {},
+    options: PublishReceiptReadOptions = {},
   ): Promise<OnChainPublishResult | null> {
     await this.init();
 
@@ -596,7 +599,13 @@ export class PublishMethods extends EVMChainAdapterBase {
         return { status: 'pending-awaiting-confirmation' };
       }
       if (receipt.status !== 1) return { status: 'reverted' };
-      return publish ? { status: 'confirmed', publish } : { status: 'unrecognized' };
+      if (!publish) return { status: 'unrecognized' };
+      const canonicalReceipt = this.projectCanonicalFinalizationReceipt(receipt, publish);
+      return {
+        status: 'confirmed',
+        publish,
+        ...(canonicalReceipt ? { canonicalReceipt } : {}),
+      };
     }
     // The SECOND step, paid only on this surface and only when there is no receipt — it is what
     // separates a transaction the node is holding from one it has never seen.
@@ -732,7 +741,7 @@ export class PublishMethods extends EVMChainAdapterBase {
    */
   private async readPublishReceipt(
     txHash: string,
-    options: ChainReadOptions,
+    options: PublishReceiptReadOptions,
     logLabel?: string,
   ): Promise<{
     receipt: ethers.TransactionReceipt | null;
@@ -744,15 +753,53 @@ export class PublishMethods extends EVMChainAdapterBase {
     });
     if (!receipt || receipt.status !== 1) return { receipt, publish: null };
 
-    const v10 = this.contracts.knowledgeAssetStorage
-      ? await this.parseV10PublishReceipt(receipt, options)
-      : null;
-    if (v10) return { receipt, publish: v10 };
+    const facts = (this.contracts.knowledgeAssetStorage
+      ? this.decodeV10PublishReceipt(receipt) : null)
+      ?? (this.contracts.knowledgeAssetsStorage
+        ? this.decodeV9PublishReceipt(receipt) : null);
+    return { receipt, publish: facts ? await this.enrichPublishReceipt(receipt, facts, options) : null };
+  }
 
-    const v9 = this.contracts.knowledgeAssetsStorage
-      ? await this.parseV9PublishReceipt(receipt, options)
-      : null;
-    return { receipt, publish: v9 };
+  /**
+   * Project the strict recovery receipt from the exact receipt/publish pair a
+   * caller already read. This is deliberately pure: the caller owns the live
+   * canonicality/finality gate, and an incomplete projection simply leaves
+   * the existing canonical-receipt fallback in place.
+   */
+  private projectCanonicalFinalizationReceipt(
+    receipt: ethers.TransactionReceipt,
+    parsedPublish: OnChainPublishResult,
+  ): CanonicalFinalizationReceipt | null {
+    if (
+      !parsedPublish.merkleRoot
+      || !parsedPublish.publisherAddress
+      || !Number.isSafeInteger(receipt.index)
+      || receipt.index < 0
+      || !receipt.blockHash
+    ) {
+      return null;
+    }
+    const kaId = parsedPublish.kaId ?? parsedPublish.batchId;
+    const startKAId = parsedPublish.startKAId ?? kaId;
+    const endKAId = parsedPublish.endKAId ?? kaId;
+    return {
+      txHash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      blockHash: receipt.blockHash,
+      txIndex: receipt.index,
+      merkleRoot: parsedPublish.merkleRoot,
+      publisherAddress: parsedPublish.publisherAddress,
+      ...(parsedPublish.authorAddress
+        ? { authorAddress: parsedPublish.authorAddress }
+        : {}),
+      batchId: parsedPublish.batchId,
+      kaId,
+      startKAId,
+      endKAId,
+      ...(parsedPublish.knowledgeAssetsContract
+        ? { knowledgeAssetsContract: parsedPublish.knowledgeAssetsContract }
+        : {}),
+    };
   }
 
   async resolveCanonicalFinalizationReceipt(
@@ -779,47 +826,35 @@ export class PublishMethods extends EVMChainAdapterBase {
       return { status: 'reorged' };
     }
 
-    const legacyPublish = parsedPublish;
-    if (
-      !legacyPublish
-      || !legacyPublish.merkleRoot
-      || !legacyPublish.publisherAddress
-      || !Number.isSafeInteger(receipt.index)
-      || receipt.index < 0
-      || !receipt.blockHash
-    ) {
-      return { status: 'rejected' };
-    }
-    const kaId = legacyPublish.kaId ?? legacyPublish.batchId;
-    const startKAId = legacyPublish.startKAId ?? kaId;
-    const endKAId = legacyPublish.endKAId ?? kaId;
-    return {
-      status: 'confirmed',
-      receipt: {
-        txHash: receipt.hash,
-        blockNumber: receipt.blockNumber,
-        blockHash: receipt.blockHash,
-        txIndex: receipt.index,
-        merkleRoot: legacyPublish.merkleRoot,
-        publisherAddress: legacyPublish.publisherAddress,
-        ...(legacyPublish.authorAddress
-          ? { authorAddress: legacyPublish.authorAddress }
-          : {}),
-        batchId: legacyPublish.batchId,
-        kaId,
-        startKAId,
-        endKAId,
-        ...(legacyPublish.knowledgeAssetsContract
-          ? { knowledgeAssetsContract: legacyPublish.knowledgeAssetsContract }
-          : {}),
-      },
-    };
+    if (!parsedPublish) return { status: 'rejected' };
+    const canonicalReceipt = this.projectCanonicalFinalizationReceipt(receipt, parsedPublish);
+    return canonicalReceipt
+      ? { status: 'confirmed', receipt: canonicalReceipt }
+      : { status: 'rejected' };
+  }
+
+  /** Apply header-read policy once, outside either event-format decoder. */
+  private async enrichPublishReceipt(
+    receipt: Pick<ethers.TransactionReceipt, 'blockNumber' | 'blockHash'>,
+    facts: Omit<OnChainPublishResult, 'blockTimestamp'>,
+    options: PublishReceiptReadOptions,
+  ): Promise<OnChainPublishResult> {
+    const blockTimestamp = options.skipBlockTimestamp === true ? 0
+      : await this.getFinalizedBlockTimestamp(receipt.blockNumber, receipt.blockHash, options);
+    return { ...facts, blockTimestamp };
   }
 
   async parseV10PublishReceipt(
     receipt: NonNullable<Awaited<ReturnType<typeof this.provider.getTransactionReceipt>>>,
-    options: ChainReadOptions = {},
+    options: PublishReceiptReadOptions = {},
   ): Promise<OnChainPublishResult | null> {
+    const facts = this.decodeV10PublishReceipt(receipt);
+    return facts ? this.enrichPublishReceipt(receipt, facts, options) : null;
+  }
+
+  private decodeV10PublishReceipt(
+    receipt: NonNullable<Awaited<ReturnType<typeof this.provider.getTransactionReceipt>>>,
+  ): Omit<OnChainPublishResult, 'blockTimestamp'> | null {
     const kas = this.contracts.knowledgeAssetStorage;
     if (!kas) return null;
 
@@ -863,7 +898,6 @@ export class PublishMethods extends EVMChainAdapterBase {
       publisherAddress = receipt.from ?? authorAddress ?? '';
     }
 
-    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber, options);
     const convictionCostCovered = decodeConvictionCostCovered(receipt.logs);
 
     return {
@@ -876,7 +910,6 @@ export class PublishMethods extends EVMChainAdapterBase {
       txHash: receipt.hash,
       blockNumber: receipt.blockNumber,
       txIndex: receipt.index,
-      blockTimestamp,
       publisherAddress,
       authorAddress,
       ...(convictionCostCovered ? { convictionCostCovered } : {}),
@@ -885,8 +918,15 @@ export class PublishMethods extends EVMChainAdapterBase {
 
   async parseV9PublishReceipt(
     receipt: NonNullable<Awaited<ReturnType<typeof this.provider.getTransactionReceipt>>>,
-    options: ChainReadOptions = {},
+    options: PublishReceiptReadOptions = {},
   ): Promise<OnChainPublishResult | null> {
+    const facts = this.decodeV9PublishReceipt(receipt);
+    return facts ? this.enrichPublishReceipt(receipt, facts, options) : null;
+  }
+
+  private decodeV9PublishReceipt(
+    receipt: NonNullable<Awaited<ReturnType<typeof this.provider.getTransactionReceipt>>>,
+  ): Omit<OnChainPublishResult, 'blockTimestamp'> | null {
     const storage = this.contracts.knowledgeAssetsStorage;
     if (!storage) return null;
 
@@ -923,7 +963,6 @@ export class PublishMethods extends EVMChainAdapterBase {
 
     if (!foundBatchCreated) return null;
 
-    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber, options);
 
     return {
       batchId,
@@ -933,7 +972,6 @@ export class PublishMethods extends EVMChainAdapterBase {
       txHash: receipt.hash,
       blockNumber: receipt.blockNumber,
       txIndex: receipt.index,
-      blockTimestamp,
       publisherAddress,
     };
   }
@@ -1002,16 +1040,11 @@ export class PublishMethods extends EVMChainAdapterBase {
 
     let currentEpoch = 0n;
     const needsGrowthSizing = params.newByteSize > currentByteSize;
-    if (needsGrowthSizing && !this.contracts.chronos) {
-      throw new Error(
-        'Chronos contract binding required for byte-size growth update tokenAmount sizing',
-      );
-    }
-    if (this.contracts.chronos) {
+    if (needsGrowthSizing) {
       try {
-        currentEpoch = BigInt(await this.readContract(
-          this.contracts.chronos, 'chronos.getCurrentEpoch', 'getCurrentEpoch',
-        ));
+        // Growth sizing is the only path that needs the epoch. The shared
+        // helper owns lazy Chronos resolution when init has not bound it yet.
+        currentEpoch = await this.getCurrentEpoch();
       } catch (err) {
         throw new Error(
           `Failed to read Chronos currentEpoch for update tokenAmount sizing: ${(err as Error).message}`,

@@ -7,6 +7,27 @@ export interface AutomaticSystemContextGraphSyncOptions {
   envValue?: string;
 }
 
+/** The node config fields the automatic system-graph sync policy reads. */
+export interface AutomaticSystemContextGraphSyncConfig {
+  nodeRole?: 'core' | 'edge';
+  syncSystemContextGraphsOnConnect?: boolean;
+}
+
+/**
+ * The policy options for one node config, with the environment read at call
+ * time. Every consumer of the policy takes its options from here.
+ */
+export function systemContextGraphSyncOptionsOf(
+  config: AutomaticSystemContextGraphSyncConfig,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): AutomaticSystemContextGraphSyncOptions {
+  return {
+    nodeRole: config.nodeRole,
+    configValue: config.syncSystemContextGraphsOnConnect,
+    envValue: env.DKG_SYNC_SYSTEM_CONTEXT_GRAPHS_ON_CONNECT,
+  };
+}
+
 /**
  * Core nodes retain the complete network catalogue needed for hosting, while
  * Edge nodes fetch only graphs their operator selected. Explicit catch-up and

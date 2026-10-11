@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
   CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
@@ -18,9 +18,14 @@ import {
   assertAcceptedRfc64CatalogAuthorMembershipV1,
   assertAcceptedRfc64CatalogPolicyRosterV1,
   rfc64CatalogAuthorityDirectionV1,
+  resolveRfc64CatalogAuthorizationRosterV1,
+  withRfc64CatalogAccessAuthorizationScopeV1,
   type Rfc64CatalogAuthorityOperationV1,
+  type Rfc64CatalogLocalAuthorizationScopeV1,
   type Rfc64CatalogAccessOperationV1,
 } from '../src/rfc64/catalog-access-policy-v1.js';
+import { withCurrentRfc64CatalogPolicyV1 } from
+  '../src/rfc64/catalog-transport-authorization-v1.js';
 
 const OWNER = '0x1111111111111111111111111111111111111111' as EvmAddressV1;
 const LOCAL = '0x2222222222222222222222222222222222222222' as EvmAddressV1;
@@ -141,6 +146,39 @@ function authInput(
 }
 
 describe('RFC-64 D26 catalog access authorization', () => {
+  it('uses a live roster once, then only an exact-CG operation scope', async () => {
+    const liveRoster = vi.fn(async () => [LOCAL] as const);
+    await expect(resolveRfc64CatalogAuthorizationRosterV1(
+      CG,
+      undefined,
+      liveRoster,
+    )).resolves.toEqual([LOCAL]);
+    expect(liveRoster).toHaveBeenCalledOnce();
+
+    const authorizationScope = Object.freeze({
+      networkId: NETWORK,
+      contextGraphId: CG,
+      policyDigest: `0x${'51'.repeat(32)}` as Digest32V1,
+      ownershipTransitionDigest: null,
+      policyEra: '0',
+      policyVersion: '0',
+      administrativeDelegationDigest: null,
+      rosterVersion: '7',
+      memberAddresses: Object.freeze([LOCAL_OTHER]),
+    }) satisfies Readonly<Rfc64CatalogLocalAuthorizationScopeV1>;
+    expect(await resolveRfc64CatalogAuthorizationRosterV1(
+      CG,
+      authorizationScope,
+      liveRoster,
+    )).toEqual([LOCAL_OTHER]);
+    expect(await resolveRfc64CatalogAuthorizationRosterV1(
+      CG_OTHER,
+      authorizationScope,
+      liveRoster,
+    )).toBeNull();
+    expect(liveRoster).toHaveBeenCalledOnce();
+  });
+
   it('classifies every protocol operation through one exhaustive authority table', () => {
     const cases: readonly (readonly [
       Rfc64CatalogAuthorityOperationV1,
@@ -297,6 +335,168 @@ describe('RFC-64 D26 catalog access authorization', () => {
       policyDigest: secondDigest,
       authorAddress: LOCAL_OTHER,
     })).toBe(true);
+  });
+
+  it('reuses one live local roster only inside the exact operation and peer scope', async () => {
+    const scopes: Array<Rfc64CatalogLocalAuthorizationScopeV1 | undefined> = [];
+    const acceptedPolicy = policy(1, 1);
+    const policyDigest = digestFor(acceptedPolicy);
+    const subject = new Rfc64CatalogAccessPolicyRegistryV1({
+      resolveLocalAgentAddress: async (_contextGraphId, scope) => {
+        scopes.push(scope);
+        return LOCAL;
+      },
+      resolveRemoteAgentAddress: async () => REMOTE,
+    });
+    subject.accept({ policy: acceptedPolicy, policyDigest, roster: roster(policyDigest) });
+
+    await withRfc64CatalogAccessAuthorizationScopeV1(async () => {
+      await expect(subject.authorize(authInput('fetch-inbound', policyDigest)))
+        .resolves.toEqual({ accessPolicy: 1, policyDigest });
+      await expect(subject.authorize(authInput('fetch-inbound', policyDigest)))
+        .resolves.toEqual({ accessPolicy: 1, policyDigest });
+      await expect(subject.authorize(authInput('fetch-outbound', policyDigest)))
+        .resolves.toEqual({ accessPolicy: 1, policyDigest });
+      await expect(subject.authorize({
+        ...authInput('fetch-inbound', policyDigest),
+        remotePeerId: '12D3KooOtherRemote',
+      })).resolves.toEqual({ accessPolicy: 1, policyDigest });
+    });
+
+    expect(scopes).toHaveLength(4);
+    expect(scopes[0]).toBeUndefined();
+    expect(scopes[1]).toEqual({
+      networkId: NETWORK,
+      contextGraphId: CG,
+      policyDigest,
+      ownershipTransitionDigest: null,
+      policyEra: '0',
+      policyVersion: '0',
+      administrativeDelegationDigest: null,
+      rosterVersion: '0',
+      memberAddresses: [LOCAL, REMOTE],
+    });
+    expect(Object.isFrozen(scopes[1])).toBe(true);
+    expect(Object.isFrozen(scopes[1]!.memberAddresses)).toBe(true);
+    expect(scopes[2]).toBeUndefined();
+    expect(scopes[3]).toBeUndefined();
+
+    await expect(subject.authorize(authInput('fetch-inbound', policyDigest)))
+      .resolves.toEqual({ accessPolicy: 1, policyDigest });
+    expect(scopes[4]).toBeUndefined();
+  });
+
+  it('binds transport pre/post-await checks to one authorization scope', async () => {
+    const scopes: Array<Rfc64CatalogLocalAuthorizationScopeV1 | undefined> = [];
+    const acceptedPolicy = policy(1, 1);
+    const policyDigest = digestFor(acceptedPolicy);
+    const subject = new Rfc64CatalogAccessPolicyRegistryV1({
+      resolveLocalAgentAddress: async (_contextGraphId, scope) => {
+        scopes.push(scope);
+        return LOCAL;
+      },
+      resolveRemoteAgentAddress: async () => REMOTE,
+    });
+    subject.accept({ policy: acceptedPolicy, policyDigest, roster: roster(policyDigest) });
+
+    await expect(withCurrentRfc64CatalogPolicyV1(
+      async () => {
+        if (await subject.authorize(authInput('fetch-inbound', policyDigest)) === null) {
+          throw new Error('authorization denied');
+        }
+      },
+      async () => 'transferred',
+    )).resolves.toBe('transferred');
+
+    expect(scopes).toHaveLength(2);
+    expect(scopes[0]).toBeUndefined();
+    expect(scopes[1]?.memberAddresses).toEqual([LOCAL, REMOTE]);
+  });
+
+  it('rechecks local and remote identity bindings on a scoped post-await check', async () => {
+    let localAddress: EvmAddressV1 | null = LOCAL;
+    let remoteAddress: EvmAddressV1 | null = REMOTE;
+    const acceptedPolicy = policy(1, 1);
+    const policyDigest = digestFor(acceptedPolicy);
+    const subject = new Rfc64CatalogAccessPolicyRegistryV1({
+      resolveLocalAgentAddress: async () => localAddress,
+      resolveRemoteAgentAddress: async () => remoteAddress,
+    });
+    subject.accept({ policy: acceptedPolicy, policyDigest, roster: roster(policyDigest) });
+
+    await withRfc64CatalogAccessAuthorizationScopeV1(async () => {
+      await expect(subject.authorize(authInput('fetch-inbound', policyDigest)))
+        .resolves.toEqual({ accessPolicy: 1, policyDigest });
+      localAddress = null;
+      await expect(subject.authorize(authInput('fetch-inbound', policyDigest)))
+        .resolves.toBeNull();
+      localAddress = LOCAL;
+      remoteAddress = null;
+      await expect(subject.authorize(authInput('fetch-inbound', policyDigest)))
+        .resolves.toBeNull();
+    });
+  });
+
+  it('expires a capability before detached async work can reuse it', async () => {
+    const scopes: Array<Rfc64CatalogLocalAuthorizationScopeV1 | undefined> = [];
+    const acceptedPolicy = policy(1, 1);
+    const policyDigest = digestFor(acceptedPolicy);
+    const subject = new Rfc64CatalogAccessPolicyRegistryV1({
+      resolveLocalAgentAddress: async (_contextGraphId, scope) => {
+        scopes.push(scope);
+        return LOCAL;
+      },
+      resolveRemoteAgentAddress: async () => REMOTE,
+    });
+    subject.accept({ policy: acceptedPolicy, policyDigest, roster: roster(policyDigest) });
+
+    let releaseDetached!: () => void;
+    let detachedAuthorization!: Promise<unknown>;
+    await withRfc64CatalogAccessAuthorizationScopeV1(async () => {
+      await subject.authorize(authInput('fetch-inbound', policyDigest));
+      const gate = new Promise<void>((resolve) => {
+        releaseDetached = resolve;
+      });
+      detachedAuthorization = (async () => {
+        await gate;
+        return subject.authorize(authInput('fetch-inbound', policyDigest));
+      })();
+    });
+    releaseDetached();
+    await expect(detachedAuthorization).resolves.toEqual({ accessPolicy: 1, policyDigest });
+    expect(scopes).toHaveLength(2);
+    expect(scopes[0]).toBeUndefined();
+    expect(scopes[1]).toBeUndefined();
+  });
+
+  it('denies a scoped recheck when its exact held generation rotates', async () => {
+    const acceptedPolicy = policy(1, 1);
+    const policyDigest = digestFor(acceptedPolicy);
+    const subject = new Rfc64CatalogAccessPolicyRegistryV1({
+      resolveLocalAgentAddress: async () => LOCAL,
+      resolveRemoteAgentAddress: async () => REMOTE,
+    });
+    subject.acceptCurrent({
+      policy: acceptedPolicy,
+      policyDigest,
+      roster: roster(policyDigest),
+    });
+
+    await withRfc64CatalogAccessAuthorizationScopeV1(async () => {
+      await expect(subject.authorize(authInput('fetch-inbound', policyDigest)))
+        .resolves.toEqual({ accessPolicy: 1, policyDigest });
+      subject.acceptAuthoritativeCurrent({
+        policy: acceptedPolicy,
+        policyDigest,
+        roster: {
+          ...roster(policyDigest),
+          version: '1',
+          previousRosterDigest: `0x${'61'.repeat(32)}` as Digest32V1,
+        },
+      });
+      await expect(subject.authorize(authInput('fetch-inbound', policyDigest)))
+        .resolves.toBeNull();
+    });
   });
 
   it('fails closed when the per-CG resolver reports no unique local principal', async () => {

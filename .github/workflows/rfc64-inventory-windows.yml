@@ -80,6 +80,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Check regression proof launcher and process cleanup
+        run: pnpm qa:check-regression-launcher
+
       - name: Build agent dependency closure
         # The canonical Gate 0 closure excludes unnecessary Solidity compilation.
         run: pnpm test:gate0:rfc64-persistence-lifecycle:build
@@ -95,6 +98,10 @@ jobs:
       - name: Typecheck Gate 0 lifecycle harness
         if: matrix.evidence
         run: pnpm typecheck:gate0:rfc64-persistence-lifecycle
+
+      - name: Test Gate 0 lifecycle harness
+        if: matrix.evidence
+        run: pnpm test:gate0:rfc64-persistence-lifecycle:unit
 
       - name: Generate Gate 0 persistence evidence
         if: matrix.evidence
@@ -118,3 +125,12 @@ jobs:
           pnpm --filter @origintrail-official/dkg-agent exec vitest run
           --config vitest.unit.config.ts
           ${{ matrix.tests }}
+
+      - name: Test snapshot retirement aliases and metadata leases
+        if: matrix.group == 'object-stores'
+        run: >-
+          pnpm --filter @origintrail-official/dkg-publisher exec vitest run
+          --config vitest.unit.config.ts
+          test/workspace-snapshot-retirement.test.ts
+          test/workspace-snapshot-write-scope.test.ts
+          test/finalized-snapshot-collector.test.ts

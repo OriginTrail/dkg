@@ -277,12 +277,16 @@ publisherCmd
       let result: any;
       try {
         const client = await ApiClient.connect();
+        // GH#2942 - the daemon derives `retryState` (why the job is not moving) beside the job;
+        // printing only the job dropped exactly the part an operator needs for a held one. It is
+        // a top-level key, so the job's own fields are untouched. The offline inspector below has
+        // no runtime wiring to derive it from, and says nothing rather than something misleading.
         if (opts.payload) {
           const resp = await client.publisherJobPayload(jobId);
-          result = { ...resp.job, payload: resp.payload };
+          result = { ...resp.job, payload: resp.payload, retryState: resp.retryState };
         } else {
           const resp = await client.publisherJob(jobId);
-          result = resp.job;
+          result = { ...resp.job, retryState: resp.retryState };
         }
       } catch (err) {
         if (!isDaemonUnreachable(err)) throw err;

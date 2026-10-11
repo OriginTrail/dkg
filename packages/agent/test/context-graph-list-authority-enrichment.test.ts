@@ -62,6 +62,8 @@ function listingAgent(input: {
     // rather than through the agent's owner-backed accessor.
     rfc64AuthorityReadCoordinatorV1: new Rfc64AuthorityReadCoordinatorV1(),
     subscribedContextGraphs: new Map(),
+    wireIdToLocalCgId: new Map(),
+    onChainContextGraphFacts: new Map(),
     store: {
       query: async () => ({
         type: 'bindings' as const,
@@ -252,7 +254,13 @@ describe('context graph list authority enrichment', () => {
       hashById.get(id)!,
       BigInt(index + 1_000),
     ]));
-    const resolveMany = vi.fn(async (nameHashes: readonly string[]) => {
+    const resolveMany = vi.fn(async (
+      nameHashes: readonly string[],
+      _options?: {
+        signal?: AbortSignal;
+        onContextGraphAuthorityProjectionServed?: (evidence: unknown) => void;
+      },
+    ) => {
       const resolved = new Map(nameHashes.map((nameHash) => [
         nameHash,
         onChainIdByHash.get(nameHash)!,
@@ -266,6 +274,8 @@ describe('context graph list authority enrichment', () => {
       // Listing enrichment runs under the shared authority governor.
       rfc64AuthorityReadCoordinatorV1: new Rfc64AuthorityReadCoordinatorV1(),
       subscribedContextGraphs: new Map(),
+      wireIdToLocalCgId: new Map(),
+      onChainContextGraphFacts: new Map(),
       contextGraphBindingState: new ContextGraphBindingState(),
       chain: {
         contextGraphAuthorityIndexRevisionReader: {
@@ -300,6 +310,10 @@ describe('context graph list authority enrichment', () => {
 
     expect(resolveMany).toHaveBeenCalledOnce();
     expect(resolveMany.mock.calls[0]?.[0]).toHaveLength(4_097);
+    expect(resolveMany.mock.calls[0]?.[1]).toEqual({
+      signal: expect.any(AbortSignal),
+      onContextGraphAuthorityProjectionServed: expect.any(Function),
+    });
     expect(result.rows).toHaveLength(ids.length);
     expect(result.rows.every((row: { id: string; onChainId?: string }, index: number) => (
       row.id === ids[index] && row.onChainId === String(index + 1_000)
@@ -322,6 +336,8 @@ describe('context graph list authority enrichment', () => {
       // Listing enrichment runs under the shared authority governor.
       rfc64AuthorityReadCoordinatorV1: new Rfc64AuthorityReadCoordinatorV1(),
       subscribedContextGraphs: new Map(),
+      wireIdToLocalCgId: new Map(),
+      onChainContextGraphFacts: new Map(),
       contextGraphBindingState: new ContextGraphBindingState(),
       chain: {
         contextGraphAuthorityIndexRevisionReader: {

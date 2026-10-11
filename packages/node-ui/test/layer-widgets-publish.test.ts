@@ -119,6 +119,60 @@ describe('PublishVmWidget — B8 confirmed discount badge (#1365 r3)', () => {
   });
 });
 
+describe('PublishVmWidget — publish outcome unknown', () => {
+  const unknownA = { name: 'a', error: 'Publishing "a" got no response within 5 minutes.' };
+
+  it('reports an all-unknown batch as a warning result, not an error', async () => {
+    apiMocks.publishAssertionsToVm.mockResolvedValue({
+      published: 0, total: 1, partial: 0, failures: [], outcomeUnknown: [unknownA], sample: null,
+    });
+    const { container, unmount } = await render(
+      React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }),
+    );
+    await clickPublish(container);
+    await flush();
+    expect(container.querySelector('[data-testid="layer-action-error"]')).toBeNull();
+    expect(container.querySelector('[data-testid="layer-action-result"]')?.textContent)
+      .toContain('1 knowledge asset: publish outcome unknown');
+    await unmount();
+  });
+
+  it('adds the unknown count to a partly published batch', async () => {
+    apiMocks.listAssertions.mockResolvedValue([{ name: 'a', graphUri: 'g' }, { name: 'b', graphUri: 'g2' }]);
+    apiMocks.publishAssertionsToVm.mockResolvedValue({
+      published: 1, total: 2, partial: 0, failures: [], outcomeUnknown: [unknownA], sample: null,
+    });
+    const { container, unmount } = await render(
+      React.createElement(PublishVmWidget, { count: 2, contextGraphId: 'cg' }),
+    );
+    await clickPublish(container);
+    await flush();
+    const text = container.querySelector('[data-testid="layer-action-result"]')?.textContent;
+    expect(text).toContain('Published 1 knowledge asset to Verifiable Memory');
+    expect(text).toContain('publish outcome unknown');
+    await unmount();
+  });
+
+  it('keeps the unknown note on the error when every other asset failed', async () => {
+    apiMocks.listAssertions.mockResolvedValue([{ name: 'a', graphUri: 'g' }, { name: 'b', graphUri: 'g2' }]);
+    apiMocks.publishAssertionsToVm.mockResolvedValue({
+      published: 0, total: 2, partial: 0,
+      failures: [{ name: 'b', error: 'VM publish tx reverted' }],
+      outcomeUnknown: [unknownA],
+      sample: null,
+    });
+    const { container, unmount } = await render(
+      React.createElement(PublishVmWidget, { count: 2, contextGraphId: 'cg' }),
+    );
+    await clickPublish(container);
+    await flush();
+    const text = container.querySelector('[data-testid="layer-action-error"]')?.textContent;
+    expect(text).toContain('b: VM publish tx reverted');
+    expect(text).toContain('publish outcome unknown');
+    await unmount();
+  });
+});
+
 describe('PublishVmWidget — S5 publish CTA gate (#1382)', () => {
   const publishBtn = (c: HTMLElement) =>
     c.querySelector('[data-testid="widget-publish-vm-btn"]') as HTMLButtonElement;

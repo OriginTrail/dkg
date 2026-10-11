@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import {
   PROTOCOL_NETWORK_IDENTITY,
+  createOperationContext,
+  isTransportTimeoutError,
   type DkgNetworkIdentity,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
@@ -12,6 +14,7 @@ import {
   verifyNetworkIdentityResponse,
 } from './network-identity-proof.js';
 import { canonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
+import { mapWithConcurrencySettled } from '../map-with-concurrency.js';
 
 export interface NetworkAdmissionConnection {
   remotePeer: { toString(): string };
@@ -32,16 +35,39 @@ export interface NetworkAdmissionCoordinatorOptions {
   getConnections: () => Iterable<NetworkAdmissionConnection>;
   deletePeerFromPeerStore: (peerId: string) => Promise<void>;
   cleanupRejectedPeerState?: (peerId: string) => void;
+  /**
+   * The peer failed the identity proof and is quarantined for `quarantineMs`
+   * (the admission service's effective cooldown, so transport refusal can use
+   * the same window). Runs BEFORE its connections are closed so transport-level
+   * dial refusal is already in place when libp2p's reconnect machinery reacts
+   * to the disconnect. Best-effort: a throw is swallowed.
+   */
+  onPeerRejected?: (peerId: string, quarantineMs: number) => void;
+  /** The peer passed the identity proof. Best-effort: a throw is swallowed. */
+  onPeerVerified?: (peerId: string) => void;
   log?: {
     info(ctx: OperationContext, message: string): void;
     warn(ctx: OperationContext, message: string): void;
   };
   probeTimeoutMs?: number;
+  /** One longer retry for a transport deadline; caller cancellation still wins. Default 15s. */
+  probeRetryTimeoutMs?: number;
 }
 
 export interface NetworkAdmissionAttemptOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
+}
+
+export interface NetworkAdmissionPreflightOptions {
+  /** Bound parallel identity streams so publish cannot fan out without limit. */
+  maxConcurrency?: number;
+}
+
+export interface NetworkAdmissionPreflightResult {
+  checked: number;
+  admitted: number;
+  unresolved: number;
 }
 
 interface NetworkAdmissionAttemptPolicy {
@@ -55,6 +81,13 @@ const AUTOMATIC_ADMISSION_POLICY: NetworkAdmissionAttemptPolicy = {
 const EXPLICIT_CONNECT_ADMISSION_POLICY: NetworkAdmissionAttemptPolicy = {
   probeRetrySuppression: 'bypass',
 };
+
+/**
+ * Most identity probes one admission caller keeps in flight: the ceiling of a
+ * preflight round, and the bound the catch-up connected-peer filter
+ * (`DKGAgent.listAdmittedConnectedPeers`) probes with.
+ */
+export const MAX_IDENTITY_PROBE_CONCURRENCY = 4;
 
 export interface NetworkIdentityProtocolRegistrar {
   register(protocolId: string, handler: (data: Uint8Array) => Promise<Uint8Array>): void;
@@ -121,6 +154,16 @@ class InFlightAdmissionAttempt {
   }
 }
 
+/**
+ * A retryable identity-probe failure.
+ *
+ * Logging contract: the coordinator logs the failed probe itself, once, with
+ * its reason and the backoff it starts. A backed-off skip throws this error
+ * too, but no new probe ran: it repeats the reason of the probe that opened
+ * the backoff window. Callers handle the error without logging it again
+ * (GH#1578: one warning per failed probe, not one per connection callback).
+ * A new throw site must keep that contract or use another error type.
+ */
 export class NetworkAdmissionProbeError extends Error {
   readonly code = 'NETWORK_ADMISSION_PROBE_FAILED';
 
@@ -157,8 +200,11 @@ export class NetworkAdmissionCoordinator {
   private readonly getConnections: () => Iterable<NetworkAdmissionConnection>;
   private readonly deletePeerFromPeerStore: (peerId: string) => Promise<void>;
   private readonly cleanupRejectedPeerState?: (peerId: string) => void;
+  private readonly onPeerRejected?: (peerId: string, quarantineMs: number) => void;
+  private readonly onPeerVerified?: (peerId: string) => void;
   private readonly log?: NetworkAdmissionCoordinatorOptions['log'];
   private readonly probeTimeoutMs: number;
+  private readonly probeRetryTimeoutMs: number;
   private readonly inFlight = new Map<CanonicalPeerId, InFlightAdmissionAttempt>();
 
   constructor(options: NetworkAdmissionCoordinatorOptions) {
@@ -172,8 +218,11 @@ export class NetworkAdmissionCoordinator {
     this.getConnections = options.getConnections;
     this.deletePeerFromPeerStore = options.deletePeerFromPeerStore;
     this.cleanupRejectedPeerState = options.cleanupRejectedPeerState;
+    this.onPeerRejected = options.onPeerRejected;
+    this.onPeerVerified = options.onPeerVerified;
     this.log = options.log;
     this.probeTimeoutMs = options.probeTimeoutMs ?? 3_000;
+    this.probeRetryTimeoutMs = options.probeRetryTimeoutMs ?? 15_000;
   }
 
   get enabled(): boolean {
@@ -209,12 +258,16 @@ export class NetworkAdmissionCoordinator {
         throw new Error('network identity is not configured');
       }
       const request = parseNetworkIdentityRequest(data);
+      const ctx = createOperationContext('connect');
+      const startedAt = performance.now();
+      notifyBestEffort(() => this.log?.info(ctx, `Network identity request received from ${request.requesterPeerId.slice(-8)}`));
       const response = await signNetworkIdentityResponse({
         request,
         identity: this.identity,
         responderPeerId: this.selfPeerId,
         sign: this.sign,
       });
+      notifyBestEffort(() => this.log?.info(ctx, `Network identity response signed in ${Math.round(performance.now() - startedAt)}ms`));
       return new TextEncoder().encode(JSON.stringify(response));
     });
   }
@@ -243,6 +296,64 @@ export class NetworkAdmissionCoordinator {
       EXPLICIT_CONNECT_ADMISSION_POLICY,
       options,
     );
+  }
+
+  /**
+   * Resolve admission for a bounded, caller-selected peer set.
+   *
+   * The coordinator remains the sole owner of accepted/rejected state. An ACK
+   * round may briefly bypass the active retry window so a healthy peer cannot
+   * be frozen out of a quorum. The admission service owns a short preflight
+   * lease inside its bounded retry state, preventing concurrent probe storms
+   * without inheriting the longer automatic backoff.
+   */
+  async preflightPeerAdmission(
+    peerIds: Iterable<string>,
+    ctx: OperationContext,
+    options: NetworkAdmissionPreflightOptions = {},
+  ): Promise<NetworkAdmissionPreflightResult> {
+    if (!this.enabled) return { checked: 0, admitted: 0, unresolved: 0 };
+
+    const canonicalPeerIds: CanonicalPeerId[] = [];
+    for (const peerId of peerIds) {
+      try {
+        canonicalPeerIds.push(canonicalAdmissionPeerId(peerId));
+      } catch {
+        // Invalid peer IDs are already rejected by the coordinator boundary.
+      }
+    }
+    const pending = [...new Set(canonicalPeerIds)]
+      .filter((peerId) => peerId !== this.selfPeerId)
+      .filter((peerId) => !this.isAcceptedPeer(peerId) && !this.isRejectedPeer(peerId));
+    if (pending.length === 0) return { checked: 0, admitted: 0, unresolved: 0 };
+
+    const requestedConcurrency = options.maxConcurrency ?? MAX_IDENTITY_PROBE_CONCURRENCY;
+    const maxConcurrency = Number.isInteger(requestedConcurrency) && requestedConcurrency > 0
+      ? Math.min(requestedConcurrency, MAX_IDENTITY_PROBE_CONCURRENCY)
+      : 1;
+    const results = await mapWithConcurrencySettled(
+      pending,
+      maxConcurrency,
+      async (peerId) => {
+        if (!this.admission.claimRetryablePreflightProbe(peerId)) return false;
+        try {
+          return await this.ensureAdmittedWithPolicy(
+            peerId,
+            ctx,
+            EXPLICIT_CONNECT_ADMISSION_POLICY,
+            {},
+          );
+        } catch (error) {
+          this.admission.markRetryablePreflightProbeAttempted(peerId);
+          throw error;
+        }
+      },
+    );
+    const admitted = results.filter(
+      (result) => result.status === 'fulfilled' && result.value,
+    ).length;
+    const unresolved = pending.length - admitted;
+    return { checked: pending.length, admitted, unresolved };
   }
 
   private async ensureAdmittedWithPolicy(
@@ -285,13 +396,28 @@ export class NetworkAdmissionCoordinator {
     }
   }
 
+  /**
+   * Suffix for the one warning a failed probe gets. The skips inside the
+   * backoff window are not logged, so that warning states the window.
+   */
+  private describeProbeBackoff(remotePeer: CanonicalPeerId): string {
+    const backoff = this.admission.getRetryableProbeBackoff(remotePeer);
+    return backoff ? ` (automatic probes paused for ${backoff.retryAfterMs}ms)` : '';
+  }
+
   private throwTransientProbeFailure(
     remotePeer: CanonicalPeerId,
     ctx: OperationContext,
     message: string,
   ): never {
-    this.admission.rememberRetryableProbeFailure(remotePeer, message, 'transient');
-    this.log?.warn(ctx, `Network identity probe for ${remotePeer.slice(-8)} failed retryably: ${message}`);
+    // Connection liveness permits an earlier re-probe, never admission without
+    // a signed identity. Disconnected peers retain exponential suppression.
+    const connected = [...this.getConnections()].some(({ remotePeer: peer }) => peer.toString() === remotePeer);
+    this.admission.rememberRetryableProbeFailure(remotePeer, message, 'transient', connected ? 3_000 : undefined);
+    this.log?.warn(
+      ctx,
+      `Network identity probe for ${remotePeer.slice(-8)} failed retryably: ${message}${this.describeProbeBackoff(remotePeer)}`,
+    );
     throw new NetworkAdmissionProbeError(remotePeer, message);
   }
 
@@ -316,11 +442,16 @@ export class NetworkAdmissionCoordinator {
     let response: Uint8Array;
     if (signal.aborted) throw abortErrorFromSignal(signal.reason);
     try {
-      response = await this.sendIdentityProbe(
-        remotePeer,
-        new TextEncoder().encode(JSON.stringify(request)),
-        { timeoutMs: this.probeTimeoutMs, signal },
-      );
+      const data = new TextEncoder().encode(JSON.stringify(request));
+      try {
+        response = await this.sendIdentityProbe(remotePeer, data, { timeoutMs: this.probeTimeoutMs, signal });
+      } catch (error) {
+        if (signal.aborted) throw abortErrorFromSignal(signal.reason);
+        if (!isTransportTimeoutError(error)) throw error;
+        // A busy peer can miss the first deadline. The same shared owner makes
+        // exactly one longer attempt before recording any failure/backoff.
+        response = await this.sendIdentityProbe(remotePeer, data, { timeoutMs: this.probeRetryTimeoutMs, signal });
+      }
     } catch (err) {
       if (signal.aborted) throw abortErrorFromSignal(signal.reason);
       const message = err instanceof Error ? err.message : String(err);
@@ -351,7 +482,10 @@ export class NetworkAdmissionCoordinator {
       // bytes, and the backoff reason is re-interpolated into later thrown
       // errors and logs. The raw message is still logged once, below.
       this.admission.rememberRetryableProbeFailure(remotePeer, 'unreadable response', 'unreadable-response');
-      this.log?.warn(ctx, `Network identity probe for ${remotePeer.slice(-8)} returned unreadable response: ${message}`);
+      this.log?.warn(
+        ctx,
+        `Network identity probe for ${remotePeer.slice(-8)} returned unreadable response: ${message}${this.describeProbeBackoff(remotePeer)}`,
+      );
       throw new NetworkAdmissionProbeError(remotePeer, message);
     }
 
@@ -364,6 +498,7 @@ export class NetworkAdmissionCoordinator {
     });
     if (verdict.ok) {
       this.admission.markVerifiedSameNetwork(remotePeer);
+      notifyBestEffort(() => this.onPeerVerified?.(remotePeer));
       return true;
     }
     await this.rejectPeer(remotePeer, ctx, `network identity proof rejected: ${verdict.reason ?? 'unknown reason'}`);
@@ -375,7 +510,10 @@ export class NetworkAdmissionCoordinator {
     // elapses the peer is re-probed, so an operator who corrects a mismatched
     // networkId and restarts the peer re-admits without every observer node
     // restarting.
-    this.admission.quarantinePeerForCooldown(remotePeer);
+    const quarantineMs = this.admission.quarantinePeerForCooldown(remotePeer);
+    // Before the disconnect: libp2p redials keep-alive-tagged peers on
+    // `peer:disconnect`, and discovery re-offers the peer within ~0.2s.
+    notifyBestEffort(() => this.onPeerRejected?.(remotePeer, quarantineMs));
     this.cleanupRejectedPeerState?.(remotePeer);
     await this.disconnectAndForgetPeer(remotePeer, ctx);
     this.log?.warn(ctx, `Rejected peer ${remotePeer.slice(-8)}: ${reason}`);
@@ -405,6 +543,14 @@ export class NetworkAdmissionCoordinator {
     }
   }
 
+}
+
+function notifyBestEffort(notify: () => void): void {
+  try {
+    notify();
+  } catch {
+    // Transport hints must never change an admission verdict.
+  }
 }
 
 function abortErrorFromSignal(reason: unknown): Error {

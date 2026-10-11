@@ -533,7 +533,7 @@ describe('RFC-64 unregistered replica authority', () => {
       outcome: 'unavailable',
       source: 'registered-chain',
     });
-    expect(whenIdle).toHaveBeenCalledTimes(2);
+    expect(whenIdle).toHaveBeenCalledOnce();
     expect(receiver.getSubscribedContextGraphs().has(CONTEXT_GRAPH_ID)).toBe(false);
   });
 
@@ -625,7 +625,7 @@ describe('RFC-64 unregistered replica authority', () => {
     });
 
     expect(resolveFinalized).toHaveBeenCalledOnce();
-    expect(whenIdle).toHaveBeenCalledOnce();
+    expect(whenIdle).not.toHaveBeenCalled();
     expect(legacyScalar).not.toHaveBeenCalled();
     expect(legacyBatch).not.toHaveBeenCalled();
     expect(localPolicy).not.toHaveBeenCalled();
@@ -689,7 +689,7 @@ describe('RFC-64 unregistered replica authority', () => {
     receiver.subscribeToContextGraph(CONTEXT_GRAPH_ID);
     expect(receiver.getSubscribedContextGraphs().has(CONTEXT_GRAPH_ID)).toBe(true);
     expect(resolveFinalized).toHaveBeenCalledTimes(3);
-    expect(whenIdle).toHaveBeenCalledTimes(3);
+    expect(whenIdle).toHaveBeenCalledOnce();
     expect(pointRead).not.toHaveBeenCalled();
     expect(legacyScalar).not.toHaveBeenCalled();
     expect(legacyBatch).not.toHaveBeenCalled();
@@ -733,7 +733,7 @@ describe('RFC-64 unregistered replica authority', () => {
       CONTEXT_GRAPH_ID,
     )).toBe(true);
     expect(resolveFinalized).toHaveBeenCalledTimes(2);
-    expect(whenIdle).toHaveBeenCalledTimes(2);
+    expect(whenIdle).not.toHaveBeenCalled();
     expect(pointRead).not.toHaveBeenCalled();
     expect(legacyScalar).not.toHaveBeenCalled();
     expect(legacyBatch).not.toHaveBeenCalled();

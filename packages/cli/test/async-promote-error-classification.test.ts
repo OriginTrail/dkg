@@ -9,9 +9,9 @@ import {
   PROMOTE_STEP_NAMES,
 } from '@origintrail-official/dkg-publisher';
 import { classifyExactSwmGraphReplaceFailure } from '../../publisher/test/_helpers/promote-replay-safety.js';
+import { diagnosticPromoteStage, untagPromoteMessage } from '../src/daemon/promote-stage-diagnostics.js';
 import {
   classifyPromoteError,
-  diagnosticPromoteStage,
   safePromoteErrorIdentity,
 } from '../src/daemon/worker/async-promote-error-classification.js';
 
@@ -48,6 +48,25 @@ describe('diagnosticPromoteStage', () => {
     'untagged failure',
   ])('maps an unowned or absent stage to unknown: %s', (message) => {
     expect(diagnosticPromoteStage(message)).toBe('unknown');
+  });
+});
+
+describe('untagPromoteMessage', () => {
+  it.each([
+    ['[promote:assertionScopedQuads] store timeout', 'store timeout'],
+    // The tag is removed whoever chose the label: it is a label, never message text.
+    ['[promote:callerControlled]   network failure', 'network failure'],
+    ['[promote:] failure', 'failure'],
+  ])('removes a leading stage tag: %s', (message, untagged) => {
+    expect(untagPromoteMessage(message)).toBe(untagged);
+  });
+
+  it.each([
+    'untagged failure',
+    'prefix [promote:assertionScopedQuads] failure',
+    '',
+  ])('leaves a message without a leading tag as it is: %j', (message) => {
+    expect(untagPromoteMessage(message)).toBe(message);
   });
 });
 

@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { toEip55Checksum } from '@origintrail-official/dkg-core';
 import { DkgNodePlugin } from '../src/DkgNodePlugin.js';
+import { DkgDaemonOutcomeUnknownError } from '../src/dkg-client.js';
 import { DkgChannelPlugin } from '../src/DkgChannelPlugin.js';
 import { ChatTurnWriter } from '../src/ChatTurnWriter.js';
 import { INTERNAL_HOOK_SYMBOL } from '../src/HookSurface.js';
@@ -322,6 +323,36 @@ describe("DkgNodePlugin", () => {
       expect(res.details).toMatchObject({ ual: 'did:dkg:1/0xauthor/7' });
     });
 
+
+    it('dkg_knowledge_asset_publish reports a client-side timeout as outcome unknown, not a tool error', async () => {
+      const { plugin, byName } = setupPluginWithFetch({});
+      const unknown = new DkgDaemonOutcomeUnknownError('/api/knowledge-assets/notes/vm/publish', 300_000);
+      vi.spyOn((plugin as any).client, 'knowledgeAssetPublish').mockRejectedValue(unknown);
+      const res = await byName.get('dkg_knowledge_asset_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+      });
+      expect(res.details).not.toHaveProperty('error');
+      expect(res.details).toEqual({ outcomeUnknown: true, warning: unknown.message });
+      expect(unknown.message).toContain('dkg_knowledge_asset_history');
+    });
+
+    it('dkg_knowledge_asset_publish never reports an unanswered publish as an unreachable daemon', async () => {
+      const { byName } = setupPluginWithFetch({});
+      // Node's fetch stops waiting for headers on its own after 300 s ("fetch failed").
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        if (String(input).includes('/vm/publish')) {
+          throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'UND_ERR_HEADERS_TIMEOUT' } });
+        }
+        return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }) as typeof fetch;
+      const res = await byName.get('dkg_knowledge_asset_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+      });
+      expect(res.details).toMatchObject({ outcomeUnknown: true });
+      expect(JSON.stringify(res.details)).not.toContain('not reachable');
+    });
 
     it('dkg_knowledge_asset_publish rejects a non-positive publish_epochs at the adapter boundary', async () => {
       const { fetchMock, byName } = setupPluginWithFetch({});

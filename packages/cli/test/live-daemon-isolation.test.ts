@@ -2,7 +2,14 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { expect, it } from 'vitest';
-import { startLiveDaemon, stopLiveDaemon, getJson, type LiveDaemon } from './helpers/live-daemon.js';
+import { RpcRequestGovernor } from '@origintrail-official/dkg-chain';
+import {
+  LIVE_DAEMON_RPC_REQUEST_BUDGET,
+  startLiveDaemon,
+  stopLiveDaemon,
+  getJson,
+  type LiveDaemon,
+} from './helpers/live-daemon.js';
 
 it('two daemon children bind their own ports and one teardown leaves the other and a foreign listener alive', async () => {
   const foreign = createServer((_req, res) => res.end('{}'));
@@ -31,3 +38,19 @@ it('two daemon children bind their own ports and one teardown leaves the other a
     await new Promise<void>((resolve) => foreign.close(() => resolve()));
   }
 }, 90_000);
+
+it('admits a background request from the first moment under the suite-chain request budget', async () => {
+  // The start-up delay is drawn at random; take the largest draw, so the
+  // answer does not depend on the one a daemon happens to get.
+  const governor = new RpcRequestGovernor(LIVE_DAEMON_RPC_REQUEST_BUDGET, {
+    clock: {
+      now: () => 0,
+      random: () => 1 - Number.EPSILON,
+      setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+      clearTimeout: (timer) => clearTimeout(timer),
+    },
+  });
+  expect(governor.snapshot().startupDelayRemainingMs).toBe(0);
+  await expect(governor.acquireImmediately('background')).resolves.toBeUndefined();
+  expect(governor.snapshot()).toMatchObject({ backgroundAdmitted: 1, rejected: 0 });
+});

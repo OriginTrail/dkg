@@ -18,6 +18,8 @@
  * would let a caller bind anyway, and must stay distinguishable from each
  * other so recovery can tell an empty finalized index from a failed read.
  */
+import { ChainRpcTransportError } from '@origintrail-official/dkg-chain';
+import { StoreOperationTimeoutError } from '@origintrail-official/dkg-storage';
 import { describe, expect, it, vi } from 'vitest';
 import type { DKGAgent } from '../src/dkg-agent.js';
 import type {
@@ -93,6 +95,58 @@ const resolveBootstrap = (agent: DKGAgent) => (
 );
 
 describe('subscription bootstrap finalized-generation refresh', () => {
+  it('uses a live roster only when the durable-readiness caller requires it', async () => {
+    const { agent, registeredAuthority } = createBootstrapAgent({ refresh: async () => new Map() });
+    registeredAuthority.mockResolvedValue({ kind: 'public', onChainId: ON_CHAIN_ID });
+    await agent.resolveContextGraphSubscriptionBootstrapAuthority(CG_ID, {
+      allowSubscriptionFallback: false, freshness: 'live',
+    });
+    expect(registeredAuthority).toHaveBeenCalledWith(CG_ID, expect.objectContaining({
+      authorityReadMode: 'live-current', freshness: 'live',
+    }));
+    registeredAuthority.mockClear();
+    await agent.resolveContextGraphSubscriptionBootstrapAuthority(CG_ID, {
+      allowSubscriptionFallback: false,
+    });
+    expect(registeredAuthority).toHaveBeenCalledWith(CG_ID, expect.objectContaining({
+      authorityReadMode: 'live-current', freshness: 'bounded',
+    }));
+  });
+
+  it('carries explicit unregistered applicability only from the canonical allowed authority read', async () => {
+    const { agent, registeredAuthority } = createBootstrapAgent({ refresh: async () => new Map() });
+    registeredAuthority.mockResolvedValue({
+      kind: 'unregistered', unregisteredEvidence: 'accepted-rfc64-finalized-absence',
+    });
+    Reflect.set(agent, 'hasAcceptedRfc64PublicUnregisteredAuthorityV1', () => true);
+    const decision = await resolveBootstrap(agent);
+    expect(decision).toMatchObject({
+      outcome: 'allowed', source: 'rfc64-public', registration: 'unregistered',
+    });
+    expect(registeredAuthority).toHaveBeenCalledOnce();
+  });
+
+  it('does not turn a legacy unregistered read fallback into VM non-applicability', async () => {
+    const { agent, registeredAuthority } = createBootstrapAgent({ refresh: async () => new Map() });
+    registeredAuthority.mockResolvedValue({ kind: 'unregistered' });
+    Reflect.set(agent, 'hasAcceptedRfc64PublicUnregisteredAuthorityV1', () => true);
+    const decision = await resolveBootstrap(agent);
+    expect(decision).toMatchObject({ outcome: 'allowed', source: 'rfc64-public' });
+    expect(decision).not.toHaveProperty('registration');
+    expect(registeredAuthority).toHaveBeenCalledOnce();
+  });
+
+  it('does not attach unregistered applicability to a private non-member denial', async () => {
+    const { agent, registeredAuthority } = createBootstrapAgent({ refresh: async () => new Map() });
+    registeredAuthority.mockResolvedValue({
+      kind: 'unregistered', unregisteredEvidence: 'approved-private-replica-finalized-absence',
+    });
+    Reflect.set(agent, 'resolveRfc64PrivateReadRosterV1', () => []);
+    const decision = await resolveBootstrap(agent);
+    expect(decision.outcome).toBe('denied');
+    expect(decision).not.toHaveProperty('registration');
+  });
+
   it('refuses admission when the finalized refresh returns no entry for the graph', async () => {
     const { agent, reconcile, refresh, registeredAuthority } = createBootstrapAgent({
       refresh: async () => new Map(),
@@ -107,6 +161,7 @@ describe('subscription bootstrap finalized-generation refresh', () => {
       source: 'registered-chain',
       reason: 'chain-name-binding-unavailable',
       metadataBootstrap: 'eligible',
+      dependency: 'chain',
     });
     expect(decision).not.toHaveProperty('onChainId');
 
@@ -125,6 +180,41 @@ describe('subscription bootstrap finalized-generation refresh', () => {
     expect(registeredAuthority).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    ['declares the graph private', async () => ({ accessPolicy: 'private' }), false],
+    ['cannot be read', async () => { throw new Error('store unavailable'); }, false],
+    ['declares the graph public', async () => ({ accessPolicy: 'public' }), true],
+    ['holds no access policy yet', async () => ({}), true],
+  ] as const)(
+    'with a local join intent, reconciles the signed seed only unless own metadata %s',
+    async (_label, ownMetaFacts, reconciles) => {
+      const { agent, reconcile, registeredAuthority } = createBootstrapAgent({
+        refresh: async () => new Map(),
+      });
+      // Signing a join request records the intent for public and private graphs alike.
+      Reflect.set(agent, 'localApprovedAgentByCG', new Map([[CG_ID, `0x${'ab'.repeat(20)}`]]));
+      const getOwnCgMetaFacts = vi.fn(ownMetaFacts);
+      Reflect.set(agent, 'getOwnCgMetaFacts', getOwnCgMetaFacts);
+
+      const decision = await resolveBootstrap(agent);
+
+      expect(getOwnCgMetaFacts).toHaveBeenCalledExactlyOnceWith(
+        CG_ID,
+        { signal: expect.any(AbortSignal) },
+      );
+      expect(decision.outcome).toBe('unavailable');
+      if (reconciles) {
+        expect(reconcile).toHaveBeenCalledOnce();
+        expect(reconcile.mock.calls[0]?.[2]).toEqual({ kind: 'finalized-absence' });
+      } else {
+        // The failed private join proof stands; no later refresh replaces it.
+        expect(decision).toMatchObject({ reason: 'finalized-name-absence-unaccepted' });
+        expect(reconcile).not.toHaveBeenCalled();
+        expect(registeredAuthority).toHaveBeenCalledOnce();
+      }
+    },
+  );
+
   it.each(['auto', 'finalized-absence'] as const)(
     'refuses admission when the finalized refresh downgrades to a %s request',
     async (kind) => {
@@ -142,6 +232,7 @@ describe('subscription bootstrap finalized-generation refresh', () => {
         source: 'registered-chain',
         reason: 'chain-name-binding-unavailable',
         metadataBootstrap: 'eligible',
+        dependency: 'chain',
       });
       // A non-evidence request must never be handed to the reconciler here:
       // only the finalized-absence seed from the earlier step ran.
@@ -165,10 +256,44 @@ describe('subscription bootstrap finalized-generation refresh', () => {
       source: 'registered-chain',
       reason: 'registered-authority-error',
       metadataBootstrap: 'eligible',
+      dependency: 'unknown',
     });
     expect(decision).not.toHaveProperty('onChainId');
     expect(reconcile).toHaveBeenCalledOnce();
     expect(registeredAuthority).toHaveBeenCalledTimes(2);
+  });
+
+  it('attributes a failed refresh or evidence reconcile to the dependency its error names (#2834)', async () => {
+    const storeFailure = createBootstrapAgent({
+      refresh: async () => {
+        throw new StoreOperationTimeoutError({
+          backend: 'oxigraph-server',
+          operation: 'query',
+          outcome: 'not_started',
+          message: 'Managed Oxigraph is recovering; query was not started',
+        });
+      },
+    });
+    await expect(resolveBootstrap(storeFailure.agent)).resolves.toMatchObject({
+      outcome: 'unavailable',
+      reason: 'registered-authority-error',
+      dependency: 'store',
+    });
+
+    const chainFailure = createBootstrapAgent({
+      refresh: async () => new Map([[CG_ID, FINALIZED_EVIDENCE_REQUEST]]),
+      reconcile: async (_contextGraphId, _signal, request) => {
+        if (request.kind === 'finalized-evidence') {
+          throw new ChainRpcTransportError('RPC_ENDPOINTS_EXHAUSTED', 'all RPC endpoints failed');
+        }
+        return null;
+      },
+    });
+    await expect(resolveBootstrap(chainFailure.agent)).resolves.toMatchObject({
+      outcome: 'unavailable',
+      reason: 'registered-authority-error',
+      dependency: 'chain',
+    });
   });
 
   it('reports an authority error when reconciling the finalized evidence throws', async () => {
@@ -189,6 +314,7 @@ describe('subscription bootstrap finalized-generation refresh', () => {
       source: 'registered-chain',
       reason: 'registered-authority-error',
       metadataBootstrap: 'eligible',
+      dependency: 'unknown',
     });
     expect(refresh).toHaveBeenCalledOnce();
     // Seed reconcile, then the evidence reconcile that threw. No re-resolve.

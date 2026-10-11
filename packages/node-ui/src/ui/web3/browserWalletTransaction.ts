@@ -1,18 +1,14 @@
 import {
   getAddress,
-  type Abi,
   type Address,
   type Chain,
-  type ContractFunctionArgs,
-  type ContractFunctionName,
   type Hex,
   type PublicClient,
   type TransactionReceipt,
-  type WriteContractParameters,
+  type WalletClient,
 } from 'viem';
-import type { PcaContracts } from '../api.js';
 import { eqAddress } from './address.js';
-import { useWalletStore, type WalletState } from '../stores/wallet.js';
+import type { WalletState } from '../stores/wallet.js';
 import {
   publicClientFor as defaultPublicClientFor,
   synthesizeChain,
@@ -24,7 +20,7 @@ import { WalletReceiptRevertedError, WalletReceiptWaitError, WalletTxStepError }
 
 export type BrowserWalletRuntimeState = Pick<
   WalletState,
-  'provider' | 'address' | 'chainId' | 'expectedChainId' | 'bootstrap'
+  'provider' | 'address' | 'chainId'
 >;
 
 export interface BrowserWalletBootstrap {
@@ -33,28 +29,21 @@ export interface BrowserWalletBootstrap {
 }
 
 export type BrowserWalletPublicClient = Pick<PublicClient, 'readContract' | 'waitForTransactionReceipt'>;
-export interface BrowserWalletClient {
-  writeContract<
-    const TAbi extends Abi,
-    TFunctionName extends ContractFunctionName<TAbi, 'nonpayable' | 'payable'>,
-    TArgs extends ContractFunctionArgs<TAbi, 'nonpayable' | 'payable', TFunctionName>,
-  >(
-    parameters: WriteContractParameters<TAbi, TFunctionName, TArgs, Chain, undefined, Chain>,
-  ): Promise<Hex>;
-}
+export type BrowserWalletClient = Pick<WalletClient, 'writeContract'>;
 
 export interface BrowserWalletRuntimeDeps<
-  Bootstrap extends BrowserWalletBootstrap = PcaContracts,
+  Bootstrap extends BrowserWalletBootstrap,
 > {
-  /** Feature-owned bootstrap; defaults to the PCA wallet store for legacy callers. */
-  bootstrap?: Bootstrap;
-  getWalletState?: () => BrowserWalletRuntimeState;
+  /** Feature-owned chain and contract bootstrap. */
+  bootstrap: Bootstrap;
+  /** Feature adapter for the currently connected wallet mechanics. */
+  getWalletState: () => BrowserWalletRuntimeState;
   publicClientFor?: (chainId: string | number, rpcUrls: string[]) => BrowserWalletPublicClient;
   walletClientFromProvider?: (chain: Chain, provider: Eip1193Provider) => BrowserWalletClient;
 }
 
 export interface BrowserWalletRuntimeContext<
-  Bootstrap extends BrowserWalletBootstrap = PcaContracts,
+  Bootstrap extends BrowserWalletBootstrap,
 > {
   provider: Eip1193Provider;
   account: Address;
@@ -71,30 +60,12 @@ export interface BrowserWalletConnectionPolicy {
   abortedError: (message: string) => Error;
   messages: {
     disconnected: string;
-    bootstrapUnavailable: string;
     wrongNetwork: string;
     providerChanged: string;
     addressChanged: string;
     networkChanged: string;
     accountChanged: string;
   };
-}
-
-function currentState<Bootstrap extends BrowserWalletBootstrap>(
-  deps: BrowserWalletRuntimeDeps<Bootstrap>,
-): BrowserWalletRuntimeState {
-  return deps.getWalletState?.() ?? useWalletStore.getState();
-}
-
-function currentBootstrap<Bootstrap extends BrowserWalletBootstrap>(
-  deps: BrowserWalletRuntimeDeps<Bootstrap>,
-  state: BrowserWalletRuntimeState,
-): Bootstrap | null {
-  if (deps.bootstrap) return deps.bootstrap;
-  // The shared wallet store is PCA-owned for legacy PCA callers. Other
-  // features provide their bootstrap explicitly, preserving their concrete
-  // contract fields across the generic runtime boundary.
-  return state.bootstrap as Bootstrap | null;
 }
 
 export function browserWalletAddress(
@@ -113,14 +84,11 @@ export function loadBrowserWalletRuntime<Bootstrap extends BrowserWalletBootstra
   deps: BrowserWalletRuntimeDeps<Bootstrap>,
   policy: BrowserWalletConnectionPolicy,
 ): BrowserWalletRuntimeContext<Bootstrap> {
-  const state = currentState(deps);
+  const state = deps.getWalletState();
   if (!state.provider || !state.address) {
     throw policy.unavailableError(policy.messages.disconnected);
   }
-  const bootstrap = currentBootstrap(deps, state);
-  if (!bootstrap) {
-    throw policy.unavailableError(policy.messages.bootstrapUnavailable);
-  }
+  const bootstrap = deps.bootstrap;
   const expectedChainId = numericChainId(bootstrap.chainId);
   if (state.chainId !== expectedChainId) {
     throw policy.unavailableError(policy.messages.wrongNetwork);
@@ -136,7 +104,7 @@ export function loadBrowserWalletRuntime<Bootstrap extends BrowserWalletBootstra
       defaultPublicClientFor(bootstrap.chainId, bootstrap.rpcUrls),
     walletClient:
       deps.walletClientFromProvider?.(chain, state.provider) ??
-      defaultWalletClientFromProvider(chain, state.provider) as BrowserWalletClient,
+      defaultWalletClientFromProvider(chain, state.provider),
     bootstrap,
   };
 }
@@ -146,7 +114,7 @@ export async function assertBrowserWalletStillConnected<Bootstrap extends Browse
   deps: BrowserWalletRuntimeDeps<Bootstrap>,
   policy: BrowserWalletConnectionPolicy,
 ): Promise<void> {
-  const state = currentState(deps);
+  const state = deps.getWalletState();
   if (state.provider !== ctx.provider) {
     throw policy.abortedError(policy.messages.providerChanged);
   }
@@ -174,25 +142,13 @@ export interface BrowserWalletTransactionProgress {
   failed: (cause: unknown, hash?: Hex) => void;
 }
 
-export interface BrowserWalletWriteRequest<
-  TAbi extends Abi,
-  TFunctionName extends ContractFunctionName<TAbi, 'nonpayable' | 'payable'>,
-> {
-  address: Address;
-  abi: TAbi;
-  functionName: TFunctionName;
-  args: ContractFunctionArgs<TAbi, 'nonpayable' | 'payable', TFunctionName>;
-}
-
 export async function submitBrowserWalletTransaction<
   Bootstrap extends BrowserWalletBootstrap,
-  const TAbi extends Abi,
-  TFunctionName extends ContractFunctionName<TAbi, 'nonpayable' | 'payable'>,
 >(
   ctx: BrowserWalletRuntimeContext<Bootstrap>,
   deps: BrowserWalletRuntimeDeps<Bootstrap>,
   policy: BrowserWalletConnectionPolicy,
-  request: BrowserWalletWriteRequest<TAbi, TFunctionName>,
+  write: (walletClient: BrowserWalletClient) => Promise<Hex>,
   step: 'approve' | 'action',
   progress: BrowserWalletTransactionProgress,
 ): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
@@ -200,27 +156,7 @@ export async function submitBrowserWalletTransaction<
   progress.signing();
   let hash: Hex;
   try {
-    // viem's ExactRequired/GetMutabilityAwareValue machinery cannot prove a
-    // generic object spread, even though the public request type above has
-    // already coupled ABI, function name, and args. Keep the cast at this one
-    // transport seam; callers retain the strict contract-specific boundary.
-    const parameters = {
-      account: ctx.account,
-      chain: ctx.chain,
-      ...request,
-    } as unknown as WriteContractParameters<
-      TAbi,
-      TFunctionName,
-      ContractFunctionArgs<TAbi, 'nonpayable' | 'payable', TFunctionName>,
-      Chain,
-      undefined,
-      Chain
-    >;
-    hash = await ctx.walletClient.writeContract<
-      TAbi,
-      TFunctionName,
-      ContractFunctionArgs<TAbi, 'nonpayable' | 'payable', TFunctionName>
-    >(parameters);
+    hash = await write(ctx.walletClient);
   } catch (cause) {
     progress.failed(cause);
     throw new WalletTxStepError(step, cause);

@@ -29,6 +29,7 @@
 import { createHash } from 'node:crypto';
 import { promises as fs, type Dirent } from 'node:fs';
 import path from 'node:path';
+import { normalizePositiveOnChainId } from '../internal/swm-host-mode-contracts.js';
 
 export interface SwmHostModeEntry {
   /** Monotonic per-store sequence number assigned at append time. */
@@ -118,16 +119,6 @@ const DEFAULT_REGISTERED_LIMITS: SwmHostModeStoreLimits = {
 
 const ENTRY_HEADER_BYTES = 8 + 8 + 4;
 const META_FILE = '_meta.json';
-
-function normalizePositiveOnChainId(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  try {
-    const parsed = BigInt(value);
-    return parsed > 0n ? parsed.toString() : undefined;
-  } catch {
-    return undefined;
-  }
-}
 
 interface CgMetaState {
   seqno: number;

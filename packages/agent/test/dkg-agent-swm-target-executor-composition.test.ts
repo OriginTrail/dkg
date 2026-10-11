@@ -78,12 +78,10 @@ describe('SWM target executor session factory', () => {
       }),
       recordDrops: () => {},
       invalidateListContextGraphsCache: () => {},
-      markMetaProjectionDirty: () => {},
       recoveryMutation: createSwmRecoveryMutationRuntimeV1({
         store,
         recordDrops: () => {},
         invalidateListContextGraphsCache: () => {},
-        markMetaProjectionDirty: () => {},
       }),
       setCheckpoint: () => {},
       deleteCheckpoint: () => {},

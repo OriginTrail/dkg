@@ -20,7 +20,9 @@
  * chain-proven policy governs only what is REQUIRED — hence the invariant that
  * a CG never REQUIRES encryption without also SUPPORTING it.
  *
- * `provenPublicOnChain` must be true ONLY on a live public proof. An absent
+ * `provenPublic` must be true ONLY on an authenticated public proof (a live
+ * on-chain public policy, or an unregistered graph's accepted owner-signed
+ * public policy while the name is still unregistered). An absent
  * oracle, `false`, or a thrown lookup all mean "not proven public" and keep the
  * encryption requirement — the same fail-closed discipline the sender uses
  * (`resolveWorkspaceRecipientsGated`), so a stale mapping or an RPC flake can
@@ -32,7 +34,7 @@
 export interface WorkspaceEncryptionPolicyInput {
   readonly hasPrivateAccessPolicy: boolean;
   readonly agentGateAddresses: readonly string[] | null;
-  readonly provenPublicOnChain: boolean;
+  readonly provenPublic: boolean;
 }
 
 export interface WorkspaceEncryptionRequirement {
@@ -44,7 +46,7 @@ export function resolveWorkspaceEncryptionRequirement(
   params: WorkspaceEncryptionPolicyInput,
 ): WorkspaceEncryptionRequirement {
   const isAgentGated = params.agentGateAddresses !== null;
-  const gateRequiresEncryption = isAgentGated && !params.provenPublicOnChain;
+  const gateRequiresEncryption = isAgentGated && !params.provenPublic;
   return {
     requiresEncryptedPayload: params.hasPrivateAccessPolicy || gateRequiresEncryption,
     supportsEncryptedPayload: params.hasPrivateAccessPolicy || isAgentGated,

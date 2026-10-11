@@ -3,6 +3,7 @@ import {
   snapshotDenseDataArray,
   snapshotExactDataRecord,
 } from '@origintrail-official/dkg-core/closed-data-snapshot';
+import type { SparqlTermPosition } from '@origintrail-official/dkg-core';
 
 import type { Quad } from './triple-store.js';
 import type {
@@ -428,6 +429,43 @@ export function finalizeRfc64AuthorCommitPlanV1(
   }) as NormalizedRfc64AuthorCommitCasV1;
   CERTIFIED_PLANS.add(plan);
   return plan;
+}
+
+/** A term an RFC-64 update interpolates, and the SPARQL position it fills. */
+export interface Rfc64AuthorCommitControlTermV1 {
+  readonly term: string;
+  readonly position: SparqlTermPosition;
+}
+
+/**
+ * The input terms an update of `plan` interpolates outside `semanticQuads`,
+ * which already hold every replacement quad and each predicate replacement:
+ * each referenced graph, each replaced subject, and every guard term,
+ * predecessor rows included. Derived from the same plan fields as
+ * `referencedGraphs` and `semanticQuads` above.
+ */
+export function rfc64AuthorCommitControlTermsV1(
+  plan: NormalizedRfc64AuthorCommitCasV1,
+): readonly Rfc64AuthorCommitControlTermV1[] {
+  const terms: Rfc64AuthorCommitControlTermV1[] = plan.referencedGraphs.map(
+    (graphUri) => ({ term: graphUri, position: 'graph' }),
+  );
+  for (const { subject } of plan.subjectReplacements) {
+    terms.push({ term: subject, position: 'subject' });
+  }
+  for (const guard of plan.guards) {
+    terms.push(
+      { term: guard.subject, position: 'subject' },
+      { term: guard.predicate, position: 'predicate' },
+    );
+    if (guard.expectedObject !== null) terms.push({ term: guard.expectedObject, position: 'object' });
+    if (guard.guardKind === 'exact-subject' && guard.expectedQuads !== null) {
+      for (const { predicate, object } of guard.expectedQuads) {
+        terms.push({ term: predicate, position: 'predicate' }, { term: object, position: 'object' });
+      }
+    }
+  }
+  return Object.freeze(terms);
 }
 
 function snapshotPlanArray(

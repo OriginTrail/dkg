@@ -5,6 +5,8 @@ import type {
   Rfc64CatalogAccessAuthorizationV1,
   Rfc64CatalogAccessPolicyRegistryV1,
 } from './catalog-access-policy-v1.js';
+import { withRfc64CatalogAccessAuthorizationScopeV1 } from
+  './catalog-access-policy-v1.js';
 
 export type Rfc64LegacyOpenCatalogAuthorizerV1<
   Input extends Rfc64CatalogAccessAuthorizationInputV1,
@@ -42,6 +44,30 @@ export function normalizeRfc64CatalogTransportAuthorizerV1<
   };
 }
 
+const DENIED_BEFORE_WORK_V1 = new WeakSet<object>();
+const DENIED_AFTER_WORK_V1 = new WeakSet<object>();
+
+function deniedV1(phase: WeakSet<object>): (cause: unknown) => never {
+  return (cause) => {
+    if (typeof cause === 'object' && cause !== null) phase.add(cause);
+    throw cause;
+  };
+}
+
+/**
+ * Where {@link withCurrentRfc64CatalogPolicyV1} rejected with `error`: at its policy check before
+ * the work, so the work never ran; at its check after the work, so the work ran to its end; or
+ * `null`, when the rejection is not from one of its own two checks. A caller that reports on a
+ * denial needs this to say whether anything went out (GH#3081).
+ */
+export function rfc64CatalogPolicyDenialPhaseV1(
+  error: unknown,
+): 'before-work' | 'after-work' | null {
+  if (typeof error !== 'object' || error === null) return null;
+  if (DENIED_BEFORE_WORK_V1.has(error)) return 'before-work';
+  return DENIED_AFTER_WORK_V1.has(error) ? 'after-work' : null;
+}
+
 /**
  * Apply the same accepted-current policy before and after an awaited boundary.
  * This closes policy-generation and membership TOCTOU windows without making
@@ -51,19 +77,23 @@ export async function withCurrentRfc64CatalogPolicyV1<Value>(
   requireCurrentPolicy: () => Promise<void>,
   work: () => Value | Promise<Value>,
 ): Promise<Value> {
-  await requireCurrentPolicy();
-  const value = await work();
-  await requireCurrentPolicy();
-  return value;
+  return withRfc64CatalogAccessAuthorizationScopeV1(async () => {
+    await requireCurrentPolicy().catch(deniedV1(DENIED_BEFORE_WORK_V1));
+    const value = await work();
+    await requireCurrentPolicy().catch(deniedV1(DENIED_AFTER_WORK_V1));
+    return value;
+  });
 }
 
 export async function recheckCurrentRfc64CatalogPolicyAfterAwaitV1<Value>(
   requireCurrentPolicy: () => Promise<void>,
   work: () => Value | Promise<Value>,
 ): Promise<Value> {
-  const value = await work();
-  await requireCurrentPolicy();
-  return value;
+  return withRfc64CatalogAccessAuthorizationScopeV1(async () => {
+    const value = await work();
+    await requireCurrentPolicy();
+    return value;
+  });
 }
 
 export type Rfc64AuthorizedCatalogWorkResultV1<Value> =
@@ -74,10 +104,12 @@ export async function withAuthorizedCurrentRfc64CatalogPolicyV1<Value>(
   isCurrentPolicyAuthorized: () => Promise<boolean>,
   work: () => Value | Promise<Value>,
 ): Promise<Rfc64AuthorizedCatalogWorkResultV1<Value>> {
-  if (!await isCurrentPolicyAuthorized()) return Object.freeze({ authorized: false });
-  const value = await work();
-  if (!await isCurrentPolicyAuthorized()) return Object.freeze({ authorized: false });
-  return Object.freeze({ authorized: true, value });
+  return withRfc64CatalogAccessAuthorizationScopeV1(async () => {
+    if (!await isCurrentPolicyAuthorized()) return Object.freeze({ authorized: false });
+    const value = await work();
+    if (!await isCurrentPolicyAuthorized()) return Object.freeze({ authorized: false });
+    return Object.freeze({ authorized: true, value });
+  });
 }
 
 function projectCatalogAccessAuthorizationInput(

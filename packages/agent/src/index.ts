@@ -1,4 +1,14 @@
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+export {
+  authorityIndexTrustDomain,
+  planAuthorityIndexBootstrap,
+  resolveAuthorityIndexConfig,
+  type AuthorityIndexBootstrapInput,
+  type AuthorityIndexBootstrapPlan,
+  type AuthorityIndexConfig,
+  type AuthorityIndexSnapshotPlan,
+  type ResolvedAuthorityIndexConfig,
+} from './authority-index-config.js';
 export { loadOpWallets, generateWallets, type OpWalletsConfig, type WalletEntry } from './op-wallets.js';
 export {
   CONTEXT_GRAPH_MEMBERSHIP_SOURCES,
@@ -85,6 +95,7 @@ export * from './rfc64/public-catalog-native-reconciler-v1.js';
 export * from './rfc64/public-catalog-activation-config-v1.js';
 export * from './rfc64/catalog-responsibility-registry-v1.js';
 export type {
+  Rfc64AgentAuthorityResolverReadOptionsV1,
   Rfc64AuthorityReadCoordinatorSnapshotV1,
 } from './rfc64/authority-rpc-circuit-breaker-v1.js';
 export * from './rfc64/policy-cell-v1.js';
@@ -105,7 +116,22 @@ export { FinalizationHandler } from './finalization-handler.js';
 export {
   VmReconcileDispatcher,
 } from './chain-reconciler.js';
-export { resolveSyncReconcilerEnabled } from './sync/backpressure.js';
+export { resolveSyncReconcilerEnabled, resolveVmReconcilerEnabled } from './sync/backpressure.js';
+export {
+  FinalizedAuthorityColdResolutionV1,
+  finalizedAuthorityColdResolutionOf,
+  peekFinalizedAuthorityColdResolution,
+} from './finalized-authority-cold-resolution.js';
+export {
+  CHAIN_AUTHORITY_COLD_RESOLUTION_TIMEOUT_ENV,
+  CHAIN_AUTHORITY_READ_TIMEOUT_ENV,
+  DEFAULT_CHAIN_AUTHORITY_READ_BUDGETS,
+  chainAuthorityReadBudgetsOf,
+  resolveChainAuthorityReadBudgets,
+  resolveChainAuthorityTimeoutMs,
+  type ChainAuthorityReadBudgets,
+  type ChainAuthorityReadBudgetsConfig,
+} from './chain-authority-read-budgets.js';
 export {
   classifySharedMemoryFreshness,
   type SelectedSharedMemorySyncResult,
@@ -145,6 +171,12 @@ export {
   ContextGraphMembershipPersistShutdownTimeoutError,
   CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_ERROR_CODE,
 } from './context-graph-membership-persist-scheduler.js';
+export {
+  ContextGraphSubscriptionPersistQueueClosedError,
+  ContextGraphSubscriptionPersistQueueFullError,
+  ContextGraphSubscriptionPersistShutdownTimeoutError,
+  CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT_ERROR_CODE,
+} from './context-graph-subscription-persist-scheduler.js';
 export { buildEndorsementQuads, DKG_ENDORSES, DKG_ENDORSED_AT } from './endorse.js';
 export {
   CclEvaluator,
@@ -181,7 +213,32 @@ export {
 } from './ccl-policy.js';
 export { ContextGraphPolicyAuthorizationError } from './dkg-agent-ownership.js';
 export { DKGAgent } from './dkg-agent.js';
+export { resolveWorkingMemoryIdentityAliases } from './working-memory-identity.js';
 export type { DiscoverContextGraphsFromChainOptions } from './context-graph-discovery-options.js';
+export {
+  CONTEXT_GRAPH_STORAGE_DISCOVERY_ID_BUDGET,
+  CONTEXT_GRAPH_STORAGE_DISCOVERY_PAGE_SIZE,
+  CONTEXT_GRAPH_STORAGE_REFRESH_INTERVAL_MS,
+  createInMemoryContextGraphStorageDiscoveryStore,
+  type ContextGraphStorageDiscoveryStore,
+} from './context-graph-storage-discovery.js';
+export type {
+  ContextGraphListOnChainFacts,
+  ListContextGraphsRow,
+} from './context-graph-list-authority-enrichment.js';
+export {
+  describeContextGraphOnChainIdResolution,
+  parseContextGraphOnChainIdReference,
+  refusesPrivateContextGraphByOnChainId,
+  type ContextGraphIdAsGiven,
+  type ContextGraphOnChainIdLookup,
+  type ContextGraphOnChainIdReference,
+  type ContextGraphOnChainIdRefusal,
+  type ContextGraphOnChainIdResolution,
+  type ResolveContextGraphOnChainIdOptions,
+  type ResolvedContextGraphOnChainId,
+  type RetiredNumericContextGraphSubscription,
+} from './context-graph-on-chain-reference.js';
 export type {
   ConfiguredContextGraphMetadataReconciliationDiagnostic,
   ConfiguredContextGraphMetadataReconciliationResult,
@@ -207,6 +264,12 @@ export type {
   Rfc64PublicCatalogAuthorRepairStatusV1,
   Rfc64SwmCatalogProjectionSupervisorStatusV1,
 } from './dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
+export type {
+  CatalogHeadDeliveryStatusV1,
+} from './internal/catalog-head-delivery-report.js';
+export type {
+  FinalizedPrivatePlacementQueueStatusV1,
+} from './internal/catalog-placement-timing.js';
 export type {
   Rfc64CatalogShadowExecutionStatusV1,
 } from './rfc64/catalog-shadow-observability-v1.js';
@@ -311,10 +374,16 @@ export {
 } from './rootless-update-error.js';
 export type {
   ContextGraphReadAuthorityDecision,
+  ContextGraphReadAuthorityDependency,
   ContextGraphReadAuthorityOutcome,
   ContextGraphReadAuthoritySource,
+  SettledContextGraphReadAuthorityDecision,
+  UnavailableContextGraphReadAuthorityDecision,
 } from './context-graph-read-authority.js';
 export type {
+  ContextGraphAuthorityFailureSite,
+  ContextGraphAuthorityReadMode,
+  ContextGraphFinalizedAbsenceDetailCode,
   LiveOnChainAccessPolicyUnavailable,
   LiveOnChainAccessPolicyUnavailableReason,
   RegisteredContextGraphAuthority,
@@ -322,6 +391,16 @@ export type {
   RegisteredContextGraphAuthorityUnavailableReason,
 } from './registered-context-graph-authority.js';
 export type { ContextGraphRegistrationBinding } from './dkg-agent-cg-registry.js';
+export type { FinalizedContextGraphAuthoritySnapshotReadV1 } from './dkg-agent-cg-resolve.js';
+export type {
+  ContextGraphReadinessMetadataV1,
+  InspectedContextGraphReadinessV1,
+  InspectedPrivateEmptyVmReadinessV1,
+  PreparedPrivateEmptyVmReadinessV1,
+  ProvenRegisteredPrivateEmptyVmInspectionV1,
+  SynchronousReadinessCommitResult,
+} from './dkg-agent-registered-private-empty-vm.js';
+export { isRegisteredPrivateEmptyVmReadinessCandidateV1 } from './dkg-agent-registered-private-empty-vm.js';
 export {
   ContextGraphNotFoundError,
   InvalidContentError,
@@ -464,6 +543,8 @@ export {
 // registry-scale per-peer fan-out and must be bounded by the SAME knob, without
 // deep-importing the compiled `dist/` module.
 export { mapWithConcurrency } from './map-with-concurrency.js';
+// Deprecated compatibility codecs for third-party subscription-store adapters.
+// The recovery runtime does not import this historical persistence surface.
 export {
   createVmReconcilePeerTopology,
   createVmReconcileCleanMissPeerIds,

@@ -1,5 +1,14 @@
 import { describe, it, expect } from 'vitest';
-import { isPublicLikeAddress, isLocalOrInternalHostname } from '../src/node.js';
+import {
+  isLocalOrInternalHostname,
+  isPublicLikeAddress,
+} from '../src/node.js';
+import {
+  isIpLoopbackAddress,
+  isLocalhostAddress,
+  isLoopbackAddress,
+  isUnspecifiedAddress,
+} from '../src/network/address-policy.js';
 
 // Twin of `packages/node-ui/test/share-project-modal.test.ts`. The two
 // classifiers (`isPublicLikeAddress` here and `isMultiaddrRemotelyDialable`
@@ -94,5 +103,22 @@ describe('isLocalOrInternalHostname', () => {
   it('treats public FQDNs as non-local', () => {
     expect(isLocalOrInternalHostname('relay.origintrail.network')).toBe(false);
     expect(isLocalOrInternalHostname('a.b.c.example.com')).toBe(false);
+  });
+});
+
+describe('shared address-scope predicates', () => {
+  it('classifies IP and DNS loopback without treating local DNS as direct IP evidence', () => {
+    expect(isIpLoopbackAddress('/ip4/127.0.0.1/tcp/9090')).toBe(true);
+    expect(isIpLoopbackAddress('/ip6/0:0:0:0:0:0:0:1/tcp/9090')).toBe(true);
+    expect(isLocalhostAddress('/dns4/node.localhost/tcp/9090')).toBe(true);
+    expect(isIpLoopbackAddress('/dns4/node.localhost/tcp/9090')).toBe(false);
+    expect(isLoopbackAddress('/dns4/node.localhost/tcp/9090')).toBe(true);
+  });
+
+  it('classifies IPv4 and IPv6 unspecified listeners', () => {
+    expect(isUnspecifiedAddress('/ip4/0.0.0.0/tcp/9090')).toBe(true);
+    expect(isUnspecifiedAddress('/ip6/::/tcp/9090')).toBe(true);
+    expect(isUnspecifiedAddress('/ip6/0:0:0:0:0:0:0:0/tcp/9090')).toBe(true);
+    expect(isUnspecifiedAddress('/ip4/192.168.1.20/tcp/9090')).toBe(false);
   });
 });

@@ -343,7 +343,7 @@ describe('publish async get benchmark', () => {
       filterResultByCase,
       publishAsyncGetPages,
       publishAsyncGetSuite,
-    } = await import('../../../esbench.config.mjs') as EsbenchConfigForTest;
+    } = await import('../../../bench/esbench.config.mjs') as EsbenchConfigForTest;
     const caseName = 'asynchronous VM publish request and finalization';
     const result = {
       [publishAsyncGetSuite]: [
@@ -384,7 +384,7 @@ describe('publish async get benchmark', () => {
   });
 
   it('keeps suite isolation for normal runs and profiles the workload in-process', async () => {
-    const { createBenchmarkToolchain } = await import('../../../esbench.config.mjs') as EsbenchConfigForTest;
+    const { createBenchmarkToolchain } = await import('../../../bench/esbench.config.mjs') as EsbenchConfigForTest;
     const {
       createProfileEnvironment,
       runCommand,
@@ -469,7 +469,7 @@ describe('publish async get benchmark', () => {
     const {
       addLinkedReportNavigation,
       publishAsyncGetPages,
-    } = await import('../../../esbench.config.mjs') as EsbenchConfigForTest;
+    } = await import('../../../bench/esbench.config.mjs') as EsbenchConfigForTest;
     const targets: Array<[string, string]> = [
       ['Combined report', 'bench/results/latest.html'],
       ...publishAsyncGetPages,
@@ -597,7 +597,7 @@ describe('publish async get benchmark', () => {
 
     expect(benchHtml).toContain('ESBENCH_HTML=1');
     expect(benchHtml).toContain('ESBENCH_PUBLISH_ASYNC_GET_HTML=1');
-    expect(benchHtml).toContain('esbench --config esbench.config.mjs');
+    expect(benchHtml).toContain('esbench --config bench/esbench.config.mjs');
     expect(benchAnalysis).toBe('node --experimental-strip-types bench/analyze-publish-async-get.ts');
     expect(benchProfile).toBe('node bench/profile-publish-async-get.mjs');
   });

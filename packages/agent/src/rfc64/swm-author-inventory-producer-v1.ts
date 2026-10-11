@@ -74,6 +74,21 @@ export interface MaintainRfc64SwmAuthorInventoryResultV1 {
   readonly snapshot: SwmAuthorInventorySnapshotV1;
 }
 
+export interface MergeRfc64SwmAuthorInventoryRowsInputV1 {
+  readonly scope: SwmAuthorInventoryScopeV1;
+  /** Non-empty canonical row set. Rows with the same UAL replace current rows. */
+  readonly rows: readonly SwmAuthorInventoryRowV1[];
+  readonly issuedAt: TimestampMsV1;
+  readonly signer: Rfc64ControlEnvelopeEip191SignerV1;
+  readonly maxCasAttempts?: number;
+}
+
+export interface MergeRfc64SwmAuthorInventoryRowsResultV1 {
+  readonly status: 'applied' | 'existing';
+  readonly attempts: number;
+  readonly snapshot: SwmAuthorInventorySnapshotV1;
+}
+
 export interface RemoveRfc64SwmAuthorInventoryInputV1 {
   readonly scope: SwmAuthorInventoryScopeV1;
   /** Exact SWM row identity that reached VM; a newer row for the UAL is preserved. */
@@ -145,6 +160,96 @@ export async function maintainRfc64SwmAuthorInventoryV1(
         snapshot: committed.snapshot,
       }),
     },
+  );
+}
+
+/**
+ * Merge a non-empty canonical row set in one signed exact-set CAS. Each retry
+ * re-reads the winning target and performs one linear merge, so concurrent
+ * target-only rows are preserved and the signer is invoked once per attempt.
+ */
+export async function mergeRfc64SwmAuthorInventoryRowsV1(
+  inventory: Pick<
+    Rfc64SwmAuthorInventoryOperationsV1,
+    'readSwmAuthorInventorySnapshotV1' | 'compareAndSwapMergeSwmAuthorInventoryV1'
+  >,
+  input: MergeRfc64SwmAuthorInventoryRowsInputV1,
+): Promise<MergeRfc64SwmAuthorInventoryRowsResultV1> {
+  const prepared = prepareMergeInput(input);
+  const inventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1(prepared.scope);
+  for (let attempt = 1; attempt <= prepared.maxCasAttempts; attempt += 1) {
+    const current = inventory.readSwmAuthorInventorySnapshotV1(
+      inventoryScopeDigest,
+      prepared.scope.authorAddress,
+    );
+    if (current !== null) await verifyCurrentHistory(current, prepared.scope);
+    let rows: readonly SwmAuthorInventoryRowV1[];
+    try {
+      rows = mergeCanonicalSwmAuthorInventoryRowsV1(
+        current?.rows ?? [],
+        prepared.rows,
+      );
+      // Revalidate cross-row uniqueness after incoming rows replace target rows.
+      rows = parseCanonicalSwmAuthorInventoryRowsV1(
+        canonicalizeSwmAuthorInventoryRowsBytesV1(rows),
+      );
+    } catch (cause) {
+      throw new Rfc64SwmAuthorInventoryProducerErrorV1(
+        'swm-inventory-producer-input',
+        'SWM inventory exact merge cannot produce a canonical row set',
+        { cause },
+      );
+    }
+    if (current !== null && swmAuthorInventoryRowsEqualV1(current.rows, rows)) {
+      return Object.freeze({
+        status: 'existing' as const,
+        attempts: attempt,
+        snapshot: current,
+      });
+    }
+    const issuedAt = clampSuccessorIssuedAtV1(prepared.issuedAt, current, rows);
+    const signedHead = await signHead({
+      scope: prepared.scope,
+      rows,
+      issuedAt,
+      previous: current?.head ?? null,
+      signer: prepared.signer,
+    });
+    try {
+      const committed = inventory.compareAndSwapMergeSwmAuthorInventoryV1({
+        snapshot: Object.freeze({ head: signedHead.head, rows }),
+        mergeRows: prepared.rows,
+        issuerSignature: signedHead.issuerSignature,
+        expectedCurrentHeadDigest:
+          (current?.head.objectDigest as Digest32V1 | undefined) ?? null,
+      });
+      return Object.freeze({
+        status: committed.status,
+        attempts: attempt,
+        snapshot: committed.snapshot,
+      });
+    } catch (cause) {
+      if (
+        cause instanceof InventoryV1CandidateError
+        && cause.code === 'swm-inventory-cas-conflict'
+        && attempt < prepared.maxCasAttempts
+      ) continue;
+      if (
+        cause instanceof InventoryV1CandidateError
+        && cause.code === 'swm-inventory-cas-conflict'
+      ) {
+        throw new Rfc64SwmAuthorInventoryProducerErrorV1(
+          'swm-inventory-producer-conflict',
+          `SWM inventory exact merge did not converge after ${attempt} CAS attempts`,
+          { cause },
+        );
+      }
+      throw cause;
+    }
+  }
+  throw new Rfc64SwmAuthorInventoryProducerErrorV1(
+    'swm-inventory-producer-conflict',
+    'SWM inventory exact-merge CAS attempt bound was exhausted',
   );
 }
 
@@ -354,6 +459,56 @@ function prepareInput(input: MaintainRfc64SwmAuthorInventoryInputV1): Readonly<{
   }
 }
 
+function prepareMergeInput(input: MergeRfc64SwmAuthorInventoryRowsInputV1): Readonly<{
+  scope: Readonly<SwmAuthorInventoryScopeV1>;
+  rows: readonly SwmAuthorInventoryRowV1[];
+  issuedAt: TimestampMsV1;
+  signer: Rfc64ControlEnvelopeEip191SignerV1;
+  maxCasAttempts: number;
+}> {
+  try {
+    assertSwmAuthorInventoryScopeV1(input.scope);
+    const scope = Object.freeze({ ...input.scope });
+    const rows = parseCanonicalSwmAuthorInventoryRowsV1(
+      canonicalizeSwmAuthorInventoryRowsBytesV1(input.rows),
+    );
+    if (rows.length === 0) throw new Error('exact merge rows must not be empty');
+    for (const row of rows) {
+      const identity = assertCanonicalDeterministicUalV1(row.kaUal);
+      if (
+        identity.agentAddress !== scope.authorAddress
+        || identity.chainId !== scope.networkId
+      ) throw new Error('merge row does not belong to the scoped network and author');
+    }
+    const signer = Object.freeze({
+      issuer: input.signer.issuer,
+      signDigest: input.signer.signDigest,
+    });
+    if (typeof signer.signDigest !== 'function' || signer.issuer !== scope.authorAddress) {
+      throw new Error('inventory signer must be the scoped author');
+    }
+    parseCanonicalDecimalU64(input.issuedAt, 'issuedAt');
+    const maxCasAttempts = input.maxCasAttempts
+      ?? RFC64_SWM_AUTHOR_INVENTORY_PRODUCER_MAX_CAS_ATTEMPTS_V1;
+    if (!Number.isSafeInteger(maxCasAttempts) || maxCasAttempts < 1 || maxCasAttempts > 16) {
+      throw new Error('maxCasAttempts must be an integer in 1..16');
+    }
+    return Object.freeze({
+      scope,
+      rows,
+      issuedAt: input.issuedAt,
+      signer,
+      maxCasAttempts,
+    });
+  } catch (cause) {
+    throw new Rfc64SwmAuthorInventoryProducerErrorV1(
+      'swm-inventory-producer-input',
+      'SWM inventory exact-merge input is not canonical or internally bound',
+      { cause },
+    );
+  }
+}
+
 function prepareRemovalInput(input: RemoveRfc64SwmAuthorInventoryInputV1): Readonly<{
   scope: Readonly<SwmAuthorInventoryScopeV1>;
   expectedRow: Readonly<Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1>;
@@ -487,4 +642,61 @@ async function signHead(input: Readonly<{
       { cause },
     );
   }
+}
+
+function mergeCanonicalSwmAuthorInventoryRowsV1(
+  current: readonly SwmAuthorInventoryRowV1[],
+  incoming: readonly SwmAuthorInventoryRowV1[],
+): readonly SwmAuthorInventoryRowV1[] {
+  const merged: SwmAuthorInventoryRowV1[] = [];
+  let currentIndex = 0;
+  let incomingIndex = 0;
+  while (currentIndex < current.length || incomingIndex < incoming.length) {
+    const currentRow = current[currentIndex];
+    const incomingRow = incoming[incomingIndex];
+    if (currentRow === undefined) {
+      merged.push(incomingRow!);
+      incomingIndex += 1;
+      continue;
+    }
+    if (incomingRow === undefined) {
+      merged.push(currentRow);
+      currentIndex += 1;
+      continue;
+    }
+    const currentIdentity = assertCanonicalDeterministicUalV1(currentRow.kaUal);
+    const incomingIdentity = assertCanonicalDeterministicUalV1(incomingRow.kaUal);
+    const order = currentIdentity.chainId === incomingIdentity.chainId
+      ? currentIdentity.agentAddress === incomingIdentity.agentAddress
+        ? BigInt(currentIdentity.kaNumber) < BigInt(incomingIdentity.kaNumber)
+          ? -1
+          : BigInt(currentIdentity.kaNumber) > BigInt(incomingIdentity.kaNumber) ? 1 : 0
+        : currentIdentity.agentAddress < incomingIdentity.agentAddress ? -1 : 1
+      : currentIdentity.chainId < incomingIdentity.chainId ? -1 : 1;
+    if (order < 0) {
+      merged.push(currentRow);
+      currentIndex += 1;
+    } else if (order > 0) {
+      merged.push(incomingRow);
+      incomingIndex += 1;
+    } else {
+      merged.push(incomingRow);
+      currentIndex += 1;
+      incomingIndex += 1;
+    }
+  }
+  return Object.freeze(merged);
+}
+
+function swmAuthorInventoryRowsEqualV1(
+  left: readonly SwmAuthorInventoryRowV1[],
+  right: readonly SwmAuthorInventoryRowV1[],
+): boolean {
+  const leftBytes = canonicalizeSwmAuthorInventoryRowsBytesV1(left);
+  const rightBytes = canonicalizeSwmAuthorInventoryRowsBytesV1(right);
+  if (leftBytes.byteLength !== rightBytes.byteLength) return false;
+  for (let index = 0; index < leftBytes.byteLength; index += 1) {
+    if (leftBytes[index] !== rightBytes[index]) return false;
+  }
+  return true;
 }

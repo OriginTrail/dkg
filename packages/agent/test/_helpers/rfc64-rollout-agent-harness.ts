@@ -101,6 +101,7 @@ export function createRfc64RolloutAgentHarness() {
       store: new OxigraphStore(persistentStorePath),
       syncSharedMemoryOnConnect: false,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
       syncOnConnectEnabled: false,
       durableSyncEnabled: false,
       agentProfileHeartbeatMs: 0,

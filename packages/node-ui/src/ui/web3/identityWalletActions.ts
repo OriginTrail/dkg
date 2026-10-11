@@ -2,10 +2,7 @@ import {
   encodePacked,
   keccak256,
   zeroAddress,
-  type Abi,
   type Address,
-  type ContractFunctionArgs,
-  type ContractFunctionName,
   type Hex,
 } from 'viem';
 import {
@@ -24,7 +21,9 @@ import {
   type BrowserWalletPublicClient,
   type BrowserWalletRuntimeContext,
   type BrowserWalletRuntimeDeps,
+  type BrowserWalletRuntimeState,
 } from './browserWalletTransaction.js';
+import { useWalletStore } from '../stores/wallet.js';
 
 export const ADMIN_KEY_PURPOSE = 1n;
 export const OPERATIONAL_KEY_PURPOSE = 2n;
@@ -41,8 +40,9 @@ const MAX_UINT72 = (1n << 72n) - 1n;
 export type IdentityWalletPublicClient = BrowserWalletPublicClient;
 export type IdentityWalletClient = BrowserWalletClient;
 
-export interface IdentityWalletActionDeps extends BrowserWalletRuntimeDeps<IdentityWalletContracts> {
-  bootstrap?: IdentityWalletContracts;
+export interface IdentityWalletActionDeps
+  extends Pick<BrowserWalletRuntimeDeps<IdentityWalletContracts>, 'bootstrap'>,
+    Partial<Omit<BrowserWalletRuntimeDeps<IdentityWalletContracts>, 'bootstrap'>> {
   onProgress?: (event: IdentityWalletProgressEvent) => void;
 }
 
@@ -79,6 +79,7 @@ export interface IdentityWalletSummary {
 }
 
 interface IdentityWalletContext extends BrowserWalletRuntimeContext<IdentityWalletContracts> {
+  runtimeDeps: BrowserWalletRuntimeDeps<IdentityWalletContracts>;
   signer: Address;
   profile: Address;
   identity: Address;
@@ -131,7 +132,6 @@ const connectionPolicy: BrowserWalletConnectionPolicy = {
   abortedError: (message) => new IdentityWalletActionError(message),
   messages: {
     disconnected: 'Connect an existing admin wallet before signing.',
-    bootstrapUnavailable: 'Wallet contract addresses are not bootstrapped yet.',
     wrongNetwork: "Switch the connected wallet to this node's network.",
     providerChanged: 'Wallet provider changed before the signature prompt. Reconnect and retry.',
     addressChanged: 'Connected wallet changed before the signature prompt. Reconnect the admin wallet.',
@@ -146,10 +146,23 @@ function loadContext(deps: IdentityWalletActionDeps): IdentityWalletContext {
       'This node does not expose identity-wallet contracts yet. Upgrade the daemon and reload the page.',
     );
   }
-  const runtime = loadBrowserWalletRuntime(deps, connectionPolicy);
+  const getWalletState = deps.getWalletState ?? (() => {
+    const { provider, address, chainId } = useWalletStore.getState();
+    return { provider, address, chainId } satisfies BrowserWalletRuntimeState;
+  });
+  const runtimeDeps: BrowserWalletRuntimeDeps<IdentityWalletContracts> = {
+    bootstrap: deps.bootstrap,
+    getWalletState,
+    ...(deps.publicClientFor ? { publicClientFor: deps.publicClientFor } : {}),
+    ...(deps.walletClientFromProvider
+      ? { walletClientFromProvider: deps.walletClientFromProvider }
+      : {}),
+  };
+  const runtime = loadBrowserWalletRuntime(runtimeDeps, connectionPolicy);
   const contracts = requiredIdentityContracts(deps.bootstrap);
   return {
     ...runtime,
+    runtimeDeps,
     signer: runtime.account,
     profile: contracts.profile,
     identity: contracts.identity,
@@ -247,26 +260,18 @@ function blockNumberOf(receipt: { blockNumber: bigint | null }): number | undefi
   return receipt.blockNumber == null ? undefined : Number(receipt.blockNumber);
 }
 
-async function write<
-  const TAbi extends Abi,
-  TFunctionName extends ContractFunctionName<TAbi, 'nonpayable' | 'payable'>,
->(
+async function write(
   ctx: IdentityWalletContext,
   deps: IdentityWalletActionDeps,
   action: IdentityWalletAction,
   address: Address,
-  request: {
-    address: Address;
-    abi: TAbi;
-    functionName: TFunctionName;
-    args: ContractFunctionArgs<TAbi, 'nonpayable' | 'payable', TFunctionName>;
-  },
+  submit: (walletClient: BrowserWalletClient) => Promise<Hex>,
 ): Promise<IdentityWalletTxResult> {
   const { hash, receipt } = await submitBrowserWalletTransaction(
     ctx,
-    deps,
+    ctx.runtimeDeps,
     connectionPolicy,
-    request,
+    submit,
     'action',
     {
       signing: () => deps.onProgress?.({ action, state: 'signing' }),
@@ -279,7 +284,7 @@ async function write<
 }
 
 /** Hardware/browser-wallet submitter for node identity key rotation. */
-export function identityWalletActionSubmitter(deps: IdentityWalletActionDeps = {}) {
+export function identityWalletActionSubmitter(deps: IdentityWalletActionDeps) {
   return {
     async addOperational(identityIdValue: string | bigint, addressValue: string): Promise<IdentityWalletTxResult> {
       const identityId = parsedIdentityId(identityIdValue);
@@ -295,12 +300,14 @@ export function identityWalletActionSubmitter(deps: IdentityWalletActionDeps = {
       ]);
       if (alreadyOperational) throw new IdentityWalletActionError(`${address} is already an operational key.`);
       if (isAdmin) throw new IdentityWalletActionError(`${address} is already an admin key and cannot also be operational.`);
-      return write(ctx, deps, 'add-operational', address, {
+      return write(ctx, deps, 'add-operational', address, walletClient => walletClient.writeContract({
+        account: ctx.account,
+        chain: ctx.chain,
         address: ctx.profile,
         abi: profileIdentityWalletAbi,
         functionName: 'addOperationalWallets',
         args: [identityId, [address]],
-      });
+      }));
     },
 
     async removeOperational(
@@ -333,12 +340,14 @@ export function identityWalletActionSubmitter(deps: IdentityWalletActionDeps = {
       if (operationalKeys.length <= 1) {
         throw new IdentityWalletActionError('The final operational key cannot be removed.');
       }
-      return write(ctx, deps, 'remove-operational', address, {
+      return write(ctx, deps, 'remove-operational', address, walletClient => walletClient.writeContract({
+        account: ctx.account,
+        chain: ctx.chain,
         address: ctx.identity,
         abi: identityWalletAbi,
         functionName: 'removeKey',
         args: [identityId, identityWalletKey(address)],
-      });
+      }));
     },
 
     async addAdmin(identityIdValue: string | bigint, addressValue: string): Promise<IdentityWalletTxResult> {
@@ -355,12 +364,14 @@ export function identityWalletActionSubmitter(deps: IdentityWalletActionDeps = {
       ]);
       if (alreadyAdmin) throw new IdentityWalletActionError(`${address} is already an admin key.`);
       if (isOperational) throw new IdentityWalletActionError(`${address} is already an operational key and cannot also be an admin.`);
-      return write(ctx, deps, 'add-admin', address, {
+      return write(ctx, deps, 'add-admin', address, walletClient => walletClient.writeContract({
+        account: ctx.account,
+        chain: ctx.chain,
         address: ctx.identity,
         abi: identityWalletAbi,
         functionName: 'addKey',
         args: [identityId, identityWalletKey(address), ADMIN_KEY_PURPOSE, ECDSA_KEY_TYPE],
-      });
+      }));
     },
 
     async removeAdmin(identityIdValue: string | bigint, addressValue: string): Promise<IdentityWalletTxResult> {
@@ -376,12 +387,14 @@ export function identityWalletActionSubmitter(deps: IdentityWalletActionDeps = {
       if (adminKeys.length <= 1) {
         throw new IdentityWalletActionError('The final admin key cannot be removed. Add its replacement first.');
       }
-      return write(ctx, deps, 'remove-admin', address, {
+      return write(ctx, deps, 'remove-admin', address, walletClient => walletClient.writeContract({
+        account: ctx.account,
+        chain: ctx.chain,
         address: ctx.identity,
         abi: identityWalletAbi,
         functionName: 'removeKey',
         args: [identityId, identityWalletKey(address)],
-      });
+      }));
     },
   };
 }

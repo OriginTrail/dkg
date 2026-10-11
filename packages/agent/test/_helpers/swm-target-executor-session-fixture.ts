@@ -1,3 +1,5 @@
+import { createListContextGraphsCacheInvalidatingStore } from '../../src/internal/context-graph-cache-invalidating-store.js';
+import type { Quad } from '@origintrail-official/dkg-storage';
 import { resolvePrivateSwmRecoveryBudgetMs } from '../../src/sync/requester/private-swm-recovery-budget.js';
 import { deleteSyncPageCheckpoint } from
   '../../src/sync/requester/page-fetch.js';
@@ -32,7 +34,7 @@ export function createSwmTargetExecutorSessionFactoryForTest(owner: {
     'invalidateListContextGraphsCache'
   ];
   contextGraphMetaProjection?: {
-    markDirtyFromQuads: SwmTargetExecutorPortsV1['markMetaProjectionDirty'];
+    markDirtyFromQuads: (quads: Quad[]) => void;
   };
   syncCheckpoints: CheckpointStore;
   workspaceOwnedEntities: Map<
@@ -47,9 +49,13 @@ export function createSwmTargetExecutorSessionFactoryForTest(owner: {
     debug?: SwmTargetExecutorPortsV1['logDebug'];
   };
 }): () => SwmTargetExecutorV1 {
+  // Historical fixtures expose a raw store plus a projection callback. Normalize them once.
+  const store = createListContextGraphsCacheInvalidatingStore(owner.store, () => {}, (quads) => {
+    if (quads?.length) owner.contextGraphMetaProjection?.markDirtyFromQuads([...quads]);
+  });
   const factory = new SwmTargetExecutorSessionFactoryV1({
       privateRecoveryBudgetMs: resolvePrivateSwmRecoveryBudgetMs(),
-    store: owner.store,
+    store,
     writeLocks: owner.writeLocks ?? new Map(),
     listSubGraphs: owner.listSubGraphs,
     createContextGraphSyncDeadline: owner.createContextGraphSyncDeadline,
@@ -60,14 +66,10 @@ export function createSwmTargetExecutorSessionFactoryForTest(owner: {
     publicSnapshotStore: owner.publicSnapshotStore,
     recordDrops: owner.oversizeTombstoneLog?.record ?? (() => {}),
     invalidateListContextGraphsCache: owner.invalidateListContextGraphsCache ?? (() => {}),
-    markMetaProjectionDirty: owner.contextGraphMetaProjection?.markDirtyFromQuads
-      ?? (() => {}),
     recoveryMutation: createSwmRecoveryMutationRuntimeV1({
-      store: owner.store,
+      store,
       recordDrops: owner.oversizeTombstoneLog?.record ?? (() => {}),
       invalidateListContextGraphsCache: owner.invalidateListContextGraphsCache ?? (() => {}),
-      markMetaProjectionDirty: owner.contextGraphMetaProjection?.markDirtyFromQuads
-        ?? (() => {}),
     }),
     setCheckpoint: (key, offset) => owner.syncCheckpoints.set(key, offset),
     deleteCheckpoint: (key) => owner.syncCheckpoints.delete(key),

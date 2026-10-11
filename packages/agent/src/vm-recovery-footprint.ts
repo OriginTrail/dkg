@@ -1,5 +1,6 @@
 import type { KnowledgeAssetUpdateContext } from '@origintrail-official/dkg-chain';
 
+import { mapWithConcurrency } from './map-with-concurrency.js';
 import type { VmRecoveryChainFootprint } from './vm-recovery-types.js';
 
 export interface VmRecoveryFootprintBridgeTarget {
@@ -20,6 +21,24 @@ export interface VmRecoveryFootprintSizingReader {
   ): Promise<VmRecoveryUpdateContext>;
 }
 
+/**
+ * Advisory sizing hints prepared before this pass began. A hint is single-use
+ * planning evidence of exactly the same kind a live read produces
+ * (`latest-bounded`); it is never authority to materialize anything.
+ */
+export interface VmRecoveryPreparedHints {
+  /**
+   * The prepared hint for `kaId`, or `undefined` when none is usable (absent,
+   * stale, already taken, failed or not ready within `maxWaitMs`). The caller
+   * then falls back to its own live read, so a miss is never evidence of
+   * absence or permission to skip a candidate.
+   */
+  take(
+    kaId: string,
+    options: { readonly maxWaitMs: number; readonly signal?: AbortSignal },
+  ): Promise<VmRecoveryChainFootprint | undefined>;
+}
+
 /** Public authority is resolved by the host; this module owns sizing only. */
 export interface VmRecoveryFootprintBridge {
   readonly resolvePublicAccess: (
@@ -27,6 +46,8 @@ export interface VmRecoveryFootprintBridge {
     options?: { signal?: AbortSignal },
   ) => Promise<boolean>;
   readonly sizing: VmRecoveryFootprintSizingReader | null;
+  /** Optional prepared hints consumed before any live read; absent keeps today's behavior. */
+  readonly prepared?: VmRecoveryPreparedHints | null;
 }
 
 export interface VmRecoveryFootprintBridgeOptions {
@@ -34,10 +55,38 @@ export interface VmRecoveryFootprintBridgeOptions {
   sizingReadTimeoutMs?: number;
   signal?: AbortSignal;
   isCurrent: () => boolean;
+  /** Observation only: receives the outcome counts of one enrichment call. */
+  observe?: (observation: VmRecoveryFootprintObservation) => void;
+  /**
+   * How many live sizing reads may be in flight at once. Reads start in
+   * candidate order and each read's deadline starts when that read starts, so
+   * a later candidate never spends its budget queueing behind earlier ones in
+   * the local RPC governor. Omitted keeps every read concurrent from the start.
+   */
+  readConcurrency?: number;
 }
 
-const VM_RECOVERY_BRIDGE_ABORTED = Symbol('vm-recovery-bridge-aborted');
-const VM_RECOVERY_BRIDGE_TIMED_OUT = Symbol('vm-recovery-bridge-timed-out');
+/** What one enrichment call did; never consulted by any recovery decision. */
+export interface VmRecoveryFootprintObservation {
+  /** Entries whose footprint was unknown and therefore needed a sizing read. */
+  readonly requested: number;
+  /** Reads that produced a valid public footprint. */
+  readonly resolved: number;
+  /** Candidates served by a prepared hint instead of a live read. */
+  readonly prepared: number;
+  /** Reads that outlived the sizing deadline (including governor queue wait). */
+  readonly timedOut: number;
+  /** Reads dropped because the operation was aborted or no longer current. */
+  readonly aborted: number;
+  /** Reads that returned a malformed, zero or unsafe tuple. */
+  readonly invalid: number;
+  /** Reads that rejected. */
+  readonly failed: number;
+  readonly elapsedMs: number;
+}
+
+export const VM_RECOVERY_BRIDGE_ABORTED = Symbol('vm-recovery-bridge-aborted');
+export const VM_RECOVERY_BRIDGE_TIMED_OUT = Symbol('vm-recovery-bridge-timed-out');
 export const VM_RECOVERY_FOOTPRINT_READ_TIMEOUT_MS = 2_500;
 
 function vmRecoveryBridgeSignalAborted(signal: AbortSignal | undefined): boolean {
@@ -62,7 +111,7 @@ async function raceVmRecoveryBridgeAbort<T>(
   }
 }
 
-async function readVmRecoveryFootprintWithDeadline<T>(
+export async function readVmRecoveryFootprintWithDeadline<T>(
   start: (signal: AbortSignal) => Promise<T>,
   callerSignal: AbortSignal | undefined,
   timeoutMs: number,
@@ -152,6 +201,39 @@ async function resolveVmRecoveryPublicAuthority(
 }
 
 /**
+ * The one rule that turns an observed update context into a planning hint.
+ * Zero, negative or unsafe values are not hints: they stay unknown/singleton.
+ */
+export function vmRecoveryFootprintFromUpdateContext(
+  context: VmRecoveryUpdateContext,
+): VmRecoveryChainFootprint | undefined {
+  if (
+    context.merkleRootsCount <= 0n
+    || context.byteSize <= 0n
+    || !Number.isSafeInteger(context.merkleLeafCount)
+    || context.merkleLeafCount <= 0
+  ) return undefined;
+  return {
+    kind: 'public-v10',
+    byteSize: context.byteSize,
+    merkleLeafCount: BigInt(context.merkleLeafCount),
+    assertionVersion: context.merkleRootsCount.toString(),
+    anchor: { kind: 'latest-bounded' },
+  };
+}
+
+function isUsablePreparedFootprint(
+  footprint: VmRecoveryChainFootprint | undefined,
+): footprint is Extract<VmRecoveryChainFootprint, { kind: 'public-v10' }> {
+  return footprint?.kind === 'public-v10'
+    && typeof footprint.byteSize === 'bigint'
+    && footprint.byteSize > 0n
+    && typeof footprint.merkleLeafCount === 'bigint'
+    && footprint.merkleLeafCount > 0n
+    && footprint.anchor.kind === 'latest-bounded';
+}
+
+/**
  * Enrich a bounded prefix with public-chain sizing hints. Latest-state reads
  * influence soft packing only; unavailable, stale, private, aborted, or
  * malformed evidence remains the conservative unknown/singleton footprint.
@@ -188,40 +270,77 @@ export async function enrichVmRecoveryFootprints<T extends VmRecoveryFootprintBr
   ) return original;
   const sizing = bridge.sizing;
 
-  const observed = await Promise.all(unknownEntries.map(async ({ target, index }) => {
-    if (options.signal?.aborted || !options.isCurrent()) return { index };
+  const counts = { resolved: 0, prepared: 0, timedOut: 0, aborted: 0, invalid: 0, failed: 0 };
+  const startedAt = performance.now();
+  const configuredConcurrency = options.readConcurrency;
+  const readConcurrency = configuredConcurrency !== undefined
+    && Number.isSafeInteger(configuredConcurrency)
+    && configuredConcurrency > 0
+    ? configuredConcurrency
+    : unknownEntries.length;
+  const sizeEntry = async (
+    { target, index }: { target: T; index: number },
+  ): Promise<{ index: number; footprint?: VmRecoveryChainFootprint }> => {
+    if (options.signal?.aborted || !options.isCurrent()) {
+      counts.aborted += 1;
+      return { index };
+    }
     try {
+      if (bridge.prepared) {
+        // A prepared hint is the same advisory evidence a live read yields. Any
+        // problem with it (absent, stale, failed, late, malformed) is a plain
+        // miss: the live read below runs exactly as it would without hints.
+        const hinted = await bridge.prepared
+          .take(target.kaId, { maxWaitMs: sizingReadTimeoutMs, signal: options.signal })
+          .catch(() => undefined);
+        if (options.signal?.aborted || !options.isCurrent()) {
+          counts.aborted += 1;
+          return { index };
+        }
+        if (isUsablePreparedFootprint(hinted)) {
+          counts.prepared += 1;
+          return { index, footprint: hinted };
+        }
+      }
       const observedContext = await readVmRecoveryFootprintWithDeadline(
         (readSignal) => sizing.readUpdateContext(BigInt(target.kaId), { signal: readSignal }),
         options.signal,
         sizingReadTimeoutMs,
       );
-      if (
-        observedContext === VM_RECOVERY_BRIDGE_ABORTED
-        || observedContext === VM_RECOVERY_BRIDGE_TIMED_OUT
-      ) return { index };
-      if (
-        options.signal?.aborted
-        || !options.isCurrent()
-        || observedContext.merkleRootsCount <= 0n
-        || observedContext.byteSize <= 0n
-        || !Number.isSafeInteger(observedContext.merkleLeafCount)
-        || observedContext.merkleLeafCount <= 0
-      ) return { index };
-      return {
-        index,
-        footprint: {
-          kind: 'public-v10',
-          byteSize: observedContext.byteSize,
-          merkleLeafCount: BigInt(observedContext.merkleLeafCount),
-          assertionVersion: observedContext.merkleRootsCount.toString(),
-          anchor: { kind: 'latest-bounded' },
-        } satisfies VmRecoveryChainFootprint,
-      };
+      if (observedContext === VM_RECOVERY_BRIDGE_ABORTED) {
+        counts.aborted += 1;
+        return { index };
+      }
+      if (observedContext === VM_RECOVERY_BRIDGE_TIMED_OUT) {
+        counts.timedOut += 1;
+        return { index };
+      }
+      if (options.signal?.aborted || !options.isCurrent()) {
+        counts.aborted += 1;
+        return { index };
+      }
+      const footprint = vmRecoveryFootprintFromUpdateContext(observedContext);
+      if (!footprint) {
+        counts.invalid += 1;
+        return { index };
+      }
+      counts.resolved += 1;
+      return { index, footprint };
     } catch {
+      counts.failed += 1;
       return { index };
     }
-  }));
+  };
+  const observed = await mapWithConcurrency(unknownEntries, readConcurrency, sizeEntry);
+  if (options.observe) {
+    try {
+      options.observe({
+        requested: unknownEntries.length,
+        ...counts,
+        elapsedMs: performance.now() - startedAt,
+      });
+    } catch { /* observation only */ }
+  }
 
   if (options.signal?.aborted || !options.isCurrent()) return unverified;
   const enriched: VmRecoveryFootprintEnrichedTarget<T>[] = [...original];

@@ -30,6 +30,15 @@ describe('DKGAgent chain cursor wiring', () => {
       compareAndSwap: vi.fn(async () => 1),
       invalidate: vi.fn(async () => 2),
     };
+    // The node's ONE chain log. Reaching the adapter is what makes it the
+    // adapter that OWNS the tick; an adapter without it builds no tick at all.
+    const chainEventLogStore = {
+      load: vi.fn(async () => undefined),
+      commit: vi.fn(async () => 1),
+      tombstone: vi.fn(async () => 2),
+      readEvents: vi.fn(async () => []),
+      blockHashAt: vi.fn(async () => undefined),
+    };
 
     agent = await DKGAgent.create({
       name: 'RegistryCursorWiring',
@@ -40,12 +49,14 @@ describe('DKGAgent chain cursor wiring', () => {
         operationalKeys: [OPERATIONAL_KEY],
         chainId: 'evm:31337',
         receiptTimeoutMs: 1_200_000,
+        indexTickMs: 12_000,
         minPublisherNativeWei: 123n,
         minPublisherTracWei: 456n,
       },
       contextGraphRegistryScanCursorStore: registryCursorStore,
       localContextGraphAuthorityHistoryStore: authorityHistoryStore,
       localContextGraphAuthorityIndexStore: authorityIndexStore,
+      chainEventLogStore,
     });
 
     expect((agent as any).chain.contextGraphRegistryScanCursor?.input?.store).toBe(registryCursorStore);
@@ -54,6 +65,25 @@ describe('DKGAgent chain cursor wiring', () => {
     expect((agent as any).chain.minPublisherNativeWei).toBe(123n);
     expect((agent as any).chain.minPublisherTracWei).toBe(456n);
     expect((agent as any).chain.receiptTimeoutMs).toBe(1_200_000);
+    expect((agent as any).chain.contextGraphAuthorityIndex?.projectionTickMs).toBe(12_000);
+    // The adapter delegates ownership of the durable store to the extracted
+    // runtime owner. Exercise that boundary instead of asserting the removed
+    // adapter implementation field.
+    let receivedStore: unknown;
+    const runtime = {
+      binding: undefined,
+      start: vi.fn(),
+      stop: vi.fn(async () => {}),
+    };
+    const owner = (agent as any).chain.chainIndexOwner;
+    owner.start(async (store: unknown) => {
+      receivedStore = store;
+      return runtime;
+    });
+    await owner.starting;
+    expect(receivedStore).toBe(chainEventLogStore);
+    expect(runtime.start).toHaveBeenCalledOnce();
+    expect((agent as any).chain.indexTickMs).toBe(12_000);
   });
 
   it('passes the chain-event lane cursor store into the poller on start', async () => {

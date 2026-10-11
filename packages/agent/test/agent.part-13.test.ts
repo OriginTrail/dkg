@@ -302,8 +302,8 @@ decisions:
 
 
     it('matches the reference evaluator across bundled CCL cases', async () => {
-      const casesDir = fileURLToPath(new URL('../../../ccl_v0_1/tests/cases', import.meta.url));
-      const policiesDir = fileURLToPath(new URL('../../../ccl_v0_1/policies', import.meta.url));
+      const casesDir = fileURLToPath(new URL('../ccl_v0_1/tests/cases', import.meta.url));
+      const policiesDir = fileURLToPath(new URL('../ccl_v0_1/policies', import.meta.url));
       const caseFiles = (await readdir(casesDir)).filter(name => name.endsWith('.yaml')).sort();
 
       for (const caseFile of caseFiles) {

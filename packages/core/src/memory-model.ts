@@ -87,7 +87,7 @@ export const ASSERTION_STATE_TO_LAYER: ReadonlyMap<AssertionState, MemoryLayer |
 ]);
 
 export interface AssertionEvent {
-  type: AssertionState;
+  type: AssertionState | 'written' | 'updated';
   timestamp: string;
   fromLayer: string;
   toLayer: string;

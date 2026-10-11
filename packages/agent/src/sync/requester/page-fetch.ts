@@ -21,6 +21,7 @@ import { syncPlaneFor } from '../attempt-telemetry.js';
 import { appendInPlace } from '../append-in-place.js';
 import type { SyncPhase } from '../auth/request-build.js';
 import { exactAssetFilterKey } from '../exact-assets.js';
+import { decodeNegotiatedExactSyncResponse, EXACT_SYNC_GZIP_ENCODING, resolveExactSyncGzipProfile } from '../wire-compression.js';
 import {
   getSyncCheckpointKey,
   type DurableManifestDigest,
@@ -182,6 +183,8 @@ interface SyncPageResultFields {
   /** Absolute raw responder row coordinate for every retained quad. */
   quadRawOffsets?: number[];
   bytesReceived: number;
+  /** Actual inflated/plain body bytes used by cumulative admission, separate from wire telemetry. */
+  decodedBytesReceived?: number;
   /** Verified manifest coordinate used by checkpoint/materialization logic. */
   resumedFromOffset: number;
   /** Raw responder-session coordinate used on the wire for this invocation. */
@@ -238,6 +241,8 @@ export interface SyncPageSizeProfileScope {
   contextGraphId: string;
   includeSharedMemory: boolean;
   phase: SyncPhase;
+  /** Compression changes path capacity; keep its learned stalls separate. */
+  responseEncoding?: typeof EXACT_SYNC_GZIP_ENCODING;
 }
 
 const DEFAULT_SYNC_PAGE_SIZE_PROFILE_TTL_MS = 10 * 60_000;
@@ -309,6 +314,7 @@ export class SyncPageSizeProfileCache {
       scope.contextGraphId,
       scope.includeSharedMemory ? 'swm' : 'vm',
       scope.phase,
+      scope.responseEncoding ?? null,
     ]);
   }
 }
@@ -517,6 +523,8 @@ interface FetchSyncPagesParams {
   sinceBatchId?: string;
   /** Exact KAs requested by VM recovery. Undefined retains ordinary full sync. */
   assetUals?: string[];
+  /** Explicit local negotiated profile; never inferred from an unsolicited response marker. */
+  responseEncoding?: typeof EXACT_SYNC_GZIP_ENCODING;
   /** Selected-SWM-only policy for returning a validated incomplete prefix. */
   returnAcceptedPrefixOnRetryableTransportFailure?: boolean;
   /** Isolates an internal requester whose retained prefix is not shareable. */
@@ -661,6 +669,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
     buildSyncRequest,
     sinceBatchId,
     assetUals,
+    responseEncoding,
     returnAcceptedPrefixOnRetryableTransportFailure,
     maxAcceptedBytes,
     maxAcceptedQuads,
@@ -673,6 +682,13 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
     logInfo,
     logDebug,
   } = params;
+
+  const profile = resolveExactSyncGzipProfile({ responseEncoding, includeSharedMemory, phase, assetUals });
+  const usesExactGzip = profile !== undefined;
+  const admittedByteLimit = profile ? Math.min(maxAcceptedBytes ?? profile.maxInflatedBytes,
+    profile.maxInflatedBytes) : maxAcceptedBytes;
+  const admittedHeapLimit = profile ? Math.min(maxAcceptedHeapBytesEstimate ?? profile.maxHeapBytesEstimate,
+    profile.maxHeapBytesEstimate) : maxAcceptedHeapBytesEstimate;
 
   const allQuads: Quad[] = [];
   const allQuadRawOffsets: number[] = [];
@@ -776,12 +792,32 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
     supportsSessionClear: checkpointStore.clearResponderSession !== undefined,
   });
   let bytesReceived = 0;
+  let decodedBytesReceived = 0;
+  let decodedRowsReceived = 0;
+  const decodePage = async (page: { bytes: Uint8Array; body: string }) => {
+    const decoded = await decodeNegotiatedExactSyncResponse(page.bytes, { allowCompression: usesExactGzip, signal,
+      maxInflatedBytes: usesExactGzip ? Math.max(0, admittedByteLimit! - decodedBytesReceived) : undefined });
+    const nextDecodedBytes = decodedBytesReceived + decoded.bytes.byteLength;
+    if (admittedByteLimit !== undefined && nextDecodedBytes > admittedByteLimit) {
+      throw new SyncPageAccumulationLimitError('bytes', nextDecodedBytes, admittedByteLimit);
+    }
+    const nextDecodedRows = decodedRowsReceived + (decoded.rows ?? 0);
+    if (profile && nextDecodedRows > profile.maxRows) {
+      throw new SyncPageAccumulationLimitError('quads', nextDecodedRows, profile.maxRows);
+    }
+    decodedBytesReceived = nextDecodedBytes; decodedRowsReceived = nextDecodedRows;
+    // The response validator already decoded these wire bytes (GH#1665). Reuse
+    // that text unless the negotiated decode produced new bytes, which only an
+    // inflated gzip frame does.
+    return decoded.bytes === page.bytes ? page.body : decodeSyncResponse(decoded.bytes);
+  };
   let acceptedHeapBytesEstimate = 0;
   let responsePages = 0;
   let admissionOutcome: SyncAdmissionTerminalOutcome | undefined;
   let yielded = false;
-  // Start an unknown peer/path at the conservative initial page size, then
-  // grow toward the throughput ceiling only after sustained success. Reduce
+  // Ordinary unknown paths start conservatively; a bounded exact singleton
+  // starts at its negotiated ceiling. Keep previously learned stalls within
+  // that encoding profile and reduce
   // within the existing bounded retry budget if a response cannot traverse
   // the wire.
   // ProtocolRouter may surface an oversized response as a generic stream reset,
@@ -798,17 +834,18 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
   // testnet-canary+ requester uses a byte-budget ceiling here, so short≠EOF holds for meta and
   // data alike; a pre-canary requester using the 500-row cap is the only one
   // that would regress, and only on an oversized (>4 MiB) meta subject.
-  const usesByteBudgetPagination = syncPageSize > SYNC_PAGE_SIZE;
+  const usesByteBudgetPagination = usesExactGzip || syncPageSize > SYNC_PAGE_SIZE;
   const pageSizeProfileScope = {
     remotePeerId,
     contextGraphId,
     includeSharedMemory,
     phase,
+    responseEncoding: profile?.responseEncoding,
   } satisfies SyncPageSizeProfileScope;
   const adaptivePageSizer = new AdaptiveSyncPageSizer(
     syncPageSize,
     usesByteBudgetPagination,
-    pageSizeProfileCache?.preferred(pageSizeProfileScope),
+    pageSizeProfileCache?.preferred(pageSizeProfileScope) ?? (usesExactGzip ? syncPageSize : undefined),
     pageSizeProfileCache
       ? (pageSize) => pageSizeProfileCache.remember(pageSizeProfileScope, pageSize)
       : undefined,
@@ -830,51 +867,62 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
     requestOffset: number,
     selectPageSize: () => number,
     onRetry: (attempt: number, delay: number, error: unknown) => void,
-  ): Promise<Uint8Array> => sendSyncRequest({
-    remotePeerId,
-    // Leave part of this round for a fresh request after a stalled attempt.
-    // Recompute after authentication on every retry; transport admission then
-    // applies the remaining monotonic private-job allowance.
-    timeoutMs: syncPageTimeoutMs,
-    attemptTimeoutMs: ({ remainingAttempts }) => Math.min(
-      syncPageTimeoutMs,
-      Math.max(1, Math.floor(Math.max(0, params.deadline - Date.now()) / remainingAttempts)),
-    ),
-    workAdmission,
-    retryAttempts: syncPageRetryAttempts,
-    signal,
-    contextGraphId,
-    offset: requestOffset,
-    protocolId: protocolSync,
-    plane: syncPlaneFor(includeSharedMemory),
-    phase,
-    requestFactory: async () => {
-      throwIfAborted(signal);
-      successfulPageSize = selectPageSize();
-      const request = await buildSyncRequest(
-        contextGraphId,
-        requestOffset,
-        successfulPageSize,
-        includeSharedMemory,
-        remotePeerId,
-        phase,
-        snapshotRef,
-        sinceBatchId,
-        syncSessionId,
-        recovery,
-        assetUals,
-      );
-      throwIfAborted(signal);
-      return request;
-    },
-    send,
-    validateResponse: (responseBytes) => {
-      if (decodeSyncResponse(responseBytes) === LEGACY_SYNC_BUSY_RESPONSE) {
-        throw makeLegacySyncBusyError(remotePeerId, contextGraphId, phase);
-      }
-    },
-    onRetry,
-  });
+  ): Promise<{ bytes: Uint8Array; body: string }> => {
+    // Validation and parsing share this one decoded body. Keep it scoped to a
+    // single page request so a rejected retry can never leak its sentinel or
+    // payload into a later accepted attempt.
+    let decodedBody: string | undefined;
+    const bytes = await sendSyncRequest({
+      remotePeerId,
+      // Leave part of this round for a fresh request after a stalled attempt.
+      // Recompute after authentication on every retry; transport admission then
+      // applies the remaining monotonic private-job allowance.
+      timeoutMs: syncPageTimeoutMs,
+      attemptTimeoutMs: ({ remainingAttempts }) => Math.min(
+        syncPageTimeoutMs,
+        Math.max(1, Math.floor(Math.max(0, params.deadline - Date.now()) / remainingAttempts)),
+      ),
+      workAdmission,
+      retryAttempts: syncPageRetryAttempts,
+      signal,
+      contextGraphId,
+      offset: requestOffset,
+      protocolId: protocolSync,
+      plane: syncPlaneFor(includeSharedMemory),
+      phase,
+      requestFactory: async () => {
+        throwIfAborted(signal);
+        successfulPageSize = selectPageSize();
+        const request = await buildSyncRequest(
+          contextGraphId,
+          requestOffset,
+          successfulPageSize,
+          includeSharedMemory,
+          remotePeerId,
+          phase,
+          snapshotRef,
+          sinceBatchId,
+          syncSessionId,
+          recovery,
+          assetUals,
+        );
+        throwIfAborted(signal);
+        return request;
+      },
+      send,
+      validateResponse: (responseBytes) => {
+        decodedBody = decodeSyncResponse(responseBytes);
+        if (decodedBody === LEGACY_SYNC_BUSY_RESPONSE) {
+          throw makeLegacySyncBusyError(remotePeerId, contextGraphId, phase);
+        }
+      },
+      onRetry,
+    });
+    if (decodedBody === undefined) {
+      throw new Error('Sync response validator did not decode the accepted page');
+    }
+    return { bytes, body: decodedBody };
+  };
 
   try {
     if (
@@ -891,7 +939,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
         syncPageSize,
         Math.max(adaptivePageSizer.current(), SYNC_PAGE_SIZE + 1),
       );
-      const primeBytes = await requestPage(
+      const primePage = await requestPage(
         0,
         () => primePageSize,
         (attempt, delay, err) => {
@@ -902,8 +950,23 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
           );
         },
       );
+      const primeBytes = primePage.bytes;
       throwIfAborted(signal);
-      const primeBody = decodeSyncResponse(primeBytes);
+      const nextBytesReceived = bytesReceived + primeBytes.byteLength;
+      if (admittedByteLimit !== undefined && nextBytesReceived > admittedByteLimit) {
+        throw toSyncPeerRespondedError(new SyncPageAccumulationLimitError(
+          'bytes', nextBytesReceived, admittedByteLimit,
+        ));
+      }
+      let primeBody: string;
+      try {
+        primeBody = await decodePage(primePage);
+      } catch (error) {
+        // The priming response crossed the wire too. A malformed compressed
+        // body or resource refusal cannot be treated as a retryable transport
+        // interruption merely because this page precedes the main parse loop.
+        throw toSyncPeerRespondedError(error);
+      }
       if (
         primeBody === syncDeniedResponse
         || (extraDeniedResponses && extraDeniedResponses.includes(primeBody))
@@ -918,14 +981,6 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
         throw new Error(
           `Durable sync session returned an empty generation-prime page for nonzero offset ${resumedFromOffset}`,
         );
-      }
-      const nextBytesReceived = bytesReceived + primeBytes.byteLength;
-      if (maxAcceptedBytes !== undefined && nextBytesReceived > maxAcceptedBytes) {
-        throw toSyncPeerRespondedError(new SyncPageAccumulationLimitError(
-          'bytes',
-          nextBytesReceived,
-          maxAcceptedBytes,
-        ));
       }
       bytesReceived = nextBytesReceived;
       responsePages += 1;
@@ -946,7 +1001,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
       // The shared request helper rebuilds auth material on every attempt and
       // is also used by generation priming, so both modes keep identical
       // transport/replay semantics.
-      const responseBytes = await requestPage(
+      const responsePage = await requestPage(
         curOffset,
         () => adaptivePageSizer.current(),
         (attempt, delay, err) => {
@@ -957,19 +1012,19 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
           logWarn(ctx, `Sync page retry ${attempt}/${syncPageRetryAttempts} for offset ${offset} (delay ${Math.round(delay)}ms${pageSizeNote}): ${err instanceof Error ? err.message : String(err)}`);
         },
       );
+      const responseBytes = responsePage.bytes;
       const transportDurationMs = Date.now() - transportStartedAt;
       throwIfAborted(signal);
       responsePages += 1;
       phaseTelemetry.recordPage();
 
       const nextBytesReceived = bytesReceived + responseBytes.byteLength;
-      if (maxAcceptedBytes !== undefined && nextBytesReceived > maxAcceptedBytes) {
-        const error = new SyncPageAccumulationLimitError(
-          'bytes',
-          nextBytesReceived,
-          maxAcceptedBytes,
-        );
-        throw toSyncPeerRespondedError(error);
+      // Bound physical traffic independently of inflation. Gzip permits zero
+      // padding, so a tiny decoded page can still occupy a full wire frame.
+      if (admittedByteLimit !== undefined && nextBytesReceived > admittedByteLimit) {
+        throw toSyncPeerRespondedError(new SyncPageAccumulationLimitError(
+          'bytes', nextBytesReceived, admittedByteLimit,
+        ));
       }
 
       let parsed: { quads: Quad[]; totalQuads: number; sourceIndexes?: number[] };
@@ -977,7 +1032,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
       let parseDurationMs = 0;
       try {
         const decodeStartedAt = Date.now();
-        const nquadsText = decodeSyncResponse(responseBytes);
+        const nquadsText = await decodePage(responsePage);
         decodeDurationMs = Date.now() - decodeStartedAt;
         bytesReceived = nextBytesReceived;
         if (
@@ -1010,13 +1065,13 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
         const nextAcceptedHeapBytesEstimate =
           acceptedHeapBytesEstimate + parsedHeapBytesEstimate;
         if (
-          maxAcceptedHeapBytesEstimate !== undefined
-          && nextAcceptedHeapBytesEstimate > maxAcceptedHeapBytesEstimate
+          admittedHeapLimit !== undefined
+          && nextAcceptedHeapBytesEstimate > admittedHeapLimit
         ) {
           throw new SyncPageAccumulationLimitError(
             'heap-bytes',
             nextAcceptedHeapBytesEstimate,
-            maxAcceptedHeapBytesEstimate,
+            admittedHeapLimit,
           );
         }
         acceptedHeapBytesEstimate = nextAcceptedHeapBytesEstimate;
@@ -1217,6 +1272,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
           ? { quadRawOffsets: allQuadRawOffsets }
           : {}),
         bytesReceived,
+        decodedBytesReceived,
         resumedFromOffset,
         rawResumedFromOffset,
         responderSessionStartedFresh,
@@ -1257,6 +1313,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
           ? { quadRawOffsets: allQuadRawOffsets }
           : {}),
         bytesReceived,
+        decodedBytesReceived,
         resumedFromOffset,
         rawResumedFromOffset,
         responderSessionStartedFresh,
@@ -1341,6 +1398,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
       ? { quadRawOffsets: allQuadRawOffsets }
       : {}),
     bytesReceived,
+    decodedBytesReceived,
     resumedFromOffset,
     rawResumedFromOffset,
     responderSessionStartedFresh,

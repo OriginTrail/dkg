@@ -30,7 +30,7 @@ SCRIPT_T0=$(date +%s)
 #   SKIP_RC9_SUBSTRATE=1  — skip SECTIONS 32-36 (rc.9 SLO + SWM substrate observability)
 #   SKIP_EDGE_RESTART=1   — skip SECTION 37 (edge restart outbox-durability, ~30-60s)
 #   RESTART_BOOT_TIMEOUT_S=60   — how long SECTION 30 / 37 waits for the node's API
-#   INVITE_DENIED_TIMEOUT_S=90  — SECTION 31 catch-up poll budget (denied/done)
+#   INVITE_DENIED_TIMEOUT_S=90  — SECTION 31 catch-up poll budget (refused/done)
 #   EDGE_OUTBOX_FLUSH_TIMEOUT_S=45  — SECTION 37 poll budget for substrate flush after recipient restart
 #   IDEMPOTENCY_QUIET_PERIOD_S=10   — SECTION 37 post-first-match window to catch late duplicates before asserting exactly-once
 #   ACK_DRAIN_TIMEOUT_S=75          — SECTION 35 poll budget for shareAckQuorum.pending to drain to ≤1.
@@ -2610,7 +2610,7 @@ section_start "SECTION 31: Curated CG — Invite & Join End-to-End (PR #448 flow
 #   - approval flips the allowlist,
 #   - the invitee then catches-up successfully and receives the
 #     `_meta` graph from the curator,
-#   - a non-allowlisted third party stays denied without a phantom
+#   - a non-allowlisted third party stays refused without a phantom
 #     CG entry.
 #
 # All those failure modes are routinely hit in real-world rollouts
@@ -2735,10 +2735,11 @@ except Exception:
       fail "N1 write returned written=$INV_WRITTEN (expected 2): ${INV_WRITE_RESP:0:200}"
     fi
 
-    # Helper: poll catch-up status until it terminates (done|denied|failed)
-    # or the timeout expires. Echoes the final status.
+    # Helper: poll catch-up status until it terminates or the timeout
+    # expires. Echoes the final status; with a 4th argument `refusal` it
+    # echoes the refusal verdict instead (see invite_refusal_verdict).
     invite_poll_catchup() {
-      local port="$1" cg_id="$2" timeout="$3"
+      local port="$1" cg_id="$2" timeout="$3" mode="${4:-status}"
       local enc t0 elapsed status last_status="" resp
       enc=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$cg_id', safe=''))")
       t0=$(date +%s)
@@ -2754,8 +2755,12 @@ except Exception:
           last_status="$status"
         fi
         case "$status" in
-          done|denied|failed)
-            echo "$status"
+          done|denied|failed|unreachable|deferred)
+            if [[ "$mode" == "refusal" ]]; then
+              invite_refusal_verdict "$resp"
+            else
+              echo "$status"
+            fi
             return
             ;;
         esac
@@ -2763,14 +2768,36 @@ except Exception:
       done
     }
 
-    echo "--- 31e: N2 subscribes BEFORE allowlisted (expect catch-up status = denied) ---"
+    # Helper: echo `refused:<status>` when an outsider's catch-up was
+    # refused: a peer denied it, or it ended `unreachable` without syncing
+    # anything. An outsider holds no `_meta` and no accepted RFC-64 policy
+    # for the CG, so it may never send a request a peer could deny.
+    # Otherwise echo the status and the synced counts.
+    invite_refusal_verdict() {
+      echo "$1" | python3 -c "
+import sys, json
+try:
+  d = json.load(sys.stdin)
+except Exception:
+  print('parse-err'); sys.exit(0)
+status = d.get('status', '')
+r = d.get('result') or {}
+data, swm = r.get('dataSynced'), r.get('sharedMemorySynced')
+if status == 'denied' or (status == 'unreachable' and data == 0 and swm == 0):
+  print(f'refused:{status}')
+else:
+  print(f'{status} (dataSynced={data}, sharedMemorySynced={swm})')
+" 2>/dev/null
+    }
+
+    echo "--- 31e: N2 subscribes BEFORE allowlisted (expect catch-up refused: denied, or unreachable with nothing synced) ---"
     INV_SUB_BODY="{\"contextGraphId\":\"$INVITE_CG_ID\"}"
     c -X POST "http://127.0.0.1:$N2_PORT/api/subscribe" -d "$INV_SUB_BODY" >/dev/null
-    INV_N2_STATUS=$(invite_poll_catchup "$N2_PORT" "$INVITE_CG_ID" "$INVITE_DENIED_TIMEOUT_S")
-    if [[ "$INV_N2_STATUS" == "denied" ]]; then
-      ok "N2 catch-up status = denied (curator correctly rejected unallowlisted subscriber)"
+    INV_N2_STATUS=$(invite_poll_catchup "$N2_PORT" "$INVITE_CG_ID" "$INVITE_DENIED_TIMEOUT_S" refusal)
+    if [[ "$INV_N2_STATUS" == refused:* ]]; then
+      ok "N2 catch-up refused (status = ${INV_N2_STATUS#refused:}, nothing synced)"
     else
-      fail "N2 catch-up status = $INV_N2_STATUS (expected denied)"
+      fail "N2 catch-up = $INV_N2_STATUS (expected denied, or unreachable with nothing synced)"
     fi
 
     echo "--- 31f: N2 has no phantom entry for the inaccessible CG ---"
@@ -2944,13 +2971,13 @@ except Exception:
       fail "N2 has no _meta triples for $INVITE_CG_ID"
     fi
 
-    echo "--- 31o: N3 (never allowlisted) tries the same CG (expect denied + no phantom) ---"
+    echo "--- 31o: N3 (never allowlisted) tries the same CG (expect refused + no phantom) ---"
     c -X POST "http://127.0.0.1:$N3_PORT/api/subscribe" -d "$INV_SUB_BODY" >/dev/null
-    INV_N3_STATUS=$(invite_poll_catchup "$N3_PORT" "$INVITE_CG_ID" "$INVITE_DENIED_TIMEOUT_S")
-    if [[ "$INV_N3_STATUS" == "denied" ]]; then
-      ok "N3 catch-up status = denied"
+    INV_N3_STATUS=$(invite_poll_catchup "$N3_PORT" "$INVITE_CG_ID" "$INVITE_DENIED_TIMEOUT_S" refusal)
+    if [[ "$INV_N3_STATUS" == refused:* ]]; then
+      ok "N3 catch-up refused (status = ${INV_N3_STATUS#refused:}, nothing synced)"
     else
-      fail "N3 catch-up status = $INV_N3_STATUS (expected denied)"
+      fail "N3 catch-up = $INV_N3_STATUS (expected denied, or unreachable with nothing synced)"
     fi
     INV_N3_LIST=$(c "http://127.0.0.1:$N3_PORT/api/context-graph/list")
     INV_N3_HAS=$(echo "$INV_N3_LIST" | python3 -c "

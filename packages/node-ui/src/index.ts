@@ -1,12 +1,5 @@
 export {
   DashboardDB,
-  SqliteMessageIdempotencyStore,
-  SqliteProtocolOutboxStore,
-  type SqliteProtocolOutboxStoreOptions,
-  SqliteSyncCheckpointStore,
-  SqliteChangelogCursorStore,
-  SqliteChangelogEraGuard,
-  SqliteKaNumberStore,
   SCHEMA_VERSION,
   // Notifications-pane redesign (V16): activity-digest primitives shared
   // with the daemon's `assertion_activity` emitters + scoped read path.
@@ -15,12 +8,26 @@ export {
   buildActivityDigestKey,
   parseActivityDigestKey,
 } from './db.js';
+// Protocol persistence lives in `@origintrail-official/dkg-node-store`. It is
+// re-exported here unchanged as a compatibility surface, so importers of this
+// package keep working (Phase 1 of the extraction moves the store classes,
+// not the SQLite file). The daemon imports them from node-store directly.
 export {
+  SqliteMessageIdempotencyStore,
+  SqliteProtocolOutboxStore,
+  type SqliteProtocolOutboxStoreOptions,
+  SqliteSyncCheckpointStore,
+  SqliteChangelogCursorStore,
+  SqliteChangelogEraGuard,
+  SqliteKaNumberStore,
   SqliteChainEventCursorStore,
   SqliteContextGraphAuthorityIndexStore,
   SqliteContextGraphAuthorityHistoryStore,
   SqliteContextGraphRegistryScanCursorStore,
-} from './chain-cursor-stores.js';
+  SqliteContextGraphStorageDiscoveryStore,
+  /** Durable side of the node's ONE chain log. Opaque: it interprets no topic. */
+  SqliteChainEventLogStore,
+} from '@origintrail-official/dkg-node-store';
 export type {
   DashboardDBOptions,
   LogVolumePruneResult,

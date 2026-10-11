@@ -101,6 +101,13 @@ export interface PromoteAttemptError {
   retryable: boolean;
   classification: PromoteFailureClassification;
   recordedAt: number;
+  /**
+   * Producer-owned publisher diagnostic code when the worker recognized one
+   * (for example `PROMOTE_POST_COMMIT_FAILURE`). Only the publisher's closed
+   * diagnostic set is ever persisted here; arbitrary upstream error codes
+   * never reach the queue row. The recovery sweep keys on it.
+   */
+  diagnosticCode?: string;
 }
 
 export interface PromoteAttemptState {
@@ -194,6 +201,31 @@ export interface PromoteRecoverySummary {
   abandoned: number;
 }
 
+/**
+ * One decision of the post-commit recovery sweep. A `failed` job whose last
+ * attempt was a publisher post-commit failure (the exact SWM replace was
+ * dispatched, but a later durable step failed) is `requeued` for the
+ * publisher's idempotent replay, which validates the committed payload and
+ * repairs the durable tail instead of re-promoting. The replay consumes the
+ * job's own retry budget; once `attempt.count` reaches `maxRetries` the job
+ * is `exhausted`: it stays `failed` with an explanatory `reason` and waits
+ * for an explicit operator `recover()`.
+ */
+export interface PromotePostCommitRecoveryEvent {
+  jobId: string;
+  action: 'requeued' | 'exhausted';
+  /** Attempts consumed so far (the attempt that recorded the failure). */
+  attempt: number;
+  maxAttempts: number;
+  /** Earliest claim time of the replay; present only when `requeued`. */
+  nextRetryAt?: number;
+}
+
+/** The exact failure transition acknowledged after the queue's write and flush. */
+export type PromoteFailureTransition =
+  | Readonly<{ state: 'failed_retrying'; jobId: string; attemptCount: number; nextRetryAt: number }>
+  | Readonly<{ state: 'failed'; jobId: string; attemptCount: number }>;
+
 export type PromoteStats = Record<PromoteJobState, number>;
 
 export interface AsyncPromoteQueue {
@@ -219,9 +251,17 @@ export interface AsyncPromoteQueue {
   heartbeat(jobId: string, claimToken: string): Promise<void>;
   recordCommitMarker(jobId: string, claimToken: string, step: PromoteCommitMarkerStep): Promise<void>;
   succeed(jobId: string, claimToken: string, result: PromoteResult): Promise<void>;
-  fail(jobId: string, claimToken: string, error: PromoteAttemptError): Promise<void>;
+  fail(jobId: string, claimToken: string, error: PromoteAttemptError): Promise<PromoteFailureTransition>;
   // Startup / lifecycle.
   recoverOnStartup(): Promise<PromoteRecoverySummary>;
+  /**
+   * Requeue terminal post-commit failures for the publisher's idempotent
+   * replay, bounded by each job's retry budget with the queue backoff. The
+   * worker runs it after `recoverOnStartup()` and then periodically; rows an
+   * operator must inspect (partial-promote ambiguity, legacy formats, missing
+   * storage lanes, cancellations) are never touched.
+   */
+  recoverPostCommitFailures(): Promise<PromotePostCommitRecoveryEvent[]>;
   pause(): Promise<void>;
   resume(): Promise<void>;
   getStats(): Promise<PromoteStats>;
@@ -265,9 +305,13 @@ export interface AsyncPromoteQueueConfig {
   /**
    * Backoff curve for `failed_retrying` jobs. Receives the next attempt
    * count (1-indexed — first retry is attempt 1) and returns ms-from-now.
-   * Default: `min(60_000 * 2^(attempt-1), 15 * 60_000)`.
+   * Default: `min(60_000 * 2^(attempt-1), 15 * 60_000)`, varied by up to +-20 %
+   * so jobs that failed together do not return together (GH#3067). A curve the
+   * caller supplies is used as given.
    */
   backoff?: (attemptCount: number) => number;
+  /** Random source of the default backoff's jitter, in [0, 1). Defaults to `Math.random`. */
+  rand?: () => number;
 }
 
 /**

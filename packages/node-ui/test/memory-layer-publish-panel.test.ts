@@ -23,10 +23,11 @@ const apiMocks = vi.hoisted(() => ({
   partialPublishWarning: vi.fn(),
 }));
 
-vi.mock('../src/ui/api.js', () => ({
+vi.mock('../src/ui/api.js', async (orig) => ({
   listAssertions: apiMocks.listAssertions,
   publishAssertionsToVm: apiMocks.publishAssertionsToVm,
   partialPublishWarning: apiMocks.partialPublishWarning,
+  outcomeUnknownPublishNote: (await orig<typeof import('../src/ui/api.js')>()).outcomeUnknownPublishNote,
   PARTIAL_PUBLISH_STATUS_SUFFIX: 'binding incomplete',
   // Other api.js members the panel/module references.
   executeQuery: vi.fn(),
@@ -217,6 +218,25 @@ describe('MemoryLayerView PublishPanel (SWM → VM)', () => {
     await act(async () => { (container.querySelector('.v10-btn-promote-all') as HTMLButtonElement).click(); });
     await flush();
     expect(container.querySelector('[data-testid="pca-discount-badge"]')).toBeNull();
+    await unmount();
+  });
+
+  it('titles an all-unknown batch as an unknown outcome, not as NOT published', async () => {
+    apiMocks.publishAssertionsToVm.mockResolvedValue({
+      published: 0, total: 1, partial: 0, failures: [],
+      outcomeUnknown: [{ name: 'beta', error: 'Publishing "beta" got no response within 5 minutes.' }],
+      sample: null,
+    });
+    const { container, unmount } = await render(
+      React.createElement(PublishPanel, { contextGraphId: 'cg', onPublished: () => {} }),
+    );
+    await flush();
+    await act(async () => { (container.querySelector('.v10-btn-promote-all') as HTMLButtonElement).click(); });
+    await flush();
+
+    expect(container.querySelector('.v10-publish-result-title')?.textContent).toBe('Publish outcome unknown');
+    expect(container.textContent).toContain('1 knowledge asset: publish outcome unknown');
+    expect(container.textContent).not.toContain('could not be published');
     await unmount();
   });
 

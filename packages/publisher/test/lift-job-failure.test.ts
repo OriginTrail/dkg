@@ -139,6 +139,27 @@ describe('LiftJob failure classification', () => {
     expect(failure.resolution).toBe('check_chain_then_finalize_or_reset');
   });
 
+  it('persists a host-only message for every failure code and leaves URL-free text alone', () => {
+    const urlText = 'request failed (https://rpc.example/v2/SECRET-KEY?apikey=K2), retry https://rpc.example:8545/K3: boom';
+    const failure = createLiftJobFailureMetadata({
+      failedFromState: 'validated',
+      code: 'workspace_unavailable',
+      message: urlText,
+      errorPayloadRef: 'urn:error:workspace-unavailable',
+    });
+    expect(failure.message).toBe('request failed (rpc.example), retry rpc.example:8545: boom');
+    expect(failure.code).toBe('workspace_unavailable');
+    expect(failure.retryable).toBe(true);
+
+    const plain = createLiftJobFailureMetadata({
+      failedFromState: 'broadcast',
+      code: 'tx_reverted',
+      message: 'execution reverted: did:dkg:base:84532/0xabc',
+      errorPayloadRef: 'urn:error:tx-reverted',
+    });
+    expect(plain.message).toBe('execution reverted: did:dkg:base:84532/0xabc');
+  });
+
   it('rejects timeout failures without timeout metadata', () => {
     expect(() =>
       createLiftJobFailureMetadata({
@@ -195,7 +216,7 @@ describe('LiftJob failure classification', () => {
     workspace_slice_not_found: { autoRetry: false, provenIneffective: false },
     publish_intent_stale: { autoRetry: false, provenIneffective: false },
     canonicalization_failed: { autoRetry: false, provenIneffective: false },
-    authority_unavailable: { autoRetry: false, provenIneffective: false },
+    authority_unavailable: { autoRetry: true, provenIneffective: false },
     authority_forbidden: { autoRetry: false, provenIneffective: false },
     validation_timeout: { autoRetry: false, provenIneffective: false },
     wallet_claim_timeout: { autoRetry: false, provenIneffective: false },

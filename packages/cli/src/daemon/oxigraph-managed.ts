@@ -31,9 +31,11 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   OXIGRAPH_VERSION,
+  oxigraphBinaryLocations,
   resolveOxigraphBinary,
   type OxigraphBinaryIo,
 } from './oxigraph-binary.js';
+import { createOxigraphStoreOwnership } from './oxigraph-store-ownership.js';
 import {
   startOxigraphServer,
   type OxigraphServerHandle,
@@ -400,9 +402,18 @@ export async function startManagedOxigraph(
   );
   if (plan === null) return null;
 
+  // What the orphan reclaim recognises as this node's Oxigraph: an orphan
+  // from an earlier release may run another binary this node could resolve.
+  const binaries = await oxigraphBinaryLocations(binary, {
+    cacheDir,
+    platform: opts.platform,
+    io: opts.binaryIo,
+  });
+
   const handle = await startOxigraphServer({
     binaryPath: binary.path,
     location: plan.location,
+    storeOwnership: (input) => createOxigraphStoreOwnership({ ...input, binaries }),
     port: plan.port,
     log,
     readyTimeoutMs: opts.readyTimeoutMs ?? plan.readyTimeoutMs,

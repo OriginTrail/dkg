@@ -22,7 +22,12 @@ import {
   type ChallengePinnedExactAssetSelection,
   type UalOnlyExactAssetSelection,
 } from '../src/sync/exact-assets.js';
+import { exactAssetFetchSessionPolicy } from '../src/sync/requester/exact-durable-fetch.js';
+import { normalizeDurableSyncContext, normalizeExactAssetFetchPolicy } from '../src/sync/requester/durable-sync-compat.js';
+import { createResponderPageOnlyExactGraphPlanMemo } from '../src/sync/responder/graph-plan.js';
+import { createSyncResponderSnapshotBudget } from '../src/sync/responder/snapshot-budget.js';
 import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
+import { SyncTargetSupersededError } from '../src/sync/error-tags.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { DurableBatchVerificationMode } from '../src/sync-verify-worker.js';
@@ -473,6 +478,221 @@ describe('exact-asset rolling-upgrade filter', () => {
     expect(authenticateChallengePinnedAsset).toHaveBeenCalledTimes(6);
     expect(storeGraphScopedAsset).not.toHaveBeenCalled();
     expect(detailed.result.insertedTriples).toBe(0);
+  });
+
+  describe('a Context Graph id superseded mid-sync (Base #34 canary)', () => {
+    // A name-hash id this node adopted under its cleartext id while the sync
+    // for it was in flight. The error starts where production raises it: the
+    // identity proof inside asset authentication.
+    const retired = `0x${'b9'.repeat(32)}`;
+    const cleartext = 'acme-fun-facts';
+    const assetUal = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/9';
+    const stoppedLine = `Sync for context graph "${retired}" from peerR stopped: `
+      + `Context Graph ${retired} was superseded by cleartext adoption of "${cleartext}"`;
+
+    function retiredAssetContext(options: {
+      contextGraphIds?: string[];
+      storeGraphScopedAsset?: () => Promise<never>;
+    } = {}) {
+      const graph = knowledgeAssetLayerGraphUri(
+        retired,
+        MemoryLayer.VerifiableMemory,
+        createGraphKnowledgeAssetScope(assetUal, '1'),
+      );
+      const data = [{ subject: 'urn:fact', predicate: 'urn:value', object: '"42"', graph }] as Quad[];
+      const meta = generateGraphKnowledgeAssetMetadata({
+        ual: assetUal,
+        contextGraphId: retired,
+        merkleRoot: new Uint8Array(32).fill(0x44),
+        publisherPeerId: 'peer',
+        accessPolicy: 'public',
+        timestamp: new Date(0),
+        assertionVersion: '1',
+        publicTripleCount: 1,
+        privateTripleCount: 0,
+        assertionGraph: graph,
+      }, { status: 'tentative' });
+      const harness = makeContext({
+        contextGraphIds: options.contextGraphIds ?? [retired],
+        pageQuads: { data, meta },
+        processResult: { verifiedData: data, verifiedMeta: meta, verifiedGraphScopedDataGraphs: [graph] },
+        storeGraphScopedAsset: options.storeGraphScopedAsset,
+      });
+      const warnings: string[] = [];
+      const debugs: string[] = [];
+      harness.context.logWarn = (_ctx, message) => { warnings.push(message); };
+      harness.context.logDebug = (_ctx, message) => { debugs.push(message); };
+      return { ...harness, warnings, debugs };
+    }
+
+    it('stops the durable store quietly when authentication finds the id superseded', async () => {
+      const storeGraphScopedAsset = vi.fn(async () => {
+        throw new SyncTargetSupersededError(retired, cleartext);
+      });
+      const { context, warnings, debugs } = retiredAssetContext({ storeGraphScopedAsset });
+
+      const summary = await runDurableSync(context);
+
+      expect(storeGraphScopedAsset).toHaveBeenCalledTimes(1);
+      expect(warnings.filter((message) => message.includes(retired))).toEqual([]);
+      expect(debugs).toContain(stoppedLine);
+      expect(summary.backoffWorthyFailures).toBe(0);
+      expect(summary.failedPeers).toBe(0);
+      expect(summary.insertedTriples).toBe(0);
+    });
+
+    it('stops a challenge-pinned exact fetch quietly when authentication finds the id superseded', async () => {
+      const authenticate = vi.fn(async () => {
+        throw new SyncTargetSupersededError(retired, cleartext);
+      });
+      const { context, warnings, debugs } = retiredAssetContext();
+      const selection = createChallengePinnedExactAssetSelection([
+        { assetUal, merkleRootHex: '44'.repeat(32), merkleLeafCount: 1n },
+      ]);
+
+      const result = await runChallengeExactAssetFetch(challengeContext(context, selection, authenticate));
+
+      expect(authenticate).toHaveBeenCalledTimes(1);
+      expect(result.authenticatedAssets).toEqual([]);
+      expect(warnings.filter((message) => message.includes(retired))).toEqual([]);
+      expect(debugs).toContain(stoppedLine);
+      expect(result.result.backoffWorthyFailures).toBe(0);
+    });
+
+    it('moves on to the next graph after a superseded one', async () => {
+      const { context, calls, warnings, debugs } = retiredAssetContext({ contextGraphIds: [retired, 'mfacts'] });
+      const fetchPage = context.fetchSyncPages;
+      context.fetchSyncPages = async (request) => {
+        if (request.contextGraphId === retired) throw new SyncTargetSupersededError(retired, cleartext);
+        return fetchPage(request);
+      };
+
+      const summary = await runDurableSync(context);
+
+      expect(warnings.filter((message) => message.includes(retired))).toEqual([]);
+      expect(debugs).toContain(stoppedLine);
+      expect(calls.some(({ contextGraphId }) => contextGraphId === 'mfacts')).toBe(true);
+      expect(summary.backoffWorthyFailures).toBe(0);
+    });
+  });
+
+  it.each(['ordinary', 'vm-update-refresh'] as const)('lets the %s exact policy own both page session choices', async (purpose) => {
+    const selection = createUalOnlyExactAssetSelection(['did:dkg:base:84532/0x0000000000000000000000000000000000000001/7']);
+    const policy = purpose === 'vm-update-refresh'
+      ? exactAssetFetchSessionPolicy(selection, purpose) : exactAssetFetchSessionPolicy(selection);
+    const { calls, context } = makeContext({ contextGraphIds: [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY], pageQuads: { data: [], meta: [] } });
+    await runDurableSync({ ...context, exactAssetFetchPolicyFor: () => policy });
+    expect(calls.map(({ phase, assetUals, forceFreshSession }) => ({ phase, assetUals, forceFreshSession })))
+      .toEqual([
+        { phase: 'meta', assetUals: [...selection.assetUals], forceFreshSession: purpose === 'vm-update-refresh' },
+        { phase: 'data', assetUals: [...selection.assetUals], forceFreshSession: purpose === 'vm-update-refresh' },
+      ]);
+    expect(policy.allowDurableCheckpoints).toBe(true);
+  });
+
+  it('refuses challenge pins passed through the untyped refresh factory boundary', () => {
+    const pinned = createChallengePinnedExactAssetSelection([{ assetUal: 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7', merkleRootHex: '1'.repeat(64), merkleLeafCount: 1n }]);
+    expect(() => Reflect.apply(exactAssetFetchSessionPolicy, undefined, [pinned, 'vm-update-refresh']))
+      .toThrow('VM update refresh requires a UAL-only exact selection');
+  });
+
+  it('refreshes actual retained META/DATA responder plans through the modern callback', async () => {
+    const memo = createResponderPageOnlyExactGraphPlanMemo(10_000, 4, createSyncResponderSnapshotBudget({
+      maxRows: 16, maxBytesEstimate: 2 * 1024 * 1024, maxSnapshotRows: 16, maxSnapshotBytesEstimate: 1024 * 1024,
+    }));
+    const plan = (graph: string) => ({ entries: [{ graph, rowCount: 1 }], totalRows: 1,
+      pagedGraphs: new Set([graph]), cursors: new Map([[0, null]]) });
+    for (const phase of ['meta', 'data']) await memo.get(phase, async () => plan(`urn:older:${phase}`));
+    const observed: string[] = [];
+    const selection = createUalOnlyExactAssetSelection(['did:dkg:base:84532/0x0000000000000000000000000000000000000001/7']);
+    const { context } = makeContext({ contextGraphIds: [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY], pageQuads: { data: [], meta: [] } });
+    const fetch = context.fetchSyncPages;
+    context.fetchSyncPages = async (request) => {
+      const cached = await memo.get(request.phase, async () => plan(`urn:updated:${request.phase}`), { refresh: request.forceFreshSession === true });
+      observed.push(cached!.entries[0]!.graph);
+      return fetch(request);
+    };
+    await runDurableSync({ ...context, exactAssetFetchPolicyFor: () => exactAssetFetchSessionPolicy(selection) });
+    expect(observed).toEqual(['urn:older:meta', 'urn:older:data']);
+    observed.length = 0;
+    await runDurableSync({ ...context, exactAssetFetchPolicyFor: () => exactAssetFetchSessionPolicy(selection, 'vm-update-refresh') });
+    expect(observed).toEqual(['urn:updated:meta', 'urn:updated:data']);
+  });
+
+  it.each(['explicit-policy', 'deprecated-option'] as const)('refuses %s refresh on positional callbacks before reading cached older META/DATA', async (source) => {
+    const memo = createResponderPageOnlyExactGraphPlanMemo(10_000, 4, createSyncResponderSnapshotBudget({
+      maxRows: 16, maxBytesEstimate: 2 * 1024 * 1024, maxSnapshotRows: 16, maxSnapshotBytesEstimate: 1024 * 1024,
+    }));
+    const plan = (graph: string) => ({ entries: [{ graph, rowCount: 1 }], totalRows: 1,
+      pagedGraphs: new Set([graph]), cursors: new Map([[0, null]]) });
+    for (const phase of ['meta', 'data']) await memo.get(phase, async () => plan(`urn:older:${phase}`));
+    const selection = createUalOnlyExactAssetSelection(['did:dkg:base:84532/0x0000000000000000000000000000000000000001/7']);
+    const { context, insertedBatches } = makeContext({ contextGraphIds: [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY], pageQuads: { data: [], meta: [] } });
+    const { durableSyncBudget: _budget, fetchSyncPages: fetch, storeInsert, ...shared } = context;
+    const warnings: string[] = [];
+    const legacyFetch = vi.fn(async (...args: unknown[]) => {
+      const phase = args[4] as 'meta' | 'data';
+      await memo.get(phase, async () => plan(`urn:updated:${phase}`));
+      return fetch({ ctx: context.ctx, remotePeerId: context.remotePeerId, contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+        phase, graphUri: args[5] as string, fetchContext: { deadline: args[6] as number } });
+    });
+    const legacy = { ...shared, createContextGraphSyncDeadline: () => Date.now() + 10_000,
+      fetchSyncPages: legacyFetch, storeInsert: (quads: Quad[]) => storeInsert({ quads }),
+      exactAssetFetchPolicyFor: () => source === 'explicit-policy'
+        ? exactAssetFetchSessionPolicy(selection, 'vm-update-refresh')
+        : normalizeExactAssetFetchPolicy(undefined, () => selection, true)!,
+      logWarn: (_ctx: unknown, message: string) => warnings.push(message),
+    };
+    const result = await Reflect.apply(runDurableSync, undefined, [legacy]);
+    expect(result.failedPhases).toBe(1);
+    expect(warnings).toContainEqual(expect.stringContaining('VM update refresh requires a modern fetchSyncPages request callback'));
+    expect(legacyFetch).not.toHaveBeenCalled();
+    expect(insertedBatches).toEqual([]);
+    for (const phase of ['meta', 'data']) {
+      const cached = await memo.get(phase, async () => plan(`urn:unexpected:${phase}`));
+      expect(cached!.entries[0]!.graph).toBe(`urn:older:${phase}`);
+    }
+  });
+
+  it.each(['legacy-selection', 'bound-policy'] as const)('normalizes %s lazily before both ordinary page fetches', async (source) => {
+    const selection = createUalOnlyExactAssetSelection(['did:dkg:base:84532/0x0000000000000000000000000000000000000001/7']);
+    const legacy = vi.fn(() => selection);
+    const policy = vi.fn(() => exactAssetFetchSessionPolicy(selection));
+    const { calls, context } = makeContext({ contextGraphIds: [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY], pageQuads: { data: [], meta: [] } });
+    const normalized = normalizeDurableSyncContext({ ...context,
+      exactAssetSelectionFor: source === 'legacy-selection' ? legacy : undefined,
+      exactAssetFetchPolicyFor: source === 'bound-policy' ? policy : undefined,
+    });
+    expect(normalized).not.toHaveProperty('exactAssetSelectionFor');
+    expect(legacy).not.toHaveBeenCalled();
+    expect(policy).not.toHaveBeenCalled();
+    await runDurableSync(normalized);
+    expect(source === 'legacy-selection' ? legacy : policy).toHaveBeenCalledExactlyOnceWith(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    expect(calls.map(({ phase, assetUals, forceFreshSession }) => ({ phase, assetUals, forceFreshSession })))
+      .toEqual(['meta', 'data'].map((phase) => ({ phase, assetUals: [...selection.assetUals], forceFreshSession: false })));
+  });
+
+  it.each([true, false])('keeps explicit policy precedence with lazy legacy fallback (policy present: %s)', async (present) => {
+    const first = createUalOnlyExactAssetSelection(['did:dkg:base:84532/0x0000000000000000000000000000000000000001/7']);
+    const second = createUalOnlyExactAssetSelection(['did:dkg:base:84532/0x0000000000000000000000000000000000000001/8']);
+    const order: string[] = [];
+    const legacy = vi.fn(() => { order.push('legacy'); return first; });
+    const policy = vi.fn(() => { order.push('policy'); return present ? exactAssetFetchSessionPolicy(second, 'vm-update-refresh') : undefined; });
+    const { calls, context } = makeContext({ contextGraphIds: [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY], pageQuads: { data: [], meta: [] } });
+    const normalized = normalizeDurableSyncContext({ ...context, exactAssetSelectionFor: legacy, exactAssetFetchPolicyFor: policy });
+    expect(order).toEqual([]);
+    await runDurableSync(normalized);
+    expect(order).toEqual(present ? ['policy'] : ['policy', 'legacy']);
+    expect(calls.map(({ assetUals, forceFreshSession }) => ({ assetUals, forceFreshSession })))
+      .toEqual(['meta', 'data'].map(() => ({ assetUals: [...(present ? second : first).assetUals], forceFreshSession: present })));
+  });
+
+  it('keeps lifecycle compatibility lazy and preserves a bound policy instead of another selection', () => {
+    const selection = createUalOnlyExactAssetSelection(['did:dkg:base:84532/0x0000000000000000000000000000000000000001/7']);
+    const policy = exactAssetFetchSessionPolicy(selection, 'vm-update-refresh');
+    const legacy = vi.fn(() => { throw new Error('legacy selection must not be read'); });
+    expect(normalizeExactAssetFetchPolicy(policy, legacy)).toBe(policy);
+    expect(legacy).not.toHaveBeenCalled();
   });
 
   it('does not thread a filter when exactAssetSelectionFor is not wired', async () => {

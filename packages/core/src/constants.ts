@@ -28,6 +28,15 @@ export const PROTOCOL_SYNC = '/dkg/10.0.2/sync';
 // and response bytes are unchanged; the distinct wire id lets upgraded peers
 // negotiate stream reuse while older peers cleanly fall back to one-shot sync.
 export const PROTOCOL_SYNC_POOLED = '/dkg/10.0.3/sync';
+/**
+ * Whether an advertised protocol list proves the peer serves sync (#2822).
+ * The pooled id is only ever registered as the overlay of the PROTOCOL_SYNC
+ * handler, so either id is proof. libp2p identifies once per connection and
+ * later records only the ids its streams negotiate, so a peer that connected
+ * before registering its sync handlers can list just the pooled id.
+ */
+export const advertisesSyncProtocol = (protocols: readonly string[]): boolean =>
+  protocols.includes(PROTOCOL_SYNC) || protocols.includes(PROTOCOL_SYNC_POOLED);
 // OT-RFC-59 changelog read-lane — a SEPARATE protocol id, not a field on
 // PROTOCOL_SYNC: the legacy sync response is bare N-Quads with no envelope, so a
 // structured (era, headSeq, nextSeq, records) head cannot ride the existing

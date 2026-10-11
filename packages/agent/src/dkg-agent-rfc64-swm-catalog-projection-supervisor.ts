@@ -6,11 +6,13 @@ import {
   assertCanonicalEvmAddress,
   assertContextGraphIdV1,
   createOperationContext,
+  type CanonicalGraphScopedAuthorSealV1,
   type ContextGraphIdV1,
   type Digest32V1,
   type EvmAddressV1,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
+import { withDefaultStoreWorkPriority } from '@origintrail-official/dkg-storage';
 
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
@@ -22,11 +24,31 @@ import { CoalescingRecurringTask } from './coalescing-recurring-task.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
   './rfc64/finalized-private-placement-repair-store-v1.js';
 import {
-  boundedRfc64SupervisorErrorV1,
-  rfc64SupervisorErrorMessageV1,
-} from './rfc64/supervisor-status-v1.js';
+  catalogRepairDiagnosticV1,
+  catalogRepairErrorSummaryV1,
+  CatalogRepairLaneInactiveErrorV1,
+  type CatalogRepairDiagnosticV1,
+} from './rfc64/catalog-repair-diagnostics-v1.js';
+import { CatalogRepairRetryV1, type CatalogRepairRevisionHintV1 } from './rfc64/catalog-repair-retry-v1.js';
+import { finalizedPrivateRepairKeyV1 } from './internal/finalized-private-placement-key.js';
+import {
+  FullCatalogParkingV1,
+  type AuthorCatalogCapacityStatusV1,
+  type FullCatalogParkingDependenciesV1,
+} from './internal/full-catalog-parking.js';
+import {
+  catalogPlacementTimingV1,
+  type CatalogPlacementAttemptV1,
+  type CatalogPlacementTimingV1,
+  type CatalogPlacementWaiterObserverV1,
+  type FinalizedPrivatePlacementQueueStatusV1,
+} from './internal/catalog-placement-timing.js';
+import { FinalizedPrivatePlacementWaitersV1 } from './internal/finalized-private-placement-waiters.js';
+import { NextTurnRecurringTaskV1 } from './internal/next-turn-recurring-task.js';
+import { retainOwedPlacementSealV1 } from './internal/owed-placement-seals.js';
 
-const MAX_CONCURRENT_REPAIRS_V1 = 4;
+// Match the default background store lane; repair fanout must not flood its queue.
+const MAX_CONCURRENT_REPAIRS_V1 = 1;
 const DEFAULT_PROJECTION_RETRY_INTERVAL_MS_V1 = 5_000;
 
 export type Rfc64PublicCatalogAuthorRepairOutcomeV1 =
@@ -45,6 +67,9 @@ export interface Rfc64PublicCatalogAuthorRepairStatusV1 {
   readonly inventoryRowCount: string | null;
   readonly lastError: string | null;
   readonly updatedAtMs: number | null;
+  readonly diagnostic: Readonly<CatalogRepairDiagnosticV1> | null;
+  readonly consecutiveFailures: number;
+  readonly nextAttemptAtMs: number | null;
 }
 
 export interface Rfc64SwmCatalogProjectionSupervisorStatusV1 {
@@ -54,6 +79,10 @@ export interface Rfc64SwmCatalogProjectionSupervisorStatusV1 {
   readonly lastPassStartedAtMs: number | null;
   readonly lastPassCompletedAtMs: number | null;
   readonly repairs: readonly Rfc64PublicCatalogAuthorRepairStatusV1[];
+  /** GH#3081 — aggregate finalized-private queue evidence; observation only. */
+  readonly finalizedPrivatePlacement: Readonly<FinalizedPrivatePlacementQueueStatusV1>;
+  /** GH#3134 — aggregate: author catalogs at their row cap and the placements parked for them. */
+  readonly authorCatalogCapacity?: Readonly<AuthorCatalogCapacityStatusV1>;
 }
 
 interface MutableAuthorRepairStatusV1 {
@@ -67,14 +96,24 @@ interface MutableAuthorRepairStatusV1 {
   lastError: string | null;
   updatedAtMs: number | null;
   dirty: boolean;
+  pendingMutationRequest: boolean;
+  diagnostic: Readonly<CatalogRepairDiagnosticV1> | null;
+  readonly retry: CatalogRepairRetryV1;
 }
 
 interface ProjectionSupervisorStateV1 {
   readonly retryIntervalMs?: number;
   readonly repairs: MutableAuthorRepairStatusV1[];
   readonly runner: CoalescingRecurringTask;
-  readonly finalizedPrivateRunner: CoalescingRecurringTask;
-  readonly finalizedPrivateAttemptWaiters: Map<string, Set<() => void>>;
+  publicMutationTimer: ReturnType<typeof setTimeout> | undefined;
+  readonly finalizedPrivateRunner: NextTurnRecurringTaskV1;
+  readonly finalizedPrivateWaiters: FinalizedPrivatePlacementWaitersV1;
+  finalizedPrivateWaiterTimer: ReturnType<typeof setTimeout> | undefined;
+  readonly finalizedPrivateRetries: Map<string, {
+    readonly contextGraphId: ContextGraphIdV1;
+    retry: CatalogRepairRetryV1;
+    attempts: number;
+  }>;
   pass: number;
   lastPassStartedAtMs: number | null;
   lastPassCompletedAtMs: number | null;
@@ -86,7 +125,7 @@ type ProjectionReconciliationV1 = Awaited<ReturnType<
 
 export interface Rfc64FinalizedPrivatePlacementRepairRequestV1 {
   readonly accepted: boolean;
-  /** Settles after this exact repair's first admitted attempt, independent of other work. */
+  /** Settles after this exact repair's first admitted attempt; no publication waits on it (GH#3081). */
   readonly whenAttempted: Promise<void>;
 }
 
@@ -95,28 +134,62 @@ interface ProjectionOwnerDependenciesV1 {
   readonly listLocalAuthorAddresses: () => readonly EvmAddressV1[];
   readonly acceptsPublicRootLane: (contextGraphId: ContextGraphIdV1) => boolean;
   readonly acceptsFinalizedPrivateLane: (contextGraphId: ContextGraphIdV1) => boolean;
+  readonly readRepairRevision: (
+    contextGraphId: ContextGraphIdV1, authorAddress: EvmAddressV1,
+  ) => CatalogRepairRevisionHintV1 | null;
   readonly listFinalizedPrivateRepairs: () => readonly Readonly<
     Rfc64FinalizedPrivatePlacementRepairV1
   >[];
+  /** `placement` is the admitted attempt's recorder (GH#3081, observation only). */
   readonly repairFinalizedPrivatePlacement: (
     repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
+    placement: CatalogPlacementAttemptV1,
   ) => Promise<void>;
   readonly reconcile: (params: Readonly<{
     readonly contextGraphId: ContextGraphIdV1;
     readonly authorAddress: EvmAddressV1;
     readonly signal: AbortSignal;
   }>) => Promise<ProjectionReconciliationV1>;
+  /** GH#3134 — one author catalog scope's applied-head row; frees the placements parked on a full catalog. */
+  readonly readAppliedCatalogHead?: FullCatalogParkingDependenciesV1['readAppliedCatalogHead'];
   readonly warn: (ctx: OperationContext, message: string) => void;
+  /** GH#3081 — the placement timing to record into, resolved at each use; the owner's own by default. */
+  readonly placementTiming?: () => CatalogPlacementTimingV1;
 }
 
 /** Feature-local owner for projection admission, mutable repair state, and its runner. */
 export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwnerV1 {
   readonly #dependencies: ProjectionOwnerDependenciesV1;
+  readonly #timing: () => CatalogPlacementTimingV1;
+  readonly #fullCatalogs: FullCatalogParkingV1;
   #state: ProjectionSupervisorStateV1 | undefined;
   #admissionClosed = false;
 
   constructor(dependencies: ProjectionOwnerDependenciesV1) {
     this.#dependencies = dependencies;
+    this.#timing = dependencies.placementTiming ?? (() => catalogPlacementTimingV1(this));
+    this.#fullCatalogs = new FullCatalogParkingV1(dependencies);
+  }
+
+  /** Observe a real inactive edge without reopening admission or starting work. */
+  observeLaneAvailability(contextGraphId: string): void {
+    if (this.#admissionClosed || this.#state === undefined) return;
+    for (const repair of this.#state.repairs) {
+      if (repair.contextGraphId !== contextGraphId) continue;
+      try {
+        if (!this.#dependencies.acceptsPublicRootLane(repair.contextGraphId)) {
+          repair.retry.observe(null);
+        }
+      } catch { /* Scheduling hints must not reject a subscription transition. */ }
+    }
+    for (const entry of this.#state.finalizedPrivateRetries.values()) {
+      if (entry.contextGraphId !== contextGraphId) continue;
+      try {
+        if (!this.#dependencies.acceptsFinalizedPrivateLane(entry.contextGraphId)) {
+          entry.retry.observe(null);
+        }
+      } catch { /* The periodic admission check remains authoritative. */ }
+    }
   }
 
   start(ctx: OperationContext): void {
@@ -149,23 +222,16 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
         if (current === undefined) {
           existing.repairs.push(repair);
           publicRepairRequested = true;
-        } else if (current.outcome === 'failed') {
-          // Re-entering start is an authorization/subscription transition, not
-          // a new inventory observation. Retry a failed repair, but do not turn
-          // a completed no-inventory or reconciled result into duplicate work.
+        }
+      }
+      for (const current of existing.repairs) {
+        const changed = this.#observeRevision(current.retry, current.contextGraphId, current.authorAddress);
+        if (changed) {
+          current.pendingMutationRequest = true;
           current.dirty = true;
           publicRepairRequested = true;
         }
-      }
-      // Release-native/default selection has no bootstrap partition to seed
-      // `repairs`. An authority transition must still revive a repair that
-      // failed while the lane was temporarily inactive.
-      for (const current of existing.repairs) {
-        if (
-          !repairKeys.has(`${current.contextGraphId}\n${current.authorAddress}`)
-          && current.outcome === 'failed'
-          && this.#dependencies.acceptsPublicRootLane(current.contextGraphId)
-        ) {
+        if ((changed || current.outcome === 'failed') && current.retry.eligible(Date.now())) {
           current.dirty = true;
           publicRepairRequested = true;
         }
@@ -193,19 +259,12 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     readonly ctx: OperationContext;
   }>): boolean {
     if (this.#admissionClosed) return false;
-    if (!this.#dependencies.acceptsPublicRootLane(params.contextGraphId)) return false;
-    let state = this.#state;
-    if (state === undefined) {
-      const retryIntervalMs = this.#dependencies.resolvePartition()?.retryIntervalMs
-        ?? DEFAULT_PROJECTION_RETRY_INTERVAL_MS_V1;
-      state = this.#createState(
-        retryIntervalMs,
-        retryIntervalMs,
-        [],
-        params.ctx,
-      );
-      this.#state = state;
+    if (!this.#dependencies.acceptsPublicRootLane(params.contextGraphId)) {
+      this.#state?.repairs.find((repair) => repair.contextGraphId === params.contextGraphId
+        && repair.authorAddress === params.authorAddress)?.retry.observe(null);
+      return false;
     }
+    const state = this.#ensureState(params.ctx);
     if (state.runner.closed) return false;
     let repair = state.repairs.find(
       (candidate) => candidate.contextGraphId === params.contextGraphId
@@ -214,46 +273,64 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     if (repair === undefined) {
       repair = newPendingRepairV1(params.contextGraphId, params.authorAddress);
       state.repairs.push(repair);
-    } else {
+    }
+    const changed = this.#observeRevision(repair.retry, repair.contextGraphId, repair.authorAddress);
+    if (changed === undefined || changed) {
+      repair.pendingMutationRequest = true;
       repair.dirty = true;
     }
+    if (!repair.retry.eligible(Date.now())) {
+      // A cheap pass arms the pending mutation's deadline without admitting
+      // canonical store work before the unchanged failure cooldown expires.
+      if (repair.pendingMutationRequest) state.runner.request();
+      return true;
+    }
+    repair.dirty = true;
     return state.runner.request();
   }
 
-  /** Enqueue one already-durable chain-confirmed private placement transition. */
+  /** Enqueue one already-durable chain-confirmed private placement; accepted or not, its marker is owed. */
   requestFinalizedPrivate(params: Readonly<{
     readonly repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>;
     readonly ctx: OperationContext;
+    /** GH#3081 — told about this waiter's cooldown skips and the attempt that releases it. */
+    readonly observer?: CatalogPlacementWaiterObserverV1;
   }>): Rfc64FinalizedPrivatePlacementRepairRequestV1 {
-    const rejected = (): Rfc64FinalizedPrivatePlacementRepairRequestV1 => Object.freeze({
-      accepted: false,
-      whenAttempted: Promise.resolve(),
-    });
-    if (this.#admissionClosed) return rejected();
-    if (!this.#dependencies.acceptsFinalizedPrivateLane(params.repair.contextGraphId)) {
-      return rejected();
-    }
-    let state = this.#state;
-    if (state === undefined) {
-      const retryIntervalMs = this.#dependencies.resolvePartition()?.retryIntervalMs
-        ?? DEFAULT_PROJECTION_RETRY_INTERVAL_MS_V1;
-      state = this.#createState(retryIntervalMs, retryIntervalMs, [], params.ctx);
-      this.#state = state;
-    }
-    if (state.finalizedPrivateRunner.closed) return rejected();
     const key = finalizedPrivateRepairKeyV1(params.repair);
-    let settleAttempt!: () => void;
-    const whenAttempted = new Promise<void>((resolve) => { settleAttempt = resolve; });
-    const waiters = state.finalizedPrivateAttemptWaiters.get(key) ?? new Set<() => void>();
-    waiters.add(settleAttempt);
-    state.finalizedPrivateAttemptWaiters.set(key, waiters);
-    if (!state.finalizedPrivateRunner.request()) {
-      waiters.delete(settleAttempt);
-      if (waiters.size === 0) state.finalizedPrivateAttemptWaiters.delete(key);
-      settleAttempt();
+    this.#timing().owed(key);
+    const rejected = (): Rfc64FinalizedPrivatePlacementRepairRequestV1 => {
+      try { params.observer?.released(); } catch { /* A refusal is a release with no attempt; observation only. */ }
+      return Object.freeze({ accepted: false, whenAttempted: Promise.resolve() });
+    };
+    if (this.#admissionClosed) return rejected();
+    const state = this.#ensureState(params.ctx);
+    if (state.finalizedPrivateRunner.closed) return rejected();
+    let laneAccepts = false;
+    try {
+      laneAccepts = this.#dependencies.acceptsFinalizedPrivateLane(params.repair.contextGraphId);
+    } finally {
+      // Refused, or the lane cannot be resolved now: the marker is durable and no request holds
+      // it, so a pass has to come back for it without waiting for other traffic or a restart.
+      if (!laneAccepts && (state.retryIntervalMs ?? 0) > 0) state.finalizedPrivateRunner.schedule(state.retryIntervalMs!);
+    }
+    if (!laneAccepts) {
+      state.finalizedPrivateRetries.get(key)?.retry.observe(null);
       return rejected();
     }
-    return Object.freeze({ accepted: true, whenAttempted });
+    const waiter = state.finalizedPrivateWaiters.add(key, this.#timing().now(), params.observer);
+    // The pass starts one turn later: the caller pays for its durable marker, not for the listing
+    // of every marker and the start of the first repair.
+    if (!state.finalizedPrivateRunner.requestNextTurn()) {
+      waiter.withdraw();
+      return rejected();
+    }
+    return Object.freeze({ accepted: true, whenAttempted: waiter.whenAttempted });
+  }
+
+  #ensureState(ctx: OperationContext): ProjectionSupervisorStateV1 {
+    if (this.#state !== undefined) return this.#state;
+    const retryIntervalMs = this.#dependencies.resolvePartition()?.retryIntervalMs ?? DEFAULT_PROJECTION_RETRY_INTERVAL_MS_V1;
+    return this.#state = this.#createState(retryIntervalMs, retryIntervalMs, [], ctx);
   }
 
   status(): Readonly<Rfc64SwmCatalogProjectionSupervisorStatusV1> | null {
@@ -265,9 +342,17 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       retryIntervalMs: state.retryIntervalMs ?? 0,
       lastPassStartedAtMs: state.lastPassStartedAtMs,
       lastPassCompletedAtMs: state.lastPassCompletedAtMs,
-      repairs: Object.freeze(state.repairs.map(({ dirty: _dirty, ...repair }) => (
-        Object.freeze(repair)
+      repairs: Object.freeze(state.repairs.map(({
+        dirty: _dirty, pendingMutationRequest: _pendingMutationRequest, retry, ...repair
+      }) => (
+        Object.freeze({ ...repair, consecutiveFailures: retry.consecutiveFailures,
+          nextAttemptAtMs: retry.nextAttemptAtMs })
       ))),
+      finalizedPrivatePlacement: this.#timing().queueStatus(
+        state.finalizedPrivateWaiters.summary(),
+        state.finalizedPrivateRunner.running,
+      ),
+      authorCatalogCapacity: this.#fullCatalogs.status(state.repairs),
     });
   }
 
@@ -281,11 +366,13 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     this.#admissionClosed = true;
     const state = this.#state;
     if (state === undefined) return;
+    clearTimeout(state.publicMutationTimer);
+    state.publicMutationTimer = undefined;
+    clearTimeout(state.finalizedPrivateWaiterTimer);
+    state.finalizedPrivateWaiterTimer = undefined;
     await Promise.all([state.runner.close(), state.finalizedPrivateRunner.close()]);
-    for (const waiters of state.finalizedPrivateAttemptWaiters.values()) {
-      for (const settle of waiters) settle();
-    }
-    state.finalizedPrivateAttemptWaiters.clear();
+    state.finalizedPrivateWaiters.releaseAll();
+    state.finalizedPrivateRetries.clear();
     this.#state = undefined;
   }
 
@@ -298,11 +385,17 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     let state!: ProjectionSupervisorStateV1;
     const runner = new CoalescingRecurringTask({
       retryIntervalMs,
-      runPass: (signal) => this.#runPass(state, signal),
+      runPass: async (signal) => {
+        try {
+          await this.#runPass(state, signal);
+        } finally {
+          this.#schedulePublicMutationWake(state);
+        }
+      },
       onError: (error) => {
         this.#dependencies.warn(
           ctx,
-          `RFC-64 SWM catalog projection pass failed: ${rfc64SupervisorErrorMessageV1(error)}`,
+          JSON.stringify({ event: 'catalog_repair_pass_failed', diagnostic: catalogRepairDiagnosticV1(error) }),
         );
       },
       beforePeriodicPass: () => {
@@ -310,28 +403,49 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
         // is the bounded liveness path for failures, not a reason to rebuild
         // every healthy catalog from its complete inventory every five seconds.
         for (const repair of state.repairs) {
-          if (repair.outcome === 'failed') repair.dirty = true;
+          if (repair.outcome !== 'failed') continue;
+          this.#observeRevision(repair.retry, repair.contextGraphId, repair.authorAddress);
+          if (repair.retry.eligible(Date.now())) repair.dirty = true;
         }
       },
       closingMessage: 'RFC-64 SWM catalog projection closing',
     });
-    const finalizedPrivateRunner = new CoalescingRecurringTask({
+    const finalizedPrivateRunner = new NextTurnRecurringTaskV1(new CoalescingRecurringTask({
       retryIntervalMs: finalizedPrivateRetryIntervalMs,
-      runPass: (signal) => this.#runFinalizedPrivatePass(state, signal),
+      runPass: async (signal) => {
+        let failed = false;
+        try {
+          await this.#runFinalizedPrivatePass(state, signal);
+        } catch (error) {
+          failed = true;
+          throw error;
+        } finally {
+          this.#timing().passEnded();
+          this.#fullCatalogs.passEnded();
+          // A failed durable queue read must not spin on an already-due waiter.
+          this.#schedulePrivateWaiterWake(state, failed
+            ? (finalizedPrivateRetryIntervalMs > 0
+              ? finalizedPrivateRetryIntervalMs : DEFAULT_PROJECTION_RETRY_INTERVAL_MS_V1)
+            : 0);
+        }
+      },
       onError: (error) => {
         this.#dependencies.warn(
           ctx,
-          `RFC-64 finalized-private repair pass failed: ${rfc64SupervisorErrorMessageV1(error)}`,
+          JSON.stringify({ event: 'catalog_private_repair_pass_failed', diagnostic: catalogRepairDiagnosticV1(error) }),
         );
       },
       closingMessage: 'RFC-64 finalized-private placement repair closing',
-    });
+    }));
     state = {
       retryIntervalMs,
       repairs,
       runner,
+      publicMutationTimer: undefined,
       finalizedPrivateRunner,
-      finalizedPrivateAttemptWaiters: new Map(),
+      finalizedPrivateWaiters: new FinalizedPrivatePlacementWaitersV1(),
+      finalizedPrivateWaiterTimer: undefined,
+      finalizedPrivateRetries: new Map(),
       pass: 0,
       lastPassStartedAtMs: null,
       lastPassCompletedAtMs: null,
@@ -340,7 +454,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
   }
 
   async #runPass(state: ProjectionSupervisorStateV1, signal: AbortSignal): Promise<void> {
-    const pending = state.repairs.filter((repair) => repair.dirty);
+    const pending = state.repairs.filter((repair) => repair.dirty && repair.retry.eligible(Date.now()));
     if (pending.length === 0) return;
     for (const repair of pending) repair.dirty = false;
     state.pass += 1;
@@ -348,7 +462,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     try {
       await mapWithConcurrency(pending, MAX_CONCURRENT_REPAIRS_V1, async (repair) => {
         if (signal.aborted) return;
-        await this.#reconcile(repair, signal);
+        await this.#reconcile(repair, state.retryIntervalMs, signal);
       });
     } finally {
       state.lastPassCompletedAtMs = Date.now();
@@ -360,40 +474,158 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     signal: AbortSignal,
   ): Promise<void> {
     const repairs = this.#dependencies.listFinalizedPrivateRepairs();
+    const currentKeys = new Set(repairs.map(finalizedPrivateRepairKeyV1));
+    this.#timing().passStarted(currentKeys);
+    for (const key of state.finalizedPrivateRetries.keys()) {
+      if (!currentKeys.has(key)) state.finalizedPrivateRetries.delete(key);
+    }
+    for (const key of state.finalizedPrivateWaiters.keys()) {
+      if (!currentKeys.has(key)) state.finalizedPrivateWaiters.release(key);
+    }
+    this.#fullCatalogs.passStarted(currentKeys);
     await mapWithConcurrency(repairs, MAX_CONCURRENT_REPAIRS_V1, async (repair) => {
+      if (signal.aborted) return;
       const key = finalizedPrivateRepairKeyV1(repair);
+      // GH#3134 — a placement its full catalog has no row for is parked: no attempt, nothing waits on it.
+      if (this.#fullCatalogs.park(key, repair)) return state.finalizedPrivateWaiters.release(key);
+      let entry = state.finalizedPrivateRetries.get(key);
+      if (entry === undefined) {
+        entry = { contextGraphId: repair.contextGraphId, retry: new CatalogRepairRetryV1(), attempts: 0 };
+        state.finalizedPrivateRetries.set(key, entry);
+      }
+      this.#observePrivateLane(entry.retry, repair.contextGraphId);
+      if (!entry.retry.eligible(Date.now())) {
+        this.#timing().cooldownSkipped();
+        state.finalizedPrivateWaiters.cooldownSkipped(key);
+        return;
+      }
+      const attemptGeneration = entry.retry.generation;
+      entry.attempts += 1;
+      const placement = this.#timing().admit(key);
       try {
-        if (signal.aborted) return;
-        await this.#dependencies.repairFinalizedPrivatePlacement(repair);
+        if (!this.#dependencies.acceptsFinalizedPrivateLane(repair.contextGraphId)) {
+          throw new CatalogRepairLaneInactiveErrorV1();
+        }
+        await withDefaultStoreWorkPriority('background', () => (
+          this.#dependencies.repairFinalizedPrivatePlacement(repair, placement.attempt)
+        ));
+        placement.end('completed');
+        state.finalizedPrivateRetries.delete(key);
       } catch (error) {
+        placement.end('failed');
         if (!signal.aborted) {
-          this.#dependencies.warn(
-            createOperationContext('system'),
-            `RFC-64 finalized-private placement repair failed for ${repair.contextGraphId} / ${repair.kaUal}: ${boundedRfc64SupervisorErrorV1(error)}`,
-          );
+          const changed = this.#observePrivateLane(entry.retry, repair.contextGraphId);
+          entry.retry.fail(attemptGeneration, Date.now(), state.retryIntervalMs, catalogRepairDiagnosticV1(error).kind);
+          if (changed) state.finalizedPrivateRunner.request();
+          if (this.#fullCatalogs.placementRefused(key, repair, error)) state.finalizedPrivateRetries.delete(key);
+          else this.#warnFailure('catalog_private_repair_failed', error, entry.attempts, entry.retry);
         }
       } finally {
-        const waiters = state.finalizedPrivateAttemptWaiters.get(key);
-        if (waiters !== undefined) {
-          state.finalizedPrivateAttemptWaiters.delete(key);
-          for (const settle of waiters) settle();
-        }
+        state.finalizedPrivateWaiters.release(key, placement);
       }
     });
   }
 
-  async #reconcile(repair: MutableAuthorRepairStatusV1, signal: AbortSignal): Promise<void> {
+  /** Retain changed or unknown explicit mutations through cooldown, even in one-pass mode. */
+  #schedulePublicMutationWake(state: ProjectionSupervisorStateV1): void {
+    clearTimeout(state.publicMutationTimer);
+    state.publicMutationTimer = undefined;
+    if (this.#state !== state || this.#admissionClosed || state.runner.closed) return;
+    let earliest = Infinity;
+    for (const repair of state.repairs) {
+      if (repair.pendingMutationRequest) {
+        earliest = Math.min(earliest, repair.retry.nextAttemptAtMs ?? Date.now());
+      }
+    }
+    if (!Number.isFinite(earliest)) return;
+    state.publicMutationTimer = setTimeout(() => {
+      state.publicMutationTimer = undefined;
+      if (this.#state !== state || this.#admissionClosed || state.runner.closed) return;
+      for (const repair of state.repairs) {
+        if (repair.pendingMutationRequest) repair.dirty = true;
+      }
+      state.runner.request();
+    }, Math.min(2_147_483_647, Math.max(0, earliest - Date.now())));
+    state.publicMutationTimer.unref?.();
+  }
+
+  /** Accepted cooldown requests need one wake even when periodic retries are disabled. */
+  #schedulePrivateWaiterWake(state: ProjectionSupervisorStateV1, minimumDelayMs: number): void {
+    clearTimeout(state.finalizedPrivateWaiterTimer);
+    state.finalizedPrivateWaiterTimer = undefined;
+    if (this.#state !== state || this.#admissionClosed || state.finalizedPrivateRunner.closed) return;
+    let earliest = Infinity;
+    for (const key of state.finalizedPrivateWaiters.keys()) {
+      const deadline = state.finalizedPrivateRetries.get(key)?.retry.nextAttemptAtMs;
+      earliest = Math.min(earliest, deadline ?? Date.now());
+    }
+    if (!Number.isFinite(earliest)) return;
+    state.finalizedPrivateWaiterTimer = setTimeout(() => {
+      state.finalizedPrivateWaiterTimer = undefined;
+      if (this.#state === state && !this.#admissionClosed && !state.finalizedPrivateRunner.closed) {
+        state.finalizedPrivateRunner.request();
+      }
+    }, Math.min(2_147_483_647, Math.max(minimumDelayMs, earliest - Date.now())));
+    state.finalizedPrivateWaiterTimer.unref?.();
+  }
+
+  #observePrivateLane(retry: CatalogRepairRetryV1, contextGraphId: ContextGraphIdV1): boolean {
+    try {
+      // Exact durable identity already partitions private retries. An unrelated
+      // mutation of the author's inventory must not reset this repair's backoff.
+      return retry.observe(this.#dependencies.acceptsFinalizedPrivateLane(contextGraphId) ? { scopeIdentity: 'finalized-private', headRevision: 'active' } : null);
+    } catch {
+      return false;
+    }
+  }
+
+  #observeRevision(
+    retry: CatalogRepairRetryV1,
+    contextGraphId: ContextGraphIdV1,
+    authorAddress: EvmAddressV1,
+  ): boolean | undefined {
+    try {
+      const active = this.#dependencies.acceptsPublicRootLane(contextGraphId);
+      return retry.observe(active
+        ? this.#dependencies.readRepairRevision(contextGraphId, authorAddress) : null);
+    } catch {
+      // A hint failure must not reject the mutation caller or reset its cooldown.
+      return undefined;
+    }
+  }
+
+  #warnFailure(event: string, error: unknown, attempt: number, retry: CatalogRepairRetryV1): void {
+    try {
+      this.#dependencies.warn(createOperationContext('system'), JSON.stringify({
+        event, diagnostic: catalogRepairDiagnosticV1(error), attempt,
+        consecutiveFailures: retry.consecutiveFailures, nextAttemptAtMs: retry.nextAttemptAtMs,
+      }));
+    } catch { /* Diagnostics must not alter repair state or waiter settlement. */ }
+  }
+
+  async #reconcile(
+    repair: MutableAuthorRepairStatusV1,
+    retryIntervalMs: number | undefined,
+    signal: AbortSignal,
+  ): Promise<void> {
+    // Consume only at actual admission. A newer mutation received
+    // during this attempt must survive both its success and failure paths.
+    repair.pendingMutationRequest = false;
+    this.#observeRevision(repair.retry, repair.contextGraphId, repair.authorAddress);
+    const attemptGeneration = repair.retry.generation;
     repair.attempts += 1;
     try {
       if (!this.#dependencies.acceptsPublicRootLane(repair.contextGraphId)) {
-        throw new Error('RFC-64 SWM catalog projection lane is temporarily inactive');
+        throw new CatalogRepairLaneInactiveErrorV1();
       }
-      const reconciliation = await this.#dependencies.reconcile({
+      const reconciliation = await withDefaultStoreWorkPriority('background', () => this.#dependencies.reconcile({
         contextGraphId: repair.contextGraphId,
         authorAddress: repair.authorAddress,
         signal,
-      });
+      }));
       if (signal.aborted) return;
+      repair.retry.reset();
+      repair.diagnostic = null;
       if (reconciliation === null) {
         Object.assign(repair, {
           outcome: 'no-inventory',
@@ -417,18 +649,27 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       });
     } catch (error) {
       if (signal.aborted) return;
+      const changed = this.#observeRevision(repair.retry, repair.contextGraphId, repair.authorAddress);
+      if (changed) repair.pendingMutationRequest = true;
+      if (repair.retry.fail(attemptGeneration, Date.now(), retryIntervalMs, catalogRepairDiagnosticV1(error).kind)) {
+        // Duplicate same-head wakes received while this attempt was active do
+        // not get to bypass the newly established failure deadline.
+        repair.dirty = repair.pendingMutationRequest;
+      } else {
+        repair.dirty = true;
+        // A head may change without an explicit notification while draining.
+        if (changed) this.#state?.runner.request();
+      }
       Object.assign(repair, {
         outcome: 'failed',
         inventoryHeadObjectDigest: null,
         catalogVersion: null,
         inventoryRowCount: null,
-        lastError: boundedRfc64SupervisorErrorV1(error),
+        lastError: catalogRepairErrorSummaryV1(error),
+        diagnostic: catalogRepairDiagnosticV1(error),
         updatedAtMs: Date.now(),
       });
-      this.#dependencies.warn(
-        createOperationContext('system'),
-        `RFC-64 local SWM catalog projection failed for ${repair.contextGraphId} / ${repair.authorAddress}: ${rfc64SupervisorErrorMessageV1(error)}`,
-      );
+      if (!this.#fullCatalogs.projectionRefused(repair, error)) this.#warnFailure('catalog_repair_failed', error, repair.attempts, repair.retry);
     }
   }
 }
@@ -467,22 +708,21 @@ function newPendingRepairV1(
     lastError: null,
     updatedAtMs: null,
     dirty: true,
+    pendingMutationRequest: false,
+    diagnostic: null,
+    retry: new CatalogRepairRetryV1(),
   };
 }
 
-function finalizedPrivateRepairKeyV1(
-  repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
-): string {
-  return JSON.stringify([
-    repair.contextGraphId,
-    repair.authorAddress,
-    repair.kaUal,
-    repair.assertionVersion,
-    repair.sealDigest,
-  ]);
-}
-
 export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
+  observeRfc64SwmCatalogProjectionLaneAvailabilityV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): void {
+    // Subscription selection can be initialized before the workload is bound.
+    projectionOwnersV1.get(this)?.observeLaneAvailability(contextGraphId);
+  }
+
   /** Seed bounded local-author projection work from selected catalog scopes. */
   startRfc64SwmCatalogProjectionSupervisorV1(
     this: DKGAgent,
@@ -525,6 +765,16 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
       repair: params.repair,
       ctx: params.ctx ?? createOperationContext('system'),
     });
+  }
+
+  /** The same request with an observer of its waiter. `seal`, the seal the marker names, is kept for the placement. */
+  protected requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1(
+    this: DKGAgent,
+    params: Readonly<{ readonly repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>; readonly seal: Readonly<CanonicalGraphScopedAuthorSealV1>; readonly ctx: OperationContext }>,
+    observer: CatalogPlacementWaiterObserverV1,
+  ): Rfc64FinalizedPrivatePlacementRepairRequestV1 {
+    retainOwedPlacementSealV1(this, params.repair.sealDigest, params.seal);
+    return projectionOwnerV1(this).requestFinalizedPrivate({ repair: params.repair, ctx: params.ctx, observer });
   }
 
   readRfc64SwmCatalogProjectionSupervisorStatusV1(

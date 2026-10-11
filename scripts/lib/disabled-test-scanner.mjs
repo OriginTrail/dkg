@@ -279,7 +279,7 @@ export function isScannableFile(filePath) {
   return isD1ScannableFile(filePath) || isD2ScannableFile(filePath);
 }
 
-export function analyzeTestSource(source, filePath, { now = new Date(), d1 = isD1ScannableFile(filePath), d2 = isD2ScannableFile(filePath) } = {}) {
+export function analyzeTestSource(source, filePath, { now = new Date(), d1 = isD1ScannableFile(filePath), d2 = isD2ScannableFile(filePath), applyWaivers = true } = {}) {
   const sourceFile = ts.createSourceFile(
     filePath,
     source,
@@ -429,7 +429,7 @@ export function analyzeTestSource(source, filePath, { now = new Date(), d1 = isD
   };
 
   visit(sourceFile);
-  return { disabled: findings.filter((finding) => !isAllowed(finding, comments)), focused: [...new Set(focused)], invalidExceptions };
+  return { disabled: applyWaivers ? findings.filter((finding) => !isAllowed(finding, comments)) : findings, focused: [...new Set(focused)], invalidExceptions };
 }
 
 // Compatibility entry points for the reviewed D1/D2 delta and fingerprint API.

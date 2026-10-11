@@ -63,6 +63,7 @@ import {
   CandidateInventoryV1,
   type AppliedCatalogHeadCasResultV1,
   type AppliedCatalogHeadSnapshotV1,
+  type AppliedCatalogHeadsSnapshotV1,
   type CandidateCatalogPrecommitResultV1,
   type CandidateBucketDiffTraversalV1,
   type CandidateBucketHeaderV1,
@@ -74,8 +75,10 @@ import {
   type CandidateSessionV1,
   type CandidateSessionGcBatchResultV1,
   type CompareAndSwapAppliedCatalogHeadInputV1,
+  type CompareAndSwapMergeSwmAuthorInventoryInputV1,
   type DeleteAppliedCatalogHeadInputV1,
   type CompareAndSwapSwmAuthorInventoryInputV1,
+  type DeleteSwmAuthorInventoryInputV1,
   type Rfc64InventoryV1CandidateApi,
   type SwmAuthorInventoryCasResultV1,
   type VerifiedCandidateBucketLoadV1,
@@ -491,6 +494,12 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
     return this.#candidate.listAppliedCatalogHeadsV1();
   }
 
+  readAppliedCatalogHeadsSnapshotV1(): AppliedCatalogHeadsSnapshotV1 {
+    this.requireOpen();
+    // A quarantine rebuild swaps in a new candidate, which lists afresh.
+    return this.#candidate.readAppliedCatalogHeadsSnapshotV1();
+  }
+
   isStagedCatalogHeadV1(
     catalogScopeDigest: Digest32V1,
     authorAddress: EvmAddressV1,
@@ -521,6 +530,14 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
     return this.#candidate.compareAndSwapAppliedCatalogHeadV1(input);
   }
 
+  readSwmAuthorInventoryHeadDigestV1(
+    inventoryScopeDigest: Digest32V1,
+    authorAddress: EvmAddressV1,
+  ): Digest32V1 | null {
+    this.requireOpen();
+    return this.#candidate.readSwmAuthorInventoryHeadDigestV1(inventoryScopeDigest, authorAddress);
+  }
+
   readSwmAuthorInventorySnapshotV1(
     inventoryScopeDigest: Digest32V1,
     authorAddress: EvmAddressV1,
@@ -532,11 +549,23 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
     );
   }
 
+  deleteSwmAuthorInventoryV1(input: DeleteSwmAuthorInventoryInputV1): void {
+    this.requireOpen();
+    this.#candidate.deleteSwmAuthorInventoryV1(input);
+  }
+
   compareAndSwapSwmAuthorInventoryV1(
     input: CompareAndSwapSwmAuthorInventoryInputV1,
   ): SwmAuthorInventoryCasResultV1 {
     this.requireOpen();
     return this.#candidate.compareAndSwapSwmAuthorInventoryV1(input);
+  }
+
+  compareAndSwapMergeSwmAuthorInventoryV1(
+    input: CompareAndSwapMergeSwmAuthorInventoryInputV1,
+  ): SwmAuthorInventoryCasResultV1 {
+    this.requireOpen();
+    return this.#candidate.compareAndSwapMergeSwmAuthorInventoryV1(input);
   }
 
   listFinalizedPrivatePlacementRepairs() {

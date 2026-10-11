@@ -260,6 +260,10 @@ describe('E2E: acknowledged-core finalization recovery at inbox capacity', () =>
     const settledBaselines = await Promise.all(receivers.map(async ({ store }) =>
       (await store.health()).stateCounts.SETTLED ?? 0));
     await Promise.all(receivers.map((receiver) => receiver.fillInbox()));
+    // Require every connected core, including the publisher's new local ACK,
+    // so both receivers still get an on-chain finalization to recover.
+    const { hubAddress } = getSharedContext();
+    await setMinimumRequiredSignatures(createProvider(), hubAddress, HARDHAT_KEYS.DEPLOYER, 3);
     const result = await nodeA.publishFromFinalizedAssertion(
       contextGraphId,
       'capacity-recovery',
@@ -267,7 +271,7 @@ describe('E2E: acknowledged-core finalization recovery at inbox capacity', () =>
     );
     expect(result.status).toBe('confirmed');
     expect(new Set(result.v10ACKs?.map((ack) => ack.peerId))).toEqual(new Set(
-      receivers.map(({ node }) => node.peerId),
+      [nodeA.peerId, ...receivers.map(({ node }) => node.peerId)],
     ));
     await Promise.all(receivers.map(async ({ node }) => {
       await expect.poll(

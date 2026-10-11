@@ -8,13 +8,19 @@
  *
  * `lsof` is preferred on Unix but often missing in minimal Linux/container
  * images; Linux fallbacks use `ss`, `fuser`, then `/proc` inode matching.
- * Managed memory scopes use a tiny parent watchdog, so callers may explicitly
- * permit a descendant PID while still rejecting unrelated local listeners.
+ * On Unix hosts Oxigraph runs under a tiny parent watchdog, so callers may
+ * explicitly permit a descendant PID while still rejecting unrelated local
+ * listeners.
  */
 import { execFile } from 'node:child_process';
-import { readdir, readFile, readlink } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import type { ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
+import {
+  procHasFdTarget,
+  processTreeWalker,
+  type ProcessTreeWalker,
+} from './process-probe.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -103,49 +109,12 @@ async function procfsListenOwnerPid(pids: ReadonlySet<number>, port: number): Pr
 
     const socketNeedle = `socket:[${listenInode}]`;
     for (const pid of pids) {
-      try {
-        const fdDir = `/proc/${pid}/fd`;
-        const fds = await readdir(fdDir);
-        for (const fd of fds) {
-          try {
-            const target = await readlink(`${fdDir}/${fd}`);
-            if (target.includes(socketNeedle)) return pid;
-          } catch {
-            continue;
-          }
-        }
-      } catch {
-        continue;
-      }
+      if (await procHasFdTarget(pid, (target) => target.includes(socketNeedle))) return pid;
     }
     return null;
   } catch {
     return null;
   }
-}
-
-async function linuxProcessTree(rootPid: number): Promise<Set<number>> {
-  const pids = new Set<number>([rootPid]);
-  const pending = [rootPid];
-  while (pending.length > 0) {
-    const pid = pending.pop()!;
-    try {
-      const children = (await readFile(`/proc/${pid}/task/${pid}/children`, 'utf8'))
-        .trim()
-        .split(/\s+/)
-        .filter(Boolean)
-        .map(Number)
-        .filter((value) => Number.isInteger(value) && value > 0);
-      for (const childPid of children) {
-        if (pids.has(childPid)) continue;
-        pids.add(childPid);
-        pending.push(childPid);
-      }
-    } catch {
-      continue;
-    }
-  }
-  return pids;
 }
 
 async function windowsListenOwnerPid(pid: number, port: number): Promise<number | null> {
@@ -165,29 +134,31 @@ async function windowsListenOwnerPid(pid: number, port: number): Promise<number 
 }
 
 /**
- * Return the PID when `child` (or, when explicitly enabled, one of its Linux
+ * Return the PID when `child` (or, when explicitly enabled, one of its Unix
  * descendants) is alive and owns the TCP listener on `port`.
- * For non-loopback hosts we only require the child to be alive (tests).
+ * For non-loopback hosts a child-only caller only requires the child to be
+ * alive (tests); a process-tree caller still needs the listening descendant,
+ * never the wrapper.
+ * `processTree` overrides the host's descendant walker, so each walker can be
+ * exercised on any Unix host.
  */
 export async function findListenOwnerPid(
   child: ChildProcess,
   port: number,
   host: string,
   ownership: 'child-only' | 'process-tree' = 'child-only',
+  processTree: ProcessTreeWalker = processTreeWalker(process.platform),
 ): Promise<number | null> {
   if (!child.pid || child.exitCode !== null || child.signalCode !== null) {
     return null;
   }
-  if (host !== '127.0.0.1' && host !== 'localhost') return child.pid;
+  if (host !== '127.0.0.1' && host !== 'localhost' && ownership === 'child-only') return child.pid;
 
   const pid = child.pid;
-  const pids = ownership === 'process-tree' && process.platform === 'linux'
-    ? await linuxProcessTree(pid)
-    : new Set([pid]);
-
   if (process.platform === 'win32') {
     return windowsListenOwnerPid(pid, port);
   }
+  const pids = ownership === 'child-only' ? new Set([pid]) : await processTree(pid);
 
   const lsofOwner = await lsofListenOwnerPid(pids, port);
   if (lsofOwner !== null) return lsofOwner;

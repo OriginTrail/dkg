@@ -26,6 +26,7 @@ import {
   hashTripleV10,
   tripleContentV10,
   keccak256,
+  keccak256Hex,
   structuredKARootV10,
   buildV10ProofMaterial,
   verifyV10ProofMaterial,
@@ -258,6 +259,30 @@ describe('extractV10KCFromStore — graph-scoped rootless KAs', () => {
     ];
     expect(new V10MerkleTree(result.leaves).root)
       .toEqual(new V10MerkleTree(expectedLeaves).root);
+  });
+
+  it('selects the chain-attested name when historical names share a numeric slot', async () => {
+    const store = new OxigraphStore();
+    await seedOntology(store, 'aaa-stale-import', CG_ID);
+    const triples = [
+      { subject: 'urn:asset:one', predicate: 'urn:p:value', object: '"one"' },
+    ];
+    const vmGraph = await seedGraphScoped(store, triples);
+    const nameHash = keccak256Hex(new TextEncoder().encode(CG_NAME));
+
+    await expect(extractV10KCFromStore(store, CG_ID, KA_ID))
+      .rejects.toBeInstanceOf(KCNotFoundError);
+    await expect(extractV10KCFromStore(
+      store, CG_ID, KA_ID, undefined,
+      async () => keccak256Hex(new TextEncoder().encode('aaa-stale-import')),
+    )).rejects.toBeInstanceOf(KCNotFoundError);
+
+    const result = await extractV10KCFromStore(
+      store, CG_ID, KA_ID, undefined, async () => nameHash,
+    );
+    expect(result.contextGraphName).toBe(CG_NAME);
+    expect(result.dataGraph).toBe(vmGraph);
+    expect(result.triples).toMatchObject(triples);
   });
 
   it('supports a fully private KA with an empty public VM graph', async () => {

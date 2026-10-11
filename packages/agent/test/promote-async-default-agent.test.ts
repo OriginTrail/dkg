@@ -9,10 +9,50 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { finalizeRootlessAssertionForTest } from '../../publisher/test/_helpers/rootless-lifecycle.js';
-import { ContextGraphAuthorityUnavailableError } from
-  '../src/internal/context-graph-authority/context-graph-authority.js';
+import {
+  CONTEXT_GRAPH_AGENT_GATE_UNAVAILABLE_REASONS,
+  ContextGraphAuthorityUnavailableError,
+} from '../src/internal/context-graph-authority/context-graph-authority.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import type { AssertionPromoteOptions } from '../src/index.js';
+import {
+  prepareAssertionPromote,
+  PROMOTE_RECIPIENT_RETRY_BUDGET_MS,
+  PROMOTE_RECIPIENT_RETRY_DELAYS_MS,
+  resolvePromoteRecipientsWithinBound,
+  type PromoteRecipientRetryTiming,
+} from '../src/internal/promote/assertion-promote-precommit.js';
+
+/** One recipient read plus every repeat the bound allows. */
+const RECIPIENT_READS_UNTIL_REPORTED = 1 + PROMOTE_RECIPIENT_RETRY_DELAYS_MS.length;
+
+/** A clock that only moves when the code under test sleeps or a read says it took time. */
+function manualRecipientRetryTiming(): PromoteRecipientRetryTiming & {
+  readonly sleeps: number[];
+  advance(elapsedMs: number): void;
+} {
+  let nowMs = 1_000;
+  const sleeps: number[] = [];
+  return {
+    sleeps,
+    now: () => nowMs,
+    sleep: async (delayMs) => {
+      sleeps.push(delayMs);
+      nowMs += delayMs;
+    },
+    advance: (elapsedMs) => { nowMs += elapsedMs; },
+  };
+}
+
+function recipientOutage(
+  reason: ConstructorParameters<typeof ContextGraphAuthorityUnavailableError>[1]['reason']
+    = 'chain-participant-authority-unavailable',
+): ContextGraphAuthorityUnavailableError {
+  return new ContextGraphAuthorityUnavailableError(
+    'private authority changed while recipient keys were resolving',
+    { reason },
+  );
+}
 
 function promoteBoundaryAgent(): any {
   const agent = Object.create(DKGAgent.prototype) as any;
@@ -115,8 +155,13 @@ describe('DKGAgent assertion promote boundary', () => {
     });
   });
 
-  it.each([
+  const PROMOTE_RETRY_POLICY_CASES = [
+    ['finalized-name-absence-unaccepted', true],
     ['chain-name-binding-unavailable', true],
+    // A cooldown ends on its own, so the promote is worth retrying. Pinned
+    // here because the policy map is the only other place that says so, and a
+    // silent flip to false would degrade it to a hard promote failure.
+    ['authority-circuit-open', true],
     ['local-chain-binding-unavailable', true],
     ['local-existence-unavailable', true],
     ['chain-access-policy-unavailable', true],
@@ -126,7 +171,16 @@ describe('DKGAgent assertion promote boundary', () => {
     ['chain-participant-authority-unavailable', true],
     ['chain-participant-authority-invalid', false],
     ['rfc64-private-read-roster-unavailable', true],
-  ] as const)(
+  ] as const;
+
+  it('enumerates every gate reason in the promotion retry policy cases', () => {
+    // Without this, a newly added reason gets a retry policy in the map that no
+    // test ever exercises: flipping it would still compile and still pass.
+    expect([...PROMOTE_RETRY_POLICY_CASES].map(([reason]) => reason).sort())
+      .toEqual([...CONTEXT_GRAPH_AGENT_GATE_UNAVAILABLE_REASONS].sort());
+  });
+
+  it.each(PROMOTE_RETRY_POLICY_CASES)(
     'applies promotion retry policy for %s at the promotion boundary',
     async (reason, retryable) => {
       const authorityFailure = new ContextGraphAuthorityUnavailableError(
@@ -172,17 +226,27 @@ describe('DKGAgent assertion promote boundary', () => {
       },
     };
 
-    const failure = await agent.assertion.promote('cg-1', 'asset-1', {
-      accessPolicy: 'ownerOnly',
-    }).catch((error: unknown) => error);
+    // The outage outlasts the bounded repeat of the recipient read, so the
+    // waits are skipped with fake timers instead of slept.
+    vi.useFakeTimers();
+    let failure: unknown;
+    try {
+      const promoted = agent.assertion.promote('cg-1', 'asset-1', {
+        accessPolicy: 'ownerOnly',
+      }).catch((error: unknown) => error);
+      await vi.runAllTimersAsync();
+      failure = await promoted;
+    } finally {
+      vi.useRealTimers();
+    }
 
     expect(getPromoteFailureDisposition(failure)).toMatchObject({
       classification: 'transient',
       retryable: true,
     });
     expect(failure).toMatchObject({ cause: authorityFailure });
-    expect(agent.resolveWorkspaceRecipientsGated)
-      .toHaveBeenCalledExactlyOnceWith({ contextGraphId: 'cg-1' });
+    expect(agent.resolveWorkspaceRecipientsGated).toHaveBeenCalledTimes(RECIPIENT_READS_UNTIL_REPORTED);
+    expect(agent.resolveWorkspaceRecipientsGated).toHaveBeenCalledWith({ contextGraphId: 'cg-1' });
   });
 
   it('does not certify an authority error escaping the committing publisher call', async () => {
@@ -226,8 +290,8 @@ describe('DKGAgent assertion promote boundary', () => {
     expect(assertionPromote).not.toHaveBeenCalled();
   });
 
-  it('forces a retry-marked post-commit observer failure to remain terminal', async () => {
-    const retryableCause = createPromoteRetryableFailure(new Error('observer failed'));
+  it('forces a retry-marked post-commit pointer failure to remain terminal', async () => {
+    const retryableCause = createPromoteRetryableFailure(new Error('pointer stamp failed'));
     const agent = promoteBoundaryAgent();
     agent.resolveWorkspaceGossipSigningAgent = async () => undefined;
     agent.publisher = {
@@ -238,7 +302,10 @@ describe('DKGAgent assertion promote boundary', () => {
         shareOperationId: 'share-operation-1',
       }),
     };
-    agent.afterDurableSwmPromotionV1 = async () => { throw retryableCause; };
+    // The real hook runs: the canonical boundary around the stamp must not let a
+    // retry marker escape as retryable.
+    agent._stampSwmPointer = async () => { throw retryableCause; };
+    agent.scheduleRfc64SwmInventoryObserverV1 = vi.fn();
 
     const failure = await agent.assertion.promote('cg-1', 'asset-1', {
       accessPolicy: 'ownerOnly',
@@ -322,7 +389,11 @@ describe('concrete promote authority callbacks with the real publisher', () => {
     const caught = await agent.assertion.promote('cg-1', 'asset-1', { accessPolicy: 'public' })
       .catch((error: unknown) => error);
 
-    expect(prerequisite).toHaveBeenCalledTimes(1);
+    // Only the recipient read is repeated, and only for an outage that can
+    // heal; the curator confirmation is never sent twice by one promote.
+    expect(prerequisite).toHaveBeenCalledTimes(
+      stage === 'recipient' && kind === 'transient' ? RECIPIENT_READS_UNTIL_REPORTED : 1,
+    );
     if (kind === 'transient') {
       expect(caught).toMatchObject({ cause: failure });
       expect(getPromoteFailureDisposition(caught)).toMatchObject({
@@ -335,5 +406,140 @@ describe('concrete promote authority callbacks with the real publisher', () => {
     expect(await store.hasGraph(finalized.sharedGraphUri)).toBe(false);
     expect(await publisher.assertionQuery('cg-1', 'asset-1', agent.defaultAgentAddress))
       .toHaveLength(1);
+  });
+});
+
+describe('bounded repeat of the promote recipient read', () => {
+  it('returns the first answer without waiting', async () => {
+    const timing = manualRecipientRetryTiming();
+    const resolve = vi.fn(async () => 'recipients');
+
+    await expect(resolvePromoteRecipientsWithinBound(resolve, timing)).resolves.toBe('recipients');
+
+    expect(resolve).toHaveBeenCalledTimes(1);
+    expect(timing.sleeps).toEqual([]);
+  });
+
+  it('repeats a read that met a retryable outage and returns the later answer', async () => {
+    const timing = manualRecipientRetryTiming();
+    const resolve = vi.fn<() => Promise<string>>()
+      .mockRejectedValueOnce(recipientOutage())
+      .mockRejectedValueOnce(recipientOutage())
+      .mockResolvedValueOnce('recipients');
+
+    await expect(resolvePromoteRecipientsWithinBound(resolve, timing)).resolves.toBe('recipients');
+
+    expect(resolve).toHaveBeenCalledTimes(3);
+    expect(timing.sleeps).toEqual(PROMOTE_RECIPIENT_RETRY_DELAYS_MS.slice(0, 2));
+  });
+
+  it('reports the last outage once every wait is used', async () => {
+    const timing = manualRecipientRetryTiming();
+    const outages = Array.from({ length: RECIPIENT_READS_UNTIL_REPORTED }, () => recipientOutage());
+    const resolve = vi.fn<() => Promise<string>>();
+    for (const outage of outages) resolve.mockRejectedValueOnce(outage);
+
+    await expect(resolvePromoteRecipientsWithinBound(resolve, timing)).rejects.toBe(outages.at(-1));
+
+    expect(resolve).toHaveBeenCalledTimes(RECIPIENT_READS_UNTIL_REPORTED);
+    expect(timing.sleeps).toEqual([...PROMOTE_RECIPIENT_RETRY_DELAYS_MS]);
+    // The waits stay inside the bound, so a share is held for a short time only.
+    expect(timing.sleeps.reduce((total, delayMs) => total + delayMs, 0))
+      .toBeLessThanOrEqual(PROMOTE_RECIPIENT_RETRY_BUDGET_MS);
+  });
+
+  it.each([
+    ['a terminal authority failure', recipientOutage('chain-participant-authority-unsupported')],
+    ['an error that is not an authority outage', new Error('Missing public encryption key')],
+  ])('does not repeat %s', async (_label, failure) => {
+    const timing = manualRecipientRetryTiming();
+    const resolve = vi.fn(async () => { throw failure; });
+
+    await expect(resolvePromoteRecipientsWithinBound(resolve, timing)).rejects.toBe(failure);
+
+    expect(resolve).toHaveBeenCalledTimes(1);
+    expect(timing.sleeps).toEqual([]);
+  });
+
+  it('does not repeat a read that already took as long as the bound', async () => {
+    const timing = manualRecipientRetryTiming();
+    const outage = recipientOutage('chain-access-policy-timeout');
+    const resolve = vi.fn(async () => {
+      // A chain read that ran into its own deadline.
+      timing.advance(2_500);
+      throw outage;
+    });
+
+    await expect(resolvePromoteRecipientsWithinBound(resolve, timing)).rejects.toBe(outage);
+
+    expect(resolve).toHaveBeenCalledTimes(1);
+    expect(timing.sleeps).toEqual([]);
+  });
+
+  it('stops repeating once the next wait would end after the bound', async () => {
+    const timing = manualRecipientRetryTiming();
+    const outage = recipientOutage();
+    const resolve = vi.fn(async () => {
+      // Each read is slow, so the third one fails too close to the bound.
+      timing.advance(600);
+      throw outage;
+    });
+
+    await expect(resolvePromoteRecipientsWithinBound(resolve, timing)).rejects.toBe(outage);
+
+    expect(resolve).toHaveBeenCalledTimes(3);
+    expect(timing.sleeps).toEqual(PROMOTE_RECIPIENT_RETRY_DELAYS_MS.slice(0, 2));
+  });
+
+  function preCommitHost(resolveWorkspaceRecipientsGated: () => Promise<unknown>) {
+    return {
+      resolveWorkspaceGossipSigningAgent: async () => undefined,
+      buildCuratorAckConfirmer: async () => undefined,
+      getContextGraphOnChainPolicy: async () => ({ accessPolicy: 1 }),
+      readLocalAccessPolicyEnum: async () => 1,
+      resolveWorkspaceRecipientsGated,
+    } as unknown as Parameters<typeof prepareAssertionPromote>[0];
+  }
+
+  it('gives the publisher a recipient callback that rides out a short outage', async () => {
+    const timing = manualRecipientRetryTiming();
+    const resolution = { requiresEncryption: false, recipients: [] };
+    const resolveWorkspaceRecipientsGated = vi.fn<() => Promise<unknown>>()
+      .mockRejectedValueOnce(recipientOutage())
+      .mockResolvedValueOnce(resolution);
+    const { publisherOptions } = await prepareAssertionPromote(
+      preCommitHost(resolveWorkspaceRecipientsGated),
+      { contextGraphId: 'cg-1', publisherPeerId: '12D3KooWBoundary' },
+      timing,
+    );
+
+    await expect(publisherOptions.resolveWorkspaceRecipients?.({ contextGraphId: 'cg-1' }))
+      .resolves.toBe(resolution);
+
+    expect(resolveWorkspaceRecipientsGated).toHaveBeenCalledTimes(2);
+    expect(resolveWorkspaceRecipientsGated).toHaveBeenCalledWith({ contextGraphId: 'cg-1' });
+    expect(timing.sleeps).toEqual(PROMOTE_RECIPIENT_RETRY_DELAYS_MS.slice(0, 1));
+  });
+
+  it('reports an outage that outlasts the bound as a retryable promote failure', async () => {
+    const timing = manualRecipientRetryTiming();
+    const outage = recipientOutage();
+    const resolveWorkspaceRecipientsGated = vi.fn(async () => { throw outage; });
+    const { publisherOptions } = await prepareAssertionPromote(
+      preCommitHost(resolveWorkspaceRecipientsGated),
+      { contextGraphId: 'cg-1', publisherPeerId: '12D3KooWBoundary' },
+      timing,
+    );
+
+    const failure = await publisherOptions.resolveWorkspaceRecipients?.({ contextGraphId: 'cg-1' })
+      .catch((error: unknown) => error);
+
+    expect(failure).toMatchObject({ code: 'PROMOTE_RETRYABLE_FAILURE', cause: outage });
+    expect(getPromoteFailureDisposition(failure)).toMatchObject({
+      classification: 'transient',
+      retryable: true,
+    });
+    expect(resolveWorkspaceRecipientsGated).toHaveBeenCalledTimes(RECIPIENT_READS_UNTIL_REPORTED);
+    expect(timing.sleeps).toEqual([...PROMOTE_RECIPIENT_RETRY_DELAYS_MS]);
   });
 });

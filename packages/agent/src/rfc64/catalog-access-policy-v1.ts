@@ -15,6 +15,8 @@
  * here: it governs VM transaction admission, not SWM synchronization.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 import {
   assertCanonicalDigest,
   assertContextGraphIdV1,
@@ -101,6 +103,39 @@ export interface AcceptedRfc64CatalogAccessSnapshotV1 {
   readonly roster: Readonly<MemberRosterV1> | null;
 }
 
+/**
+ * Process-local, accepted-current roster capability handed only to the local
+ * principal resolver for one authorization attempt.
+ *
+ * This is not a cache. The registry constructs it from the exact frozen
+ * policy/roster generation it is authorizing, then generation-fences the
+ * result after every asynchronous identity lookup. Keeping all binding fields
+ * here makes it impossible for a resolver to accidentally mix members from a
+ * different policy, ownership transition, or roster version.
+ */
+export interface Rfc64CatalogLocalAuthorizationScopeV1 {
+  readonly networkId: NetworkIdV1;
+  readonly contextGraphId: ContextGraphIdV1;
+  readonly policyDigest: Digest32V1;
+  readonly ownershipTransitionDigest: ContextGraphPolicyV1['ownershipTransitionDigest'];
+  readonly policyEra: ContextGraphPolicyV1['era'];
+  readonly policyVersion: ContextGraphPolicyV1['version'];
+  readonly administrativeDelegationDigest:
+    ContextGraphPolicyV1['administrativeDelegationDigest'];
+  readonly rosterVersion: MemberRosterV1['version'];
+  readonly memberAddresses: readonly EvmAddressV1[];
+}
+
+/** Select the one-operation roster source without retaining it past the call. */
+export function resolveRfc64CatalogAuthorizationRosterV1(
+  contextGraphId: ContextGraphIdV1,
+  scope: Readonly<Rfc64CatalogLocalAuthorizationScopeV1> | undefined,
+  resolveLiveRoster: () => Promise<readonly EvmAddressV1[] | null>,
+): Promise<readonly EvmAddressV1[] | null> | readonly EvmAddressV1[] | null {
+  if (scope === undefined) return resolveLiveRoster();
+  return scope.contextGraphId === contextGraphId ? scope.memberAddresses : null;
+}
+
 /** Canonical policy/roster invariant shared by every accepted-snapshot consumer. */
 export function assertAcceptedRfc64CatalogPolicyRosterV1(
   policy: Readonly<ContextGraphPolicyV1>,
@@ -159,6 +194,7 @@ type Rfc64CatalogLocalAuthorityV1 =
     /** Resolve the one unambiguous local principal for this Context Graph. */
     resolveLocalAgentAddress: (
       contextGraphId: ContextGraphIdV1,
+      scope?: Readonly<Rfc64CatalogLocalAuthorizationScopeV1>,
     ) => Promise<EvmAddressV1 | null>;
   }>;
 
@@ -175,6 +211,42 @@ interface HeldCatalogAccessSnapshotV1 extends AcceptedRfc64CatalogAccessSnapshot
   readonly members: ReadonlyMap<EvmAddressV1, Readonly<MemberRosterEntryV1>> | null;
 }
 
+interface Rfc64CatalogAuthorizationScopeStoreV1 {
+  active: boolean;
+  readonly generations: WeakMap<
+    Rfc64CatalogAccessPolicyRegistryV1,
+    Map<string, HeldCatalogAccessSnapshotV1>
+  >;
+}
+
+const rfc64CatalogAuthorizationScopeV1 =
+  new AsyncLocalStorage<Rfc64CatalogAuthorizationScopeStoreV1>();
+
+/**
+ * Bound one-shot transport authorization scope. Nested policy rechecks share
+ * the same scope, while independent and concurrent transfers cannot observe
+ * one another's authorization capability.
+ */
+export function withRfc64CatalogAccessAuthorizationScopeV1<Value>(
+  work: () => Value | Promise<Value>,
+): Promise<Value> {
+  const current = rfc64CatalogAuthorizationScopeV1.getStore();
+  if (current?.active === true) return Promise.resolve(work());
+  const scope: Rfc64CatalogAuthorizationScopeStoreV1 = {
+    active: true,
+    generations: new WeakMap(),
+  };
+  return rfc64CatalogAuthorizationScopeV1.run(scope, async () => {
+    try {
+      return await work();
+    } finally {
+      // Async resources created inside the operation may outlive it. Their ALS
+      // reference must not keep the capability usable after the transfer ends.
+      scope.active = false;
+    }
+  });
+}
+
 const EVM_ADDRESS = /^0x[0-9a-f]{40}$/u;
 const ZERO_ADDRESS = `0x${'0'.repeat(40)}`;
 const ZERO_DIGEST = `0x${'0'.repeat(64)}` as Digest32V1;
@@ -189,6 +261,7 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
   readonly #localAgentAddress: EvmAddressV1 | null;
   readonly #resolveLocalAgentAddress: ((
     contextGraphId: ContextGraphIdV1,
+    scope?: Readonly<Rfc64CatalogLocalAuthorizationScopeV1>,
   ) => Promise<EvmAddressV1 | null>) | null;
   readonly #resolveRemoteAgentAddress: ((
     remotePeerId: string,
@@ -358,8 +431,16 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
       || this.#resolveRemoteAgentAddress === null
     ) return null;
 
+    const scopedGenerations = scopedAuthorizationGenerations(this);
+    const scopeKey = authorizationScopeKey(boundary);
+    const scopedGeneration = scopedGenerations?.get(scopeKey);
+    if (scopedGeneration !== undefined && scopedGeneration !== held) return null;
+
     const [localAgentAddress, remoteAgentAddress] = await Promise.all([
-      this.#resolveLocalMemberAddress(boundary.contextGraphId),
+      this.#resolveLocalMemberAddress(
+        boundary.contextGraphId,
+        scopedGeneration === held ? localAuthorizationScope(held) : undefined,
+      ),
       this.#resolveRemoteMemberAddress(
         boundary.remotePeerId,
         boundary.contextGraphId,
@@ -378,6 +459,7 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
       ? localMember
       : remoteMember;
     if (!servingMember.roles.includes('provider')) return null;
+    scopedGenerations?.set(scopeKey, held);
     return authorization(held);
   };
 
@@ -424,11 +506,12 @@ export class Rfc64CatalogAccessPolicyRegistryV1 {
 
   async #resolveLocalMemberAddress(
     contextGraphId: ContextGraphIdV1,
+    scope?: Readonly<Rfc64CatalogLocalAuthorizationScopeV1>,
   ): Promise<EvmAddressV1 | null> {
     if (this.#localAgentAddress !== null) return this.#localAgentAddress;
     if (this.#resolveLocalAgentAddress === null) return null;
     try {
-      const resolved = await this.#resolveLocalAgentAddress(contextGraphId);
+      const resolved = await this.#resolveLocalAgentAddress(contextGraphId, scope);
       return resolved === null
         ? null
         : snapshotAgentAddress(resolved, 'resolved local agent address');
@@ -561,6 +644,51 @@ function authorization(
     accessPolicy: held.policy.accessPolicy,
     policyDigest: held.policyDigest,
   });
+}
+
+function localAuthorizationScope(
+  held: HeldCatalogAccessSnapshotV1,
+): Readonly<Rfc64CatalogLocalAuthorizationScopeV1> {
+  const roster = held.roster;
+  if (roster === null || held.members === null) {
+    throw new Error('private RFC-64 authorization scope requires an accepted roster');
+  }
+  return Object.freeze({
+    networkId: held.policy.networkId,
+    contextGraphId: held.policy.contextGraphId,
+    policyDigest: held.policyDigest,
+    ownershipTransitionDigest: held.policy.ownershipTransitionDigest,
+    policyEra: held.policy.era,
+    policyVersion: held.policy.version,
+    administrativeDelegationDigest: held.policy.administrativeDelegationDigest,
+    rosterVersion: roster.version,
+    memberAddresses: Object.freeze([...held.members.keys()]),
+  });
+}
+
+function scopedAuthorizationGenerations(
+  registry: Rfc64CatalogAccessPolicyRegistryV1,
+): Map<string, HeldCatalogAccessSnapshotV1> | null {
+  const store = rfc64CatalogAuthorizationScopeV1.getStore();
+  if (store?.active !== true) return null;
+  let generations = store.generations.get(registry);
+  if (generations === undefined) {
+    generations = new Map();
+    store.generations.set(registry, generations);
+  }
+  return generations;
+}
+
+function authorizationScopeKey(
+  input: Readonly<Rfc64CatalogAccessAuthorizationInputV1>,
+): string {
+  return [
+    input.operation,
+    input.remotePeerId,
+    input.networkId,
+    input.contextGraphId,
+    input.policyDigest,
+  ].join('\n');
 }
 
 function servingSide(operation: Rfc64CatalogAccessOperationV1): 'local' | 'remote' {

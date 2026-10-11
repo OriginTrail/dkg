@@ -12,6 +12,8 @@ import {
 import {
   VmReconcileQueueClosedError,
 } from '../src/vm-reconcile-service.js';
+import { Rfc64AuthorityReadCoordinatorV1 } from
+  '../src/rfc64/authority-rpc-circuit-breaker-v1.js';
 
 const CONTEXT_GRAPH = 'sports';
 const ON_CHAIN_ID = '9';
@@ -187,6 +189,12 @@ describe('exact Context Graph asset fetch', () => {
         DKGAgent.prototype.resolveFinalizedContextGraphAuthorityTargetsV1,
       resolveContextGraphRegistrationBinding:
         DKGAgent.prototype.resolveContextGraphRegistrationBinding,
+      // Registration discovery reads the finalized authority index under the
+      // shared authority governor, which every real agent gets from its
+      // public-catalog workload owner. This host is a plain object, so it
+      // carries a real coordinator directly rather than through the agent's
+      // owner-backed accessor.
+      rfc64AuthorityReadCoordinatorV1: new Rfc64AuthorityReadCoordinatorV1(),
       hasAcceptedRfc64UnregisteredAuthorityV1: vi.fn(() => false),
       hasAcceptedRfc64PublicUnregisteredAuthorityV1: vi.fn(() => false),
       resolveRegisteredContextGraphAuthority:
@@ -257,7 +265,9 @@ describe('exact Context Graph asset fetch', () => {
       [NAME_HASH],
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
-    expect(whenIdle).toHaveBeenCalledTimes(2);
+    // Exact fetch retains its own physical authorization fence; registration
+    // discovery no longer registers an unrelated global reader drain.
+    expect(whenIdle).toHaveBeenCalledOnce();
     expect(legacyLookup).not.toHaveBeenCalled();
     expect(flush).toHaveBeenCalledTimes(1);
     expect(subscription.lastReconciledOrdinal).toBe(77);

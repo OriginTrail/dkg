@@ -2,7 +2,9 @@
 
 Thin wrapper around requests that talks to the daemon at localhost:9200.
 All methods catch exceptions and return {success: False, error: "..."} —
-no exceptions leak to the agent.
+no exceptions leak to the agent. The one exception to that shape: a long
+knowledge-asset mutation that times out after reaching the daemon returns an
+``outcomeUnknown`` result (see ``_outcome_unknown``), not a failure.
 """
 
 from __future__ import annotations
@@ -46,7 +48,17 @@ for _ext, _ctype in _HERMES_MIMETYPE_OVERRIDES.items():
     mimetypes.add_type(_ctype, _ext, strict=True)
 
 _DEFAULT_URL = "http://127.0.0.1:9200"
-_TIMEOUT = 5  # seconds
+# Per-route timeout classes, in seconds. Reads and quick mutations answer from
+# local daemon state. The long synchronous knowledge-asset mutations (vm/publish,
+# swm/share, wm/import-file, and a create that also shares) hold the request open
+# far longer: vm/publish waits out the publisher's 120 s storage-ACK window
+# (ACK_TIMEOUT_MS in packages/publisher/src/ack-collector.ts) plus chain
+# confirmation. The daemon keeps working after the client disconnects, so a
+# timeout on those routes means "outcome unknown", never "failed". The long class
+# matches the TypeScript clients, which stay under the 300 s Node's fetch waits.
+_READ_TIMEOUT = 30
+_LONG_MUTATION_TIMEOUT = 240
+_LONG_MUTATION_VERBS = ("/vm/publish", "/swm/share", "/wm/import-file")
 _MAX_IMPORT_FILE_BYTES = 25 * 1024 * 1024
 _CONTEXT_GRAPH_URI_PREFIX = "did:dkg:context-graph:"
 _CG_ID_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
@@ -171,6 +183,47 @@ def _client_result_failed(result: Any) -> bool:
     return result.get("success") is False or result.get("ok") is False or bool(result.get("error"))
 
 
+def _is_long_mutation(path: str, data: Any) -> bool:
+    """Whether a POST is one of the long synchronous knowledge-asset mutations.
+
+    A create one-shot with ``alsoShareSwm`` runs the share inside
+    ``POST /api/knowledge-assets``, so it takes the same class.
+    """
+    if path.startswith("/api/knowledge-assets/") and path.endswith(_LONG_MUTATION_VERBS):
+        return True
+    return path == "/api/knowledge-assets" and isinstance(data, dict) and data.get("alsoShareSwm") is True
+
+
+def _is_read_timeout(exc: BaseException) -> bool:
+    """True when the request reached the daemon but no response arrived in time.
+
+    ``ConnectTimeout`` (the daemon was never reached) is a ``Timeout`` too, but
+    never a ``ReadTimeout``, so it stays a definite failure.
+    """
+    try:
+        from requests.exceptions import ReadTimeout
+    except Exception:
+        return False
+    return isinstance(exc, ReadTimeout)
+
+
+def _outcome_unknown(path: str, timeout: float) -> Dict[str, Any]:
+    """Result for a long mutation that timed out after reaching the daemon.
+
+    Carries no ``success: False``/``error``, so ``_client_result_failed`` does not
+    treat it as a failure: the operation may still complete daemon-side, and a
+    blind retry can 409 against it.
+    """
+    return {
+        "outcomeUnknown": True,
+        "warning": (
+            f"Outcome unknown: the DKG daemon did not answer POST {path} within {timeout:g}s. "
+            "It keeps working after the client disconnects, so the operation may still "
+            "complete. Check dkg_knowledge_asset_history for this knowledge asset before retrying."
+        ),
+    }
+
+
 def _to_write_quads(quads: List[Dict[str, str]]) -> List[Dict[str, str]]:
     """Map each quad to exactly {subject, predicate, object} for a WM write.
 
@@ -240,11 +293,14 @@ def _load_auth_token(dkg_home: Optional[str] = None) -> Optional[str]:
 class DKGClient:
     """HTTP client for DKG V10 daemon."""
 
-    def __init__(self, base_url: str = _DEFAULT_URL, timeout: int = _TIMEOUT,
+    def __init__(self, base_url: str = _DEFAULT_URL, timeout: float = _READ_TIMEOUT,
                  import_roots: Optional[List[str]] = None,
-                 dkg_home: Optional[str] = None):
+                 dkg_home: Optional[str] = None,
+                 long_mutation_timeout: float = _LONG_MUTATION_TIMEOUT):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        # A generous read timeout never shortens the long routes.
+        self.long_mutation_timeout = max(long_mutation_timeout, timeout)
         self._dkg_home = dkg_home
         self._token = _load_auth_token(dkg_home)
         self._session = None  # lazy
@@ -277,16 +333,26 @@ class DKGClient:
         except Exception as e:
             return {"success": False, "error": redact_text(str(e), self._token)}
 
+    def _timeout_for(self, long_mutation: bool) -> Any:
+        # (connect, read): connecting keeps the short deadline, because a daemon
+        # that was never reached never received the request.
+        if long_mutation:
+            return (self.timeout, self.long_mutation_timeout)
+        return self.timeout
+
     def _post(self, path: str, data: Dict[str, Any] = None) -> Dict[str, Any]:
+        long_mutation = _is_long_mutation(path, data)
         try:
             r = self._get_session().post(
                 f"{self.base_url}{path}",
                 data=json.dumps(data or {}),
-                timeout=self.timeout,
+                timeout=self._timeout_for(long_mutation),
             )
             r.raise_for_status()
             return r.json()
         except Exception as e:
+            if long_mutation and _is_read_timeout(e):
+                return _outcome_unknown(path, self.long_mutation_timeout)
             response = getattr(e, "response", None)
             if response is not None:
                 try:
@@ -649,6 +715,7 @@ class DKGClient:
         sub_graph_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """POST /api/knowledge-assets/{name}/wm/import-file — upload a local document."""
+        route = f"/api/knowledge-assets/{quote(assertion_name, safe='')}/wm/import-file"
         try:
             try:
                 path = Path(file_path).expanduser().resolve(strict=True)
@@ -681,15 +748,17 @@ class DKGClient:
                 files = {"file": (path.name, fh, guessed_type)}
                 import requests
                 r = requests.post(
-                    f"{self.base_url}/api/knowledge-assets/{quote(assertion_name, safe='')}/wm/import-file",
+                    f"{self.base_url}{route}",
                     data=data,
                     files=files,
                     headers=headers,
-                    timeout=self.timeout,
+                    timeout=self._timeout_for(True),
                 )
             r.raise_for_status()
             return r.json()
         except Exception as e:
+            if _is_read_timeout(e):
+                return _outcome_unknown(route, self.long_mutation_timeout)
             return {"success": False, "error": redact_text(str(e), self._token)}
 
     def _import_path_allowed(self, path: Path) -> bool:

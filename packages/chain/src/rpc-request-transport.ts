@@ -14,20 +14,76 @@ import type {
   Network,
   Networkish,
 } from 'ethers';
-import { errorMessage } from './evm-adapter-errors.js';
-import { createRpcTimeoutError } from './chain-rpc-transport-error.js';
+import { errorCode, errorMessage } from './evm-adapter-errors.js';
+import {
+  createRpcAdmissionTimeoutError,
+  createRpcTimeoutError,
+} from './chain-rpc-transport-error.js';
+import {
+  captureRpcUsageIssuerContext,
+  withRpcUsageIssuerContext,
+  type RpcUsageIssuerContext,
+} from './rpc-usage.js';
+import { rpcRequestAbortReason } from './rpc-request-abort.js';
+import { chainRpcFetch } from './rpc-http1-dispatcher.js';
+import { recordRpcAdmissionWait, recordRpcEndpointLatency } from './rpc-request-timing.js';
 
 export type RpcRequestClass = 'foreground' | 'background';
+
+/**
+ * Internal admission priority for a read that must complete before its
+ * fail-closed security deadline. It changes queue order inside the request's
+ * own class, and in the background class the request is not held by the
+ * start-up delay. The request still consumes that class's ordinary rate
+ * budget.
+ */
+export type RpcRequestAdmissionPriority = 'authority';
+
+/**
+ * What one deadline-bound attempt has done at the HTTP boundary: requests still
+ * waiting for local admission, and requests that left the process. A nested
+ * deadline (a shared chainId validation inside an endpoint attempt) reports to
+ * every enclosing attempt as well.
+ */
+interface RpcAttemptProgress {
+  waitingForAdmission: number;
+  dispatched: number;
+  readonly enclosing?: RpcAttemptProgress;
+}
+
+function noteAttemptProgress(
+  progress: RpcAttemptProgress | undefined,
+  update: (attempt: RpcAttemptProgress) => void,
+): void {
+  for (let attempt = progress; attempt !== undefined; attempt = attempt.enclosing) {
+    update(attempt);
+  }
+}
+
+/** A response deadline starts after admission and includes the complete body. */
+export interface RpcResponseStallPolicy {
+  readonly timeoutMs: number;
+  readonly onTimeout?: (error: Error) => void;
+}
 
 /** One raw-RPC policy context: priority and cancellation cannot drift apart. */
 export interface RpcRequestContext {
   readonly requestClass: RpcRequestClass;
+  readonly admissionPriority?: RpcRequestAdmissionPriority;
   readonly signal?: AbortSignal;
+  /** Transient caller observer, notified only after its raw RPC succeeds. */
+  readonly onProgress?: () => void;
+  readonly responseStallPolicy?: RpcResponseStallPolicy;
+  /** Set by {@link withRpcRequestTimeout}; nested scopes inherit it. */
+  readonly attemptProgress?: RpcAttemptProgress;
 }
 
 export interface RpcRequestContextInput {
   readonly requestClass?: RpcRequestClass;
+  readonly admissionPriority?: RpcRequestAdmissionPriority;
   readonly signal?: AbortSignal;
+  readonly onProgress?: () => void;
+  readonly responseStallPolicy?: RpcResponseStallPolicy;
 }
 
 const rpcRequestContext = new AsyncLocalStorage<RpcRequestContext>();
@@ -42,15 +98,22 @@ export function activeRpcRequestContext(): RpcRequestContext {
  */
 export function withRpcRequestContext<T>(input: RpcRequestContextInput, fn: () => T): T {
   const parent = activeRpcRequestContext();
+  const admissionPriority = input.admissionPriority ?? parent.admissionPriority;
   const inheritedSignal = parent.signal;
   const signal = inheritedSignal === undefined
     ? input.signal
     : input.signal === undefined || input.signal === inheritedSignal
       ? inheritedSignal
       : AbortSignal.any([inheritedSignal, input.signal]);
+  const onProgress = input.onProgress ?? parent.onProgress;
+  const responseStallPolicy = input.responseStallPolicy ?? parent.responseStallPolicy;
   return rpcRequestContext.run({
     requestClass: input.requestClass ?? parent.requestClass,
+    ...(admissionPriority === undefined ? {} : { admissionPriority }),
     ...(signal === undefined ? {} : { signal }),
+    ...(onProgress === undefined ? {} : { onProgress }),
+    ...(responseStallPolicy === undefined ? {} : { responseStallPolicy }),
+    ...(parent.attemptProgress === undefined ? {} : { attemptProgress: parent.attemptProgress }),
   }, fn);
 }
 
@@ -63,11 +126,47 @@ export function withOwnedRpcRequestContext<T>(
   input: RpcRequestContextInput,
   fn: () => T,
 ): T {
+  return runOwnedRpcRequestContext(input, activeRpcRequestContext().attemptProgress, fn);
+}
+
+function runOwnedRpcRequestContext<T>(
+  input: RpcRequestContextInput,
+  attemptProgress: RpcAttemptProgress | undefined,
+  fn: () => T,
+): T {
   const parent = activeRpcRequestContext();
+  const admissionPriority = input.admissionPriority ?? parent.admissionPriority;
   return rpcRequestContext.run({
     requestClass: input.requestClass ?? parent.requestClass,
+    ...(admissionPriority === undefined ? {} : { admissionPriority }),
     ...(input.signal === undefined ? {} : { signal: input.signal }),
+    // Owned physical/background work cannot keep a first waiter's observer.
+    ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),
+    // Shared owners must explicitly choose their own response policy; never
+    // inherit a first waiter's endpoint controller or physical deadline.
+    ...(input.responseStallPolicy === undefined ? {} : { responseStallPolicy: input.responseStallPolicy }),
+    ...(attemptProgress === undefined ? {} : { attemptProgress }),
   }, fn);
+}
+
+/**
+ * Run adapter-owned shared work outside every caller's request policy: no
+ * inherited priority, cancellation, observer, attempt accounting or usage
+ * attribution. A request that serves several callers at once has none of
+ * theirs; each of them waits for it under its own.
+ */
+export function withDetachedRpcRequestContext<T>(requestClass: RpcRequestClass, fn: () => T): T {
+  return rpcRequestContext.run({ requestClass }, () => withRpcUsageIssuerContext({}, fn));
+}
+
+/**
+ * Bind `fn` to the request policy and usage attribution active right now, for
+ * work its caller issues but another async context runs later on its behalf.
+ */
+export function bindActiveRpcRequestScope<T>(fn: () => T): () => T {
+  const request = activeRpcRequestContext();
+  const usage = captureRpcUsageIssuerContext();
+  return () => rpcRequestContext.run(request, () => withRpcUsageIssuerContext(usage, fn));
 }
 
 export function activeRpcRequestAbortSignal(): AbortSignal | undefined {
@@ -76,10 +175,12 @@ export function activeRpcRequestAbortSignal(): AbortSignal | undefined {
 
 /** Normalize caller/deadline cancellation consistently at every transport gate. */
 export function throwRpcRequestAbortReason(signal: AbortSignal): never {
-  if (signal.reason instanceof Error) throw signal.reason;
-  const error = new Error(typeof signal.reason === 'string' ? signal.reason : 'RPC request aborted');
-  error.name = 'AbortError';
-  throw error;
+  throw rpcRequestAbortReason(signal);
+}
+
+/** Native deadline errors and ethers response timeouts end a stalled endpoint. */
+export function isRpcRequestTimeout(error: unknown): boolean {
+  return ['RPC_TIMEOUT', 'TIMEOUT', 'TIMEOUT_ERROR'].includes(errorCode(error));
 }
 
 /**
@@ -87,6 +188,11 @@ export function throwRpcRequestAbortReason(signal: AbortSignal): never {
  * visible both to governor admission and to the concrete HTTP transport, while
  * the explicit race keeps the caller's timeout prompt even if third-party code
  * is temporarily between cancellable stages (for example in retry backoff).
+ *
+ * A deadline that expires while the attempt's request still waits for local
+ * governor admission, with nothing sent yet, says nothing about the endpoint:
+ * it rejects with the local-capacity code instead of a timeout, so failover
+ * neither blames this endpoint nor queues again behind the same governor.
  */
 export async function withRpcRequestTimeout<T>(
   timeoutMs: number,
@@ -99,11 +205,28 @@ export async function withRpcRequestTimeout<T>(
     ? timeoutController.signal
     : AbortSignal.any([parentSignal, timeoutController.signal]);
   const timeoutError = createRpcTimeoutError(`${label} timed out after ${timeoutMs}ms`);
+  const enclosing = activeRpcRequestContext().attemptProgress;
+  const progress: RpcAttemptProgress = {
+    waitingForAdmission: 0,
+    dispatched: 0,
+    ...(enclosing === undefined ? {} : { enclosing }),
+  };
   const timer = setTimeout(() => timeoutController.abort(timeoutError), timeoutMs);
   timer.unref?.();
   let onAbort: (() => void) | undefined;
   const aborted = new Promise<never>((_resolve, reject) => {
     onAbort = () => {
+      if (
+        timeoutController.signal.aborted
+        && progress.dispatched === 0
+        && progress.waitingForAdmission > 0
+      ) {
+        reject(createRpcAdmissionTimeoutError(
+          `${label} waited ${timeoutMs}ms for local RPC admission and was not sent`,
+          { cause: timeoutError },
+        ));
+        return;
+      }
       try {
         throwRpcRequestAbortReason(signal);
       } catch (error) {
@@ -114,7 +237,10 @@ export async function withRpcRequestTimeout<T>(
     if (signal.aborted) onAbort();
   });
   try {
-    const attempt = Promise.resolve(withOwnedRpcRequestContext({ signal }, fn));
+    const attempt = Promise.resolve(runOwnedRpcRequestContext({
+      signal,
+      onProgress: activeRpcRequestContext().onProgress,
+    }, progress, fn));
     return await Promise.race([attempt, aborted]);
   } finally {
     clearTimeout(timer);
@@ -185,7 +311,7 @@ export const cancellableRpcGetUrl: FetchGetUrlFunc = async (
       requestBody = new ArrayBuffer(request.body.length);
       new Uint8Array(requestBody).set(request.body);
     }
-    const response = await fetch(request.url, {
+    const response = await chainRpcFetch(request.url, {
       method: request.method,
       headers: request.headers,
       body: requestBody,
@@ -279,6 +405,8 @@ export interface RpcRequestProviderConfig {
   readonly endpointSlot?: number;
   readonly admission?: RpcRequestAdmission;
   readonly onRequest?: (method: string, endpointSlot?: number) => void;
+  /** Provider-owned chain-ID response cap; discovery/validation share no caller owner. */
+  readonly discoveryStallTimeoutMs?: number;
 }
 
 function methodsFromRequestBody(body: Uint8Array | null | undefined): string[] {
@@ -301,7 +429,19 @@ async function admitAndObserveRpcAttempt(
   methods: readonly string[],
   transport: Pick<RpcRequestProviderConfig, 'admission' | 'onRequest' | 'endpointSlot'>,
 ): Promise<void> {
-  for (const _method of methods) await transport.admission?.acquireActiveRequest();
+  const progress = activeRpcRequestContext().attemptProgress;
+  if (transport.admission !== undefined) {
+    noteAttemptProgress(progress, (attempt) => { attempt.waitingForAdmission += 1; });
+    const waitStartedAt = performance.now();
+    try {
+      for (const _method of methods) await transport.admission.acquireActiveRequest();
+      // Observation only: a refused or cancelled wait is not an admitted attempt.
+      recordRpcAdmissionWait(activeRpcRequestContext().requestClass, performance.now() - waitStartedAt);
+    } finally {
+      noteAttemptProgress(progress, (attempt) => { attempt.waitingForAdmission -= 1; });
+    }
+  }
+  noteAttemptProgress(progress, (attempt) => { attempt.dispatched += 1; });
   try {
     for (const method of methods) {
       transport.onRequest?.(method, transport.endpointSlot);
@@ -328,7 +468,31 @@ function createRpcProviderRequest(
       );
     }
     await admitAndObserveRpcAttempt(methods, config);
-    return cancellableRpcGetUrl(attemptRequest, signal);
+    // Observation only: time the endpoint round trip separately from the local
+    // admission wait above so a slow answer is never mistaken for a throttled one.
+    const requestClass = activeRpcRequestContext().requestClass;
+    const responsePolicy = activeRpcRequestContext().responseStallPolicy
+      ?? (methods.length === 1 && methods[0] === 'eth_chainId'
+        && config.discoveryStallTimeoutMs !== undefined
+        ? { timeoutMs: config.discoveryStallTimeoutMs } : undefined);
+    const callerSignal = activeRpcRequestAbortSignal();
+    const sentAt = performance.now();
+    let answered = false;
+    try {
+      const fetchResponse = () => cancellableRpcGetUrl(attemptRequest, signal);
+      const response = responsePolicy === undefined
+        ? await fetchResponse()
+        : await withRpcRequestTimeout(responsePolicy.timeoutMs, 'RPC response', fetchResponse);
+      answered = response.statusCode >= 200 && response.statusCode < 300;
+      return response;
+    } catch (error) {
+      if (!callerSignal?.aborted && isRpcRequestTimeout(error) && error instanceof Error) {
+        responsePolicy?.onTimeout?.(error);
+      }
+      throw error;
+    } finally {
+      recordRpcEndpointLatency(requestClass, performance.now() - sentAt, answered);
+    }
   };
   return request;
 }
@@ -364,31 +528,61 @@ function configuredProviderOptions(
  * debug/error events, destruction checks, response matching, and RPC errors.
  */
 class RequestContextJsonRpcProvider extends JsonRpcProvider {
-  readonly #pendingRequestContexts: Array<{ readonly context: RpcRequestContext }> = [];
+  readonly #discoveryAbortController = new AbortController();
+  readonly #pendingRequestContexts: Array<{
+    readonly request: RpcRequestContext;
+    readonly usage: RpcUsageIssuerContext;
+  }> = [];
+
+  override destroy(): void {
+    try {
+      // Mark ethers destroyed before cancellation resumes its discovery loop.
+      super.destroy();
+    } finally {
+      this.#discoveryAbortController.abort();
+    }
+  }
 
   override _detectNetwork(): Promise<Network> {
     // Network discovery belongs to the provider lifecycle. It can be triggered
     // synchronously by the first caller's `_start()`, but must not inherit that
-    // caller's deadline and leave the shared provider retrying forever inside
-    // an already-aborted context.
+    // caller's deadline or consumer label and leave the shared provider
+    // retrying forever inside an already-aborted context (or billing a shared
+    // `eth_chainId` probe to that caller). Its own signal retires admission,
+    // HTTP, and retry backoff when the provider is destroyed.
     return rpcRequestContext.run(
-      { requestClass: 'foreground' },
-      () => super._detectNetwork(),
+      { requestClass: 'foreground', signal: this.#discoveryAbortController.signal },
+      () => withRpcUsageIssuerContext({}, () => super._detectNetwork()),
     );
+  }
+
+  override async getNetwork(): Promise<Network> {
+    // Check before starting shared discovery; cancellation belongs to this
+    // waiter while the provider continues to own the shared physical request.
+    const signal = activeRpcRequestAbortSignal();
+    if (signal?.aborted) throwRpcRequestAbortReason(signal);
+    return waitForActiveRpcRequest(super.getNetwork());
   }
 
   override async send(
     method: string,
     params: Array<unknown> | Record<string, unknown>,
   ): Promise<unknown> {
-    const pending = { context: activeRpcRequestContext() };
+    const pending = {
+      request: activeRpcRequestContext(),
+      usage: captureRpcUsageIssuerContext(),
+    };
     // JsonRpcProvider.send performs this same lazy start before delegating. Do
     // it first so bootstrap network detection cannot consume a user payload's
     // queued context, then delegate the complete request lifecycle unchanged.
     await this._start();
     this.#pendingRequestContexts.push(pending);
     try {
-      return await super.send(method, params);
+      const result = await super.send(method, params);
+      if (!pending.request.signal?.aborted) {
+        try { pending.request.onProgress?.(); } catch { /* observer cannot change RPC outcome */ }
+      }
+      return result;
     } finally {
       // Destruction can reject a queued request before `_send` consumes it.
       const index = this.#pendingRequestContexts.indexOf(pending);
@@ -401,7 +595,10 @@ class RequestContextJsonRpcProvider extends JsonRpcProvider {
   ): Promise<Array<JsonRpcResult>> {
     const pending = this.#pendingRequestContexts.shift();
     if (!pending) return super._send(payload);
-    return rpcRequestContext.run(pending.context, () => super._send(payload));
+    return rpcRequestContext.run(
+      pending.request,
+      () => withRpcUsageIssuerContext(pending.usage, () => super._send(payload)),
+    );
   }
 }
 
@@ -410,6 +607,10 @@ export function createRpcRequestProvider(
   url: string,
   config: RpcRequestProviderConfig,
 ): JsonRpcProvider {
+  if (config.discoveryStallTimeoutMs !== undefined
+    && (!Number.isFinite(config.discoveryStallTimeoutMs) || config.discoveryStallTimeoutMs <= 0)) {
+    throw new RangeError('Discovery response deadline must be positive and finite');
+  }
   // Context ownership is defined for one caller per physical request. Do not
   // silently switch to a plain batching provider when a caller changes a
   // throughput option: use createBatchedRpcRequestProvider explicitly when

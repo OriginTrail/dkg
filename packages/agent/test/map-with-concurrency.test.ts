@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import {
   everyWithConcurrency,
   mapWithConcurrency,
+  mapWithConcurrencyDrained,
   mapWithConcurrencySettled,
 } from '../src/map-with-concurrency.js';
 import { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from '../src/sync/catchup-concurrency.js';
@@ -157,5 +158,62 @@ describe('mapWithConcurrency', () => {
   it('default concurrency is a small positive cap', () => {
     expect(CATCHUP_MAX_CONCURRENT_PEER_SYNCS).toBeGreaterThan(0);
     expect(CATCHUP_MAX_CONCURRENT_PEER_SYNCS).toBeLessThanOrEqual(16);
+  });
+});
+
+describe('mapWithConcurrencyDrained', () => {
+  it('preserves input order and the concurrency bound', async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const out = await mapWithConcurrencyDrained([10, 20, 30, 40, 50], 2, async (n, i) => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      // Later items resolve first: the output must still be in input order.
+      await new Promise((r) => setTimeout(r, (5 - i) * 3));
+      inFlight--;
+      return n * 2;
+    });
+    expect(out).toEqual([20, 40, 60, 80, 100]);
+    expect(peak).toBe(2);
+    expect(await mapWithConcurrencyDrained([], 2, async () => 1)).toEqual([]);
+    // A non-positive bound runs every item at once, like the plain map.
+    expect(await mapWithConcurrencyDrained([1, 2, 3], 0, async (n) => n + 1)).toEqual([2, 3, 4]);
+  });
+
+  it('starts nothing after a rejection and rejects only once the running callbacks have finished', async () => {
+    const started: number[] = [];
+    const finished: number[] = [];
+    let releaseSibling!: () => void;
+    const siblingGate = new Promise<void>((resolve) => { releaseSibling = resolve; });
+    let settled = false;
+
+    const run = mapWithConcurrencyDrained([0, 1, 2, 3, 4], 2, async (n) => {
+      started.push(n);
+      if (n === 0) throw new Error('item 0 failed');
+      await siblingGate;
+      finished.push(n);
+      return n;
+    }).finally(() => { settled = true; });
+    run.catch(() => undefined);
+
+    await tick();
+    // Item 0 threw and item 1 is still running: the call is not settled yet,
+    // and nothing after item 1 was started.
+    expect(started).toEqual([0, 1]);
+    expect(settled).toBe(false);
+
+    releaseSibling();
+    await expect(run).rejects.toThrow('item 0 failed');
+    expect(finished).toEqual([1]);
+    expect(started).toEqual([0, 1]);
+  });
+
+  it('rejects with the first error when several callbacks fail', async () => {
+    const run = mapWithConcurrencyDrained([0, 1, 2], 3, async (n) => {
+      await new Promise((r) => setTimeout(r, (3 - n) * 3));
+      throw new Error(`item ${n} failed`);
+    });
+    // Item 2 fails first in time; that is the error the call reports.
+    await expect(run).rejects.toThrow('item 2 failed');
   });
 });

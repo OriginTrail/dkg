@@ -46,6 +46,22 @@ function asset(index: number): { ual: string; graph: string; quads: Quad[] } {
 }
 
 describe('exact asset responder', () => {
+  it('scopes META manifest reads to the selected confirmed asset despite an unrelated corrupt marker', async () => {
+    const store = new OxigraphStore();
+    try {
+      const requested = asset(1); const unrelated = asset(2);
+      await store.insert([...requested.quads, ...unrelated.quads.map(quad =>
+        quad.predicate === `${DKG}contentScopeVersion` ? { ...quad, object: '"999"' } : quad)]);
+      const meta = await readDurableMetaPage({ store, contextGraphId: CG_ID, registeredSubGraphNames: [],
+        offset: 0, limit: 100, assetUals: [requested.ual] });
+      expect(meta).toHaveLength(8);
+      expect(new Set(meta.map(row => row.s))).toEqual(new Set([requested.ual]));
+      expect(meta).toEqual(expect.arrayContaining(requested.quads.filter(quad => quad.graph === contextGraphMetaGraphUri(CG_ID))
+        .map(quad => ({ g: quad.graph, s: quad.subject, p: quad.predicate, o: quad.object }))));
+      expect(meta.some(row => row.s === unrelated.ual)).toBe(false);
+    } finally { await store.close(); }
+  });
+
   it('serves only the requested confirmed descriptor and immutable data graph', async () => {
     const store = new OxigraphStore();
     const requested = asset(1);

@@ -252,7 +252,7 @@ export class Rfc64SeedFetchMethods extends DKGAgentBase {
       }
     }
     const hinted = new Set(selected);
-    const isCore = (peerId: string) => this.knownCorePeerIds?.has(peerId) === true;
+    const isCore = (peerId: string) => this.peerCapabilityRegistry?.supportsCore(peerId) === true;
     const cores: string[] = [];
     const nonCores: string[] = [];
     for (const peerId of admitted) {

@@ -28,6 +28,13 @@ operation scan after a restart and again on each sweep. The emergency switches
 worked because they reduced aggregate admission and removed three retry
 producers; they did not remove the underlying overlap or materialization shape.
 
+Later change: chain reconcile no longer scans workspace operations at all, and
+finalization no longer reads shared memory by root entity. A KA with no local
+graph-scoped state answers `no-swm` and is fetched from peers; a finalization
+message that is not graph-scoped is ignored. The handler memo, the scan
+single-flight of item 1, the finalization slice paging of item 2 and the two
+`scan_singleflight` metrics below went with those reads.
+
 ## Implemented boundaries
 
 1. Equivalent finalization and chain-reconcile scans are keyed single-flights.

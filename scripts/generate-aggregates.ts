@@ -12,7 +12,7 @@ import { ethers } from 'ethers';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 
-const SNAPSHOTS_DIR = path.join(__dirname, '..', 'snapshots');
+const SNAPSHOTS_DIR = path.join(__dirname, '..', 'misc', 'snapshots');
 
 const chains = [
   { name: 'base', file: 'base_publisher_snapshot_epoch16.json' },

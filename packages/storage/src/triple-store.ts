@@ -88,6 +88,10 @@ export interface StorePressureSnapshot {
   normalReservedSlots?: number;
   healthReservedSlots?: number;
   backgroundReservedSlots?: number;
+  /** Operations of the normal lane admitted at once. */
+  normalInflightLimit?: number;
+  /** Operations of the background lane admitted at once. */
+  backgroundInflightLimit?: number;
 }
 
 export interface QueryOptions {
@@ -114,6 +118,17 @@ export interface QueryOptions {
 
 export type TripleStoreQueryOptions = QueryOptions;
 
+/**
+ * Enforces query maxResponseBytes while reading the response body, before
+ * JSON or RDF result materialization. Successful SELECT/ASK/CONSTRUCT/DESCRIBE
+ * responses above the supplied byte limit reject with StoreResponseTooLargeError.
+ * Error response bodies must also stay bounded before failure formatting.
+ */
+export interface BoundedQueryResponseCapability {
+  readonly queryResponseLimitMode: 'pre-materialization';
+  query(sparql: string, options?: QueryOptions): Promise<QueryResult>;
+}
+
 export interface Rfc64SharedProjectionStreamCapabilityOptionsV1 {
   /** Gateway-derived minimum of signed, operator, and protocol ceilings. */
   readonly byteCeiling: number;
@@ -138,6 +153,9 @@ export interface UpdateOptions extends QueryOptions {
 }
 
 export interface TripleStore {
+  /** Present only when query response limits are enforced before decoding. */
+  readonly queryResponseLimitMode?: BoundedQueryResponseCapability['queryResponseLimitMode'];
+
   /**
    * Whether `query(..., { signal })` can reject while a query is already in
    * flight (`interruptible`) or can only observe cancellation before dispatch
@@ -309,6 +327,16 @@ export function findTripleStoreCapability<T>(
     candidate = (candidate as { innerStore?: unknown }).innerStore;
   }
   return null;
+}
+
+/** Discover response-limit enforcement without bypassing the outer query path. */
+export function asBoundedQueryResponseCapability(store: unknown): BoundedQueryResponseCapability | null {
+  return findTripleStoreCapability(store, (candidate): candidate is BoundedQueryResponseCapability => (
+    typeof candidate === 'object'
+    && candidate !== null
+    && (candidate as Partial<BoundedQueryResponseCapability>).queryResponseLimitMode === 'pre-materialization'
+    && typeof (candidate as Partial<BoundedQueryResponseCapability>).query === 'function'
+  ));
 }
 
 /**

@@ -18,8 +18,12 @@
  * admits candidate rows or activates KA / SWM / VM state.
  */
 
+import { type Rfc64CatalogTargetLeaseV1, Rfc64CatalogTargetTrackerV1, rfc64CatalogTargetExactIdentityKeyV1 } from './rfc64/catalog-operational-targets-v1.js';
+import { evaluateRfc64CatalogCompletionV1 } from './rfc64/catalog-completion-evidence-v1.js';
+export { RFC64_CATALOG_TARGET_MAX_ENTRIES_V1, RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1, type Rfc64CatalogTargetLeaseV1, Rfc64CatalogTargetTrackerV1, rfc64CatalogTargetExactIdentityKeyV1, projectRfc64OperationalRowCountsV1 } from './rfc64/catalog-operational-targets-v1.js';
 import {
   SYSTEM_CONTEXT_GRAPHS,
+  DKGEvent,
   ZERO_DIGEST32_V1,
   MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   contextGraphDataGraphUri,
@@ -59,13 +63,20 @@ import {
   verifyControlEnvelopeIssuerSignatureV1,
   withRpcRequestContext,
   type ContextGraphAuthorityIndexId,
+  type ContextGraphAuthorityIndexRevisionReader,
   type ContextGraphAuthoritySnapshot,
   type ContextGraphAuthorityReader,
   type ContextGraphAuthorityReaderCapability,
 } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import { DKGAgentBase } from './dkg-agent-base.js';
+import { resolveChainFinalityConfirmationsV1 } from './chain-finality-confirmations-v1.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { yieldMainThread } from './main-thread-time-slice.js';
+import {
+  isApprovedPrivateReplicaDelegationActive,
+  resolveApprovedPrivateReplicaAuthority,
+} from './approved-private-replica.js';
 import {
   Rfc64CatalogReplayConnectionRuntimeV1,
   type Rfc64CatalogReplayConnectionReservationV1,
@@ -79,7 +90,6 @@ export { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from
   './rfc64/catalog-limits-v1.js';
 import { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from
   './rfc64/catalog-limits-v1.js';
-import { mapWithConcurrency } from './map-with-concurrency.js';
 import type { Rfc64AuthorCatalogEip191SignerV1 } from './rfc64/author-catalog-producer.js';
 import type { Rfc64CatalogShadowExecutionStatusV1 } from
   './rfc64/catalog-shadow-observability-v1.js';
@@ -88,9 +98,12 @@ import {
   snapshotRfc64CatalogDeploymentProfileV1,
 } from './rfc64/catalog-authority-config-v1.js';
 import type { AcceptedOpenCatalogPolicyV1 } from './rfc64/open-catalog-policy-v1.js';
-import type {
-  AcceptRfc64CatalogAccessSnapshotInputV1,
-  AcceptedRfc64CatalogAccessSnapshotV1,
+import { rfc64CatalogLookupFailedAsV1 } from './rfc64/catalog-policy-decision-probe-v1.js';
+import {
+  resolveRfc64CatalogAuthorizationRosterV1,
+  type AcceptRfc64CatalogAccessSnapshotInputV1,
+  type AcceptedRfc64CatalogAccessSnapshotV1,
+  type Rfc64CatalogLocalAuthorizationScopeV1,
 } from './rfc64/catalog-access-policy-v1.js';
 import type {
   Rfc64PublicCatalogCurrentReceiverReconcilerV1,
@@ -126,10 +139,18 @@ import {
 } from './rfc64/catalog-synchronization-evidence-v1.js';
 import {
   createRfc64BoundedPublicRootCatalogNativeReconcilerV1,
+  createRfc64VerifiedStagedCatalogHeadMemoV1,
   type Rfc64BoundedPublicRootCatalogNativeReceiverClientV1,
   type Rfc64BoundedPublicRootCatalogDeploymentResolverV1,
 } from './rfc64/public-catalog-native-reconciler-v1.js';
 import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
+import {
+  loadRfc64OperationalAppliedHeadsV1,
+  rfc64CatalogTargetScopeKeyV1,
+  type Rfc64OperationalAppliedHeadV1,
+} from './rfc64/catalog-operational-applied-heads-v1.js';
+import { groupRfc64OperationalAppliedHeadsV1, loadRfc64OperationalPromisedRowCountsV1 } from './rfc64/catalog-operational-reads-v1.js';
+import { verifyPrivateCatalogSubscriptionReadinessV1 } from './rfc64/private-catalog-subscription-readiness-v1.js';
 import {
   type Rfc64PublicCatalogReconciliationFailureV1,
 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
@@ -142,6 +163,7 @@ import {
 } from './rfc64/public-catalog-successor-producer-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
+  RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
   Rfc64PublicCatalogTransportErrorV1,
   type Rfc64PublicCatalogHeadAnnouncementV1,
   type Rfc64PublicCatalogHeadReplayRequestV1,
@@ -155,16 +177,18 @@ import {
 } from './rfc64/public-catalog-activation-config-v1.js';
 import {
   Rfc64CatalogResponsibilityRegistryV1,
-  resolveRfc64CatalogResponsibilityReasonV1,
   type Rfc64CatalogResponsibilitySelectionV1,
 } from './rfc64/catalog-responsibility-registry-v1.js';
+import { Rfc64CatalogResponsibilityRosterV1 } from './internal/rfc64-catalog-responsibility-roster-v1.js';
 import {
+  projectRfc64CatalogTransportStateV1,
   rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1,
   type Rfc64CatalogRolloutModeV1,
 } from './rfc64/catalog-rollout-authority-v1.js';
-import type {
-  Rfc64AuthorityReadCoordinatorSnapshotV1,
-  Rfc64AuthorityReadRunOptionsV1,
+import {
+  isRfc64AuthorityRpcCircuitOpenErrorV1,
+  type Rfc64AuthorityReadCoordinatorSnapshotV1,
+  type Rfc64AuthorityReadRunOptionsV1,
 } from './rfc64/authority-rpc-circuit-breaker-v1.js';
 import {
   composeRfc64FinalizedCatalogAuthorityV1,
@@ -173,7 +197,10 @@ import {
   parseRfc64AuthoritySnapshotV1,
   type Rfc64ReleaseNativeAuthoritySnapshotV1,
 } from './rfc64/release-native-catalog-authority-v1.js';
-import { readRfc64LegacySwmBoundaryCountV1 } from
+import {
+  acquireRfc64LegacySwmBoundaryReceiverLeaseV1,
+  readRfc64LegacySwmBoundaryCountV1,
+} from
   './rfc64/legacy-swm-boundary-v1.js';
 import type { Rfc64CatalogMutationCoordinatorV1 } from
   './rfc64/catalog-mutation-runtime-v1.js';
@@ -194,6 +221,7 @@ import {
 } from './rfc64/catalog-authority-refresh-loop-v1.js';
 import { loadRfc64UnregisteredReplicaAuthorityV1 } from
   './rfc64/unregistered-replica-authority-v1.js';
+import type { ContextGraphSub } from './dkg-agent-types.js';
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
 export interface Rfc64CatalogAuthorSignerV1 {
@@ -207,64 +235,6 @@ export type Rfc64OpenCatalogAuthorSignerV1 = Rfc64CatalogAuthorSignerV1;
 const RFC64_PRIVATE_ROSTER_VERSION_PREDICATE_V1 =
   'https://dkg.network/ontology#rfc64RosterVersion';
 const RFC64_PRIVATE_ROSTER_VERSION_RADIX_V1 = 10_000_000_000_000n;
-const RFC64_OPERATIONAL_STATUS_HEAD_READ_CONCURRENCY_V1 = 8;
-
-interface Rfc64OperationalAppliedHeadV1 {
-  readonly snapshot: AppliedCatalogHeadSnapshotV1;
-  readonly issuedAt: TimestampMsV1;
-  readonly contextGraphId: string;
-  readonly scopeKey: string;
-}
-
-async function loadRfc64OperationalAppliedHeadsV1(
-  persistence: Rfc64PersistenceV1,
-): Promise<readonly Readonly<Rfc64OperationalAppliedHeadV1>[]> {
-  const snapshots = persistence.inventory.listAppliedCatalogHeadsV1();
-  const loaded = await mapWithConcurrency(
-    snapshots,
-    RFC64_OPERATIONAL_STATUS_HEAD_READ_CONCURRENCY_V1,
-    async (snapshot): Promise<Readonly<Rfc64OperationalAppliedHeadV1> | null> => {
-      const stored = await persistence.controlObjects.getVerifiedObjectByDigest({
-        objectDigest: snapshot.currentCatalogHeadDigest,
-        verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
-      }).catch(() => null);
-      if (stored === null) return null;
-      try {
-        assertSignedAuthorCatalogHeadEnvelopeV1(stored.envelope);
-      } catch {
-        return null;
-      }
-      const payload = stored.envelope.payload;
-      return Object.freeze({
-        snapshot,
-        issuedAt: payload.issuedAt,
-        contextGraphId: payload.contextGraphId,
-        scopeKey: rfc64CatalogTargetScopeKeyV1({
-          networkId: payload.networkId,
-          contextGraphId: payload.contextGraphId,
-          subGraphName: payload.subGraphName,
-          authorAddress: payload.authorAddress,
-          catalogEra: payload.era,
-        }),
-      });
-    },
-  );
-  return Object.freeze(loaded.filter(
-    (head): head is Readonly<Rfc64OperationalAppliedHeadV1> => head !== null,
-  ));
-}
-
-function groupRfc64OperationalAppliedHeadsV1(
-  heads: readonly Readonly<Rfc64OperationalAppliedHeadV1>[],
-): ReadonlyMap<string, readonly Readonly<Rfc64OperationalAppliedHeadV1>[]> {
-  const byContextGraph = new Map<string, Readonly<Rfc64OperationalAppliedHeadV1>[]>();
-  for (const head of heads) {
-    const grouped = byContextGraph.get(head.contextGraphId) ?? [];
-    grouped.push(head);
-    byContextGraph.set(head.contextGraphId, grouped);
-  }
-  return byContextGraph;
-}
 
 export interface AcceptOpenContextGraphPolicyInputV1 {
   readonly networkId: NetworkIdV1;
@@ -344,6 +314,10 @@ export {
   snapshotRfc64PublicCatalogAutoPublishConfigV1,
   snapshotRfc64PublicCatalogBootstrapConfigV1,
 } from './rfc64/catalog-authority-config-v1.js';
+import {
+  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
+  withRpcUsageSite,
+} from '@origintrail-official/dkg-chain';
 
 export interface PublishOpenAuthorCatalogSuccessorParamsV1 {
   /** Exact durable predecessor returned by genesis or a prior successor. */
@@ -376,6 +350,8 @@ export interface PublishAuthorCatalogExactSetSuccessorParamsV1 {
   readonly deployment: CatalogSealDeploymentProfileV1;
   readonly issuedAt?: TimestampMsV1;
   readonly peers: readonly string[];
+  /** Stops the production of the successor before anything is staged. */
+  readonly signal?: AbortSignal;
 }
 
 export type Rfc64OpenCatalogSuccessorAssetInputV1 =
@@ -395,7 +371,7 @@ export interface PublishOpenAuthorCatalogSuccessorResultV1 {
   readonly kaUal: string;
   readonly inventoryRowCount: CountV1;
   readonly announcedPeers: readonly string[];
-  readonly failedPeers: ReadonlyArray<{ readonly peerId: string; readonly error: string }>;
+  readonly failedPeers: AnnounceRfc64PublicCatalogHeadResultV1['failedPeers'];
 }
 
 export interface PublishAuthorCatalogSuccessorAssetResultV1 {
@@ -426,7 +402,7 @@ export interface PublishAuthorCatalogExactSetSuccessorResultV1 {
   readonly assets: readonly Readonly<PublishAuthorCatalogSuccessorAssetResultV1>[];
   readonly inventoryRowCount: CountV1;
   readonly announcedPeers: readonly string[];
-  readonly failedPeers: ReadonlyArray<{ readonly peerId: string; readonly error: string }>;
+  readonly failedPeers: AnnounceRfc64PublicCatalogHeadResultV1['failedPeers'];
 }
 
 export type PublishOpenAuthorCatalogSuccessorAssetResultV1 =
@@ -519,10 +495,30 @@ const rfc64CatalogAuthorityRevisionsV1 =
 const rfc64AuthorityAcceptedCatchupTimersV1 =
   new WeakMap<DKGAgent, ReturnType<typeof setTimeout>>();
 const rfc64DirectAcceptedCompatibilityV1 = new WeakMap<DKGAgent, Set<string>>();
+/**
+ * Context graphs whose accepted policy was composed from a private join
+ * approval rather than from owner-signed or finalized evidence. The approval
+ * proof is time-limited and bound to one request generation, so this
+ * authority may run catalog responsibility but never stands in for the live
+ * proof on reads or shared-memory access.
+ */
+const rfc64JoinDerivedAcceptedAuthorityV1 = new WeakMap<DKGAgent, Set<string>>();
 const rfc64ResponsibilityAuthorityBatchRuntimesV1 =
   new WeakMap<DKGAgent, Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1>();
+interface Rfc64ScheduledFinalizedAbsenceRetryV1 {
+  readonly contextGraphId: string;
+  readonly revision: number;
+  readonly attempt: number;
+  readonly delayMs: number;
+  /** Unique ownership key; attempt identity must never be reconstructed by callers. */
+  readonly key: string;
+}
 interface Rfc64ScheduledResponsibilityStateV1 {
   readonly targets: Map<string, number>;
+  readonly finalizedAbsenceRetries: Map<
+    string,
+    Readonly<Rfc64ScheduledFinalizedAbsenceRetryV1>
+  >;
   activityRevision: number;
   producerHolds: number;
 }
@@ -530,13 +526,99 @@ const rfc64ScheduledResponsibilityStatesV1 =
   new WeakMap<DKGAgent, Rfc64ScheduledResponsibilityStateV1>();
 const rfc64SystemContextGraphIdsV1 = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS));
 const RFC64_SCHEDULED_RESPONSIBILITY_BATCH_KEY_V1 = 'responsibility-batch';
+const RFC64_SCHEDULED_FINALIZED_ABSENCE_RETRY_KEY_PREFIX_V1 =
+  'responsibility-finalized-absence-retry';
 const RFC64_SCHEDULED_RESPONSIBILITY_QUIET_MS_V1 = 25;
 const RFC64_SCHEDULED_RESPONSIBILITY_MAX_COALESCE_MS_V1 = 1_000;
 const RFC64_SCHEDULED_RESPONSIBILITY_RETRY_MS_V1 = 30_000;
+const RFC64_SCHEDULED_FINALIZED_ABSENCE_RETRY_DELAYS_MS_V1 = Object.freeze([
+  30_000,
+  60_000,
+  120_000,
+  240_000,
+]);
+const RFC64_AUTHORITY_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1 = Object.freeze([
+  250,
+  1_000,
+  4_000,
+]);
+/**
+ * A join-approved replica can accept its policy before its providers have the
+ * roster that names it. Only that replica keeps asking for this long.
+ */
+const RFC64_JOIN_DERIVED_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1 = Object.freeze([
+  ...RFC64_AUTHORITY_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1,
+  15_000,
+  30_000,
+  60_000,
+  120_000,
+  240_000,
+]);
+const RFC64_JOIN_APPROVAL_CATALOG_REPLAY_RETRY_DELAYS_MS_V1 = Object.freeze([
+  5_000,
+  15_000,
+  30_000,
+  60_000,
+]);
+/**
+ * Waits before an authority snapshot is composed again after local authority
+ * facts moved under the previous composition. The first retry is immediate;
+ * the later ones outlast the burst of local writes a join or a publish makes.
+ */
+export const RFC64_AUTHORITY_FACTS_MOVED_RETRY_DELAYS_MS_V1 = Object.freeze([
+  0,
+  50,
+  200,
+  500,
+  1_000,
+  2_000,
+]);
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_V1 = 64;
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_PER_PEER_V1 = 4;
-export const RFC64_CATALOG_TARGET_MAX_ENTRIES_V1 = 1_024;
-export const RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1 = 64;
+
+type Rfc64ActiveRegisteredSubscriptionV1 = ContextGraphSub & Required<
+  Pick<ContextGraphSub, 'onChainId' | 'onChainHash'>
+>;
+
+function isRfc64ActiveRegisteredSubscriptionV1(
+  subscription: ContextGraphSub | undefined,
+): subscription is Rfc64ActiveRegisteredSubscriptionV1 {
+  return subscription?.subscribed === true
+    && subscription.onChainId !== undefined
+    && subscription.onChainHash !== undefined;
+}
+
+/** A private join has no numeric binding while its signed _meta catches up. */
+function isRfc64LocalJoinIntentUnregisteredSubscriptionV1(
+  hasLocalJoinIntent: boolean,
+  subscription: ContextGraphSub | undefined,
+): boolean {
+  return subscription?.subscribed === true
+    && subscription.onChainId === undefined
+    && hasLocalJoinIntent;
+}
+
+/**
+ * Construct the complete retry identity once so dispatcher-key uniqueness,
+ * the revision fence, attempt, and delay cannot drift at separate call sites.
+ */
+function createRfc64ScheduledFinalizedAbsenceRetryV1(
+  contextGraphId: string,
+  revision: number,
+  attempt: number,
+): Readonly<Rfc64ScheduledFinalizedAbsenceRetryV1> | null {
+  const delayMs = RFC64_SCHEDULED_FINALIZED_ABSENCE_RETRY_DELAYS_MS_V1[attempt - 1];
+  if (delayMs === undefined) return null;
+  return Object.freeze({
+    contextGraphId,
+    revision,
+    attempt,
+    delayMs,
+    key: `${RFC64_SCHEDULED_FINALIZED_ABSENCE_RETRY_KEY_PREFIX_V1}\0${
+      contextGraphId
+    }\0${revision}\0${attempt}`,
+  });
+}
 
 /** Pure projection of responsibility through the accepted-authority refresh fence. */
 function projectRfc64ResponsibilityAuthorityWithRefreshFenceV1(input: {
@@ -591,378 +673,6 @@ const rfc64CatalogReplayRecoveryRuntimesV1 = new WeakMap<
   Rfc64CatalogReplayRecoveryRuntimeV1<Rfc64PublicCatalogHeadAnnouncementV1>
 >();
 
-interface Rfc64CatalogTrackedTargetV1 {
-  announcement: Rfc64PublicCatalogHeadAnnouncementV1;
-  terminalFailure: boolean;
-}
-
-interface Rfc64CatalogTargetOverflowV1 {
-  active: number;
-  readonly failureWitnesses: Map<string, Rfc64PublicCatalogHeadAnnouncementV1>;
-  /** CG-owned saturation can be released only when that authority generation resets. */
-  readonly saturatedContextGraphs: Set<string>;
-  /** Lost attribution is fail-closed until the whole tracker reaches a reset boundary. */
-  unattributedSaturation: boolean;
-}
-
-interface Rfc64CatalogTargetContextEpochV1 {
-  valid: boolean;
-  activeLeases: number;
-}
-
-interface Rfc64CatalogTargetLeaseStateV1 {
-  active: boolean;
-  readonly contextEpoch: Rfc64CatalogTargetContextEpochV1;
-  readonly overflow: Rfc64CatalogTargetOverflowV1 | null;
-}
-
-export type Rfc64CatalogTargetLeaseV1 = Readonly<{
-  announcement: Rfc64PublicCatalogHeadAnnouncementV1;
-  disposition: 'tracked' | 'covered' | 'context-capacity' | 'global-capacity';
-  /** Opaque exactly-once settlement state owned by the tracker. */
-  state: Rfc64CatalogTargetLeaseStateV1;
-}>;
-
-/** Process-local, bounded operational targets; semantic truth remains the durable inventory. */
-export class Rfc64CatalogTargetTrackerV1 {
-  readonly #byContextGraph =
-    new Map<string, Map<string, Rfc64CatalogTrackedTargetV1>>();
-  readonly #contextGraphOverflows = new Map<string, Rfc64CatalogTargetOverflowV1>();
-  readonly #contextEpochs = new Map<string, Rfc64CatalogTargetContextEpochV1>();
-  #globalOverflow: Rfc64CatalogTargetOverflowV1 | null = null;
-  #size = 0;
-
-  get size(): number {
-    return this.#size;
-  }
-
-  targetsForContextGraph(
-    contextGraphId: string,
-  ): readonly Rfc64PublicCatalogHeadAnnouncementV1[] {
-    return Object.freeze(
-      [...this.#byContextGraph.get(contextGraphId)?.values() ?? []]
-        .map(({ announcement }) => announcement),
-    );
-  }
-
-  hasTerminalFailure(announcement: Rfc64PublicCatalogHeadAnnouncementV1): boolean {
-    const entry = this.#byContextGraph
-      .get(announcement.contextGraphId)
-      ?.get(rfc64CatalogTargetScopeKeyV1(announcement));
-    return entry !== undefined
-      && rfc64CatalogTargetExactIdentityV1(entry.announcement, announcement)
-      && entry.terminalFailure;
-  }
-
-  capacityExceededForContextGraph(contextGraphId: string): boolean {
-    return this.#globalOverflow !== null
-      || this.#contextGraphOverflows.has(contextGraphId);
-  }
-
-  /** Invalidate every outstanding lease and release all process-local target evidence. */
-  resetAll(): void {
-    for (const contextEpoch of this.#contextEpochs.values()) contextEpoch.valid = false;
-    this.#contextEpochs.clear();
-    this.#byContextGraph.clear();
-    this.#contextGraphOverflows.clear();
-    this.#globalOverflow = null;
-    this.#size = 0;
-  }
-
-  clearContextGraph(contextGraphId: string): number {
-    const byScope = this.#byContextGraph.get(contextGraphId);
-    const contextEpoch = this.#contextEpochs.get(contextGraphId);
-    if (contextEpoch !== undefined) {
-      contextEpoch.valid = false;
-      this.#contextEpochs.delete(contextGraphId);
-    }
-    this.#contextGraphOverflows.delete(contextGraphId);
-    if (this.#globalOverflow !== null) {
-      for (const [identity, witness] of this.#globalOverflow.failureWitnesses) {
-        if (witness.contextGraphId === contextGraphId) {
-          this.#globalOverflow.failureWitnesses.delete(identity);
-        }
-      }
-      this.#globalOverflow.saturatedContextGraphs.delete(contextGraphId);
-      this.#finishOverflowIfResolved(this.#globalOverflow, null);
-    }
-    if (byScope !== undefined) {
-      this.#byContextGraph.delete(contextGraphId);
-      this.#size -= byScope.size;
-    }
-    this.#promoteOverflowWitnesses();
-    return byScope?.size ?? 0;
-  }
-
-  begin(announcement: Rfc64PublicCatalogHeadAnnouncementV1): Rfc64CatalogTargetLeaseV1 {
-    const existingByScope = this.#byContextGraph.get(announcement.contextGraphId);
-    const key = rfc64CatalogTargetScopeKeyV1(announcement);
-    const previous = existingByScope?.get(key);
-    let contextEpoch = this.#contextEpochs.get(announcement.contextGraphId);
-    if (contextEpoch === undefined) {
-      contextEpoch = { valid: true, activeLeases: 0 };
-      this.#contextEpochs.set(announcement.contextGraphId, contextEpoch);
-    }
-    contextEpoch.activeLeases += 1;
-    const lease = (
-      disposition: Rfc64CatalogTargetLeaseV1['disposition'],
-      overflow: Rfc64CatalogTargetOverflowV1 | null = null,
-    ) => Object.freeze({
-      announcement,
-      disposition,
-      state: { active: true, contextEpoch, overflow },
-    });
-    if (
-      previous !== undefined
-      && BigInt(announcement.catalogVersion)
-        < BigInt(previous.announcement.catalogVersion)
-    ) return lease('covered');
-    if (
-      previous === undefined
-      && (existingByScope?.size ?? 0)
-        >= RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1
-    ) {
-      const overflow = this.#beginContextGraphOverflow(announcement.contextGraphId);
-      return lease(overflow.disposition, overflow.overflow);
-    }
-    if (previous === undefined && this.#size >= RFC64_CATALOG_TARGET_MAX_ENTRIES_V1) {
-      this.#globalOverflow ??= this.#createOverflow();
-      this.#globalOverflow.active += 1;
-      return lease('global-capacity', this.#globalOverflow);
-    }
-    let byScope = existingByScope;
-    if (byScope === undefined) {
-      byScope = new Map();
-      this.#byContextGraph.set(announcement.contextGraphId, byScope);
-    }
-    byScope.set(key, { announcement, terminalFailure: false });
-    if (previous === undefined) this.#size += 1;
-    return lease('tracked');
-  }
-
-  reject(
-    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
-  ): Rfc64CatalogTargetLeaseV1 {
-    const lease = this.begin(announcement);
-    this.settle(lease, 'dropped');
-    return lease;
-  }
-
-  settle(
-    lease: Rfc64CatalogTargetLeaseV1,
-    outcome: Rfc64PublicCatalogReceiverCompletionOutcomeV1,
-  ): void {
-    if (!lease.state.active) return;
-    lease.state.active = false;
-    const { contextEpoch } = lease.state;
-    contextEpoch.activeLeases = Math.max(0, contextEpoch.activeLeases - 1);
-    if (
-      contextEpoch.activeLeases === 0
-      && this.#contextEpochs.get(lease.announcement.contextGraphId) === contextEpoch
-    ) this.#contextEpochs.delete(lease.announcement.contextGraphId);
-    const overflow = lease.state.overflow;
-    if (!contextEpoch.valid) {
-      if (overflow !== null) {
-        overflow.active = Math.max(0, overflow.active - 1);
-        if (this.#globalOverflow === overflow) {
-          this.#finishOverflowIfResolved(overflow, null);
-        }
-      }
-      return;
-    }
-    const resolved = outcome === 'already-applied'
-      || outcome === 'applied'
-      || outcome === 'closed'
-      || outcome === 'staged-only';
-    if (lease.disposition === 'tracked') {
-      if (resolved) this.retire(lease.announcement);
-      else this.#markTerminalFailure(lease.announcement);
-      return;
-    }
-    if (lease.disposition === 'covered') return;
-    if (
-      overflow === null
-      || (
-        lease.disposition === 'context-capacity'
-          ? this.#contextGraphOverflows.get(lease.announcement.contextGraphId) !== overflow
-          : this.#globalOverflow !== overflow
-      )
-    ) return;
-    overflow.active = Math.max(0, overflow.active - 1);
-    const exactIdentity = rfc64CatalogTargetExactIdentityKeyV1(lease.announcement);
-    if (resolved) {
-      overflow.failureWitnesses.delete(exactIdentity);
-    } else if (!overflow.failureWitnesses.has(exactIdentity)) {
-      if (
-        overflow.failureWitnesses.size
-          >= RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1
-      ) this.#markOverflowSaturated(overflow, lease.announcement.contextGraphId);
-      else overflow.failureWitnesses.set(exactIdentity, lease.announcement);
-    }
-    this.#finishOverflowIfResolved(
-      overflow,
-      lease.disposition === 'context-capacity'
-        ? lease.announcement.contextGraphId
-        : null,
-    );
-  }
-
-  retire(announcement: Rfc64PublicCatalogHeadAnnouncementV1): boolean {
-    const byScope = this.#byContextGraph.get(announcement.contextGraphId);
-    const key = rfc64CatalogTargetScopeKeyV1(announcement);
-    const current = byScope?.get(key);
-    let retired = false;
-    if (
-      current !== undefined
-      && rfc64CatalogTargetExactIdentityV1(current.announcement, announcement)
-    ) {
-      byScope!.delete(key);
-      this.#size -= 1;
-      if (byScope!.size === 0) this.#byContextGraph.delete(announcement.contextGraphId);
-      retired = true;
-    }
-    const exactIdentity = rfc64CatalogTargetExactIdentityKeyV1(announcement);
-    const contextOverflow = this.#contextGraphOverflows.get(announcement.contextGraphId);
-    if (contextOverflow?.failureWitnesses.delete(exactIdentity) === true) {
-      this.#finishOverflowIfResolved(contextOverflow, announcement.contextGraphId);
-      retired = true;
-    }
-    if (this.#globalOverflow?.failureWitnesses.delete(exactIdentity) === true) {
-      this.#finishOverflowIfResolved(this.#globalOverflow, null);
-      retired = true;
-    }
-    this.#promoteOverflowWitnesses();
-    return retired;
-  }
-
-  #markTerminalFailure(announcement: Rfc64PublicCatalogHeadAnnouncementV1): void {
-    const entry = this.#byContextGraph
-      .get(announcement.contextGraphId)
-      ?.get(rfc64CatalogTargetScopeKeyV1(announcement));
-    if (
-      entry !== undefined
-      && rfc64CatalogTargetExactIdentityV1(entry.announcement, announcement)
-    ) entry.terminalFailure = true;
-  }
-
-  #beginContextGraphOverflow(
-    contextGraphId: string,
-  ): Readonly<{
-    disposition: 'context-capacity' | 'global-capacity';
-    overflow: Rfc64CatalogTargetOverflowV1;
-  }> {
-    let overflow = this.#contextGraphOverflows.get(contextGraphId);
-    if (overflow === undefined) {
-      if (
-        this.#contextGraphOverflows.size
-          >= RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1
-      ) {
-        this.#globalOverflow ??= this.#createOverflow();
-        this.#globalOverflow.active += 1;
-        return Object.freeze({
-          disposition: 'global-capacity',
-          overflow: this.#globalOverflow,
-        });
-      }
-      overflow = this.#createOverflow();
-      this.#contextGraphOverflows.set(contextGraphId, overflow);
-    }
-    overflow.active += 1;
-    return Object.freeze({ disposition: 'context-capacity', overflow });
-  }
-
-  #createOverflow(): Rfc64CatalogTargetOverflowV1 {
-    return {
-      active: 0,
-      failureWitnesses: new Map(),
-      saturatedContextGraphs: new Set(),
-      unattributedSaturation: false,
-    };
-  }
-
-  #markOverflowSaturated(
-    overflow: Rfc64CatalogTargetOverflowV1,
-    contextGraphId: string,
-  ): void {
-    if (overflow.saturatedContextGraphs.has(contextGraphId)) return;
-    if (
-      overflow.saturatedContextGraphs.size
-        >= RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1
-    ) {
-      overflow.unattributedSaturation = true;
-      return;
-    }
-    overflow.saturatedContextGraphs.add(contextGraphId);
-  }
-
-  #finishOverflowIfResolved(
-    overflow: Rfc64CatalogTargetOverflowV1,
-    contextGraphId: string | null,
-  ): void {
-    if (overflow.active > 0) return;
-    if (
-      overflow.failureWitnesses.size === 0
-      && overflow.saturatedContextGraphs.size === 0
-      && !overflow.unattributedSaturation
-    ) {
-      if (contextGraphId === null) this.#globalOverflow = null;
-      else this.#contextGraphOverflows.delete(contextGraphId);
-      return;
-    }
-    this.#promoteOverflowWitness(contextGraphId, overflow);
-  }
-
-  #promoteOverflowWitnesses(): void {
-    for (const [contextGraphId, overflow] of this.#contextGraphOverflows) {
-      this.#promoteOverflowWitness(contextGraphId, overflow);
-    }
-    if (this.#globalOverflow !== null) this.#promoteOverflowWitness(null, this.#globalOverflow);
-  }
-
-  #promoteOverflowWitness(
-    contextGraphId: string | null,
-    overflow: Rfc64CatalogTargetOverflowV1,
-  ): void {
-    if (overflow.active > 0) return;
-    for (const [identity, witness] of overflow.failureWitnesses) {
-      const byScope = this.#byContextGraph.get(witness.contextGraphId);
-      const key = rfc64CatalogTargetScopeKeyV1(witness);
-      const current = byScope?.get(key);
-      if (current !== undefined) {
-        if (BigInt(current.announcement.catalogVersion) > BigInt(witness.catalogVersion)) {
-          overflow.failureWitnesses.delete(identity);
-          continue;
-        }
-        current.announcement = witness;
-        current.terminalFailure = true;
-        overflow.failureWitnesses.delete(identity);
-        continue;
-      }
-      if (
-        (byScope?.size ?? 0) >= RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1
-        || this.#size >= RFC64_CATALOG_TARGET_MAX_ENTRIES_V1
-      ) continue;
-      const targetByScope = byScope ?? new Map<string, Rfc64CatalogTrackedTargetV1>();
-      if (byScope === undefined) this.#byContextGraph.set(witness.contextGraphId, targetByScope);
-      targetByScope.set(key, { announcement: witness, terminalFailure: true });
-      this.#size += 1;
-      overflow.failureWitnesses.delete(identity);
-    }
-    if (
-      overflow.failureWitnesses.size === 0
-      && overflow.saturatedContextGraphs.size === 0
-      && !overflow.unattributedSaturation
-    ) {
-      if (contextGraphId === null && this.#globalOverflow === overflow) {
-        this.#globalOverflow = null;
-      } else if (
-        contextGraphId !== null
-        && this.#contextGraphOverflows.get(contextGraphId) === overflow
-      ) this.#contextGraphOverflows.delete(contextGraphId);
-    }
-  }
-}
-
 const rfc64CatalogTargetAnnouncementsV1 =
   new WeakMap<DKGAgent, Rfc64CatalogTargetTrackerV1>();
 
@@ -988,7 +698,8 @@ function rfc64CatalogReplaySnapshotRuntimeForV1(
   if (owned?.persistence === persistence) return owned.runtime;
   const runtime = new Rfc64CatalogReplaySnapshotRuntimeV1(
     Object.freeze({
-      listAppliedCatalogHeadsV1: () => persistence.inventory.listAppliedCatalogHeadsV1(),
+      readAppliedCatalogHeadsSnapshotV1: () =>
+        persistence.inventory.readAppliedCatalogHeadsSnapshotV1(),
       readVerifiedCatalogHeadV1: async (objectDigest: Digest32V1) => (
         await persistence.controlObjects.getVerifiedObjectByDigest({
           objectDigest,
@@ -1002,40 +713,25 @@ function rfc64CatalogReplaySnapshotRuntimeForV1(
   return runtime;
 }
 
-function rfc64CatalogTargetScopeKeyV1(input: Readonly<{
-  networkId: string;
-  contextGraphId: string;
-  subGraphName: string | null;
-  authorAddress: string;
-  catalogEra: string;
-}>): string {
-  return [
-    input.networkId,
-    input.contextGraphId,
-    input.subGraphName ?? '',
-    input.authorAddress.toLowerCase(),
-    input.catalogEra,
-  ].join('\0');
-}
-
-function rfc64CatalogTargetExactIdentityV1(
-  left: Rfc64PublicCatalogHeadAnnouncementV1,
-  right: Rfc64PublicCatalogHeadAnnouncementV1,
-): boolean {
-  return rfc64CatalogTargetExactIdentityKeyV1(left)
-    === rfc64CatalogTargetExactIdentityKeyV1(right);
-}
-
-function rfc64CatalogTargetExactIdentityKeyV1(
-  target: Rfc64PublicCatalogHeadAnnouncementV1,
-): string {
-  return [
-    rfc64CatalogTargetScopeKeyV1(target),
-    target.catalogVersion,
-    target.policyDigest,
-    target.catalogHeadObjectDigest,
-    target.signatureVariantDigest,
-  ].join('\0');
+/**
+ * Keep only the newest catalog version promised for each scope. Targets that
+ * share that newest version but disagree on the head digest are all kept: that
+ * fork is evidence the row projection reports as ambiguous, and dropping one
+ * side of it would pick a branch at random.
+ */
+function pruneRfc64SupersededCatalogTargetsV1(
+  targets: readonly Rfc64PublicCatalogHeadAnnouncementV1[],
+): readonly Rfc64PublicCatalogHeadAnnouncementV1[] {
+  const newestByScope = new Map<string, bigint>();
+  for (const target of targets) {
+    const scopeKey = rfc64CatalogTargetScopeKeyV1(target);
+    const version = BigInt(target.catalogVersion);
+    const newest = newestByScope.get(scopeKey);
+    if (newest === undefined || version > newest) newestByScope.set(scopeKey, version);
+  }
+  return targets.filter((target) => (
+    BigInt(target.catalogVersion) === newestByScope.get(rfc64CatalogTargetScopeKeyV1(target))
+  ));
 }
 
 function recordRfc64CatalogTargetAnnouncementV1(
@@ -1079,6 +775,30 @@ function markRfc64DirectAcceptedCompatibilityV1(
     rfc64DirectAcceptedCompatibilityV1.set(agent, accepted);
   }
   accepted.add(contextGraphId);
+}
+
+/**
+ * Record whether the private policy just accepted for a graph is join-derived.
+ * Both ways a private policy is accepted call this (authority composition and
+ * the direct snapshot acceptance), so the mark always describes the acceptance
+ * that produced the current snapshot. An open policy cannot replace a
+ * join-derived one: the registry only takes a linked successor.
+ */
+function noteRfc64AcceptedAuthorityOriginV1(
+  agent: DKGAgent,
+  contextGraphId: string,
+  origin: 'join-approval' | 'authenticated',
+): void {
+  let joinDerived = rfc64JoinDerivedAcceptedAuthorityV1.get(agent);
+  if (origin === 'authenticated') {
+    joinDerived?.delete(contextGraphId);
+    return;
+  }
+  if (joinDerived === undefined) {
+    joinDerived = new Set<string>();
+    rfc64JoinDerivedAcceptedAuthorityV1.set(agent, joinDerived);
+  }
+  joinDerived.add(contextGraphId);
 }
 
 function rfc64CatalogAuthorityGenerationChangedV1(
@@ -1141,7 +861,12 @@ function rfc64ScheduledResponsibilityStateForV1(
 ): Rfc64ScheduledResponsibilityStateV1 {
   let state = rfc64ScheduledResponsibilityStatesV1.get(agent);
   if (state === undefined) {
-    state = { targets: new Map(), activityRevision: 0, producerHolds: 0 };
+    state = {
+      targets: new Map(),
+      finalizedAbsenceRetries: new Map(),
+      activityRevision: 0,
+      producerHolds: 0,
+    };
     rfc64ScheduledResponsibilityStatesV1.set(agent, state);
   }
   return state;
@@ -1206,14 +931,35 @@ function isCurrentRfc64CatalogAuthorityRevisionV1(
   return rfc64CatalogAuthorityRevisionsV1.get(agent)?.get(contextGraphId) === revision;
 }
 
+/**
+ * One authority composition that was discarded because a local authority fact
+ * moved while it was being read. Unlike a superseded composition, no newer one
+ * is running for this graph.
+ */
+class Rfc64AuthorityFactsMovedV1 {
+  constructor(readonly authorityRevision: number) {}
+}
+
+function waitForRfc64AuthorityFactsMovedRetryV1(
+  delayMs: number,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  if (signal !== undefined) return waitForRfc64ScheduledResponsibilityDelayV1(signal, delayMs);
+  return new Promise<void>((resolve) => { setTimeout(resolve, delayMs); });
+}
+
 type Rfc64CatalogAuthorityFailureCodeV1 =
   | 'catalog-service-unavailable'
   | 'registered-authority-adapter-unsupported'
   | 'registered-authority-binding-mismatch'
   /** Bound on-chain id is known locally but the FINALIZED authority index has no entry for it yet (chain finality lag); retryable, not a denial. */
   | 'registered-authority-unfinalized'
+  /** Private graph whose authenticated lifecycle roster is not resolvable YET. */
+  | 'registered-private-roster-unresolved'
+  | 'unregistered-private-roster-unresolved'
   | 'unregistered-owner-unresolved'
-  | 'access-policy-unresolved';
+  | 'access-policy-unresolved'
+  | 'authority-rpc-circuit-open';
 
 /** Intermediate acceleration-pull WARNs are rate-limited per scope to this window. */
 const RFC64_ACCELERATION_WARN_INTERVAL_MS_V1 = 30_000;
@@ -1242,8 +988,39 @@ function requireRfc64ContextGraphAuthorityReaderV1(
   return capability.reader;
 }
 
+/**
+ * Refresh failures that are a not-yet, not a denial. Each keeps the graph in
+ * `resolving` and lets the AUTHOR OF RECORD retain its last accepted policy
+ * while the condition clears; a replica never retains, and every other code
+ * still fails closed to `blocked`.
+ *
+ * - `registered-authority-unfinalized`: the finalized chain index lags the
+ *   registration.
+ * - `registered-private-roster-unresolved`: the authenticated lifecycle roster
+ *   for a private graph is not resolvable locally yet. Demoting to `blocked`
+ *   here fenced off the curator's own SWM root-catalog authoring lane, which is
+ *   the only root-scope SWM delivery path on a catalog-selected graph.
+ */
+const RFC64_TRANSIENT_AUTHORITY_REFRESH_FAILURES_V1: ReadonlySet<string> = new Set([
+  'registered-authority-unfinalized',
+  'registered-private-roster-unresolved',
+  'unregistered-private-roster-unresolved',
+  'authority-rpc-circuit-open',
+]);
+
+/**
+ * Is this refresh failure a not-yet rather than a denial? Exported so the
+ * classification itself is pinned: it decides whether the author keeps its
+ * catalog lane or is parked `blocked`, and on a catalog-selected graph that
+ * lane is the only root-scope SWM delivery path.
+ */
+export function isRfc64TransientAuthorityRefreshFailureV1(code: string): boolean {
+  return RFC64_TRANSIENT_AUTHORITY_REFRESH_FAILURES_V1.has(code);
+}
+
 function rfc64CatalogAuthorityFailureCodeV1(error: unknown): string {
   if (error instanceof Rfc64CatalogAuthorityResolutionErrorV1) return error.code;
+  if (isRfc64AuthorityRpcCircuitOpenErrorV1(error)) return 'authority-rpc-circuit-open';
   return 'authority-resolution-failed';
 }
 
@@ -1256,43 +1033,15 @@ export function isRfc64UnregisteredOwnerUnresolvedErrorV1(error: unknown): boole
   return rfc64CatalogAuthorityFailureCodeV1(error) === 'unregistered-owner-unresolved';
 }
 
-function aggregateRfc64DigestV1(values: readonly string[]): Digest32V1 | null {
-  if (values.length === 0) return null;
-  const sorted = [...values].sort();
-  if (sorted.length === 1) return sorted[0] as Digest32V1;
-  return ethers.keccak256(ethers.toUtf8Bytes(sorted.join('\n'))) as Digest32V1;
-}
-
-function sumDecimalCountsV1(values: readonly string[]): string {
-  return values.reduce((sum, value) => sum + BigInt(value), 0n).toString(10);
-}
-
 export class Rfc64CatalogMethods extends DKGAgentBase {
   /** Stable recovery capabilities are captured once per agent-owned runtime. */
-  /**
-   * The node's SINGLE finality depth, taken from the adapter that actually
-   * resolves the anchors whenever it can report one.
-   *
-   * `dkg-agent-types.ts` documents `chainAdapter` as "If provided, chainConfig
-   * is ignored", so in the SDK-embedding shape `chainConfig.finalityConfirmations`
-   * is absent or stale while the adapter holds the operator's real value. An
-   * adapter that does not implement the accessor (mocks, out-of-tree adapters)
-   * has no opinion, and the configured value stands.
-   */
-  private resolveChainFinalityConfirmationsV1(this: DKGAgent): number | undefined {
-    const fromAdapter = typeof this.chain.getFinalityConfirmations === 'function'
-      ? this.chain.getFinalityConfirmations()
-      : undefined;
-    return fromAdapter ?? this.config.chainConfig?.finalityConfirmations;
-  }
-
   private rfc64CatalogReplayRecoveryRuntimeV1(
     this: DKGAgent,
   ): Rfc64CatalogReplayRecoveryRuntimeV1<Rfc64PublicCatalogHeadAnnouncementV1> {
     let runtime = rfc64CatalogReplayRecoveryRuntimesV1.get(this);
     if (runtime !== undefined) return runtime;
     runtime = new Rfc64CatalogReplayRecoveryRuntimeV1({
-      requestPeer: async (contextGraphId, remotePeerId) => {
+      requestPeer: async (contextGraphId, remotePeerId, signal) => {
         const service = this.rfc64PublicCatalogServiceV1;
         const networkId = (
           this.config.rfc64CatalogDeploymentProfile?.networkId
@@ -1310,6 +1059,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             remotePeerId,
             networkId,
             contextGraphId: contextGraphId as ContextGraphIdV1,
+            ...(signal === undefined ? {} : { signal }),
           });
           return Object.freeze({
             status: 'completed' as const,
@@ -1323,10 +1073,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           throw error;
         }
       },
-      whenReceiverIdle: async () => {
-        await this.rfc64PublicCatalogServiceV1?.whenReceiverIdle();
+      whenReceiverIdleForContextGraph: async (contextGraphId, signal) => {
+        await this.rfc64PublicCatalogServiceV1
+          ?.whenReceiverIdleForContextGraph(contextGraphId, signal);
       },
+      warn: (message) => this.log.warn(createOperationContext('system'), message),
       targetIdentity: rfc64CatalogTargetExactIdentityKeyV1,
+      pruneSupersededTargets: pruneRfc64SupersededCatalogTargetsV1,
       parityFailed: async (contextGraphId, promised) => {
         const persistence = this.rfc64PersistenceV1;
         if (persistence === undefined) return true;
@@ -1528,69 +1281,90 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         await loadRfc64OperationalAppliedHeadsV1(persistence),
       );
     }
-    const replaySnapshotUnstable = replaySnapshotRevision !== replayRecovery.revision;
-    const progressByContextGraph = rfc64CatalogAuthorityProgressV1.get(this);
-    const receiverStats = service?.stats().receiver;
-    return Object.freeze(selections.map((selection) => {
-      const accepted = service !== undefined && networkId !== undefined
+    const targetTracker = rfc64CatalogTargetAnnouncementsV1.get(this);
+    const targetsByContextGraph = new Map(selections.map((selection) => [
+      selection.contextGraphId,
+      targetTracker?.targetsForContextGraph(selection.contextGraphId) ?? [],
+    ]));
+    // One accepted-policy snapshot per selection, resolved before the durable
+    // reads below and reused for both the promised targets and the replay
+    // status. Reading it twice across an await lets an accepted-policy rotation
+    // pair an old-digest promise set with a null replay status, which publishes
+    // an expected/missing pair built from promises the runtime has already
+    // dropped at that rotation.
+    const acceptedByContextGraph = new Map(selections.map((selection) => [
+      selection.contextGraphId,
+      service !== undefined && networkId !== undefined
         ? service.acceptedPolicySnapshot(
           networkId,
           selection.contextGraphId as ContextGraphIdV1,
         )
-        : null;
+        : null,
+    ]));
+    const promisedTargetsByContextGraph = new Map(selections.map((selection) => {
+      const accepted = acceptedByContextGraph.get(selection.contextGraphId) ?? null;
+      return [
+        selection.contextGraphId,
+        accepted === null
+          ? null
+          : replayRecovery.promisedTargets(selection.contextGraphId, accepted.policyDigest),
+      ] as const;
+    }));
+    const operationalTargets = [...new Map(
+      selections.flatMap((selection) => [
+        ...targetsByContextGraph.get(selection.contextGraphId) ?? [],
+        ...promisedTargetsByContextGraph.get(selection.contextGraphId) ?? [],
+      ]).map((target) => [rfc64CatalogTargetExactIdentityKeyV1(target), target]),
+    ).values()];
+    const promisedRowCounts = persistence === undefined
+      ? new Map<string, string | null>()
+      : await loadRfc64OperationalPromisedRowCountsV1(persistence, operationalTargets);
+    const replaySnapshotUnstable = replaySnapshotRevision !== replayRecovery.revision;
+    const progressByContextGraph = rfc64CatalogAuthorityProgressV1.get(this);
+    const receiverStats = service?.stats().receiver;
+    return Object.freeze(selections.map((selection) => {
+      const accepted = acceptedByContextGraph.get(selection.contextGraphId) ?? null;
       const progress = progressByContextGraph?.get(selection.contextGraphId);
       const currentReplayProgress = accepted === null
         ? null
         : replayRecovery.status(selection.contextGraphId, accepted.policyDigest);
-      const replayActive = replaySnapshotUnstable || currentReplayProgress?.active === true;
-      // Only parity/overflow evidence fails a Context Graph. Providers that
-      // could not be replayed from surface through providerHealth instead.
-      const replayFailed = currentReplayProgress?.failed === true;
       const heads = appliedByContextGraph.get(selection.contextGraphId) ?? [];
-      // A full pass that reached no provider at all corroborated nothing: with
-      // an empty promised set parity is vacuously satisfied, so applied rows
-      // would otherwise be reported as agreed by every provider. It is not
-      // evidence of missing rows, so it stays distinct from `replayFailed`, and
-      // it can only mislead once something has been applied.
-      const replayUnverified = currentReplayProgress?.unverified === true
-        && heads.length > 0;
-      const replayUnsettled = replayActive || replayFailed || replayUnverified;
-      const targetTracker = rfc64CatalogTargetAnnouncementsV1.get(this);
-      const targets = targetTracker?.targetsForContextGraph(selection.contextGraphId) ?? [];
+      // The owner is the only possible catalog author only in a private graph
+      // whose accepted roster is the owner alone: catalog authorship follows
+      // the access policy (any member, or any author of a public graph, which
+      // has no roster), not the publish policy. When this node is that owner
+      // and its verified applied heads all belong to it, an unanswered
+      // connected peer cannot reveal another author's catalog. Keep the
+      // provider failure visible in providerHealth, but do not turn locally
+      // complete owner inventory into unknown graph parity.
+      const curatedOwnerAddress = accepted?.policy.source.kind === 'owner-signed-unregistered'
+        ? accepted.policy.source.ownerAddress
+        : null;
+      const ownerIsSoleCatalogAuthor = accepted !== null
+        && curatedOwnerAddress !== null
+        && accepted.roster?.members.length === 1
+        && accepted.roster.members[0]?.agentAddress === curatedOwnerAddress;
+      const localCuratedOwnerHeads = accepted !== null
+        && accepted.policy.publishPolicy === 0
+        && curatedOwnerAddress !== null
+        && ownerIsSoleCatalogAuthor
+        && heads.length > 0
+        && this.listLocalAgents().some(({ agentAddress }) => (
+          agentAddress.toLowerCase() === curatedOwnerAddress
+        ))
+        && heads.every(({ snapshot }) => (
+          snapshot.authorAddress === curatedOwnerAddress
+        ));
+      const targets = targetsByContextGraph.get(selection.contextGraphId) ?? [];
+      const promisedTargets = promisedTargetsByContextGraph.get(selection.contextGraphId) ?? null;
       const targetCapacityExceeded = targetTracker
         ?.capacityExceededForContextGraph(selection.contextGraphId) ?? false;
-      const appliedByScope = new Map(heads.map((head) => [head.scopeKey, head]));
-      const pendingTargets = targets.filter((target) => {
-        const applied = appliedByScope.get(rfc64CatalogTargetScopeKeyV1(target));
-        return applied === undefined
-          || BigInt(target.catalogVersion) > BigInt(applied.snapshot.catalogVersion)
-          || (
-            target.catalogVersion === applied.snapshot.catalogVersion
-            && target.catalogHeadObjectDigest !== applied.snapshot.currentCatalogHeadDigest
-          );
+      const { replayActive, replayFailed, replayUnverified, replayUnsettled, pendingTargets, liveTargetsPending,
+        catalogHeadDigest, expectedCatalogHeadDigest, inventoryDigest, rowCount, rowProjection,
+      } = evaluateRfc64CatalogCompletionV1({
+        heads, targets, promisedTargets, promisedRowCounts, replay: currentReplayProgress,
+        replaySnapshotUnstable, targetCapacityExceeded, localCuratedOwnerHeads,
       });
-      const catalogHeadDigest = aggregateRfc64DigestV1(
-        heads.map(({ snapshot }) => snapshot.currentCatalogHeadDigest),
-      );
-      const expectedCatalogHeadDigests = new Map(heads.map(({ scopeKey, snapshot }) => [
-        scopeKey,
-        snapshot.currentCatalogHeadDigest,
-      ]));
-      for (const target of pendingTargets) {
-        expectedCatalogHeadDigests.set(
-          rfc64CatalogTargetScopeKeyV1(target),
-          target.catalogHeadObjectDigest,
-        );
-      }
-      const expectedCatalogHeadDigest = aggregateRfc64DigestV1(
-        [...expectedCatalogHeadDigests.values()],
-      );
-      const inventoryDigest = aggregateRfc64DigestV1(
-        heads.map(({ snapshot }) => snapshot.appliedInventoryDigest),
-      );
-      const rowCount = heads.length === 0
-        ? null
-        : sumDecimalCountsV1(heads.map(({ snapshot }) => snapshot.inventoryRowCount));
       const appliedCatalogVersion = heads.length === 0
         ? null
         : heads.reduce((highest, { snapshot }) => (
@@ -1675,9 +1449,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
               ? 'blocked'
             : replayActive
               ? 'applying'
-            : pendingTargets.length > 0
+            : liveTargetsPending
               ? 'applying'
-            : legacyReadOnlyCount > 0
+            : pendingTargets.length > 0 || legacyReadOnlyCount > 0
+              ? 'known-incomplete'
+            : rowProjection.missingRowCount !== null
+              && BigInt(rowProjection.missingRowCount) > 0n
               ? 'known-incomplete'
             : heads.length === 0
               ? 'bootstrapping'
@@ -1713,18 +1490,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             ? null
             : inventoryDigest,
         appliedInventoryDigest: inventoryDigest,
-        expectedRowCount:
-          targetCapacityExceeded || replayUnsettled || pendingTargets.length > 0
-            ? null
-            : rowCount,
+        expectedRowCount: rowProjection.expectedRowCount,
         appliedRowCount: rowCount,
-        missingRowCount:
-          targetCapacityExceeded
-          || replayUnsettled
-          || pendingTargets.length > 0
-          || rowCount === null
-            ? null
-            : '0',
+        missingRowCount: rowProjection.missingRowCount,
         legacyReadOnlyCount,
         catalogVersion,
         authorHeadCount: heads.length,
@@ -1744,21 +1512,151 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     }));
   }
 
+  /** Reason the last authority refresh of one graph recorded, or null. */
+  rfc64CatalogAuthorityRefreshFailureReasonV1(this: DKGAgent, contextGraphId: string): string | null {
+    return rfc64CatalogAuthorityProgressV1.get(this)?.get(contextGraphId)?.reason ?? null;
+  }
+
+  /** Re-prove catalog completion before the daemon's synchronous readiness commit. */
+  async withVerifiedPrivateCatalogSubscriptionReadinessV1(
+    this: DKGAgent, contextGraphId: string, commit: () => void,
+  ): Promise<boolean> {
+    return verifyPrivateCatalogSubscriptionReadinessV1(this, contextGraphId, commit, () => {
+      const progress = rfc64CatalogAuthorityProgressV1.get(this)?.get(contextGraphId);
+      const tracker = rfc64CatalogTargetAnnouncementsV1.get(this);
+      const targets = tracker?.targetsForContextGraph(contextGraphId) ?? [];
+      return {
+        service: this.rfc64PublicCatalogServiceV1,
+        persistence: this.rfc64PersistenceV1,
+        networkId: this.config.rfc64CatalogDeploymentProfile?.networkId ?? this.config.networkIdentity?.chainId,
+        approvedAgent: this.localApprovedAgentByCG.get(contextGraphId),
+        subscription: this.subscribedContextGraphs.get(contextGraphId),
+        plan: this.config.rfc64CatalogExecutionPlan,
+        metadataRevision: this.contextGraphMetaProjection.readContextGraphAuthorityFactsRevision(contextGraphId),
+        replay: this.rfc64CatalogReplayRecoveryRuntimeV1(),
+        authorityRevision: rfc64CatalogAuthorityRevisionsV1.get(this)?.get(contextGraphId),
+        authorityCurrent: progress?.state === 'accepted' && Date.now() - progress.updatedAtMs
+          <= RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.intervalMs * RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.freshnessIntervalCount,
+        legacyReadOnlyCount: readRfc64LegacySwmBoundaryCountV1(this, contextGraphId),
+        targets,
+        targetCapacityExceeded: tracker?.capacityExceededForContextGraph(contextGraphId) ?? false,
+        targetFailed: targets.some((target) => tracker!.hasTerminalFailure(target)),
+        targetFence: JSON.stringify(targets.map((target) => [
+          rfc64CatalogTargetExactIdentityKeyV1(target), tracker!.hasTerminalFailure(target),
+        ])),
+      };
+    });
+  }
+
   /**
-   * Resolve the private member set from the hardened, store-backed `_meta`
-   * gate after the complete graph definition has been authenticated. This is
-   * deliberately independent of the accepted RFC-64 roster: responsibility
-   * and roster rotation cannot ask the roster they are about to establish for
-   * permission to establish it.
+   * Resolve the private member set from the authoritative roster source after
+   * the complete graph definition has been authenticated. Registered private
+   * graphs retain the finalized chain roster; unregistered graphs use the
+   * effective store-backed metadata projection. This is deliberately
+   * independent of the accepted RFC-64 overlay: responsibility and roster
+   * rotation cannot ask the roster they are about to establish for permission
+   * to establish it.
    */
   async resolveRfc64VerifiedPrivateRosterV1(
     this: DKGAgent,
     contextGraphId: string,
   ): Promise<readonly EvmAddressV1[] | null> {
-    if (!await this.hasConfirmedMetaState(contextGraphId).catch(() => false)) {
+    // The creator's explicit local-first registration marker already proves
+    // this graph has no chain roster. Reading the general member-recovery
+    // authority here would ask the accepted catalog policy we are currently
+    // rotating to authorize its own successor. A concurrent admission can
+    // then make that read return unavailable and strand the new member behind
+    // the old policy. Read the creator's own confirmed _meta instead, while
+    // keeping merged revocations effective and fencing registration changes.
+    const localFirst = await this.isLocalFirstUnregisteredContextGraph(contextGraphId);
+    const accepted = this.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId);
+    const approvedAgent = this.localApprovedAgentByCG.get(contextGraphId);
+    let approvedReplicaGate: readonly string[] | undefined;
+    if (
+      !localFirst
+      && approvedAgent !== undefined
+      && accepted?.policy.accessPolicy === 1
+      && accepted.policy.source.kind === 'owner-signed-unregistered'
+    ) {
+      const revision = this.contextGraphMetaProjection
+        .readContextGraphAuthorityFactsRevision(contextGraphId);
+      const approved = await resolveApprovedPrivateReplicaAuthority(
+        this,
+        contextGraphId,
+        approvedAgent,
+        () => this.localApprovedAgentByCG.get(contextGraphId)?.toLowerCase()
+          === approvedAgent.toLowerCase(),
+        () => this.contextGraphMetaProjection
+          .readContextGraphAuthorityFactsRevision(contextGraphId) === revision,
+      ).catch(() => null);
+      if (
+        approved?.kind === 'unregistered-private-replica'
+        && approved.authority.ownerAddress === accepted.policy.source.ownerAddress
+      ) {
+        // The approved-member proof authenticates this replica's own private
+        // definition. Check finalized name absence independently, then read
+        // the effective local roster and fence both sources again after the
+        // store awaits. The general recovery helper would ask the accepted
+        // catalog policy to authorize the roster needed to authorize that
+        // same catalog transport, leaving cold approved replicas stuck.
+        const before = await this.readRfc64RegisteredAuthoritySnapshotV1(contextGraphId)
+          .catch(() => undefined);
+        if (before === undefined) return null;
+        if (before === null) {
+          const merged = await this.getLocalMetadataMemberRecoveryGate(contextGraphId)
+            .catch(() => null);
+          const own = await this.getOwnCgMetaFacts(contextGraphId)
+            .catch(() => null);
+          const after = await this.readRfc64RegisteredAuthoritySnapshotV1(contextGraphId)
+            .catch(() => undefined);
+          if (
+            merged === null
+            || own === null
+            || after !== null
+            || this.contextGraphMetaProjection
+              .readContextGraphAuthorityFactsRevision(contextGraphId) !== revision
+            || this.localApprovedAgentByCG.get(contextGraphId)?.toLowerCase()
+              !== approvedAgent.toLowerCase()
+            || this.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId)
+              ?.policyDigest !== accepted.policyDigest
+            // The clock is the one thing the fences above cannot see.
+            || !isApprovedPrivateReplicaDelegationActive(approved.authority)
+          ) return null;
+          const named = new Set(
+            [...own.allowedAgents, ...own.participantAgents]
+              .map((address) => address.toLowerCase()),
+          );
+          approvedReplicaGate = merged.filter((address) => named.has(address.toLowerCase()));
+        }
+      }
+    }
+    if (approvedReplicaGate === undefined
+      && !await this.hasConfirmedMetaState(contextGraphId).catch(() => false)) {
       return null;
     }
-    const gate = await this.getMemberRecoveryGate(contextGraphId).catch(() => null);
+    const gate = approvedReplicaGate !== undefined
+      ? approvedReplicaGate
+      : localFirst
+      ? await (async () => {
+          const revision = this.contextGraphMetaProjection
+            .readContextGraphAuthorityFactsRevision(contextGraphId);
+          const merged = await this.getLocalMetadataMemberRecoveryGate(contextGraphId);
+          const own = await this.getOwnCgMetaFacts(contextGraphId);
+          if (
+            !await this.isLocalFirstUnregisteredContextGraph(contextGraphId)
+            || this.contextGraphMetaProjection
+              .readContextGraphAuthorityFactsRevision(contextGraphId) !== revision
+          ) return null;
+          const named = new Set(
+            [...own.allowedAgents, ...own.participantAgents]
+              .map((address) => address.toLowerCase()),
+          );
+          return merged?.filter((address) => named.has(address.toLowerCase())) ?? null;
+        })().catch(() => null)
+      : await withRpcUsageSite(
+          CG_AUTH_RPC_SITES.rfc64Roster,
+          () => this.getMemberRecoveryRosterSource(contextGraphId),
+        ).catch(() => null);
     if (gate === null || gate.length === 0) return null;
     const members = new Set<EvmAddressV1>();
     for (const candidate of gate) {
@@ -1786,10 +1684,24 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   async resolveRfc64CatalogLocalAgentAddressV1(
     this: DKGAgent,
     contextGraphId: string,
+    authorizationScope?: Readonly<Rfc64CatalogLocalAuthorizationScopeV1>,
   ): Promise<EvmAddressV1 | null> {
-    const roster = await this.resolveRfc64VerifiedPrivateRosterV1(contextGraphId);
+    // Transport authorization already owns an accepted-current, immutable
+    // policy/roster generation. Reuse its exact member set inside this one
+    // authorization attempt instead of performing another live chain roster
+    // read. Non-transport callers omit the scope and retain the live path.
+    const roster = await resolveRfc64CatalogAuthorizationRosterV1(
+      contextGraphId as ContextGraphIdV1,
+      authorizationScope,
+      () => this.resolveRfc64VerifiedPrivateRosterV1(contextGraphId),
+    );
     if (roster === null) return null;
-    const rosterSet = new Set(roster);
+    const rosterSet = new Set<EvmAddressV1>();
+    for (const address of roster) {
+      if (!ethers.isAddress(address) || address === ethers.ZeroAddress) return null;
+      rosterSet.add(address.toLowerCase() as EvmAddressV1);
+    }
+    if (rosterSet.size === 0) return null;
     const configured = this.config.rfc64CatalogAccessPolicyAuthority
       ?.localAgentAddress
       ?.toLowerCase();
@@ -1827,7 +1739,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   }
 
   /** Canonical coordinated boundary for one registered authority snapshot. */
-  private async readRfc64RegisteredAuthoritySnapshotV1(
+  async readRfc64RegisteredAuthoritySnapshotV1(
     this: DKGAgent,
     contextGraphId: string,
     signal?: AbortSignal,
@@ -1840,12 +1752,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         try {
           const target = await this.resolveFinalizedContextGraphAuthorityTargetV1(
             contextGraphId,
-            { signal: readSignal, onRpcRead: evidence.markRpcAttempt },
+            evidence.agentResolverReadOptions(readSignal),
           );
           readSignal.throwIfAborted();
           if (target === null) return null;
           const { expectedNameHash, expectedOnChainId } = target;
-          if (target.kind !== 'resolved-snapshot') evidence.markRpcAttempt();
           const snapshot = parseRfc64AuthoritySnapshotV1(
             target.kind === 'resolved-snapshot'
               ? target.finalizedSnapshot
@@ -1853,7 +1764,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
                 this.contextGraphAuthorityReaderCapability,
               ).getContextGraphAuthoritySnapshot(
                 expectedOnChainId,
-                { signal: readSignal },
+                evidence.chainReadOptions(readSignal),
               ),
             expectedOnChainId,
           );
@@ -1873,9 +1784,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
    * one-shot join decision: the substrate outbox replays the payload bytes it
    * was given, so a deferral there does not postpone the send, it ships a
    * decision permanently missing its binding. Repeatable callers — notably the
-   * per-message catalog admission hook — leave it off, because admitting one
-   * probe per inbound message for the length of an outage is the stampede the
-   * circuit exists to prevent.
+   * per-message catalog admission hook — leave it off: refused, they defer
+   * without reaching a provider, and admitting one probe per inbound message
+   * for the length of an outage is the stampede the circuit exists to prevent.
    */
   async readRfc64CurrentCuratorAuthorityBindingV1(
     this: DKGAgent,
@@ -1914,62 +1825,61 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
 
   /**
    * Resolve a catalog peer from authenticated, Context-Graph-scoped state.
-   * Public agent profiles remain the first choice, but private admission must
-   * not depend on best-effort profile gossip. Curators already hold the
-   * member's signed delegatee binding, while approved receivers persist the
-   * authenticated curator peer together with its exact owner generation.
+   * A peer may advertise a generic agent profile after a private transfer has
+   * already begun. That profile need not be the agent approved for this graph.
+   * Prefer the verified delegatee or curator binding, so late profile gossip
+   * cannot change the identity used for catalog authorization mid-transfer.
    */
   async resolveRfc64CatalogRemoteAgentAddressV1(
     this: DKGAgent,
     remotePeerId: string,
     contextGraphId: ContextGraphIdV1,
   ): Promise<EvmAddressV1 | null> {
+    if (await this.hasConfirmedMetaState(contextGraphId).catch(rfc64CatalogLookupFailedAsV1(false))) {
+      const delegatedAgents = new Set<EvmAddressV1>();
+      const delegateePeers = await this.getContextGraphAllowedDelegateePeers(contextGraphId)
+        .catch(rfc64CatalogLookupFailedAsV1(new Map<string, string[]>()));
+      for (const [agentAddress, peerIds] of delegateePeers) {
+        const normalized = agentAddress.toLowerCase();
+        if (
+          peerIds.includes(remotePeerId)
+          && /^0x[0-9a-f]{40}$/u.test(normalized)
+        ) {
+          delegatedAgents.add(normalized as EvmAddressV1);
+        }
+      }
+      if (delegatedAgents.size === 1) return [...delegatedAgents][0]!;
+      if (delegatedAgents.size > 1) return null;
+
+      const approvedAgent = this.localApprovedAgentByCG.get(contextGraphId);
+      if (approvedAgent !== undefined) {
+        const requesterState = await this.readRequesterJoinRequestState(
+          contextGraphId,
+          approvedAgent,
+        ).catch(rfc64CatalogLookupFailedAsV1(null));
+        if (
+          requesterState?.status === 'approved'
+          && requesterState.curatorPeerId === remotePeerId
+          && requesterState.curatorAgentAddress !== undefined
+          && requesterState.curatorAuthorityEra !== undefined
+        ) {
+          const current = await this.readRfc64CurrentCuratorAuthorityBindingV1(
+            contextGraphId,
+          ).catch(rfc64CatalogLookupFailedAsV1(null));
+          if (
+            current?.agentAddress === requesterState.curatorAgentAddress
+            && current.authorityEra === requesterState.curatorAuthorityEra
+          ) return current.agentAddress;
+        }
+      }
+    }
+
     const discovered = (await this.findAgentByPeerId(remotePeerId))
       ?.agentAddress
       ?.toLowerCase();
-    if (discovered !== undefined && /^0x[0-9a-f]{40}$/u.test(discovered)) {
-      return discovered as EvmAddressV1;
-    }
-    if (!await this.hasConfirmedMetaState(contextGraphId).catch(() => false)) {
-      return null;
-    }
-
-    const delegatedAgents = new Set<EvmAddressV1>();
-    const delegateePeers = await this.getContextGraphAllowedDelegateePeers(contextGraphId)
-      .catch(() => new Map<string, string[]>());
-    for (const [agentAddress, peerIds] of delegateePeers) {
-      const normalized = agentAddress.toLowerCase();
-      if (
-        peerIds.includes(remotePeerId)
-        && /^0x[0-9a-f]{40}$/u.test(normalized)
-      ) {
-        delegatedAgents.add(normalized as EvmAddressV1);
-      }
-    }
-    if (delegatedAgents.size === 1) return [...delegatedAgents][0]!;
-    if (delegatedAgents.size > 1) return null;
-
-    const approvedAgent = this.localApprovedAgentByCG.get(contextGraphId);
-    if (approvedAgent === undefined) return null;
-    const requesterState = await this.readRequesterJoinRequestState(
-      contextGraphId,
-      approvedAgent,
-    ).catch(() => null);
-    if (
-      requesterState?.status !== 'approved'
-      || requesterState.curatorPeerId !== remotePeerId
-      || requesterState.curatorAgentAddress === undefined
-      || requesterState.curatorAuthorityEra === undefined
-    ) return null;
-    const current = await this.readRfc64CurrentCuratorAuthorityBindingV1(
-      contextGraphId,
-    ).catch(() => null);
-    if (
-      current === null
-      || current.agentAddress !== requesterState.curatorAgentAddress
-      || current.authorityEra !== requesterState.curatorAuthorityEra
-    ) return null;
-    return current.agentAddress;
+    return discovered !== undefined && /^0x[0-9a-f]{40}$/u.test(discovered)
+      ? discovered as EvmAddressV1
+      : null;
   }
 
   /** Read the curator-authored local roster generation from authenticated metadata. */
@@ -2075,18 +1985,35 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       'RFC-64 responsibility authority-index id',
     );
     const authorityIndexId = onChainId as ContextGraphAuthorityIndexId;
+    return this.rfc64FinalizedAuthoritySnapshotBatchRuntimeV1(indexedReader, readSnapshots)
+      .read(authorityIndexId, signal);
+  }
+
+  /**
+   * The agent's one finalized-index batch runtime. Every physical read takes a
+   * turn on the shared authority-read coordinator. A read owned by a single
+   * caller carries that caller's signal into its turn, so a caller that gives
+   * up is dropped from the queue, or has its in-flight read cancelled, instead
+   * of holding the single permit for everyone behind it.
+   */
+  private rfc64FinalizedAuthoritySnapshotBatchRuntimeV1(
+    this: DKGAgent,
+    indexedReader: ContextGraphAuthorityIndexRevisionReader,
+    readSnapshots: NonNullable<
+      ContextGraphAuthorityIndexRevisionReader['readContextGraphAuthorityIndexSnapshots']
+    >,
+  ): Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1 {
     let runtime = rfc64ResponsibilityAuthorityBatchRuntimesV1.get(this);
     if (runtime === undefined) {
       runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
-        readSnapshots: (targets) => this.rfc64AuthorityReadCoordinatorV1.run(
-          undefined,
+        readSnapshots: (targets, ownerSignal) => this.rfc64AuthorityReadCoordinatorV1.run(
+          ownerSignal,
           async (readSignal, evidence) => {
             try {
-              evidence.markRpcAttempt();
               return await readSnapshots.call(
                 indexedReader,
                 targets,
-                { signal: readSignal },
+                evidence.chainReadOptions(readSignal),
               );
             } finally {
               await indexedReader.whenIdle();
@@ -2096,7 +2023,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       });
       rfc64ResponsibilityAuthorityBatchRuntimesV1.set(this, runtime);
     }
-    return runtime.read(authorityIndexId, signal);
+    return runtime;
   }
 
   /**
@@ -2139,7 +2066,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         try {
           return await this.resolveFinalizedContextGraphAuthorityTargetsV1(
             registeredCandidates,
-            { signal: readSignal, onRpcRead: evidence.markRpcAttempt },
+            evidence.agentResolverReadOptions(readSignal),
           );
         } finally {
           await indexedReader.whenIdle();
@@ -2196,24 +2123,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       Rfc64FinalizedAuthoritySnapshotEvidenceV1
     >();
     if (numericTargetIds.length > 0 && readSnapshots !== undefined) {
-      let runtime = rfc64ResponsibilityAuthorityBatchRuntimesV1.get(this);
-      if (runtime === undefined) {
-        runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
-          readSnapshots: (targets) => this.rfc64AuthorityReadCoordinatorV1.run(
-            undefined,
-            async (readSignal, evidence) => {
-              try {
-                evidence.markRpcAttempt();
-                return await readSnapshots.call(indexedReader, targets, { signal: readSignal });
-              } finally {
-                await indexedReader.whenIdle();
-              }
-            },
-          ),
-        });
-        rfc64ResponsibilityAuthorityBatchRuntimesV1.set(this, runtime);
-      }
-      const evidenceBatch = runtime.createBatch(numericTargetIds);
+      const evidenceBatch = this
+        .rfc64FinalizedAuthoritySnapshotBatchRuntimeV1(indexedReader, readSnapshots)
+        .createBatch(numericTargetIds);
       await Promise.all(numericTargetIds.map(async (targetId) => {
         evidenceByTargetId.set(targetId, await evidenceBatch.read(targetId, signal));
       }));
@@ -2449,19 +2361,18 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         // chain evidence keeps precedence whenever a numeric binding exists.
         accessPolicy = this.readAcceptedRfc64CatalogAccessPolicyV1(contextGraphId);
       }
-      const privateMembershipVerified = accessPolicy === 'private'
-        && await this.hasRfc64VerifiedPrivateMembershipV1(contextGraphId);
-      const reason = resolveRfc64CatalogResponsibilityReasonV1({
+      const roster = new Rfc64CatalogResponsibilityRosterV1({
+        contextGraphId, accessPolicy, registry, owner: this, log: this.log,
+        lifecycleSignal: this.rfc64BackgroundWorkDispatcherV1.shutdownSignal,
         nodeRole: (this.config.nodeRole ?? 'edge') === 'core' ? 'core' : 'edge',
-        subscribed: subscription.subscribed === true,
-        coreHosted: subscription.coreHosted === true,
-        accessPolicy,
-        privateMembershipVerified,
+        subscribed: subscription.subscribed === true, coreHosted: subscription.coreHosted === true,
+        isCurrent: () => isCurrentRfc64CatalogResponsibilityRevisionV1(this, contextGraphId, revision),
+        askAgain: () => this.scheduleRfc64CatalogResponsibilityReconciliationV1(contextGraphId),
       });
-      if (!isCurrentRfc64CatalogResponsibilityRevisionV1(this, contextGraphId, revision)) {
-        return registry.read(contextGraphId);
-      }
-      const next = commit(reason);
+      const decision = roster.decide(accessPolicy === 'private'
+        && await roster.read(() => this.hasRfc64VerifiedPrivateMembershipV1(contextGraphId)));
+      if (decision.keep !== undefined) return decision.keep;
+      const next = commit(decision.reason);
       if (
         finalizedAuthorityEvidence?.snapshot !== null
         && finalizedAuthorityEvidence?.snapshot !== undefined
@@ -2533,6 +2444,27 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // Preserve their cancellation so the feature owner can drain
           // silently instead of reporting a false authority failure.
           if (ownerSignal.aborted) throw ownerSignal.reason;
+          if (isRfc64AuthorityRpcCircuitOpenErrorV1(error)) {
+            // Awaited subscribe/bootstrap callers do not belong to the
+            // scheduled responsibility batch. A circuit-open read must still
+            // get an owned follow-up after cooldown; otherwise the private
+            // receiver can remain unselected until an unrelated event.
+            this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(
+              `responsibility-circuit-retry\0${contextGraphId}\0${revision}`,
+              async (signal) => {
+                await waitForRfc64ScheduledResponsibilityDelayV1(
+                  signal,
+                  RFC64_SCHEDULED_RESPONSIBILITY_RETRY_MS_V1,
+                );
+                signal.throwIfAborted();
+                if (isCurrentRfc64CatalogResponsibilityRevisionV1(
+                  this,
+                  contextGraphId,
+                  revision,
+                )) this.scheduleRfc64CatalogResponsibilityReconciliationV1(contextGraphId);
+              },
+            );
+          }
           this.log.warn(
             createOperationContext('system'),
             `RFC-64 authority bootstrap incomplete for "${contextGraphId}": ${error instanceof Error ? error.message : String(error)}`,
@@ -2589,6 +2521,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       // and deactivate the registry/receiver synchronously instead of waiting
       // behind that batch's physical RPC or retry delay.
       targets.delete(contextGraphId);
+      this.clearRfc64ScheduledFinalizedAbsenceRetryV1(contextGraphId);
       state.activityRevision += 1;
       if (isCurrentRfc64CatalogResponsibilityRevisionV1(
         this,
@@ -2630,6 +2563,112 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       );
       if (!scheduled) state.targets.clear();
     };
+  }
+
+  /** Central retry-state teardown for terminal and successfully resolved revisions. */
+  private clearRfc64ScheduledFinalizedAbsenceRetryV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    expectedRevision?: number,
+  ): void {
+    const retries = rfc64ScheduledResponsibilityStateForV1(this)
+      .finalizedAbsenceRetries;
+    if (
+      expectedRevision !== undefined
+      && retries.get(contextGraphId)?.revision !== expectedRevision
+    ) return;
+    retries.delete(contextGraphId);
+  }
+
+  /**
+   * Arm one bounded, independently owned finalized-index retry.
+   *
+   * The initial selection remains fail-closed. Each retry sleeps under its
+   * own dispatcher key so the shared responsibility batch remains available
+   * to unrelated lifecycle notifications. Revision checks fence stale timers,
+   * and the finite delay schedule bounds both RPC work and dispatcher drain.
+   */
+  private scheduleRfc64ScheduledFinalizedAbsenceRetryV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    revision: number,
+    authorityRequest: Rfc64CatalogAuthorityRefreshRequestV1,
+    responsibility: Rfc64CatalogResponsibilitySelectionV1,
+  ): void {
+    const state = rfc64ScheduledResponsibilityStateForV1(this);
+    const subscription = this.subscribedContextGraphs.get(contextGraphId);
+    const eligible = authorityRequest.kind === 'finalized-absence'
+      && !responsibility.active
+      && !this.config.rfc64CatalogExecutionPlan.killSwitchActive
+      && (
+        isRfc64ActiveRegisteredSubscriptionV1(subscription)
+        || isRfc64LocalJoinIntentUnregisteredSubscriptionV1(
+          this.localApprovedAgentByCG.has(contextGraphId),
+          subscription,
+        )
+      )
+      && isCurrentRfc64CatalogResponsibilityRevisionV1(this, contextGraphId, revision);
+    if (!eligible) {
+      this.clearRfc64ScheduledFinalizedAbsenceRetryV1(contextGraphId, revision);
+      return;
+    }
+
+    const previous = state.finalizedAbsenceRetries.get(contextGraphId);
+    const attempt = previous?.revision === revision ? previous.attempt + 1 : 1;
+    const retry = createRfc64ScheduledFinalizedAbsenceRetryV1(
+      contextGraphId,
+      revision,
+      attempt,
+    );
+    if (retry === null) return;
+    state.finalizedAbsenceRetries.set(contextGraphId, retry);
+    const scheduled = this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(
+      retry.key,
+      async (signal) => {
+        await waitForRfc64ScheduledResponsibilityDelayV1(signal, retry.delayMs);
+        signal.throwIfAborted();
+        if (state.finalizedAbsenceRetries.get(contextGraphId) !== retry) return;
+        if (!isCurrentRfc64CatalogResponsibilityRevisionV1(
+          this,
+          contextGraphId,
+          retry.revision,
+        )) {
+          this.clearRfc64ScheduledFinalizedAbsenceRetryV1(
+            contextGraphId,
+            retry.revision,
+          );
+          return;
+        }
+        const currentSubscription = this.subscribedContextGraphs.get(contextGraphId);
+        if (
+          !isRfc64ActiveRegisteredSubscriptionV1(currentSubscription)
+          && !isRfc64LocalJoinIntentUnregisteredSubscriptionV1(
+            this.localApprovedAgentByCG.has(contextGraphId),
+            currentSubscription,
+          )
+        ) {
+          this.clearRfc64ScheduledFinalizedAbsenceRetryV1(
+            contextGraphId,
+            retry.revision,
+          );
+          return;
+        }
+        if (!state.targets.has(contextGraphId)) {
+          state.targets.set(contextGraphId, retry.revision);
+          state.activityRevision += 1;
+        }
+        const batchScheduled = this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(
+          RFC64_SCHEDULED_RESPONSIBILITY_BATCH_KEY_V1,
+          (ownerSignal) => this.runRfc64ScheduledCatalogResponsibilityBatchV1(ownerSignal),
+        );
+        if (!batchScheduled && state.targets.get(contextGraphId) === retry.revision) {
+          state.targets.delete(contextGraphId);
+        }
+      },
+    );
+    if (!scheduled) {
+      this.clearRfc64ScheduledFinalizedAbsenceRetryV1(contextGraphId, retry.revision);
+    }
   }
 
   /** One immutable scheduled selection set owns one finalized authority batch. */
@@ -2780,29 +2819,36 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         revision,
       )) continue;
       try {
-        await this.reconcileRfc64CatalogResponsibilityCoreV1(
+        const authorityRequest = requests.get(contextGraphId)!;
+        const responsibility = await this.reconcileRfc64CatalogResponsibilityCoreV1(
           contextGraphId,
           ownerSignal,
           {
             deferRegisteredAuthority: true,
             revision,
-            authorityRequest: requests.get(contextGraphId)!,
+            authorityRequest,
           },
+        );
+        this.scheduleRfc64ScheduledFinalizedAbsenceRetryV1(
+          contextGraphId,
+          revision,
+          authorityRequest,
+          responsibility,
         );
       } catch (error) {
         if (ownerSignal.aborted) {
           pending.clear();
           throw ownerSignal.reason ?? error;
         }
-        if (isRfc64SharedStorePressureFailureV1(error)) {
-          // One managed-store timeout/admission failure represents shared
-          // backend pressure. Do not ask every remaining graph to rediscover
-          // the same unavailable store in this pass. Requeue the untouched
-          // suffix behind one abortable retry delay; accepted authority stays
-          // in place until a later complete projection supersedes it.
+        if (isRfc64SharedStorePressureFailureV1(error)
+          || isRfc64AuthorityRpcCircuitOpenErrorV1(error)) {
+          // Shared store pressure and an open authority RPC circuit are
+          // temporary node-wide conditions. Requeue this graph and the
+          // untouched suffix after one bounded delay instead of leaving a
+          // private receiver parked until an unrelated lifecycle nudge.
           this.log.warn(
             createOperationContext('system'),
-            `RFC-64 background responsibility batch paused after shared store pressure; `
+            `RFC-64 background responsibility batch paused after shared authority pressure; `
             + `${authorityTargets.length - targetIndex} target(s) deferred: ${
               error instanceof Error ? error.message : String(error)
             }`,
@@ -2855,6 +2901,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
    * Rebuild and accept current RFC-64 authority from ordinary DKG state. A
    * supplied compatibility manifest remains an authority seed for its exact
    * graph; every other responsible graph takes this release-native path.
+   *
+   * `null` means a newer composition owns the outcome. A snapshot discarded
+   * because a local authority fact moved while it was being composed has no
+   * such successor, so it is composed again here. Returning `null` for it left
+   * the graph `resolving` until the next periodic refresh pass, and a curator
+   * that lost the refresh after a membership change kept refusing the new
+   * member's catalog replay for that long.
    */
   async reconcileRfc64CatalogAccessAuthorityV1(
     this: DKGAgent,
@@ -2862,10 +2915,45 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     signal?: AbortSignal,
     authorityRequest: Rfc64CatalogAuthorityRefreshRequestV1 = Object.freeze({ kind: 'auto' }),
   ): Promise<Rfc64ReleaseNativeAuthoritySnapshotV1 | null> {
+    for (let retry = 0; ; retry += 1) {
+      const outcome = await this.composeRfc64CatalogAccessAuthorityV1(
+        contextGraphId,
+        signal,
+        authorityRequest,
+      );
+      if (!(outcome instanceof Rfc64AuthorityFactsMovedV1)) return outcome;
+      const retryDelayMs = RFC64_AUTHORITY_FACTS_MOVED_RETRY_DELAYS_MS_V1[retry];
+      if (retryDelayMs === undefined) {
+        this.log.warn(
+          createOperationContext('system'),
+          `RFC-64 authority refresh for "${contextGraphId}" was discarded ${retry + 1} times because local authority facts kept changing; the next refresh pass retries it`,
+        );
+        return null;
+      }
+      await waitForRfc64AuthorityFactsMovedRetryV1(retryDelayMs, signal);
+      // A composition that started during the wait owns the outcome now.
+      if (!isCurrentRfc64CatalogAuthorityRevisionV1(
+        this,
+        contextGraphId,
+        outcome.authorityRevision,
+      )) return null;
+    }
+  }
+
+  /** One composition; see {@link reconcileRfc64CatalogAccessAuthorityV1}. */
+  private async composeRfc64CatalogAccessAuthorityV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    signal: AbortSignal | undefined,
+    authorityRequest: Rfc64CatalogAuthorityRefreshRequestV1,
+  ): Promise<Rfc64ReleaseNativeAuthoritySnapshotV1 | Rfc64AuthorityFactsMovedV1 | null> {
     const service = this.rfc64PublicCatalogServiceV1;
     if (this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId] !== undefined) {
       return null;
     }
+    // Retired name-hash id: the cleartext graph owns this authority now
+    // (see supersedingContextGraphIdFor).
+    if (this.supersedingContextGraphIdFor?.(contextGraphId)) return null;
     const previousAuthorityProgress = rfc64CatalogAuthorityProgressV1
       .get(this)?.get(contextGraphId);
     const authorityRevision = nextRfc64CatalogAuthorityRevisionV1(this, contextGraphId);
@@ -2924,6 +3012,48 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         && directAcceptedPrivateSnapshot.policy.accessPolicy === 1
         && directAcceptedPrivateSnapshot.roster !== null
         && directAcceptedPrivateSnapshot.policy.source.kind === 'owner-signed-unregistered';
+      // A join-approved private replica has a curator-bound decision and an
+      // exact, source-qualified member/delegation proof in its own _meta. That
+      // is sufficient local authority after finalized name absence; a remote
+      // private definition must not be promoted from RDF alone.
+      const approvedAgent = this.localApprovedAgentByCG.get(contextGraphId);
+      const approvedPrivateMetaRevision = this.contextGraphMetaProjection
+        .readContextGraphAuthorityFactsRevision(contextGraphId);
+      const approvedPrivateReplica = (
+        boundOnChainId === undefined
+        && !localFirstUnregistered
+        && !directAcceptedPrivateAuthority
+        && authorityRequest.kind === 'finalized-absence'
+        && approvedAgent !== undefined
+      ) ? await resolveApprovedPrivateReplicaAuthority(
+        this,
+        contextGraphId,
+        approvedAgent,
+        () => this.localApprovedAgentByCG.get(contextGraphId)?.toLowerCase()
+          === approvedAgent.toLowerCase(),
+        () => this.contextGraphMetaProjection
+          .readContextGraphAuthorityFactsRevision(contextGraphId)
+          === approvedPrivateMetaRevision,
+        signal,
+      ) : null;
+      // A join or catalog write can invalidate this graph's metadata while
+      // the source-qualified proof is reading it. The proof correctly returns
+      // null for that mixed generation, but null alone is not evidence that
+      // the approved owner vanished. Recompose against the new revision before
+      // falling through to owner-unresolved and deactivating a valid receiver.
+      if (
+        approvedPrivateReplica === null
+        && approvedAgent !== undefined
+        && boundOnChainId === undefined
+        && !localFirstUnregistered
+        && !directAcceptedPrivateAuthority
+        && authorityRequest.kind === 'finalized-absence'
+        && this.contextGraphMetaProjection
+          .readContextGraphAuthorityFactsRevision(contextGraphId)
+          !== approvedPrivateMetaRevision
+      ) return new Rfc64AuthorityFactsMovedV1(authorityRevision);
+      const approvedPrivateReplicaAuthority = approvedPrivateReplica?.kind
+        === 'unregistered-private-replica' ? approvedPrivateReplica.authority : null;
       // Replica authority is admissible only after the shared finalized name
       // index proves that no on-chain graph owns this name. The embedded
       // policy is independently owner-signed and graph/network-bound; plain
@@ -2934,6 +3064,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         boundOnChainId === undefined
         && !localFirstUnregistered
         && !directAcceptedPrivateAuthority
+        && approvedPrivateReplicaAuthority === null
         && authorityRequest.kind === 'finalized-absence'
       )
         ? await loadRfc64UnregisteredReplicaAuthorityV1({
@@ -2989,6 +3120,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       const registeredAuthorityRead = (
         localFirstUnregistered
         || directAcceptedPrivateAuthority
+        || approvedPrivateReplicaAuthority !== null
         || replicaUnregisteredAuthority !== null
         || (
           boundOnChainId === undefined
@@ -3026,6 +3158,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         })()
         : await this.readRfc64RegisteredAuthoritySnapshotV1(contextGraphId, signal);
       let authority: Rfc64ReleaseNativeAuthoritySnapshotV1;
+      // Mutable local authority facts must be one projection generation. Keep
+      // the exact revision paired with every later metadata/version await and
+      // refuse to accept a composed snapshot if owner, policy, revocation, or
+      // membership facts changed in the meantime.
+      let metadataAuthorityRevision: string | null = null;
       if (registeredAuthorityRead !== null) {
         const { expectedNameHash, snapshot } = registeredAuthorityRead;
         if (signal?.aborted) throw signal.reason;
@@ -3037,10 +3174,23 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         }
         let authoritativeSnapshot = snapshot;
         if (snapshot.accessPolicy === 1) {
+          metadataAuthorityRevision = this.contextGraphMetaProjection
+            .readContextGraphAuthorityFactsRevision(contextGraphId);
           const localRoster = await this.resolveRfc64VerifiedPrivateRosterV1(contextGraphId);
           if (localRoster === null) {
-            throw new Error(
-              'registered private RFC-64 Context Graph has no authenticated lifecycle roster',
+            // TRANSIENT, and typed so it is classified as such. `null` here
+            // means the authenticated roster is not resolvable *yet* — not
+            // that membership was revoked to empty, which arrives as a
+            // resolved, smaller roster. A bare Error fell through to the
+            // `blocked` branch below, which closes the authoring fence and
+            // takes the SWM root-catalog lane with it: on a catalog-selected
+            // graph that lane is the ONLY delivery path for root-scope SWM
+            // (legacy apply is deliberately closed), so the curator authored
+            // zero catalog rows for a whole matrix cell and SWM converged
+            // 0/50 rather than slowly.
+            throw new Rfc64CatalogAuthorityResolutionErrorV1(
+              'registered-private-roster-unresolved',
+              'registered private RFC-64 Context Graph has no authenticated lifecycle roster yet',
             );
           }
           // The finalized chain snapshot can lag an authenticated local
@@ -3074,6 +3224,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         if (
           !localFirstUnregistered
           && !directAcceptedPrivateAuthority
+          && approvedPrivateReplicaAuthority === null
           && replicaUnregisteredAuthority === null
         ) {
           throw new Rfc64CatalogAuthorityResolutionErrorV1(
@@ -3084,6 +3235,19 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         if (replicaUnregisteredAuthority !== null) {
           authority = replicaUnregisteredAuthority;
         } else {
+          // Capture before the first owner/policy authority-fact read. Taking
+          // this revision only before the later roster read could combine an
+          // old owner with a new policy/roster generation and still pass the
+          // acceptance-time fence.
+          //
+          // A join-approved composition keeps the revision its proof was
+          // taken against. Capturing a fresh one here would make a change
+          // that landed between the proof's last check and this line the new
+          // baseline, and the acceptance-time fence could no longer see it.
+          metadataAuthorityRevision = approvedPrivateReplicaAuthority !== null
+            ? approvedPrivateMetaRevision
+            : this.contextGraphMetaProjection
+              .readContextGraphAuthorityFactsRevision(contextGraphId);
           const ownerDid = await this.getContextGraphOwner(contextGraphId);
           if (signal?.aborted) throw signal.reason;
           const normalizedOwnerDid = ownerDid
@@ -3128,16 +3292,70 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
               'authenticated private RFC-64 authority owner does not match lifecycle metadata',
             );
           }
+          if (
+            approvedPrivateReplicaAuthority !== null
+            && (accessPolicy !== 'private'
+              || ownerAddress !== approvedPrivateReplicaAuthority.ownerAddress)
+          ) {
+            throw new Rfc64CatalogAuthorityResolutionErrorV1(
+              'unregistered-owner-unresolved',
+              'approved private replica authority does not match lifecycle metadata',
+            );
+          }
           const stored = await this.getStoredContextGraphRegistrationOptions(contextGraphId);
           const publishPolicy = stored.publishPolicy === 0 || stored.publishPolicy === 1
             ? stored.publishPolicy
             : accessPolicy === 'private' ? 0 : 1;
-          const members = accessPolicy === 'private'
-            ? await this.resolveRfc64VerifiedPrivateRosterV1(contextGraphId)
-            : [];
+          // The approved-replica proof above has already authenticated this
+          // receiver's private definition and is fenced to its metadata
+          // revision. Read that definition's effective roster directly here.
+          // The general recovery helper performs another registration read;
+          // during a catalog refresh that read can lose the accepted-absence
+          // allowance while authority is resolving, making the roster depend
+          // on the very catalog authority this refresh is meant to restore.
+          let members: readonly string[] | null = [];
+          if (accessPolicy === 'private') {
+            if (approvedPrivateReplicaAuthority !== null) {
+              const confirmed = await this.hasConfirmedMetaState(contextGraphId)
+                .catch(() => false);
+              members = confirmed
+                ? await this.getLocalMetadataMemberRecoveryGate(contextGraphId, { signal })
+                : null;
+              if (members !== null) {
+                // The join proof authenticates one member against the graph's
+                // own `_meta`. The roster above comes from the merged
+                // projection, where the shared agents and ontology graphs can
+                // name allowed agents no curator approved. Keep only addresses
+                // the graph's own `_meta` names; a revocation from any source
+                // has already been applied.
+                const ownMeta = await this.getOwnCgMetaFacts(contextGraphId, { signal });
+                if (signal?.aborted) throw signal.reason;
+                const namedByOwnMeta = new Set(
+                  [...ownMeta.allowedAgents, ...ownMeta.participantAgents]
+                    .map((address) => address.toLowerCase()),
+                );
+                members = members.filter((member) => namedByOwnMeta.has(member.toLowerCase()));
+              }
+            } else {
+              members = await this.resolveRfc64VerifiedPrivateRosterV1(contextGraphId);
+            }
+          }
           if (accessPolicy === 'private' && members === null) {
-            throw new Error(
+            throw new Rfc64CatalogAuthorityResolutionErrorV1(
+              localFirstUnregistered
+                ? 'unregistered-private-roster-unresolved'
+                : 'unregistered-owner-unresolved',
               'unregistered private RFC-64 Context Graph has no authenticated lifecycle roster',
+            );
+          }
+          if (
+            approvedPrivateReplicaAuthority !== null
+            && !members?.some((member) => member.toLowerCase()
+              === approvedPrivateReplicaAuthority.approvedAgentAddress)
+          ) {
+            throw new Rfc64CatalogAuthorityResolutionErrorV1(
+              'unregistered-owner-unresolved',
+              'approved private replica member is absent from the authenticated roster',
             );
           }
           const rosterVersion = await this.readRfc64PrivateRosterVersionV1(contextGraphId);
@@ -3161,6 +3379,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         contextGraphId,
         authorityRevision,
       )) return null;
+      if (
+        metadataAuthorityRevision !== null
+        && this.contextGraphMetaProjection
+          .readContextGraphAuthorityFactsRevision(contextGraphId)
+          !== metadataAuthorityRevision
+      ) return new Rfc64AuthorityFactsMovedV1(authorityRevision);
       // Finalized absence was exact when the refresh request was created, but
       // RDF evidence loading is asynchronous. Discovery may bind the graph to
       // a chain id during that await without starting a successor reconcile
@@ -3177,6 +3401,18 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           'registered RFC-64 Context Graph cannot accept unregistered replica authority',
         );
       }
+      // The join proof was taken before the reads above. Its delegation can
+      // pass its deadline in the meantime without any store write, so the
+      // revision fences do not see it: check the deadline in this same pass.
+      if (
+        approvedPrivateReplicaAuthority !== null
+        && !isApprovedPrivateReplicaDelegationActive(approvedPrivateReplicaAuthority)
+      ) {
+        throw new Rfc64CatalogAuthorityResolutionErrorV1(
+          'unregistered-owner-unresolved',
+          'approved private replica delegation expired while its authority was composed',
+        );
+      }
       const previousAuthority = service.acceptedPolicySnapshot(
         authority.policy.networkId,
         authority.policy.contextGraphId,
@@ -3186,6 +3422,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         policyDigest: authority.policyDigest,
         roster: authority.roster,
       });
+      noteRfc64AcceptedAuthorityOriginV1(
+        this,
+        contextGraphId,
+        approvedPrivateReplicaAuthority === null ? 'authenticated' : 'join-approval',
+      );
       const authorityGenerationChanged = rfc64CatalogAuthorityGenerationChangedV1(
         previousAuthority,
         acceptedAuthority,
@@ -3203,6 +3444,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         reason: null,
         updatedAtMs: Date.now(),
       });
+      // Restart can restore all applied heads without a receiver completion.
+      // Fresh accepted authority must also wake the live readiness verifier.
+      if (approvedPrivateReplicaAuthority !== null) {
+        this.eventBus.emit(DKGEvent.CATALOG_READINESS_CHECK_REQUESTED, { contextGraphId });
+      }
       // A first subscription attempt can race this authority bootstrap and
       // correctly fail closed. Re-enter the idempotent transport reconciler
       // exactly when authority becomes usable (or its generation changes),
@@ -3211,7 +3457,14 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         this.queueSharedMemoryGossipSubscription(contextGraphId);
         this.scheduleRfc64AuthorityAcceptedPeerCatchupV1();
       }
-      await this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(contextGraphId);
+      this.scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
+        contextGraphId,
+        acceptedAuthority.policyDigest,
+        {
+          awaitsProviderAuthorization: approvedPrivateReplicaAuthority !== null,
+          retryIncompletePrivate: acceptedAuthority.policy.accessPolicy === 1,
+        },
+      );
       return authority;
     } catch (error) {
       if (signal?.aborted) throw signal.reason;
@@ -3221,7 +3474,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         authorityRevision,
       )) {
         const failureCode = rfc64CatalogAuthorityFailureCodeV1(error);
-        if (failureCode === 'registered-authority-unfinalized') {
+        if (RFC64_TRANSIENT_AUTHORITY_REFRESH_FAILURES_V1.has(failureCode)) {
           // Finality lag is transient. Stay in `resolving`, keep whatever
           // accepted lineage the refresh started with (so an author keeps
           // serving and announcing under its accepted policy), and leave the
@@ -3267,6 +3520,72 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   }
 
   /**
+   * Release the authority single-flight before catalog promotion or replay can
+   * wait on receiver admission. The keyed dispatcher owns cancellation,
+   * coalescing, error reporting, and shutdown drain for the detached work.
+   */
+  private scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    policyDigest: Digest32V1,
+    options: Readonly<{
+      awaitsProviderAuthorization?: boolean;
+      retryIncompletePrivate?: boolean;
+    }> = {},
+  ): void {
+    const awaitsProviderAuthorization = options.awaitsProviderAuthorization === true;
+    const retryDelays = awaitsProviderAuthorization
+      ? RFC64_JOIN_DERIVED_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1
+      : RFC64_AUTHORITY_CATALOG_RECOVERY_RETRY_DELAYS_MS_V1;
+    const workKey = `authority-catalog-recovery\0${contextGraphId}\0${policyDigest}`;
+    this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(workKey, async (signal) => {
+      for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
+        try {
+          await this.promoteRfc64OwnerSignedSwmInventoriesV1(contextGraphId, signal);
+          signal.throwIfAborted();
+          const replay = await this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+            contextGraphId,
+            signal,
+          );
+          // A private join may accept its owner-signed policy before both
+          // peers have the current member roster. A peer may answer replay
+          // while the subsequent native fetch is still denied. The replay
+          // runtime's settled parity, not an answered request alone, is the
+          // evidence that the promised catalog rows were applied, so that
+          // replica keeps this bounded demand alive until the parity is clean.
+          if (!awaitsProviderAuthorization && !options.retryIncompletePrivate) return;
+          const progress = this.rfc64CatalogReplayRecoveryRuntimeV1().status(
+            contextGraphId,
+            policyDigest,
+          );
+          const incomplete = progress?.failed === true || progress?.unverified === true;
+          // A private graph can finish receiving every row while its replay
+          // drain times out or an authorized peer is temporarily unavailable.
+          // Its first accepted-authority pass must not leave that unverified
+          // witness standing until another authority revision happens. Retry
+          // only this observed incomplete state, under the existing short
+          // budget. Ordinary public and already-clean graphs still do one
+          // pass; the longer join-derived budget remains join-only.
+          if (!awaitsProviderAuthorization) {
+            if (!options.retryIncompletePrivate || !incomplete) return;
+          } else if (replay.requested > 0 && !incomplete) {
+            return;
+          }
+        } catch (error) {
+          if (signal.aborted) throw signal.reason ?? error;
+          const retryDelayMs = retryDelays[attempt];
+          if (retryDelayMs === undefined) throw error;
+          await waitForRfc64ScheduledResponsibilityDelayV1(signal, retryDelayMs);
+          continue;
+        }
+        const retryDelayMs = retryDelays[attempt];
+        if (retryDelayMs === undefined) return;
+        await waitForRfc64ScheduledResponsibilityDelayV1(signal, retryDelayMs);
+      }
+    });
+  }
+
+  /**
    * Coalesce a batch of accepted authority transitions into one connected-peer
    * catch-up. A peer may have completed an ordinary sync while those graphs
    * were correctly denied as pending; the resulting freshness stamp must not
@@ -3278,7 +3597,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const timer = setTimeout(() => {
       if (rfc64AuthorityAcceptedCatchupTimersV1.get(this) !== timer) return;
       rfc64AuthorityAcceptedCatchupTimersV1.delete(this);
-      if (!this.started) return;
+      // The node can be stopped or restarting while the agent still reports
+      // started, and reading libp2p then throws from this timer, outside any
+      // caller that could catch it.
+      if (!this.started || !this.node.isStarted) return;
       for (const peer of this.node.libp2p.getPeers()) {
         const peerId = peer.toString();
         this.queueSyncFromPeerOnConnect(
@@ -3310,15 +3632,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     contextGraphId: string,
     opts: { callerAgentAddress?: string } = {},
   ): boolean | undefined {
-    const receiverAuthority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
-    if (
-      receiverAuthority.killSwitchActive
-      || receiverAuthority.mode !== 'catalog'
-    ) return undefined;
-    if (
-      !receiverAuthority.active
-      || receiverAuthority.reconciliationLane !== 'catalog-apply'
-    ) return false;
+    const transport = projectRfc64CatalogTransportStateV1(
+      this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId),
+    );
+    if (transport === 'legacy') return undefined;
+    if (transport === 'catalog-blocked') return false;
 
     const service = this.rfc64PublicCatalogServiceV1;
     const activeNetworkId = this.config.rfc64CatalogDeploymentProfile?.networkId
@@ -3333,6 +3651,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const accepted = service.acceptedPolicySnapshot(activeNetworkId, contextGraphId);
     if (accepted === null) return false;
     if (accepted.policy.accessPolicy === 0) return true;
+    // Join-derived authority does not replace the live join proof: leave the
+    // decision to the caller's read-authority check, which runs that proof.
+    if (this.isRfc64JoinDerivedAcceptedAuthorityV1?.(contextGraphId) === true) return undefined;
     if (accepted.roster === null) return false;
     const effectiveCaller = opts.callerAgentAddress
       ?? this.config.rfc64CatalogAccessPolicyAuthority?.localAgentAddress
@@ -3341,6 +3662,28 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       effectiveCaller,
       accepted.roster.members.map(({ agentAddress }) => agentAddress),
     );
+  }
+
+  /**
+   * Whether this graph's accepted policy was composed from a private join
+   * approval. Such a snapshot is labelled owner-signed-unregistered like an
+   * authenticated owner policy, but it rests on a proof that expires with the
+   * member's delegation and belongs to one request generation. Reads and
+   * shared-memory access therefore ignore it and keep running the proof.
+   */
+  isRfc64JoinDerivedAcceptedAuthorityV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): boolean {
+    return rfc64JoinDerivedAcceptedAuthorityV1.get(this)?.has(contextGraphId) === true;
+  }
+
+  /** Whether an accepted compatibility policy, not responsibility, owns this CG's RFC-64 authority. */
+  hasRfc64AcceptedCompatibilityAuthorityV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): boolean {
+    return this.resolveRfc64AcceptedCompatibilityAuthorityV1(contextGraphId) !== null;
   }
 
   /** Whether the exact active network/CG authority is an accepted unregistered owner policy. */
@@ -3376,6 +3719,78 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       activeNetworkId as NetworkIdV1,
       contextGraphId as ContextGraphIdV1,
     )?.policy.accessPolicy === 0;
+  }
+
+  /**
+   * Whether this node's accepted RFC-64 authority may govern transport for the
+   * graph right now: the receiver-authority fence shared-memory admission uses
+   * (catalog mode, no kill switch, active, catalog-apply lane). An accepted
+   * snapshot is retained after a failed refresh or a kill switch, so a
+   * transport decision must never read the snapshot without this.
+   */
+  isRfc64CatalogTransportAuthorityActiveV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): boolean {
+    return projectRfc64CatalogTransportStateV1(
+      this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId),
+    ) === 'catalog-active';
+  }
+
+  /**
+   * {@link hasAcceptedRfc64PublicUnregisteredAuthorityV1}, but only while that
+   * authority governs transport ({@link isRfc64CatalogTransportAuthorityActiveV1}).
+   * SWM consults this one: a retained public snapshot must not keep plaintext
+   * open once catalog authority is killed, inactive, or blocked (#2831 review).
+   */
+  hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): boolean {
+    return this.isRfc64CatalogTransportAuthorityActiveV1(contextGraphId)
+      && this.hasAcceptedRfc64PublicUnregisteredAuthorityV1(contextGraphId);
+  }
+
+  /**
+   * Current private roster of the accepted owner-signed unregistered policy,
+   * but only while RFC-64 catalog authority governs transport for this graph.
+   *
+   * `undefined` means that no active accepted private-unregistered authority
+   * applies. `null` keeps an applicable but incomplete private authority
+   * fail-closed. Callers must not use the retained accepted snapshot directly:
+   * it deliberately survives a kill switch or inactive catalog lane.
+   */
+  resolveActiveAcceptedRfc64PrivateUnregisteredRosterV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): readonly string[] | null | undefined {
+    if (!this.isRfc64CatalogTransportAuthorityActiveV1(contextGraphId)) {
+      return undefined;
+    }
+    const configuredPrivate = this.config.rfc64CatalogBootstrap?.acceptedPolicies.some(
+      ({ policyEnvelope }) => (
+        policyEnvelope.payload.contextGraphId === contextGraphId
+        && policyEnvelope.payload.accessPolicy === 1
+      ),
+    ) === true;
+    const accepted = this.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId);
+    // A selected private graph stays fail-closed while its policy/roster has
+    // not yet been accepted. Once the catalog transport fence is inactive,
+    // the early return above deliberately restores the legacy fallback.
+    if (accepted === null) return configuredPrivate ? null : undefined;
+    if (
+      accepted.policy.source.kind !== 'owner-signed-unregistered'
+      || accepted.policy.accessPolicy !== 1
+    ) {
+      return undefined;
+    }
+    // A join-derived roster is not owner-authenticated transport authority;
+    // the approved-replica proof path keeps governing this graph.
+    if (this.isRfc64JoinDerivedAcceptedAuthorityV1?.(contextGraphId) === true) return undefined;
+    if (accepted.roster === null) return null;
+    return Object.freeze(
+      accepted.roster.members.map(({ agentAddress }) => agentAddress),
+    );
   }
 
   /**
@@ -3628,8 +4043,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       localPeerId: this.peerId,
       accessPolicyAuthority: this.config.rfc64CatalogAccessPolicyAuthority
         ?? {
-          resolveLocalAgentAddress: (contextGraphId) =>
-            this.resolveRfc64CatalogLocalAgentAddressV1(contextGraphId),
+          resolveLocalAgentAddress: (contextGraphId, authorizationScope) =>
+            this.resolveRfc64CatalogLocalAgentAddressV1(
+              contextGraphId,
+              authorizationScope,
+            ),
           resolveRemoteAgentAddress: (peerId, contextGraphId) =>
             this.resolveRfc64CatalogRemoteAgentAddressV1(peerId, contextGraphId),
         },
@@ -3728,6 +4146,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // through the ambient lane. Exact retirement must not depend on the
           // optional attempt-observer bookkeeping still being present.
           retireRfc64CatalogTargetAnnouncementV1(this, announcement);
+          this.eventBus.emit(DKGEvent.CATALOG_READINESS_CHECK_REQUESTED, {
+            contextGraphId: announcement.contextGraphId,
+          });
           const attempt = reconciliationAttempts.get(token);
           if (attempt === undefined) return;
           attempt.succeeded.value = true;
@@ -3836,6 +4257,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           );
         },
       },
+      catalogHeadDelivery: this.rfc64CatalogHeadDeliveryPortsV1(),
       onCatalogHeadReplayRequested: (request, remotePeerId) => {
         const admission = this.tryQueueRfc64CatalogHeadReplayV1(remotePeerId, request);
         if (admission.status === 'busy') return admission;
@@ -3884,10 +4306,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   async closeRfc64PublicCatalogMutationPersistenceV1(this: DKGAgent): Promise<void> {
     try {
       await this.rfc64CatalogMutationCoordinatorV1.closeAndDrain();
+      await rfc64CatalogReplaySnapshotRuntimesV1.get(this)?.runtime.whenIdle();
     } finally {
+      this.clearRfc64CatalogMutationMemoryV1();
       this.rfc64PublicCatalogSynchronizationEvidenceV1.clear();
       this.rfc64PublicCatalogReconciliationFailuresV1.clear();
       rfc64DirectAcceptedCompatibilityV1.delete(this);
+      rfc64JoinDerivedAcceptedAuthorityV1.delete(this);
       rfc64CatalogReplayRuntimesV1.delete(this);
       rfc64CatalogReplaySnapshotRuntimesV1.delete(this);
       rfc64CatalogReplayRecoveryRuntimesV1.get(this)?.reset();
@@ -3942,6 +4367,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       this.clearRfc64CatalogOperationalTargetsV1(input.policy.contextGraphId);
     }
     markRfc64DirectAcceptedCompatibilityV1(this, input.policy.contextGraphId);
+    noteRfc64AcceptedAuthorityOriginV1(this, input.policy.contextGraphId, 'authenticated');
     return accepted;
   }
 
@@ -4127,12 +4553,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     }
     let announced = 0;
     let failed = 0;
-    const replaySnapshotRuntime = rfc64CatalogReplaySnapshotRuntimeForV1(
-      this,
-      persistence,
-      this.rfc64CatalogMutationCoordinatorV1,
-    );
-    return replaySnapshotRuntime.withSnapshot({
+    return rfc64CatalogReplaySnapshotRuntimeForV1(this, persistence, this.rfc64CatalogMutationCoordinatorV1)
+      .withSnapshot({
       selection: requestedScope === undefined
         ? Object.freeze({ kind: 'all' })
         : Object.freeze({
@@ -4140,7 +4562,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             networkId: requestedScope.networkId,
             contextGraphId: requestedScope.contextGraphId,
           }),
-      operation: async (replayEntries) => {
+      prepare: (replayEntries) => {
         const manifest: Rfc64PublicCatalogHeadAnnouncementV1[] = [];
         for (const { head } of replayEntries) {
           const servingAuthority = this.resolveRfc64CatalogServingAuthorityV1(
@@ -4203,6 +4625,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         // where the offending scope can still be named, rather than letting
         // the encoder fail the whole response at delivery time.
         assertRfc64ReplayManifestScopesUniqueV1(manifest);
+        return manifest;
+      },
+      deliver: async (manifest) => {
         const completedManifest: Rfc64PublicCatalogHeadAnnouncementV1[] = [];
         for (const announcement of manifest) {
           try {
@@ -4228,24 +4653,90 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     });
   }
 
+  /** Replay only this graph's current head to the exact approved peer. */
+  async reannounceRfc64CatalogAfterJoinApprovalV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    approvedAgentAddress: string,
+    peerId: string,
+  ): Promise<boolean> {
+    const accepted = this.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId);
+    if (accepted === null) return false;
+    if (
+      accepted.policy.accessPolicy === 1
+      && !accepted.roster?.members.some((member) =>
+        member.agentAddress.toLowerCase() === approvedAgentAddress.toLowerCase())
+    ) return false;
+    const replay = await this.reannounceRfc64CatalogHeadsToPeerV1(peerId, {
+      kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
+      networkId: accepted.policy.networkId,
+      contextGraphId: accepted.policy.contextGraphId,
+      policyDigest: accepted.policyDigest,
+    });
+    // An approval can precede the first authored head. An empty replay is not
+    // delivery evidence: keep the bounded retry armed so a head published a
+    // moment later is announced under the settled private roster.
+    return replay.failed === 0 && replay.announced > 0;
+  }
+
+  /**
+   * An approval can arrive while its successor private roster is still being
+   * composed. Keep the exact approved peer's replay demand alive past the
+   * short notification attempt without delaying the join or widening the
+   * accepted policy. The dispatcher cancels and drains this bounded work on
+   * shutdown; each attempt rechecks current authority and membership.
+   */
+  scheduleRfc64CatalogAfterJoinApprovalRetryV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    approvedAgentAddress: string,
+    peerId: string,
+  ): boolean {
+    const workKey = `join-approved-catalog-replay\0${contextGraphId}\0${approvedAgentAddress.toLowerCase()}\0${peerId}`;
+    return this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(workKey, async (signal) => {
+      for (const delayMs of RFC64_JOIN_APPROVAL_CATALOG_REPLAY_RETRY_DELAYS_MS_V1) {
+        await waitForRfc64ScheduledResponsibilityDelayV1(signal, delayMs);
+        try {
+          await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal);
+          signal.throwIfAborted();
+          if (await this.reannounceRfc64CatalogAfterJoinApprovalV1(
+            contextGraphId,
+            approvedAgentAddress,
+            peerId,
+          )) return;
+        } catch (error) {
+          if (signal.aborted) throw signal.reason ?? error;
+          // An overlapping metadata write or transport refusal is retryable;
+          // the next pass still has to authenticate the current roster.
+        }
+      }
+      this.log.warn(
+        createOperationContext('system'),
+        `RFC-64 catalog replay remained pending after bounded join approval retries for "${contextGraphId}"`,
+      );
+    });
+  }
+
   /** Request scoped head replay from already-connected peers after late activation. */
   async requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
     this: DKGAgent,
     contextGraphId: string,
+    signal?: AbortSignal,
   ): Promise<Readonly<{ requested: number; failed: number }>> {
     return this.requestRfc64CatalogHeadReplayV1(contextGraphId, {
       kind: 'connected-peers',
-    });
+    }, signal);
   }
 
   /** Continue only already-owned recovery demand without reseeding peers. */
   async continueRfc64CatalogHeadReplayRecoveryV1(
     this: DKGAgent,
     contextGraphId: string,
+    signal?: AbortSignal,
   ): Promise<Readonly<{ requested: number; failed: number }>> {
     return this.requestRfc64CatalogHeadReplayV1(contextGraphId, {
       kind: 'pending-recovery',
-    });
+    }, signal);
   }
 
   private async requestRfc64CatalogHeadReplayV1(
@@ -4259,7 +4750,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           replayDemand: Rfc64CatalogReplayPeerDemandV1;
         }
     >,
+    signal?: AbortSignal,
   ): Promise<Readonly<{ requested: number; failed: number }>> {
+    signal?.throwIfAborted();
     const service = this.rfc64PublicCatalogServiceV1;
     const networkId = (
       this.config.rfc64CatalogDeploymentProfile?.networkId
@@ -4283,24 +4776,34 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       contextGraphId,
       policyDigest: accepted.policyDigest,
     } as const;
+    const settle = async (task: Promise<Readonly<{ requested: number; failed: number }>>) => {
+      const result = await task;
+      // Receiver completion precedes the replay owner's parity settlement.
+      // Wake readiness again after that owner releases its active fence.
+      this.eventBus.emit(DKGEvent.CATALOG_READINESS_CHECK_REQUESTED, { contextGraphId });
+      return result;
+    };
     switch (request.kind) {
       case 'connected-peers':
-        return this.rfc64CatalogReplayRecoveryRuntimeV1().request({
+        return settle(this.rfc64CatalogReplayRecoveryRuntimeV1().request({
           ...scope,
+          ...(signal === undefined ? {} : { signal }),
           kind: 'full-connected-peers',
           connectedPeerIds: this.node.libp2p.getPeers().map((peer) => peer.toString()),
-        });
+        }));
       case 'pending-recovery':
-        return this.rfc64CatalogReplayRecoveryRuntimeV1().request({
+        return settle(this.rfc64CatalogReplayRecoveryRuntimeV1().request({
           ...scope,
+          ...(signal === undefined ? {} : { signal }),
           kind: 'pending-recovery',
-        });
+        }));
       case 'connection-demand':
-        return this.rfc64CatalogReplayRecoveryRuntimeV1().request({
+        return settle(this.rfc64CatalogReplayRecoveryRuntimeV1().request({
           ...scope,
+          ...(signal === undefined ? {} : { signal }),
           kind: 'connection-demand',
           demand: request.replayDemand,
-        });
+        }));
     }
   }
 
@@ -4437,7 +4940,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       controlObjects: persistence.controlObjects,
       stageKaBundle: persistence.kaBundles.putKaBundle,
       readKaBundleByDigest: persistence.kaBundles.readKaBundleByDigest,
+      verifiedRows: this.rfc64VerifiedCatalogRowsV1(scope),
     });
+    // The history read above and the production below each walk the whole set.
+    await yieldMainThread();
     const produced = await producer.produceAndStageExactSet({
       previousHead: history.previousHead,
       previousDirectoryPath: history.previousDirectoryPath,
@@ -4450,6 +4956,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         signDigest: (objectDigest) => params.author.signMessage(objectDigest),
       },
       catalogIssuerAuthorization: params.catalogIssuerAuthorization,
+      signal: params.signal,
     });
     const head = produced.publication.head;
     const headKeys = produced.stagedControlObjects.objects.find(
@@ -4697,9 +5204,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // `chainConfig` is ignored, so reading it here would pin the
           // precommits to the default while the adapter's own authority
           // reads honoured the operator. One anchor, one source.
-          finalityConfirmations: this.resolveChainFinalityConfirmationsV1(),
+          finalityConfirmations: resolveChainFinalityConfirmationsV1(this.chain, this.config.chainConfig),
           getOnChainContextGraphId: (contextGraphId, signal) =>
-            this.getContextGraphOnChainId(contextGraphId, { signal }),
+            this.resolveContextGraphNumericIdForPolicy(contextGraphId, { signal })
+              .then((id) => id?.toString() ?? null),
           getEvmChainId: () => this.chain.getEvmChainId(),
         });
         const finalizedVmPrecommit = createRfc64FinalizedVmAgentPrecommitV1({
@@ -4712,9 +5220,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // `chainConfig` is ignored, so reading it here would pin the
           // precommits to the default while the adapter's own authority
           // reads honoured the operator. One anchor, one source.
-          finalityConfirmations: this.resolveChainFinalityConfirmationsV1(),
+          finalityConfirmations: resolveChainFinalityConfirmationsV1(this.chain, this.config.chainConfig),
           getOnChainContextGraphId: (contextGraphId, signal) =>
-            this.getContextGraphOnChainId(contextGraphId, { signal }),
+            this.resolveContextGraphNumericIdForPolicy(contextGraphId, { signal })
+              .then((id) => id?.toString() ?? null),
           getEvmChainId: () => this.chain.getEvmChainId(),
           getKnowledgeAssetStorageAddress: async () => {
             if (typeof this.chain.getDKGKnowledgeAssetsAddress !== 'function') {
@@ -4758,6 +5267,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           store: this.store,
           verifyIssuerSignature: clients.verifyIssuerSignature,
           beforeAppliedHeadCommit,
+          acquireLegacySwmBoundaryLease: (scope) =>
+            acquireRfc64LegacySwmBoundaryReceiverLeaseV1(this, scope),
           transportTimeoutMs: clients.transportTimeoutMs,
         });
         readNativeResourceStats = () => nativeReceiver.resourceStats();
@@ -4795,28 +5306,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           Object.freeze({
             synchronizeBoundedPublicRootCatalog,
           });
-        const reconciler = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
-          nativeReceiver: nativeReceiverClient,
-          inventory: persistence.inventory,
-          resolveTrustedCatalogScope: clients.resolveTrustedCatalogScope,
-          resolveDeployment,
-          requiresAppliedHeadPrecommit: (announcement) => {
-            const accepted = this.requireRfc64PublicCatalogServiceV1()
-              .acceptedPolicySnapshotForCatalogScope(
-                clients.resolveTrustedCatalogScope(announcement),
-              );
-            return accepted.policy.accessPolicy === 1
-              && accepted.policy.source.kind === 'finalized-chain'
-              // A durable head alone cannot prove that finalized VM/SWM
-              // post-commit work finished on a prior process, so restart must
-              // replay it. Within this process, however, synchronization
-              // evidence is recorded only after that lifecycle succeeds and
-              // safely closes the scheduler's check/lock race for this head.
-              && !this.rfc64PublicCatalogSynchronizationEvidenceV1.has(
-                announcement.catalogHeadObjectDigest,
-              );
-          },
-          readStagedCatalogHead: async (announcement) => {
+        const stagedCatalogHeads = createRfc64VerifiedStagedCatalogHeadMemoV1(
+          async (announcement) => {
             const stored = await persistence.controlObjects.getVerifiedObject({
               objectDigest: announcement.catalogHeadObjectDigest,
               signatureVariantDigest: announcement.signatureVariantDigest,
@@ -4841,12 +5332,55 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
               signatureVariantDigest,
             });
           },
+        );
+        const reconciler = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
+          nativeReceiver: nativeReceiverClient,
+          inventory: persistence.inventory,
+          resolveTrustedCatalogScope: clients.resolveTrustedCatalogScope,
+          resolveDeployment,
+          requiresAppliedHeadPrecommit: (announcement) => {
+            // An exact applied head can precede a late legacy SWM root marker.
+            // Replaying that authenticated head retires the marker under the
+            // native receiver lease; treating the head as satisfied would
+            // leave the graph permanently known-incomplete despite row parity.
+            if (readRfc64LegacySwmBoundaryCountV1(
+              this,
+              announcement.contextGraphId,
+            ) > 0) return true;
+            const accepted = this.requireRfc64PublicCatalogServiceV1()
+              .acceptedPolicySnapshotForCatalogScope(
+                clients.resolveTrustedCatalogScope(announcement),
+              );
+            return accepted.policy.accessPolicy === 1
+              && accepted.policy.source.kind === 'finalized-chain'
+              // A durable head alone cannot prove that finalized VM/SWM
+              // post-commit work finished on a prior process, so restart must
+              // replay it. Within this process, however, synchronization
+              // evidence is recorded only after that lifecycle succeeds and
+              // safely closes the scheduler's check/lock race for this head.
+              && !this.rfc64PublicCatalogSynchronizationEvidenceV1.has(
+                announcement.catalogHeadObjectDigest,
+              );
+          },
+          // Control objects are content-addressed and never rewritten or
+          // removed, and an EIP-191 head verifies from its envelope alone, so
+          // an exact staged head read and verified once is reused by the
+          // applied-head check instead of being re-read on every announcement.
+          stagedCatalogHeads,
         });
         const deploymentAwareReconciler: Rfc64PublicCatalogCurrentReceiverReconcilerV1 = {
           isHeadSatisfied: (announcement) => withRpcRequestContext({ requestClass: 'background' }, () => {
             this.assertRfc64CatalogNetworkMatchesTrustedSourceV1(announcement.networkId);
             return reconciler.isHeadSatisfied(announcement);
           }),
+          isHeadKnownSatisfied: (announcement) => {
+            try {
+              this.assertRfc64CatalogNetworkMatchesTrustedSourceV1(announcement.networkId);
+            } catch {
+              return false;
+            }
+            return reconciler.isHeadKnownSatisfied?.(announcement) === true;
+          },
           reconcileHead: (remotePeerId, announcement, signal) =>
             withRpcRequestContext(
               { requestClass: 'background', signal },

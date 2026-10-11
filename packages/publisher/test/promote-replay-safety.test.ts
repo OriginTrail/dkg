@@ -1,18 +1,28 @@
 import { describe, expect, it } from 'vitest';
 import {
   StoreOperationTimeoutError,
+  StoreSchedulerBusyError,
+  UnsupportedTripleStoreCapabilityError,
   isStoreOperationTimeoutError,
 } from '@origintrail-official/dkg-storage';
 
 import {
   classifyExactSwmGraphReplaceFailure,
+  classifyPromoteCompanionSettlementFailure,
   createPromotePostCommitFailure,
   createPromoteRetryableFailure,
   getPromoteFailureDisposition,
   isPromoteReplaySafeError,
   isPromoteRetryableFailure,
+  isStoreOperationProvenNotStarted,
   runPromoteCommittedFinalization,
 } from '../src/promote-replay-safety.js';
+
+function schedulerBusy(): StoreSchedulerBusyError {
+  return new StoreSchedulerBusyError(
+    'queue_wait_timeout', 'normal', 'publisher.promoteWmToSwm.finalize', { storeOperation: 'insert' },
+  );
+}
 
 describe('promote replay safety', () => {
   it('gives the same storage failure phase-specific prerequisite, exact-commit, and finalization dispositions', async () => {
@@ -35,6 +45,39 @@ describe('promote replay safety', () => {
     expect(finalization).toMatchObject({ cause: failure });
   });
 
+  it('preserves a scheduler admission rejection from the durable tail as a proven non-started failure', async () => {
+    // The saturated-store signature from the field: the scheduler refuses the
+    // finalization write before dispatch, so nothing in the tail mutated.
+    const busy = schedulerBusy();
+    await expect(runPromoteCommittedFinalization(async () => { throw busy; })).rejects.toBe(busy);
+    expect(isStoreOperationProvenNotStarted(busy)).toBe(true);
+    // The raw storage error keeps its own contract; the worker's storage-aware
+    // classifier (not a publisher marker) retries it.
+    expect(getPromoteFailureDisposition(busy)).toBeUndefined();
+  });
+
+  it.each([
+    ['an indeterminate timeout', new StoreOperationTimeoutError({
+      backend: 'managed-oxigraph', operation: 'insert', outcome: 'indeterminate',
+    })],
+    ['an untyped timeout', new StoreOperationTimeoutError({
+      backend: 'managed-oxigraph', operation: 'insert',
+    })],
+    ['a capability refusal', new UnsupportedTripleStoreCapabilityError('replaceSubject', 'managed-oxigraph')],
+    ['scheduler prose without the typed contract', new Error('Store scheduler queue wait timeout')],
+    ['a busy lookalike missing the outcome tag', Object.assign(new Error('busy'), {
+      code: 'STORE_SCHEDULER_BUSY', retryable: true, outcome: 'not_started',
+      reason: 'queue_full', priority: 'normal', operation: 'x',
+    })],
+  ])('does not certify %s as proven non-started', async (_label, failure) => {
+    expect(isStoreOperationProvenNotStarted(failure)).toBe(false);
+    const finalization = await runPromoteCommittedFinalization(async () => { throw failure; })
+      .catch((error: unknown) => error);
+    expect(getPromoteFailureDisposition(finalization)).toMatchObject({
+      classification: 'fatal', diagnostic: { code: 'PROMOTE_POST_COMMIT_FAILURE' },
+    });
+  });
+
   it('preserves a proven non-started durable-tail failure, but not a later observer failure', async () => {
     const failure = new StoreOperationTimeoutError({
       backend: 'managed-oxigraph', operation: 'insert', outcome: 'not_started',
@@ -42,6 +85,57 @@ describe('promote replay safety', () => {
     await expect(runPromoteCommittedFinalization(async () => { throw failure; })).rejects.toBe(failure);
     expect(getPromoteFailureDisposition(createPromotePostCommitFailure(failure)))
       .toMatchObject({ classification: 'fatal', retryable: false });
+  });
+
+  describe('root-companion settlement failures', () => {
+    const notStartedTimeout = () => new StoreOperationTimeoutError({
+      backend: 'managed-oxigraph', operation: 'insert', outcome: 'not_started',
+    });
+
+    it('propagates a proven non-commit untouched', () => {
+      for (const failure of [new Error('before dispatch'), notStartedTimeout(), schedulerBusy()]) {
+        expect(classifyPromoteCompanionSettlementFailure(failure, false)).toBe(failure);
+      }
+    });
+
+    it.each([
+      ['a not-started store timeout', notStartedTimeout()],
+      ['a scheduler admission rejection', schedulerBusy()],
+    ])('retries %s only while the compound outcome is unknown', (_label, failure) => {
+      const classified = classifyPromoteCompanionSettlementFailure(failure, undefined);
+      expect(classified).not.toBe(failure);
+      expect(classified).toMatchObject({
+        name: 'PromoteRetryableFailureError', code: 'PROMOTE_RETRYABLE_FAILURE', cause: failure,
+      });
+      expect(getPromoteFailureDisposition(classified)).toMatchObject({
+        classification: 'transient', retryable: true,
+      });
+      // A known compound commit keeps the same failure post-commit fatal.
+      expect(getPromoteFailureDisposition(classifyPromoteCompanionSettlementFailure(failure, true)))
+        .toMatchObject({ classification: 'fatal', retryable: false });
+    });
+
+    it.each([
+      ['an indeterminate store timeout', new StoreOperationTimeoutError({
+        backend: 'managed-oxigraph', operation: 'insert', outcome: 'indeterminate',
+      })],
+      ['an indeterminate exact-replace timeout', new StoreOperationTimeoutError({
+        backend: 'managed-oxigraph', operation: 'replaceGraphAndSubject', outcome: 'indeterminate',
+      })],
+      ['an untyped error', new Error('settlement failed')],
+      ['a generic retry marker', createPromoteRetryableFailure(new Error('settlement timed out'))],
+      ['a capability refusal', new UnsupportedTripleStoreCapabilityError('replaceSubject', 'managed-oxigraph')],
+    ])('keeps %s post-commit fatal after dispatch', (_label, failure) => {
+      for (const committed of [undefined, true] as const) {
+        const classified = classifyPromoteCompanionSettlementFailure(failure, committed);
+        expect(classified).toMatchObject({
+          name: 'PromotePostCommitFailureError', code: 'PROMOTE_POST_COMMIT_FAILURE', cause: failure,
+        });
+        expect(getPromoteFailureDisposition(classified)).toMatchObject({
+          classification: 'fatal', retryable: false,
+        });
+      }
+    });
   });
 
   it('makes post-commit failures terminal even when their cause carries a retry marker', () => {
