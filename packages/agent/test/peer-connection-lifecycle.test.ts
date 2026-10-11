@@ -1,4 +1,4 @@
-import { createOperationContext } from '@origintrail-official/dkg-core';
+import { createOperationContext, CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1, type EvmAddressV1, type Digest32V1 } from '@origintrail-official/dkg-core';
 import { describe, expect, it, vi } from 'vitest';
 import { DKGAgent } from '../src/index.js';
 import { NetworkAdmissionProbeError } from '../src/p2p/network-admission-coordinator.js';
@@ -187,6 +187,16 @@ describe('peer connection lifecycle', () => {
     },
   );
 
+  it('refuses an aborted scoped announcement before service or snapshot work', async () => {
+    const f = await createPeerEventFixture();
+    const cancellation = new Error('connection retired');
+    const controller = new AbortController(); controller.abort(cancellation);
+    try {
+      await expect(f.agent.reannounceRfc64CatalogHeadsToPeerV1(f.peerId, undefined, controller.signal))
+        .rejects.toBe(cancellation);
+    } finally { await f.agent.stop(); }
+  });
+
   it.each(['enrichment', 'sender-key'] as const)(
     'admits catalog replay before a stalled best-effort %s step',
     async (stage) => {
@@ -243,6 +253,18 @@ describe('peer connection lifecycle', () => {
         const drain = vi.spyOn(f.agent, 'drainPendingSenderKeyForPeer').mockResolvedValue(2);
         if (stage === 'enrichment') enrich.mockRejectedValue(new Error('enrichment unavailable'));
         else if (stage === 'sender-key') drain.mockRejectedValue(new Error('sender-key unavailable'));
+        vi.spyOn(f.agent, 'readAcceptedRfc64CatalogAccessSnapshotV1').mockReturnValue({
+          policy: {
+            networkId: 'otp:20430', contextGraphId: 'connection-catalog',
+            governanceChainId: null, governanceContractAddress: null, ownershipTransitionDigest: null,
+            era: '0', version: '0', previousPolicyDigest: null, accessPolicy: 0, publishPolicy: 1,
+            publishAuthority: null, publishAuthorityAccountId: '0',
+            projectionId: CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1, administrativeDelegationDigest: null,
+            source: { kind: 'owner-signed-unregistered', ownerAddress: '0x1111111111111111111111111111111111111111' as EvmAddressV1,
+              ownerAuthorityEra: '0' }, effectiveAt: '0', issuedAt: '0',
+          },
+          policyDigest: ('0x' + '11'.repeat(32)) as Digest32V1, roster: null,
+        });
         const reannounce = vi.spyOn(f.agent, 'reannounceRfc64CatalogHeadsToPeerV1')
           .mockResolvedValue({ announced: 0, failed: 0, manifest: [] });
         if (stage === 'reannouncement') {
@@ -257,10 +279,17 @@ describe('peer connection lifecycle', () => {
         await vi.waitFor(() => expect(queue).toHaveBeenCalledWith(f.peerId, expect.any(Function)));
         await flushMicrotasks();
         expect(drain).toHaveBeenCalledWith(f.peerId, expect.anything());
-        expect(reannounce).toHaveBeenCalledExactlyOnceWith(f.peerId);
+        expect(f.agent.readRfc64CatalogRuntimeSelectionV1().connectionReplay?.peers).toContainEqual(
+          expect.objectContaining({ peerIdSuffix: f.peerId.slice(-8), started: 1 }),
+        );
+        expect(reannounce).toHaveBeenCalledExactlyOnceWith(f.peerId, expect.objectContaining({
+          contextGraphId: 'connection-catalog', policyDigest: '0x' + '11'.repeat(32),
+        }), expect.any(AbortSignal));
+        expect(reannounce.mock.calls[0][2]).toBe(replay.mock.calls[0][2]);
         expect(replay).toHaveBeenCalledWith(
           'connection-catalog',
           expect.objectContaining({ kind: 'connection-demand' }),
+          expect.any(AbortSignal),
         );
         if (stage === 'replay incomplete') {
           expect(warn).toHaveBeenCalledWith(
@@ -282,6 +311,24 @@ describe('peer connection lifecycle', () => {
       }
     },
   );
+
+  it('activates only the requested graph for connected peers', async () => {
+    const f = await createPeerEventFixture();
+    const reservation = replayReservation();
+    const service = Object.getOwnPropertyDescriptor(f.agent, 'rfc64PublicCatalogServiceV1');
+    Object.defineProperty(f.agent, 'rfc64PublicCatalogServiceV1', { configurable: true, value: {} });
+    try {
+      const prepare = vi.spyOn(f.agent, 'prepareRfc64CatalogConnectionReplayV1').mockReturnValue(reservation.value);
+      vi.spyOn(f.agent.networkAdmissionCoordinator, 'ensureAdmitted').mockResolvedValue(true);
+      await expect(f.agent.replayRfc64CatalogToConnectedPeersV1('newly-active')).resolves.toEqual({ attempted: 1, admitted: 1 });
+      expect(prepare).toHaveBeenCalledExactlyOnceWith(f.peerId, 'newly-active');
+      expect(reservation.admit).toHaveBeenCalledOnce();
+    } finally {
+      if (service === undefined) delete (f.agent as { rfc64PublicCatalogServiceV1?: unknown }).rfc64PublicCatalogServiceV1;
+      else Object.defineProperty(f.agent, 'rfc64PublicCatalogServiceV1', service);
+      await f.close();
+    }
+  });
 
   it.each([
     { name: 'event', gate: 'event', reject: false },

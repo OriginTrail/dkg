@@ -22,6 +22,8 @@ import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 import { TEST_SNAPSHOT_CONFIG } from '../../../scripts/testing/snapshot-storage.js';
 import { installHardhatACKProvider } from './_helpers/v10-acks.js';
 import { DKGAgent } from '../src/index.js';
+import { Rfc64CatalogReplayConnectionRuntimeV1 } from '../src/rfc64/catalog-replay-connection-runtime-v1.js';
+import { Rfc64BackgroundWorkDispatcherV1 } from '../src/rfc64/background-work-dispatcher-v1.js';
 import type { ContextGraphSubscriptionRecord } from '../src/index.js';
 import {
   decodeReliableEnvelope,
@@ -252,6 +254,69 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
       subscribed: true,
       syncScoped: false,
     });
+  }, 75_000);
+
+  it('keeps real join and SWM catch-up responsive during a 59-graph reconnect replay burst', async () => {
+    const protocol = '/test/catalog-replay-capacity/1.0.0';
+    const encoder = new TextEncoder();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let incoming = 0;
+    curator.router.register(protocol, async () => {
+      incoming++;
+      await held;
+      return encoder.encode('completed');
+    });
+    const owner = new Rfc64BackgroundWorkDispatcherV1();
+    const replay = new Rfc64CatalogReplayConnectionRuntimeV1({
+      selectContextGraphIds: () => Array.from({ length: 59 }, (_, i) => `capacity-cg-${i}`),
+      acquireFence: (_id, peerId) => ({ peerId, generation: 1, release: () => undefined }),
+      reannounce: async () => undefined,
+      replay: async (id, demand, signal) => {
+        await joiner.router.send(demand.peerId, protocol, encoder.encode(id), { signal });
+        return { failed: 0 };
+      },
+      schedule: (work) => owner.scheduleKeyed('capacity-replay', work),
+      warn: () => undefined,
+    });
+    try {
+      replay.prepare(curator.peerId)?.admit();
+      await vi.waitFor(() => expect(incoming).toBe(1));
+      for (let i = 0; i < 20; i++) {
+        replay.peerDisconnected(curator.peerId);
+        expect(replay.prepare(curator.peerId)).toBeNull();
+      }
+      const record = await joiner.registerAgent('replay-capacity-requester', { framework: 'test' });
+      const delegation = await joiner.signJoinRequest(CG, record.agentAddress);
+      const forwarded = await joiner.forwardJoinRequest(CG, delegation, 'capacity-requester', curator.peerId);
+      expect(forwarded.delivered).toBeGreaterThanOrEqual(1);
+      expect(await curator.getJoinRequestStatus(CG, record.agentAddress)).toBe('pending');
+      // A new signed head must reach the approved member while the unrelated
+      // reconnect stream stays held; already-complete replay requests may be
+      // idempotent no-ops and are not evidence of a fresh transfer.
+      const subject = 'urn:dkg:e2e-join:capacity-catchup';
+      await curator.assertion.create(CG, 'capacity-catchup');
+      await curator.assertion.write(CG, 'capacity-catchup', [{
+        subject, predicate: 'http://schema.org/name', object: '"Capacity Catchup"',
+      }]);
+      await curator.assertion.promote(CG, 'capacity-catchup');
+      expect((await curator.publishFromFinalizedAssertion(CG, 'capacity-catchup')).status).toBe('confirmed');
+      const caughtUp = await pollUntil(
+        async () => (await joiner.query(
+          `SELECT ?name WHERE { <${subject}> <http://schema.org/name> ?name . }`, CG,
+        )).bindings,
+        bindings => bindings.length === 1,
+        60_000,
+      );
+      expect(caughtUp).toHaveLength(1);
+      // Foreground work completed while the physical replay stream remained held.
+      expect(incoming).toBe(1);
+      expect(replay.status().pendingScopes).toBe(59);
+    } finally {
+      release();
+      await owner.closeAndDrain();
+      curator.router.unregister(protocol);
+    }
   }, 75_000);
 
   it('a join request forwarded over real libp2p lands as PENDING on the curator', async () => {
