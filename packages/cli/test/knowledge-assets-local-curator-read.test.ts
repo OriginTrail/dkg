@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { DKGAgent, KaNumberAllocator } from '@origintrail-official/dkg-agent';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { contextGraphDataGraphUri, contextGraphMetaUri, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
+import { contextGraphAssertionUri, contextGraphDataGraphUri, contextGraphMetaUri, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
@@ -101,7 +101,7 @@ describe('real local curator draft provenance through HTTP admission', () => {
       expect(res.statusCode, res.body).toBe(suffix === '/wm/extraction-status' ? 404 : 200);
       const literalCalls = history.mock.calls.filter(([cg, name, opts]) => cg === CG
         && name === compactLiteralName && opts?.agentAddress?.toLowerCase() === owner.toLowerCase());
-      expect(literalCalls).toHaveLength(1);
+      expect(literalCalls).toHaveLength(suffix === '/wm/extraction-status' ? 0 : 1);
       if (suffix === '/wm/quads') expect(res.body).toContain('literal secret');
     } finally { facade.mockRestore(); history.mockRestore(); }
   });
@@ -124,6 +124,38 @@ describe('real local curator draft provenance through HTTP admission', () => {
       expect(res.body).toContain('legacy secret');
       expect(history).not.toHaveBeenCalled();
     } finally { facade.mockRestore(); history.mockRestore(); }
+  });
+  it.each(['in_progress', 'failed'] as const)('reads actor-owned compact-name extraction %s without a lifecycle', async status => {
+    const name = `${other}:987654`;
+    expect(await agent.assertion.history(CG, name, { agentAddress: owner })).toBeNull();
+    const h = context(agent, owner, `/api/knowledge-assets/${encodeURIComponent(name)}/wm/extraction-status?contextGraphId=${CG}`);
+    const uri = contextGraphAssertionUri(CG, owner, name);
+    h.ctx.extractionStatus.set(uri, { status, fileHash: 'keccak256:original-file',
+      detectedContentType: 'application/pdf', pipelineUsed: 'markitdown', tripleCount: 0,
+      startedAt: new Date().toISOString(), ...(status === 'failed' ? { error: 'conversion failed before create' } : {}),
+    });
+    const assertion = agent.assertion;
+    const history = vi.spyOn(assertion, 'history');
+    const facade = vi.spyOn(agent, 'assertion', 'get').mockReturnValue(assertion);
+    try {
+      await handleKnowledgeAssetsRoutes(h.ctx);
+      expect(h.res.statusCode, h.res.body).toBe(200);
+      expect(JSON.parse(h.res.body)).toMatchObject({ assertionUri: uri, status, fileHash: 'keccak256:original-file' });
+      expect(history).not.toHaveBeenCalled();
+    } finally { facade.mockRestore(); history.mockRestore(); }
+  });
+  it.each(['other-caller', 'revoked', 'foreign-curator', 'roster-denied'] as const)('refuses compact-name extraction for %s before reading the actor record', async kind => {
+    const cg = kind === 'revoked' ? revokedCg : kind === 'foreign-curator' ? foreignCg : kind === 'roster-denied' ? deniedCg : CG;
+    const caller = kind === 'other-caller' ? other : owner;
+    const name = `${other}:987654`;
+    const h = context(agent, caller, `/api/knowledge-assets/${encodeURIComponent(name)}/wm/extraction-status?contextGraphId=${cg}&agentAddress=${owner}`);
+    h.ctx.extractionStatus.set(contextGraphAssertionUri(cg, owner, name), { status: 'in_progress',
+      fileHash: 'private-extraction-file', detectedContentType: 'application/pdf', pipelineUsed: null,
+      tripleCount: 0, startedAt: new Date().toISOString(),
+    });
+    await handleKnowledgeAssetsRoutes(h.ctx);
+    expect(h.res.statusCode, h.res.body).toBe(403);
+    expect(h.res.body).not.toContain('private-extraction-file');
   });
   it('refuses another caller inspecting the curator lane', async () => {
     const res = await read('asset', '/wm/quads', other, `&agentAddress=${owner}`);

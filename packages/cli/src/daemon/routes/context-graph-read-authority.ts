@@ -4,12 +4,8 @@ import {
   withRpcUsageSite,
   type ContextGraphAuthorityRpcSite,
 } from '@origintrail-official/dkg-chain';
-import {
-  resolveKnowledgeAssetDraftReadAuthority,
-  type ContextGraphReadAuthorityDecision,
-  type KnowledgeAssetDraftReadAuthorityOptions,
-  type KnowledgeAssetDraftReadAuthorityResolution,
-} from '@origintrail-official/dkg-agent/dist/context-graph-read-authority.js';
+import type { ContextGraphReadAuthorityDecision } from '@origintrail-official/dkg-agent/dist/context-graph-read-authority.js';
+import { resolveKnowledgeAssetRead, type KnowledgeAssetReadInput, type KnowledgeAssetReadTarget } from '@origintrail-official/dkg-agent/dist/knowledge-asset-read-resolution.js';
 import {
   jsonResponse,
   respondContextGraphReadAuthorityUnavailable,
@@ -37,19 +33,20 @@ export async function requireContextGraphReadAuthority(
   return (await requireReadAuthority(ctx, contextGraphId, site, async (id, callerAgentAddress, signal) => ({
     decision: await ctx.agent.resolveContextGraphReadAuthority(id, { callerAgentAddress, signal }),
     value: true,
-  }), true)) !== null;
+  }), async () => true)) !== null;
 }
 
-/** A local curator proof authorizes only the caller's own draft inspection lane. */
-export async function requireKnowledgeAssetDraftReadAuthority(
+/** The KA owner returns both its caller-bound decision and resolved resource. */
+export async function requireKnowledgeAssetRead(
   ctx: RequestContext,
-  contextGraphId: unknown,
-  draft: KnowledgeAssetDraftReadAuthorityOptions['draft'],
-): Promise<Pick<KnowledgeAssetDraftReadAuthorityResolution, 'literalDescriptor'> | null> {
-  return requireReadAuthority<Pick<KnowledgeAssetDraftReadAuthorityResolution, 'literalDescriptor'>>(ctx, contextGraphId, CONTEXT_GRAPH_AUTHORITY_RPC_SITES.query, async (id, callerAgentAddress, signal) => {
-    const resolution = await resolveKnowledgeAssetDraftReadAuthority(ctx.agent, id, { callerAgentAddress, draft, signal });
-    return { decision: resolution.decision, value: { literalDescriptor: resolution.literalDescriptor } };
-  }, {});
+  input: KnowledgeAssetReadInput,
+): Promise<KnowledgeAssetReadTarget | null> {
+  return requireReadAuthority(ctx, input.cg, CONTEXT_GRAPH_AUTHORITY_RPC_SITES.query, async (cg, callerAgentAddress, signal) => {
+    const resolution = await resolveKnowledgeAssetRead(ctx.agent, { ...input, cg }, { callerAgentAddress, signal });
+    return { decision: resolution.decision, value: resolution.target };
+  }, async () => (await resolveKnowledgeAssetRead(ctx.agent, input, { nodeOperator: true,
+    callerAgentAddress: actorFromRequestContext(ctx).authenticatedAgentAddress,
+  })).target);
 }
 
 async function requireReadAuthority<T>(
@@ -57,12 +54,12 @@ async function requireReadAuthority<T>(
   contextGraphId: unknown,
   site: ContextGraphAuthorityRpcSite,
   resolveAuthority: (id: string, caller: string | undefined, signal: AbortSignal) => Promise<{ decision: ContextGraphReadAuthorityDecision; value: T }>,
-  operatorValue: T,
+  operatorValue: () => Promise<T>,
 ): Promise<T | null> {
   if (!validateRequiredContextGraphId(contextGraphId, ctx.res)) return null;
   const validatedId = contextGraphId as string;
   const actor = actorFromRequestContext(ctx);
-  if (hasNodeOperatorReadAccess(ctx)) return operatorValue;
+  if (hasNodeOperatorReadAccess(ctx)) return operatorValue();
   const lifecycle = createStoreQueryRequestLifecycle(ctx.req, ctx.res, 'api.context_graph.read_authority');
   try {
     lifecycle.signal.throwIfAborted();

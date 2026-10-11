@@ -38,7 +38,7 @@ describe('Context Graph authority RPC residual-site census', () => {
     // Both general and draft authority enter the same site-labelled callback owner.
     // Keep the concrete general resolver check separate from the transport wrapper.
     const general = gate.slice(gate.indexOf('export async function requireContextGraphReadAuthority('),
-      gate.indexOf('export async function requireKnowledgeAssetDraftReadAuthority('));
+      gate.indexOf('export async function requireKnowledgeAssetRead('));
     expect(general).toContain('requireReadAuthority(ctx, contextGraphId, site,');
     expect(general).toContain('ctx.agent.resolveContextGraphReadAuthority(id, { callerAgentAddress, signal })');
     expect(gate).toMatch(/withRpcUsageSite\(site, \(\) => resolveAuthority\(/);

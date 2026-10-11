@@ -9,7 +9,6 @@
  * the distinction between an authoritative denial and unavailable authority.
  */
 
-import type { AssertionHistoryDescriptor, DKGAgent } from './dkg-agent.js';
 import { CONTEXT_GRAPH_AUTHORITY_RPC_SITES, withRpcUsageSite } from '@origintrail-official/dkg-chain';
 import {
   contextGraphReadAuthorityDependencyOf,
@@ -106,59 +105,6 @@ export async function resolveScopedContextGraphQueryReadAuthority(
     return { ...authority, outcome: 'allowed', grantScope: input.callerAgentAddress ? 'caller' : 'node', reason: 'local-first-working-memory-owner' };
   }
   return authority;
-}
-
-export interface KnowledgeAssetDraftReadAuthorityOptions {
-  callerAgentAddress?: string;
-  draft?: { agentAddress: string; literalName?: string; subGraphName?: string };
-  signal?: AbortSignal;
-}
-
-export interface KnowledgeAssetDraftReadAuthorityResolution {
-  readonly decision: ContextGraphReadAuthorityDecision;
-  /** Undefined when no literal lookup was needed; null records a completed miss. */
-  readonly literalDescriptor?: AssertionHistoryDescriptor | null;
-}
-
-/** Draft-only local provenance never authorizes another lane or general graph reads. */
-export async function resolveKnowledgeAssetDraftReadAuthority(
-  agent: DKGAgent,
-  contextGraphId: string,
-  options: KnowledgeAssetDraftReadAuthorityOptions,
-): Promise<KnowledgeAssetDraftReadAuthorityResolution> {
-  const { callerAgentAddress: caller, draft, signal } = options;
-  signal?.throwIfAborted();
-  const authority = await agent.resolveContextGraphReadAuthority(contextGraphId, { callerAgentAddress: caller, signal });
-  signal?.throwIfAborted();
-  if (authority.outcome !== 'allowed' || authority.source !== 'legacy-local'
-    || authority.grantScope !== 'node' || caller === undefined
-    || draft?.agentAddress.toLowerCase() !== caller.toLowerCase()) return { decision: authority };
-  let literalDescriptor: AssertionHistoryDescriptor | null | undefined;
-  try {
-    if (!await agent.isLocalFirstUnregisteredContextGraph(contextGraphId)) return { decision: authority };
-    signal?.throwIfAborted();
-    // Compact identifiers are also historical literal names. Only a lifecycle
-    // in this already-authorized caller lane can override a foreign alias.
-    if (draft.literalName !== undefined) {
-      literalDescriptor = await agent.assertion.history(contextGraphId, draft.literalName, {
-        agentAddress: caller, subGraphName: draft.subGraphName,
-      });
-      if (!literalDescriptor) return { decision: authority, literalDescriptor };
-    }
-    signal?.throwIfAborted();
-    const meta = await agent.getCgMeta(contextGraphId, { signal });
-    signal?.throwIfAborted();
-    const curator = await agent.getContextGraphCurator(contextGraphId, { signal });
-    signal?.throwIfAborted();
-    if (meta.revokedAgents.some(address => address.toLowerCase() === caller.toLowerCase())
-      || !agent.curatorDidMatchesChecksumAgent(curator ?? undefined, caller)) return { decision: authority };
-    return { decision: { ...authority, grantScope: 'caller', reason: 'local-curator-draft' }, literalDescriptor };
-  } catch (error) {
-    signal?.throwIfAborted();
-    return { decision: unavailableContextGraphReadAuthorityDecision(
-      'legacy-local', 'draft-provenance-unavailable', contextGraphReadAuthorityDependencyOf(error),
-    ) };
-  }
 }
 
 export const CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE =

@@ -5,7 +5,7 @@ import { contextGraphDataGraphUri, contextGraphMetaUri, DKG_ONTOLOGY } from '@or
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent, KaNumberAllocator } from '../src/index.js';
 import { makeTestKaNumberStore } from './_helpers/ka-allocator.js';
-import { resolveKnowledgeAssetDraftReadAuthority } from '../src/context-graph-read-authority.js';
+import { resolveKnowledgeAssetRead, type KnowledgeAssetReadInput, type KnowledgeAssetReadOptions } from '../src/knowledge-asset-read-resolution.js';
 
 const CG = 'draft-read-authority-owner';
 
@@ -28,17 +28,15 @@ describe('dedicated draft authority retains the general graph-read contract', ()
     expect(await agent.resolveContextGraphReadAuthority(CG, { callerAgentAddress: owner }))
       .toMatchObject({ outcome: 'allowed', grantScope: 'node', source: 'legacy-local' });
   });
-  const readDraftAuthority = async (options: Parameters<typeof resolveKnowledgeAssetDraftReadAuthority>[2]) =>
-    (await resolveKnowledgeAssetDraftReadAuthority(agent, CG, options)).decision;
+  const readDraftAuthority = async (options: KnowledgeAssetReadOptions, target: Partial<KnowledgeAssetReadInput> = {}) =>
+    (await resolveKnowledgeAssetRead(agent, { cg: CG, name: 'asset', agentAddress: owner, read: 'quads', ...target }, options)).decision;
   afterAll(async () => { try { await agent?.stop(); } finally { await store.close(); } });
 
   it('narrows the node grant only for the real curator own draft lane', async () => {
-    expect(await readDraftAuthority({ callerAgentAddress: owner, draft: { agentAddress: owner } }))
+    expect(await readDraftAuthority({ callerAgentAddress: owner }))
       .toMatchObject({ outcome: 'allowed', grantScope: 'caller', reason: 'local-curator-draft' });
-    for (const options of [{ callerAgentAddress: owner },
-      { callerAgentAddress: owner, draft: { agentAddress: other } },
-      { callerAgentAddress: other, draft: { agentAddress: other } }]) {
-      expect(await readDraftAuthority(options))
+    for (const [callerAgentAddress, agentAddress] of [[owner, undefined], [owner, other], [other, other]]) {
+      expect(await readDraftAuthority({ callerAgentAddress }, { agentAddress }))
         .toMatchObject({ outcome: 'allowed', grantScope: 'node' });
     }
     expect(await agent.resolveContextGraphReadAuthority(CG, { callerAgentAddress: owner }))
@@ -50,7 +48,7 @@ describe('dedicated draft authority retains the general graph-read contract', ()
     const local = vi.spyOn(agent, 'isLocalFirstUnregisteredContextGraph').mockResolvedValue(false);
     try {
       expect(await readDraftAuthority({
-        callerAgentAddress: owner, draft: { agentAddress: owner },
+        callerAgentAddress: owner,
       })).toMatchObject({ outcome: 'allowed', grantScope: 'node', source: 'legacy-local' });
       expect(local).toHaveBeenCalledWith(CG);
     } finally { local.mockRestore(); }
@@ -58,11 +56,68 @@ describe('dedicated draft authority retains the general graph-read contract', ()
 
   it('requires the caller-lane literal lifecycle before overriding a foreign compact alias', async () => {
     expect(await readDraftAuthority({
-      callerAgentAddress: owner, draft: { agentAddress: owner, literalName: `${other}:5` },
-    })).toMatchObject({ outcome: 'allowed', grantScope: 'caller' });
+      callerAgentAddress: owner,
+    }, { name: `${other}:5` })).toMatchObject({ outcome: 'allowed', grantScope: 'caller' });
     expect(await readDraftAuthority({
-      callerAgentAddress: owner, draft: { agentAddress: owner, literalName: `${other}:6` },
-    })).toMatchObject({ outcome: 'allowed', grantScope: 'node' });
+      callerAgentAddress: owner,
+    }, { name: `${other}:6` })).toMatchObject({ outcome: 'allowed', grantScope: 'node' });
+  });
+
+  it('settles graph authority before any literal or curator lookup', async () => {
+    const authority = vi.spyOn(agent, 'resolveContextGraphReadAuthority').mockResolvedValueOnce({
+      outcome: 'denied', source: 'registered-chain', reason: 'not-a-member', grantScope: 'none', metadataBootstrap: 'forbidden',
+    });
+    const meta = vi.spyOn(agent, 'getCgMeta');
+    const assertion = agent.assertion;
+    const history = vi.spyOn(assertion, 'history');
+    const facade = vi.spyOn(agent, 'assertion', 'get').mockReturnValue(assertion);
+    try {
+      expect(await resolveKnowledgeAssetRead(agent, { cg: CG, name: `${other}:5`, agentAddress: owner, read: 'descriptor' },
+        { callerAgentAddress: owner })).toMatchObject({ decision: { outcome: 'denied' }, target: null });
+      expect(meta).not.toHaveBeenCalled();
+      expect(history).not.toHaveBeenCalled();
+    } finally { facade.mockRestore(); history.mockRestore(); meta.mockRestore(); authority.mockRestore(); }
+  });
+
+  it('uses one caller-lane literal lookup for admission and the resolved resource', async () => {
+    const assertion = agent.assertion;
+    const history = vi.spyOn(assertion, 'history');
+    const facade = vi.spyOn(agent, 'assertion', 'get').mockReturnValue(assertion);
+    try {
+      expect(await resolveKnowledgeAssetRead(agent, { cg: CG, name: `${other}:5`, agentAddress: owner, read: 'descriptor' },
+        { callerAgentAddress: owner })).toMatchObject({ decision: { grantScope: 'caller' }, target: { name: `${other}:5` } });
+      expect(history).toHaveBeenCalledTimes(1);
+    } finally { facade.mockRestore(); history.mockRestore(); }
+  });
+
+  it('admits extraction as an actor-owned literal without an assertion lookup', async () => {
+    const name = `${other}:987654`;
+    const assertion = agent.assertion;
+    const history = vi.spyOn(assertion, 'history');
+    const facade = vi.spyOn(agent, 'assertion', 'get').mockReturnValue(assertion);
+    try {
+      expect(await resolveKnowledgeAssetRead(agent, { cg: CG, name, agentAddress: other, layer: 'wm', read: 'extraction-status' },
+        { callerAgentAddress: owner })).toMatchObject({ decision: { grantScope: 'caller' },
+        target: { kind: 'name', name, agentAddress: owner, descriptor: null } });
+      expect(history).not.toHaveBeenCalled();
+    } finally { facade.mockRestore(); history.mockRestore(); }
+  });
+
+  it('does not fall through to an alias after cancellation during its literal lookup', async () => {
+    const controller = new AbortController();
+    const reason = new Error('caller disconnected during literal history');
+    const assertion = agent.assertion;
+    const history = vi.spyOn(assertion, 'history').mockImplementationOnce(async () => {
+      controller.abort(reason);
+      return null;
+    });
+    const alias = vi.spyOn(assertion, 'resolveByKaId');
+    const facade = vi.spyOn(agent, 'assertion', 'get').mockReturnValue(assertion);
+    try {
+      await expect(resolveKnowledgeAssetRead(agent, { cg: CG, name: `${owner}:55`, agentAddress: owner, read: 'descriptor' },
+        { callerAgentAddress: owner, signal: controller.signal })).rejects.toBe(reason);
+      expect(alias).not.toHaveBeenCalled();
+    } finally { facade.mockRestore(); alias.mockRestore(); history.mockRestore(); }
   });
 
   it('returns unavailable when later provenance read fails after real node authority settled', async () => {
@@ -80,7 +135,7 @@ describe('dedicated draft authority retains the general graph-read contract', ()
       return originalMeta(...args);
     });
     try {
-      expect(await readDraftAuthority({ callerAgentAddress: owner, draft: { agentAddress: owner } }))
+      expect(await readDraftAuthority({ callerAgentAddress: owner }))
         .toMatchObject({ outcome: 'unavailable', source: 'legacy-local', reason: 'draft-provenance-unavailable' });
     } finally { meta.mockRestore(); authority.mockRestore(); }
   });
@@ -101,7 +156,7 @@ describe('dedicated draft authority retains the general graph-read contract', ()
     });
     try {
       await expect(readDraftAuthority({
-        callerAgentAddress: owner, draft: { agentAddress: owner }, signal: controller.signal,
+        callerAgentAddress: owner, signal: controller.signal,
       })).rejects.toBe(reason);
     } finally { meta.mockRestore(); authority.mockRestore(); }
   });

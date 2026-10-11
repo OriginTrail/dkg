@@ -46,16 +46,15 @@ export const deniedWithCallerGrant: ContextGraphReadAuthorityDecision = {
   grantScope: 'caller',
 };
 
-// A draft read names an explicit author lane; it does not change general read authority.
+// KA resolution carries its admission and resource together; graph authority stays input-driven.
 import type { DKGAgent } from '../src/index.js';
-import { resolveKnowledgeAssetDraftReadAuthority, type KnowledgeAssetDraftReadAuthorityOptions, type KnowledgeAssetDraftReadAuthorityResolution } from '../src/context-graph-read-authority.js';
+import { resolveKnowledgeAssetRead, type KnowledgeAssetReadInput, type KnowledgeAssetReadOptions, type KnowledgeAssetReadResolution } from '../src/knowledge-asset-read-resolution.js';
 declare const draftAgent: DKGAgent;
-const draftOptions: KnowledgeAssetDraftReadAuthorityOptions = {
-  callerAgentAddress: '0xcaller', draft: { agentAddress: '0xcaller', literalName: 'compact:name' },
-};
-const draftDecision: Promise<KnowledgeAssetDraftReadAuthorityResolution> = resolveKnowledgeAssetDraftReadAuthority(draftAgent, 'cg', draftOptions);
-// @ts-expect-error A draft proof cannot omit its selected author lane.
-const missingDraftAuthor: KnowledgeAssetDraftReadAuthorityOptions = { draft: { literalName: 'compact:name' } };
-// @ts-expect-error The combined resolution cannot be mistaken for a decision that discards resource evidence.
-const discardedEvidence: Promise<ContextGraphReadAuthorityDecision> = resolveKnowledgeAssetDraftReadAuthority(draftAgent, 'cg', draftOptions);
-void [draftDecision, missingDraftAuthor, discardedEvidence];
+const draftOptions: KnowledgeAssetReadOptions = { callerAgentAddress: '0xcaller' };
+const draftInput: KnowledgeAssetReadInput = { cg: 'cg', name: 'compact:name', agentAddress: '0xcaller', read: 'quads' };
+const draftDecision: Promise<KnowledgeAssetReadResolution> = resolveKnowledgeAssetRead(draftAgent, draftInput, draftOptions);
+// @ts-expect-error A KA read must name the requested resource operation.
+const missingReadOperation: KnowledgeAssetReadInput = { cg: 'cg', name: 'compact:name' };
+// @ts-expect-error The combined resolution cannot discard its resource evidence.
+const discardedEvidence: Promise<ContextGraphReadAuthorityDecision> = resolveKnowledgeAssetRead(draftAgent, draftInput, draftOptions);
+void [draftDecision, missingReadOperation, discardedEvidence];
