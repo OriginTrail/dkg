@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { normalizeContextGraphNameHash } from '../context-graph-name-candidate.js';
 import type { ContextGraphBindingState, ContextGraphBindingSubscription } from '../context-graph-binding-state.js';
 
 interface HostPolicyIdentityPorts {
@@ -77,4 +78,17 @@ export function createHostModePublicPolicy(ports: HostPolicyIdentityPorts & Omit
     evaluate: (id: string, purpose: 'serving' | 'public-reader') =>
       evaluateHostCatchupPolicy({ ...ports, captureCurrent }, id, purpose),
   };
+}
+
+/** Exact local identity wins; absent raw wire requests use native routing. */
+export function resolveAutomaticHostModeLocalId(contextGraphId: string, ports: {
+  subscriptions: ReadonlyMap<string, unknown>;
+  dormant: ReadonlyMap<string, unknown>;
+  resolveAlias(id: string): string | null;
+}): string {
+  if (ports.subscriptions.has(contextGraphId) || ports.dormant.has(contextGraphId)) return contextGraphId;
+  const wireId = normalizeContextGraphNameHash(contextGraphId);
+  if (wireId === null) return contextGraphId;
+  if (ports.subscriptions.has(wireId) || ports.dormant.has(wireId)) return wireId;
+  return ports.resolveAlias(wireId) ?? wireId;
 }

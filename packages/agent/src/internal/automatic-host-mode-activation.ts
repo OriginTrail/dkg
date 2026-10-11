@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-import { SUBSCRIPTION_SOURCES, SYSTEM_CONTEXT_GRAPHS, createOperationContext, type SubscriptionSource } from '@origintrail-official/dkg-core';
+import { SUBSCRIPTION_SOURCES, SYSTEM_CONTEXT_GRAPHS, createOperationContext, type SubscriptionSource, type Logger } from '@origintrail-official/dkg-core';
 import type { DKGAgent } from '../dkg-agent.js';
+import type { GossipSession } from '../gossip-session.js';
+import { normalizeContextGraphNameHash } from '../context-graph-name-candidate.js';
+import type { ContextGraphBindingSubscription } from '../context-graph-binding-state.js';
 import type { SwmHostModeSubscriptionBinding } from '../swm/host-mode-store.js';
 
 interface AutomaticHostModePorts {
@@ -121,11 +124,18 @@ function automaticHostModeActivation(ports: AutomaticHostModePorts) {
   };
 }
 
+interface ActivationLifetimePorts {
+  session: GossipSession;
+  current(): boolean;
+  hostPublic(): boolean;
+  log: Logger;
+}
+
 /** Capture the active agent session and only its current listener custody. */
-export function createAutomaticHostModeActivation(agent: DKGAgent) {
-  const session = agent.gossipSession;
+export function createAutomaticHostModeActivation(agent: DKGAgent, lifetime: ActivationLifetimePorts) {
+  const session = lifetime.session;
   return automaticHostModeActivation({
-    current: () => session.active && agent.gossipSession === session && agent.swmHostModeStore !== undefined,
+    current: lifetime.current,
     admissionAllowed: id => agent.automaticSwmHostModeAdmissionAllowed(id),
     restoreBinding: (id, onChainId) => agent.restorePersistedHostModeBinding(id, onChainId),
     reserved: id => (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(id),
@@ -141,7 +151,7 @@ export function createAutomaticHostModeActivation(agent: DKGAgent) {
       return () => session.swmHostModeHandlers.get(key) === handler;
     },
     strip: () => agent.swmHostModeStripCiphertext(),
-    hostPublic: () => agent.config.swmHostMode?.hostPublic === true,
+    hostPublic: lifetime.hostPublic,
     probeCurated: id => agent.isCuratedForHostMode(id),
     accessPolicy: id => agent.swmHostModeAccessPolicy(id),
     confirmedPublic: id => agent.isConfirmedPublicForHostMode(id),
@@ -154,13 +164,29 @@ export function createAutomaticHostModeActivation(agent: DKGAgent) {
     },
     persisted: id => agent.awaitHostModePersistence(id),
     markRegistered: (id, current) => agent.maybeMarkRegisteredForHostMode(id, current),
-    declined: id => agent.log.info(createOperationContext('system'),
+    declined: id => lifetime.log.info(createOperationContext('system'),
       `SWM host-mode subscription DECLINED for "${id}": private-ciphertext strip is ON ` +
       `(OT-RFC-49 WS-A — cores custody zero private SWM ciphertext for curated CGs; members backfill from the curator)`),
-    enabled: id => agent.log.info(createOperationContext('system'),
+    enabled: id => lifetime.log.info(createOperationContext('system'),
       `SWM host-mode subscription enabled for "${id}" (role=core)`),
-    failed: (id, strip, error) => agent.log.warn(createOperationContext('system'), strip
+    failed: (id, strip, error) => lifetime.log.warn(createOperationContext('system'), strip
       ? `Failed to re-evaluate persisted host-mode subscription for "${id}": ${error instanceof Error ? error.message : String(error)}`
       : `Failed to restore host-mode subscription for "${id}": ${error instanceof Error ? error.message : String(error)}`),
   });
+}
+
+/** Numeric policy is authoritative over metadata and same-hash beacon hints. */
+export function readSwmHostModeAccessPolicy(contextGraphId: string, ports: {
+  localId(id: string): string;
+  hostKey(id: string): string;
+  subscriptions: ReadonlyMap<string, ContextGraphBindingSubscription>;
+  wireOwners: ReadonlyMap<string, string>;
+  accessPolicies: ReadonlyMap<string, number>;
+}): number | undefined {
+  let sub = ports.subscriptions.get(ports.localId(contextGraphId));
+  if (!sub?.onChainId && normalizeContextGraphNameHash(contextGraphId) !== null) {
+    const owner = ports.wireOwners.get(ports.hostKey(contextGraphId));
+    sub = owner === undefined ? undefined : ports.subscriptions.get(owner);
+  }
+  return sub?.onChainId ? ports.accessPolicies.get(sub.onChainId) : undefined;
 }

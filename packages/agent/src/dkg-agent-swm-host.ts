@@ -1,6 +1,6 @@
-import { createHostModePublicPolicy } from './internal/swm-host-catchup-policy.js';
+import { createHostModePublicPolicy, resolveAutomaticHostModeLocalId } from './internal/swm-host-catchup-policy.js';
 import { HostModeRestoration } from './internal/host-mode-restoration.js';
-import { createAutomaticHostModeActivation } from './internal/automatic-host-mode-activation.js';
+import { createAutomaticHostModeActivation, readSwmHostModeAccessPolicy } from './internal/automatic-host-mode-activation.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -931,7 +931,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
   /** Capture one gossip lifetime for the shared admission/activation owner. */
   swmHostModeActivation(this: DKGAgent) {
-    return createAutomaticHostModeActivation(this);
+    const session = this.gossipSession;
+    return createAutomaticHostModeActivation(this, { session,
+      current: () => session.active && this.gossipSession === session && this.swmHostModeStore !== undefined,
+      hostPublic: () => this.config.swmHostMode?.hostPublic === true, log: this.log,
+    });
   }
 
   /**
@@ -947,13 +951,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
   /** Exact local identity wins; absent raw wire requests use native routing. */
   swmHostModeLocalId(this: DKGAgent, contextGraphId: string): string {
-    if (this.subscribedContextGraphs.has(contextGraphId)
-      || this.contextGraphSubscriptionDormancyById.has(contextGraphId)) return contextGraphId;
-    const wireId = normalizeContextGraphNameHash(contextGraphId);
-    if (wireId === null) return contextGraphId;
-    if (this.subscribedContextGraphs.has(wireId)
-      || this.contextGraphSubscriptionDormancyById.has(wireId)) return wireId;
-    return this.resolveContextGraphIdAlias(wireId) ?? wireId;
+    return resolveAutomaticHostModeLocalId(contextGraphId, { subscriptions: this.subscribedContextGraphs,
+      dormant: this.contextGraphSubscriptionDormancyById, resolveAlias: id => this.resolveContextGraphIdAlias(id),
+    });
   }
 
   /** Automatic hosting cannot activate saved intent that admission left dormant. */
@@ -982,12 +982,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
   /** Numeric policy is authoritative over metadata and same-hash beacon hints. */
   swmHostModeAccessPolicy(this: DKGAgent, contextGraphId: string): number | undefined {
-    let sub = this.subscribedContextGraphs.get(this.swmHostModeLocalId(contextGraphId));
-    if (!sub?.onChainId && normalizeContextGraphNameHash(contextGraphId) !== null) {
-      const owner = this.wireIdToLocalCgId.get(this.canonicalSwmHostModeKey(contextGraphId));
-      sub = owner === undefined ? undefined : this.subscribedContextGraphs.get(owner);
-    }
-    return sub?.onChainId ? this.onChainAccessPolicyCache.get(sub.onChainId) : undefined;
+    return readSwmHostModeAccessPolicy(contextGraphId, {
+      localId: id => this.swmHostModeLocalId(id), hostKey: id => this.canonicalSwmHostModeKey(id),
+      subscriptions: this.subscribedContextGraphs, wireOwners: this.wireIdToLocalCgId,
+      accessPolicies: this.onChainAccessPolicyCache,
+    });
   }
 
   /** Manual authority uses current identity, not a retired predecessor's status. */
