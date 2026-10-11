@@ -218,6 +218,8 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
         await Promise.allSettled(runs);
         this.#scheduled = false;
         if (signal.aborted || this.#closed) { this.#closed = true; this.reset(); }
+        else if ([...this.#byPeer.values()].some(peer => [...peer.scopes.values()]
+          .some(scope => scope.admitted && scope.demand !== null))) this.#schedule();
       }
     };
     if (this.#ports.schedule === undefined) {

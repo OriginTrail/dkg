@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createRfc64CatalogReplayRecoveryCommandV1 } from '../src/rfc64/catalog-replay-connection-runtime-v1.js';
 import { Rfc64CatalogReplayConnectionRuntimeV1 } from
   '../src/rfc64/catalog-replay-connection-runtime-v1.js';
+import { Rfc64BackgroundWorkDispatcherV1 } from '../src/rfc64/background-work-dispatcher-v1.js';
 
 describe('RFC-64 catalog replay connection debounce', () => {
   it('bounds a 59-graph reconnect burst to one stream per peer and two peers per node', async () => {
@@ -157,6 +158,48 @@ describe('catalog reconnect work ownership', () => {
       await vi.waitFor(() => expect(runtime.status().pendingScopes).toBe(0));
       expect(calls).toEqual(['old', 'new']);
     } finally { held.resolve(); }
+  });
+
+  it('hands an admission made during physical retirement to the background owner', async () => {
+    const retiring = deferred();
+    const drain = deferred();
+    const allSettled = Promise.allSettled.bind(Promise);
+    let intercepted = false;
+    const retirement = vi.spyOn(Promise, 'allSettled').mockImplementation((values) => {
+      const pending = [...values];
+      if (!intercepted && pending.length === 0) {
+        intercepted = true;
+        retiring.resolve();
+        return drain.promise.then(() => allSettled(pending));
+      }
+      return allSettled(pending);
+    });
+    const owner = new Rfc64BackgroundWorkDispatcherV1();
+    const release = vi.fn();
+    const replay = vi.fn(async () => ({ failed: 0 }));
+    const runtime = new Rfc64CatalogReplayConnectionRuntimeV1({
+      selectContextGraphIds: () => ['old', 'new'],
+      acquireFence: (_cg, peerId) => ({ peerId, generation: 1, release }),
+      reannounce: async () => undefined, replay, warn: vi.fn(),
+      schedule: (work) => owner.scheduleKeyed('connection-replay', work),
+    });
+    try {
+      runtime.prepare('peer', Date.now(), 'old')?.admit();
+      await retiring.promise;
+      const admitted = runtime.prepare('peer', Date.now(), 'new');
+      expect(admitted).not.toBeNull();
+      admitted!.admit();
+      expect(replay.mock.calls.map((call) => call[0])).toEqual(['old']);
+      drain.resolve();
+      await owner.whenIdle();
+      expect(replay.mock.calls.map((call) => call[0])).toEqual(['old', 'new']);
+      expect(release).toHaveBeenCalledTimes(2);
+      expect(runtime.status().pendingScopes).toBe(0);
+    } finally {
+      drain.resolve();
+      retirement.mockRestore();
+      await owner.closeAndDrain();
+    }
   });
 
   it('does not evict an active or queued peer at capacity', async () => {
