@@ -48,6 +48,9 @@ import {
   runPromoteCommittedFinalization,
   workspaceHeadIncludesShareOperationId,
 } from '@origintrail-official/dkg-publisher';
+import { observeConfirmedCatalogObligationV1 } from './internal/confirmed-catalog-obligation.js';
+import { recoverConfirmedCatalogObligationV1 } from './internal/confirmed-catalog-obligation-recovery.js';
+import type { ConfirmedCatalogObligationRecoveryV1 } from './confirmed-catalog-obligation-error.js';
 import { selectRfc64ConfirmedCatalogObligationV1 } from './rfc64/catalog-rollout-authority-v1.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
@@ -78,7 +81,6 @@ import { resolveDurableGraphScopedAuthorSealCandidateV1 } from
 import { throwIfRfc64AbortedV1 as throwIfAbortedV1 } from './rfc64/abort-v1.js';
 import { rfc64SwmInventorySettlementCanConvergeV1 } from './rfc64/swm-inventory-settlement-outlook-v1.js';
 import {
-  snapshotRfc64FinalizedPrivatePlacementRepairV1,
   type Rfc64FinalizedPrivatePlacementRepairV1,
 } from './rfc64/finalized-private-placement-repair-store-v1.js';
 import { loadExactAppliedCatalogRowsV1 } from
@@ -796,52 +798,42 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     this: DKGAgent,
     params: ObserveRfc64ConfirmedVmParamsV1,
   ): Promise<void> {
-    const subGraphName = params.subGraphName ?? null;
-    const contextGraphId = params.contextGraphId;
-    if (selectRfc64ConfirmedCatalogObligationV1({
-      plan: this.config.rfc64CatalogExecutionPlan, contextGraphId, subGraphName,
-      authoring: this.config.rfc64CatalogAuthoringPolicy,
-      readResponsibilities: () => this.readRfc64CatalogResponsibilitiesV1(),
-      readServingAuthority: () => this.resolveRfc64CatalogServingAuthorityV1(contextGraphId),
-    }) === 'excluded') return;
-    assertContextGraphIdV1(contextGraphId, 'confirmed publish contextGraphId');
-    assertAssertionCoordinateV1(params.assertionCoordinate, 'confirmed publish assertionCoordinate');
-    const confirmedSeal = canonicalGraphScopedAuthorSealFromAssertionSealV1(params.seal);
-    const repair = snapshotRfc64FinalizedPrivatePlacementRepairV1({
-      version: 2, contextGraphId: contextGraphId as ContextGraphIdV1,
-      authorAddress: confirmedSeal.authorAddress, inventoryScope: null, subGraphName: null,
-      assertionCoordinate: params.assertionCoordinate as AssertionCoordinateV1,
-      assertionVersion: confirmedSeal.assertionVersion, kaUal: confirmedSeal.kaUal,
-      sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(confirmedSeal), seal: confirmedSeal,
+    return observeConfirmedCatalogObligationV1(params, {
+      select: () => selectRfc64ConfirmedCatalogObligationV1({
+        plan: this.config.rfc64CatalogExecutionPlan, contextGraphId: params.contextGraphId,
+        subGraphName: params.subGraphName ?? null, authoring: this.config.rfc64CatalogAuthoringPolicy,
+        readResponsibilities: () => this.readRfc64CatalogResponsibilitiesV1(),
+        readServingAuthority: () => this.resolveRfc64CatalogServingAuthorityV1(params.contextGraphId),
+      }),
+      persistence: this.rfc64PersistenceV1, log: this.log,
+      beginWait: (seal, ctx) => catalogPlacementTimingV1(this).beginWait(seal, ctx),
+      confirmed: (seal) => {
+        if (params.shareOperationId !== undefined) rfc64SwmInventoryShadowRuntimeV1(this).markVmConfirmed(
+          rfc64SwmInventoryAssetKeyV1({ contextGraphId: params.contextGraphId,
+            subGraphName: params.subGraphName ?? null, authorAddress: seal.authorAddress,
+            assertionCoordinate: params.assertionCoordinate }), seal.assertionVersion, params.shareOperationId);
+      },
+      request: (repair, ctx, observer) => this.requestRfc64FinalizedPrivateCatalogPlacementRepairV1({ repair, ctx }, observer).accepted,
     });
-    const placementWait = catalogPlacementTimingV1(this).beginWait(confirmedSeal, params.ctx);
-    const shadowRuntime = rfc64SwmInventoryShadowRuntimeV1(this);
-    if (params.shareOperationId !== undefined) {
-      shadowRuntime.markVmConfirmed(rfc64SwmInventoryAssetKeyV1({
-        contextGraphId, subGraphName, authorAddress: confirmedSeal.authorAddress,
-        assertionCoordinate: params.assertionCoordinate,
-      }), confirmedSeal.assertionVersion, params.shareOperationId);
-    }
-    // No lane lookup precedes this atomic write. A write refusal must cross the completion
-    // boundary: the queue retains its confirmed transaction and immutable request for recovery.
-    try {
-      const persistence = this.rfc64PersistenceV1;
-      if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
-      await persistence.finalizedPrivatePlacementRepairs.put(repair);
-    } catch (cause) {
-      placementWait.observer.released();
-      placementWait.end(this.log);
-      throw new Error('Confirmed publication catalog obligation was not durably recorded; recovery is required', { cause });
-    }
-    placementWait.requested();
-    try {
-      const request = this.requestRfc64FinalizedPrivateCatalogPlacementRepairV1({ repair, ctx: params.ctx }, placementWait.observer);
-      if (!request.accepted) this.log.warn(params.ctx, `Confirmed ${params.publicationLabel} for <${params.assertionUri}>: the RFC-64 catalog supervisor did not accept its placement now; the durable marker stays for its next pass or start`);
-    } catch (cause) {
-      placementWait.observer.released();
-      this.log.warn(params.ctx, `Confirmed ${params.publicationLabel} but RFC-64 finalized-private placement could not be requested; its durable marker stays for the next pass or start: ${cause instanceof Error ? cause.message : String(cause)}`);
-    }
-    placementWait.end(this.log);
+  }
+
+  /** Validate retained confirmation evidence and retry only its catalog observer. */
+  async recoverRfc64ConfirmedCatalogObligationV1(
+    this: DKGAgent, evidence: Readonly<ConfirmedCatalogObligationRecoveryV1>,
+  ): Promise<void> {
+    const generation = this.contextGraphBindingState.capture(evidence.contextGraphId);
+    const signal = this.vmReconcileLifecycleController.signal;
+    return recoverConfirmedCatalogObligationV1(evidence, {
+      chain: this.chain, store: this.store, signal,
+      resolveBinding: () => this.resolveContextGraphOnChainIdBinding(evidence.contextGraphId, { signal }),
+      assertCurrent: () => {
+        throwIfAbortedV1(signal);
+        if (!this.contextGraphBindingState.isGenerationCurrent(evidence.contextGraphId, generation)) {
+          throw new Error('Confirmed catalog recovery graph binding changed');
+        }
+      },
+      observe: (params) => this.observeRfc64ConfirmedVmV1(params),
+    });
   }
 
   /** Idempotent durable repair body owned by the catalog supervisor, charged to the attempt it admitted. */

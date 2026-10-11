@@ -17,6 +17,8 @@
     "test/finalized-private-placement-ownership.test.ts",
     "test/publication-terminal-before-catalog-placement.test.ts",
     "test/rfc64-finalized-private-placement-repair-store-v1.test.ts",
-    "test/support/confirmed-publication-harness.ts"
+    "test/support/confirmed-publication-harness.ts",
+    "test/finalized-private-placement-key.test.ts",
+    "test/confirmed-catalog-obligation-recovery.test.ts"
   ]
 }

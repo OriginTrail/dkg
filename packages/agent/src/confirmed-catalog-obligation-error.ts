@@ -17,6 +17,17 @@ export type ConfirmedCatalogObligationInputV1 = Readonly<ObserveRfc64ConfirmedVm
   readonly confirmedTransaction?: ConfirmedCatalogTransactionEvidenceV1;
 }>;
 
+/** JSON-safe caller-retained evidence; recovery validates receipt and local seal before observation. */
+export interface ConfirmedCatalogObligationRecoveryV1 {
+  readonly version: 1;
+  readonly contextGraphId: string;
+  readonly assertionCoordinate: string;
+  readonly subGraphName: string | null;
+  readonly seal: Readonly<CanonicalGraphScopedAuthorSealV1>;
+  readonly transactionHash: string;
+  readonly blockNumber: number;
+}
+
 /** Chain confirmation succeeded, but local catalog completion is still owed. */
 export class ConfirmedCatalogObligationErrorV1 extends Error {
   readonly code = 'CONFIRMED_CATALOG_OBLIGATION_PENDING';
@@ -38,6 +49,13 @@ export class ConfirmedCatalogObligationErrorV1 extends Error {
       startKAId: transaction.startKAId, endKAId: transaction.endKAId,
     });
     this.retry = structuredClone(input);
+  }
+
+  get recoveryEvidence(): Readonly<ConfirmedCatalogObligationRecoveryV1> | undefined {
+    if (this.transaction === undefined) return undefined;
+    return Object.freeze({ version: 1, contextGraphId: this.retry.contextGraphId,
+      assertionCoordinate: this.retry.assertionCoordinate, subGraphName: this.retry.subGraphName ?? null,
+      seal: this.seal, transactionHash: this.transaction.txHash, blockNumber: this.transaction.blockNumber });
   }
 
   /**
