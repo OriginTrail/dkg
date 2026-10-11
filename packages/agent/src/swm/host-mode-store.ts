@@ -443,13 +443,17 @@ export class SwmHostModeStore {
   ): Promise<void> {
     await this.withCgWriteLock(contextGraphId, async () => {
       const meta = await this.loadMeta(contextGraphId);
+      const bindingSpecified = Object.hasOwn(options, 'onChainId');
       const onChainId = normalizePositiveOnChainId(options.onChainId);
       if (
         meta.hostModeSubscribed === true
-        && (onChainId === undefined || meta.hostModeOnChainId === onChainId)
+        && (!bindingSpecified || meta.hostModeOnChainId === onChainId)
       ) return;
       meta.hostModeSubscribed = true;
-      if (onChainId !== undefined) meta.hostModeOnChainId = onChainId;
+      if (bindingSpecified) {
+        if (onChainId === undefined) delete meta.hostModeOnChainId;
+        else meta.hostModeOnChainId = onChainId;
+      }
       await this.persistMeta(contextGraphId, meta);
     });
   }

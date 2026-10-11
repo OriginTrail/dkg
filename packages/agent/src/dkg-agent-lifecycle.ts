@@ -2250,9 +2250,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
     if (this.started) return;
-    await this.swmHostModeRestoreDrain;
-    this.swmHostModeRestoreDrain = undefined;
-    this.swmHostModeRestoreDrainAborted = false;
+    await this.swmHostModeRestoration?.close();
+    this.swmHostModeRestoration = undefined;
     this.storageACKRegistrationRuntime.retireCurrentGeneration();
     this.chain.contextGraphAuthorityIndexSnapshots?.open();
     // Validate and capture the substrate before persistence/network startup.

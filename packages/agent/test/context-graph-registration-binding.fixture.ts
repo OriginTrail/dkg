@@ -1,3 +1,4 @@
+import { GossipSession } from '../src/gossip-session.js';
 import { vi } from 'vitest';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/dkg-agent.js';
@@ -54,6 +55,7 @@ function createBindingAgentHarness<TState extends object>(
       // Registered authority reads run under the shared governor on a real
       // agent, so a synthetic host owns one too. Scenarios that care about
       // circuit behavior override it.
+      gossipSession: new GossipSession(),
       rfc64PublicCatalogOwnerV1: {
         authorityReads: new Rfc64AuthorityReadCoordinatorV1(),
       },

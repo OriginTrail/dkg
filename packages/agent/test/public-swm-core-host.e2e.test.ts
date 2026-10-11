@@ -68,9 +68,10 @@ describe('public-only core hosting with the publisher offline', () => {
     await publisher.stop();
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-public-core-reader-')); directories.push(dataDir);
     reader = await DKGAgent.create({ name: 'late-public-reader', dataDir, listenHost: '127.0.0.1', listenPort: 0,
-      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP), kaNumberAllocator: makeTestKaNumberAllocator(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.EXTRA1), kaNumberAllocator: makeTestKaNumberAllocator(),
       rfc64CatalogActivation: { enabled: false }, syncOnConnectEnabled: false, syncReconcilerEnabled: false });
     agents.push(reader); await reader.start();
+    expect(await createEVMAdapter().getIdentityIdForAddress(new ethers.Wallet(HARDHAT_KEYS.EXTRA1).address)).toBe(0n);
     reader.setContextGraphSubscription(name, { subscribed: true, synced: false, syncMode: 'on-demand', onChainHash: hash, onChainId }, { persist: false });
     await reader.connectTo(core.multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!);
     expect(reader.node.libp2p.getPeers().some(peer => peer.toString() === publisherPeer)).toBe(false);

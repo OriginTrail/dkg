@@ -460,6 +460,16 @@ describe('SwmHostModeStore', () => {
       expect(await second.listHostModeSubscriptions()).toEqual([{ contextGraphId: wireId }]);
     });
 
+    it('distinguishes an omitted binding from an explicit clear across reopen', async () => {
+      const first = new SwmHostModeStore({ dataDir: dir, unregisteredLimits: limits, registeredLimits: limits });
+      await first.markHostModeSubscribed('retained-marker', { onChainId: '42' });
+      await first.markHostModeSubscribed('retained-marker');
+      expect(await first.listHostModeSubscriptions()).toEqual([{ contextGraphId: 'retained-marker', onChainId: '42' }]);
+      await first.markHostModeSubscribed('retained-marker', { onChainId: undefined });
+      const reopened = new SwmHostModeStore({ dataDir: dir, unregisteredLimits: limits, registeredLimits: limits });
+      expect(await reopened.listHostModeSubscriptions()).toEqual([{ contextGraphId: 'retained-marker' }]);
+    });
+
     it('listHostModeSubscribedCgs returns only flagged CGs', async () => {
       const store = new SwmHostModeStore({ dataDir: dir, unregisteredLimits: limits, registeredLimits: limits });
       await store.markHostModeSubscribed('curator/cg-a');

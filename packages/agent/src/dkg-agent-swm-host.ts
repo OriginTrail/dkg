@@ -1,3 +1,4 @@
+import { HostModeRestoration } from './internal/host-mode-restoration.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -832,43 +833,27 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   /** Fence restoration and join even a direct restore on an unstarted agent. */
-  async stopSwmHostModeRestoration(this: DKGAgent): Promise<void> {
-    this.swmHostModeRestoreDrainAborted = true;
-    await this.swmHostModeRestoreDrain;
+  stopSwmHostModeRestoration(this: DKGAgent): Promise<void> {
+    this.swmHostModeRestoration ??= new HostModeRestoration();
+    return this.swmHostModeRestoration.close();
   }
 
-  /** Restore a bounded startup prefix; one owned promise also drains the tail. */
+  /** Repeated callers share the same bounded startup promise and tail owner. */
   restoreSwmHostModeSubscriptions(this: DKGAgent): Promise<void> {
-    if (this.swmHostModeRestoreDrain) return this.swmHostModeRestoreDrain;
+    if (this.swmHostModeRestoration) return this.swmHostModeRestoration.startupReady;
     const store = this.swmHostModeStore;
     const session = this.gossipSession;
-    if (!store || session.live() === null || this.swmHostModeRestoreDrainAborted) return Promise.resolve();
-    let ready!: () => void;
-    const startup = new Promise<void>(resolve => { ready = resolve; });
-    const current = (): boolean => !this.swmHostModeRestoreDrainAborted
-      && session.active && this.gossipSession === session;
-    // Capture ownership before the first marker read, including the inline prefix.
-    this.swmHostModeRestoreDrain = (async () => {
-      await Promise.resolve();
-      try {
-        const entries = await store.listHostModeSubscriptions();
-        if (!current()) return;
-        const stripOn = this.swmHostModeStripCiphertext();
-        const batchSize = normalizeHostModeReconcileBatchSize(this.config.swmHostMode?.reconcileBatchSize);
-        for (let index = 0; index < entries.length; index++) {
-          if (index === batchSize) {
-            ready();
-            await new Promise<void>(resolve => { setTimeout(resolve, 0); });
-          }
-          if (!current()) return;
-          await this.restorePersistedHostModeSubscription(entries[index], stripOn);
-        }
-      } catch (error) {
-        this.log.warn(createOperationContext('system'),
-          `Failed to list persisted host-mode subscriptions: ${error instanceof Error ? error.message : String(error)}`);
-      } finally { ready(); }
-    })();
-    return startup;
+    if (!store || session.live() === null) return Promise.resolve();
+    const stripOn = this.swmHostModeStripCiphertext();
+    this.swmHostModeRestoration = new HostModeRestoration({
+      list: () => store.listHostModeSubscriptions(),
+      restore: (entry, current) => this.restorePersistedHostModeSubscription(entry, stripOn, current),
+      current: () => session.active && this.gossipSession === session,
+      batchSize: normalizeHostModeReconcileBatchSize(this.config.swmHostMode?.reconcileBatchSize),
+      failed: error => this.log.warn(createOperationContext('system'),
+        `Failed to list persisted host-mode subscriptions: ${error instanceof Error ? error.message : String(error)}`),
+    });
+    return this.swmHostModeRestoration.startupReady;
   }
 
   /**
@@ -892,16 +877,18 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this: DKGAgent,
     entry: SwmHostModeSubscriptionBinding,
     stripOn: boolean,
+    restorationCurrent?: () => boolean,
   ): Promise<void> {
     const { contextGraphId: cgId, onChainId } = entry;
     const session = this.gossipSession;
-    const current = (): boolean => !this.swmHostModeRestoreDrainAborted
-      && session.active && this.gossipSession === session;
+    const restoration = this.swmHostModeRestoration;
+    const current = (): boolean => session.active && this.gossipSession === session
+      && (restorationCurrent?.() ?? !restoration?.closed);
     if (!current() || !this.automaticSwmHostModeAdmissionAllowed(cgId)) return;
     try {
       if (!this.restorePersistedHostModeBinding(cgId, onChainId)) return;
       if (stripOn) {
-        await this.reconcileSwmHostModeSubscription(cgId, SUBSCRIPTION_SOURCES.RECONCILER);
+        await this.reconcileSwmHostModeSubscription(cgId, SUBSCRIPTION_SOURCES.RECONCILER, current);
         return;
       }
       // Binding admission also protects a rehydrated member before its
@@ -914,7 +901,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // permanently — `GraphManager.listContextGraphs()` only
       // sees local store graphs, so the periodic reconciler
       // can't heal it later either.
-      await this.maybeMarkRegisteredForHostMode(cgId);
+      await this.maybeMarkRegisteredForHostMode(cgId, current);
+      if (current()) this.automaticSwmHostModeAdmissionAllowed(cgId);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.log.warn(
@@ -962,10 +950,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
   async reconcileSwmHostModeSubscription(this: DKGAgent,
     contextGraphId: string,
     source: SubscriptionSource = SUBSCRIPTION_SOURCES.RECONCILER,
+    ownerCurrent: () => boolean = () => true,
   ): Promise<void> {
     const session = this.gossipSession;
+    const current = (): boolean => session.active && this.gossipSession === session && ownerCurrent();
     const live = session.live();
-    if (live === null) return;
+    if (live === null || !current()) return;
     if (!this.swmHostModeStore) return;
     if (!this.automaticSwmHostModeAdmissionAllowed(contextGraphId)) return;
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) return;
@@ -1005,15 +995,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
       ) {
         // A manually hosted CG can become curated later. Upgrade the cached
         // classification so the existing handler starts stripping immediately.
-        if (!session.active || this.gossipSession !== session
+        if (!current()
           || !this.automaticSwmHostModeAdmissionAllowed(contextGraphId)
           || this.swmHostModeAccessPolicy(contextGraphId) === 0) return;
         session.swmHostModeCurated.set(hostKey, true);
       }
-      if (!session.active || this.gossipSession !== session
+      if (!current()
         || !this.automaticSwmHostModeAdmissionAllowed(contextGraphId)) return;
-      await this.maybeMarkRegisteredForHostMode(contextGraphId);
-      if (!session.active || this.gossipSession !== session) return;
+      await this.maybeMarkRegisteredForHostMode(contextGraphId, current);
+      if (!current()) return;
       this.automaticSwmHostModeAdmissionAllowed(contextGraphId);
       return;
     }
@@ -1027,10 +1017,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
     //
     // A numeric policy, verified curated beacon or native private metadata
     // proves curation. A name commitment alone does not prove access policy.
-    const curated = await this.isCuratedForHostMode(contextGraphId);
+    const probedCurated = await this.isCuratedForHostMode(contextGraphId);
+    // The numeric binding can change even while an already-resolved promise yields.
+    const currentPolicy = this.swmHostModeAccessPolicy(contextGraphId);
+    const curated = currentPolicy === undefined ? probedCurated : currentPolicy === 1;
     if (!curated && (this.config.swmHostMode?.hostPublic !== true
       || !await this.isConfirmedPublicForHostMode(contextGraphId))) return;
-    if (!session.active || this.gossipSession !== session
+    if (!current()
       || !this.automaticSwmHostModeAdmissionAllowed(contextGraphId)) return;
 
     // OT-RFC-49 WS-A — the private-ciphertext strip. With `stripCiphertext`
@@ -1056,10 +1049,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
     this.wireSwmHostModeHandler(contextGraphId, source, curated);
     await this.awaitHostModePersistence(contextGraphId);
-    if (!session.active || this.gossipSession !== session
+    if (!current()
       || !this.automaticSwmHostModeAdmissionAllowed(contextGraphId)) return;
-    await this.maybeMarkRegisteredForHostMode(contextGraphId);
-    if (!session.active || this.gossipSession !== session
+    await this.maybeMarkRegisteredForHostMode(contextGraphId, current);
+    if (!current()
       || !this.automaticSwmHostModeAdmissionAllowed(contextGraphId)) return;
 
     this.log.info(
@@ -8260,6 +8253,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
       return { ok: false, reason: 'replayed catchup nonce' };
     }
 
+    // Public host custody is explicitly enabled and re-confirmed locally.
+    // Authentication and replay defence above apply equally to ordinary readers.
+    const hostKey = this.canonicalSwmHostModeKey(req.contextGraphId);
+    if (this.config.swmHostMode?.hostPublic === true
+      && this.swmHostModeSubscribed.has(hostKey)
+      && this.swmHostModeCurated.get(hostKey) === false
+      && await this.isConfirmedPublicForHostMode(req.contextGraphId)) {
+      return { ok: true, recoveredSigner: requesterEoa };
+    }
+
     // The authority sources below use UNION semantics: any source
     // that recognises the requester EOA (or, as transport-layer
     // fallback, the peer-id) is sufficient to accept. Codex PR #618
@@ -8857,10 +8860,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
    * unregistered CGs — both branches early-return without touching
    * the store.
    */
-  async maybeMarkRegisteredForHostMode(this: DKGAgent, contextGraphId: string): Promise<void> {
+  async maybeMarkRegisteredForHostMode(
+    this: DKGAgent, contextGraphId: string, ownerCurrent: () => boolean = () => true,
+  ): Promise<void> {
     const store = this.swmHostModeStore;
     const session = this.gossipSession;
-    if (!store || !session.active || this.swmHostModeRestoreDrainAborted) return;
+    if (!store || !session.active || !ownerCurrent()) return;
     try {
       // OT-RFC-38 / LU-6 Phase B — three-way registration probe.
       //
@@ -8896,8 +8901,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
           if (wireSub?.onChainId) registered = true;
         } catch { /* malformed cleartext — fall through */ }
       }
-      if (registered && session.active && this.gossipSession === session
-        && !this.swmHostModeRestoreDrainAborted) await store.markRegistered(contextGraphId);
+      if (registered && session.active && this.gossipSession === session && ownerCurrent()) {
+        await store.markRegistered(contextGraphId);
+      }
     } catch { /* best-effort; pre-registration defaults stay in place */ }
   }
 
