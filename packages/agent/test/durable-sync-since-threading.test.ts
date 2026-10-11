@@ -23,6 +23,7 @@ import {
   type UalOnlyExactAssetSelection,
 } from '../src/sync/exact-assets.js';
 import { exactAssetFetchSessionPolicy } from '../src/sync/requester/exact-durable-fetch.js';
+import { normalizeDurableSyncContext, normalizeExactAssetFetchPolicy } from '../src/sync/requester/durable-sync-compat.js';
 import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
 import { SyncTargetSupersededError } from '../src/sync/error-tags.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
@@ -591,6 +592,47 @@ describe('exact-asset rolling-upgrade filter', () => {
     const pinned = createChallengePinnedExactAssetSelection([{ assetUal: 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7', merkleRootHex: '1'.repeat(64), merkleLeafCount: 1n }]);
     expect(() => Reflect.apply(exactAssetFetchSessionPolicy, undefined, [pinned, 'vm-update-refresh']))
       .toThrow('VM update refresh requires a UAL-only exact selection');
+  });
+
+  it.each(['legacy-selection', 'bound-policy'] as const)('normalizes %s lazily before both ordinary page fetches', async (source) => {
+    const selection = createUalOnlyExactAssetSelection(['did:dkg:base:84532/0x0000000000000000000000000000000000000001/7']);
+    const legacy = vi.fn(() => selection);
+    const policy = vi.fn(() => exactAssetFetchSessionPolicy(selection));
+    const { calls, context } = makeContext({ contextGraphIds: [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY], pageQuads: { data: [], meta: [] } });
+    const normalized = normalizeDurableSyncContext({ ...context,
+      exactAssetSelectionFor: source === 'legacy-selection' ? legacy : undefined,
+      exactAssetFetchPolicyFor: source === 'bound-policy' ? policy : undefined,
+    });
+    expect(normalized).not.toHaveProperty('exactAssetSelectionFor');
+    expect(legacy).not.toHaveBeenCalled();
+    expect(policy).not.toHaveBeenCalled();
+    await runDurableSync(normalized);
+    expect(source === 'legacy-selection' ? legacy : policy).toHaveBeenCalledExactlyOnceWith(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    expect(calls.map(({ phase, assetUals, forceFreshSession }) => ({ phase, assetUals, forceFreshSession })))
+      .toEqual(['meta', 'data'].map((phase) => ({ phase, assetUals: [...selection.assetUals], forceFreshSession: false })));
+  });
+
+  it.each([true, false])('keeps explicit policy precedence with lazy legacy fallback (policy present: %s)', async (present) => {
+    const first = createUalOnlyExactAssetSelection(['did:dkg:base:84532/0x0000000000000000000000000000000000000001/7']);
+    const second = createUalOnlyExactAssetSelection(['did:dkg:base:84532/0x0000000000000000000000000000000000000001/8']);
+    const order: string[] = [];
+    const legacy = vi.fn(() => { order.push('legacy'); return first; });
+    const policy = vi.fn(() => { order.push('policy'); return present ? exactAssetFetchSessionPolicy(second, 'vm-update-refresh') : undefined; });
+    const { calls, context } = makeContext({ contextGraphIds: [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY], pageQuads: { data: [], meta: [] } });
+    const normalized = normalizeDurableSyncContext({ ...context, exactAssetSelectionFor: legacy, exactAssetFetchPolicyFor: policy });
+    expect(order).toEqual([]);
+    await runDurableSync(normalized);
+    expect(order).toEqual(present ? ['policy'] : ['policy', 'legacy']);
+    expect(calls.map(({ assetUals, forceFreshSession }) => ({ assetUals, forceFreshSession })))
+      .toEqual(['meta', 'data'].map(() => ({ assetUals: [...(present ? second : first).assetUals], forceFreshSession: present })));
+  });
+
+  it('keeps lifecycle compatibility lazy and preserves a bound policy instead of another selection', () => {
+    const selection = createUalOnlyExactAssetSelection(['did:dkg:base:84532/0x0000000000000000000000000000000000000001/7']);
+    const policy = exactAssetFetchSessionPolicy(selection, 'vm-update-refresh');
+    const legacy = vi.fn(() => { throw new Error('legacy selection must not be read'); });
+    expect(normalizeExactAssetFetchPolicy(policy, legacy)).toBe(policy);
+    expect(legacy).not.toHaveBeenCalled();
   });
 
   it('does not thread a filter when exactAssetSelectionFor is not wired', async () => {

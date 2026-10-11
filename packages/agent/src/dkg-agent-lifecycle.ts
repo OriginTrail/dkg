@@ -360,6 +360,7 @@ import {
   type VerifiedFullSnapshot,
 } from './sync/requester/durable-sync.js';
 import { createGraphScopedPhysicalOperationFence } from './sync/requester/graph-scoped-operation-fence.js';
+import { normalizeExactAssetFetchPolicy } from './sync/requester/durable-sync-compat.js';
 import {
   exactAssetFetchSessionPolicy,
   requireUalOnlyExactAssetSelection,
@@ -5797,8 +5798,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const admissionBoundary = new DurableSyncAdmissionBoundary(options?.onWorkStarted);
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
-    const exactAssetFetchPolicy = options?.exactAssetFetchPolicy ?? (options?.exactAssetSelection === undefined
-      ? undefined : exactAssetFetchSessionPolicy(options.exactAssetSelection));
+    const exactAssetFetchPolicy = normalizeExactAssetFetchPolicy(options?.exactAssetFetchPolicy, () => options?.exactAssetSelection);
     const exactAssetSelection = exactAssetFetchPolicy?.selection;
     const exactAssetUals = exactAssetSelection === undefined
       ? undefined

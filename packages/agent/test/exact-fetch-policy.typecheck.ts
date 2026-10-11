@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { DurableSyncOptions } from '../src/dkg-agent-lifecycle.js';
+import type { DurableSyncContext } from '../src/sync/requester/durable-sync.js';
 import { createUalOnlyExactAssetSelection, createChallengePinnedExactAssetSelection } from '../src/sync/exact-assets.js';
 import { exactAssetFetchSessionPolicy, type ExactAssetFetchSessionPolicy } from '../src/sync/requester/exact-durable-fetch.js';
 
@@ -8,6 +9,19 @@ const refresh = exactAssetFetchSessionPolicy(ordinary, 'vm-update-refresh');
 const accepted: DurableSyncOptions = { exactAssetFetchPolicy: refresh };
 void accepted;
 const challenge = createChallengePinnedExactAssetSelection([{ assetUal: ordinary.assetUals[0]!, merkleRootHex: '1'.repeat(64), merkleLeafCount: 1n }]);
+const ordinaryCallback: Pick<DurableSyncContext, 'exactAssetFetchPolicyFor'> = {
+  exactAssetFetchPolicyFor: () => exactAssetFetchSessionPolicy(ordinary),
+};
+void ordinaryCallback;
+const challengeCallback: Pick<DurableSyncContext, 'exactAssetFetchPolicyFor'> = {
+  // @ts-expect-error a challenge policy cannot enter durable materialization
+  exactAssetFetchPolicyFor: () => exactAssetFetchSessionPolicy(challenge),
+};
+void challengeCallback;
+const ordinaryKind: 'durable-materialization' = exactAssetFetchSessionPolicy(ordinary).kind;
+const challengeKind: 'ephemeral-challenge' = exactAssetFetchSessionPolicy(challenge).kind;
+void ordinaryKind;
+void challengeKind;
 // @ts-expect-error a refresh is bound to a UAL-only selection, never challenge pins
 exactAssetFetchSessionPolicy(challenge, 'vm-update-refresh');
 // @ts-expect-error a refresh cannot describe a full graph without an exact selection

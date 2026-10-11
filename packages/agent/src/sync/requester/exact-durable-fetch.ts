@@ -50,6 +50,8 @@ export type ExactAssetFetchSessionPolicy =
 
 /** Keep exact retrieval semantics next to filtering and completion policy. */
 export function exactAssetFetchSessionPolicy(selection: UalOnlyExactAssetSelection, purpose: 'vm-update-refresh'): Extract<ExactAssetFetchSessionPolicy, { kind: 'vm-update-refresh' }>;
+export function exactAssetFetchSessionPolicy(selection: UalOnlyExactAssetSelection): Extract<ExactAssetFetchSessionPolicy, { kind: 'durable-materialization' }>;
+export function exactAssetFetchSessionPolicy(selection: ChallengePinnedExactAssetSelection): Extract<ExactAssetFetchSessionPolicy, { kind: 'ephemeral-challenge' }>;
 export function exactAssetFetchSessionPolicy(selection: ExactAssetSelection): ExactAssetFetchSessionPolicy;
 export function exactAssetFetchSessionPolicy(
   selection: ExactAssetSelection,
@@ -76,18 +78,6 @@ export function exactAssetFetchSessionPolicy(
       .map((commitment) => `${commitment.merkleRootHex}:${commitment.merkleLeafCount}`)
       .join('.')}`,
   };
-}
-
-/** New exact owners carry selection and session semantics together; normalize the historical ordinary-selection port here. */
-export function resolveExactAssetFetchSessionPolicy(
-  contextGraphId: string,
-  policyFor: ((contextGraphId: string) => ExactAssetFetchSessionPolicy | undefined) | undefined,
-  selectionFor: ((contextGraphId: string) => ExactAssetSelection | undefined) | undefined,
-): ExactAssetFetchSessionPolicy | undefined {
-  const policy = policyFor?.(contextGraphId);
-  if (policy !== undefined) return policy;
-  const selection = selectionFor?.(contextGraphId);
-  return selection === undefined ? undefined : exactAssetFetchSessionPolicy(selection);
 }
 
 /** Refresh is a durable UAL selection, never a challenge or a full graph. */

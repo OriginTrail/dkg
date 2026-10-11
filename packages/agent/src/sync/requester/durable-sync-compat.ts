@@ -5,6 +5,29 @@ import type { SyncPageResult } from './page-fetch.js';
 import type { VerifiedGraphScopedAsset } from './graph-scoped-materialization.js';
 import type { DurableSyncBudget } from './durable-sync-budget.js';
 import type { DurableSyncContext } from './durable-sync.js';
+import type { ExactAssetSelection, UalOnlyExactAssetSelection } from '../exact-assets.js';
+import { exactAssetFetchSessionPolicy, type ExactAssetFetchSessionPolicy } from './exact-durable-fetch.js';
+
+type DurableExactFetchPolicy = Exclude<ExactAssetFetchSessionPolicy, { kind: 'ephemeral-challenge' }>;
+export type NormalizedDurableSyncContext = Omit<DurableSyncContext, 'exactAssetSelectionFor'>;
+
+/** Explicit policy wins; consult historical selections only when it is absent. */
+export function normalizeExactAssetFetchPolicy(
+  policy: DurableExactFetchPolicy | undefined,
+  legacySelection: () => UalOnlyExactAssetSelection | undefined,
+): DurableExactFetchPolicy | undefined;
+export function normalizeExactAssetFetchPolicy(
+  policy: ExactAssetFetchSessionPolicy | undefined,
+  legacySelection: () => ExactAssetSelection | undefined,
+): ExactAssetFetchSessionPolicy | undefined;
+export function normalizeExactAssetFetchPolicy(
+  policy: ExactAssetFetchSessionPolicy | undefined,
+  legacySelection: () => ExactAssetSelection | undefined,
+): ExactAssetFetchSessionPolicy | undefined {
+  if (policy !== undefined) return policy;
+  const selection = legacySelection();
+  return selection === undefined ? undefined : exactAssetFetchSessionPolicy(selection);
+}
 
 /**
  * Deprecated deep-import shape retained at the public requester boundary for
@@ -54,15 +77,27 @@ function legacyDurableSyncBudget(
 
 export function normalizeDurableSyncContext(
   context: DurableSyncContext | LegacyDurableSyncContext,
-): DurableSyncContext {
-  if ('durableSyncBudget' in context) return context;
+): NormalizedDurableSyncContext {
+  const { exactAssetSelectionFor, exactAssetFetchPolicyFor, ...withoutLegacySelection } = context;
+  // Preserve lazy per-CG reads and policy-before-legacy precedence while the
+  // internal executor sees only one selection-bound representation.
+  const policyContext = {
+    ...withoutLegacySelection,
+    exactAssetFetchPolicyFor: exactAssetFetchPolicyFor || exactAssetSelectionFor
+      ? (contextGraphId: string) => normalizeExactAssetFetchPolicy(
+        exactAssetFetchPolicyFor?.(contextGraphId),
+        () => exactAssetSelectionFor?.(contextGraphId),
+      )
+      : undefined,
+  };
+  if ('durableSyncBudget' in policyContext) return policyContext;
   const {
     createContextGraphSyncDeadline,
     fetchSyncPages,
     storeInsert,
     storeGraphScopedAsset,
     ...sharedContext
-  } = context;
+  } = policyContext;
   return {
     ...sharedContext,
     durableSyncBudget: legacyDurableSyncBudget(createContextGraphSyncDeadline),

@@ -45,12 +45,12 @@ import {
 import type { DurableSyncBudget } from './durable-sync-budget.js';
 import {
   normalizeDurableSyncContext,
-  type LegacyDurableSyncContext,
+  type LegacyDurableSyncContext, type NormalizedDurableSyncContext,
 } from './durable-sync-compat.js';
 import {
   classifyExactDurableFetch,
   classifyExactAssetResponderCapability,
-  resolveExactAssetFetchSessionPolicy, exactAssetFetchSessionPolicy,
+  exactAssetFetchSessionPolicy,
   filterExactAssetDurablePayload,
   mergeExactAssetResponderCapability,
   mergeExactDurableFetchDisposition,
@@ -399,7 +399,7 @@ export interface ChallengeExactAssetFetchContext extends Omit<
 }
 
 interface InternalDurableSyncContext extends Omit<
-  DurableSyncContext,
+  NormalizedDurableSyncContext,
   'exactAssetFetchPolicyFor'
 > {
   exactAssetFetchPolicyFor?: (contextGraphId: string) => ExactAssetFetchSessionPolicy | undefined;
@@ -619,7 +619,7 @@ async function runDurableSyncWithBudget(
     signal,
     fetchSyncPages,
     sinceBatchIdFor,
-    exactAssetSelectionFor,
+    exactAssetFetchPolicyFor,
     durableMetaContinuation,
     stopOnBackoffWorthyFailure = false,
     processDurableBatchInWorker,
@@ -794,7 +794,7 @@ async function runDurableSyncWithBudget(
         ? Math.min(contextGraphBudget.metaFetchDeadline ?? deadline, deadline)
         : deadline;
       const sinceBatchId = sinceBatchIdFor?.(pid);
-      const exactFetchPolicy = resolveExactAssetFetchSessionPolicy(pid, context.exactAssetFetchPolicyFor, exactAssetSelectionFor);
+      const exactFetchPolicy = exactAssetFetchPolicyFor?.(pid);
       const exactAssetSelection = exactFetchPolicy?.selection;
       const isProofOnlyChallengeFetch = exactFetchPolicy?.kind === 'ephemeral-challenge';
       if (isProofOnlyChallengeFetch && !proofOnlyChallengeFetch) {
