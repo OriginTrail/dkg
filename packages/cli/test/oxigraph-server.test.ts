@@ -304,7 +304,7 @@ describe('startOxigraphServer (real child processes)', () => {
       for (const generation of [0, 1]) {
         const phases: string[] = [];
         const dispose = handle.requestRecovery!(generation, 'old abandoned work')!.subscribe(phase => phases.push(phase));
-        expect(phases).toEqual(['terminated']); dispose();
+        expect(phases).toEqual([generation === 0 ? 'terminated' : 'reopened']); dispose();
       }
       expect(handle.requestRecovery!(3, 'unconfirmed future')).toBeUndefined();
       expect(handle.getRecoveryState()).toEqual({ recovering: false, admissionsPaused: false, generation: 2 });
