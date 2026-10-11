@@ -15,18 +15,24 @@ export type NormalizedDurableSyncContext = Omit<DurableSyncContext, 'exactAssetS
 export function normalizeExactAssetFetchPolicy(
   policy: DurableExactFetchPolicy | undefined,
   legacySelection: () => UalOnlyExactAssetSelection | undefined,
+  legacyForceFreshExactSession?: boolean,
 ): DurableExactFetchPolicy | undefined;
 export function normalizeExactAssetFetchPolicy(
   policy: ExactAssetFetchSessionPolicy | undefined,
   legacySelection: () => ExactAssetSelection | undefined,
+  legacyForceFreshExactSession?: boolean,
 ): ExactAssetFetchSessionPolicy | undefined;
 export function normalizeExactAssetFetchPolicy(
   policy: ExactAssetFetchSessionPolicy | undefined,
   legacySelection: () => ExactAssetSelection | undefined,
+  legacyForceFreshExactSession?: boolean,
 ): ExactAssetFetchSessionPolicy | undefined {
   if (policy !== undefined) return policy;
   const selection = legacySelection();
-  return selection === undefined ? undefined : exactAssetFetchSessionPolicy(selection);
+  if (selection === undefined) return undefined;
+  return legacyForceFreshExactSession === true && selection.kind === 'ual-only'
+    ? exactAssetFetchSessionPolicy(selection, 'vm-update-refresh')
+    : exactAssetFetchSessionPolicy(selection);
 }
 
 /**

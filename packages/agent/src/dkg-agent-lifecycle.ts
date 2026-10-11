@@ -1679,6 +1679,8 @@ export type DurableSyncOptions = {
   exactAssetSelection?: ExactAssetSelection;
   /** Selection-bound requester policy; a refresh always identifies its exact assets. */
   exactAssetFetchPolicy?: ExactAssetFetchSessionPolicy;
+  /** @deprecated Use a selection-bound exactAssetFetchPolicy for VM refreshes. */
+  forceFreshExactSession?: boolean;
   /** Internal transport decision; required streams never replay an enlarged selection. */
   exactRecoveryTransportMode?: ExactRecoveryTransportMode;
   /**
@@ -5798,7 +5800,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const admissionBoundary = new DurableSyncAdmissionBoundary(options?.onWorkStarted);
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
-    const exactAssetFetchPolicy = normalizeExactAssetFetchPolicy(options?.exactAssetFetchPolicy, () => options?.exactAssetSelection);
+    const exactAssetFetchPolicy = normalizeExactAssetFetchPolicy(
+      options?.exactAssetFetchPolicy, () => options?.exactAssetSelection, options?.forceFreshExactSession,
+    );
     const exactAssetSelection = exactAssetFetchPolicy?.selection;
     const exactAssetUals = exactAssetSelection === undefined
       ? undefined
@@ -6053,6 +6057,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       signal?: AbortSignal;
       isCurrent?: () => boolean;
       exactFetchPurpose?: 'vm-update-refresh';
+      /** @deprecated Use exactFetchPurpose: 'vm-update-refresh' for VM refreshes. */
+      forceFreshExactSession?: boolean;
       exactRecoveryTransportMode?: ExactRecoveryTransportMode;
       registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
       totalTimeoutMs?: number;
@@ -6067,6 +6073,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       signal?: AbortSignal;
       isCurrent?: () => boolean;
       exactFetchPurpose?: 'vm-update-refresh';
+      /** @deprecated Use exactFetchPurpose: 'vm-update-refresh' for VM refreshes. */
+      forceFreshExactSession?: boolean;
       exactRecoveryTransportMode?: ExactRecoveryTransportMode;
       registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
       totalTimeoutMs?: number;
@@ -6081,6 +6089,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       signal?: AbortSignal;
       isCurrent?: () => boolean;
       exactFetchPurpose?: 'vm-update-refresh';
+      /** @deprecated Use exactFetchPurpose: 'vm-update-refresh' for VM refreshes. */
+      forceFreshExactSession?: boolean;
       exactRecoveryTransportMode?: ExactRecoveryTransportMode;
       registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
       totalTimeoutMs?: number;
@@ -6100,7 +6110,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       {
         exactAssetFetchPolicy: options.exactFetchPurpose === 'vm-update-refresh'
           ? exactAssetFetchSessionPolicy(requireUalOnlyExactAssetSelection(selection), 'vm-update-refresh')
-          : exactAssetFetchSessionPolicy(selection),
+          : normalizeExactAssetFetchPolicy(undefined, () => selection, options.forceFreshExactSession),
         exactRecoveryTransportMode: options.exactRecoveryTransportMode,
         registeredPublicEvidence: options.registeredPublicEvidence,
         ...(options.totalTimeoutMs === undefined ? {} : { totalTimeoutMs: options.totalTimeoutMs }),

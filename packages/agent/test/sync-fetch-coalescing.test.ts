@@ -36,6 +36,7 @@ import {
   VmReconcileQueueClosedError,
   VmReconcileShutdownTimeoutError,
 } from '../src/vm-reconcile-service.js';
+import { exactAssetFetchSessionPolicy } from '../src/sync/requester/exact-durable-fetch.js';
 import { stubLifecycleFetch } from './_helpers/sync-fetch-coalescing.js';
 
 const PEER_A = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
@@ -939,7 +940,10 @@ describe('DKGAgent sync fetch coalescing', () => {
     }
   });
 
-  it('runs a forced-fresh exact fetch after an identical in-flight fetch and forwards freshness to both pages', async () => {
+  it.each([
+    { exactFetchPurpose: 'vm-update-refresh' as const },
+    { forceFreshExactSession: true },
+  ])('runs a forced-fresh exact fetch after an identical in-flight fetch and forwards freshness to both pages (%j)', async (freshnessOptions) => {
     const firstMetaFetch = deferred<SyncPageResult>();
     const fetchCalls: Array<{ phase: SyncPhase; forceFreshSession?: boolean }> = [];
     const agent = await createAgentWithSend(async () => new Uint8Array(0));
@@ -972,7 +976,7 @@ describe('DKGAgent sync fetch coalescing', () => {
         PEER_A,
         SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
         exactSelection(EXACT_UAL_7),
-        { exactFetchPurpose: 'vm-update-refresh' },
+        freshnessOptions,
       );
       firstMetaFetch.resolve(emptySyncPage('meta'));
 
@@ -984,6 +988,60 @@ describe('DKGAgent sync fetch coalescing', () => {
       expect(fetchCalls.slice(2)).toEqual([
         { phase: 'meta', forceFreshSession: true },
         { phase: 'data', forceFreshSession: true },
+      ]);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it.each([
+    ['detailed legacy true', true],
+    ['detailed legacy false', false],
+    ['detailed modern purpose wins', true],
+    ['durable legacy true', true],
+    ['durable legacy false', false],
+    ['durable explicit ordinary policy wins', false],
+    ['durable full graph is unaffected', false],
+    ['challenge keeps its distinct policy', true],
+  ] as const)('preserves public exact freshness compatibility on both phases: %s', async (mode, expectedFresh) => {
+    const fetchCalls: Array<{ phase: SyncPhase; forceFreshSession?: boolean }> = [];
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    stubLifecycleFetch(agent, async ({ phase, forceFreshSession }) => {
+      fetchCalls.push({ phase, forceFreshSession });
+      return emptySyncPage(phase);
+    });
+    (agent as any).processDurableBatchInWorker = async () => ({
+      verifiedData: [], verifiedMeta: [], consumedUnpersistedMetaTriples: 0,
+      totalFetchedDataQuads: 0, totalFetchedMetaQuads: 0, rejectedKcs: 0,
+      emptyResponses: 1, metaOnlyResponses: 0, verifiedPrivateOnlyResponses: 0,
+      dataRejectedMissingMeta: 0,
+    });
+    const selection = exactSelection(EXACT_UAL_7);
+    try {
+      if (mode.startsWith('durable')) {
+        await agent.runLegacyDurableSyncDetailed(
+          createOperationContext('sync'), PEER_A, [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY],
+          undefined, undefined, undefined,
+          {
+            ...(mode === 'durable full graph is unaffected' ? {} : { exactAssetSelection: selection }),
+            ...(mode === 'durable explicit ordinary policy wins' ? { exactAssetFetchPolicy: exactAssetFetchSessionPolicy(selection) } : {}),
+            forceFreshExactSession: mode !== 'durable legacy false',
+          },
+        );
+      } else {
+        const selected = mode === 'challenge keeps its distinct policy'
+          ? createChallengePinnedExactAssetSelection([{
+            assetUal: EXACT_UAL_7, merkleRootHex: '1'.repeat(64), merkleLeafCount: 1n,
+          }])
+          : [EXACT_UAL_7];
+        await agent.syncExactKnowledgeAssetsFromPeerDetailed(PEER_A, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, selected, {
+          forceFreshExactSession: mode !== 'detailed legacy false' && mode !== 'detailed modern purpose wins',
+          ...(mode === 'detailed modern purpose wins' ? { exactFetchPurpose: 'vm-update-refresh' as const } : {}),
+        });
+      }
+      expect(fetchCalls).toEqual([
+        { phase: 'meta', forceFreshSession: expectedFresh },
+        { phase: 'data', forceFreshSession: expectedFresh },
       ]);
     } finally {
       await agent.stop().catch(() => {});

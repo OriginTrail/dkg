@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import type { DKGAgent } from '../src/index.js';
 import type { DurableSyncOptions } from '../src/dkg-agent-lifecycle.js';
 import type { DurableSyncContext } from '../src/sync/requester/durable-sync.js';
 import { createUalOnlyExactAssetSelection, createChallengePinnedExactAssetSelection } from '../src/sync/exact-assets.js';
@@ -33,3 +34,13 @@ void fullGraph;
 // @ts-expect-error ordinary durable retrieval must retain resumable session semantics
 const contradictory: ExactAssetFetchSessionPolicy = { kind: 'durable-materialization', selection: ordinary, forceFreshSession: true, allowDurableCheckpoints: true };
 void contradictory;
+
+// Historical public options remain accepted while internal policy is selection-bound.
+const historicalFresh: DurableSyncOptions = { exactAssetSelection: ordinary, forceFreshExactSession: true };
+const historicalResume: DurableSyncOptions = { exactAssetSelection: ordinary, forceFreshExactSession: false };
+void historicalFresh;
+void historicalResume;
+declare const agent: DKGAgent;
+void agent.syncExactKnowledgeAssetsFromPeerDetailed('peer', 'cg', ordinary.assetUals, { forceFreshExactSession: true });
+void agent.syncExactKnowledgeAssetsFromPeerDetailed('peer', 'cg', ordinary, { forceFreshExactSession: false });
+void agent.syncExactKnowledgeAssetsFromPeerDetailed('peer', 'cg', ordinary, { exactFetchPurpose: 'vm-update-refresh', forceFreshExactSession: false });
