@@ -46,8 +46,9 @@ describe('runPromoteJob diagnostics', () => {
     queue.fail = async (jobId, claimToken, error) => {
       order.push('queue.fail.begin');
       diagnosticPresentWhenFailBegan = promoteFailureDiagnostics(logs).length === 1;
-      await fail(jobId, claimToken, error);
+      const transition = await fail(jobId, claimToken, error);
       order.push('queue.fail.end');
+      return transition;
     };
 
     const result = await runPromoteJob({
@@ -164,8 +165,9 @@ describe('runPromoteJob diagnostics', () => {
     const fail = queue.fail.bind(queue);
     let failCompleted = false;
     queue.fail = async (jobId, claimToken, error) => {
-      await fail(jobId, claimToken, error);
+      const transition = await fail(jobId, claimToken, error);
       failCompleted = true;
+      return transition;
     };
 
     const resultPromise = runPromoteJob({

@@ -71,6 +71,46 @@ function diagnostic(logs: string[], stage: string) {
 }
 
 describe('GH#2892 supervisor failure bookkeeping boundaries', () => {
+  it.each(['retrying', 'terminal'] as const)('consumes a persisted %s transition without observing the outcome again', async (kind) => {
+    const h = await setup();
+    if (kind === 'terminal') h.promote.mockReset().mockRejectedValue(new Error('Unknown assertion'));
+    const observe = vi.spyOn(h.queue, 'getStatus').mockRejectedValue(new Error('outcome read must not run'));
+    await h.run();
+    expect(observe).not.toHaveBeenCalled();
+    expect(h.supervisor.getCounters()).toMatchObject(kind === 'retrying'
+      ? { failedRetrying: 1, failedTerminal: 0 }
+      : { failedRetrying: 0, failedTerminal: 1 });
+    expect(await h.read(h.jobId)).toMatchObject({ state: kind === 'retrying' ? 'failed_retrying' : 'failed' });
+    expect(h.promote).toHaveBeenCalledTimes(1);
+    expect(h.logs.some((line) => line.includes(EVENT))).toBe(false);
+  });
+
+  it('keeps the acknowledged attempt outcome when a later lease is claimed before the caller resumes', async () => {
+    const h = await setup();
+    vi.spyOn(h.queue, 'fail').mockImplementation(async (id, token, error) => {
+      const transition = await h.fail(id, token, error);
+      h.clock.advance(60_000);
+      expect((await h.queue.claimNext('other-worker'))?.attempt.count).toBe(2);
+      return transition;
+    });
+    await h.run();
+    expect(h.supervisor.getCounters()).toMatchObject({ failedRetrying: 1, failedTerminal: 0 });
+    expect(await h.read(h.jobId)).toMatchObject({ state: 'running', attempt: { count: 2 } });
+    expect(h.promote).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains a started lease when the real record writer refuses the failure before dispatch', async () => {
+    const h = await setup();
+    h.promote.mockReset().mockImplementationOnce(async () => {
+      vi.spyOn(h.store, 'replaceSubject').mockRejectedValue(new Error(SECRET));
+      throw retryableBookkeepingFailure();
+    });
+    await h.run();
+    expect(await h.read(h.jobId)).toMatchObject({ state: 'running', attempt: { count: 1 } });
+    expect(h.supervisor.getCounters()).toMatchObject({ failedRetrying: 0, failedTerminal: 0 });
+    expect(h.promote).toHaveBeenCalledTimes(1);
+    diagnostic(h.logs, 'record_failure');
+  });
   it.each(['same-process claim', 'startup'] as const)(
     'preserves pre-write uncertainty until %s reconciles the expired started lease',
     async (recovery) => {
@@ -114,7 +154,7 @@ describe('GH#2892 supervisor failure bookkeeping boundaries', () => {
     },
   );
 
-  it.each(['write acknowledgement', 'outcome read'] as const)(
+  it.each(['write acknowledgement'] as const)(
     'trusts the durable retrying row after a failed %s and retries only at its deadline',
     async (boundary) => {
       const h = await setup();
@@ -126,9 +166,6 @@ describe('GH#2892 supervisor failure bookkeeping boundaries', () => {
         await h.fail(jobId, token, error);
         if (boundary === 'write acknowledgement') throw new Error(SECRET);
       });
-      if (boundary === 'outcome read') {
-        vi.spyOn(h.queue, 'getStatus').mockRejectedValueOnce(new Error(SECRET));
-      }
       await h.run();
       expect(failSpy).toHaveBeenCalledTimes(1);
       const retrying = await h.read(h.jobId);
@@ -139,7 +176,7 @@ describe('GH#2892 supervisor failure bookkeeping boundaries', () => {
       expect(retrying?.attempt.nextRetryAt).toBe(h.clock.now() + 60_000);
       expect(h.promote).toHaveBeenCalledTimes(1);
       expect(h.supervisor.getCounters()).toMatchObject({ failedTerminal: 0, failedRetrying: 0 });
-      diagnostic(h.logs, boundary === 'outcome read' ? 'read_failure_outcome' : 'record_failure');
+      diagnostic(h.logs, 'record_failure');
       await expect(h.fail(h.jobId, oldToken, {
         message: 'stale worker', retryable: false, classification: 'fatal', recordedAt: h.clock.now(),
       })).rejects.toBeInstanceOf(PromoteJobLeaseError);
@@ -187,19 +224,7 @@ describe('GH#2892 supervisor failure bookkeeping boundaries', () => {
     diagnostic(h.logs, 'record_failure');
   });
 
-  it.each(['missing', 'running'] as const)('does not invent a terminal verdict from a %s outcome read', async (state) => {
-    const h = await setup();
-    const failSpy = vi.spyOn(h.queue, 'fail').mockResolvedValue(undefined);
-    if (state === 'missing') vi.spyOn(h.queue, 'getStatus').mockResolvedValue(null);
-    await h.run();
-    expect(failSpy).toHaveBeenCalledTimes(1);
-    expect(h.supervisor.getCounters()).toMatchObject({ failedTerminal: 0, failedRetrying: 0 });
-    expect(await h.read(h.jobId)).toMatchObject({ state: 'running', attempt: { count: 1 } });
-    expect(h.promote).toHaveBeenCalledTimes(1);
-    diagnostic(h.logs, 'read_failure_outcome');
-  });
-
-  it('does not attribute a newer attempt outcome to the previous worker', async () => {
+  it('attributes the captured transition rather than a newer outcome observation', async () => {
     const h = await setup();
     const failSpy = vi.spyOn(h.queue, 'fail');
     vi.spyOn(h.queue, 'getStatus').mockImplementation(async (jobId) => {
@@ -209,9 +234,10 @@ describe('GH#2892 supervisor failure bookkeeping boundaries', () => {
     });
     await h.run();
     expect(failSpy).toHaveBeenCalledTimes(1);
-    expect(h.supervisor.getCounters()).toMatchObject({ failedTerminal: 0, failedRetrying: 0 });
+    expect(h.supervisor.getCounters()).toMatchObject({ failedTerminal: 0, failedRetrying: 1 });
     expect(await h.read(h.jobId)).toMatchObject({ state: 'failed_retrying', attempt: { count: 1 } });
-    diagnostic(h.logs, 'read_failure_outcome');
+    expect(h.queue.getStatus).not.toHaveBeenCalled();
+    expect(h.logs.some((line) => line.includes(EVENT))).toBe(false);
   });
 
   it.each(['sync', 'async'] as const)('keeps uncertainty safe if its %s diagnostic sink fails', async (kind) => {

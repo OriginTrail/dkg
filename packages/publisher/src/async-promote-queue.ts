@@ -6,6 +6,7 @@ export type {
   PromoteCommitMarker,
   PromoteCommitMarkerStep,
   PromoteFailureClassification,
+  PromoteFailureTransition,
   PromoteJob,
   PromoteJobState,
   PromoteLease,

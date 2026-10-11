@@ -221,6 +221,11 @@ export interface PromotePostCommitRecoveryEvent {
   nextRetryAt?: number;
 }
 
+/** The exact failure transition acknowledged after the queue's write and flush. */
+export type PromoteFailureTransition =
+  | Readonly<{ state: 'failed_retrying'; jobId: string; attemptCount: number; nextRetryAt: number }>
+  | Readonly<{ state: 'failed'; jobId: string; attemptCount: number }>;
+
 export type PromoteStats = Record<PromoteJobState, number>;
 
 export interface AsyncPromoteQueue {
@@ -246,7 +251,7 @@ export interface AsyncPromoteQueue {
   heartbeat(jobId: string, claimToken: string): Promise<void>;
   recordCommitMarker(jobId: string, claimToken: string, step: PromoteCommitMarkerStep): Promise<void>;
   succeed(jobId: string, claimToken: string, result: PromoteResult): Promise<void>;
-  fail(jobId: string, claimToken: string, error: PromoteAttemptError): Promise<void>;
+  fail(jobId: string, claimToken: string, error: PromoteAttemptError): Promise<PromoteFailureTransition>;
   // Startup / lifecycle.
   recoverOnStartup(): Promise<PromoteRecoverySummary>;
   /**
