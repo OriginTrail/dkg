@@ -111,7 +111,7 @@ import {
   type Rfc64ExactBindingsReadOperationV1,
 } from '../rfc64-exact-bindings-read-capability.js';
 import { CANCEL_ON_ABORT, ABANDONED_READ_DRAIN_BUDGET_BYTES, raceCallerAbandon,
-  snapshotManagedRecoveryCapability, type SparqlHttpReadPolicy,
+  snapshotManagedRecoveryCapability, normalizeManagedSparqlRecoveryV1, type SparqlHttpReadPolicy,
   type SparqlHttpManagedRecoveryV1 } from './managed-sparql-recovery.js';
 export { ABANDONED_READ_DRAIN_BUDGET_BYTES } from './managed-sparql-recovery.js';
 export type { SparqlHttpRecoveryState, SparqlHttpManagedRecoveryV1 } from './managed-sparql-recovery.js';
@@ -319,13 +319,13 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     this.onSlowQuery = options.onSlowQuery;
     this.managedAbandonedWorkRecovery = new ManagedWorkRecoveryCoordinatorV1({
       now: this.now,
-      capability: this.managedOxigraph && (this.onClientTimeout || managedRuntimeHooks?.requestRecovery)
+      capability: normalizeManagedSparqlRecoveryV1(this.managedOxigraph && (this.onClientTimeout || managedRuntimeHooks?.requestRecovery)
         ? {
             readState: () => this.readRecoveryState(),
             recover: this.onClientTimeout,
             requestRecovery: managedRuntimeHooks?.requestRecovery,
           }
-        : undefined,
+        : undefined),
       onPendingChange: (pending) => {
         this.retainedManagedWorkPending = pending;
         this.reportManagedRuntimeActivity(managedRuntimeHooks);

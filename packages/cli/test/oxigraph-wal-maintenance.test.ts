@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ManagedWorkRecoveryCoordinatorV1 } from '../../storage/src/managed-work-recovery-coordinator.js';
+import { normalizeManagedSparqlRecoveryV1 } from '../../storage/src/adapters/managed-sparql-recovery.js';
 import { createOxigraphRecoveryProgress, OxigraphRecoveryProgressOwner } from '../src/daemon/oxigraph-recovery-progress.js';
 import {
   DEFAULT_WAL_RESTART_THRESHOLD_BYTES,
@@ -71,7 +72,8 @@ describe('Oxigraph WAL maintenance coordinator', () => {
     const activity = wal.registerActivity();
     const pending = vi.fn((busy: boolean) => activity.report(busy));
     const recovery = new ManagedWorkRecoveryCoordinatorV1({ now: () => Date.now(), onPendingChange: pending,
-      capability: { readState: () => state, requestRecovery: (generation, operation) => progress.request(generation, operation) } });
+      capability: normalizeManagedSparqlRecoveryV1({ readState: () => state,
+        requestRecovery: (generation, operation) => progress.request(generation, operation) }) });
     try {
       recovery.retain('update', startedAt + 30_000, recovery.begin(state));
       tick(); expect(wal.admissionsPaused()).toBe(true);

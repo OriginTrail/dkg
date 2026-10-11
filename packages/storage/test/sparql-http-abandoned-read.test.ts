@@ -69,6 +69,54 @@ function harness(managed = true, extraHooks: ManagedOxigraphRuntimeHooksV1 = {})
 }
 
 describe('managed abandoned read recovery', () => {
+  it.each(['legacy', 'modern'] as const)('normalizes %s timeout, cancellation retry and reusable close at the store boundary', async protocol => {
+    const observers: Array<(phase: ManagedOxigraphRecoveryPhaseV1) => void> = [];
+    const dispose = vi.fn();
+    const requestRecovery = vi.fn((generation: number) => ({ generation, subscribe(observe: (phase: ManagedOxigraphRecoveryPhaseV1) => void) {
+      observers.push(observe); observe('verifying'); return dispose;
+    } }));
+    const { store, recovery, recover, activity, abandonMutation } = harness(true,
+      protocol === 'modern' ? { requestRecovery } : {});
+    const notify = protocol === 'modern' ? requestRecovery : recover;
+    try {
+      await abandonMutation();
+      await vi.advanceTimersByTimeAsync(899);
+      expect(notify).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(notify).toHaveBeenCalledOnce();
+      expect(activity.at(-1)).toBe(true);
+      if (protocol === 'modern') observers[0]!('cancelled');
+      await vi.advanceTimersByTimeAsync(999);
+      expect(notify).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(notify).toHaveBeenCalledTimes(2);
+      expect(activity.at(-1)).toBe(true);
+      recovery.generation += 1;
+      if (protocol === 'modern') {
+        observers[1]!('signalled');
+        expect(activity.at(-1)).toBe(true);
+        observers[1]!('terminated');
+        expect(dispose).toHaveBeenCalledTimes(2);
+        expect(recover).not.toHaveBeenCalled();
+      } else await vi.advanceTimersByTimeAsync(1_000);
+      expect(activity.at(-1)).toBe(false);
+      await store.close();
+
+      await abandonMutation();
+      observers[0]?.('terminated'); // The previous lifecycle cannot release new retained work.
+      await vi.advanceTimersByTimeAsync(899);
+      expect(notify).toHaveBeenCalledTimes(2);
+      expect(activity.at(-1)).toBe(true);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(notify).toHaveBeenCalledTimes(3);
+      await store.close();
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(notify).toHaveBeenCalledTimes(3);
+      expect(activity.at(-1)).toBe(false);
+      if (protocol === 'modern') expect(dispose).toHaveBeenCalledTimes(3);
+    } finally { await store.close(); }
+  });
+
   it('consumes the runtime progress capability without a legacy timeout notifier', async () => {
     let observe!: (phase: ManagedOxigraphRecoveryPhaseV1) => void;
     const requestRecovery = vi.fn((generation: number) => ({ generation, subscribe(callback: (phase: ManagedOxigraphRecoveryPhaseV1) => void) {

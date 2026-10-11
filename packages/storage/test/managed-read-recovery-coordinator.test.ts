@@ -1,13 +1,37 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ManagedOxigraphRecoveryPhaseV1 } from '../src/managed-oxigraph-runtime-store.js';
-import { ManagedWorkRecoveryCoordinatorV1 } from
+import { ManagedWorkRecoveryCoordinatorV1, type ManagedWorkRecoveryCoordinatorOptionsV1 } from
   '../src/managed-work-recovery-coordinator.js';
+import { normalizeManagedSparqlRecoveryV1, type ManagedSparqlRecoverySourceV1 } from '../src/adapters/managed-sparql-recovery.js';
+
+/** Drive both historical input shapes through the store boundary's one protocol. */
+function createCoordinator(options: Omit<ManagedWorkRecoveryCoordinatorOptionsV1, 'capability'> & {
+  readonly capability?: ManagedSparqlRecoverySourceV1;
+}): ManagedWorkRecoveryCoordinatorV1 {
+  return new ManagedWorkRecoveryCoordinatorV1({ ...options, capability: normalizeManagedSparqlRecoveryV1(options.capability) });
+}
 
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
 describe('ManagedWorkRecoveryCoordinatorV1', () => {
+  it.each(['legacy', 'modern'] as const)('keeps %s untracked timeout notification separate from completion', protocol => {
+    const recover = vi.fn();
+    const requestRecovery = vi.fn();
+    const pending = vi.fn();
+    const coordinator = createCoordinator({ now: () => Date.now(), onPendingChange: pending, capability: {
+      readState: () => null, recover, ...(protocol === 'modern' ? { requestRecovery } : {}),
+    } });
+    try {
+      coordinator.clientTimedOut('update', Date.now(), null);
+      expect(recover).toHaveBeenCalledExactlyOnceWith('update');
+      expect(requestRecovery).not.toHaveBeenCalled();
+      expect(pending).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { coordinator.close(); }
+  });
+
   it('uses actual generation progress without completion polling and retains cancelled signalling', async () => {
     const pending = vi.fn();
     const readState = vi.fn(() => ({ recovering: false, generation: 0 }));
@@ -18,7 +42,7 @@ describe('ManagedWorkRecoveryCoordinatorV1', () => {
       },
     }));
     const recover = vi.fn();
-    const coordinator = new ManagedWorkRecoveryCoordinatorV1({ now: () => Date.now(),
+    const coordinator = createCoordinator({ now: () => Date.now(),
       onPendingChange: pending, capability: { readState, recover, requestRecovery } });
     const retention = coordinator.clientTimedOut('query', Date.now(), coordinator.begin(readState()));
     const readsAtRequest = readState.mock.calls.length;
@@ -51,7 +75,7 @@ describe('ManagedWorkRecoveryCoordinatorV1', () => {
     const unsubscribe = vi.fn();
     const pending = vi.fn();
     const state = { recovering: false, generation: 0 };
-    const coordinator = new ManagedWorkRecoveryCoordinatorV1({ now: () => Date.now(),
+    const coordinator = createCoordinator({ now: () => Date.now(),
       onPendingChange: pending, capability: { readState: () => state, recover: vi.fn(),
         requestRecovery: generation => ({ generation, subscribe(callback) {
           observe = callback; callback('signalled'); return unsubscribe;
@@ -72,7 +96,7 @@ describe('ManagedWorkRecoveryCoordinatorV1', () => {
     const pending = vi.fn();
     let observe!: (phase: ManagedOxigraphRecoveryPhaseV1) => void;
     const dispose = vi.fn();
-    const coordinator = new ManagedWorkRecoveryCoordinatorV1({ now: () => Date.now(), onPendingChange: pending,
+    const coordinator = createCoordinator({ now: () => Date.now(), onPendingChange: pending,
       capability: { readState: () => state, requestRecovery: generation => ({ generation, subscribe(callback) {
         observe = callback; callback('signalled'); return dispose;
       } }) } });
@@ -98,7 +122,7 @@ describe('ManagedWorkRecoveryCoordinatorV1', () => {
     const requestRecovery = vi.fn((generation: number) => ({ generation, subscribe(callback: typeof observe) {
       observe = callback; callback('stopped'); return dispose;
     } }));
-    const coordinator = new ManagedWorkRecoveryCoordinatorV1({ now: () => Date.now(), onPendingChange: pending,
+    const coordinator = createCoordinator({ now: () => Date.now(), onPendingChange: pending,
       capability: { readState: () => state, requestRecovery } });
     try {
       const retention = coordinator.clientTimedOut('update', Date.now(), coordinator.begin(state));
@@ -122,7 +146,7 @@ describe('ManagedWorkRecoveryCoordinatorV1', () => {
     const pending = vi.fn((busy: boolean) => {
       if (!busy && !replacement.retention) replacement.retention = coordinator.retain('construct', Date.now() + 100, coordinator.begin(state));
     });
-    const coordinator = new ManagedWorkRecoveryCoordinatorV1({ now: () => Date.now(), onPendingChange: pending,
+    const coordinator = createCoordinator({ now: () => Date.now(), onPendingChange: pending,
       capability: { readState: () => state, requestRecovery } });
     try {
       const old = coordinator.clientTimedOut('query', Date.now(), coordinator.begin(state));
@@ -137,7 +161,7 @@ describe('ManagedWorkRecoveryCoordinatorV1', () => {
   it('does not let a stale token replace the current store generation timer', async () => {
     const state = { recovering: false, generation: 0 };
     const recover = vi.fn();
-    const coordinator = new ManagedWorkRecoveryCoordinatorV1({
+    const coordinator = createCoordinator({
       now: () => 0,
       capability: {
         readState: () => ({ ...state }),
@@ -162,7 +186,7 @@ describe('ManagedWorkRecoveryCoordinatorV1', () => {
     const state = { recovering: false, generation: 0 };
     // The default supervisor accepts and confirms termination synchronously.
     const recover = vi.fn(() => { state.generation += 1; });
-    const coordinator = new ManagedWorkRecoveryCoordinatorV1({
+    const coordinator = createCoordinator({
       now: () => Date.now(),
       capability: { readState: () => ({ ...state }), recover },
     });
@@ -289,7 +313,7 @@ describe('ManagedWorkRecoveryCoordinatorV1', () => {
 
   it('a recover notification that throws never escapes the timer', () => {
     const state = { recovering: false, generation: 0 };
-    const coordinator = new ManagedWorkRecoveryCoordinatorV1({
+    const coordinator = createCoordinator({
       now: () => 0,
       capability: {
         readState: () => ({ ...state }),
@@ -302,7 +326,7 @@ describe('ManagedWorkRecoveryCoordinatorV1', () => {
 
   it('treats an unreadable runtime capability as no retention', () => {
     const recover = vi.fn();
-    const coordinator = new ManagedWorkRecoveryCoordinatorV1({
+    const coordinator = createCoordinator({
       now: () => 0,
       capability: {
         readState: () => { throw new Error('broken'); },
@@ -317,7 +341,7 @@ describe('ManagedWorkRecoveryCoordinatorV1', () => {
     const state = { recovering: false, generation: 0 };
     const pending = vi.fn();
     const recover = vi.fn();
-    const coordinator = new ManagedWorkRecoveryCoordinatorV1({
+    const coordinator = createCoordinator({
       now: () => Date.now(), onPendingChange: pending,
       capability: { readState: () => state, recover },
     });
@@ -340,7 +364,7 @@ describe('ManagedWorkRecoveryCoordinatorV1', () => {
         if (failure === 'throws') throw new Error('signal declined');
         state.admissionsPaused = true;
       });
-      const coordinator = new ManagedWorkRecoveryCoordinatorV1({
+      const coordinator = createCoordinator({
         now: () => Date.now(), onPendingChange: pending,
         capability: { readState: () => state, recover },
       });
@@ -368,7 +392,7 @@ describe('ManagedWorkRecoveryCoordinatorV1', () => {
     let readable = true;
     const pending = vi.fn();
     const recover = vi.fn(() => { state.admissionsPaused = true; });
-    const coordinator = new ManagedWorkRecoveryCoordinatorV1({
+    const coordinator = createCoordinator({
       now: () => Date.now(), onPendingChange: pending,
       capability: { readState: () => {
         if (!readable) throw new Error('supervisor unavailable');
@@ -394,7 +418,7 @@ describe('ManagedWorkRecoveryCoordinatorV1', () => {
     const state = { recovering: false, generation: 0 };
     const pending = vi.fn();
     const recover = vi.fn();
-    const coordinator = new ManagedWorkRecoveryCoordinatorV1({
+    const coordinator = createCoordinator({
       now: () => Date.now(), onPendingChange: pending,
       capability: { readState: () => state, recover },
     });
@@ -414,7 +438,7 @@ describe('ManagedWorkRecoveryCoordinatorV1', () => {
         if (failure === 'throws') throw new Error('not signalled');
         state.admissionsPaused = true;
       });
-      const coordinator = new ManagedWorkRecoveryCoordinatorV1({
+      const coordinator = createCoordinator({
         now: () => Date.now(), onPendingChange: pending,
         capability: { readState: () => state, recover },
       });
@@ -449,7 +473,7 @@ describe('ManagedWorkRecoveryCoordinatorV1', () => {
 
   it('keeps timeout notification compatibility without a readable generation or retention', () => {
     const recover = vi.fn(() => { throw new Error('supervisor absent'); });
-    const coordinator = new ManagedWorkRecoveryCoordinatorV1({
+    const coordinator = createCoordinator({
       now: () => Date.now(), capability: { readState: () => null, recover },
     });
     expect(() => coordinator.clientTimedOut('query', Date.now(), null)).not.toThrow();
