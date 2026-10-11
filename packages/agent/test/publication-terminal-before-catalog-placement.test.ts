@@ -14,16 +14,23 @@
  * the time the row let pass before the terminal record was written.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { canonicalGraphScopedAuthorSealFromAssertionSealV1 } from '@origintrail-official/dkg-core';
+import { assertionLifecycleUri, contextGraphMetaUri, canonicalGraphScopedAuthorSealFromAssertionSealV1 } from '@origintrail-official/dkg-core';
+import type { ChainAdapter } from '@origintrail-official/dkg-chain';
+import { applyPublishedNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
 import { ConfirmedCatalogObligationErrorV1 } from '../src/confirmed-catalog-obligation-error.js';
 
+const supersededPublications = vi.hoisted(() => new Set<string>());
 vi.mock('../src/named-ka-publish-recovery.js', async (importOriginal) => ({
   ...await importOriginal<typeof import('../src/named-ka-publish-recovery.js')>(),
   // The chain normalization needs an adapter bound to the asset's chain; it answers here as it
   // does for a publish that is the asset's current version. Everything after it is real.
   normalizeRecoveredNamedKaPublish: async (
     input: Parameters<typeof recoveredNamedKaPublishV1>[0],
-  ) => recoveredNamedKaPublishV1(input),
+  ) => {
+    const recovered = recoveredNamedKaPublishV1(input);
+    return { ...recovered, materialization: { ...recovered.materialization,
+      superseded: supersededPublications.has(input.request.kaUal!) } };
+  },
 }));
 
 import {
@@ -557,6 +564,64 @@ describe('a confirmed publication and its catalog placement', () => {
     expect(fixture.markers()).toEqual([]);
     expect(fixture.events().filter((event) => event.startsWith('executor-'))).toHaveLength(1);
     expect(await path.broadcast('wallet-1')).toBeNull();
+  }, 120_000);
+
+  it('retains a superseded queued confirmation until its original seal is durably owed', async () => {
+    const fixture = await startPlacementAgentV1({ name: 'superseded-marker-write-fails' });
+    const { agent } = fixture;
+    const asset = await seedPlacementAssetV1(agent, 'superseded', 99n);
+    // Only the chain proof is staged: queue persistence, both completion tails,
+    // the original marker and the newer lifecycle are stored by their real owners.
+    const chain = (agent as unknown as { readonly chain: ChainAdapter }).chain;
+    Object.assign(chain, { getKAContextGraphId: vi.fn(async () => 1n) });
+    const path = createPublicationPathV1(fixture);
+    fixture.failMarkerWrite = new Error('the marker store refused the original confirmation');
+    const jobId = await path.enqueue(asset);
+    await path.broadcast('wallet-1');
+    await path.publisher.drainDetachedExecutions();
+    expect(await path.publisher.recover()).toBe(0);
+
+    fixture.lane.inactive = true;
+    fixture.failMarkerWrite = undefined;
+    const newer = { ...asset, seal: { ...asset.seal, assertionVersion: '2' } };
+    await confirmedSynchronousPublishTailV1(agent, newer);
+    await applyPublishedNamedKaVmLifecycle(agent.store, {
+      contextGraphId: CONTEXT_GRAPH_ID, agentAddress: AUTHOR,
+      name: asset.assertionCoordinate, publishedUal: asset.seal.kaUal!,
+      merkleRoot: `0x${'f1'.repeat(32)}`, packedKaId: asset.seal.reservedKaId,
+    });
+    const readLifecycle = () => agent.store.query(`CONSTRUCT { ?s ?p ?o } WHERE {
+      GRAPH <${contextGraphMetaUri(CONTEXT_GRAPH_ID)}> {
+        BIND(<${assertionLifecycleUri(CONTEXT_GRAPH_ID, AUTHOR, asset.assertionCoordinate)}> AS ?s) ?s ?p ?o
+      }
+    }`);
+    const newerLifecycle = await readLifecycle();
+    fixture.failMarkerWrite = new Error('the marker store still refuses the original confirmation');
+    supersededPublications.add(asset.seal.kaUal!);
+    try {
+      expect(await path.publisher.recover()).toBe(0);
+      const held = await path.job(jobId);
+      expect(held?.status).not.toBe('finalized');
+      expect(held?.broadcast?.txHash ?? held?.recovery?.txHashChecked).toBe(asset.txHash);
+      expect(fixture.markers().map((repair) => repair.assertionVersion)).toEqual(['2']);
+      expect(await readLifecycle()).toEqual(newerLifecycle);
+
+      fixture.failMarkerWrite = undefined;
+      expect(await path.publisher.recover()).toBe(1);
+      expect((await path.job(jobId))?.status).toBe('finalized');
+      expect(fixture.markers()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ version: 2, assertionVersion: '1',
+          seal: canonicalGraphScopedAuthorSealFromAssertionSealV1(asset.seal) }),
+        expect.objectContaining({ version: 2, assertionVersion: '2' }),
+      ]));
+      expect(await readLifecycle()).toEqual(newerLifecycle);
+      expect(fixture.events().filter((event) => event.startsWith('executor-'))).toHaveLength(1);
+      expect(fixture.events().filter((event) => event.startsWith('vm-materialization:'))).toHaveLength(1);
+      expect(await path.broadcast('wallet-1')).toBeNull();
+    } finally {
+      supersededPublications.delete(asset.seal.kaUal!);
+      await path.publisher.drainDetachedExecutions();
+    }
   }, 120_000);
 });
 

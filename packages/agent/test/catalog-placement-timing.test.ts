@@ -557,7 +557,6 @@ describe('catalog placement timing through the finalized-private supervisor', ()
       resolvePartition: () => ({ retryIntervalMs: 0, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),
       listLocalAuthorAddresses: () => [AUTHOR],
       acceptsPublicRootLane: () => true,
-      hasFinalizedPrivateLane: () => true,
       resolveFinalizedPlacementDecision: pinnedPrivatePlacementDecisionV1,
       readRepairRevision: () => ({ scopeIdentity: 'scope-1', headRevision: 'head-1' }),
       listFinalizedPrivateRepairs: () => markers,

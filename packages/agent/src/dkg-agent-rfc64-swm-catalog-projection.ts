@@ -72,7 +72,6 @@ import {
   INERT_CATALOG_PLACEMENT_ATTEMPT_V1,
   type CatalogPlacementAttemptV1,
 } from './internal/catalog-placement-timing.js';
-import { readOwedPlacementSealV1 } from './internal/owed-placement-seals.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
   './rfc64/finalized-private-placement-repair-store-v1.js';
 
@@ -212,8 +211,8 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         contextGraphId: params.contextGraphId,
         authorAddress: params.authorAddress,
         identity: params,
-        // V2 is self-contained; only legacy V1 can fall back to a process-local seal.
-        retainedSeal: params.version === 2 ? params.seal : readOwedPlacementSealV1(this, params.sealDigest),
+        // V2 carries its durable seal; V1 resolves only active or archived snapshots.
+        ...(params.version === 2 ? { retainedSeal: params.seal } : {}),
       })
       : resolveRfc64InventoryWorkspaceCatalogAssetV1({
         store: this.store,
@@ -222,7 +221,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         authorAddress: params.authorAddress,
         laneKind: lane.kind,
         row,
-        retainedSeal: params.version === 2 ? params.seal : readOwedPlacementSealV1(this, params.sealDigest),
+        ...(params.version === 2 ? { retainedSeal: params.seal } : {}),
       })));
     lane.service.acceptedPolicySnapshotForCatalogScope(scope);
     return this.upsertObservedRfc64PublicRootCatalogAssetV1({

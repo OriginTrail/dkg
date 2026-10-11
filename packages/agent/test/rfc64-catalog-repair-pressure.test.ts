@@ -52,7 +52,6 @@ function fixture(reconcile: (signal: AbortSignal) => Promise<void>, queueLimit =
     resolvePartition: () => undefined,
     listLocalAuthorAddresses: () => [AUTHOR],
     acceptsPublicRootLane: () => true,
-    hasFinalizedPrivateLane: () => true,
       resolveFinalizedPlacementDecision: pinnedPrivatePlacementDecisionV1,
     listFinalizedPrivateRepairs: () => [],
     repairFinalizedPrivatePlacement: async () => {},

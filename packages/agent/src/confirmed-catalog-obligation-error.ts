@@ -5,10 +5,17 @@ import {
   type CanonicalGraphScopedAuthorSealV1,
 } from '@origintrail-official/dkg-core';
 import type { OnChainPublishResult } from '@origintrail-official/dkg-chain';
+import type { PublishResult } from '@origintrail-official/dkg-publisher';
 import type { ObserveRfc64ConfirmedVmParamsV1 } from './dkg-agent-rfc64-catalog-auto-publish.js';
 
 export type ConfirmedCatalogTransactionEvidenceV1 = Readonly<Pick<OnChainPublishResult,
   'txHash' | 'blockNumber' | 'txIndex' | 'kaId' | 'batchId' | 'startKAId' | 'endKAId'>>;
+
+/** The publication tail and its recovery error carry the same immutable obligation. */
+export type ConfirmedCatalogObligationInputV1 = Readonly<ObserveRfc64ConfirmedVmParamsV1 & {
+  readonly status: PublishResult['status'];
+  readonly confirmedTransaction?: ConfirmedCatalogTransactionEvidenceV1;
+}>;
 
 /** Chain confirmation succeeded, but local catalog completion is still owed. */
 export class ConfirmedCatalogObligationErrorV1 extends Error {

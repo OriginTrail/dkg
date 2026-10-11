@@ -6,7 +6,6 @@ import {
   assertCanonicalEvmAddress,
   assertContextGraphIdV1,
   createOperationContext,
-  type CanonicalGraphScopedAuthorSealV1,
   type ContextGraphIdV1,
   type Digest32V1,
   type EvmAddressV1,
@@ -46,7 +45,6 @@ import {
 } from './internal/catalog-placement-timing.js';
 import { FinalizedPrivatePlacementWaitersV1 } from './internal/finalized-private-placement-waiters.js';
 import { NextTurnRecurringTaskV1 } from './internal/next-turn-recurring-task.js';
-import { retainOwedPlacementSealV1 } from './internal/owed-placement-seals.js';
 
 // Match the default background store lane; repair fanout must not flood its queue.
 const MAX_CONCURRENT_REPAIRS_V1 = 1;
@@ -111,7 +109,7 @@ interface ProjectionSupervisorStateV1 {
   readonly finalizedPrivateWaiters: FinalizedPrivatePlacementWaitersV1;
   finalizedPrivateWaiterTimer: ReturnType<typeof setTimeout> | undefined;
   readonly finalizedPrivateRetries: Map<string, {
-    readonly contextGraphId: ContextGraphIdV1;
+    repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>;
     retry: CatalogRepairRetryV1;
     attempts: number;
   }>;
@@ -134,7 +132,6 @@ interface ProjectionOwnerDependenciesV1 {
   readonly resolvePartition: () => Rfc64CatalogBootstrapPartitionV1 | undefined;
   readonly listLocalAuthorAddresses: () => readonly EvmAddressV1[];
   readonly acceptsPublicRootLane: (contextGraphId: ContextGraphIdV1) => boolean;
-  readonly hasFinalizedPrivateLane: (contextGraphId: ContextGraphIdV1) => boolean;
   readonly resolveFinalizedPlacementDecision: FullCatalogParkingDependenciesV1['resolveFinalizedPlacementDecision'];
   readonly readRepairRevision: (
     contextGraphId: ContextGraphIdV1, authorAddress: EvmAddressV1,
@@ -185,12 +182,8 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       } catch { /* Scheduling hints must not reject a subscription transition. */ }
     }
     for (const entry of this.#state.finalizedPrivateRetries.values()) {
-      if (entry.contextGraphId !== contextGraphId) continue;
-      try {
-        if (!this.#dependencies.hasFinalizedPrivateLane(entry.contextGraphId)) {
-          entry.retry.observe(null);
-        }
-      } catch { /* The periodic admission check remains authoritative. */ }
+      if (entry.repair.contextGraphId !== contextGraphId) continue;
+      this.#observePrivateLane(entry.retry, entry.repair);
     }
   }
 
@@ -494,9 +487,10 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       if (this.#fullCatalogs.park(key, repair)) return state.finalizedPrivateWaiters.release(key);
       let entry = state.finalizedPrivateRetries.get(key);
       if (entry === undefined) {
-        entry = { contextGraphId: repair.contextGraphId, retry: new CatalogRepairRetryV1(), attempts: 0 };
+        entry = { repair, retry: new CatalogRepairRetryV1(), attempts: 0 };
         state.finalizedPrivateRetries.set(key, entry);
       }
+      entry.repair = repair;
       this.#observePrivateLane(entry.retry, repair);
       if (!entry.retry.eligible(Date.now())) {
         this.#timing().cooldownSkipped();
@@ -771,16 +765,6 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
       repair: params.repair,
       ctx: params.ctx ?? createOperationContext('system'), observer,
     });
-  }
-
-  /** Legacy V1 compatibility: its marker has no seal and can retain one for this process only. */
-  protected requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1(
-    this: DKGAgent,
-    params: Readonly<{ readonly repair: Readonly<Extract<Rfc64FinalizedPrivatePlacementRepairV1, { version: 1 }>>; readonly seal: Readonly<CanonicalGraphScopedAuthorSealV1>; readonly ctx: OperationContext }>,
-    observer: CatalogPlacementWaiterObserverV1,
-  ): Rfc64FinalizedPrivatePlacementRepairRequestV1 {
-    retainOwedPlacementSealV1(this, params.repair.sealDigest, params.seal);
-    return projectionOwnerV1(this).requestFinalizedPrivate({ repair: params.repair, ctx: params.ctx, observer });
   }
 
   readRfc64SwmCatalogProjectionSupervisorStatusV1(

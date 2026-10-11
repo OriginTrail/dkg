@@ -145,7 +145,6 @@ function supervisor(model: ReturnType<typeof node>, options: { readHead?: boolea
     resolvePartition: () => ({ retryIntervalMs: 5_000, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }) as never,
     listLocalAuthorAddresses: () => [AUTHOR],
     acceptsPublicRootLane: () => true,
-    hasFinalizedPrivateLane: () => laneActive,
     resolveFinalizedPlacementDecision: (repair) => pinnedPrivatePlacementDecisionV1(repair, laneActive, laneUnavailable),
     readRepairRevision: () => revision,
     listFinalizedPrivateRepairs: () => model.state.markers,

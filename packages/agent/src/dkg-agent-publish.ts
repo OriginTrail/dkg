@@ -1,4 +1,4 @@
-import { ConfirmedCatalogObligationErrorV1, type ConfirmedCatalogTransactionEvidenceV1 } from './confirmed-catalog-obligation-error.js';
+import { ConfirmedCatalogObligationErrorV1, type ConfirmedCatalogObligationInputV1 } from './confirmed-catalog-obligation-error.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -4944,6 +4944,25 @@ export class PublishMethods extends DKGAgentBase {
 
     let trustedPublicQuadsDigest: string | undefined;
     let trustedPublisherPeerId = this.peerId;
+    const observeConfirmedPublication = () => this.afterConfirmedGraphScopedVmPublishV1({
+      status: 'confirmed',
+      confirmedTransaction: { txHash: recovered.txHash, blockNumber: recovered.receiptBlockNumber,
+        batchId: recovered.reservedKaId, kaId: recovered.reservedKaId },
+      contextGraphId: request.contextGraphId,
+      subGraphName: request.subGraphName,
+      assertionCoordinate: request.name,
+      shareOperationId: request.shareOperationId,
+      seal: assertionSealFromQueuedKnowledgeAssetVmPublishRequest(request),
+      assertionUri: contextGraphAssertionUri(
+        request.contextGraphId,
+        request.agentAddress ?? this.defaultAgentAddress ?? this.peerId,
+        request.name,
+        request.subGraphName,
+      ),
+      ctx,
+      publicationLabel: 'queued publish',
+    });
+
     if (!recovered.materialization.superseded) {
       let snapshot: Awaited<ReturnType<typeof resolveKnowledgeAssetOperationPublicQuads>>
         | undefined;
@@ -5040,6 +5059,8 @@ export class PublishMethods extends DKGAgentBase {
       // an unbounded write phase late. One boundary, one check — rather than a signal threaded
       // hopefully through N layers, which is how the last four rounds each missed the next one.
       throwIfRecoveryDeadlineReached(signal);
+      // A newer version does not discharge this transaction's original obligation.
+      await observeConfirmedPublication();
       await this._writeQueuedKnowledgeAssetVmPublishReceipt(
         request,
         recovered.txHash,
@@ -5139,24 +5160,7 @@ export class PublishMethods extends DKGAgentBase {
     // retired the exact SWM twin; complete its lane-specific signed inventory
     // transition as well so a public catalog cannot retain an unresolvable
     // asset after recovery (private lanes keep their finalized placement).
-    await this.afterConfirmedGraphScopedVmPublishV1({
-      status: 'confirmed',
-      confirmedTransaction: { txHash: recovered.txHash, blockNumber: recovered.receiptBlockNumber,
-        batchId: recovered.reservedKaId, kaId: recovered.reservedKaId },
-      contextGraphId: request.contextGraphId,
-      subGraphName: request.subGraphName,
-      assertionCoordinate: request.name,
-      shareOperationId: request.shareOperationId,
-      seal: assertionSealFromQueuedKnowledgeAssetVmPublishRequest(request),
-      assertionUri: contextGraphAssertionUri(
-        request.contextGraphId,
-        request.agentAddress ?? this.defaultAgentAddress ?? this.peerId,
-        request.name,
-        request.subGraphName,
-      ),
-      ctx,
-      publicationLabel: 'queued publish',
-    });
+    await observeConfirmedPublication();
 
     // SWM-source materialization owns its exact transition. VM-only recovery
     // must not run a second, unlocked cleanup: a newer unpublished assertion
@@ -6301,18 +6305,7 @@ export class PublishMethods extends DKGAgentBase {
 
   private async afterConfirmedGraphScopedVmPublishV1(
     this: DKGAgent,
-    input: Readonly<{
-      status: PublishResult['status'];
-      confirmedTransaction?: ConfirmedCatalogTransactionEvidenceV1;
-      contextGraphId: string;
-      subGraphName?: string;
-      assertionCoordinate: string;
-      shareOperationId?: string;
-      seal: AssertionSeal;
-      assertionUri: string;
-      ctx: OperationContext;
-      publicationLabel: 'publish' | 'queued publish';
-    }>,
+    input: ConfirmedCatalogObligationInputV1,
   ): Promise<void> {
     if (input.status !== 'confirmed') return;
     try { await this.observeRfc64ConfirmedVmV1(input); }

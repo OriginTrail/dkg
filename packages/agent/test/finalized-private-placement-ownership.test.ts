@@ -1,4 +1,3 @@
-import { readOwedPlacementSealV1 } from '../src/internal/owed-placement-seals.js';
 import { pinnedPrivatePlacementDecisionV1 } from './support/finalized-placement-decision-fixture.js';
 /**
  * GH#3081 — the catalog supervisor alone owns a confirmed private placement once the observer has
@@ -27,6 +26,7 @@ import {
 } from '../src/internal/catalog-placement-timing.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
   '../src/rfc64/finalized-private-placement-repair-store-v1.js';
+import { DKGAgent } from '../src/index.js';
 import {
   CONTEXT_GRAPH_ID,
   agents,
@@ -57,6 +57,10 @@ describe('the finalized-private supervisor as the owner of a placement', () => {
   const AUTHOR = `0x${'11'.repeat(20)}` as EvmAddressV1;
   const owners: Rfc64SwmCatalogProjectionOwnerV1[] = [];
   const gates: Array<ReturnType<typeof gateV1>> = [];
+
+  it('exposes no orphaned process-local seal producer on the agent mixin', () => {
+    expect('requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1' in DKGAgent.prototype).toBe(false);
+  });
 
   afterEach(async () => {
     // A row that failed with a repair still parked must not leave its owner unable to close.
@@ -105,10 +109,6 @@ describe('the finalized-private supervisor as the owner of a placement', () => {
       }),
       listLocalAuthorAddresses: () => [AUTHOR],
       acceptsPublicRootLane: () => true,
-      hasFinalizedPrivateLane: () => {
-        if (state.laneUnavailable !== undefined) throw state.laneUnavailable;
-        return state.laneActive;
-      },
       resolveFinalizedPlacementDecision: (repair) => state.laneUnavailable === undefined
         ? pinnedPrivatePlacementDecisionV1(repair, state.laneActive)
         : { ...pinnedPrivatePlacementDecisionV1(repair, false), status: 'unavailable', error: state.laneUnavailable },
@@ -429,7 +429,6 @@ describe('a confirmed private placement the observer handed to the supervisor', 
     expect(fixture.markers()).toHaveLength(1);
     expect(fixture.markers()[0]).toMatchObject({ version: 2, inventoryScope: null, seal: { kaUal: asset.seal.kaUal } });
     expect(fixture.counts().repairs).toBe(0);
-    expect(readOwedPlacementSealV1(fixture.agent, fixture.markers()[0]!.sealDigest)).toBeUndefined();
     fixture.lane.unavailable = undefined;
     fixture.lane.inactive = false;
     fixture.agent.startRfc64SwmCatalogProjectionSupervisorV1(ctx);
@@ -466,9 +465,9 @@ describe('a confirmed private placement the observer handed to the supervisor', 
 
     // The supervisor owns the retry. A lane that went away and came back makes the marker
     // eligible at once; the unchanged-failure backoff is covered by the supervisor's own suite.
-    fixture.lane.acceptsFinalizedVmRepair = false;
+    fixture.lane.inactive = true;
     agent.observeRfc64SwmCatalogProjectionLaneAvailabilityV1(CONTEXT_GRAPH_ID);
-    fixture.lane.acceptsFinalizedVmRepair = true;
+    fixture.lane.inactive = false;
     agent.startRfc64SwmCatalogProjectionSupervisorV1(ctx);
     await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
 

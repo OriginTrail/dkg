@@ -1773,7 +1773,12 @@ describe('rootless graph-scoped KA lifecycle', () => {
       .mockResolvedValue(undefined);
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
     expect(supersededReconcile).not.toHaveBeenCalled();
-    expect(supersededRfc64Confirmation).not.toHaveBeenCalled();
+    expect(supersededRfc64Confirmation).toHaveBeenCalledOnce();
+    expect(supersededRfc64Confirmation).toHaveBeenCalledWith(expect.objectContaining({
+      contextGraphId: CG_ID,
+      assertionCoordinate: name,
+      seal: expect.objectContaining({ assertionVersion: intent.assertionVersion }),
+    }));
     supersededRfc64Confirmation.mockRestore();
     supersededReconcile.mockRestore();
     const afterSupersededRecovery = await agent.assertion.history(CG_ID, name);

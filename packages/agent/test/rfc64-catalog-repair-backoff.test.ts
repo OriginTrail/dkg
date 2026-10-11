@@ -2,6 +2,7 @@ import { pinnedPrivatePlacementDecisionV1 } from './support/finalized-placement-
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createOperationContext,
+  computeCanonicalGraphScopedAuthorSealDigestV1,
   type ContextGraphIdV1,
   type EvmAddressV1,
 } from '@origintrail-official/dkg-core';
@@ -10,6 +11,8 @@ import { CatalogRepairRetryV1, type CatalogRepairRevisionHintV1 } from '../src/r
 import { CatalogRepairIntegrityErrorV1 } from '../src/rfc64/catalog-repair-diagnostics-v1.js';
 import { StoreSchedulerBusyError, StoreOperationTimeoutError, activeDefaultStoreWorkPriority } from '@origintrail-official/dkg-storage';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from '../src/rfc64/finalized-private-placement-repair-store-v1.js';
+import { resolveFinalizedPlacementDecisionV1, type FinalizedPlacementDecisionV1 } from '../src/internal/finalized-placement-decision.js';
+import { authorSealV1 } from './support/rfc64-local-catalog-repair-fixture.js';
 
 const CG = 'repair-backoff' as ContextGraphIdV1;
 const AUTHOR = `0x${'11'.repeat(20)}` as EvmAddressV1;
@@ -35,13 +38,15 @@ function fixture(retryIntervalMs = 5_000) {
   });
   const readRevision = vi.fn(() => available ? revision : null);
   const listPrivateRepairs = vi.fn(() => privateRepairs);
+  const resolvePlacement = vi.fn<(repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>) => FinalizedPlacementDecisionV1>(
+    (repair) => pinnedPrivatePlacementDecisionV1(repair, available),
+  );
   const warn = vi.fn();
   const dependencies = {
     resolvePartition: () => ({ retryIntervalMs, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),
     listLocalAuthorAddresses: () => [AUTHOR],
     acceptsPublicRootLane: () => available,
-    hasFinalizedPrivateLane: () => available,
-    resolveFinalizedPlacementDecision: (repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>) => pinnedPrivatePlacementDecisionV1(repair, available),
+    resolveFinalizedPlacementDecision: resolvePlacement,
     readRepairRevision: readRevision,
     listFinalizedPrivateRepairs: listPrivateRepairs,
     repairFinalizedPrivatePlacement: repairPrivate,
@@ -51,7 +56,7 @@ function fixture(retryIntervalMs = 5_000) {
   const owner = new Rfc64SwmCatalogProjectionOwnerV1(dependencies);
   owners.push(owner);
   return {
-    owner, reconcile, repairPrivate, readRevision, listPrivateRepairs, warn,
+    owner, reconcile, repairPrivate, readRevision, listPrivateRepairs, resolvePlacement, warn,
     request: () => owner.request({ contextGraphId: CG, authorAddress: AUTHOR, ctx }),
     setRevision: (value: string | CatalogRepairRevisionHintV1) => { revision = typeof value === 'string' ? { scopeIdentity: 'scope-1', headRevision: value } : value; },
     setAvailable: (value: boolean) => { available = value; },
@@ -579,6 +584,57 @@ describe('RFC-64 unchanged repair backoff', () => {
     expect(vi.getTimerCount()).toBe(0);
     await f.advance(60_000);
     expect(f.repairPrivate).toHaveBeenCalledTimes(2);
+  });
+
+  it('observes the exact V2 private/public decision without starting work or erasing unavailable cooldown', async () => {
+    const f = fixture(0);
+    const legacy = privateRepair();
+    if (legacy.version !== 1) throw new Error('expected pinned legacy fixture');
+    const seal = await authorSealV1(101n);
+    const repair: Rfc64FinalizedPrivatePlacementRepairV1 = {
+      ...legacy, version: 2, inventoryScope: null, subGraphName: null,
+      authorAddress: seal.authorAddress, kaUal: seal.kaUal,
+      assertionVersion: seal.assertionVersion,
+      sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(seal), seal,
+    };
+    let lane: 'private' | 'public' | 'inactive' | 'unavailable' = 'private';
+    f.resolvePlacement.mockImplementation((selected) => resolveFinalizedPlacementDecisionV1(selected, () => {
+      if (lane === 'unavailable') throw new Error('authority is unavailable');
+      if (lane === 'inactive') return null;
+      return { kind: lane, acceptsFinalizedVmRepair: lane === 'private', scopeBase: legacy.inventoryScope };
+    }));
+    f.setPrivateRepairs([repair]);
+    await f.owner.requestFinalizedPrivate({ repair, ctx }).whenAttempted;
+    expect(f.repairPrivate).toHaveBeenCalledTimes(1);
+
+    lane = 'public';
+    f.setAvailable(false); // Public retirement has no finalized-private lane.
+    f.resolvePlacement.mockClear();
+    f.owner.observeLaneAvailability(CG);
+    expect(f.resolvePlacement).toHaveBeenCalledOnce();
+    expect(f.resolvePlacement).toHaveBeenLastCalledWith(repair);
+    expect(f.repairPrivate).toHaveBeenCalledTimes(1);
+    f.owner.start(ctx);
+    await f.owner.whenIdle();
+    expect(f.repairPrivate).toHaveBeenCalledTimes(2);
+
+    for (const observed of ['public', 'unavailable', 'public'] as const) {
+      lane = observed;
+      f.owner.observeLaneAvailability(CG);
+      expect(f.repairPrivate).toHaveBeenCalledTimes(2);
+      f.owner.start(ctx);
+      await f.owner.whenIdle();
+      expect(f.repairPrivate).toHaveBeenCalledTimes(2);
+    }
+    lane = 'inactive';
+    f.owner.observeLaneAvailability(CG);
+    expect(f.repairPrivate).toHaveBeenCalledTimes(2);
+    lane = 'private';
+    f.owner.observeLaneAvailability(CG);
+    expect(f.repairPrivate).toHaveBeenCalledTimes(2);
+    f.owner.start(ctx);
+    await f.owner.whenIdle();
+    expect(f.repairPrivate).toHaveBeenCalledTimes(3);
   });
 
   it('does not transfer private cooldown across a changed durable confirmation scope', async () => {
