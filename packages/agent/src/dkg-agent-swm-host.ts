@@ -935,6 +935,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     return createAutomaticHostModeActivation(this, { session,
       current: () => session.active && this.gossipSession === session && this.swmHostModeStore !== undefined,
       hostPublic: () => this.config.swmHostMode?.hostPublic === true, log: this.log,
+      subscriptions: this.subscribedContextGraphs,
     });
   }
 
@@ -1208,13 +1209,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
     session.swmHostModeSubscribed.set(wireCgId, source);
     session.swmHostModeCurated.set(wireCgId, curated);
     live.manager.subscribe(swmTopic);
+    const handoffCurrent = this.swmHostModePublicPolicy().captureCanonicalHandoff(contextGraphId);
     const delegate = createSwmHostModeHandler(this, this.log, session, contextGraphId, wireCgId, () => {
       const publicBindingCurrent = session.swmHostModePublicBindingCurrent.get(wireCgId);
       return () => session.active && this.gossipSession === session
         && (!this.swmHostModeStripCiphertext() || (source === SUBSCRIPTION_SOURCES.MANUAL
           ? this.isExactPublicManualSwmHostMode(contextGraphId, wireCgId)
           : session.swmHostModeCurated.get(wireCgId) === false && publicBindingCurrent?.() === true));
-    });
+    }, () => this.swmHostModeActivation().refreshCanonicalHandoff(contextGraphId, source,
+      () => session.active && this.gossipSession === session && session.swmHostModeHandlers.get(wireCgId) === handler,
+      handoffCurrent));
     if (source !== SUBSCRIPTION_SOURCES.MANUAL && !curated) {
       session.swmHostModePublicBindingCurrent.set(wireCgId,
         this.swmHostModePublicPolicy().captureCurrent(contextGraphId));
@@ -1447,6 +1451,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     admissionCurrent: () => boolean = () => true,
   ): Promise<void> {
     if (!this.swmHostModeStore) return;
+    const session = this.gossipSession;
     if (data.length === 0 || !admissionCurrent()) return;
     const ctx = createOperationContext('share');
     let envelope: GossipEnvelopeMsg | undefined;
@@ -1488,21 +1493,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
       return;
     }
     const storageCgId = envelope.contextGraphId;
-    // Keep the wire-id → cleartext reverse index in sync so the
-    // chain-fallback resolver and the catchup-request path can
-    // translate either direction without an extra RPC.
-    if (storageCgId !== contextGraphId) {
-      const storageSubscription = this.subscribedContextGraphs.get(storageCgId) ?? {
-        syncMode: 'always-on' as const,
-        subscribed: false,
-        synced: false,
-        pendingMeta: true,
-      };
-      this.setContextGraphSubscription(storageCgId, {
-        ...storageSubscription,
-        onChainHash: subscriptionWireId,
-      }, { persist: false });
-    }
     // Cheap "is this ciphertext" sniff: try to decode as one of the
     // two encrypted carriers; if neither parses, drop early so we
     // don't pay the signature-verify cost on obvious garbage.
@@ -1530,7 +1520,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // traffic would pay a synchronous eth_call to compute a value it discards.
     // Security-preserving: a ciphertext envelope on a public CG just stays in the
     // curated authority path / opaque append and heals via catchup.
-    const confirmedPublic = !isCiphertext && await this.isConfirmedPublicForHostMode(storageCgId);
+    const confirmedPublic = !isCiphertext && await this.isConfirmedPublicForHostMode(contextGraphId);
     if (!admissionCurrent() || (!isCiphertext && !confirmedPublic)) return;
 
     // Authority check. Curated traffic verifies the envelope signature against
@@ -1541,8 +1531,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // same envelope validation as curated, only the allowlist decision diverges
     // (see SharedMemoryHandler.verifyHostModeEnvelopeAuthority).
     //
-    // Use `storageCgId` (cleartext from the envelope) so the meta-graph +
-    // chain-fallback resolvers work on the canonical id shape.
+    // Signature/inner-request validation uses the envelope's cleartext id.
+    // Public policy uses the captured subscription binding, before adoption.
     const handler = this.getOrCreateSharedMemoryHandler();
     const verdict = await handler.verifyHostModeEnvelopeAuthority(
       data, storageCgId, fromPeerId,
@@ -1557,7 +1547,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         ? undefined
         : {
           resolveOpenPublishPolicy: () => this.getContextGraphOnChainPolicy(
-            storageCgId, { publishPolicyMaxCacheAgeMs: HOST_MODE_PUBLISH_POLICY_MAX_CACHE_AGE_MS },
+            contextGraphId, { publishPolicyMaxCacheAgeMs: HOST_MODE_PUBLISH_POLICY_MAX_CACHE_AGE_MS },
           ),
         },
     );
@@ -1647,8 +1637,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
         }
       }
     }
+    if (!admissionCurrent()) return;
+    const seqno = await this.swmHostModeStore.append(storageCgId, data);
+    this.log.debug(
+      ctx,
+      `Host-mode stored opaque SWM envelope cg=${storageCgId} seqno=${seqno} bytes=${data.length}`,
+    );
+    if (!admissionCurrent()) return;
+
     // GH #1124 — make a CONFIRMED-PUBLIC host-only (non-member) core ACK-CAPABLE.
-    // The opaque `append` below retains the raw envelope so this host can serve
+    // The opaque `append` above retains the raw envelope so this host can serve
     // member host-catchup (LU-6 replay) — reachable under the strip only via the
     // confirmed-public exemption in `handleSwmHostCatchup`, and unconditionally
     // with `stripCiphertext:false`. The #1611 reachability itself does NOT
@@ -1691,8 +1689,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
             `Host-mode applied confirmed-public SWM plaintext cg=${storageCgId} triples=${apply.insertedTriples ?? 0} (now ACK-capable)`,
           );
         } else {
-          // Apply declined (validation / CAS / dedup). Keep going to the opaque
-          // append so member catchup still works; this host just won't ACK this
+          // Apply declined (validation / CAS / dedup). Opaque retention already
+          // completed, so member catchup still works; this host won't ACK this
           // share (it falls back to the pre-fix NO_DATA_IN_SWM decline). Logged
           // at WARN so a SYSTEMATIC public-CG apply failure is observable here
           // rather than only downstream as quorum-unmet.
@@ -1703,20 +1701,18 @@ export class SwmHostModeMethods extends DKGAgentBase {
           );
         }
       } catch (err) {
-        // Never let an apply error drop the opaque retention path below.
+        // An apply error cannot drop the opaque retention already completed.
         this.log.warn(
           ctx,
-          `Host-mode confirmed-public SWM apply threw cg=${storageCgId}: ${err instanceof Error ? err.message : String(err)} (opaque retention below unaffected)`,
+          `Host-mode confirmed-public SWM apply threw cg=${storageCgId}: ${err instanceof Error ? err.message : String(err)} (opaque retention unaffected)`,
         );
       }
     }
 
-    if (!admissionCurrent()) return;
-    const seqno = await this.swmHostModeStore.append(storageCgId, data);
-    this.log.debug(
-      ctx,
-      `Host-mode stored opaque SWM envelope cg=${storageCgId} seqno=${seqno} bytes=${data.length}`,
-    );
+    if (storageCgId !== contextGraphId) {
+      await this.swmHostModeActivation().adoptAuthenticatedEnvelopeIdentity(storageCgId, subscriptionWireId,
+        admissionCurrent, () => session.active && this.gossipSession === session);
+    }
   }
 
   /**

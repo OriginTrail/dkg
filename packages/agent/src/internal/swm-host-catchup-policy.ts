@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { normalizeContextGraphNameHash } from '../context-graph-name-candidate.js';
-import type { ContextGraphBindingState, ContextGraphBindingSubscription } from '../context-graph-binding-state.js';
+import { localContextGraphIdMatchesCommittedNameHash, type ContextGraphBindingState, type ContextGraphBindingSubscription } from '../context-graph-binding-state.js';
 
 interface HostPolicyIdentityPorts {
   readonly subscriptions: ReadonlyMap<string, ContextGraphBindingSubscription & { onChainHash?: string }>;
@@ -75,6 +75,20 @@ export function createHostModePublicPolicy(ports: HostPolicyIdentityPorts & Omit
   };
   return {
     captureCurrent,
+    captureCanonicalHandoff: (id: string): (() => boolean) => {
+      const wireId = normalizeContextGraphNameHash(id);
+      const localId = ports.localId(id);
+      const original = ports.subscriptions.get(localId);
+      const target = ports.bindings.captureTarget(localId, original);
+      return () => {
+        if (!ports.current() || wireId === null || localId !== wireId || target.bindingKind === 'unbound') return false;
+        const nextLocalId = ports.localId(id);
+        const next = ports.subscriptions.get(nextLocalId);
+        return nextLocalId !== localId && localContextGraphIdMatchesCommittedNameHash(nextLocalId, wireId)
+          && next?.onChainHash === wireId && ports.wireOwners.get(wireId) === nextLocalId
+          && ports.bindings.currentBindingFor(nextLocalId, next)?.onChainId === target.onChainId;
+      };
+    },
     evaluate: (id: string, purpose: 'serving' | 'public-reader') =>
       evaluateHostCatchupPolicy({ ...ports, captureCurrent }, id, purpose),
   };

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { SUBSCRIPTION_SOURCES, SYSTEM_CONTEXT_GRAPHS, createOperationContext, type SubscriptionSource, type Logger } from '@origintrail-official/dkg-core';
 import type { DKGAgent } from '../dkg-agent.js';
+import type { ContextGraphSub } from '../dkg-agent-types.js';
 import type { GossipSession } from '../gossip-session.js';
 import { normalizeContextGraphNameHash } from '../context-graph-name-candidate.js';
 import type { ContextGraphBindingSubscription } from '../context-graph-binding-state.js';
@@ -129,12 +130,13 @@ interface ActivationLifetimePorts {
   current(): boolean;
   hostPublic(): boolean;
   log: Logger;
+  subscriptions: ReadonlyMap<string, ContextGraphSub>;
 }
 
 /** Capture the active agent session and only its current listener custody. */
 export function createAutomaticHostModeActivation(agent: DKGAgent, lifetime: ActivationLifetimePorts) {
   const session = lifetime.session;
-  return automaticHostModeActivation({
+  const activation = automaticHostModeActivation({
     current: lifetime.current,
     admissionAllowed: id => agent.automaticSwmHostModeAdmissionAllowed(id),
     restoreBinding: (id, onChainId) => agent.restorePersistedHostModeBinding(id, onChainId),
@@ -173,6 +175,35 @@ export function createAutomaticHostModeActivation(agent: DKGAgent, lifetime: Act
       ? `Failed to re-evaluate persisted host-mode subscription for "${id}": ${error instanceof Error ? error.message : String(error)}`
       : `Failed to restore host-mode subscription for "${id}": ${error instanceof Error ? error.message : String(error)}`),
   });
+  return { ...activation,
+    refreshCanonicalHandoff: async (id: string, source: SubscriptionSource,
+      ownerCurrent: () => boolean, handoffCurrent: () => boolean): Promise<void> => {
+      const current = () => ownerCurrent() && handoffCurrent();
+      if (source === SUBSCRIPTION_SOURCES.MANUAL || !lifetime.current() || !current()) return;
+      await activation.reconcile(id, source, current);
+    },
+    adoptAuthenticatedEnvelopeIdentity: async (id: string, wireId: string, mayAdopt: () => boolean,
+      ownerCurrent: () => boolean): Promise<void> => {
+      if (!lifetime.current() || !ownerCurrent()) return;
+      // Keep the wire-id → cleartext reverse index in sync so the
+      // chain-fallback resolver and the catchup-request path can
+      // translate either direction without an extra RPC. Adoption follows
+      // verified retention, so it cannot invalidate that envelope's capture.
+      const subscription = lifetime.subscriptions.get(id);
+      if (mayAdopt() && subscription?.onChainHash !== wireId) {
+        agent.setContextGraphSubscription(id, { ...(subscription ?? {
+          syncMode: 'always-on', subscribed: false, synced: false, pendingMeta: true,
+        }), onChainHash: wireId }, { persist: false });
+      }
+      if (!lifetime.current() || !ownerCurrent()
+        || lifetime.subscriptions.get(id)?.onChainHash !== wireId) return;
+      const source = session.swmHostModeSubscribed.get(wireId);
+      if (source === undefined || source === SUBSCRIPTION_SOURCES.MANUAL) return;
+      // The old callback stays fenced. Future callbacks receive a fresh
+      // exemption only from the ordinary policy-aware activation flow.
+      await activation.reconcile(id, source, ownerCurrent);
+    },
+  };
 }
 
 /** Numeric policy is authoritative over metadata and same-hash beacon hints. */

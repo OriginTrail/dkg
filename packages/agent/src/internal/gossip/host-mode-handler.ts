@@ -19,8 +19,9 @@ export function createSwmHostModeHandler(
   contextGraphId: string,
   wireCgId: string,
   captureAdmissionCurrent: () => () => boolean = () => () => session.active,
+  refreshAdmission?: () => Promise<void>,
 ): (topic: string, data: Uint8Array, from: string) => void {
-  return (_topic: string, data: Uint8Array, from: string) => {
+  const dispatch = (_topic: string, data: Uint8Array, from: string) => {
     const admissionCurrent = captureAdmissionCurrent();
     if (!session.active || !admissionCurrent()) return;
     // Fail closed when the classification is absent. Only an explicitly
@@ -64,5 +65,17 @@ export function createSwmHostModeHandler(
         `Host-mode SWM ingest failed for "${contextGraphId}": ${msg}`,
       );
     });
+  };
+  return (topic, data, from) => {
+    if (!session.active) return;
+    if (!captureAdmissionCurrent()() && refreshAdmission !== undefined) {
+      // A canonical alias handoff gets a new policy admission; a retired
+      // callback never replaces the capture of an already-running ingest.
+      void refreshAdmission().then(() => dispatch(topic, data, from)).catch((error: unknown) => {
+        log.warn(createOperationContext('system'), `Host-mode admission refresh failed for "${contextGraphId}": ${String(error)}`);
+      });
+      return;
+    }
+    dispatch(topic, data, from);
   };
 }

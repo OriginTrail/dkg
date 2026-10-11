@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { DKG_ONTOLOGY, encodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   encodeGossipEnvelope, computeGossipSigningPayload, computeGossipSigningPayloadV2,
   GOSSIP_ENVELOPE_VERSION, GOSSIP_TYPE_WORKSPACE_PUBLISH, GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED,
-  ciphertextChunkStoreGraph, CIPHERTEXT_CHUNK_PREDICATE } from '@origintrail-official/dkg-core';
+  ciphertextChunkStoreGraph, CIPHERTEXT_CHUNK_PREDICATE, encodeWorkspacePublishRequest, GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { createHostModeTestFixture, hostEnvelope, type StripInternals } from './swm/host-mode.fixture.js';
@@ -112,6 +112,91 @@ describe('public host restoration policy fences', () => {
     await Promise.resolve();
     expect(ingest).toHaveBeenCalledTimes(1);
     expect((await g.swmHostModeStore!.iterate(id, 0)).map(entry => entry.envelopeBytes)).toEqual([persisted]);
+  });
+
+  it.each([false, true])('retains consecutive signed public envelopes through wire adoption (alreadyAdopted=%s)', async alreadyAdopted => {
+    const core = await makeCore(true, { hostPublic: true });
+    const id = 'wire-public-retention';
+    const hash = ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerCase();
+    const g = core as unknown as StripInternals;
+    const registration = await g.chain.createOnChainContextGraph({ accessPolicy: 0, publishPolicy: 1, nameHash: hash });
+    const onChainId = String(registration.contextGraphId);
+    expect(g.stageOnChainContextGraphBindingFromNameHash(hash, onChainId)).toBe(hash);
+    await g.reconcileSwmHostModeSubscription(hash);
+    expect(g.subscribedContextGraphs.has(id)).toBe(false);
+    const listener = g.swmHostModeHandlers.get(hash)!;
+    const ingest = vi.spyOn(g, 'ingestSwmHostModeEnvelope');
+    const wallet = ethers.Wallet.createRandom();
+    const peer = 'signed-wire-publisher';
+    const retained: Uint8Array[] = [];
+    if (alreadyAdopted) g.setContextGraphSubscription(id, {
+      subscribed: false, synced: false, syncMode: 'always-on', onChainHash: hash,
+    }, { persist: false });
+    for (let index = 0; index < 2; index++) {
+      const timestamp = new Date().toISOString();
+      const agentAddress = wallet.address.toLowerCase();
+      const payload = encodeWorkspacePublishRequest({ contextGraphId: id,
+        nquads: new TextEncoder().encode(`<urn:wire-public:${index}> <http://schema.org/name> "Public" <did:dkg:context-graph:${id}> .`),
+        manifest: [], publisherPeerId: peer, shareOperationId: `wire-public-${index}`, timestampMs: Date.now(),
+        agentAddress, kaNumber: '1', contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        kaUal: `did:dkg:otp:20430/${agentAddress}/1`, assertionVersion: String(index + 1),
+        publicTripleCount: 1, privateTripleCount: 0, accessPolicy: 'public', allowedPeers: [] });
+      const bytes = encodeGossipEnvelope({ version: GOSSIP_ENVELOPE_VERSION,
+        type: GOSSIP_TYPE_WORKSPACE_PUBLISH, contextGraphId: id, agentAddress: wallet.address,
+        timestamp, signature: ethers.getBytes(await wallet.signMessage(computeGossipSigningPayload(
+          GOSSIP_TYPE_WORKSPACE_PUBLISH, id, timestamp, payload))), payload });
+      retained.push(bytes);
+      listener('topic', bytes, peer);
+      await vi.waitFor(() => expect(ingest).toHaveBeenCalledTimes(index + 1));
+      await ingest.mock.results[index].value;
+      expect((await g.swmHostModeStore!.iterate(id, 0)).map(entry => Buffer.from(entry.envelopeBytes)))
+        .toEqual(retained.map(bytes => Buffer.from(bytes)));
+      expect(g.subscribedContextGraphs.get(id)?.onChainId).toBe(onChainId);
+      expect(g.subscribedContextGraphs.has(hash)).toBe(false);
+    }
+  });
+
+  it.each(['private', 'wrong-alias'] as const)('refuses signed wire handoff to a %s binding', async transition => {
+    const core = await makeCore(true, { hostPublic: true });
+    const id = 'wire-public-handoff-denial';
+    const hash = ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerCase();
+    const g = core as unknown as StripInternals;
+    const registration = await g.chain.createOnChainContextGraph({ accessPolicy: 0, publishPolicy: 1, nameHash: hash });
+    const onChainId = String(registration.contextGraphId);
+    g.stageOnChainContextGraphBindingFromNameHash(hash, onChainId);
+    await g.reconcileSwmHostModeSubscription(hash);
+    const listener = g.swmHostModeHandlers.get(hash)!;
+    const wallet = ethers.Wallet.createRandom();
+    const peer = 'signed-wire-publisher';
+    const payload = encodeWorkspacePublishRequest({ contextGraphId: id,
+      nquads: new TextEncoder().encode(`<urn:wire-denied> <http://schema.org/name> "Public" <did:dkg:context-graph:${id}> .`),
+      manifest: [], publisherPeerId: peer, shareOperationId: 'wire-denied', timestampMs: Date.now(),
+      agentAddress: wallet.address.toLowerCase(), kaNumber: '1', contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: `did:dkg:otp:20430/${wallet.address.toLowerCase()}/1`, assertionVersion: '1',
+      publicTripleCount: 1, privateTripleCount: 0, accessPolicy: 'public', allowedPeers: [] });
+    const timestamp = new Date().toISOString();
+    const bytes = encodeGossipEnvelope({ version: GOSSIP_ENVELOPE_VERSION,
+      type: GOSSIP_TYPE_WORKSPACE_PUBLISH, contextGraphId: id, agentAddress: wallet.address, timestamp,
+      signature: ethers.getBytes(await wallet.signMessage(computeGossipSigningPayload(
+        GOSSIP_TYPE_WORKSPACE_PUBLISH, id, timestamp, payload))), payload });
+    const replacementId = transition === 'private' ? String((await g.chain.createOnChainContextGraph({
+      accessPolicy: 1, publishPolicy: 1, nameHash: hash,
+    })).contextGraphId) : onChainId;
+    g.setContextGraphSubscription(transition === 'private' ? id : 'different-uncommitted-name', {
+      subscribed: false, synced: false, syncMode: 'always-on', onChainHash: hash, onChainId: replacementId,
+    }, { persist: false });
+    if (transition === 'private') g.onChainAccessPolicyCache.set(replacementId, 1);
+    const ingest = vi.spyOn(g, 'ingestSwmHostModeEnvelope');
+    const append = vi.spyOn(g.swmHostModeStore!, 'append');
+    listener('topic', bytes, peer);
+    // Drain the callback's ready refresh microtasks; there is no admitted
+    // verifier/RPC await on either rejected canonical handoff.
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(ingest).not.toHaveBeenCalled();
+    expect(append).not.toHaveBeenCalled();
+    expect(await g.swmHostModeStore!.iterate(id, 0)).toEqual([]);
+    expect(g.subscribedContextGraphs.get(transition === 'private' ? id : 'different-uncommitted-name')?.onChainId)
+      .toBe(replacementId);
   });
 
   for (const chunked of [false, true]) for (const transition of ['unchanged', 'rebind', 'close'] as const) {
