@@ -60,7 +60,7 @@ describe('Oxigraph WAL maintenance coordinator', () => {
       schedule(callback) { tick = callback; return { unref() {} } as ReturnType<typeof setInterval>; }, cancel() {},
     });
     const notify = (phase: import('@origintrail-official/dkg-storage').ManagedOxigraphRecoveryPhaseV1) => {
-      for (const observe of [...observers]) observe(phase);
+      for (const observe of Array.from(observers)) observe(phase);
     };
     try {
       tick(); now = 10; tick();

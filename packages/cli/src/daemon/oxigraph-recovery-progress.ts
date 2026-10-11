@@ -23,7 +23,7 @@ export function createOxigraphRecoveryProgress(generation: number) {
     publish(next: ManagedOxigraphRecoveryPhaseV1) {
       if (terminal() || phase === next) return;
       phase = next;
-      for (const observe of [...observers]) notify(observe);
+      for (const observe of Array.from(observers)) notify(observe);
       if (terminal()) observers.clear();
     },
   };

@@ -23,7 +23,7 @@ describe('ManagedWorkRecoveryCoordinatorV1', () => {
     const retention = coordinator.clientTimedOut('query', Date.now(), coordinator.begin(readState()));
     const readsAtRequest = readState.mock.calls.length;
     const notify = (phase: ManagedOxigraphRecoveryPhaseV1) => {
-      for (const observe of [...observers]) observe(phase);
+      for (const observe of Array.from(observers)) observe(phase);
     };
     try {
       expect(requestRecovery).toHaveBeenCalledExactlyOnceWith(0, 'query');
