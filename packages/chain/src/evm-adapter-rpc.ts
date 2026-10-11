@@ -21,6 +21,7 @@ import { createRpcTimeoutError } from './chain-rpc-transport-error.js';
 import { ContextGraphAuthorityIndexBootstrapUnavailableError } from
   './context-graph-authority-index-snapshot.js';
 import { EvmLogRangeUnavailableError } from './evm-log-range.js';
+import { isRemoteSignerError } from './remote-signer-errors.js';
 export { boundedRetryFetchRequest } from './rpc-request-transport.js';
 
 /**
@@ -117,6 +118,9 @@ export type RpcRetryDisposition = 'fail' | 'retry-later' | 'failover';
  * another endpoint attempt in the same process cannot help them.
  */
 export function classifyRpcRetryDisposition(err: unknown): RpcRetryDisposition {
+  // An external signer's failure is not an RPC endpoint failure, and retrying
+  // the step would mean asking for a second signature: it is final.
+  if (isRemoteSignerError(err)) return 'fail';
   // A failed trusted-core walk belongs to the bootstrap transport. Another RPC
   // endpoint must not multiply its complete peer/deadline/CAS budget.
   if (err instanceof ContextGraphAuthorityIndexBootstrapUnavailableError) return 'retry-later';

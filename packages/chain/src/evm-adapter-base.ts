@@ -15,6 +15,8 @@
 import { decodeConvictionCostCovered } from './conviction-cost-covered.js';
 export { decodeConvictionCostCovered } from './conviction-cost-covered.js';
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
+import { createOperationalSignerPool, isExternalEvmSigner, operationalPrivateKeyOf, type EvmSigner } from './evm-signer.js';
+export type { EvmSigner } from './evm-signer.js';
 import { createFilterErrorSilencer, installFilterNotFoundConsoleSuppressor, formatProviderError } from './filter-error-silencer.js';
 import type { FilterErrorSilencer } from './filter-error-silencer.js';
 import {
@@ -120,7 +122,7 @@ import type {
   RandomSamplingReadContextReader,
 } from './random-sampling-read-context.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
-import { RPC_READ_STALL_TIMEOUT_MS, CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRIES, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE,
+import { RPC_READ_STALL_TIMEOUT_MS, RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS, CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRIES, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE,
   TX_SERIALIZER_OBSERVE_AFTER_MS,
   TX_SERIALIZER_OBSERVE_INTERVAL_MS,
   resolveTxSerializerStallAfterMs,
@@ -143,7 +145,7 @@ type ContractWriteSender = (
   contract: Contract,
   method: string,
   args: readonly unknown[],
-  signer: Wallet,
+  signer: EvmSigner,
   label: string,
   opts?: { gasLimitBufferBps?: number },
 ) => Promise<ethers.TransactionReceipt>;
@@ -670,10 +672,10 @@ export class EVMChainAdapterBase {
   protected readonly filterErrorSilencer: FilterErrorSilencer;
 
   /** Primary signer — used for identity/profile/staking operations. */
-  protected readonly signer: Wallet;
+  protected readonly signer: EvmSigner;
 
   /** All operational signers (includes primary). Used round-robin for publish TXs. */
-  protected readonly signerPool: Wallet[];
+  protected readonly signerPool: EvmSigner[];
 
   /** Admin signer — used only for profile/key-management operations. */
   protected readonly adminSigner?: Wallet;
@@ -1529,11 +1531,8 @@ export class EVMChainAdapterBase {
         );
       }
     }
-    this.signer = new Wallet(config.privateKey, this.provider);
-    this.signerPool = [this.signer];
-    for (const key of config.additionalKeys ?? []) {
-      this.signerPool.push(new Wallet(key, this.provider));
-    }
+    this.signerPool = createOperationalSignerPool(config, this.provider);
+    this.signer = this.signerPool[0];
     // The primary signer is the node's identity anchor (a registered operational
     // key via createProfile), so RS may always fall back to it. Additional
     // wallets join this set only once their registration is confirmed on-chain.
@@ -1641,13 +1640,13 @@ export class EVMChainAdapterBase {
   }
 
   /** Pick the next signer from the pool (round-robin). */
-  protected nextSigner(): Wallet {
+  protected nextSigner(): EvmSigner {
     const s = this.signerPool[this.signerIndex % this.signerPool.length];
     this.signerIndex++;
     return s;
   }
 
-  protected findSignerByAddress(address: string): Wallet | undefined {
+  protected findSignerByAddress(address: string): EvmSigner | undefined {
     const normalized = ethers.getAddress(address).toLowerCase();
     return this.signerPool.find((signer) => signer.address.toLowerCase() === normalized);
   }
@@ -1661,7 +1660,7 @@ export class EVMChainAdapterBase {
   protected async resolvePinnedPublisherSigner(
     contextGraphId: bigint,
     publisherAddress: string,
-  ): Promise<Wallet> {
+  ): Promise<EvmSigner> {
     const selected = this.findSignerByAddress(publisherAddress);
     if (!selected) {
       throw new Error(
@@ -1892,7 +1891,7 @@ export class EVMChainAdapterBase {
    * `as Contract` recovers the dynamic-method index signature ethers'
    * `BaseContract.connect` drops.
    */
-  protected rebindContract(contract: Contract, runner: JsonRpcProvider | Wallet): Contract {
+  protected rebindContract(contract: Contract, runner: JsonRpcProvider | EvmSigner): Contract {
     return contract.connect(runner) as Contract;
   }
 
@@ -1934,25 +1933,31 @@ export class EVMChainAdapterBase {
   }
 
   protected async signPopulatedTransaction(
-    signer: Wallet,
+    signer: EvmSigner,
     populated: ethers.TransactionRequest,
   ): Promise<SignedTransactionEnvelope> {
-    let filled = await signer.populateTransaction(populated);
-    if (this.maxFeePerGasWei !== undefined) {
-      const cap = this.maxFeePerGasWei;
-      let baseFeePerGas: bigint | null | undefined;
-      if (filled.maxFeePerGas !== null && filled.maxFeePerGas !== undefined) {
-        const latestBlock = await signer.provider?.getBlock('latest');
-        baseFeePerGas = latestBlock?.baseFeePerGas;
-      }
-      filled = applyTransactionFeeCap(filled, cap, baseFeePerGas);
-    }
+    // An external signer is called outside the per-endpoint attempt deadline
+    // (`RpcFailoverClient.populateAndSign`), so its RPC population keeps it here.
+    const filled = isExternalEvmSigner(signer)
+      ? await withRpcRequestTimeout(RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS, 'transaction population',
+        () => this.populateWithFeeCap(signer, populated))
+      : await this.populateWithFeeCap(signer, populated);
     const signedTx = await signer.signTransaction(filled);
     // GH#2270 PR-3 r3 — ONE decode of the signed bytes, here, for both facts the send window
     // needs. The nonce used to be re-parsed at the dispatch boundary from the same string.
     const parsed = ethers.Transaction.from(signedTx);
     const nonce = Number.isSafeInteger(parsed.nonce) && parsed.nonce >= 0 ? parsed.nonce : undefined;
     return { signedTx, txHash: parsed.hash ?? '0x', ...(nonce === undefined ? {} : { nonce }) };
+  }
+
+  private async populateWithFeeCap(signer: EvmSigner, populated: ethers.TransactionRequest) {
+    const filled = await signer.populateTransaction(populated);
+    if (this.maxFeePerGasWei === undefined) return filled;
+    let baseFeePerGas: bigint | null | undefined;
+    if (filled.maxFeePerGas !== null && filled.maxFeePerGas !== undefined) {
+      baseFeePerGas = (await signer.provider?.getBlock('latest'))?.baseFeePerGas;
+    }
+    return applyTransactionFeeCap(filled, this.maxFeePerGasWei, baseFeePerGas);
   }
 
   /**
@@ -1964,7 +1969,7 @@ export class EVMChainAdapterBase {
    * once. Any other error, or a second `TooLowAllowance`, propagates.
    */
   protected async populateAndSignV10WithAllowanceRecovery(
-    signer: Wallet,
+    signer: EvmSigner,
     kaContract: Contract,
     method: 'publish' | 'update',
     methodParams: unknown,
@@ -2094,7 +2099,7 @@ export class EVMChainAdapterBase {
    * still local, never sent, so the caller can retry with no on-chain effect).
    */
   protected async dispatchSerializedV10Write(
-    signer: Wallet,
+    signer: EvmSigner,
     label: 'publish' | 'update',
     onBroadcast: ((signal: PreBroadcastSignal) => Promise<void> | void) | undefined,
     buildSignedTx: (ctx: SerializedSignerWriteContext) => Promise<SignedTransactionEnvelope>,
@@ -2159,7 +2164,7 @@ export class EVMChainAdapterBase {
   }
 
   protected async sendPopulatedTransaction(
-    signer: Wallet,
+    signer: EvmSigner,
     populated: ethers.TransactionRequest,
     label: string,
   ): Promise<ethers.TransactionReceipt> {
@@ -2179,7 +2184,7 @@ export class EVMChainAdapterBase {
     contract: Contract,
     method: string,
     args: readonly unknown[],
-    signer: Wallet,
+    signer: EvmSigner,
     label: string,
     opts?: { gasLimitBufferBps?: number },
   ): Promise<SignedTransactionEnvelope> {
@@ -2196,7 +2201,7 @@ export class EVMChainAdapterBase {
     contract: Contract,
     method: string,
     args: readonly unknown[],
-    signer: Wallet,
+    signer: EvmSigner,
     label: string,
     opts?: { gasLimitBufferBps?: number },
   ): Promise<ethers.TransactionReceipt> {
@@ -2212,7 +2217,7 @@ export class EVMChainAdapterBase {
    * only to code already running inside that serializer window.
    */
   protected async withSerializedSignerWrite<T>(
-    signer: Wallet,
+    signer: EvmSigner,
     fn: (ctx: SerializedSignerWriteContext) => Promise<T>,
     /**
      * Names the operation in serializer stall diagnostics (GH#1574).
@@ -2251,7 +2256,7 @@ export class EVMChainAdapterBase {
     contract: Contract,
     method: string,
     args: readonly unknown[],
-    signer: Wallet,
+    signer: EvmSigner,
     label: string,
     // Optional gas headroom for methods whose on-chain gas cost depends on
     // per-block randomness. ethers fills `gasLimit` from a single
@@ -2305,7 +2310,7 @@ export class EVMChainAdapterBase {
    * a single seam in unit tests (`mock allowance() / approve()`).
    */
   protected async ensureV10ApproveTrac(
-    signer: Wallet,
+    signer: EvmSigner,
     kav10Address: string,
     tokenAmount: bigint,
     txLabel: string,
@@ -2444,7 +2449,7 @@ export class EVMChainAdapterBase {
    * relay route through it with their own `txClass` + `FundingMode` in later phases.
    */
   protected async _withSignerSelection<T extends { address: string }>(
-    select: (ordered: Wallet[]) => Promise<T>,
+    select: (ordered: EvmSigner[]) => Promise<T>,
   ): Promise<T> {
     const previousSelection = this.signerSelectionQueue;
     let releaseSelection!: () => void;
@@ -2452,7 +2457,7 @@ export class EVMChainAdapterBase {
     await previousSelection;
     try {
       const start = this.signerIndex % this.signerPool.length;
-      const ordered: Wallet[] = [];
+      const ordered: EvmSigner[] = [];
       for (let i = 0; i < this.signerPool.length; i += 1) {
         ordered.push(this.signerPool[(start + i) % this.signerPool.length]);
       }
@@ -2466,11 +2471,11 @@ export class EVMChainAdapterBase {
   }
 
   protected async _authorizedPublisherSigners(
-    ordered: Wallet[],
+    ordered: EvmSigner[],
     contextGraphId: bigint,
-  ): Promise<Wallet[]> {
+  ): Promise<EvmSigner[]> {
     if (!this.contracts.contextGraphs) return ordered;
-    const eligible: Wallet[] = [];
+    const eligible: EvmSigner[] = [];
     for (const signer of ordered) {
       if (await this.readContract(
         this.contracts.contextGraphs, 'contextGraphs.isAuthorizedPublisher',
@@ -2488,14 +2493,14 @@ export class EVMChainAdapterBase {
     return eligible;
   }
 
-  protected async selectSigner(spec: SelectSignerSpec): Promise<Wallet> {
+  protected async selectSigner(spec: SelectSignerSpec): Promise<EvmSigner> {
     return this._withSignerSelection(async (ordered) => {
       // Eligibility by class. `rotatable-policy` filters to on-chain authorized
       // publishers for the CG; with no ContextGraphs surface every operational
       // wallet is a candidate (funding-aware over the whole pool, NOT a plain
       // pick). `rotatable-free` (RS) narrows to on-chain-registered operational
       // wallets, failing CLOSED. `rotatable-funded` uses the whole pool.
-      let eligible: Wallet[];
+      let eligible: EvmSigner[];
       if (spec.txClass === 'rotatable-policy') {
         eligible = await this._authorizedPublisherSigners(ordered, spec.contextGraphId);
       } else if (spec.txClass === 'rotatable-free') {
@@ -2534,7 +2539,7 @@ export class EVMChainAdapterBase {
     options: {
       publishEpochs?: number;
     } = {},
-  ): Promise<Wallet> {
+  ): Promise<EvmSigner> {
     return this.selectSigner({
       txClass: 'rotatable-policy',
       contextGraphId,
@@ -2562,7 +2567,7 @@ export class EVMChainAdapterBase {
    * the primary wallet (the wallet-#0 head-of-line contention this rotation
    * removes). Eligibility fails closed to the primary signer (see selectSigner).
    */
-  protected async nextRandomSamplingSigner(): Promise<Wallet> {
+  protected async nextRandomSamplingSigner(): Promise<EvmSigner> {
     // Bounded loop: every failed revalidation EVICTS the chosen wallet from
     // the registered set (strictly shrinking pool) and the primary signer
     // returns unconditionally, so this cannot spin.
@@ -2688,10 +2693,10 @@ export class EVMChainAdapterBase {
   }
 
   protected async selectFundedSigner(
-    candidates: Wallet[],
+    candidates: EvmSigner[],
     funding: FundingMode,
     policy: { preferIdle: boolean },
-  ): Promise<Wallet> {
+  ): Promise<EvmSigner> {
     // Mode-aware read: native-only selections (RS) touch only the native slot
     // so their high-frequency probes can't poison the cached TRAC balance.
     const { fundings, fundableIdx } = await this._scanCandidateFunding(
@@ -2928,7 +2933,7 @@ export class EVMChainAdapterBase {
    */
   protected async enrichInsufficientPublisherFundsError(
     err: unknown,
-    signer: Wallet,
+    signer: EvmSigner,
     contextGraphId: bigint,
     requiredTracWei: bigint = 0n,
   ): Promise<unknown> {
@@ -3012,9 +3017,9 @@ export class EVMChainAdapterBase {
     return this.signerPool.map((s) => s.address);
   }
 
-  /** Primary operational private key (hex string with 0x prefix). */
+  /** Primary operational private key (0x hex); throws `OperationalKeyUnavailableError` for external signers. */
   getOperationalPrivateKey(): string {
-    return this.signer.privateKey;
+    return operationalPrivateKeyOf(this.signer);
   }
 
   protected walletKeyHash(address: string): string {
@@ -4117,7 +4122,7 @@ export class EVMChainAdapterBase {
       );
     }
 
-    let txSigner: Wallet;
+    let txSigner: EvmSigner;
     if (params.publisherAddress) {
       txSigner = await this.resolvePinnedPublisherSigner(
         params.contextGraphId,

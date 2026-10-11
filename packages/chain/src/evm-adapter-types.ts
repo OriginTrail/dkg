@@ -13,6 +13,7 @@ import type { ContextGraphAuthorityIndexBootstrap } from './context-graph-author
 import type { ChainEventLogStore } from './chain-index/index.js';
 import type { ChainEventLogBindingSource } from './chain-event-log-binding.js';
 import type { RpcRequestAdmission } from './rpc-request-transport.js';
+import type { EvmSigner } from './evm-signer.js';
 
 export interface EVMAdapterBaseConfig {
   rpcUrl: string;
@@ -25,10 +26,21 @@ export interface EVMAdapterBaseConfig {
    * rpcUrl/rpcUrls, which may be private operator/provider endpoints.
    */
   walletRpcUrls?: string[];
-  /** Primary operational wallet key (used for identity registration, staking, etc.) */
-  privateKey: string;
+  /**
+   * Primary operational wallet key (used for identity registration, staking,
+   * etc.). Required unless `signers` is given; the two are mutually exclusive.
+   */
+  privateKey?: string;
   /** Additional operational wallet keys for parallel transaction submission. */
   additionalKeys?: string[];
+  /**
+   * Operational signers whose keys are held outside this process, for example
+   * `RemoteSigner`s backed by an external signing service. Replaces
+   * `privateKey` / `additionalKeys`: the first signer is the primary and all of
+   * them are used for parallel transaction submission. Raw-key accessors such
+   * as `getOperationalPrivateKey()` then throw `OperationalKeyUnavailableError`.
+   */
+  signers?: readonly EvmSigner[];
   hubAddress: string;
   /** Optional TRAC token contract override. When omitted, resolve from Hub.Token. */
   tokenAddress?: string;

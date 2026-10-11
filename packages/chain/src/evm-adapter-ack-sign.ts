@@ -13,6 +13,7 @@ import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { ethers } from 'ethers';
 import type { VerifyACKIdentityResult } from './chain-adapter.js';
 import { OPERATIONAL_KEY_PURPOSE } from './evm-adapter-constants.js';
+import { localPrivateKeyOf } from './evm-signer.js';
 
 export class AckSignMethods extends EVMChainAdapterBase {
   async getMinimumRequiredSignatures(): Promise<number> {
@@ -155,7 +156,8 @@ export class AckSignMethods extends EVMChainAdapterBase {
   }
 
   getACKSignerKey(): string | undefined {
-    return this.signer.privateKey;
+    // An external signer holds no extractable key; `signACKDigest` still signs through it.
+    return localPrivateKeyOf(this.signer);
   }
 
   async signMessage(messageHash: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array }> {

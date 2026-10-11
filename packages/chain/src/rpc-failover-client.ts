@@ -46,7 +46,8 @@
 import { type RpcReadDescriptor, createRpcReadDescriptor, type RpcReadDescriptorInput, type ReadOpts } from './rpc-read-descriptor.js';
 export { type RpcReadDescriptor, createRpcReadDescriptor, rpcReadDescriptor, type RpcReadDescriptorInput, type ReadOpts } from './rpc-read-descriptor.js';
 import type { SignedTransactionEnvelope } from './chain-adapter.js';
-import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
+import { JsonRpcProvider, Contract, ethers } from 'ethers';
+import { isExternalEvmSigner, type EvmSigner } from './evm-signer.js';
 import { withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import {
   classifyRpcRetryDisposition,
@@ -144,7 +145,7 @@ class ProviderSetExhaustedError extends RpcEndpointsExhaustedError {
  * `populateAndSign`.
  */
 export type SignPopulatedFn = (
-  signer: Wallet,
+  signer: EvmSigner,
   populated: ethers.TransactionRequest,
 ) => Promise<SignedTransactionEnvelope>;
 
@@ -442,7 +443,7 @@ export class RpcFailoverClient {
     contract: Contract,
     method: string,
     args: readonly unknown[],
-    signer: Wallet,
+    signer: EvmSigner,
     label: string,
     opts?: { gasLimitBufferBps?: number },
   ): Promise<SignedTransactionEnvelope> {
@@ -515,11 +516,17 @@ export class RpcFailoverClient {
             );
           }
         }
-        const signed = await withRpcRequestTimeout(
-          RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
-          `${label} transaction signing via RPC #${i + 1}`,
-          () => this.signPopulated(rpcSigner, populated),
-        );
+        // An external signer bounds its own request, and the RPC population
+        // inside `signPopulated` keeps this deadline. Its signing request is
+        // never cut off here: a signer failure is not an endpoint failure and
+        // must not fail over into a second signature for the same transaction.
+        const signed = isExternalEvmSigner(rpcSigner)
+          ? await this.signPopulated(rpcSigner, populated)
+          : await withRpcRequestTimeout(
+            RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
+            `${label} transaction signing via RPC #${i + 1}`,
+            () => this.signPopulated(rpcSigner, populated),
+          );
         // Signed on this endpoint → 'nonceWrite' marks it WRITE-proven (nonce-safe)
         // so it's preferred for the read-your-write ops that follow (the caller's
         // broadcast + receipt + confirming re-reads) AND for subsequent populates.
@@ -936,7 +943,7 @@ export class RpcFailoverClient {
    * `as Contract` recovers the dynamic-method index signature ethers'
    * `BaseContract.connect` drops.
    */
-  private rebindContract(contract: Contract, runner: JsonRpcProvider | Wallet): Contract {
+  private rebindContract(contract: Contract, runner: JsonRpcProvider | EvmSigner): Contract {
     return contract.connect(runner) as Contract;
   }
 
@@ -958,7 +965,7 @@ export class RpcFailoverClient {
   }
 
   /** Rebind a SIGNER to `provider` for one per-endpoint populate+sign attempt. */
-  private rebindSigner(signer: Wallet, provider: JsonRpcProvider): Wallet {
+  private rebindSigner(signer: EvmSigner, provider: JsonRpcProvider): EvmSigner {
     return signer.connect(provider);
   }
 }
