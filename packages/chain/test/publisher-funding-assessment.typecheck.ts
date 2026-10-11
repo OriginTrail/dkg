@@ -1,4 +1,4 @@
-import type { PublisherFundingSelection, PublisherPcaPricingEvidence } from '../src/publisher-plan.js';
+import type { PublisherFundingSelection, PublisherPcaPricingEvidence } from '../src/evm-publisher-funding.js';
 
 const candidate = { address: 'wallet' };
 // @ts-expect-error A funded verdict must identify its wallet.

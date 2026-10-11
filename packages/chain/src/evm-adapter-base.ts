@@ -89,7 +89,8 @@ import {
 import { SharedAdapterInitialization, initializationBinder } from './evm-adapter-shared-init.js';
 import { IdentityIdCache, IDENTITY_ID_POSITIVE_TTL_MS, SIGNER_IDENTITY_ID_ZERO_TTL_MS } from './identity-id-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
-import { preferredFundableCandidate, type PublisherCandidateFundingAssessment, type PublisherFundingSelection } from './publisher-plan.js';
+import { preferredFundableCandidate } from './signer-selection.js';
+import type { PublisherCandidateFundingAssessment, PublisherFundingSelection } from './evm-publisher-funding.js';
 import type { PublisherConvictionPlanReader } from './publisher-plan.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import type {
@@ -2615,7 +2616,7 @@ export class EVMChainAdapterBase {
    * verdict.
    */
   private async _scanCandidateFunding<T extends { address: string }>(
-    candidates: T[],
+    candidates: readonly T[],
     fundingFor: (candidate: T) => FundingMode,
     forceRefresh = false,
     strictPcaRead = false,
@@ -2686,7 +2687,7 @@ export class EVMChainAdapterBase {
    * scan, fresh terminal recheck, idle preference, diagnostics, and typed failure.
    */
   protected async _assessFundedCandidates<T extends { address: string }>(
-    candidates: T[],
+    candidates: readonly T[],
     fundingFor: (candidate: T) => NativeAndTracFundingMode,
     policy: { preferIdle: boolean },
   ): Promise<PublisherFundingSelection<T>> {

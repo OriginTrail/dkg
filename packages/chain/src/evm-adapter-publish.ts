@@ -32,7 +32,8 @@ import type {
 } from './chain-adapter.js';
 import { publisherPublishPlanByteSize } from './chain-adapter.js';
 import { floorPublishTokenAmount, computeUpdateACKDigest, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
-import { resolveQuotedPublisherCandidatePricing, reconcilePublisherCandidateFunding, type PublisherPcaPricingEvidence } from './publisher-plan.js';
+import { resolveQuotedPublisherCandidatePricing } from './publisher-plan.js';
+import { reconcilePublisherCandidateFunding, type PublisherPcaPricingEvidence } from './evm-publisher-funding.js';
 import { errorCode, errorMessage } from './evm-adapter-errors.js';
 import { isRetryableRpcError } from './evm-adapter-rpc.js';
 import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
@@ -163,7 +164,7 @@ export class PublishMethods extends EVMChainAdapterBase {
   ): Promise<PublisherCandidatePlan> {
     return reconcilePublisherCandidateFunding({
       candidates: plans,
-      assess: () => this._assessFundedCandidates(plans, (plan) => ({
+      assess: (currentPlans) => this._assessFundedCandidates(currentPlans, (plan) => ({
         kind: 'native+trac',
         nativeFloorWei: this.minPublisherNativeWei,
         tracFloorWei: this.minPublisherTracWei,
