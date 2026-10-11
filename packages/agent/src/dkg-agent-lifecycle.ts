@@ -865,10 +865,10 @@ import {
 import { reconcileRfc64CatalogAuthorityPlanV1 } from
   './rfc64/catalog-rollout-authority-reconciliation-v1.js';
 import {
+  attemptRfc64LegacySwmRetirementAfterFinalizedVmV1,
   describeRfc64LegacySwmFenceEventV1,
   initializeRfc64LegacySwmBoundaryV1,
   rfc64LateLegacySwmCompanionResolverV1,
-  retireRfc64LegacySwmAfterFinalizedVmV1,
 } from
   './rfc64/legacy-swm-boundary-v1.js';
 import {
@@ -2024,12 +2024,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       subGraphName?: string;
     }>,
   ): Promise<void> {
-    await retireRfc64LegacySwmAfterFinalizedVmV1(
-      this,
-      input.contextGraphId,
-      input.kaUal,
-      String(input.assertionVersion),
-      input.subGraphName,
+    // GH#3081 — nothing a caller does next depends on the marker. It waits a short time for the
+    // retirement, which then goes on without it and is repeated if it did not get its turn.
+    const assertionVersion = String(input.assertionVersion);
+    await this.owedLegacySwmRetirementsV1.retire(
+      JSON.stringify([input.contextGraphId, input.subGraphName ?? null, input.kaUal, assertionVersion]),
+      () => attemptRfc64LegacySwmRetirementAfterFinalizedVmV1(
+        this,
+        input.contextGraphId,
+        input.kaUal,
+        assertionVersion,
+        input.subGraphName,
+      ),
+      this.rfc64BackgroundWorkDispatcherV1.shutdownSignal,
     );
   }
 

@@ -563,6 +563,17 @@ export async function markRfc64LegacySwmRepublishedV1(
 }
 
 /**
+ * What became of one retirement after a finalized VM twin:
+ * - `retired`: the asset's markers up to the given version are gone;
+ * - `kept`: nothing was retired, and nothing is left to do for this request.
+ *   No marker of the asset is outstanding, or its shared copy is there again
+ *   and owns the marker;
+ * - `not-run`: the retirement did not get its turn within the fence's bound.
+ *   The marker stays, and only a later retirement removes it.
+ */
+export type Rfc64LegacySwmFinalizedVmRetirementV1 = 'retired' | 'kept' | 'not-run';
+
+/**
  * A verified, finalized VM twin can supersede an exact legacy SWM root even
  * when that root never entered the author catalog. The caller must first
  * prove byte-identical VM/SWM content and finish SWM cleanup. Recheck the
@@ -580,14 +591,36 @@ export async function retireRfc64LegacySwmAfterFinalizedVmV1(
   assertionVersionInput: string,
   subGraphName?: string,
 ): Promise<boolean> {
-  if (subGraphName !== undefined) return false;
+  return (await attemptRfc64LegacySwmRetirementAfterFinalizedVmV1(
+    owner, contextGraphId, kaUalInput, assertionVersionInput, subGraphName,
+  )) === 'retired';
+}
+
+/**
+ * {@link retireRfc64LegacySwmAfterFinalizedVmV1}, answering what became of it,
+ * so that a caller can come back for a retirement that did not get its turn.
+ * It runs up to the raised fence inside the call.
+ */
+export async function attemptRfc64LegacySwmRetirementAfterFinalizedVmV1(
+  owner: object,
+  contextGraphId: string,
+  kaUalInput: string,
+  assertionVersionInput: string,
+  subGraphName?: string,
+): Promise<Rfc64LegacySwmFinalizedVmRetirementV1> {
+  if (subGraphName !== undefined) return 'kept';
   const state = rfc64LegacySwmBoundaryStatesV1.get(owner);
-  if (state === undefined) return false;
+  if (state === undefined) return 'kept';
   assertContextGraphIdV1(contextGraphId, 'RFC-64 finalized VM legacy boundary contextGraphId');
   const kaUal = assertCanonicalDeterministicUalV1(kaUalInput).ual;
   const assertionVersion = assertPositiveDecimalU64V1(assertionVersionInput);
+  // No marker of this asset is outstanding, so there is nothing to retire and
+  // nothing to fence. A share that starts later brings a marker of its own,
+  // which is not this request's to retire. Markers are tracked from the
+  // moment a share prepares one, so one that is in flight is seen here.
+  if (state.entriesByContextGraph.get(contextGraphId)?.has(kaUal) !== true) return 'kept';
   // Not retired within the fence's bound: the marker stays, which is the
-  // conservative state, until a later pass or a catalog replay retires it.
+  // conservative state, until a later retirement removes it.
   const outcome = await runRfc64LegacySwmRetirementV1(
     state.fence,
     { source: 'finalized-vm-retirement', contextGraphId, kaUal },
@@ -620,7 +653,8 @@ export async function retireRfc64LegacySwmAfterFinalizedVmV1(
       return true;
     },
   );
-  return outcome.ran && outcome.value;
+  if (!outcome.ran) return 'not-run';
+  return outcome.value ? 'retired' : 'kept';
 }
 
 async function retireRfc64LegacySwmAssetsV1(

@@ -13,6 +13,7 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 
 import {
   acquireRfc64LegacySwmBoundaryReceiverLeaseV1,
+  attemptRfc64LegacySwmRetirementAfterFinalizedVmV1,
   awaitRfc64LateLegacySwmBoundaryAdmissionV1,
   initializeRfc64LegacySwmBoundaryV1,
   markRfc64LegacySwmRepublishedV1,
@@ -119,10 +120,10 @@ describe('RFC-64 legacy SWM fence coordinator', () => {
       { source: 'republish-retirement', contextGraphId: CG },
       async () => { ran = true; },
     );
-    // Queued behind the stuck retirement on the node-wide chain.
+    // Queued behind the stuck retirement on the node-wide chain, as every whole-graph retirement is.
     const behind = runRfc64LegacySwmRetirementV1(
       fence,
-      { source: 'finalized-vm-retirement', contextGraphId: OTHER_CG, kaUal: OTHER_KA },
+      { source: 'republish-retirement', contextGraphId: OTHER_CG },
       async () => 'retired',
     );
     expect(() => assertRfc64LegacySwmPreparationAdmittedV1(fence, CG, OTHER_KA)).toThrow();
@@ -161,7 +162,7 @@ describe('RFC-64 legacy SWM fence coordinator', () => {
     });
     const lease = gate();
     const holder = runRfc64LegacySwmRetirementV1(
-      fence, { source: 'receiver-lease', contextGraphId: OTHER_CG }, () => lease.promise,
+      fence, { source: 'receiver-lease', contextGraphId: CG }, () => lease.promise,
     );
     let ran = false;
     const waiting = runRfc64LegacySwmRetirementV1(
@@ -171,15 +172,177 @@ describe('RFC-64 legacy SWM fence coordinator', () => {
     );
 
     await expect(waiting).resolves.toEqual({ ran: false });
-    expect(events.map((event) => [event.kind, event.waitingOn])).toEqual([
-      ['wait-exceeded', 'mutation-chain'],
+    expect(events.map((event) => [event.kind, event.source, event.waitingOn])).toEqual([
+      ['wait-exceeded', 'finalized-vm-retirement', 'mutation-chain'],
     ]);
-    expect(() => assertRfc64LegacySwmPreparationAdmittedV1(fence, CG, KA)).not.toThrow();
+    // The asset's own fence is gone. The lease's fence over the graph is what still refuses.
+    expect(refusalOf(() => assertRfc64LegacySwmPreparationAdmittedV1(fence, CG, KA))).toMatchObject({
+      fenceSource: 'receiver-lease',
+      fenceScope: 'graph',
+    });
 
     lease.open();
     await holder;
     await tick();
     expect(ran).toBe(false);
+    expect(() => assertRfc64LegacySwmPreparationAdmittedV1(fence, CG, KA)).not.toThrow();
+    expect(fence.graphMutationTails.size).toBe(0);
+  });
+
+  describe('whose turn a retirement waits for', () => {
+    const assetOf = (contextGraphId: string, kaUal: string) => (
+      { source: 'finalized-vm-retirement' as const, contextGraphId, kaUal }
+    );
+
+    it('runs the retirement of an asset while a lease holds another graph', async () => {
+      const fence = createRfc64LegacySwmFenceCoordinatorV1();
+      const lease = gate();
+      const holder = runRfc64LegacySwmRetirementV1(
+        fence, { source: 'receiver-lease', contextGraphId: OTHER_CG }, () => lease.promise,
+      );
+      await tick();
+
+      await expect(runRfc64LegacySwmRetirementV1(fence, assetOf(CG, KA), async () => 'retired'))
+        .resolves.toEqual({ ran: true, value: 'retired' });
+      // The lease is still up, over its own graph only.
+      expect(() => assertRfc64LegacySwmPreparationAdmittedV1(fence, OTHER_CG, OTHER_KA)).toThrow();
+      expect(() => assertRfc64LegacySwmPreparationAdmittedV1(fence, CG, KA)).not.toThrow();
+
+      lease.open();
+      await holder;
+      await tick();
+      expect(fence.graphMutationTails.size).toBe(0);
+    });
+
+    it('holds the retirement of an asset back for a lease of its own graph, and for a retirement at work in it', async () => {
+      const fence = createRfc64LegacySwmFenceCoordinatorV1();
+      const order: string[] = [];
+      const lease = gate();
+      const firstAsset = gate();
+      const holder = runRfc64LegacySwmRetirementV1(
+        fence, { source: 'receiver-lease', contextGraphId: CG }, async () => {
+          order.push('lease');
+          await lease.promise;
+        },
+      );
+      const first = runRfc64LegacySwmRetirementV1(fence, assetOf(CG, KA), async () => {
+        order.push('first-asset');
+        await firstAsset.promise;
+      });
+      const second = runRfc64LegacySwmRetirementV1(fence, assetOf(CG, OTHER_KA), async () => {
+        order.push('second-asset');
+      });
+      await tick();
+      expect(order).toEqual(['lease']);
+
+      lease.open();
+      await holder;
+      await tick();
+      // One retirement at a time in a graph, in the order they asked.
+      expect(order).toEqual(['lease', 'first-asset']);
+
+      firstAsset.open();
+      await Promise.all([first, second]);
+      expect(order).toEqual(['lease', 'first-asset', 'second-asset']);
+    });
+
+    it('still runs one lease or whole-graph retirement at a time on the node', async () => {
+      const fence = createRfc64LegacySwmFenceCoordinatorV1();
+      const lease = gate();
+      const holder = runRfc64LegacySwmRetirementV1(
+        fence, { source: 'receiver-lease', contextGraphId: OTHER_CG }, () => lease.promise,
+      );
+      let ran = false;
+      const graphWide = runRfc64LegacySwmRetirementV1(
+        fence, { source: 'republish-retirement', contextGraphId: CG }, async () => { ran = true; },
+      );
+      await tick();
+      expect(ran).toBe(false);
+
+      lease.open();
+      await holder;
+      await expect(graphWide).resolves.toEqual({ ran: true, value: undefined });
+      expect(ran).toBe(true);
+    });
+
+    it('lets the retirement of an asset pass a whole-graph retirement that still waits for another graph', async () => {
+      const fence = createRfc64LegacySwmFenceCoordinatorV1();
+      const order: string[] = [];
+      const lease = gate();
+      const holder = runRfc64LegacySwmRetirementV1(
+        fence, { source: 'receiver-lease', contextGraphId: OTHER_CG }, () => lease.promise,
+      );
+      // It has fenced its graph and waits for the node-wide turn. It has not joined its graph's
+      // chain, so it does not hand that wait on to the assets of its graph.
+      const graphWide = runRfc64LegacySwmRetirementV1(
+        fence, { source: 'republish-retirement', contextGraphId: CG }, async () => { order.push('graph'); },
+      );
+      await tick();
+      expect(refusalOf(() => assertRfc64LegacySwmPreparationAdmittedV1(fence, CG, KA))).toMatchObject({
+        fenceSource: 'republish-retirement',
+        fenceScope: 'graph',
+      });
+
+      await expect(runRfc64LegacySwmRetirementV1(fence, assetOf(CG, KA), async () => { order.push('asset'); }))
+        .resolves.toEqual({ ran: true, value: undefined });
+      expect(order).toEqual(['asset']);
+
+      lease.open();
+      await Promise.all([holder, graphWide]);
+      expect(order).toEqual(['asset', 'graph']);
+    });
+
+    it('holds a whole-graph retirement back for the retirement of an asset that is at work in its graph', async () => {
+      const fence = createRfc64LegacySwmFenceCoordinatorV1();
+      const order: string[] = [];
+      const assetAtWork = gate();
+      const asset = runRfc64LegacySwmRetirementV1(fence, assetOf(CG, KA), async () => {
+        order.push('asset-started');
+        await assetAtWork.promise;
+        order.push('asset-ended');
+      });
+      const graphWide = runRfc64LegacySwmRetirementV1(
+        fence, { source: 'republish-retirement', contextGraphId: CG }, async () => { order.push('graph'); },
+      );
+      // Another graph's lease is behind that retirement on the node-wide chain, as before.
+      const otherLease = runRfc64LegacySwmRetirementV1(
+        fence, { source: 'receiver-lease', contextGraphId: OTHER_CG }, async () => { order.push('other-lease'); },
+      );
+      await tick();
+      expect(order).toEqual(['asset-started']);
+
+      assetAtWork.open();
+      await Promise.all([asset, graphWide, otherLease]);
+      expect(order).toEqual(['asset-started', 'asset-ended', 'graph', 'other-lease']);
+      await tick();
+      expect(fence.graphMutationTails.size).toBe(0);
+    });
+
+    it('gives a whole-graph retirement that gave up on the node-wide turn no turn in its graph', async () => {
+      const events: Rfc64LegacySwmFenceEventV1[] = [];
+      const fence = createRfc64LegacySwmFenceCoordinatorV1({
+        waitLimitMs: 20,
+        longFenceMs: 60_000,
+        onFenceEvent: (event) => events.push(event),
+      });
+      const lease = gate();
+      const holder = runRfc64LegacySwmRetirementV1(
+        fence, { source: 'receiver-lease', contextGraphId: OTHER_CG }, () => lease.promise,
+      );
+      let ran = false;
+      await expect(runRfc64LegacySwmRetirementV1(
+        fence, { source: 'republish-retirement', contextGraphId: CG }, async () => { ran = true; },
+      )).resolves.toEqual({ ran: false });
+      expect(events.map((event) => [event.kind, event.source, event.waitingOn])).toEqual([
+        ['wait-exceeded', 'republish-retirement', 'mutation-chain'],
+      ]);
+
+      lease.open();
+      await holder;
+      await tick();
+      expect(ran).toBe(false);
+      expect(fence.graphMutationTails.size).toBe(0);
+    });
   });
 
   it('does not bound the work itself, and reports a fence that was up for long', async () => {
@@ -373,6 +536,67 @@ describe('RFC-64 legacy SWM boundary behind the fence coordinator', () => {
     resolver({
       contextGraphId: BOUNDARY_CG, kaUal: BOUNDARY_UAL, shareOperationId: 'next-share', assertionVersion: '1',
     }).settle(false);
+  });
+
+  it('answers at once, with no fence, for an asset that has no marker outstanding', async () => {
+    const { owner, events, resolver } = await boundary(20);
+    // The lease holds the graph's turn for as long as the row likes.
+    const lease = await acquireRfc64LegacySwmBoundaryReceiverLeaseV1(owner, BOUNDARY_SCOPE);
+
+    await expect(attemptRfc64LegacySwmRetirementAfterFinalizedVmV1(owner, BOUNDARY_CG, BOUNDARY_UAL, '1'))
+      .resolves.toBe('kept');
+    await expect(retireRfc64LegacySwmAfterFinalizedVmV1(owner, BOUNDARY_CG, BOUNDARY_UAL, '1'))
+      .resolves.toBe(false);
+    // Neither waited for the lease, and neither gave up: no fence was raised at all.
+    expect(events).toEqual([]);
+    // A named sub-graph and an owner without a boundary have nothing to retire either.
+    await expect(attemptRfc64LegacySwmRetirementAfterFinalizedVmV1(owner, BOUNDARY_CG, BOUNDARY_UAL, '1', 'notes'))
+      .resolves.toBe('kept');
+    await expect(attemptRfc64LegacySwmRetirementAfterFinalizedVmV1({}, BOUNDARY_CG, BOUNDARY_UAL, '1'))
+      .resolves.toBe('kept');
+
+    lease.release();
+    resolver({
+      contextGraphId: BOUNDARY_CG, kaUal: BOUNDARY_UAL, shareOperationId: 'share-after-lease', assertionVersion: '1',
+    }).settle(false);
+  });
+
+  it('says whether a retirement retired the marker, kept it, or did not get its turn', async () => {
+    const { owner, events, resolver } = await boundary(20);
+    const share = resolver({
+      contextGraphId: BOUNDARY_CG, kaUal: BOUNDARY_UAL, shareOperationId: 'first-share', assertionVersion: '1',
+    });
+    // The share is still in flight: the retirement waits for it and gives up at the bound.
+    await expect(attemptRfc64LegacySwmRetirementAfterFinalizedVmV1(owner, BOUNDARY_CG, BOUNDARY_UAL, '1'))
+      .resolves.toBe('not-run');
+    expect(events.map((event) => [event.kind, event.waitingOn])).toEqual([['wait-exceeded', 'preparations']]);
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, BOUNDARY_CG)).toBe(1);
+
+    share.settle(true);
+    await expect(attemptRfc64LegacySwmRetirementAfterFinalizedVmV1(owner, BOUNDARY_CG, BOUNDARY_UAL, '1'))
+      .resolves.toBe('retired');
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, BOUNDARY_CG)).toBe(0);
+    // Asked again, there is nothing left of the asset to retire.
+    await expect(attemptRfc64LegacySwmRetirementAfterFinalizedVmV1(owner, BOUNDARY_CG, BOUNDARY_UAL, '1'))
+      .resolves.toBe('kept');
+  });
+
+  it('retires the marker of an asset while a lease holds another graph', async () => {
+    const { owner, events, resolver } = await boundary();
+    resolver({
+      contextGraphId: BOUNDARY_CG, kaUal: BOUNDARY_UAL, shareOperationId: 'first-share', assertionVersion: '1',
+    }).settle(true);
+    const otherGraph = `${BOUNDARY_SCOPE.authorAddress}/another-graph`;
+    const lease = await acquireRfc64LegacySwmBoundaryReceiverLeaseV1(
+      owner, { ...BOUNDARY_SCOPE, contextGraphId: otherGraph } as AuthorCatalogScopeV1,
+    );
+
+    await expect(attemptRfc64LegacySwmRetirementAfterFinalizedVmV1(owner, BOUNDARY_CG, BOUNDARY_UAL, '1'))
+      .resolves.toBe('retired');
+    expect(readRfc64LegacySwmBoundaryCountV1(owner, BOUNDARY_CG)).toBe(0);
+    expect(events).toEqual([]);
+
+    lease.release();
   });
 
   it('the resolver admission wait ends when the lease is released, and the prepare is then admitted', async () => {
