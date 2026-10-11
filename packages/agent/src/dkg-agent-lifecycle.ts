@@ -9741,7 +9741,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     for (const peer of libp2p.getPeers() as Array<{ toString(): string }>) {
       const remotePeer = peer.toString();
       if (remotePeer === localPeerId) continue;
-      const reservation = this.prepareRfc64CatalogConnectionReplayV1(remotePeer, contextGraphId);
+      const reservation = this.prepareRfc64CatalogGraphActivationReplayV1(remotePeer, contextGraphId);
       if (reservation === null) continue;
       attempted += 1;
       try {

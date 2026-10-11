@@ -318,7 +318,7 @@ describe('peer connection lifecycle', () => {
     const service = Object.getOwnPropertyDescriptor(f.agent, 'rfc64PublicCatalogServiceV1');
     Object.defineProperty(f.agent, 'rfc64PublicCatalogServiceV1', { configurable: true, value: {} });
     try {
-      const prepare = vi.spyOn(f.agent, 'prepareRfc64CatalogConnectionReplayV1').mockReturnValue(reservation.value);
+      const prepare = vi.spyOn(f.agent, 'prepareRfc64CatalogGraphActivationReplayV1').mockReturnValue(reservation.value);
       vi.spyOn(f.agent.networkAdmissionCoordinator, 'ensureAdmitted').mockResolvedValue(true);
       await expect(f.agent.replayRfc64CatalogToConnectedPeersV1('newly-active')).resolves.toEqual({ attempted: 1, admitted: 1 });
       expect(prepare).toHaveBeenCalledExactlyOnceWith(f.peerId, 'newly-active');

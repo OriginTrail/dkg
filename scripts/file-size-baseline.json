@@ -26,7 +26,7 @@
     "packages/agent/src/dkg-agent-query.ts": 1300,
     "packages/agent/src/dkg-agent-registry.ts": 2103,
     "packages/agent/src/dkg-agent-rfc64-catalog-auto-publish.ts": 1368,
-    "packages/agent/src/dkg-agent-rfc64-catalog.ts": 5507,
+    "packages/agent/src/dkg-agent-rfc64-catalog.ts": 5492,
     "packages/agent/src/dkg-agent-swm-host.ts": 9180,
     "packages/agent/src/dkg-agent-swm-substrate.ts": 2164,
     "packages/agent/src/dkg-agent-types.ts": 2067,

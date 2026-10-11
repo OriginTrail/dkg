@@ -81,6 +81,7 @@ import {
   Rfc64CatalogReplayConnectionRuntimeV1,
   type Rfc64CatalogReplayConnectionReservationV1,
 } from './rfc64/catalog-replay-connection-runtime-v1.js';
+import { createRfc64CatalogReplayConnectionRuntimeV1 } from './rfc64/catalog-replay-connection-adapter-v1.js';
 import {
   Rfc64CatalogReplayRecoveryRuntimeV1,
   type Rfc64CatalogReplayRecoveryRequestV1,
@@ -1105,45 +1106,29 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     return runtime;
   }
 
-  /**
-   * Prepare one catalog-owned replay transition before asynchronous network
-   * admission. The returned composite is the lifecycle listener's only RFC-64
-   * responsibility: admit it or reject it.
-   */
-  prepareRfc64CatalogConnectionReplayV1(
-    this: DKGAgent,
-    peerId: string,
-    contextGraphId?: string,
-  ): Rfc64CatalogReplayConnectionReservationV1 | null {
+  /** The connection event alone advances the replay connection generation. */
+  prepareRfc64CatalogConnectionReplayV1(this: DKGAgent, peerId: string): Rfc64CatalogReplayConnectionReservationV1 | null {
+    return this.rfc64CatalogConnectionReplayRuntimeV1().prepareConnectionOpen(peerId);
+  }
+
+  /** Graph activation selects one scope without changing connection generations. */
+  prepareRfc64CatalogGraphActivationReplayV1(this: DKGAgent, peerId: string, contextGraphId: string): Rfc64CatalogReplayConnectionReservationV1 | null {
+    return this.rfc64CatalogConnectionReplayRuntimeV1().prepareGraphActivation(peerId, contextGraphId);
+  }
+
+  rfc64CatalogConnectionReplayRuntimeV1(this: DKGAgent): Rfc64CatalogReplayConnectionRuntimeV1 {
     let runtime = rfc64CatalogReplayConnectionRuntimesV1.get(this);
     if (runtime === undefined) {
-      runtime = new Rfc64CatalogReplayConnectionRuntimeV1({
-        selectContextGraphIds: () => this.listActiveRfc64CatalogReplayContextGraphIdsV1(),
-        reserveFence: (contextGraphId, replayPeerId) => {
-          const accepted = this.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId);
-          return accepted === null ? null : this.rfc64CatalogReplayRecoveryRuntimeV1()
-            .reservePeer(contextGraphId, accepted.policyDigest, replayPeerId);
-        },
-        reannounce: (replayPeerId, id, signal) => {
-          const accepted = this.readAcceptedRfc64CatalogAccessSnapshotV1(id);
-          return accepted === null ? Promise.resolve(Object.freeze({ failed: 0 })) : this.reannounceRfc64CatalogHeadsToPeerV1(replayPeerId, {
-            kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
-            networkId: accepted.policy.networkId, contextGraphId: accepted.policy.contextGraphId,
-            policyDigest: accepted.policyDigest,
-          }, signal);
-        },
+      runtime = createRfc64CatalogReplayConnectionRuntimeV1({ agent: this,
+        reservePeer: (id, digest, peer) => this.rfc64CatalogReplayRecoveryRuntimeV1().reservePeer(id, digest, peer),
+        replay: (contextGraphId, demand, signal) => this.requestRfc64CatalogHeadReplayV1(contextGraphId, { kind: 'connection-demand', demand }, signal),
         schedule: (slot, work) => this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(`catalog-connection-replay:${slot}`, work),
         wait: waitForRfc64ScheduledResponsibilityDelayV1,
-        replay: (contextGraphId, replayDemand, signal) =>
-          this.requestRfc64CatalogHeadReplayV1(contextGraphId, {
-            kind: 'connection-demand',
-            demand: replayDemand,
-          }, signal),
         warn: (message) => this.log.warn(createOperationContext('system'), message),
       });
       rfc64CatalogReplayConnectionRuntimesV1.set(this, runtime);
     }
-    return runtime.prepare(peerId, Date.now(), contextGraphId);
+    return runtime;
   }
 
   /** Forget process-local operational targets when receiver ownership ends. */

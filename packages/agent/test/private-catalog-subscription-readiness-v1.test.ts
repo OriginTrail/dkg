@@ -38,7 +38,7 @@ describe('approved private catalog readiness handoff', () => {
       schedule: () => false, wait: async () => undefined, warn: vi.fn(),
       reannounce: async () => ({ failed: 0 }), replay: async () => ({ failed: 0 }),
     });
-    const reservation = runtime.prepare('curator-peer')!;
+    const reservation = runtime.prepareConnectionOpen('curator-peer')!;
     expect(f.state.replay.status(CG, POLICY)?.active).toBe(true);
     await expect(f.run()).resolves.toBe(false);
     expect(f.commit).not.toHaveBeenCalled();
