@@ -34,8 +34,8 @@ export function createOxigraphRecoveryProgress(generation: number) {
 export class OxigraphRecoveryProgressOwner {
   #current: ReturnType<typeof createOxigraphRecoveryProgress> | undefined;
   // Generations increase monotonically in this supervisor lifetime. A restart
-  // publishes termination only after serialized store-ownership reclamation,
-  // before launching its replacement: no older physical holder can survive it.
+  // publishes termination only after a successful replacement launch whose
+  // serialized reclaim ran first: no older physical holder can survive it.
   // Retain that confirmed prefix in constant space, not cancelled/signalled exits.
   #terminatedThrough = -1;
   constructor(private readonly generation: () => number, private readonly start: (reason: string) => boolean) {}
