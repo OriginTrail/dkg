@@ -17,6 +17,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { DKGAgent } from '../src/index.js';
+import { externalAuthorControlDigestSigner } from '../src/external-author-signing.js';
 import {
   RFC64_UNREGISTERED_REPLICA_AUTHORITY_PREDICATE_V1,
   authenticateRfc64UnregisteredReplicaAuthorityEnvelopeV1,
@@ -122,5 +123,23 @@ describe('RFC-64 control objects of an author key held by the external signer', 
     const asPayer = agent.createRfc64CatalogAuthorSignerV1(payer.address.toLowerCase() as EvmAddressV1);
     await expect(asPayer.signMessage(digest)).rejects.toThrow(/no author key of its external signer/);
     expect(payerSigningRequests(fake)).toEqual([]);
+  });
+
+  it('refuses a control-object signature that does not recover to the author', async () => {
+    const other = new ethers.Wallet(HARDHAT_KEYS.EXTRA3);
+    const misrouted = {
+      address: author.address,
+      signTypedData: other.signTypedData.bind(other),
+      signMessage: (message: string | Uint8Array) => other.signMessage(message),
+    };
+    const config = { chainConfig: { authors: {
+      addresses: [author.address],
+      signerFor: async () => misrouted,
+      firstSignerOf: async () => ({ address: author.address, signer: misrouted }),
+    } } };
+    const sign = await externalAuthorControlDigestSigner(config, author.address);
+    await expect(sign!(ethers.getBytes(ethers.id('author inventory head'))))
+      .rejects.toThrow(/does not recover to author/);
+    expect(await externalAuthorControlDigestSigner({}, author.address)).toBeUndefined();
   });
 });

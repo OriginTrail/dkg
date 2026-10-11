@@ -356,15 +356,21 @@ describe('daemon with an external signer', () => {
     const publish = await published.json() as Record<string, unknown>;
     expect(published.status, JSON.stringify(publish)).toBe(200);
 
-    // The author key signed the author attestation and the shared-memory
-    // gossip envelope (four length-framed fields: type, context graph,
-    // timestamp, payload); the payers signed transactions only.
+    // The author key signed the author attestation, the shared-memory gossip
+    // envelope (four length-framed fields: type, context graph, timestamp,
+    // payload) and, where RFC-64 catalog authority is active, the control
+    // objects the author issues (EIP-191 over 32-byte object digests); the
+    // payers signed transactions only.
     const journey = fake.requests.slice(before);
     const author = journey.filter((request) => request.authorization === `Bearer ${AUTHOR_TOKEN}`);
-    expect(author.map((request) => request.method).sort()).toEqual(['eth_sign', 'eth_signTypedData_v4']);
-    const gossip = author.find((request) => request.method === 'eth_sign')!;
-    expect(ethers.getAddress(String(gossip.params[0]))).toBe(defaultAuthor.address);
-    const fields = framedFields(ethers.getBytes(String(gossip.params[1])));
+    expect(author.filter((request) => request.method === 'eth_signTypedData_v4')).toHaveLength(1);
+    const messages = author.filter((request) => request.method === 'eth_sign');
+    expect(messages.length + 1).toBe(author.length);
+    for (const message of messages) expect(ethers.getAddress(String(message.params[0]))).toBe(defaultAuthor.address);
+    const isDigest = (request: (typeof messages)[number]) => ethers.getBytes(String(request.params[1])).length === 32;
+    const envelopes = messages.filter((request) => !isDigest(request));
+    expect(envelopes).toHaveLength(1);
+    const fields = framedFields(ethers.getBytes(String(envelopes[0]!.params[1])));
     expect(fields).toHaveLength(4);
     expect(new TextDecoder().decode(fields[0])).toBe('share-write');
     expect(new Set(journey.filter((request) => request.authorization === `Bearer ${PAYER_TOKEN}`)
