@@ -52,6 +52,7 @@ export default defineConfig({
       "test/promote-swm-pointer-post-commit.test.ts",
       "test/clear-promote-async-facade.test.ts",
       "test/query-min-trust-alias.test.ts",
+      "test/query-working-memory-identity.test.ts",
       "test/query-source-labels.test.ts",
       "test/query-private-authority-pending.test.ts",
       "test/unscoped-query-admission.test.ts",
