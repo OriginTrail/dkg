@@ -516,6 +516,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
           drainUnobserved = true;
           break;
         }
+        drainUnobserved = false;
         if (progress.peerWorklist.exhausted) {
           requiresFullReplay = true;
           failed += 1;
@@ -526,6 +527,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         const promised = progress.fullPass?.targets === null ? null
           : this.#mergePromises(progress.fullPass?.targets ?? [], received);
         input.signal?.throwIfAborted();
+        drainUnobserved = true;
         const parityFailed = promised === null || promised.length
           > RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1
           || await this.#ports.parityFailed(input.contextGraphId, promised);
@@ -549,8 +551,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         }
         break;
       }
-      // ONE two-sided corroboration contract; the settle block below is its
-      // other half and the two may not be read apart. `requested` counts only
+      // Two-sided corroboration contract: `requested` counts only
       // providers that answered `completed`, so it is the sole positive
       // evidence that anything about this node's applied rows was checked.
       //   CLEAR side (here): a pass that corroborated nothing may not clear a
@@ -560,8 +561,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
       //   attributed, retried and reported through `unresolvedPeerCount`; on
       //   its own it must NOT veto the clear, or one connected node that never
       //   answers pins `requiresFullReplay` forever.
-      //   SET side (settle block): the same `requested === 0` pass must also
-      //   RAISE the uncorroborated state, because an empty manifest set makes
+      //   SET side: `requested === 0` raises uncorroborated state; an empty manifest makes
       //   the parity predicate vacuously true. Narrowing only the clear side
       //   would leave "nothing was verified" reported as "every provider
       //   agrees".
