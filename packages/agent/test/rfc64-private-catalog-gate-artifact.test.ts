@@ -84,7 +84,11 @@ function runtimeProvenance(sourceRevision: string) {
   const loaded = buildExecutedRuntimeManifestV1(sourceRevision, RUNTIME_FILES);
   return buildRfc64PrivateRuntimeProvenanceV1(
     sourceBuild,
-    RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1.map((id) => ({ id, loaded })),
+    RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1.map((id, index) => ({
+      id,
+      identity: { hostIdentity: 'test-host', pid: index + 1 },
+      loaded,
+    })),
   );
 }
 
@@ -308,10 +312,11 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
     const sourceBuild = buildRuntimeManifestFromEntriesV1(sourceRevision, RUNTIME_FILES);
     const loaded = buildExecutedRuntimeManifestV1(sourceRevision, RUNTIME_FILES);
     const collector = createRfc64PrivateRuntimeEvidenceCollectorV1(sourceBuild);
-    for (const id of RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1) {
+    for (const [index, id] of RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1.entries()) {
       collector.record(id, {
         exit: { code: 0, signal: null, error: null },
         executedRuntimeManifest: structuredClone(loaded),
+        processIdentity: { hostIdentity: 'test-host', pid: index + 1 },
       });
     }
 
@@ -320,8 +325,11 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
     );
 
     const incomplete = createRfc64PrivateRuntimeEvidenceCollectorV1(sourceBuild);
-    for (const id of RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1.slice(0, -1)) {
-      incomplete.record(id, { executedRuntimeManifest: structuredClone(loaded) });
+    for (const [index, id] of RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1.slice(0, -1).entries()) {
+      incomplete.record(id, {
+        executedRuntimeManifest: structuredClone(loaded),
+        processIdentity: { hostIdentity: 'test-host', pid: index + 1 },
+      });
     }
     expect(() => incomplete.seal()).toThrow(/missing process: receiver-restart/u);
   });

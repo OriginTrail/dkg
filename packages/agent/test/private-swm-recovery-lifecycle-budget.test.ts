@@ -91,6 +91,7 @@ function harness(
     log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
     resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
     resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
+    rfc64LegacySwmGossipAllowedForContextGraph: () => true,
     createSwmTargetExecutorSessionV1: () => factory(),
     privateSnapshotWalks,
     syncSharedMemoryFromPeerDetailedExecution: LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,
@@ -134,10 +135,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
     expect(onRetry).toHaveBeenCalledTimes(budget === 0 ? 0 : 1);
     if (budget > 0) {
       expect(windows[1]).not.toBe(windows[0]);
-      expect(windows.map(window => window.scope)).toEqual([
-        { sharing: 'exclusive', owner: `private-swm:${CG}:peer-source:round-1` },
-        { sharing: 'exclusive', owner: `private-swm:${CG}:peer-source:round-2` },
-      ]);
+      expect(windows.every(window => window.fetchSharingIdentity === undefined)).toBe(true);
     }
   });
 
@@ -236,7 +234,6 @@ describe('private recovery job ownership and lifecycle outcome', () => {
       deadline: Number.MAX_SAFE_INTEGER,
       workAdmission: createSyncWorkAdmission(
         () => canAdmit ? 1_000 : 0,
-        { sharing: 'exclusive', owner: 'retained-revalidation-test' },
       ),
       fetchSyncPages: async (_ctx, _peer, _cg, _swm, phase) => {
         if (phase !== 'meta') throw new Error('Budget yield must precede snapshot transport');
@@ -253,6 +250,18 @@ describe('private recovery job ownership and lifecycle outcome', () => {
         putSnapshot: async () => { throw new Error('No snapshot write expected'); },
       },
       snapshotMaterializer: {
+        withKaWriteLock: async (
+          _contextGraphId: string,
+          _subGraphName: string | undefined,
+          _kaUal: string,
+          fn: () => Promise<unknown>,
+        ) => fn(),
+        readStoredHead: async () => ({
+          version: null,
+          shareOperationId: null,
+          shareOperationIds: [],
+          needsRepair: false,
+        }),
         isGraphAssetMaterialized,
         preserveStoredIdentityForSkippedAsset: async () => ({ outcome: 'replace' }),
       } as unknown as SharedMemorySnapshotMaterializer,

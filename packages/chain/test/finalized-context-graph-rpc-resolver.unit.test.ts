@@ -12,6 +12,7 @@ import {
   FINALIZED_CONTEXT_GRAPH_NAME_HASH_MAX_RETURN_BYTES_V1,
   FINALIZED_CONTEXT_GRAPH_TUPLE_MAX_RETURN_BYTES_V1,
   createFinalizedContextGraphRpcResolverV1,
+  readFinalizedContextGraphEmptyVmFactsInSnapshotV1,
 } from '../src/finalized-context-graph-rpc-resolver.js';
 import {
   FinalizedContextGraphReadErrorV1,
@@ -104,6 +105,65 @@ function readStub(
 
 describe('RFC-64 finalized Context Graph RPC resolver', () => {
   const signal = (): AbortSignal => new AbortController().signal;
+
+  it('decodes chain-owned empty-VM facts in one bounded pinned batch', async () => {
+    const hubAddress = `0x${'22'.repeat(20)}` as EvmAddressV1;
+    const iface = new ethers.Interface([
+      'function getContextGraph(uint256 contextGraphId) view returns (address owner, address[] participantAgents, uint256 metadataBatchId, bool active, uint256 createdAt, uint8 accessPolicy, uint8 publishPolicy, address publishAuthority, uint256 publishAuthorityAccountId)',
+      'function getNameHash(uint256 contextGraphId) view returns (bytes32)',
+      'function getContextGraphKaCount(uint256 contextGraphId) view returns (uint256)',
+      'function getAssetStorageAddress(string assetStorageName) view returns (address)',
+    ]);
+    const seen: string[] = [];
+    const read = vi.fn(async (calls: readonly { to: string; data: string; maxReturnBytes: number }[]) =>
+      calls.map((call) => {
+        const parsed = iface.parseTransaction({ data: call.data })!;
+        seen.push(parsed.name);
+        if (parsed.name === 'getAssetStorageAddress') {
+          expect(call.to).toBe(hubAddress);
+          expect(parsed.args[0]).toBe('ContextGraphStorage');
+          expect(call.maxReturnBytes).toBe(32);
+          return iface.encodeFunctionResult(parsed.name, [STORAGE]);
+        }
+        expect(call.to).toBe(STORAGE);
+        expect(parsed.args[0]).toBe(42n);
+        if (parsed.name === 'getContextGraph') {
+          expect(call.maxReturnBytes).toBe(FINALIZED_CONTEXT_GRAPH_TUPLE_MAX_RETURN_BYTES_V1);
+          return contextGraphResult();
+        }
+        expect(call.maxReturnBytes).toBe(32);
+        return parsed.name === 'getNameHash' ? nameHashResult() : iface.encodeFunctionResult(parsed.name, [0n]);
+      }));
+    const facts = await readFinalizedContextGraphEmptyVmFactsInSnapshotV1({
+      contextGraphId: '42', contextGraphStorageAddress: STORAGE, hubAddress,
+      session: { chainId: CHAIN_ID, blockNumber: '123' as BlockNumberV1, blockHash: BLOCK_HASH, read },
+    });
+    expect(read).toHaveBeenCalledOnce();
+    expect(seen).toEqual(['getContextGraph', 'getNameHash', 'getContextGraphKaCount', 'getAssetStorageAddress']);
+    expect(facts).toEqual({
+      active: true, accessPolicy: 1, nameHash: NAME_HASH,
+      participantAgents: [PARTICIPANT], kaCount: 0n, contextGraphStorageAddress: STORAGE,
+    });
+  });
+
+  it('rejects non-canonical empty-VM inventory and Hub results', async () => {
+    const canonical = [
+      contextGraphResult(), nameHashResult(),
+      ABI.encode(['uint256'], [0n]), ABI.encode(['address'], [STORAGE]),
+    ];
+    for (const index of [2, 3]) {
+      const encoded = [...canonical];
+      encoded[index] += '00';
+      await expect(readFinalizedContextGraphEmptyVmFactsInSnapshotV1({
+        contextGraphId: '42', contextGraphStorageAddress: STORAGE,
+        hubAddress: `0x${'22'.repeat(20)}` as EvmAddressV1,
+        session: {
+          chainId: CHAIN_ID, blockNumber: '123' as BlockNumberV1, blockHash: BLOCK_HASH,
+          read: async () => encoded,
+        },
+      })).rejects.toMatchObject({ code: 'malformed-return' });
+    }
+  });
 
   it('executes the two ABI reads at one transport anchor and decodes the policy tuple', async () => {
     const read = readStub();

@@ -14,12 +14,15 @@ import { createServer, type Server } from 'node:http';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
   RpcRequestGovernor,
+  ChainRpcTransportError,
+  EVMChainAdapter,
   rpcUsageWindowTotal,
+  snapshotProcessRpcUsage,
 } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '@origintrail-official/dkg-agent';
 import { createPublisherRuntimeFromAgent, type PublisherRuntime } from '../src/publisher-runner.js';
@@ -89,6 +92,69 @@ describe('publisher runtime drainRpcUsage — REAL runtime, real adapters, loopb
     await loopback?.close().catch(() => {});
     if (dataDir) await rm(dataDir, { recursive: true, force: true });
     runtime = null; agent = null; store = null; loopback = null; dataDir = null;
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('constructs multiple serial wallets whose healthy reads take more than a minute altogether', async () => {
+    dataDir = await mkdtemp(join(tmpdir(), 'pub-serial-startup-'));
+    await writeFile(join(dataDir, 'publisher-wallets.json'), JSON.stringify({ wallets: WALLETS }));
+    store = await createTripleStore({ backend: 'oxigraph' });
+    vi.useFakeTimers();
+    const identities = vi.spyOn(EVMChainAdapter.prototype, 'getIdentityId')
+      .mockImplementation(() => new Promise<bigint>((resolve) => {
+        setTimeout(() => resolve(1n), 40_000);
+      }));
+    const pending = createPublisherRuntimeFromAgent({
+      dataDir, store, keypair: await generateEd25519Keypair(),
+      chainBase: projectRuntimeEvmChainConfig({
+        rpcUrl: 'http://127.0.0.1:1', hubAddress: HUB, chainId: 'evm:31337',
+      })!,
+    });
+    const outcome = pending.then((value) => ({ value }), (error: unknown) => ({ error }));
+    await vi.waitFor(() => expect(identities).toHaveBeenCalledTimes(1));
+    await vi.advanceTimersByTimeAsync(40_000);
+    await vi.waitFor(() => expect(identities).toHaveBeenCalledTimes(2));
+    await vi.advanceTimersByTimeAsync(40_000);
+    const result = await outcome;
+    expect(result).not.toHaveProperty('error');
+    if ('value' in result) runtime = result.value;
+    expect(runtime?.walletIds).toHaveLength(2);
+  });
+
+  it('recovers publisher construction after transient local admission failure without changing the governor', async () => {
+    loopback = await startLoopback();
+    dataDir = await mkdtemp(join(tmpdir(), 'pub-startup-admission-'));
+    await writeFile(join(dataDir, 'publisher-wallets.json'), JSON.stringify({ wallets: WALLETS }));
+    store = await createTripleStore({ backend: 'oxigraph' });
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 1_000,
+      foregroundReservePercent: 80,
+      burstRequests: 1_000,
+      maxQueueSize: 32,
+      startupJitterMs: 0,
+    });
+    const admit = vi.spyOn(governor, 'acquireActiveRequest')
+      .mockRejectedValueOnce(new ChainRpcTransportError(
+        'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
+        'Hub.getContractAddress(Identity) chainId validation waited 4000ms for local RPC admission and was not sent',
+      ));
+    runtime = await createPublisherRuntimeFromAgent({
+      dataDir,
+      store,
+      keypair: await generateEd25519Keypair(),
+      chainBase: bindRuntimeRpcRequestGovernor(projectRuntimeEvmChainConfig({
+        rpcUrl: loopback.url,
+        hubAddress: HUB,
+        chainId: 'evm:31337',
+      })!, governor),
+    });
+    expect(runtime.walletIds).toHaveLength(WALLETS.length);
+    expect(admit.mock.calls.length).toBeGreaterThan(1);
+    expect(governor.snapshot().maxRequestsPerSecond).toBe(1_000);
+    expect(loopback.totalHits()).toBeGreaterThan(0);
+    expect(loopback.hits('eth_sendRawTransaction')).toBe(0);
+    expect(loopback.hits('eth_sendTransaction')).toBe(0);
   });
 
   it('shares one daemon-style governor across REAL agent and publisher adapters', async () => {
@@ -115,6 +181,7 @@ describe('publisher runtime drainRpcUsage — REAL runtime, real adapters, loopb
     // This is the same projection + process-state binding performed by the
     // daemon composition root before it constructs both consumers.
     const sharedChainConfig = bindRuntimeRpcRequestGovernor(projected!, governor);
+    const beforePublisher = snapshotProcessRpcUsage();
 
     runtime = await createPublisherRuntimeFromAgent({
       dataDir,
@@ -135,6 +202,12 @@ describe('publisher runtime drainRpcUsage — REAL runtime, real adapters, loopb
     expect(rpcUsageWindowTotal(usage!)).toBe(loopback.totalHits());
     for (const [method, count] of Object.entries(usage!.byMethod)) {
       expect(loopback.hits(method), `method ${method}`).toBe(count);
+    }
+    const afterPublisher = snapshotProcessRpcUsage();
+    for (const [method, count] of Object.entries(usage!.byMethod)) {
+      const before = beforePublisher.cumulative.adapterRoles[method]?.publisher_wallet ?? 0;
+      const after = afterPublisher.cumulative.adapterRoles[method]?.publisher_wallet ?? 0;
+      expect(after - before, `publisher role method ${method}`).toBe(count);
     }
 
     // Delta semantics survive the runtime boundary: second drain is empty.

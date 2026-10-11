@@ -18,12 +18,14 @@ Use these routes when you want a node running, an agent connected, memory operat
 | Run a local LLM through the DKG MCP tools | [Local LLM with DKG](local-llm.md) |
 | Give a coding agent an exact local-LLM startup procedure | [Local LLM agent runbook](local-llm-agent-runbook.md) |
 | Write, publish, and query knowledge | [Publish and Query](publish-and-query.md) |
+| Publish large text or external content pointers | [Large Content](large-content.md) |
 | Drive named Knowledge Asset lifecycle commands | [Knowledge Asset Lifecycle CLI](knowledge-asset-lifecycle.md) |
 | Configure async publisher wallets | [Async Publisher Wallets](async-publisher-wallets.md) |
 | Import, export, and verify OKF bundles | [OKF Import, Export, and Verify](okf.md) |
 | Fund testnet wallets | [Funding](funding.md) |
 | Manage Publishing Conviction Accounts | [Publishing Conviction](publishing-conviction.md) |
 | Configure relays and peer reachability | [Relays and Peers](relays-and-peers.md) |
+| Bootstrap an edge's registry index from network relays or pinned cores | [Authority Index Snapshots](authority-index-snapshots.md) |
 | Expose the storage SPARQL endpoint | [Storage SPARQL HTTP](storage-sparql-http.md) |
 | Manually subscribe a host-mode node | [Host-Mode Manual Subscribe](host-mode-manual-subscribe.md) |
 | Update or roll back | [Updates and Rollback](updates-and-rollback.md) |

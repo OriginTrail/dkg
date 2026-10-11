@@ -7,8 +7,8 @@
  * genuinely differs — no memory-provider slot, no HTTP server, many concurrent
  * resident sessions — the type names say so rather than pretending parity.
  *
- * See agent-docs/adapters/prime-agent/DESIGN.md for the reasoning and
- * .ai/adr/0007-prime-agent-adapter-transport.md for the transport decision.
+ * See packages/adapter-prime-agent/docs/DESIGN.md for the reasoning and
+ * docs/adr/0007-prime-agent-adapter-transport.md for the transport decision.
  */
 
 /** Adapter-level configuration persisted by the daemon plugin. */

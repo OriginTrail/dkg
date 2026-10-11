@@ -132,4 +132,64 @@ describe('HermesDkgClient', () => {
     expect(body.runtime.ready).toBe(false);
   });
 
+  // Real, small deadlines: a 20 ms default class and a 1 s turn class. The stub
+  // daemon answers after `latencyMs` unless the request's signal aborts first, in
+  // which case it rejects with the abort reason, as fetch does.
+  const slowDaemon = (latencyMs: number, respond: () => Response) =>
+    ((_url: string | URL | Request, init?: RequestInit) => new Promise<Response>((resolve, reject) => {
+      const timer = setTimeout(() => resolve(respond()), latencyMs);
+      init?.signal?.addEventListener('abort', () => {
+        clearTimeout(timer);
+        reject(init.signal!.reason);
+      }, { once: true });
+    })) as typeof fetch;
+  const json = (body: unknown) => () => new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+
+  it('an agent turn that outlasts the default timeout is not reported as failed', async () => {
+    const client = new HermesDkgClient({
+      timeoutMs: 20,
+      turnTimeoutMs: 1_000,
+      fetchImpl: slowDaemon(80, json({ ok: true, text: 'late reply' })),
+    });
+
+    await expect(client.sendHermesMessage({ text: 'hi', correlationId: 'c1' } as any))
+      .resolves.toMatchObject({ text: 'late reply' });
+  });
+
+  it('a health read with the same latency still times out (control)', async () => {
+    const client = new HermesDkgClient({
+      timeoutMs: 20,
+      turnTimeoutMs: 1_000,
+      fetchImpl: slowDaemon(80, json({ ok: true })),
+    });
+
+    await expect(client.getHermesChannelHealth()).rejects.toMatchObject({ name: 'TimeoutError' });
+  });
+
+  it('keeps a streamed turn open past the default timeout', async () => {
+    const encoder = new TextEncoder();
+    const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          init?.signal?.addEventListener('abort', () => controller.error(init.signal!.reason), { once: true });
+          controller.enqueue(encoder.encode('data: {"delta":"a"}\n\n'));
+          setTimeout(() => {
+            controller.enqueue(encoder.encode('data: {"delta":"b"}\n\n'));
+            controller.close();
+          }, 80);
+        },
+      });
+      return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    }) as typeof fetch;
+    const events: unknown[] = [];
+    const client = new HermesDkgClient({ timeoutMs: 20, turnTimeoutMs: 1_000, fetchImpl });
+
+    await client.streamHermesMessage({ text: 'hi', correlationId: 'c1' } as any, (event) => events.push(event));
+
+    expect(events).toEqual([{ delta: 'a' }, { delta: 'b' }]);
+  });
+
 });

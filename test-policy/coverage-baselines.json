@@ -298,6 +298,20 @@
         }
       }
     },
+    "node-store": {
+      "measured": {
+        "lines": 96.91,
+        "functions": 99.08,
+        "branches": 92.83,
+        "statements": 95.56
+      },
+      "thresholds": {
+        "lines": 95,
+        "functions": 98,
+        "branches": 91,
+        "statements": 94
+      }
+    },
     "node-ui": {
       "measured": {
         "lines": 74.88,

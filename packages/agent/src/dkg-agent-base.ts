@@ -1,3 +1,8 @@
+
+export { createListContextGraphsCacheInvalidatingStore } from './internal/context-graph-cache-invalidating-store.js';
+import type { VmRecoveryCoreTransportPreferencePolicy } from './vm-recovery-core-transport-preference.js';
+import { VmRecoveryTransportBudgetPolicy } from './vm-recovery-transport-budget-policy.js';
+import { VmRecoveryStreamSetbackPolicy } from './vm-recovery-stream-setback-policy.js';
 import type { RandomSamplingRuntime } from './random-sampling-runtime.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -13,6 +18,10 @@ import type { RandomSamplingRuntime } from './random-sampling-runtime.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
+import { PeerCapabilityRegistry } from './p2p/peer-capability.js';
+import { ACKCandidateDiscoveryCoordinator } from './p2p/ack-candidate-discovery.js';
+import type { StorageACKEndpoint } from './p2p/storage-ack-endpoint.js';
+import { StorageACKRegistrationRuntime } from './p2p/storage-ack-registration-runtime.js';
 import {
   openRfc64PersistenceV1,
   type Rfc64PersistenceV1,
@@ -36,8 +45,12 @@ import type { Rfc64CatalogShadowObservabilityRuntimeV1 } from
   './rfc64/catalog-shadow-observability-v1.js';
 import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
+import { ContextGraphSubscriptionPersistScheduler } from './context-graph-subscription-persist-scheduler.js';
+import { GossipSession } from './gossip-session.js';
 import { ContextGraphBindingState } from './context-graph-binding-state.js';
+import { SlotFactsIndex } from './context-graph-claim-proof.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
+import { RollingSubscriptionChecks } from './context-graph-subscription-rolling-checks.js';
 import type { CoalescingRecurringTask } from './coalescing-recurring-task.js';
 import { SelectedSwmBootstrapAdmission } from './sync/selected-swm-bootstrap-admission.js';
 import {
@@ -51,16 +64,44 @@ import type {
   './rfc64/swm-recovery-coordinator-v1.js';
 import type { Rfc64SwmRecoveryRuntimeV1 } from
   './dkg-agent-rfc64-swm-recovery-runtime.js';
-import {
-  DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
-  LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
-  PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
-  contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
-  contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
+import  {
+  DKGNode,
+  ProtocolRouter,
+  GossipSubManager,
+  TypedEventBus,
+  DKGEvent,
+  LibP2PNetwork,
+  PeerResolver,
+  StubNetworkStateRegistry,
+  PROTOCOL_ACCESS,
+  PROTOCOL_PUBLISH,
+  PROTOCOL_SYNC,
+  PROTOCOL_QUERY_REMOTE,
+  PROTOCOL_STORAGE_ACK,
+  PROTOCOL_GET_CIPHERTEXT_CHUNK,
+  PROTOCOL_VERIFY_PROPOSAL,
+  PROTOCOL_JOIN_REQUEST,
+  PROTOCOL_SWM_SENDER_KEY,
+  PROTOCOL_SWM_UPDATE,
+  PROTOCOL_SWM_SHARE_ACK,
+  PROTOCOL_SWM_HOST_CATCHUP,
+  PROTOCOL_MESSAGE,
+  contextGraphPublishTopic,
+  contextGraphWorkspaceTopic,
+  contextGraphAppTopic,
+  contextGraphUpdateTopic,
+  contextGraphFinalizationTopic,
+  contextGraphDataGraphUri,
+  contextGraphMetaGraphUri,
+  contextGraphWorkspaceGraphUri,
+  contextGraphWorkspaceMetaGraphUri,
   contextGraphSharedMemoryUri,
-  contextGraphVerifiableMemoryUri, contextGraphVerifiableMemoryMetaUri,
-  contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
+  contextGraphVerifiableMemoryUri,
+  contextGraphVerifiableMemoryMetaUri,
+  contextGraphDataUri,
+  contextGraphMetaUri,
+  assertionLifecycleUri,
+  contextGraphAssertionUri,
   deriveCuratorDidFromCgId,
   MemoryLayer,
   computeACKDigest,
@@ -70,19 +111,35 @@ import {
   computeGossipSigningPayload,
   GOSSIP_ENVELOPE_VERSION,
   GOSSIP_TYPE_WORKSPACE_PUBLISH,
-  encodeFinalizationMessage, type FinalizationMessageMsg,
-  decodeGossipEnvelope, type GossipEnvelopeMsg,
-  decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
-  decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
-  getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
-  Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
+  encodeFinalizationMessage,
+  type FinalizationMessageMsg,
+  decodeGossipEnvelope,
+  type GossipEnvelopeMsg,
+  decodeEncryptedWorkspacePayload,
+  ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
+  decodeSwmSenderKeyMessage,
+  SWM_SENDER_KEY_MESSAGE_TYPE,
+  getGenesisQuads,
+  computeNetworkId,
+  SYSTEM_CONTEXT_GRAPHS,
+  DKG_ONTOLOGY,
+  Logger,
+  createOperationContext,
+  sparqlString,
+  escapeSparqlLiteral,
+  isSafeIri,
+  assertSafeIri,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
   isTrustLevelQuad,
-  buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, type AuthorAttestationTypedData,
-  buildAssertionSealQuads, buildAssertionPublishReceiptQuads,
-  parseAssertionSealQuads, type AssertionSeal,
+  buildAuthorAttestationTypedData,
+  AUTHOR_SCHEME_VERSION_V1,
+  type AuthorAttestationTypedData,
+  buildAssertionSealQuads,
+  buildAssertionPublishReceiptQuads,
+  parseAssertionSealQuads,
+  type AssertionSeal,
   WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
   WORKSPACE_RECIPIENT_ENCRYPTION_KEY_PURPOSE,
   computeWorkspaceAgentEncryptionKeyProofPayload,
@@ -113,7 +170,12 @@ import {
   ratchetSwmSenderChainKey,
   uint64ForProto,
   SWM_SENDER_KEY_SKIPPED_MESSAGE_CACHE_LIMIT,
-  type DKGNodeConfig, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
+  type DKGNodeConfig,
+  type OperationContext,
+  type GetView,
+  type AssertionDescriptor,
+  type AssertionEvent,
+  type AssertionState,
   type SwmSenderKeyMessageMsg,
   type SwmSenderKeyPackageAckReasonCode,
   type SwmSenderKeyPackageMsg,
@@ -131,13 +193,11 @@ import {
   ciphertextChunkStoreGraph,
   ciphertextChunkStoreSubject,
   CIPHERTEXT_CHUNK_PREDICATE,
-  type SubscriptionSource,
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
-  isSparqlUpdateOperation,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, isExternalBackend, isStoreOperationNotStarted, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions, type SortedGraphSetSource } from '@origintrail-official/dkg-storage';
-import { bindContextGraphAuthorityReader, emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReaderCapability, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
+import { GraphManager, PrivateContentStore, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions } from '@origintrail-official/dkg-storage';
+import { bindContextGraphAuthorityReader, emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReaderCapability, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type KnowledgeAssetVersionSnapshot, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -223,6 +283,7 @@ import {
   verifyCgDiscoveryBeacon,
 } from './swm/cg-discovery-beacon.js';
 import { DiscoveryRateLimit } from './swm/discovery-rate-limit.js';
+import { NamedKaRecoveryPendingLog } from './named-ka-recovery-pending-log.js';
 import {
   decodeSwmHostCatchupRequest,
   encodeSwmHostCatchupRequest,
@@ -278,9 +339,10 @@ import {
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
-import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
+import { FinalizationHandler } from './finalization-handler.js';
 import {
   reconcileContextGraph,
+  RecentReconcileEvidenceMap,
   RecentUalSet,
   type VmReconcileSchedulingRuntime,
   type ChainReconcilerDeps,
@@ -288,6 +350,7 @@ import {
 } from './chain-reconciler.js';
 import type { ContextGraphReconcileResult } from './vm-reconcile-service.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
+import { VmRefreshQueue } from './vm-refresh.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
 // type alias so listPendingJoinApprovalRetries() retains its old
@@ -386,8 +449,6 @@ import {
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationInternalStatus,
   type ContextGraphSubscriptionStore,
-  type VmReconcileNegativeRecord,
-  type VmReconcilePeerTopology,
   type SelectedVmReconcileCursorRecord,
   type VmReconcileRotationRecord,
   type ContextGraphMemberPrincipalType,
@@ -438,6 +499,15 @@ import { ContextGraphMetaProjection } from './context-graph-meta-projection.js';
 import { ContextGraphJoinAdmissionLockManager } from './context-graph-join-admission-lock.js';
 import { ContextGraphMembershipMutationStore } from './context-graph-membership-mutation.js';
 import { LocalContextGraphProvenance } from './local-context-graph-provenance.js';
+import { createVmPromotionAuditStatus, type VmPromotionAuditStatus } from './vm-promotion-audit.js';
+import type {
+  ContextGraphStorageDiscovery,
+  OnChainContextGraphFacts,
+} from './context-graph-storage-discovery.js';
+import {
+  resolveChainAuthorityReadBudgets,
+  type ChainAuthorityReadBudgets,
+} from './chain-authority-read-budgets.js';
 import type { DKGAgent } from './dkg-agent.js';
 
 function readNonNegativeNumberEnv(name: string, fallback: number): number {
@@ -452,199 +522,44 @@ function readPositiveSafeIntegerEnv(name: string, fallback: number): number {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-export function createListContextGraphsCacheInvalidatingStore(
-  innerStore: TripleStore,
-  invalidate: () => void,
-  // #1863 — `targetGraph` lets a single-graph destructive mutation (replaceSubject)
-  // dirty the projection by graph rather than by inserted quads (covers deletes).
-  markProjectionDirty?: (quads?: readonly Quad[], targetGraph?: string) => void,
-): TripleStore & Partial<SortedGraphSetSource> {
-  const invalidateAfterMutation = async <T>(
-    work: () => Promise<T>,
-    changed: (result: T) => boolean,
-    markDirty?: (result: T) => void,
-  ): Promise<T> => {
-    const result = await work();
-    if (changed(result)) {
-      invalidate();
-      markDirty?.(result);
-    }
-    return result;
-  };
-  const sortedSource = typeof (innerStore as Partial<SortedGraphSetSource>).listGraphsSorted
-    === 'function'
-    ? innerStore as TripleStore & SortedGraphSetSource
-    : null;
-  const wrapper: TripleStore
-    & Partial<SortedGraphSetSource>
-    & { readonly innerStore: TripleStore } = {
-    innerStore,
-    get queryCancellation() {
-      return innerStore.queryCancellation;
-    },
-    getPressureSnapshot() {
-      return innerStore.getPressureSnapshot?.();
-    },
-    insert(quads, options) {
-      return invalidateAfterMutation(
-        () => innerStore.insert(quads, options),
-        () => quads.length > 0,
-        () => markProjectionDirty?.(quads),
-      );
-    },
-    delete(quads, options) {
-      return invalidateAfterMutation(
-        () => innerStore.delete(quads, options),
-        () => quads.length > 0,
-        () => markProjectionDirty?.(),
-      );
-    },
-    deleteByPattern(pattern, options) {
-      return invalidateAfterMutation(
-        () => innerStore.deleteByPattern(pattern, options),
-        removed => removed > 0,
-        () => markProjectionDirty?.(),
-      );
-    },
-    deleteByPatternWithoutCount(pattern, options) {
-      return invalidateAfterMutation(
-        () => deleteByPatternWithoutCount(innerStore, pattern, options),
-        () => true,
-        () => markProjectionDirty?.(),
-      );
-    },
-    query(sparql, options) {
-      return invalidateAfterMutation(
-        () => innerStore.query(sparql, options),
-        () => isSparqlUpdateOperation(sparql),
-        () => markProjectionDirty?.(),
-      );
-    },
-    hasGraph(graphUri, options) {
-      return innerStore.hasGraph(graphUri, options);
-    },
-    createGraph(graphUri) {
-      return innerStore.createGraph(graphUri);
-    },
-    dropGraph(graphUri, options) {
-      return invalidateAfterMutation(
-        () => innerStore.dropGraph(graphUri, options),
-        () => true,
-        () => markProjectionDirty?.(),
-      );
-    },
-    replaceGraph: innerStore.replaceGraph
-      ? (graphUri, quads, options) => invalidateAfterMutation(
-          () => innerStore.replaceGraph!(graphUri, quads, options),
-          () => true,
-          () => markProjectionDirty?.(),
-        )
-      : undefined,
-    // Rootless KA materialization replaces the assertion graph and its UAL
-    // metadata subject in one backend transaction. Preserve that optional
-    // capability through the agent decorator just like replaceGraph/update;
-    // omitting it makes every capable production backend appear unsupported.
-    replaceGraphAndSubject: innerStore.replaceGraphAndSubject
-      ? (graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads, options) =>
-          invalidateAfterMutation(
-            () => innerStore.replaceGraphAndSubject!(
-              graphUri,
-              graphQuads,
-              metaGraphUri,
-              metadataSubject,
-              metadataQuads,
-              options,
-            ),
-            () => true,
-            () => markProjectionDirty?.([...graphQuads, ...metadataQuads]),
-          )
-      : undefined,
-    // #1863 — the async-lift publisher persists a job transition via this atomic
-    // single-subject replace. Preserve the optional capability through the agent
-    // decorator just like replaceGraph/replaceGraphAndSubject/update; omitting it
-    // makes every capable production backend appear unsupported, so the publisher
-    // silently falls back to non-atomic delete-then-insert and the fix is a no-op.
-    replaceSubject: innerStore.replaceSubject
-      ? (graphUri, subject, quads, options) =>
-          invalidateAfterMutation(
-            () => innerStore.replaceSubject!(graphUri, subject, quads, options),
-            () => true,
-            // Dirty the projection by the TARGET GRAPH, not the inserted quads:
-            // a subject replace can DELETE projection-relevant metadata (or insert
-            // non-relevant/empty rows), which quad-keyed dirtying would miss. The
-            // target graph covers both delete and insert (#1863). No-op for a
-            // non-CG graph (e.g. the control-plane graph), so no hot-path churn.
-            () => markProjectionDirty?.(undefined, graphUri),
-          )
-      : undefined,
-    // RFC-64 author publication moves a complete public-SWM projection and
-    // its bounded semantic control state through one backend CAS. Preserve the
-    // capability through this cache-invalidation decorator and invalidate only
-    // after a proven commit; a clean guard conflict changes nothing.
-    rfc64AuthorCommitCasV1: innerStore.rfc64AuthorCommitCasV1
-      ? async (input, options) => {
-          try {
-            return await invalidateAfterMutation(
-              () => innerStore.rfc64AuthorCommitCasV1!(input, options),
-              result => result === 'committed',
-              () => markProjectionDirty?.(),
-            );
-          } catch (error) {
-            // A rejected CAS may have committed before its response was lost.
-            // Only an outcome-tagged pre-dispatch refusal proves caches remain
-            // valid; every indeterminate failure dirties both cache layers.
-            if (!isStoreOperationNotStarted(error, 'rfc64AuthorCommitCasV1')) {
-              invalidate();
-              markProjectionDirty?.();
-            }
-            throw error;
-          }
-        }
-      : undefined,
-    listGraphs(options) {
-      return innerStore.listGraphs(options);
-    },
-    // This wrapper changes mutation-side cache state but not graph visibility,
-    // so forwarding the direct inner capability preserves the same public
-    // boundary while keeping the responder's identity-stable catalog path live.
-    listGraphsSorted: sortedSource
-      ? (options) => sortedSource.listGraphsSorted(options)
-      : undefined,
-    listGraphsByPrefix(prefix, options) {
-      return innerStore.listGraphsByPrefix
-        ? innerStore.listGraphsByPrefix(prefix, options)
-        : innerStore.listGraphs(options).then((graphs) => graphs.filter((graph) => graph.startsWith(prefix)));
-    },
-    deleteBySubjectPrefix(graphUri, prefix, options) {
-      return invalidateAfterMutation(
-        () => innerStore.deleteBySubjectPrefix(graphUri, prefix, options),
-        removed => removed > 0,
-        () => markProjectionDirty?.(),
-      );
-    },
-    countQuads(graphUri, options) {
-      return innerStore.countQuads(graphUri, options);
-    },
-    // Defined iff the inner store supports it, so the capability propagates
-    // truthfully up the decorator chain (callers gate on `typeof store.update
-    // === 'function'`). A server-side UPDATE can create/drop named graphs and
-    // mutate projected content, so it invalidates the listGraphs cache and
-    // marks the projection dirty just like insert/delete.
-    update: innerStore.update
-      ? (sparql, options) => invalidateAfterMutation(
-        () => innerStore.update!(sparql, options),
-        () => true,
-        () => markProjectionDirty?.(),
-      )
-      : undefined,
-    flush: innerStore.flush ? (options) => innerStore.flush!(options) : undefined,
-    close() {
-      return innerStore.close();
-    },
-  };
-  return wrapper;
-}
-
+/**
+ * Same-instance restart contract.
+ *
+ * `stop()` followed by `start()` on the SAME `DKGAgent` instance is a supported
+ * lifecycle: `start()` re-opens the runtimes `stop()` closed, and reuses
+ * `this.node` (whose `DKGNode.start()` creates a brand-new libp2p node every
+ * time). Every instance field is exactly one of three kinds:
+ *
+ * 1. Session-scoped, bound to the libp2p node and its `GossipSubManager`.
+ *    `start()` builds a new manager with zero subscriptions and zero handlers,
+ *    so anything that records "topic X is subscribed and handler Y is
+ *    installed on the manager" describes a dead object once the session ends.
+ *    The subscribe helpers short-circuit on these records, so a stale copy
+ *    makes a restarted node silently deaf: `gossipRegistered`,
+ *    `sharedMemoryGossipRegistered`, `swmHostModeSubscribed`,
+ *    `swmHostModeCurated` and `swmHostModeHandlers`. They live with that
+ *    manager in one {@link GossipSession}, retired as a unit by `stop()`.
+ * 2. Session-scoped, owned by a lifecycle runtime that `stop()` closes and
+ *    `start()` re-opens or rebuilds: the router, messenger, peer resolver and
+ *    network admission, the peer-sync session, the chain and VM-reconcile
+ *    schedulers and their lifecycle generation, the RFC-64 dispatcher and
+ *    catalog runtimes, the membership-persistence scheduler, the StorageACK
+ *    registration runtime, random sampling, the host-mode store, and every
+ *    timer.
+ * 3. Durable across `stop()`/`start()` (everything else): subscription INTENT
+ *    (`subscribedContextGraphs`, `config.syncContextGraphs`), disconnect
+ *    history (`lastSyncDisconnectedAt`), local agents, the beacon registry,
+ *    and the process-lifetime caches and counters. They are keyed by durable
+ *    identifiers (context graph id, peer id, agent address) and are
+ *    reconciled lazily.
+ *
+ * `start()` re-derives kind 1 from kind 3, so that a restart ends in the state
+ * a fresh process would reach from the same durable stores, plus the
+ * process-local (on-demand, or store-less) subscriptions that were live:
+ * `start()` snapshots live intents, then the durable startup read removes its
+ * rows from that plan and replays them behind the authority gate. The same
+ * subscription wiring applies the remaining process-local intents.
+ */
 export class DKGAgentBase {
   readonly wallet: AgentWallet;
   readonly node: DKGNode;
@@ -673,7 +588,12 @@ export class DKGAgentBase {
    * these overrides folded into the defaults.
    */
   protected _promoteQueueConfig?: Partial<AsyncPromoteQueueConfig>;
-  gossip!: GossipSubManager;
+  protected gossipSession = new GossipSession();
+  get gossip(): GossipSubManager { return this.gossipSession.requireManager(); }
+  set gossip(manager: GossipSubManager) {
+    this.gossipSession.retire();
+    this.gossipSession = new GossipSession(manager);
+  }
   router!: ProtocolRouter;
   messenger!: Messenger;
   networkAdmission: NetworkAdmissionService = new NetworkAdmissionService();
@@ -706,7 +626,7 @@ export class DKGAgentBase {
   protected readonly lastHostCatchupSeqno: Map<string, Map<string, number>> = new Map();
   /** Shared write locks so gossip writes serialize against local CAS writes. */
   protected readonly writeLocks: Map<string, Promise<void>>;
-  protected readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
   private swmTargetExecutorSessionFactoryV1?: SwmTargetExecutorSessionFactoryV1;
   protected sharedMemoryHandler?: InstanceType<typeof SharedMemoryHandler>;
   protected gossipPublishHandler?: GossipPublishHandler;
@@ -750,14 +670,20 @@ export class DKGAgentBase {
    * subscribed via beacon" from "restored on restart" should consult
    * the daemon log at subscribe time, not the live `subscriptionSource`
    * field.
+   *
+   * Session-scoped, together with {@link swmHostModeCurated} and
+   * {@link swmHostModeHandlers}: they describe handlers installed on the
+   * current `GossipSubManager` and are owned by its {@link GossipSession}
+   * (restart contract on {@link DKGAgentBase}). The persisted host-mode
+   * markers in `swmHostModeStore` are the durable side.
    */
-  protected readonly swmHostModeSubscribed = new Map<string, SubscriptionSource>();
+  protected get swmHostModeSubscribed() { return this.gossipSession.swmHostModeSubscribed; }
   /**
    * Cached curation classification for each host-mode handler. The handler
    * reads this map before dispatch so the strip can cover both legacy and
    * chunked envelopes without a store-backed policy lookup per message.
    */
-  protected readonly swmHostModeCurated = new Map<string, boolean>();
+  protected get swmHostModeCurated() { return this.gossipSession.swmHostModeCurated; }
   /**
    * Per-CG reference to the host-mode gossip handler closure. Kept
    * so we can call `gossip.offMessage(topic, handler)` to remove
@@ -771,7 +697,7 @@ export class DKGAgentBase {
    * Keyed by the canonical wire-form id (same invariant as
    * `swmHostModeSubscribed`); see {@link canonicalSwmHostModeKey}.
    */
-  protected readonly swmHostModeHandlers = new Map<string, (topic: string, data: Uint8Array, from: string) => void>();
+  protected get swmHostModeHandlers() { return this.gossipSession.swmHostModeHandlers; }
   /** Async lock for the host-mode reconciler so simultaneous calls don't double-subscribe. */
   protected hostModeReconcileInflight?: Promise<void>;
   /** Rotating cursor for bounded host-mode reconcile sweeps over known context graphs. */
@@ -793,6 +719,8 @@ export class DKGAgentBase {
    */
   protected readonly reconciledKaAuthors = new Set<string>();
   protected readonly log = new Logger('DKGAgent');
+  /** Rate limit for the "Named KA recovery ... remains pending" warning. */
+  protected readonly namedKaRecoveryPendingLog = new NamedKaRecoveryPendingLog();
 
   /**
    * Per-cgId count of SWM gossip publish failures. Populated by
@@ -958,6 +886,58 @@ export class DKGAgentBase {
    */
   static readonly SWM_ACK_QUORUM_TICK_MS = 5_000;
 
+  /** Maximum expired SWM operations selected in one cleanup batch. */
+  static readonly SWM_CLEANUP_BATCH_SIZE = 250;
+  /**
+   * Hard ceiling on how long the SWM TTL cleanup keeps a StorageACK copy
+   * whose Knowledge Asset never reached this core's VM (default 90 days,
+   * three mainnet epochs). The ACK promotion audit expires such a copy sooner
+   * once the chain proves the KA was never registered; this bound covers
+   * copies it has not proven yet. ACK signatures carry no chain deadline.
+   */
+  static readonly STORAGE_ACK_RETENTION_MAX_MS = readPositiveSafeIntegerEnv(
+    'DKG_STORAGE_ACK_RETENTION_MAX_MS',
+    90 * 24 * 60 * 60_000,
+  );
+  /** Period of the ACK promotion audit (core-hosted backfill + watchdog). */
+  static readonly VM_PROMOTION_AUDIT_INTERVAL_MS = readPositiveSafeIntegerEnv(
+    'DKG_VM_PROMOTION_AUDIT_INTERVAL_MS',
+    15 * 60_000,
+  );
+  /**
+   * A signed ACK copy this young may still land (quorum round plus inclusion),
+   * so a same-version request with different content cannot replace it yet.
+   */
+  static readonly STORAGE_ACK_PENDING_TX_WINDOW_MS = readPositiveSafeIntegerEnv(
+    'DKG_STORAGE_ACK_PENDING_TX_WINDOW_MS',
+    5 * 60_000,
+  );
+  /** An ACKed KA not in VM this long after its ACK is reported as stalled. */
+  static readonly VM_PROMOTION_STALL_THRESHOLD_MS = readPositiveSafeIntegerEnv(
+    'DKG_VM_PROMOTION_STALL_THRESHOLD_MS',
+    30 * 60_000,
+  );
+  /** Graphs one audit pass may record as core-hosted (bounded RPC). */
+  static readonly VM_PROMOTION_AUDIT_MAX_RECORDS = 32;
+  /**
+   * Per-KA chain registration reads one audit pass may spend. The pass stops
+   * at the first copy it has no budget for and the next pass resumes there,
+   * so the keyset rotation reaches every copy.
+   */
+  static readonly VM_PROMOTION_AUDIT_MAX_CHAIN_CHECKS = 32;
+  /** Ledgered copies one audit pass examines (local reads only), keyset paged. */
+  static readonly VM_PROMOTION_AUDIT_PAGE_SIZE = 1_000;
+  /** Max ledger rows checked for VM promotion in one graph-scoped store query. */
+  static readonly VM_PROMOTION_AUDIT_PROMOTED_BATCH_SIZE = 64;
+  /** Ledger namespaces one backfill pass pages through. */
+  static readonly VM_PROMOTION_BACKFILL_PAGE_SIZE = 256;
+  /** Per-asset VM reconciles one audit pass may run for landed copies. */
+  static readonly VM_PROMOTION_AUDIT_MAX_RECONCILES = 16;
+  /** Ledgered update copies one pending-update run pages through (keyset). */
+  static readonly VM_PROMOTION_UPDATE_PAGE_SIZE = 64;
+  /** Pending-update lane: chain reads and per-asset reconciles per run. */
+  static readonly VM_PROMOTION_UPDATE_MAX_CHECKS = 8;
+
   /**
    * Phase B — chain-driven VM reconciliation sweep cadence. The periodic sweep
    * is the safety net behind the live `KnowledgeAssetRegisteredToContextGraph`
@@ -989,14 +969,16 @@ export class DKGAgentBase {
     'DKG_VM_RECONCILE_CACHE_MAX_ENTRIES',
     1_000,
   );
-  static readonly VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS =
-    Math.max(1, Number(process.env['DKG_VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS']) || 2_000);
   static readonly VM_RECONCILE_CG_STATE_MAX_ENTRIES = readPositiveSafeIntegerEnv(
     'DKG_VM_RECONCILE_CG_STATE_MAX_ENTRIES',
     1_000,
   );
   /** Maximum peers connected/probed/transported by one exact-recovery pass. */
   static readonly VM_RECONCILE_EXACT_PEER_MAX = 3;
+  /** How long a clean legacy exact-filter miss suppresses one peer. */
+  static readonly VM_RECONCILE_EXACT_CAPABILITY_TTL_MS = 10 * 60_000;
+  /** Transport affinity is short-lived and never establishes asset coverage. */
+  static readonly VM_RECONCILE_PUBLIC_CORE_TRANSPORT_TTL_MS = 2 * 60_000;
   /** Bounded proof universe retained across passes; transport still uses the cap above. */
   static readonly VM_RECONCILE_EXACT_ROSTER_MAX = MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS;
   static readonly VM_RECONCILE_QUEUE_MAX_PENDING =
@@ -1008,6 +990,11 @@ export class DKGAgentBase {
    */
   static readonly VM_RECONCILE_BATCH_SIZE =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_BATCH_SIZE']) || 10);
+  /** Maximum bound graphs one timer sweep admits before yielding to live work. */
+  static readonly VM_RECONCILE_PERIODIC_BOUND_BATCH_SIZE = readPositiveSafeIntegerEnv(
+    'DKG_VM_RECONCILE_PERIODIC_BOUND_BATCH_SIZE',
+    8,
+  );
   /** Hard ceiling: RS heal is best-effort maintenance and must stay bounded. */
   static readonly RS_HEAL_BATCH_MAX = 64;
   /**
@@ -1050,6 +1037,59 @@ export class DKGAgentBase {
    */
   static readonly VM_RECONCILE_CONFIRMATION_DEPTH =
     Number(process.env['DKG_VM_RECONCILE_CONFIRMATION_DEPTH']) || 5;
+  /**
+   * #2858 — confirmed VM copies waiting for a refresh after a KA update, held
+   * process-wide. Each entry is one (graph, KA) pair, a few hundred bytes. A
+   * full set refuses a new target, which holds the update event lane at that
+   * event until targets settle or are given up.
+   */
+  static readonly VM_REFRESH_MAX_ENTRIES = 4096;
+  /**
+   * #2858 — age, from its first offer, at which a refresh target that never
+   * settled is given up (an unreachable holder, a graph whose pass no longer
+   * runs). It then no longer holds the event lane's persisted cursor or a
+   * slot, and its copy waits for the KA's next update or an asset fetch.
+   */
+  static readonly VM_REFRESH_MAX_AGE_MS = 24 * 60 * 60_000;
+  /**
+   * Refresh attempts one refresh worker runs for its graph. Each is a few
+   * chain reads plus one exact fetch that asks at most
+   * `VM_RECONCILE_EXACT_PEER_MAX` peers; more due targets continue in the
+   * graph's next pass.
+   */
+  static readonly VM_REFRESH_MAX_PER_PASS = 2;
+  /**
+   * Refresh workers running at once across graphs. A worker runs beside its
+   * graph's reconcile pass, never inside it, so this keeps the lane within the
+   * dispatcher's own concurrency.
+   */
+  static readonly VM_REFRESH_MAX_WORKERS = 2;
+  /**
+   * Wall clock for each network step of a refresh attempt that runs before
+   * any data moves: resolving the graph's curators, and connecting, probing
+   * and admitting one candidate peer. Without it these steps follow only the
+   * VM lifecycle signal, which never fires in normal operation, and a libp2p
+   * dial given a caller signal has no deadline of its own, so one peer that
+   * cannot be reached held the whole attempt. A peer past it is skipped for
+   * the next candidate; curator resolution past it falls back to connected
+   * peers.
+   */
+  static readonly VM_REFRESH_PEER_STEP_TIMEOUT_MS = 20_000;
+  /**
+   * Backstop for one whole refresh attempt, above the per-step bounds and the
+   * durable sync's own transfer budget for up to `VM_RECONCILE_EXACT_PEER_MAX`
+   * peers. An attempt past it is retried after backoff.
+   */
+  static readonly VM_REFRESH_ATTEMPT_TIMEOUT_MS = 10 * 60_000;
+  /**
+   * Delay before refreshing a copy whose workspace already stages a newer
+   * version. The lane that staged it (the publisher's own update, a core's
+   * StorageACK pending-update lane) promotes it within seconds of the
+   * confirmation. On a member nothing does (a curator's shared memory it
+   * recovered after a restart, for example), so the refresh takes over once
+   * this has passed; the graph's next reconcile pass starts it.
+   */
+  static readonly VM_REFRESH_STAGED_GRACE_MS = 30_000;
 
   static readonly LIST_CONTEXT_GRAPHS_CACHE_TTL_MS =
     // A full catalogue scan enriches every globally known graph and is
@@ -1081,6 +1121,8 @@ export class DKGAgentBase {
   /** Owns peer-event admission for the current node lifetime. */
   protected peerSyncSession = PeerSyncSession.stopped();
   protected swmCleanupTimer: ReturnType<typeof setInterval> | null = null;
+  /** Single-flight guard for SWM expiry cleanup. */
+  protected swmCleanupInFlight: Promise<number> | null = null;
   /** Phase B — periodic chain-driven VM reconciliation sweep timer. */
   protected vmReconcileTimer: ReturnType<typeof setInterval> | null = null;
   /** One host-owned runtime for foreground dispatch and retained sweep admission. */
@@ -1113,44 +1155,122 @@ export class DKGAgentBase {
     bindingGeneration: number;
   }>();
   protected selectedVmReconcileBindingGeneration = 0;
-  /** Phase B — bounded dedupe of recently-reconciled UALs (live-burst guard). */
+  /** Bounded root bookkeeping for sibling cleanup only; never currentness authority. */
   protected readonly recentReconciledUals = new RecentUalSet();
+  /** Bounded same-finalized-block leases; never durable across a stagnant head. */
+  protected readonly vmReconcileFinalizedSlotEvidence =
+    new RecentReconcileEvidenceMap<{
+      kaId: bigint;
+      snapshot: KnowledgeAssetVersionSnapshot;
+    }>();
   /**
-   * In-flight core-hosted recordings launched from the synchronous StorageACK
-   * pre-sign hook. Tracked so rejections are logged and graceful stop() can
-   * flush the host-only `coreHosted` flag before teardown.
+   * In-flight core-hosted recordings awaited by the StorageACK finality gate
+   * and the ACK promotion audit. Tracked so graceful stop() can flush the
+   * host-only `coreHosted` flag before teardown.
    */
   protected readonly coreHostRecordings = new Set<Promise<void>>();
   /** Stop-time gate: once true, ACK hooks must not start new core-host writes. */
   protected coreHostRecordingsClosed = false;
   /** Monotonic guard: continuations from abandoned drain generations must not persist after restart. */
   protected coreHostRecordingGeneration = 0;
-  /** Phase D/A4 — per-UAL retry damping after a chain ordinal has no matching local SWM snapshot. */
-  protected readonly vmReconcileNegativeCache = new Map<
-    string,
-    Omit<
-      VmReconcileNegativeRecord,
-      'cacheKey' | 'peerTopologyKey' | 'peerTopology' | 'cleanMissPeerIds'
-    > & {
-      peerTopology: VmReconcilePeerTopology;
-      cleanMissPeerIds: string[];
-    }
-  >();
-  /** Bounded access-ordered keys already consulted in the durable store. */
-  protected readonly vmReconcileNegativeCacheHydrated = new Map<string, string>();
-  protected readonly vmReconcileNegativeCacheKeysByCg = new Map<string, Set<string>>();
+  /**
+   * `<localCgId>\0<onChainId>` keys whose core-hosted row this process has
+   * written through the strict subscription-store path. The StorageACK
+   * finality gate pays that write once per graph, not once per ACK.
+   */
+  protected readonly coreHostedDurableRecords = new Set<string>();
+  /** One in-flight finality-gate recording per graph, shared by concurrent ACKs. */
+  protected readonly storageAckVmPromotionFlights = new Map<string, Promise<unknown>>();
+  /** Per-asset promotions requested by declined update ACKs, one per asset. */
+  protected readonly storageAckPriorVersionFlights = new Map<string, Promise<unknown>>();
+  /** Such promotions waiting for a slot. */
+  protected readonly storageAckPriorVersionQueue = new Map<string, {
+    candidate: import('./vm-promotion-audit.js').StorageAckLedgerCandidate;
+    onChainId: string;
+  }>();
+  /** `<namespace>\0<onChainId>` pairs whose ACK namespace binding this process verified. */
+  protected readonly storageAckNamespaceBindings = new Set<string>();
+  /** When the gate first declined a namespace for a dormant subscription row. */
+  protected readonly storageAckDormantSince = new Map<string, number>();
+  /** Core ACK promotion audit (core-hosted backfill + promotion watchdog). */
+  protected vmPromotionAuditStartupTimer: ReturnType<typeof setTimeout> | null = null;
+  protected vmPromotionAuditTimer: ReturnType<typeof setInterval> | null = null;
+  protected vmPromotionAuditInFlight: Promise<void> | null = null;
+  protected readonly vmPromotionAuditStatus: VmPromotionAuditStatus = createVmPromotionAuditStatus();
+  /** Discovered namespaces whose backfill concluded (recorded or ineligible) in this process. */
+  protected readonly vmPromotionBackfillSettled = new Set<string>();
+  /** Namespaces whose backfill failed, backing off so they cannot hold every pass's slots. */
+  protected readonly vmPromotionBackfillBackoff = new Map<string, { failures: number; nextAttemptAt: number }>();
+  /** Keyset cursors: the backfill pages ledger namespaces, the audit ledger copies. */
+  protected vmPromotionBackfillCursor = '';
+  protected vmPromotionAuditCursor = '';
+  protected vmPromotionUpdateCursor = '';
+  /** Pending-update promotion (fast lane, VM sweep cadence). */
+  protected vmPromotionUpdateTimer: ReturnType<typeof setInterval> | null = null;
+  protected vmPromotionUpdateInFlight: Promise<void> | null = null;
+  /** Per ACK-copy backoff for the pending-update lane. */
+  protected readonly vmPromotionUpdateBackoff = new Map<string, { failures: number; nextAttemptAt: number }>();
+  /** The signed-ACK ledger is initialized and pre-ledger copies grandfathered. */
+  protected storageAckLedgerReady = false;
+  protected storageAckLedgerReadyFlight: Promise<boolean> | null = null;
+  protected readonly storageACKRegistrationRuntime = new StorageACKRegistrationRuntime();
+  protected get storageAckEndpoint(): StorageACKEndpoint | null {
+    return this.storageACKRegistrationRuntime.endpoint;
+  }
+  protected get storageAckHandlerRegistered(): boolean {
+    return this.storageACKRegistrationRuntime.registered;
+  }
+  /** StorageACK declines per minute bucket and code, for the last hour. */
+  protected readonly storageAckDeclineBuckets = new Map<number, Map<string, number>>();
   /** Bounded, process-local clean-absence rotations for production VM recovery. */
   protected readonly vmReconcileRotationState = new Map<string, VmReconcileRotationRecord>();
+  protected readonly vmReconcileTransportBudgetPolicy = new VmRecoveryTransportBudgetPolicy();
+  /** What a busy or broken exact-batch stream costs its peer in a graph's recovery. */
+  protected readonly vmReconcileStreamSetbackPolicy = new VmRecoveryStreamSetbackPolicy();
+  /**
+   * #2858 — confirmed VM copies behind an on-chain update, queued by the
+   * `KnowledgeAssetUpdated` nudge and worked off by a refresh worker each
+   * graph's reconcile pass starts. Retries follow the recovery backoff (sweep
+   * interval, doubling, to the recovery ceiling).
+   */
+  protected readonly vmRefreshQueue = new VmRefreshQueue({
+    maxEntries: DKGAgentBase.VM_REFRESH_MAX_ENTRIES,
+    baseBackoffMs: DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS,
+    maxBackoffMs: DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
+    maxAgeMs: DKGAgentBase.VM_REFRESH_MAX_AGE_MS,
+  });
+  /** #2858 — the running refresh worker of each graph, at most one per graph. */
+  protected readonly vmRefreshWorkers = new Map<string, Promise<void>>();
   /** Next stable batch index to consider when the bounded rotation cache has waiters. */
   protected readonly vmReconcileRotationAdmissionCursorByCg = new Map<string, number>();
   /** Last resolved curator peers, used to keep the capped exact-recovery roster authoritative. */
   protected readonly vmReconcileCuratorPeersByCg = new Map<string, string[]>();
+  /**
+   * Process-local capability evidence for exact VM recovery. Entries are
+   * connection-scoped so a reconnect can reevaluate a peer after a rolling
+   * upgrade, and the map is bounded with the other VM recovery caches.
+   */
+  protected readonly vmReconcileExactPeerCapabilities = new Map<string, {
+    connectionKey: string;
+    expiresAt: number;
+  }>();
+  /** Owns process-local Core ordering and reusable-holder transitions. */
+  protected vmReconcilePublicCoreTransportPreferencePolicy!: VmRecoveryCoreTransportPreferencePolicy;
   /** Exclusive peer-id cursor used to walk oversized curator registries. */
   protected readonly vmReconcileCuratorPageCursorByCg = new Map<string, string>();
   /** Bounded per-principal persistence lanes keep compensation ordered without heap backlog. */
   protected readonly contextGraphMembershipPersistence = new ContextGraphMembershipPersistScheduler();
   protected contextGraphMembershipPersistenceShutdownBlocked = false;
   static readonly CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_MS = 5_000;
+  /**
+   * Per-context-graph subscription store writes. Membership and subscription
+   * lanes stay separate instances of one scheduler type: a join approval
+   * enqueues a subscription write from inside a membership write, which needs
+   * the two to make progress independently.
+   */
+  protected readonly contextGraphSubscriptionPersistence = new ContextGraphSubscriptionPersistScheduler();
+  protected contextGraphSubscriptionPersistenceShutdownBlocked = false;
+  static readonly CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT_MS = 5_000;
   /** Late exact responses must not mutate rotation state after shutdown begins. */
   protected vmReconcileRotationClosed = false;
   /** Monotonic guard: every VM reconcile continuation from an earlier node run stays stale. */
@@ -1194,8 +1314,6 @@ export class DKGAgentBase {
    */
   protected messengerOutboxTimer: ReturnType<typeof setInterval> | null = null;
   protected randomSamplingRuntime: RandomSamplingRuntime | null = null;
-  protected storageACKRegistrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
-  protected storageACKRegistrationRetryInFlight = false;
   // #894 / Codex PR #901 round-3 :1685: `ensureProfile()` is a mutating
   // multi-tx flow (createProfile + stake) that can legitimately outlast the
   // boot read-timeout. Guards against the boot path AND the StorageACK retry
@@ -1204,6 +1322,18 @@ export class DKGAgentBase {
   protected profileProvisioningInFlight = false;
   protected readonly config: ResolvedDKGAgentConfig;
   protected started = false;
+  /**
+   * Lazily resolved so partial test hosts built on the prototype (and any
+   * configuration that predates the resolved field) still receive the
+   * validated package defaults instead of `undefined` deadlines.
+   */
+  protected chainAuthorityReadBudgetsV1?: ChainAuthorityReadBudgets;
+  /** Every request-scoped chain authority read on this agent shares these deadlines. */
+  get chainAuthorityReadBudgets(): ChainAuthorityReadBudgets {
+    this.chainAuthorityReadBudgetsV1 ??= this.config?.chainAuthorityReadBudgets
+      ?? resolveChainAuthorityReadBudgets(this.config?.chainConfig);
+    return this.chainAuthorityReadBudgetsV1;
+  }
   /**
    * One OT-RFC-64 persistence owner for the inventory lease and every resource
    * protected by it. Agents without dataDir remain deliberately dormant.
@@ -1245,6 +1375,11 @@ export class DKGAgentBase {
   /** Bounded process-local terminal receiver failures, keyed by announced head. */
   protected readonly rfc64PublicCatalogReconciliationFailuresV1 =
     new Rfc64PublicCatalogReconciliationFailureRegistryV1();
+  /**
+   * Subscription INTENT per context graph. Durable across `stop()`/`start()`
+   * (restart contract on {@link DKGAgentBase}): only the gossip wiring derived
+   * from it is session-scoped and re-established by `start()`.
+   */
   protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
   /**
    * Process-local fence for a registration operation whose durable marker has
@@ -1264,18 +1399,47 @@ export class DKGAgentBase {
   /** Detached owner for post-readiness persisted-subscription authority recovery. */
   protected contextGraphSubscriptionAuthorityRecoveryRuntime?:
     CoalescingRecurringTask;
+  /** Detached owner that drains activation-cap subscriptions as slots become safe. */
+  protected contextGraphSubscriptionRehydrationPromotionRuntime?:
+    CoalescingRecurringTask;
+  /** Non-hosted rows currently consuming a rolling rehydration slot. */
+  protected readonly contextGraphSubscriptionRehydrationSlotIds = new Set<string>();
+  /** Non-hosted rows waiting behind the rolling rehydration cap. */
+  protected readonly contextGraphSubscriptionRehydrationPendingIds = new Set<string>();
+  /** Which waiting row rolling activation checks next, and how soon; made anew when a start retires the runtime before. */
+  protected contextGraphSubscriptionRollingChecks = new RollingSubscriptionChecks();
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistAppliedRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistCanceledRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistPendingRevisions = new Map<string, Set<number>>();
-  protected readonly contextGraphSubscriptionPersistChains = new Map<string, Promise<void>>();
   protected readonly listContextGraphsCache = new Map<string, {
     expiresAt: number;
     rows: Array<Record<string, unknown>>;
   }>();
   protected readonly listContextGraphsInFlight = new Map<string, Promise<Array<Record<string, unknown>>>>();
   protected listContextGraphsCacheGeneration = 0;
+
+  /**
+   * Ask rolling activation for one row the activation cap left dormant. The
+   * row is checked before the rest of the backlog, whose checks are paced.
+   */
+  protected requestContextGraphSubscriptionPromotion(contextGraphId: string): void {
+    this.contextGraphSubscriptionRollingChecks.prefer(contextGraphId);
+    this.contextGraphSubscriptionRehydrationPromotionRuntime?.request();
+  }
+
+  /**
+   * Close the runtime of rolling activation that a run before this start left.
+   * The order, the pace and the report totals of its checks end with it: an
+   * agent that is started again inherits none of them, while a row asked for
+   * during this start is remembered for the runtime that follows.
+   */
+  protected async retireContextGraphSubscriptionPromotionRuntime(): Promise<void> {
+    this.contextGraphSubscriptionRollingChecks = new RollingSubscriptionChecks();
+    await this.contextGraphSubscriptionRehydrationPromotionRuntime?.close();
+  }
+
   protected listContextGraphsCacheNow(): number {
     return performance.now();
   }
@@ -1329,12 +1493,29 @@ export class DKGAgentBase {
     );
     if (inserted.length > 0) {
       this.invalidateListContextGraphsCache();
-      this.contextGraphMetaProjection.markDirtyFromQuads(inserted);
     }
   }
-  protected readonly gossipRegistered = new Set<string>();
-  protected readonly sharedMemoryGossipRegistered = new Set<string>();
+  protected get gossipRegistered() { return this.gossipSession.gossipRegistered; }
+  protected get sharedMemoryGossipRegistered() { return this.gossipSession.sharedMemoryGossipRegistered; }
+
+  /** Retire the owner without touching durable subscription or host-mode intent. */
+  protected retireGossipSession(): void {
+    this.gossipSession.retire();
+    this.gossipSession = new GossipSession();
+  }
   protected readonly seenOnChainIds = new Set<string>();
+  /**
+   * Chain-public facts per on-chain Context Graph id (decimal), merged from the
+   * live `ContextGraphCreated` tail and ContextGraphStorage enumeration. Feeds
+   * the `onChain` field of `listContextGraphs` rows and the proof of off-chain
+   * on-chain id claims (indexed by committed name hash for that); never an
+   * authority input on its own.
+   */
+  protected readonly onChainContextGraphFacts = new SlotFactsIndex<OnChainContextGraphFacts>();
+  /** Lazily built ContextGraphStorage id enumeration (historical discovery). */
+  protected contextGraphStorageDiscovery?: ContextGraphStorageDiscovery | null;
+  /** One-shot guard for the "ContextGraphNameRegistry is not in the Hub" notice. */
+  protected contextGraphNameRegistryAbsenceLogged = false;
   /**
    * OT-RFC-38 / LU-6 Phase B — reverse index from `onChainHash` (the
    * curator-committed wire id) to the local cleartext id. Lets the
@@ -1496,6 +1677,8 @@ export class DKGAgentBase {
    * kept on the encrypted path for this adapter.
    */
   protected warnedMissingCgLivenessProbe = false;
+  /** Epoch ms of the last single-read authority fallback warning; see its claim. */
+  protected lastLiveAuthorityFallbackWarnAt = Number.NEGATIVE_INFINITY;
   /**
    * Issue #872 — companion cache for the per-CG `publishPolicy` enum
    * (`0` = curators-only, `1` = open). Populated lazily by the
@@ -1558,8 +1741,8 @@ export class DKGAgentBase {
    */
   protected readonly onChainParticipantAgentsCache = new Map<string, string[]>();
   protected readonly peerHealth = new Map<string, PeerHealth>();
-  protected readonly knownCorePeerIds = new Set<string>();
-  protected readonly knownCorePeerIdsV2 = new Set<string>();
+  protected readonly peerCapabilityRegistry = new PeerCapabilityRegistry();
+  protected readonly ackCandidateDiscovery = new ACKCandidateDiscoveryCoordinator(this.peerCapabilityRegistry);
   /**
    * Last chain-reported ACK quorum (ParametersStorage
    * minimumRequiredSignatures), refreshed by the V10 ACK provider before
@@ -1692,7 +1875,9 @@ export class DKGAgentBase {
   /**
    * Per-peer timestamp of the last time all live connections to that peer
    * were gone. Used to avoid suppressing reconnect catch-up with a
-   * `lastSuccessfulSyncAt` value from before an offline gap.
+   * `lastSuccessfulSyncAt` value from before an offline gap. Durable across
+   * `stop()`/`start()` on purpose: `stop()` records every still-connected peer
+   * here, and the restarted session reads it on reconnect.
    */
   protected readonly lastSyncDisconnectedAt = new Map<string, number>();
   /** Peer + selected-CG scoped seed/retry/terminal state for RFC-64 SWM. */
@@ -1700,6 +1885,7 @@ export class DKGAgentBase {
   protected syncReconcilerTimer: ReturnType<typeof setInterval> | null = null;
   /** A.4-lite+: periodic warm/pinned Core-connection reconcile (opt-in). */
   protected warmCoreTimer: ReturnType<typeof setInterval> | null = null;
+  protected authorityIndexSnapshotRuntime?: { close(): Promise<void> };
   /** Cores keep-alive-pinned on the last warm-core pass, so the next pass can
    *  unpin Cores that fell out of the selection (stale-pin / cap-drift guard). */
   protected warmedCores: Set<string> = new Set();
@@ -1759,6 +1945,8 @@ export class DKGAgentBase {
   */
   protected readonly pendingSenderKeyByAgent = new Map<string, PendingSenderKeyEntry[]>();
   protected readonly pendingSenderKeyDrainByAgent = new Map<string, Promise<number>>();
+  /** Agent-wide serialization for the single SWM sender-key state file. */
+  protected swmSenderKeyStateSaveQueue: Promise<void> = Promise.resolve();
   /** Per-CG serialized host-mode persistence queue (moved here from the host-mode cluster during the mixin split). */
   protected readonly hostModePersistenceQueues = new Map<string, Promise<void>>();
   /** System graph holding agent-registry triples (moved here so holder classes can reference it). */
@@ -1850,7 +2038,14 @@ export class DKGAgentBase {
     if (!this.config.dataDir || this.finalizationRuntime.getRecoveryStore()) return;
     const store = this.config.finalizationRecoveryStoreFactory
       ? await this.config.finalizationRecoveryStoreFactory(this.config.dataDir)
-      : await openSqliteFinalizationRecoveryStore(this.config.dataDir);
+      : await openSqliteFinalizationRecoveryStore(this.config.dataDir, {
+          onDisplaced: (displaced) => this.log.warn(
+            createOperationContext('system'),
+            `Finalization recovery parked ${displaced.ual} after `
+              + `${displaced.failureStreak} consecutive ${displaced.failureSignature} `
+              + `failures to admit ${displaced.admittedUal}; it is retried when the inbox has room`,
+          ),
+        });
     this.finalizationRuntime.attachRecoveryStore(store);
   }
 

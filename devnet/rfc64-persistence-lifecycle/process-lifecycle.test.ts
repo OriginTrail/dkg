@@ -34,6 +34,7 @@ test('timeout rejection waits for child close and preserves the primary failure'
   const registry = new ChildProcessRegistry();
   const child = new FakeChild();
   const tracked = registry.track(child);
+  assert.equal(registry.activeCount, 1);
   const primary = new Error('ready timeout');
   let settled = false;
   const rejection = terminateBeforeRejecting(
@@ -86,12 +87,16 @@ test('post-SIGKILL close deadline is bounded and prevents data removal', async (
     /did not emit close within 10ms after SIGKILL/,
   );
   assert.deepEqual(child.deliveredSignals, ['SIGKILL']);
+  assert.equal(registry.activeCount, 1);
 
   await assert.rejects(
     registry.terminateAllThenCleanup(() => { dataRemoved = true; }),
     /did not emit close within 10ms after SIGKILL/,
   );
   assert.equal(dataRemoved, false);
+  child.close(null, 'SIGKILL');
+  await Promise.resolve();
+  assert.equal(registry.activeCount, 0);
 });
 
 test('ordered cleanup aggregates termination and data-removal failures after close', async () => {

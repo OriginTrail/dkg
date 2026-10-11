@@ -1,3 +1,5 @@
+import { DEFAULT_PROMOTE_RETRY_TUNING } from './promote-retry-policy.js';
+import { isAutomaticallyRecoverablePostCommitFailure, missingStorageLaneForAuthorOnlyJob, promoteFailureTransition, requiresManualInspection } from './async-promote-recovery-policy.js';
 /**
  * `TripleStoreAsyncPromoteQueue` — RDF-backed persistent queue for
  * WM→SWM promotes. Mirrors the structure of
@@ -34,11 +36,13 @@ import {
   type AsyncPromoteQueueConfig,
   type PromoteTerminalJobClearer,
   type PromoteAttemptError,
+  type PromoteFailureTransition,
   type PromoteCommitMarker,
   type PromoteCommitMarkerStep,
   type PromoteJob,
   type PromoteJobState,
   type PromoteListFilter,
+  type PromotePostCommitRecoveryEvent,
   type PromoteRecoverySummary,
   type PromoteRequest,
   type PromoteResult,
@@ -54,13 +58,14 @@ import {
   PROMOTE_UNIQUENESS_KEY,
   classifyJobPayload,
   comparePromoteJobs,
-  defaultBackoffMs,
+  createDefaultPromoteBackoff,
   expectBindings,
   isTerminalPromoteJobState,
   jobSubject,
   literal,
   normalizePromoteAgentLane,
   parseJobPayload,
+  postCommitRecoveryExhaustedReason,
   promoteLaneConflictScope,
   promoteLaneScopesConflict,
   serializeJobRecord,
@@ -85,7 +90,6 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
    * control-graph URI instead of walletId.
    */
   private static readonly mutationQueues = new Map<string, Promise<void>>();
-  private static readonly DEFAULT_MAX_RETRIES = 5;
   // A managed-store recovery can legitimately reject every heartbeat and
   // bookkeeping write for several minutes. Keep the lease longer than the
   // worker's bounded bookkeeping-retry window so an in-process worker is not
@@ -102,6 +106,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   private readonly backoff: (attemptCount: number) => number;
   private workScheduler?: { onWorkAvailable(): void };
   private paused = false;
+  private nextIdleClaimAt = 0;
   private graphEnsured = false;
 
   constructor(
@@ -109,12 +114,12 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     config: AsyncPromoteQueueConfig = {},
   ) {
     this.graphUri = config.graphUri ?? DEFAULT_PROMOTE_CONTROL_GRAPH_URI;
-    this.maxRetries = config.maxRetries ?? TripleStoreAsyncPromoteQueue.DEFAULT_MAX_RETRIES;
+    this.maxRetries = config.maxRetries ?? DEFAULT_PROMOTE_RETRY_TUNING.maxRetries;
     this.effectiveLeaseMs = config.leaseMs ?? TripleStoreAsyncPromoteQueue.DEFAULT_LEASE_MS;
     this.now = config.now ?? (() => Date.now());
     this.idGenerator = config.idGenerator ?? (() => crypto.randomUUID());
     this.claimTokenGenerator = config.claimTokenGenerator ?? (() => crypto.randomUUID());
-    this.backoff = config.backoff ?? defaultBackoffMs;
+    this.backoff = config.backoff ?? createDefaultPromoteBackoff(config.rand);
   }
 
   // ===========================================================================
@@ -218,7 +223,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       if (await this.abandonIfMissingStorageLane(job, now)) {
         throw new Error(`Cannot recover job ${jobId}: ${this.missingStorageLaneReason()}`);
       }
-      if (this.requiresManualInspection(job)) {
+      if (requiresManualInspection(job)) {
         throw new Error(
           `Cannot recover job ${jobId}: ${job.reason ?? job.attempt.lastError?.message ?? 'manual inspection required'}`,
         );
@@ -256,6 +261,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       if (this.paused) return null;
 
       const now = this.now();
+      if (this.workScheduler && now < this.nextIdleClaimAt) return null;
       await this.reconcileExpiredRunning(now);
       const jobs = await this.listUnlocked(
         { state: [...ACTIVE_PROMOTE_STATES] },
@@ -279,7 +285,17 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       const eligible = claimableCandidates.filter((candidate) =>
         !running.some((active) => active.jobId !== candidate.jobId && this.jobsShareClaimLane(active, candidate)),
       );
-      if (eligible.length === 0) return null;
+      if (eligible.length === 0) {
+        // A hint only: bounded polling discovers out-of-process writes, while
+        // local writes clear it. Never sleep past a known retry or lease expiry.
+        this.nextIdleClaimAt = jobs.reduce((deadline, job) => {
+          for (const at of [job.attempt.nextRetryAt, job.lease?.expiresAt]) {
+            if (at !== undefined && at > now) deadline = Math.min(deadline, at);
+          }
+          return deadline;
+        }, now + 1_000);
+        return null;
+      }
 
       // listUnlocked sorted once; filtering preserves the claim order.
       const next = eligible[0]!;
@@ -370,49 +386,14 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     });
   }
 
-  async fail(jobId: string, claimToken: string, error: PromoteAttemptError): Promise<void> {
-    await this.withMutationLock(async () => {
+  async fail(jobId: string, claimToken: string, error: PromoteAttemptError): Promise<PromoteFailureTransition> {
+    return this.withMutationLock(async () => {
       await this.ensureGraph();
       const job = await this.requireJob(jobId);
       this.assertLeaseHeld(job, claimToken);
-
-      const now = this.now();
-      const attemptCount = Math.max(1, job.attempt.count);
-      const swmInserted = job.commitMarker?.swmInserted === true;
-      const canRetry = error.retryable && !swmInserted && attemptCount < job.attempt.maxRetries;
-
-      if (canRetry) {
-        const failedRetrying: PromoteJob = {
-          ...job,
-          state: 'failed_retrying',
-          updatedAt: now,
-          lease: undefined,
-          attempt: {
-            count: attemptCount,
-            maxRetries: job.attempt.maxRetries,
-            nextRetryAt: now + this.backoff(attemptCount),
-            lastError: error,
-          },
-        };
-        await this.writeJob(failedRetrying);
-        return;
-      }
-
-      const failed: PromoteJob = {
-        ...job,
-        state: 'failed',
-        updatedAt: now,
-        lease: undefined,
-        attempt: {
-          count: attemptCount,
-          maxRetries: job.attempt.maxRetries,
-          lastError: error,
-        },
-        reason: swmInserted
-          ? 'partial promote ambiguity: failed after SWM insert; needs operator inspection'
-          : job.reason,
-      };
-      await this.writeJob(failed);
+      const failure = promoteFailureTransition(job, error, this.now(), this.backoff);
+      await this.writeJob(failure.job);
+      return failure.transition;
     });
   }
 
@@ -518,6 +499,70 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     return { reclaimed, abandoned };
   }
 
+  async recoverPostCommitFailures(): Promise<PromotePostCommitRecoveryEvent[]> {
+    // No scheduler wake: every requeued row carries a future `nextRetryAt`
+    // that the worker's durable poll already honours.
+    return this.withMutationLock(async () => {
+      await this.ensureGraph();
+      return this.reconcilePostCommitFailures(this.now());
+    });
+  }
+
+  /**
+   * A post-commit failure is recorded only after the exact SWM replace was
+   * dispatched, so the promote may have committed. The publisher's promote is
+   * idempotent for exactly that case: a replay validates whatever the exact
+   * graph holds against the sealed payload and repairs the durable tail, or
+   * re-runs the commit when nothing landed. Re-running it is therefore the
+   * same recovery an operator performs through `recover()`, minus the reset
+   * of the attempt counter: the replay spends the job's own retry budget so
+   * a durable tail that keeps failing cannot loop forever.
+   */
+  private async reconcilePostCommitFailures(now: number): Promise<PromotePostCommitRecoveryEvent[]> {
+    const events: PromotePostCommitRecoveryEvent[] = [];
+    const failed = await this.listUnlocked(
+      { state: ['failed'] },
+      'publisher.asyncPromote.recoverPostCommit',
+    );
+    for (const job of failed) {
+      if (!isAutomaticallyRecoverablePostCommitFailure(job)) continue;
+      const attemptCount = Math.max(1, job.attempt.count);
+      const maxAttempts = job.attempt.maxRetries;
+      if (attemptCount >= maxAttempts) {
+        // One durable verdict: the `reason` keeps this row out of every later
+        // sweep while leaving explicit operator recovery available.
+        await this.writeJob({
+          ...job,
+          updatedAt: now,
+          reason: postCommitRecoveryExhaustedReason(attemptCount),
+        });
+        events.push({ jobId: job.jobId, action: 'exhausted', attempt: attemptCount, maxAttempts });
+        continue;
+      }
+      // Another active job already owns this assertion; leave the row for a
+      // later sweep rather than breaking the per-assertion uniqueness key.
+      const conflicting = await this.findActiveConflict(this.conflictLookupForStoredJob(job), job.jobId);
+      if (conflicting) continue;
+      const nextRetryAt = now + this.backoff(attemptCount);
+      const requeued: PromoteJob = {
+        ...job,
+        state: 'failed_retrying',
+        updatedAt: now,
+        lease: undefined,
+        attempt: {
+          count: attemptCount,
+          maxRetries: maxAttempts,
+          nextRetryAt,
+          lastError: job.attempt.lastError ? { ...job.attempt.lastError, retryable: true } : undefined,
+        },
+      };
+      await this.writeJob(requeued);
+      events.push({ jobId: job.jobId, action: 'requeued', attempt: attemptCount, maxAttempts, nextRetryAt });
+    }
+    return events;
+  }
+
+
   async pause(): Promise<void> {
     this.paused = true;
   }
@@ -529,6 +574,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
 
   readonly workScheduling = {
     attachScheduler: (scheduler: { onWorkAvailable(): void }): (() => void) => {
+      this.nextIdleClaimAt = 0;
       this.workScheduler = scheduler;
       return () => {
         if (this.workScheduler === scheduler) this.workScheduler = undefined;
@@ -555,6 +601,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   // ===========================================================================
 
   private notifyWorkAvailable(): void {
+    this.nextIdleClaimAt = 0;
     try {
       this.workScheduler?.onWorkAvailable();
     } catch {
@@ -653,29 +700,14 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   }
 
   private async writeJob(job: PromoteJob): Promise<void> {
+    this.nextIdleClaimAt = 0;
     await this.persistJobRecord(job);
     await this.store.flush?.();
   }
 
-  /**
-   * #1933 — persist a job transition as a single-subject atomic replace so a crash between
-   * the delete and the insert can never lose the job row (delete-then-insert is two separate
-   * commits; a crash after the delete commits but before the insert commits permanently
-   * strands the subject empty). Routed through the shared writer
-   * `replaceSubjectAtomicallyOrFallback` (#1938), which uses the storage capability
-   * `tryReplaceSubjectAtomically` (one commit boundary — the storage layer owns literal
-   * externalization, graph-set-index, changelog, and reserved-plane bookkeeping structurally,
-   * rather than a raw `update()` string that ChangelogStore would scan and false-reject).
-   * Mirrors the async-lift publisher's `persistJobRecord` (#1863/#1919), adapted to the promote
-   * job's SINGLE subject: there is no immutable request subject, so the request-first ordering
-   * the lift sibling needs is N/A.
-   *
-   * A store that cannot guarantee one commit boundary (no `replaceSubject`, or a
-   * non-transactional endpoint that refuses it) takes the shared writer's BOUNDED pre-#1933
-   * delete-then-insert fallback — still safe here because every same-process transition and
-   * read serializes under `withMutationLock`, so the transient window is masked in-process.
-   * `cancel` routes through this path (it retains the row as a `failed`/`cancelled` replace,
-   * never a delete), so the atomic replace preserves its retain semantics by construction.
+  /** Capable stores replace atomically; older stores use a subject-scoped delete/insert
+   * fallback protected from same-process observation by the mutation lock.
+   * Flush completes durability separately; storage owns the record bookkeeping.
    */
   private async persistJobRecord(job: PromoteJob): Promise<void> {
     // The serializer owns record shaping AND the fail-loud single-subject guard (it throws if
@@ -734,6 +766,12 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
         return { outcome: 'rejected', reason: 'unknown' };
       }
       if (!isTerminalPromoteJobState(job.state as PromoteJobState)) return { outcome: 'rejected', reason: 'nonterminal' };
+      // The recovery sweep owns this replay-safe tail until its budget is spent.
+      // A failed row is temporarily parked between sweeps, not eligible for clear.
+      if (isAutomaticallyRecoverablePostCommitFailure({ ...job, state: job.state as PromoteJobState })
+        && Math.max(1, job.attempt.count) < job.attempt.maxRetries) {
+        return { outcome: 'rejected', reason: 'nonterminal' };
+      }
       await this.deleteJob(jobId);
       return { outcome: 'cleared' };
     });
@@ -835,11 +873,6 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     return (job.formatVersion ?? 0) < ASYNC_PROMOTE_QUEUE_FORMAT_VERSION && job.request.agentAddress === undefined;
   }
 
-  private missingStorageLaneForAuthorOnlyJob(job: PromoteJob): boolean {
-    return (job.formatVersion ?? 0) < ASYNC_PROMOTE_QUEUE_FORMAT_VERSION
-      && job.request.agentAddress === undefined
-      && job.request.authorAgentAddress !== undefined;
-  }
 
   private missingStorageLaneReason(): string {
     return `missing storage lane for pre-v${ASYNC_PROMOTE_QUEUE_FORMAT_VERSION} author-scoped promote job; needs operator inspection`;
@@ -850,7 +883,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   }
 
   private async abandonIfMissingStorageLane(job: PromoteJob, now: number): Promise<boolean> {
-    if (!this.missingStorageLaneForAuthorOnlyJob(job)) return false;
+    if (!missingStorageLaneForAuthorOnlyJob(job)) return false;
     await this.abandonForManualInspection(
       job,
       now,
@@ -886,16 +919,6 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     await this.writeJob(abandonedJob);
   }
 
-  private requiresManualInspection(job: PromoteJob): boolean {
-    const reason = (job.reason ?? '').toLowerCase();
-    const lastError = (job.attempt.lastError?.message ?? '').toLowerCase();
-    return reason.includes('partial promote ambiguity')
-      || lastError.includes('partial promote ambiguity')
-      || reason.includes('legacy promote job')
-      || lastError.includes('legacy promote job')
-      || reason.includes('missing storage lane')
-      || lastError.includes('cannot prove the wm storage lane');
-  }
 
   /**
    * In-process mutex so concurrent queue mutations don't race the

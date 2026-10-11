@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import type { SourceKindHandler, SourcePreparationResult, SourceWorkerSource } from './source-worker.js';
+import { NODE_SQLITE_SUPPORTED_RANGE } from './sqlite/module-loader-v1.js';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const XSD_NS = 'http://www.w3.org/2001/XMLSchema#';
@@ -699,7 +700,7 @@ async function createSqliteClient(
     module = await import(moduleName);
   } catch (error) {
     throw new Error(
-      `Generic SQL source ${source.id} requires Node runtime support for node:sqlite: ${error instanceof Error ? error.message : String(error)}`,
+      `Generic SQL source ${source.id} requires Node.js ${NODE_SQLITE_SUPPORTED_RANGE} with node:sqlite support: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
 

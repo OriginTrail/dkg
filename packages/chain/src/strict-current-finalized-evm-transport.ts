@@ -36,6 +36,7 @@ import {
   parseStrictFinalizedAnchorV1,
   parseStrictFinalizedChainIdV1,
   postStrictFinalizedJsonRpcV1,
+  readStrictFinalityAnchorV1,
 } from './strict-current-finalized-evm-rpc-client.js';
 import type {
   DeadlineScopeV1,
@@ -174,8 +175,9 @@ async function executeEndpointAttempt(
     );
   }
 
-  const anchor = parseStrictFinalizedAnchorV1(
-    await rpc('eth_getBlockByNumber', Object.freeze(['finalized', false])),
+  const anchor = await readStrictFinalityAnchorV1(
+    rpc,
+    config.finalityConfirmations,
     'current finalized header',
   );
   const executeCallsAt = async (blockReference: unknown): Promise<readonly string[]> => {

@@ -80,6 +80,23 @@ describe('cli-rpc classifier consolidation (W4)', () => {
     ).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
   });
 
+  it('keeps a configured RPC URL (and its API key) out of the exhaustion message [GH#2945]', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const failing = {
+      broadcastTransaction: async () => {
+        const e: any = new Error('server response 503 (info={ "requestUrl": "https://rpc.example/v2/SECRET-API-KEY" })');
+        e.code = 'ECONNREFUSED';
+        throw e;
+      },
+    } as any;
+    const err: any = await sendCliRawTransactionWithFailover(writeContext([failing]), '0xsigned', '0xhash').catch((e) => e);
+
+    expect(err.code).toBe('RPC_ENDPOINTS_EXHAUSTED');
+    expect(err.message).not.toContain('SECRET-API-KEY');
+    expect(err.message).toContain('rpc.example');
+    expect(err.cause.message).toContain('SECRET-API-KEY');
+  });
+
   it('does NOT fail over (throws immediately) on a deterministic application error', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     let calls = 0;

@@ -59,6 +59,7 @@ describe('named KA publisher recovery wiring', () => {
         knowledgeAssetsContract: '0xABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD',
       },
     }));
+    const finalityGate = vi.fn(async () => true);
     // GH#2270 PR-3 r2 — the factories take a wallet→ADAPTER map, so tests supply one directly
     // instead of a publisher whose private `chain` field had to be asserted through.
     const publishers: PublisherChainAdapters = new Map([[walletId, {
@@ -69,7 +70,7 @@ describe('named KA publisher recovery wiring', () => {
       resolvePublishTransaction,
       resolveCanonicalFinalizationReceipt,
       // r14 — the create branch gates on finality like every other mined verdict.
-      isReceiptBlockFinalAndCanonical: vi.fn(async () => true),
+      isReceiptBlockFinalAndCanonical: finalityGate,
     } as unknown as ChainAdapter]]);
     const resolver = createKnowledgeAssetVmPublishRecoveryResolver(publishers);
 
@@ -84,7 +85,15 @@ describe('named KA publisher recovery wiring', () => {
       },
       broadcast: { txHash, walletId },
     } as LiftJobBroadcast;
-    const resolved = await resolver(job, { txHash, walletId });
+    const lookup = { txHash, walletId, operationKind: 'create' as const };
+    // Compatibility row: this adapter does not transport a canonicalReceipt on its generic
+    // verdict. Passing that verdict recovery into the named resolver must keep the established
+    // canonical-receipt + finality fallback unchanged.
+    const generic = await createChainProofResolver(publishers)(lookup);
+    expect(generic.status).toBe('recovered');
+    const verdictRecovery = generic.status === 'recovered' ? generic.recovery : undefined;
+    expect(verdictRecovery?.canonicalCreate).toBeUndefined();
+    const resolved = await resolver(job, lookup, verdictRecovery);
 
     // r24 (3820376690) — this read now carries the pass deadline as a second argument, so the
     // PAYLOAD is the observable rather than the call's arity.
@@ -107,7 +116,7 @@ describe('named KA publisher recovery wiring', () => {
       publishProof: { merkleRoot, authorAddress: walletId, txIndex: 4, operationKind: 'create' },
     });
 
-    await expect(createChainProofResolver(publishers)({ txHash, walletId })).resolves.toMatchObject({
+    expect(generic).toMatchObject({
       status: 'recovered',
       recovery: {
         finalization: {
@@ -118,6 +127,195 @@ describe('named KA publisher recovery wiring', () => {
     // r17 — the receipt-only lookup is no longer consulted at all (it cannot support a durable
     // finalize), so what this row pins is the UAL handling, not which lookup was called.
     expect(resolvePublishTransaction.mock.calls[0][0]).toBe(txHash);
+    expect(resolveCanonicalFinalizationReceipt).toHaveBeenCalledOnce();
+    expect(finalityGate).toHaveBeenCalledOnce();
+  });
+
+  it('carries one canonical CREATE proof through verdict and named finalization without re-reading it', async () => {
+    const txHash = `0x${'a1'.repeat(32)}` as `0x${string}`;
+    const blockHash = `0x${'b1'.repeat(32)}` as `0x${string}`;
+    const walletId = '0x1111111111111111111111111111111111111111';
+    const authorAddress = '0x3333333333333333333333333333333333333333';
+    const kaId = (BigInt(authorAddress) << 96n) | 7n;
+    const merkleRoot = `0x${'12'.repeat(32)}` as `0x${string}`;
+    const knowledgeAssetsContract = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
+    const publish = {
+      batchId: kaId,
+      kaId,
+      knowledgeAssetsContract,
+      merkleRoot: Buffer.from(merkleRoot.slice(2), 'hex'),
+      authorAddress,
+      startKAId: kaId,
+      endKAId: kaId,
+      txHash,
+      blockNumber: 77,
+      txIndex: 4,
+      blockTimestamp: 1_700_000_077,
+      publisherAddress: walletId,
+    };
+    const canonicalReceipt = {
+      txHash,
+      blockNumber: 77,
+      blockHash,
+      txIndex: 4,
+      merkleRoot: Buffer.from(merkleRoot.slice(2), 'hex'),
+      publisherAddress: walletId,
+      authorAddress,
+      batchId: kaId,
+      kaId,
+      startKAId: kaId,
+      endKAId: kaId,
+      knowledgeAssetsContract,
+    };
+    const duplicateReceiptRead = vi.fn(async () => {
+      throw new Error('carried evidence must make the second receipt read unreachable');
+    });
+    const duplicateHeaderRead = vi.fn(async () => {
+      throw new Error('carried evidence must make the second finality read unreachable');
+    });
+    const chain = {
+      chainId: 'evm:31337',
+      resolvePublishTransaction: vi.fn(async () => ({
+        status: 'confirmed' as const,
+        publish,
+        canonicalReceipt,
+      })),
+      resolveCanonicalFinalizationReceipt: duplicateReceiptRead,
+      isReceiptBlockFinalAndCanonical: duplicateHeaderRead,
+    } as unknown as ChainAdapter;
+    const publishers: PublisherChainAdapters = new Map([[walletId, chain]]);
+    const lookup = {
+      txHash,
+      walletId,
+      operationKind: 'create' as const,
+      publishIdentityKaId: kaId.toString(),
+    };
+    const generic = await createChainProofResolver(publishers)(lookup);
+    expect(generic.status).toBe('recovered');
+    const verdictRecovery = generic.status === 'recovered' ? generic.recovery : undefined;
+    expect(verdictRecovery?.canonicalCreate).toEqual({
+      txHash,
+      blockNumber: 77,
+      blockHash,
+      txIndex: 4,
+      merkleRoot,
+      publisherAddress: walletId,
+      authorAddress,
+      batchId: kaId.toString(),
+      kaId: kaId.toString(),
+      startKAId: kaId.toString(),
+      endKAId: kaId.toString(),
+      knowledgeAssetsContract,
+      chainId: 'evm:31337',
+    });
+
+    const job = {
+      status: 'failed',
+      request: {
+        jobType: 'knowledge-asset-vm-publish',
+        knowledgeAssetVmPublish: {
+          contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+          kaUal: `did:dkg:evm:31337/${authorAddress}/7`,
+          sealMerkleRoot: merkleRoot,
+          seal: { merkleRoot, authorAddress, reservedKaId: kaId.toString() },
+        },
+      },
+    } as never;
+    const named = await createKnowledgeAssetVmPublishRecoveryResolver(publishers)(
+      job,
+      lookup,
+      verdictRecovery,
+    );
+
+    expect(named).toMatchObject({
+      inclusion: { txHash, blockNumber: 77, blockHash },
+      finalization: {
+        txHash,
+        batchId: kaId.toString(),
+        publisherAddress: walletId,
+      },
+      publishProof: { merkleRoot, authorAddress, txIndex: 4, operationKind: 'create' },
+    });
+    expect(duplicateReceiptRead).not.toHaveBeenCalled();
+    expect(duplicateHeaderRead).not.toHaveBeenCalled();
+  });
+
+  it('refuses stale or mismatched transported CREATE evidence without hiding it behind a fresh read', async () => {
+    const txHash = `0x${'a1'.repeat(32)}` as `0x${string}`;
+    const otherHash = `0x${'a2'.repeat(32)}` as `0x${string}`;
+    const blockHash = `0x${'b1'.repeat(32)}` as `0x${string}`;
+    const otherBlockHash = `0x${'b2'.repeat(32)}` as `0x${string}`;
+    const walletId = '0x1111111111111111111111111111111111111111';
+    const authorAddress = '0x3333333333333333333333333333333333333333';
+    const kaId = (BigInt(authorAddress) << 96n) | 7n;
+    const merkleRoot = `0x${'12'.repeat(32)}` as `0x${string}`;
+    const otherRoot = `0x${'13'.repeat(32)}` as `0x${string}`;
+    const knowledgeAssetsContract = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
+    const liveFallback = vi.fn(async () => ({ status: 'not-found' as const }));
+    const publishers: PublisherChainAdapters = new Map([[walletId, {
+      chainId: 'evm:31337',
+      resolveCanonicalFinalizationReceipt: liveFallback,
+      isReceiptBlockFinalAndCanonical: vi.fn(async () => true),
+    } as unknown as ChainAdapter]]);
+    const lookup = {
+      txHash,
+      walletId,
+      operationKind: 'create' as const,
+      publishIdentityKaId: kaId.toString(),
+    };
+    const job = {
+      status: 'failed',
+      request: {
+        jobType: 'knowledge-asset-vm-publish',
+        knowledgeAssetVmPublish: {
+          contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+          kaUal: `did:dkg:evm:31337/${authorAddress}/7`,
+          sealMerkleRoot: merkleRoot,
+          seal: { merkleRoot, authorAddress, reservedKaId: kaId.toString() },
+        },
+      },
+    } as never;
+    const base = {
+      inclusion: { txHash, blockNumber: 77, blockHash },
+      finalization: {
+        mode: 'published' as const,
+        txHash,
+        ual: `did:dkg:evm:31337/${knowledgeAssetsContract}/${kaId}`,
+        batchId: kaId.toString(),
+        startKAId: kaId.toString(),
+        endKAId: kaId.toString(),
+        publisherAddress: walletId,
+      },
+      canonicalCreate: {
+        txHash,
+        blockNumber: 77,
+        blockHash,
+        txIndex: 4,
+        merkleRoot,
+        publisherAddress: walletId,
+        authorAddress,
+        batchId: kaId.toString(),
+        kaId: kaId.toString(),
+        startKAId: kaId.toString(),
+        endKAId: kaId.toString(),
+        knowledgeAssetsContract,
+        chainId: 'evm:31337',
+      },
+    } as const;
+    const mutations = [
+      { ...base, canonicalCreate: { ...base.canonicalCreate, txHash: otherHash } },
+      { ...base, canonicalCreate: { ...base.canonicalCreate, merkleRoot: otherRoot } },
+      { ...base, canonicalCreate: { ...base.canonicalCreate, kaId: (kaId + 1n).toString() } },
+      { ...base, canonicalCreate: { ...base.canonicalCreate, blockHash: otherBlockHash } },
+    ];
+
+    const resolver = createKnowledgeAssetVmPublishRecoveryResolver(publishers);
+    for (const mutated of mutations) {
+      await expect(resolver(job, lookup, mutated as never)).resolves.toBeNull();
+    }
+    // Present-but-conflicting evidence is a broken invariant, not a cache miss: do not conceal it
+    // with another chain read. A later recovery pass can establish a fresh verdict from scratch.
+    expect(liveFallback).not.toHaveBeenCalled();
   });
 
   it('resolves a queued UPDATE through verifyKAUpdate, bound to the intended root [GH#2270 r4]', async () => {

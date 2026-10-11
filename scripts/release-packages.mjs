@@ -5,17 +5,20 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { cliRuntimeAssetManifest } from './copy-cli-runtime-assets.mjs';
+import { writeBuildMetadata } from './lib/build-info.mjs';
+export { buildInfoPayload } from './lib/build-info.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const ROOT_DIR = path.resolve(path.dirname(SCRIPT_PATH), '..');
+export const NODE_SQLITE_SUPPORTED_RANGE = '>=22.13.0 <23.0.0 || >=23.4.0';
+export const NODE_SQLITE_INSTALL_GUARD = Object.freeze({
+  rootCommand: 'node packages/cli/scripts/verify-node-sqlite-runtime.mjs',
+  cliCommand: 'node ./scripts/verify-node-sqlite-runtime.mjs',
+  cliAsset: 'scripts/verify-node-sqlite-runtime.mjs',
+});
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
-}
-
-function writeJson(filePath, value) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 export function releasePackageJsonPaths(rootDir = ROOT_DIR) {
@@ -44,6 +47,97 @@ export function discoverPublishablePackages(rootDir = ROOT_DIR) {
       packageJsonPath,
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function sourceFilesUnder(packageDir) {
+  const files = [];
+  const ignored = new Set(['node_modules', '.git', 'dist', 'test', 'tests', '__tests__']);
+  const visit = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        if (!ignored.has(entry.name)) visit(path.join(directory, entry.name));
+        continue;
+      }
+      if (/\.(?:cjs|js|mjs|ts|tsx)$/.test(entry.name)) files.push(path.join(directory, entry.name));
+    }
+  };
+  visit(packageDir);
+  return files;
+}
+
+/**
+ * Every publishable package that imports node:sqlite must publish the same
+ * runtime floor as the shared loader. This prevents a new SQLite consumer
+ * from silently widening the install contract while engines remain advisory.
+ */
+export function findNodeSqliteEngineViolations(rootDir = ROOT_DIR) {
+  const violations = [];
+  for (const pkg of discoverPublishablePackages(rootDir)) {
+    const packageDir = path.dirname(pkg.packageJsonPath);
+    const importsNodeSqlite = sourceFilesUnder(packageDir).some((filePath) =>
+      fs.readFileSync(filePath, 'utf8').includes('node:sqlite'));
+    if (!importsNodeSqlite) continue;
+    const packageJson = readJson(pkg.packageJsonPath);
+    if (packageJson.engines?.node !== NODE_SQLITE_SUPPORTED_RANGE) {
+      violations.push({
+        path: path.relative(rootDir, pkg.packageJsonPath),
+        name: pkg.name,
+        actual: packageJson.engines?.node,
+        expected: NODE_SQLITE_SUPPORTED_RANGE,
+      });
+    }
+  }
+  return violations;
+}
+
+/**
+ * Older active updaters cannot execute checks added to the target release.
+ * Keep a target-owned install hook in both paths those updaters already run:
+ * npm installs the published CLI package, while git slots run the workspace
+ * root install before building and swapping the target checkout.
+ */
+export function findNodeSqliteInstallGuardViolations(rootDir = ROOT_DIR) {
+  const checks = [
+    {
+      path: 'package.json',
+      expected: NODE_SQLITE_INSTALL_GUARD.rootCommand,
+    },
+    {
+      path: 'packages/cli/package.json',
+      expected: NODE_SQLITE_INSTALL_GUARD.cliCommand,
+    },
+  ];
+  const violations = [];
+  for (const check of checks) {
+    const packageJsonPath = path.join(rootDir, check.path);
+    let actual;
+    try {
+      actual = readJson(packageJsonPath).scripts?.preinstall;
+    } catch {
+      actual = '<unreadable package metadata>';
+    }
+    if (actual !== check.expected) {
+      violations.push({
+        path: check.path,
+        actual: actual ?? '<missing>',
+        expected: check.expected,
+      });
+    }
+  }
+  const assetPath = path.join(
+    rootDir,
+    'packages',
+    'cli',
+    ...NODE_SQLITE_INSTALL_GUARD.cliAsset.split('/'),
+  );
+  if (!fs.existsSync(assetPath)) {
+    violations.push({
+      path: `packages/cli/${NODE_SQLITE_INSTALL_GUARD.cliAsset}`,
+      actual: '<missing>',
+      expected: '<present>',
+    });
+  }
+  return violations;
 }
 
 export function findReleaseVersionMismatches(version, rootDir = ROOT_DIR) {
@@ -91,26 +185,8 @@ function gitHead(rootDir) {
   return runCapture('git', ['rev-parse', 'HEAD'], { cwd: rootDir });
 }
 
-export function buildInfoPayload({ commit, distTag, ciRun = null, buildTime = new Date().toISOString() }) {
-  if (typeof distTag !== 'string' || distTag.length === 0) {
-    throw new Error('--dist-tag is required for build-info generation');
-  }
-  const resolvedCommit = commit && commit.length > 0 ? commit : 'unknown';
-  return {
-    commit: resolvedCommit,
-    commitShort: resolvedCommit.slice(0, 8) || '00000000',
-    buildTime,
-    distTag,
-    ciRun,
-  };
-}
-
-export function writeBuildInfo({ rootDir = ROOT_DIR, distTag, commit, ciRun, buildTime } = {}) {
-  const resolvedCommit = commit ?? gitHead(rootDir);
-  const payload = buildInfoPayload({ commit: resolvedCommit, distTag, ciRun, buildTime });
-  const outputPath = path.join(rootDir, 'packages', 'cli', 'build-info.json');
-  writeJson(outputPath, payload);
-  return { outputPath, payload };
+export function writeBuildInfo({ rootDir = ROOT_DIR, commit, ...identity } = {}) {
+  return writeBuildMetadata({ rootDir, commit: commit ?? gitHead(rootDir), ...identity });
 }
 
 function parseArgs(argv) {
@@ -307,6 +383,21 @@ function commandVerifyTag(args) {
 }
 
 /**
+ * The child processes each subcommand runs, with repository-relative working
+ * directories: `verify-pack` packs the CLI with npm, which runs its pack
+ * lifecycle (prepack) first. The subcommands run exactly these, and the CI
+ * routing guard's execution graph (scripts/lib/__tests__/ci-execution-graph.mjs)
+ * reads them as the commands a subcommand runs; release-packages.test.mjs
+ * checks the two agree.
+ */
+export const SUBCOMMAND_CHILD_COMMANDS = Object.freeze({
+  'verify-pack': Object.freeze([
+    Object.freeze({ command: 'npm', args: Object.freeze(['pack', '--dry-run', '--json']), cwd: 'packages/cli' }),
+  ]),
+});
+const [CLI_PACK] = SUBCOMMAND_CHILD_COMMANDS['verify-pack'];
+
+/**
  * The runtime-config assets that `@origintrail-official/dkg` (packages/cli)
  * must ship in its tarball. The manifest distinguishes repo-root files copied
  * at pack time from package-local runtime helpers. These assets were silently
@@ -314,18 +405,18 @@ function commandVerifyTag(args) {
  * would ship without them.
  */
 export function findMissingCliPackAssets(rootDir = ROOT_DIR, runner = runCapture) {
-  const cliDir = path.join(rootDir, 'packages', 'cli');
   // The fail-closed manifest supplies the explicit complete pack contract:
   // copied repo-root assets plus package-local runtime helpers. build-info.json
   // is generated by `release:build-info`, so it remains a release-only extension.
   const required = [
     ...cliRuntimeAssetManifest({ rootDir }).requiredPackAssets,
     'build-info.json',
+    NODE_SQLITE_INSTALL_GUARD.cliAsset,
   ];
   // `npm pack --dry-run --json` reports exactly what would be published,
   // running the package's `prepack` first — so this reflects the real tarball.
-  const raw = runner('npm', ['pack', '--dry-run', '--json'], {
-    cwd: cliDir,
+  const raw = runner(CLI_PACK.command, [...CLI_PACK.args], {
+    cwd: path.join(rootDir, CLI_PACK.cwd),
     shell: process.platform === 'win32',
   });
   const report = JSON.parse(raw);
@@ -337,8 +428,38 @@ export function findMissingCliPackAssets(rootDir = ROOT_DIR, runner = runCapture
   return required.filter((asset) => !packed.has(asset));
 }
 
+/**
+ * What `verify-pack` finds, stopping at the first check that fails: the
+ * node:sqlite install-guard violations, the node:sqlite engine violations,
+ * then the CLI tarball's missing runtime assets. `runner` runs its child
+ * commands (SUBCOMMAND_CHILD_COMMANDS['verify-pack']).
+ */
+export function verifyPack({ rootDir = ROOT_DIR, runner = runCapture } = {}) {
+  const installGuardViolations = findNodeSqliteInstallGuardViolations(rootDir);
+  if (installGuardViolations.length > 0) return { installGuardViolations, runtimeViolations: [], missing: [] };
+  const runtimeViolations = findNodeSqliteEngineViolations(rootDir);
+  if (runtimeViolations.length > 0) return { installGuardViolations, runtimeViolations, missing: [] };
+  return { installGuardViolations, runtimeViolations, missing: findMissingCliPackAssets(rootDir, runner) };
+}
+
 function commandVerifyPack() {
-  const missing = findMissingCliPackAssets(ROOT_DIR);
+  const { installGuardViolations, runtimeViolations, missing } = verifyPack();
+  if (installGuardViolations.length > 0) {
+    console.error('Release pack check failed — node:sqlite install guards must protect predecessor update paths:');
+    for (const violation of installGuardViolations) {
+      console.error(`- ${violation.path}: ${violation.actual} (expected ${violation.expected})`);
+    }
+    process.exitCode = 1;
+    return;
+  }
+  if (runtimeViolations.length > 0) {
+    console.error('Release pack check failed — publishable node:sqlite consumers must declare the supported Node.js range:');
+    for (const violation of runtimeViolations) {
+      console.error(`- ${violation.path}: ${violation.actual ?? '<missing>'} (${violation.name})`);
+    }
+    process.exitCode = 1;
+    return;
+  }
   if (missing.length > 0) {
     console.error('Release pack check failed — @origintrail-official/dkg tarball is missing runtime assets:');
     for (const asset of missing) console.error(`- ${asset}`);
@@ -346,7 +467,7 @@ function commandVerifyPack() {
     process.exitCode = 1;
     return;
   }
-  console.log('Release pack check passed: @origintrail-official/dkg tarball includes project/build metadata, the Blazegraph runtime contract, and all network overlays.');
+  console.log('Release pack check passed: package runtime floors and @origintrail-official/dkg tarball assets are valid.');
 }
 
 function usage() {

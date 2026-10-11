@@ -22,7 +22,7 @@ function makeHarness() {
     HandlerArgs[3], // db
     HandlerArgs[4], // staticRoot
     HandlerArgs[5], HandlerArgs[6], HandlerArgs[7], HandlerArgs[8], HandlerArgs[9],
-    HandlerArgs[10]?, HandlerArgs[11]?, HandlerArgs[12]?,
+    HandlerArgs[10]?, HandlerArgs[11]?, HandlerArgs[12]?, HandlerArgs[13]?, HandlerArgs[14]?,
   ];
   let nextArgs: Tail = [
     {} as any, '.', undefined, undefined, undefined, undefined, undefined,
@@ -68,6 +68,14 @@ beforeAll(async () => {
 afterAll(async () => {
   await harness.close();
 });
+
+/** Handler tail for a caller that holds node-level admin scope. */
+function nodeAdminArgs(db: unknown, staticDir = '.') {
+  return [
+    db, staticDir, undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, true,
+  ] as any;
+}
 
 /** Stable test double that records calls; not a vi.fn so we can read from it directly. */
 function recorder<T>(impl: (...args: any[]) => T | Promise<T>) {
@@ -305,18 +313,15 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
 describe('handleNodeUIRequest /api/logs', () => {
   it('delegates to the DB-backed compatibility search surface', async () => {
     const calls: any[] = [];
-    harness.setArgs([
-      {
-        searchLogs: (opts: any) => {
-          calls.push(opts);
-          return {
-            total: 1,
-            logs: [{ ts: 1234, level: 'info', module: 'Publisher', message: 'publish completed' }],
-          };
-        },
-      } as any,
-      '.', undefined, undefined, undefined, undefined, undefined,
-    ] as any);
+    harness.setArgs(nodeAdminArgs({
+      searchLogs: (opts: any) => {
+        calls.push(opts);
+        return {
+          total: 1,
+          logs: [{ ts: 1234, level: 'info', module: 'Publisher', message: 'publish completed' }],
+        };
+      },
+    }));
 
     const res = await fetch(`${baseUrl}/api/logs?q=publish&level=info&module=Publisher&limit=5&offset=2`);
     expect(res.status).toBe(200);
@@ -351,9 +356,7 @@ describe('handleNodeUIRequest /api/node-log', () => {
     const lines = Array.from({ length: 20 }, (_, i) => `log line ${i + 1}`);
     writeFileSync(join(tmpDir, 'daemon.log'), lines.join('\n') + '\n');
 
-    harness.setArgs([
-      makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
-    ] as any);
+    harness.setArgs(nodeAdminArgs(makeFakeDb(tmpDir)));
 
     const res = await fetch(`${baseUrl}/api/node-log?lines=5`);
     expect(res.status).toBe(200);
@@ -368,9 +371,7 @@ describe('handleNodeUIRequest /api/node-log', () => {
     const lines = Array.from({ length: 10 }, (_, i) => `line ${i}`);
     writeFileSync(join(tmpDir, 'daemon.log'), lines.join('\n') + '\n');
 
-    harness.setArgs([
-      makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
-    ] as any);
+    harness.setArgs(nodeAdminArgs(makeFakeDb(tmpDir)));
 
     const res = await fetch(`${baseUrl}/api/node-log`);
     const body = await res.json();
@@ -382,9 +383,7 @@ describe('handleNodeUIRequest /api/node-log', () => {
     tmpDir = mkdtempSync(join(tmpdir(), 'dkg-log-test-'));
     writeFileSync(join(tmpDir, 'daemon.log'), 'single line\n');
 
-    harness.setArgs([
-      makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
-    ] as any);
+    harness.setArgs(nodeAdminArgs(makeFakeDb(tmpDir)));
 
     const res = await fetch(`${baseUrl}/api/node-log?lines=-10`);
     expect(res.status).toBe(200);
@@ -397,9 +396,7 @@ describe('handleNodeUIRequest /api/node-log', () => {
     const lines = Array.from({ length: 100 }, (_, i) => `line ${i}`);
     writeFileSync(join(tmpDir, 'daemon.log'), lines.join('\n') + '\n');
 
-    harness.setArgs([
-      makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
-    ] as any);
+    harness.setArgs(nodeAdminArgs(makeFakeDb(tmpDir)));
 
     const res = await fetch(`${baseUrl}/api/node-log?lines=99999`);
     expect(res.status).toBe(200);
@@ -417,9 +414,7 @@ describe('handleNodeUIRequest /api/node-log', () => {
     ].join('\n') + '\n';
     writeFileSync(join(tmpDir, 'daemon.log'), content);
 
-    harness.setArgs([
-      makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
-    ] as any);
+    harness.setArgs(nodeAdminArgs(makeFakeDb(tmpDir)));
 
     const res = await fetch(`${baseUrl}/api/node-log?q=publish`);
     const body = await res.json();
@@ -430,15 +425,177 @@ describe('handleNodeUIRequest /api/node-log', () => {
   it('returns empty lines when daemon.log does not exist', async () => {
     tmpDir = mkdtempSync(join(tmpdir(), 'dkg-log-test-'));
 
-    harness.setArgs([
-      makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
-    ] as any);
+    harness.setArgs(nodeAdminArgs(makeFakeDb(tmpDir)));
 
     const res = await fetch(`${baseUrl}/api/node-log`);
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.lines).toEqual([]);
     expect(body.totalSize).toBe(0);
+  });
+});
+
+// --- Node-wide settings changes and log reads require node-admin scope ---
+
+describe('handleNodeUIRequest node-admin scope', () => {
+  function scopedArgs(opts: {
+    admin?: boolean;
+    db?: unknown;
+    llm?: unknown;
+    telemetry?: unknown;
+  }) {
+    const tail: unknown[] = [
+      opts.db ?? {}, '.', undefined, undefined, undefined, undefined, opts.llm, opts.telemetry,
+      undefined, undefined, undefined,
+    ];
+    if (opts.admin !== undefined) tail.push(opts.admin);
+    return tail as any;
+  }
+
+  function recordingDb() {
+    const calls: string[] = [];
+    let retentionDays = 7;
+    const db = {
+      dataDir: '/nonexistent-dkg-test-dir',
+      searchLogs: () => { calls.push('searchLogs'); return { total: 0, logs: [] }; },
+      getRetentionDays: () => retentionDays,
+      setRetentionDays: (days: number) => { calls.push(`setRetentionDays:${days}`); retentionDays = days; },
+      prune: () => { calls.push('prune'); },
+    };
+    return { db, calls };
+  }
+
+  const telemetrySettings = (calls: string[]) => ({
+    getTelemetryEnabled: () => false,
+    setTelemetryEnabled: async (enabled: boolean) => { calls.push(`setTelemetryEnabled:${enabled}`); return { ok: true }; },
+  });
+  const llmSettings = (calls: string[]) => ({
+    getLlm: () => ({ apiKey: 'existing-key', model: 'm', baseURL: 'https://llm.example/v1' }),
+    setLlm: async () => { calls.push('setLlm'); },
+  });
+
+  const put = (path: string, body: unknown) => fetch(`${baseUrl}${path}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  it.each([false, undefined])('rejects node log reads without node-admin scope (flag %s)', async (admin) => {
+    const { db, calls } = recordingDb();
+    harness.setArgs(scopedArgs({ admin, db }));
+
+    for (const path of ['/api/logs?q=x', '/api/node-log?lines=5']) {
+      const res = await fetch(`${baseUrl}${path}`);
+      expect(res.status, path).toBe(403);
+      expect((await res.json()).error).toMatch(/requires a node-level admin token/);
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it('rejects node settings changes without node-admin scope and leaves them unchanged', async () => {
+    const { db, calls } = recordingDb();
+    harness.setArgs(scopedArgs({
+      admin: false,
+      db,
+      llm: llmSettings(calls),
+      telemetry: telemetrySettings(calls),
+    }));
+
+    const retention = await put('/api/settings/retention', { retentionDays: 30 });
+    const telemetry = await put('/api/settings/telemetry', { enabled: true });
+    const llm = await put('/api/settings/llm', { baseURL: 'https://other.example/v1' });
+
+    for (const res of [retention, telemetry, llm]) {
+      expect(res.status).toBe(403);
+      expect((await res.json()).error).toMatch(/agent-scoped tokens cannot change node settings/);
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it('keeps settings reads open to any authenticated caller', async () => {
+    const { db } = recordingDb();
+    harness.setArgs(scopedArgs({ admin: false, db, telemetry: telemetrySettings([]) }));
+
+    const res = await fetch(`${baseUrl}/api/settings/retention`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ retentionDays: 7 });
+  });
+
+  it('serves node-admin callers as before', async () => {
+    const { db, calls } = recordingDb();
+    harness.setArgs(scopedArgs({
+      admin: true,
+      db,
+      llm: llmSettings(calls),
+      telemetry: telemetrySettings(calls),
+    }));
+
+    expect((await fetch(`${baseUrl}/api/logs`)).status).toBe(200);
+    expect((await fetch(`${baseUrl}/api/node-log`)).status).toBe(200);
+    expect((await put('/api/settings/retention', { retentionDays: 30 })).status).toBe(200);
+    expect((await put('/api/settings/retention', { retentionDays: 0 })).status).toBe(400);
+    expect((await put('/api/settings/telemetry', { enabled: true })).status).toBe(200);
+    expect((await put('/api/settings/llm', { model: 'next' })).status).toBe(200);
+    expect(calls).toEqual([
+      'searchLogs',
+      'setRetentionDays:30',
+      'prune',
+      'setTelemetryEnabled:true',
+      'setLlm',
+    ]);
+  });
+});
+
+// --- Dashboard shell token injection ---
+
+describe('serveStatic token injection', () => {
+  let staticDir: string;
+
+  afterEach(() => {
+    if (staticDir) rmSync(staticDir, { recursive: true, force: true });
+  });
+
+  function setup(): void {
+    staticDir = mkdtempSync(join(tmpdir(), 'dkg-shell-'));
+    writeFileSync(join(staticDir, 'index.html'), '<html><head><title>DKG</title></head><body></body></html>');
+  }
+
+  function shellArgs(authToken: string | undefined, corsOrigin?: string) {
+    return [
+      { dataDir: staticDir }, staticDir, undefined, undefined, authToken, undefined, undefined,
+      undefined, corsOrigin,
+    ] as any;
+  }
+
+  it('embeds the token the caller passes', async () => {
+    setup();
+    harness.setArgs(shellArgs('shell-token-1'));
+
+    const res = await fetch(`${baseUrl}/ui`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('<script>window.__DKG_TOKEN__="shell-token-1"</script></head>');
+  });
+
+  it('serves the same shell without a token when the caller passes none', async () => {
+    setup();
+    harness.setArgs(shellArgs(undefined));
+
+    for (const path of ['/ui', '/ui/', '/ui/some/client/route']) {
+      const res = await fetch(`${baseUrl}${path}`);
+      expect(res.status, path).toBe(200);
+      const body = await res.text();
+      expect(body, path).toContain('<title>DKG</title>');
+      expect(body, path).not.toContain('__DKG_TOKEN__');
+    }
+  });
+
+  it('never marks the shell readable cross-origin', async () => {
+    setup();
+    harness.setArgs(shellArgs('shell-token-2', 'http://127.0.0.1:9200'));
+
+    const res = await fetch(`${baseUrl}/ui`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('access-control-allow-origin')).toBeNull();
   });
 });
 

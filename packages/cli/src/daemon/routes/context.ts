@@ -34,6 +34,7 @@ import type { VectorStore, EmbeddingProvider } from '../../vector-store.js';
 import type { CatchupTracker } from '../types.js';
 import type { RoutePlugin } from '../plugin-api.js';
 import type { AdmissionStatsView } from '../http-utils.js';
+import type { EventLoopDelayView } from '../event-loop-delay-monitor.js';
 import type { DaemonLocalLlmService } from '../local-llm-service.js';
 import type { DaemonRouteRpcTransport } from '../rpc-runtime.js';
 
@@ -153,6 +154,8 @@ export interface RequestContext {
   // shedding load. Deliberately the read-only `AdmissionStatsView`, not the
   // concrete limiter — plugin-facing routes must not reach tryAcquire()/release().
   admission: AdmissionStatsView;
+  /** Daemon-owned event-loop delay gauge (read-only); `/api/status` reports it. */
+  eventLoopDelay?: EventLoopDelayView;
   /** Daemon-owned, read-only local LLM session used by the Node UI. */
   localLlm?: DaemonLocalLlmService;
   /** Daemon-owned admission + accounting shared by every direct route provider. */

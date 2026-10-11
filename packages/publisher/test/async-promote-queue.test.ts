@@ -12,7 +12,7 @@
  * comparisons are pure.
  */
 
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
   DEFAULT_PROMOTE_CONTROL_GRAPH_URI,
@@ -25,6 +25,7 @@ import {
   serializeJob,
   uniquenessKey,
 } from '../src/async-promote-queue-utils.js';
+import { PROMOTE_PREREQUISITE_RETRY_WINDOW_MS } from '../src/async-promote-recovery-policy.js';
 import {
   ASYNC_PROMOTE_QUEUE_FORMAT_VERSION,
   PROMOTE_JOB_STATES,
@@ -36,6 +37,7 @@ import {
   type PromoteRequest,
 } from '../src/async-promote-queue-types.js';
 import { TripleStoreAsyncPromoteQueue } from '../src/async-promote-queue-impl.js';
+import { PROMOTE_POST_COMMIT_FAILURE_MESSAGE } from '../src/promote-replay-safety.js';
 
 describe('TripleStoreAsyncPromoteQueue', () => {
   let store: OxigraphStore;
@@ -56,6 +58,51 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     });
   }
 
+  it('skips repeated idle scans, wakes immediately for enqueue, and expires external-write hints', async () => {
+    const queue = createQueue();
+    const detach = queue.workScheduling!.attachScheduler({ onWorkAvailable() {} });
+    await queue.claimNext('idle');
+    const query = vi.spyOn(store, 'query');
+    for (let i = 0; i < 10; i++) await queue.claimNext('idle');
+    expect(query).not.toHaveBeenCalled();
+    now += 1_000;
+    await queue.claimNext('idle');
+    expect(query).toHaveBeenCalled();
+    const id = await queue.enqueue(makeRequest());
+    expect((await queue.claimNext('awake'))?.jobId).toBe(id);
+    detach();
+  });
+
+  it('discovers externally persisted work when the reader idle hint expires', async () => {
+    const reader = createQueue();
+    const wake = vi.fn();
+    const detach = reader.workScheduling!.attachScheduler({ onWorkAvailable: wake });
+    try {
+      expect(await reader.claimNext('reader')).toBeNull();
+      const writer = createQueue();
+      const id = await writer.enqueue(makeRequest());
+      expect(wake).not.toHaveBeenCalled();
+      expect(await reader.claimNext('reader')).toBeNull();
+      now += 999;
+      expect(await reader.claimNext('reader')).toBeNull();
+      now += 1;
+      expect((await reader.claimNext('reader'))?.jobId).toBe(id);
+    } finally { detach(); await store.close(); }
+  });
+
+  it('never skips past the known retry deadline', async () => {
+    const queue = createQueue({ backoff: () => 400 });
+    queue.workScheduling!.attachScheduler({ onWorkAvailable() {} });
+    const id = await queue.enqueue(makeRequest());
+    const job = await queue.claimNext('worker');
+    await queue.fail(id, job!.lease!.claimToken, { message: 'retry', retryable: true, classification: 'transient', recordedAt: now });
+    expect(await queue.claimNext('worker')).toBeNull();
+    now += 399;
+    expect(await queue.claimNext('worker')).toBeNull();
+    now += 1;
+    expect((await queue.claimNext('worker'))?.jobId).toBe(id);
+  });
+
   function makeRequest(overrides: Partial<PromoteRequest> = {}): PromoteRequest {
     return {
       contextGraphId: 'graphify',
@@ -69,6 +116,46 @@ describe('TripleStoreAsyncPromoteQueue', () => {
   function advance(ms: number): void {
     now += ms;
   }
+
+  it.each([true, false])('returns the committed failure transition after flush (retryable=%s)', async (retryable) => {
+    const queue = createQueue({ backoff: () => 400 });
+    const id = await queue.enqueue(makeRequest());
+    const job = (await queue.claimNext('worker'))!;
+    let release!: () => void;
+    let entered!: () => void;
+    const flushing = new Promise<void>((resolve) => { entered = resolve; });
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const flush = vi.spyOn(store, 'flush').mockImplementation(async () => { entered(); await held; });
+    let settled = false;
+    const failure = queue.fail(id, job.lease!.claimToken, {
+      message: 'attempt failed', retryable, classification: retryable ? 'transient' : 'fatal', recordedAt: now,
+    }).then((transition) => { settled = true; return transition; });
+    try {
+      await flushing;
+      // Let the queue return if it skipped the held persistence acknowledgement.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(settled).toBe(false);
+      release();
+      expect(await failure).toEqual(retryable
+        ? { state: 'failed_retrying', jobId: id, attemptCount: 1, nextRetryAt: now + 400 }
+        : { state: 'failed', jobId: id, attemptCount: 1 });
+      expect((await queue.getStatus(id))?.state).toBe(retryable ? 'failed_retrying' : 'failed');
+    } finally { release(); flush.mockRestore(); await store.close(); }
+  });
+
+  it('does not acknowledge a failure transition when flush loses its acknowledgement', async () => {
+    const queue = createQueue();
+    const id = await queue.enqueue(makeRequest());
+    const job = (await queue.claimNext('worker'))!;
+    const failure = new Error('flush acknowledgement lost');
+    vi.spyOn(store, 'flush').mockRejectedValueOnce(failure);
+    await expect(queue.fail(id, job.lease!.claimToken, {
+      message: 'fatal', retryable: false, classification: 'fatal', recordedAt: now,
+    })).rejects.toBe(failure);
+    expect((await queue.getStatus(id))?.state).toBe('failed');
+    vi.restoreAllMocks();
+    await store.close();
+  });
 
   it('claims from active rows after restart without transferring terminal history', async () => {
     const queue = createQueue();
@@ -1080,6 +1167,44 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     expect(job?.attempt.count).toBe(2); // maxRetries exhausted
   });
 
+  it('20a. a typed prerequisite failure keeps retrying past maxRetries until the window after enqueue ends (GH#3052)', async () => {
+    const queue = createQueue({ maxRetries: 2, backoff: () => 1 });
+    const jobId = await queue.enqueue(makeRequest());
+    const failOnce = async (diagnosticCode?: string) => {
+      const claimed = await queue.claimNext('worker-1');
+      await queue.fail(jobId, claimed!.lease!.claimToken, {
+        message: 'A promote prerequisite is temporarily unavailable',
+        retryable: true,
+        classification: 'transient',
+        recordedAt: now,
+        ...(diagnosticCode === undefined ? {} : { diagnosticCode }),
+      });
+      advance(10);
+      return queue.getStatus(jobId);
+    };
+
+    await failOnce('PROMOTE_RETRYABLE_FAILURE');
+    // Attempts 2 and 3 are at and past the budget of 2: still retried, and the
+    // row's budget stays what it was.
+    for (const attempt of [2, 3]) {
+      const job = await failOnce('PROMOTE_RETRYABLE_FAILURE');
+      expect(job?.state).toBe('failed_retrying');
+      expect(job?.attempt).toMatchObject({ count: attempt, maxRetries: 2 });
+    }
+    // Any other retryable failure past the base budget ends the job as before.
+    const other = await failOnce();
+    expect(other?.state).toBe('failed');
+    expect(other?.attempt.lastError?.retryable).toBe(true);
+
+    // And so does a prerequisite failure once the window has passed.
+    await queue.recover(jobId);
+    advance(PROMOTE_PREREQUISITE_RETRY_WINDOW_MS);
+    expect((await failOnce('PROMOTE_RETRYABLE_FAILURE'))?.state).toBe('failed_retrying');
+    const late = await failOnce('PROMOTE_RETRYABLE_FAILURE');
+    expect(late?.state).toBe('failed');
+    expect(late?.attempt).toMatchObject({ count: 2, maxRetries: 2 });
+  });
+
   it('21. claimNext() picks up a failed_retrying job once nextRetryAt has passed', async () => {
     const queue = createQueue({ backoff: () => 5_000 });
     const jobId = await queue.enqueue(makeRequest());
@@ -1799,5 +1924,268 @@ describe('TripleStoreAsyncPromoteQueue', () => {
 
     const jobs = await queue.list();
     expect(jobs.map((j) => j.request.assertionName)).toEqual(['valid']);
+  });
+  // ---------------------------------------------------------------------------
+  // Post-commit recovery sweep
+  // ---------------------------------------------------------------------------
+
+  /** Record the failure the worker persists for a publisher post-commit failure. */
+  async function failPostCommit(
+    queue: AsyncPromoteQueue,
+    jobId: string,
+    claimToken: string,
+    overrides: Partial<Parameters<AsyncPromoteQueue['fail']>[2]> = {},
+  ): Promise<void> {
+    await queue.fail(jobId, claimToken, {
+      message: PROMOTE_POST_COMMIT_FAILURE_MESSAGE,
+      retryable: false,
+      classification: 'fatal',
+      recordedAt: now,
+      diagnosticCode: 'PROMOTE_POST_COMMIT_FAILURE',
+      ...overrides,
+    });
+  }
+
+  it('34. recoverPostCommitFailures() requeues a post-commit failure with backoff and keeps its attempt count', async () => {
+    const queue = createQueue({ backoff: (attempt) => attempt * 1_000 });
+    const jobId = await queue.enqueue(makeRequest());
+    const claimed = await queue.claimNext('worker-1');
+    await failPostCommit(queue, jobId, claimed!.lease!.claimToken);
+    expect((await queue.getStatus(jobId))?.state).toBe('failed');
+
+    advance(10);
+    expect(await queue.recoverPostCommitFailures()).toEqual([{
+      jobId, action: 'requeued', attempt: 1, maxAttempts: 5, nextRetryAt: now + 1_000,
+    }]);
+    const requeued = (await queue.getStatus(jobId))!;
+    expect(requeued.state).toBe('failed_retrying');
+    expect(requeued.attempt).toMatchObject({ count: 1, maxRetries: 5, nextRetryAt: now + 1_000 });
+    expect(requeued.attempt.lastError?.diagnosticCode).toBe('PROMOTE_POST_COMMIT_FAILURE');
+    expect(requeued.attempt.lastError?.retryable).toBe(true);
+    expect(requeued.reason).toBeUndefined();
+    expect(requeued.lease).toBeUndefined();
+
+    // The replay honours the backoff and consumes the job's own retry budget.
+    expect(await queue.claimNext('worker-2')).toBeNull();
+    advance(1_000);
+    const replay = await queue.claimNext('worker-2');
+    expect(replay?.jobId).toBe(jobId);
+    expect(replay?.attempt.count).toBe(2);
+    expect(replay?.commitMarker?.promoteStarted).toBe(false);
+    // Idempotent: a sweep while the replay runs (or after it succeeds) is a no-op.
+    expect(await queue.recoverPostCommitFailures()).toEqual([]);
+    await queue.recordCommitMarker(jobId, replay!.lease!.claimToken, 'swmInserted');
+    await queue.succeed(jobId, replay!.lease!.claimToken, { promotedCount: 0, succeededAt: now });
+    expect(await queue.recoverPostCommitFailures()).toEqual([]);
+    expect((await queue.getStatus(jobId))?.state).toBe('succeeded');
+  });
+
+  it('34a. recoverPostCommitFailures() marks a spent replay budget exhausted exactly once, leaving operator recovery open', async () => {
+    const queue = createQueue({ maxRetries: 2, backoff: () => 100 });
+    const jobId = await queue.enqueue(makeRequest());
+    let claimed = await queue.claimNext('worker-1');
+    await failPostCommit(queue, jobId, claimed!.lease!.claimToken);
+    expect(await queue.recoverPostCommitFailures()).toMatchObject([{ action: 'requeued', attempt: 1, maxAttempts: 2 }]);
+    advance(100);
+    claimed = await queue.claimNext('worker-1');
+    expect(claimed?.attempt.count).toBe(2);
+    await failPostCommit(queue, jobId, claimed!.lease!.claimToken);
+
+    expect(await queue.recoverPostCommitFailures()).toEqual([
+      { jobId, action: 'exhausted', attempt: 2, maxAttempts: 2 },
+    ]);
+    const exhausted = (await queue.getStatus(jobId))!;
+    expect(exhausted.state).toBe('failed');
+    expect(exhausted.reason).toBe('automatic post-commit recovery exhausted after 2 attempts; needs operator inspection');
+    expect(exhausted.attempt.lastError?.diagnosticCode).toBe('PROMOTE_POST_COMMIT_FAILURE');
+    // The verdict is durable: later sweeps neither repeat it nor requeue the row.
+    expect(await queue.recoverPostCommitFailures()).toEqual([]);
+    expect((await queue.getStatus(jobId))?.state).toBe('failed');
+
+    // The manual command keeps working and grants a fresh budget.
+    await queue.recover(jobId);
+    const recovered = (await queue.getStatus(jobId))!;
+    expect(recovered.state).toBe('queued');
+    expect(recovered.attempt.count).toBe(0);
+    expect(recovered.reason).toBeUndefined();
+  });
+
+  it('34b. recoverPostCommitFailures() only touches post-commit failures without an operator reason', async () => {
+    const queue = createQueue();
+    const otherFatal = await queue.enqueue(makeRequest({ assertionName: 'other-fatal' }));
+    let claimed = await queue.claimNext('worker-1');
+    await queue.fail(otherFatal, claimed!.lease!.claimToken, {
+      message: 'assertion not found', retryable: false, classification: 'fatal', recordedAt: now,
+    });
+    const cancelled = await queue.enqueue(makeRequest({ assertionName: 'cancelled' }));
+    await queue.cancel(cancelled);
+    const ambiguous = await queue.enqueue(makeRequest({ assertionName: 'ambiguous' }));
+    claimed = await queue.claimNext('worker-1');
+    await queue.recordCommitMarker(ambiguous, claimed!.lease!.claimToken, 'swmInserted');
+    await failPostCommit(queue, ambiguous, claimed!.lease!.claimToken);
+    const otherDiagnostic = await queue.enqueue(makeRequest({ assertionName: 'other-diagnostic' }));
+    claimed = await queue.claimNext('worker-1');
+    await failPostCommit(queue, otherDiagnostic, claimed!.lease!.claimToken, {
+      diagnosticCode: 'PROMOTE_RETRYABLE_FAILURE',
+    });
+    const legacyRow = await queue.enqueue(makeRequest({ assertionName: 'legacy-row' }));
+    claimed = await queue.claimNext('worker-1');
+    await failPostCommit(queue, legacyRow, claimed!.lease!.claimToken);
+    const legacy = (await queue.getStatus(legacyRow))!;
+    await store.deleteByPattern({ subject: jobSubject(legacyRow), graph: DEFAULT_PROMOTE_CONTROL_GRAPH_URI });
+    await store.insert(serializeJob({ ...legacy, formatVersion: 1 }, DEFAULT_PROMOTE_CONTROL_GRAPH_URI));
+
+    expect(await queue.recoverPostCommitFailures()).toEqual([]);
+    for (const jobId of [otherFatal, cancelled, ambiguous, otherDiagnostic, legacyRow]) {
+      expect((await queue.getStatus(jobId))?.state).toBe('failed');
+    }
+    expect((await queue.getStatus(ambiguous))?.reason).toContain('partial promote ambiguity');
+  });
+
+  it('34c. recoverPostCommitFailures() recognizes rows recorded before the diagnostic code existed by the exact producer message', async () => {
+    const queue = createQueue();
+    const jobId = await queue.enqueue(makeRequest());
+    const claimed = await queue.claimNext('worker-1');
+    await queue.fail(jobId, claimed!.lease!.claimToken, {
+      message: PROMOTE_POST_COMMIT_FAILURE_MESSAGE, retryable: false, classification: 'fatal', recordedAt: now,
+    });
+    expect((await queue.getStatus(jobId))?.attempt.lastError?.diagnosticCode).toBeUndefined();
+    const lookalike = await queue.enqueue(makeRequest({ assertionName: 'lookalike' }));
+    const lookalikeClaim = await queue.claimNext('worker-1');
+    await queue.fail(lookalike, lookalikeClaim!.lease!.claimToken, {
+      message: `${PROMOTE_POST_COMMIT_FAILURE_MESSAGE} (mirrored by a caller)`,
+      retryable: false, classification: 'fatal', recordedAt: now,
+    });
+
+    expect(await queue.recoverPostCommitFailures()).toMatchObject([{ jobId, action: 'requeued' }]);
+    expect((await queue.getStatus(jobId))?.state).toBe('failed_retrying');
+    expect((await queue.getStatus(lookalike))?.state).toBe('failed');
+  });
+
+  it('34d. recoverPostCommitFailures() defers a row whose assertion is owned by another active job', async () => {
+    const queue = createQueue({ backoff: () => 100 });
+    const jobId = await queue.enqueue(makeRequest());
+    const claimed = await queue.claimNext('worker-1');
+    await failPostCommit(queue, jobId, claimed!.lease!.claimToken);
+    const replacement = await queue.enqueue(makeRequest());
+
+    expect(await queue.recoverPostCommitFailures()).toEqual([]);
+    expect((await queue.getStatus(jobId))?.state).toBe('failed');
+    expect((await queue.getStatus(jobId))?.reason).toBeUndefined();
+
+    // Once the conflicting job leaves the active states the row is recovered.
+    await queue.cancel(replacement);
+    expect(await queue.recoverPostCommitFailures()).toMatchObject([{ jobId, action: 'requeued' }]);
+    await expect(queue.enqueue(makeRequest())).rejects.toBeInstanceOf(PromoteJobConflictError);
+  });
+
+  // GH#3067 — shares that fail together (a saturated store, a flapping
+  // authority read) used to come back together: every retry delay was exactly
+  // 60/120/240/480 s. The DEFAULT curve now varies by up to 20 %; a backoff the
+  // caller injects is used as given.
+  describe('default retry backoff jitter (GH#3067)', () => {
+    async function failFirstAttempt(queue: AsyncPromoteQueue, assertionName = 'jitter'): Promise<{ jobId: string; delayMs: number }> {
+      const jobId = await queue.enqueue(makeRequest({ assertionName }));
+      const claimed = await queue.claimNext('worker-1');
+      await queue.fail(jobId, claimed!.lease!.claimToken, {
+        message: 'transient blip', retryable: true, classification: 'transient', recordedAt: now,
+      });
+      const nextRetryAt = (await queue.getStatus(jobId))!.attempt.nextRetryAt!;
+      return { jobId, delayMs: nextRetryAt - now };
+    }
+
+    it('J1. the lower end of the band is 80 % of the first delay', async () => {
+      const { delayMs } = await failFirstAttempt(createQueue({ rand: () => 0 }));
+      expect(delayMs).toBe(48_000);
+    });
+
+    it('J2. the upper end of the band is 120 % of the first delay', async () => {
+      const { delayMs } = await failFirstAttempt(createQueue({ rand: () => 0.999999 }));
+      expect(delayMs).toBe(72_000);
+    });
+
+    it('J3. a midpoint random value reproduces the unjittered 60/120/240/480 s schedule and the budget still ends at attempt 5', async () => {
+      const queue = createQueue({ rand: () => 0.5 });
+      const jobId = await queue.enqueue(makeRequest());
+      const delays: number[] = [];
+      for (let attempt = 1; attempt <= 5; attempt += 1) {
+        const claimed = await queue.claimNext('worker-1');
+        expect(claimed).not.toBeNull();
+        await queue.fail(jobId, claimed!.lease!.claimToken, {
+          message: `attempt ${attempt}`, retryable: true, classification: 'transient', recordedAt: now,
+        });
+        const job = (await queue.getStatus(jobId))!;
+        if (job.state === 'failed') break;
+        delays.push(job.attempt.nextRetryAt! - now);
+        advance(job.attempt.nextRetryAt! - now + 1);
+      }
+      expect(delays).toEqual([60_000, 120_000, 240_000, 480_000]);
+      const job = (await queue.getStatus(jobId))!;
+      expect(job.state).toBe('failed');
+      expect(job.attempt.count).toBe(5);
+    });
+
+    it('J4. the persisted retry time is an integer even for a random value that does not divide the delay', async () => {
+      const { delayMs } = await failFirstAttempt(createQueue({ rand: () => 0.333333 }));
+      // 60 000 * (1 + 0.2 * (2 * 0.333333 - 1)) = 55 999.992, persisted as an xsd:integer.
+      expect(Number.isInteger(delayMs)).toBe(true);
+      expect(delayMs).toBe(56_000);
+    });
+
+    it('J5. jobs that fail together are scheduled apart', async () => {
+      const draws = [0.05, 0.31, 0.47, 0.62, 0.74, 0.83, 0.9, 0.97];
+      let next = 0;
+      const queue = createQueue({ rand: () => draws[next++ % draws.length] });
+      const delays = new Set<number>();
+      for (let i = 0; i < draws.length; i += 1) {
+        delays.add((await failFirstAttempt(queue, `spread-${i}`)).delayMs);
+      }
+      expect(delays.size).toBe(draws.length);
+      for (const delay of delays) {
+        expect(delay).toBeGreaterThanOrEqual(48_000);
+        expect(delay).toBeLessThanOrEqual(72_000);
+      }
+    });
+
+    it('J6. an injected backoff is used exactly as given', async () => {
+      const { delayMs } = await failFirstAttempt(createQueue({ backoff: () => 1_234, rand: () => 0 }));
+      expect(delayMs).toBe(1_234);
+    });
+
+    it('J7. the longest delay stays under the 15 minute ceiling however high the random value is', async () => {
+      const queue = createQueue({ maxRetries: 12, rand: () => 0.999999 });
+      const jobId = await queue.enqueue(makeRequest());
+      let longest = 0;
+      for (let attempt = 1; attempt <= 11; attempt += 1) {
+        const claimed = await queue.claimNext('worker-1');
+        await queue.fail(jobId, claimed!.lease!.claimToken, {
+          message: `attempt ${attempt}`, retryable: true, classification: 'transient', recordedAt: now,
+        });
+        const job = (await queue.getStatus(jobId))!;
+        const delay = job.attempt.nextRetryAt! - now;
+        longest = Math.max(longest, delay);
+        advance(delay + 1);
+      }
+      expect(longest).toBe(15 * 60_000);
+    });
+
+    it('J8. the post-commit recovery sweep uses the jittered curve too', async () => {
+      const queue = createQueue({ rand: () => 0 });
+      const jobId = await queue.enqueue(makeRequest());
+      const claimed = await queue.claimNext('worker-1');
+      await failPostCommit(queue, jobId, claimed!.lease!.claimToken);
+
+      expect(await queue.recoverPostCommitFailures()).toMatchObject([{ jobId, action: 'requeued', nextRetryAt: now + 48_000 }]);
+    });
+
+    it('J9. without an injected random source the default curve draws from Math.random', async () => {
+      const spy = vi.spyOn(Math, 'random').mockReturnValue(0);
+      try {
+        const { delayMs } = await failFirstAttempt(createQueue());
+        expect(delayMs).toBe(48_000);
+      } finally {
+        spy.mockRestore();
+      }
+    });
   });
 });

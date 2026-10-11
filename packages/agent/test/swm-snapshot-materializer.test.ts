@@ -31,6 +31,7 @@ import {
   createGraphKnowledgeAssetScope,
   contextGraphWorkspaceMetaGraphUri,
   knowledgeAssetLayerGraphUri,
+  workspaceKnowledgeAssetOperationSnapshotGraph,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import {
@@ -40,7 +41,13 @@ import {
   workspacePublicQuadsDigest,
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
-import { GraphManager, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import {
+  GraphManager,
+  OxigraphStore,
+  OxigraphWorkerStore,
+  type Quad,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 import {
   canonicalGraphScopedSnapshotManifestQuads,
   materializeGraphScopedSwmRecoveryAsset,
@@ -51,8 +58,11 @@ import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/sw
 import {
   collectPublicSnapshotMetadata,
   runSharedMemorySync,
+  type SharedMemorySyncContext,
 } from '../src/sync/requester/shared-memory-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import type { RecoveryExecutionGuard } from
+  '../src/sync/requester/recovery-execution-guard.js';
 import { swmFixtures } from './swm-descriptor-fixtures.js';
 
 const CG = 'ws00-materializer-real-store';
@@ -124,6 +134,45 @@ function inGraph(quads: readonly Quad[], graph: string): Quad[] {
   return quads.map((quad) => ({ ...quad, graph }));
 }
 
+/**
+ * Counts the two validation queries so "did the memo answer this, or did the
+ * store?" is observable — the same technique as
+ * `swm-materialization-witness.test.ts`.
+ */
+function countingStore(inner: TripleStore) {
+  let constructs = 0;
+  let countQueries = 0;
+  const proxy = new Proxy(inner, {
+    get(target, prop, receiver) {
+      if (prop === 'query') {
+        return async (sparql: string, options?: unknown) => {
+          const normalized = sparql.trimStart();
+          if (normalized.startsWith('CONSTRUCT')) constructs += 1;
+          if (normalized.startsWith('SELECT (COUNT')) countQueries += 1;
+          return (target as TripleStore).query(sparql, options as never);
+        };
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  }) as TripleStore;
+  return { store: proxy, constructs: () => constructs, countQueries: () => countQueries };
+}
+
+/**
+ * Presents `inner` as a store whose revision source sees every writer but
+ * whose generation never moves. A memo miss on it cannot be explained by the
+ * generation check; `stable` lets a test hold the revision unstable.
+ */
+function fixedRevisionStore(inner: TripleStore, stable: () => boolean = () => true): TripleStore {
+  return new Proxy(inner, {
+    get(target, prop, receiver) {
+      if (prop === 'writeRevisionCoverage') return 'all-writers';
+      if (prop === 'getWriteRevision') return () => ({ generation: 0, stable: stable() });
+      return Reflect.get(target, prop, receiver);
+    },
+  }) as TripleStore;
+}
+
 async function distinctObjects(store: TripleStore, graph: string, subject: string, predicate: string): Promise<string[]> {
   const result = await store.query(
     `SELECT DISTINCT ?o WHERE { GRAPH <${graph}> { <${subject}> <${predicate}> ?o } }`,
@@ -169,6 +218,192 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       await store.insert(inGraph(v1.payload, v1.assertionGraph));
       const { materializer } = materializerFor(store);
       expect(await materializer.isGraphAssetMaterialized(descriptorFor(v2))).toBe(false);
+    });
+
+    it('fails open when the write-revision capability throws', async () => {
+      const store = new OxigraphStore();
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      vi.spyOn(store, 'getWriteRevision').mockImplementation(() => {
+        throw new Error('revision probe unavailable');
+      });
+      const { materializer } = materializerFor(store);
+
+      // A revision-probe failure must fall back to the bounded count + digest
+      // validation instead of turning a transient capability error into a
+      // materialization failure.
+      expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
+    });
+
+    it('evicts the oldest entries when the bounded memo reaches its limit', async () => {
+      vi.stubEnv('DKG_SWM_MATERIALIZATION_WITNESS', '0');
+      // Frozen clock: the memo TTL must not be able to explain a miss below, so
+      // the LRU bound is the only thing that can force a revalidation.
+      const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+      try {
+        const inner = new OxigraphStore();
+        const { store, constructs, countQueries } = countingStore(inner);
+        const { materializer } = materializerFor(store);
+        // One past MATERIALIZATION_MEMO_MAX_ENTRIES (1024), so filling the memo
+        // evicts exactly the first descriptor. `-0` is not a prefix of any other
+        // generated graph (no index carries a leading zero) and 1025 tracked
+        // graphs cannot move the tracker's global floor, so descriptors[0]'s
+        // write generation is fixed: eviction is the ONLY thing that can make
+        // the re-check below touch the store again.
+        const descriptors = Array.from({ length: 1025 }, (_, index) => ({
+          ...descriptorFor(v1),
+          assertionGraph: `${v1.assertionGraph}-${index}`,
+        }));
+        for (const descriptor of descriptors) {
+          await inner.insert(inGraph(v1.payload, descriptor.assertionGraph));
+          expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        }
+        // Every check above was cold: one count gate plus one read-back each.
+        const coldCounts = countQueries();
+        const coldConstructs = constructs();
+        expect(coldCounts).toBe(descriptors.length);
+        expect(coldConstructs).toBe(descriptors.length);
+
+        // The newest entry is still memoized — a warm re-check touches the
+        // store not at all. Without this row, "the answer is still true" would
+        // also hold with the memo disabled outright.
+        expect(await materializer.isGraphAssetMaterialized(descriptors.at(-1)!)).toBe(true);
+        expect(countQueries()).toBe(coldCounts);
+        expect(constructs()).toBe(coldConstructs);
+
+        // The 1025th entry evicted the first, so rechecking it pays the full
+        // COUNT + CONSTRUCT validation again — and still returns the
+        // digest-bound answer. Raising the bound, or dropping the eviction
+        // loop, leaves this warm and fails here.
+        expect(await materializer.isGraphAssetMaterialized(descriptors[0]!)).toBe(true);
+        expect(countQueries()).toBe(coldCounts + 1);
+        expect(constructs()).toBe(coldConstructs + 1);
+      } finally {
+        now.mockRestore();
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('does not memoize a validation that a write raced', async () => {
+      // The read-back sees v1, then a writer installs equal-count v2 before the
+      // check finishes. The check may report what it read, but it must not keep
+      // that answer under the post-write generation.
+      vi.stubEnv('DKG_SWM_MATERIALIZATION_WITNESS', '0');
+      const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+      try {
+        const inner = new OxigraphStore();
+        await inner.insert(inGraph(v1.payload, v1.assertionGraph));
+        let raceNextConstruct = true;
+        const store = new Proxy(inner, {
+          get(target, prop, receiver) {
+            if (prop === 'query') {
+              return async (sparql: string, options?: unknown) => {
+                const result = await (target as TripleStore).query(sparql, options as never);
+                if (raceNextConstruct && sparql.trimStart().startsWith('CONSTRUCT')) {
+                  raceNextConstruct = false;
+                  await target.replaceGraph(v2.assertionGraph, inGraph(v2.payload, v2.assertionGraph));
+                }
+                return result;
+              };
+            }
+            return Reflect.get(target, prop, receiver);
+          },
+        }) as TripleStore;
+        const { materializer } = materializerFor(store);
+
+        expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
+        // The store now holds v2. A memoized answer would still say v1.
+        expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(false);
+      } finally {
+        now.mockRestore();
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('meets the data-loss error of a crashed in-memory worker store instead of a memoized answer', async () => {
+      // Without a path, OxigraphWorkerStore keeps its data in the worker
+      // thread. When that thread dies the contents are gone and the store
+      // fails closed. A memo hit here would report the lost graph as present.
+      const store = new OxigraphWorkerStore();
+      try {
+        await store.insert(inGraph(v1.payload, v1.assertionGraph));
+        const { materializer } = materializerFor(store);
+        const descriptor = descriptorFor(v1);
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+
+        // An unexpected exit of the idle worker, as an out-of-memory kill would cause.
+        await (store as unknown as { worker: { terminate(): Promise<number> } }).worker.terminate();
+
+        await expect(materializer.isGraphAssetMaterialized(descriptor))
+          .rejects.toThrow(/IN-MEMORY store's worker crashed/);
+      } finally {
+        await store.close();
+      }
+    });
+
+    it('neither keeps nor uses a memo entry while the revision is unstable', async () => {
+      // An unstable revision means a write is pending or its outcome is unknown,
+      // so an unchanged generation proves nothing.
+      vi.stubEnv('DKG_SWM_MATERIALIZATION_WITNESS', '0');
+      const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+      try {
+        const inner = new OxigraphStore();
+        await inner.insert(inGraph(v1.payload, v1.assertionGraph));
+        const { store, constructs, countQueries } = countingStore(inner);
+        let stable = false;
+        const { materializer } = materializerFor(fixedRevisionStore(store, () => stable));
+        const descriptor = descriptorFor(v1);
+
+        // Unstable: a validation is not kept, so the second check validates again.
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        expect(countQueries()).toBe(2);
+        expect(constructs()).toBe(2);
+
+        // Stable: one validation seeds the memo and the next check uses it.
+        stable = true;
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        expect(countQueries()).toBe(3);
+        expect(constructs()).toBe(3);
+
+        // Unstable again: the stored entry is bypassed.
+        stable = false;
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        expect(countQueries()).toBe(4);
+        expect(constructs()).toBe(4);
+      } finally {
+        now.mockRestore();
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('drops its memo entry when it replaces the graph itself', async () => {
+      // On this store the generation never moves, so only the materializer
+      // forgetting its own entry can make the last check touch the store.
+      vi.stubEnv('DKG_SWM_MATERIALIZATION_WITNESS', '0');
+      const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+      try {
+        const inner = new OxigraphStore();
+        await inner.insert(inGraph(v1.payload, v1.assertionGraph));
+        const { store, constructs, countQueries } = countingStore(inner);
+        const { materializer } = materializerFor(fixedRevisionStore(store));
+        const descriptor = descriptorFor(v1);
+
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        expect(countQueries()).toBe(1);
+        expect(constructs()).toBe(1);
+
+        await materializer.replaceGraph(v1.assertionGraph, inGraph(v1.payload, v1.assertionGraph));
+
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        expect(countQueries()).toBe(2);
+        expect(constructs()).toBe(2);
+      } finally {
+        now.mockRestore();
+        vi.unstubAllEnvs();
+      }
     });
   });
 
@@ -265,19 +500,36 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       servedMeta: Quad[] = served.meta,
       options: Readonly<{
         preloadSnapshot?: boolean;
+        omitSnapshotStore?: boolean;
+        servedDataQuads?: readonly Quad[];
         onSnapshotRequest?: (ref: string) => void;
         snapshotStore?: WorkspacePublicSnapshotStore;
+        ordinaryRootSnapshotApplyAllowed?: (contextGraphId: string) => boolean;
+        selectedRecovery?: boolean;
+        recoveryGuard?: RecoveryExecutionGuard;
+        onExactMaterializedGraphRead?: () => void;
+        resolveRootSnapshotAtomicCompanion?:
+          SharedMemorySyncContext['resolveRootSnapshotAtomicCompanion'];
       }> = {},
     ) {
       const snapshotStore = options.snapshotStore ?? new MemorySnapshotStore();
       const { materializer } = materializerFor(store);
       let replaceCalls = 0;
+      let atomicReplaceCalls = 0;
       const run = async () => {
         if (options.preloadSnapshot !== false) {
           await snapshotStore.putSnapshot({ digest: served.digest, quads: served.payload });
         }
         return runSharedMemorySync({
-          mode: { kind: 'ordinary' },
+          mode: options.selectedRecovery
+            ? {
+                kind: 'selected-recovery',
+                recoveryGuard: options.recoveryGuard ?? {
+                  signal: new AbortController().signal,
+                  assertCurrent: () => undefined,
+                },
+              }
+            : { kind: 'ordinary' },
           ctx,
           remotePeerId: 'peer-source',
           contextGraphIds: [CG],
@@ -291,12 +543,16 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
             return {
               quads: phase === 'meta'
                 ? [...servedMeta]
-                : phase === 'snapshot' ? [...served.payload] : [],
+                : phase === 'snapshot'
+                  ? [...served.payload]
+                  : [...(options.servedDataQuads ?? [])],
               bytesReceived: 0,
               resumedFromOffset: 0,
               nextOffset: phase === 'meta'
                 ? servedMeta.length
-                : phase === 'snapshot' ? served.payload.length : 0,
+                : phase === 'snapshot'
+                  ? served.payload.length
+                  : (options.servedDataQuads?.length ?? 0),
               checkpointKey: 'k',
               completed: true,
               timedOut: false,
@@ -319,8 +575,24 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
               replaceCalls += 1;
               return materializer.replaceGraph(graphUri, quads);
             },
+            replaceGraphWithAtomicCompanion: async (graphUri, quads, companion) => {
+              atomicReplaceCalls += 1;
+              return materializer.replaceGraphWithAtomicCompanion(
+                graphUri,
+                quads,
+                companion,
+              );
+            },
+            readExactMaterializedGraph: async (descriptor) => {
+              const exact = await materializer.readExactMaterializedGraph(descriptor);
+              options.onExactMaterializedGraphRead?.();
+              return exact;
+            },
           },
-          publicSnapshotStore: snapshotStore,
+          ordinaryRootSnapshotApplyAllowed: options.ordinaryRootSnapshotApplyAllowed,
+          resolveRootSnapshotAtomicCompanion:
+            options.resolveRootSnapshotAtomicCompanion,
+          ...(options.omitSnapshotStore ? {} : { publicSnapshotStore: snapshotStore }),
           deleteCheckpoint: () => {},
           setCheckpoint: () => {},
           ensureOwnedMap: () => new Map(),
@@ -329,7 +601,11 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
           logDebug: () => {},
         });
       };
-      return { run, replaceCalls: () => replaceCalls };
+      return {
+        run,
+        replaceCalls: () => replaceCalls,
+        atomicReplaceCalls: () => atomicReplaceCalls,
+      };
     }
 
     it('heals the pre-fix broken state through the REAL content guard', async () => {
@@ -344,6 +620,315 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       expect(h.replaceCalls()).toBe(1);
       const { materializer } = materializerFor(store);
       expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
+    });
+
+    it('atomically materializes an absent store-locator root with its durable companion', async () => {
+      const store = new OxigraphStore();
+      const markerGraph = 'urn:test:rfc64-late-boundary';
+      const markerSubject = 'urn:test:rfc64-late-boundary:store-locator-absent';
+      const settle = vi.fn();
+      const h = realHarness(store, v1, v1.meta, {
+        resolveRootSnapshotAtomicCompanion: () => ({
+          graphUri: markerGraph,
+          subject: markerSubject,
+          quads: [{
+            subject: markerSubject,
+            predicate: 'urn:test:entry',
+            object: '"store-locator-absent"',
+            graph: markerGraph,
+          }],
+          settle,
+        }),
+      });
+
+      const summary = await h.run();
+
+      expect(summary.failedPhases).toBe(0);
+      expect(h.replaceCalls()).toBe(0);
+      expect(h.atomicReplaceCalls()).toBe(1);
+      expect(settle).toHaveBeenCalledWith(true);
+      await expect(store.hasGraph(v1.assertionGraph)).resolves.toBe(true);
+      await expect(store.query(
+        `ASK { GRAPH <${markerGraph}> { <${markerSubject}> ?p ?o } }`,
+      )).resolves.toMatchObject({ type: 'boolean', value: true });
+    });
+
+    it('defers an in-flight ordinary root snapshot when catalog authority takes ownership', async () => {
+      const store = new OxigraphStore();
+      let checks = 0;
+      const h = realHarness(store, v1, v1.meta, {
+        // The first check models an ordinary sync planned while legacy root
+        // scope was still admitted. Authority flips while snapshot loading
+        // yields, so the final pre-replace check must veto the mutation.
+        ordinaryRootSnapshotApplyAllowed: () => {
+          checks += 1;
+          return checks === 1;
+        },
+      });
+
+      const summary = await h.run();
+
+      expect(summary.failedPhases).toBe(0);
+      expect(checks).toBeGreaterThanOrEqual(2);
+      expect(h.replaceCalls()).toBe(0);
+      await expect(store.hasGraph(v1.assertionGraph)).resolves.toBe(false);
+      expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+        .toEqual([]);
+      expect(await distinctObjects(store, WS_META, v1.operationSubject, `${DKG}shareOperationId`))
+        .toEqual([]);
+    });
+
+    it('atomically establishes a late boundary for selected recovery even when content exists', async () => {
+      const store = new OxigraphStore();
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert([...v1.meta]);
+      const markerGraph = 'urn:test:rfc64-late-boundary';
+      const markerSubject = 'urn:test:rfc64-late-boundary:selected';
+      const settle = vi.fn();
+      const h = realHarness(store, v1, v1.meta, {
+        selectedRecovery: true,
+        // Selected recovery is intentional under catalog authority and must
+        // not be suppressed by the ordinary lane's authority gate.
+        ordinaryRootSnapshotApplyAllowed: () => false,
+        resolveRootSnapshotAtomicCompanion: () => ({
+          graphUri: markerGraph,
+          subject: markerSubject,
+          quads: [{
+            subject: markerSubject,
+            predicate: 'urn:test:entry',
+            object: '"selected"',
+            graph: markerGraph,
+          }],
+          settle,
+        }),
+      });
+
+      const summary = await h.run();
+
+      expect(summary.failedPhases).toBe(0);
+      expect(h.replaceCalls()).toBe(0);
+      expect(h.atomicReplaceCalls()).toBe(1);
+      expect(settle).toHaveBeenCalledWith(true);
+      await expect(store.query(
+        `ASK { GRAPH <${markerGraph}> { <${markerSubject}> ?p ?o } }`,
+      )).resolves.toMatchObject({ type: 'boolean', value: true });
+    });
+
+    it('rejects a revoked selected recovery after exact read without preparing a companion', async () => {
+      const store = new OxigraphStore();
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert([...v1.meta]);
+      const revoked = new Error('selected root recovery revoked after exact read');
+      const controller = new AbortController();
+      let current = true;
+      const resolveCompanion = vi.fn(() => ({
+        graphUri: 'urn:test:rfc64-late-boundary',
+        subject: 'urn:test:rfc64-late-boundary:revoked',
+        quads: [{
+          subject: 'urn:test:rfc64-late-boundary:revoked',
+          predicate: 'urn:test:entry',
+          object: '"revoked"',
+          graph: 'urn:test:rfc64-late-boundary',
+        }],
+      }));
+      const h = realHarness(store, v1, v1.meta, {
+        selectedRecovery: true,
+        recoveryGuard: {
+          signal: controller.signal,
+          assertCurrent: () => {
+            if (!current) throw revoked;
+          },
+        },
+        onExactMaterializedGraphRead: () => {
+          current = false;
+          controller.abort(revoked);
+        },
+        resolveRootSnapshotAtomicCompanion: resolveCompanion,
+      });
+
+      const summary = await h.run();
+      expect(summary.failedPhases).toBe(1);
+      expect(resolveCompanion).not.toHaveBeenCalled();
+      expect(h.atomicReplaceCalls()).toBe(0);
+      await expect(store.query(
+        'ASK { GRAPH <urn:test:rfc64-late-boundary> { ?s ?p ?o } }',
+      )).resolves.toMatchObject({ type: 'boolean', value: false });
+    });
+
+    it('backfills an already-materialized graph-locator descriptor from verified stored bytes', async () => {
+      const store = new OxigraphStore();
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      const graphLocatorMeta = v1.meta.map((quad) => (
+        quad.predicate === `${DKG}publicSnapshotRef`
+          ? {
+              ...quad,
+              predicate: `${DKG}publicSnapshotGraph`,
+              object: workspaceKnowledgeAssetOperationSnapshotGraph(CG, v1.operationId),
+            }
+          : quad
+      ));
+      await store.insert(graphLocatorMeta);
+      const markerGraph = 'urn:test:rfc64-late-boundary';
+      const markerSubject = 'urn:test:rfc64-late-boundary:graph-locator';
+      const h = realHarness(store, v1, graphLocatorMeta, {
+        selectedRecovery: true,
+        preloadSnapshot: false,
+        resolveRootSnapshotAtomicCompanion: () => ({
+          graphUri: markerGraph,
+          subject: markerSubject,
+          quads: [{
+            subject: markerSubject,
+            predicate: 'urn:test:entry',
+            object: '"graph-locator"',
+            graph: markerGraph,
+          }],
+        }),
+      });
+
+      const summary = await h.run();
+
+      expect(summary.failedPhases).toBe(0);
+      expect(h.atomicReplaceCalls()).toBe(1);
+      await expect(store.query(
+        `ASK { GRAPH <${markerGraph}> { <${markerSubject}> ?p ?o } }`,
+      )).resolves.toMatchObject({ type: 'boolean', value: true });
+    });
+
+    it('does not backfill a graph-locator root when ordinary catalog authority denies it', async () => {
+      const store = new OxigraphStore();
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      const graphLocatorMeta = v1.meta.map((quad) => (
+        quad.predicate === `${DKG}publicSnapshotRef`
+          ? {
+              ...quad,
+              predicate: `${DKG}publicSnapshotGraph`,
+              object: workspaceKnowledgeAssetOperationSnapshotGraph(CG, v1.operationId),
+            }
+          : quad
+      ));
+      await store.insert(graphLocatorMeta);
+      const markerGraph = 'urn:test:rfc64-late-boundary';
+      const markerSubject = 'urn:test:rfc64-late-boundary:graph-locator-denied';
+      const resolveCompanion = vi.fn(() => ({
+        graphUri: markerGraph,
+        subject: markerSubject,
+        quads: [{
+          subject: markerSubject,
+          predicate: 'urn:test:entry',
+          object: '"graph-locator-denied"',
+          graph: markerGraph,
+        }],
+      }));
+      const h = realHarness(store, v1, graphLocatorMeta, {
+        preloadSnapshot: false,
+        ordinaryRootSnapshotApplyAllowed: () => false,
+        resolveRootSnapshotAtomicCompanion: resolveCompanion,
+      });
+
+      const summary = await h.run();
+
+      expect(summary.failedPhases).toBe(0);
+      expect(resolveCompanion).not.toHaveBeenCalled();
+      expect(h.replaceCalls()).toBe(0);
+      expect(h.atomicReplaceCalls()).toBe(0);
+      await expect(store.query(
+        `ASK { GRAPH <${markerGraph}> { <${markerSubject}> ?p ?o } }`,
+      )).resolves.toMatchObject({ type: 'boolean', value: false });
+    });
+
+    it('does not backfill a stale graph-locator root when the stored head outranks it', async () => {
+      const store = new OxigraphStore();
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert([...v2.meta]);
+      const graphLocatorMeta = v1.meta.map((quad) => (
+        quad.predicate === `${DKG}publicSnapshotRef`
+          ? {
+              ...quad,
+              predicate: `${DKG}publicSnapshotGraph`,
+              object: workspaceKnowledgeAssetOperationSnapshotGraph(CG, v1.operationId),
+            }
+          : quad
+      ));
+      const markerGraph = 'urn:test:rfc64-late-boundary';
+      const markerSubject = 'urn:test:rfc64-late-boundary:graph-locator-stale';
+      const resolveCompanion = vi.fn(() => ({
+        graphUri: markerGraph,
+        subject: markerSubject,
+        quads: [{
+          subject: markerSubject,
+          predicate: 'urn:test:entry',
+          object: '"graph-locator-stale"',
+          graph: markerGraph,
+        }],
+      }));
+      const h = realHarness(store, v1, graphLocatorMeta, {
+        preloadSnapshot: false,
+        ordinaryRootSnapshotApplyAllowed: () => true,
+        resolveRootSnapshotAtomicCompanion: resolveCompanion,
+      });
+
+      const summary = await h.run();
+
+      expect(summary.failedPhases).toBe(0);
+      expect(resolveCompanion).not.toHaveBeenCalled();
+      expect(h.replaceCalls()).toBe(0);
+      expect(h.atomicReplaceCalls()).toBe(0);
+      const { materializer } = materializerFor(store);
+      expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
+      expect(await materializer.readStoredHead(descriptorFor(v1))).toEqual({
+        version: '2',
+        needsRepair: false,
+        shareOperationId: 'op-v2',
+      });
+      await expect(store.query(
+        `ASK { GRAPH <${markerGraph}> { <${markerSubject}> ?p ?o } }`,
+      )).resolves.toMatchObject({ type: 'boolean', value: false });
+    });
+
+    it('atomically materializes an absent graph-locator root instead of bulk-inserting it', async () => {
+      const store = new OxigraphStore();
+      const sourceGraph = workspaceKnowledgeAssetOperationSnapshotGraph(CG, v1.operationId);
+      const graphLocatorMeta = v1.meta.map((quad) => (
+        quad.predicate === `${DKG}publicSnapshotRef`
+          ? {
+              ...quad,
+              predicate: `${DKG}publicSnapshotGraph`,
+              object: sourceGraph,
+            }
+          : quad
+      ));
+      const markerGraph = 'urn:test:rfc64-late-boundary';
+      const markerSubject = 'urn:test:rfc64-late-boundary:graph-locator-absent';
+      const settle = vi.fn();
+      const h = realHarness(store, v1, graphLocatorMeta, {
+        selectedRecovery: true,
+        preloadSnapshot: false,
+        omitSnapshotStore: true,
+        servedDataQuads: inGraph(v1.payload, sourceGraph),
+        resolveRootSnapshotAtomicCompanion: () => ({
+          graphUri: markerGraph,
+          subject: markerSubject,
+          quads: [{
+            subject: markerSubject,
+            predicate: 'urn:test:entry',
+            object: '"graph-locator-absent"',
+            graph: markerGraph,
+          }],
+          settle,
+        }),
+      });
+
+      const summary = await h.run();
+
+      expect(summary.failedPhases).toBe(0);
+      expect(h.replaceCalls()).toBe(0);
+      expect(h.atomicReplaceCalls()).toBe(1);
+      expect(settle).toHaveBeenCalledWith(true);
+      await expect(store.hasGraph(v1.assertionGraph)).resolves.toBe(true);
+      await expect(store.hasGraph(sourceGraph)).resolves.toBe(false);
+      await expect(store.query(
+        `ASK { GRAPH <${markerGraph}> { <${markerSubject}> ?p ?o } }`,
+      )).resolves.toMatchObject({ type: 'boolean', value: true });
     });
 
     it('replaces an equal-count older version and leaves ONE unambiguous head', async () => {

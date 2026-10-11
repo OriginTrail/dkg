@@ -103,7 +103,6 @@ describe('private snapshot-walk coordinator', () => {
     state.markResolved('a');
     const admission = createSyncWorkAdmission(
       () => 1_000,
-      { sharing: 'exclusive', owner: 'private-test' },
     );
     const unresolved = await preparePrivateSwmSnapshotWalk(state, {
       workAdmission: admission,
@@ -137,7 +136,6 @@ describe('private snapshot-walk coordinator', () => {
     const first = await preparePrivateSwmSnapshotWalk(state, {
       workAdmission: createSyncWorkAdmission(
         () => remaining,
-        { sharing: 'exclusive', owner: 'bounded-validation' },
       ),
       validateRef,
     });
@@ -148,7 +146,6 @@ describe('private snapshot-walk coordinator', () => {
     const second = await preparePrivateSwmSnapshotWalk(state, {
       workAdmission: createSyncWorkAdmission(
         () => remaining,
-        { sharing: 'exclusive', owner: 'bounded-validation-retry' },
       ),
       validateRef,
     });
@@ -166,7 +163,6 @@ describe('private snapshot-walk coordinator', () => {
     state.beginRecoveryJob();
     const admission = createSyncWorkAdmission(
       () => 1_000,
-      { sharing: 'exclusive', owner: 'validation-epochs' },
     );
     const validateRef = vi.fn(async () => true);
 

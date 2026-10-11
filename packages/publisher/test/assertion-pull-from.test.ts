@@ -16,7 +16,7 @@ import {
   generateEd25519Keypair,
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager, OxigraphStore, PrivateContentStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGPublisher, assertionScopedGraphUri } from '../src/index.js';
 import { finalizeRootlessAssertionForTest } from './_helpers/rootless-lifecycle.js';
 
@@ -48,6 +48,26 @@ function q(subject: string, predicate: string, object: string, graph = ''): Quad
 
 function key(quad: Quad): string {
   return JSON.stringify([quad.subject, quad.predicate, quad.object]);
+}
+
+// Seed residue left by older create retries directly. Public writes now reject
+// active seals, but pull-from must still recover drafts persisted by 10.0.16.
+async function seedDirtyDraft(
+  publisher: DKGPublisher,
+  store: OxigraphStore,
+  publicQuads: Quad[],
+  privateQuads: Quad[] = [],
+): Promise<void> {
+  const wmGraph = await publisher.wmGraphUri(CG, AGENT, NAME);
+  for (const quad of publicQuads) {
+    const graph = assertionScopedGraphUri(wmGraph, quad.graph);
+    await store.createGraph(graph);
+    await store.insert([{ ...quad, graph }]);
+  }
+  if (privateQuads.length > 0) {
+    await new PrivateContentStore(store, new GraphManager(store))
+      .storeKnowledgeAssetPrivateDraftTriples(CG, AGENT, NAME, privateQuads);
+  }
 }
 
 async function seedShared(
@@ -193,7 +213,7 @@ describe('rootless assertionPullFrom', () => {
     const { publisher, store } = await makePublisher();
     await seedShared(publisher, store);
     await publisher.assertionCreate(CG, NAME, AGENT);
-    await publisher.assertionWrite(CG, NAME, AGENT, [
+    await seedDirtyDraft(publisher, store, [
       q('urn:e:local', SCHEMA, '"Local edit"'),
     ]);
 
@@ -209,7 +229,7 @@ describe('rootless assertionPullFrom', () => {
     const { publisher, store } = await makePublisher();
     await seedShared(publisher, store);
     await publisher.assertionCreate(CG, NAME, AGENT);
-    await publisher.assertionWritePrivate(CG, NAME, AGENT, [
+    await seedDirtyDraft(publisher, store, [], [
       q('urn:e:private-local', 'urn:predicate:secret', '"Local secret"'),
     ]);
 
@@ -228,10 +248,10 @@ describe('rootless assertionPullFrom', () => {
     await publisher.assertionCreate(CG, NAME, AGENT);
     const wmGraph = await publisher.wmGraphUri(CG, AGENT, NAME);
     const scopedLocalGraph = assertionScopedGraphUri(wmGraph, localNamedGraph);
-    await publisher.assertionWrite(CG, NAME, AGENT, [
+    await seedDirtyDraft(publisher, store, [
       q(ENTITY_1, SCHEMA, '"Stale named local"', localNamedGraph),
     ]);
-    await publisher.assertionWritePrivate(CG, NAME, AGENT, [
+    await seedDirtyDraft(publisher, store, [], [
       q('urn:e:private-local', 'urn:predicate:secret', '"Stale private local"'),
     ]);
     expect(await store.listGraphs()).toContain(scopedLocalGraph);
@@ -257,7 +277,7 @@ describe('rootless assertionPullFrom', () => {
     const { publisher, store } = await makePublisher();
     const finalized = await seedShared(publisher, store);
     await publisher.assertionCreate(CG, NAME, AGENT);
-    await publisher.assertionWrite(CG, NAME, AGENT, [
+    await seedDirtyDraft(publisher, store, [
       q('urn:e:precious-local', SCHEMA, '"Precious local edit"'),
     ]);
     await store.dropGraph(finalized.sharedGraphUri);
@@ -274,7 +294,7 @@ describe('rootless assertionPullFrom', () => {
     const { publisher, store } = await makePublisher();
     const finalized = await seedShared(publisher, store);
     await publisher.assertionCreate(CG, NAME, AGENT);
-    await publisher.assertionWrite(CG, NAME, AGENT, [
+    await seedDirtyDraft(publisher, store, [
       q('urn:e:precious-local', SCHEMA, '"Precious local edit"'),
     ]);
     await store.insert([
@@ -293,7 +313,7 @@ describe('rootless assertionPullFrom', () => {
     const { publisher, store } = await makePublisher();
     const finalized = await seedShared(publisher, store);
     await publisher.assertionCreate(CG, NAME, AGENT);
-    await publisher.assertionWrite(CG, NAME, AGENT, [
+    await seedDirtyDraft(publisher, store, [
       q('urn:e:precious-local', SCHEMA, '"Precious local edit"'),
     ]);
     const tamperedNamedGraph = assertionScopedGraphUri(

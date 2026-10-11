@@ -30,6 +30,7 @@ const REQUIRED_RUNTIME_PACKAGES = [
   '@origintrail-official/dkg-epcis',
   '@origintrail-official/dkg-graph-viz',
   '@origintrail-official/dkg-mcp',
+  '@origintrail-official/dkg-node-store',
   '@origintrail-official/dkg-node-ui',
   '@origintrail-official/dkg-okf',
   '@origintrail-official/dkg-publisher',
@@ -81,7 +82,8 @@ test('CLI exposes explicit standalone and prepared build paths', () => {
   assert.equal(packageJson.scripts.prebuild, undefined);
   assert.equal(packageJson.scripts.build, 'pnpm run build:prerequisites && pnpm run build:prepared');
   assert.equal(packageJson.scripts['build:prerequisites'], 'node scripts/build-prerequisites.mjs');
-  assert.match(packageJson.scripts['build:prepared'], /^tsc /);
+  assert.match(packageJson.scripts['build:prepared'], /^pnpm run build:compile &&/);
+  assert.equal(packageJson.scripts['build:compile'], 'node ../../scripts/stamp-cli-build-info.mjs --compile');
 });
 
 test('standalone CLI prerequisite entrypoint always builds its dependency graph', () => {

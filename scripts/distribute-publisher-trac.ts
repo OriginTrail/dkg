@@ -136,13 +136,28 @@ async function main() {
   }
 
   // Load distribution file
-  const distPath = path.join(__dirname, '..', 'snapshots', `${chain}_publisher_distribution.json`);
+  const distPath = path.join(__dirname, '..', 'misc', 'snapshots', `${chain}_publisher_distribution.json`);
   if (!existsSync(distPath)) {
     console.error(`Distribution file not found: ${distPath}`);
     console.error('Run generate-aggregates.ts first.');
     process.exit(1);
   }
   const distData: DistributionFile = JSON.parse(readFileSync(distPath, 'utf8'));
+
+  // The ledger is the only guard against paying a publisher twice. Ledgers
+  // written before snapshots/ moved to misc/snapshots/ are untracked, so the
+  // move left them behind; a missing ledger here would start from zero.
+  const ledgerPath = path.join(__dirname, '..', 'misc', 'snapshots', `${chain}_distribution_ledger.json`);
+  const legacyLedgerPath = path.join(__dirname, '..', 'snapshots', `${chain}_distribution_ledger.json`);
+  if (existsSync(legacyLedgerPath)) {
+    console.error(`Found a ledger at the old location: ${legacyLedgerPath}`);
+    if (existsSync(ledgerPath)) {
+      console.error(`A ledger also exists at ${ledgerPath}. Merge the two by hand, then delete the old file.`);
+    } else {
+      console.error(`Move it to ${ledgerPath}, then run again.`);
+    }
+    process.exit(1);
+  }
 
   // Connect to RPC
   const rpcUrl = (process.env[RPC_ENV_KEYS[chain]] ?? '').split(',')[0];
@@ -176,7 +191,6 @@ async function main() {
   console.log('');
 
   // Load ledger (tracks completed transfers)
-  const ledgerPath = path.join(__dirname, '..', 'snapshots', `${chain}_distribution_ledger.json`);
   const ledger = loadLedger(ledgerPath, chain, walletAddress);
   const completedSet = new Map<string, string>();
   for (const entry of ledger.entries) {

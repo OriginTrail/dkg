@@ -1,7 +1,21 @@
+import { chatTurnSubjectPattern, scopedChatTurnUri, decodeExistingChatTurn, type ExistingChatTurn } from './chat-turn-subject.js';
 import { isSafeIri } from '@origintrail-official/dkg-core';
 import { LlmClient } from './llm/client.js';
 import type { LlmConfig } from './llm/types.js';
-import { decodeRdfStringLiteral } from './rdf-literal.js';
+import { normalizeChatAttachmentRefs, stripRdfLiteral, type ChatAttachmentRef, type ChatToolCall } from './chat-literals.js';
+import { foldListedRows, foldSessionRows } from './chat-history-rows.js';
+import { selectGraphDeltaSubjects } from './chat-graph-delta-subjects.js';
+import {
+  CHAT_ATTACHMENT_REFS_PREDICATE,
+  CHAT_NS,
+  CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE,
+  CHAT_TURN_PERSISTENCE_TRANSITION_TYPE,
+  DKG_ONT,
+  MEMORY_NS,
+  RDF_TYPE,
+  SCHEMA,
+  XSD_DATETIME,
+} from './chat-vocabulary.js';
 export { decodeRdfStringLiteral } from './rdf-literal.js';
 
 export interface MemoryToolContext {
@@ -120,7 +134,6 @@ export interface SessionGraphDeltaResult {
 }
 
 export type ChatTurnPersistenceState = 'stored' | 'failed' | 'pending';
-type ChatTurnPersistenceDisplayState = 'pending' | 'in_progress' | 'stored' | 'failed' | 'skipped';
 
 const IMPORT_SOURCES = ['claude', 'chatgpt', 'gemini', 'other'] as const;
 export type ImportSource = (typeof IMPORT_SOURCES)[number];
@@ -166,167 +179,7 @@ export const AGENT_CONTEXT_GRAPH = 'agent-context';
 export const CHAT_TURNS_ASSERTION = 'chat-turns';
 const OPENCLAW_LOCAL_SESSION_ID = 'openclaw:dkg-ui';
 
-const CHAT_NS = 'urn:dkg:chat:';
-const MEMORY_NS = 'urn:dkg:memory:';
-const SCHEMA = 'http://schema.org/';
-const DKG_ONT = 'http://dkg.io/ontology/';
-const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-const XSD_DATETIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
 const OPENCLAW_LOCAL_SESSION_URI = `${CHAT_NS}session:${OPENCLAW_LOCAL_SESSION_ID}`;
-const CHAT_ATTACHMENT_REFS_PREDICATE = `${DKG_ONT}attachmentRefs`;
-const CHAT_TURN_PERSISTENCE_TRANSITION_TYPE = `${DKG_ONT}ChatTurnPersistenceTransition`;
-const CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE = `${DKG_ONT}updatesTurn`;
-const PERSISTENCE_STATUS_RANK: Record<ChatTurnPersistenceDisplayState, number> = {
-  skipped: 1,
-  pending: 2,
-  in_progress: 3,
-  failed: 4,
-  stored: 5,
-};
-
-interface ChatAttachmentRef {
-  id?: string;
-  fileName: string;
-  contextGraphId: string;
-  assertionName?: string;
-  assertionUri: string;
-  fileHash: string;
-  detectedContentType?: string;
-  extractionStatus?: 'completed' | 'skipped' | 'failed';
-  tripleCount?: number;
-  rootEntity?: string;
-}
-
-interface ChatToolCall {
-  name: string;
-  args: Record<string, unknown>;
-  result: unknown;
-}
-
-function stripRdfLiteral(value: string): string {
-  if (!value) return '';
-  const typed = value.match(/^"([\s\S]*)"(?:\^\^<[^>]+>)?(?:@[a-z-]+)?$/);
-  if (typed) return typed[1];
-  return value;
-}
-
-function normalizePersistenceStatus(value: string): ChatTurnPersistenceDisplayState | undefined {
-  const status = stripRdfLiteral(value).trim();
-  if (status === 'pending' || status === 'in_progress' || status === 'stored' || status === 'failed' || status === 'skipped') {
-    return status;
-  }
-  return undefined;
-}
-
-function choosePersistenceStatus(
-  current: ChatTurnPersistenceDisplayState | undefined,
-  candidate: ChatTurnPersistenceDisplayState | undefined,
-): ChatTurnPersistenceDisplayState | undefined {
-  if (!candidate) return current;
-  if (!current) return candidate;
-  return PERSISTENCE_STATUS_RANK[candidate] > PERSISTENCE_STATUS_RANK[current] ? candidate : current;
-}
-
-function normalizeChatAttachmentRef(raw: unknown): ChatAttachmentRef | null {
-  if (!raw || typeof raw !== 'object') return null;
-  const record = raw as Record<string, unknown>;
-  const fileName = typeof record.fileName === 'string' ? record.fileName.trim() : '';
-  const contextGraphId = typeof record.contextGraphId === 'string' ? record.contextGraphId.trim() : '';
-  const assertionUri = typeof record.assertionUri === 'string' ? record.assertionUri.trim() : '';
-  const fileHash = typeof record.fileHash === 'string' ? record.fileHash.trim() : '';
-  if (!fileName || !contextGraphId || !assertionUri || !fileHash) return null;
-
-  const normalized: ChatAttachmentRef = {
-    fileName,
-    contextGraphId,
-    assertionUri,
-    fileHash,
-  };
-  if (typeof record.id === 'string' && record.id.trim()) normalized.id = record.id.trim();
-  if (typeof record.assertionName === 'string' && record.assertionName.trim()) normalized.assertionName = record.assertionName.trim();
-  if (typeof record.detectedContentType === 'string' && record.detectedContentType.trim()) {
-    normalized.detectedContentType = record.detectedContentType.trim();
-  }
-  if (record.extractionStatus === 'completed' || record.extractionStatus === 'skipped' || record.extractionStatus === 'failed') {
-    normalized.extractionStatus = record.extractionStatus;
-  }
-  if (typeof record.tripleCount === 'number' && Number.isFinite(record.tripleCount) && record.tripleCount >= 0) {
-    normalized.tripleCount = record.tripleCount;
-  }
-  if (typeof record.rootEntity === 'string' && record.rootEntity.trim()) normalized.rootEntity = record.rootEntity.trim();
-  return normalized;
-}
-
-function normalizeChatAttachmentRefs(raw: unknown): ChatAttachmentRef[] | undefined {
-  if (!Array.isArray(raw)) return undefined;
-  const refs = raw
-    .map((entry) => normalizeChatAttachmentRef(entry))
-    .filter((entry): entry is ChatAttachmentRef => entry != null);
-  return refs.length > 0 ? refs : undefined;
-}
-
-function normalizeChatToolCall(raw: unknown): ChatToolCall | null {
-  if (!raw || typeof raw !== 'object') return null;
-  const record = raw as Record<string, unknown>;
-  const name = typeof record.name === 'string' && record.name.trim() ? record.name.trim() : 'unknown';
-  return {
-    name,
-    args: record.args && typeof record.args === 'object' && !Array.isArray(record.args)
-      ? record.args as Record<string, unknown>
-      : {},
-    result: record.result,
-  };
-}
-
-function normalizeChatToolCalls(raw: unknown): ChatToolCall[] | undefined {
-  if (!Array.isArray(raw)) return undefined;
-  const calls = raw
-    .map((entry) => normalizeChatToolCall(entry))
-    .filter((entry): entry is ChatToolCall => entry != null);
-  return calls.length > 0 ? calls : undefined;
-}
-
-function parseNestedJsonLiteral(value: string): unknown {
-  let current: unknown = value;
-  for (let depth = 0; depth < 4; depth += 1) {
-    if (typeof current !== 'string') return current;
-    const trimmed = current.trim();
-    if (!trimmed) return undefined;
-    try {
-      current = JSON.parse(trimmed);
-    } catch {
-      return undefined;
-    }
-  }
-  return current;
-}
-
-function parseAttachmentRefsLiteral(value: string): ChatAttachmentRef[] | undefined {
-  const candidates = [value, stripRdfLiteral(value)]
-    .map((candidate) => candidate.trim())
-    .filter((candidate, index, all) => candidate.length > 0 && all.indexOf(candidate) === index);
-
-  for (const candidate of candidates) {
-    const parsed = parseNestedJsonLiteral(candidate) ?? parseNestedJsonLiteral(JSON.stringify(candidate));
-    const normalized = normalizeChatAttachmentRefs(parsed);
-    if (normalized?.length) return normalized;
-  }
-  return undefined;
-}
-
-function parseToolCallsLiteral(value: string): ChatToolCall[] | undefined {
-  const candidates = [value, stripRdfLiteral(value)]
-    .map((candidate) => candidate.trim())
-    .filter((candidate, index, all) => candidate.length > 0 && all.indexOf(candidate) === index);
-
-  for (const candidate of candidates) {
-    const parsed = parseNestedJsonLiteral(candidate) ?? parseNestedJsonLiteral(JSON.stringify(candidate));
-    const normalized = normalizeChatToolCalls(parsed);
-    if (normalized?.length) return normalized;
-  }
-  return undefined;
-}
-
 function parseRdfInt(value: string): number {
   if (!value) return 0;
   const match = value.match(/^"(\d+)"/);
@@ -616,7 +469,7 @@ export class ChatMemoryManager {
     const failureReason = typeof opts?.failureReason === 'string'
       ? opts.failureReason.trim()
       : (opts?.failureReason === null ? null : undefined);
-    const turnUri = turnId ? `${CHAT_NS}turn:${turnId}` : undefined;
+    const turnUri = turnId ? (await this.findExistingChatTurn(sessionId, turnId))?.uri ?? scopedChatTurnUri(sessionId, turnId) : undefined;
 
     const isNewSession = !this.knownSessions.has(sessionId);
 
@@ -701,9 +554,7 @@ export class ChatMemoryManager {
     const sessionUri = `${CHAT_NS}session:${sessionId}`;
     const result = await this.tools.query(
       `SELECT ?turn WHERE {
-        ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-        ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
-        ?turn <${DKG_ONT}turnId> ${JSON.stringify(trimmedTurnId)} .
+        ${chatTurnSubjectPattern(`<${sessionUri}>`, '?turn', JSON.stringify(trimmedTurnId))}
       } LIMIT 1`,
       this.wmReadOpts(),
     );
@@ -717,9 +568,7 @@ export class ChatMemoryManager {
     const sessionUri = `${CHAT_NS}session:${sessionId}`;
     const result = await this.tools.query(
       `SELECT ?persistenceState ?transitionState WHERE {
-        ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-        ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
-        ?turn <${DKG_ONT}turnId> ${JSON.stringify(trimmedTurnId)} .
+        ${chatTurnSubjectPattern(`<${sessionUri}>`, '?turn', JSON.stringify(trimmedTurnId))}
         OPTIONAL { ?turn <${DKG_ONT}persistenceState> ?persistenceState }
         OPTIONAL {
           ?transition <${RDF_TYPE}> <${CHAT_TURN_PERSISTENCE_TRANSITION_TYPE}> .
@@ -740,6 +589,19 @@ export class ChatMemoryManager {
     return null;
   }
 
+  private async findExistingChatTurn(sessionId: string, turnId: string): Promise<ExistingChatTurn | null> {
+    const sessionUri = `${CHAT_NS}session:${sessionId}`;
+    const result = await this.tools.query(
+      `SELECT ?turn ?tid ?ts WHERE {
+        ${chatTurnSubjectPattern(`<${sessionUri}>`, '?turn', JSON.stringify(turnId))}
+        ?turn <${DKG_ONT}turnId> ?tid .
+        OPTIONAL { ?turn <${SCHEMA}dateCreated> ?ts }
+      } ORDER BY ?turn LIMIT 1`,
+      this.wmReadOpts(),
+    );
+    return decodeExistingChatTurn(result.bindings?.[0], turnId, stripRdfLiteral);
+  }
+
   async recordChatTurnPersistenceTransition(
     sessionId: string,
     turnId: string,
@@ -755,7 +617,7 @@ export class ChatMemoryManager {
     const trimmedTurnId = turnId.trim();
     if (!trimmedTurnId) return;
     const transitionId = crypto.randomUUID().slice(0, 8);
-    const turnUri = `${CHAT_NS}turn:${trimmedTurnId}`;
+    const turnUri = (await this.findExistingChatTurn(sessionId, trimmedTurnId))?.uri ?? scopedChatTurnUri(sessionId, trimmedTurnId);
     const transitionUri = `${CHAT_NS}turn-transition:${transitionId}`;
     const now = new Date().toISOString();
     const failureReason = typeof opts?.failureReason === 'string'
@@ -1086,9 +948,7 @@ export class ChatMemoryManager {
           OPTIONAL { ?m <${DKG_ONT}turnId> ?turnId }
           OPTIONAL { ?m <${CHAT_ATTACHMENT_REFS_PREDICATE}> ?attachmentRefs }
           OPTIONAL {
-            ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-            ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
-            ?turn <${DKG_ONT}turnId> ?turnId .
+            ${chatTurnSubjectPattern(`<${sessionUri}>`, '?turn', '?turnId')}
             OPTIONAL { ?turn <${DKG_ONT}persistenceState> ?persistenceState }
             OPTIONAL { ?turn <${DKG_ONT}failureReason> ?failureReason }
             OPTIONAL {
@@ -1106,63 +966,9 @@ export class ChatMemoryManager {
       );
       const bindings = msgsResult.bindings ?? [];
       if (bindings.length === 0) return null;
-      const messagesByUri = new Map<string, {
-        uri: string;
-        author: string;
-        text: string;
-        ts: string;
-        turnId?: string;
-        persistStatus?: ChatTurnPersistenceDisplayState;
-        failureReason?: string | null;
-        attachmentRefs?: ChatAttachmentRef[];
-        toolCalls?: ChatToolCall[];
-      }>();
-      for (const mb of bindings) {
-        const uri = String(mb.m ?? '').replace(/[<>]/g, '');
-        const key = uri || `${String(mb.author ?? '')}:${String(mb.ts ?? '')}:${String(mb.text ?? '')}`;
-        let message = messagesByUri.get(key);
-        if (!message) {
-          message = {
-            uri,
-            author: mb.author?.includes('user') ? 'user' : 'agent',
-            text: decodeRdfStringLiteral(mb.text ?? ''),
-            ts: stripRdfLiteral(mb.ts ?? ''),
-            turnId: stripRdfLiteral(mb.turnId ?? '') || undefined,
-            attachmentRefs: parseAttachmentRefsLiteral(String(mb.attachmentRefs ?? '')),
-          };
-          messagesByUri.set(key, message);
-        }
-        const candidateStatus = normalizePersistenceStatus(mb.transitionState ?? mb.persistenceState ?? '');
-        const transitionAssistantReply = String(mb.transitionAssistantReply ?? '');
-        if (message.author === 'agent' && candidateStatus === 'stored' && transitionAssistantReply) {
-          // The transition `assistantReply` is written via `JSON.stringify`
-          // (see opts.assistantReply quad) exactly like the base
-          // `schema:text`, so it needs the same decode — otherwise a
-          // stored turn (the dominant path on reload) overwrites the
-          // correctly-decoded base text with a literal-`\n` string and
-          // markdown breaks after refresh again.
-          message.text = decodeRdfStringLiteral(transitionAssistantReply);
-        }
-        const transitionAttachmentRefs = parseAttachmentRefsLiteral(String(mb.transitionAttachmentRefs ?? ''));
-        if (message.author === 'user' && candidateStatus === 'stored' && transitionAttachmentRefs?.length) {
-          message.attachmentRefs = transitionAttachmentRefs;
-        }
-        const transitionToolCalls = parseToolCallsLiteral(String(mb.transitionToolCalls ?? ''));
-        if (message.author === 'agent' && candidateStatus === 'stored' && transitionToolCalls?.length) {
-          message.toolCalls = transitionToolCalls;
-        }
-        message.persistStatus = choosePersistenceStatus(message.persistStatus, candidateStatus);
-        const candidateReason = stripRdfLiteral(mb.transitionFailureReason ?? mb.failureReason ?? '').trim();
-        if (candidateStatus === 'failed' && candidateReason) {
-          message.failureReason = candidateReason;
-        }
-        if (message.persistStatus && message.persistStatus !== 'failed') {
-          message.failureReason = undefined;
-        }
-      }
       return {
         session: sessionId,
-        messages: [...messagesByUri.values()],
+        messages: foldSessionRows(bindings),
       };
     } catch {
       return null;
@@ -1204,34 +1010,67 @@ export class ChatMemoryManager {
         .map((entry: { sessionUri: string; sessionId: string }) => `<${entry.sessionUri}>`)
         .join(' ');
 
+      // One round trip for both: the messages of the listed sessions, and the
+      // turns among them that completed by a `stored` transition. Such a turn
+      // keeps the reply of its first report on its assistant Message and carries
+      // the final one on the transition, so each message is joined to the
+      // transitions of the turn it is the assistant Message of (through the
+      // turn's `hasAssistantMessage` link), and `completedTurnReply`, the
+      // resolver `getSession` uses, decides which reply wins. The turn is matched
+      // to its transitions through its own session link, so a turn of another
+      // session that reuses the id never contributes.
+      //
+      // A legacy turn subject that two sessions share links the assistant
+      // Message of both, and a transition on it does not say whose completion
+      // it is. Such a subject contributes no completion here, so the list keeps
+      // each session's reply as it was written and never shows one session the
+      // other's (see `chatTurnSubjectPattern`).
+      //
+      // The completed turns are an independent subquery over the listed
+      // sessions' turns, joined to the messages on the assistant Message. The
+      // query must not use a UNION: a read of the working-memory view can span
+      // more than one graph (a by-name read also includes the assertion's scoped
+      // child graphs, and an agent address can have several candidate layer
+      // graphs), and the query engine refuses a UNION combined with ORDER BY
+      // across graphs, so the whole list would come back empty. An OPTIONAL
+      // join of `turnId` onto every message would cost more on this query, and
+      // would pair a message that has no `turnId` with the transitions of the
+      // session's other turns.
       const allMsgs = await this.tools.query(
-        `SELECT ?session ?author ?text ?ts WHERE {
+        `SELECT ?session ?author ?text ?ts ?m ?transitionState ?transitionAssistantReply WHERE {
           VALUES ?session { ${values} }
           ?m <${SCHEMA}isPartOf> ?session .
           ?m <${SCHEMA}author> ?author .
           ?m <${SCHEMA}text> ?text .
           ?m <${SCHEMA}dateCreated> ?ts
-        } ORDER BY ?session ?ts`,
+          OPTIONAL {
+            {
+              SELECT ?m ?transitionState ?transitionAssistantReply ?transitionTs WHERE {
+                VALUES ?turnSession { ${values} }
+                ?turn <${SCHEMA}isPartOf> ?turnSession .
+                ?transition <${CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE}> ?turn .
+                ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
+                ?transition <${RDF_TYPE}> <${CHAT_TURN_PERSISTENCE_TRANSITION_TYPE}> .
+                ?transition <${DKG_ONT}persistenceState> ?transitionState .
+                ?transition <${DKG_ONT}assistantReply> ?transitionAssistantReply .
+                ?turn <${DKG_ONT}hasAssistantMessage> ?m .
+                OPTIONAL { ?transition <${SCHEMA}dateCreated> ?transitionTs }
+                FILTER NOT EXISTS {
+                  ?turn <${SCHEMA}isPartOf> ?otherSession .
+                  FILTER(?otherSession != ?turnSession)
+                }
+              }
+            }
+          }
+        } ORDER BY ?session ?ts ?transitionTs`,
         this.wmReadOpts(),
       );
 
-      const bySession = new Map<string, Array<{ author: string; text: string; ts: string }>>();
-      for (const row of allMsgs.bindings ?? []) {
-        const sessionUri = String(row.session ?? '').replace(/[<>]/g, '');
-        if (!sessionUri) continue;
-        if (!bySession.has(sessionUri)) bySession.set(sessionUri, []);
-        const msgs = bySession.get(sessionUri)!;
-        if (msgs.length >= 100) continue;
-        msgs.push({
-          author: row.author?.includes('user') ? 'user' : 'agent',
-          text: decodeRdfStringLiteral(row.text ?? ''),
-          ts: stripRdfLiteral(row.ts ?? ''),
-        });
-      }
+      const bySession = foldListedRows(allMsgs.bindings ?? []);
 
       return sessionEntries.map((entry: { sessionUri: string; sessionId: string }) => ({
         session: entry.sessionId,
-        messages: bySession.get(entry.sessionUri) ?? [],
+        messages: (bySession.get(entry.sessionUri) ?? []).map(({ author, text, ts }) => ({ author, text, ts })),
       }));
     } catch {
       return [];
@@ -1247,9 +1086,8 @@ export class ChatMemoryManager {
     const sessionUri = `${CHAT_NS}session:${sessionId}`;
     const baseTurnId = opts?.baseTurnId?.trim() || null;
     const countResult = await this.tools.query(
-      `SELECT (COUNT(*) AS ?c) WHERE {
-        ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-        ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
+      `SELECT (COUNT(DISTINCT ?tid) AS ?c) WHERE {
+        ${chatTurnSubjectPattern(`<${sessionUri}>`, '?turn', '?tid')}
       }`,
       this.wmReadOpts(),
     );
@@ -1272,30 +1110,16 @@ export class ChatMemoryManager {
       };
     }
 
-    const turnUri = `${CHAT_NS}turn:${turnId}`;
-    const currentTurnResult = await this.tools.query(
-      `SELECT ?tid ?ts WHERE {
-        <${turnUri}> <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-        <${turnUri}> <${SCHEMA}isPartOf> <${sessionUri}> .
-        <${turnUri}> <${DKG_ONT}turnId> ?tid .
-        OPTIONAL { <${turnUri}> <${SCHEMA}dateCreated> ?ts }
-      } LIMIT 1`,
-      this.wmReadOpts(),
-    );
-    const currentTurn = (currentTurnResult.bindings ?? [])[0];
-    const currentTurnId = stripRdfLiteral(currentTurn?.tid ?? '').trim();
-    const currentTurnTs = stripRdfLiteral(currentTurn?.ts ?? '').trim();
+    const currentTurn = await this.findExistingChatTurn(sessionId, turnId);
     const latestTurnResult = await this.tools.query(
       `SELECT ?latestTurnId ?latestTs WHERE {
-        ?latestTurn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-        ?latestTurn <${SCHEMA}isPartOf> <${sessionUri}> .
-        ?latestTurn <${DKG_ONT}turnId> ?latestTurnId .
+        ${chatTurnSubjectPattern(`<${sessionUri}>`, '?latestTurn', '?latestTurnId')}
         OPTIONAL { ?latestTurn <${SCHEMA}dateCreated> ?latestTs }
       } ORDER BY DESC(?latestTs) DESC(?latestTurnId) LIMIT 1`,
       this.wmReadOpts(),
     );
     const latestTurnId = stripRdfLiteral((latestTurnResult.bindings ?? [])[0]?.latestTurnId ?? '').trim() || null;
-    if (!currentTurnId || currentTurnId !== turnId) {
+    if (!currentTurn) {
       return {
         mode: 'full_refresh_required',
         reason: 'turn_not_found',
@@ -1313,15 +1137,15 @@ export class ChatMemoryManager {
       };
     }
 
+    const { uri: turnUri, turnId: currentTurnId, createdAt: currentTurnTs } = currentTurn;
     const currentTurnIdLiteral = JSON.stringify(currentTurnId);
     const currentTsLiteral = currentTurnTs
       ? `"${currentTurnTs}"^^<${XSD_DATETIME}>`
       : null;
     const previousTurnQuery = currentTsLiteral
       ? `SELECT ?previousTurnId WHERE {
-          ?previousTurn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-          ?previousTurn <${SCHEMA}isPartOf> <${sessionUri}> .
-          ?previousTurn <${DKG_ONT}turnId> ?previousTurnId .
+          ${chatTurnSubjectPattern(`<${sessionUri}>`, '?previousTurn', '?previousTurnId')}
+          FILTER(?previousTurnId != ${currentTurnIdLiteral})
           ?previousTurn <${SCHEMA}dateCreated> ?previousTs .
           FILTER(
             ?previousTs < ${currentTsLiteral}
@@ -1329,9 +1153,8 @@ export class ChatMemoryManager {
           )
         } ORDER BY DESC(?previousTs) DESC(?previousTurnId) LIMIT 1`
       : `SELECT ?previousTurnId WHERE {
-          ?previousTurn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-          ?previousTurn <${SCHEMA}isPartOf> <${sessionUri}> .
-          ?previousTurn <${DKG_ONT}turnId> ?previousTurnId .
+          ${chatTurnSubjectPattern(`<${sessionUri}>`, '?previousTurn', '?previousTurnId')}
+          FILTER(?previousTurnId != ${currentTurnIdLiteral})
           FILTER(?previousTurnId < ${currentTurnIdLiteral})
         } ORDER BY DESC(?previousTurnId) LIMIT 1`;
     const previousTurnResult = await this.tools.query(
@@ -1341,10 +1164,8 @@ export class ChatMemoryManager {
     const previousTurnId = stripRdfLiteral((previousTurnResult.bindings ?? [])[0]?.previousTurnId ?? '').trim() || null;
     const turnIndexResult = currentTsLiteral
       ? await this.tools.query(
-          `SELECT (COUNT(*) AS ?c) WHERE {
-            ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-            ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
-            ?turn <${DKG_ONT}turnId> ?tid .
+          `SELECT (COUNT(DISTINCT ?tid) AS ?c) WHERE {
+            ${chatTurnSubjectPattern(`<${sessionUri}>`, '?turn', '?tid')}
             ?turn <${SCHEMA}dateCreated> ?ts .
             FILTER(
               ?ts < ${currentTsLiteral}
@@ -1353,7 +1174,13 @@ export class ChatMemoryManager {
           }`,
           this.wmReadOpts(),
         )
-      : { bindings: [{ c: String(previousTurnId ? 2 : 1) }] };
+      : await this.tools.query(
+          `SELECT (COUNT(DISTINCT ?tid) AS ?c) WHERE {
+            ${chatTurnSubjectPattern(`<${sessionUri}>`, '?turn', '?tid')}
+            FILTER(?tid <= ${currentTurnIdLiteral})
+          }`,
+          this.wmReadOpts(),
+        );
     const turnIndex = Math.max(0, sumBindingValues(turnIndexResult.bindings, 'c'));
 
     if (previousTurnId && !baseTurnId) {
@@ -1423,29 +1250,12 @@ export class ChatMemoryManager {
       };
     }
 
-    const relatedSubjectsResult = await this.tools.query(
-      `SELECT DISTINCT ?s WHERE {
-        VALUES ?msg { <${userMsgUri}> <${assistantMsgUri}> }
-        { BIND(<${sessionUri}> AS ?s) }
-        UNION { BIND(<${turnUri}> AS ?s) }
-        UNION { BIND(?msg AS ?s) }
-        UNION { <${assistantMsgUri}> <${DKG_ONT}usedTool> ?s }
-        UNION { ?s <${DKG_ONT}mentionedIn> ?msg }
-        UNION {
-          ?entity <${DKG_ONT}mentionedIn> ?msg .
-          ?s <${DKG_ONT}contains> ?entity .
-          ?s <${DKG_ONT}extractedFrom> <${sessionUri}> .
-        }
-      } LIMIT 5000`,
-      this.wmReadOpts(),
+    // What hangs off the turn, including its transitions (see the function).
+    const subjects = await selectGraphDeltaSubjects(
+      (sparql) => this.tools.query(sparql, this.wmReadOpts()),
+      { sessionUri, turnUri, userMsgUri, assistantMsgUri },
     );
-    const subjectSet = new Set<string>([sessionUri, turnUri, userMsgUri, assistantMsgUri]);
-    for (const b of relatedSubjectsResult.bindings ?? []) {
-      const iri = String(b.s ?? '').replace(/[<>]/g, '');
-      if (!iri || !isSafeIri(iri)) continue;
-      subjectSet.add(iri);
-    }
-    const values = [...subjectSet]
+    const values = subjects
       .map((iri) => `<${iri}>`)
       .join(' ');
     const deltaResult = await this.tools.query(

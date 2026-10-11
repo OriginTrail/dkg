@@ -172,6 +172,7 @@ export class AgentChild {
     }
     let handshakeFailure = null;
     let executedRuntimeManifest;
+    let processIdentity;
     try {
       const stopped = await this.request(
         { cmd: 'stop' },
@@ -179,6 +180,7 @@ export class AgentChild {
         this.stopTimeouts.handshake,
       );
       executedRuntimeManifest = requiredExecutedRuntimeManifest(stopped, this.role);
+      processIdentity = stopped.processIdentity;
     } catch (error) {
       handshakeFailure = error;
     }
@@ -210,6 +212,7 @@ export class AgentChild {
     this.shutdownReceipt = Object.freeze({
       exit: Object.freeze(result),
       executedRuntimeManifest,
+      processIdentity,
     });
     return this.shutdownReceipt;
   }

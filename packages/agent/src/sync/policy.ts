@@ -135,14 +135,23 @@ export function validateSyncResponderSnapshotLimitsConfig(
   }
 }
 
+/**
+ * A priority table with no prototype. Every Context Graph ID, "__proto__"
+ * included, is then an ordinary own key: on a plain object, assigning
+ * "__proto__" sets the prototype and the operator's entry is lost.
+ */
+function emptyPriorityTable(): SyncContextGraphPriorityConfig {
+  return Object.create(null) as SyncContextGraphPriorityConfig;
+}
+
 export function normalizeSyncContextGraphPriorities(
   config: SyncContextGraphPriorityConfig | undefined,
 ): Readonly<SyncContextGraphPriorityConfig> {
-  if (config === undefined) return Object.freeze({});
+  if (config === undefined) return Object.freeze(emptyPriorityTable());
   if (config === null || typeof config !== 'object' || Array.isArray(config)) {
     throw new TypeError('Invalid syncContextGraphPriorities: expected an object');
   }
-  const normalized: SyncContextGraphPriorityConfig = {};
+  const normalized = emptyPriorityTable();
   for (const [contextGraphId, value] of Object.entries(config)) {
     if (contextGraphId.trim().length === 0) {
       throw new TypeError('Invalid syncContextGraphPriorities: Context Graph IDs must be non-empty');
@@ -184,9 +193,7 @@ const SYSTEM_CONTEXT_GRAPH_IDS: ReadonlySet<string> = new Set(
 export function resolveSyncContextGraphPriorities(
   config: SyncContextGraphPriorityConfig | undefined,
 ): Readonly<SyncContextGraphPriorityConfig> {
-  const resolved: SyncContextGraphPriorityConfig = {
-    ...normalizeSyncContextGraphPriorities(config),
-  };
+  const resolved = Object.assign(emptyPriorityTable(), normalizeSyncContextGraphPriorities(config));
   for (const contextGraphId of SYSTEM_CONTEXT_GRAPH_IDS) {
     resolved[contextGraphId] ??= DEFAULT_SYSTEM_CONTEXT_GRAPH_PRIORITY;
   }
@@ -197,7 +204,12 @@ export function contextGraphPriority(
   priorities: Readonly<SyncContextGraphPriorityConfig> | undefined,
   contextGraphId: string,
 ): number {
-  const configured = priorities?.[contextGraphId];
+  // Own entries only: the sync responder passes peer-requested IDs, and a raw
+  // (unnormalized) config object returns Object.prototype members for IDs
+  // like "constructor".
+  const configured = priorities !== undefined && Object.hasOwn(priorities, contextGraphId)
+    ? priorities[contextGraphId]
+    : undefined;
   if (configured !== undefined) return configured;
   // Read-side backstop for maps that never passed through
   // resolveSyncContextGraphPriorities (a raw config object, or none at all):

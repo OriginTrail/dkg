@@ -31,6 +31,13 @@ export interface Rfc64FinalizedPolicyAgentPrecommitResolutionOptionsV1 {
   readonly acceptedPolicySnapshotForCatalogScope:
     (scope: Readonly<AuthorCatalogScopeV1>) => AcceptedRfc64CatalogAccessSnapshotV1;
   readonly rpcEndpoints: readonly string[] | null;
+  /**
+   * `chain.finalityConfirmations` — the node's SINGLE definition of finality,
+   * forwarded verbatim to the strict snapshot scope. Omitted means the shared
+   * default of 1 (anchor at head); an operator who wants a deeper precommit
+   * anchor deepens the one chain-wide setting.
+   */
+  readonly finalityConfirmations?: number;
   readonly getOnChainContextGraphId:
     (contextGraphId: ContextGraphIdV1, signal: AbortSignal) => Promise<string | null>;
   readonly getEvmChainId: () => Promise<bigint>;
@@ -155,6 +162,18 @@ export async function resolveRfc64FinalizedPolicyAgentPrecommitV1(
 }
 
 /**
+ * The strict snapshot config validates its own key set, so an operator who never
+ * set a depth must produce NO key rather than an explicit `undefined`.
+ */
+export function strictFinalityConfirmationsOptionV1(
+  finalityConfirmations: number | undefined,
+): Readonly<{ finalityConfirmations?: number }> {
+  return finalityConfirmations === undefined
+    ? Object.freeze({})
+    : Object.freeze({ finalityConfirmations });
+}
+
+/**
  * Guard a finalized-chain SWM catalog before its applied-head CAS without
  * treating catalog rows as a second VM inventory. The chain remains the VM
  * catalog; this barrier verifies the accepted policy, cleartext CG name,
@@ -176,6 +195,7 @@ export function createRfc64FinalizedPolicyAgentPrecommitV1(
     const snapshot = createStrictCurrentFinalizedEvmSnapshotScopeV1({
       chainId: resolved.chainId,
       endpoints: resolved.rpcEndpoints,
+      ...strictFinalityConfirmationsOptionV1(options.finalityConfirmations),
       // One process-wide per-chain gate protects concurrent policy and VM
       // reads even though each precommit owns its own snapshot scope.
       owner: 'rfc64',

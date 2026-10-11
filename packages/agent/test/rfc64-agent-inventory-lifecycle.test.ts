@@ -1,4 +1,5 @@
 import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
+import { GossipSession } from '../src/gossip-session.js';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -11,12 +12,14 @@ import {
   type SignedControlEnvelopeV1,
   type UnsignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
-import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
+import { MockChainAdapter, verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { DKGAgent } from '../src/dkg-agent.js';
+import { StorageACKRegistrationRuntime } from '../src/p2p/storage-ack-registration-runtime.js';
 import { ContextGraphMembershipPersistScheduler } from '../src/context-graph-membership-persist-scheduler.js';
+import { ContextGraphSubscriptionPersistScheduler } from '../src/context-graph-subscription-persist-scheduler.js';
 import { FinalizationRuntime } from '../src/finalization-runtime.js';
 import {
   INVENTORY_V1_RELATIVE_PATH,
@@ -52,11 +55,16 @@ function temporaryDataDirectory(): string {
 
 function syntheticAgent(dataDirectory?: string): any {
   const agent = Object.create(DKGAgent.prototype) as any;
+  // Production always owns an adapter, including no-chain deployments.
+  agent.chain = new MockChainAdapter();
   agent.peerSyncSession = PeerSyncSession.stopped();
+  agent.gossipSession = new GossipSession();
+  agent.storageACKRegistrationRuntime = new StorageACKRegistrationRuntime();
   agent.lastSyncDisconnectedAt = new Map();
   Object.assign(agent, {
     config: dataDirectory === undefined ? {} : { dataDir: dataDirectory },
     contextGraphMembershipPersistence: new ContextGraphMembershipPersistScheduler(),
+    contextGraphSubscriptionPersistence: new ContextGraphSubscriptionPersistScheduler(),
     finalizationRuntime: new FinalizationRuntime(),
     rfc64BackgroundWorkDispatcherV1: new Rfc64BackgroundWorkDispatcherV1(),
     rfc64PersistenceV1: undefined,

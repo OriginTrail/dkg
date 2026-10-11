@@ -15,7 +15,7 @@ import { rebuildMetrics } from '@origintrail-official/dkg-core';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { rpcUsageWindowTotal } from '../src/rpc-usage.js';
 import {
-  createRpcRequestProvider,
+  activeRpcRequestContext,
   withRpcRequestContext,
 } from '../src/rpc-request-transport.js';
 import { RpcRequestGovernor } from '../src/rpc-request-governor.js';
@@ -97,45 +97,50 @@ describe('EVM adapter endpoint validation', () => {
     expect(provider.send).toHaveBeenCalledTimes(1);
   });
 
-  it('STATIC NETWORK: shared chain-id validation is foreground-classed even when background starts it', async () => {
-    const rpc = await startLoopbackRpc();
-    servers.push(rpc);
+  it('STATIC NETWORK: chain-id validation preserves priority and does not block foreground behind background', async () => {
     const governor = new RpcRequestGovernor({
       maxRequestsPerSecond: 100,
       foregroundReservePercent: 80,
       burstRequests: 10,
       maxQueueSize: 8,
-      startupJitterMs: 60_000,
-    }, {
-      clock: {
-        now: () => Date.now(),
-        random: () => 1,
-        setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
-        clearTimeout: (timer) => clearTimeout(timer),
-      },
+      startupJitterMs: 0,
     });
-    const provider = createRpcRequestProvider(rpc.url, {
-      maxRetries: 0,
-      providerOptions: { batchMaxCount: 1 },
-      admission: governor,
-    });
+    let backgroundStarted!: () => void;
+    let releaseBackground!: () => void;
+    const backgroundDidStart = new Promise<void>((resolve) => { backgroundStarted = resolve; });
+    const backgroundMayFinish = new Promise<void>((resolve) => { releaseBackground = resolve; });
+    const provider = {
+      send: vi.fn(async () => {
+        await governor.acquireActiveRequest();
+        if (activeRpcRequestContext().requestClass === 'background') {
+          backgroundStarted();
+          await backgroundMayFinish;
+        }
+        return '0x7a69';
+      }),
+    };
     const adapter: any = new EVMChainAdapter(minimalConfig());
     adapters.push(adapter);
 
-    try {
-      await expect(withRpcRequestContext(
-        { requestClass: 'background' },
-        () => adapter.ensureConfiguredStaticChainIdValidated(provider),
-      )).resolves.toBe(31337n);
-      expect(governor.snapshot()).toMatchObject({
-        backgroundAdmitted: 0,
-        backgroundQueued: 0,
-      });
-      expect(governor.snapshot().foregroundAdmitted).toBe(rpc.totalHits());
-      expect(governor.snapshot().foregroundAdmitted).toBeGreaterThan(0);
-    } finally {
-      provider.destroy();
-    }
+    const background = withRpcRequestContext(
+      { requestClass: 'background' },
+      () => adapter.ensureConfiguredStaticChainIdValidated(provider),
+    );
+    await backgroundDidStart;
+
+    const foreground = withRpcRequestContext(
+      { requestClass: 'foreground' },
+      () => adapter.ensureConfiguredStaticChainIdValidated(provider),
+    );
+    await expect(foreground).resolves.toBe(31337n);
+    expect(provider.send).toHaveBeenCalledTimes(2);
+    expect(governor.snapshot()).toMatchObject({
+      backgroundAdmitted: 1,
+      foregroundAdmitted: 1,
+    });
+
+    releaseBackground();
+    await expect(background).resolves.toBe(31337n);
   });
 
   it('STATIC NETWORK: ordinary reads validate configured chain id once, then avoid steady eth_chainId calls', async () => {

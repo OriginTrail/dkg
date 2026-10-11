@@ -390,7 +390,7 @@ describe('generateGraphKnowledgeAssetMetadata confirmation state', () => {
     ])).toBe('finalized-materialization');
   });
 
-  it('rejects unsupported and conflicting confirmation state centrally', () => {
+  it('accepts compatible legacy confirmation kinds and rejects unsupported state', () => {
     const quad = (object: string) => ({
       subject: GRAPH_UAL,
       predicate: `${DKG}confirmationKind`,
@@ -399,10 +399,14 @@ describe('generateGraphKnowledgeAssetMetadata confirmation state', () => {
     });
     expect(() => readGraphKnowledgeAssetConfirmationKindV1([quad('"bogus"')]))
       .toThrow('Unsupported graph knowledge asset confirmation kind');
+    expect(readGraphKnowledgeAssetConfirmationKindV1([
+      quad('"transaction"'), quad('"finalized-materialization"'),
+    ])).toBe('transaction');
     expect(() => readGraphKnowledgeAssetConfirmationKindV1([
-      quad('"transaction"'),
-      quad('"finalized-materialization"'),
-    ])).toThrow('2 confirmation kinds');
+      quad('"transaction"'), quad('"bogus"'),
+    ])).toThrow('Unsupported graph knowledge asset confirmation kind');
+    expect(() => readGraphKnowledgeAssetConfirmationKindV1([quad('urn:invalid')]))
+      .toThrow('must be an RDF literal');
   });
 
   it('reads a legacy confirmed transaction receipt without a confirmation kind', () => {

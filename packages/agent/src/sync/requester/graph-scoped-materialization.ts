@@ -11,8 +11,8 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   mergeSameVersionGraphKnowledgeAssetMetadataV1,
+  overlayLocallyTrustedKnowledgeAssetControls,
   readGraphKnowledgeAssetConfirmationKindV1,
-  readLocallyTrustedKnowledgeAssetControls,
   withMaterializationLock,
 } from '@origintrail-official/dkg-publisher';
 import {
@@ -24,6 +24,24 @@ import {
   exactAssetCommitmentMatchesDescriptor,
   type ExactAssetCommitment,
 } from '../exact-assets.js';
+
+/**
+ * Name the setting that grants the missing capability.
+ *
+ * The store refuses this write because its adapter reports no transactional
+ * replacement. For an explicitly configured `sparql-http` endpoint that is the
+ * `best-effort` default rather than a property of the server: the adapter
+ * cannot know what is behind the URL, so the operator declares it. Without
+ * this hint the failure reads as a product bug, which has cost real debugging
+ * sessions on nodes whose endpoint did support the guarantee all along.
+ */
+const ATOMIC_REPLACE_UNSUPPORTED_MESSAGE_V1 = (capability: string): string => (
+  `Graph-scoped durable sync requires ${capability} support. An explicitly `
+  + 'configured sparql-http endpoint defaults to consistencyProfile '
+  + '"best-effort"; set store.options.consistencyProfile to "atomic-update" '
+  + '(or "atomic-readback" when the endpoint also guarantees read-after-write) '
+  + 'if it provides that guarantee.'
+);
 
 const ASSERTION_VERSION = 'http://dkg.io/ontology/assertionVersion';
 const MERKLE_ROOT = 'http://dkg.io/ontology/merkleRoot';
@@ -196,6 +214,14 @@ export async function authenticateVerifiedGraphScopedAsset(
   if (roots.length !== 1) {
     throw new Error(`Graph-scoped durable sync ${asset.ual} has ${roots.length} Merkle roots`);
   }
+  // What the asset claims as provenance is fixed by its own metadata, so the
+  // receipt of a first publish is requested with the views instead of after
+  // them. Only the request moves: this is awaited after the checks on the
+  // views, so a malformed claim and a failed receipt read are still reported
+  // there, and the receipt is still consulted last. A check that fails before
+  // that leaves it unawaited, so its rejection is observed here.
+  const provenance = resolveProvenance(chain, asset, options.signal);
+  provenance.catch(() => undefined);
   const [latestRoot, rootCount, boundContextGraphId] = await Promise.all([
     chain.getLatestMerkleRoot(kaId, { signal: options.signal }),
     chain.getMerkleRootCount(kaId, { signal: options.signal }),
@@ -243,31 +269,11 @@ export async function authenticateVerifiedGraphScopedAsset(
       { code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH' },
     );
   }
-  const transactionHashes = asset.metadataQuads
-    .filter((quad) => quad.predicate === TRANSACTION_HASH)
-    .map((quad) => parseTransactionHashLiteral(quad.object));
-  if (transactionHashes.length > 1) {
-    throw Object.assign(
-      new Error(
-        `Graph-scoped durable sync ${asset.ual} allows at most one receipt transaction hash, `
-          + `got ${transactionHashes.length}`,
-      ),
-      { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
-    );
-  }
+  const claimed = await provenance;
 
-  const confirmationKind = readGraphKnowledgeAssetConfirmationKindV1(asset.metadataQuads);
   let materializedBlock: number;
   let materializedTxIndex: number;
-  if (confirmationKind === 'finalized-materialization') {
-    if (transactionHashes.length !== 0) {
-      throw Object.assign(
-        new Error(
-          `Graph-scoped durable sync ${asset.ual} finalized materialization must not claim a receipt`,
-        ),
-        { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
-      );
-    }
+  if (claimed.kind === 'finalized-materialization') {
     // RFC-64 finalized VM materialization deliberately has no receipt claim:
     // it is reconstructed from a pinned finalized chain snapshot. A later
     // durable-sync requester must not trust the serving peer's local
@@ -278,24 +284,13 @@ export async function authenticateVerifiedGraphScopedAsset(
     // remains the authoritative stale-write guard for this receiptless lane.
     materializedBlock = 0;
     materializedTxIndex = 0;
-  } else if (transactionHashes.length !== 1) {
-    throw Object.assign(
-      new Error(
-        `Graph-scoped durable sync ${asset.ual} receipt-backed confirmation requires one transaction hash`,
-      ),
-      { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
-    );
-  } else if (asset.assertionVersion === 1n) {
-    const transactionHash = transactionHashes[0]!;
-    if (!chain.resolvePublishByTxHash) {
-      throw Object.assign(
-        new Error('Graph-scoped durable sync requires receipt-backed publish verification'),
-        { code: 'VM_CHAIN_PROVENANCE_UNSUPPORTED' },
-      );
-    }
-    const resolved = await chain.resolvePublishByTxHash(transactionHash, {
-      signal: options.signal,
-    });
+  } else if (claimed.kind === 'publish') {
+    const { transactionHash } = claimed;
+    // "No such publish" from the early request may only mean the endpoint had
+    // not seen the publish block yet when it was asked, while the views,
+    // answered after it, already reflect that block. Ask once more now, which
+    // is when the receipt was always read.
+    const resolved = claimed.receipt ?? await claimed.readReceipt();
     const resolvedKaId = resolved?.kaId ?? resolved?.batchId;
     if (
       !resolved
@@ -312,7 +307,7 @@ export async function authenticateVerifiedGraphScopedAsset(
     materializedBlock = resolved.blockNumber;
     materializedTxIndex = resolved.txIndex ?? 0;
   } else {
-    const transactionHash = transactionHashes[0]!;
+    const { transactionHash } = claimed;
     if (!chain.verifyKAUpdate || !chain.getLatestMerkleRootPublisher) {
       throw Object.assign(
         new Error('Graph-scoped durable sync requires receipt-backed update verification'),
@@ -440,7 +435,7 @@ export async function materializeVerifiedGraphScopedAsset(params: {
       }
       assertCurrent();
     }
-    const locallyTrustedMetadata = await readLocallyTrustedKnowledgeAssetControls(
+    const committedMetadata = await overlayLocallyTrustedKnowledgeAssetControls(
       store,
       asset.metaGraph,
       asset.ual,
@@ -459,12 +454,14 @@ export async function materializeVerifiedGraphScopedAsset(params: {
       asset.dataQuads,
       asset.metaGraph,
       asset.ual,
-      [...replacementMetadata, ...locallyTrustedMetadata],
+      committedMetadata,
       commitOptions,
     );
     if (!replaced) {
       throw Object.assign(
-        new Error('Graph-scoped durable sync requires atomic data/metadata replacement support'),
+        new Error(ATOMIC_REPLACE_UNSUPPORTED_MESSAGE_V1(
+          'atomic data/metadata replacement',
+        )),
         { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
       );
     }
@@ -480,7 +477,9 @@ export async function materializeVerifiedGraphScopedAsset(params: {
       );
       if (!quarantined) {
         throw Object.assign(
-          new Error('Graph-scoped durable sync requires atomic stale-binding quarantine support'),
+          new Error(ATOMIC_REPLACE_UNSUPPORTED_MESSAGE_V1(
+            'atomic stale-binding quarantine',
+          )),
           { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
         );
       }
@@ -555,6 +554,83 @@ function parseBytes32Literal(raw: string, field: string): Uint8Array {
     throw new Error(`Graph-scoped durable sync ${field} must be 32 bytes of hexadecimal data`);
   }
   return Uint8Array.from(hex.match(/.{2}/g)!.map((pair) => Number.parseInt(pair, 16)));
+}
+
+type PublishReceipt = Awaited<ReturnType<NonNullable<ChainAdapter['resolvePublishByTxHash']>>>;
+
+/** A verified asset's provenance claim and, for a first publish, the receipt it names. */
+type Provenance =
+  | { readonly kind: 'finalized-materialization' }
+  | { readonly kind: 'update'; readonly transactionHash: string }
+  | {
+    readonly kind: 'publish';
+    readonly transactionHash: string;
+    /** What the receipt resolved to when it was requested with the views. */
+    readonly receipt: PublishReceipt;
+    /** The same read, again. */
+    readonly readReceipt: () => Promise<PublishReceipt>;
+  };
+
+/**
+ * Read what the asset's own metadata claims as its provenance and, for a
+ * first publish, request the receipt that claim names. It is started before
+ * the views have answered and awaited after their checks, so everything it
+ * rejects with is reported where it always was: a malformed claim, a chain
+ * that cannot resolve a publish, a failed receipt read. Nothing is requested
+ * for any other asset.
+ */
+async function resolveProvenance(
+  chain: ChainAdapter,
+  asset: VerifiedGraphScopedAsset,
+  signal: AbortSignal | undefined,
+): Promise<Provenance> {
+  const transactionHashes = asset.metadataQuads
+    .filter((quad) => quad.predicate === TRANSACTION_HASH)
+    .map((quad) => parseTransactionHashLiteral(quad.object));
+  if (transactionHashes.length > 1) {
+    throw Object.assign(
+      new Error(
+        `Graph-scoped durable sync ${asset.ual} allows at most one receipt transaction hash, `
+          + `got ${transactionHashes.length}`,
+      ),
+      { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
+    );
+  }
+  if (readGraphKnowledgeAssetConfirmationKindV1(asset.metadataQuads) === 'finalized-materialization') {
+    if (transactionHashes.length !== 0) {
+      throw Object.assign(
+        new Error(
+          `Graph-scoped durable sync ${asset.ual} finalized materialization must not claim a receipt`,
+        ),
+        { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
+      );
+    }
+    return { kind: 'finalized-materialization' };
+  }
+  if (transactionHashes.length !== 1) {
+    throw Object.assign(
+      new Error(
+        `Graph-scoped durable sync ${asset.ual} receipt-backed confirmation requires one transaction hash`,
+      ),
+      { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
+    );
+  }
+  const transactionHash = transactionHashes[0]!;
+  if (asset.assertionVersion !== 1n) return { kind: 'update', transactionHash };
+  const { resolvePublishByTxHash } = chain;
+  if (!resolvePublishByTxHash) {
+    throw Object.assign(
+      new Error('Graph-scoped durable sync requires receipt-backed publish verification'),
+      { code: 'VM_CHAIN_PROVENANCE_UNSUPPORTED' },
+    );
+  }
+  // Only the receipt's batch, root, hash and ordering are consumed, so the
+  // adapter's unused block-header lookup for `blockTimestamp` is skipped.
+  const readReceipt = () => resolvePublishByTxHash.call(chain, transactionHash, {
+    signal,
+    skipBlockTimestamp: true,
+  });
+  return { kind: 'publish', transactionHash, receipt: await readReceipt(), readReceipt };
 }
 
 function parseTransactionHashLiteral(raw: string): string {

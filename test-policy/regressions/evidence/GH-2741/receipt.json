@@ -1,0 +1,583 @@
+{
+  "schemaVersion": 1,
+  "caseId": "GH-2741",
+  "method": "historical-replay",
+  "status": "proven",
+  "requestedBadRef": "v10.0.18",
+  "patch": null,
+  "identity": {
+    "packages/agent/test/regression-peer-store-repair.test.ts": "dabb9c46e829d9bc4a0fb21ab3bd3a685e88840e9226d953ccee66b4f3852446",
+    "scripts/lib/regressions/cases/GH-2741.mjs": "94ba4d195fbacb221d4245bab1c5aff2c92d2b8875a411f450fe0b569469ab8f",
+    "scripts/qa-prove-regression.mjs": "fe208ec75be58f2591ee2b5779e228d9b535004b088a4bda7b4519a850bac4af",
+    "scripts/lib/regressions/profile-contract.mjs": "80ec108ac673e911f367c5d3fb24c07488c32dba8e5e531b972cb8fc1fe22981",
+    "scripts/lib/regressions/phases.mjs": "67560288acf041b6221fe443baa033ea1269232fb10e5387ce48a9be08e578f6",
+    "scripts/lib/regressions/subprocess.mjs": "4cf313f41214c34a59f6b6fc417babefa5a55c20795046f66951dc242b91c652",
+    "scripts/lib/regressions/results.mjs": "54d6abfe2d16fd32723c3a9f92f80dbd0b14a5a18730a6a1dd587ff808445ba9",
+    "scripts/lib/regressions/identity.mjs": "5e84529068e32342dc3400d1a6200b71006ba3daa20e0defd70de8e5d533bb8d",
+    "scripts/lib/regressions/proof.mjs": "473324dfac14b5df7255a085d006944f89c8d454e52e9b03398d650881f95f64"
+  },
+  "toolchain": {
+    "node": "v22.23.1",
+    "executable": "/Users/aleatoric/.nvm/versions/node/v22.23.1/bin/node",
+    "nodeSha256": "2e3f1286a7eb3736346ed1803e458a0ff909e2b2d5bc746144dcb76970e9b99d",
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "overlay": [
+    {
+      "file": "packages/agent/test/regression-peer-store-repair.test.ts",
+      "sha256": "dabb9c46e829d9bc4a0fb21ab3bd3a685e88840e9226d953ccee66b4f3852446"
+    }
+  ],
+  "phases": [
+    {
+      "side": "bad",
+      "name": "pnpm-version",
+      "command": "pnpm",
+      "args": [
+        "--version"
+      ],
+      "invocation": {
+        "command": "pnpm",
+        "args": [
+          "--version"
+        ]
+      },
+      "code": 0,
+      "signal": null,
+      "timedOut": false
+    },
+    {
+      "side": "bad",
+      "name": "install",
+      "command": "pnpm",
+      "args": [
+        "install",
+        "--frozen-lockfile"
+      ],
+      "invocation": {
+        "command": "pnpm",
+        "args": [
+          "install",
+          "--frozen-lockfile"
+        ]
+      },
+      "code": 0,
+      "signal": null,
+      "timedOut": false
+    },
+    {
+      "side": "bad",
+      "name": "build",
+      "command": "pnpm",
+      "args": [
+        "-r",
+        "--filter",
+        "@origintrail-official/dkg-agent^...",
+        "--filter",
+        "!@origintrail-official/dkg-evm-module",
+        "run",
+        "build"
+      ],
+      "invocation": {
+        "command": "pnpm",
+        "args": [
+          "-r",
+          "--filter",
+          "@origintrail-official/dkg-agent^...",
+          "--filter",
+          "!@origintrail-official/dkg-evm-module",
+          "run",
+          "build"
+        ]
+      },
+      "code": 0,
+      "signal": null,
+      "timedOut": false
+    },
+    {
+      "side": "bad",
+      "name": "discovery",
+      "command": "pnpm",
+      "args": [
+        "--dir",
+        "packages/agent",
+        "exec",
+        "vitest",
+        "list",
+        "--config",
+        "vitest.regression-replay.config.mts",
+        "test/regression-peer-store-repair.test.ts",
+        "--json"
+      ],
+      "invocation": {
+        "command": "pnpm",
+        "args": [
+          "--dir",
+          "packages/agent",
+          "exec",
+          "vitest",
+          "list",
+          "--config",
+          "vitest.regression-replay.config.mts",
+          "test/regression-peer-store-repair.test.ts",
+          "--json"
+        ]
+      },
+      "code": 0,
+      "signal": null,
+      "timedOut": false
+    },
+    {
+      "side": "bad",
+      "name": "execution",
+      "command": "pnpm",
+      "args": [
+        "--dir",
+        "packages/agent",
+        "exec",
+        "vitest",
+        "run",
+        "--config",
+        "vitest.regression-replay.config.mts",
+        "test/regression-peer-store-repair.test.ts",
+        "-t",
+        "^Random Sampling proof-time exact repair on the real libp2p peer store fetches the challenged asset from a provider the peer store lists as sync-capable$",
+        "--reporter=json",
+        "--outputFile=/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-9aaiF7/bad/bad-report.json"
+      ],
+      "invocation": {
+        "command": "pnpm",
+        "args": [
+          "--dir",
+          "packages/agent",
+          "exec",
+          "vitest",
+          "run",
+          "--config",
+          "vitest.regression-replay.config.mts",
+          "test/regression-peer-store-repair.test.ts",
+          "-t",
+          "^Random Sampling proof-time exact repair on the real libp2p peer store fetches the challenged asset from a provider the peer store lists as sync-capable$",
+          "--reporter=json",
+          "--outputFile=/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-9aaiF7/bad/bad-report.json"
+        ]
+      },
+      "code": 1,
+      "signal": null,
+      "timedOut": false
+    },
+    {
+      "side": "candidate",
+      "name": "pnpm-version",
+      "command": "pnpm",
+      "args": [
+        "--version"
+      ],
+      "invocation": {
+        "command": "pnpm",
+        "args": [
+          "--version"
+        ]
+      },
+      "code": 0,
+      "signal": null,
+      "timedOut": false
+    },
+    {
+      "side": "candidate",
+      "name": "install",
+      "command": "pnpm",
+      "args": [
+        "install",
+        "--frozen-lockfile"
+      ],
+      "invocation": {
+        "command": "pnpm",
+        "args": [
+          "install",
+          "--frozen-lockfile"
+        ]
+      },
+      "code": 0,
+      "signal": null,
+      "timedOut": false
+    },
+    {
+      "side": "candidate",
+      "name": "build",
+      "command": "pnpm",
+      "args": [
+        "-r",
+        "--filter",
+        "@origintrail-official/dkg-agent^...",
+        "--filter",
+        "!@origintrail-official/dkg-evm-module",
+        "run",
+        "build"
+      ],
+      "invocation": {
+        "command": "pnpm",
+        "args": [
+          "-r",
+          "--filter",
+          "@origintrail-official/dkg-agent^...",
+          "--filter",
+          "!@origintrail-official/dkg-evm-module",
+          "run",
+          "build"
+        ]
+      },
+      "code": 0,
+      "signal": null,
+      "timedOut": false
+    },
+    {
+      "side": "candidate",
+      "name": "discovery",
+      "command": "pnpm",
+      "args": [
+        "--dir",
+        "packages/agent",
+        "exec",
+        "vitest",
+        "list",
+        "--config",
+        "vitest.unit.config.ts",
+        "test/regression-peer-store-repair.test.ts",
+        "--json"
+      ],
+      "invocation": {
+        "command": "pnpm",
+        "args": [
+          "--dir",
+          "packages/agent",
+          "exec",
+          "vitest",
+          "list",
+          "--config",
+          "vitest.unit.config.ts",
+          "test/regression-peer-store-repair.test.ts",
+          "--json"
+        ]
+      },
+      "code": 0,
+      "signal": null,
+      "timedOut": false
+    },
+    {
+      "side": "candidate",
+      "name": "execution",
+      "command": "pnpm",
+      "args": [
+        "--dir",
+        "packages/agent",
+        "exec",
+        "vitest",
+        "run",
+        "--config",
+        "vitest.unit.config.ts",
+        "test/regression-peer-store-repair.test.ts",
+        "-t",
+        "^Random Sampling proof-time exact repair on the real libp2p peer store fetches the challenged asset from a provider the peer store lists as sync-capable$",
+        "--reporter=json",
+        "--outputFile=/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-9aaiF7/candidate/candidate-report.json"
+      ],
+      "invocation": {
+        "command": "pnpm",
+        "args": [
+          "--dir",
+          "packages/agent",
+          "exec",
+          "vitest",
+          "run",
+          "--config",
+          "vitest.unit.config.ts",
+          "test/regression-peer-store-repair.test.ts",
+          "-t",
+          "^Random Sampling proof-time exact repair on the real libp2p peer store fetches the challenged asset from a provider the peer store lists as sync-capable$",
+          "--reporter=json",
+          "--outputFile=/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-9aaiF7/candidate/candidate-report.json"
+        ]
+      },
+      "code": 0,
+      "signal": null,
+      "timedOut": false
+    }
+  ],
+  "cleanup": {
+    "candidate": "removed",
+    "bad": "removed"
+  },
+  "bad": {
+    "source": {
+      "commit": "382258fa43b1a0dd8ef2091ba6048b90e6890581",
+      "tree": "9d29156aad08cf3acbcf3c5b12bd84e97b65e651",
+      "lockfileSha256": "f9a5b81b36191f695f3c867c6e4bf1de43e9b178277551ec1dcad26b0fa9b61a",
+      "packageManager": "pnpm@10.28.1",
+      "nodeRequirement": "22"
+    },
+    "config": {
+      "file": "packages/agent/vitest.regression-replay.config.mts",
+      "sha256": "d810e9e9cf4d95ca4c5af883edb3eb17be15a62f8690e8266c76113355ad9fd6",
+      "purpose": "minimal historical test-only config; no global setup"
+    },
+    "pnpmVersion": "10.28.1",
+    "execution": {
+      "file": "packages/agent/test/regression-peer-store-repair.test.ts",
+      "assertion": "Random Sampling proof-time exact repair on the real libp2p peer store fetches the challenged asset from a provider the peer store lists as sync-capable",
+      "status": "failed",
+      "runtime": "v22.23.1",
+      "observation": {
+        "fetchedFrom": [],
+        "outcome": {
+          "error": "Random Sampling exact repair did not recover did:dkg:base:8453/0x0000000000000000000000000000000000001234/7 from zAEZg3q6"
+        }
+      },
+      "diagnostic": "AssertionError: GH-2741: capable peer repair fetch completes: expected { fetchedFrom: [], outcome: { …(1) } } to deeply equal { …(2) }\n    at /private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-9aaiF7/bad/packages/agent/test/regression-peer-store-repair.test.ts:78:70\n    at file:///private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-9aaiF7/bad/node_modules/.pnpm/@vitest+runner@4.0.18/node_modules/@vitest/runner/dist/index.js:915:20"
+    },
+    "reportRoot": "/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-9aaiF7/bad",
+    "dependencyInputs": {
+      ".npmrc": "f5aa3042280204ad7d8b9f0a302273c0ec22748e6c2f9d33d4e68da443315acc",
+      "bench/package.json": "3ca9d4afd21425087cf31893b8f9f63c81b0b8408db5e343ca76e5f8aa26ab9a",
+      "ccl_v0_1/package.json": "0b794c79cb9d6be1356b5048326576fee04c28b6bb65be5508d6551a1d250600",
+      "demo/package.json": "b0179c05564c4e88ecb51e0b49e67ba552a794f23a141a5214295e05f8070964",
+      "devnet/_bootstrap/package.json": "d6491fd3e9a221e794d6b20e831ca0f29cb7aae0dec4f70729d9d8eee1e20208",
+      "devnet/ack-candidate-isolation/package.json": "9e69f23593816d7758f2f4f36f481f580369d57ac85f5eae10023f5a169652b1",
+      "devnet/agent-provenance/package.json": "d2d6af7c5585de56464a6cbb6d6de0ca557f06a928efa7c307311cc5a478345f",
+      "devnet/conviction-emission-bell/package.json": "014225aeed39c79c8474b306a69bb1a832c74b16528f3fdd280d4aba7b460719",
+      "devnet/core-peers-features/package.json": "9590ff8e170b5e456f3f6a78ba36562a8dc0bfb3e397fdf7f62a15f3b3329159",
+      "devnet/edge-update-flow/package.json": "32e6242cfe92830e7c90d5ea3f24c04d4e2ff8810f184232c5ffa7deb14e8129",
+      "devnet/greenfield-10min/package.json": "b1d57d1846cc9a73a073a4f8e074996dfb234afedfa9e3f9d19a5b38f117ab9a",
+      "devnet/issue-2052-system-records/package.json": "3f48adbd175fc208c6622d033f1316dc55f71e9034c4274e2532dea05adce7a6",
+      "devnet/ka-lifecycle-cli/package.json": "1ecbb93c48aea6b78a7f3c910bb41a86cd94eb2133312ee7de1dd4f03db4a453",
+      "devnet/mixed-version/package.json": "1bdafd885357519f5d0181a9f532e4c1be4101c442f5b28eb4a43ea6d9fabeb3",
+      "devnet/pr1366-pca-deposit-waiver/package.json": "563dcb4eba915263f5942d5397039ec6be65c644441c545c0275277c1d868f03",
+      "devnet/pr1369-folded-private-ack/package.json": "52703d76a56b13c96cba9114dce0f57cef93fa520ec0b23d236950c63b9e0541",
+      "devnet/pr1370-admin-op-wallet/package.json": "d30f719eb316f9536dd43400cc310cfd330fdec7952d7f86a19da0271dbd4783",
+      "devnet/pr1384-preserve-agents-on-transfer/package.json": "a2f74cec9bf4a54c596e1dcff6883347c95844fa4b936ef70c2b9ed3262604d4",
+      "devnet/pr1385-subgraph-rs/package.json": "c515ca43a6bcad986a7a7ba9e605aa8276779ac6c0af00bf17b1eb24f129f65e",
+      "devnet/pr1386-term-canon/package.json": "bd0fe9451061be8a4ef57b584a89e8a79c1af742b38a72d16008652e68dd8689",
+      "devnet/pr1387-bulk-register-agents/package.json": "30b59ceb53b48d2bae5bd2da04b902a831989e336ac4f4a3e7cd35a87f3fc88c",
+      "devnet/pr1388-okf-integration/package.json": "21662e362670b487be9c0a9bf24c7b29d19fe7a8651a4d51c801c2e02f651e5c",
+      "devnet/rfc51-publishing-allocation/package.json": "97a621f51e1cf4f32566c4906af83afd8281cda2f9ee5c4d89241cf03f37bd8d",
+      "devnet/rfc64-cp1-private-swm-recovery/package.json": "faed3b9028501a4582d2213ac1228e1d7b6c225a6a403fe36ae60b28937cd470",
+      "devnet/rfc64-cp1-public-swm-parity/package.json": "3627b49d3708194b5bc246b46a3d82ca5876574521680cc7ef866ed6688ddc21",
+      "devnet/rfc64-cp2-private-swm-vm-recovery/package.json": "704b1d7c53999de1563b0d4c3e55e4abd5d2ba96f91a5a16ec959182101d1a42",
+      "devnet/rfc64-cp3-private-provider-failover/package.json": "96d8dd19d06f17c9544542d78bbdbe215350e6875d2c3266c40b9edd37a67ad5",
+      "devnet/rfc64-gate1-public-open/package.json": "c5de8a849dd750d42461fe30246e4cc3b0b31a89aa07714ba480870f7bc4a403",
+      "devnet/rfc64-gate2-multi-asset-completeness/package.json": "8410b9bd46e34ea1feea541ad5543a962e034310a5c446b0b2a6248407697703",
+      "devnet/rfc64-m0-public-baseline/package.json": "9b33ca27563225f6633495946d1fa621e48964d1e2df1f5d34d4eb5be0882e29",
+      "devnet/rfc64-persistence-lifecycle/package.json": "c226db08f5c6ca0118c3a010779e37a393976bdf1952752e39dc2a9fbe4f7f53",
+      "devnet/rich-scenario/package.json": "99847b1238e2943c196c4a69c8acf8929f5b229f77e96f5292eab19bf9cc5601",
+      "devnet/rpc-quiet-window/package.json": "2536cbe64acfadc181735ced6af91ee56812802e939a359709326774326428c7",
+      "devnet/storage-ack-store-outage/package.json": "1bcf75e75c3fb0e43c4971905cdd96652863f36685f65bbe2df5707157547231",
+      "devnet/v10-core-flows/package.json": "95b61ac940d249a157fceb64d1ccaa621dab6299fb609788916be9c251e447ff",
+      "devnet/v10-end-to-end/package.json": "a1fd0ae1456212364a3f39165c044deadae95eabdb2a5cc866f5a018497292b7",
+      "devnet/v10-rs-prune/package.json": "cbb131e6dc76445dcffd07eca7c442f62a169ffbf74ef69e0e423c065e2945ad",
+      "devnet/v10-rs-wallet-rotation/package.json": "34df462f1e6fa8d9de93b958feabb5fc5e6ce5d8636733f53a6f961379e83fdb",
+      "devnet/v10-stress/package.json": "b71aa01a06219af67f95f00a70b7cd032d56a51dc19755e36c836727d5757136",
+      "package.json": "8d68925516dd05dc40b16a512e6219f25b57d0fd6a6d93374f9772d3c6f9969a",
+      "packages/adapter-elizaos/package.json": "fc90c17293321850a9b5374a9af547ecb657094e4899f9a0d2ecbc3199ab8467",
+      "packages/adapter-hermes/package.json": "e9ddb265a51a47fb4e88b48f318fb14e753736059e20be549842b8963f1f0384",
+      "packages/adapter-openclaw/package.json": "5d4fc4293de16302366adb585ee09203c3db23f3295734a989dda77b583eaa12",
+      "packages/adapter-prime-agent/package.json": "26b9c36aa889d3b0c7f98503103fb412cac8d2d46c0cd2e8138fb5d3fd7c7850",
+      "packages/agent/package.json": "1e4a1942dfa0506e0aaa7d765891023c90639de6121ceeae12de6a457e5a3255",
+      "packages/chain/package.json": "44775c4c4b81ee58d4ca1d05066c526df66f5f7b407e38afeef512eebfd16648",
+      "packages/cli/package.json": "977fd27936ab7b21e6584896f0a5d2ba8c7e604b8c1089bad5ccbf89dc39c4b2",
+      "packages/cli/test-fixtures/sample-kafka-extension/package.json": "385af6e9924ccf88b806cb843df075fdcce4a6825b933d1de01de974d8cba034",
+      "packages/cli/test-fixtures/sample-kafka-plugin/package.json": "03a5d7347c2662b2eefdbaeee5431527b7e688374ee3204a137c0680530e602c",
+      "packages/core/package.json": "4da2e94401654f995f170235dfbd83254e7e3d58b6822b807e075ef22d2d1819",
+      "packages/epcis/package.json": "73b9ac8a6784e5573717cc22924ca1552a122094347abfb650aa050eef7d040b",
+      "packages/evm-module/package.json": "e4f3a8b1246e522bbe30e9b24a5ad2e027f4874299de17df432531a20c412673",
+      "packages/graph-viz/package.json": "7db1aeffd685908f83219564a82b0e73c138e51e2740830a3096c50ddcd1e321",
+      "packages/http-utils/package.json": "646d47e49f5d317b8656d50ee35a0a339fcde830f5e23a32a638fa9bb20ed736",
+      "packages/kafka-plugin/package.json": "9b1e29f09992e3fa8b3fa422ce8f9cd4a9feca3ef1ebc08ba2663bb70453872d",
+      "packages/local-llm/package.json": "ee4d5058e85de10d0ea421debba4f1fae1f4e451ec678ed9e7f7141749b74be9",
+      "packages/mcp-dkg/package.json": "555d86dbd9ac9d48753a061a4e1b2a8d14f7feabffd4bcd415f757d54dbe13b8",
+      "packages/network-sim/package.json": "bbadb5cd35b34cd686e65b3d7dd7b06276755fdd936667fdbac5bba307a7d945",
+      "packages/node-ui/package.json": "1c8af4adfc156c0745bb260690919d99c7518f969b3c1fc34c38f0e6c72d4958",
+      "packages/okf/package.json": "04b1468d8cc12c1137ec019e6efb2b41270d55dc432cdc63963556fd93001862",
+      "packages/publisher/package.json": "a318882fffe8454c8c5d41921331965d898d7d9d91a1bb734123b84d7343df57",
+      "packages/query/package.json": "9f943cb27828d554216e00a95e370373c3e660a0e0feb474748d30f9314c6a40",
+      "packages/random-sampling/package.json": "aad4994587faa9f28591bdb4348d4393f903861f300e14afabe2a12ea767b0df",
+      "packages/rdf-utils/package.json": "8f1c135eeb4f285f6fca127385b0dfd23770df6410a881c406d99c445e04786c",
+      "packages/storage/package.json": "00008468338e75326bcada08e2e8820d4d71f1d87abb496d10c17a68e0bc1def",
+      "patches/hardhat@2.28.6.patch": "0d296aadcb2c28c2040ee89cecb4d10311c66f2e64ca77faf8151dbc4822dff9",
+      "pnpm-workspace.yaml": "e3fbb1107dcfe8ec290003a9b968e1e89711da4bee90a71098129d69ee6de9c7",
+      "scripts/testing/package.json": "d02836298858858f52f01f58c6afc45f02db04d86adad0fb3bba92ed1abb53f0",
+      "test-systems/package.json": "d02836298858858f52f01f58c6afc45f02db04d86adad0fb3bba92ed1abb53f0"
+    }
+  },
+  "candidate": {
+    "source": {
+      "commit": "cf4fe4dd1e377a5e1412cd75fca48fc8ae9adea2",
+      "tree": "27f585998ab9589884f25a7d0860c51838117281",
+      "lockfileSha256": "11309f3bf44b0484d0d358555fab3a964114259e67d63cbcce4482704fe91c99",
+      "packageManager": "pnpm@10.28.1",
+      "nodeRequirement": "22"
+    },
+    "config": {
+      "file": "packages/agent/vitest.unit.config.ts",
+      "sha256": "5796c4da50dd54dcb58f4d92ab687aa10581bc6fdf0bb271655d78111f95ace7",
+      "purpose": "normal required unit lane config"
+    },
+    "pnpmVersion": "10.28.1",
+    "execution": {
+      "file": "packages/agent/test/regression-peer-store-repair.test.ts",
+      "assertion": "Random Sampling proof-time exact repair on the real libp2p peer store fetches the challenged asset from a provider the peer store lists as sync-capable",
+      "status": "passed",
+      "runtime": "v22.23.1",
+      "observation": {
+        "fetchedFrom": [
+          "12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6"
+        ],
+        "outcome": {
+          "material": {
+            "contents": [
+              {
+                "0": 60,
+                "1": 117,
+                "2": 114,
+                "3": 110,
+                "4": 58,
+                "5": 104,
+                "6": 105,
+                "7": 115,
+                "8": 116,
+                "9": 111,
+                "10": 114,
+                "11": 105,
+                "12": 99,
+                "13": 97,
+                "14": 108,
+                "15": 62,
+                "16": 32,
+                "17": 60,
+                "18": 117,
+                "19": 114,
+                "20": 110,
+                "21": 58,
+                "22": 118,
+                "23": 97,
+                "24": 108,
+                "25": 117,
+                "26": 101,
+                "27": 62,
+                "28": 32,
+                "29": 34,
+                "30": 112,
+                "31": 114,
+                "32": 111,
+                "33": 111,
+                "34": 102,
+                "35": 34,
+                "36": 32,
+                "37": 46
+              }
+            ],
+            "privateRoots": []
+          }
+        }
+      },
+      "diagnostic": null
+    },
+    "reportRoot": "/private/var/folders/2r/nvfgmqpd61b4nbb4lk7nwfl80000gn/T/dkg-regression-9aaiF7/candidate",
+    "dependencyInputs": {
+      ".npmrc": "f5aa3042280204ad7d8b9f0a302273c0ec22748e6c2f9d33d4e68da443315acc",
+      "bench/package.json": "3ca9d4afd21425087cf31893b8f9f63c81b0b8408db5e343ca76e5f8aa26ab9a",
+      "demo/package.json": "b0179c05564c4e88ecb51e0b49e67ba552a794f23a141a5214295e05f8070964",
+      "devnet/_bootstrap/package.json": "d6491fd3e9a221e794d6b20e831ca0f29cb7aae0dec4f70729d9d8eee1e20208",
+      "devnet/ack-candidate-isolation/package.json": "9e69f23593816d7758f2f4f36f481f580369d57ac85f5eae10023f5a169652b1",
+      "devnet/agent-provenance/package.json": "d2d6af7c5585de56464a6cbb6d6de0ca557f06a928efa7c307311cc5a478345f",
+      "devnet/agent-restart-gossip/package.json": "8702ab0bfaffe876e0c482fa790e94e4a1cac0afe0f9f5da290e08d9f7978a55",
+      "devnet/conviction-emission-bell/package.json": "014225aeed39c79c8474b306a69bb1a832c74b16528f3fdd280d4aba7b460719",
+      "devnet/core-peers-features/package.json": "9590ff8e170b5e456f3f6a78ba36562a8dc0bfb3e397fdf7f62a15f3b3329159",
+      "devnet/edge-update-flow/package.json": "32e6242cfe92830e7c90d5ea3f24c04d4e2ff8810f184232c5ffa7deb14e8129",
+      "devnet/greenfield-10min/package.json": "b1d57d1846cc9a73a073a4f8e074996dfb234afedfa9e3f9d19a5b38f117ab9a",
+      "devnet/issue-2052-system-records/package.json": "3f48adbd175fc208c6622d033f1316dc55f71e9034c4274e2532dea05adce7a6",
+      "devnet/ka-lifecycle-cli/package.json": "1ecbb93c48aea6b78a7f3c910bb41a86cd94eb2133312ee7de1dd4f03db4a453",
+      "devnet/mixed-version/package.json": "1bdafd885357519f5d0181a9f532e4c1be4101c442f5b28eb4a43ea6d9fabeb3",
+      "devnet/node-store-persistence/package.json": "8527800eae57404795502bd52ff86ebbce0f89362f48b9c66353aecbbadd039e",
+      "devnet/pr1366-pca-deposit-waiver/package.json": "563dcb4eba915263f5942d5397039ec6be65c644441c545c0275277c1d868f03",
+      "devnet/pr1369-folded-private-ack/package.json": "52703d76a56b13c96cba9114dce0f57cef93fa520ec0b23d236950c63b9e0541",
+      "devnet/pr1370-admin-op-wallet/package.json": "d30f719eb316f9536dd43400cc310cfd330fdec7952d7f86a19da0271dbd4783",
+      "devnet/pr1384-preserve-agents-on-transfer/package.json": "a2f74cec9bf4a54c596e1dcff6883347c95844fa4b936ef70c2b9ed3262604d4",
+      "devnet/pr1385-subgraph-rs/package.json": "c515ca43a6bcad986a7a7ba9e605aa8276779ac6c0af00bf17b1eb24f129f65e",
+      "devnet/pr1386-term-canon/package.json": "bd0fe9451061be8a4ef57b584a89e8a79c1af742b38a72d16008652e68dd8689",
+      "devnet/pr1387-bulk-register-agents/package.json": "30b59ceb53b48d2bae5bd2da04b902a831989e336ac4f4a3e7cd35a87f3fc88c",
+      "devnet/pr1388-okf-integration/package.json": "21662e362670b487be9c0a9bf24c7b29d19fe7a8651a4d51c801c2e02f651e5c",
+      "devnet/public-cg-hash-subscription/package.json": "a289015a00fe19cb94805237e96c21116235e5cb7bbf7a4f653a9d39e91425ae",
+      "devnet/rfc51-publishing-allocation/package.json": "97a621f51e1cf4f32566c4906af83afd8281cda2f9ee5c4d89241cf03f37bd8d",
+      "devnet/rfc64-cp1-private-swm-recovery/package.json": "faed3b9028501a4582d2213ac1228e1d7b6c225a6a403fe36ae60b28937cd470",
+      "devnet/rfc64-cp1-public-swm-parity/package.json": "3627b49d3708194b5bc246b46a3d82ca5876574521680cc7ef866ed6688ddc21",
+      "devnet/rfc64-cp2-private-swm-vm-recovery/package.json": "704b1d7c53999de1563b0d4c3e55e4abd5d2ba96f91a5a16ec959182101d1a42",
+      "devnet/rfc64-cp3-private-provider-failover/package.json": "96d8dd19d06f17c9544542d78bbdbe215350e6875d2c3266c40b9edd37a67ad5",
+      "devnet/rfc64-gate1-public-open/package.json": "c5de8a849dd750d42461fe30246e4cc3b0b31a89aa07714ba480870f7bc4a403",
+      "devnet/rfc64-gate2-multi-asset-completeness/package.json": "8410b9bd46e34ea1feea541ad5543a962e034310a5c446b0b2a6248407697703",
+      "devnet/rfc64-m0-public-baseline/package.json": "9b33ca27563225f6633495946d1fa621e48964d1e2df1f5d34d4eb5be0882e29",
+      "devnet/rfc64-persistence-lifecycle/package.json": "c226db08f5c6ca0118c3a010779e37a393976bdf1952752e39dc2a9fbe4f7f53",
+      "devnet/rich-scenario/package.json": "99847b1238e2943c196c4a69c8acf8929f5b229f77e96f5292eab19bf9cc5601",
+      "devnet/rpc-quiet-window/package.json": "2536cbe64acfadc181735ced6af91ee56812802e939a359709326774326428c7",
+      "devnet/snapshot-finalized-cleanup/package.json": "ada0d68d7cf791da0e1ece5cbc299e39fa55e6adc4aae6784adbeb2aa12e68a0",
+      "devnet/storage-ack-store-outage/package.json": "1bcf75e75c3fb0e43c4971905cdd96652863f36685f65bbe2df5707157547231",
+      "devnet/subscription-persist-restart/package.json": "85be60fd7a78f5a49e6ab3cd188803a2071b16d2699bb1a5f03e1132dfae0d07",
+      "devnet/v10-core-flows/package.json": "95b61ac940d249a157fceb64d1ccaa621dab6299fb609788916be9c251e447ff",
+      "devnet/v10-end-to-end/package.json": "a1fd0ae1456212364a3f39165c044deadae95eabdb2a5cc866f5a018497292b7",
+      "devnet/v10-rs-prune/package.json": "cbb131e6dc76445dcffd07eca7c442f62a169ffbf74ef69e0e423c065e2945ad",
+      "devnet/v10-rs-wallet-rotation/package.json": "34df462f1e6fa8d9de93b958feabb5fc5e6ce5d8636733f53a6f961379e83fdb",
+      "devnet/v10-stress/package.json": "b71aa01a06219af67f95f00a70b7cd032d56a51dc19755e36c836727d5757136",
+      "package.json": "95668cc926797156a31f1d2ec9b754e09bbb83cd7c8a683c5c9a0da62579b8f6",
+      "packages/adapter-elizaos/package.json": "32307e71470c61ead712044e07162192f32f16e006cb4db307f2346aefabdfd8",
+      "packages/adapter-hermes/package.json": "97d0a0c12d3d0870a930d6b626074320dbcecaab512440dabd25f49a1c38d9d7",
+      "packages/adapter-openclaw/package.json": "2ad99fd7c9e8a63fc0feb88b15b66d163c49bfa6d8ee06c481dc333e50769de2",
+      "packages/adapter-prime-agent/package.json": "f9051c3dcd943590e3d250d5bbcf3776842b7b5bcc08b46ff339f9a514e42906",
+      "packages/agent/ccl_v0_1/package.json": "ea8e5b1cacfd819edd3a862a434c91f2c8b9129b9022cfbb2023cba496de3c55",
+      "packages/agent/package.json": "734a4442e93eab141a1b129ca055f38179400c8d84af9772fdf03aafdd4b2c89",
+      "packages/chain/package.json": "aaf0e1fe3a035dce9567dd8d004bf6c988524aff279d39987a7d4ee2dddffac4",
+      "packages/cli/package.json": "9b8824f57550822c95dba3058c3dec99929ae43c84465540500b1a4b80ae0316",
+      "packages/cli/test-fixtures/sample-kafka-extension/package.json": "385af6e9924ccf88b806cb843df075fdcce4a6825b933d1de01de974d8cba034",
+      "packages/cli/test-fixtures/sample-kafka-plugin/package.json": "03a5d7347c2662b2eefdbaeee5431527b7e688374ee3204a137c0680530e602c",
+      "packages/core/package.json": "b8d0b92decfa3590339c6e8613adc8807484c8186b11be8de8ca9407ac567cda",
+      "packages/epcis/package.json": "afb346a7c686c0f0c7ea5e54b90fab47ba7786d0358a5fd0f842b61eee6a4b49",
+      "packages/evm-module/package.json": "894ceacd52fac34a96d083bd0afcc34894bc2aa9362e40493cf9f4ec7aec81f2",
+      "packages/graph-viz/package.json": "2b6e602b899d0e29980941dca98c3b82f49ff0e3cc6ae1e49a358b9ceb68ad94",
+      "packages/http-utils/package.json": "bb0ed23157c22d3c0e09d958876d791585530f0ba3f6909dfa9d10ce3943843f",
+      "packages/kafka-plugin/package.json": "be67ff5ef1994c0a3bec4a7d28c68915376e154fd74b8948e4eb8d5e52cbb6f0",
+      "packages/local-llm/package.json": "72639cd7c5b5a2c17639bd15389c96d55cdb3af03e4412e0c2d01f1c7990dde1",
+      "packages/mcp-dkg/package.json": "3fdbcc69dabfd48b8f3213232fe8aad7c4110c20072c7d108507a1d7a797613f",
+      "packages/network-sim/package.json": "b2264faf05f183b46fd4d6b0b744143341fba06917598b62387abb5211ef91bd",
+      "packages/node-store/package.json": "d18d398370c77ecb7cfc09f339764a6d11e5bb8bbe823460f14343b687e8fe12",
+      "packages/node-ui/package.json": "048abbbc8aaec970dbaa0ae92a58fb78e769cc3a69543c87e32e02b66b714124",
+      "packages/okf/package.json": "4b56abb788bd35a61c661a41fa4da738f9b262077556744090143d021a956823",
+      "packages/publisher/package.json": "4ebea4d56705067dd7c188066a1c05f3da6c97abbb9be6a542998f0bb896076f",
+      "packages/query/package.json": "55d1351bfa2c753e0449df12bc8564b270590c58c2573ee0fa6d1c318b1abe46",
+      "packages/random-sampling/package.json": "7183153146fb79957a5d8ad3b677f5ddc20072eacb933af28ff0f22008b4eee1",
+      "packages/rdf-utils/package.json": "574fa4e3899756c55a7fff0b2a4a7e63b63ac7ce4fe49011dc2e655961d7390b",
+      "packages/storage/package.json": "0cc1a304d2d5e8fbdc5d58ebae65cfccd2a3cff8ec937daca01f1a9a2e4864eb",
+      "patches/@libp2p__yamux@8.0.1.patch": "b38505a7ffe3b88d005da3e1446492a1a679b579080f08937106d809ee9d683e",
+      "patches/hardhat@2.28.6.patch": "0d296aadcb2c28c2040ee89cecb4d10311c66f2e64ca77faf8151dbc4822dff9",
+      "pnpm-workspace.yaml": "82271085fca0ee7cfee64f250937f5f6004ad821847d917502eeb21f287c0ed5",
+      "scripts/testing/package.json": "d02836298858858f52f01f58c6afc45f02db04d86adad0fb3bba92ed1abb53f0",
+      "test-systems/package.json": "d02836298858858f52f01f58c6afc45f02db04d86adad0fb3bba92ed1abb53f0"
+    }
+  },
+  "artifacts": {
+    "bad-build.log": "9cecbe423a88d0275e6c1846adcb1274d86029eb89e573ede1187e9b2de0de1e",
+    "bad-config.txt": "d810e9e9cf4d95ca4c5af883edb3eb17be15a62f8690e8266c76113355ad9fd6",
+    "bad-discovery.json": "e081db503fac2fb249a6d24d7ecb1343748cd3579cf39184db98e48a3e1614a4",
+    "bad-discovery.log": "e081db503fac2fb249a6d24d7ecb1343748cd3579cf39184db98e48a3e1614a4",
+    "bad-execution.log": "fe6a51c7c1318e6ccfc075cc2d01f8d74dabe8ff5b864124c129a0fdf7c7a4d4",
+    "bad-install.log": "f4645903c58c570f7db491036da35e64653d40a473570e3cc4a462dd48593326",
+    "bad-pnpm-version.log": "3806dfe55719b45f2b4fb740740c85f0e57c89d2e54030cafa3bcd7600208be7",
+    "bad-report.json": "df94d0d08a17bfe9f59c27ed1a6fdebddde946a1ced694cece2546a628c10667",
+    "candidate-build.log": "9f444e89a6d41346080ebd4d2319f4c216ee7d311e33f445aa690c4886f94598",
+    "candidate-config.txt": "5796c4da50dd54dcb58f4d92ab687aa10581bc6fdf0bb271655d78111f95ace7",
+    "candidate-discovery.json": "da166525bd06cec3d988ae227ddeb0aaa1cefdba72782191e07a817555c13d85",
+    "candidate-discovery.log": "da166525bd06cec3d988ae227ddeb0aaa1cefdba72782191e07a817555c13d85",
+    "candidate-execution.log": "b93b36ff8ef35cc60b82e943da958c2cec03c51b49dc10b7a94b512c6fd0e52a",
+    "candidate-install.log": "9378cda22347d577f668453c80f2ec9fe5a5d99f48792102c90919fbf6f42e8e",
+    "candidate-pnpm-version.log": "3806dfe55719b45f2b4fb740740c85f0e57c89d2e54030cafa3bcd7600208be7",
+    "candidate-report.json": "2c2316c7c7621794e77b3524cfeb3c83b80a669335a4d48d043d277f25991450"
+  }
+}

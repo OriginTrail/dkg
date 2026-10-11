@@ -55,6 +55,7 @@ type RecoverContextGraphSwmOptions = Parameters<typeof recoverContextGraphSwm>[0
 export interface SwmTargetExecutorPortsV1 {
   /** Defaults to ten minutes for callers composed before this port existed. */
   readonly privateRecoveryBudgetMs?: number;
+  /** Mutations own their projection invalidation at the supplied store boundary. */
   readonly store: TripleStore;
   readonly writeLocks: Map<string, Promise<void>>;
   readonly listSubGraphs: (
@@ -64,9 +65,12 @@ export interface SwmTargetExecutorPortsV1 {
   readonly fetchSyncPages: SharedMemorySyncContext['fetchSyncPages'];
   readonly processSharedMemoryBatch: SharedMemorySyncContext['processSharedMemoryBatch'];
   readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  /** Process-local RFC-64 authority decision; this port must not perform I/O. */
+  readonly ordinaryRootSnapshotApplyAllowed?: (contextGraphId: string) => boolean;
+  readonly resolveRootSnapshotAtomicCompanion?:
+    SharedMemorySyncContext['resolveRootSnapshotAtomicCompanion'];
   readonly recordDrops: OversizeGuardHooks['recordDrops'];
   readonly invalidateListContextGraphsCache: () => void;
-  readonly markMetaProjectionDirty: (quads: Quad[]) => void;
   readonly recoveryMutation: SwmRecoveryMutationRuntimeV1;
   readonly setCheckpoint: RecoverContextGraphSwmOptions['setCheckpoint'];
   readonly deleteCheckpoint: RecoverContextGraphSwmOptions['deleteCheckpoint'];
@@ -76,6 +80,12 @@ export interface SwmTargetExecutorPortsV1 {
     retirement: FinalizedSwmTwinRetirement,
     ctx: OperationContext,
   ) => Promise<void>;
+  readonly retireLegacySwmAfterVerifiedVmTwin?: (input: Readonly<{
+    contextGraphId: string;
+    kaUal: string;
+    assertionVersion: string;
+    subGraphName?: string;
+  }>) => Promise<void>;
   readonly logInfo: (ctx: OperationContext, message: string) => void;
   readonly logWarn: (ctx: OperationContext, message: string) => void;
   readonly logDebug: (ctx: OperationContext, message: string) => void;
@@ -187,6 +197,7 @@ export class SwmTargetExecutorV1 {
       writeLocks: this.#ports.writeLocks,
       publicSnapshotStore: this.#ports.publicSnapshotStore,
       snapshotMaterializer: this.#snapshotMaterializer,
+      resolveRootAtomicCompanion: this.#ports.resolveRootSnapshotAtomicCompanion,
       store: this.#recoveryMutation.store,
       replaceMetaForRoots: (roots, metaGraphs) => this.#recoveryMutation
         .replaceMetaForRoots(
@@ -217,7 +228,6 @@ export class SwmTargetExecutorV1 {
     };
     const result = await recoverContextGraphSwmWithProgressRetries({
       window,
-      owner: `private-swm:${target.contextGraphId}:${target.remotePeerId}`,
       createRoundDeadline: () => this.#ports.createContextGraphSyncDeadline(1),
       onRetry: target.onRetry,
       snapshotProgressRetention: () => snapshotLease?.kind ?? 'detached',
@@ -257,7 +267,7 @@ export class SwmTargetExecutorV1 {
       }
       : { kind: 'ordinary' as const };
     const storeInsert = async (quads: Quad[]) => {
-      const inserted = await insertWithOversizeGuard(
+      await insertWithOversizeGuard(
         (kept) => this.#ports.store.insert(kept, {
           priority: 'background',
           source: 'agent.sharedMemorySync.storeInsert',
@@ -266,7 +276,6 @@ export class SwmTargetExecutorV1 {
         { recordDrops: this.#ports.recordDrops },
         'swm-sync',
       );
-      this.#ports.markMetaProjectionDirty(inserted);
     };
     return runSharedMemorySync({
       mode,
@@ -291,6 +300,9 @@ export class SwmTargetExecutorV1 {
       stopOnBackoffWorthyFailure: target.stopOnBackoffWorthyFailure,
       ensureContextGraph: this.#recoveryMutation.ensureContextGraph,
       snapshotMaterializer: this.#snapshotMaterializer,
+      ordinaryRootSnapshotApplyAllowed: this.#ports.ordinaryRootSnapshotApplyAllowed,
+      resolveRootSnapshotAtomicCompanion:
+        this.#ports.resolveRootSnapshotAtomicCompanion,
       reconcileFinalizedTwin: async (contextGraphId, descriptor) => {
         const retirement = await reconcileFinalizedSwmTwinFromDescriptor({
           store: this.#ports.store,
@@ -299,6 +311,31 @@ export class SwmTargetExecutorV1 {
           descriptor,
           retire: (candidate) => this.#ports.retireFinalizedSwmTwin(candidate, target.ctx),
         });
+        const twinRetired = retirement === 'retired'
+          || retirement === 'already-retired-finalized';
+        if (twinRetired) {
+          // The twin's graph and head are already gone at this point. Marker
+          // retirement is a second, separate cleanup: if its failure escaped,
+          // the caller would treat the whole reconciliation as deferred, skip
+          // the suppression below, and its bulk append would write the retired
+          // head and operation rows back without their graph. A marker left
+          // behind is the conservative state (the graph stays reported as
+          // incomplete) until a later pass or a catalog replay retires it.
+          try {
+            await this.#ports.retireLegacySwmAfterVerifiedVmTwin?.({
+              contextGraphId,
+              kaUal: descriptor.kaUal,
+              assertionVersion: descriptor.assertionVersion,
+              subGraphName: descriptor.subGraphName,
+            });
+          } catch (cause) {
+            this.#ports.logWarn(
+              target.ctx,
+              `Deferred legacy SWM boundary retirement after finalized VM twin cleanup for `
+                + `${descriptor.kaUal}: ${cause instanceof Error ? cause.message : String(cause)}`,
+            );
+          }
+        }
         if (retirement === 'retired') {
           this.#ports.invalidateListContextGraphsCache();
           this.#ports.logInfo(
@@ -306,9 +343,7 @@ export class SwmTargetExecutorV1 {
             `Retired byte-identical SWM twin after SWM recovery found finalized VM for ${descriptor.kaUal}`,
           );
         }
-        return retirement === 'retired' || retirement === 'already-retired-finalized'
-          ? 'suppress-metadata'
-          : 'preserve';
+        return twinRetired ? 'suppress-metadata' : 'preserve';
       },
       storeInsert,
       publicSnapshotStore: this.#ports.publicSnapshotStore,

@@ -3,14 +3,14 @@ import type { ReactNode } from 'react';
 import { useFetch } from '../../../hooks.js';
 import { encodeDocTabId, resolveDocRef } from '../../../lib/doc-tab-id.js';
 import { truncateMiddle } from '../../../lib/truncate.js';
-import { listAssertions, promoteAssertion, describePromoteResult, describePromoteError, knowledgeAssetPublish, publishAssertionsToVm, partialPublishWarning, fetchAssertionUals, type AssertionInfo } from '../../../api.js';
+import { listAssertions, promoteAssertion, describePromoteResult, describePromoteError, knowledgeAssetPublish, publishAssertionsToVm, partialPublishWarning, outcomeUnknownPublishNote, fetchAssertionUals, type AssertionInfo } from '../../../api.js';
 import { useMemoryEntities, type TrustLevel, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { useAgentsContext } from '../../../hooks/useAgents.js';
 import { AgentChip } from '../../../components/AgentChip.js';
 import { useTabsStore } from '../../../stores/tabs.js';
 import type { SwmAttributionsResult } from '../../../hooks/useSwmAttributions.js';
-import { LAYER_CONFIG, SOURCE_CONTENT_TYPE, MARKDOWN_FORM, SOURCE_FILE, DKG_SIZE, entityAuthorUri, entityMeta, layerNoun, useLayerTriples, entityTimestamp, formatRelativeTime, type LayerContentTab } from '../helpers.js';
+import { LAYER_CONFIG, VM_TRIPLE_STAT, SOURCE_CONTENT_TYPE, MARKDOWN_FORM, SOURCE_FILE, DKG_SIZE, entityAuthorUri, entityMeta, layerNoun, useLayerTriples, entityTimestamp, formatRelativeTime, type LayerContentTab } from '../helpers.js';
 import { EmptyState, StatStrip, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
 import { LayerGraphPanel } from './graph.js';
 import { LayerWidgetStrip } from './layer-widgets.js';
@@ -400,7 +400,7 @@ export function VerifiableMemoryHeroBanner({ entities, tripleCount, contextGraph
         layer="vm"
         items={[
           { id: 'assets', value: totalAssets, label: 'Knowledge Assets' },
-          { id: 'triples', value: tripleCount.toLocaleString(), label: 'Verifiable Triples' },
+          { id: 'triples', value: tripleCount.toLocaleString(), ...VM_TRIPLE_STAT },
           { id: 'types', value: typeCount, label: 'Entity Types' },
         ]}
       />
@@ -547,12 +547,16 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
         // shared batch loop (api.ts publishAssertionsToVm) — fail-closed direct publish + 207 partial
         // handling, uniform with the other batch-publish CTAs (carries the partial detail).
         const r = await publishAssertionsToVm(contextGraphId, bulkAssertions);
+        const unknownNote = outcomeUnknownPublishNote(r);
+        const unknownTail = unknownNote ? ` — ⚠ ${unknownNote}` : '';
         if (r.published > 0) {
           const tail = r.failures.length ? ` (${r.failures.length} could not be published)` : '';
           const partialTail = r.partial > 0 ? ` — ⚠ ${r.partial}: ${partialPublishWarning(r.partialError)}` : '';
-          setResult(`Published ${r.published} knowledge asset${r.published !== 1 ? 's' : ''} to Verifiable Memory${tail}${partialTail}`);
+          setResult(`Published ${r.published} knowledge asset${r.published !== 1 ? 's' : ''} to Verifiable Memory${tail}${partialTail}${unknownTail}`);
+        } else if (unknownNote && r.failures.length === 0) {
+          setResult(`⚠ ${unknownNote}`);
         } else {
-          throw new Error(r.failures[0] ? `${r.failures[0].name}: ${r.failures[0].error}` : 'Publish failed');
+          throw new Error(`${r.failures[0] ? `${r.failures[0].name}: ${r.failures[0].error}` : 'Publish failed'}${unknownTail}`);
         }
       }
       refresh();

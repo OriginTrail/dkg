@@ -63,7 +63,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
       type: 'return',
       value: Promise.resolve([{ topics: [], data: '0x01', blockNumber: 10 }]),
     });
-    registry.queryFilter.queueOnce({ type: 'throw', error: new Error('range too wide') });
+    registry.queryFilter.queueOnce({ type: 'throw', error: new Error('temporary provider failure') });
 
     const partial = await collectRegistryScan(adapter, {
       mode: 'incremental',
@@ -96,7 +96,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
       type: 'return',
       value: Promise.resolve([{ topics: [], data: '0x01', blockNumber: 10 }]),
     });
-    registry.queryFilter.queueOnce({ type: 'throw', error: new Error('range too wide') });
+    registry.queryFilter.queueOnce({ type: 'throw', error: new Error('temporary provider failure') });
 
     const partial = await collectRegistryScan(adapter, {
       mode: 'seedFull',
@@ -215,7 +215,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     });
     const seedOptions = (seedIncrementalWatermark: boolean): ContextGraphChainScanOptions => ({
       seedIncrementalWatermark,
-      resumeFromCursor: true,
+      resumeFromCursor: false,
       pageBudget: 1,
     });
 
@@ -607,9 +607,9 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     const { adapter, provider } = makeAdapter(registry, 2_100);
     provider.getBlockNumber.queueOnce({ type: 'return', value: Promise.resolve(2_100) });
     registry.queryFilter.queueOnce({ type: 'return', value: Promise.resolve([]) });
-    registry.queryFilter.queueOnce({ type: 'throw', error: new Error('range too wide') });
+    registry.queryFilter.queueOnce({ type: 'throw', error: new Error('temporary provider failure') });
 
-    await expect(adapter.listContextGraphsFromChain()).rejects.toThrow('range too wide');
+    await expect(adapter.listContextGraphsFromChain()).rejects.toThrow('temporary provider failure');
     expect((adapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY)).toBeUndefined();
   });
 
@@ -717,5 +717,26 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
 
     const defaulted = new EVMChainAdapter(minimalConfig({ cgRegistryScanPageSize: 0.5 }));
     expect((defaulted as any).cgRegistryScanPageSize).toBe(2_000);
+  });
+});
+
+describe('context graph list compatibility validation (#1485)', () => {
+  it.each([
+    { mode: 'listAll', incremental: false },
+    { mode: 'incremental', seedIncrementalWatermark: true },
+    { incremental: true, seedIncrementalWatermark: true },
+    { resumeFromCursor: true },
+    { seedIncrementalWatermark: false, resumeFromCursor: true },
+  ])('rejects contradictory options before adapter initialization: %j', async (options) => {
+    const registry = makeRegistry();
+    const { adapter, provider } = makeAdapter(registry);
+
+    await expect(adapter.listContextGraphsFromChain(
+      undefined,
+      options as unknown as ContextGraphChainScanOptions,
+    )).rejects.toThrow();
+    expect(registry.getAddress.calls).toEqual([]);
+    expect(registry.queryFilter.calls).toEqual([]);
+    expect(provider.getBlockNumber.calls).toEqual([]);
   });
 });

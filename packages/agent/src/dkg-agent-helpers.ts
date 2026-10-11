@@ -21,12 +21,14 @@ import { ethers } from 'ethers';
 import { join } from 'node:path';
 import {
   FileWorkspacePublicSnapshotStore,
+  snapshotReferenceCheck,
   type SharedMemoryPublicSnapshotStorageConfig,
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import type {
   Quad,
   TripleStoreConfig,
+  TripleStore,
   LargeLiteralStorageConfig,
 } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
@@ -277,12 +279,13 @@ export function defaultLargeLiteralStorage(
 export function createPublicSnapshotStore(
   dataDir: string | undefined,
   config: SharedMemoryPublicSnapshotStorageConfig | undefined,
+  store?: TripleStore,
 ): WorkspacePublicSnapshotStore | undefined {
   if (!dataDir || config?.enabled === false) return undefined;
   return new FileWorkspacePublicSnapshotStore(
     config?.directory ?? join(dataDir, 'swm-public-snapshots'),
     undefined,
-    { gc: config?.gc },
+    { gc: config?.gc, isSnapshotReferenced: store ? snapshotReferenceCheck(store) : undefined },
   );
 }
 

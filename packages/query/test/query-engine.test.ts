@@ -1449,8 +1449,9 @@ describe('DKGQueryEngine', () => {
     // Regression guard for #774 finding #3 (also mis-attributed in the
     // issue body — diagnosed as "owner-peer not replicated to node 2";
     // the workspaceOwner triple IS in fact replicated, but the scoped
-    // query couldn't see it). `devnet-test-swm-ownership-restart.sh`
-    // `wait_for_owner_meta` probe queries
+    // query couldn't see it). Until graph-scoped KAs (10.0.7) moved SWM
+    // ownership into per-author graphs, the devnet ownership-restart
+    // script probed
     //
     //   GRAPH <…/_shared_memory_meta> {
     //     <root> <http://dkg.io/ontology/workspaceOwner> ?owner
@@ -1458,11 +1459,8 @@ describe('DKGQueryEngine', () => {
     //
     // …with `contextGraphId` scope. Same reasoning as the `_meta`
     // allow: authenticated callers already have read access to the CG;
-    // refusing them visibility into the SWM ownership metadata breaks
-    // both replica ACL probes and downstream sync code. Add to the
-    // EXPLICIT-IRI allow set only; graph-variable expansion stays
-    // constrained to data + SWM data so `GRAPH ?g` cannot iterate into
-    // `_shared_memory_meta`.
+    // refusing them visibility into the SWM metadata breaks replica
+    // probes and downstream sync code.
     const swmMetaGraph = `${GRAPH}/_shared_memory_meta`;
     await store.insert([
       {

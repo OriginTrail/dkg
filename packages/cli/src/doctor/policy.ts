@@ -9,6 +9,7 @@ export const ALL_CHECK_IDS = [
   'version-skew',
   'served-ui-mismatch',
   'plugin-root',
+  'node-runtime',
 ] as const;
 
 export type CheckId = (typeof ALL_CHECK_IDS)[number];
@@ -16,4 +17,5 @@ export type CheckId = (typeof ALL_CHECK_IDS)[number];
 export const UPDATE_PREFLIGHT_CHECKS = [
   'install-layout',
   'version-skew',
+  'node-runtime',
 ] as const satisfies readonly CheckId[];

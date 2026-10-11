@@ -10,11 +10,15 @@ import { keccak256 } from './keccak.js';
  * cutover) so an ACK signed under one field-set is unusable against another.
  */
 export const ACK_DIGEST_VERSION = 1n;
+const MAX_UINT256 = (1n << 256n) - 1n;
 
 /**
  * Encode a uint256 as a big-endian 32-byte Uint8Array (abi.encodePacked format).
  */
 function uint256ToBytes(value: bigint): Uint8Array {
+  if (value < 0n || value > MAX_UINT256) {
+    throw new Error(`value must fit in uint256, got: ${value}`);
+  }
   const buf = new Uint8Array(32);
   let v = value;
   for (let i = 31; i >= 0; i--) {
@@ -157,6 +161,9 @@ function uint72ToBytes(value: bigint): Uint8Array {
  * fires for under-paid publishes.
  */
 export function floorPublishTokenAmount(tokenAmount: bigint): bigint {
+  if (tokenAmount < 0n || tokenAmount > MAX_UINT256) {
+    throw new Error(`tokenAmount must fit in uint256, got: ${tokenAmount}`);
+  }
   return tokenAmount > 0n ? tokenAmount : 1n;
 }
 

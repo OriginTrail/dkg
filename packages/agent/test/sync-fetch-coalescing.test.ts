@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   createOperationContext,
   PROTOCOL_SYNC,
+  SYSTEM_CONTEXT_GRAPHS,
 } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
@@ -21,7 +22,11 @@ import {
   type SyncCheckpointScope,
 } from '../src/sync/checkpoint/state.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
-import { UNRESTRICTED_SYNC_WORK, createSyncWorkAdmission } from '../src/sync/work-admission.js';
+import {
+  UNRESTRICTED_SYNC_WORK,
+  createSyncFetchSharingIdentity,
+  createSyncWorkAdmission,
+} from '../src/sync/work-admission.js';
 import {
   createChallengePinnedExactAssetSelection,
   createUalOnlyExactAssetSelection,
@@ -31,6 +36,7 @@ import {
   VmReconcileQueueClosedError,
   VmReconcileShutdownTimeoutError,
 } from '../src/vm-reconcile-service.js';
+import { exactAssetFetchSessionPolicy } from '../src/sync/requester/exact-durable-fetch.js';
 import { stubLifecycleFetch } from './_helpers/sync-fetch-coalescing.js';
 
 const PEER_A = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
@@ -204,6 +210,53 @@ describe('exact VM recovery lifecycle', () => {
       await agent.stop().catch(() => {});
     }
   });
+
+  it.each(['configured-store', 'storeless'] as const)(
+    'awaits strict membership reconciliation and propagates failure with a %s',
+    async (storeCase) => {
+      const membershipUpsert = vi.fn(async () => undefined);
+      const agent = await createAgentWithSend(
+        async () => new Uint8Array(0),
+        undefined,
+        storeCase === 'configured-store'
+          ? {
+              loadAll: async () => [],
+              upsert: membershipUpsert,
+              delete: async () => undefined,
+            }
+          : undefined,
+      );
+      const reconciliation = deferred<void>();
+      const reconciliationFailure = new Error('responsibility reconciliation failed');
+      const reconcile = vi.spyOn(agent, 'reconcileRfc64CatalogResponsibilityV1')
+        .mockReturnValue(reconciliation.promise);
+      try {
+        let settled = false;
+        const strictWrite = agent.upsertContextGraphMember({
+          contextGraphId: `strict-membership-${storeCase}`,
+          principalType: 'node',
+          principalId: PEER_A,
+          status: 'active',
+        }, { strict: true });
+        const failure = strictWrite.then(
+          () => { settled = true; return undefined; },
+          (error: unknown) => { settled = true; return error; },
+        );
+
+        await vi.waitFor(() => expect(reconcile).toHaveBeenCalledOnce());
+        expect(membershipUpsert).toHaveBeenCalledTimes(
+          storeCase === 'configured-store' ? 1 : 0,
+        );
+        expect(settled).toBe(false);
+
+        reconciliation.reject(reconciliationFailure);
+        expect(await failure).toBe(reconciliationFailure);
+      } finally {
+        reconciliation.resolve();
+        await agent.stop().catch(() => {});
+      }
+    },
+  );
 
   it('quarantines a physically active reconcile until shutdown is retried', async () => {
     const timeoutDescriptor = Object.getOwnPropertyDescriptor(
@@ -380,16 +433,35 @@ describe('DKGAgent sync fetch coalescing', () => {
   });
 
   it.each([
-    { name: 'different custom keys', secondKey: 'lane-b', expectedSends: 2 },
-    { name: 'separate policies with the same custom key', secondKey: 'lane-a', expectedSends: 1 },
-  ])('preserves request ownership for $name', async ({ secondKey, expectedSends }) => {
+    {
+      name: 'independently minted sharing identities',
+      identities: [createSyncFetchSharingIdentity(), createSyncFetchSharingIdentity()],
+      expectedSends: 2,
+    },
+    {
+      name: 'one deliberately shared identity',
+      identities: (() => {
+        const identity = createSyncFetchSharingIdentity();
+        return [identity, identity];
+      })(),
+      expectedSends: 1,
+    },
+  ])('preserves request ownership for $name', async ({ identities, expectedSends }) => {
     const responses = [deferred<Uint8Array>(), deferred<Uint8Array>()];
     let sends = 0;
     const agent = await createAgentWithSend(async () => responses[sends++]!.promise);
     try {
-      const first = fetchPages(agent, { workAdmission: createSyncWorkAdmission(() => 1_000, { sharing: 'coalescible', key: 'lane-a' }) });
+      const first = fetchPages(agent, {
+        workAdmission: createSyncWorkAdmission(() => 1_000, {
+          fetchSharingIdentity: identities[0],
+        }),
+      });
       await flushMicrotasks();
-      const second = fetchPages(agent, { workAdmission: createSyncWorkAdmission(() => 1_000, { sharing: 'coalescible', key: secondKey }) });
+      const second = fetchPages(agent, {
+        workAdmission: createSyncWorkAdmission(() => 1_000, {
+          fetchSharingIdentity: identities[1],
+        }),
+      });
       let secondSettled = false;
       void second.then(() => { secondSettled = true; });
       await flushMicrotasks();
@@ -579,6 +651,66 @@ describe('DKGAgent sync fetch coalescing', () => {
       await abortObserved.promise;
       expect(sendSignal?.aborted).toBe(true);
     } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('evicts an aborted shared lane before starting its replacement fetch', async () => {
+    const responses = [deferred<Uint8Array>(), deferred<Uint8Array>()];
+    const identity = createSyncFetchSharingIdentity();
+    let sends = 0;
+    const agent = await createAgentWithSend(async () => responses[sends++]!.promise);
+    const stop = new AbortController();
+    const node = (agent as any).node;
+    const originalStopSignal = Object.getOwnPropertyDescriptor(node, 'stopSignal');
+    Object.defineProperty(node, 'stopSignal', {
+      configurable: true,
+      get: () => stop.signal,
+    });
+    const workAdmission = () => createSyncWorkAdmission(() => 1_000, {
+      fetchSharingIdentity: identity,
+    });
+
+    try {
+      const first = fetchPages(agent, { workAdmission: workAdmission() });
+      const firstOutcome = first.then(
+        (value) => ({ status: 'fulfilled' as const, value }),
+        (reason) => ({ status: 'rejected' as const, reason }),
+      );
+      await flushMicrotasks();
+      expect(sends).toBe(1);
+
+      // Node shutdown synchronously aborts the shared fetch controller while
+      // this deliberately non-cooperative transport keeps its promise pending.
+      // The stale entry therefore remains visible long enough for the next
+      // caller to prove that it is evicted instead of joined.
+      stop.abort(new Error('node stopping'));
+      const replacement = fetchPages(agent, { workAdmission: workAdmission() });
+      const replacementOutcome = replacement.then(
+        (value) => ({ status: 'fulfilled' as const, value }),
+        (reason) => ({ status: 'rejected' as const, reason }),
+      );
+      await flushMicrotasks();
+      // The new fetch observes the already-aborted node signal before transport.
+      // If it had joined the stale entry, it would remain blocked on response 0.
+      expect(await replacementOutcome).toMatchObject({
+        status: 'rejected',
+        reason: { name: 'AbortError', message: 'node stopping' },
+      });
+      expect(sends).toBe(1);
+
+      responses[0]!.resolve(new Uint8Array());
+      expect(await firstOutcome).toMatchObject({
+        status: 'rejected',
+        reason: { name: 'AbortError', message: 'node stopping' },
+      });
+    } finally {
+      if (originalStopSignal) {
+        Object.defineProperty(node, 'stopSignal', originalStopSignal);
+      } else {
+        delete node.stopSignal;
+      }
+      for (const response of responses) response.resolve(new Uint8Array());
       await agent.stop().catch(() => {});
     }
   });
@@ -803,6 +935,207 @@ describe('DKGAgent sync fetch coalescing', () => {
       expect(fetchCalls).toBe(2);
       expect(forward).toBe(reverse.result);
       expect(reverse.disposition).toBe('clean-absent');
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it.each([
+    { exactFetchPurpose: 'vm-update-refresh' as const },
+    { forceFreshExactSession: true },
+  ])('runs a forced-fresh exact fetch after an identical in-flight fetch and forwards freshness to both pages (%j)', async (freshnessOptions) => {
+    const firstMetaFetch = deferred<SyncPageResult>();
+    const fetchCalls: Array<{ phase: SyncPhase; forceFreshSession?: boolean }> = [];
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    stubLifecycleFetch(agent, async ({ phase, forceFreshSession }) => {
+      fetchCalls.push({ phase, forceFreshSession });
+      if (fetchCalls.length === 1) return firstMetaFetch.promise;
+      return emptySyncPage(phase);
+    });
+    (agent as any).processDurableBatchInWorker = async () => ({
+      verifiedData: [],
+      verifiedMeta: [],
+      consumedUnpersistedMetaTriples: 0,
+      totalFetchedDataQuads: 0,
+      totalFetchedMetaQuads: 0,
+      rejectedKcs: 0,
+      emptyResponses: 1,
+      metaOnlyResponses: 0,
+      verifiedPrivateOnlyResponses: 0,
+      dataRejectedMissingMeta: 0,
+    });
+
+    try {
+      const ordinary = (agent as any).syncExactKnowledgeAssetsFromPeerDetailed(
+        PEER_A,
+        SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+        exactSelection(EXACT_UAL_7),
+      );
+      await waitFor(() => fetchCalls.length === 1);
+      const forced = (agent as any).syncExactKnowledgeAssetsFromPeerDetailed(
+        PEER_A,
+        SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+        exactSelection(EXACT_UAL_7),
+        freshnessOptions,
+      );
+      firstMetaFetch.resolve(emptySyncPage('meta'));
+
+      const [ordinaryResult, forcedResult] = await Promise.all([ordinary, forced]);
+      expect(ordinaryResult.result).not.toBe(forcedResult.result);
+      expect(fetchCalls).toHaveLength(4);
+      expect(fetchCalls.slice(0, 2).map(({ forceFreshSession }) => forceFreshSession))
+        .toEqual([false, false]);
+      expect(fetchCalls.slice(2)).toEqual([
+        { phase: 'meta', forceFreshSession: true },
+        { phase: 'data', forceFreshSession: true },
+      ]);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it.each<{ name: string; expectedFresh: boolean; invoke: (agent: DKGAgent) => Promise<unknown> }>([
+    { name: 'detailed legacy true', expectedFresh: true, invoke: agent => agent.syncExactKnowledgeAssetsFromPeerDetailed(
+      PEER_A, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, [EXACT_UAL_7], { forceFreshExactSession: true }) },
+    { name: 'detailed legacy false', expectedFresh: false, invoke: agent => agent.syncExactKnowledgeAssetsFromPeerDetailed(
+      PEER_A, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, [EXACT_UAL_7], { forceFreshExactSession: false }) },
+    { name: 'detailed modern purpose wins', expectedFresh: true, invoke: agent => agent.syncExactKnowledgeAssetsFromPeerDetailed(
+      PEER_A, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, [EXACT_UAL_7], { exactFetchPurpose: 'vm-update-refresh', forceFreshExactSession: false }) },
+    { name: 'durable legacy true', expectedFresh: true, invoke: agent => agent.runLegacyDurableSyncDetailed(
+      createOperationContext('sync'), PEER_A, [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY], undefined, undefined, undefined,
+      { exactAssetSelection: exactSelection(EXACT_UAL_7), forceFreshExactSession: true }) },
+    { name: 'durable legacy false', expectedFresh: false, invoke: agent => agent.runLegacyDurableSyncDetailed(
+      createOperationContext('sync'), PEER_A, [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY], undefined, undefined, undefined,
+      { exactAssetSelection: exactSelection(EXACT_UAL_7), forceFreshExactSession: false }) },
+    { name: 'durable explicit ordinary policy wins', expectedFresh: false, invoke: agent => agent.runLegacyDurableSyncDetailed(
+      createOperationContext('sync'), PEER_A, [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY], undefined, undefined, undefined,
+      { exactAssetSelection: exactSelection(EXACT_UAL_7), forceFreshExactSession: true,
+        exactAssetFetchPolicy: exactAssetFetchSessionPolicy(exactSelection(EXACT_UAL_7)) }) },
+    { name: 'durable full graph is unaffected', expectedFresh: false, invoke: agent => agent.runLegacyDurableSyncDetailed(
+      createOperationContext('sync'), PEER_A, [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY], undefined, undefined, undefined,
+      { forceFreshExactSession: true }) },
+    { name: 'challenge keeps its distinct policy', expectedFresh: true, invoke: agent => agent.syncExactKnowledgeAssetsFromPeerDetailed(
+      PEER_A, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, createChallengePinnedExactAssetSelection([{
+        assetUal: EXACT_UAL_7, merkleRootHex: '1'.repeat(64), merkleLeafCount: 1n,
+      }]), { forceFreshExactSession: true }) },
+  ])('preserves public exact freshness compatibility on both phases: $name', async ({ invoke, expectedFresh }) => {
+    const fetchCalls: Array<{ phase: SyncPhase; forceFreshSession?: boolean }> = [];
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    stubLifecycleFetch(agent, async ({ phase, forceFreshSession }) => {
+      fetchCalls.push({ phase, forceFreshSession });
+      return emptySyncPage(phase);
+    });
+    (agent as any).processDurableBatchInWorker = async () => ({
+      verifiedData: [], verifiedMeta: [], consumedUnpersistedMetaTriples: 0,
+      totalFetchedDataQuads: 0, totalFetchedMetaQuads: 0, rejectedKcs: 0,
+      emptyResponses: 1, metaOnlyResponses: 0, verifiedPrivateOnlyResponses: 0,
+      dataRejectedMissingMeta: 0,
+    });
+    try {
+      await invoke(agent);
+      expect(fetchCalls).toEqual([
+        { phase: 'meta', forceFreshSession: expectedFresh },
+        { phase: 'data', forceFreshSession: expectedFresh },
+      ]);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it.each([
+    { name: 'result-only', invoke: (agent: DKGAgent, options: Parameters<DKGAgent['runLegacyDurableSyncForContextGraph']>[4]) =>
+      agent.runLegacyDurableSyncForContextGraph(createOperationContext('sync'), PEER_A, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, 1, options) },
+    { name: 'detailed', invoke: (agent: DKGAgent, options: Parameters<DKGAgent['runLegacyDurableSyncForContextGraphDetailed']>[4]) =>
+      agent.runLegacyDurableSyncForContextGraphDetailed(createOperationContext('sync'), PEER_A, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, 1, options) },
+  ])('preserves direct per-graph legacy selection and freshness: $name', async ({ invoke }) => {
+    const fetchCalls: Array<{ phase: SyncPhase; forceFreshSession?: boolean; assetUals?: string[] }> = [];
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    stubLifecycleFetch(agent, async ({ phase, forceFreshSession, assetUals }) => {
+      fetchCalls.push({ phase, forceFreshSession, assetUals });
+      return emptySyncPage(phase);
+    });
+    (agent as any).processDurableBatchInWorker = async () => ({
+      verifiedData: [], verifiedMeta: [], consumedUnpersistedMetaTriples: 0,
+      totalFetchedDataQuads: 0, totalFetchedMetaQuads: 0, rejectedKcs: 0,
+      emptyResponses: 1, metaOnlyResponses: 0, verifiedPrivateOnlyResponses: 0, dataRejectedMissingMeta: 0,
+    });
+    const selected = exactSelection(EXACT_UAL_7);
+    const explicitSelection = exactSelection(EXACT_UAL_8);
+    try {
+      for (const [options, expectedFresh, expectedUals] of [
+        [{ exactAssetSelection: selected, forceFreshExactSession: true }, true, selected.assetUals],
+        [{ exactAssetSelection: selected, forceFreshExactSession: false }, false, selected.assetUals],
+        [{ exactAssetSelection: selected, forceFreshExactSession: true,
+          exactAssetFetchPolicy: exactAssetFetchSessionPolicy(explicitSelection) }, false, explicitSelection.assetUals],
+      ] as const) {
+        fetchCalls.length = 0;
+        await invoke(agent, options);
+        expect(fetchCalls).toEqual([
+          { phase: 'meta', forceFreshSession: expectedFresh, assetUals: [...expectedUals] },
+          { phase: 'data', forceFreshSession: expectedFresh, assetUals: [...expectedUals] },
+        ]);
+      }
+    } finally { await agent.stop().catch(() => {}); }
+  });
+
+  it.each([
+    { name: 'legacy true', options: { forceFreshExactSession: true }, expectedFresh: true },
+    { name: 'legacy false', options: { forceFreshExactSession: false }, expectedFresh: false },
+    { name: 'modern purpose wins', options: { exactFetchPurpose: 'vm-update-refresh' as const, forceFreshExactSession: false }, expectedFresh: true },
+  ])('preserves the public exact-fetch helper freshness on physical pages: $name', async ({ options, expectedFresh }) => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const host = agent as any;
+    const ual = `did:dkg:${host.chain.chainId}/0x0000000000000000000000000000000000000001/7`;
+    let fetched = false;
+    const fetchCalls: Array<{ phase: SyncPhase; forceFreshSession?: boolean; assetUals?: string[] }> = [];
+    Object.assign(host.chain, {
+      getKAContextGraphId: async () => 1n,
+      readKnowledgeAssetVersionSnapshot: async () => ({ latestRoot: '0x' + '01'.repeat(32), rootCount: 1n,
+        latestAuthor: '0x0000000000000000000000000000000000000001',
+        latestPublisher: '0x0000000000000000000000000000000000000002', blockNumber: 100 }),
+    });
+    Object.assign(host, {
+      requireLocalCgMatchesOnChainSlot: async () => true,
+      ensurePeerConnected: async () => {}, waitForSyncProtocol: async () => true,
+      ensurePeerAdmittedForRecovery: async () => true,
+      node: { libp2p: { getConnections: () => [{ remotePeer: { toString: () => PEER_A } }] } },
+      getOrCreateFinalizationHandler: () => ({ handleExactChainReconciledKC: async () => fetched ? 'already-confirmed' : 'no-swm' }),
+      processDurableBatchInWorker: async () => ({ verifiedData: [], verifiedMeta: [], consumedUnpersistedMetaTriples: 0,
+        totalFetchedDataQuads: 0, totalFetchedMetaQuads: 0, rejectedKcs: 0,
+        emptyResponses: 1, metaOnlyResponses: 0, verifiedPrivateOnlyResponses: 0, dataRejectedMissingMeta: 0 }),
+    });
+    stubLifecycleFetch(agent, async ({ phase, forceFreshSession, assetUals }) => {
+      fetchCalls.push({ phase, forceFreshSession, assetUals });
+      if (phase === 'data') fetched = true;
+      return emptySyncPage(phase);
+    });
+    try {
+      const outcome = await agent.runExactAssetFetchForContextGraph(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, [ual], {
+        isCurrent: () => true, peerIds: [PEER_A], ...options,
+      });
+      expect(outcome.status).toBe('complete');
+      expect(fetchCalls).toEqual([
+        { phase: 'meta', forceFreshSession: expectedFresh, assetUals: [ual] },
+        { phase: 'data', forceFreshSession: expectedFresh, assetUals: [ual] },
+      ]);
+    } finally { await agent.stop().catch(() => {}); }
+  });
+
+  it('refuses an untyped modern refresh purpose with challenge pins before physical work', async () => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const fetch = vi.fn(async ({ phase }: { phase: SyncPhase }) => emptySyncPage(phase));
+    stubLifecycleFetch(agent, fetch);
+    const onWorkStarted = vi.fn();
+    const selection = createChallengePinnedExactAssetSelection([{
+      assetUal: EXACT_UAL_7, merkleRootHex: '1'.repeat(64), merkleLeafCount: 1n,
+    }]);
+    try {
+      await expect(Reflect.apply(agent.syncExactKnowledgeAssetsFromPeerDetailed, agent, [
+        PEER_A, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, selection,
+        { exactFetchPurpose: 'vm-update-refresh', forceFreshExactSession: true, onWorkStarted },
+      ])).rejects.toThrow('VM update refresh requires a UAL-only exact selection');
+      expect(fetch).not.toHaveBeenCalled();
+      expect(onWorkStarted).not.toHaveBeenCalled();
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -1542,24 +1875,22 @@ describe('DKGAgent sync fetch coalescing', () => {
         cleanSharedMemorySyncResult();
 
       const [windowA, windowB] = await Promise.all([
-        agent.syncVmRecoveryFromConnectedPeers('coalesced-cg', {
+        agent.syncContextGraphFromConnectedPeers('coalesced-cg', {
           includeSharedMemory: true,
           maxPeers: 1,
           peerRotationKey: 'window-a',
         }),
-        agent.syncVmRecoveryFromConnectedPeers('coalesced-cg', {
+        agent.syncContextGraphFromConnectedPeers('coalesced-cg', {
           includeSharedMemory: true,
           maxPeers: 1,
           peerRotationKey: 'window-b',
         }),
       ]);
 
-      expect(windowA.cleanMissPeerIds).toEqual([PEER_A]);
-      expect(windowB.cleanMissPeerIds).toEqual([PEER_B]);
-      expect(windowA.catchup.cleanSharedMemoryPeerIds).toEqual([PEER_A]);
-      expect(windowB.catchup.cleanSharedMemoryPeerIds).toEqual([PEER_B]);
-      expect(Object.isFrozen(windowA.catchup.cleanSharedMemoryPeerIds)).toBe(true);
-      expect(Object.isFrozen(windowB.catchup.cleanSharedMemoryPeerIds)).toBe(true);
+      expect(windowA.cleanSharedMemoryPeerIds).toEqual([PEER_A]);
+      expect(windowB.cleanSharedMemoryPeerIds).toEqual([PEER_B]);
+      expect(Object.isFrozen(windowA.cleanSharedMemoryPeerIds)).toBe(true);
+      expect(Object.isFrozen(windowB.cleanSharedMemoryPeerIds)).toBe(true);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -1591,11 +1922,11 @@ describe('DKGAgent sync fetch coalescing', () => {
         await releaseRefresh.promise;
       };
 
-      const first = agent.syncVmRecoveryFromConnectedPeers('coalesced-cg', {
+      const first = agent.syncContextGraphFromConnectedPeers('coalesced-cg', {
         includeSharedMemory: true,
       });
       await refreshEntered.promise;
-      const lateJoiner = agent.syncVmRecoveryFromConnectedPeers('coalesced-cg', {
+      const lateJoiner = agent.syncContextGraphFromConnectedPeers('coalesced-cg', {
         includeSharedMemory: true,
       });
       await flushMicrotasks();
@@ -1603,9 +1934,9 @@ describe('DKGAgent sync fetch coalescing', () => {
 
       const [firstResult, lateResult] = await Promise.all([first, lateJoiner]);
       expect(sharedSyncs).toBe(1);
-      expect(firstResult.cleanMissPeerIds).toEqual([PEER_A]);
-      expect(lateResult.cleanMissPeerIds).toEqual([PEER_A]);
-      expect(lateResult.catchup).toBe(firstResult.catchup);
+      expect(firstResult.cleanSharedMemoryPeerIds).toEqual([PEER_A]);
+      expect(lateResult.cleanSharedMemoryPeerIds).toEqual([PEER_A]);
+      expect(lateResult).toBe(firstResult);
     } finally {
       releaseRefresh.resolve();
       await agent.stop().catch(() => {});
@@ -1852,17 +2183,17 @@ describe('DKGAgent sync fetch coalescing', () => {
         };
       };
 
-      const recovery = await agent.syncVmRecoveryFromConnectedPeers('coalesced-cg', {
+      const recovery = await agent.syncContextGraphFromConnectedPeers('coalesced-cg', {
         includeSharedMemory: true,
       });
-      const result = recovery.catchup;
+      const result = recovery;
 
       expect(durableCalls).toEqual([PEER_A]);
       expect(sharedCalls).toEqual([PEER_A, PEER_A]);
       expect(result.diagnostics.sharedMemory.swmCoverage).toEqual(coverage(3));
       expect(result.diagnostics.sharedMemory.continuationPasses).toBe(1);
       expect(result.diagnostics.sharedMemory.continuationStopReason).toBe('no-capable-peers');
-      expect(recovery.cleanMissPeerIds).toEqual([PEER_A]);
+      expect(recovery.cleanSharedMemoryPeerIds).toEqual([PEER_A]);
     } finally {
       await agent.stop().catch(() => {});
     }

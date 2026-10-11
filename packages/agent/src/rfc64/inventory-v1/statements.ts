@@ -366,6 +366,17 @@ DELETE FROM rfc64_swm_author_inventory_rows_v1
 WHERE inventory_scope_digest = :scope
   AND author_address = :author
   AND ka_ual = :kaUal;`,
+
+  deleteSwmAuthorRows: `
+DELETE FROM rfc64_swm_author_inventory_rows_v1
+WHERE inventory_scope_digest = :scope
+  AND author_address = :author;`,
+
+  deleteSwmAuthorHeadCas: `
+DELETE FROM rfc64_swm_author_inventory_heads_v1
+WHERE inventory_scope_digest = :scope
+  AND author_address = :author
+  AND current_head_digest = :expectedHead;`,
   listFinalizedPrivatePlacementRepairs: `
 SELECT repair_digest, repair_json
 FROM rfc64_finalized_private_placement_repairs_v1
@@ -377,6 +388,25 @@ ON CONFLICT (repair_digest) DO NOTHING;`,
   deleteFinalizedPrivatePlacementRepair: `
 DELETE FROM rfc64_finalized_private_placement_repairs_v1
 WHERE repair_digest = :repairDigest AND repair_json = :repairJson;`,
+  getUnregisteredAuthoritySeed: `
+SELECT network_id, context_graph_id, owner_address, policy_digest, signed_envelope
+FROM rfc64_unregistered_authority_seeds_v1
+WHERE network_id = :networkId AND context_graph_id = :contextGraphId;`,
+  insertUnregisteredAuthoritySeed: `
+INSERT INTO rfc64_unregistered_authority_seeds_v1 (
+  network_id,
+  context_graph_id,
+  owner_address,
+  policy_digest,
+  signed_envelope
+) VALUES (
+  :networkId,
+  :contextGraphId,
+  :ownerAddress,
+  :policyDigest,
+  :signedEnvelope
+)
+ON CONFLICT (network_id, context_graph_id) DO NOTHING;`,
 });
 
 export type InventoryV1StatementKey = keyof typeof INVENTORY_V1_STATEMENT_SQL;
@@ -411,9 +441,13 @@ export const INVENTORY_V1_STATEMENT_IDS = Object.freeze({
   updateSwmAuthorHeadCas: 'rfc64.swm-author-inventory.head.cas-update.v1',
   upsertSwmAuthorRow: 'rfc64.swm-author-inventory.row.upsert.v1',
   deleteSwmAuthorRow: 'rfc64.swm-author-inventory.row.delete.v1',
+  deleteSwmAuthorRows: 'rfc64.swm-author-inventory.rows.delete.v1',
+  deleteSwmAuthorHeadCas: 'rfc64.swm-author-inventory.head.cas-delete.v1',
   listFinalizedPrivatePlacementRepairs: 'rfc64.finalized-private-placement-repair.list.v1',
   insertFinalizedPrivatePlacementRepair: 'rfc64.finalized-private-placement-repair.insert.v1',
   deleteFinalizedPrivatePlacementRepair: 'rfc64.finalized-private-placement-repair.delete.v1',
+  getUnregisteredAuthoritySeed: 'rfc64.unregistered-authority-seed.get.v1',
+  insertUnregisteredAuthoritySeed: 'rfc64.unregistered-authority-seed.insert.v1',
 } as const satisfies Readonly<Record<InventoryV1StatementKey, string>>);
 
 export type InventoryV1StatementId =
@@ -437,6 +471,7 @@ export const INVENTORY_V1_PERSISTENT_READ_STATEMENT_KEYS = Object.freeze([
   'getSwmAuthorHead',
   'getSwmAuthorRows',
   'listFinalizedPrivatePlacementRepairs',
+  'getUnregisteredAuthoritySeed',
 ] as const satisfies readonly InventoryV1StatementKey[]);
 
 export const INVENTORY_V1_PLAN_STATEMENT_KEYS = Object.freeze([
@@ -453,6 +488,8 @@ export const INVENTORY_V1_PLAN_STATEMENT_KEYS = Object.freeze([
   'updateSwmAuthorHeadCas',
   'upsertSwmAuthorRow',
   'deleteSwmAuthorRow',
+  'deleteSwmAuthorHeadCas',
   'insertFinalizedPrivatePlacementRepair',
   'deleteFinalizedPrivatePlacementRepair',
+  'insertUnregisteredAuthoritySeed',
 ] as const satisfies readonly InventoryV1StatementKey[]);

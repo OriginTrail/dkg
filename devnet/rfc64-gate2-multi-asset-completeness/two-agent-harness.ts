@@ -1,10 +1,11 @@
 import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { hostname, tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import process from 'node:process';
 
 import { readCleanRepositoryHead } from '../rfc64-persistence-lifecycle/evidence.js';
 import { ChildProcessRegistry } from '../rfc64-persistence-lifecycle/process-lifecycle.js';
+import { assertRuntimeProcessIdentityV1 } from '../rfc64-runtime-process-evidence.mts';
 import { Gate2AgentChild, type Gate2AgentEvent } from './agent-child.js';
 import {
   GATE2_ADAPTER_PROTOCOL_VERSION,
@@ -16,7 +17,7 @@ import {
   type Gate2RuntimeManifestV1,
 } from './runtime-provenance.ts';
 
-const ADAPTER_PROCESS = join(import.meta.dirname, 'adapter-process.ts');
+const CLI_ENTRY = resolve(import.meta.dirname, '../../packages/cli/dist/cli.js');
 const RUNTIME_LOAD_HOOK = join(import.meta.dirname, 'runtime-load-hook.ts');
 const PROCESS_TIMEOUT_MS = 90_000;
 const ROLE_MASTER_KEYS = Object.freeze({
@@ -37,6 +38,17 @@ export function createGate2TwoAgentDataDirsV1(label: string): Gate2TwoAgentDataD
     author: mkdtempSync(join(tmpdir(), `dkg-rfc64-${label}-author-`)),
     receiver: mkdtempSync(join(tmpdir(), `dkg-rfc64-${label}-receiver-`)),
   });
+}
+
+/** Resolve data paths exactly as the child does: relative to its launched cwd. */
+export function resolveGate2HarnessDataDirV1(repoRootInput: string, dataDirInput: string): string {
+  if (typeof repoRootInput !== 'string' || repoRootInput.length === 0) {
+    throw new TypeError('harness repoRoot is required');
+  }
+  if (typeof dataDirInput !== 'string' || dataDirInput.length === 0) {
+    throw new TypeError('harness dataDir is required');
+  }
+  return resolve(repoRootInput, dataDirInput);
 }
 
 /** Verify one clean source/runtime boundary and return the exact current HEAD. */
@@ -89,20 +101,36 @@ export function spawnGate2HarnessAgentV1(input: {
   delete childEnv.NODE_OPTIONS;
   delete childEnv.NODE_PATH;
   delete childEnv.TSX_TSCONFIG_PATH;
+  const hostIdentity = childEnv.DKG_RFC64_RUNTIME_HOST_IDENTITY ?? hostname();
+  if (hostIdentity.length === 0) {
+    throw new Error('runtime host identity is unavailable; set DKG_RFC64_RUNTIME_HOST_IDENTITY');
+  }
   return new Gate2AgentChild({
     eventTimeoutMs: input.eventTimeoutMs ?? PROCESS_TIMEOUT_MS,
     registry: input.registry,
     role: input.role,
     spawn: {
       command: process.execPath,
-      args: ['--import', 'tsx', '--import', RUNTIME_LOAD_HOOK, ADAPTER_PROCESS, input.role],
+      args: [
+        '--import',
+        'tsx',
+        '--import',
+        RUNTIME_LOAD_HOOK,
+        CLI_ENTRY,
+        'rfc64-gate2-adapter',
+        input.role,
+      ],
       cwd: input.repoRoot,
       env: {
         ...childEnv,
-        DKG_RFC64_GATE2_ADAPTER_DATA_DIR: input.dataDir,
+        DKG_RFC64_GATE2_ADAPTER_DATA_DIR: resolveGate2HarnessDataDirV1(
+          input.repoRoot,
+          input.dataDir,
+        ),
         DKG_RFC64_GATE2_AGENT_MASTER_KEY_HEX: masterKeyHex,
         DKG_RFC64_GATE2_RUNTIME_MANIFEST_DIGEST: input.runtimeManifestDigest,
         DKG_RFC64_GATE2_RUNTIME_SOURCE_COMMIT: input.sourceCommit,
+        DKG_RFC64_RUNTIME_HOST_IDENTITY: hostIdentity,
         ...(input.allowBulkCatalogPredecessor === true
           ? { DKG_RFC64_GATE2_ALLOW_BULK_CATALOG_PREDECESSOR: '1' }
           : {}),
@@ -142,6 +170,7 @@ export function assertGate2HarnessReadyV1(
   exact(event.catalogServiceStarted, true, 'ready catalog service');
   exact(event.startupRepair, null, 'ready startup repair');
   exact(event.runtimeBuildManifestDigest, runtimeManifestDigest, 'ready runtime manifest');
+  assertRuntimeProcessIdentityV1(event.processIdentity, 'ready process identity');
   requiredString(event.peerId, 'ready peer ID');
   const multiaddr = requiredString(event.multiaddr, 'ready multiaddr');
   if (!multiaddr.includes('/tcp/')) throw new Error('ready multiaddr is not TCP');

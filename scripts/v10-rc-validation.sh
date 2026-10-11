@@ -33,6 +33,7 @@ REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 NUM_NODES="${NUM_NODES:-6}"
+source "$SCRIPT_DIR/devnet-privacy-helpers.sh"
 # shellcheck source=devnet-update-helpers.sh
 source "$SCRIPT_DIR/devnet-update-helpers.sh"
 if [ -n "${DKG_AUTH:-}" ]; then
@@ -191,6 +192,11 @@ sleep 3
 # ────────────────────────────────────────────────────────────────────────────
 section "4. PUBLISH WITH PRIVATE TRIPLES (via /api/update)"
 
+# An update replaces the KA's public assertion. Query the new Bob assertion
+# after a confirmed update; Alice belongs to the preceding version.
+VM_REPLICATION_URI="$ALICE_URI"
+VM_REPLICATION_NAME="Alice"
+
 # rc.12 publish path does NOT take privateQuads. Privacy enforcement now lives
 # on the update path: publish a KC first (§3 already did), then issue an
 # update that adds public + private quads. The publisher receives both, but
@@ -222,15 +228,10 @@ JSON
   PRIV_STATUS=$(echo "$PRIV_RESULT" | pyfield "d.get('status','?')")
   if [ "$PRIV_STATUS" = "confirmed" ] || [ "$PRIV_STATUS" = "finalized" ]; then
     ok "Update with private triples confirmed, status=$PRIV_STATUS"
+    VM_REPLICATION_URI="$BOB_URI"
+    VM_REPLICATION_NAME="Bob"
   elif echo "$PRIV_RESULT" | grep -Eq 'NO_DATA_IN_SWM|MERKLE_MISMATCH_IN_SWM'; then
-    # OT-RFC-49 (Rung-1 strip): cores hold ZERO private SWM ciphertext, so a
-    # private-quad update on a curated CG cannot draw its ACK quorum FROM the
-    # cores. Depending on whether a peer has already retained the public SWM
-    # snapshot, it declines as NO_DATA_IN_SWM or MERKLE_MISMATCH_IN_SWM. Both
-    # are the privacy model working as intended, not a failure. The durable
-    # private-update path now routes through the curator and is covered by
-    # scripts/devnet-test-curator-ack-gate.sh.
-    warn "Private update declined by core ACK privacy guard — expected post-RFC-49 (curator path covered by devnet-test-curator-ack-gate.sh)"
+    fail "Private update declined by core ACK privacy guard: $PRIV_RESULT"
   else
     fail "Private update status=$PRIV_STATUS: $PRIV_RESULT"
   fi
@@ -240,17 +241,7 @@ JSON
   echo ""
   echo "--- 4b: Private triples NOT visible on other nodes ---"
   for PORT in 9202 9203 9204; do
-    LEAK=$(post $PORT /api/query -H "Content-Type: application/json" -d "{
-      \"sparql\": \"SELECT ?o WHERE { <$BOB_URI> <http://schema.org/email> ?o }\",
-      \"contextGraphId\": \"$CG\"
-    }")
-    BINDINGS=$(echo "$LEAK" | pyfield "len(d.get('result',{}).get('bindings',[]))")
-    [ -z "$BINDINGS" ] && BINDINGS=0
-    if [ "$BINDINGS" = "0" ]; then
-      ok "Node $PORT: no private triple leak"
-    else
-      fail "Node $PORT: private triple leaked! ($BINDINGS bindings)"
-    fi
+    rc_private_peer_privacy "http://127.0.0.1:$PORT" "$AUTH" "$BOB_URI" "$CG" "$PORT"
   done
 
   echo ""
@@ -268,17 +259,7 @@ JSON
   #       on the PUBLISHER itself — not just on §4b's peer nodes. This is
   #       the strongest "privacy boundary" assertion we can make without
   #       leaking the decryption key into a test fixture.
-  PUB_LEAK=$(post 9201 /api/query -H "Content-Type: application/json" -d "{
-    \"sparql\": \"SELECT ?o WHERE { <$BOB_URI> <http://schema.org/email> ?o }\",
-    \"contextGraphId\": \"$CG\"
-  }")
-  PUB_BINDINGS=$(echo "$PUB_LEAK" | pyfield "len(d.get('result',{}).get('bindings',[]))")
-  [ -z "$PUB_BINDINGS" ] && PUB_BINDINGS=0
-  if [ "$PUB_BINDINGS" = "0" ]; then
-    ok "Publisher (node 9201) public view does NOT leak private email — privacy boundary intact"
-  else
-    fail "Publisher (node 9201) public view leaked private email ($PUB_BINDINGS bindings): $PUB_LEAK"
-  fi
+  rc_publisher_privacy "http://127.0.0.1:9201" "$AUTH" "$BOB_URI" "$CG"
 else
   warn "Skipping §4 — §3 publish did not yield a kaId (private-update path needs an existing KC)"
 fi
@@ -289,40 +270,54 @@ section "5. VM REPLICATION — public data on other nodes"
 # Closes #774 finding #2 — the original single `sleep 5` + one-shot
 # query was flaky on cold/warming meshes: replication did happen, but
 # the test polled before the first SWM/VM sync arrived at the edge
-# nodes. Switch to a per-node poll-until-found loop with a 60s budget
-# and 2s tick — gives a warm mesh the same fast-path (first tick OK)
-# while letting a cold mesh actually exercise the sync path before we
-# fail. `RC_VALIDATION_GOSSIP_BUDGET_S` lets CI/operators tune this.
+# nodes. Poll all unresolved nodes against one section-wide deadline until
+# the new assertion is visible on each. Catalog repair and chain
+# reconciliation can take longer than a minute on a fresh mesh.
+# `RC_VALIDATION_GOSSIP_BUDGET_S` lets CI/operators tune this.
 #
 # Published KA quads live in the verifiable-memory layer on peer nodes.
 # The default query view is a legacy/local root-graph view and is not a
 # reliable cross-node replication assertion for the per-KA VM layout.
-GOSSIP_BUDGET_S="${RC_VALIDATION_GOSSIP_BUDGET_S:-60}"
+GOSSIP_BUDGET_S="${RC_VALIDATION_GOSSIP_BUDGET_S:-180}"
 # Per-request curl timeout makes the poll budget real: if a node wedges
 # its HTTP socket, a bare `post` (no `--max-time`) would hang the whole
 # script and never let the budget expire. Cap each tick at
 # `GOSSIP_TICK_MAX_S` (default 5s) so we always stay within budget.
 GOSSIP_TICK_MAX_S="${RC_VALIDATION_GOSSIP_TICK_MAX_S:-5}"
 
-for PORT in 9202 9203 9204; do
-  DEADLINE=$(( $(date +%s) + GOSSIP_BUDGET_S ))
-  NAME_VAL=""
-  while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+VM_PORTS=(9202 9203 9204)
+VM_FOUND=(0 0 0)
+VM_LAST=("" "" "")
+VM_DEADLINE=$(( $(date +%s) + GOSSIP_BUDGET_S ))
+while [ "$(date +%s)" -lt "$VM_DEADLINE" ]; do
+  VM_MISSING=0
+  for i in 0 1 2; do
+    [ "${VM_FOUND[$i]}" = 1 ] && continue
+    PORT=${VM_PORTS[$i]}
     REP=$(curl -s --max-time "$GOSSIP_TICK_MAX_S" --connect-timeout 2 \
       -H "$H" -H "Content-Type: application/json" \
       -X POST "http://127.0.0.1:$PORT/api/query" -d "{
-      \"sparql\": \"SELECT ?name WHERE { <$ALICE_URI> <http://schema.org/name> ?name }\",
+      \"sparql\": \"SELECT ?name WHERE { <$VM_REPLICATION_URI> <http://schema.org/name> ?name }\",
       \"contextGraphId\": \"$CG\",
       \"view\": \"verifiable-memory\"
     }" || echo '')
     NAME_VAL=$(echo "$REP" | pyfield "(lambda b: (b[0].get('name') if b else 'EMPTY'))(d.get('result',{}).get('bindings',[]))")
-    echo "$NAME_VAL" | grep -q "Alice" && break
-    sleep 2
+    VM_LAST[$i]="$NAME_VAL"
+    if echo "$NAME_VAL" | grep -q "$VM_REPLICATION_NAME"; then
+      VM_FOUND[$i]=1
+    else
+      VM_MISSING=$((VM_MISSING+1))
+    fi
   done
-  if echo "$NAME_VAL" | grep -q "Alice"; then
-    ok "Node $PORT: replicated Alice data"
+  [ "$VM_MISSING" -eq 0 ] && break
+  sleep 2
+done
+for i in 0 1 2; do
+  PORT=${VM_PORTS[$i]}
+  if [ "${VM_FOUND[$i]}" = 1 ]; then
+    ok "Node $PORT: replicated $VM_REPLICATION_NAME data"
   else
-    fail "Node $PORT: Alice data not found after ${GOSSIP_BUDGET_S}s poll (got: $NAME_VAL)"
+    fail "Node $PORT: $VM_REPLICATION_NAME data not found after ${GOSSIP_BUDGET_S}s shared poll (got: ${VM_LAST[$i]})"
   fi
 done
 
@@ -432,17 +427,7 @@ else
 fi
 
 echo "--- 7d: WM data NOT visible on other nodes (isolation) ---"
-WM_LEAK=$(post 9202 /api/query -H "Content-Type: application/json" -d "{
-  \"sparql\": \"SELECT ?name WHERE { <$FINDING_URI> <http://schema.org/name> ?name }\",
-  \"contextGraphId\": \"$CG\"
-}")
-WM_LEAK_COUNT=$(echo "$WM_LEAK" | pyfield "len(d.get('result',{}).get('bindings',[]))")
-[ -z "$WM_LEAK_COUNT" ] && WM_LEAK_COUNT=0
-if [ "$WM_LEAK_COUNT" = "0" ]; then
-  ok "WM data correctly isolated — not visible on node 2"
-else
-  fail "WM data leaked to node 2 ($WM_LEAK_COUNT bindings)"
-fi
+rc_wm_privacy "http://127.0.0.1:9202" "$AUTH" "$FINDING_URI" "$CG"
 
 # ────────────────────────────────────────────────────────────────────────────
 section "8. PROMOTE WM → SWM"
@@ -521,32 +506,22 @@ else
 fi
 
 echo "--- 10d: Sub-graph data isolated from root graph ---"
-SG_ROOT=$(post 9201 /api/query -H "Content-Type: application/json" -d "{
-  \"sparql\": \"SELECT ?name WHERE { <$DECISION_URI> <http://schema.org/name> ?name }\",
-  \"contextGraphId\": \"$CG\"
-}")
-SG_ROOT_COUNT=$(echo "$SG_ROOT" | pyfield "len(d.get('result',{}).get('bindings',[]))")
-[ -z "$SG_ROOT_COUNT" ] && SG_ROOT_COUNT=0
-if [ "$SG_ROOT_COUNT" = "0" ]; then
-  ok "Sub-graph data correctly isolated from root graph"
-else
-  warn "Sub-graph data found in root graph ($SG_ROOT_COUNT bindings) — may be expected depending on query behavior"
-fi
+rc_subgraph_root_isolation "http://127.0.0.1:9201" "$AUTH" "$DECISION_URI" "$CG"
 
 # ────────────────────────────────────────────────────────────────────────────
 section "11. QUERY VIEWS"
 
 echo "--- 11a: Query with view=verifiable-memory ---"
 VM_Q=$(post 9201 /api/query -H "Content-Type: application/json" -d "{
-  \"sparql\": \"SELECT ?name WHERE { <$ALICE_URI> <http://schema.org/name> ?name }\",
+  \"sparql\": \"SELECT ?name WHERE { <$VM_REPLICATION_URI> <http://schema.org/name> ?name }\",
   \"contextGraphId\": \"$CG\",
   \"view\": \"verifiable-memory\"
 }")
 VM_FOUND=$(echo "$VM_Q" | pyfield "(lambda b: (b[0].get('name') if b else 'EMPTY'))(d.get('result',{}).get('bindings',[]))")
-if echo "$VM_FOUND" | grep -q "Alice"; then
-  ok "Verifiable-memory view: Alice data found"
+if echo "$VM_FOUND" | grep -q "$VM_REPLICATION_NAME"; then
+  ok "Verifiable-memory view: $VM_REPLICATION_NAME data found"
 else
-  fail "Verifiable-memory view: Alice data missing (got: $VM_FOUND)"
+  fail "Verifiable-memory view: $VM_REPLICATION_NAME data missing (got: $VM_FOUND)"
 fi
 
 echo "--- 11b: Query with view=shared-working-memory ---"

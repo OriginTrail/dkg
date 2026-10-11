@@ -5,8 +5,9 @@
  *   node scripts/promotion-closes.mjs [base] [head]
  *   pnpm run promotion:closes
  *
- * Defaults to `origin/main..origin/testnet-canary`. See CONTRIBUTING.md
- * ("Promoting testnet-canary to main") for why this is necessary.
+ * Defaults to `origin/main..origin/testnet-canary`. See
+ * .github/CONTRIBUTING.md ("Promoting testnet-canary to main") for why this
+ * is necessary.
  *
  * Every GitHub lookup is checked. A network error, auth failure or rate limit
  * ABORTS with a non-zero exit rather than silently emitting a short block —

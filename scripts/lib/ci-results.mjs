@@ -1,7 +1,52 @@
-import { CI_LANES, EVM_SCOPES, NODE_EVM_LANES, needsNodeTestArtifacts } from './ci-delta.mjs';
+import {
+  CI_LANES,
+  EVM_SCOPES,
+  NODE_EVM_LANES,
+  PRIMARY_LANE_JOBS,
+  needsNodeTestArtifacts,
+  needsSharedBuild,
+} from './ci-delta.mjs';
 
-import { PRIMARY_LANE_JOBS } from './ci-lanes.mjs';
-export { PRIMARY_LANE_JOBS } from './ci-lanes.mjs';
+export { PRIMARY_LANE_JOBS } from './ci-delta.mjs';
+
+// Pinned obligations, matched against Vitest's executed assertions. A green
+// generic suite or a runtime guard skipping the transport cases is insufficient.
+export const NODE26_REQUIRED_ASSERTIONS = Object.freeze([
+  'stay on HTTP/1.1 where a plain fetch negotiates HTTP/2',
+  'go through a dispatcher the application installed, with its own TLS trust',
+  'go through the proxy of NODE_USE_ENV_PROXY',
+  'stay on HTTP/1.1 when a chain RPC call is the first request of a fresh process',
+].map((name) => `chain RPC fetches against a server that offers HTTP/2 (#2828) ${name}`));
+
+export function validateNode26Evidence(evidence) {
+  const errors = [];
+  if (!evidence || evidence.version !== 1) return ['Node 26 execution evidence is missing or has an invalid version'];
+  if (!/^26\.\d+\.\d+$/.test(evidence.node ?? '') || !/^8\.\d+\.\d+$/.test(evidence.undici ?? '')) {
+    errors.push(`Node 26 execution requires Node 26 / undici 8, got ${evidence.node} / ${evidence.undici}`);
+  }
+  if (evidence.requireUndici8Fetch !== true) errors.push('Node 26 execution did not require DKG_REQUIRE_UNDICI8_FETCH=1');
+  if (evidence.success !== true) errors.push('Node 26 test execution did not succeed');
+  if (!Array.isArray(evidence.assertions)) return [...errors, 'Node 26 executed assertions are missing'];
+  for (const name of NODE26_REQUIRED_ASSERTIONS) {
+    const matches = evidence.assertions.filter((assertion) => assertion?.name === name);
+    if (matches.length !== 1 || matches[0].status !== 'passed') {
+      errors.push(`Node 26 required assertion did not pass exactly once: ${name}`);
+    }
+  }
+  return errors;
+}
+
+function checkNode26Execution(plan, needs, errors) {
+  if (plan.lanes?.chain_rpc_node26 !== true) return;
+  let evidence;
+  try {
+    evidence = JSON.parse(needs['chain-rpc-node26']?.outputs?.evidence ?? 'null');
+  } catch {
+    errors.push('Node 26 execution evidence is not valid JSON');
+    return;
+  }
+  errors.push(...validateNode26Evidence(evidence));
+}
 
 function checkNoFailedJobs(needs, errors) {
   for (const [job, state] of Object.entries(needs)) {
@@ -30,10 +75,10 @@ function checkPlanShape(plan, eventName, errors) {
   }
   if (
     typeof plan.fullCi !== 'boolean'
-    || typeof plan.runNode !== 'boolean'
+    || typeof plan.buildChecks !== 'boolean'
     || typeof plan.abiFreshnessRelevant !== 'boolean'
   ) {
-    errors.push('CI plan fullCi/runNode/abiFreshnessRelevant flags must be booleans');
+    errors.push('CI plan fullCi/buildChecks/abiFreshnessRelevant flags must be booleans');
   }
   if (plan.lanes?.contracts && !plan.abiFreshnessRelevant) {
     errors.push('CI plan cannot select Solidity without ABI freshness');
@@ -70,7 +115,9 @@ export function validatePrimaryResults({ eventName, plan, needs }) {
   checkPlanShape(plan, eventName, errors);
   checkNoFailedJobs(needs, errors);
   requireSuccess(needs, 'changes', true, errors);
-  requireSuccess(needs, 'build', plan.runNode, errors);
+  // The same rule emits the build job's run_node condition, so the job and
+  // this requirement cannot disagree.
+  requireSuccess(needs, 'build', needsSharedBuild(plan), errors);
 
   requireSuccess(needs, 'evm-node-test-artifacts', needsNodeTestArtifacts(plan), errors);
   requireSuccess(
@@ -83,6 +130,10 @@ export function validatePrimaryResults({ eventName, plan, needs }) {
   for (const [lane, job] of Object.entries(PRIMARY_LANE_JOBS)) {
     requireSuccess(needs, job, Boolean(plan.lanes?.[lane]), errors);
   }
+  checkNode26Execution(plan, needs, errors);
+  // ci.yml runs the Windows lifecycle workflow (persistence suites and the
+  // RFC-64 Gate 0 and evidence harnesses) wherever the agent lane runs.
+  requireSuccess(needs, 'inventory-windows', Boolean(plan.lanes?.tornado_agent), errors);
 
   const contracts = Boolean(plan.lanes?.contracts);
   requireSuccess(needs, 'abi-freshness', Boolean(plan.abiFreshnessRelevant), errors);
@@ -100,13 +151,6 @@ export function validatePrimaryResults({ eventName, plan, needs }) {
     eventName !== 'pull_request' || contracts,
     errors,
   );
-
-  const selectedNodeLane = Object.keys(PRIMARY_LANE_JOBS)
-    .filter((lane) => lane !== 'bura_blazegraph_arm64')
-    .some((lane) => plan.lanes?.[lane]);
-  if (selectedNodeLane !== Boolean(plan.runNode)) {
-    errors.push(`runNode=${plan.runNode} is inconsistent with selected Node lanes`);
-  }
 
   return errors;
 }

@@ -147,6 +147,34 @@ function verifiedEvidence(
   };
 }
 
+function recoveryEntry(
+  overrides: Partial<FinalizationRecoveryEntry> = {},
+): FinalizationRecoveryEntry {
+  const rawMessage = encodeFinalizationMessage(message());
+  return {
+    key: 'recovery-entry',
+    state: 'REORGED',
+    chainId: 'base:84532',
+    contextGraphId: CONTEXT_GRAPH,
+    publisherUpgradePending: false,
+    ual: UAL,
+    txHash: message().txHash,
+    assertionVersion: '1',
+    merkleRoot: `0x${'00'.repeat(32)}`,
+    kaId: PACKED_KA_ID.toString(),
+    batchId: PACKED_KA_ID.toString(),
+    targetContextGraphId: '42',
+    envelopeSha256: createHash('sha256').update(rawMessage).digest('hex'),
+    rawMessage,
+    generation: 0,
+    attemptCount: 0,
+    failureStreak: 0,
+    createdAt: 1,
+    updatedAt: 1,
+    ...overrides,
+  };
+}
+
 describe('graph-scoped finalization recovery admission', () => {
   it('classifies receipt placement independently of the recovery generation', () => {
     const candidate = parsedMessage();
@@ -212,10 +240,10 @@ describe('graph-scoped finalization recovery admission', () => {
 
   it('retries publisher authority on a promoted row and reports store refusal', async () => {
     const prepared = { publisherPeerId: '12D3KooWPublisher' };
-    const promoted = {
-      state: 'REORGED',
+    const promoted = recoveryEntry({
+      key: 'promoted-entry',
       generation: 7,
-    } as FinalizationRecoveryEntry;
+    });
     const recordPendingTrustedPublisher = vi.fn(async () => false);
     const recordTrustedPublisher = vi.fn(async () => false);
     const get = vi.fn(async () => promoted);
@@ -229,16 +257,12 @@ describe('graph-scoped finalization recovery admission', () => {
       recordPendingTrustedPublisher,
       recordTrustedPublisher,
       get,
-    } as unknown as FinalizationRecoveryStore;
+    };
 
     await expect(observer.observe({
       store,
-      identity: {
-        entryKey: 'promoted-entry',
-        generation: 'pending',
-        sourcePeerId: prepared.publisherPeerId,
-      },
-      ual: UAL,
+      target: { kind: 'pending', key: 'promoted-entry', ual: UAL },
+      sourcePeerId: prepared.publisherPeerId,
       prepareInput: undefined,
     })).resolves.toEqual({ prepared });
 
@@ -446,6 +470,75 @@ describe('graph-scoped finalization recovery admission', () => {
     }
   });
 
+  it('keeps retrying a store-busy entry within a minute instead of parking it as stable', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-busy-transient-'));
+    try {
+      let now = 1_000;
+      let busy = true;
+      const store = await openSqliteFinalizationRecoveryStore(directory, {
+        now: () => now,
+      });
+      const throwIfBusy = () => {
+        if (busy) {
+          throw new StoreSchedulerBusyError(
+            'queue_wait_timeout',
+            'normal',
+            'finalization-recovery-worker',
+          );
+        }
+      };
+      const recovery = new FinalizationRecovery(
+        store,
+        recoveryChain(),
+        { info: () => {}, warn: () => {} },
+        {
+          ...recoveryMaterializer(),
+          // The first pass applies the received entry; later passes replay
+          // the VERIFIED one. Both meet the same busy store.
+          apply: async () => {
+            throwIfBusy();
+            return 'applied' as const;
+          },
+          replayVerified: async () => {
+            throwIfBusy();
+            return 'promoted' as const;
+          },
+        },
+        { now: () => now },
+      );
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+
+      // Well past the stable-failure threshold: every busy pass schedules the
+      // next attempt on the bounded backoff and leaves no failure streak.
+      for (let pass = 1; pass <= 8; pass += 1) {
+        await expect(recovery.processDueBatch(16)).resolves.toBe(1);
+        const [entry] = await store.list();
+        expect(entry).toMatchObject({
+          state: 'VERIFIED',
+          attemptCount: pass,
+          failureStreak: 0,
+          lastError: 'replay store scheduler remained busy',
+        });
+        expect(entry.failureSignature).toBeUndefined();
+        expect(entry.nextAttemptAt! - now).toBeGreaterThan(0);
+        expect(entry.nextAttemptAt! - now).toBeLessThanOrEqual(60_000);
+        now = entry.nextAttemptAt!;
+      }
+
+      busy = false;
+      await expect(recovery.processDueBatch(16)).resolves.toBe(1);
+      expect(await store.list()).toMatchObject([{ state: 'SETTLED' }]);
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('parks a stable deferred failure while chain reconciliation can still wake it', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-stable-failure-'));
     let store: Awaited<ReturnType<typeof openSqliteFinalizationRecoveryStore>> | undefined;
@@ -516,6 +609,95 @@ describe('graph-scoped finalization recovery admission', () => {
         merkleRoot: `0x${'00'.repeat(32)}`,
         kaId: PACKED_KA_ID.toString(),
       })).resolves.toBe('recovered');
+      expect(await store.list()).toMatchObject([{ state: 'SETTLED' }]);
+      await store.close();
+      store = undefined;
+    } finally {
+      await store?.close().catch(() => {});
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('retries within a minute when reconciliation wakes a parked entry into a busy store', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-woken-busy-'));
+    let store: Awaited<ReturnType<typeof openSqliteFinalizationRecoveryStore>> | undefined;
+    try {
+      let now = 1_000;
+      let receiptReady = false;
+      let busy = false;
+      store = await openSqliteFinalizationRecoveryStore(directory, {
+        now: () => now,
+      });
+      const throwIfBusy = () => {
+        if (busy) {
+          throw new StoreSchedulerBusyError(
+            'queue_wait_timeout',
+            'normal',
+            'finalization-recovery-worker',
+          );
+        }
+      };
+      const recovery = new FinalizationRecovery(
+        store,
+        recoveryChain({
+          resolveCanonicalFinalizationReceipt: async () => receiptReady
+            ? { status: 'confirmed', receipt: confirmedReceipt() }
+            : { status: 'pending' },
+        }),
+        { info: () => {}, warn: () => {} },
+        {
+          ...recoveryMaterializer(),
+          apply: async () => {
+            throwIfBusy();
+            return receiptReady ? 'applied' as const : 'deferred' as const;
+          },
+          replayVerified: async () => {
+            throwIfBusy();
+            return receiptReady ? 'promoted' as const : 'no-swm' as const;
+          },
+        },
+        { now: () => now },
+      );
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+
+      // Three pending receipts park the entry on the stable-failure delay.
+      for (let pass = 1; pass <= 3; pass += 1) {
+        await expect(recovery.processDueBatch(16)).resolves.toBe(1);
+        const [entry] = await store.list();
+        if (pass < 3) now = entry!.nextAttemptAt!;
+      }
+      let [entry] = await store.list();
+      expect(entry).toMatchObject({ failureSignature: 'receipt-pending', failureStreak: 3 });
+      expect(entry!.nextAttemptAt).toBe(now + FINALIZATION_RECOVERY_STABLE_FAILURE_RETRY_MS);
+
+      // The receipt lands and reconciliation wakes the entry early, but the
+      // store is busy. The next attempt must not wait out the old six hours.
+      receiptReady = true;
+      busy = true;
+      await recovery.replayMatching({
+        chainId: 'base:84532',
+        contextGraphId: CONTEXT_GRAPH,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: `0x${'00'.repeat(32)}`,
+        kaId: PACKED_KA_ID.toString(),
+      });
+      [entry] = await store.list();
+      expect(entry).toMatchObject({
+        state: 'VERIFIED',
+        lastError: 'replay store scheduler remained busy',
+      });
+      expect(entry!.nextAttemptAt! - now).toBeGreaterThan(0);
+      expect(entry!.nextAttemptAt! - now).toBeLessThanOrEqual(60_000);
+
+      busy = false;
+      now = entry!.nextAttemptAt!;
+      await expect(recovery.processDueBatch(16)).resolves.toBe(1);
       expect(await store.list()).toMatchObject([{ state: 'SETTLED' }]);
       await store.close();
       store = undefined;
@@ -616,6 +798,77 @@ describe('graph-scoped finalization recovery admission', () => {
         state: 'REJECTED',
         attemptCount: 3,
       }]);
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('settles an entry moved to the deferred spool for a rejected arrival without chain reconciliation', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-displaced-'));
+    try {
+      let now = 1_000;
+      let workspaceReady = false;
+      const store = await openSqliteFinalizationRecoveryStore(directory, {
+        maxPerPeer: 1,
+        now: () => now,
+      });
+      const materializer = recoveryMaterializer();
+      // The adapter cannot count or list Context Graph KCs, so chain
+      // reconciliation has nothing to repair the entry with.
+      const recovery = new FinalizationRecovery(
+        store,
+        recoveryChain(),
+        { info: () => {}, warn: () => {} },
+        {
+          ...materializer,
+          prepare: async () => workspaceReady ? materializer.prepare() : undefined,
+        },
+        { now: () => now },
+      );
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        await expect(recovery.processDueBatch(16)).resolves.toBe(1);
+        const [entry] = await store.list();
+        expect(entry).toMatchObject({
+          state: 'RECEIVED',
+          failureSignature: 'workspace-unavailable',
+          failureStreak: attempt,
+        });
+        if (attempt < 3) now = entry!.nextAttemptAt!;
+      }
+      now += 5 * 60_000;
+
+      // A new finalization from the same publisher takes the entry's slot and
+      // then fails verification.
+      await expect(store.receive({
+        key: 'arrival',
+        chainId: 'base:84532',
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        ual: `${UAL}-arrival`,
+        txHash: `0x${'12'.repeat(32)}`,
+        assertionVersion: '1',
+        merkleRoot: `0x${'00'.repeat(32)}`,
+        kaId: '8',
+        batchId: '8',
+        targetContextGraphId: '42',
+        rawMessage: Uint8Array.from([9]),
+      })).resolves.toMatchObject({ status: 'inserted' });
+      expect(await store.health()).toMatchObject({ deferredEntries: 1 });
+      await store.transition('arrival', 0, 'REJECTED', 'canonical receipt not found');
+
+      workspaceReady = true;
+      await expect(recovery.processDueBatch(16)).resolves.toBe(1);
+      expect(await store.list()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ ual: UAL, state: 'SETTLED' }),
+      ]));
+      expect(await store.health()).toMatchObject({ deferredEntries: 0 });
       await store.close();
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -1747,6 +2000,49 @@ describe('graph-scoped finalization recovery admission', () => {
         { state: 'SUPERSEDED' },
         { state: 'SUPERSEDED' },
       ]);
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps recovery replay on live root/count and KA binding reads', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-recovery-snapshot-'));
+    try {
+      const store = await openSqliteFinalizationRecoveryStore(directory);
+      const getLatestMerkleRoot = vi.fn(async () => new Uint8Array(32));
+      const getMerkleRootCount = vi.fn(async () => 1n);
+      const getKAContextGraphId = vi.fn(async () => 42n);
+      const chain = recoveryChain({
+        getLatestMerkleRoot,
+        getMerkleRootCount,
+        getKAContextGraphId,
+      });
+      const recovery = new FinalizationRecovery(
+        store,
+        chain,
+        { info: () => {}, warn: () => {} },
+        recoveryMaterializer(),
+      );
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+
+      await expect(recovery.matchingEntries({
+        chainId: chain.chainId,
+        contextGraphId: CONTEXT_GRAPH,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: `0x${'00'.repeat(32)}`,
+        kaId: PACKED_KA_ID.toString(),
+      })).resolves.toHaveLength(1);
+
+      expect(getLatestMerkleRoot).toHaveBeenCalledOnce();
+      expect(getMerkleRootCount).toHaveBeenCalledOnce();
+      expect(getKAContextGraphId).toHaveBeenCalledOnce();
       await store.close();
     } finally {
       await rm(directory, { recursive: true, force: true });

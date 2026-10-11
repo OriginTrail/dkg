@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import { validateRegressions } from '../lib/regressions/registry.mjs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -8,7 +9,7 @@ import { validateSharedTestInputs } from '../lib/test-fixture-inputs.mjs';
 import { validateCiLaneWorkflow } from '../lib/ci-lane-workflow.mjs';
 import { EVM_TEST_SCOPES } from './evm-test-scopes.mjs';
 import { COVERAGE_JOBS } from '../lib/coverage-artifacts.mjs';
-import { isTestSurface, secondaryRoutes } from '../lib/test-inventory-surface.mjs';
+import { discoverTestSurface, secondaryRoutes } from '../lib/test-inventory-surface.mjs';
 import { TEST_LANE_METADATA } from '../lib/ci-lanes.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -56,7 +57,7 @@ try {
     for (const file of files) own(`${packageDirectory}/${file}`, 'evm-integration', 'pnpm test:evm', 'required');
   }
   const registrations = JSON.parse(fs.readFileSync(path.join(root, 'test-policy/test-routes.json'), 'utf8'));
-  const tracked = [...new Set(execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], { cwd: root, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 }).split('\0'))].filter(isTestSurface).filter((file) => fs.existsSync(path.join(root, file)));
+  const tracked = discoverTestSurface(root);
   for (const [file, route] of secondaryRoutes(tracked, registrations)) {
     if (!owners.has(file)) own(file, route.lane, route.command === 'resolve' ? secondaryCommand(file) : route.command, route.cadence, route);
   }
@@ -64,6 +65,8 @@ try {
   const report = tracked.sort().map((file) => ({ file, execution: owners.get(file) ?? [] }));
   fs.writeFileSync(path.join(root, 'test-inventory.json'), JSON.stringify(report, null, 2) + '\n');
   if (missing.length) throw new Error(`tests without an execution route:\n${missing.join('\n')}`);
+  const regressions = validateRegressions(root, report);
+  console.log(`Regression register: ${JSON.stringify(regressions)}`);
   console.log(`Verified ${report.length} test files across ${packages.length} Vitest packages and explicit secondary systems.`);
 } catch (error) {
   console.error(`test inventory: ${error.message}`); process.exitCode = 1;

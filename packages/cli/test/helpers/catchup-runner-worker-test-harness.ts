@@ -1,4 +1,5 @@
 import { vi } from 'vitest';
+import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import type { CatchupJobResult, CatchupRunRequest } from '../../src/catchup-runner.js';
 
 export type CatchupWorkerInvokeHandler = (
@@ -9,7 +10,7 @@ export type CatchupWorkerInvokeHandler = (
 // The worker implementation binds parentPort at module load. Keeping this mock
 // in one helper gives every worker suite the same RPC boundary and prevents a
 // future protocol change from being patched into several copied harnesses.
-const fakeCatchupParentPort = vi.hoisted(() => {
+const { fakeCatchupParentPort, InProcessCatchupWorker } = vi.hoisted(() => {
   const messageListeners: Array<(message: any) => void> = [];
   const port = {
     on(event: string, listener: (message: any) => void) {
@@ -23,12 +24,48 @@ const fakeCatchupParentPort = vi.hoisted(() => {
       for (const listener of messageListeners) listener(message);
     },
   };
-  return port;
+
+  /**
+   * The daemon runner's `Worker`, run in this thread against the fake
+   * `parentPort` above. Messages are structured-cloned and delivered on a later
+   * microtask in both directions, like the real thread boundary.
+   */
+  class InProcessWorker {
+    readonly #listeners = new Map<string, Array<(...args: any[]) => void>>();
+
+    constructor(_path: string) {
+      port.onPosted = (message: any) => {
+        const copy = structuredClone(message);
+        queueMicrotask(() => this.#emit('message', copy));
+      };
+    }
+
+    on(event: string, listener: (...args: any[]) => void) {
+      this.#listeners.set(event, [...(this.#listeners.get(event) ?? []), listener]);
+    }
+
+    postMessage(message: any) {
+      const copy = structuredClone(message);
+      queueMicrotask(() => port.emitMessage(copy));
+    }
+
+    async terminate() {
+      this.#emit('exit', 1);
+      return 1;
+    }
+
+    #emit(event: string, ...args: any[]) {
+      for (const listener of this.#listeners.get(event) ?? []) listener(...args);
+    }
+  }
+
+  return { fakeCatchupParentPort: port, InProcessCatchupWorker: InProcessWorker };
 });
 
 vi.mock('node:worker_threads', async (importOriginal) => ({
   ...(await importOriginal<typeof import('node:worker_threads')>()),
   parentPort: fakeCatchupParentPort,
+  Worker: InProcessCatchupWorker,
 }));
 
 export function durableCatchupResult() {
@@ -108,4 +145,26 @@ export async function runWorkerCatchup(
     };
     fakeCatchupParentPort.emitMessage({ type: 'run', runId, request });
   });
+}
+
+/**
+ * Run one catch-up through the daemon's real parent-side bridge
+ * (`createCatchupRunner`) and the real worker, doubling only the agent. Use it
+ * when the host's own decisions are under test, not a stubbed invoke handler.
+ *
+ * Import this helper before any module that loads `src/catchup-runner.ts`, so
+ * that module binds the in-process `Worker` above.
+ */
+export async function runCatchupThroughBridge(
+  agent: DKGAgent,
+  request: Pick<CatchupRunRequest, 'contextGraphId' | 'includeSharedMemory'>,
+): Promise<CatchupJobResult> {
+  await import('../../src/catchup-runner-worker-impl.js');
+  const { createCatchupRunner } = await import('../../src/catchup-runner.js');
+  const runner = createCatchupRunner(agent);
+  try {
+    return await runner.run(request);
+  } finally {
+    await runner.close();
+  }
 }

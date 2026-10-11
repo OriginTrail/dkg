@@ -34,7 +34,7 @@ export {
 } from './EligibilityVerdictBanner.js';
 export { SponsorshipHandshake } from './SponsorshipHandshake.js';
 export { PrimaryNodePicker, type PrimaryNodeOption } from './PrimaryNodePicker.js';
-export { WalletConnectControl } from '../Wallet/WalletConnectControl.js';
+export { PcaWalletConnectControl as WalletConnectControl } from './PcaWalletConnectControl.js';
 export { WalletPill } from '../Wallet/WalletPill.js';
 export {
   DeviceConfirmProgress,

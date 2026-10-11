@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, it, vi } from 'vitest';
-import { MockChainAdapter, type CreateOnChainContextGraphResult } from
+import {
+  MockChainAdapter,
+  type CreateOnChainContextGraphParams,
+  type CreateOnChainContextGraphResult,
+} from
   '@origintrail-official/dkg-chain';
 import {
   DKG_ONTOLOGY,
-  SYSTEM_CONTEXT_GRAPHS,
-  contextGraphDataGraphUri,
   contextGraphMetaGraphUri,
 } from '@origintrail-official/dkg-core';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
@@ -15,7 +17,7 @@ import { DKGAgent } from '../src/index.js';
 type RegistrationAgent = DKGAgent & {
   store: TripleStore;
   registerContextGraphOnChain:
-    () => Promise<CreateOnChainContextGraphResult>;
+    (params: CreateOnChainContextGraphParams) => Promise<CreateOnChainContextGraphResult>;
 };
 
 function successfulRegistration(id = 42n): CreateOnChainContextGraphResult {
@@ -41,10 +43,12 @@ async function registrationStatus(agent: RegistrationAgent, id: string): Promise
     : undefined;
 }
 
+// The fixture graph is private, so its recovery binding lives only in its own
+// `_meta`, like the rest of its metadata.
 async function hasOnChainBinding(agent: RegistrationAgent, id: string): Promise<boolean> {
   const result = await agent.store.query(`
     ASK WHERE {
-      GRAPH <${contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)}> {
+      GRAPH <${contextGraphMetaGraphUri(id)}> {
         <did:dkg:context-graph:${id}>
           <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> ?onChainId
       }
@@ -198,6 +202,38 @@ describe('Context Graph registration durability transition', () => {
       .rejects.toBe(ambiguous);
 
     expect(await registrationStatus(agent, id)).toBe('pending');
+
+    await expect(agent.registerContextGraph(id, { callerAgentAddress: ownerAddress }))
+      .rejects.toThrow(`Context graph "${id}" has a pending registration outcome`);
+    expect(agent.registerContextGraphOnChain).toHaveBeenCalledOnce();
+  });
+
+  it('reconciles a late chain success after an ambiguous registration outcome', async () => {
+    const id = 'registration-ambiguous-late-success';
+    const { agent, chain, ownerAddress } = await fixture(id);
+    const createOnChain = chain.createOnChainContextGraph.bind(chain);
+    const ambiguous = new Error('receipt lookup failed after broadcast');
+    agent.registerContextGraphOnChain = vi.fn(async (params) => {
+      await createOnChain(params);
+      throw ambiguous;
+    });
+
+    await expect(agent.registerContextGraph(id, { callerAgentAddress: ownerAddress }))
+      .rejects.toBe(ambiguous);
+    expect(await registrationStatus(agent, id)).toBe('pending');
+    expect(await hasOnChainBinding(agent, id)).toBe(false);
+    await expect(chain.resolveContextGraphIdByNameHash(
+      agent.contextGraphNameCommitment(id),
+    )).resolves.toBe(1n);
+    await expect(chain.isContextGraphActiveOnChain(1n)).resolves.toBe(true);
+
+    await expect(agent.registerContextGraph(id, { callerAgentAddress: ownerAddress }))
+      .resolves.toEqual({ onChainId: '1', txHash: undefined });
+
+    expect(agent.registerContextGraphOnChain).toHaveBeenCalledOnce();
+    expect(await registrationStatus(agent, id)).toBe('registered');
+    expect(await hasOnChainBinding(agent, id)).toBe(true);
+    expect(agent.subscribedContextGraphs.get(id)?.onChainId).toBe('1');
   });
 
   it('restores unregistered when only a preparatory transaction is ambiguous', async () => {

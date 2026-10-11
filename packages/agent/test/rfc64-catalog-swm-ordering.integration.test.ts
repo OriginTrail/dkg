@@ -140,6 +140,7 @@ describe('RFC-64 catalog and SWM ordering', () => {
       syncOnConnectEnabled: true,
       syncSharedMemoryOnConnect: true,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
       syncContextGraphs: [CONTEXT_GRAPH_ID],
       agentProfileHeartbeatMs: 0,
       rfc64CatalogDeploymentProfile: NATIVE_DEPLOYMENT,

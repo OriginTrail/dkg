@@ -16,6 +16,9 @@ import {
 } from '../src/index.js';
 import {
   contextGraphDataGraphUri,
+  contextGraphDataUri,
+  contextGraphMetaUri,
+  contextGraphSubGraphMetaUri,
   contextGraphSharedMemoryMetaUri,
   contextGraphSharedMemoryUri,
   sharedMemoryReadBothFilter,
@@ -443,6 +446,51 @@ describe('GraphManager', () => {
     ]);
     const cgs = await gm.listContextGraphs();
     expect(cgs.sort()).toEqual(['test1', 'test2']);
+  });
+
+  it('lists slash-bearing roots from authoritative declarations without promoting subgraphs', async () => {
+    const ontologyGraph = contextGraphDataUri('ontology');
+    const rootId = 'owner/name';
+    const curatedRootId = 'curator/curated';
+    const subGraphId = 'owner/subgraph';
+    await store.insert([
+      {
+        subject: contextGraphDataUri(rootId),
+        predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+        object: 'https://dkg.network/ontology#ContextGraph',
+        graph: ontologyGraph,
+      },
+      {
+        subject: contextGraphDataUri(rootId),
+        predicate: 'http://schema.org/name',
+        object: '"Named root"',
+        graph: contextGraphDataUri(rootId),
+      },
+      {
+        subject: contextGraphDataUri(curatedRootId),
+        predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+        object: 'http://dkg.io/ontology/ContextGraph',
+        graph: contextGraphMetaUri(curatedRootId),
+      },
+      {
+        subject: contextGraphDataUri(subGraphId),
+        predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+        object: 'https://dkg.network/ontology#SubGraph',
+        graph: contextGraphSubGraphMetaUri('owner', 'subgraph'),
+      },
+      {
+        subject: contextGraphDataUri('plain-root'),
+        predicate: 'http://schema.org/name',
+        object: '"Storage only"',
+        graph: contextGraphSharedMemoryUri('plain-root'),
+      },
+    ]);
+
+    const cgs = await gm.listContextGraphs();
+    expect(cgs).toContain(rootId);
+    expect(cgs).toContain(curatedRootId);
+    expect(cgs).toContain('plain-root');
+    expect(cgs).not.toContain(subGraphId);
   });
 
   it('keeps listSubGraphs as a deprecated compatibility shim', async () => {

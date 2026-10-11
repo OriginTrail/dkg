@@ -297,6 +297,7 @@ describe('requester per-CG priority admission', () => {
       },
       resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
       resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
+      rfc64LegacySwmGossipAllowedForContextGraph: () => true,
       createSwmTargetExecutorSessionV1: () => {
         createTargetExecutorSession ??=
           createSwmTargetExecutorSessionFactoryForTest(agent as never);
@@ -348,6 +349,7 @@ describe('requester per-CG priority admission', () => {
       workspaceOwnedEntities: new Map(),
       log: { info: noop, warn: noop, debug: noop },
       resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
+      rfc64LegacySwmGossipAllowedForContextGraph: () => true,
       createSwmTargetExecutorSessionV1: () => {
         createTargetExecutorSession ??=
           createSwmTargetExecutorSessionFactoryForTest(agent as never);

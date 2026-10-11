@@ -72,7 +72,10 @@ const RPC = 'http://127.0.0.1:8545';
 const DEVNET_DIR = join(REPO_ROOT, '.devnet');
 const HARDHAT_DEPLOYER_KEY =
   '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
-const RS_TIMEOUT_S = Number(process.env.RS_TIMEOUT ?? 90);
+// Phase 1 waits for a proof submitted after the phase starts. When every core
+// has already solved the current period, that is the next period's proof:
+// up to one full period (100 blocks at 1 block/s on the devnet) plus a prover tick.
+const RS_TIMEOUT_S = Number(process.env.RS_TIMEOUT ?? 150);
 
 interface DevnetNode {
   num: number;
@@ -689,7 +692,12 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
         Authorization: `Bearer ${node.authToken}`,
       });
 
-      // Preflight: every core node must have RS enabled.
+      // Preflight: every core node must have RS enabled. Also record how many
+      // proofs each node has already submitted: suites that ran earlier on the
+      // same devnet publish too, so a node can report a proof from a period
+      // that has since rolled over. Only a proof submitted after this point
+      // counts.
+      const baselineSubmitted: Record<number, number> = {};
       for (let n = 1; n <= 4; n++) {
         const node = s.nodes[n]!;
         const res = await fetch(
@@ -701,12 +709,16 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
             `node${n} /api/random-sampling/status failed: ${res.status}`,
           );
         }
-        const status = (await res.json()) as { enabled?: boolean };
+        const status = (await res.json()) as {
+          enabled?: boolean;
+          loop?: { submittedCount?: number };
+        };
         if (!status.enabled) {
           throw new Error(
             `node${n} prover disabled — identity registration may still be pending. Status: ${JSON.stringify(status)}`,
           );
         }
+        baselineSubmitted[n] = status.loop?.submittedCount ?? 0;
       }
 
       // Publish the first (and only) KC from node1 so the prover on that
@@ -752,7 +764,7 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
             };
             const submitted = status.loop?.submittedCount ?? 0;
             lastOutcomeKinds[n] = status.loop?.lastOutcome?.kind ?? '?';
-            if (submitted > 0) {
+            if (submitted > (baselineSubmitted[n] ?? 0)) {
               success = {
                 node: n,
                 identityId: BigInt(status.identityId ?? '0'),
@@ -796,7 +808,14 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
       expect(success.identityId).toBeGreaterThan(0n);
       expect(/^0x[0-9a-fA-F]+$/.test(success.txHash)).toBe(true);
 
-      const ch = await s.rss.getNodeChallenge(success.identityId);
+      // Read the challenge as of the block that mined the proof. With 1 s
+      // interval mining and short proof periods, the node may already hold
+      // the next period's (unsolved) challenge by the time we read.
+      const receipt = await s.provider.getTransactionReceipt(success.txHash);
+      expect(receipt?.status).toBe(1);
+      const ch = await s.rss.getNodeChallenge(success.identityId, {
+        blockTag: receipt!.blockNumber,
+      });
       const solved: boolean = ch[6];
       expect(solved).toBe(true);
       const epoch: bigint = ch[3];
@@ -814,7 +833,7 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
         `phase 1 (RS): on-chain score=${score} (informational; 0 on fresh devnet is benign)`,
       );
     },
-    240_000,
+    300_000,
   );
 
   // =========================================================================

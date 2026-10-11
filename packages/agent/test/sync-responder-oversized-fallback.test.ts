@@ -10,6 +10,8 @@ import {
   type CapturedSyncHandler,
 } from './_helpers/sync-responder.js';
 import { estimateStringRowHeapBytes } from '../src/sync/memory-telemetry.js';
+import { readDurableDataPage, serializeResponderRows } from '../src/sync/responder/graph-plan.js';
+import { SyncRowSnapshotBudgetError } from '../src/sync/responder/snapshot-budget.js';
 import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 
 /**
@@ -329,6 +331,492 @@ describe('oversized responder fallback is store-bounded and set-equivalent', () 
     // Both rows are served through the store-bounded fallback, not a limit error.
     expect(collected.size).toBe(2);
     boundedQuery.assertObserved();
+  });
+
+  it('uses a session cursor after the first oversized exact-graph page', async () => {
+    const cgId = 'exact-graph-keyset';
+    const graph = `did:dkg:context-graph:${cgId}/context/1`;
+    const rows: Quad[] = [];
+    for (let subjectIndex = 0; subjectIndex < 300; subjectIndex += 1) {
+      const subject = `urn:keyset:${subjectIndex.toString().padStart(4, '0')}`;
+      rows.push(
+        { graph, subject, predicate: `${DKG_NS}label`, object: `urn:object:${subjectIndex}` },
+        { graph, subject, predicate: `${DKG_NS}label`, object: `"value-${subjectIndex}"` },
+        { graph, subject, predicate: `${DKG_NS}label`, object: `"value-${subjectIndex}"@en` },
+        {
+          graph,
+          subject,
+          predicate: `${DKG_NS}label`,
+          object: `"typed-${subjectIndex}"^^<urn:test:opaque>`,
+        },
+      );
+    }
+
+    const store = new OxigraphStore();
+    await store.insert(rows);
+    const cap = registerTestSyncHandler(store, {
+      syncPageSize: 37,
+      snapshotBudget: {
+        maxRows: 10_000,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 1,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
+
+    const pageQueryOffsets: number[] = [];
+    let seekPageQueries = 0;
+    const originalQuery = store.query.bind(store);
+    store.query = (async (sparql: string, options?: Parameters<OxigraphStore['query']>[1]) => {
+      const normalized = sparql.replace(/\s+/g, ' ').trim();
+      if (
+        normalized.includes(`GRAPH <${graph}>`)
+        && normalized.includes('ORDER BY ?s ?p ?o')
+        && normalized.includes('SELECT ?s ?p ?o WHERE')
+        && normalized.includes('LIMIT')
+      ) {
+        const offsetMatch = normalized.match(/OFFSET (\d+)/);
+        if (offsetMatch) pageQueryOffsets.push(Number(offsetMatch[1]));
+        else if (normalized.includes('FILTER(')) seekPageQueries += 1;
+      }
+      return originalQuery(sparql, options);
+    }) as OxigraphStore['query'];
+
+    const actual: string[] = [];
+    for (let offset = 0; offset < rows.length; offset += 37) {
+      const page = await cap.invoke({
+        contextGraphId: cgId,
+        includeSharedMemory: false,
+        phase: 'data',
+        limit: 37,
+        offset,
+        syncSessionId: 'exact-graph-keyset-session',
+      });
+      const pageLines = linesFromNquads(page);
+      actual.push(...pageLines);
+      if (pageLines.length < 37) break;
+    }
+
+    const expectedResult = await originalQuery(`
+      SELECT ?s ?p ?o WHERE {
+        GRAPH <${graph}> { ?s ?p ?o }
+      }
+      ORDER BY ?s ?p ?o
+    `);
+    if (expectedResult.type !== 'bindings') throw new Error('expected bindings');
+    const expected = serializeResponderRows(expectedResult.bindings.map((row) => ({
+      s: row.s!,
+      p: row.p!,
+      o: row.o!,
+      g: graph,
+    })));
+
+    expect(actual).toEqual(expected.split('\n'));
+    expect(actual).toHaveLength(rows.length);
+    expect(new Set(actual)).toHaveLength(rows.length);
+    // The first page retains the compatibility OFFSET 0 query. Every later
+    // page seeks from the session cursor and therefore has no growing OFFSET.
+    expect(pageQueryOffsets).toEqual([0]);
+    expect(seekPageQueries).toBeGreaterThan(1);
+  });
+
+  it('uses OFFSET compatibility paging when a cursor contains a blank node', async () => {
+    const cgId = 'exact-graph-blank-cursor';
+    const graph = `did:dkg:context-graph:${cgId}/context/1`;
+    const store = new OxigraphStore();
+    await store.insert([
+      { graph, subject: '_:blank', predicate: 'urn:test:p', object: '"blank"' },
+      { graph, subject: 'urn:after', predicate: 'urn:test:p', object: '"after"' },
+    ]);
+    const cap = registerTestSyncHandler(store, {
+      syncPageSize: 1,
+      snapshotBudget: {
+        maxRows: 100,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 1,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    const offsets: number[] = [];
+    const originalQuery = store.query.bind(store);
+    store.query = (async (sparql: string, options?: Parameters<OxigraphStore['query']>[1]) => {
+      const normalized = sparql.replace(/\s+/g, ' ').trim();
+      if (normalized.includes(`GRAPH <${graph}>`) && normalized.includes('ORDER BY ?s ?p ?o')) {
+        const match = normalized.match(/OFFSET (\d+)/);
+        if (match) offsets.push(Number(match[1]));
+      }
+      return originalQuery(sparql, options);
+    }) as OxigraphStore['query'];
+
+    const base = {
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data' as const,
+      limit: 1,
+      syncSessionId: 'blank-cursor-session',
+    };
+    const first = linesFromNquads(await cap.invoke({ ...base, offset: 0 }));
+    const second = linesFromNquads(await cap.invoke({ ...base, offset: 1 }));
+    expect(first).toHaveLength(1);
+    expect(second).toHaveLength(1);
+    expect(first[0]).toContain('_:');
+    expect(new Set([...first, ...second])).toHaveLength(2);
+    // Blank-node ordering is backend-local, so the second page must retain
+    // the deterministic numeric OFFSET path rather than emit a keyset filter.
+    expect(offsets).toContain(1);
+  });
+
+  it.each(['double', 'float'])('uses OFFSET compatibility paging for xsd:%s NaN ordering', async (datatype) => {
+    const cgId = `exact-graph-${datatype}-nan-cursor`;
+    const graph = `did:dkg:context-graph:${cgId}/context/1`;
+    const datatypeIri = `http://www.w3.org/2001/XMLSchema#${datatype}`;
+    const store = new OxigraphStore();
+    await store.insert(['-INF', '0', '1', 'INF', 'NaN'].map((value) => ({
+      graph,
+      subject: 'urn:test:s',
+      predicate: 'urn:test:p',
+      object: `"${value}"^^<${datatypeIri}>`,
+    })));
+    const cap = registerTestSyncHandler(store, {
+      syncPageSize: 1,
+      snapshotBudget: {
+        maxRows: 100,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 1,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    const offsets: number[] = [];
+    let seekPageQueries = 0;
+    const originalQuery = store.query.bind(store);
+    store.query = (async (sparql: string, options?: Parameters<OxigraphStore['query']>[1]) => {
+      const normalized = sparql.replace(/\s+/g, ' ').trim();
+      if (normalized.includes(`GRAPH <${graph}>`) && normalized.includes('ORDER BY ?s ?p ?o')) {
+        const match = normalized.match(/OFFSET (\d+)/);
+        if (match) offsets.push(Number(match[1]));
+        else if (normalized.includes('FILTER(')) seekPageQueries += 1;
+      }
+      return originalQuery(sparql, options);
+    }) as OxigraphStore['query'];
+
+    const base = {
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data' as const,
+      limit: 1,
+      syncSessionId: `${datatype}-nan-cursor-session`,
+    };
+    const collected: string[] = [];
+    for (let offset = 0; offset < 5; offset += 1) {
+      const page = linesFromNquads(await cap.invoke({ ...base, offset }));
+      expect(page).toHaveLength(1);
+      collected.push(...page);
+    }
+
+    expect(collected).toHaveLength(5);
+    expect(new Set(collected)).toHaveLength(5);
+    expect(collected.some((line) => line.includes(`"NaN"^^<${datatypeIri}>`))).toBe(true);
+    expect(offsets).toEqual([0, 1, 2, 3, 4]);
+    expect(seekPageQueries).toBe(0);
+  });
+
+  it('uses OFFSET compatibility paging for equal-value xsd:dateTime lexical forms', async () => {
+    const cgId = 'exact-graph-datetime-equal-value-cursor';
+    const graph = `did:dkg:context-graph:${cgId}/context/1`;
+    const datatypeIri = 'http://www.w3.org/2001/XMLSchema#dateTime';
+    const store = new OxigraphStore();
+    await store.insert([
+      '2020-01-01T00:00:00',
+      '2020-01-01T00:00:00+01:00',
+      '2020-01-01T00:00:00Z',
+      '2021-01-01T00:00:00Z',
+    ].map((value) => ({
+      graph,
+      subject: 'urn:test:s',
+      predicate: 'urn:test:p',
+      object: `"${value}"^^<${datatypeIri}>`,
+    })));
+    const cap = registerTestSyncHandler(store, {
+      syncPageSize: 1,
+      snapshotBudget: {
+        maxRows: 100,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 1,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    const offsets: number[] = [];
+    let seekPageQueries = 0;
+    const originalQuery = store.query.bind(store);
+    store.query = (async (sparql: string, options?: Parameters<OxigraphStore['query']>[1]) => {
+      const normalized = sparql.replace(/\s+/g, ' ').trim();
+      if (normalized.includes(`GRAPH <${graph}>`) && normalized.includes('ORDER BY ?s ?p ?o')) {
+        const match = normalized.match(/OFFSET (\d+)/);
+        if (match) offsets.push(Number(match[1]));
+        else if (normalized.includes('FILTER(')) seekPageQueries += 1;
+      }
+      return originalQuery(sparql, options);
+    }) as OxigraphStore['query'];
+
+    const base = {
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data' as const,
+      limit: 1,
+      syncSessionId: 'datetime-equal-value-cursor-session',
+    };
+    const collected: string[] = [];
+    for (let offset = 0; offset < 4; offset += 1) {
+      const page = linesFromNquads(await cap.invoke({ ...base, offset }));
+      expect(page).toHaveLength(1);
+      collected.push(...page);
+    }
+
+    expect(collected).toHaveLength(4);
+    expect(new Set(collected)).toHaveLength(4);
+    expect(offsets).toEqual([0, 1, 2, 3]);
+    expect(seekPageQueries).toBe(0);
+  });
+
+  it.each([
+    {
+      datatype: 'time',
+      values: ['00:00:00', '00:00:00+01:00', '00:00:00Z', '01:00:00Z'],
+    },
+    {
+      datatype: 'yearMonthDuration',
+      values: ['P1M', 'P2M', 'P12M'],
+    },
+  ])('uses OFFSET compatibility paging for xsd:$datatype value ordering', async ({ datatype, values }) => {
+    const cgId = `exact-graph-${datatype}-equal-value-cursor`;
+    const graph = `did:dkg:context-graph:${cgId}/context/1`;
+    const datatypeIri = `http://www.w3.org/2001/XMLSchema#${datatype}`;
+    const store = new OxigraphStore();
+    await store.insert(values.map((value) => ({
+      graph,
+      subject: 'urn:test:s',
+      predicate: 'urn:test:p',
+      object: `"${value}"^^<${datatypeIri}>`,
+    })));
+    const cap = registerTestSyncHandler(store, {
+      syncPageSize: 1,
+      snapshotBudget: {
+        maxRows: 100,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 1,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    const offsets: number[] = [];
+    let seekPageQueries = 0;
+    const originalQuery = store.query.bind(store);
+    store.query = (async (sparql: string, options?: Parameters<OxigraphStore['query']>[1]) => {
+      const normalized = sparql.replace(/\s+/g, ' ').trim();
+      if (normalized.includes(`GRAPH <${graph}>`) && normalized.includes('ORDER BY ?s ?p ?o')) {
+        const match = normalized.match(/OFFSET (\d+)/);
+        if (match) offsets.push(Number(match[1]));
+        else if (normalized.includes('FILTER(')) seekPageQueries += 1;
+      }
+      return originalQuery(sparql, options);
+    }) as OxigraphStore['query'];
+
+    const base = {
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data' as const,
+      limit: 1,
+      syncSessionId: `${datatype}-equal-value-cursor-session`,
+    };
+    const collected: string[] = [];
+    for (let offset = 0; offset < values.length; offset += 1) {
+      const page = linesFromNquads(await cap.invoke({ ...base, offset }));
+      expect(page).toHaveLength(1);
+      collected.push(...page);
+    }
+
+    expect(collected).toHaveLength(values.length);
+    expect(new Set(collected)).toHaveLength(values.length);
+    expect(offsets).toEqual(values.map((_, offset) => offset));
+    expect(seekPageQueries).toBe(0);
+  });
+
+  it('keeps exact-graph cursor memory bounded while serving many pages', async () => {
+    const cgId = 'exact-graph-cursor-eviction';
+    const graph = `did:dkg:context-graph:${cgId}/context/1`;
+    const store = new OxigraphStore();
+    const rowCount = 513;
+    await store.insert(Array.from({ length: rowCount }, (_, index) => ({
+      graph,
+      subject: `urn:evict:${index.toString().padStart(4, '0')}`,
+      predicate: 'urn:test:p',
+      object: `"row-${index}"`,
+    })));
+    const cap = registerTestSyncHandler(store, {
+      syncPageSize: 1,
+      snapshotBudget: {
+        maxRows: 1000,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 1,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    const base = {
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data' as const,
+      limit: 1,
+      syncSessionId: 'cursor-eviction-session',
+    };
+    for (let offset = 0; offset < rowCount; offset += 1) {
+      expect(linesFromNquads(await cap.invoke({ ...base, offset }))).toHaveLength(1);
+    }
+  });
+
+  it('fails closed on cursor boundaries and preserves graph transitions', async () => {
+    const cgId = 'exact-graph-cursor-invariants';
+    const graphA = `did:dkg:context-graph:${cgId}/a`;
+    const graphB = `did:dkg:context-graph:${cgId}/b`;
+    const store = new OxigraphStore();
+    const row = (graph: string, subject: string, object = '"value"') => ({
+      graph,
+      subject,
+      predicate: 'urn:test:p',
+      object,
+    });
+    await store.insert([
+      row(graphA, 'urn:a:0'),
+      row(graphA, 'urn:a:1'),
+      row(graphB, 'urn:b:0'),
+      row(graphB, 'urn:b:1'),
+    ]);
+
+    type Plan = {
+      entries: readonly { graph: string; rowCount: number }[];
+      totalRows: number;
+      pagedGraphs: Set<string>;
+      cursors: Map<number, {
+        graph: string;
+        graphOffset: number;
+        s: string;
+        p: string;
+        o: string;
+      } | null>;
+    };
+    const pageMemo = {
+      snapshotLoadLimits: {
+        maxRows: 1,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        pageRows: 1,
+      },
+      get: async () => {
+        throw new SyncRowSnapshotBudgetError({
+          key: 'cursor-invariants',
+          reason: 'snapshot_rows',
+          rows: 2,
+          bytesEstimate: 0,
+          limit: 1,
+        });
+      },
+      release: () => {},
+    };
+    const use = async (plan: Plan, offset: number, limit: number) => {
+      const exactMemo = { get: async () => plan };
+      return readDurableDataPage({
+        store,
+        graphMembership: {} as never,
+        contextGraphId: cgId,
+        sinceBatchId: null,
+        offset,
+        limit,
+        rowListMemo: pageMemo,
+        rowListCacheScope: 'cursor-invariants',
+        exactGraphPlanMemo: exactMemo,
+      });
+    };
+
+    const basePlan = (cursors: Plan['cursors'], totalRows = 4): Plan => ({
+      entries: [
+        { graph: graphA, rowCount: 2 },
+        { graph: graphB, rowCount: 2 },
+      ],
+      totalRows,
+      pagedGraphs: new Set([graphA, graphB]),
+      cursors,
+    });
+    const cursorA0 = {
+      graph: graphA,
+      graphOffset: 1,
+      s: 'urn:a:0',
+      p: 'urn:test:p',
+      o: '"value"',
+    };
+    const crossGraph = basePlan(new Map([[1, cursorA0]]));
+    // The cursor is in graph A, but the requested page continues into graph B.
+    expect(await use(crossGraph, 1, 2)).toHaveLength(2);
+
+    const cursorInLaterGraph = basePlan(new Map([[2, {
+      graph: graphB,
+      graphOffset: 1,
+      s: 'urn:b:0',
+      p: 'urn:test:p',
+      o: '"value"',
+    }]]));
+    // Earlier plan entries are skipped while the cursor's graph is found.
+    expect(await use(cursorInLaterGraph, 2, 1)).toHaveLength(1);
+
+    const cursorBeforePlan = {
+      entries: [{ graph: graphB, rowCount: 2 }],
+      totalRows: 2,
+      pagedGraphs: new Set([graphB]),
+      cursors: new Map([[0, {
+        graph: graphA,
+        graphOffset: 1,
+        s: 'urn:a:0',
+        p: 'urn:test:p',
+        o: '"value"',
+      }]]),
+    } satisfies Plan;
+    // A retained cursor can outlive a narrowed graph inventory; later graphs
+    // still begin at row zero and remain readable.
+    expect(await use(cursorBeforePlan, 0, 1)).toHaveLength(1);
+
+    const offsetSkip = basePlan(new Map([[0, null]]));
+    expect(await use(offsetSkip, 2, 1)).toHaveLength(1);
+
+    const changing: Plan = {
+      entries: [{ graph: graphA, rowCount: 2 }],
+      totalRows: 2,
+      pagedGraphs: new Set([graphA]),
+      cursors: new Map([[0, null]]),
+    };
+    await use(changing, 0, 1);
+    await use(changing, 1, 1);
+    await store.delete([row(graphA, 'urn:a:1')]);
+    await store.insert([row(graphA, 'urn:a:2')]);
+    // Replaying the same numeric page after a same-count replacement must not
+    // overwrite the session boundary with a different cursor.
+    await expect(use(changing, 1, 1)).rejects.toThrow(/cursor changed at offset 2/);
+
+    const boundary = basePlan(new Map([[2, {
+      ...cursorA0,
+      graphOffset: 2,
+    }]]));
+    // A cursor exactly at graph A's end skips its zero-row slice and starts B.
+    expect(await use(boundary, 2, 1)).toHaveLength(1);
+
+    const pastCount = basePlan(new Map([[1, {
+      ...cursorA0,
+      graphOffset: 3,
+    }]]));
+    await expect(use(pastCount, 1, 1)).rejects.toThrow(/past the committed row count/);
+
+    const inconsistentTotal: Plan = {
+      entries: [{ graph: graphA, rowCount: 2 }],
+      totalRows: 3,
+      pagedGraphs: new Set([graphA]),
+      cursors: new Map([[0, null]]),
+    };
+    await expect(use(inconsistentTotal, 0, 3)).rejects.toThrow(/plan changed at offset 0/);
   });
 });
 

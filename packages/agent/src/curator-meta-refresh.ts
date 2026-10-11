@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { randomUUID } from 'node:crypto';
-import { multiaddr } from '@multiformats/multiaddr';
 import {
   assertSafeIri,
   contextGraphDataGraphUri,
@@ -9,6 +8,8 @@ import {
   createOperationContext,
   DKG_ONTOLOGY,
   type OperationContext,
+  type Libp2pConnectHost,
+  type PeerResolver,
 } from '@origintrail-official/dkg-core';
 import {
   tryReplaceSubjectAtomically,
@@ -20,11 +21,16 @@ import {
   META_REFRESH_COOLDOWN_MS,
   SYNC_TOTAL_TIMEOUT_MS,
 } from './dkg-agent-constants.js';
+import { hasAuthoritativePrivateMetaDefinition } from './context-graph-private-meta-proof.js';
+import type { ApprovedMemberProof } from './context-graph-member-proof.js';
 import {
-  hasAuthoritativePrivateMetaDefinition,
-  type AuthoritativePrivateMetaMemberProof,
-} from './context-graph-private-meta-proof.js';
-import { hasAuthoritativePublicMetaDefinition } from './context-graph-public-meta-proof.js';
+  unprovenApprovedMemberAcceptance,
+  type ApprovedMemberAcceptance,
+} from './internal/context-graph-authority/approved-member-acceptance.js';
+import {
+  hasAuthoritativePublicMetaDefinition,
+  hasAuthoritativePublicMetaDefinitionForApprovedMember,
+} from './context-graph-public-meta-proof.js';
 import { getSyncCheckpointKey, type SyncCheckpointStore } from './sync/checkpoint/state.js';
 import {
   hasSyncAdmissionSource,
@@ -36,6 +42,13 @@ import type {
 } from './sync/requester/page-fetch.js';
 import type { SyncPhase } from './sync/auth/request-build.js';
 import { stripLiteral } from './dkg-agent-utils.js';
+import { isCanonicalAuthoritativeContextGraphId } from
+  './context-graph-binding-state.js';
+import { ensureCuratorConnected } from './curator-peer-connection.js';
+import {
+  noteCuratorMetaRefreshStarted,
+  noteCuratorRegistrationRefusal,
+} from './curator-registration-refusal.js';
 
 export interface CuratorMetaRefreshOptions {
   signal?: AbortSignal;
@@ -45,14 +58,51 @@ export interface CuratorMetaRefreshOptions {
    * metadata recovery does not depend on metadata that has not arrived yet.
    */
   trustedCuratorPeerId?: string;
+  /** Last observed address for that peer, used only as a dial hint after restart. */
+  curatorDialAddressHint?: string;
   /** Bypass the normal auth-probe cooldown for an explicit recovery event. */
   force?: boolean;
-  /** Require the fetched snapshot to make this approved local member usable. */
-  memberProof?: AuthoritativePrivateMetaMemberProof;
-}
-
-interface CuratorConnection {
-  remotePeer: { toString(): string };
+  /**
+   * Require the fetched snapshot to make this approved local member usable,
+   * judged under the authenticated access policy the caller resolved: a
+   * public member snapshot is accepted only when that policy is `public`.
+   */
+  approvedMember?: ApprovedMemberAcceptance;
+  /**
+   * @deprecated Use `approvedMember`. Kept so an older caller keeps its
+   * member requirement: an old-style proof has no authenticated policy, so it
+   * keeps its former private-only, fail-closed meaning (an `unproven`
+   * acceptance) and never admits a public definition.
+   */
+  memberProof?: ApprovedMemberProof;
+  /**
+   * Accept only an unambiguous PUBLIC root definition. Set by the RFC-64
+   * replica metadata bootstrap, whose accepted owner-signed policy is already
+   * known to be public: a peer-served private definition must then be
+   * rejected instead of installed, so an arbitrary connected peer cannot flip
+   * the local graph private. Mutually exclusive with `approvedMember`.
+   */
+  requirePublicDefinition?: boolean;
+  /**
+   * The serving peer is an UNAUTHENTICATED relay of the declaration (RFC-64
+   * replica bootstrap from whichever peers happen to be connected), not a
+   * curator whose authority the caller established. The snapshot's chain
+   * registration claims -- `OnChainId`, `OnChainHash`, and any
+   * `registrationStatus` other than the `unregistered` placeholder -- are
+   * stripped BEFORE the projection is installed, and no subscription chain
+   * binding is applied afterwards. A chain binding may only come from chain
+   * truth (finalized authority index / name-hash resolution). The
+   * authenticated join-approval and curator-resolved refreshes never set this.
+   */
+  ignoreRegistrationBinding?: boolean;
+  /**
+   * Reject a snapshot whose root `dkg:curator` names any wallet other than
+   * this EVM address (case-insensitive). Set by the RFC-64 replica bootstrap
+   * to the owner the accepted policy already authenticated, so a relayed
+   * declaration cannot re-home the graph under a stranger's identity. A
+   * snapshot that names no curator passes this check.
+   */
+  expectedCuratorAddress?: string;
 }
 
 interface CuratorBoundSubscription {
@@ -63,18 +113,8 @@ interface CuratorBoundSubscription {
 interface CuratorMetaRefreshAgent {
   readonly peerId: string;
   readonly metaRefreshTimestamps: Map<string, number>;
-  readonly node: {
-    libp2p: {
-      getConnections(): CuratorConnection[];
-      dial(target: unknown, options?: { signal?: AbortSignal }): Promise<unknown>;
-      peerStore: {
-        merge(target: unknown, data: { multiaddrs: unknown[] }): Promise<unknown>;
-      };
-    };
-  };
-  readonly discovery: {
-    findAgentByPeerId(peerId: string): Promise<{ relayAddress?: string } | undefined>;
-  };
+  readonly node: { libp2p: Libp2pConnectHost };
+  readonly peerResolver: Pick<PeerResolver, 'connect'>;
   readonly store: TripleStore;
   readonly syncCheckpoints: Pick<SyncCheckpointStore, 'delete'>;
   readonly oversizeTombstoneLog: {
@@ -135,6 +175,83 @@ interface CuratorMetaRefreshState {
 interface AuthoritativeMetaSnapshot {
   checkpointKey: string;
   quads: Quad[];
+  /**
+   * The acceptance an approved member's snapshot was admitted under. The
+   * replacement asks it again right before its first projection write.
+   */
+  approvedMember?: ApprovedMemberAcceptance;
+}
+
+const CURATOR_AGENT_DID_PREFIX = 'did:dkg:agent:';
+
+/**
+ * Registration claims a relayed (unauthenticated-source) snapshot may not
+ * carry into the local projection. `OnChainId` / `OnChainHash` are the chain
+ * binding `applyCuratorRegistrationBinding` and the cgId resolver read;
+ * `registrationStatus` is the local registration state machine's fence. Only
+ * the `unregistered` placeholder survives: it is what the author writes for an
+ * unregistered graph and it can only make metadata confirmation stricter.
+ */
+function isRelayedRegistrationClaim(predicate: string, object: string): boolean {
+  if (
+    predicate === `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`
+    || predicate === `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`
+  ) return true;
+  return predicate === DKG_ONTOLOGY.DKG_REGISTRATION_STATUS
+    && stripLiteral(object).trim().toLowerCase() !== 'unregistered';
+}
+
+/** Drop every root-subject chain-registration claim from a relayed snapshot. */
+export function stripRelayedRegistrationBindingQuads(
+  contextGraphId: string,
+  snapshot: readonly Quad[],
+): Quad[] {
+  const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+  const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+  return snapshot.filter((quad) => !(
+    quad.graph === metaGraph
+    && quad.subject === contextGraphUri
+    && isRelayedRegistrationClaim(quad.predicate, quad.object)
+  ));
+}
+
+/**
+ * Whether every root `dkg:curator` row of the snapshot names `expectedAddress`.
+ * A curator DID is `did:dkg:agent:<evm address>`; anything else (another
+ * wallet, a peer id, a malformed value) is a mismatch. No curator row passes.
+ */
+export function snapshotCuratorMatches(
+  contextGraphId: string,
+  snapshot: readonly Quad[],
+  expectedAddress: string,
+): boolean {
+  const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+  const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+  const expected = `${CURATOR_AGENT_DID_PREFIX}${expectedAddress.toLowerCase()}`;
+  return snapshot.every((quad) => (
+    quad.graph !== metaGraph
+    || quad.subject !== contextGraphUri
+    || quad.predicate !== DKG_ONTOLOGY.DKG_CURATOR
+    || stripLiteral(quad.object).trim().toLowerCase() === expected
+  ));
+}
+
+/** An authenticated metadata refresh still cannot replace an owned numeric slot. */
+function preservesCuratorRegistrationBinding(
+  agent: CuratorMetaRefreshAgent,
+  contextGraphId: string,
+  snapshot: readonly Quad[],
+): boolean {
+  const currentId = agent.subscribedContextGraphs?.get(contextGraphId)?.onChainId;
+  if (!isCanonicalAuthoritativeContextGraphId(currentId)) return true;
+  const subject = contextGraphDataGraphUri(contextGraphId);
+  const graph = contextGraphMetaGraphUri(contextGraphId);
+  const predicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`;
+  return snapshot.every((quad) => {
+    if (quad.graph !== graph || quad.subject !== subject || quad.predicate !== predicate) return true;
+    const incomingId = stripLiteral(quad.object);
+    return !isCanonicalAuthoritativeContextGraphId(incomingId) || incomingId === currentId;
+  });
 }
 
 /**
@@ -152,7 +269,7 @@ function applyCuratorRegistrationBinding(
   snapshot: readonly Quad[],
 ): void {
   const sub = agent.subscribedContextGraphs?.get(contextGraphId);
-  if (!sub) return;
+  if (!sub || !preservesCuratorRegistrationBinding(agent, contextGraphId, snapshot)) return;
 
   const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
@@ -160,15 +277,16 @@ function applyCuratorRegistrationBinding(
   const onChainHashPredicate = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`;
   let onChainId: string | undefined;
   let onChainHash: string | undefined;
+  let invalidOnChainId = false;
 
   for (const quad of snapshot) {
     if (quad.graph !== metaGraph || quad.subject !== contextGraphUri) continue;
     const value = stripLiteral(quad.object);
-    if (quad.predicate === onChainIdPredicate && /^\d+$/.test(value)) {
-      try {
-        if (BigInt(value) > 0n) onChainId = value;
-      } catch {
-        // Ignore malformed or out-of-domain curator metadata fail-closed.
+    if (quad.predicate === onChainIdPredicate) {
+      if (isCanonicalAuthoritativeContextGraphId(value)) {
+        onChainId = value;
+      } else {
+        invalidOnChainId = true;
       }
     } else if (
       quad.predicate === onChainHashPredicate
@@ -177,6 +295,11 @@ function applyCuratorRegistrationBinding(
       onChainHash = value.toLowerCase();
     }
   }
+
+  // Treat the numeric slot and commitment as one registration claim. A
+  // malformed or out-of-uint256 slot must not leave behind a hash-only durable
+  // binding or turn untrusted metadata into a strict-writer exception.
+  if (invalidOnChainId) return;
 
   let changed = false;
   if (onChainId && sub.onChainId !== onChainId) {
@@ -251,71 +374,6 @@ function waitForSharedRefresh(
       },
     );
   });
-}
-
-function ensureCuratorConnected(
-  agent: CuratorMetaRefreshAgent,
-  curatorPeerId: string,
-  signal: AbortSignal | undefined,
-  ctx: OperationContext,
-): boolean | Promise<boolean> {
-  const connections = agent.node.libp2p.getConnections();
-  const isConnected = connections.some((connection) => (
-    connection.remotePeer.toString() === curatorPeerId
-  ));
-  if (isConnected) return true;
-
-  return dialCurator(agent, curatorPeerId, signal, ctx);
-}
-
-async function dialCurator(
-  agent: CuratorMetaRefreshAgent,
-  curatorPeerId: string,
-  signal: AbortSignal | undefined,
-  ctx: OperationContext,
-): Promise<boolean> {
-  let connections: CuratorConnection[] = [];
-  let isConnected = false;
-
-  try {
-    const { peerIdFromString } = await import('@libp2p/peer-id');
-    const peerId = peerIdFromString(curatorPeerId);
-    try {
-      await agent.node.libp2p.dial(peerId, { signal });
-      throwIfCuratorMetaRefreshAborted(signal);
-      connections = agent.node.libp2p.getConnections();
-      isConnected = connections.some((connection) => (
-        connection.remotePeer.toString() === curatorPeerId
-      ));
-    } catch {
-      // A regular dial may not have a usable direct address; relay is next.
-    }
-
-    if (!isConnected) {
-      throwIfCuratorMetaRefreshAborted(signal);
-      const discoveredAgent = await agent.discovery.findAgentByPeerId(curatorPeerId);
-      throwIfCuratorMetaRefreshAborted(signal);
-      if (discoveredAgent?.relayAddress) {
-        const circuitAddress = multiaddr(
-          `${discoveredAgent.relayAddress}/p2p-circuit/p2p/${curatorPeerId}`,
-        );
-        await agent.node.libp2p.peerStore.merge(peerId, { multiaddrs: [circuitAddress] });
-        await agent.node.libp2p.dial(peerId, { signal });
-        throwIfCuratorMetaRefreshAborted(signal);
-        connections = agent.node.libp2p.getConnections();
-        isConnected = connections.some((connection) => (
-          connection.remotePeer.toString() === curatorPeerId
-        ));
-      }
-    }
-  } catch (error) {
-    throwIfCuratorMetaRefreshAborted(signal);
-    agent.log.warn(
-      ctx,
-      `Failed to dial curator ${curatorPeerId.slice(-8)} for meta refresh: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-  return isConnected;
 }
 
 async function fetchAuthoritativeMetaSnapshot(
@@ -413,21 +471,40 @@ async function fetchAuthoritativeMetaSnapshot(
     agent.syncCheckpoints.delete(result.checkpointKey);
     return undefined;
   }
-  const hasAuthoritativePublicDefinition = hasAuthoritativePublicMetaDefinition(
-    contextGraphId,
-    controlMetaQuads,
-  );
-  // Supplying memberProof selects the fail-closed private post-approval
-  // contract. A public-only snapshot must not satisfy that request: public
-  // subscriptions reach this refresh without a member proof.
-  const acceptsAuthoritativePublicDefinition = options.memberProof === undefined
-    && hasAuthoritativePublicDefinition;
-  const hasAuthoritativePrivateDefinition = hasAuthoritativePrivateMetaDefinition(
-    contextGraphId,
-    controlMetaQuads,
-    options.memberProof,
-  );
-  if (!acceptsAuthoritativePublicDefinition && !hasAuthoritativePrivateDefinition) {
+  // The proof layer owns each snapshot contract; this refresh only picks one.
+  // Public subscriptions reach it without an approved member. A join-approved
+  // member is judged by its acceptance (#2827, #2831 review), which admits
+  // exactly one definition: a public acceptance only the public definition,
+  // and only while its authority still holds after the fetch; an unproven one
+  // only the complete private definition. A peer can then neither downgrade a
+  // private graph nor leave a public graph stored as private.
+  const approvedMember = options.approvedMember
+    ?? (options.memberProof === undefined
+      ? undefined
+      : unprovenApprovedMemberAcceptance(options.memberProof));
+  const acceptsAuthoritativePublicDefinition = approvedMember === undefined
+    ? hasAuthoritativePublicMetaDefinition(contextGraphId, controlMetaQuads)
+    : approvedMember.admittedDefinition === 'public'
+      && hasAuthoritativePublicMetaDefinitionForApprovedMember(
+        contextGraphId,
+        controlMetaQuads,
+        approvedMember.proof,
+      );
+  // A public-only bootstrap never installs a private definition, however
+  // complete: the caller's accepted policy already says the graph is public.
+  const hasAuthoritativePrivateDefinition = options.requirePublicDefinition !== true
+    && (approvedMember === undefined || approvedMember.admittedDefinition === 'private')
+    && hasAuthoritativePrivateMetaDefinition(
+      contextGraphId,
+      controlMetaQuads,
+      approvedMember?.proof,
+    );
+  // The fetch is the long await, so a member whose authority already changed
+  // stops here, before any store work. The replacement asks again right
+  // before its first projection write.
+  const admitted = (acceptsAuthoritativePublicDefinition || hasAuthoritativePrivateDefinition)
+    && (approvedMember === undefined || await approvedMember.stillHolds());
+  if (!admitted) {
     agent.syncCheckpoints.delete(snapshotCheckpointKey);
     agent.syncCheckpoints.delete(result.checkpointKey);
     agent.log.warn(
@@ -436,7 +513,29 @@ async function fetchAuthoritativeMetaSnapshot(
     );
     return undefined;
   }
-  return { checkpointKey: result.checkpointKey, quads: controlMetaQuads };
+  if (
+    options.expectedCuratorAddress !== undefined
+    && !snapshotCuratorMatches(contextGraphId, controlMetaQuads, options.expectedCuratorAddress)
+  ) {
+    agent.syncCheckpoints.delete(snapshotCheckpointKey);
+    agent.syncCheckpoints.delete(result.checkpointKey);
+    agent.log.warn(
+      ctx,
+      `Rejected curator metadata snapshot for "${contextGraphId}" from ${curatorPeerId.slice(-8)}: `
+      + 'its curator is not the owner the accepted policy names',
+    );
+    return undefined;
+  }
+  // A relayed declaration is installed without its chain-registration claims;
+  // the peer that served it is not a source of chain truth.
+  const quads = options.ignoreRegistrationBinding === true
+    ? stripRelayedRegistrationBindingQuads(contextGraphId, controlMetaQuads)
+    : controlMetaQuads;
+  return {
+    checkpointKey: result.checkpointKey,
+    quads,
+    ...(approvedMember === undefined ? {} : { approvedMember }),
+  };
 }
 
 /**
@@ -478,12 +577,23 @@ function replaceCuratorMetaProjectionSparql(
   }`;
 }
 
+/**
+ * Install `authoritative` as the graph's curator projection. A refusal before
+ * its first write leaves the projection unchanged. Subject-based stores also
+ * recheck root activation after awaited delegation commits: a late refusal
+ * preserves the root definition, while earlier admitted delegation writes remain.
+ */
 async function atomicallyReplaceCuratorMetaSnapshot(
   agent: CuratorMetaRefreshAgent,
   contextGraphId: string,
-  snapshot: readonly Quad[],
+  authoritative: AuthoritativeMetaSnapshot,
   ctx: OperationContext,
-): Promise<void> {
+): Promise<boolean> {
+  const snapshot = authoritative.quads;
+  const activationHolds = async (): Promise<boolean> => (
+    (authoritative.approvedMember === undefined || await authoritative.approvedMember.stillHolds())
+    && preservesCuratorRegistrationBinding(agent, contextGraphId, snapshot)
+  );
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
   const delegationPrefix = `did:dkg:agent-delegation:${contextGraphId}:`;
@@ -562,6 +672,11 @@ async function atomicallyReplaceCuratorMetaSnapshot(
         )),
     );
 
+    // Each subject below is its own commit, and a delegation for an agent the
+    // current root already allows takes effect as soon as it lands. So the
+    // acceptance is asked before the first of them: a refusal must leave the
+    // projection exactly as it was, and no store API commits them together.
+    if (!(await activationHolds())) return false;
     invalidateTargetProjections();
     try {
       const replaceSubject = async (subject: string, quads: Quad[]): Promise<void> => {
@@ -580,6 +695,7 @@ async function atomicallyReplaceCuratorMetaSnapshot(
         await replaceSubject(subject, quads);
         existingDelegations.delete(subject);
       }
+      if (!(await activationHolds())) return false;
       await replaceSubject(contextGraphUri, rootReplacement);
       for (const staleSubject of [...existingDelegations].sort()) {
         await replaceSubject(staleSubject, []);
@@ -587,7 +703,7 @@ async function atomicallyReplaceCuratorMetaSnapshot(
     } finally {
       invalidateTargetProjections();
     }
-    return;
+    return true;
   }
 
   const stagingGraph = `urn:dkg:curator-meta-refresh:${randomUUID()}`;
@@ -606,6 +722,9 @@ async function atomicallyReplaceCuratorMetaSnapshot(
         `Refusing partial curator metadata replacement: staged ${staged.length}/${snapshot.length} triples`,
       );
     }
+    // Staged rows sit in a scratch graph until the update below activates the
+    // whole projection at once, so the acceptance is asked right before it.
+    if (!(await activationHolds())) return false;
 
     // A decorated store can commit its inner UPDATE and then throw while
     // appending a changelog marker. Invalidate before and after the attempt so
@@ -625,6 +744,7 @@ async function atomicallyReplaceCuratorMetaSnapshot(
     if (!replaced) {
       throw new Error('Triple store does not support atomic curator metadata replacement');
     }
+    return true;
   } finally {
     try {
       await agent.store.dropGraph(stagingGraph, { source: 'agent.metaRefresh.cleanup' });
@@ -644,11 +764,15 @@ async function executeCuratorMetaRefresh(
   options: CuratorMetaRefreshOptions,
   ctx: OperationContext,
 ): Promise<boolean> {
+  // Numbered as it starts, so a watch tells its refusal from an earlier refresh's.
+  const refresh = noteCuratorMetaRefreshStarted(agent, contextGraphId, curatorPeerId);
   const connectionResult = ensureCuratorConnected(
     agent,
     curatorPeerId,
     options.signal,
     ctx,
+    throwIfCuratorMetaRefreshAborted,
+    options.curatorDialAddressHint,
   );
   const connected = typeof connectionResult === 'boolean'
     ? connectionResult
@@ -666,8 +790,32 @@ async function executeCuratorMetaRefresh(
       ctx,
     );
     if (!snapshot) return false;
-    await atomicallyReplaceCuratorMetaSnapshot(agent, contextGraphId, snapshot.quads, ctx);
-    applyCuratorRegistrationBinding(agent, contextGraphId, snapshot.quads);
+    if (!preservesCuratorRegistrationBinding(agent, contextGraphId, snapshot.quads)) {
+      // Counted, so a caller that retries failed refreshes does not fetch it again.
+      noteCuratorRegistrationRefusal(agent, contextGraphId, curatorPeerId, refresh);
+      agent.syncCheckpoints.delete(snapshot.checkpointKey);
+      agent.log.warn(ctx, `Rejected curator metadata for "${contextGraphId}": `
+        + `its registration conflicts with owned slot ${agent.subscribedContextGraphs?.get(contextGraphId)?.onChainId}`);
+      return false;
+    }
+    if (!(await atomicallyReplaceCuratorMetaSnapshot(agent, contextGraphId, snapshot, ctx))) {
+      if (!preservesCuratorRegistrationBinding(agent, contextGraphId, snapshot.quads)) {
+        noteCuratorRegistrationRefusal(agent, contextGraphId, curatorPeerId, refresh);
+      }
+      agent.syncCheckpoints.delete(snapshot.checkpointKey);
+      agent.log.warn(
+        ctx,
+        `Rejected curator metadata snapshot for "${contextGraphId}": the approved member's authority or owned registration changed before root activation`,
+      );
+      return false;
+    }
+    // The relayed snapshot carries no binding claims any more (stripped above);
+    // skipping the binding step keeps the subscription row untouched even if a
+    // future field slipped past the strip list. Chain bindings for such a
+    // graph arrive only through the finalized-index / name-hash paths.
+    if (options.ignoreRegistrationBinding !== true) {
+      applyCuratorRegistrationBinding(agent, contextGraphId, snapshot.quads);
+    }
     agent.syncCheckpoints.delete(snapshot.checkpointKey);
     agent.log.info(
       ctx,
@@ -686,6 +834,21 @@ async function executeCuratorMetaRefresh(
   }
 }
 
+/**
+ * Generation identity for result sharing. A relayed (binding-stripped) run and
+ * an authenticated curator run against the same peer are different contracts:
+ * neither may be satisfied by the other's result, though both still serialize
+ * on the target graph.
+ */
+function curatorMetaRefreshSourceKey(
+  curatorPeerId: string,
+  options: CuratorMetaRefreshOptions,
+): string {
+  return options.ignoreRegistrationBinding === true
+    ? `${curatorPeerId}\u0000relayed`
+    : curatorPeerId;
+}
+
 function scheduleCuratorMetaRefresh(
   agent: CuratorMetaRefreshAgent,
   contextGraphId: string,
@@ -695,6 +858,7 @@ function scheduleCuratorMetaRefresh(
 ): Promise<boolean> {
   const refreshes = inFlightCuratorMetaRefreshesFor(agent);
   const existingState = refreshes.get(contextGraphId);
+  const source = curatorMetaRefreshSourceKey(curatorPeerId, options);
   const execute = (runOptions: CuratorMetaRefreshOptions) => executeCuratorMetaRefresh(
     agent,
     contextGraphId,
@@ -707,13 +871,13 @@ function scheduleCuratorMetaRefresh(
     // Explicit post-approval/credential events queue one fresh generation;
     // concurrent followers share it. Different curator sources also serialize
     // by target graph so two snapshot replacements can never race.
-    if (!options.force && existingState.activeSource === curatorPeerId) {
+    if (!options.force && existingState.activeSource === source) {
       return waitForSharedRefresh(existingState.active, options.signal);
     }
     if (
       options.force
       && existingState.queued
-      && existingState.queuedSource === curatorPeerId
+      && existingState.queuedSource === source
     ) {
       return waitForSharedRefresh(existingState.queued, options.signal);
     }
@@ -730,9 +894,9 @@ function scheduleCuratorMetaRefresh(
     };
     queued = predecessor.then(startFreshGeneration, startFreshGeneration);
     existingState.active = queued;
-    existingState.activeSource = curatorPeerId;
+    existingState.activeSource = source;
     existingState.queued = queued;
-    existingState.queuedSource = curatorPeerId;
+    existingState.queuedSource = source;
     const cleanup = () => {
       if (
         refreshes.get(contextGraphId) === existingState
@@ -749,7 +913,7 @@ function scheduleCuratorMetaRefresh(
   const refresh = execute(options);
   const state: CuratorMetaRefreshState = {
     active: refresh,
-    activeSource: curatorPeerId,
+    activeSource: source,
   };
   refreshes.set(contextGraphId, state);
   return refresh.finally(() => {

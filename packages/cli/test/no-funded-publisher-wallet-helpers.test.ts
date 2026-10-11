@@ -10,6 +10,8 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { PCA_FUNDING_UNKNOWN_CODE, PCA_FUNDING_UNKNOWN_MESSAGE } from '@origintrail-official/dkg-core';
+import { PcaFundingUnknownError } from '@origintrail-official/dkg-chain/dist/evm-adapter-errors.js';
 import {
   isNoFundedPublisherWalletLike,
   noFundedPublisherWalletBody,
@@ -89,6 +91,40 @@ describe('respondWithDaemonError', () => {
     respondWithDaemonError(res, new Error('database connection lost'));
     expect(res.statusCode).toBe(500);
     expect(JSON.parse(res.body).code).toBeUndefined();
+  });
+
+  it('maps a rethrown PCA funding unknown to a sanitized retryable 503', () => {
+    const res = mockRes();
+    respondWithDaemonError(res, Object.assign(new Error('private RPC endpoint failed'), {
+      code: 'PCA_FUNDING_UNKNOWN', readCode: 'RPC_ENDPOINTS_EXHAUSTED',
+    }));
+    expect(res.statusCode).toBe(503);
+    expect(res.headers['Retry-After']).toBe('1');
+    expect(JSON.parse(res.body)).toEqual({
+      code: 'PCA_FUNDING_UNKNOWN',
+      error: 'PCA funding verification is inconclusive; retry when chain reads recover.',
+      retryable: true,
+    });
+  });
+
+  it('shares the actual chain error contract while hiding its private read cause', () => {
+    const res = mockRes();
+    const error = new PcaFundingUnknownError('PRIVATE_ENDPOINT_URL');
+    expect(error.code).toBe(PCA_FUNDING_UNKNOWN_CODE);
+    expect(error.message).toBe(PCA_FUNDING_UNKNOWN_MESSAGE);
+    respondWithDaemonError(res, error);
+    expect(res.statusCode).toBe(503);
+    expect(res.headers['Retry-After']).toBe('1');
+    expect(JSON.parse(res.body)).toEqual({
+      code: PCA_FUNDING_UNKNOWN_CODE, error: PCA_FUNDING_UNKNOWN_MESSAGE, retryable: true,
+    });
+    expect(res.body).not.toContain('PRIVATE_ENDPOINT_URL');
+  });
+
+  it('does not down-classify a genuine CALL_EXCEPTION revert to retryable', () => {
+    const res = mockRes();
+    respondWithDaemonError(res, Object.assign(new Error('execution reverted'), { code: 'CALL_EXCEPTION' }));
+    expect(res.statusCode).toBe(500);
   });
 
   it('is a no-op once the response has already been sent', () => {

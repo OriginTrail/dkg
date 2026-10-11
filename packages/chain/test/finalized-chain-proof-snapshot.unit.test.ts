@@ -61,7 +61,17 @@ function adapterOver(
       if (script.finalized instanceof Error) throw script.finalized;
       return (script.finalized?.number ?? 90) + finalityConfirmations - 1;
     },
-    async getBlock(tag: number) {
+    async getBlock(tag: number | string) {
+      if (script.finalized instanceof Error) throw script.finalized;
+      // The head is read as `getBlock('latest')`, and at the default depth that
+      // block IS the anchor — so it must answer at the HEAD height, and the
+      // resolver derives the anchor from it.
+      if (tag === 'latest') {
+        const head = (script.finalized?.number ?? 90) + finalityConfirmations - 1;
+        return script.finalized === undefined
+          ? undefined
+          : { ...script.finalized, number: head };
+      }
       if (script.finalized && tag !== script.finalized.number) {
         throw new Error(`expected confirmation-depth block ${script.finalized.number}, got ${tag}`);
       }

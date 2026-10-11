@@ -79,13 +79,15 @@ export function readGraphKnowledgeAssetConfirmationKindV1(
   const values = metadataQuads
     .filter((quad) => quad.predicate === GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE)
     .map((quad) => rdfLiteralLexicalValue(quad.object));
-  if (values.length > 1) {
-    throw new Error(`Graph knowledge asset metadata has ${values.length} confirmation kinds`);
-  }
-  if (values.length === 1 && values[0] === undefined) {
+  if (values.some(value => value === undefined)) {
     throw new Error('Graph knowledge asset confirmation kind must be an RDF literal');
   }
-  return normalizeGraphKnowledgeAssetConfirmationKindV1(values[0]);
+  const kinds = values.map(normalizeGraphKnowledgeAssetConfirmationKindV1);
+  // Legacy union metadata may carry both compatible confirmations. Transaction
+  // provenance is stronger: choosing it retains its receipt validation rather
+  // than silently falling back to the receiptless materialization lane.
+  return kinds.includes('transaction') || kinds.length === 0
+    ? 'transaction' : 'finalized-materialization';
 }
 
 /**

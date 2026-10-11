@@ -23,8 +23,10 @@ function harness(managed = true) {
     queryEndpoint: 'http://127.0.0.1:7878/query',
     timeout: 1_000,
     now: () => performance.now(),
-    getRecoveryState: () => ({ ...recovery }),
-    onClientTimeout: recover,
+    managedRecovery: {
+      readState: () => ({ ...recovery }),
+      recover,
+    },
   };
   const store = managed ? createManagedOxigraphSparqlStoreV1(options) : new SparqlHttpStore(options);
   async function abandon(sparql = 'SELECT ?s WHERE { ?s ?p ?o }') {

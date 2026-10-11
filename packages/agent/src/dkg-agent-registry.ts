@@ -238,7 +238,7 @@ import {
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
-import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
+import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
@@ -503,11 +503,16 @@ export class AgentRegistryMethods extends DKGAgentBase {
     //
     // System CGs (`agents`, `ontology`) are excluded — they are universal
     // and don't need to be re-advertised in every profile.
+    //
+    // `isPrivateContextGraph` is false when no policy is known yet, so a graph
+    // is advertised only when its policy is proven public: by a definition, or
+    // by a bound slot the chain proves public (a Core's chain discoveries). A
+    // joiner still waiting for its curator's `_meta` has no proven policy.
     const publicServed: string[] = [];
     for (const [id, sub] of this.subscribedContextGraphs) {
       if (id === SYSTEM_CONTEXT_GRAPHS.AGENTS || id === SYSTEM_CONTEXT_GRAPHS.ONTOLOGY) continue;
       if (!sub.subscribed) continue;
-      if (await this.isPrivateContextGraph(id)) continue;
+      if (await this.contextGraphAccessPolicyState(id, { onChainId: sub.onChainId }) !== 'public') continue;
       publicServed.push(id);
     }
 

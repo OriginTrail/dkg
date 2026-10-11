@@ -1,0 +1,16 @@
+# Test-only certificate for the local TLS servers in packages/chain/test
+# (helpers/local-tls.ts). Regenerate both PEM files from this directory with:
+#   openssl req -x509 -config localhost.cnf -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 36500 -keyout localhost-key.pem -out localhost-cert.pem
+[req]
+distinguished_name = subject
+x509_extensions = server
+prompt = no
+
+[subject]
+CN = localhost
+
+[server]
+subjectAltName = DNS:localhost, IP:127.0.0.1
+basicConstraints = critical, CA:FALSE
+keyUsage = critical, digitalSignature
+extendedKeyUsage = serverAuth

@@ -1,0 +1,689 @@
+/**
+ * How the hash-subscription devnet suite talks to a daemon: typed reads and posts
+ * through the wire validators, and the observation and recovery helpers built on
+ * them. The scenario file (automated.test.ts) composes these; nothing here knows
+ * which graph or which edge a test uses, so every helper takes its nodes and its
+ * expected content as arguments.
+ *
+ * The transport is injected (`DaemonIo`, defaulting to the harness), so the reply
+ * handling and the recovery decision are proven without a devnet (daemon.test.ts).
+ *
+ * ONE RULE FOR ERRORS. A reply of the wrong shape is a failure of the test, never
+ * "not yet". It is enforced by where a failure is caught, not by what is thrown: a
+ * retry or a poll catches around the REQUEST only (`tryRequest`: a rejected request
+ * comes back as a value, and a status is not a failure at all), and the reply is
+ * validated outside of that catch (`checked`). Whatever a validator throws, of any
+ * class, therefore propagates; nothing here decides anything from an exception's
+ * class. `checked()` adds the node to a validator's message and keeps a
+ * `WireShapeError` a `WireShapeError` (`withContext`), so a test can read its endpoint
+ * and field. What a poll may treat as "not yet" is a rejected request (a refused
+ * connection, a timeout) or a non-200 status. A wait that ran out says what it last
+ * saw (`waitWithNote`); a failure its probe threw is left as it is.
+ *
+ * ONE RULE FOR "NO JOB". A catch-up lookup answers a job, `none` or `unavailable`
+ * (`CatchupLookup`). `none` is only the route's own 404 "No catch-up job found"
+ * (`isNoCatchupJobReply`): any other status, another kind of 404 and a rejected request
+ * are `unavailable`, which no assertion of absence can take for an answer. A read made
+ * for an assertion or a classification (`catchupStatus`) throws on it, naming the node,
+ * the endpoint, the status and the body; a poll that waits for a job (`waitForJob`,
+ * `waitUntilNamed`) retries it until its budget is spent and says what the last lookup
+ * answered. A job read by its own id (`lookupJobById`, for the job a subscribe returned)
+ * is polled the same way, except that a 404 there fails at once: the daemon must know it.
+ */
+import { expect } from 'vitest';
+import { getJson, normTerm, postJson, waitFor, type DevnetNode } from '../_bootstrap/harness.js';
+import {
+  classifyLatestCatchupJob,
+  describeLatestJobClass,
+  isClassifiable,
+  type GraphNames,
+  type LatestJobClass,
+} from './catchup-jobs.js';
+import {
+  WireShapeError,
+  isNoCatchupJobReply,
+  parseCatchupStatusResponse,
+  parseConnectedPeerIds,
+  parseContextGraphListResponse,
+  parseNodePeerInfo,
+  parseQueryBindings,
+  parseSubscribeResponse,
+  parseSubscriptionsResponse,
+  type CatchupContextGraphIdentity,
+  type CatchupStatusReply,
+  type SubscribeReply,
+  type SubscriptionRow,
+} from './wire.js';
+
+export type View = 'shared-working-memory' | 'verifiable-memory';
+
+/** What a transport hands back: the status and the parsed JSON body (`null` when it was not JSON). */
+export interface HttpReply {
+  readonly status: number;
+  readonly json: unknown;
+}
+
+/** The transport and the poller. The defaults are the harness's; a unit test injects fakes. */
+export interface DaemonIo {
+  get(node: DevnetNode, path: string): Promise<HttpReply>;
+  post(node: DevnetNode, path: string, body: unknown): Promise<HttpReply>;
+  waitFor: typeof waitFor;
+}
+
+export const harnessIo: DaemonIo = { get: getJson, post: postJson, waitFor };
+
+/** What a request came back with: the reply, or, when the request itself was rejected (refused, reset, timed out), why. */
+export type Attempt =
+  | { readonly failed: false; readonly reply: HttpReply }
+  | { readonly failed: true; readonly why: string };
+
+/**
+ * Send a request and return what happened to IT. Only the send is inside the catch:
+ * what the caller then does with the reply (validating it, reading its body) is outside,
+ * so a retry decided on an `Attempt` can never swallow a validation failure, whatever
+ * class it is. A status is not a failure here; the caller decides what a non-200 means.
+ */
+export async function tryRequest(send: () => Promise<HttpReply>): Promise<Attempt> {
+  try {
+    return { failed: false, reply: await send() };
+  } catch (error) {
+    return { failed: true, why: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
+ * What a lookup of the latest catch-up job for an id answered. `none` is ONLY the
+ * route's own "no job names this id" reply (`isNoCatchupJobReply`). Anything else that
+ * is not a job is `unavailable`: a rejected request or a status the lookup does not
+ * understand. It carries what the daemon said, and it is never an answer: it cannot
+ * satisfy "names no job", and a poll treats it as "not yet".
+ */
+export type CatchupLookup =
+  | { readonly kind: 'job'; readonly job: CatchupStatusReply }
+  | { readonly kind: 'none' }
+  | { readonly kind: 'unavailable'; readonly why: string };
+
+/** One lookup, for a failure message or a timeout. */
+export function describeLookup(found: CatchupLookup): string {
+  switch (found.kind) {
+    case 'job': return `${found.job.jobId} (${found.job.contextGraphId}, ${found.job.jobStatus})`;
+    case 'none': return 'no job';
+    case 'unavailable': return `unavailable: ${found.why}`;
+  }
+}
+
+/** A graph as the catch-up assertions need it: both of its ids and its on-chain id. */
+export interface JobGraph extends GraphNames {
+  readonly onChainId: string;
+}
+
+export interface DaemonOptions {
+  /** How long a recovery waits between two forced catch-ups. */
+  readonly recoveryRetryEveryMs?: number;
+}
+
+/**
+ * A daemon reply. A 200 body has been checked by the endpoint's validator
+ * (wire.ts): a renamed or retyped field it reads throws there, naming the
+ * endpoint and the field. Any other status carries the body untouched (an error
+ * reply is `{ error }`).
+ */
+export type Reply<T> =
+  | { readonly ok: true; readonly status: 200; readonly body: T }
+  | { readonly ok: false; readonly status: number; readonly body: unknown };
+
+/**
+ * Check a reply with its endpoint's validator. A validator failure keeps its type,
+ * endpoint and field and gains the node in its message (`WireShapeError.withContext`),
+ * so it can still be told from a transport failure further up.
+ */
+export function checked<T>(node: DevnetNode, res: HttpReply, parse: (value: unknown) => T): Reply<T> {
+  if (res.status !== 200) return { ok: false, status: res.status, body: res.json };
+  try {
+    return { ok: true, status: 200, body: parse(res.json) };
+  } catch (err) {
+    if (err instanceof WireShapeError) throw err.withContext(`node${node.num}`);
+    throw new Error(`node${node.num} ${err instanceof Error ? err.message : String(err)}`, { cause: err });
+  }
+}
+
+/** The checked body of a reply that must be a 200: anything else fails with `label` and the raw body. */
+export function expectOk<T>(reply: Reply<T>, label: string): T {
+  expect(reply.status, `${label}: ${JSON.stringify(reply.body)}`).toBe(200);
+  return (reply as Extract<Reply<T>, { ok: true }>).body;
+}
+
+/** The id of the catch-up job a subscribe queued (the completed-catch-up variant of the reply has none). */
+export function queuedJobId(reply: SubscribeReply): string | undefined {
+  return reply.catchup?.jobId;
+}
+
+const SUBSCRIBE_PATH = '/api/context-graph/subscribe';
+
+/** The subscribe request; `forceCatchup` asks for a replacement job instead of the one already there. */
+function subscribeBody(contextGraphId: string, forceCatchup = false) {
+  return { contextGraphId, includeSharedMemory: true, syncMode: 'always-on', ...(forceCatchup ? { forceCatchup: true } : {}) };
+}
+
+/** What a forced catch-up came back with: its status, the job it made (none on a non-200 or a completed-catch-up reply) and the raw body. */
+function forcedOutcome(res: Reply<SubscribeReply>): { status: number; jobId?: string; detail: string } {
+  return { status: res.status, jobId: res.ok ? queuedJobId(res.body) : undefined, detail: JSON.stringify(res.body) };
+}
+
+export function createDaemon(io: DaemonIo = harnessIo, options: DaemonOptions = {}) {
+  const recoveryRetryEveryMs = options.recoveryRetryEveryMs ?? 60_000;
+
+  async function getChecked<T>(node: DevnetNode, path: string, parse: (value: unknown) => T): Promise<Reply<T>> {
+    return checked(node, await io.get(node, path), parse);
+  }
+
+  async function postChecked<T>(node: DevnetNode, path: string, body: unknown, parse: (value: unknown) => T): Promise<Reply<T>> {
+    return checked(node, await io.post(node, path, body), parse);
+  }
+
+  /**
+   * `io.waitFor` that says what it last saw when it runs out. A failure the probe itself
+   * throws (a reply of the wrong shape, a refusal) is the diagnostic and goes through
+   * untouched: it is told from a timeout by having been thrown by the probe, not by its class.
+   */
+  async function waitWithNote<T>(
+    label: string,
+    budgetMs: number,
+    intervalMs: number,
+    probe: () => Promise<T | null>,
+    note: () => string | Promise<string>,
+  ): Promise<T> {
+    const thrownByProbe = new Set<unknown>();
+    try {
+      return await io.waitFor(label, budgetMs, intervalMs, async () => {
+        try {
+          return await probe();
+        } catch (error) {
+          thrownByProbe.add(error);
+          throw error;
+        }
+      });
+    } catch (error) {
+      if (thrownByProbe.has(error)) throw error;
+      throw new Error(`${error instanceof Error ? error.message : String(error)} (${await note()})`, { cause: error });
+    }
+  }
+
+  /**
+   * One lookup of the latest catch-up job for an id, as a value. A validator failure (a 200
+   * of the wrong shape) is thrown from here, outside of the request's own catch; every
+   * other way of not getting a job is `none` (the route's own 404) or `unavailable`.
+   */
+  async function lookupCatchup(node: DevnetNode, contextGraphId: string): Promise<CatchupLookup> {
+    const path = `/api/sync/catchup-status?contextGraphId=${encodeURIComponent(contextGraphId)}`;
+    const sent = await tryRequest(() => io.get(node, path));
+    if (sent.failed) return { kind: 'unavailable', why: `node${node.num} GET ${path} was not answered: ${sent.why}` };
+    if (isNoCatchupJobReply(sent.reply.status, sent.reply.json)) return { kind: 'none' };
+    const res = checked(node, sent.reply, parseCatchupStatusResponse);
+    return res.ok
+      ? { kind: 'job', job: res.body }
+      : { kind: 'unavailable', why: `node${node.num} GET ${path} answered ${res.status}: ${JSON.stringify(res.body)}` };
+  }
+
+  /**
+   * One lookup of a catch-up job by ITS id, as a value. The job id came from a subscribe, so
+   * the daemon knows it: a 404 here is a failure of the test and throws at once (with `label`
+   * and what the daemon said), never "not yet". A rejected request or any other non-200 is
+   * `unavailable`; a 200 of the wrong shape throws from the validator.
+   */
+  async function lookupJobById(node: DevnetNode, jobId: string, label: string): Promise<CatchupLookup> {
+    const path = `/api/sync/catchup-status?jobId=${encodeURIComponent(jobId)}`;
+    const sent = await tryRequest(() => io.get(node, path));
+    if (sent.failed) return { kind: 'unavailable', why: `node${node.num} GET ${path} was not answered: ${sent.why}` };
+    const res = checked(node, sent.reply, parseCatchupStatusResponse);
+    if (res.ok) return { kind: 'job', job: res.body };
+    const said = `node${node.num} GET ${path} answered ${res.status}: ${JSON.stringify(res.body)}`;
+    if (res.status === 404) throw new Error(`${label}: ${said}`);
+    return { kind: 'unavailable', why: said };
+  }
+
+  /** A lookup that must have answered: the job, or null for the route's "no job" reply; anything else throws, naming the node, the endpoint, the status and the body. */
+  function answered(found: CatchupLookup): CatchupStatusReply | null {
+    if (found.kind === 'unavailable') throw new Error(found.why);
+    return found.kind === 'job' ? found.job : null;
+  }
+
+  /**
+   * The latest job for an id, or null when the route says none names it. One read, for an
+   * assertion or a classification: a lookup that failed throws instead of reading as "no
+   * job" (a poll that waits for a job uses `lookupCatchup` through `waitForJob`).
+   */
+  async function catchupStatus(node: DevnetNode, contextGraphId: string): Promise<CatchupStatusReply | null> {
+    return answered(await lookupCatchup(node, contextGraphId));
+  }
+
+  /**
+   * Wait until `find` answers a job that `accept` likes. "No job yet" (the route's 404) and
+   * a lookup that failed (a rejected request, any other non-200) both mean "not yet" and
+   * are retried until the budget is spent; a failure is never read as an answer. A timeout
+   * says what the last lookup said. A reply of the wrong shape fails the wait at once.
+   */
+  async function waitForJob(
+    label: string,
+    budgetMs: number,
+    find: () => Promise<CatchupLookup>,
+    accept: (job: CatchupStatusReply) => boolean = () => true,
+    intervalMs = 3_000,
+  ): Promise<CatchupStatusReply> {
+    let last = 'no lookup made';
+    return waitWithNote(label, budgetMs, intervalMs, async () => {
+      const found = await find();
+      last = describeLookup(found);
+      return found.kind === 'job' && accept(found.job) ? found.job : null;
+    }, () => `last lookup: ${last}`);
+  }
+
+  async function listSubscriptions(node: DevnetNode): Promise<readonly SubscriptionRow[]> {
+    const res = await getChecked(node, '/api/context-graph/subscriptions', parseSubscriptionsResponse);
+    return expectOk(res, `node${node.num} GET /api/context-graph/subscriptions`).subscriptions;
+  }
+
+  /** A node's peer id and a direct TCP address it can be dialed on, as the node reports them. */
+  async function dialTarget(node: DevnetNode): Promise<{ peerId: string; multiaddr: string }> {
+    const info = expectOk(await getChecked(node, '/api/status', parseNodePeerInfo), `node${node.num} GET /api/status`);
+    const direct = info.multiaddrs.filter((addr) => addr.includes('/tcp/') && !addr.includes('/p2p-circuit'));
+    const chosen = direct.find((addr) => addr.startsWith('/ip4/127.0.0.1/')) ?? direct[0];
+    expect(chosen, `node${node.num} reports a direct TCP address: ${JSON.stringify(info.multiaddrs)}`).toBeDefined();
+    return { peerId: info.peerId, multiaddr: chosen!.includes('/p2p/') ? chosen! : `${chosen}/p2p/${info.peerId}` };
+  }
+
+  async function connectedPeerIds(node: DevnetNode): Promise<string[]> {
+    return expectOk(await getChecked(node, '/api/connections', parseConnectedPeerIds), `node${node.num} GET /api/connections`);
+  }
+
+  /** Ask `from` to dial `to` (POST /api/connect), then wait until `from` lists the connection. */
+  async function dial(from: DevnetNode, to: DevnetNode): Promise<void> {
+    const target = await dialTarget(to);
+    const res = await io.post(from, '/api/connect', { multiaddr: target.multiaddr });
+    expect(res.status, `node${from.num} POST /api/connect to node${to.num}: ${JSON.stringify(res.json)}`).toBe(200);
+    await io.waitFor(`node${from.num} lists node${to.num} as connected`, 60_000, 1_000, async () => (
+      (await connectedPeerIds(from)).includes(target.peerId) ? true : null
+    ));
+  }
+
+  /**
+   * Wait until the node has observed the graph's slot on chain (its own chain
+   * poller staged a row for it): only then does a name-hash subscribe find the
+   * hash-keyed row it promotes.
+   */
+  async function waitUntilChainSlotObserved(node: DevnetNode, onChainId: string): Promise<void> {
+    await io.waitFor(`node${node.num} observes on-chain slot ${onChainId}`, 120_000, 3_000, async () => {
+      const res = await getChecked(node, '/api/context-graph/list', parseContextGraphListResponse);
+      if (!res.ok) return null;
+      return res.body.contextGraphs.some((row) => (row.onChainId ?? row.onChain?.id) === onChainId) ? true : null;
+    });
+  }
+
+  /**
+   * Arrange check for a test whose subject is the first subscribe: the edge holds no
+   * subscription row for the graph, under either of its ids. It fails with that
+   * message instead of letting a later assertion read someone else's leftovers.
+   */
+  async function expectNoRowFor(node: DevnetNode, graph: GraphNames): Promise<void> {
+    const ids = (await listSubscriptions(node)).map((row) => row.contextGraphId);
+    expect(ids, `node${node.num} must not yet be subscribed to ${graph.id}`).not.toContain(graph.id);
+    expect(ids, `node${node.num} must not yet be subscribed to ${graph.id} by its hash`).not.toContain(graph.nameHash);
+  }
+
+  /** Wait for the promotion: a subscribed row keyed by the cleartext id, none keyed by the hash. */
+  async function waitForAdoption(node: DevnetNode, graph: GraphNames): Promise<SubscriptionRow> {
+    return io.waitFor(`node${node.num} adopts ${graph.id}`, 180_000, 3_000, async () => {
+      const rows = await listSubscriptions(node);
+      const adopted = rows.find((candidate) => candidate.contextGraphId === graph.id && candidate.subscribed);
+      return adopted !== undefined && !rows.some((candidate) => candidate.contextGraphId === graph.nameHash)
+        ? adopted
+        : null;
+    });
+  }
+
+  /** A catch-up job by its id; anything but a 200 fails with `label` and the raw body. */
+  async function catchupJob(node: DevnetNode, jobId: string, label: string): Promise<CatchupStatusReply> {
+    return expectOk(
+      await getChecked(node, `/api/sync/catchup-status?jobId=${encodeURIComponent(jobId)}`, parseCatchupStatusResponse),
+      label,
+    );
+  }
+
+  /**
+   * The latest job the graph has under either name, as a lookup: the cleartext id's, else the
+   * hash's. The hash is asked only when the cleartext id answered "no job": a lookup that
+   * failed is not an answer to fall through on.
+   */
+  async function lookupLatestJob(node: DevnetNode, graph: GraphNames): Promise<CatchupLookup> {
+    const byId = await lookupCatchup(node, graph.id);
+    return byId.kind === 'none' ? lookupCatchup(node, graph.nameHash) : byId;
+  }
+
+  /** The latest job the graph has under either name; null when neither names one, and a lookup that failed throws. */
+  async function findLatestJob(node: DevnetNode, graph: GraphNames): Promise<CatchupStatusReply | null> {
+    return answered(await lookupLatestJob(node, graph));
+  }
+
+  /**
+   * Wait until a lookup by each of `ids` names job `jobId` as the latest job. A timeout
+   * says what the last lookups named, since "names job X by A and B" alone does not say
+   * which of the two did not, or what it named instead.
+   */
+  async function waitUntilNamed(node: DevnetNode, label: string, jobId: string, ids: readonly string[]): Promise<void> {
+    let lastSeen = 'no lookup made';
+    await waitWithNote(`${label}: node${node.num} names job ${jobId} by ${ids.join(' and ')}`, 30_000, 2_000, async () => {
+      const found = await Promise.all(ids.map((id) => lookupCatchup(node, id)));
+      lastSeen = ids.map((id, i) => `${id} -> ${describeLookup(found[i]!)}`).join('; ');
+      return found.every((lookup) => lookup.kind === 'job' && lookup.job.jobId === jobId) ? true : null;
+    }, () => `last lookups: ${lastSeen}`);
+  }
+
+  /**
+   * Assert that no job names `contextGraphId`: the route answered "No catch-up job found". A
+   * lookup that failed (a rejected request, any other status, even a 404 of another kind)
+   * did not answer, so it fails the assertion as a failed lookup instead of satisfying it.
+   */
+  async function expectNoJob(node: DevnetNode, contextGraphId: string, message: string): Promise<void> {
+    const found = await lookupCatchup(node, contextGraphId);
+    if (found.kind === 'unavailable') throw new Error(`${message}: the lookup did not answer "no job": ${found.why}`);
+    expect(found.kind === 'job' ? found.job : null, message).toBeNull();
+  }
+
+  /**
+   * Assert what is true of the graph's latest catch-up job `jobId`, whichever way
+   * it came about (see catchup-jobs.ts), and return how it was classified. It waits
+   * until a job made under the hash has settled or continued, because whether it
+   * continues under the cleartext id is only known then.
+   *
+   *   - continued (made under the cleartext id, or continued under it): the cleartext
+   *     id and the on-chain id name it. That the job itself names the cleartext graph
+   *     is what the classification checks, and it throws when it does not.
+   *   - replaced (settled under the hash, a later job under the cleartext id): the
+   *     hash still names the job, and the cleartext id and the on-chain id name the
+   *     successor.
+   *   - hash-keyed-settled (settled under the hash, never continued, no successor):
+   *     the hash names it, the on-chain id reaches it through the hash, and the
+   *     cleartext id names no job. That the cleartext id names it is NOT asserted:
+   *     it cannot.
+   * The decision is printed, so a run never passes over a branch silently.
+   */
+  async function expectLatestJobNamed(node: DevnetNode, graph: JobGraph, jobId: string, label: string): Promise<LatestJobClass> {
+    const job = await waitForJob(
+      `${label}: node${node.num} job ${jobId} settled or continued under the cleartext id`,
+      180_000,
+      () => lookupJobById(node, jobId, `${label}: the job by its id`),
+      (found) => isClassifiable(graph, found),
+    );
+    const cleartextAliasJob = (await catchupStatus(node, graph.id)) ?? undefined;
+    const cls = classifyLatestCatchupJob(graph, job, cleartextAliasJob);
+    // eslint-disable-next-line no-console
+    console.log(`hash-sub: ${label}: node${node.num}: ${describeLatestJobClass(graph, cls)}`);
+    switch (cls.kind) {
+      case 'continued':
+        await waitUntilNamed(node, label, jobId, [graph.id, graph.onChainId]);
+        break;
+      case 'replaced':
+        await waitUntilNamed(node, label, jobId, [graph.nameHash]);
+        await waitUntilNamed(node, label, cls.successorJobId, [graph.id, graph.onChainId]);
+        break;
+      case 'hash-keyed-settled':
+        await waitUntilNamed(node, label, jobId, [graph.nameHash, graph.onChainId]);
+        await expectNoJob(node, graph.id, `${label}: the cleartext id names no job while the settled job stayed under the hash`);
+        break;
+    }
+    return cls;
+  }
+
+  /** The rows of a SELECT against one memory view: `null` when the node could not answer it (yet). */
+  async function tryRows(node: DevnetNode, contextGraphId: string, sparql: string, view: View) {
+    // A rejected request or a non-200 is "no answer yet"; a 200 that is not a SELECT answer is
+    // not: it is validated outside of the request's catch.
+    const sent = await tryRequest(() => io.post(node, '/api/query', { sparql, contextGraphId, view }));
+    if (sent.failed || sent.reply.status !== 200) return null;
+    const reply = checked(node, sent.reply, parseQueryBindings);
+    return reply.ok ? reply.body : null;
+  }
+
+  /** Every (predicate, object) of one subject in one memory view, as a sorted list; a failed read throws. */
+  async function subjectContent(node: DevnetNode, contextGraphId: string, subject: string, view: View): Promise<string[]> {
+    const res = await io.post(node, '/api/query', { sparql: `SELECT ?p ?o WHERE { <${subject}> ?p ?o }`, contextGraphId, view });
+    const reply = checked(node, res, parseQueryBindings);
+    if (!reply.ok) throw new Error(`query on node${node.num} failed (${reply.status}): ${JSON.stringify(reply.body)}`);
+    return reply.body.map((row) => `${normTerm(row.p)} ${normTerm(row.o)}`).sort();
+  }
+
+  /** The same read for a poll: `[]` while the node cannot answer or does not know the graph yet (a reply of the wrong shape still throws). */
+  async function pollSubjectContent(node: DevnetNode, contextGraphId: string, subject: string, view: View): Promise<string[]> {
+    const rows = await tryRows(node, contextGraphId, `SELECT ?p ?o WHERE { <${subject}> ?p ?o }`, view);
+    return rows === null ? [] : rows.map((row) => `${normTerm(row.p)} ${normTerm(row.o)}`).sort();
+  }
+
+  /** How many rows of `predicate` a subject has in one view; 0 while the node does not know the graph. */
+  async function tryRowCount(node: DevnetNode, contextGraphId: string, subject: string, predicate: string, view: View): Promise<number> {
+    const res = await io.post(node, '/api/query', {
+      sparql: `SELECT ?o WHERE { <${subject}> <${predicate}> ?o }`,
+      contextGraphId,
+      view,
+    });
+    if (res.status !== 200) return 0;
+    const reply = checked(node, res, parseQueryBindings);
+    return reply.ok ? reply.body.length : 0;
+  }
+
+  /** The latest catch-up job's verdict, for a failure message. */
+  async function describeLatestJob(node: DevnetNode, contextGraphId: string): Promise<string> {
+    const found = await catchupStatus(node, contextGraphId).then(
+      (job) => (job === null ? 'none' : `${job.jobStatus}${job.error ? `, ${job.error}` : ''}`),
+      // The read itself failed: say how, instead of claiming there is no job.
+      (err: unknown) => `unreadable: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return `last catch-up job: ${found}`;
+  }
+
+  /**
+   * Poll an edge until a subject's content in one view matches the author's, and
+   * report the latest catch-up job's verdict if it never does. `whileWaiting`
+   * runs on every poll that found no match yet; without it the poll only reads.
+   * A reply of the wrong shape fails the poll at once, whatever comes next.
+   */
+  async function pollContent(
+    node: DevnetNode,
+    contextGraphId: string,
+    subject: string,
+    view: View,
+    expected: string[],
+    label: string,
+    budgetMs: number,
+    whileWaiting?: () => Promise<void>,
+  ): Promise<void> {
+    await waitWithNote(`${label}: node${node.num} ${view} content of ${subject}`, budgetMs, 3_000, async () => {
+      const rows = await pollSubjectContent(node, contextGraphId, subject, view);
+      if (rows.length > 0 && JSON.stringify(rows) === JSON.stringify(expected)) return rows;
+      await whileWaiting?.();
+      return null;
+    }, () => describeLatestJob(node, contextGraphId));
+  }
+
+  /**
+   * Wait for a subject's content to match the author's on an edge. Purely
+   * observational: it never subscribes, retries or otherwise changes the node, so
+   * the catch-up job a test started stays the latest one until the test itself
+   * replaces it.
+   */
+  async function waitForContent(
+    node: DevnetNode,
+    contextGraphId: string,
+    subject: string,
+    view: View,
+    expected: string[],
+    label: string,
+    budgetMs = 420_000,
+  ): Promise<void> {
+    await pollContent(node, contextGraphId, subject, view, expected, label, budgetMs);
+  }
+
+  /**
+   * Subscribe, retrying while the request is rejected or the node has not yet read the graph
+   * from the chain (a retryable 503, or a numeric id the node has not seen yet: 404). Any
+   * other status is a refusal; a 200 of the wrong shape fails at once.
+   */
+  async function subscribeWhenAdmitted(node: DevnetNode, contextGraphId: string): Promise<SubscribeReply> {
+    let last = 'no response';
+    return waitWithNote(`node${node.num} subscribes ${contextGraphId}`, 120_000, 3_000, async () => {
+      const sent = await tryRequest(() => io.post(node, SUBSCRIBE_PATH, subscribeBody(contextGraphId)));
+      if (sent.failed) {
+        last = `request failed: ${sent.why}`;
+        return null;
+      }
+      const res = checked(node, sent.reply, parseSubscribeResponse);
+      if (res.ok) return res.body;
+      last = `${res.status} ${JSON.stringify(res.body)}`;
+      if (res.status === 503 || res.status === 404) return null;
+      throw new Error(`node${node.num} subscribe ${contextGraphId} refused: ${last}`);
+    }, () => `last response: ${last}`);
+  }
+
+  /**
+   * ARRANGE, idempotent: leave `graph` subscribed, adopted under its cleartext id
+   * and converged on `author`'s VM content on `node`. It subscribes (under
+   * `requestedId`) only when the node has no row for the graph, keyed by either
+   * id; adoption and content are waits, which return at once when they already
+   * hold. So it does the same thing whether or not another test, or an earlier
+   * attempt of the same test, already subscribed this node. Returns the id of the
+   * catch-up job its own subscribe queued, or none when it did not subscribe (the
+   * job is then whichever the graph's names find).
+   */
+  async function ensureConverged(
+    node: DevnetNode,
+    author: DevnetNode,
+    graph: JobGraph & { readonly subject: string },
+    requestedId: string,
+    label: string,
+  ): Promise<{ jobId?: string }> {
+    let jobId: string | undefined;
+    const rows = await listSubscriptions(node);
+    if (!rows.some((row) => row.contextGraphId === graph.id || row.contextGraphId === graph.nameHash)) {
+      await waitUntilChainSlotObserved(node, graph.onChainId);
+      jobId = queuedJobId(await subscribeWhenAdmitted(node, requestedId));
+    }
+    await waitForAdoption(node, graph);
+    const expected = await subjectContent(author, graph.id, graph.subject, 'verifiable-memory');
+    await waitForContent(node, graph.id, graph.subject, 'verifiable-memory', expected, label);
+    return jobId === undefined ? {} : { jobId };
+  }
+
+  /**
+   * A job made under a name hash is still there under that hash once the hash has
+   * resolved (#2779): the hash names the job it was subscribed with, the job is
+   * readable by its id, and its identity note is read live, so it now names the
+   * cleartext graph. `contextGraphId` stays the hash (the job never changes the id it
+   * was created under); `resolvedContextGraphId` is set only when the job continued
+   * under the cleartext id while it ran, and then it names that graph.
+   */
+  async function expectByHashLookupResolved(node: DevnetNode, graph: GraphNames, jobId: string, label: string): Promise<CatchupStatusReply> {
+    const byHash = await waitForJob(`${label}: node${node.num} catch-up status by name hash`, 60_000, () => lookupCatchup(node, graph.nameHash), undefined, 2_000);
+    expect(byHash.jobId, `${label}: the hash names the job it was subscribed with`).toBe(jobId);
+    if (byHash.resolvedContextGraphId === undefined) {
+      // The job never continued under another id: it is still keyed by the hash it was made with.
+      expect(byHash.contextGraphId, `${label}: a job that did not continue stays keyed by the hash`).toBe(graph.nameHash);
+    } else {
+      expect(byHash.resolvedContextGraphId, `${label}: a job that continued names the cleartext graph`).toBe(graph.id);
+    }
+    expect(byHash.identity, `${label}: ${JSON.stringify(byHash)}`).toMatchObject(
+      // `satisfies` types the expected object against the daemon's declaration:
+      // vitest types toMatchObject loosely, so without it a changed identity state
+      // spelling would compile here and fail only in a long devnet run.
+      { state: 'resolved', nameHash: graph.nameHash, contextGraphId: graph.id } satisfies Partial<CatchupContextGraphIdentity>,
+    );
+    const byJobId = await catchupJob(node, jobId, `${label}: the job by its id`);
+    expect(byJobId.jobId).toBe(jobId);
+    expect(byJobId.identity, `${label}: the job by its id`).toMatchObject(
+      { state: 'resolved', nameHash: graph.nameHash, contextGraphId: graph.id } satisfies Partial<CatchupContextGraphIdentity>,
+    );
+    return byHash;
+  }
+
+  /**
+   * The operator's recovery for a catch-up job that ended `failed`: a fresh
+   * subscribe with `forceCatchup`. It mints a REPLACEMENT job (or, while a job is
+   * still queued or running, hands that one back), and from then on the cleartext
+   * id and the on-chain id name the latest job, not the one the first subscribe
+   * returned. The superseded job stays readable by its own id.
+   */
+  async function forceCatchup(
+    node: DevnetNode,
+    contextGraphId: string,
+  ): Promise<{ status: number; jobId?: string; detail: string }> {
+    return forcedOutcome(await postChecked(node, SUBSCRIBE_PATH, subscribeBody(contextGraphId, true), parseSubscribeResponse));
+  }
+
+  /**
+   * Wait for content and, once a minute while it is missing, recover with a forced
+   * catch-up. Only the SWM scenario calls this: its content depends on a holder's
+   * RFC-64 authority pipeline, which can lag or trip its RPC circuit for a while
+   * after a devnet starts (an operator recovers a short window this way; a node
+   * whose circuit stays open needs a restart, and the suite fails rather than hide
+   * it). Returns the id of the latest catch-up job, which is what the graph's
+   * aliases must name afterwards: `firstJobId` when no recovery replaced it.
+   *
+   * A failed forced catch-up (a rejected request, a non-200) is retried on the
+   * next round. A reply of the wrong shape is not: only the request is tried, so
+   * whatever a validator throws (whatever its class) rejects the whole wait, and a
+   * later good reply cannot hide it.
+   */
+  async function recoverUntilContent(
+    node: DevnetNode,
+    contextGraphId: string,
+    subject: string,
+    view: View,
+    expected: string[],
+    label: string,
+    firstJobId: string,
+    budgetMs: number,
+  ): Promise<string> {
+    let latestJobId = firstJobId;
+    let lastRetryAt = Date.now();
+    await pollContent(node, contextGraphId, subject, view, expected, label, budgetMs, async () => {
+      if (Date.now() - lastRetryAt < recoveryRetryEveryMs) return;
+      lastRetryAt = Date.now();
+      const sent = await tryRequest(() => io.post(node, SUBSCRIBE_PATH, subscribeBody(contextGraphId, true)));
+      if (sent.failed) return;
+      const forced = forcedOutcome(checked(node, sent.reply, parseSubscribeResponse));
+      if (forced.jobId !== undefined) latestJobId = forced.jobId;
+    });
+    return latestJobId;
+  }
+
+  return {
+    getChecked,
+    postChecked,
+    listSubscriptions,
+    dialTarget,
+    connectedPeerIds,
+    dial,
+    waitUntilChainSlotObserved,
+    expectNoRowFor,
+    waitForAdoption,
+    ensureConverged,
+    catchupStatus,
+    lookupCatchup,
+    lookupLatestJob,
+    lookupJobById,
+    waitForJob,
+    catchupJob,
+    findLatestJob,
+    expectLatestJobNamed,
+    expectByHashLookupResolved,
+    subjectContent,
+    pollSubjectContent,
+    tryRowCount,
+    describeLatestJob,
+    pollContent,
+    waitForContent,
+    subscribeWhenAdmitted,
+    forceCatchup,
+    recoverUntilContent,
+  };
+}
+
+export type Daemon = ReturnType<typeof createDaemon>;

@@ -9,6 +9,7 @@ import {
   CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
   MEMBER_ROSTER_OBJECT_TYPE_V1,
   MemoryLayer,
+  DKGEvent,
   assertCanonicalGraphScopedAuthorSealV1,
   buildAssertionSealQuads,
   buildAuthorAttestationTypedData,
@@ -23,6 +24,7 @@ import {
   assertionLifecycleUri,
   contextGraphAssertionUri,
   contextGraphMetaUri,
+  contextGraphOnChainIdBindingQuery,
   contextGraphLayerUri,
   contextGraphWorkspaceGraphUri,
   createGraphKnowledgeAssetScope,
@@ -51,7 +53,10 @@ import {
   writeSwmMaterializationWitness,
   type Quad,
 } from '@origintrail-official/dkg-storage';
-import { NoChainAdapter } from '@origintrail-official/dkg-chain';
+import {
+  NoChainAdapter,
+  type ContextGraphAuthorityIndexRevisionReader,
+} from '@origintrail-official/dkg-chain';
 import {
   computeFlatKCRootV10,
   generateGraphKnowledgeAssetMetadata,
@@ -65,6 +70,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DKGAgent,
   Rfc64CatalogReconciliationTerminalErrorV1,
+  type ContextGraphMembershipStore,
+  type LocalContextGraphOriginRecord,
 } from '../src/index.js';
 import { Rfc64SwmRecoveryRuntimeV1 } from
   '../src/dkg-agent-rfc64-swm-recovery-runtime.js';
@@ -93,10 +100,13 @@ import {
   type Rfc64CatalogActivationInputV1,
   type Rfc64PublicCatalogActivationInputV1,
 } from '../src/rfc64/public-catalog-activation-config-v1.js';
+import { createAppliedCatalogHeadsSnapshotV1 } from '../src/rfc64/inventory-v1/index.js';
 import { Rfc64BoundedPublicRootCatalogNativeReconcilerV1 } from
   '../src/rfc64/public-catalog-native-reconciler-v1.js';
-import { readRfc64LegacySwmBoundaryCountV1 } from
-  '../src/rfc64/legacy-swm-boundary-v1.js';
+import {
+  prepareRfc64LateLegacySwmBoundaryV1,
+  readRfc64LegacySwmBoundaryCountV1,
+} from '../src/rfc64/legacy-swm-boundary-v1.js';
 import {
   Rfc64PublicCatalogReceiverV1,
   type Rfc64VerifiedCurrentHeadTargetLifecycleEventV1,
@@ -104,6 +114,7 @@ import {
   '../src/rfc64/public-catalog-receiver-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
+  RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
   type Rfc64PublicCatalogHeadAnnouncementV1,
 } from '../src/rfc64/public-catalog-transport-v1.js';
 import type {
@@ -141,17 +152,16 @@ import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 } from
 const RFC64_NATIVE_RECONCILE_HEAD_IMPLEMENTATION_V1 =
   Rfc64BoundedPublicRootCatalogNativeReconcilerV1.prototype.reconcileHead;
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'64'.repeat(32)}`);
+const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
 const REPLAY_AUTHOR_WALLET = new ethers.Wallet(`0x${'65'.repeat(32)}`);
 const NETWORK_ID = 'otp:20430' as NetworkIdV1;
-const CONTEXT_GRAPH_ID =
-  '0x1111111111111111111111111111111111111111/native-wiring' as ContextGraphIdV1;
+const CONTEXT_GRAPH_ID = `${AUTHOR}/native-wiring` as ContextGraphIdV1;
 const FIXED_HEAD_ISSUED_AT = '1773900000000' as TimestampMsV1;
 const DELEGATION_EFFECTIVE_AT = '1773899999999' as TimestampMsV1;
 const DELEGATION_EXPIRES_AT = '1773900000001' as TimestampMsV1;
 const MULTI_DELEGATION_EXPIRES_AT = '1774000000000' as TimestampMsV1;
 const SUCCESSOR_ISSUED_AT = '1773900001000' as TimestampMsV1;
 const SECOND_SUCCESSOR_ISSUED_AT = '1773900002000' as TimestampMsV1;
-const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
 const KAV10 = '0x4444444444444444444444444444444444444444' as EvmAddressV1;
 const KA_STORAGE = '0x5555555555555555555555555555555555555555' as EvmAddressV1;
 const CONTEXT_GRAPH_STORAGE =
@@ -191,8 +201,54 @@ const NATIVE_DEPLOYMENT = Object.freeze({
 }) as CatalogSealDeploymentProfileV1;
 
 const agents: DKGAgent[] = [];
+
+/**
+ * GH#3081 — a catalog mutation hands its head off for delivery and returns, so "the mutation
+ * returned" no longer means "its peers were told". Before reading what a receiver applied, let
+ * every started agent finish its deliveries, then drain that receiver.
+ */
+async function whenDeliveredAndReceiverIdle(receiver: DKGAgent): Promise<void> {
+  await Promise.all(agents.map((agent) => agent.whenRfc64CatalogHeadDeliveryIdleV1()));
+  await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+}
 const tempDirs: string[] = [];
 const rpcHarness = createLoopbackJsonRpcTestHarness();
+
+/** Logical finalized name-reader capability; numeric agent resolvers stay native. */
+class ColdFinalizedCatalogChainV1 extends FinalizedVmLoopbackMockChainAdapterV1 {
+  authorityAvailable = true;
+  readonly finalizedNameReads: {
+    readonly nameHashes: readonly string[];
+    readonly signal: AbortSignal | undefined;
+    returnedId: string | null;
+  }[] = [];
+  readonly contextGraphAuthorityIndexRevisionReader: ContextGraphAuthorityIndexRevisionReader;
+
+  constructor(fixture: FinalizedVmLoopbackFixtureConfigV1) {
+    super(fixture);
+    this.contextGraphAuthorityIndexRevisionReader = {
+      resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: async (nameHashes, options) => {
+        options?.signal?.throwIfAborted();
+        const read = { nameHashes: [...nameHashes], signal: options?.signal, returnedId: null as string | null };
+        this.finalizedNameReads.push(read);
+        if (!this.authorityAvailable) throw new Error('cold finalized registration reader unavailable');
+        if (nameHashes.length !== 1 || nameHashes[0] !== fixture.nameHash) {
+          throw new Error('cold finalized fixture received a different name commitment');
+        }
+        const snapshot = await this.getContextGraphAuthoritySnapshot(BigInt(fixture.onChainContextGraphId));
+        read.returnedId = snapshot.contextGraphId;
+        return new Map([[fixture.nameHash, snapshot]]);
+      },
+      readContextGraphAuthorityIndexRevisions: async (ids, options) => {
+        options?.signal?.throwIfAborted();
+        return new Map(ids.map((id) => [id, '0'] as const));
+      },
+      whenIdle: async () => {},
+    };
+  }
+
+}
+
 const RFC64_M0_RECOVERY_SCENARIOS = Object.freeze(
   RFC64_M0_RECOVERY_SCENARIO_MANIFEST.map(({ id }) => id),
 );
@@ -288,8 +344,10 @@ interface NativeAgentStartOptionsV1 {
   readonly catalogActivation?: Rfc64CatalogActivationInputV1;
   readonly activation?: Rfc64PublicCatalogActivationInputV1;
   readonly persistentStorePath?: string;
+  readonly sharedMemoryTtlMs?: number;
   readonly networkIdentityChainId?: NetworkIdV1;
   readonly syncContextGraphs?: readonly string[];
+  readonly contextGraphMembershipStore?: ContextGraphMembershipStore;
   /** Normal daemon identity input; intentionally independent of RFC-64 controls. */
   readonly operationalPrivateKey?: string;
   readonly omitLegacyDeployment?: boolean;
@@ -310,8 +368,10 @@ async function startNativeAgentWithOptions(
     catalogActivation,
     activation,
     persistentStorePath,
+    sharedMemoryTtlMs,
     beforeStart,
     syncContextGraphs,
+    contextGraphMembershipStore,
     operationalPrivateKey,
     omitLegacyDeployment = false,
     networkIdentityChainId = activation === undefined && catalogActivation === undefined
@@ -329,8 +389,10 @@ async function startNativeAgentWithOptions(
     bootstrapPeers: [],
     nodeRole: 'edge',
     store: new OxigraphStore(persistentStorePath),
+    ...(sharedMemoryTtlMs === undefined ? {} : { sharedMemoryTtlMs }),
     syncSharedMemoryOnConnect: false,
     syncReconcilerEnabled: false,
+    vmReconcilerEnabled: false,
     syncOnConnectEnabled: false,
     durableSyncEnabled: false,
     agentProfileHeartbeatMs: 0,
@@ -343,6 +405,7 @@ async function startNativeAgentWithOptions(
           ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
         ) ?? []
         : []),
+    contextGraphMembershipStore,
     rfc64CatalogAccessPolicyAuthority: accessPolicyAuthority,
     ...(networkIdentityChainId === undefined ? {} : {
       networkIdentity: {
@@ -913,12 +976,8 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         );
       },
     });
-    vi.spyOn(author, 'announceRfc64PublicCatalogHeadV1')
-      .mockImplementation(async ({ announcement, peers }) => ({
-        announcement,
-        announcedPeers: peers,
-        failedPeers: [],
-      }));
+    vi.spyOn(author, 'deliverRfc64CatalogHeadV1')
+      .mockImplementation(() => ({ status: 'queued' }));
     await expect(author.recordRfc64PublicCatalogAssetV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       assertionCoordinate: 'bounded-operational-status-applied-heads' as never,
@@ -929,8 +988,8 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const persistence = (author as any).rfc64PersistenceV1;
     const [appliedHead] = persistence.inventory.listAppliedCatalogHeadsV1();
     expect(appliedHead).toBeDefined();
-    const inventoryRead = vi.fn(() => (
-      Object.freeze(Array.from({ length: 18 }, () => appliedHead))
+    const inventoryRead = vi.fn(() => createAppliedCatalogHeadsSnapshotV1(
+      Array.from({ length: 18 }, () => appliedHead),
     ));
     const originalRead = persistence.controlObjects.getVerifiedObjectByDigest
       .bind(persistence.controlObjects);
@@ -958,7 +1017,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       rootPath: persistence.rootPath,
       inventory: Object.freeze({
         ...persistence.inventory,
-        listAppliedCatalogHeadsV1: inventoryRead,
+        readAppliedCatalogHeadsSnapshotV1: inventoryRead,
       }),
       swmAuthorInventory: persistence.swmAuthorInventory,
       finalizedPrivatePlacementRepairs: persistence.finalizedPrivatePlacementRepairs,
@@ -1441,12 +1500,8 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         );
       },
     });
-    const announce = vi.spyOn(author, 'announceRfc64PublicCatalogHeadV1')
-      .mockImplementation(async ({ announcement, peers }) => ({
-        announcement,
-        announcedPeers: peers,
-        failedPeers: [],
-      }));
+    const announce = vi.spyOn(author, 'deliverRfc64CatalogHeadV1')
+      .mockImplementation(() => ({ status: 'queued' }));
 
     expect((author as any).config.rfc64CatalogAuthoringPolicy).toMatchObject({
       byContextGraph: {
@@ -1493,7 +1548,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       ...accepted,
       policy: Object.freeze({ ...accepted.policy, accessPolicy: driftedAccessPolicy }),
     }));
-    const announce = vi.spyOn(author, 'announceRfc64PublicCatalogHeadV1');
+    const announce = vi.spyOn(author, 'deliverRfc64CatalogHeadV1');
 
     await expect(author.recordRfc64SwmAuthorInventoryShadowV1({
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -1651,12 +1706,8 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       .mockReturnValue(connectedPeerIdsWithDuplicates.map((peerId) => ({
         remotePeer: { toString: () => peerId },
       })) as never);
-    const announce = vi.spyOn(author, 'announceRfc64PublicCatalogHeadV1')
-      .mockImplementation(async ({ announcement, peers }) => ({
-        announcement,
-        announcedPeers: peers,
-        failedPeers: [],
-      }));
+    const announce = vi.spyOn(author, 'deliverRfc64CatalogHeadV1')
+      .mockImplementation(() => ({ status: 'queued' }));
     const assertionCoordinate = 'default-bounded-catalog-peers';
     const shareOperationId = 'default-bounded-catalog-peers-operation';
     await seedSignedSwmWorkspaceV1(author, {
@@ -1802,7 +1853,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       },
     });
     await connectBothWays(author, provider);
-    const announce = vi.spyOn(author, 'announceRfc64PublicCatalogHeadV1');
+    const announce = vi.spyOn(author, 'deliverRfc64CatalogHeadV1');
 
     expect((author as any).config.rfc64CatalogAuthoringPolicy)
       .toMatchObject({
@@ -1863,7 +1914,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       peers: [providerPeerId],
     });
 
-    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(provider);
     expect(provider.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
@@ -1903,7 +1954,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
     providerPeerAddresses.set(author.peerId, AUTHOR);
     await connectBothWays(author, provider);
-    const announce = vi.spyOn(author, 'announceRfc64PublicCatalogHeadV1');
+    const announce = vi.spyOn(author, 'deliverRfc64CatalogHeadV1');
 
     expect((author as any).config.rfc64CatalogAuthoringPolicy)
       .toMatchObject({
@@ -1967,7 +2018,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
     })).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
-    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(provider);
     expect(provider.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
@@ -2019,7 +2070,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
     })).toMatchObject({ catalogVersion: '2', inventoryRowCount: '2' });
-    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(provider);
     expect(provider.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
@@ -2068,7 +2119,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
     })).toMatchObject({ catalogVersion: '3', inventoryRowCount: '1' });
-    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(provider);
     expect(provider.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
@@ -2098,7 +2149,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
     })).toMatchObject({ catalogVersion: '4', inventoryRowCount: '0' });
-    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(provider);
     expect(provider.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
@@ -2188,7 +2239,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const startupProjectionGate = new Promise<void>((resolve) => {
       releaseStartupProjection = resolve;
     });
-    let announce: ReturnType<typeof vi.spyOn<DKGAgent, 'announceRfc64PublicCatalogHeadV1'>>;
+    let announce: ReturnType<typeof vi.spyOn<DKGAgent, 'deliverRfc64CatalogHeadV1'>>;
     const restarted = await startAuthorWithAdmissionBackoff({
       name: 'selected-private-startup-author-restarted',
       existingDataDir: dataDir,
@@ -2209,7 +2260,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
             await startupProjectionGate;
             return originalReconcile(...args);
           });
-        announce = vi.spyOn(agent, 'announceRfc64PublicCatalogHeadV1');
+        announce = vi.spyOn(agent, 'deliverRfc64CatalogHeadV1');
       },
     });
     providerPeerAddresses.set(restarted.peerId, AUTHOR);
@@ -2248,7 +2299,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       peers: [providerPeerId],
     }));
     await vi.waitFor(async () => {
-      await provider.whenRfc64PublicCatalogReceiverIdleV1();
+      await whenDeliveredAndReceiverIdle(provider);
       expect(provider.readRfc64AppliedCatalogHeadV1({
         catalogScopeDigest: catalogScopeDigest(),
         authorAddress: AUTHOR,
@@ -3421,6 +3472,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
           reconciliationLane: 'catalog-apply',
         }),
         resolveRecoveryConfig: () => normalizedSnapshot,
+        resolveDynamicallyAcceptedPolicy: () => null,
       },
       admission: { invalidateContextGraph: () => [] },
       cooldown: { deleteProvider: () => undefined },
@@ -3471,6 +3523,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       store: new OxigraphStore(),
       syncOnConnectEnabled: false,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
       syncContextGraphs: [CONTEXT_GRAPH_ID],
       agentProfileHeartbeatMs: 0,
       rfc64CatalogDeploymentProfile: NATIVE_DEPLOYMENT,
@@ -3562,6 +3615,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       contextGraphSubscriptionStore: seededSubscriptionStore(CONTEXT_GRAPH_ID),
       syncOnConnectEnabled: true,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
       syncContextGraphs: [CONTEXT_GRAPH_ID],
       agentProfileHeartbeatMs: 0,
       rfc64CatalogDeploymentProfile: NATIVE_DEPLOYMENT,
@@ -3634,6 +3688,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       store: new OxigraphStore(),
       syncOnConnectEnabled: true,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
       syncContextGraphs: [CONTEXT_GRAPH_ID],
       agentProfileHeartbeatMs: 0,
       rfc64CatalogDeploymentProfile: NATIVE_DEPLOYMENT,
@@ -3701,6 +3756,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       store: new OxigraphStore(),
       syncOnConnectEnabled: true,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
       syncContextGraphs: [],
       agentProfileHeartbeatMs: 0,
       networkIdentity: {
@@ -3781,6 +3837,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       durableSyncEnabled: true,
       syncOnConnectEnabled: false,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
       syncContextGraphs: [authority.policy.contextGraphId],
       agentProfileHeartbeatMs: 0,
       networkIdentity: {
@@ -3906,6 +3963,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       store: new OxigraphStore(),
       syncOnConnectEnabled: false,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
       syncStalenessThresholdMs: 60_000,
       syncContextGraphs: [CONTEXT_GRAPH_ID],
       agentProfileHeartbeatMs: 0,
@@ -3981,6 +4039,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       store: new OxigraphStore(),
       syncOnConnectEnabled: false,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
       syncStalenessThresholdMs: 60_000,
       syncContextGraphs: [CONTEXT_GRAPH_ID],
       agentProfileHeartbeatMs: 0,
@@ -4051,6 +4110,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       store: new OxigraphStore(),
       syncOnConnectEnabled: false,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
       syncContextGraphs: [CONTEXT_GRAPH_ID],
       agentProfileHeartbeatMs: 0,
       rfc64CatalogDeploymentProfile: NATIVE_DEPLOYMENT,
@@ -4118,6 +4178,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       store: new OxigraphStore(),
       syncOnConnectEnabled: false,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
       syncContextGraphs: [CONTEXT_GRAPH_ID],
       agentProfileHeartbeatMs: 0,
       rfc64CatalogDeploymentProfile: NATIVE_DEPLOYMENT,
@@ -4561,7 +4622,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       seal,
     });
     expect(first).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
-    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(receiver);
 
     const scopeDigest = catalogScopeDigest();
     expect(author.readRfc64AppliedCatalogHeadV1({
@@ -4623,7 +4684,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       seal: assertionSealFromCanonical(await authorSeal(12n)),
     });
     expect(second).toMatchObject({ catalogVersion: '2', inventoryRowCount: '2' });
-    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(receiver);
     expect(receiver.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: scopeDigest,
       authorAddress: AUTHOR,
@@ -5174,7 +5235,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         await successorGate;
         return originalPublish(params);
       });
-    const announce = vi.spyOn(author, 'announceRfc64PublicCatalogHeadV1');
+    const announce = vi.spyOn(author, 'deliverRfc64CatalogHeadV1');
     const abortController = new AbortController();
     const reconciliation = author.reconcileRfc64PublicRootCatalogExactSetV1({
       scope: {
@@ -5215,6 +5276,63 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       authorAddress: AUTHOR,
     })).toBeNull();
     expect(announce).not.toHaveBeenCalled();
+  }, 60_000);
+
+  it('hands a cancellation to the successor it has already begun to publish', async () => {
+    const author = await startNativeAgent('r1-3-cancellation-forwarded-author');
+    author.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const originalPublish = author.publishAuthorCatalogExactSetSuccessorV1.bind(author);
+    // The genesis is signed first; only signatures made after the publication
+    // was entered belong to the successor.
+    const signMessage = vi.fn((message: Uint8Array) => AUTHOR_WALLET.signMessage(message));
+    let signaturesBeforeSuccessor = -1;
+    let publicationSettled: Promise<unknown> | undefined;
+    const abortController = new AbortController();
+    vi.spyOn(author, 'publishAuthorCatalogExactSetSuccessorV1')
+      .mockImplementationOnce((params) => {
+        signaturesBeforeSuccessor = signMessage.mock.calls.length;
+        // The caller gives up while the runtime stays open, so nothing but the
+        // cancellation itself can stop the publication that follows.
+        abortController.abort(new Error('test cancellation'));
+        const publication = originalPublish(params);
+        publicationSettled = publication.then(() => 'published', () => 'stopped');
+        return publication;
+      });
+
+    await expect(author.reconcileRfc64PublicRootCatalogExactSetV1({
+      scope: {
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        governanceChainId: null,
+        governanceContractAddress: null,
+        ownershipTransitionDigest: null,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        era: '0',
+        bucketCount: '1',
+      },
+      author: { address: AUTHOR_WALLET.address, signMessage },
+      assets: [{
+        assertionCoordinate: 'r1-3-cancellation-forwarded' as never,
+        projectionBytes: PROJECTION,
+        seal: await authorSeal(75n),
+      }],
+      deployment: NATIVE_DEPLOYMENT,
+      peers: [],
+      catalogIssuerDelegationEffectiveAt: '0' as TimestampMsV1,
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      signal: abortController.signal,
+    })).rejects.toThrow(/test cancellation|aborted/u);
+    // The caller is released at once; the publication itself settles later.
+    await expect(publicationSettled).resolves.toBe('stopped');
+
+    expect(signaturesBeforeSuccessor).toBeGreaterThan(0);
+    // No object of the successor was signed, so none could be staged.
+    expect(signMessage).toHaveBeenCalledTimes(signaturesBeforeSuccessor);
   }, 60_000);
 
   registerM0RecoveryScenario('cold-restart', rfc64M0RecoveryTitle('cold-restart'), async () => {
@@ -5765,6 +5883,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       startNativeAgent('author'),
       startNativeAgent('receiver'),
     ]);
+    const readinessRequests = vi.fn();
+    const syncCompletions = vi.fn();
+    receiver.eventBus.on(DKGEvent.CATALOG_READINESS_CHECK_REQUESTED, readinessRequests);
+    receiver.eventBus.on(DKGEvent.PROJECT_SYNCED, syncCompletions);
     const receiverPolicy = receiver.acceptOpenContextGraphPolicyV1({
       networkId: NETWORK_ID,
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -5789,7 +5911,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
     expect(delivery.announcedPeers).toEqual([receiver.peerId]);
     expect(delivery.failedPeers).toEqual([]);
-    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(receiver);
+
+    expect(readinessRequests).toHaveBeenCalledWith({ contextGraphId: CONTEXT_GRAPH_ID });
+    expect(syncCompletions).not.toHaveBeenCalled();
 
     const scopeDigest = catalogScopeDigest();
     expect(receiver.readRfc64AppliedCatalogHeadV1({
@@ -5824,7 +5949,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       peers: [receiver.peerId],
     });
     expect(replay.announcedPeers).toEqual([receiver.peerId]);
-    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(receiver);
     expect(receiver.rfc64PublicCatalogStatsV1()?.receiver).toMatchObject({
       applied: 1,
       dedupedAlreadyApplied: 1,
@@ -5837,7 +5962,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
   it('keeps status incomplete until a replayed successor is durably applied', async () => {
     const [provider, receiver] = await Promise.all([
       startNativeAgent('replay-completion-provider'),
-      startNativeAgent('replay-completion-receiver'),
+      startNativeAgentWithOptions({
+        name: 'replay-completion-receiver',
+        operationalPrivateKey: AUTHOR_WALLET.privateKey,
+      }),
     ]);
     await receiver.createContextGraph({
       id: CONTEXT_GRAPH_ID,
@@ -5883,7 +6011,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       }),
       peers: [receiver.peerId],
     });
-    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(receiver);
     await expect(receiver.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
       expect.objectContaining({
         contextGraphId: CONTEXT_GRAPH_ID,
@@ -5947,10 +6075,117 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     );
   }, 60_000);
 
+  it('brings a peer that missed the delivery of two heads up to date through replay', async () => {
+    // GH#3081 — delivery is best-effort and keeps only the newest head of a scope. A peer that
+    // missed announcements converges on the current head through replay, across the versions it
+    // never heard of.
+    const [provider, receiver] = await Promise.all([
+      startNativeAgent('missed-delivery-replay-provider'),
+      startNativeAgentWithOptions({
+        name: 'missed-delivery-replay-receiver',
+        operationalPrivateKey: AUTHOR_WALLET.privateKey,
+      }),
+    ]);
+    await receiver.createContextGraph({
+      id: CONTEXT_GRAPH_ID,
+      name: 'Missed delivery replay graph',
+      callerAgentAddress: AUTHOR,
+    });
+    await receiver.whenRfc64CatalogResponsibilitiesIdleV1();
+    for (const agent of [receiver, provider]) {
+      agent.acceptOpenContextGraphPolicyV1({
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        ownerAddress: AUTHOR,
+      });
+    }
+    await connectBothWays(provider, receiver);
+    const commonMutation = Object.freeze({
+      scope: Object.freeze({
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        governanceChainId: null,
+        governanceContractAddress: null,
+        ownershipTransitionDigest: null,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        era: '0',
+        bucketCount: '1',
+      }) as const,
+      author: AUTHOR_WALLET,
+      deployment: NATIVE_DEPLOYMENT,
+      catalogIssuerDelegationEffectiveAt: '0' as TimestampMsV1,
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+      peers: [receiver.peerId],
+    });
+    const publish = async (assertionCoordinate: string, kaNumber: bigint) => (
+      provider.upsertConfirmedRfc64PublicRootCatalogAssetV1({
+        ...commonMutation,
+        asset: Object.freeze({
+          assertionCoordinate: assertionCoordinate as never,
+          projectionBytes: PROJECTION,
+          seal: await authorSeal(kaNumber),
+        }),
+      })
+    );
+    const receiverApplied = () => receiver.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    });
+
+    const first = await publish('missed-delivery-first', 93n);
+    await whenDeliveredAndReceiverIdle(receiver);
+    expect(receiverApplied()).toMatchObject({
+      currentCatalogHeadDigest: first.currentCatalogHeadDigest,
+      catalogVersion: '1',
+    });
+
+    // Every announcement to the receiver now fails on the wire.
+    const router = (provider as any).router;
+    const send = router.send.bind(router);
+    let lostAnnouncements = 0;
+    const lossy = vi.spyOn(router, 'send').mockImplementation((...args: any[]) => {
+      if (args[1] !== RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1) return send(...args);
+      lostAnnouncements += 1;
+      return Promise.reject(new Error('stream reset by peer'));
+    });
+    await publish('missed-delivery-second', 94n);
+    const third = await publish('missed-delivery-third', 95n);
+    expect(third).toMatchObject({ catalogVersion: '3', inventoryRowCount: '3' });
+    await whenDeliveredAndReceiverIdle(receiver);
+    expect(lostAnnouncements).toBeGreaterThan(0);
+    expect(receiverApplied()).toMatchObject({
+      currentCatalogHeadDigest: first.currentCatalogHeadDigest,
+      catalogVersion: '1',
+    });
+    lossy.mockRestore();
+
+    await expect(receiver.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(CONTEXT_GRAPH_ID))
+      .resolves.toEqual({ requested: 1, failed: 0 });
+
+    // The receiver jumps from version 1 to the current head, version 3.
+    expect(receiverApplied()).toMatchObject({
+      currentCatalogHeadDigest: third.currentCatalogHeadDigest,
+      catalogVersion: '3',
+      inventoryRowCount: '3',
+    });
+    await expect(receiver.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
+      expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        phase: 'complete',
+        appliedCatalogHeadDigest: third.currentCatalogHeadDigest,
+        missingRowCount: '0',
+      }),
+    );
+  }, 60_000);
+
   it('keeps multi-author replay applying after one promised head lands', async () => {
     const [provider, receiver] = await Promise.all([
       startNativeAgent('multi-head-replay-provider'),
-      startNativeAgent('multi-head-replay-receiver'),
+      startNativeAgentWithOptions({
+        name: 'multi-head-replay-receiver',
+        operationalPrivateKey: AUTHOR_WALLET.privateKey,
+      }),
     ]);
     await receiver.createContextGraph({
       id: CONTEXT_GRAPH_ID,
@@ -6011,7 +6246,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       }),
       peers: [receiver.peerId],
     });
-    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(receiver);
 
     const successorPrimary = await provider.upsertConfirmedRfc64PublicRootCatalogAssetV1({
       ...commonMutation,
@@ -6066,7 +6301,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     );
     try {
       await secondEntered;
-      await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+      await whenDeliveredAndReceiverIdle(receiver);
       const primaryApplied = receiver.readRfc64AppliedCatalogHeadV1({
         catalogScopeDigest: computeAuthorCatalogScopeDigestV1(primaryScope),
         authorAddress: AUTHOR,
@@ -6111,7 +6346,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const [author, provider, receiver] = await Promise.all([
       startNativeAgent('status-target-author'),
       startNativeAgent('status-target-provider'),
-      startNativeAgent('status-target-receiver'),
+      startNativeAgentWithOptions({
+        name: 'status-target-receiver',
+        operationalPrivateKey: AUTHOR_WALLET.privateKey,
+      }),
     ]);
     await receiver.createContextGraph({
       id: CONTEXT_GRAPH_ID,
@@ -6147,8 +6385,8 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogIssuerDelegationExpiresAt: MULTI_DELEGATION_EXPIRES_AT,
     });
     expect(genesis.announcement.policyDigest).toBe(authorPolicy.policyDigest);
-    await provider.whenRfc64PublicCatalogReceiverIdleV1();
-    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(provider);
+    await whenDeliveredAndReceiverIdle(receiver);
     await expect(receiver.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
       expect.objectContaining({
         contextGraphId: CONTEXT_GRAPH_ID,
@@ -6198,7 +6436,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         peers: [receiver.peerId],
       });
     }
-    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(receiver);
 
     await expect(receiver.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
       expect.objectContaining({
@@ -6228,7 +6466,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       issuedAt: SUCCESSOR_ISSUED_AT,
       peers: [provider.peerId],
     });
-    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(provider);
     let releaseReconciliation!: () => void;
     let markedReconciliationEntered = false;
     const reconciliationGate = new Promise<void>((resolve) => {
@@ -6277,7 +6515,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       releaseReconciliation();
       try {
         await Promise.allSettled([synchronization]);
-        await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+        await whenDeliveredAndReceiverIdle(receiver);
       } finally {
         reconcileSpy.mockRestore();
       }
@@ -6309,7 +6547,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       issuedAt: (BigInt(SUCCESSOR_ISSUED_AT) + 1n).toString() as TimestampMsV1,
       peers: [provider.peerId],
     });
-    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(provider);
     let releaseRotationReconciliation!: () => void;
     let rotationReconciliationEntered = false;
     const rotationGate = new Promise<void>((resolve) => {
@@ -6376,7 +6614,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       releaseRotationReconciliation();
       try {
         await Promise.allSettled([rotationSynchronization]);
-        await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+        await whenDeliveredAndReceiverIdle(receiver);
       } finally {
         rotationReconcileSpy.mockRestore();
       }
@@ -6440,7 +6678,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
       catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
     });
-    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(provider);
 
     let releaseReconciliation!: () => void;
     let reconciliationEntered = false;
@@ -6498,7 +6736,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       releaseReconciliation();
       try {
         await Promise.allSettled([synchronization]);
-        await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+        await whenDeliveredAndReceiverIdle(receiver);
       } finally {
         reconcileSpy.mockRestore();
       }
@@ -6512,7 +6750,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const [author, provider, receiver] = await Promise.all([
       startNativeAgent('late-activation-author'),
       startNativeAgent('late-activation-provider'),
-      startNativeAgent('late-activation-receiver'),
+      startNativeAgentWithOptions({
+        name: 'late-activation-receiver',
+        operationalPrivateKey: AUTHOR_WALLET.privateKey,
+      }),
     ]);
     provider.acceptOpenContextGraphPolicyV1({
       networkId: NETWORK_ID,
@@ -6529,7 +6770,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
       catalogIssuerDelegationExpiresAt: DELEGATION_EXPIRES_AT,
     });
-    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(provider);
     expect(provider.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
@@ -6540,7 +6781,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
     const replay = vi.spyOn(provider, 'tryQueueRfc64CatalogHeadReplayV1');
     await connectBothWays(provider, receiver);
-    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(receiver);
     expect(receiver.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
@@ -6577,13 +6818,27 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         inventoryRowCount: '0',
       });
     }, { timeout: 10_000 });
-    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(receiver);
   }, 60_000);
 
   it('retires a captured legacy boundary only after successful production reconciliation', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-legacy-reconcile-'));
     tempDirs.push(dataDir);
     const persistentStorePath = join(dataDir, 'oxigraph');
+    const originRecords: LocalContextGraphOriginRecord[] = [];
+    const contextGraphMembershipStore: ContextGraphMembershipStore = {
+      loadAll: async () => [],
+      upsert: async () => undefined,
+      delete: async () => undefined,
+      localOrigins: {
+        loadLocalOrigins: async () => originRecords.map((record) => ({ ...record })),
+        recordLocalOrigin: async (record) => {
+          if (!originRecords.some(({ contextGraphId }) => contextGraphId === record.contextGraphId)) {
+            originRecords.push({ ...record });
+          }
+        },
+      },
+    };
     const assertionCoordinate = 'legacy-boundary-republish';
     const shareOperationId = 'legacy-boundary-share';
     let seeded!: Awaited<ReturnType<typeof seedSignedSwmWorkspaceV1>>;
@@ -6591,6 +6846,9 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       name: 'legacy-boundary-author',
       existingDataDir: dataDir,
       persistentStorePath,
+      sharedMemoryTtlMs: 0,
+      operationalPrivateKey: AUTHOR_WALLET.privateKey,
+      contextGraphMembershipStore,
       beforeStart: async (agent) => {
         vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
           AUTHOR_WALLET.privateKey,
@@ -6647,6 +6905,8 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       existingDataDir: dataDir,
       persistentStorePath,
       syncContextGraphs: [CONTEXT_GRAPH_ID],
+      sharedMemoryTtlMs: 0,
+      contextGraphMembershipStore,
       beforeStart: (agent) => {
         vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
           AUTHOR_WALLET.privateKey,
@@ -6686,6 +6946,8 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       existingDataDir: dataDir,
       persistentStorePath,
       syncContextGraphs: [CONTEXT_GRAPH_ID],
+      sharedMemoryTtlMs: 0,
+      contextGraphMembershipStore,
       beforeStart: (agent) => {
         vi.spyOn(agent, 'getCustodialAgentPrivateKey').mockReturnValue(
           AUTHOR_WALLET.privateKey,
@@ -6703,7 +6965,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     );
   }, 60_000);
 
-  it('publishes inherited deprecated-public catalog authority without a legacy boundary', async () => {
+  it('captures an inherited deprecated-public root boundary before exact catalog publication', async () => {
     const policy = buildOpenOwnerContextGraphPolicyV1({
       networkId: NETWORK_ID,
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -6789,7 +7051,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     )).resolves.toMatchObject({
       promotedAllRoots: true,
     });
-    expect(readRfc64LegacySwmBoundaryCountV1(author, CONTEXT_GRAPH_ID)).toBe(0);
+    expect(readRfc64LegacySwmBoundaryCountV1(author, CONTEXT_GRAPH_ID)).toBe(1);
   }, 60_000);
 
   it('keeps a root SHARE written after legacy capture incomplete across catalog re-enable', async () => {
@@ -6997,7 +7259,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
       catalogIssuerDelegationExpiresAt: MULTI_DELEGATION_EXPIRES_AT,
     });
-    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(receiver);
     expect(requestRepair).not.toHaveBeenCalled();
 
     localAgents.mockReturnValue([{ agentAddress: AUTHOR } as never]);
@@ -7015,7 +7277,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       issuedAt: SUCCESSOR_ISSUED_AT,
       peers: [receiver.peerId],
     });
-    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(receiver);
     expect(requestRepair).toHaveBeenCalledOnce();
     expect(requestRepair).toHaveBeenCalledWith(expect.objectContaining({
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -7133,7 +7395,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
       catalogIssuerDelegationExpiresAt: MULTI_DELEGATION_EXPIRES_AT,
     });
-    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(receiver);
 
     const firstAsset = {
       assertionCoordinate: 'gate-2-object-1' as never,
@@ -7152,7 +7414,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       issuedAt: SUCCESSOR_ISSUED_AT,
       peers: [receiver.peerId],
     });
-    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(receiver);
 
     const successor = await author.publishAuthorCatalogExactSetSuccessorV1({
       previousHead: {
@@ -7175,7 +7437,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
     expect(successor.inventoryRowCount).toBe('2');
     expect(successor.announcedPeers).toEqual([receiver.peerId]);
-    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(receiver);
 
     const evidence = receiver.readRfc64PublicCatalogSynchronizationEvidenceV1(
       successor.headObjectDigest,
@@ -7198,10 +7460,25 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       peers: [receiver.peerId],
     });
     expect(replay.announcedPeers).toEqual([receiver.peerId]);
-    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(receiver);
     expect(receiver.rfc64PublicCatalogStatsV1()?.receiver).toMatchObject({
       applied: 3,
       dedupedAlreadyApplied: 1,
+    });
+
+    // That check verified the exact staged head once. Every later connect
+    // re-announces the head; each is now answered without a receiver task.
+    const beforeReconnects = receiver.rfc64PublicCatalogStatsV1()!;
+    for (let connect = 0; connect < 3; connect += 1) {
+      await expect(author.announceRfc64PublicCatalogHeadV1({
+        announcement: successor.announcement,
+        peers: [receiver.peerId],
+      })).resolves.toMatchObject({ announcedPeers: [receiver.peerId] });
+    }
+    await whenDeliveredAndReceiverIdle(receiver);
+    expect(receiver.rfc64PublicCatalogStatsV1()).toMatchObject({
+      announcedHeadsAlreadySatisfied: beforeReconnects.announcedHeadsAlreadySatisfied + 3,
+      receiver: beforeReconnects.receiver,
     });
 
     const oneRow = await author.publishAuthorCatalogExactSetSuccessorV1({
@@ -7216,7 +7493,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       issuedAt: '1773900003000' as TimestampMsV1,
       peers: [receiver.peerId],
     });
-    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(receiver);
     const empty = await author.publishAuthorCatalogExactSetSuccessorV1({
       previousHead: {
         objectDigest: oneRow.headObjectDigest,
@@ -7229,7 +7506,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       issuedAt: '1773900004000' as TimestampMsV1,
       peers: [receiver.peerId],
     });
-    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(receiver);
     expect(empty).toMatchObject({
       inventoryRowCount: '0',
       signedBucketRowCount: '0',
@@ -7267,6 +7544,111 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         `SELECT ?s WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } } LIMIT 1`,
       )).resolves.toMatchObject({ type: 'bindings', bindings: [] });
     }
+  }, 60_000);
+
+  it('replays an exact applied head through the production receiver to retire a late legacy boundary', async () => {
+    const [author, receiver] = await Promise.all([
+      startNativeAgent('late-boundary-replay-author'),
+      startNativeAgent('late-boundary-replay-receiver'),
+    ]);
+    receiver.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    await connectBothWays(author, receiver);
+
+    const genesis = await author.publishOpenAuthorCatalogGenesisV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      author: AUTHOR_WALLET,
+      peers: [receiver.peerId],
+      issuedAt: FIXED_HEAD_ISSUED_AT,
+      catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
+      catalogIssuerDelegationExpiresAt: MULTI_DELEGATION_EXPIRES_AT,
+    });
+    await whenDeliveredAndReceiverIdle(receiver);
+    const seal = await authorSeal(91n);
+    const applied = await author.publishAuthorCatalogExactSetSuccessorV1({
+      previousHead: {
+        objectDigest: genesis.headObjectDigest,
+        signatureVariantDigest: genesis.signatureVariantDigest,
+      },
+      author: AUTHOR_WALLET,
+      catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+      assets: [{
+        assertionCoordinate: 'late-boundary-replay' as never,
+        projectionBytes: PROJECTION,
+        seal,
+      }],
+      deployment: NATIVE_DEPLOYMENT,
+      issuedAt: SUCCESSOR_ISSUED_AT,
+      peers: [receiver.peerId],
+    });
+    await whenDeliveredAndReceiverIdle(receiver);
+    const reannounce = async () => {
+      await expect(author.announceRfc64PublicCatalogHeadV1({
+        announcement: applied.announcement,
+        peers: [receiver.peerId],
+      })).resolves.toMatchObject({ announcedPeers: [receiver.peerId] });
+      await whenDeliveredAndReceiverIdle(receiver);
+    };
+
+    // With no boundary outstanding, the exact applied head is only deduplicated,
+    // and from then on it is answered without a receiver task at all.
+    await reannounce();
+    await reannounce();
+    const settled = receiver.rfc64PublicCatalogStatsV1()!;
+    expect(settled.receiver).toMatchObject({ applied: 2, dedupedAlreadyApplied: 1 });
+    expect(readRfc64LegacySwmBoundaryCountV1(receiver, CONTEXT_GRAPH_ID)).toBe(0);
+
+    // A legacy root share of the already-applied row commits its marker late.
+    const marker = prepareRfc64LateLegacySwmBoundaryV1(
+      receiver,
+      CONTEXT_GRAPH_ID,
+      seal.kaUal,
+      'late-boundary-replay-share',
+      seal.assertionVersion,
+    );
+    await receiver.store.insert([...marker.quads]);
+    marker.settle(true);
+    const storedMarkerRows = async () => {
+      const result = await receiver.store.query(
+        `SELECT ?p WHERE { GRAPH <${marker.graphUri}> { <${marker.subject}> ?p ?o } }`,
+      );
+      return result.type === 'bindings' ? result.bindings.length : -1;
+    };
+    expect(readRfc64LegacySwmBoundaryCountV1(receiver, CONTEXT_GRAPH_ID)).toBe(1);
+    expect(await storedMarkerRows()).toBe(1);
+
+    // The same head must now be replayed, not deduplicated: only the replay
+    // retires the marker under the receiver's boundary lease.
+    await reannounce();
+    const replayed = receiver.rfc64PublicCatalogStatsV1()!;
+    expect(replayed.receiver).toMatchObject({
+      applied: settled.receiver.applied + 1,
+      dedupedAlreadyApplied: settled.receiver.dedupedAlreadyApplied,
+    });
+    expect(replayed.announcedHeadsAlreadySatisfied)
+      .toBe(settled.announcedHeadsAlreadySatisfied);
+    expect(receiver.readRfc64PublicCatalogReconciliationFailureV1(
+      applied.headObjectDigest,
+    )).toBeNull();
+    expect(readRfc64LegacySwmBoundaryCountV1(receiver, CONTEXT_GRAPH_ID)).toBe(0);
+    expect(await storedMarkerRows()).toBe(0);
+    expect(receiver.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      currentCatalogHeadDigest: applied.headObjectDigest,
+      inventoryRowCount: '1',
+    });
+
+    // With the boundary retired, the head is satisfied again.
+    await reannounce();
+    expect(receiver.rfc64PublicCatalogStatsV1()!.receiver).toMatchObject({
+      applied: replayed.receiver.applied,
+    });
   }, 60_000);
 
   it('preserves a single-provider discovery error without aggregation', async () => {
@@ -7386,7 +7768,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
       catalogIssuerDelegationExpiresAt: MULTI_DELEGATION_EXPIRES_AT,
     });
-    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(provider);
     const successor = await author.publishOpenAuthorCatalogSuccessorV1({
       previousHead: {
         objectDigest: genesis.headObjectDigest,
@@ -7401,7 +7783,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       issuedAt: SUCCESSOR_ISSUED_AT,
       peers: [provider.peerId],
     });
-    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(provider);
     expect(provider.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
@@ -7495,7 +7877,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
       catalogIssuerDelegationExpiresAt: MULTI_DELEGATION_EXPIRES_AT,
     });
-    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(provider);
     const successor = await author.publishOpenAuthorCatalogSuccessorV1({
       previousHead: {
         objectDigest: genesis.headObjectDigest,
@@ -7510,7 +7892,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       issuedAt: SUCCESSOR_ISSUED_AT,
       peers: [provider.peerId],
     });
-    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(provider);
 
     const cold = await startNativeAgent('failure-late-receiver');
     cold.acceptOpenContextGraphPolicyV1({
@@ -7680,7 +8062,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     allowAllNetworkAdmissionForTest(author);
     peerAddresses.set(author.peerId, AUTHOR);
     await connectBothWays(author, provider);
-    let announce = vi.spyOn(author, 'announceRfc64PublicCatalogHeadV1');
+    let announce = vi.spyOn(author, 'deliverRfc64CatalogHeadV1');
     const assertionCoordinate = 'finalized-private-auto-publish';
     const shareOperationId = 'finalized-private-auto-publish-operation';
     const { seal, assertionUri } = await seedSignedSwmWorkspaceV1(author, {
@@ -7766,6 +8148,8 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       ctx: createOperationContext('publish'),
       publicationLabel: 'publish',
     });
+    // The observer returns once the placement is owed; the supervisor attempts it a turn later.
+    await author.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     // Confirmation is durable, but the injected first placement failure must
     // leave the pending row intact rather than losing the transition.
     expect(author.readRfc64AppliedCatalogHeadV1({
@@ -7875,7 +8259,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         catalogEra: policy.era,
       },
     });
-    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(provider);
     const authorHead = author.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
       authorAddress: AUTHOR,
@@ -8032,7 +8416,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         catalogEra: policy.era,
       },
     });
-    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(provider);
     expect(provider.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
       authorAddress: AUTHOR,
@@ -8414,7 +8798,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
       catalogIssuerDelegationExpiresAt: MULTI_DELEGATION_EXPIRES_AT,
     });
-    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(provider);
     expect(provider.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
       authorAddress: AUTHOR,
@@ -8438,7 +8822,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       issuedAt: SUCCESSOR_ISSUED_AT,
       peers: [provider.peerId],
     });
-    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(provider);
     expect(provider.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
       authorAddress: AUTHOR,
@@ -8733,7 +9117,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogIssuerDelegationExpiresAt: MULTI_DELEGATION_EXPIRES_AT,
     });
     expect(genesis.announcedPeers).toEqual([receiver.peerId]);
-    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(receiver);
     expect(receiver.readRfc64PublicCatalogReconciliationFailureV1(
       genesis.headObjectDigest,
     )).toEqual({
@@ -8745,6 +9129,162 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
       authorAddress: AUTHOR,
     })).toBeNull();
+  }, 60_000);
+
+  it.each([
+    { lane: 'policy', accessPolicy: 0, authority: 'available' },
+    { lane: 'policy', accessPolicy: 0, authority: 'unavailable' },
+    { lane: 'VM', accessPolicy: 1, authority: 'available' },
+    { lane: 'VM', accessPolicy: 1, authority: 'unavailable' },
+  ] as const)('cold finalized registration $lane successor with $authority authority', async ({
+    lane, accessPolicy, authority,
+  }) => {
+    const nameHash = ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH_ID)).toLowerCase() as Digest32V1;
+    const asset = Object.freeze({
+      assertionRoot: ASSERTION_ROOT,
+      assertionVersion: '1',
+      authorAddress: AUTHOR,
+      kaId: ((BigInt(AUTHOR) << 96n) | 41n).toString(),
+      publisherAddress: AUTHOR,
+    });
+    const fixture = (withAsset: boolean) => Object.freeze({
+      accessPolicy,
+      active: true,
+      assertedAtChainId: NATIVE_DEPLOYMENT.assertedAtChainId,
+      assertedAtKav10Address: KAV10,
+      knowledgeAssetStorageAddress: KA_STORAGE,
+      assets: Object.freeze(withAsset ? [asset] : []),
+      blockHash: FINALIZED_BLOCK_HASH,
+      blockNumberQuantity: '0x7c',
+      contextGraphStorageAddress: CONTEXT_GRAPH_STORAGE,
+      nameHash,
+      networkId: NETWORK_ID,
+      onChainContextGraphId: '582',
+      ownerAddress: AUTHOR,
+      participantAgents: Object.freeze(accessPolicy === 1 ? [AUTHOR] : []),
+      publishPolicy: accessPolicy === 0 ? 1 : 0,
+    } satisfies FinalizedVmLoopbackFixtureConfigV1);
+    const emptyFixture = fixture(false);
+    let finalizedRpc = createFinalizedVmLoopbackRpcV1(emptyFixture);
+    const rpc = await rpcHarness.start((call, response) => {
+      try {
+        sendJsonRpcResult(response, call, finalizedRpc.respond(call.method, call.params));
+      } catch (cause) {
+        sendJsonRpcError(response, call, -32602, cause instanceof Error ? cause.message : String(cause));
+      }
+    });
+    const receiverChain = new ColdFinalizedCatalogChainV1(emptyFixture);
+    const receiver = await startNativeAgentWithOptions({
+      name: `cold-finalized-${lane}-${authority}-receiver`,
+      networkIdentityChainId: NETWORK_ID,
+      syncContextGraphs: [],
+      accessPolicyAuthority: {
+        localAgentAddress: AUTHOR,
+        resolveRemoteAgentAddress: async () => AUTHOR,
+      },
+      finalizedRuntime: { rpcUrl: rpc.url, chainAdapter: receiverChain },
+    });
+    const author = await startNativeAgentWithOptions({
+      name: `cold-finalized-${lane}-${authority}-author`,
+      networkIdentityChainId: NETWORK_ID,
+      accessPolicyAuthority: {
+        localAgentAddress: AUTHOR,
+        resolveRemoteAgentAddress: async () => AUTHOR,
+      },
+    });
+    const accepted = composeRfc64FinalizedCatalogAuthorityV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      snapshot: parseRfc64AuthoritySnapshotV1(
+        await receiverChain.getContextGraphAuthoritySnapshot(582n), 582n,
+      ),
+    });
+    for (const agent of [author, receiver]) {
+      agent.acceptRfc64CatalogAccessSnapshotV1({
+        policy: accepted.policy, policyDigest: accepted.policyDigest, roster: accepted.roster,
+      });
+    }
+    await connectBothWays(author, receiver);
+    const scope = {
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: accepted.policy.governanceChainId,
+      governanceContractAddress: accepted.policy.governanceContractAddress,
+      ownershipTransitionDigest: accepted.policy.ownershipTransitionDigest,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: accepted.policy.era,
+      bucketCount: '1',
+    } as const;
+    const appliedScope = {
+      catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope), authorAddress: AUTHOR,
+    };
+    const genesis = await author.publishAuthorCatalogGenesisV1({
+      scope,
+      author: AUTHOR_WALLET,
+      peers: [receiver.peerId],
+      issuedAt: FIXED_HEAD_ISSUED_AT,
+      catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
+      catalogIssuerDelegationExpiresAt: MULTI_DELEGATION_EXPIRES_AT,
+    });
+    await whenDeliveredAndReceiverIdle(receiver);
+    const previousAppliedHead = receiver.readRfc64AppliedCatalogHeadV1(appliedScope);
+    expect(previousAppliedHead).toMatchObject({
+      currentCatalogHeadDigest: genesis.headObjectDigest, inventoryRowCount: '0',
+    });
+    // Registration discovery must not silently admit or persist a current binding.
+    expect(receiver.getSubscribedContextGraphs().has(CONTEXT_GRAPH_ID)).toBe(false);
+    expect(receiver.getSubscribedContextGraphs().has(nameHash)).toBe(false);
+    await expect(receiver.store.query(contextGraphOnChainIdBindingQuery(
+      CONTEXT_GRAPH_ID, { includeConflicts: true },
+    ))).resolves.toMatchObject({ type: 'bindings', bindings: [] });
+    await expect(receiver.getContextGraphOnChainId(CONTEXT_GRAPH_ID)).resolves.toBeNull();
+
+    const readerCallsBeforeSuccessor = receiverChain.finalizedNameReads.length;
+    receiverChain.authorityAvailable = authority === 'available';
+    finalizedRpc = createFinalizedVmLoopbackRpcV1(fixture(true));
+    const successor = await author.publishAuthorCatalogExactSetSuccessorV1({
+      previousHead: {
+        objectDigest: genesis.headObjectDigest, signatureVariantDigest: genesis.signatureVariantDigest,
+      },
+      author: AUTHOR_WALLET,
+      catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+      assets: [{
+        assertionCoordinate: `cold-finalized-${lane}-41` as never,
+        projectionBytes: PROJECTION,
+        seal: await authorSeal(41n),
+      }],
+      deployment: NATIVE_DEPLOYMENT,
+      issuedAt: SUCCESSOR_ISSUED_AT,
+      peers: [receiver.peerId],
+    });
+    await whenDeliveredAndReceiverIdle(receiver);
+    const successorReads = receiverChain.finalizedNameReads.slice(readerCallsBeforeSuccessor);
+    expect(successorReads.length).toBeGreaterThan(0);
+    for (const read of successorReads) {
+      expect(read.nameHashes).toEqual([nameHash]);
+      expect(read.signal).toBeInstanceOf(AbortSignal);
+      expect(read.returnedId).toBe(authority === 'available' ? '582' : null);
+    }
+    const vmGraph = contextGraphLayerUri(CONTEXT_GRAPH_ID, MemoryLayer.VerifiableMemory, AUTHOR, 41);
+    const contentGraph = accessPolicy === 1
+      ? vmGraph
+      : contextGraphLayerUri(CONTEXT_GRAPH_ID, MemoryLayer.SharedWorkingMemory, AUTHOR, 41);
+    if (authority === 'unavailable') {
+      expect(receiver.readRfc64AppliedCatalogHeadV1(appliedScope)).toEqual(previousAppliedHead);
+      expect(receiver.readRfc64PublicCatalogReconciliationFailureV1(successor.headObjectDigest)).not.toBeNull();
+      await expect(receiver.store.countQuads(contentGraph)).resolves.toBe(0);
+      await expect(receiver.store.countQuads(vmGraph)).resolves.toBe(0);
+      return;
+    }
+    expect(receiver.readRfc64PublicCatalogReconciliationFailureV1(successor.headObjectDigest)).toBeNull();
+    expect(receiver.readRfc64AppliedCatalogHeadV1(appliedScope)).toMatchObject({
+      currentCatalogHeadDigest: successor.headObjectDigest, inventoryRowCount: '1',
+    });
+    await expect(readExactGraphPaged(receiver.store, contentGraph, {
+      expectedQuadCount: PROJECTION_QUADS.length, outputGraph: '',
+    })).resolves.toEqual(PROJECTION_QUADS);
+    if (accessPolicy === 0) await expect(receiver.store.countQuads(vmGraph)).resolves.toBe(0);
   }, 60_000);
 
   it('applies a finalized-policy SWM successor through production wiring without VM writes', async () => {
@@ -8848,7 +9388,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       seal: assertionSealFromCanonical(await authorSeal(kaNumber, publicQuads)),
     });
     if (published === null) throw new Error('explicit RFC-64 catalog authoring was not enabled');
-    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(receiver);
 
     const scope = {
       networkId: NETWORK_ID,
@@ -9174,7 +9714,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogIssuerDelegationExpiresAt: DELEGATION_EXPIRES_AT,
     });
     expect(published.announcedPeers).toEqual([receiver.peerId]);
-    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(receiver);
     expect(receiver.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR_WALLET.address.toLowerCase() as never,
@@ -9225,7 +9765,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
       catalogIssuerDelegationExpiresAt: DELEGATION_EXPIRES_AT,
     });
-    await firstReceiver.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(firstReceiver);
     expect(firstReceiver.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR_WALLET.address.toLowerCase() as never,
@@ -9248,7 +9788,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       peers: [restartedReceiver.peerId],
     });
     expect(delivery.announcedPeers).toEqual([restartedReceiver.peerId]);
-    await restartedReceiver.whenRfc64PublicCatalogReceiverIdleV1();
+    await whenDeliveredAndReceiverIdle(restartedReceiver);
     expect(restartedReceiver.rfc64PublicCatalogStatsV1()?.receiver).toMatchObject({
       applied: 0,
       dedupedAlreadyApplied: 0,

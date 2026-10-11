@@ -2,20 +2,50 @@
 
 import { createHash } from 'node:crypto';
 
-import {
+import  {
   assertCanonicalDeterministicUalV1,
-  assertCanonicalDecimalU64,
+  assertAuthorCatalogScopeV1,
   assertContextGraphIdV1,
   assertSwmAuthorInventoryShareOperationIdV1,
+  contextGraphSharedMemoryMetaUri,
   contextGraphWorkspaceMetaGraphUri,
-  type CanonicalDeterministicUalV1,
+  contextGraphWorkspaceGraphUri,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+  MemoryLayer,
+  type AuthorCatalogScopeV1,
   type ContextGraphIdV1,
   type PositiveDecimalU64V1,
 } from '@origintrail-official/dkg-core';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
-import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 
 import { createRfc64DurableFileStoreV1 } from './durable-file-store-v1.js';
+import {
+  decodeRfc64BindingValueV1,
+  encodeRfc64LegacySwmBoundaryCaptureV1,
+  parseRfc64LegacySwmBoundaryCaptureV1,
+  encodeRfc64LegacySwmRepublishedMarkerV1,
+  encodeRfc64LateLegacySwmBoundaryEntryV1,
+  parseRfc64LateLegacySwmBoundaryEntryV1,
+  compareEntries,
+  compareLateEntries,
+  assertPositiveDecimalU64V1,
+  RFC64_LEGACY_SWM_HEAD_LIMIT_V1,
+  type Rfc64LegacySwmBoundaryEntryV1,
+  type Rfc64LegacySwmBoundaryCaptureV1,
+  type Rfc64LateLegacySwmBoundaryEntryV1,
+} from './legacy-swm-boundary-codec-v1.js';
+export { describeRfc64LegacySwmFenceEventV1 } from './legacy-swm-boundary-fence-v1.js';
+import {
+  assertRfc64LegacySwmPreparationAdmittedV1,
+  beginRfc64LegacySwmPreparationV1,
+  createRfc64LegacySwmFenceCoordinatorV1,
+  runRfc64LegacySwmRetirementV1,
+  waitForRfc64LegacySwmPreparationAdmissionV1,
+  type Rfc64LegacySwmFenceCoordinatorV1,
+  type Rfc64LegacySwmFenceOptionsV1,
+} from './legacy-swm-boundary-fence-v1.js';
+
 
 const RFC64_LEGACY_SWM_CAPTURE_PATH_V1 = 'legacy-swm-boundary-v1/capture.json';
 const RFC64_LEGACY_SWM_REPUBLISHED_PREFIX_V1 =
@@ -29,7 +59,6 @@ const RFC64_LEGACY_SWM_LATE_MARKER_SUBJECT_PREFIX_V1 =
 const RFC64_LEGACY_SWM_CAPTURE_MAX_BYTES_V1 = 64 * 1024 * 1024;
 const RFC64_LEGACY_SWM_REPUBLISHED_MAX_BYTES_V1 = 2 * 1024;
 const RFC64_LEGACY_SWM_META_GRAPH_LIMIT_V1 = 16_384;
-const RFC64_LEGACY_SWM_HEAD_LIMIT_V1 = 100_000;
 const CONTEXT_GRAPH_PREFIX = 'did:dkg:context-graph:';
 const SWM_META_SUFFIX = '/_shared_memory_meta';
 const SWM_HEAD_SUFFIX = '#dkg-swm-head';
@@ -38,30 +67,6 @@ const SHARE_OPERATION_ID = 'http://dkg.io/ontology/shareOperationId';
 const CONTEXT_GRAPH_ID = 'http://dkg.io/ontology/contextGraphId';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const WORKSPACE_OPERATION = 'http://dkg.io/ontology/WorkspaceOperation';
-const UTF8_ENCODER = new TextEncoder();
-const UTF8_DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
-
-interface Rfc64LegacySwmBoundaryEntryV1 {
-  readonly contextGraphId: ContextGraphIdV1;
-  readonly kaUal: CanonicalDeterministicUalV1;
-}
-
-interface Rfc64LegacySwmBoundaryCaptureV1 {
-  readonly version: 1;
-  readonly entries: readonly Rfc64LegacySwmBoundaryEntryV1[];
-}
-
-interface Rfc64LegacySwmRepublishedMarkerV1
-  extends Rfc64LegacySwmBoundaryEntryV1 {
-  readonly version: 1;
-}
-
-interface Rfc64LateLegacySwmBoundaryEntryV1
-  extends Rfc64LegacySwmBoundaryEntryV1 {
-  readonly version: 1;
-  readonly shareOperationId: string;
-  readonly assertionVersion: PositiveDecimalU64V1;
-}
 
 interface Rfc64OutstandingLegacySwmBoundaryEntryV1 {
   readonly entry: Rfc64LegacySwmBoundaryEntryV1;
@@ -84,11 +89,8 @@ interface Rfc64LegacySwmBoundaryStateV1 {
     Map<string, Rfc64OutstandingLegacySwmBoundaryEntryV1[]>
   >;
   entryCount: number;
-  mutationTail: Promise<void>;
-  activePreparations: number;
-  preparationsDrained: Promise<void>;
-  resolvePreparationsDrained: (() => void) | undefined;
-  retirementPending: number;
+  /** The preparation fences and the chain that serializes retirements. */
+  readonly fence: Rfc64LegacySwmFenceCoordinatorV1;
 }
 
 const rfc64LegacySwmBoundaryStatesV1 =
@@ -104,6 +106,7 @@ export async function initializeRfc64LegacySwmBoundaryV1(
   owner: object,
   persistenceRoot: string,
   store: TripleStore,
+  fenceOptions?: Rfc64LegacySwmFenceOptionsV1,
 ): Promise<void> {
   const durableFiles = createRfc64DurableFileStoreV1<'capture' | 'republished'>(
     persistenceRoot,
@@ -177,11 +180,7 @@ export async function initializeRfc64LegacySwmBoundaryV1(
     store,
     entriesByContextGraph,
     entryCount,
-    mutationTail: Promise.resolve(),
-    activePreparations: 0,
-    preparationsDrained: Promise.resolve(),
-    resolvePreparationsDrained: undefined,
-    retirementPending: 0,
+    fence: createRfc64LegacySwmFenceCoordinatorV1(fenceOptions),
   });
 }
 
@@ -192,6 +191,196 @@ export function readRfc64LegacySwmBoundaryCountV1(
 ): number {
   return rfc64LegacySwmBoundaryStatesV1.get(owner)
     ?.entriesByContextGraph.get(contextGraphId)?.size ?? 0;
+}
+
+/**
+ * Resolve the exact root SWM graphs that a cold catalog bootstrap may preserve
+ * as legacy read-only state. Immutable upgrade-capture entries are rechecked
+ * against their durable retirement marker. Post-capture entries are admitted
+ * only when their canonical marker is presently stored, so a provisional
+ * process-only preparation can never authorize an omission.
+ */
+export async function resolveRfc64LegacySwmColdBootstrapOmissionsV1(
+  owner: object,
+  scope: Readonly<AuthorCatalogScopeV1>,
+): Promise<ReadonlySet<string>> {
+  return (await resolveRfc64LegacySwmBoundaryEvidenceV1(owner, scope))
+    .graphAllowlist;
+}
+
+export interface Rfc64LegacySwmBoundaryEvidenceV1 {
+  readonly graphAllowlist: ReadonlySet<string>;
+  /** Highest durable late-generation marker for each exactly scoped root UAL. */
+  readonly lateAssertionVersionByKaUal: ReadonlyMap<string, PositiveDecimalU64V1>;
+}
+
+export interface Rfc64LegacySwmBoundaryReceiverLeaseV1 {
+  readonly evidence: Readonly<Rfc64LegacySwmBoundaryEvidenceV1>;
+  readonly retireAppliedAssets: (
+    assets: readonly Readonly<Rfc64RepublishedLegacySwmAssetV1>[],
+  ) => Promise<void>;
+  readonly release: () => void;
+}
+
+/**
+ * Resolve durable negative-completeness evidence for every receiver history
+ * disposition. The version floor prevents a stale catalog replay from
+ * replacing a newer same-UAL root that remains outside the applied catalog
+ * closure; immutable upgrade-capture entries intentionally have no version
+ * floor because their exact generation was not recorded by 10.0.16.
+ */
+export async function resolveRfc64LegacySwmBoundaryEvidenceV1(
+  owner: object,
+  scope: Readonly<AuthorCatalogScopeV1>,
+): Promise<Readonly<Rfc64LegacySwmBoundaryEvidenceV1>> {
+  assertAuthorCatalogScopeV1(scope);
+  if (scope.subGraphName !== null) {
+    return Object.freeze({
+      graphAllowlist: new Set<string>(),
+      lateAssertionVersionByKaUal: new Map<string, PositiveDecimalU64V1>(),
+    });
+  }
+  const state = rfc64LegacySwmBoundaryStatesV1.get(owner);
+  if (state === undefined) {
+    throw new Error('RFC-64 legacy SWM boundary persistence is unavailable');
+  }
+
+  const allowed = new Set<string>();
+  const lateAssertionVersionByKaUal = new Map<string, PositiveDecimalU64V1>();
+  const captured = state.entriesByContextGraph.get(scope.contextGraphId);
+  if (captured !== undefined) {
+    for (const [kaUal, tracked] of captured) {
+      if (!tracked.some((entry) => entry.lateMarker === null)) continue;
+      const identity = assertCanonicalDeterministicUalV1(kaUal);
+      if (
+        identity.chainId !== scope.networkId
+        || identity.agentAddress !== scope.authorAddress
+      ) {
+        continue;
+      }
+      const retiredMarker = encodeRfc64LegacySwmRepublishedMarkerV1({
+        contextGraphId: scope.contextGraphId,
+        kaUal: identity.ual,
+      });
+      const retired = await state.durableFiles.readOptionalBoundedBytes({
+        relativePath: rfc64LegacySwmRepublishedPathV1({
+          contextGraphId: scope.contextGraphId,
+          kaUal: identity.ual,
+        }),
+        maxBytes: RFC64_LEGACY_SWM_REPUBLISHED_MAX_BYTES_V1,
+        label: 'RFC-64 legacy SWM republished marker',
+      });
+      if (retired !== null) {
+        if (!bytesEqual(retired, retiredMarker)) {
+          throw new Error(
+            `RFC-64 legacy SWM republished marker differs for ${identity.ual}`,
+          );
+        }
+        continue;
+      }
+      allowed.add(rfc64LegacySwmGraphV1(scope.contextGraphId, identity));
+    }
+  }
+
+  // Read the marker graph itself rather than trusting entries hydrated by
+  // prepareRfc64LateLegacySwmBoundaryV1. This turns a clean non-commit race
+  // into a conservative denial and survives process restart.
+  for (const entry of await readRfc64LateLegacySwmBoundaryEntriesV1(state.store)) {
+    if (entry.contextGraphId !== scope.contextGraphId) continue;
+    const identity = assertCanonicalDeterministicUalV1(entry.kaUal);
+    if (
+      identity.chainId !== scope.networkId
+      || identity.agentAddress !== scope.authorAddress
+    ) {
+      continue;
+    }
+    allowed.add(rfc64LegacySwmGraphV1(scope.contextGraphId, identity));
+    const previousVersion = lateAssertionVersionByKaUal.get(identity.ual);
+    if (
+      previousVersion === undefined
+      || BigInt(entry.assertionVersion) > BigInt(previousVersion)
+    ) {
+      lateAssertionVersionByKaUal.set(identity.ual, entry.assertionVersion);
+    }
+  }
+  return Object.freeze({
+    graphAllowlist: allowed,
+    lateAssertionVersionByKaUal,
+  });
+}
+
+/**
+ * Fence new late-boundary preparations while the native receiver proves and
+ * commits one exact catalog transition. Existing preparations drain before
+ * evidence is read, and retirement runs inside the same serialized lease so
+ * no newer root generation can appear between the version check and catalog
+ * activation.
+ */
+export async function acquireRfc64LegacySwmBoundaryReceiverLeaseV1(
+  owner: object,
+  scope: Readonly<AuthorCatalogScopeV1>,
+): Promise<Readonly<Rfc64LegacySwmBoundaryReceiverLeaseV1>> {
+  assertAuthorCatalogScopeV1(scope);
+  if (scope.subGraphName !== null) {
+    return Object.freeze({
+      evidence: Object.freeze({
+        graphAllowlist: new Set<string>(),
+        lateAssertionVersionByKaUal: new Map<string, PositiveDecimalU64V1>(),
+      }),
+      retireAppliedAssets: async () => undefined,
+      release: () => undefined,
+    });
+  }
+  const state = rfc64LegacySwmBoundaryStatesV1.get(owner);
+  if (state === undefined) {
+    throw new Error('RFC-64 legacy SWM boundary persistence is unavailable');
+  }
+  let resolveReleased!: () => void;
+  const released = new Promise<void>((resolve) => { resolveReleased = resolve; });
+  let releaseCalled = false;
+  let retirementCalled = false;
+  return new Promise<Readonly<Rfc64LegacySwmBoundaryReceiverLeaseV1>>((resolveAcquired, rejectAcquired) => {
+    runRfc64LegacySwmRetirementV1(
+      state.fence,
+      { source: 'receiver-lease', contextGraphId: scope.contextGraphId },
+      async (dropFence) => {
+        const evidence = await resolveRfc64LegacySwmBoundaryEvidenceV1(owner, scope);
+        resolveAcquired(Object.freeze({
+          evidence,
+          retireAppliedAssets: async (
+            assets: readonly Readonly<Rfc64RepublishedLegacySwmAssetV1>[],
+          ) => {
+            if (retirementCalled) {
+              throw new Error('RFC-64 legacy SWM boundary lease retirement is unbalanced');
+            }
+            retirementCalled = true;
+            await retireRfc64LegacySwmAssetsV1(
+              state,
+              scope.contextGraphId,
+              assets,
+            );
+          },
+          release: () => {
+            if (releaseCalled) return;
+            releaseCalled = true;
+            // The caller has left the exact receiver boundary. Drop this CG's
+            // preparation fence synchronously so a root write begun immediately
+            // after release is admitted without waiting for the mutation-tail
+            // continuation to take another microtask turn.
+            dropFence();
+            resolveReleased();
+          },
+        }));
+        await released;
+      },
+    ).then((outcome) => {
+      // The lease did not get its turn within the fence's bound: the receiver
+      // fails this exchange and takes the catalog head again later.
+      if (!outcome.ran) {
+        rejectAcquired(new Error('RFC-64 legacy SWM boundary lease was not acquired in time'));
+      }
+    }, rejectAcquired);
+  });
 }
 
 /**
@@ -219,9 +408,7 @@ export function prepareRfc64LateLegacySwmBoundaryV1(
   const kaUal = assertCanonicalDeterministicUalV1(kaUalInput).ual;
   assertSwmAuthorInventoryShareOperationIdV1(shareOperationId);
   const assertionVersion = assertPositiveDecimalU64V1(assertionVersionInput);
-  if (state.retirementPending > 0) {
-    throw new Error('RFC-64 legacy SWM boundary retirement is in progress; retry promotion');
-  }
+  assertRfc64LegacySwmPreparationAdmittedV1(state.fence, contextGraphId, kaUal);
   const entry = Object.freeze({
     version: 1,
     contextGraphId,
@@ -248,7 +435,9 @@ export function prepareRfc64LateLegacySwmBoundaryV1(
     );
     state.entryCount += 1;
   }
-  beginRfc64LegacySwmBoundaryPreparationV1(state);
+  // Both scopes are registered only after every throwing statement above, so a refused or failed
+  // prepare can never leave a preparation behind that a retirement would wait on forever.
+  const releasePreparation = beginRfc64LegacySwmPreparationV1(state.fence, contextGraphId, kaUal);
   let settled = false;
   return Object.freeze({
     graphUri: RFC64_LEGACY_SWM_LATE_MARKER_GRAPH_V1,
@@ -267,10 +456,63 @@ export function prepareRfc64LateLegacySwmBoundaryV1(
           );
         }
       } finally {
-        settleRfc64LegacySwmBoundaryPreparationV1(state);
+        releasePreparation();
       }
     },
   });
+}
+
+/** How long a seam that can wait holds a root write back for a fence to drop. */
+export const RFC64_LEGACY_SWM_PREPARATION_ADMISSION_WAIT_MS = 2_000;
+
+/**
+ * Wait, within a short bound, for the fences that would refuse this root write
+ * to drop. The promote and the Core's StorageACK call it right before they
+ * prepare the companion: a fence is normally up for milliseconds, and without
+ * the wait each of those costs a refused share attempt (retried about a minute
+ * later) or a declined acknowledgement.
+ */
+export async function awaitRfc64LateLegacySwmBoundaryAdmissionV1(
+  owner: object,
+  contextGraphId: string,
+  kaUalInput: string,
+  limitMs: number = RFC64_LEGACY_SWM_PREPARATION_ADMISSION_WAIT_MS,
+): Promise<void> {
+  const state = rfc64LegacySwmBoundaryStatesV1.get(owner);
+  if (state === undefined) return;
+  let kaUal: string;
+  try {
+    kaUal = assertCanonicalDeterministicUalV1(kaUalInput).ual;
+  } catch {
+    return; // The prepare reports an invalid UAL.
+  }
+  await waitForRfc64LegacySwmPreparationAdmissionV1(state.fence, contextGraphId, kaUal, limitMs);
+}
+
+/**
+ * The root companion resolver the publisher's seams take: the synchronous
+ * prepare, with its admission wait attached for the seams that can wait.
+ */
+export function rfc64LateLegacySwmCompanionResolverV1(owner: object) {
+  return Object.assign(
+    (input: Readonly<{
+      contextGraphId: string;
+      kaUal: string;
+      shareOperationId: string;
+      assertionVersion: string;
+    }>) => prepareRfc64LateLegacySwmBoundaryV1(
+      owner,
+      input.contextGraphId,
+      input.kaUal,
+      input.shareOperationId,
+      input.assertionVersion,
+    ),
+    {
+      awaitAdmission: (input: Readonly<{ contextGraphId: string; kaUal: string }>) => (
+        awaitRfc64LateLegacySwmBoundaryAdmissionV1(owner, input.contextGraphId, input.kaUal)
+      ),
+    },
+  );
 }
 
 export interface Rfc64RepublishedLegacySwmAssetV1 {
@@ -303,54 +545,154 @@ export async function markRfc64LegacySwmRepublishedV1(
       canonicalAssets.set(kaUal, assertionVersion);
     }
   }
-  state.retirementPending += 1;
-  try {
-    await mutateRfc64LegacySwmBoundaryV1(state, async () => {
-      await state.preparationsDrained;
-      const outstanding = state.entriesByContextGraph.get(canonicalContextGraphId);
-      if (outstanding === undefined || outstanding.size === 0) return;
-      for (const [kaUal, catalogVersion] of [...canonicalAssets.entries()].sort()) {
-        const entries = outstanding.get(kaUal);
-        if (entries === undefined) continue;
-        const retired: Rfc64OutstandingLegacySwmBoundaryEntryV1[] = [];
-        const retained: Rfc64OutstandingLegacySwmBoundaryEntryV1[] = [];
-        for (const tracked of entries) {
-          if (
-            tracked.lateMarker !== null
-            && BigInt((tracked.entry as Rfc64LateLegacySwmBoundaryEntryV1).assertionVersion)
-              > BigInt(catalogVersion)
-          ) {
-            retained.push(tracked);
-            continue;
-          }
-          retired.push(tracked);
-        }
-        for (const tracked of retired) {
-          if (tracked.lateMarker === null) {
-            await state.durableFiles.putExactBytes({
-              relativePath: rfc64LegacySwmRepublishedPathV1(tracked.entry),
-              bytes: encodeRfc64LegacySwmRepublishedMarkerV1(tracked.entry),
-              maxBytes: RFC64_LEGACY_SWM_REPUBLISHED_MAX_BYTES_V1,
-              label: 'RFC-64 legacy SWM republished marker',
-              kind: 'republished',
-            });
-          } else {
-            await state.store.delete([tracked.lateMarker], {
-              source: 'agent.rfc64.legacySwmBoundary.retireLate',
-              priority: 'normal',
-            });
-          }
-        }
-        state.entryCount -= retired.length;
-        if (retained.length === 0) outstanding.delete(kaUal);
-        else outstanding.set(kaUal, retained);
+  const outcome = await runRfc64LegacySwmRetirementV1(
+    state.fence,
+    { source: 'republish-retirement', contextGraphId: canonicalContextGraphId },
+    () => retireCanonicalRfc64LegacySwmAssetsV1(
+      state,
+      canonicalContextGraphId,
+      canonicalAssets,
+    ),
+  );
+  // Nothing was retired within the fence's bound. The projection pass must
+  // fail like it does on a store error here: its supervisor repeats a failed
+  // pass on its timer and never repeats one that reported success.
+  if (!outcome.ran) {
+    throw new Error('RFC-64 legacy SWM republish retirement did not get its turn in time');
+  }
+}
+
+/**
+ * A verified, finalized VM twin can supersede an exact legacy SWM root even
+ * when that root never entered the author catalog. The caller must first
+ * prove byte-identical VM/SWM content and finish SWM cleanup. Recheck the
+ * physical graph and head under the legacy preparation fence before retiring
+ * its marker: a concurrent new share must either finish first and remain
+ * visible here, or retry after this retirement with a new marker. The fence
+ * and the drain are the ASSET's: this reads and deletes only that asset's
+ * graph, head and markers, so shares of other assets of the graph are
+ * neither refused nor waited for.
+ */
+export async function retireRfc64LegacySwmAfterFinalizedVmV1(
+  owner: object,
+  contextGraphId: string,
+  kaUalInput: string,
+  assertionVersionInput: string,
+  subGraphName?: string,
+): Promise<boolean> {
+  if (subGraphName !== undefined) return false;
+  const state = rfc64LegacySwmBoundaryStatesV1.get(owner);
+  if (state === undefined) return false;
+  assertContextGraphIdV1(contextGraphId, 'RFC-64 finalized VM legacy boundary contextGraphId');
+  const kaUal = assertCanonicalDeterministicUalV1(kaUalInput).ual;
+  const assertionVersion = assertPositiveDecimalU64V1(assertionVersionInput);
+  // Not retired within the fence's bound: the marker stays, which is the
+  // conservative state, until a later pass or a catalog replay retires it.
+  const outcome = await runRfc64LegacySwmRetirementV1(
+    state.fence,
+    { source: 'finalized-vm-retirement', contextGraphId, kaUal },
+    async () => {
+      if (state.entriesByContextGraph.get(contextGraphId)?.has(kaUal) !== true) return false;
+      const scope = createGraphKnowledgeAssetScope(kaUal, assertionVersion);
+      const swmGraph = knowledgeAssetLayerGraphUri(
+        contextGraphId,
+        MemoryLayer.SharedWorkingMemory,
+        scope,
+      );
+      const metaGraph = contextGraphSharedMemoryMetaUri(contextGraphId);
+      const graph = await state.store.query(
+        `SELECT ?s WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } } LIMIT 1`,
+        { source: 'agent.rfc64.legacySwmBoundary.finalizedVmGraph', priority: 'background' },
+      );
+      const head = await state.store.query(
+        `SELECT ?p WHERE { GRAPH <${metaGraph}> { <${kaUal}#dkg-swm-head> ?p ?o } } LIMIT 1`,
+        { source: 'agent.rfc64.legacySwmBoundary.finalizedVmHead', priority: 'background' },
+      );
+      if (graph.type !== 'bindings' || head.type !== 'bindings') {
+        throw new Error('RFC-64 finalized VM legacy boundary absence query was not bindings');
       }
-      if (outstanding.size === 0) {
-        state.entriesByContextGraph.delete(canonicalContextGraphId);
+      if (graph.bindings.length > 0 || head.bindings.length > 0) return false;
+      await retireCanonicalRfc64LegacySwmAssetsV1(
+        state,
+        contextGraphId,
+        new Map([[kaUal, assertionVersion]]),
+      );
+      return true;
+    },
+  );
+  return outcome.ran && outcome.value;
+}
+
+async function retireRfc64LegacySwmAssetsV1(
+  state: Rfc64LegacySwmBoundaryStateV1,
+  contextGraphId: string,
+  assets: readonly Readonly<Rfc64RepublishedLegacySwmAssetV1>[],
+): Promise<void> {
+  assertContextGraphIdV1(
+    contextGraphId,
+    'RFC-64 legacy SWM boundary contextGraphId',
+  );
+  const canonicalAssets = new Map<string, PositiveDecimalU64V1>();
+  for (const asset of assets) {
+    const kaUal = assertCanonicalDeterministicUalV1(asset.kaUal).ual;
+    const assertionVersion = assertPositiveDecimalU64V1(asset.assertionVersion);
+    const previous = canonicalAssets.get(kaUal);
+    if (previous === undefined || BigInt(assertionVersion) > BigInt(previous)) {
+      canonicalAssets.set(kaUal, assertionVersion);
+    }
+  }
+  await retireCanonicalRfc64LegacySwmAssetsV1(
+    state,
+    contextGraphId,
+    canonicalAssets,
+  );
+}
+
+async function retireCanonicalRfc64LegacySwmAssetsV1(
+  state: Rfc64LegacySwmBoundaryStateV1,
+  contextGraphId: string,
+  canonicalAssets: ReadonlyMap<string, PositiveDecimalU64V1>,
+): Promise<void> {
+  const outstanding = state.entriesByContextGraph.get(contextGraphId);
+  if (outstanding === undefined || outstanding.size === 0) return;
+  for (const [kaUal, catalogVersion] of [...canonicalAssets.entries()].sort()) {
+    const entries = outstanding.get(kaUal);
+    if (entries === undefined) continue;
+    const retired: Rfc64OutstandingLegacySwmBoundaryEntryV1[] = [];
+    const retained: Rfc64OutstandingLegacySwmBoundaryEntryV1[] = [];
+    for (const tracked of entries) {
+      if (
+        tracked.lateMarker !== null
+        && BigInt((tracked.entry as Rfc64LateLegacySwmBoundaryEntryV1).assertionVersion)
+          > BigInt(catalogVersion)
+      ) {
+        retained.push(tracked);
+        continue;
       }
-    });
-  } finally {
-    state.retirementPending -= 1;
+      retired.push(tracked);
+    }
+    for (const tracked of retired) {
+      if (tracked.lateMarker === null) {
+        await state.durableFiles.putExactBytes({
+          relativePath: rfc64LegacySwmRepublishedPathV1(tracked.entry),
+          bytes: encodeRfc64LegacySwmRepublishedMarkerV1(tracked.entry),
+          maxBytes: RFC64_LEGACY_SWM_REPUBLISHED_MAX_BYTES_V1,
+          label: 'RFC-64 legacy SWM republished marker',
+          kind: 'republished',
+        });
+      } else {
+        await state.store.delete([tracked.lateMarker], {
+          source: 'agent.rfc64.legacySwmBoundary.retireLate',
+          priority: 'normal',
+        });
+      }
+    }
+    state.entryCount -= retired.length;
+    if (retained.length === 0) outstanding.delete(kaUal);
+    else outstanding.set(kaUal, retained);
+  }
+  if (outstanding.size === 0) {
+    state.entriesByContextGraph.delete(contextGraphId);
   }
 }
 
@@ -487,136 +829,6 @@ async function captureRfc64LegacySwmBoundaryV1(
   });
 }
 
-function decodeRfc64BindingValueV1(raw: string): string {
-  if (!raw.startsWith('"')) return raw;
-  const literal = parseRdfLiteralTerm(raw);
-  if (literal === null) {
-    throw new Error('RFC-64 legacy SWM boundary contains a malformed RDF literal');
-  }
-  return literal.value;
-}
-
-function encodeRfc64LegacySwmBoundaryCaptureV1(
-  capture: Readonly<Rfc64LegacySwmBoundaryCaptureV1>,
-): Uint8Array {
-  return UTF8_ENCODER.encode(`${JSON.stringify(capture)}\n`);
-}
-
-function parseRfc64LegacySwmBoundaryCaptureV1(
-  bytes: Uint8Array,
-): Readonly<Rfc64LegacySwmBoundaryCaptureV1> {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(UTF8_DECODER.decode(bytes));
-  } catch (cause) {
-    throw new Error('RFC-64 legacy SWM boundary capture is not valid JSON', { cause });
-  }
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('RFC-64 legacy SWM boundary capture is malformed');
-  }
-  const value = parsed as Record<string, unknown>;
-  if (Object.keys(value).sort().join('\n') !== 'entries\nversion' || value.version !== 1) {
-    throw new Error('RFC-64 legacy SWM boundary capture has unknown fields or version');
-  }
-  if (!Array.isArray(value.entries) || value.entries.length > RFC64_LEGACY_SWM_HEAD_LIMIT_V1) {
-    throw new Error('RFC-64 legacy SWM boundary capture has an invalid entry set');
-  }
-  const entries = value.entries.map((raw): Rfc64LegacySwmBoundaryEntryV1 => {
-    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
-      throw new Error('RFC-64 legacy SWM boundary entry is malformed');
-    }
-    const entry = raw as Record<string, unknown>;
-    if (
-      Object.keys(entry).sort().join('\n') !== 'contextGraphId\nkaUal'
-      || typeof entry.contextGraphId !== 'string'
-      || typeof entry.kaUal !== 'string'
-    ) {
-      throw new Error('RFC-64 legacy SWM boundary entry has unknown fields');
-    }
-    assertContextGraphIdV1(
-      entry.contextGraphId,
-      'RFC-64 legacy SWM boundary contextGraphId',
-    );
-    return Object.freeze({
-      contextGraphId: entry.contextGraphId,
-      kaUal: assertCanonicalDeterministicUalV1(entry.kaUal).ual,
-    });
-  });
-  const sorted = [...entries].sort(compareEntries);
-  if (
-    sorted.some((entry, index) => compareEntries(entry, entries[index]!) !== 0)
-    || sorted.some((entry, index) => index > 0 && compareEntries(entry, sorted[index - 1]!) === 0)
-  ) {
-    throw new Error('RFC-64 legacy SWM boundary entries are duplicate or non-canonical');
-  }
-  return Object.freeze({ version: 1, entries: Object.freeze(entries) });
-}
-
-function encodeRfc64LegacySwmRepublishedMarkerV1(
-  entry: Readonly<Rfc64LegacySwmBoundaryEntryV1>,
-): Uint8Array {
-  const marker: Rfc64LegacySwmRepublishedMarkerV1 = Object.freeze({
-    version: 1,
-    contextGraphId: entry.contextGraphId,
-    kaUal: entry.kaUal,
-  });
-  return UTF8_ENCODER.encode(`${JSON.stringify(marker)}\n`);
-}
-
-function encodeRfc64LateLegacySwmBoundaryEntryV1(
-  entry: Readonly<Rfc64LateLegacySwmBoundaryEntryV1>,
-): string {
-  return JSON.stringify({
-    version: 1,
-    contextGraphId: entry.contextGraphId,
-    kaUal: entry.kaUal,
-    shareOperationId: entry.shareOperationId,
-    assertionVersion: entry.assertionVersion,
-  });
-}
-
-function parseRfc64LateLegacySwmBoundaryEntryV1(
-  encoded: string,
-): Readonly<Rfc64LateLegacySwmBoundaryEntryV1> {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(encoded);
-  } catch (cause) {
-    throw new Error('RFC-64 late legacy SWM boundary marker is not valid JSON', { cause });
-  }
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('RFC-64 late legacy SWM boundary marker is malformed');
-  }
-  const value = parsed as Record<string, unknown>;
-  if (
-    Object.keys(value).sort().join('\n')
-      !== 'assertionVersion\ncontextGraphId\nkaUal\nshareOperationId\nversion'
-    || value.version !== 1
-    || typeof value.contextGraphId !== 'string'
-    || typeof value.kaUal !== 'string'
-    || typeof value.shareOperationId !== 'string'
-    || typeof value.assertionVersion !== 'string'
-  ) {
-    throw new Error('RFC-64 late legacy SWM boundary marker has unknown fields');
-  }
-  assertContextGraphIdV1(
-    value.contextGraphId,
-    'RFC-64 late legacy SWM boundary contextGraphId',
-  );
-  const entry = Object.freeze({
-    version: 1,
-    contextGraphId: value.contextGraphId,
-    kaUal: assertCanonicalDeterministicUalV1(value.kaUal).ual,
-    shareOperationId: value.shareOperationId,
-    assertionVersion: assertPositiveDecimalU64V1(value.assertionVersion),
-  } satisfies Rfc64LateLegacySwmBoundaryEntryV1);
-  assertSwmAuthorInventoryShareOperationIdV1(entry.shareOperationId);
-  if (encoded !== encodeRfc64LateLegacySwmBoundaryEntryV1(entry)) {
-    throw new Error('RFC-64 late legacy SWM boundary marker is not canonical');
-  }
-  return entry;
-}
-
 function rfc64LateLegacySwmBoundaryMarkerQuadV1(
   entry: Readonly<Rfc64LateLegacySwmBoundaryEntryV1>,
 ): Quad {
@@ -641,20 +853,12 @@ function rfc64LegacySwmRepublishedPathV1(
   return `${RFC64_LEGACY_SWM_REPUBLISHED_PREFIX_V1}/${digest}.json`;
 }
 
-function compareEntries(
-  left: Readonly<Rfc64LegacySwmBoundaryEntryV1>,
-  right: Readonly<Rfc64LegacySwmBoundaryEntryV1>,
-): number {
-  return left.contextGraphId.localeCompare(right.contextGraphId)
-    || left.kaUal.localeCompare(right.kaUal);
-}
-
-function compareLateEntries(
-  left: Readonly<Rfc64LateLegacySwmBoundaryEntryV1>,
-  right: Readonly<Rfc64LateLegacySwmBoundaryEntryV1>,
-): number {
-  return compareEntries(left, right)
-    || left.shareOperationId.localeCompare(right.shareOperationId);
+function rfc64LegacySwmGraphV1(
+  contextGraphId: ContextGraphIdV1,
+  identity: ReturnType<typeof assertCanonicalDeterministicUalV1>,
+): string {
+  return `${contextGraphWorkspaceGraphUri(contextGraphId)}`
+    + `/${identity.agentAddress}/${identity.kaNumber}`;
 }
 
 function addRfc64OutstandingLegacySwmBoundaryEntryV1(
@@ -685,47 +889,6 @@ function removeRfc64OutstandingLegacySwmBoundaryEntryV1(
   if (retained.length === 0) byUal.delete(kaUal);
   else byUal.set(kaUal, retained);
   if (byUal.size === 0) state.entriesByContextGraph.delete(contextGraphId);
-}
-
-function beginRfc64LegacySwmBoundaryPreparationV1(
-  state: Rfc64LegacySwmBoundaryStateV1,
-): void {
-  if (state.activePreparations === 0) {
-    state.preparationsDrained = new Promise<void>((resolve) => {
-      state.resolvePreparationsDrained = resolve;
-    });
-  }
-  state.activePreparations += 1;
-}
-
-function settleRfc64LegacySwmBoundaryPreparationV1(
-  state: Rfc64LegacySwmBoundaryStateV1,
-): void {
-  if (state.activePreparations < 1) {
-    throw new Error('RFC-64 legacy SWM boundary preparation settlement is unbalanced');
-  }
-  state.activePreparations -= 1;
-  if (state.activePreparations !== 0) return;
-  const resolve = state.resolvePreparationsDrained;
-  state.resolvePreparationsDrained = undefined;
-  resolve?.();
-}
-
-function assertPositiveDecimalU64V1(input: string): PositiveDecimalU64V1 {
-  assertCanonicalDecimalU64(input, 'RFC-64 legacy SWM assertionVersion');
-  if (BigInt(input) < 1n) {
-    throw new Error('RFC-64 legacy SWM assertionVersion must be positive');
-  }
-  return input as PositiveDecimalU64V1;
-}
-
-async function mutateRfc64LegacySwmBoundaryV1<T>(
-  state: Rfc64LegacySwmBoundaryStateV1,
-  mutation: () => Promise<T>,
-): Promise<T> {
-  const result = state.mutationTail.then(mutation, mutation);
-  state.mutationTail = result.then(() => undefined, () => undefined);
-  return result;
 }
 
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
