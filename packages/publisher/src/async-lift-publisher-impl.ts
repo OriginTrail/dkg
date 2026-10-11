@@ -3098,7 +3098,6 @@ export class TripleStoreAsyncLiftPublisher
     return summarizeJournal(entries, lineage);
   }
 
-  /** A provenance-only read, independent of the mutable job record. */
   /** #1829 — all journal entries bearing this jobId. Read-only. */
   async readJournalByJob(jobId: string): Promise<JournalReadResult> {
     await this.ensureGraph();

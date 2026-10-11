@@ -208,14 +208,14 @@ describe('POST /api/memory/search — context-graph read authority', () => {
     expect(probe.authorityChecks).toEqual([]);
   });
 
-  it('gates an anonymous caller through node-local read authority', async () => {
-    // Auth-disabled / anonymous callers carry no agent identity, so the
+  it('gates an anonymous public-mode caller through node-local read authority', async () => {
+    // Anonymous public-mode callers carry no agent identity, so the
     // authority resolver falls back to the node's own membership. That is the
     // same contract `DKGAgent.query` applies, and it must still be CONSULTED
     // rather than skipped.
     const { ctx, res, probe } = buildCtx({
       body: { query: 'anything', contextGraphId: 'cg2' },
-      authentication: requestAuthentication({ kind: 'anonymous', mode: 'disabled' }),
+      authentication: requestAuthentication({ kind: 'anonymous', mode: 'public' }),
       decisionFor: () => DENY,
     });
 
@@ -227,6 +227,20 @@ describe('POST /api/memory/search — context-graph read authority', () => {
     expect(probe.authorityChecks).toEqual([
       { contextGraphId: 'cg2', callerAgentAddress: undefined },
     ]);
+  });
+
+  it('preserves tokenless auth-disabled operator memory searches', async () => {
+    const { ctx, res, probe } = buildCtx({
+      body: { query: 'anything', contextGraphId: 'cg2' },
+      authentication: requestAuthentication({ kind: 'anonymous', mode: 'disabled' }),
+      decisionFor: () => DENY,
+    });
+    await handleMemoryRoutes(ctx);
+    expect(res.statusCode).toBe(200);
+    expect(probe.storeQueried).toBe(true);
+    expect(probe.vectorSearched).toBe(true);
+    expect(probe.authorityChecks).toEqual([]);
+    expect(JSON.parse(res.body).resultCount).toBeGreaterThan(0);
   });
 
   it('denies BEFORE the SPARQL builder runs, and emits no results key', async () => {
