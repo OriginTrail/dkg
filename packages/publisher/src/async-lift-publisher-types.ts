@@ -15,10 +15,8 @@ import type {
   LiftPublishRequestMetadata,
   LiftPublishSnapshotRequest,
 } from './lift-job.js';
-import type {
-  LiftJobRetryBlocker,
-  LiftJobRetryProjection,
-} from './async-lift-retry-disposition.js';
+import type { LiftJobRetryBlocker, LiftJobRetryProjection } from './async-lift-retry-disposition.js';
+import type { LiftJobTailStepObserver } from './lift-job-tail-steps.js';
 import type { DKGPublisher } from './dkg-publisher.js';
 import type { PublishOptions, PublishResult } from './publisher.js';
 import type { AsyncLiftPublishFailureInput } from './async-lift-publish-result.js';
@@ -551,6 +549,8 @@ export interface AsyncKnowledgeAssetVmPublishExecutionInput {
   readonly validation: LiftJobValidationMetadata;
   readonly resolved: LiftResolvedPublishSlice;
   readonly publishOptions: PublishOptions;
+  /** GH#3081 — observation only: where the executor reports each step it ends after the confirmation. */
+  readonly onPostConfirmationStep?: LiftJobTailStepObserver;
   readonly publisher?: DKGPublisher;
 }
 

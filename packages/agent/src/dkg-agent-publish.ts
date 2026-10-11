@@ -184,7 +184,7 @@ import  {
   type EncodedWorkspaceGossipPayload,
   type SharedMemoryPublicSnapshotStorageConfig,
 } from '@origintrail-official/dkg-publisher';
-import { pickPublishLifecycleHooks, type PublishLifecycleHooks } from '@origintrail-official/dkg-publisher';
+import { pickPublishLifecycleHooks, type LiftJobTailStep, type LiftJobTailStepObserver, type PublishLifecycleHooks } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { join } from 'node:path';
 import {
@@ -5173,6 +5173,8 @@ export class PublishMethods extends DKGAgentBase {
       operationCtx?: OperationContext;
       onPhase?: PhaseCallback;
       publisherOverride?: DKGPublisher;
+      /** GH#3081 — observation only: where the queue hears of each step that ends after the confirmation. */
+      onPostConfirmationStep?: LiftJobTailStepObserver;
     },
   ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
     const ctx = opts?.operationCtx ?? publishOptions.operationCtx ?? createOperationContext('publishFromSWM');
@@ -5190,6 +5192,13 @@ export class PublishMethods extends DKGAgentBase {
     const executionHooks: PublishLifecycleHooks = {
       ...pickPublishLifecycleHooks(publishOptions),
       onPhase: opts?.onPhase ?? publishOptions.onPhase,
+    };
+    // GH#3081 — observation only: tell the queue which step after the confirmation just ended,
+    // so its timing line can say where this executor's tail went. Nothing here waits or reads.
+    const endedTailStep = (step: LiftJobTailStep): void => {
+      try {
+        opts?.onPostConfirmationStep?.(step);
+      } catch { /* observation only */ }
     };
     const capturedPricingPolicy = request.pricingPolicy ?? 'network-visible';
     const executionPricingPolicy = publishOptions.pricingPolicy ?? capturedPricingPolicy;
@@ -5367,6 +5376,8 @@ export class PublishMethods extends DKGAgentBase {
             (err instanceof Error ? err.message : String(err)),
         );
         return;
+      } finally {
+        endedTailStep('publishedGraphClear');
       }
       await this.retireLegacySwmAfterConfirmedLocalPublish(
         request.contextGraphId,
@@ -5375,6 +5386,7 @@ export class PublishMethods extends DKGAgentBase {
         request.subGraphName,
         ctx,
       );
+      endedTailStep('legacySwmRetire');
     };
     const clearRemainingSharedMemory = async (): Promise<void> => {
       try {
@@ -5386,6 +5398,7 @@ export class PublishMethods extends DKGAgentBase {
             (err instanceof Error ? err.message : String(err)),
         );
       }
+      endedTailStep('remainingSwmClear');
     };
     const onChainCapable =
       typeof this.chain.getEvmChainId === 'function' &&
@@ -5427,6 +5440,7 @@ export class PublishMethods extends DKGAgentBase {
           ...queuedKnowledgeAssetAccessEnvelope(request),
         },
       );
+      endedTailStep('publish');
 
       if (result.status === 'confirmed') {
         await clearPublishedGraph('update');
@@ -5565,6 +5579,7 @@ export class PublishMethods extends DKGAgentBase {
             }
           : {}),
       });
+      endedTailStep('publish');
 
       if (result.status === 'confirmed' && result.onChainResult) {
         try {
@@ -5581,6 +5596,7 @@ export class PublishMethods extends DKGAgentBase {
               (err instanceof Error ? err.message : String(err)),
           );
         }
+        endedTailStep('receiptWrite');
       }
 
       if (result.status === 'confirmed') {
@@ -5606,12 +5622,14 @@ export class PublishMethods extends DKGAgentBase {
         );
       }
     }
+    if (result.status === 'confirmed') endedTailStep('lifecycleStamp');
 
     if (result.status === 'confirmed' && result.onChainResult) {
       const rootEntities: string[] = [];
       const broadcastCgId = queuedOnChainContextGraphId ?? (onChainCapable
         ? normalizeOptionalContextGraphId(await this.getContextGraphOnChainId(request.contextGraphId))
         : undefined);
+      if (queuedOnChainContextGraphId === undefined && onChainCapable) endedTailStep('graphIdRead');
       const keepRootCopyOnLabel = true;
       const msg: FinalizationMessageMsg = {
         ual: result.ual,
@@ -5645,6 +5663,7 @@ export class PublishMethods extends DKGAgentBase {
       } catch {
         this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
       }
+      endedTailStep('finalizationGossip');
     }
 
     if (result.status === 'confirmed') {
@@ -5657,6 +5676,7 @@ export class PublishMethods extends DKGAgentBase {
             (err instanceof Error ? err.message : String(err)),
         );
       }
+      endedTailStep('shareMarkerClear');
     }
 
     await this.afterConfirmedGraphScopedVmPublishV1({
@@ -5670,6 +5690,7 @@ export class PublishMethods extends DKGAgentBase {
       ctx,
       publicationLabel: 'queued publish',
     });
+    endedTailStep('catalogObserver');
 
     return { ...result, assertionUri, seal };
   }
