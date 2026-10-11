@@ -12,6 +12,7 @@ export type SwmHostModeRegistration = Readonly<{
   source: SubscriptionSource;
   handler: SwmHostModeHandler;
   custody: SwmHostModeCustody;
+  listenerToken: symbol;
 }>;
 
 /** Read-only historical probes derive from the registration, never side tables. */
@@ -28,21 +29,39 @@ function registrationView<T>(records: ReadonlyMap<string, SwmHostModeRegistratio
 /** One transition owner for listener provenance, classification and custody. */
 class SwmHostModeRegistrations {
   readonly #records = new Map<string, SwmHostModeRegistration>();
+  constructor(private readonly sessionCurrent: () => boolean) {}
   readonly sources = registrationView(this.#records, row => row.source);
   readonly classifications = registrationView(this.#records, row => row.custody.kind === 'curated');
   readonly handlers = registrationView(this.#records, row => row.handler);
   get(key: string): SwmHostModeRegistration | undefined { return this.#records.get(key); }
   has(key: string): boolean { return this.#records.has(key); }
+  /** Captures either a pending (absent) listener or the installed token, never row identity. */
+  captureListener(key: string, token = this.#records.get(key)?.listenerToken): () => boolean {
+    return () => this.sessionCurrent() && this.#records.get(key)?.listenerToken === token;
+  }
+  /** Listener fencing and custody interpretation belong to this registration owner. */
+  captureAdmission(key: string, token: symbol, policy: {
+    bindingCurrent(): boolean;
+    stripCiphertext(): boolean;
+    manualPublicCurrent(): boolean;
+  }): () => boolean {
+    const custody = this.#records.get(key)?.custody;
+    const listenerCurrent = this.captureListener(key, token);
+    return () => listenerCurrent() && policy.bindingCurrent()
+      && (!policy.stripCiphertext() || (custody?.kind === 'manual-public'
+        ? this.#records.get(key)?.custody.kind === 'manual-public' && policy.manualPublicCurrent()
+        : custody?.kind === 'automatic-public'
+          && this.#records.get(key)?.custody.kind === 'automatic-public' && custody.current()));
+  }
   installOrRefresh(key: string, registration: SwmHostModeRegistration): void {
     const current = this.#records.get(key);
-    // The first listener and discovery source remain authoritative on re-entry.
-    const handler = (current ?? registration).handler;
+    // First source/listener/token survive custody refresh; removed/reinstalled listeners never do.
+    const owned = current ?? registration;
     const evidence = registration.custody;
-    // Installation owns the listener fence; admission evidence never changes its target.
+    const listenerCurrent = this.captureListener(key, owned.listenerToken);
     const custody: SwmHostModeCustody = evidence.kind === 'automatic-public'
-      ? { kind: 'automatic-public', current: () => this.#records.get(key)?.handler === handler && evidence.current() }
-      : evidence;
-    this.#records.set(key, Object.freeze({ ...(current ?? registration), custody: Object.freeze(custody) }));
+      ? { kind: 'automatic-public', current: () => listenerCurrent() && evidence.current() } : evidence;
+    this.#records.set(key, Object.freeze({ ...owned, custody: Object.freeze(custody) }));
   }
   remove(key: string): SwmHostModeRegistration | undefined {
     const current = this.#records.get(key);
@@ -56,7 +75,7 @@ class SwmHostModeRegistrations {
 export class GossipSession {
   readonly gossipRegistered = new Set<string>();
   readonly sharedMemoryGossipRegistered = new Set<string>();
-  readonly hostModeRegistrations = new SwmHostModeRegistrations();
+  readonly hostModeRegistrations = new SwmHostModeRegistrations(() => this.active);
   /** Live intents snapshotted before the durable startup plan is read. */
   readonly startupLiveIntents = new Map<string, Pick<ContextGraphSub, 'syncMode'>>();
   #retired = false;

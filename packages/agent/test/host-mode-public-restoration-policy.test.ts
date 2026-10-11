@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { join } from 'node:path';
-import { mkdir } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, readFile } from 'node:fs/promises';
 import { initializeRfc64LegacySwmBoundaryV1 } from '../src/rfc64/legacy-swm-boundary-v1.js';
 import { resolveRfc64PersistenceRootV1 } from '../src/rfc64/persistence-layout-v1.js';
 import { DKG_ONTOLOGY, encodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
@@ -140,8 +141,10 @@ describe('public host restoration policy fences', () => {
           g.onChainAccessPolicyCache.set(privateId, 1);
         }
         release.resolve(); await running;
+        const retainedLog = await readFile(join(g.config.dataDir, 'swm-host', `${createHash('sha256').update(id).digest('base64url')}.log`));
+        expect(retainedLog.includes(Buffer.from(signed.bytes))).toBe(true);
         expect((await store.iterate(id, 0)).map(row => Buffer.from(row.envelopeBytes)))
-          .toEqual([Buffer.from(signed.bytes)]);
+          .toEqual(transition === 'unchanged' ? [Buffer.from(signed.bytes)] : []);
         expect(apply).toHaveBeenCalledTimes(transition === 'unchanged' ? 1 : 0);
         if (transition === 'unchanged') expect(await apply.mock.results[0].value).toMatchObject({ applied: true });
         const quads = await core.store.query(`SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } ${sharedMemoryReadBothFilter(`did:dkg:context-graph:${id}/_shared_memory`, '?g')} }`);
@@ -230,7 +233,10 @@ describe('public host restoration policy fences', () => {
     handler('topic', bytes, 'authorized-publisher');
     await Promise.resolve();
     expect(ingest).toHaveBeenCalledTimes(1);
-    expect((await g.swmHostModeStore!.iterate(id, 0)).map(entry => entry.envelopeBytes)).toEqual([persisted]);
+    expect(await g.swmHostModeStore!.iterate(id, 0)).toEqual([]);
+    const retainedLog = await readFile(join(g.config.dataDir, 'swm-host', `${createHash('sha256').update(id).digest('base64url')}.log`));
+    expect(retainedLog.includes(Buffer.from(persisted))).toBe(true);
+    expect((await g.swmHostModeStore!.stats()).perCg[id].entries).toBe(1);
   });
 
   it.each([false, true])('retains consecutive signed public envelopes through wire adoption (alreadyAdopted=%s)', async alreadyAdopted => {

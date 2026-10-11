@@ -33,11 +33,7 @@ type HostModeAdmission = Readonly<{ custody: SwmHostModeCustody; current(): bool
 export function createAutomaticHostModeActivation(agent: HostActivationAgent, lifetime: ActivationLifetime) {
   const session = lifetime.session;
   const registration = (id: string) => session.hostModeRegistrations.get(agent.canonicalSwmHostModeKey(id));
-  const captureActivationCurrent = (id: string) => {
-    const key = agent.canonicalSwmHostModeKey(id);
-    const handler = session.hostModeRegistrations.get(key)?.handler;
-    return () => session.hostModeRegistrations.get(key)?.handler === handler;
-  };
+  const captureActivationCurrent = (id: string) => session.hostModeRegistrations.captureListener(agent.canonicalSwmHostModeKey(id));
   /** Admission is distinct from activation; legacy persisted custody is explicit. */
   const admit = async (id: string, intent: AdmissionIntent, evidenceCurrent: () => boolean,
     expectedListenerCurrent: () => boolean): Promise<HostModeAdmission | null> => {

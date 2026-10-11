@@ -4,6 +4,7 @@ import { SUBSCRIPTION_SOURCES, type SubscriptionSource } from '@origintrail-offi
 import { decodeSwmHostCatchupResponse, encodeSwmHostCatchupRequest, SWM_HOST_CATCHUP_WIRE_VERSION } from '../../src/swm/host-catchup-wire.js';
 import { mintSignedCatchupRequest } from '../../src/swm/host-catchup-sign.js';
 import { createHostModeTestFixture, installGossipStub, type StripInternals } from './host-mode.fixture.js';
+import type { GossipSession } from '../../src/gossip-session.js';
 import { ContextGraphBindingState } from '../../src/context-graph-binding-state.js';
 import { captureHostPolicyIdentityCurrent } from '../../src/internal/swm-host-catchup-policy.js';
 
@@ -109,11 +110,126 @@ describe('confirmed-public host-mode policy', () => {
       const response = decodeSwmHostCatchupResponse(await catching);
       expect(response.denied).toBeDefined();
       expect(response.entries).toEqual([]);
-      // Retention is the actual log, independent of concurrent designation metadata writes.
-      const retained = await g.swmHostModeStore!.iterate(id, 0);
-      expect(retained).toHaveLength(1);
-      expect(retained[0].envelopeBytes).toEqual(retainedBytes);
+      // The bytes remain retained, but the old authority's history is no longer readable under the replacement.
+      expect((await g.swmHostModeStore!.stats()).perCg[id].entries).toBe(1);
+      expect(await g.swmHostModeStore!.iterate(id, 0)).toEqual([]);
     } finally { release(); await catching; proof.mockRestore(); }
+  });
+
+  it('isolates private retained history from a reused local name rebound to a public chain slot', async () => {
+    const core = await makeCore(false, { hostPublic: true });
+    const g = core as unknown as StripInternals;
+    const id = 'reused-private-public-host-name';
+    const hash = ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerCase();
+    const privateSlot = await g.chain.createOnChainContextGraph({ accessPolicy: 1, publishPolicy: 1, nameHash: hash });
+    const publicSlot = await g.chain.createOnChainContextGraph({ accessPolicy: 0, publishPolicy: 1, nameHash: hash });
+    const bind = async (slot: bigint) => {
+      g.setContextGraphSubscription(id, { subscribed: false, synced: false, syncMode: 'always-on',
+        onChainHash: hash, onChainId: String(slot) }, { persist: false });
+      await g.reconcileSwmHostModeSubscription(id);
+      await g.awaitHostModePersistence(id);
+    };
+    await bind(privateSlot.contextGraphId);
+    const privateBytes = new Uint8Array([91, 92, 93]);
+    await g.swmHostModeStore!.append(id, privateBytes);
+    await bind(publicSlot.contextGraphId);
+    const publicBytes = new Uint8Array([41, 42, 43]);
+    await g.swmHostModeStore!.append(id, publicBytes);
+    const wallet = ethers.Wallet.createRandom();
+    const request = await mintSignedCatchupRequest({ contextGraphId: id, sinceSeqno: 0,
+      maxEntries: 32, maxBytes: 65536, requesterEoa: wallet.address, sign: digest => wallet.signMessage(digest) });
+    const response = decodeSwmHostCatchupResponse(await g.handleSwmHostCatchup(
+      encodeSwmHostCatchupRequest(request), 'ordinary-rebound-reader'));
+    expect(response.denied).toBeUndefined();
+    expect(response.entries.map(entry => Buffer.from(entry.envelopeB64, 'base64'))).toEqual([Buffer.from(publicBytes)]);
+    expect(response.nextSeqno).toBe(2);
+  });
+
+  it.each(['participant', 'beacon', 'agent-gate', 'peer', 'node-operator', 'unavailable', 'unrecognised'] as const)(
+    'preserves private signed catchup authority union: %s', async source => {
+      const core = await makeCore(false);
+      const g = core as unknown as StripInternals & {
+        resolveOnChainParticipantAgents(id: string): Promise<string[] | null>;
+        resolveBeaconPinnedCuratorEoa(id: string): Promise<string | null>;
+        getContextGraphAgentGateAddresses(id: string): Promise<string[] | null>;
+        resolveSwmAllowedPeersForCurrentAuthority(id: string): Promise<string[] | null>;
+      };
+      const id = `private-union-${source}`, peer = 'private-union-peer';
+      const wallet = ethers.Wallet.createRandom();
+      const bytes = new Uint8Array([60, 61]);
+      await g.swmHostModeStore!.append(id, bytes);
+      const unavailable = new Error('authority unavailable');
+      const participants = vi.spyOn(g, 'resolveOnChainParticipantAgents');
+      const beacon = vi.spyOn(g, 'resolveBeaconPinnedCuratorEoa');
+      const gate = vi.spyOn(g, 'getContextGraphAgentGateAddresses');
+      const peers = vi.spyOn(g, 'resolveSwmAllowedPeersForCurrentAuthority');
+      const identity = vi.spyOn(g.chain, 'getIdentityIdForAddress');
+      if (source === 'unavailable') {
+        participants.mockRejectedValue(unavailable); beacon.mockRejectedValue(unavailable);
+        gate.mockRejectedValue(unavailable); peers.mockRejectedValue(unavailable); identity.mockRejectedValue(unavailable);
+      } else {
+        participants.mockResolvedValue(source === 'participant' ? [wallet.address] : []);
+        beacon.mockResolvedValue(source === 'beacon' ? wallet.address : null);
+        gate.mockResolvedValue(source === 'agent-gate' ? [wallet.address] : []);
+        peers.mockResolvedValue(source === 'peer' ? [peer] : []);
+        identity.mockResolvedValue(source === 'node-operator' ? 1n : 0n);
+      }
+      const signed = await mintSignedCatchupRequest({ contextGraphId: id, sinceSeqno: 0, maxEntries: 32,
+        maxBytes: 65536, requesterEoa: wallet.address, sign: digest => wallet.signMessage(digest) });
+      const response = decodeSwmHostCatchupResponse(await g.handleSwmHostCatchup(encodeSwmHostCatchupRequest(signed), peer));
+      if (source === 'unavailable' || source === 'unrecognised') {
+        expect(response.entries).toEqual([]);
+        expect(response.denied).toMatch(source === 'unavailable' ? /no authority source/ : /not in any/);
+      } else {
+        expect(response.denied).toBeUndefined();
+        expect(response.entries.map(row => Buffer.from(row.envelopeB64, 'base64'))).toEqual([Buffer.from(bytes)]);
+      }
+    });
+
+  it.each(['unchanged', 'private-rebind', 'session-retired'] as const)('rechecks signed public authorization after actual retained-log read: %s', async change => {
+    const core = await makeCore(false, { hostPublic: true });
+    const g = core as unknown as StripInternals;
+    const id = 'held-public-log-read';
+    const hash = ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerCase();
+    const publicSlot = await g.chain.createOnChainContextGraph({ accessPolicy: 0, publishPolicy: 1, nameHash: hash });
+    g.setContextGraphSubscription(id, { subscribed: false, synced: false, syncMode: 'always-on',
+      onChainHash: hash, onChainId: String(publicSlot.contextGraphId) }, { persist: false });
+    await g.reconcileSwmHostModeSubscription(id);
+    await g.awaitHostModePersistence(id);
+    const publicBytes = new Uint8Array([51, 52, 53]);
+    await g.swmHostModeStore!.append(id, publicBytes);
+    const wallet = ethers.Wallet.createRandom();
+    const request = await mintSignedCatchupRequest({ contextGraphId: id, sinceSeqno: 0,
+      maxEntries: 32, maxBytes: 65536, requesterEoa: wallet.address, sign: digest => wallet.signMessage(digest) });
+    let entered!: () => void, release!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const actualRead = g.swmHostModeStore!.iterate.bind(g.swmHostModeStore!);
+    const read = vi.spyOn(g.swmHostModeStore!, 'iterate').mockImplementation(async (...args) => {
+      entered(); await gate; return actualRead(...args);
+    });
+    const responsePromise = g.handleSwmHostCatchup(encodeSwmHostCatchupRequest(request), 'ordinary-held-log-reader');
+    try {
+      await reached;
+      if (change === 'private-rebind') {
+        const privateSlot = await g.chain.createOnChainContextGraph({ accessPolicy: 1, publishPolicy: 1, nameHash: hash });
+        g.setContextGraphSubscription(id, { subscribed: false, synced: false, syncMode: 'always-on',
+          onChainHash: hash, onChainId: String(privateSlot.contextGraphId) }, { persist: false });
+        await g.reconcileSwmHostModeSubscription(id);
+        await g.awaitHostModePersistence(id);
+        await g.swmHostModeStore!.append(id, new Uint8Array([81, 82, 83]));
+      } else if (change === 'session-retired') (core as unknown as { gossipSession: GossipSession }).gossipSession.retire();
+      release();
+      const response = decodeSwmHostCatchupResponse(await responsePromise);
+      if (change === 'unchanged') {
+        expect(response.denied).toBeUndefined();
+        expect(response.entries.map(entry => Buffer.from(entry.envelopeB64, 'base64'))).toEqual([Buffer.from(publicBytes)]);
+      } else {
+        expect(response.denied).toMatch(/changed|retired/);
+        expect(response.entries).toEqual([]);
+        expect(response.nextSeqno).toBe(0);
+      }
+    } finally { release(); await responsePromise; read.mockRestore(); }
   });
 
   it('hostPublic opt-in wires a confirmed public CG even while private strip is ON', async () => {

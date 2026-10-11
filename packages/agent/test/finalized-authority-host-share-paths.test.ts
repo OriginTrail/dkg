@@ -495,7 +495,7 @@ interface HostModeIngestInternals {
     message: Uint8Array,
     resolvedSigner?: AgentKeyRecord & { privateKey: string },
   ): Promise<Uint8Array>;
-  ingestSwmHostModeEnvelope(contextGraphId: string, data: Uint8Array, fromPeerId: string): Promise<void>;
+  ingestSwmHostModeEnvelope(contextGraphId: string, data: Uint8Array, fromPeerId: string, admissionCurrent: () => boolean): Promise<void>;
   getSwmHostModeStats(): Promise<{ perCg?: Record<string, { entries: number }> } | undefined>;
 }
 
@@ -766,6 +766,7 @@ describe('the mutable publish policy bit from the finalized authority index', ()
         nowCurated,
         await signedPlaintextShare(host, nowCurated),
         PUBLISHER_PEER,
+        () => true,
       );
       expect(await hostedEntries(host, nowCurated)).toBe(0);
       expect(publishRpc).toHaveBeenCalledWith(curatedId);
@@ -776,6 +777,7 @@ describe('the mutable publish policy bit from the finalized authority index', ()
         stillOpen,
         await signedPlaintextShare(host, stillOpen),
         PUBLISHER_PEER,
+        () => true,
       );
       expect(await hostedEntries(host, stillOpen)).toBe(1);
       expect(publishRpc).toHaveBeenCalledWith(openId);

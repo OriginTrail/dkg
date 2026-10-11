@@ -17,3 +17,10 @@ void incomplete;
 
 // @ts-expect-error Every handler requires its registration-owned admission capture.
 createSwmHostModeHandler(agent, { warn: () => {}, debug: () => {} }, session, 'owned');
+
+// @ts-expect-error Concrete legacy ingestion cannot omit the captured admission fence.
+agent.ingestSwmHostModeEnvelope('owned', new Uint8Array(), 'peer');
+// @ts-expect-error Concrete chunk ingestion cannot omit the captured admission fence.
+agent.ingestSwmCiphertextChunkEnvelope('owned', new Uint8Array(), 'peer');
+agent.ingestSwmHostModeEnvelope('owned', new Uint8Array(), 'peer', () => session.active);
+agent.ingestSwmCiphertextChunkEnvelope('owned', new Uint8Array(), 'peer', () => session.active);

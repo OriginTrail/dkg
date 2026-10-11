@@ -261,5 +261,29 @@ describe('host admission and captured custody', () => {
     if (refreshed.custody.kind === 'automatic-public') expect(refreshed.custody.current()).toBe(false);
     expect(onMessage).toHaveBeenCalledTimes(1);
   });
+  it('the registration owns pending versus installed listener captures and replacement tokens', async () => {
+    const core = await makeCore(false), g = core as unknown as Host;
+    const id = 'registration-token-custody', key = ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerCase();
+    const owner = g.gossipSession.hostModeRegistrations;
+    const pending = owner.captureListener(key);
+    expect(pending()).toBe(true);
+    g.wireSwmHostModeHandler(id, SUBSCRIPTION_SOURCES.CHAIN_EVENT, { kind: 'curated' });
+    const original = owner.get(key)!;
+    const installed = owner.captureListener(key);
+    expect(pending()).toBe(false);
+    expect(installed()).toBe(true);
+    g.wireSwmHostModeHandler(id, SUBSCRIPTION_SOURCES.RECONCILER, { kind: 'manual-public' });
+    expect(owner.get(key)!.listenerToken).toBe(original.listenerToken);
+    expect(owner.get(key)!.source).toBe(original.source);
+    expect(installed()).toBe(true);
+    // Even deliberate reinstallation of the same function is a different listener lifetime.
+    owner.remove(key);
+    owner.installOrRefresh(key, { ...original, listenerToken: Symbol('replacement') });
+    expect(owner.get(key)!.handler).toBe(original.handler);
+    expect(installed()).toBe(false);
+    expect(owner.captureListener(key)()).toBe(true);
+    g.gossipSession.retire();
+    expect(owner.captureListener(key)()).toBe(false);
+  });
 
 });

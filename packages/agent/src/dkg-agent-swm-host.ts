@@ -1,4 +1,4 @@
-import { createHostModePublicPolicy, resolveAutomaticHostModeLocalId } from './internal/swm-host-catchup-policy.js';
+import { authorizeHostCatchupRequest, createHostModePublicPolicy, resolveAutomaticHostModeLocalId } from './internal/swm-host-catchup-policy.js';
 import { HostModeRestoration } from './internal/host-mode-restoration.js';
 import { createAutomaticHostModeActivation, readSwmHostModeAccessPolicy, reconcileKnownHostModeSubscriptions } from './internal/automatic-host-mode-activation.js';
 // SPDX-License-Identifier: Apache-2.0
@@ -221,7 +221,6 @@ import {
 import {
   CatchupReplayGuard,
   mintSignedCatchupRequest,
-  verifySignedCatchupRequest,
 } from './swm/host-catchup-sign.js';
 import {
   createCiphertextChunkCatchupReplayGuard,
@@ -1206,21 +1205,17 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
     const swmTopic = contextGraphWorkspaceTopic(wireCgId);
     const handoffCurrent = this.swmHostModePublicPolicy().captureCanonicalHandoff(contextGraphId);
-    const handler = createSwmHostModeHandler(this, this.log, session, contextGraphId, () => {
-      const registration = session.hostModeRegistrations.get(wireCgId);
-      const custody = registration?.custody;
-      return () => session.active && this.gossipSession === session
-        && session.hostModeRegistrations.get(wireCgId)?.handler === handler
-        && (!this.swmHostModeStripCiphertext() || (custody?.kind === 'manual-public'
-          ? session.hostModeRegistrations.get(wireCgId)?.custody.kind === 'manual-public'
-            && this.isExactPublicManualSwmHostMode(contextGraphId, wireCgId)
-          : custody?.kind === 'automatic-public'
-            && session.hostModeRegistrations.get(wireCgId)?.custody.kind === 'automatic-public' && custody.current()));
-    }, () => this.swmHostModeActivation().refreshCanonicalHandoff(contextGraphId, source,
-      () => session.active && this.gossipSession === session && session.hostModeRegistrations.get(wireCgId)?.handler === handler,
-      handoffCurrent));
+    const listenerToken = Symbol('host-mode-listener');
+    const handler = createSwmHostModeHandler(this, this.log, session, contextGraphId,
+      () => session.hostModeRegistrations.captureAdmission(wireCgId, listenerToken, {
+        bindingCurrent: this.swmHostModePublicPolicy().captureCurrent(contextGraphId),
+        stripCiphertext: () => this.swmHostModeStripCiphertext(),
+        manualPublicCurrent: () => this.isExactPublicManualSwmHostMode(contextGraphId, wireCgId),
+      }),
+      () => this.swmHostModeActivation().refreshCanonicalHandoff(contextGraphId, source,
+        session.hostModeRegistrations.captureListener(wireCgId, listenerToken), handoffCurrent));
     // Source, listener and public exemption become one registration before delivery.
-    session.hostModeRegistrations.installOrRefresh(wireCgId, { source, handler, custody });
+    session.hostModeRegistrations.installOrRefresh(wireCgId, { source, handler, custody, listenerToken });
     live.manager.subscribe(swmTopic);
     live.manager.onMessage(swmTopic, handler);
     // B3: persist the host-mode designation so a restart re-engages
@@ -1427,7 +1422,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     contextGraphId: string,
     data: Uint8Array,
     fromPeerId: string,
-    admissionCurrent: () => boolean = () => true,
+    admissionCurrent: () => boolean,
   ): Promise<void> {
     if (!this.swmHostModeStore) return;
     const session = this.gossipSession;
@@ -1618,7 +1613,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
     }
     if (!admissionCurrent()) return;
-    const seqno = await this.swmHostModeStore.append(storageCgId, data);
+    const localId = this.swmHostModeLocalId(contextGraphId);
+    const onChainId = this.contextGraphBindingState.currentBindingFor(localId, this.subscribedContextGraphs.get(localId))?.onChainId;
+    const seqno = await this.swmHostModeStore.append(storageCgId, data, { onChainId, current: admissionCurrent });
+    if (seqno === undefined) return;
     this.log.debug(
       ctx,
       `Host-mode stored opaque SWM envelope cg=${storageCgId} seqno=${seqno} bytes=${data.length}`,
@@ -1724,7 +1722,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     contextGraphId: string,
     data: Uint8Array,
     fromPeerId: string,
-    admissionCurrent: () => boolean = () => true,
+    admissionCurrent: () => boolean,
   ): Promise<void> {
     if (data.length === 0 || !admissionCurrent()) return;
     const ctx = createOperationContext('share');
@@ -2179,11 +2177,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
       });
     }
 
+    const authorizationRetired = () => encodeSwmHostCatchupResponse({
+      version: SWM_HOST_CATCHUP_WIRE_VERSION, contextGraphId: req.contextGraphId,
+      nextSeqno: req.sinceSeqno, truncated: false, denied: 'host-catchup authority changed or session retired', entries: [],
+    });
+    if (!authResult.current()) return authorizationRetired();
     const maxEntries = req.maxEntries ?? SWM_HOST_CATCHUP_DEFAULT_MAX_ENTRIES;
     const maxBytes = req.maxBytes ?? SWM_HOST_CATCHUP_DEFAULT_MAX_BYTES;
     let raw;
     try {
-      raw = await this.swmHostModeStore.iterate(req.contextGraphId, req.sinceSeqno, maxEntries + 1);
+      raw = await this.swmHostModeStore.iterate(req.contextGraphId, req.sinceSeqno, maxEntries + 1, authResult.publicOnChainId);
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       this.log.warn(ctx, `host-catchup iterate failed cg=${req.contextGraphId} from=${fromPeerId}: ${reason}`);
@@ -2196,6 +2199,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         entries: [],
       });
     }
+    if (!authResult.current()) return authorizationRetired();
     const truncatedByEntries = raw.length > maxEntries;
     if (truncatedByEntries) raw = raw.slice(0, maxEntries);
     const entries: SwmHostCatchupResponseEntry[] = [];
@@ -8079,154 +8083,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
     req: ReturnType<typeof decodeSwmHostCatchupRequest>,
     fromPeerId: string,
     nowMs: number,
-  ): Promise<{ ok: true; recoveredSigner: string } | { ok: false; reason: string }> {
-    // 1. signature + freshness. `verifySignedCatchupRequest` re-runs
-    //    `computeCatchupRequestDigest` over the same numerical fields
-    //    the client signed; pass defined defaults for the optional
-    //    `maxEntries`/`maxBytes` so the encoded uint256 layout matches.
-    const verify = verifySignedCatchupRequest(
-      {
-        version: req.version,
-        contextGraphId: req.contextGraphId,
-        sinceSeqno: req.sinceSeqno,
-        maxEntries: req.maxEntries ?? 0,
-        maxBytes: req.maxBytes ?? 0,
-        requesterEoa: req.requesterEoa,
-        issuedAtMs: req.issuedAtMs,
-        nonce: req.nonce,
-        sig: req.sig,
-      },
-      nowMs,
-    );
-    if (!verify.ok || !verify.recoveredSigner) {
-      return { ok: false, reason: verify.reason ?? 'signature verification failed' };
-    }
-    const requesterEoa = verify.recoveredSigner;
-
-    // 2. replay-defence
-    if (!this.catchupReplayGuard.recordIfFresh(requesterEoa, req.nonce, req.issuedAtMs, nowMs)) {
-      return { ok: false, reason: 'replayed catchup nonce' };
-    }
-
-    // Public host custody is explicitly enabled and re-confirmed locally.
-    // Authentication and replay defence above apply equally to ordinary readers.
-    const publicPolicy = await this.swmHostModePublicPolicy().evaluate(req.contextGraphId, 'public-reader');
-    if (publicPolicy.mayAdmitPublicReader) {
-      return { ok: true, recoveredSigner: requesterEoa };
-    }
-
-    // The authority sources below use UNION semantics: any source
-    // that recognises the requester EOA (or, as transport-layer
-    // fallback, the peer-id) is sufficient to accept. Codex PR #618
-    // R2 caught a fail-closed bug in the prior implementation where
-    // `chainParticipants` was treated as authoritative — if the
-    // chain returned a set that didn't include a legitimate
-    // delegatee or allowed-agent, we'd hard-deny without checking
-    // the locally-persisted allowlist. The current logic accepts
-    // on the first match across:
-    //   3a. on-chain participant agents
-    //   3b. beacon-pinned curator (pre-registration)
-    //   3c. locally-persisted agent-gate set (allowedAgent UNION
-    //       participantAgent from _meta + subscription cache)
-    //   3d. transport-layer allowedPeers (libp2p peer-id allowlist)
-    //   3e. registered node-operator EOA for ciphertext-only host catchup
-    // Only if none accept do we deny.
-    const requesterLower = requesterEoa.toLowerCase();
-    let anyAuthoritySourceFound = false;
-
-    try {
-      const chainParticipants = await withRpcUsageSite(
-        CG_AUTH_RPC_SITES.hostCatchUp,
-        () => this.resolveOnChainParticipantAgents(req.contextGraphId),
-      );
-      if (chainParticipants !== null) {
-        anyAuthoritySourceFound = true;
-        if (chainParticipants.some((a) => a.toLowerCase() === requesterLower)) {
-          return { ok: true, recoveredSigner: requesterEoa };
-        }
-      }
-    } catch {
-      // Adapter probe failure is non-fatal; fall through to other sources.
-    }
-
-    try {
-      const beaconCurator = await this.resolveBeaconPinnedCuratorEoa(req.contextGraphId);
-      if (beaconCurator) {
-        anyAuthoritySourceFound = true;
-        if (beaconCurator.toLowerCase() === requesterLower) {
-          return { ok: true, recoveredSigner: requesterEoa };
-        }
-      }
-    } catch {
-      // Beacon cache miss is non-fatal.
-    }
-
-    // Locally-persisted agent gate: `getContextGraphAgentGateAddresses`
-    // unions `dkg:allowedAgent` + `dkg:participantAgent` from the CG's
-    // `_meta` graph and the in-memory subscription cache. On a member-
-    // side host this is the canonical allowlist + delegatee set;
-    // chain-derived sets often miss recently-approved delegatees that
-    // haven't been mirrored on chain yet.
-    try {
-      const agentGate = await withRpcUsageSite(
-        CG_AUTH_RPC_SITES.hostCatchUp,
-        () => this.getContextGraphAgentGateAddresses(req.contextGraphId),
-      );
-      if (agentGate !== null) {
-        anyAuthoritySourceFound = true;
-        if (agentGate.some((a) => a.toLowerCase() === requesterLower)) {
-          return { ok: true, recoveredSigner: requesterEoa };
-        }
-      }
-    } catch {
-      // Local-meta probe failure is non-fatal.
-    }
-
-    // Transport-layer ACL (libp2p peer-id allowlist). Only meaningful
-    // on nodes that have persisted the CG's `allowedPeers`; host-only
-    // cores never see it.
-    try {
-      const allowedPeers = await this.resolveSwmAllowedPeersForCurrentAuthority(
-        req.contextGraphId,
-      );
-      if (allowedPeers !== null) {
-        anyAuthoritySourceFound = true;
-        if (allowedPeers.includes(fromPeerId)) {
-          return { ok: true, recoveredSigner: requesterEoa };
-        }
-      }
-    } catch {
-      // local-meta probe failure is non-fatal; the deny below still applies.
-    }
-
-    // Ciphertext host-catchup parity with LU-11 chunk-catchup: the responder
-    // serves opaque SWM envelopes, not decrypted triples. A requester that can
-    // prove control of a registered node-operator EOA is allowed to fetch these
-    // bytes so host-only cores and member daemons whose operational wallet is
-    // distinct from their DKG agent address can recover missed ciphertext.
-    if (typeof this.chain.getIdentityIdForAddress === 'function') {
-      try {
-        const reqIdentityId = await this.chain.getIdentityIdForAddress(requesterEoa);
-        if (reqIdentityId > 0n) {
-          anyAuthoritySourceFound = true;
-          this.log.debug(
-            createOperationContext('share'),
-            `host-catchup admitted via node-operator authority cg=${req.contextGraphId} requesterEoa=${requesterEoa} identityId=${reqIdentityId.toString()}`,
-          );
-          return { ok: true, recoveredSigner: requesterEoa };
-        }
-      } catch (err) {
-        this.log.debug(
-          createOperationContext('share'),
-          `host-catchup node-operator probe failed cg=${req.contextGraphId} requesterEoa=${requesterEoa}: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }
-
-    const reason = anyAuthoritySourceFound
-      ? 'requester EOA not in any of: on-chain participants, beacon curator, local agent-gate, allowedPeers, node-operator-registry'
-      : 'no authority source available for context graph';
-    return { ok: false, reason };
+  ): Promise<{ ok: true; recoveredSigner: string; current(): boolean; publicOnChainId?: string } | { ok: false; reason: string }> {
+    return authorizeHostCatchupRequest({
+      publicPolicy: this.swmHostModePublicPolicy(), replay: this.catchupReplayGuard,
+      participants: id => this.resolveOnChainParticipantAgents(id),
+      beaconCurator: id => this.resolveBeaconPinnedCuratorEoa(id),
+      agentGate: id => this.getContextGraphAgentGateAddresses(id),
+      allowedPeers: id => this.resolveSwmAllowedPeersForCurrentAuthority(id),
+      chain: this.chain, log: this.log,
+    }, req, fromPeerId, nowMs);
   }
 
   /**
