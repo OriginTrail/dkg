@@ -2,6 +2,10 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-catalog-repair-backoff.test.ts",
   "test/rfc64-catalog-repair-pressure.test.ts",
   "test/rfc64-catalog-repair-diagnostics.test.ts",
+  // #3134 — a full author catalog refuses a new asset once, visibly, and is not retried on a timer.
+  "test/rfc64-author-catalog-capacity.test.ts",
+  "test/rfc64-full-catalog-parking.test.ts",
+  "test/rfc64-full-author-catalog.test.ts",
   "test/rfc64-inventory-v1-scalars.test.ts",
   "test/rfc64-legacy-swm-boundary-v1.test.ts",
   "test/rfc64-legacy-swm-boundary-codec-v1.test.ts",

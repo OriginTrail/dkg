@@ -1101,13 +1101,12 @@ export class DKGAgent extends DKGAgentBase {
             headRevision: headDigest,
           };
         },
-        listFinalizedPrivateRepairs: () => (
-          this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.list() ?? []
-        ),
+        listFinalizedPrivateRepairs: () => this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.list() ?? [],
         repairFinalizedPrivatePlacement: async (repair, placement) => {
           await this.repairObservedRfc64FinalizedPrivateCatalogPlacementV1(repair, placement);
         },
         reconcile: (params) => this.reconcileRfc64PublicCatalogFromSwmInventoryV1(params),
+        readAppliedCatalogHead: (scope, author) => this.rfc64PersistenceV1?.inventory.readAppliedCatalogHeadV1(scope, author),
         warn: (ctx, message) => this.log.warn(ctx, message),
         placementTiming: () => catalogPlacementTimingV1(this),
       }),
