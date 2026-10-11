@@ -50,7 +50,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { observeConfirmedCatalogObligationV1 } from './internal/confirmed-catalog-obligation.js';
 import { recoverConfirmedCatalogObligationV1 } from './internal/confirmed-catalog-obligation-recovery.js';
-import type { ConfirmedCatalogObligationRecoveryV1 } from './confirmed-catalog-obligation-error.js';
+import { parseConfirmedCatalogObligationRecoveryV1 } from './confirmed-catalog-obligation-error.js';
 import { selectRfc64ConfirmedCatalogObligationV1 } from './rfc64/catalog-rollout-authority-v1.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
@@ -819,8 +819,9 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
 
   /** Validate retained confirmation evidence and retry only its catalog observer. */
   async recoverRfc64ConfirmedCatalogObligationV1(
-    this: DKGAgent, evidence: Readonly<ConfirmedCatalogObligationRecoveryV1>,
+    this: DKGAgent, input: unknown,
   ): Promise<void> {
+    const evidence = parseConfirmedCatalogObligationRecoveryV1(input);
     const generation = this.contextGraphBindingState.capture(evidence.contextGraphId);
     const signal = this.vmReconcileLifecycleController.signal;
     return recoverConfirmedCatalogObligationV1(evidence, {
@@ -851,14 +852,9 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     });
     let outcome: 'repaired' | 'already-complete' | null = null;
     await rfc64SwmInventoryShadowRuntimeV1(this).runExclusive(assetKey, async () => {
-      const applied = await this.publishRfc64FinalizedPrivateCatalogPlacementV1(repair, placement);
-      if (applied === null) {
-        await persistence.finalizedPrivatePlacementRepairs.delete(repair);
-        outcome = 'already-complete';
-        return;
-      }
+      const completion = await this.publishRfc64FinalizedPrivateCatalogPlacementV1(repair, placement);
       await persistence.finalizedPrivatePlacementRepairs.delete(repair);
-      outcome = 'repaired';
+      outcome = completion.action === 'private-placement' && completion.status === 'applied' ? 'repaired' : 'already-complete';
     });
     if (outcome === null) throw new Error('RFC-64 finalized-private placement repair did not run');
     return outcome;

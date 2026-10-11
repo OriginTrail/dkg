@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 import {
-  assertAssertionCoordinateV1, assertContextGraphIdV1, assertCanonicalGraphScopedAuthorSealV1,
   canonicalGraphScopedAuthorSealFromAssertionSealV1, computeCanonicalGraphScopedAuthorSealDigestV1,
   createOperationContext, contextGraphAssertionUri, type ContextGraphIdV1,
 } from '@origintrail-official/dkg-core';
@@ -31,14 +30,6 @@ function invalidEvidence(): Error {
 export async function recoverConfirmedCatalogObligationV1(
   evidence: Readonly<ConfirmedCatalogObligationRecoveryV1>, ports: RecoveryPortsV1,
 ): Promise<void> {
-  try {
-    assertContextGraphIdV1(evidence.contextGraphId, 'confirmed recovery contextGraphId');
-    assertAssertionCoordinateV1(evidence.assertionCoordinate, 'confirmed recovery assertionCoordinate');
-    assertCanonicalGraphScopedAuthorSealV1(evidence.seal);
-  } catch { throw invalidEvidence(); }
-  if (evidence.version !== 1 || evidence.subGraphName !== null
-    || !/^0x[0-9a-fA-F]{64}$/.test(evidence.transactionHash)
-    || !Number.isSafeInteger(evidence.blockNumber) || evidence.blockNumber < 0) throw invalidEvidence();
   ports.assertCurrent();
   const { chain, signal } = ports;
   if (!chain.resolveCanonicalFinalizationReceipt || !chain.getKAContextGraphId || !chain.getDKGKnowledgeAssetsAddress) throw invalidEvidence();
@@ -53,8 +44,9 @@ export async function recoverConfirmedCatalogObligationV1(
   if (!matches() || candidate === undefined) throw invalidEvidence();
   const binding = await ports.resolveBinding();
   if (binding === null) throw invalidEvidence();
+  const assertionVersion = BigInt(evidence.seal.assertionVersion);
   const resolved = await chain.resolveCanonicalFinalizationReceipt(evidence.transactionHash,
-    { signal, expectedBlockNumber: evidence.blockNumber });
+    { signal, expectedBlockNumber: evidence.blockNumber, includeKnowledgeAssetUpdates: assertionVersion > 1n });
   if (resolved.status !== 'confirmed') throw invalidEvidence();
   const receipt = resolved.receipt;
   const seal = evidence.seal;
@@ -66,6 +58,7 @@ export async function recoverConfirmedCatalogObligationV1(
   if (receipt.txHash.toLowerCase() !== evidence.transactionHash.toLowerCase()
     || receipt.blockNumber !== evidence.blockNumber || receipt.kaId !== kaId
     || receipt.startKAId !== kaId || receipt.endKAId !== kaId
+    || (assertionVersion > 1n && receipt.assertionVersion !== assertionVersion)
     || receipt.authorAddress?.toLowerCase() !== seal.authorAddress
     || ethers.hexlify(receipt.merkleRoot).toLowerCase() !== seal.assertionMerkleRoot
     || graphId.toString() !== binding.onChainId || chainId.toString() !== seal.assertedAtChainId

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  assertAssertionCoordinateV1, assertContextGraphIdV1, assertCanonicalGraphScopedAuthorSealV1, snapshotExactDataRecord,
   canonicalGraphScopedAuthorSealFromAssertionSealV1,
   type CanonicalGraphScopedAuthorSealV1,
 } from '@origintrail-official/dkg-core';
@@ -26,6 +27,38 @@ export interface ConfirmedCatalogObligationRecoveryV1 {
   readonly seal: Readonly<CanonicalGraphScopedAuthorSealV1>;
   readonly transactionHash: string;
   readonly blockNumber: number;
+}
+
+/** Snapshot untrusted evidence once; chain/local-seal authentication is a separate step. */
+export function parseConfirmedCatalogObligationRecoveryV1(input: unknown): Readonly<ConfirmedCatalogObligationRecoveryV1> {
+  try {
+    const value = snapshotExactDataRecord(input, ['version', 'contextGraphId', 'assertionCoordinate',
+      'subGraphName', 'seal', 'transactionHash', 'blockNumber'], 'confirmed catalog recovery');
+    if (typeof value.seal !== 'object' || value.seal === null
+      || ![Object.prototype, null].includes(Object.getPrototypeOf(value.seal))) throw new Error('Expected seal object');
+    const fields = Object.getOwnPropertyDescriptors(value.seal);
+    const seal: Record<string, unknown> = Object.create(null);
+    for (const key of Reflect.ownKeys(fields)) {
+      if (typeof key !== 'string') throw new Error('Expected string seal field');
+      const field = fields[key];
+      if (!field || !('value' in field) || !field.enumerable) throw new Error('Expected seal data field');
+      seal[key] = field.value;
+    }
+    assertContextGraphIdV1(value.contextGraphId, 'confirmed recovery contextGraphId');
+    assertAssertionCoordinateV1(value.assertionCoordinate, 'confirmed recovery assertionCoordinate');
+    assertCanonicalGraphScopedAuthorSealV1(seal);
+    if (value.version !== 1 || value.subGraphName !== null || typeof value.transactionHash !== 'string'
+      || !/^0x[0-9a-fA-F]{64}$/.test(value.transactionHash)
+      || typeof value.blockNumber !== 'number' || !Number.isSafeInteger(value.blockNumber) || value.blockNumber < 0) {
+      throw new Error('Invalid recovery scalars');
+    }
+    return Object.freeze({ version: 1, contextGraphId: value.contextGraphId,
+      assertionCoordinate: value.assertionCoordinate, subGraphName: null,
+      seal: Object.freeze(seal), transactionHash: value.transactionHash, blockNumber: value.blockNumber });
+  } catch (cause) {
+    throw Object.assign(new Error('Invalid confirmed catalog recovery evidence', { cause }),
+      { code: 'CONFIRMED_CATALOG_RECOVERY_INVALID' });
+  }
 }
 
 /** Chain confirmation succeeded, but local catalog completion is still owed. */

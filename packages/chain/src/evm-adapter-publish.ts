@@ -826,11 +826,46 @@ export class PublishMethods extends EVMChainAdapterBase {
       return { status: 'reorged' };
     }
 
-    if (!parsedPublish) return { status: 'rejected' };
-    const canonicalReceipt = this.projectCanonicalFinalizationReceipt(receipt, parsedPublish);
+    const confirmation = parsedPublish ?? (options.includeKnowledgeAssetUpdates === true
+      ? this.decodeV10UpdateConfirmationReceipt(receipt) : null);
+    if (!confirmation) return { status: 'rejected' };
+    const canonicalReceipt = this.projectCanonicalFinalizationReceipt(receipt, confirmation);
+    if (canonicalReceipt && !parsedPublish) {
+      const storage = this.contracts.knowledgeAssetStorage;
+      const update = await this.verifyKAUpdate(txHash, canonicalReceipt.kaId, canonicalReceipt.publisherAddress, options);
+      if (!update.verified || update.merkleRootCount === undefined || update.merkleRootCount <= 1n
+        || update.blockNumber !== receipt.blockNumber || update.blockHash !== receipt.blockHash
+        || update.txIndex !== receipt.index || !update.onChainMerkleRoot
+        || ethers.hexlify(update.onChainMerkleRoot) !== ethers.hexlify(canonicalReceipt.merkleRoot)
+        || this.contracts.knowledgeAssetStorage !== storage) return { status: 'rejected' };
+      // The existing verifier excludes prior blocks and refuses same-block duplicate matches.
+      // A latest count or repeated author signature cannot bind this receipt to its version.
+      canonicalReceipt.assertionVersion = update.merkleRootCount;
+      await this.getFinalizedBlockTimestamp(receipt.blockNumber, receipt.blockHash, options);
+    }
     return canonicalReceipt
       ? { status: 'confirmed', receipt: canonicalReceipt }
       : { status: 'rejected' };
+  }
+
+  /** An update is confirmation evidence only at the explicitly opted-in recovery boundary. */
+  private decodeV10UpdateConfirmationReceipt(receipt: ethers.TransactionReceipt): OnChainPublishResult | null {
+    const storage = this.contracts.knowledgeAssetStorage;
+    if (!storage) return null;
+    const confirmations: OnChainPublishResult[] = [];
+    for (const log of receipt.logs) {
+      if (log.address.toLowerCase() !== String(storage.target).toLowerCase()) continue;
+      try {
+        const parsed = storage.interface.parseLog({ topics: [...log.topics], data: log.data });
+        if (parsed?.name !== 'KnowledgeAssetUpdated') continue;
+        const kaId = BigInt(parsed.args.id);
+        confirmations.push({ batchId: kaId, kaId, startKAId: kaId, endKAId: kaId,
+          txHash: receipt.hash, blockNumber: receipt.blockNumber, txIndex: receipt.index, blockTimestamp: 0,
+          merkleRoot: ethers.getBytes(parsed.args.merkleRoot), authorAddress: String(parsed.args.author),
+          publisherAddress: receipt.from, knowledgeAssetsContract: String(storage.target) });
+      } catch { /* An unrelated or malformed log cannot authenticate a confirmation. */ }
+    }
+    return confirmations.length === 1 ? confirmations[0] : null;
   }
 
   /** Apply header-read policy once, outside either event-format decoder. */

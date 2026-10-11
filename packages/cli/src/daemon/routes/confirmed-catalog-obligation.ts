@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import {
-  ConfirmedCatalogObligationErrorV1, type ConfirmedCatalogObligationRecoveryV1,
+  ConfirmedCatalogObligationErrorV1, parseConfirmedCatalogObligationRecoveryV1,
 } from '@origintrail-official/dkg-agent';
 import type { RequestContext } from './context.js';
 import { actorFromRequestContext } from './context.js';
@@ -28,10 +28,15 @@ export async function handleConfirmedCatalogObligationRecovery(
   if (typeof evidence !== 'object' || evidence === null || Array.isArray(evidence)) {
     return jsonResponse(ctx.res, 400, { code: 'CONFIRMED_CATALOG_RECOVERY_INVALID', error: 'Missing confirmed catalog recovery evidence' });
   }
-  const candidate = evidence as ConfirmedCatalogObligationRecoveryV1;
   const actor = actorFromRequestContext(ctx);
   if (actor.authentication.principal.kind === 'anonymous' && actor.authentication.mode !== 'disabled') {
     return jsonResponse(ctx.res, 403, { error: 'Confirmed catalog recovery requires a credential' });
+  }
+  let candidate: ReturnType<typeof parseConfirmedCatalogObligationRecoveryV1>;
+  try {
+    candidate = parseConfirmedCatalogObligationRecoveryV1(evidence);
+  } catch {
+    return jsonResponse(ctx.res, 409, { code: 'CONFIRMED_CATALOG_RECOVERY_INVALID', error: 'Invalid confirmed catalog recovery evidence' });
   }
   if (actor.authenticatedAgentAddress !== undefined
     && candidate.seal?.authorAddress !== actor.authenticatedAgentAddress.toLowerCase()) {

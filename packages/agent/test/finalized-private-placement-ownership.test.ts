@@ -437,6 +437,37 @@ describe('a confirmed private placement the observer handed to the supervisor', 
     expect(fixture.catalogRows()).toBe('1');
   }, 60_000);
 
+  it.each([false, true])('retires exactly one marker after explicit completion, public=%s', async publicLane => {
+    const f = await startPlacementAgentV1({ name: `explicit-completion-${publicLane}` });
+    const asset = await seedPlacementAssetV1(f.agent, 'completion', 997n);
+    await f.agent.closeRfc64SwmCatalogProjectionSupervisorV1();
+    f.lane.acceptsFinalizedVmRepair = !publicLane;
+    await observeConfirmedV1(f.agent, asset);
+    const marker = f.markers()[0]!;
+    expect(marker).toBeDefined();
+    // A failed executor must not delete its durable obligation.
+    const refusal = new Error('physical placement refused');
+    f.failPlacements.push(refusal);
+    await expect(f.agent.repairRfc64FinalizedPrivateCatalogPlacementV1(marker)).rejects.toBe(refusal);
+    expect(f.markers()).toEqual([marker]);
+    expect(f.completions()).toEqual([]);
+    await expect(f.agent.repairRfc64FinalizedPrivateCatalogPlacementV1(marker))
+      .resolves.toBe(publicLane ? 'already-complete' : 'repaired');
+    expect(f.markers()).toEqual([]);
+    expect(f.completions()).toEqual([{ status: 'applied', action: publicLane ? 'public-retirement' : 'private-placement' }]);
+    // Re-observation owes the same record; proof of absence/coverage finishes it without new work.
+    await observeConfirmedV1(f.agent, asset);
+    expect(f.markers()).toEqual([marker]);
+    const before = f.counts();
+    await expect(f.agent.repairRfc64FinalizedPrivateCatalogPlacementV1(marker)).resolves.toBe('already-complete');
+    expect(f.markers()).toEqual([]);
+    expect(f.completions().at(-1)).toEqual(publicLane
+      ? { status: 'already-absent', action: 'public-retirement' }
+      : { status: 'already-covered', action: 'private-placement' });
+    expect(f.counts().successors).toBe(before.successors);
+    expect(f.events().filter(event => event.startsWith('marker-retired:'))).toHaveLength(2);
+  }, 60_000);
+
   it('keeps the marker when the attempt fails, reports it as owed, and retires it only on the coverage proof', async () => {
     const fixture = await startPlacementAgentV1({ name: 'ownership-failed-attempt' });
     const { agent, clock } = fixture;

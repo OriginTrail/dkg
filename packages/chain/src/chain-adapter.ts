@@ -345,6 +345,8 @@ export interface CanonicalFinalizationReceipt {
   startKAId: bigint;
   endKAId: bigint;
   knowledgeAssetsContract?: string;
+  /** Receipt-block root-history position; opt-in V10 updates require an unambiguous append. */
+  assertionVersion?: bigint;
 }
 
 export type CanonicalFinalizationReceiptResolution =
@@ -430,6 +432,9 @@ export interface CanonicalFinalizationReceiptReadOptions extends ChainReadOption
   /** Persisted block identity supplied during replay canonicality checks. */
   expectedBlockHash?: string;
   expectedBlockNumber?: number;
+  /** Confirmed catalog obligations also accept authenticated V10 update events.
+   * Omission preserves the historical creation-only receipt contract. */
+  includeKnowledgeAssetUpdates?: boolean;
 }
 
 export interface UpdateKAParams {

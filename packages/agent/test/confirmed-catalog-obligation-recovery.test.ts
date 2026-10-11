@@ -5,15 +5,16 @@ import { MockChainAdapter, type CanonicalFinalizationReceipt } from '@origintrai
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { buildAssertionSealQuads, contextGraphAssertionUri, contextGraphMetaUri,
   contextGraphPrivateUri } from '@origintrail-official/dkg-core';
-import { ConfirmedCatalogObligationErrorV1 } from '../src/confirmed-catalog-obligation-error.js';
+import { ConfirmedCatalogObligationErrorV1, parseConfirmedCatalogObligationRecoveryV1 } from '../src/confirmed-catalog-obligation-error.js';
+import { DKGAgent } from '../src/index.js';
 import { recoverConfirmedCatalogObligationV1 } from '../src/internal/confirmed-catalog-obligation-recovery.js';
 import { authorSealV1, assertionSealV1, AUTHOR, CONTEXT_GRAPH_ID } from './support/rfc64-local-catalog-repair-fixture.js';
 
 const stores: OxigraphStore[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const store of stores.splice(0)) await store.close(); });
-async function fixture(archived = false) {
+async function fixture(archived = false, assertionVersion = '1') {
   const store = new OxigraphStore(); stores.push(store);
-  const seal = await authorSealV1(103n); const raw = assertionSealV1(seal);
+  const seal = await authorSealV1(103n, assertionVersion); const raw = assertionSealV1(seal);
   const name = 'confirmed-recovery'; const subject = contextGraphAssertionUri(CONTEXT_GRAPH_ID, AUTHOR, name);
   const rows = buildAssertionSealQuads({ assertionUri: subject, metaGraph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
     merkleRoot: raw.merkleRoot, authorAddress: raw.authorAddress, authorAttestationR: raw.authorAttestationR,
@@ -67,18 +68,53 @@ describe('caller-retained confirmed catalog evidence', () => {
       await expect(recoverConfirmedCatalogObligationV1(f.evidence, f.ports)).rejects.toMatchObject({ code: 'CONFIRMED_CATALOG_RECOVERY_INVALID' });
       expect(f.observe).not.toHaveBeenCalled(); expect(f.submit).not.toHaveBeenCalled();
     });
+  it('binds repeated same-root updates to the receipt-specific assertion version', async () => {
+    const f = await fixture(false, '3');
+    for (const assertionVersion of [undefined, 1n, 2n, 4n]) {
+      f.receipt.assertionVersion = assertionVersion;
+      await expect(recoverConfirmedCatalogObligationV1(f.evidence, f.ports)).rejects.toMatchObject({ code: 'CONFIRMED_CATALOG_RECOVERY_INVALID' });
+      expect(f.observe).not.toHaveBeenCalled();
+    }
+    f.receipt.assertionVersion = 3n;
+    await recoverConfirmedCatalogObligationV1(f.evidence, f.ports);
+    expect(f.observe).toHaveBeenCalledOnce(); expect(f.submit).not.toHaveBeenCalled();
+    expect(f.chain.resolveCanonicalFinalizationReceipt).toHaveBeenLastCalledWith(f.evidence.transactionHash,
+      { signal: f.controller.signal, expectedBlockNumber: f.evidence.blockNumber, includeKnowledgeAssetUpdates: true });
+  });
   it('refuses altered seal bytes, missing local evidence, unconfirmed receipt and invalid wire fields', async () => {
     const f = await fixture();
     for (const evidence of [ { ...f.evidence, seal: { ...f.evidence.seal, authorAttestationR: `0x${'11'.repeat(32)}` } },
       { ...f.evidence, assertionCoordinate: 'missing' }, { ...f.evidence, blockNumber: -1 },
       { ...f.evidence, seal: { ...f.evidence.seal, reservedKaId: 'invalid' } } ]) {
-      await expect(recoverConfirmedCatalogObligationV1(evidence as unknown as typeof f.evidence, f.ports)).rejects.toMatchObject({ code: 'CONFIRMED_CATALOG_RECOVERY_INVALID' });
+      await expect(Promise.resolve().then(() => recoverConfirmedCatalogObligationV1(parseConfirmedCatalogObligationRecoveryV1(evidence), f.ports))).rejects.toMatchObject({ code: 'CONFIRMED_CATALOG_RECOVERY_INVALID' });
     }
     vi.mocked(f.chain.resolveCanonicalFinalizationReceipt).mockResolvedValue({ status: 'pending' });
     await expect(recoverConfirmedCatalogObligationV1(f.evidence, f.ports)).rejects.toMatchObject({ code: 'CONFIRMED_CATALOG_RECOVERY_INVALID' });
     f.ports.resolveBinding = async () => null;
     await expect(recoverConfirmedCatalogObligationV1(f.evidence, f.ports)).rejects.toMatchObject({ code: 'CONFIRMED_CATALOG_RECOVERY_INVALID' });
     expect(f.observe).not.toHaveBeenCalled(); expect(f.submit).not.toHaveBeenCalled();
+  });
+  it('owns validated wire fields and rejects accessors, extra fields and malformed seals at the public entry', async () => {
+    const f = await fixture();
+    const parsed = parseConfirmedCatalogObligationRecoveryV1(f.evidence);
+    expect(parsed).toEqual(f.evidence);
+    expect(parsed).not.toBe(f.evidence); expect(parsed.seal).not.toBe(f.evidence.seal);
+    expect(Object.isFrozen(parsed) && Object.isFrozen(parsed.seal)).toBe(true);
+    const getter = vi.fn(() => f.evidence.seal.authorAddress);
+    const accessorSeal = { ...f.evidence.seal };
+    Object.defineProperty(accessorSeal, 'authorAddress', { enumerable: true, get: getter });
+    const accessor = Object.defineProperty({ ...f.evidence }, 'seal', { enumerable: true, get: getter });
+    for (const input of [null, [], { ...f.evidence, extra: true }, accessor,
+      { ...f.evidence, seal: accessorSeal }, { ...f.evidence, version: 2 },
+      { ...f.evidence, transactionHash: '0x1234' }, { ...f.evidence, blockNumber: 1.5 },
+      { ...f.evidence, subGraphName: 'named' }, { ...f.evidence, contextGraphId: 1 },
+      { ...f.evidence, seal: { ...f.evidence.seal, reservedKaId: '-1' } }]) {
+      await expect(DKGAgent.prototype.recoverRfc64ConfirmedCatalogObligationV1.call(
+        Object.create(DKGAgent.prototype), input)).rejects.toMatchObject({ code: 'CONFIRMED_CATALOG_RECOVERY_INVALID' });
+    }
+    expect(getter).not.toHaveBeenCalled();
+    expect(f.chain.resolveCanonicalFinalizationReceipt).not.toHaveBeenCalled();
+    expect(f.observe).not.toHaveBeenCalled();
   });
   it('exports the exact JSON-safe evidence and refuses to imply confirmation without a receipt', async () => {
     const f = await fixture();

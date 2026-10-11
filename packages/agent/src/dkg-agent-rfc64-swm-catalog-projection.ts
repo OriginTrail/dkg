@@ -33,7 +33,6 @@ import type {
   ReconcileRfc64PublicRootCatalogExactSetResultV1,
   Rfc64CatalogProjectionTargetPolicyV1,
 } from './dkg-agent-rfc64-catalog-upsert.js';
-import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
 import {
   raceRfc64AgainstAbortV1 as raceAgainstAbortV1,
   throwIfRfc64AbortedV1 as throwIfAbortedV1,
@@ -77,6 +76,13 @@ import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
 
 const RFC64_DEFAULT_CATALOG_DELEGATION_EXPIRES_AT_V1 =
   '253402300799000' as TimestampMsV1;
+
+/** Positive execution evidence, independent of whether the lane publishes a catalog head. */
+export type ConfirmedCatalogObligationCompletionV1 = Readonly<
+  | { status: 'applied'; action: 'private-placement' | 'public-retirement' }
+  | { status: 'already-covered'; action: 'private-placement' }
+  | { status: 'already-absent'; action: 'public-retirement' }
+>;
 
 export interface ReconcileRfc64PublicCatalogFromSwmInventoryParamsV1 {
   readonly contextGraphId: ContextGraphIdV1;
@@ -163,7 +169,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     this: DKGAgent,
     params: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
     placement: CatalogPlacementAttemptV1,
-  ): Promise<AppliedCatalogHeadSnapshotV1 | null> {
+  ): Promise<ConfirmedCatalogObligationCompletionV1> {
     const decision = this.resolveRfc64FinalizedPlacementDecisionV1(params);
     if (decision.status === 'unavailable') throw decision.error;
     if (decision.status === 'inactive') throw new Error('RFC-64 finalized-private placement repair lane is inactive');
@@ -183,7 +189,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       this.requestRfc64SwmCatalogProjectionV1({
         contextGraphId: params.contextGraphId, authorAddress: params.authorAddress,
       });
-      return null;
+      return { status: removed.status === 'applied' ? 'applied' : 'already-absent', action: 'public-retirement' };
     }
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
@@ -192,7 +198,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       expectedRow: params,
     }));
     placement.covered(covered);
-    if (covered) return null;
+    if (covered) return { status: 'already-covered', action: 'private-placement' };
     // Only a placement that has work to do reads the author's whole inventory.
     const snapshot = persistence.swmAuthorInventory.readSwmAuthorInventorySnapshotV1(
       computeSwmAuthorInventoryScopeDigestV1(inventoryScope),
@@ -224,7 +230,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         ...(params.version === 2 ? { retainedSeal: params.seal } : {}),
       })));
     lane.service.acceptedPolicySnapshotForCatalogScope(scope);
-    return this.upsertObservedRfc64PublicRootCatalogAssetV1({
+    await this.upsertObservedRfc64PublicRootCatalogAssetV1({
       scope,
       author: this.createRfc64CatalogAuthorSignerV1(params.authorAddress),
       asset,
@@ -233,6 +239,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       catalogIssuerDelegationEffectiveAt: lane.catalogIssuerDelegationEffectiveAt,
       catalogIssuerDelegationExpiresAt: lane.catalogIssuerDelegationExpiresAt,
     }, placement);
+    return { status: 'applied', action: 'private-placement' };
   }
 
   /** Current authority, action and scope shared by repair admission and execution. */

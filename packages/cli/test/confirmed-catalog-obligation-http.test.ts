@@ -28,7 +28,7 @@ afterAll(async () => { await revertSnapshot(snapshot); });
 
 /** Real named publish + SQLite refusal + actual HTTP serialization and canonical receipt recovery. */
 describe('confirmed catalog obligation across synchronous HTTP', () => {
-  it.each(['standalone', 'atomic'] as const)('retains and recovers %s evidence without another transaction', async lane => {
+  it.each(['standalone', 'atomic', 'update', 'same-root-update'] as const)('retains and recovers %s evidence without another transaction', async lane => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-confirmed-http-'));
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const agent = await DKGAgent.create({ name: 'ConfirmedHTTP', listenPort: 0, nodeRole: 'core',
@@ -87,10 +87,33 @@ describe('confirmed catalog obligation across synchronous HTTP', () => {
       };
       const quads = [{ subject: `urn:confirmed:${lane}`, predicate: 'http://schema.org/name', object: '"Sealed"' }];
       let response: Awaited<ReturnType<typeof post>>;
-      if (lane === 'standalone') {
+      let creationTransaction: { transactionHash: string; blockNumber: number } | undefined;
+      let priorUpdate: ConfirmedCatalogObligationRecoveryV1 | undefined;
+      if (lane !== 'atomic') {
         await agent.assertion.create(cg, name); await agent.assertion.write(cg, name, quads);
         await agent.assertion.promote(cg, name);
+        if (lane === 'update' || lane === 'same-root-update') {
+          refusing = false;
+          const creation = await agent.publishFromFinalizedAssertion(cg, name);
+          if (!creation.onChainResult) throw new Error('missing creation receipt');
+          creationTransaction = { transactionHash: creation.onChainResult.txHash, blockNumber: creation.onChainResult.blockNumber };
+          await agent.assertion.pullFrom(cg, name, { layer: 'vm' });
+          await agent.assertion.write(cg, name, lane === 'same-root-update' ? quads : [{ ...quads[0], object: '"Updated"' }]);
+          await agent.assertion.promote(cg, name);
+          refusing = true;
+        }
         response = await post(`/api/knowledge-assets/${name}/vm/publish`, { contextGraphId: cg });
+        if (lane === 'same-root-update') {
+          expect(response.status, JSON.stringify(response.body)).toBe(207);
+          priorUpdate = response.body.recovery as ConfirmedCatalogObligationRecoveryV1;
+          expect(priorUpdate.seal.assertionVersion).toBe('2');
+          refusing = false;
+          await agent.recoverRfc64ConfirmedCatalogObligationV1(priorUpdate);
+          await agent.assertion.pullFrom(cg, name, { layer: 'vm' });
+          await agent.assertion.write(cg, name, quads); await agent.assertion.promote(cg, name);
+          refusing = true;
+          response = await post(`/api/knowledge-assets/${name}/vm/publish`, { contextGraphId: cg });
+        }
       } else {
         response = await post('/api/knowledge-assets', { contextGraphId: cg, name, quads,
           alsoShareSwm: true, alsoPublishVm: true });
@@ -102,14 +125,22 @@ describe('confirmed catalog obligation across synchronous HTTP', () => {
       const evidence = response.body.recovery as ConfirmedCatalogObligationRecoveryV1;
       expect(evidence.assertionCoordinate).toBe(name);
       expect(evidence.contextGraphId).toBe(cg);
-      const receipt = await chain.resolveCanonicalFinalizationReceipt!(evidence.transactionHash);
+      if (priorUpdate) {
+        expect(evidence.seal.assertionVersion).toBe('3');
+        expect(evidence.seal.assertionMerkleRoot).toBe(priorUpdate.seal.assertionMerkleRoot);
+        expect(evidence.seal.authorAttestationR).toBe(priorUpdate.seal.authorAttestationR);
+        expect(evidence.seal.authorAttestationVS).toBe(priorUpdate.seal.authorAttestationVS);
+      }
+      const receipt = await chain.resolveCanonicalFinalizationReceipt!(evidence.transactionHash, { includeKnowledgeAssetUpdates: true });
       expect(receipt.status).toBe('confirmed');
       if (receipt.status !== 'confirmed') throw new Error('real receipt unavailable');
       expect(ethers.hexlify(receipt.receipt.merkleRoot)).toBe(evidence.seal.assertionMerkleRoot);
       expect(receipt.receipt.kaId.toString()).toBe(evidence.seal.reservedKaId);
+      if (creationTransaction) expect(receipt.receipt.assertionVersion?.toString()).toBe(evidence.seal.assertionVersion);
       const provider = createProvider(); const tx = await provider.getTransaction(evidence.transactionHash);
       if (tx === null) throw new Error('missing mined transaction');
       const nonce = await provider.getTransactionCount(tx.from);
+      if (creationTransaction) for (const repair of repairs.list()) await repairs.delete(repair);
       expect(repairs.list()).toEqual([]); const initialObservations = observe.mock.calls.length;
       const retry = response.body.retryUrl as string;
       expect((await post(retry, { contextGraphId: cg, recovery: evidence }, 'foreign')).status).toBe(403);
@@ -117,6 +148,9 @@ describe('confirmed catalog obligation across synchronous HTTP', () => {
       expect((await post(retry, { contextGraphId: cg, recovery: [] })).status).toBe(400);
       expect((await post(retry, { contextGraphId: cg, recovery: { ...evidence, assertionCoordinate: 'other' } })).status).toBe(400);
       expect((await post(retry, { contextGraphId: cg, recovery: { ...evidence, seal: {} } })).status).toBe(409);
+      if (creationTransaction) expect((await post(retry, { contextGraphId: cg, recovery: { ...evidence, ...creationTransaction } })).status).toBe(409);
+      if (priorUpdate) expect((await post(retry, { contextGraphId: cg, recovery: { ...evidence,
+        transactionHash: priorUpdate.transactionHash, blockNumber: priorUpdate.blockNumber } })).status).toBe(409);
       expect((await post(retry, { contextGraphId: cg, recovery: { ...evidence,
         transactionHash: `0x${'ff'.repeat(32)}` } })).status).toBe(409);
       expect((await post(retry, { contextGraphId: cg, recovery: { ...evidence,
@@ -137,7 +171,7 @@ describe('confirmed catalog obligation across synchronous HTTP', () => {
       expect((await post(retry, { contextGraphId: cg, recovery: evidence }, 'author')).status).toBe(200);
       expect(repairs.list()).toHaveLength(1);
       expect(repairs.list()[0]).toMatchObject({ version: 2, seal: evidence.seal });
-      expect(submit).toHaveBeenCalledTimes(1);
+      expect(submit).toHaveBeenCalledTimes(lane === 'same-root-update' ? 3 : lane === 'update' ? 2 : 1);
       expect(await provider.getTransactionCount(tx.from)).toBe(nonce);
     } finally {
       vi.restoreAllMocks();

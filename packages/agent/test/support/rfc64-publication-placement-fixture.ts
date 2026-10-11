@@ -67,7 +67,7 @@ import type {
   Rfc64FinalizedPrivatePlacementRepairStoreV1,
   Rfc64FinalizedPrivatePlacementRepairV1,
 } from '../../src/rfc64/finalized-private-placement-repair-store-v1.js';
-import type { AppliedCatalogHeadSnapshotV1 } from '../../src/rfc64/inventory-v1/index.js';
+import type { ConfirmedCatalogObligationCompletionV1 } from '../../src/dkg-agent-rfc64-swm-catalog-projection.js';
 import {
   AUTHOR,
   AUTHOR_WALLET,
@@ -196,6 +196,7 @@ export interface PlacementAgentV1 {
   readonly clock: { now: number };
   /** Durable finalized-private placement markers, as the supervisor lists them. */
   readonly markers: () => readonly Rfc64FinalizedPrivatePlacementRepairV1[];
+  readonly completions: () => readonly ConfirmedCatalogObligationCompletionV1[];
   /** Rows in the author's applied catalog head, or null before the first placement. */
   readonly catalogRows: () => string | null;
   /** The finalized-private queue as `/api/status` reports it; undefined without supervisor state. */
@@ -278,7 +279,7 @@ interface PlacementAgentInternalsV1 {
   publishRfc64FinalizedPrivateCatalogPlacementV1(
     repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
     placement: CatalogPlacementAttemptV1,
-  ): Promise<AppliedCatalogHeadSnapshotV1 | null>;
+  ): Promise<ConfirmedCatalogObligationCompletionV1>;
   requestRfc64FinalizedPrivateCatalogPlacementRepairV1(
     params: Readonly<{
       repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>;
@@ -304,6 +305,7 @@ export async function startPlacementAgentV1(
   const clock = { now: 0 };
   const counted = { repairs: 0, coverageChecks: 0, successors: 0, signatures: 0, announcements: 0 };
   const events: string[] = [];
+  const completions: ConfirmedCatalogObligationCompletionV1[] = [];
   const requests: Rfc64FinalizedPrivatePlacementRepairRequestV1[] = [];
   const lane: PlacementAgentV1['lane'] = { acceptsFinalizedVmRepair: true };
   const failPlacements: Error[] = [];
@@ -351,7 +353,9 @@ export async function startPlacementAgentV1(
         async (marker, placement) => {
           const failure = failPlacements.shift();
           if (failure !== undefined) throw failure;
-          return placePrivate(marker, placement);
+          const completion = await placePrivate(marker, placement);
+          completions.push(completion);
+          return completion;
         },
       );
       const coverage = starting.rfc64CatalogCoversConfirmedSwmRowV1.bind(starting);
@@ -428,6 +432,7 @@ export async function startPlacementAgentV1(
     lane,
     failPlacements,
     markers: () => markerStore.list(),
+    completions: () => [...completions],
     catalogRows: () => agent.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigestV1(),
       authorAddress: AUTHOR,
