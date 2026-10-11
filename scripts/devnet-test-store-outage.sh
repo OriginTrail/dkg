@@ -131,8 +131,8 @@ command -v lsof >/dev/null 2>&1 || skip "lsof not available (needed to find the 
 # Canonical devnet helpers (otReviewAgent #1517: reuse the shared harness, don't
 # grow another local auth/curl/JSON variant): node_token, node_port, api(),
 # code_of/body_of, field(). Contract: DEVNET_DIR + API_PORT_BASE set above.
-# shellcheck source=devnet-lib.sh
-. "$REPO_ROOT/scripts/devnet-lib.sh" || skip "cannot source scripts/devnet-lib.sh"
+# shellcheck source=devnet-store-outage-lib.sh
+. "$REPO_ROOT/scripts/devnet-store-outage-lib.sh" || skip "cannot source scripts/devnet-store-outage-lib.sh"
 
 # --- live topology (one structured parser — otReviewAgent #1517: no shell-quoted
 # JS expressions). One line per node dir: "<n> <role> <backend> <port>", where

@@ -15,7 +15,7 @@ function pausedStatusCheck(statusBody, setup = '') {
     say() { :; }
     fail() { echo "$*" >&2; exit 1; }
     check_paused_store_status
-  `, 'bash', join(root, 'scripts/devnet-lib.sh')], { encoding: 'utf8' });
+  `, 'bash', join(root, 'scripts/devnet-store-outage-lib.sh')], { encoding: 'utf8' });
 }
 
 test('store outage accepts a count refreshed between the healthy baseline and SIGSTOP', () => {
