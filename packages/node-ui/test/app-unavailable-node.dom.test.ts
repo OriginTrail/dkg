@@ -21,6 +21,7 @@ beforeEach(() => {
   document.body.innerHTML = '<div id="root"></div>';
   window.sessionStorage.clear();
   delete (window as any).__DKG_TOKEN__;
+  delete (window as any).__DKG_USING_MOCKS__;
   vi.spyOn(console, 'warn').mockImplementation(() => {});
 });
 afterEach(async () => {
@@ -30,23 +31,39 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-async function renderAndProbe(status: number, route = '/') {
-  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ synced: true, peers: 12 }), { status })));
+async function eventually(assertion: () => void) {
+  const deadline = Date.now() + 2_000;
+  for (;;) {
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+    try { assertion(); return; } catch (error) { if (Date.now() >= deadline) throw error; }
+  }
+}
+
+async function renderWithDeferredStatus(route = '/') {
+  let release!: (status: number) => void;
+  const response = new Promise<number>((resolve) => { release = resolve; });
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ synced: true, peers: 12 }), { status: await response })));
   const { api, isUsingMocks } = await import('../src/ui/api-wrapper.js');
   const { App } = await import('../src/ui/App.js');
   root = createRoot(document.getElementById('root')!);
   await act(async () => {
     root!.render(React.createElement(MemoryRouter, { initialEntries: [route] }, React.createElement(App)));
-    await api.fetchStatus().catch(() => {});
   });
-  return { api, isUsingMocks };
+  await eventually(() => { expect(document.querySelector('[data-operational]')).not.toBeNull(); });
+  expect(isUsingMocks()).toBe(false);
+  return { api, isUsingMocks, release };
 }
 
 describe('unavailable node presentation', () => {
   it.each(['/', '/network'])('hides all operational surfaces after the actual failed probe at %s', async (route) => {
-    const { api, isUsingMocks } = await renderAndProbe(503, route);
-    expect(isUsingMocks()).toBe(true);
-    expect(document.querySelector('[data-operational]')).toBeNull();
+    // Mount and subscribe while the real route-driven probe is outstanding.
+    // No test call to the wrapper may start detection or pre-latch its state.
+    const { api, isUsingMocks, release } = await renderWithDeferredStatus(route);
+    release(503);
+    await eventually(() => {
+      expect(isUsingMocks()).toBe(true);
+      expect(document.querySelector('[data-operational]')).toBeNull();
+    });
     expect(document.body.textContent).toContain('Node unavailable');
     expect(document.body.textContent).toContain('Live node data could not be loaded');
     expect(document.body.textContent).not.toMatch(/Synced|12 peers|Example|Integrations ready/);
@@ -61,14 +78,18 @@ describe('unavailable node presentation', () => {
   });
 
   it('keeps the live operational shell when status detection succeeds', async () => {
-    const { isUsingMocks } = await renderAndProbe(200);
+    const { isUsingMocks, release } = await renderWithDeferredStatus();
+    release(200);
+    await eventually(() => { expect((window as any).__DKG_USING_MOCKS__).toBe(false); });
     expect(isUsingMocks()).toBe(false);
     expect(document.querySelectorAll('[data-operational]').length).toBeGreaterThan(0);
     expect(document.body.textContent).not.toContain('Node unavailable');
   });
 
   it('preserves token entry for a reachable node rejecting credentials', async () => {
-    const { isUsingMocks } = await renderAndProbe(401);
+    const { isUsingMocks, release } = await renderWithDeferredStatus();
+    release(401);
+    await eventually(() => { expect(document.querySelector('form[aria-label="Node API token"]')).not.toBeNull(); });
     expect(isUsingMocks()).toBe(false);
     expect(document.querySelector('form[aria-label="Node API token"]')).not.toBeNull();
     expect(document.querySelector('[data-operational]')).not.toBeNull();

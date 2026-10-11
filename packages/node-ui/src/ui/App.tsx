@@ -8,7 +8,7 @@ import { PanelRight } from './components/Shell/PanelRight.js';
 import { useLayoutStore, maxBottomHeight } from './stores/layout.js';
 import { useAgentsStore } from './stores/agents.js';
 import { useTabsStore } from './stores/tabs.js';
-import { api, isUsingMocks, subscribeMockMode } from './api-wrapper.js';
+import { api, detectMockMode, isUsingMocks, subscribeMockMode } from './api-wrapper.js';
 import { CONTEXT_GRAPH_PRIMER_TAB } from './lib/contextGraphPrimer.js';
 import { applyTheme } from './lib/applyTheme.js';
 import { useVisibilityPolling } from './hooks/useVisibilityPolling.js';
@@ -245,6 +245,7 @@ function ContextGraphPrimerRoute() {
 
 export function App() {
   const usingMocks = useSyncExternalStore(subscribeMockMode, isUsingMocks, isUsingMocks);
+  useEffect(() => { void detectMockMode(); }, []);
   if (usingMocks) return <NodeUnavailableView />;
 
   return (
