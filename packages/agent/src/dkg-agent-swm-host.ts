@@ -899,14 +899,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
       && session.active && this.gossipSession === session;
     if (!current() || !this.automaticSwmHostModeAdmissionAllowed(cgId)) return;
     try {
-      this.restorePersistedHostModeBinding(cgId, onChainId);
+      if (!this.restorePersistedHostModeBinding(cgId, onChainId)) return;
       if (stripOn) {
         await this.reconcileSwmHostModeSubscription(cgId, SUBSCRIPTION_SOURCES.RECONCILER);
         return;
       }
-      // No member-registration guard here: {@link wireSwmHostModeHandler}
-      // refuses a member-claimed CG itself, which is what makes the deferred
-      // drain safe even when it runs AFTER member rehydration claimed this CG.
+      // Binding admission also protects a rehydrated member before its
+      // gossip handler is wired; wiring retains its own registration guard.
       if (!current() || !this.wireSwmHostModeHandler(cgId, SUBSCRIPTION_SOURCES.RECONCILER, true)) return;
       // Codex PR #620 R2: also re-probe registration state.
       // Without this, a host-only CG that was registered while
@@ -927,20 +926,23 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
   }
 
-  /** Rehydrate the chain binding stored beside a cold host-mode marker. */
+  /** Cold host hints cannot replace admitted custody or its chain binding. */
   restorePersistedHostModeBinding(
     this: DKGAgent,
     contextGraphId: string,
     onChainId: string | undefined,
-  ): void {
-    if (onChainId === undefined) return;
+  ): boolean {
+    if (this.isMemberModeRegisteredForCg(contextGraphId)
+      || [contextGraphId, this.localCgIdForWireId(this.canonicalSwmHostModeKey(contextGraphId))]
+        .some(id => isAdmittedContextGraphSubscription(this.subscribedContextGraphs.get(id)))) return false;
+    if (onChainId === undefined) return true;
     if (/^0x[0-9a-fA-F]{64}$/.test(contextGraphId)) {
       this.stageOnChainContextGraphBindingFromNameHash(
         contextGraphId,
         onChainId,
         { persist: false },
       );
-      return;
+      return true;
     }
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     const next: ContextGraphSub = { ...(existing ?? {
@@ -948,6 +950,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }) };
     this.bindSubscriptionOnChainId(contextGraphId, next, onChainId);
     this.setContextGraphSubscription(contextGraphId, next, { persist: false });
+    return true;
   }
 
   /**

@@ -7,6 +7,7 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/index.js';
 import { SwmHostModeStore, type SwmHostModeSubscriptionBinding } from '../src/swm/host-mode-store.js';
 import type { ContextGraphSub } from '../src/dkg-agent-types.js';
+import { ethers } from 'ethers';
 
 interface RestorationOwner {
   swmHostModeStore?: SwmHostModeStore;
@@ -18,7 +19,7 @@ interface RestorationOwner {
   canonicalSwmHostModeKey(id: string): string;
   contextGraphBindingState: { capture(id: string): number };
   restorePersistedHostModeSubscription(entry: SwmHostModeSubscriptionBinding, strip: boolean): Promise<void>;
-  restorePersistedHostModeBinding(id: string, chainId: string): void;
+  restorePersistedHostModeBinding(id: string, chainId: string): boolean;
   bindSubscriptionOnChainId(id: string, row: ContextGraphSub, chainId: string): void;
   setContextGraphSubscription(id: string, row: ContextGraphSub, options?: { persist?: boolean }): ContextGraphSub;
   awaitHostModePersistence(id: string): Promise<void>;
@@ -85,6 +86,56 @@ describe('host-mode restoration physical ownership', () => {
       expect(owner.swmHostModeSubscribed.size).toBe(2);
     } finally { release.resolve(); await starting; }
   }, 60_000);
+
+  for (const wireMarker of [false, true]) for (const strip of [false, true]) it(
+    `deferred ${wireMarker ? 'wire' : 'cleartext'} marker cannot replace admitted member binding with strip=${strip}`,
+    async () => {
+      const { agent, markers, owner } = await create();
+      const id = 'current-member-binding';
+      const wireId = ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerCase();
+      const markerId = wireMarker ? wireId : id;
+      await markers.markHostModeSubscribed('restore-prefix');
+      await markers.markHostModeSubscribed(markerId, { onChainId: '10' });
+      // Marker enumeration order is not specified; force the real disk-backed
+      // member marker into the deferred tail rather than the startup prefix.
+      const list = SwmHostModeStore.prototype.listHostModeSubscriptions;
+      vi.spyOn(SwmHostModeStore.prototype, 'listHostModeSubscriptions').mockImplementation(async function () {
+        return (await list.call(this)).sort((a, b) => Number(a.contextGraphId === markerId) - Number(b.contextGraphId === markerId));
+      });
+      const entered = deferred(), release = deferred();
+      const original = owner.restorePersistedHostModeSubscription.bind(agent);
+      vi.spyOn(owner, 'restorePersistedHostModeSubscription').mockImplementation(async (entry, _strip) => {
+        if (entry.contextGraphId === markerId) { entered.resolve(); await release.promise; }
+        await original(entry, strip);
+      });
+      const starting = agent.start();
+      try {
+        await entered.promise;
+        await starting;
+        // Admission/rehydration won the race, before its gossip handler is wired.
+        const current = owner.setContextGraphSubscription(id, {
+          subscribed: true, synced: true, syncMode: 'always-on', onChainHash: wireId,
+          onChainId: '11', lastReconciledOrdinal: 9,
+        }, { persist: false });
+        const cursor = {};
+        owner.reconcileCursors.set(id, cursor);
+        const generation = owner.contextGraphBindingState.capture(id);
+        release.resolve();
+        await owner.swmHostModeRestoreDrain;
+        expect(owner.subscribedContextGraphs.get(id)).toBe(current);
+        expect(current.onChainId).toBe('11');
+        expect(current.lastReconciledOrdinal).toBe(9);
+        expect(owner.reconcileCursors.get(id)).toBe(cursor);
+        expect(owner.contextGraphBindingState.capture(id)).toBe(generation);
+        expect(owner.swmHostModeSubscribed.has(owner.canonicalSwmHostModeKey(id))).toBe(false);
+        // The independently callable cold-binding helper has the same custody rule.
+        owner.restorePersistedHostModeBinding(markerId, '8');
+        expect(owner.subscribedContextGraphs.get(id)).toBe(current);
+        expect(current.onChainId).toBe('11');
+        expect(owner.contextGraphBindingState.capture(id)).toBe(generation);
+      } finally { release.resolve(); await starting; }
+    }, 60_000,
+  );
 
   it('cold binding restores reset generation, watermark and cursor and persist later canonical rebindings', async () => {
     const { agent, owner } = await create();

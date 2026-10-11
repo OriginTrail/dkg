@@ -90,15 +90,6 @@ interface StripInternals {
   awaitHostModePersistence(contextGraphId: string): Promise<void>;
 }
 
-/** A CG with a curator-committed wire id. NOTE: after GH #1611 the
- * `onChainHash` alone no longer proves curation — public CGs get one too — so
- * this shape must be paired with one of the real curation proofs
- * (a cached chain access policy or a verified beacon). */
-const CURATED = (id: string): { subscribed: boolean; synced: boolean; onChainHash: string } => ({
-  subscribed: true,
-  synced: true,
-  onChainHash: ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerCase(),
-});
 async function installCurated(core: DKGAgent, id: string): Promise<void> {
   const g = core as unknown as StripInternals;
   const hash = ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerCase();
