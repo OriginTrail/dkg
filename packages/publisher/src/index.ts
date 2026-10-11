@@ -1,3 +1,4 @@
+export { journalEntriesContextGraphId } from './async-lift-control-plane.js';
 export {
   decodeEntityShareMetadata,
   ENTITY_SHARE_METADATA_PREDICATES,

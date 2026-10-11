@@ -132,7 +132,6 @@ import {
   knowledgeAssetVmPublishLifecycleKey,
   serializeJournalEntry,
   parseJournalEntry,
-  journalEntriesContextGraphId,
   summarizeJournal,
   serializeVmPublishIntentIndex,
   compareAcceptedJobs,
@@ -3100,11 +3099,6 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   /** A provenance-only read, independent of the mutable job record. */
-  async readJournalContextGraphIdByJob(jobId: string): Promise<string | null> {
-    await this.ensureGraph();
-    return journalEntriesContextGraphId(await this.readJournalEntriesBy(JOURNAL_JOB_ID, jobId));
-  }
-
   /** #1829 — all journal entries bearing this jobId. Read-only. */
   async readJournalByJob(jobId: string): Promise<JournalReadResult> {
     await this.ensureGraph();

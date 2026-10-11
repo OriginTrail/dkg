@@ -64,7 +64,7 @@ function fixture(route: Route, outcome: 'allowed' | 'denied' | 'unavailable', op
     canReadContextGraph: vi.fn(async () => outcome === 'allowed'),
   };
   const publisherControl = { describeConfiguredRetryState: () => ({ autoRetryEligible: false }), lookupKnowledgeAssetVmPublishJobByIntent: read,
-    readJournalContextGraphIdByJob: vi.fn(async () => null), readJournalByIntent: read, readJournalByJob: read, inspectPreparedPayload: read, list: vi.fn(async () => [job]), getStatus: vi.fn(async () => job) };
+    readJournalByIntent: read, readJournalByJob: vi.fn(async () => ({ entries: [], maxSeq: -1, complete: true, txHashes: [] })), inspectPreparedPayload: read, list: vi.fn(async () => [job]), getStatus: vi.fn(async () => job) };
   const url = new URL(route.path, 'http://localhost');
   const ctx = { req, res, agent, publisherControl, publisherState: { runtime: null, availability: { available: false, reason: 'publisher_disabled', retryable: false, operatorActionRequired: true } }, config: { llm: { apiKey: 'fixture' } },
     path: url.pathname, url, requestAgentAddress: CALLER,
@@ -120,7 +120,7 @@ describe('caller-bound graph reads', () => {
     const h = fixture(route, 'denied');
     await route.run(h.ctx);
     expect(h.authority).toHaveBeenCalledWith(CG, expect.objectContaining({ callerAgentAddress: CALLER }));
-    expect(h.publisherControl.readJournalByJob).not.toHaveBeenCalled();
+    expect(h.publisherControl.readJournalByJob).toHaveBeenCalledOnce();
   });
   it.each([
     { path: '/api/publisher/jobs', run: handlePublisherRoutes },
@@ -177,7 +177,7 @@ describe('caller-bound graph reads', () => {
     h.publisherControl.getStatus.mockResolvedValue({ jobId: 'legacy', request: { jobType: 'lift', lift: {} } } as never);
     await route.run(h.ctx);
     expect(h.res.statusCode).toBe(403);
-    expect(h.publisherControl.readJournalByJob).not.toHaveBeenCalled();
+    expect(h.publisherControl.readJournalByJob).toHaveBeenCalledOnce();
     const operator = fixture(route, 'denied', true);
     await route.run(operator.ctx);
     expect(operator.res.statusCode).toBe(200);
@@ -199,6 +199,39 @@ describe('caller-bound graph reads', () => {
     await route.run(h.ctx);
     expect(h.res.statusCode).toBe(200);
     expect(h.authority).not.toHaveBeenCalled();
+  });
+
+  it.each(['denied', 'unavailable'] as const)(
+    'scoped reads preserve tokenless auth-disabled operator access despite %s node authority', async outcome => {
+      const h = fixture(routes[0], outcome);
+      Object.assign(h.ctx, { authentication: requestAuthentication({ kind: 'anonymous', mode: 'disabled' }) });
+      await routes[0].run(h.ctx);
+      expect(h.res.statusCode).toBe(200);
+      expect(h.read).toHaveBeenCalledOnce();
+      expect(h.authority).not.toHaveBeenCalled();
+    },
+  );
+
+  it('returns subgraph counts through the bearer-scoped physical query', async () => {
+    const h = fixture(routes[5], 'allowed');
+    const nodeAddress = '0x1111111111111111111111111111111111111111';
+    Object.assign(h.ctx.agent, { agentAddress: nodeAddress });
+    h.agent.listSubGraphs.mockResolvedValue([{ name: 'docs', uri: `did:dkg:context-graph:${CG}/docs` }] as never);
+    h.query.mockResolvedValue({ bindings: [
+      { g: `did:dkg:context-graph:${CG}/docs/assertion/${CALLER}/one`, entities: '2', triples: '5' },
+      { g: { value: `did:dkg:context-graph:${CG}/docs` }, entities: { value: '3' }, triples: { value: '7' } },
+      { g: `did:dkg:context-graph:${CG}/_meta`, entities: '99', triples: '99' },
+      { g: 'did:dkg:context-graph:other/docs', entities: '99', triples: '99' },
+    ] } as never);
+    await routes[5].run(h.ctx);
+    expect(h.query).toHaveBeenCalledExactlyOnceWith(expect.any(String), expect.objectContaining({
+      contextGraphId: CG, includeContextGraphPartitions: true, callerAgentAddress: CALLER,
+    }));
+    expect(CALLER).not.toBe(nodeAddress);
+    expect(h.res.statusCode).toBe(200);
+    expect(JSON.parse(h.res.body)).toMatchObject({ contextGraphId: CG,
+      subGraphs: [{ name: 'docs', entityCount: 5, tripleCount: 12 }],
+    });
   });
 
   it('keeps an accepted agent credential scoped when authentication is disabled', async () => {

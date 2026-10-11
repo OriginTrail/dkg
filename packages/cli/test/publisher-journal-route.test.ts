@@ -84,6 +84,7 @@ describe('#1829 GET /api/publisher/journal', () => {
     const reloaded = createPublisherControlFromStore(store);
     const status = vi.spyOn(reloaded, 'getStatus');
     const journal = vi.spyOn(reloaded, 'readJournalByJob');
+    const queries = vi.spyOn(store, 'query');
     const ctx = createContext(`/api/publisher/journal?jobId=${jobId}&contextGraphId=unrelated-public`, reloaded);
     const caller = '0x3333333333333333333333333333333333333333';
     ctx.authentication = requestAuthentication({ kind: 'agent', agentAddress: caller });
@@ -95,7 +96,8 @@ describe('#1829 GET /api/publisher/journal', () => {
     expect(authority).toHaveBeenCalledWith('music-social', expect.objectContaining({ callerAgentAddress: caller }));
     expect(responseStatus(ctx)).toBe(allowed ? 200 : 403);
     expect(status).not.toHaveBeenCalled();
-    expect(journal).toHaveBeenCalledTimes(allowed ? 1 : 0);
+    expect(queries.mock.calls.filter(([sparql]) => sparql.includes('<urn:dkg:publisher:journalJobId>'))).toHaveLength(1);
+    expect(journal).toHaveBeenCalledExactlyOnceWith(jobId);
     if (allowed) expect(responseBody(ctx)).toEqual(retained);
     else expect((ctx.res as unknown as { body: string }).body).not.toContain(jobId);
     expect(await control.readJournalByJob(jobId)).toEqual(retained);

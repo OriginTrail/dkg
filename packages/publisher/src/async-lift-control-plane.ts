@@ -653,6 +653,4 @@ export interface VmPublishAdmissionJournalReader {
   readJournalByIntent(facts: JournalReadInput): Promise<JournalReadResult>;
   /** All journal entries bearing this jobId (a successor job continues the lineage seq). */
   readJournalByJob(jobId: string): Promise<JournalReadResult>;
-  /** Trusted journal CG provenance survives job deletion; null means absent, corrupt tuples throw. */
-  readJournalContextGraphIdByJob(jobId: string): Promise<string | null>;
 }

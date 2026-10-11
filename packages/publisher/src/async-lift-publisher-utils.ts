@@ -37,7 +37,6 @@ export {
   knowledgeAssetVmPublishLifecycleKey,
   serializeJournalEntry,
   parseJournalEntry,
-  journalEntriesContextGraphId,
   summarizeJournal,
   serializeVmPublishIntentIndex,
   createJobSlug,

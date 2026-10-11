@@ -61,6 +61,7 @@ import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chai
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import {
+  journalEntriesContextGraphId,
   findReservedSubjectPrefix,
   isSafeJobId,
   isSkolemizedUri,
@@ -619,8 +620,9 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
   if (req.method === "GET" && path === "/api/publisher/journal") {
     const jobId = url.searchParams.get("jobId")?.trim() || undefined;
     if (jobId !== undefined) {
+      const result = await publisherControl.readJournalByJob(jobId);
       if (!hasNodeOperatorReadAccess(ctx)) {
-        const journalContextGraphId = await publisherControl.readJournalContextGraphIdByJob(jobId);
+        const journalContextGraphId = journalEntriesContextGraphId(result.entries);
         if (journalContextGraphId !== null) {
           if (!(await requireContextGraphReadAuthority(ctx, journalContextGraphId))) return;
         } else {
@@ -629,7 +631,6 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
           if (!(await requirePublisherJobReadAuthority(ctx, job))) return;
         }
       }
-      const result = await publisherControl.readJournalByJob(jobId);
       return jsonResponse(res, 200, result);
     }
     const facts = parsePublisherLifecycleFactsFromQuery(url, res, requestAgentAddress);

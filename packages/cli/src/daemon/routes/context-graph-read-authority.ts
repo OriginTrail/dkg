@@ -31,7 +31,7 @@ export async function requireContextGraphReadAuthority(
   if (!validateRequiredContextGraphId(contextGraphId, ctx.res)) return false;
   const validatedId = contextGraphId as string;
   const actor = actorFromRequestContext(ctx);
-  if (actor.authentication.principal.kind === 'nodeOperator') return true;
+  if (hasNodeOperatorReadAccess(ctx)) return true;
   const lifecycle = createStoreQueryRequestLifecycle(ctx.req, ctx.res, 'api.context_graph.read_authority');
   try {
     lifecycle.signal.throwIfAborted();
