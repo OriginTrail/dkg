@@ -1,4 +1,4 @@
-import { SparqlHttpResponseError } from './sparql-http-response-error.js';
+import { SparqlHttpResponseError, isDefinitiveSparqlUpdateRejectionV1 } from './sparql-http-response-error.js';
 /**
  * SparqlHttpStore — TripleStore adapter for any SPARQL 1.1 Protocol endpoint.
  *
@@ -117,7 +117,7 @@ export { ABANDONED_READ_DRAIN_BUDGET_BYTES } from './managed-sparql-recovery.js'
 export type { SparqlHttpRecoveryState, SparqlHttpManagedRecoveryV1 } from './managed-sparql-recovery.js';
 import { ManagedWorkRecoveryCoordinatorV1 } from
   '../managed-work-recovery-coordinator.js';
-import { refusesSparqlHttpAdmissionV1, SparqlHttpLogicalMutationScopeV1,
+import { SparqlHttpLogicalMutationScopeV1,
   runSparqlHttpCountedDeleteV1 } from './managed-sparql-recovery.js';
 import { runSparqlHttpAuthorCommitV1 } from './sparql-http-author-commit.js';
 
@@ -444,9 +444,8 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     options: QueryOptions | undefined,
     work: (signal: AbortSignal | undefined, context: StoreWorkContext) => Promise<T>,
   ): Promise<T> {
-    const admission = this.logicalMutationScope.current();
     const recovery = this.readRecoveryState();
-    if (refusesSparqlHttpAdmissionV1(recovery, admission)) {
+    if (this.logicalMutationScope.refusesAdmission(recovery)) {
       return Promise.reject(this.recoveryError(operation, 'not_started'));
     }
     return this.workLifecycle.run(
@@ -455,7 +454,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
         return this.scheduler.run(
           options?.priority,
           options?.source ?? `sparql-http.${operation}`,
-          () => work(signal, context),
+          this.logicalMutationScope.bindWork(() => work(signal, context)),
           signal,
           { storeOperation: operation },
         );
@@ -526,9 +525,8 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     consume: (response: Response) => Promise<T>,
     policy: SparqlHttpReadPolicy,
   ): Promise<T> {
-    const admission = this.logicalMutationScope.current();
     const recoveryAtStart = this.readRecoveryState();
-    if (refusesSparqlHttpAdmissionV1(recoveryAtStart, admission)) {
+    if (this.logicalMutationScope.refusesAdmission(recoveryAtStart)) {
       throw this.recoveryError(storeOperation, 'not_started');
     }
     // Direct POST (W3C SPARQL 1.1 Protocol §2.1.3): the query is the raw
@@ -703,13 +701,12 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     beforeDispatch: () => void,
     semanticWrite = true,
   ): Promise<void> {
-    const admission = this.logicalMutationScope.current();
     // Direct POST (W3C SPARQL 1.1 Protocol §2.2.2): the update is the raw
     // request body with `application/sparql-update`, not URL-encoded form
     // data. See postQuery for why form encoding breaks large payloads.
     return this.runStoreWork(operation, options, async (lifecycleSignal) => {
       const recoveryAtStart = this.readRecoveryState();
-      if (refusesSparqlHttpAdmissionV1(recoveryAtStart, admission)) {
+      if (this.logicalMutationScope.refusesAdmission(recoveryAtStart)) {
         throw this.recoveryError(operation, 'not_started');
       }
       const timeoutSignal = AbortSignal.timeout(this.timeout);
@@ -731,7 +728,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
           body: update,
           signal,
         });
-        if (res.ok && admission && semanticWrite) admission.completedSemanticWrites += 1;
+        if (res.ok && semanticWrite) this.logicalMutationScope.markMutationAcknowledged();
         if (!res.ok) {
           // Keep scheduler admission until the response body has settled too;
           // otherwise retries can dispatch while an error body is unwinding.
@@ -745,6 +742,9 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
             source: options?.source ?? `sparql-http.${operation}`,
           });
         }
+        // A request/authentication refusal remains decisive even if its
+        // diagnostic body was interrupted; it cannot leave server work running.
+        if (isDefinitiveSparqlUpdateRejectionV1(error)) throw error;
         if (timeoutSignal.aborted) {
           this.managedAbandonedWorkRecovery.clientTimedOut(operation, deadline, dispatched ? recoveryToken : null);
           throw new StoreOperationTimeoutError({
@@ -956,7 +956,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     });
     statements.checkIris.rfc64AuthorCommitCasV1(plan);
     return this.runLogicalMutation('rfc64AuthorCommitCasV1', options, scoped => runSparqlHttpAuthorCommitV1({
-      wasDispatched: () => this.logicalMutationScope.current()?.mutationDispatched === true,
+      wasDispatched: () => this.logicalMutationScope.hasDispatchedMutation(),
       touchedGraphs: [...plan.touchedGraphs], writeGen: this.writeGen,
       indeterminateError: (cause) => new StoreOperationTimeoutError({
         backend: this.managedOxigraph ? 'oxigraph-server' : 'sparql-http',
@@ -1029,8 +1029,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
         // Begin the semantic write only after all pre-dispatch refusals.
         lifecycle = this.writeGen.beginWrite(opts.scope);
         this.invalidateListGraphsCache();
-        const admission = this.logicalMutationScope.current();
-        if (admission) { admission.dispatched = true; admission.mutationDispatched = true; }
+        this.logicalMutationScope.markMutationDispatched();
       });
     } catch (error) {
       if (opts.cleanup) {

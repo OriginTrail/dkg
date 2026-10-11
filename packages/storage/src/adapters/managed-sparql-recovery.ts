@@ -7,13 +7,11 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { isDefinitiveSparqlUpdateRejectionV1, isSparqlHttpResponseError } from './sparql-http-response-error.js';
 import { StoreOperationTimeoutError } from '../store-operation-timeout.js';
 
-/** Mutable execution evidence owned by one adapter's asynchronous lifetime. */
-export interface SparqlHttpOperationAdmissionV1 {
+/** Execution evidence stays private to one adapter's asynchronous lifetime. */
+interface LogicalMutationState {
   readonly storeGeneration: number | null;
-  dispatched: boolean;
   active: boolean;
-  mutationDispatched: boolean;
-  completedSemanticWrites: number;
+  progress: 'not-dispatched' | 'dispatched' | 'acknowledged';
 }
 
 interface LogicalMutationOwner {
@@ -24,31 +22,59 @@ interface LogicalMutationOwner {
 
 /** One store-bound scope; telemetry copies and other adapters cannot transfer it. */
 export class SparqlHttpLogicalMutationScopeV1 {
-  private readonly scope = new AsyncLocalStorage<SparqlHttpOperationAdmissionV1>();
+  private readonly scope = new AsyncLocalStorage<LogicalMutationState>();
   constructor(private readonly owner: LogicalMutationOwner) {}
 
-  current(): SparqlHttpOperationAdmissionV1 | undefined {
-    const admission = this.scope.getStore();
-    return admission?.active ? admission : undefined;
+  private current(): LogicalMutationState | undefined {
+    const state = this.scope.getStore();
+    return state?.active ? state : undefined;
+  }
+
+  /** Scheduler callbacks retain this store's captured owner, never another queued caller's. */
+  bindWork<T>(work: () => T): () => T {
+    const state = this.current();
+    return state ? () => this.scope.run(state, work) : () => this.scope.exit(work);
+  }
+
+  hasDispatchedMutation(): boolean {
+    const state = this.current();
+    return state !== undefined && state.progress !== 'not-dispatched';
+  }
+
+  markMutationDispatched(): void {
+    const state = this.current();
+    if (state?.progress === 'not-dispatched') state.progress = 'dispatched';
+  }
+
+  markMutationAcknowledged(): void {
+    const state = this.current();
+    if (state && state.progress !== 'not-dispatched') state.progress = 'acknowledged';
+  }
+
+  refusesAdmission(state: ManagedOxigraphRuntimeStateV1 | null): boolean {
+    if (state === null) return false;
+    const admission = this.current();
+    return state.recovering
+      || (admission?.storeGeneration != null && state.generation !== admission.storeGeneration)
+      || (state.admissionsPaused === true && !this.hasDispatchedMutation());
   }
 
   run<T>(operation: StoreOperation, options: QueryOptions | undefined,
     work: (options: QueryOptions | undefined) => Promise<T>): Promise<T> {
     if (this.current()) return work(options);
     const state = this.owner.readState();
-    if (refusesSparqlHttpAdmissionV1(state)) {
+    if (this.refusesAdmission(state)) {
       return Promise.reject(new StoreOperationTimeoutError({ backend: this.owner.backend, operation, outcome: 'not_started' }));
     }
     return this.owner.lifecycle.run(options?.signal, signal => {
-      const admission: SparqlHttpOperationAdmissionV1 = {
-        storeGeneration: state?.generation ?? null, dispatched: false,
-        active: true, mutationDispatched: false, completedSemanticWrites: 0,
+      const admission: LogicalMutationState = {
+        storeGeneration: state?.generation ?? null, active: true, progress: 'not-dispatched',
       };
       return this.scope.run(admission, async () => {
         try { return await work({ ...options, signal }); }
         catch (cause) {
-          if (!admission.mutationDispatched || hasStoreOperationOutcome(cause, operation, 'indeterminate') || (
-            admission.completedSemanticWrites === 0 && isSparqlHttpResponseError(cause)
+          if (!this.hasDispatchedMutation() || hasStoreOperationOutcome(cause, operation, 'indeterminate') || (
+            admission.progress !== 'acknowledged' && isSparqlHttpResponseError(cause)
             && isDefinitiveSparqlUpdateRejectionV1(cause) && cause.operation === operation
           )) throw cause;
           throw new StoreOperationTimeoutError({ backend: this.owner.backend, operation, outcome: 'indeterminate',
@@ -75,16 +101,6 @@ export function runSparqlHttpCountedDeleteV1(input: {
     await input.mutate(options);
     return Math.max(0, before - await count('countAfter'));
   });
-}
-
-export function refusesSparqlHttpAdmissionV1(
-  state: ManagedOxigraphRuntimeStateV1 | null,
-  admission?: SparqlHttpOperationAdmissionV1,
-): boolean {
-  if (state === null) return false;
-  return state.recovering
-    || (admission?.storeGeneration != null && state.generation !== admission.storeGeneration)
-    || (state.admissionsPaused === true && admission?.dispatched !== true);
 }
 
 /**

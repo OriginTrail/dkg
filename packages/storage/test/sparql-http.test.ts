@@ -2469,3 +2469,117 @@ if (liveQueryUrl && liveUpdateUrl) {
 // wasn't exercising anything — removed. The live-endpoint `describe` above
 // only runs when `SPARQL_HTTP_TEST_QUERY_URL` is set; otherwise the mock
 // server tests above give full coverage of the adapter's HTTP contract.
+
+// These transitions happen after initial admission, so early refusal alone cannot satisfy them.
+describe('managed update cancellation and queued maintenance admission', () => {
+  it.each([400, 403, 500].flatMap(status => ['caller', 'deadline'].map(trigger => ({ status, trigger }))))
+    ('preserves known HTTP$status evidence when its diagnostic stream is cancelled by $trigger', async ({ status, trigger }) => {
+    const originalFetch = globalThis.fetch;
+    const activity: boolean[] = []; const onClientTimeout = vi.fn();
+    let started!: () => void; const bodyStarted = new Promise<void>(resolve => { started = resolve; });
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          init!.signal!.addEventListener('abort', () => controller.error(init!.signal!.reason), { once: true });
+          started();
+        },
+      });
+      return new Response(body, { status });
+    }) as typeof fetch;
+    const store = createManagedOxigraphSparqlStoreV1({
+      queryEndpoint: 'http://127.0.0.1:7878/query', timeout: 100,
+    }, { getRecoveryState: () => ({ recovering: false, generation: 0 }), onClientTimeout,
+      registerActivity: () => ({ report: busy => activity.push(busy), dispose() {} }) });
+    try {
+      const controller = new AbortController();
+      const failed = store.insert([{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: 'urn:g' }],
+        { signal: controller.signal }).catch(error => error);
+      await bodyStarted;
+      // Let the transport observe status before interrupting the still-streaming body.
+      await Promise.resolve(); await Promise.resolve();
+      if (trigger === 'caller') controller.abort(new Error('diagnostic reader cancelled'));
+      expect(await failed).toMatchObject(status === 500 && trigger === 'deadline'
+        ? { code: 'STORE_OPERATION_TIMEOUT', operation: 'insert' }
+        : { code: 'SPARQL_HTTP_RESPONSE', status, operation: 'insert' });
+      await new Promise(resolve => setTimeout(resolve, 150));
+      if (status === 500) {
+        expect(onClientTimeout).toHaveBeenCalledExactlyOnceWith('insert');
+        expect(activity.at(-1)).toBe(true);
+      } else {
+        expect(onClientTimeout).not.toHaveBeenCalled();
+        expect(activity.at(-1)).toBe(false);
+      }
+    } finally { globalThis.fetch = originalFetch; await store.close(); }
+  });
+
+  it.each(['read', 'write'] as const)('refuses a queued %s when maintenance closes before scheduler dispatch', async kind => {
+    const originalFetch = globalThis.fetch;
+    const state = { recovering: false, admissionsPaused: false, generation: 0 };
+    const scheduler = new StorePriorityScheduler({ maxConcurrent: 1, ackReservedSlots: 0,
+      healthReservedSlots: 0, normalReservedSlots: 0, backgroundReservedSlots: 0 });
+    let release!: () => void; let started!: () => void;
+    const firstStarted = new Promise<void>(resolve => { started = resolve; });
+    const firstResponse = new Promise<Response>(resolve => { release = () => resolve(new Response(null, { status: 204 })); });
+    const fetchSpy = vi.fn(async () => { started(); return firstResponse; });
+    globalThis.fetch = fetchSpy as typeof fetch;
+    const store = createManagedOxigraphSparqlStoreV1({ queryEndpoint: 'http://127.0.0.1:7878/query', scheduler }, {
+      getRecoveryState: () => state,
+    });
+    try {
+      const revisions = asGraphWriteRevisionSource(store)!;
+      const before = revisions.getWriteRevision('urn:queued');
+      const first = store.insert([{ subject: 'urn:a', predicate: 'urn:p', object: '"a"', graph: 'urn:active' }]);
+      await firstStarted;
+      const queued = (kind === 'write'
+        ? store.insert([{ subject: 'urn:b', predicate: 'urn:p', object: '"b"', graph: 'urn:queued' }])
+        : store.query('ASK { GRAPH <urn:queued> { ?s ?p ?o } }')).catch(error => error);
+      await waitForCondition(() => scheduler.snapshot.normalQueued === 1, 'request was not actually queued');
+      state.admissionsPaused = true; release(); await first;
+      expect(await queued).toMatchObject({ code: 'STORE_OPERATION_TIMEOUT', outcome: 'not_started',
+        operation: kind === 'write' ? 'insert' : 'query' });
+      expect(fetchSpy).toHaveBeenCalledOnce();
+      expect(revisions.getWriteRevision('urn:queued')).toEqual(before);
+      expect(revisions.getWriteRevision('urn:active').generation).toBeGreaterThan(0);
+    } finally { release(); globalThis.fetch = originalFetch; await store.close(); }
+  });
+
+  it('retains only its own dispatched mutation when a continuation waits behind another scheduler caller', async () => {
+    const state = { recovering: false, admissionsPaused: false, generation: 0 };
+    const scheduler = new StorePriorityScheduler({ maxConcurrent: 1, ackReservedSlots: 0,
+      healthReservedSlots: 0, normalReservedSlots: 0, backgroundReservedSlots: 0 });
+    let releaseBlocker!: () => void; let markBlocker!: () => void;
+    const blockerStarted = new Promise<void>(resolve => { markBlocker = resolve; });
+    const blockerResponse = new Promise<Response>(resolve => { releaseBlocker = () => resolve(new Response(null, { status: 204 })); });
+    let markMutation!: () => void; let continueRead!: () => void;
+    const mutationCompleted = new Promise<void>(resolve => { markMutation = resolve; });
+    const readGate = new Promise<void>(resolve => { continueRead = resolve; });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      const body = String(init?.body);
+      if (body.includes('urn:blocker')) { markBlocker(); return blockerResponse; }
+      return body.startsWith('ASK') ? new Response(JSON.stringify({ boolean: true })) : new Response(null, { status: 204 });
+    });
+    const store = createManagedOxigraphSparqlStoreV1({ queryEndpoint: 'http://127.0.0.1:7878/query', scheduler }, {
+      getRecoveryState: () => state,
+    });
+    const continuation = store.runLogicalMutation('insert', undefined, async options => {
+      await store.insert([{ subject: 'urn:b', predicate: 'urn:p', object: '"b"', graph: 'urn:committed' }], options);
+      markMutation(); await readGate;
+      return store.query('ASK { GRAPH <urn:committed> { ?s ?p ?o } }', options);
+    });
+    let blocker: Promise<void> | undefined;
+    try {
+      await mutationCompleted;
+      blocker = store.insert([{ subject: 'urn:a', predicate: 'urn:p', object: '"a"', graph: 'urn:blocker' }]);
+      await blockerStarted; continueRead();
+      await waitForCondition(() => scheduler.snapshot.normalQueued === 1, 'continuation was not actually queued');
+      state.admissionsPaused = true; releaseBlocker(); await blocker;
+      await expect(continuation).resolves.toMatchObject({ type: 'boolean', value: true });
+      await expect(store.query('ASK {}')).rejects.toMatchObject({ outcome: 'not_started' });
+      expect(fetchSpy).toHaveBeenCalledTimes(3);
+    } finally {
+      continueRead(); releaseBlocker();
+      await Promise.allSettled([continuation, ...(blocker ? [blocker] : [])]);
+      await store.close(); fetchSpy.mockRestore();
+    }
+  });
+});
