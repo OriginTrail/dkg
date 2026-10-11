@@ -201,7 +201,7 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     // A physical turn retains its captured scopes. Snapshot overflow so a displaced
     // scope cannot be promoted again in this same synchronous sweep.
     if (peer.active) return;
-    for (const [id, scope] of [...peer.deferred]) {
+    for (const [id, scope] of Array.from(peer.deferred)) {
       if (scope.ready(now) && this.#installScope(peer, scope, now)) peer.deferred.delete(id);
     }
   }
