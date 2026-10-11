@@ -98,7 +98,7 @@ An agent registered by address can curate a context graph backed by a Publishing
 
 ## JSON-RPC methods
 
-The node speaks the standard Ethereum JSON-RPC signing API. Addresses are sent in lowercase.
+The node speaks the standard Ethereum JSON-RPC signing API. With `api: "eth"` addresses are sent in lowercase; with `api: "clef"` they are sent EIP-55 checksummed, because Clef warns about a transaction recipient without a valid checksum. Outside its advanced mode (`--advanced`) Clef refuses every transaction it warns about, including one whose call data names a method its signature database does not know, so run it in advanced mode: the warnings then go to its rules or approver instead.
 
 | Purpose | `api: "eth"` (Web3Signer-compatible) | `api: "clef"` (Clef external API) |
 | --- | --- | --- |

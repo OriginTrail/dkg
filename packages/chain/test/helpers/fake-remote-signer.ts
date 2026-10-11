@@ -176,6 +176,11 @@ async function answer(
       const tx = params[0] as Record<string, string | undefined>;
       const wallet = byAddress(tx.from);
       if (tx.nonce === undefined || tx.gas === undefined) throw new Error('nonce and gas are required');
+      // Like Clef outside its advanced mode: a recipient without a valid EIP-55
+      // checksum is a validation warning, and a warning refuses the request.
+      if (api === 'clef' && tx.to !== undefined && tx.to !== ethers.getAddress(tx.to)) {
+        throw new Error('validation failed: Invalid checksum on recipient address');
+      }
       const raw = await wallet.signTransaction({
         to: tx.to ?? null,
         nonce: Number(BigInt(tx.nonce)),

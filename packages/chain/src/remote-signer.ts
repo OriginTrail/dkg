@@ -130,6 +130,17 @@ export class RemoteSignerClient {
     return accounts;
   }
 
+  /**
+   * An address as this dialect sends it. Clef warns about a transaction
+   * recipient without a valid EIP-55 checksum and, outside its advanced mode,
+   * refuses a request it warns about, so the clef dialect sends checksummed
+   * addresses; the eth dialect sends them in lowercase, as ethers' own JSON-RPC
+   * signer does.
+   */
+  wireAddress(address: string): string {
+    return this.api === 'clef' ? getAddress(address) : address.toLowerCase();
+  }
+
   /** Returns the raw signed transaction exactly as the signer encoded it. */
   async signTransaction(transaction: Record<string, unknown>): Promise<string> {
     const method = METHODS[this.api].signTransaction;
@@ -148,7 +159,7 @@ export class RemoteSignerClient {
    * an object.
    */
   signTypedData(address: string, payload: Record<string, unknown>): Promise<unknown> {
-    const account = address.toLowerCase();
+    const account = this.wireAddress(address);
     return this.#callWithFallback('signTypedData', (method) => (
       method === 'eth_signTypedData_v4'
         ? [account, JSON.stringify(payload)]
@@ -158,7 +169,7 @@ export class RemoteSignerClient {
 
   /** Returns the EIP-191 (`\x19Ethereum Signed Message:\n`) signature over `data`. */
   signMessage(address: string, data: Uint8Array): Promise<unknown> {
-    const account = address.toLowerCase();
+    const account = this.wireAddress(address);
     const hexData = hexlify(data);
     return this.#callWithFallback('signMessage', (method) => {
       if (method === 'personal_sign') return [hexData, account];
@@ -253,8 +264,8 @@ export class RemoteSigner extends AbstractSigner implements ExternalEvmSigner {
     const type = unsigned.type ?? unsigned.inferType();
     unsigned.type = type;
     const rpcTransaction: Record<string, unknown> = {
-      from: this.address.toLowerCase(),
-      ...(unsigned.to === null ? {} : { to: unsigned.to.toLowerCase() }),
+      from: this.client.wireAddress(this.address),
+      ...(unsigned.to === null ? {} : { to: this.client.wireAddress(unsigned.to) }),
       gas: toQuantity(unsigned.gasLimit),
       value: toQuantity(unsigned.value),
       data: unsigned.data,

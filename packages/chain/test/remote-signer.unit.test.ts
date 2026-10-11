@@ -285,6 +285,18 @@ describe('RemoteSigner verification', () => {
     const message = await remote.signMessage(ethers.getBytes(ethers.id('digest')));
     expect(ethers.verifyMessage(ethers.getBytes(ethers.id('digest')), message)).toBe(WALLET_B.address);
     expect(signer.calls('account_signData')[0].params[0]).toBe('text/plain');
+    // The clef dialect names every account by its EIP-55 address.
+    expect(signer.calls('account_signTypedData')[0].params[0]).toBe(WALLET_B.address);
+    expect(signer.calls('account_signData')[0].params[1]).toBe(WALLET_B.address);
+  });
+
+  it('sends a clef transaction with EIP-55 addresses, as clef validates the recipient checksum', async () => {
+    const recipient = '0x52908400098527886E0F7030069857D2E4169EE7';
+    const tx: ethers.TransactionRequest = { ...TX, to: recipient.toLowerCase() };
+    const signer = await fakeSigner({ api: 'clef' });
+    const remote = new RemoteSigner(WALLET_B.address, client(signer, { api: 'clef' }));
+    expect(await remote.signTransaction(tx)).toBe(await WALLET_B.signTransaction(tx));
+    expect(signer.calls('account_signTransaction')[0].params[0]).toMatchObject({ from: WALLET_B.address, to: recipient });
   });
 
   it('refuses an unpopulated transaction without contacting the signer', async () => {
