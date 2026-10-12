@@ -1,4 +1,5 @@
 import type { PreparedContentCache } from './prepared-content-cache.js';
+import { EXACT_EXPORT_METADATA_OPERATION, retryExactMetadataAdmission } from './exact-metadata-admission.js';
 import { assertSafeIri, compareCodePoint } from '@origintrail-official/dkg-core';
 import {
   StoreResponseTooLargeError,
@@ -73,7 +74,7 @@ export interface ExactAssetEncodedExportLease {
   release(): void;
 }
 
-export type ExactAssetExportStage = 'export-metadata-before' | 'export-store-payload-query'
+export type ExactAssetExportStage = 'export-metadata-before' | 'export-metadata-admission-retry' | 'export-store-payload-query'
   | 'export-canonical-preparation-root' | 'export-metadata-after';
 
 export interface ExactAssetExportRequest {
@@ -281,14 +282,14 @@ export function createBoundedExactAssetExportCache(params: {
     throwIfAborted(request.signal);
     const metaGraph = `did:dkg:context-graph:${request.contextGraphId}/_meta`;
     let result;
-    try { result = await store.query(`
+    try { result = await retryExactMetadataAdmission(() => store.query(`
       SELECT ?predicate ?object WHERE {
         GRAPH <${assertSafeIri(metaGraph)}> { <${assertSafeIri(request.assetUal)}> ?predicate ?object }
       } LIMIT ${METADATA_MAX_ROWS + 1}
     `, {
-      source: 'sync.responder.exactAssetExport.metadata', priority: 'background',
+      source: EXACT_EXPORT_METADATA_OPERATION, priority: 'background',
       signal: request.signal, maxResponseBytes: METADATA_MAX_BYTES,
-    }); } catch (error) {
+    }), request.signal, waitMs => observeExactBatch(() => request.onStage?.('export-metadata-admission-retry', waitMs))); } catch (error) {
       if (error instanceof StoreResponseTooLargeError) {
         if (expected?.expectedIdentity !== undefined) throw changed();
         return refuse('metadata-profile', request);

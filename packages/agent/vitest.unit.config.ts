@@ -18,6 +18,7 @@ export default defineConfig({
     allowOnly: false,
     coverage: coverageForPackage("agent"),
     include: [
+      "test/sync-exact-export-admission.test.ts",
       "test/prepared-content-cache.test.ts",
       "test/sync-prepared-content-export.test.ts",
       "test/public-snapshot-evidence.test.ts",
@@ -78,6 +79,7 @@ export default defineConfig({
       "test/exact-batch-stream-contract.test.ts",
       "test/exact-batch-stream-duplex.test.ts",
       "test/exact-batch-stream-loopback.test.ts",
+      "test/exact-batch-stream-retry.test.ts",
       "test/exact-batch-stream-capability.test.ts",
       "test/vm-recovery-stream-profile.test.ts",
       "test/vm-recovery-experimental-stream-host.test.ts",
