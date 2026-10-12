@@ -670,21 +670,29 @@ report_builds after "$NEW_COMMIT" "$NEW_VERSION" \
 # the mesh a bounded time to complete and print what each node holds. It is
 # reported, not judged: a publication that cannot reach its Cores fails below
 # with the node's own message, and this line then says why.
+# What a complete mesh is: a Core holds every other node, an Edge holds every
+# Core (two Edges do not keep a connection to each other).
+CORES=0; ROLE=()
+for n in $(seq 1 "$NUM_NODES"); do
+  ROLE[$n]="$(status_field "$n" nodeRole)"
+  [ "${ROLE[$n]}" = "core" ] && CORES=$((CORES + 1))
+done
 mesh_began=$(date +%s)
 while :; do
   short=""
   for n in $(seq 1 "$NUM_NODES"); do
+    if [ "${ROLE[$n]}" = "core" ]; then need=$((NUM_NODES - 1)); else need="$CORES"; fi
     peers="$(status_field "$n" connectedPeers)"
-    [ "${peers:-0}" -ge $((NUM_NODES - 1)) ] 2>/dev/null || short="$short node$n=${peers:-none}"
+    [ "${peers:-0}" -ge "$need" ] 2>/dev/null || short="$short node$n=${peers:-none}/$need"
   done
   [ -z "$short" ] && break
   [ $(( $(date +%s) - mesh_began )) -ge "$MESH_WAIT_S" ] && break
   sleep 3
 done
 if [ -z "$short" ]; then
-  say "every node is connected to the other $((NUM_NODES - 1)) after $(( $(date +%s) - mesh_began ))s"
+  say "every Core is connected to the other $((NUM_NODES - 1)) nodes and every Edge to the $CORES Cores, after $(( $(date +%s) - mesh_began ))s"
 else
-  say "note: after ${MESH_WAIT_S}s not every node is connected to the other $((NUM_NODES - 1)) (peers held:$short)"
+  say "note: after ${MESH_WAIT_S}s the mesh is not complete (peers held of peers expected:$short)"
 fi
 
 # ---------------------------------------------------------------------------
