@@ -147,7 +147,10 @@ export {
   createCapturedWorkspaceGossipPayload,
   createResolveCurrentWorkspaceGossipPayload,
   parseEncodedWorkspaceGossipPayload,
+  withPreparedWorkspaceGossipEnvelope,
   type EncodedWorkspaceGossipPayload,
+  type PreparedWorkspaceGossipPayload,
+  type PrepareWorkspaceGossip,
 } from './workspace-gossip-payload.js';
 export {
   isWorkspaceAgentEncryptionKeyMissingError,

@@ -3,6 +3,7 @@ import {
   createCapturedWorkspaceGossipPayload,
   createResolveCurrentWorkspaceGossipPayload,
   parseEncodedWorkspaceGossipPayload,
+  withPreparedWorkspaceGossipEnvelope,
 } from '../src/workspace-gossip-payload.js';
 
 describe('workspace gossip payload', () => {
@@ -109,5 +110,28 @@ describe('workspace gossip payload', () => {
     expect(() => parseEncodedWorkspaceGossipPayload(value)).toThrow(
       /requires a complete captured fan-out snapshot/,
     );
+  });
+
+  it('carries a prepared envelope with its payload across the publish seam, as bytes only', () => {
+    const message = new Uint8Array([1, 2, 3]);
+    const envelope = new Uint8Array([4, 5, 6]);
+    const captured = createCapturedWorkspaceGossipPayload(message, {
+      source: 'agent-roster',
+      members: ['12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb'],
+      complete: true,
+    });
+    const prepared = withPreparedWorkspaceGossipEnvelope(captured, envelope);
+    expect(prepared).toEqual({ message, fanout: captured.fanout, envelope });
+    expect(Object.isFrozen(prepared)).toBe(true);
+    const parsed = parseEncodedWorkspaceGossipPayload(prepared);
+    expect(parsed.envelope).toBe(envelope);
+    expect(parsed.message).toBe(message);
+    expect(parsed.fanout).toEqual(captured.fanout);
+
+    // A payload that was not prepared stays without one.
+    const plain = createResolveCurrentWorkspaceGossipPayload(message);
+    expect('envelope' in parseEncodedWorkspaceGossipPayload(plain)).toBe(false);
+    expect(() => parseEncodedWorkspaceGossipPayload({ ...plain, envelope: 'signed' }))
+      .toThrow(/prepared envelope to be bytes/);
   });
 });

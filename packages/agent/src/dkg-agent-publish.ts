@@ -191,7 +191,10 @@ import  {
   type WorkspaceSenderKeyEncryptInput,
   createResolveCurrentWorkspaceGossipPayload,
   parseEncodedWorkspaceGossipPayload,
+  withPreparedWorkspaceGossipEnvelope,
   type EncodedWorkspaceGossipPayload,
+  type PreparedWorkspaceGossipPayload,
+  type PrepareWorkspaceGossip,
   type SharedMemoryPublicSnapshotStorageConfig,
 } from '@origintrail-official/dkg-publisher';
 import { pickPublishLifecycleHooks, type PublishLifecycleHooks } from '@origintrail-official/dkg-publisher';
@@ -900,7 +903,6 @@ export class PublishMethods extends DKGAgentBase {
     ctx: OperationContext,
     resolvedSigner?: WorkspaceGossipSigner | null,
     shareOperationId?: string,
-    signedMessage?: Uint8Array,
   ): Promise<void>;
 
   /**
@@ -914,7 +916,6 @@ export class PublishMethods extends DKGAgentBase {
     ctx: OperationContext,
     resolvedSigner?: WorkspaceGossipSigner | null,
     shareOperationId?: string,
-    signedMessage?: Uint8Array,
   ): Promise<void>;
 
   async publishWorkspaceGossip(this: DKGAgent,
@@ -938,11 +939,6 @@ export class PublishMethods extends DKGAgentBase {
      * from quorum tracking too.
      */
     shareOperationId?: string,
-    /**
-     * The gossip envelope of this payload when it was already signed before
-     * the write committed (see {@link presignSharedMemoryWrite}); sent as is.
-     */
-    signedMessage?: Uint8Array,
   ): Promise<void> {
     const payload = normalizeWorkspaceGossipPublishInput(payloadOrMessage);
     const message = payload.message;
@@ -980,7 +976,8 @@ export class PublishMethods extends DKGAgentBase {
     // the freemium-tier launch baseline has stabilised.
     const wireCgId = this.gossipWireIdFor(contextGraphId);
     const topic = contextGraphWorkspaceTopic(wireCgId);
-    let wireMessage = signedMessage;
+    // A payload prepared before its write committed carries its signed envelope.
+    let wireMessage = payload.envelope;
     if (wireMessage === undefined) {
       const signer = resolvedSigner === undefined
         ? await this.resolveWorkspaceGossipSigningAgent(contextGraphId)
@@ -2443,10 +2440,10 @@ export class PublishMethods extends DKGAgentBase {
     const gossipSigner = opts?.localOnly ? null : await this.resolveWorkspaceGossipSigningAgent(contextGraphId);
 
     // The gossip envelope is signed before the write commits, and the strict
-    // curator-ack gate (OT-RFC-49 curator-leader) of a gated private-CG write
-    // is asked with it: a refused signature or acknowledgement stores nothing.
-    // Without a signer or a gate the write takes the legacy best-effort path.
-    const presigned = await this.presignSharedMemoryWrite(contextGraphId, gossipSigner, opts, ctx);
+    // curator-ack gate (OT-RFC-49 curator-leader) of a gated private-CG write is
+    // asked with it (see buildCuratorAckConfirmer): a refused signature or
+    // acknowledgement stores nothing. Undefined → legacy best-effort path.
+    const confirmBeforeCommit = await this.buildCuratorAckConfirmer(contextGraphId, gossipSigner, opts, ctx);
 
     const { shareOperationId, gossipPayload } = await this.publisher.writeToWorkspace(contextGraphId, quads, {
       publisherPeerId: this.node.peerId.toString(),
@@ -2454,7 +2451,8 @@ export class PublishMethods extends DKGAgentBase {
       subGraphName: opts?.subGraphName,
       localOnly: opts?.localOnly,
       senderAgentAddress: gossipSigner?.agentAddress,
-      confirmBeforeCommit: presigned.confirmBeforeCommit,
+      prepareGossip: this.gossipEnvelopePreparer(contextGraphId, gossipSigner),
+      confirmBeforeCommit,
     });
     if (shouldCreateImplicitContextGraph) {
       await this.ensureImplicitSharedMemoryContextGraph(contextGraphId, {
@@ -2475,41 +2473,28 @@ export class PublishMethods extends DKGAgentBase {
         ctx,
         gossipSigner,
         shareOperationId,
-        presigned.signedMessage(),
       );
     }
     return { shareOperationId };
   }
 
   /**
-   * The seam before a share() or conditionalShare() commits: the write's gossip
-   * envelope is signed there, so a signer that refuses aborts the write with
-   * nothing stored (a conditional write stays retryable as it was), and the
-   * curator-ack gate, when it applies, is asked with those signed bytes. The
-   * fan-out after the commit sends the same bytes and never signs. No seam for
-   * a local-only write, or when there is neither a signer nor a gate.
+   * The publisher's pre-commit preparation of a share() or conditionalShare()
+   * that has a gossip signer: the write's envelope is signed before anything is
+   * stored, so a signer that refuses aborts the write with nothing stored (a
+   * conditional write stays retryable as it was). The prepared payload carries
+   * the signed bytes to the curator-ack gate and, through the write result, to
+   * the fan-out, which sends them without signing again.
    */
-  async presignSharedMemoryWrite(this: DKGAgent,
+  gossipEnvelopePreparer(this: DKGAgent,
     contextGraphId: string,
     gossipSigner: WorkspaceGossipSigner | null,
-    opts: { localOnly?: boolean; awaitCuratorAck?: boolean; curatorAckTimeoutMs?: number } | undefined,
-    ctx: OperationContext,
-  ): Promise<{
-    confirmBeforeCommit?: (message: Uint8Array) => Promise<{ applied: boolean; rejected?: boolean }>;
-    signedMessage: () => Uint8Array | undefined;
-  }> {
-    const curator = await this.resolveCuratorAckTarget(contextGraphId, opts);
-    if (opts?.localOnly || (gossipSigner === null && curator === undefined)) return { signedMessage: () => undefined };
-    let signed: Uint8Array | undefined;
-    return {
-      confirmBeforeCommit: async (message) => {
-        signed = await this.encodeWorkspaceGossipMessage(contextGraphId, message, gossipSigner);
-        return curator === undefined
-          ? { applied: true }
-          : this.confirmCuratorApplied(contextGraphId, curator.peerIds, signed, curator.timeoutMs, ctx);
-      },
-      signedMessage: () => signed,
-    };
+  ): PrepareWorkspaceGossip | undefined {
+    if (gossipSigner === null) return undefined;
+    return async (payload) => withPreparedWorkspaceGossipEnvelope(
+      payload,
+      await this.encodeWorkspaceGossipMessage(contextGraphId, payload.message, gossipSigner),
+    );
   }
 
   /**
@@ -2524,26 +2509,26 @@ export class PublishMethods extends DKGAgentBase {
    * `localOnly`; the gate is off (per-call `awaitCuratorAck` ?? config
    * `swmAwaitCuratorAck` ?? false); the CG is public; or this node IS the curator
    * (its own commit is authoritative — a curator never confirms with itself).
-   * Used by the WM→SWM `promote()` paths; `share()` and `conditionalShare()` take
-   * the same gate through {@link presignSharedMemoryWrite} (all flow through the
-   * publisher's `confirmBeforeCommit` seam). Public because the mixin-split
-   * `promote()` lives in a different class (cf. publishWorkspaceGossip).
+   * Shared by `share()`, `conditionalShare()`, and the WM→SWM `promote()` path
+   * (all flow through the publisher's `confirmBeforeCommit` seam). Public because
+   * the mixin-split `promote()` lives in a different class (cf. publishWorkspaceGossip).
    */
   async buildCuratorAckConfirmer(this: DKGAgent,
     contextGraphId: string,
     gossipSigner: Parameters<DKGAgent['encodeWorkspaceGossipMessage']>[2],
     opts: { localOnly?: boolean; awaitCuratorAck?: boolean; curatorAckTimeoutMs?: number } | undefined,
     ctx: OperationContext,
-  ): Promise<((message: Uint8Array) => Promise<{ applied: boolean; rejected?: boolean }>) | undefined> {
+  ): Promise<((message: Uint8Array, prepared?: PreparedWorkspaceGossipPayload) => Promise<{ applied: boolean; rejected?: boolean }>) | undefined> {
     const curator = await this.resolveCuratorAckTarget(contextGraphId, opts);
     if (curator === undefined) return undefined;
-    return async (message: Uint8Array) => {
+    return async (message: Uint8Array, prepared?: PreparedWorkspaceGossipPayload) => {
       // The publisher hands us the INNER workspace payload. The curator's
       // PROTOCOL_SWM_UPDATE handler expects the SAME signed gossip-message
       // envelope the substrate fan-out sends (encodeWorkspaceGossipMessage),
       // NOT the raw inner bytes — sending the inner bytes fails protobuf decode
-      // on the receiver (a permanent rejection). Encode identically.
-      const wireMessage = await this.encodeWorkspaceGossipMessage(contextGraphId, message, gossipSigner);
+      // on the receiver (a permanent rejection). A share prepared that envelope
+      // before its commit; otherwise encode identically.
+      const wireMessage = prepared?.envelope ?? await this.encodeWorkspaceGossipMessage(contextGraphId, message, gossipSigner);
       return this.confirmCuratorApplied(contextGraphId, curator.peerIds, wireMessage, curator.timeoutMs, ctx);
     };
   }
@@ -2628,7 +2613,7 @@ export class PublishMethods extends DKGAgentBase {
     const gossipSigner = opts?.localOnly ? null : await this.resolveWorkspaceGossipSigningAgent(contextGraphId);
     // Signed (and curator-confirmed) before the commit — same seam as share()
     // (both flow through _shareImpl), after the conditions are checked.
-    const presigned = await this.presignSharedMemoryWrite(contextGraphId, gossipSigner, opts, ctx);
+    const confirmBeforeCommit = await this.buildCuratorAckConfirmer(contextGraphId, gossipSigner, opts, ctx);
     const { shareOperationId, gossipPayload } = await this.publisher.writeConditionalToWorkspace(contextGraphId, quads, {
       publisherPeerId: this.node.peerId.toString(),
       operationCtx: ctx,
@@ -2636,7 +2621,8 @@ export class PublishMethods extends DKGAgentBase {
       subGraphName: opts?.subGraphName,
       localOnly: opts?.localOnly,
       senderAgentAddress: gossipSigner?.agentAddress,
-      confirmBeforeCommit: presigned.confirmBeforeCommit,
+      prepareGossip: this.gossipEnvelopePreparer(contextGraphId, gossipSigner),
+      confirmBeforeCommit,
     });
     if (shouldCreateImplicitContextGraph) {
       await this.ensureImplicitSharedMemoryContextGraph(contextGraphId, {
@@ -2650,7 +2636,6 @@ export class PublishMethods extends DKGAgentBase {
         ctx,
         gossipSigner,
         shareOperationId,
-        presigned.signedMessage(),
       );
     }
     return { shareOperationId };

@@ -2,8 +2,9 @@
  * Shared-memory writes of a node whose gossip signer is an author key held by
  * an external signer. share() and conditionalShare() sign the write's gossip
  * envelope before the write commits: a signer that refuses aborts the write
- * with nothing stored, so a conditional write stays retryable as it was, and
- * the fan-out after the commit sends exactly the bytes that were signed (the
+ * with nothing stored, so a conditional write stays retryable as it was. The
+ * signed envelope travels with the payload through the write result, so the
+ * fan-out after the commit sends exactly the bytes that were signed (the
  * curator-ack gate is asked with the same bytes). A fan-out that still has to
  * sign after its write committed reports a refusal as a failed fan-out, never
  * as a failed write.
@@ -148,8 +149,13 @@ describe('shared-memory writes signed by an external author key', () => {
 
   it('fans out exactly the envelope it signed before the write committed', async () => {
     const { agent, fake, sent } = await keylessWriter();
+    const fanOut = vi.spyOn(agent, 'publishWorkspaceGossip');
     const before = fake.calls('eth_sign').length;
     const { shareOperationId } = await agent.share(CG, item('0'));
+    // The fan-out is handed the payload together with its prepared envelope.
+    expect(fanOut).toHaveBeenCalledTimes(1);
+    const payload = fanOut.mock.calls[0]![1] as { envelope?: Uint8Array };
+    expect(ethers.hexlify(payload.envelope!)).toBe(ethers.hexlify(sent[0]!));
 
     const requests = fake.calls('eth_sign').slice(before);
     expect(requests).toHaveLength(1);

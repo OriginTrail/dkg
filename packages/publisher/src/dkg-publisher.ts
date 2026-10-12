@@ -115,6 +115,8 @@ import {
   createCapturedWorkspaceGossipPayload,
   createResolveCurrentWorkspaceGossipPayload,
   type EncodedWorkspaceGossipPayload,
+  type PreparedWorkspaceGossipPayload,
+  type PrepareWorkspaceGossip,
 } from './workspace-gossip-payload.js';
 import {
   PublisherWalletRequiredError,
@@ -766,19 +768,17 @@ export interface ShareOptions {
   subGraphName?: string;
   localOnly?: boolean;
   senderAgentAddress?: string;
+  /** Prepares the gossip payload before the write commits; see {@link PrepareWorkspaceGossip}. */
+  prepareGossip?: PrepareWorkspaceGossip;
   /**
-   * Strict curator-ack gate (OT-RFC-49 curator-leader). When provided, the
-   * share path calls this AFTER building the signed wire message but BEFORE any
-   * destructive store mutation, passing the exact message that would be
-   * published. If it resolves `applied: false`, the write is ABORTED with NO
-   * local persistence — `CuratorRejectedError` when `rejected: true`, otherwise
-   * `CuratorUnconfirmedError`. The agent injects this to require the curator (the
-   * authoritative replica) to have applied the write before the member commits
-   * it locally, so a write the curator never received is never silently accepted.
-   * Omitted (the default) preserves the legacy best-effort, commit-then-fan-out
-   * behaviour for public CGs, `localOnly` writes, and non-gated callers.
+   * Strict curator-ack gate (OT-RFC-49 curator-leader): called after the message
+   * is built (and prepared, which it then receives) but BEFORE any store
+   * mutation. `applied: false` ABORTS the write with NO local persistence —
+   * `CuratorRejectedError` when `rejected: true`, otherwise `CuratorUnconfirmedError`
+   * — so a write the curator (the authoritative replica) never received is never
+   * accepted. Omitted, the legacy best-effort commit-then-fan-out path is kept.
    */
-  confirmBeforeCommit?: (message: Uint8Array) => Promise<{ applied: boolean; rejected?: boolean }>;
+  confirmBeforeCommit?: (message: Uint8Array, prepared?: PreparedWorkspaceGossipPayload) => Promise<{ applied: boolean; rejected?: boolean }>;
 }
 
 /** @deprecated Use ShareOptions */
@@ -1983,15 +1983,15 @@ export class DKGPublisher implements Publisher {
       });
     }
 
-    // Strict curator-ack gate (OT-RFC-49 curator-leader). Runs AFTER the wire
-    // message is fully built + size-checked (above) and BEFORE the first
-    // destructive mutation (below) — the build/commit seam the message was
-    // deliberately pre-encoded for ("BEFORE any destructive SWM mutations").
-    // The agent injects a confirmer that reliably delivers `message` to the
-    // curator and waits for an applied-ack; a non-confirmation aborts here with
-    // ZERO orphaned state, so the member never holds a value the curator lacks.
+    // The build/commit seam (the message was pre-encoded for it, BEFORE any
+    // destructive SWM mutation): the payload is prepared for the network, then
+    // the strict curator-ack gate (OT-RFC-49 curator-leader) delivers it to the
+    // curator and waits for an applied-ack. A failure or non-confirmation aborts
+    // here with ZERO orphaned state, so the member never holds a value the
+    // curator lacks.
+    const prepared = options.prepareGossip ? await options.prepareGossip(gossipPayload) : undefined;
     if (options.confirmBeforeCommit) {
-      const confirmation = await options.confirmBeforeCommit(gossipPayload.message);
+      const confirmation = await options.confirmBeforeCommit(gossipPayload.message, prepared);
       if (!confirmation.applied) {
         if (confirmation.rejected) throw new CuratorRejectedError(contextGraphId);
         throw new CuratorUnconfirmedError(contextGraphId);
@@ -2051,7 +2051,7 @@ export class DKGPublisher implements Publisher {
     }
 
     this.log.info(ctx, `Shared memory write complete: ${shareOperationId}`);
-    return { shareOperationId, message: gossipPayload.message, gossipPayload };
+    return { shareOperationId, message: gossipPayload.message, gossipPayload: prepared ?? gossipPayload };
   }
 
   private async encodeWorkspaceGossipPayload(

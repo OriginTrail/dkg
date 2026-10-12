@@ -14,6 +14,32 @@ export interface EncodedWorkspaceGossipPayload {
         readonly kind: 'captured';
         readonly snapshot: WorkspaceAgentRecipientFanoutSnapshot;
       };
+  /**
+   * The network form of `message` (its signed gossip envelope) when the write
+   * prepared it before committing: fan-out sends these bytes as they are.
+   */
+  readonly envelope?: Uint8Array;
+}
+
+/** A payload whose network form was prepared before its write committed. */
+export type PreparedWorkspaceGossipPayload = EncodedWorkspaceGossipPayload & { readonly envelope: Uint8Array };
+
+/**
+ * Prepares a share's gossip payload for the network before the write commits,
+ * for example by signing its envelope. The publisher calls it once the message
+ * is built and size-checked, before the curator confirmation and before
+ * anything is stored, so a rejection aborts the write with nothing stored. The
+ * prepared payload is what the confirmation receives and what the write result
+ * carries.
+ */
+export type PrepareWorkspaceGossip = (payload: EncodedWorkspaceGossipPayload) => Promise<PreparedWorkspaceGossipPayload>;
+
+/** `payload` with its prepared network form. */
+export function withPreparedWorkspaceGossipEnvelope(
+  payload: EncodedWorkspaceGossipPayload,
+  envelope: Uint8Array,
+): PreparedWorkspaceGossipPayload {
+  return Object.freeze({ message: payload.message, fanout: payload.fanout, envelope });
 }
 
 export function createResolveCurrentWorkspaceGossipPayload(
@@ -52,6 +78,16 @@ export function createCapturedWorkspaceGossipPayload(
 export function parseEncodedWorkspaceGossipPayload(
   value: unknown,
 ): EncodedWorkspaceGossipPayload {
+  const payload = parseFanoutPayload(value);
+  const envelope = (value as Record<string, unknown>)['envelope'];
+  if (envelope === undefined) return payload;
+  if (!(envelope instanceof Uint8Array)) {
+    throw new TypeError('publishWorkspaceGossip requires a prepared envelope to be bytes');
+  }
+  return withPreparedWorkspaceGossipEnvelope(payload, envelope);
+}
+
+function parseFanoutPayload(value: unknown): EncodedWorkspaceGossipPayload {
   if (typeof value !== 'object' || value === null) {
     throw new TypeError('publishWorkspaceGossip requires encoded bytes with fan-out provenance');
   }
