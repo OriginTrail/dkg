@@ -15,10 +15,13 @@ const held = new ethers.Wallet(HARDHAT_KEYS.EXTRA2);
 const notHeld = new ethers.Wallet(HARDHAT_KEYS.EXTRA3).address;
 const keyless = new ethers.Wallet(HARDHAT_KEYS.PUBLISHER2).address;
 const unknown = new ethers.Wallet(HARDHAT_KEYS.PUBLISHER).address;
+// A custodial agent whose key moved off the node into the external signer, as an author key.
+const moved = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
 
 const modes: Record<string, 'custodial' | 'self-sovereign'> = {
   [custodial.address]: 'custodial',
   [keyless]: 'custodial',
+  [moved.address]: 'custodial',
   [held.address]: 'self-sovereign',
   [notHeld]: 'self-sovereign',
 };
@@ -28,8 +31,8 @@ const agents = {
   getCustodialAgentPrivateKey: (address: string) => (address === custodial.address ? custodial.privateKey.slice(2) : undefined),
 };
 const authors = {
-  addresses: [held.address],
-  signerFor: async (address: string) => (address === held.address ? held : undefined),
+  addresses: [held.address, moved.address],
+  signerFor: async (address: string) => [held, moved].find((key) => key.address === address),
   firstSignerOf: async (addresses: readonly string[]) => (
     addresses.includes(held.address) ? { address: held.address, signer: held } : undefined
   ),
@@ -74,6 +77,14 @@ describe('author signer', () => {
     const fromKey = await registeredAgentAuthorSigner(agents, authors, custodial.address, 'assertionFinalize', 'SEAL_CAPABILITY_GAP');
     expect(await fromKey.signTypedData(DOMAIN, TYPES, VALUE)).toBe(await custodial.signTypedData(DOMAIN, TYPES, VALUE));
     expect(await registeredAgentAuthorSigner(agents, authors, held.address, 'assertionFinalize')).toBe(held);
+    // A custodial agent whose key moved into the signer signs through it; one whose key is still on the node signs
+    // with it, and the signer is not asked even when it holds the address too.
+    expect(await registeredAgentAuthorSigner(agents, authors, moved.address, 'assertionFinalize', 'SEAL_CAPABILITY_GAP')).toBe(moved);
+    const signerFor = vi.fn(async () => custodial);
+    const onNode = await registeredAgentAuthorSigner(agents, { ...authors, signerFor }, custodial.address, 'assertionFinalize');
+    expect(onNode).not.toBe(custodial);
+    expect(onNode.address).toBe(custodial.address);
+    expect(signerFor).not.toHaveBeenCalled();
 
     await expect(registeredAgentAuthorSigner(agents, authors, unknown, 'assertionFinalize'))
       .rejects.toThrow(`assertionFinalize: authorAgentAddress ${unknown} is not a registered local agent on this node`);

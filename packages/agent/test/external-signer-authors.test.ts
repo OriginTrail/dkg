@@ -10,7 +10,7 @@
  * external-signer-chain-adapter.test.ts.
  */
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
@@ -476,6 +476,97 @@ describe('external signer author keys', () => {
       expect(payerSigning()).toEqual([]);
     } finally {
       await agent.stop().catch(() => {});
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+  it('signs as a custodial agent whose key moved into the external signer, after a restart, and stores no key for it', async () => {
+    // The node's former local wallet, its first agent, whose key moves into the signer as the default author.
+    const moved = new ethers.Wallet(ethers.Wallet.createRandom().privateKey);
+    const fake = await startFakeRemoteSigner({
+      credentials: [
+        { token: PAYER_TOKEN, keys: [payer.privateKey] },
+        { token: AUTHOR_TOKEN, keys: [moved.privateKey] },
+      ],
+    });
+    startedSigners.push(fake);
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-moved-custodial-key-'));
+    const keystorePath = join(dir, 'agent-keystore.json');
+    const store = () => new OxigraphStore(join(dir, 'store.nq'));
+    try {
+      const local = await DKGAgent.create({
+        name: 'MovedKeyNode',
+        store: store(),
+        dataDir: dir,
+        chainAdapter: new LocallySignedMockChain(moved),
+        nodeRole: 'edge',
+      });
+      await local.start();
+      expect(local.getDefaultAgentAddress()).toBe(moved.address);
+      expect(local.getLocalAgentMode(moved.address)).toBe('custodial');
+      // Another custodial agent, whose key will leave the node without going into the signer.
+      const keyless = await local.registerAgent('keyless');
+      await local.stop();
+
+      // Both keys leave the keystore; the agents keep their tokens.
+      const keystore = JSON.parse(await readFile(keystorePath, 'utf8')) as Record<string, { privateKey?: string; authToken?: string }>;
+      for (const address of [moved.address, keyless.agentAddress]) {
+        expect(keystore[address.toLowerCase()]?.authToken).toBeDefined();
+        delete keystore[address.toLowerCase()]!.privateKey;
+      }
+      await writeFile(keystorePath, JSON.stringify(keystore));
+
+      const remote = await connectRemoteSigners({ url: fake.url, authToken: PAYER_TOKEN, author: { authToken: AUTHOR_TOKEN, address: moved.address } });
+      const migrated = await DKGAgent.create({
+        name: 'MovedKeyNode',
+        store: store(),
+        dataDir: dir,
+        kaNumberAllocator: makeTestKaNumberAllocator(),
+        chainAdapter: new ExternallySignedMockChain('mock:31337', payer.address),
+        authorSigners: remote.authors,
+        nodeRole: 'edge',
+      });
+      try {
+        await migrated.start();
+        expect(migrated.getDefaultAgentAddress()).toBe(moved.address);
+        expect(migrated.getLocalAgentMode(moved.address)).toBe('custodial');
+        expect(migrated.getCustodialAgentPrivateKey(moved.address)).toBeUndefined();
+
+        // A draft the agent opens and seals with its own agent is attested through the signer.
+        const asMoved = { agentAddress: moved.address };
+        await migrated.assertion.create(CG, NAME, asMoved);
+        await migrated.assertion.write(CG, NAME, [q('urn:external-authors:moved', 'urn:value', '"v1"')], asMoved);
+        const before = fake.requests.length;
+        const seal = await migrated.assertion.finalize(CG, NAME, { ...asMoved, authorAgentAddress: moved.address });
+        expect(ethers.getAddress(seal.authorAddress)).toBe(moved.address);
+        expect(seal.reservedKaId >> 96n).toBe(BigInt(moved.address));
+        const signed = fake.requests.slice(before).filter((request) => request.method !== 'eth_accounts');
+        expect(signed.map((request) => [request.method, request.authorization])).toEqual([['eth_signTypedData_v4', `Bearer ${AUTHOR_TOKEN}`]]);
+        // And the node still stores no key for it.
+        expect(migrated.getCustodialAgentPrivateKey(moved.address)).toBeUndefined();
+        const stored = JSON.parse(await readFile(keystorePath, 'utf8')) as Record<string, { privateKey?: string }>;
+        expect(stored[moved.address.toLowerCase()]?.privateKey).toBeUndefined();
+
+        // A custodial agent that neither the node nor the signer holds a key for still cannot author.
+        const asKeyless = { agentAddress: keyless.agentAddress };
+        await migrated.assertion.create(CG, 'keyless', asKeyless);
+        await migrated.assertion.write(CG, 'keyless', [q('urn:external-authors:keyless', 'urn:value', '"v1"')], asKeyless);
+        await expect(migrated.assertion.finalize(CG, 'keyless', { ...asKeyless, authorAgentAddress: keyless.agentAddress }))
+          .rejects.toMatchObject({ code: 'SEAL_CAPABILITY_GAP' });
+
+        // A custodial agent whose key is on the node signs with it, and the signer is not asked.
+        const onNode = await migrated.registerAgent('on-node');
+        const asOnNode = { agentAddress: onNode.agentAddress };
+        await migrated.assertion.create(CG, 'on-node', asOnNode);
+        await migrated.assertion.write(CG, 'on-node', [q('urn:external-authors:on-node', 'urn:value', '"v1"')], asOnNode);
+        const beforeLocal = fake.requests.length;
+        const localSeal = await migrated.assertion.finalize(CG, 'on-node', { ...asOnNode, authorAgentAddress: onNode.agentAddress });
+        expect(ethers.getAddress(localSeal.authorAddress)).toBe(onNode.agentAddress);
+        expect(fake.requests.slice(beforeLocal).filter((request) => request.method !== 'eth_accounts')).toEqual([]);
+      } finally {
+        await migrated.stop().catch(() => {});
+        remote.destroy();
+      }
+    } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });

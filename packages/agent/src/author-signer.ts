@@ -64,9 +64,11 @@ export async function heldAuthorSigner(
 
 /**
  * The signer of a registered local agent named as the author: a
- * self-sovereign agent through the external signer that holds its author key,
- * a custodial agent with its key on the node. Errors start with `label`; the
- * one for a custodial agent without a key on file carries `missingKeyCode`.
+ * self-sovereign agent through the external signer that holds its author key;
+ * a custodial agent with its key on the node, which takes precedence, else
+ * through the external signer when the key moved there as an author key.
+ * Errors start with `label`; the one for a custodial agent that neither has a
+ * key on file nor is an author key of the signer carries `missingKeyCode`.
  */
 export async function registeredAgentAuthorSigner(
   agents: LocalAgentKeys,
@@ -87,12 +89,10 @@ export async function registeredAgentAuthorSigner(
         `this node does not hold its private key. Use preSignedAuthorAttestation instead.`,
     );
   }
-  const custodialKey = agents.getCustodialAgentPrivateKey(address);
-  if (!custodialKey) {
-    throw Object.assign(
-      new Error(`${label}: custodial agent ${address} has no private key on file`),
-      missingKeyCode === undefined ? {} : { code: missingKeyCode },
-    );
-  }
-  return agentKeyWallet(custodialKey);
+  const signer = await agentSigner(authors, address, agents.getCustodialAgentPrivateKey(address));
+  if (signer) return signer;
+  throw Object.assign(
+    new Error(`${label}: custodial agent ${address} has no private key on file`),
+    missingKeyCode === undefined ? {} : { code: missingKeyCode },
+  );
 }
