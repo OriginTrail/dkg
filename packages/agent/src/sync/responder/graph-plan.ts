@@ -34,7 +34,7 @@ import {
   SYNC_BYTE_BUDGET_RESPONSE_BYTES,
 } from '../../dkg-agent-constants.js';
 import type { ChangelogSyncResponse, ChangelogDeltaRecord } from '../changelog/wire.js';
-import { createAssertionNameMatcher, durableMetaLiteralValue as stripLiteral } from './durable-meta-admission.js';
+import { createAssertionNameMatcher } from './durable-meta-admission.js';
 import { buildDurableMetaPlan, readDurableMetaPlanWindow, type DurableMetaPlanMemo } from './durable-meta-plan.js';
 import { isIriTerm } from '../iri-term.js';
 import { compareCodePoint } from '@origintrail-official/dkg-core';
@@ -2826,7 +2826,7 @@ function filterDurableMetaSnapshotRows(
     if (subjectRows.some((row) =>
       (row.p === PROV_GENERATED || row.p === PROV_USED) && nonWorkingSubjects.has(row.o),
     )) admitted.add(subject);
-    if (namedByAssertion(subject)) admitted.add(subject);
+    if (namedByAssertion(subject) !== undefined) admitted.add(subject);
   }
 
   return rows
@@ -3010,5 +3010,11 @@ function contextGraphDataGraphUri(contextGraphId: string): string {
 
 function contextGraphMetaGraphUri(contextGraphId: string): string {
   return `${contextGraphDataGraphUri(contextGraphId)}/_meta`;
+}
+
+function stripLiteral(value: string | undefined): string {
+  if (!value) return '';
+  const match = value.match(/^"((?:[^"\\]|\\.)*)"(?:@[\w-]+|\^\^<[^>]+>)?$/);
+  return match ? match[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\') : value;
 }
 

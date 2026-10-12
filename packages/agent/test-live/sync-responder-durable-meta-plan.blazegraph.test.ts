@@ -9,7 +9,7 @@ import {
   type Quad,
 } from '@origintrail-official/dkg-storage';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { buildDurableMetaPlan } from '../src/sync/responder/durable-meta-plan.js';
+import { buildDurableMetaPlan, readDurableMetaPlanWindow } from '../src/sync/responder/durable-meta-plan.js';
 import { readDurableMetaPage } from '../src/sync/responder/graph-plan.js';
 
 const URL = process.env.BLAZEGRAPH_TEST_URL;
@@ -21,6 +21,9 @@ const XSD = 'http://www.w3.org/2001/XMLSchema#';
 const VM = `"${MemoryLayer.VerifiableMemory}"`;
 const WM = `"${MemoryLayer.WorkingMemory}"`;
 const DELEGATION_PREFIX = `did:dkg:agent-delegation:${CG}:`;
+/** A promoted assertion that the last case sends back to working memory. */
+const REOPENED_LIFECYCLE = 'urn:lifecycle:reopened';
+const REOPENED_NAMED = `${CG_ENTITY}/assertion/0xabc/reopened`;
 
 function q(subject: string, predicate: string, object: string): Quad {
   return { subject, predicate, object, graph: GRAPH };
@@ -51,6 +54,9 @@ const ADMITTED: Quad[] = [
   q('urn:assertion-graph:1', `${DKG}label`, '"assertion graph row"'),
   q('urn:event:generated', 'http://www.w3.org/ns/prov#generated', 'urn:lifecycle:vm'),
   q(`${CG_ENTITY}/assertion/0xabc/named`, `${DKG}label`, '"assertion name row"'),
+  q(REOPENED_LIFECYCLE, `${DKG}memoryLayer`, VM),
+  q(REOPENED_LIFECYCLE, `${DKG}assertionName`, '"reopened"'),
+  q(REOPENED_NAMED, `${DKG}label`, '"named by the reopened assertion"'),
   ...descriptor(1, 'confirmed'),
   ...descriptor(2, 'confirmed'),
   ...descriptor(3, 'confirmed'),
@@ -151,5 +157,24 @@ describe('durable metadata paged from a session plan (live Blazegraph)', () => {
         pageOfSubject.set(row.s, index);
       }
     });
+  });
+
+  // Last: it changes the fixture.
+  it('stops serving a subject, and the subject it named, once it is no longer admitted', async () => {
+    const plan = await buildPlan();
+    const windowOf = (subject: string) => {
+      const index = plan.subjects.findIndex((entry) => entry.subject === subject);
+      expect(index).toBeGreaterThanOrEqual(0);
+      return readDurableMetaPlanWindow(store, plan, plan.rowsBefore[index]!, 1);
+    };
+    expect(await windowOf(REOPENED_LIFECYCLE)).toHaveLength(2);
+    expect(await windowOf(REOPENED_NAMED)).toHaveLength(1);
+
+    // The assertion goes back to working memory; no row count changes.
+    await store.deleteByPattern({ graph: GRAPH, subject: REOPENED_LIFECYCLE, predicate: `${DKG}memoryLayer` });
+    await store.insert([q(REOPENED_LIFECYCLE, `${DKG}memoryLayer`, WM)]);
+
+    await expect(windowOf(REOPENED_LIFECYCLE)).rejects.toThrow(`subject ${REOPENED_LIFECYCLE}: expected 2 rows, found 0`);
+    await expect(windowOf(REOPENED_NAMED)).rejects.toThrow(`subject ${REOPENED_NAMED}: expected 1 rows, found 0`);
   });
 });

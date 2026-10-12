@@ -364,8 +364,8 @@ describe('durable-meta session plan', () => {
     const plan = await buildDurableMetaPlan({ store, contextGraphId: cgId, registeredSubGraphNames: [], budgetKey: 'names' });
     expect(plan.subjects).toEqual([
       { subject: cgEntity, rowCount: 1 },
-      { subject: `${cgEntity}/assertion/0xabc/notes`, rowCount: 2, byAssertionName: true },
-      { subject: `${cgEntity}/assertion/0xdef/team/plan`, rowCount: 1, byAssertionName: true },
+      { subject: `${cgEntity}/assertion/0xabc/notes`, rowCount: 2, namedBy: 'urn:lifecycle:promoted' },
+      { subject: `${cgEntity}/assertion/0xdef/team/plan`, rowCount: 1, namedBy: 'urn:lifecycle:nested' },
       { subject: 'urn:lifecycle:nested', rowCount: 2 },
       { subject: 'urn:lifecycle:promoted', rowCount: 2 },
     ]);
@@ -375,15 +375,88 @@ describe('durable-meta session plan', () => {
       'sync.responder.readDurableMetaPlanAssertionNames',
       'sync.responder.readDurableMetaPlanAssertionSubjects',
     ]);
-    // The names come back once each; the store never compares a subject with them.
+    // One row per promoted assertion; building the plan never has the store
+    // compare a subject with the names.
     expect(queries[2]!.rows).toBe(2);
     for (const query of queries) expect(query.sparql).not.toMatch(/STRENDS/);
 
+    // A page asks each named subject's own lifecycle record, and no other,
+    // in one group with the read of the rows: the pairs lead it.
     queries.length = 0;
     const rows = await readDurableMetaPlanWindow(store, plan, 0, plan.totalRows);
     expect(rows).toHaveLength(8);
-    for (const query of queries) expect(query.sparql).not.toMatch(/STRENDS|assertionName/);
+    const named = queries.filter((query) => /STRENDS/.test(query.sparql));
+    expect(named).toHaveLength(1);
+    expect(named[0]!.sparql.startsWith(
+      `SELECT DISTINCT ?s ?p ?o WHERE { VALUES (?s ?lifecycle) { (<${cgEntity}/assertion/0xabc/notes> <urn:lifecycle:promoted>) `
+      + `(<${cgEntity}/assertion/0xdef/team/plan> <urn:lifecycle:nested>) } GRAPH <${graph}> { ?lifecycle `,
+    )).toBe(true);
+    expect(named[0]!.sparql.match(/SELECT/g)).toHaveLength(1);
     await store.close();
+  });
+
+  it('asks the lifecycle record again before it serves a subject that record named', async () => {
+    const cgId = 'meta-plan-names-recheck';
+    const graph = contextGraphMetaGraphUri(cgId);
+    const cgEntity = `did:dkg:context-graph:${cgId}`;
+    const q = (subject: string, predicate: string, object: string): Quad => ({ graph, subject, predicate, object });
+    const lifecycle = 'urn:lifecycle:promoted';
+    const named = `${cgEntity}/assertion/0xabc/notes`;
+    const seed: Quad[] = [
+      q(lifecycle, `${DKG_NS}memoryLayer`, VM),
+      q(lifecycle, `${DKG_NS}assertionName`, '"notes"'),
+      q(named, `${DKG_NS}label`, '"sealed"'),
+      q(named, `${DKG_NS}note`, '"published"'),
+    ];
+    const planned = async () => {
+      const store = new OxigraphStore();
+      await store.insert(seed);
+      const plan = await buildDurableMetaPlan({ store, contextGraphId: cgId, registeredSubGraphNames: [], budgetKey: 'names-recheck' });
+      expect(plan.subjects).toEqual([
+        { subject: named, rowCount: 2, namedBy: lifecycle },
+        { subject: lifecycle, rowCount: 2 },
+      ]);
+      return { store, plan };
+    };
+    const draft = [q(named, `${DKG_NS}label`, '"draft"'), q(named, `${DKG_NS}note`, '"not published"')];
+
+    // The assertion goes back to working memory and its subject is rewritten
+    // with as many rows as it had: nothing of that is served.
+    {
+      const { store, plan } = await planned();
+      await store.deleteByPattern({ graph, subject: lifecycle, predicate: `${DKG_NS}memoryLayer` });
+      await store.insert([q(lifecycle, `${DKG_NS}memoryLayer`, WM)]);
+      await store.deleteByPattern({ graph, subject: named });
+      await store.insert(draft);
+      await expect(readDurableMetaPlanWindow(store, plan, 0, 2)).rejects.toThrow(
+        `subject ${named}: expected 2 rows, found 0`,
+      );
+      await store.close();
+    }
+    // The same when the record is gone, or no longer carries that name.
+    for (const change of [
+      (store: OxigraphStore) => store.deleteByPattern({ graph, subject: lifecycle }),
+      async (store: OxigraphStore) => {
+        await store.deleteByPattern({ graph, subject: lifecycle, predicate: `${DKG_NS}assertionName` });
+        await store.insert([q(lifecycle, `${DKG_NS}assertionName`, '"renamed"')]);
+      },
+    ]) {
+      const { store, plan } = await planned();
+      await change(store);
+      await expect(readDurableMetaPlanWindow(store, plan, 0, 2)).rejects.toThrow(/sync session superseded/i);
+      await store.close();
+    }
+    // While the record still names it, the subject is served with the rows it has.
+    {
+      const { store, plan } = await planned();
+      await store.deleteByPattern({ graph, subject: named });
+      await store.insert(draft);
+      expect((await readDurableMetaPlanWindow(store, plan, 0, 2)).map((row) => row.o)).toEqual(['"draft"', '"not published"']);
+      // A record that carries the name twice over does not repeat the rows.
+      await store.insert([q(lifecycle, `${DKG_NS}assertionName`, '"abc/notes"')]);
+      expect(await readDurableMetaPlanWindow(store, plan, 0, 2)).toHaveLength(2);
+      await store.close();
+    }
   });
 
   it('asks the store again, with every page, whether a subject is still admitted', async () => {
@@ -402,14 +475,19 @@ describe('durable-meta session plan', () => {
       q(lifecycle, `${DKG_NS}note`, '"published"'),
       ...descriptor,
     ];
-    const superseded = async (change: (store: OxigraphStore) => Promise<void>): Promise<string> => {
+    /** The failure of reading the one planned subject `subject` after `change`. */
+    const superseded = async (subject: string, change: (store: OxigraphStore) => Promise<void>): Promise<string> => {
       const store = new OxigraphStore();
       await store.insert(seed);
       const plan = await buildDurableMetaPlan({ store, contextGraphId: cgId, registeredSubGraphNames: [], budgetKey: 'recheck' });
       expect(plan.totalRows).toBe(seed.length);
       expect(await readDurableMetaPlanWindow(store, plan, 0, plan.totalRows)).toHaveLength(seed.length);
       await change(store);
-      const failure = await readDurableMetaPlanWindow(store, plan, 0, plan.totalRows).catch((error: unknown) => error);
+      // A window of that subject alone, so no other subject's change can end it.
+      const index = plan.subjects.findIndex((entry) => entry.subject === subject);
+      expect(index).toBeGreaterThanOrEqual(0);
+      const failure = await readDurableMetaPlanWindow(store, plan, plan.rowsBefore[index]!, 1)
+        .catch((error: unknown) => error);
       await store.close();
       expect(failure).toBeInstanceOf(Error);
       expect((failure as Error).message).toMatch(/sync session superseded/i);
@@ -419,21 +497,22 @@ describe('durable-meta session plan', () => {
     // A subject rewritten in place with as many rows as it had, none of which
     // was ever admitted: working-memory content is not served on the strength
     // of the plan.
-    expect(await superseded(async (store) => {
+    expect(await superseded(lifecycle, async (store) => {
       await store.deleteByPattern({ graph, subject: lifecycle });
       await store.insert([q(lifecycle, `${DKG_NS}memoryLayer`, WM), q(lifecycle, `${DKG_NS}note`, '"local draft"')]);
     })).toContain(`subject ${lifecycle}: expected 2 rows, found 0`);
 
     // A descriptor that is no longer confirmed, with the same number of rows.
-    expect(await superseded(async (store) => {
+    expect(await superseded(descriptor[0]!.subject, async (store) => {
       await store.deleteByPattern({ graph, subject: descriptor[0]!.subject, predicate: `${DKG_NS}status` });
       await store.insert([q(descriptor[0]!.subject, `${DKG_NS}status`, '"tentative"')]);
-    })).toContain(`expected ${DESCRIPTOR_ROWS} rows, found 0`);
+    })).toContain(`subject ${descriptor[0]!.subject}: expected ${DESCRIPTOR_ROWS} rows, found 0`);
 
-    // A subject whose own rows did not change, but whose admission did.
-    expect(await superseded(async (store) => {
+    // A subject whose own row did not change, but whose admission did: the
+    // delegation of an agent that was revoked after the plan.
+    expect(await superseded(delegation, async (store) => {
       await store.insert([q(cgEntity, DKG_ONTOLOGY.DKG_REVOKED_AGENT, '"0xMEMBER"')]);
-    })).toMatch(/expected \d+ rows, found \d+/);
+    })).toContain(`subject ${delegation}: expected 1 rows, found 0`);
   });
 
   it('rebuilds the plan for a new session even when that session never spent its refresh', async () => {

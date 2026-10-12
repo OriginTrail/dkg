@@ -63,14 +63,17 @@ export function durableMetaJoinRequestExclusionExpression(): string {
  * Every test here is an exact lookup from `?s`, so its cost follows the number
  * of subjects it is asked about. The one admission rule that is not such a
  * lookup, a subject named by a promoted assertion, is decided in process with
- * {@link createAssertionNameMatcher} from the names
- * {@link durableMetaAssertionNamesQuery} reads.
+ * {@link createAssertionNameMatcher} from the lifecycle records
+ * {@link durableMetaPromotedAssertionsQuery} reads, and asked again per subject
+ * by {@link durableMetaNamedSubjectRowsQuery}.
  *
- * INVARIANT: this expression together with the name matcher is the twin of the
+ * INVARIANT: this expression together with the name rule is the twin of the
  * in-process admission applied to a session snapshot
  * (`filterDurableMetaSnapshotRows`). The two MUST admit the same subjects and
  * MUST be edited together; the oversized-fallback suite compares them branch by
- * branch.
+ * branch. One deliberate difference: here a name admits a subject only when a
+ * lifecycle record with an IRI carries it, because that record is what a page
+ * read asks again. Conforming writers emit no other kind.
  */
 export function durableMetaSubjectAdmissionExpression(
   contextGraphId: string,
@@ -106,25 +109,19 @@ export function durableMetaSubjectAdmissionExpression(
       )`;
 }
 
-/** The lexical value of a metadata literal term as the admission rules read it. */
-export function durableMetaLiteralValue(value: string | undefined): string {
-  if (!value) return '';
-  const match = value.match(/^"((?:[^"\\]|\\.)*)"(?:@[\w-]+|\^\^<[^>]+>)?$/);
-  return match ? match[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\') : value;
-}
-
 /** Marks the subjects the assertion-name rule can admit. */
 export const DURABLE_META_ASSERTION_SUBJECT_MARKER = '/assertion/';
 
 /**
- * The names of the assertions of `graph` that left working memory, one row a
- * distinct name (`?name`), at most `limit` rows. One pass over the lifecycle
- * records that carry a name.
+ * The assertions of `graph` that left working memory: one row per lifecycle
+ * record with an IRI and a name (`?lifecycle`, `?name`), at most `limit` rows.
+ * One pass over the lifecycle records that carry a name.
  */
-export function durableMetaAssertionNamesQuery(graph: string, limit: number): string {
+export function durableMetaPromotedAssertionsQuery(graph: string, limit: number): string {
   return `
-    SELECT DISTINCT ?name WHERE {
-      GRAPH <${assertSafeIri(graph)}> { ?anLifecycle <${DKG_ASSERTION_NAME}> ?an ; <${DKG_MEMORY_LAYER}> ?ml }
+    SELECT ?lifecycle ?name WHERE {
+      GRAPH <${assertSafeIri(graph)}> { ?lifecycle <${DKG_ASSERTION_NAME}> ?an ; <${DKG_MEMORY_LAYER}> ?ml }
+      FILTER(isIRI(?lifecycle))
       FILTER(?ml != ${sparqlString(MemoryLayer.WorkingMemory)})
       BIND(STR(?an) AS ?name)
       FILTER(?name != "")
@@ -134,12 +131,47 @@ export function durableMetaAssertionNamesQuery(graph: string, limit: number): st
 }
 
 /**
- * The assertion-name rule: a subject under an assertion path whose path ends
- * with `/<name>` for the name of an assertion that left working memory. Names
- * are indexed by their last path segment, so a subject is compared with the
- * few names that share its last segment and not with every name.
+ * The rows (`?s ?p ?o`) of the subjects, among pairs of a subject and the
+ * lifecycle record that named it, that the record still names: it still
+ * carries a name the subject's path ends with and has not gone back to working
+ * memory.
+ *
+ * One group on purpose: the pairs, the record's two rows and the subject's
+ * rows. With the record test in a sub-select of its own, a store may read the
+ * subjects' rows without the pairs; measured on a managed Oxigraph that made
+ * this read grow with the graph, while this form stays an exact lookup per
+ * pair. DISTINCT, because a record with two names or two layers would
+ * otherwise repeat the subject's rows.
  */
-export function createAssertionNameMatcher(names: Iterable<string>): (subject: string) => boolean {
+export function durableMetaNamedSubjectRowsQuery(
+  graph: string,
+  pairs: ReadonlyArray<readonly [subject: string, lifecycle: string]>,
+): string {
+  const values = pairs
+    .map(([subject, lifecycle]) => `(<${assertSafeIri(subject)}> <${assertSafeIri(lifecycle)}>)`)
+    .join(' ');
+  return `
+      SELECT DISTINCT ?s ?p ?o WHERE {
+        VALUES (?s ?lifecycle) { ${values} }
+        GRAPH <${assertSafeIri(graph)}> {
+          ?lifecycle <${DKG_ASSERTION_NAME}> ?an ; <${DKG_MEMORY_LAYER}> ?ml .
+          ?s ?p ?o
+        }
+        FILTER(?ml != ${sparqlString(MemoryLayer.WorkingMemory)})
+        FILTER(STR(?an) != "")
+        FILTER(STRENDS(STR(?s), CONCAT("/", STR(?an))))
+      }
+    `;
+}
+
+/**
+ * The assertion-name rule: a subject under an assertion path whose path ends
+ * with `/<name>` for the name of an assertion that left working memory; the
+ * matcher returns that name. Names are indexed by their last path segment, so
+ * a subject is compared with the few names that share its last segment and
+ * not with every name.
+ */
+export function createAssertionNameMatcher(names: Iterable<string>): (subject: string) => string | undefined {
   const namesByTail = new Map<string, string[]>();
   for (const name of names) {
     if (!name) continue;
@@ -149,8 +181,8 @@ export function createAssertionNameMatcher(names: Iterable<string>): (subject: s
     else namesByTail.set(tail, [name]);
   }
   return (subject) => {
-    if (!subject.includes(DURABLE_META_ASSERTION_SUBJECT_MARKER)) return false;
+    if (!subject.includes(DURABLE_META_ASSERTION_SUBJECT_MARKER)) return undefined;
     const tail = subject.slice(subject.lastIndexOf('/') + 1);
-    return (namesByTail.get(tail) ?? []).some((name) => subject.endsWith(`/${name}`));
+    return namesByTail.get(tail)?.find((name) => subject.endsWith(`/${name}`));
   };
 }

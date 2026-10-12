@@ -3,11 +3,12 @@ import { assertSafeIri, compareCodePoint, contextGraphMetaGraphUri } from '@orig
 import { StoreResponseTooLargeError, type QueryOptions, type TripleStore } from '@origintrail-official/dkg-storage';
 import { estimateStringRowHeapBytes } from '../memory-telemetry.js';
 import { isIriTerm } from '../iri-term.js';
+import { stripMetadataLiteral } from '../metadata-literal.js';
 import {
   createAssertionNameMatcher,
-  durableMetaAssertionNamesQuery,
   durableMetaJoinRequestExclusionExpression,
-  durableMetaLiteralValue,
+  durableMetaNamedSubjectRowsQuery,
+  durableMetaPromotedAssertionsQuery,
   durableMetaSubjectAdmissionExpression,
   DURABLE_META_ASSERTION_SUBJECT_MARKER,
 } from './durable-meta-admission.js';
@@ -48,10 +49,11 @@ export interface DurableMetaPlanSubject {
   readonly subject: string;
   readonly rowCount: number;
   /**
-   * Admitted only because a promoted assertion names it. Nothing in its own
-   * rows decides that, so a page reads it without asking the store again.
+   * Set when the subject is admitted only because a promoted assertion names
+   * it: the lifecycle record of that assertion. A page read asks that record
+   * again, as it asks the store-side admission for every other subject.
    */
-  readonly byAssertionName?: true;
+  readonly namedBy?: string;
 }
 
 /**
@@ -69,7 +71,8 @@ export interface DurableMetaPlanSubject {
  * The plan decides which subjects a session walks. It does not decide that
  * their rows may be served: a page asks the store for the rows of its subjects
  * that are admitted at that moment, in the query that reads them, so rows
- * written after the plan are never served on the strength of the plan.
+ * written after the plan are never served on the strength of the plan. That
+ * holds for every subject, whichever rule admitted it.
  */
 export interface DurableMetaPlan {
   readonly graph: string;
@@ -142,10 +145,10 @@ async function queryPlanBindings(
 /**
  * Build the plan with unsorted reads of the metadata graph: a bounded row
  * count, then one row per admitted subject with its row count. Admission is
- * evaluated in the store, once per subject, by exact lookups. Only when the
- * graph holds promoted assertions are their names read as well, with one more
- * pass for the subjects under an assertion path, which are matched against the
- * names in process.
+ * evaluated in the store, once per subject, by exact lookups. The lifecycle
+ * records of promoted assertions are read as well; only when there is one does
+ * one more pass read the subjects under an assertion path, which are matched
+ * against the names in process.
  */
 export async function buildDurableMetaPlan(params: {
   store: TripleStore;
@@ -216,40 +219,48 @@ export async function buildDurableMetaPlan(params: {
   const planned = new Set<string>();
   let blankNodeRows = 0;
   let bytesEstimate = 0;
-  const admit = (subject: string, rowCount: number, byAssertionName: boolean) => {
+  const admit = (subject: string, rowCount: number, namedBy?: string) => {
     if (rowCount > limits.subjectMaxRows) throw refuse('snapshot_rows', rowCount, limits.subjectMaxRows);
     planned.add(subject);
-    subjects.push(byAssertionName ? { subject, rowCount, byAssertionName } : { subject, rowCount });
-    bytesEstimate += estimateStringRowHeapBytes(subject, '', '', '');
+    subjects.push(namedBy === undefined ? { subject, rowCount } : { subject, rowCount, namedBy });
+    bytesEstimate += estimateStringRowHeapBytes(subject, namedBy ?? '', '', '');
   };
   for (const group of await readGroups(admissionExpression, 'sync.responder.readDurableMetaPlanSubjects')) {
     const subject = group['s'];
     const rowCount = sparqlInteger(group['count']);
     if (!subject || rowCount === 0) continue;
-    if (isIriTerm(subject)) admit(subject, rowCount, false);
+    if (isIriTerm(subject)) admit(subject, rowCount);
     else blankNodeRows += rowCount;
   }
   if (blankNodeRows > limits.subjectMaxRows) throw refuse('snapshot_rows', blankNodeRows, limits.subjectMaxRows);
 
   // The assertion-name rule. Its inputs are read once each and matched here:
-  // the names of the assertions that left working memory, and the subjects
-  // under an assertion path. A graph without such a name skips the second pass.
-  const names = await queryPlanBindings(
+  // the lifecycle records of the assertions that left working memory, and the
+  // subjects under an assertion path. A graph without such a record skips the
+  // second pass.
+  const promoted = await queryPlanBindings(
     store,
-    durableMetaAssertionNamesQuery(graph, limits.maxSubjects + 1),
+    durableMetaPromotedAssertionsQuery(graph, limits.maxSubjects + 1),
     'sync.responder.readDurableMetaPlanAssertionNames',
     budgetKey,
     signal,
   );
-  if (names.length > limits.maxSubjects) throw refuse('snapshot_rows', names.length, limits.maxSubjects);
-  if (names.length > 0) {
-    const namedByAssertion = createAssertionNameMatcher(names.map((row) => durableMetaLiteralValue(row['name'])));
+  if (promoted.length > limits.maxSubjects) throw refuse('snapshot_rows', promoted.length, limits.maxSubjects);
+  const lifecycleOfName = new Map<string, string>();
+  for (const row of promoted) {
+    const lifecycle = row['lifecycle'];
+    const name = stripMetadataLiteral(row['name']);
+    if (lifecycle && isIriTerm(lifecycle) && name && !lifecycleOfName.has(name)) lifecycleOfName.set(name, lifecycle);
+  }
+  if (lifecycleOfName.size > 0) {
+    const nameOf = createAssertionNameMatcher(lifecycleOfName.keys());
     const underAssertionPath = `(isIRI(?s) && CONTAINS(STR(?s), "${DURABLE_META_ASSERTION_SUBJECT_MARKER}"))`;
     for (const group of await readGroups(underAssertionPath, 'sync.responder.readDurableMetaPlanAssertionSubjects')) {
       const subject = group['s'];
       const rowCount = sparqlInteger(group['count']);
-      if (!subject || rowCount === 0 || planned.has(subject) || !namedByAssertion(subject)) continue;
-      admit(subject, rowCount, true);
+      if (!subject || rowCount === 0 || planned.has(subject)) continue;
+      const name = nameOf(subject);
+      if (name !== undefined) admit(subject, rowCount, lifecycleOfName.get(name));
     }
     if (subjects.length > limits.maxSubjects) throw refuse('snapshot_rows', subjects.length, limits.maxSubjects);
   }
@@ -296,8 +307,8 @@ function subjectIndexAt(rowsBefore: readonly number[], offset: number): number {
  * The same query decides admission again, once per subject, before it reads
  * the rows: a subject that is no longer admitted comes back without rows. Its
  * row count then differs from the plan and ends the session, exactly as a
- * subject that changed size does. A subject the assertion-name rule admitted
- * is read as it is; that rule does not look at the subject's own rows.
+ * subject that changed size does. For a subject a promoted assertion names,
+ * the question is put to the lifecycle record that named it.
  */
 async function readPlanSubjectRows(
   store: TripleStore,
@@ -306,21 +317,13 @@ async function readPlanSubjectRows(
   signal: AbortSignal | undefined,
 ): Promise<SyncRow[]> {
   const bySubject = new Map<string, SyncRow[]>();
-  const read = async (group: readonly DurableMetaPlanSubject[], admitted: boolean) => {
+  const read = async (
+    group: readonly DurableMetaPlanSubject[],
+    rowsOfAdmitted: (chunk: readonly DurableMetaPlanSubject[]) => string,
+  ) => {
     for (let offset = 0; offset < group.length; offset += DURABLE_META_PLAN_SUBJECT_CHUNK) {
-      const values = group
-        .slice(offset, offset + DURABLE_META_PLAN_SUBJECT_CHUNK)
-        .map((entry) => `<${assertSafeIri(entry.subject)}>`)
-        .join(' ');
-      const selected = admitted
-        ? `VALUES ?s { ${values} }`
-        : `{ SELECT ?s WHERE { VALUES ?g { <${plan.graph}> } VALUES ?s { ${values} } FILTER${plan.admissionExpression} } }`;
-      const result = await store.query(`
-      SELECT ?s ?p ?o WHERE {
-        ${selected}
-        GRAPH <${plan.graph}> { ?s ?p ?o }
-      }
-    `, {
+      const chunk = group.slice(offset, offset + DURABLE_META_PLAN_SUBJECT_CHUNK);
+      const result = await store.query(rowsOfAdmitted(chunk), {
         ...storeOptions(signal, 'sync.responder.readDurableMetaPlanSubjectRows'),
         maxResponseBytes: snapshotResponseByteLimit(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE),
       });
@@ -336,8 +339,18 @@ async function readPlanSubjectRows(
       }
     }
   };
-  await read(subjects.filter((entry) => !entry.byAssertionName), false);
-  await read(subjects.filter((entry) => entry.byAssertionName), true);
+  await read(subjects.filter((entry) => entry.namedBy === undefined), (chunk) => `
+      SELECT ?s ?p ?o WHERE {
+        { SELECT ?s WHERE {
+          VALUES ?g { <${plan.graph}> }
+          VALUES ?s { ${chunk.map((entry) => `<${assertSafeIri(entry.subject)}>`).join(' ')} }
+          FILTER${plan.admissionExpression}
+        } }
+        GRAPH <${plan.graph}> { ?s ?p ?o }
+      }
+    `);
+  await read(subjects.filter((entry) => entry.namedBy !== undefined), (chunk) =>
+    durableMetaNamedSubjectRowsQuery(plan.graph, chunk.map((entry) => [entry.subject, entry.namedBy!] as const)));
   const rows: SyncRow[] = [];
   for (const entry of subjects) {
     const subjectRows = bySubject.get(entry.subject) ?? [];
