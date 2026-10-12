@@ -22,6 +22,7 @@ import {
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { createResolveCurrentWorkspaceGossipPayload } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/index.js';
+import { GOSSIP_ENVELOPE_SIGNING_BUDGET_MS, localGossipSigner, signGossipEnvelopeInTime } from '../src/external-author-signing.js';
 import { HARDHAT_KEYS } from '../../chain/test/hardhat-harness.js';
 import { startFakeRemoteSigner, type FakeSigner } from '../../chain/test/helpers/fake-remote-signer.js';
 
@@ -146,6 +147,52 @@ describe('shared-memory writes signed by an external author key', () => {
     expect(await storedValues(agent)).toEqual(['"1"']);
     expect(sent).toHaveLength(2);
     expect(signedEnvelope(sent[1]!).request.shareOperationId).toBe(shareOperationId);
+  });
+
+  it('stores nothing when its envelope is signed too late for peers to accept it', async () => {
+    const { agent, sent } = await keylessWriter();
+    await agent.share(CG, item('0'));
+    const fannedOut = sent.length;
+
+    // The author key signs once released, six minutes after the envelope's timestamp.
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    const signMessage = vi.fn(async (message: Uint8Array) => {
+      await released;
+      return author.signMessage(message);
+    });
+    vi.spyOn(agent, 'resolveWorkspaceGossipSigningAgent').mockResolvedValue({ agentAddress: author.address, signMessage });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const writing = agent.share(CG, item('1'));
+      await vi.waitFor(() => expect(signMessage).toHaveBeenCalledOnce());
+      vi.setSystemTime(Date.now() + 6 * 60_000);
+      release();
+      await expect(writing).rejects.toMatchObject({ code: 'REMOTE_SIGNER_TIMEOUT' });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(signMessage).toHaveBeenCalledOnce();
+    expect(await storedValues(agent)).toEqual(['"0"']);
+    expect(sent).toHaveLength(fannedOut);
+  });
+
+  it('waits for a gossip envelope signature only until its budget runs out, and leaves no timer behind', async () => {
+    vi.useFakeTimers();
+    try {
+      const never = { agentAddress: author.address, signMessage: () => new Promise<string>(() => {}) };
+      const refused = expect(signGossipEnvelopeInTime(never, new Uint8Array([1]), new Date().toISOString()))
+        .rejects.toMatchObject({ code: 'REMOTE_SIGNER_TIMEOUT' });
+      await vi.advanceTimersByTimeAsync(GOSSIP_ENVELOPE_SIGNING_BUDGET_MS);
+      await refused;
+      expect(vi.getTimerCount()).toBe(0);
+
+      const signed = await signGossipEnvelopeInTime(localGossipSigner(author.address, author.privateKey), new Uint8Array([1]), new Date().toISOString());
+      expect(ethers.verifyMessage(new Uint8Array([1]), signed)).toBe(author.address);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('fans out exactly the envelope it signed before the write committed', async () => {

@@ -9,7 +9,8 @@
  * for it) whose author attestations the node requests from the signer.
  */
 import { ethers } from 'ethers';
-import { operationalSigningOf, type AuthorSigner, type ChainAdapter, type ExternalAuthorSigners } from '@origintrail-official/dkg-chain';
+import { RemoteSignerError, operationalSigningOf, type AuthorSigner, type ChainAdapter, type ExternalAuthorSigners } from '@origintrail-official/dkg-chain';
+import { GOSSIP_ENVELOPE_FRESHNESS_MS } from '@origintrail-official/dkg-core';
 import type { AgentKeyRecord } from './agent-keystore.js';
 import { agentKeyWallet, externalAuthorSignerFor } from './author-signer.js';
 
@@ -49,6 +50,52 @@ export interface WorkspaceGossipSigner {
 export function localGossipSigner(agentAddress: string, privateKey: string): WorkspaceGossipSigner {
   const wallet = agentKeyWallet(privateKey);
   return { agentAddress, signMessage: (message) => wallet.signMessage(message) };
+}
+
+/**
+ * How long the signature of a gossip envelope may take after the timestamp it
+ * signs. Receivers refuse an envelope whose timestamp is more than
+ * `GOSSIP_ENVELOPE_FRESHNESS_MS` (300 s) off their clock: the curator that
+ * confirms a write before it commits, and the peers it fans out to after. Half
+ * of that window (150 s) for the signature leaves the other half for the
+ * curator's applied-ack (5 s by default), the commit, the fan-out and the clock
+ * skew between nodes.
+ */
+export const GOSSIP_ENVELOPE_SIGNING_BUDGET_MS = GOSSIP_ENVELOPE_FRESHNESS_MS / 2;
+
+/**
+ * `signer`'s signature over the signing payload of a gossip envelope stamped
+ * `timestamp`, asked for once and awaited at most until
+ * {@link GOSSIP_ENVELOPE_SIGNING_BUDGET_MS} after that timestamp; a later one
+ * is refused as `REMOTE_SIGNER_TIMEOUT`. A share prepares its envelope before it
+ * commits, so the write then fails with nothing stored instead of committing an
+ * envelope its peers would refuse; after a commit (a promote's fan-out) only the
+ * fan-out fails.
+ */
+export async function signGossipEnvelopeInTime(
+  signer: WorkspaceGossipSigner,
+  signingPayload: Uint8Array,
+  timestamp: string,
+): Promise<string> {
+  const deadline = Date.parse(timestamp) + GOSSIP_ENVELOPE_SIGNING_BUDGET_MS;
+  const late = () => new RemoteSignerError(
+    'REMOTE_SIGNER_TIMEOUT',
+    `The signature of a gossip envelope took longer than ${GOSSIP_ENVELOPE_SIGNING_BUDGET_MS / 1000} s; ` +
+      `peers refuse envelopes more than ${GOSSIP_ENVELOPE_FRESHNESS_MS / 1000} s old`,
+  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const signature = await Promise.race([
+      signer.signMessage(signingPayload),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(late()), Math.max(0, deadline - Date.now()));
+      }),
+    ]);
+    if (Date.now() > deadline) throw late();
+    return signature;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**

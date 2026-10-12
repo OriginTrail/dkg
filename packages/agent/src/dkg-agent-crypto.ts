@@ -263,7 +263,7 @@ import {
   type KeystoreEntry,
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
-import { externalAuthorGossipSigner, localGossipSigner, type WorkspaceGossipSigner } from './external-author-signing.js';
+import { externalAuthorGossipSigner, localGossipSigner, signGossipEnvelopeInTime, type WorkspaceGossipSigner } from './external-author-signing.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
@@ -3768,7 +3768,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       timestamp,
       payload,
     );
-    const signature = await signer.signMessage(signingPayload);
+    const signature = await signGossipEnvelopeInTime(signer, signingPayload, timestamp);
     return encodeGossipEnvelope({
       version: GOSSIP_ENVELOPE_VERSION,
       type: GOSSIP_TYPE_WORKSPACE_PUBLISH,
