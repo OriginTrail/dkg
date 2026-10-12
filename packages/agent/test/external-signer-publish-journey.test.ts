@@ -191,6 +191,10 @@ describe('publish journey of a node that signs through an external signer', () =
     const hostStore = new SwmHostModeStore({ dataDir: hostModeDir, ...SwmHostModeStore.defaultLimits() });
     await hostStore.init();
     (core as unknown as { swmHostModeStore?: SwmHostModeStore }).swmHostModeStore = hostStore;
+    // The core admits plaintext only once it reads the graph's open policy on
+    // chain; until then it drops shares (fail-closed) and catch-up heals them.
+    const policyDeadline = Date.now() + 20_000;
+    while (!(await core.isConfirmedPublicForHostMode(OPEN_CG)) && Date.now() < policyDeadline) await sleep(250);
     await core.ingestSwmHostModeEnvelope(OPEN_CG, envelopes[0], edge.peerId);
     expect((await hostStore.iterate(OPEN_CG, 0)).map((entry) => ethers.hexlify(entry.envelopeBytes))).toEqual([ethers.hexlify(envelopes[0])]);
     const replayed = await core.query(`SELECT ?name WHERE { <${OPEN_ENTITY}> <http://schema.org/name> ?name }`, {
