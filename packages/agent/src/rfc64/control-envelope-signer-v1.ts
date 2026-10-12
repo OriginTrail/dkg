@@ -5,12 +5,14 @@ import type {
   UnsignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import {
+  isExternalEvmSigner,
   verifyControlEnvelopeIssuerSignatureV1,
   type AuthorSigner,
   type VerifiedControlEnvelopeIssuerSignatureV1,
 } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import { raceRfc64AgainstAbortV1 } from './abort-v1.js';
+import { signRfc64ControlObjectExternallyV1, signingRfc64ControlObjectV1 } from './external-author-control-signing-v1.js';
 
 /** EOA signer shared by RFC-64 control-object producers. */
 export interface Rfc64ControlEnvelopeEip191SignerV1 {
@@ -22,9 +24,11 @@ export interface Rfc64ControlEnvelopeEip191SignerV1 {
  * An author's key as the EIP-191 signer of the RFC-64 control objects it
  * issues (a context graph's replica authority seed, an author's shared-memory
  * inventory and catalog), whichever holds it: the node or an external signer
- * (see `heldAuthorSigner`). A key that is not `issuer`'s is refused before it
- * signs, the request is abandoned when `signal` aborts, and the signature
- * must recover to `issuer`.
+ * (see `heldAuthorSigner`). An external signer is shown the control object
+ * being signed (see `signRfc64ControlObjectExternallyV1`); a key on the node
+ * signs the digest. A key that is not `issuer`'s is refused before it signs,
+ * the request is abandoned when `signal` aborts, and the signature must
+ * recover to `issuer`.
  */
 export function rfc64AuthorDigestSignerV1(
   issuer: string,
@@ -35,7 +39,9 @@ export function rfc64AuthorDigestSignerV1(
     if (author.address.toLowerCase() !== issuer.toLowerCase()) {
       throw new Error(`RFC-64: the signing key does not belong to author ${issuer}`);
     }
-    const signature = await raceRfc64AgainstAbortV1(() => author.signMessage(objectDigest), signal);
+    const signature = await raceRfc64AgainstAbortV1(() => (
+      isExternalEvmSigner(author) ? signRfc64ControlObjectExternallyV1(author, objectDigest) : author.signMessage(objectDigest)
+    ), signal);
     if (ethers.verifyMessage(objectDigest, signature).toLowerCase() !== issuer.toLowerCase()) {
       throw new Error(`RFC-64: the signature does not recover to author ${issuer}`);
     }
@@ -90,7 +96,10 @@ export async function signAndVerifyRfc64ControlEnvelopeV1(
 ): Promise<SignedAndVerifiedRfc64ControlEnvelopeV1> {
   let signature: string;
   try {
-    signature = await signer.signDigest(ethers.getBytes(objectDigest));
+    signature = await signingRfc64ControlObjectV1(
+      unsigned,
+      () => signer.signDigest(ethers.getBytes(objectDigest)),
+    );
   } catch (cause) {
     throw new Rfc64ControlEnvelopeSigningErrorV1(
       'callback',

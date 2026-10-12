@@ -306,6 +306,7 @@ const blockedRfc64Modules = [
   'catalog-transport-authorization-v1.js',
   'catalog-transport-wire-v1-internal.js',
   'control-envelope-signer-v1.js',
+  'external-author-control-signing-v1.js',
   'unregistered-replica-authority-v1.js',
   'unregistered-authority-seed-store-v1.js',
   'unregistered-authority-transport-v1.js',

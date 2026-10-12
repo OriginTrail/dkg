@@ -8,9 +8,9 @@
  * would scope them: each credential maps to its own key set. The server signs
  * exactly what it is asked to sign (it never fills nonce, gas or fees) and
  * records every request so tests can assert on what the node sent. It also
- * serves the optional `dkg_signSyncRequest` method of the `eth` dialect with a
- * strict, independently written validator (list it in `unsupported` to stand
- * in for a signer without it).
+ * serves the optional `dkg_signSyncRequest` and `dkg_signControlObject`
+ * methods of the `eth` dialect with strict, independently written validators
+ * (list one in `unsupported` to stand in for a signer without it).
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
@@ -237,6 +237,51 @@ function syncRequestDigest(value: unknown): Uint8Array {
   return ethers.getBytes(ethers.solidityPackedKeccak256(types, values));
 }
 
+const CONTROL_OBJECT_DOMAIN = 'dkg-control-object-v1\n';
+const CONTROL_OBJECT_TYPES = new Set([
+  'SwmAuthorInventoryHeadV1', 'AuthorCatalogHeadV1', 'AuthorCatalogBucketV1', 'AuthorCatalogDirectoryNodeV1',
+  'AuthorCatalogIssuerDelegationV1', 'ContextGraphPolicyV1', 'MemberRosterV1',
+]);
+
+/** JSON text with sorted object keys and no whitespace (canonical for these objects). */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (typeof value === 'object' && value !== null) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/**
+ * A strict validator for `dkg_signControlObject`, written from the documented
+ * layout with ethers primitives only: the canonical unsigned object must be an
+ * allowed object type issued by the signing account, and the digest is
+ * recomputed here. Returns the 32 digest bytes to sign with EIP-191.
+ */
+function controlObjectDigest(value: unknown, account: string): Uint8Array {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw invalidParams('the request must be an object');
+  const request = value as Record<string, unknown>;
+  if (Object.keys(request).sort().join() !== 'domain,envelope') throw invalidParams('expected exactly domain and envelope');
+  if (request.domain !== CONTROL_OBJECT_DOMAIN) throw invalidParams('bad domain');
+  if (typeof request.envelope !== 'string' || request.envelope.length > 1_048_576) throw invalidParams('bad envelope');
+  let envelope: Record<string, unknown>;
+  try {
+    envelope = JSON.parse(request.envelope) as Record<string, unknown>;
+  } catch {
+    throw invalidParams('the envelope is not JSON');
+  }
+  // Re-serializing must give the same text: no duplicate keys, no other spelling.
+  if (canonicalJson(envelope) !== request.envelope) throw invalidParams('the envelope is not canonical');
+  if (Object.keys(envelope).sort().join() !== 'issuer,objectType,payload,signatureEvidence,signatureSuite') {
+    throw invalidParams('unexpected envelope fields');
+  }
+  if (!CONTROL_OBJECT_TYPES.has(String(envelope.objectType))) throw invalidParams('object type not allowed');
+  if (envelope.issuer !== account.toLowerCase()) throw invalidParams('the issuer is not the signing account');
+  if (envelope.signatureSuite !== 'eip191-personal-sign-digest-v1') throw invalidParams('bad signature suite');
+  if (canonicalJson(envelope.signatureEvidence) !== '{"kind":"none"}') throw invalidParams('bad signature evidence');
+  return ethers.getBytes(ethers.sha256(ethers.toUtf8Bytes(CONTROL_OBJECT_DOMAIN + request.envelope)));
+}
+
 function send(res: ServerResponse, status: number, payload: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json' });
   res.end(JSON.stringify(payload));
@@ -314,6 +359,10 @@ async function answer(
     case 'eth:dkg_signSyncRequest': {
       const wallet = byAddress(params[0]);
       return { result: await wallet.signMessage(syncRequestDigest(params[1])), wallet };
+    }
+    case 'eth:dkg_signControlObject': {
+      const wallet = byAddress(params[0]);
+      return { result: await wallet.signMessage(controlObjectDigest(params[1], wallet.address)), wallet };
     }
     case 'eth:personal_sign': {
       const wallet = byAddress(params[1]);

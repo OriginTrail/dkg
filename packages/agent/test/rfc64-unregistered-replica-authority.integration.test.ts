@@ -203,11 +203,12 @@ describe('RFC-64 unregistered replica authority', () => {
     expect(fake.requests).toHaveLength(requestsBefore);
     await expect(publisher.contextGraphExists(`${owner}/mismatched-caller`)).resolves.toBe(false);
 
-    // The owner's own request looks its author key up and has the signer sign the seed.
+    // The owner's own request looks its author key up and has the signer sign
+    // the seed, which it is shown as the graph's policy object.
     await publisher.createContextGraph({ id: `${owner}/owner-request`, name: 'Owner request', accessPolicy: 0 });
     expect(lookups.some((lookup) => lookup.mock.calls.length > 0)).toBe(true);
-    const signed = fake.requests.slice(requestsBefore).filter((request) => request.method === 'eth_sign');
-    expect(signed).toHaveLength(1);
+    const signed = fake.requests.slice(requestsBefore).filter((request) => /sign/i.test(request.method));
+    expect(signed.map((request) => request.method)).toEqual(['dkg_signControlObject']);
     expect(signed[0]!.authorization).toBe(`Bearer ${EXTERNAL_AUTHOR_TOKEN}`);
     await expect(publisher.contextGraphExists(`${owner}/owner-request`)).resolves.toBe(true);
   });
