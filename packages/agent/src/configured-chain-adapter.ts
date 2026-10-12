@@ -7,6 +7,7 @@ import {
 import { operationalSignerSourceOf } from './agent-chain-signer-source.js';
 import type { DKGAgentConfig } from './dkg-agent-types.js';
 import { signsThroughExternalSigner } from './external-author-signing.js';
+import { adapterOperationalPrivateKey } from './dkg-agent-helpers.js';
 
 type ChainAdapterConstructionConfig = Pick<
   DKGAgentConfig,
@@ -97,17 +98,4 @@ export function constructConfiguredChainAdapter(
     return { chain, operationalKeys: external ? undefined : operationalKeys };
   }
   return { chain: new NoChainAdapter(), operationalKeys };
-}
-
-/** An injected adapter's local operational key, if it exposes one. */
-function adapterOperationalPrivateKey(chain: ChainAdapter): string | undefined {
-  const getter = (chain as { getOperationalPrivateKey?: () => unknown }).getOperationalPrivateKey;
-  if (typeof getter !== 'function') return undefined;
-  try {
-    const key = getter.call(chain);
-    return typeof key === 'string' && key.length > 0 ? key : undefined;
-  } catch {
-    // An adapter that signs through an external signer has no key to expose.
-    return undefined;
-  }
 }

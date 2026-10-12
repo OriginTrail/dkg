@@ -37,6 +37,7 @@ import { DKGAgent } from '../src/dkg-agent.js';
 import { agentFromPrivateKey, registerSelfSovereignAgent } from '../src/agent-keystore.js';
 import { constructConfiguredChainAdapter } from '../src/configured-chain-adapter.js';
 import { operationalSignerSourceOf } from '../src/agent-chain-signer-source.js';
+import { adapterOperationalPrivateKey, adapterOperationalPrivateKeyAddress } from '../src/dkg-agent-helpers.js';
 import {
   externalAuthorGossipSigner,
   externalSignerAgentPublicKey,
@@ -903,6 +904,21 @@ describe('external signer author keys', () => {
     // Untyped callers that name both are refused.
     expect(() => operationalSignerSourceOf({ operationalKeys: [primary], signers: remote.operational }))
       .toThrow(/either operationalKeys or signers/);
+  });
+
+  it('reads an adapter\'s operational key in one place, for its construction and its publisher address alike', () => {
+    const adapterWith = (getOperationalPrivateKey?: () => unknown) =>
+      (getOperationalPrivateKey === undefined ? {} : { getOperationalPrivateKey }) as Parameters<typeof adapterOperationalPrivateKey>[0];
+    const key = HARDHAT_KEYS.CORE_OP;
+    expect(adapterOperationalPrivateKey(adapterWith(() => key))).toBe(key);
+    expect(adapterOperationalPrivateKeyAddress(adapterWith(() => key))).toBe(new ethers.Wallet(key).address);
+    // No getter, one that throws (an adapter that signs externally), or no key: no key and no address.
+    for (const getter of [undefined, () => { throw new Error('signs through an external signer'); }, () => '', () => 7]) {
+      expect(adapterOperationalPrivateKey(adapterWith(getter))).toBeUndefined();
+      expect(adapterOperationalPrivateKeyAddress(adapterWith(getter))).toBeUndefined();
+    }
+    // A key that is not one has no address.
+    expect(adapterOperationalPrivateKeyAddress(adapterWith(() => '0x1234'))).toBeUndefined();
   });
 
   it('builds the agent adapter from external signers on edge nodes only', async () => {
