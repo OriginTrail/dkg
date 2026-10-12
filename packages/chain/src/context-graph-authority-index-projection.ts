@@ -373,10 +373,13 @@ export interface ContextGraphAuthorityIndexProjectionReadInput<T> {
    * An explicitly opted-in incomplete projection may be served only when a
    * fresh external finality read proves it still covers the selected block.
    * This is used for absent name bindings; elapsed time alone cannot prove a
-   * graph has not been registered since the projection was built.
+   * graph has not been registered since the projection was built. `withinTick`
+   * says whether the projection is still inside the tick it answers complete
+   * reads for, for a reader whose contract accepts that much.
    */
   readonly validateIncomplete?: (
     projection: ContextGraphAuthorityIndexProjection,
+    served: Readonly<{ withinTick: boolean }>,
   ) => Promise<boolean>;
   /** Today's complete read: head, cursor admission, scan, stabilize. */
   readonly refresh: () => Promise<
@@ -685,7 +688,7 @@ export class ContextGraphAuthorityIndexProjectionCache {
     const projected = input.project(projection);
     if (!projected.complete) {
       if (input.validateIncomplete === undefined
-        || !await input.validateIncomplete(projection)) return PROJECTION_CACHE_MISS;
+        || !await input.validateIncomplete(projection, { withinTick: fresh })) return PROJECTION_CACHE_MISS;
       input.signal?.throwIfAborted();
     }
     if (projection.requiresAnchorValidation === true) {

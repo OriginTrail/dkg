@@ -751,7 +751,15 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       complete: boolean;
       value: T;
     }>,
-    validateIncomplete?: (projection: ContextGraphAuthorityIndexProjection) => Promise<boolean>,
+    validateIncomplete?: (
+      projection: ContextGraphAuthorityIndexProjection,
+      served: Readonly<{ withinTick: boolean }>,
+    ) => Promise<boolean>,
+    /**
+     * The reader takes a log fold its targets are absent from as its answer.
+     * See {@link logFoldAnswersNameAbsence}.
+     */
+    logFoldAnswersIncomplete = false,
   ): Promise<T> => {
     assertOpen();
     options.signal?.throwIfAborted();
@@ -826,7 +834,8 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         // The SAME predicate the cache admits a projection by, applied to the
         // log-anchored fold. An absent target therefore still costs a live scan
         // at a live head; what the log retires is the reads whose answer it can
-        // actually produce, which is the steady state.
+        // actually produce, which is the steady state. The one reader an absent
+        // target is such an answer for is the bounded name read below.
         //
         // That predicate IS `project(candidate).complete` — `read` here — so
         // the fold is admitted by the identical rule and not by a restatement
@@ -875,7 +884,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         (completed) => read({
           ...completed,
           fetchedAtMs: resolveProjectionFetchedAtMs(askedAtMs, completed.origin),
-        }).complete,
+        }).complete || logFoldAnswersIncomplete,
       ),
     });
     options.signal?.throwIfAborted();
@@ -886,16 +895,22 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
   // hash. A live caller proves that against the provider. A bounded caller may
   // instead use the chain event log's generation fence: its tick/freshness
   // contract bounds staleness, and a moved local generation declines to the
-  // provider path. This keeps repeatable query/sync authorization available
-  // while a single endpoint is saturated without weakening mutation/key gates.
+  // provider path. It also takes the absence from a provider scan still inside
+  // its tick, which is fresher than any fold. This keeps repeatable query/sync
+  // authorization available while a single endpoint is saturated, and off the
+  // provider between ticks, without weakening mutation/key gates.
   const validateFinalizedNameAbsence = (
     operationLabel: string,
     options: ContextGraphAuthorityReadOptions,
-  ) => async (cached: ContextGraphAuthorityIndexProjection): Promise<boolean> => {
+  ) => async (
+    cached: ContextGraphAuthorityIndexProjection,
+    served: Readonly<{ withinTick: boolean }>,
+  ): Promise<boolean> => {
     const contractAddress = await dependencies.requireContextGraphStorage().getAddress();
     return contextGraphFinalizedNameAbsenceAnchorHoldsV1(cached, options, {
       currentSource: dependencies.chainEventLogAuthority?.(),
       contractAddress,
+      withinTick: served.withinTick,
       readCurrentFinalized: async () => {
         const current = await dependencies.readTipProvider(
           `${operationLabel} absent-name finality`,
@@ -926,6 +941,27 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
     });
   };
 
+  /**
+   * Whether a name the log fold does not contain is this read's answer.
+   *
+   * A bounded read already takes "absent" from a fold another read left in
+   * the cache, on the log's own fence (`validateFinalizedNameAbsence` above).
+   * It could not produce that fold itself: its refresh discarded the fold and
+   * scanned the provider, so a node whose name reads are all for graphs that
+   * are not registered paid a head read and a paged log scan for every one of
+   * them, each new block again. The sync and query checks of a member of such
+   * a graph repeat every few seconds, at authority priority, and that stream
+   * held the node's request budget against its own transactions.
+   *
+   * The fold is as old as the tick's last committed pass, bounded by the
+   * anchor's freshness rules, which is the staleness a bounded read accepts
+   * for every other answer. A live read keeps the provider scan: it is the
+   * one that may not be told "absent" from anything but a read taken for it.
+   */
+  const logFoldAnswersNameAbsence = (options: ContextGraphAuthorityReadOptions): boolean => (
+    options.freshness === 'bounded'
+  );
+
   const resolveFinalizedIdsByNameHashes = async (
     rawNameHashes: readonly string[],
     options: ContextGraphAuthorityReadOptions,
@@ -945,6 +981,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         return { complete: resolved.size === nameHashes.length, value: resolved };
       },
       validateFinalizedNameAbsence(operationLabel, options),
+      logFoldAnswersNameAbsence(options),
     );
   };
 
@@ -961,6 +998,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       options,
       (projection) => projectAuthoritySnapshotsByNameHashesV1(nameHashes, projection),
       validateFinalizedNameAbsence(operationLabel, options),
+      logFoldAnswersNameAbsence(options),
     );
   };
 
