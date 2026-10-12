@@ -56,6 +56,13 @@ export interface RemoteSigners {
   operational: RemoteSigner[];
   /** Author accounts, when configured; never overlapping `operational`. */
   authors?: RemoteAuthorSigners;
+  /**
+   * Close the connections to the signer, once the signers are no longer used:
+   * each connection once, whether payers and authors share it or not, and with
+   * it those of the signers derived from these with `connect()`. Calling it
+   * again does nothing.
+   */
+  destroy(): void;
 }
 
 /** Author keys of an external signer; see the module comment. */
@@ -140,10 +147,46 @@ export class RemoteAuthorSigners implements ExternalAuthorSigners {
   }
 }
 
-/** Ask the signer for its accounts and build the payer and author signers. */
+/**
+ * Ask the signer for its accounts and build the payer and author signers. The
+ * result owns the connections it opened (see {@link RemoteSigners.destroy});
+ * when the signer cannot be used, they are closed before the error is thrown.
+ */
 export async function connectRemoteSigners(options: ConnectRemoteSignersOptions): Promise<RemoteSigners> {
+  const connections = new SignerConnections();
+  try {
+    const signers = await discoverSigners(options, connections);
+    return { ...signers, destroy: () => connections.close() };
+  } catch (err) {
+    connections.close();
+    throw err;
+  }
+}
+
+/** The clients opened for one set of signers, each closed once. */
+class SignerConnections {
+  readonly #clients = new Set<RemoteSignerClient>();
+  #closed = false;
+
+  open(options: RemoteSignerClientOptions): RemoteSignerClient {
+    const client = new RemoteSignerClient(options);
+    this.#clients.add(client);
+    return client;
+  }
+
+  close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    for (const client of this.#clients) client.destroy();
+  }
+}
+
+async function discoverSigners(
+  options: ConnectRemoteSignersOptions,
+  connections: SignerConnections,
+): Promise<Omit<RemoteSigners, 'destroy'>> {
   const provider = options.provider ?? null;
-  const client = new RemoteSignerClient(options);
+  const client = connections.open(options);
   const served = await client.listAccounts();
   const filter = normalizeAddresses(options.addresses, 'addresses');
   if (filter !== undefined) requireServed(client, served, filter, 'the configured addresses');
@@ -163,7 +206,7 @@ export async function connectRemoteSigners(options: ConnectRemoteSignersOptions)
       requireServed(client, served, [defaultAuthor], 'the author address');
       authors = { client, accounts: [defaultAuthor], defaultOnly: true };
     } else {
-      const authorClient = new RemoteSignerClient({
+      const authorClient = connections.open({
         api: options.api,
         timeoutMs: options.timeoutMs,
         ...(ownEndpoint

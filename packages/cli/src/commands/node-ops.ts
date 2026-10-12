@@ -132,6 +132,8 @@ program
       // wallets.json is read or created.
       const remoteSigner = resolveChainSignerConfig(config.chain?.signer);
       const external = remoteSigner === undefined ? undefined : await connectConfiguredRemoteSigners(remoteSigner);
+      // Only the accounts the signer reported are shown: its connections close now.
+      external?.destroy();
       const opWallets = external === undefined
         ? await (await import('@origintrail-official/dkg-agent')).loadOpWallets(dkgDir())
         : { adminWallet: undefined, wallets: external.operational.map((signer) => ({ address: signer.address })) };

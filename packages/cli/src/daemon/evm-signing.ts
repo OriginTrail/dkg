@@ -19,7 +19,7 @@ export interface OperationalWalletAddresses {
   readonly wallets: ReadonlyArray<{ readonly address: string }>;
 }
 
-export type DaemonEvmSigning =
+export type DaemonEvmSigning = (
   | {
     readonly mode: 'local';
     readonly addresses: OperationalWalletAddresses;
@@ -29,7 +29,14 @@ export type DaemonEvmSigning =
     readonly mode: 'remote';
     readonly addresses: OperationalWalletAddresses;
     readonly chainSigning: { signers: RemoteSigner[]; authors?: RemoteAuthorSigners };
-  };
+  }
+) & {
+  /**
+   * Close the connections to the external signer once nothing signs any more,
+   * at shutdown. Calling it again does nothing; with local keys it does nothing.
+   */
+  readonly release: () => void;
+};
 
 export interface ResolveDaemonEvmSigningInput {
   config: Pick<DkgConfig, 'chain' | 'nodeRole' | 'publisher'>;
@@ -58,6 +65,7 @@ export async function resolveDaemonEvmSigning(input: ResolveDaemonEvmSigningInpu
     for (const w of opWallets.wallets) log(`  ${w.address}`);
     return {
       mode: 'local',
+      release: () => {},
       addresses: {
         ...(opWallets.adminWallet ? { adminWallet: { address: opWallets.adminWallet.address } } : {}),
         wallets: opWallets.wallets.map((w) => ({ address: w.address })),
@@ -97,6 +105,7 @@ export async function resolveDaemonEvmSigning(input: ResolveDaemonEvmSigningInpu
   }
   return {
     mode: 'remote',
+    release: () => signers.destroy(),
     addresses: { wallets: signers.operational.map((signer) => ({ address: signer.address })) },
     chainSigning: {
       signers: signers.operational,

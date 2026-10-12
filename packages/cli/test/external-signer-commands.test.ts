@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { ethers } from 'ethers';
 import type { Command as CommandType } from 'commander';
 import { HARDHAT_KEYS } from '../../chain/test/hardhat-harness.js';
-import { startFakeRemoteSigner, type FakeSigner } from '../../chain/test/helpers/fake-remote-signer.js';
+import { connectionsLeftOpen, startFakeRemoteSigner, type FakeSigner } from '../../chain/test/helpers/fake-remote-signer.js';
 
 const mocks = vi.hoisted(() => ({
   loadConfig: vi.fn(),
@@ -114,6 +114,9 @@ describe('CLI commands with an external signer', () => {
     expect(output).not.toContain('wallets.json');
     expect(errors).toEqual([]);
     expect(mocks.loadOpWallets).not.toHaveBeenCalled();
+    // The command leaves no connection to the signer open.
+    expect(fake.calls('eth_accounts')).toHaveLength(2);
+    expect(await connectionsLeftOpen(fake)).toBe(0);
   });
 
   it('dkg set-ask refuses, since it needs a local operational key', async () => {

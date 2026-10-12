@@ -24,7 +24,7 @@ import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { recorder } from './rpc-failover-test-helpers.js';
 import type { PreparedTransaction } from '../src/rpc-failover-client.js';
 import type { SignedTransactionEnvelope } from '../src/chain-adapter.js';
-import { startFakeRemoteSigner, type FakeSigner, type FakeSignerOptions } from './helpers/fake-remote-signer.js';
+import { connectionsLeftOpen, startFakeRemoteSigner, type FakeSigner, type FakeSignerOptions } from './helpers/fake-remote-signer.js';
 import { LOCALHOST_CERT, LOCALHOST_KEY, OTHER_HOST_CERT, withTrustedCertificate } from './helpers/local-tls.js';
 
 const KEY_A = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d';
@@ -620,6 +620,77 @@ describe('payer and author accounts', () => {
     expect(authors!.endpoint).toBe(signer.url);
     expect(authors!.addresses).toEqual([WALLET_B.address]);
     expect(await authors!.signerFor('not-an-address')).toBeUndefined();
+  });
+});
+
+describe('signer connections', () => {
+  it('closes the payer and author connections once each, with those of signers derived with connect()', async () => {
+    const signer = await fakeSigner({
+      credentials: [
+        { token: TOKEN, keys: [KEY_A, KEY_B] },
+        { token: AUTHOR_TOKEN, keys: [KEY_C] },
+      ],
+    });
+    const result = await connectRemoteSigners({ url: signer.url, authToken: TOKEN, author: { authToken: AUTHOR_TOKEN } });
+    const author = result.authors!.defaultAuthor as RemoteSigner;
+    const derived = result.operational[0].connect(null);
+    expect(derived.client).toBe(result.operational[0].client);
+    expect(author.client).not.toBe(derived.client);
+    await derived.signMessage('payer');
+    await author.signMessage('author');
+    expect(await signer.openConnections()).toBeGreaterThanOrEqual(2);
+
+    const destroy = vi.spyOn(RemoteSignerClient.prototype, 'destroy');
+    result.destroy();
+    result.destroy();
+    expect(destroy).toHaveBeenCalledTimes(2);
+    expect(destroy.mock.contexts[0]).toBe(derived.client);
+    expect(destroy.mock.contexts[1]).toBe(author.client);
+    expect(await connectionsLeftOpen(signer)).toBe(0);
+  });
+
+  it('closes a connection that payers and the author share once', async () => {
+    const signer = await fakeSigner({ credentials: [{ token: TOKEN, keys: [KEY_A, KEY_B] }] });
+    const result = await connectRemoteSigners({ url: signer.url, authToken: TOKEN, author: { address: WALLET_B.address } });
+    const author = result.authors!.defaultAuthor as RemoteSigner;
+    expect(author.client).toBe(result.operational[0].client);
+    await author.signMessage('author');
+
+    const destroy = vi.spyOn(RemoteSignerClient.prototype, 'destroy');
+    result.destroy();
+    result.destroy();
+    expect(destroy).toHaveBeenCalledTimes(1);
+    expect(destroy.mock.contexts[0]).toBe(author.client);
+    expect(await connectionsLeftOpen(signer)).toBe(0);
+  });
+
+  it('leaves no connection or timer behind when the signer cannot be used', async () => {
+    const signer = await fakeSigner({
+      credentials: [
+        { token: TOKEN, keys: [KEY_A] },
+        { token: AUTHOR_TOKEN, keys: [] },
+      ],
+    });
+    const destroy = vi.spyOn(RemoteSignerClient.prototype, 'destroy');
+    const failures = [
+      // Both connections asked for their accounts before the author one proved to serve none.
+      { options: { author: { authToken: AUTHOR_TOKEN } }, connections: 2 },
+      { options: { addresses: [WALLET_D.address] }, connections: 1 },
+      { options: { author: { address: WALLET_D.address } }, connections: 1 },
+    ];
+    for (const failure of failures) {
+      destroy.mockClear();
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        await expect(connectRemoteSigners({ url: signer.url, authToken: TOKEN, ...failure.options }))
+          .rejects.toMatchObject({ code: 'REMOTE_SIGNER_ADDRESS_NOT_AVAILABLE' });
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(destroy).toHaveBeenCalledTimes(failure.connections);
+      expect(await connectionsLeftOpen(signer)).toBe(0);
+    }
   });
 });
 

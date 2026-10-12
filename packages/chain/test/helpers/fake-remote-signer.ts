@@ -55,6 +55,8 @@ export interface FakeSigner {
   readonly requests: FakeSignerRequest[];
   /** Requests for one JSON-RPC method. */
   calls(method: string): FakeSignerRequest[];
+  /** Connections the signer currently has open. */
+  openConnections(): Promise<number>;
   close(): Promise<void>;
 }
 
@@ -142,11 +144,29 @@ export async function startFakeRemoteSigner(options: FakeSignerOptions): Promise
       : { url: options.tls ? `https://localhost:${(address as AddressInfo).port}` : `http://127.0.0.1:${(address as AddressInfo).port}` }),
     requests,
     calls: (method) => requests.filter((request) => request.method === method),
+    openConnections: () => new Promise<number>((resolve, reject) => {
+      server.getConnections((err, count) => (err ? reject(err) : resolve(count)));
+    }),
     close: () => new Promise<void>((resolve) => {
       server.closeAllConnections();
       server.close(() => resolve());
     }),
   };
+}
+
+/**
+ * The signer's open connections once a client has closed its own: closed ones
+ * are gone within milliseconds, while one a client leaves open stays well past
+ * this wait (an idle connection is kept for 5 s).
+ */
+export async function connectionsLeftOpen(signer: FakeSigner): Promise<number> {
+  const deadline = Date.now() + 1_000;
+  let open = await signer.openConnections();
+  while (open > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    open = await signer.openConnections();
+  }
+  return open;
 }
 
 function send(res: ServerResponse, status: number, payload: unknown): void {

@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import { ethers } from 'ethers';
 import { resolveDaemonEvmSigning } from '../src/daemon/evm-signing.js';
 import { loadLocalOpWalletsUnlessExternal, usesExternalSigner } from '../src/local-op-wallets.js';
-import { startFakeRemoteSigner, type FakeSigner } from '../../chain/test/helpers/fake-remote-signer.js';
+import { connectionsLeftOpen, startFakeRemoteSigner, type FakeSigner } from '../../chain/test/helpers/fake-remote-signer.js';
 
 const TOKEN = 'daemon-payer-credential-6a5b4c3d2e1f';
 const AUTHOR_TOKEN = 'daemon-author-credential-f1e2d3c4b5a6';
@@ -65,6 +65,7 @@ describe('daemon EVM signing', () => {
     );
     // The route-facing view carries addresses only.
     expect(JSON.stringify(signing.addresses)).not.toContain(signing.chainSigning.operationalKeys[0].slice(2));
+    expect(() => signing.release()).not.toThrow();
   });
 
   it('learns payers and authors from the external signer and creates no key file', async () => {
@@ -94,6 +95,11 @@ describe('daemon EVM signing', () => {
     expect(log).toContain(author.address);
     expect(log).not.toContain(TOKEN);
     expect(log).not.toContain(AUTHOR_TOKEN);
+    // At shutdown the payer and author connections close; releasing again does nothing.
+    expect(await fake.openConnections()).toBeGreaterThanOrEqual(2);
+    signing.release();
+    signing.release();
+    expect(await connectionsLeftOpen(fake)).toBe(0);
   });
 
   it('runs with payers only when no author keys are configured', async () => {
