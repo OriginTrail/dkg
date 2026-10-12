@@ -164,6 +164,22 @@ describe('local model response bounds', () => {
 });
 
 describe('DkgLocalLlmRuntime', () => {
+  it('rejects missing configured domain tools before inference instead of falling back to node status', async () => {
+    const fetcher = vi.fn();
+    await expect(DkgLocalLlmRuntime.create({ mcp: makeMcp([dkgStatus]), fetch: fetcher as typeof fetch,
+      domainProfile: { name: 'partner', routingKeywords: ['order'], readTools: ['partner_order'], requiredTools: ['partner_order'] },
+    })).rejects.toThrow('LOCAL_LLM_REQUIRED_TOOLS_UNAVAILABLE: partner_order');
+    expect(fetcher).not.toHaveBeenCalled();
+    const runtime = await DkgLocalLlmRuntime.create({ mcp: makeMcp(), fetch: fetcher as typeof fetch,
+      domainProfile: { name: 'partner', routingKeywords: ['catalog'], readTools: ['dkg_query_catalog_list'], requiredTools: ['dkg_query_catalog_list'] },
+    });
+    expect(runtime).toBeDefined();
+    await expect(DkgLocalLlmRuntime.create({ mcp: makeMcp([catalogList, catalogRun, dkgStatus]), projectId: 'testing', strictProjectScope: true,
+      strictProjectScopeUnscopedTools: ['dkg_status'],
+      domainProfile: { name: 'partner', routingKeywords: ['catalog'], readTools: ['dkg_query_catalog_list'], requiredTools: ['dkg_query_catalog_list'] },
+    })).rejects.toThrow('LOCAL_LLM_REQUIRED_TOOLS_UNAVAILABLE');
+  });
+
   const contextRejected = () => new Response(JSON.stringify({
     error: { type: 'exceed_context_size_error', n_prompt_tokens: 10772, n_ctx: 8192 },
   }), { status: 400 });

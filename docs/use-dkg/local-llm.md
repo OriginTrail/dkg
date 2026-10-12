@@ -921,3 +921,10 @@ fail with `LOCAL_LLM_CONTEXT_LIMIT`.
 and transport failures do not use this retry path. This handles a specific
 pre-inference rejection; it does not raise the model server's context setting or
 guarantee that arbitrary source payloads can fit.
+
+Domain profiles can also declare `requiredTools`. The runtime checks these names
+after tool normalization and Context Graph filtering, before making any model
+request. A missing or out-of-scope required tool fails with
+`LOCAL_LLM_REQUIRED_TOOLS_UNAVAILABLE`; unrelated node-status tools do not make
+that configured domain session usable. Existing profiles without this field
+keep their current behavior.

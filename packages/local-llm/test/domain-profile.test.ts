@@ -8,12 +8,14 @@ describe('domain profile contract', () => {
       routingKeywords: ['configuration', 'BOM', 'configuration'],
       readTools: ['partner_trace', 'partner_trace'],
       writeTools: ['partner_insert'],
+      requiredTools: ['partner_trace', 'partner_trace'],
       systemContext: 'Use exact identifiers from tool evidence.',
     })).toEqual({
       name: 'supply-chain',
       routingKeywords: ['configuration', 'BOM'],
       readTools: ['partner_trace'],
       writeTools: ['partner_insert'],
+      requiredTools: ['partner_trace'],
       systemContext: 'Use exact identifiers from tool evidence.',
     });
   });

@@ -419,6 +419,8 @@ export class DkgLocalLlmRuntime {
     if (!this.tools.length) {
       throw new Error('MCP tools/list returned no tools compatible with the strict Context Graph scope.');
     }
+    const missingTools = this.domainProfile?.requiredTools?.filter(name => !this.tools.some(tool => tool.name === name)) ?? [];
+    if (missingTools.length) throw new Error('LOCAL_LLM_REQUIRED_TOOLS_UNAVAILABLE: ' + missingTools.join(', '));
     this.toolRouter = createToolRouter(this.tools);
   }
 
