@@ -596,6 +596,77 @@ describe('external signer author keys', () => {
     }
   });
 
+  it('makes a newly configured default author the default agent, and opens and seals node drafts under it', async () => {
+    const fake = await startFakeRemoteSigner({
+      credentials: [
+        { token: PAYER_TOKEN, keys: [payer.privateKey] },
+        { token: AUTHOR_TOKEN, keys: [defaultAuthor.privateKey, agentKey.privateKey] },
+      ],
+    });
+    started.push(fake);
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-default-author-change-'));
+    const start = async (address: string) => {
+      const remote = await connectRemoteSigners({ url: fake.url, authToken: PAYER_TOKEN, author: { authToken: AUTHOR_TOKEN, address } });
+      const agent = await DKGAgent.create({
+        name: 'DefaultAuthorNode',
+        store: new OxigraphStore(join(dir, 'store.nq')),
+        dataDir: dir,
+        kaNumberAllocator: makeTestKaNumberAllocator(),
+        chainAdapter: new ExternallySignedMockChain('mock:31337', payer.address),
+        authorSigners: remote.authors,
+        nodeRole: 'edge',
+      });
+      await agent.start();
+      return { agent, remote };
+    };
+    const registrations = () => fake.calls('eth_signTypedData_v4')
+      .filter((request) => JSON.parse(String(request.params[1])).primaryType === 'AgentRegistration').length;
+    try {
+      // The first default author is registered as the default agent, and drafts a node token opens are its own.
+      const first = await start(agentKey.address);
+      expect(first.agent.getDefaultAgentAddress()).toBe(agentKey.address);
+      await first.agent.assertion.create(CG, 'before');
+      await first.agent.stop();
+      first.remote.destroy();
+
+      // Another default author is configured: it becomes the default agent, and the former one stays an agent.
+      const changed = await start(defaultAuthor.address);
+      try {
+        expect(changed.agent.getDefaultAgentAddress()).toBe(defaultAuthor.address);
+        expect(changed.agent.getLocalAgentMode(agentKey.address)).toBe('self-sovereign');
+        expect(changed.agent.listLocalAgents().map((record) => [record.name, record.agentAddress])).toEqual([
+          ['DefaultAuthorNode', agentKey.address],
+          ['DefaultAuthorNode-default-author', defaultAuthor.address],
+        ]);
+        expect(registrations()).toBe(2);
+        // A new draft opened and sealed with the node token is the default author's, from its reserved number on.
+        await changed.agent.assertion.create(CG, NAME);
+        await changed.agent.assertion.write(CG, NAME, [q('urn:external-authors:changed', 'urn:value', '"v1"')]);
+        const seal = await changed.agent.assertion.finalize(CG, NAME);
+        expect(ethers.getAddress(seal.authorAddress)).toBe(defaultAuthor.address);
+        expect(seal.reservedKaId >> 96n).toBe(BigInt(defaultAuthor.address));
+        // The draft the former default agent opened keeps its author.
+        expect(await changed.agent.assertion.history(CG, 'before', { agentAddress: agentKey.address })).not.toBeNull();
+        expect(await changed.agent.assertion.history(CG, 'before')).toBeNull();
+      } finally {
+        await changed.agent.stop();
+        changed.remote.destroy();
+      }
+
+      // The next start keeps it, and registers nothing again.
+      const again = await start(defaultAuthor.address);
+      try {
+        expect(again.agent.getDefaultAgentAddress()).toBe(defaultAuthor.address);
+        expect(registrations()).toBe(2);
+      } finally {
+        await again.agent.stop();
+        again.remote.destroy();
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('takes the external author keys beside a supplied adapter, with no chain configuration at all', async () => {
     const { fake, remote } = await externalSigners();
     const dir = await mkdtemp(join(tmpdir(), 'dkg-authors-beside-adapter-'));

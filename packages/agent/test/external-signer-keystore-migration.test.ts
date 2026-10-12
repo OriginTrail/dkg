@@ -14,13 +14,19 @@ import { ethers } from 'ethers';
 import { connectRemoteSigners } from '@origintrail-official/dkg-chain';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent, assertKeystoreHoldsNoPayerKey } from '../src/index.js';
-import { createEVMAdapter, getSharedContext, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { createEVMAdapter, createProvider, getSharedContext, HARDHAT_KEYS, revertSnapshot, takeSnapshot } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { startFakeRemoteSigner } from '../../chain/test/helpers/fake-remote-signer.js';
+import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
+import { installHardhatACKProvider } from './_helpers/v10-acks.js';
 
 const PAYER_TOKEN = 'migration-payer-credential-5a6b7c8d9e0f';
 const AUTHOR_TOKEN = 'migration-author-credential-0f9e8d7c6b5a';
 const formerWallet = new ethers.Wallet(HARDHAT_KEYS.EXTRA1);
 const signerAuthor = new ethers.Wallet(HARDHAT_KEYS.EXTRA2);
+const CG = 'migrated-node-graph';
+const EARLIER_CG = 'pre-migration-graph';
+const NAME = 'after-migration';
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -37,7 +43,9 @@ describe('moving a node\'s local wallet into an external signer as a payer', () 
     }
   });
 
-  it('refuses to load the payer\'s key, and loads the node\'s other agents once it is removed', async () => {
+  it('refuses to load the payer\'s key, then loads the other agents and publishes as the default author', async () => {
+    const snapshot = await takeSnapshot();
+    cleanups.push(() => revertSnapshot(snapshot));
     const dir = await mkdtemp(join(tmpdir(), 'dkg-keystore-migration-'));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const storePath = join(dir, 'store.nq');
@@ -55,6 +63,8 @@ describe('moving a node\'s local wallet into an external signer as a payer', () 
     expect(local.getDefaultAgentAddress()).toBe(formerWallet.address);
     const author = await local.registerAgent('local-author');
     expect(author.privateKey).toBeDefined();
+    // A draft its default agent opened.
+    await local.assertion.create(EARLIER_CG, 'before-migration');
     await local.stop();
 
     // The same node, its former wallet now a payer of the external signer.
@@ -76,6 +86,7 @@ describe('moving a node\'s local wallet into an external signer as a payer', () 
       dataDir: dir,
       chainConfig: { rpcUrl, hubAddress, chainId: 'evm:31337', signers: remote.operational },
       authorSigners: remote.authors,
+      kaNumberAllocator: makeTestKaNumberAllocator(),
       nodeRole: 'edge',
     });
 
@@ -96,8 +107,38 @@ describe('moving a node\'s local wallet into an external signer as a payer', () 
       expect(migrated.getCustodialAgentPrivateKey(author.agentAddress)).toBe(author.privateKey);
       expect(migrated.getLocalAgentMode(formerWallet.address)).toBe('custodial');
       expect(migrated.getCustodialAgentPrivateKey(formerWallet.address)).toBeUndefined();
+      // The signer's default author, which can sign, is now the default agent instead of the keyless former wallet,
+      // whose draft keeps its author.
+      expect(migrated.getDefaultAgentAddress()).toBe(signerAuthor.address);
+      expect(await migrated.assertion.history(EARLIER_CG, 'before-migration', { agentAddress: formerWallet.address })).not.toBeNull();
+      expect(await migrated.assertion.history(EARLIER_CG, 'before-migration')).toBeNull();
+
+      // With no agent selected the node opens, seals and publishes a new asset as the default author; the payer pays.
+      await mintTokens(createProvider(), hubAddress, HARDHAT_KEYS.DEPLOYER, formerWallet.address, ethers.parseEther('50000000'));
+      await installHardhatACKProvider(migrated);
+      await migrated.createContextGraph({ id: CG, name: 'Migrated node graph' });
+      await migrated.registerContextGraph(CG);
+      await migrated.assertion.create(CG, NAME);
+      await migrated.assertion.write(CG, NAME, [
+        { subject: 'urn:migration:asset', predicate: 'http://schema.org/name', object: '"after"', graph: '' },
+      ]);
+      const before = fake.requests.length;
+      const seal = await migrated.assertion.finalize(CG, NAME);
+      expect(ethers.getAddress(seal.authorAddress)).toBe(signerAuthor.address);
+      expect(seal.reservedKaId >> 96n).toBe(BigInt(signerAuthor.address));
+      await migrated.assertion.promote(CG, NAME);
+      const published = await migrated.publishFromFinalizedAssertion(CG, NAME);
+      expect(published.status).toBe('confirmed');
+      expect(published.kaId! >> 96n).toBe(BigInt(signerAuthor.address));
+      const signed = fake.requests.slice(before).filter((request) => request.method !== 'eth_accounts');
+      const attestations = signed.filter((request) => request.method === 'eth_signTypedData_v4');
+      expect(attestations.length).toBeGreaterThan(0);
+      expect(attestations.every((request) => request.authorization === `Bearer ${AUTHOR_TOKEN}`)).toBe(true);
+      const transactions = signed.filter((request) => request.method === 'eth_signTransaction');
+      expect(transactions.length).toBeGreaterThan(0);
+      expect(transactions.every((request) => request.authorization === `Bearer ${PAYER_TOKEN}`)).toBe(true);
     } finally {
       await migrated.stop().catch(() => {});
     }
-  }, 120_000);
+  }, 300_000);
 });

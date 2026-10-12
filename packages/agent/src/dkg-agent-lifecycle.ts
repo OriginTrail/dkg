@@ -870,7 +870,7 @@ import {
   type ContextGraphMembershipSnapshot,
 } from './join-approval-restart-projection.js';
 import { verifiedCuratorDialAddress } from './curator-dial-address.js';
-import { signsThroughExternalSigner } from './external-author-signing.js';
+import { defaultAuthorToAdopt, signsThroughExternalSigner } from './external-author-signing.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
@@ -2427,6 +2427,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.defaultAgentAddress = first.agentAddress;
       await this.markDefaultAgent(first.agentAddress).catch(() => {});
     }
+    const adopted = await defaultAuthorToAdopt(this, this.config.authorSigners, this.chain, this.config.name ?? 'owner', this.config.framework);
+    if (adopted !== undefined) { this.defaultAgentAddress = adopted; await this.markDefaultAgent(adopted).catch(() => {}); }
 
     const network = new LibP2PNetwork(this.node);
     // Local helper: race a lookup against an optional AbortSignal so

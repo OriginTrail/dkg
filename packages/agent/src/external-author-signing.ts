@@ -108,6 +108,44 @@ export async function registerExternalDefaultAgent(
   }
 }
 
+/**
+ * The default author of the external signer, to become the node's default
+ * agent, when the node signs through an external signer and its default agent
+ * is another account, for example its former local wallet kept on as a payer.
+ * What the node publishes without a selected agent is authored by the default
+ * author, so the drafts it opens without one must be the default author's too.
+ * A default author that is not an agent yet is registered by address first.
+ * The other agents stay registered, and what any agent created keeps its
+ * author. Undefined (the default agent is kept) without a default author or a
+ * default agent, when it already is the default agent, or when its
+ * registration fails.
+ */
+export async function defaultAuthorToAdopt(
+  agent: DKGAgent,
+  authors: ExternalAuthorSigners | undefined,
+  chain: Pick<ChainAdapter, 'operationalSigning'> | undefined,
+  name: string,
+  framework?: string,
+): Promise<string | undefined> {
+  const defaultAuthor = authors?.defaultAuthor?.address;
+  const previous = agent.getDefaultAgentAddress();
+  if (defaultAuthor === undefined || previous === undefined || !signsThroughExternalSigner(chain)) return undefined;
+  if (previous.toLowerCase() === defaultAuthor.toLowerCase()) return undefined;
+  const ctx = createOperationContext('system');
+  try {
+    let address = ethers.getAddress(defaultAuthor);
+    if (agent.getLocalAgentMode(address) === undefined) {
+      const taken = new Set(agent.listLocalAgents().map((record) => record.name));
+      address = (await agent.registerAgent(taken.has(name) ? `${name}-default-author` : name, { address, framework })).agentAddress;
+    }
+    log.info(ctx, `Default agent is now the external signer's default author ${address} (was ${previous})`);
+    return address;
+  } catch (err) {
+    log.warn(ctx, `Keeping the default agent: registering default author ${defaultAuthor} of the external signer failed: ${err instanceof Error ? err.message : String(err)}`);
+    return undefined;
+  }
+}
+
 /** Sign author typed data and return KAv10's compact (r, vs) form. */
 export async function signAuthorTypedDataCompact(
   signer: Pick<AuthorSigner, 'signTypedData'>,
