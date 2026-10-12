@@ -24,6 +24,12 @@
  *     `account_signData` with `text/plain`.
  * A fallback method is tried only when the signer answers "method not found"
  * for the previous one, with the same payload; the choice is remembered.
+ *
+ * A message derived from a structured preimage (a request digest, ...) is
+ * first offered to the signer with that preimage, under a method the caller
+ * names (see {@link PreimageSigningRequest}), so that a signer which checks
+ * what it signs can recompute the message. Only a signer that answers
+ * "method not found" is then asked to sign the message itself.
  */
 import {
   AbstractSigner,
@@ -47,7 +53,7 @@ import {
   type TypedDataDomain,
   type TypedDataField,
 } from 'ethers';
-import type { ExternalEvmSigner } from './evm-signer.js';
+import type { ExternalEvmSigner, PreimageSigningRequest } from './evm-signer.js';
 import { RemoteSignerError } from './remote-signer-errors.js';
 import { RemoteSignerTransport, type RemoteSignerTransportOptions } from './remote-signer-transport.js';
 
@@ -91,6 +97,7 @@ export class RemoteSignerClient {
   readonly api: RemoteSignerApi;
   readonly transport: RemoteSignerTransport;
   readonly #methodChoice = new Map<SigningOperation, string>();
+  readonly #unsupportedPreimageMethods = new Set<string>();
 
   constructor(options: RemoteSignerClientOptions) {
     const api = options.api ?? 'eth';
@@ -176,6 +183,25 @@ export class RemoteSignerClient {
       if (method === 'account_signData') return ['text/plain', account, hexData];
       return [account, hexData];
     });
+  }
+
+  /**
+   * Returns the EIP-191 signature over `request.message`, asking first with
+   * `request.method` and `[address, preimage]` so that the signer can derive
+   * the message and check it. A signer that answers "method not found" is
+   * asked to sign the message itself ({@link signMessage}) and is not offered
+   * that method again; any other failure is final.
+   */
+  async signMessageWithPreimage(address: string, request: PreimageSigningRequest): Promise<unknown> {
+    if (!this.#unsupportedPreimageMethods.has(request.method)) {
+      try {
+        return await this.transport.request(request.method, [this.wireAddress(address), request.preimage]);
+      } catch (err) {
+        if (!(err instanceof RemoteSignerError && err.code === 'REMOTE_SIGNER_METHOD_NOT_SUPPORTED')) throw err;
+        this.#unsupportedPreimageMethods.add(request.method);
+      }
+    }
+    return this.signMessage(address, request.message);
   }
 
   /** Close idle connections to the signer. */
@@ -300,6 +326,12 @@ export class RemoteSigner extends AbstractSigner implements ExternalEvmSigner {
     const data = typeof message === 'string' ? toUtf8Bytes(message) : message;
     const signature = await this.client.signMessage(this.address, data);
     return this.#verifySignature(signature, hashMessage(data), 'message');
+  }
+
+  /** The EIP-191 signature over `request.message`, offering the signer its preimage first. */
+  async signMessageWithPreimage(request: PreimageSigningRequest): Promise<string> {
+    const signature = await this.client.signMessageWithPreimage(this.address, request);
+    return this.#verifySignature(signature, hashMessage(request.message), 'message');
   }
 
   async signTypedData(

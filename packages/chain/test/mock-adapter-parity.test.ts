@@ -117,6 +117,7 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'signMessageAs',          // pool-specific wallet-key signing; mock has no adapter-held private keys
   'getOperationalPrivateKey', // mock has no wallet keys
   'operationalSigning',     // optional; absent, an adapter is taken to sign with local wallets, as the mock's do
+  'signMessageWithPreimage', // optional; absent means callers use signMessage, as for the mock's local key
   'getRequiredPublishTokenAmount', // TODO: missing on mock, cross-check below
   // Snapshot reuse requires a finalized block hash plus the exact physical
   // DKGKnowledgeAssets address and binding generation. Mock snapshots

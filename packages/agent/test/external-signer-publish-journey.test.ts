@@ -217,7 +217,7 @@ describe('publish journey of a node that signs through an external signer', () =
     await core.share(CORE_CG, [{ subject: CORE_ENTITY, predicate: 'http://schema.org/name', object: '"Core entity"', graph: '' }]);
     await bindPublicContextGraph(edge, CORE_CG, onChainId);
 
-    const before = fake.calls('eth_sign').length;
+    const before = fake.requests.length;
     expect(await edge.syncSharedMemoryFromPeer(core.peerId, [CORE_CG])).toBeGreaterThan(0);
     const synced = await edge.query(`SELECT ?name WHERE { <${CORE_ENTITY}> <http://schema.org/name> ?name }`, {
       contextGraphId: CORE_CG,
@@ -226,14 +226,17 @@ describe('publish journey of a node that signs through an external signer', () =
     expect(synced.bindings).toEqual([{ name: '"Core entity"' }]);
 
     // The core admitted requests whose signatures recover to the agent; the
-    // author key signed each one's 32-byte digest through the signer.
-    const digests = fake.calls('eth_sign').slice(before);
-    expect(digests.length).toBeGreaterThan(0);
-    for (const request of digests) {
+    // author key signed each one through the signer, which was given the
+    // request's signed fields (dkg_signSyncRequest), and no digest blind.
+    const requests = fake.requests.slice(before);
+    const syncRequests = requests.filter((request) => request.method === 'dkg_signSyncRequest');
+    expect(syncRequests.length).toBeGreaterThan(0);
+    for (const request of syncRequests) {
       expect(request.authorization).toBe(`Bearer ${AUTHOR_TOKEN}`);
       expect(ethers.getAddress(String(request.params[0]))).toBe(author.address);
-      expect(ethers.getBytes(String(request.params[1]))).toHaveLength(32);
+      expect(request.params[1]).toMatchObject({ contextGraphId: CORE_CG, requesterAgentAddress: author.address.toLowerCase() });
     }
+    expect(requests.filter((request) => request.method === 'eth_sign' || request.method === 'personal_sign')).toEqual([]);
     expect(edge.getLocalAgentMode(author.address)).toBe('self-sovereign');
     expect(edge.getCustodialAgentPrivateKey(author.address)).toBeUndefined();
   }, 180_000);

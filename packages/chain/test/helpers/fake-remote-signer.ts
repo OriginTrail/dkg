@@ -7,7 +7,10 @@
  * Accounts are scoped by bearer credential, as a multi-tenant signing service
  * would scope them: each credential maps to its own key set. The server signs
  * exactly what it is asked to sign (it never fills nonce, gas or fees) and
- * records every request so tests can assert on what the node sent.
+ * records every request so tests can assert on what the node sent. It also
+ * serves the optional `dkg_signSyncRequest` method of the `eth` dialect with a
+ * strict, independently written validator (list it in `unsupported` to stand
+ * in for a signer without it).
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
@@ -47,6 +50,8 @@ export interface FakeSignerOptions {
   reject?: (method: string, request: FakeSignerRequest) => { code: number; message: string } | undefined;
   /** Answer with a raw HTTP response (status + body) instead of JSON-RPC. */
   rawResponse?: (method: string) => { status: number; body: string } | undefined;
+  /** Further methods taking `[address, preimage]`: each derives the bytes it signs with EIP-191 from the preimage. */
+  preimageMethods?: Record<string, (preimage: unknown) => Uint8Array>;
 }
 
 export interface FakeSigner {
@@ -112,7 +117,7 @@ export async function startFakeRemoteSigner(options: FakeSignerOptions): Promise
           return;
         }
         try {
-          const { result, wallet } = await answer(api, method, params, walletsOf(credential.keys));
+          const { result, wallet } = await answer(api, method, params, walletsOf(credential.keys), options.preimageMethods);
           const sent = options.tamper ? await options.tamper(method, result, request, wallet) : result;
           send(res, 200, { jsonrpc: '2.0', id: body.id, result: sent });
         } catch (err) {
@@ -169,6 +174,69 @@ export async function connectionsLeftOpen(signer: FakeSigner): Promise<number> {
   return open;
 }
 
+const SYNC_REQUEST_FIELDS = [
+  'contextGraphId', 'offset', 'limit', 'includeSharedMemory', 'targetPeerId',
+  'requesterPeerId', 'requestId', 'issuedAtMs', 'requesterAgentAddress',
+] as const;
+const BASE58_PEER_ID = /^[1-9A-HJ-NP-Za-km-z]{46,128}$/;
+
+function invalidParams(message: string): Error {
+  return Object.assign(new Error(`invalid params: ${message}`), { code: INVALID_PARAMS });
+}
+
+/**
+ * A strict validator for `dkg_signSyncRequest`, written from the documented
+ * request layout with ethers primitives only (it shares no code with the node):
+ * every field must have its grammar, the request must be fresh, and the digest
+ * is recomputed here. Returns the 32 digest bytes to sign with EIP-191.
+ */
+function syncRequestDigest(value: unknown): Uint8Array {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw invalidParams('the request must be an object');
+  const request = value as Record<string, unknown>;
+  const authenticated = 'authPurpose' in request || 'authSelector' in request;
+  const allowed = new Set<string>([...SYNC_REQUEST_FIELDS, ...(authenticated ? ['authPurpose', 'authSelector'] : [])]);
+  for (const key of Object.keys(request)) if (!allowed.has(key)) throw invalidParams(`unexpected field ${key}`);
+  for (const key of allowed) if (!(key in request)) throw invalidParams(`missing field ${key}`);
+  const { contextGraphId, offset, limit, includeSharedMemory, targetPeerId, requesterPeerId, requestId, issuedAtMs, requesterAgentAddress } = request;
+  const text = (field: unknown, name: string, pattern?: RegExp): string => {
+    if (typeof field !== 'string' || field.length === 0 || field.length > 512 || (pattern && !pattern.test(field))) {
+      throw invalidParams(`bad ${name}`);
+    }
+    return field;
+  };
+  const integer = (field: unknown, name: string, min: number, max: number): number => {
+    if (typeof field !== 'number' || !Number.isSafeInteger(field) || field < min || field > max) throw invalidParams(`bad ${name}`);
+    return field;
+  };
+  if (typeof includeSharedMemory !== 'boolean') throw invalidParams('bad includeSharedMemory');
+  if (typeof requesterAgentAddress !== 'string' || !/^(0x[0-9a-f]{40})?$/.test(requesterAgentAddress)) {
+    throw invalidParams('bad requesterAgentAddress');
+  }
+  const issued = integer(issuedAtMs, 'issuedAtMs', 0, Number.MAX_SAFE_INTEGER);
+  if (issued < Date.now() - 60_000 || issued > Date.now() + 5_000) throw invalidParams('stale or future issuedAtMs');
+  const types = ['string', 'uint256', 'uint256', 'bool', 'string', 'string', 'string', 'uint256', 'string'];
+  const values: unknown[] = [
+    text(contextGraphId, 'contextGraphId'),
+    integer(offset, 'offset', 0, Number.MAX_SAFE_INTEGER),
+    integer(limit, 'limit', 1, 500),
+    includeSharedMemory,
+    text(targetPeerId, 'targetPeerId', BASE58_PEER_ID),
+    text(requesterPeerId, 'requesterPeerId', BASE58_PEER_ID),
+    text(requestId, 'requestId', /^0x[0-9a-f]{24}$/),
+    issued,
+    requesterAgentAddress,
+  ];
+  if (authenticated) {
+    if (typeof request.authPurpose !== 'string' || typeof request.authSelector !== 'string'
+      || request.authPurpose.length > 512 || request.authSelector.length > 512) {
+      throw invalidParams('bad authPurpose or authSelector');
+    }
+    types.push('string', 'string');
+    values.push(request.authPurpose, request.authSelector);
+  }
+  return ethers.getBytes(ethers.solidityPackedKeccak256(types, values));
+}
+
 function send(res: ServerResponse, status: number, payload: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json' });
   res.end(JSON.stringify(payload));
@@ -179,6 +247,7 @@ async function answer(
   method: string,
   params: unknown[],
   wallets: readonly ethers.Wallet[],
+  preimageMethods: FakeSignerOptions['preimageMethods'],
 ): Promise<{ result: unknown; wallet?: ethers.Wallet }> {
   const byAddress = (value: unknown): ethers.Wallet => {
     const wallet = typeof value === 'string' && ethers.isAddress(value)
@@ -187,6 +256,11 @@ async function answer(
     if (!wallet) throw new Error('unknown account');
     return wallet;
   };
+  const derive = preimageMethods?.[method];
+  if (derive) {
+    const wallet = byAddress(params[0]);
+    return { result: await wallet.signMessage(derive(params[1])), wallet };
+  }
   switch (`${api}:${method}`) {
     case 'eth:eth_accounts':
     case 'clef:account_list':
@@ -236,6 +310,10 @@ async function answer(
     case 'eth:eth_sign': {
       const wallet = byAddress(params[0]);
       return { result: await wallet.signMessage(ethers.getBytes(String(params[1]))), wallet };
+    }
+    case 'eth:dkg_signSyncRequest': {
+      const wallet = byAddress(params[0]);
+      return { result: await wallet.signMessage(syncRequestDigest(params[1])), wallet };
     }
     case 'eth:personal_sign': {
       const wallet = byAddress(params[1]);

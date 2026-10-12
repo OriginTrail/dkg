@@ -270,6 +270,7 @@ export { NoChainAdapter } from './no-chain-adapter.js';
 export {
   OperationalKeyUnavailableError,
   isExternalEvmSigner,
+  signMessageWithPreimage,
   type AuthorSigner,
   type EvmSigner,
   type ExternalAuthorSigners,
@@ -277,6 +278,7 @@ export {
   type ExternalOperationalSignerSource,
   type LocalOperationalSignerSource,
   type OperationalSignerSource,
+  type PreimageSigningRequest,
 } from './evm-signer.js';
 export {
   RemoteSigner,

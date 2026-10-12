@@ -363,9 +363,13 @@ describe('daemon with an external signer', () => {
     // envelope (four length-framed fields: type, context graph, timestamp,
     // payload) and, where RFC-64 catalog authority is active, the control
     // objects the author issues (EIP-191 over 32-byte object digests); the
-    // payers signed transactions only.
+    // payers signed transactions only. Sync requests the node may make
+    // meanwhile are signed from their fields (dkg_signSyncRequest) and are left
+    // out here.
     const journey = fake.requests.slice(before);
-    const author = journey.filter((request) => request.authorization === `Bearer ${AUTHOR_TOKEN}`);
+    const author = journey.filter((request) => (
+      request.authorization === `Bearer ${AUTHOR_TOKEN}` && request.method !== 'dkg_signSyncRequest'
+    ));
     expect(author.filter((request) => request.method === 'eth_signTypedData_v4')).toHaveLength(1);
     const messages = author.filter((request) => request.method === 'eth_sign');
     expect(messages.length + 1).toBe(author.length);

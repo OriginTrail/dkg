@@ -5,6 +5,7 @@ import type {
 } from './random-sampling-availability.js';
 import type { RandomSamplingReadContextReader } from './random-sampling-read-context.js';
 import type { ethers } from 'ethers';
+import type { PreimageSigningRequest } from './evm-signer.js';
 import type { RpcRequestClass } from './rpc-request-transport.js';
 import type { RpcUsageWindow } from './rpc-usage.js';
 import type { ContextGraphAuthorityIndexSnapshots } from './context-graph-authority-index-snapshot.js';
@@ -1919,6 +1920,13 @@ export interface ChainAdapter {
    * Used for self-signing as receiver or context graph participant.
    */
   signMessage?(messageHash: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array }>;
+
+  /**
+   * {@link signMessage} with the structured preimage of the message: an
+   * external signer is offered `request.method` with the preimage first, so
+   * that it can check what it signs. The signature is the same.
+   */
+  signMessageWithPreimage?(request: PreimageSigningRequest): Promise<{ r: Uint8Array; vs: Uint8Array }>;
 
   /**
    * Sign EIP-712 typed data with the adapter's primary signer. Used by

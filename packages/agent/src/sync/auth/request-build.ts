@@ -6,8 +6,12 @@ import {
 } from '../../dkg-agent-constants.js';
 import { requireExactAssetUals } from '../exact-assets.js';
 import { encodePipeSyncRequestTail } from './pipe-request-tail.js';
+import {
+  syncRequestSigningPreimage,
+  type SyncRequestIdentitySigner,
+  type SyncRequestSigner,
+} from './request-signing.js';
 import { EXACT_SYNC_GZIP_ENCODING, resolveExactSyncGzipProfile } from '../wire-compression.js';
-import type { SyncRequestSigner } from './request-signing.js';
 
 // 'catalog' (§7) — the public facet open-serve: served to ANYONE
 // without the allowlist gate, bounded to exactly the `_catalog` named graph.
@@ -136,7 +140,8 @@ interface BuildSyncRequestParams {
     authSelector?: string,
   ) => Uint8Array;
   getIdentityId: () => Promise<bigint>;
-  signMessage?: (digest: Uint8Array) => Promise<{ r: Uint8Array; vs: Uint8Array }>;
+  /** Signs as the node identity; it is given the digest's preimage for an external signer. */
+  signMessage?: SyncRequestIdentitySigner;
   /**
    * Agent address the request is being made ON BEHALF OF for THIS
    * context graph. NOT the process-wide default — the caller must pick
@@ -148,8 +153,9 @@ interface BuildSyncRequestParams {
   /**
    * The signing capability of `claimedAgentAddress` (see
    * `claimedAgentSyncRequestSigner`), used when no chain identity signs and
-   * whenever the agent's own signature is required. Its signature must recover
-   * to `claimedAgentAddress`.
+   * whenever the agent's own signature is required; it is given the digest's
+   * preimage for an external signer. Its signature must recover to
+   * `claimedAgentAddress`.
    */
   claimedAgentSigner?: SyncRequestSigner;
 }
@@ -287,10 +293,12 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     request.authPurpose,
     request.authSelector,
   );
+  // The signed fields, which an external signer is given to recompute the digest.
+  const preimage = syncRequestSigningPreimage(request);
   // The claimed agent's signature, which must recover to the claimed agent.
   const signAsClaimedAgent = claimedAgentAddress && claimedAgentSigner
     ? async (): Promise<string> => {
-      const signature = await claimedAgentSigner(digest);
+      const signature = await claimedAgentSigner(digest, preimage);
       if (ethers.verifyMessage(digest, signature).toLowerCase() !== claimedAgentAddress.toLowerCase()) {
         throw new Error(
           `Cannot build authenticated sync request for "${contextGraphId}": the signature does not recover to claimed agent ${claimedAgentAddress}`,
@@ -337,7 +345,7 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     // The responder enforces recoveredAddress === member gate entry.
     setClaimedAgentSignature(await signAsClaimedAgent());
   } else if (identityId > 0n && typeof signMessage === 'function') {
-    const signature = await signMessage(digest);
+    const signature = await signMessage(digest, preimage);
     request.requesterIdentityId = identityId.toString();
     request.requesterSignatureR = ethers.hexlify(signature.r);
     request.requesterSignatureVS = ethers.hexlify(signature.vs);

@@ -19,7 +19,7 @@ import { RemoteSignerError, isRemoteSignerError } from '../src/remote-signer-err
 import { connectRemoteSigners } from '../src/remote-signer-connect.js';
 import { connectConfiguredRemoteSigners, resolveChainSignerConfig } from '../src/remote-signer-config.js';
 import { RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
-import { OperationalKeyUnavailableError, isExternalEvmSigner } from '../src/evm-signer.js';
+import { OperationalKeyUnavailableError, isExternalEvmSigner, signMessageWithPreimage } from '../src/evm-signer.js';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { operationalSigningOf } from '../src/chain-adapter.js';
 import { recorder } from './rpc-failover-test-helpers.js';
@@ -433,6 +433,63 @@ describe('RemoteSigner verification', () => {
     const personal = await fakeSigner({ unsupported: ['eth_sign'] });
     expect(await new RemoteSigner(WALLET_A.address, client(personal)).signMessage('hello')).toBe(await WALLET_A.signMessage('hello'));
     expect(personal.calls('personal_sign')[0].params).toEqual([ethers.hexlify(ethers.toUtf8Bytes('hello')), WALLET_A.address.toLowerCase()]);
+  });
+
+  it('offers a structured preimage first and falls back to the message once the method is not found', async () => {
+    const digest = ethers.getBytes(ethers.id('request digest'));
+    const preimage = { kind: 'example', n: 7 };
+    const request = { method: 'test_signFromPreimage', preimage, message: digest };
+    const expected = await WALLET_A.signMessage(digest);
+
+    // A signer that implements the method gets the address and the preimage, never the message.
+    const structured = await fakeSigner({ preimageMethods: { test_signFromPreimage: () => digest } });
+    const answering = new RemoteSigner(WALLET_A.address, client(structured));
+    expect(await answering.signMessageWithPreimage(request)).toBe(expected);
+    expect(structured.requests.map((entry) => entry.method)).toEqual(['test_signFromPreimage']);
+    expect(structured.requests[0].params).toEqual([WALLET_A.address.toLowerCase(), preimage]);
+
+    // A signer without it is asked to sign the message, and is not offered the method again.
+    const plain = await fakeSigner();
+    const fallback = new RemoteSigner(WALLET_A.address, client(plain));
+    expect(await fallback.signMessageWithPreimage(request)).toBe(expected);
+    expect(await fallback.signMessageWithPreimage(request)).toBe(expected);
+    expect(plain.requests.map((entry) => entry.method)).toEqual(['test_signFromPreimage', 'eth_sign', 'eth_sign']);
+    expect(plain.calls('eth_sign')[0].params).toEqual([WALLET_A.address.toLowerCase(), ethers.hexlify(digest)]);
+
+    // A Clef signer falls back to account_signData.
+    const clef = await fakeSigner({ api: 'clef' });
+    expect(await new RemoteSigner(WALLET_A.address, client(clef, { api: 'clef' })).signMessageWithPreimage(request)).toBe(expected);
+    expect(clef.requests.map((entry) => entry.method)).toEqual(['test_signFromPreimage', 'account_signData']);
+  });
+
+  it('never turns a refused or wrong preimage signature into a message signing request', async () => {
+    const digest = ethers.getBytes(ethers.id('request digest'));
+    const request = { method: 'test_signFromPreimage', preimage: { n: 1 }, message: digest };
+    const refusing = await fakeSigner({
+      reject: (method) => method === 'test_signFromPreimage' ? { code: -32000, message: 'policy refused the request' } : undefined,
+    });
+    await expect(new RemoteSigner(WALLET_A.address, client(refusing)).signMessageWithPreimage(request))
+      .rejects.toMatchObject({ code: 'REMOTE_SIGNER_REJECTED' });
+    expect(refusing.requests.map((entry) => entry.method)).toEqual(['test_signFromPreimage']);
+
+    const otherDigest = await fakeSigner({
+      preimageMethods: { test_signFromPreimage: () => ethers.getBytes(ethers.id('another digest')) },
+    });
+    await expect(new RemoteSigner(WALLET_A.address, client(otherDigest)).signMessageWithPreimage(request))
+      .rejects.toMatchObject({ code: 'REMOTE_SIGNER_INVALID_SIGNATURE' });
+    expect(otherDigest.requests.map((entry) => entry.method)).toEqual(['test_signFromPreimage']);
+  });
+
+  it('signs with a local wallet or an external signer through one helper', async () => {
+    const digest = ethers.getBytes(ethers.id('request digest'));
+    const request = { method: 'test_signFromPreimage', preimage: { n: 2 }, message: digest };
+    expect(await signMessageWithPreimage(WALLET_B, request)).toBe(await WALLET_B.signMessage(digest));
+    const plain = await fakeSigner();
+    expect(await signMessageWithPreimage(new RemoteSigner(WALLET_B.address, client(plain)), request))
+      .toBe(await WALLET_B.signMessage(digest));
+    // An external signer without the capability signs the message.
+    const minimal = { isExternalSigner: true, address: WALLET_B.address, signMessage: (message: Uint8Array) => WALLET_B.signMessage(message) };
+    expect(await signMessageWithPreimage(minimal as never, request)).toBe(await WALLET_B.signMessage(digest));
   });
 
   it('normalizes high-s and v=0/1 signatures and rejects ones from another key', async () => {
@@ -950,6 +1007,27 @@ describe('EVMChainAdapter with external signers', () => {
       expect(signature).toBe(await WALLET_B.signTypedData(DOMAIN, TYPES, VALUE));
     } finally {
       adapter.destroy();
+    }
+  });
+
+  it('signs a message with its preimage as the primary account, external or local', async () => {
+    const digest = ethers.getBytes(ethers.id('identity request digest'));
+    const request = { method: 'test_signFromPreimage', preimage: { n: 3 }, message: digest };
+    const expected = ethers.Signature.from(await WALLET_A.signMessage(digest));
+    const signer = await fakeSigner({ preimageMethods: { test_signFromPreimage: () => digest } });
+    const { operational } = await connectRemoteSigners({ url: signer.url, authToken: TOKEN });
+    const external = new EVMChainAdapter({ ...base, signers: operational, allowNoAdminSigner: true });
+    const local = new EVMChainAdapter({ ...base, privateKey: KEY_A, allowNoAdminSigner: true });
+    try {
+      for (const adapter of [external, local]) {
+        const { r, vs } = await adapter.signMessageWithPreimage(request);
+        expect([ethers.hexlify(r), ethers.hexlify(vs)]).toEqual([expected.r, expected.yParityAndS]);
+      }
+      expect(signer.calls('test_signFromPreimage')[0].params).toEqual([WALLET_A.address.toLowerCase(), { n: 3 }]);
+      expect(signer.calls('eth_sign')).toEqual([]);
+    } finally {
+      external.destroy();
+      local.destroy();
     }
   });
 

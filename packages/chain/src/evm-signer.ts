@@ -17,6 +17,20 @@ export interface EvmSigner extends ethers.Signer {
 }
 
 /**
+ * An EIP-191 message together with the structured preimage it was derived
+ * from (for example the fields behind a 32-byte digest), so that an external
+ * signer can recompute the message and check it before it signs.
+ */
+export interface PreimageSigningRequest {
+  /** JSON-RPC method that takes `[address, preimage]` and returns the EIP-191 signature over `message`. */
+  readonly method: string;
+  /** The structured preimage; the signer derives `message` from it. */
+  readonly preimage: Readonly<Record<string, unknown>>;
+  /** The bytes signed as an EIP-191 message, exactly as `eth_sign` would sign them. */
+  readonly message: Uint8Array;
+}
+
+/**
  * A signer whose key is held outside this process (a remote signing service,
  * an HSM, ...). As for every signer, the adapter prepares a transaction first
  * (nonce, gas, fees, each endpoint under its deadline, with failover) and then
@@ -26,6 +40,8 @@ export interface EvmSigner extends ethers.Signer {
 export interface ExternalEvmSigner extends EvmSigner {
   readonly isExternalSigner: true;
   connect(provider: ethers.Provider | null): ExternalEvmSigner;
+  /** The EIP-191 signature over `request.message`, offering the signer its preimage first. */
+  signMessageWithPreimage?(request: PreimageSigningRequest): Promise<string>;
 }
 
 /**
@@ -42,6 +58,22 @@ export interface AuthorSigner {
     value: Record<string, unknown>,
   ): Promise<string>;
   signMessage(message: string | Uint8Array): Promise<string>;
+}
+
+/**
+ * The EIP-191 signature of `signer` (an operational or an author signer) over
+ * `request.message`. An external signer is given the structured preimage to
+ * check (see {@link PreimageSigningRequest}); a local wallet signs the message
+ * itself. The signature is the same either way, so receivers verify it alike.
+ */
+export function signMessageWithPreimage(
+  signer: Pick<AuthorSigner, 'signMessage'>,
+  request: PreimageSigningRequest,
+): Promise<string> {
+  if (isExternalEvmSigner(signer) && typeof signer.signMessageWithPreimage === 'function') {
+    return signer.signMessageWithPreimage(request);
+  }
+  return signer.signMessage(request.message);
 }
 
 /**
