@@ -45,7 +45,7 @@ import { HubResolutionCache } from './hub-resolution-cache.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
-import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, isCausedByRemoteSigner, isHubStaleError, isInsufficientFundsError, InsufficientPublisherFundsError, PcaFundingUnknownError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
+import { errorCode, errorMessage, errorStatus, enrichEvmError, isCausedByRemoteSigner, isHubStaleError, isInsufficientFundsError, InsufficientPublisherFundsError, PcaFundingUnknownError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import { collectEvmErrorText } from './evm-error-text.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import {
@@ -87,6 +87,7 @@ import {
 } from './rpc-usage.js';
 import { ChainWriteAheadHookError } from './write-ahead-hook-error.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
+import { prepareV10WriteWithAllowanceRecovery } from './evm-v10-write-preparation.js';
 import { formatProviderContext } from './evm-adapter-types.js';
 import {
   AbortableKeyedSingleFlight,
@@ -125,7 +126,7 @@ import type {
   RandomSamplingReadContextReader,
 } from './random-sampling-read-context.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
-import { RPC_READ_STALL_TIMEOUT_MS, CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRIES, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE,
+import { RPC_READ_STALL_TIMEOUT_MS, CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE,
   TX_SERIALIZER_OBSERVE_AFTER_MS,
   TX_SERIALIZER_OBSERVE_INTERVAL_MS,
   resolveTxSerializerStallAfterMs,
@@ -1969,15 +1970,11 @@ export class EVMChainAdapterBase {
   }
 
   /**
-   * #888: prepare a V10 write tx (shared by publish + update) with a one-shot
-   * recovery for a stale-RPC `TooLowAllowance` revert, and return the prepared,
-   * unsigned tx of the attempt that succeeded. Gas estimation during preparation
-   * can read a stale TRAC allowance and revert even though the approve
-   * succeeded; this is strictly pre-broadcast, so on that ONE revert we force a
-   * fresh approve (`ensureV10ApproveTrac(force=true)`) and prepare again exactly
-   * once. Any other error, or a second `TooLowAllowance`, propagates. Both write
-   * paths sign the result once, after every retry and recovery, so a signer
-   * failure is never read as a revert or an endpoint failure.
+   * #888: prepare a V10 write tx (shared by publish + update) with the one-shot
+   * stale-allowance recovery of `prepareV10WriteWithAllowanceRecovery`: the
+   * per-endpoint preparation, and a forced `ensureV10ApproveTrac(force=true)`
+   * sent by `approvalSender`. Both write paths sign the result once, inside their
+   * per-wallet serializer window, strictly pre-broadcast / pre-WAL.
    */
   protected async prepareV10WithAllowanceRecovery(
     signer: EvmSigner,
@@ -1989,67 +1986,17 @@ export class EVMChainAdapterBase {
     reapproveLabel: string,
     approvalSender: ContractWriteSender = this.sendContractTransaction.bind(this),
   ): Promise<PreparedTransaction> {
-    // Per-endpoint preparation failover lives in the shared
-    // `prepareAcrossProviders` (so a 429ing primary can't fail-fast the
-    // publish); the #888 stale-allowance recovery stays a strict ONE-SHOT. OUTER
-    // (this loop) owns the SINGLE `forcedReapprove` latch + the lone forced
-    // approve; INNER iterates the bare providers. `TooLowAllowance` is a
-    // CALL_EXCEPTION (non-retryable), so the inner loop does NOT fail over on it —
-    // it propagates up here. The latch is never reset per endpoint, so at most
-    // ONE forced approve fires per publish regardless of endpoints tried. Only the
-    // one prepared tx is signed and broadcast; the whole thing runs inside the
-    // per-wallet `SignerTxSerializer` (#953), strictly pre-broadcast / pre-WAL.
-    let forcedReapprove = false;
-    for (;;) {
-      try {
-        for (let preparationPass = 0; ; preparationPass += 1) {
-          try {
-            return await this.prepareAcrossProviders(
-              kaContract,
-              method,
-              [methodParams],
-              signer,
-              `V10 ${method}`,
-              { gasLimitBufferBps: V10_WRITE_GAS_LIMIT_BUFFER_BPS },
-            );
-          } catch (err) {
-            enrichEvmError(err);
-            const retryDisposition = classifyRpcRetryDisposition(err);
-            if ((errorCode(err) !== 'RPC_ENDPOINTS_EXHAUSTED'
-                && retryDisposition !== 'failover')
-              || preparationPass >= RPC_PREPARATION_ENDPOINT_SET_RETRIES) {
-              throw err;
-            }
-            const baseDelay = Math.min(
-              RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS,
-              RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS * 2 ** preparationPass,
-            );
-            const jitter = Math.floor(Math.random() * Math.max(1, baseDelay / 2));
-            await sleep(baseDelay + jitter);
-          }
-        }
-      } catch (err) {
-        enrichEvmError(err);
-        if (!forcedReapprove && isTooLowAllowanceError(err)) {
-          forcedReapprove = true;
-          console.warn(
-            `[chain] V10 ${method} gas-estimation reverted TooLowAllowance for ` +
-            `signer=${signer.address} — forcing a fresh TRAC approve and ` +
-            `retrying once (likely a stale RPC allowance read, #888).`,
-          );
-          await this.ensureV10ApproveTrac(
-            signer,
-            kav10Address,
-            tokenAmount,
-            reapproveLabel,
-            true,
-            approvalSender,
-          );
-          continue; // re-run the WHOLE inner per-provider preparation loop, allowance now in place
-        }
-        throw err; // any other error, or a SECOND TooLowAllowance, propagates
-      }
-    }
+    return prepareV10WriteWithAllowanceRecovery(method, signer.address, {
+      prepare: () => this.prepareAcrossProviders(
+        kaContract,
+        method,
+        [methodParams],
+        signer,
+        `V10 ${method}`,
+        { gasLimitBufferBps: V10_WRITE_GAS_LIMIT_BUFFER_BPS },
+      ),
+      forceReapprove: () => this.ensureV10ApproveTrac(signer, kav10Address, tokenAmount, reapproveLabel, true, approvalSender),
+    });
   }
 
   protected async sendSignedTransactionAndWait(
