@@ -214,6 +214,7 @@ export default defineConfig({
       "test/context-graph-membership-persist-scheduler.test.ts",
       "test/context-graph-subscription-persist-scheduler.test.ts",
       "test/context-graph-subscription-persist-lifecycle.test.ts",
+      "test/context-graph-subscription-row-identity.test.ts",
       "test/outbox-drainer.test.ts",
       "test/sync-checkpoint-key.test.ts",
       "test/map-with-concurrency.test.ts",

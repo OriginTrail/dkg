@@ -42,6 +42,54 @@ export function normalizeContextGraphSubscriptionTransition(
 }
 
 /**
+ * Whether a stored row and the row about to replace it say the same thing.
+ *
+ * The live map holds one object per row, and work in flight keeps the object
+ * it started under to learn that the row changed. A write that changes nothing
+ * (a client repeating its subscribe, a readiness result equal to the stored
+ * one) must therefore keep that object: it is not a new version of the row.
+ * A field that is absent and one that is `undefined` are the same row.
+ */
+export function contextGraphSubscriptionRowsEqual(
+  stored: ContextGraphSub,
+  next: ContextGraphSub,
+): boolean {
+  const left = stored as unknown as Record<string, unknown>;
+  const right = next as unknown as Record<string, unknown>;
+  for (const key of new Set([...Object.keys(left), ...Object.keys(right)])) {
+    const a = left[key];
+    const b = right[key];
+    if (Object.is(a, b)) continue;
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length
+      || a.some((value, index) => !Object.is(value, b[index]))) return false;
+  }
+  return true;
+}
+
+/**
+ * Whether a row that was stored again still gives graph-scoped sync work the
+ * premises it started under: the same admission, lifetime, chain binding and
+ * metadata state. Readiness bookkeeping (`synced`, `sharedMemorySynced`), the
+ * reconcile watermark and descriptive fields may differ: a store of verified
+ * chain data reads none of them. A row that appeared or went away is never
+ * the same premises.
+ */
+export function contextGraphSubscriptionSyncPremisesEqual(
+  captured: ContextGraphSub | undefined,
+  current: ContextGraphSub | undefined,
+): boolean {
+  if (captured === undefined || current === undefined) return false;
+  return captured.subscribed === current.subscribed
+    && (captured.coreHosted === true) === (current.coreHosted === true)
+    && captured.syncMode === current.syncMode
+    && captured.onChainId === current.onChainId
+    && captured.onChainHash === current.onChainHash
+    // `metaSynced === false` and an absent value are read differently.
+    && captured.metaSynced === current.metaSynced
+    && (captured.pendingMeta === true) === (current.pendingMeta === true);
+}
+
+/**
  * An inactive next state retains identity, including explicit unsubscribe.
  * A missing hash may be enriched; numeric/known-hash changes do not retain it.
  */

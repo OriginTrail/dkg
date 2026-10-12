@@ -763,6 +763,8 @@ import {
   isContextGraphSubscriptionPersistenceTargetCurrent,
   projectContextGraphJoinSubscriptionRecord,
   contextGraphSubscriptionClearTargets,
+  contextGraphSubscriptionRowsEqual,
+  contextGraphSubscriptionSyncPremisesEqual,
   retainsInactiveContextGraphBinding,
 } from './context-graph-subscription-policy.js';
 import { partitionSupersededContextGraphNamePlaceholders } from './dkg-agent-cg-name-resolution.js';
@@ -6258,6 +6260,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           operationContextGraphId,
           generation,
         ),
+      isEquivalentSubscription: contextGraphSubscriptionSyncPremisesEqual,
       assertLifecycleCurrent,
       asAbortError: asSyncFetchAbortError,
       track: (run) => this.graphScopedStorePhysicalRuns.add(run),
@@ -6388,12 +6391,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         bindingChangedError: () => asSyncFetchAbortError(new Error(
           `Context graph binding for ${asset.contextGraphId} changed during graph-scoped store`,
         )),
-        operation: async ({
-          subscription,
-          isBindingCurrent,
-          recaptureBindingGeneration,
-          assertCurrent,
-        }): Promise<GraphScopedMaterializationOutcome> => {
+        operation: async (control): Promise<GraphScopedMaterializationOutcome> => {
+          const { isBindingCurrent, recaptureBindingGeneration, assertCurrent } = control;
           const authentication = await authenticateDurableGraphScopedAsset({
             chain: this.chain,
             asset,
@@ -6409,7 +6408,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               );
             },
           });
+          // Authentication read the chain, the asset and the row's binding. A
+          // row stored again meanwhile with the same admission and binding (a
+          // repeated subscribe, a readiness result) is the row a store started
+          // now would run under: continue under it instead of dropping the
+          // verified asset. Everything below runs under that one row.
+          control.adoptEquivalentSubscription();
           assertCurrent();
+          const subscription = control.subscription;
           const verifiedOnChainId = authentication.onChainContextGraphId;
           if (
             verifiedOnChainId
@@ -9270,10 +9276,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ? this.contextGraphWireId(normalizedNext.onChainHash)
       : undefined;
     const nextWireId = nextOnChainHash ?? localWireId;
-    const canonicalNext: ContextGraphSub = {
+    const nextRow: ContextGraphSub = {
       ...normalizedNext,
       ...(normalizedNext.onChainHash === nextOnChainHash ? {} : { onChainHash: nextOnChainHash }),
     };
+    // A write that changes nothing keeps the stored row. Work in flight holds
+    // that object to learn of a change, and a repeated subscribe is not one.
+    // A caller that hands the stored row itself back may have changed it in
+    // place; what it changed cannot be told, so that write is a new row.
+    const canonicalNext = previous !== undefined && next !== previous
+      && contextGraphSubscriptionRowsEqual(previous, nextRow)
+      ? previous
+      : nextRow;
     const retainsInactiveBinding = retainsInactiveContextGraphBinding(previous, canonicalNext);
     const bindingFacts = this.contextGraphBindingState.applySubscriptionTransition(
       contextGraphId,
