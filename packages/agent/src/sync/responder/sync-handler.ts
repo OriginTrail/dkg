@@ -55,6 +55,7 @@ import {
 } from '../priority-admission-queue.js';
 import { resolveSyncResponderRequestProfile } from './page-framing-policy.js';
 import { createBoundedExactAssetExportCache, type ExactAssetExportLease, type ExactAssetExportCache } from './exact-asset-export-cache.js';
+import { createResponderDurableMetaPlanMemo } from './durable-meta-plan.js';
 import { encodeResolvedExactSyncResponse } from '../wire-compression.js';
 
 const MAX_SYNC_SESSION_TOKENS = 256;
@@ -473,6 +474,9 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
     { phase: 'shared_memory', budget: responderSnapshotBudget },
   );
+  const durableMetaPlanMemo = createResponderDurableMetaPlanMemo(
+    DURABLE_DATA_SYNC_SESSION_TTL_MS, SYNC_RESPONDER_DURABLE_META_SNAPSHOT_LIMIT, responderSnapshotBudget,
+  );
   const freshSwmDataGraphPlanMemo = createResponderFreshSwmDataGraphPlanMemo(
     DURABLE_DATA_SYNC_SESSION_TTL_MS,
     SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
@@ -871,6 +875,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             rowListCacheKey: session?.rowListCacheKey,
             refreshRowList: session?.refreshRowList,
             refreshGeneration: session?.refreshGeneration,
+            metaPlanMemo: durableMetaPlanMemo,
             assetUals,
             maxResponseBytes: pageFraming.maxPageBytes,
             // NON-NEGOTIATED legacy requesters (no wire `pageMode`) must fail

@@ -15,15 +15,16 @@ import { SyncRowSnapshotBudgetError } from '../src/sync/responder/snapshot-budge
 import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 
 /**
- * The oversized-snapshot fallbacks for durable-meta and TTL-cutoff SWM-data now
- * use store-bounded paged SPARQL (readDurableMetaRowsPage / readFreshSwmDataRowsPage)
- * instead of re-materializing the complete filtered set per page. These tests
- * prove the paged path returns the SAME SET of rows as the canonical in-memory
- * filter, and that it issues bounded ORDER BY/OFFSET/LIMIT store queries.
+ * The oversized-snapshot fallbacks for durable-meta and TTL-cutoff SWM-data
+ * read store-bounded pages (durable meta: exact subject lookups from a session
+ * plan; SWM data: readFreshSwmDataRowsPage) instead of re-materializing the
+ * complete filtered set per page. These tests prove the paged path returns the
+ * SAME SET of rows as the canonical in-memory filter, and that its store
+ * queries are bounded.
  *
  * The canonical result is produced by the SAME handler with a generous budget
- * (cached path → readDurableMetaRows / readFreshSwmDataRows); the paged result
- * is produced with a tiny per-snapshot budget that forces the fallback.
+ * (cached snapshot path); the paged result is produced with a tiny
+ * per-snapshot budget that forces the fallback.
  */
 
 const TINY_SNAPSHOT_BUDGET = {
@@ -138,7 +139,7 @@ describe('oversized responder fallback is store-bounded and set-equivalent', () 
       { contextGraphId: cgId, includeSharedMemory: false, phase: 'meta', limit: 5000, syncSessionId: 'canon' },
       5000,
     );
-    const boundedQuery = watchBoundedMetaPageQuery(paged, meta);
+    const boundedQuery = watchPlanPagedMetaQueries(paged, meta);
     const pagedResult = await collectAllPages(
       pagedCap,
       { contextGraphId: cgId, includeSharedMemory: false, phase: 'meta', limit: 3, syncSessionId: 'paged' },
@@ -147,7 +148,8 @@ describe('oversized responder fallback is store-bounded and set-equivalent', () 
 
     // The paged fallback is set-equivalent to the canonical in-memory filter.
     expect(pagedResult).toEqual(canonical);
-    // …and it actually paged in the store (bounded ORDER BY/OFFSET/LIMIT).
+    // …and it actually paged from the session plan (exact subject lookups, no
+    // store-side sort or OFFSET over the metadata graph).
     boundedQuery.assertObserved();
 
     // Sanity: the fixture really exercised the branches we think it did.
@@ -841,24 +843,32 @@ function watchBoundedDataPageQuery(store: OxigraphStore, graph: string) {
   return { assertObserved: () => expect(observed).toBeGreaterThan(0) };
 }
 
-/** Assert the durable-meta fallback issued a bounded, single-graph paged query. */
-function watchBoundedMetaPageQuery(store: OxigraphStore, metaGraph: string) {
+/**
+ * Assert the durable-meta fallback paged from a session plan: one row per
+ * admitted subject to build it, exact subject lookups to read pages, and no
+ * store-side sort or OFFSET over the metadata graph.
+ */
+function watchPlanPagedMetaQueries(store: OxigraphStore, metaGraph: string) {
   const originalQuery = store.query.bind(store);
-  let observed = 0;
-  store.query = (async (sparql: string) => {
+  let planBuilds = 0;
+  let subjectLookups = 0;
+  const sortedOrSkipped: string[] = [];
+  store.query = (async (sparql: string, options?: unknown) => {
     const normalized = sparql.replace(/\s+/g, ' ').trim();
-    if (
-      /^SELECT \?g \?s \?p \?o WHERE \{/.test(normalized) &&
-      normalized.includes(`VALUES ?g { <${metaGraph}> }`) &&
-      normalized.includes('ORDER BY ?g ?s ?p ?o') &&
-      /OFFSET \d+/.test(normalized) &&
-      /LIMIT \d+/.test(normalized)
-    ) {
-      observed += 1;
+    if (normalized.includes(`<${metaGraph}>`)) {
+      if (/\bORDER BY\b|\bOFFSET\b/.test(normalized)) sortedOrSkipped.push(normalized);
+      if (normalized.includes('GROUP BY ?s')) planBuilds += 1;
+      if (normalized.includes('VALUES ?s {')) subjectLookups += 1;
     }
-    return originalQuery(sparql);
+    return originalQuery(sparql, options as never);
   }) as OxigraphStore['query'];
-  return { assertObserved: () => expect(observed).toBeGreaterThan(0) };
+  return {
+    assertObserved: () => {
+      expect(sortedOrSkipped).toEqual([]);
+      expect(planBuilds).toBeGreaterThan(0);
+      expect(subjectLookups).toBeGreaterThan(0);
+    },
+  };
 }
 
 /** Assert the SWM-data fallback issued a concrete-graph, mapped-root paged query. */
