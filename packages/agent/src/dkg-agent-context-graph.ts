@@ -136,7 +136,8 @@ import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { buildAuthoritativePublicMetaQuads } from './context-graph-public-meta-proof.js';
 import { replaceContextGraphMetadataFact } from './context-graph-metadata-fact.js';
 import { addExternalAuthorCuratorAsParticipant, isExternalAuthorCurator } from './external-author-curator.js';
-import { externalAuthorControlDigestSigner } from './external-author-signing.js';
+import { heldAuthorSigner } from './author-signer.js';
+import { rfc64AuthorDigestSignerV1 } from './rfc64/control-envelope-signer-v1.js';
 import { addRegistrationParticipantAgent, type RegistrationRoster } from './context-graph-registration-roster.js';
 import {
   RFC64_UNREGISTERED_REPLICA_AUTHORITY_PREDICATE_V1,
@@ -614,17 +615,14 @@ export class ContextGraphMethods extends DKGAgentBase {
       // Resolve the key only after the authenticated effective principal has
       // been proven to own the namespace. A sibling tenant must never be able
       // to make this node sign authority with another local agent's key.
-      const signerRecord = ownerAddress === effectiveCallerAddress
-        ? this.getWorkspaceSigningAgentForAddress(ownerAddress)
-        : null;
-      let signDigest: ((digest: Uint8Array) => Promise<string>) | undefined;
-      if (signerRecord !== null) {
-        const wallet = new ethers.Wallet(signerRecord.privateKey);
-        signDigest = (digest) => wallet.signMessage(digest);
-      } else if (requiresAuthenticatedReplicaAuthority && ownerAddress !== undefined && ownerAddress === effectiveCallerAddress) {
-        // An owner whose key the external signer holds as an author key signs the seed there.
-        signDigest = await externalAuthorControlDigestSigner(this.config, ownerAddress);
-      }
+      // The owner's key held on the node signs the seed; when the authority is
+      // required, an author key the external signer holds signs it there.
+      const ownerSigner = ownerAddress !== undefined && ownerAddress === effectiveCallerAddress
+        ? await heldAuthorSigner(this, requiresAuthenticatedReplicaAuthority ? this.config : undefined, ownerAddress)
+        : undefined;
+      const signDigest = ownerSigner === undefined || ownerAddress === undefined
+        ? undefined
+        : rfc64AuthorDigestSignerV1(ownerAddress, ownerSigner);
       if (requiresAuthenticatedReplicaAuthority && signDigest === undefined) {
         throw new Error(
           `Context graph "${opts.id}" requires an authenticated RFC-64 replica authority, ` +

@@ -13,6 +13,7 @@ import type { AuthorSigner, ChainAdapter, ExternalAuthorSigners } from '@origint
 import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
 import type { AgentKeyRecord } from './agent-keystore.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { rfc64AuthorDigestSignerV1 } from './rfc64/control-envelope-signer-v1.js';
 
 export interface ExternalAuthorConfig {
   readonly chainConfig?: { readonly authors?: ExternalAuthorSigners };
@@ -47,26 +48,17 @@ export async function externalAuthorSignerFor(
 }
 
 /**
- * The EIP-191 signer of RFC-64 control objects issued by `address` (a context
- * graph's replica authority seed, an author's shared-memory inventory and
- * catalog) when the external signer holds it as an author key: it signs the
- * object's 32-byte digest, and the signature must recover to `address`. The
- * one place both kinds are signed externally. Undefined when `address` is not
- * one of its author keys: a payer never signs as an author.
+ * The EIP-191 signer of RFC-64 control objects issued by `address` (see
+ * {@link rfc64AuthorDigestSignerV1}) when the external signer holds it as an
+ * author key. Undefined when `address` is not one of its author keys: a payer
+ * never signs as an author.
  */
 export async function externalAuthorControlDigestSigner(
   config: ExternalAuthorConfig | undefined,
   address: string,
 ): Promise<((digest: Uint8Array) => Promise<string>) | undefined> {
   const author = await externalAuthorSignerFor(config, address);
-  if (author === undefined) return undefined;
-  return async (digest) => {
-    const signature = await author.signMessage(digest);
-    if (ethers.verifyMessage(digest, signature).toLowerCase() !== address.toLowerCase()) {
-      throw new Error(`RFC-64: the external signer's signature does not recover to author ${address}`);
-    }
-    return signature;
-  };
+  return author === undefined ? undefined : rfc64AuthorDigestSignerV1(address, author);
 }
 
 /**

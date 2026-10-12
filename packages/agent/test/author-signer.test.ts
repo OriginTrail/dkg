@@ -2,11 +2,12 @@
  * The author-signing capability that finalize, selection publishing and
  * updates resolve: a custodial agent's key held on the node, or the external
  * signer that holds a self-sovereign agent's author key. Both sign the same
- * typed data alike.
+ * typed data alike, and the same RFC-64 control-object digests.
  */
 import { describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
 import { heldAuthorSigner, registeredAgentAuthorSigner } from '../src/author-signer.js';
+import { rfc64AuthorDigestSignerV1 } from '../src/rfc64/control-envelope-signer-v1.js';
 import { HARDHAT_KEYS } from '../../chain/test/hardhat-harness.js';
 
 const custodial = new ethers.Wallet(HARDHAT_KEYS.EXTRA1);
@@ -68,5 +69,27 @@ describe('author signer', () => {
     const uncoded = await registeredAgentAuthorSigner(agents, config, keyless, 'Selection-based VM publish').catch((error: unknown) => error);
     expect(uncoded).toMatchObject({ message: `Selection-based VM publish: custodial agent ${keyless} has no private key on file` });
     expect((uncoded as { code?: unknown }).code).toBeUndefined();
+  });
+
+  it('signs RFC-64 control-object digests through either, as the key itself would', async () => {
+    const digest = ethers.getBytes(ethers.id('control object'));
+    for (const [address, key] of [[custodial.address, custodial], [held.address, held]] as const) {
+      const author = await heldAuthorSigner(agents, config, address);
+      const sign = rfc64AuthorDigestSignerV1(address.toLowerCase(), author!);
+      expect(await sign(digest)).toBe(await key.signMessage(digest));
+    }
+
+    // A key that is not the issuer's never signs, and a cancelled request never starts.
+    let signed = 0;
+    const counting = { address: held.address, signMessage: async (message: string | Uint8Array) => { signed += 1; return held.signMessage(message); } };
+    await expect(rfc64AuthorDigestSignerV1(custodial.address, counting)(digest)).rejects.toThrow(/does not belong to author/);
+    const abort = new AbortController();
+    const reason = new Error('cancelled');
+    abort.abort(reason);
+    await expect(rfc64AuthorDigestSignerV1(held.address, counting, abort.signal)(digest)).rejects.toBe(reason);
+    expect(signed).toBe(0);
+    // A signature by another key is refused.
+    const misrouted = { address: held.address, signMessage: (message: string | Uint8Array) => custodial.signMessage(message) };
+    await expect(rfc64AuthorDigestSignerV1(held.address, misrouted)(digest)).rejects.toThrow(/does not recover to author/);
   });
 });

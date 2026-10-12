@@ -53,7 +53,9 @@ import { markRfc64LegacySwmRepublishedV1 } from
   './rfc64/legacy-swm-boundary-v1.js';
 import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 } from
   './rfc64/catalog-peers-v1.js';
-import { externalAuthorControlDigestSigner, signsThroughExternalSigner } from './external-author-signing.js';
+import { signsThroughExternalSigner } from './external-author-signing.js';
+import { heldAuthorSigner } from './author-signer.js';
+import { rfc64AuthorDigestSignerV1 } from './rfc64/control-envelope-signer-v1.js';
 
 const RFC64_DEFAULT_CATALOG_DELEGATION_EXPIRES_AT_V1 =
   '253402300799000' as TimestampMsV1;
@@ -228,22 +230,8 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     authorAddress: EvmAddressV1,
     signal?: AbortSignal,
   ): Rfc64CatalogAuthorSignerV1 {
-    const custodialKey = this.getCustodialAgentPrivateKey(authorAddress);
-    if (custodialKey !== undefined) {
-      const wallet = new ethers.Wallet(
-        custodialKey.startsWith('0x') ? custodialKey : `0x${custodialKey}`,
-      );
-      if (wallet.address.toLowerCase() !== authorAddress) {
-        throw new Error('RFC-64 custodial author key does not match the confirmed seal');
-      }
-      return Object.freeze({
-        address: authorAddress,
-        signMessage: (message: Uint8Array) => raceAgainstAbortV1(
-          () => wallet.signMessage(message),
-          signal,
-        ),
-      });
-    }
+    // The legacy fallback for an author key held neither on the node nor by an
+    // external signer: the configured chain adapter's own message signer.
     const signMessageAs = this.chain.signMessageAs?.bind(this.chain);
     const signMessage = this.chain.signMessage?.bind(this.chain);
     const signWithChain = async (message: Uint8Array): Promise<string> => {
@@ -271,10 +259,12 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     return Object.freeze({
       address: authorAddress,
       signMessage: async (message: Uint8Array) => {
-        // An author key the external signer holds signs there. A node that signs
-        // externally never asks its payers to sign as an author.
-        const external = await externalAuthorControlDigestSigner(config, authorAddress);
-        if (external !== undefined) return raceAgainstAbortV1(() => external(message), signal);
+        // The author's key held on the node, or by the external signer as an
+        // author key (never a payer), signs. A node that signs externally never
+        // falls back to its payers.
+        throwIfAbortedV1(signal);
+        const author = await heldAuthorSigner(this, config, authorAddress);
+        if (author !== undefined) return rfc64AuthorDigestSignerV1(authorAddress, author, signal)(message);
         if (signsThroughExternalSigner(chain)) {
           throw new Error(`RFC-64: author ${authorAddress} has no key on this node and is no author key of its external signer`);
         }
