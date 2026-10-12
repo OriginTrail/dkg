@@ -1290,6 +1290,9 @@ describe('Working Memory Assertion Lifecycle', () => {
     admit();
     const promoted = await promoting;
     expect(confirmBeforeCommit).toHaveBeenCalledTimes(1);
+    // The same contract as a share: the message and the payload it belongs to, which the promote returns.
+    expect(promoted.gossipPayload).toBeDefined();
+    expect(confirmBeforeCommit).toHaveBeenCalledWith(promoted.gossipPayload!.message, promoted.gossipPayload);
     expect(settle).toHaveBeenCalledOnce();
     expect(settle).toHaveBeenCalledWith(true);
     expect(awaitAdmission).toHaveBeenCalledOnce();

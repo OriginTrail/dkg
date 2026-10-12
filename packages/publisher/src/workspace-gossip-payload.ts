@@ -32,6 +32,20 @@ export interface EncodedWorkspaceGossipPayload {
  */
 export type PrepareWorkspaceGossip = (message: Uint8Array) => Promise<Uint8Array>;
 
+/**
+ * The strict curator-ack gate (OT-RFC-49 curator-leader) of a shared-memory
+ * write, share or promote alike: called once the write's gossip payload is
+ * built, with the envelope the write prepared for it if any, and BEFORE anything
+ * is stored. `message` is always `payload.message`, passed first so callbacks
+ * that take only those bytes keep working. `applied: false` aborts the write
+ * with nothing stored: `CuratorRejectedError` when `rejected: true`, otherwise
+ * `CuratorUnconfirmedError`.
+ */
+export type ConfirmWorkspaceGossipBeforeCommit = (
+  message: Uint8Array,
+  payload: EncodedWorkspaceGossipPayload,
+) => Promise<{ applied: boolean; rejected?: boolean }>;
+
 /** `payload` with the envelope prepared for its message; its message and fan-out provenance are kept. */
 export function withWorkspaceGossipEnvelope(
   payload: EncodedWorkspaceGossipPayload,

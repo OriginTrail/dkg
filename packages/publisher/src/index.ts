@@ -147,6 +147,7 @@ export {
   createCapturedWorkspaceGossipPayload,
   createResolveCurrentWorkspaceGossipPayload,
   parseEncodedWorkspaceGossipPayload,
+  type ConfirmWorkspaceGossipBeforeCommit,
   type EncodedWorkspaceGossipPayload,
   type PrepareWorkspaceGossip,
 } from './workspace-gossip-payload.js';

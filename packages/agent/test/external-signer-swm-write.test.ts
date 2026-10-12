@@ -20,6 +20,7 @@ import {
   decodeWorkspacePublishRequest,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { createResolveCurrentWorkspaceGossipPayload } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/index.js';
 import { HARDHAT_KEYS } from '../../chain/test/hardhat-harness.js';
 import { startFakeRemoteSigner, type FakeSigner } from '../../chain/test/helpers/fake-remote-signer.js';
@@ -197,7 +198,8 @@ describe('shared-memory writes signed by an external author key', () => {
     const confirm = await agent.buildCuratorAckConfirmer(CG, await agent.resolveWorkspaceGossipSigningAgent(CG), {
       awaitCuratorAck: true,
     }, createOperationContext('share'));
-    await expect(confirm!(new Uint8Array([1, 2, 3]))).resolves.toEqual({ applied: true });
+    const promoted = createResolveCurrentWorkspaceGossipPayload(new Uint8Array([1, 2, 3]));
+    await expect(confirm!(promoted.message, promoted)).resolves.toEqual({ applied: true });
     expect(decodeGossipEnvelope(confirmed[1]!).agentAddress).toBe(author.address);
   });
 

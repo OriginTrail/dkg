@@ -114,6 +114,7 @@ import {
 import {
   createCapturedWorkspaceGossipPayload,
   createResolveCurrentWorkspaceGossipPayload,
+  type ConfirmWorkspaceGossipBeforeCommit,
   type EncodedWorkspaceGossipPayload,
   type PrepareWorkspaceGossip,
   withWorkspaceGossipEnvelope,
@@ -183,12 +184,12 @@ export type PublisherAssertionPromoteOptions = {
   trustedNonManifestCatalogTriples?: PublishOptions['trustedNonManifestCatalogTriples'];
   onChainContextGraphId?: string | bigint;
   /**
-   * Strict curator-ack gate (OT-RFC-49 curator-leader), same contract as
-   * `ShareOptions.confirmBeforeCommit`: called after the gossip message is
+   * Strict curator-ack gate (OT-RFC-49 curator-leader), the same contract as
+   * `ShareOptions.confirmBeforeCommit`: called with the gossip payload once it is
    * built and BEFORE the WM→SWM mutation. `applied: false` aborts the promote
    * (CuratorUnconfirmedError / CuratorRejectedError) leaving WM intact.
    */
-  confirmBeforeCommit?: (message: Uint8Array) => Promise<{ applied: boolean; rejected?: boolean }>;
+  confirmBeforeCommit?: ConfirmWorkspaceGossipBeforeCommit;
   /** Promote-scoped authority resolver; defaults to the configured workspace resolver. */
   resolveWorkspaceRecipients?: WorkspaceAgentRecipientResolver;
 };
@@ -778,7 +779,7 @@ export interface ShareOptions {
    * — so a write the curator (the authoritative replica) never received is never
    * accepted. Omitted, the legacy best-effort commit-then-fan-out path is kept.
    */
-  confirmBeforeCommit?: (message: Uint8Array, payload?: EncodedWorkspaceGossipPayload) => Promise<{ applied: boolean; rejected?: boolean }>;
+  confirmBeforeCommit?: ConfirmWorkspaceGossipBeforeCommit;
 }
 
 /** @deprecated Use ShareOptions */
@@ -9154,7 +9155,7 @@ export class DKGPublisher implements Publisher {
       // what we cannot send).
       if (opts?.confirmBeforeCommit) {
         if (!gossipPayload) throw new CuratorUnconfirmedError(contextGraphId);
-        const confirmation = await opts.confirmBeforeCommit(gossipPayload.message);
+        const confirmation = await opts.confirmBeforeCommit(gossipPayload.message, gossipPayload);
         if (!confirmation.applied) {
           if (confirmation.rejected) {
             // A definitive rejection proves the curator did not apply this
