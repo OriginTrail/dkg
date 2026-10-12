@@ -635,6 +635,24 @@ describe('external signer author keys', () => {
         chainAdapter: edge.chain,
         nodeRole: 'core',
       })).rejects.toThrow(/edge nodes only/);
+      // Nor does it take local operational keys, such as its payer's key left in the configuration:
+      // a fresh node refuses them before any agent is registered, and keeps no keystore.
+      const dir = await mkdtemp(join(tmpdir(), 'dkg-supplied-external-'));
+      try {
+        const refusal = await DKGAgent.create({
+          name: 'SuppliedExternalWithKeys',
+          store: new OxigraphStore(),
+          dataDir: dir,
+          chainAdapter: edge.chain,
+          chainConfig: { rpcUrl: chainConfig.rpcUrl, hubAddress: chainConfig.hubAddress, operationalKeys: [payer.privateKey] },
+          nodeRole: 'edge',
+        }).then(() => undefined, (error: unknown) => error as Error);
+        expect(refusal?.message).toMatch(/operationalKeys are local wallet keys and cannot be combined with a supplied chainAdapter/);
+        expect(refusal?.message).not.toContain(payer.privateKey.slice(2));
+        await expect(readFile(join(dir, 'agent-keystore.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
     } finally {
       (edge.chain as EVMChainAdapter).destroy();
     }

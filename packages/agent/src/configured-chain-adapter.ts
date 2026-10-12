@@ -21,6 +21,9 @@ type ChainAdapterConstructionConfig = Pick<
 
 const EXTERNAL_SIGNERS_EDGE_ONLY = 'External EVM signers are supported for edge nodes only: a core node signs StorageACKs, '
   + 'VERIFY approvals and profile operations with local keys';
+const EXTERNAL_SIGNERS_NO_LOCAL_KEYS = 'DKGAgentConfig: chainConfig.operationalKeys are local wallet keys and cannot be combined '
+  + 'with a supplied chainAdapter whose wallets sign through an external signer: such a node holds no operational key, '
+  + 'and its agents sign with author keys of the external signer';
 
 /**
  * The agent's chain adapter: the injected one, an EVM adapter over the
@@ -41,8 +44,12 @@ export function constructConfiguredChainAdapter(
     if (config.chainConfig?.signers?.length) {
       throw new Error('DKGAgentConfig: chainConfig.signers build the agent\'s own chain adapter and cannot be combined with a supplied chainAdapter');
     }
-    // A supplied adapter whose wallets sign externally is held to the same rule as configured signers.
-    if (core && signsThroughExternalSigner(chain)) throw new Error(EXTERNAL_SIGNERS_EDGE_ONLY);
+    // A supplied adapter whose wallets sign externally is held to the same rules as configured signers:
+    // edge nodes only, and no local operational key, which would become an agent's key and sign locally.
+    if (signsThroughExternalSigner(chain)) {
+      if (core) throw new Error(EXTERNAL_SIGNERS_EDGE_ONLY);
+      if (operationalKeys?.length) throw new Error(EXTERNAL_SIGNERS_NO_LOCAL_KEYS);
+    }
     if (!operationalKeys?.length) {
       const key = adapterOperationalPrivateKey(chain);
       if (key !== undefined) operationalKeys = [key];
