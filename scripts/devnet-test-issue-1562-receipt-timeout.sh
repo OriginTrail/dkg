@@ -10,7 +10,8 @@
 # shipped budget (10 requests a second, shared with the start-up reads of a
 # node that started seconds ago) one run answered the right 504 with the
 # configured deadline after 6.2 s, over the bound: the time before the receipt
-# wait is not what this script measures.
+# wait is not what this script measures. RECEIPT_TIMEOUT_TEST_NODE_BUDGET=shipped
+# runs it that way again.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -36,7 +37,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 [[ ! -d "$NODE_DIR" ]] || fail "$NODE_DIR already exists"
-DEVNET_RPC_BUDGET=local "$ROOT/scripts/devnet.sh" addnode "$NODE" edge >/dev/null
+DEVNET_RPC_BUDGET="${RECEIPT_TIMEOUT_TEST_NODE_BUDGET:-local}" "$ROOT/scripts/devnet.sh" addnode "$NODE" edge >/dev/null
 "$ROOT/scripts/devnet.sh" stop-node "$NODE" >/dev/null
 NODE_DIR="$NODE_DIR" node --input-type=module <<'NODE'
 import { readFileSync, writeFileSync } from 'node:fs';

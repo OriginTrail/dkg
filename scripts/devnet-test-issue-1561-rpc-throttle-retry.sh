@@ -17,7 +17,7 @@
 # budget. The steps before the publish are checked one by one and their answers
 # printed: on the shipped budget one run ended with the share not completed and
 # the publish refused for that reason, and the script had thrown the share's
-# answer away.
+# answer away. THROTTLE_TEST_NODE_BUDGET=shipped runs it that way again.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -71,7 +71,7 @@ proxy_pid=$!
 sleep 1
 curl -fsS "http://127.0.0.1:$PROXY_PORT/stats" >/dev/null || fail "fault proxy did not start"
 
-DEVNET_RPC_BUDGET=local "$ROOT/scripts/devnet.sh" addnode "$NODE" edge >/dev/null
+DEVNET_RPC_BUDGET="${THROTTLE_TEST_NODE_BUDGET:-local}" "$ROOT/scripts/devnet.sh" addnode "$NODE" edge >/dev/null
 "$ROOT/scripts/devnet.sh" stop-node "$NODE" >/dev/null
 NODE_DIR="$NODE_DIR" PROXY_PORT="$PROXY_PORT" node --input-type=module <<'NODE'
 import { readFileSync, writeFileSync } from 'node:fs';
