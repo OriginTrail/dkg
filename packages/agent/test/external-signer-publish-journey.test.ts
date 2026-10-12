@@ -195,6 +195,7 @@ describe('publish journey of a node that signs through an external signer', () =
     // chain; until then it drops shares (fail-closed) and catch-up heals them.
     const policyDeadline = Date.now() + 20_000;
     while (!(await core.isConfirmedPublicForHostMode(OPEN_CG)) && Date.now() < policyDeadline) await sleep(250);
+    expect(await core.isConfirmedPublicForHostMode(OPEN_CG)).toBe(true);
     await core.ingestSwmHostModeEnvelope(OPEN_CG, envelopes[0], edge.peerId);
     expect((await hostStore.iterate(OPEN_CG, 0)).map((entry) => ethers.hexlify(entry.envelopeBytes))).toEqual([ethers.hexlify(envelopes[0])]);
     const replayed = await core.query(`SELECT ?name WHERE { <${OPEN_ENTITY}> <http://schema.org/name> ?name }`, {
