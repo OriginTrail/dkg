@@ -67,12 +67,39 @@ export function contextGraphSubscriptionRowsEqual(
 }
 
 /**
+ * The rows of one subscription: the row a subscribe installed and every row
+ * stored over it since. Deleting the subscription ends the line, so a row
+ * installed afterwards under the same id is not in it, whatever its fields
+ * and although the graph's binding generation starts from zero again.
+ */
+const subscriptionLines = new WeakMap<ContextGraphSub, ContextGraphSub>();
+
+/** Record that `next` was stored over `previous` as the same subscription's row. */
+export function continueContextGraphSubscriptionLine(
+  previous: ContextGraphSub,
+  next: ContextGraphSub,
+): void {
+  subscriptionLines.set(next, subscriptionLines.get(previous) ?? previous);
+}
+
+/** Whether `current` is `captured` or a row stored over it, with no deletion of the subscription in between. */
+export function isContextGraphSubscriptionStoredAgain(
+  captured: ContextGraphSub | undefined,
+  current: ContextGraphSub | undefined,
+): boolean {
+  if (captured === undefined || current === undefined) return false;
+  return (subscriptionLines.get(captured) ?? captured) === (subscriptionLines.get(current) ?? current);
+}
+
+/**
  * Whether a row that was stored again still gives graph-scoped sync work the
  * premises it started under: the same admission, lifetime, chain binding and
  * metadata state. Readiness bookkeeping (`synced`, `sharedMemorySynced`), the
  * reconcile watermark and descriptive fields may differ: a store of verified
  * chain data reads none of them. A row that appeared or went away is never
- * the same premises.
+ * the same premises. Whether the row was stored again at all, rather than
+ * installed by a new subscribe after a deletion, is a separate question:
+ * {@link isContextGraphSubscriptionStoredAgain}.
  */
 export function contextGraphSubscriptionSyncPremisesEqual(
   captured: ContextGraphSub | undefined,

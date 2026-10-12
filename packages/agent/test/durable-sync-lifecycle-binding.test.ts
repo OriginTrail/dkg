@@ -95,6 +95,7 @@ import {
   LifecycleSyncMethods,
 } from '../src/dkg-agent-lifecycle.js';
 import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
+import { continueContextGraphSubscriptionLine } from '../src/context-graph-subscription-policy.js';
 import {
   runDurableSync,
   runDurableSyncDetailed,
@@ -2069,6 +2070,15 @@ describe('durable sync lifecycle chain binding', () => {
     expect(agentLike.subscribedContextGraphs.get(contextGraphId)).toBe(reboundSubscription);
   });
 
+  /** What the subscription setter does when it stores `next` over the live row. */
+  function storeAgain(agent: any, next: Record<string, unknown>): void {
+    continueContextGraphSubscriptionLine(
+      agent.subscribedContextGraphs.get(contextGraphId),
+      next as never,
+    );
+    agent.subscribedContextGraphs.set(contextGraphId, next);
+  }
+
   /**
    * Run one graph-scoped store whose authentication waits on a chain read, and
    * apply `whileAuthenticating` to the live rows before that read answers.
@@ -2126,7 +2136,7 @@ describe('durable sync lifecycle chain binding', () => {
     const storedAgain = { ...captured, sharedMemorySynced: false, lastReconciledOrdinal: 3 };
     const { pending, agentLike } = await storeWithRowChangeDuringAuthentication(
       captured,
-      (agent) => agent.subscribedContextGraphs.set(contextGraphId, storedAgain),
+      (agent) => storeAgain(agent, storedAgain),
     );
 
     await expect(pending).resolves.toBe('applied');
@@ -2137,7 +2147,7 @@ describe('durable sync lifecycle chain binding', () => {
     // The store keeps fencing on the row it continued under.
     const materialization = mockedMaterialize.mock.calls[0]![0];
     expect(materialization.isCurrent?.()).toBe(true);
-    agentLike.subscribedContextGraphs.set(contextGraphId, { ...storedAgain });
+    storeAgain(agentLike, { ...storedAgain });
     expect(materialization.isCurrent?.()).toBe(false);
   });
 
@@ -2146,7 +2156,7 @@ describe('durable sync lifecycle chain binding', () => {
     const storedAgain = { ...captured, sharedMemorySynced: false };
     const { pending, agentLike } = await storeWithRowChangeDuringAuthentication(
       captured,
-      (agent) => agent.subscribedContextGraphs.set(contextGraphId, storedAgain),
+      (agent) => storeAgain(agent, storedAgain),
     );
 
     await expect(pending).resolves.toBe('applied');
@@ -2173,7 +2183,26 @@ describe('durable sync lifecycle chain binding', () => {
     const { pending, agentLike } = await storeWithRowChangeDuringAuthentication(captured, (agent) => {
       const next = change(captured);
       if (next === undefined) agent.subscribedContextGraphs.delete(contextGraphId);
-      else agent.subscribedContextGraphs.set(contextGraphId, next);
+      else storeAgain(agent, next);
+    });
+
+    await expect(pending).rejects.toMatchObject({
+      name: 'AbortError',
+      message: expect.stringContaining('changed during graph-scoped store'),
+    });
+    expect(mockedMaterialize).not.toHaveBeenCalled();
+    expect(agentLike.bindSubscriptionOnChainId).not.toHaveBeenCalled();
+    expect(agentLike.persistContextGraphSyncStateStrict).not.toHaveBeenCalled();
+  });
+
+  it('still refuses a durable asset when its subscription was deleted and subscribed again during authentication', async () => {
+    // A fresh, unbound subscription: its binding generation is 0, and it is 0
+    // again after the subscription is deleted and the graph subscribed anew.
+    const captured = { subscribed: true, syncMode: 'always-on', synced: false };
+    const { pending, agentLike } = await storeWithRowChangeDuringAuthentication(captured, (agent) => {
+      agent.subscribedContextGraphs.delete(contextGraphId);
+      agent.contextGraphBindingState.delete(contextGraphId);
+      agent.subscribedContextGraphs.set(contextGraphId, { ...captured });
     });
 
     await expect(pending).rejects.toMatchObject({
@@ -2188,7 +2217,7 @@ describe('durable sync lifecycle chain binding', () => {
   it('still refuses a row stored again with the same fields once its binding generation moved', async () => {
     const captured = { subscribed: true, syncMode: 'always-on', synced: false, onChainId: '14', metaSynced: true };
     const { pending } = await storeWithRowChangeDuringAuthentication(captured, (agent) => {
-      agent.subscribedContextGraphs.set(contextGraphId, { ...captured });
+      storeAgain(agent, { ...captured });
       agent.contextGraphBindingState.bump(contextGraphId);
     });
 

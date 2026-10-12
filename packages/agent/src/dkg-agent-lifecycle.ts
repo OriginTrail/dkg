@@ -765,6 +765,8 @@ import {
   contextGraphSubscriptionClearTargets,
   contextGraphSubscriptionRowsEqual,
   contextGraphSubscriptionSyncPremisesEqual,
+  continueContextGraphSubscriptionLine,
+  isContextGraphSubscriptionStoredAgain,
   retainsInactiveContextGraphBinding,
 } from './context-graph-subscription-policy.js';
 import { partitionSupersededContextGraphNamePlaceholders } from './dkg-agent-cg-name-resolution.js';
@@ -6260,7 +6262,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           operationContextGraphId,
           generation,
         ),
-      isEquivalentSubscription: contextGraphSubscriptionSyncPremisesEqual,
+      // The same subscription (not one deleted and subscribed again, whose
+      // binding generation starts over) and the same premises for a store.
+      isEquivalentSubscription: (captured, current) =>
+        isContextGraphSubscriptionStoredAgain(captured, current)
+        && contextGraphSubscriptionSyncPremisesEqual(captured, current),
       assertLifecycleCurrent,
       asAbortError: asSyncFetchAbortError,
       track: (run) => this.graphScopedStorePhysicalRuns.add(run),
@@ -9288,6 +9294,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       && contextGraphSubscriptionRowsEqual(previous, nextRow)
       ? previous
       : nextRow;
+    if (previous !== undefined && canonicalNext !== previous) {
+      continueContextGraphSubscriptionLine(previous, canonicalNext);
+    }
     const retainsInactiveBinding = retainsInactiveContextGraphBinding(previous, canonicalNext);
     const bindingFacts = this.contextGraphBindingState.applySubscriptionTransition(
       contextGraphId,
@@ -9664,7 +9673,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     // Every in-flight binding continuation also captures the subscription
     // object, so deleting this numeric generation cannot revive old work if a
-    // new subscription later reuses the same local id.
+    // new subscription later reuses the same local id. A continuation that
+    // accepts a row stored over its own (the durable store) accepts no row of
+    // that new subscription: it starts a line of its own.
     this.contextGraphBindingState.delete(contextGraphId);
     return deleted;
   }

@@ -5,6 +5,8 @@ import { DKGAgent } from '../src/dkg-agent.js';
 import {
   contextGraphSubscriptionRowsEqual,
   contextGraphSubscriptionSyncPremisesEqual,
+  continueContextGraphSubscriptionLine,
+  isContextGraphSubscriptionStoredAgain,
 } from '../src/context-graph-subscription-policy.js';
 import { runGraphScopedPhysicalOperation } from '../src/sync/requester/graph-scoped-operation-fence.js';
 import { resolveRfc64CatalogExecutionPlanV1 } from '../src/rfc64/public-catalog-activation-config-v1.js';
@@ -77,6 +79,35 @@ describe('contextGraphSubscriptionSyncPremisesEqual', () => {
     expect(contextGraphSubscriptionSyncPremisesEqual(undefined, row())).toBe(false);
     expect(contextGraphSubscriptionSyncPremisesEqual(row(), undefined)).toBe(false);
     expect(contextGraphSubscriptionSyncPremisesEqual(undefined, undefined)).toBe(false);
+  });
+});
+
+describe('isContextGraphSubscriptionStoredAgain', () => {
+  it('follows a row through every row stored over it', () => {
+    const first = row();
+    const second = row({ synced: true });
+    const third = row({ synced: true, sharedMemorySynced: true });
+    continueContextGraphSubscriptionLine(first, second);
+    continueContextGraphSubscriptionLine(second, third);
+
+    expect(isContextGraphSubscriptionStoredAgain(first, first)).toBe(true);
+    expect(isContextGraphSubscriptionStoredAgain(first, second)).toBe(true);
+    expect(isContextGraphSubscriptionStoredAgain(first, third)).toBe(true);
+    expect(isContextGraphSubscriptionStoredAgain(second, third)).toBe(true);
+  });
+
+  it('does not take an equal row of another subscription for it, or a missing row', () => {
+    const first = row();
+    const second = row({ synced: true });
+    continueContextGraphSubscriptionLine(first, second);
+    // Installed by a new subscribe after the subscription was deleted.
+    const recreated = { ...first };
+
+    expect(isContextGraphSubscriptionStoredAgain(first, recreated)).toBe(false);
+    expect(isContextGraphSubscriptionStoredAgain(second, recreated)).toBe(false);
+    expect(isContextGraphSubscriptionStoredAgain(first, undefined)).toBe(false);
+    expect(isContextGraphSubscriptionStoredAgain(undefined, first)).toBe(false);
+    expect(isContextGraphSubscriptionStoredAgain(undefined, undefined)).toBe(false);
   });
 });
 
@@ -237,6 +268,27 @@ describe('a subscription write that changes nothing', () => {
 
     agent.markContextGraphSubscriptionState(contextGraphId, { synced: false, sharedMemorySynced: false });
     expect(rows.get(contextGraphId)).toBe(second);
+  });
+
+  it('keeps the rows it stores over one another in one line, and starts a new line after a deletion', async () => {
+    const { agent, rows } = await node('catalog');
+    const contextGraphId = 'line-of-rows';
+    const first = agent.subscribeToContextGraph(contextGraphId, { syncMode: 'always-on' });
+    const generation = agent.contextGraphBindingState.capture(contextGraphId);
+
+    agent.markContextGraphSubscriptionState(contextGraphId, { sharedMemorySynced: false });
+    const second = rows.get(contextGraphId)!;
+    expect(second).not.toBe(first);
+    expect(isContextGraphSubscriptionStoredAgain(first, second)).toBe(true);
+
+    // Deleted and subscribed again: the same fields and the same binding
+    // generation as the first row had, and another subscription.
+    agent.deleteContextGraphSubscription(contextGraphId);
+    const recreated = agent.subscribeToContextGraph(contextGraphId, { syncMode: 'always-on' });
+    expect(recreated).toEqual(first);
+    expect(agent.contextGraphBindingState.isGenerationCurrent(contextGraphId, generation)).toBe(true);
+    expect(isContextGraphSubscriptionStoredAgain(first, recreated)).toBe(false);
+    expect(isContextGraphSubscriptionStoredAgain(second, recreated)).toBe(false);
   });
 
   it('stores a new row for a caller that changed the stored row in place and writes it back', async () => {
