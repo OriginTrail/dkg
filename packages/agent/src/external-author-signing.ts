@@ -29,6 +29,13 @@ export function signsThroughExternalSigner(chain: Pick<ChainAdapter, 'usesExtern
   return chain?.usesExternalSigner?.() === true;
 }
 
+/** The payer accounts of a node that signs through an external signer, as its chain adapter lists them. */
+export function externalPayerAddresses(chain: ChainAdapter | undefined): string[] {
+  if (!signsThroughExternalSigner(chain)) return [];
+  const listed = (chain as unknown as { getSignerAddresses?: () => unknown }).getSignerAddresses?.();
+  return Array.isArray(listed) ? listed.filter((address): address is string => typeof address === 'string') : [];
+}
+
 const log = new Logger('DKGAgent');
 
 interface TypedDataInput {

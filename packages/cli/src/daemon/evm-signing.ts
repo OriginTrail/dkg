@@ -4,7 +4,7 @@
  * `chain.signer`, in which case the node creates and loads no operational
  * private key at all.
  */
-import { loadOpWallets } from '@origintrail-official/dkg-agent';
+import { agentKeystorePath, assertKeystoreHoldsNoPayerKey, loadOpWallets, readAgentKeystore } from '@origintrail-official/dkg-agent';
 import {
   connectConfiguredRemoteSigners,
   resolveChainSignerConfig,
@@ -92,6 +92,16 @@ export async function resolveDaemonEvmSigning(input: ResolveDaemonEvmSigningInpu
     );
   }
   const signers = await connectConfiguredRemoteSigners(remote, { onWarning: (message) => log(`[warn] ${message}`) });
+  try {
+    // A node that used local wallets keeps its former operational key as an
+    // agent's key: it must not start while that account is one of the payers.
+    const keystorePath = agentKeystorePath(input.dataDir);
+    const payers = signers.operational.map((signer) => signer.address);
+    assertKeystoreHoldsNoPayerKey(await readAgentKeystore(keystorePath), payers, keystorePath);
+  } catch (err) {
+    signers.destroy();
+    throw err;
+  }
   const endpoint = signers.operational[0].client.endpoint;
   log(`EVM signing: external signer at ${endpoint}; the node holds no operational private key`);
   log(`Payer accounts (${signers.operational.length}):`);

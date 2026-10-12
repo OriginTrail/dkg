@@ -107,6 +107,53 @@ export function hashAgentToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
 
+/** The agent keystore of a node's data directory. */
+export function agentKeystorePath(dataDir: string): string {
+  return `${dataDir}/agent-keystore.json`;
+}
+
+/** The entries of the keystore at `path`; none when it is missing or unreadable. */
+export async function readAgentKeystore(path: string): Promise<Record<string, KeystoreEntry>> {
+  try {
+    return JSON.parse(await readFile(path, 'utf-8'));
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Refuse a keystore that holds the private key of one of `payerAddresses`,
+ * the accounts an external signer pays from: a payer never signs as an
+ * agent, and a node that signs through an external signer must not sign with
+ * a payer key itself. A node that used local wallets keeps its former
+ * operational key here as its first agent's key, so turning that wallet into
+ * a payer is caught before any agent loads. Entries without a key pass.
+ */
+export function assertKeystoreHoldsNoPayerKey(
+  keystore: Readonly<Record<string, KeystoreEntry>>,
+  payerAddresses: readonly string[],
+  keystorePath: string,
+): void {
+  const payers = new Set(payerAddresses.map((address) => address.toLowerCase()));
+  for (const [entryAddress, entry] of Object.entries(keystore)) {
+    const privateKey = entry?.privateKey;
+    if (typeof privateKey !== 'string' || privateKey === '') continue;
+    let address = entryAddress;
+    try {
+      address = new ethers.Wallet(privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`).address;
+    } catch {
+      // A key that does not parse is checked by the address it is filed under.
+    }
+    if (!payers.has(address.toLowerCase())) continue;
+    throw new Error(
+      `${keystorePath} holds the private key of ${address}, which the external signer serves as a payer account, ` +
+        'and a payer never signs as an agent. To keep it only as a payer, delete its entry from that file: the agent ' +
+        'stays registered without a key, and author work then needs the token of an agent whose author key the ' +
+        'external signer holds. To keep it as a local agent instead, stop serving it as a payer (chain.signer.addresses).',
+    );
+  }
+}
+
 /** One lock per keystore file. */
 const keystoreWriteLocks = new Map<string, Promise<void>>();
 

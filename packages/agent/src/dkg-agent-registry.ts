@@ -225,6 +225,7 @@ import { registerSyncHandler } from './sync/responder/sync-handler.js';
 import { runSyncOnConnect } from './sync/on-connect/sync-on-connect.js';
 import {
   assertAgentNameFree, generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey, writeKeystoreEntry,
+  agentKeystorePath, readAgentKeystore, assertKeystoreHoldsNoPayerKey,
   ensureWorkspaceEncryptionKey,
   hashAgentToken,
   activeWorkspaceEncryptionKeys,
@@ -237,7 +238,7 @@ import {
   type KeystoreEntry,
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
-import { externalSignerAgentPublicKey, registerExternalDefaultAgent } from './external-author-signing.js';
+import { externalPayerAddresses, externalSignerAgentPublicKey, registerExternalDefaultAgent } from './external-author-signing.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
@@ -1164,8 +1165,11 @@ export class AgentRegistryMethods extends DKGAgentBase {
     const graph = DKGAgentBase.AGENT_SYSTEM_GRAPH;
     const DKG = 'https://dkg.network/ontology#';
 
-    // Load raw tokens and custodial keys from the on-disk keystore
+    // Load raw tokens and custodial keys from the on-disk keystore. A payer of
+    // the external signer never signs as an agent: refuse its key kept there.
     const keystore = await this.loadKeystore();
+    const keystorePath = this.keystorePath();
+    if (keystorePath) assertKeystoreHoldsNoPayerKey(keystore, externalPayerAddresses(this.chain), keystorePath);
 
     // Encryption keys live in BOTH the keystore (private halves; authoritative
     // for keys we own) and RDF (public halves + proofs + revocations; what we
@@ -1399,20 +1403,12 @@ export class AgentRegistryMethods extends DKGAgentBase {
   // ---------------------------------------------------------------------------
 
   keystorePath(this: DKGAgent): string | null {
-    if (!this.config.dataDir) return null;
-    return `${this.config.dataDir}/agent-keystore.json`;
+    return this.config.dataDir ? agentKeystorePath(this.config.dataDir) : null;
   }
 
   async loadKeystore(this: DKGAgent): Promise<Record<string, KeystoreEntry>> {
     const ksPath = this.keystorePath();
-    if (!ksPath) return {};
-    try {
-      const { readFile } = await import('node:fs/promises');
-      const raw = await readFile(ksPath, 'utf-8');
-      return JSON.parse(raw);
-    } catch {
-      return {};
-    }
+    return ksPath ? readAgentKeystore(ksPath) : {};
   }
 
   /**

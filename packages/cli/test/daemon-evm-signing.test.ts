@@ -14,6 +14,7 @@ import { ethers } from 'ethers';
 import { resolveDaemonEvmSigning } from '../src/daemon/evm-signing.js';
 import { loadLocalOpWalletsUnlessExternal, usesExternalSigner } from '../src/local-op-wallets.js';
 import { connectionsLeftOpen, startFakeRemoteSigner, type FakeSigner } from '../../chain/test/helpers/fake-remote-signer.js';
+import { HARDHAT_KEYS } from '../../chain/test/hardhat-harness.js';
 
 const TOKEN = 'daemon-payer-credential-6a5b4c3d2e1f';
 const AUTHOR_TOKEN = 'daemon-author-credential-f1e2d3c4b5a6';
@@ -100,6 +101,42 @@ describe('daemon EVM signing', () => {
     signing.release();
     signing.release();
     expect(await connectionsLeftOpen(fake)).toBe(0);
+  });
+
+  it('refuses to start while the agent keystore keeps a payer\'s key, and leaves other entries alone', async () => {
+    const dir = await tempDir();
+    const fake = await fakeSigner();
+    const tokens = await tokenFiles(dir);
+    const config = {
+      nodeRole: 'edge' as const,
+      chain: { signer: { type: 'remote' as const, url: fake.url, authTokenFile: tokens.payer, author: { authTokenFile: tokens.author } } },
+    };
+    const localAuthor = new ethers.Wallet(HARDHAT_KEYS.EXTRA3);
+    const keystorePath = join(dir, 'agent-keystore.json');
+    const unrelated = {
+      // A custodial agent of the node, and a payer's entry without a key.
+      [localAuthor.address.toLowerCase()]: { authToken: 'author-token', privateKey: localAuthor.privateKey },
+      [payers[1].address.toLowerCase()]: { authToken: 'keyless-token' },
+    };
+    // The node's former local wallet, now a payer of the signer, kept as its first agent's key.
+    await writeFile(keystorePath, JSON.stringify({
+      ...unrelated,
+      [payers[0].address.toLowerCase()]: { authToken: 'former-token', privateKey: payers[0].privateKey },
+    }));
+    const refusal = await resolveDaemonEvmSigning({ config, chainType: 'evm', dataDir: dir, log: () => {} })
+      .catch((error: unknown) => error as Error);
+    expect(refusal).toBeInstanceOf(Error);
+    expect(refusal.message).toContain(
+      `${keystorePath} holds the private key of ${payers[0].address}, which the external signer serves as a payer account`,
+    );
+    expect(refusal.message).toMatch(/delete its entry from that file.*stop serving it as a payer \(chain\.signer\.addresses\)/);
+    expect(refusal.message).not.toContain(payers[0].privateKey.slice(2));
+    expect(await connectionsLeftOpen(fake)).toBe(0);
+
+    await writeFile(keystorePath, JSON.stringify(unrelated));
+    const signing = await resolveDaemonEvmSigning({ config, chainType: 'evm', dataDir: dir, log: () => {} });
+    expect(signing.mode).toBe('remote');
+    signing.release();
   });
 
   it('runs with payers only when no author keys are configured', async () => {
