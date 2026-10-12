@@ -115,7 +115,11 @@ function createWalGrowthObserver(
   return {
     registerActivity: () => inertLease,
     admissionsPaused: () => false,
-    serverLifecycleChanged(): void {},
+    serverLifecycleChanged(completion?: 'confirmed-reopen'): void {
+      // A confirmed reopen truncated the log. The next report is due at the
+      // notice size again, also when no sample fell on the truncated log.
+      if (completion === 'confirmed-reopen') nextNoticeBytes = WAL_GROWTH_NOTICE_BYTES;
+    },
     stop(): void {
       if (stopped) return;
       stopped = true;

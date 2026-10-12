@@ -492,6 +492,25 @@ describe('Oxigraph WAL maintenance with the reopen off', () => {
     } finally { coordinator.stop(); }
   });
 
+  it('starts the notices over on a confirmed reopen, without a sample of the truncated log', () => {
+    let walBytes = 4 * WAL_GROWTH_NOTICE_BYTES;
+    const { coordinator, tick, lines } = controlledObserver({ measureRetainedWalBytes: () => walBytes });
+    try {
+      tick();
+      expect(lines).toHaveLength(1);
+      // The log was truncated and has grown past the notice size again before the next sample.
+      coordinator.serverLifecycleChanged('confirmed-reopen');
+      walBytes = WAL_GROWTH_NOTICE_BYTES + GIB;
+      tick();
+      expect(lines).toHaveLength(2);
+      expect(lines[1]).toContain('5.00 GiB of write-ahead log is retained');
+      // Any other lifecycle change leaves the last report standing.
+      coordinator.serverLifecycleChanged();
+      tick();
+      expect(lines).toHaveLength(2);
+    } finally { coordinator.stop(); }
+  });
+
   it('does not measure while the server is not available', () => {
     const measureRetainedWalBytes = vi.fn(() => 10 * WAL_GROWTH_NOTICE_BYTES);
     const { coordinator, tick, lines, setServerAvailable } = controlledObserver({ measureRetainedWalBytes });
