@@ -63,7 +63,7 @@ import {
   swmSenderStateKey,
 } from '../src/dkg-agent-swm-state.js';
 import type { ReliableSendResult } from '../src/p2p/messenger.js';
-import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
 
 const senderKeyStateWriteBarrier = vi.hoisted(() => ({
   targetDir: null as string | null,
@@ -71,6 +71,10 @@ const senderKeyStateWriteBarrier = vi.hoisted(() => ({
   writes: [] as string[],
   onFirstWrite: null as (() => void) | null,
   releaseFirstWrite: null as Promise<void> | null,
+  targetStoreWritePath: null as string | null,
+  onStoreWrite: null as (() => void) | null,
+  storeWriteReleased: null as Promise<void> | null,
+  releaseStoreWrite: null as (() => void) | null,
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -80,6 +84,14 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     mkdir: async (...args: Parameters<typeof actual.mkdir>) => {
       if (senderKeyStateWriteBarrier.targetDir === String(args[0])) return undefined;
       return Reflect.apply(actual.mkdir, undefined, args);
+    },
+    open: async (...args: Parameters<typeof actual.open>) => {
+      const handle = await Reflect.apply(actual.open, undefined, args);
+      if (senderKeyStateWriteBarrier.targetStoreWritePath === String(args[0])) {
+        senderKeyStateWriteBarrier.onStoreWrite?.();
+        await senderKeyStateWriteBarrier.storeWriteReleased;
+      }
+      return handle;
     },
     writeFile: async (...args: Parameters<typeof actual.writeFile>) => {
       if (senderKeyStateWriteBarrier.targetPath === String(args[0])) {
@@ -308,13 +320,26 @@ function senderKeyAck(
   });
 }
 
-async function bootAgent(opts: { dataDir?: string } = {}): Promise<{ agent: DKGAgent; internals: PendingInternals }> {
+// These fixtures exercise crypto without starting libp2p. stop() therefore
+// cannot own their stores; retain every created store, including prior boots
+// of a restart test, until its debounced/in-flight persistence is drained.
+const fixtureStores = new Set<TripleStore>();
+async function closeFixtureStores(): Promise<void> {
+  await Promise.all([...fixtureStores].map(async (store) => {
+    await store.close();
+    fixtureStores.delete(store);
+  }));
+}
+
+async function bootAgent(opts: { dataDir?: string; store?: TripleStore } = {}): Promise<{ agent: DKGAgent; internals: PendingInternals }> {
   const agent = await DKGAgent.create({
     name: 'PendingSenderKeyTest',
     chainAdapter: new MockChainAdapter(),
     dataDir: opts.dataDir,
+    store: opts.store,
   });
   const internals = agent as unknown as PendingInternals;
+  fixtureStores.add(internals.store);
   return { agent, internals };
 }
 
@@ -358,6 +383,12 @@ describe('createAndDistributeSwmSenderKeyEpoch: missing-peerId soft success', ()
       await agent.stop().catch(() => undefined);
       agent = null;
     }
+    senderKeyStateWriteBarrier.releaseStoreWrite?.();
+    await closeFixtureStores();
+    senderKeyStateWriteBarrier.targetStoreWritePath = null;
+    senderKeyStateWriteBarrier.onStoreWrite = null;
+    senderKeyStateWriteBarrier.storeWriteReleased = null;
+    senderKeyStateWriteBarrier.releaseStoreWrite = null;
     await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
   });
 
@@ -480,6 +511,36 @@ describe('createAndDistributeSwmSenderKeyEpoch: missing-peerId soft success', ()
     expect(queue![0].recipientKeyId).toBe(recipient.recipientKeyId);
     expect(queue![0].contextGraphId).toBe('test-cg/pending-persist');
     expect(queue![0].packageBytes.length).toBeGreaterThan(0);
+  });
+
+  it('drains every unstarted fixture store before cleanup, including an older restart boot', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-swm-fixture-store-drain-'));
+    tempDirs.push(dataDir);
+    let markStoreWrite!: () => void;
+    const storeWriteStarted = new Promise<void>((resolve) => { markStoreWrite = resolve; });
+    let releaseStoreWrite!: () => void;
+    senderKeyStateWriteBarrier.targetStoreWritePath = join(dataDir, 'store.nq.tmp');
+    senderKeyStateWriteBarrier.onStoreWrite = markStoreWrite;
+    senderKeyStateWriteBarrier.storeWriteReleased = new Promise<void>((resolve) => { releaseStoreWrite = resolve; });
+    senderKeyStateWriteBarrier.releaseStoreWrite = releaseStoreWrite;
+    const first = await bootAgent({ dataDir, store: new OxigraphStore(join(dataDir, 'store.nq')) });
+    agent = first.agent;
+    await storeWriteStarted;
+    await agent.stop(); // Never started: its graph-store flush remains owned here.
+    const replacement = await bootAgent();
+    agent = replacement.agent;
+    let drained = false;
+    const closing = closeFixtureStores().then(() => { drained = true; });
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(drained).toBe(false);
+    } finally {
+      releaseStoreWrite();
+      await closing;
+      await first.internals.store.close();
+    }
+    expect(drained).toBe(true);
+    expect(await readFile(join(dataDir, 'store.nq'), 'utf8')).toContain(DKG_ONTOLOGY.RDF_TYPE);
   });
 
   it('serializes full-state saves so a delayed older write cannot overwrite a newer snapshot', async () => {
@@ -973,7 +1034,7 @@ describe('createAndDistributeSwmSenderKeyEpoch: missing-peerId soft success', ()
     expect(queue?.map((entry) => entry.recipientPeerId).sort()).toEqual([peerA, peerB].sort());
   });
 
-  it('retries a pending peer B route at B after peer A already accepted', async () => {
+  it.each(['A', 'B'] as const)('retries only peer B after parallel setup completes with %s first', async (firstRoute) => {
     const boot = await bootAgent();
     agent = boot.agent;
     const internals = boot.internals;
@@ -989,9 +1050,19 @@ describe('createAndDistributeSwmSenderKeyEpoch: missing-peerId soft success', ()
     ) as AgentKeyRecord & { privateKey: string };
     const sendPeers: string[] = [];
     let peerBAttempts = 0;
+    const firstPeer = firstRoute === 'A' ? peerA : peerB;
+    const secondPeer = firstRoute === 'A' ? peerB : peerA;
+    let markFirstSend!: () => void;
+    const firstSendStarted = new Promise<void>((resolve) => { markFirstSend = resolve; });
+    const createPackage = agent.createSignedSwmSenderKeyPackage.bind(agent);
+    vi.spyOn(agent, 'createSignedSwmSenderKeyPackage').mockImplementation(async (input) => {
+      if (input.recipient.peerId !== firstPeer) await firstSendStarted;
+      return createPackage(input);
+    });
 
     installStubMessenger(internals, async (peerId): Promise<ReliableSendResult> => {
       sendPeers.push(peerId);
+      if (peerId === firstPeer) markFirstSend();
       if (peerId === peerB && peerBAttempts++ === 0) {
         return {
           delivered: true,
@@ -1016,9 +1087,7 @@ describe('createAndDistributeSwmSenderKeyEpoch: missing-peerId soft success', ()
       ctx: { operationId: 'test-op', operationName: 'share' },
     });
 
-    // Setup fans out to all recipients concurrently, so the sends to A and B
-    // may reach the messenger in either order.
-    expect([...sendPeers].sort()).toEqual([peerA, peerB].sort());
+    expect(sendPeers).toEqual([firstPeer, secondPeer]);
     const queued = internals.pendingSenderKeyByAgent.get(recipient.agentAddress.toLowerCase());
     expect(queued).toHaveLength(1);
     expect(queued?.[0].recipientPeerId).toBe(peerB);
@@ -1035,8 +1104,8 @@ describe('createAndDistributeSwmSenderKeyEpoch: missing-peerId soft success', ()
     );
 
     expect(drained).toBe(1);
-    // The drain sends only the retry owed to B; A already accepted.
-    expect(sendPeers.slice(2)).toEqual([peerB]);
+    expect(sendPeers).toEqual([firstPeer, secondPeer, peerB]);
+    expect(peerBAttempts).toBe(2);
     expect(internals.pendingSenderKeyByAgent.size).toBe(0);
   });
 
@@ -1431,6 +1500,7 @@ describe('createAndDistributeSwmSenderKeyEpoch: missing-peerId soft success', ()
     ]);
 
     await agent.stop();
+    await closeFixtureStores();
     agent = null;
 
     const secondBoot = await bootAgent({ dataDir });
@@ -1931,6 +2001,7 @@ describe('createAndDistributeSwmSenderKeyEpoch: missing-peerId soft success', ()
     expect(firstInternals.pendingSenderKeyByAgent.size).toBe(1);
     await firstInternals.saveSwmSenderKeyState();
     await agent.stop();
+    await closeFixtureStores();
     agent = null;
 
     const secondBoot = await bootAgent({ dataDir });
@@ -1977,6 +2048,7 @@ describe('createAndDistributeSwmSenderKeyEpoch: missing-peerId soft success', ()
     ).toEqual([peerA, peerB]);
 
     await agent.stop();
+    await closeFixtureStores();
     agent = null;
 
     const thirdBoot = await bootAgent({ dataDir });
@@ -2626,6 +2698,7 @@ describe('drainPendingSenderKeyForPeer: real recipient lookup + agent registry C
       await agent.stop().catch(() => undefined);
       agent = null;
     }
+    await closeFixtureStores();
   });
 
   it('keeps a sender key queued until the recipient publishes its signed key-to-peer route, then drains it', async () => {

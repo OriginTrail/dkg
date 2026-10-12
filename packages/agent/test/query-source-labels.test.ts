@@ -7,6 +7,7 @@ import type {
 } from '@origintrail-official/dkg-core';
 import {
   GraphManager,
+  OxigraphStore,
   type GraphWriteRevisionSource,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
@@ -14,6 +15,8 @@ import type { SignedAgentDelegation } from '../src/auth/agent-delegation.js';
 import type { DKGAgent } from '../src/dkg-agent.js';
 import { JoinRequestMethods } from '../src/dkg-agent-join.js';
 import { QueryMethods } from '../src/dkg-agent-query.js';
+import { ContextGraphPartitionQueryMethods } from '../src/internal/context-graph-partition-query.js';
+import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { canReadUnscopedQuery } from '../src/unscoped-query-admission.js';
 import { resolveRfc64PrivateReadRoster } from '../src/rfc64/private-read-roster-v1.js';
 import {
@@ -23,6 +26,37 @@ import {
 type ContextGraphQueryStore = Pick<TripleStore, 'query' | 'listGraphs' | 'listGraphsByPrefix'>;
 
 describe('query caller-provided store labels', () => {
+  it.each(['allowed', 'denied', 'unavailable'] as const)('admits the public partition inventory with %s caller authority', async outcome => {
+    const store = new OxigraphStore();
+    const contextGraphId = 'inventory-admission';
+    const root = `did:dkg:context-graph:${contextGraphId}`;
+    try {
+      await store.insert([
+        { subject: 'urn:public', predicate: 'urn:p', object: 'urn:o', graph: root },
+        { subject: 'urn:private', predicate: 'urn:p', object: 'urn:o', graph: `${root}/_private` },
+      ]);
+      const queryEngine = new DKGQueryEngine(store);
+      const inventory = vi.spyOn(queryEngine, 'listContextGraphQueryPartitions');
+      const authority = vi.fn(async () => ({ outcome }));
+      const agent = { queryEngine, resolveContextGraphReadAuthority: authority } as unknown as DKGAgent;
+      const options = { callerAgentAddress: '0xreader', signal: new AbortController().signal, priority: 'background' as const, source: 'inventory-caller' };
+      const result = ContextGraphPartitionQueryMethods.prototype.listContextGraphQueryPartitions.call(agent, contextGraphId, options);
+      if (outcome === 'unavailable') await expect(result).rejects.toMatchObject({ code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE' });
+      else {
+        const graphs = await result;
+        if (outcome === 'allowed') {
+          expect(graphs).toContain(root);
+          expect(graphs).not.toContain(`${root}/_private`);
+        } else expect(graphs).toEqual([]);
+      }
+      expect(authority).toHaveBeenCalledExactlyOnceWith(contextGraphId, {
+        ...options, authorityReadMode: 'finalized-index', allowSubscriptionFallback: false,
+      });
+      if (outcome === 'allowed') expect(inventory).toHaveBeenCalledWith(contextGraphId, options);
+      else expect(inventory).not.toHaveBeenCalled();
+    } finally { await store.close(); }
+  });
+
   it('attributes the unscoped private-graph access-policy lookup', async () => {
     const query = vi.fn<TripleStore['query']>(async () => ({
       type: 'bindings',

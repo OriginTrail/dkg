@@ -26,10 +26,6 @@ function triple(subject: string, graph: string) {
   return { s: { value: subject }, p: { value: RDF_TYPE }, o: { value: 'http://schema.org/Thing' }, g: { value: graph } };
 }
 
-function sparqlLimit(sparql: string): number {
-  return Number(sparql.match(/\bLIMIT\s+(\d+)/i)?.[1] ?? 0);
-}
-
 function Probe({ id }: { id: string }) {
   // Dashboard-style consumer: opts into failed-vs-empty signalling.
   const m = useMemoryEntities(id, { signalErrors: true });
@@ -64,41 +60,23 @@ describe('useMemoryEntities — partial layer failure', () => {
     document.body.appendChild(container);
     root = createRoot(container);
 
-    // WM (/assertion/) and VM (the exclusion query) succeed; the SWM
-    // query (ends in /_shared_memory) returns a 500.
     vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
-      const { sparql = '', contextGraphId = 'cg' } =
-        JSON.parse(String(init?.body ?? '{}')) as { sparql?: string; contextGraphId?: string };
-      // Robust layer discriminators: every query references both
-      // "/assertion/" and "/_shared_memory" (inside FILTER negations),
-      // so match on tokens unique to each — `_verifiable_memory_meta`
-      // only appears in the VM query, the `/_shared_memory` tail
-      // check only in the SWM query (PR #818 sweep 3: WM also has
-      // `STRENDS(..., "/_meta")` now so the bare `STRENDS` token
-      // no longer discriminates).
-      const isVm = sparql.includes('_verifiable_memory_meta');
-      const isSwm = !isVm && sparql.includes('STRENDS(STR(?g), "/_shared_memory")');
-      const isWm = !isVm && !isSwm;
-      if (isSwm && scenario === 'swm-error') {
-        return { ok: false, status: 500, json: async () => ({}) } as Response;
-      }
-      if (isSwm && scenario === 'swm-limit') {
-        const limit = sparqlLimit(sparql);
-        return { ok: true, json: async () => ({ result: { bindings: Array.from(
-          { length: limit },
-          () => triple(`urn:${contextGraphId}:swm-limited`, `did:dkg:context-graph:${contextGraphId}/n/_shared_memory`),
-        ) } }) } as Response;
-      }
-      if (isWm) {
-        return { ok: true, json: async () => ({ result: { bindings: [
+      const { contextGraphId = 'cg' } =
+        JSON.parse(String(init?.body ?? '{}')) as { contextGraphId?: string };
+      return { ok: true, json: async () => ({ contextGraphId, layers: {
+        wm: { ok: true, truncated: false, bindings: [
           triple(`urn:${contextGraphId}:wm-1`, `did:dkg:context-graph:${contextGraphId}/n/assertion/a/x-1`),
           triple(`urn:${contextGraphId}:wm-2`, `did:dkg:context-graph:${contextGraphId}/n/assertion/a/x-2`),
-        ] } }) } as Response;
-      }
-      // VM
-      return { ok: true, json: async () => ({ result: { bindings: [
-        triple(`urn:${contextGraphId}:vm-1`, `did:dkg:context-graph:${contextGraphId}`),
-      ] } }) } as Response;
+        ] },
+        swm: scenario === 'swm-error'
+          ? { ok: false, truncated: false, bindings: [] }
+          : { ok: true, truncated: true, bindings: [
+              triple(`urn:${contextGraphId}:swm-limited`, `did:dkg:context-graph:${contextGraphId}/n/_shared_memory`),
+            ] },
+        vm: { ok: true, truncated: false, bindings: [
+          triple(`urn:${contextGraphId}:vm-1`, `did:dkg:context-graph:${contextGraphId}`),
+        ] },
+      } }) } as Response;
     }));
   });
 
@@ -141,8 +119,6 @@ describe('useMemoryEntities — partial layer failure', () => {
     expect(el.getAttribute('data-vm-status')).toBe('ok');
     expect(el.getAttribute('data-swm')).toBe('1');
 
-    const queryBodies = vi.mocked(fetch).mock.calls
-      .map(([, init]) => JSON.parse(String(init?.body ?? '{}')) as { layerLimit?: number });
-    expect(queryBodies.every(body => body.layerLimit === undefined)).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 });

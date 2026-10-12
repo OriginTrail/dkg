@@ -27,6 +27,7 @@ import type { QueryCatalogReadResponse } from '@origintrail-official/dkg-core/qu
 export { authHeaders, HttpError, OutcomeUnknownError } from './http.js';
 export * from './pca-api.js';
 export * from './identity-wallet-api.js';
+export * from './memory-layers-api.js';
 
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 const CONTEXT_GRAPH_LOAD_TIMEOUT_MS = 60000;
@@ -604,8 +605,6 @@ export async function importFile(
     outcomeUnknownMessage(`Importing "${file.name}" into "${assertionName}"`),
   );
 }
-
-// --- Query ---
 
 // In-flight POST /api/query dedup. Coalesces concurrent identical
 // requests so React strict-mode double-mounts and sibling views asking

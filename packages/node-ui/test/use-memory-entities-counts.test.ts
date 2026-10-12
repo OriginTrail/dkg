@@ -7,7 +7,6 @@ import { useMemoryEntities } from '../src/ui/hooks/useMemoryEntities.js';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const MENTIONS = 'http://schema.org/mentions';
-const PROFILE_QUERY_CATALOG = 'http://dkg.io/ontology/profile/QueryCatalog';
 
 class MockEventSource {
   static instances: MockEventSource[] = [];
@@ -72,41 +71,29 @@ describe('useMemoryEntities canonical layer counts', () => {
     root = createRoot(container);
 
     vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
-      const { sparql = '', contextGraphId = 'cg' } =
-        JSON.parse(String(init?.body ?? '{}')) as { sparql?: string; contextGraphId?: string };
-      const isVm = sparql.includes('_verifiable_memory_meta');
-      const isCatalogQuery = sparql.includes(PROFILE_QUERY_CATALOG);
-      const isCatalogSwm = isCatalogQuery && sparql.includes('/meta/_shared_memory/');
-      // PR #818 sweep 3 — WM SPARQL now contains `STRENDS(...,
-      // "/_meta")` for the meta-exclusion filter, so the SWM
-      // detection needs the discriminating clause that's still
-      // SWM-exclusive: the `/_shared_memory` tail check.
-      const isSwm = !isVm && sparql.includes('STRENDS(STR(?g), "/_shared_memory")');
+      const { contextGraphId = 'cg', includeQueryCatalog = false } =
+        JSON.parse(String(init?.body ?? '{}')) as { contextGraphId?: string; includeQueryCatalog?: boolean };
       const graphBase = `did:dkg:context-graph:${contextGraphId}`;
-      const bindings = isCatalogQuery
-        ? isCatalogSwm
-          ? [typeBinding('urn:test:query-catalog', `${graphBase}/meta/_shared_memory/0xabc/0`)]
-          : []
-        : isVm
-        ? [
-            typeBinding('urn:test:verified', graphBase),
-            typeBinding('urn:test:full-pipeline', graphBase),
-          ]
-        : isSwm
-          ? [
-              typeBinding('urn:test:promoted', `${graphBase}/notes/_shared_memory`),
-              typeBinding('urn:test:full-pipeline', `${graphBase}/notes/_shared_memory`),
-            ]
-          : [
-              typeBinding('urn:test:promoted', `${graphBase}/notes/assertion/agent/a-1`),
-              typeBinding('urn:test:full-pipeline', `${graphBase}/notes/assertion/agent/a-1`),
-              typeBinding('urn:test:draft', `${graphBase}/notes/assertion/agent/a-2`),
-              typeBinding('urn:test:draft', `${graphBase}/docs/assertion/agent/a-3`),
-              uriBinding('urn:test:draft', MENTIONS, 'urn:test:object-only', `${graphBase}/docs/assertion/agent/a-3`),
-            ];
       return {
         ok: true,
-        json: async () => ({ result: { bindings } }),
+        json: async () => ({ contextGraphId, layers: {
+          wm: { ok: true, truncated: false, bindings: [
+            typeBinding('urn:test:promoted', `${graphBase}/notes/assertion/agent/a-1`),
+            typeBinding('urn:test:full-pipeline', `${graphBase}/notes/assertion/agent/a-1`),
+            typeBinding('urn:test:draft', `${graphBase}/notes/assertion/agent/a-2`),
+            typeBinding('urn:test:draft', `${graphBase}/docs/assertion/agent/a-3`),
+            uriBinding('urn:test:draft', MENTIONS, 'urn:test:object-only', `${graphBase}/docs/assertion/agent/a-3`),
+          ] },
+          swm: { ok: true, truncated: false, bindings: [
+            typeBinding('urn:test:promoted', `${graphBase}/notes/_shared_memory`),
+            typeBinding('urn:test:full-pipeline', `${graphBase}/notes/_shared_memory`),
+            ...(includeQueryCatalog ? [typeBinding('urn:test:query-catalog', `${graphBase}/meta/_shared_memory/0xabc/0`)] : []),
+          ] },
+          vm: { ok: true, truncated: false, bindings: [
+            typeBinding('urn:test:verified', graphBase),
+            typeBinding('urn:test:full-pipeline', graphBase),
+          ] },
+        } }),
       } as Response;
     }));
   });
@@ -133,37 +120,10 @@ describe('useMemoryEntities canonical layer counts', () => {
     expect(el.getAttribute('data-current-layers')).toContain('urn:test:full-pipeline:verified');
     expect(el.getAttribute('data-current-layers')).not.toContain('urn:test:object-only');
 
-    const queryBodies = vi.mocked(fetch).mock.calls
-      .map(([, init]) => JSON.parse(String(init?.body ?? '{}')) as { sparql?: string; includeContextGraphPartitions?: boolean });
-    expect(queryBodies).toHaveLength(3);
-    expect(queryBodies.every(body => body.includeContextGraphPartitions === true)).toBe(true);
-
-    const vmRequest = vi.mocked(fetch).mock.calls
-      .map(([, init]) => JSON.parse(String(init?.body ?? '{}')) as { sparql?: string })
-      .find(body => body.sparql?.includes('_verifiable_memory_meta'));
-    expect(vmRequest?.sparql).toContain('STR(?g) != "did:dkg:context-graph:cg-counts/meta"');
-    expect(vmRequest?.sparql).toContain('!CONTAINS(STR(?g), "/meta/")');
-
-    // PR #818 Codex sweep 3 (ux-lead Finding 1 verdict) — WM and
-    // SWM SPARQL queries gain the same meta-namespace exclusions VM
-    // already enforces. Profile artifacts (prof:* — project profile
-    // configuration) live under `<cg>/meta/...` and are loaded by
-    // `useProjectProfile` directly via its own SPARQL; without the
-    // upstream filter here they also leak into `memory.entityList`,
-    // becoming "root entities" in every consumer downstream (the
-    // GH #806 family root cause).
-    const wmRequest = vi.mocked(fetch).mock.calls
-      .map(([, init]) => JSON.parse(String(init?.body ?? '{}')) as { sparql?: string })
-      .find(body => body.sparql?.includes('CONTAINS(STR(?g), "/assertion/")'));
-    expect(wmRequest?.sparql).toContain('STR(?g) != "did:dkg:context-graph:cg-counts/meta"');
-    expect(wmRequest?.sparql).toContain('!CONTAINS(STR(?g), "/meta/")');
-    expect(wmRequest?.sparql).toContain('!STRENDS(STR(?g), "/_meta")');
-
-    const swmRequest = vi.mocked(fetch).mock.calls
-      .map(([, init]) => JSON.parse(String(init?.body ?? '{}')) as { sparql?: string })
-      .find(body => body.sparql?.includes('STRENDS(STR(?g), "/_shared_memory")'));
-    expect(swmRequest?.sparql).toContain('STR(?g) != "did:dkg:context-graph:cg-counts/meta/_shared_memory"');
-    expect(swmRequest?.sparql).toContain('!CONTAINS(STR(?g), "/meta/")');
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const [url, init] = vi.mocked(fetch).mock.calls[0];
+    expect(String(url)).toContain('/api/context-graph/memory-layers');
+    expect(JSON.parse(String(init?.body ?? '{}'))).toEqual({ contextGraphId: 'cg-counts', includeQueryCatalog: false });
   });
 
   it('loads the query-catalog branch only after visibility is enabled', async () => {
@@ -174,8 +134,8 @@ describe('useMemoryEntities canonical layer counts', () => {
 
     let el = container.querySelector('#probe')!;
     expect(el.getAttribute('data-current-layers')).not.toContain('urn:test:query-catalog');
-    expect(vi.mocked(fetch).mock.calls.some(([, init]) =>
-      String(init?.body ?? '').includes(PROFILE_QUERY_CATALOG))).toBe(false);
+    expect(vi.mocked(fetch).mock.calls.every(([, init]) =>
+      JSON.parse(String(init?.body ?? '{}')).includeQueryCatalog === false)).toBe(true);
 
     await act(async () => {
       root.render(React.createElement(Probe, {
@@ -188,12 +148,8 @@ describe('useMemoryEntities canonical layer counts', () => {
     el = container.querySelector('#probe')!;
     expect(el.getAttribute('data-current-layers')).toContain('urn:test:query-catalog:shared');
     const catalogRequests = vi.mocked(fetch).mock.calls
-      .map(([, init]) => JSON.parse(String(init?.body ?? '{}')) as { sparql?: string })
-      .filter(body => body.sparql?.includes(PROFILE_QUERY_CATALOG));
-    expect(catalogRequests).toHaveLength(2);
-    expect(catalogRequests.some(body => body.sparql?.includes('/meta/assertion/'))).toBe(true);
-    expect(catalogRequests.some(body => body.sparql?.includes('/meta/_working_memory/'))).toBe(true);
-    expect(catalogRequests.some(body => body.sparql?.includes('/meta/_shared_memory/'))).toBe(true);
-    expect(catalogRequests.every(body => !body.sparql?.includes('assertionGraph'))).toBe(true);
+      .map(([, init]) => JSON.parse(String(init?.body ?? '{}')) as { includeQueryCatalog?: boolean })
+      .filter(body => body.includeQueryCatalog);
+    expect(catalogRequests).toHaveLength(1);
   });
 });

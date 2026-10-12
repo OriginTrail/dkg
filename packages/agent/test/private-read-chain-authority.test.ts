@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
-import { StoreOperationTimeoutError } from '@origintrail-official/dkg-storage';
+import { StoreOperationTimeoutError, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
   MockChainAdapter,
   type ChainAdapter,
@@ -237,7 +237,7 @@ describe('private read authorization uses the on-chain participant roster', () =
     expect(execution).not.toHaveBeenCalled();
   });
 
-  it('serves a scoped public read from finalized authority without a live RPC', async () => {
+  it('serves scoped public reads and partition inventory from finalized authority without a live RPC', async () => {
     const contextGraphId = 'finalized-public';
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({
@@ -256,16 +256,23 @@ describe('private read authorization uses the on-chain participant roster', () =
     );
     const live = vi.spyOn(agent, 'resolveLiveOnChainAccessPolicyState')
       .mockImplementation(() => new Promise(() => undefined));
+    const root = `did:dkg:context-graph:${contextGraphId}`;
+    await (Reflect.get(agent, 'store') as TripleStore).insert([
+      { subject: 'urn:finalized-visible', predicate: 'urn:p', object: '"public"', graph: root },
+    ]);
 
     await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
       contextGraphId,
-    })).resolves.toBeDefined();
+    })).resolves.toMatchObject({ bindings: [{ s: 'urn:finalized-visible' }] });
+    await expect(agent.listContextGraphQueryPartitions(contextGraphId, {
+      callerAgentAddress: MEMBER,
+    })).resolves.toContain(root);
     expect(readIndex).toHaveBeenCalledWith(
       ['8'],
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(live).not.toHaveBeenCalled();
-  });
+  }, 5_000);
 
   it('falls back to the bounded current-state read when the finalized lane faults', async () => {
     const contextGraphId = 'finalized-faulted';

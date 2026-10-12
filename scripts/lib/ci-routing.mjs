@@ -301,7 +301,7 @@ const BLAZEGRAPH_ARM64_PATTERNS = [
 const IDENTITY_WALLET_EVM_PATTERNS = [
   /^packages\/node-ui\/src\/ui\/web3\//,
   /^packages\/node-ui\/src\/ui\/pages\/identity-wallets\//,
-  /^packages\/node-ui\/src\/ui\/(?:api|http|identity-wallet-api|pca-api)\.ts$/,
+  /^packages\/node-ui\/src\/ui\/(?:api|http|identity-wallet-api|memory-layers-api|pca-api)\.ts$/,
   /^packages\/node-ui\/src\/ui\/(?:lib\/(?:nativeGasSymbol|apiToken)|stores\/wallet)\.ts$/,
   /^packages\/node-ui\/integration\/identity-wallet-actions-v10\.test\.ts$/,
   // The daemon route the suite drives and the CLI modules it loads.

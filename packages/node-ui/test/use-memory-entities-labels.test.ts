@@ -59,18 +59,11 @@ describe('useMemoryEntities readable labels', () => {
     root = createRoot(container);
 
     vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
-      const { sparql = '', contextGraphId = 'cg' } =
-        JSON.parse(String(init?.body ?? '{}')) as { sparql?: string; contextGraphId?: string };
-      const isVm = sparql.includes('_verifiable_memory_meta');
-      // PR #818 sweep 3 — WM SPARQL also contains STRENDS (for the
-      // `/_meta` exclusion); discriminate by the SWM-exclusive
-      // `/_shared_memory` tail check.
-      const isSwm = !isVm && sparql.includes('STRENDS(STR(?g), "/_shared_memory")');
+      const { contextGraphId = 'cg' } =
+        JSON.parse(String(init?.body ?? '{}')) as { contextGraphId?: string };
       const graph = `did:dkg:context-graph:${contextGraphId}/notes/assertion/agent/a-1`;
       const extraction = 'urn:dkg:extraction:123e4567-e89b-12d3-a456-426614174000';
-      const bindings = isVm || isSwm
-        ? []
-        : [
+      const bindings = [
             binding(extraction, RDF_TYPE, 'http://schema.org/Thing', graph),
             binding('urn:test:named', RDF_TYPE, 'http://schema.org/Thing', graph),
             binding('urn:test:named', SCHEMA_NAME, 'Friendly title', graph),
@@ -81,7 +74,11 @@ describe('useMemoryEntities readable labels', () => {
           ];
       return {
         ok: true,
-        json: async () => ({ result: { bindings } }),
+        json: async () => ({ contextGraphId, layers: {
+          wm: { ok: true, truncated: false, bindings },
+          swm: { ok: true, truncated: false, bindings: [] },
+          vm: { ok: true, truncated: false, bindings: [] },
+        } }),
       } as Response;
     }));
   });
