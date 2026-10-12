@@ -100,7 +100,7 @@
 #   DEVNET_UPGRADE_RECEIVE_WAIT_S   seconds new writes have to arrive after the
 #                             upgrade (default 300).
 #   DEVNET_UPGRADE_UPDATE_WAIT_S    seconds an update is asked again while Cores
-#                             decline it as temporarily unavailable (default 180:
+#                             decline it as temporarily unavailable (default 300:
 #                             a Core acknowledges an update only once it has
 #                             promoted the version being replaced).
 #   DEVNET_UPGRADE_MESH_WAIT_S      seconds the restarted nodes have to connect to
@@ -140,7 +140,7 @@ BASELINE_WAIT_S="${DEVNET_UPGRADE_BASELINE_WAIT_S:-300}"
 SERVE_WAIT_S="${DEVNET_UPGRADE_SERVE_WAIT_S:-240}"
 RECEIVE_WAIT_S="${DEVNET_UPGRADE_RECEIVE_WAIT_S:-300}"
 MESH_WAIT_S="${DEVNET_UPGRADE_MESH_WAIT_S:-90}"
-UPDATE_WAIT_S="${DEVNET_UPGRADE_UPDATE_WAIT_S:-180}"
+UPDATE_WAIT_S="${DEVNET_UPGRADE_UPDATE_WAIT_S:-300}"
 WAL_PAUSE_NODE="${DEVNET_UPGRADE_WAL_PAUSE_NODE:-}"
 DKG_API_MAXTIME="${DKG_API_MAXTIME:-180}"
 # The update-seal helpers read the chain through RPC_URL.
