@@ -1852,7 +1852,7 @@ export interface DKGAgentConfig {
     minPublisherNativeWei?: bigint;
     minPublisherTracWei?: bigint;
   } & AgentChainSignerSource;
-  /** Author keys of an external signer, which never pay: agents registered by their addresses sign through it, with or without `chainConfig`. */
+  /** Author keys of an external signer, which never pay: agents registered by their addresses sign through it, with or without `chainConfig`. Its default author authors the node's own publishes only when its operational wallets sign externally too. */
   authorSigners?: ExternalAuthorSigners;
   /** Cross-agent query access configuration. */
   queryAccess?: QueryAccessConfig;

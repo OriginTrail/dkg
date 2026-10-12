@@ -167,6 +167,7 @@ import {
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { constructConfiguredChainAdapter } from './configured-chain-adapter.js';
+import { signsThroughExternalSigner } from './external-author-signing.js';
 import {
   prepareAssertionPromote,
   translateLegacySwmRetirementFence,
@@ -1542,9 +1543,10 @@ export class DKGAgent extends DKGAgentBase {
       eventBus,
       keypair,
       publisherPrivateKey: useLegacyAdapterOperationalKeyFallback ? legacyAdapterOperationalKey : undefined,
-      // The configured author, if any. Without one, the publisher asks the chain adapter whether it signs
-      // externally, and then never lets a paying wallet author.
-      authorSigner: config.authorSigners?.defaultAuthor,
+      // The configured default author when the node's wallets sign externally too, as its default agent
+      // is then; without one, the publisher never lets a paying wallet author. With local wallets the
+      // node's own wallet authors what it publishes without a selected agent, like its default agent.
+      authorSigner: signsThroughExternalSigner(chain) ? config.authorSigners?.defaultAuthor : undefined,
       publisherAddress: config.publisherAddress,
       publisherAddressResolver: config.publisherAddress || useLegacyAdapterOperationalKeyFallback
         ? undefined

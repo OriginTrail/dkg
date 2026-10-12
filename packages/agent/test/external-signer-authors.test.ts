@@ -94,6 +94,18 @@ class ExternallySignedMockChain extends MockChainAdapter {
   }
 }
 
+/** A mock chain whose operational wallet is a key the node holds, and signs with it. */
+class LocallySignedMockChain extends MockChainAdapter {
+  constructor(private readonly wallet: ethers.Wallet) {
+    super('mock:31337', wallet.address);
+    this.setMockACKSigner(wallet);
+  }
+
+  getOperationalPrivateKey(): string {
+    return this.wallet.privateKey;
+  }
+}
+
 async function stubAgent(remote: RemoteSigners, store = new OxigraphStore()) {
   const agent = Object.create(DKGAgent.prototype) as any;
   const chain = {
@@ -444,6 +456,47 @@ describe('external signer author keys', () => {
       expect(signingRequests(before)).toEqual([]);
     } finally {
       await payersOnly.stop().catch(() => {});
+    }
+  });
+
+  it('authors what a node with local wallets opens and seals without an agent as its wallet, beside external author keys', async () => {
+    const { fake, remote } = await externalSigners();
+    const wallet = new ethers.Wallet(ethers.Wallet.createRandom().privateKey);
+    const agent = await DKGAgent.create({
+      name: 'LocalWalletsNode',
+      store: new OxigraphStore(),
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      kaNumberAllocator: makeTestKaNumberAllocator(),
+      chainAdapter: new LocallySignedMockChain(wallet),
+      authorSigners: remote.authors,
+      nodeRole: 'edge',
+    });
+    await agent.start();
+    const signingRequests = (from: number) => fake.requests.slice(from).filter((request) => request.method !== 'eth_accounts');
+    try {
+      // The node's wallet stays its default agent, and authors the draft it opens and seals without an agent.
+      expect(agent.getDefaultAgentAddress()).toBe(wallet.address);
+      await agent.assertion.create(CG, NAME);
+      await agent.assertion.write(CG, NAME, [q('urn:external-authors:local', 'urn:value', '"v1"')]);
+      const before = fake.requests.length;
+      const seal = await agent.assertion.finalize(CG, NAME);
+      expect(ethers.getAddress(seal.authorAddress)).toBe(wallet.address);
+      expect(seal.reservedKaId >> 96n).toBe(BigInt(wallet.address));
+      expect(signingRequests(before)).toEqual([]);
+
+      // An agent registered by the default author's address authors its own drafts through the signer.
+      const author = await agent.registerAgent('author', { address: defaultAuthor.address });
+      await agent.assertion.create(CG, 'authored', { agentAddress: author.agentAddress });
+      await agent.assertion.write(CG, 'authored', [q('urn:external-authors:authored', 'urn:value', '"v1"')], { agentAddress: author.agentAddress });
+      const signedFrom = fake.requests.length;
+      const authored = await agent.assertion.finalize(CG, 'authored', { agentAddress: author.agentAddress, authorAgentAddress: author.agentAddress });
+      expect(ethers.getAddress(authored.authorAddress)).toBe(defaultAuthor.address);
+      expect(authored.reservedKaId >> 96n).toBe(BigInt(defaultAuthor.address));
+      expect(signingRequests(signedFrom).map((request) => [request.method, request.authorization]))
+        .toEqual([['eth_signTypedData_v4', `Bearer ${AUTHOR_TOKEN}`]]);
+    } finally {
+      await agent.stop().catch(() => {});
     }
   });
 
