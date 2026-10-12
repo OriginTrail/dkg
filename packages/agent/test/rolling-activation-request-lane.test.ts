@@ -145,24 +145,31 @@ describe('rolling activation and the chain request lane', () => {
     Array.from({ length: count }, (_, i) => `backlog-${String(i).padStart(4, '0')}`)
   );
 
-  it('checked back to back, several hundred rows the chain does not confirm take the whole lane', async () => {
+  it('checked back to back, several hundred rows the chain does not confirm take nine tenths of the lane and hold every ordinary read over a second', async () => {
     const host = hostWith(backlog(300), {
       checks: new RollingSubscriptionChecks({ minPauseMs: 0, pausePerCheckTime: 0 }),
     });
 
     const { ordinary, tookMs } = await runPassWithOrdinaryReads(host);
 
-    // 1,500 authority reads at the budget's ten a second.
-    expect(tookMs).toBeGreaterThan(140_000);
-    expect(tookMs).toBeLessThan(160_000);
+    // 1,500 authority reads and one ordinary read a second, at the budget's ten
+    // a second. The authority reads alone would take 150 s; the ordinary reads
+    // take one permit in eleven.
+    expect(tookMs).toBeGreaterThan(160_000);
+    expect(tookMs).toBeLessThan(170_000);
     expect(new Set(lanes)).toEqual(new Set(['foreground/authority']));
     // The reads of the first three seconds find a token left of the burst
-    // allowance, and those of the last four are admitted when the pass ends.
-    // Every read between waits out its deadline and is not sent.
+    // allowance, and the last one is admitted when the pass ends. Every read
+    // between is passed by authority reads for the governor's grace period of
+    // a second, by at most four more after that, and then takes a permit. None
+    // waits out its deadline, and none is admitted at once: that is what the
+    // pacing below is for.
     expect(ordinary.slice(0, 3)).toEqual([0, 0, 0]);
-    const starved = ordinary.slice(3, -4);
-    expect(starved.length).toBeGreaterThan(140);
-    expect(new Set(starved)).toEqual(new Set(['not sent']));
+    const held = ordinary.slice(3, -1);
+    expect(held.length).toBeGreaterThan(150);
+    expect(held.filter((outcome) => outcome === 'not sent')).toEqual([]);
+    expect(Math.min(...(held as number[]))).toBeGreaterThanOrEqual(1_000);
+    expect(Math.max(...(held as number[]))).toBeLessThanOrEqual(1_600);
   });
 
   it('paced, the same backlog leaves every ordinary read admitted at once', async () => {
