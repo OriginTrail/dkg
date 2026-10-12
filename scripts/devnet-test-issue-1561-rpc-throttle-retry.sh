@@ -104,10 +104,16 @@ step() { # <what> <response> <accepted codes...>
   for code in "$@"; do [[ "$(code_of "$response")" == "$code" ]] && return 0; done
   fail "$what answered HTTP $(code_of "$response"): $(body_of "$response" | head -c 400)"
 }
-step "create" "$(api "$NODE" POST /api/knowledge-assets "{\"contextGraphId\":\"$CG\",\"name\":\"$name\"}")" 200 201
-step "write" "$(api "$NODE" POST "/api/knowledge-assets/$name/wm/write" \
-  "{\"contextGraphId\":\"$CG\",\"quads\":[{\"subject\":\"$subject\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"429 recovery probe\\\"\",\"graph\":\"\"}]}")" 200
-step "finalize" "$(api "$NODE" POST "/api/knowledge-assets/$name/wm/finalize" "{\"contextGraphId\":\"$CG\"}")" 200
+# Each answer goes into a variable first. As a command argument,
+# "$(api ... "{\"a\":1,\"b\":2}")" is brace-expanded by bash 3.2 before the
+# substitution is read, and the node gets half a body.
+response="$(api "$NODE" POST /api/knowledge-assets "{\"contextGraphId\":\"$CG\",\"name\":\"$name\"}")"
+step "create" "$response" 200 201
+response="$(api "$NODE" POST "/api/knowledge-assets/$name/wm/write" \
+  "{\"contextGraphId\":\"$CG\",\"quads\":[{\"subject\":\"$subject\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"429 recovery probe\\\"\",\"graph\":\"\"}]}")"
+step "write" "$response" 200
+response="$(api "$NODE" POST "/api/knowledge-assets/$name/wm/finalize" "{\"contextGraphId\":\"$CG\"}")"
+step "finalize" "$response" 200
 # The node started seconds ago. A share it refuses for now (its view of the
 # chain or of the graph is not ready) is asked again, and each refusal printed.
 shared=''
