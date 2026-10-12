@@ -3,143 +3,50 @@
  * published assets) and payers are separate keys; both can live in an external
  * signer, and each agent can have its own author key. The node stores no
  * private key for such an agent: registration recovers its public key from a
- * signature the signer produces, and author attestations requested with that
- * agent are signed through the signer. Payer accounts are never usable as
- * authors. A node without operational keys takes an author key of the signer
- * as its default agent (none from payers alone) and answers no VERIFY
- * proposals.
+ * signature the signer produces, and author attestations and shared-memory
+ * gossip requested with that agent are signed through the signer. Payer
+ * accounts are never usable as authors. The node's default agent is covered in
+ * external-signer-default-agent.test.ts, its chain adapter in
+ * external-signer-chain-adapter.test.ts.
  */
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
+import { EVMChainAdapter, connectRemoteSigners, type ExternalAuthorSigners } from '@origintrail-official/dkg-chain';
 import {
-  EVMChainAdapter,
-  MockChainAdapter,
-  connectRemoteSigners,
-  operationalSigningOf,
-  type ExternalAuthorSigners,
-  type OperationalSigning,
-  type RemoteSigners,
-} from '@origintrail-official/dkg-chain';
-import {
-  Logger,
-  TypedEventBus,
   buildAuthorAttestationTypedData,
   buildUpdateAuthorAttestationTypedData,
   computeGossipSigningPayload,
-  generateEd25519Keypair,
 } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { DKGPublisher } from '@origintrail-official/dkg-publisher';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { agentFromPrivateKey, registerSelfSovereignAgent } from '../src/agent-keystore.js';
-import { constructConfiguredChainAdapter } from '../src/configured-chain-adapter.js';
-import { operationalSignerSourceOf } from '../src/agent-chain-signer-source.js';
-import { adapterOperationalPrivateKey, adapterOperationalPrivateKeyAddress } from '../src/dkg-agent-helpers.js';
-import {
-  externalAuthorGossipSigner,
-  externalSignerAgentPublicKey,
-  localGossipSigner,
-  signsThroughExternalSigner,
-} from '../src/external-author-signing.js';
-import { isExternalAuthorCurator } from '../src/external-author-curator.js';
-import { planAuthorityIndexBootstrap } from '../src/authority-index-config.js';
+import { externalAuthorGossipSigner, externalSignerAgentPublicKey, localGossipSigner } from '../src/external-author-signing.js';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
+import {
+  AUTHOR_TOKEN,
+  CG,
+  ExternallySignedMockChain,
+  KAV_ADDRESS,
+  LocallySignedMockChain,
+  NAME,
+  PAYER_TOKEN,
+  agentKey,
+  closeStartedSigners,
+  defaultAuthor,
+  externalSigners,
+  payer,
+  q,
+  startedSigners,
+  stubAgent,
+} from './_helpers/external-signers.js';
 import { HARDHAT_KEYS } from '../../chain/test/hardhat-harness.js';
 import { getSharedContext } from '../../chain/test/evm-test-context.js';
-import { startFakeRemoteSigner, type FakeSigner, type FakeSignerOptions } from '../../chain/test/helpers/fake-remote-signer.js';
+import { startFakeRemoteSigner } from '../../chain/test/helpers/fake-remote-signer.js';
 
-const PAYER_TOKEN = 'payer-credential-5e4d3c2b1a090807';
-const AUTHOR_TOKEN = 'author-credential-0706050403020100';
-const payer = ethers.Wallet.createRandom();
-const defaultAuthor = ethers.Wallet.createRandom();
-const agentKey = ethers.Wallet.createRandom();
-const CG = 'external-authors';
-const NAME = 'notes';
-const KAV_ADDRESS = '0x1111111111111111111111111111111111111111';
-
-const started: FakeSigner[] = [];
-afterEach(async () => {
-  while (started.length > 0) await started.pop()!.close();
-});
-
-async function externalSigners(options: Partial<FakeSignerOptions> = {}): Promise<{ fake: FakeSigner; remote: RemoteSigners }> {
-  const fake = await startFakeRemoteSigner({
-    credentials: [
-      { token: PAYER_TOKEN, keys: [payer.privateKey] },
-      { token: AUTHOR_TOKEN, keys: [defaultAuthor.privateKey, agentKey.privateKey] },
-    ],
-    ...options,
-  });
-  started.push(fake);
-  const remote = await connectRemoteSigners({
-    url: fake.url,
-    authToken: PAYER_TOKEN,
-    author: { authToken: AUTHOR_TOKEN, address: defaultAuthor.address },
-  });
-  return { fake, remote };
-}
-
-function silentLog() {
-  return { info() {}, warn() {}, error() {}, debug() {} };
-}
-
-/** A mock chain whose operational wallets sign through an external signer, as it reports. */
-class ExternallySignedMockChain extends MockChainAdapter {
-  operationalSigning(): OperationalSigning {
-    return { external: true, payerAddresses: [this.signerAddress] };
-  }
-}
-
-/** A mock chain whose operational wallet is a key the node holds, and signs with it. */
-class LocallySignedMockChain extends MockChainAdapter {
-  constructor(private readonly wallet: ethers.Wallet) {
-    super('mock:31337', wallet.address);
-    this.setMockACKSigner(wallet);
-  }
-
-  getOperationalPrivateKey(): string {
-    return this.wallet.privateKey;
-  }
-}
-
-async function stubAgent(remote: RemoteSigners, store = new OxigraphStore()) {
-  const agent = Object.create(DKGAgent.prototype) as any;
-  const chain = {
-    chainId: 'mock:31337',
-    getEvmChainId: async () => 31337n,
-    getKnowledgeAssetsLifecycleAddress: async () => KAV_ADDRESS,
-    hasContractCode: async () => false,
-    operationalSigning: () => ({ external: true, payerAddresses: [payer.address] }),
-  };
-  agent.store = store;
-  agent.log = silentLog();
-  agent.chain = chain;
-  agent.config = { authorSigners: remote.authors };
-  agent.localAgents = new Map();
-  agent.agentTokenIndex = new Map();
-  agent.kaNumberAllocator = makeTestKaNumberAllocator();
-  agent.reconciledKaAuthors = new Set<string>();
-  agent.publisher = new DKGPublisher({
-    store,
-    chain: chain as never,
-    eventBus: new TypedEventBus(),
-    keypair: await generateEd25519Keypair(),
-    writeLocks: new Map(),
-    authorSigner: remote.authors!.defaultAuthor,
-  });
-  Object.defineProperty(agent, 'peerId', {
-    value: '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6',
-    configurable: true,
-  });
-  return agent;
-}
-
-function q(subject: string, predicate: string, object: string): Quad {
-  return { subject, predicate, object, graph: '' };
-}
+afterEach(closeStartedSigners);
 
 describe('external signer author keys', () => {
   it('registers an agent by an address the external signer holds, keeping no key for it', async () => {
@@ -174,7 +81,7 @@ describe('external signer author keys', () => {
         { token: AUTHOR_TOKEN, keys: [first.privateKey, second.privateKey, third.privateKey] },
       ],
     });
-    started.push(fake);
+    startedSigners.push(fake);
     const remote = await connectRemoteSigners({ url: fake.url, authToken: PAYER_TOKEN, author: { authToken: AUTHOR_TOKEN } });
     const dir = await mkdtemp(join(tmpdir(), 'dkg-agent-names-'));
     try {
@@ -527,307 +434,6 @@ describe('external signer author keys', () => {
     }
   });
 
-  it('decides external signing from the chain adapter, however it was made', async () => {
-    const { remote } = await externalSigners();
-    const authors = remote.authors;
-    const external = { operationalSigning: () => ({ external: true, payerAddresses: [payer.address] }) };
-    expect(signsThroughExternalSigner(external)).toBe(true);
-    expect(signsThroughExternalSigner({ operationalSigning: () => ({ external: false, payerAddresses: [] }) })).toBe(false);
-    // An adapter that does not report its operational signing is taken to sign locally.
-    expect(signsThroughExternalSigner({})).toBe(false);
-    expect(signsThroughExternalSigner(undefined)).toBe(false);
-    // Configured signers build the agent's own adapter, which then says so; a supplied adapter brings its own wallets.
-    const built = constructConfiguredChainAdapter({
-      chainConfig: { rpcUrl: 'http://127.0.0.1:1', hubAddress: '0x00000000000000000000000000000000000000d4', signers: remote.operational },
-    });
-    // The same signers given in an adapter the node is supplied report the same payers.
-    const supplied = new EVMChainAdapter({
-      rpcUrl: 'http://127.0.0.1:1',
-      hubAddress: '0x00000000000000000000000000000000000000d4',
-      signers: remote.operational,
-      allowNoAdminSigner: true,
-    });
-    try {
-      expect(signsThroughExternalSigner(built.chain)).toBe(true);
-      expect(operationalSigningOf(built.chain)).toEqual({ external: true, payerAddresses: [payer.address] });
-      const injected = constructConfiguredChainAdapter({ chainAdapter: supplied }).chain;
-      expect(operationalSigningOf(injected)).toEqual(operationalSigningOf(built.chain));
-    } finally {
-      (built.chain as EVMChainAdapter).destroy();
-      supplied.destroy();
-    }
-    expect(() => constructConfiguredChainAdapter({
-      chainAdapter: new MockChainAdapter('mock:31337', payer.address),
-      chainConfig: { rpcUrl: 'http://127.0.0.1:1', hubAddress: ethers.ZeroAddress, signers: remote.operational },
-    })).toThrow(/cannot be combined with a supplied chainAdapter/);
-    expect(await isExternalAuthorCurator(authors, external, agentKey.address, payer.address)).toBe(true);
-    expect(await isExternalAuthorCurator(authors, undefined, agentKey.address, payer.address)).toBe(false);
-
-    // A fresh node makes the default author its default agent only when its wallets sign externally.
-    const agent = await stubAgent(remote);
-    agent.config = { name: 'node', authorSigners: authors };
-    agent.chain = { ...agent.chain, operationalSigning: undefined };
-    await agent.reconcileDefaultAgent();
-    expect(agent.localAgents.size).toBe(0);
-    expect(agent.getDefaultAgentAddress()).toBeUndefined();
-    agent.chain = { ...agent.chain, ...external };
-    await agent.reconcileDefaultAgent();
-    expect(agent.getDefaultAgentAddress()).toBe(defaultAuthor.address);
-    expect(agent.getLocalAgentMode(defaultAuthor.address)).toBe('self-sovereign');
-  });
-
-  it('settles the default agent once at start, keeping it when the default author is not to be adopted or cannot be registered', async () => {
-    const external = { operationalSigning: () => ({ external: true, payerAddresses: [payer.address] }) };
-    const authors: ExternalAuthorSigners = {
-      defaultAuthor,
-      addresses: [defaultAuthor.address],
-      signerFor: async () => defaultAuthor,
-      firstSignerOf: async () => ({ address: defaultAuthor.address, signer: defaultAuthor }),
-    };
-    // A node with its loaded agents and persisted default agent, whose signer registers no agent.
-    const nodeWith = (
-      loaded: ReadonlyArray<readonly [string, string]>,
-      persisted: string | undefined,
-      configured: ExternalAuthorSigners = authors,
-      chain: object = external,
-    ) => {
-      const node = Object.create(DKGAgent.prototype) as any;
-      node.config = { name: 'node', authorSigners: configured };
-      node.chain = chain;
-      node.log = silentLog();
-      node.localAgents = new Map(loaded.map(([name, agentAddress]) => [agentAddress, { name, agentAddress, mode: 'self-sovereign' }]));
-      node.defaultAgentAddress = persisted;
-      node.registerAgent = vi.fn(async () => { throw new Error('agent registrations are not signed here'); });
-      node.markDefaultAgent = vi.fn(async () => {});
-      return node;
-    };
-    const writer = ['node', agentKey.address] as const;
-    const author = ['author', defaultAuthor.address] as const;
-
-    // Nothing to adopt: no default author, no external signing, or the default author is the default agent already.
-    for (const node of [
-      nodeWith([writer], agentKey.address, { ...authors, defaultAuthor: undefined }),
-      nodeWith([writer], agentKey.address, authors, {}),
-      nodeWith([writer, author], defaultAuthor.address.toLowerCase()),
-    ]) {
-      const before = node.getDefaultAgentAddress();
-      await node.reconcileDefaultAgent();
-      expect(node.getDefaultAgentAddress()).toBe(before);
-      expect(node.registerAgent).not.toHaveBeenCalled();
-      expect(node.markDefaultAgent).not.toHaveBeenCalled();
-    }
-
-    // A default author that is an agent already becomes the default agent as it is.
-    const adopting = nodeWith([writer, author], agentKey.address);
-    await adopting.reconcileDefaultAgent();
-    expect(adopting.getDefaultAgentAddress()).toBe(defaultAuthor.address);
-    expect(adopting.registerAgent).not.toHaveBeenCalled();
-    expect(adopting.markDefaultAgent).toHaveBeenCalledExactlyOnceWith(defaultAuthor.address);
-
-    // A default author the signer will not register: the persisted default agent is kept, else the first agent
-    // becomes it. The registration was asked under a name no agent has.
-    for (const [names, free] of [
-      [['owner'], 'node'],
-      [['node'], 'node-default-author'],
-      [['node', 'node-default-author'], 'node-default-author-2'],
-      [['node', 'node-default-author-2'], 'node-default-author'],
-    ] as const) {
-      const loaded = names.map((name) => [name, ethers.Wallet.createRandom().address] as const);
-      for (const persisted of [loaded[loaded.length - 1]![1], undefined]) {
-        const refusing = nodeWith(loaded, persisted);
-        await refusing.reconcileDefaultAgent();
-        expect(refusing.registerAgent).toHaveBeenCalledExactlyOnceWith(free, { address: defaultAuthor.address, framework: undefined });
-        expect(refusing.getDefaultAgentAddress()).toBe(persisted ?? loaded[0]![1]);
-        if (persisted === undefined) expect(refusing.markDefaultAgent).toHaveBeenCalledExactlyOnceWith(loaded[0]![1]);
-        else expect(refusing.markDefaultAgent).not.toHaveBeenCalled();
-      }
-    }
-  });
-
-  it('auto-registers no default agent from payer accounts alone, or when no author key can be registered', async () => {
-    const { remote } = await externalSigners();
-    const chain = new EVMChainAdapter({
-      rpcUrl: 'http://127.0.0.1:1',
-      hubAddress: '0x00000000000000000000000000000000000000d4',
-      chainId: 'evm:31337',
-      signers: remote.operational,
-      allowNoAdminSigner: true,
-    });
-    try {
-      for (const authors of [
-        undefined,
-        { addresses: [], signerFor: async () => undefined, firstSignerOf: async () => undefined },
-        // Listed, but not served as an author key: the registration is refused.
-        { addresses: [payer.address], signerFor: async () => undefined, firstSignerOf: async () => undefined },
-      ]) {
-        const agent = Object.create(DKGAgent.prototype) as any;
-        agent.config = { authorSigners: authors };
-        agent.chain = chain;
-        agent.localAgents = new Map();
-        agent.agentTokenIndex = new Map();
-        agent.log = silentLog();
-        await agent.reconcileDefaultAgent();
-        expect(agent.localAgents.size).toBe(0);
-        expect(agent.defaultAgentAddress).toBeUndefined();
-      }
-    } finally {
-      chain.destroy();
-    }
-  });
-
-  it('makes the first author account of the signer the default agent, and loads it on the next start', async () => {
-    const [first, second] = [HARDHAT_KEYS.EXTRA1, HARDHAT_KEYS.EXTRA2].map((key) => new ethers.Wallet(key));
-    const fake = await startFakeRemoteSigner({
-      credentials: [
-        { token: PAYER_TOKEN, keys: [HARDHAT_KEYS.PUBLISHER] },
-        { token: AUTHOR_TOKEN, keys: [first.privateKey, second.privateKey] },
-      ],
-    });
-    started.push(fake);
-    const remote = await connectRemoteSigners({ url: fake.url, authToken: PAYER_TOKEN, author: { authToken: AUTHOR_TOKEN } });
-    expect(remote.authors!.defaultAuthor).toBeUndefined();
-    const dir = await mkdtemp(join(tmpdir(), 'dkg-default-agent-'));
-    const start = async () => {
-      const agent = await DKGAgent.create({
-        name: 'ExternalSignerNode',
-        store: new OxigraphStore(join(dir, 'store.nq')),
-        chainAdapter: new ExternallySignedMockChain('mock:31337', remote.operational[0].address),
-        authorSigners: remote.authors,
-        nodeRole: 'edge',
-      });
-      await agent.start();
-      return agent;
-    };
-    try {
-      const agent = await start();
-      expect(agent.getDefaultAgentAddress()).toBe(first.address);
-      expect(agent.listLocalAgents().map((record) => [record.name, record.agentAddress, record.mode]))
-        .toEqual([['ExternalSignerNode', first.address, 'self-sovereign']]);
-      expect(agent.getCustodialAgentPrivateKey(first.address)).toBeUndefined();
-      expect(agent.getLocalAgentMode(second.address)).toBeUndefined();
-      // The signer signed the registration with the author credential.
-      const registrations = fake.calls('eth_signTypedData_v4');
-      expect(registrations).toHaveLength(1);
-      expect(ethers.getAddress(String(registrations[0].params[0]))).toBe(first.address);
-      expect(registrations[0].authorization).toBe(`Bearer ${AUTHOR_TOKEN}`);
-      await agent.stop();
-
-      const restarted = await start();
-      expect(restarted.getDefaultAgentAddress()).toBe(first.address);
-      expect(restarted.listLocalAgents().map((record) => record.agentAddress)).toEqual([first.address]);
-      expect(fake.calls('eth_signTypedData_v4')).toHaveLength(1);
-      await restarted.stop();
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-
-  it('makes each newly configured default author the default agent, and opens and seals node drafts under it', async () => {
-    const nextAuthor = ethers.Wallet.createRandom();
-    const fake = await startFakeRemoteSigner({
-      credentials: [
-        { token: PAYER_TOKEN, keys: [payer.privateKey] },
-        { token: AUTHOR_TOKEN, keys: [defaultAuthor.privateKey, agentKey.privateKey, nextAuthor.privateKey] },
-      ],
-    });
-    started.push(fake);
-    const dir = await mkdtemp(join(tmpdir(), 'dkg-default-author-change-'));
-    const start = async (address: string) => {
-      const remote = await connectRemoteSigners({ url: fake.url, authToken: PAYER_TOKEN, author: { authToken: AUTHOR_TOKEN, address } });
-      const agent = await DKGAgent.create({
-        name: 'DefaultAuthorNode',
-        store: new OxigraphStore(join(dir, 'store.nq')),
-        dataDir: dir,
-        kaNumberAllocator: makeTestKaNumberAllocator(),
-        chainAdapter: new ExternallySignedMockChain('mock:31337', payer.address),
-        authorSigners: remote.authors,
-        nodeRole: 'edge',
-      });
-      await agent.start();
-      return { agent, remote };
-    };
-    const registrations = () => fake.calls('eth_signTypedData_v4')
-      .filter((request) => JSON.parse(String(request.params[1])).primaryType === 'AgentRegistration').length;
-    try {
-      // The first default author is registered as the default agent, and drafts a node token opens are its own.
-      const first = await start(agentKey.address);
-      expect(first.agent.getDefaultAgentAddress()).toBe(agentKey.address);
-      await first.agent.assertion.create(CG, 'before');
-      await first.agent.stop();
-      first.remote.destroy();
-
-      // Another default author is configured: it becomes the default agent, and the former one stays an agent.
-      const changed = await start(defaultAuthor.address);
-      try {
-        expect(changed.agent.getDefaultAgentAddress()).toBe(defaultAuthor.address);
-        expect(changed.agent.getLocalAgentMode(agentKey.address)).toBe('self-sovereign');
-        expect(changed.agent.listLocalAgents().map((record) => [record.name, record.agentAddress])).toEqual([
-          ['DefaultAuthorNode', agentKey.address],
-          ['DefaultAuthorNode-default-author', defaultAuthor.address],
-        ]);
-        expect(registrations()).toBe(2);
-        // A new draft opened and sealed with the node token is the default author's, from its reserved number on.
-        await changed.agent.assertion.create(CG, NAME);
-        await changed.agent.assertion.write(CG, NAME, [q('urn:external-authors:changed', 'urn:value', '"v1"')]);
-        const seal = await changed.agent.assertion.finalize(CG, NAME);
-        expect(ethers.getAddress(seal.authorAddress)).toBe(defaultAuthor.address);
-        expect(seal.reservedKaId >> 96n).toBe(BigInt(defaultAuthor.address));
-        // The draft the former default agent opened keeps its author.
-        expect(await changed.agent.assertion.history(CG, 'before', { agentAddress: agentKey.address })).not.toBeNull();
-        expect(await changed.agent.assertion.history(CG, 'before')).toBeNull();
-      } finally {
-        await changed.agent.stop();
-        changed.remote.destroy();
-      }
-
-      // The next start keeps it, and registers nothing again.
-      const again = await start(defaultAuthor.address);
-      try {
-        expect(again.agent.getDefaultAgentAddress()).toBe(defaultAuthor.address);
-        expect(registrations()).toBe(2);
-      } finally {
-        await again.agent.stop();
-        again.remote.destroy();
-      }
-
-      // A third default author gets a name of its own and becomes the default agent; the former ones stay agents.
-      const third = await start(nextAuthor.address);
-      try {
-        expect(third.agent.getDefaultAgentAddress()).toBe(nextAuthor.address);
-        expect(third.agent.listLocalAgents().map((record) => [record.name, record.agentAddress]).sort()).toEqual([
-          ['DefaultAuthorNode', agentKey.address],
-          ['DefaultAuthorNode-default-author', defaultAuthor.address],
-          ['DefaultAuthorNode-default-author-2', nextAuthor.address],
-        ]);
-        expect(registrations()).toBe(3);
-        // A new draft opened and sealed with the node token is the third default author's.
-        await third.agent.assertion.create(CG, 'after');
-        await third.agent.assertion.write(CG, 'after', [q('urn:external-authors:third', 'urn:value', '"v1"')]);
-        const seal = await third.agent.assertion.finalize(CG, 'after');
-        expect(ethers.getAddress(seal.authorAddress)).toBe(nextAuthor.address);
-        expect(seal.reservedKaId >> 96n).toBe(BigInt(nextAuthor.address));
-        // What the former default agents opened keeps its author.
-        expect(await third.agent.assertion.history(CG, 'before', { agentAddress: agentKey.address })).not.toBeNull();
-        expect(await third.agent.assertion.history(CG, NAME, { agentAddress: defaultAuthor.address })).not.toBeNull();
-      } finally {
-        await third.agent.stop();
-        third.remote.destroy();
-      }
-
-      // And the next start keeps the third, registering nothing again.
-      const restarted = await start(nextAuthor.address);
-      try {
-        expect(restarted.agent.getDefaultAgentAddress()).toBe(nextAuthor.address);
-        expect(registrations()).toBe(3);
-      } finally {
-        await restarted.agent.stop();
-        restarted.remote.destroy();
-      }
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-
   it('takes the external author keys beside a supplied adapter, with no chain configuration at all', async () => {
     const { fake, remote } = await externalSigners();
     const dir = await mkdtemp(join(tmpdir(), 'dkg-authors-beside-adapter-'));
@@ -872,132 +478,5 @@ describe('external signer author keys', () => {
       await agent.stop().catch(() => {});
       await rm(dir, { recursive: true, force: true });
     }
-  });
-
-  it('registers no VERIFY proposal handler when the node holds no operational key', async () => {
-    const messages: string[] = [];
-    Logger.setSink((record) => { messages.push(record.message); });
-    const agent = await DKGAgent.create({
-      name: 'ExternalSignerVerify',
-      store: new OxigraphStore(),
-      chainAdapter: new ExternallySignedMockChain('mock:31337', payer.address),
-      nodeRole: 'edge',
-    });
-    try {
-      await agent.start();
-      expect(messages).toContain('VERIFY proposal handler not registered: EVM signing is delegated to an external signer');
-      expect(messages).not.toContain('Registered VERIFY proposal handler');
-    } finally {
-      Logger.setSink(null);
-      await agent.stop().catch(() => {});
-    }
-  });
-
-  it('normalizes the one configured source of operational wallets for the adapter', async () => {
-    const { remote } = await externalSigners();
-    const [primary, additional] = [HARDHAT_KEYS.CORE_OP, HARDHAT_KEYS.PUBLISHER];
-    expect(operationalSignerSourceOf({ operationalKeys: [primary, additional] }))
-      .toEqual({ privateKey: primary, additionalKeys: [additional] });
-    expect(operationalSignerSourceOf({ signers: remote.operational })).toEqual({ signers: remote.operational });
-    expect(operationalSignerSourceOf({})).toBeUndefined();
-    expect(operationalSignerSourceOf({ operationalKeys: [], signers: [] })).toBeUndefined();
-    // Untyped callers that name both are refused.
-    expect(() => operationalSignerSourceOf({ operationalKeys: [primary], signers: remote.operational }))
-      .toThrow(/either operationalKeys or signers/);
-  });
-
-  it('reads an adapter\'s operational key in one place, for its construction and its publisher address alike', () => {
-    const adapterWith = (getOperationalPrivateKey?: () => unknown) =>
-      (getOperationalPrivateKey === undefined ? {} : { getOperationalPrivateKey }) as Parameters<typeof adapterOperationalPrivateKey>[0];
-    const key = HARDHAT_KEYS.CORE_OP;
-    expect(adapterOperationalPrivateKey(adapterWith(() => key))).toBe(key);
-    expect(adapterOperationalPrivateKeyAddress(adapterWith(() => key))).toBe(new ethers.Wallet(key).address);
-    // No getter, one that throws (an adapter that signs externally), or no key: no key and no address.
-    for (const getter of [undefined, () => { throw new Error('signs through an external signer'); }, () => '', () => 7]) {
-      expect(adapterOperationalPrivateKey(adapterWith(getter))).toBeUndefined();
-      expect(adapterOperationalPrivateKeyAddress(adapterWith(getter))).toBeUndefined();
-    }
-    // A key that is not one has no address.
-    expect(adapterOperationalPrivateKeyAddress(adapterWith(() => '0x1234'))).toBeUndefined();
-  });
-
-  it('builds the agent adapter from external signers on edge nodes only', async () => {
-    const { remote } = await externalSigners();
-    const chainConfig = {
-      rpcUrl: 'http://127.0.0.1:1',
-      hubAddress: '0x00000000000000000000000000000000000000d4',
-      chainId: 'evm:31337',
-      signers: remote.operational,
-    };
-    const edge = constructConfiguredChainAdapter({ chainConfig, nodeRole: 'edge' });
-    try {
-      expect(edge.operationalKeys).toBeUndefined();
-      expect((edge.chain as EVMChainAdapter).getSignerAddresses()).toEqual([payer.address]);
-      expect(() => (edge.chain as EVMChainAdapter).getOperationalPrivateKey()).toThrow(/external signer/);
-      // An injected adapter that signs externally contributes no key either, and runs an edge node only.
-      expect(constructConfiguredChainAdapter({ chainAdapter: edge.chain }).operationalKeys).toBeUndefined();
-      expect(constructConfiguredChainAdapter({ chainAdapter: edge.chain, nodeRole: 'edge' }).chain).toBe(edge.chain);
-      expect(() => constructConfiguredChainAdapter({ chainAdapter: edge.chain, nodeRole: 'core' })).toThrow(/edge nodes only/);
-      await expect(DKGAgent.create({
-        name: 'SuppliedExternalCore',
-        store: new OxigraphStore(),
-        chainAdapter: edge.chain,
-        nodeRole: 'core',
-      })).rejects.toThrow(/edge nodes only/);
-      // Nor does it take local operational keys, such as its payer's key left in the configuration:
-      // a fresh node refuses them before any agent is registered, and keeps no keystore.
-      const dir = await mkdtemp(join(tmpdir(), 'dkg-supplied-external-'));
-      try {
-        const refusal = await DKGAgent.create({
-          name: 'SuppliedExternalWithKeys',
-          store: new OxigraphStore(),
-          dataDir: dir,
-          chainAdapter: edge.chain,
-          chainConfig: { rpcUrl: chainConfig.rpcUrl, hubAddress: chainConfig.hubAddress, operationalKeys: [payer.privateKey] },
-          nodeRole: 'edge',
-        }).then(() => undefined, (error: unknown) => error as Error);
-        expect(refusal?.message).toMatch(/operationalKeys are local wallet keys and cannot be combined with a supplied chainAdapter/);
-        expect(refusal?.message).not.toContain(payer.privateKey.slice(2));
-        await expect(readFile(join(dir, 'agent-keystore.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
-        // Nor an adapter that reports external signing yet exposes a local operational key of its own.
-        const exposing = Object.assign(new ExternallySignedMockChain('mock:31337', payer.address), {
-          getOperationalPrivateKey: () => payer.privateKey,
-        });
-        const exposed = await DKGAgent.create({
-          name: 'SuppliedExternalExposingKey',
-          store: new OxigraphStore(),
-          dataDir: dir,
-          chainAdapter: exposing,
-          nodeRole: 'edge',
-        }).then(() => undefined, (error: unknown) => error as Error);
-        expect(exposed?.message).toMatch(/cannot also expose a local operational key/);
-        expect(exposed?.message).not.toContain(payer.privateKey.slice(2));
-        await expect(readFile(join(dir, 'agent-keystore.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
-      } finally {
-        await rm(dir, { recursive: true, force: true });
-      }
-    } finally {
-      (edge.chain as EVMChainAdapter).destroy();
-    }
-    expect(() => constructConfiguredChainAdapter({ chainConfig, nodeRole: 'core' })).toThrow(/edge nodes only/);
-    // An injected adapter with a local operational key still runs a core node.
-    const { signers: _signers, ...localChainConfig } = chainConfig;
-    const localCore = new EVMChainAdapter({ ...localChainConfig, privateKey: HARDHAT_KEYS.CORE_OP, allowNoAdminSigner: true });
-    try {
-      expect(constructConfiguredChainAdapter({ chainAdapter: localCore, nodeRole: 'core' }).operationalKeys)
-        .toEqual([HARDHAT_KEYS.CORE_OP]);
-    } finally {
-      localCore.destroy();
-    }
-    expect(() => constructConfiguredChainAdapter({
-      chainConfig: { ...chainConfig, operationalKeys: [payer.privateKey] },
-    })).toThrow(/either operationalKeys or signers/);
-    // An external signer counts as the agent's own EVM adapter for authority-index bootstrap.
-    expect(planAuthorityIndexBootstrap({
-      nodeRole: 'edge',
-      chainConfig: { signers: remote.operational },
-      localContextGraphAuthorityIndexStore: {},
-      networkRelays: [],
-    })).toMatchObject({ source: 'local-history', skipReason: 'no network relay is available to seed from' });
   });
 });
