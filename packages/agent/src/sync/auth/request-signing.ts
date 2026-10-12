@@ -15,6 +15,7 @@
  * sign the digest itself (`eth_sign`); a key on the node signs the digest.
  */
 import {
+  RemoteSignerError,
   signMessageWithPreimage,
   type ChainAdapter,
   type ExternalAuthorSigners,
@@ -95,7 +96,10 @@ export function claimedAgentSyncRequestSigner(
   return async (digest, preimage) => {
     const signer = await agentSigner(authors, address, privateKey);
     if (signer === undefined) {
-      throw new Error(`Cannot sign a sync request as ${address}: it is not an author key of the external signer`);
+      throw new RemoteSignerError(
+        'REMOTE_SIGNER_ADDRESS_NOT_AVAILABLE',
+        `Cannot sign a sync request as ${address}: it is not an author key of the external signer`,
+      );
     }
     return signMessageWithPreimage(signer, signingRequest(digest, preimage));
   };

@@ -12,8 +12,10 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
-import { connectRemoteSigners, type RemoteSigners } from '@origintrail-official/dkg-chain';
+import { RemoteSignerError, connectRemoteSigners, type RemoteSigners } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/dkg-agent.js';
+import { sendSyncRequest } from '../src/p2p/sync-transport.js';
+import { UNRESTRICTED_SYNC_WORK } from '../src/sync/work-admission.js';
 import { buildSyncRequestEnvelope, type SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 import {
   SYNC_REQUEST_SIGNING_METHOD,
@@ -227,11 +229,14 @@ describe('sync requests signed as the claimed agent', () => {
     expect(signed[0]!.authorization).toBe(`Bearer ${AUTHOR_TOKEN}`);
     expect(signed[0]!.params).toEqual([agentWallet.address.toLowerCase(), ethers.hexlify(DIGEST)]);
 
-    // A payer is not an author key: nothing is signed.
+    // A payer is not an author key: nothing is signed, and the failure is the signer's, so final.
     await expect(build({
       claimedAgentAddress: payer.address,
       claimedAgentSigner: claimedAgentSyncRequestSigner(authors, payer.address, {}),
-    })).rejects.toThrow(`Cannot sign a sync request as ${payer.address}: it is not an author key of the external signer`);
+    })).rejects.toMatchObject({
+      code: 'REMOTE_SIGNER_ADDRESS_NOT_AVAILABLE',
+      message: `Cannot sign a sync request as ${payer.address}: it is not an author key of the external signer`,
+    });
     expect(fake.calls('eth_sign')).toHaveLength(1);
   });
 });
@@ -267,8 +272,30 @@ describe('sync requests an external signer can check', () => {
     ]);
   });
 
+  it('do not sign a sync page again after the external signer failed, while other failures are retried', async () => {
+    const attempt = async (failure: Error) => {
+      const requestFactory = vi.fn(async (): Promise<Uint8Array> => { throw failure; });
+      await expect(sendSyncRequest({
+        remotePeerId: TARGET_PEER,
+        timeoutMs: 1_000,
+        retryAttempts: 3,
+        contextGraphId: 'catch-up-graph',
+        offset: 0,
+        workAdmission: UNRESTRICTED_SYNC_WORK,
+        requestFactory,
+        send: vi.fn(),
+        protocolId: '/dkg/10.0.2/sync',
+        onRetry: () => {},
+      } as never)).rejects.toBe(failure);
+      return requestFactory.mock.calls.length;
+    };
+    expect(await attempt(new RemoteSignerError('REMOTE_SIGNER_REJECTED', 'refused by policy'))).toBe(1);
+    expect(await attempt(new RemoteSignerError('REMOTE_SIGNER_TIMEOUT', 'no answer'))).toBe(1);
+    expect(await attempt(new Error('chain read failed'))).toBe(3);
+  }, 30_000);
+
   it('sign as the node identity with the preimage when the chain adapter takes it', async () => {
-    const signed = { r: new Uint8Array(32).fill(1), vs: new Uint8Array(32).fill(2) };
+    const signed ={ r: new Uint8Array(32).fill(1), vs: new Uint8Array(32).fill(2) };
     const signMessageWithPreimage = vi.fn(async () => signed);
     const signMessage = vi.fn(async () => signed);
     const preimage = syncRequestSigningPreimage({ contextGraphId: 'g', offset: 0, limit: 1, includeSharedMemory: false });
