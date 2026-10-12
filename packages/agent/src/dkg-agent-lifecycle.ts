@@ -299,7 +299,7 @@ import {
   type CiphertextChunkCatchupRequest,
   type CiphertextChunkCatchupResponse,
 } from './swm/ciphertext-chunk-catchup.js';
-import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
+import { waitForAdvertisedOrLiveProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { connectedPeerIds as liveConnectedPeerIds } from './p2p/connected-peer-ids.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
@@ -401,8 +401,7 @@ import {
   registerSyncHandler,
   resolveSyncResponderSnapshotPolicy,
 } from './sync/responder/sync-handler.js';
-import { createExactBatchResponderBinding } from './sync/responder/exact-batch-stream.js';
-import { exactBatchTransportOptions } from './sync/requester/exact-batch-stream.js';
+import { createExactBatchResponderBinding, exactBatchResponderTransportOptions } from './sync/responder/exact-batch-stream.js';
 import type { VmRecoveryRegisteredPublicEvidence } from './vm-recovery-pass-authority.js';
 import { runExactBatchStreamDriver } from './sync/requester/exact-batch-stream-driver.js';
 import {
@@ -430,6 +429,7 @@ import {
   planPrivateRecoverySource,
 } from './sync/private-recovery-source-planner.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
+import { selectSyncCapablePeers } from './p2p/catchup-protocol-readiness.js';
 import { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js';
 import {
   FOREGROUND_CATCHUP_SYNC_PRIORITY,
@@ -3294,9 +3294,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               admission: resources,
               parseSyncRequest: this.parseSyncRequest.bind(this),
               authorizeSyncRequest: this.authorizeSyncRequest.bind(this),
-              isPublicContextGraph: async (cg, signal) => (await this.resolveRegisteredContextGraphAuthority(cg, {
-                authorityReadMode: 'finalized-index-or-live', signal,
-              })).kind === 'public',
+              resolvePublicContextGraphAuthority: async (cg, signal) => {
+                const authority = await this.resolveRegisteredContextGraphAuthority(cg, {
+                  authorityReadMode: 'finalized-index-or-live', signal,
+                });
+                if (authority.kind === 'unavailable') return 'unavailable';
+                return authority.kind === 'public' ? 'public' : 'non-public';
+              },
+              onRefusal: (stage, code) => this.log.info(createOperationContext('sync'),
+                `Exact batch responder refusal stage=${stage} code=${code}`),
               servingWithheld: (cg) => this.contextGraphServingWithheld(cg),
               onExport: (assetIndex, wholePayloadExports, operationContext) => this.log.info(operationContext,
                 `Exact batch responder export asset=${assetIndex} wholePayloadExports=${wholePayloadExports}`),
@@ -3308,7 +3314,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 `Exact batch responder stage=${stage} asset=${assetIndex} durationMs=${durationMs.toFixed(3)}`),
             });
             registerExperimentalExactBatchResponder(this.router,
-              exactBatchTransportOptions(120_000), binding.authorizeRequest, binding.respond);
+              exactBatchResponderTransportOptions(120_000, (level, message) => this.log[level](createOperationContext('sync'), message)), binding.authorizeRequest, binding.respond);
           }
         : undefined,
       // Serve-skip policy (#1233): withhold the no-consumer agents/_meta snapshot
@@ -8294,26 +8300,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
 
-    // Phase 1: probe all peers for PROTOCOL_SYNC support serially. This is
-    // cheap (peerStore lookup / waitForPeerProtocol), but we keep it a
-    // separate pass so Phase 2's Promise.all only kicks off peers we know
-    // can serve us — parallel-probing would multiply connection churn for
-    // no gain. See the "Run per-peer syncs in parallel" comment below.
-    const syncCapable: string[] = [];
-    for (const pid of peers) {
+    // Phase 1: check protocol readiness with bounded concurrency. Stale
+    // Identify records now require live negotiation, so a serial pass would
+    // add up to six seconds per peer before any catch-up work can start.
+    const readiness = await selectSyncCapablePeers(peers, MAX_IDENTITY_PROBE_CONCURRENCY, async (pid) => {
       if (DEBUG_SYNC_PROGRESS) {
         this.log.info(ctx, `Checking sync protocol for peer ${pid.toString()} in catch-up for "${contextGraphId}"`);
       }
       const hasSync = await this.waitForSyncProtocol(pid);
       if (!hasSync) {
-        noProtocolPeers++;
         if (DEBUG_SYNC_PROGRESS) {
           this.log.warn(ctx, `Peer ${pid.toString()} is connected but not sync-capable for "${contextGraphId}"`);
         }
-        continue;
       }
-      syncCapable.push(pid.toString());
-    }
+      return hasSync;
+    });
+    noProtocolPeers = readiness.noProtocolPeers;
+    const syncCapable = readiness.syncCapable;
     syncCapablePeers = syncCapable.length;
     const coordinatedRecovery = (this.config.syncContextGraphs ?? []).includes(contextGraphId);
     let catchupPeers = syncCapable;
@@ -9095,15 +9098,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     pid: { toString(): string },
     signal?: AbortSignal,
   ): Promise<boolean> {
-    return waitForPeerProtocol(
-      this.node.libp2p.peerStore as any,
-      pid,
-      // Either id proves sync support (#2822; see `advertisesSyncProtocol`).
-      [PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED],
-      SYNC_PROTOCOL_CHECK_ATTEMPTS,
-      SYNC_PROTOCOL_CHECK_DELAY_MS,
-      signal,
-    );
+    return waitForAdvertisedOrLiveProtocol({
+      peerStore: this.node.libp2p.peerStore as any, peer: pid,
+      protocols: [PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED],
+      attempts: SYNC_PROTOCOL_CHECK_ATTEMPTS, delayMs: SYNC_PROTOCOL_CHECK_DELAY_MS, signal,
+      isConnected: peerId => this.node.libp2p.getConnections().some(c => c.remotePeer.toString() === peerId),
+      probe: (peerId, protocol, operationSignal) => this.router.probeProtocol(peerId, protocol, 3_000, operationSignal),
+    });
   }
 
   async refreshMetaSyncedFlags(this: DKGAgent, contextGraphIds: Iterable<string>): Promise<void> {
