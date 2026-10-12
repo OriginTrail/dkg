@@ -11,8 +11,9 @@
 import type { ExternalEvmSigner, OperationalSignerSource } from '@origintrail-official/dkg-chain';
 
 export type AgentChainSignerSource =
-  | { operationalKeys: string[]; signers?: never }
-  | { signers: readonly ExternalEvmSigner[]; operationalKeys?: never }
+  // A source may be passed as possibly absent (`undefined`), as it always could be.
+  | { operationalKeys?: string[]; signers?: never }
+  | { signers?: readonly ExternalEvmSigner[]; operationalKeys?: never }
   | { operationalKeys?: never; signers?: never };
 
 /**

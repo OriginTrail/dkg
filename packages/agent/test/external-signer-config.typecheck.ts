@@ -29,6 +29,11 @@ export const withAuthors: ChainConfig = {
   },
 };
 export const localKeys: ChainConfig = { ...endpoint, operationalKeys: ['0x01'] };
+// A source that may be absent, as callers have always been able to pass it.
+declare const maybeKeys: string[] | undefined;
+declare const maybeSigners: readonly ExternalEvmSigner[] | undefined;
+export const maybeLocalKeys: ChainConfig = { ...endpoint, operationalKeys: maybeKeys };
+export const maybeExternalSigners: ChainConfig = { ...endpoint, signers: maybeSigners };
 // No source at all: wallets that come with a supplied chain adapter, author keys beside it, or no writes.
 export const sourceFree: ChainConfig = { ...endpoint };
 export const authorsOnly: ChainConfig = { ...endpoint, authors: withAuthors.authors! };
