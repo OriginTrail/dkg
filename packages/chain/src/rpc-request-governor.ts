@@ -28,15 +28,20 @@ const AUTHORITY_PRIORITY_QUEUE_RESERVE = 4;
 const BACKGROUND_AUTHORITY_MAX_PASSES = 4;
 
 /**
- * The same bound in the foreground class: how many authority admissions in a
- * row may pass an ordinary foreground request that has already waited the
- * fairness grace period. An authority read answers a fail-closed check under a
- * deadline of a few seconds and goes first for that reason. A stream of such
- * reads that never ends must still leave a transaction its permits: without a
- * bound the transaction waits out its own deadline behind reads that each
- * arrived after it.
+ * In the foreground class an authority read and an ordinary request take
+ * turns under contention: an ordinary request that is waiting is passed by at
+ * most this many authority admissions in a row.
+ *
+ * An authority read answers a fail-closed check under a deadline of a few
+ * seconds and goes first for that reason. What that needs is a bounded wait
+ * whatever the ordinary backlog is, and one ordinary admission in front of it
+ * keeps that. A stream of such reads that never ends must in turn leave a
+ * transaction its permits: its signing step is several requests under one
+ * deadline, so each of them has to be admitted soon, not eventually. There is
+ * no grace period here as there is for background work, for the same reason:
+ * a second a request is the whole deadline of such a step.
  */
-const FOREGROUND_AUTHORITY_MAX_PASSES = 4;
+const FOREGROUND_AUTHORITY_MAX_PASSES = 1;
 
 export interface RpcRequestGovernorPolicyInput {
   /** Total node-process RPC request rate. Defaults to 10 requests/second. */
@@ -267,8 +272,8 @@ function zeroGovernorCounters(): MutableGovernorCounters {
  * start-up delay, which exists to spread bulk work. It still spends the
  * background bucket, yields to foreground work as any background request
  * does, and leaves bulk work that has waited a bounded share of the
- * background permits. In the foreground class it leaves ordinary requests
- * that have waited the same bounded share of the foreground permits.
+ * background permits. In the foreground class it takes turns with ordinary
+ * requests that are waiting.
  */
 export class RpcRequestGovernor {
   /**
@@ -554,29 +559,22 @@ export class RpcRequestGovernor {
   /**
    * Index of the foreground waiter the next permit goes to.
    *
-   * Authority waiters sit at the front and go first. An ordinary waiter that
-   * has waited the fairness grace period is passed by at most
-   * {@link FOREGROUND_AUTHORITY_MAX_PASSES} authority admissions in a row,
-   * then takes a permit itself: four of every five permits stay with the
-   * authority reads for as long as they need them.
+   * Authority waiters sit at the front and go first. An ordinary waiter is
+   * passed by at most {@link FOREGROUND_AUTHORITY_MAX_PASSES} authority
+   * admission in a row, then takes a permit itself: under contention the two
+   * kinds take turns, and neither can take more than every other permit from
+   * the other.
    */
   #nextForegroundWaiter(): number {
     if (this.#foregroundQueue[0]?.admissionPriority !== 'authority') return 0;
     if (this.#foregroundAuthorityPasses < FOREGROUND_AUTHORITY_MAX_PASSES) return 0;
-    const passed = this.#passedForegroundWaiter();
-    return passed < 0 ? 0 : passed;
+    const ordinary = this.#firstOrdinaryForegroundWaiter();
+    return ordinary < 0 ? 0 : ordinary;
   }
 
-  /** Index of the first ordinary foreground waiter that has waited the fairness grace period, or -1. */
-  #passedForegroundWaiter(): number {
-    const firstOrdinary = this.#foregroundQueue.findIndex(
-      (queued) => queued.admissionPriority !== 'authority',
-    );
-    return firstOrdinary >= 0
-      && this.#clock.now() - this.#foregroundQueue[firstOrdinary]!.enqueuedAtMs
-        >= RpcRequestGovernor.BACKGROUND_FAIRNESS_GRACE_MS
-      ? firstOrdinary
-      : -1;
+  /** Index of the first ordinary foreground waiter, or -1. */
+  #firstOrdinaryForegroundWaiter(): number {
+    return this.#foregroundQueue.findIndex((queued) => queued.admissionPriority !== 'authority');
   }
 
   /**
@@ -602,7 +600,7 @@ export class RpcRequestGovernor {
         ? this.#backgroundAuthorityPasses + 1
         : 0;
     } else {
-      this.#foregroundAuthorityPasses = authorityPriority && this.#passedForegroundWaiter() >= 0
+      this.#foregroundAuthorityPasses = authorityPriority && this.#firstOrdinaryForegroundWaiter() >= 0
         ? this.#foregroundAuthorityPasses + 1
         : 0;
     }

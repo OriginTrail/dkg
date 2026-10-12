@@ -171,10 +171,10 @@ async function advanceUntil(done: () => boolean, withinMs: number): Promise<numb
  * start (several at once, each back in the queue as soon as it is answered)
  * and, beside them, ordinary reads of the node's other work.
  *
- * The authority reads go first. The ordinary ones take one permit in five once
- * they have waited (the governor's fairness rule), in the order they queued.
- * A read that queues behind them therefore waits for every one of them: with
- * sixteen ahead, about eight seconds.
+ * The authority reads go first. The ordinary ones take every other permit
+ * (the governor's fairness rule), in the order they queued. A read that
+ * queues behind them therefore waits for every one of them: with forty-eight
+ * ahead, about ten seconds.
  */
 function startQueuedReads(
   governor: Governor,
@@ -212,7 +212,7 @@ function startQueuedReads(
 }
 
 /** The mix every case below queues behind. */
-const QUEUED_READERS = { authority: 20, ordinary: 16 } as const;
+const QUEUED_READERS = { authority: 20, ordinary: 48 } as const;
 
 describe('one-log start that cannot complete for now', () => {
   const adapters: Adapter[] = [];
@@ -258,7 +258,7 @@ describe('one-log start that cannot complete for now', () => {
     // The start runs as ordinary foreground work. Part-way through the second
     // contract's search, other foreground work starts to ask for more than the
     // node's request budget admits. The search's next read queues behind the
-    // ordinary reads already waiting, which share one permit in five.
+    // ordinary reads already waiting, which share every other permit.
     let queuedReads: ReturnType<typeof startQueuedReads> | undefined;
     const answer = rpc.answer!;
     rpc.answer = (method, params) => {
@@ -302,7 +302,7 @@ describe('one-log start that cannot complete for now', () => {
     expect(indexLines(log)).toEqual([]);
     expect(adapter.chainEventLog).toBeUndefined();
     expect(governor.snapshot().cancelled).toBe(2);
-    expect(queuedReads!.authorityAdmitted()).toBeGreaterThan(80);
+    expect(queuedReads!.authorityAdmitted()).toBeGreaterThan(60);
 
     // The other work ends. The third attempt, ten seconds after the second,
     // is admitted, and the log attaches.

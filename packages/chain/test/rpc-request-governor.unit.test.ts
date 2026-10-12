@@ -31,6 +31,50 @@ function acquireForegroundAuthority(governor: RpcRequestGovernor): Promise<void>
   );
 }
 
+/**
+ * Foreground readers that ask for more than any budget admits: each is back
+ * in the queue as soon as it has been admitted. `stop()` returns how many
+ * permits they took.
+ */
+function startForegroundStream(
+  governor: RpcRequestGovernor,
+  readers: number,
+  admissionPriority?: 'authority',
+): { admitted: () => number; stop: () => Promise<number> } {
+  const stream = new AbortController();
+  let admitted = 0;
+  const running = Array.from({ length: readers }, async () => {
+    while (!stream.signal.aborted) {
+      try {
+        await withRpcRequestContext(
+          { requestClass: 'foreground', admissionPriority, signal: stream.signal },
+          () => governor.acquireActiveRequest(),
+        );
+      } catch {
+        return;
+      }
+      admitted += 1;
+    }
+  });
+  return {
+    admitted: () => admitted,
+    stop: async () => {
+      stream.abort(new Error('stream over'));
+      await Promise.all(running);
+      return admitted;
+    },
+  };
+}
+
+/** The shipped rate with no burst allowance, so that every permit is a turn. */
+const TEN_A_SECOND = Object.freeze({
+  maxRequestsPerSecond: 10,
+  foregroundReservePercent: 80,
+  burstRequests: 1,
+  maxQueueSize: 128,
+  startupJitterMs: 0,
+});
+
 describe('RpcRequestGovernor', () => {
   it('resolves the default 20-request burst to exactly four background admissions', async () => {
     const governor = new RpcRequestGovernor({ startupJitterMs: 0 });
@@ -129,28 +173,26 @@ describe('RpcRequestGovernor', () => {
     )).rejects.toBeInstanceOf(RpcRequestGovernorQueueFullError);
 
     expect(governor.snapshot()).toMatchObject({ foregroundQueued: 6 });
-    await vi.advanceTimersByTimeAsync(4_000);
-    await Promise.all(authorities);
-    expect(order).toEqual([
-      'authority-0',
-      'authority-1',
-      'authority-2',
-      'authority-3',
-    ]);
-
+    // A gate takes the first permit although the ordinary queue was full
+    // before it arrived. After each gate, one ordinary request that was
+    // already waiting takes a permit: a gate waits for one ordinary admission
+    // at most, whatever the backlog is.
     await vi.advanceTimersByTimeAsync(2_000);
-    await Promise.all([ordinaryA, ordinaryB]);
+    expect(order).toEqual(['authority-0', 'ordinary-a']);
+
+    await vi.advanceTimersByTimeAsync(4_000);
+    await Promise.all([...authorities, ordinaryA, ordinaryB]);
     expect(order).toEqual([
       'authority-0',
+      'ordinary-a',
       'authority-1',
+      'ordinary-b',
       'authority-2',
       'authority-3',
-      'ordinary-a',
-      'ordinary-b',
     ]);
   });
 
-  it('lets at most four authority reads in a row pass an ordinary foreground request that has waited', async () => {
+  it('takes turns between authority reads and ordinary foreground requests that are waiting', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
     const governor = new RpcRequestGovernor({
@@ -170,19 +212,19 @@ describe('RpcRequestGovernor', () => {
       acquireForegroundAuthority(governor).then(() => { order.push(`authority-${index}`); })
     ));
 
-    // One permit a second. From the first one on, the ordinary requests have
-    // waited the fairness grace period.
+    // One permit a second. An authority read goes first, and after each one an
+    // ordinary request that is waiting takes the next permit.
     await vi.advanceTimersByTimeAsync(8_000);
     await Promise.all([...ordinary, ...authorities]);
     expect(order).toEqual([
       'authority-1',
+      'ordinary-1',
       'authority-2',
+      'ordinary-2',
       'authority-3',
       'authority-4',
-      'ordinary-1',
       'authority-5',
       'authority-6',
-      'ordinary-2',
     ]);
   });
 
@@ -216,15 +258,116 @@ describe('RpcRequestGovernor', () => {
       clearInterval(stream);
     }
 
-    // The grace period, then four more authority reads, then its own permit:
-    // not the ten seconds a request waits before it is given up.
-    expect(admittedAtMs).toBeGreaterThanOrEqual(1_000);
-    expect(admittedAtMs).toBeLessThanOrEqual(1_600);
+    // One authority read, then its own permit: not the ten seconds a request
+    // waits before it is given up.
+    expect(admittedAtMs).toBeGreaterThanOrEqual(100);
+    expect(admittedAtMs).toBeLessThanOrEqual(300);
     // The stream kept the other permits.
     expect(authorityAdmissions).toBeGreaterThanOrEqual(95);
   });
 
-  it('does not count authority reads that pass an ordinary foreground request which has only just queued', async () => {
+  it('lets a step of several requests under one deadline finish beside a sustained stream of authority reads', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const governor = new RpcRequestGovernor(TEN_A_SECOND);
+    await governor.acquire('foreground');
+    const authorityReads = startForegroundStream(governor, 20, 'authority');
+
+    // A transaction's signing step: seven chain requests, each sent when the
+    // one before it has been answered, under one ten-second deadline.
+    const deadline = new AbortController();
+    const timer = setTimeout(() => deadline.abort(new Error('signing step deadline')), 10_000);
+    let finishedAtMs: number | undefined;
+    let failure: unknown;
+    void (async () => {
+      for (let request = 0; request < 7; request += 1) {
+        await governor.acquire('foreground', deadline.signal);
+      }
+      finishedAtMs = Date.now();
+    })().catch((error: unknown) => { failure = error; });
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    clearTimeout(timer);
+    const authorityAdmitted = await authorityReads.stop();
+
+    // Every other permit, at ten a second: well inside the deadline.
+    expect(failure).toBeUndefined();
+    expect(finishedAtMs).toBeGreaterThanOrEqual(1_200);
+    expect(finishedAtMs).toBeLessThanOrEqual(1_600);
+    // The stream gave up seven permits and kept the rest.
+    expect(authorityAdmitted).toBeGreaterThanOrEqual(90);
+  });
+
+  it('makes an authority read wait for one ordinary admission at most, whatever the ordinary backlog is', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const governor = new RpcRequestGovernor(TEN_A_SECOND);
+    await governor.acquire('foreground');
+    const order: string[] = [];
+    const backlog = Array.from({ length: 40 }, (_, index) => (
+      governor.acquire('foreground').then(() => { order.push(`ordinary-${index}`); })
+    ));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(order).toHaveLength(10);
+
+    // Thirty ordinary requests are still waiting when three authority reads arrive.
+    const arrivedAtMs = Date.now();
+    const waitedMs: number[] = [];
+    const authorities = [1, 2, 3].map((index) => (
+      acquireForegroundAuthority(governor).then(() => {
+        order.push(`authority-${index}`);
+        waitedMs.push(Date.now() - arrivedAtMs);
+      })
+    ));
+    await vi.advanceTimersByTimeAsync(600);
+    await Promise.all(authorities);
+
+    expect(order.slice(10, 16)).toEqual([
+      'authority-1',
+      'ordinary-10',
+      'authority-2',
+      'ordinary-11',
+      'authority-3',
+      'ordinary-12',
+    ]);
+    // The first is admitted with the next permit; each later one waits for
+    // the ordinary request that took the permit in front of it, and no more.
+    expect(waitedMs).toEqual([100, 300, 500]);
+    await vi.advanceTimersByTimeAsync(4_000);
+    await Promise.all(backlog);
+  });
+
+  it('gives neither kind more than half of the lane while both ask for all of it', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const governor = new RpcRequestGovernor(TEN_A_SECOND);
+    await governor.acquire('foreground');
+    const authorityReads = startForegroundStream(governor, 20, 'authority');
+    const ordinaryReads = startForegroundStream(governor, 20);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    const authorityAdmitted = await authorityReads.stop();
+    const ordinaryAdmitted = await ordinaryReads.stop();
+
+    // A hundred permits in ten seconds, shared turn by turn.
+    expect(authorityAdmitted + ordinaryAdmitted).toBe(100);
+    expect(authorityAdmitted).toBe(50);
+    expect(ordinaryAdmitted).toBe(50);
+  });
+
+  it('changes nothing without contention: either kind alone takes every permit', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    for (const admissionPriority of ['authority', undefined] as const) {
+      const governor = new RpcRequestGovernor(TEN_A_SECOND);
+      await governor.acquire('foreground');
+      const reads = startForegroundStream(governor, 20, admissionPriority);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(await reads.stop()).toBe(100);
+    }
+  });
+
+  it('keeps ordinary foreground requests in the order they queued, and authority reads in theirs', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
     const governor = new RpcRequestGovernor({
@@ -237,17 +380,26 @@ describe('RpcRequestGovernor', () => {
 
     await governor.acquire('foreground');
     const order: string[] = [];
-    const ordinary = governor.acquire('foreground').then(() => { order.push('ordinary'); });
-    const authorities = Array.from({ length: 16 }, (_, index) => (
-      acquireForegroundAuthority(governor).then(() => { order.push(`authority-${index + 1}`); })
+    const ordinary = ['a', 'b', 'c'].map((name) => (
+      governor.acquire('foreground').then(() => { order.push(`ordinary-${name}`); })
+    ));
+    const authorities = [1, 2, 3, 4, 5].map((index) => (
+      acquireForegroundAuthority(governor).then(() => { order.push(`authority-${index}`); })
     ));
 
-    await vi.advanceTimersByTimeAsync(2_000);
-    await Promise.all([ordinary, ...authorities]);
-    // Nine reads pass inside the grace period and are not counted. Four more
-    // pass once the request has waited it, then the request is admitted.
-    expect(order.indexOf('ordinary')).toBe(13);
-    expect(order.slice(0, 13)).toEqual(Array.from({ length: 13 }, (_, index) => `authority-${index + 1}`));
+    await vi.advanceTimersByTimeAsync(1_000);
+    await Promise.all([...ordinary, ...authorities]);
+    // Once no ordinary request waits, the authority reads take every permit.
+    expect(order).toEqual([
+      'authority-1',
+      'ordinary-a',
+      'authority-2',
+      'ordinary-b',
+      'authority-3',
+      'ordinary-c',
+      'authority-4',
+      'authority-5',
+    ]);
   });
 
   it('does not hold a background authority read for the start-up delay', async () => {

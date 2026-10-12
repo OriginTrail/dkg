@@ -145,7 +145,7 @@ describe('rolling activation and the chain request lane', () => {
     Array.from({ length: count }, (_, i) => `backlog-${String(i).padStart(4, '0')}`)
   );
 
-  it('checked back to back, several hundred rows the chain does not confirm take nine tenths of the lane and hold every ordinary read over a second', async () => {
+  it('checked back to back, several hundred rows the chain does not confirm take nine tenths of the lane and make every ordinary read wait its turn', async () => {
     const host = hostWith(backlog(300), {
       checks: new RollingSubscriptionChecks({ minPauseMs: 0, pausePerCheckTime: 0 }),
     });
@@ -160,16 +160,15 @@ describe('rolling activation and the chain request lane', () => {
     expect(new Set(lanes)).toEqual(new Set(['foreground/authority']));
     // The reads of the first three seconds find a token left of the burst
     // allowance, and the last one is admitted when the pass ends. Every read
-    // between is passed by authority reads for the governor's grace period of
-    // a second, by at most four more after that, and then takes a permit. None
-    // waits out its deadline, and none is admitted at once: that is what the
-    // pacing below is for.
+    // between waits for the authority read in front of it and then takes a
+    // permit. None waits out its deadline, and none is admitted at once: that
+    // is what the pacing below is for.
     expect(ordinary.slice(0, 3)).toEqual([0, 0, 0]);
     const held = ordinary.slice(3, -1);
     expect(held.length).toBeGreaterThan(150);
     expect(held.filter((outcome) => outcome === 'not sent')).toEqual([]);
-    expect(Math.min(...(held as number[]))).toBeGreaterThanOrEqual(1_000);
-    expect(Math.max(...(held as number[]))).toBeLessThanOrEqual(1_600);
+    expect(Math.min(...(held as number[]))).toBeGreaterThanOrEqual(100);
+    expect(Math.max(...(held as number[]))).toBeLessThanOrEqual(300);
   });
 
   it('paced, the same backlog leaves every ordinary read admitted at once', async () => {
