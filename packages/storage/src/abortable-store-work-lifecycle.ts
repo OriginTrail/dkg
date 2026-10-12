@@ -134,15 +134,13 @@ function closedError(generation: StoreWorkGeneration): Error {
 
 /** Put `task` under the generation's drain contract until it settles. */
 function trackInFlight<T>(
-  report: () => void,
   generation: StoreWorkGeneration,
   task: Promise<T>,
   onSettled?: () => void,
 ): Promise<T> {
   generation.inFlight.add(task);
-  report();
   void task.finally(() => {
-    if (generation.inFlight.delete(task)) report();
+    generation.inFlight.delete(task);
     onSettled?.();
   }).catch(() => undefined);
   return task;
@@ -178,13 +176,6 @@ export interface StoreWorkContext {
  * generation is installed, preserving SparqlHttpStore's historical reusable
  * close contract without allowing work to escape the closing snapshot.
  */
-export interface AbortableStoreWorkLifecycleOptions {
-  /** Observation of all physical work, including detached requests. */
-  readonly onActivityChange?: (activeOperations: number) => void;
-  /** Release generation-owned resources after draining, before reusable admission opens. */
-  readonly onGenerationClosed?: () => void;
-}
-
 export class AbortableStoreWorkLifecycle {
   private generation = createGeneration();
   private closePromise: Promise<void> | null = null;
@@ -193,16 +184,6 @@ export class AbortableStoreWorkLifecycle {
    * `start` receives the caller signal combined with the close signal, and a
    * {@link StoreWorkContext} for work that may outlive the promise it returns.
    */
-  constructor(private readonly options: AbortableStoreWorkLifecycleOptions = {}) {}
-
-  private reportActivity(generation: StoreWorkGeneration): void {
-    try {
-      this.options.onActivityChange?.(generation.inFlight.size);
-    } catch {
-      // Observation cannot change lifecycle/drain semantics.
-    }
-  }
-
   run<T>(
     callerSignal: AbortSignal | undefined,
     start: (signal: AbortSignal | undefined, context: StoreWorkContext) => Promise<T>,
@@ -221,7 +202,7 @@ export class AbortableStoreWorkLifecycle {
         } catch (error) {
           work = Promise.reject(error);
         }
-        return trackInFlight(() => this.reportActivity(generation), generation, work);
+        return trackInFlight(generation, work);
       },
     };
     let task: Promise<T>;
@@ -231,27 +212,7 @@ export class AbortableStoreWorkLifecycle {
       signalScope.dispose();
       throw error;
     }
-    return trackInFlight(() => this.reportActivity(generation), generation, task, signalScope.dispose);
-  }
-
-  /** Retained server work is activity even after its caller/HTTP task has settled. */
-  retainActivity(): Readonly<{ release(): void }> {
-    const generation = this.generation;
-    if (generation.closing) return Object.freeze({ release() {} });
-    let complete!: () => void;
-    let released = false;
-    const completion = new Promise<void>(resolve => { complete = resolve; });
-    const release = () => {
-      if (released) return;
-      released = true;
-      generation.controller.signal.removeEventListener('abort', release);
-      if (generation.inFlight.delete(completion)) this.reportActivity(generation);
-      complete();
-    };
-    generation.controller.signal.addEventListener('abort', release, { once: true });
-    generation.inFlight.add(completion);
-    this.reportActivity(generation);
-    return Object.freeze({ release });
+    return trackInFlight(generation, task, signalScope.dispose);
   }
 
   close(reason: Error): Promise<void> {
@@ -264,7 +225,6 @@ export class AbortableStoreWorkLifecycle {
     const task = (async () => {
       await Promise.allSettled(draining);
       if (this.generation === generation) {
-        try { this.options.onGenerationClosed?.(); } catch { /* Observation cannot prevent reuse. */ }
         this.generation = createGeneration();
       }
     })();

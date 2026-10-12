@@ -18,7 +18,6 @@ import {
   type ChangelogStoreOptions,
 } from './changelog-store.js';
 import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
-import type { StoreOperation } from './store-operation-outcome.js';
 import type {
   Rfc64AuthorCommitCasInputV1,
   Rfc64AuthorCommitCasResultV1,
@@ -119,18 +118,6 @@ export interface QueryOptions {
 
 export type TripleStoreQueryOptions = QueryOptions;
 
-/** Optional backend-owned admission spanning a mutation and decorator bookkeeping.
- * Each backend request retains its own scheduler slot. Query options remain
- * telemetry/cancellation values and never confer continuation authority.
- */
-export interface LogicalStoreMutationCapability {
-  runLogicalMutation<T>(
-    operation: StoreOperation,
-    options: QueryOptions | undefined,
-    work: (options: QueryOptions | undefined) => Promise<T>,
-  ): Promise<T>;
-}
-
 /**
  * Enforces query maxResponseBytes while reading the response body, before
  * JSON or RDF result materialization. Successful SELECT/ASK/CONSTRUCT/DESCRIBE
@@ -166,7 +153,6 @@ export interface UpdateOptions extends QueryOptions {
 }
 
 export interface TripleStore {
-  readonly runLogicalMutation?: LogicalStoreMutationCapability['runLogicalMutation'];
   /** Present only when query response limits are enforced before decoding. */
   readonly queryResponseLimitMode?: BoundedQueryResponseCapability['queryResponseLimitMode'];
 
@@ -341,17 +327,6 @@ export function findTripleStoreCapability<T>(
     candidate = (candidate as { innerStore?: unknown }).innerStore;
   }
   return null;
-}
-
-/** Keep the outer decorator path, discovering only the backend's lifetime owner. */
-export function runLogicalStoreMutation<T>(
-  store: unknown, operation: StoreOperation, options: QueryOptions | undefined,
-  work: (options: QueryOptions | undefined) => Promise<T>,
-): Promise<T> {
-  const owner = findTripleStoreCapability(store, (candidate): candidate is LogicalStoreMutationCapability =>
-    typeof candidate === 'object' && candidate !== null
-      && typeof (candidate as Partial<LogicalStoreMutationCapability>).runLogicalMutation === 'function');
-  return owner ? owner.runLogicalMutation(operation, options, work) : work(options);
 }
 
 /** Discover response-limit enforcement without bypassing the outer query path. */

@@ -13,8 +13,6 @@ import { buildAgentRuntimeStoreConfig } from '../src/daemon/agent-runtime-store-
 
 describe('daemon managed Oxigraph store construction', () => {
   it('retains managed RFC-64 authority through the final changelog-wrapped agent config', async () => {
-    const activity: boolean[] = [];
-    let recoveryReads = 0;
     const managedStore = createManagedOxigraphRuntimeStoreConfigV1({
       backend: 'sparql-http',
       options: {
@@ -23,12 +21,6 @@ describe('daemon managed Oxigraph store construction', () => {
         managedByDkg: true,
       },
       graphSetIndex: true,
-    }, {
-      getRecoveryState: () => {
-        recoveryReads += 1;
-        return { recovering: false, generation: 0 };
-      },
-      registerActivity: () => ({ report: (activeOperations) => { activity.push(activeOperations); }, dispose() {} }),
     });
     const eraGuard: ChangelogEraGuard = {
       async load() { return null; },
@@ -42,31 +34,13 @@ describe('daemon managed Oxigraph store construction', () => {
     });
     expect(finalConfig).toBeDefined();
 
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = async () => new Response(JSON.stringify({
-      head: {},
-      boolean: true,
-    }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/sparql-results+json' },
-    });
+    const store = await createTripleStore(finalConfig!);
     try {
-      const store = await createTripleStore(finalConfig!);
-      try {
-        expect(() => new SyncSharedProjectionStoreV1(store)).not.toThrow();
-        expect(() => new SyncSemanticStoreV1(store)).not.toThrow();
-        expect(asChangelogReader(store)).not.toBeNull();
-        await expect(store.query('ASK { ?s ?p ?o }')).resolves.toMatchObject({
-          type: 'boolean',
-          value: true,
-        });
-        expect(recoveryReads).toBeGreaterThan(0);
-        expect(activity).toEqual([true, false]);
-      } finally {
-        await store.close();
-      }
+      expect(() => new SyncSharedProjectionStoreV1(store)).not.toThrow();
+      expect(() => new SyncSemanticStoreV1(store)).not.toThrow();
+      expect(asChangelogReader(store)).not.toBeNull();
     } finally {
-      globalThis.fetch = originalFetch;
+      await store.close();
     }
   });
 

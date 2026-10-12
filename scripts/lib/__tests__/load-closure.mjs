@@ -104,7 +104,7 @@ export const UNFOLLOWED_LOADS = new Map([
   ['packages/cli/test/oxigraph-orphan-lifecycle.test.ts: ...args', 'what the Oxigraph lifecycle spawns, passed through a counting wrapper: the Oxigraph binary or its standin'],
   ['packages/cli/test/oxigraph-orphan-native.test.ts: lockingStandin.binaryPath', 'an Oxigraph standin binary the test builds in a temporary directory'],
   ['packages/cli/test/oxigraph-parent-watchdog.test.ts: cmd', 'what the watchdog spawns, passed through its injected spawnChild: the Oxigraph binary or its standin'],
-  ['packages/cli/test/oxigraph-server-native.test.ts: binaryPath', 'the pinned installed Oxigraph binary, checked with --version; it is outside the repository'],
+  ['packages/cli/test/oxigraph-server.test.ts: binaryPath', 'the Oxigraph binary or its standin, checked with --version'],
   ['packages/cli/test/oxigraph-server.test.ts: command', 'what the server spawns, passed through an injected spawnProcess: the Oxigraph binary or its standin'],
   ['packages/cli/test/oxigraph-server.test.ts: standin', 'an Oxigraph standin binary fixture'],
   ['packages/core/src/daemon-lifecycle.ts: node',

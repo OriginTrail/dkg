@@ -1,56 +1,9 @@
-import type { StoreOperation } from './store-operation-outcome.js';
 import type { TripleStoreConfig } from './triple-store.js';
 
 const MANAGED_RUNTIME_CONTEXT = Symbol('dkg.managed-oxigraph-runtime-v1');
-const managedRuntimeContexts = new WeakSet<object>();
-const MANAGED_RUNTIME_DECORATOR_KEYS = [
-  'largeLiteralStorage',
-  'graphSetIndex',
-  'changelog',
-] as const;
-type ManagedRuntimeDecoratorKey = typeof MANAGED_RUNTIME_DECORATOR_KEYS[number];
-type ManagedRuntimeDecorators = Pick<TripleStoreConfig, ManagedRuntimeDecoratorKey>;
-
-export interface ManagedOxigraphRuntimeStateV1 {
-  /** The managed process was or is being terminated. */
-  readonly recovering: boolean;
-  /**
-   * Maintenance has closed admission while the live process drains. New work
-   * is refused; work already dispatched keeps its ordinary outcome.
-   */
-  readonly admissionsPaused?: boolean;
-  readonly generation: number;
-}
-
-/** Progress belongs to the supervised process generation, not a caller's timeout. */
-export type ManagedOxigraphRecoveryPhaseV1 =
-  | 'verifying' | 'signalled' | 'cancelled' | 'terminated' | 'reopened' | 'stopped';
-
-export interface ManagedOxigraphRecoveryHandleV1 {
-  readonly generation: number;
-  /** Delivers the current phase immediately, then actual supervisor transitions. */
-  subscribe(observe: (phase: ManagedOxigraphRecoveryPhaseV1) => void): () => void;
-}
-
-/** Per-adapter activity lease used when more than one store shares a runtime. */
-export interface ManagedOxigraphRuntimeActivityLeaseV1 {
-  report(busy: boolean): void;
-  dispose(): void;
-}
-
-/** Runtime control plane supplied only by the daemon-owned construction path. */
-export interface ManagedOxigraphRuntimeHooksV1 {
-  readonly onClientTimeout?: (operation: StoreOperation) => void;
-  /** Bound to the original process; signalling is not confirmed termination. */
-  readonly requestRecovery?: (generation: number, operation: StoreOperation) => ManagedOxigraphRecoveryHandleV1 | undefined;
-  readonly getRecoveryState?: () => ManagedOxigraphRuntimeStateV1;
-  /** One per-store lease lets a shared supervisor aggregate activity. */
-  readonly registerActivity?: () => ManagedOxigraphRuntimeActivityLeaseV1;
-}
-
-interface ManagedOxigraphRuntimeContextV1 {
-  readonly hooks: Readonly<ManagedOxigraphRuntimeHooksV1>;
-}
+const MANAGED_RUNTIME_AUTHORITY = Object.freeze({
+  kind: 'dkg-managed-oxigraph-runtime-v1',
+} as const);
 
 /**
  * Explicit runtime-only construction input for a DKG-supervised local
@@ -61,7 +14,7 @@ interface ManagedOxigraphRuntimeContextV1 {
 export interface ManagedOxigraphRuntimeStoreConfigV1 extends TripleStoreConfig {
   readonly backend: 'sparql-http';
   readonly options: Record<string, unknown>;
-  readonly [MANAGED_RUNTIME_CONTEXT]: ManagedOxigraphRuntimeContextV1;
+  readonly [MANAGED_RUNTIME_CONTEXT]: typeof MANAGED_RUNTIME_AUTHORITY;
 }
 
 /**
@@ -116,7 +69,6 @@ export function snapshotManagedOxigraphRuntimeOptionsV1(
 
 export function createManagedOxigraphRuntimeStoreConfigV1(
   config: TripleStoreConfig,
-  hooks: ManagedOxigraphRuntimeHooksV1 = {},
 ): ManagedOxigraphRuntimeStoreConfigV1 {
   if (config.backend !== 'sparql-http') {
     throw new Error('managed Oxigraph runtime config must use the sparql-http backend');
@@ -134,61 +86,26 @@ export function createManagedOxigraphRuntimeStoreConfigV1(
     throw new Error('managed Oxigraph runtime config must be owned by the DKG daemon');
   }
 
-  const context: ManagedOxigraphRuntimeContextV1 = Object.freeze({
-    hooks: Object.freeze({ ...hooks }),
-  });
-  managedRuntimeContexts.add(context);
   const runtimeConfig = {
     backend: 'sparql-http' as const,
     options,
-    ...copyManagedRuntimeDecorators(config),
+    ...(config.largeLiteralStorage === undefined
+      ? {}
+      : { largeLiteralStorage: config.largeLiteralStorage }),
+    ...(config.graphSetIndex === undefined
+      ? {}
+      : { graphSetIndex: config.graphSetIndex }),
+    ...(config.changelog === undefined
+      ? {}
+      : { changelog: config.changelog }),
   } as ManagedOxigraphRuntimeStoreConfigV1;
   Object.defineProperty(runtimeConfig, MANAGED_RUNTIME_CONTEXT, {
     configurable: false,
     enumerable: false,
-    value: context,
+    value: MANAGED_RUNTIME_AUTHORITY,
     writable: false,
   });
   return Object.freeze(runtimeConfig);
-}
-
-/**
- * Rebuild the decorator portion of a managed runtime config while carrying
- * its authenticated control-plane hooks forward. The endpoint and managed
- * ownership snapshot remain fixed; callers can only replace store decorators.
- */
-export function withManagedOxigraphRuntimeStoreConfigV1(
-  config: ManagedOxigraphRuntimeStoreConfigV1,
-  updates: Readonly<Partial<Pick<
-    TripleStoreConfig,
-    'largeLiteralStorage' | 'graphSetIndex' | 'changelog'
-  >>>,
-): ManagedOxigraphRuntimeStoreConfigV1 {
-  const hooks = getManagedOxigraphRuntimeHooksV1(config);
-  if (hooks === undefined) {
-    throw new Error('managed Oxigraph runtime config has no authenticated control plane');
-  }
-  return createManagedOxigraphRuntimeStoreConfigV1({
-    backend: config.backend,
-    options: config.options,
-    ...copyManagedRuntimeDecorators(config, updates),
-  }, hooks);
-}
-
-/** Copy and merge the complete decorator model in one descriptor-free pass. */
-function copyManagedRuntimeDecorators(
-  source: TripleStoreConfig,
-  updates?: Readonly<Partial<ManagedRuntimeDecorators>>,
-): Partial<ManagedRuntimeDecorators> {
-  const decorators: Partial<ManagedRuntimeDecorators> = {};
-  for (const key of MANAGED_RUNTIME_DECORATOR_KEYS) {
-    const value = updates !== undefined
-      && Object.prototype.hasOwnProperty.call(updates, key)
-      ? updates[key]
-      : source[key];
-    if (value !== undefined) decorators[key] = value;
-  }
-  return decorators;
 }
 
 /** @internal Read only by the generic construction boundary before cloning. */
@@ -206,10 +123,8 @@ export function getManagedOxigraphRuntimeConstructionAuthorityV1(
   const descriptor = Object.getOwnPropertyDescriptor(candidate, MANAGED_RUNTIME_CONTEXT);
   return descriptor !== undefined
     && Object.prototype.hasOwnProperty.call(descriptor, 'value')
-    && typeof descriptor.value === 'object'
-    && descriptor.value !== null
-    && managedRuntimeContexts.has(descriptor.value)
-    ? descriptor.value
+    && descriptor.value === MANAGED_RUNTIME_AUTHORITY
+    ? MANAGED_RUNTIME_AUTHORITY
     : undefined;
 }
 
@@ -217,21 +132,7 @@ export function getManagedOxigraphRuntimeConstructionAuthorityV1(
 export function isManagedOxigraphRuntimeConstructionAuthorityV1(
   candidate: unknown,
 ): boolean {
-  return typeof candidate === 'object'
-    && candidate !== null
-    && managedRuntimeContexts.has(candidate);
-}
-
-/** @internal Recover the typed daemon hooks from an authenticated context. */
-export function getManagedOxigraphRuntimeHooksV1(
-  candidate: unknown,
-): Readonly<ManagedOxigraphRuntimeHooksV1> | undefined {
-  const context = isManagedOxigraphRuntimeConstructionAuthorityV1(candidate)
-    ? candidate
-    : getManagedOxigraphRuntimeConstructionAuthorityV1(candidate);
-  return context !== undefined
-    ? (context as ManagedOxigraphRuntimeContextV1).hooks
-    : undefined;
+  return candidate === MANAGED_RUNTIME_AUTHORITY;
 }
 
 function assertLoopbackEndpoint(input: unknown, label: string): void {

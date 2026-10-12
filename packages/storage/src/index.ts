@@ -15,8 +15,6 @@ export {
   type Quad,
   type TripleStore,
   type TripleStoreDecorator,
-  type LogicalStoreMutationCapability,
-  runLogicalStoreMutation,
   type BoundedQueryResponseCapability,
   type QueryResult,
   type QueryOptions,
@@ -226,12 +224,6 @@ export {
 } from './rfc64-author-seal-read-gateway.js';
 export {
   createManagedOxigraphRuntimeStoreConfigV1,
-  withManagedOxigraphRuntimeStoreConfigV1,
-  type ManagedOxigraphRuntimeActivityLeaseV1,
-  type ManagedOxigraphRecoveryHandleV1,
-  type ManagedOxigraphRecoveryPhaseV1,
-  type ManagedOxigraphRuntimeHooksV1,
-  type ManagedOxigraphRuntimeStateV1,
   type ManagedOxigraphRuntimeStoreConfigV1,
 } from './managed-oxigraph-runtime-store.js';
 export {

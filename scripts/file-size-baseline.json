@@ -58,7 +58,9 @@
     "packages/agent/src/sync/requester/durable-sync.ts": 1579,
     "packages/agent/src/sync/requester/page-fetch.ts": 1413,
     "packages/agent/src/sync/requester/shared-memory-sync.ts": 2255,
+    "packages/agent/src/sync/requester/swm-recovery.ts": 809,
     "packages/agent/src/sync/requester/swm-snapshot-materializer.ts": 928,
+    "packages/agent/src/sync/responder/exact-graph-reader.ts": 885,
     "packages/agent/src/sync/responder/graph-plan.ts": 3250,
     "packages/agent/src/sync/responder/sync-handler.ts": 1108,
     "packages/chain/src/chain-adapter.ts": 2721,
@@ -139,6 +141,7 @@
     "packages/publisher/src/publish-handler.ts": 1095,
     "packages/publisher/src/storage-ack-handler.ts": 2601,
     "packages/publisher/src/update-handler.ts": 968,
+    "packages/publisher/src/workspace-agent-recipients.ts": 834,
     "packages/publisher/src/workspace-handler.ts": 2572,
     "packages/publisher/src/workspace-resolution.ts": 1742,
     "packages/publisher/src/workspace-snapshot-store.ts": 1197,
@@ -147,13 +150,10 @@
     "packages/random-sampling/src/prover.ts": 918,
     "packages/storage/src/adapters/blazegraph.ts": 958,
     "packages/storage/src/adapters/oxigraph-worker.ts": 920,
-    "packages/storage/src/adapters/sparql-http.ts": 1426,
-    "packages/storage/src/changelog-store.ts": 1157,
+    "packages/storage/src/adapters/sparql-http.ts": 1568,
+    "packages/storage/src/changelog-store.ts": 1161,
     "packages/storage/src/graph-manager.ts": 1050,
-    "packages/storage/src/graph-set-index-store.ts": 879,
-    "packages/storage/src/rfc64-author-commit-cas.ts": 981,
-    "packages/agent/src/sync/requester/swm-recovery.ts": 809,
-    "packages/agent/src/sync/responder/exact-graph-reader.ts": 885,
-    "packages/publisher/src/workspace-agent-recipients.ts": 834
+    "packages/storage/src/graph-set-index-store.ts": 934,
+    "packages/storage/src/rfc64-author-commit-cas.ts": 981
   }
 }
