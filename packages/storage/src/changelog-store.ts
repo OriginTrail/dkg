@@ -4,7 +4,7 @@ import {
   loadSortedGraphCatalog, type SortedGraphCatalog, type SortedGraphSetSource,
 } from './graph-set-index-store.js';
 import { SortedGraphCatalogProjection } from './sorted-graph-catalog-projection.js';
-import { deleteByPatternWithoutCount, findTripleStoreCapability } from './triple-store.js';
+import { deleteByPatternWithoutCount, findTripleStoreCapability, runLogicalStoreMutation } from './triple-store.js';
 import type {
   Quad,
   QueryOptions,
@@ -286,7 +286,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
       // Nothing the log cares about (default graph only).
       return this.inner.insert(safe, options);
     }
-    await this.runExclusive(async () => {
+    await this.runExclusiveMutation('insert', options, async scoped => {
       await this.ensureSeeded();
       let candidate = this.seq;
       const markers: Quad[] = [];
@@ -297,7 +297,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
         markers.push(...markerQuads(candidate, graph, 'upsert'));
       }
       // Data + markers in ONE insert() → one backend transaction → atomic.
-      await this.inner.insert([...safe, ...markers], options);
+      await this.inner.insert([...safe, ...markers], scoped);
       this.adoptDurableSeq(candidate); // advance only after durable success (gapless)
       await this.noteHighWater();
       this.fire(records);
@@ -309,9 +309,9 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     // Strip reserved-graph quads: callers cannot delete markers out of the log.
     const safe = this.stripReserved(quads);
     const touched = this.attributableGraphs(safe);
-    await this.runExclusive(async () => {
-      await this.inner.delete(safe, options);
-      await this.markPostMutation(touched, options);
+    await this.runExclusiveMutation('delete', options, async scoped => {
+      await this.inner.delete(safe, scoped);
+      await this.markPostMutation(touched, scoped);
     });
   }
 
@@ -325,17 +325,14 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
       // markers cross-graph — the same log-erasure vector, so reject it too.
       this.assertNoReservedTerm(pattern);
     }
-    return this.runExclusive(async () => {
-      const removed = await this.inner.deleteByPattern(pattern, options);
-      if (removed > 0) {
-        if (pattern.graph) {
-          await this.markPostMutation([pattern.graph], options);
-        } else {
-          // No graph hint → cannot attribute which graphs shrank/emptied.
-          this.flagReconcile('deleteByPattern(no-graph)');
-        }
-      }
-      return removed;
+    return this.runAtomicMutation({
+      operation: 'deleteByPattern', touchedGraphs: pattern.graph ? [pattern.graph] : [], options,
+      execute: scoped => this.inner.deleteByPattern(pattern, scoped),
+      committed: removed => {
+        // No graph hint → cannot attribute which graphs shrank/emptied.
+        if (removed > 0 && !pattern.graph) this.flagReconcile('deleteByPattern(no-graph)');
+        return removed > 0;
+      },
     });
   }
 
@@ -352,13 +349,13 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     } else {
       this.assertNoReservedTerm(pattern);
     }
-    await this.runExclusive(async () => {
-      await deleteByPatternWithoutCount(this.inner, pattern, options);
+    await this.runExclusiveMutation('deleteByPattern', options, async scoped => {
+      await deleteByPatternWithoutCount(this.inner, pattern, scoped);
       if (pattern.graph) {
         // No count is available to distinguish a no-op. Emitting a
         // conservative post-mutation marker matches delete(quads) semantics
         // and keeps every committed change discoverable.
-        await this.markPostMutation([pattern.graph], options);
+        await this.markPostMutation([pattern.graph], scoped);
       } else {
         this.flagReconcile('deleteByPatternWithoutCount(no-graph)');
       }
@@ -368,12 +365,10 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
   async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
     if (!this.enabled) return this.inner.deleteBySubjectPrefix(graphUri, prefix, options);
     this.assertNotReserved(graphUri, 'deleteBySubjectPrefix');
-    return this.runExclusive(async () => {
-      const removed = await this.inner.deleteBySubjectPrefix(graphUri, prefix, options);
-      if (removed > 0) {
-        await this.markPostMutation([graphUri], options);
-      }
-      return removed;
+    return this.runAtomicMutation({
+      operation: 'deleteBySubjectPrefix', touchedGraphs: [graphUri], options,
+      execute: scoped => this.inner.deleteBySubjectPrefix(graphUri, prefix, scoped),
+      committed: removed => removed > 0,
     });
   }
 
@@ -383,9 +378,9 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     // with no trace; only internal maintenance (chain-reset, which bypasses this
     // decorator) may wipe it.
     this.assertNotReserved(graphUri, 'dropGraph');
-    await this.runExclusive(async () => {
-      await this.inner.dropGraph(graphUri, options);
-      await this.appendMarkers([{ graph: graphUri, op: 'drop' }], options);
+    await this.runExclusiveMutation('dropGraph', options, async scoped => {
+      await this.inner.dropGraph(graphUri, scoped);
+      await this.appendMarkers([{ graph: graphUri, op: 'drop' }], scoped);
     });
   }
 
@@ -403,7 +398,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
       operation: 'replaceGraph',
       touchedGraphs: [graphUri],
       options,
-      execute: () => this.inner.replaceGraph!(graphUri, quads, options),
+      execute: options => this.inner.replaceGraph!(graphUri, quads, options),
     });
   }
 
@@ -437,7 +432,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
       operation: 'replaceGraphAndSubject',
       touchedGraphs: [graphUri, metaGraphUri],
       options,
-      execute: () => this.inner.replaceGraphAndSubject!(
+      execute: options => this.inner.replaceGraphAndSubject!(
         graphUri,
         graphQuads,
         metaGraphUri,
@@ -468,7 +463,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
       operation: 'replaceSubject',
       touchedGraphs: [graphUri],
       options,
-      execute: () => this.inner.replaceSubject!(graphUri, subject, quads, options),
+      execute: options => this.inner.replaceSubject!(graphUri, subject, quads, options),
     });
   }
 
@@ -492,7 +487,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
       operation: 'rfc64AuthorCommitCasV1',
       touchedGraphs: manifest.touchedGraphs,
       options,
-      execute: () => this.inner.rfc64AuthorCommitCasV1!(source, options),
+      execute: options => this.inner.rfc64AuthorCommitCasV1!(source, options),
       committed: result => result === 'committed',
     });
   }
@@ -511,13 +506,13 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     if (!this.enabled) return this.inner.update(sparql, options);
     // Reject BEFORE the mutation runs so it never touches the reserved plane.
     this.assertNoReservedRef(sparql, 'update');
-    await this.runExclusive(async () => {
-      await this.inner.update!(sparql, options);
+    await this.runExclusiveMutation('update', options, async scoped => {
+      await this.inner.update!(sparql, { ...options, ...scoped });
       const hinted = (options?.touchedGraphs ?? []).filter((g) => !this.isReservedGraph(g));
       if (hinted.length > 0) {
         // Strip the update-only touchedGraphs hint before the read-path hasGraph
         // probes — it is meaningless there and must not leak past this boundary.
-        await this.markPostMutation(hinted, queryOptionsFromUpdateOptions(options));
+        await this.markPostMutation(hinted, queryOptionsFromUpdateOptions({ ...options, ...scoped }));
       } else {
         // Opaque server-side UPDATE (e.g. an RS heal INSERT…WHERE with no hint).
         this.flagReconcile('update(no-touchedGraphs)');
@@ -786,27 +781,28 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     return run;
   }
 
-  /** Shared outcome-aware lifecycle for every certified atomic mutation. */
+  private runExclusiveMutation<T>(operation: StoreOperation, options: QueryOptions | undefined,
+    work: (options: QueryOptions | undefined) => Promise<T>): Promise<T> {
+    return this.runExclusive(() => runLogicalStoreMutation(this.inner, operation, options, async scoped => {
+      try { return await work(scoped); }
+      catch (error) {
+        if (!isStoreOperationNotStarted(error, operation)) this.flagReconcile(`${operation}(indeterminate-failure)`);
+        throw error;
+      }
+    }));
+  }
+
+  /** Shared outcome-aware lifecycle for counted and certified atomic mutations. */
   private runAtomicMutation<T>(args: {
     operation: StoreOperation;
     touchedGraphs: readonly string[];
     options?: QueryOptions;
-    execute: () => Promise<T>;
+    execute: (options?: QueryOptions) => Promise<T>;
     committed?: (result: T) => boolean;
   }): Promise<T> {
-    return this.runExclusive(async () => {
-      let result: T;
-      try {
-        result = await args.execute();
-      } catch (error) {
-        if (!isStoreOperationNotStarted(error, args.operation)) {
-          this.flagReconcile(`${args.operation}(indeterminate-failure)`);
-        }
-        throw error;
-      }
-      if ((args.committed?.(result) ?? true)) {
-        await this.markPostMutation(args.touchedGraphs, args.options);
-      }
+    return this.runExclusiveMutation(args.operation, args.options, async options => {
+      const result = await args.execute(options);
+      if (args.committed?.(result) ?? true) await this.markPostMutation(args.touchedGraphs, options);
       return result;
     });
   }

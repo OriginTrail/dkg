@@ -1,4 +1,4 @@
-import { AsyncLocalStorage } from 'node:async_hooks';
+import { AsyncLocalStorage, AsyncResource } from 'node:async_hooks';
 import { performance } from 'node:perf_hooks';
 import { availableParallelism } from 'node:os';
 import {
@@ -518,7 +518,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
         storeOperation: metadata?.storeOperation,
         queuedAt: this.now(),
         pressureTicket,
-        work,
+        work: AsyncResource.bind(work),
         resolve,
         reject,
         signal,

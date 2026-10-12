@@ -1,5 +1,5 @@
 import {
-  createManagedOxigraphRuntimeStoreConfigV1,
+  withManagedOxigraphRuntimeStoreConfigV1,
   type ChangelogEraGuard,
   type ManagedOxigraphRuntimeStoreConfigV1,
   type TripleStoreConfig,
@@ -30,6 +30,9 @@ export function buildAgentRuntimeStoreConfig(
     changelog,
   };
   return input.managedStore
-    ? createManagedOxigraphRuntimeStoreConfigV1(complete)
+    ? withManagedOxigraphRuntimeStoreConfigV1(input.managedStore, {
+      graphSetIndex: complete.graphSetIndex,
+      changelog: complete.changelog,
+    })
     : complete;
 }

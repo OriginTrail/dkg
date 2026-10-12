@@ -1,16 +1,18 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { closeSync, openSync, readFileSync, truncateSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
+import { findListenOwnerPid } from '../src/daemon/oxigraph-listen-port.js';
 import { startOxigraphServer } from '../src/daemon/oxigraph-server.js';
 import {
   createOxigraphStandinFixture,
   fetchPid,
   freePort,
   portAnswers,
+  sleep,
   waitForCondition,
   type OxigraphStandinFixture,
 } from './fixtures/oxigraph-server-real-fixture.js';
@@ -41,6 +43,38 @@ function pidIsGone(pid: number): boolean {
 }
 
 describe('startOxigraphServer WAL-aware readiness (GH#1400)', () => {
+  it.each(['timeout', 'crash'] as const)('clears a draining WAL pause after %s recovery without restarting its replacement', async cause => {
+    const port = await freePort();
+    const location = await mkdtemp(join(tmpdir(), 'oxi-wal-independent-'));
+    let walBytes = 101;
+    const lines: string[] = [];
+    const handle = await startOxigraphServer({ binaryPath: fixture.binaryPath, location, port,
+      log: line => lines.push(line), readyIntervalMs: 20, readyTimeoutMs: 5_000,
+      restartBackoffBaseMs: 20, walRestartThresholdBytes: 100,
+      walMaintenanceCheckIntervalMs: 20, walRestartIdleMs: 80, walRestartCooldownMs: 500,
+      io: { measureRetainedWalBytes: () => walBytes },
+    });
+    const activity = handle.registerStoreActivity();
+    try {
+      activity.report(true);
+      expect(await waitForCondition(() => handle.getRecoveryState().admissionsPaused === true)).toBe(true);
+      const originalPid = await fetchPid(port);
+      walBytes = 0;
+      if (cause === 'timeout') expect(handle.requestRestart('query exceeded its client deadline')).toBe(true);
+      else process.kill(originalPid, 'SIGKILL');
+      expect(await waitForCondition(() => handle.getRecoveryState().generation > 0 && !handle.getRecoveryState().recovering)).toBe(true);
+      expect(handle.getRecoveryState().admissionsPaused).toBe(false);
+      const replacementPid = await fetchPid(port);
+      expect(replacementPid).not.toBe(originalPid);
+      activity.report(false);
+      await sleep(150);
+      expect(await fetchPid(port)).toBe(replacementPid);
+      expect(lines.filter(line => line.includes('restart #'))).toHaveLength(1);
+    } finally {
+      activity.dispose(); await handle.stop(); await rm(location, { recursive: true, force: true });
+    }
+  });
+
   it('extends boot past the base and reports periodic replay progress', async () => {
     const port = await freePort();
     const location = await mkdtemp(join(tmpdir(), 'oxi-wal-auto-'));
@@ -261,4 +295,154 @@ describe('startOxigraphServer WAL-aware readiness (GH#1400)', () => {
       await rm(location, { recursive: true, force: true });
     }
   }, 30_000);
+});
+
+function startOpts(port: number, extra: Record<string, unknown> = {}) {
+  return {
+    binaryPath: fixture.binaryPath, location: fixture.directory, port,
+    readyTimeoutMs: 5_000, readyIntervalMs: 50, stopGraceMs: 1_000,
+    restartBackoffBaseMs: 100, restartBackoffMaxMs: 200, log: () => {}, ...extra,
+  } as { binaryPath: string; location: string; port: number } & Record<string, unknown>;
+}
+
+describe('managed WAL maintenance supervision (GH#2395)', () => {
+  it('measures retained WAL under load and reopens only after store work stays idle', async () => {
+    const port = await freePort();
+    const logs: string[] = [];
+    let measurements = 0;
+    const handle = await startOxigraphServer(startOpts(port, {
+      log: (line: string) => logs.push(line),
+      walRestartThresholdBytes: 100,
+      walMaintenanceCheckIntervalMs: 20,
+      walRestartIdleMs: 80,
+      walRestartCooldownMs: 60_000,
+      io: {
+        measureRetainedWalBytes: () => {
+          measurements += 1;
+          return measurements === 1 ? 0 : 101;
+        },
+      },
+    }));
+    try {
+      const firstPid = await fetchPid(port);
+      const activity = handle.registerStoreActivity();
+      activity.report(true);
+      await sleep(180);
+      expect(await fetchPid(port)).toBe(firstPid);
+      expect(measurements).toBeGreaterThanOrEqual(2);
+      // The child is alive and still answering admitted work; only new work is
+      // refused, so this is an admission pause and not a recovery.
+      expect(handle.getRecoveryState()).toEqual({
+        recovering: false,
+        admissionsPaused: true,
+        generation: 0,
+      });
+
+      activity.report(false);
+      await sleep(40);
+      expect(await fetchPid(port)).toBe(firstPid);
+      let replacementPid = firstPid;
+      for (let i = 0; i < 100; i++) {
+        await sleep(30);
+        try {
+          replacementPid = await fetchPid(port);
+          if (replacementPid !== firstPid) break;
+        } catch {
+          /* supervised reopen is between processes */
+        }
+      }
+      expect(replacementPid).not.toBe(firstPid);
+      expect(logs.join('\n')).toContain(
+        '101 B retained WAL reached the 100 B maintenance threshold',
+      );
+    } finally {
+      await handle.stop();
+    }
+    const measurementsAfterStop = measurements;
+    await sleep(100);
+    expect(measurements).toBe(measurementsAfterStop);
+  });
+
+  it.each(['ownership', 'signal'] as const)(
+    'resumes WAL maintenance after a %s verification cancellation',
+    async (failureMode) => {
+      const port = await freePort();
+      const logs: string[] = [];
+      let rejectOwnership = false;
+      let rejectSignal = false;
+      let signalAttempts = 0;
+      const handle = await startOxigraphServer(startOpts(port, {
+        log: (line: string) => logs.push(line),
+        walRestartThresholdBytes: 100,
+        walMaintenanceCheckIntervalMs: 20,
+        walRestartIdleMs: 40,
+        walRestartCooldownMs: 80,
+        io: {
+          measureRetainedWalBytes: () => 101,
+          findListenOwnerPid: async (child, listenerPort, host, ownership) => {
+            const actual = await findListenOwnerPid(child, listenerPort, host, ownership);
+            return failureMode === 'ownership' && rejectOwnership && actual !== null
+              ? actual + 100_000
+              : actual;
+          },
+          killProcess: vi.fn((pid: number, signal: NodeJS.Signals) => {
+            signalAttempts += 1;
+            if (failureMode === 'signal' && rejectSignal) return false;
+            return process.kill(pid, signal);
+          }) as unknown as typeof process.kill,
+        },
+      }));
+      try {
+        rejectOwnership = true;
+        rejectSignal = true;
+        const initialPid = await fetchPid(port);
+        for (let i = 0; i < 100; i += 1) {
+          const cancellations = logs.filter((line) => line.includes(
+            failureMode === 'ownership'
+              ? 'ownership changed'
+              : 'could not signal the verified listener',
+          )).length;
+          if (cancellations >= 2) break;
+          await sleep(20);
+        }
+        const cancellations = logs.filter((line) => line.includes(
+          failureMode === 'ownership'
+            ? 'ownership changed'
+            : 'could not signal the verified listener',
+        )).length;
+        expect(cancellations).toBeGreaterThanOrEqual(2);
+        expect(await fetchPid(port)).toBe(initialPid);
+        // The threshold remains armed: new store work stays fail-closed while
+        // the coordinator retries the verified restart. The child is still
+        // alive, so this is an admission pause and not a recovery.
+        expect(handle.getRecoveryState()).toEqual({
+          recovering: false,
+          admissionsPaused: true,
+          generation: 0,
+        });
+        if (failureMode === 'signal') expect(signalAttempts).toBeGreaterThanOrEqual(2);
+
+        rejectOwnership = false;
+        rejectSignal = false;
+        let replacementPid = initialPid;
+        for (let i = 0; i < 100; i += 1) {
+          await sleep(30);
+          try {
+            replacementPid = await fetchPid(port);
+            if (replacementPid !== initialPid) break;
+          } catch {
+            /* supervised reopen is between processes */
+          }
+        }
+        expect(replacementPid).not.toBe(initialPid);
+        for (let i = 0; i < 50 && handle.getRecoveryState().recovering; i += 1) {
+          await sleep(20);
+        }
+        expect(handle.getRecoveryState())
+        .toEqual({ recovering: false, admissionsPaused: false, generation: 1 });
+      } finally {
+        await handle.stop();
+      }
+    },
+  );
 });
