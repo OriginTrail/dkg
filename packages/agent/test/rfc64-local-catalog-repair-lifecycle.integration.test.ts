@@ -506,14 +506,8 @@ describe('RFC-64 local SWM catalog projection lifecycle', () => {
     await agent.awaitInFlightRfc64SwmInventoryObserversV1();
     expect(record).toHaveBeenCalledOnce();
 
-    const remove = vi.spyOn(agent, 'removeRfc64SwmAuthorInventoryShadowV1')
-      .mockResolvedValue({
-        status: 'absent',
-        action: 'remove',
-        attempts: 1,
-        headObjectDigest: inventoryDigest,
-        error: null,
-      });
+    const remove = vi.spyOn(agent, 'removeRfc64SwmAuthorInventoryConfirmedRowV1')
+      .mockResolvedValue({ status: 'absent', attempts: 1, snapshot: null });
     const canonicalSeal = await authorSealV1(35n);
     await agent.observeRfc64ConfirmedVmV1({
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -530,6 +524,13 @@ describe('RFC-64 local SWM catalog projection lifecycle', () => {
     });
     await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     expect(remove).toHaveBeenCalledOnce();
+    expect(remove).toHaveBeenCalledWith({
+      scope: expect.objectContaining({ networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID, authorAddress: AUTHOR }),
+      expectedRow: expect.objectContaining({ version: 2, inventoryScope: null,
+        assertionCoordinate: 'same-instance-share', assertionVersion: canonicalSeal.assertionVersion,
+        authorAddress: AUTHOR, seal: canonicalSeal,
+      }),
+    });
     expect(reconcile.mock.calls.length).toBeGreaterThanOrEqual(4);
   }, 30_000);
 

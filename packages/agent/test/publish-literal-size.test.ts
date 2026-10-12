@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PublishMethods } from '../src/dkg-agent-publish.js';
+import { confirmedPublicationCatalogConfigV1 } from './support/confirmed-publication-harness.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
 const OVERSIZED_TEXT_QUAD: Quad = {
@@ -12,6 +13,7 @@ const OVERSIZED_TEXT_QUAD: Quad = {
 describe('agent publish literal size validation', () => {
   it('rejects publishAsync private quads before workspace staging', async () => {
     const agentStub = {
+      config: confirmedPublicationCatalogConfigV1(false),
       contextGraphExists: vi.fn(async () => true),
     };
 

@@ -177,7 +177,11 @@ function assertOneShotShareComplete(result: KnowledgeAssetCreateResponse, name: 
   }
 }
 
-function assertPublishComplete(result: KnowledgeAssetPublishResponse, name: string, contextGraphId: string): void {
+function assertPublishComplete(result: KnowledgeAssetPublishResponse, name: string, contextGraphId: string): asserts result is Extract<KnowledgeAssetPublishResponse, { catalogObligationPending?: false }> {
+  if (result.catalogObligationPending === true) {
+    console.log(JSON.stringify(result, null, 2));
+    throw new Error('Publication is confirmed but catalog observation is pending. Retain this response and retry its observation; do not republish');
+  }
   assertNoLifecycleErrors(result, `Knowledge asset VM publish completed partially for "${name}" in ${contextGraphId}`);
   if (result.error) {
     throw new Error(`Knowledge asset VM publish completed partially for "${name}" in ${contextGraphId}: ${result.error}`);

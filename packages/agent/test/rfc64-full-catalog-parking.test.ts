@@ -1,3 +1,4 @@
+import { pinnedPrivatePlacementDecisionV1 } from './support/finalized-placement-decision-fixture.js';
 /**
  * GH#3134 — what the catalog supervisor does about an author catalog at its row cap, through the
  * real supervisor owner over a model of the catalogs.
@@ -137,13 +138,14 @@ function node() {
 function supervisor(model: ReturnType<typeof node>, options: { readHead?: boolean } = {}) {
   let revision: CatalogRepairRevisionHintV1 = { scopeIdentity: 'scope', headRevision: 'inventory-1' };
   let laneActive = true;
+  let laneUnavailable: Error | undefined;
   const warn = vi.fn();
   const reconcile = vi.fn(async (): Promise<null> => null);
   const owner = new Rfc64SwmCatalogProjectionOwnerV1({
     resolvePartition: () => ({ retryIntervalMs: 5_000, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }) as never,
     listLocalAuthorAddresses: () => [AUTHOR],
     acceptsPublicRootLane: () => true,
-    acceptsFinalizedPrivateLane: () => laneActive,
+    resolveFinalizedPlacementDecision: (repair) => pinnedPrivatePlacementDecisionV1(repair, laneActive, laneUnavailable),
     readRepairRevision: () => revision,
     listFinalizedPrivateRepairs: () => model.state.markers,
     repairFinalizedPrivatePlacement: model.place,
@@ -164,6 +166,7 @@ function supervisor(model: ReturnType<typeof node>, options: { readHead?: boolea
     shareTimeRequest: () => owner.request({ contextGraphId: FULL_GRAPH, authorAddress: AUTHOR, ctx }),
     setInventoryHead: (head: string) => { revision = { scopeIdentity: 'scope', headRevision: head }; },
     setLaneActive: (active: boolean) => { laneActive = active; },
+    setLaneUnavailable: (error: Error | undefined) => { laneUnavailable = error; },
   };
 }
 
@@ -552,7 +555,7 @@ describe('finalized-private placements of a full author catalog', () => {
     expect(s.capacity()).toEqual({ parkedPlacements: 2, scopesAtCap: 1 });
   });
 
-  it('does no catalog work for the safety-net attempt while the lane is inactive', async () => {
+  it.each(['inactive', 'unavailable'] as const)('does no catalog work for the V1 safety-net attempt while the lane is %s', async (state) => {
     const model = node();
     model.fill(NEW_A);
     model.state.markers = [NEW_A, NEW_B];
@@ -562,12 +565,12 @@ describe('finalized-private placements of a full author catalog', () => {
 
     // The lane goes inactive, as it does under the kill switch or a policy change. What is
     // parked stays parked, and the hourly attempt stops at the lane check every attempt makes.
-    s.setLaneActive(false);
+    if (state === 'inactive') s.setLaneActive(false);
+    else s.setLaneUnavailable(new Error('authority temporarily unavailable'));
     await s.advance(HOUR);
     expect(model.place).toHaveBeenCalledTimes(1);
-    expect(s.lines('catalog_private_repair_failed')).toEqual([
-      expect.objectContaining({ diagnostic: expect.objectContaining({ kind: 'lane_inactive' }) }),
-    ]);
+    expect(s.lines('catalog_private_repair_failed')).toHaveLength(1);
+    if (state === 'inactive') expect(s.lines('catalog_private_repair_failed')[0]).toMatchObject({ diagnostic: { kind: 'lane_inactive' } });
     // That marker is parked again, not retried on the failure timer: no further attempt at all.
     await s.advance(HOUR - 5_000);
     expect(model.place).toHaveBeenCalledTimes(1);
@@ -575,6 +578,7 @@ describe('finalized-private placements of a full author catalog', () => {
     expect(model.state.markers).toEqual([NEW_A, NEW_B]);
 
     s.setLaneActive(true);
+    s.setLaneUnavailable(undefined);
     await s.advance(5_000);
     expect(model.state.attempts).toEqual([NEW_A.kaUal, NEW_B.kaUal]);
     expect(s.capacity()).toEqual({ parkedPlacements: 2, scopesAtCap: 1 });
@@ -727,7 +731,7 @@ describe('full catalog parking', () => {
     const clock = { now: 0 };
     const warn = vi.fn();
     const parkingV1 = new FullCatalogParkingV1(
-      { warn, ...(readAppliedCatalogHead === undefined ? {} : { readAppliedCatalogHead }) },
+      { warn, resolveFinalizedPlacementDecision: pinnedPrivatePlacementDecisionV1, ...(readAppliedCatalogHead === undefined ? {} : { readAppliedCatalogHead }) },
       () => clock.now,
     );
     return { parking: parkingV1, clock, warn };

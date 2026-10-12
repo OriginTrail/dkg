@@ -4,12 +4,12 @@ import {
   MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   computeAuthorCatalogScopeDigestV1,
   createOperationContext,
-  type AuthorCatalogScopeV1,
   type Digest32V1,
   type EvmAddressV1,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 
+import type { FinalizedPlacementDecisionV1 } from './finalized-placement-decision.js';
 import { rememberBounded } from '../bounded-map.js';
 import {
   catalogRepairDiagnosticV1,
@@ -81,6 +81,8 @@ export interface FullCatalogParkingDependenciesV1 {
     catalogScopeDigest: Digest32V1,
     authorAddress: EvmAddressV1,
   ) => AppliedCatalogHeadRowV1 | null | undefined;
+  /** V2 placements bind capacity to the current lane; public retirement needs no row. */
+  readonly resolveFinalizedPlacementDecision: (repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>) => FinalizedPlacementDecisionV1;
   readonly warn: (ctx: OperationContext, message: string) => void;
 }
 
@@ -184,7 +186,8 @@ export class FullCatalogParkingV1 {
   park(key: string, repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>): boolean {
     // No full scope is known: nothing is parked, and no marker needs its scope named.
     if (this.#scopes.size === 0) return false;
-    const scopeKey = this.#parked.get(key) ?? catalogScopeDigestV1(repair);
+    const scopeKey = this.#scopeDigest(repair);
+    if (this.#parked.get(key) !== scopeKey) this.#parked.delete(key);
     const scope = scopeKey === undefined ? undefined : this.#scopes.get(scopeKey);
     const decision = scopeKey === undefined || scope === undefined
       ? 'attempt'
@@ -211,7 +214,7 @@ export class FullCatalogParkingV1 {
   ): boolean {
     const full = findAuthorCatalogFullErrorV1(error);
     if (full === undefined) return false;
-    const scopeKey = catalogScopeDigestV1(repair);
+    const scopeKey = this.#scopeDigest(repair);
     // A marker whose scope cannot be named keeps the ordinary failure handling.
     if (scopeKey === undefined) return false;
     const known = this.#scopes.get(scopeKey);
@@ -344,6 +347,13 @@ export class FullCatalogParkingV1 {
     }
   }
 
+  #scopeDigest(repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>): Digest32V1 | undefined {
+    try {
+      const decision = this.#dependencies.resolveFinalizedPlacementDecision(repair);
+      return decision.capacityScope === undefined ? undefined : computeAuthorCatalogScopeDigestV1(decision.capacityScope);
+    } catch { return undefined; }
+  }
+
   #name(
     scope: Readonly<{ contextGraphId: string; authorAddress: string }>,
     refused: 'placement' | 'projection',
@@ -382,20 +392,6 @@ export class FullCatalogParkingV1 {
 /** True or false when the applied head was read; undefined when it could not be. */
 function hasFreeRowV1(head: AppliedHeadV1 | null | undefined, scope: FullScopeV1): boolean | undefined {
   return head === undefined ? undefined : head === null || head.rows < scope.rowCap;
-}
-
-/** The canonical digest of the author catalog scope a marker names, or undefined when it names none. */
-function catalogScopeDigestV1(
-  repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
-): Digest32V1 | undefined {
-  try {
-    return computeAuthorCatalogScopeDigestV1({
-      ...repair.inventoryScope,
-      bucketCount: '1',
-    } as AuthorCatalogScopeV1) as Digest32V1;
-  } catch {
-    return undefined;
-  }
 }
 
 /** One graph and author, as the log and the status count name a scope. */

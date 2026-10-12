@@ -2094,6 +2094,7 @@ describe('RFC-64 rollout authority integration', () => {
       ctx: createOperationContext('publish'),
       publicationLabel: 'publish',
     });
+    await fixture.agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     expect(fixture.agent.readRfc64SwmAuthorInventorySnapshotV1({
       inventoryScopeDigest: fixture.targetScopeDigest,
       authorAddress: AUTHOR,

@@ -1,3 +1,4 @@
+import { pinnedPrivatePlacementDecisionV1 } from './support/finalized-placement-decision-fixture.js';
 /**
  * GH#3081 — the catalog supervisor alone owns a confirmed private placement once the observer has
  * stored its marker and asked for it. Nothing waits for the placement, so these rows pin what the
@@ -25,6 +26,7 @@ import {
 } from '../src/internal/catalog-placement-timing.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
   '../src/rfc64/finalized-private-placement-repair-store-v1.js';
+import { DKGAgent } from '../src/index.js';
 import {
   CONTEXT_GRAPH_ID,
   agents,
@@ -55,6 +57,10 @@ describe('the finalized-private supervisor as the owner of a placement', () => {
   const AUTHOR = `0x${'11'.repeat(20)}` as EvmAddressV1;
   const owners: Rfc64SwmCatalogProjectionOwnerV1[] = [];
   const gates: Array<ReturnType<typeof gateV1>> = [];
+
+  it('exposes no orphaned process-local seal producer on the agent mixin', () => {
+    expect('requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1' in DKGAgent.prototype).toBe(false);
+  });
 
   afterEach(async () => {
     // A row that failed with a repair still parked must not leave its owner unable to close.
@@ -87,7 +93,7 @@ describe('the finalized-private supervisor as the owner of a placement', () => {
     const state = {
       markers: [] as Rfc64FinalizedPrivatePlacementRepairV1[],
       laneActive: true,
-      /** When set, the lane cannot be resolved at all: the check throws it. */
+      /** When set, the canonical lane decision reports unavailability. */
       laneUnavailable: undefined as Error | undefined,
       /** How often a pass listed the durable markers. */
       listings: 0,
@@ -103,10 +109,7 @@ describe('the finalized-private supervisor as the owner of a placement', () => {
       }),
       listLocalAuthorAddresses: () => [AUTHOR],
       acceptsPublicRootLane: () => true,
-      acceptsFinalizedPrivateLane: () => {
-        if (state.laneUnavailable !== undefined) throw state.laneUnavailable;
-        return state.laneActive;
-      },
+      resolveFinalizedPlacementDecision: (repair) => pinnedPrivatePlacementDecisionV1(repair, state.laneActive, state.laneUnavailable),
       readRepairRevision: () => ({ scopeIdentity: 'scope-1', headRevision: 'head-1' }),
       listFinalizedPrivateRepairs: () => {
         state.listings += 1;
@@ -366,9 +369,8 @@ describe('a confirmed private placement the observer handed to the supervisor', 
     const refused = await seedPlacementAssetV1(agent, 'lane-a', 82n);
     const later = await seedPlacementAssetV1(agent, 'lane-b', 83n);
 
-    // The lane stops taking finalized placements between the observer's own check and the
-    // supervisor's admission.
-    fixture.afterMarkerStored = () => { fixture.lane.acceptsFinalizedVmRepair = false; };
+    // The lane becomes inactive after durable confirmation but before supervisor admission.
+    fixture.afterMarkerStored = () => { fixture.lane.inactive = true; };
     await observeConfirmedV1(agent, refused);
     fixture.afterMarkerStored = undefined;
     expect(fixture.events()).toEqual([
@@ -379,7 +381,7 @@ describe('a confirmed private placement the observer handed to the supervisor', 
     expect(fixture.counts().repairs).toBe(0);
 
     // The lane is back. The next confirmation's request starts a pass, which lists both markers.
-    fixture.lane.acceptsFinalizedVmRepair = true;
+    fixture.lane.inactive = false;
     await observeConfirmedV1(agent, later);
     await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     expect(fixture.markers()).toEqual([]);
@@ -392,8 +394,8 @@ describe('a confirmed private placement the observer handed to the supervisor', 
     const { agent } = fixture;
     const asset = await seedPlacementAssetV1(agent, 'unrequested', 87n);
 
-    // The lane cannot be resolved at all when the supervisor checks it: the request throws after
-    // the marker was stored.
+    // The canonical lane decision reports unavailability after the marker was stored; the
+    // observer still retains its request failure diagnostic.
     fixture.afterMarkerStored = () => { fixture.lane.unavailable = new Error('the catalog policy is not accepted yet'); };
     await observeConfirmedV1(agent, asset);
     fixture.afterMarkerStored = undefined;
@@ -416,45 +418,81 @@ describe('a confirmed private placement the observer handed to the supervisor', 
     expect(fixture.catalogRows()).toBe('1');
   }, 60_000);
 
-  // Two exits of the observer end a confirmed publication with no marker. Both are older than the
-  // terminal boundary and are exceptions to it; the rows record them and do not endorse them.
-  it('owes nothing when the catalog lane cannot be resolved at the confirmation', async () => {
-    const fixture = await startPlacementAgentV1({ name: 'ownership-lane-unresolvable' });
-    const { agent } = fixture;
-    const asset = await seedPlacementAssetV1(agent, 'unresolvable', 88n);
-
-    fixture.lane.unavailable = new Error('the catalog policy is not accepted yet');
-    await expect(observeConfirmedV1(agent, asset)).resolves.toBeUndefined();
-    fixture.lane.unavailable = undefined;
-
-    expect(fixture.events()).toEqual([]);
-    expect(fixture.markers()).toEqual([]);
-    expect(fixture.warnings()).toContain(
-      'Confirmed queued publish but RFC-64 catalog authority was unavailable: the catalog policy is not accepted yet',
-    );
-    // Nothing was stored, so no pass and no start has anything to place.
-    agent.startRfc64SwmCatalogProjectionSupervisorV1(ctx);
-    await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+  it.each(['unavailable', 'inactive'] as const)('durably owes confirmation while its lane is %s and places it after readiness', async (state) => {
+    const fixture = await startPlacementAgentV1({ name: `ownership-lane-${state}` });
+    const asset = await seedPlacementAssetV1(fixture.agent, state, 88n);
+    if (state === 'unavailable') fixture.lane.unavailable = new Error('policy is not accepted yet');
+    else fixture.lane.inactive = true;
+    await observeConfirmedV1(fixture.agent, asset);
+    expect(fixture.markers()).toHaveLength(1);
+    expect(fixture.markers()[0]).toMatchObject({ version: 2, inventoryScope: null, seal: { kaUal: asset.seal.kaUal } });
     expect(fixture.counts().repairs).toBe(0);
-    expect(fixture.catalogRows()).toBeNull();
+    fixture.lane.unavailable = undefined;
+    fixture.lane.inactive = false;
+    fixture.agent.startRfc64SwmCatalogProjectionSupervisorV1(ctx);
+    await fixture.agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    expect(fixture.markers()).toEqual([]);
+    expect(fixture.catalogRows()).toBe('1');
   }, 60_000);
 
-  it('owes nothing when the graph has no catalog lane at the confirmation', async () => {
-    const fixture = await startPlacementAgentV1({ name: 'ownership-lane-inactive' });
-    const { agent } = fixture;
-    const asset = await seedPlacementAssetV1(agent, 'laneless', 89n);
+  it.each(['unavailable', 'inactive'] as const)('projects canonical %s directly without the nullable publication adapter', async (state) => {
+    const fixture = await startPlacementAgentV1({ name: `ownership-direct-decision-${state}` });
+    const asset = await seedPlacementAssetV1(fixture.agent, state, 89n);
+    await fixture.agent.closeRfc64SwmCatalogProjectionSupervisorV1();
+    await observeConfirmedV1(fixture.agent, asset);
+    const marker = fixture.markers()[0]!;
+    expect(marker).toBeDefined();
+    const before = fixture.counts();
+    const failure = new Error('the accepted catalog policy is temporarily unavailable');
+    if (state === 'unavailable') fixture.lane.unavailable = failure;
+    else fixture.lane.inactive = true;
+    const internals = fixture.agent as unknown as {
+      resolveRfc64CatalogAuthoringLaneV1(): unknown;
+    };
+    const publicationAdapter = vi.spyOn(internals, 'resolveRfc64CatalogAuthoringLaneV1')
+      .mockImplementation(() => { throw new Error('placement must not call the nullable publication adapter'); });
+    if (state === 'unavailable') {
+      await expect(fixture.agent.repairRfc64FinalizedPrivateCatalogPlacementV1(marker)).rejects.toBe(failure);
+    } else {
+      await expect(fixture.agent.repairRfc64FinalizedPrivateCatalogPlacementV1(marker))
+        .rejects.toThrow('RFC-64 finalized-private placement repair lane is inactive');
+    }
+    expect(publicationAdapter).not.toHaveBeenCalled();
+    expect(fixture.markers()).toEqual([marker]);
+    expect(fixture.counts()).toMatchObject({
+      successors: before.successors, signatures: before.signatures, announcements: before.announcements,
+    });
+  }, 60_000);
 
-    fixture.lane.inactive = true;
-    await expect(observeConfirmedV1(agent, asset)).resolves.toBeUndefined();
-    fixture.lane.inactive = false;
-
-    // The observer took the path of a lane that places nothing at confirmation: no marker.
-    expect(fixture.events()).toEqual([]);
-    expect(fixture.markers()).toEqual([]);
-    agent.startRfc64SwmCatalogProjectionSupervisorV1(ctx);
-    await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
-    expect(fixture.counts().repairs).toBe(0);
-    expect(fixture.catalogRows()).toBeNull();
+  it.each([false, true])('retires exactly one marker after explicit completion, public=%s', async publicLane => {
+    const f = await startPlacementAgentV1({ name: `explicit-completion-${publicLane}` });
+    const asset = await seedPlacementAssetV1(f.agent, 'completion', 997n);
+    await f.agent.closeRfc64SwmCatalogProjectionSupervisorV1();
+    f.lane.acceptsFinalizedVmRepair = !publicLane;
+    await observeConfirmedV1(f.agent, asset);
+    const marker = f.markers()[0]!;
+    expect(marker).toBeDefined();
+    // A failed executor must not delete its durable obligation.
+    const refusal = new Error('physical placement refused');
+    f.failPlacements.push(refusal);
+    await expect(f.agent.repairRfc64FinalizedPrivateCatalogPlacementV1(marker)).rejects.toBe(refusal);
+    expect(f.markers()).toEqual([marker]);
+    expect(f.completions()).toEqual([]);
+    await expect(f.agent.repairRfc64FinalizedPrivateCatalogPlacementV1(marker))
+      .resolves.toBe(publicLane ? 'already-complete' : 'repaired');
+    expect(f.markers()).toEqual([]);
+    expect(f.completions()).toEqual([{ status: 'applied', action: publicLane ? 'public-retirement' : 'private-placement' }]);
+    // Re-observation owes the same record; proof of absence/coverage finishes it without new work.
+    await observeConfirmedV1(f.agent, asset);
+    expect(f.markers()).toEqual([marker]);
+    const before = f.counts();
+    await expect(f.agent.repairRfc64FinalizedPrivateCatalogPlacementV1(marker)).resolves.toBe('already-complete');
+    expect(f.markers()).toEqual([]);
+    expect(f.completions().at(-1)).toEqual(publicLane
+      ? { status: 'already-absent', action: 'public-retirement' }
+      : { status: 'already-covered', action: 'private-placement' });
+    expect(f.counts().successors).toBe(before.successors);
+    expect(f.events().filter(event => event.startsWith('marker-retired:'))).toHaveLength(2);
   }, 60_000);
 
   it('keeps the marker when the attempt fails, reports it as owed, and retires it only on the coverage proof', async () => {
@@ -485,9 +523,9 @@ describe('a confirmed private placement the observer handed to the supervisor', 
 
     // The supervisor owns the retry. A lane that went away and came back makes the marker
     // eligible at once; the unchanged-failure backoff is covered by the supervisor's own suite.
-    fixture.lane.acceptsFinalizedVmRepair = false;
+    fixture.lane.inactive = true;
     agent.observeRfc64SwmCatalogProjectionLaneAvailabilityV1(CONTEXT_GRAPH_ID);
-    fixture.lane.acceptsFinalizedVmRepair = true;
+    fixture.lane.inactive = false;
     agent.startRfc64SwmCatalogProjectionSupervisorV1(ctx);
     await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
 
@@ -554,48 +592,29 @@ describe('a confirmed private placement the observer handed to the supervisor', 
     expect(observer).not.toHaveBeenCalled();
   }, 120_000);
 
-  it('keeps a marker whose seal is stored nowhere after a restart, attempts it at a bounded pace, and says why', async () => {
-    // The seal of an owed placement is kept in memory, not on disk. Two edit cycles followed by
-    // a restart leave a marker that cannot place its version. This row records what the node
-    // then does; it does not endorse it.
+  it('owns the immutable seal through repeated reopen cycles and restart without reobserving confirmation', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-placement-sealless-'));
     tempDirs.push(dataDir);
     const storePath = join(dataDir, 'store.nq');
     const first = await startPlacementAgentV1({ name: 'ownership-sealless', dataDir, storePath });
     const asset = await seedPlacementAssetV1(first.agent, 'sealless', 90n);
-    // The marker is stored while the supervisor takes no requests, so nothing places it before
-    // the stop. Then both stored seals move on.
     await first.agent.closeRfc64SwmCatalogProjectionSupervisorV1();
     await observeConfirmedV1(first.agent, asset);
     expect(first.markers()).toHaveLength(1);
     await reopenForEditingV1(first.agent, asset);
-    await reopenNextVersionForEditingV1(first.agent, asset);
+    for (let version = 2n; version <= 4n; version++) {
+      await reopenNextVersionForEditingV1(first.agent, asset, version);
+    }
     await first.agent.stop();
     agents.splice(agents.indexOf(first.agent), 1);
-
-    const second = await startPlacementAgentV1({ name: 'ownership-sealless-restart', dataDir, storePath });
-    const sealFailures = (): Array<Record<string, any>> => second.warnings().flatMap((line) => {
-      try {
-        const parsed = JSON.parse(line);
-        return parsed.event === 'catalog_private_repair_failed' && parsed.diagnostic?.stage === 'seal' ? [parsed] : [];
-      } catch {
-        return [];
-      }
+    let observer!: ReturnType<typeof vi.spyOn>;
+    const second = await startPlacementAgentV1({ name: 'ownership-sealless-restart', dataDir, storePath,
+      beforeStart: (agent) => { observer = vi.spyOn(agent, 'observeRfc64ConfirmedVmV1'); },
     });
-    await untilV1(() => sealFailures().length > 0, 'the placement fails for want of its seal', 30_000);
-
-    // Visible: the failure names the stage and its kind, and the placement stays in the backlog.
-    expect(sealFailures()).toEqual([
-      expect.objectContaining({
-        event: 'catalog_private_repair_failed',
-        diagnostic: expect.objectContaining({ kind: 'integrity', stage: 'seal' }),
-        consecutiveFailures: 1,
-      }),
-    ]);
-    expect(second.markers()).toHaveLength(1);
-    expect(second.catalogRows()).toBeNull();
-    expect(second.queue()).toMatchObject({ pending: 1, waiters: 0 });
-    // Bounded: the supervisor's backoff holds the next attempt back, here by its first interval.
-    expect(sealFailures()[0]!.nextAttemptAtMs - Date.now()).toBeGreaterThan(3_000);
+    await untilV1(() => second.markers().length === 0, 'the original sealed placement survives restart', 30_000);
+    await second.agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    expect(second.catalogRows()).toBe('1');
+    expect(second.queue()).toMatchObject({ pending: 0, waiters: 0 });
+    expect(observer).not.toHaveBeenCalled();
   }, 120_000);
 });

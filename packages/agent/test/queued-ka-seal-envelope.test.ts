@@ -6,6 +6,7 @@ import {
 import type { KnowledgeAssetVmPublishRequest } from '@origintrail-official/dkg-publisher';
 import type { DKGAgent } from '../src/dkg-agent.js';
 import { PublishMethods } from '../src/dkg-agent-publish.js';
+import { confirmedPublicationCatalogConfigV1 } from './support/confirmed-publication-harness.js';
 import {
   assertionSealFromQueuedKnowledgeAssetVmPublishRequest,
   isGraphScopedKnowledgeAssetVmPublishRequest,
@@ -59,7 +60,7 @@ describe('validated queued KA seal envelope', () => {
   ] as const)('rejects %s in execution, preflight and recovery before chain reads', async (_name, override) => {
     const queued = request(override);
     const readChain = vi.fn(() => { throw new Error('Invalid envelopes must not reach chain reads'); });
-    const host = { publisher: {}, chain: { getChainId: readChain } } as unknown as DKGAgent;
+    const host = { config: confirmedPublicationCatalogConfigV1(false), publisher: {}, chain: { getChainId: readChain } } as unknown as DKGAgent;
     await expect(PublishMethods.prototype.preflightQueuedKnowledgeAssetVmPublishExecution.call(host, queued))
       .rejects.toBeInstanceOf(LegacyKnowledgeAssetReadOnlyError);
     // The envelope is checked before any persisted receipt/job fields are read.
@@ -79,7 +80,7 @@ describe('validated queued KA seal envelope', () => {
   it('keeps queued pricing disagreement ahead of legacy envelope rejection', async () => {
     const queued = request({ contentScopeVersion: 1 });
     await expect(PublishMethods.prototype.publishQueuedKnowledgeAssetVmPublish.call(
-      { publisher: {} } as unknown as DKGAgent, queued, { pricingPolicy: 'full-content' },
+      { config: confirmedPublicationCatalogConfigV1(false), publisher: {} } as unknown as DKGAgent, queued, { pricingPolicy: 'full-content' },
     )).rejects.toMatchObject({ code: 'PUBLISH_INTENT_STALE' });
   });
 });

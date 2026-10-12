@@ -100,6 +100,8 @@ import {
   respondPublicationPricingPolicyError,
 } from './knowledge-assets-error-mapping.js';
 
+import { confirmedCatalogObligationResponse, handleConfirmedCatalogObligationRecovery } from './confirmed-catalog-obligation.js';
+
 const PREFIX = "/api/knowledge-assets";
 
 type FinalizedPublishResult = Awaited<
@@ -1124,6 +1126,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           }
           recordPcaDiscount(ctx, resolvedContextGraphId, pub?.onChainResult);
         } catch (e: any) {
+          const obligation = confirmedCatalogObligationResponse(e);
+          if (obligation !== null) return jsonResponse(res, 207, { created: true, ...result,
+            ...obligation, errors: [...errors, { phase: 'vm-publish', code: obligation.code, error: obligation.error }] });
           if (respondWithPartialStoreFailure(e, 'vm-publish')) return;
           errors.push({ phase: "vm-publish", error: sanitizeRpcMessage(e?.message ?? String(e)) });
         }
@@ -1303,6 +1308,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     writePreflightContextGraphOpts,
   );
   if (!contextGraphId) return;
+
+  if (layer === 'vm' && verb === 'observe-confirmed') {
+    return handleConfirmedCatalogObligationRecovery(ctx, contextGraphId, name, parsed);
+  }
 
   try {
     // ── WM verbs (the only writable layer) ──
@@ -1786,6 +1795,8 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           ...(reason ? { error: reason } : {}),
         });
       } catch (e: any) {
+        const obligation = confirmedCatalogObligationResponse(e);
+        if (obligation !== null) return jsonResponse(res, 207, obligation);
         const msg = e?.message ?? String(e);
         // A vm/publish on a KA that hasn't been finalized, or hasn't been
         // shared to SWM, is a caller precondition error (4xx), not a

@@ -1,4 +1,7 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { Command } from 'commander';
+import { ApiClient } from '../src/api-client.js';
+import { registerKnowledgeAssetCommand } from '../src/commands/knowledge-asset.js';
 import { createServer } from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -14,6 +17,21 @@ const TSX_LOADER = join(REPO_ROOT, 'node_modules', 'tsx', 'dist', 'loader.mjs');
 const CLI_SOURCE = join(__dirname, '..', 'src', 'cli.ts');
 const TSX_LOADER_URL = pathToFileURL(TSX_LOADER).href;
 const AUTHOR_AGENT_ADDRESS = `0x${'11'.repeat(20)}`;
+const PENDING_OBLIGATION = {
+  status: 'confirmed', code: 'CONFIRMED_CATALOG_OBLIGATION_PENDING', catalogObligationPending: true,
+  error: 'Confirmed publication catalog obligation was not durably recorded; recovery is required',
+  txHash: `0x${'ab'.repeat(32)}`, blockNumber: 100,
+  recovery: { version: 1, contextGraphId: 'pending-obligation', assertionCoordinate: 'paper', subGraphName: null,
+    transactionHash: `0x${'ab'.repeat(32)}`, blockNumber: 100,
+    seal: { authorAddress: AUTHOR_AGENT_ADDRESS, assertionMerkleRoot: `0x${'11'.repeat(32)}`,
+      authorAttestationR: `0x${'22'.repeat(32)}`, authorAttestationVS: `0x${'33'.repeat(32)}`,
+      authorSchemeVersion: '1', assertedAtChainId: '31337', assertedAtKav10Address: AUTHOR_AGENT_ADDRESS,
+      reservedKaId: ((BigInt(AUTHOR_AGENT_ADDRESS) << 96n) | 7n).toString(),
+      assertionFinalizedAt: '2026-10-11T12:00:00.000Z', contentScopeVersion: '2',
+      kaUal: `did:dkg:evm:31337/${AUTHOR_AGENT_ADDRESS}/7`, assertionVersion: '2',
+      publicTripleCount: '1', privateTripleCount: '0', privateMerkleRoot: null } },
+  retryAction: 'observe_confirmed_catalog_obligation', retryUrl: '/api/knowledge-assets/paper/vm/observe-confirmed',
+};
 const PRE_SIGNED_AUTHOR_ATTESTATION = {
   address: `0x${'22'.repeat(20)}`,
   reservedKaId: '1948668849774537224271579776955044026207910057309515413017665',
@@ -49,6 +67,13 @@ describe.sequential('knowledge-asset CLI smoke', () => {
     server = createServer(async (req, res) => {
       const method = req.method ?? '';
       const url = req.url ?? '';
+
+      if (method === 'POST' && url === PENDING_OBLIGATION.retryUrl) {
+        const body = await readJsonBody(req); calls.push({ method, url, body });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'confirmed', catalogObligationPending: false }));
+        return;
+      }
 
       if (method === 'POST' && url === '/api/knowledge-assets') {
         const body = await readJsonBody(req);
@@ -88,6 +113,10 @@ describe.sequential('knowledge-asset CLI smoke', () => {
         calls.push({ method, url, body });
         const isSharePartial = lifecycle[1] === 'swm/share' && body.contextGraphId === 'partial-share';
         const isPublishPartial = lifecycle[1] === 'vm/publish' && body.contextGraphId === 'partial-binding';
+        if (lifecycle[1] === 'vm/publish' && body.contextGraphId === 'pending-obligation') {
+          res.writeHead(207, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(PENDING_OBLIGATION)); return;
+        }
         res.writeHead(
           lifecycle[1] === 'vm/publish-async'
             ? 202
@@ -628,6 +657,39 @@ describe.sequential('knowledge-asset CLI smoke', () => {
     expect(publishCalls.find((call) => call.body?.contextGraphId === 'research'))
       .toBeUndefined();
   }, 60000);
+
+  it.each([false, true])('retains the complete confirmed-obligation response before failure (JSON=%s)', async json => {
+    calls = [];
+    const result = await runCli(['ka', 'publish', 'paper', '-c', 'pending-obligation', ...(json ? ['--json'] : [])],
+      testEnv(dkgHome, smokeApiPort)).then(() => { throw new Error('pending obligation must fail'); },
+      error => error as { stdout: string; stderr: string; code: number });
+    expect(result.code).toBe(1);
+    const emitted = JSON.parse(result.stdout);
+    expect(emitted).toEqual(PENDING_OBLIGATION);
+    expect(result.stderr).toContain('observation');
+    const recovery = await fetch(`http://127.0.0.1:${smokeApiPort}${emitted.retryUrl}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contextGraphId: emitted.recovery.contextGraphId, recovery: emitted.recovery }),
+    });
+    expect(recovery.status).toBe(200);
+    expect(calls.filter(call => call.url === '/api/knowledge-assets/paper/vm/publish')).toHaveLength(1);
+    expect(calls.find(call => call.url === PENDING_OBLIGATION.retryUrl)?.body.recovery).toEqual(PENDING_OBLIGATION.recovery);
+    // Execute the same registered command in-process so its physical HTTP/result path is covered.
+    calls = [];
+    const output: unknown[] = [];
+    vi.spyOn(ApiClient, 'connect').mockResolvedValue(new ApiClient(Number(smokeApiPort)));
+    vi.spyOn(console, 'log').mockImplementation(value => { output.push(value); });
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(process, 'exit').mockImplementation(code => { throw new Error(`exit:${code}`); });
+    try {
+      const program = new Command(); registerKnowledgeAssetCommand(program);
+      await expect(program.parseAsync(['ka', 'publish', 'paper', '-c', 'pending-obligation', ...(json ? ['--json'] : [])],
+        { from: 'user' })).rejects.toThrow('exit:1');
+      expect(output).toHaveLength(1); expect(JSON.parse(String(output[0]))).toEqual(PENDING_OBLIGATION);
+      expect(diagnostic).toHaveBeenCalledWith(expect.stringContaining('do not republish'));
+      expect(calls.filter(call => call.url === '/api/knowledge-assets/paper/vm/publish')).toHaveLength(1);
+    } finally { vi.restoreAllMocks(); }
+  }, 30000);
 
   it('creates, writes, finalizes, shares, and publishes through lifecycle-native KA commands', async () => {
     calls = [];

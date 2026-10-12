@@ -5,6 +5,8 @@ import { join } from 'node:path';
 
 import {
   assertCanonicalGraphScopedAuthorSealV1,
+  assertUnsignedContextGraphPolicyEnvelopeV1,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
   buildAssertionSealQuads,
   buildAuthorAttestationTypedData,
   computeAuthorCatalogScopeDigestV1,
@@ -17,6 +19,7 @@ import {
   type CatalogSealDeploymentProfileV1,
   type ContextGraphIdV1,
   type Digest32V1,
+  type DecimalU64V1,
   type EvmAddressV1,
   type NetworkIdV1,
 } from '@origintrail-official/dkg-core';
@@ -37,6 +40,7 @@ import { afterEach, expect } from 'vitest';
 
 import { DKGAgent } from '../../src/index.js';
 import type {
+  Rfc64CatalogActivationInputV1,
   Rfc64PublicCatalogActivationInputV1,
 } from '../../src/rfc64/public-catalog-activation-config-v1.js';
 import {
@@ -93,6 +97,7 @@ afterEach(async () => {
 
 interface StartRepairAgentOptionsV1 {
   readonly name: string;
+  readonly nodeRole?: 'core' | 'edge';
   readonly dataDir?: string;
   readonly storePath?: string;
   /** Replaces the in-memory store, for example with {@link scheduledRepairStoreV1}. */
@@ -101,6 +106,8 @@ interface StartRepairAgentOptionsV1 {
   readonly autoPublish?: Rfc64PublicCatalogAutoPublishConfigV1;
   readonly bootstrap?: Rfc64PublicCatalogBootstrapConfigV1;
   readonly activation?: Rfc64PublicCatalogActivationInputV1;
+  readonly rollout?: Rfc64CatalogActivationInputV1['rollout'];
+  readonly catalogActivation?: Rfc64CatalogActivationInputV1;
   readonly beforeStart?: (agent: DKGAgent) => void | Promise<void>;
 }
 
@@ -116,7 +123,7 @@ export async function startRepairAgentV1(
     listenHost: '127.0.0.1',
     listenPort: 0,
     bootstrapPeers: [],
-    nodeRole: 'edge',
+    nodeRole: options.nodeRole ?? 'edge',
     store: options.store ?? new OxigraphStore(options.storePath),
     syncSharedMemoryOnConnect: false,
     syncReconcilerEnabled: false,
@@ -124,13 +131,14 @@ export async function startRepairAgentV1(
     syncOnConnectEnabled: false,
     durableSyncEnabled: false,
     agentProfileHeartbeatMs: 0,
-    syncContextGraphs: options.syncContextGraphs
-      ?? (options.activation !== undefined && options.activation.enabled !== false
+    rfc64CatalogActivation: options.catalogActivation ?? (options.rollout === undefined ? undefined : { rollout: options.rollout }),
+    syncContextGraphs: options.syncContextGraphs === undefined
+      ? (options.activation !== undefined && options.activation.enabled !== false
         ? options.activation.bootstrap?.acceptedPublicPolicies.map(
           ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
         ) ?? []
-        : []),
-    ...(options.activation === undefined ? {} : {
+        : []) : [...options.syncContextGraphs],
+    ...(options.activation === undefined && options.catalogActivation?.deploymentProfile === undefined ? {} : {
       networkIdentity: {
         networkId: await computeNetworkId(),
         chainId: NATIVE_DEPLOYMENT.networkId,
@@ -202,8 +210,8 @@ export function catalogScopeDigestV1(): Digest32V1 {
     ownershipTransitionDigest: null,
     subGraphName: null,
     authorAddress: AUTHOR,
-    era: '0',
-    bucketCount: '1',
+    era: '0' as DecimalU64V1,
+    bucketCount: '1' as DecimalU64V1,
   });
 }
 
@@ -216,9 +224,11 @@ export function bootstrapConfigV1(
     contextGraphId: CONTEXT_GRAPH_ID,
     ownerAddress: AUTHOR,
   });
+  const policyEnvelope = unsignedOpenContextGraphPolicyEnvelopeV1(policy);
+  assertUnsignedContextGraphPolicyEnvelopeV1(policyEnvelope);
   return {
     acceptedPublicPolicies: [{
-      policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
+      policyEnvelope,
       targets: includeRemoteTarget ? [{
         authorAddress: AUTHOR,
         providers: ['12D3KooWRepairProvider'],
@@ -311,6 +321,7 @@ export async function seedDurableWorkspaceAssetV1(
   agent: DKGAgent,
   suffix: string,
   reservedKaId: bigint,
+  accessPolicy: 'public' | 'ownerOnly' = 'public',
 ): Promise<Readonly<{
   seal: AssertionSeal;
   scopeDigest: Digest32V1;
@@ -338,7 +349,7 @@ export async function seedDurableWorkspaceAssetV1(
     kav10Address: seal.kav10Address,
     reservedKaId: seal.reservedKaId!,
     finalizedAtIso: seal.finalizedAtIso,
-    contentScopeVersion: seal.contentScopeVersion!,
+    contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
     kaUal: seal.kaUal!,
     assertionVersion: seal.assertionVersion!,
     publicTripleCount: seal.publicTripleCount!,
@@ -355,7 +366,7 @@ export async function seedDurableWorkspaceAssetV1(
     quads: PROJECTION_QUADS,
     privateTripleCount: 0,
     publisherPeerId: agent.peerId,
-    accessPolicy: 'public',
+    accessPolicy,
     agentAddress: AUTHOR,
     timestamp: new Date('2026-07-19T12:35:00.000Z'),
   });
@@ -379,7 +390,7 @@ export async function seedDurableWorkspaceAssetV1(
       ownershipTransitionDigest: null,
       subGraphName: null,
       authorAddress: AUTHOR,
-      era: '0',
+      era: '0' as DecimalU64V1,
     }),
   });
 }
