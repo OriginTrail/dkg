@@ -23,6 +23,13 @@ export interface SyncResponderRequestShape {
    * its selection key: what an exact request costs depends on its assets).
    */
   readonly selection: 'full' | 'delta' | `exact:${string}`;
+  /**
+   * Whether the request starts a walk or reads a later page of a session the
+   * responder already holds state for. A start pays for building that state, a
+   * continuation reads from it, so one failing says nothing about the other: a
+   * start that cannot be served must not end the sessions that are being served.
+   */
+  readonly stage: 'start' | 'continuation';
 }
 
 export interface SyncResponderCoolingOptions {
@@ -73,10 +80,10 @@ export function syncNotServableReasonOf(error: unknown): SyncNotServableReason |
  * A store query that runs into the store deadline is expensive for the whole
  * node, not only for its request, and the same request would end the same way.
  * So after one such failure the shape is refused for a period that doubles
- * with each consecutive failure; when a period ends one request is run again as
- * a probe, and a served request clears the record. A request beyond the paging
- * bounds is remembered the same way, which saves the bounded reads that would
- * rediscover it.
+ * with each consecutive failure; when a period ends requests run again, and
+ * one that is served clears the record. A request beyond the paging bounds is
+ * remembered the same way, which saves the bounded reads that would rediscover
+ * it.
  *
  * The failing request itself keeps its own error and outcome. Only the
  * requests refused while cooling get the handler's ordinary busy reply, with
@@ -91,7 +98,7 @@ export function createSyncResponderCooling(options: SyncResponderCoolingOptions)
   // that overlap one failure may start and fail within the same millisecond.
   let tick = 0;
   const keyOf = (shape: SyncResponderRequestShape) =>
-    JSON.stringify([shape.plane, shape.phase, shape.selection, shape.contextGraphId]);
+    JSON.stringify([shape.plane, shape.phase, shape.selection, shape.stage, shape.contextGraphId]);
   const prune = (at: number) => {
     // A record outlives its period so the next failure can extend it; one that
     // has not been probed for a whole cap is forgotten.
@@ -103,8 +110,36 @@ export function createSyncResponderCooling(options: SyncResponderCoolingOptions)
     }
   };
 
+  const record = (shape: SyncResponderRequestShape, key: string, startedTick: number, error: unknown) => {
+    const reason = syncNotServableReasonOf(error);
+    const failedAt = now();
+    const recorded = entries.get(key);
+    // A request that overlapped an already recorded failure is the same
+    // evidence, not a further failure: it extends nothing.
+    if (reason === undefined || (recorded && startedTick <= recorded.recordedTick)) return;
+    const failures = (recorded?.failures ?? 0) + 1;
+    const period = Math.min(baseMs * 2 ** Math.min(failures - 1, 30), maxMs);
+    entries.delete(key);
+    entries.set(key, { failures, reason, recordedTick: (tick += 1), until: failedAt + period });
+    prune(failedAt);
+    options.logWarn(
+      `Sync responder will not run ${shape.plane} ${shape.phase} (${shape.selection}, ${shape.stage}) requests for `
+      + `"${shape.contextGraphId}" for ${Math.round(period / 1000)}s: ${reason}, `
+      + `${failures} in a row (${error instanceof Error ? error.message : String(error)})`,
+    );
+  };
+
   return {
-    async run<T>(shape: SyncResponderRequestShape, work: () => Promise<T>): Promise<T> {
+    /**
+     * Run `work` for a request of this shape, or refuse it while the shape
+     * cools. `work` receives a reporter for a failure of work the request
+     * started but may not wait for: session state goes on being built after
+     * its request has left, and what ends that build is evidence all the same.
+     */
+    async run<T>(
+      shape: SyncResponderRequestShape,
+      work: (reportFailure: (error: unknown) => void) => Promise<T>,
+    ): Promise<T> {
       const key = keyOf(shape);
       const startedAt = now();
       const cooling = entries.get(key);
@@ -113,27 +148,15 @@ export function createSyncResponderCooling(options: SyncResponderCoolingOptions)
       }
       const startedTick = (tick += 1);
       try {
-        const result = await work();
-        entries.delete(key);
+        const result = await work((error) => record(shape, key, startedTick, error));
+        // Served after the last recorded failure: nothing is held against the
+        // shape. A request that was already running when that failure was
+        // recorded says nothing about the requests after it.
+        const recorded = entries.get(key);
+        if (recorded && startedTick > recorded.recordedTick) entries.delete(key);
         return result;
       } catch (error) {
-        const reason = syncNotServableReasonOf(error);
-        const failedAt = now();
-        const recorded = entries.get(key);
-        // A request that overlapped an already recorded failure is the same
-        // evidence, not a further failure: it extends nothing.
-        if (reason !== undefined && (!recorded || startedTick > recorded.recordedTick)) {
-          const failures = (recorded?.failures ?? 0) + 1;
-          const period = Math.min(baseMs * 2 ** Math.min(failures - 1, 30), maxMs);
-          entries.delete(key);
-          entries.set(key, { failures, reason, recordedTick: (tick += 1), until: failedAt + period });
-          prune(failedAt);
-          options.logWarn(
-            `Sync responder will not run ${shape.plane} ${shape.phase} (${shape.selection}) requests for `
-            + `"${shape.contextGraphId}" for ${Math.round(period / 1000)}s: ${reason}, `
-            + `${failures} in a row (${error instanceof Error ? error.message : String(error)})`,
-          );
-        }
+        record(shape, key, startedTick, error);
         throw error;
       }
     },

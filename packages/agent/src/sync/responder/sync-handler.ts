@@ -720,7 +720,9 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       return { kind: 'authorized', authDurationMs };
     };
 
-    const serveAuthorizedStage = async (authDurationMs: number): Promise<Uint8Array> => {
+    const serveAuthorizedStage = async (
+      authDurationMs: number, reportDetachedFailure?: (error: unknown) => void,
+    ): Promise<Uint8Array> => {
       throwIfAborted(signal);
 
       if (store.queryCancellation === 'pre-dispatch' && !warnedPreDispatchCancellation) {
@@ -881,6 +883,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             refreshRowList: session?.refreshRowList,
             refreshGeneration: session?.refreshGeneration,
             metaPlanMemo: durableMetaPlanMemo,
+            onSessionPlanFailure: reportDetachedFailure,
             assetUals,
             maxResponseBytes: pageFraming.maxPageBytes,
             // NON-NEGOTIATED legacy requesters (no wire `pageMode`) must fail
@@ -985,7 +988,8 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     const serveCooled = (authDurationMs: number) => cooling.run({
       contextGraphId, plane, phase,
       selection: assetUals !== undefined ? `exact:${assetSelectionKey}` : sinceBatchId == null ? 'full' : 'delta',
-    }, () => serveAuthorizedStage(authDurationMs));
+      stage: offset > 0 && request.syncSessionId ? 'continuation' : 'start',
+    }, (reportDetachedFailure) => serveAuthorizedStage(authDurationMs, reportDetachedFailure));
     const preAuthorizationScheduling: SyncResponderScheduling = {
       plane,
       lane: 'pre_authorization',

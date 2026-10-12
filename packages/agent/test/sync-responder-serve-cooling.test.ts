@@ -41,6 +41,7 @@ const META: SyncResponderRequestShape = {
   plane: 'durable',
   phase: 'meta',
   selection: 'full',
+  stage: 'start',
 };
 
 class TestBusyError extends Error {}
@@ -175,6 +176,48 @@ describe('sync responder cooling', () => {
     expect(readSyncNotServable(refusal)!.retryAfterMs).toBe(SYNC_RESPONDER_COOLING_BASE_MS);
   });
 
+  it('keeps cooling when a request that was already running is served after the failure', async () => {
+    const { ledger } = cooling();
+    let serve!: () => void;
+    // A request of the same shape that is cheap for its own reasons, in flight
+    // while another one runs into the deadline.
+    const running = ledger.run(META, () => new Promise<string>((resolve) => { serve = () => resolve('rows'); }));
+    await expect(ledger.run(META, async () => { throw storeDeadline(); })).rejects.toThrow();
+    serve();
+    await expect(running).resolves.toBe('rows');
+    expect(ledger.coolingCount()).toBe(1);
+    const work = vi.fn(async () => 'unreached');
+    await expect(ledger.run(META, work)).rejects.toBeInstanceOf(TestBusyError);
+    expect(work).not.toHaveBeenCalled();
+  });
+
+  it('takes a failure of work the request started but did not wait for as evidence', async () => {
+    const { ledger, warnings } = cooling();
+    let report!: (error: unknown) => void;
+    // The request leaves; what it started goes on and then fails.
+    await expect(ledger.run(META, async (reportFailure) => {
+      report = reportFailure;
+      throw new Error('requester stopped waiting');
+    })).rejects.toThrow('requester stopped waiting');
+    expect(ledger.coolingCount()).toBe(0);
+    report(storeDeadline());
+    expect(ledger.coolingCount()).toBe(1);
+    expect(warnings).toHaveLength(1);
+    await expect(ledger.run(META, async () => 'unreached')).rejects.toBeInstanceOf(TestBusyError);
+  });
+
+  it('counts one failure once when it reaches the request and its reporter', async () => {
+    const { ledger, warnings } = cooling();
+    const failure = storeDeadline();
+    await expect(ledger.run(META, async (reportFailure) => {
+      reportFailure(failure);
+      throw failure;
+    })).rejects.toBe(failure);
+    expect(warnings).toHaveLength(1);
+    const refusal = await ledger.run(META, async () => 'unreached').catch((error: unknown) => error);
+    expect(readSyncNotServable(refusal)!.retryAfterMs).toBe(SYNC_RESPONDER_COOLING_BASE_MS);
+  });
+
   it('counts requests that overlapped one failure once', async () => {
     const { ledger, warnings } = cooling();
     let failBoth!: () => void;
@@ -199,6 +242,7 @@ describe('sync responder cooling', () => {
       { ...META, plane: 'shared-memory' },
       { ...META, selection: 'delta' },
       { ...META, selection: 'exact:abc' },
+      { ...META, stage: 'continuation' },
     ];
     for (const shape of others) await expect(ledger.run(shape, async () => 'served')).resolves.toBe('served');
     await expect(ledger.run({ ...META, selection: 'exact:abc' }, async () => { throw storeDeadline(); }))
@@ -206,6 +250,20 @@ describe('sync responder cooling', () => {
     await expect(ledger.run({ ...META, selection: 'exact:def' }, async () => 'served')).resolves.toBe('served');
     await expect(ledger.run({ ...META, selection: 'exact:abc' }, async () => 'unreached'))
       .rejects.toBeInstanceOf(TestBusyError);
+  });
+
+  it('keeps the sessions being served apart from a start that cannot be served, and the reverse', async () => {
+    const { ledger } = cooling();
+    const next: SyncResponderRequestShape = { ...META, stage: 'continuation' };
+    await expect(ledger.run(META, async () => { throw storeDeadline(); })).rejects.toThrow();
+    // Later pages of sessions that already hold their state are still read.
+    await expect(ledger.run(next, async () => 'page')).resolves.toBe('page');
+    // Serving them says nothing about a start: it stays refused.
+    await expect(ledger.run(META, async () => 'unreached')).rejects.toBeInstanceOf(TestBusyError);
+    // A later page that runs into the deadline cools later pages only.
+    await expect(ledger.run(next, async () => { throw storeDeadline(); })).rejects.toThrow();
+    await expect(ledger.run(next, async () => 'unreached')).rejects.toBeInstanceOf(TestBusyError);
+    expect(ledger.coolingCount()).toBe(2);
   });
 
   it('remembers a request beyond the paging bounds the same way', async () => {
@@ -328,15 +386,21 @@ describe('sync handler with cooling', () => {
     };
     const authorized = { value: true };
     const cap = registerTestSyncHandler(store, { authorize: async () => authorized.value });
-    const meta = (contextGraphId: string, syncSessionId: string) => cap.invoke({
+    const meta = (
+      contextGraphId: string,
+      syncSessionId: string,
+      remotePeerId?: string,
+      offset = 0,
+      limit = 100,
+    ) => cap.invoke({
       contextGraphId,
       includeSharedMemory: false,
       phase: 'meta',
-      offset: 0,
-      limit: 100,
+      offset,
+      limit,
       syncSessionId,
-    });
-    return { cgId, store, state, authorized, meta };
+    }, remotePeerId);
+    return { cgId, metaGraph, store, state, authorized, meta };
   }
 
   it('runs a request that hit the store deadline once, then answers without touching the store', async () => {
@@ -345,9 +409,14 @@ describe('sync handler with cooling', () => {
     await expect(meta(cgId, 'first')).rejects.toMatchObject({ code: 'STORE_OPERATION_TIMEOUT' });
     expect(state.metaReads).toBe(1);
 
-    // The same request from the same peer, and from another one.
-    for (const attempt of ['second', 'third']) {
-      const refusal = await meta(cgId, attempt).catch((error: unknown) => error);
+    // The same request from the same peer, and from two other ones: what a
+    // request costs does not depend on who sends it.
+    for (const [attempt, peer] of [
+      ['second', undefined],
+      ['third', '12D3KooWCoolingTestSecondRequesterPeer'],
+      ['fourth', '12D3KooWCoolingTestThirdRequesterPeer'],
+    ] as const) {
+      const refusal = await meta(cgId, attempt, peer).catch((error: unknown) => error);
       expect(refusal).toMatchObject({ name: 'QuietRetryableHandlerError' });
       const reply = readSyncNotServable(refusal);
       expect(reply?.reason).toBe('store-deadline');
@@ -358,6 +427,31 @@ describe('sync handler with cooling', () => {
 
     // Another graph is served as before.
     expect(linesFromNquads(await meta('other', 'other-session'))).toHaveLength(1);
+    await store.close();
+  });
+
+  it('keeps serving the later pages of a session while new sessions of the graph are refused', async () => {
+    const { cgId, metaGraph, store, state, meta } = await fixture();
+    await store.insert(['two', 'three', 'four'].map((name) => ({
+      graph: metaGraph, subject: `did:dkg:activity:${name}`, predicate: `${DKG_NS}label`, object: `"${name}"`,
+    })));
+    const walking = '12D3KooWCoolingTestWalkingRequesterPeer';
+    const starting = '12D3KooWCoolingTestStartingRequesterPeer';
+
+    // One peer starts a walk while the store answers.
+    state.failing = false;
+    expect(linesFromNquads(await meta(cgId, 'walk', walking, 0, 2))).toHaveLength(2);
+    // Another peer's start then runs into the store deadline.
+    state.failing = true;
+    await expect(meta(cgId, 'start', starting)).rejects.toMatchObject({ code: 'STORE_OPERATION_TIMEOUT' });
+    const readsAfterFailure = state.metaReads;
+
+    // The walk goes on from the state its session already holds.
+    expect(linesFromNquads(await meta(cgId, 'walk', walking, 2, 2))).toHaveLength(2);
+    // A new start is refused without a read, for either peer.
+    await expect(meta(cgId, 'start-again', starting)).rejects.toMatchObject({ name: 'QuietRetryableHandlerError' });
+    await expect(meta(cgId, 'walk-again', walking)).rejects.toMatchObject({ name: 'QuietRetryableHandlerError' });
+    expect(state.metaReads).toBe(readsAfterFailure);
     await store.close();
   });
 
