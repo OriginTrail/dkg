@@ -657,7 +657,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
     },
   ): Promise<AgentKeyRecord> {
     assertAgentNameFree(this.localAgents.values(), name);
-    const publicKey = opts?.address === undefined ? opts?.publicKey : await externalSignerAgentPublicKey(this.config.authorSigners, opts.address, name, opts.publicKey);
+    const publicKey = opts?.address === undefined ? opts?.publicKey : await externalSignerAgentPublicKey(this.config?.authorSigners, opts.address, name, opts.publicKey);
     // Again after the signer answered: a concurrent registration may have taken the name meanwhile.
     assertAgentNameFree(this.localAgents.values(), name);
     if (publicKey && (opts?.publicEncryptionKey || opts?.encryptionKeyProof) && !(opts.publicEncryptionKey && opts.encryptionKeyProof)) {
@@ -1382,7 +1382,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
     }
     if (!opKey) {
       // No operational key: with an external signer, one of its author keys (no key stored).
-      const author = await registerExternalDefaultAgent(this, this.config.authorSigners, this.chain, this.config.name ?? 'owner', this.config.framework);
+      const author = await registerExternalDefaultAgent(this, this.config?.authorSigners, this.chain, this.config.name ?? 'owner', this.config.framework);
       if (author) { this.defaultAgentAddress = author; await this.markDefaultAgent(author); }
       return;
     }

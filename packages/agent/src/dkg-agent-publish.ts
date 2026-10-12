@@ -1476,7 +1476,7 @@ export class PublishMethods extends DKGAgentBase {
       if (mode === undefined) {
         throw new Error(`publishAsync: ${opts.authorAgentAddress} is not a registered local agent`);
       }
-      if (mode === 'self-sovereign' && !(await externalAuthorSignerFor(this.config.authorSigners, opts.authorAgentAddress))) {
+      if (mode === 'self-sovereign' && !(await externalAuthorSignerFor(this.config?.authorSigners, opts.authorAgentAddress))) {
         throw new Error(
           `publishAsync: agent ${opts.authorAgentAddress} is self-sovereign — supply ` +
             'authorSignTypedData callback or preSignedAuthorAttestation instead',
@@ -3197,7 +3197,7 @@ export class PublishMethods extends DKGAgentBase {
     } else if (opts?.authorAgentAddress != null) {
       // #1116 (round 11) — a custodial agent without a key on file is a CAPABILITY GAP.
       authorSigner = await registeredAgentAuthorSigner(
-        this, this.config.authorSigners, opts.authorAgentAddress, 'assertionFinalize', SEAL_CAPABILITY_GAP_CODE,
+        this, this.config?.authorSigners, opts.authorAgentAddress, 'assertionFinalize', SEAL_CAPABILITY_GAP_CODE,
       );
       authorAddress = opts.authorAgentAddress;
     } else {
@@ -3722,7 +3722,7 @@ export class PublishMethods extends DKGAgentBase {
       authorAddress = preSigned.address;
     } else if (opts?.authorAgentAddress != null) {
       authorSigner = await registeredAgentAuthorSigner(
-        this, this.config.authorSigners, opts.authorAgentAddress, 'Selection-based VM publish',
+        this, this.config?.authorSigners, opts.authorAgentAddress, 'Selection-based VM publish',
       );
       authorAddress = opts.authorAgentAddress;
     } else {
@@ -6486,7 +6486,7 @@ export class PublishMethods extends DKGAgentBase {
       authorAddress: seal.authorAddress,
       schemeVersion: seal.authorSchemeVersion,
     });
-    const authorSigner = await heldAuthorSigner(this, this.config.authorSigners, seal.authorAddress);
+    const authorSigner = await heldAuthorSigner(this, this.config?.authorSigners, seal.authorAddress);
     // GH#1786 — one predicate owns "can this node re-sign for that author", shared with
     // the pre-enqueue preflight on the async lane so the two cannot drift.
     if (!authorSigner
@@ -6531,7 +6531,7 @@ export class PublishMethods extends DKGAgentBase {
     // argument explicit stops the same call from being written again.
     publisher: DKGPublisher,
   ): Promise<boolean> {
-    if (await heldAuthorSigner(this, this.config.authorSigners, authorAddress)) return true;
+    if (await heldAuthorSigner(this, this.config?.authorSigners, authorAddress)) return true;
     const fallbackAddress = await publisher.publisherFallbackAuthorAddress();
     return Boolean(fallbackAddress && fallbackAddress.toLowerCase() === authorAddress.toLowerCase());
   }

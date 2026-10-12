@@ -651,7 +651,7 @@ export class ImportedArtifactMethods extends DKGAgentBase {
           getIdentityId: () => this.chain.getIdentityId(),
           signMessage: typeof this.chain.signMessage === 'function' ? this.chain.signMessage.bind(this.chain) : undefined,
           claimedAgentAddress,
-          claimedAgentSigner: claimedAgentSyncRequestSigner(this.config.authorSigners, claimedAgentAddress, claimedAgent),
+          claimedAgentSigner: claimedAgentSyncRequestSigner(this.config?.authorSigners, claimedAgentAddress, claimedAgent),
         })
       : new TextEncoder().encode(JSON.stringify({
           contextGraphId: params.contextGraphId,

@@ -254,7 +254,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       }
       return signature;
     };
-    const authors = this.config.authorSigners;
+    const authors = this.config?.authorSigners;
     const chain = this.chain;
     return Object.freeze({
       address: authorAddress,
