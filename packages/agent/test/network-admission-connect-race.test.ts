@@ -3,11 +3,13 @@ import { peerIdFromString } from '@libp2p/peer-id';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   DEFAULT_GENESIS_ID,
+  PROTOCOL_NETWORK_IDENTITY,
   computeNetworkId,
   createOperationContext,
   type DKGNodeConfig,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { watchProtocolRefusal } from '../../../scripts/testing/protocol-refusal.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 
 /** NetworkAdmissionCoordinator's default identity-probe budget. */
@@ -82,6 +84,64 @@ describe('network admission when the peer connects mid-probe', () => {
     expect(Date.now() - startedAt).toBeLessThan(PROBE_TIMEOUT_MS - 1_000);
     expect(b.networkAdmission.isAcceptedPeer(a.peerId)).toBe(true);
     expect(b.networkAdmission.getRetryableProbeBackoff(a.peerId)).toBeUndefined();
+  }, 20_000);
+
+  // A peer that is still booting answers the identity probe with multistream
+  // `na` until it registers the identity handler, and admission gates every
+  // other protocol. ProtocolRouter fails a refused protocol fast, so the probe
+  // opts back into its in-line retry (`retryOnProtocolRefusal`): a peer whose
+  // handler shows up within the retry window must be admitted, not pushed
+  // into a transient probe backoff.
+  //
+  // The handler is registered by the observation, never by a timer (see
+  // `watchProtocolRefusal`): it appears only once the probing side has seen its
+  // own `dialProtocol` of the identity protocol refused, so the probe can only
+  // be admitted by a retry.
+  it('admits a peer whose identity handler appears only after the first identity probe was refused', async () => {
+    const networkId = await computeNetworkId(DEFAULT_GENESIS_ID);
+    const a = await startAgent('BootingPeerA', networkId);
+    const b = await startAgent('BootingPeerB', networkId);
+    // A is "still booting": the identity handler is not registered yet.
+    a.router.unregister(PROTOCOL_NETWORK_IDENTITY);
+
+    // B starts its own identity probe when the connection opens, and the
+    // explicit call below joins that one in-flight attempt, so there is one
+    // probe to refuse and the watch registers the handler once. It is installed
+    // before the dial.
+    const watch = watchProtocolRefusal(b.node.libp2p, PROTOCOL_NETWORK_IDENTITY, () => {
+      a.networkAdmissionCoordinator.registerIdentityProtocol(a.router);
+    });
+    let admittedAfterRefusalMs = 0;
+    try {
+      const aAddress = a.multiaddrs.find((addr) => addr.includes('/tcp/') && !addr.includes('/p2p-circuit'));
+      expect(aAddress).toBeDefined();
+      await b.node.libp2p.dial(multiaddr(aAddress!));
+
+      // Bounded by the coordinator's own probe budget: if the refusal is never
+      // seen the handler is never registered and this rejects, it does not hang.
+      const admitted = await b.networkAdmissionCoordinator
+        .ensureAdmitted(a.peerId, createOperationContext('connect'))
+        .catch(watch.failWithContext('identity probe did not admit the peer'));
+      admittedAfterRefusalMs = watch.msSinceFirstRefusal();
+      expect(admitted).toBe(true);
+    } finally {
+      watch.dispose();
+    }
+
+    // The refusal was observed, and it is what registered the handler. Exactly
+    // one dial was refused: the connect-time probe and the explicit call share
+    // one in-flight attempt, and its retry got through.
+    expect(watch.refusedDials).toBe(1);
+    expect(watch.registrations).toBe(1);
+    expect(b.networkAdmission.isAcceptedPeer(a.peerId)).toBe(true);
+    expect(b.networkAdmission.getRetryableProbeBackoff(a.peerId)).toBeUndefined();
+    // The retry, independently of the watch's own counters: the router waits its first
+    // backoff step (500 ms) after a refused attempt before it tries again, so a probe
+    // admitted sooner than that did not go through a retry of the refusal.
+    expect(admittedAfterRefusalMs).toBeGreaterThanOrEqual(450);
+    // Generous: the router's retry schedule is 500 ms + 1000 ms inside the
+    // coordinator's 3 s probe budget. This bounds a stall; it does not prove the retry.
+    expect(admittedAfterRefusalMs).toBeLessThan(PROBE_TIMEOUT_MS);
   }, 20_000);
 
   it('refuses redials after a real signed network-identity mismatch', async () => {

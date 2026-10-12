@@ -435,6 +435,71 @@ describe('Messenger.sendReliable (failure / outbox)', () => {
   });
 });
 
+/**
+ * What libp2p's multistream-select throws when the peer refuses a protocol: an
+ * error NAMED `UnsupportedProtocolError` (`@libp2p/interface`, which this
+ * package does not depend on; classification is by name, not `instanceof`).
+ */
+function unsupportedProtocolError(message: string): Error {
+  const err = new Error(message);
+  err.name = 'UnsupportedProtocolError';
+  return err;
+}
+
+describe('Messenger.sendReliable (peer refuses the protocol)', () => {
+  // ProtocolRouter no longer re-negotiates a refused protocol inside one
+  // send() (isRecoverableSendError is false for it), but the durable outbox
+  // must keep queueing such a message: multistream answers "no such protocol"
+  // for a peer that is still booting or about to be upgraded exactly as for one
+  // that never will, and a thrown message is simply lost.
+  it('queues a libp2p UnsupportedProtocolError refusal instead of rethrowing it', async () => {
+    const router = makeRouter(async () => {
+      throw unsupportedProtocolError(`Protocol selection failed - could not negotiate ${PROTO}`);
+    });
+    const { messenger, outboxStore } = makeSubstrate({ router });
+
+    const result = await messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]), {
+      messageId: FIXED_MSG_ID,
+    });
+
+    expect(result).toMatchObject({
+      delivered: false,
+      queued: true,
+      attempts: 1,
+      messageId: FIXED_MSG_ID,
+    });
+    expect(outboxStore.hasEntry(PEER_A, PROTO, FIXED_MSG_ID)).toBe(true);
+  });
+
+  it('queues a bare "could not negotiate" refusal too, and a reworded typed refusal', async () => {
+    for (const refusal of [
+      new Error('Protocol selection failed - could not negotiate /dkg/10.0.1/message'),
+      unsupportedProtocolError('the remote declined every offered protocol'),
+    ]) {
+      const router = makeRouter(async () => {
+        throw refusal;
+      });
+      const { messenger, outboxStore } = makeSubstrate({ router });
+      const result = await messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]), {
+        messageId: FIXED_MSG_ID,
+      });
+      expect(result).toMatchObject({ delivered: false, queued: true });
+      expect(outboxStore.hasEntry(PEER_A, PROTO, FIXED_MSG_ID)).toBe(true);
+    }
+  });
+
+  it('still rethrows an error that is neither transient nor a refusal', async () => {
+    const router = makeRouter(async () => {
+      throw new Error('Invalid payload');
+    });
+    const { messenger, outboxStore } = makeSubstrate({ router });
+    await expect(
+      messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]), { messageId: FIXED_MSG_ID }),
+    ).rejects.toThrow(/Invalid payload/);
+    expect(outboxStore.size()).toBe(0);
+  });
+});
+
 describe('Messenger.register (receiver-side idempotency)', () => {
   it('forwards a reliable-envelope wire cap to the protocol router', () => {
     const { messenger, router } = makeSubstrate();

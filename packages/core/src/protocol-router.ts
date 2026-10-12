@@ -11,6 +11,11 @@ import {
   type MessageStreamPoolOptions,
 } from './message-stream-pool.js';
 import { withSpan, getMetrics } from './telemetry-api.js';
+import { isProtocolUnsupportedError, isRecoverableSendError } from './transport-error.js';
+
+// The send-error predicates live in `transport-error.ts` (typed classification);
+// re-exported here so their long-standing import path keeps working.
+export { isProtocolUnsupportedError, isRecoverableSendError };
 
 type AbortableByteStream = Stream | (AsyncIterable<Uint8Array> & { abort(reason?: unknown): void });
 
@@ -21,49 +26,6 @@ export const DEFAULT_MAX_READ_BYTES = 10 * 1024 * 1024;
 export const DEFAULT_SEND_TIMEOUT_MS = 20_000;
 
 export type ProtocolProbeOutcome = 'supported' | 'unsupported' | 'unavailable';
-
-/**
- * Returns true if the error is recoverable (retry with backoff).
- * Exported for tests.
- */
-export function isRecoverableSendError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
-  return (
-    msg.includes('closed') ||
-    msg.includes('reset') ||
-    msg.includes('stream returned in closed state') ||
-    msg.includes('econnreset') ||
-    msg.includes('etimedout') ||
-    msg.includes('send timeout') ||
-    msg.includes('operation timed out') ||
-    msg.includes('operation was aborted due to timeout') ||
-    msg.includes('econnrefused') ||
-    msg.includes('epipe') ||
-    msg.includes('aborted') ||
-    msg.includes('no valid addresses') ||
-    (msg.includes('sync responder') &&
-      (msg.includes('queue full') ||
-        msg.includes('queue wait exceeded'))) ||
-    // libp2p dial exhaustion — every known multiaddr for the peer
-    // failed in one attempt. Surfaced by `transportManager.dial` and
-    // by `dialProtocol` after iterating every relay/transport
-    // candidate. Classifying as recoverable lets the substrate
-    // outbox queue + retry via PR-5's DHT-walk-on-stall, which
-    // re-resolves the peer's addresses against the routing layer.
-    //
-    // Without this, an instantaneous routing-table miss (peer's
-    // addresses momentarily absent from local libp2p peerStore)
-    // becomes a terminal application-level loss. The May 2026
-    // multi-node soak surfaced 50/57 of all sender-side hard fails
-    // in this class — making this single string the highest-impact
-    // gap-closer toward the 99.9% delivery SLO.
-    msg.includes('all multiaddr dials failed') ||
-    msg.includes('no_reservation') ||
-    msg.includes('no reservation') ||
-    msg.includes('protocol selection failed') ||
-    msg.includes('could not negotiate')
-  );
-}
 
 /**
  * Per-call options for {@link ProtocolRouter.send}. Replaces the prior
@@ -121,6 +83,20 @@ export interface SendOptions {
    * multi-path wires; the pooled wire keeps its own frame ceiling.
    */
   maxReadBytes?: number;
+  /**
+   * Keep retrying, with the router's usual backoff, when the peer refuses the
+   * protocol ("no such protocol" from multistream-select). Default `false`: a
+   * refusal means the peer does not speak the protocol on any wire variant the
+   * router tried, so `send()` fails fast instead of re-negotiating it.
+   *
+   * Set it only for a protocol whose refusal can be TRANSIENT because the peer
+   * registers the handler during startup: multistream answers `na` in the
+   * window between `libp2p.start()` and that registration, and cannot be told
+   * apart from a peer that will never speak it. The network-identity probe is
+   * the one such caller: it gates every other protocol, so a refusal while the
+   * peer is still booting must not cost a full admission backoff.
+   */
+  retryOnProtocolRefusal?: boolean;
 }
 
 export interface AdmissionCheckOptions {
@@ -975,6 +951,7 @@ export class ProtocolRouter {
       throw new Error('single-use payloads cannot use parallelPaths > 1');
     }
     const maxReadBytes = resolveSendMaxReadBytes(opts.maxReadBytes, this.maxReadBytes);
+    const retryOnProtocolRefusal = opts.retryOnProtocolRefusal === true;
     const overallStartedAt = Date.now();
     const overallDeadline = lifecycle.deadline;
     const stopSignal = this.node.stopSignal;
@@ -1265,7 +1242,15 @@ export class ProtocolRouter {
           triedConnections.add(pickedConnection);
         }
         if (attemptSignal.aborted || overallSignal.aborted) throw err;
-        if (!isRecoverableSendError(err) || attempt >= maxAttempts - 1) throw err;
+        // A peer that refuses the protocol (`ProtocolUnsupported`) is NOT
+        // recoverable: the pooled -> one-shot wire-variant fallback above has
+        // already run inside this same `send()`, so this refusal is the
+        // one-shot wire's too, and re-negotiating the same protocol only
+        // burns the retry budget and the send deadline. A caller that knows the
+        // refusal can be transient (a booting peer) opts back in.
+        const retryable = isRecoverableSendError(err) ||
+          (retryOnProtocolRefusal && isProtocolUnsupportedError(err));
+        if (!retryable || attempt >= maxAttempts - 1) throw err;
         const backoff = (attempt + 1) * 500;
         // Make the backoff abortable so the overall deadline is
         // honored. Codex PR #560 round-5 caught: if the pool burned
@@ -2062,28 +2047,6 @@ interface PooledOverlay {
   pool: MessageStreamPool;
   wireProtocolId: string;
   logicalProtocolId: string;
-}
-
-/**
- * Returns true if `err` looks like a multistream-select / protocol-
- * negotiation failure that justifies falling back to a different
- * wire variant. Conservative — only fall back on errors that
- * specifically mean "the peer doesn't speak this protocol", not on
- * transient transport errors that should retry on the same wire.
- *
- * Exported for tests.
- */
-export function isProtocolUnsupportedError(err: unknown): boolean {
-  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
-  // PooledStreamResetError wraps the underlying message verbatim
-  // ("pooled stream reset: <inner>"), so the substrings below
-  // match through the wrapper.
-  return (
-    msg.includes('protocol selection failed') ||
-    msg.includes('could not negotiate') ||
-    msg.includes('unsupported protocol') ||
-    msg.includes('protocol mismatch')
-  );
 }
 
 // Helpers attached to ProtocolRouter via prototype assignment after

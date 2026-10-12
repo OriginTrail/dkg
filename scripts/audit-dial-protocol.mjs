@@ -177,6 +177,13 @@ const ALLOWLIST = new Map([
     },
   ],
   [
+    'packages/core/type-tests/protocol-refusal.ts',
+    {
+      expectedHits: 7,
+      justification: 'compile-only type assertions about the test-helper watcher\'s dial signature (run by tsc in core\'s build, never executed): calls through the declared host type and @ts-expect-error cases',
+    },
+  ],
+  [
     'packages/core/src/message-stream-pool.ts',
     {
       expectedHits: 2,
