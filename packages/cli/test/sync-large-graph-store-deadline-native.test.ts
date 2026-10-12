@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -15,17 +15,19 @@ import {
   generateAssertionPromotedMetadata,
   generateGraphKnowledgeAssetMetadata,
 } from '@origintrail-official/dkg-publisher';
-import { createManagedOxigraphSparqlStoreV1, type TripleStore } from '@origintrail-official/dkg-storage';
+import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { readSyncNotServable } from '../../agent/src/sync/not-servable.js';
 import { linesFromNquads, registerTestSyncHandler } from '../../agent/test/_helpers/sync-responder.js';
-import { resolveOxigraphBinary } from '../src/daemon/oxigraph-binary.js';
-import { startOxigraphServer, type OxigraphServerHandle } from '../src/daemon/oxigraph-server.js';
+import { OXIGRAPH_VERSION, resolveOxigraphBinary } from '../src/daemon/oxigraph-binary.js';
+import { startManagedOxigraph } from '../src/daemon/oxigraph-managed.js';
+import type { OxigraphServerHandle } from '../src/daemon/oxigraph-server.js';
 import { freePort, waitForCondition } from './fixtures/oxigraph-server-real-fixture.js';
 
 /**
- * The sync responder against the pinned real Oxigraph executable, with the
- * store's own client deadline and supervised recovery: no store double and no
- * fake clock anywhere on the deadline path.
+ * The sync responder against the pinned real Oxigraph executable, started and
+ * wired the way a node starts its managed store, with the store's own client
+ * deadline and supervised recovery: no store double and no fake clock anywhere
+ * on the deadline path.
  *
  * Two properties are checked. The cost of a metadata page follows the page,
  * also for a graph far past the responder's snapshot budget, so every page
@@ -153,7 +155,9 @@ async function run(binaryPath: string, args: readonly string[]): Promise<void> {
   });
 }
 
-let binaryPath = process.env.DKG_OXIGRAPH_TEST_BINARY;
+let binaryPath: string;
+/** Where the managed store looks for its executable. */
+let binaryCacheDirectory: string;
 let nquadsFile: string;
 let fixtureDirectory: string;
 /** Every row of the fixture is durable metadata, so a whole walk serves this many. */
@@ -172,37 +176,28 @@ async function startResponder(options: {
   clientDeadlineMs: number;
   snapshotBudget?: typeof SCALED_SNAPSHOT_BUDGET;
 }): Promise<Responder> {
-  const location = await mkdtemp(join(tmpdir(), 'oxi-native-sync-deadline-'));
+  const root = await mkdtemp(join(tmpdir(), 'oxi-native-sync-deadline-'));
+  const location = join(root, 'store');
   // Bulk-load before the server owns the store directory.
-  await run(binaryPath!, ['load', '--location', location, '--file', nquadsFile]);
-  const port = await freePort();
-  const handle = await startOxigraphServer({
-    binaryPath: binaryPath!,
-    location,
-    port,
+  await run(binaryPath, ['load', '--location', location, '--file', nquadsFile]);
+  const managed = await startManagedOxigraph({
+    config: { store: { backend: 'oxigraph-server', options: {
+      port: await freePort(),
+      cacheDir: binaryCacheDirectory,
+      location,
+      clientTimeoutMs: options.clientDeadlineMs,
+    } } },
+    dataDir: root,
     readyTimeoutMs: 20_000,
-    readyIntervalMs: 50,
-    stopGraceMs: 2_000,
-    restartBackoffBaseMs: 100,
-    restartBackoffMaxMs: 200,
     log: () => {},
   });
-  const endpoint = `http://127.0.0.1:${port}`;
-  const store = createManagedOxigraphSparqlStoreV1({
-    queryEndpoint: `${endpoint}/query`,
-    updateEndpoint: `${endpoint}/update`,
-    timeout: options.clientDeadlineMs,
-  }, {
-    getRecoveryState: () => handle.getRecoveryState(),
-    registerActivity: () => handle.registerStoreActivity(),
-    onClientTimeout: (operation) => handle.requestRestart(`${operation} exceeded the client deadline`),
-    requestRecovery: (generation, operation) =>
-      handle.requestRecovery!(generation, `${operation} exceeded the client deadline`),
-  });
+  if (!managed) throw new Error('the managed store did not start');
+  const { handle } = managed;
+  const store = await createTripleStore(managed.storeConfig);
   cleanups.push(async () => {
     await store.close();
     await handle.stop();
-    await rm(location, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
   });
   const storeQueries = { count: 0 };
   const query = store.query.bind(store);
@@ -233,13 +228,21 @@ async function startResponder(options: {
 
 describe('sync of a large graph against a real store deadline (pinned real Oxigraph executable)', () => {
   beforeAll(async () => {
-    if (!binaryPath) {
-      binaryPath = (await resolveOxigraphBinary({
-        cacheDir: join(tmpdir(), 'dkg-required-oxigraph-test-binary'),
-        log: () => {},
-      })).path;
-    }
     fixtureDirectory = await mkdtemp(join(tmpdir(), 'oxi-native-sync-fixture-'));
+    const provided = process.env.DKG_OXIGRAPH_TEST_BINARY;
+    if (provided) {
+      // An executable handed to the run: placed where the managed store looks.
+      binaryCacheDirectory = join(fixtureDirectory, 'binary-cache');
+      await mkdir(binaryCacheDirectory);
+      binaryPath = join(
+        binaryCacheDirectory,
+        `oxigraph-v${OXIGRAPH_VERSION}${process.platform === 'win32' ? '.exe' : ''}`,
+      );
+      await copyFile(provided, binaryPath);
+    } else {
+      binaryCacheDirectory = join(tmpdir(), 'dkg-required-oxigraph-test-binary');
+      binaryPath = (await resolveOxigraphBinary({ cacheDir: binaryCacheDirectory, log: () => {} })).path;
+    }
     nquadsFile = join(fixtureDirectory, 'large-meta.nq');
     const lines = syntheticMetadataLines();
     metadataRows = new Set(lines).size;
