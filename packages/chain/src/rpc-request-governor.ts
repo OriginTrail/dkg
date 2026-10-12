@@ -299,6 +299,12 @@ export class RpcRequestGovernor {
   #backgroundAuthorityPasses = 0;
   /** See {@link RpcRequestGovernor.#nextForegroundWaiter}. */
   #foregroundAuthorityPasses = 0;
+  /**
+   * Background work has taken the ordinary turn that an authority read is
+   * being passed over for. It may take such a turn once; the next permit then
+   * goes to the ordinary request the turn belongs to.
+   */
+  #backgroundTookOrdinaryTurn = false;
   /** Queued waiters that hold a slot of the authority reserve. */
   #authorityReserveSlotsInUse = 0;
   #timer: ReturnType<typeof setTimeout> | null = null;
@@ -603,6 +609,7 @@ export class RpcRequestGovernor {
       this.#foregroundAuthorityPasses = authorityPriority && this.#firstOrdinaryForegroundWaiter() >= 0
         ? this.#foregroundAuthorityPasses + 1
         : 0;
+      this.#backgroundTookOrdinaryTurn = false;
     }
     this.#window[requestClass === 'foreground' ? 'foregroundAdmitted' : 'backgroundAdmitted'] += 1;
   }
@@ -645,12 +652,22 @@ export class RpcRequestGovernor {
     // an ordinary request is admitted while an authority waiter still sits at
     // the head of the queue, so the head alone would deny the background class
     // its turn for as long as authority reads keep arriving.
+    //
+    // A turn taken from an ordinary request that an authority read is being
+    // passed over for is taken once. Admitting background work does not use
+    // the turn up, so without this a background class whose bucket never runs
+    // dry would take it again on every permit, and the authority read behind
+    // it would wait for as long as the background backlog lasts.
+    const foregroundNext = this.#nextForegroundWaiter();
+    const passesAuthorityRead = foregroundNext > 0;
     if (
       this.#foregroundQueue.length > 0
-      && this.#foregroundQueue[this.#nextForegroundWaiter()]?.admissionPriority !== 'authority'
+      && this.#foregroundQueue[foregroundNext]?.admissionPriority !== 'authority'
       && agedBackgroundHasCapacity
+      && !(passesAuthorityRead && this.#backgroundTookOrdinaryTurn)
     ) {
       this.#resolveWaiter(this.#backgroundQueue, backgroundNext);
+      if (passesAuthorityRead) this.#backgroundTookOrdinaryTurn = true;
     }
     while (this.#foregroundQueue.length > 0 && this.#availableTokens >= 1) {
       this.#resolveWaiter(this.#foregroundQueue, this.#nextForegroundWaiter());

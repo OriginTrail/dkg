@@ -398,6 +398,45 @@ describe('RpcRequestGovernor', () => {
     }
   });
 
+  it('lets background work take an ordinary turn once, also when its bucket never runs dry', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    // No foreground reserve: the background bucket fills as fast as the lane.
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 1,
+      burstRequests: 1,
+      foregroundReservePercent: 0,
+      maxQueueSize: 512,
+      startupJitterMs: 0,
+    });
+    await governor.acquire('foreground');
+    const order: string[] = [];
+    const record = (name: string) => (): void => { order.push(`${name}@${Date.now() / 1_000}s`); };
+    const giveUp = new AbortController();
+    for (let request = 0; request < 20; request += 1) {
+      void governor.acquire('background', giveUp.signal).then(record('background'), () => {});
+    }
+    await vi.advanceTimersByTimeAsync(2_000);
+    void governor.acquire('foreground').then(record('ordinary'));
+    void acquireForegroundAuthority(governor).then(record('authority-1'));
+    void acquireForegroundAuthority(governor).then(record('authority-2'));
+
+    await vi.advanceTimersByTimeAsync(4_000);
+    // The background backlog takes the ordinary turn between the two
+    // authority reads once. The next permit is the ordinary request's own, and
+    // the second authority read follows it: it waits for one ordinary and one
+    // background admission, not for the backlog.
+    expect(order).toEqual([
+      'background@1s',
+      'background@2s',
+      'authority-1@3s',
+      'background@4s',
+      'ordinary@5s',
+      'authority-2@6s',
+    ]);
+    giveUp.abort(new Error('test over'));
+  });
+
   it('leaves a stream of authority reads alone in front of background work as it was', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
