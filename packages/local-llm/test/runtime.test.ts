@@ -183,6 +183,7 @@ describe('DkgLocalLlmRuntime', () => {
     expect(failed.messages[0].content).toContain('UNRELATED_PREVIOUS_ANSWER');
     expect(recovered.messages[0].content).not.toContain('UNRELATED_PREVIOUS_ANSWER');
     expect(recovered.messages[0].content).toContain('testing');
+    expect(recovered.messages[0].content).toContain('ask for the missing identifier');
     expect(recovered.messages.slice(1)).toEqual(failed.messages.slice(1));
     expect(recovered.tools).toEqual(failed.tools);
     expect(mcp.callTool).toHaveBeenCalledOnce();

@@ -735,7 +735,9 @@ export class DkgLocalLlmRuntime {
         if (!historyRemoved) {
           // Keep the selected graph, current question and every current-turn
           // tool result. Only unrelated past-turn history leaves this request.
-          messages[0] = { role: 'system', content: currentSystemContext };
+          messages[0] = { role: 'system', content: currentSystemContext
+            + '\n\nEarlier conversation history was omitted to fit this request. '
+            + 'Do not guess entities referred to only in earlier turns; ask for the missing identifier if needed.' };
           historyRemoved = true;
           await this.trace.write('CONTEXT RECOVERY', { action: 'omit-prior-history', contextTokens: error.contextTokens });
         } else if (sessionEvidence.length && routedTools.length && !contextFinalOnlyUsed) {

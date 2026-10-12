@@ -913,7 +913,9 @@ plus tool schemas still exceed the backend context, one final attempt omits the
 schemas and asks for a concise answer from the existing evidence, with any
 incomplete search reported as partial. Current evidence is not silently pruned,
 completed tools are not dispatched again, and saved conversation history is not
-cleared. Requests that still cannot fit fail with `LOCAL_LLM_CONTEXT_LIMIT`.
+cleared. If an identifier exists only in the omitted conversation, the model is
+instructed to ask for it instead of guessing. Requests that still cannot fit
+fail with `LOCAL_LLM_CONTEXT_LIMIT`.
 
 `CONTEXT RECOVERY` trace sections identify each step. Other HTTP errors, timeouts
 and transport failures do not use this retry path. This handles a specific
