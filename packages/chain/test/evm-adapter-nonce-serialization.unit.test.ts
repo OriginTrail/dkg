@@ -561,7 +561,7 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
     const signPreparedTransaction = recorder(async () => ({ signedTx: 'pub', txHash: '0xpub' }));
     (a as any).signPreparedTransaction = signPreparedTransaction;
 
-    const result = await (a as any).signPreparedTransaction(await (a as any).prepareV10WithAllowanceRecovery(
+    const result = await (a as any).prepareV10WithAllowanceRecovery(
       signer,
       {} as any,
       'publish',
@@ -570,11 +570,11 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
       1n,
       'approve V10 publish TRAC (forced re-approve, #888)',
       scopedSend,
-    ));
+    );
 
-    expect(result).toEqual({ signedTx: 'pub', txHash: '0xpub' });
+    expect(result).toEqual({ transaction: { nonce: 1 }, signer });
     expect(populateCalls).toBe(2);
-    expect(signPreparedTransaction.calls).toHaveLength(1); // signed once, after the recovery
+    expect(signPreparedTransaction.calls).toEqual([]); // the publish signs the result, once
     expect(publicSend.calls).toEqual([]);
     expect(scopedSend.calls).toHaveLength(1);
     expect(scopedSend.calls[0].slice(1, 2)).toEqual(['approve']);

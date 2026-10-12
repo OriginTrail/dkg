@@ -20,6 +20,7 @@ import {
   isTooLowAllowanceError,
 } from '../src/evm-adapter-errors.js';
 import { startFakeRemoteSigner, type FakeSigner, type FakeSignerOptions } from './helpers/fake-remote-signer.js';
+import { connectable } from './connectable.js';
 
 // Well-known Hardhat development accounts.
 const PAYER_KEY = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d';
@@ -57,10 +58,6 @@ async function signerRefusingTransactions(options: Partial<FakeSignerOptions> = 
 }
 
 /** The adapter with its protected transaction seams exposed to the test. */
-/** What both V10 write paths do in their serializer window: prepare with the shared recovery, then sign once. */
-const prepareAndSignV10 = async (adapter: any, ...args: unknown[]) =>
-  adapter.signPreparedTransaction(await adapter.prepareV10WithAllowanceRecovery(...args));
-
 async function adapterFor(fake: FakeSigner): Promise<any> {
   const { operational } = await connectRemoteSigners({ url: fake.url, authToken: TOKEN });
   const adapter = new EVMChainAdapter({
@@ -102,34 +99,100 @@ describe('contract recovery never re-signs after a signer refusal', () => {
     expect(isCausedByRemoteSigner(Object.assign(looping, { error: refusal }))).toBe(true);
   });
 
-  it('asks for one publish signature and no approval when the signer refuses with an allowance revert text', async () => {
-    const fake = await signerRefusingTransactions();
+  /**
+   * The adapter with what a V10 publish or update reads before it signs stubbed: its payer is the
+   * publisher, its preparation reverts `TooLowAllowance` `staleAllowanceReads` times before it
+   * succeeds, and its approvals, broadcast and receipt wait are recorded. Its signing and its
+   * serialized dispatch, which checkpoints and then broadcasts, are the adapter's own.
+   */
+  async function v10WriteAdapter(fake: FakeSigner, staleAllowanceReads: number) {
     const adapter = await adapterFor(fake);
-    const approvals: unknown[] = [];
+    adapter.initialized = true;
+    const payer = adapter.signer;
+    const lifecycle = connectable({ getAddress: async () => KAV });
+    adapter.contracts.knowledgeAssetsLifecycle = { connect: () => lifecycle, getAddress: async () => KAV };
+    adapter.contracts.knowledgeAssetStorage = connectable({
+      getLatestMerkleRootPublisher: async () => payer.address,
+      getMerkleRoots: async () => [],
+    });
+    adapter.contracts.contextGraphStorage = connectable({ kaToContextGraph: async () => 0n });
+    adapter.resolvePinnedPublisherSigner = async () => payer;
+    adapter.resolveCurrentTokenAmount = async () => 0n;
+    adapter.computeUpdateNewTokenAmount = async () => 0n;
+    adapter.getIdentityId = async () => 0n;
+    adapter.getEvmChainId = async () => 31337n;
+    const approvals: unknown[][] = [];
     adapter.ensureV10ApproveTrac = async (...args: unknown[]) => { approvals.push(args); };
-    // Preparation succeeds; the signature after it is refused.
-    adapter.prepareAcrossProviders = async (_contract: unknown, _method: unknown, _args: unknown, signer: unknown) => (
-      { transaction: TX, signer }
-    );
-    await expect(prepareAndSignV10(adapter, adapter.signer, {}, 'publish', {}, KAV, 1n, 'publish approval'))
-      .rejects.toMatchObject({ code: 'REMOTE_SIGNER_REJECTED' });
-    expect(fake.calls('eth_signTransaction')).toHaveLength(1);
-    expect(approvals).toHaveLength(0);
-
-    // A genuine TooLowAllowance revert from gas estimation still forces one approval and one retry.
-    let attempts = 0;
+    let preparations = 0;
     adapter.prepareAcrossProviders = async (_contract: unknown, _method: unknown, _args: unknown, signer: unknown) => {
-      attempts += 1;
-      if (attempts === 1) throw Object.assign(new Error('execution reverted'), { revert: { name: 'TooLowAllowance' } });
+      preparations += 1;
+      if (preparations <= staleAllowanceReads) {
+        throw Object.assign(new Error('execution reverted'), { revert: { name: 'TooLowAllowance' } });
+      }
       return { transaction: TX, signer };
     };
-    const signPrepared = vi.fn(async () => ({ signedTx: '0x02', txHash: '0xab' }));
-    adapter.signPreparedTransaction = signPrepared;
-    await expect(prepareAndSignV10(adapter, adapter.signer, {}, 'publish', {}, KAV, 1n, 'publish approval'))
-      .resolves.toMatchObject({ txHash: '0xab' });
-    expect(attempts).toBe(2);
-    expect(approvals).toHaveLength(1);
-    expect(signPrepared).toHaveBeenCalledTimes(1);
+    const broadcast = vi.fn();
+    adapter.broadcastSignedTransactionWithRetries = broadcast;
+    const receiptWait = vi.fn();
+    adapter.waitForReceiptWithFailover = receiptWait;
+    return { adapter, payer: payer.address as string, approvals, preparations: () => preparations, broadcast, receiptWait };
+  }
+
+  /** A V10 publish or update by `author` through its production entry point, with `onBroadcast` as its write-ahead checkpoint. */
+  function v10Write(adapter: any, write: 'publish' | 'update', author: string, onBroadcast: () => void): Promise<unknown> {
+    const signature = { r: new Uint8Array(32), vs: new Uint8Array(32) };
+    const root = ethers.getBytes(ethers.keccak256(ethers.toUtf8Bytes(write)));
+    if (write === 'publish') {
+      return adapter.createKnowledgeAssets({
+        publishOperationId: ethers.hexlify(ethers.randomBytes(32)),
+        contextGraphId: 7n,
+        merkleRoot: root,
+        knowledgeAssetsAmount: 1,
+        byteSize: 100,
+        epochs: 1,
+        tokenAmount: 1n,
+        isImmutable: false,
+        merkleLeafCount: 1,
+        reservedKaId: (BigInt(author) << 96n) | 1n,
+        publisherNodeIdentityId: 0n,
+        publisherAddress: author,
+        author: { address: author, signature, schemeVersion: 1 },
+        ackSignatures: [],
+        onBroadcast,
+      });
+    }
+    return adapter.updateKnowledgeCollectionV10({
+      kaId: 42n,
+      newMerkleRoot: root,
+      newByteSize: 100,
+      newMerkleLeafCount: 1,
+      newTokenAmount: 1n,
+      authorAddress: author,
+      authorR: signature.r,
+      authorVS: signature.vs,
+      authorSchemeVersion: 1,
+      ackSignatures: [{ identityId: 1n, ...signature }],
+      onBroadcast,
+    });
+  }
+
+  it.each([
+    ['publish', 0],
+    ['publish', 1],
+    ['update', 0],
+    ['update', 1],
+  ] as const)('asks once for a %s signature after %i stale allowance read(s), and never checkpoints or sends a refused one', async (write, staleAllowanceReads) => {
+    const fake = await signerRefusingTransactions();
+    const { adapter, payer, approvals, preparations, broadcast, receiptWait } = await v10WriteAdapter(fake, staleAllowanceReads);
+    const onBroadcast = vi.fn();
+    await expect(v10Write(adapter, write, payer, onBroadcast)).rejects.toMatchObject({ code: 'REMOTE_SIGNER_REJECTED' });
+    expect(fake.calls('eth_signTransaction')).toHaveLength(1);
+    expect(preparations()).toBe(staleAllowanceReads + 1);
+    // The approval gate, and one forced re-approve after a stale read only: a refusal quoting an allowance revert forces none.
+    expect(approvals.map((args) => args[4])).toEqual(staleAllowanceReads === 0 ? [false] : [false, true]);
+    expect(onBroadcast).not.toHaveBeenCalled();
+    expect(broadcast).not.toHaveBeenCalled();
+    expect(receiptWait).not.toHaveBeenCalled();
   });
 
   it('does not re-resolve the Hub and sign again when the signer refuses with a stale-contract text', async () => {
