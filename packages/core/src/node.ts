@@ -35,7 +35,7 @@ import { bootstrap } from '@libp2p/bootstrap';
 import { kadDHT, type KadDHT } from '@libp2p/kad-dht';
 import { gossipsub, type GossipSub } from '@libp2p/gossipsub';
 import { mdns } from '@libp2p/mdns';
-import { identify } from '@libp2p/identify';
+import { identify, identifyPush } from '@libp2p/identify';
 import { ping, type Ping } from '@libp2p/ping';
 import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
 import { circuitRelayServer } from '@libp2p/circuit-relay-v2';
@@ -827,7 +827,7 @@ export class DKGNode {
       !(usableRelayCandidates.length > 0 || enableRelay);
 
     const services: Record<string, any> = {
-      identify: identify(),
+      identify: identify(), identifyPush: identifyPush(),
       ping: ping(),
       dht: kadDHT(buildKadDHTOptions(
         this.config,
