@@ -116,7 +116,7 @@ interface BuildSyncRequestParams {
    */
   recovery?: boolean;
   /**
-   * Force the authenticated envelope to be signed by `claimedAgentPrivateKey`
+   * Force the authenticated envelope to be signed by `claimedAgentSigner`
    * even when the node also has an on-chain identity signer. Use this for
    * protocols whose responder authorizes the recovered signer as the claimed
    * agent itself, not as the node identity/op-key.
@@ -145,12 +145,11 @@ interface BuildSyncRequestParams {
    * envelope tampering can't steer the responder's delegation lookup.
    */
   claimedAgentAddress?: string;
-  /** Private key matching `claimedAgentAddress`, used as a fallback signer when no chain identity is available. */
-  claimedAgentPrivateKey?: string;
   /**
-   * Signs as `claimedAgentAddress` when the node holds no key for it (an author
-   * key of the external signer), wherever `claimedAgentPrivateKey` would be
-   * used. Its signature must recover to `claimedAgentAddress`.
+   * The signing capability of `claimedAgentAddress` (see
+   * `claimedAgentSyncRequestSigner`), used when no chain identity signs and
+   * whenever the agent's own signature is required. Its signature must recover
+   * to `claimedAgentAddress`.
    */
   claimedAgentSigner?: SyncRequestSigner;
 }
@@ -177,7 +176,6 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     getIdentityId,
     signMessage,
     claimedAgentAddress,
-    claimedAgentPrivateKey,
     claimedAgentSigner,
   } = params;
 
@@ -289,21 +287,18 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     request.authPurpose,
     request.authSelector,
   );
-  // The claimed agent signs with its key held on the node, else through the
-  // signer that holds it, whose signature must recover to the claimed agent.
-  const signAsClaimedAgent = !claimedAgentAddress
-    ? undefined
-    : claimedAgentPrivateKey
-      ? () => new ethers.Wallet(claimedAgentPrivateKey).signMessage(digest)
-      : claimedAgentSigner && (async () => {
-        const signature = await claimedAgentSigner(digest);
-        if (ethers.verifyMessage(digest, signature).toLowerCase() !== claimedAgentAddress.toLowerCase()) {
-          throw new Error(
-            `Cannot build authenticated sync request for "${contextGraphId}": the signature does not recover to claimed agent ${claimedAgentAddress}`,
-          );
-        }
-        return signature;
-      });
+  // The claimed agent's signature, which must recover to the claimed agent.
+  const signAsClaimedAgent = claimedAgentAddress && claimedAgentSigner
+    ? async (): Promise<string> => {
+      const signature = await claimedAgentSigner(digest);
+      if (ethers.verifyMessage(digest, signature).toLowerCase() !== claimedAgentAddress.toLowerCase()) {
+        throw new Error(
+          `Cannot build authenticated sync request for "${contextGraphId}": the signature does not recover to claimed agent ${claimedAgentAddress}`,
+        );
+      }
+      return signature;
+    }
+    : undefined;
   const setClaimedAgentSignature = (signature: string): void => {
     const sig = ethers.Signature.from(signature);
     request.requesterIdentityId = '0';
