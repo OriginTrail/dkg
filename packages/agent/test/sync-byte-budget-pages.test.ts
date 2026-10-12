@@ -17,6 +17,7 @@ import {
   SYNC_REQUEST_SAFE_PAGE_SIZE,
 } from '../src/dkg-agent-constants.js';
 import { buildSyncRequestEnvelope } from '../src/sync/auth/request-build.js';
+import { claimedAgentSyncRequestSigner } from '../src/sync/auth/request-signing.js';
 import { MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 import {
   fetchSyncPages,
@@ -335,7 +336,7 @@ describe('byte-budget sync pagination', () => {
       },
       getIdentityId: async () => 0n,
       claimedAgentAddress: wallet.address,
-      claimedAgentPrivateKey: wallet.privateKey,
+      claimedAgentSigner: claimedAgentSyncRequestSigner(undefined, wallet.address, { privateKey: wallet.privateKey }),
     });
 
     const request = JSON.parse(new TextDecoder().decode(encoded));
@@ -362,7 +363,7 @@ describe('byte-budget sync pagination', () => {
       computeSyncDigest: () => new Uint8Array(32),
       getIdentityId: async () => 0n,
       claimedAgentAddress: wallet.address,
-      claimedAgentPrivateKey: wallet.privateKey,
+      claimedAgentSigner: claimedAgentSyncRequestSigner(undefined, wallet.address, { privateKey: wallet.privateKey }),
     });
 
     const request = JSON.parse(new TextDecoder().decode(encoded));
@@ -412,7 +413,7 @@ describe('byte-budget sync pagination', () => {
       },
       getIdentityId: async () => 0n,
       claimedAgentAddress: wallet.address,
-      claimedAgentPrivateKey: wallet.privateKey,
+      claimedAgentSigner: claimedAgentSyncRequestSigner(undefined, wallet.address, { privateKey: wallet.privateKey }),
     });
 
     const request = JSON.parse(new TextDecoder().decode(encoded));
@@ -438,7 +439,7 @@ describe('byte-budget sync pagination', () => {
       computeSyncDigest: () => new Uint8Array(32),
       getIdentityId: async () => 0n,
       claimedAgentAddress: wallet.address,
-      claimedAgentPrivateKey: wallet.privateKey,
+      claimedAgentSigner: claimedAgentSyncRequestSigner(undefined, wallet.address, { privateKey: wallet.privateKey }),
     });
 
     const request = JSON.parse(new TextDecoder().decode(encoded));

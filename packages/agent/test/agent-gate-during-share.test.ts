@@ -105,8 +105,10 @@ describe('agent gate while shares run into the same context graph (GH#3069)', ()
 
     await expect(agent.getContextGraphAgentGateAddresses(CG)).resolves.toEqual([MEMBER]);
     // The helper stubs the signer for the shares it runs; this is the real one.
-    await expect(DKGAgent.prototype.resolveWorkspaceGossipSigningAgent.call(agent, CG))
-      .resolves.toMatchObject({ agentAddress: MEMBER, privateKey: signer.privateKey });
+    const gossipSigner = await DKGAgent.prototype.resolveWorkspaceGossipSigningAgent.call(agent, CG);
+    expect(gossipSigner).toMatchObject({ agentAddress: MEMBER });
+    const bytes = new TextEncoder().encode('framed gossip payload');
+    expect(ethers.verifyMessage(bytes, await gossipSigner!.signMessage(bytes))).toBe(MEMBER);
 
     expect(rosterReads).toHaveBeenCalledTimes(2);
     expect(agent.resolveSwmTransportAuthority).toHaveBeenCalledTimes(10);

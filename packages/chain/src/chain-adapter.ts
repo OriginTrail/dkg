@@ -1494,6 +1494,25 @@ export interface KnowledgeAssetUpdateContext {
   merkleLeafCount: number;
 }
 
+/** How a chain adapter's operational wallets, the payers of its transactions, sign. */
+export interface OperationalSigning {
+  /** An external signer signs for every operational wallet; the node holds none of their keys. */
+  readonly external: boolean;
+  /** The operational wallets, the first one primary. */
+  readonly payerAddresses: readonly string[];
+}
+
+/**
+ * The operational signing `chain` reports, or `undefined` for an adapter that
+ * does not report one (one without the capability): callers take such an
+ * adapter to sign with local wallets, and cannot list its payers.
+ */
+export function operationalSigningOf(
+  chain: Pick<ChainAdapter, 'operationalSigning'> | undefined,
+): OperationalSigning | undefined {
+  return typeof chain?.operationalSigning === 'function' ? chain.operationalSigning() : undefined;
+}
+
 /**
  * Chain-agnostic adapter interface for interacting with the DKG Trust Layer.
  *
@@ -1961,6 +1980,15 @@ export interface ChainAdapter {
     types: Record<string, Array<{ name: string; type: string }>>,
     value: Record<string, unknown>,
   ): Promise<string>;
+
+  /**
+   * How the operational wallets (the payers of transactions) sign, and which
+   * they are. When an external signer signs for them the node holds none of
+   * their keys, and such a paying wallet never authors an asset: callers must
+   * not fall back to it as the author. Optional: see {@link operationalSigningOf}
+   * for an adapter without it.
+   */
+  operationalSigning?(): OperationalSigning;
 
   /**
    * Return `true` iff `address` has deployed bytecode on this chain.

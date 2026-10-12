@@ -125,7 +125,9 @@ import {
   type Quad,
   type LargeLiteralStorageConfig,
 } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type AuthorSigner, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { signAuthorTypedDataCompact, type WorkspaceGossipSigner } from './external-author-signing.js';
+import { externalAuthorSignerFor, heldAuthorSigner, registeredAgentAuthorSigner } from './author-signer.js';
 import  {
   DKGPublisher,
   PublishHandler,
@@ -189,7 +191,9 @@ import  {
   type WorkspaceSenderKeyEncryptInput,
   createResolveCurrentWorkspaceGossipPayload,
   parseEncodedWorkspaceGossipPayload,
+  type ConfirmWorkspaceGossipBeforeCommit,
   type EncodedWorkspaceGossipPayload,
+  type PrepareWorkspaceGossip,
   type SharedMemoryPublicSnapshotStorageConfig,
 } from '@origintrail-official/dkg-publisher';
 import { pickPublishLifecycleHooks, type PublishLifecycleHooks } from '@origintrail-official/dkg-publisher';
@@ -317,7 +321,6 @@ import {
   attachRevocationToWorkspaceEncryptionKey,
   migrateLegacyWorkspaceEncryptionFields,
   refreshDefaultEncryptionKeyView,
-  type AgentKeyRecord,
   type KeystoreEntry,
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
@@ -897,7 +900,7 @@ export class PublishMethods extends DKGAgentBase {
     contextGraphId: string,
     payload: EncodedWorkspaceGossipPayload,
     ctx: OperationContext,
-    resolvedSigner?: (AgentKeyRecord & { privateKey: string }) | null,
+    resolvedSigner?: WorkspaceGossipSigner | null,
     shareOperationId?: string,
   ): Promise<void>;
 
@@ -910,7 +913,7 @@ export class PublishMethods extends DKGAgentBase {
     contextGraphId: string,
     message: Uint8Array,
     ctx: OperationContext,
-    resolvedSigner?: (AgentKeyRecord & { privateKey: string }) | null,
+    resolvedSigner?: WorkspaceGossipSigner | null,
     shareOperationId?: string,
   ): Promise<void>;
 
@@ -918,7 +921,7 @@ export class PublishMethods extends DKGAgentBase {
     contextGraphId: string,
     payloadOrMessage: EncodedWorkspaceGossipPayload | Uint8Array,
     ctx: OperationContext,
-    resolvedSigner?: (AgentKeyRecord & { privateKey: string }) | null,
+    resolvedSigner?: WorkspaceGossipSigner | null,
     /**
      * Publisher-minted unique share ID. When provided, this share
      * is registered with `SwmAckQuorum` after fan-out so the
@@ -972,10 +975,22 @@ export class PublishMethods extends DKGAgentBase {
     // the freemium-tier launch baseline has stabilised.
     const wireCgId = this.gossipWireIdFor(contextGraphId);
     const topic = contextGraphWorkspaceTopic(wireCgId);
-    const signer = resolvedSigner === undefined
-      ? await this.resolveWorkspaceGossipSigningAgent(contextGraphId)
-      : resolvedSigner;
-    const wireMessage = await this.encodeWorkspaceGossipMessage(contextGraphId, message, signer);
+    // A payload prepared before its write committed carries its signed envelope.
+    let wireMessage = payload.envelope;
+    if (wireMessage === undefined) {
+      const signer = resolvedSigner === undefined
+        ? await this.resolveWorkspaceGossipSigningAgent(contextGraphId)
+        : resolvedSigner;
+      try {
+        wireMessage = await this.encodeWorkspaceGossipMessage(contextGraphId, message, signer);
+      } catch (err) {
+        // The caller's write has committed. An external signer that does not
+        // sign the envelope fails this fan-out, reported like any other, not
+        // the write; peers catch up through sync.
+        this.reportSwmGossipPublishFailure(contextGraphId, topic, err, ctx);
+        return;
+      }
+    }
 
     // rc.9 PR-C (SWM reliable fan-out plan, Step 3): tier-switch
     // between substrate fan-out (point-to-point reliable via
@@ -1329,19 +1344,29 @@ export class PublishMethods extends DKGAgentBase {
       // post-increment count, and flag the overflow case explicitly
       // so operators can see why the per-cgId breakdown in
       // /api/slo's `gossip.publishFailures` may not show this cgId.
-      const { failureCountForCg, evictedToOverflow } = this.recordSwmGossipPublishFailure(contextGraphId);
-      const errClass = err instanceof Error
-        ? (err.name && err.name !== 'Error' ? err.name : err.constructor.name)
-        : typeof err;
-      const errMessage = err instanceof Error ? err.message : String(err);
-      const overflowSuffix = evictedToOverflow
-        ? ' (evicted to overflow bucket; per-cgId breakdown truncated)'
-        : '';
-      this.log.warn(
-        ctx,
-        `Gossip publish FAILED for topic="${topic}" cgId=${contextGraphId} errorClass="${errClass}" error="${errMessage}" failureCountForCg=${failureCountForCg}${overflowSuffix}`,
-      );
+      this.reportSwmGossipPublishFailure(contextGraphId, topic, err, ctx);
     }
+  }
+
+  /** Count a failed SWM gossip publish and log it, as `/api/slo` and operators see it. */
+  reportSwmGossipPublishFailure(this: DKGAgent,
+    contextGraphId: string,
+    topic: string,
+    err: unknown,
+    ctx: OperationContext,
+  ): void {
+    const { failureCountForCg, evictedToOverflow } = this.recordSwmGossipPublishFailure(contextGraphId);
+    const errClass = err instanceof Error
+      ? (err.name && err.name !== 'Error' ? err.name : err.constructor.name)
+      : typeof err;
+    const errMessage = err instanceof Error ? err.message : String(err);
+    const overflowSuffix = evictedToOverflow
+      ? ' (evicted to overflow bucket; per-cgId breakdown truncated)'
+      : '';
+    this.log.warn(
+      ctx,
+      `Gossip publish FAILED for topic="${topic}" cgId=${contextGraphId} errorClass="${errClass}" error="${errMessage}" failureCountForCg=${failureCountForCg}${overflowSuffix}`,
+    );
   }
 
   /**
@@ -1452,7 +1477,7 @@ export class PublishMethods extends DKGAgentBase {
       if (mode === undefined) {
         throw new Error(`publishAsync: ${opts.authorAgentAddress} is not a registered local agent`);
       }
-      if (mode === 'self-sovereign') {
+      if (mode === 'self-sovereign' && !(await externalAuthorSignerFor(this.config?.authorSigners, opts.authorAgentAddress))) {
         throw new Error(
           `publishAsync: agent ${opts.authorAgentAddress} is self-sovereign — supply ` +
             'authorSignTypedData callback or preSignedAuthorAttestation instead',
@@ -2413,9 +2438,10 @@ export class PublishMethods extends DKGAgentBase {
     const shouldCreateImplicitContextGraph = await this.shouldCreateImplicitSharedMemoryContextGraph(contextGraphId);
     const gossipSigner = opts?.localOnly ? null : await this.resolveWorkspaceGossipSigningAgent(contextGraphId);
 
-    // Strict curator-ack gate (OT-RFC-49 curator-leader): require the curator's
-    // applied-ack BEFORE the local commit for a gated private-CG write (see
-    // buildCuratorAckConfirmer). Undefined → legacy best-effort path.
+    // The gossip envelope is signed before the write commits, and the strict
+    // curator-ack gate (OT-RFC-49 curator-leader) of a gated private-CG write is
+    // asked with it (see buildCuratorAckConfirmer): a refused signature or
+    // acknowledgement stores nothing. Undefined → legacy best-effort path.
     const confirmBeforeCommit = await this.buildCuratorAckConfirmer(contextGraphId, gossipSigner, opts, ctx);
 
     const { shareOperationId, gossipPayload } = await this.publisher.writeToWorkspace(contextGraphId, quads, {
@@ -2424,6 +2450,7 @@ export class PublishMethods extends DKGAgentBase {
       subGraphName: opts?.subGraphName,
       localOnly: opts?.localOnly,
       senderAgentAddress: gossipSigner?.agentAddress,
+      prepareGossip: this.gossipEnvelopePreparer(contextGraphId, gossipSigner),
       confirmBeforeCommit,
     });
     if (shouldCreateImplicitContextGraph) {
@@ -2451,6 +2478,23 @@ export class PublishMethods extends DKGAgentBase {
   }
 
   /**
+   * The publisher's pre-commit preparation of a share() or conditionalShare()
+   * that has a gossip signer: it signs the message's envelope before anything
+   * is stored, so a signer that refuses aborts the write with nothing stored (a
+   * conditional write stays retryable as it was). The publisher attaches the
+   * signed bytes to its payload, which carries them to the curator-ack gate
+   * and, through the write result, to the fan-out, which sends them without
+   * signing again.
+   */
+  gossipEnvelopePreparer(this: DKGAgent,
+    contextGraphId: string,
+    gossipSigner: WorkspaceGossipSigner | null,
+  ): PrepareWorkspaceGossip | undefined {
+    if (gossipSigner === null) return undefined;
+    return (message) => this.encodeWorkspaceGossipMessage(contextGraphId, message, gossipSigner);
+  }
+
+  /**
    * Build the strict curator-ack gate's `confirmBeforeCommit` callback for a
    * private-CG SWM write (OT-RFC-49 curator-leader), or `undefined` when the gate
    * does not apply. The callback runs inside the publisher's `_shareImpl`, under
@@ -2471,23 +2515,33 @@ export class PublishMethods extends DKGAgentBase {
     gossipSigner: Parameters<DKGAgent['encodeWorkspaceGossipMessage']>[2],
     opts: { localOnly?: boolean; awaitCuratorAck?: boolean; curatorAckTimeoutMs?: number } | undefined,
     ctx: OperationContext,
-  ): Promise<((message: Uint8Array) => Promise<{ applied: boolean; rejected?: boolean }>) | undefined> {
+  ): Promise<ConfirmWorkspaceGossipBeforeCommit | undefined> {
+    const curator = await this.resolveCuratorAckTarget(contextGraphId, opts);
+    if (curator === undefined) return undefined;
+    return async (_message, payload) => {
+      // The publisher hands us the INNER workspace payload. The curator's
+      // PROTOCOL_SWM_UPDATE handler expects the SAME signed gossip-message
+      // envelope the substrate fan-out sends (encodeWorkspaceGossipMessage),
+      // NOT the raw inner bytes — sending the inner bytes fails protobuf decode
+      // on the receiver (a permanent rejection). A share prepared that envelope
+      // before its commit; otherwise encode its message identically.
+      const wireMessage = payload.envelope ?? await this.encodeWorkspaceGossipMessage(contextGraphId, payload.message, gossipSigner);
+      return this.confirmCuratorApplied(contextGraphId, curator.peerIds, wireMessage, curator.timeoutMs, ctx);
+    };
+  }
+
+  /** The curator peers and timeout of the strict curator-ack gate, when it applies (see above). */
+  private async resolveCuratorAckTarget(this: DKGAgent,
+    contextGraphId: string,
+    opts: { localOnly?: boolean; awaitCuratorAck?: boolean; curatorAckTimeoutMs?: number } | undefined,
+  ): Promise<{ peerIds: string[]; timeoutMs: number } | undefined> {
     const wantCuratorAck = !opts?.localOnly
       && (opts?.awaitCuratorAck ?? this.config.swmAwaitCuratorAck ?? false);
     if (!wantCuratorAck) return undefined;
     if (!(await this.isPrivateContextGraph(contextGraphId))) return undefined;
     const curator = await this.resolveCuratorPeerIdsForCg(contextGraphId);
     if (curator.curatorIsLocal) return undefined;
-    const timeoutMs = opts?.curatorAckTimeoutMs ?? DKGAgentBase.SWM_CURATOR_ACK_TIMEOUT_MS;
-    return async (message: Uint8Array) => {
-      // The publisher hands us the INNER workspace payload. The curator's
-      // PROTOCOL_SWM_UPDATE handler expects the SAME signed gossip-message
-      // envelope the substrate fan-out sends (encodeWorkspaceGossipMessage),
-      // NOT the raw inner bytes — sending the inner bytes fails protobuf decode
-      // on the receiver (a permanent rejection). Encode identically.
-      const wireMessage = await this.encodeWorkspaceGossipMessage(contextGraphId, message, gossipSigner);
-      return this.confirmCuratorApplied(contextGraphId, curator.peerIds, wireMessage, timeoutMs, ctx);
-    };
+    return { peerIds: curator.peerIds, timeoutMs: opts?.curatorAckTimeoutMs ?? DKGAgentBase.SWM_CURATOR_ACK_TIMEOUT_MS };
   }
 
   /**
@@ -2554,7 +2608,8 @@ export class PublishMethods extends DKGAgentBase {
     this.log.info(ctx, `CAS write: ${quads.length} quads, ${conditions.length} conditions for ${contextGraphId}${sgLabel}`);
     const shouldCreateImplicitContextGraph = await this.shouldCreateImplicitSharedMemoryContextGraph(contextGraphId);
     const gossipSigner = opts?.localOnly ? null : await this.resolveWorkspaceGossipSigningAgent(contextGraphId);
-    // Strict curator-ack gate — same seam as share() (both flow through _shareImpl).
+    // Signed (and curator-confirmed) before the commit — same seam as share()
+    // (both flow through _shareImpl), after the conditions are checked.
     const confirmBeforeCommit = await this.buildCuratorAckConfirmer(contextGraphId, gossipSigner, opts, ctx);
     const { shareOperationId, gossipPayload } = await this.publisher.writeConditionalToWorkspace(contextGraphId, quads, {
       publisherPeerId: this.node.peerId.toString(),
@@ -2563,6 +2618,7 @@ export class PublishMethods extends DKGAgentBase {
       subGraphName: opts?.subGraphName,
       localOnly: opts?.localOnly,
       senderAgentAddress: gossipSigner?.agentAddress,
+      prepareGossip: this.gossipEnvelopePreparer(contextGraphId, gossipSigner),
       confirmBeforeCommit,
     });
     if (shouldCreateImplicitContextGraph) {
@@ -3130,7 +3186,7 @@ export class PublishMethods extends DKGAgentBase {
     // 7. Resolve author. preSigned > custodial agent > publisher fallback.
     const schemeVersion = opts?.schemeVersion ?? AUTHOR_SCHEME_VERSION_V1;
     let authorAddress: string;
-    let signerPrivateKey: string | undefined;
+    let authorSigner: AuthorSigner | undefined;
     let preSigned: PreSignedAuthorAttestation | undefined;
     if (opts?.preSignedAuthorAttestation != null) {
       preSigned = opts.preSignedAuthorAttestation;
@@ -3140,28 +3196,10 @@ export class PublishMethods extends DKGAgentBase {
       // canonicalization and allocation, while the caller retains its key.
       authorAddress = ethers.getAddress(opts.authorAgentAddress!);
     } else if (opts?.authorAgentAddress != null) {
-      const mode = this.getLocalAgentMode(opts.authorAgentAddress);
-      if (mode === undefined) {
-        throw new Error(
-          `assertionFinalize: authorAgentAddress ${opts.authorAgentAddress} is not a registered local agent on this node`,
-        );
-      }
-      if (mode === 'self-sovereign') {
-        throw new Error(
-          `assertionFinalize: agent ${opts.authorAgentAddress} is registered as self-sovereign — ` +
-            `this node does not hold its private key. Use preSignedAuthorAttestation instead.`,
-        );
-      }
-      signerPrivateKey = this.getCustodialAgentPrivateKey(opts.authorAgentAddress);
-      if (!signerPrivateKey) {
-        // #1116 (round 11) — CAPABILITY GAP (no local signing key for this agent).
-        throw Object.assign(
-          new Error(
-            `assertionFinalize: custodial agent ${opts.authorAgentAddress} has no private key on file`,
-          ),
-          { code: SEAL_CAPABILITY_GAP_CODE },
-        );
-      }
+      // #1116 (round 11) — a custodial agent without a key on file is a CAPABILITY GAP.
+      authorSigner = await registeredAgentAuthorSigner(
+        this, this.config?.authorSigners, opts.authorAgentAddress, 'assertionFinalize', SEAL_CAPABILITY_GAP_CODE,
+      );
       authorAddress = opts.authorAgentAddress;
     } else {
       // Publisher-wallet fallback: use the daemon's own publisher EOA
@@ -3173,7 +3211,7 @@ export class PublishMethods extends DKGAgentBase {
         throw Object.assign(
           new Error(
             'assertionFinalize: no agent override supplied and no publisher signer is available. ' +
-              'Either supply authorAgentAddress / preSignedAuthorAttestation, or configure a publisher private key on the daemon.',
+              'Either supply authorAgentAddress / preSignedAuthorAttestation, or configure a publisher key or default author on the daemon.',
           ),
           { code: SEAL_CAPABILITY_GAP_CODE },
         );
@@ -3457,18 +3495,8 @@ export class PublishMethods extends DKGAgentBase {
       }
       r = ethers.getBytes(sig.r);
       vs = ethers.getBytes(sig.yParityAndS);
-    } else if (signerPrivateKey) {
-      const wallet = new ethers.Wallet(
-        signerPrivateKey.startsWith('0x') ? signerPrivateKey : '0x' + signerPrivateKey,
-      );
-      const sigHex = await wallet.signTypedData(
-        typedData.domain,
-        typedData.types,
-        typedData.message,
-      );
-      const sig = ethers.Signature.from(sigHex);
-      r = ethers.getBytes(sig.r);
-      vs = ethers.getBytes(sig.yParityAndS);
+    } else if (authorSigner) {
+      ({ r, vs } = await signAuthorTypedDataCompact(authorSigner, typedData));
     } else {
       // Publisher fallback: ask the publisher to sign with its own
       // wallet. Returns the compact (r, vs) form.
@@ -3688,37 +3716,22 @@ export class PublishMethods extends DKGAgentBase {
 
     const schemeVersion = opts?.schemeVersion ?? AUTHOR_SCHEME_VERSION_V1;
     let authorAddress: string;
-    let signerPrivateKey: string | undefined;
+    let authorSigner: AuthorSigner | undefined;
     let preSigned: PreSignedAuthorAttestation | undefined;
     if (opts?.preSignedAuthorAttestation != null) {
       preSigned = opts.preSignedAuthorAttestation;
       authorAddress = preSigned.address;
     } else if (opts?.authorAgentAddress != null) {
-      const mode = this.getLocalAgentMode(opts.authorAgentAddress);
-      if (mode === undefined) {
-        throw new Error(
-          `Selection-based VM publish: authorAgentAddress ${opts.authorAgentAddress} is not a registered local agent on this node`,
-        );
-      }
-      if (mode === 'self-sovereign') {
-        throw new Error(
-          `Selection-based VM publish: agent ${opts.authorAgentAddress} is registered as self-sovereign — ` +
-            `this node does not hold its private key. Use preSignedAuthorAttestation instead.`,
-        );
-      }
-      signerPrivateKey = this.getCustodialAgentPrivateKey(opts.authorAgentAddress);
-      if (!signerPrivateKey) {
-        throw new Error(
-          `Selection-based VM publish: custodial agent ${opts.authorAgentAddress} has no private key on file`,
-        );
-      }
+      authorSigner = await registeredAgentAuthorSigner(
+        this, this.config?.authorSigners, opts.authorAgentAddress, 'Selection-based VM publish',
+      );
       authorAddress = opts.authorAgentAddress;
     } else {
       const fallbackAddress = await this.publisher.publisherFallbackAuthorAddress();
       if (!fallbackAddress) {
         throw new Error(
           'Selection-based VM publish: no agent override supplied and no publisher signer is available. ' +
-            'Either supply authorAgentAddress / preSignedAuthorAttestation, or configure a publisher private key on the daemon.',
+            'Either supply authorAgentAddress / preSignedAuthorAttestation, or configure a publisher key or default author on the daemon.',
         );
       }
       authorAddress = fallbackAddress;
@@ -3825,18 +3838,8 @@ export class PublishMethods extends DKGAgentBase {
       }
       r = preSigned.signature.r;
       vs = preSigned.signature.vs;
-    } else if (signerPrivateKey) {
-      const wallet = new ethers.Wallet(
-        signerPrivateKey.startsWith('0x') ? signerPrivateKey : '0x' + signerPrivateKey,
-      );
-      const sigHex = await wallet.signTypedData(
-        typedData.domain,
-        typedData.types,
-        typedData.message,
-      );
-      const sig = ethers.Signature.from(sigHex);
-      r = ethers.getBytes(sig.r);
-      vs = ethers.getBytes(sig.yParityAndS);
+    } else if (authorSigner) {
+      ({ r, vs } = await signAuthorTypedDataCompact(authorSigner, typedData));
     } else {
       const compact = await this.publisher.signAuthorAttestationAsPublisher(typedData);
       r = compact.r;
@@ -4175,7 +4178,6 @@ export class PublishMethods extends DKGAgentBase {
         `allowed agent before publishing.`,
       );
     }
-    const signerWallet = new ethers.Wallet(signer.privateKey);
     const signerAgentAddress = signer.agentAddress;
     const log = this.log;
     const ctx = createOperationContext('publish');
@@ -4240,7 +4242,7 @@ export class PublishMethods extends DKGAgentBase {
           payload,
           i,
         );
-        const signature = await signerWallet.signMessage(signingPayload);
+        const signature = await signer.signMessage(signingPayload);
         const envelope = encodeGossipEnvelope({
           version: GOSSIP_ENVELOPE_VERSION,
           type: GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED,
@@ -6485,10 +6487,10 @@ export class PublishMethods extends DKGAgentBase {
       authorAddress: seal.authorAddress,
       schemeVersion: seal.authorSchemeVersion,
     });
-    const custodialKey = this.getCustodialAgentPrivateKey(seal.authorAddress);
+    const authorSigner = await heldAuthorSigner(this, this.config?.authorSigners, seal.authorAddress);
     // GH#1786 — one predicate owns "can this node re-sign for that author", shared with
     // the pre-enqueue preflight on the async lane so the two cannot drift.
-    if (!custodialKey
+    if (!authorSigner
       // Sync signing path: the publisher resolved here IS the one about to sign.
       && !(await this._canReSignUpdateAttestationForAuthor(
         seal.authorAddress, publisherOverride ?? this.publisher,
@@ -6497,12 +6499,8 @@ export class PublishMethods extends DKGAgentBase {
     }
     let r: Uint8Array;
     let vs: Uint8Array;
-    if (custodialKey) {
-      const wallet = new ethers.Wallet(custodialKey.startsWith('0x') ? custodialKey : '0x' + custodialKey);
-      const sigHex = await wallet.signTypedData(typedData.domain, typedData.types, typedData.message);
-      const sig = ethers.Signature.from(sigHex);
-      r = ethers.getBytes(sig.r);
-      vs = ethers.getBytes(sig.yParityAndS);
+    if (authorSigner) {
+      ({ r, vs } = await signAuthorTypedDataCompact(authorSigner, typedData));
     } else {
       const publisher = publisherOverride ?? this.publisher;
       const compact = await publisher.signAuthorAttestationAsPublisher(typedData);
@@ -6534,7 +6532,7 @@ export class PublishMethods extends DKGAgentBase {
     // argument explicit stops the same call from being written again.
     publisher: DKGPublisher,
   ): Promise<boolean> {
-    if (this.getCustodialAgentPrivateKey(authorAddress)) return true;
+    if (await heldAuthorSigner(this, this.config?.authorSigners, authorAddress)) return true;
     const fallbackAddress = await publisher.publisherFallbackAuthorAddress();
     return Boolean(fallbackAddress && fallbackAddress.toLowerCase() === authorAddress.toLowerCase());
   }

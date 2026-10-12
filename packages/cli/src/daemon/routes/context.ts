@@ -8,7 +8,8 @@
 // looked inside the monolithic `handleRequest`.
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { DKGAgent, OpWalletsConfig } from '@origintrail-official/dkg-agent';
+import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import type { OperationalWalletAddresses } from '../evm-signing.js';
 import type { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import {
   authenticatedAgentAddress,
@@ -128,7 +129,8 @@ export interface RequestContext {
   rfc64PublicCatalog: ResolvedRfc64PublicCatalogActivationConfig;
   startedAt: number;
   dashDb: DashboardDB;
-  opWallets: OpWalletsConfig;
+  /** Wallet addresses only; with an external signer, the payer accounts it serves. */
+  opWallets: OperationalWalletAddresses;
   network: Awaited<ReturnType<typeof loadNetworkConfig>>;
   tracker: OperationTracker;
   memoryManager: ChatMemoryManager;

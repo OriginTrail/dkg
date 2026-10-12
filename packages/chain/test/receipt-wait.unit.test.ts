@@ -53,7 +53,6 @@ describe('receipt deadline orchestration', () => {
         provider: { getTransactionReceipt: lookup } as any,
         rpcUrl: 'https://rpc.example',
       }],
-      async () => { throw new Error('signing must not be reached'); },
       () => 'evm:31337',
       { validateEndpoint: validate },
     );
@@ -91,7 +90,6 @@ describe('receipt deadline orchestration', () => {
         provider: { getTransactionReceipt } as any,
         rpcUrl: 'https://rpc.example',
       }],
-      async () => { throw new Error('signing must not be reached'); },
       () => 'evm:31337',
       { validateEndpoint },
     );

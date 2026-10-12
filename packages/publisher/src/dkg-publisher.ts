@@ -4,9 +4,10 @@ import { assertKaSlotOwnershipAvailable, assertionAllocationLockKey } from './as
 import { assertWorkingMemoryLifecycleMutable } from './working-memory-lifecycle.js';
 import { PublishedSnapshotRetirement } from './published-snapshot-retirement.js';
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
-import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
+import type { AuthorSigner, ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
 import type { PreBroadcastRecord } from './publisher.js';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
+import { fallbackAuthorResolver, type FallbackAuthor } from './fallback-author.js';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
 import type { AssertionSeal } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphPrivateUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, contextGraphSubGraphPrivateUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, isAllocatableKaAuthorV1, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
@@ -114,7 +115,10 @@ import {
 import {
   createCapturedWorkspaceGossipPayload,
   createResolveCurrentWorkspaceGossipPayload,
+  type ConfirmWorkspaceGossipBeforeCommit,
   type EncodedWorkspaceGossipPayload,
+  type PrepareWorkspaceGossip,
+  withWorkspaceGossipEnvelope,
 } from './workspace-gossip-payload.js';
 import {
   PublisherWalletRequiredError,
@@ -181,12 +185,12 @@ export type PublisherAssertionPromoteOptions = {
   trustedNonManifestCatalogTriples?: PublishOptions['trustedNonManifestCatalogTriples'];
   onChainContextGraphId?: string | bigint;
   /**
-   * Strict curator-ack gate (OT-RFC-49 curator-leader), same contract as
-   * `ShareOptions.confirmBeforeCommit`: called after the gossip message is
+   * Strict curator-ack gate (OT-RFC-49 curator-leader), the same contract as
+   * `ShareOptions.confirmBeforeCommit`: called with the gossip payload once it is
    * built and BEFORE the WM→SWM mutation. `applied: false` aborts the promote
    * (CuratorUnconfirmedError / CuratorRejectedError) leaving WM intact.
    */
-  confirmBeforeCommit?: (message: Uint8Array) => Promise<{ applied: boolean; rejected?: boolean }>;
+  confirmBeforeCommit?: ConfirmWorkspaceGossipBeforeCommit;
   /** Promote-scoped authority resolver; defaults to the configured workspace resolver. */
   resolveWorkspaceRecipients?: WorkspaceAgentRecipientResolver;
 };
@@ -504,6 +508,8 @@ export interface DKGPublisherConfig {
   publisherAddressResolver?: (contextGraphId?: bigint) => Promise<string | undefined>;
   /** EVM private key for signing publish requests (hex string with 0x prefix) */
   publisherPrivateKey?: string;
+  /** Author (asset owner) signing attestations instead of the paying wallet; `null`, or omitted over a chain whose wallets sign externally: the paying wallet never authors. */
+  authorSigner?: Pick<AuthorSigner, 'address' | 'signTypedData'> | null;
   /**
    * Additional EVM private keys whose identities can act as receiver
    * signers for the `contextGraphSignatures` path of `publishSharedMemory`
@@ -764,19 +770,17 @@ export interface ShareOptions {
   subGraphName?: string;
   localOnly?: boolean;
   senderAgentAddress?: string;
+  /** Prepares the gossip payload before the write commits; see {@link PrepareWorkspaceGossip}. */
+  prepareGossip?: PrepareWorkspaceGossip;
   /**
-   * Strict curator-ack gate (OT-RFC-49 curator-leader). When provided, the
-   * share path calls this AFTER building the signed wire message but BEFORE any
-   * destructive store mutation, passing the exact message that would be
-   * published. If it resolves `applied: false`, the write is ABORTED with NO
-   * local persistence — `CuratorRejectedError` when `rejected: true`, otherwise
-   * `CuratorUnconfirmedError`. The agent injects this to require the curator (the
-   * authoritative replica) to have applied the write before the member commits
-   * it locally, so a write the curator never received is never silently accepted.
-   * Omitted (the default) preserves the legacy best-effort, commit-then-fan-out
-   * behaviour for public CGs, `localOnly` writes, and non-gated callers.
+   * Strict curator-ack gate (OT-RFC-49 curator-leader): called after the message
+   * is built, with its payload and prepared envelope, but BEFORE any store
+   * mutation. `applied: false` ABORTS the write with NO local persistence —
+   * `CuratorRejectedError` when `rejected: true`, otherwise `CuratorUnconfirmedError`
+   * — so a write the curator (the authoritative replica) never received is never
+   * accepted. Omitted, the legacy best-effort commit-then-fan-out path is kept.
    */
-  confirmBeforeCommit?: (message: Uint8Array) => Promise<{ applied: boolean; rejected?: boolean }>;
+  confirmBeforeCommit?: ConfirmWorkspaceGossipBeforeCommit;
 }
 
 /** @deprecated Use ShareOptions */
@@ -1168,6 +1172,7 @@ export class DKGPublisher implements Publisher {
   private readonly publisherAddress?: string;
   private readonly publisherAddressResolver?: (contextGraphId?: bigint) => Promise<string | undefined>;
   private readonly publisherWallet?: ethers.Wallet;
+  private readonly fallbackAuthor: () => Promise<FallbackAuthor | undefined>;
   private readonly publisherPlanner: PublisherPlanner;
   private adapterSignMessagePublisherAddress?: string;
   private readonly adapterSignMessageProbeCache = new Map<string, boolean>();
@@ -1204,6 +1209,7 @@ export class DKGPublisher implements Publisher {
     this.keypair = config.keypair;
     this.publisherNodeIdentityId = config.publisherNodeIdentityId ?? 0n;
     this.publisherAddressResolver = config.publisherAddressResolver;
+    this.fallbackAuthor = fallbackAuthorResolver(config.authorSigner, config.chain, () => this.resolvePublisherAddress(), (address) => this.getPublisherSigner(address));
 
     const configuredPublisherAddress = normalizePublisherAddress(config.publisherAddress);
     if (config.publisherPrivateKey) {
@@ -1512,30 +1518,26 @@ export class DKGPublisher implements Publisher {
     return { address: await this.inferAdapterPublisherAddress(contextGraphId, options) };
   }
 
-  /** RFC-001 §9 fallback author when no agent override is supplied. Returns undefined if no signer configured. */
+  /** RFC-001 §9 fallback author (the configured author, else the publisher) when no agent override is supplied. */
   async publisherFallbackAuthorAddress(): Promise<string | undefined> {
-    return this.resolvePublisherAddress();
+    return (await this.fallbackAuthor())?.address;
   }
 
-  /** Sign EIP-712 typed data with the publisher's own wallet. Returns KAv10's compact (r, vs). */
+  /** Sign EIP-712 typed data as the configured author, else with the publisher's own wallet. Returns KAv10's compact (r, vs). */
   async signAuthorAttestationAsPublisher(typedData: {
     domain: { name: string; version: string; chainId: bigint; verifyingContract: string };
     types: Record<string, Array<{ name: string; type: string }>>;
     message: Record<string, unknown>;
   }): Promise<{ r: Uint8Array; vs: Uint8Array }> {
-    const address = await this.resolvePublisherAddress();
-    if (!address) {
+    const author = await this.fallbackAuthor();
+    if (!author) {
       throw new Error(
-        'signAuthorAttestationAsPublisher: no publisher signer is configured. ' +
-          'Configure publisherPrivateKey or use a chain adapter that exposes signTypedData.',
+        'signAuthorAttestationAsPublisher: no author signer is configured. ' +
+          'Configure an author signer, publisherPrivateKey, or a chain adapter that exposes signTypedData.',
       );
     }
-    const signer = await this.getPublisherSigner(address);
-    if (!signer) {
-      throw new Error(
-        `signAuthorAttestationAsPublisher: failed to resolve a signer for ${address}.`,
-      );
-    }
+    const signer = await author.signer();
+    if (!signer) throw new Error(`signAuthorAttestationAsPublisher: failed to resolve a signer for ${author.address}.`);
     const sigHex = await signer.signTypedData(
       typedData.domain,
       typedData.types as { [k: string]: Array<{ name: string; type: string }> },
@@ -1979,15 +1981,15 @@ export class DKGPublisher implements Publisher {
       });
     }
 
-    // Strict curator-ack gate (OT-RFC-49 curator-leader). Runs AFTER the wire
-    // message is fully built + size-checked (above) and BEFORE the first
-    // destructive mutation (below) — the build/commit seam the message was
-    // deliberately pre-encoded for ("BEFORE any destructive SWM mutations").
-    // The agent injects a confirmer that reliably delivers `message` to the
-    // curator and waits for an applied-ack; a non-confirmation aborts here with
-    // ZERO orphaned state, so the member never holds a value the curator lacks.
+    // The build/commit seam (the message was pre-encoded for it, BEFORE any
+    // destructive SWM mutation): the message's envelope is prepared for the
+    // network, then the strict curator-ack gate (OT-RFC-49 curator-leader)
+    // delivers it to the curator and waits for an applied-ack. A failure or
+    // non-confirmation aborts here with ZERO orphaned state, so the member never
+    // holds a value the curator lacks.
+    const payload = options.prepareGossip ? withWorkspaceGossipEnvelope(gossipPayload, await options.prepareGossip(gossipPayload.message)) : gossipPayload;
     if (options.confirmBeforeCommit) {
-      const confirmation = await options.confirmBeforeCommit(gossipPayload.message);
+      const confirmation = await options.confirmBeforeCommit(payload.message, payload);
       if (!confirmation.applied) {
         if (confirmation.rejected) throw new CuratorRejectedError(contextGraphId);
         throw new CuratorUnconfirmedError(contextGraphId);
@@ -2047,7 +2049,7 @@ export class DKGPublisher implements Publisher {
     }
 
     this.log.info(ctx, `Shared memory write complete: ${shareOperationId}`);
-    return { shareOperationId, message: gossipPayload.message, gossipPayload };
+    return { shareOperationId, message: payload.message, gossipPayload: payload };
   }
 
   private async encodeWorkspaceGossipPayload(
@@ -9150,7 +9152,7 @@ export class DKGPublisher implements Publisher {
       // what we cannot send).
       if (opts?.confirmBeforeCommit) {
         if (!gossipPayload) throw new CuratorUnconfirmedError(contextGraphId);
-        const confirmation = await opts.confirmBeforeCommit(gossipPayload.message);
+        const confirmation = await opts.confirmBeforeCommit(gossipPayload.message, gossipPayload);
         if (!confirmation.applied) {
           if (confirmation.rejected) {
             // A definitive rejection proves the curator did not apply this

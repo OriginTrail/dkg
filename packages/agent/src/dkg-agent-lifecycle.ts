@@ -870,6 +870,7 @@ import {
   type ContextGraphMembershipSnapshot,
 } from './join-approval-restart-projection.js';
 import { verifiedCuratorDialAddress } from './curator-dial-address.js';
+import { signsThroughExternalSigner } from './external-author-signing.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
@@ -2413,19 +2414,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
 
-    // Load registered agents from triple store; auto-register default if none exist.
-    // loadAgentsFromStore restores defaultAgentAddress from the persisted
-    // isDefaultAgent marker, avoiding reliance on SPARQL result ordering.
+    // Load registered agents from triple store; loadAgentsFromStore restores
+    // defaultAgentAddress from the persisted isDefaultAgent marker, avoiding
+    // reliance on SPARQL result ordering. Then settle the default agent once.
     await this.loadAgentsFromStore();
-    if (this.localAgents.size === 0) {
-      await this.autoRegisterDefaultAgent();
-    }
-    if (!this.defaultAgentAddress && this.localAgents.size > 0) {
-      // Fallback: no persisted marker — pick first and persist for next boot
-      const first = this.localAgents.values().next().value!;
-      this.defaultAgentAddress = first.agentAddress;
-      await this.markDefaultAgent(first.agentAddress).catch(() => {});
-    }
+    await this.reconcileDefaultAgent();
 
     const network = new LibP2PNetwork(this.node);
     // Local helper: race a lookup against an optional AbortSignal so
@@ -3002,6 +2995,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         return verifyHandler.handler(data, peerId);
       });
       this.log.info(ctx, 'Registered VERIFY proposal handler');
+    } else if (signsThroughExternalSigner(this.chain)) {
+      this.log.info(ctx, 'VERIFY proposal handler not registered: EVM signing is delegated to an external signer');
     }
 
     // Start chain event poller for trustless confirmation of tentative publishes

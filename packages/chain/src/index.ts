@@ -249,6 +249,7 @@ export type { MockChainAdapterOptions } from './mock-adapter.js';
 export {
   EVMChainAdapter,
   type EVMAdapterConfig,
+  type EVMAdapterOptions,
   decodeEvmError,
   enrichEvmError,
   classifyRpcRetryDisposition,
@@ -266,6 +267,52 @@ export {
   type RpcRetryDisposition,
 } from './evm-adapter.js';
 export { NoChainAdapter } from './no-chain-adapter.js';
+export {
+  OperationalKeyUnavailableError,
+  isExternalEvmSigner,
+  type AuthorSigner,
+  type EvmSigner,
+  type ExternalAuthorSigners,
+  type ExternalEvmSigner,
+  type ExternalOperationalSignerSource,
+  type LocalOperationalSignerSource,
+  type OperationalSignerSource,
+} from './evm-signer.js';
+export {
+  RemoteSigner,
+  RemoteSignerClient,
+  type RemoteSignerApi,
+  type RemoteSignerClientOptions,
+} from './remote-signer.js';
+export {
+  DEFAULT_REMOTE_SIGNER_TIMEOUT_MS,
+  type RemoteSignerTransportOptions,
+} from './remote-signer-transport.js';
+export {
+  RemoteSignerError,
+  isRemoteSignerError,
+  type RemoteSignerErrorCode,
+  type RemoteSignerFailureCode,
+  type RemoteSignerFailureLike,
+} from './remote-signer-errors.js';
+export {
+  RemoteAuthorSigners,
+  connectRemoteSigners,
+  type ConnectRemoteSignersOptions,
+  type RemoteSignerAuthorOptions,
+  type RemoteSigners,
+} from './remote-signer-connect.js';
+export {
+  connectConfiguredRemoteSigners,
+  resolveChainSignerConfig,
+  type ChainSignerConfig,
+  type ChainSignerSettings,
+  type ConnectConfiguredRemoteSignersOptions,
+  type LocalChainSignerConfig,
+  type RemoteChainSignerAuthorConfig,
+  type RemoteChainSignerConfig,
+  type ResolvedRemoteSignerConfig,
+} from './remote-signer-config.js';
 export {
   createRpcReadDescriptor,
   type RpcReadDescriptor,

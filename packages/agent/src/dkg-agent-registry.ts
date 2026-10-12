@@ -96,7 +96,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, PcaUnavailableError, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type NodePublishingConvictionAccount, type PcaAccountRelation, type ShardingTableNode, type PcaContracts, type PcaRpcMethod, type BrowserWalletRpcMethod, type IdentityWalletContracts } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, PcaUnavailableError, enrichEvmError, buildKnowledgeAssetUal, operationalSigningOf, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type NodePublishingConvictionAccount, type PcaAccountRelation, type ShardingTableNode, type PcaContracts, type PcaRpcMethod, type BrowserWalletRpcMethod, type IdentityWalletContracts } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -224,7 +224,8 @@ import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
 import { runSyncOnConnect } from './sync/on-connect/sync-on-connect.js';
 import {
-  generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
+  assertAgentNameFree, generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey, writeKeystoreEntry,
+  agentKeystorePath, readAgentKeystore, assertKeystoreHoldsNoPayerKey,
   ensureWorkspaceEncryptionKey,
   hashAgentToken,
   activeWorkspaceEncryptionKeys,
@@ -237,6 +238,8 @@ import {
   type KeystoreEntry,
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
+import { externalSignerAgentPublicKey, signsThroughExternalSigner } from './external-author-signing.js';
+import { externalSignerDefaultAgent } from './default-agent.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
@@ -641,36 +644,33 @@ export class AgentRegistryMethods extends DKGAgentBase {
   // Agent Registry — multi-agent identity management
   // ---------------------------------------------------------------------------
 
-  /**
-   * Register a new agent on this node.
-   * - Custodial (publicKey omitted): node generates secp256k1 keypair
-   * - Self-sovereign (publicKey provided): agent holds its own key
-   */
+  /** Register an agent: custodial (node-held key), self-sovereign (`publicKey`) or by `address` held by the external signer. */
   async registerAgent(this: DKGAgent,
     name: string,
     opts?: {
       publicKey?: string;
+      /** An author key of the node's external signer; registered self-sovereign (the node stores no key). */
+      address?: string;
       framework?: string;
       encryptionKeyAlgorithm?: typeof WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519;
       publicEncryptionKey?: string;
       encryptionKeyProof?: string;
     },
   ): Promise<AgentKeyRecord> {
-    for (const existing of this.localAgents.values()) {
-      if (existing.name === name) {
-        throw new Error(`Agent name "${name}" already registered on this node`);
-      }
-    }
-    if (opts?.publicKey && (opts.publicEncryptionKey || opts.encryptionKeyProof) && !(opts.publicEncryptionKey && opts.encryptionKeyProof)) {
+    assertAgentNameFree(this.localAgents.values(), name);
+    const publicKey = opts?.address === undefined ? opts?.publicKey : await externalSignerAgentPublicKey(this.config?.authorSigners, opts.address, name, opts.publicKey);
+    // Again after the signer answered: a concurrent registration may have taken the name meanwhile.
+    assertAgentNameFree(this.localAgents.values(), name);
+    if (publicKey && (opts?.publicEncryptionKey || opts?.encryptionKeyProof) && !(opts.publicEncryptionKey && opts.encryptionKeyProof)) {
       throw new Error('Self-sovereign agents must provide both publicEncryptionKey and encryptionKeyProof');
     }
 
-    const record = opts?.publicKey
+    const record = publicKey
       ? registerSelfSovereignAgent(
         name,
-        opts.publicKey,
-        opts.framework,
-        opts.publicEncryptionKey && opts.encryptionKeyProof
+        publicKey,
+        opts?.framework,
+        opts?.publicEncryptionKey && opts.encryptionKeyProof
           ? {
             encryptionKeyAlgorithm: opts.encryptionKeyAlgorithm ?? WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
             publicEncryptionKey: opts.publicEncryptionKey,
@@ -1166,8 +1166,12 @@ export class AgentRegistryMethods extends DKGAgentBase {
     const graph = DKGAgentBase.AGENT_SYSTEM_GRAPH;
     const DKG = 'https://dkg.network/ontology#';
 
-    // Load raw tokens and custodial keys from the on-disk keystore
+    // Load raw tokens and custodial keys from the on-disk keystore. A payer of
+    // the external signer never signs as an agent: refuse its key kept there.
     const keystore = await this.loadKeystore();
+    const keystorePath = this.keystorePath();
+    const signing = operationalSigningOf(this.chain);
+    if (keystorePath && signing?.external) assertKeystoreHoldsNoPayerKey(keystore, signing.payerAddresses, keystorePath);
 
     // Encryption keys live in BOTH the keystore (private halves; authoritative
     // for keys we own) and RDF (public halves + proofs + revocations; what we
@@ -1379,11 +1383,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
     }
     if (!opKey) return;
 
-    const record = agentFromPrivateKey(
-      opKey,
-      this.config.name ?? 'owner',
-      this.config.framework,
-    );
+    const record = agentFromPrivateKey(opKey, this.config.name ?? 'owner', this.config.framework);
 
     this.localAgents.set(record.agentAddress, record);
     this.agentTokenIndex.set(record.authToken, record.agentAddress);
@@ -1396,25 +1396,34 @@ export class AgentRegistryMethods extends DKGAgentBase {
     this.log.info(ctx, `Auto-registered default agent "${record.name}" → ${record.agentAddress}`);
   }
 
+  /**
+   * Settle the node's default agent once at start, after `loadAgentsFromStore` restored the persisted one,
+   * and persist it when it changes: with an external signer, the account `externalSignerDefaultAgent` picks;
+   * otherwise the persisted default, else the first agent, else one from the operational key.
+   */
+  async reconcileDefaultAgent(this: DKGAgent): Promise<void> {
+    const authors = signsThroughExternalSigner(this.chain) ? this.config?.authorSigners : undefined;
+    if (this.localAgents.size === 0 && authors === undefined) return this.autoRegisterDefaultAgent();
+    const previous = this.defaultAgentAddress;
+    const kept = previous ?? this.localAgents.values().next().value?.agentAddress;
+    const target = authors === undefined ? kept : await externalSignerDefaultAgent(this, authors, kept, this.config.name ?? 'owner', this.config.framework);
+    if (target === undefined || target.toLowerCase() === previous?.toLowerCase()) return;
+    this.defaultAgentAddress = target;
+    await this.markDefaultAgent(target).catch(() => {});
+    this.log.info(createOperationContext('system'), `Default agent is now ${target}${previous === undefined ? '' : ` (was ${previous})`}`);
+  }
+
   // ---------------------------------------------------------------------------
   // Agent keystore — secrets kept out of queryable RDF
   // ---------------------------------------------------------------------------
 
   keystorePath(this: DKGAgent): string | null {
-    if (!this.config.dataDir) return null;
-    return `${this.config.dataDir}/agent-keystore.json`;
+    return this.config.dataDir ? agentKeystorePath(this.config.dataDir) : null;
   }
 
   async loadKeystore(this: DKGAgent): Promise<Record<string, KeystoreEntry>> {
     const ksPath = this.keystorePath();
-    if (!ksPath) return {};
-    try {
-      const { readFile } = await import('node:fs/promises');
-      const raw = await readFile(ksPath, 'utf-8');
-      return JSON.parse(raw);
-    } catch {
-      return {};
-    }
+    return ksPath ? readAgentKeystore(ksPath) : {};
   }
 
   /**
@@ -1428,15 +1437,8 @@ export class AgentRegistryMethods extends DKGAgentBase {
     const ksPath = this.keystorePath();
     if (!ksPath) return;
     try {
-      const { readFile, writeFile, mkdir, chmod } = await import('node:fs/promises');
-      const { dirname } = await import('node:path');
-      let existing: Record<string, KeystoreEntry> = {};
-      try {
-        const raw = await readFile(ksPath, 'utf-8');
-        existing = JSON.parse(raw);
-      } catch { /* first write */ }
       const defaultActive = activeWorkspaceEncryptionKeys(record)[0];
-      existing[record.agentAddress.toLowerCase()] = {
+      await writeKeystoreEntry(ksPath, record.agentAddress, {
         authToken: record.authToken,
         ...(record.privateKey ? { privateKey: record.privateKey } : {}),
         ...(record.workspaceEncryptionKeys.length
@@ -1446,10 +1448,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
         ...(defaultActive?.publicEncryptionKey ? { publicEncryptionKey: defaultActive.publicEncryptionKey } : {}),
         ...(defaultActive?.privateEncryptionKey ? { privateEncryptionKey: defaultActive.privateEncryptionKey } : {}),
         ...(defaultActive?.encryptionKeyProof ? { encryptionKeyProof: defaultActive.encryptionKeyProof } : {}),
-      };
-      await mkdir(dirname(ksPath), { recursive: true });
-      await writeFile(ksPath, JSON.stringify(existing, null, 2), { mode: 0o600 });
-      await chmod(ksPath, 0o600);
+      });
     } catch {
       // Non-fatal — agent still works, just won't survive restart
     }

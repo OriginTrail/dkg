@@ -61,6 +61,10 @@ explicit subscribe/create/write operations remain unchanged. Remove the
 setting, set it to `true`, or use the environment override to restore normal
 default behavior on the next boot.
 
+## Signing With An External Signer
+
+An Edge Node can delegate EVM signing to an external signer (for example an HSM-backed signer or a separate signing service) so that it holds no operational private keys and creates no `wallets.json`. See [External Signer](external-signer.md).
+
 ## Core Node Profile Registration
 
 The two node roles are `edge` and `core`.

@@ -194,7 +194,7 @@ export async function prepareAssertionPromote(
         senderAgentAddress: gossipSigner?.agentAddress,
         confirmBeforeCommit: confirmBeforeCommit === undefined
           ? undefined
-          : (message) => resolvePromoteAuthority(() => confirmBeforeCommit(message)),
+          : (message, payload) => resolvePromoteAuthority(() => confirmBeforeCommit(message, payload)),
         resolveWorkspaceRecipients: (request) => resolvePromoteAuthority(
           () => resolvePromoteRecipientsWithinBound(
             () => host.resolveWorkspaceRecipientsGated(request),

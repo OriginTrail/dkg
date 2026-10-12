@@ -59,7 +59,6 @@ function failoverReadProvider(providers: unknown[]) {
       provider: provider as any,
       rpcUrl: `https://rpc-${index}.example`,
     })),
-    async () => { throw new Error('Hub rotation tests must not sign transactions'); },
     () => 'evm:31337',
   );
   return client.read.bind(client);

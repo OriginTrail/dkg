@@ -533,7 +533,7 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
   });
 
   it('forced re-approve (#888) routes through the caller-scoped approvalSender, never the public serializer', async () => {
-    // Pins the wiring `populateAndSignV10WithAllowanceRecovery` →
+    // Pins the wiring `prepareV10WithAllowanceRecovery` →
     // `ensureV10ApproveTrac(…, approvalSender)`: if the recovery path ever
     // fell back to the default `this.sendContractTransaction`, the in-lock
     // publish would re-enter the per-wallet serializer and self-deadlock.
@@ -551,15 +551,17 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
     (a as any).sendContractTransaction = publicSend;
     const scopedSend = recorder(async () => fakeReceipt('approve'));
     let populateCalls = 0;
-    (a as any).populateAndSignAcrossProviders = recorder(async () => {
+    (a as any).prepareAcrossProviders = recorder(async () => {
       populateCalls += 1;
       if (populateCalls === 1) {
         throw Object.assign(new Error('execution reverted'), { revert: { name: 'TooLowAllowance' } });
       }
-      return { signedTx: 'pub', txHash: '0xpub' };
+      return { transaction: { nonce: 1 }, signer };
     });
+    const signPreparedTransaction = recorder(async () => ({ signedTx: 'pub', txHash: '0xpub' }));
+    (a as any).signPreparedTransaction = signPreparedTransaction;
 
-    const result = await (a as any).populateAndSignV10WithAllowanceRecovery(
+    const result = await (a as any).prepareV10WithAllowanceRecovery(
       signer,
       {} as any,
       'publish',
@@ -570,8 +572,9 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
       scopedSend,
     );
 
-    expect(result).toEqual({ signedTx: 'pub', txHash: '0xpub' });
+    expect(result).toEqual({ transaction: { nonce: 1 }, signer });
     expect(populateCalls).toBe(2);
+    expect(signPreparedTransaction.calls).toEqual([]); // the publish signs the result, once
     expect(publicSend.calls).toEqual([]);
     expect(scopedSend.calls).toHaveLength(1);
     expect(scopedSend.calls[0].slice(1, 2)).toEqual(['approve']);

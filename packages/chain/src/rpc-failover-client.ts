@@ -21,17 +21,19 @@
  * read loop keeps one more piece of ordering state beside it, of the same
  * kind: which endpoint refused which read (`EndpointReadRefusals`, see
  * endpoint-read-refusals.ts), so that read starts at the others. The
- * module never references the adapter; it is constructed with two required
- * capabilities and one optional per-endpoint transport preflight:
+ * module never references the adapter; it is constructed with one required
+ * capability and optional hooks (`RpcFailoverClientOptions`):
  *   1. `getEndpoints()` — a LIVE thunk over the RPC endpoints, each a
  *      `{ provider, rpcUrl }` pair. One object per endpoint keeps the
  *      `provider ↔ rpcUrl` pairing explicit inside every failover loop (not an
  *      index invariant across two parallel arrays); reading it live lets a
  *      mid-flight rebind of the pool take effect. The `rpcUrl` is
  *      host-only-reduced before it reaches any log or error message.
- *   2. `signPopulated` — signing is reached ONLY through this injected callback;
- *      this module holds no signer state. Used by `populateAndSign`; the read
- *      family never signs.
+ *   2. `prepareForSigning` — the adapter's signer-side preparation (nonce, gas
+ *      and fee reads, fee cap), which `prepareTransaction` runs under the
+ *      per-endpoint deadline. This module holds no signer state and NEVER signs:
+ *      it returns a prepared transaction with its endpoint-bound signer, and the
+ *      caller signs it once, outside every retry.
  *
  * The read family (`read` / `readContract`) and receipt lookups share one private
  * `runAcrossProviders` core. Transaction preparation and broadcast stay explicit
@@ -45,8 +47,8 @@
 
 import { type RpcReadDescriptor, createRpcReadDescriptor, type RpcReadDescriptorInput, type ReadOpts } from './rpc-read-descriptor.js';
 export { type RpcReadDescriptor, createRpcReadDescriptor, rpcReadDescriptor, type RpcReadDescriptorInput, type ReadOpts } from './rpc-read-descriptor.js';
-import type { SignedTransactionEnvelope } from './chain-adapter.js';
-import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
+import { JsonRpcProvider, Contract, ethers } from 'ethers';
+import type { EvmSigner } from './evm-signer.js';
 import { withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import {
   classifyRpcRetryDisposition,
@@ -139,14 +141,24 @@ class ProviderSetExhaustedError extends RpcEndpointsExhaustedError {
 }
 
 /**
- * The adapter's transaction-signing helper, injected as a callback so signing is
- * reached only through this thunk and the module holds no signer state. Used by
- * `populateAndSign`.
+ * Signer-side preparation of a transaction the contract populated: the signer's
+ * nonce, gas and fee reads, plus any fee cap. It is RPC work on one endpoint,
+ * so `prepareTransaction` runs it under the per-endpoint deadline; it never
+ * signs. Defaults to the signer's own `populateTransaction`.
  */
-export type SignPopulatedFn = (
-  signer: Wallet,
+export type PrepareForSigningFn = (
+  signer: EvmSigner,
   populated: ethers.TransactionRequest,
-) => Promise<SignedTransactionEnvelope>;
+) => Promise<ethers.TransactionRequest>;
+
+/**
+ * A transaction prepared on one endpoint, with the signer bound to that
+ * endpoint: everything but the signature, which the caller adds once.
+ */
+export interface PreparedTransaction {
+  readonly transaction: ethers.TransactionRequest;
+  readonly signer: EvmSigner;
+}
 
 /** Optional per-endpoint transport preflight, e.g. static-network chain-id validation. */
 export type ValidateEndpointFn = (endpoint: RpcEndpoint) => Promise<void>;
@@ -159,6 +171,8 @@ export type ValidateEndpointFn = (endpoint: RpcEndpoint) => Promise<void>;
 export interface RpcFailoverClientOptions {
   /** Optional per-endpoint transport preflight, e.g. static-network chain-id validation. */
   validateEndpoint?: ValidateEndpointFn;
+  /** Signer-side preparation run by `prepareTransaction` (see `PrepareForSigningFn`). */
+  prepareForSigning?: PrepareForSigningFn;
   /** Endpoint-stickiness configuration (Mechanism B). */
   stickiness?: StickinessOptions;
   /** Full-pool retries after every endpoint reports a transient throttle. */
@@ -207,22 +221,25 @@ export class RpcFailoverClient {
   private readonly endpointOrderingEnabled: () => boolean;
   /** Optional per-endpoint transport preflight (from `options.validateEndpoint`). */
   private readonly validateEndpoint?: ValidateEndpointFn;
+  /** Signer-side preparation (from `options.prepareForSigning`). */
+  private readonly prepareForSigning: PrepareForSigningFn;
   private readonly readThrottleRetries: number;
   private readonly readThrottleBackoffMs: number;
 
   constructor(
     private readonly getEndpoints: () => RpcEndpoint[],
-    private readonly signPopulated: SignPopulatedFn,
     // The chain id (e.g. `evm:31337`) carried on every chain-RPC metric label so
     // a multi-chain node's series stay separable. A LIVE thunk so the adapter can
     // construct this client BEFORE its own `chainId` field is assigned and still
     // have the label resolve correctly at metric-record time.
     private readonly chainId: () => string,
-    // Optional transport hooks/config in ONE object (preflight + stickiness) so
-    // adding a knob never appends another positional `undefined`.
+    // Optional transport hooks/config in ONE object (preflight, signer-side
+    // preparation, stickiness) so adding a knob never appends another positional
+    // `undefined`.
     options?: RpcFailoverClientOptions,
   ) {
     this.validateEndpoint = options?.validateEndpoint;
+    this.prepareForSigning = options?.prepareForSigning ?? ((signer, populated) => signer.populateTransaction(populated));
     this.readThrottleRetries = options?.readThrottleRetries ?? 2;
     this.readThrottleBackoffMs = options?.readThrottleBackoffMs ?? 250;
     const stickiness = options?.stickiness;
@@ -426,26 +443,28 @@ export class RpcFailoverClient {
   // per-endpoint loop and returns/raises) ---
 
   /**
-   * Per-endpoint populate+sign loop, shared by the non-V10 and V10 publish/update
-   * write paths. Iterates the bare endpoints (signer + contract rebound to each),
-   * populates (gas/nonce/chainId reads, optional OOG-buffer gas estimate) + signs
-   * via the injected `signPopulated` callback, and returns the FIRST successful
-   * `{signedTx,txHash}`. Advances ONLY on `isRetryableRpcError`; a non-retryable
-   * error (a decoded revert — e.g. `TooLowAllowance`) propagates AT ONCE so the
-   * caller can react. Exhaustion → typed `RPC_ENDPOINTS_EXHAUSTED`.
+   * Per-endpoint transaction preparation, shared by every contract write.
+   * Iterates the bare endpoints (signer + contract rebound to each), populates
+   * the call (optional OOG-buffer gas estimate), then runs the signer-side
+   * preparation (`prepareForSigning`: nonce, gas and fee reads, fee cap), each
+   * step under the per-endpoint deadline, and returns the FIRST fully prepared
+   * transaction with the signer bound to that endpoint. Advances ONLY on
+   * `isRpcEndpointFailoverEligible`; a non-retryable error (a decoded revert —
+   * e.g. `TooLowAllowance`) propagates AT ONCE so the caller can react.
+   * Exhaustion → typed `RPC_ENDPOINTS_EXHAUSTED`.
    *
-   * STRICTLY pre-broadcast: signs once on the winning provider, does NOT broadcast
-   * or fire the WAL — the caller broadcasts the single returned tx, keeping the
-   * WAL checkpoint between sign and broadcast intact.
+   * It NEVER signs: the caller signs the returned transaction once, outside this
+   * loop and any retry around it, and broadcasts it (a V10 write fires its WAL
+   * checkpoint in between).
    */
-  async populateAndSign(
+  async prepareTransaction(
     contract: Contract,
     method: string,
     args: readonly unknown[],
-    signer: Wallet,
+    signer: EvmSigner,
     label: string,
     opts?: { gasLimitBufferBps?: number },
-  ): Promise<SignedTransactionEnvelope> {
+  ): Promise<PreparedTransaction> {
     const canonical = this.getEndpoints();
     // 'nonceWrite': the state machine starts a fresh-nonce populate on a backend
     // ONLY if a prior populate proved it (else canonical primary-first = the
@@ -503,7 +522,8 @@ export class RpcFailoverClient {
             // to it (it may estimate fine and apply the buffer). Only on the LAST
             // provider — or for a non-retryable estimate error, where failover
             // can't help — fall back to ethers' own unbuffered estimate during
-            // signing, leaving a breadcrumb so a recurring OOG isn't a mystery.
+            // the signer-side preparation, leaving a breadcrumb so a recurring
+            // OOG isn't a mystery.
             const hasMoreProviders = i < attempts.length - 1;
             if (isRpcEndpointFailoverEligible(estErr) && hasMoreProviders) {
               throw estErr;
@@ -515,17 +535,17 @@ export class RpcFailoverClient {
             );
           }
         }
-        const signed = await withRpcRequestTimeout(
+        const transaction = await withRpcRequestTimeout<ethers.TransactionRequest>(
           RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
-          `${label} transaction signing via RPC #${i + 1}`,
-          () => this.signPopulated(rpcSigner, populated),
+          `${label} signer population via RPC #${i + 1}`,
+          () => this.prepareForSigning(rpcSigner, populated),
         );
-        // Signed on this endpoint → 'nonceWrite' marks it WRITE-proven (nonce-safe)
-        // so it's preferred for the read-your-write ops that follow (the caller's
-        // broadcast + receipt + confirming re-reads) AND for subsequent populates.
+        // Prepared (nonce read) on this endpoint → 'nonceWrite' marks it WRITE-proven
+        // (nonce-safe) so it's preferred for the read-your-write ops that follow (the
+        // caller's broadcast + receipt + confirming re-reads) AND for subsequent populates.
         attempt.recordSuccess();
         noteRpcServed(`${label} preparation`, endpoint.rpcUrl, { mode: 'read', key: this.servedWriteKey('tx-preparation') });
-        return signed;
+        return { transaction, signer: rpcSigner };
       } catch (err) {
         if (!isRpcEndpointFailoverEligible(err)) throw err;
         lastRetryable = err;
@@ -547,7 +567,7 @@ export class RpcFailoverClient {
       ? hostOnlyRpcText(errorMessage(lastRetryable))
       : `${label} transaction preparation failed on all configured RPC endpoints ` +
         `(${canonical.map((e) => rpcHost(e.rpcUrl)).join(', ')}): ${hostOnlyRpcText(errorMessage(lastRetryable))}`;
-    // Populate+sign exhausted every endpoint. This is the PREPARE phase
+    // Preparation exhausted every endpoint. This is the PREPARE phase
     // (populateTransaction / eth_estimateGas), NOT the broadcast — label it
     // eth_estimateGas so it doesn't collide with the genuine
     // eth_sendRawTransaction failover counter in the broadcast loop.
@@ -936,7 +956,7 @@ export class RpcFailoverClient {
    * `as Contract` recovers the dynamic-method index signature ethers'
    * `BaseContract.connect` drops.
    */
-  private rebindContract(contract: Contract, runner: JsonRpcProvider | Wallet): Contract {
+  private rebindContract(contract: Contract, runner: JsonRpcProvider | EvmSigner): Contract {
     return contract.connect(runner) as Contract;
   }
 
@@ -957,8 +977,8 @@ export class RpcFailoverClient {
     );
   }
 
-  /** Rebind a SIGNER to `provider` for one per-endpoint populate+sign attempt. */
-  private rebindSigner(signer: Wallet, provider: JsonRpcProvider): Wallet {
+  /** Rebind a SIGNER to `provider` for one per-endpoint preparation attempt. */
+  private rebindSigner(signer: EvmSigner, provider: JsonRpcProvider): EvmSigner {
     return signer.connect(provider);
   }
 }

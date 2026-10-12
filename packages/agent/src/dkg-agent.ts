@@ -120,7 +120,7 @@ import {
 export type { DiscoverContextGraphsFromChainOptions } from './context-graph-discovery-options.js';
 import { awaitRfc64LateLegacySwmBoundaryAdmissionV1, prepareRfc64LateLegacySwmBoundaryV1 } from
   './rfc64/legacy-swm-boundary-v1.js';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, withRpcRequestContext, type EVMAdapterConfig, type ChainAdapter, type ChainEventLogBinding, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, withRpcRequestContext, type ChainAdapter, type ChainEventLogBinding, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -166,6 +166,8 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+import { constructConfiguredChainAdapter } from './configured-chain-adapter.js';
+import { signsThroughExternalSigner } from './external-author-signing.js';
 import {
   prepareAssertionPromote,
   translateLegacySwmRetirementFence,
@@ -722,55 +724,6 @@ function normalizeStorageAckConfig(config: DKGAgentConfig): StorageAckNormalized
     ...rest,
     storageAckTiming: timing,
   };
-}
-
-function constructConfiguredChainAdapter(
-  config: StorageAckNormalizedDKGAgentConfig,
-  contextGraphAuthorityIndexBootstrap?: EVMAdapterConfig['contextGraphAuthorityIndexBootstrap'],
-): Readonly<{ chain: ChainAdapter; operationalKeys: string[] | undefined }> {
-  let operationalKeys = config.chainConfig?.operationalKeys;
-  if (config.chainAdapter) {
-    const chain = config.chainAdapter;
-    if (!operationalKeys?.length && typeof (chain as any).getOperationalPrivateKey === 'function') {
-      operationalKeys = [(chain as any).getOperationalPrivateKey()];
-    }
-    return { chain, operationalKeys };
-  }
-  if (config.chainConfig && operationalKeys?.length) {
-    const evmConfigBase = {
-      rpcUrl: config.chainConfig.rpcUrl,
-      rpcUrls: config.chainConfig.rpcUrls,
-      rpcRequestAdmission: config.chainConfig.rpcRequestAdmission,
-      walletRpcUrls: config.chainConfig.walletRpcUrls,
-      privateKey: operationalKeys[0],
-      additionalKeys: operationalKeys.slice(1),
-      hubAddress: config.chainConfig.hubAddress,
-      tokenAddress: config.chainConfig.tokenAddress,
-      chainId: config.chainConfig.chainId,
-      receiptTimeoutMs: config.chainConfig.receiptTimeoutMs,
-      finalityConfirmations: config.chainConfig.finalityConfirmations,
-      indexTickMs: config.chainConfig.indexTickMs,
-      boundedAuthorityReads: config.chainConfig.boundedAuthorityReads,
-      maxFeePerGasWei: config.chainConfig.maxFeePerGasWei,
-      approvalPolicy: config.chainConfig.approvalPolicy,
-      cgRegistryScanPageSize: config.chainConfig.cgRegistryScanPageSize,
-      minPublisherNativeWei: config.chainConfig.minPublisherNativeWei,
-      minPublisherTracWei: config.chainConfig.minPublisherTracWei,
-      contextGraphRegistryScanCursorStore: config.contextGraphRegistryScanCursorStore,
-      localContextGraphAuthorityHistoryStore: config.localContextGraphAuthorityHistoryStore,
-      localContextGraphAuthorityIndexStore: config.localContextGraphAuthorityIndexStore,
-      // THE one log. Only this adapter is given the store, so only this
-      // adapter owns a tick; every other adapter in the process reads the
-      // binding it publishes.
-      chainEventLogStore: config.chainEventLogStore,
-      contextGraphAuthorityIndexBootstrap,
-    };
-    const chain = config.chainConfig.adminPrivateKey
-      ? new EVMChainAdapter({ ...evmConfigBase, adminPrivateKey: config.chainConfig.adminPrivateKey })
-      : new EVMChainAdapter({ ...evmConfigBase, allowNoAdminSigner: true });
-    return { chain, operationalKeys };
-  }
-  return { chain: new NoChainAdapter(), operationalKeys };
 }
 
 /**
@@ -1590,6 +1543,10 @@ export class DKGAgent extends DKGAgentBase {
       eventBus,
       keypair,
       publisherPrivateKey: useLegacyAdapterOperationalKeyFallback ? legacyAdapterOperationalKey : undefined,
+      // The configured default author when the node's wallets sign externally too, as its default agent
+      // is then; without one, the publisher never lets a paying wallet author. With local wallets the
+      // node's own wallet authors what it publishes without a selected agent, like its default agent.
+      authorSigner: signsThroughExternalSigner(chain) ? config.authorSigners?.defaultAuthor : undefined,
       publisherAddress: config.publisherAddress,
       publisherAddressResolver: config.publisherAddress || useLegacyAdapterOperationalKeyFallback
         ? undefined

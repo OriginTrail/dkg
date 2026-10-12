@@ -56,7 +56,7 @@ import {
   resolveContextGraphAuthorityIndexTickMs,
   resolveFinalityConfirmations,
   resolveReceiptTimeoutMs,
-  type ApprovalPolicy,
+  type ApprovalPolicy, type ChainSignerSettings,
   type RpcRequestGovernorPolicyInput,
 } from '@origintrail-official/dkg-chain';
 import { runtimeAssetRoots } from './runtime-assets.js';
@@ -356,7 +356,7 @@ export interface ApprovalPolicyConfig {
 
 export type ApprovalPolicyConfigInput = ApprovalPolicyConfig | ApprovalPolicyMode;
 
-export interface ChainConfig {
+export interface ChainConfig extends ChainSignerSettings {
   /** 'evm' for real blockchain, omit or 'mock' for in-memory (testing only) */
   type: 'evm' | 'mock';
   /** JSON-RPC endpoint URL */

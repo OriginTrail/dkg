@@ -37,6 +37,16 @@ export async function bindAndSubscribePublicContextGraph(
   contextGraphId: string,
   onChainId: string,
 ): Promise<void> {
+  await bindPublicContextGraph(node, contextGraphId, onChainId);
+  node.subscribeToContextGraph(contextGraphId);
+}
+
+/** Bind a local label to its public on-chain CG without subscribing to it. */
+export async function bindPublicContextGraph(
+  node: PublishProtocolAgent,
+  contextGraphId: string,
+  onChainId: string,
+): Promise<void> {
   // Role-aware activation fails closed until the local label is bound to the
   // live public on-chain CG. Protocol tests bind deterministically instead of
   // racing background ontology discovery before subscribing replicas.
@@ -46,7 +56,6 @@ export async function bindAndSubscribePublicContextGraph(
     object: `"${onChainId}"`,
     graph: contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
   }]);
-  node.subscribeToContextGraph(contextGraphId);
 }
 
 export async function pollUntil<T>(

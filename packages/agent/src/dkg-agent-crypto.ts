@@ -263,6 +263,7 @@ import {
   type KeystoreEntry,
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
+import { externalAuthorGossipSigner, localGossipSigner, signGossipEnvelopeInTime, type WorkspaceGossipSigner } from './external-author-signing.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
@@ -3709,13 +3710,15 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
 
   async resolveWorkspaceGossipSigningAgent(this: DKGAgent,
     contextGraphId: string,
-  ): Promise<(AgentKeyRecord & { privateKey: string }) | null> {
+  ): Promise<WorkspaceGossipSigner | null> {
     const authority = await withRpcUsageSite(
       CG_AUTH_RPC_SITES.signer,
       () => this.resolveContextGraphAgentGateAuthority(contextGraphId),
     );
     if (authority.kind === 'ungated') {
-      return this.getWorkspaceGossipSigningAgent();
+      const local = this.getWorkspaceGossipSigningAgent();
+      if (local) return localGossipSigner(local.agentAddress, local.privateKey);
+      return (await externalAuthorGossipSigner(this.config?.authorSigners, this.localAgents.values(), { preferred: this.defaultAgentAddress })) ?? null;
     }
     if (authority.kind === 'unavailable') {
       const message =
@@ -3736,9 +3739,11 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     const allowedSet = new Set(allowedAgents.map((agent) => agent.toLowerCase()));
     for (const record of this.localAgents.values()) {
       if (record.privateKey && allowedSet.has(record.agentAddress.toLowerCase())) {
-        return { ...record, privateKey: record.privateKey };
+        return localGossipSigner(record.agentAddress, record.privateKey);
       }
     }
+    const external = await externalAuthorGossipSigner(this.config?.authorSigners, this.localAgents.values(), { allowed: allowedSet });
+    if (external) return external;
 
     throw new Error(`Cannot gossip SWM write for agent-gated context graph "${contextGraphId}": no local allowed signing agent key`);
   }
@@ -3746,7 +3751,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async encodeWorkspaceGossipMessage(this: DKGAgent,
     contextGraphId: string,
     message: Uint8Array,
-    resolvedSigner?: (AgentKeyRecord & { privateKey: string }) | null,
+    resolvedSigner?: WorkspaceGossipSigner | null,
   ): Promise<Uint8Array> {
     const signer = resolvedSigner === undefined
       ? await this.resolveWorkspaceGossipSigningAgent(contextGraphId)
@@ -3763,7 +3768,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       timestamp,
       payload,
     );
-    const signature = await new ethers.Wallet(signer.privateKey).signMessage(signingPayload);
+    const signature = await signGossipEnvelopeInTime(signer, signingPayload, timestamp);
     return encodeGossipEnvelope({
       version: GOSSIP_ENVELOPE_VERSION,
       type: GOSSIP_TYPE_WORKSPACE_PUBLISH,

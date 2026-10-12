@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import {
   createPromoteRetryableFailure,
+  createResolveCurrentWorkspaceGossipPayload,
   DKGPublisher,
   getPromoteFailureDisposition,
 } from '@origintrail-official/dkg-publisher';
@@ -112,10 +113,10 @@ describe('DKGAgent assertion promote boundary', () => {
           ...(options.allowedPeers === undefined ? {} : { allowedPeers: ['peer-a'] }),
         },
       );
-      const message = new Uint8Array([1, 2, 3]);
-      await expect(assertionPromote.mock.calls[0]?.[3]?.confirmBeforeCommit?.(message))
+      const payload = createResolveCurrentWorkspaceGossipPayload(new Uint8Array([1, 2, 3]));
+      await expect(assertionPromote.mock.calls[0]?.[3]?.confirmBeforeCommit?.(payload.message, payload))
         .resolves.toEqual({ applied: true });
-      expect(confirmer).toHaveBeenCalledExactlyOnceWith(message);
+      expect(confirmer).toHaveBeenCalledExactlyOnceWith(payload.message, payload);
       if (options.allowedPeers !== undefined) {
         expect(assertionPromote.mock.calls[0]?.[3]?.allowedPeers).not.toBe(options.allowedPeers);
       }

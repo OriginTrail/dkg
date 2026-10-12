@@ -12,12 +12,12 @@
  * against (AC-4 pins that equivalence). Deterministic: injected `now` (no fake
  * timers) + bare recorder doubles, so we assert TRY-ORDER via call counts, not
  * wall-clock. The shared transport-double helpers (`recorder`, `makeClient`,
- * `retryable429`, `NEVER_SIGN`) come from `./rpc-failover-test-helpers.js`.
+ * `retryable429`, `NEVER_PREPARE`) come from `./rpc-failover-test-helpers.js`.
  */
 import { describe, it, expect, afterEach } from 'vitest';
-import { RpcFailoverClient, type SignPopulatedFn } from '../src/rpc-failover-client.js';
+import { RpcFailoverClient } from '../src/rpc-failover-client.js';
 import { _resetRpcFailoverStatsForTest, getRpcFailoverStats } from '../src/rpc-failover-log.js';
-import { recorder, retryable429, NEVER_SIGN, makeClient } from './rpc-failover-test-helpers.js';
+import { recorder, retryable429, NEVER_PREPARE, makeClient } from './rpc-failover-test-helpers.js';
 
 afterEach(() => { _resetRpcFailoverStatsForTest(); });
 
@@ -38,7 +38,7 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
   it('AC-1: after a failover the NEXT read tries the last-good backend FIRST (primary not re-probed)', async () => {
     const primary = { read: readSeq(() => retryable429()) }; // always 429
     const backup = { read: readSeq(() => 'BACKUP') };        // always ok
-    const client = makeClient([primary, backup], STICKY_URLS, NEVER_SIGN, { enabled: true });
+    const client = makeClient([primary, backup], STICKY_URLS, NEVER_PREPARE, { enabled: true });
 
     expect(await client.read('r', (p: any) => p.read())).toBe('BACKUP'); // op1: fail over → establish preferred=backup
     expect(primary.read.calls).toHaveLength(1);
@@ -52,7 +52,7 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
   it('AC-4: kill-switch (enabled:false) reproduces index-0 — op2 re-probes the primary every call', async () => {
     const primary = { read: readSeq(() => retryable429()) };
     const backup = { read: readSeq(() => 'BACKUP') };
-    const client = makeClient([primary, backup], STICKY_URLS, NEVER_SIGN, { enabled: false });
+    const client = makeClient([primary, backup], STICKY_URLS, NEVER_PREPARE, { enabled: false });
 
     expect(await client.read('r', (p: any) => p.read())).toBe('BACKUP');
     expect(await client.read('r', (p: any) => p.read())).toBe('BACKUP');
@@ -70,7 +70,7 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
       broadcastTransaction: recorder(async () => undefined),                  // backup broadcasts ok
       getTransactionReceipt: recorder(async () => receipt),                   // ...but backup is preferred first
     };
-    const client = makeClient([primary, backup], STICKY_URLS, NEVER_SIGN, { enabled: true });
+    const client = makeClient([primary, backup], STICKY_URLS, NEVER_PREPARE, { enabled: true });
 
     await client.broadcast('0xsigned', '0xhash', 'w'); // primary 429 → backup ok → preferred := backup
     expect(primary.broadcastTransaction.calls).toHaveLength(1);
@@ -85,7 +85,7 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     let clock = 0;
     const primary = { read: readSeq(() => retryable429()) }; // stays down the whole test
     const backup = { read: readSeq(() => 'BACKUP') };
-    const client = makeClient([primary, backup], STICKY_URLS, NEVER_SIGN, { enabled: true, ttlMs: 30_000, now: () => clock });
+    const client = makeClient([primary, backup], STICKY_URLS, NEVER_PREPARE, { enabled: true, ttlMs: 30_000, now: () => clock });
 
     clock = 0;      await client.read('r', (p: any) => p.read()); // op1: establish, arm due=30_000
     clock = 10_000; await client.read('r', (p: any) => p.read()); // within TTL → backup first
@@ -108,7 +108,7 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     // primary: 429 on call 1 (establish), healthy from call 2 (the re-probe onward)
     const primary = { read: readSeq((n) => (n === 1 ? retryable429() : 'PRIMARY')) };
     const backup = { read: readSeq(() => 'BACKUP') };
-    const client = makeClient([primary, backup], STICKY_URLS, NEVER_SIGN, { enabled: true, ttlMs: 30_000, now: () => clock });
+    const client = makeClient([primary, backup], STICKY_URLS, NEVER_PREPARE, { enabled: true, ttlMs: 30_000, now: () => clock });
 
     clock = 0;      expect(await client.read('r', (p: any) => p.read())).toBe('BACKUP');  // establish preferred=backup
     clock = 35_000; expect(await client.read('r', (p: any) => p.read())).toBe('PRIMARY'); // re-probe → primary ok → CLEAR
@@ -119,7 +119,7 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
 
   it('AC-5: a single-RPC client never establishes a preferred (nothing to fail over to)', async () => {
     const only = { read: readSeq(() => 'ONLY') };
-    const client = makeClient([only], ['https://only.example'], NEVER_SIGN, { enabled: true });
+    const client = makeClient([only], ['https://only.example'], NEVER_PREPARE, { enabled: true });
 
     await client.read('r', (p: any) => p.read());
     await client.read('r', (p: any) => p.read());
@@ -131,7 +131,7 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     // primary: 429 on call 1 (establish backup), healthy afterwards
     const primary = { read: readSeq((n) => (n === 1 ? retryable429() : 'PRIMARY')) };
     const backup = { read: readSeq(() => 'BACKUP') };
-    const client = makeClient([primary, backup], STICKY_URLS, NEVER_SIGN, { enabled: true });
+    const client = makeClient([primary, backup], STICKY_URLS, NEVER_PREPARE, { enabled: true });
 
     expect(await client.read('r', (p: any) => p.read())).toBe('BACKUP'); // op1: establish preferred=backup
 
@@ -151,7 +151,7 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     const primary = { read: recorder(async () => { order.push('primary'); throw retryable429(); }) };
     let backupN = 0;
     const backup = { read: recorder(async () => { order.push('backup'); backupN += 1; if (backupN === 1) return 'BACKUP'; throw retryable429(); }) };
-    const client = makeClient([primary, backup], STICKY_URLS, NEVER_SIGN, { enabled: true });
+    const client = makeClient([primary, backup], STICKY_URLS, NEVER_PREPARE, { enabled: true });
 
     expect(await client.read('r', (p: any) => p.read())).toBe('BACKUP'); // op1 canonical: primary 429 → backup ok → preferred=backup
     expect(order).toEqual(['primary', 'backup']);
@@ -169,7 +169,7 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     // Establish preferred=backup via a read failover.
     const primary = { read: readSeq((n) => (n === 1 ? retryable429() : 'PRIMARY')), getTransactionReceipt: recorder(async () => receipt) };
     const backup = { read: readSeq(() => 'BACKUP'), getTransactionReceipt: recorder(async () => null) };
-    const client = makeClient([primary, backup], STICKY_URLS, NEVER_SIGN, { enabled: true });
+    const client = makeClient([primary, backup], STICKY_URLS, NEVER_PREPARE, { enabled: true });
 
     expect(await client.read('r', (p: any) => p.read())).toBe('BACKUP'); // establish preferred=backup
 
@@ -189,7 +189,7 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     const primary = { read: readSeq((n) => (n === 1 ? retryable429() : 'PRIMARY')) };
     // backup: ok on op1 (establish), then FAILS (429) from op2 on — a hanging/erroring backup.
     const backup = { read: readSeq((n) => (n === 1 ? 'BACKUP' : retryable429())) };
-    const client = makeClient([primary, backup], STICKY_URLS, NEVER_SIGN, { enabled: true });
+    const client = makeClient([primary, backup], STICKY_URLS, NEVER_PREPARE, { enabled: true });
 
     expect(await client.read('r', (p: any) => p.read())).toBe('BACKUP'); // op1: establish preferred=backup
 
@@ -207,12 +207,12 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     let clock = 0;
     const p0 = {}; const p1 = {};
     const populateOrder: string[] = [];
-    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
+    const prepareForSigning = recorder(async (_s: unknown, pop: any) => ({ ...pop, nonce: 7 }));
     const contract = { connect: (s: any) => ({ doWrite: { populateTransaction: () => { const w = s.boundTo === p0 ? 'primary' : 'backup'; populateOrder.push(w); return w === 'primary' ? Promise.reject(retryable429()) : Promise.resolve({ to: '0xTO', data: '0x' }); } } }) } as any;
-    const client = makeClient([p0, p1], STICKY_URLS, signPopulated as SignPopulatedFn, { enabled: true, ttlMs: 30_000, now: () => clock });
+    const client = makeClient([p0, p1], STICKY_URLS, prepareForSigning, { enabled: true, ttlMs: 30_000, now: () => clock });
 
     clock = 0;
-    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w'); // establish write-proven backup
+    await client.prepareTransaction(contract, 'doWrite', [], makeSigner(), 'w'); // establish write-proven backup
     expect(populateOrder).toEqual(['primary', 'backup']);
 
     // Past the TTL: a READ re-probe would go canonical, but a nonce-critical populate
@@ -220,7 +220,7 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     // the write-proven backend.
     clock = 40_000;
     populateOrder.length = 0;
-    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w');
+    await client.prepareTransaction(contract, 'doWrite', [], makeSigner(), 'w');
     expect(populateOrder).toEqual(['backup']); // backup tried FIRST — no primary re-probe. (Bug: ['primary','backup'].)
   });
 
@@ -228,21 +228,21 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     const p0 = { read: readSeq(() => retryable429()) };
     const p1 = { read: readSeq(() => 'BACKUP') };
     const populateOrder: string[] = [];
-    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
+    const prepareForSigning = recorder(async (_s: unknown, pop: any) => ({ ...pop, nonce: 7 }));
     // primary populate 429s, backup populate ok (so a populate proves the backup).
     const contract = { connect: (s: any) => ({ doWrite: { populateTransaction: () => { const w = s.boundTo === p0 ? 'primary' : 'backup'; populateOrder.push(w); return w === 'primary' ? Promise.reject(retryable429()) : Promise.resolve({ to: '0xTO', data: '0x' }); } } }) } as any;
-    const client = makeClient([p0, p1], STICKY_URLS, signPopulated as SignPopulatedFn, { enabled: true });
+    const client = makeClient([p0, p1], STICKY_URLS, prepareForSigning, { enabled: true });
 
     expect(await client.read('r', (p: any) => p.read())).toBe('BACKUP'); // establish preferred=backup, source=READ
 
     // populate #1: source=read → nonceWrite won't trust a read-only backend's nonce →
     // canonical → primary 429 → backup populates → UPGRADES the preference read→write.
-    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w');
+    await client.prepareTransaction(contract, 'doWrite', [], makeSigner(), 'w');
     expect(populateOrder).toEqual(['primary', 'backup']);
 
     // populate #2: now write-proven → sticks to the backup first (proves the upgrade).
     populateOrder.length = 0;
-    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w');
+    await client.prepareTransaction(contract, 'doWrite', [], makeSigner(), 'w');
     expect(populateOrder).toEqual(['backup']);
   });
 
@@ -251,7 +251,7 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     const p0: any = { getTransactionReceipt: recorder(async () => receipt) }; // primary HAS the receipt
     const p1: any = { getTransactionReceipt: recorder(async () => null) };    // write-proven backup: benign null (lagging, NOT a failure)
     const populateOrder: string[] = [];
-    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
+    const prepareForSigning = recorder(async (_s: unknown, pop: any) => ({ ...pop, nonce: 7 }));
     let primaryPopN = 0;
     const contract = { connect: (s: any) => ({ doWrite: { populateTransaction: () => {
       const which = s.boundTo === p0 ? 'primary' : 'backup';
@@ -259,9 +259,9 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
       if (which === 'primary') { primaryPopN += 1; if (primaryPopN === 1) return Promise.reject(retryable429()); }
       return Promise.resolve({ to: '0xTO', data: '0x' });
     } } }) } as any;
-    const client = makeClient([p0, p1], STICKY_URLS, signPopulated as SignPopulatedFn, { enabled: true });
+    const client = makeClient([p0, p1], STICKY_URLS, prepareForSigning, { enabled: true });
 
-    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w'); // establish WRITE-proven backup (primary 429 → backup)
+    await client.prepareTransaction(contract, 'doWrite', [], makeSigner(), 'w'); // establish WRITE-proven backup (primary 429 → backup)
     expect(populateOrder).toEqual(['primary', 'backup']);
 
     // getReceipt: the write-proven backup returns null (benign — NOT a failure, so
@@ -272,7 +272,7 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     expect(p0.getTransactionReceipt.calls).toHaveLength(1); // primary served
 
     populateOrder.length = 0;
-    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w');
+    await client.prepareTransaction(contract, 'doWrite', [], makeSigner(), 'w');
     // Downgraded → nonceWrite re-derives from CANONICAL (primary first). Without the
     // downgrade branch this would be ['backup'] (still write-proven).
     expect(populateOrder).toEqual(['primary']);
@@ -282,7 +282,7 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     const order: string[] = [];
     const primary = { read: recorder(async () => { order.push('primary'); throw retryable429(); }) };
     const backup = { read: recorder(async () => { order.push('backup'); return 'BACKUP'; }) };
-    const client = makeClient([primary, backup], STICKY_URLS, NEVER_SIGN, { enabled: true });
+    const client = makeClient([primary, backup], STICKY_URLS, NEVER_PREPARE, { enabled: true });
 
     // Transparent read from a CLEAN state that fails over primary→backup must NOT
     // establish a sticky preference (else background tip/poller reads would silently
@@ -300,7 +300,7 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     const primary = { read: readSeq((n) => (n === 1 ? retryable429() : 'PRIMARY')) };
     // backup: ok on op1 (establish), a benign null on op2, ok on op3.
     const backup = { read: readSeq((n) => (n === 2 ? null : 'BACKUP')) };
-    const client = makeClient([primary, backup], STICKY_URLS, NEVER_SIGN, { enabled: true });
+    const client = makeClient([primary, backup], STICKY_URLS, NEVER_PREPARE, { enabled: true });
 
     expect(await client.read('r', (p: any) => p.read())).toBe('BACKUP'); // establish preferred=backup
     const before = getRpcFailoverStats();
@@ -323,7 +323,7 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     const knownTxError = () => new Error('already known');
     const primary = { broadcastTransaction: recorder(async () => { throw retryable429(); }), read: recorder(async () => 'PRIMARY') };
     const backup = { broadcastTransaction: recorder(async () => { throw knownTxError(); }), read: recorder(async () => 'BACKUP') };
-    const client = makeClient([primary, backup], STICKY_URLS, NEVER_SIGN, { enabled: true });
+    const client = makeClient([primary, backup], STICKY_URLS, NEVER_PREPARE, { enabled: true });
 
     // primary 429 → backup returns "already known" (idempotent success) → the backup
     // is where the tx is known → it establishes the preference, same as a real send.
@@ -338,17 +338,17 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     let clock = 0;
     const p0: any = {}; const p1: any = {};
     const populateOrder: string[] = [];
-    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
+    const prepareForSigning = recorder(async (_s: unknown, pop: any) => ({ ...pop, nonce: 7 }));
     // populate: primary 429s, backup ok → write-proven backup.
     const contract = { connect: (s: any) => ({ doWrite: { populateTransaction: () => { const w = s.boundTo === p0 ? 'primary' : 'backup'; populateOrder.push(w); return w === 'primary' ? Promise.reject(retryable429()) : Promise.resolve({ to: '0xTO', data: '0x' }); } } }) } as any;
     // broadcast: primary throws a NON-RETRYABLE nonce error (would terminate the loop if tried first); backup ok.
     const nonceTooHigh = () => { const e: any = new Error('nonce too high'); e.code = 'CALL_EXCEPTION'; return e; };
     p0.broadcastTransaction = recorder(async () => { throw nonceTooHigh(); });
     p1.broadcastTransaction = recorder(async () => undefined);
-    const client = makeClient([p0, p1], STICKY_URLS, signPopulated as SignPopulatedFn, { enabled: true, ttlMs: 30_000, now: () => clock });
+    const client = makeClient([p0, p1], STICKY_URLS, prepareForSigning, { enabled: true, ttlMs: 30_000, now: () => clock });
 
     clock = 0;
-    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w'); // establish write-proven backup
+    await client.prepareTransaction(contract, 'doWrite', [], makeSigner(), 'w'); // establish write-proven backup
     expect(populateOrder).toEqual(['primary', 'backup']);
 
     // Past the TTL, broadcast the backup-signed tx. It must try the BACKUP first
@@ -382,32 +382,32 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
         },
       }),
     } as any;
-    const signPopulated = recorder(async (_boundSigner: unknown, populated: any) => {
+    const prepareForSigning = recorder(async (_boundSigner: unknown, populated: any) => {
       signedNonces.push(populated.nonce);
-      return { signedTx: `0xS${populated.nonce}`, txHash: `0xH${populated.nonce}` };
+      return populated;
     });
-    const client = makeClient([p0, p1], STICKY_URLS, signPopulated as SignPopulatedFn, { enabled: true });
+    const client = makeClient([p0, p1], STICKY_URLS, prepareForSigning, { enabled: true });
 
-    const first = await client.populateAndSign(contract, 'doWrite', [], signer, 'w');
-    await client.broadcast(first.signedTx, first.txHash, 'w');
+    const first = await client.prepareTransaction(contract, 'doWrite', [], signer, 'w');
+    await client.broadcast(`0xS${first.transaction.nonce}`, `0xH${first.transaction.nonce}`, 'w');
     pendingNonce.set(p1, 1);
 
-    await client.populateAndSign(contract, 'doWrite', [], signer, 'w');
+    await client.prepareTransaction(contract, 'doWrite', [], signer, 'w');
     expect(populatedBy).toEqual(['primary', 'backup']);
     expect(signedNonces).toEqual([0, 1]);
   });
 
-  it('AC-10: a populateAndSign failover primes the preferred for the following read (the 4th loop establishes too)', async () => {
+  it('AC-10: a prepareTransaction failover primes the preferred for the following read (the 4th loop establishes too)', async () => {
     const p0 = { read: recorder(async () => { throw retryable429(); }) };
     const p1 = { read: recorder(async () => 'BACKUP-READ') };
-    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
+    const prepareForSigning = recorder(async (_s: unknown, pop: any) => ({ ...pop, nonce: 7 }));
     const makeSigner = () => ({ address: '0x' + 'ab'.repeat(20), connect: (p: unknown) => ({ address: '0x' + 'ab'.repeat(20), boundTo: p }) }) as any;
     // populateTransaction 429s when the signer is bound to p0 (primary), succeeds on p1 (backup).
     const contract = { connect: (s: any) => ({ doWrite: { populateTransaction: () => (s.boundTo === p0 ? Promise.reject(retryable429()) : Promise.resolve({ to: '0xTO', data: '0x' })) } }) } as any;
-    const client = makeClient([p0, p1], STICKY_URLS, signPopulated as SignPopulatedFn, { enabled: true });
+    const client = makeClient([p0, p1], STICKY_URLS, prepareForSigning, { enabled: true });
 
-    await expect(client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w'))
-      .resolves.toEqual({ signedTx: '0xS', txHash: '0xH' }); // primary populate 429 → backup populates+signs → preferred=backup
+    await expect(client.prepareTransaction(contract, 'doWrite', [], makeSigner(), 'w'))
+      .resolves.toMatchObject({ transaction: { to: '0xTO', nonce: 7 } }); // primary populate 429 → backup prepares → preferred=backup
     expect(getRpcFailoverStats().preferredEstablishments).toBe(1);
 
     // The subsequent read prefers the backup the write signed on → primary read NOT probed.
@@ -419,7 +419,7 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
   it('AC-11: a null (not-yet-mined) receipt does NOT establish a preference', async () => {
     const primary = { getTransactionReceipt: recorder(async () => { throw retryable429(); }) };
     const backup = { getTransactionReceipt: recorder(async () => null) }; // responds, but no receipt yet
-    const client = makeClient([primary, backup], STICKY_URLS, NEVER_SIGN, { enabled: true });
+    const client = makeClient([primary, backup], STICKY_URLS, NEVER_PREPARE, { enabled: true });
 
     await expect(client.getReceipt('0xhash')).resolves.toBeNull();
     // A null tick has no single winning endpoint (both were visited; neither had
@@ -434,7 +434,6 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     let providers: any[] = [{ read: readSeq(() => retryable429()) }, { read: readSeq(() => 'BACKUP') }];
     const client = new RpcFailoverClient(
       () => providers.map((p, i) => ({ provider: p as any, rpcUrl: urls[i] })),
-      NEVER_SIGN,
       () => 'evm:31337',
       { stickiness: { enabled: true } },
     );
@@ -455,7 +454,7 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
   it('AC-8: establishing a preferred emits a host-only stickiness log + increments the counter', async () => {
     const primary = { read: readSeq(() => retryable429()) };
     const backup = { read: readSeq(() => 'BACKUP') };
-    const client = makeClient([primary, backup], STICKY_URLS, NEVER_SIGN, { enabled: true });
+    const client = makeClient([primary, backup], STICKY_URLS, NEVER_PREPARE, { enabled: true });
 
     const warns: string[] = [];
     const origWarn = console.warn;
@@ -479,14 +478,14 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     const p0 = { read: readSeq(() => retryable429()) };  // primary read 429s → establishes backup as READ preferred
     const p1 = { read: readSeq(() => 'BACKUP') };
     const populateOrder: string[] = [];
-    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
+    const prepareForSigning = recorder(async (_s: unknown, pop: any) => ({ ...pop, nonce: 7 }));
     // Both endpoints can populate; record which the signer was bound to.
     const contract = { connect: (s: any) => ({ doWrite: { populateTransaction: () => { populateOrder.push(s.boundTo === p0 ? 'primary' : 'backup'); return Promise.resolve({ to: '0xTO', data: '0x' }); } } }) } as any;
-    const client = makeClient([p0, p1], STICKY_URLS, signPopulated as SignPopulatedFn, { enabled: true });
+    const client = makeClient([p0, p1], STICKY_URLS, prepareForSigning, { enabled: true });
 
     expect(await client.read('r', (pr: any) => pr.read())).toBe('BACKUP'); // READ establishes preferred=backup (NOT populate-proven)
 
-    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w');
+    await client.prepareTransaction(contract, 'doWrite', [], makeSigner(), 'w');
     // The nonce-critical populate STARTED on the canonical primary (the authoritative
     // nonce source), NOT the read-preferred backup — so a lagging read-preferred
     // backend can never sign a stale nonce.
@@ -496,16 +495,16 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
   it('AC-14: once a populate PROVES a backend (primary down for writes), subsequent writes stick to it (#1340, no per-write primary re-probe)', async () => {
     const p0 = {}; const p1 = {};
     const populateOrder: string[] = [];
-    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
+    const prepareForSigning = recorder(async (_s: unknown, pop: any) => ({ ...pop, nonce: 7 }));
     // primary populate always 429s (down for writes); backup populates ok.
     const contract = { connect: (s: any) => ({ doWrite: { populateTransaction: () => { const which = s.boundTo === p0 ? 'primary' : 'backup'; populateOrder.push(which); return which === 'primary' ? Promise.reject(retryable429()) : Promise.resolve({ to: '0xTO', data: '0x' }); } } }) } as any;
-    const client = makeClient([p0, p1], STICKY_URLS, signPopulated as SignPopulatedFn, { enabled: true });
+    const client = makeClient([p0, p1], STICKY_URLS, prepareForSigning, { enabled: true });
 
-    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w'); // write #1: canonical → primary 429 → backup → populate-proven
+    await client.prepareTransaction(contract, 'doWrite', [], makeSigner(), 'w'); // write #1: canonical → primary 429 → backup → populate-proven
     expect(populateOrder).toEqual(['primary', 'backup']);
 
     populateOrder.length = 0;
-    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w'); // write #2: populate-proven backend tried FIRST
+    await client.prepareTransaction(contract, 'doWrite', [], makeSigner(), 'w'); // write #2: populate-proven backend tried FIRST
     expect(populateOrder).toEqual(['backup']); // primary NOT re-probed — write stickiness preserved for #1340
   });
 
@@ -515,11 +514,11 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     const p0 = { broadcastTransaction: recorder(async () => undefined) };
     const p1 = { broadcastTransaction: recorder(async () => { throw retryable429(); }) };
     const populateOrder: string[] = [];
-    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
+    const prepareForSigning = recorder(async (_s: unknown, pop: any) => ({ ...pop, nonce: 7 }));
     const contract = { connect: (s: any) => ({ doWrite: { populateTransaction: () => { const w = s.boundTo === p0 ? 'primary' : 'backup'; populateOrder.push(w); return w === 'primary' ? Promise.reject(retryable429()) : Promise.resolve({ to: '0xTO', data: '0x' }); } } }) } as any;
-    const client = makeClient([p0, p1], STICKY_URLS, signPopulated as SignPopulatedFn, { enabled: true });
+    const client = makeClient([p0, p1], STICKY_URLS, prepareForSigning, { enabled: true });
 
-    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w'); // populate proves backup (source=write)
+    await client.prepareTransaction(contract, 'doWrite', [], makeSigner(), 'w'); // populate proves backup (source=write)
     expect(populateOrder).toEqual(['primary', 'backup']);
 
     // Broadcast tx: preferred=backup → backup FAILS → primary broadcasts as a FALLBACK.
@@ -528,7 +527,7 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     expect(p0.broadcastTransaction.calls).toHaveLength(1); // primary took over
 
     populateOrder.length = 0;
-    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w'); // next populate
+    await client.prepareTransaction(contract, 'doWrite', [], makeSigner(), 'w'); // next populate
     // The backup's nonce view is now suspect (it failed the write; the tx moved to
     // the primary), so the write-preference was downgraded → populate re-derives
     // from canonical (primary-first). Without the #A downgrade this would be ['backup'].
@@ -539,18 +538,18 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     const p0 = {};
     const p1 = { read: recorder(async () => 'BACKUP-READ') };
     const populateOrder: string[] = [];
-    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
+    const prepareForSigning = recorder(async (_s: unknown, pop: any) => ({ ...pop, nonce: 7 }));
     const contract = { connect: (s: any) => ({ doWrite: { populateTransaction: () => { const w = s.boundTo === p0 ? 'primary' : 'backup'; populateOrder.push(w); return w === 'primary' ? Promise.reject(retryable429()) : Promise.resolve({ to: '0xTO', data: '0x' }); } } }) } as any;
-    const client = makeClient([p0, p1], STICKY_URLS, signPopulated as SignPopulatedFn, { enabled: true });
+    const client = makeClient([p0, p1], STICKY_URLS, prepareForSigning, { enabled: true });
 
-    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w'); // populate proves backup (source=write)
+    await client.prepareTransaction(contract, 'doWrite', [], makeSigner(), 'w'); // populate proves backup (source=write)
     expect(populateOrder).toEqual(['primary', 'backup']);
 
     // Intervening READ served by the same preferred backend — must NOT downgrade the write-proven flag.
     expect(await client.read('r', (p: any) => p.read())).toBe('BACKUP-READ');
 
     populateOrder.length = 0;
-    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w'); // still write-proven → sticks to backup
+    await client.prepareTransaction(contract, 'doWrite', [], makeSigner(), 'w'); // still write-proven → sticks to backup
     expect(populateOrder).toEqual(['backup']); // the read did NOT reset the write-proven source
   });
 
@@ -560,7 +559,6 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     let providers: any[] = [{ read: readSeq(() => retryable429()) }, { read: readSeq(() => 'B') }];
     const client = new RpcFailoverClient(
       () => providers.map((p, i) => ({ provider: p as any, rpcUrl: urls[i] })),
-      NEVER_SIGN,
       () => 'evm:31337',
       { stickiness: { enabled: true, ttlMs: 30_000, now: () => clock } },
     );
@@ -586,7 +584,7 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     const receipt = { status: 1, hash: '0xhash' };
     const primary = { getTransactionReceipt: recorder(async () => { throw retryable429(); }), read: recorder(async () => 'P') };
     const backup = { getTransactionReceipt: recorder(async () => receipt), read: recorder(async () => 'B') };
-    const client = makeClient([primary, backup], STICKY_URLS, NEVER_SIGN, { enabled: true });
+    const client = makeClient([primary, backup], STICKY_URLS, NEVER_PREPARE, { enabled: true });
 
     // getReceipt runs as the FIRST loop: primary 429 → backup returns the receipt →
     // it (not a prior broadcast) establishes the preferred endpoint.
@@ -603,7 +601,7 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     const primary: any = { getTransactionReceipt: recorder(async () => { throw retryable429(); }) };
     const backup: any = { getTransactionReceipt: recorder(async () => receipt) };
     const populateOrder: string[] = [];
-    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
+    const prepareForSigning = recorder(async (_s: unknown, pop: any) => ({ ...pop, nonce: 7 }));
     const contract = { connect: (signer: any) => ({
       doWrite: {
         populateTransaction: async () => {
@@ -615,12 +613,12 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     const client = makeClient(
       [primary, backup],
       STICKY_URLS,
-      signPopulated as SignPopulatedFn,
+      prepareForSigning,
       { enabled: true },
     );
 
     await expect(client.getReceipt('0xhash')).resolves.toBe(receipt);
-    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'write');
+    await client.prepareTransaction(contract, 'doWrite', [], makeSigner(), 'write');
 
     expect(populateOrder).toEqual(['primary']);
   });
@@ -634,7 +632,7 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     const client = makeClient(
       [{ read: pRead }, { read: bRead }, { read: cRead }],
       ['https://p.example', 'https://b.example', 'https://c.example'],
-      NEVER_SIGN,
+      NEVER_PREPARE,
       { enabled: true, ttlMs: 30_000, now: () => clock },
     );
     clock = 0;
@@ -656,7 +654,7 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     const primaryView = recorder(async () => { n0 += 1; if (n0 === 1) throw retryable429(); return 'PRIMARY'; });
     const backupView = recorder(async () => 'BACKUP');
     const contract = { connect: (p: unknown) => (p === p0 ? { view: primaryView } : { view: backupView }) } as any;
-    const client = makeClient([p0, p1], STICKY_URLS, NEVER_SIGN, { enabled: true });
+    const client = makeClient([p0, p1], STICKY_URLS, NEVER_PREPARE, { enabled: true });
 
     expect(await client.readContract('v', contract, (c: any) => c.view())).toBe('BACKUP'); // op1: primary 429 → backup → preferred=backup
 

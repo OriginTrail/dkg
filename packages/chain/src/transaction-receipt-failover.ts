@@ -43,7 +43,6 @@ export async function waitForTransactionReceiptWithFailover(
   }));
   const receiptTransport = new RpcFailoverClient(
     () => rpcEndpoints,
-    async () => { throw new Error('receipt-only RPC transport cannot sign'); },
     () => 'direct',
     { stickiness: { enabled: false } },
   );
