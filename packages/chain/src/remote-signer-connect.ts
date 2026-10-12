@@ -60,7 +60,8 @@ export interface RemoteSigners {
    * Close the connections to the signer, once the signers are no longer used:
    * each connection once, whether payers and authors share it or not, and with
    * it those of the signers derived from these with `connect()`. Calling it
-   * again does nothing.
+   * again does nothing. The signers are not to be used afterwards: a request
+   * would connect anew, and no later call closes that connection.
    */
   destroy(): void;
 }

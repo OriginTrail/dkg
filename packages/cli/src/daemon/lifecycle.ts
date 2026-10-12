@@ -3863,9 +3863,9 @@ async function runDaemonInnerWithStartupOwnership(
         });
         if (backingStoresClosed) log("Stopped.");
       } finally {
+        await cleanupStateFiles();
         // Nothing signs any more: close the connections to an external signer.
         evmSigning.release();
-        await cleanupStateFiles();
       }
     })().catch((err: any) => {
       log(`Shutdown cleanup error: ${err?.message ?? String(err)}`);
