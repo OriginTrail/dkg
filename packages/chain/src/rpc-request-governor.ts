@@ -27,6 +27,17 @@ const AUTHORITY_PRIORITY_QUEUE_RESERVE = 4;
  */
 const BACKGROUND_AUTHORITY_MAX_PASSES = 4;
 
+/**
+ * The same bound in the foreground class: how many authority admissions in a
+ * row may pass an ordinary foreground request that has already waited the
+ * fairness grace period. An authority read answers a fail-closed check under a
+ * deadline of a few seconds and goes first for that reason. A stream of such
+ * reads that never ends must still leave a transaction its permits: without a
+ * bound the transaction waits out its own deadline behind reads that each
+ * arrived after it.
+ */
+const FOREGROUND_AUTHORITY_MAX_PASSES = 4;
+
 export interface RpcRequestGovernorPolicyInput {
   /** Total node-process RPC request rate. Defaults to 10 requests/second. */
   maxRequestsPerSecond?: number;
@@ -256,7 +267,8 @@ function zeroGovernorCounters(): MutableGovernorCounters {
  * start-up delay, which exists to spread bulk work. It still spends the
  * background bucket, yields to foreground work as any background request
  * does, and leaves bulk work that has waited a bounded share of the
- * background permits.
+ * background permits. In the foreground class it leaves ordinary requests
+ * that have waited the same bounded share of the foreground permits.
  */
 export class RpcRequestGovernor {
   /**
@@ -280,6 +292,8 @@ export class RpcRequestGovernor {
   #lastRefillMs: number;
   /** See {@link RpcRequestGovernor.#nextBackgroundWaiter}. */
   #backgroundAuthorityPasses = 0;
+  /** See {@link RpcRequestGovernor.#nextForegroundWaiter}. */
+  #foregroundAuthorityPasses = 0;
   /** Queued waiters that hold a slot of the authority reserve. */
   #authorityReserveSlotsInUse = 0;
   #timer: ReturnType<typeof setTimeout> | null = null;
@@ -538,6 +552,34 @@ export class RpcRequestGovernor {
   }
 
   /**
+   * Index of the foreground waiter the next permit goes to.
+   *
+   * Authority waiters sit at the front and go first. An ordinary waiter that
+   * has waited the fairness grace period is passed by at most
+   * {@link FOREGROUND_AUTHORITY_MAX_PASSES} authority admissions in a row,
+   * then takes a permit itself: four of every five permits stay with the
+   * authority reads for as long as they need them.
+   */
+  #nextForegroundWaiter(): number {
+    if (this.#foregroundQueue[0]?.admissionPriority !== 'authority') return 0;
+    if (this.#foregroundAuthorityPasses < FOREGROUND_AUTHORITY_MAX_PASSES) return 0;
+    const passed = this.#passedForegroundWaiter();
+    return passed < 0 ? 0 : passed;
+  }
+
+  /** Index of the first ordinary foreground waiter that has waited the fairness grace period, or -1. */
+  #passedForegroundWaiter(): number {
+    const firstOrdinary = this.#foregroundQueue.findIndex(
+      (queued) => queued.admissionPriority !== 'authority',
+    );
+    return firstOrdinary >= 0
+      && this.#clock.now() - this.#foregroundQueue[firstOrdinary]!.enqueuedAtMs
+        >= RpcRequestGovernor.BACKGROUND_FAIRNESS_GRACE_MS
+      ? firstOrdinary
+      : -1;
+  }
+
+  /**
    * Whether the background class is owed its turn past foreground work: one of
    * its waiters has waited the fairness grace period for a permit it could
    * take now. Which waiter the turn goes to is a separate question
@@ -558,6 +600,10 @@ export class RpcRequestGovernor {
       this.#backgroundAvailableTokens -= 1;
       this.#backgroundAuthorityPasses = authorityPriority && this.#passedBackgroundWaiter() >= 0
         ? this.#backgroundAuthorityPasses + 1
+        : 0;
+    } else {
+      this.#foregroundAuthorityPasses = authorityPriority && this.#passedForegroundWaiter() >= 0
+        ? this.#foregroundAuthorityPasses + 1
         : 0;
     }
     this.#window[requestClass === 'foreground' ? 'foregroundAdmitted' : 'backgroundAdmitted'] += 1;
@@ -604,7 +650,7 @@ export class RpcRequestGovernor {
       this.#resolveWaiter(this.#backgroundQueue, backgroundNext);
     }
     while (this.#foregroundQueue.length > 0 && this.#availableTokens >= 1) {
-      this.#resolveWaiter(this.#foregroundQueue);
+      this.#resolveWaiter(this.#foregroundQueue, this.#nextForegroundWaiter());
     }
     while (
       this.#foregroundQueue.length === 0
