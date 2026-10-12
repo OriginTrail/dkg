@@ -763,6 +763,10 @@ import {
   isContextGraphSubscriptionPersistenceTargetCurrent,
   projectContextGraphJoinSubscriptionRecord,
   contextGraphSubscriptionClearTargets,
+  contextGraphSubscriptionRowsEqual,
+  contextGraphSubscriptionSyncPremisesEqual,
+  continueContextGraphSubscriptionLine,
+  isContextGraphSubscriptionStoredAgain,
   retainsInactiveContextGraphBinding,
 } from './context-graph-subscription-policy.js';
 import { partitionSupersededContextGraphNamePlaceholders } from './dkg-agent-cg-name-resolution.js';
@@ -6258,6 +6262,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           operationContextGraphId,
           generation,
         ),
+      // The same subscription (not one deleted and subscribed again, whose
+      // binding generation starts over) and the same premises for a store.
+      isEquivalentSubscription: (captured, current) =>
+        isContextGraphSubscriptionStoredAgain(captured, current)
+        && contextGraphSubscriptionSyncPremisesEqual(captured, current),
       assertLifecycleCurrent,
       asAbortError: asSyncFetchAbortError,
       track: (run) => this.graphScopedStorePhysicalRuns.add(run),
@@ -6388,12 +6397,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         bindingChangedError: () => asSyncFetchAbortError(new Error(
           `Context graph binding for ${asset.contextGraphId} changed during graph-scoped store`,
         )),
-        operation: async ({
-          subscription,
-          isBindingCurrent,
-          recaptureBindingGeneration,
-          assertCurrent,
-        }): Promise<GraphScopedMaterializationOutcome> => {
+        operation: async (control): Promise<GraphScopedMaterializationOutcome> => {
+          const { isBindingCurrent, recaptureBindingGeneration, assertCurrent } = control;
           const authentication = await authenticateDurableGraphScopedAsset({
             chain: this.chain,
             asset,
@@ -6409,7 +6414,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               );
             },
           });
+          // Authentication read the chain, the asset and the row's binding. A
+          // row stored again meanwhile with the same admission and binding (a
+          // repeated subscribe, a readiness result) is the row a store started
+          // now would run under: continue under it instead of dropping the
+          // verified asset. Everything below runs under that one row.
+          control.adoptEquivalentSubscription();
           assertCurrent();
+          const subscription = control.subscription;
           const verifiedOnChainId = authentication.onChainContextGraphId;
           if (
             verifiedOnChainId
@@ -9270,10 +9282,21 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ? this.contextGraphWireId(normalizedNext.onChainHash)
       : undefined;
     const nextWireId = nextOnChainHash ?? localWireId;
-    const canonicalNext: ContextGraphSub = {
+    const nextRow: ContextGraphSub = {
       ...normalizedNext,
       ...(normalizedNext.onChainHash === nextOnChainHash ? {} : { onChainHash: nextOnChainHash }),
     };
+    // A write that changes nothing keeps the stored row. Work in flight holds
+    // that object to learn of a change, and a repeated subscribe is not one.
+    // A caller that hands the stored row itself back may have changed it in
+    // place; what it changed cannot be told, so that write is a new row.
+    const canonicalNext = previous !== undefined && next !== previous
+      && contextGraphSubscriptionRowsEqual(previous, nextRow)
+      ? previous
+      : nextRow;
+    if (previous !== undefined && canonicalNext !== previous) {
+      continueContextGraphSubscriptionLine(previous, canonicalNext);
+    }
     const retainsInactiveBinding = retainsInactiveContextGraphBinding(previous, canonicalNext);
     const bindingFacts = this.contextGraphBindingState.applySubscriptionTransition(
       contextGraphId,
@@ -9650,7 +9673,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     // Every in-flight binding continuation also captures the subscription
     // object, so deleting this numeric generation cannot revive old work if a
-    // new subscription later reuses the same local id.
+    // new subscription later reuses the same local id. A continuation that
+    // accepts a row stored over its own (the durable store) accepts no row of
+    // that new subscription: it starts a line of its own.
     this.contextGraphBindingState.delete(contextGraphId);
     return deleted;
   }

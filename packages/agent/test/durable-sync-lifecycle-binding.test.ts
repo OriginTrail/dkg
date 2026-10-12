@@ -95,6 +95,7 @@ import {
   LifecycleSyncMethods,
 } from '../src/dkg-agent-lifecycle.js';
 import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
+import { continueContextGraphSubscriptionLine } from '../src/context-graph-subscription-policy.js';
 import {
   runDurableSync,
   runDurableSyncDetailed,
@@ -2067,6 +2068,161 @@ describe('durable sync lifecycle chain binding', () => {
     expect(syncCheckpoints).toEqual(new Map([['unchanged', 17]]));
     expect(subscription).toEqual({ subscribed: true, onChainId: '14', lastReconciledOrdinal: 9 });
     expect(agentLike.subscribedContextGraphs.get(contextGraphId)).toBe(reboundSubscription);
+  });
+
+  /** What the subscription setter does when it stores `next` over the live row. */
+  function storeAgain(agent: any, next: Record<string, unknown>): void {
+    continueContextGraphSubscriptionLine(
+      agent.subscribedContextGraphs.get(contextGraphId),
+      next as never,
+    );
+    agent.subscribedContextGraphs.set(contextGraphId, next);
+  }
+
+  /**
+   * Run one graph-scoped store whose authentication waits on a chain read, and
+   * apply `whileAuthenticating` to the live rows before that read answers.
+   */
+  async function storeWithRowChangeDuringAuthentication(
+    captured: Record<string, unknown>,
+    whileAuthenticating: (agentLike: any) => void,
+  ) {
+    const root = new Uint8Array(32);
+    let releaseRoot!: () => void;
+    let markRootReadStarted!: () => void;
+    const rootReadStarted = new Promise<void>((resolve) => { markRootReadStarted = resolve; });
+    const rootGate = new Promise<void>((resolve) => { releaseRoot = resolve; });
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => {
+        markRootReadStarted();
+        await rootGate;
+        return root;
+      },
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+      getLatestMerkleRootPublisher: async () => '0x2222222222222222222222222222222222222222',
+      verifyKAUpdate: async () => ({
+        verified: true,
+        onChainMerkleRoot: root,
+        blockNumber: 123,
+        txIndex: 4,
+        merkleRootCount: 2n,
+      }),
+    } as ChainAdapter;
+    let agentLike!: any;
+    const storeGraphScopedAsset = await captureGraphScopedStore(chain, vi.fn(), {
+      onAgentLike: (created) => {
+        agentLike = created;
+        created.subscribedContextGraphs.set(contextGraphId, captured);
+        created.persistContextGraphSyncStateStrict = vi.fn(async () => {});
+      },
+    });
+    const pending = storeGraphScopedAsset(graphScopedStoreRequest(
+      graphScopedAsset(root),
+      Date.now() + 120_000,
+    ));
+    await rootReadStarted;
+    whileAuthenticating(agentLike);
+    releaseRoot();
+    return { pending, agentLike };
+  }
+
+  it('stores a durable asset whose subscription row was stored again with the same binding during authentication', async () => {
+    const captured = { subscribed: true, syncMode: 'always-on', synced: false, onChainId: '14', metaSynced: true };
+    // What a repeated subscribe or a catch-up readiness result stores: the
+    // same admission and binding, other readiness bookkeeping.
+    const storedAgain = { ...captured, sharedMemorySynced: false, lastReconciledOrdinal: 3 };
+    const { pending, agentLike } = await storeWithRowChangeDuringAuthentication(
+      captured,
+      (agent) => storeAgain(agent, storedAgain),
+    );
+
+    await expect(pending).resolves.toBe('applied');
+    expect(mockedMaterialize).toHaveBeenCalledOnce();
+    expect(agentLike.bindSubscriptionOnChainId).not.toHaveBeenCalled();
+    expect(agentLike.persistContextGraphSyncStateStrict).not.toHaveBeenCalled();
+    expect(agentLike.subscribedContextGraphs.get(contextGraphId)).toBe(storedAgain);
+    // The store keeps fencing on the row it continued under.
+    const materialization = mockedMaterialize.mock.calls[0]![0];
+    expect(materialization.isCurrent?.()).toBe(true);
+    storeAgain(agentLike, { ...storedAgain });
+    expect(materialization.isCurrent?.()).toBe(false);
+  });
+
+  it('binds the row that was stored again, not the one the store started under', async () => {
+    const captured = { subscribed: true, syncMode: 'always-on', synced: false };
+    const storedAgain = { ...captured, sharedMemorySynced: false };
+    const { pending, agentLike } = await storeWithRowChangeDuringAuthentication(
+      captured,
+      (agent) => storeAgain(agent, storedAgain),
+    );
+
+    await expect(pending).resolves.toBe('applied');
+    expect(agentLike.persistContextGraphSyncStateStrict).toHaveBeenCalledWith(
+      contextGraphId,
+      { ...storedAgain, onChainId: '14', lastReconciledOrdinal: 0 },
+      'on-chain id binding',
+      expect.any(Function),
+    );
+    expect(agentLike.bindSubscriptionOnChainId).toHaveBeenCalledOnce();
+    expect(agentLike.bindSubscriptionOnChainId.mock.calls[0]![1]).toBe(storedAgain);
+  });
+
+  it.each([
+    ['is no longer subscribed', (row: Record<string, unknown>) => ({ ...row, subscribed: false })],
+    ['became core-hosted', (row: Record<string, unknown>) => ({ ...row, coreHosted: true })],
+    ['changed its lifetime', (row: Record<string, unknown>) => ({ ...row, syncMode: 'on-demand' })],
+    ['is bound to another name commitment', (row: Record<string, unknown>) => ({ ...row, onChainHash: `0x${'ab'.repeat(32)}` })],
+    ['lost its metadata proof', (row: Record<string, unknown>) => ({ ...row, metaSynced: false })],
+    ['waits for metadata again', (row: Record<string, unknown>) => ({ ...row, pendingMeta: true })],
+    ['went away', () => undefined],
+  ] as const)('still refuses a durable asset whose row %s during authentication', async (_what, change) => {
+    const captured = { subscribed: true, syncMode: 'always-on', synced: false, onChainId: '14', metaSynced: true };
+    const { pending, agentLike } = await storeWithRowChangeDuringAuthentication(captured, (agent) => {
+      const next = change(captured);
+      if (next === undefined) agent.subscribedContextGraphs.delete(contextGraphId);
+      else storeAgain(agent, next);
+    });
+
+    await expect(pending).rejects.toMatchObject({
+      name: 'AbortError',
+      message: expect.stringContaining('changed during graph-scoped store'),
+    });
+    expect(mockedMaterialize).not.toHaveBeenCalled();
+    expect(agentLike.bindSubscriptionOnChainId).not.toHaveBeenCalled();
+    expect(agentLike.persistContextGraphSyncStateStrict).not.toHaveBeenCalled();
+  });
+
+  it('still refuses a durable asset when its subscription was deleted and subscribed again during authentication', async () => {
+    // A fresh, unbound subscription: its binding generation is 0, and it is 0
+    // again after the subscription is deleted and the graph subscribed anew.
+    const captured = { subscribed: true, syncMode: 'always-on', synced: false };
+    const { pending, agentLike } = await storeWithRowChangeDuringAuthentication(captured, (agent) => {
+      agent.subscribedContextGraphs.delete(contextGraphId);
+      agent.contextGraphBindingState.delete(contextGraphId);
+      agent.subscribedContextGraphs.set(contextGraphId, { ...captured });
+    });
+
+    await expect(pending).rejects.toMatchObject({
+      name: 'AbortError',
+      message: expect.stringContaining('changed during graph-scoped store'),
+    });
+    expect(mockedMaterialize).not.toHaveBeenCalled();
+    expect(agentLike.bindSubscriptionOnChainId).not.toHaveBeenCalled();
+    expect(agentLike.persistContextGraphSyncStateStrict).not.toHaveBeenCalled();
+  });
+
+  it('still refuses a row stored again with the same fields once its binding generation moved', async () => {
+    const captured = { subscribed: true, syncMode: 'always-on', synced: false, onChainId: '14', metaSynced: true };
+    const { pending } = await storeWithRowChangeDuringAuthentication(captured, (agent) => {
+      storeAgain(agent, { ...captured });
+      agent.contextGraphBindingState.bump(contextGraphId);
+    });
+
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect(mockedMaterialize).not.toHaveBeenCalled();
   });
 
   it('cancels and retries a hung root read within the graph deadline', async () => {
