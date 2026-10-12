@@ -670,8 +670,10 @@ report_builds after "$NEW_COMMIT" "$NEW_VERSION" \
 # the mesh a bounded time to complete and print what each node holds. It is
 # reported, not judged: a publication that cannot reach its Cores fails below
 # with the node's own message, and this line then says why.
-# What a complete mesh is: a Core holds every other node, an Edge holds every
-# Core (two Edges do not keep a connection to each other).
+# What a complete mesh is here: a Core holds every other node and an Edge holds
+# every Core. An Edge's connection to the other Edge is not required: after the
+# rolling restart of the first run both Edges held their four Cores and nothing
+# else.
 CORES=0; ROLE=()
 for n in $(seq 1 "$NUM_NODES"); do
   ROLE[$n]="$(status_field "$n" nodeRole)"
