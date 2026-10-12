@@ -335,6 +335,22 @@ interface EvmContextGraphAuthorityIndexRevisionReaderDependenciesV1 {
   readonly chainEventLogAuthority?: () => ChainEventLogAuthoritySource | undefined;
 }
 
+/**
+ * When a read may be given an answer some of its targets are absent from. One
+ * policy for both places such an answer can come from, so that they cannot
+ * drift apart: the projection the cache retained, and the log fold a refresh
+ * has just produced and fenced.
+ */
+interface IncompleteAdmissionV1 {
+  /** A retained projection: the cache's `validateIncomplete`. */
+  readonly retained: (
+    projection: ContextGraphAuthorityIndexProjection,
+    served: Readonly<{ withinTick: boolean }>,
+  ) => Promise<boolean>;
+  /** A fold of the node's own log that the refresh produced for this read. */
+  readonly freshLogFold: boolean;
+}
+
 /** Physical provider attempts outlive a cancelled caller and must be drained. */
 class EvmContextGraphAuthorityIndexRevisionReadLifecycleV1 {
   readonly #active = new Set<Promise<unknown>>();
@@ -751,15 +767,8 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       complete: boolean;
       value: T;
     }>,
-    validateIncomplete?: (
-      projection: ContextGraphAuthorityIndexProjection,
-      served: Readonly<{ withinTick: boolean }>,
-    ) => Promise<boolean>,
-    /**
-     * The reader takes a log fold its targets are absent from as its answer.
-     * See {@link logFoldAnswersNameAbsence}.
-     */
-    logFoldAnswersIncomplete = false,
+    /** When an answer some targets are absent from may be given; see {@link IncompleteAdmissionV1}. */
+    incomplete?: IncompleteAdmissionV1,
   ): Promise<T> => {
     assertOpen();
     options.signal?.throwIfAborted();
@@ -781,7 +790,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       scope,
       signal: options.signal,
       project: read,
-      ...(validateIncomplete === undefined ? {} : { validateIncomplete }),
+      ...(incomplete === undefined ? {} : { validateIncomplete: incomplete.retained }),
       validateAnchor: async (cached) => {
         const provenByLog = await contextGraphAuthorityProjectionAnchorProvenByLogV1(
           cached,
@@ -884,7 +893,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         (completed) => read({
           ...completed,
           fetchedAtMs: resolveProjectionFetchedAtMs(askedAtMs, completed.origin),
-        }).complete || logFoldAnswersIncomplete,
+        }).complete || incomplete?.freshLogFold === true,
       ),
     });
     options.signal?.throwIfAborted();
@@ -899,6 +908,18 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
   // its tick, which is fresher than any fold. This keeps repeatable query/sync
   // authorization available while a single endpoint is saturated, and off the
   // provider between ticks, without weakening mutation/key gates.
+  //
+  // The same rule decides the fold a refresh has just produced. A bounded
+  // read took "absent" from a fold another read left in the cache, but could
+  // not produce that fold itself: its refresh discarded the fold and scanned
+  // the provider. A node whose name reads are all for graphs that are not
+  // registered then paid a head read and a paged log scan for every one of
+  // them, each new block again; the sync and query checks of a member of such
+  // a graph repeat every few seconds, at authority priority, and that stream
+  // held the node's request budget against its own transactions. The fold is
+  // as old as the tick's last committed pass, inside the anchor's freshness
+  // rules: the staleness a bounded read accepts for every other answer. A
+  // live read keeps the provider scan.
   const validateFinalizedNameAbsence = (
     operationLabel: string,
     options: ContextGraphAuthorityReadOptions,
@@ -941,26 +962,14 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
     });
   };
 
-  /**
-   * Whether a name the log fold does not contain is this read's answer.
-   *
-   * A bounded read already takes "absent" from a fold another read left in
-   * the cache, on the log's own fence (`validateFinalizedNameAbsence` above).
-   * It could not produce that fold itself: its refresh discarded the fold and
-   * scanned the provider, so a node whose name reads are all for graphs that
-   * are not registered paid a head read and a paged log scan for every one of
-   * them, each new block again. The sync and query checks of a member of such
-   * a graph repeat every few seconds, at authority priority, and that stream
-   * held the node's request budget against its own transactions.
-   *
-   * The fold is as old as the tick's last committed pass, bounded by the
-   * anchor's freshness rules, which is the staleness a bounded read accepts
-   * for every other answer. A live read keeps the provider scan: it is the
-   * one that may not be told "absent" from anything but a read taken for it.
-   */
-  const logFoldAnswersNameAbsence = (options: ContextGraphAuthorityReadOptions): boolean => (
-    options.freshness === 'bounded'
-  );
+  /** The absence rule above, for the retained projection and for a fresh fold alike. */
+  const finalizedNameAbsenceAdmission = (
+    operationLabel: string,
+    options: ContextGraphAuthorityReadOptions,
+  ): IncompleteAdmissionV1 => Object.freeze({
+    retained: validateFinalizedNameAbsence(operationLabel, options),
+    freshLogFold: options.freshness === 'bounded',
+  });
 
   const resolveFinalizedIdsByNameHashes = async (
     rawNameHashes: readonly string[],
@@ -980,8 +989,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         }
         return { complete: resolved.size === nameHashes.length, value: resolved };
       },
-      validateFinalizedNameAbsence(operationLabel, options),
-      logFoldAnswersNameAbsence(options),
+      finalizedNameAbsenceAdmission(operationLabel, options),
     );
   };
 
@@ -997,8 +1005,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       operationLabel,
       options,
       (projection) => projectAuthoritySnapshotsByNameHashesV1(nameHashes, projection),
-      validateFinalizedNameAbsence(operationLabel, options),
-      logFoldAnswersNameAbsence(options),
+      finalizedNameAbsenceAdmission(operationLabel, options),
     );
   };
 
