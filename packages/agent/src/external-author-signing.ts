@@ -12,6 +12,7 @@ import { ethers } from 'ethers';
 import { operationalSigningOf, type AuthorSigner, type ChainAdapter, type ExternalAuthorSigners } from '@origintrail-official/dkg-chain';
 import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
 import type { AgentKeyRecord } from './agent-keystore.js';
+import { agentKeyWallet, externalAuthorSignerFor } from './author-signer.js';
 import type { DKGAgent } from './dkg-agent.js';
 
 /**
@@ -32,15 +33,6 @@ interface TypedDataInput {
   message: Record<string, unknown>;
 }
 
-/** The external signer for `address`, when it is one of the author keys `authors`. */
-export async function externalAuthorSignerFor(
-  authors: ExternalAuthorSigners | undefined,
-  address: string,
-): Promise<AuthorSigner | undefined> {
-  if (authors === undefined || !ethers.isAddress(address)) return undefined;
-  return authors.signerFor(address);
-}
-
 /**
  * An allowed agent's capability to sign SWM gossip envelopes: the EIP-191
  * signature over a framed gossip signing payload, made with the agent's key
@@ -53,9 +45,13 @@ export interface WorkspaceGossipSigner {
   signMessage(message: Uint8Array): Promise<string>;
 }
 
-/** The gossip signer of an agent whose key is held on the node; its wallet is built once. */
+/**
+ * The gossip signer of an agent whose key is held on the node: the agent
+ * signer's wallet for that key, built once. Which agent signs is the gossip
+ * protocol's choice; its external counterpart is chosen below in one lookup.
+ */
 export function localGossipSigner(agentAddress: string, privateKey: string): WorkspaceGossipSigner {
-  const wallet = new ethers.Wallet(privateKey);
+  const wallet = agentKeyWallet(privateKey);
   return { agentAddress, signMessage: (message) => wallet.signMessage(message) };
 }
 

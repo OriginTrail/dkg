@@ -126,8 +126,8 @@ import {
   type LargeLiteralStorageConfig,
 } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type AuthorSigner, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
-import { externalAuthorSignerFor, signAuthorTypedDataCompact, type WorkspaceGossipSigner } from './external-author-signing.js';
-import { heldAuthorSigner, registeredAgentAuthorSigner } from './author-signer.js';
+import { signAuthorTypedDataCompact, type WorkspaceGossipSigner } from './external-author-signing.js';
+import { externalAuthorSignerFor, heldAuthorSigner, registeredAgentAuthorSigner } from './author-signer.js';
 import  {
   DKGPublisher,
   PublishHandler,

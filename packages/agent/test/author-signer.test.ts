@@ -4,9 +4,9 @@
  * signer that holds a self-sovereign agent's author key. Both sign the same
  * typed data alike, and the same RFC-64 control-object digests.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
-import { heldAuthorSigner, registeredAgentAuthorSigner } from '../src/author-signer.js';
+import { agentKeyWallet, agentSigner, heldAuthorSigner, registeredAgentAuthorSigner } from '../src/author-signer.js';
 import { rfc64AuthorDigestSignerV1 } from '../src/rfc64/control-envelope-signer-v1.js';
 import { HARDHAT_KEYS } from '../../chain/test/hardhat-harness.js';
 
@@ -40,6 +40,28 @@ const TYPES = { Attestation: [{ name: 'root', type: 'bytes32' }, { name: 'author
 const VALUE = { root: ethers.keccak256('0x01'), author: custodial.address };
 
 describe('author signer', () => {
+  it('resolves one signer for an agent: its key on the node first, else the external signer, asked only then', async () => {
+    const signerFor = vi.fn(authors.signerFor);
+    const counted = { ...authors, signerFor };
+    const message = ethers.getBytes(ethers.id('agent message'));
+    // A key held on the node signs, stored with or without its 0x prefix, and the external signer is not asked.
+    for (const key of [custodial.privateKey, custodial.privateKey.slice(2)]) {
+      expect(agentKeyWallet(key).address).toBe(custodial.address);
+      const local = await agentSigner(counted, custodial.address, key);
+      expect(await local!.signMessage(message)).toBe(await custodial.signMessage(message));
+    }
+    // For an address both hold, the key on the node wins.
+    const both = await agentSigner(counted, held.address, held.privateKey);
+    expect(both).not.toBe(held);
+    expect(both!.address).toBe(held.address);
+    expect(signerFor).not.toHaveBeenCalled();
+    // Else the external signer that holds the address as an author key; neither way, no signer.
+    expect(await agentSigner(counted, held.address, undefined)).toBe(held);
+    expect(signerFor).toHaveBeenCalledTimes(1);
+    expect(await agentSigner(counted, notHeld, undefined)).toBeUndefined();
+    expect(await agentSigner(undefined, held.address, undefined)).toBeUndefined();
+  });
+
   it('signs with a custodial key held on the node, else through the external signer that holds the key', async () => {
     const fromKey = await heldAuthorSigner(agents, authors, custodial.address);
     expect(await fromKey!.signTypedData(DOMAIN, TYPES, VALUE)).toBe(await custodial.signTypedData(DOMAIN, TYPES, VALUE));

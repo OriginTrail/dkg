@@ -105,6 +105,8 @@ describe('sync requests signed as the claimed agent', () => {
     try {
       const authors = remote.authors;
       const requestsAfterConnect = fake.requests.length;
+      // The account lists are known from connecting, so a lookup is seen as a call, not as a request.
+      const lookups = vi.spyOn(authors!, 'signerFor');
       // Not a local agent, or one the node can sign for in neither way: no signer.
       expect(claimedAgentSyncRequestSigner(authors, agentWallet.address, undefined)).toBeUndefined();
       expect(claimedAgentSyncRequestSigner(authors, undefined, {})).toBeUndefined();
@@ -115,10 +117,30 @@ describe('sync requests signed as the claimed agent', () => {
       expect(signerOf(local)).toBe(agentWallet.address);
       expect(fake.requests).toHaveLength(requestsAfterConnect);
 
+      // Also a key stored without its 0x prefix.
+      const unprefixed = await build({
+        claimedAgentSigner: claimedAgentSyncRequestSigner(authors, agentWallet.address, { privateKey: agentWallet.privateKey.slice(2) }),
+      });
+      expect(signerOf(unprefixed)).toBe(agentWallet.address);
+      expect(fake.requests).toHaveLength(requestsAfterConnect);
+      expect(lookups).not.toHaveBeenCalled();
+      // When the node identity signs the request, the agent's signer is never resolved: the signer is not asked.
+      const identitySignature = ethers.Signature.from(await otherWallet.signMessage(DIGEST));
+      const byIdentity = await build({
+        claimedAgentSigner: claimedAgentSyncRequestSigner(authors, agentWallet.address, {}),
+        getIdentityId: async () => 7n,
+        signMessage: async () => ({ r: ethers.getBytes(identitySignature.r), vs: ethers.getBytes(identitySignature.yParityAndS) }),
+      });
+      expect(byIdentity['requesterIdentityId']).toBe('7');
+      expect(fake.requests).toHaveLength(requestsAfterConnect);
+      expect(lookups).not.toHaveBeenCalled();
+
       // Otherwise the author key is looked up only when a request is signed, and signs it once.
       const external = claimedAgentSyncRequestSigner(authors, agentWallet.address, {});
       expect(fake.requests).toHaveLength(requestsAfterConnect);
+      expect(lookups).not.toHaveBeenCalled();
       expect(signerOf(await build({ claimedAgentSigner: external }))).toBe(agentWallet.address);
+      expect(lookups).toHaveBeenCalledTimes(1);
       const signed = fake.calls('eth_sign');
       expect(signed).toHaveLength(1);
       expect(signed[0]!.authorization).toBe(`Bearer ${AUTHOR_TOKEN}`);

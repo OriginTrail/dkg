@@ -26,6 +26,7 @@ import {
   generateWorkspaceRecipientEncryptionKey,
   workspaceAgentEncryptionKeyId,
 } from '@origintrail-official/dkg-core';
+import { agentKeyWallet } from './author-signer.js';
 
 /**
  * One workspace X25519 encryption key registered to a DKG agent.
@@ -140,7 +141,7 @@ export function assertKeystoreHoldsNoPayerKey(
     if (typeof privateKey !== 'string' || privateKey === '') continue;
     let address = entryAddress;
     try {
-      address = new ethers.Wallet(privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`).address;
+      address = agentKeyWallet(privateKey).address;
     } catch {
       // A key that does not parse is checked by the address it is filed under.
     }

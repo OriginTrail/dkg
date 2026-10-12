@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import { ethers } from 'ethers';
 import { connectRemoteSigners } from '@origintrail-official/dkg-chain';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { DKGAgent } from '../src/index.js';
+import { DKGAgent, assertKeystoreHoldsNoPayerKey } from '../src/index.js';
 import { createEVMAdapter, getSharedContext, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { startFakeRemoteSigner } from '../../chain/test/helpers/fake-remote-signer.js';
 
@@ -28,6 +28,15 @@ afterEach(async () => {
 });
 
 describe('moving a node\'s local wallet into an external signer as a payer', () => {
+  it('reads a payer key stored without its 0x prefix as that payer\'s key, whatever entry holds it', () => {
+    const path = join(tmpdir(), 'agent-keystore.json');
+    for (const filedUnder of [formerWallet.address.toLowerCase(), signerAuthor.address.toLowerCase()]) {
+      const keystore = { [filedUnder]: { authToken: 'former-token', privateKey: formerWallet.privateKey.slice(2) } };
+      expect(() => assertKeystoreHoldsNoPayerKey(keystore, [formerWallet.address], path))
+        .toThrow(`${path} holds the private key of ${formerWallet.address}`);
+    }
+  });
+
   it('refuses to load the payer\'s key, and loads the node\'s other agents once it is removed', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-keystore-migration-'));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));

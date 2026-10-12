@@ -360,6 +360,12 @@ describe('external signer author keys', () => {
     const custodial = agentFromPrivateKey(HARDHAT_KEYS.EXTRA3, 'custodial');
     agent.localAgents.set(custodial.agentAddress, custodial);
     expect((await agent.resolveWorkspaceGossipSigningAgent(CG))?.agentAddress).toBe(custodial.agentAddress);
+    // Also when its key is stored without the 0x prefix, signing the same bytes without asking the signer.
+    agent.localAgents.set(custodial.agentAddress, { ...custodial, privateKey: custodial.privateKey!.slice(2) });
+    const requestsBefore = fake.requests.length;
+    const unprefixed = await agent.resolveWorkspaceGossipSigningAgent(CG);
+    expect(await unprefixed!.signMessage(payload)).toBe(await new ethers.Wallet(custodial.privateKey!).signMessage(payload));
+    expect(fake.requests).toHaveLength(requestsBefore);
 
     // A payer registered as the default agent never signs: the write goes out unsigned.
     const payerOnly = await stubAgent(remote);

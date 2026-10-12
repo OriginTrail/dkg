@@ -13,7 +13,8 @@
  */
 import type { ChainAdapter, ExternalAuthorSigners } from '@origintrail-official/dkg-chain';
 import { addRegistrationParticipantAgent, type RegistrationRoster } from './context-graph-registration-roster.js';
-import { externalAuthorSignerFor, signsThroughExternalSigner } from './external-author-signing.js';
+import { externalAuthorSignerFor } from './author-signer.js';
+import { signsThroughExternalSigner } from './external-author-signing.js';
 
 /**
  * Whether the node signs through an external signer and `curator`, which is
