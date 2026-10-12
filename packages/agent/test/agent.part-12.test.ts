@@ -228,11 +228,7 @@ describe('Genesis Knowledge', () => {
         name: 'PcaExternalAuthorCuratorBot',
         store: new OxigraphStore(),
         chainAdapter: chain,
-        chainConfig: {
-          rpcUrl: 'http://127.0.0.1:1',
-          hubAddress: ethers.ZeroAddress,
-          authors: externalAuthorKeys(HARDHAT_KEYS.EXTRA1),
-        },
+        authorSigners: externalAuthorKeys(HARDHAT_KEYS.EXTRA1),
         nodeRole: 'edge',
       });
       await agent.start();
@@ -299,11 +295,7 @@ describe('Genesis Knowledge', () => {
         name: 'PcaExternalAuthorCapBot',
         store: new OxigraphStore(),
         chainAdapter: chain,
-        chainConfig: {
-          rpcUrl: 'http://127.0.0.1:1',
-          hubAddress: ethers.ZeroAddress,
-          authors: externalAuthorKeys(HARDHAT_KEYS.EXTRA1),
-        },
+        authorSigners: externalAuthorKeys(HARDHAT_KEYS.EXTRA1),
         nodeRole: 'edge',
       });
       await agent.start();
@@ -346,11 +338,7 @@ describe('Genesis Knowledge', () => {
         name: 'PcaNotExternalAuthorCuratorBot',
         store: new OxigraphStore(),
         chainAdapter: chain,
-        chainConfig: {
-          rpcUrl: 'http://127.0.0.1:1',
-          hubAddress: ethers.ZeroAddress,
-          authors: externalAuthorKeys(HARDHAT_KEYS.EXTRA1),
-        },
+        authorSigners: externalAuthorKeys(HARDHAT_KEYS.EXTRA1),
         nodeRole: 'edge',
       });
       await agent.start();
@@ -390,8 +378,8 @@ describe('Genesis Knowledge', () => {
           rpcUrl: 'http://127.0.0.1:1',
           hubAddress: ethers.ZeroAddress,
           operationalKeys: [HARDHAT_KEYS.REC2_OP],
-          authors: externalAuthorKeys(HARDHAT_KEYS.EXTRA1),
         },
+        authorSigners: externalAuthorKeys(HARDHAT_KEYS.EXTRA1),
         nodeRole: 'edge',
       });
       await agent.start();
@@ -428,11 +416,7 @@ describe('Genesis Knowledge', () => {
         name: 'PcaExternalAuthorWrongAgentBot',
         store: new OxigraphStore(),
         chainAdapter: chain,
-        chainConfig: {
-          rpcUrl: 'http://127.0.0.1:1',
-          hubAddress: ethers.ZeroAddress,
-          authors: externalAuthorKeys(HARDHAT_KEYS.EXTRA1),
-        },
+        authorSigners: externalAuthorKeys(HARDHAT_KEYS.EXTRA1),
         nodeRole: 'edge',
       });
       await agent.start();

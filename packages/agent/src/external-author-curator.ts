@@ -11,23 +11,23 @@
  * registration's `participantAgents`), as the EOA auto-promotion in
  * `registerContextGraph` does for a curator that is not the chain signer.
  */
-import type { ChainAdapter } from '@origintrail-official/dkg-chain';
+import type { ChainAdapter, ExternalAuthorSigners } from '@origintrail-official/dkg-chain';
 import { addRegistrationParticipantAgent, type RegistrationRoster } from './context-graph-registration-roster.js';
-import { externalAuthorSignerFor, signsThroughExternalSigner, type ExternalAuthorConfig } from './external-author-signing.js';
+import { externalAuthorSignerFor, signsThroughExternalSigner } from './external-author-signing.js';
 
 /**
  * Whether the node signs through an external signer and `curator`, which is
  * not the registration signer, is one of that signer's author keys.
  */
 export async function isExternalAuthorCurator(
-  config: ExternalAuthorConfig | undefined,
+  authors: ExternalAuthorSigners | undefined,
   chain: Pick<ChainAdapter, 'operationalSigning'> | undefined,
   curator: string,
   registrationSigner: string,
 ): Promise<boolean> {
   if (!signsThroughExternalSigner(chain)) return false;
   if (curator.toLowerCase() === registrationSigner.toLowerCase()) return false;
-  return (await externalAuthorSignerFor(config, curator)) !== undefined;
+  return (await externalAuthorSignerFor(authors, curator)) !== undefined;
 }
 
 /**

@@ -65,7 +65,8 @@ describe('moving a node\'s local wallet into an external signer as a payer', () 
       name: 'MigratingNode',
       store: new OxigraphStore(storePath),
       dataDir: dir,
-      chainConfig: { rpcUrl, hubAddress, chainId: 'evm:31337', signers: remote.operational, authors: remote.authors },
+      chainConfig: { rpcUrl, hubAddress, chainId: 'evm:31337', signers: remote.operational },
+      authorSigners: remote.authors,
       nodeRole: 'edge',
     });
 

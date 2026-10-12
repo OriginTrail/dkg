@@ -88,7 +88,8 @@ describe('publish journey of a node that signs through an external signer', () =
       listenPort: 0,
       nodeRole: 'edge',
       kaNumberAllocator: makeTestKaNumberAllocator(),
-      chainConfig: { rpcUrl, hubAddress, chainId: 'evm:31337', signers: remote.operational, authors: remote.authors },
+      chainConfig: { rpcUrl, hubAddress, chainId: 'evm:31337', signers: remote.operational },
+      authorSigners: remote.authors,
     });
     core = await createPublishProtocolAgent({
       name: 'JourneyCore',

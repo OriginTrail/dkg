@@ -624,14 +624,12 @@ describe('generic imported artifact peer handler', () => {
     agent.localAgents = new Map([[ownerAgentAddress, {}]]);
     const signerFor = vi.fn(async (address: string) => (address === ownerAgentAddress ? ownerWallet : undefined));
     Object.assign(agent.config, {
-      chainConfig: {
-        authors: {
-          addresses: [ownerAgentAddress],
-          signerFor,
-          firstSignerOf: async (addresses: readonly string[]) => (
-            addresses.includes(ownerAgentAddress) ? { address: ownerAgentAddress, signer: ownerWallet } : undefined
-          ),
-        },
+      authorSigners: {
+        addresses: [ownerAgentAddress],
+        signerFor,
+        firstSignerOf: async (addresses: readonly string[]) => (
+          addresses.includes(ownerAgentAddress) ? { address: ownerAgentAddress, signer: ownerWallet } : undefined
+        ),
       },
     });
 

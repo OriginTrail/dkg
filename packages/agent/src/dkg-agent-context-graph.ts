@@ -618,7 +618,7 @@ export class ContextGraphMethods extends DKGAgentBase {
       // The owner's key held on the node signs the seed; when the authority is
       // required, an author key the external signer holds signs it there.
       const ownerSigner = ownerAddress !== undefined && ownerAddress === effectiveCallerAddress
-        ? await heldAuthorSigner(this, requiresAuthenticatedReplicaAuthority ? this.config : undefined, ownerAddress)
+        ? await heldAuthorSigner(this, requiresAuthenticatedReplicaAuthority ? this.config.authorSigners : undefined, ownerAddress)
         : undefined;
       const signDigest = ownerSigner === undefined || ownerAddress === undefined
         ? undefined
@@ -1541,7 +1541,7 @@ export class ContextGraphMethods extends DKGAgentBase {
 
         const normalizedChainSigner = ethers.getAddress(chainSigner);
         const signerIsOwner = normalizedChainSigner.toLowerCase() === publishAuthority.toLowerCase();
-        const externalAuthorCurator = await isExternalAuthorCurator(this.config, this.chain, ownerAddress, normalizedChainSigner);
+        const externalAuthorCurator = await isExternalAuthorCurator(this.config.authorSigners, this.chain, ownerAddress, normalizedChainSigner);
         if (ownerAddress.toLowerCase() !== normalizedChainSigner.toLowerCase() && !externalAuthorCurator) {
           throw new Error(
             `Context graph "${id}" cannot be PCA-registered: local curator ${ownerAddress} differs from registration chain signer ${normalizedChainSigner}. The local curator must control the wallet that will own the on-chain Context Graph NFT.`,

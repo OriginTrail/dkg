@@ -739,9 +739,8 @@ describe('publishJsonLd', () => {
         authToken: 'async-payer-credential',
         author: { authToken: 'async-author-credential' },
       });
-      const { rpcUrl, hubAddress } = getSharedContext();
       const { agent, store } = await createAgent('AsyncExternalAuthorBot', {
-        chainConfig: { rpcUrl, hubAddress, authors: remote.authors },
+        authorSigners: remote.authors,
       });
       await agent.createContextGraph({ id: 'async-external-author', name: 'AsyncExternalAuthor', description: '' });
       await agent.registerContextGraph('async-external-author');

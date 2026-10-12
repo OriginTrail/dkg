@@ -82,7 +82,7 @@ async function keylessWriter(): Promise<{ agent: DKGAgent; internals: WriterInte
     name: 'KeylessWriter',
     store: new OxigraphStore(),
     chainAdapter: new ExternallySignedMockChain('mock:31337', payer.address),
-    chainConfig: { rpcUrl: 'http://127.0.0.1:1', hubAddress: ethers.ZeroAddress, authors: remote.authors },
+    authorSigners: remote.authors,
     nodeRole: 'edge',
   });
   cleanups.push(async () => {

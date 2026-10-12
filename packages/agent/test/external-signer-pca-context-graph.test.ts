@@ -174,8 +174,8 @@ describe('PCA-backed curated context graph with an external signer', () => {
         hubAddress,
         chainId: 'evm:31337',
         signers: remote.operational,
-        authors: remote.authors,
       },
+      authorSigners: remote.authors,
     });
     await agent.start();
   }, 180_000);

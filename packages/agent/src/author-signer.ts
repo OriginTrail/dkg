@@ -8,8 +8,8 @@
  * the publisher's own fallback stay explicit at their call sites.
  */
 import { ethers } from 'ethers';
-import type { AuthorSigner } from '@origintrail-official/dkg-chain';
-import { externalAuthorSignerFor, type ExternalAuthorConfig } from './external-author-signing.js';
+import type { AuthorSigner, ExternalAuthorSigners } from '@origintrail-official/dkg-chain';
+import { externalAuthorSignerFor } from './external-author-signing.js';
 
 /** The node's local agents, as far as author signing needs them. */
 interface LocalAgentKeys {
@@ -28,11 +28,11 @@ function custodialWallet(privateKey: string): ethers.Wallet {
  */
 export async function heldAuthorSigner(
   agents: LocalAgentKeys,
-  config: ExternalAuthorConfig | undefined,
+  authors: ExternalAuthorSigners | undefined,
   address: string,
 ): Promise<AuthorSigner | undefined> {
   const custodialKey = agents.getCustodialAgentPrivateKey(address);
-  return custodialKey ? custodialWallet(custodialKey) : externalAuthorSignerFor(config, address);
+  return custodialKey ? custodialWallet(custodialKey) : externalAuthorSignerFor(authors, address);
 }
 
 /**
@@ -43,7 +43,7 @@ export async function heldAuthorSigner(
  */
 export async function registeredAgentAuthorSigner(
   agents: LocalAgentKeys,
-  config: ExternalAuthorConfig | undefined,
+  authors: ExternalAuthorSigners | undefined,
   address: string,
   label: string,
   missingKeyCode?: string,
@@ -53,7 +53,7 @@ export async function registeredAgentAuthorSigner(
     throw new Error(`${label}: authorAgentAddress ${address} is not a registered local agent on this node`);
   }
   if (mode === 'self-sovereign') {
-    const external = await externalAuthorSignerFor(config, address);
+    const external = await externalAuthorSignerFor(authors, address);
     if (external) return external;
     throw new Error(
       `${label}: agent ${address} is registered as self-sovereign — ` +

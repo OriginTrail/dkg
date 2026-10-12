@@ -1545,7 +1545,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       getIdentityId: () => this.chain.getIdentityId(),
       signMessage: typeof this.chain.signMessage === 'function' ? this.chain.signMessage.bind(this.chain) : undefined,
       claimedAgentAddress: claimedAgentAddress,
-      claimedAgentSigner: claimedAgentSyncRequestSigner(this.config, claimedAgentAddress, claimedAgent),
+      claimedAgentSigner: claimedAgentSyncRequestSigner(this.config.authorSigners, claimedAgentAddress, claimedAgent),
     });
   }
 

@@ -28,9 +28,11 @@ export type DaemonEvmSigning = (
   | {
     readonly mode: 'remote';
     readonly addresses: OperationalWalletAddresses;
-    readonly chainSigning: { signers: RemoteSigner[]; authors?: RemoteAuthorSigners };
+    readonly chainSigning: { signers: RemoteSigner[] };
   }
 ) & {
+  /** The external signer's author keys, which never pay: the agent takes them beside its chain configuration. */
+  readonly authorSigners?: RemoteAuthorSigners;
   /**
    * Close the connections to the external signer once nothing signs any more,
    * at shutdown. Calling it again does nothing; with local keys it does nothing.
@@ -117,9 +119,7 @@ export async function resolveDaemonEvmSigning(input: ResolveDaemonEvmSigningInpu
     mode: 'remote',
     release: () => signers.destroy(),
     addresses: { wallets: signers.operational.map((signer) => ({ address: signer.address })) },
-    chainSigning: {
-      signers: signers.operational,
-      ...(authors === undefined ? {} : { authors }),
-    },
+    chainSigning: { signers: signers.operational },
+    ...(authors === undefined ? {} : { authorSigners: authors }),
   };
 }

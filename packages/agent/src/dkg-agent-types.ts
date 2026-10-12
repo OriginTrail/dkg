@@ -1786,7 +1786,7 @@ export interface DKGAgentConfig {
    * profile admin key, only for profile/key-management txs (optional; those paths fail fast without
    * it). One source of operational wallets (`AgentChainSignerSource`): `operationalKeys` (first =
    * primary signer; all pay publish txs round-robin), or `signers` (external only, not with a
-   * supplied `chainAdapter`), or neither. `authors`: external author keys that never pay.
+   * supplied `chainAdapter`), or neither. External author keys are `authorSigners`, beside it.
    */
   chainConfig?: {
     rpcUrl: string;
@@ -1799,7 +1799,6 @@ export interface DKGAgentConfig {
     /** Optional TRAC token contract override. When omitted, the adapter resolves Hub.Token. */
     tokenAddress?: string;
     adminPrivateKey?: string;
-    authors?: ExternalAuthorSigners;
     chainId?: string;
     /** Overall submitted-transaction receipt deadline (default 10 minutes). */
     receiptTimeoutMs?: number;
@@ -1853,6 +1852,8 @@ export interface DKGAgentConfig {
     minPublisherNativeWei?: bigint;
     minPublisherTracWei?: bigint;
   } & AgentChainSignerSource;
+  /** Author keys of an external signer, which never pay: agents registered by their addresses sign through it, with or without `chainConfig`. */
+  authorSigners?: ExternalAuthorSigners;
   /** Cross-agent query access configuration. */
   queryAccess?: QueryAccessConfig;
   /** User-selected context graph IDs to sync automatically on peer connect. */

@@ -36,7 +36,6 @@ const AUTHOR_TOKEN = 'rfc64-author-credential-9c8b7a6f5e4d3c2b';
 const payer = new ethers.Wallet(HARDHAT_KEYS.PUBLISHER);
 const author = new ethers.Wallet(HARDHAT_KEYS.EXTRA2);
 const OWNER = author.address.toLowerCase() as EvmAddressV1;
-const HUB = '0x3333333333333333333333333333333333333333';
 
 /** The chain adapter of a node whose operational wallets sign through an external signer. */
 class ExternallySignedNoChain extends NoChainAdapter {
@@ -67,7 +66,7 @@ async function externalAuthorNode(name: string): Promise<{ agent: DKGAgent; fake
     config: {
       rfc64CatalogDeploymentProfile: DEPLOYMENT,
       chainAdapter: new ExternallySignedNoChain(),
-      chainConfig: { rpcUrl: 'http://127.0.0.1:1', hubAddress: HUB, authors: remote.authors },
+      authorSigners: remote.authors,
     },
   });
   return { agent, fake };
@@ -133,17 +132,17 @@ describe('RFC-64 control objects of an author key held by the external signer', 
       signTypedData: other.signTypedData.bind(other),
       signMessage: (message: string | Uint8Array) => other.signMessage(message),
     };
-    const config = { chainConfig: { authors: {
+    const authors = {
       addresses: [author.address],
       signerFor: async () => misrouted,
       firstSignerOf: async () => ({ address: author.address, signer: misrouted }),
-    } } };
+    };
     // An agent the node holds no key for: the external author key is looked up, then checked.
     const agents = { getLocalAgentMode: () => 'self-sovereign' as const, getCustodialAgentPrivateKey: () => undefined };
-    const held = await heldAuthorSigner(agents, config, author.address);
+    const held = await heldAuthorSigner(agents, authors, author.address);
     expect(held).toBe(misrouted);
     await expect(rfc64AuthorDigestSignerV1(OWNER, held!)(ethers.getBytes(ethers.id('author inventory head'))))
       .rejects.toThrow(/does not recover to author/);
-    expect(await heldAuthorSigner(agents, {}, author.address)).toBeUndefined();
+    expect(await heldAuthorSigner(agents, undefined, author.address)).toBeUndefined();
   });
 });

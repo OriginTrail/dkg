@@ -105,7 +105,7 @@ async function stubAgent(remote: RemoteSigners, store = new OxigraphStore()) {
   agent.store = store;
   agent.log = silentLog();
   agent.chain = chain;
-  agent.config = { chainConfig: { authors: remote.authors } };
+  agent.config = { authorSigners: remote.authors };
   agent.localAgents = new Map();
   agent.agentTokenIndex = new Map();
   agent.kaNumberAllocator = makeTestKaNumberAllocator();
@@ -132,18 +132,18 @@ function q(subject: string, predicate: string, object: string): Quad {
 describe('external signer author keys', () => {
   it('registers an agent by an address the external signer holds, keeping no key for it', async () => {
     const { fake, remote } = await externalSigners();
-    const config = { chainConfig: { authors: remote.authors } };
-    const publicKey = await externalSignerAgentPublicKey(config, agentKey.address, 'writer');
+    const authors = remote.authors;
+    const publicKey = await externalSignerAgentPublicKey(authors, agentKey.address, 'writer');
     expect(ethers.computeAddress(publicKey)).toBe(agentKey.address);
     const [registration] = fake.calls('eth_signTypedData_v4');
     expect(registration.authorization).toBe(`Bearer ${AUTHOR_TOKEN}`);
     expect(JSON.parse(String(registration.params[1])).primaryType).toBe('AgentRegistration');
 
-    await expect(externalSignerAgentPublicKey(config, payer.address, 'payer'))
+    await expect(externalSignerAgentPublicKey(authors, payer.address, 'payer'))
       .rejects.toThrow(/not an author key of the external signer/);
-    await expect(externalSignerAgentPublicKey(config, agentKey.address, 'writer', defaultAuthor.publicKey))
+    await expect(externalSignerAgentPublicKey(authors, agentKey.address, 'writer', defaultAuthor.publicKey))
       .rejects.toThrow(/publicKey does not belong/);
-    await expect(externalSignerAgentPublicKey({ chainConfig: {} }, agentKey.address, 'writer'))
+    await expect(externalSignerAgentPublicKey(undefined, agentKey.address, 'writer'))
       .rejects.toThrow(/requires external author keys/);
 
     const agent = await stubAgent(remote);
@@ -203,16 +203,16 @@ describe('external signer author keys', () => {
   it('takes a supplied public key of an author key as is, and refuses a registration signed with another key', async () => {
     const { fake, remote } = await externalSigners();
     const before = fake.calls('eth_signTypedData_v4').length;
-    await expect(externalSignerAgentPublicKey({ chainConfig: { authors: remote.authors } }, agentKey.address, 'writer', agentKey.publicKey))
+    await expect(externalSignerAgentPublicKey(remote.authors, agentKey.address, 'writer', agentKey.publicKey))
       .resolves.toBe(agentKey.publicKey);
     expect(fake.calls('eth_signTypedData_v4')).toHaveLength(before);
 
     // A signer that answers for the address but signs with a different key.
-    const wrongKey = { chainConfig: { authors: {
+    const wrongKey = {
       addresses: [agentKey.address],
       signerFor: async () => defaultAuthor,
       firstSignerOf: async ([address]: readonly string[]) => ({ address, signer: defaultAuthor }),
-    } } };
+    };
     await expect(externalSignerAgentPublicKey(wrongKey, agentKey.address, 'writer'))
       .rejects.toThrow(/did not sign the registration/);
   });
@@ -303,7 +303,7 @@ describe('external signer author keys', () => {
 
   it('signs shared-memory gossip as an allowed agent whose author key the signer holds', async () => {
     const { fake, remote } = await externalSigners();
-    const config = { chainConfig: { authors: remote.authors } };
+    const authors = remote.authors;
     const held = registerSelfSovereignAgent('writer', agentKey.publicKey);
     const custodial = agentFromPrivateKey(HARDHAT_KEYS.EXTRA3, 'custodial');
     const outside = registerSelfSovereignAgent('outside', new ethers.Wallet(HARDHAT_KEYS.EXTRA2).signingKey.publicKey);
@@ -313,10 +313,10 @@ describe('external signer author keys', () => {
     // Not allowed, or allowed but not held by the signer: no gossip signer. The
     // allowed agents the signer does not hold cost one account lookup, not one each.
     let before = lookups();
-    expect(await externalAuthorGossipSigner(config, [custodial, outside, elsewhere], { allowed })).toBeUndefined();
+    expect(await externalAuthorGossipSigner(authors, [custodial, outside, elsewhere], { allowed })).toBeUndefined();
     expect(lookups() - before).toBe(1);
     before = lookups();
-    const signer = await externalAuthorGossipSigner(config, [custodial, outside, elsewhere, held], { allowed });
+    const signer = await externalAuthorGossipSigner(authors, [custodial, outside, elsewhere, held], { allowed });
     expect(signer?.agentAddress).toBe(agentKey.address);
     expect(lookups() - before).toBe(1);
 
@@ -401,11 +401,7 @@ describe('external signer author keys', () => {
         listenPort: 0,
         kaNumberAllocator: makeTestKaNumberAllocator(),
         chainAdapter: new ExternallySignedMockChain('mock:31337', payer.address),
-        chainConfig: {
-          rpcUrl: 'http://127.0.0.1:1',
-          hubAddress: ethers.ZeroAddress,
-          ...(authors ? { authors } : {}),
-        },
+        authorSigners: authors,
         nodeRole: 'edge',
       });
       await agent.start();
@@ -474,7 +470,7 @@ describe('external signer author keys', () => {
 
   it('decides external signing from the chain adapter, however it was made', async () => {
     const { remote } = await externalSigners();
-    const authorsOnly = { chainConfig: { authors: remote.authors } };
+    const authors = remote.authors;
     const external = { operationalSigning: () => ({ external: true, payerAddresses: [payer.address] }) };
     expect(signsThroughExternalSigner(external)).toBe(true);
     expect(signsThroughExternalSigner({ operationalSigning: () => ({ external: false, payerAddresses: [] }) })).toBe(false);
@@ -505,14 +501,14 @@ describe('external signer author keys', () => {
       chainAdapter: new MockChainAdapter('mock:31337', payer.address),
       chainConfig: { rpcUrl: 'http://127.0.0.1:1', hubAddress: ethers.ZeroAddress, signers: remote.operational },
     })).toThrow(/cannot be combined with a supplied chainAdapter/);
-    expect(await isExternalAuthorCurator(authorsOnly, external, agentKey.address, payer.address)).toBe(true);
-    expect(await isExternalAuthorCurator(authorsOnly, undefined, agentKey.address, payer.address)).toBe(false);
+    expect(await isExternalAuthorCurator(authors, external, agentKey.address, payer.address)).toBe(true);
+    expect(await isExternalAuthorCurator(authors, undefined, agentKey.address, payer.address)).toBe(false);
 
     const agent = await stubAgent(remote);
-    agent.config = authorsOnly;
-    expect(await registerExternalDefaultAgent(agent, authorsOnly, undefined, 'node')).toBeUndefined();
+    agent.config = { authorSigners: authors };
+    expect(await registerExternalDefaultAgent(agent, authors, undefined, 'node')).toBeUndefined();
     expect(agent.localAgents.size).toBe(0);
-    expect(await registerExternalDefaultAgent(agent, authorsOnly, external, 'node')).toBe(defaultAuthor.address);
+    expect(await registerExternalDefaultAgent(agent, authors, external, 'node')).toBe(defaultAuthor.address);
     expect(agent.getLocalAgentMode(defaultAuthor.address)).toBe('self-sovereign');
   });
 
@@ -533,7 +529,7 @@ describe('external signer author keys', () => {
         { addresses: [payer.address], signerFor: async () => undefined, firstSignerOf: async () => undefined },
       ]) {
         const agent = Object.create(DKGAgent.prototype) as any;
-        agent.config = { chainConfig: authors ? { authors } : {} };
+        agent.config = { authorSigners: authors };
         agent.chain = chain;
         agent.localAgents = new Map();
         agent.agentTokenIndex = new Map();
@@ -564,7 +560,7 @@ describe('external signer author keys', () => {
         name: 'ExternalSignerNode',
         store: new OxigraphStore(join(dir, 'store.nq')),
         chainAdapter: new ExternallySignedMockChain('mock:31337', remote.operational[0].address),
-        chainConfig: { rpcUrl: 'http://127.0.0.1:1', hubAddress: ethers.ZeroAddress, authors: remote.authors },
+        authorSigners: remote.authors,
         nodeRole: 'edge',
       });
       await agent.start();
@@ -590,6 +586,52 @@ describe('external signer author keys', () => {
       expect(fake.calls('eth_signTypedData_v4')).toHaveLength(1);
       await restarted.stop();
     } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('takes the external author keys beside a supplied adapter, with no chain configuration at all', async () => {
+    const { fake, remote } = await externalSigners();
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-authors-beside-adapter-'));
+    const agent = await DKGAgent.create({
+      name: 'AuthorsBesideAdapter',
+      store: new OxigraphStore(),
+      dataDir: dir,
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      kaNumberAllocator: makeTestKaNumberAllocator(),
+      chainAdapter: new ExternallySignedMockChain('mock:31337', payer.address),
+      authorSigners: remote.authors,
+      nodeRole: 'edge',
+    });
+    const payerSigning = () => fake.requests.filter((request) => request.authorization === `Bearer ${PAYER_TOKEN}` && request.method !== 'eth_accounts');
+    try {
+      await agent.start();
+      // The default author is the default agent, registered by address: the node keeps no key for it.
+      expect(agent.getDefaultAgentAddress()).toBe(defaultAuthor.address);
+      expect(agent.getLocalAgentMode(defaultAuthor.address)).toBe('self-sovereign');
+      const keystore = JSON.parse(await readFile(join(dir, 'agent-keystore.json'), 'utf8')) as Record<string, { privateKey?: string }>;
+      expect(Object.keys(keystore)).toEqual([defaultAuthor.address.toLowerCase()]);
+      expect(keystore[defaultAuthor.address.toLowerCase()]!.privateKey).toBeUndefined();
+      // A payer is never an agent; another author key is, by its address.
+      await expect(agent.registerAgent('payer', { address: payer.address })).rejects.toThrow(/not an author key of the external signer/);
+      await agent.registerAgent('writer', { address: agentKey.address });
+
+      // Finalizing as the default agent, and as the node with no agent named, is attested by the default author through the signer.
+      for (const [name, named, author] of [['as-agent', defaultAuthor.address, defaultAuthor.address], ['as-node', undefined, defaultAuthor.address]] as const) {
+        await agent.assertion.create(CG, name);
+        await agent.assertion.write(CG, name, [q(`urn:external-authors:${name}`, 'urn:value', '"v1"')]);
+        const before = fake.requests.length;
+        const seal = await agent.assertion.finalize(CG, name, named === undefined ? undefined : { authorAgentAddress: named });
+        expect(ethers.getAddress(seal.authorAddress)).toBe(author);
+        const signed = fake.requests.slice(before).filter((request) => request.method !== 'eth_accounts');
+        expect(signed.map((request) => [request.method, request.authorization])).toEqual([['eth_signTypedData_v4', `Bearer ${AUTHOR_TOKEN}`]]);
+        expect(ethers.getAddress(String(signed[0].params[0]))).toBe(author);
+        expect(JSON.parse(String(signed[0].params[1])).primaryType).toBe('AuthorAttestation');
+      }
+      expect(payerSigning()).toEqual([]);
+    } finally {
+      await agent.stop().catch(() => {});
       await rm(dir, { recursive: true, force: true });
     }
   });

@@ -103,20 +103,20 @@ describe('sync requests signed as the claimed agent', () => {
     fakes.push(fake);
     const remote = await connectRemoteSigners({ url: fake.url, authToken: PAYER_TOKEN, author: { authToken: AUTHOR_TOKEN } });
     try {
-      const config = { chainConfig: { authors: remote.authors } };
+      const authors = remote.authors;
       const requestsAfterConnect = fake.requests.length;
       // Not a local agent, or one the node can sign for in neither way: no signer.
-      expect(claimedAgentSyncRequestSigner(config, agentWallet.address, undefined)).toBeUndefined();
-      expect(claimedAgentSyncRequestSigner(config, undefined, {})).toBeUndefined();
+      expect(claimedAgentSyncRequestSigner(authors, agentWallet.address, undefined)).toBeUndefined();
+      expect(claimedAgentSyncRequestSigner(authors, undefined, {})).toBeUndefined();
       expect(claimedAgentSyncRequestSigner(undefined, agentWallet.address, {})).toBeUndefined();
 
       // A key held on the node signs on the node, even with author keys configured.
-      const local = await build({ claimedAgentSigner: claimedAgentSyncRequestSigner(config, agentWallet.address, { privateKey: agentWallet.privateKey }) });
+      const local = await build({ claimedAgentSigner: claimedAgentSyncRequestSigner(authors, agentWallet.address, { privateKey: agentWallet.privateKey }) });
       expect(signerOf(local)).toBe(agentWallet.address);
       expect(fake.requests).toHaveLength(requestsAfterConnect);
 
       // Otherwise the author key is looked up only when a request is signed, and signs it once.
-      const external = claimedAgentSyncRequestSigner(config, agentWallet.address, {});
+      const external = claimedAgentSyncRequestSigner(authors, agentWallet.address, {});
       expect(fake.requests).toHaveLength(requestsAfterConnect);
       expect(signerOf(await build({ claimedAgentSigner: external }))).toBe(agentWallet.address);
       const signed = fake.calls('eth_sign');
@@ -127,7 +127,7 @@ describe('sync requests signed as the claimed agent', () => {
       // A payer is not an author key: nothing is signed.
       await expect(build({
         claimedAgentAddress: payer.address,
-        claimedAgentSigner: claimedAgentSyncRequestSigner(config, payer.address, {}),
+        claimedAgentSigner: claimedAgentSyncRequestSigner(authors, payer.address, {}),
       })).rejects.toThrow(`Cannot sign a sync request as ${payer.address}: it is not an author key of the external signer`);
       expect(fake.calls('eth_sign')).toHaveLength(1);
     } finally {

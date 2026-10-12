@@ -8,7 +8,8 @@
  * as before.
  */
 import { ethers } from 'ethers';
-import { externalAuthorSignerFor, type ExternalAuthorConfig } from '../../external-author-signing.js';
+import type { ExternalAuthorSigners } from '@origintrail-official/dkg-chain';
+import { externalAuthorSignerFor } from '../../external-author-signing.js';
 
 /** Signs a sync request digest as one account; returns its 65-byte EIP-191 signature. */
 export type SyncRequestSigner = (digest: Uint8Array) => Promise<string>;
@@ -21,7 +22,7 @@ export type SyncRequestSigner = (digest: Uint8Array) => Promise<string>;
  * such local agent, or the node can sign for it neither way.
  */
 export function claimedAgentSyncRequestSigner(
-  config: ExternalAuthorConfig | undefined,
+  authors: ExternalAuthorSigners | undefined,
   address: string | undefined,
   record: { readonly privateKey?: string } | undefined,
 ): SyncRequestSigner | undefined {
@@ -31,7 +32,7 @@ export function claimedAgentSyncRequestSigner(
     let wallet: ethers.Wallet | undefined;
     return (digest) => (wallet ??= new ethers.Wallet(privateKey)).signMessage(digest);
   }
-  return externalAuthorSyncRequestSigner(config, address);
+  return externalAuthorSyncRequestSigner(authors, address);
 }
 
 /**
@@ -40,12 +41,12 @@ export function claimedAgentSyncRequestSigner(
  * author keys.
  */
 function externalAuthorSyncRequestSigner(
-  config: ExternalAuthorConfig | undefined,
+  authors: ExternalAuthorSigners | undefined,
   address: string,
 ): SyncRequestSigner | undefined {
-  if (config?.chainConfig?.authors === undefined) return undefined;
+  if (authors === undefined) return undefined;
   return async (digest) => {
-    const author = await externalAuthorSignerFor(config, address);
+    const author = await externalAuthorSignerFor(authors, address);
     if (author === undefined) {
       throw new Error(`Cannot sign a sync request as ${address}: it is not an author key of the external signer`);
     }

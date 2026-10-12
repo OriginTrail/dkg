@@ -14,10 +14,6 @@ import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
 import type { AgentKeyRecord } from './agent-keystore.js';
 import type { DKGAgent } from './dkg-agent.js';
 
-export interface ExternalAuthorConfig {
-  readonly chainConfig?: { readonly authors?: ExternalAuthorSigners };
-}
-
 /**
  * Whether the node signs through an external signer, as its chain adapter
  * reports: the one classification, whether the agent built the adapter from
@@ -36,12 +32,11 @@ interface TypedDataInput {
   message: Record<string, unknown>;
 }
 
-/** The external signer for `address`, when it is one of the configured author keys. */
+/** The external signer for `address`, when it is one of the author keys `authors`. */
 export async function externalAuthorSignerFor(
-  config: ExternalAuthorConfig | undefined,
+  authors: ExternalAuthorSigners | undefined,
   address: string,
 ): Promise<AuthorSigner | undefined> {
-  const authors = config?.chainConfig?.authors;
   if (authors === undefined || !ethers.isAddress(address)) return undefined;
   return authors.signerFor(address);
 }
@@ -71,11 +66,10 @@ export function localGossipSigner(agentAddress: string, privateKey: string): Wor
  * `preferred` (the default agent) tried first. A payer is never selected.
  */
 export async function externalAuthorGossipSigner(
-  config: ExternalAuthorConfig | undefined,
+  authors: ExternalAuthorSigners | undefined,
   agents: Iterable<AgentKeyRecord>,
   selection: { readonly allowed?: ReadonlySet<string>; readonly preferred?: string },
 ): Promise<WorkspaceGossipSigner | undefined> {
-  const authors = config?.chainConfig?.authors;
   if (authors === undefined) return undefined;
   const { allowed, preferred } = selection;
   const eligible = [...agents]
@@ -99,12 +93,11 @@ export async function externalAuthorGossipSigner(
  */
 export async function registerExternalDefaultAgent(
   agent: DKGAgent,
-  config: ExternalAuthorConfig | undefined,
+  authors: ExternalAuthorSigners | undefined,
   chain: Pick<ChainAdapter, 'operationalSigning'> | undefined,
   name: string,
   framework?: string,
 ): Promise<string | undefined> {
-  const authors = config?.chainConfig?.authors;
   if (!signsThroughExternalSigner(chain) || authors === undefined) return undefined;
   const address = authors.defaultAuthor?.address ?? authors.addresses[0];
   if (address === undefined) return undefined;
@@ -145,19 +138,19 @@ const REGISTRATION_TYPES = {
  * public key is recovered from that signature.
  */
 export async function externalSignerAgentPublicKey(
-  config: ExternalAuthorConfig | undefined,
+  authors: ExternalAuthorSigners | undefined,
   address: string,
   name: string,
   publicKey?: string,
 ): Promise<string> {
   if (!ethers.isAddress(address)) throw new Error(`Invalid agent address "${address}"`);
   const agent = ethers.getAddress(address);
-  if (config?.chainConfig?.authors === undefined) {
+  if (authors === undefined) {
     throw new Error(
       'Registering an agent by address requires external author keys (the external signer\'s author connection)',
     );
   }
-  const signer = await externalAuthorSignerFor(config, agent);
+  const signer = await externalAuthorSignerFor(authors, agent);
   if (signer === undefined) {
     throw new Error(`${agent} is not an author key of the external signer (payer accounts cannot be agents)`);
   }

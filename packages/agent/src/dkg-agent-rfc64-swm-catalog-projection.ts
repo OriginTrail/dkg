@@ -254,7 +254,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       }
       return signature;
     };
-    const config = this.config;
+    const authors = this.config.authorSigners;
     const chain = this.chain;
     return Object.freeze({
       address: authorAddress,
@@ -263,7 +263,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
         // author key (never a payer), signs. A node that signs externally never
         // falls back to its payers.
         throwIfAbortedV1(signal);
-        const author = await heldAuthorSigner(this, config, authorAddress);
+        const author = await heldAuthorSigner(this, authors, authorAddress);
         if (author !== undefined) return rfc64AuthorDigestSignerV1(authorAddress, author, signal)(message);
         if (signsThroughExternalSigner(chain)) {
           throw new Error(`RFC-64: author ${authorAddress} has no key on this node and is no author key of its external signer`);

@@ -1544,7 +1544,7 @@ export class DKGAgent extends DKGAgentBase {
       publisherPrivateKey: useLegacyAdapterOperationalKeyFallback ? legacyAdapterOperationalKey : undefined,
       // The configured author, if any. Without one, the publisher asks the chain adapter whether it signs
       // externally, and then never lets a paying wallet author.
-      authorSigner: config.chainConfig?.authors?.defaultAuthor,
+      authorSigner: config.authorSigners?.defaultAuthor,
       publisherAddress: config.publisherAddress,
       publisherAddressResolver: config.publisherAddress || useLegacyAdapterOperationalKeyFallback
         ? undefined

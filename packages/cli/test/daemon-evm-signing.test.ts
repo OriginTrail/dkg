@@ -89,7 +89,9 @@ describe('daemon EVM signing', () => {
     if (signing.mode !== 'remote') return;
     expect(signing.addresses).toEqual({ wallets: payers.map((payer) => ({ address: payer.address })) });
     expect(signing.chainSigning.signers.map((signer) => signer.address)).toEqual(payers.map((payer) => payer.address));
-    expect(signing.chainSigning.authors?.defaultAuthor?.address).toBe(author.address);
+    // The author keys go to the agent beside its chain configuration, never inside it.
+    expect(signing.authorSigners?.defaultAuthor?.address).toBe(author.address);
+    expect(Object.keys(signing.chainSigning)).toEqual(['signers']);
     const log = lines.join('\n');
     expect(log).toContain('external signer');
     expect(log).toContain(payers[0].address);
@@ -152,7 +154,8 @@ describe('daemon EVM signing', () => {
     });
     expect(signing.mode).toBe('remote');
     if (signing.mode !== 'remote') return;
-    expect(signing.chainSigning.authors).toBeUndefined();
+    expect(signing.authorSigners).toBeUndefined();
+    expect(Object.keys(signing.chainSigning)).toEqual(['signers']);
     expect(lines.join('\n')).toContain('Author keys: none configured');
   });
 

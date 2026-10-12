@@ -182,7 +182,7 @@ describe('RFC-64 unregistered replica authority', () => {
       config: {
         rfc64CatalogDeploymentProfile: DEPLOYMENT,
         chainAdapter: new ExternallySignedNoChain(),
-        chainConfig: { rpcUrl: 'http://127.0.0.1:1', hubAddress: HUB, authors: remote.authors },
+        authorSigners: remote.authors,
       },
     });
     const owner = EXTERNAL_AUTHOR.address.toLowerCase();
