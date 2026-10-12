@@ -15,6 +15,7 @@ import { RemoteSignerError } from '../src/remote-signer-errors.js';
 import { RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
 import {
   InsufficientPublisherFundsError,
+  isCausedByRemoteSigner,
   isHubStaleError,
   isTooLowAllowanceError,
 } from '../src/evm-adapter-errors.js';
@@ -72,7 +73,15 @@ async function adapterFor(fake: FakeSigner): Promise<any> {
 describe('contract recovery never re-signs after a signer refusal', () => {
   it('never reads a signer refusal, or an error wrapping one, as a recoverable revert', () => {
     const refusal = new RemoteSignerError('REMOTE_SIGNER_REJECTED', `Remote signer at unix:/s rejected eth_signTransaction: ${REFUSAL}`);
-    for (const err of [refusal, new Error(`publish failed: ${REFUSAL}`, { cause: refusal })]) {
+    // Directly, as a cause, and where ethers wraps an RPC failure (its error payload, its request info).
+    const wrapped = [
+      refusal,
+      new Error(`publish failed: ${REFUSAL}`, { cause: refusal }),
+      Object.assign(new Error(`could not coalesce error: ${REFUSAL}`), { error: refusal }),
+      Object.assign(new Error(`execution reverted: ${REFUSAL}`), { info: { error: refusal } }),
+    ];
+    for (const err of wrapped) {
+      expect(isCausedByRemoteSigner(err)).toBe(true);
       expect(isTooLowAllowanceError(err)).toBe(false);
       expect(isHubStaleError(err)).toBe(false);
     }
@@ -81,6 +90,12 @@ describe('contract recovery never re-signs after a signer refusal', () => {
     expect(isTooLowAllowanceError(Object.assign(new Error('call exception'), { revert: { name: 'TooLowAllowance' } }))).toBe(true);
     expect(isHubStaleError(new Error('execution reverted: UnauthorizedAccess(Only Contracts in Hub)'))).toBe(true);
     expect(isHubStaleError('Only Contracts in Hub')).toBe(false);
+    // A wrapper that refers back to itself is walked once.
+    const looping: Error & { cause?: unknown } = new Error('execution reverted: TooLowAllowance');
+    looping.cause = looping;
+    expect(isCausedByRemoteSigner(looping)).toBe(false);
+    expect(isTooLowAllowanceError(looping)).toBe(true);
+    expect(isCausedByRemoteSigner(Object.assign(looping, { error: refusal }))).toBe(true);
   });
 
   it('asks for one publish signature and no approval when the signer refuses with an allowance revert text', async () => {

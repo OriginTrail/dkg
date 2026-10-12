@@ -18,20 +18,6 @@ import {
 import { loadAbi, loadVendoredAbis } from './evm-adapter-abi.js';
 import { isRemoteSignerError } from './remote-signer-errors.js';
 
-/**
- * True when `err`, or an error it wraps, is a failure of an external signer.
- * Such a failure is final: no contract-error recovery may read its text as a
- * revert and ask the signer for another signature.
- */
-export function isCausedByRemoteSigner(err: unknown): boolean {
-  let current = err;
-  for (let depth = 0; depth < 8 && typeof current === 'object' && current !== null; depth += 1) {
-    if (isRemoteSignerError(current)) return true;
-    current = (current as { cause?: unknown }).cause;
-  }
-  return false;
-}
-
 export function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   try { return JSON.stringify(err); } catch { return String(err); }
@@ -68,6 +54,19 @@ function* wrappedRpcErrorRecords(err: unknown): Generator<Record<string, unknown
       pending.push({ value: record[key], depth: depth + 1 });
     }
   }
+}
+
+/**
+ * True when `err`, or an error it wraps anywhere in the wrapper graph the
+ * selectors here walk, is a failure of an external signer. Such a failure is
+ * final: no contract-error recovery may read its text as a revert and ask the
+ * signer for another signature.
+ */
+export function isCausedByRemoteSigner(err: unknown): boolean {
+  for (const record of wrappedRpcErrorRecords(err)) {
+    if (isRemoteSignerError(record)) return true;
+  }
+  return false;
 }
 
 export function errorStatus(err: unknown): number | undefined {
