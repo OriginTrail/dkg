@@ -2074,6 +2074,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       !state
       || state.membershipHash !== membershipHash
       || state.recipientRouteHash !== recipientRouteHash
+      || state.chainKeyMatchesIndex !== true
     ) {
       const pruned = this.prunePendingSenderKeysForEpochRotation({
         contextGraphId: input.contextGraphId,
@@ -2160,6 +2161,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         subGraphName: input.subGraphName,
         recipients: input.recipients,
       }),
+      chainKeyMatchesIndex: true,
       chainKey,
       nextMessageIndex: 0,
       senderSigningSecretKey: senderSigningKeypair.secretKey,

@@ -26,7 +26,11 @@ import {
   DKGAgent,
   type AgentKeyRecord,
 } from '../src/index.js';
-import { swmSenderStateKey } from '../src/dkg-agent-swm-state.js';
+import {
+  deserializeSwmSenderSendState,
+  serializeSwmSenderSendState,
+  swmSenderStateKey,
+} from '../src/dkg-agent-swm-state.js';
 import type { LocalSwmSenderKeySendState } from '../src/dkg-agent-types.js';
 import type { WorkspaceAgentRecipient } from '@origintrail-official/dkg-publisher';
 import type { ReliableSendResult } from '../src/p2p/messenger.js';
@@ -238,5 +242,47 @@ describe('SWM Sender Key: shares that overlap', () => {
       opened.push(index);
     }
     expect(opened).toEqual([0, 3, 1, 4, 2, 5]);
+  });
+
+  it('replaces, once, an epoch saved before the index and the key were advanced together', async () => {
+    const rig = await senderWithOneMember('sender-key-overlap-saved-state');
+
+    const first = await rig.share('first');
+    expect(rig.sendState().chainKeyMatchesIndex).toBe(true);
+
+    // What a node holds after an upgrade: an epoch whose saved state says
+    // nothing about how it was advanced. Its key may be behind its index, and
+    // no recipient can open a message from such a pair.
+    delete rig.sendState().chainKeyMatchesIndex;
+    rig.sendState().nextMessageIndex += 3;
+
+    const replaced = await rig.share('after-upgrade');
+    expect(replaced.epochId).not.toBe(first.epochId);
+    expect(uint64ForProto(replaced.messageIndex)).toBe(0);
+    expect(rig.sendState().chainKeyMatchesIndex).toBe(true);
+    const secret = await rig.memberSecretFor(replaced.epochId);
+    const result = await decryptSwmSenderKeyMessage({
+      chainKey: secret.chainKey,
+      message: replaced,
+      senderSigningPublicKey: secret.senderSigningPublicKey,
+    });
+    expect(text(result.plaintext)).toBe('after-upgrade');
+
+    const next = await rig.share('next');
+    expect(next.epochId).toBe(replaced.epochId);
+    expect(uint64ForProto(next.messageIndex)).toBe(1);
+  });
+
+  it('keeps the mark across a save and reads saved state without it as unmarked', async () => {
+    const rig = await senderWithOneMember('sender-key-overlap-persistence');
+    await rig.share('first');
+
+    const saved = serializeSwmSenderSendState(rig.sendState());
+    expect(deserializeSwmSenderSendState(saved).chainKeyMatchesIndex).toBe(true);
+
+    const savedByAnEarlierBuild = { ...saved };
+    delete savedByAnEarlierBuild.chainKeyMatchesIndex;
+    expect(deserializeSwmSenderSendState(savedByAnEarlierBuild).chainKeyMatchesIndex).toBeUndefined();
+    expect(deserializeSwmSenderSendState({ ...saved, chainKeyMatchesIndex: 'yes' }).chainKeyMatchesIndex).toBeUndefined();
   });
 });
