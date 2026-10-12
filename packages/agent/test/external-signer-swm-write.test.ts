@@ -11,7 +11,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
-import { MockChainAdapter, connectRemoteSigners } from '@origintrail-official/dkg-chain';
+import { MockChainAdapter, connectRemoteSigners, type OperationalSigning } from '@origintrail-official/dkg-chain';
 import {
   Logger,
   computeGossipSigningPayload,
@@ -35,8 +35,8 @@ const REFUSAL = 'message signing refused by policy';
 
 /** A mock chain whose operational wallets sign through an external signer, as it reports. */
 class ExternallySignedMockChain extends MockChainAdapter {
-  usesExternalSigner(): boolean {
-    return true;
+  operationalSigning(): OperationalSigning {
+    return { external: true, payerAddresses: [this.signerAddress] };
   }
 }
 

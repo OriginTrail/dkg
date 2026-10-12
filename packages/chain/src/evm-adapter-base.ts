@@ -36,6 +36,7 @@ import type {
   KnowledgeAssetUpdateContext,
   V10PublishParams,
   OnChainPublishResult,
+  OperationalSigning,
   PreBroadcastSignal,
   SignedTransactionEnvelope,
   BrowserWalletRpcMethod,
@@ -3032,9 +3033,9 @@ export class EVMChainAdapterBase {
     return operationalPrivateKeyOf(this.signer);
   }
 
-  /** Whether the operational wallets sign through an external signer (one source signs for the whole pool). */
-  usesExternalSigner(): boolean {
-    return isExternalEvmSigner(this.signer);
+  /** How the operational wallets sign (one source signs for the whole pool), and which they are. */
+  operationalSigning(): OperationalSigning {
+    return { external: isExternalEvmSigner(this.signer), payerAddresses: this.getSignerAddresses() };
   }
 
   protected walletKeyHash(address: string): string {

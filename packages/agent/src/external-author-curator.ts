@@ -21,7 +21,7 @@ import { externalAuthorSignerFor, signsThroughExternalSigner, type ExternalAutho
  */
 export async function isExternalAuthorCurator(
   config: ExternalAuthorConfig | undefined,
-  chain: Pick<ChainAdapter, 'usesExternalSigner'> | undefined,
+  chain: Pick<ChainAdapter, 'operationalSigning'> | undefined,
   curator: string,
   registrationSigner: string,
 ): Promise<boolean> {

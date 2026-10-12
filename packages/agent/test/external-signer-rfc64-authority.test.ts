@@ -8,7 +8,7 @@
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
-import { NoChainAdapter, connectRemoteSigners } from '@origintrail-official/dkg-chain';
+import { NoChainAdapter, connectRemoteSigners, type OperationalSigning } from '@origintrail-official/dkg-chain';
 import {
   SYSTEM_CONTEXT_GRAPHS,
   contextGraphDataGraphUri,
@@ -40,8 +40,8 @@ const HUB = '0x3333333333333333333333333333333333333333';
 
 /** The chain adapter of a node whose operational wallets sign through an external signer. */
 class ExternallySignedNoChain extends NoChainAdapter {
-  usesExternalSigner(): boolean {
-    return true;
+  operationalSigning(): OperationalSigning {
+    return { external: true, payerAddresses: [] };
   }
 }
 

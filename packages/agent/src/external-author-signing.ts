@@ -9,7 +9,7 @@
  * for it) whose author attestations the node requests from the signer.
  */
 import { ethers } from 'ethers';
-import type { AuthorSigner, ChainAdapter, ExternalAuthorSigners } from '@origintrail-official/dkg-chain';
+import { operationalSigningOf, type AuthorSigner, type ChainAdapter, type ExternalAuthorSigners } from '@origintrail-official/dkg-chain';
 import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
 import type { AgentKeyRecord } from './agent-keystore.js';
 import type { DKGAgent } from './dkg-agent.js';
@@ -24,15 +24,8 @@ export interface ExternalAuthorConfig {
  * configured external signers or was given it. Its paying wallets then never
  * author an asset.
  */
-export function signsThroughExternalSigner(chain: Pick<ChainAdapter, 'usesExternalSigner'> | undefined): boolean {
-  return chain?.usesExternalSigner?.() === true;
-}
-
-/** The payer accounts of a node that signs through an external signer, as its chain adapter lists them. */
-export function externalPayerAddresses(chain: ChainAdapter | undefined): string[] {
-  if (!signsThroughExternalSigner(chain)) return [];
-  const listed = (chain as unknown as { getSignerAddresses?: () => unknown }).getSignerAddresses?.();
-  return Array.isArray(listed) ? listed.filter((address): address is string => typeof address === 'string') : [];
+export function signsThroughExternalSigner(chain: Pick<ChainAdapter, 'operationalSigning'> | undefined): boolean {
+  return operationalSigningOf(chain)?.external === true;
 }
 
 const log = new Logger('DKGAgent');
@@ -107,7 +100,7 @@ export async function externalAuthorGossipSigner(
 export async function registerExternalDefaultAgent(
   agent: DKGAgent,
   config: ExternalAuthorConfig | undefined,
-  chain: Pick<ChainAdapter, 'usesExternalSigner'> | undefined,
+  chain: Pick<ChainAdapter, 'operationalSigning'> | undefined,
   name: string,
   framework?: string,
 ): Promise<string | undefined> {

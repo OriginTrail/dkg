@@ -21,6 +21,7 @@ import { connectConfiguredRemoteSigners, resolveChainSignerConfig } from '../src
 import { RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
 import { OperationalKeyUnavailableError, isExternalEvmSigner } from '../src/evm-signer.js';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
+import { operationalSigningOf } from '../src/chain-adapter.js';
 import { recorder } from './rpc-failover-test-helpers.js';
 import type { PreparedTransaction } from '../src/rpc-failover-client.js';
 import type { SignedTransactionEnvelope } from '../src/chain-adapter.js';
@@ -932,7 +933,8 @@ describe('EVMChainAdapter with external signers', () => {
       expect(adapter.getSignerAddresses()).toEqual([WALLET_A.address, WALLET_B.address]);
       expect(adapter.getSignerAddress()).toBe(WALLET_A.address);
       expect(() => adapter.getOperationalPrivateKey()).toThrow(OperationalKeyUnavailableError);
-      expect(adapter.usesExternalSigner()).toBe(true);
+      expect(adapter.operationalSigning()).toEqual({ external: true, payerAddresses: [WALLET_A.address, WALLET_B.address] });
+      expect(operationalSigningOf(adapter)).toEqual(adapter.operationalSigning());
       expect(adapter.getACKSignerKey()).toBeUndefined();
       const signature = await adapter.signTypedDataAs(WALLET_B.address, DOMAIN, TYPES, VALUE);
       expect(signature).toBe(await WALLET_B.signTypedData(DOMAIN, TYPES, VALUE));
@@ -965,7 +967,10 @@ describe('EVMChainAdapter with external signers', () => {
     const adapter = new EVMChainAdapter({ ...base, privateKey: KEY_C, allowNoAdminSigner: true });
     try {
       expect(adapter.getOperationalPrivateKey()).toBe(KEY_C);
-      expect(adapter.usesExternalSigner()).toBe(false);
+      expect(adapter.operationalSigning()).toEqual({ external: false, payerAddresses: [new ethers.Wallet(KEY_C).address] });
+      // An adapter without the capability does not report its signing; none is assumed.
+      expect(operationalSigningOf({})).toBeUndefined();
+      expect(operationalSigningOf(undefined)).toBeUndefined();
       expect(adapter.getACKSignerKey()).toBe(KEY_C);
     } finally {
       adapter.destroy();

@@ -18,7 +18,9 @@ import {
   EVMChainAdapter,
   MockChainAdapter,
   connectRemoteSigners,
+  operationalSigningOf,
   type ExternalAuthorSigners,
+  type OperationalSigning,
   type RemoteSigners,
 } from '@origintrail-official/dkg-chain';
 import {
@@ -86,8 +88,8 @@ function silentLog() {
 
 /** A mock chain whose operational wallets sign through an external signer, as it reports. */
 class ExternallySignedMockChain extends MockChainAdapter {
-  usesExternalSigner(): boolean {
-    return true;
+  operationalSigning(): OperationalSigning {
+    return { external: true, payerAddresses: [this.signerAddress] };
   }
 }
 
@@ -98,7 +100,7 @@ async function stubAgent(remote: RemoteSigners, store = new OxigraphStore()) {
     getEvmChainId: async () => 31337n,
     getKnowledgeAssetsLifecycleAddress: async () => KAV_ADDRESS,
     hasContractCode: async () => false,
-    usesExternalSigner: () => true,
+    operationalSigning: () => ({ external: true, payerAddresses: [payer.address] }),
   };
   agent.store = store;
   agent.log = silentLog();
@@ -473,19 +475,31 @@ describe('external signer author keys', () => {
   it('decides external signing from the chain adapter, however it was made', async () => {
     const { remote } = await externalSigners();
     const authorsOnly = { chainConfig: { authors: remote.authors } };
-    const external = { usesExternalSigner: () => true };
+    const external = { operationalSigning: () => ({ external: true, payerAddresses: [payer.address] }) };
     expect(signsThroughExternalSigner(external)).toBe(true);
-    expect(signsThroughExternalSigner({ usesExternalSigner: () => false })).toBe(false);
+    expect(signsThroughExternalSigner({ operationalSigning: () => ({ external: false, payerAddresses: [] }) })).toBe(false);
+    // An adapter that does not report its operational signing is taken to sign locally.
     expect(signsThroughExternalSigner({})).toBe(false);
     expect(signsThroughExternalSigner(undefined)).toBe(false);
     // Configured signers build the agent's own adapter, which then says so; a supplied adapter brings its own wallets.
     const built = constructConfiguredChainAdapter({
       chainConfig: { rpcUrl: 'http://127.0.0.1:1', hubAddress: '0x00000000000000000000000000000000000000d4', signers: remote.operational },
     });
+    // The same signers given in an adapter the node is supplied report the same payers.
+    const supplied = new EVMChainAdapter({
+      rpcUrl: 'http://127.0.0.1:1',
+      hubAddress: '0x00000000000000000000000000000000000000d4',
+      signers: remote.operational,
+      allowNoAdminSigner: true,
+    });
     try {
       expect(signsThroughExternalSigner(built.chain)).toBe(true);
+      expect(operationalSigningOf(built.chain)).toEqual({ external: true, payerAddresses: [payer.address] });
+      const injected = constructConfiguredChainAdapter({ chainAdapter: supplied }).chain;
+      expect(operationalSigningOf(injected)).toEqual(operationalSigningOf(built.chain));
     } finally {
       (built.chain as EVMChainAdapter).destroy();
+      supplied.destroy();
     }
     expect(() => constructConfiguredChainAdapter({
       chainAdapter: new MockChainAdapter('mock:31337', payer.address),

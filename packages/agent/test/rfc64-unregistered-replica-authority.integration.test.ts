@@ -13,6 +13,7 @@ import {
   NoChainAdapter,
   connectRemoteSigners,
   type ContextGraphAuthoritySnapshot,
+  type OperationalSigning,
 } from '@origintrail-official/dkg-chain';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
@@ -53,8 +54,8 @@ const EXTERNAL_AUTHOR = new ethers.Wallet(HARDHAT_KEYS.EXTRA2);
 
 /** The chain adapter of a node whose operational wallets sign through an external signer. */
 class ExternallySignedNoChain extends NoChainAdapter {
-  usesExternalSigner(): boolean {
-    return true;
+  operationalSigning(): OperationalSigning {
+    return { external: true, payerAddresses: [] };
   }
 }
 
