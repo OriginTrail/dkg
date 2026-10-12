@@ -126,7 +126,7 @@ import {
   type LargeLiteralStorageConfig,
 } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type AuthorSigner, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
-import { signAuthorTypedDataCompact, type WorkspaceGossipSigner } from './external-author-signing.js';
+import { externalSwmSender, signAuthorTypedDataCompact, type WorkspaceGossipSigner } from './external-author-signing.js';
 import { externalAuthorSignerFor, heldAuthorSigner, registeredAgentAuthorSigner } from './author-signer.js';
 import  {
   DKGPublisher,
@@ -3999,7 +3999,8 @@ export class PublishMethods extends DKGAgentBase {
       ?? this.peerId;
 
     await this.loadSwmSenderKeyState();
-    const sender = this.getLocalSigningAgentForAddress(senderAddress);
+    const sender = this.getLocalSigningAgentForAddress(senderAddress)
+      ?? await externalSwmSender(this.config?.authorSigners, this.localAgents, senderAddress);
     if (!sender) {
       throw new Error(
         `${logPrefix}: curated CG ${contextGraphId}: cannot bootstrap swm-sender-key — ` +

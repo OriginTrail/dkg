@@ -69,6 +69,17 @@ function messageSignatures(fake: FakeSigner, token: string): FakeSignerRequest[]
   ));
 }
 
+/** `eth_sign` requests over a bare 32-byte digest. */
+function digestSignatures(fake: FakeSigner): FakeSignerRequest[] {
+  return fake.calls('eth_sign').filter((request) => signedBytes(request).length === 32);
+}
+
+/** The text of the first length-framed field of an `eth_sign` request's data. */
+function firstFramedField(request: FakeSignerRequest): string {
+  const signed = signedBytes(request);
+  return new TextDecoder().decode(signed.subarray(4, 4 + new DataView(signed.buffer, signed.byteOffset).getUint32(0)));
+}
+
 /** A keyless edge whose payer and author keys are served by its own fake signer. */
 async function keylessEdge(
   name: string,
@@ -191,8 +202,11 @@ describe('catch-up sync of a node that signs through an external signer', () => 
     }
     const contextGraphs = new Set(requests.map((request) => (request.params[1] as { contextGraphId: string }).contextGraphId));
     expect(contextGraphs).toEqual(new Set([SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, PUBLIC_CG]));
-    // Every message signature was such a request: no digest was signed blind, and payers signed no message.
-    expect(messageSignatures(edge.fake, AUTHOR_TOKEN)).toEqual(requests);
+    // Besides these, the author key signed one message, the framed proof binding its
+    // workspace encryption key: no digest was signed blind, and payers signed no message.
+    const others = messageSignatures(edge.fake, AUTHOR_TOKEN).filter((request) => request.method !== 'dkg_signSyncRequest');
+    expect(others.map((request) => [request.method, firstFramedField(request)])).toEqual([['eth_sign', 'domain']]);
+    expect(digestSignatures(edge.fake)).toEqual([]);
     expect(messageSignatures(edge.fake, PAYER_TOKEN)).toEqual([]);
   });
 
@@ -224,7 +238,7 @@ describe('catch-up sync of a node that signs through an external signer', () => 
     expect(await names(plain.agent)).toEqual(['"Caught up"']);
     // One attempt with the method, then each request's 32-byte digest through eth_sign.
     expect(plain.fake.calls('dkg_signSyncRequest')).toHaveLength(1);
-    const digests = plain.fake.calls('eth_sign');
+    const digests = digestSignatures(plain.fake);
     expect(digests.length).toBeGreaterThan(0);
     for (const request of digests) {
       expect(request.authorization).toBe(`Bearer ${AUTHOR_TOKEN}`);
@@ -258,6 +272,6 @@ describe('catch-up sync of a node that signs through an external signer', () => 
     );
     expect(signer).toBe(new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address);
     expect(await chainOf(creator).verifySyncIdentity!(signer, identityId)).toBe(true);
-    expect(operational.fake.calls('eth_sign')).toEqual([]);
+    expect(digestSignatures(operational.fake)).toEqual([]);
   }, 120_000);
 });

@@ -206,7 +206,7 @@ describe('RFC-64 unregistered replica authority', () => {
     // The owner's own request looks its author key up and has the signer sign the seed.
     await publisher.createContextGraph({ id: `${owner}/owner-request`, name: 'Owner request', accessPolicy: 0 });
     expect(lookups.some((lookup) => lookup.mock.calls.length > 0)).toBe(true);
-    const signed = fake.calls('eth_sign');
+    const signed = fake.requests.slice(requestsBefore).filter((request) => request.method === 'eth_sign');
     expect(signed).toHaveLength(1);
     expect(signed[0]!.authorization).toBe(`Bearer ${EXTERNAL_AUTHOR_TOKEN}`);
     await expect(publisher.contextGraphExists(`${owner}/owner-request`)).resolves.toBe(true);

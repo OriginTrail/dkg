@@ -143,14 +143,18 @@ describe('publish journey of a node that signs through an external signer', () =
     expect(published.status).toBe('confirmed');
 
     // The shared-memory envelope was signed by the author key through the
-    // signer, over the four length-framed fields; payers signed transactions.
-    const messages = fake.calls('eth_sign');
+    // signer, over the four length-framed fields (the other message it signed
+    // is the proof binding its workspace encryption key, at registration);
+    // payers signed transactions.
+    const firstField = (request: { params: unknown[] }): string => {
+      const signed = ethers.getBytes(String(request.params[1]));
+      return new TextDecoder().decode(signed.subarray(4, 4 + new DataView(signed.buffer, signed.byteOffset).getUint32(0)));
+    };
+    expect(fake.calls('eth_sign').map(firstField).sort()).toEqual(['domain', 'share-write']);
+    const messages = fake.calls('eth_sign').filter((request) => firstField(request) === 'share-write');
     expect(messages).toHaveLength(1);
     expect(messages[0].authorization).toBe(`Bearer ${AUTHOR_TOKEN}`);
     expect(ethers.getAddress(String(messages[0].params[0]))).toBe(author.address);
-    const signed = ethers.getBytes(String(messages[0].params[1]));
-    const type = new TextDecoder().decode(signed.subarray(4, 4 + new DataView(signed.buffer, signed.byteOffset).getUint32(0)));
-    expect(type).toBe('share-write');
     expect(fake.requests.filter((request) => request.authorization === `Bearer ${PAYER_TOKEN}` && request.method.includes('sign'))
       .every((request) => request.method === 'eth_signTransaction')).toBe(true);
   }, 180_000);

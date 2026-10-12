@@ -263,7 +263,7 @@ import {
   type KeystoreEntry,
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
-import { externalAuthorGossipSigner, localGossipSigner, signGossipEnvelopeInTime, type WorkspaceGossipSigner } from './external-author-signing.js';
+import { externalAuthorGossipSigner, externalSwmSender, localGossipSigner, signGossipEnvelopeInTime, signSwmSenderKeyPackage, type SwmSenderSigningAgent, type WorkspaceGossipSigner } from './external-author-signing.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
@@ -2040,7 +2040,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       resolution = currentResolution;
     }
     const ctx = createOperationContext('share', input.operationId);
-    const sender = this.getLocalSigningAgentForAddress(input.senderAgentAddress);
+    const sender = this.getLocalSigningAgentForAddress(input.senderAgentAddress)
+      ?? await externalSwmSender(this.config?.authorSigners, this.localAgents, input.senderAgentAddress);
     if (!sender) {
       throw new Error(`Cannot create SWM Sender Key epoch: no local custodial signing key for agent ${input.senderAgentAddress}`);
     }
@@ -2137,7 +2138,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async createAndDistributeSwmSenderKeyEpoch(this: DKGAgent, input: {
     contextGraphId: string;
     subGraphName?: string;
-    sender: AgentKeyRecord & { privateKey: string };
+    sender: SwmSenderSigningAgent;
     recipients: readonly WorkspaceAgentRecipient[];
     membershipHash: string;
     ctx: OperationContext;
@@ -2193,7 +2194,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         const pkg = await this.createSignedSwmSenderKeyPackage({
           state,
           recipient,
-          senderPrivateKey: input.sender.privateKey,
+          sender: input.sender,
         });
         const packageBytes = encodeSwmSenderKeyPackage(pkg);
 
@@ -2974,7 +2975,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async createSignedSwmSenderKeyPackage(this: DKGAgent, input: {
     state: LocalSwmSenderKeySendState;
     recipient: WorkspaceAgentRecipient;
-    senderPrivateKey: string;
+    sender: SwmSenderSigningAgent;
   }): Promise<SwmSenderKeyPackageMsg> {
     if (!input.recipient.publicKeyBytes) {
       throw new Error(`Missing public encryption key bytes for DKG agent ${input.recipient.agentAddress}`);
@@ -2993,8 +2994,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       senderSigningPublicKey: input.state.senderSigningPublicKey,
       recipientPublicKey: input.recipient.publicKeyBytes,
     });
-    const signature = await new ethers.Wallet(input.senderPrivateKey)
-      .signMessage(computeSwmSenderKeyPackageAAD(pkg));
+    const signature = await signSwmSenderKeyPackage(input.sender, computeSwmSenderKeyPackageAAD(pkg));
     return { ...pkg, signature: ethers.getBytes(signature) };
   }
 
