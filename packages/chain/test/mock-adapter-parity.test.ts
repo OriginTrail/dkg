@@ -239,9 +239,10 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // mock has no ERC-20 allowance surface to mirror.
   'confirmAllowanceVisible',
   // TS-private populate+sign helper with shared stale-allowance recovery
-  // (#888) backing both V10 write paths (publish + update); the mock has no
-  // populate/gas-estimation surface to mirror.
+  // (#888) backing both V10 write paths (publish + update), and its
+  // preparation step; the mock has no populate/gas-estimation surface to mirror.
   'populateAndSignV10WithAllowanceRecovery',
+  'prepareV10WithAllowanceRecovery',
   // TS-private shared dispatch for the two V10 write paths (#953). Serializes
   // the populate→sign→broadcast→confirm nonce window per operational wallet
   // via KeyedSerializer. The mock has no nonce/broadcast surface to mirror —

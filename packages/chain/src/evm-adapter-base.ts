@@ -1969,14 +1969,10 @@ export class EVMChainAdapterBase {
   }
 
   /**
-   * #888: prepare a V10 write tx (shared by publish + update) with a one-shot
-   * recovery for a stale-RPC `TooLowAllowance` revert, then sign it once. Gas
-   * estimation during preparation can read a stale TRAC allowance and revert
-   * even though the approve succeeded; this is strictly pre-broadcast, so on that
-   * ONE revert we force a fresh approve (`ensureV10ApproveTrac(force=true)`) and
-   * prepare again exactly once. Any other error, or a second `TooLowAllowance`,
-   * propagates. The signature comes after every retry and recovery, so a signer
-   * failure is never read as a revert or an endpoint failure.
+   * #888: prepare and sign a V10 write tx (shared by publish + update): the
+   * preparation and its allowance recovery first, then the one signature. The
+   * signature comes after every retry and recovery, so a signer failure is never
+   * read as a revert or an endpoint failure.
    */
   protected async populateAndSignV10WithAllowanceRecovery(
     signer: EvmSigner,
@@ -1988,6 +1984,37 @@ export class EVMChainAdapterBase {
     reapproveLabel: string,
     approvalSender: ContractWriteSender = this.sendContractTransaction.bind(this),
   ): Promise<SignedTransactionEnvelope> {
+    return this.signPreparedTransaction(await this.prepareV10WithAllowanceRecovery(
+      signer,
+      kaContract,
+      method,
+      methodParams,
+      kav10Address,
+      tokenAmount,
+      reapproveLabel,
+      approvalSender,
+    ));
+  }
+
+  /**
+   * #888: prepare a V10 write tx (shared by publish + update) with a one-shot
+   * recovery for a stale-RPC `TooLowAllowance` revert, and return the prepared,
+   * unsigned tx of the attempt that succeeded. Gas estimation during preparation
+   * can read a stale TRAC allowance and revert even though the approve
+   * succeeded; this is strictly pre-broadcast, so on that ONE revert we force a
+   * fresh approve (`ensureV10ApproveTrac(force=true)`) and prepare again exactly
+   * once. Any other error, or a second `TooLowAllowance`, propagates.
+   */
+  protected async prepareV10WithAllowanceRecovery(
+    signer: EvmSigner,
+    kaContract: Contract,
+    method: 'publish' | 'update',
+    methodParams: unknown,
+    kav10Address: string,
+    tokenAmount: bigint,
+    reapproveLabel: string,
+    approvalSender: ContractWriteSender,
+  ): Promise<PreparedTransaction> {
     // Per-endpoint preparation failover lives in the shared
     // `prepareAcrossProviders` (so a 429ing primary can't fail-fast the
     // publish); the #888 stale-allowance recovery stays a strict ONE-SHOT. OUTER
@@ -1996,15 +2023,14 @@ export class EVMChainAdapterBase {
     // CALL_EXCEPTION (non-retryable), so the inner loop does NOT fail over on it —
     // it propagates up here. The latch is never reset per endpoint, so at most
     // ONE forced approve fires per publish regardless of endpoints tried. Only the
-    // one signed tx is broadcast; the whole thing runs inside the per-wallet
-    // `SignerTxSerializer` (#953), strictly pre-broadcast / pre-WAL.
+    // one prepared tx is signed and broadcast; the whole thing runs inside the
+    // per-wallet `SignerTxSerializer` (#953), strictly pre-broadcast / pre-WAL.
     let forcedReapprove = false;
-    let prepared: PreparedTransaction | undefined;
-    while (prepared === undefined) {
+    for (;;) {
       try {
-        for (let preparationPass = 0; prepared === undefined; preparationPass += 1) {
+        for (let preparationPass = 0; ; preparationPass += 1) {
           try {
-            prepared = await this.prepareAcrossProviders(
+            return await this.prepareAcrossProviders(
               kaContract,
               method,
               [methodParams],
@@ -2050,7 +2076,6 @@ export class EVMChainAdapterBase {
         throw err; // any other error, or a SECOND TooLowAllowance, propagates
       }
     }
-    return this.signPreparedTransaction(prepared);
   }
 
   protected async sendSignedTransactionAndWait(
@@ -2178,9 +2203,9 @@ export class EVMChainAdapterBase {
   /**
    * Thin delegator to `this.rpcFailover.prepareTransaction` — the per-endpoint
    * preparation loop (which runs `prepareSignerTransaction` through the injected
-   * hook). Called by `populateAndSignV10WithAllowanceRecovery` (the
-   * `forcedReapprove` latch owner) and `sendContractTransaction`, which sign the
-   * prepared tx once afterwards. STRICTLY pre-signing — the caller owns the
+   * hook). Called by `prepareV10WithAllowanceRecovery` (the `forcedReapprove`
+   * latch owner) and `sendContractTransaction`, whose callers sign the prepared
+   * tx once afterwards. STRICTLY pre-signing — the caller owns the
    * signature, the WAL split and the broadcast.
    */
   protected async prepareAcrossProviders(
