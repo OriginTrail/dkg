@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { isSyncTransportFailure } from './error-tags.js';
 
 /**
  * "This request cannot be served here right now": the reply of a sync responder
@@ -37,7 +38,7 @@ export function formatSyncNotServable(reason: SyncNotServableReason, retryAfterM
 const UNTYPED_STORE_DEADLINE = /exceeded its (?:store|server-side query) deadline/;
 const UNTYPED_TOO_LARGE = /snapshot exceeds per-snapshot (?:rows|estimated bytes) budget/;
 
-/** Read a not-servable reply from a sync failure; `null` for every other failure. */
+/** Read a not-servable text from a failure's message; `null` for every other message. */
 export function readSyncNotServable(error: unknown): SyncNotServable | null {
   const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
   const start = message.indexOf(SYNC_NOT_SERVABLE_PREFIX);
@@ -49,4 +50,13 @@ export function readSyncNotServable(error: unknown): SyncNotServable | null {
   const reason: SyncNotServableReason = /reason=too-large\b/.test(detail) ? 'too-large' : 'store-deadline';
   const retryAfter = /retry-after-ms=(\d{1,12})\b/.exec(detail);
   return retryAfter ? { reason, retryAfterMs: Number(retryAfter[1]) } : { reason };
+}
+
+/**
+ * A not-servable reply that came back from the peer: the failure of a request
+ * that was sent. The same words in a failure of this node's own making (building
+ * a request can read the local store) say nothing about the peer.
+ */
+export function readSyncNotServableReply(error: unknown): SyncNotServable | null {
+  return isSyncTransportFailure(error) ? readSyncNotServable(error) : null;
 }
