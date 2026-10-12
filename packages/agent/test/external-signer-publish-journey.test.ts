@@ -7,7 +7,8 @@
  * a knowledge asset into it. Every signature the node needs is requested from
  * the external signer. Its shares into an open graph, which has no signing
  * roster, are signed by its default agent's author key in the same way, so a
- * hosting core admits and replays them.
+ * hosting core admits and replays them, and so are the sync requests with
+ * which it bootstraps a core's public graph.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -48,6 +49,8 @@ const NAME = 'journey-asset';
 const ENTITY = 'urn:external-signer-journey:entity';
 const OPEN_CG = 'external-signer-open-journey';
 const OPEN_ENTITY = 'urn:external-signer-journey:open-entity';
+const CORE_CG = 'external-signer-core-graph';
+const CORE_ENTITY = 'urn:external-signer-journey:core-entity';
 const COMMITTED = ethers.parseEther('100000');
 
 let snapshotId: string;
@@ -203,5 +206,34 @@ describe('publish journey of a node that signs through an external signer', () =
       graphSuffix: '_shared_memory',
     });
     expect(replayed.bindings).toHaveLength(1);
+  }, 180_000);
+
+  it('bootstraps a core\'s public graph, its sync requests signed by the author key it holds no copy of', async () => {
+    // The payers have no on-chain identity, so a request is signed as the node's agent.
+    expect(await (edge as unknown as { chain: { getIdentityId(): Promise<bigint> } }).chain.getIdentityId()).toBe(0n);
+    await core.createContextGraph({ id: CORE_CG, name: 'Core public graph' });
+    const { onChainId } = await core.registerContextGraph(CORE_CG, { publishPolicy: 1 });
+    await core.share(CORE_CG, [{ subject: CORE_ENTITY, predicate: 'http://schema.org/name', object: '"Core entity"', graph: '' }]);
+    await bindPublicContextGraph(edge, CORE_CG, onChainId);
+
+    const before = fake.calls('eth_sign').length;
+    expect(await edge.syncSharedMemoryFromPeer(core.peerId, [CORE_CG])).toBeGreaterThan(0);
+    const synced = await edge.query(`SELECT ?name WHERE { <${CORE_ENTITY}> <http://schema.org/name> ?name }`, {
+      contextGraphId: CORE_CG,
+      graphSuffix: '_shared_memory',
+    });
+    expect(synced.bindings).toEqual([{ name: '"Core entity"' }]);
+
+    // The core admitted requests whose signatures recover to the agent; the
+    // author key signed each one's 32-byte digest through the signer.
+    const digests = fake.calls('eth_sign').slice(before);
+    expect(digests.length).toBeGreaterThan(0);
+    for (const request of digests) {
+      expect(request.authorization).toBe(`Bearer ${AUTHOR_TOKEN}`);
+      expect(ethers.getAddress(String(request.params[0]))).toBe(author.address);
+      expect(ethers.getBytes(String(request.params[1]))).toHaveLength(32);
+    }
+    expect(edge.getLocalAgentMode(author.address)).toBe('self-sovereign');
+    expect(edge.getCustodialAgentPrivateKey(author.address)).toBeUndefined();
   }, 180_000);
 });

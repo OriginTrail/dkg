@@ -1,0 +1,130 @@
+/**
+ * Authenticated sync requests made for an agent whose key the node does not
+ * hold. The claimed agent's signer (an author key of the external signer)
+ * signs the request digest wherever a key held on the node would, EIP-191 over
+ * the same 32-byte digest; its signature must recover to the claimed agent,
+ * and a key held on the node is used first. A payer never signs as an agent.
+ */
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ethers } from 'ethers';
+import { connectRemoteSigners } from '@origintrail-official/dkg-chain';
+import { buildSyncRequestEnvelope } from '../src/sync/auth/request-build.js';
+import { externalAgentSyncRequestSigner, type SyncRequestSigner } from '../src/sync/auth/request-signing.js';
+import { HARDHAT_KEYS } from '../../chain/test/hardhat-harness.js';
+import { startFakeRemoteSigner, type FakeSigner } from '../../chain/test/helpers/fake-remote-signer.js';
+
+const PAYER_TOKEN = 'sync-payer-credential-7d8e9f0a1b2c';
+const AUTHOR_TOKEN = 'sync-author-credential-2c1b0a9f8e7d';
+const agentWallet = new ethers.Wallet(HARDHAT_KEYS.EXTRA2);
+const otherWallet = new ethers.Wallet(HARDHAT_KEYS.EXTRA3);
+const payer = new ethers.Wallet(HARDHAT_KEYS.PUBLISHER);
+const DIGEST = ethers.getBytes(ethers.id('sync request digest'));
+
+type BuildParams = Parameters<typeof buildSyncRequestEnvelope>[0];
+
+function params(overrides: Partial<BuildParams> = {}): BuildParams {
+  return {
+    contextGraphId: 'public-graph',
+    offset: 0,
+    limit: 100,
+    includeSharedMemory: true,
+    targetPeerId: 'peer-target',
+    requesterPeerId: 'peer-requester',
+    needsAuth: true,
+    computeSyncDigest: () => DIGEST,
+    getIdentityId: async () => 0n,
+    claimedAgentAddress: agentWallet.address,
+    ...overrides,
+  };
+}
+
+async function build(overrides: Partial<BuildParams>): Promise<Record<string, string>> {
+  return JSON.parse(new TextDecoder().decode(await buildSyncRequestEnvelope(params(overrides))));
+}
+
+function signerOf(request: Record<string, string>): string {
+  return ethers.recoverAddress(ethers.hashMessage(DIGEST), {
+    r: request['requesterSignatureR']!,
+    yParityAndS: request['requesterSignatureVS']!,
+  });
+}
+
+const fakes: FakeSigner[] = [];
+afterEach(async () => {
+  while (fakes.length > 0) await fakes.pop()!.close();
+});
+
+describe('sync requests for an agent the node holds no key for', () => {
+  it('are signed over the request digest by the claimed agent\'s signer, which must recover to the agent', async () => {
+    const claimedAgentSigner = vi.fn<SyncRequestSigner>(async (digest) => agentWallet.signMessage(digest));
+    const request = await build({ claimedAgentSigner });
+    expect(claimedAgentSigner).toHaveBeenCalledWith(DIGEST);
+    expect(request['requesterIdentityId']).toBe('0');
+    expect(request['requesterAgentAddress']).toBe(agentWallet.address);
+    expect(signerOf(request)).toBe(agentWallet.address);
+
+    // A signature by another key is refused: no request is built.
+    await expect(build({ claimedAgentSigner: async (digest) => otherWallet.signMessage(digest) }))
+      .rejects.toThrow(`the signature does not recover to claimed agent ${agentWallet.address}`);
+    // Without a key or a signer, the request still cannot be authenticated.
+    await expect(build({})).rejects.toThrow(`missing signing key for claimed agent ${agentWallet.address}`);
+  });
+
+  it('use a key held on the node first, the node identity when it has one, and the signer for agent-signed requests', async () => {
+    const claimedAgentSigner = vi.fn<SyncRequestSigner>(async (digest) => agentWallet.signMessage(digest));
+    expect(signerOf(await build({ claimedAgentSigner, claimedAgentPrivateKey: agentWallet.privateKey })))
+      .toBe(agentWallet.address);
+    expect(claimedAgentSigner).not.toHaveBeenCalled();
+
+    const identitySignature = ethers.Signature.from(await otherWallet.signMessage(DIGEST));
+    const identity = await build({
+      claimedAgentSigner,
+      getIdentityId: async () => 7n,
+      signMessage: async () => ({ r: ethers.getBytes(identitySignature.r), vs: ethers.getBytes(identitySignature.yParityAndS) }),
+    });
+    expect(identity['requesterIdentityId']).toBe('7');
+    expect(claimedAgentSigner).not.toHaveBeenCalled();
+
+    // Member recovery and forced agent signatures are the agent's own, identity or not.
+    const recovery = await build({ claimedAgentSigner, recovery: true, getIdentityId: async () => 7n });
+    expect(recovery['requesterIdentityId']).toBe('0');
+    expect(signerOf(recovery)).toBe(agentWallet.address);
+    const forced = await build({ claimedAgentSigner, forceClaimedAgentSignature: true, authPurpose: 'purpose', authSelector: '0x12' });
+    expect(signerOf(forced)).toBe(agentWallet.address);
+    expect(claimedAgentSigner).toHaveBeenCalledTimes(2);
+    await expect(build({ recovery: true })).rejects.toThrow('missing claimed agent signing key');
+  });
+
+  it('are signed by an author key of the external signer, never by a payer', async () => {
+    const fake = await startFakeRemoteSigner({
+      credentials: [
+        { token: PAYER_TOKEN, keys: [payer.privateKey] },
+        { token: AUTHOR_TOKEN, keys: [agentWallet.privateKey] },
+      ],
+    });
+    fakes.push(fake);
+    const remote = await connectRemoteSigners({ url: fake.url, authToken: PAYER_TOKEN, author: { authToken: AUTHOR_TOKEN } });
+    try {
+      const config = { chainConfig: { authors: remote.authors } };
+      // Only for an agent the node holds no key for, and only with author keys configured.
+      expect(externalAgentSyncRequestSigner(config, { agentAddress: agentWallet.address, privateKey: agentWallet.privateKey }))
+        .toBeUndefined();
+      expect(externalAgentSyncRequestSigner(undefined, { agentAddress: agentWallet.address })).toBeUndefined();
+      expect(externalAgentSyncRequestSigner(config, undefined)).toBeUndefined();
+
+      const request = await build({ claimedAgentSigner: externalAgentSyncRequestSigner(config, { agentAddress: agentWallet.address }) });
+      expect(signerOf(request)).toBe(agentWallet.address);
+      const [signed] = fake.calls('eth_sign');
+      expect(signed!.authorization).toBe(`Bearer ${AUTHOR_TOKEN}`);
+      expect(signed!.params).toEqual([agentWallet.address.toLowerCase(), ethers.hexlify(DIGEST)]);
+
+      await expect(build({
+        claimedAgentAddress: payer.address,
+        claimedAgentSigner: externalAgentSyncRequestSigner(config, { agentAddress: payer.address }),
+      })).rejects.toThrow(`Cannot sign a sync request as ${payer.address}: it is not an author key of the external signer`);
+      expect(fake.calls('eth_sign')).toHaveLength(1);
+    } finally {
+      remote.destroy();
+    }
+  });
+});
