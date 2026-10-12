@@ -10,8 +10,8 @@
 #   2. write through that release, on every store backend;
 #   3. restart every node on the build under test with
 #      `devnet.sh restart-node N`, one node at a time, on the same data;
-#   4. require that every node starts, reports the new build, still serves what
-#      was written, and can publish and receive again.
+#   4. require that every node starts, reports the new version and build, still
+#      serves what was written, and can publish and receive again.
 #
 # IT OWNS THE DEVNET. A devnet that is running is stopped and replaced (its
 # node logs are copied to the results directory first). The devnet is left
@@ -43,7 +43,8 @@
 #   node must read.
 #
 # After the upgrade, without writing anything first:
-#     every node reports the commit of the build under test and its backend;
+#     every node reports the version and commit of the build under test and
+#     its backend;
 #     every read above still answers the same; every draft is still there;
 #     every member still lists both subscriptions; every writer still holds its
 #     queued publications as finalized.
@@ -193,6 +194,11 @@ NEW_COMMIT="$(BUILD_INFO="$REPO_ROOT/packages/cli/build-info.json" node -e '
 case "$NEW_COMMIT" in ''|unknown|uncommitted) NEW_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)" ;; esac
 [ -n "$NEW_COMMIT" ] || skip "cannot tell which commit the build under test is (no packages/cli/build-info.json and no git checkout)"
 [ -f "$REPO_ROOT/packages/cli/dist/cli.js" ] || skip "the build under test is not built (packages/cli/dist/cli.js is missing); run pnpm build first"
+# The version a node of the build under test reports: the CLI package's.
+NEW_VERSION="$(PACKAGE="$REPO_ROOT/packages/cli/package.json" node -e '
+  try { process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.env.PACKAGE, "utf8")).version ?? "")); }
+  catch { process.stdout.write(""); }')"
+[ -n "$NEW_VERSION" ] || skip "cannot read the version of the build under test from packages/cli/package.json"
 
 if [ "$FROM_REF" = "current" ]; then
   CONTROL=1
@@ -213,7 +219,7 @@ say "results: $RESULTS"
 if [ "$CONTROL" = "1" ]; then
   say "CONTROL RUN (DEVNET_UPGRADE_FROM=current): the build under test (${NEW_COMMIT:0:9}) is restarted on its own data; no upgrade is exercised"
 else
-  say "upgrade from $FROM_REF (${FROM_COMMIT:0:9}) to the build under test (${NEW_COMMIT:0:9})"
+  say "upgrade from $FROM_REF (${FROM_COMMIT:0:9}) to the build under test (v$NEW_VERSION ${NEW_COMMIT:0:9})"
 fi
 
 # All three store backends need Docker for two of them. Find out before the
@@ -246,10 +252,11 @@ wait_node_up() { # <node> <seconds>
   return 1
 }
 
-# Every node must report the expected commit and its backend.
-# <label> <expected commit> -> 0 when all six do; prints one line per node.
+# Every node must report the expected commit and its backend, and the expected
+# version when one is given.
+# <label> <expected commit> [expected version] -> 0 when all six do; prints one line per node.
 report_builds() {
-  local label="$1" expected="$2" n version commit backend role wrong=0
+  local label="$1" expected="$2" expected_version="${3:-}" n version commit backend role wrong=0
   for n in $(seq 1 "$NUM_NODES"); do
     version="$(status_field "$n" version)"; commit="$(status_field "$n" commit)"
     backend="$(status_field "$n" storeBackend)"; role="$(status_field "$n" nodeRole)"
@@ -261,6 +268,9 @@ report_builds() {
     say "  node $n ($role, $backend): v$version ${commit:0:9}${commit:40}"
     printf '%s\tnode%s\t%s\t%s\tv%s\t%s\n' "$label" "$n" "$role" "$backend" "$version" "$commit" >> "$RESULTS/builds.tsv"
     case "$commit" in "$expected"*) : ;; *) wrong=$((wrong + 1)); say "    expected commit ${expected:0:9}" ;; esac
+    if [ -n "$expected_version" ] && [ "$version" != "$expected_version" ]; then
+      wrong=$((wrong + 1)); say "    expected version $expected_version"
+    fi
     [ "$backend" = "$(expected_backend "$n")" ] || { wrong=$((wrong + 1)); say "    expected store backend $(expected_backend "$n")"; }
   done
   [ "$wrong" -eq 0 ]
@@ -615,7 +625,8 @@ for n in $(seq 1 "$NUM_NODES"); do
     *) stop_here "node $n answers on '${commit:0:9}' after its restart, not on the build under test (${NEW_COMMIT:0:9})" ;;
   esac
 done
-report_builds after "$NEW_COMMIT" || stop_here "not every node reports the build under test on its store backend after the upgrade"
+report_builds after "$NEW_COMMIT" "$NEW_VERSION" \
+  || stop_here "not every node reports the build under test (v$NEW_VERSION ${NEW_COMMIT:0:9}) on its store backend after the upgrade"
 
 # Every node has restarted and dialled its bootstrap peers as it came up. Give
 # the mesh a bounded time to complete and print what each node holds. It is
