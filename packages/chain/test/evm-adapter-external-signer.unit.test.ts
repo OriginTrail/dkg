@@ -57,6 +57,10 @@ async function signerRefusingTransactions(options: Partial<FakeSignerOptions> = 
 }
 
 /** The adapter with its protected transaction seams exposed to the test. */
+/** What both V10 write paths do in their serializer window: prepare with the shared recovery, then sign once. */
+const prepareAndSignV10 = async (adapter: any, ...args: unknown[]) =>
+  adapter.signPreparedTransaction(await adapter.prepareV10WithAllowanceRecovery(...args));
+
 async function adapterFor(fake: FakeSigner): Promise<any> {
   const { operational } = await connectRemoteSigners({ url: fake.url, authToken: TOKEN });
   const adapter = new EVMChainAdapter({
@@ -107,7 +111,7 @@ describe('contract recovery never re-signs after a signer refusal', () => {
     adapter.prepareAcrossProviders = async (_contract: unknown, _method: unknown, _args: unknown, signer: unknown) => (
       { transaction: TX, signer }
     );
-    await expect(adapter.populateAndSignV10WithAllowanceRecovery(adapter.signer, {}, 'publish', {}, KAV, 1n, 'publish approval'))
+    await expect(prepareAndSignV10(adapter, adapter.signer, {}, 'publish', {}, KAV, 1n, 'publish approval'))
       .rejects.toMatchObject({ code: 'REMOTE_SIGNER_REJECTED' });
     expect(fake.calls('eth_signTransaction')).toHaveLength(1);
     expect(approvals).toHaveLength(0);
@@ -121,7 +125,7 @@ describe('contract recovery never re-signs after a signer refusal', () => {
     };
     const signPrepared = vi.fn(async () => ({ signedTx: '0x02', txHash: '0xab' }));
     adapter.signPreparedTransaction = signPrepared;
-    await expect(adapter.populateAndSignV10WithAllowanceRecovery(adapter.signer, {}, 'publish', {}, KAV, 1n, 'publish approval'))
+    await expect(prepareAndSignV10(adapter, adapter.signer, {}, 'publish', {}, KAV, 1n, 'publish approval'))
       .resolves.toMatchObject({ txHash: '0xab' });
     expect(attempts).toBe(2);
     expect(approvals).toHaveLength(1);

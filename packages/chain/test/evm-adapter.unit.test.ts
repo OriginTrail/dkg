@@ -5751,10 +5751,10 @@ describe('ensureV10ApproveTrac — forced re-approve + visibility poll (#888)', 
 // PR #896 review (🔴): the forced-re-approve recovery was inlined in the
 // publish path only, leaving `updateV10` exposed to the same stale-allowance
 // race on metadata-only updates. The recovery now lives in a shared helper
-// (`populateAndSignV10WithAllowanceRecovery`) used by BOTH V10 write paths.
-// These tests pin that shared behaviour directly. Preparation runs through the
-// real endpoint loop (with a stubbed signer-side population); `signSpy` is the
-// one signature after it.
+// (`prepareV10WithAllowanceRecovery`) used by BOTH V10 write paths, which sign
+// its result once. These tests pin that shared behaviour directly, through
+// `prepareAndSignV10`. Preparation runs through the real endpoint loop (with a
+// stubbed signer-side population); `signSpy` is the one signature after it.
 function makeRecoveryAdapter() {
   const a = new EVMChainAdapter(minimalConfig());
   const ensureSpy = recorder(async (..._a: unknown[]) => {});
@@ -5762,6 +5762,10 @@ function makeRecoveryAdapter() {
   const { sign: signSpy } = stubPrepareAndSign(a, () => ({ signedTx: '0xsigned', txHash: '0xhash' }));
   return { a, ensureSpy, signSpy, signer: new ethers.Wallet(DEPLOYER_PK) };
 }
+
+/** What both V10 write paths do in their serializer window: prepare with the shared recovery, then sign once. */
+const prepareAndSignV10 = async (a: EVMChainAdapter, ...args: unknown[]) =>
+  (a as any).signPreparedTransaction(await (a as any).prepareV10WithAllowanceRecovery(...args));
 
 /** A V10 transaction as preparation hands it over, for tests that stub the preparation loop. */
 const PREPARED_V10_TX = { transaction: { to: V10_KA_ADDRESS, data: '0xabcd' }, signer: null };
@@ -5782,7 +5786,7 @@ const rawTooLowAllowanceRevert = () => {
   return err;
 };
 
-describe('populateAndSignV10WithAllowanceRecovery — shared publish/update recovery (#888/#896)', () => {
+describe('prepareV10WithAllowanceRecovery — shared publish/update recovery (#888/#896)', () => {
 
   it('applies 25% gas headroom to every concurrent V10 publish preparation', async () => {
     const { a } = makeRecoveryAdapter();
@@ -5800,11 +5804,11 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
     (a as any).prepareAcrossProviders = prepareAcross;
 
     await Promise.all([
-      (a as any).populateAndSignV10WithAllowanceRecovery(
-        signerA, {}, 'publish', {}, V10_KA_ADDRESS, 1n, 'label A',
+      prepareAndSignV10(
+        a, signerA, {}, 'publish', {}, V10_KA_ADDRESS, 1n, 'label A',
       ),
-      (a as any).populateAndSignV10WithAllowanceRecovery(
-        signerB, {}, 'publish', {}, V10_KA_ADDRESS, 1n, 'label B',
+      prepareAndSignV10(
+        a, signerB, {}, 'publish', {}, V10_KA_ADDRESS, 1n, 'label B',
       ),
     ]);
 
@@ -5821,8 +5825,8 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
     const prepareAcross = recorder(async (..._args: unknown[]) => PREPARED_V10_TX);
     (a as any).prepareAcrossProviders = prepareAcross;
 
-    await (a as any).populateAndSignV10WithAllowanceRecovery(
-      signer, {}, 'update', {}, V10_KA_ADDRESS, 1n, 'label',
+    await prepareAndSignV10(
+      a, signer, {}, 'update', {}, V10_KA_ADDRESS, 1n, 'label',
     );
 
     expect(prepareAcross.calls).toHaveLength(1);
@@ -5847,7 +5851,8 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
       )());
       const kaContract = connectable({ [method]: { populateTransaction: populate } });
 
-      const result = await (a as any).populateAndSignV10WithAllowanceRecovery(
+      const result = await prepareAndSignV10(
+        a,
         signer,
         kaContract,
         method,
@@ -5879,7 +5884,8 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
     )());
     const kaContract = connectable({ publish: { populateTransaction: populate } });
 
-    const result = await (a as any).populateAndSignV10WithAllowanceRecovery(
+    const result = await prepareAndSignV10(
+      a,
       signer,
       kaContract,
       'publish',
@@ -5902,8 +5908,8 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
     const kaContract = connectable({ publish: { populateTransaction: populate } });
 
     await expect(
-      (a as any).populateAndSignV10WithAllowanceRecovery(
-        signer, kaContract, 'publish', {}, V10_KA_ADDRESS, 0n, 'label',
+      prepareAndSignV10(
+        a, signer, kaContract, 'publish', {}, V10_KA_ADDRESS, 0n, 'label',
       ),
     ).rejects.toThrow('TooLowAllowance');
 
@@ -5932,8 +5938,8 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
     });
     const kaContract = connectable({ publish: { populateTransaction: populate } });
 
-    const result = await (a as any).populateAndSignV10WithAllowanceRecovery(
-      signer, kaContract, 'publish', {}, V10_KA_ADDRESS, 0n, 'label',
+    const result = await prepareAndSignV10(
+      a, signer, kaContract, 'publish', {}, V10_KA_ADDRESS, 0n, 'label',
     );
 
     expect(result).toEqual({ signedTx: '0xsigned', txHash: '0xhash' });
@@ -5957,8 +5963,8 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
     });
     const kaContract = connectable({ publish: { populateTransaction: populate } });
 
-    const result = await (a as any).populateAndSignV10WithAllowanceRecovery(
-      signer, kaContract, 'publish', {}, V10_KA_ADDRESS, 0n, 'label',
+    const result = await prepareAndSignV10(
+      a, signer, kaContract, 'publish', {}, V10_KA_ADDRESS, 0n, 'label',
     );
 
     expect(result).toEqual({ signedTx: '0xsigned', txHash: '0xhash' });
@@ -5987,8 +5993,8 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
       });
       (a as any).prepareAcrossProviders = prepareAcross;
 
-      const pending = (a as any).populateAndSignV10WithAllowanceRecovery(
-        signer, {}, 'publish', {}, V10_KA_ADDRESS, 1n, 'label',
+      const pending = prepareAndSignV10(
+        a, signer, {}, 'publish', {}, V10_KA_ADDRESS, 1n, 'label',
       );
       await vi.advanceTimersByTimeAsync(RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS);
       await vi.advanceTimersByTimeAsync(RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS * 2);
@@ -6012,8 +6018,8 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
     (a as any).prepareAcrossProviders = prepareAcross;
 
     await expect(
-      (a as any).populateAndSignV10WithAllowanceRecovery(
-        signer, {}, 'publish', {}, V10_KA_ADDRESS, 1n, 'label',
+      prepareAndSignV10(
+        a, signer, {}, 'publish', {}, V10_KA_ADDRESS, 1n, 'label',
       ),
     ).rejects.toBe(queueFull);
 
@@ -6028,8 +6034,8 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
 
     let thrown: any;
     try {
-      await (a as any).populateAndSignV10WithAllowanceRecovery(
-        signer, kaContract, 'publish', {}, V10_KA_ADDRESS, 0n, 'label',
+      await prepareAndSignV10(
+        a, signer, kaContract, 'publish', {}, V10_KA_ADDRESS, 0n, 'label',
       );
     } catch (err) {
       thrown = err;
@@ -6050,8 +6056,8 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
     const kaContract = connectable({ update: { populateTransaction: populate } });
 
     await expect(
-      (a as any).populateAndSignV10WithAllowanceRecovery(
-        signer, kaContract, 'update', {}, V10_KA_ADDRESS, 0n, 'label',
+      prepareAndSignV10(
+        a, signer, kaContract, 'update', {}, V10_KA_ADDRESS, 0n, 'label',
       ),
     ).rejects.toThrow('NotBatchPublisher');
 
@@ -6072,8 +6078,8 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
     const sign = recorder(async () => { throw refusal; });
     (a as any).signPreparedTransaction = sign;
 
-    await expect((a as any).populateAndSignV10WithAllowanceRecovery(
-      signer, kaContract, 'publish', {}, V10_KA_ADDRESS, 0n, 'label',
+    await expect(prepareAndSignV10(
+      a, signer, kaContract, 'publish', {}, V10_KA_ADDRESS, 0n, 'label',
     )).rejects.toBe(refusal);
 
     expect(sign.calls).toHaveLength(1);     // never asked again

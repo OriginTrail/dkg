@@ -1485,7 +1485,7 @@ export class PublishMethods extends EVMChainAdapterBase {
           false,
           ctx.sendContractTransaction,
         );
-        return this.populateAndSignV10WithAllowanceRecovery(
+        return this.signPreparedTransaction(await this.prepareV10WithAllowanceRecovery(
           signer,
           ka as Contract,
           'update',
@@ -1494,7 +1494,7 @@ export class PublishMethods extends EVMChainAdapterBase {
           newTokenAmount,
           'approve V10 update TRAC (forced re-approve, #888)',
           ctx.sendContractTransaction,
-        );
+        ));
       },
       (preBroadcastTxHash) => {
         throw new Error(

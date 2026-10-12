@@ -1969,41 +1969,15 @@ export class EVMChainAdapterBase {
   }
 
   /**
-   * #888: prepare and sign a V10 write tx (shared by publish + update): the
-   * preparation and its allowance recovery first, then the one signature. The
-   * signature comes after every retry and recovery, so a signer failure is never
-   * read as a revert or an endpoint failure.
-   */
-  protected async populateAndSignV10WithAllowanceRecovery(
-    signer: EvmSigner,
-    kaContract: Contract,
-    method: 'publish' | 'update',
-    methodParams: unknown,
-    kav10Address: string,
-    tokenAmount: bigint,
-    reapproveLabel: string,
-    approvalSender: ContractWriteSender = this.sendContractTransaction.bind(this),
-  ): Promise<SignedTransactionEnvelope> {
-    return this.signPreparedTransaction(await this.prepareV10WithAllowanceRecovery(
-      signer,
-      kaContract,
-      method,
-      methodParams,
-      kav10Address,
-      tokenAmount,
-      reapproveLabel,
-      approvalSender,
-    ));
-  }
-
-  /**
    * #888: prepare a V10 write tx (shared by publish + update) with a one-shot
    * recovery for a stale-RPC `TooLowAllowance` revert, and return the prepared,
    * unsigned tx of the attempt that succeeded. Gas estimation during preparation
    * can read a stale TRAC allowance and revert even though the approve
    * succeeded; this is strictly pre-broadcast, so on that ONE revert we force a
    * fresh approve (`ensureV10ApproveTrac(force=true)`) and prepare again exactly
-   * once. Any other error, or a second `TooLowAllowance`, propagates.
+   * once. Any other error, or a second `TooLowAllowance`, propagates. Both write
+   * paths sign the result once, after every retry and recovery, so a signer
+   * failure is never read as a revert or an endpoint failure.
    */
   protected async prepareV10WithAllowanceRecovery(
     signer: EvmSigner,
@@ -2013,7 +1987,7 @@ export class EVMChainAdapterBase {
     kav10Address: string,
     tokenAmount: bigint,
     reapproveLabel: string,
-    approvalSender: ContractWriteSender,
+    approvalSender: ContractWriteSender = this.sendContractTransaction.bind(this),
   ): Promise<PreparedTransaction> {
     // Per-endpoint preparation failover lives in the shared
     // `prepareAcrossProviders` (so a 429ing primary can't fail-fast the
@@ -4305,7 +4279,7 @@ export class EVMChainAdapterBase {
     // #888: populate (which gas-estimates and can revert `TooLowAllowance`
     // on a stale RPC allowance read) + sign, with a one-shot forced-approve
     // recovery shared with `updateV10` — see
-    // `populateAndSignV10WithAllowanceRecovery`. This runs strictly BEFORE
+    // `prepareV10WithAllowanceRecovery`. This runs strictly BEFORE
     // the `onBroadcast` WAL checkpoint and the broadcast below, so the
     // forced re-approve + single retry has no on-chain side effect.
     // #888 + #953: populate (gas-estimates; can revert `TooLowAllowance` on a
@@ -4332,7 +4306,7 @@ export class EVMChainAdapterBase {
           false,
           ctx.sendContractTransaction,
         );
-        return this.populateAndSignV10WithAllowanceRecovery(
+        return this.signPreparedTransaction(await this.prepareV10WithAllowanceRecovery(
           txSigner,
           ka as Contract,
           'publish',
@@ -4341,7 +4315,7 @@ export class EVMChainAdapterBase {
           params.tokenAmount,
           'approve V10 publish TRAC (forced re-approve, #888)',
           ctx.sendContractTransaction,
-        );
+        ));
       },
       () => {
         throw new Error('Transaction receipt is null');

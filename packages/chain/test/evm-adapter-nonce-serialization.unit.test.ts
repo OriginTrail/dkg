@@ -533,7 +533,7 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
   });
 
   it('forced re-approve (#888) routes through the caller-scoped approvalSender, never the public serializer', async () => {
-    // Pins the wiring `populateAndSignV10WithAllowanceRecovery` →
+    // Pins the wiring `prepareV10WithAllowanceRecovery` →
     // `ensureV10ApproveTrac(…, approvalSender)`: if the recovery path ever
     // fell back to the default `this.sendContractTransaction`, the in-lock
     // publish would re-enter the per-wallet serializer and self-deadlock.
@@ -561,7 +561,7 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
     const signPreparedTransaction = recorder(async () => ({ signedTx: 'pub', txHash: '0xpub' }));
     (a as any).signPreparedTransaction = signPreparedTransaction;
 
-    const result = await (a as any).populateAndSignV10WithAllowanceRecovery(
+    const result = await (a as any).signPreparedTransaction(await (a as any).prepareV10WithAllowanceRecovery(
       signer,
       {} as any,
       'publish',
@@ -570,7 +570,7 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
       1n,
       'approve V10 publish TRAC (forced re-approve, #888)',
       scopedSend,
-    );
+    ));
 
     expect(result).toEqual({ signedTx: 'pub', txHash: '0xpub' });
     expect(populateCalls).toBe(2);
