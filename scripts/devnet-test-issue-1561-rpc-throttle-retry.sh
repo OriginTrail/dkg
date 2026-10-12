@@ -3,6 +3,13 @@
 # endpoints behind a fault proxy. The first eth_getBlockByNumber on each endpoint
 # returns 429 (one complete throttled pool); the next pool pass forwards and the
 # publish must confirm.
+#
+# A block read is tip-sensitive: it tries the endpoints in their configured
+# order every time (endpoint-stickiness.ts, `transparentRead`). So the pass
+# after the throttled one is answered by the first endpoint and the second one
+# is not asked for a block again. The proxy must therefore have seen the block
+# read on BOTH endpoints (the throttled pass covered the whole pool) and at
+# least twice on the first (the pass after it was forwarded).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -98,6 +105,10 @@ exhaustions_after="$(field "$(body_of "$status_after")" chain.rpcExhaustions)"
   || fail "recovered throttle pass was reported as terminal exhaustion ($exhaustions_before -> $exhaustions_after)"
 
 stats="$(curl -fsS "http://127.0.0.1:$PROXY_PORT/stats")"
-STATS="$stats" node -e 'const s=JSON.parse(process.env.STATS); for (const p of ["/a","/b"]) { const n=s[`${p}:eth_getBlockByNumber`]||0; if(n<2) throw new Error(`${p} getBlock calls=${n}, expected throttle plus recovery`); }' \
-  || fail "proxy did not observe a full throttled pass plus recovery: $stats"
+STATS="$stats" node -e '
+  const stats = JSON.parse(process.env.STATS);
+  const blockReads = (endpoint) => stats[`${endpoint}:eth_getBlockByNumber`] || 0;
+  if (blockReads("/b") < 1) throw new Error(`/b getBlock calls=${blockReads("/b")}: the throttled pass did not reach the second endpoint`);
+  if (blockReads("/a") < 2) throw new Error(`/a getBlock calls=${blockReads("/a")}: no block read was forwarded after the throttled pass`);
+' || fail "proxy did not observe a full throttled pass plus recovery: $stats"
 echo "[#1561] PASS: publish recovered after both RPC endpoints returned 429"

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 #
-# Internal sweep — runs every devnet-test script not already covered by
-# devnet-test-rfc38-all.sh, plus the non-RFC-38 baseline harnesses.
+# Internal sweep — runs the baseline devnet-test harnesses listed in SCRIPTS
+# below. It is NOT every devnet-test script: devnet-test-rfc38-all.sh runs the
+# RFC-38 ones, and scripts/devnet-comprehensive.sh registers the remaining
+# regression scripts one by one, so that each has its own result and time.
 # Aggregates pass/fail and writes per-script logs for triage.
 #
 # Prerequisite: devnet running (./scripts/devnet.sh start).
