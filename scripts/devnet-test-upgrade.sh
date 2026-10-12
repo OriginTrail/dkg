@@ -54,6 +54,8 @@
 #     the draft it wrote before the upgrade; its member must read all five.
 #     Every node publishes once more into the common graph and every node must
 #     read all six.
+# Optionally (DEVNET_UPGRADE_WAL_PAUSE_NODE), one managed-Oxigraph node is then
+# made to meet a write-ahead-log maintenance pause.
 #
 # The writer's read of an asset it updated. A member must read the updated
 # version and nothing else. The writer's own store also keeps the copy its
@@ -100,6 +102,16 @@
 #   DEVNET_UPGRADE_MESH_WAIT_S      seconds the restarted nodes have to connect to
 #                             each other before the checks begin (default 90;
 #                             reported, never a failure by itself).
+#   DEVNET_UPGRADE_WAL_PAUSE_NODE   optional last step, off by default: the node
+#                             (1 or 2, the managed-Oxigraph nodes) that is made
+#                             to meet a write-ahead-log maintenance pause on the
+#                             upgraded network. It runs
+#                             devnet-test-oxigraph-wal-pause.sh, which sets a
+#                             small limit on that node, writes until the node
+#                             pauses its store work, and requires that a write
+#                             refused during the pause succeeds when repeated
+#                             and that the node serves again. WAL_PAUSE_BYTES and
+#                             the other knobs of that script pass through.
 #   DEVNET_DIR, API_PORT_BASE, HARDHAT_PORT, DEVNET_CONTEXT_GRAPH and the store
 #   ports of scripts/devnet.sh are honoured.
 #
@@ -124,6 +136,7 @@ BASELINE_WAIT_S="${DEVNET_UPGRADE_BASELINE_WAIT_S:-300}"
 SERVE_WAIT_S="${DEVNET_UPGRADE_SERVE_WAIT_S:-240}"
 RECEIVE_WAIT_S="${DEVNET_UPGRADE_RECEIVE_WAIT_S:-300}"
 MESH_WAIT_S="${DEVNET_UPGRADE_MESH_WAIT_S:-90}"
+WAL_PAUSE_NODE="${DEVNET_UPGRADE_WAL_PAUSE_NODE:-}"
 DKG_API_MAXTIME="${DKG_API_MAXTIME:-180}"
 # The update-seal helpers read the chain through RPC_URL.
 export RPC_URL="${RPC_URL:-http://127.0.0.1:$HARDHAT_PORT}"
@@ -156,6 +169,10 @@ stop_here() {
 command -v curl >/dev/null 2>&1 || skip "curl not available"
 command -v node >/dev/null 2>&1 || skip "node not available"
 command -v git >/dev/null 2>&1 || skip "git not available"
+case "$WAL_PAUSE_NODE" in
+  ''|1|2) : ;;
+  *) skip "DEVNET_UPGRADE_WAL_PAUSE_NODE='$WAL_PAUSE_NODE' is not a managed-Oxigraph node of the devnet layout (1 or 2)" ;;
+esac
 
 # shellcheck source=devnet-lib.sh
 . "$SCRIPT_DIR/devnet-lib.sh" || skip "cannot source scripts/devnet-lib.sh"
@@ -752,6 +769,22 @@ if check_state after-upgrade "$EXPECT_AFTER" "$RECEIVE_WAIT_S"; then
   ok "all $(wc -l < "$EXPECT_AFTER" | tr -d ' ') reads hold on the upgraded network"
 else
   bad "$(grep -c -v '^ok ' "$RESULTS/after-upgrade.log") of $(wc -l < "$EXPECT_AFTER" | tr -d ' ') reads do not hold on the upgraded network (results: $RESULTS/after-upgrade.results.json)"
+fi
+
+# ---------------------------------------------------------------------------
+# 6. Optional: a store maintenance pause on the upgraded network
+# ---------------------------------------------------------------------------
+if [ -n "$WAL_PAUSE_NODE" ]; then
+  step "6. a write-ahead-log maintenance pause on node $WAL_PAUSE_NODE of the upgraded network"
+  DEVNET_VERSION_LAYOUT="all:current" WAL_PAUSE_NODE="$WAL_PAUSE_NODE" WAL_PAUSE_RESULTS="$RESULTS/wal-pause" \
+    "$SCRIPT_DIR/devnet-test-oxigraph-wal-pause.sh" > "$RESULTS/wal-pause.log" 2>&1
+  pause_status=$?
+  sed 's/^/[upgrade]     /' "$RESULTS/wal-pause.log"
+  case "$pause_status" in
+    0) ok "node $WAL_PAUSE_NODE met a maintenance pause: the refused write succeeded when repeated and the node serves again" ;;
+    3) bad "the maintenance pause on node $WAL_PAUSE_NODE was asked for and not exercised (log: $RESULTS/wal-pause.log)" ;;
+    *) bad "the maintenance pause on node $WAL_PAUSE_NODE did not hold (exit $pause_status; log: $RESULTS/wal-pause.log)" ;;
+  esac
 fi
 
 # Informational, never part of the verdict: what each node logged since it came
