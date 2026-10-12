@@ -160,8 +160,13 @@ let binaryPath: string;
 let binaryCacheDirectory: string;
 let nquadsFile: string;
 let fixtureDirectory: string;
-/** Every row of the fixture is durable metadata, so a whole walk serves this many. */
-let metadataRows: number;
+/** Every row of the fixture is durable metadata, so a whole walk serves exactly these. */
+let metadataLines: Set<string>;
+
+/** The store keeps a whole-second timestamp without its zero fraction. */
+function asStored(line: string): string {
+  return line.replace('.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>', 'Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>');
+}
 
 interface Responder {
   handle: OxigraphServerHandle;
@@ -245,7 +250,8 @@ describe('sync of a large graph against a real store deadline (pinned real Oxigr
     }
     nquadsFile = join(fixtureDirectory, 'large-meta.nq');
     const lines = syntheticMetadataLines();
-    metadataRows = new Set(lines).size;
+    metadataLines = new Set(lines.map(asStored));
+    expect(metadataLines.size).toBe(new Set(lines).size);
     await writeFile(nquadsFile, `${lines.join('\n')}\n`);
     return async () => { await rm(fixtureDirectory, { recursive: true, force: true }); };
   }, 120_000);
@@ -259,6 +265,7 @@ describe('sync of a large graph against a real store deadline (pinned real Oxigr
     const responder = await startResponder({ clientDeadlineMs, snapshotBudget: SCALED_SNAPSHOT_BUDGET });
 
     const timings: Array<{ offset: number; rows: number; ms: number }> = [];
+    const served: string[] = [];
     let offset = 0;
     // The smallest page a requester falls back to, then its ordinary sizes.
     for (const rowsHint of [64, 512, 8192, 8192]) {
@@ -268,35 +275,36 @@ describe('sync of a large graph against a real store deadline (pinned real Oxigr
       // Whole descriptors, as many as the page asked for.
       expect(lines.length).toBe(rowsHint);
       expect(lines.length % DESCRIPTOR_ROWS).toBe(0);
+      for (const line of lines) served.push(line);
       offset += lines.length;
     }
 
     // The rest of the walk: the remaining descriptors, then the seals of the
     // promoted assertions, their lifecycle records and events.
-    const served = new Set<string>();
-    let sealRows = 0;
     let slowestLaterMs = 0;
     for (let guard = 0; guard < 200; guard += 1) {
       const startedAt = performance.now();
       const lines = linesFromNquads(await responder.metaPage(offset, 8192, 'native-session'));
       slowestLaterMs = Math.max(slowestLaterMs, Math.round(performance.now() - startedAt));
       if (lines.length === 0) break;
-      for (const line of lines) {
-        served.add(line);
-        if (line.includes('/assertion/0x')) sealRows += 1;
-      }
+      for (const line of lines) served.push(line);
       offset += lines.length;
     }
 
     // eslint-disable-next-line no-console
-    console.log(`[sync-large-graph] ${ASSETS} assets and ${ASSERTIONS} promoted assertions, ${metadataRows} metadata rows: `
+    console.log(`[sync-large-graph] ${ASSETS} assets and ${ASSERTIONS} promoted assertions, ${metadataLines.size} metadata rows: `
       + `${JSON.stringify(timings)}, slowest later page ${slowestLaterMs} ms`);
     // No page came near the deadline, the first included.
     for (const timing of timings) expect(timing.ms).toBeLessThan(clientDeadlineMs);
     expect(slowestLaterMs).toBeLessThan(clientDeadlineMs);
-    // The walk served every row of the graph, the seals of every assertion among them.
-    expect(offset).toBe(metadataRows);
-    expect(sealRows).toBe(ASSERTIONS * SEAL_ROWS);
+    // The walk served every row of the graph exactly once: none twice, none
+    // missing, none that is not in it.
+    expect(served).toHaveLength(metadataLines.size);
+    const servedOnce = new Set(served);
+    expect(servedOnce.size).toBe(served.length);
+    const missing = [...metadataLines].filter((line) => !servedOnce.has(line));
+    expect(missing.slice(0, 3)).toEqual([]);
+    expect(served.filter((line) => line.includes('/assertion/0x'))).toHaveLength(ASSERTIONS * SEAL_ROWS);
     // No query had to be reclaimed by a supervised recovery.
     expect(responder.handle.getRecoveryState()).toMatchObject({ recovering: false, generation: 0 });
   }, 120_000);
