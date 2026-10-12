@@ -115,8 +115,8 @@ import {
   createCapturedWorkspaceGossipPayload,
   createResolveCurrentWorkspaceGossipPayload,
   type EncodedWorkspaceGossipPayload,
-  type PreparedWorkspaceGossipPayload,
   type PrepareWorkspaceGossip,
+  withWorkspaceGossipEnvelope,
 } from './workspace-gossip-payload.js';
 import {
   PublisherWalletRequiredError,
@@ -772,13 +772,13 @@ export interface ShareOptions {
   prepareGossip?: PrepareWorkspaceGossip;
   /**
    * Strict curator-ack gate (OT-RFC-49 curator-leader): called after the message
-   * is built (and prepared, which it then receives) but BEFORE any store
+   * is built, with its payload and prepared envelope, but BEFORE any store
    * mutation. `applied: false` ABORTS the write with NO local persistence —
    * `CuratorRejectedError` when `rejected: true`, otherwise `CuratorUnconfirmedError`
    * — so a write the curator (the authoritative replica) never received is never
    * accepted. Omitted, the legacy best-effort commit-then-fan-out path is kept.
    */
-  confirmBeforeCommit?: (message: Uint8Array, prepared?: PreparedWorkspaceGossipPayload) => Promise<{ applied: boolean; rejected?: boolean }>;
+  confirmBeforeCommit?: (message: Uint8Array, payload?: EncodedWorkspaceGossipPayload) => Promise<{ applied: boolean; rejected?: boolean }>;
 }
 
 /** @deprecated Use ShareOptions */
@@ -1984,14 +1984,14 @@ export class DKGPublisher implements Publisher {
     }
 
     // The build/commit seam (the message was pre-encoded for it, BEFORE any
-    // destructive SWM mutation): the payload is prepared for the network, then
-    // the strict curator-ack gate (OT-RFC-49 curator-leader) delivers it to the
-    // curator and waits for an applied-ack. A failure or non-confirmation aborts
-    // here with ZERO orphaned state, so the member never holds a value the
-    // curator lacks.
-    const prepared = options.prepareGossip ? await options.prepareGossip(gossipPayload) : undefined;
+    // destructive SWM mutation): the message's envelope is prepared for the
+    // network, then the strict curator-ack gate (OT-RFC-49 curator-leader)
+    // delivers it to the curator and waits for an applied-ack. A failure or
+    // non-confirmation aborts here with ZERO orphaned state, so the member never
+    // holds a value the curator lacks.
+    const payload = options.prepareGossip ? withWorkspaceGossipEnvelope(gossipPayload, await options.prepareGossip(gossipPayload.message)) : gossipPayload;
     if (options.confirmBeforeCommit) {
-      const confirmation = await options.confirmBeforeCommit(gossipPayload.message, prepared);
+      const confirmation = await options.confirmBeforeCommit(payload.message, payload);
       if (!confirmation.applied) {
         if (confirmation.rejected) throw new CuratorRejectedError(contextGraphId);
         throw new CuratorUnconfirmedError(contextGraphId);
@@ -2051,7 +2051,7 @@ export class DKGPublisher implements Publisher {
     }
 
     this.log.info(ctx, `Shared memory write complete: ${shareOperationId}`);
-    return { shareOperationId, message: gossipPayload.message, gossipPayload: prepared ?? gossipPayload };
+    return { shareOperationId, message: payload.message, gossipPayload: payload };
   }
 
   private async encodeWorkspaceGossipPayload(

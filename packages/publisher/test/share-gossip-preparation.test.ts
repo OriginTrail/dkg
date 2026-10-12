@@ -1,16 +1,17 @@
 /**
- * A share's gossip payload prepared for the network before the write commits
+ * A share's gossip message prepared for the network before the write commits
  * (`ShareOptions.prepareGossip`), as the agent does to sign its envelope. The
  * preparation runs once the message is built and size-checked, before the
- * curator confirmation and before anything is stored; a failure stores
- * nothing; the confirmation receives the prepared payload, and the write
- * result carries it.
+ * curator confirmation and before anything is stored, and returns only the
+ * envelope bytes; a failure stores nothing. The publisher attaches the bytes
+ * to the payload it built, whose message and fan-out provenance it keeps, and
+ * that one payload goes to the confirmation and into the write result.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKG_GOSSIP_MAX_MESSAGE_BYTES, TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
-import { DKGPublisher, withPreparedWorkspaceGossipEnvelope, type PrepareWorkspaceGossip } from '../src/index.js';
+import { DKGPublisher, type PrepareWorkspaceGossip } from '../src/index.js';
 
 const CG = 'gossip-preparation-cg';
 const PEER = '12D3KooWGossipPreparation';
@@ -42,12 +43,12 @@ describe('share gossip preparation', () => {
     return result.type === 'bindings' ? result.bindings.map((row) => String(row['o'])) : [];
   }
 
-  it('prepares the payload before the confirmation and the commit, and returns it with the write', async () => {
+  it('prepares the envelope before the confirmation and the commit, and returns it with the payload it built', async () => {
     const order: string[] = [];
-    const prepareGossip = vi.fn<PrepareWorkspaceGossip>(async (payload) => {
+    const prepareGossip = vi.fn<PrepareWorkspaceGossip>(async () => {
       order.push('prepare');
       expect(await storedValues()).toEqual([]);
-      return withPreparedWorkspaceGossipEnvelope(payload, ENVELOPE);
+      return ENVELOPE;
     });
     const confirmBeforeCommit = vi.fn(async () => {
       order.push('confirm');
@@ -59,8 +60,10 @@ describe('share gossip preparation', () => {
 
     expect(order).toEqual(['prepare', 'confirm']);
     expect(await storedValues()).toEqual(['"prepared"']);
+    // The publisher's own message and fan-out provenance, with the prepared envelope attached.
+    expect(result.gossipPayload.message).toBe(prepareGossip.mock.calls[0]![0]);
+    expect(result.gossipPayload.fanout).toEqual({ kind: 'resolve-current' });
     expect(result.gossipPayload.envelope).toBe(ENVELOPE);
-    expect(result.gossipPayload.message).toBe(prepareGossip.mock.calls[0]![0].message);
     expect(confirmBeforeCommit).toHaveBeenCalledWith(result.gossipPayload.message, result.gossipPayload);
   });
 
@@ -87,6 +90,6 @@ describe('share gossip preparation', () => {
     const confirmBeforeCommit = vi.fn(async () => ({ applied: true }));
     const plain = await publisher.share(CG, item('plain'), { publisherPeerId: PEER, confirmBeforeCommit });
     expect('envelope' in plain.gossipPayload).toBe(false);
-    expect(confirmBeforeCommit).toHaveBeenCalledWith(plain.gossipPayload.message, undefined);
+    expect(confirmBeforeCommit).toHaveBeenCalledWith(plain.gossipPayload.message, plain.gossipPayload);
   });
 });

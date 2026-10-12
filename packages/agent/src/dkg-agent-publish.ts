@@ -191,9 +191,7 @@ import  {
   type WorkspaceSenderKeyEncryptInput,
   createResolveCurrentWorkspaceGossipPayload,
   parseEncodedWorkspaceGossipPayload,
-  withPreparedWorkspaceGossipEnvelope,
   type EncodedWorkspaceGossipPayload,
-  type PreparedWorkspaceGossipPayload,
   type PrepareWorkspaceGossip,
   type SharedMemoryPublicSnapshotStorageConfig,
 } from '@origintrail-official/dkg-publisher';
@@ -2480,21 +2478,19 @@ export class PublishMethods extends DKGAgentBase {
 
   /**
    * The publisher's pre-commit preparation of a share() or conditionalShare()
-   * that has a gossip signer: the write's envelope is signed before anything is
-   * stored, so a signer that refuses aborts the write with nothing stored (a
-   * conditional write stays retryable as it was). The prepared payload carries
-   * the signed bytes to the curator-ack gate and, through the write result, to
-   * the fan-out, which sends them without signing again.
+   * that has a gossip signer: it signs the message's envelope before anything
+   * is stored, so a signer that refuses aborts the write with nothing stored (a
+   * conditional write stays retryable as it was). The publisher attaches the
+   * signed bytes to its payload, which carries them to the curator-ack gate
+   * and, through the write result, to the fan-out, which sends them without
+   * signing again.
    */
   gossipEnvelopePreparer(this: DKGAgent,
     contextGraphId: string,
     gossipSigner: WorkspaceGossipSigner | null,
   ): PrepareWorkspaceGossip | undefined {
     if (gossipSigner === null) return undefined;
-    return async (payload) => withPreparedWorkspaceGossipEnvelope(
-      payload,
-      await this.encodeWorkspaceGossipMessage(contextGraphId, payload.message, gossipSigner),
-    );
+    return (message) => this.encodeWorkspaceGossipMessage(contextGraphId, message, gossipSigner);
   }
 
   /**
@@ -2518,17 +2514,17 @@ export class PublishMethods extends DKGAgentBase {
     gossipSigner: Parameters<DKGAgent['encodeWorkspaceGossipMessage']>[2],
     opts: { localOnly?: boolean; awaitCuratorAck?: boolean; curatorAckTimeoutMs?: number } | undefined,
     ctx: OperationContext,
-  ): Promise<((message: Uint8Array, prepared?: PreparedWorkspaceGossipPayload) => Promise<{ applied: boolean; rejected?: boolean }>) | undefined> {
+  ): Promise<((message: Uint8Array, payload?: EncodedWorkspaceGossipPayload) => Promise<{ applied: boolean; rejected?: boolean }>) | undefined> {
     const curator = await this.resolveCuratorAckTarget(contextGraphId, opts);
     if (curator === undefined) return undefined;
-    return async (message: Uint8Array, prepared?: PreparedWorkspaceGossipPayload) => {
+    return async (message: Uint8Array, payload?: EncodedWorkspaceGossipPayload) => {
       // The publisher hands us the INNER workspace payload. The curator's
       // PROTOCOL_SWM_UPDATE handler expects the SAME signed gossip-message
       // envelope the substrate fan-out sends (encodeWorkspaceGossipMessage),
       // NOT the raw inner bytes — sending the inner bytes fails protobuf decode
       // on the receiver (a permanent rejection). A share prepared that envelope
       // before its commit; otherwise encode identically.
-      const wireMessage = prepared?.envelope ?? await this.encodeWorkspaceGossipMessage(contextGraphId, message, gossipSigner);
+      const wireMessage = payload?.envelope ?? await this.encodeWorkspaceGossipMessage(contextGraphId, message, gossipSigner);
       return this.confirmCuratorApplied(contextGraphId, curator.peerIds, wireMessage, curator.timeoutMs, ctx);
     };
   }

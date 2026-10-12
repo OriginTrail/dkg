@@ -3,7 +3,7 @@ import {
   createCapturedWorkspaceGossipPayload,
   createResolveCurrentWorkspaceGossipPayload,
   parseEncodedWorkspaceGossipPayload,
-  withPreparedWorkspaceGossipEnvelope,
+  withWorkspaceGossipEnvelope,
 } from '../src/workspace-gossip-payload.js';
 
 describe('workspace gossip payload', () => {
@@ -120,7 +120,7 @@ describe('workspace gossip payload', () => {
       members: ['12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb'],
       complete: true,
     });
-    const prepared = withPreparedWorkspaceGossipEnvelope(captured, envelope);
+    const prepared = withWorkspaceGossipEnvelope(captured, envelope);
     expect(prepared).toEqual({ message, fanout: captured.fanout, envelope });
     expect(Object.isFrozen(prepared)).toBe(true);
     const parsed = parseEncodedWorkspaceGossipPayload(prepared);

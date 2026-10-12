@@ -21,24 +21,22 @@ export interface EncodedWorkspaceGossipPayload {
   readonly envelope?: Uint8Array;
 }
 
-/** A payload whose network form was prepared before its write committed. */
-export type PreparedWorkspaceGossipPayload = EncodedWorkspaceGossipPayload & { readonly envelope: Uint8Array };
-
 /**
- * Prepares a share's gossip payload for the network before the write commits,
- * for example by signing its envelope. The publisher calls it once the message
- * is built and size-checked, before the curator confirmation and before
- * anything is stored, so a rejection aborts the write with nothing stored. The
- * prepared payload is what the confirmation receives and what the write result
- * carries.
+ * Prepares the network form of a share's gossip message before the write
+ * commits, for example by signing its envelope, and returns only those bytes.
+ * The publisher calls it once the message is built and size-checked, before
+ * the curator confirmation and before anything is stored, so a rejection
+ * aborts the write with nothing stored. The publisher attaches the bytes to
+ * the payload it built ({@link withWorkspaceGossipEnvelope}); that one payload
+ * goes to the confirmation and into the write result.
  */
-export type PrepareWorkspaceGossip = (payload: EncodedWorkspaceGossipPayload) => Promise<PreparedWorkspaceGossipPayload>;
+export type PrepareWorkspaceGossip = (message: Uint8Array) => Promise<Uint8Array>;
 
-/** `payload` with its prepared network form. */
-export function withPreparedWorkspaceGossipEnvelope(
+/** `payload` with the envelope prepared for its message; its message and fan-out provenance are kept. */
+export function withWorkspaceGossipEnvelope(
   payload: EncodedWorkspaceGossipPayload,
   envelope: Uint8Array,
-): PreparedWorkspaceGossipPayload {
+): EncodedWorkspaceGossipPayload {
   return Object.freeze({ message: payload.message, fanout: payload.fanout, envelope });
 }
 
@@ -84,7 +82,7 @@ export function parseEncodedWorkspaceGossipPayload(
   if (!(envelope instanceof Uint8Array)) {
     throw new TypeError('publishWorkspaceGossip requires a prepared envelope to be bytes');
   }
-  return withPreparedWorkspaceGossipEnvelope(payload, envelope);
+  return withWorkspaceGossipEnvelope(payload, envelope);
 }
 
 function parseFanoutPayload(value: unknown): EncodedWorkspaceGossipPayload {
