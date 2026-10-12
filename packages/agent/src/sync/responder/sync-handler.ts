@@ -56,6 +56,7 @@ import {
 import { resolveSyncResponderRequestProfile } from './page-framing-policy.js';
 import { createBoundedExactAssetExportCache, type ExactAssetExportLease, type ExactAssetExportCache } from './exact-asset-export-cache.js';
 import { createResponderDurableMetaPlanMemo } from './durable-meta-plan.js';
+import { createSyncResponderCooling } from './serve-cooling.js';
 import { encodeResolvedExactSyncResponse } from '../wire-compression.js';
 
 const MAX_SYNC_SESSION_TOKENS = 256;
@@ -507,6 +508,10 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
   const subGraphRegistrationMemo = createResponderSubGraphRegistrationMemo(store);
   const swmAdmissionMemo = createResponderSwmAdmissionMemo(store);
   const limiter = createSyncResponderLimiter();
+  const cooling = createSyncResponderCooling({
+    busyError: (message) => new SyncResponderBusyError(message),
+    logWarn: (message) => logWarn(createOperationContext('sync'), message),
+  });
   // Preserve the original one-admission auth+serve path unless an operator
   // actually configures a non-zero priority. An empty/all-zero map is a true
   // compatibility no-op for responder scheduling.
@@ -977,6 +982,10 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     };
 
     const plane: SyncResponderPlane = isWorkspace ? 'shared-memory' : 'durable';
+    const serveCooled = (authDurationMs: number) => cooling.run({
+      contextGraphId, plane, phase,
+      selection: assetUals !== undefined ? `exact:${assetSelectionKey}` : sinceBatchId == null ? 'full' : 'delta',
+    }, () => serveAuthorizedStage(authDurationMs));
     const preAuthorizationScheduling: SyncResponderScheduling = {
       plane,
       lane: 'pre_authorization',
@@ -1000,7 +1009,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
                 priority,
                 priorityClass: syncPriorityClass(priority),
               },
-              work: () => serveAuthorizedStage(prepared.authDurationMs),
+              work: () => serveCooled(prepared.authDurationMs),
             };
           },
         ).then((result) => {
@@ -1016,7 +1025,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             const prepared = await prepareResponderStage();
             return prepared.kind === 'respond'
               ? prepared.bytes
-              : serveAuthorizedStage(prepared.authDurationMs);
+              : serveCooled(prepared.authDurationMs);
           },
         );
 
