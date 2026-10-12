@@ -17,6 +17,8 @@ interface Target {
   readonly version?: number;
 }
 
+type AcceptedRecoveryPolicy = 'public' | 'private' | 'private-join';
+
 /** Stands in for the agent's newest-version-per-scope promise pruning. */
 function pruneSupersededTargets(targets: readonly Target[]): readonly Target[] {
   const newestByScope = new Map<string, number>();
@@ -201,6 +203,7 @@ describe('RFC-64 catalog replay recovery runtime', () => {
         scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
           contextGraphId: string,
           policyDigest: string,
+          recoveryPolicy: AcceptedRecoveryPolicy,
         ): void;
       }
     ).scheduleRfc64AuthorityAcceptedCatalogRecoveryV1;
@@ -211,7 +214,7 @@ describe('RFC-64 catalog replay recovery runtime', () => {
       rfc64CatalogReplayRecoveryRuntimeV1: () => ({
         status: () => ({ failed: false, unverified: false }),
       }),
-    }, 'public-cg', `0x${'11'.repeat(32)}`);
+    }, 'public-cg', `0x${'11'.repeat(32)}`, 'public');
 
     await dispatcher.whenIdle();
     expect(promote).toHaveBeenCalledOnce();
@@ -233,7 +236,7 @@ describe('RFC-64 catalog replay recovery runtime', () => {
         scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
           contextGraphId: string,
           policyDigest: string,
-          options?: { retryIncompletePrivate?: boolean },
+          recoveryPolicy: AcceptedRecoveryPolicy,
         ): void;
       }
     ).scheduleRfc64AuthorityAcceptedCatalogRecoveryV1;
@@ -248,14 +251,14 @@ describe('RFC-64 catalog replay recovery runtime', () => {
       host,
       'private-cg',
       `0x${'55'.repeat(32)}`,
-      { retryIncompletePrivate: true },
+      'private',
     );
     await dispatcher.whenIdle();
     expect(replay).toHaveBeenCalledTimes(2);
 
     replay.mockClear();
     status.mockReturnValue({ failed: false, unverified: true });
-    scheduleAcceptedRecovery.call(host, 'public-cg', `0x${'66'.repeat(32)}`);
+    scheduleAcceptedRecovery.call(host, 'public-cg', `0x${'66'.repeat(32)}`, 'public');
     await dispatcher.whenIdle();
     expect(replay).toHaveBeenCalledOnce();
     await dispatcher.closeAndDrain();
@@ -277,7 +280,7 @@ describe('RFC-64 catalog replay recovery runtime', () => {
           scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
             contextGraphId: string,
             policyDigest: string,
-            options?: { awaitsProviderAuthorization?: boolean },
+            recoveryPolicy: AcceptedRecoveryPolicy,
           ): void;
         }
       ).scheduleRfc64AuthorityAcceptedCatalogRecoveryV1;
@@ -287,7 +290,7 @@ describe('RFC-64 catalog replay recovery runtime', () => {
         promoteRfc64OwnerSignedSwmInventoriesV1: async () => undefined,
         requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
         rfc64CatalogReplayRecoveryRuntimeV1: () => ({ status }),
-      }, 'private-cg', `0x${'33'.repeat(32)}`, { awaitsProviderAuthorization: true });
+      }, 'private-cg', `0x${'33'.repeat(32)}`, 'private-join');
 
       await vi.advanceTimersByTimeAsync(0);
       expect(replay).toHaveBeenCalledOnce();
@@ -320,7 +323,7 @@ describe('RFC-64 catalog replay recovery runtime', () => {
           scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
             contextGraphId: string,
             policyDigest: string,
-            options?: { awaitsProviderAuthorization?: boolean },
+            recoveryPolicy: AcceptedRecoveryPolicy,
           ): void;
         }
       ).scheduleRfc64AuthorityAcceptedCatalogRecoveryV1;
@@ -330,7 +333,7 @@ describe('RFC-64 catalog replay recovery runtime', () => {
         promoteRfc64OwnerSignedSwmInventoriesV1: promote,
         requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
         rfc64CatalogReplayRecoveryRuntimeV1: () => ({ status }),
-      }, 'private-cg', `0x${'44'.repeat(32)}`, { awaitsProviderAuthorization: true });
+      }, 'private-cg', `0x${'44'.repeat(32)}`, 'private-join');
 
       await vi.advanceTimersByTimeAsync(0);
       expect(replay).toHaveBeenCalledOnce();
@@ -358,7 +361,7 @@ describe('RFC-64 catalog replay recovery runtime', () => {
           scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
             contextGraphId: string,
             policyDigest: string,
-            options?: { awaitsProviderAuthorization?: boolean },
+            recoveryPolicy: AcceptedRecoveryPolicy,
           ): void;
         }
       ).scheduleRfc64AuthorityAcceptedCatalogRecoveryV1;
@@ -368,7 +371,7 @@ describe('RFC-64 catalog replay recovery runtime', () => {
         promoteRfc64OwnerSignedSwmInventoriesV1: async () => undefined,
         requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
         rfc64CatalogReplayRecoveryRuntimeV1: () => ({ status: () => null }),
-      }, 'private-cg', `0x${'55'.repeat(32)}`, { awaitsProviderAuthorization: true });
+      }, 'private-cg', `0x${'55'.repeat(32)}`, 'private-join');
 
       await vi.advanceTimersByTimeAsync(480_000);
       await dispatcher.whenIdle();
@@ -393,6 +396,7 @@ describe('RFC-64 catalog replay recovery runtime', () => {
           scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
             contextGraphId: string,
             policyDigest: string,
+            recoveryPolicy: AcceptedRecoveryPolicy,
           ): void;
         }
       ).scheduleRfc64AuthorityAcceptedCatalogRecoveryV1;
@@ -403,7 +407,7 @@ describe('RFC-64 catalog replay recovery runtime', () => {
         rfc64BackgroundWorkDispatcherV1: dispatcher,
         promoteRfc64OwnerSignedSwmInventoriesV1: promote,
         requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
-      }, 'public-cg', `0x${'66'.repeat(32)}`);
+      }, 'public-cg', `0x${'66'.repeat(32)}`, 'public');
 
       await vi.advanceTimersByTimeAsync(0);
       await dispatcher.whenIdle();
@@ -432,6 +436,7 @@ describe('RFC-64 catalog replay recovery runtime', () => {
           scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
             contextGraphId: string,
             policyDigest: string,
+            recoveryPolicy: AcceptedRecoveryPolicy,
           ): void;
         }
       ).scheduleRfc64AuthorityAcceptedCatalogRecoveryV1;
@@ -443,7 +448,7 @@ describe('RFC-64 catalog replay recovery runtime', () => {
         rfc64CatalogReplayRecoveryRuntimeV1: () => ({
           status: () => ({ failed: false, unverified: false }),
         }),
-      }, 'public-cg', `0x${'22'.repeat(32)}`);
+      }, 'public-cg', `0x${'22'.repeat(32)}`, 'public');
 
       await vi.advanceTimersByTimeAsync(0);
       expect(promote).toHaveBeenCalledOnce();
@@ -478,6 +483,7 @@ describe('RFC-64 catalog replay recovery runtime', () => {
           scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
             contextGraphId: string,
             policyDigest: string,
+            recoveryPolicy: AcceptedRecoveryPolicy,
           ): void;
         }
       ).scheduleRfc64AuthorityAcceptedCatalogRecoveryV1;
@@ -486,7 +492,7 @@ describe('RFC-64 catalog replay recovery runtime', () => {
         rfc64BackgroundWorkDispatcherV1: dispatcher,
         promoteRfc64OwnerSignedSwmInventoriesV1: promote,
         requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
-      }, 'public-cg', `0x${'33'.repeat(32)}`);
+      }, 'public-cg', `0x${'33'.repeat(32)}`, 'public');
 
       await attempted.promise;
       await expect(dispatcher.closeAndDrain()).resolves.toBeUndefined();

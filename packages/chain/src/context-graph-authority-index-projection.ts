@@ -1,14 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import {
-  contextGraphAuthorityIndexStateRevision,
-  type ContextGraphAuthorityIndexCheckpoint,
-  type ContextGraphAuthorityIndexState,
-} from './context-graph-authority-index-checkpoint.js';
-import type { ContextGraphAuthorityIndexId } from
-  './context-graph-authority-index-id.js';
-import { normalizeContextGraphAuthorityHash as normalizeHash } from
-  './context-graph-authority-generation.js';
+import type { ContextGraphAuthorityIndexView } from
+  './context-graph-authority-index-view.js';
 import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
 import type { ChainIndexAuthorityAnchor } from './chain-index/chain-index-anchor.js';
 import {
@@ -16,6 +9,8 @@ import {
   isContextGraphAuthorityIndexRetryableError,
 } from
   './context-graph-authority-index-errors.js';
+import type { ContextGraphAuthorityIndexHorizonReader } from
+  './context-graph-authority-index-horizon.js';
 import { waitForSignal } from './wait-for-signal.js';
 
 /** Default `chain.indexTickMs`: how long one completed projection answers reads. */
@@ -75,12 +70,12 @@ export const CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS = 5 * 60_
 
 /** In-flight refreshes one caller waits out before it reads for itself. */
 const MAX_REFRESH_WAITS = 2;
-const ZERO_HASH = `0x${'00'.repeat(32)}`;
 
 type ProjectionCacheLookup<T> =
   | Readonly<{ hit: false }>
   | Readonly<{ hit: true; value: T }>;
 const PROJECTION_CACHE_MISS: ProjectionCacheLookup<never> = Object.freeze({ hit: false });
+const RETRY_REFRESH_HORIZON_RACE = Symbol('retry-refresh-horizon-race');
 
 /** Normalize `chain.indexTickMs`; an omitted value defaults, an invalid one throws. */
 export function resolveContextGraphAuthorityIndexTickMs(value: unknown): number {
@@ -143,92 +138,8 @@ export interface ContextGraphAuthorityProjectionServedEvidence {
   readonly ageMs: number;
 }
 
-/**
- * Read-only view of ONE complete contract-wide checkpoint.
- *
- * The checkpoint (durable prefix plus the in-memory tail reduced above the
- * reorg holdback) stays private, exactly as it does behind the index's own
- * purpose-specific reads: a caller can project states out of it but can never
- * hand it to `exportSnapshot`, which serves the durable cursor only.
- *
- * These are the SAME projections `ContextGraphAuthorityIndex` runs on a fresh
- * scan, so a state, revision or policy digest read through a cached view is
- * byte-identical to the one a fresh scan at that head produces.
- */
-export class ContextGraphAuthorityIndexView {
-  readonly #checkpoint: ContextGraphAuthorityIndexCheckpoint;
-
-  constructor(checkpoint: ContextGraphAuthorityIndexCheckpoint) {
-    this.#checkpoint = checkpoint;
-    Object.freeze(this);
-  }
-
-  has(contextGraphId: ContextGraphAuthorityIndexId): boolean {
-    return this.#checkpoint.states.some((state) => state.contextGraphId === contextGraphId);
-  }
-
-  /** ABSENT is explicit: it throws, and is never a public/inactive/zero default. */
-  resolve(contextGraphId: ContextGraphAuthorityIndexId): ContextGraphAuthorityIndexState {
-    const state = this.#checkpoint.states.find((candidate) => (
-      candidate.contextGraphId === contextGraphId
-    ));
-    if (state === undefined) {
-      throw new Error(`Context Graph ${contextGraphId} has no finalized creation event`);
-    }
-    return state;
-  }
-
-  revisions(
-    contextGraphIds: readonly ContextGraphAuthorityIndexId[],
-  ): ReadonlyMap<ContextGraphAuthorityIndexId, string> {
-    const revisions = new Map<ContextGraphAuthorityIndexId, string>();
-    for (const [contextGraphId, state] of this.states(contextGraphIds)) {
-      revisions.set(contextGraphId, contextGraphAuthorityIndexStateRevision(state));
-    }
-    return revisions;
-  }
-
-  states(
-    contextGraphIds: readonly ContextGraphAuthorityIndexId[],
-  ): ReadonlyMap<ContextGraphAuthorityIndexId, ContextGraphAuthorityIndexState> {
-    const targetIds = new Set<ContextGraphAuthorityIndexId>(contextGraphIds);
-    const states = new Map<ContextGraphAuthorityIndexId, ContextGraphAuthorityIndexState>();
-    for (const state of this.#checkpoint.states) {
-      if (targetIds.has(state.contextGraphId)) states.set(state.contextGraphId, state);
-    }
-    return states;
-  }
-
-  /** Missing and zero-hash targets are omitted; duplicates fail closed. */
-  statesByNameHashes(
-    nameHashes: readonly string[],
-  ): ReadonlyMap<string, ContextGraphAuthorityIndexState> {
-    const targets = new Set<string>();
-    for (const rawNameHash of nameHashes) {
-      const nameHash = normalizeHash(rawNameHash);
-      if (nameHash === undefined) {
-        throw new Error('Context Graph authority index name hash is invalid');
-      }
-      if (nameHash !== ZERO_HASH) targets.add(nameHash);
-    }
-    if (targets.size === 0) return new Map();
-    const states = new Map<string, ContextGraphAuthorityIndexState>();
-    const counts = new Map<string, number>();
-    for (const state of this.#checkpoint.states) {
-      if (!targets.has(state.nameHash)) continue;
-      counts.set(state.nameHash, (counts.get(state.nameHash) ?? 0) + 1);
-      states.set(state.nameHash, state);
-    }
-    for (const [nameHash, count] of counts) {
-      if (count <= 1) continue;
-      throw new Error(
-        `Context Graph name hash ${nameHash} is ambiguous across ` +
-        `${count} finalized Context Graphs`,
-      );
-    }
-    return states;
-  }
-}
+export { ContextGraphAuthorityIndexView } from
+  './context-graph-authority-index-view.js';
 
 /** Where a completed projection obtained the chain data it contains. */
 export type ContextGraphAuthorityIndexProjectionOrigin =
@@ -377,13 +288,18 @@ export interface ContextGraphAuthorityIndexProjectionReadInput<T> {
    */
   readonly validateIncomplete?: (
     projection: ContextGraphAuthorityIndexProjection,
-  ) => Promise<boolean>;
+  ) => Promise<boolean | ContextGraphAuthorityIndexIncompleteProjectionAdmission>;
   /** Today's complete read: head, cursor admission, scan, stabilize. */
   readonly refresh: () => Promise<
     ContextGraphAuthorityIndexCompletedProjection | ContextGraphAuthorityIndexProjectionFault
   >;
   readonly onServed?: (evidence: ContextGraphAuthorityProjectionServedEvidence) => void;
 }
+
+/** Admission evidence for one explicitly reusable incomplete projection. */
+export type ContextGraphAuthorityIndexIncompleteProjectionAdmission =
+  | Readonly<{ admitted: false }>
+  | Readonly<{ admitted: true; anchorValidated: boolean }>;
 
 /** Every mutable invariant for one physical deployment/contract scope. */
 interface ContextGraphAuthorityProjectionScopeState {
@@ -426,10 +342,14 @@ export class ContextGraphAuthorityIndexProjectionCache {
   readonly staleMs: number;
   readonly #headTimestampToleranceMs: number;
   readonly #now: () => number;
+  readonly #horizons: ContextGraphAuthorityIndexHorizonReader | undefined;
   /** One state cell per scope, including every refresh currently in flight. */
   readonly #scopes = new Map<string, ContextGraphAuthorityProjectionScopeState>();
 
-  constructor(options: ContextGraphAuthorityIndexProjectionOptions = {}) {
+  constructor(
+    options: ContextGraphAuthorityIndexProjectionOptions = {},
+    horizons?: ContextGraphAuthorityIndexHorizonReader,
+  ) {
     this.tickMs = resolveContextGraphAuthorityIndexTickMs(options.tickMs);
     this.staleMs = resolveContextGraphAuthorityIndexStaleMs(this.tickMs);
     this.#headTimestampToleranceMs = options.headTimestampToleranceMs
@@ -439,24 +359,44 @@ export class ContextGraphAuthorityIndexProjectionCache {
       throw new Error('Context Graph authority head timestamp tolerance must be a positive integer');
     }
     this.#now = options.now ?? (() => Date.now());
+    this.#horizons = horizons;
   }
 
-  /** A checkpoint tombstone or a fork proved this scope's projection wrong. */
+  /** A checkpoint or cached-anchor proof invalidated this projection only. */
   drop(scope: string): void {
+    this.dropProjection(scope);
+  }
+
+  /** Drop one projection generation without forgetting its durable floor. */
+  dropProjection(scope: string): void {
     const state = this.#scopes.get(scope);
     if (state === undefined) return;
-    state.generation += 1;
-    delete state.projection;
-    delete state.failedAtMs;
-    delete state.refreshing;
+    this.#invalidateProjectionState(state);
+    this.#deleteScopeIfIdle(scope, state);
+  }
+  /** Read-your-writes invalidation affects projection retention only. */
+  dropAll(): void {
+    for (const scope of this.#scopes.keys()) this.dropProjection(scope);
+  }
+
+  /** Reconcile a newly active durable fence with retained/in-flight cache state. */
+  refreshHorizonChanged(scope: string): void {
+    const state = this.#scopes.get(scope);
+    if (state === undefined) return;
+    const projectionIsObsolete = state.projection !== undefined
+      && this.#horizons !== undefined
+      && !this.#horizons.admits(scope, state.projection.finalized);
+    const refreshOwnerIsUnfenced = state.refreshing !== undefined;
+    if (projectionIsObsolete || refreshOwnerIsUnfenced) {
+      state.generation += 1;
+      if (projectionIsObsolete) delete state.projection;
+      delete state.failedAtMs;
+      if (refreshOwnerIsUnfenced) delete state.refreshing;
+    }
     this.#deleteScopeIfIdle(scope, state);
   }
 
-  /**
-   * Hub/contract rotation, adapter teardown, or a local transaction that
-   * changed authority: nothing scanned before it may answer, and a refresh
-   * already in flight may not publish.
-   */
+  /** Hub/contract rotation or adapter teardown drops every retained answer. */
   clear(): void {
     for (const [scope, state] of this.#scopes) {
       state.generation += 1;
@@ -528,10 +468,25 @@ export class ContextGraphAuthorityIndexProjectionCache {
       const published = await this.#serve(input, 'backing-off');
       if (published.hit) return published.value;
     }
-    return this.#refresh(input);
+    const refreshed = await this.#refresh(input, true);
+    return refreshed === RETRY_REFRESH_HORIZON_RACE
+      ? this.#refresh(input, false)
+      : refreshed;
   }
 
-  async #refresh<T>(input: ContextGraphAuthorityIndexProjectionReadInput<T>): Promise<T> {
+  async #refresh<T>(
+    input: ContextGraphAuthorityIndexProjectionReadInput<T>,
+    retryPostRefreshHorizonRace: false,
+  ): Promise<T>;
+  async #refresh<T>(
+    input: ContextGraphAuthorityIndexProjectionReadInput<T>,
+    retryPostRefreshHorizonRace: true,
+  ): Promise<T | typeof RETRY_REFRESH_HORIZON_RACE>;
+  async #refresh<T>(
+    input: ContextGraphAuthorityIndexProjectionReadInput<T>,
+    retryPostRefreshHorizonRace: boolean,
+  ): Promise<T | typeof RETRY_REFRESH_HORIZON_RACE> {
+    input.signal?.throwIfAborted();
     const state = this.#scopeState(input.scope);
     state.activeRefreshes += 1;
     const generation = state.generation;
@@ -569,6 +524,20 @@ export class ContextGraphAuthorityIndexProjectionCache {
             completed.origin,
           ),
         });
+        try {
+          this.#horizons?.assertAtOrAbove(input.scope, projection.finalized);
+        } catch (error) {
+          // A background durable refresh can advance after the provider
+          // callback's own fence but before this cache publishes. Re-enter the
+          // complete provider read once so the typed miss is still classified
+          // inside its failover boundary; a second race propagates fail closed.
+          if (retryPostRefreshHorizonRace
+            && isContextGraphAuthorityIndexRetryableError(error)
+            && error.reason === 'refresh-horizon-ahead') {
+            return RETRY_REFRESH_HORIZON_RACE;
+          }
+          throw error;
+        }
         if (generation === state.generation) {
           this.#publish(state, projection);
         }
@@ -590,7 +559,10 @@ export class ContextGraphAuthorityIndexProjectionCache {
       // old authority projection may paper over: invalidate the retained view
       // and propagate the typed failure.
       if (isContextGraphAuthorityIndexRetryableError(error)) {
-        if (generation === state.generation) this.drop(input.scope);
+        if (generation === state.generation
+          && error.reason !== 'refresh-horizon-ahead') {
+          this.dropProjection(input.scope);
+        }
         throw error;
       }
       // Only the chain transport boundary proves an availability outage. A
@@ -630,6 +602,8 @@ export class ContextGraphAuthorityIndexProjectionCache {
     // boundary has already rejected a contract rotation, and this remains the
     // publication-side invariant protecting the state cell.
     if (this.#scopes.get(projection.scope) !== state) return;
+    if (this.#horizons !== undefined
+      && !this.#horizons.admits(projection.scope, projection.finalized)) return;
     // No chain time, no cache: the S2 guard could never be evaluated.
     if (!Number.isSafeInteger(projection.head.timestampSeconds)
       || projection.head.timestampSeconds < 0) return;
@@ -668,8 +642,17 @@ export class ContextGraphAuthorityIndexProjectionCache {
     reason: 'backing-off' | 'refresh-failed',
   ): Promise<ProjectionCacheLookup<T>> {
     const state = this.#scopes.get(input.scope);
-    const projection = state?.projection;
+    if (state === undefined) return PROJECTION_CACHE_MISS;
+    const projection = state.projection;
     if (projection === undefined) return PROJECTION_CACHE_MISS;
+    // A same-height replacement horizon can exclude this projection without a
+    // refresh observing it, including while the validation below is pending.
+    const candidateIsCurrent = (): boolean => (
+      this.#scopes.get(input.scope) === state && state.projection === projection
+      && (this.#horizons === undefined
+        || this.#horizons.admits(input.scope, projection.finalized))
+    );
+    if (!candidateIsCurrent()) return PROJECTION_CACHE_MISS;
     const now = this.#now();
     const ageMs = now - projection.fetchedAtMs;
     if (!this.#isWithinServiceWindow(projection, now)) return PROJECTION_CACHE_MISS;
@@ -683,12 +666,24 @@ export class ContextGraphAuthorityIndexProjectionCache {
       }
     }
     const projected = input.project(projection);
+    let anchorValidated = false;
     if (!projected.complete) {
-      if (input.validateIncomplete === undefined
-        || !await input.validateIncomplete(projection)) return PROJECTION_CACHE_MISS;
+      if (input.validateIncomplete === undefined) return PROJECTION_CACHE_MISS;
+      const admission = await input.validateIncomplete(projection);
       input.signal?.throwIfAborted();
+      if (!candidateIsCurrent()) return PROJECTION_CACHE_MISS;
+      // Preserve the original deep-module callback contract: `true` admits
+      // the incomplete projection but still requires its ordinary tail-anchor
+      // validation. The structured result lets a validator explicitly prove
+      // that same anchor once and avoid a duplicate provider read.
+      if (typeof admission === 'boolean') {
+        if (!admission) return PROJECTION_CACHE_MISS;
+      } else {
+        if (!admission.admitted) return PROJECTION_CACHE_MISS;
+        anchorValidated = admission.anchorValidated;
+      }
     }
-    if (projection.requiresAnchorValidation === true) {
+    if (projection.requiresAnchorValidation === true && !anchorValidated) {
       if (input.validateAnchor === undefined) return PROJECTION_CACHE_MISS;
       let anchorIsCurrent: boolean | undefined;
       try {
@@ -699,13 +694,16 @@ export class ContextGraphAuthorityIndexProjectionCache {
         input.signal?.throwIfAborted();
         return PROJECTION_CACHE_MISS;
       }
+      input.signal?.throwIfAborted();
+      if (!candidateIsCurrent()) return PROJECTION_CACHE_MISS;
       if (anchorIsCurrent === undefined) return PROJECTION_CACHE_MISS;
       if (!anchorIsCurrent) {
         // A mismatched anchor proves the tail projection belongs to a fork.
-        this.drop(input.scope);
+        this.dropProjection(input.scope);
         return PROJECTION_CACHE_MISS;
       }
     }
+    if (!candidateIsCurrent()) return PROJECTION_CACHE_MISS;
     // A RETAINED fold is still a fold. Labelling it `cache` here would relaunder
     // exactly what `#refresh` above stopped: `cache` tells a consumer that some
     // scan of this read class produced the entry and that `ageMs` dates that
@@ -739,12 +737,21 @@ export class ContextGraphAuthorityIndexProjectionCache {
   #scopeState(scope: string): ContextGraphAuthorityProjectionScopeState {
     let state = this.#scopes.get(scope);
     if (state === undefined) {
-      state = { generation: 0, activeRefreshes: 0 };
+      state = {
+        generation: 0,
+        activeRefreshes: 0,
+      };
       this.#scopes.set(scope, state);
     }
     return state;
   }
 
+  #invalidateProjectionState(state: ContextGraphAuthorityProjectionScopeState): void {
+    state.generation += 1;
+    delete state.projection;
+    delete state.failedAtMs;
+    delete state.refreshing;
+  }
   #deleteScopeIfIdle(
     scope: string,
     state: ContextGraphAuthorityProjectionScopeState,

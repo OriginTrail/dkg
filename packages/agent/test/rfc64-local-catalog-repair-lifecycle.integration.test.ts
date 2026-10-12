@@ -160,7 +160,7 @@ describe('RFC-64 local SWM catalog projection lifecycle', () => {
     });
   });
 
-  it('classifies an authority turnover after row preparation as retriable', async () => {
+  it('classifies both authority turnovers after row preparation as retriable', async () => {
     const agent = await startRepairAgentV1({
       name: 'inventory-authority-cas-fence',
       autoPublish: {
@@ -184,35 +184,52 @@ describe('RFC-64 local SWM catalog projection lifecycle', () => {
     const internal = agent as any;
     const originalPrepare = internal.prepareRfc64SwmAuthorInventoryRowV1.bind(agent);
     const originalResolve = internal.resolveRfc64CatalogAuthoringLaneV1.bind(agent);
+    let transition: 'lane-disappears' | 'scope-digest-changes' = 'lane-disappears';
     let transitioned = false;
     const resolve = vi.spyOn(internal, 'resolveRfc64CatalogAuthoringLaneV1')
-      .mockImplementation((...args: unknown[]) => (
-        transitioned ? null : originalResolve(...args)
-      ));
+      .mockImplementation((...args: unknown[]) => {
+        const lane = originalResolve(...args);
+        if (!transitioned || lane === null) return lane;
+        if (transition === 'lane-disappears') return null;
+        return {
+          ...lane,
+          scopeBase: {
+            ...lane.scopeBase,
+            era: (BigInt(lane.scopeBase.era) + 1n).toString(),
+          },
+        };
+      });
     const prepare = vi.spyOn(internal, 'prepareRfc64SwmAuthorInventoryRowV1')
       .mockImplementation(async (...args: unknown[]) => {
         const row = await originalPrepare(...args);
         transitioned = true;
         return row;
       });
-
-    await expect(agent.recordRfc64SwmAuthorInventoryShadowV1({
+    const record = () => agent.recordRfc64SwmAuthorInventoryShadowV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       assertionCoordinate: seeded.assertionCoordinate,
       lifecycleAgentAddress: AUTHOR,
       shareOperationId: seeded.shareOperationId,
-    })).resolves.toMatchObject({
+    });
+
+    await expect(record()).resolves.toMatchObject({
       status: 'dormant',
       dormantReason: 'authority-transition',
     });
+    transition = 'scope-digest-changes';
+    transitioned = false;
+    await expect(record()).resolves.toMatchObject({
+      status: 'dormant',
+      dormantReason: 'authority-transition',
+    });
+    expect(agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: seeded.scopeDigest,
+      authorAddress: AUTHOR,
+    })).toBeNull();
+
     prepare.mockRestore();
     resolve.mockRestore();
-    await expect(agent.recordRfc64SwmAuthorInventoryShadowV1({
-      contextGraphId: CONTEXT_GRAPH_ID,
-      assertionCoordinate: seeded.assertionCoordinate,
-      lifecycleAgentAddress: AUTHOR,
-      shareOperationId: seeded.shareOperationId,
-    })).resolves.toMatchObject({ status: 'applied' });
+    await expect(record()).resolves.toMatchObject({ status: 'applied' });
     expect(agent.readRfc64SwmAuthorInventorySnapshotV1({
       inventoryScopeDigest: seeded.scopeDigest,
       authorAddress: AUTHOR,

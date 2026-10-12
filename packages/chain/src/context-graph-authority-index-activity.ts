@@ -21,6 +21,11 @@ export class ContextGraphAuthorityIndexActivity {
     return waitForSignal(this.track(operation()), signal);
   }
 
+  /** Snapshot an idle barrier only when physical work is currently pending. */
+  drainPending(): Promise<void> | undefined {
+    return this.#pending.size === 0 ? undefined : this.whenIdle();
+  }
+
   async whenIdle(): Promise<void> {
     for (;;) {
       const revision = this.#revision;

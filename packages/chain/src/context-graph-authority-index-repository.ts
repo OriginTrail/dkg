@@ -19,6 +19,17 @@ export type ContextGraphAuthorityIndexRepositoryRecord = (
     }>
 ) & Readonly<{ [authorityIndexObservation]: true }>;
 
+/** A repository observation that passed durable decoding/admission. */
+export type ContextGraphAuthorityIndexAdmittedRepositoryRecord = Exclude<
+  ContextGraphAuthorityIndexRepositoryRecord,
+  Readonly<{ kind: 'invalid'; token: number }>
+>;
+
+export type ContextGraphAuthorityIndexCommittedRepositoryRecord = Extract<
+  ContextGraphAuthorityIndexAdmittedRepositoryRecord,
+  Readonly<{ kind: 'checkpoint' }>
+>;
+
 type CacheableAuthorityIndexRecord = Exclude<
   ContextGraphAuthorityIndexRepositoryRecord,
   Readonly<{ kind: 'missing'; token: undefined }> | Readonly<{ kind: 'invalid'; token: number }>
@@ -63,6 +74,13 @@ export interface ContextGraphAuthorityIndexScopedRepository {
   ): Promise<ContextGraphAuthorityIndexCommitResult>;
 }
 
+/** Internal scoped repository whose durable row identity is explicit. */
+export interface ContextGraphAuthorityIndexKeyedScopedRepository
+  extends ContextGraphAuthorityIndexScopedRepository {
+  /** CAS tokens are monotonic only within this key. */
+  readonly key: string;
+}
+
 function assertAuthorityIndexToken(value: unknown): asserts value is number {
   if (!Number.isSafeInteger(value) || Number(value) < 1) {
     throw new Error('Context Graph authority index durable token is invalid');
@@ -85,8 +103,9 @@ export class ContextGraphAuthorityIndexRepository {
     this.#entries.clear();
   }
 
-  forScope(scope: string): ContextGraphAuthorityIndexScopedRepository {
+  forScope(scope: string): ContextGraphAuthorityIndexKeyedScopedRepository {
     return Object.freeze({
+      key: scope,
       load: () => this.#load(scope),
       reload: () => this.#reload(scope),
       invalidateOrReloadWinner: (record: TokenedAuthorityIndexRecord, signal?: AbortSignal) => (

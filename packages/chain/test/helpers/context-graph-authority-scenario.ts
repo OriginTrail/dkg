@@ -177,6 +177,8 @@ export interface AuthorityScenarioOptions {
   readonly zeroHashContextGraphs?: number;
   readonly lateContextGraphNameHash?: string;
   readonly finalizedNumber?: number;
+  /** Optional believable chain time, used when a test needs a retained projection. */
+  readonly headTimestampSeconds?: number;
   /**
    * The head block's own hash. Needed when the head carries events: the page
    * reducer requires an event AT the page anchor to match the anchor's hash.
@@ -393,8 +395,13 @@ export function createAuthorityScenario(options: AuthorityScenarioOptions = {}) 
       },
       ...(options.lateContextGraphNameHash === undefined ? [] : [{
         name: 'ContextGraphCreated' as const,
-        blockNumber: 33,
-        blockHash: NEXT_POLICY_HASH,
+        // The replacement fork registers this name at the same height whose
+        // original hash proved it absent. That makes a same-height hash change
+        // observable without advancing the scenario's finalized boundary.
+        blockNumber: replacementAuthorityFork ? 30 : 33,
+        blockHash: replacementAuthorityFork
+          ? REPLACEMENT_FINALIZED_HASH
+          : NEXT_POLICY_HASH,
         index: 1,
         contextGraphId: 11n,
         owner: MEMBER,
@@ -482,7 +489,13 @@ export function createAuthorityScenario(options: AuthorityScenarioOptions = {}) 
         // depth 1 this read IS the anchor, so a later numbered read at this
         // height is unambiguously the stabilization fence.
         anchorReadArmed = anchorNumber() !== finalizedNumber;
-        return { number: finalizedNumber, hash: finalizedHash };
+        return {
+          number: finalizedNumber,
+          hash: finalizedHash,
+          ...(options.headTimestampSeconds === undefined
+            ? {}
+            : { timestamp: options.headTimestampSeconds }),
+        };
       }
       // A numbered read: the deeper anchor resolution below depth 1, or the
       // stabilization fence / historical hash read.

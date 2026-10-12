@@ -6,7 +6,7 @@ export class ContextGraphAuthorityIndexRetryableError extends Error {
 
   constructor(
     message: string,
-    readonly reason?: 'cursor-ahead',
+    readonly reason?: 'cursor-ahead' | 'refresh-horizon-ahead',
   ) {
     super(message);
   }
