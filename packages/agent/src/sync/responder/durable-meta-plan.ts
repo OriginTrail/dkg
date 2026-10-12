@@ -116,8 +116,8 @@ function storeOptions(signal: AbortSignal | undefined, source: string): QueryOpt
  * The value of a COUNT binding. The counts are the plan's bounds and its
  * cursor, so a row without a count is an unexpected store result, not zero.
  */
-function countOf(row: Record<string, string> | undefined, source: string): number {
-  const value = stripMetadataLiteral(row?.['count']);
+function countOf(row: Record<string, string> | undefined, source: string, binding = 'count'): number {
+  const value = stripMetadataLiteral(row?.[binding]);
   if (value === undefined || !/^\d+$/.test(value)) {
     throw new Error(`Durable meta plan: ${source} returned a row without a count`);
   }
@@ -201,24 +201,29 @@ export async function buildDurableMetaPlan(params: {
   // One unsorted scan of the one metadata graph, one row per subject. Its bound
   // is twice the row cap, not the cap: the count above already refused a larger
   // graph, so the bound can only bind if the graph doubles between the two
-  // reads, and a truncated scan cannot pass for a complete one.
-  const subjectRowCounts = `{
-        SELECT ?s (COUNT(*) AS ?count) WHERE {
-          { SELECT ?s WHERE { GRAPH <${graph}> { ?s ?p ?o } } LIMIT ${2 * limits.maxRows + 1} }
-        }
-        GROUP BY ?s
-      }`;
+  // reads. The same query counts the rows the scan covers, so a scan that did
+  // reach its bound, and may have left subjects out, is refused and cannot pass
+  // for a complete one.
+  const scanBound = 2 * limits.maxRows + 1;
+  const scannedRows = `{ SELECT ?s WHERE { GRAPH <${graph}> { ?s ?p ?o } } LIMIT ${scanBound} }`;
   const readGroups = async (filter: string, source: string) => {
-    const groups = await queryPlanBindings(store, `
-    SELECT ?s ?count WHERE {
-      VALUES ?g { <${graph}> }
-      ${subjectRowCounts}
-      FILTER${durableMetaJoinRequestExclusionExpression()}
-      FILTER${filter}
+    const rows = await queryPlanBindings(store, `
+    SELECT ?scanned ?s ?count WHERE {
+      { SELECT (COUNT(*) AS ?scanned) WHERE { ${scannedRows} } }
+      UNION
+      {
+        VALUES ?g { <${graph}> }
+        { SELECT ?s (COUNT(*) AS ?count) WHERE { ${scannedRows} } GROUP BY ?s }
+        FILTER${durableMetaJoinRequestExclusionExpression()}
+        FILTER${filter}
+      }
     }
-    LIMIT ${limits.maxSubjects + 1}
+    LIMIT ${limits.maxSubjects + 2}
   `, source, budgetKey, signal);
+    const groups = rows.filter((row) => row['s'] !== undefined);
     if (groups.length > limits.maxSubjects) throw refuse('snapshot_rows', groups.length, limits.maxSubjects);
+    const scanned = countOf(rows.find((row) => row['scanned'] !== undefined), `${source} (rows scanned)`, 'scanned');
+    if (scanned >= scanBound) throw refuse('snapshot_rows', scanned, limits.maxRows);
     return groups;
   };
 

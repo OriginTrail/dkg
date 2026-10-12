@@ -195,11 +195,12 @@ describe('durable-meta session plan', () => {
     ]);
     expect(queries[2]!.rows).toBe(0);
     // The count stops one row past the cap; the subject scan cannot outgrow
-    // twice the cap and returns at most one row past the subject cap, as does
-    // the read of the names.
+    // twice the cap and returns at most one row past the subject cap (beside
+    // the one row that says how many rows it scanned), as does the read of
+    // the names.
     expect(queries[0]!.sparql).toContain('LIMIT 1001 }');
-    expect(queries[1]!.sparql).toContain('LIMIT 2001 }');
-    expect(queries[1]!.sparql).toMatch(/LIMIT 51$/);
+    expect(queries[1]!.sparql.match(/LIMIT 2001 \}/g)).toHaveLength(2);
+    expect(queries[1]!.sparql).toMatch(/LIMIT 52$/);
     expect(queries[2]!.sparql).toMatch(/LIMIT 51$/);
     for (const query of queries) expect(query.sparql).not.toMatch(/\bORDER BY\b|\bOFFSET\b/);
 
@@ -215,6 +216,39 @@ describe('durable-meta session plan', () => {
     // Refused on the bounded count alone.
     expect(queries.map((query) => query.source)).toEqual(['sync.responder.countDurableMetaPlanRows']);
     await store.close();
+  });
+
+  it('refuses a subject scan that reached its bound instead of planning what it happened to cover', async () => {
+    const cgId = 'meta-plan-scan-bound';
+    const graph = contextGraphMetaGraphUri(cgId);
+    const activity = (name: string): Quad => ({
+      graph, subject: `did:dkg:activity:${name}`, predicate: `${DKG_NS}label`, object: `"${name}"`,
+    });
+    const grownBy = async (rows: number, maxRows: number) => {
+      const store = new OxigraphStore();
+      await store.insert([activity('one'), activity('two')]);
+      const original = store.query.bind(store);
+      (store as { query: TripleStore['query'] }).query = async (sparql, options) => {
+        const result = await original(sparql, options);
+        // The graph grows between the bounded count and the subject scan.
+        if (options?.source === 'sync.responder.countDurableMetaPlanRows') {
+          await store.insert(Array.from({ length: rows }, (_, index) => ({
+            graph, subject: `urn:noise:${index}`, predicate: `${DKG_NS}label`, object: `"noise ${index}"`,
+          })));
+        }
+        return result;
+      };
+      const plan = buildDurableMetaPlan({
+        store, contextGraphId: cgId, registeredSubGraphNames: [], budgetKey: 'scan-bound', limits: { maxRows },
+      });
+      return plan.finally(() => store.close());
+    };
+
+    // Two rows at the count, eight at the scan: the scan stops at its bound of
+    // five, wherever the admitted rows fall among them.
+    await expect(grownBy(6, 2)).rejects.toMatchObject({ name: 'SyncRowSnapshotBudgetError', reason: 'snapshot_rows' });
+    // Growth the scan still covers whole is planned as the graph is.
+    await expect(grownBy(2, 2)).resolves.toMatchObject({ totalRows: 2 });
   });
 
   it('refuses a plan beyond its subject, subject-size and retained-size caps with the typed budget error', async () => {
