@@ -253,9 +253,6 @@ export default defineConfig({
           'test/oxigraph-listen-port.test.ts',
           'test/oxigraph-server.test.ts',
           'test/oxigraph-server-native.test.ts',
-          // The sync responder against the same real executable: page cost of
-          // a large metadata graph under the store's own client deadline.
-          'test/sync-large-graph-store-deadline-native.test.ts',
           'test/oxigraph-server-wal.test.ts',
           'test/oxigraph-managed-start-options.test.ts',
           'test/oxigraph-wal-maintenance.test.ts',
@@ -268,6 +265,10 @@ export default defineConfig({
           'test/oxigraph-reclaim-policy.test.ts',
           'test/oxigraph-orphan-native.test.ts',
           'test/oxigraph-managed.test.ts',
+          // The sync responder against the real pinned executable, started as
+          // a node starts its managed store: page cost of a large metadata
+          // graph under the store's own client deadline.
+          'test/sync-large-graph-store-deadline-native.test.ts',
           // Opt-in via BLAZEGRAPH_INTEGRATION_TEST=1. Skips silently
           // (no fetch / no docker spawn) when the env-var is unset, so
           // keeping it in the fast unit lane costs nothing.
