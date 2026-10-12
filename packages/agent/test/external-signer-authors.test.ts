@@ -527,10 +527,10 @@ describe('external signer author keys', () => {
       signerFor: async () => defaultAuthor,
       firstSignerOf: async () => ({ address: defaultAuthor.address, signer: defaultAuthor }),
     };
-    const agentWith = (defaultAgent: string | undefined) => ({
+    const agentWith = (defaultAgent: string | undefined, names: readonly string[] = ['node']) => ({
       getDefaultAgentAddress: () => defaultAgent,
       getLocalAgentMode: () => undefined,
-      listLocalAgents: () => [{ name: 'node', agentAddress: agentKey.address }],
+      listLocalAgents: () => names.map((name) => ({ name, agentAddress: agentKey.address })),
       registerAgent: vi.fn(async () => { throw new Error('agent registrations are not signed here'); }),
     });
     // Nothing to adopt: no default author, no default agent, no external signing, or the default author already.
@@ -543,10 +543,17 @@ describe('external signer author keys', () => {
       expect(await defaultAuthorToAdopt(agent as never, configured, chain, 'node')).toBeUndefined();
       expect(agent.registerAgent).not.toHaveBeenCalled();
     }
-    // A default author the signer will not register: the default agent is kept.
-    const refusing = agentWith(agentKey.address);
-    expect(await defaultAuthorToAdopt(refusing as never, authors, external, 'node')).toBeUndefined();
-    expect(refusing.registerAgent).toHaveBeenCalledWith('node-default-author', { address: defaultAuthor.address, framework: undefined });
+    // A default author the signer will not register: the default agent is kept. It was asked under a name no agent has.
+    for (const [names, free] of [
+      [['owner'], 'node'],
+      [['node'], 'node-default-author'],
+      [['node', 'node-default-author'], 'node-default-author-2'],
+      [['node', 'node-default-author-2'], 'node-default-author'],
+    ] as const) {
+      const refusing = agentWith(agentKey.address, names);
+      expect(await defaultAuthorToAdopt(refusing as never, authors, external, 'node')).toBeUndefined();
+      expect(refusing.registerAgent).toHaveBeenCalledWith(free, { address: defaultAuthor.address, framework: undefined });
+    }
   });
 
   it('auto-registers no default agent from payer accounts alone, or when no author key can be registered', async () => {
@@ -627,11 +634,12 @@ describe('external signer author keys', () => {
     }
   });
 
-  it('makes a newly configured default author the default agent, and opens and seals node drafts under it', async () => {
+  it('makes each newly configured default author the default agent, and opens and seals node drafts under it', async () => {
+    const nextAuthor = ethers.Wallet.createRandom();
     const fake = await startFakeRemoteSigner({
       credentials: [
         { token: PAYER_TOKEN, keys: [payer.privateKey] },
-        { token: AUTHOR_TOKEN, keys: [defaultAuthor.privateKey, agentKey.privateKey] },
+        { token: AUTHOR_TOKEN, keys: [defaultAuthor.privateKey, agentKey.privateKey, nextAuthor.privateKey] },
       ],
     });
     started.push(fake);
@@ -692,6 +700,40 @@ describe('external signer author keys', () => {
       } finally {
         await again.agent.stop();
         again.remote.destroy();
+      }
+
+      // A third default author gets a name of its own and becomes the default agent; the former ones stay agents.
+      const third = await start(nextAuthor.address);
+      try {
+        expect(third.agent.getDefaultAgentAddress()).toBe(nextAuthor.address);
+        expect(third.agent.listLocalAgents().map((record) => [record.name, record.agentAddress]).sort()).toEqual([
+          ['DefaultAuthorNode', agentKey.address],
+          ['DefaultAuthorNode-default-author', defaultAuthor.address],
+          ['DefaultAuthorNode-default-author-2', nextAuthor.address],
+        ]);
+        expect(registrations()).toBe(3);
+        // A new draft opened and sealed with the node token is the third default author's.
+        await third.agent.assertion.create(CG, 'after');
+        await third.agent.assertion.write(CG, 'after', [q('urn:external-authors:third', 'urn:value', '"v1"')]);
+        const seal = await third.agent.assertion.finalize(CG, 'after');
+        expect(ethers.getAddress(seal.authorAddress)).toBe(nextAuthor.address);
+        expect(seal.reservedKaId >> 96n).toBe(BigInt(nextAuthor.address));
+        // What the former default agents opened keeps its author.
+        expect(await third.agent.assertion.history(CG, 'before', { agentAddress: agentKey.address })).not.toBeNull();
+        expect(await third.agent.assertion.history(CG, NAME, { agentAddress: defaultAuthor.address })).not.toBeNull();
+      } finally {
+        await third.agent.stop();
+        third.remote.destroy();
+      }
+
+      // And the next start keeps the third, registering nothing again.
+      const restarted = await start(nextAuthor.address);
+      try {
+        expect(restarted.agent.getDefaultAgentAddress()).toBe(nextAuthor.address);
+        expect(registrations()).toBe(3);
+      } finally {
+        await restarted.agent.stop();
+        restarted.remote.destroy();
       }
     } finally {
       await rm(dir, { recursive: true, force: true });

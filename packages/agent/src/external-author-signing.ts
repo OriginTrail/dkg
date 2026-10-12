@@ -114,11 +114,11 @@ export async function registerExternalDefaultAgent(
  * is another account, for example its former local wallet kept on as a payer.
  * What the node publishes without a selected agent is authored by the default
  * author, so the drafts it opens without one must be the default author's too.
- * A default author that is not an agent yet is registered by address first.
- * The other agents stay registered, and what any agent created keeps its
- * author. Undefined (the default agent is kept) without a default author or a
- * default agent, when it already is the default agent, or when its
- * registration fails.
+ * A default author that is not an agent yet is registered by address first,
+ * under a name no agent of the node has. The other agents stay registered, and
+ * what any agent created keeps its author. Undefined (the default agent is
+ * kept) without a default author or a default agent, when it already is the
+ * default agent, or when its registration fails.
  */
 export async function defaultAuthorToAdopt(
   agent: DKGAgent,
@@ -136,13 +136,27 @@ export async function defaultAuthorToAdopt(
     let address = ethers.getAddress(defaultAuthor);
     if (agent.getLocalAgentMode(address) === undefined) {
       const taken = new Set(agent.listLocalAgents().map((record) => record.name));
-      address = (await agent.registerAgent(taken.has(name) ? `${name}-default-author` : name, { address, framework })).agentAddress;
+      address = (await agent.registerAgent(freeDefaultAuthorName(taken, name), { address, framework })).agentAddress;
     }
     log.info(ctx, `Default agent is now the external signer's default author ${address} (was ${previous})`);
     return address;
   } catch (err) {
     log.warn(ctx, `Keeping the default agent: registering default author ${defaultAuthor} of the external signer failed: ${err instanceof Error ? err.message : String(err)}`);
     return undefined;
+  }
+}
+
+/**
+ * The name a default author is registered under when the node adopts it: the
+ * node's name, else the first of `<name>-default-author`,
+ * `<name>-default-author-2`, … that no agent of the node has, so each default
+ * author adopted in turn gets its own name and the agents before it keep theirs.
+ */
+function freeDefaultAuthorName(taken: ReadonlySet<string>, name: string): string {
+  if (!taken.has(name)) return name;
+  for (let n = 1; ; n += 1) {
+    const candidate = n === 1 ? `${name}-default-author` : `${name}-default-author-${n}`;
+    if (!taken.has(candidate)) return candidate;
   }
 }
 
