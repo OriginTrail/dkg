@@ -14,6 +14,7 @@ import {
 } from './tool-router.js';
 import { NOOP_TRACE, type InteractionTrace } from './text-trace.js';
 import type { DkgLocalLlmDomainProfile } from './domain-profile.js';
+
 import {
   rewriteCompactPredicatesForDkg,
   referencesUnresolvedContextGraphAlias,
@@ -25,6 +26,12 @@ import {
   DEFAULT_MAX_MODEL_RESPONSE_BYTES,
   readModelResponseTextBounded,
 } from './model-response.js';
+
+class LocalModelContextLimitError extends Error {
+  constructor(readonly contextTokens?: number) {
+    super('LOCAL_LLM_CONTEXT_LIMIT');
+  }
+}
 
 export interface McpClientLike {
   listTools(options?: { signal?: AbortSignal }): Promise<{ tools: McpToolDefinition[] }>;
@@ -581,6 +588,15 @@ export class DkgLocalLlmRuntime {
     signal?.throwIfAborted();
     if (!response.ok) {
       await this.trace.write(`LLM HTTP ERROR ${round}`, { status: response.status, body: raw });
+      // This explicit rejection occurred before inference. Do not retry
+      // timeouts, transport failures or other ambiguous model outcomes.
+      if (response.status === 400) {
+        let failure: { error?: { type?: string; n_ctx?: number } } | undefined;
+        try { failure = JSON.parse(raw); } catch { /* Preserve the ordinary HTTP failure below. */ }
+        if (failure?.error?.type === 'exceed_context_size_error') {
+          throw new LocalModelContextLimitError(failure.error.n_ctx);
+        }
+      }
       throw new Error(`Local LLM endpoint returned ${response.status}: ${raw}`);
     }
 
@@ -638,8 +654,7 @@ export class DkgLocalLlmRuntime {
     }
 
     const priorSession = this.renderSessionContext();
-    const systemContext = [
-      dkgLocalLlmSystemContext({
+    const currentSystemContext = dkgLocalLlmSystemContext({
         projectId: this.projectId,
         profile: route.profile,
         toolNames: route.tools.map((tool) => tool.name),
@@ -647,7 +662,9 @@ export class DkgLocalLlmRuntime {
         addendum: [this.domainProfile?.systemContext, this.systemContextAddendum]
           .filter(Boolean)
           .join('\n\n'),
-      }),
+      });
+    const systemContext = [
+      currentSystemContext,
       ...(priorSession ? [SESSION_CONTEXT, priorSession] : []),
     ].join('\n\n');
     const messages: ChatMessage[] = [
@@ -668,6 +685,8 @@ export class DkgLocalLlmRuntime {
     let requireTool = route.profile !== 'chat';
     let finalOnly = false;
     let truncationRetryUsed = false;
+    let historyRemoved = !priorSession;
+    let contextFinalOnlyUsed = false;
 
     const scheduleRepair = async (
       reason: string,
@@ -704,14 +723,39 @@ export class DkgLocalLlmRuntime {
             ? []
             : openAiTools;
       const toolChoice = routedTools.length ? (requireTool ? 'required' : 'auto') : undefined;
-      const response = await this.callModel(
-        messages,
-        routedTools,
-        toolChoice,
-        round,
-        route.profile === 'chat' ? Math.min(this.maxTokens, 256) : this.maxTokens,
-        signal,
-      );
+      let response: OpenAiCompatibleResponse;
+      try {
+        response = await this.callModel(
+          messages, routedTools, toolChoice, round,
+          route.profile === 'chat' ? Math.min(this.maxTokens, 256) : this.maxTokens,
+          signal,
+        );
+      } catch (error) {
+        if (!(error instanceof LocalModelContextLimitError)) throw error;
+        if (!historyRemoved) {
+          // Keep the selected graph, current question and every current-turn
+          // tool result. Only unrelated past-turn history leaves this request.
+          messages[0] = { role: 'system', content: currentSystemContext };
+          historyRemoved = true;
+          await this.trace.write('CONTEXT RECOVERY', { action: 'omit-prior-history', contextTokens: error.contextTokens });
+        } else if (sessionEvidence.length && routedTools.length && !contextFinalOnlyUsed) {
+          // Tool schemas consume context too. A bounded final answer can use
+          // the existing evidence without another tool dispatch or invented rows.
+          finalOnly = true;
+          requireTool = false;
+          pinnedToolName = undefined;
+          contextFinalOnlyUsed = true;
+          messages.push({ role: 'user', content:
+            'The model context limit was reached. Answer concisely from the current tool results only. '
+            + 'If the requested list or count is not fully supported, explicitly report a partial answer and what is missing. '
+            + 'Do not infer absent facts or repeat tool calls.' });
+          await this.trace.write('CONTEXT RECOVERY', { action: 'finish-from-current-evidence', contextTokens: error.contextTokens });
+        } else throw error;
+        // At most two explicit pre-inference rejections can reach here. They
+        // do not spend an orchestration round or repeat any completed MCP call.
+        round--;
+        continue;
+      }
       const choice = response.choices?.[0];
       const assistant = choice?.message;
       if (!assistant) throw new Error('Local LLM endpoint returned no assistant choice.');

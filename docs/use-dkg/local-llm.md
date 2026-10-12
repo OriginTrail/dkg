@@ -903,3 +903,19 @@ Before recommending another model, run the production real-DKG benchmark. It
 uses the same runtime, a real MCP child process, a real DKG daemon/store, and
 independent state verification. See
 [`packages/local-llm/README.md`](../../packages/local-llm/README.md#real-dkg-benchmark).
+## Explicit model context rejection
+
+When an OpenAI-compatible backend explicitly returns HTTP 400 with
+`error.type=exceed_context_size_error`, the runtime can recover before inference
+by omitting prior-turn history from that request. It preserves the selected
+graph, current question and every current-turn tool result. If those results
+plus tool schemas still exceed the backend context, one final attempt omits the
+schemas and asks for a concise answer from the existing evidence, with any
+incomplete search reported as partial. Current evidence is not silently pruned,
+completed tools are not dispatched again, and saved conversation history is not
+cleared. Requests that still cannot fit fail with `LOCAL_LLM_CONTEXT_LIMIT`.
+
+`CONTEXT RECOVERY` trace sections identify each step. Other HTTP errors, timeouts
+and transport failures do not use this retry path. This handles a specific
+pre-inference rejection; it does not raise the model server's context setting or
+guarantee that arbitrary source payloads can fit.
