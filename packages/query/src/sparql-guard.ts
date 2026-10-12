@@ -12,6 +12,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { PreparedSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
 import type { QueryResult } from './query-engine.js';
+import { emptyImplicitGroupSolution } from './sparql-empty-aggregate.js';
 
 // CodeQL alert #65 (js/redos) — the previous single-shot regex
 // `^\s*(?:(?:PREFIX\s+[^\s:]*:\s*)|(?:BASE\s+))*\s*(SELECT|...)\b/i`
@@ -45,7 +46,10 @@ export type SparqlQueryForm = 'SELECT' | 'CONSTRUCT' | 'ASK' | 'DESCRIBE' | 'UNK
  * query engine would return for a successful-but-empty execution of
  * the same form:
  *
- *   - SELECT  → `{ bindings: [] }`
+ *   - SELECT  → `{ bindings: [] }`, except a SELECT that only aggregates
+ *               without GROUP BY: over no data that query still has its
+ *               one row (`COUNT` is 0), so {@link emptyResultForSparql}
+ *               answers that row
  *   - ASK     → `{ bindings: [{ result: 'false' }] }` (the `dkg-query-engine`
  *               convention: ASK results surface through bindings so
  *               callers don't need a separate branch)
@@ -111,10 +115,11 @@ export function emptyResultForForm(form: SparqlQueryForm): QueryResult {
 
 /**
  * One-shot ergonomic helper: classify the SPARQL string and build a
- * shape-matched empty `QueryResult` in a single call. Equivalent to
- * `emptyResultForForm(detectSparqlQueryForm(sparql))` and exists
- * solely so callers that don't already need the form for branching
- * don't have to write the two-step every time.
+ * shape-matched empty `QueryResult` in a single call. It is
+ * `emptyResultForForm(detectSparqlQueryForm(sparql))` for every query
+ * but the aggregate-only SELECT described above, which the form alone
+ * cannot recognize: prefer this helper wherever the query text is at
+ * hand.
  *
  * — sparql-guard.ts:56) consolidation:
  * before this consolidation, two parallel pairs lived in this file
@@ -124,7 +129,13 @@ export function emptyResultForForm(form: SparqlQueryForm): QueryResult {
  * call sites without re-introducing a parallel classifier.
  */
 export function emptyResultForSparql(sparql: string): QueryResult {
-  return emptyResultForForm(detectSparqlQueryForm(sparql));
+  const form = detectSparqlQueryForm(sparql);
+  if (form === 'SELECT') {
+    // The form alone cannot tell `SELECT (COUNT(*) AS ?n)` from `SELECT ?s`.
+    const solution = emptyImplicitGroupSolution(sparql);
+    if (solution !== null) return { bindings: [solution] };
+  }
+  return emptyResultForForm(form);
 }
 
 // ─────────────────────────────────────────────────────────────────────
