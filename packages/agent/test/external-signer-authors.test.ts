@@ -664,6 +664,20 @@ describe('external signer author keys', () => {
         expect(refusal?.message).toMatch(/operationalKeys are local wallet keys and cannot be combined with a supplied chainAdapter/);
         expect(refusal?.message).not.toContain(payer.privateKey.slice(2));
         await expect(readFile(join(dir, 'agent-keystore.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+        // Nor an adapter that reports external signing yet exposes a local operational key of its own.
+        const exposing = Object.assign(new ExternallySignedMockChain('mock:31337', payer.address), {
+          getOperationalPrivateKey: () => payer.privateKey,
+        });
+        const exposed = await DKGAgent.create({
+          name: 'SuppliedExternalExposingKey',
+          store: new OxigraphStore(),
+          dataDir: dir,
+          chainAdapter: exposing,
+          nodeRole: 'edge',
+        }).then(() => undefined, (error: unknown) => error as Error);
+        expect(exposed?.message).toMatch(/cannot also expose a local operational key/);
+        expect(exposed?.message).not.toContain(payer.privateKey.slice(2));
+        await expect(readFile(join(dir, 'agent-keystore.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
       } finally {
         await rm(dir, { recursive: true, force: true });
       }
