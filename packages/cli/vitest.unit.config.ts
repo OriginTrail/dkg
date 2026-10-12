@@ -253,6 +253,9 @@ export default defineConfig({
           'test/oxigraph-listen-port.test.ts',
           'test/oxigraph-server.test.ts',
           'test/oxigraph-server-native.test.ts',
+          // The sync responder against the same real executable: page cost of
+          // a large metadata graph under the store's own client deadline.
+          'test/sync-large-graph-store-deadline-native.test.ts',
           'test/oxigraph-server-wal.test.ts',
           'test/oxigraph-managed-start-options.test.ts',
           'test/oxigraph-wal-maintenance.test.ts',
