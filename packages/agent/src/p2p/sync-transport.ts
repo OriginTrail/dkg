@@ -21,6 +21,7 @@ import {
   type SyncAttemptPhase,
   type SyncAttemptPlane,
 } from '../sync/attempt-telemetry.js';
+import { readSyncNotServable } from '../sync/not-servable.js';
 import type { Messenger } from './messenger.js';
 
 /**
@@ -251,8 +252,11 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
       maxAttempts: params.retryAttempts,
       baseDelayMs: 1000,
       signal: params.signal,
+      // A responder that says it cannot serve the request would say so again:
+      // the same request is not sent a second time within this fetch.
       isRetryable: (error) => params.signal?.aborted !== true
         && !(error instanceof SyncWorkAdmissionExhaustedError)
+        && readSyncNotServable(error) === null
         && workAdmission.canAdmitWork(),
       onRetry: params.onRetry,
     },

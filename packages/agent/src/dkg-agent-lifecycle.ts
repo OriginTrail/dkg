@@ -310,6 +310,7 @@ import {
   type SyncPageFetchOptions,
   type SyncPageResult,
 } from './sync/requester/page-fetch.js';
+import { describeSyncPeerGraphHold, observeSyncPageFetch, syncPeerGraphHoldsFor } from './sync/requester/peer-graph-holds.js';
 import {
   composeSyncWorkAdmission,
   createSyncFetchSharingIdentity,
@@ -5835,8 +5836,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       exactRecovery: exactAssetUals !== undefined,
       extendedRecovery,
     });
+    // A graph this peer could not serve is not asked for again until its hold
+    // ends. It stays owed: the round below cannot finalize as complete.
+    const heldContextGraphIds = exactAssetUals === undefined
+      ? syncPeerGraphHoldsFor(this).heldAmong(remotePeerId, contextGraphIds)
+      : [];
+    if (heldContextGraphIds.length > 0) {
+      this.log.debug(ctx, `Not asking ${remotePeerId.slice(-8)} for ${heldContextGraphIds.length} held Context Graph(s): ${heldContextGraphIds.join(', ')}`);
+    }
     const orderedContextGraphIds = orderContextGraphIdsByPriority(
-      contextGraphIds,
+      contextGraphIds.filter((contextGraphId) => !heldContextGraphIds.includes(contextGraphId)),
       this.config.syncContextGraphPriorities,
     );
     let exactFetchDisposition: ExactDurableFetchDisposition | undefined;
@@ -5965,7 +5974,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       });
       return {
         admission: admissionBoundary.snapshot(),
-        result: finalizeDurableSyncCompletion(accumulator),
+        result: finalizeDurableSyncCompletion(
+          heldContextGraphIds.length > 0 ? markDurableTerminalBoundary(accumulator, false) : accumulator,
+        ),
         ...(exactFetchDisposition ? { exactFetchDisposition } : {}),
         ...(exactResponderCapability ? { exactResponderCapability } : {}),
         ...(authenticatedExactAssets.length === 0
@@ -7221,11 +7232,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         }
       }
     });
-    sharedFetch.catch(() => {
-      // The shared fetch can reject after every waiter has already detached.
-      // Keep that from becoming unhandled while still propagating failures to
-      // active waiters through the original promise.
-    });
+    // The shared fetch can reject after every waiter has already detached.
+    // Observing it keeps that from becoming unhandled while failures still
+    // reach active waiters through the original promise; a peer that could not
+    // serve a whole-graph durable sync is held for that graph.
+    void observeSyncPageFetch(syncPeerGraphHoldsFor(this), {
+      peerId: remotePeerId, contextGraphId, phase,
+      wholeGraphDurable: !includeSharedMemory && assetUals === undefined && recovery !== true,
+    }, sharedFetch, (hold) => this.log.warn(ctx, describeSyncPeerGraphHold(hold)));
     entry = { promise: sharedFetch, controller, waiters: 0, ownerSource: pageFetchSource };
     if (coalescingKey && fetchSharingIdentity) {
       coalescingLane = inFlight.get(fetchSharingIdentity);
