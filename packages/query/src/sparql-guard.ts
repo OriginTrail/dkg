@@ -10,7 +10,7 @@ import {
   analyzeSparqlOperation,
   classifySparqlOperation,
 } from '@origintrail-official/dkg-core';
-import type { PreparedSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
+import type { PreparedSparql } from '@origintrail-official/dkg-core/sparql-lexer';
 import type { QueryResult } from './query-engine.js';
 
 // CodeQL alert #65 (js/redos) — the previous single-shot regex

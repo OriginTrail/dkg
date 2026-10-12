@@ -3,7 +3,7 @@ import {
   sparqlTokenIndexesAtDepth,
   type PreparedSparqlQuery,
   type SparqlLexicalToken,
-} from '@origintrail-official/dkg-rdf-utils/sparql';
+} from '@origintrail-official/dkg-core/sparql-lexer';
 import {
   sparqlRewriteReady,
   sparqlRewriteUnsupported,
