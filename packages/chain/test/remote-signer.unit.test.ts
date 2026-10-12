@@ -805,6 +805,16 @@ describe('chain.signer configuration', () => {
     }
     expect(output.join('\n')).not.toContain(TOKEN);
   });
+
+  it('recognizes a remote-signer failure by its code prefix, as a full error or a code-only record', () => {
+    expect(isRemoteSignerError(new RemoteSignerError('REMOTE_SIGNER_TIMEOUT', 'timed out'))).toBe(true);
+    // A record that keeps only the code, and a code another version of this module names.
+    expect(isRemoteSignerError({ code: 'REMOTE_SIGNER_REJECTED' })).toBe(true);
+    expect(isRemoteSignerError({ code: 'REMOTE_SIGNER_SOMETHING_NEWER' })).toBe(true);
+    for (const other of [undefined, null, 'REMOTE_SIGNER_REJECTED', { code: 'RPC_TIMEOUT' }, { code: 7 }, new Error('REMOTE_SIGNER_REJECTED')]) {
+      expect(isRemoteSignerError(other)).toBe(false);
+    }
+  });
 });
 
 describe('remote signer failures are final for the transaction path', () => {

@@ -65,8 +65,27 @@ export class RemoteSignerError extends Error {
   }
 }
 
-/** True for a {@link RemoteSignerError}, including one rebuilt across a module boundary. */
-export function isRemoteSignerError(err: unknown): err is RemoteSignerError {
+/**
+ * The code of a remote-signer failure as it may arrive across a module
+ * boundary: any code with the `REMOTE_SIGNER_` prefix. It includes every
+ * {@link RemoteSignerErrorCode}, and also a code that a different version of
+ * this module names, which is recognized by the prefix as well.
+ */
+export type RemoteSignerFailureCode = `REMOTE_SIGNER_${string}`;
+
+/**
+ * What {@link isRemoteSignerError} recognizes: an object whose `code` is a
+ * {@link RemoteSignerFailureCode}, such as a {@link RemoteSignerError}, one
+ * rebuilt across a module boundary, or a code-only record. Only `code` is
+ * checked, so only `code` is promised: a message, a name or the signer
+ * details may be absent (`instanceof RemoteSignerError` tells the full error).
+ */
+export interface RemoteSignerFailureLike {
+  readonly code: RemoteSignerFailureCode;
+}
+
+/** True for a remote-signer failure: a {@link RemoteSignerError}, or any object with a `REMOTE_SIGNER_` code. */
+export function isRemoteSignerError(err: unknown): err is RemoteSignerFailureLike {
   if (err instanceof RemoteSignerError) return true;
   const code = (err as { code?: unknown } | null)?.code;
   return typeof code === 'string' && code.startsWith('REMOTE_SIGNER_');

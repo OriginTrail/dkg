@@ -292,6 +292,8 @@ export {
   RemoteSignerError,
   isRemoteSignerError,
   type RemoteSignerErrorCode,
+  type RemoteSignerFailureCode,
+  type RemoteSignerFailureLike,
 } from './remote-signer-errors.js';
 export {
   RemoteAuthorSigners,
