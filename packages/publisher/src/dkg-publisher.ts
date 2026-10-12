@@ -6,7 +6,8 @@ import { PublishedSnapshotRetirement } from './published-snapshot-retirement.js'
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
 import type { AuthorSigner, ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
 import type { PreBroadcastRecord } from './publisher.js';
-import { enrichEvmError, operationalSigningOf } from '@origintrail-official/dkg-chain';
+import { enrichEvmError } from '@origintrail-official/dkg-chain';
+import { fallbackAuthorResolver, type FallbackAuthor } from './fallback-author.js';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
 import type { AssertionSeal } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphPrivateUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, contextGraphSubGraphPrivateUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, isAllocatableKaAuthorV1, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
@@ -1171,7 +1172,7 @@ export class DKGPublisher implements Publisher {
   private readonly publisherAddress?: string;
   private readonly publisherAddressResolver?: (contextGraphId?: bigint) => Promise<string | undefined>;
   private readonly publisherWallet?: ethers.Wallet;
-  private readonly authorSigner?: Pick<AuthorSigner, 'address' | 'signTypedData'> | null;
+  private readonly fallbackAuthor: () => Promise<FallbackAuthor | undefined>;
   private readonly publisherPlanner: PublisherPlanner;
   private adapterSignMessagePublisherAddress?: string;
   private readonly adapterSignMessageProbeCache = new Map<string, boolean>();
@@ -1208,7 +1209,7 @@ export class DKGPublisher implements Publisher {
     this.keypair = config.keypair;
     this.publisherNodeIdentityId = config.publisherNodeIdentityId ?? 0n;
     this.publisherAddressResolver = config.publisherAddressResolver;
-    this.authorSigner = config.authorSigner !== undefined ? config.authorSigner : (operationalSigningOf(config.chain)?.external === true ? null : undefined);
+    this.fallbackAuthor = fallbackAuthorResolver(config.authorSigner, config.chain, () => this.resolvePublisherAddress(), (address) => this.getPublisherSigner(address));
 
     const configuredPublisherAddress = normalizePublisherAddress(config.publisherAddress);
     if (config.publisherPrivateKey) {
@@ -1519,7 +1520,7 @@ export class DKGPublisher implements Publisher {
 
   /** RFC-001 §9 fallback author (the configured author, else the publisher) when no agent override is supplied. */
   async publisherFallbackAuthorAddress(): Promise<string | undefined> {
-    return this.authorSigner === null ? undefined : this.authorSigner?.address ?? this.resolvePublisherAddress();
+    return (await this.fallbackAuthor())?.address;
   }
 
   /** Sign EIP-712 typed data as the configured author, else with the publisher's own wallet. Returns KAv10's compact (r, vs). */
@@ -1528,19 +1529,15 @@ export class DKGPublisher implements Publisher {
     types: Record<string, Array<{ name: string; type: string }>>;
     message: Record<string, unknown>;
   }): Promise<{ r: Uint8Array; vs: Uint8Array }> {
-    const address = this.authorSigner === null ? undefined : this.authorSigner?.address ?? await this.resolvePublisherAddress();
-    if (!address) {
+    const author = await this.fallbackAuthor();
+    if (!author) {
       throw new Error(
         'signAuthorAttestationAsPublisher: no author signer is configured. ' +
           'Configure an author signer, publisherPrivateKey, or a chain adapter that exposes signTypedData.',
       );
     }
-    const signer = this.authorSigner ?? await this.getPublisherSigner(address);
-    if (!signer) {
-      throw new Error(
-        `signAuthorAttestationAsPublisher: failed to resolve a signer for ${address}.`,
-      );
-    }
+    const signer = await author.signer();
+    if (!signer) throw new Error(`signAuthorAttestationAsPublisher: failed to resolve a signer for ${author.address}.`);
     const sigHex = await signer.signTypedData(
       typedData.domain,
       typedData.types as { [k: string]: Array<{ name: string; type: string }> },
