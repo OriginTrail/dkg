@@ -311,10 +311,10 @@ describe('external signer author keys', () => {
     // Not allowed, or allowed but not held by the signer: no gossip signer. The
     // allowed agents the signer does not hold cost one account lookup, not one each.
     let before = lookups();
-    expect(await externalAuthorGossipSigner(config, [custodial, outside, elsewhere], allowed)).toBeUndefined();
+    expect(await externalAuthorGossipSigner(config, [custodial, outside, elsewhere], { allowed })).toBeUndefined();
     expect(lookups() - before).toBe(1);
     before = lookups();
-    const signer = await externalAuthorGossipSigner(config, [custodial, outside, elsewhere, held], allowed);
+    const signer = await externalAuthorGossipSigner(config, [custodial, outside, elsewhere, held], { allowed });
     expect(signer?.agentAddress).toBe(agentKey.address);
     expect(lookups() - before).toBe(1);
 
@@ -329,6 +329,44 @@ describe('external signer author keys', () => {
     for (const bytes of [payload, computeGossipSigningPayload('share-write', CG, '2026-01-01T00:00:01.000Z', new Uint8Array([4]))]) {
       expect(await local.signMessage(bytes)).toBe(await new ethers.Wallet(custodial.privateKey!).signMessage(bytes));
     }
+  });
+
+  it('signs gossip of a graph without a signing roster as the default agent when the node holds no key', async () => {
+    const { fake, remote } = await externalSigners();
+    const agent = await stubAgent(remote);
+    agent.resolveContextGraphAgentGateAuthority = async () => ({ kind: 'ungated' });
+    // Another agent the signer holds was registered first; the default agent signs.
+    const held = registerSelfSovereignAgent('writer', agentKey.publicKey);
+    const byDefault = registerSelfSovereignAgent('default', defaultAuthor.signingKey.publicKey);
+    agent.localAgents.set(held.agentAddress, held);
+    agent.localAgents.set(byDefault.agentAddress, byDefault);
+    agent.defaultAgentAddress = defaultAuthor.address;
+    const before = fake.requests.length;
+    const signer = await agent.resolveWorkspaceGossipSigningAgent(CG);
+    expect(signer?.agentAddress).toBe(defaultAuthor.address);
+    expect(fake.requests).toHaveLength(before);
+    const payload = computeGossipSigningPayload('share-write', CG, '2026-01-01T00:00:00.000Z', new Uint8Array([7]));
+    expect(ethers.verifyMessage(payload, await signer!.signMessage(payload))).toBe(defaultAuthor.address);
+    const [request] = fake.calls('eth_sign');
+    expect(request.authorization).toBe(`Bearer ${AUTHOR_TOKEN}`);
+    expect(request.params).toEqual([defaultAuthor.address.toLowerCase(), ethers.hexlify(payload)]);
+
+    // Without a default agent, the first agent the signer holds signs.
+    agent.defaultAgentAddress = undefined;
+    expect((await agent.resolveWorkspaceGossipSigningAgent(CG))?.agentAddress).toBe(agentKey.address);
+    // A key held on the node signs itself, before any external author.
+    const custodial = agentFromPrivateKey(HARDHAT_KEYS.EXTRA3, 'custodial');
+    agent.localAgents.set(custodial.agentAddress, custodial);
+    expect((await agent.resolveWorkspaceGossipSigningAgent(CG))?.agentAddress).toBe(custodial.agentAddress);
+
+    // A payer registered as the default agent never signs: the write goes out unsigned.
+    const payerOnly = await stubAgent(remote);
+    payerOnly.resolveContextGraphAgentGateAuthority = async () => ({ kind: 'ungated' });
+    const payerAgent = registerSelfSovereignAgent('payer-as-agent', payer.publicKey);
+    payerOnly.localAgents.set(payerAgent.agentAddress, payerAgent);
+    payerOnly.defaultAgentAddress = payer.address;
+    expect(await payerOnly.resolveWorkspaceGossipSigningAgent(CG)).toBeNull();
+    expect(fake.calls('eth_sign')).toHaveLength(1);
   });
 
   it('refuses a self-sovereign agent whose key the signer does not hold as an author key', async () => {

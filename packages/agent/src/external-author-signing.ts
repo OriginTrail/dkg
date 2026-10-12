@@ -88,19 +88,24 @@ export function localGossipSigner(agentAddress: string, privateKey: string): Wor
 }
 
 /**
- * The gossip signer of the first of `agents` in `allowed` whose author key the
- * external signer holds, chosen in one selection over the author accounts.
+ * The gossip signer of the first of `agents` whose author key the external
+ * signer holds, chosen in one selection over the author accounts: of the agents
+ * in `allowed` when the graph has a signing roster, else of every agent, with
+ * `preferred` (the default agent) tried first. A payer is never selected.
  */
 export async function externalAuthorGossipSigner(
   config: ExternalAuthorConfig | undefined,
   agents: Iterable<AgentKeyRecord>,
-  allowed: ReadonlySet<string>,
+  selection: { readonly allowed?: ReadonlySet<string>; readonly preferred?: string },
 ): Promise<WorkspaceGossipSigner | undefined> {
   const authors = config?.chainConfig?.authors;
   if (authors === undefined) return undefined;
-  const candidates = [...agents]
+  const { allowed, preferred } = selection;
+  const eligible = [...agents]
     .map((record) => record.agentAddress)
-    .filter((address) => allowed.has(address.toLowerCase()) && ethers.isAddress(address));
+    .filter((address) => ethers.isAddress(address) && (allowed?.has(address.toLowerCase()) ?? true));
+  const isPreferred = (address: string) => address.toLowerCase() === preferred?.toLowerCase();
+  const candidates = [...eligible.filter(isPreferred), ...eligible.filter((address) => !isPreferred(address))];
   const found = await authors.firstSignerOf(candidates);
   if (found === undefined) return undefined;
   const { address, signer } = found;

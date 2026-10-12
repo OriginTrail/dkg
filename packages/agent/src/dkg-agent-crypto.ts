@@ -3717,7 +3717,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     );
     if (authority.kind === 'ungated') {
       const local = this.getWorkspaceGossipSigningAgent();
-      return local ? localGossipSigner(local.agentAddress, local.privateKey) : null;
+      if (local) return localGossipSigner(local.agentAddress, local.privateKey);
+      return (await externalAuthorGossipSigner(this.config, this.localAgents.values(), { preferred: this.defaultAgentAddress })) ?? null;
     }
     if (authority.kind === 'unavailable') {
       const message =
@@ -3741,7 +3742,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         return localGossipSigner(record.agentAddress, record.privateKey);
       }
     }
-    const external = await externalAuthorGossipSigner(this.config, this.localAgents.values(), allowedSet);
+    const external = await externalAuthorGossipSigner(this.config, this.localAgents.values(), { allowed: allowedSet });
     if (external) return external;
 
     throw new Error(`Cannot gossip SWM write for agent-gated context graph "${contextGraphId}": no local allowed signing agent key`);
