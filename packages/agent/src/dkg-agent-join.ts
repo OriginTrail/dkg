@@ -144,11 +144,10 @@ import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
 import { AGENT_REGISTRY_CONTEXT_GRAPH, canonicalAgentDidSubject, type AgentProfileConfig } from './profile.js';
 import {
   computeDelegationDigest,
-  computeWorkspaceEncryptionKeysAttestationDigest,
-  signAgentDelegation,
   verifyAgentDelegation,
   type SignedAgentDelegation,
 } from './auth/agent-delegation.js';
+import { signJoinDelegation } from './external-agent-join-signing.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
 import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
@@ -1733,7 +1732,7 @@ export class JoinRequestMethods extends DKGAgentBase {
     if (!addr) throw new Error('No agent address available');
 
     const agent = this.localAgents.get(addr);
-    if (!agent?.privateKey) {
+    if (!agent) {
       throw new Error(`No private key for agent ${addr} — self-sovereign agents must sign externally`);
     }
 
@@ -1757,29 +1756,21 @@ export class JoinRequestMethods extends DKGAgentBase {
       publicEncryptionKey: key.publicEncryptionKey,
       encryptionKeyProof: key.encryptionKeyProof,
     }));
-    const signed = await signAgentDelegation({
+    // Signed with the agent's key on the node, or through the external signer that holds it.
+    const delegation = await signJoinDelegation(this.config?.authorSigners, agent, {
       agentAddress: addr,
       scope: joinDelegationScope(this.chain.deploymentId, contextGraphId),
       issuedAtMs,
       expiresAtMs,
       delegateePeerId,
       delegateeOpKey,
-      agentPrivateKey: agent.privateKey,
-    });
+    }, workspaceEncryptionKeys);
     // Remember our intent so multi-agent post-approval sync binds to
     // the right agent before `_meta` catches up. Last-write-wins is
     // intentional: a node that re-signs with a different agent has
     // changed its intent for this CG.
     this.localApprovedAgentByCG.set(contextGraphId, addr.toLowerCase());
-    const delegation: SignedAgentDelegation = {
-      ...signed,
-      ...(workspaceEncryptionKeys.length > 0 ? { workspaceEncryptionKeys } : {}),
-    };
-    if (workspaceEncryptionKeys.length === 0) return delegation;
-    const workspaceEncryptionKeysSignature = await new ethers.Wallet(agent.privateKey).signMessage(
-      computeWorkspaceEncryptionKeysAttestationDigest(delegation),
-    );
-    return { ...delegation, workspaceEncryptionKeysSignature };
+    return delegation;
   }
 
   /**
