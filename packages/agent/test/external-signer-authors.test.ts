@@ -9,7 +9,7 @@
  * as its default agent (none from payers alone) and answers no VERIFY
  * proposals.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -38,6 +38,7 @@ import { agentFromPrivateKey, registerSelfSovereignAgent } from '../src/agent-ke
 import { constructConfiguredChainAdapter } from '../src/configured-chain-adapter.js';
 import { operationalSignerSourceOf } from '../src/agent-chain-signer-source.js';
 import {
+  defaultAuthorToAdopt,
   externalAuthorGossipSigner,
   externalSignerAgentPublicKey,
   localGossipSigner,
@@ -516,6 +517,36 @@ describe('external signer author keys', () => {
     expect(agent.localAgents.size).toBe(0);
     expect(await registerExternalDefaultAgent(agent, authors, external, 'node')).toBe(defaultAuthor.address);
     expect(agent.getLocalAgentMode(defaultAuthor.address)).toBe('self-sovereign');
+  });
+
+  it('keeps the default agent when the default author is not to be adopted, or cannot be registered', async () => {
+    const external = { operationalSigning: () => ({ external: true, payerAddresses: [payer.address] }) };
+    const authors = {
+      defaultAuthor,
+      addresses: [defaultAuthor.address],
+      signerFor: async () => defaultAuthor,
+      firstSignerOf: async () => ({ address: defaultAuthor.address, signer: defaultAuthor }),
+    };
+    const agentWith = (defaultAgent: string | undefined) => ({
+      getDefaultAgentAddress: () => defaultAgent,
+      getLocalAgentMode: () => undefined,
+      listLocalAgents: () => [{ name: 'node', agentAddress: agentKey.address }],
+      registerAgent: vi.fn(async () => { throw new Error('agent registrations are not signed here'); }),
+    });
+    // Nothing to adopt: no default author, no default agent, no external signing, or the default author already.
+    for (const [agent, configured, chain] of [
+      [agentWith(agentKey.address), { ...authors, defaultAuthor: undefined }, external],
+      [agentWith(undefined), authors, external],
+      [agentWith(agentKey.address), authors, {}],
+      [agentWith(defaultAuthor.address.toLowerCase()), authors, external],
+    ] as const) {
+      expect(await defaultAuthorToAdopt(agent as never, configured, chain, 'node')).toBeUndefined();
+      expect(agent.registerAgent).not.toHaveBeenCalled();
+    }
+    // A default author the signer will not register: the default agent is kept.
+    const refusing = agentWith(agentKey.address);
+    expect(await defaultAuthorToAdopt(refusing as never, authors, external, 'node')).toBeUndefined();
+    expect(refusing.registerAgent).toHaveBeenCalledWith('node-default-author', { address: defaultAuthor.address, framework: undefined });
   });
 
   it('auto-registers no default agent from payer accounts alone, or when no author key can be registered', async () => {
