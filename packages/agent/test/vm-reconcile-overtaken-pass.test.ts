@@ -1,10 +1,10 @@
 /**
  * A VM reconcile pass works on the graph's subscription row as it was when
  * the pass resolved its target, and checks at every step that the row is
- * still the graph's current one. A subscribe request for a graph the node
- * already holds stores that row again, unchanged, when the graph's shared
- * memory is carried by the catalog. A pass that is running then stops at its
- * next check, with the error a pass also ends on at shutdown.
+ * still the graph's current one. Catch-up and sync rounds store that row
+ * again with their result while a pass runs. The pass then stops at its next
+ * check, with the error a pass also ends on at shutdown. A write that changes
+ * nothing (a client repeating its subscribe) keeps the row, and the pass.
  *
  * On a running node that is not a failed pass: the graph is asked again
  * shortly, on the row as it is now, instead of losing its live nudges until
@@ -116,9 +116,8 @@ async function subscribedHost() {
       expect(count).toHaveBeenCalledTimes(reads);
     },
     /**
-     * What a subscribe request does for a graph the node already holds and
-     * whose shared memory the catalog carries: it stores the graph's row
-     * again, as it is (`installContextGraphSubscription`).
+     * What a subscribe request does for a graph the node already holds: it
+     * stores the graph's row as it is (`installContextGraphSubscription`).
      */
     subscribeAgain(): void {
       const before = seams.subscribedContextGraphs.get(localCgId)!;
@@ -127,9 +126,25 @@ async function subscribedHost() {
         { ...before, subscribed: true, synced: before.synced ?? false, syncMode: before.syncMode },
         { persist: false },
       );
-      // Nothing about the graph changed, and its row is another object.
+      // Nothing about the graph changed, and its row is the same object.
+      expect(seams.subscribedContextGraphs.get(localCgId)).toBe(before);
+    },
+    /**
+     * What catch-up or a sync round does when it ends: it stores the graph's
+     * row again with its readiness result. The graph's binding is the same,
+     * and its row is another object.
+     */
+    storeReadinessResult(): void {
+      const before = seams.subscribedContextGraphs.get(localCgId)!;
+      seams.setContextGraphSubscription(
+        localCgId,
+        { ...before, sharedMemorySynced: before.sharedMemorySynced !== true },
+        { persist: false },
+      );
       expect(seams.subscribedContextGraphs.get(localCgId)).not.toBe(before);
-      expect(seams.subscribedContextGraphs.get(localCgId)).toMatchObject(before);
+      expect(seams.subscribedContextGraphs.get(localCgId)).toMatchObject({
+        subscribed: before.subscribed, onChainId: before.onChainId,
+      });
     },
     async close() {
       await runtime.close();
@@ -145,7 +160,35 @@ function useFakeClock(): void {
 
 afterEach(() => { vi.useRealTimers(); });
 
-describe('VM reconcile pass overtaken by a subscribe request for its graph', () => {
+describe('VM reconcile pass overtaken by a store of its graph\'s row', () => {
+  it('is not overtaken by a subscribe request that leaves the row as it is', async () => {
+    const host = await subscribedHost();
+    const { runtime, count, logged } = host;
+    useFakeClock();
+    try {
+      host.holdNextCountRead();
+      const pass = runtime.dispatch(localCgId, 'live').then(() => undefined, (error: unknown) => error);
+      await host.passIsRunning(1);
+
+      // A client subscribes to the graph again while the pass runs.
+      host.subscribeAgain();
+
+      host.answer();
+      expect(await pass).toBeUndefined();
+      await runtime.waitForIdle();
+      expect(logged.info()).toEqual([]);
+      expect(logged.warn()).toEqual([]);
+
+      // The pass got through, so the graph is not waiting to be asked again.
+      await vi.advanceTimersByTimeAsync(10 * RETRY_MS);
+      await runtime.waitForIdle();
+      expect(count).toHaveBeenCalledTimes(1);
+    } finally {
+      host.answer();
+      await host.close();
+    }
+  });
+
   it('starts the next pass after one delay and not at the sweep, on the row as it is now', async () => {
     const host = await subscribedHost();
     const { runtime, count, logged } = host;
@@ -156,9 +199,9 @@ describe('VM reconcile pass overtaken by a subscribe request for its graph', () 
       const pass = runtime.dispatch(localCgId, 'live').then(() => undefined, (error: unknown) => error);
       await host.passIsRunning(1);
 
-      // A client subscribes to the graph again while the pass runs, and
-      // another chain event for the graph arrives.
-      host.subscribeAgain();
+      // A catch-up of the graph ends while the pass runs and stores its
+      // result, and another chain event for the graph arrives.
+      host.storeReadinessResult();
       runtime.triggerLive(localCgId);
 
       host.answer();
@@ -216,7 +259,7 @@ describe('VM reconcile pass overtaken by a subscribe request for its graph', () 
       runtime.triggerLive(localCgId);
       for (let overtaken = 1; overtaken <= 3; overtaken++) {
         await host.passIsRunning(overtaken);
-        host.subscribeAgain();
+        host.storeReadinessResult();
         host.answer();
         if (overtaken < 3) host.holdNextCountRead();
         await runtime.waitForIdle();
@@ -249,7 +292,7 @@ describe('VM reconcile pass overtaken by a subscribe request for its graph', () 
       host.holdNextCountRead();
       runtime.triggerPeriodic(localCgId);
       await host.passIsRunning(1);
-      host.subscribeAgain();
+      host.storeReadinessResult();
       host.answer();
       await runtime.waitForIdle();
       expect(logged.info()).toEqual([overtakenLine(localCgId)]);
@@ -272,7 +315,7 @@ describe('VM reconcile pass overtaken by a subscribe request for its graph', () 
       host.holdNextCountRead();
       const request = runtime.triggerManual(localCgId).then(() => undefined, (error: unknown) => error);
       await host.passIsRunning(1);
-      host.subscribeAgain();
+      host.storeReadinessResult();
       host.answer();
       const failure = await request;
       expect(failure).toBeInstanceOf(VmReconcileQueueClosedError);

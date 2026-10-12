@@ -58,7 +58,7 @@ describe('import artifact daemon routes', () => {
         await handleKnowledgeAssetsRoutes({
           req,
           res,
-          agent: args.agent,
+          agent: { resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'node', source: 'legacy-local', reason: 'fixture-node', metadataBootstrap: 'eligible' }), ...args.agent },
           publisherControl: {},
           publisherRuntime: null,
           config: {},
@@ -84,7 +84,7 @@ describe('import artifact daemon routes', () => {
           url,
           path: url.pathname,
           requestAgentAddress: 'did:dkg:agent:test',
-          authentication: requestAuthentication({ kind: 'anonymous' }),
+          authentication: requestAuthentication({ kind: 'anonymous', mode: 'disabled' }),
           emitMemoryGraphChanged: (event) => events.push(event),
         } as any);
         if (!res.writableEnded) {

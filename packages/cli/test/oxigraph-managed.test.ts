@@ -127,7 +127,8 @@ describe('planManagedOxigraph', () => {
     });
     expect(plan!.queryTimeoutS).toBeUndefined();
     expect(plan!.clientTimeoutMs).toBe(30_000);
-    expect(plan!.walRestartThresholdBytes).toBe(4 * 1024 ** 3);
+    // The maintenance reopen is opt-in: nothing configured, nothing planned.
+    expect(plan!.walRestartThresholdBytes).toBeUndefined();
   });
 
   it('honours operator overrides for port, location and cacheDir', () => {
@@ -151,8 +152,8 @@ describe('planManagedOxigraph', () => {
     expect(plan!.walRestartThresholdBytes).toBe(1_234);
   });
 
-  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
-    'normalizes invalid WAL threshold %s before it enters the launch plan',
+  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '4294967296', null])(
+    'leaves the WAL maintenance reopen off for the invalid threshold %s',
     (walRestartThresholdBytes) => {
       const plan = planManagedOxigraph(
         {
@@ -163,7 +164,7 @@ describe('planManagedOxigraph', () => {
         },
         '/data',
       );
-      expect(plan!.walRestartThresholdBytes).toBe(4 * 1024 ** 3);
+      expect(plan!.walRestartThresholdBytes).toBeUndefined();
     },
   );
 

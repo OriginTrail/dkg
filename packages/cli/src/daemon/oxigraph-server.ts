@@ -129,7 +129,7 @@ export interface StartOxigraphServerOptions {
   restartBackoffBaseMs?: number;
   /** Cap for restart backoff. */
   restartBackoffMaxMs?: number;
-  /** Restart at the next idle window after retained WAL reaches this size. */
+  /** Opt-in: reopen at the next idle window once the retained WAL reaches this size. Unset: only reported. */
   walRestartThresholdBytes?: number;
   /** Retained-WAL sampling interval. Test seam. */
   walMaintenanceCheckIntervalMs?: number;
@@ -190,7 +190,7 @@ const DEFAULT_READY_INTERVAL_MS = 500;
 const DEFAULT_RESTART_BASE_MS = 1_000;
 const DEFAULT_RESTART_MAX_MS = 30_000;
 export {
-  DEFAULT_WAL_RESTART_THRESHOLD_BYTES,
+  WAL_GROWTH_NOTICE_BYTES,
   resolveWalRestartThresholdBytes,
 } from './oxigraph-wal-maintenance.js';
 

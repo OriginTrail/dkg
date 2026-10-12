@@ -299,7 +299,7 @@ import {
   type CiphertextChunkCatchupRequest,
   type CiphertextChunkCatchupResponse,
 } from './swm/ciphertext-chunk-catchup.js';
-import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
+import { waitForAdvertisedOrLiveProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { connectedPeerIds as liveConnectedPeerIds } from './p2p/connected-peer-ids.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
@@ -401,8 +401,7 @@ import {
   registerSyncHandler,
   resolveSyncResponderSnapshotPolicy,
 } from './sync/responder/sync-handler.js';
-import { createExactBatchResponderBinding } from './sync/responder/exact-batch-stream.js';
-import { exactBatchTransportOptions } from './sync/requester/exact-batch-stream.js';
+import { createExactBatchResponderBinding, exactBatchResponderTransportOptions } from './sync/responder/exact-batch-stream.js';
 import type { VmRecoveryRegisteredPublicEvidence } from './vm-recovery-pass-authority.js';
 import { runExactBatchStreamDriver } from './sync/requester/exact-batch-stream-driver.js';
 import {
@@ -430,6 +429,7 @@ import {
   planPrivateRecoverySource,
 } from './sync/private-recovery-source-planner.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
+import { selectSyncCapablePeers } from './p2p/catchup-protocol-readiness.js';
 import { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js';
 import {
   FOREGROUND_CATCHUP_SYNC_PRIORITY,
@@ -763,6 +763,10 @@ import {
   isContextGraphSubscriptionPersistenceTargetCurrent,
   projectContextGraphJoinSubscriptionRecord,
   contextGraphSubscriptionClearTargets,
+  contextGraphSubscriptionRowsEqual,
+  contextGraphSubscriptionSyncPremisesEqual,
+  continueContextGraphSubscriptionLine,
+  isContextGraphSubscriptionStoredAgain,
   retainsInactiveContextGraphBinding,
 } from './context-graph-subscription-policy.js';
 import { partitionSupersededContextGraphNamePlaceholders } from './dkg-agent-cg-name-resolution.js';
@@ -864,6 +868,12 @@ import {
   './rfc64/public-catalog-activation-config-v1.js';
 import { reconcileRfc64CatalogAuthorityPlanV1 } from
   './rfc64/catalog-rollout-authority-reconciliation-v1.js';
+import {
+  describeOwedLegacySwmRetirementEventV1,
+  owedLegacySwmRetirementsOfV1,
+  peekOwedLegacySwmRetirementsV1,
+  type OwedLegacySwmRetirementsV1,
+} from './internal/owed-legacy-swm-retirements.js';
 import {
   describeRfc64LegacySwmFenceEventV1,
   initializeRfc64LegacySwmBoundaryV1,
@@ -2024,13 +2034,38 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       subGraphName?: string;
     }>,
   ): Promise<void> {
-    await retireRfc64LegacySwmAfterFinalizedVmV1(
-      this,
-      input.contextGraphId,
-      input.kaUal,
-      String(input.assertionVersion),
-      input.subGraphName,
+    // GH#3081 — nothing a caller does next depends on the marker. It waits a short time for the
+    // retirement, which then goes on without it and is repeated if it did not get its turn. The
+    // retirement stays this node's until it ended: stop() ends its wait and drains its work.
+    const assertionVersion = String(input.assertionVersion);
+    await this.owedLegacySwmRetirementsV1().retire(
+      JSON.stringify([input.contextGraphId, input.subGraphName ?? null, input.kaUal, assertionVersion]),
+      (signal) => retireRfc64LegacySwmAfterFinalizedVmV1(
+        this,
+        input.contextGraphId,
+        input.kaUal,
+        assertionVersion,
+        input.subGraphName,
+        signal,
+      ),
     );
+  }
+
+  /** GH#3081 — the owner of this host's legacy SWM retirements, made by whoever needs it first. */
+  private owedLegacySwmRetirementsV1(this: DKGAgent): OwedLegacySwmRetirementsV1 {
+    return owedLegacySwmRetirementsOfV1(this, (event) => {
+      const { level, line } = describeOwedLegacySwmRetirementEventV1(event);
+      this.log[level](createOperationContext('system'), line);
+    });
+  }
+
+  /**
+   * GH#3081 — for stop(): admit no more legacy SWM retirements, end the ones that still wait and
+   * drain the ones at work. The owner is made here if nothing asked for a retirement before, so
+   * that one first asked for while stop() drains meets a closed owner and not a new, open one.
+   */
+  closeOwedLegacySwmRetirementsV1(this: DKGAgent): Promise<void> {
+    return this.owedLegacySwmRetirementsV1().closeAndDrain();
   }
 
   async retireFinalizedSwmTwinCandidate(
@@ -2267,6 +2302,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     await this.contextGraphSubscriptionAuthorityRecoveryRuntime?.close();
     await this.retireContextGraphSubscriptionPromotionRuntime();
     this.rfc64BackgroundWorkDispatcherV1.reopen();
+    peekOwedLegacySwmRetirementsV1(this)?.reopen();
     this.contextGraphMembershipPersistence.reopen();
     // stop() drained and closed subscription writes; a restarted agent admits
     // them again. Writes issued before the first start() left it open.
@@ -3294,9 +3330,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               admission: resources,
               parseSyncRequest: this.parseSyncRequest.bind(this),
               authorizeSyncRequest: this.authorizeSyncRequest.bind(this),
-              isPublicContextGraph: async (cg, signal) => (await this.resolveRegisteredContextGraphAuthority(cg, {
-                authorityReadMode: 'finalized-index-or-live', signal,
-              })).kind === 'public',
+              resolvePublicContextGraphAuthority: async (cg, signal) => {
+                const authority = await this.resolveRegisteredContextGraphAuthority(cg, {
+                  authorityReadMode: 'finalized-index-or-live', signal,
+                });
+                if (authority.kind === 'unavailable') return 'unavailable';
+                return authority.kind === 'public' ? 'public' : 'non-public';
+              },
+              onRefusal: (stage, code) => this.log.info(createOperationContext('sync'),
+                `Exact batch responder refusal stage=${stage} code=${code}`),
               servingWithheld: (cg) => this.contextGraphServingWithheld(cg),
               onExport: (assetIndex, wholePayloadExports, operationContext) => this.log.info(operationContext,
                 `Exact batch responder export asset=${assetIndex} wholePayloadExports=${wholePayloadExports}`),
@@ -3308,7 +3350,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 `Exact batch responder stage=${stage} asset=${assetIndex} durationMs=${durationMs.toFixed(3)}`),
             });
             registerExperimentalExactBatchResponder(this.router,
-              exactBatchTransportOptions(120_000), binding.authorizeRequest, binding.respond);
+              exactBatchResponderTransportOptions(120_000, (level, message) => this.log[level](createOperationContext('sync'), message)), binding.authorizeRequest, binding.respond);
           }
         : undefined,
       // Serve-skip policy (#1233): withhold the no-consumer agents/_meta snapshot
@@ -6258,6 +6300,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           operationContextGraphId,
           generation,
         ),
+      // The same subscription (not one deleted and subscribed again, whose
+      // binding generation starts over) and the same premises for a store.
+      isEquivalentSubscription: (captured, current) =>
+        isContextGraphSubscriptionStoredAgain(captured, current)
+        && contextGraphSubscriptionSyncPremisesEqual(captured, current),
       assertLifecycleCurrent,
       asAbortError: asSyncFetchAbortError,
       track: (run) => this.graphScopedStorePhysicalRuns.add(run),
@@ -6388,12 +6435,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         bindingChangedError: () => asSyncFetchAbortError(new Error(
           `Context graph binding for ${asset.contextGraphId} changed during graph-scoped store`,
         )),
-        operation: async ({
-          subscription,
-          isBindingCurrent,
-          recaptureBindingGeneration,
-          assertCurrent,
-        }): Promise<GraphScopedMaterializationOutcome> => {
+        operation: async (control): Promise<GraphScopedMaterializationOutcome> => {
+          const { isBindingCurrent, recaptureBindingGeneration, assertCurrent } = control;
           const authentication = await authenticateDurableGraphScopedAsset({
             chain: this.chain,
             asset,
@@ -6409,7 +6452,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               );
             },
           });
+          // Authentication read the chain, the asset and the row's binding. A
+          // row stored again meanwhile with the same admission and binding (a
+          // repeated subscribe, a readiness result) is the row a store started
+          // now would run under: continue under it instead of dropping the
+          // verified asset. Everything below runs under that one row.
+          control.adoptEquivalentSubscription();
           assertCurrent();
+          const subscription = control.subscription;
           const verifiedOnChainId = authentication.onChainContextGraphId;
           if (
             verifiedOnChainId
@@ -8294,26 +8344,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
 
-    // Phase 1: probe all peers for PROTOCOL_SYNC support serially. This is
-    // cheap (peerStore lookup / waitForPeerProtocol), but we keep it a
-    // separate pass so Phase 2's Promise.all only kicks off peers we know
-    // can serve us — parallel-probing would multiply connection churn for
-    // no gain. See the "Run per-peer syncs in parallel" comment below.
-    const syncCapable: string[] = [];
-    for (const pid of peers) {
+    // Phase 1: check protocol readiness with bounded concurrency. Stale
+    // Identify records now require live negotiation, so a serial pass would
+    // add up to six seconds per peer before any catch-up work can start.
+    const readiness = await selectSyncCapablePeers(peers, MAX_IDENTITY_PROBE_CONCURRENCY, async (pid) => {
       if (DEBUG_SYNC_PROGRESS) {
         this.log.info(ctx, `Checking sync protocol for peer ${pid.toString()} in catch-up for "${contextGraphId}"`);
       }
       const hasSync = await this.waitForSyncProtocol(pid);
       if (!hasSync) {
-        noProtocolPeers++;
         if (DEBUG_SYNC_PROGRESS) {
           this.log.warn(ctx, `Peer ${pid.toString()} is connected but not sync-capable for "${contextGraphId}"`);
         }
-        continue;
       }
-      syncCapable.push(pid.toString());
-    }
+      return hasSync;
+    });
+    noProtocolPeers = readiness.noProtocolPeers;
+    const syncCapable = readiness.syncCapable;
     syncCapablePeers = syncCapable.length;
     const coordinatedRecovery = (this.config.syncContextGraphs ?? []).includes(contextGraphId);
     let catchupPeers = syncCapable;
@@ -9095,15 +9142,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     pid: { toString(): string },
     signal?: AbortSignal,
   ): Promise<boolean> {
-    return waitForPeerProtocol(
-      this.node.libp2p.peerStore as any,
-      pid,
-      // Either id proves sync support (#2822; see `advertisesSyncProtocol`).
-      [PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED],
-      SYNC_PROTOCOL_CHECK_ATTEMPTS,
-      SYNC_PROTOCOL_CHECK_DELAY_MS,
-      signal,
-    );
+    return waitForAdvertisedOrLiveProtocol({
+      peerStore: this.node.libp2p.peerStore as any, peer: pid,
+      protocols: [PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED],
+      attempts: SYNC_PROTOCOL_CHECK_ATTEMPTS, delayMs: SYNC_PROTOCOL_CHECK_DELAY_MS, signal,
+      isConnected: peerId => this.node.libp2p.getConnections().some(c => c.remotePeer.toString() === peerId),
+      probe: (peerId, protocol, operationSignal) => this.router.probeProtocol(peerId, protocol, 3_000, operationSignal),
+    });
   }
 
   async refreshMetaSyncedFlags(this: DKGAgent, contextGraphIds: Iterable<string>): Promise<void> {
@@ -9270,10 +9315,21 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ? this.contextGraphWireId(normalizedNext.onChainHash)
       : undefined;
     const nextWireId = nextOnChainHash ?? localWireId;
-    const canonicalNext: ContextGraphSub = {
+    const nextRow: ContextGraphSub = {
       ...normalizedNext,
       ...(normalizedNext.onChainHash === nextOnChainHash ? {} : { onChainHash: nextOnChainHash }),
     };
+    // A write that changes nothing keeps the stored row. Work in flight holds
+    // that object to learn of a change, and a repeated subscribe is not one.
+    // A caller that hands the stored row itself back may have changed it in
+    // place; what it changed cannot be told, so that write is a new row.
+    const canonicalNext = previous !== undefined && next !== previous
+      && contextGraphSubscriptionRowsEqual(previous, nextRow)
+      ? previous
+      : nextRow;
+    if (previous !== undefined && canonicalNext !== previous) {
+      continueContextGraphSubscriptionLine(previous, canonicalNext);
+    }
     const retainsInactiveBinding = retainsInactiveContextGraphBinding(previous, canonicalNext);
     const bindingFacts = this.contextGraphBindingState.applySubscriptionTransition(
       contextGraphId,
@@ -9650,7 +9706,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     // Every in-flight binding continuation also captures the subscription
     // object, so deleting this numeric generation cannot revive old work if a
-    // new subscription later reuses the same local id.
+    // new subscription later reuses the same local id. A continuation that
+    // accepts a row stored over its own (the durable store) accepts no row of
+    // that new subscription: it starts a line of its own.
     this.contextGraphBindingState.delete(contextGraphId);
     return deleted;
   }

@@ -5,11 +5,17 @@
     "declaration": false,
     "declarationMap": false,
     "noEmit": true,
-    "rootDir": ".",
+    "rootDir": "../..",
     "sourceMap": false
   },
   "include": [
     "test/**/*.typecheck.ts",
-    "test/_helpers/catchup-readiness-fixtures.ts"
+    "test/_helpers/catchup-readiness-fixtures.ts",
+    "test/context-graph-route-read-authority.test.ts",
+    "test/genui-read-authority.test.ts",
+    "test/memory-search-read-authority.test.ts",
+    "test/knowledge-assets-local-curator-read.test.ts",
+    "test/publisher-journal-route.test.ts",
+    "test/context-graph-route-read-authority-native.test.ts"
   ]
 }

@@ -1,3 +1,5 @@
+import { normalizeContextGraphIdOrUri } from '../context-graph-identifiers.js';
+export { normalizeContextGraphIdOrUri } from '../context-graph-identifiers.js';
 // HTTP request/response utilities extracted from the legacy monolithic
 // `daemon.ts`. Body parsing, JSON validators, CORS resolution, the
 // loopback rate-limiter, plus small helpers used across route handlers.
@@ -753,13 +755,6 @@ export function validateRequiredContextGraphId(
   return true;
 }
 
-const CONTEXT_GRAPH_URI_PREFIX = "did:dkg:context-graph:";
-
-export function normalizeContextGraphIdOrUri(contextGraphId: string): string {
-  return contextGraphId.startsWith(CONTEXT_GRAPH_URI_PREFIX)
-    ? contextGraphId.slice(CONTEXT_GRAPH_URI_PREFIX.length)
-    : contextGraphId;
-}
 
 type ExistingContextGraphRow = {
   id?: unknown;

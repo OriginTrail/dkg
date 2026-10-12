@@ -1,10 +1,12 @@
+import { EventEmitter } from 'node:events';
 import type { ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { createPublisherControlFromStore } from '../src/publisher-runner.js';
 import { handlePublisherRoutes } from '../src/daemon/routes/publisher.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { createMixedPublisherInventory } from '../../publisher/test/_helpers/publisher-inventory.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 
 // #1829 — GET /api/publisher/journal route: read-only append-only journal, by jobId
@@ -51,12 +53,12 @@ describe('#1829 GET /api/publisher/journal', () => {
     };
   }
 
-  async function newControlWithJob(): Promise<{ control: ReturnType<typeof createPublisherControlFromStore>; jobId: string }> {
+  async function newControlWithJob(overrides: Record<string, unknown> = {}): Promise<{ control: ReturnType<typeof createPublisherControlFromStore>; jobId: string; store: OxigraphStore }> {
     const store = new OxigraphStore();
     stores.push(store);
     const control = createPublisherControlFromStore(store);
-    const jobId = await control.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
-    return { control, jobId };
+    const jobId = await control.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest(overrides));
+    return { control, jobId, store };
   }
 
   it('reads the journal by jobId (200, admission entry present)', async () => {
@@ -69,6 +71,112 @@ describe('#1829 GET /api/publisher/journal', () => {
     expect(body.entries[0]?.kind).toBe('admission');
     expect(body.entries[0]?.jobId).toBe(jobId);
     expect(body.complete).toBe(true);
+  });
+
+  it.each([true, false])('keeps a cleared journal bound to its durable CG for an authorized=%s agent', async allowed => {
+    const { control, jobId, store } = await newControlWithJob();
+    await control.claimNext('wallet-1');
+    await control.update(jobId, 'validated', { validation: { canonicalRoots: [], canonicalRootMap: {}, swmQuadCount: 2, authorityProofRef: 'knowledge-asset-lifecycle', transitionType: 'CREATE' } });
+    await control.update(jobId, 'finalized', { finalization: { mode: 'local' } });
+    const retained = await control.readJournalByJob(jobId);
+    expect(retained.entries.length).toBeGreaterThan(1);
+    await control.clearTerminalJob(jobId);
+    expect(await control.getStatus(jobId)).toBeNull();
+    const reloaded = createPublisherControlFromStore(store);
+    const status = vi.spyOn(reloaded, 'getStatus');
+    const journal = vi.spyOn(reloaded, 'readJournalByJob');
+    const queries = vi.spyOn(store, 'query');
+    const caller = '0x3333333333333333333333333333333333333333';
+    const ctx = createContext(`/api/publisher/journal?jobId=${jobId}&contextGraphId=unrelated-public`, reloaded, '0x0',
+      requestAuthentication({ kind: 'agent', agentAddress: caller }));
+    const authority = vi.fn(async () => ({ outcome: allowed ? 'allowed' as const : 'denied' as const,
+      source: 'registered-chain' as const, reason: 'chain-participant', grantScope: allowed ? 'caller' as const : 'none' as const,
+      metadataBootstrap: 'forbidden' as const }));
+    Object.assign(ctx.agent, { resolveContextGraphReadAuthority: authority });
+    await handlePublisherRoutes(ctx);
+    expect(authority).toHaveBeenCalledWith('music-social', expect.objectContaining({ callerAgentAddress: caller }));
+    expect(responseStatus(ctx)).toBe(allowed ? 200 : 403);
+    expect(status).not.toHaveBeenCalled();
+    expect(queries.mock.calls.filter(([sparql]) => sparql.includes('<urn:dkg:publisher:journalJobId>'))).toHaveLength(1);
+    expect(journal).toHaveBeenCalledExactlyOnceWith(jobId);
+    if (allowed) expect(responseBody(ctx)).toEqual(retained);
+    else expect((ctx.res as unknown as { body: string }).body).not.toContain(jobId);
+    expect(await control.readJournalByJob(jobId)).toEqual(retained);
+  });
+
+  it.each([true, false])('reads a writer-created retained DEL-name journal with its real graph authority (allowed=%s)', async allowed => {
+    const name = 'asset\u007f';
+    const { control, jobId, store } = await newControlWithJob({ name });
+    await control.claimNext('wallet-1');
+    await control.update(jobId, 'validated', { validation: { canonicalRoots: [], canonicalRootMap: {}, swmQuadCount: 2, authorityProofRef: 'knowledge-asset-lifecycle', transitionType: 'CREATE' } });
+    await control.update(jobId, 'finalized', { finalization: { mode: 'local' } });
+    const retained = await control.readJournalByJob(jobId);
+    expect(retained.entries.length).toBeGreaterThan(1);
+    expect(retained.entries.every(entry => entry.lineageKey.split('\u001f')[1] === name)).toBe(true);
+    await control.clearTerminalJob(jobId);
+    expect(await control.getStatus(jobId)).toBeNull();
+    const reloaded = createPublisherControlFromStore(store);
+    const caller = '0x3333333333333333333333333333333333333333';
+    const ctx = createContext(`/api/publisher/journal?jobId=${jobId}&contextGraphId=unrelated-public`, reloaded, '0x0',
+      requestAuthentication({ kind: 'agent', agentAddress: caller }));
+    const authority = vi.fn(async () => ({ outcome: allowed ? 'allowed' as const : 'denied' as const,
+      source: 'registered-chain' as const, reason: 'chain-participant', grantScope: allowed ? 'caller' as const : 'none' as const,
+      metadataBootstrap: 'forbidden' as const }));
+    Object.assign(ctx.agent, { resolveContextGraphReadAuthority: authority });
+    await handlePublisherRoutes(ctx);
+    expect(authority).toHaveBeenCalledExactlyOnceWith('music-social', expect.objectContaining({ callerAgentAddress: caller }));
+    expect(responseStatus(ctx)).toBe(allowed ? 200 : 403);
+    if (allowed) expect(responseBody(ctx)).toEqual(retained);
+    else expect((ctx.res as unknown as { body: string }).body).not.toContain(jobId);
+    expect(await reloaded.readJournalByJob(jobId)).toEqual(retained);
+  });
+
+  it.each([true, false])('uses the native job scope when its journal is empty (allowed=%s)', async allowed => {
+    const { control, jobId, store } = await newControlWithJob();
+    await store.deleteByPattern({ graph: 'urn:dkg:publisher:journal' });
+    const retained = await control.readJournalByJob(jobId);
+    expect(retained.entries).toEqual([]);
+    const caller = '0x3333333333333333333333333333333333333333';
+    const ctx = createContext(`/api/publisher/journal?jobId=${jobId}&contextGraphId=foreign-public`, control, '0x0',
+      requestAuthentication({ kind: 'agent', agentAddress: caller }));
+    const authority = vi.fn(async () => ({ outcome: allowed ? 'allowed' as const : 'denied' as const,
+      source: 'registered-chain' as const, reason: 'chain-participant', grantScope: allowed ? 'caller' as const : 'none' as const,
+      metadataBootstrap: 'forbidden' as const }));
+    Object.assign(ctx.agent, { resolveContextGraphReadAuthority: authority });
+    const read = vi.spyOn(control, 'readJournalByJob');
+    const status = vi.spyOn(control, 'getStatus');
+    await handlePublisherRoutes(ctx);
+    expect(responseStatus(ctx)).toBe(allowed ? 200 : 403);
+    expect(authority).toHaveBeenCalledExactlyOnceWith('music-social', expect.objectContaining({ callerAgentAddress: caller }));
+    expect(read).toHaveBeenCalledExactlyOnceWith(jobId);
+    expect(status).toHaveBeenCalledExactlyOnceWith(jobId);
+    if (allowed) expect(responseBody(ctx)).toEqual(retained);
+  });
+
+  it.each([true, false])('preserves empty raw-job journals only for operators (operator=%s)', async operator => {
+    const { store, publisher } = await createMixedPublisherInventory('music-social');
+    stores.push(store);
+    const ctx = createContext('/api/publisher/journal?jobId=legacy', publisher, '0x0',
+      requestAuthentication(operator ? { kind: 'nodeOperator' }
+        : { kind: 'agent', agentAddress: '0x3333333333333333333333333333333333333333' }));
+    const authority = vi.fn();
+    Object.assign(ctx.agent, { resolveContextGraphReadAuthority: authority });
+    await handlePublisherRoutes(ctx);
+    expect(responseStatus(ctx)).toBe(operator ? 200 : 403);
+    expect(authority).not.toHaveBeenCalled();
+    if (operator) expect(responseBody(ctx)).toMatchObject({ entries: [], maxSeq: -1 });
+  });
+
+  it.each([true, false])('keeps unknown empty journals compatible (operator=%s)', async operator => {
+    const { control } = await newControlWithJob();
+    const ctx = createContext('/api/publisher/journal?jobId=missing', control, '0x0',
+      requestAuthentication(operator ? { kind: 'nodeOperator' }
+        : { kind: 'agent', agentAddress: '0x3333333333333333333333333333333333333333' }));
+    const status = vi.spyOn(control, 'getStatus');
+    await handlePublisherRoutes(ctx);
+    expect(responseStatus(ctx)).toBe(operator ? 200 : 404);
+    expect(status).toHaveBeenCalledTimes(operator ? 0 : 1);
+    if (operator) expect(responseBody(ctx)).toMatchObject({ entries: [], maxSeq: -1 });
   });
 
   it('reads the journal facts-pure by lifecycle identity (200)', async () => {
@@ -106,14 +214,17 @@ describe('#1829 GET /api/publisher/journal', () => {
   });
 });
 
-function createContext(path: string, publisherControl: RequestContext['publisherControl'], requestAgentAddress = '0x0'): RequestContext {
+function createContext(path: string, publisherControl: RequestContext['publisherControl'], requestAgentAddress = '0x0',
+  authentication: RequestContext['authentication'] = requestAuthentication({ kind: 'anonymous' })): RequestContext {
   const url = new URL(`http://127.0.0.1${path}`);
   const req = Readable.from([]);
   Object.assign(req, { method: 'GET', url: path, headers: { host: '127.0.0.1' } });
   return {
     req: req as RequestContext['req'],
     res: createResponse() as unknown as ServerResponse,
-    agent: {} as RequestContext['agent'],
+    agent: { resolveContextGraphReadAuthority: async () => ({
+      outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant', metadataBootstrap: 'forbidden',
+    }) } as unknown as RequestContext['agent'],
     publisherControl,
     publisherState: {
       runtime: null,
@@ -141,13 +252,13 @@ function createContext(path: string, publisherControl: RequestContext['publisher
     apiPortRef: { value: 0 },
     url,
     path: url.pathname,
-    authentication: requestAuthentication({ kind: 'anonymous' }),
+    authentication,
     requestAgentAddress,
-  };
+  } as unknown as RequestContext;
 }
 
 function createResponse() {
-  return {
+  return Object.assign(new EventEmitter(), {
     statusCode: 0,
     headers: undefined as Record<string, string> | undefined,
     body: '',
@@ -162,7 +273,7 @@ function createResponse() {
       this.writableEnded = true;
       return this;
     },
-  };
+  });
 }
 
 function responseStatus(ctx: RequestContext): number {

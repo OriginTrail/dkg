@@ -7,8 +7,8 @@
  * maintenance threshold is never a command-line argument, never in the
  * rewritten store config, and only takes effect an hour into a loaded node's
  * life. That left the one line that carries `plan.walRestartThresholdBytes`
- * into the supervisor untested: deleting it silently reverted every operator
- * override to the 4 GiB default.
+ * into the supervisor untested: deleting it silently turned every operator's
+ * maintenance reopen off, which is what an unset threshold means.
  *
  * This file therefore stubs the two module boundaries `startManagedOxigraph`
  * calls out to, so the options object handed to the supervisor can be asserted
@@ -36,7 +36,6 @@ import {
   MANAGED_OXIGRAPH_BACKEND,
   startManagedOxigraph,
 } from '../src/daemon/oxigraph-managed.js';
-import { DEFAULT_WAL_RESTART_THRESHOLD_BYTES } from '../src/daemon/oxigraph-wal-maintenance.js';
 
 function stubHandle(port: number) {
   return {
@@ -74,31 +73,70 @@ describe('startManagedOxigraph launch-option forwarding', () => {
     );
   });
 
-  it('hands the operator WAL threshold to the supervisor unchanged', async () => {
+  it('hands the operator WAL threshold to the supervisor unchanged and says the reopen is on', async () => {
+    const lines: string[] = [];
     const result = await startManagedOxigraph({
       config: {
         store: {
           backend: MANAGED_OXIGRAPH_BACKEND,
-          options: { walRestartThresholdBytes: 1_234 },
+          options: { walRestartThresholdBytes: 2 * 1024 ** 3 },
         },
       },
       dataDir: '/data',
       platform: 'linux',
+      log: line => lines.push(line),
     });
 
     expect(result).not.toBeNull();
-    expect(startedWith().walRestartThresholdBytes).toBe(1_234);
+    expect(startedWith().walRestartThresholdBytes).toBe(2 * 1024 ** 3);
+    expect(lines.filter(line => line.includes('WAL maintenance reopen'))).toEqual([
+      '[oxigraph] WAL maintenance reopen is on: the store is reopened once 2.00 GiB of write-ahead log '
+      + 'is retained (store.options.walRestartThresholdBytes)',
+    ]);
   });
 
-  it('hands the canonical default to the supervisor when nothing is configured', async () => {
+  it('leaves the WAL maintenance reopen off, without a word, when nothing is configured', async () => {
+    const lines: string[] = [];
     await startManagedOxigraph({
       config: { store: { backend: MANAGED_OXIGRAPH_BACKEND } },
       dataDir: '/data',
       platform: 'linux',
+      log: line => lines.push(line),
     });
 
-    expect(startedWith().walRestartThresholdBytes)
-      .toBe(DEFAULT_WAL_RESTART_THRESHOLD_BYTES);
+    expect(startedWith()).toHaveProperty('walRestartThresholdBytes', undefined);
     expect(startedWith().port).toBe(DEFAULT_OXIGRAPH_PORT);
+    expect(lines.filter(line => line.includes('walRestartThresholdBytes'))).toEqual([]);
+  });
+
+  it.each([
+    [0, '0'],
+    [-5, '-5'],
+    [1.5, '1.5'],
+    ['4294967296', '"4294967296"'],
+    ['x'.repeat(40), `"${'x'.repeat(32)}..."`],
+    [null, 'null'],
+    [true, 'true'],
+    [{ bytes: 1 }, 'a value of type object'],
+    [[4096], 'a value of type array'],
+  ])('ignores the invalid WAL threshold %j and says the reopen stays off', async (configured, shown) => {
+    const lines: string[] = [];
+    await startManagedOxigraph({
+      config: {
+        store: {
+          backend: MANAGED_OXIGRAPH_BACKEND,
+          options: { walRestartThresholdBytes: configured },
+        },
+      },
+      dataDir: '/data',
+      platform: 'linux',
+      log: line => lines.push(line),
+    });
+
+    expect(startedWith()).toHaveProperty('walRestartThresholdBytes', undefined);
+    expect(lines.filter(line => line.includes('walRestartThresholdBytes'))).toEqual([
+      '[oxigraph] store.options.walRestartThresholdBytes must be a positive integer number of bytes; '
+      + `ignoring ${shown}. The WAL maintenance reopen stays off`,
+    ]);
   });
 });

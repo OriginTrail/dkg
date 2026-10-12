@@ -1,3 +1,4 @@
+export { journalEntriesContextGraphId } from './async-lift-control-plane.js';
 export {
   decodeEntityShareMetadata,
   ENTITY_SHARE_METADATA_PREDICATES,
@@ -496,6 +497,10 @@ export {
   type AsyncLiftPublishFailureInput,
 } from './async-lift-publish-result.js';
 export {
+  publisherJobReadScope,
+  readPublisherJournalWithScope,
+  type PublisherReadScope,
+  type PublisherJournalReadResult,
   createKnowledgeAssetVmPublishSnapshotMetadata,
   createKnowledgeAssetVmPublishSnapshotRequest,
 } from './async-lift-publisher-utils.js';

@@ -1,3 +1,6 @@
+import { normalizeContextGraphIdOrUri } from '../../context-graph-identifiers.js';
+import { classifyKaIdentifier, type KnowledgeAssetReadTarget } from '@origintrail-official/dkg-agent/dist/knowledge-asset-read-resolution.js';
+import { requireKnowledgeAssetRead } from './context-graph-read-authority.js';
 // Route handlers for the GitHub-shaped Knowledge Asset HTTP surface.
 //
 // OT-RFC-43 §10.5 — one coherent resource model for a Knowledge Asset (KA):
@@ -24,7 +27,7 @@
 // by its lifecycle NAME (the file handle) + `contextGraphId`. Minter-namespaced
 // `(agent, number)` addressing is layered on by Option 1 later, on these same
 // routes, as an additional accepted identifier form.
-import type { RequestContext } from "./context.js";
+import { actorFromRequestContext, type RequestContext } from "./context.js";
 import { reportBatchRejectionWithLifecycle } from "@origintrail-official/dkg-agent";
 import {
   jsonResponse,
@@ -39,7 +42,6 @@ import {
   classifyStoreUnavailable,
   respondIfChainRpcTransportError,
   sanitizeRpcMessage,
-  normalizeContextGraphIdOrUri,
   resolveRequiredWriteContextGraphId,
   isNoFundedPublisherWalletLike,
   noFundedPublisherWalletBody,
@@ -182,59 +184,6 @@ function hex(bytes: Uint8Array): string {
   return "0x" + Buffer.from(bytes).toString("hex");
 }
 
-/**
- * OT-RFC-43 B3 — classify the leading path segment as a KA identifier:
- *   (a) `did:dkg:.../<id>`        → the trailing `/<id>` is the packed kaId
- *   (b) `0x<agent>:<number>`      → (agent, number), but only on read paths
- *   (c) anything else             → a plain assertion NAME (current behavior)
- * The compact form stays enabled for GET/read compatibility. Create/mutation
- * call sites pass `includeCompact: false` so historically-valid literal names
- * like `0xabc...:7` remain creatable and mutable.
- */
-const AGENT_NUMBER_RE = /^0x[0-9a-fA-F]{40}:[0-9]+$/;
-
-function classifyKaIdentifier(
-  seg: string,
-  opts: { includeCompact?: boolean } = {},
-): { kind: "kaId"; kaId: bigint } | { kind: "name" } {
-  const includeCompact = opts.includeCompact ?? true;
-  if (seg.startsWith("did:dkg:")) {
-    // Rootless V2 uses the author-scoped identity
-    //   did:dkg:<chain>/<author>/<per-author-number>
-    // while the legacy/canonical on-chain form carries an already-packed id
-    // in the last segment. Reconstruct the packed id for the rootless form so
-    // resolveByKaId can recover the lifecycle author after a cross-node sync.
-    // A value larger than the 96-bit per-author range is already packed and
-    // must remain byte-for-byte unchanged.
-    const idPart = seg.slice(seg.lastIndexOf("/") + 1);
-    if (/^[0-9]+$/.test(idPart)) {
-      try {
-        const numericId = BigInt(idPart);
-        if (numericId <= ((1n << 96n) - 1n)) {
-          const withoutId = seg.slice(0, seg.lastIndexOf("/"));
-          const authorPart = withoutId.slice(withoutId.lastIndexOf("/") + 1);
-          if (/^0x[0-9a-fA-F]{40}$/.test(authorPart)) {
-            return { kind: "kaId", kaId: (BigInt(authorPart) << 96n) | numericId };
-          }
-        }
-        return { kind: "kaId", kaId: numericId };
-      } catch {
-        /* fall through to name */
-      }
-    }
-    return { kind: "name" };
-  }
-  if (includeCompact && AGENT_NUMBER_RE.test(seg)) {
-    const [agentHex, numberStr] = seg.split(":");
-    try {
-      const kaId = (BigInt(agentHex) << 96n) | BigInt(numberStr);
-      return { kind: "kaId", kaId };
-    } catch {
-      return { kind: "name" };
-    }
-  }
-  return { kind: "name" };
-}
 
 function rejectKaIdMutationIdentifier(seg: string, res: RequestContext["res"]): boolean {
   if (classifyKaIdentifier(seg, { includeCompact: false }).kind !== "kaId") return false;
@@ -261,7 +210,7 @@ function rejectReservedKaIdentifierName(name: string, res: RequestContext["res"]
  * OT-RFC-43 §10.5.4 — derive a per-layer status from a history descriptor's
  * pointers. Reuses the canonical `deriveStatus` helper.
  */
-function layerStatus(hist: Record<string, unknown>, layer: "wm" | "swm" | "vm"): string {
+function layerStatus(hist: NonNullable<KnowledgeAssetReadTarget["descriptor"]>, layer: "wm" | "swm" | "vm"): string {
   return deriveStatus(
     {
       state: hist["state"] as string | undefined,
@@ -1163,35 +1112,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
   const layer = segs[1]; // wm | swm | vm | undefined
   const verb = segs[2];
 
-  // OT-RFC-43 B3 — classify the identifier once for the GET surface. For a
-  // kaId form (did:dkg UAL or `0x<addr>:<number>`) we resolve to the lifecycle
-  // descriptor via the agent resolver; for a plain name we use it directly.
-  // Returns the descriptor (or null) so both GET handlers share one read.
-  async function resolveDescriptor(cg: string, subGraphName?: string, agentAddress?: string): Promise<Record<string, unknown> | null> {
-    const ident = classifyKaIdentifier(name);
-    if (ident.kind === "kaId") {
-      // Compact `0x<agent>:<number>` is both a B3 read alias and a historically
-      // valid literal assertion name. Preserve literal-name semantics first:
-      // if such a lifecycle exists, return it; otherwise fall back to B3.
-      if (AGENT_NUMBER_RE.test(name)) {
-        const literalHist = await agent.assertion.history(cg, name, { agentAddress, subGraphName });
-        if (literalHist) return literalHist as unknown as Record<string, unknown>;
-      }
-      const hist = await (agent as any).assertion.resolveByKaId?.(cg, ident.kaId, { subGraphName });
-      return (hist as unknown as Record<string, unknown>) ?? null;
-    }
-    // `agentAddress` parity (#988): author-scoped read so a caller can inspect
-    // another agent's lifecycle record (the engine keys the lifecycle URI by
-    // author and defaults to the local agent when omitted).
-    const hist = await agent.assertion.history(cg, name, { subGraphName, ...(agentAddress ? { agentAddress } : {}) });
-    return (hist as unknown as Record<string, unknown>) ?? null;
-  }
-
   // Shared GET preflight: decode/validate the :identifier, require + normalize
   // contextGraphId, validate subGraphName, extract optional agentAddress. For
   // agent-scoped bearer tokens, omitted agentAddress defaults to the token's
   // storage lane so GETs see the same draft the write routes created.
-  function readGetParams(): { cg: string; subGraphName?: string; agentAddress?: string } | null {
+  async function readGetParams(): Promise<KnowledgeAssetReadTarget | null> {
     if (decodeAndValidateName(name, res) === null) return null;
     const rawCg = url.searchParams.get("contextGraphId");
     if (!validateRequiredContextGraphId(rawCg, res)) return null;
@@ -1202,16 +1127,21 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       jsonResponse(res, 400, { error: '"agentAddress" must be a 0x-prefixed 20-byte EVM address' });
       return null;
     }
-    const agentAddress = explicitAgentAddress ?? writePreflightCallerAgentAddress;
-    return { cg: normalizeContextGraphIdOrUri(rawCg as string), subGraphName, agentAddress };
+    const literal = verb === 'extraction-status';
+    const agentAddress = literal ? actorFromRequestContext(ctx).effectiveAgentAddress : explicitAgentAddress ?? writePreflightCallerAgentAddress;
+    const cg = normalizeContextGraphIdOrUri(rawCg as string);
+    return requireKnowledgeAssetRead(ctx, {
+      cg, name, layer, subGraphName, agentAddress,
+      ...(literal ? { kind: 'literal', lookup: 'none' } : { kind: 'identifier', lookup: verb === 'quads' ? 'quads' : 'descriptor' }),
+    });
   }
 
   // GET /api/knowledge-assets/:identifier — KA metadata / lifecycle state.
   // `:identifier` is a plain name OR a B3 kaId (did:dkg UAL / `0x<addr>:<n>`).
   if (method === "GET" && segs.length === 1) {
-    const p = readGetParams();
+    const p = await readGetParams();
     if (!p) return;
-    const hist = await resolveDescriptor(p.cg, p.subGraphName, p.agentAddress);
+    const hist = p.descriptor;
     if (!hist) return jsonResponse(res, 404, { error: `No knowledge asset "${name}" in context graph "${p.cg}"` });
     return jsonResponse(res, 200, hist);
   }
@@ -1219,18 +1149,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
   // GET /api/knowledge-assets/:identifier/wm/quads — dump the WM draft's quads.
   // Parity with the legacy POST /api/assertion/:name/query (read, not SPARQL).
   if (method === "GET" && layer === "wm" && verb === "quads") {
-    const p = readGetParams();
+    const p = await readGetParams();
     if (!p) return;
-    // B3: ONLY a did:dkg / 0x<agent>:<number> kaId alias needs resolving to the
-    // lifecycle name before querying — otherwise the raw alias is passed as the
-    // assertion name and misses the real WM graph (parity with the sibling GETs).
-    // A plain name is queried directly (unchanged), so reads of a name-keyed WM
-    // draft still work even when no lifecycle descriptor exists yet.
-    let resolvedName = name;
-    if (classifyKaIdentifier(name).kind === "kaId") {
-      const hist = await resolveDescriptor(p.cg, p.subGraphName, p.agentAddress);
-      if (!hist) return jsonResponse(res, 404, { error: `No knowledge asset "${name}" in context graph "${p.cg}"` });
-      if (typeof hist.name === "string") resolvedName = hist.name;
+    const resolvedName = p.name;
+    if (p.kind === 'kaId' && !p.descriptor) {
+      return jsonResponse(res, 404, { error: `No knowledge asset "${name}" in context graph "${p.cg}"` });
     }
     try {
       const quads = await agent.assertion.query(p.cg, resolvedName, {
@@ -1248,22 +1171,24 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
 
   // GET /api/knowledge-assets/:name/wm/extraction-status?contextGraphId=...&subGraphName=...
   // Faithful port of the legacy GET /api/assertion/:name/extraction-status. The
-  // handler reads + validates the query params itself (parity with legacy), so
-  // here we only decode/validate the :name segment before delegating.
+  // shared GET preflight owns parsing and authority; extraction keeps its
+  // actor-owned storage lane rather than the optional inspection author lane.
   if (method === "GET" && layer === "wm" && verb === "extraction-status") {
-    if (decodeAndValidateName(name, res) === null) return;
-    return handleKaExtractionStatus(ctx, name);
+    const p = await readGetParams();
+    if (!p) return;
+    if (p.agentAddress === undefined) throw new Error('Extraction read target has no actor lane');
+    return handleKaExtractionStatus(ctx, { ...p, agentAddress: p.agentAddress });
   }
 
   // GET /api/knowledge-assets/:identifier/{wm,swm,vm} — per-layer status.
   // Returns that layer's pointer + that layer's derived status so per-layer
   // divergence (e.g. WM ahead of VM after wm/pull-from) is observable.
   if (method === "GET" && (layer === "wm" || layer === "swm" || layer === "vm") && !verb) {
-    const p = readGetParams();
+    const p = await readGetParams();
     if (!p) return;
-    const hist = await resolveDescriptor(p.cg, p.subGraphName, p.agentAddress);
+    const hist = p.descriptor;
     if (!hist) return jsonResponse(res, 404, { error: `No knowledge asset "${name}"` });
-    const pointerKey = `${layer}CurrentAssertion`;
+    const pointerKey = `${layer}CurrentAssertion` as const;
     return jsonResponse(res, 200, {
       layer,
       ...hist,

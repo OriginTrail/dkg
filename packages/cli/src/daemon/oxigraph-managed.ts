@@ -42,6 +42,7 @@ import {
   type OxigraphServerHandle,
   type OxigraphServerIo,
 } from './oxigraph-server.js';
+import { formatWalBytes } from './oxigraph-wal.js';
 import { resolveWalRestartThresholdBytes } from './oxigraph-wal-maintenance.js';
 import {
   normalizeOxigraphMemoryLimits,
@@ -64,6 +65,15 @@ const MAX_NODE_TIMER_MS = 2_147_483_647;
 const MAX_MANAGED_OXIGRAPH_QUERY_TIMEOUT_S = Math.floor(
   (MAX_NODE_TIMER_MS - MANAGED_OXIGRAPH_CLIENT_TIMEOUT_GRACE_MS) / 1_000,
 );
+
+/** A config value as one log line can show it: short, and never an object dump. */
+function describeIgnoredOption(value: unknown): string {
+  if (typeof value === 'string') {
+    return JSON.stringify(value.length > 32 ? `${value.slice(0, 32)}...` : value);
+  }
+  if (typeof value === 'number' || typeof value === 'boolean' || value === null) return String(value);
+  return `a value of type ${Array.isArray(value) ? 'array' : typeof value}`;
+}
 
 /** Same port validation as {@link planManagedOxigraph} — shared with status. */
 export function resolveManagedOxigraphPort(
@@ -252,8 +262,12 @@ export interface ManagedOxigraphPlan {
   clientTimeoutMs: number;
   /** Finite limits applied to an isolated systemd user scope. */
   memoryLimits?: OxigraphMemoryLimits;
-  /** Retained WAL size that schedules an idle supervised reopen. */
-  walRestartThresholdBytes: number;
+  /**
+   * Retained WAL size that schedules an idle supervised reopen. Undefined
+   * unless the operator set `store.options.walRestartThresholdBytes` to a
+   * positive integer: the maintenance reopen is opt-in.
+   */
+  walRestartThresholdBytes?: number;
   /**
    * sharedMemoryPublicSnapshotStorage with a defaulted `directory`, set
    * only when the operator enabled it. Same rewrite hazard as
@@ -409,6 +423,22 @@ export async function startManagedOxigraph(
     binary.version,
   );
   if (plan === null) return null;
+
+  // The maintenance reopen is opt-in, so say which way this node runs when
+  // the operator touched the option: on at which size, or ignored and why.
+  const configuredWalThreshold = opts.config.store?.options?.walRestartThresholdBytes;
+  if (plan.walRestartThresholdBytes !== undefined) {
+    log(
+      `[oxigraph] WAL maintenance reopen is on: the store is reopened once `
+      + `${formatWalBytes(plan.walRestartThresholdBytes)} of write-ahead log is retained `
+      + `(store.options.walRestartThresholdBytes)`,
+    );
+  } else if (configuredWalThreshold !== undefined) {
+    log(
+      `[oxigraph] store.options.walRestartThresholdBytes must be a positive integer number of bytes; `
+      + `ignoring ${describeIgnoredOption(configuredWalThreshold)}. The WAL maintenance reopen stays off`,
+    );
+  }
 
   // What the orphan reclaim recognises as this node's Oxigraph: an orphan
   // from an earlier release may run another binary this node could resolve.

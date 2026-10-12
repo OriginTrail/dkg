@@ -31,6 +31,7 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
+import { normalizeContextGraphIdOrUri } from '../context-graph-identifiers.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { addFinalizedPublishOptions, parseFinalizedPublishOptions } from './finalized-publish-command-options.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
@@ -237,6 +238,7 @@ publisherCmd
   .command('jobs')
   .description('List async publisher jobs')
   .option('--status <value>', 'Filter by status')
+  .option('--context-graph <id>', 'Context graph to list (required for agent tokens)')
   .action(async (opts: ActionOpts) => {
     try {
       const status = opts.status ? String(opts.status) : undefined;
@@ -245,10 +247,11 @@ publisherCmd
         process.exit(1);
       }
 
+      const contextGraphId = opts.contextGraph ? String(opts.contextGraph) : undefined;
       let jobs: any[];
       try {
         const client = await ApiClient.connect();
-        const result = await client.publisherJobs(status);
+        const result = await client.publisherJobs(status, contextGraphId);
         jobs = result.jobs;
       } catch (err) {
         if (!isDaemonUnreachable(err)) throw err;
@@ -256,7 +259,10 @@ publisherCmd
         const { createPublisherInspector } = await import('../publisher-runner.js');
         const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
         try {
-          jobs = await inspector.publisher.list(status ? { status: status as any } : undefined);
+          jobs = await inspector.publisher.list({
+            ...(status ? { status: status as any } : {}),
+            ...(contextGraphId ? { contextGraphId: normalizeContextGraphIdOrUri(contextGraphId) } : {}),
+          });
         } finally {
           await inspector.stop();
         }

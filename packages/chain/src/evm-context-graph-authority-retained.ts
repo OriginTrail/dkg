@@ -69,6 +69,14 @@ export async function contextGraphAuthorityProjectionAnchorProvenByLogV1(
  * Revalidate a cached proof that a name was absent at its finalized anchor.
  * Bounded readers may use the local log generation as the first fence; live
  * readers and any local-proof miss keep the provider-backed comparison.
+ *
+ * A bounded reader also takes the absence from a provider scan that is still
+ * inside its tick (`withinTick`). Such a scan read the chain later than any
+ * fold of the log did, and the fold is the other answer a bounded reader
+ * accepts. Without it a node whose log cannot answer (no chain index, a tick
+ * that fell behind) compares heads for every such read and, on a chain that
+ * moved, scans the provider again each time. A fold keeps its own fence, the
+ * log generation: it is refused the moment the tick commits past it.
  */
 export async function contextGraphFinalizedNameAbsenceAnchorHoldsV1(
   cached: ContextGraphAuthorityIndexProjection,
@@ -76,6 +84,8 @@ export async function contextGraphFinalizedNameAbsenceAnchorHoldsV1(
   input: Readonly<{
     currentSource?: ChainEventLogAuthoritySource;
     contractAddress: string;
+    /** The cache still answers complete reads from this projection. */
+    withinTick?: boolean;
     readCurrentFinalized: () => Promise<Readonly<{ number: number; hash: string }>>;
   }>,
 ): Promise<boolean> {
@@ -88,6 +98,7 @@ export async function contextGraphFinalizedNameAbsenceAnchorHoldsV1(
     );
     options.signal?.throwIfAborted();
     if (provenByLog === true) return true;
+    if (input.withinTick === true && cached.origin.kind === 'scan') return true;
   }
   const current = await input.readCurrentFinalized();
   options.signal?.throwIfAborted();

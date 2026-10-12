@@ -27,6 +27,22 @@ const AUTHORITY_PRIORITY_QUEUE_RESERVE = 4;
  */
 const BACKGROUND_AUTHORITY_MAX_PASSES = 4;
 
+/**
+ * In the foreground class an authority read and an ordinary request take
+ * turns under contention: an ordinary request that is waiting is passed by at
+ * most this many authority admissions in a row.
+ *
+ * An authority read answers a fail-closed check under a deadline of a few
+ * seconds and goes first for that reason. What that needs is a bounded wait
+ * whatever the ordinary backlog is, and one ordinary admission in front of it
+ * keeps that. A stream of such reads that never ends must in turn leave a
+ * transaction its permits: its signing step is several requests under one
+ * deadline, so each of them has to be admitted soon, not eventually. There is
+ * no grace period here as there is for background work, for the same reason:
+ * a second a request is the whole deadline of such a step.
+ */
+const FOREGROUND_AUTHORITY_MAX_PASSES = 1;
+
 export interface RpcRequestGovernorPolicyInput {
   /** Total node-process RPC request rate. Defaults to 10 requests/second. */
   maxRequestsPerSecond?: number;
@@ -256,7 +272,8 @@ function zeroGovernorCounters(): MutableGovernorCounters {
  * start-up delay, which exists to spread bulk work. It still spends the
  * background bucket, yields to foreground work as any background request
  * does, and leaves bulk work that has waited a bounded share of the
- * background permits.
+ * background permits. In the foreground class it takes turns with ordinary
+ * requests that are waiting.
  */
 export class RpcRequestGovernor {
   /**
@@ -280,6 +297,14 @@ export class RpcRequestGovernor {
   #lastRefillMs: number;
   /** See {@link RpcRequestGovernor.#nextBackgroundWaiter}. */
   #backgroundAuthorityPasses = 0;
+  /** See {@link RpcRequestGovernor.#nextForegroundWaiter}. */
+  #foregroundAuthorityPasses = 0;
+  /**
+   * Background work has taken the ordinary turn that an authority read is
+   * being passed over for. It may take such a turn once; the next permit then
+   * goes to the ordinary request the turn belongs to.
+   */
+  #backgroundTookOrdinaryTurn = false;
   /** Queued waiters that hold a slot of the authority reserve. */
   #authorityReserveSlotsInUse = 0;
   #timer: ReturnType<typeof setTimeout> | null = null;
@@ -538,6 +563,27 @@ export class RpcRequestGovernor {
   }
 
   /**
+   * Index of the foreground waiter the next permit goes to.
+   *
+   * Authority waiters sit at the front and go first. An ordinary waiter is
+   * passed by at most {@link FOREGROUND_AUTHORITY_MAX_PASSES} authority
+   * admission in a row, then takes a permit itself: under contention the two
+   * kinds take turns, and neither can take more than every other permit from
+   * the other.
+   */
+  #nextForegroundWaiter(): number {
+    if (this.#foregroundQueue[0]?.admissionPriority !== 'authority') return 0;
+    if (this.#foregroundAuthorityPasses < FOREGROUND_AUTHORITY_MAX_PASSES) return 0;
+    const ordinary = this.#firstOrdinaryForegroundWaiter();
+    return ordinary < 0 ? 0 : ordinary;
+  }
+
+  /** Index of the first ordinary foreground waiter, or -1. */
+  #firstOrdinaryForegroundWaiter(): number {
+    return this.#foregroundQueue.findIndex((queued) => queued.admissionPriority !== 'authority');
+  }
+
+  /**
    * Whether the background class is owed its turn past foreground work: one of
    * its waiters has waited the fairness grace period for a permit it could
    * take now. Which waiter the turn goes to is a separate question
@@ -559,6 +605,11 @@ export class RpcRequestGovernor {
       this.#backgroundAuthorityPasses = authorityPriority && this.#passedBackgroundWaiter() >= 0
         ? this.#backgroundAuthorityPasses + 1
         : 0;
+    } else {
+      this.#foregroundAuthorityPasses = authorityPriority && this.#firstOrdinaryForegroundWaiter() >= 0
+        ? this.#foregroundAuthorityPasses + 1
+        : 0;
+      this.#backgroundTookOrdinaryTurn = false;
     }
     this.#window[requestClass === 'foreground' ? 'foregroundAdmitted' : 'backgroundAdmitted'] += 1;
   }
@@ -595,16 +646,31 @@ export class RpcRequestGovernor {
       && this.#backgroundWorkHasWaited();
     // At most one aged background request jumps the foreground queue per
     // scheduling turn. Its own bucket keeps this within the background share;
-    // the single admission keeps foreground latency bounded.
+    // the single admission keeps foreground latency bounded. It jumps an
+    // ordinary foreground request, never an authority read, and which of the
+    // two the next permit goes to is the turn rule's decision: under that rule
+    // an ordinary request is admitted while an authority waiter still sits at
+    // the head of the queue, so the head alone would deny the background class
+    // its turn for as long as authority reads keep arriving.
+    //
+    // A turn taken from an ordinary request that an authority read is being
+    // passed over for is taken once. Admitting background work does not use
+    // the turn up, so without this a background class whose bucket never runs
+    // dry would take it again on every permit, and the authority read behind
+    // it would wait for as long as the background backlog lasts.
+    const foregroundNext = this.#nextForegroundWaiter();
+    const passesAuthorityRead = foregroundNext > 0;
     if (
       this.#foregroundQueue.length > 0
-      && this.#foregroundQueue[0]?.admissionPriority !== 'authority'
+      && this.#foregroundQueue[foregroundNext]?.admissionPriority !== 'authority'
       && agedBackgroundHasCapacity
+      && !(passesAuthorityRead && this.#backgroundTookOrdinaryTurn)
     ) {
       this.#resolveWaiter(this.#backgroundQueue, backgroundNext);
+      if (passesAuthorityRead) this.#backgroundTookOrdinaryTurn = true;
     }
     while (this.#foregroundQueue.length > 0 && this.#availableTokens >= 1) {
-      this.#resolveWaiter(this.#foregroundQueue);
+      this.#resolveWaiter(this.#foregroundQueue, this.#nextForegroundWaiter());
     }
     while (
       this.#foregroundQueue.length === 0

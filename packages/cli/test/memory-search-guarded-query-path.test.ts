@@ -68,7 +68,7 @@ function buildCtx(opts: {
     res,
     agent: {
       resolveContextGraphReadAuthority: async () => ({
-        outcome: 'allowed' as const, source: 'registered-chain', reason: 'chain-participant',
+        outcome: 'allowed' as const, source: 'registered-chain', reason: 'chain-participant', grantScope: 'caller',
       }),
       canUseSharedMemoryForContextGraph: async () => true,
       listLocalAgents: () => (opts.localAgents ?? []).map((agentAddress) => ({ agentAddress })),
@@ -275,7 +275,7 @@ describe('POST /api/memory/search — guarded query path', () => {
       res,
       agent: {
         resolveContextGraphReadAuthority: async () => ({
-        outcome: 'allowed' as const, source: 'registered-chain', reason: 'chain-participant',
+        outcome: 'allowed' as const, source: 'registered-chain', reason: 'chain-participant', grantScope: 'caller',
       }),
       canUseSharedMemoryForContextGraph: async () => true,
         listLocalAgents: () => [],

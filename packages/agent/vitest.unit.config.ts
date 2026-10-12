@@ -54,6 +54,7 @@ export default defineConfig({
       "test/clear-promote-async-facade.test.ts",
       "test/query-min-trust-alias.test.ts",
       "test/query-working-memory-identity.test.ts",
+      "test/query-refused-aggregate.test.ts",
       "test/query-source-labels.test.ts",
       "test/query-private-authority-pending.test.ts",
       "test/unscoped-query-admission.test.ts",
@@ -214,6 +215,7 @@ export default defineConfig({
       "test/context-graph-membership-persist-scheduler.test.ts",
       "test/context-graph-subscription-persist-scheduler.test.ts",
       "test/context-graph-subscription-persist-lifecycle.test.ts",
+      "test/context-graph-subscription-row-identity.test.ts",
       "test/outbox-drainer.test.ts",
       "test/sync-checkpoint-key.test.ts",
       "test/map-with-concurrency.test.ts",
@@ -321,6 +323,9 @@ export default defineConfig({
       "test/encrypt-inline-policy.test.ts",
       // #3081 — the steps the queued executor reports after the confirmation (observation only).
       "test/queued-publish-tail-steps.test.ts",
+      // #3081 — a publication does not wait for the retirement of its shared copy's marker.
+      "test/owed-legacy-swm-retirements.test.ts",
+      "test/legacy-swm-retirement-caller-wait.test.ts",
       "test/queued-publish-options.test.ts",
       "test/agents-meta-policy.test.ts",
       "test/agents-meta-sync-wiring.test.ts",
@@ -338,6 +343,7 @@ export default defineConfig({
       "test/join-encryption-key-cache.test.ts",
       "test/bounded-operation.test.ts",
       "test/private-read-chain-authority.test.ts",
+      "test/knowledge-asset-draft-read-authority.test.ts",
       "test/context-graph-authority-retry.test.ts",
       "test/context-graph-access-policy-state.test.ts",
       "test/context-graph-live-authority-fold.test.ts",

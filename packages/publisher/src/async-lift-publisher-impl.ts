@@ -132,8 +132,10 @@ import {
   knowledgeAssetVmPublishLifecycleKey,
   serializeJournalEntry,
   parseJournalEntry,
+  summarizeJournal,
   serializeVmPublishIntentIndex,
   compareAcceptedJobs,
+  projectListedLiftJobs,
   createKnowledgeAssetVmPublishSnapshotMetadata,
   createKnowledgeAssetVmPublishSnapshotRequest,
   createKnowledgeAssetVmPublishJobRequest,
@@ -946,18 +948,15 @@ export class TripleStoreAsyncLiftPublisher
     return missing.length;
   }
 
-  async list(filter: { status?: LiftJobState } = {}): Promise<PersistedLiftJob[]> {
+  async list(filter: { status?: LiftJobState; contextGraphId?: string } = {}): Promise<PersistedLiftJob[]> {
     await this.ensureGraph();
     const statusFilter = filter.status ? `FILTER (?status = ${literal(filter.status)})` : '';
     const result = await this.store.query(
       `SELECT ?payload ?status WHERE { GRAPH <${this.graphUri}> { ?job <${STATUS_PREDICATE}> ?status ; <${PAYLOAD_PREDICATE}> ?payload . ${statusFilter} } }`,
       { source: 'publisher.asyncLift.list' },
     );
-    return expectBindings(result)
-      .map((row) => this.parseJobPayloadForScan(row['payload']))
-      .filter((job): job is PersistedLiftJob => job !== null)
-      .map((job) => this.chainObservations.project(job))
-      .sort(compareAcceptedJobs);
+    return projectListedLiftJobs(expectBindings(result).map(row => this.parseJobPayloadForScan(row['payload'])),
+      filter.contextGraphId, job => this.chainObservations.project(job));
   }
 
   /**
@@ -3094,7 +3093,7 @@ export class TripleStoreAsyncLiftPublisher
       : lineage.filter((e) => e.intentKey === facts.intentKey);
     // maxSeq/complete describe the whole LINEAGE (the contiguity reference); entries and
     // txHashes describe the queried subset (an intentKey filter is one version within it).
-    return this.summarizeJournal(entries, lineage);
+    return summarizeJournal(entries, lineage);
   }
 
   /** #1829 — all journal entries bearing this jobId. Read-only. */
@@ -3106,7 +3105,7 @@ export class TripleStoreAsyncLiftPublisher
     // is a property of the LINEAGE, not this job's slice. Resolve the lineage from any
     // entry (all of a job's entries share one lineageKey) and compute maxSeq/complete over it.
     const lineage = await this.readJournalEntriesBy(JOURNAL_LIFECYCLE_KEY, jobEntries[0]!.lineageKey);
-    return this.summarizeJournal(jobEntries, lineage);
+    return summarizeJournal(jobEntries, lineage);
   }
 
   // Object-bound read of every entry whose `predicate` equals `value`, grouped by
@@ -3130,19 +3129,6 @@ export class TripleStoreAsyncLiftPublisher
       .map((map) => parseJournalEntry(map))
       .filter((e): e is AdmissionJournalEntry => e !== null)
       .sort((a, b) => a.seq - b.seq);
-  }
-
-  // `entries` is the queried subset returned to the caller; `lineage` is the full
-  // per-lineageKey set the completeness check is computed over (defaults to `entries`
-  // for a full-lineage read). maxSeq/complete describe the LINEAGE (no seq gap); a
-  // subset read never spuriously reports incomplete. On oxigraph `complete` is
-  // authoritative; on external SPARQL backends (no fsync) the highest-seq entry can be
-  // lost on crash without a visible gap — documented on JournalReadResult as best-effort.
-  private summarizeJournal(entries: AdmissionJournalEntry[], lineage: AdmissionJournalEntry[] = entries): JournalReadResult {
-    const maxSeq = lineage.reduce((max, e) => Math.max(max, e.seq), -1);
-    const complete = lineage.length === maxSeq + 1;
-    const txHashes = [...new Set(entries.map((e) => e.txHash).filter((h): h is string => h !== undefined))];
-    return { entries, maxSeq, complete, txHashes };
   }
 
   /**

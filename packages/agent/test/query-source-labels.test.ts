@@ -341,7 +341,8 @@ describe('runtime-accepted RFC-64 private query authorization', () => {
     {
       label: 'COUNT',
       sparql: 'SELECT (COUNT(*) AS ?count) WHERE { GRAPH ?g { ?s ?p ?o } }',
-      expected: { bindings: [] },
+      // What the count returns over no data: one row, never an answer without rows.
+      expected: { bindings: [{ count: '"0"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
     },
     {
       label: 'SELECT',

@@ -1,3 +1,4 @@
+import { normalizeContextGraphIdOrUri } from '../../context-graph-identifiers.js';
 // daemon/routes/shared-assertion-helpers.ts
 //
 // Shared helper functions / types / classes extracted verbatim from
@@ -31,7 +32,6 @@ import {
   oversizedRdfLiteralResponseBody,
   isNoFundedPublisherWalletLike,
   safeDecodeURIComponent,
-  normalizeContextGraphIdOrUri,
 } from '../http-utils.js';
 import { getExtractionStatusRecord } from '../../extraction-status.js';
 import type { RequestContext } from './context.js';

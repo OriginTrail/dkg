@@ -1,5 +1,5 @@
+import type { VmPublishAdmissionJournalReader } from './async-lift-control-plane.js';
 import type {
-  AdmissionJournalEntry,
   KnowledgeAssetVmPublishRequest,
   LiftJob,
   PersistedLiftJob,
@@ -211,7 +211,7 @@ export interface AsyncLiftPublisher {
    */
   update(jobId: string, status: LiftJobState, data?: Partial<LiftJob>): Promise<void>;
   getStatus(jobId: string): Promise<PersistedLiftJob | null>;
-  list(filter?: { status?: LiftJobState }): Promise<PersistedLiftJob[]>;
+  list(filter?: { status?: LiftJobState; contextGraphId?: string }): Promise<PersistedLiftJob[]>;
   inspectPreparedPayload(jobId: string): Promise<AsyncPreparedPublishPayload | null>;
   processNext(walletId: string): Promise<PersistedLiftJob | null>;
   /** @deprecated Prefer `administrative.recordPublishResultById`; workers use a claim session. */
@@ -372,42 +372,7 @@ export interface VmPublishIntentRecoveryPublisher extends AsyncLiftPublisher {
   lookupKnowledgeAssetVmPublishJobByIntent(facts: IntentLookupInput): Promise<IntentLookupResult>;
 }
 
-/** #1829 — read query for the append-only journal (facts-pure, or by jobId). */
-export interface JournalReadInput {
-  readonly contextGraphId: string;
-  readonly name: string;
-  readonly subGraphName?: string;
-  readonly agentAddress?: string;
-  /** Optional per-version filter WITHIN the lineage; never the lineage key itself. */
-  readonly intentKey?: string;
-}
-
-/**
- * #1829 — result of a journal read. `entries` are seq-ordered; `maxSeq` is -1 for an
- * empty lineage. `complete` = `entries.length === maxSeq + 1` (no seq gap) — authoritative
- * on oxigraph-worker; best-effort on external SPARQL backends (no fsync, so the
- * highest-seq entry can be lost on a crash without a gap being visible). `txHashes` are
- * ATTEMPTED submissions — a reconciler MUST verify each against chain; a hash here is
- * never proof the tx was sent (a pre-flush 'broadcast' entry can survive a rolled-back
- * attempt).
- */
-export interface JournalReadResult {
-  readonly entries: readonly AdmissionJournalEntry[];
-  readonly maxSeq: number;
-  readonly complete: boolean;
-  readonly txHashes: readonly string[];
-}
-
-/**
- * #1829 — read-only append-only journal reader. Segregated off the base contract (like
- * the #1828 recovery lookup): only the daemon control instance serves it.
- */
-export interface VmPublishAdmissionJournalReader {
-  /** Facts-pure lineage read (derives lineageKey from facts, never the ephemeral index). */
-  readJournalByIntent(facts: JournalReadInput): Promise<JournalReadResult>;
-  /** All journal entries bearing this jobId (a successor job continues the lineage seq). */
-  readJournalByJob(jobId: string): Promise<JournalReadResult>;
-}
+export type { JournalReadInput, JournalReadResult, VmPublishAdmissionJournalReader } from './async-lift-control-plane.js';
 
 /**
  * #1837 — atomic by-jobId terminal cleanup. Segregated off the base contract (like the

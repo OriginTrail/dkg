@@ -1,3 +1,4 @@
+import { requireContextGraphReadAuthority } from './context-graph-read-authority.js';
 // daemon/routes/context-graph.ts
 //
 // Route handlers for context-graph (+ contextGraph, sub-graph) CRUD, participants, join flow, manifest publish/install.
@@ -1047,6 +1048,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     const contextGraphId = qs.get("contextGraphId");
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
     try {
+      if (!(await requireContextGraphReadAuthority(ctx, contextGraphId))) return;
       const registered = await agent.listSubGraphs(contextGraphId!);
       // One pass enumerates *all* named graphs in the project + their
       // distinct-subject and triple counts. Sub-graph ownership is inferred
@@ -1068,6 +1070,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         const result = await agent.query(sparql, {
           contextGraphId: contextGraphId!,
           includeContextGraphPartitions: true,
+          callerAgentAddress: actorFromRequestContext(ctx).authenticatedAgentAddress,
         });
         const parseCount = (v: any) => {
           if (v === undefined || v === null) return 0;
@@ -1165,6 +1168,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   if (req.method === "GET" && listParticipantsMatch) {
     const contextGraphId = decodeURIComponent(listParticipantsMatch[1]);
     try {
+      if (!(await requireContextGraphReadAuthority(ctx, contextGraphId))) return;
       const agents = await agent.getContextGraphAllowedAgents(contextGraphId);
       return jsonResponse(res, 200, { contextGraphId, allowedAgents: agents });
     } catch (err: unknown) {

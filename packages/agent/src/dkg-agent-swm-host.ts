@@ -4512,8 +4512,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
       // The pass stopped because its target is no longer the graph's current
       // one, on a node that is not shutting down: the graph's row was stored
-      // again under it, by a subscribe request for a graph the node already
-      // holds, for one. That is not a failure of the graph. Asked again
+      // again under it with a change, by a catch-up or a sync round that
+      // ended, for one. That is not a failure of the graph. Asked again
       // shortly, it gets a pass on the row as it is now; left as a failed pass
       // it lost its live nudges until its turn in the periodic sweep. Only a
       // graph the sweep would still select is asked again.

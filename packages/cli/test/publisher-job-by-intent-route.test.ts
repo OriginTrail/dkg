@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import type { ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -200,7 +201,9 @@ function createContext(
   return {
     req: req as RequestContext['req'],
     res: createResponse() as unknown as ServerResponse,
-    agent: {} as RequestContext['agent'],
+    agent: { resolveContextGraphReadAuthority: async () => ({
+      outcome: 'allowed', grantScope: 'caller', source: 'registered-chain', reason: 'chain-participant', metadataBootstrap: 'forbidden',
+    }) } as RequestContext['agent'],
     publisherControl,
     publisherState: {
       runtime: null,
@@ -234,7 +237,7 @@ function createContext(
 }
 
 function createResponse() {
-  return {
+  return Object.assign(new EventEmitter(), {
     statusCode: 0,
     headers: undefined as Record<string, string> | undefined,
     body: '',
@@ -249,7 +252,7 @@ function createResponse() {
       this.writableEnded = true;
       return this;
     },
-  };
+  });
 }
 
 function responseStatus(ctx: RequestContext): number {

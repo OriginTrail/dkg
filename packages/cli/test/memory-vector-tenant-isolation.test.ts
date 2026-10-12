@@ -74,7 +74,7 @@ function request(store: VectorStore, principal: Parameters<typeof requestAuthent
     peerId: PEER, getDefaultAgentAddress: () => A,
     listLocalAgents: () => [A, B].map(agentAddress => ({ agentAddress })),
     resolveContextGraphReadAuthority: vi.fn(async () => ({
-      outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant',
+      outcome: 'allowed', grantScope: 'caller', source: 'registered-chain', reason: 'chain-participant',
     })),
     canUseSharedMemoryForContextGraph: async () => true,
     query: vi.fn(async () => ({ bindings: [] })),
@@ -189,6 +189,6 @@ describe('enabled vector memory search tenant isolation', () => {
     await handleMemoryRoutes(ctx);
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body).results.map((row: { entityUri: string }) => row.entityUri)).toEqual(['bob']);
-    expect(agent.resolveContextGraphReadAuthority).toHaveBeenCalledWith(CG, { callerAgentAddress: B });
+    expect(agent.resolveContextGraphReadAuthority).toHaveBeenCalledWith(CG, expect.objectContaining({ callerAgentAddress: B, signal: expect.any(AbortSignal) }));
   });
 });
