@@ -85,6 +85,7 @@ async function spawnDaemon(
   nodeRole: 'edge' | 'core',
   socketPath: string,
   bootstrapPeers: string[] = [],
+  extraConfig: Record<string, unknown> = {},
 ): Promise<Daemon> {
   const { rpcUrl, hubAddress } = getSharedContext();
   const apiPort = await freePort();
@@ -118,6 +119,7 @@ async function spawnDaemon(
       },
     },
     contextGraphs: [],
+    ...extraConfig,
   }));
   const child = spawn('node', [CLI_ENTRY, 'daemon-worker'], {
     env: {
@@ -178,6 +180,7 @@ describe('daemon with an external signer', () => {
   let pcaOwner: ReturnType<typeof createEVMAdapter> | undefined;
   let accountId: bigint;
   let core: DKGAgent | undefined;
+  let coreAddress: string;
 
   const api = (path: string, init: RequestInit = {}) => fetch(`http://127.0.0.1:${daemon!.apiPort}${path}`, {
     ...init,
@@ -212,7 +215,7 @@ describe('daemon with an external signer', () => {
       syncOnConnectEnabled: false,
     });
     await core.start();
-    const coreAddress = core.multiaddrs.find((address) => address.includes('/tcp/') && !address.includes('/p2p-circuit'))!;
+    coreAddress = core.multiaddrs.find((address) => address.includes('/tcp/') && !address.includes('/p2p-circuit'))!;
     dir = await mkdtemp(join(tmpdir(), 'dkg-ext-'));
     fake = await startFakeRemoteSigner({
       socketPath: join(dir, 'signer.sock'),
@@ -414,6 +417,39 @@ describe('daemon with an external signer', () => {
     expect(output).not.toContain(PAYER_TOKEN);
     expect(output).not.toContain(AUTHOR_TOKEN);
   });
+
+  it('catches up the system graphs on connect, each request signed by the author key from its fields', async () => {
+    const home = join(dir, 'catch-up');
+    await mkdir(home);
+    const before = fake.requests.length;
+    const edge = await spawnDaemon(home, 'edge', fake.socketPath!, [coreAddress], { syncSystemContextGraphsOnConnect: true });
+    try {
+      await waitUntilReady(edge);
+      let synced: RegExpMatchArray | null = null;
+      for (let attempt = 0; attempt < 60 && synced === null; attempt++) {
+        synced = (await allOutput(edge)).match(/Synced ([1-9]\d*) data triples from peer/);
+        if (synced === null) await sleep(500);
+      }
+      const output = await allOutput(edge);
+      expect(synced, output.slice(-4000)).not.toBeNull();
+      expect(output).not.toContain('Cannot build authenticated sync request');
+      const requests = fake.requests.slice(before);
+      const signed = requests.filter((request) => request.method === 'dkg_signSyncRequest');
+      expect(new Set(signed.map((request) => (request.params[1] as { contextGraphId: string }).contextGraphId)))
+        .toEqual(new Set([SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY]));
+      for (const request of signed) {
+        expect(request.authorization).toBe(`Bearer ${AUTHOR_TOKEN}`);
+        expect(ethers.getAddress(String(request.params[0]))).toBe(defaultAuthor.address);
+      }
+      // No digest was signed blind (the framed proof of its encryption key, at start, is no digest).
+      expect(requests.filter((request) => (
+        request.method === 'personal_sign'
+        || (request.method === 'eth_sign' && ethers.dataLength(String(request.params[1])) === 32)
+      ))).toEqual([]);
+    } finally {
+      expect(await stop(edge)).toBe(0);
+    }
+  }, 120_000);
 
   it('refuses to start as a core node, before any key file exists', async () => {
     const home = join(dir, 'core');
