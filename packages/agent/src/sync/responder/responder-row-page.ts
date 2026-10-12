@@ -51,6 +51,8 @@ export function createSessionPlanGetter<T>(
   initialRefreshPending: boolean,
   loadPlan: (signal?: AbortSignal) => Promise<T>,
   expiredMessage: string,
+  /** The session generation of the request; see {@link SessionPlanMemo.get}. */
+  generation?: string,
 ): (pageOffset: number, pageSignal: AbortSignal | undefined) => Promise<T> {
   let planRefreshPending = initialRefreshPending;
   return async (pageOffset, pageSignal) => {
@@ -61,6 +63,7 @@ export function createSessionPlanGetter<T>(
         refresh: refreshPlan,
         requireExisting: pageOffset > 0,
         signal: pageSignal,
+        generation,
       })
       : await loadPlan(pageSignal);
     if (!plan) throw new Error(expiredMessage);

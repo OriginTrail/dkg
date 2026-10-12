@@ -60,10 +60,17 @@ export function durableMetaJoinRequestExclusionExpression(): string {
  * `?g`. Admission is decided per subject: every row of an admitted subject is
  * durable metadata.
  *
- * INVARIANT: this is the SPARQL twin of the in-process admission applied to a
- * session snapshot (`filterDurableMetaSnapshotRows`). The two MUST admit the
- * same subjects and MUST be edited together; the oversized-fallback suite
- * compares them branch by branch.
+ * Every test here is an exact lookup from `?s`, so its cost follows the number
+ * of subjects it is asked about. The one admission rule that is not such a
+ * lookup, a subject named by a promoted assertion, is decided in process with
+ * {@link createAssertionNameMatcher} from the names
+ * {@link durableMetaAssertionNamesQuery} reads.
+ *
+ * INVARIANT: this expression together with the name matcher is the twin of the
+ * in-process admission applied to a session snapshot
+ * (`filterDurableMetaSnapshotRows`). The two MUST admit the same subjects and
+ * MUST be edited together; the oversized-fallback suite compares them branch by
+ * branch.
  */
 export function durableMetaSubjectAdmissionExpression(
   contextGraphId: string,
@@ -96,14 +103,54 @@ export function durableMetaSubjectAdmissionExpression(
              GRAPH ?g { ?s (<${PROV_GENERATED}>|<${PROV_USED}>) ?evLifecycle . ?evLifecycle <${DKG_MEMORY_LAYER}> ?ml }
              ${notWorking}
            }
-        || (
-             CONTAINS(STR(?s), "/assertion/") &&
-             EXISTS {
-               GRAPH ?g { ?anLifecycle <${DKG_ASSERTION_NAME}> ?an ; <${DKG_MEMORY_LAYER}> ?ml }
-               ${notWorking}
-               FILTER(STR(?an) != "")
-               FILTER(STRENDS(STR(?s), CONCAT("/", STR(?an))))
-             }
-           )
       )`;
+}
+
+/** The lexical value of a metadata literal term as the admission rules read it. */
+export function durableMetaLiteralValue(value: string | undefined): string {
+  if (!value) return '';
+  const match = value.match(/^"((?:[^"\\]|\\.)*)"(?:@[\w-]+|\^\^<[^>]+>)?$/);
+  return match ? match[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\') : value;
+}
+
+/** Marks the subjects the assertion-name rule can admit. */
+export const DURABLE_META_ASSERTION_SUBJECT_MARKER = '/assertion/';
+
+/**
+ * The names of the assertions of `graph` that left working memory, one row a
+ * distinct name (`?name`), at most `limit` rows. One pass over the lifecycle
+ * records that carry a name.
+ */
+export function durableMetaAssertionNamesQuery(graph: string, limit: number): string {
+  return `
+    SELECT DISTINCT ?name WHERE {
+      GRAPH <${assertSafeIri(graph)}> { ?anLifecycle <${DKG_ASSERTION_NAME}> ?an ; <${DKG_MEMORY_LAYER}> ?ml }
+      FILTER(?ml != ${sparqlString(MemoryLayer.WorkingMemory)})
+      BIND(STR(?an) AS ?name)
+      FILTER(?name != "")
+    }
+    LIMIT ${Math.max(0, Math.floor(limit))}
+  `;
+}
+
+/**
+ * The assertion-name rule: a subject under an assertion path whose path ends
+ * with `/<name>` for the name of an assertion that left working memory. Names
+ * are indexed by their last path segment, so a subject is compared with the
+ * few names that share its last segment and not with every name.
+ */
+export function createAssertionNameMatcher(names: Iterable<string>): (subject: string) => boolean {
+  const namesByTail = new Map<string, string[]>();
+  for (const name of names) {
+    if (!name) continue;
+    const tail = name.slice(name.lastIndexOf('/') + 1);
+    const sameTail = namesByTail.get(tail);
+    if (sameTail) sameTail.push(name);
+    else namesByTail.set(tail, [name]);
+  }
+  return (subject) => {
+    if (!subject.includes(DURABLE_META_ASSERTION_SUBJECT_MARKER)) return false;
+    const tail = subject.slice(subject.lastIndexOf('/') + 1);
+    return (namesByTail.get(tail) ?? []).some((name) => subject.endsWith(`/${name}`));
+  };
 }

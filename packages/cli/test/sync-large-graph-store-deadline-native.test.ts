@@ -5,11 +5,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import {
+  contextGraphAssertionUri,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
   MemoryLayer,
 } from '@origintrail-official/dkg-core';
-import { generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
+import {
+  generateAssertionCreatedMetadata,
+  generateAssertionPromotedMetadata,
+  generateGraphKnowledgeAssetMetadata,
+} from '@origintrail-official/dkg-publisher';
 import { createManagedOxigraphSparqlStoreV1, type TripleStore } from '@origintrail-official/dkg-storage';
 import { readSyncNotServable } from '../../agent/src/sync/not-servable.js';
 import { linesFromNquads, registerTestSyncHandler } from '../../agent/test/_helpers/sync-responder.js';
@@ -27,16 +32,22 @@ import { freePort, waitForCondition } from './fixtures/oxigraph-server-real-fixt
  * stays well inside the store deadline. And a request that did run into the
  * deadline is not run a second time while its shape cools.
  *
+ * The graph holds the two shapes metadata comes in: published asset
+ * descriptors, and named assertions that were promoted (a lifecycle record,
+ * its events and the seal kept under the assertion's own path).
+ *
  * The production snapshot budget (200,000 rows) and deadline (30 s) are scaled
- * down together so the same shape runs in seconds: a 96,000-row metadata graph
- * against a 4,000-row snapshot budget and a 2.5 s deadline. On this graph a
- * store-side sort of the metadata takes several seconds; the session plan that
- * pages it takes a fraction of one.
+ * down together so the same shape runs in seconds: a metadata graph of about
+ * 130,000 rows against a 4,000-row snapshot budget and a 5 s deadline. The
+ * session plan that pages this graph is built in about a second.
  */
 
 const ASSETS = 6_000;
 /** Rows the publisher writes per confirmed asset descriptor. */
 const DESCRIPTOR_ROWS = 16;
+const ASSERTIONS = 1_200;
+/** Rows of the seal a promoted assertion keeps under its own path. */
+const SEAL_ROWS = 14;
 const CONTEXT_GRAPH_ID = 'native-large-meta';
 const META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_meta`;
 const SCALED_SNAPSHOT_BUDGET = {
@@ -50,9 +61,43 @@ function term(value: string): string {
   return value.startsWith('"') ? value : `<${value}>`;
 }
 
-function syntheticMetadataNQuads(): string {
+/** The metadata of named assertions after promotion, as the publisher leaves it. */
+function promotedAssertionLines(): string[] {
+  const lines: string[] = [];
+  for (let index = 0; index < ASSERTIONS; index += 1) {
+    const agentAddress = `0x${((index % 8) + 1).toString(16).padStart(40, 'b')}`;
+    const meta = {
+      contextGraphId: CONTEXT_GRAPH_ID,
+      agentAddress,
+      assertionName: `notes-${index}`,
+      timestamp: new Date(Date.UTC(2026, 6, 1) + index * 60_000),
+    };
+    const promoted = generateAssertionPromotedMetadata({
+      ...meta,
+      shareOperationId: `share-${index}`,
+      rootEntities: [`urn:synthetic:root:${index}`],
+    });
+    const removed = new Set(promoted.delete.map((quad) => `${quad.subject}\n${quad.predicate}\n${quad.object}`));
+    const quads = [
+      ...generateAssertionCreatedMetadata(meta)
+        .filter((quad) => !removed.has(`${quad.subject}\n${quad.predicate}\n${quad.object}`)),
+      ...promoted.insert,
+    ];
+    for (const quad of quads) {
+      lines.push(`${term(quad.subject)} <${quad.predicate}> ${term(quad.object)} <${quad.graph}> .`);
+    }
+    const seal = contextGraphAssertionUri(CONTEXT_GRAPH_ID, agentAddress, meta.assertionName);
+    for (let row = 0; row < SEAL_ROWS; row += 1) {
+      lines.push(`<${seal}> <http://dkg.io/ontology/syntheticSealField${row}> "seal-${index}-${row}" <${META_GRAPH}> .`);
+    }
+  }
+  return lines;
+}
+
+function syntheticMetadataLines(): string[] {
   const lines: string[] = [
     `<did:dkg:context-graph:${CONTEXT_GRAPH_ID}> <http://schema.org/name> "${CONTEXT_GRAPH_ID}" <${META_GRAPH}> .`,
+    ...promotedAssertionLines(),
   ];
   for (let index = 0; index < ASSETS; index += 1) {
     const author = `0x${((index % 8) + 1).toString(16).padStart(40, 'a')}`;
@@ -92,7 +137,7 @@ function syntheticMetadataNQuads(): string {
       lines.push(`${term(quad.subject)} <${quad.predicate}> ${term(quad.object)} <${quad.graph}> .`);
     }
   }
-  return `${lines.join('\n')}\n`;
+  return lines;
 }
 
 async function run(binaryPath: string, args: readonly string[]): Promise<void> {
@@ -111,6 +156,8 @@ async function run(binaryPath: string, args: readonly string[]): Promise<void> {
 let binaryPath = process.env.DKG_OXIGRAPH_TEST_BINARY;
 let nquadsFile: string;
 let fixtureDirectory: string;
+/** Every row of the fixture is durable metadata, so a whole walk serves this many. */
+let metadataRows: number;
 
 interface Responder {
   handle: OxigraphServerHandle;
@@ -194,7 +241,9 @@ describe('sync of a large graph against a real store deadline (pinned real Oxigr
     }
     fixtureDirectory = await mkdtemp(join(tmpdir(), 'oxi-native-sync-fixture-'));
     nquadsFile = join(fixtureDirectory, 'large-meta.nq');
-    await writeFile(nquadsFile, syntheticMetadataNQuads());
+    const lines = syntheticMetadataLines();
+    metadataRows = new Set(lines).size;
+    await writeFile(nquadsFile, `${lines.join('\n')}\n`);
     return async () => { await rm(fixtureDirectory, { recursive: true, force: true }); };
   }, 120_000);
 
@@ -203,7 +252,7 @@ describe('sync of a large graph against a real store deadline (pinned real Oxigr
   });
 
   it('serves pages of a metadata graph far past the snapshot budget within the deadline, with no supervised recovery', async () => {
-    const clientDeadlineMs = 2_500;
+    const clientDeadlineMs = 5_000;
     const responder = await startResponder({ clientDeadlineMs, snapshotBudget: SCALED_SNAPSHOT_BUDGET });
 
     const timings: Array<{ offset: number; rows: number; ms: number }> = [];
@@ -219,18 +268,40 @@ describe('sync of a large graph against a real store deadline (pinned real Oxigr
       offset += lines.length;
     }
 
+    // The rest of the walk: the remaining descriptors, then the seals of the
+    // promoted assertions, their lifecycle records and events.
+    const served = new Set<string>();
+    let sealRows = 0;
+    let slowestLaterMs = 0;
+    for (let guard = 0; guard < 200; guard += 1) {
+      const startedAt = performance.now();
+      const lines = linesFromNquads(await responder.metaPage(offset, 8192, 'native-session'));
+      slowestLaterMs = Math.max(slowestLaterMs, Math.round(performance.now() - startedAt));
+      if (lines.length === 0) break;
+      for (const line of lines) {
+        served.add(line);
+        if (line.includes('/assertion/0x')) sealRows += 1;
+      }
+      offset += lines.length;
+    }
+
     // eslint-disable-next-line no-console
-    console.log(`[sync-large-graph] ${ASSETS} assets, ${1 + ASSETS * DESCRIPTOR_ROWS} metadata rows: ${JSON.stringify(timings)}`);
+    console.log(`[sync-large-graph] ${ASSETS} assets and ${ASSERTIONS} promoted assertions, ${metadataRows} metadata rows: `
+      + `${JSON.stringify(timings)}, slowest later page ${slowestLaterMs} ms`);
     // No page came near the deadline, the first included.
     for (const timing of timings) expect(timing.ms).toBeLessThan(clientDeadlineMs);
+    expect(slowestLaterMs).toBeLessThan(clientDeadlineMs);
+    // The walk served every row of the graph, the seals of every assertion among them.
+    expect(offset).toBe(metadataRows);
+    expect(sealRows).toBe(ASSERTIONS * SEAL_ROWS);
     // No query had to be reclaimed by a supervised recovery.
     expect(responder.handle.getRecoveryState()).toMatchObject({ recovering: false, generation: 0 });
-  }, 60_000);
+  }, 120_000);
 
   it('runs a request that hit the store deadline once, then refuses it without touching the store', async () => {
-    // With the production snapshot budget the first page reads the whole
-    // 96,000-row graph in one query, which cannot finish in 100 ms: a request
-    // that really does not fit this store's deadline.
+    // With the production snapshot budget the first page reads the whole graph
+    // in one query, which cannot finish in 100 ms: a request that really does
+    // not fit this store's deadline.
     const responder = await startResponder({ clientDeadlineMs: 100 });
 
     await expect(responder.metaPage(0, 64, 'first')).rejects.toMatchObject({

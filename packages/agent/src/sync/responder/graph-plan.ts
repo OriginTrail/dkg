@@ -34,6 +34,7 @@ import {
   SYNC_BYTE_BUDGET_RESPONSE_BYTES,
 } from '../../dkg-agent-constants.js';
 import type { ChangelogSyncResponse, ChangelogDeltaRecord } from '../changelog/wire.js';
+import { createAssertionNameMatcher, durableMetaLiteralValue as stripLiteral } from './durable-meta-admission.js';
 import { buildDurableMetaPlan, readDurableMetaPlanWindow, type DurableMetaPlanMemo } from './durable-meta-plan.js';
 import { isIriTerm } from '../iri-term.js';
 import { compareCodePoint } from '@origintrail-official/dkg-core';
@@ -859,6 +860,8 @@ export async function readDurableMetaPage(params: {
   assetUals?: readonly string[];
   /** Session plans of metadata graphs too large for a snapshot; absent rebuilds the plan per request. */
   metaPlanMemo?: DurableMetaPlanMemo;
+  /** Told when a session plan's build fails, also after the request that started it has left. */
+  onSessionPlanFailure?: (error: unknown) => void;
   /**
    * Serialized-response byte budget the store-paged subject extend must not
    * blow (#1916): a single admitted subject larger than this cannot be a valid
@@ -918,6 +921,10 @@ export async function readDurableMetaPage(params: {
       releaseOnShortPage: false,
     }
     : undefined;
+  // A session's plan is built once and kept for its later requests, so its
+  // build does not end with the request that started it: a requester that
+  // stops waiting finds the plan on its retry instead of starting it again.
+  const sessionPlan = params.metaPlanMemo !== undefined && params.rowListCacheKey !== undefined;
   const getPlan = createSessionPlanGetter(
     params.metaPlanMemo,
     params.rowListCacheKey,
@@ -927,9 +934,13 @@ export async function readDurableMetaPage(params: {
       contextGraphId: params.contextGraphId,
       registeredSubGraphNames: params.registeredSubGraphNames,
       budgetKey: cache?.key ?? `durable-meta:${params.contextGraphId}`,
-      signal,
+      signal: sessionPlan ? undefined : signal,
+    }).catch((error: unknown) => {
+      if (sessionPlan) params.onSessionPlanFailure?.(error);
+      throw error;
     }),
     'Durable meta sync session plan expired before page completion',
+    params.refreshGeneration,
   );
   const page = await readResponderRowsPage(
     cache,
@@ -2809,24 +2820,13 @@ function filterDurableMetaSnapshotRows(
       if (name) assertionNames.add(name);
     }
   }
-  const assertionNamesByTail = new Map<string, string[]>();
-  for (const name of assertionNames) {
-    const tail = name.slice(name.lastIndexOf('/') + 1);
-    const names = assertionNamesByTail.get(tail) ?? [];
-    names.push(name);
-    assertionNamesByTail.set(tail, names);
-  }
+  const namedByAssertion = createAssertionNameMatcher(assertionNames);
 
   for (const [subject, subjectRows] of bySubject) {
     if (subjectRows.some((row) =>
       (row.p === PROV_GENERATED || row.p === PROV_USED) && nonWorkingSubjects.has(row.o),
     )) admitted.add(subject);
-    if (subject.includes('/assertion/')) {
-      const tail = subject.slice(subject.lastIndexOf('/') + 1);
-      if ((assertionNamesByTail.get(tail) ?? []).some(
-        (name) => subject.endsWith(`/${name}`),
-      )) admitted.add(subject);
-    }
+    if (namedByAssertion(subject)) admitted.add(subject);
   }
 
   return rows
@@ -3012,8 +3012,3 @@ function contextGraphMetaGraphUri(contextGraphId: string): string {
   return `${contextGraphDataGraphUri(contextGraphId)}/_meta`;
 }
 
-function stripLiteral(value: string | undefined): string {
-  if (!value) return '';
-  const match = value.match(/^"((?:[^"\\]|\\.)*)"(?:@[\w-]+|\^\^<[^>]+>)?$/);
-  return match ? match[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\') : value;
-}

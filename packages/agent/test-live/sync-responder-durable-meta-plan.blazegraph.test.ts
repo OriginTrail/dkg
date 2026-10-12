@@ -20,6 +20,7 @@ const DKG = 'http://dkg.io/ontology/';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
 const VM = `"${MemoryLayer.VerifiableMemory}"`;
 const WM = `"${MemoryLayer.WorkingMemory}"`;
+const DELEGATION_PREFIX = `did:dkg:agent-delegation:${CG}:`;
 
 function q(subject: string, predicate: string, object: string): Quad {
   return { subject, predicate, object, graph: GRAPH };
@@ -37,10 +38,12 @@ function descriptor(index: number, status: string): Quad[] {
 }
 
 // One subject per admission branch, and one per way of not being admitted.
+// Agent-delegation subjects have their own cases below.
 const ADMITTED: Quad[] = [
   q(CG_ENTITY, 'http://schema.org/name', '"root"'),
   q(CG_ENTITY, DKG_ONTOLOGY.DKG_ALLOWED_AGENT, '"0xAcTiVe"'),
-  q(`did:dkg:agent-delegation:${CG}:0xactive`, DKG_ONTOLOGY.DKG_DELEGATION_AGENT, '"0xactive"'),
+  q(CG_ENTITY, DKG_ONTOLOGY.DKG_ALLOWED_AGENT, '"0xReVoKeD"'),
+  q(CG_ENTITY, DKG_ONTOLOGY.DKG_REVOKED_AGENT, '"0xREVOKED"'),
   q('did:dkg:activity:one', `${DKG}note`, '"activity"'),
   q('urn:lifecycle:vm', `${DKG}memoryLayer`, VM),
   q('urn:lifecycle:vm', `${DKG}assertionGraph`, 'urn:assertion-graph:1'),
@@ -52,14 +55,26 @@ const ADMITTED: Quad[] = [
   ...descriptor(2, 'confirmed'),
   ...descriptor(3, 'confirmed'),
 ];
+const ACTIVE_DELEGATION = `${DELEGATION_PREFIX}0xactive`;
+const DELEGATIONS: Quad[] = [
+  q(ACTIVE_DELEGATION, DKG_ONTOLOGY.DKG_DELEGATION_AGENT, '"0xactive"'),
+  q(`${DELEGATION_PREFIX}0xrevoked`, DKG_ONTOLOGY.DKG_DELEGATION_AGENT, '"0xrevoked"'),
+  q(`${DELEGATION_PREFIX}0xorphaned`, DKG_ONTOLOGY.DKG_DELEGATION_AGENT, '"0xorphaned"'),
+];
 const NOT_ADMITTED: Quad[] = [
-  q(`did:dkg:agent-delegation:${CG}:0xorphaned`, DKG_ONTOLOGY.DKG_DELEGATION_AGENT, '"0xorphaned"'),
   q('did:dkg:join-request:one', `${DKG}memoryLayer`, VM),
   q('urn:lifecycle:wm', `${DKG}memoryLayer`, WM),
+  q('urn:lifecycle:wm', `${DKG}assertionGraph`, 'urn:assertion-graph:wm'),
+  q('urn:lifecycle:wm', `${DKG}assertionName`, '"working"'),
+  q('urn:assertion-graph:wm', `${DKG}label`, '"assertion graph of a working-memory lifecycle"'),
   q('urn:event:working', 'http://www.w3.org/ns/prov#generated', 'urn:lifecycle:wm'),
+  q(`${CG_ENTITY}/assertion/0xabc/working`, `${DKG}label`, '"named only by a working-memory lifecycle"'),
+  q(`${CG_ENTITY}/assertion/0xabc/unnamed`, `${DKG}label`, '"no lifecycle has this name"'),
   q('urn:noise', `${DKG}label`, '"noise"'),
   ...descriptor(4, 'tentative'),
 ];
+
+const isDelegation = (subject: string): boolean => subject.startsWith(DELEGATION_PREFIX);
 
 describe('durable metadata paged from a session plan (live Blazegraph)', () => {
   let store: BlazegraphStore;
@@ -71,7 +86,7 @@ describe('durable metadata paged from a session plan (live Blazegraph)', () => {
     manager = new BlazegraphNamespaceManager({ namespaceApiUrl: blazegraphNamespaceApiUrlFromSparqlEndpoint(URL) });
     handles = await manager.acquireMany([CG]);
     store = new BlazegraphStore(handles[0]!.sparqlUrl, { timeout: 15_000 });
-    await store.insert([...ADMITTED, ...NOT_ADMITTED]);
+    await store.insert([...ADMITTED, ...DELEGATIONS, ...NOT_ADMITTED]);
   });
 
   afterAll(async () => {
@@ -79,18 +94,34 @@ describe('durable metadata paged from a session plan (live Blazegraph)', () => {
     if (handles) await manager.disposeAll(handles);
   });
 
+  const buildPlan = () => buildDurableMetaPlan({
+    store,
+    contextGraphId: CG,
+    registeredSubGraphNames: [],
+    budgetKey: 'live',
+  });
+
   it('plans exactly the admitted subjects with their row counts', async () => {
-    const plan = await buildDurableMetaPlan({
-      store,
-      contextGraphId: CG,
-      registeredSubGraphNames: [],
-      budgetKey: 'live',
-    });
+    const plan = await buildPlan();
     const expected = new Map<string, number>();
     for (const quad of ADMITTED) expected.set(quad.subject, (expected.get(quad.subject) ?? 0) + 1);
-    expect(new Map(plan.subjects.map((entry) => [entry.subject, entry.rowCount]))).toEqual(expected);
+    const planned = plan.subjects.filter((entry) => !isDelegation(entry.subject));
+    expect(new Map(planned.map((entry) => [entry.subject, entry.rowCount]))).toEqual(expected);
     expect(plan.blankNodeRows).toBe(0);
-    expect(plan.totalRows).toBe(ADMITTED.length);
+    expect(plan.totalRows).toBe(plan.subjects.reduce((rows, entry) => rows + entry.rowCount, 0));
+  });
+
+  it('never plans the delegation of a revoked or an unknown agent', async () => {
+    const delegations = (await buildPlan()).subjects.map((entry) => entry.subject).filter(isDelegation);
+    expect(delegations.filter((subject) => subject !== ACTIVE_DELEGATION)).toEqual([]);
+  });
+
+  // Known difference of this store, the same before the plan lane: its
+  // store-side delegation test admits no subject (#3186). This case becomes an
+  // ordinary one when the two stores agree.
+  it.fails('plans the delegation of an active member (#3186)', async () => {
+    const delegations = (await buildPlan()).subjects.map((entry) => entry.subject).filter(isDelegation);
+    expect(delegations).toEqual([ACTIVE_DELEGATION]);
   });
 
   it('serves every admitted row once, in pages of whole subjects', async () => {
@@ -108,9 +139,11 @@ describe('durable metadata paged from a session plan (live Blazegraph)', () => {
       offset += rows.length;
     }
     const served = pages.flat();
-    expect(new Set(served.map(({ s, p, o }) => JSON.stringify([s, p, o]))))
+    const outsideDelegations = served.filter((row) => !isDelegation(row.s));
+    expect(new Set(outsideDelegations.map(({ s, p, o }) => JSON.stringify([s, p, o]))))
       .toEqual(new Set(ADMITTED.map(({ subject, predicate, object }) => JSON.stringify([subject, predicate, object]))));
-    expect(served).toHaveLength(ADMITTED.length);
+    expect(outsideDelegations).toHaveLength(ADMITTED.length);
+    expect(served.filter((row) => isDelegation(row.s) && row.s !== ACTIVE_DELEGATION)).toEqual([]);
     const pageOfSubject = new Map<string, number>();
     pages.forEach((page, index) => {
       for (const row of page) {

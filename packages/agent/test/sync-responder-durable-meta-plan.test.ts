@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { contextGraphMetaGraphUri, MemoryLayer } from '@origintrail-official/dkg-core';
+import { describe, expect, it, vi } from 'vitest';
+import { contextGraphMetaGraphUri, DKG_ONTOLOGY, MemoryLayer } from '@origintrail-official/dkg-core';
 import {
   OxigraphStore,
   StoreResponseTooLargeError,
@@ -10,6 +10,7 @@ import {
   buildDurableMetaPlan,
   createResponderDurableMetaPlanMemo,
   readDurableMetaPlanWindow,
+  type DurableMetaPlan,
 } from '../src/sync/responder/durable-meta-plan.js';
 import { readDurableMetaPage } from '../src/sync/responder/graph-plan.js';
 import { SyncRowSnapshotBudgetError } from '../src/sync/responder/snapshot-budget.js';
@@ -172,7 +173,7 @@ describe('durable-meta session plan', () => {
     await store.close();
   });
 
-  it('bounds its two scans by construction and refuses a graph beyond the row cap before reading subjects', async () => {
+  it('bounds its scans by construction and refuses a graph beyond the row cap before reading subjects', async () => {
     const cgId = 'meta-plan-row-cap';
     const store = await storeWithDescriptors(cgId, 5);
     const queries = observeQueries(store);
@@ -185,15 +186,21 @@ describe('durable-meta session plan', () => {
       limits: { maxRows: 1_000, maxSubjects: 50 },
     });
     expect(plan.totalRows).toBe(1 + 5 * DESCRIPTOR_ROWS);
+    // No assertion left working memory here, so the subjects under an assertion
+    // path are not read at all.
     expect(queries.map((query) => query.source)).toEqual([
       'sync.responder.countDurableMetaPlanRows',
       'sync.responder.readDurableMetaPlanSubjects',
+      'sync.responder.readDurableMetaPlanAssertionNames',
     ]);
+    expect(queries[2]!.rows).toBe(0);
     // The count stops one row past the cap; the subject scan cannot outgrow
-    // twice the cap and returns at most one row past the subject cap.
+    // twice the cap and returns at most one row past the subject cap, as does
+    // the read of the names.
     expect(queries[0]!.sparql).toContain('LIMIT 1001 }');
     expect(queries[1]!.sparql).toContain('LIMIT 2001 }');
     expect(queries[1]!.sparql).toMatch(/LIMIT 51$/);
+    expect(queries[2]!.sparql).toMatch(/LIMIT 51$/);
     for (const query of queries) expect(query.sparql).not.toMatch(/\bORDER BY\b|\bOFFSET\b/);
 
     queries.length = 0;
@@ -323,6 +330,245 @@ describe('durable-meta session plan', () => {
     // A new session plans the graph as it is now.
     const restarted = await page(0, true);
     expect(restarted).toHaveLength(2 * DESCRIPTOR_ROWS);
+    await store.close();
+  });
+
+  it('decides the assertion-name rule in process, from one read of the names and one of the subjects', async () => {
+    const cgId = 'meta-plan-names';
+    const graph = contextGraphMetaGraphUri(cgId);
+    const cgEntity = `did:dkg:context-graph:${cgId}`;
+    const q = (subject: string, predicate: string, object: string): Quad => ({ graph, subject, predicate, object });
+    const store = new OxigraphStore();
+    await store.insert([
+      q(cgEntity, 'http://schema.org/name', '"root"'),
+      // Two assertions that left working memory, one that did not.
+      q('urn:lifecycle:promoted', `${DKG_NS}memoryLayer`, VM),
+      q('urn:lifecycle:promoted', `${DKG_NS}assertionName`, '"notes"'),
+      q('urn:lifecycle:nested', `${DKG_NS}memoryLayer`, VM),
+      q('urn:lifecycle:nested', `${DKG_NS}assertionName`, '"team/plan"'),
+      q('urn:lifecycle:draft', `${DKG_NS}memoryLayer`, WM),
+      q('urn:lifecycle:draft', `${DKG_NS}assertionName`, '"draft"'),
+      // Named by them, in whole path segments only.
+      q(`${cgEntity}/assertion/0xabc/notes`, `${DKG_NS}label`, '"a"'),
+      q(`${cgEntity}/assertion/0xabc/notes`, `${DKG_NS}note`, '"b"'),
+      q(`${cgEntity}/assertion/0xdef/team/plan`, `${DKG_NS}label`, '"c"'),
+      // Not named: a draft's name, a name that is only a suffix of a segment,
+      // no name at all, and a name outside an assertion path.
+      q(`${cgEntity}/assertion/0xabc/draft`, `${DKG_NS}label`, '"d"'),
+      q(`${cgEntity}/assertion/0xabc/my-notes`, `${DKG_NS}label`, '"e"'),
+      q(`${cgEntity}/assertion/0xabc/other`, `${DKG_NS}label`, '"f"'),
+      q('urn:elsewhere/notes', `${DKG_NS}label`, '"g"'),
+    ]);
+    const queries = observeQueries(store);
+
+    const plan = await buildDurableMetaPlan({ store, contextGraphId: cgId, registeredSubGraphNames: [], budgetKey: 'names' });
+    expect(plan.subjects).toEqual([
+      { subject: cgEntity, rowCount: 1 },
+      { subject: `${cgEntity}/assertion/0xabc/notes`, rowCount: 2, byAssertionName: true },
+      { subject: `${cgEntity}/assertion/0xdef/team/plan`, rowCount: 1, byAssertionName: true },
+      { subject: 'urn:lifecycle:nested', rowCount: 2 },
+      { subject: 'urn:lifecycle:promoted', rowCount: 2 },
+    ]);
+    expect(queries.map((query) => query.source)).toEqual([
+      'sync.responder.countDurableMetaPlanRows',
+      'sync.responder.readDurableMetaPlanSubjects',
+      'sync.responder.readDurableMetaPlanAssertionNames',
+      'sync.responder.readDurableMetaPlanAssertionSubjects',
+    ]);
+    // The names come back once each; the store never compares a subject with them.
+    expect(queries[2]!.rows).toBe(2);
+    for (const query of queries) expect(query.sparql).not.toMatch(/STRENDS/);
+
+    queries.length = 0;
+    const rows = await readDurableMetaPlanWindow(store, plan, 0, plan.totalRows);
+    expect(rows).toHaveLength(8);
+    for (const query of queries) expect(query.sparql).not.toMatch(/STRENDS|assertionName/);
+    await store.close();
+  });
+
+  it('asks the store again, with every page, whether a subject is still admitted', async () => {
+    const cgId = 'meta-plan-recheck';
+    const graph = contextGraphMetaGraphUri(cgId);
+    const cgEntity = `did:dkg:context-graph:${cgId}`;
+    const q = (subject: string, predicate: string, object: string): Quad => ({ graph, subject, predicate, object });
+    const lifecycle = 'urn:lifecycle:recheck';
+    const descriptor = descriptorQuads(cgId, 0);
+    const delegation = `did:dkg:agent-delegation:${cgId}:0xmember`;
+    const seed: Quad[] = [
+      q(cgEntity, 'http://schema.org/name', '"root"'),
+      q(cgEntity, DKG_ONTOLOGY.DKG_ALLOWED_AGENT, '"0xMember"'),
+      q(delegation, DKG_ONTOLOGY.DKG_DELEGATION_AGENT, '"0xmember"'),
+      q(lifecycle, `${DKG_NS}memoryLayer`, VM),
+      q(lifecycle, `${DKG_NS}note`, '"published"'),
+      ...descriptor,
+    ];
+    const superseded = async (change: (store: OxigraphStore) => Promise<void>): Promise<string> => {
+      const store = new OxigraphStore();
+      await store.insert(seed);
+      const plan = await buildDurableMetaPlan({ store, contextGraphId: cgId, registeredSubGraphNames: [], budgetKey: 'recheck' });
+      expect(plan.totalRows).toBe(seed.length);
+      expect(await readDurableMetaPlanWindow(store, plan, 0, plan.totalRows)).toHaveLength(seed.length);
+      await change(store);
+      const failure = await readDurableMetaPlanWindow(store, plan, 0, plan.totalRows).catch((error: unknown) => error);
+      await store.close();
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toMatch(/sync session superseded/i);
+      return (failure as Error).message;
+    };
+
+    // A subject rewritten in place with as many rows as it had, none of which
+    // was ever admitted: working-memory content is not served on the strength
+    // of the plan.
+    expect(await superseded(async (store) => {
+      await store.deleteByPattern({ graph, subject: lifecycle });
+      await store.insert([q(lifecycle, `${DKG_NS}memoryLayer`, WM), q(lifecycle, `${DKG_NS}note`, '"local draft"')]);
+    })).toContain(`subject ${lifecycle}: expected 2 rows, found 0`);
+
+    // A descriptor that is no longer confirmed, with the same number of rows.
+    expect(await superseded(async (store) => {
+      await store.deleteByPattern({ graph, subject: descriptor[0]!.subject, predicate: `${DKG_NS}status` });
+      await store.insert([q(descriptor[0]!.subject, `${DKG_NS}status`, '"tentative"')]);
+    })).toContain(`expected ${DESCRIPTOR_ROWS} rows, found 0`);
+
+    // A subject whose own rows did not change, but whose admission did.
+    expect(await superseded(async (store) => {
+      await store.insert([q(cgEntity, DKG_ONTOLOGY.DKG_REVOKED_AGENT, '"0xMEMBER"')]);
+    })).toMatch(/expected \d+ rows, found \d+/);
+  });
+
+  it('rebuilds the plan for a new session even when that session never spent its refresh', async () => {
+    const cgId = 'meta-plan-generation';
+    const store = await storeWithDescriptors(cgId, 2);
+    const metaPlanMemo = createResponderDurableMetaPlanMemo();
+    const queries = observeQueries(store);
+    const page = (generation: string, refreshRowList: boolean) => readDurableMetaPage({
+      store,
+      contextGraphId: cgId,
+      registeredSubGraphNames: [],
+      offset: 0,
+      limit: 1_000,
+      rowListCacheKey: 'peer:durable-meta:generation',
+      refreshRowList,
+      refreshGeneration: `peer:durable-meta:generation\u0000${generation}`,
+      metaPlanMemo,
+    });
+    const plansBuilt = () => queries
+      .filter((query) => query.source === 'sync.responder.readDurableMetaPlanSubjects').length;
+
+    expect(await page('first', true)).toHaveLength(1 + 2 * DESCRIPTOR_ROWS);
+    // Same session: the plan is kept.
+    expect(await page('first', false)).toHaveLength(1 + 2 * DESCRIPTOR_ROWS);
+    expect(plansBuilt()).toBe(1);
+
+    // A later session whose first request was lost before it reached the plan:
+    // the request that arrives no longer carries the refresh, only the session.
+    await store.insert(descriptorQuads(cgId, 2));
+    expect(await page('second', false)).toHaveLength(1 + 3 * DESCRIPTOR_ROWS);
+    expect(plansBuilt()).toBe(2);
+    await store.close();
+  });
+
+  it('waits out a plan build of another session instead of joining it', async () => {
+    const memo = createResponderDurableMetaPlanMemo();
+    const planOf = (label: string) => ({ graph: label, bytesEstimate: 0 }) as unknown as DurableMetaPlan;
+    const [earlier, later, unused] = [planOf('earlier'), planOf('later'), planOf('unused')];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+
+    const first = memo.get('key', async () => { await gate; return earlier; }, { generation: 'earlier' });
+    // A request of a later session arrives while the earlier build is running.
+    const second = memo.get('key', async () => later, { generation: 'later' });
+    release();
+    expect(await first).toBe(earlier);
+    expect(await second).toBe(later);
+
+    // The later session's plan is the one kept for it.
+    expect(await memo.get('key', async () => unused, { generation: 'later' })).toBe(later);
+    // To the earlier session its plan is gone: a later page of it cannot go on.
+    expect(await memo.get('key', async () => unused, { generation: 'earlier', requireExisting: true })).toBeNull();
+  });
+
+  it('keeps building a session plan after the request that started it has left', async () => {
+    const cgId = 'meta-plan-owner';
+    const store = await storeWithDescriptors(cgId, 2);
+    const metaPlanMemo = createResponderDurableMetaPlanMemo();
+    const queries = observeQueries(store);
+    const original = store.query.bind(store);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let signalsSeen: Array<AbortSignal | undefined> = [];
+    (store as { query: TripleStore['query'] }).query = async (sparql, options) => {
+      if (options?.source === 'sync.responder.countDurableMetaPlanRows') {
+        signalsSeen.push(options.signal);
+        await gate;
+      }
+      return original(sparql, options);
+    };
+    const page = (signal: AbortSignal | undefined, refreshRowList: boolean) => readDurableMetaPage({
+      store,
+      contextGraphId: cgId,
+      registeredSubGraphNames: [],
+      offset: 0,
+      limit: 1_000,
+      signal,
+      rowListCacheKey: 'peer:durable-meta:owner',
+      refreshRowList,
+      refreshGeneration: 'peer:durable-meta:owner\u0000session',
+      metaPlanMemo,
+    });
+
+    const leaving = new AbortController();
+    const first = page(leaving.signal, true).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(signalsSeen).toHaveLength(1));
+    leaving.abort(new Error('requester stopped waiting'));
+    expect(await first).toMatchObject({ message: 'requester stopped waiting' });
+    // The build was not tied to that request, and it goes on.
+    expect(signalsSeen).toEqual([undefined]);
+    release();
+
+    // The retry of the same session finds the plan instead of starting it again.
+    expect(await page(undefined, false)).toHaveLength(1 + 2 * DESCRIPTOR_ROWS);
+    expect(queries.filter((query) => query.source === 'sync.responder.readDurableMetaPlanSubjects')).toHaveLength(1);
+    await store.close();
+  });
+
+  it('reports a session plan build that fails after its request has left', async () => {
+    const cgId = 'meta-plan-detached-failure';
+    const store = await storeWithDescriptors(cgId, 2);
+    const original = store.query.bind(store);
+    let fail!: (error: Error) => void;
+    const gate = new Promise<never>((_, reject) => { fail = reject; });
+    let started = false;
+    (store as { query: TripleStore['query'] }).query = async (sparql, options) => {
+      if (options?.source === 'sync.responder.countDurableMetaPlanRows') {
+        started = true;
+        await gate;
+      }
+      return original(sparql, options);
+    };
+    const reported: unknown[] = [];
+    const leaving = new AbortController();
+    const request = readDurableMetaPage({
+      store,
+      contextGraphId: cgId,
+      registeredSubGraphNames: [],
+      offset: 0,
+      limit: 1_000,
+      signal: leaving.signal,
+      rowListCacheKey: 'peer:durable-meta:detached-failure',
+      refreshRowList: true,
+      refreshGeneration: 'peer:durable-meta:detached-failure\u0000session',
+      metaPlanMemo: createResponderDurableMetaPlanMemo(),
+      onSessionPlanFailure: (error) => reported.push(error),
+    }).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(started).toBe(true));
+    leaving.abort(new Error('requester stopped waiting'));
+    expect(await request).toMatchObject({ message: 'requester stopped waiting' });
+    expect(reported).toEqual([]);
+
+    const storeFailure = new Error('the store gave up on the query');
+    fail(storeFailure);
+    await vi.waitFor(() => expect(reported).toEqual([storeFailure]));
     await store.close();
   });
 
