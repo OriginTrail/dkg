@@ -869,6 +869,12 @@ import {
 import { reconcileRfc64CatalogAuthorityPlanV1 } from
   './rfc64/catalog-rollout-authority-reconciliation-v1.js';
 import {
+  describeOwedLegacySwmRetirementEventV1,
+  owedLegacySwmRetirementsOfV1,
+  peekOwedLegacySwmRetirementsV1,
+  type OwedLegacySwmRetirementsV1,
+} from './internal/owed-legacy-swm-retirements.js';
+import {
   describeRfc64LegacySwmFenceEventV1,
   initializeRfc64LegacySwmBoundaryV1,
   rfc64LateLegacySwmCompanionResolverV1,
@@ -2028,13 +2034,38 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       subGraphName?: string;
     }>,
   ): Promise<void> {
-    await retireRfc64LegacySwmAfterFinalizedVmV1(
-      this,
-      input.contextGraphId,
-      input.kaUal,
-      String(input.assertionVersion),
-      input.subGraphName,
+    // GH#3081 — nothing a caller does next depends on the marker. It waits a short time for the
+    // retirement, which then goes on without it and is repeated if it did not get its turn. The
+    // retirement stays this node's until it ended: stop() ends its wait and drains its work.
+    const assertionVersion = String(input.assertionVersion);
+    await this.owedLegacySwmRetirementsV1().retire(
+      JSON.stringify([input.contextGraphId, input.subGraphName ?? null, input.kaUal, assertionVersion]),
+      (signal) => retireRfc64LegacySwmAfterFinalizedVmV1(
+        this,
+        input.contextGraphId,
+        input.kaUal,
+        assertionVersion,
+        input.subGraphName,
+        signal,
+      ),
     );
+  }
+
+  /** GH#3081 — the owner of this host's legacy SWM retirements, made by whoever needs it first. */
+  private owedLegacySwmRetirementsV1(this: DKGAgent): OwedLegacySwmRetirementsV1 {
+    return owedLegacySwmRetirementsOfV1(this, (event) => {
+      const { level, line } = describeOwedLegacySwmRetirementEventV1(event);
+      this.log[level](createOperationContext('system'), line);
+    });
+  }
+
+  /**
+   * GH#3081 — for stop(): admit no more legacy SWM retirements, end the ones that still wait and
+   * drain the ones at work. The owner is made here if nothing asked for a retirement before, so
+   * that one first asked for while stop() drains meets a closed owner and not a new, open one.
+   */
+  closeOwedLegacySwmRetirementsV1(this: DKGAgent): Promise<void> {
+    return this.owedLegacySwmRetirementsV1().closeAndDrain();
   }
 
   async retireFinalizedSwmTwinCandidate(
@@ -2271,6 +2302,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     await this.contextGraphSubscriptionAuthorityRecoveryRuntime?.close();
     await this.retireContextGraphSubscriptionPromotionRuntime();
     this.rfc64BackgroundWorkDispatcherV1.reopen();
+    peekOwedLegacySwmRetirementsV1(this)?.reopen();
     this.contextGraphMembershipPersistence.reopen();
     // stop() drained and closed subscription writes; a restarted agent admits
     // them again. Writes issued before the first start() left it open.

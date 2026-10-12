@@ -2,6 +2,8 @@
 
 import { RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE } from '@origintrail-official/dkg-core';
 
+import { Rfc64SerializedScopeRuntimeV1 } from './serialized-scope-runtime-v1.js';
+
 /** Who raised a fence. Named in every refusal and in every fence event. */
 export type Rfc64LegacySwmFenceSourceV1 =
   | 'finalized-vm-retirement'
@@ -74,13 +76,25 @@ interface Rfc64LegacySwmFenceScopeStateV1 {
 }
 
 /**
- * The preparation fences of one legacy SWM boundary and the chain that
- * serializes its retirements. A preparation registers under its context graph
+ * The preparation fences of one legacy SWM boundary and the chains that
+ * serialize its retirements. A preparation registers under its context graph
  * id and under its asset key; a retirement fences one of the two.
+ *
+ * Everything that retires in one graph takes turns on that graph's chain: its
+ * leases, its retirements and the retirements of its assets. They read and
+ * change the same markers. A lease or a retirement of a whole graph first
+ * takes a turn on the node-wide chain as well, so one of them runs at a time
+ * on the node, as before. The retirement of one asset does not: it waits for
+ * the work of its own graph and for nothing else.
  */
 export interface Rfc64LegacySwmFenceCoordinatorV1 {
   readonly scopes: Map<string, Rfc64LegacySwmFenceScopeStateV1>;
+  /** The node-wide chain of the leases and retirements that fence a whole graph. */
   mutationTail: Promise<void>;
+  /** How many of them hold or await the node-wide turn. */
+  nodeWideTurnsPending: number;
+  /** The turns of each graph that has a lease or a retirement waiting or at work. */
+  readonly graphTurns: Rfc64SerializedScopeRuntimeV1;
   readonly waitLimitMs: number;
   readonly longFenceMs: number;
   readonly now: () => number;
@@ -93,6 +107,8 @@ export function createRfc64LegacySwmFenceCoordinatorV1(
   return {
     scopes: new Map(),
     mutationTail: Promise.resolve(),
+    nodeWideTurnsPending: 0,
+    graphTurns: new Rfc64SerializedScopeRuntimeV1('RFC-64 legacy SWM graph turn'),
     waitLimitMs: options.waitLimitMs ?? RFC64_LEGACY_SWM_FENCE_WAIT_LIMIT_MS,
     longFenceMs: options.longFenceMs ?? RFC64_LEGACY_SWM_FENCE_LONG_MS,
     now: options.now ?? (() => performance.now()),
@@ -217,12 +233,23 @@ export type Rfc64LegacySwmRetirementOutcomeV1<T> =
  * for the scope's in-flight preparations, then run. The fence drops when the
  * work settles, or earlier when the work calls `dropFence`.
  *
- * The two waits share one bound. A retirement that does not get to run within
+ * The turn is the graph's (see {@link Rfc64LegacySwmFenceCoordinatorV1}). Work
+ * that fences the whole graph takes the node-wide turn first and joins its
+ * graph's chain only then, so the retirement of an asset never waits behind
+ * work that is itself still waiting for another graph. When the node-wide turn
+ * is free, that work joins its graph's chain inside the call, in the order it
+ * asked.
+ *
+ * The waits share one bound. A retirement that does not get to run within
  * it drops its fence, reports `wait-exceeded` and answers `ran: false`; when
- * its turn on the chain comes later it does nothing. Leaving the markers in
+ * its turn on a chain comes later it does nothing. Leaving the markers in
  * place is the conservative state, and the next pass retires them. Without the
- * bound one preparation that never settles would hold the chain, and through
- * it the fence of every graph that tries to retire, for as long as it hangs.
+ * bound one preparation that never settles would hold its chain, and through
+ * it the fence of everything that waits there, for as long as it hangs.
+ *
+ * `signal` ends the waits early, in silence: a retirement that has not
+ * started its work when the signal aborts drops its fence and answers
+ * `ran: false`. Work that has started runs to its end.
  */
 export async function runRfc64LegacySwmRetirementV1<T>(
   fence: Rfc64LegacySwmFenceCoordinatorV1,
@@ -231,9 +258,12 @@ export async function runRfc64LegacySwmRetirementV1<T>(
     contextGraphId: string;
     /** Present for an asset fence; absent for the graph's. */
     kaUal?: string;
+    /** The owner's lifetime: an abort ends a retirement that is still waiting. */
+    signal?: AbortSignal;
   }>,
   work: (dropFence: () => void) => Promise<T>,
 ): Promise<Rfc64LegacySwmRetirementOutcomeV1<T>> {
+  if (target.signal?.aborted) return { ran: false };
   const scopeKey = target.kaUal === undefined
     ? target.contextGraphId
     : rfc64LegacySwmAssetScopeKeyV1(target.contextGraphId, target.kaUal);
@@ -283,9 +313,16 @@ export async function runRfc64LegacySwmRetirementV1<T>(
     resolveAbandoned();
   }, fence.waitLimitMs);
   timer.unref?.();
+  const stopWaiting = (): void => {
+    if (workStarted || gaveUp) return;
+    gaveUp = true;
+    dropFence();
+    resolveAbandoned();
+  };
+  target.signal?.addEventListener('abort', stopWaiting, { once: true });
   const notRun = { ran: false } as const;
 
-  const turn = fence.mutationTail.then(async (): Promise<Rfc64LegacySwmRetirementOutcomeV1<T>> => {
+  const run = async (): Promise<Rfc64LegacySwmRetirementOutcomeV1<T>> => {
     if (gaveUp) return notRun;
     waitingOn = 'preparations';
     await Promise.race([scope.preparationsDrained, abandoned]);
@@ -293,12 +330,28 @@ export async function runRfc64LegacySwmRetirementV1<T>(
     workStarted = true;
     clearTimeout(timer);
     return { ran: true, value: await work(dropFence) };
-  });
-  fence.mutationTail = turn.then(() => undefined, () => undefined);
+  };
+  // Joins the graph's queue inside the call. The turn lasts as long as the work, whatever
+  // became of the caller in the meantime.
+  const takeGraphTurn = (): Promise<Rfc64LegacySwmRetirementOutcomeV1<T>> => (
+    fence.graphTurns.run(target.contextGraphId, run)
+  );
+  let turn: Promise<Rfc64LegacySwmRetirementOutcomeV1<T>>;
+  if (target.kaUal !== undefined) {
+    turn = takeGraphTurn();
+  } else {
+    turn = fence.nodeWideTurnsPending === 0
+      ? takeGraphTurn()
+      : fence.mutationTail.then(() => (gaveUp ? notRun : takeGraphTurn()));
+    fence.nodeWideTurnsPending += 1;
+    fence.mutationTail = turn.then(() => undefined, () => undefined)
+      .then(() => { fence.nodeWideTurnsPending -= 1; });
+  }
   try {
     return await Promise.race([turn, abandoned.then(() => notRun)]);
   } finally {
     clearTimeout(timer);
+    target.signal?.removeEventListener('abort', stopWaiting);
     dropFence();
   }
 }

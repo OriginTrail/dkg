@@ -322,6 +322,9 @@ export default defineConfig({
       "test/encrypt-inline-policy.test.ts",
       // #3081 — the steps the queued executor reports after the confirmation (observation only).
       "test/queued-publish-tail-steps.test.ts",
+      // #3081 — a publication does not wait for the retirement of its shared copy's marker.
+      "test/owed-legacy-swm-retirements.test.ts",
+      "test/legacy-swm-retirement-caller-wait.test.ts",
       "test/queued-publish-options.test.ts",
       "test/agents-meta-policy.test.ts",
       "test/agents-meta-sync-wiring.test.ts",

@@ -146,13 +146,15 @@ function harness(options: {
 }
 
 describe('the steps a queued executor reports after the confirmation', () => {
-  it('reports every step it runs as that step ends, and waits for the legacy retirement in between', async () => {
+  it('reports every step it runs as that step ends, the call that retires the legacy marker among them', async () => {
     const retirement = held();
     const { calls, execute } = harness({ retireLegacySwm: retirement.pass });
 
     const executing = execute();
     await retirement.entered;
-    // The executor is waiting for the retirement: nothing after it has run or been reported.
+    // The executor is inside the call that retires the legacy marker, held here by the row. On a
+    // node that call returns within a second (`legacy-swm-retirement-caller-wait.test.ts`); the
+    // step is reported when it returns, and nothing after it has run or been reported before.
     expect(calls).toEqual([
       // The on-chain id of the graph is read before the publish; it is not read again for the
       // announcement, so no such step is reported.
