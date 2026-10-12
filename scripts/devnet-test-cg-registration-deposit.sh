@@ -20,10 +20,12 @@
 #
 # Requires a running devnet (./scripts/devnet.sh start 6). Self-contained.
 #
-# Standalone MANUAL proof — run directly; intentionally NOT wired into
-# devnet-comprehensive.sh / _devnet-full-sweep.sh. This one arms a GLOBAL chain
-# param (and restores it via trap), so it is deliberately kept out of the shared
-# orchestrated run; see PR #1244.
+# Registered in scripts/devnet-comprehensive.sh as the LAST entry of the
+# "regression" group, and it has to stay last there. It arms a GLOBAL chain
+# param (and restores it, also from a trap on any exit path), so nothing that
+# registers a context graph may run after it on the same chain: the one suite
+# that follows it starts a devnet of its own. That is why it was kept out of
+# the orchestrated run until the run had such a place; see PR #1244.
 #   Run:  ./scripts/devnet-test-cg-registration-deposit.sh
 set -uo pipefail
 

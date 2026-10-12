@@ -11,6 +11,14 @@
 #      CG-phonebook agent discovery, structured ACK rejection reasons)
 #   6. node-ui smoke
 #   7. soak suite (libp2p / SWM / RS)
+#   8. regression scripts, one entry each (store outage, a caller that gives up
+#      on a managed store, registration deposit, the issue-15xx publisher and
+#      outbox regressions, the curator acknowledgement gate)
+#   9. devnet-test-upgrade.sh              (previous release -> this build, on
+#      the same data; replaces the devnet, so it is last)
+#
+# A suite of groups 8 and 9 that could not exercise its scenario exits 3 and is
+# recorded as SKIPPED: the run then ends INCONCLUSIVE, never as a pass.
 #
 # Bash 3.2 compatible (uses parallel indexed arrays instead of
 # `declare -A`).
@@ -26,9 +34,17 @@
 #                       (default: $REPO_ROOT/.devnet/comprehensive-results/<ts>)
 #   SKIP_SOAK=1         skip the long soak suite
 #   SOAK_ONLY=1         run only the soak suite
+#   ONLY_GROUPS="a b"   run only the suites of the named groups, in their
+#                       registered order (the group is the name in brackets in
+#                       the plan this script prints, e.g. "regression upgrade")
 #   SKIP_PROBES=1       skip the rc.12-specific probes
 #   SKIP_RFC38_EXTRAS=1 skip the rfc38-all suite
 #   SKIP_UI=1           skip the node-ui smoke
+#   SKIP_REGRESSIONS=1  skip the regression scripts of group 8
+#   SKIP_UPGRADE=1      skip the upgrade suite
+#   DEVNET_UPGRADE_FROM the ref the upgrade suite starts on (default: the
+#                       newest release tag below the workspace version; see
+#                       devnet-test-upgrade.sh)
 #   FAIL_FAST=1         stop on first FAIL
 #   DEVNET_CANCEL_GRACE_SECONDS  cleanup grace before SIGKILL (default 300)
 #   SOAK_RS_SECONDS     length of the devnet-soak-rs run (default 1800)
@@ -56,6 +72,9 @@ SUITE_GROUPS=()
 SUITE_RESULTS=()
 SUITE_LOGS=()
 SUITE_ELAPSEDS=()
+# 1 for a suite whose exit 3 means "a precondition was unmet, nothing was
+# exercised" (see register_skip_aware); 0 for every other suite.
+SUITE_SKIP_AWARE=()
 
 START=$(date +%s)
 PARTIAL=0
@@ -63,13 +82,20 @@ FILTERS=""
 INTERRUPTED=0
 ACTIVE_PID=""
 FINAL_EXIT=0
-for flag in SKIP_RFC49 SKIP_RFC38_EXTRAS SKIP_PROBES SKIP_UI SKIP_SOAK SOAK_ONLY; do
+for flag in SKIP_RFC49 SKIP_RFC38_EXTRAS SKIP_REGRESSIONS SKIP_PROBES SKIP_UI SKIP_SOAK SKIP_UPGRADE SOAK_ONLY; do
   value=$(printenv "$flag" 2>/dev/null || true)
   if { [ "$flag" = SKIP_RFC49 ] && [ -n "$value" ]; } || [ "$value" = 1 ]; then
     PARTIAL=1
     FILTERS="${FILTERS}${FILTERS:+,}$flag=$value"
   fi
 done
+# ONLY_GROUPS names groups, separated by spaces (commas are accepted and
+# recorded as spaces: the filter list itself is comma-separated).
+ONLY_GROUPS="$(printf '%s' "${ONLY_GROUPS:-}" | tr ',' ' ' | tr -s ' ' | sed 's/^ //; s/ $//')"
+if [ -n "$ONLY_GROUPS" ]; then
+  PARTIAL=1
+  FILTERS="${FILTERS}${FILTERS:+,}ONLY_GROUPS=$ONLY_GROUPS"
+fi
 
 write_report() {
   local destination="$1" phase="$2" idx=0
@@ -190,6 +216,19 @@ register() {
   SUITE_RESULTS+=("PENDING")
   SUITE_LOGS+=("")
   SUITE_ELAPSEDS+=("0")
+  SUITE_SKIP_AWARE+=("0")
+}
+
+# Register a suite that follows the "exit 3 = did not run" convention of
+# devnet-test-store-outage.sh: 0 = the scenario was exercised and held, 3 = a
+# precondition was unmet and nothing was exercised, anything else = a failure.
+# Exit 3 of such a suite is recorded as SKIPPED: never a pass, and not a
+# failure of the product either, so the run ends INCONCLUSIVE. Only suites
+# registered here get that reading. For the aggregators (_devnet-full-sweep.sh,
+# devnet-test-rfc38-all.sh) exit 3 means three failed scripts and stays FAIL:3.
+register_skip_aware() {
+  register "$@"
+  SUITE_SKIP_AWARE[$(( ${#SUITE_IDS[@]} - 1 ))]=1
 }
 
 # Group: smoke
@@ -247,30 +286,76 @@ if [ "${SKIP_SOAK:-0}" != "1" ]; then
     "$REPO_ROOT/scripts/devnet-soak-rs.sh 1 $SOAK_RS_SECONDS"
 fi
 
-# Apply SOAK_ONLY filter
-if [ "${SOAK_ONLY:-0}" = "1" ]; then
+# Group: regression — single-purpose devnet scripts that no entry above runs.
+# One entry each, so that each has its own result, log and time. They come
+# after the soak: nothing they do to the devnet (a temporary seventh node,
+# seeded outbox rows, a restarted Core) can reach a suite above.
+#
+# The order is part of the registration. A node that did not restart does not
+# dial a restarted Core again by itself, so the three scripts that restart a
+# Core come late, and among them issue-1577 is first: it stops Core 4 and needs
+# its Edge connected to the three Cores that stay up. cg-registration-deposit
+# is last of all: it arms a chain-wide parameter and puts it back, and nothing
+# that registers a context graph may depend on that having worked.
+#
+# store-outage, managed-oxigraph-caller-abort and issue-1585 exit 3 when the
+# devnet cannot host their scenario (no daemon-managed Oxigraph store to pause;
+# nodes started without DEVNET_ENABLE_PUBLISHER=1, which the release process
+# sets). That is SKIPPED, and the run is then INCONCLUSIVE.
+if [ "${SKIP_REGRESSIONS:-0}" != "1" ]; then
+  register_skip_aware "store-outage" "regression" "$REPO_ROOT/scripts/devnet-test-store-outage.sh"
+  register_skip_aware "managed-oxigraph-caller-abort" "regression" "$REPO_ROOT/scripts/devnet-test-managed-oxigraph-caller-abort.sh"
+  for r in agents-meta-bounded issue-1561-rpc-throttle-retry issue-1562-receipt-timeout \
+    issue-1567-global-cli-rollback issue-1573-publish-fundability issue-1576-publisher-readiness; do
+    register "$r" "regression" "$REPO_ROOT/scripts/devnet-test-${r}.sh"
+  done
+  # Runs devnet-test-seal-decouple.sh as its first phase.
+  register_skip_aware "issue-1585-named-ka-swm" "regression" "$REPO_ROOT/scripts/devnet-test-issue-1585-named-ka-swm.sh"
+  for r in issue-1580-bounded-outbox-drain issue-1577-ack-outbox-ownership curator-ack-gate issue-1579-outbox-backoff \
+    cg-registration-deposit; do
+    register "$r" "regression" "$REPO_ROOT/scripts/devnet-test-${r}.sh"
+  done
+fi
+
+# Group: upgrade — the only suite that does not run on the devnet it is given.
+# It stops that devnet (keeping its node logs under $RESULTS/upgrade), starts a
+# new one on the previous release, writes through it, restarts every node on
+# this build and checks the result. Keep it LAST: a suite registered after it
+# would run on its devnet with the auth token read at pre-flight above.
+if [ "${SKIP_UPGRADE:-0}" != "1" ]; then
+  register_skip_aware "upgrade-from-previous-release" "upgrade" \
+    "env DEVNET_UPGRADE_RESULTS=$RESULTS/upgrade $REPO_ROOT/scripts/devnet-test-upgrade.sh"
+fi
+
+# Apply the group selection: SOAK_ONLY=1 (the soak group) or ONLY_GROUPS.
+SELECT_GROUPS="$ONLY_GROUPS"
+[ "${SOAK_ONLY:-0}" = "1" ] && SELECT_GROUPS="soak"
+if [ -n "$SELECT_GROUPS" ]; then
   NEW_IDS=()
   NEW_CMDS=()
   NEW_GROUPS=()
   NEW_RESULTS=()
   NEW_LOGS=()
   NEW_ELAPSEDS=()
+  NEW_SKIP_AWARE=()
   i=0
   while [ "$i" -lt "${#SUITE_IDS[@]}" ]; do
-    if [ "${SUITE_GROUPS[$i]}" = "soak" ]; then
+    case " $SELECT_GROUPS " in *" ${SUITE_GROUPS[$i]} "*) selected=1 ;; *) selected=0 ;; esac
+    if [ "$selected" = "1" ]; then
       NEW_IDS+=("${SUITE_IDS[$i]}")
       NEW_CMDS+=("${SUITE_CMDS[$i]}")
       NEW_GROUPS+=("${SUITE_GROUPS[$i]}")
       NEW_RESULTS+=("PENDING")
       NEW_LOGS+=("")
       NEW_ELAPSEDS+=("0")
+      NEW_SKIP_AWARE+=("${SUITE_SKIP_AWARE[$i]}")
     fi
     i=$((i + 1))
   done
   # Bash 3.2 with nounset rejects expanding an empty array.
   if [ "${#NEW_IDS[@]}" -eq 0 ]; then
     SUITE_IDS=(); SUITE_CMDS=(); SUITE_GROUPS=()
-    SUITE_RESULTS=(); SUITE_LOGS=(); SUITE_ELAPSEDS=()
+    SUITE_RESULTS=(); SUITE_LOGS=(); SUITE_ELAPSEDS=(); SUITE_SKIP_AWARE=()
   else
     SUITE_IDS=("${NEW_IDS[@]}")
     SUITE_CMDS=("${NEW_CMDS[@]}")
@@ -278,6 +363,7 @@ if [ "${SOAK_ONLY:-0}" = "1" ]; then
     SUITE_RESULTS=("${NEW_RESULTS[@]}")
     SUITE_LOGS=("${NEW_LOGS[@]}")
     SUITE_ELAPSEDS=("${NEW_ELAPSEDS[@]}")
+    SUITE_SKIP_AWARE=("${NEW_SKIP_AWARE[@]}")
   fi
 fi
 
@@ -339,6 +425,12 @@ while [ "$i" -lt "${#SUITE_IDS[@]}" ]; do
   if [ "$ec" -eq 0 ]; then
     SUITE_RESULTS[$i]="PASS"
     log "PASS $id  (${elapsed}s)"
+  elif [ "$ec" -eq 3 ] && [ "${SUITE_SKIP_AWARE[$i]}" = "1" ]; then
+    # Not a failure, so FAIL_FAST does not stop here; not a pass either.
+    SUITE_RESULTS[$i]="SKIPPED"
+    log "SKIPPED $id  (exit=3: a precondition was unmet, nothing was exercised; ${elapsed}s)"
+    log "  last 12 lines of $logfile:"
+    tail -n 12 "$logfile" 2>/dev/null | sed 's/^/      /' | tee -a "$RESULTS/orchestrator.log"
   else
     SUITE_RESULTS[$i]="FAIL:$ec"
     log "FAIL $id  (exit=$ec, ${elapsed}s)"

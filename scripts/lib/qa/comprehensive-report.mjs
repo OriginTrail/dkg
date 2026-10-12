@@ -28,7 +28,8 @@ if (phase === 'complete') {
     '', '## Suites', '', '| id | group | result | elapsed | log |', '|---|---|---|---:|---|',
     ...suites.map(s => `| \`${s.id}\` | ${s.group} | ${s.result} | ${s.elapsedSeconds}s | \`${basename(s.log)}\` |`), '',
   ];
-  for (const suite of suites.filter(s => s.result.startsWith('FAIL:'))) {
+  // A skipped suite prints why it did not run; that line belongs in the report.
+  for (const suite of suites.filter(s => s.result.startsWith('FAIL:') || s.result === 'SKIPPED')) {
     let tail;
     try { tail = readFileSync(suite.log, 'utf8').trimEnd().split('\n').slice(-25).join('\n'); }
     catch { tail = '(no log)'; }

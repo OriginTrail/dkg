@@ -12,6 +12,17 @@ const suiteFiles = ['v10-rc-validation.sh', '_devnet-full-sweep.sh', 'devnet-tes
   'devnet-test-rc11-promote-crash-recovery.sh', 'devnet-test-rc11-shutdown-mid-publish.sh', 'devnet-test-rfc38-all.sh',
   ...['hub-rotation', 'multi-rpc-failover', 'libp2p-tunables', 'cg-phonebook', 'ack-rejection-reasons'].map(p => `devnet-probe-${p}.sh`),
   'devnet-test-node-ui-smoke.sh', 'libp2p-soak-test.sh', 'devnet-swm-soak-gate.sh', 'devnet-soak-rs.sh'];
+// The regression scripts, in the order they are registered: the scripts that restart a Core come
+// late, and the one that arms a chain-wide parameter is last.
+const regressionIds = ['store-outage', 'managed-oxigraph-caller-abort', 'agents-meta-bounded',
+  'issue-1561-rpc-throttle-retry', 'issue-1562-receipt-timeout', 'issue-1567-global-cli-rollback',
+  'issue-1573-publish-fundability', 'issue-1576-publisher-readiness', 'issue-1585-named-ka-swm',
+  'issue-1580-bounded-outbox-drain', 'issue-1577-ack-outbox-ownership', 'curator-ack-gate', 'issue-1579-outbox-backoff',
+  'cg-registration-deposit'];
+suiteFiles.push(...regressionIds.map(id => `devnet-test-${id}.sh`), 'devnet-test-upgrade.sh');
+// Suites registered with the "exit 3 = did not run" convention (register_skip_aware).
+const skipAwareFiles = ['devnet-test-store-outage.sh', 'devnet-test-managed-oxigraph-caller-abort.sh',
+  'devnet-test-issue-1585-named-ka-swm.sh', 'devnet-test-upgrade.sh'];
 
 function setup(t, { missing = [], fail = {}, first = 'exit 0' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'dkg-comprehensive-'));
@@ -29,7 +40,7 @@ function setup(t, { missing = [], fail = {}, first = 'exit 0' } = {}) {
 }
 function launch(dir, overrides = {}) {
   const env = { ...process.env, PATH: `${join(dir, 'bin')}:${process.env.PATH}`, RESULTS_DIR: join(dir, 'results'), NUM_NODES: '1' };
-  for (const key of ['SOAK_ONLY', 'SKIP_SOAK', 'SKIP_UI', 'SKIP_PROBES', 'SKIP_RFC38_EXTRAS', 'SKIP_RFC49', 'FAIL_FAST', 'DEVNET_DIR']) delete env[key];
+  for (const key of ['SOAK_ONLY', 'ONLY_GROUPS', 'SKIP_SOAK', 'SKIP_UI', 'SKIP_PROBES', 'SKIP_RFC38_EXTRAS', 'SKIP_RFC49', 'SKIP_REGRESSIONS', 'SKIP_UPGRADE', 'FAIL_FAST', 'DEVNET_DIR']) delete env[key];
   const child = spawn('bash', [join(dir, 'scripts/devnet-comprehensive.sh')], { env: { ...env, ...overrides } });
   let stdout = '', stderr = '';
   child.stdout.on('data', c => stdout += c); child.stderr.on('data', c => stderr += c);
@@ -92,6 +103,92 @@ test('legacy exit 2 remains an individual FAIL:2 and does not get reinterpreted'
   assert.equal(result.status, 1, result.stderr);
   const receipt = matchingReports(dir);
   assert.equal(receipt.outcome, 'FAIL'); assert.equal(receipt.suites[0].result, 'FAIL:2');
+});
+
+test('exit 3 of a skip-aware suite is a suite that did not run: never a pass, not a failure, and no reason to stop', async t => {
+  const dir = setup(t, { fail: Object.fromEntries(skipAwareFiles.map(file => [file, 3])) });
+  // FAIL_FAST stops at a failure. A suite that did not run is not one.
+  const result = await launch(dir, { FAIL_FAST: '1' }).done;
+  assert.equal(result.status, 1, 'a run with a suite that did not run must not succeed');
+  const receipt = matchingReports(dir);
+  assert.equal(receipt.outcome, 'INCONCLUSIVE'); assert.equal(receipt.completeSuccess, false);
+  assert.equal(receipt.totals.skipped, skipAwareFiles.length); assert.equal(receipt.totals.fail, 0);
+  assert.equal(receipt.totals.pass, suiteFiles.length - skipAwareFiles.length);
+  assert.equal(receipt.totals.executed, suiteFiles.length - skipAwareFiles.length);
+  const markdown = readFileSync(join(dir, 'results/REPORT.md'), 'utf8');
+  for (const file of skipAwareFiles) {
+    const suite = receipt.suites.find(s => s.command.endsWith(file));
+    assert.equal(suite.result, 'SKIPPED', file);
+    assert.match(result.stdout, new RegExp(`SKIPPED ${suite.id} +\\(exit=3: a precondition was unmet`));
+    // The reason a suite gives for not running is part of the report.
+    assert.ok(markdown.includes(`### ${suite.id}`), file);
+  }
+  assert.ok(receipt.suites.every(s => s.result === 'PASS' || s.result === 'SKIPPED'));
+});
+
+test('exit 3 of an aggregator stays three failed scripts, and any other exit of a skip-aware suite is a failure', async t => {
+  const dir = setup(t, { fail: { '_devnet-full-sweep.sh': 3, 'devnet-test-rfc38-all.sh': 3, [skipAwareFiles[0]]: 1 } });
+  assert.equal((await launch(dir).done).status, 1);
+  const receipt = matchingReports(dir);
+  assert.equal(receipt.outcome, 'FAIL'); assert.equal(receipt.totals.skipped, 0); assert.equal(receipt.totals.fail, 3);
+  assert.deepEqual(receipt.suites.filter(s => s.result !== 'PASS').map(s => [s.id, s.result]),
+    [['devnet-full-sweep', 'FAIL:3'], ['rfc38-all', 'FAIL:3'], ['store-outage', 'FAIL:1']]);
+});
+
+// What is registered, and in which order, is in the report of a run that stops
+// at its first suite: every later suite is listed as NOT_RUN with its command.
+async function registered(t, overrides = {}) {
+  const dir = setup(t, { first: 'exit 1' });
+  assert.equal((await launch(dir, { FAIL_FAST: '1', ...overrides }).done).status, 1);
+  return { dir, receipt: matchingReports(dir) };
+}
+
+test('the regression scripts have one entry each, after the soak and before the upgrade, in their registered order', async t => {
+  const { dir, receipt } = await registered(t);
+  const group = receipt.suites.filter(s => s.group === 'regression');
+  assert.deepEqual(group.map(s => s.id), regressionIds);
+  for (const s of group) assert.equal(s.command, join(dir, 'scripts', `devnet-test-${s.id}.sh`));
+  const first = receipt.suites.findIndex(s => s.group === 'regression');
+  assert.equal(receipt.suites[first - 1].group, 'soak');
+  assert.deepEqual(receipt.suites.slice(first + group.length).map(s => s.group), ['upgrade']);
+
+  const partial = (await registered(t, { SKIP_REGRESSIONS: '1' })).receipt;
+  assert.equal(partial.partial, true); assert.deepEqual(partial.filters, ['SKIP_REGRESSIONS=1']);
+  assert.ok(partial.suites.every(s => s.group !== 'regression'));
+  assert.equal(partial.suites.at(-1).group, 'upgrade');
+});
+
+test('the upgrade suite is last, gets its own results directory, and can be left out of an exploratory run', async t => {
+  const { dir, receipt } = await registered(t);
+  const last = receipt.suites.at(-1);
+  assert.equal(last.id, 'upgrade-from-previous-release');
+  assert.ok(last.command.startsWith(`env DEVNET_UPGRADE_RESULTS=${join(dir, 'results')}/upgrade `), last.command);
+  const partial = (await registered(t, { SKIP_UPGRADE: '1' })).receipt;
+  assert.equal(partial.outcome, 'INCONCLUSIVE'); assert.equal(partial.partial, true);
+  assert.deepEqual(partial.filters, ['SKIP_UPGRADE=1']);
+  assert.ok(partial.suites.every(s => s.group !== 'upgrade'));
+});
+
+test('ONLY_GROUPS selects whole groups in their registered order and marks the run partial', async t => {
+  for (const value of ['regression upgrade', 'upgrade,regression']) {
+    const dir = setup(t, { fail: { 'devnet-test-store-outage.sh': 1 } });
+    assert.equal((await launch(dir, { FAIL_FAST: '1', ONLY_GROUPS: value }).done).status, 1);
+    const receipt = matchingReports(dir);
+    assert.deepEqual(receipt.suites.map(s => s.id), [...regressionIds, 'upgrade-from-previous-release']);
+    assert.deepEqual(receipt.suites.map(s => s.result), ['FAIL:1', ...regressionIds.map(() => 'NOT_RUN')]);
+    assert.equal(receipt.partial, true);
+    assert.deepEqual(receipt.filters, [`ONLY_GROUPS=${value.replace(',', ' ')}`]);
+  }
+  // A selection that completes is usable, and still never certifies a complete run.
+  const upgradeOnly = setup(t);
+  assert.equal((await launch(upgradeOnly, { ONLY_GROUPS: 'upgrade' }).done).status, 0);
+  const receipt = matchingReports(upgradeOnly);
+  assert.deepEqual(receipt.suites.map(s => [s.id, s.result]), [['upgrade-from-previous-release', 'PASS']]);
+  assert.equal(receipt.outcome, 'INCONCLUSIVE'); assert.equal(receipt.selectionOutcome, 'PASS');
+  // A name that is no group selects nothing, and nothing is never a success.
+  const none = setup(t);
+  assert.equal((await launch(none, { ONLY_GROUPS: 'no-such-group' }).done).status, 1);
+  assert.equal(report(none).totals.registered, 0);
 });
 
 test('confirmed failure and missing evidence are both retained', async t => {
@@ -210,7 +307,10 @@ test('preflight failure preserves exit 2 and incomplete matching reports', async
 });
 
 test('pure reducer never passes empty, unknown or unfinished states', () => {
-  for (const suites of [[], [{ result: 'PENDING' }], [{ result: 'RUNNING' }], [{ result: 'MISSING' }], [{ result: 'BOGUS' }]]) {
+  for (const suites of [[], [{ result: 'PENDING' }], [{ result: 'RUNNING' }], [{ result: 'MISSING' }], [{ result: 'BOGUS' }],
+    [{ result: 'SKIPPED' }], [{ result: 'PASS' }, { result: 'SKIPPED' }], [{ result: 'FAIL:1' }, { result: 'SKIPPED' }]]) {
     assert.equal(summarizeComprehensive(suites).outcome, 'INCONCLUSIVE');
   }
+  assert.deepEqual(summarizeComprehensive([{ result: 'PASS' }, { result: 'SKIPPED' }]).totals,
+    { pass: 1, fail: 0, missing: 0, skipped: 1, unfinished: 0, executed: 1, registered: 2 });
 });

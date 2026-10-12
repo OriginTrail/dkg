@@ -76,6 +76,10 @@ DEVNET_ENABLE_PUBLISHER=1 ./scripts/devnet.sh start 6
 
 Keep the generated devnet report with the release notes. If this gate fails, fix `main` through PR review and rerun the gate before tagging.
 
+The run ends with the regression scripts and the upgrade suite (`scripts/devnet-test-upgrade.sh`). The upgrade suite replaces the devnet with one started on the previous release (`DEVNET_UPGRADE_FROM`, by default the newest release tag below the workspace version), writes through it on every store backend, restarts every node on this checkout's build on the same data, and requires that the network still serves what it held and can publish and receive again. It needs the release tags in the checkout (`git fetch --tags`) and Docker, and the first run on a tag builds that tag once under `.devnet-versions/`.
+
+A suite that could not exercise its scenario is reported as `SKIPPED` and the run as `INCONCLUSIVE`. That is not a pass: remove the cause (for example a devnet started without `DEVNET_ENABLE_PUBLISHER=1`, or a checkout without tags) and run the gate again.
+
 ## 5) Canary tagging workflow
 
 Create and push the canary/prerelease tag from the devnet-validated `main` commit. Tags **must be signed** (`git tag -s`): the `release:verify-tag` publish preflight in §6a rejects any tag without a PGP/SSH signature block, so an unsigned `git tag -a` tag cannot be published — it fails the release run at the first step.
