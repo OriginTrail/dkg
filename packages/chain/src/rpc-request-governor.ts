@@ -639,10 +639,15 @@ export class RpcRequestGovernor {
       && this.#backgroundWorkHasWaited();
     // At most one aged background request jumps the foreground queue per
     // scheduling turn. Its own bucket keeps this within the background share;
-    // the single admission keeps foreground latency bounded.
+    // the single admission keeps foreground latency bounded. It jumps an
+    // ordinary foreground request, never an authority read, and which of the
+    // two the next permit goes to is the turn rule's decision: under that rule
+    // an ordinary request is admitted while an authority waiter still sits at
+    // the head of the queue, so the head alone would deny the background class
+    // its turn for as long as authority reads keep arriving.
     if (
       this.#foregroundQueue.length > 0
-      && this.#foregroundQueue[0]?.admissionPriority !== 'authority'
+      && this.#foregroundQueue[this.#nextForegroundWaiter()]?.admissionPriority !== 'authority'
       && agedBackgroundHasCapacity
     ) {
       this.#resolveWaiter(this.#backgroundQueue, backgroundNext);
