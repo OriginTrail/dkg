@@ -925,23 +925,39 @@ export async function readDurableMetaPage(params: {
   // build does not end with the request that started it: a requester that
   // stops waiting finds the plan on its retry instead of starting it again.
   const sessionPlan = params.metaPlanMemo !== undefined && params.rowListCacheKey !== undefined;
-  const getPlan = createSessionPlanGetter(
+  let startedBuild: Promise<unknown> | undefined;
+  const loadSessionPlan = createSessionPlanGetter(
     params.metaPlanMemo,
     params.rowListCacheKey,
     params.refreshRowList === true,
-    (signal) => buildDurableMetaPlan({
-      store: params.store,
-      contextGraphId: params.contextGraphId,
-      registeredSubGraphNames: params.registeredSubGraphNames,
-      budgetKey: cache?.key ?? `durable-meta:${params.contextGraphId}`,
-      signal: sessionPlan ? undefined : signal,
-    }).catch((error: unknown) => {
-      if (sessionPlan) params.onSessionPlanFailure?.(error);
-      throw error;
-    }),
+    (signal) => {
+      const build = buildDurableMetaPlan({
+        store: params.store,
+        contextGraphId: params.contextGraphId,
+        registeredSubGraphNames: params.registeredSubGraphNames,
+        budgetKey: cache?.key ?? `durable-meta:${params.contextGraphId}`,
+        signal: sessionPlan ? undefined : signal,
+      }).catch((error: unknown) => {
+        if (sessionPlan) params.onSessionPlanFailure?.(error);
+        throw error;
+      });
+      if (sessionPlan) startedBuild = build;
+      return build;
+    },
     'Durable meta sync session plan expired before page completion',
     params.refreshGeneration,
   );
+  // The request that started a build stays until that build has settled, also
+  // when its requester has left: the build is this request's work, so it keeps
+  // the request's place in the responder's limits instead of running beside them.
+  const getPlan: typeof loadSessionPlan = async (pageOffset, pageSignal) => {
+    try {
+      return await loadSessionPlan(pageOffset, pageSignal);
+    } catch (error) {
+      await startedBuild?.catch(() => {});
+      throw error;
+    }
+  };
   const page = await readResponderRowsPage(
     cache,
     // Store-paged lane (no session, or a metadata graph too large for a

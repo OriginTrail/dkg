@@ -112,9 +112,16 @@ function storeOptions(signal: AbortSignal | undefined, source: string): QueryOpt
   return { signal, priority: 'background', source };
 }
 
-function sparqlInteger(value: string | undefined): number {
-  const match = String(value ?? '').match(/\d+/);
-  return match ? Math.floor(Number(match[0])) : 0;
+/**
+ * The value of a COUNT binding. The counts are the plan's bounds and its
+ * cursor, so a row without a count is an unexpected store result, not zero.
+ */
+function countOf(row: Record<string, string> | undefined, source: string): number {
+  const value = stripMetadataLiteral(row?.['count']);
+  if (value === undefined || !/^\d+$/.test(value)) {
+    throw new Error(`Durable meta plan: ${source} returned a row without a count`);
+  }
+  return Number(value);
 }
 
 async function queryPlanBindings(
@@ -188,7 +195,7 @@ export async function buildDurableMetaPlan(params: {
       { SELECT ?s WHERE { GRAPH <${graph}> { ?s ?p ?o } } LIMIT ${limits.maxRows + 1} }
     }
   `, 'sync.responder.countDurableMetaPlanRows', budgetKey, signal);
-  const rawRows = sparqlInteger(counted[0]?.['count']);
+  const rawRows = countOf(counted[0], 'the row count');
   if (rawRows > limits.maxRows) throw refuse('snapshot_rows', rawRows, limits.maxRows);
 
   // One unsorted scan of the one metadata graph, one row per subject. Its bound
@@ -227,7 +234,7 @@ export async function buildDurableMetaPlan(params: {
   };
   for (const group of await readGroups(admissionExpression, 'sync.responder.readDurableMetaPlanSubjects')) {
     const subject = group['s'];
-    const rowCount = sparqlInteger(group['count']);
+    const rowCount = countOf(group, 'the subject scan');
     if (!subject || rowCount === 0) continue;
     if (isIriTerm(subject)) admit(subject, rowCount);
     else blankNodeRows += rowCount;
@@ -257,7 +264,7 @@ export async function buildDurableMetaPlan(params: {
     const underAssertionPath = `(isIRI(?s) && CONTAINS(STR(?s), "${DURABLE_META_ASSERTION_SUBJECT_MARKER}"))`;
     for (const group of await readGroups(underAssertionPath, 'sync.responder.readDurableMetaPlanAssertionSubjects')) {
       const subject = group['s'];
-      const rowCount = sparqlInteger(group['count']);
+      const rowCount = countOf(group, 'the scan of subjects under an assertion path');
       if (!subject || rowCount === 0 || planned.has(subject)) continue;
       const name = nameOf(subject);
       if (name !== undefined) admit(subject, rowCount, lifecycleOfName.get(name));

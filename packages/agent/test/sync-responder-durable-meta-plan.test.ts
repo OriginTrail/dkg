@@ -597,13 +597,20 @@ describe('durable-meta session plan', () => {
     });
 
     const leaving = new AbortController();
-    const first = page(leaving.signal, true).catch((error: unknown) => error);
+    let settled = false;
+    const first = page(leaving.signal, true)
+      .catch((error: unknown) => error)
+      .finally(() => { settled = true; });
     await vi.waitFor(() => expect(signalsSeen).toHaveLength(1));
     leaving.abort(new Error('requester stopped waiting'));
-    expect(await first).toMatchObject({ message: 'requester stopped waiting' });
-    // The build was not tied to that request, and it goes on.
+    // The build was not tied to that request's signal, and it goes on. The
+    // request that started it stays until it has settled, so the build keeps
+    // that request's place in the responder's limits.
     expect(signalsSeen).toEqual([undefined]);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(settled).toBe(false);
     release();
+    expect(await first).toMatchObject({ message: 'requester stopped waiting' });
 
     // The retry of the same session finds the plan instead of starting it again.
     expect(await page(undefined, false)).toHaveLength(1 + 2 * DESCRIPTOR_ROWS);
@@ -642,12 +649,78 @@ describe('durable-meta session plan', () => {
     }).catch((error: unknown) => error);
     await vi.waitFor(() => expect(started).toBe(true));
     leaving.abort(new Error('requester stopped waiting'));
-    expect(await request).toMatchObject({ message: 'requester stopped waiting' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
     expect(reported).toEqual([]);
 
     const storeFailure = new Error('the store gave up on the query');
     fail(storeFailure);
-    await vi.waitFor(() => expect(reported).toEqual([storeFailure]));
+    // The request ends as the one its requester left; what ended the build is
+    // reported apart from it.
+    expect(await request).toMatchObject({ message: 'requester stopped waiting' });
+    expect(reported).toEqual([storeFailure]);
+    await store.close();
+  });
+
+  it('does not let a request that joined a build wait for it after its requester has left', async () => {
+    const cgId = 'meta-plan-joiner';
+    const store = await storeWithDescriptors(cgId, 2);
+    const metaPlanMemo = createResponderDurableMetaPlanMemo();
+    const original = store.query.bind(store);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let builds = 0;
+    (store as { query: TripleStore['query'] }).query = async (sparql, options) => {
+      if (options?.source === 'sync.responder.countDurableMetaPlanRows') {
+        builds += 1;
+        await gate;
+      }
+      return original(sparql, options);
+    };
+    const page = (signal: AbortSignal | undefined, refreshRowList: boolean) => readDurableMetaPage({
+      store,
+      contextGraphId: cgId,
+      registeredSubGraphNames: [],
+      offset: 0,
+      limit: 1_000,
+      signal,
+      rowListCacheKey: 'peer:durable-meta:joiner',
+      refreshRowList,
+      refreshGeneration: 'peer:durable-meta:joiner\u0000session',
+      metaPlanMemo,
+    });
+
+    const starter = page(undefined, true);
+    await vi.waitFor(() => expect(builds).toBe(1));
+    const leaving = new AbortController();
+    const joiner = page(leaving.signal, false).catch((error: unknown) => error);
+    leaving.abort(new Error('joiner stopped waiting'));
+    // It did not start the build, so it has nothing to stay for.
+    expect(await joiner).toMatchObject({ message: 'joiner stopped waiting' });
+    release();
+    expect(await starter).toHaveLength(1 + 2 * DESCRIPTOR_ROWS);
+    expect(builds).toBe(1);
+    await store.close();
+  });
+
+  it('treats a count the store did not return as an unexpected result, not as zero', async () => {
+    const cgId = 'meta-plan-count';
+    const store = await storeWithDescriptors(cgId, 1);
+    const original = store.query.bind(store);
+    const withoutCount = (source: string) => {
+      (store as { query: TripleStore['query'] }).query = async (sparql, options) => {
+        const result = await original(sparql, options);
+        if (options?.source !== source || result.type !== 'bindings') return result;
+        return { ...result, bindings: result.bindings.map(({ count: _count, ...row }) => row) };
+      };
+    };
+    const build = () => buildDurableMetaPlan({ store, contextGraphId: cgId, registeredSubGraphNames: [], budgetKey: 'count' });
+
+    withoutCount('sync.responder.countDurableMetaPlanRows');
+    await expect(build()).rejects.toThrow('the row count returned a row without a count');
+    withoutCount('sync.responder.readDurableMetaPlanSubjects');
+    await expect(build()).rejects.toThrow('the subject scan returned a row without a count');
+    (store as { query: TripleStore['query'] }).query = original;
+    await expect(build()).resolves.toMatchObject({ totalRows: 1 + DESCRIPTOR_ROWS });
     await store.close();
   });
 
