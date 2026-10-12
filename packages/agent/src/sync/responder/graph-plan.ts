@@ -572,20 +572,16 @@ export class DurableMetaPageFrameError extends Error {
  * boundary — so a normal small-subject page stays ~`rowLimit` rows (extended to
  * complete the straddling subject) instead of ballooning to the full byte budget.
  *
- * Subjects are grouped by {@link metaSubjectKey} over `rows`, which is ONE query's
- * result (a cached snapshot or a single store-paged window), so a blank-node
- * subject's rows are self-consistently labelled and stay grouped (same
- * single-query invariant as the #1788 fix). `trailingComplete` says whether the
- * LAST subject in `rows` is fully present; when false that trailing subject is
- * treated as incomplete and the function returns -1 ("need more rows") so the
- * caller grows the window to complete it.
+ * Subjects are grouped by {@link metaSubjectKey} over `rows`, in which every
+ * subject is whole: a cached page is extended to a subject boundary, and a plan
+ * window reads whole subjects (the non-IRI tail from one query, so its labels
+ * are self-consistent and its subjects stay grouped).
  */
 function subjectAtomicBudgetEnd(
   rows: readonly SyncRow[],
   start: number,
   maxBytes: number,
   rowLimit: number,
-  trailingComplete: boolean,
   oversizedPolicy: MetaOversizedSubjectPolicy = 'byte-fit',
   contextGraphId = '',
 ): number {
@@ -604,9 +600,6 @@ function subjectAtomicBudgetEnd(
       runBytes += serializedResponderRowByteLength(rows[j]) + (i === start && j === i ? 0 : 1);
       j += 1;
     }
-    // The subject is fully present iff a later subject follows it in `rows`, or
-    // the caller says the tail is complete.
-    const complete = j < n || trailingComplete;
     if (bytes + runBytes > safeMax) {
       // This whole subject won't fit within the budget. `bytes + runBytes` is the
       // frame size of every prior (whole) subject plus this one — the smallest
@@ -638,13 +631,6 @@ function subjectAtomicBudgetEnd(
         k += 1;
       }
       return k;
-    }
-    if (!complete) {
-      // Trailing subject fits SO FAR but may continue beyond `rows`. It is not
-      // over budget, so it should be INCLUDED whole once fully read — signal
-      // "need more rows" so the caller grows the window to complete it (rather
-      // than deferring a subject that would fit).
-      return -1;
     }
     bytes += runBytes;
     lastBoundary = j;
@@ -954,7 +940,7 @@ export async function readDurableMetaPage(params: {
     async (offset, limit, signal) => {
       const window = await readDurableMetaPlanWindow(params.store, await getPlan(offset, signal), offset, limit, signal);
       return window.slice(0, subjectAtomicBudgetEnd(
-        window, 0, maxResponseBytes, limit, true, oversizedSubjectPolicy, params.contextGraphId,
+        window, 0, maxResponseBytes, limit, oversizedSubjectPolicy, params.contextGraphId,
       ));
     },
     params.offset,
@@ -995,7 +981,6 @@ export async function readDurableMetaPage(params: {
     0,
     maxResponseBytes,
     Number.MAX_SAFE_INTEGER,
-    true,
     oversizedSubjectPolicy,
     params.contextGraphId,
   ));
