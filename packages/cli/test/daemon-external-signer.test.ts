@@ -295,7 +295,10 @@ describe('daemon with an external signer', () => {
     const transactions = fake.calls('eth_signTransaction');
     expect(transactions.length).toBeGreaterThan(0);
     expect(transactions.every((request) => request.authorization === `Bearer ${PAYER_TOKEN}`)).toBe(true);
-    expect(await allOutput(daemon!)).toContain(`Auto-registered default agent "external-signer-test" → ${defaultAuthor.address}`);
+    // The node token acts as the default agent: the default author, registered by address at start.
+    const identity = await api('/api/agent/identity');
+    expect(identity.status).toBe(200);
+    expect(((await identity.json()) as { agentAddress: string }).agentAddress).toBe(defaultAuthor.address);
   });
 
   it('runs the publish journey with the node token and no local key', async () => {
