@@ -17,7 +17,8 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { DKGAgent } from '../src/index.js';
-import { externalAuthorControlDigestSigner } from '../src/external-author-signing.js';
+import { heldAuthorSigner } from '../src/author-signer.js';
+import { rfc64AuthorDigestSignerV1 } from '../src/rfc64/control-envelope-signer-v1.js';
 import {
   RFC64_UNREGISTERED_REPLICA_AUTHORITY_PREDICATE_V1,
   authenticateRfc64UnregisteredReplicaAuthorityEnvelopeV1,
@@ -137,9 +138,12 @@ describe('RFC-64 control objects of an author key held by the external signer', 
       signerFor: async () => misrouted,
       firstSignerOf: async () => ({ address: author.address, signer: misrouted }),
     } } };
-    const sign = await externalAuthorControlDigestSigner(config, author.address);
-    await expect(sign!(ethers.getBytes(ethers.id('author inventory head'))))
+    // An agent the node holds no key for: the external author key is looked up, then checked.
+    const agents = { getLocalAgentMode: () => 'self-sovereign' as const, getCustodialAgentPrivateKey: () => undefined };
+    const held = await heldAuthorSigner(agents, config, author.address);
+    expect(held).toBe(misrouted);
+    await expect(rfc64AuthorDigestSignerV1(OWNER, held!)(ethers.getBytes(ethers.id('author inventory head'))))
       .rejects.toThrow(/does not recover to author/);
-    expect(await externalAuthorControlDigestSigner({}, author.address)).toBeUndefined();
+    expect(await heldAuthorSigner(agents, {}, author.address)).toBeUndefined();
   });
 });

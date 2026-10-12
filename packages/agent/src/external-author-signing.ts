@@ -13,7 +13,6 @@ import type { AuthorSigner, ChainAdapter, ExternalAuthorSigners } from '@origint
 import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
 import type { AgentKeyRecord } from './agent-keystore.js';
 import type { DKGAgent } from './dkg-agent.js';
-import { rfc64AuthorDigestSignerV1 } from './rfc64/control-envelope-signer-v1.js';
 
 export interface ExternalAuthorConfig {
   readonly chainConfig?: { readonly authors?: ExternalAuthorSigners };
@@ -52,20 +51,6 @@ export async function externalAuthorSignerFor(
   const authors = config?.chainConfig?.authors;
   if (authors === undefined || !ethers.isAddress(address)) return undefined;
   return authors.signerFor(address);
-}
-
-/**
- * The EIP-191 signer of RFC-64 control objects issued by `address` (see
- * {@link rfc64AuthorDigestSignerV1}) when the external signer holds it as an
- * author key. Undefined when `address` is not one of its author keys: a payer
- * never signs as an author.
- */
-export async function externalAuthorControlDigestSigner(
-  config: ExternalAuthorConfig | undefined,
-  address: string,
-): Promise<((digest: Uint8Array) => Promise<string>) | undefined> {
-  const author = await externalAuthorSignerFor(config, address);
-  return author === undefined ? undefined : rfc64AuthorDigestSignerV1(address, author);
 }
 
 /**
