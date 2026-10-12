@@ -99,6 +99,10 @@
 #                             again what it held (default 240).
 #   DEVNET_UPGRADE_RECEIVE_WAIT_S   seconds new writes have to arrive after the
 #                             upgrade (default 300).
+#   DEVNET_UPGRADE_UPDATE_WAIT_S    seconds an update is asked again while Cores
+#                             decline it as temporarily unavailable (default 180:
+#                             a Core acknowledges an update only once it has
+#                             promoted the version being replaced).
 #   DEVNET_UPGRADE_MESH_WAIT_S      seconds the restarted nodes have to connect to
 #                             each other before the checks begin (default 90;
 #                             reported, never a failure by itself).
@@ -136,6 +140,7 @@ BASELINE_WAIT_S="${DEVNET_UPGRADE_BASELINE_WAIT_S:-300}"
 SERVE_WAIT_S="${DEVNET_UPGRADE_SERVE_WAIT_S:-240}"
 RECEIVE_WAIT_S="${DEVNET_UPGRADE_RECEIVE_WAIT_S:-300}"
 MESH_WAIT_S="${DEVNET_UPGRADE_MESH_WAIT_S:-90}"
+UPDATE_WAIT_S="${DEVNET_UPGRADE_UPDATE_WAIT_S:-180}"
 WAL_PAUSE_NODE="${DEVNET_UPGRADE_WAL_PAUSE_NODE:-}"
 DKG_API_MAXTIME="${DKG_API_MAXTIME:-180}"
 # The update-seal helpers read the chain through RPC_URL.
@@ -369,13 +374,29 @@ publish_asset() {
 }
 
 # update_asset <node> <graph> <asset id> <subject> <value>: owner-sealed update of a published asset.
+# A Core that has not promoted the version being replaced yet declines to
+# acknowledge its update as temporarily unavailable, and without a quorum the
+# update fails before anything reaches the chain. That is the answer a client
+# is meant to repeat, so the update is asked again for up to UPDATE_WAIT_S
+# seconds, and every repeat is printed.
 update_asset() {
-  local body response answer
-  body="$(build_update_body "$1" "$3" "$2" "$(quads_json "$4" "$5")")" || { LAST_ERROR="could not seal the update of asset $3 (owner key or chain read)"; return 1; }
-  response="$(api "$1" POST /api/update "$body")"
-  answer="$(body_of "$response")"
-  if [ "$(code_of "$response")" = "200" ] && [ "$(field "$answer" status)" = "confirmed" ] && [ "$(field "$answer" kaId)" = "$3" ]; then return 0; fi
-  LAST_ERROR="HTTP $(code_of "$response"): $(printf '%s' "$answer" | head -c 400)"
+  local body response answer began attempt=0
+  began=$(date +%s)
+  while :; do
+    attempt=$((attempt + 1))
+    body="$(build_update_body "$1" "$3" "$2" "$(quads_json "$4" "$5")")" || { LAST_ERROR="could not seal the update of asset $3 (owner key or chain read)"; return 1; }
+    response="$(api "$1" POST /api/update "$body")"
+    answer="$(body_of "$response")"
+    if [ "$(code_of "$response")" = "200" ] && [ "$(field "$answer" status)" = "confirmed" ] && [ "$(field "$answer" kaId)" = "$3" ]; then
+      [ "$attempt" -eq 1 ] || say "  the update of asset $3 on node $1 was confirmed at attempt $attempt, $(( $(date +%s) - began ))s after the first"
+      return 0
+    fi
+    case "$answer" in *CORE_TEMPORARILY_UNAVAILABLE*) : ;; *) break ;; esac
+    [ $(( $(date +%s) - began )) -lt "$UPDATE_WAIT_S" ] || break
+    say "  Cores declined the update of asset $3 on node $1 as temporarily unavailable (attempt $attempt): $(printf '%s' "$answer" | head -c 260); asking again"
+    sleep 5
+  done
+  LAST_ERROR="HTTP $(code_of "$response") at attempt $attempt: $(printf '%s' "$answer" | head -c 400)"
   return 1
 }
 

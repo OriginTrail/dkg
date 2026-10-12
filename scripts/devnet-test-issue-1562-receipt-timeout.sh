@@ -3,6 +3,14 @@
 # receipt deadline; Hardhat automine is paused and the publish must return the
 # configured RPC_TIMEOUT near that deadline (not after the transport's 5s attempt
 # plus poll sleep, and not the old hard-coded timeout).
+#
+# The temporary node gets the devnet's LOCAL chain-request budget whatever the
+# run uses (DEVNET_RPC_BUDGET, scripts/devnet.sh). The bound below is on the
+# whole publish request, of which the receipt wait is the last part. On the
+# shipped budget (10 requests a second, shared with the start-up reads of a
+# node that started seconds ago) one run answered the right 504 with the
+# configured deadline after 6.2 s, over the bound: the time before the receipt
+# wait is not what this script measures.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -28,7 +36,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 [[ ! -d "$NODE_DIR" ]] || fail "$NODE_DIR already exists"
-"$ROOT/scripts/devnet.sh" addnode "$NODE" edge >/dev/null
+DEVNET_RPC_BUDGET=local "$ROOT/scripts/devnet.sh" addnode "$NODE" edge >/dev/null
 "$ROOT/scripts/devnet.sh" stop-node "$NODE" >/dev/null
 NODE_DIR="$NODE_DIR" node --input-type=module <<'NODE'
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -49,11 +57,27 @@ done
 api "$NODE" POST /api/identity/ensure '{}' >/dev/null || true
 
 name="issue-1562-$(date +%s)-$$"; subject="urn:issue:1562:$name"
-api "$NODE" POST /api/knowledge-assets "{\"contextGraphId\":\"$CG\",\"name\":\"$name\"}" >/dev/null
-api "$NODE" POST "/api/knowledge-assets/$name/wm/write" \
-  "{\"contextGraphId\":\"$CG\",\"quads\":[{\"subject\":\"$subject\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"receipt deadline probe\\\"\",\"graph\":\"\"}]}" >/dev/null
-api "$NODE" POST "/api/knowledge-assets/$name/wm/finalize" "{\"contextGraphId\":\"$CG\"}" >/dev/null
-api "$NODE" POST "/api/knowledge-assets/$name/swm/share" "{\"contextGraphId\":\"$CG\"}" >/dev/null
+# A setup step that does not answer as expected ends the script here, with the
+# node's own answer, instead of later as a misleading failure of the publish.
+step() { # <what> <response> <accepted codes...>
+  local what="$1" response="$2" code; shift 2
+  for code in "$@"; do [[ "$(code_of "$response")" == "$code" ]] && return 0; done
+  fail "$what answered HTTP $(code_of "$response"): $(body_of "$response" | head -c 400)"
+}
+step "create" "$(api "$NODE" POST /api/knowledge-assets "{\"contextGraphId\":\"$CG\",\"name\":\"$name\"}")" 200 201
+step "write" "$(api "$NODE" POST "/api/knowledge-assets/$name/wm/write" \
+  "{\"contextGraphId\":\"$CG\",\"quads\":[{\"subject\":\"$subject\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"receipt deadline probe\\\"\",\"graph\":\"\"}]}")" 200
+step "finalize" "$(api "$NODE" POST "/api/knowledge-assets/$name/wm/finalize" "{\"contextGraphId\":\"$CG\"}")" 200
+# The node started seconds ago. A share it refuses for now (its view of the
+# chain or of the graph is not ready) is asked again, and each refusal printed.
+shared=''
+for attempt in $(seq 1 18); do
+  shared="$(api "$NODE" POST "/api/knowledge-assets/$name/swm/share" "{\"contextGraphId\":\"$CG\"}")"
+  [[ "$(code_of "$shared")" == 200 ]] && break
+  echo "[#1562] share answered HTTP $(code_of "$shared") (attempt $attempt): $(body_of "$shared" | head -c 300)"
+  sleep 5
+done
+step "share" "$shared" 200
 
 # Devnet enables interval mining by default. Disabling automine alone still
 # creates a block every second and can confirm the probe transaction, so pause

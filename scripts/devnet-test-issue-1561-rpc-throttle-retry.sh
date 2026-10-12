@@ -10,6 +10,14 @@
 # is not asked for a block again. The proxy must therefore have seen the block
 # read on BOTH endpoints (the throttled pass covered the whole pool) and at
 # least twice on the first (the pass after it was forwarded).
+#
+# The temporary node gets the devnet's LOCAL chain-request budget whatever the
+# run uses (DEVNET_RPC_BUDGET, scripts/devnet.sh): what is under test is the
+# node's answer to a provider that throttles, not the node's own request
+# budget. The steps before the publish are checked one by one and their answers
+# printed: on the shipped budget one run ended with the share not completed and
+# the publish refused for that reason, and the script had thrown the share's
+# answer away.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -63,7 +71,7 @@ proxy_pid=$!
 sleep 1
 curl -fsS "http://127.0.0.1:$PROXY_PORT/stats" >/dev/null || fail "fault proxy did not start"
 
-"$ROOT/scripts/devnet.sh" addnode "$NODE" edge >/dev/null
+DEVNET_RPC_BUDGET=local "$ROOT/scripts/devnet.sh" addnode "$NODE" edge >/dev/null
 "$ROOT/scripts/devnet.sh" stop-node "$NODE" >/dev/null
 NODE_DIR="$NODE_DIR" PROXY_PORT="$PROXY_PORT" node --input-type=module <<'NODE'
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -89,11 +97,27 @@ exhaustions_before="$(field "$(body_of "$status_before")" chain.rpcExhaustions)"
 api "$NODE" POST /api/identity/ensure '{}' >/dev/null || true
 
 name="issue-1561-$(date +%s)-$$"; subject="urn:issue:1561:$name"
-api "$NODE" POST /api/knowledge-assets "{\"contextGraphId\":\"$CG\",\"name\":\"$name\"}" >/dev/null
-api "$NODE" POST "/api/knowledge-assets/$name/wm/write" \
-  "{\"contextGraphId\":\"$CG\",\"quads\":[{\"subject\":\"$subject\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"429 recovery probe\\\"\",\"graph\":\"\"}]}" >/dev/null
-api "$NODE" POST "/api/knowledge-assets/$name/wm/finalize" "{\"contextGraphId\":\"$CG\"}" >/dev/null
-api "$NODE" POST "/api/knowledge-assets/$name/swm/share" "{\"contextGraphId\":\"$CG\"}" >/dev/null
+# A setup step that does not answer as expected ends the script here, with the
+# node's own answer, instead of later as a misleading failure of the publish.
+step() { # <what> <response> <accepted codes...>
+  local what="$1" response="$2" code; shift 2
+  for code in "$@"; do [[ "$(code_of "$response")" == "$code" ]] && return 0; done
+  fail "$what answered HTTP $(code_of "$response"): $(body_of "$response" | head -c 400)"
+}
+step "create" "$(api "$NODE" POST /api/knowledge-assets "{\"contextGraphId\":\"$CG\",\"name\":\"$name\"}")" 200 201
+step "write" "$(api "$NODE" POST "/api/knowledge-assets/$name/wm/write" \
+  "{\"contextGraphId\":\"$CG\",\"quads\":[{\"subject\":\"$subject\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"429 recovery probe\\\"\",\"graph\":\"\"}]}")" 200
+step "finalize" "$(api "$NODE" POST "/api/knowledge-assets/$name/wm/finalize" "{\"contextGraphId\":\"$CG\"}")" 200
+# The node started seconds ago. A share it refuses for now (its view of the
+# chain or of the graph is not ready) is asked again, and each refusal printed.
+shared=''
+for attempt in $(seq 1 18); do
+  shared="$(api "$NODE" POST "/api/knowledge-assets/$name/swm/share" "{\"contextGraphId\":\"$CG\"}")"
+  [[ "$(code_of "$shared")" == 200 ]] && break
+  echo "[#1561] share answered HTTP $(code_of "$shared") (attempt $attempt): $(body_of "$shared" | head -c 300)"
+  sleep 5
+done
+step "share" "$shared" 200
 result="$(api "$NODE" POST "/api/knowledge-assets/$name/vm/publish" "{\"contextGraphId\":\"$CG\"}")"
 [[ "$(code_of "$result")" == 200 ]] || fail "publish failed: $(body_of "$result")"
 [[ "$(field "$(body_of "$result")" status)" == confirmed ]] || fail "publish not confirmed"
