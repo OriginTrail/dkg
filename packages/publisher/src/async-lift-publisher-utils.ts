@@ -16,7 +16,9 @@ import type {
   RawLiftJobRequest,
   RawLiftRequest,
 } from './lift-job.js';
-import { parseLiteral } from './async-lift-control-plane.js';
+import { journalEntriesContextGraphId, parseLiteral } from './async-lift-control-plane.js';
+import type { JournalReadResult, VmPublishAdmissionJournalReader } from './async-lift-control-plane.js';
+import type { AsyncLiftPublisher } from './async-lift-publisher-types.js';
 import { PUBLICATION_PRICING_POLICIES } from './publication-pricing.js';
 export {
   CONTROL_CLAIM_TOKEN,
@@ -37,6 +39,7 @@ export {
   knowledgeAssetVmPublishLifecycleKey,
   serializeJournalEntry,
   parseJournalEntry,
+  summarizeJournal,
   serializeVmPublishIntentIndex,
   createJobSlug,
   jobSubject,
@@ -63,6 +66,50 @@ export function expectBindings(result: QueryResult): Array<Record<string, string
     throw new Error(`Expected SPARQL bindings result, got ${result.type}`);
   }
   return result.bindings;
+}
+
+/** Scope comes from publisher-owned provenance, never a request's inspection CG. */
+export type PublisherReadScope =
+  | { readonly kind: 'context-graph'; readonly contextGraphId: string }
+  | { readonly kind: 'operator-only' }
+  | { readonly kind: 'missing' };
+
+export interface PublisherJournalReadResult {
+  readonly scope: PublisherReadScope;
+  readonly journal: JournalReadResult;
+}
+
+/** Raw jobs do not carry authenticated graph identity; their reads are operator-only. */
+export function publisherJobReadScope(job: PersistedLiftJob | null): PublisherReadScope {
+  if (job === null) return { kind: 'missing' };
+  return job.request.jobType === 'knowledge-asset-vm-publish'
+    ? { kind: 'context-graph', contextGraphId: job.request.knowledgeAssetVmPublish.contextGraphId }
+    : { kind: 'operator-only' };
+}
+
+/** Authorize the same retained journal snapshot that will be returned after job cleanup. */
+export async function readPublisherJournalWithScope(
+  publisher: Pick<VmPublishAdmissionJournalReader, 'readJournalByJob'> & Pick<AsyncLiftPublisher, 'getStatus'>,
+  jobId: string,
+): Promise<PublisherJournalReadResult> {
+  const journal = await publisher.readJournalByJob(jobId);
+  const contextGraphId = journalEntriesContextGraphId(journal.entries);
+  return { journal, scope: contextGraphId === null
+    ? publisherJobReadScope(await publisher.getStatus(jobId))
+    : { kind: 'context-graph', contextGraphId } };
+}
+
+/** Canonical inventory projection; graph-scoped listings exclude legacy raw-lift jobs. */
+export function projectListedLiftJobs(
+  jobs: readonly (PersistedLiftJob | null)[],
+  contextGraphId: string | undefined,
+  project: (job: PersistedLiftJob) => PersistedLiftJob,
+): PersistedLiftJob[] {
+  return jobs.filter((job): job is PersistedLiftJob => {
+    if (job === null) return false;
+    const scope = publisherJobReadScope(job);
+    return contextGraphId === undefined || (scope.kind === 'context-graph' && scope.contextGraphId === contextGraphId);
+  }).map(project).sort(compareAcceptedJobs);
 }
 
 export function compareAcceptedJobs(a: PersistedLiftJob, b: PersistedLiftJob): number {

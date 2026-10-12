@@ -343,6 +343,7 @@ export default defineConfig({
       "test/join-encryption-key-cache.test.ts",
       "test/bounded-operation.test.ts",
       "test/private-read-chain-authority.test.ts",
+      "test/knowledge-asset-draft-read-authority.test.ts",
       "test/context-graph-authority-retry.test.ts",
       "test/context-graph-access-policy-state.test.ts",
       "test/context-graph-live-authority-fold.test.ts",

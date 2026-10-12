@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import { describe, expect, it } from 'vitest';
 import type { ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
@@ -51,7 +52,7 @@ const VALID_OBJECT_EVENT_DOC = {
 };
 
 function createResponse() {
-  const response = {
+  const response = Object.assign(new EventEmitter(), {
     statusCode: 0,
     headers: undefined as Record<string, string> | undefined,
     body: '',
@@ -66,7 +67,7 @@ function createResponse() {
       this.writableEnded = true;
       return this;
     },
-  };
+  });
   return response;
 }
 
@@ -451,6 +452,9 @@ describe('EPCIS events query route — per-request CG + sub-graph', () => {
   function captureSparql(): { agent: RequestContext['agent']; calls: Array<{ sparql: string; opts: unknown }> } {
     const calls: Array<{ sparql: string; opts: unknown }> = [];
     const agent = {
+      resolveContextGraphReadAuthority: async () => ({
+        outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant', metadataBootstrap: 'forbidden',
+      }),
       query: async (sparql: string, opts: unknown) => {
         calls.push({ sparql, opts });
         return { bindings: [] };

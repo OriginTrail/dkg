@@ -535,6 +535,7 @@ test('identity-wallet browser actions select the real-EVM chain scope', () => {
     'packages/node-ui/src/ui/stores/wallet.ts',
     'packages/node-ui/integration/identity-wallet-actions-v10.test.ts',
     'packages/cli/src/daemon/routes/identity-wallets.ts',
+    'packages/cli/src/context-graph-identifiers.ts',
   ]) {
     const plan = pullRequestPlan([change(filePath)]);
     assert.deepEqual(plan.evmScopes, ['chain'], filePath);
