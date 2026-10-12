@@ -238,7 +238,8 @@ import {
   type KeystoreEntry,
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
-import { externalSignerAgentPublicKey, registerExternalDefaultAgent } from './external-author-signing.js';
+import { externalSignerAgentPublicKey, signsThroughExternalSigner } from './external-author-signing.js';
+import { externalSignerDefaultAgent } from './default-agent.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
@@ -1370,8 +1371,8 @@ export class AgentRegistryMethods extends DKGAgentBase {
   }
 
   /**
-   * Auto-register the default "owner" agent from the first operational wallet
-   * (or an external signer's author key). Called on boot when no agents exist.
+   * Auto-register the default "owner" agent from the first operational wallet.
+   * Called on boot when no agents have been previously registered.
    */
   public async autoRegisterDefaultAgent(this: DKGAgent): Promise<void> {
     let opKey = this.config.chainConfig?.operationalKeys?.[0];
@@ -1380,12 +1381,8 @@ export class AgentRegistryMethods extends DKGAgentBase {
         opKey = (this.chain as any).getOperationalPrivateKey();
       } catch { /* adapter without key — skip */ }
     }
-    if (!opKey) {
-      // No operational key: with an external signer, one of its author keys (no key stored).
-      const author = await registerExternalDefaultAgent(this, this.config?.authorSigners, this.chain, this.config.name ?? 'owner', this.config.framework);
-      if (author) { this.defaultAgentAddress = author; await this.markDefaultAgent(author); }
-      return;
-    }
+    if (!opKey) return;
+
     const record = agentFromPrivateKey(opKey, this.config.name ?? 'owner', this.config.framework);
 
     this.localAgents.set(record.agentAddress, record);
@@ -1397,6 +1394,23 @@ export class AgentRegistryMethods extends DKGAgentBase {
 
     const ctx = createOperationContext('system');
     this.log.info(ctx, `Auto-registered default agent "${record.name}" → ${record.agentAddress}`);
+  }
+
+  /**
+   * Settle the node's default agent once at start, after `loadAgentsFromStore` restored the persisted one,
+   * and persist it when it changes: with an external signer, the account `externalSignerDefaultAgent` picks;
+   * otherwise the persisted default, else the first agent, else one from the operational key.
+   */
+  async reconcileDefaultAgent(this: DKGAgent): Promise<void> {
+    const authors = signsThroughExternalSigner(this.chain) ? this.config?.authorSigners : undefined;
+    if (this.localAgents.size === 0 && authors === undefined) return this.autoRegisterDefaultAgent();
+    const previous = this.defaultAgentAddress;
+    const kept = previous ?? this.localAgents.values().next().value?.agentAddress;
+    const target = authors === undefined ? kept : await externalSignerDefaultAgent(this, authors, kept, this.config.name ?? 'owner', this.config.framework);
+    if (target === undefined || target.toLowerCase() === previous?.toLowerCase()) return;
+    this.defaultAgentAddress = target;
+    await this.markDefaultAgent(target).catch(() => {});
+    this.log.info(createOperationContext('system'), `Default agent is now ${target}${previous === undefined ? '' : ` (was ${previous})`}`);
   }
 
   // ---------------------------------------------------------------------------

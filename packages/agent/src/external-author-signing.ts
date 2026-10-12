@@ -10,10 +10,8 @@
  */
 import { ethers } from 'ethers';
 import { operationalSigningOf, type AuthorSigner, type ChainAdapter, type ExternalAuthorSigners } from '@origintrail-official/dkg-chain';
-import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
 import type { AgentKeyRecord } from './agent-keystore.js';
 import { agentKeyWallet, externalAuthorSignerFor } from './author-signer.js';
-import type { DKGAgent } from './dkg-agent.js';
 
 /**
  * Whether the node signs through an external signer, as its chain adapter
@@ -24,8 +22,6 @@ import type { DKGAgent } from './dkg-agent.js';
 export function signsThroughExternalSigner(chain: Pick<ChainAdapter, 'operationalSigning'> | undefined): boolean {
   return operationalSigningOf(chain)?.external === true;
 }
-
-const log = new Logger('DKGAgent');
 
 interface TypedDataInput {
   domain: ethers.TypedDataDomain;
@@ -77,87 +73,6 @@ export async function externalAuthorGossipSigner(
   if (found === undefined) return undefined;
   const { address, signer } = found;
   return { agentAddress: address, signMessage: (message) => signer.signMessage(message) };
-}
-
-/**
- * Register the default agent of a node that signs through an external signer
- * and so holds no operational key to derive one from: the signer's default
- * author, else its first author account, registered by address like any agent
- * the signer holds (the signer signs the registration; the node stores no key).
- * Returns its address, or undefined when the signer serves no author account
- * or the registration fails; the node then has no default agent.
- */
-export async function registerExternalDefaultAgent(
-  agent: DKGAgent,
-  authors: ExternalAuthorSigners | undefined,
-  chain: Pick<ChainAdapter, 'operationalSigning'> | undefined,
-  name: string,
-  framework?: string,
-): Promise<string | undefined> {
-  if (!signsThroughExternalSigner(chain) || authors === undefined) return undefined;
-  const address = authors.defaultAuthor?.address ?? authors.addresses[0];
-  if (address === undefined) return undefined;
-  const ctx = createOperationContext('system');
-  try {
-    const record = await agent.registerAgent(name, { address, framework });
-    log.info(ctx, `Auto-registered default agent "${record.name}" → ${record.agentAddress}, an author key of the external signer`);
-    return record.agentAddress;
-  } catch (err) {
-    log.warn(ctx, `No default agent: registering author key ${address} of the external signer failed: ${err instanceof Error ? err.message : String(err)}`);
-    return undefined;
-  }
-}
-
-/**
- * The default author of the external signer, to become the node's default
- * agent, when the node signs through an external signer and its default agent
- * is another account, for example its former local wallet kept on as a payer.
- * What the node publishes without a selected agent is authored by the default
- * author, so the drafts it opens without one must be the default author's too.
- * A default author that is not an agent yet is registered by address first,
- * under a name no agent of the node has. The other agents stay registered, and
- * what any agent created keeps its author. Undefined (the default agent is
- * kept) without a default author or a default agent, when it already is the
- * default agent, or when its registration fails.
- */
-export async function defaultAuthorToAdopt(
-  agent: DKGAgent,
-  authors: ExternalAuthorSigners | undefined,
-  chain: Pick<ChainAdapter, 'operationalSigning'> | undefined,
-  name: string,
-  framework?: string,
-): Promise<string | undefined> {
-  const defaultAuthor = authors?.defaultAuthor?.address;
-  const previous = agent.getDefaultAgentAddress();
-  if (defaultAuthor === undefined || previous === undefined || !signsThroughExternalSigner(chain)) return undefined;
-  if (previous.toLowerCase() === defaultAuthor.toLowerCase()) return undefined;
-  const ctx = createOperationContext('system');
-  try {
-    let address = ethers.getAddress(defaultAuthor);
-    if (agent.getLocalAgentMode(address) === undefined) {
-      const taken = new Set(agent.listLocalAgents().map((record) => record.name));
-      address = (await agent.registerAgent(freeDefaultAuthorName(taken, name), { address, framework })).agentAddress;
-    }
-    log.info(ctx, `Default agent is now the external signer's default author ${address} (was ${previous})`);
-    return address;
-  } catch (err) {
-    log.warn(ctx, `Keeping the default agent: registering default author ${defaultAuthor} of the external signer failed: ${err instanceof Error ? err.message : String(err)}`);
-    return undefined;
-  }
-}
-
-/**
- * The name a default author is registered under when the node adopts it: the
- * node's name, else the first of `<name>-default-author`,
- * `<name>-default-author-2`, … that no agent of the node has, so each default
- * author adopted in turn gets its own name and the agents before it keep theirs.
- */
-function freeDefaultAuthorName(taken: ReadonlySet<string>, name: string): string {
-  if (!taken.has(name)) return name;
-  for (let n = 1; ; n += 1) {
-    const candidate = n === 1 ? `${name}-default-author` : `${name}-default-author-${n}`;
-    if (!taken.has(candidate)) return candidate;
-  }
 }
 
 /** Sign author typed data and return KAv10's compact (r, vs) form. */

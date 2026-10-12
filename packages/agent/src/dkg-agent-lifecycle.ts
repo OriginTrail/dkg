@@ -870,7 +870,7 @@ import {
   type ContextGraphMembershipSnapshot,
 } from './join-approval-restart-projection.js';
 import { verifiedCuratorDialAddress } from './curator-dial-address.js';
-import { defaultAuthorToAdopt, signsThroughExternalSigner } from './external-author-signing.js';
+import { signsThroughExternalSigner } from './external-author-signing.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
@@ -2414,21 +2414,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
 
-    // Load registered agents from triple store; auto-register default if none exist.
-    // loadAgentsFromStore restores defaultAgentAddress from the persisted
-    // isDefaultAgent marker, avoiding reliance on SPARQL result ordering.
+    // Load registered agents from triple store; loadAgentsFromStore restores
+    // defaultAgentAddress from the persisted isDefaultAgent marker, avoiding
+    // reliance on SPARQL result ordering. Then settle the default agent once.
     await this.loadAgentsFromStore();
-    if (this.localAgents.size === 0) {
-      await this.autoRegisterDefaultAgent();
-    }
-    if (!this.defaultAgentAddress && this.localAgents.size > 0) {
-      // Fallback: no persisted marker — pick first and persist for next boot
-      const first = this.localAgents.values().next().value!;
-      this.defaultAgentAddress = first.agentAddress;
-      await this.markDefaultAgent(first.agentAddress).catch(() => {});
-    }
-    const adopted = await defaultAuthorToAdopt(this, this.config.authorSigners, this.chain, this.config.name ?? 'owner', this.config.framework);
-    if (adopted !== undefined) { this.defaultAgentAddress = adopted; await this.markDefaultAgent(adopted).catch(() => {}); }
+    await this.reconcileDefaultAgent();
 
     const network = new LibP2PNetwork(this.node);
     // Local helper: race a lookup against an optional AbortSignal so

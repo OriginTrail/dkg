@@ -38,11 +38,9 @@ import { agentFromPrivateKey, registerSelfSovereignAgent } from '../src/agent-ke
 import { constructConfiguredChainAdapter } from '../src/configured-chain-adapter.js';
 import { operationalSignerSourceOf } from '../src/agent-chain-signer-source.js';
 import {
-  defaultAuthorToAdopt,
   externalAuthorGossipSigner,
   externalSignerAgentPublicKey,
   localGossipSigner,
-  registerExternalDefaultAgent,
   signsThroughExternalSigner,
 } from '../src/external-author-signing.js';
 import { isExternalAuthorCurator } from '../src/external-author-curator.js';
@@ -564,48 +562,84 @@ describe('external signer author keys', () => {
     expect(await isExternalAuthorCurator(authors, external, agentKey.address, payer.address)).toBe(true);
     expect(await isExternalAuthorCurator(authors, undefined, agentKey.address, payer.address)).toBe(false);
 
+    // A fresh node makes the default author its default agent only when its wallets sign externally.
     const agent = await stubAgent(remote);
-    agent.config = { authorSigners: authors };
-    expect(await registerExternalDefaultAgent(agent, authors, undefined, 'node')).toBeUndefined();
+    agent.config = { name: 'node', authorSigners: authors };
+    agent.chain = { ...agent.chain, operationalSigning: undefined };
+    await agent.reconcileDefaultAgent();
     expect(agent.localAgents.size).toBe(0);
-    expect(await registerExternalDefaultAgent(agent, authors, external, 'node')).toBe(defaultAuthor.address);
+    expect(agent.getDefaultAgentAddress()).toBeUndefined();
+    agent.chain = { ...agent.chain, ...external };
+    await agent.reconcileDefaultAgent();
+    expect(agent.getDefaultAgentAddress()).toBe(defaultAuthor.address);
     expect(agent.getLocalAgentMode(defaultAuthor.address)).toBe('self-sovereign');
   });
 
-  it('keeps the default agent when the default author is not to be adopted, or cannot be registered', async () => {
+  it('settles the default agent once at start, keeping it when the default author is not to be adopted or cannot be registered', async () => {
     const external = { operationalSigning: () => ({ external: true, payerAddresses: [payer.address] }) };
-    const authors = {
+    const authors: ExternalAuthorSigners = {
       defaultAuthor,
       addresses: [defaultAuthor.address],
       signerFor: async () => defaultAuthor,
       firstSignerOf: async () => ({ address: defaultAuthor.address, signer: defaultAuthor }),
     };
-    const agentWith = (defaultAgent: string | undefined, names: readonly string[] = ['node']) => ({
-      getDefaultAgentAddress: () => defaultAgent,
-      getLocalAgentMode: () => undefined,
-      listLocalAgents: () => names.map((name) => ({ name, agentAddress: agentKey.address })),
-      registerAgent: vi.fn(async () => { throw new Error('agent registrations are not signed here'); }),
-    });
-    // Nothing to adopt: no default author, no default agent, no external signing, or the default author already.
-    for (const [agent, configured, chain] of [
-      [agentWith(agentKey.address), { ...authors, defaultAuthor: undefined }, external],
-      [agentWith(undefined), authors, external],
-      [agentWith(agentKey.address), authors, {}],
-      [agentWith(defaultAuthor.address.toLowerCase()), authors, external],
-    ] as const) {
-      expect(await defaultAuthorToAdopt(agent as never, configured, chain, 'node')).toBeUndefined();
-      expect(agent.registerAgent).not.toHaveBeenCalled();
+    // A node with its loaded agents and persisted default agent, whose signer registers no agent.
+    const nodeWith = (
+      loaded: ReadonlyArray<readonly [string, string]>,
+      persisted: string | undefined,
+      configured: ExternalAuthorSigners = authors,
+      chain: object = external,
+    ) => {
+      const node = Object.create(DKGAgent.prototype) as any;
+      node.config = { name: 'node', authorSigners: configured };
+      node.chain = chain;
+      node.log = silentLog();
+      node.localAgents = new Map(loaded.map(([name, agentAddress]) => [agentAddress, { name, agentAddress, mode: 'self-sovereign' }]));
+      node.defaultAgentAddress = persisted;
+      node.registerAgent = vi.fn(async () => { throw new Error('agent registrations are not signed here'); });
+      node.markDefaultAgent = vi.fn(async () => {});
+      return node;
+    };
+    const writer = ['node', agentKey.address] as const;
+    const author = ['author', defaultAuthor.address] as const;
+
+    // Nothing to adopt: no default author, no external signing, or the default author is the default agent already.
+    for (const node of [
+      nodeWith([writer], agentKey.address, { ...authors, defaultAuthor: undefined }),
+      nodeWith([writer], agentKey.address, authors, {}),
+      nodeWith([writer, author], defaultAuthor.address.toLowerCase()),
+    ]) {
+      const before = node.getDefaultAgentAddress();
+      await node.reconcileDefaultAgent();
+      expect(node.getDefaultAgentAddress()).toBe(before);
+      expect(node.registerAgent).not.toHaveBeenCalled();
+      expect(node.markDefaultAgent).not.toHaveBeenCalled();
     }
-    // A default author the signer will not register: the default agent is kept. It was asked under a name no agent has.
+
+    // A default author that is an agent already becomes the default agent as it is.
+    const adopting = nodeWith([writer, author], agentKey.address);
+    await adopting.reconcileDefaultAgent();
+    expect(adopting.getDefaultAgentAddress()).toBe(defaultAuthor.address);
+    expect(adopting.registerAgent).not.toHaveBeenCalled();
+    expect(adopting.markDefaultAgent).toHaveBeenCalledExactlyOnceWith(defaultAuthor.address);
+
+    // A default author the signer will not register: the persisted default agent is kept, else the first agent
+    // becomes it. The registration was asked under a name no agent has.
     for (const [names, free] of [
       [['owner'], 'node'],
       [['node'], 'node-default-author'],
       [['node', 'node-default-author'], 'node-default-author-2'],
       [['node', 'node-default-author-2'], 'node-default-author'],
     ] as const) {
-      const refusing = agentWith(agentKey.address, names);
-      expect(await defaultAuthorToAdopt(refusing as never, authors, external, 'node')).toBeUndefined();
-      expect(refusing.registerAgent).toHaveBeenCalledWith(free, { address: defaultAuthor.address, framework: undefined });
+      const loaded = names.map((name) => [name, ethers.Wallet.createRandom().address] as const);
+      for (const persisted of [loaded[loaded.length - 1]![1], undefined]) {
+        const refusing = nodeWith(loaded, persisted);
+        await refusing.reconcileDefaultAgent();
+        expect(refusing.registerAgent).toHaveBeenCalledExactlyOnceWith(free, { address: defaultAuthor.address, framework: undefined });
+        expect(refusing.getDefaultAgentAddress()).toBe(persisted ?? loaded[0]![1]);
+        if (persisted === undefined) expect(refusing.markDefaultAgent).toHaveBeenCalledExactlyOnceWith(loaded[0]![1]);
+        else expect(refusing.markDefaultAgent).not.toHaveBeenCalled();
+      }
     }
   });
 
@@ -631,7 +665,7 @@ describe('external signer author keys', () => {
         agent.localAgents = new Map();
         agent.agentTokenIndex = new Map();
         agent.log = silentLog();
-        await agent.autoRegisterDefaultAgent();
+        await agent.reconcileDefaultAgent();
         expect(agent.localAgents.size).toBe(0);
         expect(agent.defaultAgentAddress).toBeUndefined();
       }
