@@ -1,3 +1,5 @@
+import { namedGraphsFromQuads, endsWithHighSurrogate, normalizeGraphUris, queryOptionsFromUpdateOptions } from "./graph-set-index-utils.js";
+import type { AtomicAssetReplacement } from './atomic-asset-group.js';
 import { performance } from 'node:perf_hooks';
 import {
   codePointLowerBound,
@@ -50,6 +52,7 @@ export type GraphSetMutationSource =
   | 'dropGraph'
   | 'replaceGraph'
   | 'replaceGraphAndSubject'
+  | 'replaceAssetGroup'
   | 'replaceSubject'
   | 'rfc64AuthorCommitCasV1'
   | 'query'
@@ -61,6 +64,7 @@ type TouchedGraphMutationSource =
   | 'deleteBySubjectPrefix'
   | 'replaceGraph'
   | 'replaceGraphAndSubject'
+  | 'replaceAssetGroup'
   | 'replaceSubject'
   | 'rfc64AuthorCommitCasV1'
   | 'update';
@@ -459,6 +463,18 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     }
     this.bumpMutation();
     await this.maintainTouchedGraphs([graphUri], 'replaceGraph', options);
+  }
+
+  async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
+    if (!this.inner.replaceAssetGroup) throw new UnsupportedTripleStoreCapabilityError('replaceAssetGroup', 'group-decorator');
+    try { await this.inner.replaceAssetGroup(assets, options); }
+    catch (error) {
+      if (!isStoreOperationNotStarted(error, 'replaceAssetGroup')) this.scheduleFullRefresh('replaceAssetGroup');
+      throw error;
+    }
+    if (!this.enabled) return;
+    this.bumpMutation();
+    await this.maintainTouchedGraphs([...new Set(assets.flatMap(a => [a.graphUri, a.metaGraphUri]))], 'replaceAssetGroup', options);
   }
 
   async replaceGraphAndSubject(
@@ -887,31 +903,6 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       // Observability hooks must not make already-committed store writes fail.
     }
   }
-}
-
-function namedGraphsFromQuads(quads: Quad[]): string[] {
-  return [...new Set(quads.map((quad) => quad.graph).filter(Boolean))];
-}
-
-function endsWithHighSurrogate(value: string): boolean {
-  if (value.length === 0) return false;
-  const lastCodeUnit = value.charCodeAt(value.length - 1);
-  return lastCodeUnit >= 0xD800 && lastCodeUnit <= 0xDBFF;
-}
-
-/** Filter falsy entries and de-duplicate a caller-supplied graph-URI hint list. */
-function normalizeGraphUris(graphs: readonly string[]): string[] {
-  return [...new Set(graphs.filter(Boolean))];
-}
-
-/**
- * Drop the update-only `touchedGraphs` hint, yielding the read-path `QueryOptions`
- * (source/priority/signal) to forward to index-maintenance reads (`hasGraph`) — so
- * the update-only field never crosses into a read call via structural assignability.
- */
-function queryOptionsFromUpdateOptions(options: UpdateOptions): QueryOptions {
-  const { touchedGraphs: _touchedGraphs, ...readOptions } = options;
-  return readOptions;
 }
 
 function positiveFiniteMs(value: number | undefined, fallback: number): number {

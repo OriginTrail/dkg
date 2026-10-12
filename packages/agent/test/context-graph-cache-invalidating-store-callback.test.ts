@@ -85,4 +85,25 @@ describe('createListContextGraphsCacheInvalidatingStore with the historical call
     expect(refused.markProjectionDirty).not.toHaveBeenCalled();
     expect(refused.invalidate).not.toHaveBeenCalled();
   });
+
+  it('forwards atomic groups and invalidates every deletion target on success or uncertain outcome', async () => {
+    const assets = [1, 2].map(n => ({ graphUri: `urn:data:${n}`, graphQuads: [],
+      metaGraphUri: 'urn:meta', metadataSubject: `urn:asset:${n}`, metadataQuads: [] }));
+    for (const setup of [open(), open(failing('replaceAssetGroup', new Error('response lost')))]) {
+      await setup.wrapper.replaceAssetGroup!(assets).catch(error => {
+        expect(error.message).toBe('response lost');
+      });
+      expect(setup.invalidate).toHaveBeenCalledTimes(1);
+      for (const asset of assets) {
+        expect(setup.markProjectionDirty).toHaveBeenCalledWith(undefined, asset.graphUri, undefined);
+        expect(setup.markProjectionDirty).toHaveBeenCalledWith(undefined, asset.metaGraphUri, asset.metadataSubject);
+      }
+    }
+    const refused = open(failing('replaceAssetGroup', Object.assign(new Error('rejected'), {
+      storeOperationOutcomeTag: STORE_OPERATION_OUTCOME_TAG, storeOperation: 'replaceAssetGroup', outcome: 'not_started',
+    })));
+    await expect(refused.wrapper.replaceAssetGroup!(assets)).rejects.toThrow('rejected');
+    expect(refused.invalidate).not.toHaveBeenCalled();
+    expect(refused.markProjectionDirty).not.toHaveBeenCalled();
+  });
 });

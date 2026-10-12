@@ -1,3 +1,5 @@
+import type { QueryOptions } from '../triple-store.js';
+import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
 import oxigraph from 'oxigraph';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
 import { existsSync, readFileSync, renameSync } from 'node:fs';
@@ -418,6 +420,18 @@ export class OxigraphStore implements TripleStore {
     }
     this.scheduleFlush();
     this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
+  }
+
+  async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
+    const plan = buildAtomicAssetGroupUpdate(assets);
+    for (const a of assets) {
+      assertQuadLiteralsMutf8Safe([...a.graphQuads, ...a.metadataQuads], { maxBytes: JAVA_WRITE_UTF_MAX_BYTES, label: 'replaceAssetGroup' });
+      statements.checkIris.replaceGraphAndSubject(a.graphUri, a.graphQuads, a.metaGraphUri, a.metadataSubject, a.metadataQuads);
+    }
+    options?.signal?.throwIfAborted();
+    this.store.update(plan.update);
+    this.scheduleFlush();
+    this.writeGen.recordWrite({ kind: 'graphs', graphs: plan.graphs });
   }
 
   async replaceGraphAndSubject(

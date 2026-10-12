@@ -22,6 +22,8 @@ export interface ReceivedExactBatchAsset {
   /** One unchanged negotiated exact-sync response, not the whole batch. */
   readonly dataBytes: Uint8Array;
   readonly chunkCount: number;
+  /** Bulk directory bound; absent on the unchanged exact v1 path. */
+  readonly plainBytes?: number;
 }
 interface Slot {
   metadata: Uint8Array; chunks: Uint8Array[]; bytes: number; chunkCount: number;

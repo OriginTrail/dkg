@@ -1,3 +1,5 @@
+import { createOperationContext } from "@origintrail-official/dkg-core";
+import { recoverPublicSnapshotBulk } from './public-snapshot-bulk.js';
 // SPDX-License-Identifier: Apache-2.0
 import {
   PublicGraphSnapshotCache,
@@ -22,6 +24,7 @@ export interface PublicSnapshotSyncOptions {
   /** Operator-configured peer identities, never populated from self-advertised roles. */
   trustedCorePeerIds: readonly string[];
   mode?: PublicSnapshotMode;
+  transport?: "exact" | "bulk";
   signal?: AbortSignal;
 }
 export class PublicSnapshotMethods {
@@ -87,10 +90,11 @@ export class PublicSnapshotMethods {
   ) {
     const { contextGraphId, onChainId } = options;
     const mode = options.mode ?? "core-cache";
+    const transport = options.transport ?? (process.env.DKG_PUBLIC_SNAPSHOT_BULK === "1" ? "bulk" : "exact");
     if (
       !validateContextGraphId(contextGraphId).valid ||
       !/^[1-9][0-9]{0,77}$/.test(onChainId) ||
-      !["core-cache", "rpc-only"].includes(mode)
+      !["core-cache", "rpc-only"].includes(mode) || !["exact", "bulk"].includes(transport)
     )
       throw new Error("Invalid snapshot job");
     const peers = [...new Set(options.trustedCorePeerIds)];
@@ -167,7 +171,21 @@ export class PublicSnapshotMethods {
           if (mode === "core-cache") await markCoreTrustedGraph(this.store, contextGraphId);
           assertCurrent();
           const uals = snapshot.assets.map((a) => buildKnowledgeAssetUalFromOnChainIdV1(snapshot.chainId, snapshot.assetStorage, BigInt(a.id)));
-          const committed = new Set<string>();
+          let committed = new Set<string>();
+          let bulkChunks: Awaited<ReturnType<typeof recoverPublicSnapshotBulk>>['chunks'] | undefined;
+          if (transport === 'bulk') {
+            const result = await recoverPublicSnapshotBulk(this, { contextGraphId, onChainId, peers, uals,
+              evidence, signal, assertCurrent, deadline: startedAt + 3_600_000, dataDir: this.config.dataDir,
+              shouldQuarantineCommitted: () => {
+                const current = this.subscribedContextGraphs.get(contextGraphId);
+                return !current || current.onChainId !== onChainId;
+              },
+              onCommitted: () => this.invalidateListContextGraphsCache(),
+              log: message => this.log.info(createOperationContext('sync'), message),
+            });
+            committed = result.committed; bulkChunks = result.chunks;
+          }
+
           const recover = async (batch: string[], transport: "stream-preferred" | "legacy") => {
             for (const peer of peers) {
               assertCurrent();
@@ -187,7 +205,7 @@ export class PublicSnapshotMethods {
             }
             return batch.filter(ual => !committed.has(ual));
           };
-          for (let offset = 0; offset < uals.length; offset += 10) {
+          for (let offset = 0; transport === "exact" && offset < uals.length; offset += 10) {
             const batch = uals.slice(offset, offset + 10);
             const remaining = await recover(batch, "stream-preferred");
             // The stream profile excludes private commitments. Only missing assets
@@ -205,7 +223,7 @@ export class PublicSnapshotMethods {
             fresh.snapshot.contextGraphStorage === snapshot.contextGraphStorage &&
             BigInt(fresh.snapshot.blockNumber) >= BigInt(snapshot.blockNumber);
           return {
-            mode,
+            mode, transport, bulkChunks,
             sourceCore: initial.sourceCore,
             coverageSourceCore: fresh.sourceCore,
             snapshotDigest: snapshot.snapshotDigest,

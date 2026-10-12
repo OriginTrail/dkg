@@ -108,11 +108,12 @@ const MAX_ROWS = 100_000;
 const UTF8 = new TextDecoder('utf-8', { fatal: true });
 
 /** Normal worker and graph-scoped callback; no direct INSERT or authority bypass. */
-export function createExactBatchVerifiedCommitter(options: ExactBatchVerifiedReceiverOptions) {
-  return async (received: ReceivedExactBatchAsset, signal?: AbortSignal): Promise<void> => {
+export function createExactBatchAssetVerifier(options: ExactBatchVerifiedReceiverOptions) {
+  return async (received: ReceivedExactBatchAsset, signal?: AbortSignal) => {
     signal?.throwIfAborted();
     let started = performance.now();
     const decoded = await decodeExactBatchAsset(received, { signal });
+    if (received.plainBytes !== undefined && received.plainBytes !== decoded.bytes.length) throw new Error('Bulk expanded size mismatch');
     observeExactBatch(() => options.onStage?.('decode', received.assetIndex, performance.now() - started));
     const metaGraph = `did:dkg:context-graph:${options.contextGraphId}${META_GRAPH_SUFFIX}`;
     started = performance.now();
@@ -143,9 +144,18 @@ export function createExactBatchVerifiedCommitter(options: ExactBatchVerifiedRec
     if (partition.assets.length !== 1 || partition.remainingData.length !== 0 || partition.remainingMeta.length !== 0) throw new Error('Exact batch requires one complete verified graph-scoped asset');
     const asset = partition.assets[0]!;
     if (asset.ual !== received.assetUal || asset.assertionGraph !== descriptor.assertionGraph || asset.assertionVersion.toString() !== descriptor.assertionVersion) throw new Error('Exact batch verified identity mismatch');
+    return asset;
+  };
+}
+
+/** V1 keeps its original commit-before-ACK contract. Bulk reuses only verification. */
+export function createExactBatchVerifiedCommitter(options: ExactBatchVerifiedReceiverOptions) {
+  const verify = createExactBatchAssetVerifier(options);
+  return async (received: ReceivedExactBatchAsset, signal?: AbortSignal): Promise<void> => {
+    const asset = await verify(received, signal);
     const deadline = options.authenticationDeadline();
     if (!Number.isFinite(deadline) || deadline <= Date.now()) throw new Error('Exact batch authentication deadline expired');
-    started = performance.now();
+    const started = performance.now();
     const outcome = await options.storeGraphScopedAsset({ asset, authenticationDeadline: deadline, signal });
     observeExactBatch(() => options.onStage?.('authenticate-and-store', received.assetIndex, performance.now() - started));
     // The prototype ACK certifies a completed normal atomic application, not an

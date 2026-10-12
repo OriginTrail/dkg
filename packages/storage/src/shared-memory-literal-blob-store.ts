@@ -1,3 +1,4 @@
+import type { AtomicAssetReplacement } from './atomic-asset-group.js';
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -127,6 +128,20 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     }
     await this.withExternalizedQuads(quads, (externalized) =>
       this.inner.replaceGraph!(graphUri, externalized, options));
+  }
+
+  async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
+    if (!this.inner.replaceAssetGroup) throw new UnsupportedTripleStoreCapabilityError('replaceAssetGroup', 'group-decorator');
+    const quads = assets.flatMap(a => [...a.graphQuads, ...a.metadataQuads]);
+    await this.withExternalizedQuads(quads, externalized => {
+      let offset = 0;
+      const replaced = assets.map(a => {
+        const graphQuads = externalized.slice(offset, offset += a.graphQuads.length);
+        const metadataQuads = externalized.slice(offset, offset += a.metadataQuads.length);
+        return { ...a, graphQuads, metadataQuads };
+      });
+      return this.inner.replaceAssetGroup!(replaced, options);
+    });
   }
 
   async replaceGraphAndSubject(

@@ -35,6 +35,8 @@ import {
   getManagedOxigraphRuntimeConstructionAuthorityV1,
 } from './managed-oxigraph-runtime-store.js';
 
+import type { AtomicAssetReplacement } from './atomic-asset-group.js';
+
 export interface Quad {
   subject: string;
   predicate: string;
@@ -225,6 +227,9 @@ export interface TripleStore {
    * in a second named graph. Implementations MUST guarantee one commit boundary
    * for both replacements; generic update() support is not sufficient.
    */
+  /** One transaction for distinct assertion/metadata pairs. Refusal must precede mutation. */
+  replaceAssetGroup?(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void>;
+
   replaceGraphAndSubject?(
     graphUri: string,
     graphQuads: Quad[],

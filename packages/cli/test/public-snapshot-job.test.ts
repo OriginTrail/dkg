@@ -39,6 +39,15 @@ const body = JSON.stringify({
   trustedCorePeerIds: ["configured-core"],
 });
 describe("public snapshot administrator API", () => {
+  it("records an explicit bulk transport and rejects unknown transport values", async () => {
+    const sync = vi.fn(async () => ({ current: true }));
+    const url = await serve(true, sync);
+    const input = { ...JSON.parse(body), transport: 'bulk' };
+    expect((await fetch(url, { method: 'POST', body: JSON.stringify(input) })).status).toBe(202);
+    await vi.waitFor(async () => expect((await (await fetch(url)).json()).request.transport).toBe('bulk'));
+    expect(sync).toHaveBeenCalledWith(input);
+    expect((await fetch(url, { method: 'POST', body: JSON.stringify({ ...input, transport: 'parallel' }) })).status).toBe(400);
+  });
   it("denies an agent principal and never starts recovery", async () => {
     const sync = vi.fn(async () => ({}));
     const url = await serve(false, sync);

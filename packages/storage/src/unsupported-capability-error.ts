@@ -10,6 +10,7 @@ import {
 export type TripleStoreCapability =
   | 'update'
   | 'replaceGraph'
+  | 'replaceAssetGroup'
   | 'replaceGraphAndSubject'
   | 'replaceSubject'
   | 'rfc64AuthorCommitCasV1';

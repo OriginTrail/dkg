@@ -1,3 +1,5 @@
+import { reconcileAfterMaterialization } from './sync/requester/post-materialization.js';
+import { registerPublicBulkGraph } from './sync/responder/bulk-graph-stream.js';
 import { createRemoteQueryHandler } from "./remote-query-handler.js";
 import { syncReconcilerEnabled, syncOnConnectEnabled, durableSyncEnabled } from './internal/lifecycle-sync-policy.js';
 import { emptySwmRecoveryResult } from './sync/shared-memory-completion.js';
@@ -134,7 +136,6 @@ import {
   type VerifyContextGraphBinding,
 } from './sync/requester/graph-scoped-materialization.js';
 import {
-  reconcileFinalizedSwmTwin,
   type FinalizedSwmTwinRetirement,
 } from './sync/requester/finalized-swm-twin-reconciliation.js';
 import {
@@ -2009,6 +2010,14 @@ function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
 }
 
 export class LifecycleSyncMethods extends DKGAgentBase {
+  async reconcileAfterGraphScopedMaterialization(this: DKGAgent, asset: VerifiedGraphScopedAsset, ctx: OperationContext): Promise<void> {
+    await reconcileAfterMaterialization({ store: this.store, writeLocks: this.writeLocks, log: this.log,
+      invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
+      retireFinalizedSwmTwinCandidate: (candidate, context) => this.retireFinalizedSwmTwinCandidate(candidate, context),
+      retireLegacySwmAfterVerifiedVmTwin: params => this.retireLegacySwmAfterVerifiedVmTwin(params),
+    }, asset, ctx);
+  }
+
   async retireLegacySwmAfterVerifiedVmTwin(
     this: DKGAgent,
     input: Readonly<{
@@ -3267,7 +3276,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       onExperimentalExactBatchResources: resolveExactBatchStreamEnabled()
         && this.config.nodeRole === 'core'
         ? (resources) => {
-            const binding = createExactBatchResponderBinding({
+            const responderOptions: Parameters<typeof createExactBatchResponderBinding>[0] = {
               localPeerId: this.peerId,
               store: this.store,
               exportCache: resources.exportCache,
@@ -3286,6 +3295,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 `Exact batch responder refusal asset=${assetIndex} reason=${reason}${budgetReason ? ` budgetReason=${budgetReason}` : ''}`),
               onStage: (stage, assetIndex, durationMs, operationContext) => this.log.info(operationContext,
                 `Exact batch responder stage=${stage} asset=${assetIndex} durationMs=${durationMs.toFixed(3)}`),
+            };
+            const binding = createExactBatchResponderBinding(responderOptions);
+            if (process.env.DKG_PUBLIC_SNAPSHOT_BULK === '1') registerPublicBulkGraph(this.router, {
+              ...responderOptions,
+              onExport: (index, count, ctx) => this.log.info(ctx, `Bulk responder export asset=${index} wholePayloadExports=${count}`),
+              onPayload: (index, plain, encoded, ctx) => this.log.info(ctx, `Bulk responder payload asset=${index} plainBytes=${plain} encodedBytes=${encoded}`),
+              onStage: (stage, index, ms, ctx) => this.log.info(ctx, `Bulk responder stage=${stage} asset=${index} durationMs=${ms.toFixed(3)}`),
             });
             registerExperimentalExactBatchResponder(this.router,
               exactBatchTransportOptions(120_000), binding.authorizeRequest, binding.respond);
@@ -6439,47 +6455,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
             },
           });
-          if (outcome === 'applied') {
-            this.invalidateListContextGraphsCache();
-            try {
-              let retiredTwin: FinalizedSwmTwinRetirement | undefined;
-              const retirement = await reconcileFinalizedSwmTwin({
-                store: this.store,
-                writeLocks: this.writeLocks,
-                asset: authentication.asset,
-                retire: async (candidate) => {
-                  await this.retireFinalizedSwmTwinCandidate(candidate, ctx);
-                  retiredTwin = candidate;
-                },
-              });
-              if (retirement === 'retired') {
-                await this.retireLegacySwmAfterVerifiedVmTwin({
-                  contextGraphId: asset.contextGraphId,
-                  kaUal: asset.ual,
-                  assertionVersion: asset.assertionVersion,
-                  // The marker of the namespace whose twin was verified and
-                  // retired. Without it a twin in a named subgraph would
-                  // retire the root marker of the same asset.
-                  subGraphName: retiredTwin?.subGraphName,
-                });
-                this.invalidateListContextGraphsCache();
-                this.log.info(
-                  ctx,
-                  `Retired byte-identical SWM twin after durable VM materialization for ${asset.ual}`,
-                );
-              }
-            } catch (cause) {
-              // VM materialization is already durable and independently
-              // verified. A best-effort tier cleanup must never turn that
-              // success into a failed sync; the untouched SWM copy remains
-              // safe and the next durable replay can reconcile it again.
-              this.log.warn(
-                ctx,
-                `Deferred SWM twin reconciliation for ${asset.ual}: `
-                + `${cause instanceof Error ? cause.message : String(cause)}`,
-              );
-            }
-          }
+          if (outcome === 'applied') await this.reconcileAfterGraphScopedMaterialization(authentication.asset, ctx);
           return outcome;
         },
       }),

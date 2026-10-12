@@ -1,3 +1,5 @@
+import { buildBulkAssetGroupPlan } from './bulk-asset-group.js';
+import { validateAtomicAssetGroup, buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
 import { performance } from 'node:perf_hooks';
 import type {
   TripleStore,
@@ -466,6 +468,41 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     }
   }
 
+  async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
+    validateAtomicAssetGroup(assets);
+    for (const a of assets) {
+      assertQuadLiteralsMutf8Safe([...a.graphQuads, ...a.metadataQuads], { maxBytes: JAVA_WRITE_UTF_MAX_BYTES, label: 'replaceAssetGroup' });
+      statements.checkIris.replaceGraphAndSubject(a.graphUri, a.graphQuads, a.metaGraphUri, a.metadataSubject, a.metadataQuads);
+    }
+    const bulk = buildBulkAssetGroupPlan(assets);
+    if (bulk) {
+      await this.runStoreWork('replaceAssetGroup', options, async deadline => {
+        const post = async (body: string, contentType: string, accept?: string) => {
+          deadline.check();
+          const response = await deadline.waitFor(fetch(this.url, { method: 'POST',
+            headers: { 'Content-Type': contentType, ...(accept ? { Accept: accept } : {}) }, body, signal: deadline.signal }));
+          const text = await deadline.waitFor(readResponseTextBounded(response, 64 * 1024));
+          if (!response.ok) throw new Error(`Blazegraph bulk group failed (${response.status})`);
+          return text;
+        };
+        // All three stages occupy one scheduler admission and original operation deadline.
+        // No fallback is allowed after an upload or indeterminate publication.
+        await post(bulk.nquads, 'application/n-quads');
+        await post(bulk.update, SPARQL_UPDATE_CONTENT_TYPE);
+        const receipt = JSON.parse(await post(bulk.receiptQuery, SPARQL_QUERY_CONTENT_TYPE, 'application/sparql-results+json'));
+        if (receipt?.boolean !== true) throw new Error('Bulk group publication receipt missing');
+        await post(bulk.cleanup, SPARQL_UPDATE_CONTENT_TYPE);
+      });
+      return;
+    }
+    const plan = buildAtomicAssetGroupUpdate(assets);
+    try { await this.sparqlUpdate(plan.update, options, 'replaceAssetGroup'); }
+    catch (error) {
+      await this.sparqlUpdate(plan.cleanup, { ...options, source: 'replaceAssetGroup.cleanup' }, 'replaceAssetGroup').catch(() => undefined);
+      throw error;
+    }
+  }
+
   async replaceGraphAndSubject(
     graphUri: string,
     graphQuads: DKGQuad[],
@@ -869,81 +906,6 @@ function parseBlazegraphConstructNQuads(text: string): DKGQuad[] {
   }
 
   return quads;
-}
-
-// =====================================================================
-// Oversized-literal guard
-// =====================================================================
-
-/**
- * Java Modified UTF-8 byte length of a string.
- *
- * Blazegraph uses `DataOutputStream.writeUTF()` for index keys, which
- * encodes strings in Java's Modified UTF-8 (MUTF-8).  The key
- * differences from standard UTF-8:
- *   - U+0000 (NUL) is encoded as 2 bytes (0xC0, 0x80) instead of 1
- *   - Supplementary codepoints (U+10000–U+10FFFF) are encoded as a
- *     UTF-16 surrogate pair, each surrogate taking 3 MUTF-8 bytes =
- *     6 bytes total (vs 4 in standard UTF-8)
- *
- * `writeUTF()` hard-caps the encoded length at 65 535 bytes.
- * Exceeding this triggers `java.io.UTFDataFormatException` and causes
- * the entire batch to fail with HTTP 500.
- */
-const BLAZEGRAPH_MUTF8_LIMIT = 65_535;
-
-function javaModifiedUtf8Length(str: string): number {
-  let len = 0;
-  for (let i = 0; i < str.length; i++) {
-    const code = str.charCodeAt(i);
-    if (code === 0) {
-      len += 2;
-    } else if (code <= 0x7f) {
-      len += 1;
-    } else if (code <= 0x7ff) {
-      len += 2;
-    } else if (code >= 0xd800 && code <= 0xdbff) {
-      // High surrogate — the low surrogate at i+1 will add another 3
-      len += 3;
-    } else {
-      len += 3;
-    }
-  }
-  return len;
-}
-
-/**
- * Check quads for literal objects that would exceed Blazegraph's
- * MUTF-8 index key limit.  Throws with details about the offending
- * quads so callers know the batch was NOT fully persisted.
- */
-function rejectOversizedLiterals(quads: DKGQuad[], maxBytes: number): DKGQuad[] {
-  const rejected: Array<{ subject: string; predicate: string; mutf8Len: number }> = [];
-  const out: DKGQuad[] = [];
-  for (const q of quads) {
-    if (q.object.startsWith('"')) {
-      const mutf8Len = javaModifiedUtf8Length(q.object);
-      if (mutf8Len > maxBytes) {
-        rejected.push({
-          subject: q.subject.slice(0, 120),
-          predicate: q.predicate.slice(0, 120),
-          mutf8Len,
-        });
-        continue;
-      }
-    }
-    out.push(q);
-  }
-  if (rejected.length > 0) {
-    const details = rejected
-      .map((r) => `  subject=${r.subject} predicate=${r.predicate} (${r.mutf8Len} MUTF-8 bytes)`)
-      .join('\n');
-    throw new Error(
-      `[BlazegraphStore] ${rejected.length} quad(s) exceed Blazegraph's ${maxBytes}-byte MUTF-8 limit ` +
-      `and would cause UTFDataFormatException. Rejected quads:\n${details}`,
-    );
-  }
-  return out;
 }
 
 // =====================================================================

@@ -1,6 +1,9 @@
 import { MULTICALL3_RUNTIME_CODE } from "../../chain/test/fixtures/multicall3-runtime-code.js";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { Contract, Wallet, ethers } from "ethers";
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { readFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { EVMChainAdapter } from "@origintrail-official/dkg-chain";
@@ -21,6 +24,8 @@ import {
 } from "../../chain/test/evm-test-context.js";
 
 const agents: DKGAgent[] = [];
+const directories: string[] = [];
+beforeEach(async () => { vi.stubEnv('DKG_PUBLIC_SNAPSHOT_BULK', '0'); before = await takeSnapshot(); });
 const graph = "public-snapshot-local";
 const abi = (name: string) =>
   JSON.parse(
@@ -31,17 +36,18 @@ const abi = (name: string) =>
   );
 let before: string;
 beforeAll(async () => {
-  before = await takeSnapshot();
   vi.stubEnv("DKG_EXACT_BATCH_STREAM_ENABLED", "1");
 });
-afterAll(async () => {
-  for (const agent of agents.reverse()) await agent.stop();
-  vi.unstubAllEnvs();
+afterEach(async () => {
+  for (const agent of agents.splice(0).reverse()) await agent.stop();
+  for (const directory of directories.splice(0)) await rm(directory, { recursive: true, force: true });
   await revertSnapshot(before);
 });
+afterAll(() => vi.unstubAllEnvs());
 
 describe("public snapshot recovery over live local nodes and chain", () => {
-  it("reuses coherent core evidence and verifies content without receiver asset RPCs", async () => {
+  it.each(["exact", "bulk"] as const)("reuses coherent core evidence without receiver asset RPCs (%s)", async transport => {
+    if (transport === "bulk") vi.stubEnv("DKG_PUBLIC_SNAPSHOT_BULK", "1");
     const { rpcUrl, hubAddress } = getSharedContext();
     const provider = createProvider();
     const signer = new Wallet(HARDHAT_KEYS.DEPLOYER, provider);
@@ -89,7 +95,7 @@ describe("public snapshot recovery over live local nodes and chain", () => {
           graph: assertionGraph,
         },
       ];
-      const privateRoot = n === 12 ? new Uint8Array(32).fill(7) : undefined;
+      const privateRoot = n === 12 && transport === "exact" ? new Uint8Array(32).fill(7) : undefined;
       const root = computeFlatKCRootV10(data, privateRoot ? [privateRoot] : []);
       await (
         await kas.createKnowledgeAsset(
@@ -149,8 +155,9 @@ describe("public snapshot recovery over live local nodes and chain", () => {
       chainAdapter: EVMChainAdapter,
       store: OxigraphStore,
     ) => {
+      const dataDir = await mkdtemp(join(tmpdir(), "snapshot-local-")); directories.push(dataDir);
       const a = await DKGAgent.create({
-        name,
+        dataDir, name,
         nodeRole,
         listenHost: "127.0.0.1",
         listenPort: 0,
@@ -217,9 +224,16 @@ describe("public snapshot recovery over live local nodes and chain", () => {
       }
       return recover(...args);
     });
+    if (transport === 'bulk') {
+      const replace = target.replaceAssetGroup.bind(target);
+      vi.spyOn(target, 'replaceAssetGroup').mockImplementation(async (...args) => {
+        if (!discoveredDuringRecovery) { discoveredDuringRecovery = true; await receiver.discoverContextGraphsFromStorage(); }
+        return replace(...args);
+      });
+    }
     const t = performance.now();
     const result = await receiver.syncPublicGraphSnapshot({
-      contextGraphId: graph,
+      transport, contextGraphId: graph,
       onChainId,
       trustedCorePeerIds: [core.peerId],
     });
@@ -243,7 +257,7 @@ describe("public snapshot recovery over live local nodes and chain", () => {
     const privateRows = await target.query('SELECT ?value WHERE {GRAPH ?g {?s <urn:secret> ?value}}');
     expect(privateRows.type === 'bindings' && privateRows.bindings.length).toBe(0);
     const commitments = await target.query('SELECT ?root WHERE {GRAPH ?g {?s <http://dkg.io/ontology/privateMerkleRoot> ?root}}');
-    expect(commitments.type === 'bindings' && commitments.bindings.length).toBe(1);
+    expect(commitments.type === 'bindings' && commitments.bindings.length).toBe(transport === 'exact' ? 1 : 0);
     await expect(assertPublicSnapshotQueryTrust(target, graph)).rejects.toThrow(
       "core-trusted",
     );

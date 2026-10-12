@@ -1,3 +1,5 @@
+import { normalizeNonNegativeNumber, normalizeSampleRate, normalizeQuerySource } from "./sparql-telemetry-options.js";
+import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
 /**
  * SparqlHttpStore — TripleStore adapter for any SPARQL 1.1 Protocol endpoint.
  *
@@ -966,6 +968,18 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     });
   }
 
+  async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
+    if (!this.supportsConsistency('atomic-update')) throw new UnsupportedTripleStoreCapabilityError('replaceAssetGroup', 'SparqlHttpStore');
+    const plan = buildAtomicAssetGroupUpdate(assets);
+    for (const a of assets) {
+      assertQuadLiteralsMutf8Safe([...a.graphQuads, ...a.metadataQuads], { maxBytes: JAVA_WRITE_UTF_MAX_BYTES, label: 'replaceAssetGroup' });
+      statements.checkIris.replaceGraphAndSubject(a.graphUri, a.graphQuads, a.metaGraphUri, a.metadataSubject, a.metadataQuads);
+    }
+    await this.runRemoteGraphMutation({ scope: { kind: 'graphs', graphs: plan.graphs },
+      update: plan.update, options: options ?? {}, operation: 'replaceAssetGroup',
+      cleanup: { update: plan.cleanup, options: options ?? {}, operation: 'replaceAssetGroup' } });
+  }
+
   async replaceGraphAndSubject(
     graphUri: string,
     graphQuads: DKGQuad[],
@@ -1488,23 +1502,6 @@ function resolveConsistencyProfile(
     );
   }
   return profile;
-}
-
-function normalizeNonNegativeNumber(value: number | undefined, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0
-    ? value
-    : fallback;
-}
-
-function normalizeSampleRate(value: number | undefined, fallback: number): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
-  return Math.min(1, Math.max(0, value));
-}
-
-function normalizeQuerySource(source: string | undefined): string {
-  const trimmed = source?.trim();
-  if (!trimmed) return 'unknown';
-  return trimmed.replace(/[^\w:./-]/g, '_').slice(0, 120) || 'unknown';
 }
 
 function inferQueryOperation(sparql: string): SparqlHttpSlowQueryEvent['operation'] {

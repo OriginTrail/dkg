@@ -13,6 +13,7 @@ interface Job {
     contextGraphId: string;
     onChainId: string;
     mode: string;
+    transport: string;
     trustedCorePeerIds: readonly string[];
   };
   state: "running" | "complete" | "failed";
@@ -56,6 +57,7 @@ export async function handlePublicSnapshotJob({
             "onChainId",
             "trustedCorePeerIds",
             "mode",
+            "transport",
           ].includes(k),
       ) ||
       typeof input.contextGraphId !== "string" ||
@@ -67,6 +69,7 @@ export async function handlePublicSnapshotJob({
         (p) => typeof p !== "string" || !p || p.length > 256,
       ) ||
       ![undefined, "core-cache", "rpc-only"].includes(input.mode) ||
+      ![undefined, "exact", "bulk"].includes(input.transport) ||
       !/^[1-9][0-9]{0,77}$/.test(input.onChainId)
     )
       throw new Error("Invalid request");
@@ -84,6 +87,7 @@ export async function handlePublicSnapshotJob({
       contextGraphId: input.contextGraphId,
       onChainId: input.onChainId,
       mode: input.mode ?? "core-cache",
+      transport: input.transport ?? (process.env.DKG_PUBLIC_SNAPSHOT_BULK === "1" ? "bulk" : "exact"),
       trustedCorePeerIds: [...input.trustedCorePeerIds],
     },
     id: randomUUID(),
