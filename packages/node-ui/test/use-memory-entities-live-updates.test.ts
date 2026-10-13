@@ -116,7 +116,7 @@ describe('useMemoryEntities live updates', () => {
     });
     await flush();
 
-    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(fetch).toHaveBeenCalledTimes(4);
     expect(container.querySelector('#probe')?.getAttribute('data-wm')).toBe('1');
 
     revision = 2;
@@ -129,14 +129,14 @@ describe('useMemoryEntities live updates', () => {
       });
       vi.advanceTimersByTime(349);
     });
-    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(fetch).toHaveBeenCalledTimes(4);
 
     await act(async () => {
       vi.advanceTimersByTime(1);
     });
     await flush();
 
-    expect(fetch).toHaveBeenCalledTimes(6);
+    expect(fetch).toHaveBeenCalledTimes(8);
     expect(container.querySelector('#probe')?.getAttribute('data-wm')).toBe('2');
   });
 
@@ -157,7 +157,7 @@ describe('useMemoryEntities live updates', () => {
     });
     await flush();
 
-    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(fetch).toHaveBeenCalledTimes(4);
     expect(container.querySelector('#probe')?.getAttribute('data-wm')).toBe('1');
   });
 });

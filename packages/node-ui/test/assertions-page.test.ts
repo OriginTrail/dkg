@@ -4,7 +4,7 @@ import { OxigraphStore } from '../../storage/dist/index.js';
 import { DKGQueryEngine } from '../../query/dist/dkg-query-engine.js';
 import { listAssertionsPage, fetchAssertionPageCounts } from '../src/ui/assertions-page.js';
 import { invalidateQueryCache } from '../src/ui/api.js';
-import { fetchMemoryEntity } from '../src/ui/hooks/useMemoryEntities.js';
+import { fetchMemoryEntity, readMemoryGraphPage } from '../src/ui/hooks/useMemoryEntities.js';
 
 const owner = '0x1111111111111111111111111111111111111111';
 const cg = `${owner}/jpb-data`;
@@ -44,6 +44,47 @@ beforeEach(() => {
 afterEach(async () => { vi.unstubAllGlobals(); invalidateQueryCache(); await store.close(); });
 
 describe('assertion pages against the native scoped query engine', () => {
+  it('continues across bounded graph-inventory pages even when a triple page is not full', async () => {
+    for (let i = 0; i < 12; i++) await assertion(`graph-${String(i).padStart(2, '0')}`);
+    const query = 'SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), ' + JSON.stringify(root + '/_working_memory/') + ')) }';
+    const sizes: number[] = []; const seen: string[] = []; let cursor;
+    for (let page = 0; page < 5; page++) {
+      const result = await readMemoryGraphPage(query, cg, { includeContextGraphPartitions: true, layerLimit: 100, cursor });
+      expect(result.ok).toBe(true); sizes.push(result.triples.length);
+      seen.push(...result.triples.map(triple => triple.subject));
+      if (!result.truncated) break;
+      cursor = result.cursor;
+    }
+    expect(sizes).toEqual([5, 5, 2]);
+    expect(new Set(seen).size).toBe(12);
+  });
+  it('seeks through graph rows without skipping datatype/language variants or blank-node edges', async () => {
+    await assertion('seek');
+    await store.insert([
+      { subject: 'urn:seek', predicate: 'urn:value', object: '"1"', graph: content('seek') },
+      { subject: 'urn:seek', predicate: 'urn:value', object: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', graph: content('seek') },
+      { subject: 'urn:seek', predicate: 'urn:value', object: '"1"@en', graph: content('seek') },
+      { subject: 'urn:seek', predicate: 'urn:value', object: '"1"@fr', graph: content('seek') },
+      { subject: 'urn:seek', predicate: 'urn:value', object: '_:step', graph: content('seek') },
+      { subject: '_:step', predicate: 'urn:value', object: 'urn:seek', graph: content('seek') },
+    ]);
+    const query = 'SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), ' + JSON.stringify(root + '/_working_memory/') + ')) }';
+    const triples: Array<{ subject: string; predicate: string; object: string }> = [];
+    let cursor;
+    for (let page = 0; page < 5; page++) {
+      const result = await readMemoryGraphPage(query, cg, { includeContextGraphPartitions: true, layerLimit: 2, cursor });
+      expect(result.ok).toBe(true);
+      triples.push(...result.triples);
+      if (!result.truncated) break;
+      cursor = result.cursor;
+    }
+    expect(triples).toHaveLength(7);
+    expect(new Set(triples.map(triple => JSON.stringify(triple))).size).toBe(7);
+    expect(triples.filter(triple => triple.subject === 'urn:seek').map(triple => triple.object)).toEqual(expect.arrayContaining([
+      '"1"', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', '"1"@en', '"1"@fr',
+    ]));
+    expect(requests.every(request => !/\bOFFSET\b/.test(request.sparql))).toBe(true);
+  });
   it('can render membership before requesting slower visible-page counts', async () => {
     await assertion('one'); await assertion('two');
     const page = await listAssertionsPage(cg, 'wm', { includeCounts: false });

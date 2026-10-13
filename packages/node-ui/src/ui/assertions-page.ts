@@ -3,7 +3,7 @@ import { executeQuery, type AssertionInfo } from './api.js';
 import { UI_READ_MAX_AGE_MS } from './lib/read-cache.js';
 
 export interface AssertionsPage {
-  items: Array<AssertionInfo & { reservedUal?: string }>;
+  items: Array<AssertionInfo & { reservedUal?: string; dataGraphUri?: string }>;
   nextCursor?: string;
 }
 
@@ -41,10 +41,11 @@ export async function listAssertionsPage(
   const layerName = layer.toUpperCase();
   // Select the canonical lifecycle row when an old physical-graph alias also exists.
   // This avoids duplicates across page boundaries and does not inspect source triples.
-  const sparql = `SELECT DISTINCT ?g ?ual WHERE {
+  const sparql = `SELECT DISTINCT ?g ?ual ?dg WHERE {
     GRAPH ${meta} {
       ?g <${DKG}memoryLayer> ${JSON.stringify(layerName)} .
       OPTIONAL { ?g <${DKG}reservedUal> ?ual }
+      OPTIONAL { ?g <${DKG}assertionGraph> ?dg }
       FILTER NOT EXISTS { ?canonical <${DKG}assertionGraph> ?g ; <${DKG}memoryLayer> ${JSON.stringify(layerName)} . FILTER(?canonical != ?g) }
     }
     FILTER(STRSTARTS(STR(?g), ${JSON.stringify(base)}) || STRSTARTS(STR(?g), ${JSON.stringify(urn)}))
@@ -63,7 +64,7 @@ export async function listAssertionsPage(
     const graphUri = value(row.g);
     const parsed = identity(graphUri, contextGraphId);
     if (!parsed || (parsed.subGraph === 'meta' && !(options.includeQueryCatalog && parsed.name.startsWith('query-catalog-')))) return [];
-    return [{ ...parsed, graphUri, reservedUal: value(row.ual) || undefined }];
+    return [{ ...parsed, graphUri, reservedUal: value(row.ual) || undefined, dataGraphUri: value(row.dg) || undefined }];
   });
   if (items.length && layer === 'wm' && options.includeCounts !== false) {
     const byGraph = await fetchAssertionPageCounts(contextGraphId, items).catch(() => ({} as Record<string, number>));
@@ -76,13 +77,15 @@ export async function listAssertionsPage(
 }
 
 /** Counts are a separate bounded read so assertion rows can render before badges arrive. */
-export async function fetchAssertionPageCounts(contextGraphId: string, items: AssertionInfo[]): Promise<Record<string, number>> {
-  if (!items.length) return {};
-  const meta = sparqlIri(`did:dkg:context-graph:${contextGraphId}/_meta`);
-  const graphs = items.slice(0, 100).map(item => sparqlIri(item.graphUri)).join(' ');
+export async function fetchAssertionPageCounts(contextGraphId: string, items: AssertionsPage['items']): Promise<Record<string, number>> {
+  const page = items.slice(0, 100).filter(item => item.dataGraphUri);
+  if (!page.length) return {};
+  const graphs = [...new Set(page.map(item => sparqlIri(item.dataGraphUri!)))].join(' ');
+  const identities = page.map(item => `(${sparqlIri(item.graphUri)} ${sparqlIri(item.dataGraphUri!)})`).join(' ');
+  // sparql-scan-allow: R2 -- ?dg is a finite VALUES set of at most 100 exact KA graphs from this authenticated metadata page; the daemon still applies its CG allow-set.
   const counts = await executeQuery(`SELECT ?g (COUNT(*) AS ?cnt) WHERE {
-    VALUES ?g { ${graphs} }
-    GRAPH ${meta} { ?g <${DKG}assertionGraph> ?dg }
+    VALUES ?dg { ${graphs} }
+    VALUES (?g ?dg) { ${identities} }
     GRAPH ?dg { ?s ?p ?o }
   } GROUP BY ?g`, { contextGraphId, includeContextGraphPartitions: true }, { maxAgeMs: UI_READ_MAX_AGE_MS });
   return Object.fromEntries((counts.result?.bindings ?? []).map(row =>

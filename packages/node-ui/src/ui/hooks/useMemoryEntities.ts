@@ -374,7 +374,8 @@ export function subGraphOf(gUri: string, cgId: string): string | undefined {
   return seg;
 }
 
-interface LayerResult { triples: Triple[]; ok: boolean; truncated: boolean; rowCount: number }
+type MemoryGraphCursor = [string, string, string, string, string, string, string, boolean?];
+interface LayerResult { triples: Triple[]; ok: boolean; truncated: boolean; rowCount: number; cursor?: MemoryGraphCursor }
 
 interface QueryLayerOptions {
   view?: string;
@@ -383,7 +384,30 @@ interface QueryLayerOptions {
   includeContextGraphPartitions?: boolean;
   /** Local-only result limit used to detect lower-bound totals; never sent to /api/query. */
   layerLimit?: number;
-  offset?: number;
+  cursor?: MemoryGraphCursor;
+  /** Resource lookups already bind a term and do not need graph inventory paging. */
+  direct?: boolean;
+}
+
+function cursorForRow(row: Record<string, unknown>): MemoryGraphCursor {
+  const subject = canonicalEntityUri(rdfBindingValue(row.s) ?? '');
+  const object = rdfBindingValue(row.o) ?? '';
+  const literal = object.match(/^"([\s\S]*)"(?:@([A-Za-z0-9-]+)|\^\^<([^>]+)>)?$/);
+  const language = literal?.[2]?.toLowerCase() ?? '';
+  const kind = object.startsWith('_:') ? 'B' : literal || !isUri(object) ? 'L' : 'I';
+  return [canonicalEntityUri(bv(row.g) ?? ''), (subject.startsWith('_:') ? 'B:' + subject.slice(2) : 'I:' + subject),
+    canonicalEntityUri(bv(row.p) ?? ''), kind,
+    kind === 'L' ? decodeRdfStringLiteral(object) : kind === 'B' ? object.slice(2) : canonicalEntityUri(object),
+    language, kind === 'L' ? literal?.[3] ?? (language
+      ? 'http://www.w3.org/1999/02/22-rdf-syntax-ns#langString' : 'http://www.w3.org/2001/XMLSchema#string') : ''];
+}
+
+const CURSOR_VARIABLES = ['?__g', '?__s', '?__p', '?__kind', '?__o', '?__lang', '?__datatype'];
+function cursorFilter(cursor: MemoryGraphCursor): string {
+  return `FILTER(${CURSOR_VARIABLES.map((variable, index) => {
+    const equal = CURSOR_VARIABLES.slice(0, index).map((prior, i) => `${prior} = ${JSON.stringify(cursor[i])}`);
+    return `(${[...equal, `${variable} > ${JSON.stringify(cursor[index])}`].join(' && ')})`;
+  }).join(' || ')})`;
 }
 
 const LOADING_LAYER_STATUS: Record<MemoryLayerKey, MemoryLayerStatus> = {
@@ -398,7 +422,7 @@ const ERROR_LAYER_STATUS: Record<MemoryLayerKey, MemoryLayerStatus> = {
   vm: 'error',
 };
 
-async function queryLayer(
+export async function readMemoryGraphPage(
   sparql: string,
   contextGraphId: string,
   opts?: QueryLayerOptions,
@@ -416,12 +440,43 @@ async function queryLayer(
     // here coalesces with any other concurrently-mounted instance of
     // this hook (e.g. Dashboard card + ProjectView both subscribed to
     // the same CG). One underlying fetch instead of N for each layer.
-    const { layerLimit = WM_LIMIT, offset = 0, ...requestOpts } = opts ?? {};
+    const { layerLimit = WM_LIMIT, cursor, direct = false, ...requestOpts } = opts ?? {};
     const ordered = sparql.replace(/\s+LIMIT\s+\d+\s*$/i, '');
-    const body = { sparql: `${ordered} ORDER BY ?g ?s ?p ?o LIMIT ${layerLimit} OFFSET ${offset}`, contextGraphId, ...requestOpts };
+    let graphValues = '';
+    let graphNames: string[] = [];
+    let moreGraphs = false;
+    if (!direct) {
+      // Discover a small graph page through existence probes, not a sorted
+      // walk over all source triples. Only these graphs feed the data read.
+      const predicateFilter = ordered.match(/&&\s*(\?p\s*!=\s*<[^>]+>)/)?.[1];
+      const inventory = ordered.replace(/SELECT\s+\?s\s+\?p\s+\?o\s+\?g/i, 'SELECT DISTINCT ?g')
+        .replace(/&&\s*\?p\s*!=\s*<[^>]+>/g, '')
+        .replace(/\?s\s+\?p\s+\?o\b/g, `FILTER EXISTS { ?s ?p ?o ${predicateFilter ? `FILTER(${predicateFilter})` : ''} }`)
+        .replace(/}\s*$/, `${cursor ? `FILTER(STR(?g) ${cursor[7] ? '>' : '>='} ${JSON.stringify(cursor[0])})` : ''} }`);
+      const catalog = await postQueryDeduped({ sparql: `${inventory} ORDER BY STR(?g) LIMIT 6`, contextGraphId, ...requestOpts }, { maxAgeMs: UI_READ_MAX_AGE_MS });
+      const names = [...new Set((catalog.result?.bindings ?? []).map(row => canonicalEntityUri(bv(row.g) ?? '')).filter(Boolean))];
+      graphNames = names.slice(0, 5);
+      moreGraphs = names.length > 5;
+      if (!graphNames.length) return { triples: [], ok: true, truncated: false, rowCount: 0 };
+      graphValues = `VALUES ?g { ${graphNames.map(sparqlIri).join(' ')} }`;
+    }
+    // Compare the complete RDF term identity. STR(?o) alone would skip values
+    // sharing lexical text but differing in language, datatype or node kind.
+    const seek = ordered.replace(/WHERE\s*{/i, `WHERE { ${graphValues}`).replace(/}\s*$/, `
+      BIND(STR(?g) AS ?__g)
+      BIND(CONCAT(IF(isBlank(?s), "B:", "I:"), STR(?s)) AS ?__s)
+      BIND(STR(?p) AS ?__p)
+      BIND(IF(isBlank(?o), "B", IF(isIRI(?o), "I", "L")) AS ?__kind)
+      BIND(STR(?o) AS ?__o)
+      BIND(IF(isLiteral(?o), LANG(?o), "") AS ?__lang)
+      BIND(IF(isLiteral(?o), STR(DATATYPE(?o)), "") AS ?__datatype)
+      ${cursor ? cursorFilter(cursor) : ''}
+    }`);
+    const body = { sparql: `${seek} ORDER BY ${CURSOR_VARIABLES.join(' ')} LIMIT ${layerLimit}`, contextGraphId, ...requestOpts };
     const data = await postQueryDeduped(body, { maxAgeMs: UI_READ_MAX_AGE_MS });
     const bindings = data?.result?.bindings ?? [];
-    const truncated = typeof layerLimit === 'number' && bindings.length >= layerLimit;
+    const clipped = bindings.length >= layerLimit;
+    const truncated = clipped || moreGraphs;
     const triples = bindings
       .map((row: any) => {
         const g = bv(row.g);
@@ -433,7 +488,9 @@ async function queryLayer(
         };
       })
       .filter((t: Triple) => t.subject && t.predicate && t.object);
-    return { triples, ok: true, truncated, rowCount: bindings.length };
+    return { triples, ok: true, truncated, rowCount: bindings.length,
+      cursor: !clipped && graphNames.length ? [graphNames.at(-1)!, '', '', '', '', '', '', true]
+        : bindings.length ? cursorForRow(bindings.at(-1)!) : undefined };
   } catch {
     return { triples: [], ok: false, truncated: false, rowCount: 0 };
   }
@@ -664,9 +721,9 @@ export async function fetchMemoryEntity(
       { key: 'swm', sparql: queryCatalogLayerSparql(contextGraphId, 'swm'), layer: 'shared' as const },
     ] : []),
   ].filter(definition => !layer || definition.key === layer);
-  const results = await Promise.all(definitions.map(definition => queryLayer(
+  const results = await Promise.all(definitions.map(definition => readMemoryGraphPage(
     definition.sparql.replace(/}\s+LIMIT\s+\d+\s*$/i, `FILTER(${match}) }`),
-    contextGraphId, { includeContextGraphPartitions: true, layerLimit: 1_000 },
+    contextGraphId, { includeContextGraphPartitions: true, layerLimit: 1_000, direct: true },
   )));
   if (results.some(result => !result.ok)) throw new Error('Could not load all resource details. Retry to refresh this resource.');
   return {
@@ -714,7 +771,7 @@ export function useMemoryEntities(
   const [pageError, setPageError] = useState<string | null>(null);
   const activeRef = useRef(true);
   const requestRef = useRef<{ key: string; promise: Promise<void>; again: boolean } | null>(null);
-  const pagesRef = useRef<Array<{ sparql: string; layer: TrustLevel; offset: number; result: LayerResult }>>([]);
+  const pagesRef = useRef<Array<{ sparql: string; layer: TrustLevel; result: LayerResult }>>([]);
   const key = JSON.stringify([contextGraphId, includeQueryCatalog, signalErrors]);
 
   const fetchAll = useCallback((force = false): Promise<void> => {
@@ -741,11 +798,11 @@ export function useMemoryEntities(
       ] : []),
     ];
     entry.promise = (async () => {
-      const results = await Promise.all(definitions.map(definition => queryLayer(
+      const results = await Promise.all(definitions.map(definition => readMemoryGraphPage(
         definition.sparql, contextGraphId, { includeContextGraphPartitions: true, layerLimit: WM_LIMIT },
       )));
       if (version !== versionRef.current || !activeRef.current) return;
-      pagesRef.current = definitions.map((definition, index) => ({ ...definition, result: results[index], offset: results[index].rowCount }));
+      pagesRef.current = definitions.map((definition, index) => ({ ...definition, result: results[index] }));
       const triples = pagesRef.current.flatMap(page => page.result.triples.map(triple => ({ ...triple, layer: page.layer })));
       setLayeredTriples(triples);
       setLoadedKey(key);
@@ -776,14 +833,13 @@ export function useMemoryEntities(
     setLoading(true);
     setPageError(null);
     entry.promise = (async () => {
-      const results = await Promise.all(pages.map(page => queryLayer(page.sparql, contextGraphId, {
-        includeContextGraphPartitions: true, layerLimit: WM_LIMIT, offset: page.offset,
+      const results = await Promise.all(pages.map(page => readMemoryGraphPage(page.sparql, contextGraphId, {
+        includeContextGraphPartitions: true, layerLimit: WM_LIMIT, cursor: page.result.cursor,
       })));
       if (version !== versionRef.current || !activeRef.current) return;
       const added: LayeredTriple[] = [];
       for (const [index, result] of results.entries()) {
         if (!result.ok) { setPageError('Could not load more graph data. Retry to continue from the last loaded page.'); continue; }
-        pages[index].offset += result.rowCount;
         pages[index].result = result;
         added.push(...result.triples.map(triple => ({ ...triple, layer: pages[index].layer })));
       }

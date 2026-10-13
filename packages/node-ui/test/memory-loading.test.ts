@@ -29,7 +29,7 @@ describe('bounded graph reads', () => {
     const fetch = vi.fn(async (_url: string, init: RequestInit) => {
       const request = JSON.parse(String(init.body));
       if (request.sparql.includes('_verifiable_memory_meta') || request.sparql.includes('STRENDS(STR(?g), "/_shared_memory")')) return response([]);
-      if (request.sparql.includes('OFFSET 5000')) {
+      if (request.sparql.includes('?__s > "I:urn:order:4999"')) {
         if (pageFails) return new Response('{"error":"temporary"}', { status: 503 });
         return response(rows(1, request.contextGraphId).map(row => ({ ...row, s: 'urn:order:5000' })));
       }
@@ -43,8 +43,10 @@ describe('bounded graph reads', () => {
     pageFails = false;
     await act(async () => memory.loadMore?.()); await flush();
     expect(memory.hasMore).toBe(false); expect(memory.partial).toBe(false); expect(memory.graphTriples).toHaveLength(5001);
-    const offsetReads = fetch.mock.calls.map(([, init]) => JSON.parse(String(init.body)).sparql).filter(sparql => sparql.includes('OFFSET 5000'));
-    expect(offsetReads).toHaveLength(2);
+    const pageReads = fetch.mock.calls.map(([, init]) => JSON.parse(String(init.body)).sparql).filter(sparql => sparql.includes('?__s > "I:urn:order:4999"'));
+    expect(pageReads).toHaveLength(2);
+    expect(pageReads[0]).toBe(pageReads[1]);
+    expect(pageReads.some(sparql => /\bOFFSET\b/.test(sparql))).toBe(false);
     const before = fetch.mock.calls.length;
     await act(async () => root.render(null));
     await act(async () => root.render(React.createElement(Probe, { id: 'cg-a' })));

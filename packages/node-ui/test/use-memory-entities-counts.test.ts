@@ -135,7 +135,7 @@ describe('useMemoryEntities canonical layer counts', () => {
 
     const queryBodies = vi.mocked(fetch).mock.calls
       .map(([, init]) => JSON.parse(String(init?.body ?? '{}')) as { sparql?: string; includeContextGraphPartitions?: boolean });
-    expect(queryBodies).toHaveLength(3);
+    expect(queryBodies).toHaveLength(6); // Graph inventory and bounded data read for each nonempty layer.
     expect(queryBodies.every(body => body.includeContextGraphPartitions === true)).toBe(true);
 
     const vmRequest = vi.mocked(fetch).mock.calls
@@ -190,7 +190,7 @@ describe('useMemoryEntities canonical layer counts', () => {
     const catalogRequests = vi.mocked(fetch).mock.calls
       .map(([, init]) => JSON.parse(String(init?.body ?? '{}')) as { sparql?: string })
       .filter(body => body.sparql?.includes(PROFILE_QUERY_CATALOG));
-    expect(catalogRequests).toHaveLength(2);
+    expect(catalogRequests).toHaveLength(3); // WM/SWM inventories, then data only for the populated SWM catalog.
     expect(catalogRequests.some(body => body.sparql?.includes('/meta/assertion/'))).toBe(true);
     expect(catalogRequests.some(body => body.sparql?.includes('/meta/_working_memory/'))).toBe(true);
     expect(catalogRequests.some(body => body.sparql?.includes('/meta/_shared_memory/'))).toBe(true);
