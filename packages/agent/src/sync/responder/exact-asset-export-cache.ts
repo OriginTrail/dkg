@@ -628,20 +628,22 @@ export function createBoundedExactAssetExportCache(params: {
         if (body.byteLength < 1 || body.byteLength > EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES
           || plainBytes > EXACT_SYNC_GZIP_MAX_INFLATED_BYTES) throw invalid();
         const encodingDurationMs = performance.now() - encodeStarted;
-        let retained = false;
+        let retained = false, persistence: Promise<void> | undefined;
         const encoded = createEncodedResponseLease({ metadata: metaBytes, body, plainBytes, identity: rows.identity,
           wholePayloadExports: rows.wholePayloadExports ?? 1, encodingDurationMs }, {
           assertCurrent: () => rows.assertCurrent(), release: () => rows.release(),
-          afterFence: async () => {
-            if (retained || !reusable) return false;
-            retainEncoded(key, body, plainBytes, rows.identity);
-            retained = true;
-            await params.preparedContentCache?.put(diskKey, { body, plainBytes });
-            return Boolean(params.preparedContentCache);
-          },
         }, { changed, invalid });
         transferred = true;
-        return encoded;
+        return Object.freeze({ ...encoded, async assertCurrent() {
+          await encoded.assertCurrent();
+          if (!reusable) return;
+          // All callers await the same publication while the response owns its bytes.
+          if (!retained) {
+            retainEncoded(key, body, plainBytes, rows.identity); retained = true;
+            persistence = params.preparedContentCache?.put(diskKey, { body, plainBytes });
+          }
+          if (persistence) { await persistence; await encoded.assertCurrent(); }
+        } });
       } finally {
         // The physical encoder settles before its row/response charge ends.
         if (!transferred) rows.release();
