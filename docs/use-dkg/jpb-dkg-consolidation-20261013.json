@@ -1,0 +1,458 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-13T09:01:53.065467+00:00",
+  "repository": "OriginTrail/dkg",
+  "combinedPullRequest": 3196,
+  "baseBranch": "codex/dmaast-program-editor-deploy-20260921",
+  "baseCommit": "ba0d433d84ae9a77e17991f1e637a6bb50c0ca04",
+  "implementationCommit": "bad6d6336f14afc6567cc22d7124b2c4ae26b247",
+  "sourcePrTipsPreserved": [
+    {
+      "number": 3033,
+      "tip": "c712d48e3803c18497f4ac4e5751521bdaa188d1",
+      "isAncestor": true
+    },
+    {
+      "number": 3068,
+      "tip": "5d99effa75145aa5e6b2aee2ea6b953decf0ce2e",
+      "isAncestor": true
+    },
+    {
+      "number": 3080,
+      "tip": "0c6b53b3676ce37dc99b9665bafd1ae2aa25551d",
+      "isAncestor": true
+    },
+    {
+      "number": 3092,
+      "tip": "ff492762256f372c1e6ec6af29c4af1d0f3358c0",
+      "isAncestor": true
+    },
+    {
+      "number": 3196,
+      "tip": "766f601693ecb0a698a4c074b1ee6decf3646831",
+      "isAncestor": true
+    }
+  ],
+  "integratedPatches": [
+    {
+      "sourceRepository": "OriginTrail/jbp_digital_twin",
+      "sourceCommit": "ad375ec4bdfd3e216b03176ebbd1808e84041dad",
+      "path": "integrations/dkg-runtime/monitoring-runtime-50acc958.patch",
+      "sha256": "555c0d8dc7b348bde831bd3470c5df1edfd6a217fd123cf06881d797fd7160f3",
+      "integrated": true
+    },
+    {
+      "sourceRepository": "OriginTrail/jbp_digital_twin",
+      "sourceCommit": "ad375ec4bdfd3e216b03176ebbd1808e84041dad",
+      "path": "integrations/dkg-runtime/private-local-first-write-50acc958.patch",
+      "sha256": "c21a87783bc9d49ff2a8948b8f75e559a32bff71bc731c1bccdf0cd85b436df5",
+      "integrated": true
+    },
+    {
+      "sourceRepository": "OriginTrail/jbp_digital_twin",
+      "sourceCommit": "ad375ec4bdfd3e216b03176ebbd1808e84041dad",
+      "path": "integrations/dkg-runtime/wm-default-dataset-50acc958.patch",
+      "sha256": "dbfc8da74f30337fd100ee991a4b16da49a766dc9b01b65245578af0f8279a5b",
+      "integrated": true
+    },
+    {
+      "sourceRepository": "OriginTrail/jbp_digital_twin",
+      "sourceCommit": "ad375ec4bdfd3e216b03176ebbd1808e84041dad",
+      "path": "integrations/dkg-ui/jpb-monitoring-50acc958.patch",
+      "sha256": "f79f1e1a6ff089ecd702572ecaa622ab7bedc7762914e38e31d415369aa404d1",
+      "integrated": true
+    }
+  ],
+  "localValidation": {
+    "node": "25.2.1",
+    "pnpm": "10.28.1",
+    "passedTests": 997,
+    "passedTestFiles": 58,
+    "suites": {
+      "cli": {
+        "status": "passed",
+        "files": 14,
+        "tests": 295,
+        "logSha256": "d3334495098c403d03de6dd0a7c02aa3a8d46de9728d55f04b1f292c1213d803"
+      },
+      "llm": {
+        "status": "passed",
+        "files": 9,
+        "tests": 119,
+        "logSha256": "baa2228dd8d4bd742b7527257c8b6acfeae2fe2d1aad396403f1c809004f1f3b"
+      },
+      "ui": {
+        "status": "passed",
+        "files": 8,
+        "tests": 109,
+        "logSha256": "e0df06d04033a45140d8d7dde0866f685f59d8e9b648b5b814a0cd3d836cf277"
+      },
+      "query": {
+        "status": "passed",
+        "files": 19,
+        "tests": 410,
+        "logSha256": "4181bbdd00085d02d50e538a4e0ced6d38745dcd4ec87cb3b72711318bf17656"
+      },
+      "semantic": {
+        "status": "passed",
+        "files": 4,
+        "tests": 24,
+        "logSha256": "12bac6b69b7905e9624a2820852ae5c501e171c48b4e7fc3f188ec1b2391a9b3"
+      },
+      "core": {
+        "status": "passed",
+        "files": 1,
+        "tests": 3,
+        "logSha256": "0a5ec2890d3928c1aa9f03c6269ae034047f7ec23273aacd8abfbba839ecd5d4"
+      },
+      "sdk": {
+        "status": "passed",
+        "files": 2,
+        "tests": 34,
+        "logSha256": "e2ae985639d2e7665a96a1cb28ef25726fbeff000503f9fb6461d8f43b3393ca"
+      },
+      "mcp": {
+        "status": "passed",
+        "files": 1,
+        "tests": 3,
+        "logSha256": "27f8acf533296c3876f2e7790fe1e74fd998b9a8fa913e6ffbfda33fa3113036"
+      }
+    },
+    "cliDependencyTypeScript": "passed",
+    "productionNodeUiBuild": "passed",
+    "workflowYamlParse": "passed",
+    "trackedTextNulAudit": "passed",
+    "diffWhitespace": "passed",
+    "browserTestNodeOptions": "--no-experimental-webstorage",
+    "wasm": {
+      "reuseSourceCommit": "50acc9581297910065b272d1827b2f7649cae1b7",
+      "rustTreeUnchanged": "57377cdd100733524248e1f96651824242c9fb80",
+      "artifactLockAndEveryArtifactHashAndAbiVerified": true,
+      "locallyRebuiltRust": false,
+      "hostedCiRebuildsPinnedRust": true
+    },
+    "repositoryLint": {
+      "status": "existing-base-failures",
+      "oxlintDiagnosticFingerprints": 7,
+      "oxlintNewFindings": 0,
+      "oxlintDiagnosticsByteIdenticalToCleanBase": true,
+      "oxlintLogSha256": "033f2523f068075bc2af9d9d906ee7e8e7d906f2bf87ec1f6fa195c13cb998d3",
+      "disabledTestFindings": 64,
+      "disabledTestNewFindings": 0,
+      "expiredOrIncompleteTestExceptions": 4
+    },
+    "scopeNotes": [
+      "The targeted CLI lane excludes the chain-backed notifications-route suite, which requires Hardhat global setup; the scoped 100-graph notification fanout regression runs here.",
+      "Browser tests passed after disabling the Node experimental storage global; no product source was changed for this environment issue."
+    ]
+  },
+  "nodeInspection": {
+    "performedReadOnly": true,
+    "sourceFilesChecked": 48,
+    "byteIdenticalSourceFiles": 24,
+    "sourceComparison": [
+      {
+        "path": "packages/agent/src/dkg-agent-cg-resolve.ts",
+        "consolidatedSha256": "baa0b3a432b3419f0e3066698689d63dc413449283526fe5fb0a554293df7c8f",
+        "deployedSha256": "baa0b3a432b3419f0e3066698689d63dc413449283526fe5fb0a554293df7c8f",
+        "identical": true
+      },
+      {
+        "path": "packages/agent/src/dkg-agent-types.ts",
+        "consolidatedSha256": "fdb4753dc4174c5608fa2e8b021365eb3136cc06340b7a559d76503b125ad06d",
+        "deployedSha256": "fdb4753dc4174c5608fa2e8b021365eb3136cc06340b7a559d76503b125ad06d",
+        "identical": true
+      },
+      {
+        "path": "packages/cli/src/daemon/http-utils.ts",
+        "consolidatedSha256": "2a7e73ae79a3629c5f083306314b615891273b2dc3fb6316d0c10257b301bac9",
+        "deployedSha256": "2a7e73ae79a3629c5f083306314b615891273b2dc3fb6316d0c10257b301bac9",
+        "identical": true
+      },
+      {
+        "path": "packages/cli/src/daemon/lifecycle.ts",
+        "consolidatedSha256": "30c50c17f71f1e7ad02f8b36a9bd30f775ed153d43322e6ff13bb8e6aaa664bf",
+        "deployedSha256": "9054ea6ec7daeb87885bfdc3c819ef2d2d71343e353d4e009a7183117588bcd1",
+        "identical": false
+      },
+      {
+        "path": "packages/cli/src/daemon/local-llm-service.ts",
+        "consolidatedSha256": "ffe124c706db63306e609644b575c61bfec7bc90f8b102707f0a8ea312af5eda",
+        "deployedSha256": "ab9d6b2253969e350eabcc8b41a3e7a4d848b9038e0e682ec151d87d4b6c9410",
+        "identical": false
+      },
+      {
+        "path": "packages/cli/src/daemon/local-llm-session.ts",
+        "consolidatedSha256": "a0fd032c3970ac23ba99603bf2f39a1bb8c520d7df3034b150de3045def79328",
+        "deployedSha256": null,
+        "identical": false
+      },
+      {
+        "path": "packages/cli/src/daemon/query-catalog-service.ts",
+        "consolidatedSha256": "3c8130de46ab8cd4950adb325c8e2eb857e8d3b5d8611c6225f88d94165c2d1d",
+        "deployedSha256": "3c8130de46ab8cd4950adb325c8e2eb857e8d3b5d8611c6225f88d94165c2d1d",
+        "identical": true
+      },
+      {
+        "path": "packages/cli/src/daemon/routes/context-graph.ts",
+        "consolidatedSha256": "9b4feabb2549765f16037241b34e7da6d23321235b04c6256a2773c5f05fac4b",
+        "deployedSha256": "699786b14afa69e1a12a3bc8cd4e66bca84d58fc18d06fd853d57f7919f3f943",
+        "identical": false
+      },
+      {
+        "path": "packages/cli/src/daemon/routes/notifications.ts",
+        "consolidatedSha256": "421978c2d95b97e2452167a13f21677a992b764f75a127f794997406e70bdc89",
+        "deployedSha256": "421978c2d95b97e2452167a13f21677a992b764f75a127f794997406e70bdc89",
+        "identical": true
+      },
+      {
+        "path": "packages/cli/src/daemon/routes/query-catalog.ts",
+        "consolidatedSha256": "5da99c9c09628204fead8f0c63bd2a03d5b3a4548bd051dcd3dd017870e59f1e",
+        "deployedSha256": "5da99c9c09628204fead8f0c63bd2a03d5b3a4548bd051dcd3dd017870e59f1e",
+        "identical": true
+      },
+      {
+        "path": "packages/cli/src/daemon/routes/semantic-runtime-configuration.ts",
+        "consolidatedSha256": "5d7f6877183d946b6e8c893685232ea3202564e458cb2d7411ddffe655386618",
+        "deployedSha256": "5d7f6877183d946b6e8c893685232ea3202564e458cb2d7411ddffe655386618",
+        "identical": true
+      },
+      {
+        "path": "packages/cli/src/local-llm-runtime-factory.ts",
+        "consolidatedSha256": "054d90d4e7677439bfa794652373816c0930984d7f2d1ef58d462b18b06b5f75",
+        "deployedSha256": "92b29bc204feae2112395dc999d104b94a3f31d3a4bfa9aa6fdebc4a7542db8a",
+        "identical": false
+      },
+      {
+        "path": "packages/cli/src/semantic-runtime-configuration.ts",
+        "consolidatedSha256": "2cf70c0d3f749f7d544e9a1d2fd863f1fcf4feb5aabf28e0baa355bc7e4e829a",
+        "deployedSha256": "2cf70c0d3f749f7d544e9a1d2fd863f1fcf4feb5aabf28e0baa355bc7e4e829a",
+        "identical": true
+      },
+      {
+        "path": "packages/cli/src/semantic-runtime-execution-output.ts",
+        "consolidatedSha256": "eed206b532145e370abbeabae9859f01541507584f41d9a7246d0284caa6715d",
+        "deployedSha256": "eed206b532145e370abbeabae9859f01541507584f41d9a7246d0284caa6715d",
+        "identical": true
+      },
+      {
+        "path": "packages/cli/src/semantic-runtime-local-llm-adapter.ts",
+        "consolidatedSha256": "4071cc503167ee88a299d12e7833c422653b567d409bbf60f6496bc9781488a9",
+        "deployedSha256": "a545c9c9afe30f602fdfca349feec29ab536511f57944ae03fd5a95cbf52a8cd",
+        "identical": false
+      },
+      {
+        "path": "packages/cli/src/semantic-runtime-program-bindings.ts",
+        "consolidatedSha256": "dfa06a3c9c32870abe6466993c97e80502a70452bc5dacac3e88098e0f8efa41",
+        "deployedSha256": "dfa06a3c9c32870abe6466993c97e80502a70452bc5dacac3e88098e0f8efa41",
+        "identical": true
+      },
+      {
+        "path": "packages/cli/src/semantic-runtime-tool-catalog.ts",
+        "consolidatedSha256": "16365aebcb81f941f4620931107307d180c6d84c469e89b3673400dbec3a48c1",
+        "deployedSha256": "16365aebcb81f941f4620931107307d180c6d84c469e89b3673400dbec3a48c1",
+        "identical": true
+      },
+      {
+        "path": "packages/cli/src/semantic-runtime.ts",
+        "consolidatedSha256": "b258e500d91abd3edb2e05ec3a2d7bf5125cff2da5e249519a0c7fbc4a1b3219",
+        "deployedSha256": "16e380987b5e54ebac7956176f78245aebb48e249e7085e33de3170ba0b0c9eb",
+        "identical": false
+      },
+      {
+        "path": "packages/core/src/typescript-program-bundle.ts",
+        "consolidatedSha256": "081b7aa8fdcaf2c73728e2827830c71af8c4526d3fe13650b43b58c4aee1b64a",
+        "deployedSha256": null,
+        "identical": false
+      },
+      {
+        "path": "packages/graph-computer/src/index.ts",
+        "consolidatedSha256": "391bb1e988185f05b02b623bca08ae3bf9d60008ce2042bfdce37d9f304ffbf4",
+        "deployedSha256": "ecc8a7b79d985bc3f9b6cd9f4f20a1ec209d2ec121001b29379d5c993c657884",
+        "identical": false
+      },
+      {
+        "path": "packages/graph-computer/src/program-bundle.ts",
+        "consolidatedSha256": "15357f217e57a874489ccb40d9543835770281be519d329f8a3b09319c318dfb",
+        "deployedSha256": null,
+        "identical": false
+      },
+      {
+        "path": "packages/graph-computer/src/types.ts",
+        "consolidatedSha256": "9d758c05f173791d10418c919f7659cb50f07e4ec0d4fa5d2fdfe55640199f23",
+        "deployedSha256": "6e014c16f1c6b59541c5aeedfde0df824707dce7df47a7ba5a1f9e092de47c2b",
+        "identical": false
+      },
+      {
+        "path": "packages/local-llm/src/domain-profile.ts",
+        "consolidatedSha256": "f54b55cd6c415772ee5d1d6b9e3c593f0c4a6ad726830b0ec0ff83144693452b",
+        "deployedSha256": "f54b55cd6c415772ee5d1d6b9e3c593f0c4a6ad726830b0ec0ff83144693452b",
+        "identical": true
+      },
+      {
+        "path": "packages/local-llm/src/runtime.ts",
+        "consolidatedSha256": "913aeaccb81cb7f67712d99c8bd3ca318664e5d079b33d1760c20f72d16df656",
+        "deployedSha256": "913aeaccb81cb7f67712d99c8bd3ca318664e5d079b33d1760c20f72d16df656",
+        "identical": true
+      },
+      {
+        "path": "packages/mcp-dkg/src/adapters.ts",
+        "consolidatedSha256": "85aada8b835c28d8a3dd8e4a3581acd9d5bf53c80947c063aee2f58926bc676b",
+        "deployedSha256": "082eb8d5b14590ef25d8e04293e069482ff907852c778e523fc5323798b51bd2",
+        "identical": false
+      },
+      {
+        "path": "packages/node-ui/src/ui/api.ts",
+        "consolidatedSha256": "715573623e7808589cb9d03d38ec9dc546abbde38dd3d7248ac1c48c1b5aeb79",
+        "deployedSha256": "5246b8d0a42c6c67f9b8e33f8aaccde850538118c420587e742a52cbef15ac49",
+        "identical": false
+      },
+      {
+        "path": "packages/node-ui/src/ui/components/Programs/ProgramEditor.tsx",
+        "consolidatedSha256": "86e0b16bcf1afd4465af7effeda9a838f4878ff9bfb85168751aa1eabbec4598",
+        "deployedSha256": "6966409021efe7373912994fc57cb8012b08ea0a6a46aaad66c54f9143a199d1",
+        "identical": false
+      },
+      {
+        "path": "packages/node-ui/src/ui/components/Programs/ProgramSourceEditor.tsx",
+        "consolidatedSha256": "6ae4e861189d834ca03b17cfeb342268027fb7933cef3ebf61e1e22431f9945c",
+        "deployedSha256": null,
+        "identical": false
+      },
+      {
+        "path": "packages/node-ui/src/ui/components/Programs/TypeScriptEditor.tsx",
+        "consolidatedSha256": "b98647c4b65ed3120d8e9201d8da1850e44c199da4164d2117662ee693bc6c87",
+        "deployedSha256": "c6122ce26cc6be7192c2f281683ffd95917deeb9d161ba4d835b04c5364e289b",
+        "identical": false
+      },
+      {
+        "path": "packages/node-ui/src/ui/components/Shell/Header.tsx",
+        "consolidatedSha256": "4c822e825c03d46c5edbb8c0a85e39ba146535b6f0d77e5e707956323a69192b",
+        "deployedSha256": "4c822e825c03d46c5edbb8c0a85e39ba146535b6f0d77e5e707956323a69192b",
+        "identical": true
+      },
+      {
+        "path": "packages/node-ui/src/ui/components/Shell/PanelCenter.tsx",
+        "consolidatedSha256": "98ea3f19d7dde1fb9aaee5d4d0227476b26826c0962c11e32b5e6eaa20d445d2",
+        "deployedSha256": "98ea3f19d7dde1fb9aaee5d4d0227476b26826c0962c11e32b5e6eaa20d445d2",
+        "identical": true
+      },
+      {
+        "path": "packages/node-ui/src/ui/components/Shell/PanelRight/PanelRightContainer.tsx",
+        "consolidatedSha256": "6b1f5c795a15b30e195139f08ed63b378da0a1bffaf9d2a04f9d4434c38b5637",
+        "deployedSha256": "8fb1856a32766bec4091278df33cec6cf14a7fc8075f6c0eeaa0d275bbed6da7",
+        "identical": false
+      },
+      {
+        "path": "packages/node-ui/src/ui/hooks/useNotificationsFeed.ts",
+        "consolidatedSha256": "88c2fdd6f2ca54c3fb05d7dad50746572906557c2bc1b462442b55c014b379e2",
+        "deployedSha256": "88c2fdd6f2ca54c3fb05d7dad50746572906557c2bc1b462442b55c014b379e2",
+        "identical": true
+      },
+      {
+        "path": "packages/node-ui/src/ui/hooks/useShellRouting.ts",
+        "consolidatedSha256": "9a1c182ce2a8658f615f96899823c4aa564f79733ea6ad4d76a6995dc8c2b13f",
+        "deployedSha256": "9a1c182ce2a8658f615f96899823c4aa564f79733ea6ad4d76a6995dc8c2b13f",
+        "identical": true
+      },
+      {
+        "path": "packages/node-ui/src/ui/jpb-monitor-api.ts",
+        "consolidatedSha256": "11e1b945273b978bb32e6a568a50ebf0c30543750e112184a1ff77d862bbd841",
+        "deployedSha256": "c41c36a6ce414590c6d0430511dadb7b3d4df7bab6ee3a4a25f7e42b4ad4c70c",
+        "identical": false
+      },
+      {
+        "path": "packages/node-ui/src/ui/lib/randomUUID.ts",
+        "consolidatedSha256": "258e8adabb26bf893d104ec2fb7c7c0d489ff3c3cbda5d24bacaeafefa70b034",
+        "deployedSha256": null,
+        "identical": false
+      },
+      {
+        "path": "packages/node-ui/src/ui/pages/Sources.tsx",
+        "consolidatedSha256": "766380f926ddf69c023d3d1a2fe36deb857bf03203626e6f11d5b8df3a2986fb",
+        "deployedSha256": "904434514e9b7712db4d5150954dc6ca8833dc056ca941244ddcef326bf32c9c",
+        "identical": false
+      },
+      {
+        "path": "packages/node-ui/src/ui/styles.css",
+        "consolidatedSha256": "53208d88c98fcafa44bc72908438e2ceea230c61a405c12fa86897b64a7b32f6",
+        "deployedSha256": "53208d88c98fcafa44bc72908438e2ceea230c61a405c12fa86897b64a7b32f6",
+        "identical": true
+      },
+      {
+        "path": "packages/node-ui/src/ui/styles/27-sources.css",
+        "consolidatedSha256": "81da74ad3691ade32f5c63eaaf04e3ca60c067988a7dc066a330cc0d4e4a4610",
+        "deployedSha256": "81da74ad3691ade32f5c63eaaf04e3ca60c067988a7dc066a330cc0d4e4a4610",
+        "identical": true
+      },
+      {
+        "path": "packages/node-ui/src/ui/views/project/components/ka.tsx",
+        "consolidatedSha256": "7d3cae75d1563c7a87263b2c29431aa61c927a427030a11592eca2bba3fa7720",
+        "deployedSha256": "31c1cdb1e81facfc15eb80f169ee6ab14c6f144f905bea433d54d37738dc0d15",
+        "identical": false
+      },
+      {
+        "path": "packages/node-ui/src/ui/views/project/components/query.tsx",
+        "consolidatedSha256": "dda3d016ba0f41d861ff251f08c093883a36cb55b4e2bf8eeac4609e00a4d204",
+        "deployedSha256": "e27b92993cd99d15a7bb10e69a99c2f32f29852c258dde8451a82e10172a249e",
+        "identical": false
+      },
+      {
+        "path": "packages/node-ui/src/ui/views/project/components/subgraph.tsx",
+        "consolidatedSha256": "1f2ff8548b61399181640a053edf452cb288b4131ee9fd04f6cc7d3d342983f8",
+        "deployedSha256": "d49e23e38d97c27f09033be4fdcd0974789190c96c5b22859d3f4f5865019485",
+        "identical": false
+      },
+      {
+        "path": "packages/query/src/dkg-query-engine.ts",
+        "consolidatedSha256": "28ce0c0564153d99cffce029860d75bcbf9d6b5e3d01b1e5d76621e26af1834a",
+        "deployedSha256": "28ce0c0564153d99cffce029860d75bcbf9d6b5e3d01b1e5d76621e26af1834a",
+        "identical": true
+      },
+      {
+        "path": "packages/query/src/query-engine.ts",
+        "consolidatedSha256": "625a1c8fb31f5127dd8147d03efd339f604e4538f9d630260e4277eef850294d",
+        "deployedSha256": "625a1c8fb31f5127dd8147d03efd339f604e4538f9d630260e4277eef850294d",
+        "identical": true
+      },
+      {
+        "path": "packages/query/src/sparql-graph-scope.ts",
+        "consolidatedSha256": "df6458cdd555e40405717a4e7847f63eb9164004efd58d258470d4c50b751c89",
+        "deployedSha256": "df6458cdd555e40405717a4e7847f63eb9164004efd58d258470d4c50b751c89",
+        "identical": true
+      },
+      {
+        "path": "packages/semantic-runtime/src/persistence.ts",
+        "consolidatedSha256": "08053f16bca40bf49daf16d6b9bdbd4e8bf640e7f0100fbe1440e03893c6f815",
+        "deployedSha256": "08053f16bca40bf49daf16d6b9bdbd4e8bf640e7f0100fbe1440e03893c6f815",
+        "identical": true
+      },
+      {
+        "path": "packages/semantic-runtime/src/program-policy.ts",
+        "consolidatedSha256": "877ddb0d0e6da61a61633f675651b66f70e5c10002c6925392f87195157d1a03",
+        "deployedSha256": "877ddb0d0e6da61a61633f675651b66f70e5c10002c6925392f87195157d1a03",
+        "identical": true
+      },
+      {
+        "path": "packages/semantic-runtime/typescript-runtime/compiler.mjs",
+        "consolidatedSha256": "cde9e290acebce36409f6c8286b6f75058d36d809ab77f5f8425a1d52190ecac",
+        "deployedSha256": "f96c8a48df60990e39a1d0af88b7525a482f40ee1305d66adb00cf18749322ab",
+        "identical": false
+      }
+    ],
+    "newWholeBranchDeployed": false,
+    "runtimeRestarted": false,
+    "monitorWorkerRestarted": false,
+    "graphDataChanged": false,
+    "sqlRefreshManuallyTriggered": false,
+    "wholeBranchReleaseCreated": false,
+    "sourceComparisonIsNotCompiledRuntimeOrServedUiProof": true
+  },
+  "operationalBoundaries": {
+    "jpbWorkerRecoveryPr": 20,
+    "jpbWorkerDeployedRuntime": "9e823207538e47f5bbfd3024707187d283057080",
+    "fullRecoveredAndAutomaticCycleVerification": "pending-separate-observer",
+    "dataPrivacy": "owner-private-working-memory",
+    "completeGenealogyOrMeasuredPlcaClaimed": false
+  }
+}
