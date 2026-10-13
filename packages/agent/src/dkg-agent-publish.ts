@@ -1173,6 +1173,7 @@ export class PublishMethods extends DKGAgentBase {
         shareOperationId,
         cgId: contextGraphId,
         expectedMembers: ackMembers,
+        ...(directFollowers.length > 0 ? { directMembers: directFollowers } : {}),
         preAckedFromSubstrate: [],
         payload: wireMessage,
         enumerationSource: plan.enumerationSource,

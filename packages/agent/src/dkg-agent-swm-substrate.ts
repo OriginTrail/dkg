@@ -1684,14 +1684,16 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       return;
     }
     const quorumRecord = this.swmAckQuorum?.inspect(shareOperationId);
+    // A direct member has no gossip path: it is retried outside the narrowing made for subscribers.
+    const direct = new Set(quorumRecord?.directMembers ?? []);
     let topUpPeers = dialableMissingPeers;
     if (quorumRecord?.enumerationSource === 'topic-subscribers') {
       const selection = this.selectSwmFanoutPeersForActiveShare({
         contextGraphId: cgId,
-        candidatePeers: dialableMissingPeers,
+        candidatePeers: dialableMissingPeers.filter((peerId) => !direct.has(peerId)),
         enumerationSource: 'topic-subscribers',
       });
-      topUpPeers = selection.selectedPeers;
+      topUpPeers = [...selection.selectedPeers, ...dialableMissingPeers.filter((peerId) => direct.has(peerId))];
       if (selection.skippedRecentPeers.length > 0 || topUpPeers.length !== dialableMissingPeers.length) {
         this.log.info(
           ctx,
@@ -1758,7 +1760,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           timeoutMs: DKGAgentBase.SWM_SUBSTRATE_FANOUT_TIMEOUT_MS,
         });
         const classified = classifySendResult(peerId, sendResult);
-        if (quorumRecord?.enumerationSource === 'topic-subscribers') {
+        if (quorumRecord?.enumerationSource === 'topic-subscribers' && !direct.has(peerId)) {
           this.recordSwmFanoutPeerRecord(cgId, classified);
         }
         switch (classified.outcome) {
@@ -1777,7 +1779,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         }
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
-        if (quorumRecord?.enumerationSource === 'topic-subscribers') {
+        if (quorumRecord?.enumerationSource === 'topic-subscribers' && !direct.has(peerId)) {
           this.recordSwmFanoutPeerOutcome(cgId, peerId, 'failed');
         }
         this.swmAckQuorum?.dropPeer(shareOperationId, peerId);

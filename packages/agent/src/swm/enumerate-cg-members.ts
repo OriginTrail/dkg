@@ -463,12 +463,17 @@ export function createCGMemberEnumerator(deps: CGMemberEnumeratorDeps): CGMember
    * this node can reach now. Read live on every call: a follower is cheap to
    * read, comes and goes with the sync requests of its peer, and must be a
    * recipient of the very next share, whatever the cache holds.
+   *
+   * "Not a subscriber" is judged against GossipSub's subscribers of this
+   * moment, not against the cached snapshot. A peer that was a subscriber a
+   * minute ago and is reached only through a relay now has lost its gossip
+   * path; the snapshot would still list it and it would be left without one.
    */
   async function directFollowersOf(cgId: string, resolved: ResolvedMembers): Promise<string[]> {
     if (!resolved.isPublic || !deps.getSharedMemoryFollowers) return [];
     const followers = deps.getSharedMemoryFollowers(cgId);
     if (followers.length === 0) return [];
-    const subscribers = new Set(resolved.enumeration.members);
+    const subscribers = new Set(deps.getTopicSubscribers(deps.topicForCG(cgId)));
     return dialable(
       dedupAndExcludeSelf(followers, deps.getSelfPeerId()).filter((peerId) => !subscribers.has(peerId)),
     );

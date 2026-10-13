@@ -107,6 +107,24 @@ export class SharedMemoryFollowers {
   }
 }
 
+/**
+ * A peer asked this node to replay a graph's catalog heads. It follows the
+ * graph when the request names the policy this node has accepted for it: the
+ * peer then holds the same policy, and its receiver for the graph is active.
+ * A request for a graph this node holds no policy for, or under another
+ * policy, records nothing. Returns whether the peer was recorded.
+ */
+export function noteCatalogHeadReplayFollower(
+  followers: SharedMemoryFollowers,
+  acceptedPolicyDigest: string | undefined,
+  request: { readonly contextGraphId: string; readonly policyDigest: string },
+  peerId: string,
+): boolean {
+  if (acceptedPolicyDigest === undefined || acceptedPolicyDigest !== request.policyDigest) return false;
+  followers.note(request.contextGraphId, peerId);
+  return true;
+}
+
 const FOLLOWERS_BY_AGENT = new WeakMap<object, SharedMemoryFollowers>();
 
 /**

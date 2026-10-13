@@ -260,6 +260,35 @@ function expectCrossing(what: string, watched: Arrival): void {
 }
 
 /**
+ * Direct sends for the graph that `author` counted as delivered so far: each
+ * one is a receiver that answered "applied" to the share it was sent.
+ */
+function directDeliveries(author: DKGAgent, contextGraphId: string): number {
+  return author.getSwmSubstrateFanoutStats().delivered[contextGraphId] ?? 0;
+}
+
+/**
+ * The proof that a share crossed by being delivered. An arrival alone does
+ * not show it: a pull that starts during the watch fetches the share as well.
+ * The author's own count of delivered direct sends does, and a pull does not
+ * move it. Asserted only with the fix: without it nothing is sent at all.
+ */
+async function expectDeliveredDirectly(
+  what: string,
+  author: DKGAgent,
+  contextGraphId: string,
+  deliveriesBefore: number,
+  receivers: number,
+): Promise<void> {
+  if (!SUB_GRAPH_SHARES_CROSS_THE_RELAY) return;
+  await author.awaitInFlightSubstrateFanOuts();
+  expect.soft(
+    directDeliveries(author, contextGraphId) - deliveriesBefore,
+    what + ': receivers that applied the share its author sent them directly',
+  ).toBe(receivers);
+}
+
+/**
  * What POST /api/context-graph/subscribe does: admit the subscription (prove
  * the name is not registered, fetch the owner-signed policy from a connected
  * peer and accept it), subscribe, and, first thing in its catch-up job, fetch
@@ -417,6 +446,7 @@ describe('E2E: shared memory between agents linked only through a relay, public 
     // root), so whatever a sender does with its root share must not cost the
     // peer the sub-graph share that follows. Assertion 3 is the same delivery
     // with no root share by its author before it.
+    const deliveriesBefore = directDeliveries(owner, contextGraphId);
     const shared = await share(owner, contextGraphId, 'owner-sub-graph', 'owner-notes');
     const [atMember1, atMember2] = await Promise.all([
       watchAcrossTheRelay(member1, contextGraphId, shared),
@@ -424,6 +454,7 @@ describe('E2E: shared memory between agents linked only through a relay, public 
     ]);
     expectCrossing('the owner\'s sub-graph share at member 1', atMember1);
     expectCrossing('the owner\'s sub-graph share at member 2', atMember2);
+    await expectDeliveredDirectly('the owner\'s sub-graph share', owner, contextGraphId, deliveriesBefore, 2);
     // What was watched crossed, or failed to cross, a relay and nothing else.
     for (const member of [member1, member2]) expectRelayOnlyLink(network, member, owner, 'after the owner\'s sub-graph share');
   }, 240_000);
@@ -431,8 +462,10 @@ describe('E2E: shared memory between agents linked only through a relay, public 
   it('3. a share by a member into a named sub-graph ' + DELIVERY + ' the owner', async () => {
     buildsOn(FOLLOWING);
     await whenNobodyPulls(everyone);
+    const deliveriesBefore = directDeliveries(member1, contextGraphId);
     const shared = await share(member1, contextGraphId, 'member-sub-graph', 'member-1-notes');
     expectCrossing('member 1\'s sub-graph share at the owner', await watchAcrossTheRelay(owner, contextGraphId, shared));
+    await expectDeliveredDirectly('member 1\'s sub-graph share', member1, contextGraphId, deliveriesBefore, 1);
     expectRelayOnlyLink(network, member1, owner, 'after the member\'s sub-graph share');
   }, 240_000);
 
@@ -476,8 +509,11 @@ describe('E2E: shared memory between agents linked only through a relay, public 
     // cross. Its author last worked out whom to send to before member 2
     // connected, so this also requires that a peer which has just asked for
     // the graph counts at once. The switch decides what is expected.
+    const deliveriesBefore = directDeliveries(member1, contextGraphId);
     const connected = await share(member1, contextGraphId, 'member-sub-graph-connected', 'member-1-notes');
     expectCrossing('member 1\'s sub-graph share at member 2', await watchAcrossTheRelay(member2, contextGraphId, connected));
+    // To the owner and, now, to member 2.
+    await expectDeliveredDirectly('member 1\'s sub-graph share after the members connected', member1, contextGraphId, deliveriesBefore, 2);
     expectRelayOnlyLink(network, member1, member2, 'the members, after the sub-graph share');
   }, 360_000);
 });

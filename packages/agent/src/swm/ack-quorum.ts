@@ -158,6 +158,13 @@ export interface TrackInput {
    */
   preAckedFromSubstrate?: readonly string[];
   /**
+   * Members of `expectedMembers` for which the direct send is the only
+   * delivery path: the followers of a public graph that are not topic
+   * subscribers. The watchdog's top-up sends to them without the narrowing
+   * it applies to subscribers, which gossip also reaches.
+   */
+  directMembers?: readonly string[];
+  /**
    * The wire bytes that went out via gossip. Held in the tracking
    * record so the watchdog can pass them to {@link SubstrateTopUp}
    * verbatim — receivers are idempotent on (shareOperationId,
@@ -275,6 +282,8 @@ export interface TrackedRecordSnapshot {
   watchdogMs: number;
   deadlineHardMs: number;
   enumerationSource: CGMemberEnumeration['source'];
+  /** See {@link TrackInput.directMembers}. Present only when there is at least one. */
+  directMembers?: readonly string[];
 }
 
 const DEFAULT_QUORUM_THRESHOLD = 0.9;
@@ -303,6 +312,7 @@ interface TrackedRecord {
   watchdogArmedAtMs: number;
   watchdogFired: boolean;
   enumerationSource: CGMemberEnumeration['source'];
+  directMembers: readonly string[];
 }
 
 export function createSwmAckQuorum(deps: SwmAckQuorumDeps): SwmAckQuorum {
@@ -407,6 +417,7 @@ export function createSwmAckQuorum(deps: SwmAckQuorumDeps): SwmAckQuorum {
         watchdogArmedAtMs: startedAtMs,
         watchdogFired: false,
         enumerationSource: input.enumerationSource,
+        directMembers: (input.directMembers ?? []).filter((peerId) => expectedMembers.has(peerId)),
       };
       records.set(record.shareOperationId, record);
       trackedCount += 1;
@@ -477,6 +488,7 @@ export function createSwmAckQuorum(deps: SwmAckQuorumDeps): SwmAckQuorum {
         watchdogMs: record.watchdogMs,
         deadlineHardMs: record.deadlineHardMs,
         enumerationSource: record.enumerationSource,
+        ...(record.directMembers.length > 0 ? { directMembers: record.directMembers } : {}),
       };
     },
 

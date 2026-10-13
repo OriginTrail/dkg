@@ -16,9 +16,10 @@ import {
 import {
   SHARED_MEMORY_FOLLOWER_TTL_MS,
   SharedMemoryFollowers,
+  noteCatalogHeadReplayFollower,
   sharedMemoryFollowersOf,
 } from '../src/swm/shared-memory-followers.js';
-import { FANOUT_RESPONSE_REJECTED, chooseFanOutTier } from '../src/swm/substrate-fanout.js';
+import { FANOUT_RESPONSE_REJECTED, FANOUT_RESPONSE_RETRYABLE, chooseFanOutTier } from '../src/swm/substrate-fanout.js';
 import { registerSyncHandler } from '../src/sync/responder/sync-handler.js';
 import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 
@@ -158,6 +159,24 @@ describe('SharedMemoryFollowers', () => {
     expect(followers.followers('graph-1').sort()).toEqual([PEER_A, PEER_B].sort());
   });
 
+  describe('a request to replay a graph\'s catalog heads', () => {
+    const request = { contextGraphId: GRAPH, policyDigest: `0x${'ab'.repeat(32)}` };
+
+    it('makes the peer a follower when it names the policy this node has accepted', () => {
+      const { followers } = withClock();
+      expect(noteCatalogHeadReplayFollower(followers, request.policyDigest, request, PEER_A)).toBe(true);
+      expect(followers.followers(GRAPH)).toEqual([PEER_A]);
+    });
+
+    it('records nothing under another policy, or for a graph this node holds no policy for', () => {
+      const { followers } = withClock();
+      expect(noteCatalogHeadReplayFollower(followers, `0x${'cd'.repeat(32)}`, request, PEER_A)).toBe(false);
+      expect(noteCatalogHeadReplayFollower(followers, undefined, request, PEER_A)).toBe(false);
+      expect(followers.followers(GRAPH)).toEqual([]);
+      expect(followers.graphCount).toBe(0);
+    });
+  });
+
   it('gives each agent its own followers and the same ones every time', () => {
     const agentOne = {};
     const agentTwo = {};
@@ -240,14 +259,15 @@ describe('recipients of a share into a public graph', () => {
 
   // The subscriber snapshot is cached for a minute. A follower is not: the
   // peer that asked a moment ago is a recipient of the very next share.
-  it('include a new follower at once, while the subscriber snapshot is still cached', async () => {
+  it('include a new follower at once, while the graph\'s resolution is still cached', async () => {
     const followers = new SharedMemoryFollowers();
-    let subscriberReads = 0;
+    let resolutions = 0;
     const enumerator = createCGMemberEnumerator(makeDeps({
-      getTopicSubscribers: () => {
-        subscriberReads += 1;
-        return [PEER_A];
+      getContextGraphAllowedPeers: async () => {
+        resolutions += 1;
+        return null;
       },
+      getTopicSubscribers: () => [PEER_A],
       getSharedMemoryFollowers: (cgId) => followers.followers(cgId),
       now: () => 5_000,
     }));
@@ -256,7 +276,30 @@ describe('recipients of a share into a public graph', () => {
     const next = await enumerator.enumerate(GRAPH);
     expect(next.members).toEqual([PEER_A]);
     expect(next.directFollowers).toEqual([PEER_B]);
-    expect(subscriberReads).toBe(1);
+    expect(resolutions).toBe(1);
+  });
+
+  // The cached snapshot can list a peer that has lost its gossip connection
+  // since. Once it asks again, through a relay, it is a follower: judged
+  // against the subscribers of this moment, not against the snapshot.
+  it('treat a peer of the cached snapshot that is no longer a subscriber as a follower', async () => {
+    const followers = new SharedMemoryFollowers();
+    let subscribersNow = [PEER_A, PEER_C];
+    const enumerator = createCGMemberEnumerator(makeDeps({
+      getTopicSubscribers: () => subscribersNow,
+      getSharedMemoryFollowers: (cgId) => followers.followers(cgId),
+      now: () => 5_000,
+    }));
+    expect((await enumerator.enumerate(GRAPH)).members).toEqual([PEER_A, PEER_C]);
+    subscribersNow = [PEER_C];
+    followers.note(GRAPH, PEER_A);
+    const next = await enumerator.enumerate(GRAPH);
+    expect(next.members).toEqual([PEER_A, PEER_C]);
+    expect(next.directFollowers).toEqual([PEER_A]);
+    // With more subscribers than direct sends allow, the plan still sends to it.
+    const plan = chooseFanOutTier({ enumeration: next, maxSubstrateMembers: 1 });
+    expect(plan.useSubstrate).toBe(false);
+    expect(plan.directFollowers).toEqual([PEER_A]);
   });
 
   it('join a resolution that is in flight and still read the followers of that moment', async () => {
@@ -338,11 +381,13 @@ describe('a share into a public graph that has followers', () => {
   const DELIVERED = { delivered: true as const, response: new Uint8Array(), attempts: 1, messageId: 'm' };
   /** The receiver's answer for a share it will never apply. */
   const REFUSED = { delivered: true as const, response: FANOUT_RESPONSE_REJECTED, attempts: 1, messageId: 'm' };
+  /** The receiver's answer for a share it cannot apply now. */
+  const RETRY_LATER = { delivered: true as const, response: FANOUT_RESPONSE_RETRYABLE, attempts: 1, messageId: 'm' };
 
   async function agentWith(options: {
     subscribers: string[];
     followers: string[];
-    answer?: (peerId: string) => typeof DELIVERED | typeof REFUSED;
+    answer?: (peerId: string) => typeof DELIVERED | typeof REFUSED | typeof RETRY_LATER;
   }) {
     const agent = await DKGAgent.create({
       name: `shares-through-relay-${Math.random().toString(36).slice(2)}`,
@@ -432,6 +477,84 @@ describe('a share into a public graph that has followers', () => {
     expect(agent.getSwmFanoutPeerOutcomeForTests(GRAPH, PEER_A)).toBe('failed');
     expect(agent.getSwmFanoutPeerOutcomeForTests(GRAPH, PEER_B)).toBeUndefined();
     expect(await share('reports')).toEqual([PEER_B]);
+  });
+
+  // A follower that answers "not now" is sent the share again by the watchdog.
+  // That retry must reach every such follower: the narrowing to three peers a
+  // round is for subscribers, which gossip also reaches.
+  it('is sent again to every follower that asked for a retry, not to three of them', async () => {
+    const followers = ['follower-1', 'follower-2', 'follower-3', 'follower-4'];
+    let retryLater = true;
+    const { agent, share } = await agentWith({
+      subscribers: [PEER_A],
+      followers,
+      answer: (peerId) => (retryLater && peerId !== PEER_A ? RETRY_LATER : DELIVERED),
+    });
+    expect(await share('reports')).toEqual([PEER_A, ...followers].sort());
+    const tracked = agent.getSwmAckQuorumRecordSnapshotForTests('share-1') as
+      | { acked: readonly string[]; directMembers?: readonly string[] }
+      | undefined;
+    expect(tracked?.acked).toEqual([PEER_A]);
+    expect([...(tracked?.directMembers ?? [])].sort()).toEqual(followers);
+
+    retryLater = false;
+    const sent: string[] = [];
+    const messenger = (agent as unknown as { messenger: { sendReliable: (peerId: string, protocolId: string) => Promise<unknown> } }).messenger;
+    const sendReliable = messenger.sendReliable;
+    messenger.sendReliable = async (peerId, protocolId) => {
+      sent.push(peerId);
+      return sendReliable(peerId, protocolId);
+    };
+    await agent.invokeSwmSubstrateTopUpForTests({
+      shareOperationId: 'share-1',
+      cgId: GRAPH,
+      payload: new Uint8Array([1, 2, 3, 1]),
+      missingPeers: followers,
+    });
+    expect([...sent].sort()).toEqual(followers);
+    // None of it is remembered against a follower, whatever it answered.
+    for (const peerId of followers) expect(agent.getSwmFanoutPeerOutcomeForTests(GRAPH, peerId)).toBeUndefined();
+    // Every member has the share now, so the tracking of it has ended.
+    expect(agent.getSwmAckQuorumRecordSnapshotForTests('share-1')).toBeUndefined();
+  });
+
+  it('is tracked, and sent again, when a follower is the only recipient', async () => {
+    let retryLater = true;
+    const { agent, share } = await agentWith({
+      subscribers: [],
+      followers: [PEER_B],
+      answer: () => (retryLater ? RETRY_LATER : DELIVERED),
+    });
+    expect(await share('reports')).toEqual([PEER_B]);
+    expect(agent.getSwmAckQuorumRecordSnapshotForTests('share-1')).toMatchObject({ expectedMembers: [PEER_B], acked: [] });
+    retryLater = false;
+    await agent.invokeSwmSubstrateTopUpForTests({
+      shareOperationId: 'share-1',
+      cgId: GRAPH,
+      payload: new Uint8Array([1, 2, 3, 1]),
+      missingPeers: [PEER_B],
+    });
+    expect(agent.getSwmAckQuorumRecordSnapshotForTests('share-1')).toBeUndefined();
+  });
+
+  it('is sent again to a subscriber by the old rules, beside the followers', async () => {
+    const subscribers = ['subscriber-1', 'subscriber-2', 'subscriber-3', 'subscriber-4', 'subscriber-5'];
+    const { agent, share } = await agentWith({ subscribers, followers: [PEER_B], answer: () => RETRY_LATER });
+    await share('reports');
+    const sent: string[] = [];
+    (agent as unknown as { messenger: { sendReliable: (peerId: string) => Promise<unknown> } }).messenger.sendReliable = async (peerId) => {
+      sent.push(peerId);
+      return RETRY_LATER;
+    };
+    await agent.invokeSwmSubstrateTopUpForTests({
+      shareOperationId: 'share-1',
+      cgId: GRAPH,
+      payload: new Uint8Array([1, 2, 3, 1]),
+      missingPeers: [...subscribers, PEER_B],
+    });
+    // Three subscribers this round, as before, and the follower.
+    expect(sent.filter((peerId) => peerId !== PEER_B)).toHaveLength(3);
+    expect(sent).toContain(PEER_B);
   });
 
   describe('into the root', () => {
