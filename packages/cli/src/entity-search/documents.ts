@@ -1,13 +1,15 @@
 import { createHash } from 'node:crypto';
+import { isSafeIri, sparqlIri, sparqlString } from '@origintrail-official/dkg-core';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import { EntitySearchError, checkDeadline, type EntityDocument, type EntityIndexSpec } from './types.js';
 
 export const PAGE_SIZE = 8;
 export const MAX_DOCUMENT_ROWS = 256;
 export function iri(value: unknown): string {
-  if (typeof value !== 'string' || value.length > 2048 || !/^[a-z][a-z0-9+.-]*:/i.test(value)
-      || /[<>"{}|^`\\\s]/u.test(value) || [...value].some(char => char.charCodeAt(0) < 32)) throw new EntitySearchError('ENTITY_INVALID_REQUEST', 400);
-  return `<${value}>`;
+  if (typeof value !== 'string' || value.length > 2048 || !isSafeIri(value)) {
+    throw new EntitySearchError('ENTITY_INVALID_REQUEST', 400);
+  }
+  return sparqlIri(value);
 }
 export function parseSpec(raw: EntityIndexSpec): EntityIndexSpec {
   if (!raw || typeof raw.contextGraphId !== 'string' || !raw.contextGraphId || raw.contextGraphId.length > 256
@@ -49,8 +51,8 @@ export class EntityGraphReader {
     let cursor = '';
     if (after) {
       const [graph, entity] = JSON.parse(after) as string[];
-      cursor = `FILTER(STR(?sourceGraph) > ${JSON.stringify(graph)} ||
-        (STR(?sourceGraph) = ${JSON.stringify(graph)} && STR(?entity) > ${JSON.stringify(entity)}))`;
+      cursor = `FILTER(STR(?sourceGraph) > ${sparqlString(graph)} ||
+        (STR(?sourceGraph) = ${sparqlString(graph)} && STR(?entity) > ${sparqlString(entity)}))`;
     }
     const rows = await this.query(spec, `SELECT DISTINCT ?sourceGraph ?entity WHERE {
       ${selection(spec)} ${cursor} } ORDER BY STR(?sourceGraph) STR(?entity) LIMIT ${PAGE_SIZE}`, signal, deadline);
@@ -58,9 +60,18 @@ export class EntityGraphReader {
   }
   async document(spec: EntityIndexSpec, entity: Pick<EntityDocument, 'sourceGraph' | 'entityUri'>,
     signal: AbortSignal, deadline: number): Promise<EntityDocument | null> {
+    const selected = `VALUES (?sourceGraph ?entity) { (${iri(entity.sourceGraph)} ${iri(entity.entityUri)}) }
+      ${selection(spec).replace('GRAPH ?sourceGraph', `GRAPH ${iri(entity.sourceGraph)}`)}`;
+    // Return only a witness for large literals, before transferring their payload.
+    // The bounded inner selection also caps aggregate work per document. All
+    // reads retain the original deadline and current authorization; errors pass through.
+    const oversized = await this.query(spec, `SELECT (true AS ?oversized) WHERE {
+      { SELECT (COUNT(*) AS ?rows) (SUM(STRLEN(STR(?p)) + STRLEN(STR(?value))) AS ?chars) WHERE {
+        { SELECT DISTINCT ?p ?value WHERE { ${selected} } LIMIT ${MAX_DOCUMENT_ROWS + 1} }
+      } } FILTER(?rows > ${MAX_DOCUMENT_ROWS} || ?chars > 16384) } LIMIT 1`, signal, deadline);
+    if (oversized.length) throw new EntitySearchError('ENTITY_DOCUMENT_TOO_LARGE', 422);
     const rows = await this.query(spec, `SELECT DISTINCT ?p ?value WHERE {
-      VALUES (?sourceGraph ?entity) { (${iri(entity.sourceGraph)} ${iri(entity.entityUri)}) }
-      ${selection(spec)} } ORDER BY ?p ?value LIMIT ${MAX_DOCUMENT_ROWS + 1}`, signal, deadline);
+      ${selected} } ORDER BY ?p ?value LIMIT ${MAX_DOCUMENT_ROWS + 1}`, signal, deadline);
     if (!rows.length) return null;
     if (rows.length > MAX_DOCUMENT_ROWS) throw new EntitySearchError('ENTITY_DOCUMENT_TOO_LARGE', 422);
     // Preserve predicate names in the embedding input; do not flatten unrelated entities.
