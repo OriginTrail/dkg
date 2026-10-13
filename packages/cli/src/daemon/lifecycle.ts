@@ -3739,7 +3739,8 @@ async function runDaemonInnerWithStartupOwnership(
         const teardown = await runProducerQuiescentTeardown(
           buildProducerQuiescentTeardownSteps({
             closeHttpServer: () => closeDaemonHttpServer(server, detachedHttpResponses),
-            closeLocalLlm: async () => { entitySearch?.close(); await localLlm.close(); },
+            closeEntitySearch: async () => { entitySearch?.close(); },
+            closeLocalLlm: () => localLlm.close(),
             drainCatchupJobs,
             flushTelemetry,
             stopPublisherRuntime: async () => {

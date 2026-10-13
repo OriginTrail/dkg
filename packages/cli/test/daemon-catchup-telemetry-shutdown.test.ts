@@ -1014,6 +1014,7 @@ describe('A11 — instrumentation never breaks the route or the drain', () => {
  */
 const TEARDOWN_ORDER = [
   'closeServer',
+  'closeEntitySearch',
   'closeLocalLlm',
   'drainCatchupJobs',
   'flushTelemetry',
@@ -1049,6 +1050,7 @@ describe('A24 — producer-quiescent teardown order', () => {
     await runProducerQuiescentTeardown({
       ...steps,
       closeServer: async () => { events.push('closeServer'); },
+      closeEntitySearch: async () => { events.push('closeEntitySearch'); },
       closeLocalLlm: async () => { events.push('closeLocalLlm'); },
       drainCatchupJobs: async () => { await sleep(1); events.push('drainCatchupJobs'); },
       flushTelemetry: async () => { await sleep(1); events.push('flushTelemetry'); },
@@ -1310,6 +1312,7 @@ describe('A24 — teardown WIRING: every slot dispatches to the dep it names', (
         closeHttpServer: async () => {
           calls.push('closeHttpServer');
         },
+        closeEntitySearch: async () => { calls.push('closeEntitySearch'); },
         closeLocalLlm: async () => {
           calls.push('closeLocalLlm');
         },
@@ -1371,6 +1374,7 @@ describe('A24 — teardown WIRING: every slot dispatches to the dep it names', (
     // the sequencer's per-step guard covers each of them individually.
     expect(dispatched).toEqual([
       ['closeServer', ['closeHttpServer']],
+      ['closeEntitySearch', ['closeEntitySearch']],
       ['closeLocalLlm', ['closeLocalLlm']],
       ['drainCatchupJobs', ['drainCatchupJobs']],
       ['flushTelemetry', ['flushTelemetry']],
