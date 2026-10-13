@@ -34,14 +34,16 @@
 # the pair's gossip. So as soon as the graph exists, and before anything is
 # shared, every Core subscribes to it and unsubscribes again: a node does not
 # re-activate a subscription its operator ended. The script checks before the
-# first share and at the end that no Core follows the graph, and fails if one
-# does, because then nothing it saw is about the link.
+# first share and at the end that every Core says it does not follow the graph.
+# It fails if one does, and also if one cannot be asked (an error, an answer
+# that is not its listing): in both cases nothing it saw is about the link.
 #
 # Then the first Edge creates a public, unregistered context graph with a
 # sub-graph, the second subscribes, and, in this order:
 #
 #   1. a share into the SUB-GRAPH, made as soon as the second Edge holds the
-#      graph's definition, must arrive within RELAY_ONLY_ARRIVAL_SECS. This is
+#      graph's definition, must arrive within RELAY_ONLY_ARRIVAL_SECS of its
+#      share job finishing. This is
 #      the defect: before the fix nothing delivered it. It also covers the
 #      author learning in time that it has a follower.
 #   2. a share into the root must arrive (control: the link, the subscription
@@ -81,7 +83,6 @@ DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 API_PORT_BASE="${API_PORT_BASE:-9201}"
 NODE_A="${RELAY_ONLY_NODE_A:-7}"
 NODE_B="${RELAY_ONLY_NODE_B:-8}"
-NUM_NODES="${NUM_NODES:-6}"
 ARRIVAL_SECS="${RELAY_ONLY_ARRIVAL_SECS:-45}"
 SETUP_SECS="${RELAY_ONLY_SETUP_SECS:-90}"
 SETTLE_SECS="${RELAY_ONLY_SETTLE_SECS:-0}"
@@ -94,6 +95,8 @@ export DKG_API_MAXTIME="${DKG_API_MAXTIME:-60}"
 . "$REPO_ROOT/scripts/devnet-lib.sh"
 # shellcheck source=devnet-observation-helpers.sh
 . "$REPO_ROOT/scripts/devnet-observation-helpers.sh"
+# shellcheck source=devnet-listing-helpers.sh
+. "$REPO_ROOT/scripts/devnet-listing-helpers.sh"
 
 PASS=0; FAIL=0
 STARTED=$(date +%s)
@@ -205,11 +208,20 @@ say "graph $CG"
 # once the graph exists (it asks the creator, which it is connected to); the
 # subscription is ended at once, and an ended subscription is not re-activated
 # when the Core later discovers the graph by itself.
+# Which nodes are Cores is read from the devnet's own files, not from an API
+# answer: a Core that does not answer must not drop out of the list unnoticed.
 CORES=""
 graph_body="$(json '{ contextGraphId: a[0] }' "$CG")"
-for n in $(seq 1 "$NUM_NODES"); do
+for dir in "$DEVNET_DIR"/node*/; do
+  n="${dir%/}"; n="${n##*/node}"
+  case "$n" in ''|*[!0-9]*) continue ;; esac
   [ "$n" != "$NODE_A" ] && [ "$n" != "$NODE_B" ] || continue
-  [ "$(field "$(body_of "$(api "$n" GET /api/status)")" nodeRole)" = "core" ] || continue
+  role="$(node -e 'try { process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).nodeRole || "edge")); } catch { process.stdout.write("unreadable"); }' "${dir}config.json")"
+  case "$role" in
+    core) ;;
+    edge) continue ;;
+    *) bad "the role of node$n could not be read from ${dir}config.json; it may be a Core that carries the graph"; finish ;;
+  esac
   CORES="$CORES $n"
   waited=0
   while :; do
@@ -221,41 +233,40 @@ for n in $(seq 1 "$NUM_NODES"); do
   answer="$(api "$n" POST /api/context-graph/unsubscribe "$graph_body")"
   [ "$(code_of "$answer")" = "200" ] || { bad "Core node$n could not be kept out of the graph (unsubscribe: HTTP $(code_of "$answer") $(body_of "$answer" | head -c 200))"; finish; }
 done
-# cores_following: the Cores that list the graph as subscribed, as " node3 node4".
-cores_following() {
-  local n listing following=""
-  for n in $CORES; do
-    listing="$(body_of "$(api "$n" GET /api/context-graph/list)")"
-    if CG="$CG" node -e 'let d = ""; process.stdin.on("data", c => d += c).on("end", () => {
-      let graphs = []; try { graphs = JSON.parse(d).contextGraphs || []; } catch {}
-      const g = graphs.find(x => x.id === process.env.CG);
-      process.exit(g && g.subscribed === true ? 0 : 1); })' <<<"$listing"; then following="$following node$n"; fi
-  done
-  printf '%s' "$following"
+# The precondition everything below rests on: every Core says that it does not
+# follow the graph. A Core whose listing cannot be read has said nothing, and
+# that fails the check exactly as a Core that follows the graph does.
+cores_kept_out() { # <when>
+  local status=0
+  # shellcheck disable=SC2086
+  devnet_following "$CG" $CORES || status=$?
+  case "$status" in
+    0) ok "$1: no Core follows the graph, so only the relayed link can carry a sub-graph share"; return 0 ;;
+    1) bad "$1: Core(s)$DEVNET_FOLLOWING follow the graph although their subscription was ended: their gossip can carry a share, so nothing here says the relayed link delivered" ;;
+    *) bad "$1: whether a Core follows the graph could not be established for$DEVNET_FOLLOWING_UNKNOWN${DEVNET_FOLLOWING:+ (and$DEVNET_FOLLOWING do follow it)}; without that nothing here says the relayed link delivered" ;;
+  esac
+  return 1
 }
-following="$(cores_following)"
-[ -z "$following" ] || { bad "Core(s)$following still follow the graph after their subscription was ended"; finish; }
+[ -n "$CORES" ] || { bad "no Core found under $DEVNET_DIR: there is nothing to keep out of the graph, and no relay either"; finish; }
+cores_kept_out "before the first share" || finish
 say "Cores$CORES are kept out of the graph (t+$(elapsed)s)"
 
-
-has_definition() {
-  local listing
-  listing="$(body_of "$(api "$NODE_B" GET /api/context-graph/list)")"
-  CG="$CG" node -e 'let d = ""; process.stdin.on("data", c => d += c).on("end", () => {
-    let graphs = []; try { graphs = JSON.parse(d).contextGraphs || []; } catch {}
-    const g = graphs.find(x => x.id === process.env.CG);
-    process.exit(g && g.accessPolicy ? 0 : 1); })' <<<"$listing"
-}
 subscribe_body="$(json '{ contextGraphId: a[0], includeSharedMemory: true }' "$CG")"
 answer="$(api "$NODE_B" POST /api/context-graph/subscribe "$subscribe_body")"
 [ "$(code_of "$answer")" = "200" ] || { bad "node$NODE_B could not subscribe: HTTP $(code_of "$answer") $(body_of "$answer" | head -c 300)"; finish; }
-waited=0
-until has_definition; do
+# One more subscribe half-way is what a client does when the first one found nothing.
+since="$(date +%s)"; asked_again=""; have=""
+while :; do
+  if devnet_has_definition "$NODE_B" "$CG"; then have=1; break; fi
+  waited=$(( $(date +%s) - since ))
   [ "$waited" -lt "$SETUP_SECS" ] || break
-  [ "$waited" -ne $(( SETUP_SECS / 2 )) ] || api "$NODE_B" POST /api/context-graph/subscribe "$subscribe_body" >/dev/null
-  sleep 1; waited=$((waited + 1))
+  if [ -z "$asked_again" ] && [ "$waited" -ge $(( SETUP_SECS / 2 )) ]; then
+    asked_again=1
+    api "$NODE_B" POST /api/context-graph/subscribe "$subscribe_body" >/dev/null
+  fi
+  sleep 1
 done
-has_definition || { bad "node$NODE_B holds no definition of the graph ${SETUP_SECS}s after it subscribed"; finish; }
+[ -n "$have" ] || { bad "node$NODE_B holds no definition of the graph ${SETUP_SECS}s after it subscribed (its listing last said: $DEVNET_LISTING_ANSWER)"; finish; }
 say "node$NODE_B follows the graph (t+$(elapsed)s)"
 case "$SETTLE_SECS" in ''|*[!0-9]*) SETTLE_SECS=0 ;; esac
 if [ "$SETTLE_SECS" -gt 0 ]; then
@@ -265,7 +276,7 @@ fi
 
 # share_and_expect <what> <sub-graph or ""> <tag> <shape key>: node A shares, node B must hold it in time.
 share_and_expect() {
-  local what="$1" sub="$2" tag="$3" key="$4" name subject body answer job state job_view shared_at rows status verdict sparql scope prefix
+  local what="$1" sub="$2" tag="$3" key="$4" name subject body answer job state job_view shared_at started rows status verdict sparql scope prefix
   name="i3198-relay-$(printf '%s' "$STAMP" | tr 'A-Z' 'a-z')-$tag"
   subject="urn:issue3198:relay:$STAMP:$tag"
   body="$(shapes body "$key" "$CG" "$name" "$subject" "$sub")"
@@ -283,9 +294,12 @@ share_and_expect() {
     sleep 1
   done
   [ "$state" = "succeeded" ] || { bad "$what: the share job ended '$state': $(field "$job_view" lastError | head -c 300)"; return 1; }
+  # The time to arrive runs from the end of the share job, as in the
+  # content-shapes script; the report counts from the share itself.
   sparql="SELECT ?g ?p ?o WHERE { GRAPH ?g { <$subject> ?p ?o } }"
   scope="$(json '{ contextGraphId: a[0], includeContextGraphPartitions: true }' "$CG")"
   prefix="did:dkg:context-graph:$CG/${sub:+$sub/}_shared_memory"
+  started="$(date +%s)"
   while :; do
     status=0
     rows="$(devnet_query_api_settling "http://127.0.0.1:$(node_port "$NODE_B")" "$AUTH" "$sparql" o bindings "$scope" 2>/dev/null)" || status=$?
@@ -294,10 +308,10 @@ share_and_expect() {
       [ "$status" -ne 0 ] || { ok "$what: at node$NODE_B $(( $(date +%s) - shared_at ))s after the share"; return 0; }
       [ "$status" -ne 4 ] || { bad "$what: at node$NODE_B with another value: ${verdict#different }"; return 1; }
     fi
-    [ $(( $(date +%s) - shared_at )) -lt "$ARRIVAL_SECS" ] || break
+    [ $(( $(date +%s) - started )) -lt "$ARRIVAL_SECS" ] || break
     sleep 1
   done
-  bad "$what: NOT at node$NODE_B ${ARRIVAL_SECS}s after the share"
+  bad "$what: NOT at node$NODE_B ${ARRIVAL_SECS}s after its share job finished"
   return 1
 }
 
@@ -305,7 +319,5 @@ share_and_expect "a share into the sub-graph" "$SUB_GRAPH" sub-1 plain
 share_and_expect "a share into the root (control)" "" root plain
 share_and_expect "a share into the sub-graph right after the root share" "$SUB_GRAPH" sub-2 plain-after
 relay_only_link "after the last share"
-following="$(cores_following)"
-if [ -z "$following" ]; then ok "no Core followed the graph: only the relayed link could carry the sub-graph shares"
-else bad "Core(s)$following followed the graph although their subscription was ended: their gossip can carry a share, so nothing above says the relayed link delivered"; fi
+cores_kept_out "after the last share"
 finish

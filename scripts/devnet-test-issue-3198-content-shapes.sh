@@ -34,11 +34,12 @@
 # AFTER the one that could not be published.
 #
 # Every asset must be in shared memory on every other node within
-# CONTENT_SHAPES_ARRIVAL_SECS, with the value it was written with (the same
-# characters for text, the same value for a typed literal: a store may answer
-# "100.0" for "100"). Afterwards the node logs written during the run must not
-# hold a repeated `catalog_repair_failed` (authors) nor NQUADS_BYTE_LIMIT_EXCEEDED
-# or "post-read differs" (anyone).
+# CONTENT_SHAPES_ARRIVAL_SECS, with the value it was written with and no other
+# value beside it (the same characters for text, the same value for a typed
+# literal: a store may answer "100.0" for "100"). Afterwards the node logs
+# written during the run must not hold a repeated `catalog_repair_failed`
+# (authors) nor NQUADS_BYTE_LIMIT_EXCEEDED or "post-read differs" (anyone); a
+# log that does not mention the run at all fails that check, it does not pass it.
 #
 # Blazegraph is not optional. A devnet without one node on Blazegraph FAILS this
 # script (it does not skip): that is the configuration in which defect 2 went
@@ -92,6 +93,8 @@ export DKG_API_MAXTIME="${DKG_API_MAXTIME:-60}"
 . "$REPO_ROOT/scripts/devnet-lib.sh"
 # shellcheck source=devnet-observation-helpers.sh
 . "$REPO_ROOT/scripts/devnet-observation-helpers.sh"
+# shellcheck source=devnet-listing-helpers.sh
+. "$REPO_ROOT/scripts/devnet-listing-helpers.sh"
 
 PASS=0; FAIL=0
 STARTED=$(date +%s)
@@ -158,23 +161,21 @@ OX_AUTHOR="$(first_of edge $OTHER_NODES || echo "${OTHER_NODES# }" | cut -d' ' -
 BZ_AUTHOR="$(echo "${BLAZE_NODES# }" | cut -d' ' -f1)"
 
 # ── log marks: only what the nodes write from here on is judged ──────────────
+log_size() { { wc -c < "$DEVNET_DIR/node$1/daemon.log"; } 2>/dev/null | tr -d ' '; }
 LOG_MARK=()
-for n in $UP_NODES; do LOG_MARK[$n]="$(wc -c < "$DEVNET_DIR/node$n/daemon.log" 2>/dev/null | tr -d ' ' || echo 0)"; done
-log_since_mark() { tail -c "+$(( ${LOG_MARK[$1]:-0} + 1 ))" "$DEVNET_DIR/node$1/daemon.log" 2>/dev/null; }
+for n in $UP_NODES; do LOG_MARK[$n]="$(log_size "$n")"; done
+# What a node logged since the mark. A log that is shorter than it was has been
+# replaced, and all of it is new. Status 1 when there is no log to read.
+log_since_mark() {
+  local mark="${LOG_MARK[$1]:-0}" size
+  size="$(log_size "$1")"
+  [ -n "$size" ] || return 1
+  [ "$size" -ge "${mark:-0}" ] || mark=0
+  tail -c "+$(( ${mark:-0} + 1 ))" "$DEVNET_DIR/node$1/daemon.log"
+}
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 RUN_GRAPHS=""    # "<author>|<context graph id>" per line, for the log checks
-
-# 0 when the node lists the graph with its access policy, which it knows only
-# from the definition. An unanswered or unreadable listing counts as "not yet".
-has_definition() {
-  local n="$1" cg="$2" listing
-  listing="$(body_of "$(api "$n" GET /api/context-graph/list)")"
-  CG="$cg" node -e 'let d = ""; process.stdin.on("data", c => d += c).on("end", () => {
-    let graphs = []; try { graphs = JSON.parse(d).contextGraphs || []; } catch {}
-    const g = graphs.find(x => x.id === process.env.CG);
-    process.exit(g && g.accessPolicy ? 0 : 1); })' <<<"$listing"
-}
 
 # "<node> <key>" per line: the first asset of the current battery a node missed.
 MISSED_FIRST=""
@@ -298,7 +299,7 @@ run_graph() {
   for n in $receivers; do
     since="$(date +%s)"; asked_again=""; have=""
     while :; do
-      if has_definition "$n" "$cg"; then have=1; break; fi
+      if devnet_has_definition "$n" "$cg"; then have=1; break; fi
       waited=$(( $(date +%s) - since ))
       [ "$waited" -lt "$SETUP_SECS" ] || break
       if [ -z "$asked_again" ] && [ "$waited" -ge $(( SETUP_SECS / 2 )) ]; then
@@ -309,7 +310,7 @@ run_graph() {
       sleep 1
     done
     if [ -n "$have" ]; then with_definition="$with_definition $n"
-    else bad "$label author: $(store_label "$n") holds no definition of the graph ${SETUP_SECS}s after it subscribed; nothing shared into it can be expected there"; fi
+    else bad "$label author: $(store_label "$n") holds no definition of the graph ${SETUP_SECS}s after it subscribed (its listing last said: $DEVNET_LISTING_ANSWER); nothing shared into it can be expected there"; fi
   done
   receivers="$with_definition"
   [ -n "$receivers" ] || { bad "$label author: no subscriber is ready, the battery was not run"; return 0; }
@@ -347,35 +348,36 @@ if [ -n "$BZ_AUTHOR" ]; then run_graph blazegraph "$BZ_AUTHOR"; fi
 
 # ── the logs of this run ─────────────────────────────────────────────────────
 # The defects were loud in the logs long before anybody looked at the data.
-# Neither line names its context graph, so the check is by node and by time:
-# what a node wrote since this script started.
-#   - An author that cannot publish a catalog row logs catalog_repair_failed on
-#     every retry, with a growing "consecutiveFailures". One such line with a
-#     count of 0 or 1 is a retry that then succeeded (a full devnet run has a
-#     few); two failures in a row are not.
-#   - A receiver that reads a row back in another form logs the refusal with
-#     NQUADS_BYTE_LIMIT_EXCEEDED or "post-read differs" / "post-read failed". A
-#     full devnet run without the defect has no such line on any node.
+# scripts/lib/qa/node-log-check.mjs says what counts, and why a log that does
+# not mention this run is no evidence at all (a missing, replaced or wrong file
+# has no defect line either).
 say "── node logs written during this run ── (t+$(elapsed)s)"
 AUTHORS="$(printf '%s\n' "$RUN_GRAPHS" | awk -F'|' 'NF == 2 { print $1 }' | sort -u | tr '\n' ' ')"
-for n in $AUTHORS; do
-  found="$(log_since_mark "$n" | grep -F '"event":"catalog_repair_failed"' || true)"
-  repeated="$(printf '%s\n' "$found" | grep -E '"consecutiveFailures":([2-9]|[1-9][0-9]+)' || true)"
-  if [ -n "$repeated" ]; then
-    bad "author node$n logged catalog_repair_failed $(printf '%s\n' "$found" | wc -l | tr -d ' ') time(s), failing repeatedly; one of them: $(printf '%s\n' "$repeated" | head -1 | cut -c1-320)"
-  else
-    ok "author node$n logged no repeated catalog_repair_failed"
-    [ -z "$found" ] || note "author node$n logged catalog_repair_failed $(printf '%s\n' "$found" | wc -l | tr -d ' ') time(s) and recovered each time"
-  fi
-done
-refused=0
+TAB="$(printf '\t')"
+refused=0; unread=0
 for n in $UP_NODES; do
-  found="$(log_since_mark "$n" | grep -E 'NQUADS_BYTE_LIMIT_EXCEEDED|post-read (differs|failed)' || true)"
-  [ -n "$found" ] || continue
-  refused=1
-  bad "$(store_label "$n") refused what it read back from its store $(printf '%s\n' "$found" | wc -l | tr -d ' ') time(s); first: $(printf '%s\n' "$found" | head -1 | sed 's/^.*\[DKGAgent\] //' | cut -c1-320)"
+  role=receiver
+  case " $AUTHORS " in *" $n "*) role=author ;; esac
+  status=0
+  report="$(log_since_mark "$n" | node "$REPO_ROOT/scripts/lib/qa/node-log-check.mjs" "$STAMP" "$role")" || status=$?
+  if [ "$status" -ne 0 ] && [ "$status" -ne 1 ]; then
+    unread=1
+    bad "the log of node$n holds nothing about this run ($DEVNET_DIR/node$n/daemon.log): what it would have shown is not known"
+    continue
+  fi
+  repeated=0
+  while IFS="$TAB" read -r kind count sample; do
+    case "$kind" in
+      repair-failed-repeatedly) repeated=1; bad "author node$n logged catalog_repair_failed $count time(s), failing repeatedly; one of them: $sample" ;;
+      repair-failed-recovered) note "author node$n logged catalog_repair_failed $count time(s) and recovered each time" ;;
+      read-back-refused) refused=1; bad "$(store_label "$n") refused what it read back from its store $count time(s); first: $sample" ;;
+    esac
+  done <<EOF
+$report
+EOF
+  [ "$role" != author ] || [ "$repeated" -ne 0 ] || ok "author node$n logged no repeated catalog_repair_failed"
 done
-[ "$refused" -ne 0 ] || ok "no node refused what it read back from its store (no NQUADS_BYTE_LIMIT_EXCEEDED, no \"post-read differs\")"
+[ "$refused" -ne 0 ] || [ "$unread" -ne 0 ] || ok "no node refused what it read back from its store (no NQUADS_BYTE_LIMIT_EXCEEDED, no \"post-read differs\")"
 
 echo
 say "Stores:$STORE_LINE"
