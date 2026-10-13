@@ -8,7 +8,8 @@ import { bulkChunkHash, readBulkJson, parseBulkAssetHeader,
   type BulkGraphRequest } from '../bulk-graph-contract.js';
 import { BulkStagingQueue } from './bulk-staging-queue.js';
 import { BulkCommitGroup } from './bulk-commit-group.js';
-import { createExactBatchAssetVerifier, type ExactBatchAssetVerifierOptions } from './exact-batch-stream.js';
+import { createAssetPayloadVerifier, decodeAssetPayload, type AssetVerificationOptions } from './asset-payload-verifier.js';
+import { observeExactBatch } from '../exact-batch-observation.js';
 import type { VerifiedGraphScopedAsset } from './graph-scoped-materialization.js';
 
 export interface BulkGraphMetrics { encodedBytes: number; receivedAssets: number; verifiedAssets: number;
@@ -34,7 +35,7 @@ export async function exchangeBulkGraphVerified(router: ProtocolRouter, peer: st
 }
 /** Disk staging and one bounded verifier/group writer overlap the continuous network reader. */
 export async function consumeBulkGraph(session: BulkGraphSession, request: BulkGraphRequest, options: {
-  stagingRoot: string; verification: ExactBatchAssetVerifierOptions;
+  stagingRoot: string; verification: AssetVerificationOptions;
   commit: (assets: readonly VerifiedGraphScopedAsset[], signal: AbortSignal) => Promise<void>;
   onMetrics?: (metrics: BulkGraphMetrics) => void;
 }) {
@@ -92,7 +93,7 @@ export async function consumeBulkGraph(session: BulkGraphSession, request: BulkG
       queue.deliver({ index: frame.index, path, header, chunks }); observe();
     }
   })().catch(error => queue.fail(error));
-  const verify = createExactBatchAssetVerifier(options.verification);
+  const verify = createAssetPayloadVerifier(options.verification);
   const group = new BulkCommitGroup(async members => {
     signal.throwIfAborted();
     const started = performance.now();
@@ -111,8 +112,12 @@ export async function consumeBulkGraph(session: BulkGraphSession, request: BulkG
       if (delivery.kind === 'flush') { await group.flush(); continue; }
       const staged = delivery.value;
       const dataBytes = await readFile(staged.path);
+      const started = performance.now();
+      const decoded = await decodeAssetPayload(dataBytes, signal);
+      if (decoded.bytes.length !== staged.header.plainBytes) throw new Error('Bulk expanded size mismatch');
+      observeExactBatch(() => options.verification.onStage?.('decode', staged.index, performance.now() - started));
       const asset = await verify({ assetIndex: staged.index, assetUal: request.assetUals[staged.index]!,
-        metadataBytes: Buffer.from(staged.header.metadata, 'base64'), dataBytes, plainBytes: staged.header.plainBytes, chunkCount: staged.chunks }, signal);
+        metadataBytes: Buffer.from(staged.header.metadata, 'base64'), dataBytes: decoded.bytes }, signal);
       await group.append(asset, staged); metrics.verifiedAssets++;
       // CREDIT returns bounded staging capacity after verification has consumed the file.
       // It is deliberately not durable coverage; only COMMIT has that meaning.

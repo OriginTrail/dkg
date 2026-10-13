@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { EXACT_BATCH_FRAME_HEADER_BYTES, EXACT_BATCH_MAX_FRAME_BYTES, EXACT_BATCH_MAX_REQUEST_BYTES,
   EXACT_BATCH_MAX_ASSETS, EXACT_BATCH_MAX_CHUNKS_PER_ASSET, type ExactBatchTransportSession, type ExactBatchTransportOptions } from '@origintrail-official/dkg-core';
-import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   EXACT_BATCH_BATCH_INDEX, EXACT_BATCH_FRAME_KIND as K, EXACT_BATCH_STREAM_WINDOW_SIZE,
   ExactBatchReceiveWindow, decodeExactBatchAsset,
@@ -10,22 +9,13 @@ import {
 import { EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES } from '../wire-compression.js';
 import { requireExactAssetUals } from '../exact-assets.js';
 import { observeExactBatch } from '../exact-batch-observation.js';
-import { parseGraphScopedDescriptor } from '../durable-integrity.js';
-import { estimateQuadHeapBytes } from '../memory-telemetry.js';
 import type { DurableSyncContext } from './durable-sync.js';
-import { assertNoLegacyRfc64ControlGraphs, partitionVerifiedGraphScopedAssets } from './verified-asset-preparation.js';
+import { createAssetPayloadVerifier, type AssetVerificationOptions, type AssetVerificationStage } from './asset-payload-verifier.js';
 
 /** Agent consumes the public operations of Core's fixed wire session. */
 export type ExactBatchAgentSession = Pick<ExactBatchTransportSession, 'signal' | 'windowSize' | 'assetUals' | 'next' | 'send'>;
-export type ExactBatchStage = 'decode' | 'parse' | 'verify' | 'authenticate-and-store';
-export interface ExactBatchAssetVerifierOptions {
-  readonly contextGraphId: string;
-  readonly assetUals: readonly string[];
-  readonly ctx: Parameters<DurableSyncContext['processDurableBatchInWorker']>[2];
-  readonly parseAndFilter: (text: string, graph: string, contextGraphId: string) => Promise<{ quads: Quad[]; totalQuads: number }>;
-  readonly processDurableBatchInWorker: DurableSyncContext['processDurableBatchInWorker'];
-  readonly onStage?: (stage: ExactBatchStage, assetIndex: number, durationMs: number) => void;
-}
+export type ExactBatchStage = AssetVerificationStage;
+export type ExactBatchAssetVerifierOptions = AssetVerificationOptions;
 export interface ExactBatchVerifiedReceiverOptions extends ExactBatchAssetVerifierOptions {
   /** The normal host callback, including chain/binding fences, atomic write and retirement. */
   readonly storeGraphScopedAsset: NonNullable<DurableSyncContext['storeGraphScopedAsset']>;
@@ -104,49 +94,14 @@ function partialSyncError(progress: ExactBatchProgress, failure: unknown, signal
     cause instanceof ExactBatchRefusalError && !signal?.aborted ? progress.refusalObservation : undefined,
     failure instanceof ExactBatchStreamFailure && !signal?.aborted);
 }
-const META_GRAPH_SUFFIX = '/_meta';
-const MAX_PARSED_HEAP = 32 * 1024 * 1024;
-const MAX_ROWS = 100_000;
-const UTF8 = new TextDecoder('utf-8', { fatal: true });
-
-/** Decode and verify only; callers own authentication and materialization. */
+/** Exact wire adaptation preserves its unchanged negotiated payload and ACK contract. */
 export function createExactBatchAssetVerifier(options: ExactBatchAssetVerifierOptions) {
+  const verify = createAssetPayloadVerifier(options);
   return async (received: ReceivedExactBatchAsset, signal?: AbortSignal) => {
-    signal?.throwIfAborted();
-    let started = performance.now();
+    const started = performance.now();
     const decoded = await decodeExactBatchAsset(received, { signal });
-    if (received.plainBytes !== undefined && received.plainBytes !== decoded.bytes.length) throw new Error('Bulk expanded size mismatch');
     observeExactBatch(() => options.onStage?.('decode', received.assetIndex, performance.now() - started));
-    const metaGraph = `did:dkg:context-graph:${options.contextGraphId}${META_GRAPH_SUFFIX}`;
-    started = performance.now();
-    const metadata = await options.parseAndFilter(UTF8.decode(received.metadataBytes), metaGraph, options.contextGraphId);
-    signal?.throwIfAborted();
-    // Filter loss is not permission to commit a truncated or cross-graph header.
-    if (metadata.totalQuads !== metadata.quads.length || metadata.quads.some(q => q.subject !== received.assetUal || q.graph !== metaGraph)) throw new Error('Exact batch metadata scope mismatch');
-    const descriptor = parseGraphScopedDescriptor(received.assetUal, metadata.quads);
-    if (descriptor.contextGraphId !== options.contextGraphId || descriptor.privateTripleCount !== 0 || descriptor.publicTripleCount < 1) throw new Error('Exact batch requires a nonempty public assertion');
-    const data = await options.parseAndFilter(UTF8.decode(decoded.bytes), descriptor.assertionGraph, options.contextGraphId);
-    signal?.throwIfAborted();
-    if (data.totalQuads !== data.quads.length || data.quads.length !== descriptor.publicTripleCount || data.quads.some(q => q.graph !== descriptor.assertionGraph)) throw new Error('Exact batch body scope or count mismatch');
-    if (data.quads.length > MAX_ROWS || metadata.quads.length > 128) throw new RangeError('Exact batch parsed row allowance exceeded');
-    let heap = 0;
-    for (const q of data.quads) heap += estimateQuadHeapBytes(q);
-    for (const q of metadata.quads) heap += estimateQuadHeapBytes(q);
-    if (heap > MAX_PARSED_HEAP) throw new RangeError('Exact batch parsed heap allowance exceeded');
-    observeExactBatch(() => options.onStage?.('parse', received.assetIndex, performance.now() - started));
-    started = performance.now();
-    const processed = await options.processDurableBatchInWorker(data.quads, metadata.quads, options.ctx, false,
-      { kind: 'changelogPage', changedDataGraphs: [descriptor.assertionGraph] });
-    signal?.throwIfAborted();
-    observeExactBatch(() => options.onStage?.('verify', received.assetIndex, performance.now() - started));
-    if (processed.rejectedKcs !== 0 || processed.dataRejectedMissingMeta !== 0 || processed.verifiedData.length !== data.quads.length) throw new Error('Exact batch canonical integrity verification rejected');
-    const verifiedGraphs = processed.verifiedGraphScopedDataGraphs ?? [];
-    assertNoLegacyRfc64ControlGraphs(options.contextGraphId, processed.verifiedData, processed.verifiedMeta, verifiedGraphs);
-    const partition = partitionVerifiedGraphScopedAssets(options.contextGraphId, processed.verifiedData, processed.verifiedMeta, verifiedGraphs);
-    if (partition.assets.length !== 1 || partition.remainingData.length !== 0 || partition.remainingMeta.length !== 0) throw new Error('Exact batch requires one complete verified graph-scoped asset');
-    const asset = partition.assets[0]!;
-    if (asset.ual !== received.assetUal || asset.assertionGraph !== descriptor.assertionGraph || asset.assertionVersion.toString() !== descriptor.assertionVersion) throw new Error('Exact batch verified identity mismatch');
-    return asset;
+    return verify({ ...received, dataBytes: decoded.bytes }, signal);
   };
 }
 

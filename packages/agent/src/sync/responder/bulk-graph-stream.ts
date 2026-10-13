@@ -4,12 +4,12 @@ import { BULK_GRAPH_KIND as K, BULK_GRAPH_CHUNK_BYTES, BULK_GRAPH_FRAME_BYTES,
   createOperationContext, registerBulkGraphResponder, type ProtocolRouter, type BulkGraphSession } from '@origintrail-official/dkg-core';
 import { BULK_STAGING_BYTES, BULK_STAGING_ASSETS, bulkChunkHash, bulkJson, readBulkJson,
   validateBulkGraphRequest, type BulkGraphRequest } from '../bulk-graph-contract.js';
-import type { ExactBatchResponderBindingOptions } from './exact-batch-stream.js';
+import type { PublicAssetResponderOptions } from './public-asset-responder.js';
 
 const observe = (callback: () => void) => { try { callback(); } catch { /* Diagnostic only. */ } };
 const EMPTY = new Uint8Array();
 /** Public-only, shares the existing responder admission and verified prepared-content cache. */
-export function registerPublicBulkGraph(router: ProtocolRouter, options: ExactBatchResponderBindingOptions): void {
+export function registerPublicBulkGraph(router: ProtocolRouter, options: PublicAssetResponderOptions): void {
   registerBulkGraphResponder(router, async (bytes, peer, signal) => {
     const request = validateBulkGraphRequest(readBulkJson(bytes));
     return options.admission.withPreAuthorizationAdmission(peer, signal, async () => {
@@ -26,7 +26,7 @@ export function registerPublicBulkGraph(router: ProtocolRouter, options: ExactBa
     session.signal, () => servePublicBulkChunk(request, session, options)));
 }
 
-export async function servePublicBulkChunk(request: BulkGraphRequest, session: BulkGraphSession, options: ExactBatchResponderBindingOptions): Promise<void> {
+export async function servePublicBulkChunk(request: BulkGraphRequest, session: BulkGraphSession, options: PublicAssetResponderOptions): Promise<void> {
   const context = createOperationContext('sync');
   const hash = bulkChunkHash(request);
   const outstanding = new Map<number, number>();

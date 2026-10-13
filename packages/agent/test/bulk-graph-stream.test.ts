@@ -25,7 +25,7 @@ const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const close of cleanups.reverse()) await close(); cleanups.length = 0; });
 async function fixture(count = 20, corruptAt = -1, failClose = false, hooks: {
   beforePublish?: () => Promise<void>; onControl?: (frame: BulkGraphFrame) => void;
-  payloadBytes?: readonly number[];
+  payloadBytes?: readonly number[]; expandedLengthMismatch?: boolean;
 } = {}) {
   const directory = await mkdtemp(join(tmpdir(),'dkg-bulk-test-')); cleanups.push(() => rm(directory,{recursive:true,force:true}));
   const backing = new OxigraphStore(), target = new OxigraphStore(); cleanups.push(() => backing.close(), () => target.close());
@@ -85,7 +85,7 @@ async function fixture(count = 20, corruptAt = -1, failClose = false, hooks: {
     store:source,peerId:nodes[1]!.peerId,parseSyncRequest:parse,authorizeSyncRequest:async()=>true,
     logWarn:()=>{},logDebug:()=>{},onExperimentalExactBatchResources:r=>{resources=r;}});
   const exports: number[] = [];
-  registerPublicBulkGraph(server,{localPeerId:nodes[1]!.peerId,store:source,admission:resources,
+  registerPublicBulkGraph(server,{admission:resources,
     exportCache:{ acquireEncoded:async request=>{
       // Byte-boundary cases isolate receiver parsing/verification from exporter budgets.
       const payload = prepared.get(request.assetUal);
@@ -94,9 +94,9 @@ async function fixture(count = 20, corruptAt = -1, failClose = false, hooks: {
       if (lease && request.assetUal === uals[corruptAt]) {
         const body = lease.body.slice(); body[body.length-2] ^= 1; return {...lease,body};
       }
-      return lease;
+      return lease && hooks.expandedLengthMismatch ? { ...lease, plainBytes: lease.plainBytes + 1 } : lease;
     }} as typeof resources.exportCache,
-    parseSyncRequest:parse,authorizeSyncRequest:async()=>true,isPublicContextGraph:async graph=>graph===cg,
+    authorizeSyncRequest:async()=>true,isPublicContextGraph:async graph=>graph===cg,
     onExport:(_,n)=>exports.push(n)});
   const worker = new SyncVerifyWorker(); cleanups.push(() => worker.close());
   const request: BulkGraphRequest = {version:1,contextGraphId:cg,snapshotDigest:'a'.repeat(64),assetUals:uals};
@@ -168,6 +168,11 @@ describe('bulk public graph stream over real Noise sockets and verifier', () => 
     expect(f.groups).toEqual([1, 1]);
     expect(f.heaps.every(n => n < 64 * 1024 * 1024)).toBe(true);
   }, 60_000);
+  it('rejects a false expanded-length directory before verification or publication', async () => {
+    const f = await fixture(1, -1, false, { expandedLengthMismatch: true });
+    await expect(f.run()).rejects.toThrow('Bulk expanded size mismatch');
+    expect(await f.target.countQuads()).toBe(0); expect(f.groups).toEqual([]);
+  });
   it('transfers more than ten assets, groups atomic publication, and reuses warm payloads', async () => {
     const f=await fixture(); const first=await f.run();
     expect(first.committedAssetUals).toEqual(f.uals); expect(first.metrics.commitGroups).toBeLessThan(20);
