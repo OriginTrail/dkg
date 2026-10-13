@@ -383,35 +383,6 @@ export function createSelectedSwmMetaFetcher(options: {
     };
   };
 
-  /**
-   * Wait in line for a whole allowance of the pool, on behalf of a transfer
-   * that holds nothing. Resolves the reservation the budget granted, or `null`
-   * when the wait ended without one; throws when the recovery was revoked.
-   *
-   * It waits for at most half of the work allowance, so that a transfer that
-   * does get the pool still has time to ask its peer, and never longer than
-   * `MAX_POOL_WAIT_MS`.
-   */
-  const waitForWholeAllowance = async (
-    request: SharedMemoryMetadataFetchRequest,
-    state: SelectedSwmMetaContinuationState,
-  ): Promise<SelectedSwmMetaRetentionReservation | null> => {
-    const whole = await state.retentionLease.reserveWholeAllowance(
-      Math.min(
-        MAX_POOL_WAIT_MS,
-        Math.floor(request.workAdmission.capTimeout(Number.MAX_SAFE_INTEGER) / 2),
-      ),
-      request.signal,
-    );
-    if (request.signal?.aborted) {
-      // A recovery revoked while it waited neither holds the pool nor asks
-      // its peer.
-      whole?.release();
-      request.signal.throwIfAborted();
-    }
-    return whole;
-  };
-
   const fetchRetained = async (
     request: SharedMemoryMetadataFetchRequest,
     state: SelectedSwmMetaContinuationState,
@@ -420,29 +391,44 @@ export function createSelectedSwmMetaFetcher(options: {
   ): Promise<SyncPageResult> => {
     // Reserve before yielding to transport. Overlapping selected invocations
     // therefore cannot both spend the same process-wide free allowance.
-    let admitted: SelectedSwmMetaRetentionReservation | null =
-      restarted ?? state.retentionLease.reserve();
-    if (admitted.exhaustion === 'shared') {
-      // The pool admits nothing, and from here on this pass holds no
-      // reservation unless the wait below is granted one.
-      //
-      // Every fetch reserves a whole prefix allowance before it starts, so the
-      // pool admits only a few transfers at once however little they then
-      // retain. A transfer that holds nothing yet has no prefix to protect,
-      // and the continuation ledger grants no later pass to a round without
-      // progress: yielding at once would report a timed-out page for a peer
-      // that was never asked. So while fetches are in flight it waits in
-      // line, and the budget hands it a whole allowance, never a share, once
-      // that leaves the transfers that are between two passes over their
-      // manifest the room for the next one. Without a grant it yields like
-      // any other pass. It never reserves again: what is free then is the
-      // room the budget kept for those transfers.
-      admitted.release();
-      admitted = state.nextOffset === 0 && state.quads.length === 0
-        ? await waitForWholeAllowance(request, state)
-        : null;
+    let reservation = restarted ?? state.retentionLease.reserve();
+    // Every fetch reserves a whole prefix allowance before it starts, so the
+    // pool admits only a few transfers at once however little they then
+    // retain. A transfer that holds nothing yet has no prefix to protect, and
+    // the continuation ledger grants no later pass to a round without
+    // progress: yielding here would report a timed-out page for a peer that
+    // was never asked. So while fetches are in flight it waits in line, and
+    // the budget hands it a whole allowance, never a share, once that leaves
+    // the transfers that are between two passes over their manifest the room
+    // for the next one. It waits for at most half of its work allowance, so
+    // that a transfer that does get the pool still has time to ask its peer,
+    // and never longer than `MAX_POOL_WAIT_MS`.
+    if (
+      reservation.exhaustion === 'shared'
+      && state.nextOffset === 0
+      && state.quads.length === 0
+    ) {
+      reservation.release();
+      const whole = await state.retentionLease.reserveWholeAllowance(
+        Math.min(
+          MAX_POOL_WAIT_MS,
+          Math.floor(request.workAdmission.capTimeout(Number.MAX_SAFE_INTEGER) / 2),
+        ),
+        request.signal,
+      );
+      if (request.signal?.aborted) {
+        // A recovery revoked while it waited neither holds the pool nor asks
+        // its peer.
+        whole?.release();
+        request.signal.throwIfAborted();
+      }
+      // Without a grant the transfer yields below, as it did before it could
+      // wait. It must not reserve again: what is free now is the room the
+      // budget kept for transfers that go on with their manifest.
+      if (whole) reservation = whole;
     }
-    if (admitted === null) {
+    const exhaustion = reservation.exhaustion;
+    if (exhaustion === 'shared') {
       // Sibling transfers hold the whole process-wide allowance. Spending a
       // fetch here cannot succeed — the first returned row exceeds a zero
       // allowance — and the thrown accumulation limit is fail-closed, so it
@@ -451,6 +437,7 @@ export function createSelectedSwmMetaFetcher(options: {
       // bounds its own passes, and a later pass runs once capacity frees.
       // `prefix` exhaustion is NOT yielded: that ceiling is this lease's own
       // and no later pass can widen it, so it must keep failing closed.
+      reservation.release();
       state.sharedPoolYields += 1;
       if (
         state.sharedPoolYields >= MAX_CONSECUTIVE_SHARED_POOL_YIELDS
@@ -487,8 +474,6 @@ export function createSelectedSwmMetaFetcher(options: {
         timedOut: true,
       };
     }
-    const reservation = admitted;
-    const exhaustion = reservation.exhaustion;
     try {
       const fetched = await options.fetchPage({
         ...request,
