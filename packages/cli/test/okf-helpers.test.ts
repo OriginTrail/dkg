@@ -187,4 +187,12 @@ describe('distinctTripleCountsByPredicate (verify expectations)', () => {
     ]);
     expect(Object.fromEntries(counts)).toEqual({ 'urn:p:lineage': 3, 'urn:p:name': 1 });
   });
+
+  it('counts a triple held in several named graphs once', () => {
+    const counts = distinctTripleCountsByPredicate([
+      { subject: 'urn:okf:m', predicate: 'urn:p:lineage', object: 'urn:okf:p', graph: 'urn:g:one' },
+      { subject: 'urn:okf:m', predicate: 'urn:p:lineage', object: 'urn:okf:p', graph: 'urn:g:two' },
+    ]);
+    expect(Object.fromEntries(counts)).toEqual({ 'urn:p:lineage': 1 });
+  });
 });

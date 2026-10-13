@@ -7,6 +7,7 @@
  */
 
 import {
+  distinctTriples,
   exportInputFromQuads,
   isStale,
   SCHEMA_NS,
@@ -142,14 +143,9 @@ export function parseRelateRules(raw: string[]): TypeRelation[] {
  * can ever repair.
  */
 export function distinctTripleCountsByPredicate(quads: Quad[]): Map<string, number> {
-  const seen = new Set<string>();
   const counts = new Map<string, number>();
-  for (const q of quads) {
-    const key = `${q.subject}\u0000${q.predicate}\u0000${q.object}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    counts.set(q.predicate, (counts.get(q.predicate) ?? 0) + 1);
-  }
+  // The OKF package's own triple identity (named graph ignored), the same policy export uses.
+  for (const q of distinctTriples(quads)) counts.set(q.predicate, (counts.get(q.predicate) ?? 0) + 1);
   return counts;
 }
 

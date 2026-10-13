@@ -147,7 +147,11 @@ export interface ConceptMapping {
   citations: OkfCitation[];
   /** v0.2 trust / provenance / lifecycle summary (SPEC §5, §10). */
   trust: ConceptTrust;
-  /** Non-fatal diagnostics raised while mapping this concept (v0.2 family shape, footnotes, broken source paths). */
+  /**
+   * Every non-fatal diagnostic raised while mapping this concept, in report
+   * order: v0.2 family shape, unresolved bundle paths, footnotes, broken links,
+   * and (unless `includeCodeSpanLinks`) links inside code spans.
+   */
   warnings: OkfWarning[];
 }
 

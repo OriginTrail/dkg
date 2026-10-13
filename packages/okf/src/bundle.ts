@@ -151,24 +151,8 @@ export function importBundle(files: BundleFile[], opts: OkfMappingOptions = {}):
     }
     concepts.push(mapping);
     quads.push(...mapping.quads);
-    // v0.2 family shape / footnote / unresolved-path diagnostics (never fatal).
+    // Every concept-level diagnostic is built by mapConcept (one owner).
     warnings.push(...mapping.warnings);
-    for (const bl of mapping.brokenLinks) {
-      warnings.push({
-        conceptId: doc.conceptId,
-        code: 'broken-link',
-        message: `unresolved cross-link "${bl.raw}" (not in bundle — not an error, SPEC §6.1/§11)`,
-      });
-    }
-    if (!opts.includeCodeSpanLinks) {
-      for (const cs of mapping.codeSpanLinks) {
-        warnings.push({
-          conceptId: doc.conceptId,
-          code: 'code-span-link',
-          message: `link "${cs.raw}" sits inside an inline code span — treated as literal text per CommonMark, not an edge`,
-        });
-      }
-    }
   }
 
   return { okfVersion, iriByConceptId, concepts, reservedSkipped, quads, warnings };

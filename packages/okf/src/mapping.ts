@@ -390,6 +390,24 @@ export function mapConcept(
     }
   }
 
+  // Link diagnostics, from the same metadata the result carries (SPEC §6.1/§11).
+  for (const link of brokenLinks) {
+    warnings.push({
+      conceptId: doc.conceptId,
+      code: 'broken-link',
+      message: `unresolved cross-link "${link.raw}" (not in bundle — not an error, SPEC §6.1/§11)`,
+    });
+  }
+  if (!opts.includeCodeSpanLinks) {
+    for (const link of codeSpanLinks) {
+      warnings.push({
+        conceptId: doc.conceptId,
+        code: 'code-span-link',
+        message: `link "${link.raw}" sits inside an inline code span — treated as literal text per CommonMark, not an edge`,
+      });
+    }
+  }
+
   const trust = summarizeTrust(doc.frontmatter, fm.derivedFromConcepts);
 
   return {

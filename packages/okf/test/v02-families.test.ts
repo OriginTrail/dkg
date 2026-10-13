@@ -992,6 +992,28 @@ describe('schema:isPartOf and schema:url on export', () => {
   });
 });
 
+describe('concept diagnostics have one owner', () => {
+  it('mapConcept reports unresolved source paths and body links, and the bundle reports exactly those', () => {
+    const files = bundle(
+      'type: Metric\nsources:\n  - { id: s, resource: /policies/missing.md }',
+      'See [gone](/tables/gone.md) and `[code](/policies/revenue-recognition.md)`.\n',
+    );
+    const r = importBundle(files);
+    const c = r.concepts.find((x) => x.conceptId === 'metrics/revenue')!;
+    const expected = [
+      'broken-link|sources[0].resource "/policies/missing.md" does not resolve to a concept in the bundle (not an error, SPEC §6.1/§11)',
+      'broken-link|unresolved cross-link "/tables/gone.md" (not in bundle — not an error, SPEC §6.1/§11)',
+      'code-span-link|link "/policies/revenue-recognition.md" sits inside an inline code span — treated as literal text per CommonMark, not an edge',
+    ];
+    expect(c.warnings.map((w) => `${w.code}|${w.message}`)).toEqual(expected);
+    expect(r.warnings.filter((w) => w.conceptId === 'metrics/revenue').map((w) => `${w.code}|${w.message}`)).toEqual(expected);
+    // includeCodeSpanLinks turns the code-span link into an edge, and its warning off
+    const withCode = importBundle(files, { includeCodeSpanLinks: true }).concepts.find((x) => x.conceptId === 'metrics/revenue')!;
+    expect(withCode.warnings.map((w) => w.code)).toEqual(['broken-link', 'broken-link']);
+    expect(withCode.codeSpanLinks.map((l) => l.raw)).toEqual(['/policies/revenue-recognition.md']);
+  });
+});
+
 describe('§12 versioning', () => {
   it('reads okf_version 0.2 silently and warns (best-effort) on an unknown version', () => {
     const ok = importBundle(bundle('type: Metric'));

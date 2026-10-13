@@ -76,4 +76,4 @@ export { exportBundle, exportInputFromQuads } from './export.js';
 export { validateBundle } from './validation.js';
 export { quadsToNQuads } from './nquads.js';
 export { loadBundleDir, loadBundleDirWithReport } from './loader.js';
-export { isSafeIri, literalTerm, typedLiteralTerm, dedupeQuads } from './utils.js';
+export { isSafeIri, literalTerm, typedLiteralTerm, dedupeQuads, distinctTriples } from './utils.js';
