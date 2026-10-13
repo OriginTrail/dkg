@@ -3,6 +3,8 @@ import { ethers } from "ethers";
 import {
   sealPublicGraphSnapshot,
   decodePublicGraphSnapshot,
+  normalizePublicGraphSnapshot,
+  PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES,
   PublicGraphSnapshotCache,
 } from "../src/public-graph-snapshot.js";
 const scope = {
@@ -143,4 +145,33 @@ describe("public graph snapshot contract", () => {
     expect(read).toHaveBeenCalledTimes(10);
   });
 
+});
+
+describe.each([
+  ["object", normalizePublicGraphSnapshot],
+  ["wire", (input: unknown, scope: Parameters<typeof normalizePublicGraphSnapshot>[1]) => decodePublicGraphSnapshot(bytes(input), scope)],
+] as const)("%s snapshot validation parity", (_kind, normalize) => {
+  it("canonicalizes field order and returns a detached frozen inventory", () => {
+    const raw = make();
+    const reverse = Object.fromEntries(Object.entries(raw).reverse());
+    const result = normalize(reverse, {...scope,now:2000});
+    expect(result).toEqual(raw);
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(Object.isFrozen(result.assets)).toBe(true);
+    expect(Object.isFrozen(result.assets[0])).toBe(true);
+    raw.assets[0]!.root = `0x${"c".repeat(64)}`;
+    expect(result.assets[0]!.root).not.toBe(raw.assets[0]!.root);
+  });
+  it.each([
+    null, {}, {extra:true}, {chainId:"other"}, {observedAt:18000},
+    {expiresAt:2000}, {snapshotDigest:"bad"}, {inventoryDigest:"bad"},
+    {assets:[...make().assets,...make().assets]}, {assets:[{id:"01",root:`0x${"b".repeat(64)}`,version:"1"}]},
+  ])("rejects invalid facts %j", patch => {
+    const input = patch === null ? null : Object.keys(patch).length === 0 ? {} : {...make(),...patch};
+    expect(() => normalize(input,{...scope,now:8000})).toThrow();
+  });
+  it("enforces the size limit on in-process results too", () => {
+    const deploymentId = "x".repeat(PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES);
+    expect(() => normalize(reseal({deploymentId}),{...scope,deploymentId,now:2000})).toThrow("size");
+  });
 });
