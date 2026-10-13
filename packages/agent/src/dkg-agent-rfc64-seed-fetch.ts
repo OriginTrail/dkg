@@ -41,6 +41,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 
+import { rememberBounded } from './bounded-map.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
@@ -142,12 +143,7 @@ function rememberSeedSourcePeer(agent: DKGAgent, contextGraphId: string, peerId:
     sources = new Map();
     rfc64SeedSourcePeersV1.set(agent, sources);
   }
-  sources.delete(contextGraphId);
-  if (sources.size >= MAX_PEER_WINDOW_SCOPES_V1) {
-    const oldest = sources.keys().next().value;
-    if (oldest !== undefined) sources.delete(oldest);
-  }
-  sources.set(contextGraphId, peerId);
+  rememberBounded(sources, contextGraphId, peerId, MAX_PEER_WINDOW_SCOPES_V1);
 }
 
 /** Per-agent serve-side compat state: single-flight, negative cache, one write-through per scope. */
