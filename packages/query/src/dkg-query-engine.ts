@@ -433,7 +433,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       // …/_shared_memory/{addr}/{number} graphs so GRAPH-variable scans bind them.
       const swmRouted = (options?.includeSharedMemory ?? options?.includeWorkspace) || options?.graphSuffix === '_shared_memory';
       const swmPerKaGraphs = needsDiscovery && swmRouted
-        ? await this.discoverGraphsByPrefix(`${sharedMemoryGraph}/`, reads)
+        ? await discoverRouteGraphs(`${sharedMemoryGraph}/`)
         : [];
       // Per-KA VM: published data is in …/_verifiable_memory/{addr}/{number}; bind those too
       // for GRAPH-variable scans on any route that reads the data graph.
@@ -993,7 +993,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const registeredSubGraphs = subGraphName ? new Set([subGraphName]) : catalog.subGraphs;
     const registeredAssertionGraphs = catalog.assertionGraphs;
     const knownChildContextGraphs = catalog.childContextGraphs;
-    const allGraphs = catalog.graphs;
+    const visible = this.store.graphEnumerationVisibility;
+    const allGraphs = visible
+      ? [...catalog.graphs].filter(graph => visible.call(this.store, graph))
+      : await reads.listGraphsByPrefix(contextGraphDataUri(contextGraphId));
 
     for (const graph of allGraphs) {
       if (

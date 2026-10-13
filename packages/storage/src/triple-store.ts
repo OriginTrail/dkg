@@ -273,6 +273,13 @@ export interface TripleStore {
     input: Rfc64AuthorCommitCasInputV1,
     options?: QueryOptions,
   ): Promise<Rfc64AuthorCommitCasResultV1>;
+  /** Optional projection of a freshly queried nonempty graph inventory into
+   * this store's enumeration visibility. Every decorator must compose its own
+   * rules and its inner store's predicate; never unwrap to discover this capability.
+   * Absence requires normal filtered enumeration. Visibility changes must obey
+   * the same all-writers revision contract as enumeration when revisions exist.
+   */
+  readonly graphEnumerationVisibility?: (graph: string) => boolean;
   listGraphs(options?: QueryOptions): Promise<string[]>;
   listGraphsByPrefix?(prefix: string, options?: QueryOptions): Promise<string[]>;
 

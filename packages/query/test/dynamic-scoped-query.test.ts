@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { describe, expect, it, vi } from 'vitest';
+import { OxigraphStore, ChangelogStore, GraphSetIndexStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import { readScopedContentGraphCatalog } from '../src/scoped-content-graph-catalog.js';
 
@@ -11,6 +11,36 @@ const OPTIONS = { contextGraphId: ID, includeContextGraphPartitions: true };
 const QUERY = `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${NAME}> ?name } }`;
 
 describe('fresh dynamic scoped query admission', () => {
+  it.each(['changelog', 'index-outside', 'index-inside', 'unknown'] as const)('keeps reserved VM partitions invisible through %s enumeration', async kind => {
+    const base = new OxigraphStore(), hidden = `${ROOT}/_verifiable_memory/a/1`, publicGraph = `${ROOT}/_verifiable_memory/a/2`;
+    await base.insert([hidden, publicGraph].map(graph => ({ graph, subject: 'urn:item', predicate: NAME, object: '"value"' })));
+    const inner = kind === 'index-inside' ? new GraphSetIndexStore(base) : base;
+    const changelog = new ChangelogStore(inner, { reservedGraphs: [hidden] });
+    let store: TripleStore = kind === 'index-outside' ? new GraphSetIndexStore(changelog) : changelog;
+    if (kind === 'unknown') store = new Proxy(store, { get(target, key) {
+      if (key === 'graphEnumerationVisibility') return undefined;
+      const value = Reflect.get(target, key, target); return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    try {
+      // Raw query remains deliberately unfiltered; enumeration owns visibility.
+      expect((await base.query(`SELECT ?s WHERE { GRAPH <${hidden}> { ?s ?p ?o } }`)).type).toBe('bindings');
+      expect(await store.listGraphs()).not.toContain(hidden);
+      const result = await new DKGQueryEngine(store).query(QUERY, OPTIONS);
+      expect(result.bindings).toEqual([{ g: publicGraph, name: '"value"' }]);
+    } finally { await store.close(); }
+  });
+  it('uses one fresh inventory for combined VM and SWM variable routes', async () => {
+    const store = new OxigraphStore(), graphs = [`${ROOT}/_verifiable_memory/a/1`, `${ROOT}/_shared_memory/a/1`];
+    try {
+      await store.insert(graphs.map(graph => ({ graph, subject: 'urn:item', predicate: NAME, object: '"value"' })));
+      const query = vi.spyOn(store, 'query'), list = vi.spyOn(store, 'listGraphs');
+      const result = await new DKGQueryEngine(store).query(QUERY, { ...OPTIONS, includeSharedMemory: true });
+      expect(result.bindings.map(row => row.g).sort()).toEqual(graphs.sort());
+      // One catalog and the unchanged two caller executions for the combined route.
+      expect(query).toHaveBeenCalledTimes(3); expect(list).not.toHaveBeenCalled();
+    } finally { await store.close(); }
+  });
+
   it.each(['"code"', '"code"^^<http://www.w3.org/2001/XMLSchema#string>', '"code"@en'])('shares registration handling with view discovery: %s', async name => {
     const store = new OxigraphStore();
     try {

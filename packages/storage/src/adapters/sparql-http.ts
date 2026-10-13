@@ -392,6 +392,7 @@ export interface SparqlHttpStoreOptions {
 export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapability {
   readonly queryResponseLimitMode = 'pre-materialization' as const;
   readonly writeRevisionCoverage = 'process-local' as const;
+  readonly graphEnumerationVisibility = (graph: string): boolean => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph);
   readonly queryCancellation = 'interruptible' as const;
   /**
    * RFC-64 stream capability installed only for a storage-created managed
@@ -1366,7 +1367,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     return r.type === 'bindings'
       ? r.bindings
           .map((b) => b.g)
-          .filter((graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph))
+          .filter(this.graphEnumerationVisibility)
       : [];
   }
 

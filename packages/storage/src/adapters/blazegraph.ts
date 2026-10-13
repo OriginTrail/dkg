@@ -239,6 +239,7 @@ function createStoreOperationDeadline(
  */
 export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapability {
   readonly queryResponseLimitMode = 'pre-materialization' as const;
+  readonly graphEnumerationVisibility = (graph: string): boolean => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph);
   readonly queryCancellation = 'interruptible' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
   readonly rfc64SemanticReadCertifiedV1 = true as const;
@@ -758,7 +759,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     if (r.type !== 'bindings') return [];
     return r.bindings
       .map((b) => b.g)
-      .filter((graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph));
+      .filter(this.graphEnumerationVisibility);
   }
 
   // -------------------------------------------------------------------

@@ -1,3 +1,4 @@
+import { composeGraphEnumerationVisibility } from './graph-enumeration-visibility.js';
 import { namedGraphsFromQuads, endsWithHighSurrogate, normalizeGraphUris, queryOptionsFromUpdateOptions } from "./graph-set-index-utils.js";
 import type { AtomicAssetReplacement } from './atomic-asset-group.js';
 import { performance } from 'node:perf_hooks';
@@ -265,9 +266,11 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
    */
   private pendingFullRefresh: PendingFullRefreshSource | null = null;
 
+  readonly graphEnumerationVisibility;
   constructor(inner: TripleStore, options: GraphSetIndexStoreOptions = {}) {
     this.inner = inner;
     this.innerStore = inner;
+    this.graphEnumerationVisibility = composeGraphEnumerationVisibility(inner, graph => !isAtomicGraphReplaceStagingGraph(graph));
     this.enabled = options.enabled !== false;
     this.revalidateMs = Math.max(0, options.revalidateMs ?? DEFAULT_GRAPH_SET_REVALIDATE_MS);
     this.revalidateFailureBackoffMs = positiveFiniteMs(
