@@ -1,0 +1,55 @@
+name: TypeScript Program bundles
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/typescript-program-bundles.yml'
+      - 'packages/core/src/typescript-program-bundle.ts'
+      - 'packages/core/test/typescript-program-bundle.test.ts'
+      - 'packages/core/package.json'
+      - 'packages/graph-computer/**'
+      - 'packages/semantic-runtime/**'
+      - 'packages/node-ui/src/ui/components/Programs/**'
+      - 'packages/node-ui/test/program-editor.test.ts'
+      - 'pnpm-lock.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: typescript-program-bundles-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sandbox:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 25.2.1
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Build source codec, SDK and TypeScript host
+        run: |
+          pnpm --filter @origintrail-official/dkg-rdf-utils build
+          pnpm --filter @origintrail-official/dkg-core build
+          pnpm --filter @origintrail-official/dkg-graph-computer build
+          pnpm --filter @origintrail-official/dkg-semantic-runtime exec tsc
+      - name: Verify source identity and exact SDK upload
+        run: |
+          pnpm --filter @origintrail-official/dkg-core exec vitest run test/typescript-program-bundle.test.ts
+          pnpm --filter @origintrail-official/dkg-graph-computer exec vitest run
+      - name: Verify imports, effect budgets and real Wasm isolation
+        run: pnpm --filter @origintrail-official/dkg-semantic-runtime exec vitest run test/typescript-programs.test.ts test/typescript-bundles.test.ts --maxWorkers=1
+      - name: Verify dependency editing and approval invalidation
+        run: pnpm --filter @origintrail-official/dkg-node-ui exec vitest run test/program-editor.test.ts
+      - name: Build node editor
+        run: |
+          pnpm --filter @origintrail-official/dkg-graph-viz build
+          pnpm --filter @origintrail-official/dkg-node-ui build:ui

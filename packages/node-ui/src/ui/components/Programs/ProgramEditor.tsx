@@ -1,4 +1,4 @@
-import React, { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { Approval, GraphComputer, PreparedInvocation, ProgramReference, Execution, MemoryLayer, ProgramExecutionTrace } from '@origintrail-official/dkg-graph-computer';
 import { createUuid } from '@origintrail-official/dkg-graph-computer';
 import { programClient, fetchProgramAgents, fetchProgramGraphs, type ProgramAgent, type ProgramGraph } from './client.js';
@@ -8,11 +8,11 @@ import ToolPicker from './ToolPicker.js';
 import ChildProgramPicker from './ChildProgramPicker.js';
 import { readPermissions } from './tool-permissions.js';
 import ExecutionTrace from './ExecutionTrace.js';
+import ProgramSourceEditor from './ProgramSourceEditor.js';
 import PermissionSummary, { approvalMatchesScope } from './PermissionSummary.js';
 import { programDraftKey, readProgramDraft, writeProgramDraft, type ProgramDraft } from './program-drafts.js';
 import './program-editor.css';
 
-const Editor = lazy(() => import('./TypeScriptEditor.js'));
 const TEMPLATE = `import { pipe, map, reduce } from '@origintrail-official/dkg-graph-computer/program';
 
 export async function run(values: number[]) {
@@ -367,7 +367,7 @@ export default function ProgramEditor({ contextGraphId, existing, onClose, onSav
           {existing && <button type="button" onClick={() => loadSource()} disabled={!!busy || !address}>Reload stored source</button>}
           <label>Program name<input value={name} disabled={!!busy} onChange={event => setName(event.target.value)} /></label>
           <label>Version<input value={version} disabled={!!busy} onChange={event => { setVersion(event.target.value); invalidate(); }} /></label>
-          <Suspense fallback={<p>Loading TypeScript editor…</p>}><Editor value={source} disabled={!!busy || (!!existing && !saved)} onChange={value => { setSource(value); invalidate(); }} /></Suspense>
+          <ProgramSourceEditor value={source} disabled={!!busy || (!!existing && !saved)} onChange={value => { setSource(value); invalidate(); }} />
           <div className="program-editor-actions"><button type="button" onClick={save} disabled={!!busy || !address || !source.trim() || !dirty}>Save new version</button>
             <span>{saved ? (dirty ? 'Unsaved changes' : 'Source saved') : existing ? (busy ? 'Loading stored Program' : 'Source not loaded') : 'Unsaved changes'}</span></div>
           <p className="program-editor-help" role="status">{draftStatus || 'Preparing draft'}. Drafts stay on this browser; saving a version stores the Program on the node.</p>

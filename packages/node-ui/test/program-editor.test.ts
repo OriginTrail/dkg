@@ -3,7 +3,7 @@ import React, { act } from 'react';
 import { Storage as BrowserStorage } from 'happy-dom';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { GraphComputer } from '@origintrail-official/dkg-graph-computer';
+import { GraphComputer, createTypeScriptProgramBundle, readTypeScriptProgramBundle } from '@origintrail-official/dkg-graph-computer';
 const { queries, programs } = vi.hoisted(() => ({ queries: vi.fn(), programs: {
   upload: vi.fn(), getSource: vi.fn(), getApproval: vi.fn(), listApprovals: vi.fn(), approve: vi.fn(), updateApproval: vi.fn(), invoke: vi.fn(), prepareInvocation: vi.fn(),
 } }));
@@ -89,6 +89,30 @@ describe('TypeScript Program editor', () => {
       source: 'export function run() { return 7; }', version: '1', permittedPrograms: [] });
     return program;
   }
+
+  it('reviews entry and dependency sources, preserves the bundle and invalidates approval after a dependency edit', async () => {
+    const program = storedProgram();
+    const source = createTypeScriptProgramBundle({ entry: 'main.ts', files: {
+      'main.ts': 'import {value} from "./lib.js"; export function run() { return value; }',
+      'lib.js': 'export const value = 7;',
+    }, imports: {} });
+    programs.getSource.mockResolvedValue({ ...program, contextGraphId: 'school', layer: 'wm', language: 'typescript-v1',
+      source, version: '1', requiredTools: [], permittedPrograms: [] });
+    programs.approve.mockImplementation(async () => approval(program));
+    await render({ existing });
+    expect((container.querySelector('[aria-label="source"]') as HTMLTextAreaElement).value).toBe(readTypeScriptProgramBundle(source)!.files['main.ts'].source);
+    expect(container.textContent).toContain('Dependency pins');
+    await fill('Operation IRI', operation.operationIri); await click('Check approval'); await click('Approve Program');
+    expect(button('Run Program').disabled).toBe(false);
+    await select('Program file', 'lib.js'); await fill('source', 'export const value = 8;');
+    expect(button('Run Program').disabled).toBe(true);
+    await click('Save new version');
+    const bundle = readTypeScriptProgramBundle(uploaded.source)!;
+    expect(bundle.files['main.ts']).toEqual(readTypeScriptProgramBundle(source)!.files['main.ts']);
+    expect(bundle.files['lib.js'].source).toBe('export const value = 8;');
+    expect(bundle.files['lib.js'].sha256).not.toBe(readTypeScriptProgramBundle(source)!.files['lib.js'].sha256);
+    expect(button('Run Program').disabled).toBe(true);
+  });
 
   it('generates bounded SPARQL permissions without granting them and requires a new version after scope changes', async () => {
     await render(); await pickTool('SPARQL read'); await fill('Row limit', '25');

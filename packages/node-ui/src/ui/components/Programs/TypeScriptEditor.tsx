@@ -35,8 +35,8 @@ function loadRuntime() {
   return runtime;
 }
 
-export default function TypeScriptEditor({ value, onChange, disabled }: {
-  value: string; onChange(value: string): void; disabled: boolean;
+export default function TypeScriptEditor({ value, onChange, disabled, filename = 'main.ts' }: {
+  value: string; onChange(value: string): void; disabled: boolean; filename?: string;
 }) {
   const container = useRef<HTMLDivElement>(null);
   const editor = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
@@ -49,7 +49,8 @@ export default function TypeScriptEditor({ value, onChange, disabled }: {
     let cleanup: (() => void) | undefined;
     void loadRuntime().then(({ monaco }) => {
       if (disposed) return;
-      const model = monaco.editor.createModel(latest.current.value, 'typescript', monaco.Uri.parse(`file:///program-${createUuid()}.ts`));
+      const language = filename.endsWith('.json') ? 'json' : /\.[cm]?js$/.test(filename) ? 'javascript' : 'typescript';
+      const model = monaco.editor.createModel(latest.current.value, language, monaco.Uri.parse(`file:///program-${createUuid()}/${filename}`));
       const instance = monaco.editor.create(container.current!, { model, automaticLayout: true,
         readOnly: latest.current.disabled, theme: useLayoutStore.getState().theme === 'dark' ? 'vs-dark' : 'vs',
         minimap: { enabled: false }, wordWrap: 'on', fontSize: 13, tabSize: 2, scrollBeyondLastLine: false,

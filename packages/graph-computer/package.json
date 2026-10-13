@@ -17,7 +17,7 @@
     "prepack": "pnpm run build",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
-  "dependencies": { "ethers": "^6" },
+  "dependencies": { "ethers": "^6", "@origintrail-official/dkg-core": "workspace:*" },
   "devDependencies": { "@types/node": "^22", "typescript": "^5.7", "vitest": "^4.0.18" },
   "files": ["dist", "README.md"],
   "publishConfig": { "access": "public" },

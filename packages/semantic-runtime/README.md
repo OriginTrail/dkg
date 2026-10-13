@@ -6,13 +6,20 @@ loads and admits one immutable Program plan into the same kernel.
 
 Stored `typescript-v1` Programs use `TypeScriptProgramHost`: the daemon compiles
 their source at approval with ComponentizeJS, then runs each invocation in a
-separate Wasm process. Their only effect API is `invoke_program`, routed through
-pinned child operation grants with the original caller's permissions. The SDK
+separate Wasm process. Their effect APIs are `invoke_tool` and `invoke_program`, routed through
+pinned tool and child operation grants with the original caller's permissions. The SDK
 provides guest `pipe`, `map` and `reduce` helpers. See the
 [TypeScript Program guide](../graph-computer/README.md#write-a-typescript-program)
 for upload, approval and invocation examples, resource limits, and retry semantics.
 This path shares the execution journal and RDF receipts with the S-expression
 runtime, but does not checkpoint JavaScript continuations.
+
+TypeScript source may also be an immutable multi-file bundle. The shared core
+codec checks all dependency pins before the compiler's virtual resolver accepts
+them. It has no npm, filesystem or URL resolution fallback. The bundler processes
+source as data; dependency initialization runs in the bounded Wasm guest. See
+[library imports](../graph-computer/README.md#import-a-library) for packaging,
+approval identity and sandbox limits.
 
 The execution boundary is a versioned WebAssembly component with typed,
 asynchronous WIT. The official Rust WASI 0.3 build flow uses a

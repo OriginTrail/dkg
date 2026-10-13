@@ -27,6 +27,7 @@
     "clean": "rm -rf dist generated tsconfig.tsbuildinfo"
   },
   "dependencies": {
+    "@origintrail-official/dkg-core": "workspace:*",
     "@bytecodealliance/componentize-js": "0.23.0",
     "@bytecodealliance/jco": "1.32.1",
     "esbuild": "0.28.2",
