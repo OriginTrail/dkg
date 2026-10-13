@@ -21,6 +21,8 @@
  * share they are certain to refuse (see `publishWorkspaceGossip`).
  */
 
+import { rememberBounded } from '../bounded-map.js';
+
 /** Where a share goes: the root of its graph (`null`) or a named sub-graph. */
 export interface WorkspaceShareScope {
   readonly subGraphName: string | null;
@@ -66,23 +68,10 @@ export class SharedMemoryFollowers {
    * moment of the share, so nothing else has to be told.
    */
   note(contextGraphId: string, peerId: string): void {
-    const now = this.#now();
-    let peers = this.#byGraph.get(contextGraphId);
-    if (peers === undefined) {
-      peers = new Map();
-    } else {
-      // Re-inserting moves both to the end: the first entry is always the one silent the longest.
-      this.#byGraph.delete(contextGraphId);
-      peers.delete(peerId);
-    }
-    peers.set(peerId, now);
-    this.#byGraph.set(contextGraphId, peers);
-    while (peers.size > this.#perGraphLimit) {
-      peers.delete(peers.keys().next().value as string);
-    }
-    while (this.#byGraph.size > this.#graphLimit) {
-      this.#byGraph.delete(this.#byGraph.keys().next().value as string);
-    }
+    const peers = this.#byGraph.get(contextGraphId) ?? new Map<string, number>();
+    // Each insert goes to the end: the first entry is always the one silent the longest, and it makes room.
+    rememberBounded(peers, peerId, this.#now(), this.#perGraphLimit);
+    rememberBounded(this.#byGraph, contextGraphId, peers, this.#graphLimit);
   }
 
   /** The peers whose last authorized request for the graph is within the TTL. */

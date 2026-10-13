@@ -518,6 +518,39 @@ describe('a share into a public graph that has followers', () => {
     expect(agent.getSwmAckQuorumRecordSnapshotForTests('share-1')).toBeUndefined();
   });
 
+  // Nine of ten is the quorum at which a share's tracking used to end.
+  it('is still sent again to the one follower that asked for a retry when nine subscribers have it', async () => {
+    const subscribers = Array.from({ length: 9 }, (_unused, index) => `subscriber-${index + 1}`);
+    let retryLater = true;
+    const { agent, host, share } = await agentWith({
+      subscribers,
+      followers: [PEER_B],
+      answer: (peerId) => (retryLater && peerId === PEER_B ? RETRY_LATER : DELIVERED),
+    });
+    // Every subscriber is sent to: none of them is narrowed away in this case.
+    (host as unknown as { selectSwmFanoutPeersForActiveShare: (input: { candidatePeers: readonly string[] }) => unknown })
+      .selectSwmFanoutPeersForActiveShare = (input) => ({
+        selectedPeers: [...input.candidatePeers],
+        knownGoodPeers: [],
+        unknownProbedPeers: [],
+        skippedRecentPeers: [],
+        candidatePeers: [...input.candidatePeers],
+      });
+    expect(await share('reports')).toEqual([...subscribers, PEER_B].sort());
+    const pending = agent.getSwmAckQuorumRecordSnapshotForTests('share-1');
+    expect(pending?.ackPct).toBe(0.9);
+    expect([...(pending?.acked ?? [])].sort()).toEqual([...subscribers].sort());
+
+    retryLater = false;
+    await agent.invokeSwmSubstrateTopUpForTests({
+      shareOperationId: 'share-1',
+      cgId: GRAPH,
+      payload: new Uint8Array([1, 2, 3, 1]),
+      missingPeers: [PEER_B],
+    });
+    expect(agent.getSwmAckQuorumRecordSnapshotForTests('share-1')).toBeUndefined();
+  });
+
   it('is tracked, and sent again, when a follower is the only recipient', async () => {
     let retryLater = true;
     const { agent, share } = await agentWith({

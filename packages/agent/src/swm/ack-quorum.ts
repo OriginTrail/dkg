@@ -330,6 +330,22 @@ export function createSwmAckQuorum(deps: SwmAckQuorumDeps): SwmAckQuorum {
     return record.acked.size / record.expectedMembers.size;
   }
 
+  /** Direct members that have not acknowledged and were not dropped. */
+  function pendingDirectMembers(record: TrackedRecord): string[] {
+    return record.directMembers.filter((peerId) => record.expectedMembers.has(peerId) && !record.acked.has(peerId));
+  }
+
+  /**
+   * The share needs no more work: the quorum of its members acknowledged it,
+   * and so did every direct member. The members a quorum leaves out get the
+   * share by gossip; a direct member has no gossip path, so while one is
+   * pending the record stays and the watchdog sends to it again, until it
+   * acknowledges, is dropped, or the hard deadline passes.
+   */
+  function isSettled(record: TrackedRecord): boolean {
+    return ackPctOf(record) >= record.quorumThreshold && pendingDirectMembers(record).length === 0;
+  }
+
   /**
    * Mark a record complete + invoke the observer + delete it from
    * the tracking map. Idempotent on `shareOperationId` (the
@@ -366,10 +382,11 @@ export function createSwmAckQuorum(deps: SwmAckQuorumDeps): SwmAckQuorum {
   function fireWatchdog(record: TrackedRecord): void {
     record.watchdogFired = true;
     watchdogFiredCount += 1;
-    const missingPeers: string[] = [];
-    for (const peer of record.expectedMembers) {
-      if (!record.acked.has(peer)) missingPeers.push(peer);
-    }
+    // Once the quorum is reached only the pending direct members are sent to
+    // again: the other members a quorum leaves out are left to gossip, as before.
+    const missingPeers: string[] = ackPctOf(record) >= record.quorumThreshold
+      ? pendingDirectMembers(record)
+      : [...record.expectedMembers].filter((peer) => !record.acked.has(peer));
     safeInvoke(() => observers.onWatchdogFired?.({
       shareOperationId: record.shareOperationId,
       cgId: record.cgId,
@@ -422,7 +439,7 @@ export function createSwmAckQuorum(deps: SwmAckQuorumDeps): SwmAckQuorum {
       records.set(record.shareOperationId, record);
       trackedCount += 1;
 
-      if (ackPctOf(record) >= record.quorumThreshold) {
+      if (isSettled(record)) {
         completeRecord(record);
       }
     },
@@ -434,7 +451,7 @@ export function createSwmAckQuorum(deps: SwmAckQuorumDeps): SwmAckQuorum {
       if (record.acked.has(fromPeerId)) return;
       record.acked.add(fromPeerId);
 
-      if (ackPctOf(record) >= record.quorumThreshold) {
+      if (isSettled(record)) {
         completeRecord(record);
       }
     },
@@ -456,7 +473,7 @@ export function createSwmAckQuorum(deps: SwmAckQuorumDeps): SwmAckQuorum {
         // does not extend total lifetime.
         const watchdogAge = t - record.watchdogArmedAtMs;
         if (!record.watchdogFired && watchdogAge >= record.watchdogMs) {
-          if (ackPctOf(record) < record.quorumThreshold) {
+          if (!isSettled(record)) {
             fireWatchdog(record);
           }
         }
@@ -522,7 +539,7 @@ export function createSwmAckQuorum(deps: SwmAckQuorumDeps): SwmAckQuorum {
       // Normal path: dropping a peer may have shrunken the
       // denominator past the quorum threshold. Mirror the `onAck`
       // / `track` paths' completion check.
-      if (ackPctOf(record) >= record.quorumThreshold) {
+      if (isSettled(record)) {
         completeRecord(record);
       }
     },
