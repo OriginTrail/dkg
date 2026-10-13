@@ -101,8 +101,9 @@ describe('ProtocolRouter.probeProtocol', () => {
     expect(await router.probeProtocol(PEER_ID, ACK_PROTOCOL, 5)).toBe('unavailable');
   });
 
-  it('propagates node shutdown instead of treating it as unsupported', async () => {
+  it.each(['node', 'caller'] as const)('propagates %s shutdown instead of treating it as unsupported', async owner => {
     const stop = new AbortController();
+    const caller = new AbortController();
     const dialProtocol = vi.fn((_peer, _protocol, options: { signal: AbortSignal }) =>
       new Promise((_resolve, reject) => {
         if (options.signal.aborted) reject(options.signal.reason);
@@ -112,9 +113,10 @@ describe('ProtocolRouter.probeProtocol', () => {
       libp2p: { dialProtocol }, stopSignal: stop.signal,
     } as unknown as ConstructorParameters<typeof ProtocolRouter>[0]);
 
-    const probe = router.probeProtocol(PEER_ID, ACK_PROTOCOL);
-    stop.abort(new Error('node stopped'));
-    await expect(probe).rejects.toThrow(/node stopped/);
+    const probe = router.probeProtocol(PEER_ID, ACK_PROTOCOL, 3_000, caller.signal);
+    await vi.waitFor(() => expect(dialProtocol).toHaveBeenCalledOnce());
+    (owner === 'node' ? stop : caller).abort(new Error(`${owner} stopped`));
+    await expect(probe).rejects.toThrow(`${owner} stopped`);
   });
 
   it('discovers a handler registered after an existing libp2p connection', async () => {
