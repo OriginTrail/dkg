@@ -362,8 +362,8 @@ export interface DurableSyncContext {
     dataRejectedMissingMeta: number;
   }>;
   storeInsert: (request: DurableSyncStoreInsertRequest) => Promise<void>;
-  /** Snapshot jobs must never enter the legacy unauthenticated insertion path. */
-  requireAuthenticatedGraphScopedAssets?: boolean;
+  /** The recovery policy admits the entire verified page before its first commit. */
+  admitVerifiedPage?: (page: ReturnType<typeof partitionVerifiedGraphScopedAssets>) => void;
   /** Exact replacement path for verified V2 KAs; absent capability fails closed. */
   storeGraphScopedAsset?: (
     request: DurableSyncGraphScopedStoreRequest,
@@ -1338,8 +1338,8 @@ async function runDurableSyncWithBudget(
         processed.verifiedMeta,
         processed.verifiedGraphScopedDataGraphs ?? [],
       );
+      context.admitVerifiedPage?.(partitioned);
       assertGraphScopedRecoveryWritable(partitioned, {
-        requireAuthenticated: context.requireAuthenticatedGraphScopedAssets === true,
         challengePinned: exactAssetSelection?.kind === 'challenge-pinned',
         canStore: storeGraphScopedAsset !== undefined,
         canAuthenticateChallenge: authenticateChallengePinnedAsset !== undefined,
