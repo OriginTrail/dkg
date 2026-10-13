@@ -62,7 +62,6 @@ describe('reading a canonical projection back (live Blazegraph)', () => {
   let store: BlazegraphStore;
   let projectionBytes: Uint8Array;
   let projectionText: string;
-  let projection: Quad[];
 
   beforeAll(async () => {
     if (!BLAZEGRAPH_URL) {
@@ -71,7 +70,7 @@ describe('reading a canonical projection back (live Blazegraph)', () => {
     store = new BlazegraphStore(BLAZEGRAPH_URL, { timeout: 15_000 });
     projectionBytes = encodeCanonicalCgSharedPublicRootProjectionV1(ASSET);
     projectionText = new TextDecoder().decode(projectionBytes);
-    projection = await writeProjection(store, GRAPH, projectionText);
+    await writeProjection(store, GRAPH, projectionText);
   }, 60_000);
 
   afterAll(async () => {
@@ -108,7 +107,7 @@ describe('reading a canonical projection back (live Blazegraph)', () => {
     expect(stored.get('https://schema.org/value')).toBe(typed('100.0', 'double'));
     expect(stored.get('https://schema.org/ratingValue')).toBe(typed('5.0', 'float'));
     expect(`${quadsToNQuads(quads)}\n`).not.toBe(projectionText);
-    expect(readBackHoldsProjectionV1(projection, quads)).toBe(true);
+    expect(readBackHoldsProjectionV1(projectionBytes, quads)).toBe(true);
   });
 
   it('tells a changed value apart', async () => {
@@ -117,6 +116,6 @@ describe('reading a canonical projection back (live Blazegraph)', () => {
     await writeProjection(store, CHANGED_GRAPH, changedText);
 
     const quads = await readBack(CHANGED_GRAPH, projectionReadBackByteLimitV1(changedText, ASSET.length));
-    expect(readBackHoldsProjectionV1(projection, quads)).toBe(false);
+    expect(readBackHoldsProjectionV1(projectionBytes, quads)).toBe(false);
   });
 });

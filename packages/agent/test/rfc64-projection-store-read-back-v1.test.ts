@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { encodeCanonicalCgSharedPublicRootProjectionV1 } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { describe, expect, it } from 'vitest';
 
@@ -19,6 +20,12 @@ const quad = (predicate: string, object: string, graph = ''): Quad => ({
   object,
   graph,
 });
+/** The verified bytes of a projection: its triples in the canonical form, sorted, one to a line. */
+const bytesOf = (projection: readonly Quad[]): Uint8Array => encodeCanonicalCgSharedPublicRootProjectionV1(projection);
+/** Whether a store that returned `readBack` holds the projection. */
+const holds = (projection: readonly Quad[], readBack: readonly Quad[]): boolean => (
+  readBackHoldsProjectionV1(bytesOf(projection), readBack)
+);
 
 describe('reading a projection back from the store', () => {
   describe('the byte limit', () => {
@@ -72,19 +79,30 @@ describe('reading a projection back from the store', () => {
   });
 
   describe('the comparison', () => {
+    it('takes the projection as its verified bytes, which are already in the canonical form', () => {
+      const projection = [quad('name', '"Alice"'), quad('age', typed('42', 'integer'))];
+      const bytes = new TextEncoder().encode(
+        `<${SUBJECT}> <https://example.org/age> ${typed('42', 'integer')} .\n`
+        + `<${SUBJECT}> <https://example.org/name> "Alice" .\n`,
+      );
+      expect(bytesOf(projection)).toEqual(bytes);
+      expect(readBackHoldsProjectionV1(bytes, [...projection].reverse())).toBe(true);
+      expect(readBackHoldsProjectionV1(bytes.subarray(0, bytes.byteLength - 1), projection)).toBe(false);
+    });
+
     it('accepts the same triples', () => {
       const projection = [quad('name', '"Alice"'), quad('age', typed('42', 'integer'))];
-      expect(readBackHoldsProjectionV1(projection, [...projection])).toBe(true);
+      expect(holds(projection, [...projection])).toBe(true);
     });
 
     it('accepts the same triples in another order', () => {
       const projection = [quad('name', '"Alice"'), quad('age', typed('42', 'integer'))];
-      expect(readBackHoldsProjectionV1(projection, [...projection].reverse())).toBe(true);
+      expect(holds(projection, [...projection].reverse())).toBe(true);
     });
 
     it('does not compare graph names', () => {
       const projection = [quad('name', '"Alice"')];
-      expect(readBackHoldsProjectionV1(projection, [quad('name', '"Alice"', 'urn:graph')])).toBe(true);
+      expect(holds(projection, [quad('name', '"Alice"', 'urn:graph')])).toBe(true);
     });
 
     // The left form is the canonical one a projection carries; the right form
@@ -99,7 +117,7 @@ describe('reading a projection back from the store', () => {
     ])('accepts %s in the lexical form of the store', (_name, canonical, stored) => {
       const projection = [quad('name', '"Alice"'), quad('value', canonical)];
       const readBack = [quad('value', stored), quad('name', '"Alice"')];
-      expect(readBackHoldsProjectionV1(projection, readBack)).toBe(true);
+      expect(holds(projection, readBack)).toBe(true);
     });
 
     // The left form is the canonical one, with the character itself; the right
@@ -112,13 +130,13 @@ describe('reading a projection back from the store', () => {
     ])('accepts %s that the store returns escaped', (_name, canonical, stored) => {
       const projection = [quad('name', '"Alice"'), quad('text', canonical)];
       const readBack = [quad('name', '"Alice"'), quad('text', stored)];
-      expect(readBackHoldsProjectionV1(projection, readBack)).toBe(true);
+      expect(holds(projection, readBack)).toBe(true);
     });
 
     it('refuses another character returned escaped', () => {
       const projection = [quad('text', '"a\tb"')];
-      expect(readBackHoldsProjectionV1(projection, [quad('text', '"a\\nb"')])).toBe(false);
-      expect(readBackHoldsProjectionV1(projection, [quad('text', '"a b"')])).toBe(false);
+      expect(holds(projection, [quad('text', '"a\\nb"')])).toBe(false);
+      expect(holds(projection, [quad('text', '"a b"')])).toBe(false);
     });
 
     it.each([
@@ -131,13 +149,13 @@ describe('reading a projection back from the store', () => {
     ])('refuses %s', (_name, canonical, stored) => {
       const projection = [quad('name', '"Alice"'), quad('value', canonical)];
       const readBack = [quad('name', '"Alice"'), quad('value', stored)];
-      expect(readBackHoldsProjectionV1(projection, readBack)).toBe(false);
+      expect(holds(projection, readBack)).toBe(false);
     });
 
     it('refuses another subject or predicate', () => {
       const projection = [quad('value', typed('100', 'double'))];
-      expect(readBackHoldsProjectionV1(projection, [quad('other', typed('100.0', 'double'))])).toBe(false);
-      expect(readBackHoldsProjectionV1(projection, [{
+      expect(holds(projection, [quad('other', typed('100.0', 'double'))])).toBe(false);
+      expect(holds(projection, [{
         ...quad('value', typed('100.0', 'double')),
         subject: 'https://example.org/other',
       }])).toBe(false);
@@ -145,8 +163,8 @@ describe('reading a projection back from the store', () => {
 
     it('refuses a missing or an extra triple', () => {
       const projection = [quad('name', '"Alice"'), quad('value', typed('100', 'double'))];
-      expect(readBackHoldsProjectionV1(projection, [quad('name', '"Alice"')])).toBe(false);
-      expect(readBackHoldsProjectionV1(projection, [
+      expect(holds(projection, [quad('name', '"Alice"')])).toBe(false);
+      expect(holds(projection, [
         ...projection,
         quad('extra', '"x"'),
       ])).toBe(false);
@@ -155,14 +173,14 @@ describe('reading a projection back from the store', () => {
     it('refuses one triple returned twice in place of two', () => {
       const projection = [quad('name', '"Alice"'), quad('value', typed('100', 'double'))];
       const readBack = [quad('name', '"Alice"'), quad('name', '"Alice"')];
-      expect(readBackHoldsProjectionV1(projection, readBack)).toBe(false);
+      expect(holds(projection, readBack)).toBe(false);
     });
 
     it('compares a term the canonical form does not know character for character', () => {
       const custom = (value: string) => `"${value}"^^<https://example.org/datatype>`;
       const projection = [quad('value', custom('1.0'))];
-      expect(readBackHoldsProjectionV1(projection, [quad('value', custom('1.0'))])).toBe(true);
-      expect(readBackHoldsProjectionV1(projection, [quad('value', custom('1.00'))])).toBe(false);
+      expect(holds(projection, [quad('value', custom('1.0'))])).toBe(true);
+      expect(holds(projection, [quad('value', custom('1.00'))])).toBe(false);
     });
   });
 });

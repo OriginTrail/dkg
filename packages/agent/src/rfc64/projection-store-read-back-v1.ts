@@ -28,7 +28,7 @@
  */
 
 import { encodeCanonicalCgSharedPublicRootProjectionV1 } from '@origintrail-official/dkg-core';
-import { quadToNQuad, type Quad } from '@origintrail-official/dkg-storage';
+import type { Quad } from '@origintrail-official/dkg-storage';
 
 /** Bytes one escaped character may add: `\uXXXX` in place of a single byte. */
 export const STORE_ESCAPE_ALLOWANCE_BYTES_PER_CHARACTER_V1 = 5;
@@ -60,34 +60,23 @@ export function projectionReadBackByteLimitV1(
 }
 
 /**
- * True when `readBack` holds the triples of `projection` and no other: either
- * term for term as the store returned them, in any order, or after both are
- * put in the canonical term form. Graph names are not compared; the caller
- * read one graph.
+ * True when `readBack` holds the triples of the verified projection and no
+ * other. The projection's bytes are its triples in the canonical term form,
+ * sorted, one to a line; the read-back is put in the same form and compared
+ * with them byte for byte. That one rule covers a store that returns the rows
+ * in another order, a term in its own lexical form, or a character escaped.
+ * The canonical form leaves a term it does not know as it is, so such a term
+ * still has to match character for character. Graph names are not compared;
+ * the caller read one graph.
  */
 export function readBackHoldsProjectionV1(
-  projection: readonly Readonly<Quad>[],
+  projectionBytes: Uint8Array,
   readBack: readonly Readonly<Quad>[],
 ): boolean {
-  if (projection.length !== readBack.length) return false;
-  if (sortedStoreTermsV1(projection) === sortedStoreTermsV1(readBack)) return true;
-  // The canonical form leaves a term it does not know as it is, so such a term
-  // still has to match character for character.
-  return equalBytes(
-    encodeCanonicalCgSharedPublicRootProjectionV1(projection),
-    encodeCanonicalCgSharedPublicRootProjectionV1(readBack),
-  );
-}
-
-/** Triple insertion does not retain row order, so the rows are compared sorted. */
-function sortedStoreTermsV1(quads: readonly Readonly<Quad>[]): string {
-  return quads.map((quad) => quadToNQuad({ ...quad, graph: '' })).sort().join('\n');
-}
-
-function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
-  if (left.byteLength !== right.byteLength) return false;
-  for (let index = 0; index < left.byteLength; index += 1) {
-    if (left[index] !== right[index]) return false;
+  const readBackBytes = encodeCanonicalCgSharedPublicRootProjectionV1(readBack);
+  if (readBackBytes.byteLength !== projectionBytes.byteLength) return false;
+  for (let index = 0; index < readBackBytes.byteLength; index += 1) {
+    if (readBackBytes[index] !== projectionBytes[index]) return false;
   }
   return true;
 }

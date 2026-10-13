@@ -2433,8 +2433,8 @@ async function activateExactPublicProjection(
   } catch (cause) {
     fail('catalog-native-receiver-activation', 'exact SWM post-read failed', cause);
   }
-  const readBackText = `${quadsToNQuads(readBack)}\n`;
-  if (readBackText !== projectionText && !readBackHoldsProjectionV1(quads, readBack)) {
+  if (!readBackHoldsProjectionV1(projectionBytes, readBack)) {
+    const readBackText = `${quadsToNQuads(readBack)}\n`;
     const digest = (value: string) => createHash('sha256').update(value).digest('hex');
     fail(
       'catalog-native-receiver-activation',
@@ -2450,7 +2450,9 @@ async function activateExactPublicProjection(
   await assertExactAuthorSealPostRead(store, sealBinding);
   return {
     swmGraph,
-    publicQuadsDigest: workspacePublicQuadsDigest(graphQuads),
+    // The digest of what the store holds, in the store's own spelling: later
+    // reads of this graph and of its verified copy are compared with it.
+    publicQuadsDigest: workspacePublicQuadsDigest(readBack),
     evidence: Object.freeze({
       kaId: row.kaId,
       catalogRowDigest: sealBinding.catalogRowDigest,

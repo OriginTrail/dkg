@@ -45,6 +45,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 import { OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
+import { workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -937,16 +938,22 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       [`"42"^^<${XSD}integer>`, `"42"^^<${XSD}int>`],
     ]);
     const returned: string[] = [];
-    const observed = fixture.createCasObservedReceiver(
+    const recordedDigests: string[] = [];
+    const receiver = fixture.createReceiver(
+      fixture.receiverPersistence.inventory,
+      undefined,
       undefined,
       postReadStoreReturning(fixture.receiverStore, (object) => {
         const stored = storeForms.get(object) ?? object;
         returned.push(stored);
         return stored;
       }),
+      async (plan) => {
+        recordedDigests.push(...plan.rows.map((row) => row.publicQuadsDigest));
+      },
     );
 
-    await expect(fixture.synchronize(fixture.announcement, observed.receiver))
+    await expect(fixture.synchronize(fixture.announcement, receiver))
       .resolves.toMatchObject({
         appliedHeadStatus: 'applied',
         inventoryRowCount: 1,
@@ -955,7 +962,18 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     // Both rows came back in the other form, and one of them longer than the
     // projection's own bytes allow.
     expect([...returned].sort()).toEqual([...storeForms.values()].sort());
-    expect(observed.compareAndSwapAppliedCatalogHeadV1).toHaveBeenCalledOnce();
+    // The digest kept for the row is the digest of what the store returned.
+    // A later read of this graph, or of its verified copy, is compared with
+    // it, and that read comes back in the store's spelling too.
+    const subject = 'https://example.org/alice';
+    expect(recordedDigests).toEqual([workspacePublicQuadsDigest([
+      { subject, predicate: 'https://schema.org/age', object: `"42"^^<${XSD}int>`, graph: '' },
+      { subject, predicate: 'https://schema.org/name', object: `"Alice"^^<${XSD}string>`, graph: '' },
+    ])]);
+    expect(recordedDigests).not.toEqual([workspacePublicQuadsDigest([
+      { subject, predicate: 'https://schema.org/age', object: `"42"^^<${XSD}integer>`, graph: '' },
+      { subject, predicate: 'https://schema.org/name', object: '"Alice"', graph: '' },
+    ])]);
   }, 30_000);
 
   it('rejects a post-read that returns far more bytes than the projection before the applied-head CAS', async () => {
