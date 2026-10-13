@@ -2,7 +2,7 @@
 
 All notable changes to the DKG V10 node are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [10.0.24] - 2026-10-11
+## [10.0.24] - 2026-10-13
 
 A patch for queued publications into private Context Graphs. A queued
 publication into a private graph stayed non-terminal for minutes after its
@@ -792,6 +792,13 @@ a node on an earlier version does not apply a catalog head with such a row
   never reported `synced`** (#3198, #3217): its catch-up asked every peer
   before the graph's policy was active on the node, and nothing repeated it.
   A catch-up job now waits for that, once, for at most ten seconds.
+- **A member of a private Context Graph stopped publishing its catalog after
+  the roster changed again** (#3220): for example when a second member was
+  approved. The member's metadata then held two roster generations, its
+  authority for the graph stayed incomplete with `RFC-64 private roster
+  metadata has conflicting generations`, and the curator received none of
+  that member's writes into the graph's root. The newest generation is now
+  read.
 
 ### Changed
 
