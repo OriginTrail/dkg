@@ -313,15 +313,20 @@ describe("public snapshot recovery over live local nodes and chain", () => {
     // Re-authenticate through ordinary RPC exact sync after snapshot import. Replacing
     // the snapshot receipt must leave the canonical partition route discoverable.
     const replayUal = `did:dkg:evm:31337/${signer.address.toLowerCase()}/3`;
-    await rpcReceiver.syncExactKnowledgeAssetsFromPeerDetailed(core.peerId, graph, [replayUal], {
+    const replay = await rpcReceiver.syncExactKnowledgeAssetsFromPeerDetailed(core.peerId, graph, [replayUal], {
       exactRecoveryTransportMode: 'legacy',
     });
+    expect(replay.committedExactAssetUals).toContain(replayUal);
+    expect(replay.result.failedPhases).toBe(0);
     const replayed = await rpcReceiver.query('SELECT ?entity WHERE {?entity a <http://schema.org/Thing>}', {
       contextGraphId: graph, view: 'verifiable-memory',
     });
     expect(replayed.bindings).toEqual([{entity:'urn:entity:3'}]);
     const entities = await core.findEntitiesByType(rpcReceiver.peerId, graph, 'http://schema.org/Thing');
     expect(entities).toMatchObject({status:'OK',entityUris:['urn:entity:3']});
+    const triples = await core.getEntityTriples(rpcReceiver.peerId, graph, 'urn:entity:3');
+    expect(triples).toMatchObject({status:'OK',resultCount:2});
+    expect(triples.ntriples).toContain('<urn:entity:3>');
     console.log(
       JSON.stringify({
         measurement: "local-independent-snapshot-recovery",
