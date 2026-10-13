@@ -218,6 +218,14 @@ describe('§5.4 / §5.5 status and stale_after', () => {
     expect(objs(offset.c.quads, OKF_STALE_AFTER)).toEqual(['"2026-12-31T00:00:00+15:00"']);
     expect(offset.r.warnings.map((w) => w.message).join('\n')).toMatch(/"2026-12-31T00:00:00\+15:00" is not a valid ISO 8601 datetime/);
   });
+  it('names a usage_window bound like every other field, at concept and source level', () => {
+    const { r } = conceptOf(
+      bundle("type: Metric\nusage_window: { from: soon, to: 2026-06-30T00:00:00Z }\nsources:\n  - { id: s, resource: https://x.example/s, usage_window: { from: '2026-13-01T00:00:00Z' } }"),
+    );
+    const messages = r.warnings.map((w) => w.message);
+    expect(messages).toContain('`usage_window.from` "soon" is not a valid ISO 8601 datetime (§5); kept as a plain literal');
+    expect(messages).toContain('`sources[0].usage_window.from` "2026-13-01T00:00:00Z" is not a valid ISO 8601 datetime (§5); kept as a plain literal');
+  });
   it('warns when a timestamp lacks the explicit UTC offset OKF requires', () => {
     const { r } = conceptOf(bundle("type: Metric\nstale_after: '2026-12-31T00:00:00'"));
     expect(r.warnings.map((w) => w.message).join('\n')).toMatch(/has no explicit UTC offset/);

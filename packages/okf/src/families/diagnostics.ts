@@ -21,7 +21,6 @@ import {
   RUNTIME,
   SOURCES,
   STATUS,
-  USAGE_WINDOW,
   type FamilySpec,
   type FieldSpec,
   type ListFamilySpec,
@@ -48,13 +47,9 @@ function checkDateTime(field: string, value: unknown, out: Diagnostic[]): void {
   }
 }
 
-/** The backticked name of a field in a message. */
+/** The backticked name of a field in a message (`stale_after`, `sources[0].usage_window.from`). */
 function fieldLabel(spec: FamilySpec, label: string, field: FieldSpec): string {
-  if (spec.shape === 'scalar') return `\`${label}\``;
-  // Kept exactly as the hand-written checks reported it, so this refactor
-  // changes no output; the next commit makes usage_window match the others.
-  if (spec === USAGE_WINDOW) return `\`${label}\`.${field.key}`;
-  return `\`${label}.${field.key}\``;
+  return spec.shape === 'scalar' ? `\`${label}\`` : `\`${label}.${field.key}\``;
 }
 
 function checkField(spec: FamilySpec, field: FieldSpec, value: unknown, label: string, out: Diagnostic[]): void {
