@@ -67,6 +67,10 @@
 
 * [Local LLM Agent Runbook](use-dkg/local-llm-agent-runbook.md)
 * [Context Pack](agent-context/context-pack.md)
+* [Set Up and Verify](agent-context/task-packs/setup.md)
+* [Ingest Knowledge](agent-context/task-packs/ingest.md)
+* [OKF Workflow](agent-context/task-packs/okf.md)
+* [Collaborate](agent-context/task-packs/collaborate.md)
 * [Invariants](agent-context/invariants.md)
 * [Publish Lifecycle Language](agent-context/publish-lifecycle-language.md)
 * [Publish & Query](agent-context/task-packs/publish-query.md)
