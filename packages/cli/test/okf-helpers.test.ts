@@ -1,9 +1,46 @@
 import { describe, it, expect } from 'vitest';
 import { fileURLToPath } from 'node:url';
-import { importBundle, loadBundleDir, exportBundle, RDF_TYPE, SCHEMA_NAME, OKF_SOURCE } from '@origintrail-official/dkg-okf';
-import { bindingsOf, cell, exportInputFromBindings, parseRelateRules, summarizeOkfImport } from '../src/commands/okf-helpers.js';
+import {
+  importBundle,
+  loadBundleDir,
+  exportBundle,
+  quadsToNQuads,
+  RDF_TYPE,
+  SCHEMA_NAME,
+  OKF_SOURCE,
+  DKG_HAS_SECTION,
+  SECTION_GENID_INFIX,
+  GENID_TAGS,
+  type Quad,
+} from '@origintrail-official/dkg-okf';
+import {
+  bindingsOf,
+  cell,
+  distinctTripleCountsByPredicate,
+  exportInputFromBindings,
+  parseRelateRules,
+  summarizeOkfImport,
+} from '../src/commands/okf-helpers.js';
 
 const acme = loadBundleDir(fileURLToPath(new URL('../../okf/test/fixtures/acme_retail', import.meta.url)));
+
+/** The semantic graph: everything except presentational section structure (as in the okf round-trip tests). */
+function semantic(quads: Quad[]): string {
+  const sectionNode = SECTION_GENID_INFIX + GENID_TAGS.section;
+  return quadsToNQuads(quads.filter((q) => !q.subject.includes(sectionNode) && q.predicate !== DKG_HAS_SECTION));
+}
+
+/** Deterministic Fisher–Yates with a small LCG. */
+function shuffled<T>(items: T[], seed: number): T[] {
+  const out = [...items];
+  let x = seed;
+  for (let i = out.length - 1; i > 0; i--) {
+    x = (x * 1103515245 + 12345) % 2147483648;
+    const j = x % (i + 1);
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
 
 describe('bindingsOf / cell (daemon result readers)', () => {
   it('reads bindings structurally and normalises bare-string and SPARQL-JSON cells', () => {
@@ -90,14 +127,42 @@ describe('exportInputFromBindings (graph → exporter input)', () => {
     ]);
   });
 
-  it('feeds exportBundle a graph that rebuilds the v0.2 families (round trip through bindings)', () => {
-    const imported = importBundle(acme);
-    const bindings = imported.quads.map((q) => ({ s: `<${q.subject}>`, p: `<${q.predicate}>`, o: q.object }));
-    const input = exportInputFromBindings(bindings, base);
-    expect(input.concepts.map((c) => c.conceptId).sort()).toEqual(imported.concepts.map((c) => c.conceptId).sort());
-    const reimported = importBundle(exportBundle(input));
+  const imported = importBundle(acme);
+  const toBindings = (quads: Quad[]) => quads.map((q) => ({ s: `<${q.subject}>`, p: `<${q.predicate}>`, o: q.object }));
+
+  it('rebuilds the complete semantic graph from shuffled bindings, every family payload included', () => {
+    for (const seed of [3, 17, 2026]) {
+      const input = exportInputFromBindings(shuffled(toBindings(imported.quads), seed), base);
+      expect(input.concepts.map((c) => c.conceptId).sort()).toEqual(imported.concepts.map((c) => c.conceptId).sort());
+      const reimported = importBundle(exportBundle(input));
+      expect(semantic(reimported.quads)).toBe(semantic(imported.quads));
+      for (const c of imported.concepts) {
+        expect(reimported.concepts.find((x) => x.conceptId === c.conceptId)!.trust).toEqual(c.trust);
+      }
+    }
+  });
+
+  it('is not vacuous: dropping the parameter nodes changes the graph even though trust summaries still match', () => {
+    const bindings = toBindings(imported.quads).filter((b) => !b.s.includes(GENID_TAGS.parameter));
+    const reimported = importBundle(exportBundle(exportInputFromBindings(bindings, base)));
+    expect(semantic(reimported.quads)).not.toBe(semantic(imported.quads));
+    // the summary-only comparison this test replaced would have passed here
     for (const c of imported.concepts) {
       expect(reimported.concepts.find((x) => x.conceptId === c.conceptId)!.trust).toEqual(c.trust);
     }
+  });
+});
+
+describe('distinctTripleCountsByPredicate (verify expectations)', () => {
+  it('counts each distinct triple once per predicate', () => {
+    const q = (s: string, p: string, o: string): Quad => ({ subject: s, predicate: p, object: o });
+    const counts = distinctTripleCountsByPredicate([
+      q('urn:okf:m', 'urn:p:lineage', 'urn:okf:p'),
+      q('urn:okf:m', 'urn:p:lineage', 'urn:okf:p'),
+      q('urn:okf:m', 'urn:p:lineage', 'https://x.example/doc'),
+      q('urn:okf:n', 'urn:p:lineage', 'urn:okf:p'),
+      q('urn:okf:m', 'urn:p:name', '"M"'),
+    ]);
+    expect(Object.fromEntries(counts)).toEqual({ 'urn:p:lineage': 3, 'urn:p:name': 1 });
   });
 });

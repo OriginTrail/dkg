@@ -135,6 +135,25 @@ export function parseRelateRules(raw: string[]): TypeRelation[] {
   });
 }
 
+/**
+ * The per-predicate triple counts `dkg okf verify` expects to find. A store
+ * holds a set, so each distinct (subject, predicate, object) is counted once —
+ * a repeated quad in the mapping (which the mapper no longer emits, but a
+ * caller-supplied mapping might) must not become a shortfall that no re-import
+ * can ever repair.
+ */
+export function distinctTripleCountsByPredicate(quads: Quad[]): Map<string, number> {
+  const seen = new Set<string>();
+  const counts = new Map<string, number>();
+  for (const q of quads) {
+    const key = `${q.subject}\u0000${q.predicate}\u0000${q.object}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    counts.set(q.predicate, (counts.get(q.predicate) ?? 0) + 1);
+  }
+  return counts;
+}
+
 /** Daemon bindings carry IRIs raw or as `<…>`; strip the brackets so terms match the mapper's raw-IRI convention. */
 function unwrapIri(term: string): string {
   return term.startsWith('<') && term.endsWith('>') ? term.slice(1, -1) : term;

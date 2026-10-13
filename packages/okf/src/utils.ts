@@ -57,3 +57,24 @@ export function camelCase(value: string): string {
 export function sanitizeForBlank(value: string): string {
   return value.replace(/[^A-Za-z0-9]+/g, '_');
 }
+
+/**
+ * Drop repeated quads, keeping the first occurrence (and so the emission
+ * order). An RDF store holds a set: two identical triples are one triple, so a
+ * mapper that emits a repeat (two `sources` naming the same resource → two
+ * identical `prov:wasDerivedFrom` edges; `tags: [a, a]`) overstates what the
+ * store will hold, and a completeness check built on that count can never pass.
+ */
+export function dedupeQuads<T extends { subject: string; predicate: string; object: string; graph?: string }>(
+  quads: T[],
+): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const q of quads) {
+    const key = `${q.subject}\u0000${q.predicate}\u0000${q.object}\u0000${q.graph ?? ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(q);
+  }
+  return out;
+}

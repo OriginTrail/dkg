@@ -10,7 +10,7 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ### Changed
 
-- **OKF mapper fidelity.** Mapping-valued producer keys are carried as `rdf:JSON` literals so they round-trip as objects instead of degrading to strings; YAML-native timestamps are rendered in XSD canonical form (`…Z`, no `.000`) and a value that is not a valid datetime lexical is kept as a plain literal (with a warning) rather than a bogus `xsd:dateTime`.
+- **OKF mapper fidelity.** Mapping-valued producer keys are carried as `rdf:JSON` literals so they round-trip as objects instead of degrading to strings; YAML-native timestamps are rendered in XSD canonical form (`…Z`, no `.000`) and a value that is not a valid date (shape, calendar, clock and offset are all checked) is kept as a plain literal (with a warning) rather than a bogus `xsd:dateTime`. Unknown keys inside a v0.2 family, including `usage_window`, are preserved under invertible `okf:<family>.<key>` predicates, and the mapper emits each triple once, so `dkg okf verify` no longer reports a permanent shortfall when several sources name the same resource.
 
 ## [10.0.24] - 2026-10-11
 

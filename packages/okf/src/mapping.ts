@@ -38,7 +38,7 @@ import {
   DEFAULT_IRI_BASE,
 } from './constants.js';
 import { conceptIdToIri, resolveLinkTarget } from './paths.js';
-import { isSafeIri, literalTerm, sanitizeForBlank } from './utils.js';
+import { dedupeQuads, isSafeIri, literalTerm, sanitizeForBlank } from './utils.js';
 import {
   typeToIri,
   dateTerm,
@@ -167,7 +167,9 @@ export function mapFrontmatter(
       }
     }
   }
-  return { quads: out, derivedFromConcepts: [...new Set(derived)].sort(), warnings };
+  // An RDF store holds a set: emit each triple once (two sources naming one
+  // resource would otherwise yield two identical prov:wasDerivedFrom edges).
+  return { quads: dedupeQuads(out), derivedFromConcepts: [...new Set(derived)].sort(), warnings };
 }
 
 /** Quads-only view of `mapFrontmatter` (kept for API compatibility). */
@@ -399,7 +401,8 @@ export function mapConcept(
   return {
     conceptId: doc.conceptId,
     iri,
-    quads,
+    // Each triple once — the count the store holds, and what `verify` expects.
+    quads: dedupeQuads(quads),
     resolvedLinks,
     brokenLinks,
     codeSpanLinks,

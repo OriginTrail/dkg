@@ -73,8 +73,6 @@ export const DKG_HAS_SECTION = 'http://dkg.io/ontology/hasSection';
 export const OKF_NS = 'http://dkg.io/ontology/okf/';
 /** `generated.by` — actor literal (§5.2, §7). */
 export const OKF_GENERATED_BY = OKF_NS + 'generatedBy';
-/** Prefix for producer-defined keys nested inside `generated` (`generated<PascalKey>`). */
-export const OKF_GENERATED_PREFIX = OKF_NS + 'generated';
 /** Concept → one `okf:Verification` node per `verified[]` event (§5.2). */
 export const OKF_VERIFICATION = OKF_NS + 'verification';
 export const OKF_VERIFIED_BY = OKF_NS + 'verifiedBy';
@@ -100,10 +98,8 @@ export const OKF_PARAMETER = OKF_NS + 'parameter';
 export const OKF_PARAMETER_TYPE = OKF_NS + 'parameterType';
 export const OKF_REQUIRED = OKF_NS + 'required';
 export const OKF_COMPUTATION = OKF_NS + 'computation';
-export const OKF_EXECUTOR_PREFIX = OKF_NS + 'executor';
 export const OKF_EXECUTOR_RESOURCE = OKF_NS + 'executorResource';
 export const OKF_EXECUTOR_RECEIPT = OKF_NS + 'executorReceipt';
-export const OKF_ATTESTER_PREFIX = OKF_NS + 'attester';
 export const OKF_ATTESTER_RESOURCE = OKF_NS + 'attesterResource';
 /** Classes of the skolemized family nodes. */
 export const OKF_CLASS_VERIFICATION = OKF_NS + 'Verification';

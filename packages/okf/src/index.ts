@@ -64,10 +64,11 @@ export {
   isStale,
 } from './trust.js';
 export { valueToTerms, dateTerm, actorTerm, pathFieldTerm, typeToIri, isAttestedComputationType } from './terms.js';
+export { okfExtensionPredicate, okfExtensionKey, okfExtensionPrefix } from './extensions.js';
 export type { PathContext, PathFieldTerm } from './terms.js';
 export { importBundle } from './bundle.js';
 export { exportBundle } from './export.js';
 export { validateBundle } from './validation.js';
 export { quadsToNQuads } from './nquads.js';
 export { loadBundleDir, loadBundleDirWithReport } from './loader.js';
-export { isSafeIri, literalTerm, typedLiteralTerm } from './utils.js';
+export { isSafeIri, literalTerm, typedLiteralTerm, dedupeQuads } from './utils.js';

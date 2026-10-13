@@ -230,8 +230,19 @@ it; the CLI summary reports it against the current time.
   (the path implies it).
 - **Producer-defined keys** are always preserved (camelCased into schema.org),
   never dropped or rejected (OKF §4.1, §11). Unknown keys *inside* a family are
-  preserved too (on the family node, or as `okf:generated<Key>` /
-  `okf:executor<Key>` / `okf:attester<Key>` for the single-valued families).
+  preserved too, under the family-scoped extension predicate
+  `okf:<familyKey>.<percent-encoded key>` on the family's subject (the concept
+  for `generated` / `executor` / `attester` / `usage_window`, the entry's node
+  for `verified` / `sources` / `parameters`). Unlike the top-level camelCase
+  convention this is invertible: `timeout_s`, `sample rate` and `café` come back
+  exactly, and the predicate is always IRI-safe. The top-level convention is
+  left as it was in v0.1 so an OKF import keeps converging with the node's
+  Markdown extractor.
+- **Each triple once.** The mapper deduplicates its output per concept: a store
+  holds a set, so two `sources` naming one resource give two `okf:Source` nodes
+  but a single `prov:wasDerivedFrom` edge. Without this the expected count in
+  `dkg okf verify` exceeded what any complete import can store, a permanent
+  false shortfall; the verifier also counts distinct triples on its own.
 - **Conformance is permissive.** Only two rules make a bundle non-conformant
   (unparseable frontmatter; missing non-empty `type`). Missing optionals, unknown
   types/keys, broken links, missing `index.md`, malformed families and unknown

@@ -41,7 +41,6 @@ import {
   SCHEMA_CITATION,
   PROV_WAS_DERIVED_FROM,
   OKF_GENERATED_BY,
-  OKF_GENERATED_PREFIX,
   OKF_VERIFICATION,
   OKF_VERIFIED_BY,
   OKF_VERIFIED_AT,
@@ -59,10 +58,8 @@ import {
   OKF_PARAMETER_TYPE,
   OKF_REQUIRED,
   OKF_COMPUTATION,
-  OKF_EXECUTOR_PREFIX,
   OKF_EXECUTOR_RESOURCE,
   OKF_EXECUTOR_RECEIPT,
-  OKF_ATTESTER_PREFIX,
   OKF_ATTESTER_RESOURCE,
   OKF_ATTESTED_COMPUTATION_TYPE,
   OKF_TARGET_VERSION,
@@ -71,6 +68,7 @@ import {
   XSD_BOOLEAN,
   DEFAULT_IRI_BASE,
 } from './constants.js';
+import { okfExtensionKey } from './extensions.js';
 import type { BundleFile, ExportInput, OkfMappingOptions, Quad } from './types.js';
 
 const LITERAL_RE = /^("(?:\\.|[^"\\])*")(?:\^\^<[^>]*>|@[A-Za-z-]+)?$/;
@@ -169,10 +167,6 @@ function termValue(term: string, ctx: ExportContext, pathForm = false): unknown 
   return term;
 }
 
-function lowerFirst(s: string): string {
-  return s.charAt(0).toLowerCase() + s.slice(1);
-}
-
 /** Accumulate a (possibly multi-valued) key: scalar on first sight, list thereafter. */
 function accumulate(target: Record<string, unknown>, key: string, value: unknown): void {
   if (key in target) {
@@ -215,29 +209,15 @@ const CONCEPT_PREDICATES = new Set([
   SCHEMA_CITATION,
 ]);
 
-/** A family node's producer-defined extras (`schema:<camelKey>` on the node). */
-function nodeExtras(quads: Quad[], known: Set<string>, ctx: ExportContext): Record<string, unknown> {
+/** Producer-defined keys of a family on one subject: its `okf:<familyKey>.<key>` extension predicates (extensions.ts). */
+function familyExtensions(quads: Quad[], familyKey: string, ctx: ExportContext): Record<string, unknown> {
   const extras: Record<string, unknown> = {};
   for (const q of quads) {
-    if (known.has(q.predicate) || q.predicate === RDF_TYPE) continue;
-    if (!q.predicate.startsWith(SCHEMA_NS)) continue;
-    accumulate(extras, q.predicate.slice(SCHEMA_NS.length), termValue(q.object, ctx));
+    const key = okfExtensionKey(familyKey, q.predicate);
+    if (key !== null) accumulate(extras, key, termValue(q.object, ctx));
   }
   return extras;
 }
-
-const VERIFICATION_PREDICATES = new Set([OKF_VERIFIED_BY, OKF_VERIFIED_AT]);
-const SOURCE_PREDICATES = new Set([
-  SCHEMA_IDENTIFIER,
-  SCHEMA_NAME,
-  OKF_RESOURCE,
-  OKF_AUTHOR,
-  OKF_USAGE_COUNT,
-  SCHEMA_DATE_MODIFIED,
-  OKF_USAGE_WINDOW_FROM,
-  OKF_USAGE_WINDOW_TO,
-]);
-const PARAMETER_PREDICATES = new Set([SCHEMA_NAME, OKF_PARAMETER_TYPE, OKF_REQUIRED]);
 
 function verificationEntry(quads: Quad[], ctx: ExportContext): Record<string, unknown> {
   const entry: Record<string, unknown> = {};
@@ -245,15 +225,17 @@ function verificationEntry(quads: Quad[], ctx: ExportContext): Record<string, un
     if (q.predicate === OKF_VERIFIED_BY) entry.by = termValue(q.object, ctx);
     else if (q.predicate === OKF_VERIFIED_AT) entry.at = termValue(q.object, ctx);
   }
-  return orderKeys({ ...entry, ...nodeExtras(quads, VERIFICATION_PREDICATES, ctx) }, ['by', 'at']);
+  return orderKeys({ ...entry, ...familyExtensions(quads, 'verified', ctx) }, ['by', 'at']);
 }
 
+/** `usage_window` on one subject (concept or source node): its bounds plus its producer extensions (§5.1). */
 function usageWindow(quads: Quad[], ctx: ExportContext): Record<string, unknown> | null {
   const w: Record<string, unknown> = {};
   for (const q of quads) {
     if (q.predicate === OKF_USAGE_WINDOW_FROM) w.from = termValue(q.object, ctx);
     else if (q.predicate === OKF_USAGE_WINDOW_TO) w.to = termValue(q.object, ctx);
   }
+  Object.assign(w, familyExtensions(quads, 'usage_window', ctx));
   return Object.keys(w).length > 0 ? orderKeys(w, ['from', 'to']) : null;
 }
 
@@ -283,7 +265,7 @@ function sourceEntry(quads: Quad[], ctx: ExportContext): Record<string, unknown>
   }
   const window = usageWindow(quads, ctx);
   if (window) entry.usage_window = window;
-  return orderKeys({ ...entry, ...nodeExtras(quads, SOURCE_PREDICATES, ctx) }, [
+  return orderKeys({ ...entry, ...familyExtensions(quads, 'sources', ctx) }, [
     'id',
     'resource',
     'title',
@@ -301,7 +283,7 @@ function parameterEntry(quads: Quad[], ctx: ExportContext): Record<string, unkno
     else if (q.predicate === OKF_PARAMETER_TYPE) entry.type = termValue(q.object, ctx);
     else if (q.predicate === OKF_REQUIRED) entry.required = termValue(q.object, ctx);
   }
-  return orderKeys({ ...entry, ...nodeExtras(quads, PARAMETER_PREDICATES, ctx) }, ['name', 'type', 'required']);
+  return orderKeys({ ...entry, ...familyExtensions(quads, 'parameters', ctx) }, ['name', 'type', 'required']);
 }
 
 function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportContext): BundleFile {
@@ -328,8 +310,7 @@ function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportConte
   const executor: Record<string, unknown> = {};
   const receipt: string[] = [];
   const attester: Record<string, unknown> = {};
-  let usageFrom: unknown = null;
-  let usageTo: unknown = null;
+  const usageWindowQuads: Quad[] = [];
 
   for (const q of bySubject.get(c.iri) ?? []) {
     switch (q.predicate) {
@@ -389,10 +370,8 @@ function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportConte
         frontmatter.stale_after = termValue(q.object, ctx);
         break;
       case OKF_USAGE_WINDOW_FROM:
-        usageFrom = termValue(q.object, ctx);
-        break;
       case OKF_USAGE_WINDOW_TO:
-        usageTo = termValue(q.object, ctx);
+        usageWindowQuads.push(q);
         break;
       case OKF_RUNTIME:
         frontmatter.runtime = termValue(q.object, ctx);
@@ -410,12 +389,17 @@ function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportConte
         attester.resource = termValue(q.object, ctx, true);
         break;
       default: {
-        if (q.predicate.startsWith(OKF_GENERATED_PREFIX)) {
-          accumulate(generatedExtras, lowerFirst(q.predicate.slice(OKF_GENERATED_PREFIX.length)), termValue(q.object, ctx));
-        } else if (q.predicate.startsWith(OKF_EXECUTOR_PREFIX)) {
-          accumulate(executor, lowerFirst(q.predicate.slice(OKF_EXECUTOR_PREFIX.length)), termValue(q.object, ctx));
-        } else if (q.predicate.startsWith(OKF_ATTESTER_PREFIX)) {
-          accumulate(attester, lowerFirst(q.predicate.slice(OKF_ATTESTER_PREFIX.length)), termValue(q.object, ctx));
+        const generatedKey = okfExtensionKey('generated', q.predicate);
+        const executorKey = okfExtensionKey('executor', q.predicate);
+        const attesterKey = okfExtensionKey('attester', q.predicate);
+        if (generatedKey !== null) {
+          accumulate(generatedExtras, generatedKey, termValue(q.object, ctx));
+        } else if (executorKey !== null) {
+          accumulate(executor, executorKey, termValue(q.object, ctx));
+        } else if (attesterKey !== null) {
+          accumulate(attester, attesterKey, termValue(q.object, ctx));
+        } else if (okfExtensionKey('usage_window', q.predicate) !== null) {
+          usageWindowQuads.push(q);
         } else if (q.predicate.startsWith(SCHEMA_NS) && !CONCEPT_PREDICATES.has(q.predicate)) {
           // Producer-defined key: typed scalars and rdf:JSON objects come back
           // as native values so the datatype / structure survives re-import.
@@ -451,12 +435,8 @@ function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportConte
   if (sourceNodes.length > 0) {
     frontmatter.sources = sourceNodes.sort(byNodeIndex).map((n) => sourceEntry(nodeQuads(n), ctx));
   }
-  if (usageFrom !== null || usageTo !== null) {
-    const w: Record<string, unknown> = {};
-    if (usageFrom !== null) w.from = usageFrom;
-    if (usageTo !== null) w.to = usageTo;
-    frontmatter.usage_window = w;
-  }
+  const window = usageWindow(usageWindowQuads, ctx);
+  if (window) frontmatter.usage_window = window;
   Object.assign(frontmatter, extras);
 
   // Stable key order: required/recommended, then the §10 contract, then the §5

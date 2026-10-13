@@ -18,7 +18,14 @@ import {
   OKF_TRUST_TIER,
   type Quad,
 } from '@origintrail-official/dkg-okf';
-import { bindingsOf, cell, exportInputFromBindings, parseRelateRules, summarizeOkfImport } from './okf-helpers.js';
+import {
+  bindingsOf,
+  cell,
+  distinctTripleCountsByPredicate,
+  exportInputFromBindings,
+  parseRelateRules,
+  summarizeOkfImport,
+} from './okf-helpers.js';
 import { batchEntityQuads, type PublishQuad } from '../batching.js';
 import { ApiClient } from '../api-client.js';
 import type { ActionOpts } from '../cli-helpers.js';
@@ -588,10 +595,8 @@ export function registerOkfCommand(program: Command): void {
           includeCodeSpanLinks: Boolean(opts.includeCodeSpanLinks),
           typeRelations,
         });
-        const expectedByPred = new Map<string, number>();
-        for (const q of imported.quads) {
-          expectedByPred.set(q.predicate, (expectedByPred.get(q.predicate) ?? 0) + 1);
-        }
+        // Distinct triples per predicate: what the store can actually hold.
+        const expectedByPred = distinctTripleCountsByPredicate(imported.quads);
         const expectedConcepts = imported.concepts.length;
 
         const client = await ApiClient.connect();

@@ -75,16 +75,16 @@ verified one, and is never rejected — SPEC §11).
 | `type` | `rdf:type schema:<PascalCase>` | `Attested Computation` ↔ `schema:AttestedComputation` (exact spelling restored on export) |
 | `title`, `description`, `tags`, `resource` | `schema:name`, `schema:description`, `schema:keywords`, `schema:url` | unchanged from v0.1 |
 | `generated.at` / legacy `timestamp` (§5.2, §13.1) | `schema:dateModified` (xsd:dateTime) | one predicate for both versions; `generated.at` wins, a leftover `timestamp` is kept as `schema:timestamp` |
-| `generated.by` (§5.2, §7) | `okf:generatedBy` (actor literal) | extra keys inside `generated` → `okf:generated<Key>` |
+| `generated.by` (§5.2, §7) | `okf:generatedBy` (actor literal) | extra keys inside `generated` → `okf:generated.<key>` (see *Family extensions*) |
 | `verified[]` (§5.2) | `okf:verification → okf:Verification` node: `okf:verifiedBy`, `okf:verifiedAt` | a bare `{ by, at }` is a one-element list; entry order is in the node IRI |
 | derived tier (§5.3) | `okf:trustTier` = `machine-confirmed` \| `human-reviewed` | emitted only when a verifier exists; absent ⇒ `unverified` |
 | `status` (§5.4) | `okf:status` | absent ⇒ `stable`, never materialised |
 | `stale_after` (§5.5) | `okf:staleAfter` (xsd:dateTime) | staleness is `now >= stale_after`, computed by consumers (`isStale`) |
 | `sources[]` (§5.1) | `okf:source → okf:Source` node: `schema:identifier` (`id`), `schema:name` (`title`), `okf:resource`, `okf:author`, `okf:usageCount`, `schema:dateModified` (`last_modified`), `okf:usageWindowFrom/To` | plus `prov:wasDerivedFrom <resource>` on the concept whenever the resource has an IRI |
-| `usage_window` (§5.1) | `okf:usageWindowFrom`, `okf:usageWindowTo` | concept-level sibling; per-entry overrides sit on the source node |
+| `usage_window` (§5.1) | `okf:usageWindowFrom`, `okf:usageWindowTo` | concept-level sibling; per-entry overrides sit on the source node; extra keys (e.g. `population`) → `okf:usage_window.<key>` on the same subject |
 | `runtime`, `computation` (§10.2) | `okf:runtime`, `okf:computation` | |
 | `parameters[]` (§10.2) | `okf:parameter → okf:Parameter` node: `schema:name`, `okf:parameterType`, `okf:required` | ordered by node IRI |
-| `executor`, `attester` (§10.2) | `okf:executorResource`, `okf:executorReceipt` (one per field), `okf:attesterResource`; extras `okf:executor<Key>` / `okf:attester<Key>` | |
+| `executor`, `attester` (§10.2) | `okf:executorResource`, `okf:executorReceipt` (one per field), `okf:attesterResource` | extra keys → `okf:executor.<key>` / `okf:attester.<key>` |
 | body links (§6.1) | `schema:mentions` (untyped; opt-in `--relate` typing) | unchanged |
 | legacy `# Citations` (§13.1) | `schema:citation` | still parsed for v0.1 documents |
 | producer-defined keys (§4.1) | `schema:<camelKey>` | scalars typed; nested mappings as `rdf:JSON` literals so they round-trip as objects |
@@ -95,6 +95,23 @@ concept becomes a typed edge to its IRI (file-relative first, then the
 bundle-root-relative reading Google's reference bundles use), an absolute URL
 stays an IRI, and anything else (a `references/` artifact, an attester `.py`, a
 scope descriptor) is kept as a literal.
+
+**Family extensions.** A producer-defined key *inside* a family (§4.1 asks
+consumers to preserve unknown keys) — `executor.timeout_s`,
+`usage_window.population`, `verified[].note`, `sources[].sample_rate` — is
+carried under `okf:<familyKey>.<key>` on the family's subject (the concept for
+`generated` / `executor` / `attester` / `usage_window`, the entry's node for
+`verified` / `sources` / `parameters`). The key is percent-encoded, so the
+predicate is always IRI-safe (`okf:generated.sample%20rate`,
+`okf:generated.caf%C3%A9`) and export restores the key exactly — unlike the
+camelCase convention for top-level producer keys, which folds `timeout_s` to
+`timeoutS`. `okfExtensionPredicate` / `okfExtensionKey` are the two directions.
+
+**Each triple once.** An RDF store holds a set, so the mapper emits every
+triple once: two sources naming the same resource yield two `okf:Source` nodes
+but one `prov:wasDerivedFrom` edge, and `tags: [a, a]` yields one
+`schema:keywords`. The mapped quad count is therefore exactly what a complete
+import leaves in the store, which is what `dkg okf verify` compares against.
 
 Namespaces: `okf:` = `http://dkg.io/ontology/okf/` (a sub-namespace of the DKG
 ontology, so it never collides with the node's own `dkg:status` /
@@ -107,8 +124,10 @@ rebuilt in their original order; derived triples (`okf:trustTier`,
 `prov:wasDerivedFrom`) are not written back and are re-derived on the next
 import. A concept that only carries a last-modified time (a v0.1 import) is
 written with the legacy `timestamp` key — `generated` requires a `by` actor and
-the exporter never invents provenance. Known deviations: `executor.receipt`
-comes back sorted (set semantics), concept paths come back in the recommended
+the exporter never invents provenance. Entry order is restored from the node
+IRIs, so it survives a graph that returns quads in any order. Known deviations:
+`executor.receipt` comes back sorted (set semantics), a repeated list value
+(`tags: [a, a]`) comes back once, concept paths come back in the recommended
 absolute `/path.md` form, and an unquoted timestamp with an offset is folded to
 UTC (same instant).
 

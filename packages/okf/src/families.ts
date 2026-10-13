@@ -19,7 +19,8 @@
  *     when the concept carries at least one verifier. Absence ⇒ `unverified`.
  *
  * Nothing here is inferred from prose; every triple is a pure function of the
- * frontmatter. Unknown keys inside a family are preserved, never dropped.
+ * frontmatter. Unknown keys inside a family are preserved, never dropped,
+ * under the invertible `okf:<familyKey>.<key>` extension predicates.
  */
 
 import {
@@ -29,7 +30,6 @@ import {
   SCHEMA_NAME,
   PROV_WAS_DERIVED_FROM,
   OKF_GENERATED_BY,
-  OKF_GENERATED_PREFIX,
   OKF_VERIFICATION,
   OKF_VERIFIED_BY,
   OKF_VERIFIED_AT,
@@ -47,10 +47,8 @@ import {
   OKF_PARAMETER_TYPE,
   OKF_REQUIRED,
   OKF_COMPUTATION,
-  OKF_EXECUTOR_PREFIX,
   OKF_EXECUTOR_RESOURCE,
   OKF_EXECUTOR_RECEIPT,
-  OKF_ATTESTER_PREFIX,
   OKF_ATTESTER_RESOURCE,
   OKF_CLASS_VERIFICATION,
   OKF_CLASS_SOURCE,
@@ -60,7 +58,8 @@ import {
   XSD_BOOLEAN,
   XSD_INTEGER,
 } from './constants.js';
-import { literalTerm, typedLiteralTerm, pascalCase, sanitizeForBlank } from './utils.js';
+import { literalTerm, typedLiteralTerm, sanitizeForBlank } from './utils.js';
+import { okfExtensionPredicate } from './extensions.js';
 import {
   dateTimeLexical,
   hasExplicitOffset,
@@ -111,27 +110,21 @@ function nodeIri(iri: string, tag: string, nodeKey: string, index: number): stri
   return `${iri}${SECTION_GENID_INFIX}${tag}${sanitizeForBlank(nodeKey)}_${index}`;
 }
 
-/** Producer-defined keys on a family node, preserved under the generic `schema:` convention. */
-function extraQuads(subject: string, obj: Record<string, unknown>, known: ReadonlySet<string>): Quad[] {
-  const out: Quad[] = [];
-  for (const [k, v] of Object.entries(obj)) {
-    if (known.has(k) || v === null || v === undefined) continue;
-    out.push(...genericQuads(subject, k, v));
-  }
-  return out;
-}
-
-/** Producer-defined keys nested in a single-valued family (`generated`, `executor`, `attester`): `<prefix><PascalKey>`. */
-function prefixedExtraQuads(
+/**
+ * Producer-defined keys inside a family (SPEC §4.1), on the family's subject
+ * (the concept, or the entry's node), under the invertible extension
+ * predicate `okf:<familyKey>.<percent-encoded key>` (extensions.ts).
+ */
+function extensionQuads(
   subject: string,
-  prefix: string,
+  familyKey: string,
   obj: Record<string, unknown>,
   known: ReadonlySet<string>,
 ): Quad[] {
   const out: Quad[] = [];
   for (const [k, v] of Object.entries(obj)) {
     if (known.has(k) || v === null || v === undefined) continue;
-    const predicate = prefix + pascalCase(k);
+    const predicate = okfExtensionPredicate(familyKey, k);
     for (const object of valueToTerms(v)) out.push({ subject, predicate, object });
   }
   return out;
@@ -142,11 +135,15 @@ function pushDate(out: Quad[], subject: string, predicate: string, value: unknow
   if (t) out.push({ subject, predicate, object: t });
 }
 
+const USAGE_WINDOW_KNOWN = new Set(['from', 'to']);
+
+/** `usage_window` (§5.1) on `subject`: the `{ from, to }` bounds plus any producer extensions (e.g. `population`). */
 function usageWindowQuads(subject: string, value: unknown): Quad[] {
   if (!isMapping(value)) return genericQuads(subject, 'usage_window', value);
   const out: Quad[] = [];
   pushDate(out, subject, OKF_USAGE_WINDOW_FROM, value.from);
   pushDate(out, subject, OKF_USAGE_WINDOW_TO, value.to);
+  out.push(...extensionQuads(subject, 'usage_window', value, USAGE_WINDOW_KNOWN));
   return out;
 }
 
@@ -196,7 +193,7 @@ export function familyQuads(
         quads.push({ subject: iri, predicate: OKF_GENERATED_BY, object: actorTerm(value.by) });
       }
       pushDate(quads, iri, SCHEMA_DATE_MODIFIED, value.at);
-      quads.push(...prefixedExtraQuads(iri, OKF_GENERATED_PREFIX, value, GENERATED_KNOWN));
+      quads.push(...extensionQuads(iri, 'generated', value, GENERATED_KNOWN));
       break;
     }
 
@@ -216,7 +213,7 @@ export function familyQuads(
         quads.push({ subject: node, predicate: RDF_TYPE, object: OKF_CLASS_VERIFICATION });
         quads.push({ subject: node, predicate: OKF_VERIFIED_BY, object: actorTerm(entry.by) });
         pushDate(quads, node, OKF_VERIFIED_AT, entry.at);
-        quads.push(...extraQuads(node, entry, VERIFIED_KNOWN));
+        quads.push(...extensionQuads(node, 'verified', entry, VERIFIED_KNOWN));
       });
       if (events > 0) {
         quads.push({ subject: iri, predicate: OKF_TRUST_TIER, object: literalTerm(deriveTrustTier(value)) });
@@ -280,7 +277,7 @@ export function familyQuads(
         if (entry.usage_window !== undefined && entry.usage_window !== null) {
           quads.push(...usageWindowQuads(node, entry.usage_window));
         }
-        quads.push(...extraQuads(node, entry, SOURCE_KNOWN));
+        quads.push(...extensionQuads(node, 'sources', entry, SOURCE_KNOWN));
       });
       break;
     }
@@ -316,7 +313,7 @@ export function familyQuads(
               : valueToTerms(entry.required)[0];
           if (object) quads.push({ subject: node, predicate: OKF_REQUIRED, object });
         }
-        quads.push(...extraQuads(node, entry, PARAMETER_KNOWN));
+        quads.push(...extensionQuads(node, 'parameters', entry, PARAMETER_KNOWN));
       });
       break;
     }
@@ -338,7 +335,7 @@ export function familyQuads(
           quads.push({ subject: iri, predicate: OKF_EXECUTOR_RECEIPT, object: literalTerm(String(field)) });
         }
       }
-      quads.push(...prefixedExtraQuads(iri, OKF_EXECUTOR_PREFIX, value, EXECUTOR_KNOWN));
+      quads.push(...extensionQuads(iri, 'executor', value, EXECUTOR_KNOWN));
       break;
     }
 
@@ -350,7 +347,7 @@ export function familyQuads(
       if (value.resource !== undefined && value.resource !== null) {
         resolvePath('attester.resource', value.resource, iri, OKF_ATTESTER_RESOURCE);
       }
-      quads.push(...prefixedExtraQuads(iri, OKF_ATTESTER_PREFIX, value, ATTESTER_KNOWN));
+      quads.push(...extensionQuads(iri, 'attester', value, ATTESTER_KNOWN));
       break;
     }
 

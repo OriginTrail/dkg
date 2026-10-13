@@ -48,6 +48,9 @@ import {
   XSD_DATE_TIME,
   XSD_INTEGER,
   XSD_BOOLEAN,
+  okfExtensionPredicate,
+  okfExtensionKey,
+  isSafeIri,
 } from '../src/index.js';
 import type { BundleFile, Quad } from '../src/index.js';
 
@@ -97,9 +100,9 @@ describe('§5.2 generated / legacy timestamp', () => {
     expect(objs(c.quads, SCHEMA_DATE_MODIFIED)).toEqual([DT('2026-06-30T14:00:00Z')]);
     expect(objs(c.quads, SCHEMA_NS + 'timestamp')).toEqual(['"2026-01-01T00:00:00Z"']);
   });
-  it('preserves producer keys nested inside generated under okf:generated<Key>', () => {
+  it('preserves producer keys nested inside generated under the okf:generated.<key> extension predicate', () => {
     const { c } = conceptOf(bundle('type: Metric\ngenerated: { by: human:a, at: 2026-06-30T14:00:00Z, model: gemini-2.5-pro }'));
-    expect(objs(c.quads, OKF_NS + 'generatedModel')).toEqual(['"gemini-2.5-pro"']);
+    expect(objs(c.quads, OKF_NS + 'generated.model')).toEqual(['"gemini-2.5-pro"']);
     expect(exportedFrontmatter(bundle('type: Metric\ngenerated: { by: human:a, at: 2026-06-30T14:00:00Z, model: gemini-2.5-pro }')).generated).toEqual({
       by: 'human:a',
       at: '2026-06-30T14:00:00Z',
@@ -135,7 +138,7 @@ describe('§5.2 / §5.3 verified and trust tiers', () => {
     );
     expect(objs(c.quads, OKF_VERIFICATION)).toEqual([node(GENID_TAGS.verification, 0), node(GENID_TAGS.verification, 1)]);
     expect(objs(c.quads, OKF_TRUST_TIER)).toEqual(['"machine-confirmed"']);
-    expect(objs(c.quads, SCHEMA_NS + 'note', node(GENID_TAGS.verification, 1))).toEqual(['"re-run"']);
+    expect(objs(c.quads, okfExtensionPredicate('verified', 'note'), node(GENID_TAGS.verification, 1))).toEqual(['"re-run"']);
   });
   it('emits no tier for an empty list and skips entries without a verifier (reported, never fatal)', () => {
     const { c, r } = conceptOf(bundle('type: Metric\nverified:\n  - { at: 2026-06-26T02:00:00Z }\n  - nope'));
@@ -201,6 +204,10 @@ describe('§5.4 / §5.5 status and stale_after', () => {
     // a well-formed value is typed, and the same instant is not reported stale by an impossible one
     const ok = conceptOf(bundle("type: Metric\nstale_after: '2026-02-28T00:00:00Z'")).c;
     expect(objs(ok.quads, OKF_STALE_AFTER)).toEqual([DT('2026-02-28T00:00:00Z')]);
+    // an out-of-range offset is just as invalid: plain literal plus the warning
+    const offset = conceptOf(bundle("type: Metric\nstale_after: '2026-12-31T00:00:00+15:00'"));
+    expect(objs(offset.c.quads, OKF_STALE_AFTER)).toEqual(['"2026-12-31T00:00:00+15:00"']);
+    expect(offset.r.warnings.map((w) => w.message).join('\n')).toMatch(/"2026-12-31T00:00:00\+15:00" is not a valid ISO 8601 datetime/);
   });
   it('warns when a timestamp lacks the explicit UTC offset OKF requires', () => {
     const { r } = conceptOf(bundle("type: Metric\nstale_after: '2026-12-31T00:00:00'"));
@@ -257,13 +264,11 @@ describe('§5.1 sources and provenance', () => {
     const policy = 'urn:okf:policies/revenue-recognition';
     // root-relative without slash (the reference bundles' convention), file-relative, and absolute
     for (const i of [1, 3, 4]) expect(objs(c.quads, OKF_RESOURCE, node(GENID_TAGS.source, i))).toEqual([policy]);
-    // derivation edges: the policy concept (deduped) + the external URL; scope descriptor gets none
-    expect(objs(c.quads, PROV_WAS_DERIVED_FROM).sort()).toEqual([
-      'https://developers.google.com/analytics/bigquery/export-schema',
-      policy,
-      policy,
-      policy,
-    ].sort());
+    // derivation edges: the policy concept ONCE (three sources name it) + the external URL;
+    // the scope descriptor gets none. The store holds a set, so a repeat would never verify.
+    expect(objs(c.quads, PROV_WAS_DERIVED_FROM).sort()).toEqual(
+      ['https://developers.google.com/analytics/bigquery/export-schema', policy].sort(),
+    );
     expect(c.trust.derivedFromConcepts).toEqual(['policies/revenue-recognition']);
   });
 
@@ -343,14 +348,14 @@ describe('§10 attested computations', () => {
     expect(objs(c.quads, SCHEMA_NAME, p0)).toEqual(['"year"']);
     expect(objs(c.quads, OKF_PARAMETER_TYPE, p0)).toEqual(['"integer"']);
     expect(objs(c.quads, OKF_REQUIRED, p0)).toEqual([`"true"^^<${XSD_BOOLEAN}>`]);
-    expect(objs(c.quads, SCHEMA_NS + 'default', p1)).toEqual(['"all"']);
+    expect(objs(c.quads, okfExtensionPredicate('parameters', 'default'), p1)).toEqual(['"all"']);
     expect(objs(c.quads, OKF_COMPUTATION)).toEqual(['"references/computations/lib/revenue.sql"']);
     // a bundle concept named by executor.resource becomes a typed edge
     expect(objs(c.quads, OKF_EXECUTOR_RESOURCE)).toEqual(['urn:okf:policies/revenue-recognition']);
     expect(objs(c.quads, OKF_EXECUTOR_RECEIPT).sort()).toEqual(['"executed_sql"', '"job_id"', '"result"']);
-    expect(objs(c.quads, OKF_NS + 'executorTimeoutS')).toEqual([`"30"^^<${XSD_INTEGER}>`]);
+    expect(objs(c.quads, OKF_NS + 'executor.timeout_s')).toEqual([`"30"^^<${XSD_INTEGER}>`]);
     expect(objs(c.quads, OKF_ATTESTER_RESOURCE)).toEqual(['"references/attesters/sql-equality.py"']);
-    expect(objs(c.quads, OKF_NS + 'attesterStrict')).toEqual([`"true"^^<${XSD_BOOLEAN}>`]);
+    expect(objs(c.quads, OKF_NS + 'attester.strict')).toEqual([`"true"^^<${XSD_BOOLEAN}>`]);
     expect(c.trust.attestedComputation).toBe(true);
   });
 
@@ -366,7 +371,7 @@ describe('§10 attested computations', () => {
     expect(fm.executor).toEqual({
       resource: '/policies/revenue-recognition.md',
       receipt: ['executed_sql', 'job_id', 'result'], // set semantics: sorted
-      timeoutS: 30,
+      timeout_s: 30, // the extension key comes back exactly, not camelCased
     });
     expect(fm.attester).toEqual({ resource: 'references/attesters/sql-equality.py', strict: true });
     expect(summarizeTrust(fm).attestedComputation).toBe(true);
@@ -446,6 +451,157 @@ describe('export only rewrites IRIs that are exported concepts', () => {
       'https://example.org/policy',
     ]);
     expect(quadsToNQuads(metric(second).quads)).toBe(quadsToNQuads(metric(first).quads));
+  });
+});
+
+describe('each triple is emitted once (an RDF store holds a set)', () => {
+  const REPEATED = [
+    'type: Metric',
+    'tags: [finance, revenue, finance]',
+    'sources:',
+    '  - { id: a, resource: /policies/revenue-recognition.md }',
+    '  - { id: b, resource: policies/revenue-recognition.md }',
+    '  - { id: c, resource: https://x.example/doc }',
+    '  - { id: d, resource: https://x.example/doc }',
+  ].join('\n');
+
+  it('keeps one Source node per entry but one lineage edge per distinct resource', () => {
+    const { c } = conceptOf(bundle(REPEATED));
+    expect(objs(c.quads, OKF_SOURCE)).toHaveLength(4);
+    expect(objs(c.quads, PROV_WAS_DERIVED_FROM).sort()).toEqual(['https://x.example/doc', 'urn:okf:policies/revenue-recognition']);
+    expect(objs(c.quads, SCHEMA_NS + 'keywords')).toEqual(['"finance"', '"revenue"']);
+  });
+
+  it('never emits a duplicate quad, so the mapped count is the count the store holds', () => {
+    const r = importBundle(bundle(REPEATED));
+    for (const concept of r.concepts) {
+      const distinct = new Set(quadsToNQuads(concept.quads).split('\n').filter(Boolean));
+      expect(concept.quads).toHaveLength(distinct.size);
+    }
+    expect(r.quads).toHaveLength(new Set(quadsToNQuads(r.quads).split('\n').filter(Boolean)).size);
+  });
+});
+
+describe('family extensions (SPEC §4.1) are preserved invertibly', () => {
+  const WINDOWS = [
+    'type: Metric',
+    'usage_window: { from: 2026-04-01T00:00:00Z, to: 2026-06-30T00:00:00Z, population: production-only }',
+    'sources:',
+    '  - id: dash',
+    '    resource: https://x.example/dash',
+    '    usage_window: { from: 2026-05-01T00:00:00Z, to: 2026-05-31T00:00:00Z, population: prod, sample_rate: 0.1 }',
+  ].join('\n');
+
+  it('keeps usage_window extensions at concept and source level', () => {
+    const { c } = conceptOf(bundle(WINDOWS));
+    const s0 = node(GENID_TAGS.source, 0);
+    expect(objs(c.quads, okfExtensionPredicate('usage_window', 'population'))).toEqual(['"production-only"']);
+    expect(objs(c.quads, okfExtensionPredicate('usage_window', 'population'), s0)).toEqual(['"prod"']);
+    expect(objs(c.quads, okfExtensionPredicate('usage_window', 'sample_rate'), s0)).toEqual(['"0.1"^^<http://www.w3.org/2001/XMLSchema#decimal>']);
+    expect(objs(c.quads, OKF_USAGE_WINDOW_FROM, s0)).toEqual([DT('2026-05-01T00:00:00Z')]);
+  });
+
+  it('round-trips the extensions through export and re-import', () => {
+    const files = bundle(WINDOWS);
+    const fm = exportedFrontmatter(files);
+    expect(fm.usage_window).toEqual({ from: '2026-04-01T00:00:00Z', to: '2026-06-30T00:00:00Z', population: 'production-only' });
+    expect((fm.sources as Array<Record<string, unknown>>)[0].usage_window).toEqual({
+      from: '2026-05-01T00:00:00Z',
+      to: '2026-05-31T00:00:00Z',
+      population: 'prod',
+      sample_rate: 0.1,
+    });
+    const first = conceptOf(files).c;
+    const second = importBundle(exportBundle(importBundle(files))).concepts.find((x) => x.conceptId === 'metrics/revenue')!;
+    expect(quadsToNQuads(second.quads.filter((q) => !q.subject.includes(GENID_TAGS.section)))).toBe(
+      quadsToNQuads(first.quads.filter((q) => !q.subject.includes(GENID_TAGS.section))),
+    );
+  });
+
+  it('encodes any key to an IRI-safe predicate and decodes it back exactly', () => {
+    for (const key of ['population', 'sample rate', 'retry_count', 'café', 'a.b', '50%', '日本語']) {
+      const predicate = okfExtensionPredicate('executor', key);
+      expect(isSafeIri(predicate)).toBe(true);
+      expect(okfExtensionKey('executor', predicate)).toBe(key);
+      expect(okfExtensionKey('attester', predicate)).toBeNull();
+    }
+    expect(okfExtensionKey('generated', OKF_NS + 'generatedBy')).toBeNull();
+    // a malformed percent sequence (hand-edited graph) is returned undecoded, never thrown
+    expect(okfExtensionKey('executor', OKF_NS + 'executor.%E0%A4%A')).toBe('%E0%A4%A');
+  });
+
+  it('round-trips keys with spaces, underscores and non-ASCII characters exactly', () => {
+    const files = bundle(
+      "type: Metric\ngenerated: { by: human:a, 'sample rate': 0.5, run_id: r1, 'café': ja }\nexecutor: { resource: https://x.example/run, retry_count: 2 }\nverified:\n  - { by: human:a, 'review note': ok, ticket_id: T-1 }",
+    );
+    const { c } = conceptOf(files);
+    for (const q of c.quads) expect(isSafeIri(q.predicate)).toBe(true);
+    const fm = exportedFrontmatter(files);
+    expect(fm.generated).toEqual({ by: 'human:a', 'sample rate': 0.5, run_id: 'r1', café: 'ja' });
+    expect(fm.executor).toEqual({ resource: 'https://x.example/run', retry_count: 2 });
+    expect(fm.verified).toEqual([{ by: 'human:a', 'review note': 'ok', ticket_id: 'T-1' }]);
+  });
+});
+
+describe('export restores family entry order from the node IRIs, whatever order quads arrive in', () => {
+  // The CLI rebuilds concepts from a SPARQL SELECT with no ORDER BY, so node and
+  // link quads can arrive in any order. Export must restore the entry order
+  // from the index baked into each node IRI, not rely on input order.
+  const ORDERED = [
+    'type: Attested Computation',
+    'runtime: bigquery',
+    'parameters:',
+    '  - { name: p0, type: integer, required: true }',
+    '  - { name: p1, type: string, required: false }',
+    '  - { name: p2, type: date, required: true }',
+    'verified:',
+    '  - { by: human:first, at: 2026-06-25T09:00:00Z }',
+    '  - { by: process:second, at: 2026-06-26T02:00:00Z }',
+    '  - { by: reference_agent/third, at: 2026-06-27T02:00:00Z }',
+    'sources:',
+    '  - { id: s0, resource: https://x.example/0 }',
+    '  - { id: s1, resource: https://x.example/1 }',
+    '  - { id: s2, resource: https://x.example/2 }',
+  ].join('\n');
+
+  /** Deterministic Fisher–Yates with a small LCG, so the test is reproducible. */
+  function shuffled<T>(items: T[], seed: number): T[] {
+    const out = [...items];
+    let x = seed;
+    for (let i = out.length - 1; i > 0; i--) {
+      x = (x * 1103515245 + 12345) % 2147483648;
+      const j = x % (i + 1);
+      [out[i], out[j]] = [out[j], out[i]];
+    }
+    return out;
+  }
+
+  const imported = importBundle(bundle(ORDERED));
+  const concept = imported.concepts.find((x) => x.conceptId === 'metrics/revenue')!;
+  const exportWith = (quads: Quad[]) => {
+    const files = exportBundle({ concepts: imported.concepts.map((x) => (x === concept ? { ...x, quads } : x)) });
+    return parseDocument('metrics/revenue.md', files.find((f) => f.path === 'metrics/revenue.md')!.content).frontmatter;
+  };
+  const expectOriginalOrder = (fm: Record<string, unknown>) => {
+    expect((fm.parameters as Array<{ name: string }>).map((p) => p.name)).toEqual(['p0', 'p1', 'p2']);
+    expect((fm.verified as Array<{ by: string }>).map((v) => v.by)).toEqual(['human:first', 'process:second', 'reference_agent/third']);
+    expect((fm.sources as Array<{ id: string }>).map((s) => s.id)).toEqual(['s0', 's1', 's2']);
+  };
+
+  it('restores the order from reversed quads', () => {
+    expectOriginalOrder(exportWith([...concept.quads].reverse()));
+  });
+
+  it('restores the order from shuffled quads', () => {
+    for (const seed of [7, 42, 1234]) {
+      const quads = shuffled(concept.quads, seed);
+      // the permutation really does scramble at least one family's link order
+      const linkOrder = quads.filter((q) => q.predicate === OKF_SOURCE || q.predicate === OKF_VERIFICATION || q.predicate === OKF_PARAMETER);
+      expect(linkOrder.map((q) => q.object)).not.toEqual(
+        concept.quads.filter((q) => linkOrder.includes(q)).map((q) => q.object),
+      );
+      expectOriginalOrder(exportWith(quads));
+    }
   });
 });
 
