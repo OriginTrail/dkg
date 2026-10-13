@@ -480,3 +480,39 @@ describe('a typed date keeps its datatype through export and re-import', () => {
     expect(text).toContain("at: '2026-06-30T14:00:00Z'");
   });
 });
+
+describe('a family value of the wrong shape is kept whole through export and re-import', () => {
+  // A list where a family expects a mapping is one rdf:JSON literal, never
+  // split into items, so a list holding one mapping never exports as a valid
+  // family, which would replace the kept triple and invent provenance the
+  // first import did not recognise.
+  const cases: Array<[string, string, (fm: Record<string, unknown>) => unknown]> = [
+    ['generated', 'generated: [{ by: human:alice }]', (fm) => fm.generated],
+    ['sources[].usage_window', 'sources:\n  - { id: s, resource: https://x.example/s, usage_window: [{ from: 2026-06-01T00:00:00Z }] }', (fm) => (fm.sources as Array<Record<string, unknown>>)[0].usage_window],
+    ['usage_window', 'usage_window: [{ from: 2026-06-01T00:00:00Z }]', (fm) => fm.usage_window],
+    ['attester', 'attester: [{ resource: https://x.example/a }]', (fm) => fm.attester],
+  ];
+  for (const [name, yaml, valueOf] of cases) {
+    it(`${name}: the same triples and the same shape warning come back, and the list stays a list`, () => {
+      const files = bundle(`type: Metric\n${yaml}`);
+      const first = importBundle(files);
+      const second = importBundle(exportBundle(first));
+      expect(semantic(second.quads)).toBe(semantic(first.quads));
+      const shapeWarnings = (r: ReturnType<typeof importBundle>) => r.warnings.filter((w) => w.code === 'malformed-family').map((w) => w.message);
+      expect(shapeWarnings(first)).toHaveLength(1);
+      expect(shapeWarnings(second)).toEqual(shapeWarnings(first));
+      expect(Array.isArray(valueOf(exportedFrontmatter(files)))).toBe(true);
+    });
+  }
+
+  it('leaves a producer key on the same predicate as it was: a list item by item, a mapping as one object', () => {
+    for (const yaml of ['usageWindow: [a, b]', 'usageWindow: { a: 1 }']) {
+      const files = bundle(`type: Metric\n${yaml}`);
+      const first = importBundle(files);
+      expect(semantic(importBundle(exportBundle(first)).quads)).toBe(semantic(first.quads));
+      const fm = exportedFrontmatter(files);
+      expect(Object.keys(fm)).toEqual(['type', 'usageWindow']);
+      expect(first.warnings).toEqual([]);
+    }
+  });
+});

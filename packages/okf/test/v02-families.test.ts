@@ -43,6 +43,7 @@ import {
   SCHEMA_DATE_MODIFIED,
   SCHEMA_IDENTIFIER,
   SCHEMA_NAME,
+  RDF_JSON,
   SCHEMA_NS,
   V02_FAMILY_KEYS,
   XSD_BOOLEAN,
@@ -371,11 +372,12 @@ describe('§10 attested computations', () => {
     const d = familyDiagnostics({ type: 'Attested Computation', runtime: 'bigquery', parameters: [{ type: 'integer' }, 'x'] });
     expect(d.map((x) => x.message).join('\n')).toMatch(/parameters\[0\]\.name` is missing/);
     expect(d.map((x) => x.message).join('\n')).toMatch(/parameters\[1\]` is not a mapping/);
-    // the malformed shapes are preserved as producer keys rather than dropped
+    // the malformed shapes are kept verbatim under the generic predicate, whole:
+    // a single value as its own term, a list as one rdf:JSON literal
     const { c } = conceptOf(files);
     expect(objs(c.quads, SCHEMA_NS + 'parameters')).toEqual(['"year"']);
     expect(objs(c.quads, SCHEMA_NS + 'executor')).toEqual(['"run-it"']);
-    expect(objs(c.quads, SCHEMA_NS + 'attester')).toEqual(['"a"']);
+    expect(objs(c.quads, SCHEMA_NS + 'attester')).toEqual([`"[\\"a\\"]"^^<${RDF_JSON}>`]);
   });
 
   it('warns on a computation path that looks like a concept but is missing', () => {

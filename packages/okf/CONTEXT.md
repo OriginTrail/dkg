@@ -318,13 +318,23 @@ it; the CLI summary reports it against the current time.
   kept verbatim under the generic predicate on the entry's node, warned about,
   and written back under their own key on export. Entry nodes carry no other
   `schema:` producer keys, so the read-back is unambiguous.
-- **A wrong-shaped top-level `usage_window`** (`usage_window: Q2`) is kept
-  verbatim as `schema:usageWindow` on the concept — the very triple a producer
-  key named `usageWindow` produces — so export writes it back as the
-  `usageWindow` producer key. The graph round-trips exactly, but the
-  frontmatter key changes and the shape warning does not recur on re-import.
-  Single-word families (`generated`, `verified`, `sources`, …) keep their key,
-  since camelCase leaves them unchanged.
+- **A wrong-shaped family value is kept whole.** A family given a value of the
+  wrong shape keeps it verbatim under `schema:<camelKey>`: a single value as its
+  own term, anything else as one `rdf:JSON` literal, never split into items, so
+  a list holding one mapping (`generated: [{ by: … }]`) exports as that list
+  and never comes back as a valid family that would replace the kept triple
+  and invent provenance. Single-word families (`generated`, `verified`,
+  `sources`, …) are written back under their own key, since camelCase leaves it
+  unchanged.
+- **A wrong-shaped top-level `usage_window`** sits on `schema:usageWindow`, the
+  predicate a producer key named `usageWindow` uses. A list
+  (`usage_window: [ … ]`) is one `rdf:JSON` array, which no producer key
+  yields (a producer key's list is one triple per item), so export writes it
+  back under `usage_window` and the shape warning recurs. A single value
+  (`usage_window: Q2`) is the very triple a `usageWindow` producer key
+  produces, so export writes it back as that producer key: the graph
+  round-trips exactly, but the frontmatter key changes and the shape warning
+  does not recur on re-import.
 - **Each triple once.** The mapper deduplicates its output per concept: a store
   holds a set, so two `sources` naming one resource give two `okf:Source` nodes
   but a single `prov:wasDerivedFrom` edge. Without this the expected count in

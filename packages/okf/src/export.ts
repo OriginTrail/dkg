@@ -45,6 +45,8 @@ import {
 } from './constants.js';
 import { accumulate, conceptIdFromIri, literalValue, orderKeys, termValue, type ExportContext } from './decode-terms.js';
 import { decodeFamilies } from './families/decode.js';
+import { FAMILY_SPECS } from './families/specs.js';
+import { genericPredicate } from './terms.js';
 import { dict, distinctTriples, pascalCase } from './utils.js';
 import type { BundleFile, ExportInput, OkfMappingOptions, Quad } from './types.js';
 
@@ -109,6 +111,22 @@ const CONCEPT_KEY_ORDER = [
   'usage_window',
 ];
 
+/**
+ * A family whose kept-verbatim value (`families/encode.ts`) sits on a generic
+ * predicate that reads back as a different producer key: `usage_window` →
+ * `schema:usageWindow` → `usageWindow`. A list it was given is one `rdf:JSON`
+ * array, which no producer key yields (a producer key's list is one triple per
+ * item), so that value is written back under the family key, where re-import
+ * keeps it verbatim again. A single value is the very triple a `usageWindow`
+ * producer key produces, and is written back as one.
+ */
+const FAMILY_KEY_BY_GENERIC_PREDICATE: ReadonlyMap<string, string> = new Map(
+  FAMILY_SPECS.filter((s) => s.shape === 'mapping' && genericPredicate(s.key) !== SCHEMA_NS + s.key).map((s) => [
+    genericPredicate(s.key),
+    s.key,
+  ]),
+);
+
 /** The IRI `emitFolderHierarchy` gives a nested concept's parent directory, or `null` at the bundle root. */
 function parentDirectoryIri(conceptId: string, iriBase: string): string | null {
   const slash = conceptId.lastIndexOf('/');
@@ -138,6 +156,7 @@ function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportConte
     bySubject.get(q.subject)!.push(q);
   }
   const conceptQuads = bySubject.get(c.iri) ?? [];
+  const families = decodeFamilies(conceptQuads, (node) => bySubject.get(node) ?? [], ctx);
 
   // Dictionaries: producer keys are arbitrary (`constructor`, `__proto__`).
   const frontmatter = dict();
@@ -196,14 +215,19 @@ function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportConte
         if (q.predicate.startsWith(SCHEMA_NS) && !CONCEPT_PREDICATES.has(q.predicate)) {
           // Producer-defined key: typed scalars and rdf:JSON objects come back
           // as native values so the datatype / structure survives re-import.
-          accumulate(extras, q.predicate.slice(SCHEMA_NS.length), termValue(q.object, ctx));
+          const value = termValue(q.object, ctx);
+          const familyKey = FAMILY_KEY_BY_GENERIC_PREDICATE.get(q.predicate);
+          const key =
+            familyKey !== undefined && Array.isArray(value) && !(familyKey in families)
+              ? familyKey
+              : q.predicate.slice(SCHEMA_NS.length);
+          accumulate(extras, key, value);
         }
       // okf:* family predicates are decoded below; derived triples are not read back.
     }
   }
   if (tags.length > 0) frontmatter.tags = tags;
 
-  const families = decodeFamilies(conceptQuads, (node) => bySubject.get(node) ?? [], ctx);
   Object.assign(frontmatter, families);
   // §13.1: a last-modified time with no `generated` (which needs a `by`) is the legacy `timestamp`.
   if (!('generated' in families) && dateModified !== null) frontmatter.timestamp = dateModified;

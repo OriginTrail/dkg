@@ -148,7 +148,10 @@ explicit offset, an `Attested Computation` without `runtime`, a mapping or list
 where one value belongs — kept verbatim — …), a footnote
 `[^label]` that joins no `sources[].id`, a `.md` path in a path-valued field
 that names no concept, and an `okf_version` this consumer does not know (the
-bundle is still consumed best-effort, §12).
+bundle is still consumed best-effort, §12). A family given a value of the wrong
+shape (`generated: [{ by: … }]`, `usage_window: Q2`) keeps it verbatim under
+`schema:<camelKey>`, whole: one term for a single value, one `rdf:JSON` literal
+for anything else, so it exports as written and warns again on re-import.
 
 ## Docs
 

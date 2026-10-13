@@ -10,8 +10,9 @@
  *     number, so re-importing an export mints the same IRIs;
  *   - every key a family does not define is an extension, kept under
  *     `okf:<familyKey>.<key>` on the same subject;
- *   - a value of the wrong shape is kept verbatim as a producer key
- *     (`schema:<camelKey>`) and reported by `diagnostics.ts`.
+ *   - a value of the wrong shape is kept verbatim under the family key's
+ *     generic predicate (`schema:<camelKey>`), whole, and reported by
+ *     `diagnostics.ts`.
  *
  * Two operations are not field mappings and stay explicit here: a
  * `derivesLineage` path field adds `prov:wasDerivedFrom` on the concept (§5.1),
@@ -33,7 +34,7 @@ import {
   XSD_INTEGER,
 } from '../constants.js';
 import { okfExtensionPredicate } from '../extensions.js';
-import { genericQuads, dateTerm, jsonTerm, pathFieldTerm, toArray, valueToTerms, type PathContext } from '../terms.js';
+import { genericPredicate, genericQuads, dateTerm, jsonTerm, pathFieldTerm, toArray, valueToTerms, type PathContext } from '../terms.js';
 import { deriveTrustTier } from '../trust.js';
 import { isBlank, isMapping, isScalar, literalTerm, safeString, sanitizeForBlank, typedLiteralTerm } from '../utils.js';
 import type { OkfWarning, Quad } from '../types.js';
@@ -152,9 +153,21 @@ function encodeFields(
   }
 }
 
+/**
+ * A family value of the wrong shape, kept verbatim under the family key's
+ * generic predicate: a single value as its own term, anything else as one
+ * `rdf:JSON` literal, never split into items. Export then restores the whole
+ * value: a list stays a list, so `generated: [{ by: … }]` never comes back as
+ * a valid `generated` mapping that would invent provenance.
+ */
+function keepVerbatim(enc: Encoding, subject: string, key: string, value: unknown): void {
+  if (isScalar(value)) enc.out.push(...genericQuads(subject, key, value));
+  else enc.out.push({ subject, predicate: genericPredicate(key), object: jsonTerm(value) });
+}
+
 function encodeMapping(enc: Encoding, spec: MappingFamilySpec, subject: string, value: unknown, label: string): void {
   if (!isMapping(value)) {
-    enc.out.push(...genericQuads(subject, spec.key, value));
+    keepVerbatim(enc, subject, spec.key, value);
     return;
   }
   encodeFields(enc, spec, subject, value, label);
@@ -163,7 +176,7 @@ function encodeMapping(enc: Encoding, spec: MappingFamilySpec, subject: string, 
 function encodeList(enc: Encoding, spec: ListFamilySpec, value: unknown): void {
   const parsed = parseList(spec, value);
   if (parsed.shape === 'invalid') {
-    enc.out.push(...genericQuads(enc.iri, spec.key, value));
+    keepVerbatim(enc, enc.iri, spec.key, value);
     return;
   }
   let nodes = 0;
