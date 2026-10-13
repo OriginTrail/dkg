@@ -30,7 +30,14 @@ export class Libp2pConnectCandidateParseError extends Error {
 
 const DEFAULT_CANDIDATE_TIMEOUT_MS = 5_000;
 const CONNECTION_OBSERVATION_INTERVAL_MS = 100;
-const MAX_CONFIGURED_RELAY_FALLBACKS = 4;
+/**
+ * Time for the walk through this node's own relays, in candidate timeouts.
+ * The walk used to stop after this many relays. A relay the target holds no
+ * reservation on answers in one round trip, so the same time now covers every
+ * relay of a long list, while a node that is cut off (each relay runs to its
+ * timeout) gives up when it did before.
+ */
+const RELAY_FALLBACK_BUDGET_IN_CANDIDATE_TIMEOUTS = 4;
 
 function trimTrailingSlashes(value: string): string {
   let end = value.length;
@@ -103,15 +110,21 @@ function canonicalCandidatePeerId(rawTarget: string): CanonicalPeerId {
  * Apply libp2p-specific route policy at the transport boundary. Resolver
  * addresses are treated as opaque until they reach this planner: malformed,
  * wrong-target, and private direct candidates are dropped here. When no public
- * direct route survives, append at most four circuits through the operator's
- * configured relays while preserving the resolver and relay order.
+ * direct route survives, append a circuit through each of the operator's
+ * configured relays, after the resolver's candidates: relays this node is
+ * connected to first, then the others, each group in configured order. The
+ * target holds reservations on a few of the configured relays only, and which
+ * ones is its own choice, so a short prefix of a long relay list can miss all
+ * of them. `relayFallbackFrom` is the index of the first appended circuit; the
+ * caller bounds the time spent from there on.
  */
 function planLibp2pPeerConnectionCandidates(
   peerId: NodeIdentity,
   resolvedAddresses: readonly Address[],
   configuredRelayTargets: readonly ConfiguredRelayTarget[] = [],
   allowResolvedPrivateDirect = false,
-): Libp2pConnectCandidate[] {
+  connectedPeerIds: ReadonlySet<string> = new Set(),
+): { candidates: Libp2pConnectCandidate[]; relayFallbackFrom: number } {
   const canonicalPeerId = peerIdFromString(peerId).toString();
   const planned: Libp2pConnectCandidate[] = [];
   const seen = new Set<string>();
@@ -157,24 +170,24 @@ function planLibp2pPeerConnectionCandidates(
     }
   }
 
-  if (hasPublicDirect) return planned;
+  const relayFallbackFrom = planned.length;
+  if (hasPublicDirect) return { candidates: planned, relayFallbackFrom };
 
-  let fallbackCount = 0;
-  for (const target of configuredRelayTargets) {
-    if (fallbackCount >= MAX_CONFIGURED_RELAY_FALLBACKS) break;
+  const isConnected = (target: ConfiguredRelayTarget): boolean => connectedPeerIds.has(target.peerId);
+  for (const target of [
+    ...configuredRelayTargets.filter(isConnected),
+    ...configuredRelayTargets.filter((relayTarget) => !isConnected(relayTarget)),
+  ]) {
     if (target.peerId === canonicalPeerId) continue;
     const rawRelay = target.addresses.find(
       (address) => !address.includes('/p2p-circuit') && isPublicLikeAddress(address),
     );
     const relay = rawRelay === undefined ? undefined : trimTrailingSlashes(rawRelay);
     if (!relay) continue;
-    const circuit = `${relay}/p2p-circuit/p2p/${canonicalPeerId}`;
-    const before = planned.length;
-    const candidate = appendCandidate(circuit);
-    if (candidate?.kind === 'circuit' && planned.length > before) fallbackCount += 1;
+    appendCandidate(`${relay}/p2p-circuit/p2p/${canonicalPeerId}`);
   }
 
-  return planned;
+  return { candidates: planned, relayFallbackFrom };
 }
 
 /** Public address projection retained for callers that only need route planning. */
@@ -182,12 +195,15 @@ export function planLibp2pPeerConnectionAddresses(
   peerId: NodeIdentity,
   resolvedAddresses: readonly Address[],
   configuredRelayTargets: readonly ConfiguredRelayTarget[] = [],
+  connectedPeerIds?: ReadonlySet<string>,
 ): Address[] {
   return planLibp2pPeerConnectionCandidates(
     peerId,
     resolvedAddresses,
     configuredRelayTargets,
-  ).map((candidate) => candidate.address);
+    false,
+    connectedPeerIds,
+  ).candidates.map((candidate) => candidate.address);
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -318,7 +334,8 @@ export async function tryConnectLibp2pRecoveryStage(
  * Canonical libp2p implementation of PeerConnectionNetwork.connectPeer(). Resolver output is
  * attempted in order, with private direct addresses normally left in the peer
  * store, before one final peer-id fallback. Recovery can explicitly try newly
- * resolved peer-bound private routes before configured relays. Candidate-local
+ * resolved peer-bound private routes before configured relays. The circuits
+ * through this node's own relays share one time budget. Candidate-local
  * timeouts never masquerade as caller aborts.
  */
 export async function connectLibp2pPeer(
@@ -337,27 +354,36 @@ export async function connectLibp2pPeer(
     return;
   }
 
-  const candidates = planLibp2pPeerConnectionCandidates(
+  const { candidates, relayFallbackFrom } = planLibp2pPeerConnectionCandidates(
     canonicalPeerId,
     resolvedAddresses,
     options.configuredRelayTargets,
     options.allowResolvedPrivateDirect,
+    new Set(host.getConnections().map((connection) => connection.remotePeer.toString())),
   );
 
+  const candidateTimeoutMs = options.candidateTimeoutMs ?? DEFAULT_CANDIDATE_TIMEOUT_MS;
+  let relayFallbackBudgetMs = RELAY_FALLBACK_BUDGET_IN_CANDIDATE_TIMEOUTS * candidateTimeoutMs;
   let lastCandidateError: unknown;
-  for (const candidate of candidates) {
+  for (const [index, candidate] of candidates.entries()) {
     throwIfAborted(options.signal);
+    const relayFallback = index >= relayFallbackFrom;
+    if (relayFallback && relayFallbackBudgetMs <= 0) break;
+    const startedAt = Date.now();
     try {
       await connectLibp2pCandidate(host, candidate, {
         expectedPeerId: canonicalPeerId,
         signal: options.signal,
-        timeoutMs: options.candidateTimeoutMs,
+        timeoutMs: relayFallback
+          ? Math.min(candidateTimeoutMs, relayFallbackBudgetMs)
+          : options.candidateTimeoutMs,
         log: options.log,
       });
       return;
     } catch (error) {
       if (options.signal?.aborted) throw error;
       lastCandidateError = error;
+      if (relayFallback) relayFallbackBudgetMs -= Date.now() - startedAt;
     }
   }
 

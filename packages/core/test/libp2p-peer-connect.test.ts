@@ -16,6 +16,9 @@ const WRONG_TARGET = '12D3KooWR5C8ajtPigVGnBwDGTZ4XAtCepRs2WCgfPuBPrgGqcNK';
 const RELAY_C_PEER = '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
 const RELAY_D_PEER = '12D3KooWFWm8sg6dkitmdBd5Uxaqp3CDRL27mFcM7vEHK92Xapyy';
 const RELAY_E_PEER = '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh';
+// Synthetic ids (fixed seeds) on documentation addresses.
+const RELAY_F_PEER = '12D3KooWEDzT4GTs6wLCDV1AXzqirjHb96BNCZzEeTrKuGLzX1ZU';
+const RELAY_G_PEER = '12D3KooWEfdKH3uyEDaAZ234JU8Hi5TWU9emytDzwuJJ4aLYN87d';
 
 const CONFIGURED_RELAYS = [
   { peerId: RELAY_A.split('/').at(-1)!, addresses: [RELAY_A] },
@@ -33,6 +36,16 @@ const CONFIGURED_RELAYS = [
     addresses: [`/ip4/178.104.54.32/tcp/9090/p2p/${RELAY_E_PEER}`],
   },
 ];
+
+const SEVEN_CONFIGURED_RELAYS = [
+  ...CONFIGURED_RELAYS,
+  { peerId: RELAY_F_PEER, addresses: [`/ip4/203.0.113.6/tcp/9090/p2p/${RELAY_F_PEER}`] },
+  { peerId: RELAY_G_PEER, addresses: [`/ip4/203.0.113.7/tcp/9090/p2p/${RELAY_G_PEER}`] },
+];
+
+function circuitThrough(relay: { addresses: readonly string[] }): string {
+  return `${relay.addresses[0]}/p2p-circuit/p2p/${TARGET}`;
+}
 
 describe('parseLibp2pConnectCandidate terminal peer policy', () => {
   it('accepts peer-bound private direct and circuit hints', () => {
@@ -90,20 +103,47 @@ describe('planLibp2pPeerConnectionAddresses', () => {
     )).toEqual([]);
   });
 
-  it('preserves configured relay order and caps fallback at four circuits', () => {
+  it('walks every configured relay the node is connected to, in configured order', () => {
+    const planned = planLibp2pPeerConnectionAddresses(
+      TARGET,
+      [],
+      SEVEN_CONFIGURED_RELAYS,
+      new Set(SEVEN_CONFIGURED_RELAYS.map(({ peerId }) => peerId)),
+    );
+
+    expect(planned).toEqual(SEVEN_CONFIGURED_RELAYS.map(circuitThrough));
+  });
+
+  it('puts the relays the node is connected to first', () => {
+    const relay = (index: number) => SEVEN_CONFIGURED_RELAYS[index]!;
+    const planned = planLibp2pPeerConnectionAddresses(
+      TARGET,
+      [],
+      SEVEN_CONFIGURED_RELAYS,
+      new Set([relay(1).peerId, relay(6).peerId]),
+    );
+
+    // Connected: the second and the seventh. Then the other five in configured order.
+    expect(planned).toEqual([1, 6, 0, 2, 3, 4, 5].map((index) => circuitThrough(relay(index))));
+  });
+
+  it('does not repeat a resolved circuit among the connected-relay fallbacks', () => {
+    expect(planLibp2pPeerConnectionAddresses(
+      TARGET,
+      [CIRCUIT_B],
+      CONFIGURED_RELAYS.slice(0, 2),
+      new Set(CONFIGURED_RELAYS.slice(0, 2).map(({ peerId }) => peerId)),
+    )).toEqual([CIRCUIT_B, CIRCUIT_A]);
+  });
+
+  it('plans a circuit through every configured relay, in configured order', () => {
     const planned = planLibp2pPeerConnectionAddresses(
       TARGET,
       [`/ip4/192.168.0.20/tcp/9090/p2p/${TARGET}`],
       CONFIGURED_RELAYS,
     );
-    const expected = CONFIGURED_RELAYS.slice(0, 4).map(
-      ({ addresses }) => `${addresses[0]}/p2p-circuit/p2p/${TARGET}`,
-    );
 
-    expect(planned).toEqual(expected);
-    expect(planned).not.toContain(
-      `${CONFIGURED_RELAYS[4]!.addresses[0]}/p2p-circuit/p2p/${TARGET}`,
-    );
+    expect(planned).toEqual(CONFIGURED_RELAYS.map(circuitThrough));
   });
 
   it('treats the whole IPv6 fe80::/10 range as private', () => {
@@ -356,6 +396,147 @@ describe('connectLibp2pPeer', () => {
     })).rejects.toBe(relayFailure);
     expect(host.dial.mock.calls.map(([target]) => targetString(target)))
       .toEqual([RELAY_A, TARGET]);
+  });
+
+  it('reaches a target whose only reservation is on the last of seven connected relays', async () => {
+    const last = SEVEN_CONFIGURED_RELAYS.at(-1)!;
+    const calls: string[] = [];
+    const host = {
+      getConnections: () => [
+        ...SEVEN_CONFIGURED_RELAYS.map(({ peerId }) => ({ remotePeer: { toString: () => peerId } })),
+        ...(calls.includes(circuitThrough(last)) ? [{ remotePeer: { toString: () => TARGET } }] : []),
+      ],
+      dial: vi.fn(async (target: unknown) => {
+        const address = targetString(target);
+        calls.push(address);
+        // A relay the target holds no reservation on refuses the circuit at once.
+        if (address.includes('/p2p-circuit/') && address !== circuitThrough(last)) {
+          throw new Error('failed to connect via relay with status NO_RESERVATION');
+        }
+      }),
+      peerStore: { merge: vi.fn(async () => undefined) },
+    };
+
+    await connectLibp2pPeer(host, TARGET, [], {
+      configuredRelayTargets: SEVEN_CONFIGURED_RELAYS,
+      skipIdentityFallback: true,
+    });
+
+    expect(calls).toEqual(SEVEN_CONFIGURED_RELAYS.flatMap(
+      (relay) => [relay.addresses[0]!, circuitThrough(relay)],
+    ));
+  });
+
+  it('gives the walk through its relays the time of four candidate timeouts', async () => {
+    vi.useFakeTimers();
+    try {
+      const circuits: string[] = [];
+      const startedAt = Date.now();
+      let endedAt: number | undefined;
+      const host = {
+        getConnections: () => SEVEN_CONFIGURED_RELAYS.map(
+          ({ peerId }) => ({ remotePeer: { toString: () => peerId } }),
+        ),
+        dial: vi.fn((target: unknown, options?: { signal?: AbortSignal }) => {
+          const address = targetString(target);
+          if (!address.includes('/p2p-circuit/')) return Promise.resolve();
+          circuits.push(address);
+          return new Promise<never>((_resolve, reject) => {
+            // The first relay answers after 30 ms. The others never answer.
+            if (circuits.length === 1) setTimeout(() => reject(new Error('NO_RESERVATION')), 30);
+            options?.signal?.addEventListener('abort', () => {
+              reject(new DOMException('candidate timed out', 'AbortError'));
+            }, { once: true });
+          });
+        }),
+        peerStore: { merge: vi.fn(async () => undefined) },
+      };
+
+      const outcome = connectLibp2pPeer(host, TARGET, [], {
+        configuredRelayTargets: SEVEN_CONFIGURED_RELAYS,
+        candidateTimeoutMs: 50,
+        skipIdentityFallback: true,
+      }).then(() => 'connected', (error: unknown) => { endedAt = Date.now(); return error; });
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(await outcome).toMatchObject({ name: 'AbortError' });
+      // 30 ms, three full timeouts, and the 20 ms that were left for a fifth relay.
+      expect(circuits).toEqual(SEVEN_CONFIGURED_RELAYS.slice(0, 5).map(circuitThrough));
+      expect(endedAt! - startedAt).toBe(4 * 50);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not charge that time for relays that refuse at once', async () => {
+    vi.useFakeTimers();
+    try {
+      const circuits: string[] = [];
+      const host = {
+        getConnections: () => [],
+        dial: vi.fn((target: unknown, options?: { signal?: AbortSignal }) => {
+          const address = targetString(target);
+          if (!address.includes('/p2p-circuit/')) return Promise.resolve();
+          circuits.push(address);
+          if (circuits.length < SEVEN_CONFIGURED_RELAYS.length) {
+            return Promise.reject(new Error('NO_RESERVATION'));
+          }
+          return new Promise<never>((_resolve, reject) => {
+            options?.signal?.addEventListener('abort', () => {
+              reject(new DOMException('candidate timed out', 'AbortError'));
+            }, { once: true });
+          });
+        }),
+        peerStore: { merge: vi.fn(async () => undefined) },
+      };
+
+      const outcome = connectLibp2pPeer(host, TARGET, [], {
+        configuredRelayTargets: SEVEN_CONFIGURED_RELAYS,
+        candidateTimeoutMs: 50,
+        skipIdentityFallback: true,
+      }).then(() => 'connected', (error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(await outcome).toMatchObject({ name: 'AbortError' });
+      expect(circuits).toEqual(SEVEN_CONFIGURED_RELAYS.map(circuitThrough));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not charge a resolved circuit against the time for its own relays', async () => {
+    vi.useFakeTimers();
+    try {
+      const resolved = `/ip4/203.0.113.9/tcp/9090/p2p/${RELAY_G_PEER}/p2p-circuit/p2p/${TARGET}`;
+      const circuits: string[] = [];
+      const host = {
+        getConnections: () => [],
+        dial: vi.fn((target: unknown, options?: { signal?: AbortSignal }) => {
+          const address = targetString(target);
+          if (!address.includes('/p2p-circuit/')) return Promise.resolve();
+          circuits.push(address);
+          return new Promise<never>((_resolve, reject) => {
+            options?.signal?.addEventListener('abort', () => {
+              reject(new DOMException('candidate timed out', 'AbortError'));
+            }, { once: true });
+          });
+        }),
+        peerStore: { merge: vi.fn(async () => undefined) },
+      };
+
+      const outcome = connectLibp2pPeer(host, TARGET, [resolved], {
+        configuredRelayTargets: CONFIGURED_RELAYS,
+        candidateTimeoutMs: 50,
+        skipIdentityFallback: true,
+      }).then(() => 'connected', (error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(await outcome).toMatchObject({ name: 'AbortError' });
+      // The resolved circuit runs to its own timeout, then four of the five relays.
+      expect(circuits).toEqual([resolved, ...CONFIGURED_RELAYS.slice(0, 4).map(circuitThrough)]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('stops immediately when the caller-owned signal aborts', async () => {
