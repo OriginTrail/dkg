@@ -1,4 +1,4 @@
-import type { DurableRecoveryAuthority } from './durable-recovery-authority.js';
+import { memoizeRecoveryBindingProof, type DurableRecoveryAuthority, type DurableRecoveryInput } from './durable-recovery-authority.js';
 import { createRemoteQueryHandler } from "./remote-query-handler.js";
 import { syncReconcilerEnabled, syncOnConnectEnabled, durableSyncEnabled } from './internal/lifecycle-sync-policy.js';
 import { emptySwmRecoveryResult } from './sync/shared-memory-completion.js';
@@ -400,7 +400,6 @@ import {
 } from './sync/responder/sync-handler.js';
 import { createExactBatchResponderBinding } from './sync/responder/exact-batch-stream.js';
 import { exactBatchTransportOptions } from './sync/requester/exact-batch-stream.js';
-import type { VmRecoveryRegisteredPublicEvidence } from './vm-recovery-pass-authority.js';
 import { runExactBatchStreamDriver } from './sync/requester/exact-batch-stream-driver.js';
 import {
   runSelectedSharedMemoryRetry,
@@ -1302,7 +1301,7 @@ function durableSyncSingleFlightKey(params: {
   hasCurrentFence: boolean;
   hasChallengePinnedSelection: boolean;
   hasForcedFreshExactSession: boolean;
-  hasRegisteredPublicEvidence: boolean;
+  hasRecoveryAuthorityOwner: boolean;
   exactAssetUals?: readonly string[];
   settlementSliceTimeoutMs?: number;
   priority?: number;
@@ -1318,7 +1317,7 @@ function durableSyncSingleFlightKey(params: {
     || params.hasCurrentFence
     || params.hasChallengePinnedSelection
     || params.hasForcedFreshExactSession
-    || params.hasRegisteredPublicEvidence
+    || params.hasRecoveryAuthorityOwner
   ) {
     return null;
   }
@@ -1639,18 +1638,16 @@ export interface ContextGraphCatchupOptions {
   sourceOverride?: SyncAdmissionSource;
 }
 
-interface ExactKnowledgeAssetSyncOptions {
+type ExactKnowledgeAssetSyncOptions = DurableRecoveryInput & {
   onWorkStarted?: () => void;
   signal?: AbortSignal;
   isCurrent?: () => boolean;
   forceFreshExactSession?: boolean;
   exactRecoveryTransportMode?: ExactRecoveryTransportMode;
-  registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
-  recoveryAuthority?: DurableRecoveryAuthority;
   totalTimeoutMs?: number;
-}
+};
 
-export type DurableSyncOptions = {
+export type DurableSyncOptions = DurableRecoveryInput & {
   stopOnBackoffWorthyFailure?: boolean;
   /**
    * Outer wall-clock budget for the complete legacy durable operation.
@@ -1687,12 +1684,6 @@ export type DurableSyncOptions = {
   forceFreshExactSession?: boolean;
   /** Internal transport decision; required streams never replay an enlarged selection. */
   exactRecoveryTransportMode?: ExactRecoveryTransportMode;
-  /**
-   * The owning recovery pass's fresh positive registered-public answer, for the exact-batch
-   * stream pre-flight to rely on. Handed only to that pass's own exchange; absent otherwise.
-   */
-  registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
-  recoveryAuthority?: DurableRecoveryAuthority;
   /** Owner-private retained META prefix for bounded durable recovery. */
   durableMetaContinuation?: DurableMetaContinuation;
   /** Admission override for foreground VM recovery. */
@@ -1738,6 +1729,7 @@ type AdmittedDurableSyncResult = PhysicalDurableSyncResult & {
 };
 
 type LegacyDurableContextGraphOptions = {
+  recoveryAuthority?: DurableRecoveryAuthority;
   onPhase?: PhaseCallback;
   onAtomicCommitStarted?: (contextGraphId: string, ual: string) => void;
   onAccessDenied?: (contextGraphId: string) => void;
@@ -1755,8 +1747,6 @@ type LegacyDurableContextGraphOptions = {
   isCurrent?: () => boolean;
   durableMetaContinuation?: DurableMetaContinuation;
   exactRecoveryTransportMode?: ExactRecoveryTransportMode;
-  registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence;
-  recoveryAuthority?: DurableRecoveryAuthority;
 };
 
 const DURABLE_AUTHENTICATION_MAX_ATTEMPTS = 5;
@@ -5780,6 +5770,32 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     )).result;
   }
 
+  createRecoveryAuthority(
+    this: DKGAgent, ctx: OperationContext, input: DurableRecoveryInput = {},
+  ): DurableRecoveryAuthority {
+    if (input.recoveryAuthority) {
+      if (input.registeredPublicEvidence) throw new Error('Conflicting durable recovery authorities');
+      return input.recoveryAuthority;
+    }
+    const evidence = input.registeredPublicEvidence;
+    const verifyContextGraphBinding = memoizeRecoveryBindingProof(
+      (id, onChainId, signal) => this.requireLocalCgMatchesOnChainSlot(id, onChainId, ctx, { signal }),
+    );
+    return {
+      lifetime: 'exchange',
+      coalescing: evidence ? 'owner-only' : 'allowed',
+      isRegisteredPublic: async (id, signal) => evidence?.usableFor(id, signal) === true
+        || (await this.resolveRegisteredContextGraphAuthority(id, { authorityReadMode: 'finalized-index-or-live', signal })).kind === 'public',
+      authenticate: (asset, deadline, signal) => authenticateDurableGraphScopedAsset({
+        chain: this.chain, asset, verifyContextGraphBinding, deadline, signal,
+        onRetry: (error, attempt, maxAttempts) => this.log.warn(ctx,
+          `Retrying graph-scoped durable authentication for ${asset.ual} `
+          + `after transient chain verification failure (${attempt}/${maxAttempts}): `
+          + `${error instanceof Error ? error.message : String(error)}`),
+      }),
+    };
+  }
+
   async runLegacyDurableSyncDetailed(this: DKGAgent,
     ctx: OperationContext,
     remotePeerId: string,
@@ -5789,6 +5805,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     sinceBatchIdFor?: (contextGraphId: string) => string | undefined,
     options?: DurableSyncOptions,
   ): Promise<AdmittedDurableSyncResult> {
+    const authority = LifecycleSyncMethods.prototype.createRecoveryAuthority.call(this, ctx, options);
     const admissionBoundary = new DurableSyncAdmissionBoundary(options?.onWorkStarted);
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
@@ -5852,8 +5869,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 exactAssetSelection,
                 forceFreshExactSession: options?.forceFreshExactSession,
                 exactRecoveryTransportMode: options?.exactRecoveryTransportMode,
-                registeredPublicEvidence: options?.registeredPublicEvidence,
-                recoveryAuthority: options?.recoveryAuthority,
+                recoveryAuthority: authority,
                 authenticationTimeoutMs,
                 operationFetchDeadline: operationBoundary.fetchDeadline,
                 operationDeadline: operationBoundary.deadline,
@@ -5972,7 +5988,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       hasCurrentFence: Boolean(options?.isCurrent),
       hasChallengePinnedSelection: exactAssetSelection?.kind === 'challenge-pinned',
       hasForcedFreshExactSession: options?.forceFreshExactSession === true,
-      hasRegisteredPublicEvidence: options?.registeredPublicEvidence !== undefined || options?.recoveryAuthority !== undefined,
+      hasRecoveryAuthorityOwner: authority.coalescing === 'owner-only',
       exactAssetUals,
       settlementSliceTimeoutMs: options?.settlementSliceTimeoutMs,
       exactRecoveryTransportMode: options?.exactRecoveryTransportMode,
@@ -6072,8 +6088,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         exactAssetSelection: selection,
         forceFreshExactSession: options.forceFreshExactSession,
         exactRecoveryTransportMode: options.exactRecoveryTransportMode,
-        registeredPublicEvidence: options.registeredPublicEvidence,
-        recoveryAuthority: options.recoveryAuthority,
+        recoveryAuthority: LifecycleSyncMethods.prototype.createRecoveryAuthority.call(this, ctx, options),
         ...(options.totalTimeoutMs === undefined ? {} : { totalTimeoutMs: options.totalTimeoutMs }),
         stopOnBackoffWorthyFailure: true,
         priority: VM_RECOVERY_SYNC_PRIORITY,
@@ -6149,7 +6164,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       exactAssetSelection,
       forceFreshExactSession,
       exactRecoveryTransportMode = 'stream-preferred',
-      registeredPublicEvidence,
       authenticationTimeoutMs = fetchTimeoutMs,
       operationFetchDeadline,
       operationDeadline,
@@ -6166,63 +6180,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
     };
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
-    // The CG name commitment is immutable for an on-chain slot. Prove a
-    // local/on-chain binding once per durable-sync invocation, then reuse the
-    // successful proof for every KA in that batch. Without this operation-
-    // scoped cache, a large CG performs one RPC name-hash read per KA. Only an
-    // affirmative proof remains cached; false results and read failures are
-    // evicted so a bounded authentication retry performs a fresh chain read.
-    const contextGraphBindingProofs = new Map<string, Promise<boolean>>();
-    const verifyContextGraphBinding = async (
-      localContextGraphId: string,
-      onChainContextGraphId: bigint,
-      signal?: AbortSignal,
-    ): Promise<boolean> => {
-      const onChainId = onChainContextGraphId.toString();
-      const key = `${localContextGraphId}\0${onChainId}`;
-      let proof = contextGraphBindingProofs.get(key);
-      if (!proof) {
-        proof = this.requireLocalCgMatchesOnChainSlot(
-          localContextGraphId,
-          onChainId,
-          ctx,
-          { signal },
-        );
-        contextGraphBindingProofs.set(key, proof);
-      }
-      try {
-        const matches = await proof;
-        if (!matches && contextGraphBindingProofs.get(key) === proof) {
-          contextGraphBindingProofs.delete(key);
-        }
-        return matches;
-      } catch (error) {
-        if (contextGraphBindingProofs.get(key) === proof) {
-          contextGraphBindingProofs.delete(key);
-        }
-        throw error;
-      }
-    };
-    const authority: DurableRecoveryAuthority = options.recoveryAuthority ?? {
-      lifetime: 'exchange',
-      isRegisteredPublic: async (id, signal) => registeredPublicEvidence?.usableFor(id, signal) === true
-        || (await this.resolveRegisteredContextGraphAuthority(id, { authorityReadMode: 'finalized-index-or-live', signal })).kind === 'public',
-      authenticate: (asset, deadline, signal) => authenticateDurableGraphScopedAsset({
-      chain: this.chain,
-      asset,
-      verifyContextGraphBinding,
-      deadline,
-      signal,
-      onRetry: (error, attempt, maxAttempts) => {
-        this.log.warn(
-          ctx,
-          `Retrying graph-scoped durable authentication for ${asset.ual} `
-          + `after transient chain verification failure (${attempt}/${maxAttempts}): `
-          + `${error instanceof Error ? error.message : String(error)}`,
-        );
-      },
-          }),
-    };
+    const verifyContextGraphBinding = memoizeRecoveryBindingProof(
+      (id, onChainId, signal) => this.requireLocalCgMatchesOnChainSlot(id, onChainId, ctx, { signal }),
+    );
+    const authority = options.recoveryAuthority ?? LifecycleSyncMethods.prototype.createRecoveryAuthority.call(this, ctx);
     const contextGraphBudget = createDurableSyncBudget({
       fetchTimeoutMs,
       authenticationTimeoutMs,
@@ -6326,6 +6287,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         : undefined,
       durableMetaContinuation,
       stopOnBackoffWorthyFailure,
+      requireAuthenticatedGraphScopedAssets: authority.lifetime === 'snapshot-job',
       processDurableBatchInWorker: this.processDurableBatchInWorker.bind(this),
       storeInsert: ({ quads, signal: operationSignal }) => {
         return this.insertSyncedQuadsAndInvalidateListCache(quads, {

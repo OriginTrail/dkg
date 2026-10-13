@@ -94,7 +94,7 @@ export function createExactBatchHostFixture(cleanups: Array<() => Promise<void>>
   const run = (exactAssetSelection = selection as typeof selection | ReturnType<typeof createChallengePinnedExactAssetSelection>, exactRecoveryTransportMode: ExactRecoveryTransportMode = 'stream-preferred',
     handedOver: { registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence; operationFetchDeadline?: number; signal?: AbortSignal } = {}) => (
     LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraphDetailed.call(host, ctx, 'fixture-source', CG, 1,
-      { exactAssetSelection, exactRecoveryTransportMode, fetchTimeoutMs: 120_000, authenticationTimeoutMs: 30_000, onAtomicCommitStarted: atomicStarted, ...handedOver })
+      { exactAssetSelection, exactRecoveryTransportMode, fetchTimeoutMs: 120_000, authenticationTimeoutMs: 30_000, onAtomicCommitStarted: atomicStarted, operationFetchDeadline: handedOver.operationFetchDeadline, signal: handedOver.signal, recoveryAuthority: LifecycleSyncMethods.prototype.createRecoveryAuthority.call(host, ctx, handedOver) })
   );
   const frames: ExactBatchFrame[] = items.flatMap((item, assetIndex) => [
     { kind: K.META, assetIndex, sequence: 0, payload: new TextEncoder().encode(item.meta.map(quadToNQuad).join('\n') + '\n') },
