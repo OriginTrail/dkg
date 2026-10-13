@@ -48,7 +48,7 @@ import {
   toArray,
   type PathContext,
 } from './terms.js';
-import { SOURCES, V02_FAMILY_KEYS, familyQuads, familyDiagnostics, parseList, sourceIds, declaresSources } from './families/index.js';
+import { SOURCES, familyQuads, familyDiagnostics, parseList, sourceIds, declaresSources } from './families/index.js';
 import { dateTimeLexical, parseVerified, trustTierOf, conceptStatus } from './trust.js';
 import type {
   OkfDocument,
@@ -155,15 +155,11 @@ export function mapFrontmatter(
         break;
       }
       default: {
-        if (V02_FAMILY_KEYS.has(key)) {
-          const r = familyQuads(iri, key, value, pathCtx);
-          out.push(...r.quads);
-          derived.push(...r.derivedFromConcepts);
-          warnings.push(...r.warnings);
-        } else {
-          // Producer-defined keys — preserved, never dropped (SPEC §4.1/§11).
-          out.push(...genericQuads(iri, key, value));
-        }
+        // A v0.2 family, or a producer-defined key (preserved, never dropped — SPEC §4.1/§11).
+        const r = familyQuads(iri, key, value, pathCtx);
+        out.push(...r.quads);
+        derived.push(...r.derivedFromConcepts);
+        warnings.push(...r.warnings);
       }
     }
   }

@@ -12,6 +12,12 @@
  * Producer-defined keys inside a family are not listed here: anything that is
  * not a field (or a nested family) is an extension, carried under
  * `okf:<familyKey>.<key>` (`../extensions.ts`).
+ *
+ * Every behaviour a family has is a field of its definition (lineage, the
+ * trust tier, allowed values, a type-dependent requirement); no code checks
+ * which definition object it was handed. The definitions are internal to the
+ * package — the public API is the mapping, export, validation and trust
+ * operations built on them.
  */
 
 import {
@@ -41,6 +47,8 @@ import {
   OKF_CLASS_VERIFICATION,
   OKF_CLASS_SOURCE,
   OKF_CLASS_PARAMETER,
+  OKF_ATTESTED_COMPUTATION_TYPE,
+  OKF_STATUS_VALUES,
   GENID_TAGS,
 } from '../constants.js';
 
@@ -77,6 +85,8 @@ export interface FieldSpec {
   readonly skipEntryWhenBlank?: boolean;
   /** The concept also `prov:wasDerivedFrom` this field's resource whenever it has an IRI (§5.1 lineage). */
   readonly derivesLineage?: boolean;
+  /** The only values the spec defines; any other is kept verbatim and reported (`status`, §5.4). */
+  readonly allowedValues?: readonly string[];
 }
 
 interface FamilyBase {
@@ -84,6 +94,8 @@ interface FamilyBase {
   readonly key: string;
   /** SPEC section cited by diagnostics. */
   readonly section: string;
+  /** The family is required on concepts of this `type`, and its absence is reported with `note` (`runtime`, §10.2). */
+  readonly requiredForType?: { readonly type: string; readonly note: string };
 }
 
 /** One value flat on the concept: `status`, `stale_after`, `runtime`, `computation`. */
@@ -124,6 +136,8 @@ export interface ListFamilySpec extends FamilyBase {
   readonly shapeNote: string;
   /** Diagnostic wording for an entry that is not a mapping (it is skipped). */
   readonly entryNote: string;
+  /** The concept materialises the §5.3 trust tier derived from these entries (`verified`). */
+  readonly derivesTrustTier?: boolean;
 }
 
 export type FamilySpec = ScalarFamilySpec | MappingFamilySpec | ListFamilySpec;
@@ -150,6 +164,7 @@ export const VERIFIED: ListFamilySpec = {
   tag: GENID_TAGS.verification,
   shapeNote: 'must be a `{ by, at }` mapping or a list of them (§5.2); preserved verbatim',
   entryNote: 'is not a `{ by, at }` mapping (§5.2); skipped',
+  derivesTrustTier: true,
   fields: [
     {
       key: 'by',
@@ -166,7 +181,7 @@ export const STATUS: ScalarFamilySpec = {
   key: 'status',
   section: '§5.4',
   shape: 'scalar',
-  field: { key: 'status', predicate: OKF_STATUS, kind: 'token' },
+  field: { key: 'status', predicate: OKF_STATUS, kind: 'token', allowedValues: OKF_STATUS_VALUES },
 };
 
 export const STALE_AFTER: ScalarFamilySpec = {
@@ -212,6 +227,7 @@ export const RUNTIME: ScalarFamilySpec = {
   key: 'runtime',
   section: '§10.2',
   shape: 'scalar',
+  requiredForType: { type: OKF_ATTESTED_COMPUTATION_TYPE, note: 'is required for an `Attested Computation` concept (§10.2)' },
   field: { key: 'runtime', predicate: OKF_RUNTIME, kind: 'token' },
 };
 

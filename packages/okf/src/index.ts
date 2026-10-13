@@ -49,39 +49,10 @@ export {
 export { parseDocument, OkfDocumentError } from './document.js';
 export { frontmatterQuads, mapFrontmatter, parseBody, mapConcept, summarizeTrust } from './mapping.js';
 export type { FrontmatterContext, FrontmatterMapping } from './mapping.js';
-export {
-  familyQuads,
-  encodeFamily,
-  decodeFamilies,
-  familyDiagnostics,
-  sourceIds,
-  parseList,
-  FAMILY_SPECS,
-  FAMILY_BY_KEY,
-  V02_FAMILY_KEYS,
-  GENERATED,
-  VERIFIED,
-  STATUS,
-  STALE_AFTER,
-  SOURCES,
-  USAGE_WINDOW,
-  RUNTIME,
-  PARAMETERS,
-  COMPUTATION,
-  EXECUTOR,
-  ATTESTER,
-} from './families/index.js';
-export type {
-  FamilyResult,
-  FamilySpec,
-  FieldSpec,
-  FieldKind,
-  ScalarFamilySpec,
-  MappingFamilySpec,
-  ListFamilySpec,
-  ParsedEntry,
-  ParsedList,
-} from './families/index.js';
+// The v0.2 family definitions and codec (`./families/`) are internal; these
+// are the operations built on them.
+export { familyQuads, familyDiagnostics, sourceIds, V02_FAMILY_KEYS } from './families/index.js';
+export type { FamilyResult, ParsedEntry } from './families/index.js';
 export {
   dateTimeLexical,
   isXsdDateTime,

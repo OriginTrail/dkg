@@ -71,9 +71,14 @@ date, integer, boolean, path, text-list), and its diagnostic wording. The
 encoder (`families/encode.ts`), the decoder (`families/decode.ts`), the shape
 diagnostics (`families/diagnostics.ts`) and the verification parser
 (`parseVerified`) all read it, so adding or changing a field is one edit.
-Field order is also the key order export writes. The two operations that are
-not field mappings stay explicit in the encoder: a `derivesLineage` field adds
-`prov:wasDerivedFrom`, and `verified` materialises the trust tier.
+Field order is also the key order export writes. Every behaviour is a field of
+the definition — `derivesLineage` (adds `prov:wasDerivedFrom`),
+`derivesTrustTier` (`verified` materialises the tier), `allowedValues`
+(`status`) and `requiredForType` (`runtime` on an Attested Computation) — so no
+code depends on which definition object it is handed. The definitions are
+internal: the package exports the operations built on them (`familyQuads`,
+`familyDiagnostics`, `parseVerified`, `exportInputFromQuads`, …), not the
+descriptors.
 
 **Parsed list** (`parseList`):
 The single classification of a list family's entries — which are mappings,

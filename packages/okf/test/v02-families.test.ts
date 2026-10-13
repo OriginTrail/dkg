@@ -53,12 +53,11 @@ import {
   isSafeIri,
   exportInputFromQuads,
   familyQuads,
-  decodeFamilies,
-  FAMILY_SPECS,
-  FAMILY_BY_KEY,
   V02_FAMILY_KEYS,
   DKG_HAS_SECTION,
 } from '../src/index.js';
+import * as okfPublic from '../src/index.js';
+import { decodeFamilies, encodeFamily, FAMILY_SPECS, FAMILY_BY_KEY, VERIFIED } from '../src/families/index.js';
 import type { BundleFile, Quad } from '../src/index.js';
 import { loadBundleDir } from '../src/index.js';
 import { fileURLToPath } from 'node:url';
@@ -871,6 +870,26 @@ describe('rdf:type export', () => {
     const exported = exportBundle(imported);
     const typesOf = (r: typeof imported) => r.quads.filter((q) => q.predicate === RDF_TYPE).map((q) => `${q.subject} ${q.object}`).sort();
     expect(typesOf(importBundle(exported))).toEqual(typesOf(imported));
+  });
+});
+
+describe('family definitions are internal and carry their behaviour as data', () => {
+  it('keeps the definitions and codec out of the public API', () => {
+    for (const name of ['FAMILY_SPECS', 'FAMILY_BY_KEY', 'VERIFIED', 'SOURCES', 'encodeFamily', 'decodeFamilies', 'parseList']) {
+      expect(Object.prototype.hasOwnProperty.call(okfPublic, name)).toBe(false);
+    }
+    for (const name of ['familyQuads', 'familyDiagnostics', 'parseVerified', 'exportInputFromQuads', 'V02_FAMILY_KEYS']) {
+      expect(Object.prototype.hasOwnProperty.call(okfPublic, name)).toBe(true);
+    }
+  });
+
+  it('does not depend on which definition object it is handed', () => {
+    const ctx = { conceptId: 'm', iriBase: 'urn:okf:', conceptExists: () => false };
+    const value = [{ by: 'human:a', at: '2026-06-25T09:00:00Z' }];
+    const canonical = encodeFamily('urn:okf:m', VERIFIED, value, ctx);
+    const copy = encodeFamily('urn:okf:m', { ...VERIFIED }, value, ctx);
+    expect(quadsToNQuads(copy.quads)).toBe(quadsToNQuads(canonical.quads));
+    expect(copy.quads.some((q) => q.predicate === OKF_TRUST_TIER)).toBe(true);
   });
 });
 

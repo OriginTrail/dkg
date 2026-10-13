@@ -40,8 +40,13 @@ export function typeToIri(value: unknown): string | null {
  * round trip.
  */
 export function isAttestedComputationType(value: unknown): boolean {
+  return isConceptType(value, OKF_ATTESTED_COMPUTATION_TYPE);
+}
+
+/** True when a `type` value names `typeName`, in its spec spelling or the PascalCased form its rdf:type IRI carries. */
+export function isConceptType(value: unknown, typeName: string): boolean {
   if (value === undefined || value === null) return false;
-  return pascalCase(String(value)) === pascalCase(OKF_ATTESTED_COMPUTATION_TYPE);
+  return pascalCase(String(value)) === pascalCase(typeName);
 }
 
 /**

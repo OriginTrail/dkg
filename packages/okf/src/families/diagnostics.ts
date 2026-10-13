@@ -4,23 +4,21 @@
  * consumer MUST NOT reject for any of them (§11), so every finding is a
  * warning. Shared by `validateBundle` and the mapper so the two never disagree.
  *
- * Generic rules: a family of the wrong shape (`shapeNote`), a list entry that
- * is not a mapping (`entryNote`), a blank required field (`requiredNote`), an
- * invalid date, a non-integer integer. Two rules are specific and stay
- * explicit: `status` must be a §5.4 value, and an Attested Computation needs a
- * `runtime` (§10.2).
+ * Every rule is read from the definitions: a family of the wrong shape
+ * (`shapeNote`), a list entry that is not a mapping (`entryNote`), a blank
+ * required field (`requiredNote`), a value outside `allowedValues` (`status`,
+ * §5.4), a family missing on a concept of its `requiredForType` (`runtime` on
+ * an Attested Computation, §10.2), an invalid date, a non-integer integer.
  */
 
-import { dateTimeLexical, hasExplicitOffset, isKnownStatus, isXsdDateTime } from '../trust.js';
-import { isAttestedComputationType } from '../terms.js';
+import { dateTimeLexical, hasExplicitOffset, isXsdDateTime } from '../trust.js';
+import { isConceptType } from '../terms.js';
 import { isBlank, isMapping } from '../utils.js';
 import type { OkfWarning } from '../types.js';
 import { parseList } from './parse.js';
 import {
   FAMILY_SPECS,
-  RUNTIME,
   SOURCES,
-  STATUS,
   type FamilySpec,
   type FieldSpec,
   type ListFamilySpec,
@@ -55,6 +53,12 @@ function fieldLabel(spec: FamilySpec, label: string, field: FieldSpec): string {
 function checkField(spec: FamilySpec, field: FieldSpec, value: unknown, label: string, out: Diagnostic[]): void {
   if (value === undefined || value === null) return;
   const name = fieldLabel(spec, label, field);
+  if (field.allowedValues) {
+    const s = String(value).trim();
+    if (!field.allowedValues.includes(s)) {
+      out.push({ code: 'malformed-family', message: `${name} "${s}" is not one of ${field.allowedValues.join(' | ')} (${spec.section}); kept verbatim` });
+    }
+  }
   if (field.kind === 'date') checkDateTime(name, value, out);
   else if (field.kind === 'integer' && !(typeof value === 'number' && Number.isInteger(value))) {
     out.push({ code: 'malformed-family', message: `${name} should be an integer (${spec.section})` });
@@ -84,16 +88,9 @@ function checkEntry(
 
 function checkFamily(spec: FamilySpec, value: unknown, label: string, out: Diagnostic[]): void {
   switch (spec.shape) {
-    case 'scalar': {
-      if (spec === STATUS) {
-        const s = String(value).trim();
-        if (!isKnownStatus(s)) {
-          out.push({ code: 'malformed-family', message: `\`status\` "${s}" is not one of draft | stable | deprecated (§5.4); kept verbatim` });
-        }
-      }
+    case 'scalar':
       checkField(spec, spec.field, value, label, out);
       break;
-    }
     case 'mapping':
       if (!isMapping(value)) out.push({ code: 'malformed-family', message: `\`${label}\` ${spec.shapeNote}` });
       else checkEntry(spec, value, label, out);
@@ -121,8 +118,9 @@ function checkFamily(spec: FamilySpec, value: unknown, label: string, out: Diagn
 export function familyDiagnostics(frontmatter: Record<string, unknown>): Diagnostic[] {
   const out: Diagnostic[] = [];
   for (const spec of FAMILY_SPECS) {
-    if (spec === RUNTIME && isAttestedComputationType(frontmatter.type) && isBlank(frontmatter.runtime)) {
-      out.push({ code: 'malformed-family', message: '`runtime` is required for an `Attested Computation` concept (§10.2)' });
+    const requirement = spec.requiredForType;
+    if (requirement && isConceptType(frontmatter.type, requirement.type) && isBlank(frontmatter[spec.key])) {
+      out.push({ code: 'malformed-family', message: `\`${spec.key}\` ${requirement.note}` });
     }
     const value = frontmatter[spec.key];
     if (value !== undefined && value !== null) checkFamily(spec, value, spec.key, out);

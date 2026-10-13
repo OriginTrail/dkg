@@ -14,7 +14,7 @@
  *
  * Two operations are not field mappings and stay explicit here: a
  * `derivesLineage` path field adds `prov:wasDerivedFrom` on the concept (§5.1),
- * and `verified` materialises the derived §5.3 trust tier.
+ * and a `derivesTrustTier` list (`verified`) materialises the §5.3 tier.
  */
 
 import {
@@ -32,7 +32,6 @@ import { isBlank, isMapping, literalTerm, sanitizeForBlank, typedLiteralTerm } f
 import type { OkfWarning, Quad } from '../types.js';
 import { parseList } from './parse.js';
 import {
-  VERIFIED,
   definedKeys,
   type FamilySpec,
   type FieldSpec,
@@ -160,7 +159,7 @@ function encodeList(enc: Encoding, spec: ListFamilySpec, value: unknown): void {
     encodeFields(enc, spec, node, entry.mapping, `${spec.key}[${entry.index}]`);
   }
   // §5.3: the trust tier is derived from the same parse and materialised once a verifier exists.
-  if (spec === VERIFIED && nodes > 0) {
+  if (spec.derivesTrustTier && nodes > 0) {
     enc.result.quads.push({ subject: enc.iri, predicate: OKF_TRUST_TIER, object: literalTerm(deriveTrustTier(value)) });
   }
 }
