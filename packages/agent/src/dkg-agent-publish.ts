@@ -250,6 +250,7 @@ import {
   classifySwmFanoutPeerOutcome,
   type SelectSwmFanoutPeersResult,
 } from './swm/swm-fanout-peer-selection.js';
+import type { WorkspaceShareScope } from './swm/shared-memory-followers.js';
 import { SwmHostModeStore, type SwmHostModeStoreLimits } from './swm/host-mode-store.js';
 import {
   BEACON_ACCESS_POLICY_CURATED,
@@ -893,6 +894,7 @@ export class PublishMethods extends DKGAgentBase {
     ctx: OperationContext,
     resolvedSigner?: (AgentKeyRecord & { privateKey: string }) | null,
     shareOperationId?: string,
+    shareScope?: WorkspaceShareScope,
   ): Promise<void>;
 
   /**
@@ -906,6 +908,7 @@ export class PublishMethods extends DKGAgentBase {
     ctx: OperationContext,
     resolvedSigner?: (AgentKeyRecord & { privateKey: string }) | null,
     shareOperationId?: string,
+    shareScope?: WorkspaceShareScope,
   ): Promise<void>;
 
   async publishWorkspaceGossip(this: DKGAgent,
@@ -929,6 +932,12 @@ export class PublishMethods extends DKGAgentBase {
      * from quorum tracking too.
      */
     shareOperationId?: string,
+    /**
+     * Where the share goes: the graph's root (`subGraphName: null`) or a
+     * named sub-graph. Decides only whether the graph's followers are sent
+     * to; a caller that leaves it out sends to them.
+     */
+    shareScope?: WorkspaceShareScope,
   ): Promise<void> {
     const payload = normalizeWorkspaceGossipPublishInput(payloadOrMessage);
     const message = payload.message;
@@ -1057,6 +1066,27 @@ export class PublishMethods extends DKGAgentBase {
       }
     }
 
+    // Followers of a public graph: peers that asked this node for the graph's
+    // shared memory and are not topic subscribers, which is what a peer
+    // reached only through a relay is (GossipSub does not run there). A direct
+    // send is their only path, so they are sent to outside the selection
+    // above (its probe limit and its memory of refusals assume that gossip
+    // delivers as well) and outside the cap that turns a large public graph
+    // gossip-only. One share is not sent to them: a share into a root that
+    // the catalog owns. The receiver refuses it and takes the content from
+    // the author's catalog, so sending it would only spend the relay's bytes.
+    const directFollowers = shareScope?.subGraphName === null
+      && !this.rfc64LegacySwmApplyAllowedForScope(contextGraphId, null)
+      ? []
+      : (plan.directFollowers ?? []);
+    const followerPeers = new Set(directFollowers);
+    const sendMembers = directFollowers.length === 0
+      ? substrateMembers
+      : [...new Set([...substrateMembers, ...directFollowers])];
+    const ackMembers = directFollowers.length === 0
+      ? plan.substrateMembers
+      : [...new Set([...plan.substrateMembers, ...directFollowers])];
+
     // rc.9 PR-D codex follow-up #D5 (rebased onto PR-G's G2
     // detach): register the SwmAckQuorum tracker BEFORE
     // substrate + gossip fire so a fast receiver's
@@ -1135,14 +1165,14 @@ export class PublishMethods extends DKGAgentBase {
     // retryable sentinel had no second delivery attempt because no gossip ACK
     // could ever arrive.
     const ackQuorumActive = !!shareOperationId
-      && plan.substrateMembers.length > 0;
+      && ackMembers.length > 0;
     let trackedQuorum: SwmAckQuorum | null = null;
     if (ackQuorumActive && shareOperationId) {
       trackedQuorum = this.getOrCreateSwmAckQuorum();
       trackedQuorum.track({
         shareOperationId,
         cgId: contextGraphId,
-        expectedMembers: plan.substrateMembers,
+        expectedMembers: ackMembers,
         preAckedFromSubstrate: [],
         payload: wireMessage,
         enumerationSource: plan.enumerationSource,
@@ -1159,7 +1189,7 @@ export class PublishMethods extends DKGAgentBase {
     //   2. (PR-D #D5) Feed substrate-`delivered` peers into
     //      the quorum via onAck so they count toward the same
     //      quorum target as gossip-side acks.
-    if (plan.useSubstrate && substrateMembers.length > 0) {
+    if ((plan.useSubstrate || directFollowers.length > 0) && sendMembers.length > 0) {
       const baseBookkeeper = this.substrateFanoutBookkeeper();
       // PR-J: capture per-peer outcomes for the optional detail
       // line emitted when anything queues/fails/is rejected. Lets
@@ -1172,7 +1202,7 @@ export class PublishMethods extends DKGAgentBase {
             contextGraphId,
             protocolId: PROTOCOL_SWM_UPDATE,
             payload: wireMessage,
-            members: substrateMembers,
+            members: sendMembers,
             sendTimeoutMs: DKGAgentBase.SWM_SUBSTRATE_FANOUT_TIMEOUT_MS,
             substrate: this.messenger,
             bookkeeper: {
@@ -1201,6 +1231,7 @@ export class PublishMethods extends DKGAgentBase {
                 // (swmSubstrateTopUp) keeps feeding its own outcomes.
                 if (
                   plan.enumerationSource === 'topic-subscribers'
+                  && !followerPeers.has(record.peerId)
                   && classifySwmFanoutPeerOutcome(record) !== 'nonTerminal'
                 ) {
                   this.recordSwmFanoutPeerRecord(contextGraphId, record);
@@ -1225,13 +1256,14 @@ export class PublishMethods extends DKGAgentBase {
             ctx,
             `SWM substrate fan-out cgId=${contextGraphId} source=${plan.enumerationSource} `
             + `enumerated=${plan.enumeratedCount} `
-            + `selected=${substrateMembers.length} `
+            + `selected=${sendMembers.length} `
             + `attempted=${substrateResult.attempted} `
             + `delivered=${substrateResult.delivered} rejected=${substrateResult.rejected} `
             + `retryable=${substrateResult.retryable} `
             + `queued=${substrateResult.queued} `
             + `inFlight=${substrateResult.inFlight} failed=${substrateResult.failed} `
-            + `also_gossiped=${plan.useGossip}`,
+            + `also_gossiped=${plan.useGossip}`
+            + (directFollowers.length > 0 ? ` followers=${directFollowers.length}` : ''),
           );
           // PR-J per-peer detail. Logged at WARN so it surfaces in
           // operator dashboards that filter by level (the aggregate
@@ -1638,6 +1670,7 @@ export class PublishMethods extends DKGAgentBase {
         ctx,
         gossipSigner,
         promoted.shareOperationId,
+        { subGraphName: opts?.subGraphName ?? null },
       );
     }
     try {
@@ -2398,6 +2431,7 @@ export class PublishMethods extends DKGAgentBase {
         ctx,
         gossipSigner,
         shareOperationId,
+        { subGraphName: opts?.subGraphName ?? null },
       );
     }
     return { shareOperationId };
@@ -2530,6 +2564,7 @@ export class PublishMethods extends DKGAgentBase {
         ctx,
         gossipSigner,
         shareOperationId,
+        { subGraphName: opts?.subGraphName ?? null },
       );
     }
     return { shareOperationId };

@@ -67,7 +67,7 @@ import { takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm
  * A build that delivers while this still says `false` fails as well, on
  * purpose, with a message that points at this line.
  */
-const SUB_GRAPH_SHARES_CROSS_THE_RELAY = false;
+const SUB_GRAPH_SHARES_CROSS_THE_RELAY = true;
 
 /**
  * A share that crosses the relay is pushed to the peer, so it is there in

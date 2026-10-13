@@ -3321,9 +3321,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       peerId: this.peerId,
       parseSyncRequest: this.parseSyncRequest.bind(this),
       authorizeSyncRequest: this.authorizeSyncRequest.bind(this),
-      // A new follower changes who a share into the graph goes to: drop the cached recipient set.
+      // The peer follows the graph: a share into it goes to this peer too (read at the share, no cache).
       onSharedMemoryRequestAuthorized: (contextGraphId, remotePeerId) => {
-        if (sharedMemoryFollowersOf(this).note(contextGraphId, remotePeerId)) this.cgMemberEnumerator?.invalidate(contextGraphId);
+        sharedMemoryFollowersOf(this).note(contextGraphId, remotePeerId);
       },
       onExperimentalExactBatchResources: resolveExactBatchStreamEnabled()
         && this.config.nodeRole === 'core'

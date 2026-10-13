@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { PROTOCOL_SWM_UPDATE, type OperationContext } from '@origintrail-official/dkg-core';
+import { PROTOCOL_SWM_UPDATE, createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
+import { DKGAgent } from '../src/index.js';
 import { SwmSubstrateMethods } from '../src/dkg-agent-swm-substrate.js';
 import {
   createCGMemberEnumerator,
@@ -16,6 +18,7 @@ import {
   SharedMemoryFollowers,
   sharedMemoryFollowersOf,
 } from '../src/swm/shared-memory-followers.js';
+import { FANOUT_RESPONSE_REJECTED, chooseFanOutTier } from '../src/swm/substrate-fanout.js';
 import { registerSyncHandler } from '../src/sync/responder/sync-handler.js';
 import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 
@@ -29,6 +32,7 @@ import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 const SELF = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
 const PEER_A = '12D3KooWRdP3mMN9KkQCWKFjFxhgpXp8Q2y8zQZkgRYfGQ4bQh3a';
 const PEER_B = '12D3KooWFHUALUrdSfrVHSxtCRCJC9xvxS7nYfM6T1sbYVak9HTu';
+const PEER_C = '12D3KooWGRUVh6uXvRkYt8oYp9VvrxgZvKk3eYcZ6oZ3mGJ8sQwT';
 const GRAPH = 'test-cg/shares-through-relay';
 
 /** What a Core node grants for one circuit today. */
@@ -96,12 +100,12 @@ describe('SharedMemoryFollowers', () => {
     return { clock, followers: new SharedMemoryFollowers({ ...options, now: () => clock.now }) };
   }
 
-  it('lists a peer after its request and reports it as new once', () => {
+  it('lists a peer after its request, once, and only for that graph', () => {
     const { followers } = withClock();
     expect(followers.followers(GRAPH)).toEqual([]);
-    expect(followers.note(GRAPH, PEER_A)).toBe(true);
-    expect(followers.note(GRAPH, PEER_A)).toBe(false);
-    expect(followers.note(GRAPH, PEER_B)).toBe(true);
+    followers.note(GRAPH, PEER_A);
+    followers.note(GRAPH, PEER_A);
+    followers.note(GRAPH, PEER_B);
     expect(followers.followers(GRAPH).sort()).toEqual([PEER_A, PEER_B].sort());
     expect(followers.followers('another-graph')).toEqual([]);
   });
@@ -114,8 +118,9 @@ describe('SharedMemoryFollowers', () => {
     followers.note(GRAPH, PEER_B);
     clock.now += 2;
     expect(followers.followers(GRAPH)).toEqual([PEER_B]);
-    // The silent peer is new again when it comes back.
-    expect(followers.note(GRAPH, PEER_A)).toBe(true);
+    // The silent peer is a follower again when it comes back.
+    followers.note(GRAPH, PEER_A);
+    expect(followers.followers(GRAPH).sort()).toEqual([PEER_A, PEER_B].sort());
   });
 
   it('forgets a graph whose followers have all gone silent', () => {
@@ -175,43 +180,99 @@ describe('recipients of a share into a public graph', () => {
     };
   }
 
-  it('include a follower that GossipSub does not report', async () => {
+  it('keep a follower that GossipSub does not report apart from the subscribers', async () => {
     const enumerator = createCGMemberEnumerator(makeDeps({
       getTopicSubscribers: () => [PEER_A],
       getSharedMemoryFollowers: () => [PEER_B],
     }));
     const result = await enumerator.enumerate(GRAPH);
     expect(result.source).toBe('topic-subscribers');
-    expect([...result.members].sort()).toEqual([PEER_A, PEER_B].sort());
+    expect(result.members).toEqual([PEER_A]);
+    expect(result.directFollowers).toEqual([PEER_B]);
   });
 
-  it('are the followers alone when no peer is subscribed over GossipSub', async () => {
+  it('have the followers of a public graph that has no subscriber at all', async () => {
     const enumerator = createCGMemberEnumerator(makeDeps({
       getSharedMemoryFollowers: (cgId) => (cgId === GRAPH ? [PEER_B] : []),
     }));
     const result = await enumerator.enumerate(GRAPH);
-    expect(result.source).toBe('topic-subscribers');
-    expect(result.members).toEqual([PEER_B]);
-    expect((await enumerator.enumerate('graph-without-followers')).source).toBe('none');
+    expect(result).toEqual({ source: 'none', members: [], directFollowers: [PEER_B] });
+    expect(await enumerator.enumerate('graph-without-followers')).toEqual({ source: 'none', members: [] });
   });
 
-  it('list a peer once when it is both a subscriber and a follower, and never this node', async () => {
+  it('do not list a subscriber or this node among the followers', async () => {
     const enumerator = createCGMemberEnumerator(makeDeps({
       getTopicSubscribers: () => [PEER_A, SELF],
-      getSharedMemoryFollowers: () => [PEER_A, SELF, PEER_B],
+      getSharedMemoryFollowers: () => [PEER_A, SELF, PEER_B, PEER_B],
     }));
     const result = await enumerator.enumerate(GRAPH);
-    expect([...result.members].sort()).toEqual([PEER_A, PEER_B].sort());
+    expect(result.members).toEqual([PEER_A]);
+    expect(result.directFollowers).toEqual([PEER_B]);
   });
 
-  it('send directly only to the followers the node can reach', async () => {
+  it('have only the followers the node can reach', async () => {
     const enumerator = createCGMemberEnumerator(makeDeps({
+      getTopicSubscribers: () => [PEER_C],
       getSharedMemoryFollowers: () => [PEER_A, PEER_B],
-      isPeerDialable: (peerId) => peerId === PEER_B,
+      isPeerDialable: (peerId) => {
+        if (peerId === PEER_A) throw new Error('peer store lookup failed');
+        return peerId === PEER_B;
+      },
     }));
     const result = await enumerator.enumerate(GRAPH);
-    expect([...result.members].sort()).toEqual([PEER_A, PEER_B].sort());
-    expect(result.source === 'topic-subscribers' ? result.substrateEligibleMembers : undefined).toEqual([PEER_B]);
+    expect(result.members).toEqual([PEER_C]);
+    expect(result.source === 'topic-subscribers' ? result.substrateEligibleMembers : undefined).toEqual([]);
+    expect(result.directFollowers).toEqual([PEER_B]);
+  });
+
+  it('carry no followers field when none can be reached', async () => {
+    const enumerator = createCGMemberEnumerator(makeDeps({
+      getTopicSubscribers: () => [PEER_C],
+      getSharedMemoryFollowers: () => [PEER_A],
+      isPeerDialable: (peerId) => peerId === PEER_C,
+    }));
+    expect(await enumerator.enumerate(GRAPH)).toEqual({
+      source: 'topic-subscribers',
+      members: [PEER_C],
+      substrateEligibleMembers: [PEER_C],
+    });
+  });
+
+  // The subscriber snapshot is cached for a minute. A follower is not: the
+  // peer that asked a moment ago is a recipient of the very next share.
+  it('include a new follower at once, while the subscriber snapshot is still cached', async () => {
+    const followers = new SharedMemoryFollowers();
+    let subscriberReads = 0;
+    const enumerator = createCGMemberEnumerator(makeDeps({
+      getTopicSubscribers: () => {
+        subscriberReads += 1;
+        return [PEER_A];
+      },
+      getSharedMemoryFollowers: (cgId) => followers.followers(cgId),
+      now: () => 5_000,
+    }));
+    expect((await enumerator.enumerate(GRAPH)).directFollowers).toBeUndefined();
+    followers.note(GRAPH, PEER_B);
+    const next = await enumerator.enumerate(GRAPH);
+    expect(next.members).toEqual([PEER_A]);
+    expect(next.directFollowers).toEqual([PEER_B]);
+    expect(subscriberReads).toBe(1);
+  });
+
+  it('join a resolution that is in flight and still read the followers of that moment', async () => {
+    const followers = new SharedMemoryFollowers();
+    let release: (peers: string[] | null) => void = () => {};
+    const enumerator = createCGMemberEnumerator(makeDeps({
+      getContextGraphAllowedPeers: () => new Promise((resolve) => { release = resolve; }),
+      getTopicSubscribers: () => [PEER_A],
+      getSharedMemoryFollowers: (cgId) => followers.followers(cgId),
+    }));
+    const first = enumerator.enumerate(GRAPH);
+    const second = enumerator.enumerate(GRAPH);
+    followers.note(GRAPH, PEER_B);
+    release(null);
+    expect((await first).directFollowers).toEqual([PEER_B]);
+    expect((await second).directFollowers).toEqual([PEER_B]);
   });
 
   it('are the roster alone for a private graph and the allowlist alone for an allowlisted one', async () => {
@@ -229,8 +290,175 @@ describe('recipients of a share into a public graph', () => {
       isPrivateContextGraph: async () => true,
       getSharedMemoryFollowers,
     }));
-    expect((await privateGraph.enumerate(GRAPH)).members).toEqual([]);
+    expect(await privateGraph.enumerate(GRAPH)).toEqual({ source: 'none', members: [] });
     expect(asked).toBe(0);
+  });
+});
+
+describe('the fan-out plan for a public graph with followers', () => {
+  it.each([
+    ['few subscribers', [PEER_A], 100, true],
+    ['more subscribers than the cap, where the subscribers get gossip only', [PEER_A, PEER_C], 1, false],
+  ] as const)('keeps the followers with %s', (_name, members, cap, useSubstrate) => {
+    const plan = chooseFanOutTier({
+      enumeration: { source: 'topic-subscribers', members, directFollowers: [PEER_B] },
+      maxSubstrateMembers: cap,
+    });
+    expect(plan.useSubstrate).toBe(useSubstrate);
+    expect(plan.substrateMembers).toEqual(useSubstrate ? members : []);
+    expect(plan.directFollowers).toEqual([PEER_B]);
+  });
+
+  it('keeps the followers of a graph without subscribers', () => {
+    const plan = chooseFanOutTier({
+      enumeration: { source: 'none', members: [], directFollowers: [PEER_B] },
+      maxSubstrateMembers: 100,
+    });
+    expect(plan).toMatchObject({ useSubstrate: false, useGossip: true, substrateMembers: [], directFollowers: [PEER_B] });
+  });
+
+  it('has no followers field without followers, and none for an allowlisted graph', () => {
+    expect(chooseFanOutTier({
+      enumeration: { source: 'topic-subscribers', members: [PEER_A] },
+      maxSubstrateMembers: 100,
+    })).not.toHaveProperty('directFollowers');
+    expect(chooseFanOutTier({
+      enumeration: { source: 'topic-subscribers', members: [PEER_A], directFollowers: [] },
+      maxSubstrateMembers: 100,
+    })).not.toHaveProperty('directFollowers');
+    expect(chooseFanOutTier({
+      enumeration: { source: 'allowlist', isPrivate: false, members: [PEER_A], directFollowers: [PEER_B] },
+      maxSubstrateMembers: 100,
+    })).not.toHaveProperty('directFollowers');
+  });
+});
+
+describe('a share into a public graph that has followers', () => {
+  const SHARE_PROTOCOL = '/dkg/10.0.1/swm-update';
+  const DELIVERED = { delivered: true as const, response: new Uint8Array(), attempts: 1, messageId: 'm' };
+  /** The receiver's answer for a share it will never apply. */
+  const REFUSED = { delivered: true as const, response: FANOUT_RESPONSE_REJECTED, attempts: 1, messageId: 'm' };
+
+  async function agentWith(options: {
+    subscribers: string[];
+    followers: string[];
+    answer?: (peerId: string) => typeof DELIVERED | typeof REFUSED;
+  }) {
+    const agent = await DKGAgent.create({
+      name: `shares-through-relay-${Math.random().toString(36).slice(2)}`,
+      chainAdapter: new MockChainAdapter(),
+    });
+    const host = agent as unknown as {
+      node: object;
+      gossip: unknown;
+      messenger: unknown;
+      isPeerDialable: (peerId: string) => Promise<boolean>;
+      swmSubstrateMaxMembers: number;
+      rfc64LegacySwmApplyAllowedForScope: (contextGraphId: string, subGraphName: string | null) => boolean;
+    };
+    Object.defineProperty(host.node, 'peerId', { value: SELF, configurable: true });
+    host.gossip = {
+      subscribe() {},
+      unsubscribe() {},
+      onMessage() {},
+      async publish() {},
+      getSubscribers: () => [...options.subscribers],
+    };
+    host.isPeerDialable = async () => true;
+    const sent: string[] = [];
+    host.messenger = {
+      sendReliable: async (peerId: string, protocolId: string) => {
+        expect(protocolId).toBe(SHARE_PROTOCOL);
+        sent.push(peerId);
+        return (options.answer ?? (() => DELIVERED))(peerId);
+      },
+    };
+    for (const peerId of options.followers) sharedMemoryFollowersOf(agent).note(GRAPH, peerId);
+    let shares = 0;
+    const share = async (subGraphName: string | null | undefined): Promise<string[]> => {
+      sent.length = 0;
+      shares += 1;
+      await agent.publishWorkspaceGossip(
+        GRAPH,
+        new Uint8Array([1, 2, 3, shares]),
+        createOperationContext('share'),
+        null,
+        `share-${shares}`,
+        subGraphName === undefined ? undefined : { subGraphName },
+      );
+      await agent.awaitInFlightSubstrateFanOuts();
+      return [...sent].sort();
+    };
+    return { agent, host, share };
+  }
+
+  it('goes to the follower as well as to the subscriber', async () => {
+    const { share } = await agentWith({ subscribers: [PEER_A], followers: [PEER_B] });
+    expect(await share('reports')).toEqual([PEER_A, PEER_B].sort());
+  });
+
+  it('goes to the follower when there is no subscriber', async () => {
+    const { share } = await agentWith({ subscribers: [], followers: [PEER_B] });
+    expect(await share('reports')).toEqual([PEER_B]);
+  });
+
+  it('goes to a peer once when it is a subscriber and a follower', async () => {
+    const { share } = await agentWith({ subscribers: [PEER_A], followers: [PEER_A] });
+    expect(await share('reports')).toEqual([PEER_A]);
+  });
+
+  it('goes to the follower when the graph has more subscribers than direct sends allow', async () => {
+    const { host, share } = await agentWith({ subscribers: [PEER_A, PEER_C], followers: [PEER_B] });
+    host.swmSubstrateMaxMembers = 1;
+    // The subscribers get it by gossip alone; the follower has no gossip path.
+    expect(await share('reports')).toEqual([PEER_B]);
+  });
+
+  it('goes to every follower, past the number of unknown subscribers one share probes', async () => {
+    const followers = ['follower-1', 'follower-2', 'follower-3', 'follower-4', 'follower-5'];
+    const { share } = await agentWith({ subscribers: [], followers });
+    expect(await share('reports')).toEqual(followers);
+  });
+
+  it('still goes to a follower that refused the share before', async () => {
+    const { agent, share } = await agentWith({
+      subscribers: [PEER_A],
+      followers: [PEER_B],
+      answer: () => REFUSED,
+    });
+    expect(await share('reports')).toEqual([PEER_A, PEER_B].sort());
+    // The refusal is remembered for the subscriber, which gossip also reaches,
+    // and not for the follower, for which this send is the only path.
+    expect(agent.getSwmFanoutPeerOutcomeForTests(GRAPH, PEER_A)).toBe('failed');
+    expect(agent.getSwmFanoutPeerOutcomeForTests(GRAPH, PEER_B)).toBeUndefined();
+    expect(await share('reports')).toEqual([PEER_B]);
+  });
+
+  describe('into the root', () => {
+    it('does not go to the follower when the catalog owns the root, and the next sub-graph share does', async () => {
+      const { host, share } = await agentWith({ subscribers: [PEER_A], followers: [PEER_B] });
+      const asked: Array<string | null> = [];
+      host.rfc64LegacySwmApplyAllowedForScope = (_contextGraphId, subGraphName) => {
+        asked.push(subGraphName);
+        return subGraphName !== null;
+      };
+      expect(await share(null)).toEqual([PEER_A]);
+      expect(asked).toEqual([null]);
+      expect(await share('reports')).toEqual([PEER_A, PEER_B].sort());
+      expect(asked).toEqual([null]);
+    });
+
+    it('goes to the follower when the root is on the direct lane', async () => {
+      const { host, share } = await agentWith({ subscribers: [], followers: [PEER_B] });
+      host.rfc64LegacySwmApplyAllowedForScope = () => true;
+      expect(await share(null)).toEqual([PEER_B]);
+    });
+
+    it('goes to the follower when the caller does not say where the share goes', async () => {
+      const { host, share } = await agentWith({ subscribers: [], followers: [PEER_B] });
+      host.rfc64LegacySwmApplyAllowedForScope = () => false;
+      expect(await share(undefined)).toEqual([PEER_B]);
+    });
   });
 });
 

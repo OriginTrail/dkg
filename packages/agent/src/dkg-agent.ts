@@ -4105,6 +4105,7 @@ export class DKGAgent extends DKGAgentBase {
               createOperationContext('share'),
               gossipSigner,
               shareOperationId,
+              { subGraphName: opts?.subGraphName ?? null },
             );
           } catch (err: any) {
             agent.log.warn(createOperationContext('share'), `Promote gossip failed (local SWM committed): ${err?.message ?? err}`);
