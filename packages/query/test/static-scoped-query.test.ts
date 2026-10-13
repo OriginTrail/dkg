@@ -36,6 +36,25 @@ describe('static scoped query admission', () => {
     await store.close();
   });
 
+  it.each(['includeSharedMemory', 'includeWorkspace'] as const)('bypasses occupied discovery in the combined %s route', async option => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert([{ subject: 'urn:item', predicate: SCHEMA_NAME, object: '"scoped"', graph: META }]);
+      store.listGraphs = async () => { throw new Error('catalog lane occupied'); };
+      const query = store.query.bind(store);
+      const caller = vi.spyOn(store, 'query').mockImplementation((sparql, options) => {
+        if (!sparql.includes(`<${SCHEMA_NAME}>`)) throw new Error('metadata lane occupied');
+        return query(sparql, options);
+      });
+      const result = await new DKGQueryEngine(store).query(
+        `SELECT ?name WHERE { GRAPH <${META}> { ?s <${SCHEMA_NAME}> ?name } }`,
+        { contextGraphId: CONTEXT_GRAPH, [option]: true },
+      );
+      expect(result.bindings).toEqual([{ name: '"scoped"' }]);
+      expect(caller).toHaveBeenCalledTimes(2);
+    } finally { await store.close(); }
+  });
+
   it.each([
     { graph: `${GRAPH}/_private`, options: {} },
     { graph: META, options: { graphSuffix: '_shared_memory' as const } },
