@@ -1,4 +1,5 @@
 import React from 'react';
+import { Database } from 'lucide-react';
 import { useLayoutStore } from '../../stores/layout.js';
 import { useAgentsStore } from '../../stores/agents.js';
 import { useTabsStore } from '../../stores/tabs.js';
@@ -139,6 +140,15 @@ export function Header() {
 
       <div className="v10-header-actions">
         <NotificationsBell />
+
+        <button
+          className="v10-header-icon-btn"
+          onClick={() => openTab({ id: 'sources', label: 'Sources', closable: true })}
+          title="Sources - JPB order monitoring"
+          aria-label="Sources - JPB order monitoring"
+        >
+          <Database size={15} />
+        </button>
 
         <button
           className="v10-header-icon-btn"

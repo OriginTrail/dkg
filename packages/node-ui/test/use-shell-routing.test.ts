@@ -95,6 +95,13 @@ describe('useShellRouting (BUG-018 + Codex unmapped-tab follow-up)', () => {
   });
 
   describe('Step 1 — deep-link landing opens the matching tab', () => {
+    it('landing on /sources opens the native Sources tab', () => {
+      const ref = { current: '' };
+      mountAtPath('/sources', ref);
+      const { tabs, activeTabId } = useTabsStore.getState();
+      expect(tabs.find((tab) => tab.id === 'sources')?.label).toBe('Sources');
+      expect(activeTabId).toBe('sources');
+    });
     it('landing on /settings opens the Settings tab and makes it active', () => {
       const ref = { current: '' };
       mountAtPath('/settings', ref);
@@ -126,6 +133,15 @@ describe('useShellRouting (BUG-018 + Codex unmapped-tab follow-up)', () => {
   });
 
   describe('Step 2 — URL syncs to the active tab', () => {
+    it('opening Sources updates the URL and opening its graph returns to the native graph tab', async () => {
+      const ref = { current: '' };
+      mountAtPath('/', ref);
+      await act(async () => useTabsStore.getState().openTab({ id: 'sources', label: 'Sources', closable: true }));
+      expect(ref.current).toBe('/sources');
+      await act(async () => useTabsStore.getState().openTab({ id: 'project:fixture-jpb', label: 'JPB snapshot', closable: true }));
+      expect(ref.current).toBe('/');
+      expect(useTabsStore.getState().activeTabId).toBe('project:fixture-jpb');
+    });
     it('opens /settings → user clicks Operations tab → URL navigates to /observability', async () => {
       const ref = { current: '' };
       mountAtPath('/settings', ref);

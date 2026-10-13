@@ -26,6 +26,10 @@ const SettingsView = createRecoverableLazyView(() =>
   import('../../pages/Settings.js').then((m) => m.SettingsPage)
 , 'settings');
 
+const SourcesView = createRecoverableLazyView(() =>
+  import('../../pages/Sources.js').then((m) => m.SourcesPage)
+, 'sources');
+
 const AgentProfilePage = createRecoverableLazyView(() =>
   import('../AgentProfilePage.js').then((m) => m.AgentProfilePage)
 , 'account');
@@ -301,6 +305,8 @@ function ViewContainer() {
   if (activeTabId === 'settings') {
     return <SettingsView />;
   }
+
+  if (activeTabId === 'sources') return <SourcesView />;
 
   if (activeTabId === 'conviction') {
     return <PublishingConvictionView />;

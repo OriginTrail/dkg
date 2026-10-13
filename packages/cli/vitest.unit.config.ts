@@ -55,6 +55,7 @@ export default defineConfig({
           'test/semantic-runtime-remote-execute-adapter.test.ts',
           'test/status-route-rpc.test.ts',
           'test/backpressure-route.test.ts',
+          'test/notifications-route-bounded.test.ts',
       'test/status-route-store-quads.test.ts',
       'test/query-route-lifecycle.test.ts',
       'test/query-catalog-profile-route.test.ts',

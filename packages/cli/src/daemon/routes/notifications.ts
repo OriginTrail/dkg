@@ -12,6 +12,7 @@
 //   POST /api/notifications/read   → mark ids + digestKeys read (caller-scoped)
 
 import { scopeNotifications, type NotificationScopeContext } from '@origintrail-official/dkg-node-ui';
+import { mapWithConcurrency } from '@origintrail-official/dkg-agent';
 import { jsonResponse, readBody, SMALL_BODY_BYTES } from '../http-utils.js';
 import type { RequestContext } from './context.js';
 
@@ -170,15 +171,18 @@ export async function handleNotificationRoutes(ctx: RequestContext): Promise<voi
       // against the node default agent and silently empty the pending set for
       // any non-default curator agent.
       const pendingByGraph = new Map<string, Set<string>>();
-      await Promise.all(
-        [...scope.curatedCgIds].map(async (cgId) => {
+      // Ingestion emits notification events for each assertion. A caller can
+      // curate hundreds of graphs; one feed refresh must not enqueue all of
+      // their store-backed join lookups at once.
+      await mapWithConcurrency(
+        [...scope.curatedCgIds], 4, async (cgId) => {
           try {
             const pending = await agent.listPendingJoinRequests(cgId, callerAddress);
             pendingByGraph.set(cgId, new Set(pending.map((r) => r.agentAddress.toLowerCase())));
           } catch {
             pendingByGraph.set(cgId, new Set());
           }
-        }),
+        },
       );
 
       const scopeCtx: NotificationScopeContext = {

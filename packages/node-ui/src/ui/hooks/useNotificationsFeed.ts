@@ -260,16 +260,29 @@ export function useNotificationsFeed(): UseNotificationsFeed {
   // Track whether we've ever loaded successfully, so a refresh failure keeps
   // the last-known-good payload instead of blanking the pane.
   const hasDataRef = useRef(false);
+  const loadInFlightRef = useRef(false);
+  const loadAgainRef = useRef(false);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; loadAgainRef.current = false; };
+  }, []);
 
-  const load = useCallback(() => {
+  const load = useCallback(function refreshFeed() {
+    if (!mountedRef.current) return;
+    if (loadInFlightRef.current) { loadAgainRef.current = true; return; }
+    loadInFlightRef.current = true;
+    loadAgainRef.current = false;
     api.fetchNotificationsFeed()
       .then((resp) => {
+        if (!mountedRef.current) return;
         hasDataRef.current = true;
         setData(resp);
         setRefreshError(false);
         setStatus(resp.scopeUnknown ? 'identity-pending' : 'ready');
       })
       .catch(() => {
+        if (!mountedRef.current) return;
         // Last-known-good: keep prior rows if we have them. A WARM failure
         // (already have data) keeps status 'ready' — which is what preserves
         // the cached list — and raises `refreshError` so the pane still shows
@@ -281,6 +294,11 @@ export function useNotificationsFeed(): UseNotificationsFeed {
         } else {
           setStatus('error');
         }
+      })
+      .finally(() => {
+        loadInFlightRef.current = false;
+        // Retain one follow-up for events received during this refresh.
+        if (loadAgainRef.current && mountedRef.current) refreshFeed();
       });
   }, []);
 
