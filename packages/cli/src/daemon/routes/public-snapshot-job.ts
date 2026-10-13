@@ -4,19 +4,12 @@ import { readBody, jsonResponse, isPayloadTooLargeError } from "../http-utils.js
 import { randomUUID } from "node:crypto";
 import type {
   DKGAgent,
-  PublicSnapshotSyncOptions,
 } from "@origintrail-official/dkg-agent";
 import type { RequestContext } from "./context.js";
 
 interface Job {
   id: string;
-  request: {
-    contextGraphId: string;
-    onChainId: string;
-    mode: string;
-    transport: string;
-    trustedCorePeerIds: readonly string[];
-  };
+  request: Omit<ReturnType<typeof normalizePublicSnapshotSyncOptions>, 'signal'>;
   state: "running" | "complete" | "failed";
   startedAt: number;
   finishedAt?: number;
@@ -45,7 +38,7 @@ export async function handlePublicSnapshotJob({
     reply(409, { error: "Snapshot recovery already running" });
     return;
   }
-  let input: PublicSnapshotSyncOptions;
+  let input: ReturnType<typeof normalizePublicSnapshotSyncOptions>;
   try {
     const raw: unknown = JSON.parse(await readBody(req, 4096));
     if (
@@ -77,8 +70,8 @@ export async function handlePublicSnapshotJob({
     request: {
       contextGraphId: input.contextGraphId,
       onChainId: input.onChainId,
-      mode: input.mode ?? "core-cache",
-      transport: input.transport!,
+      mode: input.mode,
+      transport: input.transport,
       trustedCorePeerIds: [...input.trustedCorePeerIds],
     },
     id: randomUUID(),
