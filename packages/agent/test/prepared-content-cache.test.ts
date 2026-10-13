@@ -72,10 +72,12 @@ describe('persistent prepared content', () => {
     expect(await f.restart().get('key')).toEqual(value);
     const before = await readFile(entryPath(f.directory, 'key'));
     const link = join(f.directory, 'link'); await symlink(f.directory, link);
-    const linked = createPreparedContentCache({ ...f.options, directory: link });
-    expect(await linked.get('key')).toBeNull();
-    await linked.put('key', { body: new Uint8Array([1, 2, 3]), plainBytes: 3 });
-    await linked.put('new-key', value);
+    for (const directory of [link, link + '/', link + '/.']) {
+      const linked = createPreparedContentCache({ ...f.options, directory });
+      expect(await linked.get('key')).toBeNull();
+      await linked.put('key', { body: new Uint8Array([1, 2, 3]), plainBytes: 3 });
+      await linked.put('new-key', value);
+    }
     expect(await readFile(entryPath(f.directory, 'key'))).toEqual(before);
     expect(await f.restart().get('new-key')).toBeNull();
     expect(await readFile(join(f.directory, 'unrelated'), 'utf8')).toBe('keep');

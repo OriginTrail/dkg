@@ -6,7 +6,45 @@ import { type PreparedContent, createPreparedContentCache, resolvePreparedConten
 import { createBoundedExactAssetExportCache } from '../src/sync/responder/exact-asset-export-cache.js';
 import { exactAssetExportFixture as fixture } from './fixtures/exact-asset-export.js';
 
-afterEach(() => vi.restoreAllMocks());
+const directories: string[] = [];
+function persistentFixture(count: number) {
+  const directory = mkdtempSync(join(tmpdir(), 'prepared-export-'));
+  directories.push(directory);
+  const config = resolvePreparedContentCacheConfig({ enabled: true, directory })!;
+  return { f: fixture(count), config };
+}
+afterEach(() => {
+  vi.restoreAllMocks();
+  for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
+});
+
+it('publishes verified bytes even if the response changes while publication is queued', async () => {
+  const { f, config } = persistentFixture(4);
+  const disk = createPreparedContentCache(config);
+  let entered!: () => void, resume!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const held = new Promise<void>(resolve => { resume = resolve; });
+  const cache = createBoundedExactAssetExportCache({ store: f.store, budget: f.budget,
+    preparedContentCache: { get: key => disk.get(key), put: async (key, content) => {
+      entered(); await held; await disk.put(key, content);
+    } } });
+  const lease = (await cache.acquireEncoded(f))!;
+  const expected = lease.body.slice();
+  const pending = lease.assertCurrent();
+  const rejected = expect(pending).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_INVALID' });
+  try {
+    await started; lease.body.fill(0); resume();
+    await rejected; lease.release();
+    const restarted = createBoundedExactAssetExportCache({ store: f.store, budget: f.budget,
+      preparedContentCache: createPreparedContentCache(config) });
+    const warm = (await restarted.acquireEncoded(f))!;
+    try {
+      expect(warm.body).toEqual(expected);
+      expect(restarted.stats().preparedCacheHits).toBe(1);
+      await warm.assertCurrent();
+    } finally { warm.release(); }
+  } finally { resume(); await pending.catch(() => {}); lease.release(); }
+});
 
 describe('cold prepared writes retain source fences and response ownership', () => {
   it.each(['metadata', 'revision', 'abort'] as const)('rejects a %s change while persistence is pending', async kind => {
@@ -48,13 +86,11 @@ describe('cold prepared writes retain source fences and response ownership', () 
 
 describe('prepared assertion reuse across responder restarts', () => {
   it('reuses persisted bytes after a process generation reset and fences the new response', async () => {
-    const f = fixture(4), directory = mkdtempSync(join(tmpdir(), 'prepared-generation-reset-'));
+    const { f, config } = persistentFixture(4);
     let generation = 7;
     Object.assign(f.store, { getWriteRevision: () => ({ generation, stable: true }) });
-    const config = resolvePreparedContentCacheConfig({ enabled: true, directory })!;
     const restart = () => createBoundedExactAssetExportCache({ store: f.store, budget: f.budget,
       preparedContentCache: createPreparedContentCache(config) });
-    try {
       const cold = (await restart().acquireEncoded(f))!;
       await cold.assertCurrent(); const expected = cold.body.slice(); cold.release();
       generation = 0;
@@ -69,15 +105,12 @@ describe('prepared assertion reuse across responder restarts', () => {
         generation++;
         await expect(warm.assertCurrent()).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_CHANGED' });
       } finally { warm.release(); }
-    } finally { rmSync(directory, { recursive: true, force: true }); }
   });
 
   it('serves prepared bytes when memory retention declines and keeps the response charged and fenced', async () => {
-    const f = fixture(4), directory = mkdtempSync(join(tmpdir(), 'prepared-no-retain-'));
-    const config = resolvePreparedContentCacheConfig({ enabled: true, directory })!;
+    const { f, config } = persistentFixture(4);
     const restart = () => createBoundedExactAssetExportCache({ store: f.store, budget: f.budget,
       encodedMaxBytes: 1, preparedContentCache: createPreparedContentCache(config) });
-    try {
       const first = (await restart().acquireEncoded(f))!;
       await first.assertCurrent(); const expected = first.body.slice(); first.release();
       const before = f.budget.stats().bytesEstimate;
@@ -93,14 +126,11 @@ describe('prepared assertion reuse across responder restarts', () => {
       lease.release(); lease.release();
       expect(f.budget.stats().bytesEstimate).toBe(before);
       expect(f.reads.every(read => read.options?.source?.endsWith('.metadata'))).toBe(true);
-    } finally { rmSync(directory, { recursive: true, force: true }); }
   });
   it('reuses disk bytes without exporting DATA, but reads fresh metadata and fences every response', async () => {
-    const f = fixture(4), directory = mkdtempSync(join(tmpdir(), 'prepared-responder-'));
-    const config = resolvePreparedContentCacheConfig({ enabled: true, directory })!;
+    const { f, config } = persistentFixture(4);
     const restart = () => createBoundedExactAssetExportCache({ store: f.store, budget: f.budget,
       preparedContentCache: createPreparedContentCache(config) });
-    try {
       const first = restart(), cold = (await first.acquireEncoded(f))!;
       await cold.assertCurrent(); const expected = cold.body.slice(); cold.release();
       const second = restart(); f.reads.length = 0;
@@ -112,14 +142,11 @@ describe('prepared assertion reuse across responder restarts', () => {
       // A policy transition invalidates access even though the disk copy exists.
       f.meta.find(q => q.predicate === 'http://dkg.io/ontology/accessPolicy')!.object = '"private"';
       expect(await restart().acquireEncoded(f)).toBeNull();
-    } finally { rmSync(directory, { recursive: true, force: true }); }
   });
   it('does not persist an unfenced response or reuse changed metadata', async () => {
-    const f = fixture(3), directory = mkdtempSync(join(tmpdir(), 'prepared-responder-'));
-    const config = resolvePreparedContentCacheConfig({ enabled: true, directory })!;
+    const { f, config } = persistentFixture(3);
     const restart = () => createBoundedExactAssetExportCache({ store: f.store, budget: f.budget,
       preparedContentCache: createPreparedContentCache(config) });
-    try {
       const abandoned = (await restart().acquireEncoded(f))!; abandoned.release();
       const second = restart(), cold = (await second.acquireEncoded(f))!;
       expect(cold.wholePayloadExports).toBe(1); await cold.assertCurrent(); cold.release();
@@ -127,7 +154,6 @@ describe('prepared assertion reuse across responder restarts', () => {
       const third = restart(), changed = (await third.acquireEncoded(f))!;
       expect(changed.wholePayloadExports).toBe(1); await changed.assertCurrent(); changed.release();
       expect(third.stats().preparedCacheHits).toBe(0);
-    } finally { rmSync(directory, { recursive: true, force: true }); }
   });
   it('retains source revision fences and cancellation after disk IO', async () => {
     const f = fixture(3); let revision = 1;
@@ -170,14 +196,13 @@ it('owns a cancelled prepared-read reservation until the disk read settles', asy
 });
 
 it.each(['metadata', 'data'] as const)('never reuses or publishes disk content with an unstable %s revision', async kind => {
-  const f = fixture(4), directory = mkdtempSync(join(tmpdir(), 'prepared-unstable-'));
+  const { f, config } = persistentFixture(4);
   let stable = true;
   Object.assign(f.store, { getWriteRevision: (graph: string) => ({ generation: 1,
     stable: stable || (kind === 'metadata' ? !graph.endsWith('/_meta') : graph !== f.graph) }) });
-  const disk = createPreparedContentCache(resolvePreparedContentCacheConfig({ enabled: true, directory })!);
+  const disk = createPreparedContentCache(config);
   const get = vi.spyOn(disk, 'get'), put = vi.spyOn(disk, 'put');
   const restart = () => createBoundedExactAssetExportCache({ store: f.store, budget: f.budget, preparedContentCache: disk });
-  try {
     const seeded = (await restart().acquireEncoded(f))!;
     await seeded.assertCurrent(); seeded.release();
     expect(put).toHaveBeenCalledTimes(1);
@@ -193,5 +218,4 @@ it.each(['metadata', 'data'] as const)('never reuses or publishes disk content w
     await expect(corrupt.acquireEncoded(f)).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_INVALID' });
     expect(corrupt.stats().preparedCacheHits).toBe(0);
     expect(get).not.toHaveBeenCalled(); expect(put).not.toHaveBeenCalled();
-  } finally { rmSync(directory, { recursive: true, force: true }); }
 });

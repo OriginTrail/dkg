@@ -242,20 +242,14 @@ export function overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1(
   ]);
   const result = metadata.filter(q => !controls.has(q.predicate));
   result.push(
-    mq(scope.ual, GRAPH_KNOWLEDGE_ASSET_STATUS_PREDICATE, lit(state.status), scope.metaGraph),
     mq(scope.ual, GRAPH_KNOWLEDGE_ASSET_PUBLISHED_AT_PREDICATE,
       `${lit(scope.receivedAt.toISOString())}^^<${XSD}dateTime>`, scope.metaGraph),
   );
   if (state.status === 'confirmed') {
     appendAuthenticatedSubGraphRoute(result, scope.ual, scope.metaGraph, scope.subGraphName);
-    result.push(
-      mq(scope.ual, GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE, lit(state.confirmation.kind), scope.metaGraph),
-      materializedVersionQuad(scope.metaGraph, scope.ual, state.materializedVersion),
-    );
-    if (state.confirmation.kind === 'transaction') result.push(
-      mq(scope.ual, GRAPH_KNOWLEDGE_ASSET_TRANSACTION_HASH_PREDICATE, lit(state.confirmation.transactionHash), scope.metaGraph),
-    );
-  }
+    appendConfirmationControls(result, scope.ual, scope.metaGraph, state.confirmation);
+    result.push(materializedVersionQuad(scope.metaGraph, scope.ual, state.materializedVersion));
+  } else result.push(mq(scope.ual, GRAPH_KNOWLEDGE_ASSET_STATUS_PREDICATE, lit('tentative'), scope.metaGraph));
   return result;
 }
 
@@ -270,45 +264,35 @@ export function generateGraphKnowledgeAssetMetadata(
   const { scope, metaGraph, quads } = generateGraphKnowledgeAssetMetadataBase(meta);
   if (state.status === 'confirmed') {
     const { confirmation } = state;
-    if (confirmation.kind === 'transaction') {
-      quads.push(
-        mq(scope.ual, GRAPH_KNOWLEDGE_ASSET_STATUS_PREDICATE, lit('confirmed'), metaGraph),
-        mq(
-          scope.ual,
-          GRAPH_KNOWLEDGE_ASSET_TRANSACTION_HASH_PREDICATE,
-          lit(confirmation.provenance.txHash),
-          metaGraph,
-        ),
-        mq(scope.ual, `${DKG}batchId`, intLit(confirmation.provenance.batchId), metaGraph),
-        mq(
-          scope.ual,
-          GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE,
-          lit('transaction'),
-          metaGraph,
-        ),
-      );
-    } else {
-      const { batchId, materializedVersion } = confirmation.provenance;
-      if (batchId < 0n) {
-        throw new Error('Finalized graph metadata batchId must be non-negative');
-      }
-      quads.push(
-        mq(scope.ual, GRAPH_KNOWLEDGE_ASSET_STATUS_PREDICATE, lit('confirmed'), metaGraph),
-        mq(scope.ual, `${DKG}batchId`, intLit(batchId), metaGraph),
-        mq(
-          scope.ual,
-          GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE,
-          lit('finalized-materialization'),
-          metaGraph,
-        ),
-        materializedVersionQuad(metaGraph, scope.ual, materializedVersion),
-      );
+    const { batchId } = confirmation.provenance;
+    if (confirmation.kind === 'finalized-materialization' && batchId < 0n) {
+      throw new Error('Finalized graph metadata batchId must be non-negative');
+    }
+    appendConfirmationControls(quads, scope.ual, metaGraph, confirmation.kind === 'transaction'
+      ? { kind: 'transaction', transactionHash: confirmation.provenance.txHash } : confirmation);
+    quads.push(mq(scope.ual, `${DKG}batchId`, intLit(batchId), metaGraph));
+    if (confirmation.kind === 'finalized-materialization') {
+      quads.push(materializedVersionQuad(metaGraph, scope.ual, confirmation.provenance.materializedVersion));
     }
   } else {
     quads.push(mq(scope.ual, GRAPH_KNOWLEDGE_ASSET_STATUS_PREDICATE, lit('tentative'), metaGraph));
   }
   if (state.status === 'confirmed') appendAuthenticatedSubGraphRoute(quads, scope.ual, metaGraph, meta.subGraphName);
   return quads;
+}
+
+/** Serialize confirmation controls identically for local generation and authenticated recovery. */
+function appendConfirmationControls(
+  quads: Quad[], ual: string, metaGraph: string,
+  confirmation: { kind: 'finalized-materialization' } | { kind: 'transaction'; transactionHash: string },
+): void {
+  quads.push(
+    mq(ual, GRAPH_KNOWLEDGE_ASSET_STATUS_PREDICATE, lit('confirmed'), metaGraph),
+    mq(ual, GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE, lit(confirmation.kind), metaGraph),
+  );
+  if (confirmation.kind === 'transaction') {
+    quads.push(mq(ual, GRAPH_KNOWLEDGE_ASSET_TRANSACTION_HASH_PREDICATE, lit(confirmation.transactionHash), metaGraph));
+  }
 }
 
 /** Locally authenticated routing is independent of receipt or snapshot provenance. */
