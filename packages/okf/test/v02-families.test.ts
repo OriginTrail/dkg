@@ -635,7 +635,7 @@ describe('family definitions are internal and carry their behaviour as data', ()
     for (const name of ['FAMILY_SPECS', 'FAMILY_BY_KEY', 'VERIFIED', 'SOURCES', 'prepareFamily', 'resolveReferences', 'decodeFamilies', 'parseList', 'prepareConcept', 'resolveConcept']) {
       expect(Object.prototype.hasOwnProperty.call(okfPublic, name)).toBe(false);
     }
-    for (const name of ['familyQuads', 'familyDiagnostics', 'parseVerified', 'exportInputFromQuads', 'V02_FAMILY_KEYS']) {
+    for (const name of ['familyQuads', 'familyDiagnostics', 'parseVerified', 'exportInputFromQuads', 'V02_FAMILY_KEYS', 'dateTimeLexical', 'isXsdDateTime', 'isXsdDate', 'hasExplicitOffset']) {
       expect(Object.prototype.hasOwnProperty.call(okfPublic, name)).toBe(true);
     }
   });

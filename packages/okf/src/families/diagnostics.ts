@@ -11,7 +11,7 @@
  * an Attested Computation, §10.2), an invalid date, a non-integer integer.
  */
 
-import { dateTimeLexical, hasExplicitOffset, isXsdDateTime } from '../trust.js';
+import { dateTimeLexical, hasExplicitOffset, isXsdDateTime } from '../timestamps.js';
 import { isConceptType } from '../terms.js';
 import { isBlank, isMapping, isScalar, safeString } from '../utils.js';
 import type { OkfWarning } from '../types.js';

@@ -59,7 +59,8 @@ import {
   declaresSources,
   type PreparedQuad,
 } from './families/index.js';
-import { dateTimeLexical, parseVerified, trustTierOf, conceptStatus } from './trust.js';
+import { dateTimeLexical } from './timestamps.js';
+import { parseVerified, trustTierOf, conceptStatus } from './trust.js';
 import type {
   OkfDocument,
   OkfMappingOptions,

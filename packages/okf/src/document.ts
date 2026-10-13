@@ -22,7 +22,7 @@
 import * as jsYaml from 'js-yaml';
 import type { OkfDocument } from './types.js';
 import { pathToConceptId } from './paths.js';
-import { dateTimeLexical, isXsdDate, isXsdDateTime } from './trust.js';
+import { dateTimeLexical, isXsdDate, isXsdDateTime } from './timestamps.js';
 import { withYamlLexical, yamlLexicalOf } from './yaml-lexical.js';
 
 /** js-yaml's built-in timestamp type (exported at runtime, absent from its type declarations). */

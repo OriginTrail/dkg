@@ -53,11 +53,8 @@ export type { FrontmatterContext, FrontmatterMapping } from './mapping.js';
 // are the operations built on them.
 export { familyQuads, familyDiagnostics, sourceIds, V02_FAMILY_KEYS } from './families/index.js';
 export type { FamilyResult, ParsedEntry } from './families/index.js';
+export { dateTimeLexical, isXsdDateTime, isXsdDate, hasExplicitOffset } from './timestamps.js';
 export {
-  dateTimeLexical,
-  isXsdDateTime,
-  isXsdDate,
-  hasExplicitOffset,
   actorKind,
   parseVerified,
   normalizeVerified,

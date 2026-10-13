@@ -15,7 +15,7 @@ import {
 } from './constants.js';
 import { conceptIdToIri, resolveLinkTarget } from './paths.js';
 import { isSafeIri, literalTerm, safeString, typedLiteralTerm, pascalCase, camelCase } from './utils.js';
-import { dateTimeLexical, isXsdDate, isXsdDateTime } from './trust.js';
+import { dateTimeLexical, isXsdDate, isXsdDateTime } from './timestamps.js';
 import type { Quad } from './types.js';
 
 /**
