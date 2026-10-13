@@ -31,6 +31,51 @@ The Node UI defaults to:
 http://127.0.0.1:9200/ui
 ```
 
+## Run From A Container Image
+
+Each release is also published as a container image, `ghcr.io/origintrail/dkg-node`, for `linux/amd64` and `linux/arm64`, built from the release tag's source. Its tags are the version (`10.0.24`), the newest patch of a minor line (`10.0`) and the newest release (`latest`). A prerelease gets its version tag only.
+
+Start a node on testnet, with its state in a named volume:
+
+```bash
+docker run -d --name dkg-node \
+  -e DKG_NETWORK=testnet \
+  -v dkg-node-data:/data \
+  -p 127.0.0.1:9200:9200 \
+  -p 9090:9090 \
+  --stop-timeout 30 \
+  --restart unless-stopped \
+  ghcr.io/origintrail/dkg-node:10.0.24
+```
+
+- `/data` is the node's home (`DKG_HOME`): config, keys, auth token, triple store and logs. Keep the volume, and back it up as you would `~/.dkg`.
+- `DKG_NETWORK` (`testnet`, `mainnet-gnosis` or `mainnet-base`) is read only while `/data` has no config. The container then writes `/data/config.json` for that network, with the API listening on all of the container's interfaces, the peer-to-peer port fixed at 9090, the `oxigraph-server` store and auto-update off. On its first start the node downloads its Oxigraph server binary from GitHub into `/data`.
+- Port 9200 serves the API and the Node UI; the command above publishes it on the host's loopback only. Every route except `/api/status` needs the node's token, which `docker exec dkg-node dkg auth show` prints. The Node UI signs in by itself only on a direct local connection, so through a published port it asks for the token.
+- Port 9090 is the libp2p TCP port. An Edge Node reaches peers through relays and can run without it published; a Core Node must be reachable on it.
+- `--stop-timeout 30` gives the node time to finish its shutdown, which can take up to 15 seconds, longer than Docker's default of 10.
+
+Run CLI commands and read logs in the container:
+
+```bash
+docker exec dkg-node dkg status
+docker logs -f dkg-node
+```
+
+To use your own configuration, mount a host directory that holds your `config.json` at `/data` (it must be writable by the container's user, UID 1000), or edit `config.json` in the volume and restart the container. A config for a container needs `"apiHost": "0.0.0.0"`, a fixed `"listenPort"` that you publish, and `"autoUpdate": { "enabled": false }`. A Core Node also needs `"nodeRole": "core"` and its public `announceAddresses`. Environment variables the node reads pass with `-e`.
+
+The container does not update itself; a new version is a new image. To upgrade, remove the container and start the new version on the same volume. To run exactly the image you tested, pin its version and digest. `docker pull` prints the digest:
+
+```bash
+docker pull ghcr.io/origintrail/dkg-node:10.0.24
+# Digest: sha256:<digest>
+```
+
+Then reference the image as `ghcr.io/origintrail/dkg-node:10.0.24@sha256:<digest>` in `docker run` or a Compose file. The digest of each release is also in the summary of its `Node image` workflow run. To check that an image was built by this repository's workflow, verify its build provenance with the GitHub CLI:
+
+```bash
+gh attestation verify oci://ghcr.io/origintrail/dkg-node:10.0.24 --repo OriginTrail/dkg
+```
+
 ## Boot Without Restoring Persisted Context Graph Subscriptions
 
 By default, the daemon restores durable Context Graph subscription rows as
