@@ -1,5 +1,5 @@
 import { buildBulkAssetGroupPlan } from './bulk-asset-group.js';
-import { validateAtomicAssetGroup, buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
+import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
 import { performance } from 'node:perf_hooks';
 import type {
   TripleStore,
@@ -460,7 +460,6 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
   }
 
   async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
-    validateAtomicAssetGroup(assets);
     statements.checkIris.replaceAssetGroup(assets);
     let published = false;
     try {

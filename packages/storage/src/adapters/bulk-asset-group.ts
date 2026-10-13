@@ -2,12 +2,13 @@
 import { randomUUID } from 'node:crypto';
 import { canonicalizeObjectTermForHash, formatSparqlTerm } from '@origintrail-official/dkg-core';
 import { ATOMIC_GRAPH_REPLACE_STAGING_PREFIX } from '../atomic-graph-replace.js';
-import { type AtomicAssetReplacement, ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES, validateAtomicAssetGroup } from '../atomic-asset-group.js';
+import { type AtomicAssetReplacement, ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES, validateAtomicAssetGroup, preflightAtomicAssetGroupLiterals } from '../atomic-asset-group.js';
 import { quadToBlazegraphNQuad } from './blazegraph-nquads.js';
 
 /** Native upload into hidden graphs followed by ONE guarded group publication and receipt. */
 export function buildBulkAssetGroupPlan(assets: readonly AtomicAssetReplacement[]) {
   validateAtomicAssetGroup(assets);
+  preflightAtomicAssetGroupLiterals(assets);
   if (assets.every(a => !a.graphQuads.length && !a.metadataQuads.length)) return null;
   const stages: string[] = [], lines: string[] = [], guards: string[] = [], branches: string[] = [];
   let bytes = 0;
