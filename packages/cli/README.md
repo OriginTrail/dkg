@@ -210,6 +210,12 @@ dialers still find a working circuit. Override with `relayReservationCount`
 in `config.json` when you want to dial up tolerance (max 16) or strip back
 down to 1 for the legacy behavior.
 
+Which relays hold them: each edge takes the relays of `network/<env>.json`
+in its own fixed order, so the edges of a network spread over all listed
+relays instead of all reserving on the first three. Relays given with
+`--relay-preferred` / `preferredRelays` stay first, in the order given. A
+node never reserves on a relay outside its list.
+
 ```jsonc
 {
   "nodeRole": "edge",

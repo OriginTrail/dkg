@@ -244,6 +244,9 @@ export default defineConfig({
           // Protocol persistence stores (node-store): runDaemonInner composes
           // every one over a seeded legacy node-ui.db; no hardhat, no network.
           'test/daemon-protocol-store-wiring.test.ts',
+          // Relay list handed to the agent: an edge's own order of the network
+          // relays, file order for a Core. Boots to DKGAgent.create; no network.
+          'test/daemon-relay-order-wiring.test.ts',
           // The typed composition seam behind that wiring: createProtocolStores
           // over one shared connection, real DashboardDB.
           'test/protocol-persistence.test.ts',

@@ -44,6 +44,7 @@ import * as osModule from 'node:os';
 import type { NetworkInterfaceInfo } from 'node:os';
 import { formatAuthorityIndexStartupLine } from './authority-index-startup-line.js';
 import { checkCoreRelayPrereqs } from './core-prereq-check.js';
+import { networkRelaysForNode } from './relay-order.js';
 import { rotateDaemonLogIfNeeded } from './log-rotation.js';
 import { resolveUpdateTelemetryVersionStatus } from './update-telemetry-status.js';
 const { homedir } = osModule;
@@ -1655,7 +1656,13 @@ async function runDaemonInnerWithStartupOwnership(
   } else if (config.relay) {
     relayPeers = [config.relay];
   } else if (network?.relays?.length) {
-    relayPeers = network.relays;
+    // An edge takes the list in its own order, so that the edges of a network
+    // spread their reservations over every listed relay (relay-order.ts).
+    relayPeers = networkRelaysForNode({
+      relays: network.relays,
+      role,
+      nodeKey: opWallets.wallets[0]?.address,
+    });
     usingNetworkRelays = true;
     log(`Using relay(s) from network config (${network.networkName})`);
   }

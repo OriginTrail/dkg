@@ -13,6 +13,7 @@ Nodes use libp2p for peer connectivity. Edge nodes behind NAT reserve relay slot
 
 - The relay list is `relay` from the node config (one relay), or else `relays` from the active network config. Operator-preferred relays are placed in front. `"relay": "none"` turns relays off.
 - An edge keeps a connection to every relay in its list and holds reservations on three of them (`relayReservationCount`, 1 to 16).
+- Each edge takes the network's relays in its own fixed order, so the edges of a network spread their reservations over all listed relays. Operator-preferred relays always come first, in the order given.
 - A node reserves only on relays in its list, and relayed connections to other nodes go through those relays only.
 - Every Core node runs a relay server. An edge uses a Core as a relay when that Core is in the edge's list.
 
