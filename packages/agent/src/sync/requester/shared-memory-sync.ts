@@ -264,6 +264,8 @@ export interface SharedMemoryMetadataFetchRequest {
   readonly graphUri: string;
   readonly deadline: number;
   readonly workAdmission: SyncWorkAdmission;
+  /** Aborts when the recovery this fetch belongs to is revoked. */
+  readonly signal?: AbortSignal;
 }
 
 export interface SharedMemoryMetadataFetchOutcome {
@@ -632,6 +634,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
           graphUri: wsMetaGraph,
           deadline,
           workAdmission,
+          ...(recoveryBoundary.signal === undefined ? {} : { signal: recoveryBoundary.signal }),
         }))
         : {
           result: await recoveryBoundary.read(() => fetchRecoveryPages(

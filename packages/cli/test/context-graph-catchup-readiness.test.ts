@@ -1009,8 +1009,10 @@ describe('catch-up terminal status through the bridge and worker', () => {
     /** Runs on each sync-protocol probe, i.e. after `prepareCatchup` returned. */
     onProbe?: () => void;
     durable: () => Promise<unknown>;
-    selectedSharedMemory?: () => Promise<unknown>;
+    selectedSharedMemory?: (peerId: string) => Promise<unknown>;
     ordinarySharedMemory?: () => Promise<unknown>;
+    /** The node's sync-capable peers; three unless a test needs a wider walk. */
+    peers?: readonly string[];
   }) {
     const calls = { durable: 0, selectedSharedMemory: 0, ordinarySharedMemory: 0 };
     const agent = {
@@ -1029,7 +1031,8 @@ describe('catch-up terminal status through the bridge and worker', () => {
       }),
       ensurePeerConnected: async () => {},
       primeCatchupConnections: async () => {},
-      listAdmittedConnectedPeers: async () => PEERS.map((peerId) => ({ toString: () => peerId })),
+      listAdmittedConnectedPeers: async () => (node.peers ?? PEERS)
+        .map((peerId) => ({ toString: () => peerId })),
       selectCatchupPeers: (peers: Array<{ toString(): string }>) => peers,
       waitForSyncProtocol: async () => {
         node.onProbe?.();
@@ -1039,9 +1042,9 @@ describe('catch-up terminal status through the bridge and worker', () => {
         calls.durable += 1;
         return { result: await node.durable() };
       },
-      syncSelectedSharedMemoryFromPeerDetailed: async () => {
+      syncSelectedSharedMemoryFromPeerDetailed: async (peerId: string) => {
         calls.selectedSharedMemory += 1;
-        return node.selectedSharedMemory!();
+        return node.selectedSharedMemory!(peerId);
       },
       syncSharedMemoryFromPeerDetailed: async () => {
         calls.ordinarySharedMemory += 1;
@@ -1171,6 +1174,101 @@ describe('catch-up terminal status through the bridge and worker', () => {
     const classification = classify(result);
     expect(classification.jobStatus).toBe('failed');
     expect(classification.error).toBe('Sync did not complete — all reachable peers failed (timeouts or transport errors). Retry once the network is healthier.');
+  });
+
+  // A public graph that is not registered on chain and holds nothing yet,
+  // followed from a node with eight sync-capable peers. It has no finalized
+  // plane, so its shared memory is the only plane the job can prove, and with
+  // no content the only proof is a round in which every peer answered empty.
+  describe('an unregistered public graph that holds nothing', () => {
+    const WALK = Array.from({ length: 8 }, (_, index) => `peer-${index}`);
+    /** What the agent returns for a peer that cleanly answered both phases empty. */
+    const answeredEmpty = (peerId: string) => ({
+      kind: 'selected-shared-memory',
+      shared: {
+        ...emptySharedMemorySyncResult(),
+        emptyResponses: 1,
+        completedPhases: 2,
+        swmCoverage: {
+          contextGraphId: CG,
+          peerIdSuffix: peerId.slice(-8),
+          snapshotsResolved: 0,
+          snapshotsTotal: 0,
+          manifestComplete: true,
+          descriptorsAuthoritative: true,
+          missingCount: 0,
+          missingSample: [],
+          materializationFailures: 0,
+        },
+      },
+      scopeComplete: false,
+    });
+    /** A round that ended without the peer having been asked for its metadata. */
+    const neverAsked = () => ({
+      kind: 'selected-shared-memory',
+      shared: {
+        ...emptySharedMemorySyncResult(),
+        timedOutPhases: 1,
+        metadataContinuationYields: 1,
+      },
+      scopeComplete: false,
+    });
+    const emptyGraphNode = (selectedSharedMemory: (peerId: string) => Promise<unknown>) => nodeAgent({
+      isPrivate: false,
+      legacySyncAllowed: false,
+      selectedLane: { lane: 'selected-public', active: true },
+      durable: async () => createIncompleteDurableSyncResult(),
+      selectedSharedMemory,
+      peers: WALK,
+    });
+    const classifyUnregistered = (result: CatchupJobResult) => classifyContextGraphCatchupReadiness({
+      inspection: {
+        kind: 'current',
+        metadata: { kind: 'confirmed', accessPolicy: 'public' },
+        authority: { outcome: 'allowed', registration: 'unregistered' },
+      },
+      result,
+      includeSharedMemory: true,
+      readinessBeforeCatchup: before,
+    });
+
+    it('becomes synced, and so writable, when every peer of the walk answered empty', async () => {
+      const { agent, calls } = emptyGraphNode(async (peerId) => answeredEmpty(peerId));
+
+      const result = await runCatchupThroughBridge(agent, { contextGraphId: CG, includeSharedMemory: true });
+
+      expect(calls).toEqual({ durable: 0, selectedSharedMemory: WALK.length, ordinarySharedMemory: 0 });
+      expect(result.cleanPlaneCompletions?.sharedMemory).toMatchObject({ emptyPeers: WALK.length });
+      expect(result.diagnostics?.sharedMemory).toMatchObject({ timedOutPhases: 0, failedPeers: 0 });
+      expect(classifyUnregistered(result)).toMatchObject({
+        jobStatus: 'done',
+        durablePlane: 'not-applicable',
+        statePatch: { synced: true, sharedMemorySynced: true, metaSynced: true, pendingMeta: false },
+        readinessPatch: { durableVerified: false, sharedMemoryVerified: true },
+      });
+    });
+
+    it('stays unsynced when part of the walk ended without its peer having been asked', async () => {
+      // Three peers answered empty. For the other five the round ended on a
+      // timed-out metadata phase with nothing fetched, so what they hold is
+      // unknown and the graph cannot be called empty.
+      const { agent } = emptyGraphNode(async (peerId) => (
+        WALK.indexOf(peerId) < 3 ? answeredEmpty(peerId) : neverAsked()
+      ));
+
+      const result = await runCatchupThroughBridge(agent, { contextGraphId: CG, includeSharedMemory: true });
+
+      expect(result.cleanPlaneCompletions?.sharedMemory).toMatchObject({
+        emptyPeers: 3,
+        incompleteResponders: 5,
+      });
+      expect(result.diagnostics?.sharedMemory.timedOutPhases).toBe(5);
+      expect(classifyUnregistered(result)).toMatchObject({
+        jobStatus: 'unreachable',
+        statePatch: { synced: false, sharedMemorySynced: false },
+        readinessPatch: { durableVerified: false, sharedMemoryVerified: false },
+      });
+    });
   });
 
   it('still ends denied when the peers deny the requester', async () => {
