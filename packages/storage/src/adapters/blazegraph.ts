@@ -1,3 +1,4 @@
+import { withAdmittedReadCancellation } from '../admitted-read-cancellation.js';
 import { buildBulkAssetGroupPlan } from './bulk-asset-group.js';
 import { validateAtomicAssetGroup, buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
 import { performance } from 'node:perf_hooks';
@@ -315,14 +316,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
       if (!isReadOnlyStoreOperation(operation)) {
         return Promise.reject(new Error('Mutations are not allowed inside a query read admission'));
       }
-      return this.queryAdmission.read(async deadline => {
-        deadline.check();
-        options?.signal?.throwIfAborted();
-        const result = await work(deadline);
-        deadline.check();
-        options?.signal?.throwIfAborted();
-        return result;
-      });
+      return this.queryAdmission.read(deadline => withAdmittedReadCancellation(deadline, options?.signal, work));
     }
     const deadline = createStoreOperationDeadline(
       this.operationTimeoutMs,

@@ -37,7 +37,7 @@ describe('query read admission', () => {
     expect(store.graphEnumerationVisibility).toBeTypeOf('function');
   });
 
-  it('serializes sibling reads and retains the slot until aborted transport settles', async () => {
+  it.each(['admission', 'read'] as const)('retains the slot until a cancelled %s transport settles', async owner => {
     const { store, scheduler } = fixture();
     const controller = new AbortController();
     let entered!: () => void, settle!: () => void;
@@ -48,8 +48,9 @@ describe('query read admission', () => {
     vi.stubGlobal('fetch', fetcher);
     const failure = new Error('caller deadline');
     const work = store.withQueryReadAdmission(() => Promise.all([
-      store.query('SELECT ?authority WHERE {}', options), store.query('SELECT ?data WHERE {}', options),
-    ]), { ...options, signal: controller.signal });
+      store.query('SELECT ?authority WHERE {}', { ...options, signal: owner === 'read' ? controller.signal : undefined }),
+      store.query('SELECT ?data WHERE {}', options),
+    ]), { ...options, signal: owner === 'admission' ? controller.signal : undefined });
     const rejected = expect(work).rejects.toBe(failure);
     await started; controller.abort(failure);
     let nextStarted = false;
