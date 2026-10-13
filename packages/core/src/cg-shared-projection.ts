@@ -898,11 +898,10 @@ function assertCanonicalObjectTerm(object: string, lineNumber: number): void {
 }
 
 function assertCanonicalLiteralBody(body: string, lineNumber: number): void {
+  // Only the escapes are checked. The canonical form escapes `\`, `"`, LF and
+  // CR; a tab or another control character stands for itself. A raw line
+  // break never reaches a line: every entry point refuses CR and splits on LF.
   for (let index = 0; index < body.length; index += 1) {
-    const code = body.charCodeAt(index);
-    if (code <= 0x1f || code === 0x7f) {
-      fail('projection-literal', `projection line ${lineNumber} literal contains a raw control`);
-    }
     if (body[index] !== '\\') continue;
     const escaped = body[index + 1];
     if (escaped !== '\\' && escaped !== '"' && escaped !== 'n' && escaped !== 'r') {

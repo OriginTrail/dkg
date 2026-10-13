@@ -298,6 +298,7 @@ const blockedRfc64Modules = [
   'applied-catalog-authority-transition-v1.js',
   'catalog-semantic-authority-transition-v1.js',
   'public-catalog-native-errors-v1.js',
+  'projection-store-read-back-v1.js',
   'catalog-applied-head-coordinator-v1.js',
   'catalog-native-scoped-read-capability-v1-internal.js',
   'catalog-native-scoped-read-provider-v1.js',

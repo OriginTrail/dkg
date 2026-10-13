@@ -45,6 +45,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 import { OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
+import { workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -892,6 +893,103 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       .rejects.toMatchObject({
         code: 'catalog-native-receiver-activation',
         message: expect.stringContaining('exact SWM post-read differs'),
+      });
+    expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
+  }, 30_000);
+
+  // A store may return a typed literal in its own lexical form of the same
+  // value, and that form may be longer than the canonical one the projection
+  // carries. These are the forms a second store engine returned.
+  const postReadStoreReturning = (
+    receiverStore: TripleStore,
+    storedForm: (object: string) => string,
+  ): TripleStore => new Proxy(receiverStore, {
+    get(target, property) {
+      if (property === 'query') {
+        return async (...args: Parameters<TripleStore['query']>) => {
+          const result = await target.query(...args);
+          if (
+            args[1]?.source === 'rfc64-public-catalog-native-post-read'
+            && result.type === 'bindings'
+            && result.bindings.length > 1
+          ) {
+            return {
+              ...result,
+              bindings: result.bindings.map((binding) => ({
+                ...binding,
+                o: storedForm(String(binding.o)),
+              })),
+            };
+          }
+          return result;
+        };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  }) as TripleStore;
+
+  it('accepts an exact projection when the store post-read returns literals in its own lexical form', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    const XSD = 'http://www.w3.org/2001/XMLSchema#';
+    const storeForms = new Map([
+      ['"Alice"', `"Alice"^^<${XSD}string>`],
+      [`"42"^^<${XSD}integer>`, `"42"^^<${XSD}int>`],
+    ]);
+    const returned: string[] = [];
+    const recordedDigests: string[] = [];
+    const receiver = fixture.createReceiver(
+      fixture.receiverPersistence.inventory,
+      undefined,
+      undefined,
+      postReadStoreReturning(fixture.receiverStore, (object) => {
+        const stored = storeForms.get(object) ?? object;
+        returned.push(stored);
+        return stored;
+      }),
+      async (plan) => {
+        recordedDigests.push(...plan.rows.map((row) => row.publicQuadsDigest));
+      },
+    );
+
+    await expect(fixture.synchronize(fixture.announcement, receiver))
+      .resolves.toMatchObject({
+        appliedHeadStatus: 'applied',
+        inventoryRowCount: 1,
+        activatedTripleCount: 2,
+      });
+    // Both rows came back in the other form, and one of them longer than the
+    // projection's own bytes allow.
+    expect([...returned].sort()).toEqual([...storeForms.values()].sort());
+    // The digest kept for the row is the digest of what the store returned.
+    // A later read of this graph, or of its verified copy, is compared with
+    // it, and that read comes back in the store's spelling too.
+    const subject = 'https://example.org/alice';
+    expect(recordedDigests).toEqual([workspacePublicQuadsDigest([
+      { subject, predicate: 'https://schema.org/age', object: `"42"^^<${XSD}int>`, graph: '' },
+      { subject, predicate: 'https://schema.org/name', object: `"Alice"^^<${XSD}string>`, graph: '' },
+    ])]);
+    expect(recordedDigests).not.toEqual([workspacePublicQuadsDigest([
+      { subject, predicate: 'https://schema.org/age', object: `"42"^^<${XSD}integer>`, graph: '' },
+      { subject, predicate: 'https://schema.org/name', object: '"Alice"', graph: '' },
+    ])]);
+  }, 30_000);
+
+  it('rejects a post-read that returns far more bytes than the projection before the applied-head CAS', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    const observed = fixture.createCasObservedReceiver(
+      undefined,
+      postReadStoreReturning(fixture.receiverStore, (object) => (
+        object === '"Alice"' ? `"${'A'.repeat(400)}"` : object
+      )),
+    );
+
+    await expect(fixture.synchronize(fixture.announcement, observed.receiver))
+      .rejects.toMatchObject({
+        code: 'catalog-native-receiver-activation',
+        message: expect.stringContaining('exact SWM post-read failed'),
       });
     expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
   }, 30_000);
