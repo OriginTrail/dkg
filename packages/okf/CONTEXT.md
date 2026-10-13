@@ -270,6 +270,13 @@ it; the CLI summary reports it against the current time.
   kept verbatim under the generic predicate on the entry's node, warned about,
   and written back under their own key on export. Entry nodes carry no other
   `schema:` producer keys, so the read-back is unambiguous.
+- **A wrong-shaped top-level `usage_window`** (`usage_window: Q2`) is kept
+  verbatim as `schema:usageWindow` on the concept — the very triple a producer
+  key named `usageWindow` produces — so export writes it back as the
+  `usageWindow` producer key. The graph round-trips exactly, but the
+  frontmatter key changes and the shape warning does not recur on re-import.
+  Single-word families (`generated`, `verified`, `sources`, …) keep their key,
+  since camelCase leaves them unchanged.
 - **Each triple once.** The mapper deduplicates its output per concept: a store
   holds a set, so two `sources` naming one resource give two `okf:Source` nodes
   but a single `prov:wasDerivedFrom` edge. Without this the expected count in
