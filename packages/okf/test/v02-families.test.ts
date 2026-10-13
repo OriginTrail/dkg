@@ -508,15 +508,16 @@ describe('export restores family entry order from the node IRIs, whatever order 
 });
 
 describe('one verification boundary: RDF, summary and diagnostics agree on which entry is which', () => {
-  it('keeps the node index of a valid verifier that follows an invalid entry', () => {
+  it('numbers a valid verifier that follows an invalid entry as the first node', () => {
     const { c, r } = conceptOf(bundle('type: Metric\nverified:\n  - { at: 2026-06-26T02:00:00Z }\n  - { by: human:a, at: 2026-06-27T02:00:00Z }'));
-    // the RDF: one Verification node, at index 1 — the entry's position in the list
-    expect(objs(c.quads, OKF_VERIFICATION)).toEqual([node(GENID_TAGS.verification, 1)]);
-    expect(objs(c.quads, OKF_VERIFIED_BY, node(GENID_TAGS.verification, 1))).toEqual(['"human:a"']);
+    // the RDF: one Verification node, numbered 0 — its position among the
+    // usable entries, which is what export writes back and re-import reads
+    expect(objs(c.quads, OKF_VERIFICATION)).toEqual([node(GENID_TAGS.verification, 0)]);
+    expect(objs(c.quads, OKF_VERIFIED_BY, node(GENID_TAGS.verification, 0))).toEqual(['"human:a"']);
     expect(objs(c.quads, OKF_TRUST_TIER)).toEqual(['"human-reviewed"']);
     // the summary counts the same single event
     expect(c.trust).toMatchObject({ tier: 'human-reviewed', verifications: 1 });
-    // the diagnostics name the skipped entry by the same index
+    // the diagnostics name the skipped entry by its position as written
     expect(r.warnings.map((w) => w.message)).toContain('`verified[0].by` is missing (§5.2); the event cannot name a verifier and is skipped');
     // and export writes back only the usable event
     expect(exportedFrontmatter(bundle('type: Metric\nverified:\n  - { at: 2026-06-26T02:00:00Z }\n  - { by: human:a, at: 2026-06-27T02:00:00Z }')).verified).toEqual([

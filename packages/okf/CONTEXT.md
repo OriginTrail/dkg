@@ -61,8 +61,12 @@ namespace (`http://dkg.io/ontology/okf/`) plus `prov:` and the existing
 `schema:` terms. Single values sit flat on the concept; each entry of a
 list-valued family (`sources`, `verified`, `parameters`) becomes a **family
 node** — a skolemized IRI `<conceptIri>/.well-known/genid/okf{src,ver,param}_<id>_<n>`
-typed `okf:Source` / `okf:Verification` / `okf:Parameter`, with the entry index
-`n` in the IRI so export restores the original order.
+typed `okf:Source` / `okf:Verification` / `okf:Parameter`, with `n` the entry's
+position among the usable entries: export restores the original order from it,
+and because a skipped entry (a `verified` entry without `by`, an entry that is
+not a mapping) takes no number, re-importing an export, which writes only the
+usable entries, mints the same IRIs. Warnings name an entry by its position in
+the list as written.
 
 **Family definition** (`src/families/specs.ts`):
 The one declaration of a family: its shape (scalar, mapping or list), its
@@ -243,7 +247,7 @@ it; the CLI summary reports it against the current time.
   keys in a canonical order (by RDF term), not the order the source bundle or
   the store happened to use. A single-valued field that somehow holds two
   values exports the same one either way. `parameters`, `verified` and
-  `sources` keep their order because the entry index is in the node IRI, and a
+  `sources` keep their order because the node IRI numbers the entries, and a
   value kept verbatim as one `rdf:JSON` literal keeps its internal order.
 - **Both `timestamp` and `generated` present.** Unusual (a migration leftover).
   `generated.at` → `schema:dateModified`; `timestamp` → `schema:timestamp` (the

@@ -9,12 +9,19 @@ import { isBlank, isMapping, isScalar } from '../utils.js';
 import type { ListFamilySpec } from './specs.js';
 
 export interface ParsedEntry {
-  /** Position in the frontmatter list (0 for a bare mapping); the node IRI carries it. */
+  /** Position in the frontmatter list (0 for a bare mapping); warnings name the entry by it. */
   readonly index: number;
   /** The entry when it is a mapping, else `null`. */
   readonly mapping: Record<string, unknown> | null;
   /** Whether the entry becomes a node: a mapping whose every `skipEntryWhenBlank` field holds one non-blank value. */
   readonly usable: boolean;
+  /**
+   * The number its node IRI carries: its position among the usable entries,
+   * or `null` when it is skipped. A skipped entry takes no number, so the IRIs
+   * are the same after an export, which writes only the usable entries, and
+   * a re-import.
+   */
+  readonly node: number | null;
 }
 
 export interface ParsedList {
@@ -30,12 +37,13 @@ export function parseList(spec: ListFamilySpec, value: unknown): ParsedList {
       ? [value]
       : null;
   if (raw === null) return { shape: 'invalid', entries: [] };
+  let nodes = 0;
   const entries = raw.map((entry, index): ParsedEntry => {
     const mapping = isMapping(entry) ? entry : null;
     const usable =
       mapping !== null &&
       spec.fields.every((f) => !f.skipEntryWhenBlank || (isScalar(mapping[f.key]) && !isBlank(mapping[f.key])));
-    return { index, mapping, usable };
+    return { index, mapping, usable, node: usable ? nodes++ : null };
   });
   return { shape: Array.isArray(value) ? 'list' : 'mapping', entries };
 }

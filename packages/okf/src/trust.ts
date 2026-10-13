@@ -122,7 +122,8 @@ export interface ParsedVerification {
  * names no verifier and is not an event. Which entries are usable is decided
  * by the `verified` family spec (`families/specs.ts`) through `parseList`, the
  * same classification the RDF mapping, the diagnostics and the summary counts
- * read, so an event keeps the index of its node IRI.
+ * read, so the events are exactly the entries that become nodes; each keeps
+ * its entry's position in the list.
  */
 export function parseVerified(value: unknown): ParsedVerification {
   if (value === undefined || value === null) return { shape: 'absent', entries: [], events: [] };

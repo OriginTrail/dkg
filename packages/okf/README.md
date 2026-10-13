@@ -126,7 +126,8 @@ import. A concept that only carries a last-modified time (a v0.1 import) is
 written with the legacy `timestamp` key — `generated` requires a `by` actor and
 the exporter never invents provenance. A graph keeps no order, so export
 depends only on which triples it holds: entry order is restored from the node
-IRIs, and everything else is written in a canonical order, so two stores holding
+IRIs (a skipped entry takes no number, so they are the same after a round
+trip), and everything else is written in a canonical order, so two stores holding
 the same graph export the same bytes whatever order they return rows in. Known
 deviations: set-valued lists (`tags`, `authors`, `executor.receipt`, links,
 citations) and producer keys come back in canonical order (a value kept

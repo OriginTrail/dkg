@@ -5,8 +5,9 @@
  *   - a mapping family puts its fields flat on its subject;
  *   - a list family mints one skolemized node per usable entry
  *     (`<concept>/.well-known/genid/<tag><id>_<n>`, typed with the family's
- *     class and linked from the concept), with the entry index `n` in the IRI
- *     so export restores the order;
+ *     class and linked from the concept), `n` numbering the usable entries in
+ *     order: export restores the order from it, and a skipped entry takes no
+ *     number, so re-importing an export mints the same IRIs;
  *   - every key a family does not define is an extension, kept under
  *     `okf:<familyKey>.<key>` on the same subject;
  *   - a value of the wrong shape is kept verbatim as a producer key
@@ -167,9 +168,9 @@ function encodeList(enc: Encoding, spec: ListFamilySpec, value: unknown): void {
   }
   let nodes = 0;
   for (const entry of parsed.entries) {
-    if (!entry.usable || entry.mapping === null) continue;
+    if (entry.node === null || entry.mapping === null) continue;
     nodes += 1;
-    const node = nodeIri(enc.iri, spec.tag, enc.conceptId, entry.index);
+    const node = nodeIri(enc.iri, spec.tag, enc.conceptId, entry.node);
     enc.out.push({ subject: enc.iri, predicate: spec.link, object: node });
     enc.out.push({ subject: node, predicate: RDF_TYPE, object: spec.nodeClass });
     encodeFields(enc, spec, node, entry.mapping, `${spec.key}[${entry.index}]`);

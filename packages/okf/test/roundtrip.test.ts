@@ -401,3 +401,27 @@ describe('export depends only on which triples the graph holds', () => {
     expect(titleOf([typed, a, b])).toBe(titleOf([b, typed, a]));
   });
 });
+
+describe('a skipped list entry leaves the family node IRIs unchanged by a round trip', () => {
+  // Export writes only the usable entries, so a node IRI must number the
+  // usable entries, not the positions as written, or re-import renames every
+  // node after a skipped one (and both graphs together hold duplicates).
+  const cases: Array<[string, string, string]> = [
+    ['verified', 'verified:\n  - { at: 2026-06-26T02:00:00Z }\n  - { by: human:a, at: 2026-06-27T02:00:00Z }\n  - { by: process:p }', GENID_TAGS.verification],
+    ['sources', 'sources:\n  - nope\n  - { id: s, resource: https://x.example/s }\n  - { id: p, resource: /policies/revenue-recognition.md }', GENID_TAGS.source],
+    ['parameters', 'parameters:\n  - 42\n  - { name: year, type: integer, required: true }\n  - { name: region, type: string }', GENID_TAGS.parameter],
+  ];
+  for (const [family, yaml, tag] of cases) {
+    it(`${family}: the usable entries are nodes 0 and 1, before and after export`, () => {
+      const files = bundle(`type: Attested Computation\nruntime: bigquery\n${yaml}`);
+      const first = importBundle(files);
+      const second = importBundle(exportBundle(first));
+      expect(semantic(second.quads)).toBe(semantic(first.quads));
+      const nodes = (quads: Quad[]) => [...new Set(quads.map((q) => q.subject).filter((s) => s.includes(SECTION_GENID_INFIX + tag)))].sort();
+      expect(nodes(first.quads)).toEqual([0, 1].map((n) => `urn:okf:metrics/revenue${SECTION_GENID_INFIX}${tag}metrics_revenue_${n}`));
+      expect(nodes(second.quads)).toEqual(nodes(first.quads));
+      // A warning still names the skipped entry by its position as written.
+      expect(first.warnings.some((w) => w.message.includes(`${family}[0]`))).toBe(true);
+    });
+  }
+});
