@@ -83,6 +83,7 @@
     "./dist/rfc64/applied-catalog-authority-transition-v1.js": null,
     "./dist/rfc64/catalog-semantic-authority-transition-v1.js": null,
     "./dist/rfc64/public-catalog-native-errors-v1.js": null,
+    "./dist/rfc64/projection-store-read-back-v1.js": null,
     "./dist/rfc64/catalog-applied-head-coordinator-v1.js": null,
     "./dist/rfc64/catalog-synchronization-evidence-v1.js": null,
     "./dist/rfc64/finalized-private-placement-repair-store-v1.js": null,

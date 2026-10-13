@@ -896,6 +896,86 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
   }, 30_000);
 
+  // A store may return a typed literal in its own lexical form of the same
+  // value, and that form may be longer than the canonical one the projection
+  // carries. These are the forms a second store engine returned.
+  const postReadStoreReturning = (
+    receiverStore: TripleStore,
+    storedForm: (object: string) => string,
+  ): TripleStore => new Proxy(receiverStore, {
+    get(target, property) {
+      if (property === 'query') {
+        return async (...args: Parameters<TripleStore['query']>) => {
+          const result = await target.query(...args);
+          if (
+            args[1]?.source === 'rfc64-public-catalog-native-post-read'
+            && result.type === 'bindings'
+            && result.bindings.length > 1
+          ) {
+            return {
+              ...result,
+              bindings: result.bindings.map((binding) => ({
+                ...binding,
+                o: storedForm(String(binding.o)),
+              })),
+            };
+          }
+          return result;
+        };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  }) as TripleStore;
+
+  it('accepts an exact projection when the store post-read returns literals in its own lexical form', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    const XSD = 'http://www.w3.org/2001/XMLSchema#';
+    const storeForms = new Map([
+      ['"Alice"', `"Alice"^^<${XSD}string>`],
+      [`"42"^^<${XSD}integer>`, `"42"^^<${XSD}int>`],
+    ]);
+    const returned: string[] = [];
+    const observed = fixture.createCasObservedReceiver(
+      undefined,
+      postReadStoreReturning(fixture.receiverStore, (object) => {
+        const stored = storeForms.get(object) ?? object;
+        returned.push(stored);
+        return stored;
+      }),
+    );
+
+    await expect(fixture.synchronize(fixture.announcement, observed.receiver))
+      .resolves.toMatchObject({
+        appliedHeadStatus: 'applied',
+        inventoryRowCount: 1,
+        activatedTripleCount: 2,
+      });
+    // Both rows came back in the other form, and one of them longer than the
+    // projection's own bytes allow.
+    expect([...returned].sort()).toEqual([...storeForms.values()].sort());
+    expect(observed.compareAndSwapAppliedCatalogHeadV1).toHaveBeenCalledOnce();
+  }, 30_000);
+
+  it('rejects a post-read that returns far more bytes than the projection before the applied-head CAS', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    const observed = fixture.createCasObservedReceiver(
+      undefined,
+      postReadStoreReturning(fixture.receiverStore, (object) => (
+        object === '"Alice"' ? `"${'A'.repeat(400)}"` : object
+      )),
+    );
+
+    await expect(fixture.synchronize(fixture.announcement, observed.receiver))
+      .rejects.toMatchObject({
+        code: 'catalog-native-receiver-activation',
+        message: expect.stringContaining('exact SWM post-read failed'),
+      });
+    expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
+  }, 30_000);
+
   it('cold-bootstraps a zero-row successor on a fresh receiver', async () => {
     const fixture = await setupLiveReceiver();
 

@@ -69,11 +69,9 @@ import {
   type VerifiedControlEnvelopeIssuerSignatureV1,
 } from '@origintrail-official/dkg-chain';
 import {
-  quadToNQuad,
   quadsToNQuads,
   readExactGraphPaged,
   tryReplaceGraphAndSubjectAtomically,
-  type Quad,
   type TripleStore,
   invalidateSwmMaterializationWitness,
 } from '@origintrail-official/dkg-storage';
@@ -124,6 +122,7 @@ import {
   failRfc64PublicCatalogNativeV1 as fail,
   Rfc64PublicCatalogNativeReceiverErrorV1,
 } from './public-catalog-native-errors-v1.js';
+import { projectionReadBackByteLimitV1, readBackHoldsProjectionV1 } from './projection-store-read-back-v1.js';
 import {
   deactivateRfc64CatalogOwnedProjectionV1 as deactivateExactOwnedPublicProjection,
   deriveRfc64PublicSwmGraphV1 as derivePublicSwmGraph,
@@ -2426,7 +2425,8 @@ async function activateExactPublicProjection(
     readBack = await readExactGraphPaged(store, swmGraph, {
       expectedQuadCount: expectedTripleCount,
       maxQuadCount: expectedTripleCount,
-      maxNQuadsBytes: projectionBytes.byteLength,
+      // The store may return a term in a longer form than the canonical one.
+      maxNQuadsBytes: projectionReadBackByteLimitV1(projectionText, expectedTripleCount),
       outputGraph: '',
       queryOptions: { source: 'rfc64-public-catalog-native-post-read' },
     });
@@ -2434,21 +2434,18 @@ async function activateExactPublicProjection(
     fail('catalog-native-receiver-activation', 'exact SWM post-read failed', cause);
   }
   const readBackText = `${quadsToNQuads(readBack)}\n`;
-  if (readBackText !== projectionText) {
+  if (readBackText !== projectionText && !readBackHoldsProjectionV1(quads, readBack)) {
     const digest = (value: string) => createHash('sha256').update(value).digest('hex');
-    const setEqual = canonicalQuadSetV1(quads) === canonicalQuadSetV1(readBack);
-    if (!setEqual) {
-      fail(
-        'catalog-native-receiver-activation',
-        `exact SWM post-read differs from verified projection for ${kaUal}`
-          + ` expectedTriples=${expectedTripleCount} actualTriples=${readBack.length}`
-          + ` expectedBytes=${Buffer.byteLength(projectionText)}`
-          + ` actualBytes=${Buffer.byteLength(readBackText)}`
-          + ` expectedSha256=${digest(projectionText)}`
-          + ` actualSha256=${digest(readBackText)}`
-          + ` canonicalSetEqual=${setEqual}`,
-      );
-    }
+    fail(
+      'catalog-native-receiver-activation',
+      `exact SWM post-read differs from verified projection for ${kaUal}`
+        + ` expectedTriples=${expectedTripleCount} actualTriples=${readBack.length}`
+        + ` expectedBytes=${Buffer.byteLength(projectionText)}`
+        + ` actualBytes=${Buffer.byteLength(readBackText)}`
+        + ` expectedSha256=${digest(projectionText)}`
+        + ` actualSha256=${digest(readBackText)}`
+        + ' canonicalSetEqual=false',
+    );
   }
   await assertExactAuthorSealPostRead(store, sealBinding);
   return {
@@ -2517,11 +2514,6 @@ function compareQuads(
     || left.object.localeCompare(right.object)
     || left.subject.localeCompare(right.subject)
     || left.graph.localeCompare(right.graph);
-}
-
-/** RDF graph equality is set equality; triple insertion does not retain row order. */
-function canonicalQuadSetV1(quads: readonly Readonly<Quad>[]): string {
-  return [...new Set(quads.map(quadToNQuad))].sort().join('\n');
 }
 
 export function rfc64CatalogSignatureVariantDigestV1(
