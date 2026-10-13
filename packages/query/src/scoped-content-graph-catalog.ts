@@ -19,8 +19,9 @@ export async function readScopedContentGraphCatalog(
   const prefix = escapeSparqlLiteral(`${root}/`);
   const result = await query(`SELECT DISTINCT ?graph ?name ?assertionGraph ?ctxGraph WHERE {
     {
-      { SELECT DISTINCT ?graph WHERE { GRAPH ?graph { ?s ?p ?o } } }
+      GRAPH ?graph {}
       FILTER(?graph = <${root}> || STRSTARTS(STR(?graph), "${prefix}"))
+      FILTER EXISTS { GRAPH ?graph { ?s ?p ?o } }
     } UNION {
       GRAPH <${meta}> {
         ?subGraph a <http://dkg.io/ontology/SubGraph> ; <http://schema.org/name> ?name .
