@@ -3,12 +3,11 @@
  * fields (`export.ts`) and the family decoder (`families/decode.ts`).
  */
 
+import { parseRdfLiteralTerm, type RdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import { RDF_JSON, XSD_BOOLEAN, XSD_DATE, XSD_DATE_TIME, XSD_DECIMAL, XSD_INTEGER } from './constants.js';
 import { yamlTimestamp } from './document.js';
 import { dict } from './utils.js';
 
-const LITERAL_RE = /^("(?:\\.|[^"\\])*")(?:\^\^<[^>]*>|@[A-Za-z-]+)?$/;
-const TYPED_LITERAL_RE = /^("(?:\\.|[^"\\])*")\^\^<([^>]*)>$/;
 const NODE_INDEX_RE = /_(\d+)$/;
 
 /**
@@ -31,12 +30,19 @@ export interface ExportContext {
   conceptIris: ReadonlySet<string>;
 }
 
-/** Lexical value of a literal term, or `null` if the term is an IRI / blank node. */
+/**
+ * A literal object term, parsed once by the shared RDF parser
+ * (`dkg-rdf-utils`): the canonical form the mapper writes and the stores
+ * return, a surrogate pair written as two short escapes included. `null` for
+ * an IRI, a blank node, or a literal that does not parse.
+ */
+function parseLiteral(term: string): RdfLiteralTerm | null {
+  return term.startsWith('"') ? parseRdfLiteralTerm(term, { combineSurrogatePairs: true }) : null;
+}
+
+/** Lexical value of a literal term, or `null` for an IRI / blank node or a literal that does not parse. */
 export function literalValue(term: string): string | null {
-  if (!term.startsWith('"')) return null;
-  const m = term.match(LITERAL_RE);
-  if (!m) return null;
-  return JSON.parse(m[1]) as string;
+  return parseLiteral(term)?.value ?? null;
 }
 
 /**
@@ -51,11 +57,10 @@ export function literalValue(term: string): string | null {
  * date in a date field, `form` `date`) so callers fall back to the lexical
  * string.
  */
-function typedValue(term: string, form: TermForm): { value: unknown } | null {
-  const m = term.match(TYPED_LITERAL_RE);
-  if (!m) return null;
-  const lexical = JSON.parse(m[1]) as string;
-  switch (m[2]) {
+function typedValue(literal: RdfLiteralTerm, form: TermForm): { value: unknown } | null {
+  if (literal.kind !== 'typed') return null;
+  const lexical = literal.value;
+  switch (literal.datatype) {
     case XSD_INTEGER: {
       const n = Number(lexical);
       return Number.isInteger(n) ? { value: n } : null;
@@ -101,8 +106,11 @@ export function conceptIdFromIri(iri: string, iriBase: string): string | null {
  */
 export function termValue(term: string, ctx: ExportContext, form: TermForm = 'value'): unknown {
   if (term.startsWith('"')) {
-    const typed = typedValue(term, form);
-    return typed ? typed.value : (literalValue(term) ?? term);
+    const literal = parseLiteral(term);
+    // A literal that does not parse is written back as given.
+    if (literal === null) return term;
+    const typed = typedValue(literal, form);
+    return typed ? typed.value : literal.value;
   }
   if (form === 'path' && ctx.conceptIris.has(term)) {
     const id = conceptIdFromIri(term, ctx.iriBase);

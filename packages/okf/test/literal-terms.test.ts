@@ -2,12 +2,16 @@ import { describe, it, expect } from 'vitest';
 import { formatCanonicalRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import {
   exportBundle,
+  exportInputFromQuads,
   importBundle,
   literalTerm,
+  parseDocument,
   quadsToNQuads,
   typedLiteralTerm,
   DKG_HAS_SECTION,
   RDF_JSON,
+  RDF_TYPE,
+  SCHEMA_NAME,
   XSD_DATE_TIME,
 } from '../src/index.js';
 import type { Quad } from '../src/index.js';
@@ -45,5 +49,31 @@ describe('literal terms are written in the canonical RDF form', () => {
     expect(fm.note).toBe(AWKWARD);
     expect((fm.executor as Record<string, unknown>).memo).toBe(AWKWARD);
     expect(fm.owner).toEqual({ label: AWKWARD, lone: '\uD800' });
+  });
+});
+
+describe('export reads literals with the shared RDF parser', () => {
+  const iri = 'urn:okf:x';
+  const typed: Quad = { subject: iri, predicate: RDF_TYPE, object: 'http://schema.org/Thing' };
+  const exported = (quads: Quad[]) => {
+    const file = exportBundle(exportInputFromQuads(quads)).find((f) => f.path === 'x.md')!;
+    return parseDocument('x.md', file.content).frontmatter;
+  };
+
+  it('decodes every escape N-Triples allows, as a store may return them', () => {
+    const fm = exported([
+      typed,
+      // a long UCHAR, a surrogate pair as two short escapes, an escaped single quote
+      { subject: iri, predicate: SCHEMA_NAME, object: `"smile \\U0001F642 pair \\uD83D\\uDE42 it\\'s"` },
+      { subject: iri, predicate: 'http://schema.org/note', object: '"hello"@en' },
+    ]);
+    expect(fm.title).toBe("smile 🙂 pair 🙂 it's");
+    expect(fm.note).toBe('hello');
+  });
+
+  it('writes a literal that does not parse back as given instead of throwing', () => {
+    // A raw line break is not canonical N-Triples.
+    const raw = '"line one\nline two"';
+    expect(exported([typed, { subject: iri, predicate: 'http://schema.org/note', object: raw }]).note).toBe(raw);
   });
 });
