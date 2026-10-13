@@ -80,7 +80,7 @@ export class PublicSnapshotEvidence implements DurableRecoveryAuthority {
     }
   }
   readonly coalescing = 'owner-only' as const;
-  readonly assets: Map<string, PublicGraphSnapshot["assets"][number]>;
+  private readonly assets: ReadonlyMap<string, PublicGraphSnapshot["assets"][number]>;
   constructor(
     readonly observation: PublicSnapshotObservation,
     readonly isCurrent: () => boolean,

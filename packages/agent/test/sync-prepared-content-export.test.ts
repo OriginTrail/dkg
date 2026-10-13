@@ -47,6 +47,31 @@ describe('cold prepared writes retain source fences and response ownership', () 
 });
 
 describe('prepared assertion reuse across responder restarts', () => {
+  it('reuses persisted bytes after a process generation reset and fences the new response', async () => {
+    const f = fixture(4), directory = mkdtempSync(join(tmpdir(), 'prepared-generation-reset-'));
+    let generation = 7;
+    Object.assign(f.store, { getWriteRevision: () => ({ generation, stable: true }) });
+    const config = resolvePreparedContentCacheConfig({ enabled: true, directory })!;
+    const restart = () => createBoundedExactAssetExportCache({ store: f.store, budget: f.budget,
+      preparedContentCache: createPreparedContentCache(config) });
+    try {
+      const cold = (await restart().acquireEncoded(f))!;
+      await cold.assertCurrent(); const expected = cold.body.slice(); cold.release();
+      generation = 0;
+      const restarted = restart(); f.reads.length = 0;
+      const warm = (await restarted.acquireEncoded(f))!;
+      try {
+        expect(warm.body).toEqual(expected);
+        expect(warm.wholePayloadExports).toBe(0);
+        expect(restarted.stats()).toMatchObject({ exports: 0, preparedCacheHits: 1 });
+        await warm.assertCurrent();
+        expect(f.reads.every(read => read.options?.source?.endsWith('.metadata'))).toBe(true);
+        generation++;
+        await expect(warm.assertCurrent()).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_CHANGED' });
+      } finally { warm.release(); }
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+  });
+
   it('serves prepared bytes when memory retention declines and keeps the response charged and fenced', async () => {
     const f = fixture(4), directory = mkdtempSync(join(tmpdir(), 'prepared-no-retain-'));
     const config = resolvePreparedContentCacheConfig({ enabled: true, directory })!;
