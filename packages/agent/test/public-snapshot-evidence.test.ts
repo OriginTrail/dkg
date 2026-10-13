@@ -67,6 +67,11 @@ describe("job-scoped public snapshot evidence", () => {
     let current = true;
     const evidence = new PublicSnapshotEvidence({snapshot, mode: "core-cache", sourceCore: "configured-core"}, () => current,
     );
+    expect(evidence.isRegisteredPublic(graph)).toBe(true);
+    expect(evidence.isRegisteredPublic('other-graph')).toBe(false);
+    const cancelled = new AbortController(); cancelled.abort(new Error('cancelled job'));
+    expect(evidence.isRegisteredPublic(graph, cancelled.signal)).toBe(false);
+    expect(() => evidence.authenticate(asset(), Infinity, cancelled.signal)).toThrow('cancelled job');
     const result = evidence.authenticate(asset());
     expect(
       result.asset.metadataQuads.some((q) =>
@@ -79,6 +84,7 @@ describe("job-scoped public snapshot evidence", () => {
         .map((q) => q.object),
     ).toEqual(['"core-cache"']);
     current = false;
+    expect(evidence.isRegisteredPublic(graph)).toBe(false);
     expect(() => evidence.authenticate(asset())).toThrow("no longer current");
   });
   it.each(["root", "version", "graph", "identity"])(

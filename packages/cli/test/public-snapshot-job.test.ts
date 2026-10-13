@@ -54,6 +54,19 @@ describe("public snapshot administrator API", () => {
     expect((await fetch(url, {method:'POST',body:' '.repeat(4097)})).status).toBe(413);
     expect(sync).toHaveBeenCalledTimes(1);
   });
+  it('shares distinct-peer normalization and rejects malformed domain values before dispatch', async () => {
+    const sync = vi.fn(async () => ({})), url = await serve(true, sync);
+    const request = JSON.parse(body);
+    expect((await fetch(url, { method: 'POST', body: JSON.stringify({ ...request, trustedCorePeerIds: Array(5).fill('core') }) })).status).toBe(202);
+    expect(sync).toHaveBeenCalledWith({ ...request, mode: 'core-cache', trustedCorePeerIds: ['core'] });
+    await vi.waitFor(async () => expect((await (await fetch(url)).json()).state).toBe('complete'));
+    sync.mockClear();
+    for (const patch of [{ mode: 'unknown' }, { contextGraphId: '../bad' }, { onChainId: '0' },
+      { trustedCorePeerIds: [] }, { trustedCorePeerIds: ['a', 'b', 'c', 'd', 'e'] }, { trustedCorePeerIds: [1] }]) {
+      expect((await fetch(url, { method: 'POST', body: JSON.stringify({ ...request, ...patch }) })).status).toBe(400);
+    }
+    expect(sync).not.toHaveBeenCalled();
+  });
   it("starts one owned job, refuses duplicates, and preserves terminal failure", async () => {
     let reject!: (error: Error) => void;
     const held = new Promise((_, r) => {
