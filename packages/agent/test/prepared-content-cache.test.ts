@@ -61,8 +61,16 @@ describe('persistent prepared content', () => {
     const file = (await readdir(f.directory)).find(name => name.endsWith('.prepared'))!;
     await rm(join(f.directory, file)); await symlink(join(f.directory, 'unrelated'), join(f.directory, file));
     expect(await f.restart().get('../not-a-path')).toBeNull();
+    await f.cache.put('key', value);
+    expect(await f.restart().get('key')).toEqual(value);
+    const before = await readFile(entryPath(f.directory, 'key'));
     const link = join(f.directory, 'link'); await symlink(f.directory, link);
-    expect(await createPreparedContentCache({ ...f.options, directory: link }).get('key')).toBeNull();
+    const linked = createPreparedContentCache({ ...f.options, directory: link });
+    expect(await linked.get('key')).toBeNull();
+    await linked.put('key', { body: new Uint8Array([1, 2, 3]), plainBytes: 3 });
+    await linked.put('new-key', value);
+    expect(await readFile(entryPath(f.directory, 'key'))).toEqual(before);
+    expect(await f.restart().get('new-key')).toBeNull();
     expect(await readFile(join(f.directory, 'unrelated'), 'utf8')).toBe('keep');
   });
   it('refuses a symlink replacing an indexed entry even when its target is valid prepared content', async () => {
