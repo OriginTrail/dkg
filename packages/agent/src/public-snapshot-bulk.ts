@@ -39,13 +39,14 @@ export async function recoverPublicSnapshotBulk(agent: DKGAgent, options: Public
     }
   }
   if (!supplier) throw new Error('Configured cores do not support bulk graph v1');
-  const committed = new Set<string>(), chunks: BulkGraphMetrics[] = [];
+  let committedCount = 0;
+  const chunks: BulkGraphMetrics[] = [];
   const ctx = createOperationContext('sync');
-  while (committed.size < options.uals.length) {
+  while (committedCount < options.uals.length) {
     assertCurrent();
     const request: BulkGraphRequest = { version: 1, contextGraphId,
       snapshotDigest: options.evidence.snapshot.snapshotDigest,
-      assetUals: options.uals.filter(ual => !committed.has(ual)).slice(0, BULK_GRAPH_MAX_ASSETS) };
+      assetUals: options.uals.slice(committedCount, committedCount + BULK_GRAPH_MAX_ASSETS) };
     const result = await exchangeBulkGraphVerified(agent.router, supplier, request,
       bulkGraphTransportOptions(Math.max(1, options.deadline - Date.now()), signal),
       {
@@ -69,8 +70,8 @@ export async function recoverPublicSnapshotBulk(agent: DKGAgent, options: Public
         onMetrics: metrics => options.log(`Bulk snapshot progress ${JSON.stringify(metrics)}`),
       });
     if (!result.committedAssetUals.length) throw new Error('Bulk snapshot made no durable progress');
-    for (const ual of result.committedAssetUals) committed.add(ual);
+    committedCount += result.committedAssetUals.length;
     chunks.push(result.metrics);
   }
-  return { committed, bulkChunks: chunks };
+  return { committed: new Set(options.uals.slice(0, committedCount)), bulkChunks: chunks };
 }

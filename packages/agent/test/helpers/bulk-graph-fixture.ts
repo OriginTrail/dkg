@@ -25,6 +25,7 @@ const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const close of cleanups.reverse()) await close(); cleanups.length = 0; });
 export async function fixture(count = 20, corruptAt = -1, failClose = false, hooks: {
   beforePublish?: () => Promise<void>; onControl?: (frame: BulkGraphFrame) => void;
+  beforeSend?: (frame: BulkGraphFrame) => Promise<void>; observe?: () => unknown;
   payloadBytes?: readonly number[]; expandedLengthMismatch?: boolean; tamperDigest?: 'asset' | 'chunk';
 } = {}) {
   const directory = await mkdtemp(join(tmpdir(),'dkg-bulk-test-')); cleanups.push(() => rm(directory,{recursive:true,force:true}));
@@ -87,11 +88,12 @@ export async function fixture(count = 20, corruptAt = -1, failClose = false, hoo
   const exports: number[] = [];
   let markPrefixCommitted!: () => void;
   const prefixCommitted = new Promise<void>(resolve => { markPrefixCommitted = resolve; });
-  if (hooks.tamperDigest) {
+  if (hooks.tamperDigest || hooks.beforeSend) {
     const register = server.registerDuplexStream.bind(server);
     server.registerDuplexStream = (protocol, prepare, respond, options) => register(protocol, prepare, async context => {
       const session = context.continuation as unknown as BulkGraphSession, send = session.send.bind(session);
       session.send = async frame => {
+        await hooks.beforeSend?.(frame);
         if ((hooks.tamperDigest === 'asset' && frame.kind === K.META && frame.index === 0)
           || (hooks.tamperDigest === 'chunk' && frame.kind === K.CHUNK_END)) {
           if (frame.kind === K.CHUNK_END) await prefixCommitted;
@@ -115,7 +117,7 @@ export async function fixture(count = 20, corruptAt = -1, failClose = false, hoo
       return lease && hooks.expandedLengthMismatch ? { ...lease, plainBytes: lease.plainBytes + 1 } : lease;
     }} as typeof resources.exportCache,
     authorizeSyncRequest:async()=>true,isPublicContextGraph:async graph=>graph===cg,
-    onExport:(_,n)=>exports.push(n)});
+    onExport:(_,n)=>{ exports.push(n); return hooks.observe?.(); }});
   const worker = new SyncVerifyWorker(); cleanups.push(() => worker.close());
   const request: BulkGraphRequest = {version:1,contextGraphId:cg,snapshotDigest:'a'.repeat(64),assetUals:uals};
   const groups: number[]=[]; const heaps: number[]=[];
@@ -139,7 +141,7 @@ export async function fixture(count = 20, corruptAt = -1, failClose = false, hoo
   }
   const cancellation = new AbortController();
   const run = () => exchangeBulkGraphVerified(router,nodes[1]!.peerId,request,bulkGraphTransportOptions(20_000,cancellation.signal),
-    {stagingRoot:directory,
+    {stagingRoot:directory, onMetrics: hooks.observe,
       verification:{contextGraphId:cg,assetUals:uals,ctx:createOperationContext('sync'),
         parseAndFilter:worker.parseAndFilter.bind(worker),processDurableBatchInWorker:(data,meta,_ctx,accept,mode)=>worker.processDurableBatch(data,meta,accept,mode),
       },

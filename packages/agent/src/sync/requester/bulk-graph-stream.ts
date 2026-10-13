@@ -47,7 +47,7 @@ export async function consumeBulkGraph(session: BulkGraphSession, request: BulkG
   const metrics: BulkGraphMetrics = { encodedBytes: 0, receivedAssets: 0, verifiedAssets: 0, committedAssets: 0,
     commitGroups: 0, largestGroup: 0, peakStagedBytes: 0, commitMs: 0 };
   const committed: string[] = [];
-  const observe = () => { try { options.onMetrics?.({ ...metrics }); } catch { /* diagnostic only */ } };
+  const observe = () => observeExactBatch(() => options.onMetrics?.({ ...metrics }));
   const hash = bulkChunkHash(request);
   const reader = (async () => {
     for (;;) {

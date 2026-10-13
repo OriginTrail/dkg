@@ -4,6 +4,29 @@ import { BulkGraphPartialError } from '../src/sync/requester/bulk-graph-stream.j
 import { fixture, cg } from './helpers/bulk-graph-fixture.js';
 
 describe('bulk public graph stream over real Noise sockets and verifier', () => {
+  it('publishes a timed group while the next frame and chunk end are withheld', async () => {
+    const controls: BulkGraphFrame[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const f = await fixture(1, -1, false, {
+      beforeSend: async frame => { if (frame.kind === K.CHUNK_END) await gate; },
+      onControl: frame => { controls.push(frame); },
+    });
+    const run = f.run();
+    try {
+      await expect.poll(() => controls.filter(x => x.kind === K.CREDIT).length, { timeout: 5000 }).toBe(1);
+      await expect.poll(() => controls.filter(x => x.kind === K.COMMIT).map(x => x.index), { timeout: 5000 }).toEqual([0]);
+      expect(await f.target.countQuads()).toBeGreaterThan(0);
+    } finally { release(); await run; }
+  }, 15_000);
+  it.each(['throw', 'reject'])('isolates %s from responder and requester observers', async mode => {
+    const f = await fixture(1, -1, false, { observe: () => {
+      if (mode === 'throw') throw new Error('diagnostic failure');
+      return Promise.reject(new Error('diagnostic failure'));
+    } });
+    expect((await f.run()).committedAssetUals).toEqual(f.uals);
+    expect(await f.target.countQuads()).toBeGreaterThan(0);
+  });
   it.each([false, true])('withholds durable ACK while publication is pending or rejected (reject=%s)', async reject => {
     const controls: BulkGraphFrame[] = [];
     let release!: () => void, entered!: () => void;
