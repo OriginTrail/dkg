@@ -832,7 +832,13 @@ function exactProbeIsLocallyWritable(
   if (!requireLocalWritable) {
     return hasActiveSyncedSubscription(probe) || probe.hasLocalContent === true || probe.declarationFound === true;
   }
-  return hasActiveSyncedSubscription(probe) || probe.hasLocalContent === true;
+  // A private graph created on this node deliberately never subscribes to
+  // gossip and has no content before its first write. The durable local-origin
+  // journal plus its store-backed declaration proves it is ready locally;
+  // the caller authorization check remains in exactProbeCanFastAccept.
+  return hasActiveSyncedSubscription(probe) || probe.hasLocalContent === true || (
+    probe.locallyCreated === true && probe.declarationFound === true
+  );
 }
 
 function exactProbeCanFastAccept(

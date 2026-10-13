@@ -1093,6 +1093,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       storeAvailable: !storeUnavailable,
       ...(exists !== undefined ? { exists } : {}),
       ...(hasLocalContent !== undefined ? { hasLocalContent } : {}),
+      locallyCreated: this.localContextGraphProvenance.hasLocalCreate(contextGraphId),
       ...(inMemorySubscription
         ? { inMemorySubscription: {
             subscribed: inMemorySubscription.subscribed,
