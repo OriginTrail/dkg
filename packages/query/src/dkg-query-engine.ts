@@ -1,3 +1,4 @@
+import { registeredSubGraphPattern, decodeRegisteredSubGraphName } from './registered-sub-graphs.js';
 import { readScopedContentGraphCatalog } from './scoped-content-graph-catalog.js';
 import { staticScopedRouteGraphs } from './static-scoped-route-graphs.js';
 import { storeOptions } from './query-store-options.js';
@@ -1061,20 +1062,12 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     reads: StoreReadLane,
   ): Promise<Set<string>> {
     const names = new Set<string>();
-    const metaGraph = contextGraphMetaUri(contextGraphId);
-    const result = await reads.query(
-      `SELECT ?name WHERE {
-        GRAPH <${assertSafeIri(metaGraph)}> {
-          ?subGraph a <http://dkg.io/ontology/SubGraph> ;
-                    <http://schema.org/name> ?name .
-        }
-      }`,
-    );
+    const result = await reads.query(`SELECT ?name WHERE { ${registeredSubGraphPattern(contextGraphId)} }`);
     if (result.type !== 'bindings') return names;
 
     for (const row of result.bindings) {
-      const name = stripSparqlLiteralValue(row['name']);
-      if (validateSubGraphName(name).valid) {
+      const name = decodeRegisteredSubGraphName(row['name']);
+      if (name !== undefined) {
         names.add(name);
       }
     }

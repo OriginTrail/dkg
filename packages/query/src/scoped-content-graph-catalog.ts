@@ -1,4 +1,5 @@
-import { assertSafeIri, contextGraphDataUri, contextGraphMetaUri, escapeSparqlLiteral, validateSubGraphName } from '@origintrail-official/dkg-core';
+import { registeredSubGraphPattern, decodeRegisteredSubGraphName } from './registered-sub-graphs.js';
+import { assertSafeIri, contextGraphDataUri, contextGraphMetaUri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
 import type { QueryResult } from '@origintrail-official/dkg-storage';
 
 /** One fresh store admission for the inventory and its scope authority.
@@ -21,11 +22,11 @@ export async function readScopedContentGraphCatalog(
     {
       GRAPH ?graph {}
       FILTER(?graph = <${root}> || STRSTARTS(STR(?graph), "${prefix}"))
-      FILTER EXISTS { GRAPH ?graph { ?s ?p ?o } }
+      # A bounded existence probe keeps Blazegraph from scanning an entire
+      # graph for EXISTS, while retaining empty-graph exclusion on Oxigraph.
+      FILTER EXISTS { SELECT ?graph WHERE { GRAPH ?graph { ?s ?p ?o } } LIMIT 1 }
     } UNION {
-      GRAPH <${meta}> {
-        ?subGraph a <http://dkg.io/ontology/SubGraph> ; <http://schema.org/name> ?name .
-      }
+      ${registeredSubGraphPattern(contextGraphId)}
     } UNION {
       GRAPH <${meta}> { ?assertion <http://dkg.io/ontology/assertionGraph> ?assertionGraph . }
     } UNION {
@@ -46,8 +47,8 @@ export async function readScopedContentGraphCatalog(
     if (row.graph && (row.graph === root || row.graph.startsWith(`${root}/`))) catalog.graphs.add(row.graph);
     if (row.assertionGraph) catalog.assertionGraphs.add(row.assertionGraph);
     if (row.ctxGraph) catalog.childContextGraphs.add(row.ctxGraph);
-    const name = (row.name ?? '').replace(/^"/, '').replace(/"(?:\^\^<[^>]+>|@[a-zA-Z-]+)?$/, '');
-    if (validateSubGraphName(name).valid) catalog.subGraphs.add(name);
+    const name = decodeRegisteredSubGraphName(row.name);
+    if (name !== undefined) catalog.subGraphs.add(name);
   }
   return catalog;
 }
