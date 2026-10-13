@@ -1414,7 +1414,7 @@ describe('ProtocolRouter', () => {
       let returned = false;
       return {
         writeStatus: 'open' as const,
-        send: () => undefined,
+        send: (_bytes: Uint8Array): void => undefined,
         close: async () => undefined,
         abort: () => undefined,
         async *[Symbol.asyncIterator]() {
@@ -1797,12 +1797,8 @@ describe('ProtocolRouter', () => {
         addresses: [{ multiaddr: { toString: () => '/ip4/1.2.3.4/tcp/4001' } }],
       });
 
-      function limitedConnection(newStream: () => Promise<unknown>) {
-        return {
-          status: 'open',
-          limits: { bytes: 1024 * 1024 },
-          newStream: newStream as () => Promise<ReturnType<typeof makeStubStream>>,
-        };
+      function limitedConnection(newStream: () => Promise<ReturnType<typeof makeStubStream>>) {
+        return { status: 'open', limits: { bytes: 1024 * 1024 }, newStream };
       }
 
       it('is sent on the open limited connection when the dial ends in a closed duplicate', async () => {
