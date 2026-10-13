@@ -706,8 +706,8 @@ export class ProtocolRouter {
    * multistream negotiation reflects the live handler table. A successful
    * probe opens and immediately aborts the stream before any payload bytes.
    */
-  async probeProtocol(peerIdStr: string, protocolId: string, timeoutMs = 3_000): Promise<ProtocolProbeOutcome> {
-    const lifecycle = startRequestAbortLifecycle(timeoutMs, [this.node.stopSignal]);
+  async probeProtocol(peerIdStr: string, protocolId: string, timeoutMs = 3_000, parentSignal?: AbortSignal): Promise<ProtocolProbeOutcome> {
+    const lifecycle = startRequestAbortLifecycle(timeoutMs, [parentSignal, this.node.stopSignal]);
     const signal = lifecycle.signal;
     try {
       await this.requirePeerAccepted(peerIdStr, protocolId, 'outbound', { signal, timeoutMs });
@@ -724,7 +724,7 @@ export class ProtocolRouter {
       }
       return 'supported';
     } catch (error) {
-      if (this.node.stopSignal?.aborted) throw error;
+      if (parentSignal?.aborted || this.node.stopSignal?.aborted) throw error;
       return isProtocolUnsupportedError(error) ? 'unsupported' : 'unavailable';
     } finally {
       lifecycle.release();

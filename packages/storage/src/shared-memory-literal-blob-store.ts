@@ -132,16 +132,14 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
 
   async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
     if (!this.inner.replaceAssetGroup) throw new UnsupportedTripleStoreCapabilityError('replaceAssetGroup', 'group-decorator');
-    const quads = assets.flatMap(a => [...a.graphQuads, ...a.metadataQuads]);
-    await this.withExternalizedQuads(quads, externalized => {
-      let offset = 0;
-      const replaced = assets.map(a => {
-        const graphQuads = externalized.slice(offset, offset += a.graphQuads.length);
-        const metadataQuads = externalized.slice(offset, offset += a.metadataQuads.length);
-        return { ...a, graphQuads, metadataQuads };
-      });
-      return this.inner.replaceAssetGroup!(replaced, options);
-    });
+    const replaced = await Promise.all(assets.map(async asset => {
+      const [graphQuads, metadataQuads] = await Promise.all([
+        Promise.all(asset.graphQuads.map(quad => this.externalizeInsertQuad(quad))),
+        Promise.all(asset.metadataQuads.map(quad => this.externalizeInsertQuad(quad))),
+      ]);
+      return { ...asset, graphQuads, metadataQuads };
+    }));
+    await this.inner.replaceAssetGroup(replaced, options);
   }
 
   async replaceGraphAndSubject(

@@ -173,11 +173,13 @@ describe('ProtocolRouter releases per-send abort signals (#2812)', () => {
     expect(attachedTo(stop.signal)).toEqual({ listeners: 0, dependants: 0 });
   });
 
-  it('leaves nothing on node.stopSignal after a protocol probe', async () => {
+  it('leaves nothing on node.stopSignal or the caller signal after a protocol probe', async () => {
     const stop = new AbortController();
+    const caller = new AbortController();
     const router = new ProtocolRouter(makeNode(stop.signal, async () => respondingStream()), { peerResolver });
 
-    await expect(router.probeProtocol(FAKE_PEER_ID, PROTOCOL, 60_000)).resolves.toBe('supported');
+    await expect(router.probeProtocol(FAKE_PEER_ID, PROTOCOL, 60_000, caller.signal)).resolves.toBe('supported');
     expect(attachedTo(stop.signal)).toEqual({ listeners: 0, dependants: 0 });
+    expect(attachedTo(caller.signal)).toEqual({ listeners: 0, dependants: 0 });
   });
 });

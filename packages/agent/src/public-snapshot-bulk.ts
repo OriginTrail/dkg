@@ -24,10 +24,18 @@ export async function recoverPublicSnapshotBulk(agent: DKGAgent, options: Public
       signal.throwIfAborted(); assertCurrent();
       const protocols = await agent.getPeerProtocols(peer);
       signal.throwIfAborted(); assertCurrent();
-      if (protocols.includes(BULK_GRAPH_PROTOCOL)) { supplier = peer; break; }
+      // Identify may still be in flight. Negotiate the live handler before
+      // excluding a configured core, without sending an application request.
+      const remaining = options.deadline - Date.now();
+      if (remaining <= 0) throw new Error('Bulk snapshot deadline exceeded');
+      const supported = protocols.includes(BULK_GRAPH_PROTOCOL) ||
+        await agent.router.probeProtocol(peer, BULK_GRAPH_PROTOCOL, Math.min(3_000, remaining), signal) === 'supported';
+      signal.throwIfAborted(); assertCurrent();
+      if (supported) { supplier = peer; break; }
     } catch {
       // A peer-specific probe failure must not discard other configured suppliers.
       signal.throwIfAborted(); assertCurrent();
+      if (Date.now() >= options.deadline) throw new Error('Bulk snapshot deadline exceeded');
     }
   }
   if (!supplier) throw new Error('Configured cores do not support bulk graph v1');
