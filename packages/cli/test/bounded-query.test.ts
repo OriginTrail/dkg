@@ -3,6 +3,8 @@ import { EventEmitter } from 'node:events';
 import { boundSelect, boundedResult } from '../src/daemon/bounded-query.js';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../../query/src/dkg-query-engine.js';
+import { QueryMethods } from '../../agent/src/dkg-agent-query.js';
+import { LifecycleSyncMethods } from '../../agent/src/dkg-agent-lifecycle.js';
 import { handleBoundedQueryRoutes } from '../src/daemon/routes/bounded-query.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
@@ -134,3 +136,88 @@ it('rejects synchronous store results completed after the absolute deadline', as
     expect(JSON.parse(read.res.body).code).toBe('QUERY_DEADLINE_EXCEEDED');
   } finally { await store.close(); }
 });
+
+
+it.each(['complete', 'page'] as const)('executes %s queries with trailing VALUES and comments', async mode => {
+  const store = new OxigraphStore();
+  try {
+    const read = context({ query: async (q: string) => store.query(q) }, { mode, maxRows: 1,
+      offset: mode === 'page' ? 1 : 0,
+      sparql: 'SELECT ?s WHERE { } ORDER BY ?s # modifier comment\nVALUES ?s { <urn:a> <urn:b> } # final comment',
+    });
+    await handleBoundedQueryRoutes(read.ctx);
+    if (mode === 'complete') {
+      expect(read.res.statusCode).toBe(422);
+      expect(JSON.parse(read.res.body)).toMatchObject({ code: 'QUERY_RESULT_TOO_LARGE' });
+      expect(JSON.parse(read.res.body)).not.toHaveProperty('result');
+    } else {
+      expect(read.res.statusCode).toBe(200);
+      expect(JSON.parse(read.res.body)).toMatchObject({ result: { bindings: [{ s: 'urn:b' }] }, hasMore: false, nextOffset: 2 });
+    }
+  } finally { await store.close(); }
+});
+
+it.each([
+  'SELECT ?s WHERE { ?s ?p ?o }',
+  'SELECT ?s WHERE { { SELECT ?s WHERE { ?s ?p ?o } ORDER BY ?s } }',
+])('rejects page requests without outer ordering: %s', async sparql => {
+  const query = vi.fn();
+  const read = context({ query }, { mode: 'page', sparql });
+  await handleBoundedQueryRoutes(read.ctx);
+  expect(read.res.statusCode).toBe(400);
+  expect(query).not.toHaveBeenCalled();
+});
+
+it('rejects oversized materialized bindings even below the row limit', async () => {
+  const read = context({ query: async () => ({ bindings: [{ value: 'x'.repeat(1024 * 1024) }] }) });
+  await handleBoundedQueryRoutes(read.ctx);
+  expect(read.res.statusCode).toBe(422);
+  expect(JSON.parse(read.res.body)).toMatchObject({ code: 'QUERY_RESULT_TOO_LARGE' });
+  expect(JSON.parse(read.res.body)).not.toHaveProperty('result');
+});
+
+it('bounds stalled shared-memory metadata admission and prevents a late caller query', async () => {
+  let release!: (value: { type: 'boolean'; value: boolean }) => void;
+  const pending = new Promise<{ type: 'boolean'; value: boolean }>(resolve => { release = resolve; });
+  const metadata = vi.fn(async () => pending);
+  const callerQuery = vi.fn(async () => ({ bindings: [] }));
+  const agent = {
+    queryEngine: { query: callerQuery }, log: { info() {} },
+    resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'public', source: 'registered-chain', reason: 'public' }),
+    resolveAcceptedRfc64SharedMemoryAuthorityV1: () => undefined,
+    canUseSharedMemoryForContextGraph: LifecycleSyncMethods.prototype.canUseSharedMemoryForContextGraph,
+    hasConfirmedSharedMemoryMetaState: LifecycleSyncMethods.prototype.hasConfirmedSharedMemoryMetaState,
+    hasConfirmedMetaState: LifecycleSyncMethods.prototype.hasConfirmedMetaState,
+    store: { query: metadata }, chain: {}, peerId: 'fixture',
+    localApprovedAgentByCG: new Map(), subscribedContextGraphs: new Map(),
+    isPrivateContextGraph: async () => false,
+  };
+  const read = context({ query: QueryMethods.prototype.query.bind(agent as never) }, {
+    view: 'shared-working-memory', timeoutMs: 20,
+  });
+  const started = performance.now();
+  await handleBoundedQueryRoutes(read.ctx);
+  expect(performance.now() - started).toBeLessThan(1000);
+  expect(read.res.statusCode).toBe(503);
+  expect(JSON.parse(read.res.body).code).toBe('QUERY_DEADLINE_EXCEEDED');
+  expect(metadata.mock.calls[0]?.[1]?.signal.aborted).toBe(true);
+  release({ type: 'boolean', value: true });
+  await new Promise(resolve => setImmediate(resolve));
+  expect(callerQuery).not.toHaveBeenCalled();
+  expect(read.req.listenerCount('aborted')).toBe(0);
+  expect(read.res.listenerCount('close')).toBe(0);
+});
+
+
+it.each(['finalized-name-absence-unaccepted', 'authority-circuit-open'])(
+  'returns retryable 503 for unavailable authority: %s', async reason => {
+    const read = context({ query: async () => { throw Object.assign(new Error('unavailable'), {
+      code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE', retryable: true,
+      source: 'registered-chain', reason, contextGraphId: 'test',
+    }); } });
+    await handleBoundedQueryRoutes(read.ctx);
+    expect(read.res.statusCode).toBe(503);
+    expect(JSON.parse(read.res.body)).toMatchObject({ code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE', retryable: true });
+    expect(JSON.parse(read.res.body)).not.toHaveProperty('result');
+  },
+);

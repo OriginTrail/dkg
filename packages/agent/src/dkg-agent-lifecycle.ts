@@ -11183,13 +11183,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     } = {},
   ): Promise<boolean> {
     return confirmContextGraphMetadataV1({
-      chain: this.chain,
+      chain: this.chain, signal: options.signal,
       resolveActivePublicChainProof: () => this.resolveActivePublicContextGraphChainProof(
         contextGraphId,
         createOperationContext('sync'),
         options.signal,
       ),
-      isPrivateContextGraph: (id) => this.isPrivateContextGraph(id),
+      isPrivateContextGraph: (id) => this.isPrivateContextGraph(id, { signal: options.signal }),
       localApprovedAgentByContextGraph: this.localApprovedAgentByCG,
       peerId: this.peerId,
       store: this.store,
@@ -11248,17 +11248,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     );
   }
 
-  async hasConfirmedSharedMemoryMetaState(this: DKGAgent, contextGraphId: string): Promise<boolean> {
-    return this.hasConfirmedMetaState(contextGraphId);
+  async hasConfirmedSharedMemoryMetaState(this: DKGAgent, contextGraphId: string, options: { signal?: AbortSignal } = {}): Promise<boolean> {
+    return this.hasConfirmedMetaState(contextGraphId, options);
   }
 
   async canUseSharedMemoryForContextGraph(this: DKGAgent,
     contextGraphId: string,
     opts: {
-      callerAgentAddress?: string;
+      callerAgentAddress?: string; signal?: AbortSignal;
       readAuthority?: ContextGraphReadAuthorityDecision;
     } = {},
   ): Promise<boolean> {
+    opts.signal?.throwIfAborted();
     const acceptedRfc64Authority = this.resolveAcceptedRfc64SharedMemoryAuthorityV1(
       contextGraphId,
       opts,
@@ -11271,9 +11272,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // member checks below (#2858); a refusal by an active authority stands.
     if (
       acceptedRfc64Authority === false
-      && !(await this.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId))
+      && !(await this.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId, opts))
     ) return false;
-    if (!(await this.hasConfirmedSharedMemoryMetaState(contextGraphId))) {
+    if (!(await this.hasConfirmedSharedMemoryMetaState(contextGraphId, opts))) {
       return false;
     }
     // Whether to host, sync, or serve SWM for a selected graph is a read-only
@@ -11287,7 +11288,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       : withRpcUsageSite(
           CG_AUTH_RPC_SITES.sharedMemoryRead,
           () => this.canReadContextGraph(contextGraphId, {
-            callerAgentAddress: opts.callerAgentAddress,
+            callerAgentAddress: opts.callerAgentAddress, signal: opts.signal,
             allowSubscriptionFallback: false,
             authorityReadMode: 'finalized-index-or-live',
           }),
