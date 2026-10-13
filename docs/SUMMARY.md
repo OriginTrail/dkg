@@ -6,6 +6,13 @@
 * [Quickstart](getting-started/quickstart.md)
 * [Terms & Conditions](getting-started/dkg-v10-t-c.md)
 
+## Build with DKG
+
+* [Import Documents](build/import-documents.md)
+* [Google OKF Tutorial](build/okf-tutorial.md)
+* [Integrate an HTTP Application](build/http-application.md)
+* [Two-Agent Collaboration](build/collaborate.md)
+
 ## Connect Agents and Systems
 
 * [Choose a Connection](integrations/README.md)

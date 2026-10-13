@@ -18,7 +18,7 @@ This table describes the 10.0.23 baseline. “Memory tools” means callable ope
 | MCP client | Via discovered MCP tools | Client/agent workflow decides when to call tools | Use the client's own conversation UI | [MCP](mcp.md) |
 | Prime Agent | Not supplied by the current bridge | Not advertised as primary memory | Yes, for an existing live session | [Prime Agent](prime-agent.md) |
 | Local model | Via DKG's MCP orchestration | Explicit tool use; read-only by default | See local runtime configuration | [Local models](../use-dkg/local-llm.md) |
-| Custom application | HTTP/CLI operations | Implemented by your application | Your application supplies its UI | [HTTP integration](../references/api.md) |
+| Custom application | HTTP/CLI operations | Implemented by your application | Your application supplies its UI | [HTTP integration](../build/http-application.md) |
 
 ## Setup and success criteria
 

@@ -91,12 +91,12 @@ dkg ka history atlas -c "$CG"
 dkg query "$CG" --include-shared-memory -q 'SELECT ?project ?database ?source WHERE { GRAPH ?g { ?p <https://schema.org/name> ?project ; <https://example.org/dkg-tutorial/usesDatabase> ?db ; <https://schema.org/citation> ?source . ?db <https://schema.org/name> ?database . } }'
 ```
 
-Expect one row: `Atlas`, `Oxigraph`, `https://example.org/dkg-tutorial/source`. A successful local share is not proof that every peer has received it. Follow [peer connectivity](../use-dkg/relays-and-peers.md) to check a second node. If sharing fails, inspect the existing KA and follow the [share recovery guide](../use-dkg/knowledge-asset-lifecycle.md#synchronous-share-failures).
+Expect one row: `Atlas`, `Oxigraph`, `https://example.org/dkg-tutorial/source`. A successful local share is not proof that every peer has received it. Follow [two-agent collaboration](../build/collaborate.md) to check a second node. If sharing fails, inspect the existing KA and follow the [share recovery guide](../use-dkg/knowledge-asset-lifecycle.md#synchronous-share-failures).
 
 ## Continue
 
-- [Import documents](../use-dkg/knowledge-asset-lifecycle.md) or [Google OKF bundles](../use-dkg/okf.md).
-- [Integrate an application](../references/api.md).
+- [Import documents](../build/import-documents.md) or [Google OKF bundles](../build/okf-tutorial.md).
+- [Integrate an application](../build/http-application.md).
 - [Publish selected knowledge](../use-dkg/publish-and-query.md) when on-chain provenance is intended and funded.
 
 You have completed the first-use workflow when a fresh conversation retrieves the expected answer and source from the node. Sharing and paid publication are separate continuations.
