@@ -1,3 +1,4 @@
+import type { DurableRecoveryAuthority } from './durable-recovery-authority.js';
 // SPDX-License-Identifier: Apache-2.0
 import { overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1 } from "@origintrail-official/dkg-publisher";
 import type { PublicGraphSnapshot } from "@origintrail-official/dkg-chain";
@@ -70,7 +71,8 @@ export async function assertPublicSnapshotQueryTrust(
     );
 }
 /** Owned by one explicit public job, never installed as a shared/global chain adapter. */
-export class PublicSnapshotEvidence {
+export class PublicSnapshotEvidence implements DurableRecoveryAuthority {
+  readonly lifetime = 'snapshot-job' as const;
   readonly assets: Map<string, PublicGraphSnapshot["assets"][number]>;
   constructor(
     readonly observation: PublicSnapshotObservation,
@@ -81,7 +83,11 @@ export class PublicSnapshotEvidence {
   get snapshot() { return this.observation.snapshot; }
   get mode() { return this.observation.mode; }
   get sourceCore() { return this.observation.sourceCore; }
-  authenticate(asset: VerifiedGraphScopedAsset): AuthenticatedGraphScopedAsset {
+  isRegisteredPublic(contextGraphId: string, signal?: AbortSignal): boolean {
+    return contextGraphId === this.snapshot.contextGraphId && this.isCurrent() && !signal?.aborted;
+  }
+  authenticate(asset: VerifiedGraphScopedAsset, _deadline?: number, signal?: AbortSignal): AuthenticatedGraphScopedAsset {
+    signal?.throwIfAborted();
     if (!this.isCurrent()) throw new Error("Snapshot job is no longer current");
     const s = this.snapshot;
     const identity = parseDeterministicKnowledgeAssetUal(asset.ual);
