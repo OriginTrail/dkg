@@ -54,7 +54,7 @@ import {
 import { readResponseTextBounded } from '../http-response-limit.js';
 import { scanNQuadLines, type NQuadLineScan } from '../nquads-text.js';
 import { StoreOperationTimeoutError } from '../store-operation-timeout.js';
-import type { StoreOperation, StoreOperationOutcome } from '../store-operation-outcome.js';
+import { isReadOnlyStoreOperation, type StoreOperation, type StoreOperationOutcome } from '../store-operation-outcome.js';
 import {
   createRfc64HttpSharedProjectionRunnerV1,
   RFC64_BLAZEGRAPH_PROJECTION_RESPONSE_STRATEGY_V1,
@@ -313,7 +313,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     work: (deadline: StoreOperationDeadline) => Promise<T>,
   ): Promise<T> {
     if (this.queryAdmission.active) {
-      if (!['query', 'construct', 'listGraphs'].includes(operation)) {
+      if (!isReadOnlyStoreOperation(operation)) {
         return Promise.reject(new Error('Mutations are not allowed inside a query read admission'));
       }
       return this.queryAdmission.read(async deadline => {

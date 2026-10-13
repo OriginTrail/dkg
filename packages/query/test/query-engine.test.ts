@@ -2090,7 +2090,7 @@ describe('DKGQueryEngine', () => {
     }
   });
 
-  it('keeps completed partition discovery isolated between sub-graph scopes', async () => {
+  it('shares context discovery while keeping sub-graph authorization isolated', async () => {
     const codeMemory = `${GRAPH}/code/_shared_memory/0xAgent/1`;
     const decisionsMemory = `${GRAPH}/decisions/_shared_memory/0xAgent/1`;
     await store.insert([
@@ -2123,14 +2123,14 @@ describe('DKGQueryEngine', () => {
     });
     expect(decisions.bindings.some((row) => row['g'] === decisionsMemory)).toBe(true);
     expect(decisions.bindings.some((row) => row['g'] === codeMemory)).toBe(false);
-    expect(discoverySpy.calls).toHaveLength(2);
+    expect(discoverySpy.calls).toHaveLength(1);
 
     await engine.query(sparql, {
       contextGraphId: CONTEXT_GRAPH,
       subGraphName: 'code',
       includeContextGraphPartitions: true,
     });
-    expect(discoverySpy.calls).toHaveLength(2);
+    expect(discoverySpy.calls).toHaveLength(1);
   });
 
   it('reuses completed partition discovery until the context-graph write generation changes', async () => {
@@ -2361,13 +2361,13 @@ describe('DKGQueryEngine', () => {
     const afterWrite = target.resolveScopedContentGraphDiscovery(CONTEXT_GRAPH, reads);
     expect(discoveryCalls).toBe(2);
 
-    secondDiscovery.resolve({ inventory: ['urn:graph:fresh'], contentGraphs: ['urn:graph:fresh'] });
-    await expect(afterWrite).resolves.toEqual({ inventory: ['urn:graph:fresh'], contentGraphs: ['urn:graph:fresh'] });
-    firstDiscovery.resolve({ inventory: ['urn:graph:stale'], contentGraphs: ['urn:graph:stale'] });
-    await expect(beforeWrite).resolves.toEqual({ inventory: ['urn:graph:stale'], contentGraphs: ['urn:graph:stale'] });
+    secondDiscovery.resolve({ inventory: ['urn:graph:fresh'], subGraphs: [], assertionGraphs: [], childContextGraphs: [] });
+    await expect(afterWrite).resolves.toEqual({ inventory: ['urn:graph:fresh'], subGraphs: [], assertionGraphs: [], childContextGraphs: [] });
+    firstDiscovery.resolve({ inventory: ['urn:graph:stale'], subGraphs: [], assertionGraphs: [], childContextGraphs: [] });
+    await expect(beforeWrite).resolves.toEqual({ inventory: ['urn:graph:stale'], subGraphs: [], assertionGraphs: [], childContextGraphs: [] });
 
     await expect(target.resolveScopedContentGraphDiscovery(CONTEXT_GRAPH, reads))
-      .resolves.toEqual({ inventory: ['urn:graph:fresh'], contentGraphs: ['urn:graph:fresh'] });
+      .resolves.toEqual({ inventory: ['urn:graph:fresh'], subGraphs: [], assertionGraphs: [], childContextGraphs: [] });
     expect(discoveryCalls).toBe(2);
   });
 
@@ -2397,8 +2397,8 @@ describe('DKGQueryEngine', () => {
       shared: { cacheKey: '["normal","dashboard.vm"]' },
     });
     expect(discoveryCalls).toBe(2);
-    laneA.resolve({ inventory: ['urn:graph:a'], contentGraphs: ['urn:graph:a'] });
-    laneB.resolve({ inventory: ['urn:graph:b'], contentGraphs: ['urn:graph:b'] });
+    laneA.resolve({ inventory: ['urn:graph:a'], subGraphs: [], assertionGraphs: [], childContextGraphs: [] });
+    laneB.resolve({ inventory: ['urn:graph:b'], subGraphs: [], assertionGraphs: [], childContextGraphs: [] });
     await Promise.all([first, second]);
   });
 

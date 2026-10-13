@@ -19,22 +19,21 @@ function revisionSource(
 }
 
 const REQUEST = {
-  contentKey: 'parent',
+  contextKey: 'parent',
   laneKey: 'normal',
   graphPrefix: 'did:dkg:context-graph:parent',
 };
 
 
-// Existing lane/revision cases use the same graph list for each half of a
-// discovery snapshot; assert content results while exercising the full memo.
+// Exercise revision and lane isolation using inventories from distinct contexts.
 function testMemo(...args: ConstructorParameters<typeof ScopedContentGraphDiscoveryMemo>) {
   const memo = new ScopedContentGraphDiscoveryMemo(...args);
   return {
     get(request: typeof REQUEST & { signal?: AbortSignal; load: () => Promise<readonly string[]> }) {
       return memo.get({ ...request, load: async () => {
         const graphs = await request.load();
-        return { inventory: graphs, contentGraphs: graphs };
-      } }).then(snapshot => snapshot.contentGraphs);
+        return { inventory: graphs, subGraphs: [], assertionGraphs: [], childContextGraphs: [] };
+      } }).then(snapshot => snapshot.inventory);
     },
   };
 }
@@ -45,13 +44,14 @@ describe('ScopedContentGraphDiscoveryMemo', () => {
       revisionSource('all-writers', () => ({ generation: 1, stable: true })),
     );
     const inventory = ['urn:route-only', 'urn:content'];
-    const contentGraphs = ['urn:content'];
-    const first = await memo.get({ ...REQUEST, load: async () => ({ inventory, contentGraphs }) });
-    inventory.push('urn:later'); contentGraphs.push('urn:later');
-    expect(first).toEqual({ inventory: ['urn:route-only', 'urn:content'], contentGraphs: ['urn:content'] });
+    const assertionGraphs = ['urn:content'];
+    const first = await memo.get({ ...REQUEST, load: async () => ({ inventory, assertionGraphs, subGraphs: [], childContextGraphs: [] }) });
+    inventory.push('urn:later'); assertionGraphs.push('urn:later');
+    expect(first.inventory).toEqual(['urn:route-only', 'urn:content']);
+    expect(first.assertionGraphs).toEqual(['urn:content']);
     expect(Object.isFrozen(first)).toBe(true);
     expect(Object.isFrozen(first.inventory)).toBe(true);
-    expect(Object.isFrozen(first.contentGraphs)).toBe(true);
+    expect(Object.isFrozen(first.assertionGraphs)).toBe(true);
     const second = await memo.get({ ...REQUEST, load: async () => { throw new Error('unexpected reload'); } });
     expect(second).toBe(first);
   });
@@ -137,7 +137,7 @@ describe('ScopedContentGraphDiscoveryMemo', () => {
     await expect(otherLane).resolves.toEqual(['urn:graph:ok']);
   });
 
-  it('isolates completed values and concurrent flights by authorization scope key', async () => {
+  it('isolates completed values and concurrent flights by context key', async () => {
     const code = deferred<readonly string[]>();
     const decisions = deferred<readonly string[]>();
     let loads = 0;
@@ -147,12 +147,12 @@ describe('ScopedContentGraphDiscoveryMemo', () => {
 
     const codeRequest = memo.get({
       ...REQUEST,
-      contentKey: '["parent","code"]',
+      contextKey: 'code-context',
       load: () => { loads += 1; return code.promise; },
     });
     const decisionsRequest = memo.get({
       ...REQUEST,
-      contentKey: '["parent","decisions"]',
+      contextKey: 'decisions-context',
       load: () => { loads += 1; return decisions.promise; },
     });
     expect(loads).toBe(2);
@@ -164,12 +164,12 @@ describe('ScopedContentGraphDiscoveryMemo', () => {
 
     await expect(memo.get({
       ...REQUEST,
-      contentKey: '["parent","code"]',
+      contextKey: 'code-context',
       load: async () => { loads += 1; return ['urn:graph:wrong']; },
     })).resolves.toEqual(['urn:graph:code']);
     await expect(memo.get({
       ...REQUEST,
-      contentKey: '["parent","decisions"]',
+      contextKey: 'decisions-context',
       load: async () => { loads += 1; return ['urn:graph:wrong']; },
     })).resolves.toEqual(['urn:graph:decisions']);
     expect(loads).toBe(2);

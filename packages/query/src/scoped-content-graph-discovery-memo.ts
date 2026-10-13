@@ -10,11 +10,13 @@ export interface ScopedContentGraphDiscoveryMemoOptions {
 
 export interface ScopedContentGraphDiscoverySnapshot {
   readonly inventory: readonly string[];
-  readonly contentGraphs: readonly string[];
+  readonly subGraphs: readonly string[];
+  readonly assertionGraphs: readonly string[];
+  readonly childContextGraphs: readonly string[];
 }
 
 export interface ScopedContentGraphDiscoveryRequest {
-  contentKey: string;
+  contextKey: string;
   laneKey: string;
   graphPrefix: string;
   signal?: AbortSignal;
@@ -47,12 +49,12 @@ export class ScopedContentGraphDiscoveryMemo {
     const before = this.revisionSource.getWriteRevision(request.graphPrefix);
     if (!before.stable) return raceAgainstCallerAbort(request.load(), request.signal);
 
-    const completedKey = JSON.stringify([request.contentKey, before.generation]);
+    const completedKey = JSON.stringify([request.contextKey, before.generation]);
     const cached = this.completed.get(completedKey);
     if (cached) return raceAgainstCallerAbort(Promise.resolve(cached), request.signal);
 
     const flightKey = JSON.stringify([
-      request.contentKey,
+      request.contextKey,
       request.laneKey,
       before.generation,
     ]);
@@ -64,7 +66,9 @@ export class ScopedContentGraphDiscoveryMemo {
       if (after.stable && after.generation === before.generation) {
         const immutable = Object.freeze({
           inventory: Object.freeze([...value.inventory]),
-          contentGraphs: Object.freeze([...value.contentGraphs]),
+          subGraphs: Object.freeze([...value.subGraphs]),
+          assertionGraphs: Object.freeze([...value.assertionGraphs]),
+          childContextGraphs: Object.freeze([...value.childContextGraphs]),
         });
         this.completed.set(completedKey, immutable);
         return immutable;

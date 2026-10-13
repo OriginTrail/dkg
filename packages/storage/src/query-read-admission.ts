@@ -17,11 +17,17 @@ export class QueryReadAdmission<Context> {
     if (this.active) throw new Error('Nested query read admission is not supported');
     const owner = { context, closed: false, tail: Promise.resolve() as Promise<unknown> };
     return this.current.run(owner, async () => {
-      try { return await work(); }
-      finally {
+      try {
+        const result = await work();
         owner.closed = true;
-        // Do not release the scheduler slot while a sibling read is unwinding.
         await owner.tail;
+        return result;
+      } catch (error) {
+        owner.closed = true;
+        // Drain siblings without replacing the callback's classified/wrapped error.
+        // If work succeeded, the tail error above remains the primary failure.
+        await owner.tail.catch(() => undefined);
+        throw error;
       }
     });
   }

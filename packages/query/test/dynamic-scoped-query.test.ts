@@ -23,6 +23,7 @@ describe('fresh dynamic scoped query admission', () => {
       if (key === 'withQueryReadAdmission') return admission;
       if (key === 'graphEnumerationVisibility' && !visible) return undefined;
       const value = Reflect.get(target, key, target);
+      if (key === 'listGraphsByPrefix' && owned) throw new Error('Owned plan entered shared enumeration');
       if (key === 'query') return (...args: Parameters<TripleStore['query']>) => {
         reads.push(owned); return target.query(...args);
       };
@@ -43,6 +44,21 @@ describe('fresh dynamic scoped query admission', () => {
       await engine.query(QUERY, { ...OPTIONS, includePrivate: true });
       expect(admission).not.toHaveBeenCalled();
     } finally { await adapter.close(); }
+  });
+  it('shares a context inventory across sibling scopes without sharing their authorization', async () => {
+    const store = new OxigraphStore();
+    const code = `${ROOT}/code/_verifiable_memory/a/1`, decisions = `${ROOT}/decisions/_verifiable_memory/a/1`;
+    try {
+      await store.insert([code, decisions].map(graph => ({ graph, subject: 'urn:item', predicate: NAME, object: '"value"' })));
+      const query = vi.spyOn(store, 'query');
+      const engine = new DKGQueryEngine(store);
+      expect((await engine.query(QUERY, { ...OPTIONS, subGraphName: 'code' })).bindings.map(row => row.g)).toEqual([code]);
+      expect((await engine.query(QUERY, { ...OPTIONS, subGraphName: 'decisions' })).bindings.map(row => row.g)).toEqual([decisions]);
+      expect(query).toHaveBeenCalledTimes(3); // One context catalog, two authorized caller reads.
+      await store.dropGraph(code);
+      expect((await engine.query(QUERY, { ...OPTIONS, subGraphName: 'code' })).bindings).toEqual([]);
+      expect(query).toHaveBeenCalledTimes(5); // The write invalidates the shared context inventory.
+    } finally { await store.close(); }
   });
   it.each(['changelog', 'index-outside', 'index-inside', 'unknown'] as const)('keeps reserved VM partitions invisible through %s enumeration', async kind => {
     const base = new OxigraphStore(), hidden = `${ROOT}/_verifiable_memory/a/1`, publicGraph = `${ROOT}/_verifiable_memory/a/2`;

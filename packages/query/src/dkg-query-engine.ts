@@ -1,9 +1,9 @@
-import { createQueryStoreReadContext, type QueryStoreReadContext, type StoreReadLane } from './query-store-read-context.js';
+import { createStoreReadLane, createQueryStoreReadContext, type QueryStoreReadContext, type StoreReadLane } from './query-store-read-context.js';
 import { registeredSubGraphPattern, decodeRegisteredSubGraphName } from './registered-sub-graphs.js';
 import { stripSparqlLiteralValue } from './query-binding.js';
 import { readScopedContentGraphCatalog } from './scoped-content-graph-catalog.js';
 import { resolveLegacyRouteScope } from './legacy-route-scope.js';
-import { staticScopedRouteGraphs } from './static-scoped-route-graphs.js';
+import { resolveQueryReadPlan, type QueryReadPlan } from './query-read-plan.js';
 import { storeOptions } from './query-store-options.js';
 import {
   asGraphWriteRevisionSource,
@@ -341,67 +341,49 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // Active UCHAR syntax is materialized once, immediately before the final
     // caller query crosses the store boundary.
     const initialGraphScope = prepareGraphScope(prepared);
-    // Only group plans whose fresh catalog supplies the entire inventory. Other
-    // routes may use a decorator's shared refresh flight; admitting those before
-    // waiting for the flight could deadlock against its queued store work.
-    const ownsAdmission = Boolean(this.store.withQueryReadAdmission && this.store.graphEnumerationVisibility
-      && options?.contextGraphId && options.includeContextGraphPartitions
-      && !options.view && !options.includePrivate && options.graphSuffix !== '_shared_memory'
-      && initialGraphScope.graphVariables.length > 0);
-    const reads = createQueryStoreReadContext(this.store, options, listGraphsByPrefix, ownsAdmission);
-    const work = () => this.queryPrepared(initialGraphScope, options, reads);
-    return ownsAdmission ? this.store.withQueryReadAdmission!(work, storeOptions(options)) : work();
+    if (options?.contextGraphId) assertNoCallerDatasetClauses(initialGraphScope);
+    if (options?.subGraphName) {
+      const validation = validateSubGraphName(options.subGraphName);
+      if (!validation.valid) throw new Error(`Invalid sub-graph name for query: ${validation.reason}`);
+    }
+    const plan = resolveQueryReadPlan(initialGraphScope, options,
+      Boolean(this.store.withQueryReadAdmission && this.store.graphEnumerationVisibility));
+    if (plan.kind === 'scoped' && plan.discovery === 'admission-owned') {
+      return this.store.withQueryReadAdmission!(async () => {
+        const caller = createStoreReadLane(this.store, storeOptions(options), listGraphsByPrefix);
+        const discovery = await this.discoverScopedContentGraphDiscovery(plan.contextGraphId, caller);
+        // This lane has no shared refresh capability: all routing reuses the owned inventory.
+        const reads: StoreReadLane = { query: caller.query,
+          listGraphsByPrefix: async prefix => filterRouteGraphsByPrefix(discovery.inventory, prefix) };
+        return this.queryPrepared(initialGraphScope, options, plan, reads, discovery);
+      }, storeOptions(options));
+    }
+    const reads = createQueryStoreReadContext(this.store, options, listGraphsByPrefix);
+    const discovery = plan.kind === 'scoped' && plan.expandGraphVariables
+      ? await this.resolveScopedContentGraphDiscovery(plan.contextGraphId, reads) : undefined;
+    return this.queryPrepared(initialGraphScope, options, plan, reads, discovery);
   }
 
-  private async queryPrepared(initialGraphScope: PreparedGraphScope, options: QueryOptions | undefined, reads: QueryStoreReadContext): Promise<QueryResult> {
+  private async queryPrepared(initialGraphScope: PreparedGraphScope, options: QueryOptions | undefined,
+    plan: QueryReadPlan, reads: StoreReadLane, scopedDiscovery?: ScopedContentGraphDiscoverySnapshot): Promise<QueryResult> {
     let routedScope = initialGraphScope;
 
     // ── V10 view-based routing ────────────────────────────────────────
     const effectiveContextGraphId = options?.contextGraphId;
-    if (effectiveContextGraphId) {
-      assertNoCallerDatasetClauses(initialGraphScope);
-    }
-
-    if (options?.subGraphName) {
-      const v = validateSubGraphName(options.subGraphName);
-      if (!v.valid) throw new Error(`Invalid sub-graph name for query: ${v.reason}`);
-    }
-
-    if (effectiveContextGraphId && !options?.view) {
+    if (plan.kind === 'scoped') {
       const { dataGraph, sharedMemoryGraph, staticContentGraphs,
-        subGraphName, isSwmOnlyRoute, metaAllowList, staticPrivateAllowList } =
-        staticScopedRouteGraphs(effectiveContextGraphId, options);
-      // Explicit static GRAPH targets need only the route's static authority.
-      // Avoid unrelated catalog admissions while ingestion occupies the store.
-      // Variables and dynamic partitions still require fresh discovery below.
-      const staticAllowedGraphs = [
-        ...staticContentGraphs,
-        ...metaAllowList,
-        ...staticPrivateAllowList,
-      ];
-      const needsDiscovery = !initialGraphScope.hasGraphClause
-        || initialGraphScope.graphTargets.some(
-          (target) => target.kind !== 'iri' || !staticAllowedGraphs.includes(target.iri),
-        );
-      const shouldExpandGraphVariables = options?.includeContextGraphPartitions === true
-        && initialGraphScope.graphVariables.length > 0 && !isSwmOnlyRoute;
-      // Broad variable scans already need a fresh scoped inventory. Reuse that
-      // inventory for memory routing within this request, avoiding another admission.
-      const scopedDiscovery = shouldExpandGraphVariables
-        ? await this.resolveScopedContentGraphDiscovery(effectiveContextGraphId, reads, subGraphName)
-        : undefined;
+        subGraphName, metaAllowList, staticPrivateAllowList } = plan.graphs;
+      const { needsDiscovery, swmRouted, dataRouted } = plan;
       const discoverRouteGraphs = (prefix: string): Promise<string[]> => scopedDiscovery
         ? Promise.resolve(filterRouteGraphsByPrefix(scopedDiscovery.inventory, prefix))
         : this.discoverGraphsByPrefix(prefix, reads);
       // Per-KA SWM: when a route targets SWM, expand the allow-set with the discovered
       // …/_shared_memory/{addr}/{number} graphs so GRAPH-variable scans bind them.
-      const swmRouted = (options?.includeSharedMemory ?? options?.includeWorkspace) || options?.graphSuffix === '_shared_memory';
       const swmPerKaGraphs = needsDiscovery && swmRouted
         ? await discoverRouteGraphs(`${sharedMemoryGraph}/`)
         : [];
       // Per-KA VM: published data is in …/_verifiable_memory/{addr}/{number}; bind those too
       // for GRAPH-variable scans on any route that reads the data graph.
-      const dataRouted = options?.graphSuffix !== '_shared_memory';
       const vmPerKaGraphs = needsDiscovery && dataRouted
         ? await discoverRouteGraphs(`${dataGraph}/_verifiable_memory/`)
         : [];
@@ -409,12 +391,12 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         [graph, ...(graph === dataGraph ? vmPerKaGraphs : swmPerKaGraphs)]);
       const privateAllowList = options?.includePrivate && needsDiscovery
         ? [...staticPrivateAllowList, ...(await this.discoverGraphScopedPrivateGraphs(
-            effectiveContextGraphId, reads, subGraphName,
+            plan.contextGraphId, reads, subGraphName,
           ))]
         : staticPrivateAllowList;
       const explicitAllowedGraphs = [...allowedGraphs, ...metaAllowList, ...privateAllowList];
       const variableAllowedGraphs = scopedDiscovery
-        ? [...new Set([...explicitAllowedGraphs, ...scopedDiscovery.contentGraphs])]
+        ? [...new Set([...explicitAllowedGraphs, ...scopedContentGraphs(scopedDiscovery, plan.contextGraphId, subGraphName)])]
         : explicitAllowedGraphs;
       // Explicit GRAPH IRIs remain limited to the static route-specific
       // allow-list. GRAPH variables only gain known same-CG content
@@ -509,7 +491,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     view: GetView,
     contextGraphId: string,
     options: QueryOptions,
-    reads: QueryStoreReadContext,
+    reads: StoreReadLane,
   ): Promise<QueryResult> {
     const sparql = initialScope.source;
     // Uniform layout (rc.17): a by-name working-memory read must target the per-KA
@@ -930,22 +912,16 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   private async resolveScopedContentGraphDiscovery(
     contextGraphId: string,
     reads: QueryStoreReadContext,
-    subGraphName?: string,
   ): Promise<ScopedContentGraphDiscoverySnapshot> {
-    // Admission-owned work cannot be shared with another caller or outlive its
-    // original signal. Keep fresh authority and the caller query in this plan.
-    if (reads.ownsAdmission) return this.discoverScopedContentGraphDiscovery(contextGraphId, reads, subGraphName);
-    const contentKey = JSON.stringify([contextGraphId, subGraphName ?? null]);
     const graphPrefix = `did:dkg:context-graph:${contextGraphId}`;
     return this.scopedContentGraphDiscoveryMemo.get({
-      contentKey,
+      contextKey: contextGraphId,
       laneKey: reads.shared.cacheKey,
       graphPrefix,
       signal: reads.signal,
       load: () => this.discoverScopedContentGraphDiscovery(
         contextGraphId,
         reads.shared,
-        subGraphName,
       ),
     });
   }
@@ -953,37 +929,17 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   private async discoverScopedContentGraphDiscovery(
     contextGraphId: string,
     reads: StoreReadLane,
-    subGraphName?: string,
   ): Promise<ScopedContentGraphDiscoverySnapshot> {
-    const allowed = new Set<string>();
     const visible = this.store.graphEnumerationVisibility;
     const [catalog, filteredInventory] = await Promise.all([
       readScopedContentGraphCatalog(contextGraphId, reads.query, Boolean(visible)),
       visible ? undefined : reads.listGraphsByPrefix(contextGraphDataUri(contextGraphId)),
     ]);
-    const registeredSubGraphs = subGraphName ? new Set([subGraphName]) : catalog.subGraphs;
-    const registeredAssertionGraphs = catalog.assertionGraphs;
-    const knownChildContextGraphs = catalog.childContextGraphs;
-    const allGraphs = visible
+    const inventory = visible
       ? [...catalog.graphs].filter(graph => visible.call(this.store, graph))
       : filteredInventory!;
-
-    for (const graph of allGraphs) {
-      if (
-        isScopedContentGraph(
-          graph,
-          contextGraphId,
-          registeredSubGraphs,
-          registeredAssertionGraphs,
-          knownChildContextGraphs,
-          subGraphName,
-        )
-      ) {
-        allowed.add(graph);
-      }
-    }
-
-    return { inventory: [...allGraphs], contentGraphs: [...allowed] };
+    return { inventory, subGraphs: [...catalog.subGraphs],
+      assertionGraphs: [...catalog.assertionGraphs], childContextGraphs: [...catalog.childContextGraphs] };
   }
 
   private async discoverRegisteredSubGraphNames(
@@ -1209,6 +1165,12 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     return { bindings: allBindings };
   }
 
+}
+
+function scopedContentGraphs(snapshot: ScopedContentGraphDiscoverySnapshot, contextGraphId: string, subGraphName?: string): string[] {
+  const subGraphs = new Set(subGraphName ? [subGraphName] : snapshot.subGraphs);
+  const assertions = new Set(snapshot.assertionGraphs), children = new Set(snapshot.childContextGraphs);
+  return snapshot.inventory.filter(graph => isScopedContentGraph(graph, contextGraphId, subGraphs, assertions, children, subGraphName));
 }
 
 function isScopedContentGraph(

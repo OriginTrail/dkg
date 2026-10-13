@@ -18,12 +18,11 @@ export interface StoreReadLane {
 }
 
 export interface QueryStoreReadContext extends StoreReadLane {
-  readonly ownsAdmission: boolean;
   readonly signal: AbortSignal | undefined;
   readonly shared: StoreReadLane & { readonly cacheKey: string };
 }
 
-function createStoreReadLane(
+export function createStoreReadLane(
   store: TripleStore,
   options: StoreQueryOptions | undefined,
   listByPrefix: (store: TripleStore, prefix: string, options?: StoreQueryOptions) => Promise<string[]>,
@@ -38,14 +37,12 @@ export function createQueryStoreReadContext(
   store: TripleStore,
   queryOptions: QueryOptions | undefined,
   listByPrefix: (store: TripleStore, prefix: string, options?: StoreQueryOptions) => Promise<string[]>,
-  ownsAdmission = false,
 ): QueryStoreReadContext {
   const options = storeOptions(queryOptions);
   const lane = createStoreReadLane(store, options, listByPrefix);
   const sharedOptions = sharedDiscoveryStoreOptions(options);
   return {
     ...lane,
-    ownsAdmission,
     signal: options?.signal,
     shared: {
       ...createStoreReadLane(store, sharedOptions, listByPrefix),
