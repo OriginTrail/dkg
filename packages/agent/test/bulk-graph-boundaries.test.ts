@@ -20,6 +20,28 @@ describe('100 MB encoded envelope and bounded credits', () => {
     await expect(servePublicBulkChunk(request, session, options)).rejects.toThrow('public authority changed');
     expect(sent).toBe(32); expect(released).toBe(33);
   });
+  it('rechecks asset access after CREDIT while the context graph remains public', async () => {
+    let revoked = false, acquired = 0, released = 0;
+    const sent: BulkGraphFrame[] = [];
+    const request: BulkGraphRequest = { version: 1, contextGraphId: 'boundary', snapshotDigest: 'a'.repeat(64),
+      assetUals: Array.from({ length: 34 }, (_, i) => `fixture-${i}`) };
+    const session = { signal: new AbortController().signal,
+      send: async (frame: BulkGraphFrame) => { sent.push(frame); },
+      next: async () => { revoked = true; return { kind: K.CREDIT, index: 0, sequence: 1, payload: new Uint8Array() }; },
+    } as unknown as BulkGraphSession;
+    const options = { isPublicContextGraph: async () => true,
+      exportCache: { acquireEncoded: async () => {
+        const index = acquired++;
+        return { body: new Uint8Array([1]), metadata: new Uint8Array([1]), plainBytes: 1,
+          assertCurrent: async () => { if (index === 32 && revoked) throw new Error('asset access revoked'); },
+          release: () => { released++; } };
+      } },
+    } as unknown as ExactBatchResponderBindingOptions;
+    await expect(servePublicBulkChunk(request, session, options)).rejects.toThrow('asset access revoked');
+    expect(sent.filter(frame => frame.kind === K.META)).toHaveLength(32);
+    expect(sent.some(frame => frame.index === 32 && [K.META, K.DATA].includes(frame.kind))).toBe(false);
+    expect(released).toBe(33);
+  });
   it('ends before crossing 100,000,000 encoded bytes, without splitting or inventing a committed asset', async () => {
     const request: BulkGraphRequest = {version:1,contextGraphId:'boundary',snapshotDigest:'a'.repeat(64),
       assetUals:Array.from({length:26},(_,i)=>`did:dkg:base:84532/0x0000000000000000000000000000000000000001/${i+1}`)};

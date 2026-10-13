@@ -63,6 +63,9 @@ export async function servePublicBulkChunk(request: BulkGraphRequest, session: B
       // disclosing the next body, as the exact transport does after its ACK wait.
       if (options.servingWithheld?.(request.contextGraphId)
         || !await options.isPublicContextGraph(request.contextGraphId, session.signal)) throw new Error('Bulk graph public authority changed');
+      // Asset access may change independently of public graph status while
+      // waiting for CREDIT. Revalidate the retained lease before disclosure.
+      await lease.assertCurrent();
       session.signal.throwIfAborted();
       const directory = bulkJson({ encodedBytes: lease.body.length, plainBytes: lease.plainBytes, offset: bytes,
         digest: createHash('sha256').update(lease.body).digest('hex'), metadata: Buffer.from(lease.metadata).toString('base64') });
