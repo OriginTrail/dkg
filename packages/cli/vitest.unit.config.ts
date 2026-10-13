@@ -44,6 +44,8 @@ export default defineConfig({
           'test/semantic-runtime-query-pins.test.ts',
           'test/semantic-runtime-program-policy.test.ts',
           'test/semantic-runtime-program-bindings.test.ts',
+          'test/semantic-runtime-graph-configuration-limits.test.ts',
+          'test/semantic-runtime-execution-output.test.ts',
           'test/semantic-runtime-asset-program.test.ts',
           'test/semantic-runtime-sparql-adapter.test.ts',
           'test/semantic-runtime-configuration-api.test.ts',

@@ -1,7 +1,7 @@
 import { canonicalizeJson, type CanonicalJsonValue } from '@origintrail-official/dkg-core';
 import type { ProgramConfigurationRecord, SemanticProgramBinding, SemanticRuntimeConfig, SemanticRuntimeStore } from '@origintrail-official/dkg-semantic-runtime';
 
-import { programBindingDigest, validateProgramBindings, validateProgramConfiguration, validateProgramRoutes } from './semantic-runtime-program-bindings.js';
+import { programBindingDigest, validateProgramBindings, validateEffectiveProgramConfiguration, validateProgramRoutes } from './semantic-runtime-program-bindings.js';
 
 type Route = NonNullable<SemanticRuntimeConfig['programRoutes']>[number];
 type Kind = ProgramConfigurationRecord['kind'];
@@ -80,7 +80,7 @@ export class SemanticProgramConfiguration {
       else routes.delete(id);
     }
     const result = { bindings: [...bindings.values()], routes: [...routes.values()] };
-    validateProgramConfiguration(result.bindings, result.routes);
+    validateEffectiveProgramConfiguration(result.bindings, result.routes);
     return result;
   }
 

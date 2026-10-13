@@ -268,7 +268,10 @@ export class SemanticRuntimeStore {
       const row = this.db.prepare('SELECT revision FROM program_configuration WHERE kind=? AND context_graph_id=? AND operation_iri=?')
         .get(record.kind, record.contextGraphId, record.operationIri) as { revision: bigint } | undefined;
       if (Number(row?.revision ?? 0) !== expectedRevision) throw new Error('PROGRAM_CONFIGURATION_CONFLICT');
-      const count = this.db.prepare('SELECT COUNT(*) AS n FROM program_configuration WHERE kind=?').get(record.kind) as { n: bigint };
+      // Independent context-graph owners have independent configuration quotas.
+      // Disabled grants/tombstones still occupy their graph's durable CAS slot.
+      const count = this.db.prepare('SELECT COUNT(*) AS n FROM program_configuration WHERE kind=? AND context_graph_id=?')
+        .get(record.kind, record.contextGraphId) as { n: bigint };
       if (!row && count.n >= 256n) throw new Error('PROGRAM_CONFIGURATION_LIMIT');
       const revision = expectedRevision + 1;
       this.db.prepare(`INSERT INTO program_configuration(kind, context_graph_id, operation_iri, revision, payload, updated_by, updated_at)

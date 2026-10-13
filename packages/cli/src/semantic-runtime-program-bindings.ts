@@ -9,8 +9,19 @@ import { validateSemanticQueryPins } from './semantic-runtime-query-pins.js';
 
 /** Validate trusted local configuration at startup, before any grant can be used. */
 export function validateProgramBindings(value: unknown): asserts value is SemanticProgramBinding[] {
-  if (!Array.isArray(value) || value.length > 256) throw new Error('INVALID_PROGRAM_BINDINGS');
+  validateBindings(value, false);
+}
+
+/** Durable approvals belong to independent graph owners. Keep the bounded
+ * authority surface per graph when their local configurations are merged. */
+export function validateEffectiveProgramBindings(value: unknown): asserts value is SemanticProgramBinding[] {
+  validateBindings(value, true);
+}
+
+function validateBindings(value: unknown, perGraph: boolean): asserts value is SemanticProgramBinding[] {
+  if (!Array.isArray(value) || (!perGraph && value.length > 256)) throw new Error('INVALID_PROGRAM_BINDINGS');
   const seen = new Set<string>();
+  const graphCounts = new Map<string, number>();
   for (const binding of value) {
     if (!record(binding)
       || !keys(binding, ['operationIri', 'contextGraphId', 'enabled', 'allowedCallerAgentAddresses', 'executorAgentAddress', 'program', 'query', 'sparqlRead', 'assetCreation', 'localLlm', 'typescript', 'executionLayer', 'authorizationRevision'])
@@ -80,6 +91,12 @@ export function validateProgramBindings(value: unknown): asserts value is Semant
     }
     if (!binding.query && !binding.assetCreation && !binding.sparqlRead && !binding.typescript) throw new Error('EMPTY_PROGRAM_BINDING');
     if (binding.executionLayer !== undefined && !['wm', 'swm', 'vm'].includes(String(binding.executionLayer))) throw new Error('INVALID_EXECUTION_LAYER');
+    if (perGraph) {
+      const graph = binding.contextGraphId as string;
+      const count = (graphCounts.get(graph) ?? 0) + 1;
+      if (count > 256) throw new Error('INVALID_PROGRAM_BINDINGS');
+      graphCounts.set(graph, count);
+    }
     const key = `${binding.contextGraphId}\0${binding.operationIri}`;
     if (seen.has(key)) throw new Error('DUPLICATE_PROGRAM_BINDING');
     seen.add(key);
@@ -107,8 +124,17 @@ function address(value: unknown): value is string {
 
 /** Routing never grants target authority or selects a signing identity. */
 export function validateProgramRoutes(value: unknown): asserts value is NonNullable<SemanticRuntimeConfig['programRoutes']> {
-  if (!Array.isArray(value) || value.length > 256) throw new Error('INVALID_PROGRAM_ROUTES');
+  validateRoutes(value, false);
+}
+
+export function validateEffectiveProgramRoutes(value: unknown): asserts value is NonNullable<SemanticRuntimeConfig['programRoutes']> {
+  validateRoutes(value, true);
+}
+
+function validateRoutes(value: unknown, perGraph: boolean): asserts value is NonNullable<SemanticRuntimeConfig['programRoutes']> {
+  if (!Array.isArray(value) || (!perGraph && value.length > 256)) throw new Error('INVALID_PROGRAM_ROUTES');
   const seen = new Set<string>();
+  const graphCounts = new Map<string, number>();
   for (const route of value) {
     if (!record(route) || !keys(route, ['contextGraphId', 'operationIri', 'targetPeerId'])
       || typeof route.contextGraphId !== 'string' || !validateContextGraphId(route.contextGraphId).valid
@@ -118,6 +144,11 @@ export function validateProgramRoutes(value: unknown): asserts value is NonNulla
       throw new Error('INVALID_PROGRAM_ROUTE');
     }
     sparqlIri(route.operationIri);
+    if (perGraph) {
+      const count = (graphCounts.get(route.contextGraphId) ?? 0) + 1;
+      if (count > 256) throw new Error('INVALID_PROGRAM_ROUTES');
+      graphCounts.set(route.contextGraphId, count);
+    }
     const key = `${route.contextGraphId}\0${route.operationIri}`;
     if (seen.has(key)) throw new Error('DUPLICATE_PROGRAM_ROUTE');
     seen.add(key);
@@ -128,8 +159,20 @@ export function validateProgramRoutes(value: unknown): asserts value is NonNulla
 export function validateProgramConfiguration(bindings: unknown, routes: unknown): void {
   validateProgramBindings(bindings);
   validateProgramRoutes(routes);
+  assertUnambiguousProgramRoutes(bindings, routes);
+}
+
+/** Validate the complete effective authority, including every graph's schema,
+ * duplicate operations and mutually exclusive binding/route paths. */
+export function validateEffectiveProgramConfiguration(bindings: unknown, routes: unknown): void {
+  validateEffectiveProgramBindings(bindings);
+  validateEffectiveProgramRoutes(routes);
+  assertUnambiguousProgramRoutes(bindings, routes);
+}
+
+function assertUnambiguousProgramRoutes(bindings: SemanticProgramBinding[], routes: NonNullable<SemanticRuntimeConfig['programRoutes']>): void {
+  const bound = new Set(bindings.map(binding => `${binding.contextGraphId}\0${binding.operationIri}`));
   for (const route of routes) {
-    if (bindings.some((binding) => binding.contextGraphId === route.contextGraphId
-      && binding.operationIri === route.operationIri)) throw new Error('AMBIGUOUS_PROGRAM_ROUTE');
+    if (bound.has(`${route.contextGraphId}\0${route.operationIri}`)) throw new Error('AMBIGUOUS_PROGRAM_ROUTE');
   }
 }

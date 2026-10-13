@@ -1,5 +1,6 @@
 import { programToolDefinition } from './semantic-runtime-tool-catalog.js';
 import { createLocalLlmProgramAdapter, type LocalLlmProgramProvider } from './semantic-runtime-local-llm-adapter.js';
+import { buildExecutionOutputQuads, decodeExecutionOutputRows, ExecutionOutputCodecError, type ExecutionOutputRow } from './semantic-runtime-execution-output.js';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -44,7 +45,7 @@ import { createInvestigatorAdapter } from './semantic-runtime-investigator-adapt
 import { assertSparqlReadOutput, createSparqlReadAdapter } from './semantic-runtime-sparql-adapter.js';
 import { createDkgQueryAdapter, findSavedQuery } from './semantic-runtime-query-adapter.js';
 import { readContextGraphQueryCatalogBindings } from './daemon/query-catalog-service.js';
-import { programBindingDigest, validateProgramBindings, validateProgramConfiguration } from './semantic-runtime-program-bindings.js';
+import { programBindingDigest, validateProgramBindings, validateEffectiveProgramConfiguration } from './semantic-runtime-program-bindings.js';
 import { assertSemanticQueryDefinition, assertSemanticQueryOutput } from './semantic-runtime-query-pins.js';
 import { validateSemanticProgramPolicy } from './semantic-runtime-program-policy.js';
 import { createRemoteExecuteAdapter } from './semantic-runtime-remote-execute-adapter.js';
@@ -499,8 +500,11 @@ export async function invokeBoundSemanticProgram(
   composition?: TypeScriptComposition,
 ): Promise<SemanticInvocationResult> {
   const denied = () => new SemanticProgramError('PROGRAM_INVOCATION_FORBIDDEN', 'This operation is not authorized for the caller', 403);
-  validateProgramBindings(config.programBindings ?? []);
-  const selected = config.programBindings?.find((item) =>
+  const bindings = config.programBindings ?? [];
+  if (!Array.isArray(bindings)) throw new Error('INVALID_PROGRAM_BINDINGS');
+  const scopedBindings = bindings.filter((item) => item?.contextGraphId === contextGraphId);
+  validateProgramBindings(scopedBindings);
+  const selected = scopedBindings.find((item) =>
     item.contextGraphId === contextGraphId && item.operationIri === operationIri);
   if (!authenticatedCaller || !selected?.enabled
     || !selected.allowedCallerAgentAddresses.some((address) => address.toLowerCase() === authenticatedCaller.toLowerCase())) {
@@ -1757,7 +1761,7 @@ async function invokeResolved(
   };
 }
 
-async function loadExecutionOutputs(
+export async function loadExecutionOutputs(
   agent: DKGAgent,
   contextGraphId: string,
   executionIri: string,
@@ -1765,10 +1769,16 @@ async function loadExecutionOutputs(
   operatorAddress: string,
 ): Promise<string[]> {
   const result = await agent.query(`
-    SELECT ?g ?output ?orderedOutputs WHERE {
+    SELECT ?g ?output ?orderedOutputs ?outputHash ?orderedOutputsEncoding ?orderedOutputsByteLength ?orderedOutputsSha256 ?orderedOutputsChunkCount ?orderedOutputsChunk WHERE {
       GRAPH ?g {
         { ${sparqlIri(executionIri)} <${SR}orderedOutputs> ?orderedOutputs }
         UNION { ${sparqlIri(executionIri)} <${SR}output> ?output }
+        UNION { ${sparqlIri(executionIri)} <${SR}outputHash> ?outputHash }
+        UNION { ${sparqlIri(executionIri)} <${SR}orderedOutputsEncoding> ?orderedOutputsEncoding }
+        UNION { ${sparqlIri(executionIri)} <${SR}orderedOutputsByteLength> ?orderedOutputsByteLength }
+        UNION { ${sparqlIri(executionIri)} <${SR}orderedOutputsSha256> ?orderedOutputsSha256 }
+        UNION { ${sparqlIri(executionIri)} <${SR}orderedOutputsChunkCount> ?orderedOutputsChunkCount }
+        UNION { ${sparqlIri(executionIri)} <${SR}orderedOutputsChunk> ?orderedOutputsChunk }
       }
     }
   `, queryOptions(
@@ -1780,34 +1790,16 @@ async function loadExecutionOutputs(
   const rows = resultRows(result)
     .filter((row) => programGraphAuthor(row.g, contextGraphId, executionLayer)
       ?.toLowerCase() === operatorAddress.toLowerCase());
-  const ordered = new Set(rows.filter((row) => row.orderedOutputs !== undefined)
-    .map((row) => literalValue(row.orderedOutputs)));
-  const legacy = new Set(rows.filter((row) => row.output !== undefined).map((row) => literalValue(row.output)));
-  if (ordered.size > 1) {
-    throw new SemanticProgramError('EXECUTION_OUTPUT_ORDER_INVALID', 'Execution has conflicting ordered output records', 409);
+  try {
+    return decodeExecutionOutputRows(rows.map(row => Object.fromEntries(Object.entries(row).map(([key, value]) =>
+      [key, key === 'g' ? iriValue(value) : literalValue(value)])) as unknown as ExecutionOutputRow));
+  } catch (error) {
+    if (error instanceof ExecutionOutputCodecError) throw new SemanticProgramError(error.code, 'Execution output receipt is invalid or incomplete', 409);
+    throw error;
   }
-  if (ordered.size === 1) {
-    let outputs: unknown;
-    try { outputs = JSON.parse([...ordered][0]); } catch { /* Validate below without exposing stored content. */ }
-    if (!Array.isArray(outputs) || outputs.some((output) => typeof output !== 'string')) {
-      throw new SemanticProgramError('EXECUTION_OUTPUT_ORDER_INVALID', 'Execution ordered outputs are malformed', 409);
-    }
-    const values = new Set(outputs as string[]);
-    if (values.size !== legacy.size || [...values].some((output) => !legacy.has(output))) {
-      throw new SemanticProgramError('EXECUTION_OUTPUT_ORDER_INVALID', 'Execution ordered outputs disagree with stored outputs', 409);
-    }
-    return outputs as string[];
-  }
-  // RDF values have no sequence and collapse duplicates. Old single-output
-  // records remain usable; multiple distinct values cannot prove index-based
-  // release authority and must never be reordered heuristically.
-  if (legacy.size > 1) {
-    throw new SemanticProgramError('EXECUTION_OUTPUT_ORDER_UNAVAILABLE', 'Legacy Execution outputs have no recoverable order', 409);
-  }
-  return [...legacy];
 }
 
-function buildExecutionQuads(input: {
+export function buildExecutionQuads(input: {
   bound?: BoundProgramInvocation;
   executionIri: string;
   invocationId: string;
@@ -1867,17 +1859,7 @@ function buildExecutionQuads(input: {
       status: agent.status,
     })));
   }
-  for (const output of input.outputs) {
-    const exactBytes = Buffer.from(output.value, 'utf8');
-    quads.push(literalQuad(input.executionIri, `${SR}output`, output.value));
-    quads.push(literalQuad(
-      input.executionIri,
-      `${SR}outputHash`,
-      `sha256:${createHash('sha256').update(exactBytes).digest('hex')}`,
-    ));
-  }
-  // RDF values alone do not preserve positions or duplicate outputs.
-  quads.push(literalQuad(input.executionIri, `${SR}orderedOutputs`, JSON.stringify(input.outputs.map((output) => output.value))));
+  quads.push(...buildExecutionOutputQuads(input.executionIri, input.outputs.map(output => output.value)));
   return quads;
 }
 
@@ -2071,7 +2053,7 @@ async function assertProgramInvocationAuthorized(input: {
 }
 
 export function validateSemanticRuntimeConfig(config: SemanticRuntimeConfig): void {
-  validateProgramConfiguration(config.programBindings ?? [], config.programRoutes ?? []);
+  validateEffectiveProgramConfiguration(config.programBindings ?? [], config.programRoutes ?? []);
   validateSemanticRuntimeSettings(config);
 }
 
