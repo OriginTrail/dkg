@@ -91,7 +91,7 @@ async function fixture(count = 20, corruptAt = -1, failClose = false) {
     {stagingRoot:directory,
       verification:{contextGraphId:cg,assetUals:uals,ctx:createOperationContext('sync'),
         parseAndFilter:worker.parseAndFilter.bind(worker),processDurableBatchInWorker:(data,meta,_ctx,accept,mode)=>worker.processDurableBatch(data,meta,accept,mode),
-        authenticationDeadline:()=>Date.now()+10_000,storeGraphScopedAsset:async()=>{throw new Error('Singleton write used');}},
+      },
       commit:async (assets, signal)=>{
         const authenticated=[];
         for(const asset of assets) authenticated.push((await authenticateVerifiedGraphScopedAsset(chain,asset,async()=>true)).asset);

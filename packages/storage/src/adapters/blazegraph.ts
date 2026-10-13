@@ -476,11 +476,12 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     }
     const bulk = buildBulkAssetGroupPlan(assets);
     if (bulk) {
-      await this.runStoreWork('replaceAssetGroup', options, async deadline => {
-        const post = async (body: string, contentType: string, accept?: string) => {
+      let published = false;
+      try { await this.runStoreWork('replaceAssetGroup', options, async deadline => {
+        const post = async (body: string, contentType: string) => {
           deadline.check();
           const response = await deadline.waitFor(fetch(this.url, { method: 'POST',
-            headers: { 'Content-Type': contentType, ...(accept ? { Accept: accept } : {}) }, body, signal: deadline.signal }));
+            headers: { 'Content-Type': contentType }, body, signal: deadline.signal }));
           const text = await deadline.waitFor(readResponseTextBounded(response, 64 * 1024));
           if (!response.ok) throw new Error(`Blazegraph bulk group failed (${response.status})`);
           return text;
@@ -489,10 +490,20 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
         // No fallback is allowed after an upload or indeterminate publication.
         await post(bulk.nquads, 'application/n-quads');
         await post(bulk.update, SPARQL_UPDATE_CONTENT_TYPE);
-        const receipt = JSON.parse(await post(bulk.receiptQuery, SPARQL_QUERY_CONTENT_TYPE, 'application/sparql-results+json'));
-        if (receipt?.boolean !== true) throw new Error('Bulk group publication receipt missing');
+        const response = await this.postReadQuery(bulk.receiptQuery,
+          'application/sparql-results+json', deadline, 64 * 1024, 'query');
+        const receipt = decodeSparqlJsonQueryResult(
+          await deadline.waitFor(readResponseTextBounded(response, 64 * 1024)), 'ask');
+        if (receipt.type !== 'boolean' || !receipt.value) throw new Error('Bulk group publication receipt missing');
+        published = true;
         await post(bulk.cleanup, SPARQL_UPDATE_CONTENT_TYPE);
-      });
+      }); } catch (error) {
+        // A confirmed transaction stays committed even if auxiliary cleanup or
+        // the enclosing deadline fails afterward. Drain the admission first,
+        // then let the caller account for it and quarantine revoked bindings
+        // while still holding its materialization locks. Never retry publication.
+        if (!published) throw error;
+      }
       return;
     }
     const plan = buildAtomicAssetGroupUpdate(assets);

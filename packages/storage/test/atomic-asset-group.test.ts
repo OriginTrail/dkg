@@ -74,4 +74,23 @@ describe('atomic asset group', () => {
     expect(() => buildAtomicAssetGroupUpdate([])).toThrow();
     expect(() => buildAtomicAssetGroupUpdate(Array.from({length:9},(_,i)=>asset(i,'x')))).toThrow();
   });
+  it.each([0, 1, 2, 3])('preserves every destination when staging member %s alone is missing', async missing => {
+    const store = new OxigraphStore();
+    try {
+      const members = [asset(1, 'new'), asset(2, 'new')];
+      await store.insert([...[asset(1, 'old'), asset(2, 'old')].flatMap(a => [...a.graphQuads, ...a.metadataQuads]),
+        { graph: 'urn:meta', subject: 'urn:other', predicate: 'urn:p', object: '"keep"' }]);
+      const select = 'SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(?g IN (<urn:data:1>, <urn:data:2>, <urn:meta>)) } ORDER BY ?g ?s ?p ?o';
+      const before = await store.query(select);
+      const plan = buildBulkAssetGroupPlan(members)!;
+      const { parseNQuadsTextTolerant: parseNQuads } = await import('../src/nquads-text.js');
+      const staged = parseNQuads(plan.nquads);
+      const graphs = [...new Set(staged.map(q => q.graph))];
+      expect(graphs).toHaveLength(4);
+      await store.insert(staged.filter(q => q.graph !== graphs[missing]));
+      await store.update(plan.update);
+      expect(await store.query(plan.receiptQuery)).toEqual({ type: 'boolean', value: false });
+      expect(await store.query(select)).toEqual(before);
+    } finally { await store.close(); }
+  });
 });

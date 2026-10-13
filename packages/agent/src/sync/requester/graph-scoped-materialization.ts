@@ -1,7 +1,6 @@
-import { readCurrentAssertionVersion } from "../../graph-scoped-assertion-version.js";
+import { prepareGraphScopedReplacementUnderLock } from './graph-scoped-replacement.js';
 import { normalizeGraphScopedHex32 } from "../graph-scoped-root.js";
 import {
-  assertSafeIri,
   parseDeterministicKnowledgeAssetUal,
 } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
@@ -12,9 +11,7 @@ import {
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import {
-  mergeSameVersionGraphKnowledgeAssetMetadataV1,
   overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1,
-  overlayLocallyTrustedKnowledgeAssetControls,
   readGraphKnowledgeAssetConfirmationKindV1,
   withMaterializationLock,
 } from '@origintrail-official/dkg-publisher';
@@ -386,39 +383,10 @@ export async function materializeVerifiedGraphScopedAsset(params: {
 
   const materializeUnderLock = async (): Promise<GraphScopedMaterializationOutcome> => {
     assertCurrent();
-    const currentVersion = await readCurrentAssertionVersion(
-      store,
-      asset.metaGraph,
-      asset.ual,
-      options,
-    );
-    assertCurrent();
-    if (currentVersion !== undefined && currentVersion > asset.assertionVersion) {
-      return 'stale';
-    }
-    let replacementMetadata = asset.metadataQuads;
-    if (currentVersion === asset.assertionVersion) {
-      const currentMetadata = await readCurrentGraphKnowledgeAssetMetadata(
-        store,
-        asset.metaGraph,
-        asset.ual,
-        options,
-      );
-      if (currentMetadata) {
-        replacementMetadata = mergeSameVersionGraphKnowledgeAssetMetadataV1(
-          replacementMetadata,
-          currentMetadata,
-        );
-      }
-      assertCurrent();
-    }
-    const committedMetadata = await overlayLocallyTrustedKnowledgeAssetControls(
-      store,
-      asset.metaGraph,
-      asset.ual,
-      replacementMetadata,
-      options,
-    );
+    const replacement = await prepareGraphScopedReplacementUnderLock({
+      store, asset, options, assertCurrent, requireCurrentMetadata: false,
+    });
+    if (!replacement) return 'stale';
     // This is the last interruptible boundary. Once the atomic replacement is
     // dispatched, its real completion owns the materialization lock and stop()
     // must drain it rather than detaching the writer.
@@ -431,7 +399,7 @@ export async function materializeVerifiedGraphScopedAsset(params: {
       asset.dataQuads,
       asset.metaGraph,
       asset.ual,
-      committedMetadata,
+      replacement.metadataQuads,
       commitOptions,
     );
     if (!replaced) {
@@ -471,31 +439,6 @@ export async function materializeVerifiedGraphScopedAsset(params: {
         signal: options.signal,
       });
 }
-
-/** Read the current subject once; publisher metadata helpers own typed merging. */
-async function readCurrentGraphKnowledgeAssetMetadata(
-  store: TripleStore,
-  metaGraph: string,
-  ual: string,
-  options: QueryOptions,
-): Promise<Quad[] | undefined> {
-  const result = await store.query(`
-    SELECT ?predicate ?object WHERE {
-      GRAPH <${assertSafeIri(metaGraph)}> {
-        <${assertSafeIri(ual)}> ?predicate ?object .
-      }
-    }
-  `, options);
-  if (result.type !== 'bindings') return undefined;
-  if (result.bindings.some((row) => !row.predicate || !row.object)) return undefined;
-  return result.bindings.map((row) => ({
-    subject: ual,
-    predicate: row.predicate!,
-    object: row.object!,
-    graph: metaGraph,
-  }));
-}
-
 
 function parseBytes32Literal(raw: string, field: string): Uint8Array {
   const hex = normalizeGraphScopedHex32(raw, field);

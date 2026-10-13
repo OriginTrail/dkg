@@ -349,8 +349,8 @@ describe("public snapshot recovery over live local nodes and chain", () => {
     );
     // Internally valid peer content B must not replace local content when
     // the accepted chain snapshot still authenticates root A.
-    for (const transport of ["stream-required", "legacy"] as const) {
-      const n = transport === "legacy" ? 12 : 1;
+    for (const mismatchTransport of (transport === "bulk" ? ["bulk", "stream-required", "legacy"] as const : ["stream-required", "legacy"] as const)) {
+      const n = mismatchTransport === "legacy" ? 12 : mismatchTransport === "bulk" ? 2 : 1;
       const ual = `did:dkg:evm:31337/${signer.address.toLowerCase()}/${n}`;
       const assertionGraph = `did:dkg:context-graph:${graph}/_verifiable_memory/${signer.address.toLowerCase()}/${n}`;
       const metaGraph = `did:dkg:context-graph:${graph}/_meta`;
@@ -360,29 +360,50 @@ describe("public snapshot recovery over live local nodes and chain", () => {
       const metadata = generateGraphKnowledgeAssetMetadata({contextGraphId:graph,ual,assertionGraph,merkleRoot:root,publisherPeerId:"fixture",accessPolicy:"public",allowedPeers:[],timestamp:new Date(),assertionVersion:1,authorAddress:signer.address,publicTripleCount:1,privateTripleCount:privateRoot?1:0,privateMerkleRoot:privateRoot}, {status:"confirmed",confirmation:{kind:"finalized-materialization",provenance:{batchId:BigInt(n),materializedVersion:{blockNumber:0,txIndex:0}}}});
       await source.replaceGraphAndSubject(assertionGraph, changed, metaGraph, ual, metadata);
       // A fresh supplier avoids the encoded cache from the matching-content test.
-      const supplier = await make(`MismatchSource-${transport}`, "core", new EVMChainAdapter(makeAdapterConfig(rpcUrl,hubAddress,HARDHAT_KEYS.DEPLOYER)),source);
+      const supplier = await make(`MismatchSource-${mismatchTransport}`, "core", new EVMChainAdapter(makeAdapterConfig(rpcUrl,hubAddress,HARDHAT_KEYS.DEPLOYER)),source);
       const mismatchStore = new OxigraphStore();
       const beforeQuads: Quad[] = [
         {subject:"urn:preserved",predicate:"urn:value",object:'"unchanged"',graph:assertionGraph},
         {subject:ual,predicate:"urn:local-note",object:'"unchanged"',graph:metaGraph},
       ];
       await mismatchStore.insert(beforeQuads);
-      const sink = await make(`MismatchReceiver-${transport}`, "edge", new EVMChainAdapter(makeAdapterConfig(rpcUrl,hubAddress,HARDHAT_KEYS.REC1_OP)),mismatchStore);
+      const sink = await make(`MismatchReceiver-${mismatchTransport}`, "edge", new EVMChainAdapter(makeAdapterConfig(rpcUrl,hubAddress,HARDHAT_KEYS.REC1_OP)),mismatchStore);
       sink.subscribeToContextGraph(graph,{onChainId,syncMode:"on-demand",trackSyncScope:false});
       await sink.connectTo(supplier.multiaddrs.find(a=>a.includes("/tcp/")&&!a.includes("/p2p-circuit"))!);
-      const beforeRows = await mismatchStore.query("SELECT ?s ?p ?o ?g WHERE {GRAPH ?g {?s ?p ?o}} ORDER BY ?g ?s ?p ?o");
+      const beforeRows = await mismatchStore.query(`SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(?g = <${metaGraph}> || STRSTARTS(STR(?g), "did:dkg:context-graph:${graph}/_verifiable_memory/")) } ORDER BY ?g ?s ?p ?o`);
       const writes = vi.spyOn(mismatchStore,"replaceGraphAndSubject");
+      if (mismatchTransport === 'bulk') {
+        const groupWrites = vi.spyOn(mismatchStore, 'replaceAssetGroup');
+        const authenticated: string[] = [];
+        const original = PublicSnapshotEvidence.prototype.authenticate;
+        const authentication = vi.spyOn(PublicSnapshotEvidence.prototype, 'authenticate').mockImplementation(function(asset) {
+          authenticated.push(asset.ual);
+          return original.call(this, asset);
+        });
+        try {
+          await expect(sink.syncPublicGraphSnapshot({ transport: 'bulk', contextGraphId: graph,
+            onChainId, trustedCorePeerIds: [supplier.peerId] })).rejects.toThrow();
+          // A matching first member and mismatched second member share the
+          // real bulk commit callback; authentication must precede every write.
+          expect(authenticated).toContain(`did:dkg:evm:31337/${signer.address.toLowerCase()}/1`);
+          expect(authenticated).toContain(ual);
+          expect(groupWrites).not.toHaveBeenCalled();
+          expect(writes).not.toHaveBeenCalled();
+          expect(await mismatchStore.query(`SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(?g = <${metaGraph}> || STRSTARTS(STR(?g), "did:dkg:context-graph:${graph}/_verifiable_memory/")) } ORDER BY ?g ?s ?p ?o`)).toEqual(beforeRows);
+        } finally { authentication.mockRestore(); }
+        continue;
+      }
       const evidence = new PublicSnapshotEvidence({snapshot: independent, mode:"core-cache", sourceCore:supplier.peerId},()=>true);
       const authenticate = vi.fn(asset => evidence.authenticate(asset));
       const rejected = await sink.syncExactKnowledgeAssetsFromPeerDetailed(supplier.peerId,graph,[ual],{
-        forceFreshExactSession:true,exactRecoveryTransportMode:transport,totalTimeoutMs:15000,
+        forceFreshExactSession:true,exactRecoveryTransportMode:mismatchTransport,totalTimeoutMs:15000,
         authenticateGraphScopedAsset:authenticate,
         registeredPublicEvidence:{usableFor:()=>true,revoke:()=>{}},
       });
       expect(authenticate).toHaveBeenCalled();
       expect(rejected.committedExactAssetUals ?? []).toEqual([]);
       expect(writes).not.toHaveBeenCalled();
-      expect(await mismatchStore.query("SELECT ?s ?p ?o ?g WHERE {GRAPH ?g {?s ?p ?o}} ORDER BY ?g ?s ?p ?o")).toEqual(beforeRows);
+      expect(await mismatchStore.query(`SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(?g = <${metaGraph}> || STRSTARTS(STR(?g), "did:dkg:context-graph:${graph}/_verifiable_memory/")) } ORDER BY ?g ?s ?p ?o`)).toEqual(beforeRows);
     }
     const privateCreated = await adapter.createOnChainContextGraph({
       participantAgents: [],
