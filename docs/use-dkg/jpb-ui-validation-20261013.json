@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "recordedAt": "2026-10-13T13:10:37.030063+00:00",
+  "recordedAt": "2026-10-13T13:51:51.023975+00:00",
   "repository": "OriginTrail/dkg",
   "pullRequest": 3196,
-  "implementationCommit": "a0e7ef77fcd8aae78a8e2760f40da570fb7a02e6",
+  "implementationCommit": "da84768b92eb9585e32497bab7910cdb05268ce3",
   "baseBranch": "codex/dmaast-program-editor-deploy-20260921",
   "localEnvironment": {
     "node": "25.2.1",
@@ -12,7 +12,7 @@
   "validation": {
     "nodeUi": {
       "filesPassed": 179,
-      "testsPassed": 2469,
+      "testsPassed": 2471,
       "existingTestsSkipped": 38
     },
     "graphViz": {
@@ -34,22 +34,35 @@
     },
     "workflowYaml": "passed",
     "diffWhitespace": "passed",
-    "nulAudit": "passed"
+    "nulAudit": "passed",
+    "sparqlScalabilityLint": {
+      "status": "passed",
+      "newBlocking": 0,
+      "boundedDynamicValuesAcknowledgments": 1,
+      "justification": "Visible-page counts read a finite VALUES set of at most 100 exact data graphs; CG authorization is still applied. The static linter cannot evaluate the generated VALUES list."
+    }
   },
   "liveReadOnlyApi": {
-    "at": "2026-10-13T13:03:40.855Z",
+    "at": "2026-10-13T13:40:55.177Z",
     "environment": "candidate-client-with-read-only-live-JPB-API",
     "contextGraph": "private-owner-scoped-jpb-data",
     "firstPage": 50,
     "secondPage": 50,
     "distinctAcrossPages": 100,
     "firstPageCountsPresent": 50,
-    "membershipReadyMs": 4677,
+    "membershipReadyMs": 5673,
     "metadataAndCountReadsSeparate": true,
     "firstPageUalsPresent": 50,
     "repeatedFirstPageUsedCache": true,
-    "resourceDetailTriples": 9,
+    "resourceDetailTriples": 7,
     "resourceDetailPartial": false,
+    "exactDataGraphCounts": true,
+    "seekPages": {
+      "firstRows": 3,
+      "nextRows": 3,
+      "bothSucceeded": true,
+      "distinctRows": 6
+    },
     "browserPreviewVerified": false,
     "deployed": false
   },
@@ -64,9 +77,10 @@
   "limitations": [
     "Candidate browser preview was blocked by ERR_BLOCKED_BY_CLIENT; no candidate or deployed-browser acceptance is claimed.",
     "No browser heap soak measurement; reproduced observer, GPU resource and asynchronous initialization regressions are covered by tests.",
-    "Graph pages use ordered offsets and are refreshed on graph changes, not a frozen dataset snapshot.",
+    "Graph pages use seek cursors over bounded storage-graph pages and are refreshed on graph changes, not a frozen dataset snapshot.",
     "Explicitly loading and rendering more nodes increases client memory and layout cost.",
     "42 browser TypeScript diagnostics are identical to the unchanged previous PR head; this is not a clean browser TypeScript gate.",
-    "Full ingestion recovery and the next automatic unchanged-data cycle are still a separate verification."
+    "Full ingestion recovery and the next automatic unchanged-data cycle are still a separate verification.",
+    "Live browse includes a storage-graph discovery request before each data page. These reads succeeded, but live query latencies vary under current node load; no general low-latency claim is made."
   ]
 }

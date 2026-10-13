@@ -82,16 +82,20 @@ and configuration pins remain enforced.
 ### UI loading and graph rendering
 
 The UI now lists assertions in cursor pages of 50. It reads membership and UALs
-from metadata first, then loads triple-count badges only for the visible page.
+from metadata first, then loads triple-count badges only for the visible page. The count read binds those exact data graphs directly, rather
+than joining an open graph variable against all content.
 Old physical aliases are suppressed in favor of their canonical lifecycle rows;
 published aliases do not reappear in the Shared Working Memory list. Explicit
 bulk share/publish actions still apply to all eligible assertions across pages,
 with query-catalog configuration excluded from the bulk scope.
 
-Graph reads use ordered pages of 5,000 triples per layer. A visible notice and
+Graph reads discover at most five storage partitions inside the selected Context
+Graph, then read at most 5,000 triples per layer page. Partition discovery uses
+existence probes; data reads use an exact graph set and seek cursors. A visible notice and
 **Load more graph data** replace the old silent cutoff. Counts describe loaded
 data and remain lower bounds when a layer is clipped or unavailable. A failed
-page can retry its last offset. Graph-change events reset the read and invalidate
+page retries its last successful cursor, including graph, subject, predicate and
+RDF object identity (node kind, lexical value, language and datatype). Graph-change events reset the read and invalidate
 cached pages; these pages are a live browse view, not an immutable SQL snapshot.
 
 Recent graph reads and assertion pages are cached for five minutes within the
