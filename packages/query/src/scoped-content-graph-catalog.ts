@@ -1,4 +1,4 @@
-import { registeredSubGraphPattern, decodeRegisteredSubGraphName } from './registered-sub-graphs.js';
+import { registeredSubGraphBranches, decodeRegisteredSubGraphName } from './registered-sub-graphs.js';
 import { assertSafeIri, contextGraphDataUri, contextGraphMetaUri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
 import { nonEmptyNamedGraphEnumerationPattern, type QueryResult } from '@origintrail-official/dkg-storage';
 
@@ -19,23 +19,23 @@ export async function readScopedContentGraphCatalog(
   const root = assertSafeIri(contextGraphDataUri(contextGraphId));
   const meta = assertSafeIri(contextGraphMetaUri(contextGraphId));
   const prefix = escapeSparqlLiteral(`${root}/`);
-  const inventory = includeInventory ? `{
+  // Keep UNION branches flat: Blazegraph 2.1.5 cannot lower a nested UNION
+  // introduced by graph-scope lifting, even though the nested form is valid SPARQL.
+  const branches = [
+    ...(includeInventory ? [`
       ${nonEmptyNamedGraphEnumerationPattern('graph')}
       FILTER(?graph = <${root}> || STRSTARTS(STR(?graph), "${prefix}"))
-    } UNION` : '';
-  const result = await query(`SELECT DISTINCT ${includeInventory ? '?graph ' : ''}?name ?assertionGraph ?ctxGraph WHERE {
-    ${inventory} {
-      ${registeredSubGraphPattern(contextGraphId)}
-    } UNION {
-      GRAPH <${meta}> { ?assertion <http://dkg.io/ontology/assertionGraph> ?assertionGraph . }
-    } UNION {
-      GRAPH ?g {
-        { ?ctxGraph a <https://dkg.network/ontology#ContextGraph> . }
-        UNION { ?ctxGraph <https://dkg.network/ontology#registrationStatus> ?status . }
-      }
+    `] : []),
+    ...registeredSubGraphBranches(contextGraphId),
+    `GRAPH <${meta}> { ?assertion <http://dkg.io/ontology/assertionGraph> ?assertionGraph . }`,
+    ...['a <https://dkg.network/ontology#ContextGraph>', '<https://dkg.network/ontology#registrationStatus> ?status'].map(pattern => `
+      GRAPH ?g { ?ctxGraph ${pattern} . }
       FILTER(STR(?g) = CONCAT(STR(?ctxGraph), "/_meta"))
       FILTER(STRSTARTS(STR(?ctxGraph), "${prefix}"))
-    }
+    `),
+  ];
+  const result = await query(`SELECT DISTINCT ${includeInventory ? '?graph ' : ''}?name ?assertionGraph ?ctxGraph WHERE {
+    ${branches.map(branch => `{ ${branch} }`).join(' UNION ')}
   }`);
   const catalog = {
     graphs: new Set<string>(), subGraphs: new Set<string>(),

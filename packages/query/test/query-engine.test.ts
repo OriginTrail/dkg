@@ -983,6 +983,11 @@ describe('DKGQueryEngine', () => {
 
     const multiGraphQuery = () =>
       recStore.queries.find((s) => s.includes('VALUES ?__dkgViewGraph'));
+    // Authority discovery may UNION independent metadata branches. This guard
+    // concerns per-content-graph reads of the SWM view, not catalog queries.
+    const hasPerGraphSwmRead = () => recStore.queries.some(
+      (s) => /}\s*UNION\s*{\s*GRAPH\s*<[^>]*\/_shared_memory\//i.test(s),
+    );
 
     it('collapses N SWM graphs into one VALUES/GRAPH query and reads every triple', async () => {
       const quads: Quad[] = [];
@@ -1002,9 +1007,8 @@ describe('DKGQueryEngine', () => {
       expect(multi).toBeDefined();
       expect(multi).toContain('GRAPH ?__dkgViewGraph {');
       expect(multi).toContain(swmGraph('0xowner', 0));
-      expect(
-        recStore.queries.some((s) => /}\s*UNION\s*{\s*GRAPH\s*</i.test(s)),
-      ).toBe(false);
+      expect(recStore.queries.filter(s => s.includes('VALUES ?__dkgViewGraph'))).toHaveLength(1);
+      expect(hasPerGraphSwmRead()).toBe(false);
     });
 
     it('preserves COUNT(*) aggregate semantics over the graph set', async () => {
@@ -1087,7 +1091,8 @@ describe('DKGQueryEngine', () => {
       expect((result.quads ?? []).every((qd) => qd.predicate === 'urn:out')).toBe(true);
       // ...and it went through the ONE VALUES query, never a per-graph UNION.
       expect(multiGraphQuery()).toBeDefined();
-      expect(recStore.queries.some((s) => /}\s*UNION\s*{\s*GRAPH\s*</i.test(s))).toBe(false);
+      expect(recStore.queries.filter(s => s.includes('VALUES ?__dkgViewGraph'))).toHaveLength(1);
+      expect(hasPerGraphSwmRead()).toBe(false);
     });
 
     it('ASK over the SWM view uses the VALUES path and returns the boolean', async () => {
