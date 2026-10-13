@@ -412,6 +412,8 @@ export interface ContextGraphSubscribeOptions {
   syncMode?: 'on-demand' | 'always-on';
   /** Authoritative numeric slot established by the admission owner. */
   onChainId?: string;
+  /** Authenticated name commitment belonging to the numeric slot. */
+  onChainHash?: string;
 }
 
 export class SwmSubstrateMethods extends DKGAgentBase {
@@ -484,6 +486,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       if (options?.onChainId !== undefined) {
         this.bindSubscriptionOnChainId(contextGraphId, next, options.onChainId);
       }
+      if (options?.onChainHash !== undefined) next.onChainHash = options.onChainHash;
       return next;
     };
     // Opening an already durable graph must never silently downgrade it to a
@@ -495,7 +498,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       requested: options?.syncMode,
       hasDormantDurableIntent: this.contextGraphSubscriptionDormancyById.has(contextGraphId),
     });
-    const persist = syncMode === 'on-demand' ? false : options?.persist;
+    const persist = options?.persist; // The canonical projection owns durable versus on-demand intent.
     if (!this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)) {
       // Preserve the user's durable selection and VM intent without installing
       // legacy publish/update/finalization authority. The 10.0.16 catalog owns
@@ -539,6 +542,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         !existing?.subscribed
         || existing.syncMode !== syncMode
         || (options?.onChainId !== undefined && existing.onChainId !== options.onChainId)
+        || (options?.onChainHash !== undefined && existing.onChainHash !== options.onChainHash)
       ) {
         return this.setContextGraphSubscription(
           contextGraphId,
