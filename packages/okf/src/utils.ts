@@ -111,3 +111,22 @@ export function setOwn(target: Record<string, unknown>, key: string, value: unkn
 export function assignOwn(target: Record<string, unknown>, source: Record<string, unknown>): void {
   for (const key of Object.keys(source)) setOwn(target, key, source[key]);
 }
+
+/**
+ * Distinct triples, first occurrence kept, the named graph ignored. A
+ * graph-wide read returns the same triple once per named graph that holds it
+ * (two sub-graphs of one Context Graph, say); for export that is one triple,
+ * and decoding the repeat would invent an extra source, verification or
+ * parameter.
+ */
+export function distinctTriples<T extends { subject: string; predicate: string; object: string }>(quads: readonly T[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const q of quads) {
+    const key = `${q.subject}\u0000${q.predicate}\u0000${q.object}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(q);
+  }
+  return out;
+}

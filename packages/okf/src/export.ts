@@ -44,23 +44,30 @@ import {
 } from './constants.js';
 import { accumulate, conceptIdFromIri, literalValue, orderKeys, termValue, type ExportContext } from './decode-terms.js';
 import { decodeFamilies } from './families/decode.js';
-import { assignOwn, hasOwn } from './utils.js';
+import { assignOwn, distinctTriples, hasOwn, pascalCase } from './utils.js';
 import type { BundleFile, ExportInput, OkfMappingOptions, Quad } from './types.js';
 
 /**
  * Spec-defined type names whose exact spelling carries meaning for consumers
- * (§10.5 discovery is by `type: Attested Computation`). Producer types keep
- * the PascalCased local name — the original spacing is not recoverable.
+ * (§10.5 discovery is by `type: Attested Computation`). A Map, so a local name
+ * like `toString` or `constructor` never reads an inherited property.
  */
-const SPEC_TYPE_NAMES: Record<string, string> = {
-  AttestedComputation: OKF_ATTESTED_COMPUTATION_TYPE,
-};
+const SPEC_TYPE_NAMES: ReadonlyMap<string, string> = new Map([['AttestedComputation', OKF_ATTESTED_COMPUTATION_TYPE]]);
 
-/** Map an rdf:type object IRI back to a writable `type` value. */
+/**
+ * Map an rdf:type object IRI back to a writable `type` value. A `schema:`
+ * local name is written bare only when importing it bare gives the same IRI
+ * back (the importer PascalCases a bare `type`); otherwise — `schema:toString`,
+ * `schema:foo-bar`, which only a full-IRI `type` can produce — the full IRI is
+ * written, so the type round-trips. Producer spacing (`BigQuery Table`) is not
+ * recoverable and comes back as `BigQueryTable`, which maps to the same IRI.
+ */
 function typeValue(object: string): string {
   if (!object.startsWith(SCHEMA_NS)) return object;
   const local = object.slice(SCHEMA_NS.length);
-  return SPEC_TYPE_NAMES[local] ?? local;
+  const special = SPEC_TYPE_NAMES.get(local);
+  if (special !== undefined) return special;
+  return local !== '' && pascalCase(local) === local ? local : object;
 }
 
 /** Predicates handled explicitly on the concept subject; any other `schema:` predicate is a producer key. */
@@ -103,7 +110,8 @@ const CONCEPT_KEY_ORDER = [
 
 function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportContext): BundleFile {
   const bySubject = new Map<string, Quad[]>();
-  for (const q of c.quads) {
+  // A repeated triple is one triple (see `distinctTriples`), however the input was assembled.
+  for (const q of distinctTriples(c.quads)) {
     if (!bySubject.has(q.subject)) bySubject.set(q.subject, []);
     bySubject.get(q.subject)!.push(q);
   }
@@ -245,7 +253,8 @@ export function exportBundle(input: ExportInput, opts: OkfMappingOptions = {}): 
  * Rebuild the exporter's input from the quads of a graph (e.g. every subject
  * under `iriBase` in one Context Graph view), in any order.
  *
- * A concept is a subject under `iriBase` that carries an `rdf:type`. A
+ * Repeated triples (the same triple read from several named graphs) count
+ * once. A concept is a subject under `iriBase` that carries an `rdf:type`. A
  * skolemized node (`<conceptIri>/.well-known/genid/…`: a body section, or a
  * v0.2 verification / source / parameter entry) belongs to the concept its IRI
  * starts with and is attached to it, so the families can be rebuilt; it is
@@ -257,7 +266,8 @@ export function exportInputFromQuads(quads: readonly Quad[], opts: Pick<OkfMappi
   const iriBase = opts.iriBase ?? DEFAULT_IRI_BASE;
   const rootQuads = new Map<string, Quad[]>();
   const nodeQuadsByOwner = new Map<string, Quad[]>();
-  for (const q of quads) {
+  // The same triple from several named graphs (overlapping sub-graphs) is one triple.
+  for (const q of distinctTriples(quads)) {
     const infixAt = q.subject.indexOf(SECTION_GENID_INFIX);
     const target = infixAt === -1 ? rootQuads : nodeQuadsByOwner;
     const key = infixAt === -1 ? q.subject : q.subject.slice(0, infixAt);

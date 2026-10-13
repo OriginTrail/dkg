@@ -119,7 +119,8 @@ describe('exportInputFromBindings (graph → exporter input)', () => {
     const [c] = input.concepts;
     expect(c.iri).toBe(concept);
     expect(c.quads).toEqual([
-      { subject: concept, predicate: RDF_TYPE, object: '<http://schema.org/Metric>' },
+      // a bracketed object IRI is unwrapped like the subject and predicate
+      { subject: concept, predicate: RDF_TYPE, object: 'http://schema.org/Metric' },
       { subject: concept, predicate: SCHEMA_NAME, object: '"Revenue"' },
       { subject: concept, predicate: OKF_SOURCE, object: source },
       { subject: source, predicate: RDF_TYPE, object: 'http://dkg.io/ontology/okf/Source' },
@@ -129,6 +130,9 @@ describe('exportInputFromBindings (graph → exporter input)', () => {
 
   const imported = importBundle(acme);
   const toBindings = (quads: Quad[]) => quads.map((q) => ({ s: `<${q.subject}>`, p: `<${q.predicate}>`, o: q.object }));
+  /** Every IRI bracketed, in object position too; literals (`"…"`) stay as they are. */
+  const toBracketedBindings = (quads: Quad[]) =>
+    quads.map((q) => ({ s: `<${q.subject}>`, p: `<${q.predicate}>`, o: q.object.startsWith('"') ? q.object : `<${q.object}>` }));
 
   it('rebuilds the complete semantic graph from shuffled bindings, every family payload included', () => {
     for (const seed of [3, 17, 2026]) {
@@ -140,6 +144,24 @@ describe('exportInputFromBindings (graph → exporter input)', () => {
         expect(reimported.concepts.find((x) => x.conceptId === c.conceptId)!.trust).toEqual(c.trust);
       }
     }
+  });
+
+  it('rebuilds the graph when object IRIs are bracketed too (family links, edges, types)', () => {
+    const bindings = toBracketedBindings(imported.quads);
+    // the fixture really does bracket the references to family nodes
+    expect(bindings.some((b) => b.o.startsWith('<') && b.o.includes(GENID_TAGS.source))).toBe(true);
+    expect(bindings.some((b) => b.o.startsWith('<') && b.o.includes(GENID_TAGS.verification))).toBe(true);
+    expect(bindings.some((b) => b.o.startsWith('<') && b.o.includes(GENID_TAGS.parameter))).toBe(true);
+    for (const seed of [5, 21]) {
+      const reimported = importBundle(exportBundle(exportInputFromBindings(shuffled(bindings, seed), base)));
+      expect(semantic(reimported.quads)).toBe(semantic(imported.quads));
+    }
+  });
+
+  it('counts a triple read from two named graphs once (no invented entries)', () => {
+    const once = exportBundle(exportInputFromBindings(toBindings(imported.quads), base));
+    const twice = exportBundle(exportInputFromBindings([...toBindings(imported.quads), ...toBindings(imported.quads)], base));
+    expect(twice).toEqual(once);
   });
 
   it('is not vacuous: dropping the parameter nodes changes the graph even though trust summaries still match', () => {

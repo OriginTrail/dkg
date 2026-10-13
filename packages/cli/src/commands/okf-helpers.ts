@@ -161,7 +161,10 @@ function unwrapIri(term: string): string {
 /**
  * `?s ?p ?o` bindings from one Context Graph view → quads. The daemon returns
  * cells as bare strings or SPARQL-JSON objects, and IRIs raw or bracketed;
- * both are normalised. Bindings with an empty cell are skipped. Pure; no daemon.
+ * both are normalised — in every position, so a bracketed object IRI (a
+ * family link, an edge, an `rdf:type`) still matches the unbracketed subject
+ * it names. Literals (`"…"`) and blank nodes (`_:…`) pass through. Bindings
+ * with an empty cell are skipped. Pure; no daemon.
  */
 export function quadsFromBindings(bindings: Array<Record<string, unknown>>): Quad[] {
   const quads: Quad[] = [];
@@ -170,7 +173,7 @@ export function quadsFromBindings(bindings: Array<Record<string, unknown>>): Qua
     const p = cell(b.p);
     const o = cell(b.o);
     if (!s || !p || !o) continue;
-    quads.push({ subject: unwrapIri(s), predicate: unwrapIri(p), object: o });
+    quads.push({ subject: unwrapIri(s), predicate: unwrapIri(p), object: unwrapIri(o) });
   }
   return quads;
 }

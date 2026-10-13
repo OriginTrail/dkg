@@ -60,6 +60,8 @@ import {
   DKG_HAS_SECTION,
 } from '../src/index.js';
 import type { BundleFile, Quad } from '../src/index.js';
+import { loadBundleDir } from '../src/index.js';
+import { fileURLToPath } from 'node:url';
 
 const IRI = 'urn:okf:metrics/revenue';
 const DT = (lex: string) => `"${lex}"^^<${XSD_DATE_TIME}>`;
@@ -811,6 +813,64 @@ describe('concept IDs are arbitrary file paths', () => {
     expect(r.concepts.map((c) => c.resolvedLinks.map((l) => l.targetConceptId))).toEqual([['constructor'], ['__proto__']]);
     expect(r.quads.every((q) => typeof q.subject === 'string')).toBe(true);
     expect(exportBundle(r).map((f) => f.path)).toEqual(['__proto__.md', 'constructor.md', 'index.md']);
+  });
+});
+
+describe('the same triple from several named graphs is one triple on export', () => {
+  const acme = loadBundleDir(fileURLToPath(new URL('./fixtures/acme_retail', import.meta.url)));
+  const bitcoin = loadBundleDir(fileURLToPath(new URL('./fixtures/crypto_bitcoin', import.meta.url)));
+
+  it('exports doubled rows byte-for-byte like the single graph', () => {
+    for (const files of [acme, bitcoin]) {
+      const imported = importBundle(files);
+      const single = exportBundle(exportInputFromQuads(imported.quads));
+      expect(single).toEqual(exportBundle(imported));
+      expect(exportBundle(exportInputFromQuads([...imported.quads, ...imported.quads]))).toEqual(single);
+      // a caller-built ExportInput with repeats is normalised as well
+      const repeated = { concepts: imported.concepts.map((c) => ({ ...c, quads: [...c.quads, ...c.quads] })) };
+      expect(exportBundle(repeated)).toEqual(single);
+    }
+  });
+
+  it('keeps distinct sources that name the same resource as separate entries', () => {
+    const files = bundle('type: Metric\nsources:\n  - { id: a, resource: /policies/revenue-recognition.md }\n  - { id: b, resource: /policies/revenue-recognition.md }');
+    const imported = importBundle(files);
+    const doubled = exportBundle(exportInputFromQuads([...imported.quads, ...imported.quads]));
+    const fm = parseDocument('metrics/revenue.md', doubled.find((f) => f.path === 'metrics/revenue.md')!.content).frontmatter;
+    expect(fm.sources).toEqual([
+      { id: 'a', resource: '/policies/revenue-recognition.md' },
+      { id: 'b', resource: '/policies/revenue-recognition.md' },
+    ]);
+  });
+});
+
+describe('rdf:type export', () => {
+  const TYPES: Array<[string, string]> = [
+    ['http://schema.org/toString', 'http://schema.org/toString'],
+    ['http://schema.org/constructor', 'http://schema.org/constructor'],
+    ['http://schema.org/__proto__', 'http://schema.org/__proto__'],
+    ['http://schema.org/foo-bar', 'http://schema.org/foo-bar'],
+    ['http://schema.org/thing', 'http://schema.org/thing'],
+    ['BigQuery Table', 'BigQueryTable'],
+    ['Attested Computation', 'Attested Computation'],
+    ['https://example.org/Custom', 'https://example.org/Custom'],
+  ];
+  const files: BundleFile[] = [IDX_V02(), ...TYPES.map(([type], i) => ({ path: `t${i}.md`, content: `---\ntype: ${type}\n---\n\nbody\n` }))];
+  const imported = importBundle(files);
+
+  it('writes a string for every type, and the full IRI when a bare local name would not map back', () => {
+    const exported = exportBundle(imported);
+    TYPES.forEach(([, expected], i) => {
+      const fm = parseDocument(`t${i}.md`, exported.find((f) => f.path === `t${i}.md`)!.content).frontmatter;
+      expect(typeof fm.type).toBe('string');
+      expect(fm.type).toBe(expected);
+    });
+  });
+
+  it('re-imports every concept with its original rdf:type', () => {
+    const exported = exportBundle(imported);
+    const typesOf = (r: typeof imported) => r.quads.filter((q) => q.predicate === RDF_TYPE).map((q) => `${q.subject} ${q.object}`).sort();
+    expect(typesOf(importBundle(exported))).toEqual(typesOf(imported));
   });
 });
 
