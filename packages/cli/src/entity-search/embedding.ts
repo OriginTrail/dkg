@@ -3,6 +3,30 @@ import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
 import { EntitySearchError, validVector, type EntityEmbedder, type EntityEmbeddingConfig } from './types.js';
 
+interface ModelEntry { name: string; digest: string }
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown> : undefined;
+}
+function models(value: unknown): ModelEntry[] {
+  const entries = record(value)?.models;
+  if (entries === undefined) return [];
+  if (!Array.isArray(entries)) throw new EntitySearchError('ENTITY_EMBEDDING_INVALID');
+  return entries.map(entry => {
+    const model = record(entry);
+    if (typeof model?.name !== 'string' || typeof model.digest !== 'string') {
+      throw new EntitySearchError('ENTITY_EMBEDDING_INVALID');
+    }
+    return { name: model.name, digest: model.digest };
+  });
+}
+function embedding(value: unknown, dimensions: number): number[] {
+  const vectors = record(value)?.embeddings;
+  const vector = Array.isArray(vectors) ? vectors[0] : undefined;
+  validVector(vector, dimensions);
+  return vector;
+}
+
 /** Explicitly configured local inference only. No fallback to a billed provider. */
 export class LocalEntityEmbedder implements EntityEmbedder {
   readonly fingerprint: string;
@@ -23,7 +47,7 @@ export class LocalEntityEmbedder implements EntityEmbedder {
     this.fingerprint = createHash('sha256').update(JSON.stringify([config.provider, config.model, config.digest, config.dimensions,
       config.queryPrefix ?? "", config.documentPrefix ?? ""])).digest('hex');
   }
-  private async json(path: string, signal: AbortSignal, body?: unknown) {
+  private async json(path: string, signal: AbortSignal, body?: unknown): Promise<unknown> {
     const res = await fetch(this.base + path, { method: body ? 'POST' : 'GET', redirect: 'error', signal,
       headers: { 'Content-Type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) });
     if (!res.ok || !res.body) { await res.body?.cancel(); throw new EntitySearchError('ENTITY_EMBEDDING_UNAVAILABLE'); }
@@ -36,24 +60,22 @@ export class LocalEntityEmbedder implements EntityEmbedder {
     }
   }
   private async model(signal: AbortSignal): Promise<string> {
-    const tags = await this.json('/api/tags', signal);
+    const tags = models(await this.json('/api/tags', signal));
     const model = this.config.model.includes(':') ? this.config.model : this.config.model + ':latest';
-    if (!tags.models?.some((v: { name: string; digest: string }) => v.name === model && v.digest === this.config.digest)) {
+    if (!tags.some(v => v.name === model && v.digest === this.config.digest)) {
       throw new EntitySearchError('ENTITY_EMBEDDING_MODEL_CHANGED');
     }
     return model;
   }
   async ready(signal: AbortSignal): Promise<boolean> {
     const model = await this.model(signal);
-    const running = await this.json('/api/ps', signal);
-    return running.models?.some((v: { name: string; digest: string }) => v.name === model && v.digest === this.config.digest) === true;
+    const running = models(await this.json('/api/ps', signal));
+    return running.some(v => v.name === model && v.digest === this.config.digest) === true;
   }
   async embed(text: string, kind: 'query' | 'document', signal: AbortSignal): Promise<number[]> {
     const model = await this.model(signal);
     const prefix = kind === 'query' ? this.config.queryPrefix : this.config.documentPrefix;
     const reply = await this.json('/api/embed', signal, { model, input: (prefix ?? '') + text, truncate: false, keep_alive: '5m' });
-    const vector = reply.embeddings?.[0];
-    validVector(vector, this.dimensions);
-    return vector;
+    return embedding(reply, this.dimensions);
   }
 }
