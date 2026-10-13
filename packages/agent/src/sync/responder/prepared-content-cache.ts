@@ -1,7 +1,7 @@
 import { constants } from 'node:fs';
 import { mkdir, lstat, open, readdir, rename, unlink, utimes } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES, EXACT_SYNC_GZIP_MAX_INFLATED_BYTES } from '../wire-compression.js';
 
 /** Optional local performance copies. This directory must belong to one daemon/store. */
@@ -77,7 +77,9 @@ export function createPreparedContentCache(
   options: NonNullable<ReturnType<typeof resolvePreparedContentCacheConfig>>,
   onError: (error: unknown, operation: 'initialize' | 'read' | 'publish') => void = () => {},
 ): PreparedContentCache {
-  const { directory, maxBytes, maxEntries, ttlMs } = options;
+  const { maxBytes, maxEntries, ttlMs } = options;
+  // lstat follows a final symlink spelled with a trailing separator on POSIX.
+  const directory = resolve(options.directory);
   // Iteration order is oldest first; successful reads/writes move to the end.
   const entries = new Map<string, { size: number }>();
   let initialized = false, total = 0;
