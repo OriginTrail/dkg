@@ -4,6 +4,8 @@ import { isSafeIri } from '@origintrail-official/dkg-core';
 export const EPCIS_DECLARED_EVENT_TYPE = 'http://dkg.io/ontology/epcisEventType';
 
 export const EPCIS_TYPE_PREFIX = 'https://gs1.github.io/EPCIS/';
+export const EPCIS_CURRENT_PREFIX = 'https://ref.gs1.org/epcis/';
+export const EPCIS_NAMESPACES = [EPCIS_TYPE_PREFIX, EPCIS_CURRENT_PREFIX] as const;
 export const EPCIS_STANDARD_EVENT_TYPES = Object.freeze([
   'ObjectEvent', 'AggregationEvent', 'TransactionEvent', 'TransformationEvent', 'AssociationEvent',
 ] as const);
@@ -16,10 +18,11 @@ export type ResolvedEpcisEventType =
 
 /** Resolve only valid capture discriminators to their canonical identity. */
 export function resolveEpcisEventType(value: string): ResolvedEpcisEventType | undefined {
-  const name = EPCIS_STANDARD_EVENT_TYPES.find((name) => value === name || value === `${EPCIS_TYPE_PREFIX}${name}`);
+  const name = EPCIS_STANDARD_EVENT_TYPES.find((name) =>
+    value === name || EPCIS_NAMESPACES.some((prefix) => value === `${prefix}${name}`));
   if (name) return { kind: 'standard', name, iri: `${EPCIS_TYPE_PREFIX}${name}` };
   if (isSafeIri(value)) return {
-    kind: value.startsWith(EPCIS_TYPE_PREFIX) ? 'gs1-extension' : 'external', iri: value,
+    kind: EPCIS_NAMESPACES.some((prefix) => value.startsWith(prefix)) ? 'gs1-extension' : 'external', iri: value,
   };
   return undefined;
 }
