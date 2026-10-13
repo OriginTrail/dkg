@@ -59,8 +59,9 @@ export interface SelectedSwmMetaRetentionLease {
   replace(rows: number, bytesEstimate: number): void;
   /**
    * Drop the retained prefix and reserve a fresh allowance in one step, taking
-   * back any reservation this lease still has out. Waiting leases decide only
-   * afterwards, so a transfer that starts its prefix over keeps its allowance.
+   * back any reservation this lease still has out. No waiting lease is let
+   * through in between, so a transfer that starts its prefix over keeps its
+   * allowance.
    */
   restart(): SelectedSwmMetaRetentionReservation;
   /**
@@ -360,9 +361,10 @@ export function createSelectedSwmMetaRetentionBudget(
           }
           dropOwnReservations();
           replaceRetained(0, 0, false);
-          const reservation = lease.reserve();
-          settleAllowanceWaiters();
-          return reservation;
+          // The new reservation takes at least what the two steps above gave
+          // back, and a fetch of this lease stays in flight: no waiting lease
+          // has anything to decide.
+          return lease.reserve();
         },
         endRound() {
           const current = entries.get(id);

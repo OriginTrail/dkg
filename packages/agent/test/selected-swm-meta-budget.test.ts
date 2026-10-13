@@ -389,6 +389,32 @@ describe('selected SWM metadata retention budget', () => {
     waiter.release();
   });
 
+  it('counts the room of a transfer that is fetching its next pass only once', async () => {
+    const budget = pool(2);
+    const continuing = budget.lease();
+    continuing.reserve().commitReplace(1, 100);
+    // Its next pass has the rest of its allowance reserved.
+    const nextPass = continuing.reserve();
+    expect(nextPass).toEqual(expect.objectContaining({ maxRows: 1, maxBytesEstimate: 100 }));
+    const other = budget.lease();
+    const inFlight = other.reserve();
+    const waiter = budget.lease();
+    const waiting = waiter.reserveWholeAllowance(60_000);
+    let granted = false;
+    void waiting.then(() => { granted = true; });
+    await turn();
+    expect(granted).toBe(false);
+
+    // An empty answer frees a whole allowance. Room kept beside the
+    // reservation of the pass in flight would keep the waiting lease out.
+    inFlight.commitReplace(0, 0, true);
+    await turn();
+    expect(granted).toBe(true);
+    (await waiting)!.release();
+    nextPass.release();
+    for (const lease of [continuing, other, waiter]) lease.release();
+  });
+
   it('grants in the order the leases started to wait', async () => {
     const budget = pool(1);
     const holder = budget.lease();

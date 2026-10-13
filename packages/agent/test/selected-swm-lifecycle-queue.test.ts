@@ -238,13 +238,18 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
           recoveryTargets: [{ contextGraphId: publicCg, lane: 'selected-public' }],
         },
       ));
+      let fourthEnded = false;
+      void walk[3]!.then(() => { fourthEnded = true; }, () => { fourthEnded = true; });
       await poolReserved;
       await new Promise((resolve) => setImmediate(resolve));
       expect(harness.probes.metaFetches()).toBe(3);
+      expect(fourthEnded).toBe(false);
 
       // The fourth round waits for the pool. Its recovery authority goes away
       // (an unsubscribe, say) while the three fetches are still in flight.
+      // The round ends with it, well before its wait for the pool would.
       leases[3]!.abort(new Rfc64SwmRecoveryTargetRevokedErrorV1(publicCg));
+      await vi.waitFor(() => expect(fourthEnded).toBe(true), { timeout: 2_000 });
       const revoked = await walk[3]!;
 
       // The round is over although nothing has freed the pool, it did not ask

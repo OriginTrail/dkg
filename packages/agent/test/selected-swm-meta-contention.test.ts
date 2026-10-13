@@ -760,13 +760,18 @@ describe('selected SWM metadata retention contention', () => {
 
     const revoked = transfer(budget, 'revoked');
     const recovery = new AbortController();
+    let ended = false;
     const parked = revoked.pass({ signal: recovery.signal });
+    void parked.then(() => { ended = true; }, () => { ended = true; });
     await turn();
+    expect(ended).toBe(false);
 
     // The sibling is still fetching. The revoked transfer must not stay in
-    // its peer's queue until that fetch, or its own deadline, ends.
+    // its peer's queue until that fetch, or its own wait, ends.
     const revocation = new Error('recovery authority was revoked');
     recovery.abort(revocation);
+    await turn();
+    expect(ended).toBe(true);
     await expect(parked).rejects.toBe(revocation);
     expect(revoked.asked).toEqual([]);
 
@@ -826,9 +831,15 @@ describe('selected SWM metadata retention contention', () => {
     await turn();
     expect(holder.asked).toEqual([1]);
 
-    // Resolves while the sibling is still fetching: the prefix and its cursor
-    // are what the yield protects, and the ledger grants this round a retry.
-    const outcome = await waiter.pass();
+    // Resolves at once, while the sibling is still fetching: the prefix and
+    // its cursor are what the yield protects, and the ledger grants this
+    // round a retry.
+    let ended = false;
+    const yielding = waiter.pass();
+    void yielding.then(() => { ended = true; }, () => { ended = true; });
+    await turn();
+    expect(ended).toBe(true);
+    const outcome = await yielding;
 
     expect(waiter.asked).toEqual([ALLOWANCE]);
     expect(outcome.continuationYielded).toBe(true);
