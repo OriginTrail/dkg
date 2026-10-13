@@ -403,15 +403,17 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   }
 
   async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
-    if (!this.inner.replaceAssetGroup) throw new UnsupportedTripleStoreCapabilityError('replaceAssetGroup', 'group-decorator');
-    try { await this.inner.replaceAssetGroup(assets, options); }
-    catch (error) {
-      if (!isStoreOperationNotStarted(error, 'replaceAssetGroup')) this.scheduleFullRefresh('replaceAssetGroup');
-      throw error;
-    }
-    if (!this.enabled) return;
-    this.bumpMutation();
-    await this.maintainTouchedGraphs([...new Set(assets.flatMap(a => [a.graphUri, a.metaGraphUri]))], 'replaceAssetGroup', options);
+    return runLogicalStoreMutation(this.inner, 'replaceAssetGroup', options, async options => {
+      if (!this.inner.replaceAssetGroup) throw new UnsupportedTripleStoreCapabilityError('replaceAssetGroup', 'group-decorator');
+      try { await this.inner.replaceAssetGroup(assets, options); }
+      catch (error) {
+        if (!isStoreOperationNotStarted(error, 'replaceAssetGroup')) this.scheduleFullRefresh('replaceAssetGroup');
+        throw error;
+      }
+      if (!this.enabled) return;
+      this.bumpMutation();
+      await this.maintainTouchedGraphs([...new Set(assets.flatMap(a => [a.graphUri, a.metaGraphUri]))], 'replaceAssetGroup', options);
+    });
   }
 
   async replaceGraphAndSubject(
