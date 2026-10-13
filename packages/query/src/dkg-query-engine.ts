@@ -1,5 +1,6 @@
 import { registeredSubGraphPattern, decodeRegisteredSubGraphName } from './registered-sub-graphs.js';
 import { readScopedContentGraphCatalog } from './scoped-content-graph-catalog.js';
+import { resolveLegacyRouteScope } from './legacy-route-scope.js';
 import { staticScopedRouteGraphs } from './static-scoped-route-graphs.js';
 import { storeOptions } from './query-store-options.js';
 import {
@@ -59,7 +60,6 @@ import {
   constrainGraphVariablesToAllowedSet,
   prepareGraphScope,
   requireGraphScopeRewrite,
-  rewriteGraphRoute,
   rewriteGraphSet,
   transitionGraphScope,
   wrapWithGraph,
@@ -493,63 +493,19 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         ? contextGraphSubGraphUri(effectiveContextGraphId, options.subGraphName)
         : contextGraphDataUri(effectiveContextGraphId);
       const sharedMemoryGraph = contextGraphSharedMemoryUri(effectiveContextGraphId, options?.subGraphName);
+      const resolveRoute = (root: string, family: 'data' | 'shared-memory') =>
+        resolveLegacyRouteScope(routedScope, root, family, prefix => this.discoverGraphsByPrefix(prefix, reads));
       if (options?.includeSharedMemory ?? options?.includeWorkspace) {
-        // Per-KA VM: read-both the published per-KA …/_verifiable_memory/{addr}/{number} + root.
-        const vmGraphsInc = routedScope.hasGraphClause ? [] : await this.discoverGraphsByPrefix(
-          `${dataGraph}/_verifiable_memory/`,
-          reads,
-        );
-        const dataScope = requireGraphScopeRewrite(rewriteGraphRoute(
-          routedScope,
-          vmGraphsInc.length > 0 ? [dataGraph, ...vmGraphsInc] : [],
-          dataGraph,
-          'deduplicated-values-union',
-        ));
-        // Per-KA SWM: union the discovered …/_shared_memory/{addr}/{number} graphs.
-        const swmGraphs = routedScope.hasGraphClause ? [] : await this.discoverGraphsByPrefix(
-          `${sharedMemoryGraph}/`,
-          reads,
-        );
-        const sharedMemoryScope = requireGraphScopeRewrite(rewriteGraphRoute(
-          routedScope,
-          swmGraphs,
-          sharedMemoryGraph,
-          'union-only',
-        ));
-        // Both are graph-wrapped forms of the CALLER's query, so they carry
-        // the same provenance as execAndNormalize (PR #2330 review — this
-        // branch previously bypassed the marker, leaving the original 500 for
-        // any `includeSharedMemory` request with malformed SPARQL).
+        const dataScope = await resolveRoute(dataGraph, 'data');
+        const sharedMemoryScope = await resolveRoute(sharedMemoryGraph, 'shared-memory');
+        // Preserve both caller executions and the established merge semantics.
         const dataResult = await this.execCallerQuery(dataScope, reads);
         const smResult = await this.execCallerQuery(sharedMemoryScope, reads);
         return mergeSharedMemoryAndDataResults(dataResult, smResult);
       }
-      if (options?.graphSuffix === '_shared_memory') {
-        // Uniform layout: SWM is per-KA …/_shared_memory/{addr}/{number}. Discover the
-        // per-KA graphs under the prefix and union them (the legacy bucket is now empty).
-        const swmGraphs = routedScope.hasGraphClause ? [] : await this.discoverGraphsByPrefix(
-          `${sharedMemoryGraph}/`,
-          reads,
-        );
-        effectiveScope = requireGraphScopeRewrite(rewriteGraphRoute(
-          routedScope,
-          swmGraphs,
-          sharedMemoryGraph,
-          'union-only',
-        ));
-      } else {
-        // Per-KA VM: read-both the published per-KA …/_verifiable_memory/{addr}/{number} + root.
-        const vmGraphs = routedScope.hasGraphClause ? [] : await this.discoverGraphsByPrefix(
-          `${dataGraph}/_verifiable_memory/`,
-          reads,
-        );
-        effectiveScope = requireGraphScopeRewrite(rewriteGraphRoute(
-          routedScope,
-          vmGraphs.length > 0 ? [dataGraph, ...vmGraphs] : [],
-          dataGraph,
-          'deduplicated-values-union',
-        ));
-      }
+      effectiveScope = options?.graphSuffix === '_shared_memory'
+        ? await resolveRoute(sharedMemoryGraph, 'shared-memory')
+        : await resolveRoute(dataGraph, 'data');
     }
 
     const result = await this.execAndNormalize(effectiveScope, reads);
