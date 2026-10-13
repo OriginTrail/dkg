@@ -10,11 +10,17 @@ import {
   validateBundle,
   quadsToNQuads,
   conceptIdToKaName,
+  isStale,
   DEFAULT_IRI_BASE,
   RDF_TYPE,
   SCHEMA_NS,
   SECTION_GENID_INFIX,
+  PROV_WAS_DERIVED_FROM,
+  OKF_VERIFICATION,
+  OKF_SOURCE,
+  OKF_TRUST_TIER,
   type BundleImport,
+  type ExportInput,
   type Quad,
   type TypeRelation,
 } from '@origintrail-official/dkg-okf';
@@ -175,14 +181,40 @@ export function registerOkfCommand(program: Command): void {
     linksResolved: number;
     linksBroken: number;
     citations: number;
+    sources: number;
+    derivedFromConcepts: number;
+    trustTiers: { humanReviewed: number; machineConfirmed: number; unverified: number };
+    draft: number;
+    deprecated: number;
+    stale: number;
+    attestedComputations: number;
   } {
     let linksResolved = 0;
     let linksBroken = 0;
     let citations = 0;
+    let sources = 0;
+    let derivedFromConcepts = 0;
+    const trustTiers = { humanReviewed: 0, machineConfirmed: 0, unverified: 0 };
+    let draft = 0;
+    let deprecated = 0;
+    let stale = 0;
+    let attestedComputations = 0;
+    // Staleness is `now >= stale_after` (OKF §5.5) — evaluated at summary time,
+    // never baked into the deterministic mapping.
+    const now = new Date();
     for (const c of imported.concepts) {
       linksResolved += new Set(c.resolvedLinks.map((l) => l.targetConceptId)).size;
       linksBroken += c.brokenLinks.length;
       citations += c.citations.length;
+      sources += c.trust.sources;
+      derivedFromConcepts += c.trust.derivedFromConcepts.length;
+      if (c.trust.tier === 'human-reviewed') trustTiers.humanReviewed += 1;
+      else if (c.trust.tier === 'machine-confirmed') trustTiers.machineConfirmed += 1;
+      else trustTiers.unverified += 1;
+      if (c.trust.status === 'draft') draft += 1;
+      if (c.trust.status === 'deprecated') deprecated += 1;
+      if (isStale(c.trust.staleAfter, now)) stale += 1;
+      if (c.trust.attestedComputation) attestedComputations += 1;
     }
     return {
       concepts: imported.concepts.length,
@@ -191,6 +223,13 @@ export function registerOkfCommand(program: Command): void {
       linksResolved,
       linksBroken,
       citations,
+      sources,
+      derivedFromConcepts,
+      trustTiers,
+      draft,
+      deprecated,
+      stale,
+      attestedComputations,
     };
   }
 
@@ -569,6 +608,10 @@ export function registerOkfCommand(program: Command): void {
           term.startsWith('<') && term.endsWith('>') ? term.slice(1, -1) : term;
 
         const quadsBySubject = new Map<string, Quad[]>();
+        // Skolemized nodes (`<conceptIri>/.well-known/genid/...`: sections and the
+        // OKF v0.2 verification / source / parameter nodes) grouped by the
+        // concept that owns them, so the exporter can rebuild the v0.2 families.
+        const nodeQuadsByOwner = new Map<string, Quad[]>();
         for (const b of bindings) {
           const s = cell(b.s);
           const p = cell(b.p);
@@ -576,39 +619,29 @@ export function registerOkfCommand(program: Command): void {
           if (!s || !p || !o) continue;
           const subject = unwrapIri(s);
           const quad: Quad = { subject, predicate: unwrapIri(p), object: o };
+          const infixAt = subject.indexOf(SECTION_GENID_INFIX);
+          if (infixAt !== -1) {
+            const owner = subject.slice(0, infixAt);
+            if (!nodeQuadsByOwner.has(owner)) nodeQuadsByOwner.set(owner, []);
+            nodeQuadsByOwner.get(owner)!.push(quad);
+            continue;
+          }
           if (!quadsBySubject.has(subject)) quadsBySubject.set(subject, []);
           quadsBySubject.get(subject)!.push(quad);
         }
 
-        // Rebuild a minimal BundleImport for the exporter. Keep only real concept
-        // roots: subjects under the IRI base that carry an OKF concept rdf:type.
-        // This excludes the skolemized `dkg:hasSection` nodes
-        // (`<conceptIri>/.well-known/genid/...`), which would otherwise be rebuilt
-        // as standalone `.well-known/genid/*.md` files that were never concepts.
-        const concepts = [...quadsBySubject.entries()]
-          .filter(
-            ([iri, quads]) =>
-              iri.startsWith(iriBase) &&
-              !iri.includes(SECTION_GENID_INFIX) &&
-              quads.some((q) => q.predicate === RDF_TYPE),
-          )
+        // Rebuild the exporter's input. Keep only real concept roots: subjects
+        // under the IRI base that carry an OKF concept rdf:type. The skolemized
+        // nodes are attached to their owning concept rather than treated as
+        // concepts — otherwise they would be rebuilt as standalone
+        // `.well-known/genid/*.md` files that were never concepts.
+        const concepts: ExportInput['concepts'] = [...quadsBySubject.entries()]
+          .filter(([iri, quads]) => iri.startsWith(iriBase) && quads.some((q) => q.predicate === RDF_TYPE))
           .map(([iri, quads]) => ({
             conceptId: iri.slice(iriBase.length),
             iri,
-            quads,
-            resolvedLinks: [],
-            brokenLinks: [],
-            codeSpanLinks: [],
-            citations: [],
+            quads: [...quads, ...(nodeQuadsByOwner.get(iri) ?? [])],
           }));
-        const imported: BundleImport = {
-          okfVersion: null,
-          iriByConceptId: Object.fromEntries(concepts.map((c) => [c.conceptId, c.iri])),
-          concepts,
-          reservedSkipped: [],
-          quads: concepts.flatMap((c) => c.quads),
-          warnings: [],
-        };
 
         if (concepts.length === 0) {
           console.error(
@@ -617,7 +650,7 @@ export function registerOkfCommand(program: Command): void {
           process.exit(OKF_EXIT_CODES.NOT_FOUND);
         }
 
-        const outFiles = exportBundle(imported, { iriBase });
+        const outFiles = exportBundle({ concepts }, { iriBase });
         // Path-traversal guard: concept IDs come from graph subjects (untrusted),
         // so a subject like `urn:okf:../../escape` would otherwise write outside
         // outDir. Refuse any file that doesn't resolve under the output directory.
@@ -660,6 +693,11 @@ export function registerOkfCommand(program: Command): void {
     'http://schema.org/license',
     'http://schema.org/citation',
     'http://schema.org/mentions',
+    // OKF v0.2 provenance / trust families (SPEC §5)
+    OKF_SOURCE,
+    PROV_WAS_DERIVED_FROM,
+    OKF_VERIFICATION,
+    OKF_TRUST_TIER,
   ];
 
   okfCmd

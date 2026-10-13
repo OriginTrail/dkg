@@ -47,7 +47,10 @@ describe('valueToTerms typing for producer-defined keys', () => {
     expect(obj('http://schema.org/note')).toEqual(['"plain"']);
     expect(obj('http://schema.org/homepage')).toEqual(['https://example.org/p']);
     expect(obj('http://schema.org/list')).toEqual(['"a"', '"b"']);
-    expect(obj('http://schema.org/nested')).toEqual(['"{\\"a\\":1}"']);
+    // Nested mappings are rdf:JSON literals so they round-trip as objects, not strings.
+    expect(obj('http://schema.org/nested')).toEqual([
+      '"{\\"a\\":1}"^^<http://www.w3.org/1999/02/22-rdf-syntax-ns#JSON>',
+    ]);
   });
 
   it('skips null/undefined values', () => {

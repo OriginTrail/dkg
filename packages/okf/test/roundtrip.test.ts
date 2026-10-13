@@ -8,24 +8,23 @@ import {
   validateBundle,
   DKG_HAS_SECTION,
   SECTION_GENID_INFIX,
+  GENID_TAGS,
 } from '../src/index.js';
 import type { Quad } from '../src/index.js';
 
 const files = loadBundleDir(fileURLToPath(new URL('./fixtures/crypto_bitcoin', import.meta.url)));
 
 /**
- * The semantic graph: concept-subject quads minus presentational `dkg:hasSection`
- * structure (the `hasSection` edges and the skolemized section nodes). Round-trip
- * equivalence is asserted over this projection (export is graph-faithful, not
- * byte-faithful — see export.ts).
+ * The semantic graph: every quad minus the presentational `dkg:hasSection`
+ * structure (the `hasSection` edges and the skolemized *section* nodes). The
+ * v0.2 family nodes (`okfver_` / `okfsrc_` / `okfparam_`) ARE part of the
+ * semantic graph and must survive the round trip. Equivalence is asserted over
+ * this projection (export is graph-faithful, not byte-faithful — see export.ts).
  */
 function semantic(quads: Quad[]): string {
+  const sectionNode = SECTION_GENID_INFIX + GENID_TAGS.section;
   return quadsToNQuads(
-    quads.filter(
-      (q) =>
-        !q.subject.includes(SECTION_GENID_INFIX) &&
-        q.predicate !== DKG_HAS_SECTION,
-    ),
+    quads.filter((q) => !q.subject.includes(sectionNode) && q.predicate !== DKG_HAS_SECTION),
   );
 }
 

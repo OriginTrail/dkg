@@ -2,6 +2,16 @@
 
 All notable changes to the DKG V10 node are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Google OKF v0.2 support in `@origintrail-official/dkg-okf` / `dkg okf`.** The importer now targets the [OKF v0.2 spec](https://github.com/GoogleCloudPlatform/open-knowledge-format) and carries every v0.2 family as queryable RDF: `sources[]` become `okf:Source` nodes with their credibility signals (`author`, `usage_count`, `last_modified`, `usage_window`) plus a `prov:wasDerivedFrom` lineage edge to every source with an IRI; `generated` / `verified[]` become `okf:generatedBy`, `schema:dateModified` and `okf:Verification` nodes with the §5.3 trust tier derived and materialised as `okf:trustTier`; `status` and `stale_after` map to `okf:status` / `okf:staleAfter`; and the Attested Computation contract (`runtime`, `parameters`, `computation`, `executor`, `attester`) maps to `okf:runtime`, ordered `okf:Parameter` nodes and typed edges to executor skills in the bundle. Path-valued fields resolve against the bundle in both the spec's file-relative and the reference bundles' root-relative spelling. `dkg okf export` rebuilds all families in order and declares `okf_version: "0.2"`; `dkg okf import` reports `trustTiers`, `sources`, `derivedFromConcepts`, `deprecated`, `stale` and `attestedComputations` in its summary. Malformed families, dangling `[^footnote]` attributions, unresolved `.md` paths and unknown `okf_version` values are warnings, never rejections (§11). Google's `acme_retail` v0.2 bundle is vendored as the golden fixture; v0.1 bundles consume unchanged under the §13.1 fallbacks (`timestamp`, legacy `# Citations`).
+
+### Changed
+
+- **OKF mapper fidelity.** Mapping-valued producer keys are carried as `rdf:JSON` literals so they round-trip as objects instead of degrading to strings; YAML-native timestamps are rendered in XSD canonical form (`…Z`, no `.000`) and a value that is not a valid datetime lexical is kept as a plain literal (with a warning) rather than a bogus `xsd:dateTime`.
+
 ## [10.0.24] - 2026-10-11
 
 A patch for queued publications into private Context Graphs. A queued

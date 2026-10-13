@@ -1,5 +1,5 @@
 /**
- * Bundle-aware OKF import (the two passes from ADR 0005 / SPEC §3–§5).
+ * Bundle-aware OKF import (the two passes from ADR 0005 / SPEC §3–§6).
  *
  * Pass 1 — index the bundle: classify concept vs. reserved files, parse each
  * concept's frontmatter, derive a deterministic subject IRI per concept ID, and
@@ -21,7 +21,7 @@ import {
   pathToConceptId,
   conceptIdToIri,
 } from './paths.js';
-import { DEFAULT_IRI_BASE, SCHEMA_MENTIONS } from './constants.js';
+import { DEFAULT_IRI_BASE, SCHEMA_MENTIONS, OKF_KNOWN_VERSIONS, OKF_TARGET_VERSION } from './constants.js';
 import type {
   BundleFile,
   BundleImport,
@@ -84,12 +84,12 @@ export function importBundle(files: BundleFile[], opts: OkfMappingOptions = {}):
       warnings.push({
         conceptId: doc.conceptId,
         code: 'missing-type',
-        message: 'concept has no non-empty `type` (a hard §9 conformance requirement; the bundle will not validate)',
+        message: 'concept has no non-empty `type` (a hard §11 conformance requirement; the bundle will not validate)',
       });
     }
   }
 
-  // `okf_version` may be declared only in the bundle-root `index.md` (SPEC §11).
+  // `okf_version` may be declared only in the bundle-root `index.md` (SPEC §12).
   let okfVersion: string | null = null;
   const rootIndex = ordered.find((f) => f.path === 'index.md');
   if (rootIndex) {
@@ -100,6 +100,14 @@ export function importBundle(files: BundleFile[], opts: OkfMappingOptions = {}):
     } catch {
       // Reserved files need no frontmatter; ignore.
     }
+  }
+  // A version this consumer does not know is consumed best-effort, never
+  // refused (SPEC §12). v0.1 bundles consume under the §13.1 fallbacks.
+  if (okfVersion !== null && !(OKF_KNOWN_VERSIONS as readonly string[]).includes(okfVersion)) {
+    warnings.push({
+      code: 'unsupported-version',
+      message: `root index.md declares okf_version "${okfVersion}"; this consumer targets OKF ${OKF_TARGET_VERSION} and consumes the bundle best-effort (SPEC §12)`,
+    });
   }
 
   // --- Pass 2: extract + link ---
@@ -128,11 +136,13 @@ export function importBundle(files: BundleFile[], opts: OkfMappingOptions = {}):
     }
     concepts.push(mapping);
     quads.push(...mapping.quads);
+    // v0.2 family shape / footnote / unresolved-path diagnostics (never fatal).
+    warnings.push(...mapping.warnings);
     for (const bl of mapping.brokenLinks) {
       warnings.push({
         conceptId: doc.conceptId,
         code: 'broken-link',
-        message: `unresolved cross-link "${bl.raw}" (not in bundle — not an error, SPEC §5.3/§9)`,
+        message: `unresolved cross-link "${bl.raw}" (not in bundle — not an error, SPEC §6.1/§11)`,
       });
     }
     if (!opts.includeCodeSpanLinks) {
