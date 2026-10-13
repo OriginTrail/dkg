@@ -178,6 +178,8 @@ import {
   type SwmFanoutPeerSelector,
 } from './swm/swm-fanout-peer-selection.js';
 import { SwmHostModeStore, type SwmHostModeStoreLimits } from './swm/host-mode-store.js';
+import { connectionCarriesShareDelivery } from './swm/relayed-connection-allowance.js';
+import { sharedMemoryFollowersOf } from './swm/shared-memory-followers.js';
 import {
   BEACON_ACCESS_POLICY_CURATED,
   BEACON_REANNOUNCE_INTERVAL_MS,
@@ -1462,23 +1464,18 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         return this.node.libp2p.getPeers().some((p) => p.toString() === peerId);
       }
 
-      // PR-K filter tier 1: connectivity. Reject peers whose
-      // ONLY live connections are *limited* Circuit Relay V2
-      // reservations. Limited reservations cap data (~128 KiB)
-      // and duration (~2 min) per stream; the aggressive
-      // per-cycle traffic of SWM substrate fan-out exhausts
-      // these caps almost immediately, after which every
-      // `messenger.sendReliable` hits a stream-reset / aborted
-      // error that `isRecoverableSendError` (correctly)
-      // classifies as recoverable. The outbox queues + retries
-      // forever, each retry eating fresh budget — a death
-      // spiral the 2026-05-18 Miles<->Lex soak surfaced as
-      // `swm-update: d=0 q=2031` after ~60 cycles, with both
-      // peers behind NAT and connected only via limited relays.
+      // PR-K filter tier 1: connectivity. Reject a peer whose live
+      // connections are all relayed with a SMALL allowance. A relay
+      // that grants about 128 KiB and 2 minutes for a circuit is used
+      // up by the fan-out at once; every later `sendReliable` then
+      // fails as recoverable and is queued again, each retry eating
+      // the next circuit (`swm-update: d=0 q=2031` in the 2026-05-18
+      // soak, both peers behind NAT). A relayed connection with enough
+      // allowance left, as Core nodes grant, does carry the fan-out:
+      // see `swm/relayed-connection-allowance.ts`.
       const conns = this.node.libp2p.getConnections(pid);
       if (conns.length > 0) {
-        const hasNonLimited = conns.some((c) => !((c as unknown as { limits?: unknown }).limits));
-        if (!hasNonLimited) return false;
+        if (!conns.some((c) => connectionCarriesShareDelivery((c as unknown as { limits?: unknown }).limits))) return false;
       } else {
         // No live connection — fall back to peerStore-cached
         // addresses. A future dial may yield a non-limited
@@ -1537,6 +1534,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         getContextGraphAllowedAgentPeers: (cgId) => this.resolvePrivateSwmAgentPeerRoster(cgId),
         isPrivateContextGraph: (cgId) => this.isPrivateContextGraph(cgId),
         getTopicSubscribers: (topic) => this.gossip.getSubscribers(topic),
+        getSharedMemoryFollowers: (cgId) => sharedMemoryFollowersOf(this).followers(cgId),
         // OT-RFC-38 / LU-6 Phase B — substrate caller passes the local
         // cleartext id; resolver derives the wire-form topic for the
         // peer-subscriber probe so the substrate doesn't query the

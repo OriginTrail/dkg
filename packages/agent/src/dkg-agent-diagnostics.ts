@@ -188,6 +188,7 @@ export async function getPeerDiagnostics(
       // `connection.limits` (presence ⇒ limited). Defensive cast
       // against future shape drift.
       limited: Boolean((c as unknown as { limits?: unknown }).limits),
+      allowance: readConnectionAllowance((c as unknown as { limits?: unknown }).limits),
       streams: c.streams?.length ?? 0,
       openedAt: c.timeline?.open ?? null,
     };
@@ -380,4 +381,17 @@ export async function pingPeers(
 
   deps.log.info(ctx, `Peer health ping: ${alive}/${peers.length} peers alive`);
   return alive;
+}
+
+/**
+ * The remaining allowance of a relayed connection in a JSON-safe shape. libp2p
+ * reports the bytes as a bigint and leaves out a limit the relay did not set.
+ */
+function readConnectionAllowance(limits: unknown): PeerConnectionSnapshot['allowance'] {
+  if (limits === undefined || limits === null || typeof limits !== 'object') return null;
+  const { bytes, seconds } = limits as { bytes?: unknown; seconds?: unknown };
+  return {
+    bytes: typeof bytes === 'bigint' || (typeof bytes === 'number' && Number.isFinite(bytes)) ? String(bytes) : null,
+    seconds: typeof seconds === 'number' && Number.isFinite(seconds) ? seconds : null,
+  };
 }

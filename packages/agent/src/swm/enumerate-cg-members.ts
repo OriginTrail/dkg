@@ -230,6 +230,16 @@ export interface CGMemberEnumeratorDeps {
    */
   isPeerDialable?: (peerId: string) => boolean | Promise<boolean>;
   /**
+   * Peers known to follow a public CG's shared memory by other means than a
+   * GossipSub subscription: see `shared-memory-followers.ts`. GossipSub does
+   * not run over a relayed connection, so a subscriber this node reaches only
+   * through a relay never shows up in {@link getTopicSubscribers}. They are
+   * added to the public recipient set and pass through the same
+   * {@link isPeerDialable} filter. Read on every resolve, never for a private
+   * or allowlisted CG, whose roster is authoritative.
+   */
+  getSharedMemoryFollowers?: (cgId: string) => readonly string[];
+  /**
    * Lazy accessor for our own peer ID. Always excluded from the
    * returned member set — we don't fan-out to ourselves (the local
    * apply already happened in the caller).
@@ -393,7 +403,8 @@ export function createCGMemberEnumerator(deps: CGMemberEnumeratorDeps): CGMember
     // allowlist resolution, GossipSub subscriber snapshot) IS
     // cached; only the cheap liveness check repeats.
     const subscribers = deps.getTopicSubscribers(deps.topicForCG(cgId));
-    const members = dedupAndExcludeSelf(subscribers, deps.getSelfPeerId());
+    const followers = deps.getSharedMemoryFollowers?.(cgId) ?? [];
+    const members = dedupAndExcludeSelf([...subscribers, ...followers], deps.getSelfPeerId());
     return members.length === 0
       ? { source: 'none', members: [] }
       : { source: 'topic-subscribers', members };
