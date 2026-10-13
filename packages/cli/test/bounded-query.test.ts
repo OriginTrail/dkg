@@ -9,7 +9,7 @@ import { handleBoundedQueryRoutes } from '../src/daemon/routes/bounded-query.js'
 import { requestAuthentication } from './_helpers/request-authentication.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 
-function context(agent: Record<string, unknown>, payload: Record<string, unknown> = {}) {
+function context(agent: Record<string, unknown>, payload: Record<string, unknown> = {}, agentAddress?: string) {
   const req = Object.assign(new EventEmitter(), {
     method: 'POST', aborted: false,
     __dkgPrebufferedBody: Buffer.from(JSON.stringify({ version: 1, contextGraphId: 'test', maxRows: 10,
@@ -21,7 +21,7 @@ function context(agent: Record<string, unknown>, payload: Record<string, unknown
     end(body = '') { this.body = body; this.writableEnded = true; return this; },
   });
   return { ctx: { req, res, agent, path: '/api/query/bounded',
-    authentication: requestAuthentication({ kind: 'anonymous' }),
+    authentication: requestAuthentication(agentAddress ? { kind: 'agent', agentAddress } : { kind: 'anonymous' }),
   } as unknown as RequestContext, req, res };
 }
 
@@ -221,3 +221,41 @@ it.each(['finalized-name-absence-unaccepted', 'authority-circuit-open'])(
     expect(JSON.parse(read.res.body)).not.toHaveProperty('result');
   },
 );
+
+
+it('forwards the authenticated caller and response ceiling through scoped agent admission', async () => {
+  const store = new OxigraphStore();
+  const engine = new DKGQueryEngine(store);
+  const storeRead = vi.spyOn(store, 'query');
+  const execute = vi.spyOn(engine, 'query');
+  // Explicit private authority fixture; scoped admission and the query engine
+  // below are production code, including the route's identity handoff.
+  const authority = vi.fn(async (_id: string, options: { callerAgentAddress?: string }) => ({
+    outcome: options.callerAgentAddress === 'member' ? 'allowed' : 'denied',
+    grantScope: options.callerAgentAddress === 'member' ? 'caller' : 'none',
+    source: 'registered-chain', reason: 'private-roster', metadataBootstrap: 'forbidden',
+  }));
+  const agent = { queryEngine: engine, log: { info() {} }, peerId: 'fixture',
+    resolveContextGraphReadAuthority: authority, subscribedContextGraphs: new Map() };
+  const routeAgent = { query: QueryMethods.prototype.query.bind(agent as never) };
+  try {
+    await store.insert([{ subject: 'urn:allowed', predicate: 'urn:p', object: '"value"',
+      graph: 'did:dkg:context-graph:test' }]);
+    const member = context(routeAgent, {}, 'member');
+    await handleBoundedQueryRoutes(member.ctx);
+    expect(member.res.statusCode, member.res.body).toBe(200);
+    expect(JSON.parse(member.res.body).result.bindings).toEqual([{ s: 'urn:allowed' }]);
+    expect(authority.mock.calls[0][1]).toMatchObject({ callerAgentAddress: 'member' });
+    const callerReads = storeRead.mock.calls.filter(([query]) => query.includes('<urn:p>'));
+    expect(callerReads.length).toBeGreaterThan(0);
+    for (const [, options] of callerReads) expect(options?.maxResponseBytes).toBe(1024 * 1024);
+    execute.mockClear(); storeRead.mockClear();
+    const outsider = context(routeAgent, {}, 'outsider');
+    await handleBoundedQueryRoutes(outsider.ctx);
+    expect(outsider.res.statusCode).toBe(403);
+    expect(JSON.parse(outsider.res.body)).toMatchObject({ code: 'QUERY_ACCESS_DENIED' });
+    expect(authority.mock.calls[1][1]).toMatchObject({ callerAgentAddress: 'outsider' });
+    expect(execute).not.toHaveBeenCalled();
+    expect(storeRead).not.toHaveBeenCalled();
+  } finally { await store.close(); }
+});
