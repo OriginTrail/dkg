@@ -65,7 +65,7 @@ export async function recoverPublicSnapshotBulk(agent: DKGAgent, options: Public
           });
           if (outcome !== 'applied') throw new Error('Bulk group was quarantined after graph binding changed');
           options.onCommitted();
-          for (const asset of authenticated) await agent.reconcileAfterGraphScopedMaterialization(asset, ctx);
+          await Promise.all(authenticated.map(asset => agent.reconcileAfterGraphScopedMaterialization(asset, ctx)));
         },
         onMetrics: metrics => options.log(`Bulk snapshot progress ${JSON.stringify(metrics)}`),
       });

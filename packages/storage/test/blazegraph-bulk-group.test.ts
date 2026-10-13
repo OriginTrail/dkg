@@ -11,6 +11,29 @@ const members = [{ graphUri: 'urn:data', metaGraphUri: 'urn:meta', metadataSubje
 }];
 
 describe('Blazegraph confirmed bulk publication', () => {
+  it('uses identical native wire terms for ordinary and staged uploads', async () => {
+    const values = ['"001"^^<http://www.w3.org/2001/XMLSchema#integer>', '"café 😀"@fr',
+      '"quoted \\"text\\" and \\n newline"', '"\\\\U0001F600"'];
+    const quads = values.map((object, i) => ({graph:'urn:data',subject:`urn:é:${i}`,predicate:'urn:p',object}));
+    const fetcher = vi.fn().mockImplementation(async (_url, init) =>
+      new Response(String(init.body).startsWith('ASK') ? JSON.stringify({boolean:true}) : ''));
+    vi.stubGlobal('fetch', fetcher);
+    const store = new BlazegraphStore('http://fixture.invalid/sparql');
+    try {
+      await store.insert(quads);
+      const ordinary = String(fetcher.mock.calls[0]![1].body);
+      fetcher.mockClear();
+      await store.replaceAssetGroup([{...members[0]!,graphQuads:quads,metadataQuads:[]}]);
+      const staged = String(fetcher.mock.calls[0]![1].body);
+      const terms = (body: string) => body.trimEnd().split('\n').map(line => line.replace(/ <[^>]+> \.$/, ' .'));
+      expect(terms(staged)).toEqual(terms(ordinary));
+      expect(staged.endsWith('\n')).toBe(true);
+      expect([...staged].every(char => char.charCodeAt(0) <= 0x7f)).toBe(true);
+      expect(staged).toContain('^^<http://www.w3.org/2001/XMLSchema#integer>');
+      expect(staged).toContain('\\u00E9');
+    } finally { await store.close(); }
+  });
+
   it.each([false, true])('defers all serialization and uses one admission (fallback=%s)', async fallback => {
     const scheduler = new StorePriorityScheduler({ maxConcurrent: 1, ackReservedSlots: 0,
       healthReservedSlots: 0, normalReservedSlots: 0, backgroundReservedSlots: 0 });

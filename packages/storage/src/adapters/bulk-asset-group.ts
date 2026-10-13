@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { canonicalizeObjectTermForHash, formatSparqlTerm } from '@origintrail-official/dkg-core';
 import { ATOMIC_GRAPH_REPLACE_STAGING_PREFIX } from '../atomic-graph-replace.js';
 import { type AtomicAssetReplacement, ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES, validateAtomicAssetGroup } from '../atomic-asset-group.js';
-import { toBlazegraphAsciiSafeNQuads } from './blazegraph-nquads.js';
+import { quadToBlazegraphNQuad } from './blazegraph-nquads.js';
 
 /** Native upload into hidden graphs followed by ONE guarded group publication and receipt. */
 export function buildBulkAssetGroupPlan(assets: readonly AtomicAssetReplacement[]) {
@@ -22,7 +22,7 @@ export function buildBulkAssetGroupPlan(assets: readonly AtomicAssetReplacement[
         const o = formatSparqlTerm(quad.object, { position: 'object' });
         triples.add(`${s} ${p} ${o}`);
         values.add(`${s} ${p} ${canonicalizeObjectTermForHash(o)}`);
-        const line = toBlazegraphAsciiSafeNQuads(`${s} ${p} ${o} <${stage}> .\n`);
+        const line = `${quadToBlazegraphNQuad({ ...quad, graph: stage })}\n`;
         bytes += Buffer.byteLength(line);
         if (bytes > ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES) throw new RangeError('Atomic asset group byte allowance exceeded');
         lines.push(line);

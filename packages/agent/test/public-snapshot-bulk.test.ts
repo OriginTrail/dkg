@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { sealPublicGraphSnapshot } from '@origintrail-official/dkg-chain';
-import { BULK_GRAPH_PROTOCOL, BULK_GRAPH_CHUNK_BYTES, contextGraphMetaUri, knowledgeAssetLayerGraphUri,
+import { BULK_GRAPH_KIND as K, BULK_GRAPH_PROTOCOL, BULK_GRAPH_CHUNK_BYTES, contextGraphMetaUri, knowledgeAssetLayerGraphUri,
   MemoryLayer, createGraphKnowledgeAssetScope } from '@origintrail-official/dkg-core';
 import type { DKGAgent } from '../src/dkg-agent.js';
 import { recoverPublicSnapshotBulk } from '../src/public-snapshot-bulk.js';
@@ -14,8 +14,15 @@ vi.mock('@origintrail-official/dkg-core', async importOriginal => ({
 }));
 
 describe('public bulk snapshot recovery', () => {
-  it.each(['connect', 'protocols', 'delayed-identify'] as const)('uses a healthy supplier after %s and recovers across chunks', async failure => {
-    const f = await fixture(5);
+  it.each(['connect', 'protocols', 'delayed-identify', 'reconciliation'] as const)('uses a healthy supplier after %s and recovers across chunks', async failure => {
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const started = new Set<string>(), completed = new Set<string>(), controls: number[] = [];
+    const f = await fixture(5, -1, false, { onControl: frame => {
+      if (failure !== 'reconciliation' || frame.kind !== K.COMMIT) return;
+      controls.push(frame.index);
+      expect(completed.has(f.uals[frame.index]!)).toBe(true);
+    } });
     const snapshot = sealPublicGraphSnapshot({ version: 1, chainId: 'base:84532', deploymentId: 'fixture',
       contextGraphId: cg, onChainId: '14', nameHash: `0x${'1'.repeat(64)}`,
       contextGraphStorage: `0x${'2'.repeat(40)}`, assetStorage: `0x${'0'.repeat(39)}1`,
@@ -29,7 +36,10 @@ describe('public bulk snapshot recovery', () => {
     const agent = { store: f.target, router: f.router, ensurePeerConnected: ensure, getPeerProtocols: protocols,
       getOrCreateSyncVerifyWorker: () => f.worker,
       processDurableBatchInWorker: ((data, meta, _ctx, accept, mode) => f.worker.processDurableBatch(data, meta, accept, mode)) as DKGAgent['processDurableBatchInWorker'],
-      reconcileAfterGraphScopedMaterialization: async () => {},
+      reconcileAfterGraphScopedMaterialization: async (asset: { ual: string }) => {
+        if (failure !== 'reconciliation') return;
+        started.add(asset.ual); await held; completed.add(asset.ual);
+      },
     } as unknown as DKGAgent;
     const requests: string[][] = [], peers: string[] = [];
     const exchange = f.router.withDuplexStream.bind(f.router);
@@ -46,11 +56,19 @@ describe('public bulk snapshot recovery', () => {
       });
     });
     const signal = new AbortController().signal;
-    const result = await recoverPublicSnapshotBulk(agent, { contextGraphId: cg, peers: ['offline', f.supplierPeer],
+    const pending = recoverPublicSnapshotBulk(agent, { contextGraphId: cg, peers: ['offline', f.supplierPeer],
       uals: f.uals, evidence: new PublicSnapshotEvidence({ mode: 'core-cache', snapshot, sourceCore: f.supplierPeer }, () => true),
       signal, assertCurrent: () => signal.throwIfAborted(), deadline: Date.now() + 30_000, dataDir: f.directory,
       shouldQuarantineCommitted: () => false, onCommitted: () => {}, log: () => {},
     });
+    if (failure === 'reconciliation') {
+      try {
+        await vi.waitFor(() => expect(started.size).toBeGreaterThanOrEqual(2), { timeout: 5000 });
+        expect(controls).toHaveLength(0);
+      } finally { release(); }
+    } else release();
+    const result = await pending;
+    if (failure === 'reconciliation') expect(completed).toEqual(new Set(f.uals));
     expect(ensure.mock.calls.map(call => call[0])).toEqual(['offline', f.supplierPeer]);
     if (failure === 'delayed-identify') expect(probe).toHaveBeenCalledExactlyOnceWith(f.supplierPeer, BULK_GRAPH_PROTOCOL, 3_000, signal);
     else expect(probe).not.toHaveBeenCalled();
