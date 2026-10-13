@@ -8,6 +8,9 @@ import {
   exportBundle,
   importBundle,
   parseDocument,
+  quadsToNQuads,
+  DKG_HAS_SECTION,
+  GENID_TAGS,
   SECTION_GENID_INFIX,
   XSD_DATE_TIME,
 } from '../../src/index.js';
@@ -38,4 +41,16 @@ export function exportedFrontmatter(files: BundleFile[], path = 'metrics/revenue
   const exported = exportBundle(importBundle(files));
   const file = exported.find((f) => f.path === path)!;
   return parseDocument(path, file.content).frontmatter;
+}
+
+/**
+ * The semantic graph: every quad minus the presentational `dkg:hasSection`
+ * structure (the `hasSection` edges and the skolemized *section* nodes). The
+ * v0.2 family nodes (`okfver_` / `okfsrc_` / `okfparam_`) ARE part of the
+ * semantic graph and must survive the round trip. Equivalence is asserted over
+ * this projection (export is graph-faithful, not byte-faithful — see export.ts).
+ */
+export function semantic(quads: Quad[]): string {
+  const sectionNode = SECTION_GENID_INFIX + GENID_TAGS.section;
+  return quadsToNQuads(quads.filter((q) => !q.subject.includes(sectionNode) && q.predicate !== DKG_HAS_SECTION));
 }

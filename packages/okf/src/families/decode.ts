@@ -14,11 +14,11 @@
  * import re-derives them.
  */
 
-import { SCHEMA_NS } from '../constants.js';
+import { RDF_JSON, SCHEMA_NS } from '../constants.js';
 import { okfExtensionKey } from '../extensions.js';
 import { genericPredicate } from '../terms.js';
 import { dict } from '../utils.js';
-import { accumulate, byNodeIndex, orderKeys, termValue, type ExportContext, type TermForm } from '../decode-terms.js';
+import { accumulate, byNodeIndex, literalDatatype, orderKeys, termValue, type ExportContext, type TermForm } from '../decode-terms.js';
 import type { Quad } from '../types.js';
 import {
   FAMILY_SPECS,
@@ -142,6 +142,49 @@ function keptVerbatim(spec: FamilySpec, quads: readonly Quad[], ctx: ExportConte
   return read.length > 0 ? { value: kept[spec.key], quads: read } : null;
 }
 
+/**
+ * A family with a legacy field (`generated`, whose `at` supersedes the v0.1
+ * `timestamp`, §13.1). That field's predicate can hold two values: the
+ * family's own, and the legacy `timestamp` the importer writes there when no
+ * `generated.at` gives a time. They are told apart triple by triple:
+ *
+ *   - an `rdf:JSON` value is one the family kept verbatim (a mapping or list
+ *     where one time belongs), which the legacy key could not carry: it is the
+ *     family's, and a time beside it is the legacy key's;
+ *   - otherwise a time is the family's when the family is there, or when the
+ *     concept keeps a producer value under the legacy key, which only the
+ *     family's own time makes; else it reads back under the legacy key (a v0.1
+ *     last-modified time).
+ */
+function decodeLegacyFamily(
+  spec: MappingFamilySpec,
+  legacy: NonNullable<MappingFamilySpec['legacy']>,
+  decoded: ReturnType<typeof decodeFields>,
+  conceptQuads: readonly Quad[],
+  ctx: ExportContext,
+): Array<[string, Read]> {
+  const predicate = spec.fields.find((f) => f.key === legacy.field)?.predicate;
+  const fieldQuads = decoded.quads.filter((q) => q.predicate === predicate);
+  const kept = fieldQuads.filter((q) => literalDatatype(q.object) === RDF_JSON);
+  const times = fieldQuads.filter((q) => literalDatatype(q.object) !== RDF_JSON);
+  const present = isPresent(spec, decoded);
+  const keyTaken = conceptQuads.some((q) => q.predicate === genericPredicate(legacy.key));
+  const familyTimes = kept.length === 0 && (present || keyTaken);
+  const legacyQuads = familyTimes ? [] : times;
+  const familyQuads = decoded.quads.filter((q) => !legacyQuads.includes(q));
+  const out: Array<[string, Read]> = [];
+  if (familyQuads.length > 0 && (present || kept.length > 0 || familyTimes)) {
+    const family = decodeFields(spec, familyQuads, ctx);
+    out.push([spec.key, { value: orderKeys(family.value, spec.fields.map((f) => f.key)), quads: familyQuads }]);
+  } else {
+    const verbatim = keptVerbatim(spec, conceptQuads, ctx, 'concept');
+    if (verbatim) out.push([spec.key, verbatim]);
+  }
+  const last = legacyQuads[legacyQuads.length - 1];
+  if (last) out.push([legacy.key, { value: termValue(last.object, ctx, 'date'), quads: legacyQuads }]);
+  return out;
+}
+
 function decodeEntry(
   spec: ListFamilySpec,
   quads: readonly Quad[],
@@ -195,26 +238,16 @@ export function decodeFamilies(
       }
       case 'mapping': {
         const decoded = decodeFields(spec, conceptQuads, ctx);
+        if (spec.legacy) {
+          for (const [key, read] of decodeLegacyFamily(spec, spec.legacy, decoded, conceptQuads, ctx)) put(key, read);
+          break;
+        }
         if (isPresent(spec, decoded)) {
           put(spec.key, { value: orderKeys(decoded.value, spec.fields.map((f) => f.key)), quads: decoded.quads });
           break;
         }
         const kept = keptVerbatim(spec, conceptQuads, ctx, 'concept');
         if (kept) put(spec.key, kept);
-        // Without the family, a legacy field reads back under its legacy key
-        // (§13.1), unless the concept keeps a value of its own under that key:
-        // only the family's field makes one (`generated.at` supersedes
-        // `timestamp`, which is then a producer key), so the field reads back
-        // inside the family and neither value overwrites the other.
-        const legacy = spec.legacy;
-        if (legacy && legacy.field in decoded.fields) {
-          const keyTaken = conceptQuads.some((q) => q.predicate === genericPredicate(legacy.key));
-          if (keyTaken && !(spec.key in frontmatter)) {
-            put(spec.key, { value: orderKeys(decoded.value, spec.fields.map((f) => f.key)), quads: decoded.quads });
-          } else {
-            put(legacy.key, { value: decoded.fields[legacy.field], quads: decoded.quads });
-          }
-        }
         break;
       }
       case 'list': {

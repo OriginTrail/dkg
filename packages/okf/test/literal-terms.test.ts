@@ -6,16 +6,14 @@ import {
   importBundle,
   literalTerm,
   parseDocument,
-  quadsToNQuads,
   typedLiteralTerm,
-  DKG_HAS_SECTION,
   RDF_JSON,
   RDF_TYPE,
   SCHEMA_NAME,
   XSD_DATE_TIME,
 } from '../src/index.js';
 import type { Quad } from '../src/index.js';
-import { bundle, exportedFrontmatter } from './helpers/okf-v02-fixtures.js';
+import { bundle, exportedFrontmatter, semantic } from './helpers/okf-v02-fixtures.js';
 
 // Literal terms use the DKG's canonical form (dkg-rdf-utils), the one the
 // stores return, so an import's quads match what a store holds byte for byte
@@ -41,7 +39,6 @@ describe('literal terms are written in the canonical RDF form', () => {
         `owner: { label: "${escaped}", lone: "\\uD800" }`,
       ].join('\n'),
     );
-    const semantic = (quads: Quad[]) => quadsToNQuads(quads.filter((q) => q.predicate !== DKG_HAS_SECTION && !q.subject.includes('okfsec_')));
     const first = importBundle(files);
     expect(semantic(importBundle(exportBundle(first)).quads)).toBe(semantic(first.quads));
     const fm = exportedFrontmatter(files);

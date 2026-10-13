@@ -40,6 +40,12 @@ function parseLiteral(term: string): RdfLiteralTerm | null {
   return term.startsWith('"') ? parseRdfLiteralTerm(term, { combineSurrogatePairs: true }) : null;
 }
 
+/** The datatype IRI of a typed literal term, or `null` for any other term. */
+export function literalDatatype(term: string): string | null {
+  const literal = parseLiteral(term);
+  return literal?.kind === 'typed' ? literal.datatype : null;
+}
+
 /** Lexical value of a literal term, or `null` for an IRI / blank node or a literal that does not parse. */
 export function literalValue(term: string): string | null {
   return parseLiteral(term)?.value ?? null;
