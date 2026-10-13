@@ -5,15 +5,19 @@
  * concept's frontmatter, derive a deterministic subject IRI per concept ID, and
  * read `okf_version` from the root `index.md` if present.
  *
- * Pass 2 — extract + link: map each concept (frontmatter + body) to quads and
- * resolve its Markdown links against the Pass-1 map into untyped directed edges.
+ * Pass 2 — prepare: encode each concept's values and parse its body, without
+ * reading the index. A concept with a value no RDF term can hold is skipped
+ * here and leaves the index.
+ *
+ * Pass 3 — resolve: read each prepared concept's path-valued fields and
+ * Markdown links against the final index, into typed and untyped edges.
  *
  * Pure and deterministic: same `BundleFile[]` ⇒ identical quads and IRIs. No
  * filesystem, no network — `loadBundleDir` (loader.ts) is the only I/O surface.
  */
 
 import { parseDocument, OkfDocumentError } from './document.js';
-import { mapConcept } from './mapping.js';
+import { prepareConcept, resolveConcept, type PreparedConcept } from './mapping.js';
 import { OkfValueError } from './terms.js';
 import {
   isConceptFile,
@@ -114,7 +118,30 @@ export function importBundle(files: BundleFile[], opts: OkfMappingOptions = {}):
     });
   }
 
-  // --- Pass 2: extract + link ---
+  // --- Pass 2: prepare ---
+  // Every concept is prepared once, before any reference is read. A concept
+  // whose value no RDF term can hold (`OkfValueError`) is skipped with a
+  // warning and leaves the index, so the index every survivor then resolves
+  // against (once) names only imported concepts: a reference to a skipped
+  // concept is a broken link, never an edge. Any other exception is a defect
+  // and propagates.
+  type Prepared = { doc: OkfDocument; prepared: PreparedConcept } | { doc: OkfDocument; failure: OkfWarning };
+  const prepared = docs.map((doc): Prepared => {
+    try {
+      return { doc, prepared: prepareConcept(doc, iriByConceptId[doc.conceptId], opts) };
+    } catch (err) {
+      if (!(err instanceof OkfValueError)) throw err;
+      return { doc, failure: { conceptId: doc.conceptId, code: 'unmappable-value', message: `could not be mapped (${err.message}); skipped` } };
+    }
+  });
+  for (const p of prepared) {
+    if ('failure' in p) {
+      delete iriByConceptId[p.doc.conceptId];
+      delete typeByConceptId[p.doc.conceptId];
+    }
+  }
+
+  // --- Pass 3: resolve ---
   const exists = (id: string): boolean =>
     Object.prototype.hasOwnProperty.call(iriByConceptId, id);
   // Opt-in: retype cross-concept edges by their endpoints' OKF `type` pair
@@ -125,40 +152,15 @@ export function importBundle(files: BundleFile[], opts: OkfMappingOptions = {}):
     return typeRelations.find((r) => r.from === fromType && r.to === toType)?.predicate;
   };
 
-  // A concept whose value no RDF term can hold (`OkfValueError`) is skipped
-  // with a warning. It must not stay a link target either, or the survivors
-  // would emit resolved links and lineage edges to a concept never imported:
-  // so failures are found first, dropped from the index, and the survivors
-  // mapped against the final index. Without failures that is a single pass.
-  // Any other exception is a defect and propagates.
-  type Outcome = { doc: OkfDocument; mapping: ConceptMapping } | { doc: OkfDocument; failure: OkfWarning };
-  const mapOrSkip = (doc: OkfDocument): Outcome => {
-    try {
-      return { doc, mapping: mapConcept(doc, iriByConceptId[doc.conceptId], exists, opts) };
-    } catch (err) {
-      if (!(err instanceof OkfValueError)) throw err;
-      return { doc, failure: { conceptId: doc.conceptId, code: 'unmappable-value', message: `could not be mapped (${err.message}); skipped` } };
-    }
-  };
-  let outcomes = docs.map(mapOrSkip);
-  if (outcomes.some((o) => 'failure' in o)) {
-    for (const o of outcomes) {
-      if ('failure' in o) {
-        delete iriByConceptId[o.doc.conceptId];
-        delete typeByConceptId[o.doc.conceptId];
-      }
-    }
-    outcomes = outcomes.map((o) => ('failure' in o ? o : { doc: o.doc, mapping: mapConcept(o.doc, iriByConceptId[o.doc.conceptId], exists, opts) }));
-  }
-
   const concepts: ConceptMapping[] = [];
   const quads: Quad[] = [];
-  for (const outcome of outcomes) {
-    if ('failure' in outcome) {
-      warnings.push(outcome.failure);
+  for (const p of prepared) {
+    if ('failure' in p) {
+      warnings.push(p.failure);
       continue;
     }
-    const { doc, mapping } = outcome;
+    const { doc } = p;
+    const mapping = resolveConcept(p.prepared, exists);
     if (typeRelations.length > 0) {
       const fromType = typeByConceptId[doc.conceptId];
       for (const q of mapping.quads) {
@@ -170,7 +172,7 @@ export function importBundle(files: BundleFile[], opts: OkfMappingOptions = {}):
     }
     concepts.push(mapping);
     quads.push(...mapping.quads);
-    // Every concept-level diagnostic is built by mapConcept (one owner).
+    // Every concept-level diagnostic comes from the mapper (prepare + resolve).
     warnings.push(...mapping.warnings);
   }
 

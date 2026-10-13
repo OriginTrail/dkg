@@ -118,8 +118,11 @@ it; the CLI summary reports it against the current time.
 ## Relationships
 
 - Bundle → many Concepts (+ reserved files, skipped). Pass 1 indexes the bundle
-  and builds the `conceptId → IRI` map; Pass 2 maps each concept and resolves its
-  links against that map (so an edge only forms to a concept that exists).
+  and builds the `conceptId → IRI` map; Pass 2 prepares each concept from its
+  document alone (values encoded, body parsed, path-valued fields and links
+  left as references); Pass 3 resolves each prepared concept's references
+  against the final map (so an edge only forms to a concept that is imported).
+  Each concept is prepared once and resolved once.
 - Concept → one Knowledge Asset (one subject IRI) → many quads (frontmatter
   triples + family nodes + body sections + untyped edges + citations).
 - Frontmatter key → RDF predicate via the locked table (ADR 0005; the v0.2 rows
@@ -287,9 +290,10 @@ it; the CLI summary reports it against the current time.
   mapping with its own `toString` key makes `String()` throw. A verifier given
   that way names no verifier, so its entry is skipped. Base fields use a
   coercion that never throws. A concept whose value no RDF term can hold (a
-  cyclic YAML alias has no JSON form) is skipped with an `unmappable-value`
-  warning and dropped from the concept index first, so no other concept links
-  to it (its links report as unresolved); the rest of the bundle imports. That
+  cyclic YAML alias has no JSON form) fails while it is prepared, is skipped
+  with an `unmappable-value` warning, and leaves the concept index before any
+  reference is resolved, so no other concept links to it (its links report as
+  unresolved); the rest of the bundle imports. That
   is the only failure caught: any other exception in the mapper is a defect and
   propagates.
 - **`schema:isPartOf` on export.** The edge `emitFolderHierarchy` infers (to the

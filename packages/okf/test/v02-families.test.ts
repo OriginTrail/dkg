@@ -49,7 +49,7 @@ import {
   XSD_INTEGER,
 } from '../src/index.js';
 import * as okfPublic from '../src/index.js';
-import { decodeFamilies, encodeFamily, FAMILY_SPECS, FAMILY_BY_KEY, VERIFIED } from '../src/families/index.js';
+import { decodeFamilies, prepareFamily, resolveReferences, FAMILY_SPECS, FAMILY_BY_KEY, VERIFIED } from '../src/families/index.js';
 import type { Quad } from '../src/index.js';
 import { DT, objs, node, bundle, conceptOf, exportedFrontmatter } from './helpers/okf-v02-fixtures.js';
 
@@ -592,7 +592,7 @@ describe('a nested family of the wrong shape is kept through export', () => {
 
 describe('family definitions are internal and carry their behaviour as data', () => {
   it('keeps the definitions and codec out of the public API', () => {
-    for (const name of ['FAMILY_SPECS', 'FAMILY_BY_KEY', 'VERIFIED', 'SOURCES', 'encodeFamily', 'decodeFamilies', 'parseList']) {
+    for (const name of ['FAMILY_SPECS', 'FAMILY_BY_KEY', 'VERIFIED', 'SOURCES', 'prepareFamily', 'resolveReferences', 'decodeFamilies', 'parseList', 'prepareConcept', 'resolveConcept']) {
       expect(Object.prototype.hasOwnProperty.call(okfPublic, name)).toBe(false);
     }
     for (const name of ['familyQuads', 'familyDiagnostics', 'parseVerified', 'exportInputFromQuads', 'V02_FAMILY_KEYS']) {
@@ -603,8 +603,8 @@ describe('family definitions are internal and carry their behaviour as data', ()
   it('does not depend on which definition object it is handed', () => {
     const ctx = { conceptId: 'm', iriBase: 'urn:okf:', conceptExists: () => false };
     const value = [{ by: 'human:a', at: '2026-06-25T09:00:00Z' }];
-    const canonical = encodeFamily('urn:okf:m', VERIFIED, value, ctx);
-    const copy = encodeFamily('urn:okf:m', { ...VERIFIED }, value, ctx);
+    const canonical = resolveReferences('urn:okf:m', prepareFamily('urn:okf:m', 'm', VERIFIED, value), ctx);
+    const copy = resolveReferences('urn:okf:m', prepareFamily('urn:okf:m', 'm', { ...VERIFIED }, value), ctx);
     expect(quadsToNQuads(copy.quads)).toBe(quadsToNQuads(canonical.quads));
     expect(copy.quads.some((q) => q.predicate === OKF_TRUST_TIER)).toBe(true);
   });

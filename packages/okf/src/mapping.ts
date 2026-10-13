@@ -48,7 +48,16 @@ import {
   toArray,
   type PathContext,
 } from './terms.js';
-import { SOURCES, familyQuads, familyDiagnostics, parseList, sourceIds, declaresSources } from './families/index.js';
+import {
+  SOURCES,
+  familyDiagnostics,
+  parseList,
+  prepareFamilyQuads,
+  resolveReferences,
+  sourceIds,
+  declaresSources,
+  type PreparedQuad,
+} from './families/index.js';
 import { dateTimeLexical, parseVerified, trustTierOf, conceptStatus } from './trust.js';
 import type {
   OkfDocument,
@@ -113,9 +122,16 @@ export function mapFrontmatter(
     iriBase,
     conceptExists: ctx.conceptExists ?? (() => false),
   };
-  const out: Quad[] = [];
-  const derived: string[] = [];
-  const warnings: OkfWarning[] = [];
+  return resolveFrontmatter(iri, prepareFrontmatter(iri, frontmatter, pathCtx.conceptId), pathCtx);
+}
+
+/**
+ * The frontmatter as quads, with every path-valued field left as a reference:
+ * what the document alone decides, and the one place a value can fail to
+ * encode (`OkfValueError`).
+ */
+function prepareFrontmatter(iri: string, frontmatter: Record<string, unknown>, conceptId: string): PreparedQuad[] {
+  const out: PreparedQuad[] = [];
   // v0.2 `generated.at` supersedes the v0.1 `timestamp` (§13.1).
   const generatedAt = isMapping(frontmatter.generated) ? dateTimeLexical(frontmatter.generated.at) : null;
 
@@ -154,18 +170,20 @@ export function mapFrontmatter(
         out.push({ subject: iri, predicate: SCHEMA_URL, object: isSafeIri(r) ? r : literalTerm(r) });
         break;
       }
-      default: {
+      default:
         // A v0.2 family, or a producer-defined key (preserved, never dropped — SPEC §4.1/§11).
-        const r = familyQuads(iri, key, value, pathCtx);
-        out.push(...r.quads);
-        derived.push(...r.derivedFromConcepts);
-        warnings.push(...r.warnings);
-      }
+        out.push(...prepareFamilyQuads(iri, conceptId, key, value));
     }
   }
+  return out;
+}
+
+/** Prepared frontmatter read against the bundle (`ctx`): its path-valued fields resolved in place. */
+function resolveFrontmatter(iri: string, prepared: readonly PreparedQuad[], ctx: PathContext): FrontmatterMapping {
+  const r = resolveReferences(iri, prepared, ctx);
   // An RDF store holds a set: emit each triple once (two sources naming one
   // resource would otherwise yield two identical prov:wasDerivedFrom edges).
-  return { quads: dedupeQuads(out), derivedFromConcepts: [...new Set(derived)].sort(), warnings };
+  return { quads: dedupeQuads(r.quads), derivedFromConcepts: [...new Set(r.derivedFromConcepts)].sort(), warnings: r.warnings };
 }
 
 /** Quads-only view of `mapFrontmatter` (kept for API compatibility). */
@@ -273,9 +291,40 @@ export function parseBody(body: string): ParsedBody {
 }
 
 /**
+ * What one concept's document decides on its own: its frontmatter as quads
+ * with the path-valued fields still references, its parsed body, and its
+ * family diagnostics. Nothing here reads the bundle, so a bundle can prepare
+ * every concept, settle which ones it holds, and only then resolve.
+ */
+export interface PreparedConcept {
+  readonly doc: OkfDocument;
+  readonly iri: string;
+  readonly opts: OkfMappingOptions;
+  readonly frontmatter: readonly PreparedQuad[];
+  readonly body: ParsedBody;
+  readonly diagnostics: readonly OkfWarning[];
+}
+
+/**
+ * Prepare one concept: encode its values and parse its body, without reading
+ * the bundle. Throws `OkfValueError` for a value no RDF term can hold, the one
+ * recoverable failure: `importBundle` then skips the concept, so the index the
+ * others resolve against never names it.
+ */
+export function prepareConcept(doc: OkfDocument, iri: string, opts: OkfMappingOptions = {}): PreparedConcept {
+  return {
+    doc,
+    iri,
+    opts,
+    frontmatter: prepareFrontmatter(iri, doc.frontmatter, doc.conceptId),
+    body: parseBody(doc.body),
+    diagnostics: familyDiagnostics(doc.frontmatter).map((d) => ({ conceptId: doc.conceptId, ...d })),
+  };
+}
+
+/**
  * Map a single concept to its Knowledge Asset quads + structured link/citation
- * diagnostics. `conceptExists` decides whether a resolved link target is in the
- * bundle (a candidate that is not present is a broken link — warned, never fatal).
+ * diagnostics: `resolveConcept(prepareConcept(doc, iri, opts), conceptExists)`.
  */
 export function mapConcept(
   doc: OkfDocument,
@@ -283,15 +332,23 @@ export function mapConcept(
   conceptExists: (conceptId: string) => boolean,
   opts: OkfMappingOptions = {},
 ): ConceptMapping {
-  const iriBase = opts.iriBase ?? DEFAULT_IRI_BASE;
-  const fm = mapFrontmatter(iri, doc.frontmatter, { conceptId: doc.conceptId, iriBase, conceptExists });
-  const quads: Quad[] = [...fm.quads];
-  const warnings: OkfWarning[] = [
-    ...familyDiagnostics(doc.frontmatter).map((d) => ({ conceptId: doc.conceptId, ...d })),
-    ...fm.warnings,
-  ];
+  return resolveConcept(prepareConcept(doc, iri, opts), conceptExists);
+}
 
-  const parsed = parseBody(doc.body);
+/**
+ * Complete a prepared concept against the bundle. `conceptExists` decides
+ * whether a path-valued field or a body link names a concept in the bundle (a
+ * candidate that is not present is a broken link — warned, never fatal).
+ * Never throws for a value: every value was encoded by `prepareConcept`.
+ */
+export function resolveConcept(prepared: PreparedConcept, conceptExists: (conceptId: string) => boolean): ConceptMapping {
+  const { doc, iri, opts } = prepared;
+  const iriBase = opts.iriBase ?? DEFAULT_IRI_BASE;
+  const fm = resolveFrontmatter(iri, prepared.frontmatter, { conceptId: doc.conceptId, iriBase, conceptExists });
+  const quads: Quad[] = [...fm.quads];
+  const warnings: OkfWarning[] = [...prepared.diagnostics, ...fm.warnings];
+
+  const parsed = prepared.body;
 
   // Sections: every body heading (OKF titles live in frontmatter, so H1s count).
   // Section nodes are skolemized into deterministic concept-scoped IRIs rather
