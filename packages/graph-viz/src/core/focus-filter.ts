@@ -43,9 +43,13 @@ export class FocusFilter {
     nodes: Map<string, GraphNode>;
     edges: Map<string, GraphEdge>;
   } {
+    // A refresh can replace every URI while keeping the same number of triples.
+    // Reusing an absent focal node would otherwise produce an empty large graph.
+    if (this._focalNode && !model.nodes.has(this._focalNode)) this._focalNode = null;
     // If graph is small enough, show everything
     if (model.nodes.size <= this._config.maxNodes) {
       this._enabled = false;
+      this._visibleNodes.clear();
       // Mark all as non-boundary
       for (const node of model.nodes.values()) {
         node.isBoundary = false;

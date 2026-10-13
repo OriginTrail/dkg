@@ -4,6 +4,7 @@ import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { useMemoryEntities } from '../src/ui/hooks/useMemoryEntities.js';
+import { invalidateQueryCache } from '../src/ui/api.js';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 
@@ -82,6 +83,7 @@ describe('useMemoryEntities live updates', () => {
   let revision = 1;
 
   beforeEach(() => {
+    invalidateQueryCache();
     vi.useFakeTimers();
     MockEventSource.instances = [];
     (globalThis as any).EventSource = MockEventSource;

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const apiMocks = vi.hoisted(() => ({
   listAssertions: vi.fn(),
+  listAssertionsPage: vi.fn(),
   promoteAssertion: vi.fn(),
   describePromoteResult: vi.fn((name: string) => ({ message: `Shared ${name}` })),
   describePromoteError: vi.fn(() => null),
@@ -19,6 +20,11 @@ const apiMocks = vi.hoisted(() => ({
 vi.mock('../src/ui/api-wrapper.js', () => ({
   api: { fetchSubGraphs: vi.fn(async () => ({ subGraphs: [] })) },
 }));
+vi.mock('../src/ui/assertions-page.js', () => ({
+  listAssertionsPage: apiMocks.listAssertionsPage,
+  fetchAssertionPageCounts: vi.fn(async () => ({})),
+}));
+vi.mock('../src/ui/hooks/useNodeEvents.js', () => ({ useMemoryGraphEvents: () => {} }));
 
 vi.mock('../src/ui/api.js', () => ({
   listJoinRequests: vi.fn(async () => ({ requests: [] })),
@@ -31,6 +37,7 @@ vi.mock('../src/ui/api.js', () => ({
   describePromoteError: apiMocks.describePromoteError,
   fetchAssertionUals: apiMocks.fetchAssertionUals,
   executeQuery: vi.fn(),
+  invalidateQueryCache: vi.fn(),
   writeProfileQueryCatalog: vi.fn(),
   fetchSubGraphs: vi.fn(async () => ({ subGraphs: [] })),
   // ka.tsx (pulled in transitively via the components barrel) imports these —
@@ -99,6 +106,9 @@ describe('Context Graph shared empty/stat patterns', () => {
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     document.body.innerHTML = '';
     vi.clearAllMocks();
+    apiMocks.listAssertionsPage.mockReset().mockImplementation(async (cg: string, layer: string, options: { includeQueryCatalog?: boolean }) => ({
+      items: await apiMocks.listAssertions(cg, layer, { includeQueryCatalog: options.includeQueryCatalog }),
+    }));
   });
 
   afterEach(() => {
@@ -462,6 +472,30 @@ describe('Context Graph shared empty/stat patterns', () => {
     // over the error signal when both fire.
     expect(badge?.getAttribute('data-state')).toBeNull();
 
+    await unmount();
+  });
+
+  it('navigates assertion pages and resets the cursor when the graph changes', async () => {
+    const row = (name: string) => ({ name, graphUri: `urn:assertion:${name}` });
+    apiMocks.listAssertionsPage
+      .mockResolvedValueOnce({ items: [row('first-page')], nextCursor: 'urn:cursor:one' })
+      .mockResolvedValueOnce({ items: [row('second-page')] })
+      .mockResolvedValueOnce({ items: [row('new-graph-page')] });
+    const { container, root, unmount } = await render(React.createElement(AssertionsList, {
+      contextGraphId: 'cg-a', layer: 'wm', onComplete: vi.fn(),
+    }));
+    await waitForText(container, 'first-page');
+    const button = (text: string) => [...container.querySelectorAll('button')].find(element => element.textContent === text)!;
+    expect(button('Previous assertions').disabled).toBe(true);
+    await act(async () => button('Next assertions').click());
+    await waitForText(container, 'second-page');
+    expect(button('Next assertions').disabled).toBe(true);
+    expect(apiMocks.listAssertionsPage).toHaveBeenLastCalledWith('cg-a', 'wm', { includeQueryCatalog: false, cursor: 'urn:cursor:one', includeCounts: false });
+    await act(async () => root.render(React.createElement(AssertionsList, { contextGraphId: 'cg-b', layer: 'wm', onComplete: vi.fn() })));
+    await waitForText(container, 'new-graph-page');
+    expect(apiMocks.listAssertionsPage).toHaveBeenLastCalledWith('cg-b', 'wm', { includeQueryCatalog: false, cursor: undefined, includeCounts: false });
+    expect(button('Previous assertions').disabled).toBe(true);
+    expect(apiMocks.listAssertions).not.toHaveBeenCalled();
     await unmount();
   });
 

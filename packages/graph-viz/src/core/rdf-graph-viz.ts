@@ -61,6 +61,8 @@ export class RdfGraphViz {
   private _timelineOverlay: TimelineOverlay | null = null;
   private _renderQueued = false;
   private _autoFitDisabled = false;
+  private _resizeObserver: ResizeObserver | null = null;
+  private _destroyed = false;
 
   constructor(container: HTMLElement, config: RdfGraphVizConfig = {}) {
     this._config = config;
@@ -99,10 +101,13 @@ export class RdfGraphViz {
       this._renderer = null as unknown as RendererBackend;
 
       import('./renderer-3d.js').then(({ WebGL3DRenderer }) => {
+        if (this._destroyed) { resolveReady(); return; }
         this._renderer = new WebGL3DRenderer(backendConfig);
-        resolveReady();
+        return Promise.resolve(this._renderer.init()).then(() => { resolveReady(); });
       }).catch((err) => {
+        if (this._destroyed) { resolveReady(); return; }
         console.warn('[dkg-graph-viz] 3D renderer not available, falling back to 2D:', err.message);
+        this._renderer?.destroy();
         this._renderer = new Canvas2DRenderer(backendConfig);
         resolveReady();
       });
@@ -124,39 +129,43 @@ export class RdfGraphViz {
 
     // Auto-resize on container resize
     if (typeof ResizeObserver !== 'undefined') {
-      const observer = new ResizeObserver(() => this._renderer?.resize());
-      observer.observe(container);
+      this._resizeObserver = new ResizeObserver(() => this._renderer?.resize());
+      this._resizeObserver.observe(container);
     }
   }
 
   // --- Data Loading ---
 
   /** Load N-Triples or N-Quads string */
-  async loadNTriples(input: string): Promise<void> {
+  async loadNTriples(input: string, signal?: AbortSignal): Promise<void> {
     const { parseNTriples } = await import('../parsers/ntriples.js');
     const triples = parseNTriples(input);
+    if (signal?.aborted) return;
     this._ingest(triples);
   }
 
   /** Load N-Quads string */
-  async loadNQuads(input: string): Promise<void> {
+  async loadNQuads(input: string, signal?: AbortSignal): Promise<void> {
     const { parseNQuads } = await import('../parsers/ntriples.js');
     const triples = parseNQuads(input);
+    if (signal?.aborted) return;
     this._ingest(triples);
   }
 
   /** Load Turtle string */
-  async loadTurtle(input: string): Promise<void> {
+  async loadTurtle(input: string, signal?: AbortSignal): Promise<void> {
     const { parseTurtle } = await import('../parsers/turtle.js');
     const { triples, prefixes } = parseTurtle(input);
+    if (signal?.aborted || this._destroyed) return;
     this._prefixManager.addPrefixes(prefixes);
     this._ingest(triples);
   }
 
   /** Load JSON-LD (object or string) */
-  async loadJsonLd(input: Record<string, unknown> | string): Promise<void> {
+  async loadJsonLd(input: Record<string, unknown> | string, signal?: AbortSignal): Promise<void> {
     const { parseJsonLd } = await import('../parsers/jsonld.js');
     const triples = await parseJsonLd(input);
+    if (signal?.aborted) return;
     this._ingest(triples);
   }
 
@@ -329,7 +338,7 @@ export class RdfGraphViz {
       this._renderer.autoFitDisabled = value;
     } else {
       this._rendererReady.then(() => {
-        if (this._renderer) this._renderer.autoFitDisabled = value;
+        if (!this._destroyed && this._renderer) this._renderer.autoFitDisabled = value;
       });
     }
   }
@@ -587,6 +596,7 @@ export class RdfGraphViz {
 
     // Apply animation after renderer is fully ready (3D init is async)
     this._rendererReady.then(() => {
+      if (this._destroyed) return;
       if (config.animation && this._renderer?.applyAnimation) {
         this._renderer.applyAnimation(config.animation);
       }
@@ -612,6 +622,10 @@ export class RdfGraphViz {
 
   /** Destroy the visualization and clean up resources */
   destroy(): void {
+    if (this._destroyed) return;
+    this._destroyed = true;
+    this._resizeObserver?.disconnect();
+    this._resizeObserver = null;
     this._timelineOverlay?.unmount();
     this._timelineOverlay = null;
     this._renderer?.destroy();
@@ -624,6 +638,7 @@ export class RdfGraphViz {
 
   /** Ingest triples, resolve labels/images, and render */
   private _ingest(triples: RdfTriple[]): void {
+    if (this._destroyed) return;
     this._model.addTriples(triples);
     this._postIngest();
   }
@@ -652,6 +667,7 @@ export class RdfGraphViz {
 
   /** Render with current focus filter + temporal filter state */
   private _renderCurrent(): void {
+    if (this._destroyed) return;
     // In 3D mode, renderer module loads asynchronously.
     // Queue one deferred render instead of throwing on early data loads.
     if (!this._renderer) {

@@ -1,9 +1,12 @@
 import React, { useMemo, useState, useCallback } from 'react';
 import type { ReactNode } from 'react';
 import { useFetch } from '../../../hooks.js';
+import { listAssertionsPage, fetchAssertionPageCounts } from '../../../assertions-page.js';
+import { invalidateQueryCache } from '../../../api.js';
+import { useMemoryGraphEvents } from '../../../hooks/useNodeEvents.js';
 import { encodeDocTabId, resolveDocRef } from '../../../lib/doc-tab-id.js';
 import { truncateMiddle } from '../../../lib/truncate.js';
-import { listAssertions, promoteAssertion, describePromoteResult, describePromoteError, knowledgeAssetPublish, publishAssertionsToVm, partialPublishWarning, fetchAssertionUals, type AssertionInfo } from '../../../api.js';
+import { listAssertions, promoteAssertion, describePromoteResult, describePromoteError, knowledgeAssetPublish, publishAssertionsToVm, partialPublishWarning, type AssertionInfo } from '../../../api.js';
 import { useMemoryEntities, type TrustLevel, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { useAgentsContext } from '../../../hooks/useAgents.js';
@@ -435,18 +438,26 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
   onComplete: () => void;
   scrollKey?: string;
 }) {
-  const { data: assertions, loading, refresh } = useFetch(
-    () => listAssertions(contextGraphId, layer, { includeQueryCatalog }),
-    [contextGraphId, layer, includeQueryCatalog],
+  const scope = JSON.stringify([contextGraphId, layer, includeQueryCatalog]);
+  const [paging, setPaging] = useState<{ scope: string; cursors: Array<string | undefined>; index: number }>({ scope, cursors: [undefined], index: 0 });
+  const cursors = paging.scope === scope ? paging.cursors : [undefined];
+  const pageIndex = paging.scope === scope ? paging.index : 0;
+  const cursor = cursors[pageIndex];
+  const { data: loadedPage, loading, error: loadError, refresh: loadPage } = useFetch(
+    async () => ({ scope, cursor, ...await listAssertionsPage(contextGraphId, layer, { includeQueryCatalog, cursor, includeCounts: false }) }),
+    [contextGraphId, layer, includeQueryCatalog, cursor],
     0
   );
-  // Deterministic Option-1 UAL per assertion (dkg:reservedUal), shown next to
-  // the filename. Refreshes alongside the list.
-  const { data: ualMap } = useFetch(
-    () => fetchAssertionUals(contextGraphId),
-    [contextGraphId, layer],
-    0
-  );
+  const page = loadedPage?.scope === scope && loadedPage.cursor === cursor ? loadedPage : null;
+  const assertions = page?.items ?? [];
+  const countKey = JSON.stringify([scope, assertions.map(item => item.graphUri)]);
+  const pageCounts = useFetch(async () => ({
+    key: countKey,
+    counts: layer === 'wm' ? await fetchAssertionPageCounts(contextGraphId, assertions) : {},
+  }), [countKey, page]);
+  const counts = pageCounts.data?.key === countKey ? pageCounts.data.counts : {};
+  const refresh = useCallback(() => { invalidateQueryCache(contextGraphId); loadPage(); }, [contextGraphId, loadPage]);
+  useMemoryGraphEvents(contextGraphId, loadPage, { layers: [layer] });
   const [busy, setBusy] = useState<string | null>(null);
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -580,7 +591,9 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
     );
   }
 
-  if (!assertions?.length) {
+  if (loadError) return <div role="alert" style={scrollRootStyle}>Could not load assertions: {loadError} <button onClick={refresh}>Retry</button></div>;
+
+  if (!assertions.length && !page?.nextCursor && pageIndex === 0) {
     return (
       <div className="v10-layer-empty-shell" style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
         <EmptyState
@@ -598,7 +611,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
   }
 
   const actionLabel = layer === 'wm' ? 'Share Complete KA → Shared' : 'Publish to VM';
-  const actionAllLabel = layer === 'wm' ? 'Share Complete KAs → Shared' : 'Publish all to Verifiable Memory';
+  const actionAllLabel = layer === 'wm' ? 'Share all complete KAs → Shared' : 'Publish all to Verifiable Memory';
   const bulkVisibleAssertionCount = assertions.filter(
     assertion => assertion.subGraph !== 'meta' || !assertion.name.startsWith('query-catalog-'),
   ).length;
@@ -606,10 +619,11 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
   return (
     <div style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
       <div style={{ padding: '8px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid var(--border-subtle)' }}>
-        <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{assertions.length} assertion{assertions.length !== 1 ? 's' : ''}</span>
+        <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>Page {pageIndex + 1} · {assertions.length} assertion{assertions.length !== 1 ? 's' : ''}</span>
         {bulkVisibleAssertionCount > 0 && (
           <button
             className={`v10-layer-expand-footer-btn ${layer === 'wm' ? 'promote' : 'publish'}`}
+            title="Applies to all assertions in this layer across every page. Query catalog assertions are excluded."
             disabled={busy !== null}
             onClick={handlePromoteAll}
             style={{ opacity: busy === '__all__' ? 0.5 : 1 }}
@@ -639,17 +653,17 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
           <span className="v10-item-icon">▤</span>
           <div className="v10-item-info">
             <div className="v10-item-name" style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{a.name}</div>
-            {ualMap?.[a.name] && (
+            {a.reservedUal && (
               <div
                 className="v10-item-ual"
                 style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-tertiary)', opacity: 0.7, wordBreak: 'break-all', marginTop: 1 }}
-                title={ualMap[a.name]}
+                title={a.reservedUal}
               >
-                {ualMap[a.name]}
+                {a.reservedUal}
               </div>
             )}
             <div className="v10-item-meta-row">
-              {a.tripleCount != null && <span className="v10-item-count">{a.tripleCount} triples</span>}
+              {(a.tripleCount ?? counts[a.graphUri]) != null && <span className="v10-item-count">{a.tripleCount ?? counts[a.graphUri]} triples</span>}
               {a.subGraph && (
                 <span
                   className="v10-item-count v10-item-subgraph"
@@ -671,6 +685,13 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
           </button>
         </div>
       ))}
+      <nav aria-label="Assertion pages" style={{ display: 'flex', gap: 12, padding: 16 }}>
+        <button disabled={pageIndex === 0 || busy !== null} onClick={() => setPaging({ scope, cursors, index: pageIndex - 1 })}>Previous assertions</button>
+        <button disabled={!page?.nextCursor || busy !== null} onClick={() => {
+          setPaging({ scope, cursors: [...cursors.slice(0, pageIndex + 1), page!.nextCursor], index: pageIndex + 1 });
+        }}>Next assertions</button>
+        <button disabled={busy !== null} onClick={refresh}>Refresh assertions</button>
+      </nav>
     </div>
   );
 }

@@ -448,7 +448,7 @@ describe('useMemoryEntities hook', () => {
 
   it('subscribes to memory_graph_changed events for live graph refreshes', () => {
     expect(nodeEventsHook).toContain("'memory_graph_changed'");
-    expect(hook).toContain('useMemoryGraphEvents(contextGraphId, fetchAll)');
+    expect(hook).toContain('useMemoryGraphEvents(contextGraphId, () => { void fetchAll(false); })');
   });
 });
 

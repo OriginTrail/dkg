@@ -1,4 +1,5 @@
 import { randomUUID } from './lib/randomUUID.js';
+import { ReadCache, UI_READ_MAX_AGE_MS } from './lib/read-cache.js';
 import {
   BASE,
   authHeaders,
@@ -362,12 +363,27 @@ export const fetchNodeLog = (params: { lines?: number; q?: string } = {}) => {
 
 // --- Context graphs (V10) — legacy daemon paths keep working server-side redirects.
 export async function fetchContextGraphs(): Promise<{ contextGraphs: any[] }> {
-  const data = await getWithTimeout<{ contextGraphs?: any[] }>(
+  const session = JSON.stringify(authHeaders());
+  if (session !== querySession) { invalidateQueryCache(); querySession = session; }
+  const key = JSON.stringify([session, graphListGeneration]);
+  const cached = graphListCache.get(key, UI_READ_MAX_AGE_MS);
+  if (cached) return cached;
+  if (graphListRequest?.key === key) return graphListRequest.promise;
+  const generation = graphListGeneration;
+  const promise = getWithTimeout<{ contextGraphs?: any[] }>(
     '/api/context-graph/list',
     CONTEXT_GRAPH_LOAD_TIMEOUT_MS,
-  );
-  const list = data.contextGraphs ?? [];
-  return { contextGraphs: list.filter((p: any) => !p.isSystem) };
+  ).then(data => {
+    if (session !== JSON.stringify(authHeaders())) throw new HttpError(401, 'The session changed while loading data.');
+    const result = { contextGraphs: (data.contextGraphs ?? []).filter((p: any) => !p.isSystem) };
+    if (generation === graphListGeneration && session === JSON.stringify(authHeaders())) graphListCache.set(key, result);
+    return result;
+  }).catch(error => {
+    if (error instanceof HttpError && (error.status === 401 || error.status === 403)) invalidateQueryCache();
+    throw error;
+  }).finally(() => { if (graphListRequest?.promise === promise) graphListRequest = null; });
+  graphListRequest = { key, promise };
+  return promise;
 }
 
 // --- Agent Identity ---
@@ -416,7 +432,9 @@ export async function createContextGraph(
       const errBody = await res.json().catch(() => ({}));
       throw new Error((errBody as { error?: string })?.error ?? `HTTP ${res.status}`);
     }
-    return res.json() as Promise<{ created: string; uri: string; registered?: boolean; onChainId?: string; registerError?: string }>;
+    const result = await res.json() as { created: string; uri: string; registered?: boolean; onChainId?: string; registerError?: string };
+    invalidateQueryCache(id);
+    return result;
   } catch (err: any) {
     if (err.name === 'AbortError') {
       throw new Error('Creating project is taking longer than expected — it may still complete in the background. Refresh the page in a moment.');
@@ -748,25 +766,71 @@ export function normalizeQueryExecutionResponse(
 }
 
 const inflightQuery = new Map<string, Promise<QueryExecutionResponse>>();
+const graphListCache = new ReadCache<{ contextGraphs: any[] }>(2 * 1024 * 1024, 1);
+let graphListGeneration = 0;
+let graphListRequest: { key: string; promise: Promise<{ contextGraphs: any[] }> } | null = null;
+const queryReadCache = new ReadCache<QueryExecutionResponse>();
+const queryGenerations = new Map<string, number>();
+let querySession = '';
+let queryGeneration = 0;
 
-export function postQueryDeduped(body: Record<string, unknown>): Promise<QueryExecutionResponse> {
-  const key = JSON.stringify(body);
+export function invalidateQueryCache(contextGraphId?: string): void {
+  graphListCache.invalidate();
+  graphListGeneration++;
+  queryReadCache.invalidate(contextGraphId);
+  if (contextGraphId) {
+    if (!queryGenerations.has(contextGraphId) && queryGenerations.size >= 128) invalidateQueryCache();
+    queryGenerations.set(contextGraphId, (queryGenerations.get(contextGraphId) ?? 0) + 1);
+  }
+  else {
+    queryGeneration++;
+    queryGenerations.clear();
+    inflightQuery.clear();
+  }
+}
+
+export interface QueryReadOptions { maxAgeMs?: number; }
+
+export function postQueryDeduped(body: Record<string, unknown>, read: QueryReadOptions = {}): Promise<QueryExecutionResponse> {
+  const headers = authHeaders();
+  const session = JSON.stringify(headers);
+  if (session !== querySession) {
+    invalidateQueryCache();
+    querySession = session;
+  }
+  const scope = String(body.contextGraphId ?? '');
+  const generation = queryGenerations.get(scope) ?? 0;
+  const globalGeneration = queryGeneration;
+  const requestBody = JSON.stringify(body);
+  const key = JSON.stringify([session, globalGeneration, generation, requestBody]);
+  const maxAgeMs = read.maxAgeMs ?? 0;
+  const operation = classifySparqlOperation(String(body.sparql ?? '')).kind;
+  const cacheable = maxAgeMs > 0 && operation === 'read';
+  const cached = cacheable ? queryReadCache.get(key, maxAgeMs) : undefined;
+  if (cached) return Promise.resolve(cached);
   const existing = inflightQuery.get(key);
   if (existing) return existing;
   const promise = (async () => {
-    const res = await fetch(`${BASE}/api/query`, {
+    const res = await fetchWithTimeout(`${BASE}/api/query`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: key,
-    });
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: requestBody,
+    }, 60_000);
     if (!res.ok) {
+      if (res.status === 401 || res.status === 403) invalidateQueryCache();
       const errBody = await res.json().catch(() => ({}));
       const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
       throw new HttpError(res.status, msg, errBody);
     }
-    return normalizeQueryExecutionResponse(await res.json(), String(body.sparql ?? ''));
+    const result = normalizeQueryExecutionResponse(await res.json(), String(body.sparql ?? ''));
+    if (session !== JSON.stringify(authHeaders())) throw new HttpError(401, 'The session changed while loading data.');
+    if (operation !== 'read') invalidateQueryCache(scope || undefined);
+    if (cacheable && session === querySession && globalGeneration === queryGeneration && generation === (queryGenerations.get(scope) ?? 0)) {
+      queryReadCache.set(key, result, scope);
+    }
+    return result;
   })().finally(() => {
-    inflightQuery.delete(key);
+    if (inflightQuery.get(key) === promise) inflightQuery.delete(key);
   });
   inflightQuery.set(key, promise);
   return promise;
@@ -787,8 +851,9 @@ export interface QueryExecutionOptions {
 export const executeQuery = (
   sparql: string,
   options: QueryExecutionOptions = {},
+  read: QueryReadOptions = {},
 ) =>
-  postQueryDeduped({ sparql, ...options });
+  postQueryDeduped({ sparql, ...options }, read);
 
 /**
  * Map of assertion name → deterministic Option-1 UAL (`dkg:reservedUal`,

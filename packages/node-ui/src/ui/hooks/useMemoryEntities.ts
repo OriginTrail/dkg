@@ -1,8 +1,10 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { postQueryDeduped } from '../api.js';
+import { postQueryDeduped, invalidateQueryCache } from '../api.js';
+import { UI_READ_MAX_AGE_MS } from '../lib/read-cache.js';
 import { useMemoryGraphEvents } from './useNodeEvents.js';
 import { MEMORY_LABEL_PREDICATES } from '../lib/memoryLabels.js';
 import { decodeRdfStringLiteral } from '../../rdf-literal.js';
+import { sparqlIri } from '@origintrail-official/dkg-core/sparql-safe';
 
 export type TrustLevel = 'working' | 'shared' | 'verified';
 export type MemoryLayerKey = 'wm' | 'swm' | 'vm';
@@ -77,6 +79,9 @@ export interface MemoryData {
   /** Per-layer query status so UI can distinguish a VM miss from WM/SWM failures. */
   layerStatus: Record<MemoryLayerKey, MemoryLayerStatus>;
   refresh: () => void;
+  hasMore?: boolean;
+  loadMore?: () => void;
+  pageError?: string | null;
 }
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
@@ -87,6 +92,19 @@ function bv(v: unknown): string | undefined {
   if (typeof v === 'string') return v;
   if (typeof v === 'object' && 'value' in (v as any)) return String((v as any).value);
   return String(v);
+}
+
+export function rdfBindingValue(term: unknown): string | undefined {
+  if (!term || typeof term !== 'object') return bv(term);
+  const binding = term as { type?: string; value?: string; datatype?: string; 'xml:lang'?: string };
+  if (binding.type === 'bnode') return `_:${String(binding.value).replace(/^_:/, '')}`;
+  if (binding.type === 'literal' || binding.type === 'typed-literal') {
+    const text = JSON.stringify(binding.value ?? '');
+    if (binding['xml:lang']) return `${text}@${binding['xml:lang']}`;
+    if (binding.datatype) return `${text}^^<${binding.datatype}>`;
+    return text;
+  }
+  return bv(term);
 }
 
 function isUri(s: string): boolean {
@@ -217,12 +235,11 @@ function deriveEntityLabel(entity: MemoryEntity): string {
 // We treat it as VM, not WM. Pre-publish writes only exist in
 // `assertion/<addr>/<name>` graphs.
 //
-// 50k triples comfortably fits realistic PoC projects in full (our
-// seeded `dkg-code-project` WM has ~28k); SWM/VM stay smaller by
-// design (hundreds of triples each).
-const WM_LIMIT = 50_000;
-const SWM_LIMIT = 20_000;
-const VM_LIMIT = 20_000;
+// Bounded pages replace a silent result cutoff. Counts remain lower bounds
+// until the user has loaded every page and all requested layers succeeded.
+const WM_LIMIT = 5_000;
+const SWM_LIMIT = 5_000;
+const VM_LIMIT = 5_000;
 
 function queryCatalogLayerSparql(cgId: string, layer: 'wm' | 'swm'): string {
   const cgUri = `did:dkg:context-graph:${cgId}`;
@@ -357,7 +374,7 @@ export function subGraphOf(gUri: string, cgId: string): string | undefined {
   return seg;
 }
 
-interface LayerResult { triples: Triple[]; ok: boolean; truncated: boolean }
+interface LayerResult { triples: Triple[]; ok: boolean; truncated: boolean; rowCount: number }
 
 interface QueryLayerOptions {
   view?: string;
@@ -366,6 +383,7 @@ interface QueryLayerOptions {
   includeContextGraphPartitions?: boolean;
   /** Local-only result limit used to detect lower-bound totals; never sent to /api/query. */
   layerLimit?: number;
+  offset?: number;
 }
 
 const LOADING_LAYER_STATUS: Record<MemoryLayerKey, MemoryLayerStatus> = {
@@ -398,25 +416,26 @@ async function queryLayer(
     // here coalesces with any other concurrently-mounted instance of
     // this hook (e.g. Dashboard card + ProjectView both subscribed to
     // the same CG). One underlying fetch instead of N for each layer.
-    const { layerLimit, ...requestOpts } = opts ?? {};
-    const body: any = { sparql, contextGraphId, ...requestOpts };
-    const data: any = await postQueryDeduped(body);
-    const bindings = data?.result?.bindings ?? data?.results?.bindings ?? [];
+    const { layerLimit = WM_LIMIT, offset = 0, ...requestOpts } = opts ?? {};
+    const ordered = sparql.replace(/\s+LIMIT\s+\d+\s*$/i, '');
+    const body = { sparql: `${ordered} ORDER BY ?g ?s ?p ?o LIMIT ${layerLimit} OFFSET ${offset}`, contextGraphId, ...requestOpts };
+    const data = await postQueryDeduped(body, { maxAgeMs: UI_READ_MAX_AGE_MS });
+    const bindings = data?.result?.bindings ?? [];
     const truncated = typeof layerLimit === 'number' && bindings.length >= layerLimit;
     const triples = bindings
       .map((row: any) => {
         const g = bv(row.g);
         return {
-          subject: bv(row.s) ?? '',
+          subject: rdfBindingValue(row.s) ?? '',
           predicate: bv(row.p) ?? '',
-          object: bv(row.o) ?? '',
+          object: rdfBindingValue(row.o) ?? '',
           subGraph: g ? subGraphOf(g, contextGraphId) : undefined,
         };
       })
       .filter((t: Triple) => t.subject && t.predicate && t.object);
-    return { triples, ok: true, truncated };
+    return { triples, ok: true, truncated, rowCount: bindings.length };
   } catch {
-    return { triples: [], ok: false, truncated: false };
+    return { triples: [], ok: false, truncated: false, rowCount: 0 };
   }
 }
 
@@ -625,6 +644,37 @@ export function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntit
 
 export const buildMemoryEntities = buildEntities;
 
+/** Read a clicked resource directly, even when its facts fall outside the loaded graph pages. */
+export async function fetchMemoryEntity(
+  contextGraphId: string,
+  uri: string,
+  layer?: MemoryLayerKey,
+  includeQueryCatalog = false,
+): Promise<{ triples: LayeredTriple[]; partial: boolean }> {
+  const target = canonicalEntityUri(uri);
+  const match = target.startsWith('_:')
+    ? `((isBlank(?s) && STR(?s) = ${JSON.stringify(target.slice(2))}) || (isBlank(?o) && STR(?o) = ${JSON.stringify(target.slice(2))}))`
+    : `(?s = ${sparqlIri(target)} || ?o = ${sparqlIri(target)})`;
+  const definitions = [
+    { key: 'wm', sparql: wmSparql(contextGraphId), layer: 'working' as const },
+    { key: 'swm', sparql: swmSparql(contextGraphId), layer: 'shared' as const },
+    { key: 'vm', sparql: vmSparql(contextGraphId), layer: 'verified' as const },
+    ...(includeQueryCatalog ? [
+      { key: 'wm', sparql: queryCatalogLayerSparql(contextGraphId, 'wm'), layer: 'working' as const },
+      { key: 'swm', sparql: queryCatalogLayerSparql(contextGraphId, 'swm'), layer: 'shared' as const },
+    ] : []),
+  ].filter(definition => !layer || definition.key === layer);
+  const results = await Promise.all(definitions.map(definition => queryLayer(
+    definition.sparql.replace(/}\s+LIMIT\s+\d+\s*$/i, `FILTER(${match}) }`),
+    contextGraphId, { includeContextGraphPartitions: true, layerLimit: 1_000 },
+  )));
+  if (results.some(result => !result.ok)) throw new Error('Could not load all resource details. Retry to refresh this resource.');
+  return {
+    triples: results.flatMap((result, index) => result.triples.map(triple => ({ ...triple, layer: definitions[index].layer }))),
+    partial: results.some(result => result.truncated),
+  };
+}
+
 /**
  * Canonical "first-class entity" predicate — an entity belongs in the
  * Entities tab list (and therefore the graph node set) iff it has at
@@ -651,6 +701,7 @@ export function useMemoryEntities(
   const signalErrors = opts?.signalErrors ?? false;
   const includeQueryCatalog = opts?.includeQueryCatalog ?? false;
   const [layeredTriples, setLayeredTriples] = useState<LayeredTriple[]>([]);
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [partial, setPartial] = useState(false);
@@ -659,83 +710,111 @@ export function useMemoryEntities(
   );
   const versionRef = useRef(0);
 
-  const fetchAll = useCallback(async () => {
-    if (!contextGraphId) return;
+  const [hasMore, setHasMore] = useState(false);
+  const [pageError, setPageError] = useState<string | null>(null);
+  const activeRef = useRef(true);
+  const requestRef = useRef<{ key: string; promise: Promise<void>; again: boolean } | null>(null);
+  const pagesRef = useRef<Array<{ sparql: string; layer: TrustLevel; offset: number; result: LayerResult }>>([]);
+  const key = JSON.stringify([contextGraphId, includeQueryCatalog, signalErrors]);
+
+  const fetchAll = useCallback((force = false): Promise<void> => {
+    if (!contextGraphId) return Promise.resolve();
+    if (force) invalidateQueryCache(contextGraphId);
+    const running = requestRef.current;
+    if (running?.key === key) {
+      running.again = true;
+      return running.promise;
+    }
     const version = ++versionRef.current;
     setLoading(true);
     setError(null);
-    setPartial(false);
+    setPageError(null);
     setLayerStatus(LOADING_LAYER_STATUS);
-
-    try {
-      // queryLayer never throws — it returns { triples, ok }. We keep
-      // whatever layers succeeded (failed layers contribute []), so a
-      // single-layer 500 never blanks the others for any consumer.
-      const countScope = { includeContextGraphPartitions: true };
-      const emptyCatalogLayer: LayerResult = { triples: [], ok: true, truncated: false };
-      const [wmR, swmR, vmR, catalogWmR, catalogSwmR] = await Promise.all([
-        queryLayer(wmSparql(contextGraphId), contextGraphId, { ...countScope, layerLimit: WM_LIMIT }),
-        queryLayer(swmSparql(contextGraphId), contextGraphId, { ...countScope, layerLimit: SWM_LIMIT }),
-        queryLayer(vmSparql(contextGraphId), contextGraphId, { ...countScope, layerLimit: VM_LIMIT }),
-        includeQueryCatalog
-          ? queryLayer(queryCatalogLayerSparql(contextGraphId, 'wm'), contextGraphId, { ...countScope, layerLimit: SWM_LIMIT })
-          : Promise.resolve(emptyCatalogLayer),
-        includeQueryCatalog
-          ? queryLayer(queryCatalogLayerSparql(contextGraphId, 'swm'), contextGraphId, { ...countScope, layerLimit: SWM_LIMIT })
-          : Promise.resolve(emptyCatalogLayer),
-      ]);
-
-      if (version !== versionRef.current) return;
-
-      const all: LayeredTriple[] = [
-        ...wmR.triples.map(t => ({ ...t, layer: 'working' as const })),
-        ...catalogWmR.triples.map(t => ({ ...t, layer: 'working' as const })),
-        ...swmR.triples.map(t => ({ ...t, layer: 'shared' as const })),
-        ...catalogSwmR.triples.map(t => ({ ...t, layer: 'shared' as const })),
-        ...vmR.triples.map(t => ({ ...t, layer: 'verified' as const })),
-      ];
-
-      const wmOk = wmR.ok && catalogWmR.ok;
-      const swmOk = swmR.ok && catalogSwmR.ok;
-
-      setLayeredTriples(all);
-      setLayerStatus({
-        wm: wmOk ? 'ok' : 'error',
-        swm: swmOk ? 'ok' : 'error',
-        vm: vmR.ok ? 'ok' : 'error',
-      });
-      const layerResults = [
-        { ok: wmOk, truncated: wmR.truncated || catalogWmR.truncated },
-        { ok: swmOk, truncated: swmR.truncated || catalogSwmR.truncated },
-        vmR,
-      ];
-      const failed = layerResults.filter(r => !r.ok).length;
-      const clipped = layerResults.some(r => r.truncated);
-      // `partial` is computed UNCONDITIONALLY for every caller — it was
-      // previously dead unless a caller opted in, making truncated
-      // counts look exact in MemoryStackView/ProjectView (Codex).
-      // With same-CG partition scans, a successful layer can also hit
-      // its fixed LIMIT; those counts are lower bounds, not exact totals.
-      // Whether a *total* failure also escalates to a hard `error`
-      // (dashboard assetCount fallback / views' error screen) stays the
-      // configurable part via `signalErrors`.
-      setPartial((failed > 0 && failed < 3) || clipped);
+    const entry = { key, promise: Promise.resolve(), again: false };
+    const definitions: Array<{ sparql: string; layer: TrustLevel }> = [
+      { sparql: wmSparql(contextGraphId), layer: 'working' },
+      { sparql: swmSparql(contextGraphId), layer: 'shared' },
+      { sparql: vmSparql(contextGraphId), layer: 'verified' },
+      ...(includeQueryCatalog ? [
+        { sparql: queryCatalogLayerSparql(contextGraphId, 'wm'), layer: 'working' as const },
+        { sparql: queryCatalogLayerSparql(contextGraphId, 'swm'), layer: 'shared' as const },
+      ] : []),
+    ];
+    entry.promise = (async () => {
+      const results = await Promise.all(definitions.map(definition => queryLayer(
+        definition.sparql, contextGraphId, { includeContextGraphPartitions: true, layerLimit: WM_LIMIT },
+      )));
+      if (version !== versionRef.current || !activeRef.current) return;
+      pagesRef.current = definitions.map((definition, index) => ({ ...definition, result: results[index], offset: results[index].rowCount }));
+      const triples = pagesRef.current.flatMap(page => page.result.triples.map(triple => ({ ...triple, layer: page.layer })));
+      setLayeredTriples(triples);
+      setLoadedKey(key);
+      const status = (layer: TrustLevel): MemoryLayerStatus => pagesRef.current.filter(page => page.layer === layer).every(page => page.result.ok) ? 'ok' : 'error';
+      const statuses = { wm: status('working'), swm: status('shared'), vm: status('verified') };
+      const failed = Object.values(statuses).filter(value => value === 'error').length;
+      const more = results.some(result => result.truncated);
+      setLayerStatus(statuses);
+      setHasMore(more);
+      setPartial(failed > 0 || more);
       setError(signalErrors && failed === 3 ? 'Failed to load memory data' : null);
-    } catch (err: any) {
-      if (version === versionRef.current) {
-        setError(err.message ?? 'Failed to load memory data');
-        setLayerStatus(ERROR_LAYER_STATUS);
+    })().finally(() => {
+      if (version === versionRef.current && activeRef.current) setLoading(false);
+      if (requestRef.current !== entry) return;
+      requestRef.current = null;
+      if (entry.again && activeRef.current) void fetchAll(false);
+    });
+    requestRef.current = entry;
+    return entry.promise;
+  }, [contextGraphId, includeQueryCatalog, signalErrors, key]);
+
+  const loadMore = useCallback((): Promise<void> => {
+    if (requestRef.current) return requestRef.current.promise;
+    const pages = pagesRef.current.filter(page => page.result.truncated);
+    if (!pages.length) return Promise.resolve();
+    const version = ++versionRef.current;
+    const entry = { key, promise: Promise.resolve(), again: false };
+    setLoading(true);
+    setPageError(null);
+    entry.promise = (async () => {
+      const results = await Promise.all(pages.map(page => queryLayer(page.sparql, contextGraphId, {
+        includeContextGraphPartitions: true, layerLimit: WM_LIMIT, offset: page.offset,
+      })));
+      if (version !== versionRef.current || !activeRef.current) return;
+      const added: LayeredTriple[] = [];
+      for (const [index, result] of results.entries()) {
+        if (!result.ok) { setPageError('Could not load more graph data. Retry to continue from the last loaded page.'); continue; }
+        pages[index].offset += result.rowCount;
+        pages[index].result = result;
+        added.push(...result.triples.map(triple => ({ ...triple, layer: pages[index].layer })));
       }
-    } finally {
-      if (version === versionRef.current) setLoading(false);
-    }
-  }, [contextGraphId, includeQueryCatalog, signalErrors]);
+      setLayeredTriples(previous => [...previous, ...added]);
+      const more = pagesRef.current.some(page => page.result.truncated);
+      setHasMore(more);
+      setPartial(more || pagesRef.current.some(page => !page.result.ok));
+    })().finally(() => {
+      if (version === versionRef.current && activeRef.current) setLoading(false);
+      if (requestRef.current !== entry) return;
+      requestRef.current = null;
+      if (entry.again && activeRef.current) void fetchAll(false);
+    });
+    requestRef.current = entry;
+    return entry.promise;
+  }, [contextGraphId, key, fetchAll]);
 
-  useMemoryGraphEvents(contextGraphId, fetchAll);
+  useMemoryGraphEvents(contextGraphId, () => { void fetchAll(false); });
+  useEffect(() => {
+    activeRef.current = true;
+    void fetchAll(false);
+    return () => {
+      activeRef.current = false;
+      versionRef.current++;
+      requestRef.current = null;
+      pagesRef.current = [];
+    };
+  }, [fetchAll]);
 
-  useEffect(() => { fetchAll(); }, [fetchAll]);
-
-  const entities = useMemo(() => buildMemoryEntities(layeredTriples), [layeredTriples]);
+  const visibleTriples = useMemo(() => loadedKey === key ? layeredTriples : [], [loadedKey, key, layeredTriples]);
+  const entities = useMemo(() => buildMemoryEntities(visibleTriples), [visibleTriples]);
 
   const entityList = useMemo(() =>
     [...entities.values()]
@@ -754,13 +833,13 @@ export function useMemoryEntities(
 
   const graphTriples = useMemo(() => {
     const seen = new Set<string>();
-    return layeredTriples.filter(t => {
+    return visibleTriples.filter(t => {
       const key = `${t.subject}|${t.predicate}|${t.object}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
     }).map(({ subject, predicate, object, subGraph }) => ({ subject, predicate, object, subGraph }));
-  }, [layeredTriples]);
+  }, [visibleTriples]);
 
   const trustMap = useMemo(() => {
     const m = new Map<string, TrustLevel>();
@@ -778,17 +857,22 @@ export function useMemoryEntities(
     return { wm, swm, vm, total: entityList.length };
   }, [entityList]);
 
+  const refresh = useCallback(() => { void fetchAll(true); }, [fetchAll]);
+  const nextPage = useCallback(() => { void loadMore(); }, [loadMore]);
   return {
     entities,
     entityList,
-    allTriples: layeredTriples,
+    allTriples: visibleTriples,
     graphTriples,
     trustMap,
     counts,
-    loading,
+    loading: loading || loadedKey !== key,
     error,
     partial,
     layerStatus,
-    refresh: fetchAll,
+    refresh,
+    hasMore: loadedKey === key && hasMore,
+    loadMore: nextPage,
+    pageError,
   };
 }

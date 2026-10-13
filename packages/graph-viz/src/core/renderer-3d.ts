@@ -23,6 +23,12 @@ import type { GraphEventEmitter } from './events.js';
 export class WebGL3DRenderer implements RendererBackend {
   private _container: HTMLElement;
   private _graph: any = null;
+  private _destroyed = false;
+  private _initializing: Promise<void> | null = null;
+  private _fadeFrame: number | null = null;
+  private _iconMaterials = new Set<any>();
+  private _iconSprites = new Map<string, { url: string; sprite: any }>();
+  private _svgImages = new Set<HTMLImageElement>();
   private _hexPainter: HexagonPainter;
   private _styleEngine: StyleEngine;
   private _events: GraphEventEmitter;
@@ -77,13 +83,19 @@ export class WebGL3DRenderer implements RendererBackend {
   }
 
   async init(): Promise<void> {
-    if (this._graph) return;
+    if (this._destroyed || this._graph) return;
+    if (!this._initializing) this._initializing = this._initialize();
+    await this._initializing;
+  }
+
+  private async _initialize(): Promise<void> {
 
     const [ForceGraph3DModule, THREE] = await Promise.all([
       import('3d-force-graph'),
       import('three'),
     ]);
 
+    if (this._destroyed) return;
     this._ForceGraph3D = ForceGraph3DModule.default ?? ForceGraph3DModule;
     this._THREE = THREE;
     this._textureLoader = new THREE.TextureLoader();
@@ -184,6 +196,7 @@ export class WebGL3DRenderer implements RendererBackend {
     edges: Map<string, GraphEdge>,
     collapsedNodeIds?: Set<string>
   ): void {
+    if (this._destroyed) return;
     if (!this._graph) {
       this.init().then(() => this.render(nodes, edges, collapsedNodeIds));
       return;
@@ -196,17 +209,18 @@ export class WebGL3DRenderer implements RendererBackend {
         this._graph.nodeOpacity(0.05);
         // Animate fade-in
         const fadeIn = () => {
+          if (this._destroyed || !this._graph) return;
           const elapsed = performance.now() - this._loadTime;
           if (elapsed < 1500) {
             const t = elapsed / 1500;
             const ease = 1 - Math.pow(1 - t, 3);
             this._graph.nodeOpacity(ease * 0.85);
-            requestAnimationFrame(fadeIn);
+            this._fadeFrame = requestAnimationFrame(fadeIn);
           } else {
             this._graph.nodeOpacity(0.85);
           }
         };
-        requestAnimationFrame(fadeIn);
+        this._fadeFrame = requestAnimationFrame(fadeIn);
       }
     }
 
@@ -262,6 +276,28 @@ export class WebGL3DRenderer implements RendererBackend {
       });
     }
     this._positionCache = freshCache;
+    const usedTextures = new Set<string>();
+    for (const node of newNodes.values()) {
+      if (node._graphNode?.imageUrl) usedTextures.add(node._graphNode.imageUrl);
+    }
+    for (const [id, icon] of this._iconSprites) {
+      if (newNodes.get(id)?._graphNode?.imageUrl === icon.url) continue;
+      icon.sprite.parent?.remove(icon.sprite);
+      icon.sprite.material.dispose();
+      this._iconMaterials.delete(icon.sprite.material);
+      this._iconSprites.delete(id);
+    }
+    for (const [url, texture] of this._textureCache) {
+      if (usedTextures.has(url)) continue;
+      texture.dispose();
+      this._textureCache.delete(url);
+    }
+    for (const image of this._svgImages) {
+      if (usedTextures.has(image.src)) continue;
+      image.onload = null;
+      this._svgImages.delete(image);
+    }
+    for (const sprite of this._labelSprites.values()) this._disposeLabel(sprite);
     this._labelSprites.clear();
 
     this._graph.graphData({
@@ -311,6 +347,17 @@ export class WebGL3DRenderer implements RendererBackend {
   }
 
   destroy(): void {
+    if (this._destroyed) return;
+    this._destroyed = true;
+    if (this._fadeFrame !== null) cancelAnimationFrame(this._fadeFrame);
+    this._fadeFrame = null;
+    for (const image of this._svgImages) image.onload = null;
+    this._svgImages.clear();
+    for (const sprite of this._labelSprites.values()) this._disposeLabel(sprite);
+    for (const texture of this._textureCache.values()) texture.dispose();
+    for (const material of this._iconMaterials) material.dispose();
+    this._iconMaterials.clear();
+    this._iconSprites.clear();
     if (this._labelTimer) {
       clearInterval(this._labelTimer);
       this._labelTimer = null;
@@ -344,9 +391,16 @@ export class WebGL3DRenderer implements RendererBackend {
     const radius = this._hexPainter.getRadius(node);
     const size = Math.max(radius * 2.5, 6);
     const url = node.imageUrl;
+    const cached = this._iconSprites.get(node.id);
+    if (cached?.url === url) {
+      cached.sprite.scale.set(size, size, 1);
+      return cached.sprite;
+    }
 
     if (url.startsWith('data:image/svg+xml')) {
-      return this._createSvgSprite(url, size, node);
+      const sprite = this._createSvgSprite(url, size, node);
+      this._iconSprites.set(node.id, { url, sprite });
+      return sprite;
     }
 
     let texture = this._textureCache.get(url);
@@ -357,8 +411,10 @@ export class WebGL3DRenderer implements RendererBackend {
     }
 
     const mat = new THREE.SpriteMaterial({ map: texture, transparent: true, opacity: 0.9 });
+    this._iconMaterials.add(mat);
     const sprite = new THREE.Sprite(mat);
     sprite.scale.set(size, size, 1);
+    this._iconSprites.set(node.id, { url, sprite });
     return sprite;
   }
 
@@ -368,6 +424,7 @@ export class WebGL3DRenderer implements RendererBackend {
     let texture = this._textureCache.get(dataUri);
     if (texture) {
       const mat = new THREE.SpriteMaterial({ map: texture, transparent: true });
+      this._iconMaterials.add(mat);
       const sprite = new THREE.Sprite(mat);
       sprite.scale.set(size, size, 1);
       return sprite;
@@ -386,7 +443,10 @@ export class WebGL3DRenderer implements RendererBackend {
     ctx.fill();
 
     const img = new Image();
+    this._svgImages.add(img);
     img.onload = () => {
+      this._svgImages.delete(img);
+      if (this._destroyed) return;
       const pad = res * 0.2;
       ctx.drawImage(img, pad, pad, res - pad * 2, res - pad * 2);
       texture.needsUpdate = true;
@@ -397,6 +457,7 @@ export class WebGL3DRenderer implements RendererBackend {
     this._textureCache.set(dataUri, texture);
 
     const mat = new THREE.SpriteMaterial({ map: texture, transparent: true });
+    this._iconMaterials.add(mat);
     const sprite = new THREE.Sprite(mat);
     sprite.scale.set(size, size, 1);
     return sprite;
@@ -455,9 +516,7 @@ export class WebGL3DRenderer implements RendererBackend {
     // Remove labels no longer visible
     for (const [id, sprite] of this._labelSprites) {
       if (!showSet.has(id)) {
-        sprite.parent?.remove(sprite);
-        sprite.material.map?.dispose();
-        sprite.material.dispose();
+        this._disposeLabel(sprite);
         this._labelSprites.delete(id);
       }
     }
@@ -492,8 +551,14 @@ export class WebGL3DRenderer implements RendererBackend {
         sprite.position.set(0, -radius - 2, 0);
         nodeObj.add(sprite);
         this._labelSprites.set(id, sprite);
-      }
+      } else this._disposeLabel(sprite);
     }
+  }
+
+  private _disposeLabel(sprite: any): void {
+    sprite.parent?.remove(sprite);
+    sprite.material.map?.dispose();
+    sprite.material.dispose();
   }
 
   private _createLabelSprite(text: string): any {
@@ -547,6 +612,7 @@ export class WebGL3DRenderer implements RendererBackend {
    * by periodically reheating the simulation with a very low alpha decay.
    */
   applyAnimation(config: AnimationConfig): void {
+    if (this._destroyed) return;
     if (!this._graph) return;
 
     // Animation flags

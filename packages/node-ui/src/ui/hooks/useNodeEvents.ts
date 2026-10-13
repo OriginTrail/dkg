@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { invalidateQueryCache } from '../api.js';
 
 export type MemoryGraphLayer = 'wm' | 'swm' | 'vm';
 
@@ -72,6 +73,10 @@ function connect() {
   const handleEvent = (type: NodeEventType) => (e: MessageEvent) => {
     let data: Record<string, unknown> = {};
     try { data = JSON.parse(e.data); } catch { /* empty payload is fine */ }
+    if (type === 'memory_graph_changed' && typeof data.contextGraphId === 'string') {
+      invalidateQueryCache(data.contextGraphId);
+    }
+    if (type === 'connected' || type === 'join_rejected' || type === 'join_approved' || type === 'project_synced') invalidateQueryCache();
     const event: NodeEvent = { type, data };
     for (const fn of listeners) {
       try { fn(event); } catch { /* never crash listeners */ }

@@ -468,14 +468,26 @@ export function LayerGraphPanel({
     if (!nodeColorsOverride) return swm;
     return { ...swm, ...nodeColorsOverride };
   }, [layer, swmAttr.nodeColors, nodeColorsOverride]);
-  const graphOptions = useMemo(
-    () => buildLayerGraphOptions(layer, mergedNodeColors),
-    [layer, mergedNodeColors],
-  );
   const { canvasTriples, singletonItems } = useMemo(
     () => splitGraphTriplesForShelf(renderTriples),
     [renderTriples],
   );
+  const loadedNodeCount = useMemo(() => {
+    const nodes = new Set<string>();
+    for (const triple of canvasTriples) {
+      nodes.add(graphNodeKey(triple.subject));
+      if (isResourceNode(triple.object)) nodes.add(graphNodeKey(triple.object));
+    }
+    return nodes.size;
+  }, [canvasTriples]);
+  const [expandedNodes, setExpandedNodes] = useState<string | null>(null);
+  const expansionScope = JSON.stringify([contextGraphId, layer, scopeLabel]);
+  const showAllLoadedNodes = expandedNodes === expansionScope;
+  const graphOptions = useMemo(() => {
+    const options = buildLayerGraphOptions(layer, mergedNodeColors);
+    if (showAllLoadedNodes) options.focus = { ...options.focus, maxNodes: Math.max(3000, loadedNodeCount) };
+    return options;
+  }, [layer, mergedNodeColors, showAllLoadedNodes, loadedNodeCount]);
 
   // Union `singletonItems` (URIs that are *subjects* of triples but have
   // no resource→resource edges) with any caller-supplied scope entity
@@ -508,8 +520,15 @@ export function LayerGraphPanel({
   const showGraphScopeLabel = trustLegendActiveLayer === null && Boolean(scopeLabel);
   const nodeLayerContext = trustLegendActiveLayer === null ? undefined : trustLegendActiveLayer ?? layer;
   const hasOverlay = (layer === 'vm' && anchors.length > 0) || (layer === 'swm' && swmAttr.palette.length > 0);
-  const overlay = hasOverlay ? (
+  const overlay = hasOverlay || loadedNodeCount > 3000 ? (
     <>
+      {loadedNodeCount > 3000 && <div className="v10-graph-legend" role="status">
+        <span>{showAllLoadedNodes ? `Showing all ${loadedNodeCount.toLocaleString()} loaded nodes.`
+          : 'This large graph shows one connected view of up to 3,000 nodes.'}</span>
+        <button onClick={() => setExpandedNodes(showAllLoadedNodes ? null : expansionScope)}>
+          {showAllLoadedNodes ? 'Use smaller graph view' : `Show all loaded nodes (${loadedNodeCount.toLocaleString()})`}
+        </button>
+      </div>}
       {layer === 'vm' && anchors.length > 0 && (
         <VerifiedGraphLegend anchors={anchors} />
       )}
@@ -583,7 +602,7 @@ export function LayerGraphPanel({
         canvasTriples.length > 0 ? (
           <Suspense fallback={<span className="v10-graph-placeholder">Loading graph...</span>}>
             <RdfGraph
-              key={`${graphKey}:${expanded ? 'expanded' : 'inline'}:${canvasTriples.length}`}
+              key={`${graphKey}:${expanded ? 'expanded' : 'inline'}:${canvasTriples.length}:${graphOptions.focus?.maxNodes}`}
               data={canvasTriples}
               format="triples"
               options={graphOptions}

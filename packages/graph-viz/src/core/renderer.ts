@@ -198,6 +198,13 @@ export class Canvas2DRenderer implements RendererBackend {
           this._events.emit('node:click', fn._graphNode);
         }
       })
+      .nodePointerAreaPaint((node: ForceNode, color: string, ctx: CanvasRenderingContext2D) => {
+        if (!node._graphNode || node.x === undefined || node.y === undefined) return;
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, this._hexPainter.getRadius(node._graphNode), 0, Math.PI * 2);
+        ctx.fill();
+      })
       .onNodeDrag((_node: any) => {
         try {
           this._graph.d3ReheatSimulation();

@@ -97,7 +97,13 @@ jobs:
             test/jpb-monitor-api.test.ts test/jpb-sources-page.test.ts \
             test/notifications-refresh.dom.test.ts test/use-shell-routing.test.ts \
             test/context-graph-query-catalog.test.ts test/subgraph-query-catalog.test.ts \
-            test/panel-right.component.test.ts test/program-editor.test.ts --maxWorkers=1
+            test/panel-right.component.test.ts test/program-editor.test.ts \
+            test/program-signer.test.ts test/layer-widgets-publish.test.ts \
+            test/assertions-page.test.ts test/ui-read-cache.test.ts test/memory-loading.test.ts \
+            test/context-graph-empty-stat-components.test.ts test/project-view-navigation.test.ts \
+            test/use-memory-entities-live-updates.test.ts test/use-memory-entities-partial.test.ts \
+            test/use-fetch-visibility.test.ts test/list-assertions.test.ts test/layer-graph-panel.test.ts --maxWorkers=1
+          pnpm --filter @origintrail-official/dkg-graph-viz exec vitest run
       - name: Build production DKG UI
         run: |
           pnpm --filter @origintrail-official/dkg-graph-viz exec tsc

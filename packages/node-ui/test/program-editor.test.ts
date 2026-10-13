@@ -36,6 +36,7 @@ function approval(program = uploaded, revision = 1) {
 async function settle() { await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); }); }
 async function render(props: Partial<ProgramEditorProps> = {}) {
   await act(async () => { root.render(React.createElement(ProgramEditor, { contextGraphId: 'school', onClose: vi.fn(), onSaved: vi.fn(), ...props })); });
+  await act(async () => { await vi.dynamicImportSettled(); });
   await settle();
 }
 function button(text: string) { return [...container.querySelectorAll('button')].find(b => b.textContent === text)!; }
