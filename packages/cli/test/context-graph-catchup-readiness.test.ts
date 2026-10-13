@@ -1106,6 +1106,71 @@ describe('catch-up terminal status through the bridge and worker', () => {
     expect(calls).toEqual({ durable: 0, selectedSharedMemory: 0, ordinarySharedMemory: 0 });
   });
 
+  it('asks every peer when the selection that activates the lane commits a moment after the walk starts', async () => {
+    // An Edge's first subscribe to a public graph whose definition arrived
+    // quickly. The graph's policy is accepted, so the selected lane is the
+    // graph's lane, but the selection that activates it is committed in the
+    // background a moment after the job has asked all its peers. Each call
+    // used to answer "not attempted": the job ended on a walk that had asked
+    // nobody, and nothing ran it again, so the graph never became synced.
+    const selectedLane: { lane: 'selected-public' | null; active: boolean } = {
+      lane: 'selected-public',
+      active: false,
+    };
+    let commit: ReturnType<typeof setTimeout> | undefined;
+    const { agent, calls } = nodeAgent({
+      isPrivate: false,
+      legacySyncAllowed: false,
+      selectedLane,
+      // The first probe is where the walk starts; the commit follows it.
+      onProbe: () => {
+        commit ??= setTimeout(() => { selectedLane.active = true; }, 80);
+      },
+      durable: async () => createIncompleteDurableSyncResult(),
+      // The graph holds nothing yet: every peer answers both phases empty.
+      selectedSharedMemory: async () => ({
+        kind: 'selected-shared-memory',
+        shared: {
+          ...emptySharedMemorySyncResult(),
+          emptyResponses: 1,
+          completedPhases: 2,
+          swmCoverage: {
+            contextGraphId: CG,
+            peerIdSuffix: 'peer',
+            snapshotsResolved: 0,
+            snapshotsTotal: 0,
+            manifestComplete: true,
+            descriptorsAuthoritative: true,
+            missingCount: 0,
+            missingSample: [],
+            materializationFailures: 0,
+          },
+        },
+        scopeComplete: false,
+      }),
+    });
+
+    const result = await runCatchupThroughBridge(agent, { contextGraphId: CG, includeSharedMemory: true });
+
+    expect(calls).toEqual({ durable: 0, selectedSharedMemory: PEERS.length, ordinarySharedMemory: 0 });
+    expect(result.peersResponded).toBe(PEERS.length);
+    expect(result.cleanPlaneCompletions?.sharedMemory).toMatchObject({ emptyPeers: PEERS.length });
+    expect(classifyContextGraphCatchupReadiness({
+      inspection: {
+        kind: 'current',
+        metadata: { kind: 'confirmed', accessPolicy: 'public' },
+        authority: { outcome: 'allowed', registration: 'unregistered' },
+      },
+      result,
+      includeSharedMemory: true,
+      readinessBeforeCatchup: before,
+    })).toMatchObject({
+      jobStatus: 'done',
+      statePatch: { synced: true, sharedMemorySynced: true },
+      readinessPatch: { sharedMemoryVerified: true },
+    });
+  });
+
   it('runs selected SWM when the public policy commits after the job prepared', async () => {
     const selectedLane: { lane: 'selected-public' | null; active: boolean } = {
       lane: null,
