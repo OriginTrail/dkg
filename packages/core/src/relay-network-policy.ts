@@ -22,6 +22,11 @@ export interface RelayNetworkPolicy {
   discoveryFilter: RelayDiscoveryFilter;
   relayPathGate: RelayPathGate;
   connectionGater: RelayedConnectionGater;
+  /**
+   * The relays the path gate lets circuits through. A reservation on any
+   * other relay yields an address this node and its peers refuse.
+   */
+  allowedRelayPeerIds: ReadonlySet<string>;
 }
 
 export interface RelayNetworkPolicyOptions {
@@ -68,6 +73,7 @@ export function buildActiveRelayNetworkPolicy(
     discoveryFilter: buildActiveRelayDiscoveryFilter(activeRelayPeerIds),
     relayPathGate,
     connectionGater: adaptRelayPathGateToConnectionGater(relayPathGate),
+    allowedRelayPeerIds: activeRelayPeerIds,
   };
 }
 

@@ -17,6 +17,7 @@ import { describe, it, expect } from 'vitest';
 import {
   readRelayReservations,
   readConnectionStreams,
+  readRelayClientReservationStore,
 } from '../src/relay-internal-shapes.js';
 
 describe('readRelayReservations', () => {
@@ -81,5 +82,26 @@ describe('readConnectionStreams', () => {
 
   it('returns an empty array when the connection has streams but none are open', () => {
     expect(readConnectionStreams({ streams: [] })).toEqual([]);
+  });
+});
+
+describe('readRelayClientReservationStore', () => {
+  it('returns the reservation store of a circuit-relay client transport', () => {
+    const reservationStore = { addRelay: async () => undefined };
+    expect(readRelayClientReservationStore({ reservationStore })).toBe(reservationStore);
+  });
+
+  it('returns null when the transport is missing or not an object', () => {
+    expect(readRelayClientReservationStore(undefined)).toBeNull();
+    expect(readRelayClientReservationStore(null)).toBeNull();
+    expect(readRelayClientReservationStore('transport')).toBeNull();
+  });
+
+  it('returns null when the store is missing or has no addRelay function', () => {
+    expect(readRelayClientReservationStore({})).toBeNull();
+    expect(readRelayClientReservationStore({ reservationStore: null })).toBeNull();
+    expect(readRelayClientReservationStore({ reservationStore: 'store' })).toBeNull();
+    expect(readRelayClientReservationStore({ reservationStore: {} })).toBeNull();
+    expect(readRelayClientReservationStore({ reservationStore: { addRelay: 'no' } })).toBeNull();
   });
 });
