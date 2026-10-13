@@ -377,7 +377,27 @@ export function createSelectedSwmMetaFetcher(options: {
   ): Promise<SyncPageResult> => {
     // Reserve before yielding to transport. Overlapping selected invocations
     // therefore cannot both spend the same process-wide free allowance.
-    const reservation = state.retentionLease.reserve();
+    let reservation = state.retentionLease.reserve();
+    // Every fetch reserves a whole prefix allowance before it starts, so the
+    // pool admits only a few transfers at once however little they then
+    // retain. A transfer that holds nothing yet has no prefix to protect, and
+    // the continuation ledger grants no later pass to a round without
+    // progress: yielding here would report a timed-out page for a peer that
+    // was never asked. Wait for the fetches in flight to settle instead,
+    // within this round's own deadline. A waiter holds no capacity, so it
+    // cannot keep a sibling from advancing.
+    while (
+      reservation.exhaustion === 'shared'
+      && state.nextOffset === 0
+      && state.quads.length === 0
+    ) {
+      reservation.release();
+      const capacityFreed = await state.retentionLease.waitForSharedCapacity(
+        request.deadline - now(),
+      );
+      reservation = state.retentionLease.reserve();
+      if (!capacityFreed) break;
+    }
     const exhaustion = reservation.exhaustion;
     if (exhaustion === 'shared') {
       // Sibling transfers hold the whole process-wide allowance. Spending a

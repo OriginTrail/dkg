@@ -2,8 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { InMemoryPeerSyncLease, runSyncOnConnect } from '../src/sync/on-connect/sync-on-connect.js';
 import { ordinaryLane } from './_helpers/run-sync-on-connect.js';
+import { classifySharedMemoryFreshness } from '../src/sync/shared-memory-freshness.js';
 import {
   PEER,
+  callSelectedSharedMemoryFromPeerDetailed,
   callSelectedSharedMemorySummary,
   createSelectedSwmLifecycleHarness,
   result,
@@ -111,6 +113,80 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
       expect(harness.agent.syncCheckpoints.size).toBe(0);
     } finally {
       releaseFirst();
+      await harness.close();
+    }
+  });
+
+  it('asks every peer of a walk wider than the metadata pool about a graph that holds nothing', async () => {
+    // A public graph without content, followed from a node with eight
+    // sync-capable peers. The limits are the defaults: each metadata fetch
+    // reserves one whole prefix allowance and the pool holds three. An empty
+    // graph can only be proven empty by a round in which every peer answered,
+    // so a peer that is reported as timed out without having been asked makes
+    // that proof impossible.
+    const publicCg = 'selected-empty-graph-wide-walk';
+    const peers = Array.from({ length: 8 }, (_, index) => `12D3KooWEmptyGraphWalkPeer${index}`);
+    let releaseOpening!: () => void;
+    const openingRelease = new Promise<void>((resolve) => { releaseOpening = resolve; });
+    let signalPoolReserved!: () => void;
+    const poolReserved = new Promise<void>((resolve) => { signalPoolReserved = resolve; });
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest: snapshotManifest(publicCg, 0),
+      clock: { now: () => 1_000, deadline: () => 61_000 },
+      completeSwmProviders: [],
+      reportEmptyResponse: true,
+      onMetaFetch: async ({ fetch }) => {
+        if (fetch > 3) return;
+        if (fetch === 3) signalPoolReserved();
+        await openingRelease;
+      },
+    });
+
+    try {
+      const walk = peers.map((remotePeerId) => callSelectedSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [publicCg],
+        {
+          remotePeerId,
+          selectedSwmPriority: true,
+          priority: 2_000,
+          recoveryTargets: [{ contextGraphId: publicCg, lane: 'selected-public' }],
+        },
+      ));
+      await poolReserved;
+      await new Promise((resolve) => setImmediate(resolve));
+      // Three fetches hold the pool. The other five have neither asked their
+      // peer nor given up on it.
+      expect(harness.probes.metaFetches()).toBe(3);
+      let settled = 0;
+      for (const round of walk) void round.then(() => { settled += 1; });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(settled).toBe(0);
+
+      releaseOpening();
+      const rounds = await Promise.all(walk);
+
+      expect(harness.probes.metaFetches()).toBe(peers.length);
+      for (const round of rounds) {
+        expect(round.shared).toMatchObject({
+          emptyResponses: 1,
+          completedPhases: 2,
+          timedOutPhases: 0,
+          failedPhases: 0,
+          failedPeers: 0,
+          metadataContinuationYields: 0,
+        });
+        expect(round.shared.swmCoverage).toMatchObject({
+          snapshotsTotal: 0,
+          manifestComplete: true,
+        });
+        // What the catch-up job reads from each peer of the walk.
+        expect(classifySharedMemoryFreshness(round.shared, { complete: true }))
+          .toMatchObject({ completedWithoutFailure: true, timedOut: false });
+      }
+    } finally {
+      releaseOpening();
       await harness.close();
     }
   });

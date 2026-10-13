@@ -28,6 +28,17 @@ export interface SelectedSwmMetaRetentionReservation {
 export interface SelectedSwmMetaRetentionLease {
   /** Reserve append capacity before a page fetch starts. */
   reserve(): SelectedSwmMetaRetentionReservation;
+  /**
+   * Wait while another lease's fetch holds reserved capacity.
+   *
+   * Resolves `true` as soon as shared capacity may have grown (a reservation
+   * was committed or released, or a lease gave rows back), so a new
+   * `reserve()` is worth trying. Resolves `false` after `timeoutMs`, and at
+   * once when no other lease has capacity reserved: the pool is then held by
+   * retained prefixes, which only their owners or the retention clock give
+   * back, so there is nothing bounded to wait for.
+   */
+  waitForSharedCapacity(timeoutMs: number): Promise<boolean>;
   /** Atomically replace this lease's retained size after a fetched tail. */
   replace(rows: number, bytesEstimate: number): void;
   release(): void;
@@ -45,6 +56,9 @@ export class SelectedSwmMetaRetentionBudgetError extends Error {
     this.name = 'SelectedSwmMetaRetentionBudgetError';
   }
 }
+
+/** Largest delay a Node timer takes without firing at once. */
+const MAX_CAPACITY_WAIT_MS = 2_147_483_647;
 
 /**
  * Process-local retained-prefix budget shared by overlapping selected calls.
@@ -78,6 +92,20 @@ export function createSelectedSwmMetaRetentionBudget(
   let bytesEstimate = 0;
   let reservedRows = 0;
   let reservedBytesEstimate = 0;
+  /** Leases waiting for capacity that another lease's fetch has reserved. */
+  const capacityWaiters = new Set<() => void>();
+  const notifyCapacityFreed = () => {
+    // Each waiter removes itself and resumes on a later turn.
+    for (const wake of capacityWaiters) wake();
+  };
+  /**
+   * Whether a fetch can fill this reservation. One that admits no rows or no
+   * bytes is what a contended lease gets and releases at once: it must neither
+   * be waited for nor wake a waiter, or waiters would keep waking each other.
+   */
+  const admitsRows = (reservation: { rows: number; bytesEstimate: number }) => (
+    reservation.rows > 0 && reservation.bytesEstimate > 0
+  );
 
   const validateRetainedSize = (nextRows: number, nextBytesEstimate: number) => {
     if (!Number.isSafeInteger(nextRows) || nextRows < 0) {
@@ -134,6 +162,9 @@ export function createSelectedSwmMetaRetentionBudget(
         entries.set(id, { rows: nextRows, bytesEstimate: nextBytesEstimate });
         rows = globalRows;
         bytesEstimate = globalBytes;
+        if (nextRows < current.rows || nextBytesEstimate < current.bytesEstimate) {
+          notifyCapacityFreed();
+        }
       };
       return {
         reserve() {
@@ -166,6 +197,7 @@ export function createSelectedSwmMetaRetentionBudget(
             reservations.delete(reservationId);
             reservedRows -= reservation.rows;
             reservedBytesEstimate -= reservation.bytesEstimate;
+            if (admitsRows(reservation)) notifyCapacityFreed();
           };
           // A lease at its own prefix ceiling stays exhausted no matter what
           // the rest of the pool does, so that case is reported first.
@@ -207,21 +239,48 @@ export function createSelectedSwmMetaRetentionBudget(
             release: releaseReservation,
           };
         },
+        waitForSharedCapacity(timeoutMs) {
+          const siblingFetchInFlight = [...reservations.values()].some((reservation) => (
+            reservation.owner !== id && admitsRows(reservation)
+          ));
+          if (released || !(timeoutMs > 0) || !siblingFetchInFlight) {
+            return Promise.resolve(false);
+          }
+          return new Promise<boolean>((resolve) => {
+            const finish = (capacityFreed: boolean) => {
+              clearTimeout(timer);
+              capacityWaiters.delete(wake);
+              resolve(capacityFreed);
+            };
+            const wake = () => finish(true);
+            const timer = setTimeout(
+              () => finish(false),
+              Math.min(timeoutMs, MAX_CAPACITY_WAIT_MS),
+            );
+            timer.unref?.();
+            capacityWaiters.add(wake);
+          });
+        },
         replace,
         release() {
           if (released) return;
           released = true;
+          let capacityFreed = false;
           for (const [reservationId, reservation] of reservations) {
             if (reservation.owner !== id) continue;
             reservations.delete(reservationId);
             reservedRows -= reservation.rows;
             reservedBytesEstimate -= reservation.bytesEstimate;
+            capacityFreed ||= admitsRows(reservation);
           }
           const current = entries.get(id);
-          if (!current) return;
-          entries.delete(id);
-          rows -= current.rows;
-          bytesEstimate -= current.bytesEstimate;
+          if (current) {
+            entries.delete(id);
+            rows -= current.rows;
+            bytesEstimate -= current.bytesEstimate;
+            capacityFreed ||= current.rows > 0 || current.bytesEstimate > 0;
+          }
+          if (capacityFreed) notifyCapacityFreed();
         },
       };
     },
