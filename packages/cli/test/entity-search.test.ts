@@ -69,6 +69,18 @@ describe('entity discovery using current scoped graph content', () => {
     expect((await f.search()).staleCandidates).toBe(1);
     f.deny(); await expect(f.search()).rejects.toMatchObject({ code: 'QUERY_ACCESS_DENIED' });
   });
+  it('skips a dropped partition while returning surviving authorized candidates', async () => {
+    const f = await fixture(1);
+    const surviving = 'did:dkg:context-graph:catalog/_verifiable_memory/b';
+    await f.graph.insert([
+      { graph: surviving, subject: 'urn:survivor', predicate: 'urn:description', object: '"ocean survivor"' },
+      { graph: surviving, subject: 'urn:survivor', predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'urn:Topic' },
+    ]);
+    await f.index();
+    await f.graph.dropGraph(partition);
+    expect(await f.search()).toMatchObject({ staleCandidates: 1, entities: [{ entityUri: 'urn:survivor' }] });
+    f.deny(); await expect(f.search()).rejects.toMatchObject({ code: 'QUERY_ACCESS_DENIED' });
+  });
   it('resumes keyset pages, reuses unchanged embeddings, and prunes old entries only at a completed scan', async () => {
     const f = await fixture(10); expect(await f.index()).toMatchObject({ scanComplete: false, indexedEntities: 8 });
     expect(await f.index()).toMatchObject({ scanComplete: true, indexedEntities: 10 });
@@ -170,6 +182,24 @@ it('bounds preparation, rejects expired work and releases admission on failure',
   expect(await provider.ready(AbortSignal.timeout(1000))).toBe(false);
   expect(await provider.ready(AbortSignal.timeout(1000))).toBe(false);
 });
+
+it.each(['embedding', 'residency'] as const)('releases admitted warm-up after %s failure', async stage => {
+  const f = await fixture(); const indexed = await f.index();
+  const failure = new Error('injected provider failure');
+  if (stage === 'embedding') f.embedder.embed.mockRejectedValueOnce(failure);
+  else f.embedder.ready.mockRejectedValueOnce(failure);
+  const warmup = () => f.service.readiness(indexed.indexId, 'catalog', true, f.reader,
+    AbortSignal.timeout(5000), performance.now() + 5000);
+  await expect(warmup()).rejects.toBe(failure);
+  expect((await f.search()).entities).toHaveLength(2);
+  expect(await f.index(true)).toMatchObject({ scanComplete: true });
+  expect(await warmup()).toMatchObject({ ready: true });
+});
+
+it.each([null, [], 'spec', {}, { ...spec, textPredicates: [1] }, { ...spec, types: [null] }])(
+  'rejects untrusted specification input: %j', raw => {
+    expect(() => parseSpec(raw)).toThrow('ENTITY_INVALID_REQUEST');
+  });
 
 it('persists a partial scan across service recreation and keeps SWM and VM indexes separate', async () => {
   const f = await fixture(9); await f.index();

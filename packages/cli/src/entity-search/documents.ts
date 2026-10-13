@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { isSafeIri, sparqlIri, sparqlString } from '@origintrail-official/dkg-core';
+import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import { EntitySearchError, checkDeadline, type EntityDocument, type EntityIndexSpec } from './types.js';
 
@@ -11,16 +12,21 @@ export function iri(value: unknown): string {
   }
   return sparqlIri(value);
 }
-export function parseSpec(raw: EntityIndexSpec): EntityIndexSpec {
-  if (!raw || typeof raw.contextGraphId !== 'string' || !raw.contextGraphId || raw.contextGraphId.length > 256
-      || !['verifiable-memory', 'shared-working-memory'].includes(raw.view)) throw new EntitySearchError('ENTITY_INVALID_REQUEST', 400);
+export function parseSpec(raw: unknown): EntityIndexSpec {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !('contextGraphId' in raw)
+      || typeof raw.contextGraphId !== 'string' || !raw.contextGraphId || raw.contextGraphId.length > 256
+      || !('view' in raw) || (raw.view !== 'verifiable-memory' && raw.view !== 'shared-working-memory')
+      || !('textPredicates' in raw)) throw new EntitySearchError('ENTITY_INVALID_REQUEST', 400);
   function terms(values: unknown, required: boolean): string[] {
     if (!Array.isArray(values) || values.length > 16 || (required && !values.length)) throw new EntitySearchError('ENTITY_INVALID_REQUEST', 400);
-    values.forEach(iri);
-    return [...new Set(values as string[])].sort();
+    const validated = values.map(value => {
+      if (typeof value !== 'string') throw new EntitySearchError('ENTITY_INVALID_REQUEST', 400);
+      iri(value); return value;
+    });
+    return [...new Set(validated)].sort();
   }
   return { contextGraphId: raw.contextGraphId, view: raw.view,
-    textPredicates: terms(raw.textPredicates, true), types: terms(raw.types ?? [], false) };
+    textPredicates: terms(raw.textPredicates, true), types: terms(('types' in raw ? raw.types : undefined) ?? [], false) };
 }
 export function indexKey(spec: EntityIndexSpec, fingerprint: string): string {
   return createHash('sha256').update(JSON.stringify([spec, fingerprint])).digest('hex');
@@ -28,10 +34,10 @@ export function indexKey(spec: EntityIndexSpec, fingerprint: string): string {
 export function documentKey(doc: Pick<EntityDocument, 'entityUri' | 'sourceGraph'>): string {
   return JSON.stringify([doc.sourceGraph, doc.entityUri]);
 }
-function selection(spec: EntityIndexSpec): string {
+function selection(spec: EntityIndexSpec, graphOperand: string): string {
   return `VALUES ?p { ${spec.textPredicates.map(iri).join(' ')} }
-    GRAPH ?sourceGraph { ?entity ?p ?value . FILTER(isIRI(?entity) && isLiteral(?value))
-    ${spec.types.length ? `?entity a ?type . VALUES ?type { ${spec.types.map(iri).join(' ')} }` : ''} }`;
+    GRAPH ${graphOperand} { ?entity ?p ?value . FILTER(isIRI(?entity) && isLiteral(?value))
+    ${spec.types.length ? `FILTER EXISTS { ?entity a ?type . VALUES ?type { ${spec.types.map(iri).join(' ')} } }` : ''} }`;
 }
 export class EntityGraphReader {
   constructor(private agent: { query: OmitThisParameter<DKGAgent['query']> }, readonly callerAgentAddress?: string, private priority: 'normal' | 'background' = 'normal') {}
@@ -55,21 +61,26 @@ export class EntityGraphReader {
         (STR(?sourceGraph) = ${sparqlString(graph)} && STR(?entity) > ${sparqlString(entity)}))`;
     }
     const rows = await this.query(spec, `SELECT DISTINCT ?sourceGraph ?entity WHERE {
-      ${selection(spec)} ${cursor} } ORDER BY STR(?sourceGraph) STR(?entity) LIMIT ${PAGE_SIZE}`, signal, deadline);
+      ${selection(spec, '?sourceGraph')} ${cursor} } ORDER BY STR(?sourceGraph) STR(?entity) LIMIT ${PAGE_SIZE}`, signal, deadline);
     return rows.map(row => ({ sourceGraph: row.sourceGraph, entityUri: row.entity }));
   }
   async document(spec: EntityIndexSpec, entity: Pick<EntityDocument, 'sourceGraph' | 'entityUri'>,
     signal: AbortSignal, deadline: number): Promise<EntityDocument | null> {
     const selected = `VALUES (?sourceGraph ?entity) { (${iri(entity.sourceGraph)} ${iri(entity.entityUri)}) }
-      ${selection(spec).replace('GRAPH ?sourceGraph', `GRAPH ${iri(entity.sourceGraph)}`)}`;
-    // Return only a witness for large literals, before transferring their payload.
-    // The bounded inner selection also caps aggregate work per document. All
-    // reads retain the original deadline and current authorization; errors pass through.
-    const oversized = await this.query(spec, `SELECT (true AS ?oversized) WHERE {
-      { SELECT (COUNT(*) AS ?rows) (SUM(STRLEN(STR(?p)) + STRLEN(STR(?value))) AS ?chars) WHERE {
-        { SELECT DISTINCT ?p ?value WHERE { ${selected} } LIMIT ${MAX_DOCUMENT_ROWS + 1} }
-      } } FILTER(?rows > ${MAX_DOCUMENT_ROWS} || ?chars > 16384) } LIMIT 1`, signal, deadline);
-    if (oversized.length) throw new EntitySearchError('ENTITY_DOCUMENT_TOO_LARGE', 422);
+      ${selection(spec, '?sourceGraph')}`;
+    // A bound variable intersects the fresh authorized graph set: a removed
+    // partition produces no rows. Keep it outside nested SELECTs so the engine
+    // can constrain it safely. Each unique RDF property yields one size witness;
+    // the type EXISTS avoids multiplying witnesses by matching types.
+    const sizes = await this.query(spec, `SELECT (STRLEN(STR(?p)) + STRLEN(STR(?value)) AS ?chars)
+      WHERE { ${selected} } LIMIT ${MAX_DOCUMENT_ROWS + 1}`, signal, deadline);
+    let chars = 0;
+    for (const row of sizes) {
+      const size = Number(parseRdfLiteralTerm(row.chars)?.value ?? row.chars);
+      if (!Number.isSafeInteger(size) || size < 0) throw new EntitySearchError('ENTITY_SEARCH_UNAVAILABLE');
+      chars += size;
+    }
+    if (sizes.length > MAX_DOCUMENT_ROWS || chars > 16384) throw new EntitySearchError('ENTITY_DOCUMENT_TOO_LARGE', 422);
     const rows = await this.query(spec, `SELECT DISTINCT ?p ?value WHERE {
       ${selected} } ORDER BY ?p ?value LIMIT ${MAX_DOCUMENT_ROWS + 1}`, signal, deadline);
     if (!rows.length) return null;
