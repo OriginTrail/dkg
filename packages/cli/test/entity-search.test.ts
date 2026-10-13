@@ -1,4 +1,4 @@
-import { markCoreTrustedGraph, withPublicSnapshotQueryTrust } from "../../agent/src/public-snapshot-evidence.js";
+import { withPublicSnapshotQueryTrust } from "../../agent/src/public-snapshot-evidence.js";
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
