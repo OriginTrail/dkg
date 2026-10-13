@@ -48,6 +48,7 @@ export type ConfirmContextGraphMetadataInput =
     };
 
 export interface ContextGraphMetadataConfirmationDependencies {
+  readonly signal?: AbortSignal;
   readonly chain: ChainAdapter;
   readonly resolveActivePublicChainProof: () => Promise<ActivePublicContextGraphChainProof>;
   readonly isPrivateContextGraph: (contextGraphId: string) => Promise<boolean>;
@@ -63,6 +64,7 @@ export async function confirmContextGraphMetadataV1(
   contextGraphId: string,
   input: ConfirmContextGraphMetadataInput = {},
 ): Promise<boolean> {
+  dependencies.signal?.throwIfAborted();
   if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
     return true;
   }
@@ -101,7 +103,7 @@ export async function confirmContextGraphMetadataV1(
         <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> "unregistered" .
       }
     }`,
-    { source: 'agent.contextGraph.confirmedMeta.unregisteredPlaceholder' },
+    { source: 'agent.contextGraph.confirmedMeta.unregisteredPlaceholder', signal: dependencies.signal },
   );
   const hasUnregisteredPlaceholder = unregisteredPlaceholderResult.type === 'boolean'
     && unregisteredPlaceholderResult.value === true;
@@ -166,7 +168,7 @@ export async function confirmContextGraphMetadataV1(
         <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
       }
     }`,
-    { source: 'agent.contextGraph.confirmedMeta.ontologyDeclaration' },
+    { source: 'agent.contextGraph.confirmedMeta.ontologyDeclaration', signal: dependencies.signal },
   );
   return ontologyResult.type === 'boolean' && ontologyResult.value === true;
 }
@@ -210,7 +212,7 @@ async function findAuthoritativeDefinition(
       ? buildAuthoritativePrivateMetaAskQuery(contextGraphId, memberProof)
       : buildAuthoritativePublicMetaAskQuery(contextGraphId, memberProof);
     const result = await dependencies.store.query(query, {
-      source: `${sourcePrefix}.${definition}Definition`,
+      source: `${sourcePrefix}.${definition}Definition`, signal: dependencies.signal,
     });
     if (result.type === 'boolean' && result.value === true) return definition;
   }
