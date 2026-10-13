@@ -1,16 +1,17 @@
 /**
- * Bundle-aware OKF import (the two passes from ADR 0005 / SPEC §3–§6).
+ * Bundle-aware OKF import (the passes from ADR 0005 / SPEC §3–§6).
  *
- * Pass 1 — index the bundle: classify concept vs. reserved files, parse each
- * concept's frontmatter, derive a deterministic subject IRI per concept ID, and
- * read `okf_version` from the root `index.md` if present.
+ * Pass 1 — read the bundle: classify concept vs. reserved files, parse each
+ * concept's frontmatter, and read `okf_version` from the root `index.md` if
+ * present.
  *
- * Pass 2 — prepare: encode each concept's values and parse its body, without
- * reading the index. A concept with a value no RDF term can hold is skipped
- * here and leaves the index.
+ * Pass 2 — prepare and index: encode each concept's values and parse its body,
+ * without reading the index, under its deterministic subject IRI. Only a
+ * concept that prepares is indexed; one with a value no RDF term can hold is
+ * skipped and never enters the index.
  *
  * Pass 3 — resolve: read each prepared concept's path-valued fields and
- * Markdown links against the final index, into typed and untyped edges.
+ * Markdown links against the complete index, into typed and untyped edges.
  *
  * Pure and deterministic: same `BundleFile[]` ⇒ identical quads and IRIs. No
  * filesystem, no network — `loadBundleDir` (loader.ts) is the only I/O surface.
@@ -51,13 +52,8 @@ export function importBundle(files: BundleFile[], opts: OkfMappingOptions = {}):
 
   const reservedSkipped = ordered.filter((f) => isReservedFile(f.path)).map((f) => f.path);
 
-  // --- Pass 1: index ---
+  // --- Pass 1: read ---
   const docs: OkfDocument[] = [];
-  // Dictionaries: a concept ID is a file path, and `__proto__.md` or
-  // `constructor.md` are valid concept files (§2), so a plain object would
-  // drop the first (prototype setter) and misread inherited names.
-  const iriByConceptId = dict<string>();
-  const typeByConceptId = dict<string | undefined>();
   for (const f of ordered) {
     if (!isConceptFile(f.path)) continue;
     let doc: OkfDocument;
@@ -85,9 +81,6 @@ export function importBundle(files: BundleFile[], opts: OkfMappingOptions = {}):
       continue;
     }
     docs.push(doc);
-    iriByConceptId[doc.conceptId] = conceptIdToIri(doc.conceptId, iriBase);
-    typeByConceptId[doc.conceptId] =
-      doc.frontmatter.type != null ? safeString(doc.frontmatter.type) : undefined;
     if (isBlank(doc.frontmatter.type)) {
       warnings.push({
         conceptId: doc.conceptId,
@@ -118,27 +111,31 @@ export function importBundle(files: BundleFile[], opts: OkfMappingOptions = {}):
     });
   }
 
-  // --- Pass 2: prepare ---
-  // Every concept is prepared once, before any reference is read. A concept
-  // whose value no RDF term can hold (`OkfValueError`) is skipped with a
-  // warning and leaves the index, so the index every survivor then resolves
-  // against (once) names only imported concepts: a reference to a skipped
-  // concept is a broken link, never an edge. Any other exception is a defect
-  // and propagates.
+  // --- Pass 2: prepare and index ---
+  // Every concept is prepared once, before any reference is read, and only a
+  // concept that prepares enters the index. A concept whose value no RDF term
+  // can hold (`OkfValueError`) is skipped with a warning, so the index every
+  // concept then resolves against (once) names only imported concepts: a
+  // reference to a skipped concept is a broken link, never an edge. Any other
+  // exception is a defect and propagates.
+  // Dictionaries: a concept ID is a file path, and `__proto__.md` or
+  // `constructor.md` are valid concept files (§2), so a plain object would
+  // drop the first (prototype setter) and misread inherited names.
+  const iriByConceptId = dict<string>();
+  const typeByConceptId = dict<string | undefined>();
   type Prepared = { doc: OkfDocument; prepared: PreparedConcept } | { doc: OkfDocument; failure: OkfWarning };
-  const prepared = docs.map((doc): Prepared => {
+  const prepared: Prepared[] = [];
+  for (const doc of docs) {
+    const iri = conceptIdToIri(doc.conceptId, iriBase);
     try {
-      return { doc, prepared: prepareConcept(doc, iriByConceptId[doc.conceptId], opts) };
+      prepared.push({ doc, prepared: prepareConcept(doc, iri, opts) });
     } catch (err) {
       if (!(err instanceof OkfValueError)) throw err;
-      return { doc, failure: { conceptId: doc.conceptId, code: 'unmappable-value', message: `could not be mapped (${err.message}); skipped` } };
+      prepared.push({ doc, failure: { conceptId: doc.conceptId, code: 'unmappable-value', message: `could not be mapped (${err.message}); skipped` } });
+      continue;
     }
-  });
-  for (const p of prepared) {
-    if ('failure' in p) {
-      delete iriByConceptId[p.doc.conceptId];
-      delete typeByConceptId[p.doc.conceptId];
-    }
+    iriByConceptId[doc.conceptId] = iri;
+    typeByConceptId[doc.conceptId] = doc.frontmatter.type != null ? safeString(doc.frontmatter.type) : undefined;
   }
 
   // --- Pass 3: resolve ---
