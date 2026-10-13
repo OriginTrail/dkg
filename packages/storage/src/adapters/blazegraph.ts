@@ -14,7 +14,7 @@ import type {
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { decodeSparqlJsonQueryResult } from '../sparql-json-query-result.js';
-import { toBlazegraphAsciiSafeNQuads } from './blazegraph-nquads.js';
+import { quadToBlazegraphNQuad } from './blazegraph-nquads.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
 import {
   assertQuadLiteralsMutf8Safe,
@@ -44,7 +44,6 @@ import {
   type Rfc64AuthorCommitCasInputV1,
   type Rfc64AuthorCommitCasResultV1,
 } from '../rfc64-author-commit-cas.js';
-import { quadToNQuad } from '../bounded-rdf.js';
 import {
   sparqlStatements,
   type SparqlQueryPlan,
@@ -843,21 +842,6 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
 // =====================================================================
 // N-Quad serialisation / parsing helpers (shared with oxigraph adapter)
 // =====================================================================
-
-/**
- * N-Quads serializer for Blazegraph's bulk-insert wire format: a standard
- * N-Quads line ({@link quadToNQuad}) made ASCII-safe
- * ({@link toBlazegraphAsciiSafeNQuads}). This is the single serialization
- * entry point for the adapter's write path, so the Blazegraph wire-format
- * invariant lives at the serialization boundary rather than as a separate
- * post-processing pass a caller must remember to apply. The ASCII-safe pass
- * operates on the assembled line by design: it normalizes `\U` escapes and
- * relies on backslash parity across the whole line, both of which are
- * line-level properties of the rendered N-Quads, not of an individual term.
- */
-function quadToBlazegraphNQuad(q: DKGQuad): string {
-  return toBlazegraphAsciiSafeNQuads(quadToNQuad(q));
-}
 
 /**
  * Parse a Blazegraph CONSTRUCT body and reject one that the engine cut short.

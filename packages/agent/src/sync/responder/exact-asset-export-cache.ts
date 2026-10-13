@@ -1,3 +1,4 @@
+import { createEncodedResponseLease } from './encoded-response-lease.js';
 import type { PreparedContentCache } from './prepared-content-cache.js';
 import { EXACT_EXPORT_METADATA_OPERATION, retryExactMetadataAdmission } from './exact-metadata-admission.js';
 import { assertSafeIri, compareCodePoint } from '@origintrail-official/dkg-core';
@@ -547,7 +548,6 @@ export function createBoundedExactAssetExportCache(params: {
         s: request.assetUal, p: row.predicate, o: row.object, g: metadata.metaGraph,
       }))));
       if (metaBytes.byteLength > EXACT_BATCH_MAX_FRAME_BYTES) return refuse('metadata-profile', request);
-      const metaDigest = bytesToHex(sha256(metaBytes));
       const { key: revision, reusable } = sourceRevision(request.graph, metadata.metaGraph);
       const key = encodedKey(request, metadata, revision);
       pruneEncoded();
@@ -555,21 +555,30 @@ export function createBoundedExactAssetExportCache(params: {
       // metadata identity selects an immutable assertion across restarts; fresh
       // authority and the current process's revision fence still apply.
       const diskKey = encodedKey(request, metadata, null);
-      let hit = reusable ? encodedCache.get(key) : undefined;
+      const hit = reusable ? encodedCache.get(key) : undefined;
       if (!hit && reusable && params.preparedContentCache) {
         const readId = Symbol('prepared-content-read');
         const rejected = reserve(readId, `${key}:prepared-read`, 0, RESPONSE_RESERVATION_BYTES, () => {});
         if (rejected) return refuse('response-admission', request, rejected.reason);
+        let transferred = false;
         try {
           const prepared = await params.preparedContentCache.get(diskKey);
           throwIfAborted(request.signal);
           if (prepared) {
             if (sourceRevision(request.graph, metadata.metaGraph).key !== revision) throw changed();
-            retainEncoded(key, prepared.body, prepared.plainBytes, metadata.identity);
-            hit = encodedCache.get(key);
-            if (hit) preparedCacheHits += 1;
+            // Keep the read reservation as response ownership even if memory retention declines.
+            const body = prepared.body.slice();
+            retainEncoded(key, body, prepared.plainBytes, metadata.identity);
+            const response = createEncodedResponseLease({ metadata: metaBytes, body, plainBytes: prepared.plainBytes,
+              identity: metadata.identity, wholePayloadExports: 0, encodingDurationMs: 0 }, {
+              assertCurrent: () => assertEncodedCurrent(request, metadata.identity, revision),
+              release: () => { budget.remove(readId); },
+            }, { changed, invalid });
+            preparedCacheHits++;
+            transferred = true;
+            return response;
           }
-        } finally { budget.remove(readId); }
+        } finally { if (!transferred) budget.remove(readId); }
       }
       if (hit && Date.now() - hit.lastUsedAt < encodedTtlMs) {
         // Only the independently verified immutable assertion copy is reused.
@@ -590,23 +599,14 @@ export function createBoundedExactAssetExportCache(params: {
           hit.lastUsedAt = Date.now();
           encodedCache.delete(key); encodedCache.set(key, hit);
           encodedCacheHits += 1;
-          return Object.freeze({ metadata: metaBytes, body, plainBytes: hit.plainBytes, identity: hit.identity,
-            wholePayloadExports: 0 as const, encodingDurationMs: 0,
-            async assertCurrent() {
-              if (response.released) throw changed();
-              await assertEncodedCurrent(request, hit.identity, revision);
-              if (bytesToHex(sha256(metaBytes)) !== metaDigest) throw invalid();
-            },
-            release() {
-              response.release(() => {
-                if (Date.now() - hit.lastUsedAt >= encodedTtlMs) {
-                  discardEncoded(hit);
-                  return false;
-                }
-                return true;
-              });
-            },
-          });
+          return createEncodedResponseLease({ metadata: metaBytes, body, plainBytes: hit.plainBytes, identity: hit.identity,
+            wholePayloadExports: 0, encodingDurationMs: 0 }, {
+            assertCurrent: () => assertEncodedCurrent(request, hit.identity, revision),
+            release: () => response.release(() => {
+              if (Date.now() - hit.lastUsedAt >= encodedTtlMs) { discardEncoded(hit); return false; }
+              return true;
+            }),
+          }, { changed, invalid });
         } catch (error) {
           response.release(() => true);
           throw error;
@@ -629,35 +629,18 @@ export function createBoundedExactAssetExportCache(params: {
         if (body.byteLength < 1 || body.byteLength > EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES
           || plainBytes > EXACT_SYNC_GZIP_MAX_INFLATED_BYTES) throw invalid();
         const encodingDurationMs = performance.now() - encodeStarted;
-        const digest = bytesToHex(sha256(body));
-        let released = false;
         let retained = false;
-        const encoded = Object.freeze({ metadata: metaBytes, body, plainBytes, identity: rows.identity,
-          wholePayloadExports: rows.wholePayloadExports ?? 1, encodingDurationMs,
-          async assertCurrent() {
-            if (released) throw changed();
-            await rows.assertCurrent();
-            if (bytesToHex(sha256(metaBytes)) !== metaDigest) throw invalid();
-            // The cold response is caller-owned until promotion. Never retain
-            // bytes changed by a send adapter or another response consumer.
-            if (bytesToHex(sha256(body)) !== digest) throw invalid();
-            if (!retained && reusable) {
-              retainEncoded(key, body, plainBytes, rows.identity);
-              retained = true;
-              await params.preparedContentCache?.put(diskKey, { body, plainBytes });
-              // Persistence adds an async boundary: fence it before ASSET_END.
-              if (params.preparedContentCache) {
-                await rows.assertCurrent();
-                if (bytesToHex(sha256(body)) !== digest || bytesToHex(sha256(metaBytes)) !== metaDigest) throw invalid();
-              }
-            }
+        const encoded = createEncodedResponseLease({ metadata: metaBytes, body, plainBytes, identity: rows.identity,
+          wholePayloadExports: rows.wholePayloadExports ?? 1, encodingDurationMs }, {
+          assertCurrent: () => rows.assertCurrent(), release: () => rows.release(),
+          afterFence: async () => {
+            if (retained || !reusable) return false;
+            retainEncoded(key, body, plainBytes, rows.identity);
+            retained = true;
+            await params.preparedContentCache?.put(diskKey, { body, plainBytes });
+            return Boolean(params.preparedContentCache);
           },
-          release() {
-            if (released) return;
-            released = true;
-            rows.release();
-          },
-        });
+        }, { changed, invalid });
         transferred = true;
         return encoded;
       } finally {
