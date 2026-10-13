@@ -1,3 +1,4 @@
+export { nonEmptyNamedGraphEnumerationPattern } from './adapters/graph-enumeration-query.js';
 export {
   BlazegraphNamespaceManager,
   BLAZEGRAPH_NAMESPACE_XML_TEMPLATE,

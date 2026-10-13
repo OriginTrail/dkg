@@ -1,6 +1,6 @@
 import { registeredSubGraphPattern, decodeRegisteredSubGraphName } from './registered-sub-graphs.js';
 import { assertSafeIri, contextGraphDataUri, contextGraphMetaUri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
-import type { QueryResult } from '@origintrail-official/dkg-storage';
+import { nonEmptyNamedGraphEnumerationPattern, type QueryResult } from '@origintrail-official/dkg-storage';
 
 /** One fresh store admission for the inventory and its scope authority.
  * UNION keeps these independent sets separate; joining them would multiply rows.
@@ -20,11 +20,8 @@ export async function readScopedContentGraphCatalog(
   const prefix = escapeSparqlLiteral(`${root}/`);
   const result = await query(`SELECT DISTINCT ?graph ?name ?assertionGraph ?ctxGraph WHERE {
     {
-      GRAPH ?graph {}
+      ${nonEmptyNamedGraphEnumerationPattern('graph')}
       FILTER(?graph = <${root}> || STRSTARTS(STR(?graph), "${prefix}"))
-      # A bounded existence probe keeps Blazegraph from scanning an entire
-      # graph for EXISTS, while retaining empty-graph exclusion on Oxigraph.
-      FILTER EXISTS { SELECT ?graph WHERE { GRAPH ?graph { ?s ?p ?o } } LIMIT 1 }
     } UNION {
       ${registeredSubGraphPattern(contextGraphId)}
     } UNION {
