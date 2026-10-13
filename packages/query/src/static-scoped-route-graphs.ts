@@ -1,4 +1,5 @@
 import {
+  contextGraphDataUri, contextGraphSubGraphUri, contextGraphSharedMemoryUri,
   contextGraphMetaUri, contextGraphSharedMemoryMetaUri,
   contextGraphSubGraphMetaUri, contextGraphPrivateUri, contextGraphSubGraphPrivateUri,
 } from '@origintrail-official/dkg-core';
@@ -39,6 +40,14 @@ export function staticScopedRouteGraphs(effectiveContextGraphId: string, options
   // require an explicit count-query opt-in.
   const subGraphName = options?.subGraphName;
   const isSwmOnlyRoute = options?.graphSuffix === '_shared_memory';
+  const dataGraph = subGraphName
+    ? contextGraphSubGraphUri(effectiveContextGraphId, subGraphName)
+    : contextGraphDataUri(effectiveContextGraphId);
+  const sharedMemoryGraph = contextGraphSharedMemoryUri(effectiveContextGraphId, subGraphName);
+  // Keep option precedence and ordering shared by admission and authorization.
+  const staticContentGraphs = options?.includeSharedMemory ?? options?.includeWorkspace
+    ? [dataGraph, sharedMemoryGraph]
+    : isSwmOnlyRoute ? [sharedMemoryGraph] : [dataGraph];
   const metaAllowList = [
     ...(isSwmOnlyRoute
       ? []
@@ -73,5 +82,5 @@ export function staticScopedRouteGraphs(effectiveContextGraphId: string, options
           : contextGraphPrivateUri(effectiveContextGraphId),
       ]
     : [];
-  return { subGraphName, isSwmOnlyRoute, metaAllowList, staticPrivateAllowList };
+  return { dataGraph, sharedMemoryGraph, staticContentGraphs, subGraphName, isSwmOnlyRoute, metaAllowList, staticPrivateAllowList };
 }

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 
@@ -20,11 +20,20 @@ describe('static scoped query admission', () => {
     await store.insert([{subject: 'urn:item', predicate: SCHEMA_NAME, object: '"scoped"', graph}]);
     // Catalog availability must not gate a read already authorized by the route.
     store.listGraphs = async () => { throw new Error('catalog lane occupied'); };
+    const query = store.query.bind(store);
+    const callerQuery = vi.spyOn(store, 'query').mockImplementation((sparql, options) => {
+      // Private discovery uses query(), not listGraphs(). Only the caller's
+      // name query may enter this otherwise unavailable read lane.
+      if (!sparql.includes(`<${SCHEMA_NAME}>`)) throw new Error('metadata lane occupied');
+      return query(sparql, options);
+    });
     const result = await engine.query(
       `SELECT ?name WHERE { GRAPH <${graph}> { ?s <${SCHEMA_NAME}> ?name } }`,
       { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true, ...options },
     );
     expect(result.bindings).toEqual([{ name: '"scoped"' }]);
+    expect(callerQuery).toHaveBeenCalledTimes(1);
+    await store.close();
   });
 
   it.each([

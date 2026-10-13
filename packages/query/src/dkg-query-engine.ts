@@ -403,19 +403,14 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
 
     if (effectiveContextGraphId && !options?.view) {
-      const dataGraph = options?.subGraphName
-        ? contextGraphSubGraphUri(effectiveContextGraphId, options.subGraphName)
-        : contextGraphDataUri(effectiveContextGraphId);
-      const sharedMemoryGraph = contextGraphSharedMemoryUri(effectiveContextGraphId, options?.subGraphName);
-      const { subGraphName, isSwmOnlyRoute, metaAllowList, staticPrivateAllowList } =
+      const { dataGraph, sharedMemoryGraph, staticContentGraphs,
+        subGraphName, isSwmOnlyRoute, metaAllowList, staticPrivateAllowList } =
         staticScopedRouteGraphs(effectiveContextGraphId, options);
       // Explicit static GRAPH targets need only the route's static authority.
       // Avoid unrelated catalog admissions while ingestion occupies the store.
       // Variables and dynamic partitions still require fresh discovery below.
       const staticAllowedGraphs = [
-        ...(options?.includeSharedMemory ?? options?.includeWorkspace
-          ? [dataGraph, sharedMemoryGraph]
-          : isSwmOnlyRoute ? [sharedMemoryGraph] : [dataGraph]),
+        ...staticContentGraphs,
         ...metaAllowList,
         ...staticPrivateAllowList,
       ];
@@ -447,11 +442,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       const vmPerKaGraphs = needsDiscovery && dataRouted
         ? await discoverRouteGraphs(`${dataGraph}/_verifiable_memory/`)
         : [];
-      const allowedGraphs = options?.includeSharedMemory ?? options?.includeWorkspace
-        ? [dataGraph, ...vmPerKaGraphs, sharedMemoryGraph, ...swmPerKaGraphs]
-        : options?.graphSuffix === '_shared_memory'
-          ? [sharedMemoryGraph, ...swmPerKaGraphs]
-          : [dataGraph, ...vmPerKaGraphs];
+      const allowedGraphs = staticContentGraphs.flatMap(graph =>
+        [graph, ...(graph === dataGraph ? vmPerKaGraphs : swmPerKaGraphs)]);
       const privateAllowList = options?.includePrivate && needsDiscovery
         ? [...staticPrivateAllowList, ...(await this.discoverGraphScopedPrivateGraphs(
             effectiveContextGraphId, reads, subGraphName,
