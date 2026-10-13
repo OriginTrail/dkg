@@ -16,9 +16,11 @@ import {
   SCHEMA_NAME,
   SCHEMA_URL,
   SECTION_GENID_INFIX,
+  XSD_DATE,
+  okfExtensionPredicate,
 } from '../src/index.js';
 import type { BundleFile, Quad } from '../src/index.js';
-import { objs, IDX_V02, bundle, exportedFrontmatter } from './helpers/okf-v02-fixtures.js';
+import { objs, IDX_V02, bundle, exportedFrontmatter, DT } from './helpers/okf-v02-fixtures.js';
 
 const files = loadBundleDir(fileURLToPath(new URL('./fixtures/crypto_bitcoin', import.meta.url)));
 
@@ -424,4 +426,57 @@ describe('a skipped list entry leaves the family node IRIs unchanged by a round 
       expect(first.warnings.some((w) => w.message.includes(`${family}[0]`))).toBe(true);
     });
   }
+});
+
+describe('a typed date keeps its datatype through export and re-import', () => {
+  // Only a date field types its text on import; anywhere else (a family
+  // extension, a producer key, a nested value kept verbatim, an integer or
+  // boolean field given a date) YAML itself must say it is a date, so export
+  // writes it as an unquoted timestamp, exactly as stored.
+  const DAY = (lex: string) => `"${lex}"^^<${XSD_DATE}>`;
+  const files = bundle(
+    [
+      'type: Attested Computation',
+      'runtime: bigquery',
+      "executor: { resource: https://x.example/run, last_run: 2026-06-30T14:00:00Z, local: 2026-07-01T00:00:00, day: 2026-06-15, quoted: '2026-06-15' }",
+      'verified:',
+      '  - { by: human:a, at: 2026-06-30T14:00:00Z, until: 2026-12-31 }',
+      'sources:',
+      '  - { id: s, resource: https://x.example/s, usage_count: 2026-06-30, usage_window: 2026-06-30 }',
+      'parameters:',
+      '  - { name: year, required: 2026-06-30T00:00:00Z }',
+      'released: 2026-06-15',
+      "looks_like: '2026-06-30T14:00:00Z'",
+    ].join('\n'),
+  );
+  const first = importBundle(files);
+  const exported = exportBundle(first);
+  const second = importBundle(exported);
+
+  it('reproduces the graph exactly', () => {
+    expect(semantic(second.quads)).toBe(semantic(first.quads));
+  });
+
+  it('keeps each date typed, with or without an offset, and each quoted string plain', () => {
+    const ext = (key: string) => objs(second.quads, okfExtensionPredicate('executor', key));
+    expect(ext('last_run')).toEqual([DT('2026-06-30T14:00:00Z')]);
+    expect(ext('local')).toEqual([DT('2026-07-01T00:00:00')]);
+    expect(ext('day')).toEqual([DAY('2026-06-15')]);
+    expect(ext('quoted')).toEqual(['"2026-06-15"']);
+    expect(objs(second.quads, 'http://schema.org/released')).toEqual([DAY('2026-06-15')]);
+    expect(objs(second.quads, 'http://schema.org/looksLike')).toEqual(['"2026-06-30T14:00:00Z"']);
+    const typedDates = (quads: Quad[]) => quads.filter((q) => q.object.endsWith(`^^<${XSD_DATE}>`) || q.object.includes('XMLSchema#dateTime>')).length;
+    expect(typedDates(second.quads)).toBe(typedDates(first.quads));
+  });
+
+  it('writes those dates unquoted and every date-looking string quoted', () => {
+    const text = exported.find((f) => f.path === 'metrics/revenue.md')!.content;
+    for (const line of ['last_run: 2026-06-30T14:00:00Z', 'local: 2026-07-01T00:00:00', 'day: 2026-06-15', 'until: 2026-12-31', 'usage_count: 2026-06-30', 'usage_window: 2026-06-30', 'required: 2026-06-30T00:00:00Z', 'released: 2026-06-15']) {
+      expect(text).toContain(line);
+    }
+    expect(text).toContain("quoted: '2026-06-15'");
+    expect(text).toContain("looksLike: '2026-06-30T14:00:00Z'");
+    // a date field types its text on import, so it is written as text
+    expect(text).toContain("at: '2026-06-30T14:00:00Z'");
+  });
 });

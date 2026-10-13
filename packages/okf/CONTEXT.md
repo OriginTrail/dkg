@@ -235,7 +235,12 @@ it; the CLI summary reports it against the current time.
   UTC (same instant — the deployed store canonicalises xsd:dateTime the same
   way). Staleness reads an offset-less value as UTC, and a timestamp in a text
   field or inside a value kept verbatim is written as its original text, so
-  nothing depends on the machine's time zone.
+  nothing depends on the machine's time zone. On export, a date field is
+  written as text (its import types the text again), while a typed date
+  anywhere else (a family extension, a producer key, a value kept verbatim
+  under its generic predicate) is written as an unquoted YAML timestamp,
+  exactly as stored: there only YAML itself can say the value is a date, and
+  a quoted one would re-import as a plain literal.
 - **Actors are literals, not IRIs.** Minting `urn:okf:actor:human:x` nodes would
   let a later layer link actors to DIDs / wallets, but the convention is a string
   and IRI-encoding `@`, spaces or `%` adds an invertibility problem for no

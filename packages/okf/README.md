@@ -134,7 +134,11 @@ citations) and producer keys come back in canonical order (a value kept
 verbatim as one JSON literal keeps its own), a repeated list value
 (`tags: [a, a]`) comes back once, concept paths come back in the recommended
 absolute `/path.md` form, and an unquoted timestamp with an offset is folded to
-UTC (same instant).
+UTC (same instant). A typed date keeps its type: a date field (`generated.at`,
+`stale_after`, …) is written as text, which its import types again, and a date
+anywhere else (a family extension, a producer key, a value kept verbatim) is
+written as an unquoted YAML timestamp, exactly as stored, so YAML carries the
+type; a quoted date-looking string stays a quoted string.
 
 ### Diagnostics
 

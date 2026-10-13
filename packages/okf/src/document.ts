@@ -22,8 +22,8 @@
 import * as jsYaml from 'js-yaml';
 import type { OkfDocument } from './types.js';
 import { pathToConceptId } from './paths.js';
-import { isXsdDate, isXsdDateTime } from './trust.js';
-import { withYamlLexical } from './yaml-lexical.js';
+import { dateTimeLexical, isXsdDate, isXsdDateTime } from './trust.js';
+import { withYamlLexical, yamlLexicalOf } from './yaml-lexical.js';
 
 /** js-yaml's built-in timestamp type (exported at runtime, absent from its type declarations). */
 const BUILTIN_TIMESTAMP = (jsYaml as unknown as {
@@ -41,16 +41,36 @@ const BUILTIN_TIMESTAMP = (jsYaml as unknown as {
  * diagnosed and typed the same quoted or not. Valid values with an offset keep
  * their usual UTC canonical form.
  */
+function constructTimestamp(data: string): Date | string {
+  return isXsdDateTime(data) || isXsdDate(data) ? withYamlLexical(BUILTIN_TIMESTAMP.construct(data), data) : data;
+}
+
 const OKF_TIMESTAMP = new jsYaml.Type('tag:yaml.org,2002:timestamp', {
   kind: 'scalar',
   resolve: (data: string) => BUILTIN_TIMESTAMP.resolve(data),
-  construct: (data: string) =>
-    isXsdDateTime(data) || isXsdDate(data) ? withYamlLexical(BUILTIN_TIMESTAMP.construct(data), data) : data,
+  construct: constructTimestamp,
   instanceOf: Date,
+  // Written unquoted, as the text it carries (a value read from RDF carries
+  // its stored lexical), else in canonical form.
+  represent: (date: object) => yamlLexicalOf(date) ?? dateTimeLexical(date) ?? (date as Date).toISOString(),
 });
 
-/** js-yaml's default schema with the validated timestamp type in place of the built-in one. */
-const OKF_SCHEMA = jsYaml.DEFAULT_SCHEMA.extend({ implicit: [OKF_TIMESTAMP] });
+/**
+ * js-yaml's default schema with the validated timestamp type in place of the
+ * built-in one, for reading frontmatter and for writing it on export.
+ */
+export const OKF_YAML_SCHEMA = jsYaml.DEFAULT_SCHEMA.extend({ implicit: [OKF_TIMESTAMP] });
+
+/**
+ * What the unquoted YAML scalar `text` reads as when it is a timestamp: a
+ * `Date` carrying `text`, as `parseDocument` builds it, or `null` when YAML
+ * would read it as anything else.
+ */
+export function yamlTimestamp(text: string): Date | null {
+  if (!BUILTIN_TIMESTAMP.resolve(text)) return null;
+  const value = constructTimestamp(text);
+  return value instanceof Date ? value : null;
+}
 
 const DELIM = '---';
 
@@ -94,7 +114,7 @@ export function parseDocument(bundlePath: string, text: string): OkfDocument {
   const fmText = lines.slice(1, endIdx).join('\n');
   let parsed: unknown;
   try {
-    parsed = jsYaml.load(fmText, { schema: OKF_SCHEMA }) ?? {};
+    parsed = jsYaml.load(fmText, { schema: OKF_YAML_SCHEMA }) ?? {};
   } catch (err) {
     throw new OkfDocumentError(
       `Invalid YAML frontmatter in ${bundlePath}: ${(err as Error).message}`,

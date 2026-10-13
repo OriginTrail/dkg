@@ -28,8 +28,10 @@ import { exportBundle, importBundle, loadBundleDir, parseDocument, quadsToNQuads
  * An OKF v0.2 bundle that stresses what storage could break: three entries in
  * every list family (order), a source naming another concept (lineage), a
  * scope-descriptor source, extension keys with a space and non-ASCII
- * characters, and a nested producer object whose strings carry a double
- * quote, a backslash, a newline, non-ASCII text and an astral character.
+ * characters, unquoted dates outside a date field (a family extension and a
+ * producer key, which only YAML can type), and a nested producer object whose
+ * strings carry a double quote, a backslash, a newline, non-ASCII text and an
+ * astral character.
  * Values are already canonical (Z offsets, integers) so store canonicalisation
  * cannot legitimately change them.
  */
@@ -46,6 +48,7 @@ const V02_FILES: Record<string, string> = {
     '  - { by: reference_agent/gemini-2.5-pro, at: 2026-07-03T02:00:00Z, note: re-run }',
     'status: draft',
     'stale_after: 2026-12-31T00:00:00Z',
+    'released: 2026-06-15',
     'sources:',
     '  - { id: policy, resource: /v02rt/policy.md, title: Revenue policy, author: human:jsmith@acme }',
     '  - id: dashboard',
@@ -76,7 +79,7 @@ const V02_FILES: Record<string, string> = {
     '  - { name: region, type: string, required: false }',
     '  - { name: segment, type: string, required: false, default: all }',
     'computation: references/sql/revenue.sql',
-    'executor: { resource: /v02rt/skill.md, receipt: [job_id, executed_sql, result], timeout_s: 30 }',
+    'executor: { resource: /v02rt/skill.md, receipt: [job_id, executed_sql, result], timeout_s: 30, last_run: 2026-06-30T14:00:00Z, since: 2026-06-15 }',
     'attester: { resource: references/attesters/sql_equality.py }',
     '---',
     '',
@@ -253,7 +256,11 @@ describe.sequential('OKF subgraph lifecycle roundtrip', { timeout: 120_000 }, ()
     const computation = parseDocument('v02rt/computation.md', storeExport['v02rt/computation.md']).frontmatter;
     expect(computation.type).toBe('Attested Computation');
     expect((computation.parameters as Array<{ name: string }>).map((param) => param.name)).toEqual(['year', 'region', 'segment']);
-    expect(computation.executor).toEqual({ resource: '/v02rt/skill.md', receipt: ['executed_sql', 'job_id', 'result'], timeout_s: 30 });
+    expect(computation.executor).toMatchObject({ resource: '/v02rt/skill.md', receipt: ['executed_sql', 'job_id', 'result'], timeout_s: 30 });
+    // Dates outside a date field come back unquoted, so re-import types them again.
+    expect(storeExport['v02rt/computation.md']).toContain('last_run: 2026-06-30T14:00:00Z');
+    expect(storeExport['v02rt/computation.md']).toContain('since: 2026-06-15');
+    expect(storeExport['v02rt/metric.md']).toContain('released: 2026-06-15');
 
     // Re-importing the store export reproduces the original graph.
     expect(semantic(importBundle(loadBundleDir(output)).quads)).toBe(semantic(offline.quads));

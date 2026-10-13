@@ -11,7 +11,7 @@
 import { okfExtensionKey } from '../extensions.js';
 import { genericPredicate } from '../terms.js';
 import { dict } from '../utils.js';
-import { accumulate, byNodeIndex, orderKeys, termValue, type ExportContext } from '../decode-terms.js';
+import { accumulate, byNodeIndex, orderKeys, termValue, type ExportContext, type TermForm } from '../decode-terms.js';
 import type { Quad } from '../types.js';
 import {
   FAMILY_SPECS,
@@ -30,6 +30,11 @@ function fieldByPredicate(spec: MappingFamilySpec | ListFamilySpec): ReadonlyMap
     FIELD_BY_PREDICATE.set(spec, map);
   }
   return map;
+}
+
+/** How a field's value is written back: a date field's import re-types its text, a path field's names a concept. */
+function formOf(field: FieldSpec): TermForm {
+  return field.kind === 'date' || field.kind === 'path' ? field.kind : 'value';
 }
 
 /** Set-valued fields come back sorted: strings by value, a kept-verbatim structure by its JSON. */
@@ -65,7 +70,7 @@ function decodeFields(
   for (const q of quads) {
     const field = byPredicate.get(q.predicate);
     if (!field) continue;
-    const decoded = termValue(q.object, ctx, field.kind === 'path');
+    const decoded = termValue(q.object, ctx, formOf(field));
     if (field.kind === 'text-list') (lists[field.key] ??= []).push(decoded);
     else fields[field.key] = decoded; // single-valued: last wins
   }
@@ -111,7 +116,7 @@ function decodeEntry(
 function decodeScalar(spec: ScalarFamilySpec, quads: readonly Quad[], ctx: ExportContext): { value: unknown } | null {
   let found: { value: unknown } | null = null;
   for (const q of quads) {
-    if (q.predicate === spec.field.predicate) found = { value: termValue(q.object, ctx, spec.field.kind === 'path') };
+    if (q.predicate === spec.field.predicate) found = { value: termValue(q.object, ctx, formOf(spec.field)) };
   }
   return found;
 }

@@ -25,6 +25,7 @@
  */
 
 import { dump as dumpYaml } from 'js-yaml';
+import { OKF_YAML_SCHEMA } from './document.js';
 import {
   RDF_TYPE,
   SCHEMA_NS,
@@ -163,7 +164,8 @@ function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportConte
         frontmatter.resource = termValue(q.object, ctx);
         break;
       case SCHEMA_DATE_MODIFIED:
-        dateModified = termValue(q.object, ctx);
+        // `timestamp` / `generated.at`: a date field, which types its text on import.
+        dateModified = termValue(q.object, ctx, 'date');
         break;
       case SCHEMA_KEYWORDS: {
         const v = literalValue(q.object);
@@ -209,7 +211,8 @@ function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportConte
 
   const ordered = orderKeys(frontmatter, CONCEPT_KEY_ORDER);
 
-  const yaml = dumpYaml(ordered, { sortKeys: false, lineWidth: -1 }).trimEnd();
+  // The OKF schema writes a typed date read back as a `Date` unquoted, exactly as stored.
+  const yaml = dumpYaml(ordered, { schema: OKF_YAML_SCHEMA, sortKeys: false, lineWidth: -1 }).trimEnd();
 
   const bodyParts: string[] = [];
   const uniqueEdges = [...new Set(edges)].sort();

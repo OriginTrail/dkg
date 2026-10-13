@@ -3,12 +3,26 @@
  * fields (`export.ts`) and the family decoder (`families/decode.ts`).
  */
 
-import { RDF_JSON, XSD_BOOLEAN, XSD_DECIMAL, XSD_INTEGER } from './constants.js';
+import { RDF_JSON, XSD_BOOLEAN, XSD_DATE, XSD_DATE_TIME, XSD_DECIMAL, XSD_INTEGER } from './constants.js';
+import { yamlTimestamp } from './document.js';
 import { dict } from './utils.js';
 
 const LITERAL_RE = /^("(?:\\.|[^"\\])*")(?:\^\^<[^>]*>|@[A-Za-z-]+)?$/;
 const TYPED_LITERAL_RE = /^("(?:\\.|[^"\\])*")\^\^<([^>]*)>$/;
 const NODE_INDEX_RE = /_(\d+)$/;
+
+/**
+ * How a decoded value is written back, by what its import does with it:
+ *
+ *   - `value`: the value's own YAML type decides its datatype (a producer key,
+ *     a family extension, a field that fell back to the generic encoding), so a
+ *     typed date is written as a YAML timestamp;
+ *   - `date`: a date field, whose import types the text itself, so it is
+ *     written as text;
+ *   - `path`: a path-valued field, so an exported concept's IRI is written as
+ *     its bundle path.
+ */
+export type TermForm = 'value' | 'date' | 'path';
 
 /** What one export run knows: the IRI namespace and the exact set of concept IRIs being written. */
 export interface ExportContext {
@@ -27,13 +41,17 @@ export function literalValue(term: string): string | null {
 
 /**
  * Recover the native value of a known typed literal so producer-defined
- * numeric / boolean / object keys survive the round-trip. Import maps `count: 3`
- * → `"3"^^xsd:integer` and `{a: 1}` → `"{\"a\":1}"^^rdf:JSON`; without this,
- * export would emit YAML strings, which re-import as plain literals (datatype
- * and structure lost). Returns `null` for unknown datatypes / plain literals
- * so callers fall back to the lexical string.
+ * numeric / boolean / date / object keys survive the round-trip. Import maps
+ * `count: 3` → `"3"^^xsd:integer`, an unquoted `2026-06-15` →
+ * `"2026-06-15"^^xsd:date` and `{a: 1}` → `"{\"a\":1}"^^rdf:JSON`; without
+ * this, export would emit YAML strings, which re-import as plain literals
+ * (datatype and structure lost). A date comes back as the `Date` its stored
+ * lexical reads as unquoted, which the export schema writes unquoted, exactly
+ * as stored. Returns `null` for unknown datatypes / plain literals (and for a
+ * date in a date field, `form` `date`) so callers fall back to the lexical
+ * string.
  */
-function typedValue(term: string): { value: unknown } | null {
+function typedValue(term: string, form: TermForm): { value: unknown } | null {
   const m = term.match(TYPED_LITERAL_RE);
   if (!m) return null;
   const lexical = JSON.parse(m[1]) as string;
@@ -55,6 +73,12 @@ function typedValue(term: string): { value: unknown } | null {
         return null;
       }
     }
+    case XSD_DATE_TIME:
+    case XSD_DATE: {
+      if (form === 'date') return null;
+      const date = yamlTimestamp(lexical);
+      return date ? { value: date } : null;
+    }
     default:
       return null;
   }
@@ -65,21 +89,22 @@ export function conceptIdFromIri(iri: string, iriBase: string): string | null {
 }
 
 /**
- * Object term → YAML value. Literals become their typed native value or lexical
- * string; IRIs are written as given, except that for path-valued fields
- * (`pathForm`) an IRI that is one of the exported concepts is written back as
- * its recommended absolute bundle path `/<conceptId>.md` (SPEC §6.1/§6.2).
+ * Object term → YAML value (see `TermForm`). Literals become their typed native
+ * value or lexical string; IRIs are written as given, except that for
+ * path-valued fields (`path`) an IRI that is one of the exported concepts is
+ * written back as its recommended absolute bundle path `/<conceptId>.md`
+ * (SPEC §6.1/§6.2).
  * Membership is checked against the exported concept set, not just the IRI
  * namespace: with `iriBase: "https://example.org/"` an external
  * `https://example.org/docs/external` source must survive verbatim, or
  * re-import would read a broken path and lose its `prov:wasDerivedFrom` edge.
  */
-export function termValue(term: string, ctx: ExportContext, pathForm = false): unknown {
+export function termValue(term: string, ctx: ExportContext, form: TermForm = 'value'): unknown {
   if (term.startsWith('"')) {
-    const typed = typedValue(term);
+    const typed = typedValue(term, form);
     return typed ? typed.value : (literalValue(term) ?? term);
   }
-  if (pathForm && ctx.conceptIris.has(term)) {
+  if (form === 'path' && ctx.conceptIris.has(term)) {
     const id = conceptIdFromIri(term, ctx.iriBase);
     if (id !== null) return `/${id}.md`;
   }
