@@ -2074,6 +2074,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       !state
       || state.membershipHash !== membershipHash
       || state.recipientRouteHash !== recipientRouteHash
+      || state.chainKeyMatchesIndex !== true
     ) {
       const pruned = this.prunePendingSenderKeysForEpochRotation({
         contextGraphId: input.contextGraphId,
@@ -2107,8 +2108,13 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       });
     }
 
+    // Shares into one graph overlap. Each takes its key and index here, before the next
+    // await, so that no two encrypt with the same pair and the key keeps step with the index.
+    const { chainKey, nextMessageIndex: messageIndex } = state;
+    state.chainKey = ratchetSwmSenderChainKey(chainKey);
+    state.nextMessageIndex = messageIndex + 1;
     const encrypted = await encryptSwmSenderKeyMessage({
-      chainKey: state.chainKey,
+      chainKey,
       plaintext: input.plaintext,
       senderSigningSecretKey: state.senderSigningSecretKey,
       contextGraphId: state.contextGraphId,
@@ -2116,10 +2122,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       senderAgentAddress: state.senderAgentAddress,
       epochId: state.epochId,
       membershipHash: state.membershipHash,
-      messageIndex: state.nextMessageIndex,
+      messageIndex,
     });
-    state.chainKey = encrypted.nextChainKey;
-    state.nextMessageIndex += 1;
     await this.saveSwmSenderKeyState();
     this.logSwmSenderKeyDebugEncryptedPayload(ctx, encrypted.message);
 
@@ -2157,6 +2161,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         subGraphName: input.subGraphName,
         recipients: input.recipients,
       }),
+      chainKeyMatchesIndex: true,
       chainKey,
       nextMessageIndex: 0,
       senderSigningSecretKey: senderSigningKeypair.secretKey,

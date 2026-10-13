@@ -143,12 +143,10 @@ export type LocalSwmSenderKeySendState = {
   senderAgentAddress: string;
   epochId: string;
   membershipHash: string;
-  /**
-   * Exact transport-route snapshot seeded for this epoch. Optional only for
-   * sender state persisted before route-aware epoch rotation was introduced;
-   * such legacy state rotates once before it can be reused.
-   */
+  /** Exact transport-route snapshot seeded for this epoch. State saved before route-aware rotation has none and rotates once. */
   recipientRouteHash?: string;
+  /** Set on an epoch whose `chainKey` is always the key of `nextMessageIndex`. State saved without it rotates once. */
+  chainKeyMatchesIndex?: true;
   chainKey: Uint8Array;
   nextMessageIndex: number;
   senderSigningSecretKey: Uint8Array;
