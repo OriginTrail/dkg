@@ -4,7 +4,7 @@ import { EntitySearchError, checkDeadline, unitVector, type EntityDocument, type
 import { documentKey } from './documents.js';
 
 export interface IndexState {
-  id: string; spec: EntityIndexSpec; fingerprint: string; generation: number;
+  id: string; spec: EntityIndexSpec; fingerprint: string;
   cursor: string | null; scanComplete: boolean; completedAt: string | null;
 }
 export class EntityIndexStore {
@@ -17,18 +17,29 @@ export class EntityIndexStore {
       && !this.db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'entity_scan_documents'").get();
     this.db.exec(`CREATE TABLE IF NOT EXISTS entity_indexes (id TEXT PRIMARY KEY, state TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS entity_documents (index_id TEXT NOT NULL, entity_key TEXT NOT NULL,
-        document TEXT NOT NULL, vector TEXT NOT NULL, generation INTEGER NOT NULL,
+        document TEXT NOT NULL, vector TEXT NOT NULL,
         PRIMARY KEY(index_id, entity_key));
       CREATE TABLE IF NOT EXISTS entity_scan_documents (index_id TEXT NOT NULL, entity_key TEXT NOT NULL,
-        document TEXT NOT NULL, vector TEXT NOT NULL, generation INTEGER NOT NULL,
+        document TEXT NOT NULL, vector TEXT NOT NULL,
         PRIMARY KEY(index_id, entity_key));`);
+    // Compatibility only: table membership now owns unfinished/completed scans.
+    this.db.transaction(() => {
+      for (const table of ['entity_documents', 'entity_scan_documents']) {
+        const columns = this.db.pragma(`table_info(${table})`) as Array<{ name: string }>;
+        if (columns.some(column => column.name === 'generation')) this.db.exec(`ALTER TABLE ${table} DROP COLUMN generation`);
+      }
+      for (const row of this.db.prepare('SELECT state FROM entity_indexes').all() as Array<{ state: string }>) {
+        const state = JSON.parse(row.state) as IndexState & { generation?: number };
+        if ('generation' in state) { delete state.generation; this.save(state); }
+      }
+    })();
     if (legacy) {
       // Older partial scans mixed generations in the completed table. Revisit
       // their cursor from the start so publication never drops the first pages.
       this.db.transaction(() => {
         for (const row of this.db.prepare('SELECT state FROM entity_indexes').all() as Array<{ state: string }>) {
           const state: IndexState = JSON.parse(row.state);
-          if (!state.scanComplete) this.begin({ ...state, generation: state.generation + 1, cursor: null });
+          if (!state.scanComplete) this.begin({ ...state, cursor: null });
         }
       })();
     }
@@ -65,8 +76,8 @@ export class EntityIndexStore {
       .get(state.id) as { n: number }).n;
     if (count >= this.capacity && !this.db.prepare('SELECT 1 FROM entity_scan_documents WHERE index_id = ? AND entity_key = ?')
       .get(state.id, key)) throw new EntitySearchError('ENTITY_INDEX_CAPACITY', 422);
-    this.db.prepare('INSERT OR REPLACE INTO entity_scan_documents VALUES (?, ?, ?, ?, ?)')
-      .run(state.id, key, JSON.stringify(doc), JSON.stringify(vector), state.generation);
+    this.db.prepare('INSERT OR REPLACE INTO entity_scan_documents VALUES (?, ?, ?, ?)')
+      .run(state.id, key, JSON.stringify(doc), JSON.stringify(vector));
   }
   finish(state: IndexState): void {
     this.db.transaction(() => {
