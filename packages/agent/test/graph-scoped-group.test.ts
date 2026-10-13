@@ -103,7 +103,7 @@ describe('group materialization fences and physical completion', () => {
     const newer = materializeVerifiedGraphScopedAsset({ store, asset: asset(2, 2) }).then(value => { newerSettled = true; return value; });
     await new Promise(r => setTimeout(r, 20));
     expect(dispatchedSignal).toBeUndefined(); expect(settled).toBe(false); expect(newerSettled).toBe(false);
-    release.resolve(); expect(await result).toBe('owned job cancelled'); expect(await newer).toBe('applied');
+    release.resolve(); expect(await result).toBe('applied'); expect(await newer).toBe('applied');
     expect(await store.query('SELECT ?o WHERE { GRAPH <urn:data:2> { ?s <urn:value> ?o } }'))
       .toMatchObject({ bindings: [{ o: '"2"' }] });
   });

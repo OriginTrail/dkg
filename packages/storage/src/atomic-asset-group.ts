@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { assertSafeIri, assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
-import { assertReplacementPayload, assertSubjectReplacementPayload, buildAtomicGraphAndSubjectReplaceUpdate } from './atomic-graph-replace.js';
+import { assertReplacementPayload, assertSubjectReplacementPayload, formatGraphBlock } from './atomic-graph-replace.js';
 import type { Quad } from './triple-store.js';
 
 /** One atomic visibility boundary, independently bounded from a transport chunk. */
@@ -38,10 +38,17 @@ export function preflightAtomicAssetGroupLiterals(assets: readonly AtomicAssetRe
 export function buildAtomicAssetGroupUpdate(assets: readonly AtomicAssetReplacement[]) {
   validateAtomicAssetGroup(assets);
   preflightAtomicAssetGroupLiterals(assets);
-  const plans = assets.map(a => buildAtomicGraphAndSubjectReplaceUpdate(
-    a.graphUri, a.graphQuads, a.metaGraphUri, a.metadataSubject, a.metadataQuads));
-  const update = plans.map(p => p.update).join(';\n');
+  // Every caller promises whole-update atomicity; no staging is needed here.
+  const operations = assets.flatMap(a => [
+    `CLEAR SILENT GRAPH <${a.graphUri}>`,
+    `DELETE WHERE { GRAPH <${a.metaGraphUri}> { <${a.metadataSubject}> ?p ?o } }`,
+  ]);
+  const blocks = assets.flatMap(a => [
+    ...(a.graphQuads.length ? [formatGraphBlock(a.graphUri, a.graphQuads)] : []),
+    ...(a.metadataQuads.length ? [formatGraphBlock(a.metaGraphUri, a.metadataQuads)] : []),
+  ]);
+  if (blocks.length) operations.push(`INSERT DATA {\n${blocks.join('\n')}\n}`);
+  const update = operations.join(';\n');
   if (Buffer.byteLength(update) > ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES) throw new RangeError('Atomic asset group byte allowance exceeded');
-  return { update, cleanup: plans.map(p => p.cleanup).join(';\n'),
-    graphs: [...new Set(assets.flatMap(a => [a.graphUri, a.metaGraphUri]))] };
+  return { update, graphs: [...new Set(assets.flatMap(a => [a.graphUri, a.metaGraphUri]))] };
 }

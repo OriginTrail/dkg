@@ -92,6 +92,19 @@ describe('atomic asset group', () => {
     expect(await store.query(destinations)).toEqual(expected);
     await store.update(replay.cleanup); await store.close();
   });
+  it('rolls back a failed whole-update transaction without staging cleanup', async () => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert([...oldMembers(), unrelated]);
+      const before = await store.query(destinations);
+      const plan = buildAtomicAssetGroupUpdate([asset(1, 'new'), asset(2, 'new')]);
+      expect(plan.update).not.toContain('urn:dkg:internal:atomic-graph-replace:');
+      // CREATE fails because the existing metadata graph already exists, after
+      // all replacement statements have been submitted in the same request.
+      await expect(store.update(`${plan.update}; CREATE GRAPH <urn:meta>`)).rejects.toThrow();
+      expect(await store.query(destinations)).toEqual(before);
+    } finally { await store.close(); }
+  });
   it('bounds transaction size and asset count independently from a 100 MB transfer', () => {
     expect(() => buildAtomicAssetGroupUpdate([])).toThrow();
     expect(() => buildAtomicAssetGroupUpdate(Array.from({length:9},(_,i)=>asset(i,'x')))).toThrow();

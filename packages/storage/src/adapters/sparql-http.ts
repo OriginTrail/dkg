@@ -974,8 +974,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     const plan = buildAtomicAssetGroupUpdate(assets);
     statements.checkIris.replaceAssetGroup(assets);
     await this.runRemoteGraphMutation({ scope: { kind: 'graphs', graphs: plan.graphs },
-      update: plan.update, options: options ?? {}, operation: 'replaceAssetGroup',
-      cleanup: { update: plan.cleanup, options: options ?? {}, operation: 'replaceAssetGroup' } });
+      update: plan.update, options: options ?? {}, operation: 'replaceAssetGroup' });
   }
 
   async replaceGraphAndSubject(

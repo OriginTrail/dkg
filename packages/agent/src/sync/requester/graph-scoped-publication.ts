@@ -16,13 +16,16 @@ export async function executeGraphScopedPublication<T extends GraphScopedMateria
   const { assets, options, assertCurrent } = params;
   const apply = async (): Promise<T | 'quarantined'> => {
     assertCurrent();
+    // At most eight members, under the complete ordered lock set. Drain every
+    // preparation before inspecting results or releasing any member lock.
+    const prepared = await Promise.allSettled(assets.map(asset =>
+      prepareGraphScopedReplacementUnderLock({ store: params.store, asset, options,
+        assertCurrent, requireCurrentMetadata: params.requireCurrentMetadata })));
     const replacements: AtomicAssetReplacement[] = [];
-    for (const asset of assets) {
-      const replacement = await prepareGraphScopedReplacementUnderLock({
-        store: params.store, asset, options, assertCurrent, requireCurrentMetadata: params.requireCurrentMetadata,
-      });
-      if (!replacement) return params.stale();
-      replacements.push(replacement);
+    for (const result of prepared) {
+      if (result.status === 'rejected') throw result.reason;
+      if (!result.value) return params.stale();
+      replacements.push(result.value);
     }
     assertCurrent();
     // Once dispatched, publication and any quarantine drain under every lock.

@@ -78,7 +78,7 @@ export class PublicGraphSnapshotMethods extends EVMChainAdapterBase {
       const count = BigInt(countRaw);
       if (count > BigInt(PUBLIC_GRAPH_SNAPSHOT_MAX_ASSETS))
         throw new Error("Snapshot inventory exceeds bound");
-      const assets: PublicGraphSnapshot["assets"] = [];
+      const assets: PublicGraphSnapshot["assets"][number][] = [];
       const multicallCode = await provider.getCode(MULTICALL3_ADDRESS, number);
       const useMulticall =
         ethers.keccak256(multicallCode) === MULTICALL3_RUNTIME_CODE_HASH;
