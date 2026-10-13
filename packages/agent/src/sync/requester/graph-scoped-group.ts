@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-import { assertSafeIri } from '@origintrail-official/dkg-core';
-import { mergeSameVersionGraphKnowledgeAssetMetadataV1, overlayLocallyTrustedKnowledgeAssetControls,
-  withMaterializationLock } from '@origintrail-official/dkg-publisher';
+import { withMaterializationLock } from '@origintrail-official/dkg-publisher';
 import { UnsupportedTripleStoreCapabilityError, type AtomicAssetReplacement, type TripleStore,
   type QueryOptions } from '@origintrail-official/dkg-storage';
-import { readCurrentAssertionVersion } from '../../graph-scoped-assertion-version.js';
+import { prepareGraphScopedReplacementUnderLock } from './graph-scoped-replacement.js';
 import { filterOversizedSyncQuads } from '../oversize-filter.js';
 import type { VerifiedGraphScopedAsset, GraphScopedMaterializationOutcome } from './graph-scoped-materialization.js';
 
@@ -30,21 +28,12 @@ export async function materializeVerifiedGraphScopedGroup(params: {
   const apply = async (): Promise<GraphScopedMaterializationOutcome[]> => {
     const replacements: AtomicAssetReplacement[] = [];
     for (const asset of assets) {
-      assertCurrent();
-      const version = await readCurrentAssertionVersion(store, asset.metaGraph, asset.ual, options);
-      // A stale member cannot silently become acknowledged coverage for this snapshot.
-      if (version !== undefined && version > asset.assertionVersion) throw new Error('Materialization group has a newer local assertion');
-      let metadata = asset.metadataQuads;
-      if (version === asset.assertionVersion) {
-        const rows = await store.query(`SELECT ?predicate ?object WHERE { GRAPH <${assertSafeIri(asset.metaGraph)}> { <${assertSafeIri(asset.ual)}> ?predicate ?object } }`, options);
-        if (rows.type !== 'bindings' || rows.bindings.some(r => !r.predicate || !r.object)) throw new Error('Group metadata read unavailable');
-        metadata = mergeSameVersionGraphKnowledgeAssetMetadataV1(metadata, rows.bindings.map(r => ({
-          graph: asset.metaGraph, subject: asset.ual, predicate: r.predicate!, object: r.object!,
-        })));
-      }
-      metadata = await overlayLocallyTrustedKnowledgeAssetControls(store, asset.metaGraph, asset.ual, metadata, options);
-      replacements.push({ graphUri: asset.assertionGraph, graphQuads: asset.dataQuads,
-        metaGraphUri: asset.metaGraph, metadataSubject: asset.ual, metadataQuads: metadata });
+      const replacement = await prepareGraphScopedReplacementUnderLock({
+        store, asset, options, assertCurrent, requireCurrentMetadata: true,
+      });
+      // Singleton callers report stale; a group must reject before any write.
+      if (!replacement) throw new Error('Materialization group has a newer local assertion');
+      replacements.push(replacement);
     }
     assertCurrent();
     // Cancellation must drain the real dispatched transaction while retaining all locks.
