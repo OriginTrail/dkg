@@ -225,6 +225,12 @@ if [ "${SKIP_UI:-0}" != "1" ]; then
   register "node-ui-smoke" "node-ui" "$REPO_ROOT/scripts/devnet-test-node-ui-smoke.sh"
 fi
 
+# Group: issue-3198 — what one node shares must reach the others whatever the
+# literal looks like (a tab, a typed literal a store returns in another form)
+# and whichever store a node runs. The script FAILS on a devnet without a
+# Blazegraph node.
+register "issue-3198-content-shapes" "issue-3198" "$REPO_ROOT/scripts/devnet-test-issue-3198-content-shapes.sh"
+
 # Group: soak (LONG)
 if [ "${SKIP_SOAK:-0}" != "1" ]; then
   SOAK_RECIPIENT_PEER=$(curl -sf -H "Authorization: Bearer $AUTH" \

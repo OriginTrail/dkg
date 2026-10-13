@@ -10,6 +10,7 @@ import { summarizeComprehensive } from '../qa/comprehensive-result.mjs';
 const scripts = fileURLToPath(new URL('../..', import.meta.url));
 const suiteFiles = ['v10-rc-validation.sh', '_devnet-full-sweep.sh', 'devnet-test-rfc49-catalog-sampling.sh',
   'devnet-test-rc11-promote-crash-recovery.sh', 'devnet-test-rc11-shutdown-mid-publish.sh', 'devnet-test-rfc38-all.sh',
+  'devnet-test-issue-3198-content-shapes.sh',
   ...['hub-rotation', 'multi-rpc-failover', 'libp2p-tunables', 'cg-phonebook', 'ack-rejection-reasons'].map(p => `devnet-probe-${p}.sh`),
   'devnet-test-node-ui-smoke.sh', 'libp2p-soak-test.sh', 'devnet-swm-soak-gate.sh', 'devnet-soak-rs.sh'];
 
@@ -57,6 +58,23 @@ test('complete valid run succeeds and snapshots every registered suite before ex
   const plan = JSON.parse(readFileSync(join(dir, 'results/PLAN.json'), 'utf8'));
   assert.equal(plan.suites.length, suiteFiles.length);
   assert.ok(plan.suites.every(s => s.result === 'PENDING'));
+});
+
+test('the issue-3198 script has its own entry, after the node-ui smoke and before the soak', async t => {
+  // A run that stops at its first suite lists every later suite as NOT_RUN, with its command.
+  const dir = setup(t, { first: 'exit 1' });
+  assert.equal((await launch(dir, { FAIL_FAST: '1' }).done).status, 1);
+  const suites = matchingReports(dir).suites;
+  const group = suites.filter(s => s.group === 'issue-3198');
+  assert.deepEqual(group.map(s => s.id), ['issue-3198-content-shapes']);
+  for (const s of group) assert.equal(s.command, join(dir, 'scripts', `devnet-test-${s.id}.sh`));
+  const first = suites.findIndex(s => s.group === 'issue-3198');
+  assert.equal(suites[first - 1].group, 'node-ui');
+  assert.equal(suites[first + group.length].group, 'soak');
+  // It is not optional: no SKIP_* switch removes it from a run that reaches it.
+  const partial = setup(t, { first: 'exit 1' });
+  await launch(partial, { FAIL_FAST: '1', SKIP_UI: '1', SKIP_PROBES: '1', SKIP_RFC38_EXTRAS: '1', SKIP_RFC49: '1' }).done;
+  assert.deepEqual(matchingReports(partial).suites.filter(s => s.group === 'issue-3198').map(s => s.id), group.map(s => s.id));
 });
 
 test('missing-only run is incomplete and nonzero', async t => {

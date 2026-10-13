@@ -16,12 +16,26 @@
 #   scripts/devnet.sh stop
 #   scripts/devnet-blazegraph-native.sh stop           # <-- devnet.sh does NOT own this
 #
+# Stop it after every devnet: `devnet.sh start` deploys a new chain and wipes
+# each node's own store, but it cannot wipe a store it did not start. `start`
+# here therefore boots on an EMPTY journal (BLAZEGRAPH_KEEP_JOURNAL=1 keeps the
+# previous one), so a devnet never reads the graphs of the chain before it.
+#
+# Environment:
+#   BLAZEGRAPH_JAR           an existing standalone JAR to run, instead of
+#                            downloading one into .devnet/blazegraph-native
+#   BLAZEGRAPH_PORT          port to listen on (default 9999, loopback only);
+#                            start the devnet with the same DEVNET_BLAZEGRAPH_PORT
+#   BLAZEGRAPH_HEAP          JVM heap limit (default 1g)
+#   BLAZEGRAPH_NAMESPACES    namespaces to create (default "node3 node4")
+#   BLAZEGRAPH_KEEP_JOURNAL  1 = keep the journal of the previous run
+#
 # Commands: start (default) | stop | status
 set -u
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BZ_DIR="$REPO_ROOT/.devnet/blazegraph-native"
-JAR="$BZ_DIR/blazegraph-2.1.6.jar"
+JAR="${BLAZEGRAPH_JAR:-$BZ_DIR/blazegraph-2.1.6.jar}"
 PIDFILE="$BZ_DIR/blazegraph.pid"
 LOG="$BZ_DIR/blazegraph.log"
 PORT="${BLAZEGRAPH_PORT:-9999}"
@@ -58,14 +72,25 @@ seed_namespace() {
 
 cmd_start() {
   mkdir -p "$BZ_DIR"
-  if is_up; then log "already serving on :$PORT/$CTX"; else
+  if is_up; then
+    log "already serving on :$PORT/$CTX — its namespaces keep what an earlier devnet wrote; run '$0 stop' first for an empty store"
+  else
     command -v java >/dev/null 2>&1 || { log "FATAL: no 'java' on PATH (need a native JDK)"; exit 1; }
     if [ ! -f "$JAR" ]; then
+      [ -z "${BLAZEGRAPH_JAR:-}" ] || { log "FATAL: BLAZEGRAPH_JAR=$JAR does not exist"; exit 1; }
       log "downloading Blazegraph 2.1.6 JAR..."
       curl -fsSL --max-time 120 -o "$JAR" "$JAR_URL" || { log "FATAL: JAR download failed"; exit 1; }
     fi
-    log "booting native Blazegraph on :$PORT (host JVM: $(java -version 2>&1 | head -1))"
-    ( cd "$BZ_DIR" && java -server -Djetty.port="$PORT" -jar "$JAR" > "$LOG" 2>&1 & echo $! > "$PIDFILE" )
+    if [ "${BLAZEGRAPH_KEEP_JOURNAL:-0}" != "1" ] && [ -f "$BZ_DIR/blazegraph.jnl" ]; then
+      rm -f "$BZ_DIR/blazegraph.jnl"
+      log "removed the journal of the previous run"
+    fi
+    log "booting native Blazegraph on 127.0.0.1:$PORT (host JVM: $(java -version 2>&1 | head -1))"
+    # `exec` makes the recorded pid the JVM itself (not a wrapper shell that
+    # `stop` would kill while the JVM lives on), and leaves no process holding
+    # the caller's stdout once this script returns.
+    ( cd "$BZ_DIR" && exec nohup java -server -Xmx"${BLAZEGRAPH_HEAP:-1g}" -Djetty.host=127.0.0.1 -Djetty.port="$PORT" -jar "$JAR" > "$LOG" 2>&1 < /dev/null ) &
+    echo $! > "$PIDFILE"
     local i
     for i in $(seq 1 40); do is_up && break; sleep 2; done
     is_up || { log "FATAL: not ready after 80s — see $LOG"; tail -8 "$LOG"; exit 1; }
@@ -73,18 +98,25 @@ cmd_start() {
   fi
   local ns
   for ns in $NAMESPACES; do seed_namespace "$ns" || exit 1; done
-  log "OK — start the devnet with: DEVNET_BLAZEGRAPH_CTX=$CTX scripts/devnet.sh start 6"
+  if [ "$PORT" = "9999" ]; then
+    log "OK — start the devnet with: DEVNET_BLAZEGRAPH_CTX=$CTX scripts/devnet.sh start 6"
+  else
+    log "OK — start the devnet with: DEVNET_BLAZEGRAPH_PORT=$PORT DEVNET_BLAZEGRAPH_CTX=$CTX scripts/devnet.sh start 6"
+  fi
 }
 
 cmd_stop() {
-  if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-    kill "$(cat "$PIDFILE")" 2>/dev/null && log "stopped (pid $(cat "$PIDFILE"))"
-    rm -f "$PIDFILE"
-  else
-    # Robust fallback: any host-JVM blazegraph JAR (covers a manually-started one).
-    pkill -f "blazegraph.*\.jar" 2>/dev/null && log "stopped (pkill blazegraph*.jar)" || log "not running"
-    rm -f "$PIDFILE"
-  fi
+  # Stop the JVM that listens on OUR port (whoever started it) and the one this
+  # script recorded. Another Blazegraph on this host, on another port, belongs
+  # to somebody else and is never signalled.
+  local pid stopped=""
+  for pid in $({ lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null; cat "$PIDFILE" 2>/dev/null; } | sort -u); do
+    case "$(ps -p "$pid" -o args= 2>/dev/null)" in
+      *java*.jar*) kill "$pid" 2>/dev/null && stopped="$stopped $pid" ;;
+    esac
+  done
+  if [ -n "$stopped" ]; then log "stopped (pid$stopped)"; else log "not running"; fi
+  rm -f "$PIDFILE"
 }
 
 cmd_status() {

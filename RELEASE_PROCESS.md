@@ -65,6 +65,14 @@ git pull --ff-only origin main
 git rev-parse --short HEAD
 ```
 
+The devnet of this gate must have a node on Blazegraph. `devnet.sh start` puts nodes 3 and 4 on it when Docker can run the pinned image and otherwise falls back to Oxigraph with a note; the suite's `issue-3198-content-shapes` entry fails on such a devnet, because a store that returns a literal in another form than it was given is exactly what an all-Oxigraph devnet cannot show. Where the image cannot run (Apple silicon), start the native server before the devnet, add `DEVNET_BLAZEGRAPH_CTX=blazegraph` to the `devnet.sh start` line below, and stop it after `devnet.sh stop`:
+
+```bash
+BLAZEGRAPH_JAR=/path/to/blazegraph.jar ./scripts/devnet-blazegraph-native.sh start
+# ... the gate, with DEVNET_BLAZEGRAPH_CTX=blazegraph on the start line ...
+./scripts/devnet-blazegraph-native.sh stop
+```
+
 Run the comprehensive devnet suite on that checkout:
 
 ```bash
