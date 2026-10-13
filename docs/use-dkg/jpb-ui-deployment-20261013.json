@@ -39,7 +39,8 @@
     "graphContinuation": {
       "entitiesBefore": 5,
       "entitiesAfter": 9,
-      "moreDataNoticeVisible": true
+      "moreDataNoticeVisible": true,
+      "countScope": "Standalone entities visible in the graph panel; total loaded graph entities include connected and reference nodes."
     },
     "assertionTabReturnReady": true,
     "at": "2026-10-13T15:40:48.917Z"
