@@ -3,7 +3,7 @@ import { createOperationContext, createGraphKnowledgeAssetScope, knowledgeAssetL
 import { quadsToNQuads } from '@origintrail-official/dkg-storage';
 import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
 import { SyncVerifyWorker } from '../src/sync-verify-worker.js';
-import { createExactBatchAssetVerifier } from '../src/sync/requester/exact-batch-stream.js';
+import { createAssetPayloadVerifier } from '../src/sync/requester/asset-payload-verifier.js';
 import { BulkCommitGroup } from '../src/sync/requester/bulk-commit-group.js';
 import { encodeNegotiatedExactSyncResponse } from '../src/sync/wire-compression.js';
 import { estimateQuadHeapBytes } from '../src/sync/memory-telemetry.js';
@@ -20,7 +20,7 @@ describe('bulk group independent parsed heap fence', () => {
     const worker = new SyncVerifyWorker(), assets = [], stages = [];
     const cg = 'heap-fixture', address = '0x0000000000000000000000000000000000000001';
     const uals = [1, 2, 3].map(id => `did:dkg:base:84532/${address}/${id}`);
-    const verify = createExactBatchAssetVerifier({ contextGraphId: cg, assetUals: uals,
+    const verify = createAssetPayloadVerifier({ contextGraphId: cg, assetUals: uals,
       ctx: createOperationContext('sync'), parseAndFilter: worker.parseAndFilter.bind(worker),
       processDurableBatchInWorker: (data, meta, _ctx, accept, mode) => worker.processDurableBatch(data, meta, accept, mode),
     });
@@ -40,7 +40,7 @@ describe('bulk group independent parsed heap fence', () => {
           responseEncoding: 'gzip-nquads-v1', assetUals: [ual], phase: 'data',
         } });
         assets.push(await verify({ assetIndex: index, assetUal: ual, metadataBytes: metadata,
-          dataBytes: body, plainBytes: plain.length, chunkCount: Math.ceil(body.length / 65536) }));
+          dataBytes: plain }));
         stages.push({ index, path: 'fixture-consumed', chunks: Math.ceil(body.length / 65536), header: {
           encodedBytes: body.length, plainBytes: plain.length, offset: 0, digest: '0'.repeat(64), metadata: metadata.toString('base64'),
         } });

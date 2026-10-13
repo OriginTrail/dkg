@@ -474,10 +474,12 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
       assertQuadLiteralsMutf8Safe([...a.graphQuads, ...a.metadataQuads], { maxBytes: JAVA_WRITE_UTF_MAX_BYTES, label: 'replaceAssetGroup' });
       statements.checkIris.replaceGraphAndSubject(a.graphUri, a.graphQuads, a.metaGraphUri, a.metadataSubject, a.metadataQuads);
     }
-    const bulk = buildBulkAssetGroupPlan(assets);
-    if (bulk) {
-      let published = false;
-      try { await this.runStoreWork('replaceAssetGroup', options, async deadline => {
+    let published = false;
+    try {
+      const usedBulk = await this.runStoreWork('replaceAssetGroup', options, async deadline => {
+        // Keep serialized bodies owned by an admitted slot, never queued work.
+        const bulk = buildBulkAssetGroupPlan(assets);
+        if (!bulk) return false;
         const post = async (body: string, contentType: string) => {
           deadline.check();
           const response = await deadline.waitFor(fetch(this.url, { method: 'POST',
@@ -486,8 +488,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
           if (!response.ok) throw new Error(`Blazegraph bulk group failed (${response.status})`);
           return text;
         };
-        // All three stages occupy one scheduler admission and original operation deadline.
-        // No fallback is allowed after an upload or indeterminate publication.
+        // One admission/deadline; no fallback after an upload or uncertain publication.
         await post(bulk.nquads, 'application/n-quads');
         await post(bulk.update, SPARQL_UPDATE_CONTENT_TYPE);
         const response = await this.postReadQuery(bulk.receiptQuery,
@@ -497,13 +498,13 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
         if (receipt.type !== 'boolean' || !receipt.value) throw new Error('Bulk group publication receipt missing');
         published = true;
         await post(bulk.cleanup, SPARQL_UPDATE_CONTENT_TYPE);
-      }); } catch (error) {
-        // A confirmed transaction stays committed even if auxiliary cleanup or
-        // the enclosing deadline fails afterward. Drain the admission first,
-        // then let the caller account for it and quarantine revoked bindings
-        // while still holding its materialization locks. Never retry publication.
-        if (!published) throw error;
-      }
+        return true;
+      });
+      if (usedBulk) return;
+    } catch (error) {
+      // After receipt confirmation, drain cleanup/deadline failures and preserve
+      // committed progress for the caller under its materialization locks. No retry.
+      if (!published) throw error;
       return;
     }
     const plan = buildAtomicAssetGroupUpdate(assets);
