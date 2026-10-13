@@ -29,7 +29,26 @@ const FILE_PATTERN = /^[a-f0-9]{64}\.prepared$/;
 const TEMP_PATTERN = /^[a-f0-9]{64}\.prepared\.[a-f0-9-]{36}\.tmp$/;
 const TTL = 6 * 60 * 60 * 1_000;
 const digest = (value: string | Uint8Array) => createHash('sha256').update(value).digest('hex');
-const positive = (value: number, max: number) => Number.isSafeInteger(value) && value > 0 && value <= max;
+const positive = (value: unknown, max: number): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value > 0 && value <= max;
+
+interface ManifestV1 {
+  version: 1; key: string; createdAt: number; plainBytes: number; encodedBytes: number; sha256: string;
+}
+function encodeManifest(manifest: ManifestV1): Buffer {
+  return Buffer.from(JSON.stringify(manifest));
+}
+function decodeManifest(header: string, key: string, encodedBytes: number, now: number, ttlMs: number): ManifestV1 | null {
+  const value: unknown = JSON.parse(header);
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const m = value as Record<string, unknown>;
+  if (m.version !== 1 || m.key !== key || typeof m.createdAt !== 'number' || !Number.isSafeInteger(m.createdAt)
+    || m.createdAt > now || now - m.createdAt >= ttlMs
+    || !positive(m.plainBytes, EXACT_SYNC_GZIP_MAX_INFLATED_BYTES)
+    || !positive(m.encodedBytes, EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES) || m.encodedBytes !== encodedBytes
+    || typeof m.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(m.sha256)) return null;
+  return { version: 1, key: m.key, createdAt: m.createdAt, plainBytes: m.plainBytes,
+    encodedBytes: m.encodedBytes, sha256: m.sha256 };
+}
 
 export function resolvePreparedContentCacheConfig(config: PreparedContentCacheConfig | undefined, dataDir?: string) {
   if (config === undefined) return undefined;
@@ -120,12 +139,8 @@ export function createPreparedContentCache(
           if (length < 1 || length > HEADER_LIMIT || stat.size <= 4 + length) return null;
           const header = Buffer.alloc(length);
           if ((await handle.read(header, 0, length, 4)).bytesRead !== length) return null;
-          const manifest = JSON.parse(header.toString('utf8'));
-          if (manifest.version !== 1 || manifest.key !== key || !Number.isSafeInteger(manifest.createdAt)
-            || manifest.createdAt > Date.now() || Date.now() - manifest.createdAt >= ttlMs
-            || !positive(manifest.plainBytes, EXACT_SYNC_GZIP_MAX_INFLATED_BYTES)
-            || !positive(manifest.encodedBytes, EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES)
-            || manifest.encodedBytes !== stat.size - 4 - length) return null;
+          const manifest = decodeManifest(header.toString('utf8'), key, stat.size - 4 - length, Date.now(), ttlMs);
+          if (!manifest) return null;
           const body = Buffer.alloc(manifest.encodedBytes);
           if ((await handle.read(body, 0, body.length, 4 + length)).bytesRead !== body.length
             || digest(body) !== manifest.sha256) return null;
@@ -147,8 +162,8 @@ export function createPreparedContentCache(
       return run<void>(undefined, async () => {
         if (!positive(value.body.byteLength, EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES)
           || !positive(value.plainBytes, EXACT_SYNC_GZIP_MAX_INFLATED_BYTES)) return;
-        const header = Buffer.from(JSON.stringify({ version: 1, key, createdAt: Date.now(),
-          plainBytes: value.plainBytes, encodedBytes: value.body.byteLength, sha256: digest(value.body) }));
+        const header = encodeManifest({ version: 1, key, createdAt: Date.now(),
+          plainBytes: value.plainBytes, encodedBytes: value.body.byteLength, sha256: digest(value.body) });
         const size = 4 + header.byteLength + value.body.byteLength;
         if (header.byteLength > HEADER_LIMIT || size > maxBytes) return;
         const name = digest(key) + SUFFIX;

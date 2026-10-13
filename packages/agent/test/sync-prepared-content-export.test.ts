@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createPreparedContentCache, resolvePreparedContentCacheConfig } from '../src/sync/responder/prepared-content-cache.js';
+import { type PreparedContent, createPreparedContentCache, resolvePreparedContentCacheConfig } from '../src/sync/responder/prepared-content-cache.js';
 import { createBoundedExactAssetExportCache } from '../src/sync/responder/exact-asset-export-cache.js';
 import { exactAssetExportFixture as fixture } from './fixtures/exact-asset-export.js';
 
@@ -107,16 +107,39 @@ describe('prepared assertion reuse across responder restarts', () => {
   it('retains source revision fences and cancellation after disk IO', async () => {
     const f = fixture(3); let revision = 1;
     Object.assign(f.store, { getWriteRevision: () => ({ generation: revision, stable: true }) });
-    let value: any;
-    const preparedContentCache = { get: async () => value ?? null, put: async (_key: string, saved: any) => { value = saved; } };
+    let value: PreparedContent | undefined;
+    const preparedContentCache = { get: async () => value ?? null, put: async (_key: string, saved: PreparedContent) => { value = saved; } };
     const first = createBoundedExactAssetExportCache({ store: f.store, budget: f.budget, preparedContentCache });
     const cold = (await first.acquireEncoded(f))!; await cold.assertCurrent(); cold.release();
+    const baseline = f.budget.stats();
     const second = createBoundedExactAssetExportCache({ store: f.store, budget: f.budget,
-      preparedContentCache: { ...preparedContentCache, get: async () => { revision++; return value; } } });
+      preparedContentCache: { ...preparedContentCache, get: async () => { revision++; return value!; } } });
     await expect(second.acquireEncoded(f)).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_CHANGED' });
+    expect(f.budget.stats()).toEqual(baseline);
     const controller = new AbortController();
     const third = createBoundedExactAssetExportCache({ store: f.store, budget: f.budget,
-      preparedContentCache: { ...preparedContentCache, get: async () => { controller.abort(); return value; } } });
+      preparedContentCache: { ...preparedContentCache, get: async () => { controller.abort(); return value!; } } });
     await expect(third.acquireEncoded({ ...f, signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' });
+    expect(f.budget.stats()).toEqual(baseline);
   });
+});
+
+it('owns a cancelled prepared-read reservation until the disk read settles', async () => {
+  const f=fixture(3), controller=new AbortController();
+  let enter!:()=>void, finish!:()=>void;
+  const started=new Promise<void>(r=>{enter=r;}), held=new Promise<void>(r=>{finish=r;});
+  const baseline=f.budget.stats();
+  const cache=createBoundedExactAssetExportCache({store:f.store,budget:f.budget,
+    preparedContentCache:{get:async()=>{enter();await held;return null;},put:async()=>{}}});
+  let settled=false;
+  const pending=cache.acquireEncoded({...f,signal:controller.signal}).finally(()=>{settled=true;});
+  const rejected=expect(pending).rejects.toMatchObject({name:'AbortError'});
+  await started;
+  try {
+    const reserved=f.budget.stats();
+    expect(reserved.bytesEstimate).toBe(baseline.bytesEstimate+96*1024*1024);
+    controller.abort();await Promise.resolve();
+    expect(settled).toBe(false);expect(f.budget.stats()).toEqual(reserved);
+  } finally {finish();}
+  await rejected;expect(f.budget.stats()).toEqual(baseline);
 });
