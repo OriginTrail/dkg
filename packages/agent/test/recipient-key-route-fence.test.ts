@@ -434,6 +434,111 @@ describe('RecipientKeyRouteFence (GH#3067)', () => {
     });
   });
 
+  describe('a removal in flight that only its graph proves harmless', () => {
+    const keyWrite = (graph = DATA_GRAPH) => ({ quads: [quad(AGENT, DKG_ONTOLOGY.DKG_PUBLIC_ENCRYPTION_KEY, graph)] });
+
+    it.each([
+      // Settled, so the only write still in flight is the removal.
+      ['a key write on its graph has settled', (fence: RecipientKeyRouteFence) => { fence.begin(keyWrite())('changed'); }],
+      ['a key write on its graph was dispatched and changed nothing', (fence: RecipientKeyRouteFence) => { fence.begin(keyWrite())('unchanged'); }],
+      ['a key fact of its graph is noted directly', (fence: RecipientKeyRouteFence) => { fence.noteQuads(keyWrite().quads); }],
+    ])('is a pending key write once %s', async (_how, gainKey) => {
+      const fence = await readyFence();
+      const settle = fence.begin({ removals: [{ graph: DATA_GRAPH }] });
+      expect(fence.hasPendingWrites).toBe(false);
+      expect(fence.cacheable).toBe(true);
+      gainKey(fence);
+      expect(fence.hasPendingWrites).toBe(true);
+      expect(fence.cacheable).toBe(false);
+      settle('changed');
+      expect(fence.hasPendingWrites).toBe(false);
+    });
+
+    it('is a pending key write once a scan finds a key fact in its graph', async () => {
+      const graphs = [PROFILE_GRAPH];
+      const fence = new RecipientKeyRouteFence(scanStore(graphs).store);
+      await fence.ensureReady();
+      const settle = fence.begin({ removals: [{ graph: DATA_GRAPH }] });
+      expect(fence.hasPendingWrites).toBe(false);
+      // Something opaque changed the store, and the next scan finds a key fact in the graph being removed.
+      graphs.push(DATA_GRAPH);
+      fence.noteUnscopedWrite();
+      await fence.ensureReady();
+      expect(fence.hasPendingWrites).toBe(true);
+      expect(moved(fence, () => settle('changed'))).toBe(true);
+      expect(fence.hasPendingWrites).toBe(false);
+      expect(fence.cacheable).toBe(true);
+    });
+
+    it('is counted once, however many of its graphs gain a key fact', async () => {
+      const fence = await readyFence();
+      const settle = fence.begin({ removals: [{ graph: DATA_GRAPH }, { graph: 'urn:dkg:graph:second' }] });
+      fence.begin(keyWrite())('changed');
+      fence.begin(keyWrite('urn:dkg:graph:second'))('changed');
+      expect(fence.hasPendingWrites).toBe(true);
+      settle('changed');
+      expect(fence.hasPendingWrites).toBe(false);
+      // The count is back at zero, not below it: a later key write is pending while it is in flight.
+      const later = fence.begin(keyWrite());
+      expect(fence.hasPendingWrites).toBe(true);
+      later('changed');
+      expect(fence.hasPendingWrites).toBe(false);
+      expect(fence.cacheable).toBe(true);
+    });
+
+    it('ends memoizing when its outcome is unknown after its graph gained a key fact', async () => {
+      const fence = await readyFence();
+      const settle = fence.begin({ removals: [{ graph: DATA_GRAPH }] });
+      fence.begin(keyWrite())('changed');
+      settle('indeterminate');
+      expect(fence.hasPendingWrites).toBe(false);
+      expect(fence.cacheable).toBe(false);
+    });
+
+    it('ends memoizing when a key fact lands in a graph that it may still empty', async () => {
+      const fence = await readyFence();
+      fence.begin({ removals: [{ graph: DATA_GRAPH }] })('indeterminate');
+      expect(fence.cacheable).toBe(true);
+      // A key fact elsewhere is not at risk.
+      fence.begin(keyWrite('urn:dkg:graph:elsewhere'))('changed');
+      expect(fence.cacheable).toBe(true);
+      fence.begin(keyWrite())('changed');
+      expect(fence.cacheable).toBe(false);
+    });
+
+    it.each(['changed', 'unchanged'] as const)('leaves no trace on its graph when it settles %s', async (outcome) => {
+      const fence = await readyFence();
+      fence.begin({ removals: [{ graph: DATA_GRAPH }] })(outcome);
+      fence.begin(keyWrite())('changed');
+      expect(fence.hasPendingWrites).toBe(false);
+      expect(fence.cacheable).toBe(true);
+    });
+
+    it('is not watched when its subject or predicate already proves it harmless', async () => {
+      const fence = await readyFence();
+      const settle = fence.begin({
+        removals: [
+          { graph: DATA_GRAPH, subject: 'urn:dkg:job:1' },
+          { graph: DATA_GRAPH, predicate: MEMORY_LAYER },
+        ],
+      });
+      fence.begin(keyWrite())('changed');
+      expect(fence.hasPendingWrites).toBe(false);
+      settle('indeterminate');
+      expect(fence.cacheable).toBe(true);
+    });
+
+    it('gives up memoizing instead of remembering an unbounded number of graphs', async () => {
+      const fence = await readyFence();
+      for (let index = 0; index < 256; index += 1) {
+        fence.begin({ removals: [{ graph: `urn:dkg:graph:staging:${index}` }] })('indeterminate');
+      }
+      expect(fence.cacheable).toBe(true);
+      fence.begin({ removals: [{ graph: 'urn:dkg:graph:staging:one-more' }] })('indeterminate');
+      expect(fence.cacheable).toBe(false);
+    });
+  });
+
   describe('against a real store', () => {
     const stores: OxigraphStore[] = [];
     afterEach(async () => {

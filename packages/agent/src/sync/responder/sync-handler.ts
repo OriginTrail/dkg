@@ -114,6 +114,8 @@ interface RegisterSyncHandlerParams {
     remotePeerId: string,
     options?: { signal?: AbortSignal },
   ) => Promise<boolean>;
+  /** Called for every shared-memory request this node authorized; the requester follows that graph. */
+  onSharedMemoryRequestAuthorized?: (contextGraphId: string, remotePeerId: string) => void;
   /** Default absent. Experimental registrations reuse these exact owned resources. */
   onExperimentalExactBatchResources?: (resources: ExperimentalExactBatchResponderResources) => void;
   /**
@@ -708,6 +710,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         logWarn(createOperationContext('sync'), `Denied sync request for "${contextGraphId}" from peer ${peerId} (phase=${phase})`);
         return { kind: 'respond', bytes: new TextEncoder().encode(syncDeniedResponse) };
       }
+      if (isWorkspace) params.onSharedMemoryRequestAuthorized?.(contextGraphId, peerId);
       return { kind: 'authorized', authDurationMs };
     };
 

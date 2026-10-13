@@ -48,7 +48,8 @@ const expectedRfc64PublicCatalogReconciliationOutcomes = [
 ];
 
 if (
-  typeof root.DKGAgent !== 'function'
+  typeof root.resolveWorkingMemoryIdentityAliases !== 'function'
+  || typeof root.DKGAgent !== 'function'
   || typeof legacyAgent.DKGAgent !== 'function'
   || typeof legacyAgentBase.createListContextGraphsCacheInvalidatingStore !== 'function'
   || typeof legacyAgentPublish.createKnowledgeAssetVmPublishIntentKey !== 'function'
@@ -297,12 +298,14 @@ const blockedRfc64Modules = [
   'applied-catalog-authority-transition-v1.js',
   'catalog-semantic-authority-transition-v1.js',
   'public-catalog-native-errors-v1.js',
+  'projection-store-read-back-v1.js',
   'catalog-applied-head-coordinator-v1.js',
   'catalog-native-scoped-read-capability-v1-internal.js',
   'catalog-native-scoped-read-provider-v1.js',
   'catalog-head-lineage-v1.js',
   'catalog-limits-v1.js',
   'catalog-peers-v1.js',
+  'catalog-policy-decision-probe-v1.js',
   'catalog-transport-authorization-v1.js',
   'catalog-transport-wire-v1-internal.js',
   'control-envelope-signer-v1.js',
@@ -347,6 +350,8 @@ const blockedRfc64Modules = [
   'public-catalog-receiver-task-lifecycle-v1.js',
   'public-catalog-receiver-v1.js',
   'public-catalog-service-v1.js',
+  'public-catalog-head-delivery-v1.js',
+  'public-catalog-head-fanout-v1.js',
   'public-catalog-issuer-delegation-v1.js',
   'public-catalog-successor-asset-v1.js',
   'public-catalog-successor-producer-v1.js',
