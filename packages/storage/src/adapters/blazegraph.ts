@@ -477,42 +477,39 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     }
     let published = false;
     try {
-      const usedBulk = await this.runStoreWork('replaceAssetGroup', options, async deadline => {
-        // Keep serialized bodies owned by an admitted slot, never queued work.
+      await this.runStoreWork('replaceAssetGroup', options, async deadline => {
+        // Both strategies plan and publish under one slot and original deadline.
         const bulk = buildBulkAssetGroupPlan(assets);
-        if (!bulk) return false;
+        const plan = bulk ?? buildAtomicAssetGroupUpdate(assets);
         const post = async (body: string, contentType: string) => {
           deadline.check();
           const response = await deadline.waitFor(fetch(this.url, { method: 'POST',
             headers: { 'Content-Type': contentType }, body, signal: deadline.signal }));
-          const text = await deadline.waitFor(readResponseTextBounded(response, 64 * 1024));
+          await deadline.waitFor(readResponseTextBounded(response, 64 * 1024));
           if (!response.ok) throw new Error(`Blazegraph bulk group failed (${response.status})`);
-          return text;
         };
-        // One admission/deadline; no fallback after an upload or uncertain publication.
-        await post(bulk.nquads, 'application/n-quads');
-        await post(bulk.update, SPARQL_UPDATE_CONTENT_TYPE);
-        const response = await this.postReadQuery(bulk.receiptQuery,
-          'application/sparql-results+json', deadline, 64 * 1024, 'query');
-        const receipt = decodeSparqlJsonQueryResult(
-          await deadline.waitFor(readResponseTextBounded(response, 64 * 1024)), 'ask');
-        if (receipt.type !== 'boolean' || !receipt.value) throw new Error('Bulk group publication receipt missing');
-        published = true;
-        await post(bulk.cleanup, SPARQL_UPDATE_CONTENT_TYPE);
-        return true;
+        try {
+          if (bulk) await post(bulk.nquads, 'application/n-quads');
+          await post(plan.update, SPARQL_UPDATE_CONTENT_TYPE);
+          if (bulk) {
+            const response = await this.postReadQuery(bulk.receiptQuery,
+              'application/sparql-results+json', deadline, 64 * 1024, 'query');
+            const receipt = decodeSparqlJsonQueryResult(
+              await deadline.waitFor(readResponseTextBounded(response, 64 * 1024)), 'ask');
+            if (receipt.type !== 'boolean' || !receipt.value) throw new Error('Bulk group publication receipt missing');
+            published = true;
+            await post(bulk.cleanup, SPARQL_UPDATE_CONTENT_TYPE);
+          }
+        } catch (error) {
+          // Best effort, staging-only, after failed I/O settles and within the
+          // original deadline. Never replay publication or hide its first error.
+          if (!published) await post(plan.cleanup, SPARQL_UPDATE_CONTENT_TYPE).catch(() => undefined);
+          throw error;
+        }
       });
-      if (usedBulk) return;
     } catch (error) {
-      // After receipt confirmation, drain cleanup/deadline failures and preserve
-      // committed progress for the caller under its materialization locks. No retry.
+      // Receipt-confirmed publication survives auxiliary cleanup/deadline failure.
       if (!published) throw error;
-      return;
-    }
-    const plan = buildAtomicAssetGroupUpdate(assets);
-    try { await this.sparqlUpdate(plan.update, options, 'replaceAssetGroup'); }
-    catch (error) {
-      await this.sparqlUpdate(plan.cleanup, { ...options, source: 'replaceAssetGroup.cleanup' }, 'replaceAssetGroup').catch(() => undefined);
-      throw error;
     }
   }
 
