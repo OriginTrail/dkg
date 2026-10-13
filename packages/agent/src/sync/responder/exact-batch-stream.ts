@@ -1,19 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
-import { createOperationContext, type ExactBatchResponderAuthorization, type OperationContext } from '@origintrail-official/dkg-core';
-import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { createOperationContext, ExactBatchResponderRefusal, type ExactBatchResponderAuthorization, type ExactBatchTransportOptions, type OperationContext } from '@origintrail-official/dkg-core';
+import { isStoreOperationTimeoutError, isStoreSchedulerBusyError, type TripleStore } from '@origintrail-official/dkg-storage';
 import type { SyncRequestEnvelope } from '../auth/request-build.js';
 import { requireExactAssetUals } from '../exact-assets.js';
 import { observeExactBatch } from '../exact-batch-observation.js';
+import { exactBatchTransportOptions } from '../exact-batch-transport-options.js';
 import {
   EXACT_BATCH_BATCH_INDEX, EXACT_BATCH_FRAME_KIND as K, EXACT_BATCH_MAX_FRAME_BYTES,
   EXACT_BATCH_STREAM_WINDOW_SIZE, ExactBatchSendWindow, type ExactBatchFrame,
 } from '../exact-batch-stream-contract.js';
 import type { ExactBatchAgentSession } from '../requester/exact-batch-stream.js';
-import type { ExactAssetExportCache, ExactAssetExportFallbackReason, ExactAssetExportStage } from './exact-asset-export-cache.js';
+import { ExactBatchAssetMissingError, type ExactAssetExportCache, type ExactAssetExportFallbackReason,
+  type ExactAssetExportStage } from './exact-asset-export-cache.js';
 import type { SyncRowSnapshotBudgetError } from './snapshot-budget.js';
 import type { ExperimentalExactBatchResponderResources } from './sync-handler.js';
 
-const ENCODER = new TextEncoder();
 const EMPTY = new Uint8Array(0);
 export interface ExactBatchResponderBindingOptions {
   readonly localPeerId: string;
@@ -24,8 +25,10 @@ export interface ExactBatchResponderBindingOptions {
   readonly parseSyncRequest: (bytes: Uint8Array) => SyncRequestEnvelope;
   readonly authorizeSyncRequest: (request: SyncRequestEnvelope, peerId: string, options: { signal?: AbortSignal }) => Promise<boolean>;
   /** Positive normal CG policy read: the experimental pilot serves public CGs only. */
-  readonly isPublicContextGraph: (contextGraphId: string, signal: AbortSignal) => Promise<boolean>;
+  readonly resolvePublicContextGraphAuthority: (contextGraphId: string, signal: AbortSignal) => Promise<'public' | 'non-public' | 'unavailable'>;
   readonly servingWithheld?: (contextGraphId: string) => boolean;
+  /** Closed, request-free reason for a pre-export refusal. */
+  readonly onRefusal?: (stage: 'authorization' | 'public-authority' | 'serving' | 'export', code: 'BUSY' | 'DENIED' | 'ASSET_MISSING') => void;
   readonly onStage?: (stage: 'metadata' | 'export' | 'encode' | 'send' | 'source-fence' | 'ack-wait' | ExactAssetExportStage, assetIndex: number, durationMs: number, context: OperationContext) => void;
   /** Successful cache lease export count, never a peer/body authority claim. */
   readonly onExport?: (assetIndex: number, wholePayloadExports: 0 | 1, context: OperationContext) => void;
@@ -49,11 +52,39 @@ class AuthorizedExactBatchContext {
     return this.scope;
   }
 }
-class ProfileRefusal extends Error {}
+/** Responder-only diagnostics contain no request bytes, graph identifiers or raw errors. */
+export function exactBatchResponderTransportOptions(timeoutMs: number,
+  log: (level: 'info' | 'warn', message: string) => void): ExactBatchTransportOptions {
+  return { ...exactBatchTransportOptions(timeoutMs),
+    onInboundOpen: peer => log('info', `Exact batch inbound opened peer=${peer}`),
+    onInboundFailure: ({ peerIdSuffix, stage, errorName, errorCode, signalAborted }) =>
+      log('warn', `Exact batch inbound failed peer=${peerIdSuffix} stage=${stage} error=${errorName}${errorCode ? ` code=${errorCode}` : ''} aborted=${signalAborted}`) };
+}
 
 /** Bind directly to Core's explicit registerExperimentalExactBatchResponder. */
 export function createExactBatchResponderBinding(options: ExactBatchResponderBindingOptions) {
   const authorizationOwner = {};
+  const noteRefusal = (stage: 'authorization' | 'public-authority' | 'serving' | 'export', code: 'BUSY' | 'DENIED' | 'ASSET_MISSING'): void => {
+    observeExactBatch(() => options.onRefusal?.(stage, code));
+  };
+  const refuse = (stage: 'authorization' | 'public-authority' | 'serving' | 'export', code: 'BUSY' | 'DENIED' | 'ASSET_MISSING'): never => {
+    noteRefusal(stage, code);
+    throw new ExactBatchResponderRefusal(code);
+  };
+  const readPublicAuthority = async (contextGraphId: string, signal: AbortSignal): Promise<boolean> => {
+    try {
+      const authority = await options.resolvePublicContextGraphAuthority(contextGraphId, signal);
+      if (authority === 'unavailable') refuse('public-authority', 'BUSY');
+      return authority === 'public';
+    } catch (error) {
+      if (isStoreSchedulerBusyError(error) || isStoreOperationTimeoutError(error)) refuse('public-authority', 'BUSY');
+      throw error;
+    }
+  };
+  const requirePublicAuthority = async (contextGraphId: string, signal: AbortSignal): Promise<void> => {
+    if (await readPublicAuthority(contextGraphId, signal)) return;
+    refuse('public-authority', 'DENIED');
+  };
   const authorizeRequest = async (bytes: Uint8Array, peerId: string, signal: AbortSignal): Promise<ExactBatchResponderAuthorization<AuthorizedExactBatchContext>> => {
     signal.throwIfAborted();
     if (bytes.byteLength < 1 || bytes.byteLength > 8192) throw new Error('Exact batch START request allowance exceeded');
@@ -66,11 +97,18 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
     // the normal authorizer owns signature/private-ACL semantics below.
     if ((request.targetPeerId !== undefined && request.targetPeerId !== options.localPeerId)
       || (request.requesterPeerId !== undefined && request.requesterPeerId !== peerId)) throw new Error('Exact batch START peer claims do not match the session');
-    if (options.servingWithheld?.(request.contextGraphId)) throw new Error('Exact batch graph serving withheld');
+    if (options.servingWithheld?.(request.contextGraphId)) refuse('serving', 'BUSY');
     return options.admission.withPreAuthorizationAdmission(peerId, signal, async () => {
-    if (!(await options.authorizeSyncRequest(request, peerId, { signal }))) throw new Error('Exact batch START authorization denied');
+    let authorized: boolean;
+    try {
+      authorized = await options.authorizeSyncRequest(request, peerId, { signal });
+    } catch (error) {
+      if (isStoreSchedulerBusyError(error) || isStoreOperationTimeoutError(error)) refuse('authorization', 'BUSY');
+      throw error;
+    }
+    if (!authorized) refuse('authorization', 'DENIED');
     signal.throwIfAborted();
-    if (!(await options.isPublicContextGraph(request.contextGraphId, signal))) throw new Error('Exact batch requires public context graph authority');
+    await requirePublicAuthority(request.contextGraphId, signal);
     signal.throwIfAborted();
     const assetUals = Object.freeze(selected);
     return Object.freeze({ assetUals, context: new AuthorizedExactBatchContext(authorizationOwner, peerId, {
@@ -93,20 +131,25 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
     try {
       for (const [assetIndex, assetUal] of assetUals.entries()) {
         session.signal.throwIfAborted();
-        if (options.servingWithheld?.(request.contextGraphId)) throw new Error('Exact batch graph serving withheld');
+        if (options.servingWithheld?.(request.contextGraphId)) refuse('serving', 'BUSY');
         while (!window.canStartAsset) await readAck();
         // A long batch must stop before the next KA if normal CG authority
         // becomes private. This never enters the private/member join lane.
-        if (!(await options.isPublicContextGraph(request.contextGraphId, session.signal))) throw new Error('Exact batch public context graph authority changed');
+        await requirePublicAuthority(request.contextGraphId, session.signal);
         let started = performance.now();
         const lease = await options.exportCache.acquireEncoded({ contextGraphId: request.contextGraphId, assetUal,
           signal: session.signal,
-          authorizeMissingAccessPolicy: () => options.isPublicContextGraph(request.contextGraphId, session.signal),
+          // A definitive policy change during an already prepared export is
+          // fenced by the cache as a changed source, before ASSET_END.
+          authorizeMissingAccessPolicy: () => readPublicAuthority(request.contextGraphId, session.signal),
           onStage: (stage, durationMs) => options.onStage?.(stage, assetIndex, durationMs, context),
           onFallback: (reason, budgetReason) => observeExactBatch(() => options.onFallback?.(reason, assetIndex, context, budgetReason)) });
         observeExactBatch(() => options.onStage?.('export', assetIndex,
           Math.max(0, performance.now() - started - (lease?.encodingDurationMs ?? 0)), context));
-        if (!lease) throw new ProfileRefusal('Exact batch exporter profile refused');
+        if (!lease) {
+          session.signal.throwIfAborted();
+          throw new ExactBatchResponderRefusal('RESOURCE_LIMIT');
+        }
         try {
           // Bounded observation cannot affect exporter ownership or response.
           if (lease.wholePayloadExports !== undefined) {
@@ -139,11 +182,13 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
       while (window.acknowledgedCount < assetUals.length) await readAck();
       if (!window.complete) throw new Error('Exact batch responder did not reach commit completion');
     } catch (error) {
-      // Only explicit bounded/capability refusal gets the closed resource
-      // response. Integrity, authorization and source-change errors abort.
-      if (error instanceof ProfileRefusal && !session.signal.aborted) {
-        await send({ kind: K.REFUSE, assetIndex: EXACT_BATCH_BATCH_INDEX, sequence: 0, payload: ENCODER.encode('RESOURCE_LIMIT') });
-        return;
+      // Core serializes all closed refusals on the same stream, including a
+      // late refusal after DATA. Integrity and source-change errors abort.
+      if (!session.signal.aborted && error instanceof ExactBatchAssetMissingError) {
+        refuse('export', 'ASSET_MISSING');
+      }
+      if (!session.signal.aborted && (isStoreSchedulerBusyError(error) || isStoreOperationTimeoutError(error))) {
+        refuse('export', 'BUSY');
       }
       throw error;
     } finally { window.close(); }

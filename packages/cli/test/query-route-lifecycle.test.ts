@@ -79,13 +79,13 @@ function queryRouteContext(
   return {
     req,
     res,
-    agent,
+    agent: { resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'node', source: 'legacy-local', reason: 'fixture-node', metadataBootstrap: 'eligible' }), ...agent },
     tracker,
     validTokens: new Set<string>(),
     url: new URL('http://127.0.0.1/api/query'),
     path: '/api/query',
     requestAgentAddress: '',
-    authentication: requestAuthentication({ kind: 'anonymous' }),
+    authentication: requestAuthentication({ kind: 'anonymous', mode: 'disabled' }),
   } as unknown as RequestContext;
 }
 

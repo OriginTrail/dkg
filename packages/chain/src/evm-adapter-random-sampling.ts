@@ -19,6 +19,41 @@ import type { EVMChainAdapter } from './evm-adapter.js';
 import { RandomSamplingContractsUnavailableError, type RandomSamplingAvailability } from './random-sampling-availability.js';
 import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
 import { MAX_PROBE_AGE_MS, DURATION_PROBE_TIMEOUT_MS } from './evm-adapter-constants.js';
+import type { GasLimitBufferOptions } from './gas-limit-buffer.js';
+
+/**
+ * Gas headroom for `createChallenge`.
+ *
+ * The contract draws a context graph by weight and then up to ten of its
+ * assets. When none of them is live it settles that graph's weight, sets the
+ * graph aside and draws again, up to five graphs per call. Which graphs a call
+ * lands on follows from the block it runs in, so the estimate (latest block)
+ * and the transaction (a later block) take independent draws. A settle is a
+ * fixed amount of work, not a share of the estimate: it walks every epoch
+ * since the graph was last finalized and rewrites the graph's path in the
+ * weight tree.
+ *
+ * Measured on a test network with about 630 graphs: a creation without a
+ * settle needs 308k to 391k gas and each settle adds 180k to 800k. Of 5,336
+ * creations in 24 days, 14% were estimated on a draw with a settle in it.
+ * +50% of an estimate without a settle is about 165k, less than the cheapest
+ * settle, and 10% of those creations ran out of gas. A creation that runs
+ * out rolls its settles back with it, so the same graph is missed again
+ * later.
+ *
+ * 2.5M fits four settles of the usual size (560k) or three of the costliest,
+ * and puts every limit (2.8M at least) above the costliest of those 5,336
+ * estimates (2.58M). A multiplier with the same reach would be x8 and ask
+ * for 20M gas on that estimate, more than a 17M block holds. The +50% is
+ * kept for an estimate above 5M, where it is the larger of the two.
+ *
+ * Unused gas is refunded. The wallet must hold the limit times the fee cap
+ * before the transaction is accepted: about 2.8M gas where it was 0.5M.
+ */
+const CREATE_CHALLENGE_GAS_BUFFER: GasLimitBufferOptions = Object.freeze({
+  gasLimitBufferBps: 5_000,
+  gasLimitMinBuffer: 2_500_000n,
+});
 
 export class RandomSamplingMethods extends EVMChainAdapterBase {
   async resolveRandomSamplingAvailability(this: EVMChainAdapter, identityId: bigint): Promise<RandomSamplingAvailability> {
@@ -156,7 +191,7 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
     method: string,
     args: readonly unknown[],
     label: string,
-    opts?: { gasLimitBufferBps?: number },
+    opts?: GasLimitBufferOptions,
   ): Promise<ethers.TransactionReceipt> {
     const signer = await this.nextRandomSamplingSigner();
     try {
@@ -191,13 +226,7 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
           'createChallenge',
           [],
           'create random-sampling challenge',
-          // createChallenge's gas depends on per-block randomness (weighted
-          // CG draw + `blockhash` entropy in `_deriveChallengeSeed`). The
-          // estimate is taken against a different block than the one the tx
-          // mines in, so without headroom the tx intermittently OOGs and
-          // reverts with empty `0x` data. +50% covers the estimate-vs-exec
-          // spread with margin for production CG/KC counts.
-          { gasLimitBufferBps: 5_000 },
+          CREATE_CHALLENGE_GAS_BUFFER,
         );
       } catch (err) {
         this.translateRandomSamplingError(err);
@@ -277,6 +306,20 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
           'submitProof',
           [contentHex, proofHex],
           'submit random-sampling proof',
+          // submitProof's gas depends on `block.timestamp`. The contract settles
+          // the node's stake to it and skips that settle when the node is
+          // already settled at that timestamp, which createChallenge leaves
+          // true for its own block. An estimate that runs on the block holding
+          // this node's challenge therefore misses the settle, and the proof,
+          // mined a block later, pays for it: observed 294,443 estimated and
+          // 306,807 needed (+4.2%); with the raw estimate as its limit the
+          // proof ran out of gas and reverted with empty `0x` data. Rarer and
+          // larger: a proof mined after an epoch change or a stake-boost expiry
+          // writes storage its estimate did not see (measured on a local chain:
+          // +33%, +16%, and +46% for both at once). +50%, the headroom
+          // createChallenge already has, covers all of these; +25% does not
+          // cover the epoch change. Unused gas is refunded.
+          { gasLimitBufferBps: 5_000 },
         );
       } catch (err) {
         this.translateRandomSamplingError(err);

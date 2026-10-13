@@ -791,8 +791,7 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
         })),
         updateKnowledgeAssetFromStagedSharedWorkingMemoryV1: publisherUpdate,
       },
-      _resolveEncryptInlinePayload: vi.fn(async () => undefined),
-      _resolveEncryptInlineChunked: vi.fn(async () => undefined),
+      _resolveInlineEncryption: vi.fn(async () => ({ encryptInlinePayload: undefined, encryptInlineChunked: undefined })),
       gossip: { publish: async (_topic: string, data: Uint8Array) => { published.push(data); } },
     } as any;
 

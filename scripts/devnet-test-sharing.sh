@@ -938,9 +938,11 @@ echo "--- 16c: Node 4 (late joiner) sees VM data ---"
 sharing_expect_count warn "Node 4 read of VM data for CG1" "Node 4 has VM data for CG1 ({value} entities, after {polls}s)" "Node 4 missing VM data for CG1 after 20s" \
   "${N4_PORT}" 20 1 "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG_ID\",\"view\":\"verifiable-memory\"}"
 
-echo "--- 16d: Node 3 (excluded from private CG) still gets VM (on-chain is public) ---"
-sharing_expect_count warn "Node 3 read of VM data for CG1" "Node 3 sees VM for private CG1 ({value} entities — on-chain is public)" "Node 3 missing VM for CG1 — VM gossip may be slower for private CGs" \
-  "${N3_PORT}" 20 1 "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG_ID\",\"view\":\"verifiable-memory\"}"
+echo "--- 16d: Node 3 (excluded from private CG) reads no VM data ---"
+# Node 3 is not on CG1's allowlist. Its node refuses the read and answers what
+# the count returns over no data: one row of 0, never an answer without rows.
+N3_PRIVATE_VM_CT=$(sharing_api_observe "${N3_PORT}" "SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }" cnt count "{\"contextGraphId\":\"$CG_ID\",\"view\":\"verifiable-memory\"}") || devnet_observation_abort
+check "Node 3 reads no VM data of private CG1" "$N3_PRIVATE_VM_CT" "0"
 
 echo "--- 16e: WM data still private after publish ---"
 for port_label in "${N2_PORT}:Node2" "${N4_PORT}:Node4" "${N3_PORT}:Node3"; do

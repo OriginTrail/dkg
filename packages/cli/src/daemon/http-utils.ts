@@ -1,3 +1,5 @@
+import { normalizeContextGraphIdOrUri } from '../context-graph-identifiers.js';
+export { normalizeContextGraphIdOrUri } from '../context-graph-identifiers.js';
 // HTTP request/response utilities extracted from the legacy monolithic
 // `daemon.ts`. Body parsing, JSON validators, CORS resolution, the
 // loopback rate-limiter, plus small helpers used across route handlers.
@@ -12,6 +14,8 @@ import {
   validateContextGraphId,
   validateSubGraphName,
   isSafeIri,
+  PCA_FUNDING_UNKNOWN_CODE,
+  PCA_FUNDING_UNKNOWN_MESSAGE,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   messageIndicatesNoFundedPublisherWallet,
   Logger,
@@ -150,6 +154,7 @@ export function respondContextGraphReadAuthorityUnavailable(
   res: ServerResponse,
   attribution: ContextGraphReadAuthorityAttribution,
   ctx: OperationContext = createOperationContext('query'),
+  code: typeof CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE | 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE' = CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
 ): void {
   readAuthorityDiagnostics.record(ctx, attribution);
   jsonResponse(
@@ -157,7 +162,7 @@ export function respondContextGraphReadAuthorityUnavailable(
     503,
     {
       error: 'Context Graph read authority is temporarily unavailable; retry once chain and metadata access recover.',
-      code: CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
+      code,
       retryable: true,
     },
     undefined,
@@ -221,11 +226,11 @@ export function noFundedPublisherWalletBody(message: string): { code: string; er
  * Use a fixed message: the underlying RPC error may contain private endpoint
  * details and its transport code is intentionally not the public error code. */
 export function respondIfPcaFundingUnknown(res: ServerResponse, err: unknown): boolean {
-  if ((err as { code?: unknown } | null)?.code !== 'PCA_FUNDING_UNKNOWN') return false;
+  if ((err as { code?: unknown } | null)?.code !== PCA_FUNDING_UNKNOWN_CODE) return false;
   res.setHeader('Retry-After', '1');
   jsonResponse(res, 503, {
-    code: 'PCA_FUNDING_UNKNOWN',
-    error: 'PCA funding verification is inconclusive; retry when chain reads recover.',
+    code: PCA_FUNDING_UNKNOWN_CODE,
+    error: PCA_FUNDING_UNKNOWN_MESSAGE,
     retryable: true,
   });
   return true;
@@ -750,13 +755,6 @@ export function validateRequiredContextGraphId(
   return true;
 }
 
-const CONTEXT_GRAPH_URI_PREFIX = "did:dkg:context-graph:";
-
-export function normalizeContextGraphIdOrUri(contextGraphId: string): string {
-  return contextGraphId.startsWith(CONTEXT_GRAPH_URI_PREFIX)
-    ? contextGraphId.slice(CONTEXT_GRAPH_URI_PREFIX.length)
-    : contextGraphId;
-}
 
 type ExistingContextGraphRow = {
   id?: unknown;

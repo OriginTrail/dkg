@@ -25,6 +25,7 @@ const KA_UAL = `${DKG_NS}kaUal`;
 const ASSERTION_VERSION = `${DKG_NS}assertionVersion`;
 const ASSERTION_GRAPH = `${DKG_NS}assertionGraph`;
 const CONTEXT_GRAPH = `${DKG_NS}contextGraph`;
+const AUTHENTICATED_SUB_GRAPH = `${DKG_NS}authenticatedSubGraphName`;
 const BATCH_ID = `${DKG_NS}batchId`;
 const STATUS = `${DKG_NS}status`;
 const RESERVED_UAL = `${DKG_NS}reservedUal`;
@@ -64,6 +65,7 @@ const DURABLE_INTEGRITY_META_PREDICATE_SET: ReadonlySet<string> = new Set(
  */
 const DURABLE_SYNC_CONTROL_PREDICATE_SET: ReadonlySet<string> = new Set([
   BATCH_ID,
+  AUTHENTICATED_SUB_GRAPH,
   ASSERTION_GRAPH,
   ASSERTION_VERSION,
 ]);
@@ -1405,6 +1407,10 @@ function selectAdmittedMetadataIndexes(
   let droppedControls = 0;
   for (const index of preparedMeta.admissibleOriginalIndexes) {
     const quad = preparedMeta.originalMetaQuads[index]!;
+    if (quad.predicate === AUTHENTICATED_SUB_GRAPH) {
+      droppedControls += 1;
+      continue;
+    }
     if (
       metadata.merkleSubjects.has(quad.subject)
       || metadata.markerSubjects.has(quad.subject)
@@ -1469,6 +1475,10 @@ function selectSystemOverrideMetadataIndexes(
   let droppedControls = 0;
   for (const index of preparedMeta.admissibleOriginalIndexes) {
     const quad = preparedMeta.originalMetaQuads[index]!;
+    if (quad.predicate === AUTHENTICATED_SUB_GRAPH) {
+      droppedControls += 1;
+      continue;
+    }
     if (
       isDurableSyncControlQuad(quad, metadata, 'standalone')
       && !isAuthenticatedSyncControl(
@@ -1503,25 +1513,11 @@ function isDurableSyncControlQuad(
 }
 
 /**
- * GH#1778 — classify a `dkg:assertionVersion` row as DESCRIPTIVE author-seal
- * metadata rather than a delta/routing control. A graph-scoped author seal
- * (subject carries `dkg:assertionMerkleRoot`) is descriptive: its 13 sibling
- * quads (Merkle root, EIP-712 attestation, `dkg:kaUal`, counts) already sync
- * unauthenticated, and the seal's authenticity is established at PUBLISH time
- * (`parseAssertionSealQuads` + a Merkle recompute), not here. Only
- * `dkg:assertionVersion` collides with the sync-control set, so for a
- * not-yet-published KA it was being stripped — leaving 13/14 quads and making
- * `parseAssertionSealQuads` throw "Partial graph-scoped assertion seal".
- *
- * Classifying it here (via the core `parseGraphScopedAssertionSealCandidate`
- * check — the SAME canonical "publishable graph-scoped seal" definition VM
- * publish uses: complete v2 seal whose kaUal author == authorAddress ==
- * `.../assertion/<addr>/…` coordinate, single-valued identity fields) keeps the
- * control-authentication abstraction honest: the seal field follows the
- * descriptive path instead of being smuggled through `isAuthenticatedSyncControl`
- * as an "authenticated control". A peer that forges a version value gains nothing
- * the sibling quads didn't already allow — a tampered version derives the wrong
- * graph scope and fails closed at publish.
+ * Author-seal versions are descriptive until publishing verifies the seal and
+ * Merkle root (GH#1778). Require the same canonical seal shape as VM publish:
+ * complete v2 fields, single-valued identity, matching UAL author and coordinate.
+ * Descriptor-owned versions still pass the normal control-authentication gate.
+ * A forged seal version cannot grant routing authority and fails at publish.
  */
 function isGraphSealDescriptiveVersion(quad: Quad, metadata: IntegrityMetadataIndex): boolean {
   return quad.predicate === ASSERTION_VERSION

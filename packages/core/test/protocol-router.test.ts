@@ -1414,7 +1414,7 @@ describe('ProtocolRouter', () => {
       let returned = false;
       return {
         writeStatus: 'open' as const,
-        send: () => undefined,
+        send: (_bytes: Uint8Array): void => undefined,
         close: async () => undefined,
         abort: () => undefined,
         async *[Symbol.asyncIterator]() {
@@ -1785,6 +1785,121 @@ describe('ProtocolRouter', () => {
       expect(out).toEqual(new Uint8Array([0x67]));
       expect(dialCalls).toBe(1);
       expect(limitedNewStream).toBe(1);
+    });
+
+    // A single-use payload gets one attempt, so the retry above never runs for
+    // it. Its dial fails before any byte is written, and the open limited
+    // connection must carry it within that one attempt. libp2p never returns
+    // a limited connection from a dial: it dials a second circuit, and aborts
+    // it when it has the address of the first.
+    describe('single-use payload on a peer reached through a relay', () => {
+      const DIRECT_ADDRESS_IN_PEER_STORE = async () => ({
+        addresses: [{ multiaddr: { toString: () => '/ip4/1.2.3.4/tcp/4001' } }],
+      });
+
+      function limitedConnection(newStream: () => Promise<ReturnType<typeof makeStubStream>>) {
+        return { status: 'open', limits: { bytes: 1024 * 1024 }, newStream };
+      }
+
+      it('is sent on the open limited connection when the dial ends in a closed duplicate', async () => {
+        let dialCalls = 0;
+        const sent: Uint8Array[] = [];
+        const router = makeRouterWithFastPath({
+          connections: [limitedConnection(async () => ({
+            ...makeStubStream(new Uint8Array([0x68])),
+            send: (bytes: Uint8Array) => { sent.push(bytes); },
+          }))],
+          peerStoreGet: DIRECT_ADDRESS_IN_PEER_STORE,
+          dialBehavior: async () => {
+            dialCalls += 1;
+            throw new Error('Remote closed connection during opening');
+          },
+        });
+
+        const out = await router.send(
+          FAKE_PEER_ID,
+          '/dkg/test/1.0.0',
+          new Uint8Array([7]),
+          { timeoutMs: 5_000, payloadReuse: 'single-use' },
+        );
+
+        expect(out).toEqual(new Uint8Array([0x68]));
+        expect(dialCalls).toBe(1);
+        expect(sent).toEqual([new Uint8Array([7])]);
+      });
+
+      it('fails with the dial error when no connection to the peer is open', async () => {
+        let dialCalls = 0;
+        const router = makeRouterWithFastPath({
+          connections: [],
+          peerStoreGet: DIRECT_ADDRESS_IN_PEER_STORE,
+          dialBehavior: async () => {
+            dialCalls += 1;
+            throw new Error('Remote closed connection during opening');
+          },
+        });
+
+        await expect(router.send(
+          FAKE_PEER_ID,
+          '/dkg/test/1.0.0',
+          new Uint8Array([7]),
+          { timeoutMs: 5_000, payloadReuse: 'single-use' },
+        )).rejects.toThrow('Remote closed connection during opening');
+        expect(dialCalls).toBe(1);
+      });
+
+      it('is not sent a second time when the limited connection fails after the write', async () => {
+        let dialCalls = 0;
+        let limitedNewStream = 0;
+        const sent: Uint8Array[] = [];
+        const router = makeRouterWithFastPath({
+          connections: [limitedConnection(async () => {
+            limitedNewStream += 1;
+            return {
+              ...makeStubStream(new Uint8Array([0x69])),
+              send: (bytes: Uint8Array) => { sent.push(bytes); },
+              close: async () => { throw new Error('stream reset'); },
+            };
+          })],
+          peerStoreGet: DIRECT_ADDRESS_IN_PEER_STORE,
+          dialBehavior: async () => {
+            dialCalls += 1;
+            throw new Error('Remote closed connection during opening');
+          },
+        });
+
+        await expect(router.send(
+          FAKE_PEER_ID,
+          '/dkg/test/1.0.0',
+          new Uint8Array([7]),
+          { timeoutMs: 5_000, payloadReuse: 'single-use' },
+        )).rejects.toThrow('stream reset');
+        expect(dialCalls).toBe(1);
+        expect(limitedNewStream).toBe(1);
+        expect(sent).toEqual([new Uint8Array([7])]);
+      });
+
+      it('goes out on the dialed stream when the dial succeeds, leaving the limited connection alone', async () => {
+        let limitedNewStream = 0;
+        const router = makeRouterWithFastPath({
+          connections: [limitedConnection(async () => {
+            limitedNewStream += 1;
+            return makeStubStream(new Uint8Array([0x6a]));
+          })],
+          peerStoreGet: DIRECT_ADDRESS_IN_PEER_STORE,
+          dialBehavior: async () => makeStubStream(new Uint8Array([0x6b])) as any,
+        });
+
+        const out = await router.send(
+          FAKE_PEER_ID,
+          '/dkg/test/1.0.0',
+          new Uint8Array([7]),
+          { timeoutMs: 5_000, payloadReuse: 'single-use' },
+        );
+
+        expect(out).toEqual(new Uint8Array([0x6b]));
+        expect(limitedNewStream).toBe(0);
+      });
     });
 
     it('prefers an open direct candidate even when a limited candidate is listed first', async () => {

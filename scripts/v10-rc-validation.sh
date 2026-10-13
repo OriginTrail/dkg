@@ -148,9 +148,18 @@ for port in 9201 9202 9203 9204 9205; do
   fi
 done
 
-AGENTS=$(get 9201 /api/agents 2>/dev/null || echo '{}')
-PEER_COUNT=$(echo "$AGENTS" | pyfield "len(d.get('agents',[]))")
-if [ -z "$PEER_COUNT" ]; then PEER_COUNT=0; fi
+# Node 1 learns the other nodes' agent profiles with its first full sync
+# round, a few seconds after the last node has joined. `devnet.sh start`
+# returns when every node lists the two bootstrap graphs, which can be before
+# that round, so the list is read until it is filled instead of once.
+PEER_COUNT=0
+for _ in $(seq 1 "${AGENT_DISCOVERY_WAIT_S:-30}"); do
+  AGENTS=$(get 9201 /api/agents 2>/dev/null || echo '{}')
+  PEER_COUNT=$(echo "$AGENTS" | pyfield "len(d.get('agents',[]))")
+  if [ -z "$PEER_COUNT" ]; then PEER_COUNT=0; fi
+  if [ "$PEER_COUNT" -ge 4 ]; then break; fi
+  sleep 1
+done
 if [ "$PEER_COUNT" -ge 4 ]; then
   ok "Node 1 sees $PEER_COUNT peers (expected ≥4)"
 else

@@ -16,6 +16,7 @@ import {
 import { formatEth, formatEthTooltip } from '../lib/formatEth.js';
 import { nativeGasSymbol } from '../lib/nativeGasSymbol.js';
 import { PcaDashboardRow } from '../pages/conviction/PcaDashboardRow.js';
+import { dashboardSizePresentation } from './dashboard-size-presentation.js';
 
 // Single user-facing description shown inside the My Context Graphs
 // card (one line, no separate footnote — round-2 feedback: the split
@@ -436,11 +437,9 @@ function CgRow({
             )
             : mem.partial
               ? (
-                // Some (not all) memory layers failed — the counts are
-                // a lower bound, not exact. Mark with a "~" + tooltip so
-                // the row doesn't silently undercount (Codex).
-                <span title="Partial — one or more memory layers were unavailable; counts are a lower bound">
-                  ~{abbrev(entities.total)} <span className="v10-cg-dim">entities</span> · ~{abbrev(triples.total)} <span className="v10-cg-dim">triples</span>
+                // More layers can reveal residue and reduce canonical triple totals.
+                <span title="Loaded preview only — some memory layers are capped or unavailable; total triples may increase or decrease as layers load">
+                  {entities.total.toLocaleString()}+ <span className="v10-cg-dim">entities</span> · ~{triples.total.toLocaleString()} <span className="v10-cg-dim">triples · loaded preview</span>
                 </span>
               )
               : <>{abbrev(entities.total)} <span className="v10-cg-dim">entities</span> · {abbrev(triples.total)} <span className="v10-cg-dim">triples</span></>}
@@ -563,6 +562,7 @@ export function DashboardView() {
       hasCgs,
     };
   }, [myCgs, reports]);
+  const sizePresentation = dashboardSizePresentation(agg);
 
   // Curator vs joined split for the My Context Graphs card bar — same
   // isCurator rule CgRow uses for the Role badge (round-2 feedback).
@@ -650,48 +650,22 @@ export function DashboardView() {
               <div className="v10-cg-size-metric">
                 <div className="v10-cg-size-num">
                   <span className="v10-cg-size-big">
-                    {/* Mixed (some rows on the summary fallback, some
-                        live) → "~" approximate prefix; pure all-fallback
-                        keeps the bare number under the explicit
-                        "summary" label below (Codex). */}
-                    {agg.sizeApprox && !agg.triplesUnknown ? '~' : ''}
-                    {agg.entities.total.toLocaleString()}
+                    {sizePresentation.entityValue}
                   </span>
-                  {agg.triplesUnknown ? (
-                    // Pure fallback: number is the published
-                    // Knowledge-Asset summary, NOT the all-layer entity
-                    // count — different unit, labelled explicitly.
-                    <span
-                      className="v10-cg-dim"
-                      title="Live entity count unavailable — showing the published Knowledge-Asset summary (not the full WM/SWM/VM entity total)"
-                    >
-                      Knowledge Assets (summary)
-                    </span>
-                  ) : agg.sizeApprox ? (
-                    <span
-                      className="v10-cg-dim"
-                      title="Some context graphs reported only their Knowledge-Asset summary — this total mixes summary and live counts and is approximate"
-                    >
-                      entities / KA · approx.
-                    </span>
-                  ) : (
-                    <span className="v10-cg-dim">entities / Knowledge Assets</span>
-                  )}
+                  <span className="v10-cg-dim" title={sizePresentation.entityTitle}>{sizePresentation.entityLabel}</span>
                 </div>
                 {/* Hide the proportion bar whenever any row fell back —
                     the WM/SWM/VM breakdown is unreliable then. */}
-                {agg.triplesUnknown || agg.sizeApprox ? null : <LayerBar counts={agg.entities} />}
+                {sizePresentation.showLayerBars ? <LayerBar counts={agg.entities} /> : null}
               </div>
               <div className="v10-cg-size-metric">
                 <div className="v10-cg-size-num">
                   <span className="v10-cg-size-big">
-                    {agg.triplesUnknown
-                      ? '—'
-                      : `${agg.sizeApprox ? '~' : ''}${agg.triples.total.toLocaleString()}`}
+                    {sizePresentation.tripleValue}
                   </span>
-                  <span className="v10-cg-dim">triples</span>
+                  <span className="v10-cg-dim">{sizePresentation.tripleLabel}</span>
                 </div>
-                {agg.triplesUnknown || agg.sizeApprox ? null : <LayerBar counts={agg.triples} />}
+                {sizePresentation.showLayerBars ? <LayerBar counts={agg.triples} /> : null}
               </div>
               <LayerLegend />
             </div>
@@ -699,7 +673,7 @@ export function DashboardView() {
           <div className="stat-sub">
             {agg.hasCgs
               ? (agg.sizePartial
-                  ? 'Some context graphs could not report size; total is partial.'
+                  ? 'Partial preview — some memory layers are capped or unavailable. Context graphs may contain more entities; triple totals may increase or decrease as layers load.'
                   : 'Totals across all your context graphs, summed over Working, Shared Working & Verifiable Memory. Knowledge Assets are entities that have been published to Verifiable Memory.')
               : 'No context graphs yet.'}
           </div>

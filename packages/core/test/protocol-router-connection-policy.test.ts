@@ -32,7 +32,7 @@ function fixture() {
   const stream = new FakeStream();
   const connection = (limited = false) => ({
     status: 'open',
-    remotePeer: { equals: (other: unknown) => String(other) === PEER },
+    remotePeer: { toString: () => PEER, equals: (other: unknown) => String(other) === PEER },
     ...(limited ? { limits: {} } : {}),
     newStream: vi.fn(async (_protocol: string, _options: { signal?: AbortSignal; runOnLimitedConnection?: boolean }) => stream as unknown as Stream),
   });
@@ -134,6 +134,59 @@ describe.each(callers)('shared connection policy through $name', ({ invoke }) =>
 });
 
 describe('scoped duplex ownership', () => {
+  it('reports the inbound failure stage without exposing request or error text', async () => {
+    const f = fixture();
+    const onInboundOpen = vi.fn();
+    const onInboundFailure = vi.fn();
+    f.router.registerDuplexStream(PROTOCOL,
+      async () => ({ requestData: REQUEST, continuation: undefined }),
+      async () => { throw Object.assign(new Error('secret request body'), { code: 'PRIVATE:secret' }); },
+      { ...OPTIONS, maxRequestBytes: 10, onInboundOpen, onInboundFailure });
+    const inbound = f.handle.mock.calls[0]![1] as (stream: Stream, connection: ReturnType<typeof f.connection>) => Promise<void>;
+    await inbound(f.stream as unknown as Stream, f.connection());
+    expect(onInboundOpen).toHaveBeenCalledWith(PEER.slice(-8));
+    expect(onInboundFailure).toHaveBeenCalledWith({
+      peerIdSuffix: PEER.slice(-8), stage: 'handler', errorName: 'Error',
+      errorCode: undefined, signalAborted: false,
+    });
+    expect(JSON.stringify(onInboundFailure.mock.calls)).not.toContain('secret');
+    expect(f.stream.abort).toHaveBeenCalled();
+  });
+
+  it('reports pre-handler admission failure even when the diagnostic callback throws', async () => {
+    const f = fixture();
+    f.admission.mockResolvedValue(false);
+    const handler = vi.fn();
+    const onInboundFailure = vi.fn(() => { throw new Error('observer failed'); });
+    f.router.registerDuplexStream(PROTOCOL,
+      async () => ({ requestData: REQUEST, continuation: undefined }), handler,
+      { ...OPTIONS, maxRequestBytes: 10, onInboundFailure });
+    const inbound = f.handle.mock.calls[0]![1] as (stream: Stream, connection: ReturnType<typeof f.connection>) => Promise<void>;
+    await expect(inbound(f.stream as unknown as Stream, f.connection())).resolves.toBeUndefined();
+    expect(onInboundFailure).toHaveBeenCalledWith(expect.objectContaining({ stage: 'peer-admission' }));
+    expect(handler).not.toHaveBeenCalled();
+    expect(f.stream.abort).toHaveBeenCalled();
+  });
+
+  it('isolates rejecting async open and failure observers from admission and cleanup', async () => {
+    const f = fixture();
+    f.admission.mockResolvedValue(false);
+    const handler = vi.fn();
+    const onInboundOpen = vi.fn(async () => { throw new Error('async open observer failed'); });
+    const onInboundFailure = vi.fn(async () => { throw new Error('async failure observer failed'); });
+    f.router.registerDuplexStream(PROTOCOL,
+      async () => ({ requestData: REQUEST, continuation: undefined }), handler,
+      { ...OPTIONS, maxRequestBytes: 10, onInboundOpen, onInboundFailure });
+    const inbound = f.handle.mock.calls[0]![1] as (stream: Stream, connection: ReturnType<typeof f.connection>) => Promise<void>;
+    await expect(inbound(f.stream as unknown as Stream, f.connection())).resolves.toBeUndefined();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(onInboundOpen).toHaveBeenCalledOnce();
+    expect(onInboundFailure).toHaveBeenCalledWith(expect.objectContaining({ stage: 'peer-admission' }));
+    expect(handler).not.toHaveBeenCalled();
+    expect(f.stream.abort).toHaveBeenCalled();
+    expect(getEventListeners(f.stop.signal, 'abort')).toHaveLength(0);
+  });
+
   it('stops before dialing when cancellation ends a pending resolver', async () => {
     const f = fixture();
     let entered!: () => void;
