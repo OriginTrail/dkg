@@ -1,5 +1,6 @@
 import { createOperationContext } from "@origintrail-official/dkg-core";
 import { recoverPublicSnapshotBulk } from './public-snapshot-bulk.js';
+import { recoverPublicSnapshotExact } from './public-snapshot-exact.js';
 // SPDX-License-Identifier: Apache-2.0
 import {
   PublicGraphSnapshotCache,
@@ -171,49 +172,19 @@ export class PublicSnapshotMethods {
           if (mode === "core-cache") await markCoreTrustedGraph(this.store, contextGraphId);
           assertCurrent();
           const uals = snapshot.assets.map((a) => buildKnowledgeAssetUalFromOnChainIdV1(snapshot.chainId, snapshot.assetStorage, BigInt(a.id)));
-          let committed = new Set<string>();
-          let bulkChunks: Awaited<ReturnType<typeof recoverPublicSnapshotBulk>>['chunks'] | undefined;
-          if (transport === 'bulk') {
-            const result = await recoverPublicSnapshotBulk(this, { contextGraphId, onChainId, peers, uals,
-              evidence, signal, assertCurrent, deadline: startedAt + 3_600_000, dataDir: this.config.dataDir,
+          const recovery = { contextGraphId, peers, uals, evidence, signal, assertCurrent };
+          const { committed, bulkChunks } = await (transport === 'bulk'
+            ? recoverPublicSnapshotBulk(this, { ...recovery,
+              deadline: startedAt + 3_600_000, dataDir: this.config.dataDir,
               shouldQuarantineCommitted: () => {
                 const current = this.subscribedContextGraphs.get(contextGraphId);
                 return !current || current.onChainId !== onChainId;
               },
               onCommitted: () => this.invalidateListContextGraphsCache(),
               log: message => this.log.info(createOperationContext('sync'), message),
-            });
-            committed = result.committed; bulkChunks = result.chunks;
-          }
+            })
+            : recoverPublicSnapshotExact(this, recovery));
 
-          const recover = async (batch: string[], transport: "stream-preferred" | "legacy") => {
-            for (const peer of peers) {
-              assertCurrent();
-              const remaining = batch.filter(ual => !committed.has(ual));
-              if (!remaining.length) break;
-              const result = await this.syncExactKnowledgeAssetsFromPeerDetailed(peer, contextGraphId, remaining, {
-                signal, isCurrent, forceFreshExactSession: true,
-                exactRecoveryTransportMode: transport,
-                authenticateGraphScopedAsset: asset => evidence.authenticate(asset),
-                totalTimeoutMs: 120_000,
-                registeredPublicEvidence: {
-                  usableFor: (id, s) => id === contextGraphId && isCurrent() && !s?.aborted,
-                  revoke: () => {},
-                },
-              });
-              for (const ual of result.committedExactAssetUals ?? []) committed.add(ual);
-            }
-            return batch.filter(ual => !committed.has(ual));
-          };
-          for (let offset = 0; transport === "exact" && offset < uals.length; offset += 10) {
-            const batch = uals.slice(offset, offset + 10);
-            const remaining = await recover(batch, "stream-preferred");
-            // The stream profile excludes private commitments. Only missing assets
-            // use the bounded singleton transport, with identical authentication.
-            for (const ual of remaining) await recover([ual], "legacy");
-            if (batch.some(ual => !committed.has(ual)))
-              throw new Error(`Snapshot recovery incomplete: ${committed.size}/${uals.length} committed`);
-          }
           // A new inventory/root comparison is required before claiming current coverage.
           const fresh = await read(true);
           assertCurrent();

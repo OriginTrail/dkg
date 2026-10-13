@@ -2,7 +2,7 @@
 import { createHash } from 'node:crypto';
 import { BULK_GRAPH_KIND as K, BULK_GRAPH_CHUNK_BYTES, BULK_GRAPH_FRAME_BYTES,
   createOperationContext, registerBulkGraphResponder, type ProtocolRouter, type BulkGraphSession } from '@origintrail-official/dkg-core';
-import { BULK_STAGING_BYTES, BULK_STAGING_ASSETS, bulkChunkHash, bulkJson, readBulkJson,
+import { BULK_STAGING_BYTES, BULK_STAGING_ASSETS, bulkChunkHash, bulkJson, readBulkJson, encodeBulkRefusal, encodeBulkChunkEnd,
   validateBulkGraphRequest, type BulkGraphRequest } from '../bulk-graph-contract.js';
 import type { PublicAssetResponderOptions } from './public-asset-responder.js';
 
@@ -53,7 +53,7 @@ export async function servePublicBulkChunk(request: BulkGraphRequest, session: B
       onStage: (stage, ms) => observe(() => options.onStage?.(stage, index, ms, context)),
       onFallback: (reason, budgetReason) => observe(() => options.onFallback?.(reason, index, context, budgetReason)) });
     if (!lease) {
-      await session.send({ kind: K.REFUSE, index, sequence: 0, payload: bulkJson({ code: 'RESOURCE_LIMIT' }) });
+      await session.send({ kind: K.REFUSE, index, sequence: 0, payload: encodeBulkRefusal({ code: 'RESOURCE_LIMIT' }) });
       return;
     }
     try {
@@ -86,6 +86,6 @@ export async function servePublicBulkChunk(request: BulkGraphRequest, session: B
   }
   if (!lengths.length) throw new Error('Bulk graph chunk made no progress');
   await session.send({ kind: K.CHUNK_END, index: lengths.length, sequence: bytes,
-    payload: bulkJson({ digest: hash.digest('hex'), assets: lengths.length, encodedBytes: bytes }) });
+    payload: encodeBulkChunkEnd({ digest: hash.digest('hex'), assets: lengths.length, encodedBytes: bytes }) });
   while (committed < lengths.length) await readControl();
 }

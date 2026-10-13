@@ -4,13 +4,13 @@ import { ATOMIC_ASSET_GROUP_MAX_ASSETS, UnsupportedTripleStoreCapabilityError, t
   type QueryOptions } from '@origintrail-official/dkg-storage';
 import { prepareGraphScopedReplacementUnderLock } from './graph-scoped-replacement.js';
 import { filterOversizedSyncQuads } from '../oversize-filter.js';
-import type { VerifiedGraphScopedAsset, GraphScopedMaterializationOutcome } from './graph-scoped-materialization.js';
+import type { VerifiedGraphScopedAsset } from './graph-scoped-materialization.js';
 
 /** The same per-KA lock domain as individual materialization, acquired in a total order. */
 export async function materializeVerifiedGraphScopedGroup(params: {
   store: TripleStore; assets: readonly VerifiedGraphScopedAsset[]; options?: QueryOptions;
   assertCurrent: () => void; shouldQuarantineCommitted: () => boolean;
-}): Promise<GraphScopedMaterializationOutcome[]> {
+}): Promise<'applied' | 'quarantined'> {
   const { store, assets, assertCurrent, shouldQuarantineCommitted, options = {} } = params;
   if (!assets.length || assets.length > ATOMIC_ASSET_GROUP_MAX_ASSETS) throw new RangeError('Invalid materialization group');
   const keys = assets.map(a => `${a.metaGraph}\0${a.ual}`);
@@ -22,10 +22,10 @@ export async function materializeVerifiedGraphScopedGroup(params: {
       throw new Error('Materialization group contains oversized RDF terms');
   }
   const ordered = [...assets].sort((a,b) => `${a.metaGraph}\0${a.ual}` < `${b.metaGraph}\0${b.ual}` ? -1 : 1);
-  const lock = (index: number): Promise<GraphScopedMaterializationOutcome[]> => index < ordered.length
+  const lock = (index: number): Promise<'applied' | 'quarantined'> => index < ordered.length
     ? withMaterializationLock(ordered[index]!.metaGraph, ordered[index]!.ual, () => lock(index + 1), { signal: options.signal })
     : apply();
-  const apply = async (): Promise<GraphScopedMaterializationOutcome[]> => {
+  const apply = async (): Promise<'applied' | 'quarantined'> => {
     const replacements: AtomicAssetReplacement[] = [];
     for (const asset of assets) {
       const replacement = await prepareGraphScopedReplacementUnderLock({
@@ -42,12 +42,12 @@ export async function materializeVerifiedGraphScopedGroup(params: {
     await store.replaceAssetGroup(replacements, commitOptions);
     if (shouldQuarantineCommitted()) {
       await store.replaceAssetGroup(replacements.map(a => ({ ...a, graphQuads: [], metadataQuads: [] })), commitOptions);
-      return assets.map(() => 'quarantined');
+      return 'quarantined';
     }
     // A lifecycle cancellation never creates an ACK. Data already atomically published
     // remains available to a later independently authenticated resume.
     assertCurrent();
-    return assets.map(() => 'applied');
+    return 'applied';
   };
   return lock(0);
 }

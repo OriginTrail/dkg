@@ -23,6 +23,21 @@ export function validateBulkGraphRequest(value: unknown): BulkGraphRequest {
 }
 export const bulkJson = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
 export const readBulkJson = (bytes: Uint8Array): unknown => JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+export interface BulkChunkEnd { digest: string; assets: number; encodedBytes: number }
+export interface BulkRefusal { code: 'RESOURCE_LIMIT' }
+export const encodeBulkChunkEnd = (value: BulkChunkEnd) => bulkJson(value);
+export const encodeBulkRefusal = (value: BulkRefusal) => bulkJson(value);
+export function parseBulkChunkEnd(bytes: Uint8Array): BulkChunkEnd {
+  const value = readBulkJson(bytes) as BulkChunkEnd;
+  if (!value || typeof value.digest !== 'string' || typeof value.assets !== 'number' || typeof value.encodedBytes !== 'number')
+    throw new Error('Bulk chunk directory digest or coverage mismatch');
+  return value;
+}
+export function parseBulkRefusal(bytes: Uint8Array): BulkRefusal {
+  const value = readBulkJson(bytes) as BulkRefusal;
+  if (!value || value.code !== 'RESOURCE_LIMIT') throw new Error('Invalid bulk graph refusal');
+  return value;
+}
 /** Length-bound directory hash: generation, ordered asset identities, metadata and exact encoding. */
 export function bulkChunkHash(request: BulkGraphRequest) {
   return createHash('sha256').update(bulkJson(request));
