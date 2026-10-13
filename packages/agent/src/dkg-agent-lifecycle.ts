@@ -10,7 +10,6 @@ import { createRandomSamplingEligibilityResolver } from './random-sampling-eligi
 import { RandomSamplingRuntime } from './random-sampling-runtime.js';
 import { startAuthorityIndexSnapshotRuntime } from './authority-index-snapshot-runtime.js';
 // SPDX-License-Identifier: Apache-2.0
-
 /**
  * Lifecycle + sync subsystem extracted from dkg-agent.ts as a mixin holder:
  * start() boot orchestration, random-sampling prover wiring, peer/CG sync
