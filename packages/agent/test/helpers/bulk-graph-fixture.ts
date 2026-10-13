@@ -145,14 +145,14 @@ export async function fixture(count = 20, corruptAt = -1, failClose = false, hoo
       verification:{contextGraphId:cg,assetUals:uals,ctx:createOperationContext('sync'),
         parseAndFilter:worker.parseAndFilter.bind(worker),processDurableBatchInWorker:(data,meta,_ctx,accept,mode)=>worker.processDurableBatch(data,meta,accept,mode),
       },
-      commit:async (assets, signal)=>{
+      commit:async (assets, signal, onPublished)=>{
         const authenticated=[];
         for(const asset of assets) authenticated.push((await authenticateVerifiedGraphScopedAsset(chain,asset,async()=>true)).asset);
         await hooks.beforePublish?.();
         const outcome=await materializeVerifiedGraphScopedGroup({store:target,assets:authenticated,
           assertCurrent:()=>signal.throwIfAborted(),shouldQuarantineCommitted:()=>false});
-        expect(outcome).toBe('applied'); groups.push(assets.length);
+        expect(outcome).toBe('applied'); onPublished(); groups.push(assets.length);
         heaps.push(assets.flatMap(a => [...a.dataQuads, ...a.metadataQuads]).reduce((n, q) => n + estimateQuadHeapBytes(q), 0));
       }});
-  return {run,source,target,groups,heaps,exports,uals,router,worker,directory,byId, supplierPeer: nodes[1]!.peerId};
+  return {run,cancellation,source,target,groups,heaps,exports,uals,router,worker,directory,byId, supplierPeer: nodes[1]!.peerId};
 }
