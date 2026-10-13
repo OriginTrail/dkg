@@ -25,6 +25,45 @@ function context(agent: Record<string, unknown>, payload: Record<string, unknown
   } as unknown as RequestContext, req, res };
 }
 
+it.each([
+  { maxRows: 8193 }, { timeoutMs: 2001 }, { mode: 'page', offset: 1_000_001 },
+  { sparql: 'SELECT ?s WHERE { ?s ?p ?o }'.padEnd(64 * 1024 + 1) },
+])('rejects an over-limit request before querying: %j', async payload => {
+  const query = vi.fn();
+  const read = context({ query }, payload);
+  await handleBoundedQueryRoutes(read.ctx);
+  expect(read.res.statusCode).toBe(400);
+  expect(JSON.parse(read.res.body).code).toBe('BOUNDED_QUERY_INVALID_REQUEST');
+  expect(query).not.toHaveBeenCalled();
+});
+
+it.each([
+  { maxRows: 8192 }, { timeoutMs: 2000 },
+  { mode: 'page', offset: 1_000_000, sparql: 'SELECT ?s WHERE { ?s ?p ?o } ORDER BY ?s' },
+  { sparql: 'SELECT ?s WHERE { ?s ?p ?o }'.padEnd(64 * 1024) },
+])('accepts requests exactly at a hard ceiling: %j', async payload => {
+  const query = vi.fn(async () => ({ bindings: [] }));
+  const read = context({ query }, payload);
+  await handleBoundedQueryRoutes(read.ctx);
+  expect(read.res.statusCode).toBe(200);
+  expect(query).toHaveBeenCalledOnce();
+});
+
+it.each([
+  { offset: 999_998, count: 3, nextOffset: 1_000_000, hasMore: true, pagingLimitReached: false },
+  { offset: 999_999, count: 3, nextOffset: null, hasMore: true, pagingLimitReached: true },
+  { offset: 1_000_000, count: 3, nextOffset: null, hasMore: true, pagingLimitReached: true },
+  { offset: 1_000_000, count: 1, nextOffset: null, hasMore: false, pagingLimitReached: false },
+])('distinguishes dataset exhaustion from the offset ceiling: $offset / $count', async example => {
+  const query = vi.fn(async () => ({ bindings: Array.from({ length: example.count }, (_, n) => ({ s: `urn:${n}` })) }));
+  const read = context({ query }, { mode: 'page', maxRows: 2, offset: example.offset,
+    sparql: 'SELECT ?s WHERE { ?s ?p ?o } ORDER BY ?s' });
+  await handleBoundedQueryRoutes(read.ctx);
+  expect(read.res.statusCode).toBe(200);
+  expect(JSON.parse(read.res.body)).toMatchObject({ hasMore: example.hasMore,
+    nextOffset: example.nextOffset, pagingLimitReached: example.pagingLimitReached });
+});
+
 describe('bounded local query contract', () => {
   it('executes a SELECT with an overflow witness instead of silently truncating a security decision', async () => {
     const store = new OxigraphStore();

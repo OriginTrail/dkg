@@ -1,10 +1,10 @@
-import { classifySparqlOperation } from '@origintrail-official/dkg-core';
 import { prepareSparql, prepareSparqlQuery } from '@origintrail-official/dkg-rdf-utils/sparql';
 
 export const BOUNDED_QUERY_VERSION = 1;
 export const BOUNDED_QUERY_MAX_ROWS = 8192;
 export const BOUNDED_QUERY_MAX_BYTES = 1024 * 1024;
 export const BOUNDED_QUERY_MAX_TIMEOUT_MS = 2000;
+export const BOUNDED_QUERY_MAX_OFFSET = 1_000_000;
 
 interface BoundedQueryBase {
   readonly sparql: string;
@@ -27,7 +27,7 @@ export function boundedQueryPolicy(input: Record<string, unknown>): BoundedQuery
   if (input.version !== BOUNDED_QUERY_VERSION || typeof timeoutMs !== 'number'
       || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > BOUNDED_QUERY_MAX_TIMEOUT_MS
       || (mode !== 'complete' && mode !== 'page') || typeof offset !== 'number'
-      || !Number.isSafeInteger(offset) || offset < 0 || offset > 1_000_000
+      || !Number.isSafeInteger(offset) || offset < 0 || offset > BOUNDED_QUERY_MAX_OFFSET
       || (mode === 'complete' && offset !== 0)
       || (view !== undefined && view !== 'verifiable-memory' && view !== 'shared-working-memory')) {
     throw new Error('Unsupported version, view, mode, offset or deadline');
@@ -45,12 +45,12 @@ export function boundSelect(sparql: unknown, maxRows: unknown, mode: 'complete' 
   if (typeof maxRows !== 'number' || !Number.isInteger(maxRows) || maxRows < 1 || maxRows > BOUNDED_QUERY_MAX_ROWS) {
     throw new Error(`maxRows must be an integer from 1 to ${BOUNDED_QUERY_MAX_ROWS}`);
   }
-  const operation = classifySparqlOperation(sparql);
   const prepared = prepareSparql(sparql);
-  if (operation.kind !== 'read' || operation.form !== 'SELECT' || prepared.status !== 'valid') {
+  if (prepared.status !== 'valid') {
     throw new Error('Only read-only SELECT queries are supported');
   }
   const query = prepareSparqlQuery(prepared);
+  if (query.operation !== 'SELECT') throw new Error('Only read-only SELECT queries are supported');
   if (!query.where || query.hasDatasetClause) throw new Error('A scoped WHERE clause is required');
   let insertion = sparql.length;
   let ordered = false;
@@ -84,9 +84,12 @@ export function finalizeBoundedQuery(policy: BoundedQueryPolicy, bindings: Array
   const rows = policy.mode === 'page' ? bindings.slice(0, policy.maxRows) : bindings;
   const bounded = boundedResult(rows, policy.maxRows);
   if (!bounded.ok) return bounded;
+  const hasMore = bindings.length > policy.maxRows;
+  const nextOffset = policy.offset + rows.length;
+  const canContinue = nextOffset <= BOUNDED_QUERY_MAX_OFFSET;
   return { ok: true as const, response: {
     mode: policy.mode, resultComplete: policy.mode === 'complete', result: bounded.result,
-    ...(policy.mode === 'page' ? { pageComplete: true, hasMore: bindings.length > policy.maxRows,
-      offset: policy.offset, nextOffset: policy.offset + rows.length } : {}),
+    ...(policy.mode === 'page' ? { pageComplete: true, hasMore, pagingLimitReached: hasMore && !canContinue,
+      offset: policy.offset, nextOffset: canContinue ? nextOffset : null } : {}),
   } };
 }
