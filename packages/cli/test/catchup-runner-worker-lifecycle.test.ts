@@ -675,6 +675,149 @@ describe('WorkerCatchupRunner agent bridge', () => {
     expect(privateMember).toHaveBeenCalledWith('cg-catalog-only');
   });
 
+  it('waits for a selected lane that becomes active a moment after the walk of a first subscribe starts', async () => {
+    // A first subscribe: the graph's public policy is accepted and its
+    // definition is in, the selection that activates the lane is committed in
+    // the background a moment later, and the job asks all its peers in
+    // between. Every call used to find the lane inactive and answer "not
+    // attempted". The pass loop then stopped on a walk that had asked nobody,
+    // and nothing ran the job again.
+    let authority: { lane: string | null; active: boolean } = {
+      lane: 'selected-public',
+      active: false,
+    };
+    const { agent, calls } = bridgeAgent({
+      resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => authority,
+      log: { info: vi.fn(), debug: vi.fn() },
+    });
+    // One runner, as the daemon has: the job's window is opened by its
+    // preparation and shared by the calls of its walk.
+    createCatchupRunner(agent);
+    const post = (invokeId: number, method: string, args: unknown[]) => (
+      workerControl.FakeWorker.emitToRunner({ type: 'invoke', invokeId, method, args })
+    );
+    type Answer = { type: string; invokeId: number; result?: any; error?: string };
+    const answers = () => new Map(
+      (workerControl.state.posted as Answer[])
+        .filter((message) => message.type === 'invoke-result')
+        .map((message) => [message.invokeId, message]),
+    );
+    const answered = async (count: number) => {
+      for (let i = 0; i < 400 && answers().size < count; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      return answers();
+    };
+
+    post(1, 'prepareCatchup', ['cg-first-subscribe', true]);
+    expect((await answered(1)).get(1)?.error).toBeUndefined();
+    const peers = ['peer-a', 'peer-b', 'peer-c', 'peer-d'];
+    for (const [index, peerId] of peers.entries()) {
+      post(10 + index, 'syncSharedMemory', [
+        peerId, 'cg-first-subscribe', 2000, 'catchup-foreground', true,
+      ]);
+    }
+    // The whole walk is under way before the authority is there. No call has
+    // answered, and no peer has been asked.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(answers().size).toBe(1);
+    expect(calls.selectedShared).toHaveLength(0);
+
+    authority = { lane: 'selected-public', active: true };
+    const all = await answered(1 + peers.length);
+    expect(calls.selectedShared.map(([peerId]) => peerId).sort()).toEqual(peers);
+    for (const index of peers.keys()) {
+      expect(all.get(10 + index)?.result).toMatchObject({
+        kind: 'selected-shared-memory',
+        scopeComplete: true,
+      });
+    }
+    // The job says once that it waited.
+    const info = (agent as any).log.info as ReturnType<typeof vi.fn>;
+    expect(info).toHaveBeenCalledTimes(1);
+    expect(info.mock.calls[0]![1]).toMatch(
+      /^Catch-up for "cg-first-subscribe": the selected SWM lane became active after \d+ ms$/,
+    );
+  });
+
+  it('bounds that wait by one window a job, and ends it when the runner closes', async () => {
+    const { SelectedLaneActivationWait, SELECTED_LANE_ACTIVATION_WAIT_MS } = await import(
+      '../src/catchup-selected-lane.js'
+    );
+    expect(SELECTED_LANE_ACTIVATION_WAIT_MS).toBe(10_000);
+    vi.useFakeTimers();
+    try {
+      const pending = { lane: 'selected-public', active: false };
+      let authority: { lane: string | null; active: boolean } = pending;
+      const info = vi.fn();
+      const agent = { resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => authority, log: { info } };
+      const wait = new SelectedLaneActivationWait(1_000, 50);
+      const outcome = (pending: Promise<boolean>) => {
+        const seen: { value?: boolean } = {};
+        void pending.then((value) => { seen.value = value; });
+        return seen;
+      };
+
+      // No job has opened a window for the graph: a call answers at once.
+      await expect(wait.untilActive(agent, 'cg-never')).resolves.toBe(false);
+      expect(info).not.toHaveBeenCalled();
+
+      // A graph whose lane is accepted and never activated: the calls of the
+      // job wait out the one window together, and the job says so once.
+      wait.begin('cg-never');
+      const walk = [0, 1, 2].map(() => outcome(wait.untilActive(agent, 'cg-never')));
+      await vi.advanceTimersByTimeAsync(999);
+      expect(walk.map((call) => call.value)).toEqual([undefined, undefined, undefined]);
+      await vi.advanceTimersByTimeAsync(2);
+      expect(walk.map((call) => call.value)).toEqual([false, false, false]);
+      expect(info).toHaveBeenCalledTimes(1);
+      expect(info.mock.calls[0]![1]).toBe(
+        'Catch-up for "cg-never": the selected SWM lane is still not active after 1000 ms',
+      );
+      // Later peers of the same job, and its later passes, do not wait again.
+      await expect(wait.untilActive(agent, 'cg-never')).resolves.toBe(false);
+      expect(info).toHaveBeenCalledTimes(1);
+
+      // The next job for the graph has a window of its own, and a lane that
+      // becomes active ends the wait at the next look.
+      wait.begin('cg-never');
+      const later = outcome(wait.untilActive(agent, 'cg-never'));
+      await vi.advanceTimersByTimeAsync(120);
+      expect(later.value).toBeUndefined();
+      authority = { lane: 'selected-public', active: true };
+      await vi.advanceTimersByTimeAsync(50);
+      expect(later.value).toBe(true);
+      // An active lane never waits.
+      await expect(wait.untilActive(agent, 'cg-other')).resolves.toBe(true);
+
+      // A graph without an accepted public policy (one the node is no member
+      // of, say) has nothing on its way: its job does not wait, and says
+      // nothing. A policy that goes away ends a wait that was under way.
+      authority = { lane: null, active: false };
+      wait.begin('cg-outsider');
+      await expect(wait.untilActive(agent, 'cg-outsider')).resolves.toBe(false);
+      authority = pending;
+      const revoked = outcome(wait.untilActive(agent, 'cg-outsider'));
+      await vi.advanceTimersByTimeAsync(60);
+      expect(revoked.value).toBeUndefined();
+      authority = { lane: null, active: false };
+      await vi.advanceTimersByTimeAsync(50);
+      expect(revoked.value).toBe(false);
+
+      // A closing runner ends the wait of a job that is still in its window.
+      authority = pending;
+      wait.begin('cg-closing');
+      const closing = outcome(wait.untilActive(agent, 'cg-closing'));
+      await vi.advanceTimersByTimeAsync(60);
+      expect(closing.value).toBeUndefined();
+      wait.close();
+      await vi.advanceTimersByTimeAsync(50);
+      expect(closing.value).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('decides the selected SWM lane on every call, not once per job', async () => {
     // A first subscribe commits the graph's RFC-64 policy in the background
     // while the job prepares, so one call can find the lane inactive and the
