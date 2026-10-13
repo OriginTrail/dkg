@@ -14,6 +14,19 @@ const asset = (id: number, value: string): AtomicAssetReplacement => ({ graphUri
   metaGraphUri: 'urn:meta', metadataSubject: `urn:asset:${id}`,
   metadataQuads: [{ graph: 'urn:meta', subject: `urn:asset:${id}`, predicate: 'urn:version', object: '"2"' }] });
 
+const destinations = 'SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(?g IN (<urn:data:1>, <urn:data:2>, <urn:meta>)) } ORDER BY ?g ?s ?p ?o';
+const unrelated = { graph: 'urn:meta', subject: 'urn:unrelated', predicate: 'urn:p', object: '"retained"' };
+const oldMembers = () => [asset(1, 'old-first'), asset(2, 'old-second')].flatMap(a => [
+  ...a.graphQuads, ...a.metadataQuads.map(q => ({ ...q, object: '"1"' })),
+]);
+async function expectedDestinations(members: AtomicAssetReplacement[]) {
+  const expected = new OxigraphStore();
+  try {
+    await expected.insert([...members.flatMap(a => [...a.graphQuads, ...a.metadataQuads]), unrelated]);
+    return await expected.query(destinations);
+  } finally { await expected.close(); }
+}
+
 describe('atomic asset group', () => {
   it('forwards one group through production decorators and records every touched graph', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'group-decorators-'));
@@ -36,13 +49,13 @@ describe('atomic asset group', () => {
   });
   it('publishes distinct assertions and subjects together while retaining unrelated metadata', async () => {
     const store = new OxigraphStore();
-    await store.insert([asset(1,'old').graphQuads[0]!, { graph:'urn:meta', subject:'urn:unrelated', predicate:'urn:p', object:'"retained"' }]);
-    await store.replaceAssetGroup([asset(1,'new'),asset(2,'second')]);
-    expect(await store.countQuads('urn:data:1')).toBe(1);
-    expect(await store.countQuads('urn:data:2')).toBe(1);
-    expect(await store.countQuads('urn:meta')).toBe(3);
-    await store.replaceAssetGroup([asset(1,'new'),asset(2,'second')]);
-    expect(await store.countQuads('urn:meta')).toBe(3);
+    const members = [asset(1, 'new'), asset(2, 'second')];
+    await store.insert([...oldMembers(), unrelated]);
+    const expected = await expectedDestinations(members);
+    await store.replaceAssetGroup(members);
+    expect(await store.query(destinations)).toEqual(expected);
+    await store.replaceAssetGroup(members);
+    expect(await store.query(destinations)).toEqual(expected);
     await store.close();
   });
   it('rejects duplicate, overlapping and invalid members before touching any destination', async () => {
@@ -57,18 +70,26 @@ describe('atomic asset group', () => {
   });
   it('guards native staging inside the publication transaction and exposes no receipt on a missing member', async () => {
     const store = new OxigraphStore(), members = [asset(1,'new'),asset(2,'other')];
-    await store.insert(asset(1,'old').graphQuads);
+    await store.insert([...oldMembers(), unrelated]);
+    const before = await store.query(destinations);
+    const expected = await expectedDestinations(members);
     const plan = buildBulkAssetGroupPlan(members)!;
     await store.update(plan.update);
     expect(await store.query(plan.receiptQuery)).toEqual({type:'boolean',value:false});
-    expect(await store.query('ASK { GRAPH <urn:data:1> { ?s ?p "old" } }')).toEqual({type:'boolean',value:true});
+    expect(await store.query(destinations)).toEqual(before);
     // Load the same serialized native payload via INSERT DATA for this embedded fixture.
     const { parseNQuadsTextTolerant: parseNQuads } = await import('../src/nquads-text.js');
     await store.insert(parseNQuads(plan.nquads));
     await store.update(plan.update);
     expect(await store.query(plan.receiptQuery)).toEqual({type:'boolean',value:true});
-    expect(await store.countQuads('urn:meta')).toBe(2);
-    await store.update(plan.cleanup); await store.close();
+    expect(await store.query(destinations)).toEqual(expected);
+    await store.update(plan.cleanup);
+    const replay = buildBulkAssetGroupPlan(members)!;
+    await store.insert(parseNQuads(replay.nquads));
+    await store.update(replay.update);
+    expect(await store.query(replay.receiptQuery)).toEqual({type:'boolean',value:true});
+    expect(await store.query(destinations)).toEqual(expected);
+    await store.update(replay.cleanup); await store.close();
   });
   it('bounds transaction size and asset count independently from a 100 MB transfer', () => {
     expect(() => buildAtomicAssetGroupUpdate([])).toThrow();
