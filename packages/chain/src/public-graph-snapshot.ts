@@ -49,22 +49,30 @@ export function sealPublicGraphSnapshot(
   const snapshot = { ...input, inventoryDigest: hash(input.assets) };
   return { ...snapshot, snapshotDigest: hash(snapshot) };
 }
-/** Strict wire validation and a detached copy prevent mutable peer objects from changing a job's evidence. */
+export interface PublicGraphSnapshotScope {
+  chainId: string;
+  deploymentId: string;
+  contextGraphId: string;
+  onChainId: string;
+  now?: number;
+}
+/** The wire boundary owns byte size, UTF-8 and JSON decoding only. */
 export function decodePublicGraphSnapshot(
   bytes: Uint8Array,
-  expected: {
-    chainId: string;
-    deploymentId: string;
-    contextGraphId: string;
-    onChainId: string;
-    now?: number;
-  },
+  expected: PublicGraphSnapshotScope,
 ): PublicGraphSnapshot {
   if (!bytes.length || bytes.length > PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES)
     throw new Error("Snapshot size exceeds bound");
-  const s = JSON.parse(
-    new TextDecoder("utf-8", { fatal: true }).decode(bytes),
-  ) as PublicGraphSnapshot;
+  return normalizePublicGraphSnapshot(
+    JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)), expected,
+  );
+}
+/** Validate and detach either an adapter result or a decoded peer object. */
+export function normalizePublicGraphSnapshot(
+  input: unknown,
+  expected: PublicGraphSnapshotScope,
+): PublicGraphSnapshot {
+  const s = input as PublicGraphSnapshot;
   if (
     !s ||
     typeof s !== "object" ||
@@ -159,6 +167,8 @@ export function decodePublicGraphSnapshot(
     canonical.snapshotDigest !== s.snapshotDigest
   )
     throw new Error("Snapshot digest mismatch");
+  if (Buffer.byteLength(JSON.stringify(canonical), "utf8") > PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES)
+    throw new Error("Snapshot size exceeds bound");
   for (const asset of canonical.assets) Object.freeze(asset);
   Object.freeze(canonical.assets);
   return Object.freeze(canonical);
