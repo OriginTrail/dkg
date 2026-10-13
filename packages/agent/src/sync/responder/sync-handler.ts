@@ -1,4 +1,4 @@
-import { createPreparedContentCache, resolvePreparedContentCacheConfig, type PreparedContentCacheConfig } from './prepared-content-cache.js';
+import { preparedCacheFailureCause, createPreparedContentCache, resolvePreparedContentCacheConfig, type PreparedContentCacheConfig } from './prepared-content-cache.js';
 import {
   createOperationContext,
   DEFAULT_MAX_READ_BYTES,
@@ -499,9 +499,10 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
   );
   const preparedOptions = resolvePreparedContentCacheConfig(params.preparedContentCache, params.dataDir);
   let cacheWarned = false;
-  const preparedContentCache = preparedOptions ? createPreparedContentCache(preparedOptions, () => {
-    if (!cacheWarned) params.logWarn(createOperationContext('sync'), 'Prepared content cache unavailable; using verified export');
+  const preparedContentCache = preparedOptions ? createPreparedContentCache(preparedOptions, (error, operation) => {
+    if (cacheWarned) return;
     cacheWarned = true;
+    params.logWarn(createOperationContext('sync'), `Prepared content cache ${operation} failed (${preparedCacheFailureCause(error)}); using verified export`);
   }) : undefined;
   const exactAssetExportCache = createBoundedExactAssetExportCache({ store, budget: responderSnapshotBudget, preparedContentCache });
   const swmDataExactGraphPlanMemo = createResponderExactGraphPagePlanMemo(
